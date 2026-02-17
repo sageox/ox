@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
-	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
@@ -157,17 +155,6 @@ func TestIsHealthy_DaemonHung(t *testing.T) {
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
 
-	// Create a lock file to make IsRunning() return true
-	lockPath := LockPath()
-	require.NoError(t, os.MkdirAll(filepath.Dir(lockPath), 0755))
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
-	require.NoError(t, err)
-	defer os.Remove(lockPath)
-
-	// Acquire the lock (makes IsRunning() return true)
-	require.NoError(t, syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
-	defer lockFile.Close()
-
 	// Create socket that accepts but never responds (simulates hung daemon)
 	socketPath := SocketPath()
 	listener, err := listen(socketPath)
@@ -200,17 +187,6 @@ func TestIsHealthy_DaemonHealthy(t *testing.T) {
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
 
-	// Create a lock file to make IsRunning() return true
-	lockPath := LockPath()
-	require.NoError(t, os.MkdirAll(filepath.Dir(lockPath), 0755))
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
-	require.NoError(t, err)
-	defer os.Remove(lockPath)
-
-	// Acquire the lock
-	require.NoError(t, syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
-	defer lockFile.Close()
-
 	// Start a real server that responds to pings
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	server := NewServer(logger)
@@ -232,7 +208,7 @@ func TestIsHealthy_DaemonHealthy(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// IsHealthy should succeed
-	err = IsHealthy()
+	err := IsHealthy()
 	assert.NoError(t, err)
 
 	cancel()

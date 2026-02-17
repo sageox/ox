@@ -36,9 +36,6 @@ const (
 	restartHistoryFile  = "daemon-restarts.json"
 )
 
-// ErrAlreadyRunning indicates the daemon is already running.
-var ErrAlreadyRunning = errors.New("daemon already running")
-
 // ErrNotRunning indicates the daemon is not running.
 var ErrNotRunning = errors.New("daemon not running")
 
@@ -156,7 +153,6 @@ type Daemon struct {
 	issues    *IssueTracker
 
 	// state
-	lockFile     *os.File
 	mu           sync.Mutex
 	running      bool
 	startTime    time.Time // daemon start time for uptime tracking
@@ -197,7 +193,6 @@ func (d *Daemon) timeSinceLastActivity() time.Duration {
 // This blocks until Stop is called or a termination signal is received.
 func (d *Daemon) Start() error {
 	// check for restart loop before proceeding
-	// this must be done before acquiring lock to allow throttling
 	if delay := checkRestartLoop(d.logger); delay > 0 {
 		d.logger.Info("throttling startup due to restart loop", "delay", delay)
 		time.Sleep(delay)
@@ -211,13 +206,7 @@ func (d *Daemon) Start() error {
 	d.mu.Lock()
 	if d.running {
 		d.mu.Unlock()
-		return ErrAlreadyRunning
-	}
-
-	// acquire lock file
-	if err := d.acquireLock(); err != nil {
-		d.mu.Unlock()
-		return fmt.Errorf("acquire lock: %w", err)
+		return errors.New("daemon already running")
 	}
 
 	d.ctx, d.cancel = context.WithCancel(context.Background())
@@ -689,82 +678,14 @@ func (d *Daemon) shutdown() error {
 	return nil
 }
 
-// lockRetryAttempts and lockRetryInterval control acquireLock retry behavior.
-// During daemon restart (version mismatch), there's a brief window where the old
-// daemon has released its lock but the OS hasn't fully cleaned up. These retries
-// bridge that gap. Tests override these to avoid 3s waits.
-var (
-	lockRetryAttempts = 30
-	lockRetryInterval = 100 * time.Millisecond
-)
-
-// acquireLock acquires the daemon lock file.
-// Returns error if another daemon is already running.
-// Retries briefly to handle the window between an old daemon releasing its lock
-// and the lock file being fully cleaned up (e.g., during version mismatch restart).
-func (d *Daemon) acquireLock() error {
-	lockPath := LockPath()
-
-	// ensure directory exists (0700 = owner-only access for security)
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0700); err != nil {
-		return fmt.Errorf("create lock dir: %w", err)
-	}
-
-	for attempt := 0; attempt <= lockRetryAttempts; attempt++ {
-		// 0600 = owner read/write only (security: prevent other users from reading)
-		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
-		if err != nil {
-			return fmt.Errorf("open lock file: %w", err)
-		}
-
-		// try to acquire exclusive lock (non-blocking)
-		acquired, err := tryLock(f)
-		if err != nil {
-			f.Close()
-			return fmt.Errorf("acquire lock: %w", err)
-		}
-		if acquired {
-			d.lockFile = f
-			return nil
-		}
-
-		f.Close()
-
-		if attempt < lockRetryAttempts {
-			time.Sleep(lockRetryInterval)
-		}
-	}
-
-	return ErrAlreadyRunning
-}
-
-// releaseLock releases the daemon lock file.
-func (d *Daemon) releaseLock() {
-	if d.lockFile == nil {
-		return
-	}
-
-	unlock(d.lockFile)
-	d.lockFile.Close()
-	d.lockFile = nil
-
-	os.Remove(LockPath())
-}
-
-// Liveness Detection: Socket + PID Hybrid (NOT socket-only)
+// Liveness Detection: Socket Ping
 //
-// We use BOTH socket existence AND PID file because socket-only detection fails for:
-// - Hung processes: Socket exists, process alive but unresponsive
-// - D-state (uninterruptible sleep): Process stuck in kernel, socket exists
-// - Zombie state: Process dead but not reaped, socket may persist
+// Claude manages the daemon process lifecycle (launching and killing), so flock-based
+// locking is unnecessary. Having two daemons briefly run is harmless — one will shut
+// down via inactivity timeout within 1 hour.
 //
-// PID file enables:
-// - Process identity verification before kill (confirm it's our daemon)
-// - Stale socket vs hung process distinction
-// - Safe forced recovery: kill -0 PID to check, kill -9 PID to recover
-//
-// The lock file (flock) provides the primary "is daemon running" check.
-// PID file is a secondary safety net for recovery scenarios.
+// We detect liveness by pinging the daemon over its Unix socket. PID file is kept
+// as a secondary safety net for recovery scenarios (kill -9 to force-stop a hung daemon).
 //
 // See: docs/ai/analysis/february-2026-ipc-analysis.md
 
@@ -781,7 +702,7 @@ func (d *Daemon) writePidFile() error {
 	return os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0600)
 }
 
-// cleanup removes PID file and releases lock.
+// cleanup removes PID and socket files.
 func (d *Daemon) cleanup() {
 	// unregister from daemon registry
 	if err := UnregisterDaemon(); err != nil {
@@ -790,30 +711,12 @@ func (d *Daemon) cleanup() {
 
 	os.Remove(PidPath())
 	os.Remove(SocketPath())
-	d.releaseLock()
 }
 
-// IsRunning checks if a daemon is currently running.
-// Uses file lock detection, not PID (PIDs get reused after crashes).
+// IsRunning checks if a daemon is currently running and responsive.
+// Uses socket-based ping detection. Claude manages the daemon process lifecycle,
+// so flock-based locking is no longer needed.
 func IsRunning() bool {
-	lockPath := LockPath()
-
-	f, err := os.OpenFile(lockPath, os.O_RDONLY, 0600)
-	if err != nil {
-		return false // lock file doesn't exist
-	}
-	defer f.Close()
-
-	// try to acquire lock (non-blocking)
-	acquired, err := tryLock(f)
-	if err != nil {
-		return true // error acquiring = assume daemon running
-	}
-	if !acquired {
-		return true // lock held = daemon running
-	}
-
-	// we got the lock, release it
-	unlock(f)
-	return false
+	client := NewClientWithTimeout(100 * time.Millisecond)
+	return client.Ping() == nil
 }

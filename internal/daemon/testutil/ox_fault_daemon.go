@@ -65,7 +65,6 @@ func NewOxFaultDaemon(t *testing.T, config OxFaultConfig) *OxFaultDaemon {
 
 	d := faultdaemon.New(
 		daemon.SocketPath(),
-		daemon.LockPath(),
 		config.Config,
 	)
 

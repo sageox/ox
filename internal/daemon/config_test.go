@@ -74,13 +74,6 @@ func TestSocketPath_DefaultModeWithoutRuntime(t *testing.T) {
 	assert.Equal(t, expected, path)
 }
 
-func TestLockPath(t *testing.T) {
-	path := LockPath()
-	assert.NotEmpty(t, path)
-	assert.Contains(t, path, "daemon-")
-	assert.Contains(t, path, ".lock")
-}
-
 func TestLogPath(t *testing.T) {
 	path := LogPath()
 	assert.NotEmpty(t, path)
@@ -152,28 +145,6 @@ func TestSocketPathForWorkspace_LegacyMode(t *testing.T) {
 	home, err := os.UserHomeDir()
 	assert.NoError(t, err)
 	expected := filepath.Join(home, ".sageox", "state", "daemon", "daemon-abc12345.sock")
-	assert.Equal(t, expected, path)
-}
-
-func TestLockPathForWorkspace_DefaultMode(t *testing.T) {
-	// XDG is now the default, so default mode uses XDG_RUNTIME_DIR
-	tmpDir := t.TempDir()
-	t.Setenv("OX_XDG_DISABLE", "")
-	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
-
-	path := LockPathForWorkspace("abc12345")
-	expected := filepath.Join(tmpDir, "sageox", "daemon", "daemon-abc12345.lock")
-	assert.Equal(t, expected, path)
-}
-
-func TestLockPathForWorkspace_LegacyMode(t *testing.T) {
-	// Legacy mode uses ~/.sageox/ paths
-	t.Setenv("OX_XDG_DISABLE", "1")
-
-	path := LockPathForWorkspace("abc12345")
-	home, err := os.UserHomeDir()
-	assert.NoError(t, err)
-	expected := filepath.Join(home, ".sageox", "state", "daemon", "daemon-abc12345.lock")
 	assert.Equal(t, expected, path)
 }
 

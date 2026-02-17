@@ -490,7 +490,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	err = outputAgentPrime(cmd, textMode, reviewMode, output)
 
-	// Start daemon as child process (no Setsid detachment).
+	// Start daemon if not already running.
 	// Daemon self-exits via inactivity timeout when heartbeats stop.
 	// Runs after output so agent gets its bootstrap response immediately.
 	if config.IsInitialized(projectRoot) {

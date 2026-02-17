@@ -16,7 +16,7 @@ Sessions, ledgers, and team knowledge ensure your AI coworkers understand your p
 ## Install the CLI
 
 ```bash
-$ git clone https://github.com/sageox/ox-cli.git && cd ox-cli
+$ git clone https://github.com/sageox/ox.git && cd ox
 $ make build && make install
 # set up the ox location using export PATH
 ```

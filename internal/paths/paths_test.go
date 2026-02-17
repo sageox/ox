@@ -592,14 +592,6 @@ func TestDaemonPaths(t *testing.T) {
 		}
 	})
 
-	t.Run("lock file", func(t *testing.T) {
-		path := DaemonLockFile(wsID)
-		want := "daemon-" + wsID + ".lock"
-		if !strings.HasSuffix(path, want) {
-			t.Errorf("DaemonLockFile(%q) = %q, want suffix %q", wsID, path, want)
-		}
-	})
-
 	t.Run("pid file", func(t *testing.T) {
 		path := DaemonPidFile(wsID)
 		want := "daemon-" + wsID + ".pid"

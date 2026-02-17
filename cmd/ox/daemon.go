@@ -301,17 +301,17 @@ func startDaemonBackground(ledgerPath string) error {
 	}
 
 	// start daemon process
+	// NOTE: No setsid/detach — Claude manages the daemon process lifecycle.
 	cmd := exec.Command(exe, "daemon", "start", "--foreground")
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	setSysProcAttr(cmd) // platform-specific detach
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
-	// detach - don't wait for the process
+	// don't wait for the process
 	logFile.Close()
 
 	fmt.Printf("Daemon started (PID: %d)\n", cmd.Process.Pid)

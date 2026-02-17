@@ -107,8 +107,9 @@ func ShouldUseDaemon() bool {
 }
 
 // EnsureDaemon ensures the daemon is running, starting it if necessary.
-// The daemon is started as a detached process (Setsid on Unix) so it survives
-// after the parent exits. Used by `ox daemon start` for standalone operation.
+// Claude manages the daemon process lifecycle (launching and killing), so
+// setsid/detach is no longer needed. The daemon relies on its inactivity
+// timeout to self-exit when no heartbeats arrive.
 // Returns nil on success (daemon is running), or an error if it couldn't be started.
 // This is a no-op if daemon is already running or disabled via SAGEOX_DAEMON=false.
 //
@@ -117,28 +118,22 @@ func EnsureDaemon() error {
 	if IsDaemonDisabled() {
 		return nil
 	}
-	return ensureDaemonInternal(true)
+	return ensureDaemonInternal()
 }
 
-// EnsureDaemonAttached ensures the daemon is running as a child process of the caller.
-// Unlike EnsureDaemon, it does NOT detach (no Setsid), so the daemon stays in the
-// caller's process group. However, once the caller (ox agent prime) exits, the daemon
-// is reparented to PID 1 (launchd/init). macOS has no PR_SET_PDEATHSIG equivalent,
-// so there is no automatic signal delivery when the grandparent (coding agent) exits.
-// The daemon relies on its inactivity timeout to self-exit when no heartbeats arrive.
-// Returns nil on success (daemon is running), or an error if it couldn't be started.
-// This is a no-op if daemon is already running or disabled via SAGEOX_DAEMON=false.
+// EnsureDaemonAttached is an alias for EnsureDaemon.
+// Previously started the daemon without setsid (attached to caller's process group).
+// Now that Claude manages the daemon lifecycle, setsid is removed entirely and
+// both functions behave identically.
 func EnsureDaemonAttached() error {
 	if IsDaemonDisabled() {
 		return nil
 	}
-	return ensureDaemonInternal(false)
+	return ensureDaemonInternal()
 }
 
-// ensureDaemonInternal is the shared implementation for EnsureDaemon and EnsureDaemonAttached.
-// When detach is true, the daemon is started in a new session (Setsid) so it survives parent exit.
-// When detach is false, the daemon stays in the caller's process group.
-func ensureDaemonInternal(detach bool) error {
+// ensureDaemonInternal starts the daemon if it's not already running.
+func ensureDaemonInternal() error {
 	if IsRunning() {
 		return nil // already running
 	}
@@ -162,15 +157,11 @@ func ensureDaemonInternal(detach bool) error {
 	}
 
 	// start daemon process
+	// NOTE: No setsid/detach — Claude manages the daemon process lifecycle.
+	// The daemon relies on inactivity timeout to self-exit when claude dies.
 	cmd := exec.Command(exe, "daemon", "start", "--foreground")
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	if detach {
-		setSysProcAttr(cmd) // platform-specific detach (Setsid on Unix)
-	}
-	// NOTE: Pdeathsig won't help here — it tracks the immediate parent
-	// (ox agent prime, which exits immediately), not the grandparent (claude).
-	// The daemon relies on inactivity timeout to self-exit when claude dies.
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()

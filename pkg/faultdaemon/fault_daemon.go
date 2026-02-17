@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -20,13 +19,11 @@ const maxRequestSize = 1 * 1024 * 1024 // 1MB
 // It can simulate various failure conditions on Unix sockets.
 type FaultDaemon struct {
 	socketPath string
-	lockPath   string
 
 	configMu sync.RWMutex
 	config   Config
 
 	listener net.Listener
-	lockFile *os.File
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -41,49 +38,27 @@ type FaultDaemon struct {
 
 // New creates a new fault injection daemon.
 // socketPath: Unix socket path to listen on.
-// lockPath: Optional lock file path (makes daemon discoverable). Pass "" to skip lock.
 // config: Fault injection configuration.
-func New(socketPath, lockPath string, config Config) *FaultDaemon {
+func New(socketPath string, config Config) *FaultDaemon {
 	return &FaultDaemon{
 		socketPath: socketPath,
-		lockPath:   lockPath,
 		config:     config,
 	}
 }
 
-// Start starts the fault daemon, optionally acquiring a lock and listening on the socket.
-// Returns an error if the socket cannot be created or the lock cannot be acquired.
+// Start starts the fault daemon, listening on the socket.
+// Returns an error if the socket cannot be created.
 func (d *FaultDaemon) Start() error {
 	d.ctx, d.cancel = context.WithCancel(context.Background())
 
-	// acquire lock file if path provided
-	if d.lockPath != "" {
-		if err := os.MkdirAll(filepath.Dir(d.lockPath), 0755); err != nil {
-			return err
-		}
-
-		lockFile, err := os.OpenFile(d.lockPath, os.O_CREATE|os.O_RDWR, 0600)
-		if err != nil {
-			return err
-		}
-
-		if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-			lockFile.Close()
-			return err
-		}
-		d.lockFile = lockFile
-	}
-
 	// create socket
 	if err := os.MkdirAll(filepath.Dir(d.socketPath), 0755); err != nil {
-		d.releaseLock()
 		return err
 	}
 	os.Remove(d.socketPath) // remove stale socket
 
 	listener, err := net.Listen("unix", d.socketPath)
 	if err != nil {
-		d.releaseLock()
 		return err
 	}
 	d.listener = listener
@@ -105,19 +80,7 @@ func (d *FaultDaemon) Stop() {
 	}
 	d.wg.Wait()
 
-	d.releaseLock()
 	os.Remove(d.socketPath)
-}
-
-func (d *FaultDaemon) releaseLock() {
-	if d.lockFile != nil {
-		syscall.Flock(int(d.lockFile.Fd()), syscall.LOCK_UN)
-		d.lockFile.Close()
-		if d.lockPath != "" {
-			os.Remove(d.lockPath)
-		}
-		d.lockFile = nil
-	}
 }
 
 // SetFault changes the fault mode while running.
@@ -165,11 +128,6 @@ func (d *FaultDaemon) ResetCalls() {
 // SocketPath returns the socket path this daemon is listening on.
 func (d *FaultDaemon) SocketPath() string {
 	return d.socketPath
-}
-
-// LockPath returns the lock file path (if any).
-func (d *FaultDaemon) LockPath() string {
-	return d.lockPath
 }
 
 func (d *FaultDaemon) recordCall(request []byte) {

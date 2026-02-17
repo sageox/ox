@@ -61,7 +61,7 @@ func createTestDaemon(t *testing.T, config Config) (*FaultDaemon, string) {
 		}
 	}
 
-	d := New(socketPath, "", config)
+	d := New(socketPath, config)
 	return d, socketPath
 }
 
@@ -297,12 +297,14 @@ func TestFaultDaemon_SetFault(t *testing.T) {
 	assert.True(t, resp.Success)
 }
 
-func TestFaultDaemon_WithLockFile(t *testing.T) {
-	tmpDir := t.TempDir()
+func TestFaultDaemon_SocketPathAccessor(t *testing.T) {
+	// use /tmp directly to avoid Unix socket path length limit (~104 chars)
+	tmpDir, err := os.MkdirTemp("/tmp", "ox-fd-acc-")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
 	socketPath := filepath.Join(tmpDir, "test.sock")
-	lockPath := filepath.Join(tmpDir, "test.lock")
 
-	d := New(socketPath, lockPath, Config{
+	d := New(socketPath, Config{
 		Fault: FaultNone,
 		ResponseHandler: func(request []byte) []byte {
 			return []byte(`{"success":true}` + "\n")
@@ -311,13 +313,8 @@ func TestFaultDaemon_WithLockFile(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	// verify lock file exists
-	_, err := os.Stat(lockPath)
-	assert.NoError(t, err, "lock file should exist")
-
-	// verify socket path accessors
+	// verify socket path accessor
 	assert.Equal(t, socketPath, d.SocketPath())
-	assert.Equal(t, lockPath, d.LockPath())
 }
 
 // =============================================================================

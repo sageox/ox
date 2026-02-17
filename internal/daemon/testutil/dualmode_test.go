@@ -214,11 +214,15 @@ func TestHelperFunctions(t *testing.T) {
 	t.Run("IsDaemonMode with mock", func(t *testing.T) {
 		mock := env.StartMock()
 		_ = mock
-		// mock daemon doesn't set lock file, so IsRunning may return false
-		// this is expected behavior - mock is for IPC testing, not lock testing
+		// mock daemon is for IPC testing
 	})
 
 	t.Run("WaitForDaemon times out without daemon", func(t *testing.T) {
+		// isolate socket path so we don't find the real daemon
+		tmpDir := t.TempDir()
+		t.Setenv("OX_XDG_ENABLE", "1")
+		t.Setenv("XDG_RUNTIME_DIR", tmpDir)
+
 		// short timeout since we expect failure
 		err := WaitForDaemon(t, 200*time.Millisecond)
 		assert.Error(t, err)

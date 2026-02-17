@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"slices"
 	"sync"
 	"time"
@@ -1099,12 +1100,12 @@ func (c *Client) Ping() error {
 // Uses a 100ms timeout - plenty for localhost IPC. If you need custom
 // timeouts, use NewClientWithTimeout(t).Ping() directly.
 func IsHealthy() error {
-	if !IsRunning() {
-		return errors.New("daemon not running")
-	}
-
 	client := NewClientWithTimeout(100 * time.Millisecond)
 	if err := client.Ping(); err != nil {
+		// distinguish "no socket" from "socket exists but unresponsive"
+		if _, statErr := os.Stat(SocketPath()); os.IsNotExist(statErr) {
+			return errors.New("daemon not running")
+		}
 		return fmt.Errorf("daemon not responsive: %w", err)
 	}
 

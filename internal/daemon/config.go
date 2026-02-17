@@ -93,16 +93,6 @@ func SocketPathForWorkspace(workspaceID string) string {
 	return paths.DaemonSocketFile(workspaceID)
 }
 
-// LockPath returns the path to the daemon lock file for the current workspace.
-func LockPath() string {
-	return LockPathForWorkspace(CurrentWorkspaceID())
-}
-
-// LockPathForWorkspace returns the lock path for a specific workspace.
-func LockPathForWorkspace(workspaceID string) string {
-	return paths.DaemonLockFile(workspaceID)
-}
-
 // LogPath returns the path to the daemon log file for the current workspace.
 // Requires project to be initialized with repo_id.
 func LogPath() string {

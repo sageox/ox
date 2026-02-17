@@ -121,7 +121,7 @@ func CacheDir() string {
 // StateDir returns the runtime state directory per XDG Base Directory Specification.
 // https://specifications.freedesktop.org/basedir-spec/latest/
 //
-// Contains: daemon/ (sockets, locks, PIDs, registry)
+// Contains: daemon/ (sockets, PIDs, registry)
 //
 // XDG mode (default): $XDG_RUNTIME_DIR/sageox (ephemeral, doesn't persist across reboots)
 // Legacy mode (OX_XDG_DISABLE=1): ~/.sageox/state
@@ -401,7 +401,7 @@ func LedgersDataDir(repoID, ep string) string {
 // -----------------------------------------------------------------------------
 
 // DaemonStateDir returns the directory for daemon runtime state.
-// Contains sockets, locks, PIDs, and the daemon registry.
+// Contains sockets, PIDs, and the daemon registry.
 func DaemonStateDir() string {
 	return filepath.Join(StateDir(), "daemon")
 }
@@ -409,11 +409,6 @@ func DaemonStateDir() string {
 // DaemonSocketFile returns the path to a daemon's Unix socket.
 func DaemonSocketFile(workspaceID string) string {
 	return filepath.Join(DaemonStateDir(), "daemon-"+workspaceID+".sock")
-}
-
-// DaemonLockFile returns the path to a daemon's lock file.
-func DaemonLockFile(workspaceID string) string {
-	return filepath.Join(DaemonStateDir(), "daemon-"+workspaceID+".lock")
 }
 
 // DaemonPidFile returns the path to a daemon's PID file.
