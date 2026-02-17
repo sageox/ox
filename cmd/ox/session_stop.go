@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	sessionhtml "github.com/sageox/ox/internal/session/html"
@@ -28,6 +29,9 @@ type processResult struct {
 // Both raw and events sessions have secrets scrubbed before storage.
 func processSession(projectRoot string, state *session.RecordingState) (*processResult, error) {
 	result := &processResult{}
+
+	// resolve project endpoint for auth lookups
+	projectEndpoint := endpoint.GetForProject(projectRoot)
 
 	// get adapter
 	adapter, err := adapters.GetAdapter(state.AdapterName)
@@ -137,7 +141,7 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 		AgentType:    state.AdapterName,
 		AgentVersion: result.AgentVersion,
 		Model:        result.Model,
-		Username:     getDisplayName(),
+		Username:     getDisplayName(projectEndpoint),
 		RepoID:       repoID,
 	}
 	if err := rawWriter.WriteHeader(meta); err != nil {
@@ -187,7 +191,7 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 		AgentType:    state.AdapterName,
 		AgentVersion: result.AgentVersion,
 		Model:        result.Model,
-		Username:     getDisplayName(),
+		Username:     getDisplayName(projectEndpoint),
 		RepoID:       repoID,
 	}
 	if err := eventsWriter.WriteHeader(eventsMeta); err != nil {

@@ -124,7 +124,7 @@ func refreshGitCredentials(reason string) checkResult {
 	}
 
 	// check new status
-	newStatus := gitserver.CheckCredentialStatus()
+	newStatus := gitserver.CheckCredentialStatusForEndpoint(projectEndpoint)
 	return PassedCheck("Git credentials",
 		fmt.Sprintf("refreshed, %d repos (expires in %s)", newStatus.RepoCount, newStatus.FormatExpiry()))
 }

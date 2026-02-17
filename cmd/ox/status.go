@@ -280,16 +280,12 @@ func getGitRepoStatus(repoPath string, lastSync time.Time, hasLastSync bool) git
 		return status
 	}
 
-	// get current branch
+	// get current branch (rev-parse fails on empty repos with no commits)
 	branchCmd := exec.Command("git", "-C", repoPath, "rev-parse", "--abbrev-ref", "HEAD")
 	branchOutput, err := branchCmd.Output()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			status.Error = fmt.Sprintf("git rev-parse failed: %s", strings.TrimSpace(string(exitErr.Stderr)))
-		} else {
-			status.Error = fmt.Sprintf("git rev-parse failed: %v", err)
-		}
+		// empty repo (cloned but no commits yet) — not an error
+		status.Branch = "(empty)"
 		return status
 	}
 	status.Branch = strings.TrimSpace(string(branchOutput))
@@ -458,13 +454,13 @@ func isGitRepo(path string) bool {
 // Note: RepoClient uses http.Client internally which manages connection
 // pooling automatically. No explicit Close() is needed - connections are
 // reused across requests and cleaned up when idle.
-func getLedgerRemoteURL() string {
-	token, err := auth.GetToken()
+func getLedgerRemoteURL(ep string) string {
+	token, err := auth.GetTokenForEndpoint(ep)
 	if err != nil || token == nil || token.AccessToken == "" {
 		return ""
 	}
 
-	client := api.NewRepoClient().WithAuthToken(token.AccessToken)
+	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
 	repos, err := client.GetRepos()
 	if err != nil || repos == nil {
 		return ""
@@ -482,17 +478,17 @@ func getLedgerRemoteURL() string {
 // getTeamContextRemoteURL fetches the team context git URL from the cloud API.
 // Returns empty string if not available or on error.
 // Designed to be fast - silently returns empty on any failure.
-func getTeamContextRemoteURL(teamID string) string {
+func getTeamContextRemoteURL(teamID, ep string) string {
 	if teamID == "" {
 		return ""
 	}
 
-	token, err := auth.GetToken()
+	token, err := auth.GetTokenForEndpoint(ep)
 	if err != nil || token == nil || token.AccessToken == "" {
 		return ""
 	}
 
-	client := api.NewRepoClient().WithAuthToken(token.AccessToken)
+	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
 	teamInfo, err := client.GetTeamInfo(teamID)
 	if err != nil || teamInfo == nil {
 		return ""
@@ -1375,7 +1371,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 
 			// ensure git credentials are valid (auto-refresh if needed)
 			// this is fast (local check) unless credentials need refresh
-			_, _ = gitserver.EnsureValidCredentials(func() (*gitserver.GitCredentials, error) {
+			_, _ = gitserver.EnsureValidCredentialsForEndpoint(currentEndpoint, func() (*gitserver.GitCredentials, error) {
 				client := api.NewRepoClientWithEndpoint(currentEndpoint).WithAuthToken(token.AccessToken)
 				return fetchGitCredentials(client)
 			})
@@ -1421,7 +1417,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 					} else if authenticated {
 						// ledger not cloned yet - get expected info from cloud API
 						// so we can show what SHOULD exist even if not cloned
-						if ledgerURL := getLedgerRemoteURL(); ledgerURL != "" {
+						if ledgerURL := getLedgerRemoteURL(currentEndpoint); ledgerURL != "" {
 							if ledgerPath == "" {
 								ledgerPath = "(pending clone)"
 							}

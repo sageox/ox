@@ -142,9 +142,17 @@ type SummarizeResponse struct {
 }
 
 // Summarize calls the SageOx API to generate an LLM summary of a session.
+// If endpointURL is non-empty, uses that endpoint for auth and API calls;
+// otherwise falls back to the default endpoint.
 // Returns nil if summarization fails (non-critical feature).
-func Summarize(entries []Entry, agentID, agentType, model string) (*SummarizeResponse, error) {
-	token, err := auth.GetToken()
+func Summarize(entries []Entry, agentID, agentType, model, endpointURL string) (*SummarizeResponse, error) {
+	var token *auth.StoredToken
+	var err error
+	if endpointURL != "" {
+		token, err = auth.GetTokenForEndpoint(endpointURL)
+	} else {
+		token, err = auth.GetToken()
+	}
 	if err != nil || token == nil {
 		return nil, fmt.Errorf("authentication required for summarization")
 	}
@@ -154,7 +162,12 @@ func Summarize(entries []Entry, agentID, agentType, model string) (*SummarizeRes
 
 	// make API call
 	client := &http.Client{Timeout: summarizeTimeout}
-	reqURL := endpoint.Get() + summarizePath
+	var reqURL string
+	if endpointURL != "" {
+		reqURL = endpointURL + summarizePath
+	} else {
+		reqURL = endpoint.Get() + summarizePath
+	}
 
 	body, err := json.Marshal(req)
 	if err != nil {

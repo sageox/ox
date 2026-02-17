@@ -620,12 +620,16 @@ func checkGitRepoPaths(fix bool) checkResult {
 			if info, err := os.Stat(defaultPath); err == nil {
 				// path exists - check if it's a valid git repo
 				if info.IsDir() && !ledger.Exists(defaultPath) {
-					// directory exists but not a git repo
+					// directory exists but not a git repo — classify by contents
+					issueType := "not-git-repo"
+					if entries, _ := os.ReadDir(defaultPath); len(entries) == 0 {
+						issueType = "empty-dir"
+					}
 					issues = append(issues, repoPathIssue{
 						repoType: "ledger",
 						path:     defaultPath,
 						endpoint: endpoint.GetForProject(gitRoot),
-						issue:    "not-git-repo",
+						issue:    issueType,
 					})
 				}
 			}
@@ -650,6 +654,40 @@ func checkGitRepoPaths(fix bool) checkResult {
 			symlinkIssue := checkTeamContextSymlink(tc, gitRoot)
 			if symlinkIssue != nil {
 				issues = append(issues, *symlinkIssue)
+			}
+		}
+	}
+
+	// discover team contexts from repo detail API that aren't in local config
+	// GetRepos() only returns member repos; GetRepoDetail() also returns public/read-only
+	projectEndpoint := endpoint.GetForProject(gitRoot)
+	projectCfg, _ := config.LoadProjectConfig(gitRoot)
+	if projectCfg != nil && projectCfg.RepoID != "" {
+		if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil {
+			client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
+			if detail, err := client.GetRepoDetail(projectCfg.RepoID); err == nil && detail != nil {
+				knownTeamIDs := make(map[string]bool, len(localCfg.TeamContexts))
+				for _, tc := range localCfg.TeamContexts {
+					knownTeamIDs[tc.TeamID] = true
+				}
+				for _, tc := range detail.TeamContexts {
+					if knownTeamIDs[tc.StableID()] {
+						continue
+					}
+					expectedPath := paths.TeamContextDir(tc.StableID(), projectEndpoint)
+					issue := validateRepoPath(expectedPath)
+					if issue != "" {
+						issues = append(issues, repoPathIssue{
+							repoType: "team-context",
+							path:     expectedPath,
+							teamID:   tc.StableID(),
+							teamName: tc.Name,
+							endpoint: projectEndpoint,
+							cloneURL: tc.RepoURL,
+							issue:    issue,
+						})
+					}
+				}
 			}
 		}
 	}
@@ -871,6 +909,7 @@ type repoPathIssue struct {
 	teamID   string // only for team-context
 	teamName string // only for team-context
 	endpoint string
+	cloneURL string // pre-fetched clone URL (avoids re-lookup for public/read-only repos)
 	issue    string // "missing", "not-git-repo", "empty-dir", "legacy-structure", "broken-symlink", "invalid-symlink"
 }
 
@@ -967,12 +1006,14 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 				skipped++
 			}
 		case "missing", "empty-dir", "not-git-repo":
-			// only option is to clone from cloud (or skip)
-			if !cli.ConfirmYesNo("Clone from cloud?", true) {
-				skipped++
-				fmt.Println("  Skipped.")
-				fmt.Println()
-				continue
+			// for directories with potential data, ask before cloning
+			if issue.issue == "not-git-repo" {
+				if !cli.ConfirmYesNo("Clone from cloud?", true) {
+					skipped++
+					fmt.Println("  Skipped.")
+					fmt.Println()
+					continue
+				}
 			}
 
 			// attempt clone
@@ -1164,7 +1205,7 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 		if err := os.MkdirAll(filepath.Dir(ledgerPath), 0755); err != nil {
 			fmt.Printf("    Error creating directory: %v\n", err)
 			skipped++
-		} else if err := cloneViaDaemon(ledgerRepo.URL, ledgerPath, "ledger"); err != nil {
+		} else if err := cloneViaDaemon(ledgerRepo.URL, ledgerPath, "ledger", projectEndpoint); err != nil {
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
 		} else {
@@ -1205,7 +1246,7 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 			continue
 		}
 
-		if err := cloneViaDaemon(tcRepo.URL, tcPath, "team_context"); err != nil {
+		if err := cloneViaDaemon(tcRepo.URL, tcPath, "team_context", projectEndpoint); err != nil {
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
 			continue
@@ -1291,7 +1332,7 @@ func extractTeamIDFromRepoName(name string) string {
 // │ Therefore, this function FALLS BACK to direct git clone when daemon is     │
 // │ unavailable. This is an INTENTIONAL EXCEPTION to the normal pattern.       │
 // └─────────────────────────────────────────────────────────────────────────────┘
-func cloneViaDaemon(cloneURL, targetPath, repoType string) error {
+func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 	// Try daemon first (preferred path - centralized credential handling)
 	if daemon.IsRunning() {
 		client := daemon.NewClientWithTimeout(60 * time.Second)
@@ -1326,7 +1367,7 @@ func cloneViaDaemon(cloneURL, targetPath, repoType string) error {
 	// This is a CRITICAL PATH EXCEPTION. Clone is required for product to
 	// function at all. See function-level comment for rationale.
 	//
-	// Uses gitserver.CloneFromURL which:
+	// Uses gitserver.CloneFromURLWithEndpoint which:
 	// - Loads credentials from local credential store
 	// - Builds authenticated URL with oauth2:TOKEN format
 	// - Executes git clone directly
@@ -1336,7 +1377,7 @@ func cloneViaDaemon(cloneURL, targetPath, repoType string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	if err := gitserver.CloneFromURL(ctx, cloneURL, targetPath, nil); err != nil {
+	if err := gitserver.CloneFromURLWithEndpoint(ctx, cloneURL, targetPath, endpointURL, nil); err != nil {
 		return fmt.Errorf("direct clone failed: %w", err)
 	}
 
@@ -1354,7 +1395,10 @@ func cloneRepoForFix(issue repoPathIssue) error {
 	var repoURL string
 	var fetchErr error
 
-	if issue.repoType == "ledger" {
+	// use pre-fetched URL if available (e.g., from GetRepoDetail for public repos)
+	if issue.cloneURL != "" {
+		repoURL = issue.cloneURL
+	} else if issue.repoType == "ledger" {
 		repoURL, fetchErr = fetchLedgerURLWithError(issue.endpoint)
 	} else {
 		repoURL, fetchErr = fetchTeamContextURLWithError(issue.teamID, issue.endpoint)
@@ -1411,7 +1455,7 @@ func cloneRepoForFix(issue repoPathIssue) error {
 		fmt.Printf("  Cloning team context from: %s\n", repoURL)
 	}
 	fmt.Printf("  Cloning to: %s\n", issue.path)
-	return cloneViaDaemon(repoURL, issue.path, issue.repoType)
+	return cloneViaDaemon(repoURL, issue.path, issue.repoType, issue.endpoint)
 }
 
 // fetchLedgerURLWithError fetches the ledger git URL from the cloud API with error details.
@@ -1470,7 +1514,7 @@ func fetchTeamContextURLWithError(teamID string, currentEndpoint string) (string
 		return "", fmt.Errorf("team ID is empty")
 	}
 
-	token, err := auth.GetToken()
+	token, err := auth.GetTokenForEndpoint(currentEndpoint)
 	if err != nil {
 		return "", fmt.Errorf("get auth token for %s: %w", currentEndpoint, err)
 	}
@@ -1478,7 +1522,7 @@ func fetchTeamContextURLWithError(teamID string, currentEndpoint string) (string
 		return "", fmt.Errorf("not authenticated to %s - run 'ox login' first", currentEndpoint)
 	}
 
-	client := api.NewRepoClient().WithAuthToken(token.AccessToken)
+	client := api.NewRepoClientWithEndpoint(currentEndpoint).WithAuthToken(token.AccessToken)
 	teamInfo, err := client.GetTeamInfo(teamID)
 	if err != nil {
 		return "", fmt.Errorf("API call to %s for team %s failed: %w", currentEndpoint, teamID, err)

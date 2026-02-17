@@ -336,6 +336,19 @@ See [docs/human/guides/development-philosophy.md](docs/human/guides/development-
 
 Always confirm with human before doing a git commit or a git push in this repo.
 
+**Commit messages:**
+- **One line only.** Concise imperative summary, max ~72 chars (e.g., `fix session expiry on token refresh`)
+- No multi-line bodies, no bullet lists, no paragraphs — the PR is where detail lives
+- Format: `type(scope): summary` or plain imperative sentence
+
+**Pull requests (human-readable):**
+- PRs are the primary vehicle for communicating *what changed and why* to human reviewers
+- Include a clear summary, motivation, and test plan
+- Add Mermaid diagrams for pipelines, data flows, state machines, or architecture changes
+- Use tables, screenshots, or before/after comparisons where they reduce cognitive load
+- Write for humans who skim — lead with the most important change, use headings and bullets
+- **Squash merges use "PR title + description"** — the PR body becomes the squash commit message on main, so write it as the permanent record
+
 ### Key Practices
 
 - **Simplicity**: Don't over-engineer; minimum complexity for current needs

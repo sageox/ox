@@ -5,6 +5,7 @@ import (
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 )
 
 // ShouldSuggest checks if we should suggest the badge.
@@ -16,7 +17,9 @@ import (
 // 4. Badge is not already present in README
 func ShouldSuggest(gitRoot string) bool {
 	// 1. check if user is authenticated
-	token, err := auth.GetToken()
+	// use project endpoint if available
+	ep := endpoint.GetForProject(gitRoot)
+	token, err := auth.GetTokenForEndpoint(ep)
 	if err != nil || token == nil || token.AccessToken == "" {
 		return false
 	}

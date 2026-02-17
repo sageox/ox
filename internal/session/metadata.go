@@ -66,10 +66,11 @@ type SessionFooter struct {
 // oxsid is the full session ID (e.g., "oxsid_01JEYQ9Z8X...").
 // agentType identifies the AI agent (e.g., "claude-code").
 // projectRemote is the git remote URL for provenance.
-func NewSessionMeta(sessionID, oxsid, agentType, projectRemote string) *SessionMeta {
+// endpointURL is the project endpoint for auth lookup (empty = default).
+func NewSessionMeta(sessionID, oxsid, agentType, projectRemote, endpointURL string) *SessionMeta {
 	return &SessionMeta{
 		OxVersion:     version.Version,
-		OxUsername:    getOxUsername(),
+		OxUsername:    getOxUsername(endpointURL),
 		SchemaVersion: SessionSchemaVersion,
 		AgentType:     agentType,
 		SessionID:     sessionID,
@@ -80,8 +81,8 @@ func NewSessionMeta(sessionID, oxsid, agentType, projectRemote string) *SessionM
 }
 
 // NewSessionMetaWithVersion creates metadata with a specific agent version.
-func NewSessionMetaWithVersion(sessionID, oxsid, agentType, agentVersion, projectRemote string) *SessionMeta {
-	meta := NewSessionMeta(sessionID, oxsid, agentType, projectRemote)
+func NewSessionMetaWithVersion(sessionID, oxsid, agentType, agentVersion, projectRemote, endpointURL string) *SessionMeta {
+	meta := NewSessionMeta(sessionID, oxsid, agentType, projectRemote, endpointURL)
 	meta.AgentVersion = agentVersion
 	return meta
 }
@@ -99,9 +100,17 @@ func NewSessionFooter(startedAt time.Time, entryCount int) *SessionFooter {
 }
 
 // getOxUsername returns the authenticated SageOx username.
+// If ep is non-empty, looks up the token for that specific endpoint.
+// Falls back to the default endpoint token when ep is empty.
 // Returns empty string if not authenticated or on error.
-func getOxUsername() string {
-	token, err := auth.GetToken()
+func getOxUsername(ep string) string {
+	var token *auth.StoredToken
+	var err error
+	if ep != "" {
+		token, err = auth.GetTokenForEndpoint(ep)
+	} else {
+		token, err = auth.GetToken()
+	}
 	if err != nil || token == nil {
 		return ""
 	}

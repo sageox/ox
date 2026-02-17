@@ -33,15 +33,14 @@ func Heartbeat(repoPath string, teamIDs []string, agentID string) {
 		}
 
 		// include credentials if available (refreshes daemon's copy)
-		if creds, err := gitserver.LoadCredentials(); err == nil && creds != nil {
+		// use project endpoint to get the correct token for this repo
+		projectEndpoint := endpoint.GetForProject(repoPath)
+		if creds, err := gitserver.LoadCredentialsForEndpoint(projectEndpoint); err == nil && creds != nil {
 			hbCreds := &daemon.HeartbeatCreds{
 				Token:     creds.Token,
 				ServerURL: creds.ServerURL,
 				ExpiresAt: creds.ExpiresAt,
 			}
-			// include auth token and user info for API calls
-			// use project endpoint to get the correct token for this repo
-			projectEndpoint := endpoint.GetForProject(repoPath)
 			if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil {
 				hbCreds.AuthToken = token.AccessToken
 				hbCreds.UserEmail = token.UserInfo.Email

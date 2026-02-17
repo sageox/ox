@@ -1,12 +1,10 @@
 package gitserver
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -329,52 +327,6 @@ func TestRepoNameFromURL(t *testing.T) {
 	}
 }
 
-// tests for deprecated functions (maintained for backwards compatibility)
-
-func TestCheckoutTeamLedger_NoCredentials(t *testing.T) {
-	setupTestDir(t)
-
-	ctx := context.Background()
-	err := CheckoutTeamLedger(ctx, "team-123", "/tmp/test-team", nil)
-
-	assert.True(t, errors.Is(err, ErrNoCredentials), "error = %v, want %v", err, ErrNoCredentials)
-}
-
-func TestCheckoutTeamLedger_RepoNotFound(t *testing.T) {
-	tempDir := setupTestDir(t)
-
-	// save credentials without team repo
-	creds := GitCredentials{
-		Token:     "test-token",
-		ServerURL: "https://git.example.com",
-		Username:  "testuser",
-		ExpiresAt: time.Now().Add(1 * time.Hour),
-		Repos: map[string]RepoEntry{
-			"team-alpha": {
-				Name: "team-alpha",
-				Type: "team-context",
-				URL:  "https://git.example.com/teams/alpha.git",
-			},
-		},
-	}
-	require.NoError(t, SaveCredentialsForEndpoint("", creds))
-
-	ctx := context.Background()
-	checkoutPath := filepath.Join(tempDir, "team-checkout")
-	err := CheckoutTeamLedger(ctx, "team-xyz", checkoutPath, nil)
-
-	assert.True(t, errors.Is(err, ErrRepoNotFound), "error = %v, want %v", err, ErrRepoNotFound)
-}
-
-func TestCheckoutRepo_NoCredentials(t *testing.T) {
-	setupTestDir(t)
-
-	ctx := context.Background()
-	err := CheckoutRepo(ctx, "some-repo", "/tmp/test-repo", nil)
-
-	assert.True(t, errors.Is(err, ErrNoCredentials), "error = %v, want %v", err, ErrNoCredentials)
-}
-
 func TestIsGitInstalled(t *testing.T) {
 	// this should return true on most development machines
 	// we don't fail if git is not installed since that's a valid state
@@ -394,35 +346,6 @@ func TestGetGitVersion(t *testing.T) {
 	t.Logf("git version: %s", version)
 }
 
-func TestCheckoutTeamLedger_FindsByPartialMatch(t *testing.T) {
-	tempDir := setupTestDir(t)
-
-	// save credentials with team repo using different naming pattern
-	creds := GitCredentials{
-		Token:     "test-token",
-		ServerURL: "https://git.example.com",
-		Username:  "testuser",
-		ExpiresAt: time.Now().Add(1 * time.Hour),
-		Repos: map[string]RepoEntry{
-			"acme-corp-team-context": {
-				Name: "acme-corp-team-context",
-				Type: "team-context",
-				URL:  "https://git.example.com/user/acme-corp-team-context.git",
-			},
-		},
-	}
-	require.NoError(t, SaveCredentialsForEndpoint("", creds))
-
-	ctx := context.Background()
-	checkoutPath := filepath.Join(tempDir, "team-checkout")
-
-	// should find by partial match (acme-corp contains in key)
-	err := CheckoutTeamLedger(ctx, "acme-corp", checkoutPath, nil)
-
-	// will fail because clone won't work, but should NOT be ErrRepoNotFound
-	assert.False(t, errors.Is(err, ErrRepoNotFound), "should have found repo by partial match, got %v", err)
-}
-
 func TestCheckoutOptions(t *testing.T) {
 	// verify options struct works correctly
 	opts := &CheckoutOptions{
@@ -434,108 +357,3 @@ func TestCheckoutOptions(t *testing.T) {
 	assert.Equal(t, "main", opts.Branch)
 }
 
-// tests for new URL-required functions
-
-func TestCheckoutLedgerWithURL_EmptyURL(t *testing.T) {
-	setupTestDir(t)
-
-	ctx := context.Background()
-	err := CheckoutLedgerWithURL(ctx, "", "/tmp/test-ledger", nil)
-
-	assert.True(t, errors.Is(err, ErrEmptyURL), "error = %v, want %v", err, ErrEmptyURL)
-}
-
-func TestCheckoutLedgerWithURL_NoCredentials(t *testing.T) {
-	setupTestDir(t)
-
-	ctx := context.Background()
-	err := CheckoutLedgerWithURL(ctx, "https://git.example.com/user/ledger.git", "/tmp/test-ledger", nil)
-
-	assert.True(t, errors.Is(err, ErrNoCredentials), "error = %v, want %v", err, ErrNoCredentials)
-}
-
-func TestCheckoutTeamContextWithURL_EmptyURL(t *testing.T) {
-	setupTestDir(t)
-
-	ctx := context.Background()
-	err := CheckoutTeamContextWithURL(ctx, "team-123", "", "/tmp/test-team", nil)
-
-	assert.True(t, errors.Is(err, ErrEmptyURL), "error = %v, want %v", err, ErrEmptyURL)
-}
-
-func TestCheckoutTeamContextWithURL_NoCredentials(t *testing.T) {
-	setupTestDir(t)
-
-	ctx := context.Background()
-	err := CheckoutTeamContextWithURL(ctx, "team-123", "https://git.example.com/team/context.git", "/tmp/test-team", nil)
-
-	assert.True(t, errors.Is(err, ErrNoCredentials), "error = %v, want %v", err, ErrNoCredentials)
-}
-
-func TestCloneFromURL_EmptyURL(t *testing.T) {
-	setupTestDir(t)
-
-	ctx := context.Background()
-	err := CloneFromURL(ctx, "", "/tmp/test-repo", nil)
-
-	assert.True(t, errors.Is(err, ErrEmptyURL), "error = %v, want %v", err, ErrEmptyURL)
-}
-
-func TestCloneFromURL_NoCredentials(t *testing.T) {
-	setupTestDir(t)
-
-	ctx := context.Background()
-	err := CloneFromURL(ctx, "https://git.example.com/user/repo.git", "/tmp/test-repo", nil)
-
-	assert.True(t, errors.Is(err, ErrNoCredentials), "error = %v, want %v", err, ErrNoCredentials)
-}
-
-func TestCheckoutLedgerWithURL_WithCredentials(t *testing.T) {
-	tempDir := setupTestDir(t)
-
-	// save credentials (needed for auth)
-	creds := GitCredentials{
-		Token:     "test-token",
-		ServerURL: "https://git.example.com",
-		Username:  "testuser",
-		ExpiresAt: time.Now().Add(1 * time.Hour),
-		Repos:     map[string]RepoEntry{},
-	}
-	require.NoError(t, SaveCredentialsForEndpoint("", creds))
-
-	ctx := context.Background()
-	checkoutPath := filepath.Join(tempDir, "ledger-checkout")
-
-	// this will fail at clone (no actual repo), but should pass URL and creds validation
-	err := CheckoutLedgerWithURL(ctx, "https://git.example.com/user/ledger.git", checkoutPath, nil)
-
-	// should fail with clone error, not URL or credentials error
-	assert.False(t, errors.Is(err, ErrEmptyURL), "should not be ErrEmptyURL")
-	assert.False(t, errors.Is(err, ErrNoCredentials), "should not be ErrNoCredentials")
-	assert.True(t, errors.Is(err, ErrCloneFailed), "error = %v, want %v", err, ErrCloneFailed)
-}
-
-func TestCheckoutTeamContextWithURL_WithCredentials(t *testing.T) {
-	tempDir := setupTestDir(t)
-
-	// save credentials (needed for auth)
-	creds := GitCredentials{
-		Token:     "test-token",
-		ServerURL: "https://git.example.com",
-		Username:  "testuser",
-		ExpiresAt: time.Now().Add(1 * time.Hour),
-		Repos:     map[string]RepoEntry{},
-	}
-	require.NoError(t, SaveCredentialsForEndpoint("", creds))
-
-	ctx := context.Background()
-	checkoutPath := filepath.Join(tempDir, "team-checkout")
-
-	// this will fail at clone (no actual repo), but should pass URL and creds validation
-	err := CheckoutTeamContextWithURL(ctx, "team-123", "https://git.example.com/team/context.git", checkoutPath, nil)
-
-	// should fail with clone error, not URL or credentials error
-	assert.False(t, errors.Is(err, ErrEmptyURL), "should not be ErrEmptyURL")
-	assert.False(t, errors.Is(err, ErrNoCredentials), "should not be ErrNoCredentials")
-	assert.True(t, errors.Is(err, ErrCloneFailed), "error = %v, want %v", err, ErrCloneFailed)
-}

@@ -20,9 +20,6 @@ var (
 	// ErrNoCredentials is returned when credentials are not available
 	ErrNoCredentials = errors.New("git credentials not available")
 
-	// ErrRepoNotFound is returned when the requested repo is not in credentials
-	ErrRepoNotFound = errors.New("repository not found in credentials")
-
 	// ErrCloneFailed is returned when git clone fails
 	ErrCloneFailed = errors.New("git clone failed")
 
@@ -48,59 +45,6 @@ func DefaultCheckoutPath(repoName, workDir string) string {
 	}
 	parentDir := filepath.Dir(workDir)
 	return filepath.Join(parentDir, repoName)
-}
-
-// CheckoutLedgerWithURL clones the ledger repo to the specified path.
-// The repoURL MUST be provided - it should be fetched from the cloud API.
-// Uses stored credentials for authentication only.
-func CheckoutLedgerWithURL(ctx context.Context, repoURL, path string, opts *CheckoutOptions) error {
-	if repoURL == "" {
-		return ErrEmptyURL
-	}
-
-	creds, err := LoadCredentials()
-	if err != nil {
-		return fmt.Errorf("load credentials: %w", err)
-	}
-	if creds == nil {
-		return ErrNoCredentials
-	}
-
-	if path == "" {
-		path = DefaultCheckoutPath("ledger", "")
-	}
-
-	return cloneRepo(ctx, repoURL, path, creds, opts)
-}
-
-// CheckoutTeamContextWithURL clones a team context repo to the specified path.
-// The repoURL MUST be provided - it should be fetched from the cloud API.
-// The teamID is used for logging/tracking purposes only.
-// Uses stored credentials for authentication only.
-func CheckoutTeamContextWithURL(ctx context.Context, teamID, repoURL, path string, opts *CheckoutOptions) error {
-	if repoURL == "" {
-		return ErrEmptyURL
-	}
-
-	creds, err := LoadCredentials()
-	if err != nil {
-		return fmt.Errorf("load credentials: %w", err)
-	}
-	if creds == nil {
-		return ErrNoCredentials
-	}
-
-	if path == "" {
-		// derive repo name from URL for default path
-		repoName := repoNameFromURL(repoURL)
-		if repoName == "" {
-			repoName = fmt.Sprintf("team-%s-context", teamID)
-		}
-		path = DefaultCheckoutPath(repoName, "")
-	}
-
-	logger.Debug("checkout team context", "team_id", teamID, "path", path)
-	return cloneRepo(ctx, repoURL, path, creds, opts)
 }
 
 // repoNameFromURL extracts the repository name from a git URL.
@@ -140,15 +84,14 @@ func repoNameFromURL(repoURL string) string {
 	return strings.TrimSuffix(base, ".git")
 }
 
-// CloneFromURL clones a repository directly from a URL.
-// Uses stored credentials for authentication but ignores the cached URL.
-// This is useful when the URL is fetched fresh from the cloud API.
-func CloneFromURL(ctx context.Context, repoURL, path string, opts *CheckoutOptions) error {
+// CloneFromURLWithEndpoint clones using endpoint-specific credentials.
+// Falls back to default credentials if no endpoint-specific ones exist.
+func CloneFromURLWithEndpoint(ctx context.Context, repoURL, path, endpointURL string, opts *CheckoutOptions) error {
 	if repoURL == "" {
 		return ErrEmptyURL
 	}
 
-	creds, err := LoadCredentials()
+	creds, err := LoadCredentialsForEndpoint(endpointURL)
 	if err != nil {
 		return fmt.Errorf("load credentials: %w", err)
 	}
@@ -157,65 +100,6 @@ func CloneFromURL(ctx context.Context, repoURL, path string, opts *CheckoutOptio
 	}
 
 	return cloneRepo(ctx, repoURL, path, creds, opts)
-}
-
-// Deprecated: CheckoutTeamLedger looks up the URL from cached credentials.
-// Use CheckoutTeamContextWithURL instead - fetch the URL from the cloud API first.
-// This function will be removed in a future version.
-func CheckoutTeamLedger(ctx context.Context, teamID, path string, opts *CheckoutOptions) error {
-	creds, err := LoadCredentials()
-	if err != nil {
-		return fmt.Errorf("failed to load credentials: %w", err)
-	}
-	if creds == nil {
-		return ErrNoCredentials
-	}
-
-	// look for team repo by team ID
-	repoKey := fmt.Sprintf("team-%s", teamID)
-	repo := creds.GetRepo(repoKey)
-	if repo == nil {
-		// try alternate naming patterns
-		for name, entry := range creds.Repos {
-			if strings.Contains(name, teamID) && entry.Type == "team-context" {
-				repo = &entry
-				break
-			}
-		}
-	}
-	if repo == nil {
-		return fmt.Errorf("%w: team context for %s", ErrRepoNotFound, teamID)
-	}
-
-	if path == "" {
-		path = DefaultCheckoutPath(repo.Name, "")
-	}
-
-	return cloneRepo(ctx, repo.URL, path, creds, opts)
-}
-
-// Deprecated: CheckoutRepo looks up the URL from cached credentials.
-// Use CloneFromURL instead - fetch the URL from the cloud API first.
-// This function will be removed in a future version.
-func CheckoutRepo(ctx context.Context, repoName, path string, opts *CheckoutOptions) error {
-	creds, err := LoadCredentials()
-	if err != nil {
-		return fmt.Errorf("failed to load credentials: %w", err)
-	}
-	if creds == nil {
-		return ErrNoCredentials
-	}
-
-	repo := creds.GetRepo(repoName)
-	if repo == nil {
-		return fmt.Errorf("%w: %s", ErrRepoNotFound, repoName)
-	}
-
-	if path == "" {
-		path = DefaultCheckoutPath(repoName, "")
-	}
-
-	return cloneRepo(ctx, repo.URL, path, creds, opts)
 }
 
 // cloneRepo performs the actual git clone operation with credentials
@@ -252,11 +136,19 @@ func cloneRepo(ctx context.Context, repoURL, path string, creds *GitCredentials,
 	cmd.Stderr = os.Stderr // show git progress/errors
 
 	if err := cmd.Run(); err != nil {
+		// sanitize args to prevent credential leaks in error messages
+		safeArgs := make([]string, len(args))
+		copy(safeArgs, args)
+		for i, arg := range safeArgs {
+			if strings.Contains(arg, "@") && (strings.HasPrefix(arg, "https://") || strings.HasPrefix(arg, "http://")) {
+				safeArgs[i] = sanitizeURL(arg)
+			}
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return fmt.Errorf("%w: exit code %d\n  debug (contains credentials): git %s", ErrCloneFailed, exitErr.ExitCode(), strings.Join(args, " "))
+			return fmt.Errorf("%w: exit code %d\n  debug: git %s", ErrCloneFailed, exitErr.ExitCode(), strings.Join(safeArgs, " "))
 		}
-		return fmt.Errorf("%w: %w\n  debug (contains credentials): git %s", ErrCloneFailed, err, strings.Join(args, " "))
+		return fmt.Errorf("%w: %w\n  debug: git %s", ErrCloneFailed, err, strings.Join(safeArgs, " "))
 	}
 
 	logger.Info("repository cloned", "path", path)

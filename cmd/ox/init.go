@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/constants"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
@@ -660,13 +661,18 @@ func runInit() error {
 				cli.PrintPreserved("Git credentials synced")
 			}
 			// update marker file with cached URLs from credentials
-			if err := updateMarkerWithCachedURLs(sageoxDir, cfg.RepoID); err != nil {
+			if err := updateMarkerWithCachedURLs(sageoxDir, cfg.RepoID, endpoint.Get()); err != nil {
 				slog.Debug("failed to update marker with cached URLs", "error", err)
 			}
 		}
 
-		// Note: Data directories (teams, ledgers) are created on-demand when
-		// content is actually cloned by 'ox doctor --fix', not preemptively here.
+		// trigger daemon to sync (clone missing team contexts and ledger)
+		if daemon.IsRunning() {
+			go func() {
+				client := daemon.NewClient()
+				_ = client.RequestSync()
+			}()
+		}
 
 		// re-stage .sageox/ files after API registration updated config.json
 		// and README.md with team_id, repo_id, and dashboard links

@@ -64,8 +64,9 @@ func findSessionByFilename(store *session.Store, filename string) (*session.Stor
 }
 
 // getAuthenticatedUsername returns the authenticated user's email or empty string.
-func getAuthenticatedUsername() string {
-	token, err := auth.GetToken()
+// ep is the normalized endpoint to look up the token for.
+func getAuthenticatedUsername(ep string) string {
+	token, err := auth.GetTokenForEndpoint(ep)
 	if err != nil || token == nil {
 		return ""
 	}
@@ -74,8 +75,9 @@ func getAuthenticatedUsername() string {
 
 // getDisplayName returns a privacy-aware display name from auth info + user config.
 // Falls back to empty string if not authenticated.
-func getDisplayName() string {
-	token, err := auth.GetToken()
+// ep is the normalized endpoint to look up the token for.
+func getDisplayName(ep string) string {
+	token, err := auth.GetTokenForEndpoint(ep)
 	if err != nil || token == nil {
 		return ""
 	}

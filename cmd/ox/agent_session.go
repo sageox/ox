@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/doctor"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -432,6 +433,9 @@ type agentSessionResult struct {
 func processAgentSession(projectRoot string, state *session.RecordingState) (*agentSessionResult, error) {
 	result := &agentSessionResult{}
 
+	// resolve project endpoint for auth lookups
+	projectEndpoint := endpoint.GetForProject(projectRoot)
+
 	// get adapter
 	adapter, err := adapters.GetAdapter(state.AdapterName)
 	if err != nil {
@@ -524,7 +528,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		AgentType:    state.AdapterName,
 		AgentVersion: result.AgentVersion,
 		Model:        result.Model,
-		Username:     getDisplayName(),
+		Username:     getDisplayName(projectEndpoint),
 		RepoID:       repoID,
 	}
 	if err := rawWriter.WriteHeader(meta); err != nil {
@@ -585,7 +589,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		AgentType:    state.AdapterName,
 		AgentVersion: result.AgentVersion,
 		Model:        result.Model,
-		Username:     getDisplayName(),
+		Username:     getDisplayName(projectEndpoint),
 		RepoID:       repoID,
 	}
 	if err := eventsWriter.WriteHeader(eventsMeta); err != nil {
@@ -808,7 +812,8 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	}
 
 	// write meta.json first (before LFS upload) to preserve session metadata even if LFS fails
-	username := getAuthenticatedUsername()
+	projectEndpoint := endpoint.GetForProject(projectRoot)
+	username := getAuthenticatedUsername(projectEndpoint)
 	meta := &lfs.SessionMeta{
 		Version:     "1.0",
 		SessionName: sessionName,
@@ -1448,7 +1453,9 @@ func runAgentSessionPlan(inst *agentinstance.Instance) error {
 			return fmt.Errorf("failed to access session store: %w", err)
 		}
 
-		username := getAuthenticatedUsername()
+		planProjectRoot, _ := findProjectRoot()
+		planEndpoint := endpoint.GetForProject(planProjectRoot)
+		username := getAuthenticatedUsername(planEndpoint)
 		if username == "" {
 			username = "anonymous"
 		}

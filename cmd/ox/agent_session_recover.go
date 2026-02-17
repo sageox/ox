@@ -9,6 +9,7 @@ import (
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/doctor"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 )
@@ -168,7 +169,8 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 				slog.Warn("LFS upload failed during recovery", "error", uploadErr)
 				_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			} else {
-				username := getAuthenticatedUsername()
+				recoverEndpoint := endpoint.GetForProject(projectRoot)
+				username := getAuthenticatedUsername(recoverEndpoint)
 				meta := &lfs.SessionMeta{
 					Version:     "1.0",
 					SessionName: sessionName,

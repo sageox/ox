@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/spf13/cobra"
 )
@@ -60,7 +61,8 @@ Example:
 		}
 
 		// build or create meta.json first (before LFS upload) to preserve metadata even if LFS fails
-		meta, err := buildSessionMeta(sessionPath, sessionName, nil)
+		uploadEndpoint := endpoint.GetForProject(projectRoot)
+		meta, err := buildSessionMeta(sessionPath, sessionName, nil, uploadEndpoint)
 		if err != nil {
 			return fmt.Errorf("build meta.json: %w", err)
 		}
@@ -122,7 +124,8 @@ func hasContentFiles(sessionPath string) bool {
 // buildSessionMeta reads existing meta.json or constructs one from the directory name.
 // If fileRefs is nil, Files field is initialized as empty map.
 // If fileRefs is non-nil, Files field is updated with the provided references.
-func buildSessionMeta(sessionPath, sessionName string, fileRefs map[string]lfs.FileRef) (*lfs.SessionMeta, error) {
+// ep is the normalized endpoint used for auth token lookup.
+func buildSessionMeta(sessionPath, sessionName string, fileRefs map[string]lfs.FileRef, ep string) (*lfs.SessionMeta, error) {
 	// try reading existing meta.json first
 	meta, err := lfs.ReadSessionMeta(sessionPath)
 	if err == nil {
@@ -152,7 +155,7 @@ func buildSessionMeta(sessionPath, sessionName string, fileRefs map[string]lfs.F
 	return &lfs.SessionMeta{
 		Version:     "1.0",
 		SessionName: sessionName,
-		Username:    firstNonEmpty(username, getAuthenticatedUsername(), "unknown"),
+		Username:    firstNonEmpty(username, getAuthenticatedUsername(ep), "unknown"),
 		AgentID:     agentID,
 		AgentType:   "unknown",
 		CreatedAt:   ts,

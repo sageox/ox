@@ -54,7 +54,7 @@ func createTestCredentials(expiresIn time.Duration) GitCredentials {
 func TestLoadCredentials_NoFile(t *testing.T) {
 	setupTestDir(t)
 
-	creds, err := LoadCredentials()
+	creds, err := LoadCredentialsForEndpoint("")
 	require.NoError(t, err)
 	assert.Nil(t, creds)
 }
@@ -69,7 +69,7 @@ func TestSaveAndLoadCredentials(t *testing.T) {
 	require.NoError(t, SaveCredentialsForEndpoint("", originalCreds))
 
 	// retrieve credentials
-	retrievedCreds, err := LoadCredentials()
+	retrievedCreds, err := LoadCredentialsForEndpoint("")
 	require.NoError(t, err)
 	require.NotNil(t, retrievedCreds)
 
@@ -156,7 +156,7 @@ func TestSaveCredentials_UpdatesExisting(t *testing.T) {
 	require.NoError(t, SaveCredentialsForEndpoint("", creds2))
 
 	// verify second credentials are retrieved
-	retrievedCreds, err := LoadCredentials()
+	retrievedCreds, err := LoadCredentialsForEndpoint("")
 	require.NoError(t, err)
 
 	assert.Equal(t, "token2", retrievedCreds.Token)
@@ -170,7 +170,7 @@ func TestRemoveCredentials(t *testing.T) {
 	require.NoError(t, SaveCredentialsForEndpoint("", creds))
 
 	// verify credentials exist
-	retrievedCreds, err := LoadCredentials()
+	retrievedCreds, err := LoadCredentialsForEndpoint("")
 	require.NoError(t, err)
 	require.NotNil(t, retrievedCreds, "credentials should exist before removal")
 
@@ -178,7 +178,7 @@ func TestRemoveCredentials(t *testing.T) {
 	require.NoError(t, RemoveCredentials())
 
 	// verify credentials no longer exist
-	retrievedCreds, err = LoadCredentials()
+	retrievedCreds, err = LoadCredentialsForEndpoint("")
 	require.NoError(t, err)
 	assert.Nil(t, retrievedCreds)
 }
@@ -247,7 +247,7 @@ func TestLoadCredentials_CorruptedFile(t *testing.T) {
 	require.NoError(t, os.WriteFile(credsPath, corruptedData, 0600))
 
 	// attempt to read corrupted file
-	creds, err := LoadCredentials()
+	creds, err := LoadCredentialsForEndpoint("")
 	assert.Error(t, err)
 	assert.Nil(t, creds)
 }
@@ -264,7 +264,7 @@ func TestLoadCredentials_EmptyFile(t *testing.T) {
 	require.NoError(t, os.WriteFile(credsPath, []byte(""), 0600))
 
 	// attempt to read empty file
-	creds, err := LoadCredentials()
+	creds, err := LoadCredentialsForEndpoint("")
 	assert.Error(t, err)
 	assert.Nil(t, creds)
 }

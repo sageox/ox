@@ -14,7 +14,7 @@ func TestNewSessionMeta(t *testing.T) {
 	agentType := "claude-code"
 	projectRemote := "github.com/example/repo"
 
-	meta := NewSessionMeta(sessionID, oxsid, agentType, projectRemote)
+	meta := NewSessionMeta(sessionID, oxsid, agentType, projectRemote, "")
 
 	assert.Equal(t, sessionID, meta.SessionID)
 	assert.Equal(t, oxsid, meta.OxSID)
@@ -26,13 +26,13 @@ func TestNewSessionMeta(t *testing.T) {
 }
 
 func TestNewSessionMetaWithVersion(t *testing.T) {
-	meta := NewSessionMetaWithVersion("Oxa7b3", "oxsid_test", "cursor", "0.45.1", "github.com/example/repo")
+	meta := NewSessionMetaWithVersion("Oxa7b3", "oxsid_test", "cursor", "0.45.1", "github.com/example/repo", "")
 
 	assert.Equal(t, "0.45.1", meta.AgentVersion)
 }
 
 func TestSessionMetaClose(t *testing.T) {
-	meta := NewSessionMeta("Oxa7b3", "oxsid_test", "claude-code", "")
+	meta := NewSessionMeta("Oxa7b3", "oxsid_test", "claude-code", "", "")
 
 	assert.True(t, meta.EndedAt.IsZero(), "EndedAt should be zero before Close")
 
@@ -45,7 +45,7 @@ func TestSessionMetaClose(t *testing.T) {
 }
 
 func TestSessionMetaDuration(t *testing.T) {
-	meta := NewSessionMeta("Oxa7b3", "oxsid_test", "claude-code", "")
+	meta := NewSessionMeta("Oxa7b3", "oxsid_test", "claude-code", "", "")
 
 	// duration is zero before close
 	assert.Equal(t, time.Duration(0), meta.Duration(), "Duration should be zero before Close")
@@ -131,7 +131,7 @@ func TestNewSystemSessionEntry(t *testing.T) {
 }
 
 func TestNewSession(t *testing.T) {
-	meta := NewSessionMeta("Oxa7b3", "oxsid_test", "claude-code", "")
+	meta := NewSessionMeta("Oxa7b3", "oxsid_test", "claude-code", "", "")
 	session := NewSession(meta)
 
 	assert.Equal(t, meta, session.Meta)
@@ -140,7 +140,7 @@ func TestNewSession(t *testing.T) {
 }
 
 func TestSessionAddEntry(t *testing.T) {
-	meta := NewSessionMeta("Oxa7b3", "oxsid_test", "claude-code", "")
+	meta := NewSessionMeta("Oxa7b3", "oxsid_test", "claude-code", "", "")
 	session := NewSession(meta)
 
 	entry := NewUserSessionEntry("test message")
@@ -196,7 +196,7 @@ func TestSessionEntryCount(t *testing.T) {
 }
 
 func TestSessionClose(t *testing.T) {
-	meta := NewSessionMeta("Oxa7b3", "oxsid_test", "claude-code", "")
+	meta := NewSessionMeta("Oxa7b3", "oxsid_test", "claude-code", "", "")
 	session := NewSession(meta)
 
 	assert.True(t, session.Meta.EndedAt.IsZero(), "EndedAt should be zero before Close")
@@ -213,7 +213,7 @@ func TestSessionCloseNilMeta(t *testing.T) {
 }
 
 func TestSessionFooter(t *testing.T) {
-	meta := NewSessionMeta("Oxa7b3", "oxsid_test", "claude-code", "")
+	meta := NewSessionMeta("Oxa7b3", "oxsid_test", "claude-code", "", "")
 	session := NewSession(meta)
 
 	session.AddUserEntry("message 1")
@@ -235,7 +235,7 @@ func TestSessionFooterNilMeta(t *testing.T) {
 
 func TestSessionConversationFlow(t *testing.T) {
 	// simulate a realistic conversation flow
-	meta := NewSessionMeta("Oxa7b3", "oxsid_01JEYQ9Z8X9Y2K3N4P5Q6R7S8T", "claude-code", "github.com/example/repo")
+	meta := NewSessionMeta("Oxa7b3", "oxsid_01JEYQ9Z8X9Y2K3N4P5Q6R7S8T", "claude-code", "github.com/example/repo", "")
 	session := NewSession(meta)
 
 	// user asks a question
@@ -287,6 +287,6 @@ func BenchmarkSessionAddEntry(b *testing.B) {
 
 func BenchmarkNewSessionMeta(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		NewSessionMeta("Oxa7b3", "oxsid_test", "claude-code", "github.com/example/repo")
+		NewSessionMeta("Oxa7b3", "oxsid_test", "claude-code", "github.com/example/repo", "")
 	}
 }

@@ -654,8 +654,9 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) {
 		return
 	}
 
-	// check if ledger exists - if not, try to auto-clone
-	if _, err := os.Stat(s.config.LedgerPath); os.IsNotExist(err) {
+	// check if ledger is a valid git repo - if not, try to auto-clone
+	// handles both missing directories and directories left behind by failed clones
+	if !pathIsGitRepo(s.config.LedgerPath) {
 		// reload workspace registry to get clone URL
 		if err := s.workspaceRegistry.LoadFromConfig(); err == nil {
 			if ledger := s.workspaceRegistry.GetLedger(); ledger != nil {
@@ -684,7 +685,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) {
 				}
 			}
 		}
-		return // can't pull from non-existent repo
+		return // can't pull from repo that isn't cloned yet
 	}
 
 	// skip if repo stuck in broken rebase state
@@ -1234,7 +1235,7 @@ func isValidRepoPath(path string) bool {
 // │ required because the CLI has a FALLBACK:                                    │
 // │                                                                             │
 // │   cmd/ox/doctor_git_repos.go:cloneViaDaemon()                              │
-// │   → Falls back to gitserver.CloneFromURL() when daemon unavailable         │
+// │   → Falls back to gitserver.CloneFromURLWithEndpoint() when daemon unavailable │
 // │                                                                             │
 // │ This handler is PREFERRED over direct clone because it provides:            │
 // │ - Centralized credential handling                                           │

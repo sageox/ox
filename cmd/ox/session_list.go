@@ -9,6 +9,7 @@ import (
 
 	lipgloss "charm.land/lipgloss/v2"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -71,7 +72,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 		limit = 0
 	}
 
-	store, _, err := newSessionStore()
+	store, projectRoot, err := newSessionStore()
 	if err != nil {
 		return err
 	}
@@ -141,7 +142,8 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 	}
 
 	// get local username for sessions without meta.json
-	localUser := getAuthenticatedUsername()
+	listEndpoint := endpoint.GetForProject(projectRoot)
+	localUser := getAuthenticatedUsername(listEndpoint)
 
 	// print header
 	fmt.Println()

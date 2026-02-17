@@ -111,6 +111,33 @@ func TestSyncScheduler_NoLedgerPath(t *testing.T) {
 	scheduler.syncAll(ctx)
 }
 
+func TestSyncScheduler_DoPull_LedgerDirExistsButNotGitRepo(t *testing.T) {
+	// simulate a failed clone that left an empty directory behind
+	tmpDir := t.TempDir()
+	ledgerDir := filepath.Join(tmpDir, "ledger")
+	require.NoError(t, os.MkdirAll(ledgerDir, 0755))
+
+	// verify the directory exists but is NOT a git repo
+	_, err := os.Stat(ledgerDir)
+	require.NoError(t, err)
+	assert.False(t, pathIsGitRepo(ledgerDir))
+
+	cfg := DefaultConfig()
+	cfg.LedgerPath = ledgerDir
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// doPull should detect the empty dir is not a git repo and return early
+	// (enters the clone branch) rather than falling through to git fetch/pull
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// should not panic — previously this would fall through to git pull
+	// on an empty directory since it only checked os.IsNotExist
+	scheduler.doPull(ctx, nil)
+}
+
 func TestSyncScheduler_PullInProgress(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.LedgerPath = "/tmp/test"

@@ -247,7 +247,7 @@ func TestShouldRefreshCachedURLs(t *testing.T) {
 	t.Run("returns true for empty dir", func(t *testing.T) {
 		emptyDir := filepath.Join(tmpDir, "empty")
 		require.NoError(t, os.MkdirAll(emptyDir, 0755))
-		assert.True(t, ShouldRefreshCachedURLs(emptyDir))
+		assert.True(t, ShouldRefreshCachedURLs(emptyDir, currentEndpoint))
 	})
 
 	t.Run("returns true for expired cache", func(t *testing.T) {
@@ -261,7 +261,7 @@ func TestShouldRefreshCachedURLs(t *testing.T) {
 		data, _ := json.Marshal(marker)
 		require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, ".repo_shouldrefresh"), data, 0644))
 
-		assert.True(t, ShouldRefreshCachedURLs(sageoxDir))
+		assert.True(t, ShouldRefreshCachedURLs(sageoxDir, currentEndpoint))
 	})
 
 	t.Run("returns false for fresh cache", func(t *testing.T) {
@@ -278,7 +278,7 @@ func TestShouldRefreshCachedURLs(t *testing.T) {
 		data, _ := json.Marshal(marker)
 		require.NoError(t, os.WriteFile(filepath.Join(freshDir, ".repo_norefresh"), data, 0644))
 
-		assert.False(t, ShouldRefreshCachedURLs(freshDir))
+		assert.False(t, ShouldRefreshCachedURLs(freshDir, currentEndpoint))
 	})
 }
 

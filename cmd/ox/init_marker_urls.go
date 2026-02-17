@@ -34,9 +34,9 @@ func (u *repoMarkerURLs) IsExpired() bool {
 
 // updateMarkerWithCachedURLs updates an existing marker file with cached URLs from git credentials.
 // This is called after successful API registration and credential fetch.
-func updateMarkerWithCachedURLs(sageoxDir, repoID string) error {
+func updateMarkerWithCachedURLs(sageoxDir, repoID, endpointURL string) error {
 	// load git credentials to get URLs
-	creds, err := gitserver.LoadCredentials()
+	creds, err := gitserver.LoadCredentialsForEndpoint(endpointURL)
 	if err != nil || creds == nil {
 		return fmt.Errorf("no git credentials available")
 	}

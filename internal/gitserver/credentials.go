@@ -127,49 +127,6 @@ func isKeyringAvailable() bool {
 	return true
 }
 
-// LoadCredentials loads git server credentials.
-// Tries OS keychain first, falls back to file storage.
-func LoadCredentials() (*GitCredentials, error) {
-	// try keychain first
-	if isKeyringAvailable() {
-		data, err := keyring.Get(keyringService, keyringUser)
-		if err == nil && data != "" {
-			var creds GitCredentials
-			if err := json.Unmarshal([]byte(data), &creds); err == nil {
-				return &creds, nil
-			}
-			// JSON parse failed, fall through to file storage
-		}
-		// keyring not found or error, fall through to file storage
-	}
-
-	// fallback to file storage
-	return loadCredentialsFromFile()
-}
-
-// loadCredentialsFromFile loads credentials from the file-based storage
-func loadCredentialsFromFile() (*GitCredentials, error) {
-	credsPath, err := getCredentialsFilePath()
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := os.ReadFile(credsPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil // no credentials stored
-		}
-		return nil, fmt.Errorf("failed to read git credentials file: %w", err)
-	}
-
-	var creds GitCredentials
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return nil, fmt.Errorf("failed to parse git credentials file: %w", err)
-	}
-
-	return &creds, nil
-}
-
 // RemoveCredentials deletes git server credentials from all storage locations.
 // Removes from both keychain and file storage to ensure complete cleanup.
 func RemoveCredentials() error {
@@ -298,53 +255,6 @@ type CredentialStatus struct {
 // NearExpiryThreshold is how close to expiry credentials must be to trigger refresh
 const NearExpiryThreshold = 1 * time.Hour
 
-// CheckCredentialStatus checks the current state of git credentials.
-// Returns a status struct indicating whether credentials are valid and why.
-func CheckCredentialStatus() CredentialStatus {
-	creds, err := LoadCredentials()
-	if err != nil {
-		return CredentialStatus{
-			Valid:  false,
-			Reason: "load error: " + err.Error(),
-		}
-	}
-
-	if creds == nil {
-		return CredentialStatus{
-			Valid:  false,
-			Reason: "missing",
-		}
-	}
-
-	if creds.IsExpired() {
-		return CredentialStatus{
-			Valid:           false,
-			Reason:          "expired",
-			RepoCount:       len(creds.Repos),
-			ExpiresAt:       creds.ExpiresAt,
-			TimeUntilExpiry: time.Until(creds.ExpiresAt),
-		}
-	}
-
-	timeUntilExpiry := time.Until(creds.ExpiresAt)
-	if timeUntilExpiry < NearExpiryThreshold {
-		return CredentialStatus{
-			Valid:           false,
-			Reason:          "expiring soon",
-			RepoCount:       len(creds.Repos),
-			ExpiresAt:       creds.ExpiresAt,
-			TimeUntilExpiry: timeUntilExpiry,
-		}
-	}
-
-	return CredentialStatus{
-		Valid:           true,
-		RepoCount:       len(creds.Repos),
-		ExpiresAt:       creds.ExpiresAt,
-		TimeUntilExpiry: timeUntilExpiry,
-	}
-}
-
 // NeedsRefresh returns true if credentials need to be refreshed
 func (s CredentialStatus) NeedsRefresh() bool {
 	return !s.Valid
@@ -385,63 +295,6 @@ type RefreshResult struct {
 // providing authentication context.
 type CredentialFetcher func() (*GitCredentials, error)
 
-// RefreshCredentials attempts to refresh git credentials.
-// If force=false, only refreshes if credentials are missing/expired/expiring soon.
-// If force=true, always attempts to refresh.
-// Old credentials are preserved if refresh fails (safe refresh).
-func RefreshCredentials(fetcher CredentialFetcher, force bool) RefreshResult {
-	status := CheckCredentialStatus()
-
-	// check if refresh is needed
-	if !force && !status.NeedsRefresh() {
-		return RefreshResult{
-			Skipped: true,
-			Status:  status,
-		}
-	}
-
-	// attempt to fetch new credentials
-	newCreds, err := fetcher()
-	if err != nil {
-		// fetch failed - old credentials preserved
-		return RefreshResult{
-			Error:  err,
-			Status: status, // return old status
-		}
-	}
-
-	if newCreds == nil {
-		return RefreshResult{
-			Error:  fmt.Errorf("fetcher returned nil credentials"),
-			Status: status,
-		}
-	}
-
-	// save new credentials to endpoint-specific file (using ServerURL from credentials)
-	if err := SaveCredentialsForEndpoint(newCreds.ServerURL, *newCreds); err != nil {
-		return RefreshResult{
-			Error:  fmt.Errorf("save credentials: %w", err),
-			Status: status,
-		}
-	}
-
-	// return new status
-	return RefreshResult{
-		Refreshed: true,
-		Status:    CheckCredentialStatus(),
-	}
-}
-
-// EnsureValidCredentials checks credentials and refreshes if needed.
-// This is a convenience wrapper for common use cases.
-// Returns the current status (after potential refresh).
-func EnsureValidCredentials(fetcher CredentialFetcher) (CredentialStatus, error) {
-	result := RefreshCredentials(fetcher, false)
-	if result.Error != nil {
-		return result.Status, result.Error
-	}
-	return result.Status, nil
-}
 
 // --- Per-Endpoint Credential Storage ---
 // These functions support multi-endpoint setups where each endpoint has its own
@@ -527,16 +380,6 @@ func LoadCredentialsForEndpoint(endpointURL string) (*GitCredentials, error) {
 	data, err := os.ReadFile(credsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// try falling back to default credentials if they match this endpoint
-			defaultCreds, defaultErr := LoadCredentials()
-			if defaultErr == nil && defaultCreds != nil {
-				// check if default creds match this endpoint
-				defaultSlug := endpointSlug(defaultCreds.ServerURL)
-				requestSlug := endpointSlug(endpointURL)
-				if defaultSlug == requestSlug {
-					return defaultCreds, nil
-				}
-			}
 			return nil, nil // no credentials for this endpoint
 		}
 		return nil, fmt.Errorf("failed to read git credentials file: %w", err)

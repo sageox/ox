@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitserver"
 )
 
 func init() {
@@ -162,6 +163,11 @@ func (c *ProjectConfig) GetEndpoint() string {
 		return c.Endpoint
 	}
 	return endpoint.Get()
+}
+
+// GitCredentials returns the git credentials scoped to this project's endpoint.
+func (c *ProjectConfig) GitCredentials() (*gitserver.GitCredentials, error) {
+	return gitserver.LoadCredentialsForEndpoint(c.GetEndpoint())
 }
 
 // GetDefaultProjectConfig returns a ProjectConfig with default values

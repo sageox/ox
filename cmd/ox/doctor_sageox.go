@@ -619,8 +619,9 @@ func registerRepoWithSageOx(gitRoot string, cfg *config.ProjectConfig) (string, 
 	req.IsPublic = isPublic
 
 	// create client and add auth token if available
-	client := api.NewRepoClient()
-	if token, err := auth.GetToken(); err == nil && token != nil && token.AccessToken != "" {
+	projectEndpoint := cfg.GetEndpoint()
+	client := api.NewRepoClientWithEndpoint(projectEndpoint)
+	if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil && token.AccessToken != "" {
 		client.WithAuthToken(token.AccessToken)
 	}
 
@@ -662,8 +663,9 @@ func checkCloudDoctor() []checkResult {
 	}
 
 	// create client and add auth token if available
-	client := api.NewRepoClient()
-	if token, err := auth.GetToken(); err == nil && token != nil && token.AccessToken != "" {
+	projectEndpoint := cfg.GetEndpoint()
+	client := api.NewRepoClientWithEndpoint(projectEndpoint)
+	if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil && token.AccessToken != "" {
 		client.WithAuthToken(token.AccessToken)
 	}
 
@@ -859,7 +861,7 @@ func checkMarkerCachedURLs(fix bool) checkResult {
 	// if URLs are present, validate them
 	if urls != nil && urls.LedgerURL != "" {
 		// check if URLs match git credentials (source of truth)
-		creds, credErr := gitserver.LoadCredentials()
+		creds, credErr := gitserver.LoadCredentialsForEndpoint(currentEndpoint)
 		if credErr == nil && creds != nil {
 			mismatch := false
 			var mismatchDetails []string
@@ -888,7 +890,7 @@ func checkMarkerCachedURLs(fix bool) checkResult {
 					if cfgErr != nil || cfg.RepoID == "" {
 						return WarningCheck("Cached URLs", "outdated (no repo_id)", strings.Join(mismatchDetails, ", "))
 					}
-					if err := updateMarkerWithCachedURLs(sageoxDir, cfg.RepoID); err != nil {
+					if err := updateMarkerWithCachedURLs(sageoxDir, cfg.RepoID, currentEndpoint); err != nil {
 						return WarningCheck("Cached URLs", "update failed", err.Error())
 					}
 					return PassedCheck("Cached URLs", "refreshed")
@@ -909,7 +911,7 @@ func checkMarkerCachedURLs(fix bool) checkResult {
 
 	if fix {
 		// try to populate from git credentials
-		if err := updateMarkerWithCachedURLs(sageoxDir, cfg.RepoID); err != nil {
+		if err := updateMarkerWithCachedURLs(sageoxDir, cfg.RepoID, currentEndpoint); err != nil {
 			// no credentials available - not an error, just informational
 			return WarningCheck("Cached URLs", "not available",
 				"Sign in with `ox login` to enable URL caching for offline reconnection")
@@ -918,7 +920,7 @@ func checkMarkerCachedURLs(fix bool) checkResult {
 	}
 
 	// check if git credentials exist but URLs weren't cached
-	creds, credErr := gitserver.LoadCredentials()
+	creds, credErr := gitserver.LoadCredentialsForEndpoint(currentEndpoint)
 	if credErr == nil && creds != nil && len(creds.Repos) > 0 {
 		return WarningCheck("Cached URLs", "missing",
 			"Run `ox doctor --fix` to cache URLs for offline reconnection")
