@@ -1,88 +1,38 @@
 # Contributing to ox
 
-Thanks for your interest in contributing to ox.
+ox uses an issue-driven contribution model. We don't accept pull requests from external contributors — fork PRs are automatically closed.
 
-This project values clarity, small changes, and thoughtful engineering.
-If you're unsure about something, open an issue before writing code.
+This isn't about gatekeeping. It's about supply chain security in the age of AI-generated code. When AI agents can produce large, plausible-looking changes, the only way to maintain quality and security is to tightly control the inputs to the development process.
 
----
+## How It Works
 
-## Before You Start
+1. **You [file an issue](https://github.com/sageox/ox/issues)** — bug reports, feature requests, and agent prompts are all welcome. Be as detailed as you like.
+2. **We plan it** — a maintainer reviews and generates a detailed implementation plan.
+3. **We build it** — SageOx engineers (with AI coworkers under our direct control) implement the plan with full test coverage and code review.
+4. **You get credit** — we include you as a co-author on any PR generated from your report.
 
-- Search existing issues and PRs.
-- For non-trivial changes, open an issue to discuss direction first.
-- Keep changes focused and minimal.
+You get the fix or feature you asked for, maintained over time, without having to keep a fork in sync.
 
-Large architectural changes without discussion will likely be closed.
+## What We Welcome
 
----
+[File an issue](https://github.com/sageox/ox/issues) for any of the following:
 
-## Development Principles
+- **Bug reports** — clear description, steps to reproduce, expected vs actual behavior, environment details
+- **Feature requests** — the problem being solved, why existing behavior is insufficient, tradeoffs considered
+- **Agent prompts and implementation plans** — well-crafted prompts, detailed plans, and design proposals are valuable contributions. If you've worked out how something should be built, share it.
 
-ox is a systems-level tool. Contributions should:
+## Attribution
 
-- Preserve simplicity
-- Avoid unnecessary dependencies
-- Maintain deterministic behavior
-- Favor clarity over cleverness
-- Keep the CLI UX predictable
+When your issue leads to a PR, we're happy to include you as a co-author. Just let us know your preferred name and email in the issue.
 
-If a change increases complexity, justify why.
+## Source Code in Issues
 
----
+By including any source code in a bug report or feature request, you grant a full copyright license to SageOx Inc.
 
-## Pull Requests
+## Copyright
 
-When opening a PR:
+The resulting software is the exclusive copyright of SageOx Inc.
 
-- Keep it small and scoped
-- Write clear commit messages
-- Explain the *why*, not just the *what*
-- Update docs if behavior changes
-- Ensure the project builds and tests pass
+## No Exceptions
 
-PRs may be closed if:
-- Scope is too large
-- Direction was not discussed first
-- Changes conflict with project philosophy
-
----
-
-## Issues
-
-Good issues include:
-
-- Clear description
-- Steps to reproduce (for bugs)
-- Expected vs actual behavior
-- Environment details
-
-Feature requests should explain:
-- The problem being solved
-- Why existing behavior is insufficient
-- Tradeoffs considered
-
----
-
-## Code Style
-
-- Follow existing patterns.
-- Do not introduce formatting changes unrelated to your change.
-- Prefer explicit logic over abstraction layers.
-
----
-
-## Communication
-
-Be direct. Be respectful.
-Disagree on ideas, not people.
-
----
-
-## License
-
-By contributing, you agree that your contributions will be licensed under the project's license.
-
----
-
-Thanks for helping improve ox.
+There are no exceptions.

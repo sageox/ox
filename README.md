@@ -57,7 +57,7 @@ Team discussions impacting the product are captured and transcribed in the app a
 
 <!-- TODO: add screenshot of transcription UI -->
 
-## 📸 Capture sessions
+## 🤖 Capture sessions
 
 `ox-session` capture the conversation between a developer and Claude so the decisions, patterns, and reasoning become available to the rest of the team.
 
@@ -72,7 +72,13 @@ claude
 
 <!-- TODO: add screenshot of session viewer -->
 
-Test it by having a different developer ask Claude about a decision made during the captured session.
+## 🚀 Just Ask
+
+Start your AI coworker in your repo and just ask:
+
+- *"What decisions were made in the last coding session on this project?"*
+- *"Create a plan of work based on the SageOx team discussions from today."*
+- *"Look at my team's SageOx coding sessions from this week and teach me a really effective prompt that was used."*
 
 ## ⚙️ How it works
 
@@ -81,25 +87,28 @@ Test it by having a different developer ask Claude about a decision made during 
 3. Your AI coworker receives team context, security conventions, and architectural patterns
 4. Coworkers (human and AI) share context through ledgers and team knowledge
 
-## 🧠 How Ox Fits In
+### SageOx in Practice
 
-**Skills give agents hands. Ox gives agents taste and judgment.**
+Here's a real example from [PR #4](https://github.com/sageox/ox/pull/4):
 
-| Source | Teaches | Example |
-|--------|---------|---------|
-| Coding agent (skills & plugins) | **HOW** to do things | "Run `terraform plan` before apply" |
-| SageOx (team context) | **WHY** to make decisions | "Use spot instances for batch jobs" |
-| SageOx (team context) | **STYLE** conventions | "Prefix all resources with env name" |
-| SageOx (team context) | **WHEN** to act | "Review infra on cloud file changes" |
+```mermaid
+flowchart LR
+    subgraph discuss ["🎙️ Discuss"]
+        A1["Ryan & Ajit discuss daemon design"]
+        A2["Captured in Team Context"]
+    end
+    subgraph implement ["🤖 Implement"]
+        B1["Ajit builds with Claude"]
+        B3["Session captured in Ledger"]
+    end
+    subgraph review ["🚀 Review"]
+        C1["Ryan opens PR #4"]
+        C2["Has audio, session, and code"]
+    end
+    discuss --> implement --> review
+```
 
-## 🤖 Supported AI Agents
-
-SageOx integrates with popular AI coding agents:
-
-- **Claude Code** - Automatic session hooks via `.claude/` configuration
-- **Other agents** - Any agent that reads `AGENTS.md` or supports hooks
-
-Run `ox integrate` to set up the integration for your preferred agent.
+Ryan and Ajit discussed the daemon design in a recorded team discussion. Ajit then implemented it with Claude (session captured in the ledger). When Ryan reviewed the PR, he had the full picture — the original discussion audio, the implementation session, and the code.
 
 ## ⚙️ Configuration
 

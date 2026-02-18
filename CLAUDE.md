@@ -380,6 +380,9 @@ Always confirm with human before doing a git commit or a git push in this repo.
 - No multi-line bodies, no bullet lists, no paragraphs — the PR is where detail lives
 - Format: `type(scope): summary` or plain imperative sentence
 
+**Community attribution:**
+- When a PR implements a community-filed GitHub issue, include `Co-Authored-By: <name> <email>` (from the issue author) in the commit. This is part of our issue-driven contribution model — see `CONTRIBUTING.md`.
+
 **Pull requests (human-readable):**
 - PRs are the primary vehicle for communicating *what changed and why* to human reviewers
 - Include a clear summary, motivation, and test plan
