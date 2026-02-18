@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/spf13/cobra"
 )
@@ -119,6 +121,11 @@ var logoutCmd = &cobra.Command{
 			fmt.Println(cli.StyleDim.Render("Note: server-side sessions may still be active."))
 		}
 
+		// strip PATs from git remote URLs for logged-out endpoints
+		for _, ep := range endpointsToLogout {
+			stripExistingRemotes(ep)
+		}
+
 		// show contextual tip
 		userCfg, _ := config.LoadUserConfig("")
 		tips.MaybeShow("logout", tips.AlwaysShow, false, !userCfg.AreTipsEnabled(), false)
@@ -131,4 +138,33 @@ func init() {
 	logoutCmd.Flags().BoolVarP(&logoutForce, "force", "f", false, "skip confirmation prompt (for scripting)")
 	logoutCmd.Flags().BoolVar(&logoutAll, "all", false, "logout from all endpoints")
 	logoutCmd.Flags().StringVar(&logoutEndpoint, "endpoint", "", "endpoint to logout from")
+}
+
+// stripExistingRemotes removes PATs from all known ledger/team-context remote URLs.
+// Called after logout to prevent stale credentials from lingering in .git/config.
+func stripExistingRemotes(ep string) {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return
+	}
+
+	localCfg, err := config.LoadLocalConfig(gitRoot)
+	if err != nil || localCfg == nil {
+		return
+	}
+
+	if localCfg.Ledger != nil && localCfg.Ledger.Path != "" {
+		if err := gitserver.StripRemoteCredentials(localCfg.Ledger.Path); err != nil {
+			slog.Debug("failed to strip ledger remote credentials", "error", err)
+		}
+	}
+
+	for _, tc := range localCfg.TeamContexts {
+		if tc.Path == "" {
+			continue
+		}
+		if err := gitserver.StripRemoteCredentials(tc.Path); err != nil {
+			slog.Debug("failed to strip team context remote credentials", "team", tc.TeamName, "error", err)
+		}
+	}
 }

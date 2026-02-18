@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/spf13/cobra"
 )
@@ -427,6 +428,8 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 		fmt.Println("You can sync git credentials later with 'ox doctor'.")
 	} else {
 		cli.PrintPreserved("Git credentials synced")
+		// refresh remote URLs in existing repos with new credentials
+		refreshExistingRemotes(currentEndpoint)
 	}
 
 	// show contextual tip
@@ -474,4 +477,35 @@ func fetchGitCredentialsWithRetry(client *api.RepoClient) error {
 	}
 
 	return lastErr
+}
+
+// refreshExistingRemotes updates PATs in all known ledger/team-context remote URLs.
+// Called after login to ensure existing repos use the new credentials.
+func refreshExistingRemotes(ep string) {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return
+	}
+
+	localCfg, err := config.LoadLocalConfig(gitRoot)
+	if err != nil || localCfg == nil {
+		return
+	}
+
+	// refresh ledger remote
+	if localCfg.Ledger != nil && localCfg.Ledger.Path != "" {
+		if err := gitserver.RefreshRemoteCredentials(localCfg.Ledger.Path, ep); err != nil {
+			slog.Debug("failed to refresh ledger remote credentials", "error", err)
+		}
+	}
+
+	// refresh team context remotes
+	for _, tc := range localCfg.TeamContexts {
+		if tc.Path == "" {
+			continue
+		}
+		if err := gitserver.RefreshRemoteCredentials(tc.Path, ep); err != nil {
+			slog.Debug("failed to refresh team context remote credentials", "team", tc.TeamName, "error", err)
+		}
+	}
 }

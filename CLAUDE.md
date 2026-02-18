@@ -426,6 +426,22 @@ RIGHT: Update tests to use CreateInitializedProject(t) helper
 - `config.CreateInitializedProjectWithConfig(t, cfg)` - with project config
 - `config.RequireSageoxDir(t, path)` - add `.sageox/` to existing dir
 
+### Bug Fix Regression Tests
+
+Every bug fix MUST include a regression test unless existing tests already cover the failure mode. No test theater — each test must answer: "What bug does this prevent from recurring?"
+
+- Reproduce exact conditions that caused the bug; test must fail without fix, pass with it
+- Test observable behavior, not implementation details
+- Cover edge cases discovered during investigation
+
+### Doctor as Last Line of Defense
+
+`ox doctor` detects and repairs **every known failure mode**, including edge cases inline repairs miss.
+
+- **Auto-fix by default** (`FixLevelAuto`) for safe, deterministic repairs (stale PATs, missing credentials)
+- **Detect all states**: missing values are as broken as wrong values
+- **CWD-independent where possible**; reserve `FixLevelConfirm` for destructive/ambiguous repairs
+
 ### Go Formatting
 
 - Use tabs for indentation (Go standard)

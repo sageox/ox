@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1537,44 +1538,19 @@ func fetchTeamContextURLWithError(teamID string, currentEndpoint string) (string
 	return teamInfo.RepoURL, nil
 }
 
-// checkLedgerRemoteURL validates the ledger's local git remote matches the cloud URL.
-// Reads from locally saved git credentials (populated by checkGitCredentials in Category 0)
-// to avoid a duplicate API call.
+// checkLedgerRemoteURL validates the ledger's remote credentials are current.
+// Delegates to checkLedgerRemoteURLMatch for the actual PAT comparison.
 func checkLedgerRemoteURL(localCfg *config.LocalConfig) checkResult {
 	if localCfg == nil || localCfg.Ledger == nil || localCfg.Ledger.Path == "" {
 		return SkippedCheck("Ledger remote URL", "no ledger configured", "")
 	}
 
-	ledgerPath := localCfg.Ledger.Path
-
-	// check if ledger exists and is a git repo
-	if !isGitRepo(ledgerPath) {
+	if !isGitRepo(localCfg.Ledger.Path) {
 		return SkippedCheck("Ledger remote URL", "ledger not a git repo", "")
 	}
 
-	// get local origin URL
-	cmd := exec.Command("git", "-C", ledgerPath, "remote", "get-url", "origin")
-	output, err := cmd.Output()
-	if err != nil {
-		return WarningCheck("Ledger remote URL", "no origin remote configured",
-			"Run: git -C "+ledgerPath+" remote add origin <url>")
-	}
-	localURL := strings.TrimSpace(string(output))
-
-	// get cloud URL from locally cached credentials (no API call)
-	cloudURL := getLedgerURLFromCredentials()
-	if cloudURL == "" {
-		return SkippedCheck("Ledger remote URL", "no cached cloud URL", "")
-	}
-
-	// compare (normalize both for comparison)
-	if normalizeGitURLForCompare(localURL) != normalizeGitURLForCompare(cloudURL) {
-		return WarningCheck("Ledger remote URL",
-			fmt.Sprintf("mismatch: local=%s, cloud=%s", localURL, cloudURL),
-			"Update local remote or re-clone from cloud URL")
-	}
-
-	return PassedCheck("Ledger remote URL", "matches cloud")
+	// delegate to the PAT comparison check (read-only, no fix)
+	return checkLedgerRemoteURLMatch(false)
 }
 
 // checkTeamContextRemoteURLs validates team context local git remotes match cloud URLs.
@@ -1618,7 +1594,7 @@ func checkTeamContextRemoteURLs(localCfg *config.LocalConfig) []checkResult {
 		if normalizeGitURLForCompare(localURL) != normalizeGitURLForCompare(cloudURL) {
 			results = append(results, WarningCheck(
 				fmt.Sprintf("Team %s remote URL", tc.TeamName),
-				fmt.Sprintf("mismatch: local=%s, cloud=%s", localURL, cloudURL),
+				fmt.Sprintf("mismatch: local=%s, cloud=%s", gitserver.SanitizeRemoteURL(localURL), gitserver.SanitizeRemoteURL(cloudURL)),
 				"Update local remote or re-clone from cloud URL"))
 		} else {
 			results = append(results, PassedCheck(
@@ -1631,22 +1607,34 @@ func checkTeamContextRemoteURLs(localCfg *config.LocalConfig) []checkResult {
 }
 
 // normalizeGitURLForCompare normalizes git URLs for comparison.
-// Handles SSH vs HTTPS, with/without .git suffix, case differences.
-func normalizeGitURLForCompare(url string) string {
-	url = strings.TrimSpace(url)
-	url = strings.TrimSuffix(url, ".git")
-	url = strings.ToLower(url)
-	// convert SSH to comparable format
-	if strings.HasPrefix(url, "git@") {
-		// git@host:path -> host/path
-		url = strings.TrimPrefix(url, "git@")
-		url = strings.Replace(url, ":", "/", 1)
+// Strips credentials (userinfo), protocol, .git suffix, and lowercases.
+// Handles SSH vs HTTPS format differences.
+func normalizeGitURLForCompare(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	rawURL = strings.ToLower(rawURL)
+
+	// handle SSH format: git@host:path -> host/path
+	if strings.HasPrefix(rawURL, "git@") {
+		rawURL = strings.TrimPrefix(rawURL, "git@")
+		rawURL = strings.Replace(rawURL, ":", "/", 1)
+		return strings.TrimSuffix(rawURL, ".git")
 	}
-	// remove protocol
-	url = strings.TrimPrefix(url, "https://")
-	url = strings.TrimPrefix(url, "http://")
-	url = strings.TrimPrefix(url, "ssh://")
-	return url
+
+	// parse to strip userinfo (credentials) safely
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		// fallback to string-based stripping
+		rawURL = strings.TrimPrefix(rawURL, "https://")
+		rawURL = strings.TrimPrefix(rawURL, "http://")
+		return strings.TrimSuffix(rawURL, ".git")
+	}
+
+	parsed.User = nil // strip oauth2:TOKEN@ credentials
+	parsed.Scheme = ""
+	parsed.Fragment = ""
+	parsed.RawQuery = ""
+	result := strings.TrimPrefix(parsed.String(), "//")
+	return strings.TrimSuffix(result, ".git")
 }
 
 // checkLedgerStructureMigration checks if ledger should be migrated from sibling to centralized.
@@ -2224,28 +2212,6 @@ func checkLedgerPathMismatch(fix bool) checkResult {
 	return WarningCheck("Ledger path config", "path mismatch", detail)
 }
 
-// getLedgerURLFromCredentials reads the ledger URL from locally saved git credentials.
-// This avoids a duplicate API call when credentials were already fetched and saved
-// by checkGitCredentials() (Category 0 in doctor).
-func getLedgerURLFromCredentials() string {
-	gitRoot := findGitRoot()
-	projectEndpoint := endpoint.GetForProject(gitRoot)
-	if projectEndpoint == "" {
-		projectEndpoint = endpoint.Get()
-	}
-
-	creds, err := gitserver.LoadCredentialsForEndpoint(projectEndpoint)
-	if err != nil || creds == nil {
-		return ""
-	}
-
-	for _, repo := range creds.Repos {
-		if repo.Type == "ledger" {
-			return repo.URL
-		}
-	}
-	return ""
-}
 
 // getTeamURLFromCredentials reads a team context URL from locally saved git credentials.
 // Matches by repo name (team slug). This avoids a duplicate API call.

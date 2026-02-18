@@ -769,6 +769,32 @@ func TestIsValidGitURL(t *testing.T) {
 	}
 }
 
+func TestNormalizeGitURLForCompare(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"bare HTTPS", "https://git.sageox.ai/team/ledger.git", "git.sageox.ai/team/ledger"},
+		{"HTTPS with oauth2 credentials", "https://oauth2:secret-token@git.sageox.ai/team/ledger.git", "git.sageox.ai/team/ledger"},
+		{"HTTPS with other credentials", "https://user:pass@git.sageox.ai/team/ledger.git", "git.sageox.ai/team/ledger"},
+		{"SSH format", "git@github.com:org/repo.git", "github.com/org/repo"},
+		{"HTTP", "http://localhost:3000/team/repo.git", "localhost:3000/team/repo"},
+		{"no .git suffix", "https://git.sageox.ai/team/ledger", "git.sageox.ai/team/ledger"},
+		{"mixed case", "HTTPS://Git.SageOx.AI/Team/Ledger.git", "git.sageox.ai/team/ledger"},
+		{"with trailing spaces", "  https://git.sageox.ai/repo.git  ", "git.sageox.ai/repo"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeGitURLForCompare(tt.input)
+			if got != tt.want {
+				t.Errorf("normalizeGitURLForCompare(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCheckSSHAuth(t *testing.T) {
 	// this test just verifies the function doesn't panic
 	// actual SSH key presence depends on the test environment

@@ -288,6 +288,14 @@ func resolveLedgerPath() (string, error) {
 // Retries on transient failures (network, rejection). Fails fast on permanent errors
 // (auth, config) to avoid wasting time on retries that will never succeed.
 func pushLedger(ledgerPath string) error {
+	// ensure remote has current credentials before pushing
+	ep := endpoint.GetForProject(findGitRoot())
+	if ep != "" {
+		if err := gitserver.RefreshRemoteCredentials(ledgerPath, ep); err != nil {
+			slog.Debug("remote credential refresh skipped before push", "error", err)
+		}
+	}
+
 	const maxRetries = 3
 
 	// Errors that indicate a permanent failure — retrying won't help.

@@ -3,11 +3,14 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/ledger"
 )
 
@@ -55,8 +58,8 @@ func init() {
 		Slug:        CheckSlugLedgerRemoteURLMatch,
 		Name:        "Ledger remote URL match",
 		Category:    "Ledger Git Health",
-		FixLevel:    FixLevelConfirm,
-		Description: "Validates ledger remote URL matches expected cloud configuration",
+		FixLevel:    FixLevelAuto,
+		Description: "Validates ledger remote credentials match current login",
 		Run:         func(fix bool) checkResult { return checkLedgerRemoteURLMatch(fix) },
 	})
 }
@@ -301,8 +304,9 @@ func checkLedgerCleanWorkdir() checkResult {
 	return PassedCheck("Ledger clean workdir", "clean")
 }
 
-// checkLedgerRemoteURLMatch validates the ledger remote URL matches expected cloud configuration.
-// With fix=true, offers to update the remote URL to match cloud.
+// checkLedgerRemoteURLMatch detects stale PATs in the ledger's git remote URL.
+// Compares the embedded PAT against the currently stored credentials.
+// With fix=true, updates the remote URL with the current PAT.
 func checkLedgerRemoteURLMatch(fix bool) checkResult {
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
@@ -313,7 +317,7 @@ func checkLedgerRemoteURLMatch(fix bool) checkResult {
 		return SkippedCheck("Ledger remote URL match", "ledger not a git repo", "")
 	}
 
-	// get local origin URL
+	// get local origin URL and extract embedded PAT
 	localCmd := exec.Command("git", "-C", ledgerPath, "remote", "get-url", "origin")
 	localOutput, err := localCmd.Output()
 	if err != nil {
@@ -321,62 +325,91 @@ func checkLedgerRemoteURLMatch(fix bool) checkResult {
 	}
 	localURL := strings.TrimSpace(string(localOutput))
 
-	// get expected URL from locally cached credentials (no API call)
-	cloudURL := getLedgerURLFromCredentials()
-	if cloudURL == "" {
-		return SkippedCheck("Ledger remote URL match", "no cached cloud URL", "")
+	// extract the PAT embedded in the remote URL
+	embeddedPAT, _ := extractPATFromURL(localURL)
+
+	// SSH URLs — credentials managed externally
+	if strings.Contains(localURL, "@") && !strings.Contains(localURL, "://") {
+		return PassedCheck("Ledger remote URL match", "SSH remote (credentials managed externally)")
 	}
 
-	// compare normalized URLs
-	if normalizeGitURLForCompare(localURL) == normalizeGitURLForCompare(cloudURL) {
-		return PassedCheck("Ledger remote URL match", "matches cloud")
+	// load current credentials from store
+	gitRoot := findGitRoot()
+	ep := endpoint.GetForProject(gitRoot)
+	if ep == "" {
+		return SkippedCheck("Ledger remote URL match", "no endpoint configured", "")
 	}
 
-	// URLs don't match
+	creds, err := gitserver.LoadCredentialsForEndpoint(ep)
+	if err != nil || creds == nil || creds.Token == "" {
+		if embeddedPAT == "" {
+			return PassedCheck("Ledger remote URL match", "no credentials to check")
+		}
+		return SkippedCheck("Ledger remote URL match", "no stored credentials (run ox login)", "")
+	}
+
+	// check if credentials are expired
+	if !creds.ExpiresAt.IsZero() && creds.ExpiresAt.Before(time.Now()) {
+		return SkippedCheck("Ledger remote URL match", "credentials expired (run ox login)", "")
+	}
+
+	// compare PATs — both stale and missing PATs need repair
+	if embeddedPAT == creds.Token {
+		return PassedCheck("Ledger remote URL match", "credentials current")
+	}
+
+	// credentials need repair: either stale PAT or bare URL missing credentials
+	sanitizedURL := gitserver.SanitizeRemoteURL(localURL)
+
 	if fix {
-		return fixLedgerRemoteURLForCheck(ledgerPath, localURL, cloudURL)
+		return fixLedgerStalePAT(ledgerPath, ep)
+	}
+
+	if embeddedPAT == "" {
+		return WarningCheck("Ledger remote URL match",
+			fmt.Sprintf("missing credentials in remote: %s", sanitizedURL),
+			"Remote has no embedded credentials. Run `ox doctor` to auto-fix.")
 	}
 
 	return WarningCheck("Ledger remote URL match",
-		fmt.Sprintf("mismatch: local=%s", localURL),
-		fmt.Sprintf("Expected cloud URL: %s\n       Run `ox doctor --fix=%s` to update remote",
-			cloudURL, CheckSlugLedgerRemoteURLMatch))
+		fmt.Sprintf("stale credentials in remote: %s", sanitizedURL),
+		"Remote uses credentials from a different login. Run `ox doctor` to auto-fix.")
 }
 
-// fixLedgerRemoteURLForCheck prompts user to update ledger remote URL to match cloud.
-func fixLedgerRemoteURLForCheck(ledgerPath, localURL, cloudURL string) checkResult {
-	fmt.Println()
-	fmt.Println("  Ledger remote URL does not match cloud configuration.")
-	fmt.Printf("    Local:    %s\n", localURL)
-	fmt.Printf("    Expected: %s\n", cloudURL)
-	fmt.Println()
-
-	// this is a confirm-level fix, so prompt user
-	if !confirmFixPrompt("Update ledger remote URL to match cloud?") {
-		return WarningCheck("Ledger remote URL match", "mismatch (not fixed)",
-			"Remote URL differs from cloud configuration")
+// extractPATFromURL parses a git URL and returns the embedded PAT and the full URL.
+// Returns ("", url) for SSH URLs, bare URLs, or non-oauth2 auth.
+func extractPATFromURL(rawURL string) (pat string, fullURL string) {
+	// SSH URLs don't have embedded PATs
+	if strings.Contains(rawURL, "@") && !strings.Contains(rawURL, "://") {
+		return "", rawURL
 	}
 
-	// update the remote URL
-	setURLCmd := exec.Command("git", "-C", ledgerPath, "remote", "set-url", "origin", cloudURL)
-	if output, err := setURLCmd.CombinedOutput(); err != nil {
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.User == nil {
+		return "", rawURL
+	}
+
+	// only handle oauth2-style auth (ox-managed)
+	if parsed.User.Username() != "oauth2" {
+		return "", rawURL
+	}
+
+	password, hasPassword := parsed.User.Password()
+	if !hasPassword || password == "" {
+		return "", rawURL
+	}
+
+	return password, rawURL
+}
+
+// fixLedgerStalePAT updates the ledger remote URL with the current PAT.
+func fixLedgerStalePAT(ledgerPath, ep string) checkResult {
+	err := gitserver.RefreshRemoteCredentials(ledgerPath, ep)
+	if err != nil {
 		return FailedCheck("Ledger remote URL match",
-			"failed to update remote",
-			fmt.Sprintf("Error: %v\nOutput: %s", err, string(output)))
+			"failed to update remote credentials",
+			fmt.Sprintf("Error: %v", err))
 	}
 
-	fmt.Println("  Remote URL updated successfully.")
-	fmt.Println()
-
-	return PassedCheck("Ledger remote URL match", "updated to match cloud")
-}
-
-// confirmFixPrompt prompts for user confirmation with a yes/no question.
-// Returns true if user confirms, false otherwise.
-func confirmFixPrompt(prompt string) bool {
-	fmt.Printf("  %s [y/N]: ", prompt)
-	var response string
-	fmt.Scanln(&response)
-	response = strings.ToLower(strings.TrimSpace(response))
-	return response == "y" || response == "yes"
+	return PassedCheck("Ledger remote URL match", "credentials updated")
 }

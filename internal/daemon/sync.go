@@ -759,6 +759,12 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) {
 	}
 	s.logger.Debug("pulling changes")
 
+	// refresh remote URL if credentials changed (e.g., user switch via ox login)
+	projectEndpoint := endpoint.GetForProject(s.config.ProjectRoot)
+	if err := gitserver.RefreshRemoteCredentials(s.config.LedgerPath, projectEndpoint); err != nil {
+		s.logger.Warn("ledger remote credential refresh failed", "error", err)
+	}
+
 	// git fetch
 	fetchCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "fetch", "--quiet")
 	if err := fetchCmd.Run(); err != nil {
@@ -1798,6 +1804,12 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 			s.logger.Debug("team context recently fetched, skipping", "path", path, "age", time.Since(info.ModTime()))
 			return nil
 		}
+	}
+
+	// refresh remote URL if credentials changed (e.g., user switch via ox login)
+	teamEndpoint := endpoint.GetForProject(s.config.ProjectRoot)
+	if err := gitserver.RefreshRemoteCredentials(path, teamEndpoint); err != nil {
+		s.logger.Warn("team context remote credential refresh failed", "path", path, "error", err)
 	}
 
 	// git fetch
