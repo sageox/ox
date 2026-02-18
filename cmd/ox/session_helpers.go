@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
@@ -63,14 +64,18 @@ func findSessionByFilename(store *session.Store, filename string) (*session.Stor
 	return t, nil
 }
 
-// getAuthenticatedUsername returns the authenticated user's email or empty string.
+// getAuthenticatedUsername returns the authenticated user's username (local part of email) or empty string.
 // ep is the normalized endpoint to look up the token for.
 func getAuthenticatedUsername(ep string) string {
 	token, err := auth.GetTokenForEndpoint(ep)
 	if err != nil || token == nil {
 		return ""
 	}
-	return token.UserInfo.Email
+	email := token.UserInfo.Email
+	if at := strings.Index(email, "@"); at > 0 {
+		return email[:at]
+	}
+	return email
 }
 
 // getDisplayName returns a privacy-aware display name from auth info + user config.

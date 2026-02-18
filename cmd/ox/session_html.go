@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -460,21 +458,6 @@ func truncateOutput(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-// openInBrowser opens URL in default browser.
-func openInBrowser(url string) error {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", url)
-	case "linux":
-		cmd = exec.Command("xdg-open", url)
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
-	default:
-		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
-	}
-	return cmd.Start()
-}
 
 // cssRootVars generates the :root CSS variables from theme constants.
 func cssRootVars() string {
@@ -963,11 +946,6 @@ const htmlTemplate = `<!DOCTYPE html>
                 <summary class="message-header">
                     <span class="message-type message-type-{{.Type}}">{{.SenderLabel}}</span>
                     {{if .IsAhaMoment}}<span class="aha-indicator" title="{{if .AhaMoment}}{{.AhaMoment.Type}}: {{.AhaMoment.Why}}{{end}}">Key Moment #{{.AhaMomentID}}</span><button class="aha-ffwd" onclick="navigateAhaMoment(1)" title="Jump to next key moment (press 'a')">⏩</button>{{end}}
-                    {{if not .Timestamp.IsZero}}
-                    <time datetime="{{.Timestamp.Format "2006-01-02T15:04:05Z07:00"}}">
-                        {{.Timestamp.Format "15:04:05"}}
-                    </time>
-                    {{end}}
                 </summary>
                 <div class="message-content">{{.Content}}</div>
                 {{if .AhaMoment}}
@@ -1007,11 +985,6 @@ const htmlTemplate = `<!DOCTYPE html>
             <div class="message-header">
                 <span class="message-type message-type-{{.Type}}">{{.SenderLabel}}</span>
                 {{if .IsAhaMoment}}<span class="aha-indicator" title="{{if .AhaMoment}}{{.AhaMoment.Type}}: {{.AhaMoment.Why}}{{end}}">Key Moment #{{.AhaMomentID}}</span><button class="aha-ffwd" onclick="navigateAhaMoment(1)" title="Jump to next key moment (press 'a')">⏩</button>{{end}}
-                {{if not .Timestamp.IsZero}}
-                <time datetime="{{.Timestamp.Format "2006-01-02T15:04:05Z07:00"}}">
-                    {{.Timestamp.Format "15:04:05"}}
-                </time>
-                {{end}}
             </div>
             <div class="message-content">{{.Content}}</div>
             {{if .AhaMoment}}

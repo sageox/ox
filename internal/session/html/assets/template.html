@@ -97,9 +97,6 @@
         <article class="message message-{{.Type}}" id="msg-{{.ID}}" data-type="{{.Type}}">
             <div class="message-header">
                 <span class="message-type message-type-{{.Type}}">{{.SenderLabel}}</span>
-                <time datetime="{{.Timestamp.Format "2006-01-02T15:04:05Z07:00"}}">
-                    {{.Timestamp.Format "15:04:05"}}
-                </time>
             </div>
             <div class="message-content">{{.Content}}</div>
             {{if .ToolCall}}

@@ -22,6 +22,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	sessionhtml "github.com/sageox/ox/internal/session/html"
+	"github.com/sageox/ox/internal/version"
 )
 
 // Agent UX Decision: JSON is the default output format for session commands.
@@ -530,6 +531,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		Model:        result.Model,
 		Username:     getDisplayName(projectEndpoint),
 		RepoID:       repoID,
+		OxVersion:    version.Version,
 	}
 	if err := rawWriter.WriteHeader(meta); err != nil {
 		rawWriter.Close()
@@ -669,7 +671,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			// read back the raw session
 			rawSession, readErr := store.ReadSession(filename)
 			if readErr == nil && rawSession != nil {
-				htmlPath := strings.TrimSuffix(result.RawPath, ".jsonl") + ".html"
+				htmlPath := filepath.Join(filepath.Dir(result.RawPath), "session.html")
 				if genErr := htmlGen.GenerateToFileWithSummary(rawSession, summaryView, htmlPath); genErr == nil {
 					result.HTMLPath = htmlPath
 				} else {
@@ -962,14 +964,22 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 		return fmt.Errorf("could not find project root: %w", err)
 	}
 
-	// parse optional --file argument
+	// parse optional --file argument and positional session name
 	var filePath string
+	var sessionName string
 	for i, arg := range args {
 		if arg == "--file" && i+1 < len(args) {
 			filePath = args[i+1]
 		}
 		if len(arg) > 7 && arg[:7] == "--file=" {
 			filePath = arg[7:]
+		}
+	}
+	// first positional arg (not a flag) is the session name
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "--") {
+			sessionName = arg
+			break
 		}
 	}
 
@@ -982,6 +992,24 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 		if err != nil {
 			return fmt.Errorf("failed to read session file: %w", err)
 		}
+		entryCount = len(entries)
+	} else if sessionName != "" {
+		// read from named session in the store
+		repoID := getRepoIDOrDefault(projectRoot)
+		contextPath := session.GetContextPath(repoID)
+		if contextPath == "" {
+			return fmt.Errorf("no session store found")
+		}
+		store, err := session.NewStore(contextPath)
+		if err != nil {
+			return fmt.Errorf("failed to open session store: %w", err)
+		}
+		stored, err := store.ReadSession(sessionName)
+		if err != nil {
+			return fmt.Errorf("session not found: %s\nRun 'ox session list' to see available sessions", sessionName)
+		}
+		filePath = stored.Info.FilePath
+		entries = convertStoredEntries(stored.Entries)
 		entryCount = len(entries)
 	} else {
 		// get from current recording or latest session
@@ -1127,7 +1155,7 @@ func runAgentSessionHTML(inst *agentinstance.Instance, args []string) error {
 	var htmlPath string
 
 	if filePath != "" {
-		htmlPath = strings.TrimSuffix(filePath, ".jsonl") + ".html"
+		htmlPath = filepath.Join(filepath.Dir(filePath), "session.html")
 	} else {
 		// find latest session
 		repoID := getRepoIDOrDefault(projectRoot)
@@ -1144,7 +1172,7 @@ func runAgentSessionHTML(inst *agentinstance.Instance, args []string) error {
 			return fmt.Errorf("no sessions found: %w", err)
 		}
 		rawPath := latest.FilePath
-		htmlPath = strings.TrimSuffix(rawPath, ".jsonl") + ".html"
+		htmlPath = filepath.Join(filepath.Dir(rawPath), "session.html")
 	}
 
 	// check if HTML already exists
