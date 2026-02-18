@@ -1,8 +1,8 @@
 {
   "_comment": "SageOx CLI release signatures - regenerate with: SAGEOX_CLI_SIGNING_KEY=... go run ./scripts/sign-manifest",
   "schema_version": "1",
-  "public_key": "9GRocv2+839R/n5H/LKtZqEEulZ4kNYj1W0VFlAYaQE=",
+  "public_key": "a1g2w1WQmOzdfwXvYPyzGZ7gD47qi3dPSCDZF7ObFnU=",
   "signatures": {
-    "redaction": "5CkWNnBrbKzwojAnE/TkxT8NOJzrFcryMXqQSOszOzwMv49/R8XLG9eSgF3BLI0qCci1x5wz844oi3oA5ofxDg=="
+    "redaction": "YmXPZCqdeELTVmEXs435s0jnmg/iuFVhlehb+nV0iw9z5DUnBJXNgEnfF3qQauj9rYx18Xko2OBVnBlYRskcCg=="
   }
 }

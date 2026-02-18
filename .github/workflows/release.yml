@@ -22,6 +22,7 @@ env:
 
 jobs:
   build-and-release:
+    if: github.repository == 'sageox/ox'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -33,7 +34,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: 'go.mod'
 
       - name: Sign artifacts
         id: sign
@@ -64,7 +65,6 @@ jobs:
           args: release -f .config/goreleaser.yml --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
           SAGEOX_CLI_PUBLIC_KEY: ${{ steps.sign.outputs.SAGEOX_CLI_PUBLIC_KEY }}
           SAGEOX_CLI_SIGNATURES: ${{ steps.sign.outputs.SAGEOX_CLI_SIGNATURES }}
 

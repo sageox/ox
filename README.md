@@ -15,10 +15,17 @@ Sessions, ledgers, and team knowledge ensure your AI coworkers understand your p
 
 ## Install the CLI
 
+**Quick install (macOS / Linux / FreeBSD):**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash
+```
+
+**From source:**
+
 ```bash
 git clone https://github.com/sageox/ox.git && cd ox
 make build && make install
-# set up the ox location using export PATH
 ```
 
 ## Set up ox in your repo

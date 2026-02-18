@@ -8,24 +8,88 @@ before:
     - go mod tidy
 
 builds:
-  - id: ox
+  - id: ox-linux-amd64
     main: ./cmd/ox
     binary: ox
     env:
       - CGO_ENABLED=0
     goos:
       - linux
-      - darwin
     goarch:
       - amd64
+    ldflags:
+      - -s -w
+      - -X github.com/sageox/ox/internal/version.Version={{.Version}}
+      - -X github.com/sageox/ox/internal/version.GitCommit={{.ShortCommit}}
+      - -X github.com/sageox/ox/internal/version.BuildDate={{.Date}}
+      - -X 'github.com/sageox/ox/internal/signing.EmbeddedPublicKey={{ .Env.SAGEOX_CLI_PUBLIC_KEY }}'
+      - -X 'github.com/sageox/ox/internal/signing.EmbeddedSignatures={{ .Env.SAGEOX_CLI_SIGNATURES }}'
+
+  - id: ox-linux-arm64
+    main: ./cmd/ox
+    binary: ox
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
       - arm64
     ldflags:
       - -s -w
       - -X github.com/sageox/ox/internal/version.Version={{.Version}}
       - -X github.com/sageox/ox/internal/version.GitCommit={{.ShortCommit}}
       - -X github.com/sageox/ox/internal/version.BuildDate={{.Date}}
-      # SageOx release signatures (set via SAGEOX_CLI_PUBLIC_KEY and SAGEOX_CLI_SIGNATURES env vars)
-      # Signs all embedded artifacts: redaction policy, guidance, etc.
+      - -X 'github.com/sageox/ox/internal/signing.EmbeddedPublicKey={{ .Env.SAGEOX_CLI_PUBLIC_KEY }}'
+      - -X 'github.com/sageox/ox/internal/signing.EmbeddedSignatures={{ .Env.SAGEOX_CLI_SIGNATURES }}'
+
+  - id: ox-darwin-amd64
+    main: ./cmd/ox
+    binary: ox
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+      - -X github.com/sageox/ox/internal/version.Version={{.Version}}
+      - -X github.com/sageox/ox/internal/version.GitCommit={{.ShortCommit}}
+      - -X github.com/sageox/ox/internal/version.BuildDate={{.Date}}
+      - -X 'github.com/sageox/ox/internal/signing.EmbeddedPublicKey={{ .Env.SAGEOX_CLI_PUBLIC_KEY }}'
+      - -X 'github.com/sageox/ox/internal/signing.EmbeddedSignatures={{ .Env.SAGEOX_CLI_SIGNATURES }}'
+
+  - id: ox-darwin-arm64
+    main: ./cmd/ox
+    binary: ox
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/sageox/ox/internal/version.Version={{.Version}}
+      - -X github.com/sageox/ox/internal/version.GitCommit={{.ShortCommit}}
+      - -X github.com/sageox/ox/internal/version.BuildDate={{.Date}}
+      - -X 'github.com/sageox/ox/internal/signing.EmbeddedPublicKey={{ .Env.SAGEOX_CLI_PUBLIC_KEY }}'
+      - -X 'github.com/sageox/ox/internal/signing.EmbeddedSignatures={{ .Env.SAGEOX_CLI_SIGNATURES }}'
+
+  - id: ox-freebsd-amd64
+    main: ./cmd/ox
+    binary: ox
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - freebsd
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+      - -X github.com/sageox/ox/internal/version.Version={{.Version}}
+      - -X github.com/sageox/ox/internal/version.GitCommit={{.ShortCommit}}
+      - -X github.com/sageox/ox/internal/version.BuildDate={{.Date}}
       - -X 'github.com/sageox/ox/internal/signing.EmbeddedPublicKey={{ .Env.SAGEOX_CLI_PUBLIC_KEY }}'
       - -X 'github.com/sageox/ox/internal/signing.EmbeddedSignatures={{ .Env.SAGEOX_CLI_SIGNATURES }}'
 
@@ -61,20 +125,20 @@ release:
   draft: false
   prerelease: auto
   name_template: "v{{.Version}}"
+  header: |
+    ## ox v{{.Version}}
 
-brews:
-  - name: ox
-    repository:
-      owner: sageox
-      name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    homepage: "https://sageox.ai"
-    description: "Shared team context that makes agentic engineering multiplayer"
-    license: "MIT"
-    install: |
-      bin.install "ox"
-    test: |
-      system "#{bin}/ox", "version"
+    Pre-compiled binaries for Linux, macOS (Intel & Apple Silicon), and FreeBSD.
+
+    ### Installation
+
+    **Quick Install (macOS/Linux/FreeBSD):**
+    ```bash
+    curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash
+    ```
+
+    **Manual Install:**
+    Download the appropriate binary for your platform below, extract it, and place it in your PATH.
 
 announce:
-  skip: false
+  skip: true
