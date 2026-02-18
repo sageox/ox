@@ -25,7 +25,6 @@ type Config struct {
 	SyncIntervalRead time.Duration
 
 	// TeamContextSyncInterval is how often to sync team context repos.
-	// Lower frequency than ledger (team context changes less often).
 	TeamContextSyncInterval time.Duration
 
 	// DebounceWindow batches rapid changes before committing.
@@ -49,7 +48,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		SyncIntervalRead:        5 * time.Minute,  // includes anti-entropy checks
-		TeamContextSyncInterval: 30 * time.Minute, // lower priority than ledger
+		TeamContextSyncInterval: 1 * time.Minute,
 		DebounceWindow:          500 * time.Millisecond,
 		InactivityTimeout:       1 * time.Hour, // exit after 1 hour of inactivity
 		AutoStart:               true,

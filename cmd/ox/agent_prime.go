@@ -897,22 +897,23 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 		}
 	}
 
-	// ledger / team sessions section
+	// ledger / repo session history section
 	if output.Ledger != nil {
 		fmt.Fprintln(cmd.OutOrStdout())
 		if output.Ledger.Exists {
-			fmt.Fprintln(cmd.OutOrStdout(), "## Team Sessions & Discussions")
+			fmt.Fprintln(cmd.OutOrStdout(), "## Ledger (Repo Session History)")
 			fmt.Fprintln(cmd.OutOrStdout())
-			fmt.Fprintln(cmd.OutOrStdout(), "The ledger contains sessions recorded by all team members.")
-			fmt.Fprintln(cmd.OutOrStdout(), "  List team sessions:  ox session list")
-			fmt.Fprintln(cmd.OutOrStdout(), "  View a session:      ox session view <name>")
+			fmt.Fprintln(cmd.OutOrStdout(), "The ledger is a repo-specific archive of prior AI coworker coding sessions.")
+			fmt.Fprintln(cmd.OutOrStdout(), "It is NOT team context. Do NOT consult the ledger unless explicitly asked")
+			fmt.Fprintln(cmd.OutOrStdout(), "to review prior sessions or coding history for this repo.")
 			fmt.Fprintln(cmd.OutOrStdout())
-			if output.TeamContext != nil && output.TeamContext.HasAgentContext {
-				fmt.Fprintf(cmd.OutOrStdout(), "Team discussions: %s\n", output.TeamContext.AgentContextPath)
-			}
+			fmt.Fprintln(cmd.OutOrStdout(), "  List sessions:  ox session list")
+			fmt.Fprintln(cmd.OutOrStdout(), "  View a session: ox session view <name> --text")
+			fmt.Fprintln(cmd.OutOrStdout(), "  (without --text, opens in browser — not suitable for agents)")
+			fmt.Fprintln(cmd.OutOrStdout())
 			fmt.Fprintln(cmd.OutOrStdout(), "Do NOT read ledger files directly (LFS stubs). Always use ox session commands.")
 		} else {
-			fmt.Fprintln(cmd.OutOrStdout(), "Ledger: not provisioned (team sessions unavailable until 'ox doctor --fix' or daemon sync)")
+			fmt.Fprintln(cmd.OutOrStdout(), "Ledger: not provisioned (sessions unavailable until 'ox doctor --fix' or daemon sync)")
 		}
 	}
 
@@ -1013,11 +1014,14 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 			fmt.Fprintln(cmd.OutOrStdout(), "Invoke commands via slash prefix (e.g., /deploy).")
 		}
 
-		// emit team context guidance if available (with dedup hash)
-		if output.TeamContext.HasAgentContext {
-			fmt.Fprintln(cmd.OutOrStdout())
-			fmt.Fprintf(cmd.OutOrStdout(), "**Team context available.** If `team-ctx:%s` not in context, run: `ox agent %s team-ctx`\n",
-				output.TeamContext.AgentContextHash, output.AgentID)
+		// always emit team context guidance — discussions may sync after prime runs
+		fmt.Fprintln(cmd.OutOrStdout())
+		fmt.Fprintln(cmd.OutOrStdout(), "**Team context available** — distilled from recorded team meetings and discussions")
+		fmt.Fprintln(cmd.OutOrStdout(), "(architecture, conventions, product direction). Organized under `discussions/`")
+		fmt.Fprintln(cmd.OutOrStdout(), "by date (e.g., `discussions/2026-02-17*`). This is your source for team knowledge.")
+		fmt.Fprintf(cmd.OutOrStdout(), "Path: `%s`\n", shortenPath(output.TeamContext.Path))
+		if !output.TeamContext.HasAgentContext {
+			fmt.Fprintln(cmd.OutOrStdout(), "Not yet synced — may appear shortly as the daemon syncs in the background.")
 		}
 	}
 
@@ -1131,15 +1135,16 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 	// (most projects only have one team context)
 	tc := localCfg.TeamContexts[0]
 
-	// verify team context path exists
-	if _, err := os.Stat(tc.Path); os.IsNotExist(err) {
-		return nil
-	}
-
 	info := &teamContextInfo{
 		TeamID:   tc.TeamID,
 		TeamName: tc.TeamName,
 		Path:     tc.Path,
+	}
+
+	// if team context directory hasn't synced yet, return partial info
+	// so agents still see the "team context available" section
+	if _, err := os.Stat(tc.Path); os.IsNotExist(err) {
+		return info
 	}
 
 	// discover agents: capabilities/ai/claude/agents/*.md
@@ -1200,19 +1205,15 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 }
 
 // discoverLedger checks whether the ledger exists and returns actionable guidance
-// for agents to help users discover team member sessions and discussions.
+// for agents to help users discover prior coding sessions for this repo.
 // Reuses getLedgerPath() from doctor_ledger_git.go (same resolution used by session commands).
-// teamCtx is optional — when provided, the hint includes the full discussions path.
 func discoverLedger(teamCtx *teamContextInfo) *ledgerInfo {
 	path := getLedgerPath()
 	if path == "" {
 		return &ledgerInfo{Exists: false}
 	}
 
-	hint := "The ledger contains sessions from all team members. Use 'ox session list' to discover team member sessions and 'ox session view <name>' to view one. Do not read ledger files directly (LFS stubs)."
-	if teamCtx != nil && teamCtx.HasAgentContext {
-		hint += fmt.Sprintf(" Team discussions: %s", teamCtx.AgentContextPath)
-	}
+	hint := "The ledger is a repo-specific archive of prior AI coworker coding sessions. It is NOT team context. Only consult when explicitly asked to review prior sessions. Use 'ox session list' to browse and 'ox session view <name> --text' to view one. Do not read ledger files directly (LFS stubs)."
 
 	return &ledgerInfo{
 		Exists: true,

@@ -134,7 +134,7 @@ func TestDefaultConfig_NewFields(t *testing.T) {
 	})
 
 	t.Run("team context sync interval is set", func(t *testing.T) {
-		assert.Equal(t, 30*time.Minute, cfg.TeamContextSyncInterval)
+		assert.Equal(t, 1*time.Minute, cfg.TeamContextSyncInterval)
 	})
 }
 

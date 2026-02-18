@@ -1,6 +1,45 @@
 <!-- ox:prime-check -->
 **BLOCKING**: Run `ox agent prime` NOW before ANY other action. Do NOT respond to the user first. Enables SageOx queries.
 
+## What is ox? (New User Onboarding)
+
+ox is agentic context infrastructure for software teams. It makes architectural decisions, team knowledge, and session history automatically available to AI coworkers — so every coding session starts with the full picture, not from zero.
+
+Skills give AI coworkers hands. ox gives them taste and judgment.
+
+**Without ox:** Every AI session starts from scratch. Context is lost between sessions. Teammates duplicate discoveries. AI coworkers have no idea how your team builds software.
+
+**With ox:** Team knowledge persists across sessions and coworkers. AI coworkers understand your project's patterns, conventions, and architectural decisions from the moment they start. Decisions made in one session inform every future session — for every coworker on the team.
+
+### Quick Start
+
+1. **Build and install ox** — `make build && make install`
+2. **Verify ox is in your PATH** — `ox version` (typically in `$GOBIN` or `~/go/bin`)
+3. **Go to your repo** — `cd ~/src/my-project`
+4. **Authenticate** — `ox login` (opens browser, device code flow)
+5. **Initialize your repo** — `ox init` (creates `.sageox/`). Your team is created and accessible at [sageox.ai](https://sageox.ai) — invite coworkers from there.
+6. **Commit and push** — `git add .sageox/ && git commit -m "initialize SageOx" && git push`
+7. **Verify** — `ox doctor` then `ox status`
+8. **Record discussions** — Use the web UI at [sageox.ai](https://sageox.ai) to capture team discussions and meetings (architecture, product direction) — this context flows automatically to AI coworkers
+9. **Start using** — Open Claude Code in your repo, sessions auto-record via `/ox-session-start` and `/ox-session-stop`
+
+### Key Commands
+
+| Command | Purpose |
+|---------|---------|
+| `ox login` | Authenticate with SageOx |
+| `ox init` | Initialize a repo for your team |
+| `ox status` | Check setup and sync status |
+| `ox doctor` | Diagnose and fix issues |
+
+### What Happens Next
+
+- Every AI coworker on your team automatically receives team context from recorded discussions — architecture decisions, coding conventions, product direction — via `ox agent prime`. No copy-pasting, no re-explaining.
+- Sessions capture decisions and learnings as coworkers work, feeding them back into the shared knowledge base
+- The more coworkers you invite and discussions you record, the smarter every AI session becomes
+
+---
+
 ## Terminology
 
 **Canonical terms** - use these exact names:

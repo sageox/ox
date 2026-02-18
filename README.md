@@ -16,8 +16,8 @@ Sessions, ledgers, and team knowledge ensure your AI coworkers understand your p
 ## Install the CLI
 
 ```bash
-$ git clone https://github.com/sageox/ox.git && cd ox
-$ make build && make install
+git clone https://github.com/sageox/ox.git && cd ox
+make build && make install
 # set up the ox location using export PATH
 ```
 
@@ -25,16 +25,16 @@ $ make build && make install
 
 ```bash
 # cd into your code repo (e.g. ~/src/my-project)
-$ cd ~/src/my-project
-$ ox login
+cd ~/src/my-project
+ox login
 
 # one time setup, done ONCE per repo
-$ ox init
+ox init
 # commit the changes in your repo, e.g. git commit -a -m 'SageOx init'
 
-$ ox doctor
+ox doctor
 # ox doctor --fix may be needed in the alpha stage
-$ ox status
+ox status
 # will give you the location of the team context and ledger repos
 ```
 
@@ -55,9 +55,9 @@ Team discussions impacting the product are captured and transcribed in the app a
 `ox-session` capture the conversation between a developer and Claude so the decisions, patterns, and reasoning become available to the rest of the team.
 
 ```bash
-$ pwd
+pwd
 /home/me/src/my-project
-$ claude
+claude
 /ox-session-start
 <implement fizz buzz>
 /ox-session-stop
@@ -90,7 +90,6 @@ Test it by having a different developer ask Claude about a decision made during 
 SageOx integrates with popular AI coding agents:
 
 - **Claude Code** - Automatic session hooks via `.claude/` configuration
-- **Cursor** - Integration via rules and context files
 - **Other agents** - Any agent that reads `AGENTS.md` or supports hooks
 
 Run `ox integrate` to set up the integration for your preferred agent.
@@ -102,3 +101,9 @@ SageOx looks for configuration in:
 1. CLI flags (`--verbose`, `--quiet`, `--json`)
 2. Environment variables (`OX_*` prefix)
 3. Config file (`.sageox/config.yaml`)
+
+## Legal
+
+- [Privacy Policy](https://sageox.ai/privacy)
+- [Terms of Service](https://sageox.ai/terms)
+- [Acceptable Use Policy](https://sageox.ai/acceptable-use)
