@@ -72,7 +72,13 @@ claude
 
 <!-- TODO: add screenshot of session viewer -->
 
-Test it by having a different developer ask Claude about a decision made during the captured session.
+## 🚀 Just Ask
+
+Start your AI coworker in your repo and just ask:
+
+- *"What decisions were made in the last coding session on this project?"*
+- *"Create a plan of work based on the SageOx team discussions from today."*
+- *"Look at my team's SageOx coding sessions from this week and teach me a really effective prompt that was used."*
 
 ## ⚙️ How it works
 
