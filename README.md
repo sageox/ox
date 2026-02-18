@@ -38,19 +38,19 @@ ox status
 # will give you the location of the team context and ledger repos
 ```
 
-## Go to [sageox.ai](https://sageox.ai) - Setup team
+## 👥 Go to [sageox.ai](https://sageox.ai) - Setup team
 
 Go into your newly created team in SageOx and invite your coworkers by copying the invite in the upper right, displayed in Team Overview.
 
 <!-- TODO: add screenshot of team invite UI -->
 
-## Record discussions
+## 🎙️ Record discussions
 
 Team discussions impacting the product are captured and transcribed in the app and the context is automatically available to Claude.
 
 <!-- TODO: add screenshot of transcription UI -->
 
-## Capture sessions
+## 📸 Capture sessions
 
 `ox-session` capture the conversation between a developer and Claude so the decisions, patterns, and reasoning become available to the rest of the team.
 
@@ -67,14 +67,14 @@ claude
 
 Test it by having a different developer ask Claude about a decision made during the captured session.
 
-## How it works
+## ⚙️ How it works
 
 1. **ox init** creates a `.sageox/` directory with shared team context for your project
 2. **ox integrate** sets up hooks so your AI coworker automatically loads context at session start
 3. Your AI coworker receives team context, security conventions, and architectural patterns
 4. Coworkers (human and AI) share context through ledgers and team knowledge
 
-## How Ox Fits In
+## 🧠 How Ox Fits In
 
 **Skills give agents hands. Ox gives agents taste and judgment.**
 
@@ -85,7 +85,7 @@ Test it by having a different developer ask Claude about a decision made during 
 | SageOx (team context) | **STYLE** conventions | "Prefix all resources with env name" |
 | SageOx (team context) | **WHEN** to act | "Review infra on cloud file changes" |
 
-## Supported AI Agents
+## 🤖 Supported AI Agents
 
 SageOx integrates with popular AI coding agents:
 
@@ -94,7 +94,7 @@ SageOx integrates with popular AI coding agents:
 
 Run `ox integrate` to set up the integration for your preferred agent.
 
-## Configuration
+## ⚙️ Configuration
 
 SageOx looks for configuration in:
 
