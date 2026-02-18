@@ -99,8 +99,34 @@ Each entry represents a conversation turn or tool invocation. Entries are writte
 |------|-------------|
 | `user` | Human user message or prompt |
 | `assistant` | AI agent response |
-| `system` | System message (context injection, coworker load) |
+| `system` | System message (context injection, framework content, coworker load) |
 | `tool` | Tool call or result (bash, read, write, edit, grep, glob) |
+
+### Adapter-Layer Entry Classification
+
+Coding agents (e.g., Claude Code) mix human and system content in `type: "user"` protocol entries. The adapter layer (`ClaudeCodeAdapter`) classifies these before writing to `raw.jsonl`, so downstream consumers see correct types without needing their own heuristics.
+
+**Classification rules for source `type: "user"` entries:**
+
+| Content Pattern | Classified As | Rationale |
+|----------------|---------------|-----------|
+| Plain human text | `user` | Genuine human message |
+| `<system-reminder>...</system-reminder>` tags only | `system` | Framework-injected context |
+| `<system_instruction>...</system_instruction>` tags only | `system` | System directives |
+| `<system-instruction>...</system-instruction>` tags only | `system` | System directives (hyphen variant) |
+| `<!-- ox-hash: ... -->` marker | `system` | Skill expansion content |
+| `isMeta: true` flag | `system` | Agent framework metadata |
+| Plan mode boilerplate (`Entered plan mode.`, `Plan mode is active.`, `Plan mode still active`) | `system` | Framework UI injection |
+| Context compaction continuation (`This session is being continued from a previous conversation`) | `system` | Injected when session resumes after hitting context window limit |
+| `<local-command-stdout>...</local-command-stdout>` tags only | `system` | Conductor local command output |
+| `<local-command-caveat>...</local-command-caveat>` tags only | `system` | Conductor framework caveat injection |
+| Unicode tool prefixes (`⏺` U+23FA, `⎿` U+23BF) | `system` | Agent tool call/result display markers |
+| Pure `tool_result` content blocks (no text) | *(skipped)* | Deduplicated — tool calls already captured from assistant `tool_use` blocks |
+| Mixed human text + system tags | `user` | Tags stripped, human text preserved |
+
+**Deduplication:** `tool_result` content blocks in user-role entries are protocol plumbing — the agent framework feeds tool output back as user messages. Since tool calls and their results are already captured from the assistant's `tool_use` blocks (as `tool` entries), including `tool_result` blocks would duplicate content. They are omitted from `raw.jsonl`.
+
+**Backward compatibility:** The HTML generator (`cleanMessageContent`) and view layer (`reclassifyByContent`) retain tag-stripping logic as safety nets for sessions recorded before adapter-layer classification was added.
 
 ### Entry Examples
 
