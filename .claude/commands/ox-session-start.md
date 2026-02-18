@@ -23,10 +23,10 @@ Keywords: session start, record, capture, begin, log, track, ledger, start recor
 **Symptom:** No SageOx configuration found
 **Solution:** Run `ox init` to initialize SageOx in this repository
 
-## Post-Command: Show Notice (REQUIRED)
+## Post-Command (REQUIRED)
 
-After the command completes, check the JSON output for a `notice` field.
-If present, you MUST display the notice text to the user verbatim. This is a one-time
-transparency notice about session recording that the user needs to see.
+After the command completes, check the JSON output:
+- **`notice`**: If present, display the notice text to the user verbatim. This is a one-time transparency notice about session recording.
+- **`guidance`**: Follow this guidance throughout the session. It contains instructions about plan capture and session boundaries.
 
 $ox agent session start

@@ -40,6 +40,13 @@ import (
 //   2. --text: outputs human-readable text only
 //   3. default: outputs full JSON
 
+// sessionStartGuidance is behavioral guidance for agents during a recorded session.
+// Returned in the session start JSON so all coding agents (not just Claude Code) receive it.
+const sessionStartGuidance = `During this recorded session:
+1. Plan capture: After creating or revising a plan, immediately save it with: cat <plan-file> | ox agent <id> session plan
+2. After stopping: Check the session stop output for plan_path. If empty and you created a plan, save it now with: cat <plan-file> | ox agent <id> session plan
+3. Session boundaries: One plan per session. If work shifts to an unrelated feature, suggest stopping this session and starting a new one.`
+
 // sessionStartOutput is the JSON output format for session start.
 type sessionStartOutput struct {
 	Success bool   `json:"success"`
@@ -48,8 +55,9 @@ type sessionStartOutput struct {
 	Title   string `json:"title,omitempty"`
 	Adapter string `json:"adapter"`
 	Started string `json:"started"`
-	Hint    string `json:"hint,omitempty"`   // suggests how to end recording
-	Notice  string `json:"notice,omitempty"` // one-time notice the agent MUST show to the user
+	Hint     string `json:"hint,omitempty"`     // suggests how to end recording
+	Notice   string `json:"notice,omitempty"`   // one-time notice the agent MUST show to the user
+	Guidance string `json:"guidance,omitempty"` // behavioral guidance for the agent during the session
 }
 
 // runAgentSessionStart starts recording a session for the agent.
@@ -111,6 +119,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		AdapterName: adapterName,
 		SessionFile: sessionFile,
 		Title:       title,
+		Username:    getSessionUsername(),
 	}
 
 	state, err := session.StartRecording(projectRoot, opts)
@@ -141,14 +150,15 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		fmt.Println()
 		fmt.Println("--- Machine Output ---")
 		output := sessionStartOutput{
-			Success: true,
-			Type:    "session_start",
-			AgentID: inst.AgentID,
-			Title:   title,
-			Adapter: adapterName,
-			Started: state.StartedAt.Format(time.RFC3339),
-			Hint:    "Run /ox-session-stop to end recording",
-			Notice:  notice,
+			Success:  true,
+			Type:     "session_start",
+			AgentID:  inst.AgentID,
+			Title:    title,
+			Adapter:  adapterName,
+			Started:  state.StartedAt.Format(time.RFC3339),
+			Hint:     "Run /ox-session-stop to end recording",
+			Notice:   notice,
+			Guidance: sessionStartGuidance,
 		}
 		jsonOut, err := json.MarshalIndent(output, "", "  ")
 		if err != nil {
@@ -176,14 +186,15 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	// default: JSON output (or explicit --json)
 	output := sessionStartOutput{
-		Success: true,
-		Type:    "session_start",
-		AgentID: inst.AgentID,
-		Title:   title,
-		Adapter: adapterName,
-		Started: state.StartedAt.Format(time.RFC3339),
-		Hint:    "Run /ox-session-stop to end recording",
-		Notice:  notice,
+		Success:  true,
+		Type:     "session_start",
+		AgentID:  inst.AgentID,
+		Title:    title,
+		Adapter:  adapterName,
+		Started:  state.StartedAt.Format(time.RFC3339),
+		Hint:     "Run /ox-session-stop to end recording",
+		Notice:   notice,
+		Guidance: sessionStartGuidance,
 	}
 	jsonOut, err := json.MarshalIndent(output, "", "  ")
 	if err != nil {
@@ -460,9 +471,6 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	}
 	result.EntryCount = len(rawEntries)
 
-	// get user info for filename
-	username := getSessionUsername()
-
 	// get repo ID for context path
 	repoID := getRepoIDOrDefault(projectRoot)
 
@@ -477,8 +485,10 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		return nil, fmt.Errorf("failed to create store: %w", err)
 	}
 
-	// generate filename
-	filename := session.GenerateFilename(username, state.AgentID)
+	// use session name from recording state (created at start time)
+	// instead of generating a new name, which would have a different timestamp and
+	// potentially different username, causing path mismatches
+	filename := session.GetSessionName(state.SessionPath)
 
 	// create redactor for secret scrubbing
 	redactor := session.NewRedactor()

@@ -355,6 +355,7 @@ make bump-version NEW_VERSION=0.10.0
 - Utilize modern 2025 TUI best practices when changing or adding UX.
 - Let Edward Tufte inspire data visualization ideas.
 - While `ox` is designed with Agent UX in mind for agentic work, UX output and tool ergonomics optimized for human delight and understanding are extremely important.
+- Agent behavioral guidance belongs in CLI JSON output (e.g., `guidance` field), not in agent-specific skill files — skills should be thin wrappers that relay CLI output.
 - Do not use Terraform tools from HashiCorp, use OpenTufu, due to BSL licensing issues.
 - Don't do git push.
 - Make sure CLI docs version always matches the CLI version.

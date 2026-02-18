@@ -23,17 +23,6 @@ Keywords: session stop, save, finish, end, done, wrap up, stop recording, upload
 **Symptom:** Command hangs during "Generating summary..."
 **Solution:** Summarization runs client-side. Wait for completion or check network if it stalls
 
-## Pre-Command: Capture Plan (if applicable)
-
-Before running the session stop command, check if you used plan mode during this session:
-
-1. Look for your plan file in `~/.claude/plans/` (the most recently modified `.md` file)
-2. If a plan file exists and was used in this session, save it with the session:
-   ```bash
-   cat ~/.claude/plans/<plan-file>.md | ox agent <id> session plan
-   ```
-3. This ensures the plan is preserved alongside the session in the ledger
-
 ## Post-Command: Generate and Push Summary (REQUIRED)
 
 After the command completes, check the JSON output for a `summary_prompt` field.
