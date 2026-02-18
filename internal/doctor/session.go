@@ -344,7 +344,7 @@ func (c *SessionStaleCheck) Run(ctx context.Context) CheckResult {
 		Name:    c.Name(),
 		Status:  StatusWarn,
 		Message: fmt.Sprintf("abandoned session recording for %s (%s)", ageStr, agentID),
-		Fix:     fmt.Sprintf("Run 'ox agent %s session recover' to recover the stale session, or 'ox agent %s session stop' if the original session file still exists.", agentID, agentID),
+		Fix:     fmt.Sprintf("Run 'ox agent %s session recover' to upload to ledger, or 'ox agent %s session abort --force' to discard", agentID, agentID),
 	}
 }
 
@@ -558,7 +558,7 @@ func (c *SessionOrphanedCheck) Run(ctx context.Context) CheckResult {
 			Name:    c.Name(),
 			Status:  StatusWarn,
 			Message: fmt.Sprintf("found %d-day old recording (%s)", days, agentID),
-			Fix:     fmt.Sprintf("Run 'ox agent %s session recover' to recover the orphaned session", agentID),
+			Fix:     fmt.Sprintf("Run 'ox agent %s session recover' to upload to ledger, or 'ox agent %s session abort --force' to discard", agentID, agentID),
 		}
 	}
 

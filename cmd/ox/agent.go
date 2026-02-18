@@ -48,6 +48,7 @@ Use the session:
   ox agent <agent_id> session subagent-complete # Report subagent completion to parent
   ox agent <agent_id> session subagent-list # List subagent sessions
   ox agent <agent_id> session recover       # Recover stale/crashed session
+  ox agent <agent_id> session abort         # Discard active session (destructive)
 
 Example:
   $ ox agent prime
@@ -176,7 +177,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		return runAgentDoctor(inst)
 	case "session":
 		if len(subargs) == 0 {
-			return fmt.Errorf("session requires a subcommand\nUsage: ox agent %s session <start|stop|remind|summarize|html|record|plan|import|capture-prior|subagent-complete|subagent-list|recover>", inst.AgentID)
+			return fmt.Errorf("session requires a subcommand\nUsage: ox agent %s session <start|stop|abort|remind|summarize|html|record|plan|import|capture-prior|subagent-complete|subagent-list|recover>", inst.AgentID)
 		}
 		sessionCmd := subargs[0]
 		sessionArgs := subargs[1:]
@@ -205,8 +206,10 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 			return runAgentSessionSubagentList(inst)
 		case "recover":
 			return runAgentSessionRecover(inst)
+		case "abort":
+			return runAgentSessionAbort(inst, sessionArgs)
 		default:
-			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, remind, summarize, html, record, plan, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
+			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, remind, summarize, html, record, plan, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
 		}
 	default:
 		return fmt.Errorf("unknown command: %s\nAvailable: doctor, session", subcommand)
