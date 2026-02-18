@@ -265,7 +265,8 @@ type SyncScheduler struct {
 
 	// per-operation flags to reduce lock contention
 	// each operation only blocks itself, not unrelated operations
-	pullInProgress bool
+	pullInProgress        bool
+	lastCredentialRefresh time.Time // dedup concurrent credential refresh calls
 
 	// error tracking
 	recentErrors  []syncError
@@ -645,14 +646,39 @@ func (s *SyncScheduler) LastSync() time.Time {
 func (s *SyncScheduler) pullChanges(ctx context.Context) {
 	// anti-entropy: ensure missing workspaces get cloned
 	s.triggerMissingClones()
-	_ = s.doPull(ctx, nil)
+	_ = s.doPull(ctx, nil, false)
+}
+
+// shouldSyncOrBypass checks if a sync should proceed given backoff state.
+// If forceSync is true (user-initiated), clears backoff and proceeds.
+// If forceSync is false (background ticker) and backoff is active, logs and returns false.
+func (s *SyncScheduler) shouldSyncOrBypass(id string, forceSync bool) bool {
+	if s.workspaceRegistry.ShouldSync(id) {
+		return true
+	}
+	if forceSync {
+		s.workspaceRegistry.ClearSyncFailures(id)
+		return true
+	}
+	failures, nextRetry := s.workspaceRegistry.GetSyncRetryInfo(id)
+	s.logger.Warn("sync in backoff, skipping", "id", id, "failures", failures, "next_retry", nextRetry)
+	if s.issues != nil {
+		s.issues.SetIssue(DaemonIssue{
+			Type:     IssueTypeSyncBackoff,
+			Severity: SeverityWarning,
+			Repo:     id,
+			Summary:  fmt.Sprintf("Sync suspended after %d consecutive failures (retrying at %s)", failures, nextRetry.Format(time.Kitchen)),
+		})
+	}
+	return false
 }
 
 // doPull fetches and pulls from remote with optional progress updates.
 // If ledger doesn't exist locally but has a clone URL, spawns background clone.
 // Returns an error if fetch or pull fails (for on-demand sync error reporting).
 // Callers that don't need the error (background scheduler) can ignore it.
-func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) error {
+// forceSync=true bypasses backoff (user-initiated syncs via IPC).
+func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, forceSync bool) error {
 	if s.config.LedgerPath == "" {
 		return nil
 	}
@@ -727,6 +753,11 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) er
 		s.issues.ClearIssue(IssueTypeGitLock, "ledger")
 	}
 
+	// sync backoff — skip if recent sync failures triggered backoff
+	if !s.shouldSyncOrBypass("ledger", forceSync) {
+		return nil
+	}
+
 	s.mu.Lock()
 	if s.pullInProgress {
 		s.mu.Unlock()
@@ -747,8 +778,19 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) er
 		s.mu.Unlock()
 	}()
 
-	// check FETCH_HEAD mtime to avoid redundant pulls (e.g., crash loop protection,
-	// or if user manually fetched). Uses same pattern as team context sync.
+	// ls-remote SHA check — skip if remote HEAD matches local (nothing new to pull).
+	// Cheaper than git fetch: only hits /info/refs, no upload-pack negotiation.
+	if s.remoteRefCheck(ctx, s.config.LedgerPath) {
+		// remote matches local — clear any previous failure state
+		s.workspaceRegistry.ClearSyncFailures("ledger")
+		if progress != nil {
+			_ = progress.WriteStage("skipped", "Remote unchanged, skipping pull")
+		}
+		return nil
+	}
+
+	// FETCH_HEAD mtime dedup (secondary: cross-daemon coordination, crash loop protection).
+	// Kept as fallback for when ls-remote can't run (credential issues, etc).
 	fetchHead := filepath.Join(s.config.LedgerPath, ".git", "FETCH_HEAD")
 	if info, err := os.Stat(fetchHead); err == nil {
 		threshold := max(s.config.SyncIntervalRead/2, minFetchHeadAge)
@@ -777,6 +819,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) er
 			s.recordError(fmt.Sprintf("fetch failed: %v", err))
 		}
 		s.metrics.RecordPullFailure()
+		s.workspaceRegistry.RecordSyncFailure("ledger")
 		if detail != "" {
 			return fmt.Errorf("ledger fetch failed: %s (%w)", detail, err)
 		}
@@ -821,6 +864,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) er
 			s.recordError(fmt.Sprintf("pull failed: %v", err))
 		}
 		s.metrics.RecordPullFailure()
+		s.workspaceRegistry.RecordSyncFailure("ledger")
 
 		// check if it's a merge conflict
 		statusCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "status", "--porcelain")
@@ -844,9 +888,11 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) er
 		return fmt.Errorf("ledger pull failed: %w", err)
 	}
 
-	// sync succeeded - clear any previous merge conflict issue
+	// sync succeeded - clear failure backoff, merge conflict, and sync backoff issues
+	s.workspaceRegistry.ClearSyncFailures("ledger")
 	if s.issues != nil {
 		s.issues.ClearIssue(IssueTypeMergeConflict, "ledger")
+		s.issues.ClearIssue(IssueTypeSyncBackoff, "ledger")
 	}
 
 	duration := time.Since(startTime)
@@ -898,6 +944,16 @@ const credentialRefreshThreshold = 1 * time.Hour
 // or for a different endpoint, and refreshes them from the cloud API if needed.
 // This is lazy refresh - called before sync operations that need valid credentials.
 func (s *SyncScheduler) refreshCredentialsIfNeeded() {
+	// dedup: stamp-then-release to prevent TOCTOU race where concurrent callers
+	// both observe a stale timestamp and both proceed to hit the API.
+	s.mu.Lock()
+	if !s.lastCredentialRefresh.IsZero() && time.Since(s.lastCredentialRefresh) < 5*time.Minute {
+		s.mu.Unlock()
+		return
+	}
+	s.lastCredentialRefresh = time.Now() // stamp before releasing lock
+	s.mu.Unlock()
+
 	// get the endpoint for this project
 	projectEndpoint := endpoint.GetForProject(s.config.ProjectRoot)
 
@@ -982,6 +1038,12 @@ func (s *SyncScheduler) fetchLedgerURLFromAPI() {
 		return
 	}
 
+	// backoff on repeated API failures (separate key from git sync —
+	// a cloud API outage should not block git fetch/pull against a healthy repo)
+	if !s.workspaceRegistry.ShouldSync("ledger-api") {
+		return
+	}
+
 	// get repo ID from workspace registry (loaded from project config)
 	repoID := s.workspaceRegistry.GetRepoID()
 	if repoID == "" {
@@ -1013,6 +1075,7 @@ func (s *SyncScheduler) fetchLedgerURLFromAPI() {
 	detail, detailErr := client.GetRepoDetail(repoID)
 	if detailErr != nil {
 		s.logger.Warn("failed to fetch repo detail", "repo_id", repoID, "error", detailErr)
+		s.workspaceRegistry.RecordSyncFailure("ledger-api")
 	}
 
 	// if GetRepoDetail succeeded, use its data
@@ -1027,9 +1090,12 @@ func (s *SyncScheduler) fetchLedgerURLFromAPI() {
 				s.workspaceRegistry.InitializeLedger(detail.Ledger.RepoURL, s.config.ProjectRoot)
 				s.logger.Info("initialized ledger workspace from repo detail", "clone_url", detail.Ledger.RepoURL)
 			}
+			s.workspaceRegistry.ClearSyncFailures("ledger-api")
 			s.persistLedgerPath()
 			return
 		} else if detail.Ledger != nil {
+			// "not ready" is a transient provisioning state, not a failure —
+			// don't apply backoff, just skip this tick and retry next cycle
 			s.logger.Debug("ledger not ready from repo detail", "status", detail.Ledger.Status, "message", detail.Ledger.Message)
 			return
 		}
@@ -1041,6 +1107,7 @@ func (s *SyncScheduler) fetchLedgerURLFromAPI() {
 	if err != nil {
 		// network errors are expected when offline - use Warn not Error
 		s.logger.Warn("failed to fetch ledger status", "repo_id", repoID, "error", err)
+		s.workspaceRegistry.RecordSyncFailure("ledger-api")
 		return
 	}
 
@@ -1052,6 +1119,8 @@ func (s *SyncScheduler) fetchLedgerURLFromAPI() {
 
 	// check if ledger is ready
 	if status.Status != "ready" {
+		// "not ready" is a transient provisioning state, not a failure —
+		// don't apply backoff, just skip this tick and retry next cycle
 		s.logger.Debug("ledger not ready", "status", status.Status, "message", status.Message)
 		return
 	}
@@ -1063,6 +1132,7 @@ func (s *SyncScheduler) fetchLedgerURLFromAPI() {
 			s.workspaceRegistry.InitializeLedger(status.RepoURL, s.config.ProjectRoot)
 			s.logger.Info("initialized ledger workspace from API", "clone_url", status.RepoURL)
 		}
+		s.workspaceRegistry.ClearSyncFailures("ledger-api")
 		s.persistLedgerPath()
 	}
 }
@@ -1145,7 +1215,7 @@ func (s *SyncScheduler) doSyncAll(ctx context.Context, progress *ProgressWriter)
 	// refresh credentials if expired or near expiry
 	s.refreshCredentialsIfNeeded()
 
-	return s.doPull(ctx, progress)
+	return s.doPull(ctx, progress, true)
 }
 
 // isValidRepoPath validates that a repo path is safe to use.
@@ -1424,7 +1494,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 func (s *SyncScheduler) pullTeamContexts(ctx context.Context) {
 	// anti-entropy: ensure missing workspaces get cloned
 	s.triggerMissingClones()
-	s.doTeamSync(ctx, nil)
+	s.doTeamSync(ctx, nil, false)
 }
 
 // TeamSync performs an on-demand sync of all team contexts with progress updates.
@@ -1432,7 +1502,7 @@ func (s *SyncScheduler) TeamSync(progress *ProgressWriter) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	s.doTeamSync(ctx, progress)
+	s.doTeamSync(ctx, progress, true)
 	return nil
 }
 
@@ -1442,7 +1512,7 @@ func (s *SyncScheduler) TeamSync(progress *ProgressWriter) error {
 // Auto-clone behavior: If a team context doesn't exist locally but has a clone URL,
 // spawns a background goroutine to clone it. This doesn't block the sync loop.
 // Note: Ledger auto-clone is handled separately in doPull() on the ledger sync ticker.
-func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter) {
+func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter, forceSync bool) {
 	// refresh credentials if expired or near expiry
 	s.refreshCredentialsIfNeeded()
 
@@ -1518,6 +1588,12 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			continue
 		}
 
+		// sync backoff — skip if recent sync failures triggered backoff
+		if !s.shouldSyncOrBypass(ws.ID, forceSync) {
+			skippedCount++
+			continue
+		}
+
 		if progress != nil {
 			_ = progress.WriteStage("syncing", fmt.Sprintf("Syncing team: %s", ws.TeamName))
 		}
@@ -1534,6 +1610,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 
 		if pullErr != nil {
 			s.workspaceRegistry.SetWorkspaceError(ws.ID, pullErr.Error())
+			s.workspaceRegistry.RecordSyncFailure(ws.ID)
 			s.logger.Debug("team context pull failed", "team", ws.TeamName, "error", pullErr)
 			s.metrics.RecordTeamSyncError()
 			if progress != nil {
@@ -1541,6 +1618,10 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			}
 		} else {
 			s.workspaceRegistry.ClearWorkspaceError(ws.ID)
+			s.workspaceRegistry.ClearSyncFailures(ws.ID)
+			if s.issues != nil {
+				s.issues.ClearIssue(IssueTypeSyncBackoff, ws.ID)
+			}
 			// update last sync in registry and config file
 			if err := s.workspaceRegistry.UpdateConfigLastSync(ws.ID); err != nil {
 				s.logger.Warn("failed to update config last sync", "team", ws.TeamName, "error", err)
@@ -1665,17 +1746,13 @@ func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspac
 		// classify error to choose backoff strategy
 		permanent := isClonePermanentError(err.Error())
 
-		// exponential backoff: 1min, 2min, 4min, 8min, 16min, 32min, max 1 hour
+		// exponential backoff: 1min, 2min, 4min, 8min, ..., max 1 hour
 		// permanent errors cap at 5 min — user may fix creds and we should retry soon
-		backoffMinutes := 1 << min(newAttempts-1, 6) // cap exponent at 6 (64 min)
-		backoff := time.Duration(backoffMinutes) * time.Minute
-		maxBackoff := cloneBackoffMax
+		maxBack := cloneBackoffMax
 		if permanent {
-			maxBackoff = clonePermanentBackoffMax
+			maxBack = clonePermanentBackoffMax
 		}
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+		backoff := exponentialBackoff(newAttempts, time.Minute, maxBack)
 
 		nextRetry := time.Now().Add(backoff)
 		s.workspaceRegistry.SetCloneRetry(workspaceID, newAttempts, nextRetry)
@@ -1815,7 +1892,14 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		s.issues.ClearIssue(IssueTypeGitLock, repoName)
 	}
 
-	// check FETCH_HEAD mtime for multi-daemon deduplication (see comment above)
+	// ls-remote SHA check — skip if remote HEAD matches local (nothing new to pull).
+	// Cheaper than git fetch: only hits /info/refs, no upload-pack negotiation.
+	if s.remoteRefCheck(ctx, path) {
+		return nil
+	}
+
+	// FETCH_HEAD mtime dedup (secondary: multi-daemon dedup on shared team context paths).
+	// Kept as fallback for when ls-remote can't run (credential issues, etc).
 	fetchHead := filepath.Join(path, ".git", "FETCH_HEAD")
 	if info, err := os.Stat(fetchHead); err == nil {
 		threshold := max(s.config.TeamContextSyncInterval/2, minTeamContextFetchAge)
@@ -1875,6 +1959,64 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 	}
 
 	return nil
+}
+
+// remoteRefCheck compares the remote tracking branch SHA to the local HEAD SHA via ls-remote.
+// Returns true if they match (nothing new to pull), false if different or on error.
+// On error, returns false to fall through to the existing fetch+pull path.
+//
+// Uses the local tracking branch (e.g. refs/heads/main) rather than remote HEAD,
+// because remote HEAD is a symbolic ref that may point to a different default branch
+// than the local checkout tracks. There is an inherent race between ls-remote and
+// the subsequent fetch (the remote can advance between the two calls), but this is
+// safe — we just pull slightly stale data and catch up on the next cycle.
+//
+// This is cheaper than git fetch because ls-remote only hits /info/refs (1 HTTP
+// round-trip) without git-upload-pack negotiation or packfile transfer.
+func (s *SyncScheduler) remoteRefCheck(ctx context.Context, repoPath string) bool {
+	lsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// resolve the upstream tracking branch (e.g. "refs/remotes/origin/main" → "refs/heads/main")
+	upstreamCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+	upstreamOut, err := upstreamCmd.Output()
+	if err != nil {
+		// no tracking branch configured — fall through to fetch
+		return false
+	}
+	upstream := strings.TrimSpace(string(upstreamOut))
+	// convert "origin/main" to "refs/heads/main" for ls-remote
+	remoteRef := upstream
+	if strings.HasPrefix(upstream, "origin/") {
+		remoteRef = "refs/heads/" + strings.TrimPrefix(upstream, "origin/")
+	}
+
+	// git ls-remote origin <ref> — single HTTP round-trip, no local locks
+	lsCmd := exec.CommandContext(lsCtx, "git", "-C", repoPath, "ls-remote", "origin", remoteRef)
+	lsOut, err := lsCmd.Output()
+	if err != nil {
+		s.logger.Debug("ls-remote failed, falling through to fetch", "path", repoPath, "error", err)
+		return false
+	}
+	fields := strings.Fields(string(lsOut))
+	if len(fields) == 0 {
+		return false
+	}
+	remoteSHA := fields[0]
+
+	// git rev-parse HEAD — local-only, instant
+	localCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "HEAD")
+	localOut, err := localCmd.Output()
+	if err != nil {
+		return false
+	}
+	localSHA := strings.TrimSpace(string(localOut))
+
+	match := remoteSHA == localSHA
+	if match {
+		s.logger.Debug("remote ref unchanged", "path", repoPath, "ref", remoteRef, "sha", localSHA[:min(8, len(localSHA))])
+	}
+	return match
 }
 
 // TeamContextStatus returns the current team context sync status.
