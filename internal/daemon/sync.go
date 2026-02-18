@@ -641,17 +641,20 @@ func (s *SyncScheduler) LastSync() time.Time {
 
 // pullChanges fetches and pulls from remote (used by scheduler).
 // Also performs anti-entropy: checks for missing workspaces and triggers clones.
+// Errors from doPull are already logged and recorded; background sync continues.
 func (s *SyncScheduler) pullChanges(ctx context.Context) {
 	// anti-entropy: ensure missing workspaces get cloned
 	s.triggerMissingClones()
-	s.doPull(ctx, nil)
+	_ = s.doPull(ctx, nil)
 }
 
 // doPull fetches and pulls from remote with optional progress updates.
 // If ledger doesn't exist locally but has a clone URL, spawns background clone.
-func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) {
+// Returns an error if fetch or pull fails (for on-demand sync error reporting).
+// Callers that don't need the error (background scheduler) can ignore it.
+func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) error {
 	if s.config.LedgerPath == "" {
-		return
+		return nil
 	}
 
 	// check if ledger is a valid git repo - if not, try to auto-clone
@@ -673,7 +676,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) {
 						attempts, nextRetry := s.workspaceRegistry.GetCloneRetryInfo(ledger.ID)
 						s.logger.Debug("ledger clone in backoff, skipping",
 							"attempts", attempts, "next_retry", nextRetry)
-						return
+						return nil
 					}
 
 					s.logger.Info("ledger not cloned, starting background clone", "path", ledger.Path)
@@ -685,7 +688,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) {
 				}
 			}
 		}
-		return // can't pull from repo that isn't cloned yet
+		return nil // can't pull from repo that isn't cloned yet
 	}
 
 	// skip if repo stuck in broken rebase state
@@ -693,11 +696,11 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) {
 	rebaseApply := filepath.Join(s.config.LedgerPath, ".git", "rebase-apply")
 	if _, err := os.Stat(rebaseMerge); err == nil {
 		s.logger.Debug("repo in rebase state, skipping pull", "path", s.config.LedgerPath)
-		return
+		return nil
 	}
 	if _, err := os.Stat(rebaseApply); err == nil {
 		s.logger.Debug("repo in rebase-apply state, skipping pull", "path", s.config.LedgerPath)
-		return
+		return nil
 	}
 
 	// check for stale lock files from crashed git processes
@@ -717,7 +720,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) {
 					strings.Join(locks, ",")),
 			})
 		}
-		return
+		return nil
 	}
 	// clear lock issue if previously set but now resolved
 	if s.issues != nil {
@@ -727,7 +730,11 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) {
 	s.mu.Lock()
 	if s.pullInProgress {
 		s.mu.Unlock()
-		return
+		if progress != nil {
+			// on-demand sync: tell the user a sync is already running
+			_ = progress.WriteStage("skipped", "Pull already in progress")
+		}
+		return nil
 	}
 	s.pullInProgress = true
 	s.mu.Unlock()
@@ -750,7 +757,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) {
 			if progress != nil {
 				_ = progress.WriteStage("skipped", "Recently fetched, skipping pull")
 			}
-			return
+			return nil
 		}
 	}
 
@@ -759,13 +766,21 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) {
 	}
 	s.logger.Debug("pulling changes")
 
-	// git fetch
+	// git fetch (capture stderr for diagnosable error messages)
 	fetchCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "fetch", "--quiet")
-	if err := fetchCmd.Run(); err != nil {
-		s.logger.Warn("fetch failed", "error", err)
-		s.recordError("fetch failed: " + err.Error())
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
+		detail := sanitizeGitOutput(strings.TrimSpace(string(output)))
+		s.logger.Warn("fetch failed", "error", err, "output", detail)
+		if detail != "" {
+			s.recordError(fmt.Sprintf("fetch failed: %s (%v)", detail, err))
+		} else {
+			s.recordError(fmt.Sprintf("fetch failed: %v", err))
+		}
 		s.metrics.RecordPullFailure()
-		return
+		if detail != "" {
+			return fmt.Errorf("ledger fetch failed: %s (%w)", detail, err)
+		}
+		return fmt.Errorf("ledger fetch failed: %w", err)
 	}
 
 	// track FETCH_HEAD mtime to record when remote had new content
@@ -788,23 +803,28 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) {
 				Summary:  "Ledger has diverged from remote (force push detected). Run 'ox doctor --fix' to re-clone.",
 			})
 		}
-		return
+		return errors.New("ledger diverged from remote (force push detected)")
 	}
 
 	if progress != nil {
 		_ = progress.WriteStage("pulling", "Pulling changes...")
 	}
 
-	// git pull --rebase
+	// git pull --rebase (capture stderr for diagnosable error messages)
 	pullCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "pull", "--rebase", "--quiet")
-	if err := pullCmd.Run(); err != nil {
-		s.logger.Warn("pull failed", "error", err)
-		s.recordError("pull failed: " + err.Error())
+	if output, err := pullCmd.CombinedOutput(); err != nil {
+		detail := sanitizeGitOutput(strings.TrimSpace(string(output)))
+		s.logger.Warn("pull failed", "error", err, "output", detail)
+		if detail != "" {
+			s.recordError(fmt.Sprintf("pull failed: %s (%v)", detail, err))
+		} else {
+			s.recordError(fmt.Sprintf("pull failed: %v", err))
+		}
 		s.metrics.RecordPullFailure()
 
 		// check if it's a merge conflict
 		statusCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "status", "--porcelain")
-		if output, _ := statusCmd.Output(); strings.Contains(string(output), "UU") {
+		if statusOutput, _ := statusCmd.Output(); strings.Contains(string(statusOutput), "UU") {
 			s.metrics.RecordConflict()
 
 			// report issue — daemon does not write; next pull will skip via rebase-state check
@@ -818,7 +838,10 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) {
 				})
 			}
 		}
-		return
+		if detail != "" {
+			return fmt.Errorf("ledger pull failed: %s (%w)", detail, err)
+		}
+		return fmt.Errorf("ledger pull failed: %w", err)
 	}
 
 	// sync succeeded - clear any previous merge conflict issue
@@ -841,6 +864,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter) {
 	}
 
 	s.logger.Debug("pull complete", "duration", duration)
+	return nil
 }
 
 // detectForcePush checks if local and remote have diverged (force push scenario).
@@ -1107,20 +1131,21 @@ func (s *SyncScheduler) Sync() error {
 
 // SyncWithProgress performs a full sync with progress updates.
 // If progress is nil, no progress updates are sent.
+// Returns an error if the ledger sync fails (surfaced to CLI via IPC).
 func (s *SyncScheduler) SyncWithProgress(progress *ProgressWriter) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	s.doSyncAll(ctx, progress)
-	return nil
+	return s.doSyncAll(ctx, progress)
 }
 
 // doSyncAll performs pull with optional progress updates.
-func (s *SyncScheduler) doSyncAll(ctx context.Context, progress *ProgressWriter) {
+// Returns an error if the pull fails.
+func (s *SyncScheduler) doSyncAll(ctx context.Context, progress *ProgressWriter) error {
 	// refresh credentials if expired or near expiry
 	s.refreshCredentialsIfNeeded()
 
-	s.doPull(ctx, progress)
+	return s.doPull(ctx, progress)
 }
 
 // isValidRepoPath validates that a repo path is safe to use.
@@ -1800,10 +1825,14 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		}
 	}
 
-	// git fetch
+	// git fetch (capture stderr for diagnosable error messages)
 	fetchCmd := exec.CommandContext(ctx, "git", "-C", path, "fetch", "--quiet")
-	if err := fetchCmd.Run(); err != nil {
-		return err
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
+		detail := sanitizeGitOutput(strings.TrimSpace(string(output)))
+		if detail != "" {
+			return fmt.Errorf("fetch failed: %s (%w)", detail, err)
+		}
+		return fmt.Errorf("fetch failed: %w", err)
 	}
 
 	// track FETCH_HEAD mtime for team context repos
@@ -1811,12 +1840,14 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		s.recordRemoteChange(path, info.ModTime())
 	}
 
-	// git pull --rebase (ignore conflicts - just log)
+	// git pull --rebase (capture stderr for diagnosable error messages)
 	pullCmd := exec.CommandContext(ctx, "git", "-C", path, "pull", "--rebase", "--quiet")
-	if err := pullCmd.Run(); err != nil {
+	if output, err := pullCmd.CombinedOutput(); err != nil {
+		detail := sanitizeGitOutput(strings.TrimSpace(string(output)))
+
 		// check if it's a merge conflict
 		statusCmd := exec.CommandContext(ctx, "git", "-C", path, "status", "--porcelain")
-		if output, _ := statusCmd.Output(); strings.Contains(string(output), "UU") {
+		if statusOutput, _ := statusCmd.Output(); strings.Contains(string(statusOutput), "UU") {
 			s.metrics.RecordConflict()
 
 			// report merge conflict issue — daemon does not write; next pull will skip via rebase-state check
@@ -1830,9 +1861,11 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 					RequiresConfirm: true, // merge resolution needs human approval
 				})
 			}
-			return err
 		}
-		return err
+		if detail != "" {
+			return fmt.Errorf("pull failed: %s (%w)", detail, err)
+		}
+		return fmt.Errorf("pull failed: %w", err)
 	}
 
 	// sync succeeded - clear any previous merge conflict issue for this repo

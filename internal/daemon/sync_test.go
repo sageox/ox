@@ -192,6 +192,76 @@ func TestSyncScheduler_Sync_Method(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestSyncScheduler_SyncWithProgress_PropagatesFetchError(t *testing.T) {
+	// Set up a real git repo with a bogus remote so git fetch fails.
+	// This is the exact scenario that was silently swallowed before:
+	// doPull encounters "exit status 128" from git fetch, but
+	// SyncWithProgress must return that error (not nil).
+	tmpDir := t.TempDir()
+	ledgerDir := filepath.Join(tmpDir, "ledger")
+
+	// init a git repo with a remote that will fail to fetch
+	cmd := exec.Command("git", "init", ledgerDir)
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "-C", ledgerDir, "remote", "add", "origin", "https://127.0.0.1:1/nonexistent.git")
+	require.NoError(t, cmd.Run())
+
+	cfg := DefaultConfig()
+	cfg.LedgerPath = ledgerDir
+	cfg.SyncIntervalRead = 1 * time.Second // low threshold so FETCH_HEAD check doesn't skip
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	err := scheduler.SyncWithProgress(nil)
+	assert.Error(t, err, "SyncWithProgress must propagate git fetch failures")
+	assert.Contains(t, err.Error(), "ledger fetch failed")
+}
+
+func TestSyncScheduler_SyncWithProgress_PropagatesPullError(t *testing.T) {
+	// Set up a repo where fetch succeeds but pull --rebase fails.
+	// Create a local bare repo as remote, clone it, then force-push
+	// a divergent history so pull --rebase fails with a conflict.
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "bare.git")
+	ledgerDir := filepath.Join(tmpDir, "ledger")
+
+	// create bare repo with initial commit
+	require.NoError(t, exec.Command("git", "init", "--bare", bareDir).Run())
+
+	// clone, add initial commit
+	require.NoError(t, exec.Command("git", "clone", bareDir, ledgerDir).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, "file.txt"), []byte("original"), 0644))
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "add", "file.txt").Run())
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "commit", "-m", "initial").Run())
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "push", "origin", "HEAD").Run())
+
+	// create a local commit that will conflict
+	require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, "file.txt"), []byte("local change"), 0644))
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "add", "file.txt").Run())
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "commit", "-m", "local").Run())
+
+	// force-push a conflicting commit to the bare repo from a temp clone
+	tempClone := filepath.Join(tmpDir, "temp")
+	require.NoError(t, exec.Command("git", "clone", bareDir, tempClone).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(tempClone, "file.txt"), []byte("remote change"), 0644))
+	require.NoError(t, exec.Command("git", "-C", tempClone, "add", "file.txt").Run())
+	require.NoError(t, exec.Command("git", "-C", tempClone, "commit", "--amend", "-m", "amended").Run())
+	require.NoError(t, exec.Command("git", "-C", tempClone, "push", "--force", "origin", "HEAD").Run())
+
+	cfg := DefaultConfig()
+	cfg.LedgerPath = ledgerDir
+	cfg.SyncIntervalRead = 1 * time.Second
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	err := scheduler.SyncWithProgress(nil)
+	assert.Error(t, err, "SyncWithProgress must propagate git pull failures")
+	// could be "pull failed" or "diverged" depending on detectForcePush
+	assert.Contains(t, err.Error(), "ledger")
+}
+
 func TestSyncScheduler_ActivityCallback(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.LedgerPath = ""
