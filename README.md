@@ -93,24 +93,21 @@ Here's a real example from [PR #4](https://github.com/sageox/ox/pull/4):
 
 ```mermaid
 flowchart LR
-    subgraph discuss ["🎙️ Discuss"]
-        A1["Ryan & Ajit discuss daemon design"]
-        A2["Captured in Team Context"]
+    subgraph discuss ["🎙️ Ryan and Ajit Discuss"]
+        A1["Captured in Team Context"]
     end
-    subgraph implement ["🤖 Implement"]
-        B1["Ajit builds with Claude"]
-        B3["Session captured in Ledger"]
+    subgraph implement ["🤖 Ajit Implements"]
+        B1["Captured in Ledger"]
     end
-    subgraph review ["🚀 Review"]
-        C1["Ryan opens PR #4"]
-        C2["Has audio, session, and code"]
+    subgraph review ["🚀 Ryan Reviews"]
+        C1["Code + Session + Transcript"]
     end
     discuss --> implement --> review
 ```
 
 Ryan and Ajit discussed the daemon design in a recorded team discussion. Ajit then implemented it with Claude (session captured in the ledger). When Ryan reviewed the PR, he had the full picture — the original discussion audio, the implementation session, and the code.
 
-## ⚙️ Configuration
+## ⚙️  Configuration
 
 SageOx looks for configuration in:
 
