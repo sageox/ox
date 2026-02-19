@@ -70,7 +70,7 @@ func TestHandler_Handle(t *testing.T) {
 		adapter           *mockCLIAdapter
 		catalog           *mockCatalog
 		wantNil           bool
-		wantKind          string
+		wantKind          FailureKind
 		wantSuggestionSet bool
 	}{
 		{
@@ -98,7 +98,7 @@ func TestHandler_Handle(t *testing.T) {
 			},
 			catalog:           newMockCatalog(),
 			wantNil:           false,
-			wantKind:          string(FailureUnknownCommand),
+			wantKind:          FailureUnknownCommand,
 			wantSuggestionSet: true, // levenshtein should find "status"
 		},
 		{
@@ -118,7 +118,7 @@ func TestHandler_Handle(t *testing.T) {
 			},
 			catalog:           newMockCatalog(),
 			wantNil:           false,
-			wantKind:          string(FailureUnknownFlag),
+			wantKind:          FailureUnknownFlag,
 			wantSuggestionSet: true, // levenshtein should find "--verbose"
 		},
 		{
@@ -140,7 +140,7 @@ func TestHandler_Handle(t *testing.T) {
 				return c
 			}(),
 			wantNil:           false,
-			wantKind:          string(FailureUnknownFlag),
+			wantKind:          FailureUnknownFlag,
 			wantSuggestionSet: true,
 		},
 		{
@@ -159,7 +159,7 @@ func TestHandler_Handle(t *testing.T) {
 			},
 			catalog:           newMockCatalog(),
 			wantNil:           false,
-			wantKind:          string(FailureMissingRequired),
+			wantKind:          FailureMissingRequired,
 			wantSuggestionSet: false, // no badtoken or valid options for levenshtein
 		},
 		{
@@ -181,7 +181,7 @@ func TestHandler_Handle(t *testing.T) {
 				return c
 			}(),
 			wantNil:           false,
-			wantKind:          string(FailureUnknownCommand),
+			wantKind:          FailureUnknownCommand,
 			wantSuggestionSet: true,
 		},
 	}
@@ -391,7 +391,7 @@ func TestHandler_Handle_BuildsFrictionEventCorrectly(t *testing.T) {
 
 	// verify FrictionEvent fields are populated correctly
 	assert.NotEmpty(t, event.Timestamp, "timestamp should be set")
-	assert.Equal(t, string(FailureUnknownCommand), event.Kind, "kind should match parsed error")
+	assert.Equal(t, FailureUnknownCommand, event.Kind, "kind should match parsed error")
 	assert.NotEmpty(t, event.Actor, "actor should be set")
 	assert.Contains(t, event.Input, "ox statu", "input should contain original args")
 	assert.Contains(t, event.ErrorMsg, "unknown command", "error_msg should contain raw message")

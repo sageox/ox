@@ -9,14 +9,14 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/frictionapi"
+	"github.com/sageox/ox/internal/uxfriction"
 	"github.com/sageox/ox/internal/version"
 )
 
 const (
 	// frictionBufferSize is the max number of events in the ring buffer.
-	// Events beyond this are silently dropped (oldest first).
-	frictionBufferSize = 200
+	// Matches MaxEventsPerRequest (100) so a full buffer can be sent in one request.
+	frictionBufferSize = 100
 
 	// frictionFlushInterval is the default interval between flush attempts.
 	// 15 minutes is appropriate because friction events are rare (typos/unknown
@@ -38,8 +38,8 @@ const (
 // and Retry-After headers.
 type FrictionCollector struct {
 	mu           sync.Mutex
-	buffer       *frictionapi.RingBuffer
-	client       *frictionapi.Client
+	buffer       *uxfriction.RingBuffer
+	client       *uxfriction.Client
 	catalogCache *CatalogCache
 
 	enabled      bool
@@ -69,7 +69,7 @@ func NewFrictionCollector(logger *slog.Logger, projectEndpoint string) *Friction
 	}
 
 	fc := &FrictionCollector{
-		buffer:       frictionapi.NewRingBuffer(frictionBufferSize),
+		buffer:       uxfriction.NewRingBuffer(frictionBufferSize),
 		catalogCache: NewCatalogCache(),
 		enabled:      enabled,
 		shutdown:     make(chan struct{}),
@@ -79,7 +79,7 @@ func NewFrictionCollector(logger *slog.Logger, projectEndpoint string) *Friction
 	// AuthFunc calls through to fc.getAuthToken, which is wired later via
 	// SetAuthTokenGetter. This lazy indirection lets us create the collector
 	// before the heartbeat handler is ready.
-	fc.client = frictionapi.NewClient(frictionapi.ClientConfig{
+	fc.client = uxfriction.NewClient(uxfriction.ClientConfig{
 		Endpoint: ep,
 		Version:  version.Version,
 		AuthFunc: func() string {
@@ -150,11 +150,10 @@ func (f *FrictionCollector) Stop() {
 }
 
 // RecordFromIPC adds a friction event from an IPC payload.
-// This converts the daemon FrictionPayload to frictionapi.FrictionEvent.
 func (f *FrictionCollector) RecordFromIPC(payload FrictionPayload) {
-	event := frictionapi.FrictionEvent{
+	event := uxfriction.FrictionEvent{
 		Timestamp:  payload.Timestamp,
-		Kind:       payload.Kind,
+		Kind:       uxfriction.FailureKind(payload.Kind),
 		Command:    payload.Command,
 		Subcommand: payload.Subcommand,
 		Actor:      payload.Actor,
@@ -169,7 +168,7 @@ func (f *FrictionCollector) RecordFromIPC(payload FrictionPayload) {
 // Record adds a friction event to the buffer.
 // This is non-blocking and safe for concurrent use.
 // Events are silently dropped if the buffer is full (ring buffer overwrites oldest).
-func (f *FrictionCollector) Record(event frictionapi.FrictionEvent) {
+func (f *FrictionCollector) Record(event uxfriction.FrictionEvent) {
 	if !f.enabled {
 		return
 	}
@@ -234,7 +233,7 @@ func (f *FrictionCollector) flush() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	opts := &frictionapi.SubmitOptions{
+	opts := &uxfriction.SubmitOptions{
 		CatalogVersion: f.catalogCache.Version(),
 	}
 
@@ -271,13 +270,13 @@ func (f *FrictionCollector) CatalogVersion() string {
 
 // CatalogData returns the current cached catalog data.
 // Returns nil if no catalog is cached.
-func (f *FrictionCollector) CatalogData() *frictionapi.CatalogData {
+func (f *FrictionCollector) CatalogData() *uxfriction.CatalogData {
 	return f.catalogCache.Data()
 }
 
 // UpdateCatalog updates the catalog cache with new data.
 // Returns true if the catalog was updated (version changed).
-func (f *FrictionCollector) UpdateCatalog(catalog *frictionapi.CatalogData) (bool, error) {
+func (f *FrictionCollector) UpdateCatalog(catalog *uxfriction.CatalogData) (bool, error) {
 	return f.catalogCache.Update(catalog)
 }
 

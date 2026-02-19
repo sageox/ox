@@ -4,35 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/sageox/ox/internal/frictionapi"
 	"github.com/sageox/ox/internal/uxfriction"
 	"github.com/sageox/ox/internal/uxfriction/adapters"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// toFrictionAPIEvent converts uxfriction.FrictionEvent to frictionapi.FrictionEvent.
-// These are separate types to avoid import cycles between packages.
-func toFrictionAPIEvent(e *uxfriction.FrictionEvent) frictionapi.FrictionEvent {
-	return frictionapi.FrictionEvent{
-		Timestamp:  e.Timestamp,
-		Kind:       e.Kind,
-		Command:    e.Command,
-		Subcommand: e.Subcommand,
-		Actor:      e.Actor,
-		AgentType:  e.AgentType,
-		PathBucket: e.PathBucket,
-		Input:      e.Input,
-		ErrorMsg:   e.ErrorMsg,
-	}
-}
 
 // testCLI builds a realistic CLI for integration testing.
 // Structure:
@@ -232,7 +216,7 @@ func TestIntegration_EndToEnd_CLIWithFriction(t *testing.T) {
 			require.NotNil(t, result.Event, "result should have event")
 
 			// verify event fields
-			assert.Equal(t, string(tc.wantKind), result.Event.Kind, "kind mismatch")
+			assert.Equal(t, tc.wantKind, result.Event.Kind, "kind mismatch")
 			assert.NotEmpty(t, result.Event.Timestamp, "timestamp should be set")
 			assert.NotEmpty(t, result.Event.Actor, "actor should be set")
 			assert.NotEmpty(t, result.Event.PathBucket, "path_bucket should be set")
@@ -252,7 +236,7 @@ func TestIntegration_EndToEnd_CLIWithFriction(t *testing.T) {
 func TestIntegration_FrictionEventsSubmittedToServer(t *testing.T) {
 	t.Parallel()
 
-	var receivedEvents []frictionapi.FrictionEvent
+	var receivedEvents []uxfriction.FrictionEvent
 	var receivedVersion string
 	var requestCount atomic.Int32
 
@@ -266,7 +250,7 @@ func TestIntegration_FrictionEventsSubmittedToServer(t *testing.T) {
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 
 		// decode request
-		var req frictionapi.SubmitRequest
+		var req uxfriction.SubmitRequest
 		err := json.NewDecoder(r.Body).Decode(&req)
 		require.NoError(t, err)
 
@@ -276,7 +260,7 @@ func TestIntegration_FrictionEventsSubmittedToServer(t *testing.T) {
 		// send successful response
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(frictionapi.FrictionResponse{Accepted: len(req.Events)})
+		json.NewEncoder(w).Encode(uxfriction.FrictionResponse{Accepted: len(req.Events)})
 	}))
 	defer server.Close()
 
@@ -286,13 +270,13 @@ func TestIntegration_FrictionEventsSubmittedToServer(t *testing.T) {
 	handler := uxfriction.NewHandler(adapter, nil)
 
 	// create friction client pointing to mock server
-	client := frictionapi.NewClient(frictionapi.ClientConfig{
+	client := uxfriction.NewClient(uxfriction.ClientConfig{
 		Endpoint: server.URL,
 		Version:  "test-0.1.0",
 	})
 
 	// create buffer to collect events
-	buffer := frictionapi.NewRingBuffer(100)
+	buffer := uxfriction.NewRingBuffer(100)
 
 	// simulate CLI errors and collect friction events
 	errorCases := [][]string{
@@ -309,7 +293,7 @@ func TestIntegration_FrictionEventsSubmittedToServer(t *testing.T) {
 		if err != nil {
 			result := handler.Handle(args, err)
 			if result != nil && result.Event != nil {
-				buffer.Add(toFrictionAPIEvent(result.Event))
+				buffer.Add(*result.Event)
 			}
 		}
 	}
@@ -354,18 +338,18 @@ func TestIntegration_RateLimiting(t *testing.T) {
 			w.Header().Set("X-SageOx-Sample-Rate", "0.0")
 		}
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(frictionapi.FrictionResponse{Accepted: 1})
+		json.NewEncoder(w).Encode(uxfriction.FrictionResponse{Accepted: 1})
 	}))
 	defer server.Close()
 
-	client := frictionapi.NewClient(frictionapi.ClientConfig{
+	client := uxfriction.NewClient(uxfriction.ClientConfig{
 		Endpoint: server.URL,
 		Version:  "test-0.1.0",
 	})
 
 	// first submission should succeed
 	assert.True(t, client.ShouldSend(), "should send first request")
-	_, err := client.Submit(context.Background(), []frictionapi.FrictionEvent{{
+	_, err := client.Submit(context.Background(), []uxfriction.FrictionEvent{{
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
 		Kind:       "unknown-command",
 		Actor:      "human",
@@ -393,14 +377,14 @@ func TestIntegration_RetryAfter(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := frictionapi.NewClient(frictionapi.ClientConfig{
+	client := uxfriction.NewClient(uxfriction.ClientConfig{
 		Endpoint: server.URL,
 		Version:  "test-0.1.0",
 	})
 
 	// first request
 	assert.True(t, client.ShouldSend())
-	_, err := client.Submit(context.Background(), []frictionapi.FrictionEvent{{
+	_, err := client.Submit(context.Background(), []uxfriction.FrictionEvent{{
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
 		Kind:       "unknown-command",
 		Actor:      "human",
@@ -419,22 +403,23 @@ func TestIntegration_BufferBoundsUnderLoad(t *testing.T) {
 	t.Parallel()
 
 	const bufferSize = 50
-	buffer := frictionapi.NewRingBuffer(bufferSize)
+	buffer := uxfriction.NewRingBuffer(bufferSize)
 
 	// build handler
 	root := buildTestCLI()
 	adapter := adapters.NewCobraAdapter(root)
 	handler := uxfriction.NewHandler(adapter, nil)
 
-	// simulate heavy load - 1000 errors
+	// simulate heavy load - 1000 unique errors
 	for i := 0; i < 1000; i++ {
+		cmdName := fmt.Sprintf("unknown-cmd-%d", i)
 		root := buildTestCLI()
-		root.SetArgs([]string{"unknown-cmd-" + string(rune('a'+i%26))})
+		root.SetArgs([]string{cmdName})
 		err := root.Execute()
 		if err != nil {
-			result := handler.Handle([]string{"testcli", "unknown"}, err)
+			result := handler.Handle([]string{"testcli", cmdName}, err)
 			if result != nil && result.Event != nil {
-				buffer.Add(toFrictionAPIEvent(result.Event))
+				buffer.Add(*result.Event)
 			}
 		}
 
@@ -462,15 +447,15 @@ func TestIntegration_CatalogUpdateFromServer(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(frictionapi.FrictionResponse{
+		json.NewEncoder(w).Encode(uxfriction.FrictionResponse{
 			Accepted: 1,
-			Catalog: &frictionapi.CatalogData{
+			Catalog: &uxfriction.CatalogData{
 				Version: "v2026-01-20-001",
-				Tokens: []frictionapi.TokenMapping{
+				Tokens: []uxfriction.TokenMapping{
 					{Pattern: "initt", Target: "init", Kind: "unknown-command", Confidence: 0.95},
 					{Pattern: "agnt", Target: "agent", Kind: "unknown-command", Confidence: 0.90},
 				},
-				Commands: []frictionapi.CommandMapping{
+				Commands: []uxfriction.CommandMapping{
 					{Pattern: "daemon status", Target: "status", Confidence: 0.85},
 				},
 			},
@@ -478,13 +463,13 @@ func TestIntegration_CatalogUpdateFromServer(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := frictionapi.NewClient(frictionapi.ClientConfig{
+	client := uxfriction.NewClient(uxfriction.ClientConfig{
 		Endpoint: server.URL,
 		Version:  "test-0.1.0",
 	})
 
 	// submit event
-	resp, err := client.Submit(context.Background(), []frictionapi.FrictionEvent{{
+	resp, err := client.Submit(context.Background(), []uxfriction.FrictionEvent{{
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
 		Kind:       "unknown-command",
 		Actor:      "human",
@@ -504,16 +489,16 @@ func TestIntegration_CatalogUpdateFromServer(t *testing.T) {
 func TestIntegration_EventFieldValidation(t *testing.T) {
 	t.Parallel()
 
-	var receivedEvent frictionapi.FrictionEvent
+	var receivedEvent uxfriction.FrictionEvent
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req frictionapi.SubmitRequest
+		var req uxfriction.SubmitRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		if len(req.Events) > 0 {
 			receivedEvent = req.Events[0]
 		}
 		w.WriteHeader(http.StatusOK)
-		json.NewEncoder(w).Encode(frictionapi.FrictionResponse{Accepted: 1})
+		json.NewEncoder(w).Encode(uxfriction.FrictionResponse{Accepted: 1})
 	}))
 	defer server.Close()
 
@@ -532,11 +517,11 @@ func TestIntegration_EventFieldValidation(t *testing.T) {
 	require.NotNil(t, result.Event)
 
 	// submit to server
-	client := frictionapi.NewClient(frictionapi.ClientConfig{
+	client := uxfriction.NewClient(uxfriction.ClientConfig{
 		Endpoint: server.URL,
 		Version:  "test-0.1.0",
 	})
-	_, submitErr := client.Submit(context.Background(), []frictionapi.FrictionEvent{toFrictionAPIEvent(result.Event)}, nil)
+	_, submitErr := client.Submit(context.Background(), []uxfriction.FrictionEvent{*result.Event}, nil)
 	require.NoError(t, submitErr)
 
 	// verify all required fields are present (matching API spec)
@@ -554,7 +539,7 @@ func TestIntegration_EventFieldValidation(t *testing.T) {
 		"invalid-arg":      true,
 		"parse-error":      true,
 	}
-	assert.True(t, validKinds[receivedEvent.Kind], "kind must be valid enum: %s", receivedEvent.Kind)
+	assert.True(t, validKinds[string(receivedEvent.Kind)], "kind must be valid enum: %s", receivedEvent.Kind)
 
 	// verify actor is valid enum
 	validActors := map[string]bool{
@@ -586,7 +571,7 @@ func TestIntegration_ConcurrentCLIErrors(t *testing.T) {
 		bufferSize         = 100
 	)
 
-	buffer := frictionapi.NewRingBuffer(bufferSize)
+	buffer := uxfriction.NewRingBuffer(bufferSize)
 	var wg bytes.Buffer // just for sync, not used for data
 	done := make(chan struct{})
 
@@ -606,7 +591,7 @@ func TestIntegration_ConcurrentCLIErrors(t *testing.T) {
 					result := handler.Handle([]string{"testcli", "unknown"}, err)
 					if result != nil && result.Event != nil {
 						// buffer.Add is thread-safe
-						buffer.Add(toFrictionAPIEvent(result.Event))
+						buffer.Add(*result.Event)
 					}
 				}
 			}
@@ -636,10 +621,10 @@ func TestIntegration_ConcurrentCLIErrors(t *testing.T) {
 func TestIntegration_TruncationEnforced(t *testing.T) {
 	t.Parallel()
 
-	var receivedEvent frictionapi.FrictionEvent
+	var receivedEvent uxfriction.FrictionEvent
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req frictionapi.SubmitRequest
+		var req uxfriction.SubmitRequest
 		json.NewDecoder(r.Body).Decode(&req)
 		if len(req.Events) > 0 {
 			receivedEvent = req.Events[0]
@@ -658,7 +643,7 @@ func TestIntegration_TruncationEnforced(t *testing.T) {
 		longError[i] = 'e'
 	}
 
-	event := frictionapi.FrictionEvent{
+	event := uxfriction.FrictionEvent{
 		Timestamp:  time.Now().UTC().Format(time.RFC3339),
 		Kind:       "unknown-command",
 		Actor:      "human",
@@ -667,17 +652,17 @@ func TestIntegration_TruncationEnforced(t *testing.T) {
 		ErrorMsg:   string(longError),
 	}
 
-	client := frictionapi.NewClient(frictionapi.ClientConfig{
+	client := uxfriction.NewClient(uxfriction.ClientConfig{
 		Endpoint: server.URL,
 		Version:  "test-0.1.0",
 	})
 
-	_, err := client.Submit(context.Background(), []frictionapi.FrictionEvent{event}, nil)
+	_, err := client.Submit(context.Background(), []uxfriction.FrictionEvent{event}, nil)
 	require.NoError(t, err)
 
 	// verify truncation was applied
-	assert.LessOrEqual(t, len(receivedEvent.Input), frictionapi.MaxInputLength,
+	assert.LessOrEqual(t, len(receivedEvent.Input), uxfriction.MaxInputLength,
 		"input should be truncated to max length")
-	assert.LessOrEqual(t, len(receivedEvent.ErrorMsg), frictionapi.MaxErrorLength,
+	assert.LessOrEqual(t, len(receivedEvent.ErrorMsg), uxfriction.MaxErrorLength,
 		"error_msg should be truncated to max length")
 }

@@ -139,7 +139,7 @@ func TestClient_Submit(t *testing.T) {
 				Version:  "0.5.0",
 			})
 
-			resp, err := client.Submit(context.Background(), tt.events)
+			resp, err := client.Submit(context.Background(), tt.events, nil)
 
 			if tt.wantErr {
 				if err == nil {
@@ -191,7 +191,7 @@ func TestClient_Submit_Truncation(t *testing.T) {
 		{Kind: "unknown-command", Input: longInput, ErrorMsg: longError},
 	}
 
-	_, err := client.Submit(context.Background(), events)
+	_, err := client.Submit(context.Background(), events, nil)
 	if err != nil {
 		t.Fatalf("Submit() error = %v", err)
 	}
@@ -225,7 +225,7 @@ func TestClient_Submit_MaxEvents(t *testing.T) {
 		events[i] = FrictionEvent{Kind: "unknown-command", Input: "test"}
 	}
 
-	_, err := client.Submit(context.Background(), events)
+	_, err := client.Submit(context.Background(), events, nil)
 	if err != nil {
 		t.Fatalf("Submit() error = %v", err)
 	}
@@ -251,7 +251,7 @@ func TestClient_Submit_WithAuth(t *testing.T) {
 		AuthFunc: func() string { return "test-token-123" },
 	})
 
-	_, err := client.Submit(context.Background(), []FrictionEvent{})
+	_, err := client.Submit(context.Background(), []FrictionEvent{}, nil)
 	if err != nil {
 		t.Fatalf("Submit() error = %v", err)
 	}
@@ -372,7 +372,7 @@ func TestClient_UpdateFromHeaders(t *testing.T) {
 				Version:  "0.5.0",
 			})
 
-			_, err := client.Submit(context.Background(), []FrictionEvent{})
+			_, err := client.Submit(context.Background(), []FrictionEvent{}, nil)
 			if err != nil {
 				t.Fatalf("Submit() error = %v", err)
 			}
@@ -415,6 +415,155 @@ func TestClient_Reset(t *testing.T) {
 	}
 	if !client.RetryAfter().IsZero() {
 		t.Error("RetryAfter should be zero after Reset")
+	}
+}
+
+func TestClient_Submit_SendsClientVersionHeader(t *testing.T) {
+	var receivedVersion string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedVersion = r.Header.Get("X-Client-Version")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		Endpoint: server.URL,
+		Version:  "0.9.0",
+	})
+
+	_, err := client.Submit(context.Background(), []FrictionEvent{}, nil)
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+
+	if receivedVersion != "0.9.0" {
+		t.Errorf("X-Client-Version = %q, want %q", receivedVersion, "0.9.0")
+	}
+}
+
+func TestClient_Submit_SendsCatalogVersionHeader(t *testing.T) {
+	var receivedCatalogVersion string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedCatalogVersion = r.Header.Get("X-Catalog-Version")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		Endpoint: server.URL,
+		Version:  "0.9.0",
+	})
+
+	// with opts
+	opts := &SubmitOptions{CatalogVersion: "v2026-01-17-001"}
+	_, err := client.Submit(context.Background(), []FrictionEvent{}, opts)
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+
+	if receivedCatalogVersion != "v2026-01-17-001" {
+		t.Errorf("X-Catalog-Version = %q, want %q", receivedCatalogVersion, "v2026-01-17-001")
+	}
+}
+
+func TestClient_Submit_NoCatalogVersionHeaderWhenNilOpts(t *testing.T) {
+	var receivedCatalogVersion string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedCatalogVersion = r.Header.Get("X-Catalog-Version")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		Endpoint: server.URL,
+		Version:  "0.9.0",
+	})
+
+	_, err := client.Submit(context.Background(), []FrictionEvent{}, nil)
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+
+	if receivedCatalogVersion != "" {
+		t.Errorf("X-Catalog-Version = %q, want empty (nil opts)", receivedCatalogVersion)
+	}
+}
+
+func TestClient_Submit_ParsesCatalogFromResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := FrictionResponse{
+			Accepted: 1,
+			Catalog: &CatalogData{
+				Version: "v2026-01-17-002",
+				Tokens: []TokenMapping{
+					{Pattern: "stauts", Target: "status", Kind: "unknown-command"},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		Endpoint: server.URL,
+		Version:  "0.9.0",
+	})
+
+	resp, err := client.Submit(context.Background(), []FrictionEvent{
+		{Kind: "unknown-command", Input: "ox stauts"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+
+	if resp.Catalog == nil {
+		t.Fatal("Catalog should be parsed from response body")
+	}
+	if resp.Catalog.Version != "v2026-01-17-002" {
+		t.Errorf("Catalog.Version = %q, want %q", resp.Catalog.Version, "v2026-01-17-002")
+	}
+	if len(resp.Catalog.Tokens) != 1 {
+		t.Fatalf("Catalog.Tokens length = %d, want 1", len(resp.Catalog.Tokens))
+	}
+	if resp.Catalog.Tokens[0].Pattern != "stauts" {
+		t.Errorf("Catalog.Tokens[0].Pattern = %q, want %q", resp.Catalog.Tokens[0].Pattern, "stauts")
+	}
+}
+
+func TestClient_Submit_NoCatalogOnNon2xx(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// return catalog data in body, but with 429 status
+		resp := FrictionResponse{
+			Accepted: 0,
+			Catalog: &CatalogData{
+				Version: "v-should-not-parse",
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(ClientConfig{
+		Endpoint: server.URL,
+		Version:  "0.9.0",
+	})
+
+	resp, err := client.Submit(context.Background(), []FrictionEvent{
+		{Kind: "unknown-command", Input: "test"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+
+	if resp.Catalog != nil {
+		t.Errorf("Catalog should be nil on non-2xx response, got version %q", resp.Catalog.Version)
 	}
 }
 

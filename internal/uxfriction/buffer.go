@@ -5,13 +5,16 @@ import (
 )
 
 // RingBuffer is a thread-safe circular buffer for FrictionEvents.
-// When full, new events overwrite the oldest.
+// When full, new events overwrite the oldest. Deduplicates by Kind+Input
+// within each flush window — if an identical event is already in the buffer,
+// the new one is silently dropped.
 type RingBuffer struct {
 	mu       sync.Mutex
 	events   []FrictionEvent
 	capacity int
 	head     int // next write position
 	count    int // current number of stored events
+	seen     map[string]bool
 }
 
 // NewRingBuffer creates a RingBuffer with the given capacity.
@@ -22,13 +25,31 @@ func NewRingBuffer(capacity int) *RingBuffer {
 	return &RingBuffer{
 		events:   make([]FrictionEvent, capacity),
 		capacity: capacity,
+		seen:     make(map[string]bool),
 	}
 }
 
+// dedupeKey returns the deduplication key for an event.
+func dedupeKey(e FrictionEvent) string {
+	return string(e.Kind) + ":" + e.Input
+}
+
 // Add inserts an event into the buffer, overwriting the oldest if full.
+// Duplicate events (same Kind+Input) are silently dropped.
 func (rb *RingBuffer) Add(event FrictionEvent) {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
+
+	key := dedupeKey(event)
+	if rb.seen[key] {
+		return
+	}
+
+	// if overwriting an existing event, remove its dedup key
+	if rb.count == rb.capacity {
+		oldKey := dedupeKey(rb.events[rb.head])
+		delete(rb.seen, oldKey)
+	}
 
 	rb.events[rb.head] = event
 	rb.head = (rb.head + 1) % rb.capacity
@@ -36,6 +57,7 @@ func (rb *RingBuffer) Add(event FrictionEvent) {
 	if rb.count < rb.capacity {
 		rb.count++
 	}
+	rb.seen[key] = true
 }
 
 // Drain returns all events in chronological order (oldest first) and clears the buffer.
@@ -65,6 +87,7 @@ func (rb *RingBuffer) Drain() []FrictionEvent {
 	// clear the buffer
 	rb.head = 0
 	rb.count = 0
+	rb.seen = make(map[string]bool)
 
 	return result
 }

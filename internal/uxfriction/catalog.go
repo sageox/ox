@@ -191,13 +191,9 @@ func (c *FrictionCatalog) LookupCommand(input string) *CommandMapping {
 	}
 
 	for _, mapping := range c.regexCommands {
+		// compiledRegex is pre-compiled by Update(); skip if somehow nil
 		if mapping.compiledRegex == nil {
-			// lazy compile
-			re, err := regexp.Compile(mapping.Pattern)
-			if err != nil {
-				continue
-			}
-			mapping.compiledRegex = re
+			continue
 		}
 		if mapping.compiledRegex.MatchString(normalizedInput) {
 			return mapping

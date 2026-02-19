@@ -129,7 +129,7 @@ func sendFrictionEvent(event *uxfriction.FrictionEvent) {
 	// convert uxfriction event to daemon payload
 	payload := daemon.FrictionPayload{
 		Timestamp:  event.Timestamp,
-		Kind:       event.Kind,
+		Kind:       string(event.Kind),
 		Command:    event.Command,
 		Subcommand: event.Subcommand,
 		Actor:      event.Actor,
