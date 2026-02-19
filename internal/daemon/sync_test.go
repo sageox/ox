@@ -135,7 +135,7 @@ func TestSyncScheduler_DoPull_LedgerDirExistsButNotGitRepo(t *testing.T) {
 
 	// should not panic — previously this would fall through to git pull
 	// on an empty directory since it only checked os.IsNotExist
-	scheduler.doPull(ctx, nil)
+	scheduler.doPull(ctx, nil, false)
 }
 
 func TestSyncScheduler_PullInProgress(t *testing.T) {
@@ -1569,4 +1569,269 @@ func TestClonePermanentBackoffMax(t *testing.T) {
 	// permanent errors should have a much shorter max backoff than transient
 	assert.Less(t, clonePermanentBackoffMax, cloneBackoffMax)
 	assert.Equal(t, 5*time.Minute, clonePermanentBackoffMax)
+}
+
+func TestRemoteRefCheck_NoChanges(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	require.NoError(t, os.MkdirAll(repoDir, 0755))
+	setupGitRepo(t, repoDir)
+
+	cfg := DefaultConfig()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// local and remote are in sync — should return true (skip)
+	ctx := context.Background()
+	assert.True(t, scheduler.remoteRefCheck(ctx, repoDir), "should skip when remote matches local")
+}
+
+func TestRemoteRefCheck_WithChanges(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	require.NoError(t, os.MkdirAll(repoDir, 0755))
+	setupGitRepo(t, repoDir)
+
+	// push a new commit to the bare remote from a separate clone
+	bareDir := repoDir + ".bare"
+	tempClone := filepath.Join(tmpDir, "temp-clone")
+	require.NoError(t, exec.Command("git", "clone", bareDir, tempClone).Run())
+
+	configCmd := exec.Command("git", "-C", tempClone, "config", "user.email", "test@test.com")
+	require.NoError(t, configCmd.Run())
+	configCmd2 := exec.Command("git", "-C", tempClone, "config", "user.name", "Test")
+	require.NoError(t, configCmd2.Run())
+
+	require.NoError(t, os.WriteFile(filepath.Join(tempClone, "new-file.txt"), []byte("new content"), 0644))
+	require.NoError(t, exec.Command("git", "-C", tempClone, "add", ".").Run())
+	require.NoError(t, exec.Command("git", "-C", tempClone, "commit", "-m", "new commit").Run())
+	require.NoError(t, exec.Command("git", "-C", tempClone, "push", "origin", "HEAD:main").Run())
+
+	cfg := DefaultConfig()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// remote has a new commit — should return false (proceed with fetch)
+	ctx := context.Background()
+	assert.False(t, scheduler.remoteRefCheck(ctx, repoDir), "should not skip when remote has new commits")
+}
+
+func TestRemoteRefCheck_ErrorFallsThrough(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	tmpDir := t.TempDir()
+	repoDir := filepath.Join(tmpDir, "repo")
+	require.NoError(t, os.MkdirAll(repoDir, 0755))
+
+	// init repo with a bogus remote that will fail ls-remote
+	require.NoError(t, exec.Command("git", "init", repoDir).Run())
+	require.NoError(t, exec.Command("git", "-C", repoDir, "remote", "add", "origin", "https://127.0.0.1:1/nonexistent.git").Run())
+
+	cfg := DefaultConfig()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// ls-remote should fail — function should return false (fall through to fetch)
+	ctx := context.Background()
+	assert.False(t, scheduler.remoteRefCheck(ctx, repoDir), "should fall through on ls-remote error")
+}
+
+func TestDoPull_SkipsWhenRemoteUnchanged(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	tmpDir := t.TempDir()
+	ledgerDir := filepath.Join(tmpDir, "ledger")
+	require.NoError(t, os.MkdirAll(ledgerDir, 0755))
+	setupGitRepo(t, ledgerDir)
+
+	cfg := DefaultConfig()
+	cfg.LedgerPath = ledgerDir
+	cfg.SyncIntervalRead = 1 * time.Second
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	ctx := context.Background()
+
+	// first pull should succeed (fetches, finds nothing new or syncs)
+	err := scheduler.doPull(ctx, nil, false)
+	assert.NoError(t, err)
+
+	// second pull should be skipped by ls-remote check (remote unchanged)
+	err = scheduler.doPull(ctx, nil, false)
+	assert.NoError(t, err) // no error — just skipped
+}
+
+func TestSyncBackoff_LedgerFetchFailure(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	tmpDir := t.TempDir()
+	ledgerDir := filepath.Join(tmpDir, "ledger")
+
+	// init repo with bogus remote so fetch fails
+	require.NoError(t, exec.Command("git", "init", ledgerDir).Run())
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "config", "user.email", "test@test.com").Run())
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "config", "user.name", "Test").Run())
+	require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, "README.md"), []byte("test"), 0644))
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "add", ".").Run())
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "commit", "-m", "initial").Run())
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "remote", "add", "origin", "https://127.0.0.1:1/nonexistent.git").Run())
+
+	cfg := DefaultConfig()
+	cfg.LedgerPath = ledgerDir
+	cfg.SyncIntervalRead = 1 * time.Second
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	ctx := context.Background()
+
+	// first attempt: should fail (fetch fails on bogus remote)
+	err := scheduler.doPull(ctx, nil, false)
+	assert.Error(t, err, "first pull should fail")
+
+	// verify backoff was recorded
+	failures, nextRetry := scheduler.workspaceRegistry.GetSyncRetryInfo("ledger")
+	assert.Equal(t, 1, failures)
+	assert.False(t, nextRetry.IsZero(), "next retry should be set")
+	assert.True(t, nextRetry.After(time.Now()), "next retry should be in the future")
+
+	// second attempt: should be skipped due to backoff (no error, just skipped)
+	err = scheduler.doPull(ctx, nil, false)
+	assert.NoError(t, err, "second pull should be skipped by backoff (returns nil)")
+}
+
+func TestSyncBackoff_ClearsOnSuccess(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	tmpDir := t.TempDir()
+	ledgerDir := filepath.Join(tmpDir, "ledger")
+	require.NoError(t, os.MkdirAll(ledgerDir, 0755))
+	setupGitRepo(t, ledgerDir)
+
+	cfg := DefaultConfig()
+	cfg.LedgerPath = ledgerDir
+	cfg.SyncIntervalRead = 1 * time.Second
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// artificially set failure state
+	scheduler.workspaceRegistry.RecordSyncFailure("ledger")
+	failures, _ := scheduler.workspaceRegistry.GetSyncRetryInfo("ledger")
+	assert.Equal(t, 1, failures)
+
+	// use forceSync=true to bypass backoff (simulates on-demand sync clearing backoff)
+	ctx := context.Background()
+	err := scheduler.doPull(ctx, nil, true)
+	assert.NoError(t, err)
+
+	// verify doPull's success path cleared the failure state
+	failures, _ = scheduler.workspaceRegistry.GetSyncRetryInfo("ledger")
+	assert.Equal(t, 0, failures)
+}
+
+func TestWorkspaceRegistry_SyncBackoff(t *testing.T) {
+	// unit test the backoff math
+	cfg := DefaultConfig()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// initially should allow sync
+	assert.True(t, scheduler.workspaceRegistry.ShouldSync("ledger"))
+
+	// record failures and verify exponential backoff
+	scheduler.workspaceRegistry.RecordSyncFailure("ledger")
+	assert.False(t, scheduler.workspaceRegistry.ShouldSync("ledger"), "should be in backoff after 1 failure")
+
+	failures, nextRetry := scheduler.workspaceRegistry.GetSyncRetryInfo("ledger")
+	assert.Equal(t, 1, failures)
+	assert.True(t, nextRetry.After(time.Now()))
+
+	// clear should reset
+	scheduler.workspaceRegistry.ClearSyncFailures("ledger")
+	assert.True(t, scheduler.workspaceRegistry.ShouldSync("ledger"), "should allow sync after clear")
+
+	failures, _ = scheduler.workspaceRegistry.GetSyncRetryInfo("ledger")
+	assert.Equal(t, 0, failures)
+}
+
+func TestSyncBackoffMax(t *testing.T) {
+	assert.Equal(t, 30*time.Minute, syncBackoffMax)
+}
+
+func TestExponentialBackoff(t *testing.T) {
+	base := time.Minute
+	maxBack := 30 * time.Minute
+
+	tests := []struct {
+		failures int
+		expected time.Duration
+	}{
+		{0, 1 * time.Minute},
+		{1, 1 * time.Minute},
+		{2, 2 * time.Minute},
+		{3, 4 * time.Minute},
+		{4, 8 * time.Minute},
+		{5, 16 * time.Minute},
+		{6, 30 * time.Minute}, // 32min capped to 30
+		{7, 30 * time.Minute}, // still capped
+		{100, 30 * time.Minute}, // extreme value, still capped
+	}
+	for _, tt := range tests {
+		got := exponentialBackoff(tt.failures, base, maxBack)
+		assert.Equal(t, tt.expected, got, "failures=%d", tt.failures)
+	}
+}
+
+func TestSyncBackoff_SeparateAPIAndGitKeys(t *testing.T) {
+	// verify that API failures don't block git sync and vice versa
+	cfg := DefaultConfig()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// record API failure
+	scheduler.workspaceRegistry.RecordSyncFailure("ledger-api")
+	assert.False(t, scheduler.workspaceRegistry.ShouldSync("ledger-api"), "API should be in backoff")
+	assert.True(t, scheduler.workspaceRegistry.ShouldSync("ledger"), "git sync should NOT be in backoff")
+
+	// record git sync failure
+	scheduler.workspaceRegistry.RecordSyncFailure("ledger")
+	assert.False(t, scheduler.workspaceRegistry.ShouldSync("ledger"), "git sync should be in backoff")
+	assert.False(t, scheduler.workspaceRegistry.ShouldSync("ledger-api"), "API should still be in backoff")
+
+	// clear git sync — API should still be backed off
+	scheduler.workspaceRegistry.ClearSyncFailures("ledger")
+	assert.True(t, scheduler.workspaceRegistry.ShouldSync("ledger"), "git sync should be clear")
+	assert.False(t, scheduler.workspaceRegistry.ShouldSync("ledger-api"), "API should still be in backoff")
+}
+
+func TestSyncBackoff_ForceBypassClearsState(t *testing.T) {
+	cfg := DefaultConfig()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// put ledger into backoff
+	scheduler.workspaceRegistry.RecordSyncFailure("ledger")
+	scheduler.workspaceRegistry.RecordSyncFailure("ledger")
+	assert.False(t, scheduler.workspaceRegistry.ShouldSync("ledger"))
+
+	// forceSync=true should clear and proceed
+	assert.True(t, scheduler.shouldSyncOrBypass("ledger", true))
+	// state should be cleared
+	failures, _ := scheduler.workspaceRegistry.GetSyncRetryInfo("ledger")
+	assert.Equal(t, 0, failures)
 }
