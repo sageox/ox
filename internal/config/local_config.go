@@ -274,9 +274,10 @@ func (c *LocalConfig) SetLedgerPath(path string) {
 }
 
 // UpdateLedgerLastSync updates the last sync time for the ledger.
+// No-ops if Ledger is nil (consistent with UpdateTeamContextLastSync behavior).
 func (c *LocalConfig) UpdateLedgerLastSync() {
 	if c.Ledger == nil {
-		c.Ledger = &LedgerConfig{}
+		return
 	}
 	c.Ledger.LastSync = time.Now().UTC()
 }
