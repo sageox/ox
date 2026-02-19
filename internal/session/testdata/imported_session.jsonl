@@ -1,0 +1,9 @@
+{"_meta":{"schema_version":"1","agent_type":"claude-code","session_id":"test-import-001","started_at":"2026-01-20T14:00:00Z","username":"testdev"}}
+{"ts":"2026-01-20T14:00:01Z","type":"user","content":"Fix the login validation bug in auth.go","seq":1}
+{"ts":"2026-01-20T14:00:05Z","type":"assistant","content":"I'll investigate the login validation issue. Let me read the auth file first.","seq":2}
+{"ts":"2026-01-20T14:00:10Z","type":"tool","tool_name":"Read","tool_input":"/src/auth.go","seq":3}
+{"ts":"2026-01-20T14:00:11Z","type":"tool_result","result":"package auth\n\nfunc ValidateLogin(email string) bool {\n\treturn email != \"\"\n}","seq":4}
+{"ts":"2026-01-20T14:00:15Z","type":"assistant","content":"The validation is too permissive. It only checks for empty strings but doesn't validate email format. I'll fix this.","seq":5}
+{"ts":"2026-01-20T14:00:20Z","type":"system","content":"Build completed successfully.","seq":6}
+{"ts":"2026-01-20T14:00:25Z","type":"user","content":"Looks good, run the tests","seq":7}
+{"ts":"2026-01-20T14:00:30Z","type":"assistant","content":"All tests pass. The login validation now properly checks email format.","seq":8}

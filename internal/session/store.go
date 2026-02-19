@@ -194,6 +194,7 @@ type StoreMeta struct {
 	Model        string    `json:"model,omitempty"`         // LLM model used (e.g., "claude-sonnet-4-20250514")
 	Username     string    `json:"username,omitempty"`
 	RepoID       string    `json:"repo_id,omitempty"`
+	OxVersion    string    `json:"ox_version,omitempty"` // version of ox that created this session
 }
 
 // Writable is an interface for entries that can be written to a session.
@@ -842,6 +843,9 @@ func ParseStoreMeta(m map[string]any) *StoreMeta {
 
 	if v, ok := m["repo_id"].(string); ok {
 		meta.RepoID = v
+	}
+	if v, ok := m["ox_version"].(string); ok {
+		meta.OxVersion = v
 	}
 
 	// created_at (or started_at)

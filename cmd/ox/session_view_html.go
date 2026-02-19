@@ -34,8 +34,8 @@ func viewAsHTML(_ *session.Store, storedSession *session.StoredSession, projectR
 		isRecording = session.IsRecording(projectRoot)
 	}
 
-	// determine HTML path (same directory, .html extension)
-	htmlPath := strings.TrimSuffix(storedSession.Info.FilePath, ".jsonl") + ".html"
+	// determine HTML path (session.html in the session directory)
+	htmlPath := filepath.Join(filepath.Dir(storedSession.Info.FilePath), "session.html")
 
 	// check if HTML exists and is up-to-date
 	needsGeneration := false
@@ -200,10 +200,22 @@ func viewHTMLBuildTemplateData(t *session.StoredSession) *sessionhtml.TemplateDa
 		}
 	}
 
+	// derive sender labels from metadata
+	userLabel := "User"
+	agentLabel := "Assistant"
+	if t.Meta != nil {
+		if t.Meta.Username != "" {
+			userLabel = t.Meta.Username
+		}
+		if t.Meta.AgentType != "" {
+			agentLabel = formatAgentType(t.Meta.AgentType)
+		}
+	}
+
 	// build messages from entries
 	var userMessages, toolCalls int
 	for i, entry := range t.Entries {
-		msg := viewHTMLBuildMessageView(i+1, entry)
+		msg := viewHTMLBuildMessageView(i+1, entry, userLabel, agentLabel)
 		data.Messages = append(data.Messages, msg)
 
 		// count for statistics
@@ -265,7 +277,7 @@ func viewHTMLBuildTitle(t *session.StoredSession) string {
 }
 
 // viewHTMLBuildMessageView converts a session entry to a message view.
-func viewHTMLBuildMessageView(id int, entry map[string]any) sessionhtml.MessageView {
+func viewHTMLBuildMessageView(id int, entry map[string]any, userLabel, agentLabel string) sessionhtml.MessageView {
 	msg := sessionhtml.MessageView{
 		ID: id,
 	}
@@ -274,9 +286,17 @@ func viewHTMLBuildMessageView(id int, entry map[string]any) sessionhtml.MessageV
 	entryType, _ := entry["type"].(string)
 	msg.Type = viewHTMLMapEntryType(entryType)
 
-	// get timestamp
+	// get timestamp - check both "timestamp" and "ts" field names
 	if ts, ok := entry["timestamp"].(string); ok {
 		if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			msg.Timestamp = parsed
+		} else if parsed, err := time.Parse(time.RFC3339, ts); err == nil {
+			msg.Timestamp = parsed
+		}
+	} else if ts, ok := entry["ts"].(string); ok {
+		if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			msg.Timestamp = parsed
+		} else if parsed, err := time.Parse(time.RFC3339, ts); err == nil {
 			msg.Timestamp = parsed
 		}
 	}
@@ -321,6 +341,13 @@ func viewHTMLBuildMessageView(id int, entry map[string]any) sessionhtml.MessageV
 		}
 	}
 
+	// fall back to root-level content (imported JSONL / ox native format)
+	if msg.Content == "" {
+		if content, ok := entry["content"].(string); ok && content != "" {
+			msg.Content = sessionhtml.RenderMarkdown(content)
+		}
+	}
+
 	// reclassify based on content patterns (tool output or system context
 	// that was incorrectly tagged as "user" in the session recording)
 	// extract raw content from either root level or nested data
@@ -332,15 +359,31 @@ func viewHTMLBuildMessageView(id int, entry map[string]any) sessionhtml.MessageV
 	}
 	msg.Type = reclassifyByContent(msg.Type, string(msg.Content), rawContent)
 
+	// set sender label based on final type
+	switch msg.Type {
+	case "user":
+		msg.SenderLabel = userLabel
+	case "assistant":
+		msg.SenderLabel = agentLabel
+	case "system":
+		msg.SenderLabel = "System"
+	case "tool":
+		msg.SenderLabel = "Tool Call"
+	default:
+		msg.SenderLabel = msg.Type
+	}
+
 	return msg
 }
 
 // viewHTMLMapEntryType converts session entry types to display types.
 func viewHTMLMapEntryType(entryType string) string {
 	switch entryType {
-	case "message":
+	case "user":
+		return "user"
+	case "assistant", "message":
 		return "assistant"
-	case "tool_call", "tool_result":
+	case "tool_call", "tool_result", "tool":
 		return "tool"
 	case "system":
 		return "system"
@@ -381,51 +424,6 @@ func viewHTMLTruncateOutput(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-// processContentWithMermaid escapes HTML but preserves Mermaid code blocks for rendering.
-// Mermaid blocks are detected as ```mermaid ... ``` and converted to <pre class="mermaid">.
-func processContentWithMermaid(s string) string {
-	// pattern: ```mermaid followed by content until closing ```
-	const mermaidStart = "```mermaid"
-	const codeEnd = "```"
-
-	var result strings.Builder
-	remaining := s
-
-	for {
-		// find next mermaid block
-		startIdx := strings.Index(remaining, mermaidStart)
-		if startIdx == -1 {
-			// no more mermaid blocks, escape the rest
-			result.WriteString(viewHTMLEscapeHTML(remaining))
-			break
-		}
-
-		// escape content before the mermaid block
-		result.WriteString(viewHTMLEscapeHTML(remaining[:startIdx]))
-
-		// find end of mermaid block
-		afterStart := remaining[startIdx+len(mermaidStart):]
-		endIdx := strings.Index(afterStart, codeEnd)
-		if endIdx == -1 {
-			// no closing ```, escape everything
-			result.WriteString(viewHTMLEscapeHTML(remaining[startIdx:]))
-			break
-		}
-
-		// extract mermaid content (trim leading/trailing whitespace)
-		mermaidContent := strings.TrimSpace(afterStart[:endIdx])
-
-		// wrap in mermaid pre tag (content is NOT escaped so Mermaid.js can parse it)
-		result.WriteString(`<pre class="mermaid">`)
-		result.WriteString(mermaidContent)
-		result.WriteString(`</pre>`)
-
-		// continue after the closing ```
-		remaining = afterStart[endIdx+len(codeEnd):]
-	}
-
-	return result.String()
-}
 
 // viewHTMLCSSRootVars generates the :root CSS variables from theme constants.
 func viewHTMLCSSRootVars() string {
@@ -978,12 +976,7 @@ const viewHTMLTemplate = `<!DOCTYPE html>
             {{if or (eq .Type "tool") (eq .Type "system") (eq .Type "info")}}
             <details class="message-collapsible">
                 <summary class="message-header">
-                    <span class="message-type message-type-{{.Type}}">{{.Type}}</span>
-                    {{if not .Timestamp.IsZero}}
-                    <time datetime="{{.Timestamp.Format "2006-01-02T15:04:05Z07:00"}}">
-                        {{.Timestamp.Format "15:04:05"}}
-                    </time>
-                    {{end}}
+                    <span class="message-type message-type-{{.Type}}">{{.SenderLabel}}</span>
                 </summary>
                 <div class="message-content">{{.Content}}</div>
                 {{if .ToolCall}}
@@ -1013,12 +1006,7 @@ const viewHTMLTemplate = `<!DOCTYPE html>
             </details>
             {{else}}
             <div class="message-header">
-                <span class="message-type message-type-{{.Type}}">{{.Type}}</span>
-                {{if not .Timestamp.IsZero}}
-                <time datetime="{{.Timestamp.Format "2006-01-02T15:04:05Z07:00"}}">
-                    {{.Timestamp.Format "15:04:05"}}
-                </time>
-                {{end}}
+                <span class="message-type message-type-{{.Type}}">{{.SenderLabel}}</span>
             </div>
             <div class="message-content">{{.Content}}</div>
             {{if .ToolCall}}

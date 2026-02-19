@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -12,97 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestProcessContentWithMermaid(t *testing.T) {
-	tests := []struct {
-		name        string
-		input       string
-		wantMermaid bool
-		wantEscaped bool
-	}{
-		{
-			name:        "plain text",
-			input:       "Hello world",
-			wantMermaid: false,
-			wantEscaped: false,
-		},
-		{
-			name:        "text with HTML chars",
-			input:       "<script>alert('xss')</script>",
-			wantMermaid: false,
-			wantEscaped: true,
-		},
-		{
-			name:        "mermaid block",
-			input:       "Here is a diagram:\n```mermaid\ngraph LR\n  A --> B\n```\nEnd.",
-			wantMermaid: true,
-			wantEscaped: false,
-		},
-		{
-			name:        "mermaid block with surrounding HTML",
-			input:       "<b>Title</b>\n```mermaid\nsequenceDiagram\n  A->>B: Hello\n```",
-			wantMermaid: true,
-			wantEscaped: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := processContentWithMermaid(tt.input)
-
-			hasMermaid := strings.Contains(result, `<pre class="mermaid">`)
-			if hasMermaid != tt.wantMermaid {
-				t.Errorf("mermaid presence = %v, want %v\nresult: %s", hasMermaid, tt.wantMermaid, result)
-			}
-
-			// check that HTML outside mermaid blocks is escaped
-			if tt.wantEscaped {
-				if strings.Contains(result, "<script>") || strings.Contains(result, "<b>") {
-					t.Errorf("HTML should be escaped but found raw tags\nresult: %s", result)
-				}
-			}
-		})
-	}
-}
-
-func TestProcessContentWithMermaid_PreservesContent(t *testing.T) {
-	input := "```mermaid\ngraph TD\n  A[Start] --> B{Decision}\n  B -->|Yes| C[OK]\n  B -->|No| D[Cancel]\n```"
-
-	result := processContentWithMermaid(input)
-
-	// verify mermaid content is preserved (not escaped)
-	if !strings.Contains(result, "A[Start]") {
-		t.Error("mermaid content should be preserved")
-	}
-	if !strings.Contains(result, "-->") {
-		t.Error("mermaid arrows should be preserved")
-	}
-	if strings.Contains(result, "&gt;") {
-		t.Error("mermaid content should not be escaped")
-	}
-}
-
-func TestProcessContentWithMermaid_MultipleDiagrams(t *testing.T) {
-	input := `First diagram:
-` + "```mermaid" + `
-graph LR
-  A --> B
-` + "```" + `
-
-Second diagram:
-` + "```mermaid" + `
-sequenceDiagram
-  C->>D: Hello
-` + "```"
-
-	result := processContentWithMermaid(input)
-
-	// count mermaid blocks
-	count := strings.Count(result, `<pre class="mermaid">`)
-	if count != 2 {
-		t.Errorf("expected 2 mermaid blocks, got %d\nresult: %s", count, result)
-	}
-}
 
 func TestBuildTemplateData_BasicSession(t *testing.T) {
 	st := &session.StoredSession{

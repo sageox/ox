@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/version"
 )
 
 // planHistoryEntry represents a single entry in the planning history input.
@@ -35,6 +37,7 @@ type planHistoryMeta struct {
 	AgentType     string `json:"agent_type"`
 	SessionID     string `json:"session_id"`
 	StartedAt     string `json:"started_at"`
+	Username      string `json:"username,omitempty"`
 }
 
 // planHistoryOutput is the JSON output format for plan-history command.
@@ -128,6 +131,35 @@ func runAgentSessionPlanHistory(inst *agentinstance.Instance, args []string) err
 		planPath = filepath.Join(sessionPath, "plan.md")
 		if err := os.WriteFile(planPath, []byte(planContent), 0644); err != nil {
 			return fmt.Errorf("write plan file: %w", err)
+		}
+	}
+
+	// generate supplementary files from the raw session
+	stored, readErr := session.ReadSessionFromPath(rawPath)
+	if readErr == nil && stored != nil {
+		// session.html
+		htmlPath := filepath.Join(sessionPath, "session.html")
+		if genErr := generateHTML(stored, htmlPath); genErr != nil {
+			slog.Debug("generate session HTML", "error", genErr)
+		}
+
+		// session.md (full session markdown)
+		sessionMDPath := filepath.Join(sessionPath, "session.md")
+		mdGen := session.NewMarkdownGenerator()
+		if mdErr := mdGen.GenerateToFile(stored, sessionMDPath); mdErr != nil {
+			slog.Debug("generate session markdown", "error", mdErr)
+		}
+
+		// summary.md
+		summaryMDPath := filepath.Join(sessionPath, "summary.md")
+		summaryMDGen := session.NewSummaryMarkdownGenerator()
+		summaryBytes, summaryErr := summaryMDGen.Generate(stored.Meta, nil, stored.Entries)
+		if summaryErr == nil {
+			if writeErr := os.WriteFile(summaryMDPath, summaryBytes, 0644); writeErr != nil {
+				slog.Debug("write summary markdown", "error", writeErr)
+			}
+		} else {
+			slog.Debug("generate summary markdown", "error", summaryErr)
 		}
 	}
 
@@ -383,6 +415,7 @@ func writePlanHistoryRaw(path string, entries []planHistoryEntry, meta *planHist
 			"created_at":   time.Now().Format(time.RFC3339),
 			"agent_id":     agentID,
 			"session_type": "planning",
+			"ox_version":   version.Version,
 		},
 	}
 	if meta != nil {
@@ -391,6 +424,9 @@ func writePlanHistoryRaw(path string, entries []planHistoryEntry, meta *planHist
 		}
 		if meta.StartedAt != "" {
 			header["metadata"].(map[string]any)["started_at"] = meta.StartedAt
+		}
+		if meta.Username != "" {
+			header["metadata"].(map[string]any)["username"] = meta.Username
 		}
 	}
 	if err := encoder.Encode(header); err != nil {

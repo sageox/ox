@@ -68,6 +68,9 @@ type HistoryMeta struct {
 	// SessionTitle is a human-readable title for this session
 	SessionTitle string `json:"session_title,omitempty"`
 
+	// Username is the authenticated user who created this session
+	Username string `json:"username,omitempty"`
+
 	// MessageCount is the total number of entries captured
 	MessageCount int `json:"message_count,omitempty"`
 
