@@ -142,6 +142,7 @@ type teamContextInfo struct {
 	AgentContextPath    string `json:"agent_context_path,omitempty"`     // full path to distilled-discussions.md
 	AgentContextRelPath string `json:"agent_context_rel_path,omitempty"` // relative path within team context
 	AgentContextHash    string `json:"agent_context_hash,omitempty"`     // content hash for deduplication
+	ReadCommand         string `json:"read_command,omitempty"`           // command to read team discussions
 }
 
 // teamClaudeInstructions holds paths to team instruction files.
@@ -1016,10 +1017,11 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 
 		// always emit team context guidance — discussions may sync after prime runs
 		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "**Team context available** — distilled from recorded team meetings and discussions")
-		fmt.Fprintln(cmd.OutOrStdout(), "(architecture, conventions, product direction). Organized under `discussions/`")
-		fmt.Fprintln(cmd.OutOrStdout(), "by date (e.g., `discussions/2026-02-17*`). This is your source for team knowledge.")
-		fmt.Fprintf(cmd.OutOrStdout(), "Path: `%s`\n", shortenPath(output.TeamContext.Path))
+		fmt.Fprintln(cmd.OutOrStdout(), "**Team context available** — recorded team meetings and discussions")
+		fmt.Fprintln(cmd.OutOrStdout(), "(architecture, conventions, product direction).")
+		fmt.Fprintln(cmd.OutOrStdout())
+		fmt.Fprintln(cmd.OutOrStdout(), "  Read SageOx team discussions:  ox agent team-ctx")
+		fmt.Fprintln(cmd.OutOrStdout())
 		if !output.TeamContext.HasAgentContext {
 			fmt.Fprintln(cmd.OutOrStdout(), "Not yet synced — may appear shortly as the daemon syncs in the background.")
 		}
@@ -1136,9 +1138,10 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 	tc := localCfg.TeamContexts[0]
 
 	info := &teamContextInfo{
-		TeamID:   tc.TeamID,
-		TeamName: tc.TeamName,
-		Path:     tc.Path,
+		TeamID:      tc.TeamID,
+		TeamName:    tc.TeamName,
+		Path:        tc.Path,
+		ReadCommand: "ox agent team-ctx",
 	}
 
 	// if team context directory hasn't synced yet, return partial info
