@@ -59,6 +59,11 @@ type WorkspaceState struct {
 // - Caches loaded config to avoid repeated disk reads
 // - Adds runtime state (Exists, LastErr, SyncInProgress) on top of config
 // - Thread-safe for concurrent access from daemon goroutines
+//
+// INVARIANT: WorkspaceRegistry is the sole writer to config.local.toml within the daemon.
+// All config writes must go through registry methods (UpdateConfigLastSync, PersistLedgerPath, etc.)
+// to prevent cache/disk divergence. Never call config.SaveLocalConfig directly from sync.go
+// or other daemon code.
 type WorkspaceRegistry struct {
 	mu sync.RWMutex
 
@@ -78,7 +83,6 @@ type WorkspaceRegistry struct {
 	localConfigCache    *config.LocalConfig
 	localConfigLoadedAt time.Time
 	configCacheDuration time.Duration
-	configLoading       bool // prevents redundant concurrent loads
 }
 
 // NewWorkspaceRegistry creates a new workspace registry for the given project.
@@ -106,14 +110,6 @@ func (r *WorkspaceRegistry) loadFromConfigLocked() error {
 	if r.localConfigCache != nil && time.Since(r.localConfigLoadedAt) < r.configCacheDuration {
 		return nil // use cached config
 	}
-
-	// if another goroutine is loading, use stale cache (other goroutine is refreshing)
-	if r.configLoading {
-		return nil
-	}
-
-	r.configLoading = true
-	defer func() { r.configLoading = false }()
 
 	// load fresh config
 	localCfg, err := config.LoadLocalConfig(r.projectRoot)
@@ -493,6 +489,31 @@ func (r *WorkspaceRegistry) UpdateConfigLastSync(id string) error {
 	}
 
 	return config.SaveLocalConfig(r.projectRoot, r.localConfigCache)
+}
+
+// PersistLedgerPath saves the ledger path to the config cache and disk.
+// This keeps the cache in sync so UpdateConfigLastSync doesn't overwrite it.
+func (r *WorkspaceRegistry) PersistLedgerPath(path string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.localConfigCache == nil {
+		return nil
+	}
+
+	if r.localConfigCache.Ledger == nil {
+		r.localConfigCache.Ledger = &config.LedgerConfig{Path: path}
+	} else if r.localConfigCache.Ledger.Path == "" {
+		r.localConfigCache.Ledger.Path = path
+	} else {
+		return nil // already has a path
+	}
+
+	if err := config.SaveLocalConfig(r.projectRoot, r.localConfigCache); err != nil {
+		return err
+	}
+	slog.Info("persisted ledger path to config.local.toml", "path", path)
+	return nil
 }
 
 // GetLedgerPath returns the ledger path for quick access.

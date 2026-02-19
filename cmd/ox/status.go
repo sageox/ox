@@ -1405,8 +1405,8 @@ daemon health, and a tree view of all SageOx directory locations.`,
 				// load local config for git repos section
 				localCfg, _ = config.LoadLocalConfig(gitRoot)
 
-				// if no ledger in config, try to get info from cloud API or default path
-				if localCfg.Ledger == nil {
+				// if no ledger path in config, try to get info from cloud API or default path
+				if localCfg.Ledger == nil || localCfg.Ledger.Path == "" {
 					ledgerPath, _ := ledger.DefaultPath()
 
 					// first check if ledger exists locally at default path

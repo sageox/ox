@@ -35,7 +35,6 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
-	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/version"
@@ -1068,25 +1067,14 @@ func (s *SyncScheduler) fetchLedgerURLFromAPI() {
 }
 
 // persistLedgerPath saves the ledger path to config.local.toml for persistence across daemon restarts.
+// Uses the workspace registry's config cache to avoid stale-cache overwrites from UpdateConfigLastSync.
 func (s *SyncScheduler) persistLedgerPath() {
 	ledger := s.workspaceRegistry.GetLedger()
 	if ledger == nil || ledger.Path == "" {
 		return
 	}
-	localCfg, err := config.LoadLocalConfig(s.config.ProjectRoot)
-	if err != nil {
-		s.logger.Warn("failed to load local config for ledger persistence", "error", err)
-		return
-	}
-	if localCfg.Ledger == nil || localCfg.Ledger.Path == "" {
-		localCfg.Ledger = &config.LedgerConfig{
-			Path: ledger.Path,
-		}
-		if err := config.SaveLocalConfig(s.config.ProjectRoot, localCfg); err != nil {
-			s.logger.Warn("failed to persist ledger to config.local.toml", "error", err)
-		} else {
-			s.logger.Info("persisted ledger path to config.local.toml", "path", ledger.Path)
-		}
+	if err := s.workspaceRegistry.PersistLedgerPath(ledger.Path); err != nil {
+		s.logger.Warn("failed to persist ledger to config.local.toml", "error", err)
 	}
 	// trigger clone if ledger doesn't exist on disk (self-healing)
 	if !ledger.Exists && ledger.CloneURL != "" {
