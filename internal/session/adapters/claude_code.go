@@ -7,11 +7,34 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+)
+
+// userContentClass indicates how a user message should be classified.
+// See docs/ai/specs/session-raw-jsonl.md for the entry type definitions
+// that these classifications map to in the output format.
+type userContentClass int
+
+const (
+	userContentUser   userContentClass = iota // genuine human message → type "user"
+	userContentSystem                         // system/framework content → type "system"
+	userContentSkip                           // omit entirely (e.g., pure tool_result)
+)
+
+// regex patterns for stripping system-injected tags from user content.
+// Claude Code injects these tags into user turns for framework context;
+// they should not be attributed to the human user in session recordings.
+var (
+	reStripSystemReminder          = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
+	reStripSystemInstructionUndsc  = regexp.MustCompile(`(?s)<system_instruction>.*?</system_instruction>`)
+	reStripSystemInstructionHyphen = regexp.MustCompile(`(?s)<system-instruction>.*?</system-instruction>`)
+	reStripLocalCommandStdout      = regexp.MustCompile(`(?s)<local-command-stdout>.*?</local-command-stdout>`)
+	reStripLocalCommandCaveat      = regexp.MustCompile(`(?s)<local-command-caveat>.*?</local-command-caveat>`)
 )
 
 // debounceDelay is the time to wait after the last write event before reading
@@ -40,6 +63,12 @@ func (a *ClaudeCodeAdapter) claudeDir() string {
 
 // Detect checks if Claude Code session files are present
 func (a *ClaudeCodeAdapter) Detect() bool {
+	// env var is a stronger signal than filesystem — works in containers
+	// or environments where ~/.claude hasn't been created yet
+	if os.Getenv("CLAUDE_CODE_ENTRYPOINT") != "" {
+		return true
+	}
+
 	claudeDir := a.claudeDir()
 	if claudeDir == "" {
 		return false
@@ -54,11 +83,6 @@ func (a *ClaudeCodeAdapter) Detect() bool {
 	projectsDir := filepath.Join(claudeDir, "projects")
 	if _, err := os.Stat(projectsDir); os.IsNotExist(err) {
 		return false
-	}
-
-	// check for env vars that indicate Claude Code context
-	if os.Getenv("CLAUDE_CODE_ENTRYPOINT") != "" {
-		return true
 	}
 
 	// fallback: check if projects directory has content
@@ -424,8 +448,16 @@ func (a *ClaudeCodeAdapter) parseLine(line []byte) (*RawEntry, error) {
 	// process based on type
 	switch raw.Type {
 	case "user":
-		entry.Role = "user"
-		entry.Content = a.extractUserContent(&raw)
+		content, class := a.classifyUserContent(&raw)
+		switch class {
+		case userContentSkip:
+			return nil, nil
+		case userContentSystem:
+			entry.Role = "system"
+		default:
+			entry.Role = "user"
+		}
+		entry.Content = content
 	case "assistant":
 		entries := a.extractAssistantContent(&raw)
 		if len(entries) == 0 {
@@ -438,13 +470,78 @@ func (a *ClaudeCodeAdapter) parseLine(line []byte) (*RawEntry, error) {
 	return entry, nil
 }
 
-// extractUserContent extracts text content from user messages
-func (a *ClaudeCodeAdapter) extractUserContent(raw *claudeCodeEntry) string {
+// classifyUserContent extracts text content from user messages and classifies
+// the entry as user, system, or skip based on content analysis.
+//
+// Claude Code's JSONL uses type:"user" for ALL messages sent to the model,
+// including system reminders, tool results, skill expansions, and plan mode
+// instructions. This function separates genuine human messages from
+// framework-injected content so raw.jsonl stores correct entry types.
+//
+// See docs/ai/specs/session-raw-jsonl.md for the output format spec.
+// tool_result blocks are omitted because the corresponding tool call is
+// already captured from the assistant's tool_use block (deduplication).
+func (a *ClaudeCodeAdapter) classifyUserContent(raw *claudeCodeEntry) (string, userContentClass) {
+	if raw.Message == nil {
+		return "", userContentSkip
+	}
+
+	// isMeta entries are framework context, not human messages.
+	// Strip system tags for consistency with other system-classified entries.
+	if raw.IsMeta {
+		content := a.extractRawUserText(raw)
+		cleaned := strings.TrimSpace(stripSystemTags(content))
+		if cleaned == "" {
+			cleaned = content
+		}
+		return cleaned, userContentSystem
+	}
+
+	switch content := raw.Message.Content.(type) {
+	case string:
+		return classifyTextContent(content)
+
+	case []interface{}:
+		var textParts []string
+		hasToolResult := false
+		hasText := false
+
+		for _, item := range content {
+			block, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			switch block["type"] {
+			case "text":
+				if text, ok := block["text"].(string); ok {
+					hasText = true
+					textParts = append(textParts, text)
+				}
+			case "tool_result":
+				hasToolResult = true
+				// tool_result blocks are protocol plumbing — the tool call
+				// is already captured from the assistant's tool_use block
+			}
+		}
+
+		// pure tool_result with no text → skip entirely
+		if hasToolResult && !hasText {
+			return "", userContentSkip
+		}
+
+		// classify the joined text content
+		joined := strings.Join(textParts, "\n")
+		return classifyTextContent(joined)
+	}
+
+	return "", userContentSkip
+}
+
+// extractRawUserText extracts text from a user message without classification.
+func (a *ClaudeCodeAdapter) extractRawUserText(raw *claudeCodeEntry) string {
 	if raw.Message == nil {
 		return ""
 	}
-
-	// message.content can be a string or array
 	switch content := raw.Message.Content.(type) {
 	case string:
 		return content
@@ -452,13 +549,8 @@ func (a *ClaudeCodeAdapter) extractUserContent(raw *claudeCodeEntry) string {
 		var parts []string
 		for _, item := range content {
 			if block, ok := item.(map[string]interface{}); ok {
-				switch block["type"] {
-				case "text":
+				if block["type"] == "text" {
 					if text, ok := block["text"].(string); ok {
-						parts = append(parts, text)
-					}
-				case "tool_result":
-					if text, ok := block["content"].(string); ok {
 						parts = append(parts, text)
 					}
 				}
@@ -467,6 +559,65 @@ func (a *ClaudeCodeAdapter) extractUserContent(raw *claudeCodeEntry) string {
 		return strings.Join(parts, "\n")
 	}
 	return ""
+}
+
+// classifyTextContent analyzes text content and returns cleaned text + classification.
+// It detects framework-injected patterns and strips system tags, returning only
+// genuine human content when possible.
+func classifyTextContent(text string) (string, userContentClass) {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return "", userContentSkip
+	}
+
+	// skill expansion marker (ox skills embed this comment)
+	if strings.Contains(text, "<!-- ox-hash:") {
+		return text, userContentSystem
+	}
+
+	// plan mode boilerplate injected by the framework
+	if strings.HasPrefix(trimmed, "Entered plan mode.") ||
+		strings.HasPrefix(trimmed, "Plan mode is active.") ||
+		strings.HasPrefix(trimmed, "Plan mode still active") {
+		return text, userContentSystem
+	}
+
+	// context compaction continuation injected when a session resumes after
+	// hitting the context window limit
+	if strings.HasPrefix(trimmed, "This session is being continued from a previous conversation") {
+		return text, userContentSystem
+	}
+
+	// Claude Code UI prefixes for tool call/result display that leak into
+	// user turns. U+23FA (black circle) = tool call, U+23BF (dentistry) = tool result.
+	if strings.HasPrefix(trimmed, "\u23fa ") || strings.HasPrefix(trimmed, "⏺ ") ||
+		strings.HasPrefix(trimmed, "\u23bf") || strings.HasPrefix(trimmed, "⎿") {
+		return text, userContentSystem
+	}
+
+	// strip system tags and check what remains
+	cleaned := stripSystemTags(text)
+	cleanedTrimmed := strings.TrimSpace(cleaned)
+
+	if cleanedTrimmed == "" {
+		// content was entirely system tags
+		return text, userContentSystem
+	}
+
+	// always return the cleaned form for consistency
+	return cleanedTrimmed, userContentUser
+}
+
+// stripSystemTags removes system-injected XML tags from content.
+// These tags are framework-level context that should not appear in
+// human-attributed session entries.
+func stripSystemTags(text string) string {
+	text = reStripSystemReminder.ReplaceAllString(text, "")
+	text = reStripSystemInstructionUndsc.ReplaceAllString(text, "")
+	text = reStripSystemInstructionHyphen.ReplaceAllString(text, "")
+	text = reStripLocalCommandStdout.ReplaceAllString(text, "")
+	text = reStripLocalCommandCaveat.ReplaceAllString(text, "")
+	return text
 }
 
 // extractAssistantContent extracts content and tool calls from assistant messages

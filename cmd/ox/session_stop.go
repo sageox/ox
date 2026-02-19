@@ -3,12 +3,13 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
+	"path/filepath"
 
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	sessionhtml "github.com/sageox/ox/internal/session/html"
+	"github.com/sageox/ox/internal/version"
 )
 
 // session_stop.go contains session processing logic used by session commands.
@@ -143,6 +144,7 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 		Model:        result.Model,
 		Username:     getDisplayName(projectEndpoint),
 		RepoID:       repoID,
+		OxVersion:    version.Version,
 	}
 	if err := rawWriter.WriteHeader(meta); err != nil {
 		rawWriter.Close()
@@ -236,7 +238,7 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 			// read back the raw session
 			rawSession, readErr := store.ReadSession(filename)
 			if readErr == nil && rawSession != nil {
-				htmlPath := strings.TrimSuffix(result.RawPath, ".jsonl") + ".html"
+				htmlPath := filepath.Join(filepath.Dir(result.RawPath), "session.html")
 				if genErr := htmlGen.GenerateToFile(rawSession, htmlPath); genErr == nil {
 					result.HTMLPath = htmlPath
 				}

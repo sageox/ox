@@ -306,7 +306,7 @@ func TestExtractContent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := extractContent(tt.entry)
+			got := session.ExtractContent(tt.entry)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -452,6 +452,31 @@ func TestCleanMessageContent(t *testing.T) {
 			name:  "returns empty for only tags",
 			input: "<system-reminder>all noise</system-reminder>",
 			want:  "",
+		},
+		{
+			name:  "strips system_instruction blocks",
+			input: "before <system_instruction>internal directive</system_instruction> after",
+			want:  "before  after",
+		},
+		{
+			name:  "strips system-instruction (hyphen) blocks",
+			input: "before <system-instruction>internal directive</system-instruction> after",
+			want:  "before  after",
+		},
+		{
+			name:  "strips all instruction variants together",
+			input: "<system-reminder>r</system-reminder><system_instruction>i</system_instruction><system-instruction>h</system-instruction>Real",
+			want:  "Real",
+		},
+		{
+			name:  "strips local-command-stdout blocks",
+			input: "before <local-command-stdout>## Context Usage\n**Model:** claude-opus</local-command-stdout> after",
+			want:  "before  after",
+		},
+		{
+			name:  "strips local-command-caveat blocks",
+			input: "<local-command-caveat>Caveat: messages below were generated</local-command-caveat>Real content",
+			want:  "Real content",
 		},
 		{
 			name:  "passes through plain text",

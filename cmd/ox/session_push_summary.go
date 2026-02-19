@@ -230,7 +230,7 @@ func regenerateLocalCacheHTML(sessionName string, summaryData []byte) {
 
 	// regenerate HTML using generateHTML() which reads summary.json from
 	// the same directory and populates aha moments, SageOx insights, etc.
-	htmlPath := strings.TrimSuffix(rawPath, ".jsonl") + ".html"
+	htmlPath := filepath.Join(filepath.Dir(rawPath), "session.html")
 	if err := generateHTML(stored, htmlPath); err != nil {
 		slog.Debug("regenerate HTML with rich summary", "error", err)
 		return

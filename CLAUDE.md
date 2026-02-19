@@ -355,6 +355,7 @@ make bump-version NEW_VERSION=0.10.0
 - Utilize modern 2025 TUI best practices when changing or adding UX.
 - Let Edward Tufte inspire data visualization ideas.
 - While `ox` is designed with Agent UX in mind for agentic work, UX output and tool ergonomics optimized for human delight and understanding are extremely important.
+- Agent behavioral guidance belongs in CLI JSON output (e.g., `guidance` field), not in agent-specific skill files — skills should be thin wrappers that relay CLI output.
 - Do not use Terraform tools from HashiCorp, use OpenTufu, due to BSL licensing issues.
 - Don't do git push.
 - Make sure CLI docs version always matches the CLI version.
@@ -379,6 +380,9 @@ Always confirm with human before doing a git commit or a git push in this repo.
 - **One line only.** Concise imperative summary, max ~72 chars (e.g., `fix session expiry on token refresh`)
 - No multi-line bodies, no bullet lists, no paragraphs — the PR is where detail lives
 - Format: `type(scope): summary` or plain imperative sentence
+
+**Community attribution:**
+- When a PR implements a community-filed GitHub issue, include `Co-Authored-By: <name> <email>` (from the issue author) in the commit. This is part of our issue-driven contribution model — see `CONTRIBUTING.md`.
 
 **Pull requests (human-readable):**
 - PRs are the primary vehicle for communicating *what changed and why* to human reviewers

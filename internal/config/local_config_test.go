@@ -380,17 +380,25 @@ func TestLocalConfig_SetLedgerPath(t *testing.T) {
 }
 
 func TestLocalConfig_UpdateLedgerLastSync(t *testing.T) {
-	cfg := &LocalConfig{}
-	before := time.Now().UTC()
+	t.Run("no-ops when ledger is nil", func(t *testing.T) {
+		cfg := &LocalConfig{}
+		cfg.UpdateLedgerLastSync()
+		assert.Nil(t, cfg.Ledger, "should not create lossy LedgerConfig when nil")
+	})
 
-	cfg.UpdateLedgerLastSync()
+	t.Run("updates existing ledger and preserves path", func(t *testing.T) {
+		cfg := &LocalConfig{
+			Ledger: &LedgerConfig{Path: "/some/path"},
+		}
+		before := time.Now().UTC()
+		cfg.UpdateLedgerLastSync()
+		after := time.Now().UTC()
 
-	after := time.Now().UTC()
-
-	require.NotNil(t, cfg.Ledger, "expected ledger to be created")
-	require.True(t, cfg.Ledger.HasLastSync(), "expected last_sync to be set")
-	assert.True(t, !cfg.Ledger.LastSync.Before(before) && !cfg.Ledger.LastSync.After(after),
-		"last_sync %v not in range [%v, %v]", cfg.Ledger.LastSync, before, after)
+		require.True(t, cfg.Ledger.HasLastSync(), "expected last_sync to be set")
+		assert.Equal(t, "/some/path", cfg.Ledger.Path, "path must be preserved")
+		assert.True(t, !cfg.Ledger.LastSync.Before(before) && !cfg.Ledger.LastSync.After(after),
+			"last_sync %v not in range [%v, %v]", cfg.Ledger.LastSync, before, after)
+	})
 }
 
 func TestLocalConfig_GetTeamContext(t *testing.T) {

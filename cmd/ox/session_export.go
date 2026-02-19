@@ -167,7 +167,7 @@ func runSessionExport(cmd *cobra.Command, args []string) error {
 		cli.PrintSuccess(fmt.Sprintf("Exported HTML: %s", cli.StyleFile.Render(outputPath)))
 
 		if openBrowser {
-			if err := openInBrowser("file://" + outputPath); err != nil {
+			if err := cli.OpenInBrowser("file://" + outputPath); err != nil {
 				cli.PrintWarning(fmt.Sprintf("Could not open browser: %v", err))
 			}
 		}

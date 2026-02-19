@@ -40,9 +40,13 @@ func StripANSI(s string) string {
 
 // regex patterns for stripping internal tags from message content
 var (
-	reCommandMessage = regexp.MustCompile(`(?s)<command-message>.*?</command-message>`)
-	reCommandName    = regexp.MustCompile(`<command-name>(.*?)</command-name>`)
-	reSystemReminder = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
+	reCommandMessage    = regexp.MustCompile(`(?s)<command-message>.*?</command-message>`)
+	reCommandName       = regexp.MustCompile(`<command-name>(.*?)</command-name>`)
+	reSystemReminder    = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
+	reSystemInstruction  = regexp.MustCompile(`(?s)<system_instruction>.*?</system_instruction>`)
+	reSystemInstructHyp  = regexp.MustCompile(`(?s)<system-instruction>.*?</system-instruction>`)
+	reLocalCommandStdout = regexp.MustCompile(`(?s)<local-command-stdout>.*?</local-command-stdout>`)
+	reLocalCommandCaveat = regexp.MustCompile(`(?s)<local-command-caveat>.*?</local-command-caveat>`)
 )
 
 // Generator creates HTML session viewers from stored sessions.
@@ -209,7 +213,7 @@ func extractMetadata(t *session.StoredSession) *MetadataView {
 	// try to get end time from footer
 	if t.Footer != nil {
 		if closedAt, ok := t.Footer["closed_at"].(string); ok {
-			if endTime, err := time.Parse(time.RFC3339Nano, closedAt); err == nil {
+			if endTime, ok := session.ParseTimestamp(closedAt); ok {
 				meta.EndedAt = endTime
 			}
 		}
@@ -258,15 +262,13 @@ func convertEntry(index int, entry map[string]any, userLabel, agentLabel string)
 	}
 
 	// extract timestamp
-	if ts, ok := entry["timestamp"].(string); ok {
-		if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
-			msg.Timestamp = parsed
-		}
+	if ts, ok := session.ExtractEntryTimestamp(entry); ok {
+		msg.Timestamp = ts
 	}
 
 	// extract content, strip internal tags, and render markdown.
 	// goldmark strips raw HTML by default, providing XSS safety.
-	raw := cleanMessageContent(extractContent(entry))
+	raw := cleanMessageContent(session.ExtractContent(entry))
 	if strings.TrimSpace(raw) == "" {
 		msg.Content = ""
 	} else {
@@ -286,20 +288,12 @@ func convertEntry(index int, entry map[string]any, userLabel, agentLabel string)
 
 // normalizeMessageType maps various type strings to display-friendly names.
 func normalizeMessageType(t string) string {
-	switch strings.ToLower(t) {
-	case "user", "human":
-		return "user"
-	case "assistant", "ai", "model":
-		return "assistant"
-	case "system":
-		return "system"
-	case "tool", "tool_use", "tool_call":
-		return "tool"
-	case "tool_result", "tool_output":
-		return "tool_result"
-	default:
-		return t
+	// use shared mapper with case-insensitive fallback
+	mapped := session.MapEntryType(strings.ToLower(t))
+	if mapped == "info" {
+		return t // preserve original for unknown types
 	}
+	return mapped
 }
 
 // formatAgentName converts agent type to display name (e.g., "claude-code" -> "Claude Code").
@@ -322,35 +316,6 @@ func formatAgentName(agentType string) string {
 }
 
 // extractContent pulls the content from an entry in various formats.
-func extractContent(entry map[string]any) string {
-	// try direct content field
-	if content, ok := entry["content"].(string); ok {
-		return content
-	}
-
-	// try nested data.content
-	if data, ok := entry["data"].(map[string]any); ok {
-		if content, ok := data["content"].(string); ok {
-			return content
-		}
-		// try data.message
-		if message, ok := data["message"].(string); ok {
-			return message
-		}
-	}
-
-	// try message field
-	if message, ok := entry["message"].(string); ok {
-		return message
-	}
-
-	// try text field
-	if text, ok := entry["text"].(string); ok {
-		return text
-	}
-
-	return ""
-}
 
 // extractToolCall pulls tool call information if present.
 func extractToolCall(entry map[string]any) *ToolCallView {
@@ -430,9 +395,19 @@ func formatValue(val any) string {
 }
 
 // cleanMessageContent strips internal XML tags from message content.
-// - <command-message>...</command-message> blocks are removed entirely
-// - <command-name>/foo</command-name> is replaced with "/foo"
-// - <system-reminder>...</system-reminder> blocks are removed entirely
+// This is a backward-compat safety net for sessions recorded before the adapter-layer
+// classification fix (see adapters/claude_code.go:classifyUserContent). New sessions
+// have correct entry types from the adapter, but pre-fix raw.jsonl files may still
+// contain these tags in user-attributed entries.
+//
+// Tags stripped:
+//   - <command-message>...</command-message> blocks removed entirely
+//   - <command-name>/foo</command-name> replaced with "/foo"
+//   - <system-reminder>...</system-reminder> blocks removed entirely
+//   - <system_instruction>...</system_instruction> blocks removed entirely
+//   - <system-instruction>...</system-instruction> blocks removed entirely
+//   - <local-command-stdout>...</local-command-stdout> blocks removed entirely
+//   - <local-command-caveat>...</local-command-caveat> blocks removed entirely
 func cleanMessageContent(text string) string {
 	text = reCommandMessage.ReplaceAllString(text, "")
 	text = reCommandName.ReplaceAllStringFunc(text, func(match string) string {
@@ -443,6 +418,10 @@ func cleanMessageContent(text string) string {
 		return ""
 	})
 	text = reSystemReminder.ReplaceAllString(text, "")
+	text = reSystemInstruction.ReplaceAllString(text, "")
+	text = reSystemInstructHyp.ReplaceAllString(text, "")
+	text = reLocalCommandStdout.ReplaceAllString(text, "")
+	text = reLocalCommandCaveat.ReplaceAllString(text, "")
 	return strings.TrimSpace(text)
 }
 

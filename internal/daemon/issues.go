@@ -111,6 +111,7 @@ const (
 	IssueTypeAuthExpiring       = "auth_expiring"
 	IssueTypeGitLock            = "git_lock"
 	IssueTypeCloneFailed        = "clone_failed"
+	IssueTypeSyncBackoff        = "sync_backoff"
 )
 
 // severityRank returns a numeric rank for sorting (higher = more severe).

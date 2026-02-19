@@ -49,6 +49,10 @@ type WorkspaceState struct {
 	// clone retry state (for background clones that fail)
 	CloneAttempts    int       `json:"clone_attempts,omitempty"`     // number of failed clone attempts
 	NextCloneAttempt time.Time `json:"next_clone_attempt,omitempty"` // when to retry clone (exponential backoff)
+
+	// sync (fetch/pull) retry state — backoff on consecutive failures
+	SyncFailures    int       `json:"sync_failures,omitempty"`     // consecutive failed sync attempts
+	NextSyncAttempt time.Time `json:"next_sync_attempt,omitempty"` // when to retry sync (exponential backoff)
 }
 
 // WorkspaceRegistry tracks all workspaces (ledger + team contexts) for a daemon.
@@ -59,6 +63,11 @@ type WorkspaceState struct {
 // - Caches loaded config to avoid repeated disk reads
 // - Adds runtime state (Exists, LastErr, SyncInProgress) on top of config
 // - Thread-safe for concurrent access from daemon goroutines
+//
+// INVARIANT: WorkspaceRegistry is the sole writer to config.local.toml within the daemon.
+// All config writes must go through registry methods (UpdateConfigLastSync, PersistLedgerPath, etc.)
+// to prevent cache/disk divergence. Never call config.SaveLocalConfig directly from sync.go
+// or other daemon code.
 type WorkspaceRegistry struct {
 	mu sync.RWMutex
 
@@ -78,7 +87,6 @@ type WorkspaceRegistry struct {
 	localConfigCache    *config.LocalConfig
 	localConfigLoadedAt time.Time
 	configCacheDuration time.Duration
-	configLoading       bool // prevents redundant concurrent loads
 }
 
 // NewWorkspaceRegistry creates a new workspace registry for the given project.
@@ -106,14 +114,6 @@ func (r *WorkspaceRegistry) loadFromConfigLocked() error {
 	if r.localConfigCache != nil && time.Since(r.localConfigLoadedAt) < r.configCacheDuration {
 		return nil // use cached config
 	}
-
-	// if another goroutine is loading, use stale cache (other goroutine is refreshing)
-	if r.configLoading {
-		return nil
-	}
-
-	r.configLoading = true
-	defer func() { r.configLoading = false }()
 
 	// load fresh config
 	localCfg, err := config.LoadLocalConfig(r.projectRoot)
@@ -495,6 +495,31 @@ func (r *WorkspaceRegistry) UpdateConfigLastSync(id string) error {
 	return config.SaveLocalConfig(r.projectRoot, r.localConfigCache)
 }
 
+// PersistLedgerPath saves the ledger path to the config cache and disk.
+// This keeps the cache in sync so UpdateConfigLastSync doesn't overwrite it.
+func (r *WorkspaceRegistry) PersistLedgerPath(path string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.localConfigCache == nil {
+		return nil
+	}
+
+	if r.localConfigCache.Ledger == nil {
+		r.localConfigCache.Ledger = &config.LedgerConfig{Path: path}
+	} else if r.localConfigCache.Ledger.Path == "" {
+		r.localConfigCache.Ledger.Path = path
+	} else {
+		return nil // already has a path
+	}
+
+	if err := config.SaveLocalConfig(r.projectRoot, r.localConfigCache); err != nil {
+		return err
+	}
+	slog.Info("persisted ledger path to config.local.toml", "path", path)
+	return nil
+}
+
 // GetLedgerPath returns the ledger path for quick access.
 func (r *WorkspaceRegistry) GetLedgerPath() string {
 	r.mu.RLock()
@@ -676,6 +701,81 @@ func (r *WorkspaceRegistry) GetCloneRetryInfo(id string) (attempts int, nextAtte
 		return 0, time.Time{}
 	}
 	return ws.CloneAttempts, ws.NextCloneAttempt
+}
+
+// syncBackoffMax caps sync (fetch/pull) backoff at 30 minutes.
+// Shorter than clone backoff (1hr) since syncs are more frequent and recovery is faster.
+const syncBackoffMax = 30 * time.Minute
+
+// exponentialBackoff calculates a capped exponential backoff duration.
+// Returns base * 2^(failures-1), capped at maxBackoff.
+// Used by both sync and clone backoff paths.
+func exponentialBackoff(failures int, base, maxBackoff time.Duration) time.Duration {
+	if failures <= 0 {
+		return base
+	}
+	d := base * (1 << min(failures-1, 10)) // cap shift to avoid overflow
+	if d > maxBackoff {
+		return maxBackoff
+	}
+	return d
+}
+
+// RecordSyncFailure increments the consecutive failure count and sets backoff.
+// Backoff: 1min, 2min, 4min, 8min, 16min, 32min→capped to 30min.
+// Creates a minimal workspace entry if one doesn't exist yet.
+func (r *WorkspaceRegistry) RecordSyncFailure(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	ws := r.workspaces[id]
+	if ws == nil {
+		ws = &WorkspaceState{ID: id}
+		r.workspaces[id] = ws
+	}
+	ws.SyncFailures++
+	ws.NextSyncAttempt = time.Now().Add(exponentialBackoff(ws.SyncFailures, time.Minute, syncBackoffMax))
+}
+
+// ClearSyncFailures resets sync retry state after a successful sync.
+func (r *WorkspaceRegistry) ClearSyncFailures(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	ws := r.workspaces[id]
+	if ws == nil {
+		return
+	}
+	ws.SyncFailures = 0
+	ws.NextSyncAttempt = time.Time{}
+}
+
+// ShouldSync checks if enough time has passed since the last sync failure to retry.
+// Returns true if no previous failures or backoff has expired.
+func (r *WorkspaceRegistry) ShouldSync(id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	ws := r.workspaces[id]
+	if ws == nil {
+		return true
+	}
+	if ws.SyncFailures == 0 || ws.NextSyncAttempt.IsZero() {
+		return true
+	}
+	return time.Now().After(ws.NextSyncAttempt)
+}
+
+// GetSyncRetryInfo returns the current sync retry state for a workspace.
+func (r *WorkspaceRegistry) GetSyncRetryInfo(id string) (failures int, nextAttempt time.Time) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	ws := r.workspaces[id]
+	if ws == nil {
+		return 0, time.Time{}
+	}
+	return ws.SyncFailures, ws.NextSyncAttempt
 }
 
 // RegisterTeamContextsFromAPI registers team contexts discovered from the repo detail API.

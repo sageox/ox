@@ -180,8 +180,7 @@ func (g *MarkdownGenerator) writeEntries(buf *bytes.Buffer, entries []map[string
 
 // writeEntry writes a single entry based on its type.
 func (g *MarkdownGenerator) writeEntry(buf *bytes.Buffer, index int, entry map[string]any, meta *StoreMeta) {
-	entryType := mdExtractEntryType(entry)
-	timestamp := mdExtractTimestamp(entry)
+	entryType := ExtractEntryType(entry)
 	seq := index + 1
 
 	// determine username - use metadata if available
@@ -223,11 +222,7 @@ func (g *MarkdownGenerator) writeEntry(buf *bytes.Buffer, index int, entry map[s
 
 	// write entry header with anchor ID for navigation
 	fmt.Fprintf(buf, "<a id=\"msg-%d\"></a>\n\n", seq)
-	if !timestamp.IsZero() {
-		fmt.Fprintf(buf, "### %s _%s_%s\n\n", role, timestamp.Format("15:04:05"), ahaIndicator)
-	} else {
-		fmt.Fprintf(buf, "### %s (#%d)%s\n\n", role, seq, ahaIndicator)
-	}
+	fmt.Fprintf(buf, "### %s%s\n\n", role, ahaIndicator)
 
 	// write content based on type
 	switch entryType {
@@ -244,7 +239,7 @@ func (g *MarkdownGenerator) writeEntry(buf *bytes.Buffer, index int, entry map[s
 
 // writeMessageContent writes user/assistant/system message content.
 func (g *MarkdownGenerator) writeMessageContent(buf *bytes.Buffer, entry map[string]any) {
-	content := mdExtractContent(entry)
+	content := ExtractContent(entry)
 	if content == "" {
 		buf.WriteString("_No content_\n")
 		return
@@ -329,7 +324,7 @@ func (g *MarkdownGenerator) writeToolResult(buf *bytes.Buffer, entry map[string]
 		}
 	} else {
 		// fallback to content field
-		content := mdExtractContent(entry)
+		content := ExtractContent(entry)
 		if content != "" {
 			g.writeMessageContent(buf, entry)
 		} else {
@@ -366,53 +361,8 @@ func (g *MarkdownGenerator) writeFooter(buf *bytes.Buffer, t *StoredSession) {
 	buf.WriteString("\n---\n")
 }
 
-// mdExtractEntryType gets the type field from an entry.
-func mdExtractEntryType(entry map[string]any) string {
-	if t, ok := entry["type"].(string); ok {
-		return t
-	}
-	return "unknown"
-}
 
-// mdExtractTimestamp gets the timestamp from an entry.
-func mdExtractTimestamp(entry map[string]any) time.Time {
-	if ts, ok := entry["timestamp"].(string); ok {
-		if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
-			return parsed
-		}
-	}
-	return time.Time{}
-}
 
-// mdExtractContent gets content from various field locations.
-func mdExtractContent(entry map[string]any) string {
-	// try direct content field
-	if content, ok := entry["content"].(string); ok {
-		return content
-	}
-
-	// try nested data.content
-	if data, ok := entry["data"].(map[string]any); ok {
-		if content, ok := data["content"].(string); ok {
-			return content
-		}
-		if message, ok := data["message"].(string); ok {
-			return message
-		}
-	}
-
-	// try message field
-	if message, ok := entry["message"].(string); ok {
-		return message
-	}
-
-	// try text field
-	if text, ok := entry["text"].(string); ok {
-		return text
-	}
-
-	return ""
-}
 
 // mdExtractToolName gets the tool name from an entry.
 func mdExtractToolName(entry map[string]any) string {
@@ -501,7 +451,7 @@ func mdExtractEndTime(t *StoredSession) time.Time {
 func mdCountEntryTypes(entries []map[string]any) map[string]int {
 	counts := make(map[string]int)
 	for _, entry := range entries {
-		entryType := mdExtractEntryType(entry)
+		entryType := ExtractEntryType(entry)
 		// normalize similar types
 		switch entryType {
 		case "user", "human":

@@ -5,8 +5,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -431,4 +433,49 @@ func TestIsCheckoutClean(t *testing.T) {
 	t.Run("nonexistent path returns false", func(t *testing.T) {
 		assert.False(t, isCheckoutClean("/nonexistent/path/xyz"), "nonexistent path should return false")
 	})
+}
+
+// TestUpdateConfigLastSync_PreservesLedgerPath verifies that UpdateConfigLastSync
+// does not clobber the ledger path when writing last_sync to disk.
+// This was the root cause of the "daemon synced but ox status shows not cloned" bug:
+// UpdateConfigLastSync used an in-memory cache with Path="" and overwrote the path
+// that persistLedgerPath had just written to disk.
+func TestUpdateConfigLastSync_PreservesLedgerPath(t *testing.T) {
+	projectDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, ".sageox"), 0755))
+
+	// seed config.local.toml with an empty-path ledger (the broken state)
+	localCfg := &config.LocalConfig{
+		Ledger: &config.LedgerConfig{Path: ""},
+	}
+	require.NoError(t, config.SaveLocalConfig(projectDir, localCfg))
+
+	// build registry and load the empty-path config into cache
+	reg := NewWorkspaceRegistry(projectDir, "test-repo")
+	reg.configCacheDuration = 1 * time.Hour // keep cache warm
+	require.NoError(t, reg.LoadFromConfig())
+
+	// simulate daemon discovering ledger via API and registering it
+	ledgerPath := filepath.Join(t.TempDir(), "ledger")
+	require.NoError(t, os.MkdirAll(filepath.Join(ledgerPath, ".git"), 0755))
+	reg.workspaces["ledger"] = &WorkspaceState{
+		ID:   "ledger",
+		Type: WorkspaceTypeLedger,
+		Path: ledgerPath,
+	}
+
+	// persist the discovered path (writes through the cache)
+	require.NoError(t, reg.PersistLedgerPath(ledgerPath))
+
+	// UpdateConfigLastSync writes last_sync through the same cache
+	require.NoError(t, reg.UpdateConfigLastSync("ledger"))
+
+	// reload from disk and verify the path survived
+	reloaded, err := config.LoadLocalConfig(projectDir)
+	require.NoError(t, err)
+	require.NotNil(t, reloaded.Ledger)
+	assert.Equal(t, ledgerPath, reloaded.Ledger.Path,
+		"UpdateConfigLastSync must not clobber ledger path set by PersistLedgerPath")
+	assert.True(t, reloaded.Ledger.HasLastSync(),
+		"last_sync should be set after UpdateConfigLastSync")
 }
