@@ -6,7 +6,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/sageox/ox/internal/frictionapi"
+	"github.com/sageox/ox/internal/uxfriction"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -15,7 +15,7 @@ import (
 // Thread-safe for concurrent access.
 type CatalogCache struct {
 	mu       sync.RWMutex
-	catalog  *frictionapi.CatalogData
+	catalog  *uxfriction.CatalogData
 	filePath string
 }
 
@@ -54,7 +54,7 @@ func (c *CatalogCache) Load() error {
 		return nil
 	}
 
-	var catalog frictionapi.CatalogData
+	var catalog uxfriction.CatalogData
 	if err := json.Unmarshal(data, &catalog); err != nil {
 		// corrupted cache, reset it
 		c.catalog = nil
@@ -68,7 +68,7 @@ func (c *CatalogCache) Load() error {
 // Save writes the catalog to disk.
 // Creates the cache directory if it doesn't exist.
 // Safe to call concurrently.
-func (c *CatalogCache) Save(catalog *frictionapi.CatalogData) error {
+func (c *CatalogCache) Save(catalog *uxfriction.CatalogData) error {
 	if catalog == nil {
 		return nil
 	}
@@ -117,7 +117,7 @@ func (c *CatalogCache) Version() string {
 // Data returns the current catalog data.
 // Returns nil if no catalog is cached.
 // Safe to call concurrently.
-func (c *CatalogCache) Data() *frictionapi.CatalogData {
+func (c *CatalogCache) Data() *uxfriction.CatalogData {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -128,11 +128,11 @@ func (c *CatalogCache) Data() *frictionapi.CatalogData {
 	// return a copy to prevent concurrent modification
 	catalogCopy := *c.catalog
 	if c.catalog.Commands != nil {
-		catalogCopy.Commands = make([]frictionapi.CommandMapping, len(c.catalog.Commands))
+		catalogCopy.Commands = make([]uxfriction.CommandMapping, len(c.catalog.Commands))
 		copy(catalogCopy.Commands, c.catalog.Commands)
 	}
 	if c.catalog.Tokens != nil {
-		catalogCopy.Tokens = make([]frictionapi.TokenMapping, len(c.catalog.Tokens))
+		catalogCopy.Tokens = make([]uxfriction.TokenMapping, len(c.catalog.Tokens))
 		copy(catalogCopy.Tokens, c.catalog.Tokens)
 	}
 
@@ -142,7 +142,7 @@ func (c *CatalogCache) Data() *frictionapi.CatalogData {
 // Update updates the catalog cache if the new version differs from current.
 // Returns true if the catalog was updated.
 // Safe to call concurrently.
-func (c *CatalogCache) Update(catalog *frictionapi.CatalogData) (bool, error) {
+func (c *CatalogCache) Update(catalog *uxfriction.CatalogData) (bool, error) {
 	if catalog == nil {
 		return false, nil
 	}

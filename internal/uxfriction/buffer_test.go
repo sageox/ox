@@ -1,6 +1,7 @@
 package uxfriction
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -51,6 +52,9 @@ func TestNewRingBuffer(t *testing.T) {
 			if rb.head != 0 {
 				t.Errorf("initial head = %d, want 0", rb.head)
 			}
+			if rb.seen == nil {
+				t.Error("seen map should be initialized")
+			}
 		})
 	}
 }
@@ -93,11 +97,10 @@ func TestRingBuffer_Add(t *testing.T) {
 			rb := NewRingBuffer(tc.capacity)
 
 			for i := 0; i < tc.eventsToAdd; i++ {
-				event := FrictionEvent{
-					Kind:  string(FailureInvalidArg),
-					Input: "test",
-				}
-				rb.Add(event)
+				rb.Add(FrictionEvent{
+					Kind:  FailureInvalidArg,
+					Input: fmt.Sprintf("cmd%d", i),
+				})
 			}
 
 			if rb.Count() != tc.expectedCount {
@@ -105,6 +108,81 @@ func TestRingBuffer_Add(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRingBuffer_Dedup(t *testing.T) {
+	t.Run("duplicate events are dropped", func(t *testing.T) {
+		rb := NewRingBuffer(10)
+		rb.Add(FrictionEvent{Kind: FailureUnknownCommand, Input: "ox statu"})
+		rb.Add(FrictionEvent{Kind: FailureUnknownCommand, Input: "ox statu"})
+		rb.Add(FrictionEvent{Kind: FailureUnknownCommand, Input: "ox statu"})
+
+		if rb.Count() != 1 {
+			t.Errorf("Count() = %d, want 1 (duplicates should be dropped)", rb.Count())
+		}
+	})
+
+	t.Run("different kind same input are distinct", func(t *testing.T) {
+		rb := NewRingBuffer(10)
+		rb.Add(FrictionEvent{Kind: FailureUnknownCommand, Input: "ox foo"})
+		rb.Add(FrictionEvent{Kind: FailureUnknownFlag, Input: "ox foo"})
+
+		if rb.Count() != 2 {
+			t.Errorf("Count() = %d, want 2 (different kinds are distinct)", rb.Count())
+		}
+	})
+
+	t.Run("same kind different input are distinct", func(t *testing.T) {
+		rb := NewRingBuffer(10)
+		rb.Add(FrictionEvent{Kind: FailureUnknownCommand, Input: "ox foo"})
+		rb.Add(FrictionEvent{Kind: FailureUnknownCommand, Input: "ox bar"})
+
+		if rb.Count() != 2 {
+			t.Errorf("Count() = %d, want 2 (different inputs are distinct)", rb.Count())
+		}
+	})
+
+	t.Run("dedup resets after drain", func(t *testing.T) {
+		rb := NewRingBuffer(10)
+		rb.Add(FrictionEvent{Kind: FailureUnknownCommand, Input: "ox statu"})
+
+		if rb.Count() != 1 {
+			t.Fatalf("Count() = %d, want 1", rb.Count())
+		}
+
+		rb.Drain()
+
+		// same event should be accepted again after drain
+		rb.Add(FrictionEvent{Kind: FailureUnknownCommand, Input: "ox statu"})
+		if rb.Count() != 1 {
+			t.Errorf("Count() after re-add = %d, want 1 (dedup should reset on drain)", rb.Count())
+		}
+	})
+
+	t.Run("overwritten event key is freed", func(t *testing.T) {
+		rb := NewRingBuffer(2)
+
+		rb.Add(FrictionEvent{Kind: FailureUnknownCommand, Input: "cmd1"})
+		rb.Add(FrictionEvent{Kind: FailureUnknownCommand, Input: "cmd2"})
+		// buffer full: [cmd1, cmd2]
+
+		// cmd3 overwrites cmd1, freeing "unknown-command:cmd1"
+		rb.Add(FrictionEvent{Kind: FailureUnknownCommand, Input: "cmd3"})
+
+		// cmd1 should be accepted again since it was evicted
+		rb.Add(FrictionEvent{Kind: FailureUnknownCommand, Input: "cmd1"})
+
+		events := rb.Drain()
+		if len(events) != 2 {
+			t.Fatalf("Drain() returned %d events, want 2", len(events))
+		}
+		if events[0].Input != "cmd3" {
+			t.Errorf("events[0].Input = %q, want %q", events[0].Input, "cmd3")
+		}
+		if events[1].Input != "cmd1" {
+			t.Errorf("events[1].Input = %q, want %q", events[1].Input, "cmd1")
+		}
+	})
 }
 
 func TestRingBuffer_Drain(t *testing.T) {
@@ -250,8 +328,8 @@ func TestRingBuffer_ConcurrentAdd(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < eventsPerGoroutine; j++ {
 				rb.Add(FrictionEvent{
-					Kind:  string(FailureInvalidArg),
-					Input: "concurrent",
+					Kind:  FailureInvalidArg,
+					Input: fmt.Sprintf("g%d-e%d", goroutineID, j),
 				})
 			}
 		}(i)
@@ -259,10 +337,10 @@ func TestRingBuffer_ConcurrentAdd(t *testing.T) {
 
 	wg.Wait()
 
-	totalAdded := numGoroutines * eventsPerGoroutine
-	expectedCount := rb.capacity // should cap at capacity
-	if totalAdded < rb.capacity {
-		expectedCount = totalAdded
+	totalUnique := numGoroutines * eventsPerGoroutine // 500 unique events
+	expectedCount := rb.capacity                       // capped at 100
+	if totalUnique < rb.capacity {
+		expectedCount = totalUnique
 	}
 
 	if rb.Count() != expectedCount {
@@ -283,15 +361,15 @@ func TestRingBuffer_ConcurrentAddAndDrain(t *testing.T) {
 	numWriters := 5
 	eventsPerWriter := 20
 
-	// start writers
+	// start writers with unique inputs per goroutine+iteration
 	for i := 0; i < numWriters; i++ {
 		wg.Add(1)
-		go func() {
+		go func(writerID int) {
 			defer wg.Done()
 			for j := 0; j < eventsPerWriter; j++ {
-				rb.Add(FrictionEvent{Input: "writer"})
+				rb.Add(FrictionEvent{Input: fmt.Sprintf("w%d-e%d", writerID, j)})
 			}
-		}()
+		}(i)
 	}
 
 	// start readers that drain periodically

@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sageox/ox/internal/frictionapi"
+	"github.com/sageox/ox/internal/uxfriction"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -63,7 +63,7 @@ func TestNewFrictionCollector_UsesProjectEndpoint(t *testing.T) {
 	logger := testLogger()
 	fc := NewFrictionCollector(logger, server.URL)
 
-	fc.Record(frictionapi.FrictionEvent{Kind: "unknown-command", Input: "test"})
+	fc.Record(uxfriction.FrictionEvent{Kind: "unknown-command", Input: "test"})
 	fc.flush()
 
 	assert.True(t, requestReceived.Load(), "friction event should be sent to project endpoint")
@@ -86,7 +86,7 @@ func TestNewFrictionCollector_SendsAuthToken(t *testing.T) {
 	fc := NewFrictionCollector(logger, "")
 	fc.SetAuthTokenGetter(func() string { return "test-friction-token" })
 
-	fc.Record(frictionapi.FrictionEvent{Kind: "unknown-command", Input: "test"})
+	fc.Record(uxfriction.FrictionEvent{Kind: "unknown-command", Input: "test"})
 	fc.flush()
 
 	auth, ok := receivedAuth.Load().(string)
@@ -111,7 +111,7 @@ func TestNewFrictionCollector_NoAuthTokenWhenGetterNotSet(t *testing.T) {
 	fc := NewFrictionCollector(logger, "")
 	// deliberately NOT calling SetAuthTokenGetter
 
-	fc.Record(frictionapi.FrictionEvent{Kind: "unknown-command", Input: "test"})
+	fc.Record(uxfriction.FrictionEvent{Kind: "unknown-command", Input: "test"})
 	fc.flush()
 
 	auth, ok := receivedAuth.Load().(string)
@@ -142,7 +142,7 @@ func TestNewFrictionCollector_EnvVarOverridesProjectEndpoint(t *testing.T) {
 	logger := testLogger()
 	fc := NewFrictionCollector(logger, projectServer.URL)
 
-	fc.Record(frictionapi.FrictionEvent{Kind: "unknown-command", Input: "test"})
+	fc.Record(uxfriction.FrictionEvent{Kind: "unknown-command", Input: "test"})
 	fc.flush()
 
 	assert.True(t, envServerHit.Load(), "env var endpoint should receive the event")
@@ -153,11 +153,11 @@ func TestFrictionCollector_Record(t *testing.T) {
 	logger := testLogger()
 	fc := NewFrictionCollector(logger, "")
 
-	// record some events
-	for range 5 {
-		fc.Record(frictionapi.FrictionEvent{
+	// record some events (unique inputs for dedup)
+	for i := range 5 {
+		fc.Record(uxfriction.FrictionEvent{
 			Kind:  "unknown-command",
-			Input: "test command",
+			Input: fmt.Sprintf("test command %d", i),
 		})
 	}
 
@@ -172,7 +172,7 @@ func TestFrictionCollector_Record_SetsTimestamp(t *testing.T) {
 	fc := NewFrictionCollector(logger, "")
 
 	// record event without timestamp
-	fc.Record(frictionapi.FrictionEvent{
+	fc.Record(uxfriction.FrictionEvent{
 		Kind:  "unknown-command",
 		Input: "test",
 	})
@@ -204,7 +204,7 @@ func TestFrictionCollector_Record_Truncates(t *testing.T) {
 		longInput[i] = 'x'
 	}
 
-	fc.Record(frictionapi.FrictionEvent{
+	fc.Record(uxfriction.FrictionEvent{
 		Kind:  "unknown-command",
 		Input: string(longInput),
 	})
@@ -214,8 +214,8 @@ func TestFrictionCollector_Record_Truncates(t *testing.T) {
 		t.Fatalf("expected 1 event, got %d", len(events))
 	}
 
-	if len(events[0].Input) != frictionapi.MaxInputLength {
-		t.Errorf("Input length = %d, want %d", len(events[0].Input), frictionapi.MaxInputLength)
+	if len(events[0].Input) != uxfriction.MaxInputLength {
+		t.Errorf("Input length = %d, want %d", len(events[0].Input), uxfriction.MaxInputLength)
 	}
 }
 
@@ -227,15 +227,15 @@ func TestFrictionCollector_BoundedMemory_HighLoad(t *testing.T) {
 	logger := testLogger()
 
 	// test the underlying RingBuffer directly for cleaner verification
-	buffer := frictionapi.NewRingBuffer(frictionBufferSize)
+	buffer := uxfriction.NewRingBuffer(frictionBufferSize)
 
 	// record many more events than buffer capacity
 	eventsToAdd := frictionBufferSize * 10 // 10x capacity
 
-	for range eventsToAdd {
-		buffer.Add(frictionapi.FrictionEvent{
+	for i := range eventsToAdd {
+		buffer.Add(uxfriction.FrictionEvent{
 			Kind:  "unknown-command",
-			Input: "test command with some content",
+			Input: fmt.Sprintf("test command %d", i),
 		})
 	}
 
@@ -253,9 +253,9 @@ func TestFrictionCollector_BoundedMemory_HighLoad(t *testing.T) {
 	// (even though early flush may drain some events)
 	fc := NewFrictionCollector(logger, "")
 	for i := range eventsToAdd {
-		fc.Record(frictionapi.FrictionEvent{
+		fc.Record(uxfriction.FrictionEvent{
 			Kind:  "unknown-command",
-			Input: "test",
+			Input: fmt.Sprintf("collector test %d", i),
 		})
 		// verify we never exceed capacity at any point
 		stats := fc.Stats()
@@ -276,18 +276,18 @@ func TestFrictionCollector_BoundedMemory_ConcurrentLoad(t *testing.T) {
 	numGoroutines := 50
 	eventsPerGoroutine := 100
 
-	// launch many concurrent writers
-	for range numGoroutines {
+	// launch many concurrent writers with unique inputs
+	for g := range numGoroutines {
 		wg.Add(1)
-		go func() {
+		go func(goroutineID int) {
 			defer wg.Done()
-			for range eventsPerGoroutine {
-				fc.Record(frictionapi.FrictionEvent{
+			for j := range eventsPerGoroutine {
+				fc.Record(uxfriction.FrictionEvent{
 					Kind:  "unknown-command",
-					Input: "concurrent test",
+					Input: fmt.Sprintf("concurrent g%d-e%d", goroutineID, j),
 				})
 			}
-		}()
+		}(g)
 	}
 
 	wg.Wait()
@@ -316,7 +316,7 @@ func TestFrictionCollector_BackendUnavailable(t *testing.T) {
 
 	// record events
 	for range 50 {
-		fc.Record(frictionapi.FrictionEvent{
+		fc.Record(uxfriction.FrictionEvent{
 			Kind:  "unknown-command",
 			Input: "test",
 		})
@@ -348,7 +348,7 @@ func TestFrictionCollector_BackendTimeout(t *testing.T) {
 
 	// record events
 	for range 10 {
-		fc.Record(frictionapi.FrictionEvent{
+		fc.Record(uxfriction.FrictionEvent{
 			Kind:  "unknown-command",
 			Input: "test",
 		})
@@ -375,7 +375,7 @@ func TestFrictionCollector_BackendConnectionRefused(t *testing.T) {
 
 	// record events
 	for range 10 {
-		fc.Record(frictionapi.FrictionEvent{
+		fc.Record(uxfriction.FrictionEvent{
 			Kind:  "unknown-command",
 			Input: "test",
 		})
@@ -410,7 +410,7 @@ func TestFrictionCollector_RateLimiting_SampleRate(t *testing.T) {
 
 	// first batch - should send
 	for range 10 {
-		fc.Record(frictionapi.FrictionEvent{Kind: "unknown-command", Input: "test"})
+		fc.Record(uxfriction.FrictionEvent{Kind: "unknown-command", Input: "test"})
 	}
 	fc.flush()
 
@@ -421,7 +421,7 @@ func TestFrictionCollector_RateLimiting_SampleRate(t *testing.T) {
 
 	// second batch - should be skipped due to sample rate 0
 	for range 10 {
-		fc.Record(frictionapi.FrictionEvent{Kind: "unknown-command", Input: "test"})
+		fc.Record(uxfriction.FrictionEvent{Kind: "unknown-command", Input: "test"})
 	}
 	fc.flush()
 
@@ -450,7 +450,7 @@ func TestFrictionCollector_RateLimiting_RetryAfter(t *testing.T) {
 
 	// first batch - should send
 	for range 10 {
-		fc.Record(frictionapi.FrictionEvent{Kind: "unknown-command", Input: "test"})
+		fc.Record(uxfriction.FrictionEvent{Kind: "unknown-command", Input: "test"})
 	}
 	fc.flush()
 
@@ -460,7 +460,7 @@ func TestFrictionCollector_RateLimiting_RetryAfter(t *testing.T) {
 
 	// second batch - should be skipped due to Retry-After
 	for range 10 {
-		fc.Record(frictionapi.FrictionEvent{Kind: "unknown-command", Input: "test"})
+		fc.Record(uxfriction.FrictionEvent{Kind: "unknown-command", Input: "test"})
 	}
 	fc.flush()
 
@@ -481,7 +481,7 @@ func TestFrictionCollector_MaxEventsPerRequest(t *testing.T) {
 	var maxReceivedEvents atomic.Int32
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req frictionapi.SubmitRequest
+		var req uxfriction.SubmitRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("failed to decode request: %v", err)
 		}
@@ -505,15 +505,15 @@ func TestFrictionCollector_MaxEventsPerRequest(t *testing.T) {
 	logger := testLogger()
 	fc := NewFrictionCollector(logger, "")
 
-	// record more events than max per request
-	for range 150 {
-		fc.Record(frictionapi.FrictionEvent{Kind: "unknown-command", Input: "test"})
+	// record more events than max per request (unique inputs for dedup)
+	for i := range 150 {
+		fc.Record(uxfriction.FrictionEvent{Kind: "unknown-command", Input: fmt.Sprintf("test %d", i)})
 	}
 	fc.flush()
 
 	// verify events were truncated to max (no single request should exceed max)
-	if maxReceivedEvents.Load() > int32(frictionapi.MaxEventsPerRequest) {
-		t.Errorf("maxReceivedEvents = %d, want <= %d", maxReceivedEvents.Load(), frictionapi.MaxEventsPerRequest)
+	if maxReceivedEvents.Load() > int32(uxfriction.MaxEventsPerRequest) {
+		t.Errorf("maxReceivedEvents = %d, want <= %d", maxReceivedEvents.Load(), uxfriction.MaxEventsPerRequest)
 	}
 }
 
@@ -527,7 +527,7 @@ func TestFrictionCollector_StartStop(t *testing.T) {
 
 	// record some events
 	for range 5 {
-		fc.Record(frictionapi.FrictionEvent{Kind: "unknown-command", Input: "test"})
+		fc.Record(uxfriction.FrictionEvent{Kind: "unknown-command", Input: "test"})
 	}
 
 	// stop should not panic and should return
@@ -570,7 +570,7 @@ func TestFrictionCollector_DisabledNoOp(t *testing.T) {
 	}
 
 	// recording should be no-op
-	fc.Record(frictionapi.FrictionEvent{Kind: "unknown-command", Input: "test"})
+	fc.Record(uxfriction.FrictionEvent{Kind: "unknown-command", Input: "test"})
 
 	stats := fc.Stats()
 	if stats.BufferCount != 0 {
@@ -608,7 +608,7 @@ func TestFrictionCollector_Stats(t *testing.T) {
 
 // TestFrictionCollector_SubmitRequestFormat verifies the JSON format sent to server.
 func TestFrictionCollector_SubmitRequestFormat(t *testing.T) {
-	var receivedReq frictionapi.SubmitRequest
+	var receivedReq uxfriction.SubmitRequest
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// verify headers
@@ -634,7 +634,7 @@ func TestFrictionCollector_SubmitRequestFormat(t *testing.T) {
 	logger := testLogger()
 	fc := NewFrictionCollector(logger, "")
 
-	fc.Record(frictionapi.FrictionEvent{
+	fc.Record(uxfriction.FrictionEvent{
 		Kind:     "unknown-command",
 		Actor:    "human",
 		Input:    "ox foo",
@@ -682,15 +682,15 @@ func TestFrictionCollector_CatalogVersionHeader(t *testing.T) {
 	catalogPath := filepath.Join(tmpDir, "friction-catalog.json")
 
 	// pre-populate catalog cache
-	catalog := &frictionapi.CatalogData{Version: "v2026-01-17-001"}
+	catalog := &uxfriction.CatalogData{Version: "v2026-01-17-001"}
 	data, _ := json.Marshal(catalog)
 	require.NoError(t, os.WriteFile(catalogPath, data, 0600))
 
 	// create collector with custom cache path
 	logger := testLogger()
 	fc := &FrictionCollector{
-		buffer:       frictionapi.NewRingBuffer(frictionBufferSize),
-		client:       frictionapi.NewClient(frictionapi.ClientConfig{Endpoint: server.URL, Version: "test"}),
+		buffer:       uxfriction.NewRingBuffer(frictionBufferSize),
+		client:       uxfriction.NewClient(uxfriction.ClientConfig{Endpoint: server.URL, Version: "test"}),
 		catalogCache: &CatalogCache{filePath: catalogPath},
 		enabled:      true,
 		shutdown:     make(chan struct{}),
@@ -701,7 +701,7 @@ func TestFrictionCollector_CatalogVersionHeader(t *testing.T) {
 	require.NoError(t, fc.catalogCache.Load())
 
 	// record and flush
-	fc.Record(frictionapi.FrictionEvent{Kind: "unknown-command", Input: "test"})
+	fc.Record(uxfriction.FrictionEvent{Kind: "unknown-command", Input: "test"})
 	fc.flush()
 
 	assert.Equal(t, "v2026-01-17-001", receivedVersion)
@@ -712,11 +712,11 @@ func TestFrictionCollector_CatalogUpdateFromResponse(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp := frictionapi.FrictionResponse{
+		resp := uxfriction.FrictionResponse{
 			Accepted: 1,
-			Catalog: &frictionapi.CatalogData{
+			Catalog: &uxfriction.CatalogData{
 				Version: "v2026-01-17-002",
-				Tokens: []frictionapi.TokenMapping{
+				Tokens: []uxfriction.TokenMapping{
 					{Pattern: "prine", Target: "prime", Kind: "unknown-command"},
 				},
 			},
@@ -733,8 +733,8 @@ func TestFrictionCollector_CatalogUpdateFromResponse(t *testing.T) {
 	// create collector with custom cache path
 	logger := testLogger()
 	fc := &FrictionCollector{
-		buffer:       frictionapi.NewRingBuffer(frictionBufferSize),
-		client:       frictionapi.NewClient(frictionapi.ClientConfig{Endpoint: server.URL, Version: "test"}),
+		buffer:       uxfriction.NewRingBuffer(frictionBufferSize),
+		client:       uxfriction.NewClient(uxfriction.ClientConfig{Endpoint: server.URL, Version: "test"}),
 		catalogCache: &CatalogCache{filePath: catalogPath},
 		enabled:      true,
 		shutdown:     make(chan struct{}),
@@ -745,7 +745,7 @@ func TestFrictionCollector_CatalogUpdateFromResponse(t *testing.T) {
 	assert.Empty(t, fc.CatalogVersion())
 
 	// record and flush
-	fc.Record(frictionapi.FrictionEvent{Kind: "unknown-command", Input: "test"})
+	fc.Record(uxfriction.FrictionEvent{Kind: "unknown-command", Input: "test"})
 	fc.flush()
 
 	// catalog should be updated
@@ -772,11 +772,11 @@ func TestFrictionCollector_CatalogNotUpdatedWhenSameVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount.Add(1)
 		// return same version as client has
-		resp := frictionapi.FrictionResponse{
+		resp := uxfriction.FrictionResponse{
 			Accepted: 1,
-			Catalog: &frictionapi.CatalogData{
+			Catalog: &uxfriction.CatalogData{
 				Version: "v1",
-				Tokens:  []frictionapi.TokenMapping{{Pattern: "new", Target: "data"}},
+				Tokens:  []uxfriction.TokenMapping{{Pattern: "new", Target: "data"}},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -789,17 +789,17 @@ func TestFrictionCollector_CatalogNotUpdatedWhenSameVersion(t *testing.T) {
 	catalogPath := filepath.Join(tmpDir, "friction-catalog.json")
 
 	// pre-populate with v1
-	catalog := &frictionapi.CatalogData{
+	catalog := &uxfriction.CatalogData{
 		Version: "v1",
-		Tokens:  []frictionapi.TokenMapping{{Pattern: "old", Target: "data"}},
+		Tokens:  []uxfriction.TokenMapping{{Pattern: "old", Target: "data"}},
 	}
 	data, _ := json.Marshal(catalog)
 	require.NoError(t, os.WriteFile(catalogPath, data, 0600))
 
 	logger := testLogger()
 	fc := &FrictionCollector{
-		buffer:       frictionapi.NewRingBuffer(frictionBufferSize),
-		client:       frictionapi.NewClient(frictionapi.ClientConfig{Endpoint: server.URL, Version: "test"}),
+		buffer:       uxfriction.NewRingBuffer(frictionBufferSize),
+		client:       uxfriction.NewClient(uxfriction.ClientConfig{Endpoint: server.URL, Version: "test"}),
 		catalogCache: &CatalogCache{filePath: catalogPath},
 		enabled:      true,
 		shutdown:     make(chan struct{}),
@@ -808,7 +808,7 @@ func TestFrictionCollector_CatalogNotUpdatedWhenSameVersion(t *testing.T) {
 	require.NoError(t, fc.catalogCache.Load())
 
 	// record and flush
-	fc.Record(frictionapi.FrictionEvent{Kind: "unknown-command", Input: "test"})
+	fc.Record(uxfriction.FrictionEvent{Kind: "unknown-command", Input: "test"})
 	fc.flush()
 
 	// catalog version should still be v1 (no update)
@@ -829,8 +829,8 @@ func TestFrictionCollector_UpdateCatalog(t *testing.T) {
 
 	logger := testLogger()
 	fc := &FrictionCollector{
-		buffer:       frictionapi.NewRingBuffer(frictionBufferSize),
-		client:       frictionapi.NewClient(frictionapi.ClientConfig{Endpoint: "http://test", Version: "test"}),
+		buffer:       uxfriction.NewRingBuffer(frictionBufferSize),
+		client:       uxfriction.NewClient(uxfriction.ClientConfig{Endpoint: "http://test", Version: "test"}),
 		catalogCache: &CatalogCache{filePath: catalogPath},
 		enabled:      true,
 		shutdown:     make(chan struct{}),
@@ -838,9 +838,9 @@ func TestFrictionCollector_UpdateCatalog(t *testing.T) {
 	}
 
 	// manually update catalog
-	catalog := &frictionapi.CatalogData{
+	catalog := &uxfriction.CatalogData{
 		Version: "v1",
-		Commands: []frictionapi.CommandMapping{
+		Commands: []uxfriction.CommandMapping{
 			{Pattern: "old cmd", Target: "new cmd", Confidence: 0.95},
 		},
 	}
@@ -869,14 +869,14 @@ func TestFrictionCollector_StatsIncludesCatalogVersion(t *testing.T) {
 	catalogPath := filepath.Join(tmpDir, "friction-catalog.json")
 
 	// pre-populate catalog
-	catalog := &frictionapi.CatalogData{Version: "v2026-01-17-005"}
+	catalog := &uxfriction.CatalogData{Version: "v2026-01-17-005"}
 	data, _ := json.Marshal(catalog)
 	require.NoError(t, os.WriteFile(catalogPath, data, 0600))
 
 	logger := testLogger()
 	fc := &FrictionCollector{
-		buffer:       frictionapi.NewRingBuffer(frictionBufferSize),
-		client:       frictionapi.NewClient(frictionapi.ClientConfig{Endpoint: "http://test", Version: "test"}),
+		buffer:       uxfriction.NewRingBuffer(frictionBufferSize),
+		client:       uxfriction.NewClient(uxfriction.ClientConfig{Endpoint: "http://test", Version: "test"}),
 		catalogCache: &CatalogCache{filePath: catalogPath},
 		enabled:      true,
 		shutdown:     make(chan struct{}),

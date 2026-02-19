@@ -10,23 +10,23 @@ import (
 func TestNewFrictionEvent(t *testing.T) {
 	tests := []struct {
 		name string
-		kind string
+		kind FailureKind
 	}{
 		{
 			name: "unknown command failure",
-			kind: string(FailureUnknownCommand),
+			kind: FailureUnknownCommand,
 		},
 		{
 			name: "unknown flag failure",
-			kind: string(FailureUnknownFlag),
+			kind: FailureUnknownFlag,
 		},
 		{
 			name: "invalid arg failure",
-			kind: string(FailureInvalidArg),
+			kind: FailureInvalidArg,
 		},
 		{
 			name: "parse error failure",
-			kind: string(FailureParseError),
+			kind: FailureParseError,
 		},
 	}
 
@@ -130,7 +130,7 @@ func TestFrictionEvent_MarshalJSON(t *testing.T) {
 			if result["ts"] != tt.event.Timestamp {
 				t.Errorf("ts = %v, want %v", result["ts"], tt.event.Timestamp)
 			}
-			if result["kind"] != tt.event.Kind {
+			if result["kind"] != string(tt.event.Kind) {
 				t.Errorf("kind = %v, want %v", result["kind"], tt.event.Kind)
 			}
 			if result["actor"] != tt.event.Actor {

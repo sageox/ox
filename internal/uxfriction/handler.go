@@ -115,7 +115,7 @@ func (h *Handler) HandleWithAutoExecute(args []string, err error) *AutoExecuteRe
 	actor, agentType := DetectActor()
 
 	// build friction event
-	event := NewFrictionEvent(string(parsed.Kind))
+	event := NewFrictionEvent(parsed.Kind)
 	event.Command = parsed.Command
 	event.Subcommand = parsed.Subcommand
 	event.Actor = string(actor)

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/sageox/ox/internal/frictionapi"
+	"github.com/sageox/ox/internal/uxfriction"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -43,9 +43,9 @@ func TestCatalogCache_SaveAndLoad(t *testing.T) {
 		filePath: filepath.Join(tmpDir, "catalog.json"),
 	}
 
-	catalog := &frictionapi.CatalogData{
+	catalog := &uxfriction.CatalogData{
 		Version: "v2026-01-17-001",
-		Commands: []frictionapi.CommandMapping{
+		Commands: []uxfriction.CommandMapping{
 			{
 				Pattern:    "daemons list --every",
 				Target:     "daemons show --all",
@@ -53,7 +53,7 @@ func TestCatalogCache_SaveAndLoad(t *testing.T) {
 				Confidence: 0.95,
 			},
 		},
-		Tokens: []frictionapi.TokenMapping{
+		Tokens: []uxfriction.TokenMapping{
 			{
 				Pattern:    "prine",
 				Target:     "prime",
@@ -115,9 +115,9 @@ func TestCatalogCache_Update(t *testing.T) {
 		filePath: filepath.Join(tmpDir, "catalog.json"),
 	}
 
-	catalog1 := &frictionapi.CatalogData{
+	catalog1 := &uxfriction.CatalogData{
 		Version: "v1",
-		Tokens: []frictionapi.TokenMapping{
+		Tokens: []uxfriction.TokenMapping{
 			{Pattern: "typo1", Target: "correct1"},
 		},
 	}
@@ -134,9 +134,9 @@ func TestCatalogCache_Update(t *testing.T) {
 	assert.False(t, updated)
 
 	// new version should update
-	catalog2 := &frictionapi.CatalogData{
+	catalog2 := &uxfriction.CatalogData{
 		Version: "v2",
-		Tokens: []frictionapi.TokenMapping{
+		Tokens: []uxfriction.TokenMapping{
 			{Pattern: "typo2", Target: "correct2"},
 		},
 	}
@@ -174,7 +174,7 @@ func TestCatalogCache_Clear(t *testing.T) {
 	}
 
 	// save first
-	catalog := &frictionapi.CatalogData{Version: "v1"}
+	catalog := &uxfriction.CatalogData{Version: "v1"}
 	err := cache.Save(catalog)
 	require.NoError(t, err)
 
@@ -254,9 +254,9 @@ func TestCatalogCache_DataReturnsCopy(t *testing.T) {
 		filePath: filepath.Join(tmpDir, "catalog.json"),
 	}
 
-	catalog := &frictionapi.CatalogData{
+	catalog := &uxfriction.CatalogData{
 		Version: "v1",
-		Tokens: []frictionapi.TokenMapping{
+		Tokens: []uxfriction.TokenMapping{
 			{Pattern: "original", Target: "correct"},
 		},
 	}
@@ -287,7 +287,7 @@ func TestCatalogCache_ConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(version int) {
 			defer wg.Done()
-			catalog := &frictionapi.CatalogData{
+			catalog := &uxfriction.CatalogData{
 				Version: "v" + string(rune('0'+version)),
 			}
 			_, _ = cache.Update(catalog)
@@ -310,7 +310,7 @@ func TestCatalogCache_SaveCreatesDirectory(t *testing.T) {
 	nestedPath := filepath.Join(tmpDir, "nested", "deep", "catalog.json")
 	cache := &CatalogCache{filePath: nestedPath}
 
-	catalog := &frictionapi.CatalogData{Version: "v1"}
+	catalog := &uxfriction.CatalogData{Version: "v1"}
 	err := cache.Save(catalog)
 	require.NoError(t, err)
 
@@ -332,17 +332,17 @@ func TestCatalogCache_AtomicWrite(t *testing.T) {
 	}
 
 	// save first version
-	catalog1 := &frictionapi.CatalogData{
+	catalog1 := &uxfriction.CatalogData{
 		Version: "v1",
-		Tokens:  []frictionapi.TokenMapping{{Pattern: "a", Target: "b"}},
+		Tokens:  []uxfriction.TokenMapping{{Pattern: "a", Target: "b"}},
 	}
 	err := cache.Save(catalog1)
 	require.NoError(t, err)
 
 	// save second version
-	catalog2 := &frictionapi.CatalogData{
+	catalog2 := &uxfriction.CatalogData{
 		Version: "v2",
-		Tokens:  []frictionapi.TokenMapping{{Pattern: "c", Target: "d"}},
+		Tokens:  []uxfriction.TokenMapping{{Pattern: "c", Target: "d"}},
 	}
 	err = cache.Save(catalog2)
 	require.NoError(t, err)

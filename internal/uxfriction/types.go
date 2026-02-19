@@ -103,7 +103,7 @@ type FrictionEvent struct {
 	Timestamp string `json:"ts"`
 
 	// Kind categorizes the failure type (unknown-command, unknown-flag, invalid-arg, parse-error).
-	Kind string `json:"kind"`
+	Kind FailureKind `json:"kind"`
 
 	// Command is the top-level command (e.g., "agent" in "ox agent prime").
 	Command string `json:"command,omitempty"`
@@ -126,6 +126,9 @@ type FrictionEvent struct {
 
 	// ErrorMsg is the redacted, truncated error message (max 200 chars).
 	ErrorMsg string `json:"error_msg"`
+
+	// Suggestion is an optional suggested correction.
+	Suggestion string `json:"suggestion,omitempty"`
 }
 
 // Field length limits for FrictionEvent.
@@ -135,7 +138,7 @@ const (
 )
 
 // NewFrictionEvent creates a FrictionEvent with current timestamp.
-func NewFrictionEvent(kind string) *FrictionEvent {
+func NewFrictionEvent(kind FailureKind) *FrictionEvent {
 	return &FrictionEvent{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Kind:      kind,
@@ -247,4 +250,14 @@ type AutoExecuteResult struct {
 	// Mapping contains the original catalog mapping (if suggestion came from catalog).
 	// Nil for Levenshtein suggestions.
 	Mapping *CommandMapping
+}
+
+// FrictionResponse represents the API response from friction event submission.
+type FrictionResponse struct {
+	// Accepted is the number of events successfully processed.
+	Accepted int `json:"accepted"`
+
+	// Catalog contains catalog data if updated or client version is stale.
+	// nil if catalog version matches X-Catalog-Version header.
+	Catalog *CatalogData `json:"catalog,omitempty"`
 }

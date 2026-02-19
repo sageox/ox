@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -62,6 +63,15 @@ type SubmitResponse struct {
 	// RetryAfter is the duration to wait before retrying, from Retry-After header.
 	// Zero if not present in response.
 	RetryAfter time.Duration
+
+	// Catalog contains catalog data if updated or client version is stale.
+	Catalog *CatalogData
+}
+
+// SubmitOptions contains optional parameters for Submit.
+type SubmitOptions struct {
+	// CatalogVersion is the current catalog version to send in X-Catalog-Version header.
+	CatalogVersion string
 }
 
 // NewClient creates a new friction client with the given configuration.
@@ -83,7 +93,8 @@ func NewClient(cfg ClientConfig) *Client {
 // The caller should check ShouldSend() before calling Submit to respect rate limiting.
 //
 // Events are truncated to MaxEventsPerRequest (100) if more are provided.
-func (c *Client) Submit(ctx context.Context, events []FrictionEvent) (*SubmitResponse, error) {
+// Pass nil for opts if no catalog version header is needed.
+func (c *Client) Submit(ctx context.Context, events []FrictionEvent, opts *SubmitOptions) (*SubmitResponse, error) {
 	if len(events) == 0 {
 		// empty submission is a heartbeat - still valid
 		events = []FrictionEvent{}
@@ -121,6 +132,12 @@ func (c *Client) Submit(ctx context.Context, events []FrictionEvent) (*SubmitRes
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Client-Version", c.config.Version)
+
+	// add catalog version header if provided
+	if opts != nil && opts.CatalogVersion != "" {
+		req.Header.Set("X-Catalog-Version", opts.CatalogVersion)
+	}
 
 	// add auth header if available
 	if c.config.AuthFunc != nil {
@@ -143,6 +160,17 @@ func (c *Client) Submit(ctx context.Context, events []FrictionEvent) (*SubmitRes
 	// parse response headers and update internal state
 	c.updateFromHeaders(resp.Header, result)
 
+	// parse response body for catalog data
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		respBody, err := io.ReadAll(resp.Body)
+		if err == nil && len(respBody) > 0 {
+			var frictionResp FrictionResponse
+			if json.Unmarshal(respBody, &frictionResp) == nil && frictionResp.Catalog != nil {
+				result.Catalog = frictionResp.Catalog
+			}
+		}
+	}
+
 	return result, nil
 }
 
@@ -152,7 +180,7 @@ func (c *Client) Submit(ctx context.Context, events []FrictionEvent) (*SubmitRes
 // Usage pattern:
 //
 //	if client.ShouldSend() {
-//	    client.Submit(ctx, events)
+//	    client.Submit(ctx, events, nil)
 //	}
 func (c *Client) ShouldSend() bool {
 	c.mu.RLock()
