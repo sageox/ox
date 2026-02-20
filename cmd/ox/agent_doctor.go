@@ -113,8 +113,8 @@ func buildAgentDoctorOutput(agentID, projectRoot string) *AgentDoctorOutput {
 	output.CommitNeeded = commitNeeded
 	output.PushNeeded = pushNeeded
 
-	// build next steps based on state
-	output.NextSteps = buildNextSteps(output)
+	// build next steps based on state, preserving any steps already appended above
+	output.NextSteps = append(output.NextSteps, buildNextSteps(output)...)
 
 	return output
 }
