@@ -782,6 +782,12 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	if s.remoteRefCheck(ctx, s.config.LedgerPath) {
 		// remote matches local — clear any previous failure state
 		s.workspaceRegistry.ClearSyncFailures("ledger")
+
+		// update lastSync: we successfully verified the ledger is current
+		s.mu.Lock()
+		s.lastSync = time.Now()
+		s.mu.Unlock()
+
 		if progress != nil {
 			_ = progress.WriteStage("skipped", "Remote unchanged, skipping pull")
 		}

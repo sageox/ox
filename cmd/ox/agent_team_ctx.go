@@ -33,16 +33,11 @@ func runAgentTeamCtx(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a SageOx project: %w", err)
 	}
 
-	localCfg, err := config.LoadLocalConfig(projectRoot)
-	if err != nil {
-		return fmt.Errorf("failed to load local config: %w", err)
-	}
-
-	if len(localCfg.TeamContexts) == 0 {
+	tc := config.FindRepoTeamContext(projectRoot)
+	if tc == nil {
 		return fmt.Errorf("no team context configured for this project")
 	}
 
-	tc := localCfg.TeamContexts[0]
 	out := cmd.OutOrStdout()
 
 	// list recent discussion files

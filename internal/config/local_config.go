@@ -340,6 +340,39 @@ func (c *LocalConfig) RemoveTeamContext(teamID string) {
 	}
 }
 
+// FindRepoTeamContext returns the team context that belongs to this repo's team.
+// Loads ProjectConfig.TeamID and matches it against LocalConfig.TeamContexts.
+// Falls back to the first configured team context if no match is found.
+// Returns nil if no team contexts are configured.
+func FindRepoTeamContext(projectRoot string) *TeamContext {
+	localCfg, err := LoadLocalConfig(projectRoot)
+	if err != nil || len(localCfg.TeamContexts) == 0 {
+		return nil
+	}
+
+	projectCfg, err := LoadProjectConfig(projectRoot)
+	if err == nil && projectCfg != nil && projectCfg.TeamID != "" {
+		if tc := localCfg.GetTeamContext(projectCfg.TeamID); tc != nil {
+			return tc
+		}
+	}
+
+	// fallback: first configured team context
+	return &localCfg.TeamContexts[0]
+}
+
+// IsRepoTeamContext returns true if the given team ID matches the repo's owning team.
+func IsRepoTeamContext(projectRoot, teamID string) bool {
+	if projectRoot == "" || teamID == "" {
+		return false
+	}
+	projectCfg, err := LoadProjectConfig(projectRoot)
+	if err != nil || projectCfg == nil {
+		return false
+	}
+	return projectCfg.TeamID == teamID
+}
+
 // GetConfiguredEndpoints returns all unique endpoints configured for a project.
 // Collects from: project config only (local config no longer has endpoint fields).
 // Returns empty slice if no endpoints are configured.

@@ -602,13 +602,8 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		}
 	}
 
-	// Ledger section - always show
+	// Ledger - no sub-header, rendered under Project Status
 	b.WriteString("\n")
-	b.WriteString(statusHeaderStyle.Render("Ledger"))
-	b.WriteString("\n")
-	b.WriteString(statusMutedStyle.Render("──────"))
-	b.WriteString("\n")
-
 	if projectRoot == "" {
 		// not in a git repo — ledgers are per-project
 		b.WriteString(statusLabelStyle.Render("Status"))
@@ -624,7 +619,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		if repoID == "" {
 			repoID = "(not registered)"
 		}
-		b.WriteString(statusLabelStyle.Render("Repo"))
+		b.WriteString(statusLabelStyle.Render("Ledger"))
 		b.WriteString(statusMutedStyle.Render(repoID))
 		b.WriteString("\n")
 
@@ -789,18 +784,6 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString("\n")
 	}
 
-	// Team Context section - always show
-	// Source: cloud API only (no filesystem discovery)
-	b.WriteString("\n")
-	b.WriteString(statusHeaderStyle.Render("Team Contexts"))
-	b.WriteString("\n")
-	b.WriteString(statusMutedStyle.Render("─────────────"))
-	b.WriteString("\n")
-
-	// build a map of team paths we've rendered to avoid duplicates
-	renderedTeams := make(map[string]bool)
-	hasAnyTeams := false
-
 	// build lookup for visibility/access from repo detail API
 	teamDetail := make(map[string]api.RepoDetailTeamContext)
 	if repoDetail != nil {
@@ -809,22 +792,58 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		}
 	}
 
-	// Render cloud team contexts
+	// partition team contexts into repo TC vs other TCs
+	repoTeamID := ""
+	if projectCfg != nil {
+		repoTeamID = projectCfg.TeamID
+	}
+
+	type cloudTCEntry struct {
+		info api.RepoInfo
+	}
+	type detailTCEntry struct {
+		info api.RepoDetailTeamContext
+	}
+
+	var repoCloudTC *cloudTCEntry
+	var otherCloudTCs []cloudTCEntry
 	for _, cloudTC := range cloudTeamContexts {
+		if repoTeamID != "" && cloudTC.StableID() == repoTeamID {
+			repoCloudTC = &cloudTCEntry{info: cloudTC}
+		} else {
+			otherCloudTCs = append(otherCloudTCs, cloudTCEntry{info: cloudTC})
+		}
+	}
+
+	var repoDetailTC *detailTCEntry
+	var otherDetailTCs []detailTCEntry
+	if repoDetail != nil {
+		for _, dtc := range repoDetail.TeamContexts {
+			if repoTeamID != "" && dtc.StableID() == repoTeamID {
+				if repoCloudTC == nil {
+					repoDetailTC = &detailTCEntry{info: dtc}
+				}
+			} else {
+				otherDetailTCs = append(otherDetailTCs, detailTCEntry{info: dtc})
+			}
+		}
+	}
+
+	// helper: render a single cloud team context entry
+	renderedTeams := make(map[string]bool)
+	renderCloudTC := func(cloudTC api.RepoInfo) {
 		expectedPath := paths.TeamContextDir(cloudTC.StableID(), projectEndpoint)
 		if renderedTeams[expectedPath] {
-			continue
+			return
 		}
 		renderedTeams[expectedPath] = true
-
-		hasAnyTeams = true
 
 		b.WriteString(statusLabelStyle.Render("Team"))
 		b.WriteString(statusValueStyle.Render(cloudTC.Name))
 		b.WriteString("\n")
 
 		visibility := "private"
-		accessLevel := "member" // cloudTeamContexts only contains teams user is a member of
+		accessLevel := "member"
 		if detail, ok := teamDetail[cloudTC.StableID()]; ok {
 			if detail.Visibility != "" {
 				visibility = detail.Visibility
@@ -841,10 +860,8 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString(statusMutedStyle.Render(expectedPath))
 		b.WriteString("\n")
 
-		// check if team context actually exists on disk
 		gitDir := filepath.Join(expectedPath, ".git")
 		if _, err := os.Stat(gitDir); err == nil {
-			// exists and is a git repo - show as synced
 			status := getGitRepoStatus(expectedPath, time.Time{}, false)
 			if status.Error != "" {
 				b.WriteString(statusLabelStyle.Render("  Status"))
@@ -853,7 +870,6 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 				b.WriteString(statusLabelStyle.Render("  Status"))
 				b.WriteString(formatValue(fmt.Sprintf("%d uncommitted", status.UncommittedCount), "warning"))
 			} else {
-				// look up last sync time from daemon workspace data
 				syncTimeStr := ""
 				if daemonStatus != nil {
 					for _, wsList := range daemonStatus.Workspaces {
@@ -873,7 +889,6 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			}
 			b.WriteString("\n")
 		} else {
-			// not cloned
 			b.WriteString(statusLabelStyle.Render("  Status"))
 			if isDaemonBootstrapping(daemonStatus) {
 				b.WriteString(statusMutedStyle.Render("⟳ setting up..."))
@@ -895,81 +910,103 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString("\n")
 	}
 
-	// also show team contexts from repoDetail (includes public TCs for non-members)
-	if repoDetail != nil {
-		for _, detailTC := range repoDetail.TeamContexts {
-			expectedPath := paths.TeamContextDir(detailTC.StableID(), projectEndpoint)
-			if renderedTeams[expectedPath] {
-				continue // already rendered from cloudTeamContexts
-			}
-			renderedTeams[expectedPath] = true
-			hasAnyTeams = true
+	// helper: render a single detail-only team context entry
+	renderDetailTC := func(detailTC api.RepoDetailTeamContext) {
+		expectedPath := paths.TeamContextDir(detailTC.StableID(), projectEndpoint)
+		if renderedTeams[expectedPath] {
+			return
+		}
+		renderedTeams[expectedPath] = true
 
-			b.WriteString(statusLabelStyle.Render("Team"))
-			b.WriteString(statusValueStyle.Render(detailTC.Name))
-			b.WriteString("\n")
+		b.WriteString(statusLabelStyle.Render("Team"))
+		b.WriteString(statusValueStyle.Render(detailTC.Name))
+		b.WriteString("\n")
 
-			detailVisibility := "private"
-			if detailTC.Visibility != "" {
-				detailVisibility = detailTC.Visibility
-			}
-			b.WriteString(statusLabelStyle.Render("  Visibility"))
-			b.WriteString(renderVisibilityWithAccess(detailVisibility, detailTC.AccessLevel))
-			b.WriteString("\n")
-			b.WriteString(statusLabelStyle.Render("  Path"))
-			b.WriteString(statusMutedStyle.Render(expectedPath))
-			b.WriteString("\n")
+		detailVisibility := "private"
+		if detailTC.Visibility != "" {
+			detailVisibility = detailTC.Visibility
+		}
+		b.WriteString(statusLabelStyle.Render("  Visibility"))
+		b.WriteString(renderVisibilityWithAccess(detailVisibility, detailTC.AccessLevel))
+		b.WriteString("\n")
+		b.WriteString(statusLabelStyle.Render("  Path"))
+		b.WriteString(statusMutedStyle.Render(expectedPath))
+		b.WriteString("\n")
 
-			// check if team context exists on disk
-			gitDir := filepath.Join(expectedPath, ".git")
-			if _, err := os.Stat(gitDir); err == nil {
-				status := getGitRepoStatus(expectedPath, time.Time{}, false)
-				if status.Error != "" {
-					b.WriteString(statusLabelStyle.Render("  Status"))
-					b.WriteString(formatValue(status.Error, "error"))
-				} else if status.UncommittedCount > 0 {
-					b.WriteString(statusLabelStyle.Render("  Status"))
-					b.WriteString(formatValue(fmt.Sprintf("%d uncommitted", status.UncommittedCount), "warning"))
-				} else {
-					b.WriteString(statusLabelStyle.Render("  Status"))
-					b.WriteString(formatValue("synced", "success"))
-				}
-				b.WriteString("\n")
+		gitDir := filepath.Join(expectedPath, ".git")
+		if _, err := os.Stat(gitDir); err == nil {
+			status := getGitRepoStatus(expectedPath, time.Time{}, false)
+			if status.Error != "" {
+				b.WriteString(statusLabelStyle.Render("  Status"))
+				b.WriteString(formatValue(status.Error, "error"))
+			} else if status.UncommittedCount > 0 {
+				b.WriteString(statusLabelStyle.Render("  Status"))
+				b.WriteString(formatValue(fmt.Sprintf("%d uncommitted", status.UncommittedCount), "warning"))
 			} else {
 				b.WriteString(statusLabelStyle.Render("  Status"))
-				if isDaemonBootstrapping(daemonStatus) {
-					b.WriteString(statusMutedStyle.Render("⟳ setting up..."))
-				} else {
-					b.WriteString(formatValue("not cloned", "warning"))
-				}
-				b.WriteString("\n")
-				b.WriteString(statusLabelStyle.Render("  Remote"))
-				b.WriteString(statusMutedStyle.Render(detailTC.RepoURL))
-				b.WriteString("\n")
+				b.WriteString(formatValue("synced", "success"))
 			}
 			b.WriteString("\n")
+		} else {
+			b.WriteString(statusLabelStyle.Render("  Status"))
+			if isDaemonBootstrapping(daemonStatus) {
+				b.WriteString(statusMutedStyle.Render("⟳ setting up..."))
+			} else {
+				b.WriteString(formatValue("not cloned", "warning"))
+			}
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render("  Remote"))
+			b.WriteString(statusMutedStyle.Render(detailTC.RepoURL))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	hasAnyTeams := false
+
+	// Repo team context - rendered inline under Project Status
+	b.WriteString("\n")
+	if repoCloudTC != nil {
+		hasAnyTeams = true
+		renderCloudTC(repoCloudTC.info)
+	} else if repoDetailTC != nil {
+		hasAnyTeams = true
+		renderDetailTC(repoDetailTC.info)
+	} else {
+		// no repo team context found
+		b.WriteString(statusLabelStyle.Render("Status"))
+		b.WriteString(statusMutedStyle.Render("not configured"))
+		b.WriteString("\n")
+	}
+
+	// Other team contexts
+	hasOtherTCs := len(otherCloudTCs) > 0 || len(otherDetailTCs) > 0
+	if hasOtherTCs {
+		b.WriteString("\n")
+		b.WriteString(statusHeaderStyle.Render("Other Team Contexts"))
+		b.WriteString("\n")
+		b.WriteString(statusMutedStyle.Render("───────────────────"))
+		b.WriteString("\n")
+
+		for _, entry := range otherCloudTCs {
+			hasAnyTeams = true
+			renderCloudTC(entry.info)
+		}
+		for _, entry := range otherDetailTCs {
+			hasAnyTeams = true
+			renderDetailTC(entry.info)
 		}
 	}
 
-	if !hasAnyTeams {
+	if !hasAnyTeams && repoTeamID == "" {
+		// no repo TC and no other TCs at all
 		if authenticated && len(cloudTeamContexts) == 0 {
-			b.WriteString(statusLabelStyle.Render("Status"))
-			b.WriteString(formatValue("none available", "muted"))
-			b.WriteString("\n")
 			b.WriteString(statusLabelStyle.Render(""))
 			if userEmail != "" {
 				b.WriteString(statusWarningStyle.Render(fmt.Sprintf("You have no teams assigned to your account yet (%s)", userEmail)))
 			} else {
 				b.WriteString(statusWarningStyle.Render("You have no teams assigned to your account yet"))
 			}
-			b.WriteString("\n")
-		} else if !authenticated {
-			b.WriteString(statusLabelStyle.Render("Status"))
-			b.WriteString(formatValue("none", "error"))
-			b.WriteString("\n")
-		} else {
-			b.WriteString(statusLabelStyle.Render("Status"))
-			b.WriteString(formatValue("none", "error"))
 			b.WriteString("\n")
 		}
 	}

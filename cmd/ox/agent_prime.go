@@ -127,6 +127,7 @@ type capturePriorGuidance struct {
 type teamContextInfo struct {
 	TeamID     string   `json:"team_id"`
 	TeamName   string   `json:"team_name,omitempty"`
+	IsRepoTeam bool     `json:"is_repo_team"`
 	Path       string   `json:"path"`
 	Agents     []string `json:"agents,omitempty"`     // discovered agent names
 	Escalation string   `json:"escalation,omitempty"` // path to human escalation roster if exists
@@ -1128,18 +1129,17 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 		return nil
 	}
 
-	localCfg, err := config.LoadLocalConfig(projectRoot)
-	if err != nil || len(localCfg.TeamContexts) == 0 {
+	tc := config.FindRepoTeamContext(projectRoot)
+	if tc == nil {
 		return nil
 	}
 
-	// use the first configured team context
-	// (most projects only have one team context)
-	tc := localCfg.TeamContexts[0]
+	isRepoTeam := config.IsRepoTeamContext(projectRoot, tc.TeamID)
 
 	info := &teamContextInfo{
 		TeamID:      tc.TeamID,
 		TeamName:    tc.TeamName,
+		IsRepoTeam:  isRepoTeam,
 		Path:        tc.Path,
 		ReadCommand: "ox agent team-ctx",
 	}
