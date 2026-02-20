@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -20,17 +21,16 @@ type sessionAbortOutput struct {
 
 // runAgentSessionAbort discards the active session without uploading to ledger.
 // This is a destructive operation — all local session data is permanently deleted.
-// Requires --force flag; agents should confirm with the user before invoking.
 //
-// Usage: ox agent <id> session abort --force
+// Confirmation behavior:
+//   - Interactive terminal: prompts user with y/N confirmation
+//   - Non-interactive (agent/pipe): requires --force flag
+//
+// Usage: ox agent <id> session abort [--force]
 func runAgentSessionAbort(inst *agentinstance.Instance, args []string) error {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
 		return fmt.Errorf("could not find project root: %w", err)
-	}
-
-	if !session.IsRecording(projectRoot) {
-		return fmt.Errorf("no active session to abort\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
 	}
 
 	state, err := session.LoadRecordingState(projectRoot)
@@ -38,12 +38,19 @@ func runAgentSessionAbort(inst *agentinstance.Instance, args []string) error {
 		return fmt.Errorf("failed to load recording state: %w", err)
 	}
 	if state == nil {
-		return fmt.Errorf("no active session to abort")
+		return fmt.Errorf("no active session to abort\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
 	}
 
-	// require --force to prevent accidental data loss
+	// confirmation: interactive terminal prompts, non-interactive requires --force
 	if !hasFlag(args, "--force") {
-		return fmt.Errorf("session abort is destructive and cannot be undone\nConfirm with the user first, then run: ox agent %s session abort --force", inst.AgentID)
+		if cli.IsInteractive() {
+			if !cli.ConfirmYesNo("Abort and discard active session? This cannot be undone", false) {
+				fmt.Println("Canceled.")
+				return nil
+			}
+		} else {
+			return fmt.Errorf("session abort is destructive and cannot be undone\nPass --force to confirm: ox agent %s session abort --force", inst.AgentID)
+		}
 	}
 
 	sessionName := session.GetSessionName(state.SessionPath)
@@ -57,7 +64,7 @@ func runAgentSessionAbort(inst *agentinstance.Instance, args []string) error {
 	// guard against empty path — os.RemoveAll("") would delete cwd
 	if state.SessionPath != "" {
 		if err := os.RemoveAll(state.SessionPath); err != nil {
-			return fmt.Errorf("failed to remove session data: %w", err)
+			return fmt.Errorf("recording cleared but failed to remove session data at %s: %w", state.SessionPath, err)
 		}
 	}
 

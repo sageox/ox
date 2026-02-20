@@ -1,11 +1,14 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
@@ -79,8 +82,31 @@ func TestAbortRemovesSessionFolder(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "session folder should be removed after abort")
 }
 
+func TestAbortEmptySessionPathDoesNotDeleteCwd(t *testing.T) {
+	projectRoot, state := setupAbortTest(t)
+
+	// corrupt .recording.json: clear SessionPath to simulate damaged state
+	corruptState := fmt.Sprintf(`{"agent_id":"OxAbrt","started_at":"%s","adapter_name":"test","session_path":""}`,
+		state.StartedAt.Format(time.RFC3339))
+	recordingPath := filepath.Join(state.SessionPath, ".recording.json")
+	require.NoError(t, os.WriteFile(recordingPath, []byte(corruptState), 0644))
+
+	inst := &agentinstance.Instance{AgentID: "OxAbrt"}
+	err := runAgentSessionAbort(inst, []string{"--force"})
+	// abort may succeed or error — either is fine, but cwd must survive
+	_ = err
+
+	// the critical assertion: cwd was not deleted
+	_, statErr := os.Stat(projectRoot)
+	assert.NoError(t, statErr, "project root must not be deleted when SessionPath is empty")
+}
+
 func TestAbortRequiresForce(t *testing.T) {
 	setupAbortTest(t)
+
+	// simulate non-interactive (agent/pipe) — requires --force
+	cli.SetNoInteractive(true)
+	t.Cleanup(func() { cli.SetNoInteractive(false) })
 
 	inst := &agentinstance.Instance{AgentID: "OxAbrt"}
 	err := runAgentSessionAbort(inst, nil)
