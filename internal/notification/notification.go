@@ -20,8 +20,12 @@ const ClockSkewTolerance = 5 * time.Second
 // TeamContextFiles lists files agents should re-read when updated.
 // Paths are relative to team context root.
 //
-// To add more files, edit this list and release ox.
+// TODO: revisit whether manually listing files is the right long-term approach.
+// This works for now with a small set of known files, but may not scale
+// as team context structure evolves. Consider glob patterns or directory watches.
 var TeamContextFiles = []string{
+	"AGENTS.md",  // team instructions (root)
+	"CLAUDE.md",  // team instructions (root, Claude-specific)
 	"agent-context/distilled-discussions.md",
 	"coworkers/ai/claude/AGENTS.md",
 	"coworkers/ai/claude/CLAUDE.md",
