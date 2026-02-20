@@ -1466,8 +1466,9 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	// invalidate workspace registry cache after cloning new repo
 	s.workspaceRegistry.InvalidateConfigCache()
 
-	// create AGENTS.md for newly cloned ledger/team-context repos
-	if payload.RepoType != "" {
+	// create AGENTS.md for newly cloned ledger repos only.
+	// team-context repos have AGENTS.md pre-populated by the server.
+	if payload.RepoType == "ledger" {
 		if progress != nil {
 			_ = progress.WriteStage("initializing", "Creating AGENTS.md...")
 		}
