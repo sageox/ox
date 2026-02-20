@@ -94,14 +94,27 @@ func buildAgentDoctorOutput(agentID, projectRoot string) *AgentDoctorOutput {
 	incompleteSessions := findIncompleteSessions(sessionsDir, agentID)
 	output.IncompleteSessions = incompleteSessions
 
+	// check for orphaned/stale recordings
+	if session.IsRecording(projectRoot) {
+		state, _ := session.LoadRecordingState(projectRoot)
+		if state != nil {
+			age := state.Duration()
+			if age.Hours() > 24 {
+				output.NextSteps = append(output.NextSteps,
+					fmt.Sprintf("Orphaned session (%s old). Upload: 'ox agent %s session recover', or discard: 'ox agent %s session abort --force'",
+						formatDurationHuman(age), agentID, agentID))
+			}
+		}
+	}
+
 	// check git status for staged/pending changes
 	stagedCount, commitNeeded, pushNeeded := checkLedgerGitStatus(ledgerPath)
 	output.StagedCount = stagedCount
 	output.CommitNeeded = commitNeeded
 	output.PushNeeded = pushNeeded
 
-	// build next steps based on state
-	output.NextSteps = buildNextSteps(output)
+	// build next steps based on state, preserving any steps already appended above
+	output.NextSteps = append(output.NextSteps, buildNextSteps(output)...)
 
 	return output
 }
