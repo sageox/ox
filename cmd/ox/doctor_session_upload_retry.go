@@ -9,7 +9,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 )
@@ -258,17 +260,14 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 	}
 
 	// build and write meta.json
-	meta := &lfs.SessionMeta{
-		Version:     "1.0",
-		SessionName: orphan.SessionName,
-		AgentID:     orphan.Meta.AgentID,
-		AgentType:   orphan.Meta.AgentType,
-		Model:       orphan.Meta.Model,
-		Username:    orphan.Meta.Username,
-		CreatedAt:   orphan.Meta.CreatedAt,
-		EntryCount:  orphan.EntryCount,
-		Files:       fileRefs,
-	}
+	retryEndpoint := endpoint.GetForProject(projectRoot)
+	meta := lfs.NewSessionMeta(orphan.SessionName, orphan.Meta.Username, orphan.Meta.AgentID, orphan.Meta.AgentType, orphan.Meta.CreatedAt).
+		Model(orphan.Meta.Model).
+		EntryCount(orphan.EntryCount).
+		UserID(auth.GetUserID(retryEndpoint)).
+		RepoID(orphan.Meta.RepoID).
+		WithFiles(fileRefs).
+		Build()
 	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
 		return fmt.Errorf("write meta.json: %w", err)
 	}

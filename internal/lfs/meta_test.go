@@ -145,6 +145,75 @@ func TestNewFileRef(t *testing.T) {
 	assert.Equal(t, "sha256:", ref.OID[:7])
 }
 
+func TestNewSessionMeta_Builder(t *testing.T) {
+	ts := time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)
+	meta := NewSessionMeta("session-1", "user@test.com", "Ox1234", "claude-code", ts).
+		Model("claude-sonnet-4").
+		Title("Test session").
+		Summary("Did some work").
+		EntryCount(10).
+		UserID("usr_abc123").
+		RepoID("repo_xyz789").
+		Build()
+
+	assert.Equal(t, "1.0", meta.Version)
+	assert.Equal(t, "session-1", meta.SessionName)
+	assert.Equal(t, "user@test.com", meta.Username)
+	assert.Equal(t, "Ox1234", meta.AgentID)
+	assert.Equal(t, "claude-code", meta.AgentType)
+	assert.Equal(t, ts, meta.CreatedAt)
+	assert.Equal(t, "claude-sonnet-4", meta.Model)
+	assert.Equal(t, "Test session", meta.Title)
+	assert.Equal(t, "Did some work", meta.Summary)
+	assert.Equal(t, 10, meta.EntryCount)
+	assert.Equal(t, "usr_abc123", meta.UserID)
+	assert.Equal(t, "repo_xyz789", meta.RepoID)
+	assert.NotNil(t, meta.Files)
+	assert.Empty(t, meta.Files)
+}
+
+func TestNewSessionMeta_DefaultFiles(t *testing.T) {
+	meta := NewSessionMeta("s", "u", "a", "t", time.Now()).Build()
+	assert.NotNil(t, meta.Files)
+	assert.Empty(t, meta.Files)
+}
+
+func TestNewSessionMeta_WithFiles(t *testing.T) {
+	files := map[string]FileRef{
+		"raw.jsonl": {OID: "sha256:abc", Size: 100},
+	}
+	meta := NewSessionMeta("s", "u", "a", "t", time.Now()).
+		WithFiles(files).
+		Build()
+	assert.Equal(t, files, meta.Files)
+}
+
+func TestNewSessionMeta_RoundTrip(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionDir := filepath.Join(tmpDir, "test-session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	meta := NewSessionMeta("test-session", "user@test.com", "Ox1234", "claude-code",
+		time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)).
+		Model("claude-sonnet-4").
+		UserID("usr_abc").
+		RepoID("repo_xyz").
+		WithFiles(map[string]FileRef{
+			"raw.jsonl": {OID: "sha256:abc123", Size: 1024},
+		}).
+		Build()
+
+	err := WriteSessionMeta(sessionDir, meta)
+	require.NoError(t, err)
+
+	got, err := ReadSessionMeta(sessionDir)
+	require.NoError(t, err)
+	assert.Equal(t, meta.UserID, got.UserID)
+	assert.Equal(t, meta.RepoID, got.RepoID)
+	assert.Equal(t, meta.Model, got.Model)
+	assert.Equal(t, "sha256:abc123", got.Files["raw.jsonl"].OID)
+}
+
 func TestFileRef_BareOID(t *testing.T) {
 	tests := []struct {
 		oid      string

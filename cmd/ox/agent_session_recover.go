@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
@@ -171,16 +172,12 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 			} else {
 				recoverEndpoint := endpoint.GetForProject(projectRoot)
 				username := getAuthenticatedUsername(recoverEndpoint)
-				meta := &lfs.SessionMeta{
-					Version:     "1.0",
-					SessionName: sessionName,
-					Username:    username,
-					AgentID:     state.AgentID,
-					AgentType:   state.AdapterName,
-					CreatedAt:   state.StartedAt,
-					EntryCount:  entryCount,
-					Files:       fileRefs,
-				}
+				meta := lfs.NewSessionMeta(sessionName, username, state.AgentID, state.AdapterName, state.StartedAt).
+					EntryCount(entryCount).
+					UserID(auth.GetUserID(recoverEndpoint)).
+					RepoID(getRepoIDOrDefault(projectRoot)).
+					WithFiles(fileRefs).
+					Build()
 				if err := lfs.WriteSessionMeta(ledgerSessionDir, meta); err != nil {
 					slog.Warn("write meta.json failed", "error", err)
 					_ = doctor.SetNeedsDoctorAgent(projectRoot)

@@ -186,6 +186,22 @@ func GetTokenForEndpoint(ep string) (*StoredToken, error) {
 	return token, nil
 }
 
+// GetUserID returns the authenticated user's unique ID for the given endpoint.
+// Returns empty string if not authenticated or on error.
+func GetUserID(ep string) string {
+	var token *StoredToken
+	var err error
+	if ep != "" {
+		token, err = GetTokenForEndpoint(ep)
+	} else {
+		token, err = GetToken()
+	}
+	if err != nil || token == nil {
+		return ""
+	}
+	return token.UserInfo.UserID
+}
+
 // SaveToken saves the authentication token for the current API endpoint
 func SaveToken(token *StoredToken) error {
 	return SaveTokenForEndpoint(endpoint.Get(), token)

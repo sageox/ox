@@ -20,6 +20,9 @@ type SessionMeta struct {
 	// OxUsername is the authenticated SageOx username (if logged in)
 	OxUsername string `json:"ox_username,omitempty"`
 
+	// UserID is the unique user identifier from auth (if logged in)
+	UserID string `json:"user_id,omitempty"`
+
 	// SchemaVersion identifies the session format version
 	SchemaVersion string `json:"schema_version"`
 
@@ -71,6 +74,7 @@ func NewSessionMeta(sessionID, oxsid, agentType, projectRemote, endpointURL stri
 	return &SessionMeta{
 		OxVersion:     version.Version,
 		OxUsername:    getOxUsername(endpointURL),
+		UserID:        auth.GetUserID(endpointURL),
 		SchemaVersion: SessionSchemaVersion,
 		AgentType:     agentType,
 		SessionID:     sessionID,
@@ -98,6 +102,7 @@ func NewSessionFooter(startedAt time.Time, entryCount int) *SessionFooter {
 		EntryCount:   entryCount,
 	}
 }
+
 
 // getOxUsername returns the authenticated SageOx username.
 // If ep is non-empty, looks up the token for that specific endpoint.

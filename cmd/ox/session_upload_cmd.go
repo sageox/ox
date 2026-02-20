@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/spf13/cobra"
@@ -152,17 +153,12 @@ func buildSessionMeta(sessionPath, sessionName string, fileRefs map[string]lfs.F
 		fileRefs = make(map[string]lfs.FileRef)
 	}
 
-	return &lfs.SessionMeta{
-		Version:     "1.0",
-		SessionName: sessionName,
-		Username:    firstNonEmpty(username, getAuthenticatedUsername(ep), "unknown"),
-		AgentID:     agentID,
-		AgentType:   "unknown",
-		CreatedAt:   ts,
-		EntryCount:  entryCount,
-		Summary:     summary,
-		Files:       fileRefs,
-	}, nil
+	return lfs.NewSessionMeta(sessionName, firstNonEmpty(username, getAuthenticatedUsername(ep), "unknown"), agentID, "unknown", ts).
+		EntryCount(entryCount).
+		Summary(summary).
+		UserID(auth.GetUserID(ep)).
+		WithFiles(fileRefs).
+		Build(), nil
 }
 
 // parseSessionDirName extracts timestamp, username, and agent ID from a session

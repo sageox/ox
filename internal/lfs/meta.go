@@ -15,6 +15,7 @@ type SessionMeta struct {
 	Version     string             `json:"version"` // "1.0"
 	SessionName string             `json:"session_name"`
 	Username    string             `json:"username"` // email of author
+	UserID      string             `json:"user_id,omitempty"`
 	AgentID     string             `json:"agent_id"`
 	AgentType   string             `json:"agent_type"` // "claude-code", "cursor", etc.
 	Model       string             `json:"model,omitempty"`
@@ -22,6 +23,7 @@ type SessionMeta struct {
 	CreatedAt   time.Time          `json:"created_at"`
 	EntryCount  int                `json:"entry_count,omitempty"`
 	Summary     string             `json:"summary,omitempty"`
+	RepoID      string             `json:"repo_id,omitempty"`
 	Files       map[string]FileRef `json:"files"` // OID manifest: filename -> ref
 }
 
@@ -42,6 +44,66 @@ const (
 	// HydrationStatusPartial means some content files are present.
 	HydrationStatusPartial HydrationStatus = "partial"
 )
+
+// SessionMetaBuilder constructs SessionMeta with required fields and optional setters.
+type SessionMetaBuilder struct {
+	meta SessionMeta
+}
+
+// NewSessionMeta creates a builder with required fields pre-filled.
+func NewSessionMeta(sessionName, username, agentID, agentType string, createdAt time.Time) *SessionMetaBuilder {
+	return &SessionMetaBuilder{
+		meta: SessionMeta{
+			Version:     "1.0",
+			SessionName: sessionName,
+			Username:    username,
+			AgentID:     agentID,
+			AgentType:   agentType,
+			CreatedAt:   createdAt,
+			Files:       make(map[string]FileRef),
+		},
+	}
+}
+
+func (b *SessionMetaBuilder) Model(m string) *SessionMetaBuilder {
+	b.meta.Model = m
+	return b
+}
+
+func (b *SessionMetaBuilder) Title(t string) *SessionMetaBuilder {
+	b.meta.Title = t
+	return b
+}
+
+func (b *SessionMetaBuilder) Summary(s string) *SessionMetaBuilder {
+	b.meta.Summary = s
+	return b
+}
+
+func (b *SessionMetaBuilder) EntryCount(n int) *SessionMetaBuilder {
+	b.meta.EntryCount = n
+	return b
+}
+
+func (b *SessionMetaBuilder) UserID(id string) *SessionMetaBuilder {
+	b.meta.UserID = id
+	return b
+}
+
+func (b *SessionMetaBuilder) RepoID(id string) *SessionMetaBuilder {
+	b.meta.RepoID = id
+	return b
+}
+
+func (b *SessionMetaBuilder) WithFiles(f map[string]FileRef) *SessionMetaBuilder {
+	b.meta.Files = f
+	return b
+}
+
+// Build returns the constructed SessionMeta.
+func (b *SessionMetaBuilder) Build() *SessionMeta {
+	return &b.meta
+}
 
 const metaFilename = "meta.json"
 

@@ -826,19 +826,14 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	// write meta.json first (before LFS upload) to preserve session metadata even if LFS fails
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 	username := getAuthenticatedUsername(projectEndpoint)
-	meta := &lfs.SessionMeta{
-		Version:     "1.0",
-		SessionName: sessionName,
-		Username:    username,
-		AgentID:     state.AgentID,
-		AgentType:   state.AdapterName,
-		Model:       result.Model,
-		Title:       state.Title,
-		CreatedAt:   state.StartedAt,
-		EntryCount:  result.EntryCount,
-		Summary:     result.Summary,
-		Files:       make(map[string]lfs.FileRef), // initially empty, populated after LFS upload
-	}
+	meta := lfs.NewSessionMeta(sessionName, username, state.AgentID, state.AdapterName, state.StartedAt).
+		Model(result.Model).
+		Title(state.Title).
+		EntryCount(result.EntryCount).
+		Summary(result.Summary).
+		UserID(auth.GetUserID(projectEndpoint)).
+		RepoID(getRepoIDOrDefault(projectRoot)).
+		Build()
 	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
 		return fmt.Errorf("write meta.json: %w", err)
 	}
