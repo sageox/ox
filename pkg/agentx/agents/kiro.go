@@ -102,6 +102,11 @@ func (a *KiroAgent) SetCommandManager(cm agentx.CommandManager) {
 	a.commandManager = cm
 }
 
+// DetectVersion returns empty string as Kiro's version detection is not yet implemented.
+func (a *KiroAgent) DetectVersion(_ context.Context, _ agentx.Environment) string {
+	return ""
+}
+
 // IsInstalled checks if Kiro is installed on the system.
 // Checks: kiro binary in PATH, macOS app bundle, or config directory.
 func (a *KiroAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bool, error) {

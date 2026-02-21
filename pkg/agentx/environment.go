@@ -1,6 +1,7 @@
 package agentx
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,6 +40,13 @@ type Environment interface {
 
 	// IsDir checks if a path is a directory
 	IsDir(path string) bool
+
+	// Exec runs a command and returns its stdout output.
+	// Returns error if the command fails or is not found.
+	Exec(ctx context.Context, name string, args ...string) ([]byte, error)
+
+	// ReadFile reads a file and returns its contents.
+	ReadFile(path string) ([]byte, error)
 }
 
 // SystemEnvironment implements Environment using the real system.
@@ -152,15 +160,29 @@ func (e *SystemEnvironment) IsDir(path string) bool {
 	return err == nil && info.IsDir()
 }
 
+func (e *SystemEnvironment) Exec(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).Output()
+}
+
+func (e *SystemEnvironment) ReadFile(path string) ([]byte, error) {
+	return os.ReadFile(path)
+}
+
 // MockEnvironment is a test implementation of Environment.
 type MockEnvironment struct {
-	EnvVars   map[string]string
-	Home      string
-	Config    string
-	Data      string
-	Cache     string
-	OS        string
-	HomeError error
+	EnvVars     map[string]string
+	Home        string
+	Config      string
+	Data        string
+	Cache       string
+	OS          string
+	HomeError   error
+	ExecOutputs map[string][]byte  // keyed by command name
+	ExecErrors  map[string]error   // keyed by command name
+	Files       map[string][]byte  // keyed by file path
+	PathBinaries map[string]string // keyed by binary name → path
+	ExistingFiles map[string]bool  // keyed by path
+	ExistingDirs  map[string]bool  // keyed by path
 }
 
 // NewMockEnvironment creates a mock environment for testing.
@@ -217,16 +239,59 @@ func (e *MockEnvironment) GOOS() string {
 }
 
 func (e *MockEnvironment) LookPath(name string) (string, error) {
-	// Mock implementation - override in tests if needed
+	if e.PathBinaries != nil {
+		if p, ok := e.PathBinaries[name]; ok {
+			return p, nil
+		}
+	}
 	return "", exec.ErrNotFound
 }
 
 func (e *MockEnvironment) FileExists(path string) bool {
-	// Mock implementation - override in tests if needed
+	if e.ExistingFiles != nil {
+		if ok := e.ExistingFiles[path]; ok {
+			return true
+		}
+	}
+	if e.Files != nil {
+		if _, ok := e.Files[path]; ok {
+			return true
+		}
+	}
+	if e.ExistingDirs != nil {
+		if ok := e.ExistingDirs[path]; ok {
+			return true
+		}
+	}
 	return false
 }
 
 func (e *MockEnvironment) IsDir(path string) bool {
-	// Mock implementation - override in tests if needed
+	if e.ExistingDirs != nil {
+		return e.ExistingDirs[path]
+	}
 	return false
+}
+
+func (e *MockEnvironment) Exec(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if e.ExecErrors != nil {
+		if err, ok := e.ExecErrors[name]; ok {
+			return nil, err
+		}
+	}
+	if e.ExecOutputs != nil {
+		if out, ok := e.ExecOutputs[name]; ok {
+			return out, nil
+		}
+	}
+	return nil, exec.ErrNotFound
+}
+
+func (e *MockEnvironment) ReadFile(path string) ([]byte, error) {
+	if e.Files != nil {
+		if data, ok := e.Files[path]; ok {
+			return data, nil
+		}
+	}
+	return nil, os.ErrNotExist
 }

@@ -111,6 +111,12 @@ func (a *CopilotAgent) SetCommandManager(cm agentx.CommandManager) {
 	a.commandManager = cm
 }
 
+// DetectVersion returns empty string as Copilot is a VS Code extension
+// without a standalone CLI for version detection.
+func (a *CopilotAgent) DetectVersion(_ context.Context, _ agentx.Environment) string {
+	return ""
+}
+
 // IsInstalled checks if GitHub Copilot is installed on the system.
 // Checks: gh copilot extension or config directory exists.
 func (a *CopilotAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bool, error) {

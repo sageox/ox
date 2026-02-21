@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -314,6 +315,16 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 	if agentVer != "" {
 		useragent.SetAgentVersion(agentVer)
+	} else if agentType != "" {
+		// auto-detect agent version as fallback when --agent-ver not provided
+		if agent := agentx.CurrentAgent(); agent != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if ver := agent.DetectVersion(ctx, agentx.NewSystemEnvironment()); ver != "" {
+				agentVer = ver
+				useragent.SetAgentVersion(ver)
+			}
+		}
 	}
 
 	// load attribution from user and project configs
@@ -517,11 +528,17 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "warning: failed to write session marker: %v\n", err)
 		}
 
-		_ = WriteToClaudeEnvFile(map[string]string{
-			"AGENT_ENV":         "claude-code",
+		envVars := map[string]string{
 			"SAGEOX_AGENT_ID":   agentID,
 			"SAGEOX_SESSION_ID": serverSessionID,
-		})
+		}
+		if agentType != "" {
+			envVars["AGENT_ENV"] = agentType
+		}
+		if agentVer != "" {
+			envVars["AGENT_VERSION"] = agentVer
+		}
+		_ = WriteToClaudeEnvFile(envVars)
 	}
 
 	err = outputAgentPrime(cmd, textMode, reviewMode, output)

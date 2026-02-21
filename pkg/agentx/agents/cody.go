@@ -101,6 +101,11 @@ func (a *CodyAgent) SetCommandManager(cm agentx.CommandManager) {
 	a.commandManager = cm
 }
 
+// DetectVersion returns empty string as Cody is primarily a VS Code extension.
+func (a *CodyAgent) DetectVersion(_ context.Context, _ agentx.Environment) string {
+	return ""
+}
+
 // IsInstalled checks if Cody is installed on the system.
 // Checks: cody binary in PATH or config directory exists.
 func (a *CodyAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bool, error) {

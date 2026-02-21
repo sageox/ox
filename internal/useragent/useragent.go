@@ -2,6 +2,7 @@ package useragent
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 	"sync"
 
@@ -69,10 +70,21 @@ func String() string {
 	if cached != "" {
 		return cached
 	}
-	if agentType != "" {
-		agentToken := agentType
-		if agentVersion != "" {
-			agentToken = agentType + "/" + agentVersion
+
+	// fall back to environment variables set by ox agent prime
+	at := agentType
+	if at == "" {
+		at = os.Getenv("AGENT_ENV")
+	}
+	av := agentVersion
+	if av == "" && at != "" {
+		av = os.Getenv("AGENT_VERSION")
+	}
+
+	if at != "" {
+		agentToken := at
+		if av != "" {
+			agentToken = at + "/" + av
 		}
 		cached = fmt.Sprintf("ox/%s (%s; %s; %s)", version.Version, agentToken, runtime.GOOS, runtime.GOARCH)
 	} else {

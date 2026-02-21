@@ -103,6 +103,11 @@ func (a *CodePuppyAgent) SetCommandManager(cm agentx.CommandManager) {
 	a.commandManager = cm
 }
 
+// DetectVersion returns empty string as Code Puppy's version detection is not yet implemented.
+func (a *CodePuppyAgent) DetectVersion(_ context.Context, _ agentx.Environment) string {
+	return ""
+}
+
 // IsInstalled checks if Code Puppy is installed on the system.
 // Checks: codepuppy binary in PATH or config directory exists.
 func (a *CodePuppyAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bool, error) {

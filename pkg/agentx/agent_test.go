@@ -176,3 +176,4 @@ func (a *mockAgent) Capabilities() Capabilities                                 
 func (a *mockAgent) HookManager() HookManager                                       { return nil }
 func (a *mockAgent) CommandManager() CommandManager                                 { return nil }
 func (a *mockAgent) IsInstalled(ctx context.Context, env Environment) (bool, error) { return true, nil }
+func (a *mockAgent) DetectVersion(_ context.Context, _ Environment) string           { return "" }

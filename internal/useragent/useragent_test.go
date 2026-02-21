@@ -12,6 +12,8 @@ import (
 
 func TestString_WithoutAgentType(t *testing.T) {
 	ResetForTesting()
+	t.Setenv("AGENT_ENV", "")
+	t.Setenv("AGENT_VERSION", "")
 
 	ua := String()
 	expected := "ox/" + version.Version + " (" + runtime.GOOS + "; " + runtime.GOARCH + ")"
@@ -60,6 +62,8 @@ func TestString_CachesResult(t *testing.T) {
 
 func TestString_InvalidatesCacheOnSetAgentType(t *testing.T) {
 	ResetForTesting()
+	t.Setenv("AGENT_ENV", "")
+	t.Setenv("AGENT_VERSION", "")
 	before := String()
 	assert.NotContains(t, before, "claude-code")
 
@@ -69,6 +73,8 @@ func TestString_InvalidatesCacheOnSetAgentType(t *testing.T) {
 }
 
 func TestResetForTesting(t *testing.T) {
+	t.Setenv("AGENT_ENV", "")
+	t.Setenv("AGENT_VERSION", "")
 	SetAgentType("claude-code")
 	ResetForTesting()
 
@@ -94,6 +100,8 @@ func TestString_WithAgentVersion(t *testing.T) {
 
 func TestSetAgentVersion_WithoutAgentType(t *testing.T) {
 	ResetForTesting()
+	t.Setenv("AGENT_ENV", "")
+	t.Setenv("AGENT_VERSION", "")
 	SetAgentVersion("1.0.26")
 
 	ua := String()
@@ -130,6 +138,41 @@ func TestSetAgentVersion_InvalidatesCacheOnSet(t *testing.T) {
 	SetAgentVersion("1.0.26")
 	after := String()
 	assert.Contains(t, after, "claude-code/1.0.26")
+}
+
+func TestString_FallsBackToEnvVars(t *testing.T) {
+	ResetForTesting()
+
+	// simulate env vars set by a prior ox agent prime invocation
+	t.Setenv("AGENT_ENV", "cursor")
+	t.Setenv("AGENT_VERSION", "0.44.11")
+
+	ua := String()
+	assert.Contains(t, ua, "cursor/0.44.11")
+}
+
+func TestString_ExplicitSetTakesPrecedenceOverEnv(t *testing.T) {
+	ResetForTesting()
+
+	t.Setenv("AGENT_ENV", "cursor")
+	t.Setenv("AGENT_VERSION", "0.44.11")
+
+	SetAgentType("claude-code")
+	SetAgentVersion("1.0.26")
+
+	ua := String()
+	assert.Contains(t, ua, "claude-code/1.0.26")
+	assert.NotContains(t, ua, "cursor")
+}
+
+func TestString_EnvAgentTypeOnly(t *testing.T) {
+	ResetForTesting()
+
+	t.Setenv("AGENT_ENV", "aider")
+
+	ua := String()
+	assert.Contains(t, ua, "aider;")
+	assert.NotContains(t, ua, "aider/")
 }
 
 func TestSetAgentType_ConcurrentSafe(t *testing.T) {

@@ -111,6 +111,16 @@ func (a *CursorAgent) SetCommandManager(cm agentx.CommandManager) {
 	a.commandManager = cm
 }
 
+// DetectVersion attempts to determine the installed Cursor version.
+// Reads ~/.cursor/package.json for the version field.
+func (a *CursorAgent) DetectVersion(ctx context.Context, env agentx.Environment) string {
+	configPath, err := a.UserConfigPath(env)
+	if err != nil {
+		return ""
+	}
+	return versionFromPackageJSON(env, filepath.Join(configPath, "package.json"))
+}
+
 // IsInstalled checks if Cursor is installed on the system.
 // Checks: cursor binary in PATH, macOS app bundle, or ~/.cursor config directory.
 func (a *CursorAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bool, error) {

@@ -129,6 +129,12 @@ func (a *ClaudeCodeAgent) SetCommandManager(cm agentx.CommandManager) {
 	a.commandManager = cm
 }
 
+// DetectVersion attempts to determine the installed Claude Code version.
+// Runs: claude --version
+func (a *ClaudeCodeAgent) DetectVersion(ctx context.Context, env agentx.Environment) string {
+	return versionFromCommand(ctx, env, "claude", "--version")
+}
+
 // IsInstalled checks if Claude Code is installed on the system.
 // Checks: claude binary in PATH, or ~/.claude config directory exists.
 func (a *ClaudeCodeAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bool, error) {

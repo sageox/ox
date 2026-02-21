@@ -101,6 +101,11 @@ func (a *ContinueAgent) SetCommandManager(cm agentx.CommandManager) {
 	a.commandManager = cm
 }
 
+// DetectVersion returns empty string as Continue is primarily an IDE extension.
+func (a *ContinueAgent) DetectVersion(_ context.Context, _ agentx.Environment) string {
+	return ""
+}
+
 // IsInstalled checks if Continue is installed on the system.
 // Checks: continue binary in PATH or config directory exists.
 func (a *ContinueAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bool, error) {
