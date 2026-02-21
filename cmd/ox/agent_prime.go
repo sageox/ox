@@ -21,6 +21,7 @@ import (
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/notification"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/tokens"
 	"github.com/sageox/ox/internal/ui"
@@ -144,6 +145,11 @@ type teamContextInfo struct {
 	AgentContextRelPath string `json:"agent_context_rel_path,omitempty"` // relative path within team context
 	AgentContextHash    string `json:"agent_context_hash,omitempty"`     // content hash for deduplication
 	ReadCommand         string `json:"read_command,omitempty"`           // command to read team discussions
+
+	// Team docs catalog — progressive disclosure for docs/ files.
+	// Listed in prime output so agents know what's available and when to read each doc.
+	// Content is NOT inlined — agents read on demand via file path.
+	TeamDocs []teamdocs.TeamDoc `json:"team_docs,omitempty"`
 }
 
 // teamClaudeInstructions holds paths to team instruction files.
@@ -1016,6 +1022,23 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 			fmt.Fprintln(cmd.OutOrStdout(), "Invoke commands via slash prefix (e.g., /deploy).")
 		}
 
+		// emit team docs catalog if any indexed docs exist
+		if len(output.TeamContext.TeamDocs) > 0 {
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "## Team Docs (read on demand — not preloaded)")
+			fmt.Fprintln(cmd.OutOrStdout())
+			for _, doc := range output.TeamContext.TeamDocs {
+				title := doc.Title
+				if title == "" {
+					title = doc.Name
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "  %s — \"%s\"\n", doc.Name, title)
+				if doc.When != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "    When: %s\n", doc.When)
+				}
+			}
+		}
+
 		// always emit team context guidance — discussions may sync after prime runs
 		fmt.Fprintln(cmd.OutOrStdout())
 		fmt.Fprintln(cmd.OutOrStdout(), "**Team context available** — recorded team meetings and discussions")
@@ -1190,6 +1213,15 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 		if customizations.HasAgentsIndex {
 			info.AgentsIndexPath = customizations.AgentsIndexPath
 		}
+	}
+
+	// discover team docs from docs/ directory.
+	// Only markdown files are indexed — agents read markdown natively,
+	// frontmatter is a markdown convention, and token estimation is
+	// trivial for text. Non-markdown assets need entirely different
+	// disclosure mechanisms and are out of scope for this catalog.
+	if docs, _ := teamdocs.DiscoverDocs(tc.Path); len(docs) > 0 {
+		info.TeamDocs = docs
 	}
 
 	// check for agent-context/distilled-discussions.md
