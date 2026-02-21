@@ -701,28 +701,31 @@ func runInit() error {
 		fmt.Printf("  1. Commit and push SageOx files:\n")
 		fmt.Printf("     %s\n", cli.StyleCommand.Render("git commit -m 'SageOx init' && git push"))
 
-		// step 2: invite teammates (show dashboard URL if team info available)
+		// step 2: start background sync (clones ledger + team contexts, starts daemon if needed)
+		fmt.Printf("  2. Run %s to start background sync\n", cli.StyleCommand.Render("ox sync"))
+
+		// step 3: invite teammates (show dashboard URL if team info available)
 		if cfg.TeamID != "" && cfg.Endpoint != "" {
 			teamDashURL := strings.TrimSuffix(cfg.Endpoint, "/") + "/team/" + cfg.TeamID
 			teamLabel := cfg.TeamName
 			if teamLabel == "" {
 				teamLabel = cfg.TeamID
 			}
-			fmt.Printf("  2. Invite teammates (%s):\n", teamLabel)
+			fmt.Printf("  3. Invite teammates (%s):\n", teamLabel)
 			fmt.Printf("     Run %s or visit %s to get invite link\n", cli.StyleCommand.Render("ox view team"), teamDashURL)
 		} else {
-			fmt.Println("  2. Invite teammates from your team dashboard")
+			fmt.Println("  3. Invite teammates from your team dashboard")
 		}
 
-		// step 3: health check
-		fmt.Printf("  3. Run %s to confirm everything is working properly\n", cli.StyleCommand.Render("ox doctor"))
+		// step 4: health check
+		fmt.Printf("  4. Run %s to confirm everything is working properly\n", cli.StyleCommand.Render("ox doctor"))
 
-		// step 4: try session recording
-		fmt.Printf("  4. Start Claude Code in this repo\n")
+		// step 5: try session recording
+		fmt.Printf("  5. Start Claude Code in this repo\n")
 		fmt.Printf("     Run %s to try session recording\n", cli.StyleCommand.Render("/ox-session-start"))
 
-		// step 5: agent bootstrap
-		fmt.Printf("  5. Claude Code should auto-run: %s\n", cli.StyleCommand.Render("ox agent prime"))
+		// step 6: agent bootstrap
+		fmt.Printf("  6. Claude Code should auto-run: %s\n", cli.StyleCommand.Render("ox agent prime"))
 
 		// show contextual tip
 		userCfg, _ := config.LoadUserConfig("")
