@@ -573,6 +573,11 @@ path = %q
 
 	scheduler := NewSyncScheduler(cfg, logger)
 
+	// prevent refreshCredentialsIfNeeded from calling real API
+	scheduler.mu.Lock()
+	scheduler.lastCredentialRefresh = time.Now()
+	scheduler.mu.Unlock()
+
 	// manually touch FETCH_HEAD to be old so the sync isn't skipped
 	fetchHead := filepath.Join(teamDir, ".git", "FETCH_HEAD")
 	oldTime := time.Now().Add(-1 * time.Hour)
@@ -641,6 +646,11 @@ path = %q
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	scheduler := NewSyncScheduler(cfg, logger)
+
+	// prevent refreshCredentialsIfNeeded from calling real API
+	scheduler.mu.Lock()
+	scheduler.lastCredentialRefresh = time.Now()
+	scheduler.mu.Unlock()
 
 	// make FETCH_HEAD old for both repos
 	for _, dir := range []string{teamDir1, teamDir2} {
