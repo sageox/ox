@@ -194,16 +194,20 @@ func extractDescriptionFromContent(path string) string {
 
 		// skip headings, horizontal rules, and list items
 		if strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "---") || strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "| ") {
+			// stop scanning after 50 lines to avoid reading entire large files
+			if lineCount > 50 {
+				break
+			}
 			continue
 		}
 
-		// found a paragraph line — truncate if needed
-		if len(trimmed) > 160 {
-			return trimmed[:157] + "..."
+		// found a paragraph line — use rune-safe truncation to avoid
+		// splitting multi-byte UTF-8 characters (e.g., emoji, CJK)
+		runes := []rune(trimmed)
+		if len(runes) > 160 {
+			return string(runes[:157]) + "..."
 		}
 		return trimmed
-
-		// stop scanning after 50 lines
 	}
 
 	return ""

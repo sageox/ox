@@ -262,6 +262,11 @@ func TestExtractDescriptionFromContent(t *testing.T) {
 			content: "# Title\n\n" + strings.Repeat("A", 200),
 			want:    strings.Repeat("A", 157) + "...",
 		},
+		{
+			name:    "truncation is rune-safe with multi-byte chars",
+			content: "# Title\n\n" + strings.Repeat("\u00e9", 200), // é is 2 bytes in UTF-8
+			want:    strings.Repeat("\u00e9", 157) + "...",
+		},
 	}
 
 	for _, tt := range tests {
