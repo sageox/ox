@@ -169,6 +169,7 @@ func TestString_EnvAgentTypeOnly(t *testing.T) {
 	ResetForTesting()
 
 	t.Setenv("AGENT_ENV", "aider")
+	t.Setenv("AGENT_VERSION", "")
 
 	ua := String()
 	assert.Contains(t, ua, "aider;")

@@ -325,11 +325,14 @@ func TestGetRepos_UserAgentHeader(t *testing.T) {
 		authToken:  "token",
 	}
 
+	useragent.ResetForTesting()
+	t.Cleanup(useragent.ResetForTesting)
+	expectedUA := useragent.String()
+
 	_, err := client.GetRepos()
 
 	require.NoError(t, err)
-	useragent.ResetForTesting()
-	assert.Equal(t, useragent.String(), receivedUserAgent)
+	assert.Equal(t, expectedUA, receivedUserAgent)
 }
 
 func TestGetRepos_EmptyResponseBody(t *testing.T) {
@@ -663,11 +666,14 @@ func TestGetTeamInfo_UserAgentHeader(t *testing.T) {
 		authToken:  "token",
 	}
 
+	useragent.ResetForTesting()
+	t.Cleanup(useragent.ResetForTesting)
+	expectedUA := useragent.String()
+
 	_, err := client.GetTeamInfo("team_abc")
 
 	require.NoError(t, err)
-	useragent.ResetForTesting()
-	assert.Equal(t, useragent.String(), receivedUserAgent)
+	assert.Equal(t, expectedUA, receivedUserAgent)
 }
 
 // ======

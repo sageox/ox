@@ -13,9 +13,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/useragent"
-	"time"
 )
 
 // Client communicates with a Git LFS Batch API server (e.g., GitLab).

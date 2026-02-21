@@ -56,6 +56,10 @@ func TestAuthenticatedRequest_Success(t *testing.T) {
 	token.AccessToken = "valid-access-token"
 	require.NoError(t, client.SaveToken(token))
 
+	useragent.ResetForTesting()
+	t.Cleanup(useragent.ResetForTesting)
+	expectedUserAgent := useragent.String()
+
 	// make authenticated request
 	resp, err := client.AuthenticatedRequest(context.Background(), "GET", mockAPI.URL+"/test", nil)
 	require.NoError(t, err)
@@ -66,8 +70,6 @@ func TestAuthenticatedRequest_Success(t *testing.T) {
 	assert.Equal(t, expectedAuth, receivedAuthHeader)
 
 	// verify User-Agent was set
-	useragent.ResetForTesting()
-	expectedUserAgent := useragent.String()
 	assert.Equal(t, expectedUserAgent, receivedUserAgent)
 
 	// verify response
@@ -322,13 +324,15 @@ func TestMakeRequest_UserAgent(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
+	useragent.ResetForTesting()
+	t.Cleanup(useragent.ResetForTesting)
+	expectedUserAgent := useragent.String()
+
 	// make request
 	_, err := makeRequest(context.Background(), "GET", mockServer.URL, "test-token", nil)
 	require.NoError(t, err)
 
 	// verify User-Agent header
-	useragent.ResetForTesting()
-	expectedUserAgent := useragent.String()
 	assert.Equal(t, expectedUserAgent, receivedUserAgent)
 }
 
