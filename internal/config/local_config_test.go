@@ -622,6 +622,9 @@ func TestFindRepoTeamContext_FallbackToConfigJSON(t *testing.T) {
 	// config.local.toml), FindRepoTeamContext should fall back to computing the
 	// path from config.json's team_id + endpoint. Previously returned nil, which
 	// broke team context features until daemon ran.
+	tempHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
+
 	tmpDir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
 		TeamID:   "team_fallback",
 		TeamName: "Fallback Team",
@@ -632,7 +635,6 @@ func TestFindRepoTeamContext_FallbackToConfigJSON(t *testing.T) {
 	expectedPath := DefaultTeamContextPath("team_fallback", "https://sageox.ai")
 	require.NotEmpty(t, expectedPath)
 	require.NoError(t, os.MkdirAll(expectedPath, 0755))
-	t.Cleanup(func() { os.RemoveAll(expectedPath) })
 
 	// no config.local.toml at all — daemon hasn't written anything
 	tc := FindRepoTeamContext(tmpDir)
@@ -644,6 +646,9 @@ func TestFindRepoTeamContext_FallbackToConfigJSON(t *testing.T) {
 
 func TestFindRepoTeamContext_FallbackRequiresDirOnDisk(t *testing.T) {
 	// fallback should NOT return a team context if the directory doesn't exist
+	tempHome := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
+
 	tmpDir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
 		TeamID:   "team_nodir",
 		TeamName: "No Dir Team",
