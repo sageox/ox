@@ -191,6 +191,10 @@ func (e *TestEnvironment) setupEnvironment() {
 		e.EnvVars = setEnvVar(e.EnvVars, key, value)
 	}
 
+	// Remove CLAUDECODE env var so spawned Claude Code sessions don't refuse
+	// to start with "cannot be launched inside another Claude Code session"
+	e.EnvVars = removeEnvVar(e.EnvVars, "CLAUDECODE")
+
 	// Create required directories
 	for _, dir := range []string{"config", "data", "cache", "state"} {
 		os.MkdirAll(filepath.Join(e.RootDir, dir, "sageox"), 0755)
@@ -207,6 +211,18 @@ func setEnvVar(envVars []string, key, value string) []string {
 		}
 	}
 	return append(envVars, prefix+value)
+}
+
+// removeEnvVar removes an environment variable from a slice of env vars.
+func removeEnvVar(envVars []string, key string) []string {
+	prefix := key + "="
+	result := envVars[:0]
+	for _, v := range envVars {
+		if !strings.HasPrefix(v, prefix) {
+			result = append(result, v)
+		}
+	}
+	return result
 }
 
 // AgentTestResult holds the result of running a prompt through an agent.
