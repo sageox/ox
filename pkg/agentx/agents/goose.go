@@ -109,6 +109,12 @@ func (a *GooseAgent) SetCommandManager(cm agentx.CommandManager) {
 	a.commandManager = cm
 }
 
+// DetectVersion attempts to determine the installed Goose version.
+// Runs: goose --version
+func (a *GooseAgent) DetectVersion(ctx context.Context, env agentx.Environment) string {
+	return versionFromCommand(ctx, env, "goose", "--version")
+}
+
 // IsInstalled checks if Goose is installed on the system.
 // Checks: goose binary in PATH or config directory exists.
 func (a *GooseAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bool, error) {

@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/sageox/ox/internal/useragent"
 )
 
 // ComputeOID computes the SHA256 hex digest of content (the LFS OID).
@@ -34,6 +36,8 @@ func UploadObject(action *Action, content []byte) error {
 	if err != nil {
 		return fmt.Errorf("create upload request: %w", err)
 	}
+
+	req.Header.Set("User-Agent", useragent.String())
 
 	// set headers from action
 	for k, v := range action.Header {
@@ -69,6 +73,8 @@ func DownloadObject(action *Action) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create download request: %w", err)
 	}
+
+	req.Header.Set("User-Agent", useragent.String())
 
 	// set headers from action
 	for k, v := range action.Header {

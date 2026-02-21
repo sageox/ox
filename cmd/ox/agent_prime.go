@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,7 @@ import (
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/tokens"
 	"github.com/sageox/ox/internal/ui"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/pkg/agentx"
 	"github.com/spf13/cobra"
 )
@@ -307,6 +309,24 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// enrich User-Agent for all subsequent API calls in this process
+	if agentType != "" {
+		useragent.SetAgentType(agentType)
+	}
+	if agentVer != "" {
+		useragent.SetAgentVersion(agentVer)
+	} else if agentType != "" {
+		// auto-detect agent version as fallback when --agent-ver not provided
+		if agent := agentx.CurrentAgent(); agent != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if ver := agent.DetectVersion(ctx, agentx.NewSystemEnvironment()); ver != "" {
+				agentVer = ver
+				useragent.SetAgentVersion(ver)
+			}
+		}
+	}
+
 	// load attribution from user and project configs
 	attribution := loadResolvedAttribution()
 
@@ -508,11 +528,17 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "warning: failed to write session marker: %v\n", err)
 		}
 
-		_ = WriteToClaudeEnvFile(map[string]string{
-			"AGENT_ENV":         "claude-code",
+		envVars := map[string]string{
 			"SAGEOX_AGENT_ID":   agentID,
 			"SAGEOX_SESSION_ID": serverSessionID,
-		})
+		}
+		if agentType != "" {
+			envVars["AGENT_ENV"] = agentType
+		}
+		if agentVer != "" {
+			envVars["AGENT_VERSION"] = agentVer
+		}
+		_ = WriteToClaudeEnvFile(envVars)
 	}
 
 	err = outputAgentPrime(cmd, textMode, reviewMode, output)

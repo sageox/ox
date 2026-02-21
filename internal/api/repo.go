@@ -13,6 +13,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/version"
 )
@@ -170,7 +171,7 @@ func (c *RepoClient) RegisterRepo(req *RepoInitRequest) (*RepoInitResponse, erro
 
 	// set headers
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("User-Agent", fmt.Sprintf("ox/%s", c.version))
+	httpReq.Header.Set("User-Agent", useragent.String())
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}
@@ -246,7 +247,7 @@ func (c *RepoClient) GetDoctorIssues(repoID string) (*DoctorResponse, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("User-Agent", fmt.Sprintf("ox/%s", c.version))
+	httpReq.Header.Set("User-Agent", useragent.String())
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}
@@ -318,7 +319,7 @@ func (c *RepoClient) NotifyUninstall(repoID, repoSalt string) error {
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("User-Agent", fmt.Sprintf("ox/%s", c.version))
+	httpReq.Header.Set("User-Agent", useragent.String())
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}

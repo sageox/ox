@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/useragent"
 	"gopkg.in/ini.v1"
 )
 
@@ -124,7 +125,7 @@ func fetchAWSCallerIdentity(accessKey, secretKey string) (*Identity, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.Header.Set("User-Agent", "ox")
+	req.Header.Set("User-Agent", useragent.String())
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	// TODO: Implement AWS Signature v4 signing

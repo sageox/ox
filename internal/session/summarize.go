@@ -12,7 +12,7 @@ import (
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/endpoint"
-	"github.com/sageox/ox/internal/version"
+	"github.com/sageox/ox/internal/useragent"
 )
 
 const (
@@ -181,7 +181,7 @@ func Summarize(entries []Entry, agentID, agentType, model, endpointURL string) (
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
-	httpReq.Header.Set("User-Agent", fmt.Sprintf("ox/%s", version.Version))
+	httpReq.Header.Set("User-Agent", useragent.String())
 
 	resp, err := client.Do(httpReq)
 	if err != nil {

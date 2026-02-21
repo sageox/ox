@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 )
 
@@ -88,6 +89,7 @@ func getLatestGitHubRelease() (string, error) {
 		return "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("GET", url)
 	start := time.Now()

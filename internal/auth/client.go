@@ -13,7 +13,7 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/resilience"
-	"github.com/sageox/ox/internal/version"
+	"github.com/sageox/ox/internal/useragent"
 )
 
 // APIResponse represents a response from an authenticated API request
@@ -148,7 +148,7 @@ func makeRequest(ctx context.Context, method, url, accessToken string, data inte
 
 	// build headers
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
-	req.Header.Set("User-Agent", fmt.Sprintf("ox/%s", version.Version))
+	req.Header.Set("User-Agent", useragent.String())
 
 	// add Content-Type if sending JSON data
 	if data != nil {

@@ -129,6 +129,12 @@ func (a *ClineAgent) SetCommandManager(cm agentx.CommandManager) {
 	a.commandManager = cm
 }
 
+// DetectVersion returns empty string as Cline is a VS Code extension
+// without a standalone CLI for version detection.
+func (a *ClineAgent) DetectVersion(_ context.Context, _ agentx.Environment) string {
+	return ""
+}
+
 // IsInstalled checks if Cline is installed.
 // Checks for VS Code extension storage directory.
 func (a *ClineAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bool, error) {

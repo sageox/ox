@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/sageox/ox/internal/useragent"
 )
 
 // ClientConfig configures the doctor API client.
@@ -43,6 +45,8 @@ func (c *Client) GetContext(ctx context.Context) (*DoctorContextResponse, error)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
+
+	req.Header.Set("User-Agent", useragent.String())
 
 	if c.config.AuthFunc != nil {
 		if token := c.config.AuthFunc(); token != "" {

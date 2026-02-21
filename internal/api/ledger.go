@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/useragent"
 )
 
 const (
@@ -58,7 +59,7 @@ func (c *RepoClient) GetLedgerStatus(repoID string) (*LedgerStatusResponse, erro
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("User-Agent", fmt.Sprintf("ox/%s", c.version))
+	httpReq.Header.Set("User-Agent", useragent.String())
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}

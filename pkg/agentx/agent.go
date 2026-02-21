@@ -73,6 +73,11 @@ type AgentDetector interface {
 	// Detection methods vary by agent: binary in PATH, config directory exists,
 	// application bundle present (macOS), etc.
 	IsInstalled(ctx context.Context, env Environment) (bool, error)
+
+	// DetectVersion attempts to determine the installed version of this agent.
+	// Returns empty string if version cannot be determined (best-effort).
+	// Strategies vary by agent: CLI --version, reading package.json, etc.
+	DetectVersion(ctx context.Context, env Environment) string
 }
 
 // AgentConfig provides configuration path information.

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 )
 
@@ -336,7 +336,7 @@ func (c *TelemetryCollector) sendEvents(events []TelemetryEvent) {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", fmt.Sprintf("ox-daemon/%s", c.appVersion))
+	req.Header.Set("User-Agent", useragent.DaemonString())
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

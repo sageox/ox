@@ -14,6 +14,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/sageox/ox/internal/useragent"
 )
 
 // Client communicates with a Git LFS Batch API server (e.g., GitLab).
@@ -122,6 +124,7 @@ func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchRespons
 
 	req.Header.Set("Content-Type", "application/vnd.git-lfs+json")
 	req.Header.Set("Accept", "application/vnd.git-lfs+json")
+	req.Header.Set("User-Agent", useragent.String())
 	req.Header.Set("Authorization", c.authHeader)
 
 	resp, err := c.httpClient.Do(req)

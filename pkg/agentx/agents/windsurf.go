@@ -111,6 +111,17 @@ func (a *WindsurfAgent) SetCommandManager(cm agentx.CommandManager) {
 	a.commandManager = cm
 }
 
+// DetectVersion attempts to determine the installed Windsurf version.
+// Reads ~/.codeium/windsurf/package.json for the version field.
+func (a *WindsurfAgent) DetectVersion(ctx context.Context, env agentx.Environment) string {
+	configPath, err := a.UserConfigPath(env)
+	if err != nil {
+		return ""
+	}
+	// Windsurf stores its app data under the codeium config, try windsurf subdir
+	return versionFromPackageJSON(env, filepath.Join(configPath, "windsurf", "package.json"))
+}
+
 // IsInstalled checks if Windsurf is installed on the system.
 // Checks: windsurf binary in PATH, macOS app bundle, or config directory.
 func (a *WindsurfAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bool, error) {

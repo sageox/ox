@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sageox/ox/internal/version"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -56,6 +56,10 @@ func TestAuthenticatedRequest_Success(t *testing.T) {
 	token.AccessToken = "valid-access-token"
 	require.NoError(t, client.SaveToken(token))
 
+	useragent.ResetForTesting()
+	t.Cleanup(useragent.ResetForTesting)
+	expectedUserAgent := useragent.String()
+
 	// make authenticated request
 	resp, err := client.AuthenticatedRequest(context.Background(), "GET", mockAPI.URL+"/test", nil)
 	require.NoError(t, err)
@@ -66,7 +70,6 @@ func TestAuthenticatedRequest_Success(t *testing.T) {
 	assert.Equal(t, expectedAuth, receivedAuthHeader)
 
 	// verify User-Agent was set
-	expectedUserAgent := "ox/" + version.Version
 	assert.Equal(t, expectedUserAgent, receivedUserAgent)
 
 	// verify response
@@ -321,12 +324,15 @@ func TestMakeRequest_UserAgent(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
+	useragent.ResetForTesting()
+	t.Cleanup(useragent.ResetForTesting)
+	expectedUserAgent := useragent.String()
+
 	// make request
 	_, err := makeRequest(context.Background(), "GET", mockServer.URL, "test-token", nil)
 	require.NoError(t, err)
 
 	// verify User-Agent header
-	expectedUserAgent := "ox/" + version.Version
 	assert.Equal(t, expectedUserAgent, receivedUserAgent)
 }
 

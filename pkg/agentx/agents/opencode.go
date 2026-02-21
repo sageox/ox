@@ -101,6 +101,12 @@ func (a *OpenCodeAgent) SetCommandManager(cm agentx.CommandManager) {
 	a.commandManager = cm
 }
 
+// DetectVersion attempts to determine the installed OpenCode version.
+// Runs: opencode --version
+func (a *OpenCodeAgent) DetectVersion(ctx context.Context, env agentx.Environment) string {
+	return versionFromCommand(ctx, env, "opencode", "--version")
+}
+
 // IsInstalled checks if OpenCode is installed on the system.
 // Checks: opencode binary in PATH or config directory exists.
 func (a *OpenCodeAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bool, error) {

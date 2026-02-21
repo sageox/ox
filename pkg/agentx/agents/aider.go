@@ -108,6 +108,12 @@ func (a *AiderAgent) SetCommandManager(cm agentx.CommandManager) {
 	a.commandManager = cm
 }
 
+// DetectVersion attempts to determine the installed Aider version.
+// Runs: aider --version
+func (a *AiderAgent) DetectVersion(ctx context.Context, env agentx.Environment) string {
+	return versionFromCommand(ctx, env, "aider", "--version")
+}
+
 // IsInstalled checks if Aider is installed on the system.
 // Checks: aider binary in PATH or config directory exists.
 func (a *AiderAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bool, error) {

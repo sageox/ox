@@ -101,6 +101,12 @@ func (a *AmpAgent) SetCommandManager(cm agentx.CommandManager) {
 	a.commandManager = cm
 }
 
+// DetectVersion attempts to determine the installed Amp version.
+// Runs: amp --version
+func (a *AmpAgent) DetectVersion(ctx context.Context, env agentx.Environment) string {
+	return versionFromCommand(ctx, env, "amp", "--version")
+}
+
 // IsInstalled checks if Amp is installed on the system.
 // Checks: amp binary in PATH or config directory exists.
 func (a *AmpAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bool, error) {

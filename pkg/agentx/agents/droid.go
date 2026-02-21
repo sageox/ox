@@ -137,6 +137,12 @@ func (a *DroidAgent) SetCommandManager(cm agentx.CommandManager) {
 	a.commandManager = cm
 }
 
+// DetectVersion attempts to determine the installed Droid version.
+// Runs: droid --version
+func (a *DroidAgent) DetectVersion(ctx context.Context, env agentx.Environment) string {
+	return versionFromCommand(ctx, env, "droid", "--version")
+}
+
 // IsInstalled checks if Droid is installed.
 // Checks for droid binary in PATH or config directory.
 func (a *DroidAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bool, error) {

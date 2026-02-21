@@ -22,6 +22,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	sessionhtml "github.com/sageox/ox/internal/session/html"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 )
 
@@ -103,6 +104,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	}
 
 	adapterName := adapter.Name()
+	useragent.SetAgentType(adapterName)
 
 	// find the agent's session file
 	since := time.Now().Add(-5 * time.Minute)
