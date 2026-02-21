@@ -21,6 +21,24 @@ const (
 // LocalConfig represents machine-specific config stored in .sageox/config.local.toml.
 // This file tracks local paths for git repos (ledger and team-context) and is NOT
 // committed to version control.
+//
+// ARCHITECTURE DECISION: Why config.local.toml stores [[team_contexts]]
+//
+// Team membership is inherently user-level data, but we store it per-repo because:
+//   - Each workspace runs its own daemon. Per-repo config means each daemon writes
+//     to its own file with no locking or coordination needed.
+//   - Different repos can point to different endpoints (e.g., sageox.ai vs self-hosted).
+//     Per-repo config naturally scopes team contexts to the correct endpoint.
+//   - A user-level file (~/) would require file locking across concurrent daemons,
+//     or namespace partitioning by endpoint — complexity that per-repo config avoids.
+//
+// The daemon discovers all team contexts the user can access (via GET /api/v1/cli/repos)
+// and records them here. This includes cross-team contexts (teams the user belongs to
+// beyond the repo's own team). For the repo's own team, FindRepoTeamContext() has a
+// fallback that computes the path from config.json's team_id without requiring this file.
+//
+// FUTURE: Consider replacing this with a user-level file if we move to a single
+// global daemon, which would eliminate the multi-writer locking problem.
 type LocalConfig struct {
 	Ledger       *LedgerConfig `toml:"ledger,omitempty"`
 	TeamContexts []TeamContext `toml:"team_contexts,omitempty"`
@@ -343,22 +361,60 @@ func (c *LocalConfig) RemoveTeamContext(teamID string) {
 // FindRepoTeamContext returns the team context that belongs to this repo's team.
 // Loads ProjectConfig.TeamID and matches it against LocalConfig.TeamContexts.
 // Falls back to the first configured team context if no match is found.
-// Returns nil if no team contexts are configured.
+//
+// If no team contexts are configured in config.local.toml (daemon hasn't synced yet),
+// falls back to computing the expected path from config.json's team_id + endpoint.
+// This ensures the repo's own team context is discoverable immediately after ox init,
+// without waiting for the daemon to populate [[team_contexts]].
 func FindRepoTeamContext(projectRoot string) *TeamContext {
 	localCfg, err := LoadLocalConfig(projectRoot)
-	if err != nil || len(localCfg.TeamContexts) == 0 {
-		return nil
+	if err != nil {
+		localCfg = &LocalConfig{}
 	}
 
 	projectCfg, err := LoadProjectConfig(projectRoot)
-	if err == nil && projectCfg != nil && projectCfg.TeamID != "" {
+	if err != nil || projectCfg == nil {
+		// no project config — can only use local config entries
+		if len(localCfg.TeamContexts) > 0 {
+			return &localCfg.TeamContexts[0]
+		}
+		return nil
+	}
+
+	// try matching project's team_id against local config entries
+	if projectCfg.TeamID != "" && len(localCfg.TeamContexts) > 0 {
 		if tc := localCfg.GetTeamContext(projectCfg.TeamID); tc != nil {
 			return tc
 		}
 	}
 
-	// fallback: first configured team context
-	return &localCfg.TeamContexts[0]
+	// fallback: any configured team context
+	if len(localCfg.TeamContexts) > 0 {
+		return &localCfg.TeamContexts[0]
+	}
+
+	// fallback: compute path from config.json team_id + endpoint (no daemon needed)
+	if projectCfg.TeamID != "" {
+		ep := endpoint.GetForProject(projectRoot)
+		if ep == "" {
+			return nil
+		}
+		computedPath := DefaultTeamContextPath(projectCfg.TeamID, ep)
+		if computedPath == "" {
+			return nil
+		}
+		// only return if the directory actually exists on disk
+		if _, err := os.Stat(computedPath); err != nil {
+			return nil
+		}
+		return &TeamContext{
+			TeamID:   projectCfg.TeamID,
+			TeamName: projectCfg.TeamName,
+			Path:     computedPath,
+		}
+	}
+
+	return nil
 }
 
 // IsRepoTeamContext returns true if the given team ID matches the repo's owning team.

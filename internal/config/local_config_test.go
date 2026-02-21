@@ -593,6 +593,75 @@ func TestHasLastSync(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
+// FindRepoTeamContext Tests
+// -----------------------------------------------------------------------------
+
+func TestFindRepoTeamContext_WithLocalConfig(t *testing.T) {
+	// when [[team_contexts]] is populated in config.local.toml, use it
+	tmpDir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
+		TeamID:   "team_abc",
+		TeamName: "Team ABC",
+		Endpoint: "https://sageox.ai",
+	})
+
+	localCfg := &LocalConfig{
+		TeamContexts: []TeamContext{
+			{TeamID: "team_abc", TeamName: "Team ABC", Path: "/some/path/team_abc"},
+		},
+	}
+	require.NoError(t, SaveLocalConfig(tmpDir, localCfg))
+
+	tc := FindRepoTeamContext(tmpDir)
+	require.NotNil(t, tc, "expected team context from local config")
+	assert.Equal(t, "team_abc", tc.TeamID)
+	assert.Equal(t, "/some/path/team_abc", tc.Path)
+}
+
+func TestFindRepoTeamContext_FallbackToConfigJSON(t *testing.T) {
+	// BUG REGRESSION: when daemon hasn't synced yet (no [[team_contexts]] in
+	// config.local.toml), FindRepoTeamContext should fall back to computing the
+	// path from config.json's team_id + endpoint. Previously returned nil, which
+	// broke team context features until daemon ran.
+	tmpDir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
+		TeamID:   "team_fallback",
+		TeamName: "Fallback Team",
+		Endpoint: "https://sageox.ai",
+	})
+
+	// compute expected path and create the directory (simulates daemon having cloned it)
+	expectedPath := DefaultTeamContextPath("team_fallback", "https://sageox.ai")
+	require.NotEmpty(t, expectedPath)
+	require.NoError(t, os.MkdirAll(expectedPath, 0755))
+	t.Cleanup(func() { os.RemoveAll(expectedPath) })
+
+	// no config.local.toml at all — daemon hasn't written anything
+	tc := FindRepoTeamContext(tmpDir)
+	require.NotNil(t, tc, "expected fallback team context from config.json")
+	assert.Equal(t, "team_fallback", tc.TeamID)
+	assert.Equal(t, "Fallback Team", tc.TeamName)
+	assert.Equal(t, expectedPath, tc.Path)
+}
+
+func TestFindRepoTeamContext_FallbackRequiresDirOnDisk(t *testing.T) {
+	// fallback should NOT return a team context if the directory doesn't exist
+	tmpDir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
+		TeamID:   "team_nodir",
+		TeamName: "No Dir Team",
+		Endpoint: "https://sageox.ai",
+	})
+
+	tc := FindRepoTeamContext(tmpDir)
+	assert.Nil(t, tc, "expected nil when team context dir doesn't exist on disk")
+}
+
+func TestFindRepoTeamContext_NoProjectConfig(t *testing.T) {
+	tmpDir := CreateInitializedProject(t)
+
+	tc := FindRepoTeamContext(tmpDir)
+	assert.Nil(t, tc, "expected nil with no project config and no local config")
+}
+
+// -----------------------------------------------------------------------------
 // Team Symlink Tests
 // -----------------------------------------------------------------------------
 
