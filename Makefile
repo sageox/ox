@@ -1,6 +1,6 @@
 # Makefile for ox CLI tool
 
-.PHONY: help build install clean dev run test test-all test-slow test-integration test-sequential test-profile test-watch coverage smoke-test lint format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version
+.PHONY: help build install clean dev run test test-all test-slow test-integration test-benchmark test-sequential test-profile test-watch coverage smoke-test lint format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version
 
 # Variables
 GO := go
@@ -57,6 +57,10 @@ test-slow: ## Run slow tests (build tag: slow) - includes real Claude sessions
 test-integration: ## Run integration tests (build tag: integration) - full E2E with Claude
 	@echo "Running integration tests (requires claude CLI and ANTHROPIC_API_KEY)..."
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=integration -race -timeout=10m ./...
+
+test-benchmark: ## Run prime efficiency benchmarks (requires claude CLI) - ~36 min, ~18 API calls
+	@echo "Running prime efficiency benchmarks..."
+	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=integration -run TestPrimeEfficiency -timeout=45m ./tests/integration/agents/benchmark/...
 
 test-sequential: ## Run tests sequentially (for debugging race conditions)
 	@echo "Running tests sequentially..."

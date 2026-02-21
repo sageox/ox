@@ -60,6 +60,9 @@ sessions/
 !/.claude-plugin/
 !/claude-plugin/.claude-plugin/
 
+# Benchmark results (append-only, local to each machine)
+tests/integration/agents/benchmark/results.jsonl
+
 # Claude Code local settings (user-specific)
 .claude/settings.local.json
 demo/credentials.sops.yaml

@@ -312,6 +312,14 @@
       "auto_execute": true,
       "confidence": 0.90,
       "description": "Unix pattern: whoami -> status"
+    },
+    {
+      "pattern": "team-ctx",
+      "target": "agent team-ctx",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.95,
+      "description": "Missing subcommand: team-ctx -> agent team-ctx"
     }
   ]
 }
