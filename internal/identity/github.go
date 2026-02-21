@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/useragent"
 	"gopkg.in/yaml.v3"
 )
 
@@ -90,7 +91,7 @@ func fetchGitHubUser(token string) (*Identity, error) {
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", "ox")
+	req.Header.Set("User-Agent", useragent.String())
 	req.Header.Set("Accept", "application/vnd.github+json")
 
 	logger.LogHTTPRequest("GET", url)

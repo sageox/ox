@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/useragent"
 	"gopkg.in/yaml.v3"
 )
 
@@ -147,7 +148,7 @@ func fetchGiteaUser(instanceURL, token string) (*Identity, error) {
 
 	// Gitea uses Authorization: token <token>
 	req.Header.Set("Authorization", "token "+token)
-	req.Header.Set("User-Agent", "ox")
+	req.Header.Set("User-Agent", useragent.String())
 	req.Header.Set("Accept", "application/json")
 
 	logger.LogHTTPRequest("GET", apiURL)

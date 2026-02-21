@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/useragent"
 	"gopkg.in/yaml.v3"
 )
 
@@ -93,7 +94,7 @@ func fetchGitLabUser(token string) (*Identity, error) {
 
 	// GitLab uses PRIVATE-TOKEN header instead of Bearer
 	req.Header.Set("PRIVATE-TOKEN", token)
-	req.Header.Set("User-Agent", "ox")
+	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("GET", url)
 	start := time.Now()

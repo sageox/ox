@@ -12,6 +12,7 @@ import (
 
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/useragent"
 )
 
 const (
@@ -135,6 +136,7 @@ func refreshToken(token *StoredToken) (*StoredToken, error) {
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("POST", tokenURL)
 	start := time.Now()
@@ -320,6 +322,7 @@ func (c *AuthClient) refreshToken(token *StoredToken) (*StoredToken, error) {
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("POST", tokenURL)
 	start := time.Now()

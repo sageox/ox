@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/useragent"
 )
 
 // getBitbucketIdentity fetches the authenticated Bitbucket user identity.
@@ -70,7 +71,7 @@ func fetchBitbucketUser(token string) (*Identity, error) {
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", "ox")
+	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("GET", url)
 	start := time.Now()
@@ -118,7 +119,7 @@ func fetchBitbucketEmail(token string, client *http.Client) string {
 	}
 
 	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", "ox")
+	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("GET", url)
 	start := time.Now()

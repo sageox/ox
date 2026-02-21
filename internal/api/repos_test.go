@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -327,7 +328,8 @@ func TestGetRepos_UserAgentHeader(t *testing.T) {
 	_, err := client.GetRepos()
 
 	require.NoError(t, err)
-	assert.Equal(t, "ox/1.2.3", receivedUserAgent)
+	useragent.ResetForTesting()
+	assert.Equal(t, useragent.String(), receivedUserAgent)
 }
 
 func TestGetRepos_EmptyResponseBody(t *testing.T) {
@@ -664,7 +666,8 @@ func TestGetTeamInfo_UserAgentHeader(t *testing.T) {
 	_, err := client.GetTeamInfo("team_abc")
 
 	require.NoError(t, err)
-	assert.Equal(t, "ox/2.0.0", receivedUserAgent)
+	useragent.ResetForTesting()
+	assert.Equal(t, useragent.String(), receivedUserAgent)
 }
 
 // ======

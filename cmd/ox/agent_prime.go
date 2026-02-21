@@ -25,6 +25,7 @@ import (
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/tokens"
 	"github.com/sageox/ox/internal/ui"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/pkg/agentx"
 	"github.com/spf13/cobra"
 )
@@ -305,6 +306,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		if agent := agentx.CurrentAgent(); agent != nil {
 			agentType = agent.Name()
 		}
+	}
+
+	// enrich User-Agent for all subsequent API calls in this process
+	if agentType != "" {
+		useragent.SetAgentType(agentType)
+	}
+	if agentVer != "" {
+		useragent.SetAgentVersion(agentVer)
 	}
 
 	// load attribution from user and project configs

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/useragent"
 	"gopkg.in/yaml.v3"
 )
 
@@ -91,7 +92,7 @@ func fetchAzureDevOpsUser(token string) (*Identity, error) {
 
 	// Azure DevOps uses Basic auth with empty username and PAT as password
 	req.SetBasicAuth("", token)
-	req.Header.Set("User-Agent", "ox")
+	req.Header.Set("User-Agent", useragent.String())
 	req.Header.Set("Accept", "application/json")
 
 	logger.LogHTTPRequest("GET", url)

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sageox/ox/internal/version"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -66,7 +66,8 @@ func TestAuthenticatedRequest_Success(t *testing.T) {
 	assert.Equal(t, expectedAuth, receivedAuthHeader)
 
 	// verify User-Agent was set
-	expectedUserAgent := "ox/" + version.Version
+	useragent.ResetForTesting()
+	expectedUserAgent := useragent.String()
 	assert.Equal(t, expectedUserAgent, receivedUserAgent)
 
 	// verify response
@@ -326,7 +327,8 @@ func TestMakeRequest_UserAgent(t *testing.T) {
 	require.NoError(t, err)
 
 	// verify User-Agent header
-	expectedUserAgent := "ox/" + version.Version
+	useragent.ResetForTesting()
+	expectedUserAgent := useragent.String()
 	assert.Equal(t, expectedUserAgent, receivedUserAgent)
 }
 

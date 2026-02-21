@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/useragent"
+
 	"github.com/sageox/ox/internal/logger"
 )
 
@@ -131,7 +133,7 @@ func (c *RepoClient) GetRepos() (*ReposResponse, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("User-Agent", fmt.Sprintf("ox/%s", c.version))
+	httpReq.Header.Set("User-Agent", useragent.String())
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}
@@ -196,7 +198,7 @@ func (c *RepoClient) GetTeamInfo(teamID string) (*TeamInfoResponse, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("User-Agent", fmt.Sprintf("ox/%s", c.version))
+	httpReq.Header.Set("User-Agent", useragent.String())
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}
@@ -274,7 +276,7 @@ func (c *RepoClient) GetRepoDetail(repoID string) (*RepoDetailResponse, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("User-Agent", fmt.Sprintf("ox/%s", c.version))
+	httpReq.Header.Set("User-Agent", useragent.String())
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}

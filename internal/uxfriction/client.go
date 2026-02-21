@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/sageox/ox/internal/useragent"
 )
 
 // ClientConfig configures the friction client.
@@ -132,6 +134,7 @@ func (c *Client) Submit(ctx context.Context, events []FrictionEvent, opts *Submi
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", useragent.String())
 	req.Header.Set("X-Client-Version", c.config.Version)
 
 	// add catalog version header if provided

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/logger"
@@ -334,7 +334,7 @@ func (c *Client) sendEventsWithResult(ctx context.Context, events []Event) bool 
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", fmt.Sprintf("ox/%s", c.version))
+	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("POST", url)
 	start := time.Now()
@@ -381,7 +381,7 @@ func (c *Client) sendEvents(ctx context.Context, events []Event) {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", fmt.Sprintf("ox/%s", c.version))
+	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("POST", url)
 	start := time.Now()
