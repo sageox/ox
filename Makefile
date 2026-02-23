@@ -58,9 +58,9 @@ test-integration: ## Run integration tests (build tag: integration) - full E2E w
 	@echo "Running integration tests (requires claude CLI and ANTHROPIC_API_KEY)..."
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=integration -race -timeout=10m ./...
 
-test-benchmark: ## Run prime efficiency benchmarks (requires claude CLI) - ~36 min, ~18 API calls
+test-benchmark: ## Run prime efficiency benchmarks (requires claude CLI) - ~80 min, ~40 API calls
 	@echo "Running prime efficiency benchmarks..."
-	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=integration -run TestPrimeEfficiency -timeout=45m ./tests/integration/agents/benchmark/...
+	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=integration -run TestPrimeEfficiency -timeout=90m ./tests/integration/agents/benchmark/...
 
 test-sequential: ## Run tests sequentially (for debugging race conditions)
 	@echo "Running tests sequentially..."

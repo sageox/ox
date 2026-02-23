@@ -37,6 +37,8 @@ type BenchmarkRun struct {
 type QueryResult struct {
 	QueryID             string        `json:"query_id"`
 	Iteration           int           `json:"iteration"`
+	PromptVariant       int           `json:"prompt_variant"`        // index into Texts slice
+	PromptText          string        `json:"prompt_text,omitempty"` // actual prompt used
 	FoundCorrectSource  bool          `json:"found_correct_source"`
 	ToolCallsTotal      int           `json:"tool_calls_total"`
 	ToolCallsUntilFound int           `json:"tool_calls_until_found"` // -1 if not found
