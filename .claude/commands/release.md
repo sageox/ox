@@ -26,6 +26,14 @@ make test
 
 If tests or lint fail, fix issues before proceeding.
 
+### Step 1b: Smoke Tests (requires SAGEOX_CI_PASSWORD)
+
+```bash
+make smoke-test
+```
+
+This runs end-to-end tests against test.sageox.ai: auth, init, doctor, status, re-init, agent prime, session list, and clone-without-ox. If smoke tests fail, investigate before proceeding — these verify ox works in a real environment.
+
 ### Step 2: Analyze Changes Since Last Release
 
 ```bash

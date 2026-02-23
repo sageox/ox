@@ -129,6 +129,11 @@ main() {
     run_test "Authentication" "smoke-test-auth.sh" || true
     run_test "ox init" "smoke-test-init.sh" || true
     run_test "ox doctor cloud" "smoke-test-doctor.sh" || true
+    run_test "ox status" "smoke-test-status.sh" || true
+    run_test "ox init (re-init)" "smoke-test-reinit.sh" || true
+    run_test "ox agent prime" "smoke-test-prime.sh" || true
+    run_test "ox session list" "smoke-test-sessions.sh" || true
+    run_test "Clone without ox" "smoke-test-clone-no-ox.sh" || true
     # skip checkout test for now - requires team setup
     # run_test "ox team context add" "smoke-test-checkout.sh" || true
 
