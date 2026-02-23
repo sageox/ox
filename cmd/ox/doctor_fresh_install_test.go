@@ -254,6 +254,60 @@ func collectFixableIssues(check checkResult, category string, fixable *[]string)
 	}
 }
 
+// TestDoctorFreshCheckout_NoSideEffectDirectories verifies that running doctor
+// on a freshly checked-out repo (with .sageox/ committed) does not create
+// the sibling _sageox directory as a side-effect. This was the root cause of
+// bug #35: checkStorageHealth created an empty ledger directory, which then
+// caused checkGitRepoPaths to fail with "empty directory".
+func TestDoctorFreshCheckout_NoSideEffectDirectories(t *testing.T) {
+	// create a fresh git repo simulating a checkout that already has .sageox/
+	tmpDir := testGitRepo(t)
+
+	originalWd, _ := os.Getwd()
+	defer os.Chdir(originalWd)
+	os.Chdir(tmpDir)
+
+	// simulate a checkout that already has .sageox/ committed (like cloning ox)
+	createFreshSageoxStructure(t, tmpDir)
+
+	// record the parent directory contents before doctor
+	parentDir := filepath.Dir(tmpDir)
+	beforeEntries, err := os.ReadDir(parentDir)
+	require.NoError(t, err)
+	beforeNames := make(map[string]bool)
+	for _, e := range beforeEntries {
+		beforeNames[e.Name()] = true
+	}
+
+	// run doctor checks (no --fix)
+	opts := doctorOptions{
+		fix:      false,
+		verbose:  false,
+		forceYes: true,
+	}
+	_ = runDoctorChecks(opts)
+
+	// verify no new directories were created in the parent
+	afterEntries, err := os.ReadDir(parentDir)
+	require.NoError(t, err)
+
+	var newDirs []string
+	for _, e := range afterEntries {
+		if !beforeNames[e.Name()] && e.IsDir() {
+			newDirs = append(newDirs, e.Name())
+		}
+	}
+
+	repoName := filepath.Base(tmpDir)
+	siblingName := repoName + "_sageox"
+	for _, dir := range newDirs {
+		if dir == siblingName || strings.HasSuffix(dir, "_sageox") {
+			t.Errorf("ox doctor created sibling directory %q as side-effect; "+
+				"health checks must not create filesystem state", dir)
+		}
+	}
+}
+
 // filterTestEnvironmentIssues removes issues that are expected in a test environment
 // without real credentials, API access, or daemon running
 func filterTestEnvironmentIssues(issues []string) []string {

@@ -282,3 +282,34 @@ func TestCheckHealth_EmptyProjectRoot(t *testing.T) {
 	// recording should not be checked (no project root)
 	assert.False(t, status.IsRecordingActive)
 }
+
+// TestCheckHealth_DoesNotCreateSiblingDirectory verifies that CheckHealth
+// does not create the ledger directory as a side-effect. This was bug #35:
+// the storage writability check called os.MkdirAll, creating an empty
+// <project>_sageox/<endpoint>/ledger directory that then caused
+// checkGitRepoPaths to report a false "empty directory" failure.
+func TestCheckHealth_DoesNotCreateSiblingDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+	projectRoot := filepath.Join(tempDir, "my_project")
+
+	err := os.MkdirAll(projectRoot, 0755)
+	require.NoError(t, err)
+
+	siblingDir := filepath.Join(tempDir, "my_project_sageox")
+
+	// precondition: sibling directory does not exist
+	_, err = os.Stat(siblingDir)
+	require.True(t, os.IsNotExist(err), "sibling dir should not exist before CheckHealth")
+
+	status := CheckHealth(projectRoot)
+
+	// CheckHealth should still report a storage path
+	assert.NotEmpty(t, status.StoragePath)
+	// storage should be considered writable (parent is writable)
+	assert.True(t, status.StorageWritable, "storage should be writable even without existing dir")
+
+	// critical assertion: the sibling directory must NOT have been created
+	_, err = os.Stat(siblingDir)
+	assert.True(t, os.IsNotExist(err),
+		"CheckHealth must not create sibling directory %s as side-effect", siblingDir)
+}
