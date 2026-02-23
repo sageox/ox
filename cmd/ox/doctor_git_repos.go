@@ -703,8 +703,12 @@ func checkGitRepoPaths(fix bool) checkResult {
 			if _, err := os.Stat(sageoxDir); err == nil {
 				// .sageox exists - check if authenticated
 				if authenticated, _ := auth.IsAuthenticated(); authenticated {
-					// authenticated + .sageox exists but no repos configured yet
-					// expected on fresh checkout — warn, don't fail
+					// recently initialized? daemon may not have synced yet
+					if isRecentlyInitialized(gitRoot) {
+						return InfoCheck("git repo paths", "repos syncing",
+							"Background sync is cloning repos. Run `ox doctor` again in a minute.")
+					}
+					// authenticated + .sageox exists but no repos configured = problem
 					if fix {
 						return fixMissingRepos(gitRoot, localCfg)
 					}
@@ -724,6 +728,22 @@ func checkGitRepoPaths(fix bool) checkResult {
 	// issues found
 	if fix {
 		return fixRepoPathIssues(gitRoot, localCfg, issues)
+	}
+
+	// check if all issues are "missing" and the project was just initialized.
+	// after ox init, the daemon may not have cloned repos yet -- this is expected,
+	// not a failure. downgrade to info so users don't see scary errors on first run.
+	allMissing := true
+	for _, issue := range issues {
+		if issue.issue != "missing" {
+			allMissing = false
+			break
+		}
+	}
+	if allMissing && isRecentlyInitialized(gitRoot) {
+		return InfoCheck("git repo paths",
+			fmt.Sprintf("%d repo(s) syncing", len(issues)),
+			"Background sync is cloning repos. Run `ox doctor` again in a minute.")
 	}
 
 	// build detail message listing issues
@@ -2290,4 +2310,22 @@ func saveGitCredentialsFromRepos(repos *api.ReposResponse, projectEndpoint strin
 		ep = endpoint.Get()
 	}
 	return gitserver.SaveCredentialsForEndpoint(ep, *creds)
+}
+
+// bootstrapGracePeriod is the window after ox init during which missing repos
+// are expected (daemon is still cloning). Chosen to be longer than typical clone
+// time for small team context repos on a fast connection.
+// Caveat: mtime-based detection is unreliable on NFS and CI cache-restore scenarios
+// where file timestamps may not reflect actual write time.
+const bootstrapGracePeriod = 5 * time.Minute
+
+// isRecentlyInitialized checks if the project was initialized within the grace period.
+// Uses config.json modification time as a proxy for init time.
+func isRecentlyInitialized(gitRoot string) bool {
+	configPath := filepath.Join(gitRoot, ".sageox", "config.json")
+	info, err := os.Stat(configPath)
+	if err != nil {
+		return false
+	}
+	return time.Since(info.ModTime()) < bootstrapGracePeriod
 }

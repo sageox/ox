@@ -1,6 +1,6 @@
 # Makefile for ox CLI tool
 
-.PHONY: help build install clean dev run test test-all test-slow test-integration test-benchmark test-sequential test-profile test-watch coverage smoke-test lint format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version
+.PHONY: help build install clean dev run test test-all test-slow test-integration test-benchmark test-sequential test-profile test-watch coverage smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version
 
 # Variables
 GO := go
@@ -86,9 +86,20 @@ smoke-test: build ## Run smoke tests against SageOx cloud (requires SAGEOX_CI_PA
 	@./scripts/smoketest/smoke-test.sh
 
 # Code quality
-lint: ## Run golangci-lint
+lint: lint-test-env ## Run golangci-lint
 	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/usage/install/" && exit 1)
 	golangci-lint run -c .config/golangci.yml ./...
+
+lint-test-env: ## Check that test files use testguard instead of os.Environ()
+	@echo "Checking for os.Environ() in test files..."
+	@if grep -rn 'os\.Environ()' --include='*_test.go' . | grep -v '// safe:' | grep -v 'internal/testguard/' > /dev/null 2>&1; then \
+		echo "ERROR: os.Environ() found in test files without '// safe:' annotation:"; \
+		grep -rn 'os\.Environ()' --include='*_test.go' . | grep -v '// safe:' | grep -v 'internal/testguard/'; \
+		echo ""; \
+		echo "Use testguard.RunOx() for ox subprocesses, or add '// safe: <reason>' comment."; \
+		exit 1; \
+	fi
+	@echo "OK: no unguarded os.Environ() in test files"
 
 format: ## Format code with gofmt and goimports
 	@echo "Formatting code..."
