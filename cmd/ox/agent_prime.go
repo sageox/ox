@@ -1361,11 +1361,7 @@ func ensureClaudeHooks(projectRoot string) bool {
 	if !detectClaudeCode() {
 		return false
 	}
-	status, err := listClaudeHooks()
-	if err != nil {
-		return false
-	}
-	if status[claudeSessionStart] && status[claudePreCompact] {
+	if HasProjectClaudeHooks(projectRoot) {
 		return false // already installed
 	}
 	if err := InstallProjectClaudeHooks(projectRoot); err != nil {

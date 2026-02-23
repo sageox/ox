@@ -156,8 +156,9 @@ const (
 	CheckSlugGeminiHooks         = "gemini-hooks"
 	CheckSlugCodexHooks          = "codex-hooks"
 	CheckSlugCodePuppyHooks      = "code-puppy-hooks"
-	CheckSlugHookCommands        = "hook-commands"
-	CheckSlugSessionStartHookBug = "session-start-hook-bug"
+	CheckSlugHookCommands          = "hook-commands"
+	CheckSlugHookCompleteness      = "hook-completeness"
+	CheckSlugSessionStartHookBug   = "session-start-hook-bug"
 
 	// Team Context checks
 	CheckSlugTeamRegistration = "team-registration"

@@ -426,6 +426,11 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		if !hookCmdCheck.skipped {
 			integrationChecks = append(integrationChecks, hookCmdCheck)
 		}
+		// check project-level hook completeness (all required events present)
+		completenessCheck := checkProjectHookCompleteness(opts.shouldFix(CheckSlugHookCompleteness))
+		if !completenessCheck.skipped {
+			integrationChecks = append(integrationChecks, completenessCheck)
+		}
 		// also check project-level hooks if present
 		projectHookCheck := checkProjectHookCommands()
 		if !projectHookCheck.skipped {

@@ -371,7 +371,8 @@ func mergeHookEntries(existing, new []ClaudeHookEntry) []ClaudeHookEntry {
 	return result
 }
 
-// HasProjectClaudeHooks checks if ox prime hooks are already in .claude/settings.local.json
+// HasProjectClaudeHooks checks if ox prime hooks are already in .claude/settings.local.json.
+// Returns true only if BOTH SessionStart AND PreCompact have at least one ox prime hook.
 func HasProjectClaudeHooks(gitRoot string) bool {
 	settings, err := readProjectClaudeSettings(gitRoot)
 	if err != nil {
@@ -379,12 +380,34 @@ func HasProjectClaudeHooks(gitRoot string) bool {
 	}
 
 	for _, eventName := range []string{claudeSessionStart, claudePreCompact} {
-		entries := settings.Hooks[eventName]
-		for _, entry := range entries {
+		found := false
+		for _, entry := range settings.Hooks[eventName] {
 			if hasOxPrimeHook(entry) {
-				return true
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// listProjectClaudeHooks returns per-event hook status from project-level settings.
+func listProjectClaudeHooks(gitRoot string) map[string]bool {
+	settings, err := readProjectClaudeSettings(gitRoot)
+	if err != nil {
+		return make(map[string]bool)
+	}
+	status := make(map[string]bool)
+	for _, eventName := range []string{claudeSessionStart, claudePreCompact} {
+		for _, entry := range settings.Hooks[eventName] {
+			if hasOxPrimeHook(entry) {
+				status[eventName] = true
+				break
 			}
 		}
 	}
-	return false
+	return status
 }
