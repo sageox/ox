@@ -335,9 +335,10 @@ func filterTestEnvironmentIssues(issues []string) []string {
 			strings.Contains(issue, "Git remotes") {
 			continue
 		}
-		// skip repo paths when no ledger/team contexts configured
+		// skip repo paths when no ledger/team contexts configured or syncing
 		if strings.Contains(issue, "git repo paths") &&
-			strings.Contains(issue, "no repos configured") {
+			(strings.Contains(issue, "no repos configured") ||
+				strings.Contains(issue, "repos syncing")) {
 			continue
 		}
 		// skip ox in PATH - not expected in test environment

@@ -83,7 +83,7 @@ func buildOxCLI(t *testing.T) string {
 
 	cmd := exec.Command("go", "build", "-o", oxBinary, "./cmd/ox")
 	cmd.Dir = projectRoot
-	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+	cmd.Env = append(os.Environ(), "CGO_ENABLED=0") // safe: go build only
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -173,7 +173,7 @@ func runClaudeSession(t *testing.T, claudePath, oxPath, workspace string) string
 			prompt,
 		)
 		cmd.Dir = workspace
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: claude CLI subprocess, not ox
 			// CLAUDE_TRANSCRIPT_DIR is Claude Code's env var for session recording output
 			"CLAUDE_TRANSCRIPT_DIR="+sessionDir,
 		)

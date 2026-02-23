@@ -283,6 +283,11 @@ func syncPathExists(path string) bool {
 // This mirrors the logic in daemon.go:startDaemonBackground but is self-contained
 // to avoid circular dependencies.
 func autoStartDaemon() error {
+	// OX_NO_DAEMON=1 prevents daemon start (integration tests)
+	if os.Getenv("OX_NO_DAEMON") == "1" {
+		return fmt.Errorf("daemon start disabled: OX_NO_DAEMON=1")
+	}
+
 	// get the path to the current executable
 	exe, err := os.Executable()
 	if err != nil {
