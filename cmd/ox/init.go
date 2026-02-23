@@ -702,6 +702,9 @@ func runInit() error {
 					}
 				} else {
 					slog.Debug("daemon did not become healthy within 2s after auto-start; sync deferred to daemon timer")
+					if !initQuiet {
+						cli.PrintInfo("Background sync starting — run " + cli.StyleCommand.Render("ox status") + " to check progress")
+					}
 				}
 			}
 		}
@@ -743,6 +746,10 @@ func runInit() error {
 			step++
 		}
 
+		// step N: health check
+		fmt.Printf("  %d. Run %s to confirm everything is working properly\n", step, cli.StyleCommand.Render("ox doctor"))
+		step++
+
 		// step N: invite teammates (show dashboard URL if team info available)
 		if cfg.TeamID != "" && cfg.Endpoint != "" {
 			teamDashURL := strings.TrimSuffix(cfg.Endpoint, "/") + "/team/" + cfg.TeamID
@@ -757,17 +764,18 @@ func runInit() error {
 		}
 		step++
 
-		// step N: health check
-		fmt.Printf("  %d. Run %s to confirm everything is working properly\n", step, cli.StyleCommand.Render("ox doctor"))
-		step++
+		// step N: start Claude Code (ox will auto-prime and surface team context)
+		fmt.Printf("  %d. Start Claude Code in this repo — ox will auto-prime and surface your team context\n", step)
 
-		// step N: try session recording
-		fmt.Printf("  %d. Start Claude Code in this repo\n", step)
-		fmt.Printf("     Run %s to try session recording\n", cli.StyleCommand.Render("/ox-session-start"))
-		step++
-
-		// step N: agent bootstrap
-		fmt.Printf("  %d. Claude Code should auto-run: %s\n", step, cli.StyleCommand.Render("ox agent prime"))
+		// show team context sync status so user knows what's happening in the background
+		if cfg.TeamID != "" {
+			tc := config.FindRepoTeamContext(gitRoot)
+			if tc != nil {
+				fmt.Println()
+				fmt.Printf("  Team context syncing to: %s\n", tc.Path)
+				fmt.Printf("  Run %s to check sync progress.\n", cli.StyleCommand.Render("ox status"))
+			}
+		}
 
 		// show contextual tip
 		userCfg, _ := config.LoadUserConfig("")

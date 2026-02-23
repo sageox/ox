@@ -1090,6 +1090,12 @@ func displayPrioritySummary(cmd *cobra.Command, categories []checkCategory) bool
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), summary)
 
+	// when everything is healthy, show a reassuring confirmation
+	if failCount == 0 && warnCount == 0 {
+		fmt.Fprintln(cmd.OutOrStdout())
+		fmt.Fprintln(cmd.OutOrStdout(), ui.RenderPass("All checks passed — setup is healthy"))
+	}
+
 	// show fixable slugs if any failed or warning checks have fixes
 	renderFixableSlugs(cmd, fixableSlugs)
 

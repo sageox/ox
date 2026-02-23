@@ -218,7 +218,14 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		return nil, fmt.Errorf("check recording state project=%s: %w", projectRoot, err)
 	}
 	if existing != nil {
-		return nil, fmt.Errorf("%w: agent_id=%s started_at=%s", ErrAlreadyRecording, existing.AgentID, existing.StartedAt.Format(time.RFC3339))
+		if existing.AgentID == opts.AgentID {
+			// same agent trying to start again — genuine conflict
+			return nil, fmt.Errorf("%w: agent_id=%s started_at=%s", ErrAlreadyRecording, existing.AgentID, existing.StartedAt.Format(time.RFC3339))
+		}
+		// different agent — ghost session from a previous instance.
+		// auto-clear so this session can start. the caller (agent_session.go)
+		// should have already cleared it, but handle it here as defense-in-depth.
+		_ = ClearRecordingState(projectRoot)
 	}
 
 	reminderInterval := opts.ReminderInterval

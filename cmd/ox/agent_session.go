@@ -86,9 +86,20 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	// one-time session recording notice (returned to caller via JSON)
 	notice := getSessionTermsNotice()
 
-	// refuse to start if already recording — user must explicitly stop first
-	if session.IsRecording(projectRoot) {
-		return fmt.Errorf("a session is already being recorded\nRun 'ox agent %s session stop' first, then start a new session", inst.AgentID)
+	// check for existing recording state
+	existingState, _ := session.LoadRecordingState(projectRoot)
+	if existingState != nil {
+		if existingState.AgentID == inst.AgentID {
+			// same agent — genuine duplicate start, refuse
+			return fmt.Errorf("a session is already being recorded\nRun 'ox agent %s session stop' first, then start a new session", inst.AgentID)
+		}
+		// different agent ID — this is a ghost session from a previous Claude Code
+		// instance (e.g., user restarted after hooks install notice). auto-clear it
+		// so the new session can start cleanly.
+		slog.Info("clearing ghost session from previous agent", "old_agent", existingState.AgentID, "new_agent", inst.AgentID, "started_at", existingState.StartedAt)
+		if err := session.ClearRecordingState(projectRoot); err != nil {
+			slog.Warn("failed to clear ghost session", "error", err)
+		}
 	}
 
 	// parse optional title from args (simple parsing: --title "value" or --title=value)

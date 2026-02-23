@@ -118,6 +118,57 @@ func TestDisplayDoctorResults_AllPassed(t *testing.T) {
 	assert.Contains(t, output, "0 failed", "output missing fail count")
 }
 
+// TestDisplayPrioritySummary_AllPassedShowsHealthy verifies the reassuring
+// confirmation message when all checks pass with no warnings.
+func TestDisplayPrioritySummary_AllPassedShowsHealthy(t *testing.T) {
+	t.Parallel()
+	categories := []checkCategory{
+		{
+			name: "Core",
+			checks: []checkResult{
+				PassedCheck("check1", "ok"),
+				PassedCheck("check2", "ok"),
+			},
+		},
+	}
+
+	cmd := &cobra.Command{}
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+
+	// non-verbose mode exercises displayPrioritySummary
+	hasFailed := displayDoctorResults(cmd, categories, doctorOptions{})
+
+	assert.False(t, hasFailed)
+	output := buf.String()
+	assert.Contains(t, output, "All checks passed", "should show healthy confirmation when no failures or warnings")
+}
+
+// TestDisplayPrioritySummary_WarningsNoHealthyMessage verifies the healthy
+// confirmation is NOT shown when there are warnings (even without failures).
+func TestDisplayPrioritySummary_WarningsNoHealthyMessage(t *testing.T) {
+	t.Parallel()
+	categories := []checkCategory{
+		{
+			name: "Mixed",
+			checks: []checkResult{
+				PassedCheck("check1", "ok"),
+				WarningCheck("check2", "might be an issue", ""),
+			},
+		},
+	}
+
+	cmd := &cobra.Command{}
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+
+	hasFailed := displayDoctorResults(cmd, categories, doctorOptions{})
+
+	assert.False(t, hasFailed)
+	output := buf.String()
+	assert.NotContains(t, output, "All checks passed", "should NOT show healthy message when warnings exist")
+}
+
 // TestDisplayDoctorResults_HasFailures returns true when any check failed
 func TestDisplayDoctorResults_HasFailures(t *testing.T) {
 	t.Parallel()

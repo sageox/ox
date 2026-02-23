@@ -225,7 +225,9 @@ type agentPrimeOutput struct {
 	ContentLength   int                        `json:"content_length,omitempty"` // raw byte length
 	Session         *sessionStatus             `json:"session,omitempty"`        // session recording status
 	Ledger          *ledgerInfo                `json:"ledger,omitempty"`         // ledger discovery for team sessions
-	TeamContext     *teamContextInfo           `json:"team_context,omitempty"`   // team context if configured
+	TeamContext       *teamContextInfo `json:"team_context,omitempty"`        // team context if configured
+	TeamContextStatus string           `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
+	UserNotification  string           `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user
 	// Prime call tracking
 	PrimeCallCount       int    `json:"prime_call_count,omitempty"`       // number of prime calls this session
 	PrimeExcessiveNotice string `json:"prime_excessive_notice,omitempty"` // warning if prime called excessively
@@ -531,6 +533,41 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		NeedsDoctorAgent: needsDoctorAgent,
 		DoctorHint:       doctorHint,
 		HooksInstalled:   hooksInstalled,
+	}
+
+	// set team context status hint for agents when team context hasn't synced yet
+	if output.TeamContext == nil {
+		// check if we have a team ID configured (team context expected but not yet synced)
+		projCfg, _ := config.LoadProjectConfig(projectRoot)
+		if projCfg != nil && projCfg.TeamID != "" {
+			output.TeamContextStatus = "syncing"
+		}
+	}
+
+	// build pre-assembled notification for JSON-consuming agents.
+	// this duplicates the logic in outputAgentPrimeText so JSON consumers
+	// don't have to assemble the notification from individual fields.
+	var notifParts []string
+	if output.TeamContext != nil {
+		teamName := output.TeamContext.TeamName
+		if teamName == "" {
+			teamName = output.TeamContext.TeamID
+		}
+		if output.TeamContext.HasAgentContext {
+			notifParts = append(notifParts, fmt.Sprintf("Team context: %s (synced, discussions available)", teamName))
+		} else {
+			notifParts = append(notifParts, fmt.Sprintf("Team context: %s (synced)", teamName))
+		}
+	} else if output.TeamContextStatus != "" {
+		notifParts = append(notifParts, "Team context: "+output.TeamContextStatus)
+	}
+	if output.Session != nil && output.Session.Recording {
+		notifParts = append(notifParts, "Session recording: active")
+	} else {
+		notifParts = append(notifParts, "Session recording: available (/ox-session-start)")
+	}
+	if len(notifParts) > 0 {
+		output.UserNotification = "SageOx is active on this repo. " + strings.Join(notifParts, ". ") + "."
 	}
 
 	if hooksInstalled {
@@ -1001,9 +1038,34 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "Session: %s\n", output.SessionID)
 	}
 
-	// instruct agent to notify user about SageOx
+	// instruct agent to notify user about SageOx.
+	// NOTE: all output from this function is consumed by the AI agent, not shown
+	// directly to the human. the agent decides how to relay this to the user.
+	// "NOTIFY USER NOW" is a behavioral directive — it tells the agent to surface
+	// this information immediately rather than silently absorbing it.
 	fmt.Fprintln(cmd.OutOrStdout())
-	fmt.Fprintln(cmd.OutOrStdout(), "**NOTIFY USER NOW:** Tell the user that SageOx is optimizing collaborative work on this repo.")
+	fmt.Fprintln(cmd.OutOrStdout(), "**NOTIFY USER NOW:** Tell the user that SageOx is active on this repo. Include these details:")
+	fmt.Fprintln(cmd.OutOrStdout())
+	// team context status — give agent concrete lines to relay
+	if output.TeamContext != nil {
+		teamName := output.TeamContext.TeamName
+		if teamName == "" {
+			teamName = output.TeamContext.TeamID
+		}
+		if output.TeamContext.HasAgentContext {
+			fmt.Fprintf(cmd.OutOrStdout(), "- Team context: %s (synced, discussions available via `ox agent team-ctx`)\n", teamName)
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "- Team context: %s (synced)\n", teamName)
+		}
+	} else if output.TeamContextStatus != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "- Team context: %s\n", output.TeamContextStatus)
+	}
+	// session recording status
+	if output.Session != nil && output.Session.Recording {
+		fmt.Fprintf(cmd.OutOrStdout(), "- Session recording: active\n")
+	} else {
+		fmt.Fprintln(cmd.OutOrStdout(), "- Session recording: available (`/ox-session-start`)")
+	}
 
 	// quick reference: intent-to-command lookup
 	if output.Guidance != nil && len(output.Guidance.Commands) > 0 {

@@ -475,6 +475,69 @@ func TestStartRecording(t *testing.T) {
 		_, err := StartRecording("", opts)
 		assert.Error(t, err)
 	})
+
+	t.Run("clears ghost session from different agent", func(t *testing.T) {
+		// Regression test for ghost session bug: when user exits Claude Code
+		// without stopping the session (e.g., after hooks restart notice), the
+		// .recording.json persists. A new Claude Code instance with a different
+		// agent ID should auto-clear it instead of blocking with ErrAlreadyRecording.
+		cacheDir := t.TempDir()
+		projectRoot := setupRecordingTest(t, cacheDir)
+
+		// agent A starts a recording (simulates first Claude Code session)
+		optsA := StartRecordingOptions{
+			AgentID:     "OxOldAgent",
+			AdapterName: "claude-code",
+			Username:    "testuser",
+		}
+		stateA, err := StartRecording(projectRoot, optsA)
+		require.NoError(t, err, "agent A start failed")
+		require.True(t, IsRecording(projectRoot))
+
+		// user exits Claude Code without stopping — .recording.json persists
+		// agent B (new Claude Code instance) tries to start a new recording
+		optsB := StartRecordingOptions{
+			AgentID:     "OxNewAgent",
+			AdapterName: "claude-code",
+			Username:    "testuser",
+		}
+		stateB, err := StartRecording(projectRoot, optsB)
+		require.NoError(t, err, "agent B should succeed after auto-clearing ghost session")
+		require.NotNil(t, stateB)
+		assert.Equal(t, "OxNewAgent", stateB.AgentID)
+
+		// old recording state should be gone
+		oldRecordingPath := filepath.Join(stateA.SessionPath, recordingFile)
+		_, err = os.Stat(oldRecordingPath)
+		assert.True(t, os.IsNotExist(err), "ghost .recording.json should be cleared")
+
+		// new recording should be active
+		loaded, err := LoadRecordingState(projectRoot)
+		require.NoError(t, err)
+		require.NotNil(t, loaded)
+		assert.Equal(t, "OxNewAgent", loaded.AgentID)
+	})
+
+	t.Run("same agent duplicate start still blocked", func(t *testing.T) {
+		// Ensure the ghost session fix doesn't break the genuine duplicate
+		// protection — same agent ID starting twice should still error.
+		cacheDir := t.TempDir()
+		projectRoot := setupRecordingTest(t, cacheDir)
+
+		opts := StartRecordingOptions{
+			AgentID:     "OxSameAgent",
+			AdapterName: "claude-code",
+			Username:    "testuser",
+		}
+
+		_, err := StartRecording(projectRoot, opts)
+		require.NoError(t, err)
+
+		_, err = StartRecording(projectRoot, opts)
+		assert.Error(t, err)
+		assert.True(t, errors.Is(err, ErrAlreadyRecording),
+			"same agent starting twice should still get ErrAlreadyRecording")
+	})
 }
 
 func TestStopRecording(t *testing.T) {
