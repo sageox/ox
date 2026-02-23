@@ -788,6 +788,12 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		s.lastSync = time.Now()
 		s.mu.Unlock()
 
+		// persist sync timestamp so "ox status" shows when we last checked,
+		// not when content last changed
+		if err := s.workspaceRegistry.UpdateConfigLastSync("ledger"); err != nil {
+			s.logger.Warn("failed to update ledger config last sync", "error", err)
+		}
+
 		if progress != nil {
 			_ = progress.WriteStage("skipped", "Remote unchanged, skipping pull")
 		}
@@ -801,6 +807,10 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		threshold := max(s.config.SyncIntervalRead/2, minFetchHeadAge)
 		if time.Since(info.ModTime()) < threshold {
 			s.logger.Debug("ledger recently fetched, skipping", "age", time.Since(info.ModTime()))
+			// persist sync timestamp — another daemon recently fetched, ledger is current
+			if err := s.workspaceRegistry.UpdateConfigLastSync("ledger"); err != nil {
+				s.logger.Warn("failed to update ledger config last sync", "error", err)
+			}
 			if progress != nil {
 				_ = progress.WriteStage("skipped", "Recently fetched, skipping pull")
 			}
