@@ -203,15 +203,18 @@ func Summarize(entries []Entry, agentID, agentType, model, endpointURL string) (
 }
 
 // buildSummarizeRequest converts entries to the API request format.
+// Filters out low-value exploratory tool calls to reduce noise for the LLM.
 func buildSummarizeRequest(entries []Entry, agentID, agentType, model string) *SummarizeRequest {
+	filtered := FilterForSummarization(entries)
+
 	req := &SummarizeRequest{
 		AgentID:   agentID,
 		AgentType: agentType,
 		Model:     model,
-		Entries:   make([]SummarizeEntry, 0, len(entries)),
+		Entries:   make([]SummarizeEntry, 0, len(filtered)),
 	}
 
-	for _, e := range entries {
+	for _, e := range filtered {
 		se := SummarizeEntry{
 			Type:     string(e.Type),
 			Content:  e.Content,
@@ -224,6 +227,85 @@ func buildSummarizeRequest(entries []Entry, agentID, agentType, model string) *S
 	}
 
 	return req
+}
+
+// readOnlyTools are tools that only read/search without modifying state.
+// Successful calls to these are low-value noise for summarization.
+var readOnlyTools = map[string]bool{
+	"read":      true,
+	"Read":      true,
+	"glob":      true,
+	"Glob":      true,
+	"grep":      true,
+	"Grep":      true,
+	"WebFetch":  true,
+	"WebSearch": true,
+	"webfetch":  true,
+	"websearch": true,
+}
+
+// FilterForSummarization removes low-value tool entries from session data
+// before sending to the LLM summarizer. Keeps raw.jsonl complete for
+// auditability while reducing noise in the summarization input.
+//
+// Filtered out (when successful):
+//   - Read-only tools: Read, Glob, Grep, WebFetch, WebSearch
+//   - Bash commands that are noise: ls, pwd, cat, head, tail, etc.
+//
+// Always kept:
+//   - All user and assistant messages (the human-AI dialog)
+//   - System messages
+//   - Write/Edit tool calls (actual changes)
+//   - Failed tool calls (important for understanding debugging)
+//   - Bash commands that modify state
+func FilterForSummarization(entries []Entry) []Entry {
+	if len(entries) == 0 {
+		return entries
+	}
+
+	filtered := make([]Entry, 0, len(entries))
+	for _, e := range entries {
+		if e.Type != EntryTypeTool {
+			filtered = append(filtered, e)
+			continue
+		}
+
+		// keep tool entries that errored (useful for understanding debugging)
+		if hasToolError(e) {
+			filtered = append(filtered, e)
+			continue
+		}
+
+		// filter read-only tools
+		if readOnlyTools[e.ToolName] {
+			continue
+		}
+
+		// filter noise bash/Bash commands
+		toolLower := strings.ToLower(e.ToolName)
+		if toolLower == "bash" || toolLower == "execute" {
+			if IsNoiseCommand(e.ToolInput) {
+				continue
+			}
+		}
+
+		filtered = append(filtered, e)
+	}
+
+	return filtered
+}
+
+// hasToolError checks if a tool entry indicates a failure.
+func hasToolError(e Entry) bool {
+	output := e.ToolOutput
+	if output == "" {
+		output = e.Content
+	}
+	if output == "" {
+		return false
+	}
+	hasErr, _ := eventLogDetectError(output)
+	return hasErr
 }
 
 // BuildSummaryPrompt builds a prompt for the calling agent to generate a session summary.
@@ -245,7 +327,8 @@ func BuildSummaryPrompt(entries []Entry, rawPath, ledgerSessionDir string) strin
 	// (the agent already has the session in its context window)
 	sb.WriteString("## Session to Analyze\n\n")
 	fmt.Fprintf(&sb, "Read the session recording at: `%s`\n\n", rawPath)
-	fmt.Fprintf(&sb, "The file is JSONL format with %d entries. Each line is a JSON object with `type`, `content`, and optional `tool_name` fields.\n\n", len(entries))
+	fmt.Fprintf(&sb, "The file is JSONL format with %d entries. Each line is a JSON object with `type`, `content`, and optional `tool_name` fields.\n", len(entries))
+	sb.WriteString("Focus on user/assistant dialog and write/edit tool calls. Skip read/glob/grep tool entries — they are exploratory noise.\n\n")
 
 	// save-to path
 	summaryPath := filepath.Join(filepath.Dir(rawPath), "summary.json")

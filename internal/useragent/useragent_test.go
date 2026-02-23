@@ -22,6 +22,8 @@ func TestString_WithoutAgentType(t *testing.T) {
 
 func TestString_WithAgentType(t *testing.T) {
 	ResetForTesting()
+	t.Setenv("AGENT_ENV", "")
+	t.Setenv("AGENT_VERSION", "")
 	SetAgentType("claude-code")
 
 	ua := String()

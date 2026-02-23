@@ -83,6 +83,14 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		return fmt.Errorf("not logged in to SageOx\nRun 'ox login' first to authenticate")
 	}
 
+	// check write access before recording — fail fast if user is a viewer
+	if err := checkUploadAccess(projectRoot); err != nil {
+		if errors.Is(err, api.ErrReadOnly) {
+			return fmt.Errorf("you have read-only access to this repo — sessions cannot be uploaded to the ledger\nTo upload sessions, request team membership from an admin")
+		}
+		// non-ErrReadOnly errors fall through (fail-open)
+	}
+
 	// one-time session recording notice (returned to caller via JSON)
 	notice := getSessionTermsNotice()
 

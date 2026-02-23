@@ -11,6 +11,7 @@ package testguard
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -60,7 +61,8 @@ func RunOx(t *testing.T, oxBin, dir string, envVars []string, args ...string) (s
 
 	exitCode := 0
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		} else {
 			t.Logf("warning: command error (not exit code): %v", err)
