@@ -192,10 +192,24 @@ type TeamInstructions struct {
 	Files    []string `json:"files"`               // which files contributed: ["AGENTS.md", "CLAUDE.md"]
 }
 
+// intentCommand maps a user intent to the ox command that resolves it.
+type intentCommand struct {
+	Intent  string `json:"intent"`  // natural language phrases the user might say
+	Command string `json:"command"` // exact ox CLI command to run
+}
+
+// agentGuidance provides a top-level intent-to-command lookup for agents.
+// Agents should consult this before exploring files or running ad-hoc discovery.
+type agentGuidance struct {
+	Hint     string          `json:"hint"`     // one-line instruction for the agent
+	Commands []intentCommand `json:"commands"` // ordered by query frequency
+}
+
 // agentPrimeOutput is the structured response for agent bootstrap (prime)
 type agentPrimeOutput struct {
 	Status          string                     `json:"status"` // fresh, unavailable
 	AgentID         string                     `json:"agent_id"`
+	Guidance        *agentGuidance             `json:"guidance,omitempty"` // intent-to-command lookup (scan first)
 	SessionID       string                     `json:"session_id,omitempty"`
 	AgentType       string                     `json:"agent_type,omitempty"`     // detected or specified agent type
 	AgentSupported  bool                       `json:"agent_supported"`          // true if agent is officially supported
@@ -439,6 +453,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		doctorHint = "Run 'ox agent doctor' to finalize incomplete sessions"
 	}
 
+	// build intent-to-command guidance for agent consumption
+	guidance := buildGuidance(teamCtx, ledgerStatus)
+
 	// check for team context notifications using mtime-based approach
 	var lastNotified time.Time
 	if existingMarker != nil {
@@ -494,6 +511,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	output := agentPrimeOutput{
 		Status:           "fresh",
 		AgentID:          agentID,
+		Guidance:         guidance,
 		SessionID:        serverSessionID,
 		AgentType:        agentType,
 		AgentSupported:   isAgentSupported(agentType),
@@ -682,6 +700,45 @@ func buildCapturePriorGuidance(agentID string) *capturePriorGuidance {
 {"seq":1,"type":"user","content":"<user prompt>","ts":"%s","source":"planning_history"}
 {"seq":2,"type":"assistant","content":"<assistant response>","ts":"%s","source":"planning_history"}
 EOF`, agentID, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339)),
+	}
+}
+
+// buildGuidance constructs state-aware command guidance for agent consumption.
+// Only includes entries when the underlying resource is available.
+func buildGuidance(teamCtx *teamContextInfo, ledger *ledgerInfo) *agentGuidance {
+	var cmds []intentCommand
+
+	// team discussions — only when team context exists
+	if teamCtx != nil {
+		cmds = append(cmds, intentCommand{
+			Intent:  "team discussions, architecture decisions, conventions, what to implement next",
+			Command: "ox agent team-ctx",
+		})
+	}
+
+	// health check — always available on initialized project
+	cmds = append(cmds, intentCommand{
+		Intent:  "setup issues, health check, configuration problems, known issues",
+		Command: "ox doctor",
+	})
+
+	// sync status — always available
+	cmds = append(cmds, intentCommand{
+		Intent:  "sync status, up to date, synchronized, stale",
+		Command: "ox status",
+	})
+
+	// session history — only when ledger is provisioned
+	if ledger != nil && ledger.Exists {
+		cmds = append(cmds, intentCommand{
+			Intent:  "session history, prior sessions, what was worked on before",
+			Command: "ox session list",
+		})
+	}
+
+	return &agentGuidance{
+		Hint:     "Use these commands to answer user questions — check here before exploring files.",
+		Commands: cmds,
 	}
 }
 
@@ -881,6 +938,10 @@ func buildHumanSummary(output agentPrimeOutput) string {
 		fmt.Fprintf(&sb, "- **Token Estimate:** %d\n", output.TokenEstimate)
 	}
 
+	if output.Guidance != nil {
+		fmt.Fprintf(&sb, "- **Guidance:** %d intent-to-command mappings\n", len(output.Guidance.Commands))
+	}
+
 	if output.ProjectGuidance != nil {
 		fmt.Fprintf(&sb, "- **Project Guidance:** AGENTS.md found (%d bytes, ~%d tokens)\n",
 			output.ProjectGuidance.Size, output.ProjectGuidance.Tokens)
@@ -943,6 +1004,18 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 	// instruct agent to notify user about SageOx
 	fmt.Fprintln(cmd.OutOrStdout())
 	fmt.Fprintln(cmd.OutOrStdout(), "**NOTIFY USER NOW:** Tell the user that SageOx is optimizing collaborative work on this repo.")
+
+	// quick reference: intent-to-command lookup
+	if output.Guidance != nil && len(output.Guidance.Commands) > 0 {
+		fmt.Fprintln(cmd.OutOrStdout())
+		fmt.Fprintln(cmd.OutOrStdout(), "## Quick Reference")
+		fmt.Fprintln(cmd.OutOrStdout())
+		fmt.Fprintln(cmd.OutOrStdout(), output.Guidance.Hint)
+		fmt.Fprintln(cmd.OutOrStdout())
+		for _, ic := range output.Guidance.Commands {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %-60s  %s\n", ic.Intent, ic.Command)
+		}
+	}
 
 	// show hooks restart notice prominently
 	if output.HooksInstalled {
