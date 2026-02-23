@@ -89,3 +89,36 @@ func TestExtractTopicHint_Empty(t *testing.T) {
 	assert.Equal(t, "", extractTopicHint("   "))
 	assert.Equal(t, "", extractTopicHint("# Header Only\n"))
 }
+
+func TestLocalSummary_SkipsSkillInvocation(t *testing.T) {
+	entries := []Entry{
+		{Type: EntryTypeUser, Content: "/ox-session-start"},
+		{Type: EntryTypeUser, Content: "Fix the authentication bug in the login flow"},
+		{Type: EntryTypeAssistant, Content: "I'll fix that."},
+	}
+	result := LocalSummary(entries)
+	assert.True(t, strings.HasPrefix(result, "Fix the authentication bug"), "should skip /ox-session-start and use second user message")
+	assert.NotContains(t, result, "/ox-session-start")
+}
+
+func TestLocalSummary_AllSkillInvocations(t *testing.T) {
+	// when all user messages are skill invocations, no topic hint
+	entries := []Entry{
+		{Type: EntryTypeUser, Content: "/ox-session-start"},
+		{Type: EntryTypeUser, Content: "/commit"},
+		{Type: EntryTypeAssistant, Content: "Done."},
+	}
+	result := LocalSummary(entries)
+	assert.False(t, strings.Contains(result, "/ox-session-start"))
+	assert.False(t, strings.Contains(result, "/commit"))
+	assert.Contains(t, result, "2 user messages")
+}
+
+func TestIsSkillInvocation(t *testing.T) {
+	assert.True(t, isSkillInvocation("/ox-session-start"))
+	assert.True(t, isSkillInvocation("/commit"))
+	assert.True(t, isSkillInvocation("/ox-session-stop"))
+	assert.False(t, isSkillInvocation("Fix the bug"))
+	assert.False(t, isSkillInvocation("Add a /path to the config"))
+	assert.False(t, isSkillInvocation(""))
+}

@@ -337,6 +337,68 @@ func TestClaudeCodeAdapter_ParseLine_UserMessage(t *testing.T) {
 		assert.Equal(t, "system", entry.Role)
 	})
 
+	t.Run("command-name tag classified as system", func(t *testing.T) {
+		jsonl := `{
+			"type": "user",
+			"timestamp": "2026-01-05T10:00:00.000Z",
+			"message": {
+				"role": "user",
+				"content": "<command-name>/context</command-name>\n            <command-message>context</command-message>\n            <command-args></command-args>"
+			}
+		}`
+		entry, err := adapter.parseLine([]byte(jsonl))
+		require.NoError(t, err)
+		require.NotNil(t, entry)
+		assert.Equal(t, "system", entry.Role)
+	})
+
+	t.Run("task-notification classified as system", func(t *testing.T) {
+		jsonl := `{
+			"type": "user",
+			"timestamp": "2026-01-05T10:00:00.000Z",
+			"message": {
+				"role": "user",
+				"content": "<task-notification>\n<task-id>bec5bb9</task-id>\n<status>completed</status>\n<summary>Background command completed</summary>\n</task-notification>"
+			}
+		}`
+		entry, err := adapter.parseLine([]byte(jsonl))
+		require.NoError(t, err)
+		require.NotNil(t, entry)
+		assert.Equal(t, "system", entry.Role)
+	})
+
+	t.Run("request interrupted classified as system", func(t *testing.T) {
+		jsonl := `{
+			"type": "user",
+			"timestamp": "2026-01-05T10:00:00.000Z",
+			"message": {
+				"role": "user",
+				"content": "[Request interrupted by user for tool use]"
+			}
+		}`
+		entry, err := adapter.parseLine([]byte(jsonl))
+		require.NoError(t, err)
+		require.NotNil(t, entry)
+		assert.Equal(t, "system", entry.Role)
+	})
+
+	t.Run("mixed task-notification with user text keeps user text", func(t *testing.T) {
+		jsonl := `{
+			"type": "user",
+			"timestamp": "2026-01-05T10:00:00.000Z",
+			"message": {
+				"role": "user",
+				"content": "<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n</task-notification>\nPlease review the results"
+			}
+		}`
+		entry, err := adapter.parseLine([]byte(jsonl))
+		require.NoError(t, err)
+		require.NotNil(t, entry)
+		assert.Equal(t, "user", entry.Role)
+		assert.Contains(t, entry.Content, "Please review the results")
+		assert.NotContains(t, entry.Content, "task-notification")
+	})
+
 	t.Run("mixed local-command-stdout with user text keeps user text", func(t *testing.T) {
 		jsonl := `{
 			"type": "user",

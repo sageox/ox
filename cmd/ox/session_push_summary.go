@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -107,6 +108,17 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 			Success: false,
 			Type:    "push_summary",
 			Error:   fmt.Sprintf("write summary.json: %v", err),
+		}
+	}
+
+	// update meta.json summary with the AI-generated title from summary.json
+	var summaryObj struct {
+		Title   string `json:"title"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal(data, &summaryObj); err == nil && summaryObj.Title != "" {
+		if err := lfs.UpdateMetaSummary(sessionDir, summaryObj.Title); err != nil {
+			slog.Debug("update meta.json summary", "error", err)
 		}
 	}
 

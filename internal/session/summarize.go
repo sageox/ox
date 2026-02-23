@@ -289,7 +289,8 @@ func LocalSummary(entries []Entry) string {
 			userCount++
 			if firstUserMsg == "" {
 				msg := strings.TrimSpace(e.Content)
-				if len(msg) > 0 {
+				// skip skill invocations (e.g. "/ox-session-start") as topic hints
+				if len(msg) > 0 && !isSkillInvocation(msg) {
 					firstUserMsg = msg
 				}
 			}
@@ -366,4 +367,13 @@ func extractTopicHint(msg string) string {
 	}
 
 	return line
+}
+
+// isSkillInvocation returns true if the message looks like a slash-command
+// skill invocation (e.g. "/ox-session-start", "/commit"). These are not
+// meaningful topic hints for session summaries.
+func isSkillInvocation(msg string) bool {
+	first := strings.SplitN(msg, "\n", 2)[0]
+	first = strings.TrimSpace(first)
+	return strings.HasPrefix(first, "/")
 }
