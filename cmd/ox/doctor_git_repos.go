@@ -1150,63 +1150,53 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 			"Run `ox login` first")
 	}
 
-	// fetch repos from cloud API with spinner using project endpoint
 	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
+
+	// fetch team context repos (user-scoped) and save git credentials
 	repos, err := cli.WithSpinner("Fetching repos from cloud...", func() (*api.ReposResponse, error) {
 		return client.GetRepos()
 	})
 	if err != nil {
 		return FailedCheck("git repo paths", "API error", err.Error())
 	}
-	if repos == nil || len(repos.Repos) == 0 {
-		return WarningCheck("git repo paths", "no repos from cloud",
-			"Cloud has not provisioned any repos yet - contact support if this persists")
-	}
-
-	// save git credentials from the already-fetched response (avoids duplicate API call)
-	if err := saveGitCredentialsFromRepos(repos, projectEndpoint); err != nil {
-		slog.Warn("failed to save git credentials", "error", err)
-	}
-
-	var fixed, skipped int
-	var foundLedger, foundTeamContexts []api.RepoInfo
-
-	// categorize repos
-	for _, repo := range repos.Repos {
-		switch repo.Type {
-		case "ledger":
-			foundLedger = append(foundLedger, repo)
-		case "team-context":
-			foundTeamContexts = append(foundTeamContexts, repo)
+	if repos != nil {
+		if err := saveGitCredentialsFromRepos(repos, projectEndpoint); err != nil {
+			slog.Warn("failed to save git credentials", "error", err)
 		}
 	}
 
-	// clone ledger - uses shared config.DefaultLedgerPath() for path derivation
-	// (see internal/config/local_config.go for the canonical implementation)
-	if len(foundLedger) > 0 {
-		ledgerRepo := foundLedger[0]
+	// fetch repo detail (project-scoped) for ledger URL and team contexts
+	// GetRepos() only returns team-context repos; ledger comes from GetRepoDetail()
+	projectCfg, _ := config.LoadProjectConfig(gitRoot)
+	var repoDetail *api.RepoDetailResponse
+	if projectCfg != nil && projectCfg.RepoID != "" {
+		repoDetail, err = client.GetRepoDetail(projectCfg.RepoID)
+		if err != nil {
+			slog.Warn("failed to fetch repo detail", "error", err)
+		}
+	}
 
-		// use shared function for ledger path derivation
-		// primary: ledger.DefaultPath() which uses cwd git root
-		// fallback: config.DefaultLedgerPath() with explicit gitRoot param
+	var fixed, skipped, total int
+
+	// clone ledger from repo detail API (GetRepos doesn't return ledgers)
+	if repoDetail != nil && repoDetail.Ledger != nil && repoDetail.Ledger.Status == "ready" && repoDetail.Ledger.RepoURL != "" {
+		total++
+
 		var ledgerPath string
-		var err error
 		ledgerPath, err = ledger.DefaultPath()
 		if err != nil {
-			// fallback to explicit derivation using gitRoot
 			repoName := filepath.Base(gitRoot)
 			ep := endpoint.GetForProject(gitRoot)
 			ledgerPath = config.DefaultLedgerPath(repoName, gitRoot, ep)
 		}
 
-		fmt.Printf("  Ledger: %s\n", ledgerRepo.URL)
+		fmt.Printf("  Ledger: %s\n", repoDetail.Ledger.RepoURL)
 		fmt.Printf("    Cloning to: %s\n", ledgerPath)
 
-		// ensure parent directory exists
 		if err := os.MkdirAll(filepath.Dir(ledgerPath), 0755); err != nil {
 			fmt.Printf("    Error creating directory: %v\n", err)
 			skipped++
-		} else if err := cloneViaDaemon(ledgerRepo.URL, ledgerPath, "ledger", projectEndpoint); err != nil {
+		} else if err := cloneViaDaemon(repoDetail.Ledger.RepoURL, ledgerPath, "ledger", projectEndpoint); err != nil {
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
 		} else {
@@ -1218,42 +1208,71 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 		fmt.Println()
 	}
 
+	// build team context list from repo detail (preferred, has team_id) or GetRepos fallback
+	type teamContextInfo struct {
+		teamID   string
+		teamName string
+		cloneURL string
+	}
+	var teamContexts []teamContextInfo
+
+	if repoDetail != nil {
+		for _, tc := range repoDetail.TeamContexts {
+			if tc.StableID() != "" && tc.RepoURL != "" {
+				teamContexts = append(teamContexts, teamContextInfo{
+					teamID:   tc.StableID(),
+					teamName: tc.Name,
+					cloneURL: tc.RepoURL,
+				})
+			}
+		}
+	} else if repos != nil {
+		// fallback: use GetRepos response (team_id field is directly available)
+		for _, repo := range repos.Repos {
+			if repo.Type == "team-context" && repo.TeamID != "" {
+				teamContexts = append(teamContexts, teamContextInfo{
+					teamID:   repo.TeamID,
+					teamName: repo.Name,
+					cloneURL: repo.URL,
+				})
+			}
+		}
+	}
+
 	// clone team contexts
-	for _, tcRepo := range foundTeamContexts {
-		// extract team ID from repo name (format: "team-xxx-context" or similar)
-		teamID := extractTeamIDFromRepoName(tcRepo.Name)
-		if teamID == "" {
-			slog.Debug("could not extract team ID from repo name", "name", tcRepo.Name)
+	for _, tc := range teamContexts {
+		total++
+
+		tcPath := paths.TeamContextDir(tc.teamID, projectEndpoint)
+
+		displayName := tc.teamName
+		if displayName == "" {
+			displayName = tc.teamID
+		}
+
+		// skip if already a valid git repo (team contexts are shared across projects)
+		if info, statErr := os.Stat(filepath.Join(tcPath, ".git")); statErr == nil && info.IsDir() {
+			localCfg.SetTeamContext(tc.teamID, displayName, tcPath)
+			fixed++
 			continue
 		}
 
-		// fetch team info to get the display name
-		teamInfo, err := client.GetTeamInfo(teamID)
-		teamName := teamID
-		if err == nil && teamInfo != nil && teamInfo.Name != "" {
-			teamName = teamInfo.Name
-		}
-
-		// use centralized path for team contexts
-		tcPath := paths.TeamContextDir(teamID, endpoint.GetForProject(gitRoot))
-
-		fmt.Printf("  Team Context (%s): %s\n", teamName, tcRepo.URL)
+		fmt.Printf("  Team Context (%s): %s\n", displayName, tc.cloneURL)
 		fmt.Printf("    Cloning to: %s\n", tcPath)
 
-		// ensure parent directory exists
 		if err := os.MkdirAll(filepath.Dir(tcPath), 0755); err != nil {
 			fmt.Printf("    Error creating directory: %v\n", err)
 			skipped++
 			continue
 		}
 
-		if err := cloneViaDaemon(tcRepo.URL, tcPath, "team_context", projectEndpoint); err != nil {
+		if err := cloneViaDaemon(tc.cloneURL, tcPath, "team_context", projectEndpoint); err != nil {
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
 			continue
 		}
 
-		localCfg.SetTeamContext(teamID, teamName, tcPath)
+		localCfg.SetTeamContext(tc.teamID, displayName, tcPath)
 		fixed++
 		fmt.Println()
 	}
@@ -1266,7 +1285,6 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 	}
 
 	// determine result
-	total := len(foundLedger) + len(foundTeamContexts)
 	if total == 0 {
 		return WarningCheck("git repo paths", "no repos from cloud",
 			"Cloud has not provisioned any repos yet")

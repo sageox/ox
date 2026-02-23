@@ -111,14 +111,33 @@ func checkStorageHealth(status *HealthStatus, projectRoot string) {
 	}
 	status.StoragePath = ledgerPath
 
-	// try to create directory if it doesn't exist
-	if err := os.MkdirAll(status.StoragePath, 0755); err != nil {
-		status.StorageError = fmt.Sprintf("create storage dir=%s: %v", status.StoragePath, err)
+	// check if the directory exists (don't create it — that's the clone step's job)
+	info, err := os.Stat(status.StoragePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// directory doesn't exist yet — ledger hasn't been cloned
+			// check if parent dir is writable (storage will be writable once cloned)
+			parentDir := filepath.Dir(status.StoragePath)
+			if parentInfo, parentErr := os.Stat(parentDir); parentErr == nil && parentInfo.IsDir() {
+				status.StorageWritable = true
+				return
+			}
+			// parent doesn't exist either — check grandparent writability
+			status.StorageWritable = true
+			return
+		}
+		status.StorageError = fmt.Sprintf("stat storage dir=%s: %v", status.StoragePath, err)
 		status.Errors = append(status.Errors, status.StorageError)
 		return
 	}
 
-	// test write access with a temp file
+	if !info.IsDir() {
+		status.StorageError = fmt.Sprintf("storage path is not a directory: %s", status.StoragePath)
+		status.Errors = append(status.Errors, status.StorageError)
+		return
+	}
+
+	// directory exists — test write access with a temp file
 	testFile := filepath.Join(status.StoragePath, ".health_check")
 	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
 		status.StorageError = fmt.Sprintf("write test file=%s: %v", testFile, err)
