@@ -225,7 +225,9 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		// different agent — ghost session from a previous instance.
 		// auto-clear so this session can start. the caller (agent_session.go)
 		// should have already cleared it, but handle it here as defense-in-depth.
-		_ = ClearRecordingState(projectRoot)
+		if err := ClearRecordingState(projectRoot); err != nil {
+			return nil, fmt.Errorf("clear ghost recording state project=%s: %w", projectRoot, err)
+		}
 	}
 
 	reminderInterval := opts.ReminderInterval
