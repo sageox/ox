@@ -50,6 +50,11 @@ const (
 	// Team contexts are shared across repos, so we use a longer interval to reduce redundant fetches.
 	minTeamContextFetchAge = 5 * time.Minute
 
+	// teamDiscoveryInterval is how often we re-fetch the team list from the API,
+	// independent of credential token expiry. This ensures new teams are discovered
+	// promptly even when the token is still fresh.
+	teamDiscoveryInterval = 5 * time.Minute
+
 	// maxConcurrentClones limits background clone operations to prevent resource exhaustion.
 	// 100 team contexts shouldn't spawn 100 concurrent git clones.
 	maxConcurrentClones = 3
@@ -266,6 +271,7 @@ type SyncScheduler struct {
 	// each operation only blocks itself, not unrelated operations
 	pullInProgress        bool
 	lastCredentialRefresh time.Time // dedup concurrent credential refresh calls
+	lastTeamDiscovery     time.Time // dedup concurrent team discovery calls
 
 	// error tracking
 	recentErrors  []syncError
@@ -1046,6 +1052,96 @@ func (s *SyncScheduler) refreshCredentialsIfNeeded() {
 	s.logger.Info("git credentials refreshed successfully", "expires", newCreds.ExpiresAt)
 }
 
+// discoverTeams re-fetches the team list from the API independently of token refresh.
+// This ensures new teams are discovered promptly even when the credential token is still
+// fresh (far from expiry). Only updates the Repos map in credentials; token/expiry are
+// preserved from the existing credentials.
+func (s *SyncScheduler) discoverTeams() {
+	s.mu.Lock()
+	if !s.lastTeamDiscovery.IsZero() && time.Since(s.lastTeamDiscovery) < teamDiscoveryInterval {
+		s.mu.Unlock()
+		return
+	}
+	s.lastTeamDiscovery = time.Now()
+	s.mu.Unlock()
+
+	projectEndpoint := endpoint.GetForProject(s.config.ProjectRoot)
+
+	// load existing credentials — we need a valid token to call the API
+	creds, err := gitserver.LoadCredentialsForEndpoint(projectEndpoint)
+	if err != nil {
+		s.logger.Debug("failed to load credentials for team discovery", "error", err)
+		return
+	}
+	if creds == nil || creds.Token == "" {
+		// no credentials available; refreshCredentialsIfNeeded will handle this
+		return
+	}
+
+	// use the git PAT from credentials to call the repos API
+	token, err := auth.GetTokenForEndpoint(projectEndpoint)
+	if err != nil {
+		s.logger.Debug("failed to get auth token for team discovery", "error", err)
+		return
+	}
+	if token == nil || token.AccessToken == "" {
+		return
+	}
+
+	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
+	reposResp, err := client.GetRepos()
+	if err != nil {
+		s.logger.Warn("failed to fetch repos for team discovery", "error", err)
+		return
+	}
+	if reposResp == nil {
+		return
+	}
+
+	// build new repos map from API response
+	newRepos := make(map[string]gitserver.RepoEntry)
+	for _, repo := range reposResp.Repos {
+		entry := gitserver.RepoEntry{
+			Name:   repo.Name,
+			Type:   repo.Type,
+			URL:    repo.URL,
+			TeamID: repo.StableID(),
+		}
+		newRepos[entry.Name] = entry
+	}
+
+	// check if repos changed before writing
+	if reposEqual(creds.Repos, newRepos) {
+		return
+	}
+
+	// update only the repos map; preserve existing token, expiry, server URL
+	creds.Repos = newRepos
+	if err := gitserver.SaveCredentialsForEndpoint(projectEndpoint, *creds); err != nil {
+		s.logger.Warn("failed to save credentials after team discovery", "error", err)
+		return
+	}
+
+	s.logger.Info("team discovery found updated team list", "repo_count", len(newRepos))
+}
+
+// reposEqual checks if two repo maps have identical entries.
+func reposEqual(a, b map[string]gitserver.RepoEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok {
+			return false
+		}
+		if va.Name != vb.Name || va.Type != vb.Type || va.URL != vb.URL || va.TeamID != vb.TeamID {
+			return false
+		}
+	}
+	return true
+}
+
 // fetchLedgerURLFromAPI fetches the ledger URL from the cloud API and caches it.
 // Called when the ledger needs to be cloned but no clone URL is available from credentials.
 // Prefers GetRepoDetail (returns ledger + team contexts in one call), falling back to
@@ -1527,6 +1623,10 @@ func (s *SyncScheduler) TeamSync(progress *ProgressWriter) error {
 func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter, forceSync bool) {
 	// refresh credentials if expired or near expiry
 	s.refreshCredentialsIfNeeded()
+
+	// discover new teams independently of token refresh — ensures new teams
+	// are found even when the credential token is still fresh
+	s.discoverTeams()
 
 	if s.config.ProjectRoot == "" {
 		if progress != nil {

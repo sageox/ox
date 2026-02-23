@@ -79,6 +79,16 @@ func withAttributionGuidance(content string, loggedIn bool, attr config.Resolved
 		sb.WriteString("\n```\n")
 	}
 
+	// PR attribution for squash merges (always-on when any attribution is configured)
+	if attr.Commit != "" {
+		sb.WriteString("\n**PR Attribution (Critical for Squash Merges):**\n")
+		sb.WriteString("GitHub squash merges use the PR body as the commit message. To ensure attribution survives:\n")
+		sb.WriteString("- Always include the following as the **last line** of every PR body:\n")
+		sb.WriteString("```\n")
+		sb.WriteString(attr.Commit) // git trailer format, not markdown
+		sb.WriteString("\n```\n")
+	}
+
 	return sb.String()
 }
 
@@ -95,7 +105,7 @@ func buildAttributionTextSection(attr config.ResolvedAttribution) string {
 		sb.WriteString(fmt.Sprintf("- **Commits**: Add trailer \"%s\"\n", attr.Commit))
 	}
 	if attr.PR != "" {
-		sb.WriteString(fmt.Sprintf("- **PRs**: Add \"%s\"\n", attr.PR))
+		sb.WriteString(fmt.Sprintf("- **PRs**: End body with \"%s\" (survives squash merge)\n", attr.Commit))
 	}
 	return sb.String()
 }
