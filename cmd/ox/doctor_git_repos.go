@@ -703,11 +703,12 @@ func checkGitRepoPaths(fix bool) checkResult {
 			if _, err := os.Stat(sageoxDir); err == nil {
 				// .sageox exists - check if authenticated
 				if authenticated, _ := auth.IsAuthenticated(); authenticated {
-					// authenticated + .sageox exists but no repos configured = problem
+					// authenticated + .sageox exists but no repos configured yet
+					// expected on fresh checkout — warn, don't fail
 					if fix {
 						return fixMissingRepos(gitRoot, localCfg)
 					}
-					return FailedCheck("git repo paths", "no repos configured",
+					return WarningCheck("git repo paths", "no repos configured",
 						"Run `ox doctor --fix` to fetch and clone repos from cloud")
 				}
 				// not authenticated - suggest login first

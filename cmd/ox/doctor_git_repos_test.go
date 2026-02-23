@@ -803,10 +803,10 @@ func TestCheckSSHAuth(t *testing.T) {
 	_ = result
 }
 
-// TestExtractTeamIDFromRepoName verifies that extractTeamIDFromRepoName
-// handles both repo name patterns and real API display names.
+// TestExtractTeamIDFromRepoName_DisplayNames verifies that
+// extractTeamIDFromRepoName handles real API display names.
 // Bug #37: the API returns display names like "SageOx" not repo names
-// like "team-xxx-context", so extraction always failed silently.
+// like "team-xxx-context", so extraction always failed.
 func TestExtractTeamIDFromRepoName(t *testing.T) {
 	tests := []struct {
 		name     string
