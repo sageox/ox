@@ -93,6 +93,11 @@ func init() {
 	agentCmd.PersistentFlags().Bool("text", false,
 		"human-readable text output (overrides JSON default)")
 
+	// force flag - skip confirmation for destructive operations (e.g., session abort)
+	agentCmd.PersistentFlags().Bool("force", false,
+		"skip confirmation for destructive operations")
+	_ = agentCmd.PersistentFlags().MarkHidden("force")
+
 	// initialize prime command flags
 	initAgentPrimeCmd()
 
@@ -207,7 +212,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		case "recover":
 			return runAgentSessionRecover(inst)
 		case "abort":
-			return runAgentSessionAbort(inst, sessionArgs)
+			return runAgentSessionAbort(inst, cmd)
 		default:
 			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, remind, summarize, html, record, plan, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
 		}

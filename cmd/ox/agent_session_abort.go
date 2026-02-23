@@ -8,6 +8,7 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
+	"github.com/spf13/cobra"
 )
 
 // sessionAbortOutput is the JSON output format for session abort.
@@ -27,7 +28,7 @@ type sessionAbortOutput struct {
 //   - Non-interactive (agent/pipe): requires --force flag
 //
 // Usage: ox agent <id> session abort [--force]
-func runAgentSessionAbort(inst *agentinstance.Instance, args []string) error {
+func runAgentSessionAbort(inst *agentinstance.Instance, cmd *cobra.Command) error {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
 		return fmt.Errorf("could not find project root: %w", err)
@@ -42,7 +43,8 @@ func runAgentSessionAbort(inst *agentinstance.Instance, args []string) error {
 	}
 
 	// confirmation: interactive terminal prompts, non-interactive requires --force
-	if !hasFlag(args, "--force") {
+	forceFlag := cmd.Flag("force") != nil && cmd.Flag("force").Value.String() == "true"
+	if !forceFlag {
 		if cli.IsInteractive() {
 			if !cli.ConfirmYesNo("Abort and discard active session? This cannot be undone", false) {
 				fmt.Println("Canceled.")
@@ -96,12 +98,3 @@ func runAgentSessionAbort(inst *agentinstance.Instance, args []string) error {
 	return nil
 }
 
-// hasFlag checks if a flag is present in args.
-func hasFlag(args []string, flag string) bool {
-	for _, arg := range args {
-		if arg == flag {
-			return true
-		}
-	}
-	return false
-}
