@@ -118,10 +118,6 @@ type FrictionEvent struct {
 	// Omitted when Actor is "human".
 	AgentType string `json:"agent_type,omitempty"`
 
-	// Orchestrator is the orchestrator managing the agent (e.g., "openclaw", "conductor").
-	// Omitted when no orchestrator is detected.
-	Orchestrator string `json:"orchestrator,omitempty"`
-
 	// PathBucket categorizes the working directory (home, repo, other).
 	PathBucket string `json:"path_bucket"`
 
