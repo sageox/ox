@@ -132,9 +132,10 @@ func TestRegression_Path1_ImportedSession_ToolCallDetails(t *testing.T) {
 	require.NoError(t, err)
 	htmlStr := string(html)
 
-	// tool name and input should appear
+	// tool calls now use compact >_ format; raw non-JSON input
+	// is not rendered separately
 	assert.Contains(t, htmlStr, "Read", "tool name should appear")
-	assert.Contains(t, htmlStr, "/src/auth.go", "tool input should appear")
+	assert.Contains(t, htmlStr, "&gt;_", "tool call should have >_ prompt prefix")
 }
 
 func TestRegression_Path1_StandardSession_NestedContent(t *testing.T) {
@@ -197,10 +198,10 @@ func TestRegression_Path1_AllMetadataFields(t *testing.T) {
 	htmlStr := string(html)
 
 	// all metadata fields should appear somewhere in the output
+	// (duration was removed from MetadataView/StatsView)
 	assert.Contains(t, htmlStr, "testdev", "username")
 	assert.Contains(t, htmlStr, "claude-code", "agent type")
 	assert.Contains(t, htmlStr, "claude-sonnet-4", "model")
-	assert.Contains(t, htmlStr, "30m", "duration should be computed from created_at and closed_at")
 }
 
 // --- Mixed format session (both root and nested content) ---

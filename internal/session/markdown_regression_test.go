@@ -123,9 +123,10 @@ func TestRegression_Markdown_ImportedSession_EntryTypes(t *testing.T) {
 	require.NoError(t, err)
 	mdStr := string(md)
 
-	// footer summary should contain entry type counts
-	assert.Contains(t, mdStr, "user", "summary should count user entries")
-	assert.Contains(t, mdStr, "assistant", "summary should count assistant entries")
+	// entry count summary table was removed from footer;
+	// verify entry types render via their role headers instead
+	assert.Contains(t, mdStr, "**testdev**", "user entries should render with username header")
+	assert.Contains(t, mdStr, "**Claude Code**", "assistant entries should render with agent name header")
 }
 
 func TestRegression_Markdown_ImportedSession_ToolDetails(t *testing.T) {
@@ -135,8 +136,8 @@ func TestRegression_Markdown_ImportedSession_ToolDetails(t *testing.T) {
 	require.NoError(t, err)
 	mdStr := string(md)
 
-	assert.Contains(t, mdStr, "`Read`", "tool name should appear in markdown")
-	assert.Contains(t, mdStr, "/src/auth.go", "tool input should appear in markdown")
+	// tool calls now render as compact `>_ ToolName` format
+	assert.Contains(t, mdStr, "`>_ Read`", "tool name should appear in compact >_ format")
 }
 
 func TestRegression_Markdown_StandardSession_NestedContent(t *testing.T) {
@@ -157,7 +158,10 @@ func TestRegression_Markdown_StandardSession_Duration(t *testing.T) {
 	require.NoError(t, err)
 	mdStr := string(md)
 
-	assert.Contains(t, mdStr, "30m", "duration should appear in markdown header")
+	// duration was removed from MetadataView/StatsView;
+	// verify session still renders without it
+	assert.Contains(t, mdStr, "## Conversation", "markdown should still contain conversation section")
+	assert.NotContains(t, mdStr, "Duration", "duration field should not appear in metadata")
 }
 
 func TestRegression_Markdown_NoPerEntryTimestamps(t *testing.T) {

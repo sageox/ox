@@ -326,52 +326,182 @@ body.embed .messages-container { padding-top: var(--spacing-md); }
   color: var(--color-secondary);
 }
 
-/* Tool Details */
+/* ============================================================
+   Tool Calls — terminal transcript aesthetic
+
+   Design: tool calls are "stage directions" in a conversation.
+   They should be legible when looked at, invisible when not.
+   A left border "rail" groups consecutive calls visually.
+   ============================================================ */
+
+/* Shared base: left gutter rail groups tool calls */
+.tool-inline,
 .tool-details {
-  margin-top: var(--spacing-lg);
-  background-color: var(--color-bg);
-  border-radius: var(--border-radius);
+  margin: 2px 0;
+  border-left: 2px solid rgba(122, 143, 120, 0.25);
+  padding-left: 10px;
+  margin-left: 4px;
+}
+
+/* Consecutive tool calls collapse into a tight block */
+.tool-inline + .tool-inline,
+.tool-inline + .tool-details,
+.tool-details + .tool-inline,
+.tool-details + .tool-details {
+  margin-top: 0;
+}
+
+/* The command line: bare monospace, no background pill */
+.tool-cmd {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  letter-spacing: -0.01em;
+  color: var(--color-text-dim);
+  background: none;
+  padding: 0.15em 0;
+  border: none;
+  border-radius: 0;
+  display: inline;
+}
+
+/* Prompt glyph: structural marker, not a highlight */
+.tool-prompt {
+  color: rgba(122, 143, 120, 0.5);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  display: inline-block;
+  width: 1.8em;
+  text-align: right;
+  margin-right: 6px;
+  user-select: none;
+}
+
+/* Tool name: the ONE scanning token per line */
+.tool-name-label {
+  color: var(--color-accent);
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  display: inline-block;
+  min-width: 3.5em;
+}
+
+/* Tool arguments: secondary context, truncate gracefully */
+.tool-args {
+  max-width: 60ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+  vertical-align: bottom;
+}
+
+/* Per-tool color accents for fast visual scanning */
+.tool-cmd[data-tool="Bash"] .tool-name-label { color: #E0A56A; }
+.tool-cmd[data-tool="Write"] .tool-name-label,
+.tool-cmd[data-tool="Edit"] .tool-name-label,
+.tool-cmd[data-tool="MultiEdit"] .tool-name-label { color: #C4A882; }
+.tool-cmd[data-tool="Grep"] .tool-name-label,
+.tool-cmd[data-tool="Glob"] .tool-name-label { color: #7FA7C8; }
+
+/* Collapsible tool details */
+.tool-details {
+  background-color: transparent;
+  border-radius: 0;
   overflow: hidden;
 }
 
 .tool-details summary {
-  padding: var(--spacing-md);
+  padding: 1px 0;
   cursor: pointer;
   user-select: none;
-  font-weight: 600;
-  color: var(--color-info);
-  background-color: rgba(127, 167, 200, 0.1);
-  transition: background-color 0.2s ease;
+  list-style: none;
   display: flex;
   align-items: center;
-  gap: var(--spacing-sm);
+  gap: 0;
+  line-height: 1.6;
+  border-radius: 3px;
+  transition: background-color 0.12s ease;
 }
 
-.tool-details summary:hover {
-  background-color: rgba(127, 167, 200, 0.2);
+.tool-details summary::-webkit-details-marker { display: none; }
+
+/* Expansion hint: subtle ellipsis after the command */
+.tool-details summary::after {
+  content: '\2026';
+  color: rgba(126, 135, 132, 0.4);
+  font-size: 0.7rem;
+  margin-left: 6px;
+  letter-spacing: 0.1em;
+  transition: opacity 0.12s ease;
 }
 
-.tool-details summary::marker {
-  color: var(--color-info);
+.tool-details[open] summary::after { content: ''; }
+
+/* Hover: only brighten the ellipsis hint */
+.tool-details summary:hover::after {
+  color: rgba(126, 135, 132, 0.7);
 }
 
 .tool-details[open] summary {
-  border-bottom: 1px solid rgba(127, 167, 200, 0.2);
+  border-bottom: 1px solid rgba(127, 167, 200, 0.08);
 }
 
-.tool-input,
+/* Tool output: indented, contained */
+.tool-io {
+  margin-left: 28px;
+  padding: 6px 0 6px 10px;
+  border-left: 1px solid rgba(122, 143, 120, 0.15);
+}
+
 .tool-output {
-  padding: var(--spacing-md);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: #6B7370;
+  max-height: 300px;
+  overflow-y: auto;
+  overflow-x: auto;
+  margin: 0;
+  padding: 0;
+  background: none;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
-.tool-section-title {
-  font-size: var(--font-size-sm);
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--color-text-dim);
-  margin-bottom: var(--spacing-sm);
+.tool-output::-webkit-scrollbar { width: 4px; height: 4px; }
+.tool-output::-webkit-scrollbar-track { background: transparent; }
+.tool-output::-webkit-scrollbar-thumb { background: rgba(122, 143, 120, 0.2); border-radius: 2px; }
+
+/* Light theme overrides */
+@media (prefers-color-scheme: light) {
+  .tool-inline, .tool-details { border-left-color: rgba(90, 110, 88, 0.2); }
+  .tool-prompt { color: rgba(90, 110, 88, 0.4); }
+  .tool-name-label { color: #5A7A55; }
+  .tool-cmd { color: #8A928E; }
+  .tool-cmd[data-tool="Bash"] .tool-name-label { color: #B8824A; }
+  .tool-cmd[data-tool="Write"] .tool-name-label,
+  .tool-cmd[data-tool="Edit"] .tool-name-label,
+  .tool-cmd[data-tool="MultiEdit"] .tool-name-label { color: #9A7A52; }
+  .tool-cmd[data-tool="Grep"] .tool-name-label,
+  .tool-cmd[data-tool="Glob"] .tool-name-label { color: #4A7A9C; }
+  .tool-io { border-left-color: rgba(90, 110, 88, 0.12); }
+  .tool-output { color: #9AA09D; }
+  .tool-output::-webkit-scrollbar-thumb { background: rgba(90, 110, 88, 0.15); }
 }
+
+body.light-theme .tool-inline, body.light-theme .tool-details { border-left-color: rgba(90, 110, 88, 0.2); }
+body.light-theme .tool-prompt { color: rgba(90, 110, 88, 0.4); }
+body.light-theme .tool-name-label { color: #5A7A55; }
+body.light-theme .tool-cmd { color: #8A928E; }
+body.light-theme .tool-cmd[data-tool="Bash"] .tool-name-label { color: #B8824A; }
+body.light-theme .tool-cmd[data-tool="Write"] .tool-name-label,
+body.light-theme .tool-cmd[data-tool="Edit"] .tool-name-label,
+body.light-theme .tool-cmd[data-tool="MultiEdit"] .tool-name-label { color: #9A7A52; }
+body.light-theme .tool-cmd[data-tool="Grep"] .tool-name-label,
+body.light-theme .tool-cmd[data-tool="Glob"] .tool-name-label { color: #4A7A9C; }
+body.light-theme .tool-io { border-left-color: rgba(90, 110, 88, 0.12); }
+body.light-theme .tool-output { color: #9AA09D; }
 
 /* Code Blocks */
 pre {
@@ -617,20 +747,6 @@ body.light-theme .tool-output .diff-header { color: #3a6a94; font-weight: 600; }
   font-size: var(--font-size-sm);
   font-weight: 500;
   border: 1px solid var(--color-accent);
-}
-
-/* Tool Icon */
-.tool-icon {
-  width: 16px;
-  height: 16px;
-  max-width: 16px;
-  max-height: 16px;
-  flex-shrink: 0;
-  transition: transform 0.2s ease;
-}
-
-details[open] .tool-icon {
-  transform: rotate(90deg);
 }
 
 /* Footer */

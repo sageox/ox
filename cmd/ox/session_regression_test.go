@@ -167,8 +167,10 @@ func TestRegression_Path2_StandardSession_Duration(t *testing.T) {
 	sess := buildRegressionStandardSession()
 	data := buildTemplateData(sess, nil)
 
+	// duration was removed from MetadataView; verify times are still populated
 	require.NotNil(t, data.Metadata)
-	assert.Equal(t, "30m", data.Metadata.Duration, "duration should be 30m (14:00 to 14:30)")
+	assert.False(t, data.Metadata.StartedAt.IsZero(), "StartedAt should be set")
+	assert.False(t, data.Metadata.EndedAt.IsZero(), "EndedAt should be set")
 }
 
 func TestRegression_Path2_GenerateHTML_CreatesFile(t *testing.T) {
@@ -339,8 +341,10 @@ func TestRegression_Path3_Duration(t *testing.T) {
 	sess := buildRegressionImportedSession()
 	data := viewHTMLBuildTemplateData(sess)
 
+	// duration was removed from MetadataView; verify times are still populated
 	require.NotNil(t, data.Metadata)
-	assert.Equal(t, "30m", data.Metadata.Duration, "Path 3 duration should be 30m")
+	assert.False(t, data.Metadata.StartedAt.IsZero(), "StartedAt should be set")
+	assert.False(t, data.Metadata.EndedAt.IsZero(), "EndedAt should be set")
 }
 
 // ============================================================

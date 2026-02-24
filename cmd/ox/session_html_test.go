@@ -74,7 +74,7 @@ func TestBuildTemplateData_WithMetadata(t *testing.T) {
 	assert.Equal(t, "claude-code", data.Metadata.AgentType)
 	assert.Equal(t, "claude-sonnet-4", data.Metadata.Model)
 	assert.Equal(t, "testuser", data.Metadata.Username)
-	assert.Equal(t, "30m", data.Metadata.Duration)
+	// duration was removed from MetadataView
 }
 
 func TestBuildTemplateData_WithToolCalls(t *testing.T) {
@@ -115,7 +115,7 @@ func TestBuildTemplateData_WithToolCalls(t *testing.T) {
 	assert.Equal(t, "Read", data.Messages[1].ToolCall.Name)
 	assert.Equal(t, "file contents here", data.Messages[1].ToolCall.Output)
 
-	assert.Equal(t, 2, data.Statistics.ToolCalls)
+	// ToolCalls was removed from StatsView
 }
 
 func TestGenerateHTML_CreatesFile(t *testing.T) {
@@ -323,13 +323,13 @@ func TestBuildTemplateData_FallbackDuration(t *testing.T) {
 	data := buildTemplateData(st, nil)
 
 	require.NotNil(t, data.Metadata)
-	assert.Equal(t, "5m 30s", data.Metadata.Duration, "should compute duration from entry timestamps")
-	assert.False(t, data.Metadata.StartedAt.IsZero(), "should backfill StartedAt from first entry")
-	assert.False(t, data.Metadata.EndedAt.IsZero(), "should backfill EndedAt from last entry")
+	// duration was removed from MetadataView; with zero CreatedAt and no footer,
+	// StartedAt/EndedAt remain zero (no entry-based backfill without Duration)
+	assert.True(t, data.Metadata.StartedAt.IsZero(), "StartedAt should be zero when CreatedAt is zero")
 }
 
 func TestBuildTemplateData_MetaDurationTakesPrecedence(t *testing.T) {
-	// session where meta duration is already computed — fallback should NOT override
+	// session where meta CreatedAt + footer closed_at are set
 	createdAt := time.Date(2026, 1, 14, 10, 0, 0, 0, time.UTC)
 	st := &session.StoredSession{
 		Info: session.SessionInfo{Filename: "test.jsonl"},
@@ -344,13 +344,15 @@ func TestBuildTemplateData_MetaDurationTakesPrecedence(t *testing.T) {
 			{
 				"type":      "user",
 				"content":   "Hello",
-				"timestamp": "2026-01-14T10:05:00Z", // first entry is 5min after start
+				"timestamp": "2026-01-14T10:05:00Z",
 			},
 		},
 	}
 
 	data := buildTemplateData(st, nil)
-	assert.Equal(t, "30m", data.Metadata.Duration, "meta duration should take precedence over entry fallback")
+	// duration was removed from MetadataView; verify StartedAt uses meta.CreatedAt
+	require.NotNil(t, data.Metadata)
+	assert.Equal(t, createdAt, data.Metadata.StartedAt, "StartedAt should use meta.CreatedAt")
 }
 
 func TestBuildMessageView_SkillExpansionCollapsed(t *testing.T) {
