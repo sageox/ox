@@ -11,6 +11,10 @@ import (
 	"github.com/sageox/ox/internal/version"
 )
 
+// versionCacheFile is the path to the version cache file.
+// Package-level var so tests can override with t.TempDir().
+var versionCacheFile = filepath.Join(paths.CacheDir(), "version-check.json")
+
 // versionCacheData matches the daemon's cache format for latest version info.
 type versionCacheData struct {
 	LatestVersion string    `json:"latest_version"`
@@ -28,7 +32,7 @@ type versionCheckResult struct {
 // readVersionCache reads the daemon-written version cache file.
 // Returns nil on any error (missing file, corrupt JSON, etc.).
 func readVersionCache() *versionCacheData {
-	data, err := os.ReadFile(filepath.Join(paths.CacheDir(), "version-check.json"))
+	data, err := os.ReadFile(versionCacheFile)
 	if err != nil {
 		return nil
 	}
@@ -42,7 +46,7 @@ func readVersionCache() *versionCacheData {
 // writeVersionCacheFromDoctor writes the version cache as a side effect of doctor's
 // live GitHub check. This warms the cache for prime even when the daemon isn't running.
 func writeVersionCacheFromDoctor(latestVersion string) {
-	cachePath := filepath.Join(paths.CacheDir(), "version-check.json")
+	cachePath := versionCacheFile
 
 	// read existing cache to preserve ETag if present
 	existing := readVersionCache()

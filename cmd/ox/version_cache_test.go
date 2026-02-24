@@ -7,30 +7,26 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/version"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func versionCachePath() string {
-	return filepath.Join(paths.CacheDir(), "version-check.json")
+// useTestCacheDir redirects versionCacheFile to a temp directory for the
+// duration of the test, preventing writes to the real ~/.cache/sageox/.
+func useTestCacheDir(t *testing.T) {
+	t.Helper()
+	old := versionCacheFile
+	versionCacheFile = filepath.Join(t.TempDir(), "version-check.json")
+	t.Cleanup(func() { versionCacheFile = old })
 }
 
 func writeTestVersionCache(t *testing.T, data *versionCacheData) {
 	t.Helper()
-	cachePath := versionCachePath()
-	require.NoError(t, os.MkdirAll(filepath.Dir(cachePath), 0700))
+	require.NoError(t, os.MkdirAll(filepath.Dir(versionCacheFile), 0700))
 	raw, err := json.MarshalIndent(data, "", "  ")
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(cachePath, raw, 0600))
-	t.Cleanup(func() { os.Remove(cachePath) })
-}
-
-func removeVersionCache(t *testing.T) {
-	t.Helper()
-	os.Remove(versionCachePath())
-	t.Cleanup(func() { os.Remove(versionCachePath()) })
+	require.NoError(t, os.WriteFile(versionCacheFile, raw, 0600))
 }
 
 // core semver comparison logic — the double-digit case (0.12 vs 0.9) catches
@@ -59,6 +55,7 @@ func TestIsNewerVersion(t *testing.T) {
 
 // newer version in cache should produce an update result with v-prefix stripped
 func TestCheckVersionFromCache_NewerVersion(t *testing.T) {
+	useTestCacheDir(t)
 	writeTestVersionCache(t, &versionCacheData{
 		LatestVersion: "v99.0.0",
 		CheckedAt:     time.Now(),
@@ -73,6 +70,7 @@ func TestCheckVersionFromCache_NewerVersion(t *testing.T) {
 
 // same or older version must not report an update — false positives would nag users
 func TestCheckVersionFromCache_NoUpdateWhenCurrentOrNewer(t *testing.T) {
+	useTestCacheDir(t)
 	for _, latestVersion := range []string{"v" + version.Version, "v0.0.1"} {
 		writeTestVersionCache(t, &versionCacheData{
 			LatestVersion: latestVersion,
@@ -86,6 +84,7 @@ func TestCheckVersionFromCache_NoUpdateWhenCurrentOrNewer(t *testing.T) {
 // doctor writes cache as side effect — must preserve daemon's ETag or
 // the next conditional request loses its advantage
 func TestWriteVersionCacheFromDoctor_PreservesETag(t *testing.T) {
+	useTestCacheDir(t)
 	writeTestVersionCache(t, &versionCacheData{
 		LatestVersion: "v0.8.0",
 		CheckedAt:     time.Now().Add(-1 * time.Hour),
@@ -102,10 +101,9 @@ func TestWriteVersionCacheFromDoctor_PreservesETag(t *testing.T) {
 
 // corrupt cache must not crash prime — graceful degradation
 func TestCheckVersionFromCache_CorruptFile(t *testing.T) {
-	cachePath := versionCachePath()
-	require.NoError(t, os.MkdirAll(filepath.Dir(cachePath), 0700))
-	require.NoError(t, os.WriteFile(cachePath, []byte("{{bad json"), 0600))
-	t.Cleanup(func() { os.Remove(cachePath) })
+	useTestCacheDir(t)
+	require.NoError(t, os.MkdirAll(filepath.Dir(versionCacheFile), 0700))
+	require.NoError(t, os.WriteFile(versionCacheFile, []byte("{{bad json"), 0600))
 
 	assert.Nil(t, checkVersionFromCache())
 }
