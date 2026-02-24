@@ -610,15 +610,13 @@ func (r *WorkspaceRegistry) SetLedgerCloneURL(cloneURL string) bool {
 // InitializeLedger creates a ledger workspace from API-fetched URL.
 // Called when ledger URL is fetched from API but no ledger workspace exists yet.
 //
-// Uses sibling directory pattern: <project>_sageox/<endpoint>/ledger
-// Path is computed via config.DefaultLedgerPath for consistency.
+// Path is computed via config.DefaultLedgerPath (user directory) for consistency.
 func (r *WorkspaceRegistry) InitializeLedger(cloneURL, projectRoot string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	// use canonical path helper for consistent path derivation
-	repoName := filepath.Base(projectRoot)
-	ledgerPath := config.DefaultLedgerPath(repoName, projectRoot, r.endpoint)
+	ledgerPath := config.DefaultLedgerPath(r.repoID, r.endpoint)
 
 	if r.ledger != nil {
 		// ledger already initialized, update URL and ensure path is set

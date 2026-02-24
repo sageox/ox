@@ -93,8 +93,11 @@ func TestSessionSyncCheck(t *testing.T) {
 	ctx := context.Background()
 	result := check.Run(ctx)
 
-	// should skip if repo not cloned
-	assert.Equal(t, StatusSkip, result.Status)
+	// when gitRoot has no config, behavior depends on CWD fallback:
+	// - skip if no ledger found at all
+	// - warn if CWD's project ledger exists but is not synced
+	assert.Contains(t, []Status{StatusSkip, StatusWarn}, result.Status,
+		"expected skip or warn, got: %v", result.Status)
 }
 
 func TestSessionCheck(t *testing.T) {

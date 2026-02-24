@@ -358,18 +358,14 @@ func TeamContextDir(teamID, ep string) string {
 	return filepath.Join(TeamsDataDir(ep), safeID)
 }
 
-// LedgersDataDir returns the legacy centralized ledger metadata directory.
+// LedgersDataDir returns the CANONICAL directory for ledger git checkouts.
 //
-// NOTE: The canonical ledger git checkout location is the SIBLING directory:
+// Format:
 //
-//	<project_parent>/<repo_name>_sageox/<endpoint_slug>/ledger
+//	~/.local/share/sageox/<endpoint>/ledgers/<repo_id>/
 //
-// See config.DefaultLedgerPath() for the canonical path.
-//
-// This function returns a path under ~/.sageox/data/ which is used for
-// ledger metadata only, NOT as the git checkout location:
-//
-//	~/.sageox/data/<endpoint>/ledgers/<repo_id>/
+// This centralized location allows all worktrees to share a single ledger
+// and enables daemons to discover ledgers at a known location.
 //
 // The endpoint is normalized via NormalizeSlug() which strips common prefixes
 // (api., www., app.) and removes port numbers.

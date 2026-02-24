@@ -107,8 +107,14 @@ func (p *ProjectContext) SiblingDir() string {
 }
 
 // DefaultLedgerPath returns the default ledger path for this project.
-// Uses the project's endpoint for path resolution.
-// Format: <project_parent>/<repo_name>_sageox/<endpoint_slug>/ledger
+// Uses the project's endpoint and repo ID for path resolution.
+// Format: ~/.local/share/sageox/<endpoint_slug>/ledgers/<repo_id>/
 func (p *ProjectContext) DefaultLedgerPath() string {
-	return DefaultLedgerPath(p.RepoName(), p.root, p.Endpoint())
+	return DefaultLedgerPath(p.RepoID(), p.Endpoint())
+}
+
+// SiblingLedgerPath returns the deprecated sibling-directory ledger path.
+// Used for migration detection only.
+func (p *ProjectContext) SiblingLedgerPath() string {
+	return SiblingLedgerPath(p.RepoName(), p.root, p.Endpoint())
 }

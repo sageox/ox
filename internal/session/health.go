@@ -96,11 +96,10 @@ func checkStorageHealth(status *HealthStatus, projectRoot string) {
 	var err error
 
 	if projectRoot != "" {
-		// derive ledger path from project root using shared function
-		repoName := filepath.Base(projectRoot)
-		ep := endpoint.GetForProject(projectRoot)
-		ledgerPath = config.DefaultLedgerPath(repoName, projectRoot, ep)
-	} else {
+		// derive ledger path from project config (repo ID + endpoint)
+		ledgerPath = ledgerPathFromProject(projectRoot)
+	}
+	if ledgerPath == "" {
 		// fall back to cwd-based ledger path
 		ledgerPath, err = ledger.DefaultPath()
 		if err != nil {
@@ -157,11 +156,10 @@ func checkLedgerHealth(status *HealthStatus, projectRoot string) {
 	var err error
 
 	if projectRoot != "" {
-		// derive ledger path from project root using shared function
-		repoName := filepath.Base(projectRoot)
-		ep := endpoint.GetForProject(projectRoot)
-		ledgerPath = config.DefaultLedgerPath(repoName, projectRoot, ep)
-	} else {
+		// derive ledger path from project config (repo ID + endpoint)
+		ledgerPath = ledgerPathFromProject(projectRoot)
+	}
+	if ledgerPath == "" {
 		// fall back to cwd-based ledger path
 		ledgerPath, err = ledger.DefaultPath()
 		if err != nil {
@@ -324,4 +322,15 @@ func ShortenPath(path string) string {
 		return "~" + path[len(home):]
 	}
 	return path
+}
+
+// ledgerPathFromProject derives the ledger path from a project root.
+// Returns empty string if project config cannot be loaded or has no repo ID.
+func ledgerPathFromProject(projectRoot string) string {
+	projectCfg, err := config.LoadProjectConfig(projectRoot)
+	if err != nil || projectCfg == nil || projectCfg.RepoID == "" {
+		return ""
+	}
+	ep := endpoint.GetForProject(projectRoot)
+	return config.DefaultLedgerPath(projectCfg.RepoID, ep)
 }

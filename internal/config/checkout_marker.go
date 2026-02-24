@@ -89,7 +89,7 @@ func SaveCheckoutMarker(checkoutPath string, marker *CheckoutMarker) error {
 	// ensure .gitignore exists in .sageox to protect local files
 	gitignorePath := filepath.Join(sageoxDir, ".gitignore")
 	if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
-		gitignoreContent := "# Local-only files - do not commit\ncheckout.json\nworkspaces.jsonl\n"
+		gitignoreContent := "# Local-only files - do not commit\ncheckout.json\nworkspaces.jsonl\nledger\nteams/\n"
 		// non-fatal error - best effort only
 		_ = os.WriteFile(gitignorePath, []byte(gitignoreContent), 0644)
 	}

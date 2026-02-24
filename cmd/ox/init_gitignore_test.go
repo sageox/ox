@@ -94,6 +94,8 @@ sessions/
 .needs-doctor-agent
 agent_instances/
 config.local.toml
+ledger
+teams/
 !README.md
 !config.json
 !discovered.jsonl
@@ -115,6 +117,8 @@ sessions/
 .needs-doctor-agent
 agent_instances/
 config.local.toml
+ledger
+teams/
 !README.md
 !config.json
 !discovered.jsonl

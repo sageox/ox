@@ -35,6 +35,10 @@ agent_instances/
 # Ignore local-only config (sync state, machine-specific)
 config.local.toml
 
+# Ignore local symlinks to user-directory data
+ledger
+teams/
+
 # Keep core files (committed to git)
 !README.md
 !config.json
@@ -52,6 +56,8 @@ var requiredGitignoreEntries = []string{
 	".needs-doctor-agent",
 	"agent_instances/",
 	"config.local.toml",
+	"ledger",
+	"teams/",
 	"!README.md",
 	"!config.json",
 	"!discovered.jsonl",

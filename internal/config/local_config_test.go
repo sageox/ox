@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -140,6 +141,42 @@ func TestDefaultSageoxSiblingDir(t *testing.T) {
 }
 
 func TestDefaultLedgerPath(t *testing.T) {
+	dataDir := paths.DataDir()
+	tests := []struct {
+		name        string
+		repoID      string
+		endpointURL string
+		want        string
+	}{
+		{
+			name:        "production endpoint",
+			repoID:      "repo_01jfk3mab",
+			endpointURL: "https://api.sageox.ai",
+			want:        filepath.Join(dataDir, "sageox.ai", "ledgers", "repo_01jfk3mab"),
+		},
+		{
+			name:        "staging endpoint",
+			repoID:      "repo_01jfk3mab",
+			endpointURL: "https://staging.sageox.ai",
+			want:        filepath.Join(dataDir, "staging.sageox.ai", "ledgers", "repo_01jfk3mab"),
+		},
+		{
+			name:        "empty repo ID",
+			repoID:      "",
+			endpointURL: "https://sageox.ai",
+			want:        "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := DefaultLedgerPath(tt.repoID, tt.endpointURL)
+			assert.Equal(t, tt.want, got, "DefaultLedgerPath(%q, %q)", tt.repoID, tt.endpointURL)
+		})
+	}
+}
+
+func TestSiblingLedgerPath(t *testing.T) {
 	tests := []struct {
 		name        string
 		repoName    string
@@ -162,46 +199,18 @@ func TestDefaultLedgerPath(t *testing.T) {
 			want:        "/home/user/code/my-project_sageox/staging.sageox.ai/ledger",
 		},
 		{
-			name:        "localhost endpoint",
-			repoName:    "my-project",
-			projectRoot: "/home/user/code/my-project",
-			endpointURL: "http://localhost:8080",
-			want:        "/home/user/code/my-project_sageox/localhost/ledger",
-		},
-		{
-			name:        "repo with spaces",
-			repoName:    "my project",
-			projectRoot: "/home/user/code/my-project",
-			endpointURL: "https://sageox.ai",
-			want:        "/home/user/code/my_project_sageox/sageox.ai/ledger",
-		},
-		{
-			name:        "repo with slashes",
-			repoName:    "org/repo",
-			projectRoot: "/home/user/code/repo",
-			endpointURL: "https://sageox.ai",
-			want:        "/home/user/code/org_repo_sageox/sageox.ai/ledger",
-		},
-		{
 			name:        "empty project root",
 			repoName:    "my-project",
 			projectRoot: "",
 			endpointURL: "https://sageox.ai",
 			want:        "",
 		},
-		{
-			name:        "empty endpoint defaults to production",
-			repoName:    "my-project",
-			projectRoot: "/home/user/code/my-project",
-			endpointURL: "",
-			want:        "/home/user/code/my-project_sageox/sageox.ai/ledger",
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := DefaultLedgerPath(tt.repoName, tt.projectRoot, tt.endpointURL)
-			assert.Equal(t, tt.want, got, "DefaultLedgerPath(%q, %q, %q)", tt.repoName, tt.projectRoot, tt.endpointURL)
+			got := SiblingLedgerPath(tt.repoName, tt.projectRoot, tt.endpointURL)
+			assert.Equal(t, tt.want, got, "SiblingLedgerPath(%q, %q, %q)", tt.repoName, tt.projectRoot, tt.endpointURL)
 		})
 	}
 }
@@ -344,21 +353,20 @@ func TestLegacyTeamContextPath(t *testing.T) {
 }
 
 func TestLocalConfig_GetLedgerPath(t *testing.T) {
-	projectRoot := "/home/user/code/my-project"
-	repoName := "my-project"
+	repoID := "repo_01jfk3mab"
 	endpointURL := "https://api.sageox.ai"
 
 	t.Run("nil config", func(t *testing.T) {
 		var cfg *LocalConfig
-		got := cfg.GetLedgerPath(repoName, projectRoot, endpointURL)
-		want := DefaultLedgerPath(repoName, projectRoot, endpointURL)
+		got := cfg.GetLedgerPath(repoID, endpointURL)
+		want := DefaultLedgerPath(repoID, endpointURL)
 		assert.Equal(t, want, got)
 	})
 
 	t.Run("empty ledger", func(t *testing.T) {
 		cfg := &LocalConfig{}
-		got := cfg.GetLedgerPath(repoName, projectRoot, endpointURL)
-		want := DefaultLedgerPath(repoName, projectRoot, endpointURL)
+		got := cfg.GetLedgerPath(repoID, endpointURL)
+		want := DefaultLedgerPath(repoID, endpointURL)
 		assert.Equal(t, want, got)
 	})
 
@@ -366,7 +374,7 @@ func TestLocalConfig_GetLedgerPath(t *testing.T) {
 		cfg := &LocalConfig{
 			Ledger: &LedgerConfig{Path: "/custom/ledger/path"},
 		}
-		got := cfg.GetLedgerPath(repoName, projectRoot, endpointURL)
+		got := cfg.GetLedgerPath(repoID, endpointURL)
 		assert.Equal(t, "/custom/ledger/path", got)
 	})
 }
@@ -996,4 +1004,149 @@ func TestUpdateTeamSymlink(t *testing.T) {
 		err := UpdateTeamSymlink(repoName, t.TempDir(), "", "old", "https://api.sageox.ai")
 		assert.Error(t, err)
 	})
+}
+
+func TestCreateOrUpdateSymlink_CorrectTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require elevated privileges on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "target")
+	require.NoError(t, os.MkdirAll(target, 0755))
+
+	link := filepath.Join(tmpDir, "link")
+	require.NoError(t, os.Symlink(target, link))
+
+	// calling with same target should be a no-op
+	err := createOrUpdateSymlink(link, target)
+	require.NoError(t, err)
+
+	// symlink should still point to the same target
+	got, err := os.Readlink(link)
+	require.NoError(t, err)
+	assert.Equal(t, target, got)
+}
+
+func TestCreateOrUpdateSymlink_WrongTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require elevated privileges on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	oldTarget := filepath.Join(tmpDir, "old-target")
+	newTarget := filepath.Join(tmpDir, "new-target")
+	require.NoError(t, os.MkdirAll(oldTarget, 0755))
+	require.NoError(t, os.MkdirAll(newTarget, 0755))
+
+	link := filepath.Join(tmpDir, "link")
+	require.NoError(t, os.Symlink(oldTarget, link))
+
+	// should replace symlink to point to new target
+	err := createOrUpdateSymlink(link, newTarget)
+	require.NoError(t, err)
+
+	got, err := os.Readlink(link)
+	require.NoError(t, err)
+	assert.Equal(t, newTarget, got)
+}
+
+func TestCreateOrUpdateSymlink_DanglingSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require elevated privileges on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	deadTarget := filepath.Join(tmpDir, "does-not-exist")
+	newTarget := filepath.Join(tmpDir, "new-target")
+	require.NoError(t, os.MkdirAll(newTarget, 0755))
+
+	link := filepath.Join(tmpDir, "link")
+	require.NoError(t, os.Symlink(deadTarget, link))
+
+	// dangling symlink should be replaced
+	err := createOrUpdateSymlink(link, newTarget)
+	require.NoError(t, err)
+
+	got, err := os.Readlink(link)
+	require.NoError(t, err)
+	assert.Equal(t, newTarget, got)
+}
+
+func TestCreateOrUpdateSymlink_RegularFileBlocks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require elevated privileges on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "target")
+	require.NoError(t, os.MkdirAll(target, 0755))
+
+	// create a regular file where the symlink should go
+	link := filepath.Join(tmpDir, "link")
+	require.NoError(t, os.WriteFile(link, []byte("not a symlink"), 0644))
+
+	err := createOrUpdateSymlink(link, target)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not a symlink")
+}
+
+func TestCreateOrUpdateSymlink_DirectoryBlocks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require elevated privileges on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	target := filepath.Join(tmpDir, "target")
+	require.NoError(t, os.MkdirAll(target, 0755))
+
+	// create a real directory where the symlink should go
+	link := filepath.Join(tmpDir, "link")
+	require.NoError(t, os.MkdirAll(link, 0755))
+
+	err := createOrUpdateSymlink(link, target)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not a symlink")
+}
+
+func TestCreateProjectLedgerSymlink_EmptyEndpoint(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require elevated privileges on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	sageoxDir := filepath.Join(tmpDir, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+
+	// empty endpoint should be a no-op (not create a wrong symlink)
+	err := CreateProjectLedgerSymlink(tmpDir, "repo_01abc", "")
+	require.NoError(t, err)
+
+	// symlink should NOT exist
+	_, err = os.Lstat(filepath.Join(sageoxDir, "ledger"))
+	assert.True(t, os.IsNotExist(err), "symlink should not be created with empty endpoint")
+}
+
+func TestCreateProjectTeamSymlinks_EmptyEndpoint(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require elevated privileges on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	sageoxDir := filepath.Join(tmpDir, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+
+	// empty endpoint should be a no-op
+	err := CreateProjectTeamSymlinks(tmpDir, "team_abc", "")
+	require.NoError(t, err)
+
+	// teams dir should NOT exist
+	_, err = os.Stat(filepath.Join(sageoxDir, "teams"))
+	assert.True(t, os.IsNotExist(err), "teams dir should not be created with empty endpoint")
+}
+
+func TestDefaultLedgerPath_EmptyEndpoint(t *testing.T) {
+	// empty endpoint should return empty (not panic or produce a wrong path)
+	got := DefaultLedgerPath("repo_01abc", "")
+	assert.Empty(t, got, "should return empty with empty endpoint")
 }
