@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/repotools"
 )
@@ -271,19 +273,22 @@ func GetStatusForEndpoint(endpointURL string) *Status {
 
 // checkSyncStatus checks the ahead/behind status with remote.
 func checkSyncStatus(path string, status *Status) {
-	// fetch to update tracking info (quiet, ignore errors)
-	fetchCmd := exec.Command("git", "-C", path, "fetch", "--quiet")
-	_ = fetchCmd.Run()
+	// skip fetch if daemon already fetched recently (prevents redundant network calls)
+	if age, ok := gitutil.FetchHeadAge(path); ok && age < gitutil.MinFetchHeadAge {
+		// use cached state — daemon keeps ledger current via its sync loop
+	} else {
+		// fetch with timeout to avoid hanging on network issues
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _ = gitutil.RunGit(ctx, path, "fetch", "--quiet")
+		cancel()
+	}
 
 	// check ahead/behind
-	cmd := exec.Command("git", "-C", path, "status", "--porcelain", "-b")
-	output, err := cmd.Output()
+	outputStr, err := gitutil.RunGit(context.Background(), path, "status", "--porcelain", "-b")
 	if err != nil {
 		status.SyncStatus = "unknown"
 		return
 	}
-
-	outputStr := string(output)
 
 	// parse branch line for ahead/behind: ## branch...origin/branch [ahead N, behind M]
 	if strings.Contains(outputStr, "[") {
@@ -302,13 +307,12 @@ func checkSyncStatus(path string, status *Status) {
 
 // countPendingChanges counts uncommitted changes in the ledger.
 func countPendingChanges(path string, status *Status) {
-	cmd := exec.Command("git", "-C", path, "status", "--porcelain")
-	output, err := cmd.Output()
+	output, err := gitutil.RunGit(context.Background(), path, "status", "--porcelain")
 	if err != nil {
 		return
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		if line != "" {
 			status.PendingChanges++

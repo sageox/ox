@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
 )
 
@@ -232,7 +234,7 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 	}
 
 	// push with pull --rebase retry (up to 3 attempts)
-	return pushLedger(ledgerPath)
+	return pushLedger(context.Background(), ledgerPath)
 }
 
 // commitAndPushLedgerWithExtras commits meta.json, .gitignore, and optionally summary.json,
@@ -265,7 +267,7 @@ func commitAndPushLedgerWithExtras(ledgerPath, sessionName string, includeSummar
 		return fmt.Errorf("git commit failed: %s: %w", string(output), err)
 	}
 
-	return pushLedger(ledgerPath)
+	return pushLedger(context.Background(), ledgerPath)
 }
 
 // resolveLedgerPath returns the ledger git repo path for the project.
@@ -287,7 +289,13 @@ func resolveLedgerPath() (string, error) {
 // pushLedger pushes ledger changes to remote with conflict retry.
 // Retries on transient failures (network, rejection). Fails fast on permanent errors
 // (auth, config) to avoid wasting time on retries that will never succeed.
-func pushLedger(ledgerPath string) error {
+// Uses context for timeout control (60s per git operation).
+func pushLedger(ctx context.Context, ledgerPath string) error {
+	// pre-flight: check for lock files and broken rebase state
+	if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
+		return fmt.Errorf("ledger blocked: %w", err)
+	}
+
 	// ensure remote has current credentials before pushing
 	ep := endpoint.GetForProject(findGitRoot())
 	if ep != "" {
@@ -297,6 +305,7 @@ func pushLedger(ledgerPath string) error {
 	}
 
 	const maxRetries = 3
+	const opTimeout = 60 * time.Second
 
 	// Errors that indicate a permanent failure — retrying won't help.
 	permanentPatterns := []string{
@@ -308,35 +317,44 @@ func pushLedger(ledgerPath string) error {
 	}
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		pushCmd := exec.Command("git", "-C", ledgerPath, "push", "--quiet")
-		output, err := pushCmd.CombinedOutput()
+		attemptCtx, cancel := context.WithTimeout(ctx, opTimeout)
+		outStr, err := gitutil.RunGit(attemptCtx, ledgerPath, "push", "--quiet")
+		cancel()
 		if err == nil {
 			return nil // success
 		}
 
-		outStr := string(output)
-
 		// fail fast on permanent errors
 		for _, pattern := range permanentPatterns {
 			if strings.Contains(outStr, pattern) {
-				return fmt.Errorf("git push failed (not retryable): %s: %w", outStr, err)
+				return fmt.Errorf("git push failed (not retryable): %s", outStr)
 			}
 		}
 
 		if attempt == maxRetries {
-			return fmt.Errorf("git push failed after %d attempts: %s: %w", maxRetries, outStr, err)
+			return fmt.Errorf("git push failed after %d attempts: %s", maxRetries, outStr)
 		}
 
 		slog.Info("push failed, retrying", "attempt", attempt, "output", outStr)
 
 		// pull --rebase to handle non-fast-forward (most common retry case)
 		if strings.Contains(outStr, "non-fast-forward") || strings.Contains(outStr, "rejected") {
-			pullCmd := exec.Command("git", "-C", ledgerPath, "pull", "--rebase", "--quiet")
-			if pullOutput, pullErr := pullCmd.CombinedOutput(); pullErr != nil {
+			// check rebase state before pulling
+			if gitutil.IsRebaseInProgress(ledgerPath) {
+				abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
+				_, _ = gitutil.RunGit(abortCtx, ledgerPath, "rebase", "--abort")
+				abortCancel()
+			}
+
+			pullCtx, pullCancel := context.WithTimeout(ctx, opTimeout)
+			pullOut, pullErr := gitutil.RunGit(pullCtx, ledgerPath, "pull", "--rebase", "--quiet")
+			pullCancel()
+			if pullErr != nil {
 				// abort rebase to avoid leaving repo in broken state
-				abortCmd := exec.Command("git", "-C", ledgerPath, "rebase", "--abort")
-				_ = abortCmd.Run() // best-effort cleanup
-				return fmt.Errorf("git pull --rebase failed during retry: %s: %w", string(pullOutput), pullErr)
+				abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
+				_, _ = gitutil.RunGit(abortCtx, ledgerPath, "rebase", "--abort")
+				abortCancel()
+				return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
 			}
 		}
 
