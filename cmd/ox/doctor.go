@@ -535,6 +535,11 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 	if !teamSymlinkCheck.skipped {
 		gitRepoChecks = append(gitRepoChecks, teamSymlinkCheck)
 	}
+	// ensure .sageox/ledger and .sageox/teams/primary symlinks exist
+	projectSymlinkCheck := checkProjectSymlinks(opts.shouldFix(CheckSlugProjectSymlinks))
+	if !projectSymlinkCheck.skipped {
+		gitRepoChecks = append(gitRepoChecks, projectSymlinkCheck)
+	}
 	categories = append(categories, checkCategory{
 		name:   "Git Repository Health",
 		checks: gitRepoChecks,

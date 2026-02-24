@@ -125,6 +125,7 @@ const (
 	CheckSlugLedgerRemote       = "ledger-remote"
 	CheckSlugTeamContextPath    = "team-context-path"
 	CheckSlugTeamSymlink        = "team-symlink"
+	CheckSlugProjectSymlinks    = "project-symlinks"
 	CheckSlugLegacyStructure    = "legacy-structure"
 	CheckSlugGitConfig          = "git-config"
 	CheckSlugGitRemotes         = "git-remotes"

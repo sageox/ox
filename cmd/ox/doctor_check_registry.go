@@ -285,6 +285,15 @@ func init() {
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugProjectSymlinks,
+		Name:        "Project symlinks",
+		Category:    "Git Repository Health",
+		FixLevel:    FixLevelAuto,
+		Description: "Ensures .sageox/ledger and .sageox/teams/primary symlinks exist for short path display",
+		Run:         checkProjectSymlinks,
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugLegacyStructure,
 		Name:        "Legacy structure",
 		Category:    "Git Repository Health",
