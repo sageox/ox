@@ -122,6 +122,9 @@ func (h *Handler) HandleWithAutoExecute(args []string, err error) *AutoExecuteRe
 	if actor == ActorAgent && agentType != "" {
 		event.AgentType = agentType
 	}
+	if orchType := agentx.OrchestratorType(); orchType != "" {
+		event.Orchestrator = orchType
+	}
 	event.PathBucket = detectPathBucket()
 	event.Input = RedactInput(args)
 	event.ErrorMsg = RedactError(parsed.RawMessage, MaxErrorLength)

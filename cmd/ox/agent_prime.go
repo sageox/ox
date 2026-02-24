@@ -352,6 +352,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
+	if orchType := agentx.OrchestratorType(); orchType != "" {
+		useragent.SetOrchestratorType(orchType)
+	}
 
 	// load attribution from user and project configs
 	attribution := loadResolvedAttribution()

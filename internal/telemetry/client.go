@@ -334,7 +334,7 @@ func (c *Client) sendEventsWithResult(ctx context.Context, events []Event) bool 
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(req.Header)
 
 	logger.LogHTTPRequest("POST", url)
 	start := time.Now()
@@ -381,7 +381,7 @@ func (c *Client) sendEvents(ctx context.Context, events []Event) {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(req.Header)
 
 	logger.LogHTTPRequest("POST", url)
 	start := time.Now()

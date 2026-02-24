@@ -73,7 +73,7 @@ func RequestDeviceCode() (*DeviceCodeResponse, error) {
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(req.Header)
 
 	logger.LogHTTPRequest("POST", endpointURL)
 	start := time.Now()
@@ -236,7 +236,7 @@ func pollToken(client *http.Client, endpoint, deviceCode string) (*TokenResponse
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(req.Header)
 
 	logger.LogHTTPRequest("POST", endpoint)
 	start := time.Now()
@@ -290,7 +290,7 @@ func exchangeForJWT(client *http.Client, apiURL, opaqueToken string) (*JWTExchan
 
 	req.Header.Set("Authorization", "Bearer "+opaqueToken)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(req.Header)
 
 	logger.LogHTTPRequest("GET", endpoint)
 	start := time.Now()
@@ -333,7 +333,7 @@ func fetchUserInfo(client *http.Client, apiURL, accessToken string) (*UserInfo, 
 
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(req.Header)
 
 	logger.LogHTTPRequest("GET", endpoint)
 	start := time.Now()
@@ -390,7 +390,7 @@ func (c *AuthClient) RequestDeviceCode() (*DeviceCodeResponse, error) {
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(req.Header)
 
 	logger.LogHTTPRequest("POST", endpointURL)
 	start := time.Now()

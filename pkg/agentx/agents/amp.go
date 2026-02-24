@@ -28,7 +28,10 @@ func (a *AmpAgent) Name() string {
 
 func (a *AmpAgent) URL() string {
 	return "https://github.com/sourcegraph/amp"
+
 }
+
+func (a *AmpAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
 
 // Detect checks if Amp is the active agent.
 //

@@ -28,7 +28,10 @@ func (a *KiroAgent) Name() string {
 
 func (a *KiroAgent) URL() string {
 	return "https://kiro.dev"
+
 }
+
+func (a *KiroAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
 
 // Detect checks if Kiro is the active agent.
 //

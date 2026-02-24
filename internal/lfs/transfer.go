@@ -37,7 +37,7 @@ func UploadObject(action *Action, content []byte) error {
 		return fmt.Errorf("create upload request: %w", err)
 	}
 
-	req.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(req.Header)
 
 	// set headers from action
 	for k, v := range action.Header {
@@ -74,7 +74,7 @@ func DownloadObject(action *Action) ([]byte, error) {
 		return nil, fmt.Errorf("create download request: %w", err)
 	}
 
-	req.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(req.Header)
 
 	// set headers from action
 	for k, v := range action.Header {

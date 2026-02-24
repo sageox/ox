@@ -136,7 +136,7 @@ func refreshToken(token *StoredToken) (*StoredToken, error) {
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(req.Header)
 
 	logger.LogHTTPRequest("POST", tokenURL)
 	start := time.Now()
@@ -322,7 +322,7 @@ func (c *AuthClient) refreshToken(token *StoredToken) (*StoredToken, error) {
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(req.Header)
 
 	logger.LogHTTPRequest("POST", tokenURL)
 	start := time.Now()

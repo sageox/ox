@@ -11,6 +11,7 @@ import (
 	"github.com/sageox/ox/pkg/agentx/agents"
 	"github.com/sageox/ox/pkg/agentx/commands"
 	"github.com/sageox/ox/pkg/agentx/hooks"
+	"github.com/sageox/ox/pkg/agentx/orchestrators"
 )
 
 func init() {
@@ -66,4 +67,8 @@ func RegisterDefaultAgents() {
 
 	// Droid (Factory.ai)
 	agentx.DefaultRegistry.Register(agents.NewDroidAgent())
+
+	// Orchestrators
+	agentx.DefaultRegistry.Register(orchestrators.NewOpenClawAgent())
+	agentx.DefaultRegistry.Register(orchestrators.NewConductorAgent())
 }

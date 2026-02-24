@@ -46,7 +46,7 @@ func (c *Client) GetContext(ctx context.Context) (*DoctorContextResponse, error)
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
-	req.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(req.Header)
 
 	if c.config.AuthFunc != nil {
 		if token := c.config.AuthFunc(); token != "" {

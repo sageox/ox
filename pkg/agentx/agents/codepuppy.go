@@ -28,7 +28,10 @@ func (a *CodePuppyAgent) Name() string {
 
 func (a *CodePuppyAgent) URL() string {
 	return "https://github.com/codepuppy-ai/codepuppy"
+
 }
+
+func (a *CodePuppyAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
 
 // Detect checks if Code Puppy is the active agent.
 //

@@ -59,7 +59,7 @@ func (c *RepoClient) GetLedgerStatus(repoID string) (*LedgerStatusResponse, erro
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(httpReq.Header)
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}

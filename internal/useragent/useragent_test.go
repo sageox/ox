@@ -1,6 +1,7 @@
 package useragent
 
 import (
+	"net/http"
 	"runtime"
 	"strings"
 	"sync"
@@ -10,10 +11,17 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestString_WithoutAgentType(t *testing.T) {
-	ResetForTesting()
+// clearEnv clears all useragent-relevant env vars for a clean test.
+func clearEnv(t *testing.T) {
+	t.Helper()
 	t.Setenv("AGENT_ENV", "")
 	t.Setenv("AGENT_VERSION", "")
+	t.Setenv("ORCHESTRATOR_ENV", "")
+}
+
+func TestString_WithoutAgentType(t *testing.T) {
+	ResetForTesting()
+	clearEnv(t)
 
 	ua := String()
 	expected := "ox/" + version.Version + " (" + runtime.GOOS + "; " + runtime.GOARCH + ")"
@@ -22,8 +30,7 @@ func TestString_WithoutAgentType(t *testing.T) {
 
 func TestString_WithAgentType(t *testing.T) {
 	ResetForTesting()
-	t.Setenv("AGENT_ENV", "")
-	t.Setenv("AGENT_VERSION", "")
+	clearEnv(t)
 	SetAgentType("claude-code")
 
 	ua := String()
@@ -64,8 +71,7 @@ func TestString_CachesResult(t *testing.T) {
 
 func TestString_InvalidatesCacheOnSetAgentType(t *testing.T) {
 	ResetForTesting()
-	t.Setenv("AGENT_ENV", "")
-	t.Setenv("AGENT_VERSION", "")
+	clearEnv(t)
 	before := String()
 	assert.NotContains(t, before, "claude-code")
 
@@ -75,8 +81,7 @@ func TestString_InvalidatesCacheOnSetAgentType(t *testing.T) {
 }
 
 func TestResetForTesting(t *testing.T) {
-	t.Setenv("AGENT_ENV", "")
-	t.Setenv("AGENT_VERSION", "")
+	clearEnv(t)
 	SetAgentType("claude-code")
 	ResetForTesting()
 
@@ -102,8 +107,7 @@ func TestString_WithAgentVersion(t *testing.T) {
 
 func TestSetAgentVersion_WithoutAgentType(t *testing.T) {
 	ResetForTesting()
-	t.Setenv("AGENT_ENV", "")
-	t.Setenv("AGENT_VERSION", "")
+	clearEnv(t)
 	SetAgentVersion("1.0.26")
 
 	ua := String()
@@ -169,9 +173,8 @@ func TestString_ExplicitSetTakesPrecedenceOverEnv(t *testing.T) {
 
 func TestString_EnvAgentTypeOnly(t *testing.T) {
 	ResetForTesting()
-
+	clearEnv(t)
 	t.Setenv("AGENT_ENV", "aider")
-	t.Setenv("AGENT_VERSION", "")
 
 	ua := String()
 	assert.Contains(t, ua, "aider;")
@@ -201,4 +204,76 @@ func TestSetAgentType_ConcurrentSafe(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, count, "exactly one agent type should win: %s", ua)
+}
+
+func TestString_OrchestratorNotInUserAgent(t *testing.T) {
+	ResetForTesting()
+	clearEnv(t)
+	SetAgentType("claude-code")
+	SetOrchestratorType("conductor")
+
+	ua := String()
+	expected := "ox/" + version.Version + " (claude-code; " + runtime.GOOS + "; " + runtime.GOARCH + ")"
+	assert.Equal(t, expected, ua)
+	assert.NotContains(t, ua, "conductor")
+}
+
+func TestSetOrchestratorType_FirstWriteWins(t *testing.T) {
+	ResetForTesting()
+	SetOrchestratorType("conductor")
+	SetOrchestratorType("openclaw")
+
+	assert.Equal(t, "conductor", OrchestratorType())
+}
+
+func TestSetOrchestratorType_EmptyIgnored(t *testing.T) {
+	ResetForTesting()
+	clearEnv(t)
+	SetOrchestratorType("")
+	SetOrchestratorType("conductor")
+
+	assert.Equal(t, "conductor", OrchestratorType())
+}
+
+func TestOrchestratorType_FallsBackToEnv(t *testing.T) {
+	ResetForTesting()
+	clearEnv(t)
+	t.Setenv("ORCHESTRATOR_ENV", "conductor")
+
+	assert.Equal(t, "conductor", OrchestratorType())
+}
+
+func TestOrchestratorType_ExplicitTakesPrecedenceOverEnv(t *testing.T) {
+	ResetForTesting()
+	clearEnv(t)
+	t.Setenv("ORCHESTRATOR_ENV", "openclaw")
+	SetOrchestratorType("conductor")
+
+	assert.Equal(t, "conductor", OrchestratorType())
+}
+
+func TestSetHeaders_WithOrchestrator(t *testing.T) {
+	ResetForTesting()
+	clearEnv(t)
+	SetAgentType("claude-code")
+	SetAgentVersion("1.0.26")
+	SetOrchestratorType("conductor")
+
+	h := http.Header{}
+	SetHeaders(h)
+
+	assert.Equal(t, "ox/"+version.Version+" (claude-code/1.0.26; "+runtime.GOOS+"; "+runtime.GOARCH+")", h.Get("User-Agent"))
+	assert.Equal(t, "conductor", h.Get("X-Orchestrator"))
+}
+
+func TestSetHeaders_WithoutOrchestrator(t *testing.T) {
+	ResetForTesting()
+	clearEnv(t)
+	SetAgentType("claude-code")
+
+	h := http.Header{}
+	SetHeaders(h)
+
+	assert.NotEmpty(t, h.Get("User-Agent"))
+	assert.Empty(t, h.Get("X-Orchestrator"))
 }

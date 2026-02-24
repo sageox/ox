@@ -31,7 +31,10 @@ func (a *DroidAgent) Name() string {
 
 func (a *DroidAgent) URL() string {
 	return "https://factory.ai/"
+
 }
+
+func (a *DroidAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
 
 // Detect checks if Droid is the active agent.
 //

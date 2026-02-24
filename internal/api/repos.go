@@ -133,7 +133,7 @@ func (c *RepoClient) GetRepos() (*ReposResponse, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(httpReq.Header)
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}
@@ -198,7 +198,7 @@ func (c *RepoClient) GetTeamInfo(teamID string) (*TeamInfoResponse, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(httpReq.Header)
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}
@@ -276,7 +276,7 @@ func (c *RepoClient) GetRepoDetail(repoID string) (*RepoDetailResponse, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(httpReq.Header)
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}

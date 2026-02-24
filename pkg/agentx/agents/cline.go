@@ -31,7 +31,10 @@ func (a *ClineAgent) Name() string {
 
 func (a *ClineAgent) URL() string {
 	return "https://github.com/cline/cline"
+
 }
+
+func (a *ClineAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
 
 // Detect checks if Cline is the active agent.
 //

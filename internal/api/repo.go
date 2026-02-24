@@ -171,7 +171,7 @@ func (c *RepoClient) RegisterRepo(req *RepoInitRequest) (*RepoInitResponse, erro
 
 	// set headers
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(httpReq.Header)
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}
@@ -247,7 +247,7 @@ func (c *RepoClient) GetDoctorIssues(repoID string) (*DoctorResponse, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(httpReq.Header)
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}
@@ -319,7 +319,7 @@ func (c *RepoClient) NotifyUninstall(repoID, repoSalt string) error {
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(httpReq.Header)
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}

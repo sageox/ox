@@ -2,19 +2,22 @@ package useragent
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 
 	"github.com/sageox/ox/internal/version"
 )
 
 var (
-	mu           sync.RWMutex
-	agentType    string
-	agentVersion string
-	cached       string
-	daemonStr    string
+	mu               sync.RWMutex
+	agentType        string
+	agentVersion     string
+	orchestratorType string
+	cached           string
+	daemonStr        string
 )
 
 func init() {
@@ -52,10 +55,25 @@ func SetAgentVersion(ver string) {
 	cached = ""
 }
 
+// SetOrchestratorType records the detected orchestrator (e.g. "conductor", "openclaw").
+// Thread-safe. First write wins; subsequent calls are no-ops.
+func SetOrchestratorType(ot string) {
+	if ot == "" {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if orchestratorType != "" {
+		return
+	}
+	orchestratorType = ot
+	cached = ""
+}
+
 // String returns the User-Agent for CLI requests.
-// With agent version: "ox/0.17.0 (claude-code/1.0.26; darwin; arm64)"
-// Without version:    "ox/0.17.0 (claude-code; darwin; arm64)"
-// No agent:           "ox/0.17.0 (darwin; arm64)"
+// With agent:    "ox/0.17.0 (claude-code/1.0.26; darwin; arm64)"
+// Without ver:   "ox/0.17.0 (claude-code; darwin; arm64)"
+// No agent:      "ox/0.17.0 (darwin; arm64)"
 func String() string {
 	mu.RLock()
 	if cached != "" {
@@ -81,16 +99,40 @@ func String() string {
 		av = os.Getenv("AGENT_VERSION")
 	}
 
+	// build parenthesized token list
+	var tokens []string
 	if at != "" {
 		agentToken := at
 		if av != "" {
 			agentToken = at + "/" + av
 		}
-		cached = fmt.Sprintf("ox/%s (%s; %s; %s)", version.Version, agentToken, runtime.GOOS, runtime.GOARCH)
-	} else {
-		cached = fmt.Sprintf("ox/%s (%s; %s)", version.Version, runtime.GOOS, runtime.GOARCH)
+		tokens = append(tokens, agentToken)
 	}
+	tokens = append(tokens, runtime.GOOS, runtime.GOARCH)
+
+	cached = fmt.Sprintf("ox/%s (%s)", version.Version, strings.Join(tokens, "; "))
 	return cached
+}
+
+// OrchestratorType returns the detected orchestrator type (e.g. "conductor").
+// Returns empty string if no orchestrator is detected.
+func OrchestratorType() string {
+	mu.RLock()
+	defer mu.RUnlock()
+	ot := orchestratorType
+	if ot == "" {
+		ot = os.Getenv("ORCHESTRATOR_ENV")
+	}
+	return ot
+}
+
+// SetHeaders sets User-Agent and X-Orchestrator headers on the request.
+// Use this for SageOx API requests to include full telemetry context.
+func SetHeaders(h http.Header) {
+	h.Set("User-Agent", String())
+	if ot := OrchestratorType(); ot != "" {
+		h.Set("X-Orchestrator", ot)
+	}
 }
 
 // DaemonString returns the User-Agent for daemon requests.
@@ -105,5 +147,6 @@ func ResetForTesting() {
 	defer mu.Unlock()
 	agentType = ""
 	agentVersion = ""
+	orchestratorType = ""
 	cached = ""
 }

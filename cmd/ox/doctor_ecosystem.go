@@ -89,7 +89,7 @@ func getLatestGitHubRelease() (string, error) {
 		return "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	req.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(req.Header)
 
 	logger.LogHTTPRequest("GET", url)
 	start := time.Now()

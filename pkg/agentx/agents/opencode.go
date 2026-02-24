@@ -28,7 +28,10 @@ func (a *OpenCodeAgent) Name() string {
 
 func (a *OpenCodeAgent) URL() string {
 	return "https://github.com/opencode-ai/opencode"
+
 }
+
+func (a *OpenCodeAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
 
 // Detect checks if OpenCode is the active agent.
 //

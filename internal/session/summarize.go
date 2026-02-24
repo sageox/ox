@@ -181,7 +181,7 @@ func Summarize(entries []Entry, agentID, agentType, model, endpointURL string) (
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
-	httpReq.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(httpReq.Header)
 
 	resp, err := client.Do(httpReq)
 	if err != nil {

@@ -134,7 +134,7 @@ func (c *Client) Submit(ctx context.Context, events []FrictionEvent, opts *Submi
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
+	useragent.SetHeaders(req.Header)
 	req.Header.Set("X-Client-Version", c.config.Version)
 
 	// add catalog version header if provided
