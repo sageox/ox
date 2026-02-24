@@ -308,6 +308,9 @@ type SyncScheduler struct {
 
 	// issues tracker for health check system
 	issues *IssueTracker
+
+	// version cache for GitHub release checks
+	versionCache *VersionCache
 }
 
 // syncError tracks a sync error with timestamp.
@@ -350,6 +353,7 @@ func NewSyncScheduler(cfg *Config, logger *slog.Logger) *SyncScheduler {
 		metrics:             NewSyncMetrics(),
 		remoteChangeTracker: NewActivityTracker(100),
 		workspaceRegistry:   NewWorkspaceRegistry(cfg.ProjectRoot, repoName),
+		versionCache:        NewVersionCache(logger),
 	}
 }
 
@@ -568,6 +572,19 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	heartbeatTicker := time.NewTicker(heartbeatInterval)
 	defer heartbeatTicker.Stop()
 
+	// version check ticker - check GitHub for new releases (ETag conditional requests)
+	var versionCheckTicker *time.Ticker
+	var versionCheckChan <-chan time.Time
+	if s.config.VersionCheckInterval > 0 {
+		versionCheckTicker = time.NewTicker(s.config.VersionCheckInterval)
+		versionCheckChan = versionCheckTicker.C
+		defer versionCheckTicker.Stop()
+
+		// load cached version data and do initial check on startup
+		_ = s.versionCache.Load()
+		go s.checkLatestVersion(ctx)
+	}
+
 	// team context sync (lower priority, less frequent)
 	var teamContextTicker *time.Ticker
 	var teamContextChan <-chan time.Time
@@ -615,6 +632,9 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		case <-heartbeatTicker.C:
 			s.writeHeartbeats()
 
+		case <-versionCheckChan:
+			s.checkLatestVersion(ctx)
+
 		case <-s.triggerChan:
 			// triggered by file watcher, do full sync
 			s.syncAll(ctx)
@@ -652,6 +672,14 @@ func (s *SyncScheduler) pullChanges(ctx context.Context) {
 	// anti-entropy: ensure missing workspaces get cloned
 	s.triggerMissingClones()
 	_ = s.doPull(ctx, nil, false)
+}
+
+// checkLatestVersion fetches the latest GitHub release using ETag conditional requests.
+// Called periodically by the sync scheduler to keep the version cache warm.
+func (s *SyncScheduler) checkLatestVersion(ctx context.Context) {
+	if err := s.versionCache.CheckAndUpdate(ctx); err != nil {
+		s.logger.Warn("version check failed", "error", err)
+	}
 }
 
 // shouldSyncOrBypass checks if a sync should proceed given backoff state.

@@ -237,6 +237,10 @@ type agentPrimeOutput struct {
 	// Hook auto-install
 	HooksInstalled     bool   `json:"hooks_installed,omitempty"`      // true if hooks were newly installed this prime
 	HooksRestartNotice string `json:"hooks_restart_notice,omitempty"` // message for agent to relay to user about restarting
+	// Version update advisory
+	UpdateAvailable bool   `json:"update_available,omitempty"` // true if newer ox version exists
+	LatestVersion   string `json:"latest_version,omitempty"`   // latest available version (without v prefix)
+	UpdateHint      string `json:"update_hint,omitempty"`      // human-readable update instruction
 }
 
 // agentPrimeCmd registers a new agent instance and starts a session
@@ -572,6 +576,20 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	if hooksInstalled {
 		output.HooksRestartNotice = "SageOx hooks were just installed. Tell the user to exit this session and start a new one so the hooks take effect."
+	}
+
+	// check for version updates from daemon cache (pure file read, ~0ms)
+	if vResult := checkVersionFromCache(); vResult != nil {
+		output.UpdateAvailable = true
+		output.LatestVersion = vResult.LatestVersion
+		output.UpdateHint = fmt.Sprintf(
+			"v%s -> v%s available. Run 'brew upgrade sageox' or visit https://github.com/sageox/ox/releases",
+			vResult.CurrentVersion, vResult.LatestVersion,
+		)
+		// append to user notification
+		if output.UserNotification != "" {
+			output.UserNotification += " " + output.UpdateHint + "."
+		}
 	}
 
 	// write session marker for idempotent behavior (graceful failure)
@@ -1027,6 +1045,10 @@ func buildHumanSummary(output agentPrimeOutput) string {
 		fmt.Fprintf(&sb, "- **Hooks Installed:** %s\n", output.HooksRestartNotice)
 	}
 
+	if output.UpdateAvailable {
+		fmt.Fprintf(&sb, "- **Update Available:** %s\n", output.UpdateHint)
+	}
+
 	return sb.String()
 }
 
@@ -1077,6 +1099,16 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 		for _, ic := range output.Guidance.Commands {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %-60s  %s\n", ic.Intent, ic.Command)
 		}
+	}
+
+	// show version update notice
+	if output.UpdateAvailable {
+		fmt.Fprintln(cmd.OutOrStdout())
+		cli.PrintSuggestionBox(
+			"Update Available",
+			output.UpdateHint,
+			"brew upgrade sageox",
+		)
 	}
 
 	// show hooks restart notice prominently
