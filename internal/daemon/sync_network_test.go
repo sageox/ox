@@ -10,6 +10,8 @@ import (
 
 	"log/slog"
 
+	"github.com/sageox/ox/internal/gitutil"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -309,7 +311,7 @@ func TestDoPull_AlreadyCanceledContext(t *testing.T) {
 
 	// verify no lock files were left behind
 	gitDir := filepath.Join(ledgerDir, ".git")
-	locks := hasLockFiles(gitDir)
+	locks := gitutil.HasLockFiles(gitDir)
 	assert.Empty(t, locks, "no lock files should remain after canceled context")
 
 	// verify pullInProgress was reset
@@ -364,7 +366,7 @@ func TestDoPull_ContextCancellationDuringFetch(t *testing.T) {
 
 	// verify no lock files were left behind
 	gitDir := filepath.Join(ledgerDir, ".git")
-	locks := hasLockFiles(gitDir)
+	locks := gitutil.HasLockFiles(gitDir)
 	assert.Empty(t, locks, "no lock files should remain after fetch failure")
 }
 
@@ -498,7 +500,7 @@ func TestHasLockFiles_Unit(t *testing.T) {
 	require.NoError(t, os.MkdirAll(gitDir, 0755))
 
 	// no lock files initially
-	assert.Empty(t, hasLockFiles(gitDir))
+	assert.Empty(t, gitutil.HasLockFiles(gitDir))
 
 	// create each type of lock file and verify detection
 	knownLocks := []string{"index.lock", "shallow.lock", "config.lock", "HEAD.lock"}
@@ -506,7 +508,7 @@ func TestHasLockFiles_Unit(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(gitDir, lock), []byte{}, 0644))
 	}
 
-	found := hasLockFiles(gitDir)
+	found := gitutil.HasLockFiles(gitDir)
 	assert.Len(t, found, len(knownLocks))
 	for _, lock := range knownLocks {
 		assert.Contains(t, found, lock)
@@ -514,14 +516,14 @@ func TestHasLockFiles_Unit(t *testing.T) {
 
 	// remove one and verify partial detection
 	require.NoError(t, os.Remove(filepath.Join(gitDir, "index.lock")))
-	found = hasLockFiles(gitDir)
+	found = gitutil.HasLockFiles(gitDir)
 	assert.Len(t, found, len(knownLocks)-1)
 	assert.NotContains(t, found, "index.lock")
 }
 
 // TestHasLockFiles_NonexistentDir verifies no panic on missing .git directory.
 func TestHasLockFiles_NonexistentDir(t *testing.T) {
-	found := hasLockFiles("/nonexistent/path/.git")
+	found := gitutil.HasLockFiles("/nonexistent/path/.git")
 	assert.Empty(t, found)
 }
 

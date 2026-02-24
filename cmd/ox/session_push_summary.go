@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -165,7 +166,7 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 
 	// push using existing retry logic
 	slog.Info("pushing summary to ledger", "session", sessionName)
-	if err := pushLedger(ledgerPath); err != nil {
+	if err := pushLedger(context.Background(), ledgerPath); err != nil {
 		return &pushSummaryOutput{
 			Success: false,
 			Type:    "push_summary",
