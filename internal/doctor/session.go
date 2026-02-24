@@ -675,9 +675,7 @@ func (c *SessionIncompleteCheck) getLedgerPath() string {
 		return path
 	}
 
-	repoName := filepath.Base(c.gitRoot)
-	ep := endpoint.GetForProject(c.gitRoot)
-	return config.DefaultLedgerPath(repoName, c.gitRoot, ep)
+	return ledgerPathFromProject(c.gitRoot)
 }
 
 // gitFileStatus holds the git status for a file or directory.
@@ -923,9 +921,7 @@ func (c *SessionAutoStageCheck) getLedgerPath() string {
 		return path
 	}
 
-	repoName := filepath.Base(c.gitRoot)
-	ep := endpoint.GetForProject(c.gitRoot)
-	return config.DefaultLedgerPath(repoName, c.gitRoot, ep)
+	return ledgerPathFromProject(c.gitRoot)
 }
 
 // findUnstagedSessionFiles returns session files that are untracked or modified but not staged.
@@ -1209,4 +1205,15 @@ func (c *SessionPushCheck) pushToRemote(ledgerPath string) error {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
 	}
 	return nil
+}
+
+// ledgerPathFromProject derives the ledger path from a project root.
+// Returns empty string if project config cannot be loaded or has no repo ID.
+func ledgerPathFromProject(gitRoot string) string {
+	projectCfg, err := config.LoadProjectConfig(gitRoot)
+	if err != nil || projectCfg == nil || projectCfg.RepoID == "" {
+		return ""
+	}
+	ep := endpoint.GetForProject(gitRoot)
+	return config.DefaultLedgerPath(projectCfg.RepoID, ep)
 }

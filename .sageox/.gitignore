@@ -17,3 +17,7 @@ config.local.toml
 !config.json
 !discovered.jsonl
 !offline/
+
+# SageOx required entries
+ledger
+teams/

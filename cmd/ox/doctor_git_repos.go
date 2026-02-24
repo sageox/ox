@@ -598,7 +598,13 @@ func checkGitRepoPaths(fix bool) checkResult {
 	// collect all issues
 	var issues []repoPathIssue
 
-	// check for legacy ledger structure (sibling directory)
+	// check for sibling ledger structure (deprecated in favor of user-dir)
+	siblingLedgerIssue := checkSiblingLedgerStructure(gitRoot, localCfg)
+	if siblingLedgerIssue != nil {
+		issues = append(issues, *siblingLedgerIssue)
+	}
+
+	// check for legacy ledger structure (oldest format)
 	legacyLedgerIssue := checkLegacyLedgerStructure(gitRoot, localCfg)
 	if legacyLedgerIssue != nil {
 		issues = append(issues, *legacyLedgerIssue)
@@ -757,6 +763,8 @@ func checkGitRepoPaths(fix bool) checkResult {
 			desc = "exists but not a git repo"
 		case "empty-dir":
 			desc = "empty directory"
+		case "sibling-structure":
+			desc = "using deprecated sibling directory (migrating to user directory)"
 		case "legacy-structure":
 			desc = "using old sibling directory structure"
 		case "broken-symlink":
@@ -788,6 +796,125 @@ func checkGitRepoPaths(fix bool) checkResult {
 	return FailedCheck("git repo paths",
 		fmt.Sprintf("%d repo(s) with issues", len(issues)),
 		fmt.Sprintf("%s\n       Run `ox doctor --fix` to repair", strings.Join(details, "\n       ")))
+}
+
+// checkSiblingLedgerStructure detects if the project is using the deprecated sibling
+// directory structure (<project_parent>/<repo_name>_sageox/<endpoint_slug>/ledger)
+// instead of the canonical user directory (~/.local/share/sageox/<ep>/ledgers/<repo_id>/).
+func checkSiblingLedgerStructure(gitRoot string, localCfg *config.LocalConfig) *repoPathIssue {
+	repoName := filepath.Base(gitRoot)
+	ep := endpoint.GetForProject(gitRoot)
+	siblingPath := config.SiblingLedgerPath(repoName, gitRoot, ep)
+	if siblingPath == "" {
+		return nil
+	}
+
+	// check if configured path matches the sibling pattern
+	if localCfg.Ledger != nil && localCfg.Ledger.Path != "" {
+		if localCfg.Ledger.Path == siblingPath && isGitRepo(siblingPath) {
+			return &repoPathIssue{
+				repoType: "ledger",
+				path:     siblingPath,
+				endpoint: ep,
+				issue:    "sibling-structure",
+			}
+		}
+		return nil
+	}
+
+	// no explicit config — check if sibling path exists
+	if isGitRepo(siblingPath) {
+		return &repoPathIssue{
+			repoType: "ledger",
+			path:     siblingPath,
+			endpoint: ep,
+			issue:    "sibling-structure",
+		}
+	}
+
+	return nil
+}
+
+// fixSiblingLedgerStructure migrates a ledger from the sibling directory to the user directory.
+// If the new path doesn't exist: moves the directory. If it does and old has no local changes: removes old.
+func fixSiblingLedgerStructure(gitRoot string, localCfg *config.LocalConfig, issue repoPathIssue) bool {
+	projectCfg, err := config.LoadProjectConfig(gitRoot)
+	if err != nil || projectCfg == nil || projectCfg.RepoID == "" {
+		fmt.Println("  Cannot migrate: project config missing repo_id. Run 'ox init' first.")
+		fmt.Println()
+		return false
+	}
+
+	ep := endpoint.GetForProject(gitRoot)
+	newPath := config.DefaultLedgerPath(projectCfg.RepoID, ep)
+	if newPath == "" {
+		fmt.Println("  Cannot determine new ledger path.")
+		fmt.Println()
+		return false
+	}
+
+	fmt.Printf("  Migrating ledger to user directory:\n")
+	fmt.Printf("    From: %s\n", issue.path)
+	fmt.Printf("    To:   %s\n", newPath)
+	fmt.Println()
+
+	if isGitRepo(newPath) {
+		// new path already exists — check if old has local changes
+		if hasLocalGitChanges(issue.path) {
+			fmt.Println("  Old ledger has uncommitted local changes. Keeping both copies.")
+			fmt.Println("  Manually review and remove the old location when ready.")
+			fmt.Println()
+			return false
+		}
+
+		// no local changes, safe to remove old
+		fmt.Println("  New location already exists. Removing old copy (no local changes).")
+		if err := os.RemoveAll(issue.path); err != nil {
+			fmt.Printf("  Failed to remove old ledger: %v\n", err)
+			return false
+		}
+	} else {
+		// new path doesn't exist — move
+		if err := os.MkdirAll(filepath.Dir(newPath), 0755); err != nil {
+			fmt.Printf("  Failed to create parent directory: %v\n", err)
+			return false
+		}
+		if err := os.Rename(issue.path, newPath); err != nil {
+			fmt.Printf("  Failed to move ledger: %v\n", err)
+			fmt.Println("  (This can happen if source and target are on different filesystems.)")
+			fmt.Println("  The ledger will be re-cloned at the new location on next sync.")
+			return false
+		}
+	}
+
+	// update config
+	localCfg.Ledger = &config.LedgerConfig{
+		Path: newPath,
+	}
+
+	// create symlinks (warn but don't fail migration)
+	if err := config.CreateProjectLedgerSymlink(gitRoot, projectCfg.RepoID, ep); err != nil {
+		fmt.Printf("  Warning: could not create ledger symlink: %v\n", err)
+	}
+	if projectCfg.TeamID != "" {
+		if err := config.CreateProjectTeamSymlinks(gitRoot, projectCfg.TeamID, ep); err != nil {
+			fmt.Printf("  Warning: could not create team symlinks: %v\n", err)
+		}
+	}
+
+	fmt.Println("  Migrated successfully.")
+	fmt.Println()
+	return true
+}
+
+// hasLocalGitChanges returns true if the git repo at path has uncommitted changes.
+func hasLocalGitChanges(repoPath string) bool {
+	cmd := exec.Command("git", "-C", repoPath, "status", "--porcelain")
+	output, err := cmd.Output()
+	if err != nil {
+		return true // assume changes on error (be conservative)
+	}
+	return strings.TrimSpace(string(output)) != ""
 }
 
 // checkLegacyLedgerStructure detects if the project is using the old sibling directory
@@ -932,7 +1059,7 @@ type repoPathIssue struct {
 	teamName string // only for team-context
 	endpoint string
 	cloneURL string // pre-fetched clone URL (avoids re-lookup for public/read-only repos)
-	issue    string // "missing", "not-git-repo", "empty-dir", "legacy-structure", "broken-symlink", "invalid-symlink"
+	issue    string // "missing", "not-git-repo", "empty-dir", "sibling-structure", "legacy-structure", "broken-symlink", "invalid-symlink"
 }
 
 // fixRepoPathIssues prompts user to fix repo path issues.
@@ -999,6 +1126,8 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 			issueDesc = "exists but is not a git repository"
 		case "empty-dir":
 			issueDesc = "is an empty directory"
+		case "sibling-structure":
+			issueDesc = "using deprecated sibling directory (migrating to user directory)"
 		case "legacy-structure":
 			issueDesc = "using old sibling directory structure"
 		case "broken-symlink":
@@ -1015,6 +1144,12 @@ func fixRepoPathIssues(gitRoot string, localCfg *config.LocalConfig, issues []re
 
 		// handle different issue types
 		switch issue.issue {
+		case "sibling-structure":
+			if fixSiblingLedgerStructure(gitRoot, localCfg, issue) {
+				fixed++
+			} else {
+				skipped++
+			}
 		case "legacy-structure":
 			if fixLegacyStructure(gitRoot, localCfg, issue) {
 				fixed++
@@ -1205,10 +1340,12 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 
 		var ledgerPath string
 		ledgerPath, err = ledger.DefaultPath()
-		if err != nil {
-			repoName := filepath.Base(gitRoot)
-			ep := endpoint.GetForProject(gitRoot)
-			ledgerPath = config.DefaultLedgerPath(repoName, gitRoot, ep)
+		if err != nil || ledgerPath == "" {
+			// fallback: derive directly from project config
+			if projectCfg, cfgErr := config.LoadProjectConfig(gitRoot); cfgErr == nil && projectCfg.RepoID != "" {
+				ep := endpoint.GetForProject(gitRoot)
+				ledgerPath = config.DefaultLedgerPath(projectCfg.RepoID, ep)
+			}
 		}
 
 		fmt.Printf("  Ledger: %s\n", repoDetail.Ledger.RepoURL)

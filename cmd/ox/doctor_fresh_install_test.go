@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -149,9 +150,13 @@ func isExpectedEmptyRepoIssue(category string, check checkResult) bool {
 	if strings.Contains(check.message, "not registered") {
 		return true
 	}
-	// Ledger for sessions not provisioned in test environment
-	if strings.Contains(check.name, "ledger for sessions") &&
-		strings.Contains(check.message, "not provisioned") {
+	// Ledger for sessions not provisioned/cloned in test environment
+	if strings.Contains(check.name, "ledger") &&
+		(strings.Contains(check.message, "not provisioned") || strings.Contains(check.message, "not found")) {
+		return true
+	}
+	// Agent environment detection (test runs inside an agent)
+	if strings.Contains(check.name, "AGENT_ENV") {
 		return true
 	}
 	return false
@@ -172,6 +177,12 @@ func createFreshSageoxStructure(t *testing.T, gitRoot string) {
 	repoID := "repo_01test000000000000000000"
 	markerPath := filepath.Join(sageoxDir, ".repo_"+repoID[5:]) // strip "repo_" prefix
 	require.NoError(t, os.WriteFile(markerPath, []byte("{}"), 0644), "failed to create repo marker")
+
+	// add repo_id to project config (needed for ledger path resolution)
+	cfg, err := config.LoadProjectConfig(gitRoot)
+	require.NoError(t, err)
+	cfg.RepoID = repoID
+	require.NoError(t, config.SaveProjectConfig(gitRoot, cfg))
 
 	// README.md
 	readmeContent := GetSageoxReadmeContent(nil)
@@ -353,6 +364,14 @@ func filterTestEnvironmentIssues(issues []string) []string {
 		// skip ledger for sessions - not provisioned in test environment
 		if strings.Contains(issue, "ledger for sessions") &&
 			strings.Contains(issue, "not provisioned") {
+			continue
+		}
+		// skip agent environment detection (test runs inside an agent)
+		if strings.Contains(issue, "AGENT_ENV") {
+			continue
+		}
+		// skip uncommitted changes in test repos (test setup artifacts)
+		if strings.Contains(issue, "uncommitted change") {
 			continue
 		}
 		filtered = append(filtered, issue)

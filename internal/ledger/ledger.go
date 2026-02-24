@@ -55,9 +55,9 @@ func DefaultPath() (string, error) {
 }
 
 // DefaultPathForEndpoint returns the default ledger path for a specific endpoint.
-// Uses the sibling directory pattern with endpoint namespacing:
+// Uses the user directory with repo ID:
 //
-//	<project_parent>/<repo_name>_sageox/<endpoint_slug>/ledger
+//	~/.local/share/sageox/<endpoint_slug>/ledgers/<repo_id>/
 //
 // If endpointURL is empty, uses the current endpoint from environment or project config.
 // Falls back to legacy path (~/.cache/sageox/context) if not in a git repo.
@@ -65,7 +65,16 @@ func DefaultPathForEndpoint(endpointURL string) (string, error) {
 	// find main project root (resolves through worktrees to ensure shared ledger)
 	projectRoot, err := repotools.FindMainRepoRoot(repotools.VCSGit)
 	if err == nil && projectRoot != "" {
-		repoName := filepath.Base(projectRoot)
+		// load project config to get repo ID
+		projectCfg, cfgErr := config.LoadProjectConfig(projectRoot)
+		if cfgErr != nil {
+			return "", fmt.Errorf("load project config: %w", cfgErr)
+		}
+
+		repoID := projectCfg.RepoID
+		if repoID == "" {
+			return "", fmt.Errorf("project config missing repo_id (run 'ox init')")
+		}
 
 		// determine endpoint: explicit parameter > project config > env > default
 		ep := endpointURL
@@ -73,7 +82,7 @@ func DefaultPathForEndpoint(endpointURL string) (string, error) {
 			ep = endpoint.GetForProject(projectRoot)
 		}
 
-		return config.DefaultLedgerPath(repoName, projectRoot, ep), nil
+		return config.DefaultLedgerPath(repoID, ep), nil
 	}
 
 	// fallback to legacy path if not in a git repo
