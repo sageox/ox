@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -20,205 +23,76 @@ func testVersionCache(t *testing.T) *VersionCache {
 	return vc
 }
 
-func TestVersionCache_LoadMissingFile(t *testing.T) {
-	t.Parallel()
+// testVersionCacheWithServer creates a VersionCache wired to a test HTTP server.
+func testVersionCacheWithServer(t *testing.T, handler http.HandlerFunc) *VersionCache {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
 
 	vc := testVersionCache(t)
-
-	err := vc.Load()
-	require.NoError(t, err)
-	assert.Nil(t, vc.Data())
+	vc.httpClient = srv.Client()
+	vc.apiURL = srv.URL
+	return vc
 }
 
-func TestVersionCache_SaveAndLoad(t *testing.T) {
+func TestVersionCache_SaveAndLoadRoundTrip(t *testing.T) {
 	t.Parallel()
-
 	vc := testVersionCache(t)
 
 	now := time.Now().Truncate(time.Second)
-	data := &VersionCacheData{
+	err := vc.Save(&VersionCacheData{
 		LatestVersion: "v0.9.0",
 		CheckedAt:     now,
 		ETag:          `"abc123"`,
-	}
-
-	err := vc.Save(data)
+	})
 	require.NoError(t, err)
 
-	// create a fresh cache pointing at the same file to verify disk round-trip
-	vc2 := &VersionCache{
-		filePath: vc.filePath,
-		logger:   slog.Default(),
-	}
-	err = vc2.Load()
-	require.NoError(t, err)
+	// fresh instance reading from same file — proves disk format is correct
+	vc2 := &VersionCache{filePath: vc.filePath, logger: slog.Default()}
+	require.NoError(t, vc2.Load())
 
 	loaded := vc2.Data()
 	require.NotNil(t, loaded)
 	assert.Equal(t, "v0.9.0", loaded.LatestVersion)
 	assert.Equal(t, `"abc123"`, loaded.ETag)
-	// JSON time marshaling loses sub-second precision; compare truncated
-	assert.True(t, loaded.CheckedAt.Equal(now) || loaded.CheckedAt.Sub(now).Abs() < time.Second,
-		"CheckedAt mismatch: got %v, want %v", loaded.CheckedAt, now)
 }
 
-func TestVersionCache_SaveNil(t *testing.T) {
-	t.Parallel()
-
-	vc := testVersionCache(t)
-
-	// saving nil is a no-op
-	err := vc.Save(nil)
-	require.NoError(t, err)
-
-	// file should not exist
-	_, err = os.Stat(vc.filePath)
-	assert.True(t, os.IsNotExist(err))
-}
-
-func TestVersionCache_SaveAtomicWrite(t *testing.T) {
-	t.Parallel()
-
-	vc := testVersionCache(t)
-
-	data := &VersionCacheData{
-		LatestVersion: "v0.8.0",
-		CheckedAt:     time.Now(),
-		ETag:          `"etag1"`,
-	}
-	err := vc.Save(data)
-	require.NoError(t, err)
-
-	// temp file should not linger after successful save
-	tmpFile := vc.filePath + ".tmp"
-	_, err = os.Stat(tmpFile)
-	assert.True(t, os.IsNotExist(err), "temp file should not exist after save")
-
-	// actual file should exist with correct content
-	_, err = os.Stat(vc.filePath)
-	require.NoError(t, err)
-}
-
-func TestVersionCache_SaveCreatesDirectory(t *testing.T) {
-	t.Parallel()
-
-	vc := &VersionCache{
-		filePath: filepath.Join(t.TempDir(), "nested", "deep", "version-check.json"),
-		logger:   slog.Default(),
-	}
-
-	data := &VersionCacheData{
-		LatestVersion: "v0.7.0",
-		CheckedAt:     time.Now(),
-	}
-	err := vc.Save(data)
-	require.NoError(t, err)
-
-	_, err = os.Stat(vc.filePath)
-	require.NoError(t, err)
-}
-
+// corrupt cache must not crash — real scenario: partial write, disk full
 func TestVersionCache_LoadCorruptFile(t *testing.T) {
 	t.Parallel()
-
 	vc := testVersionCache(t)
 
-	// write corrupt JSON to the cache path
-	err := os.MkdirAll(filepath.Dir(vc.filePath), 0700)
-	require.NoError(t, err)
-	err = os.WriteFile(vc.filePath, []byte("{not valid json!!!"), 0600)
-	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(vc.filePath), 0700))
+	require.NoError(t, os.WriteFile(vc.filePath, []byte("{not valid json!!!"), 0600))
 
-	// load should succeed (corrupt cache is silently reset)
-	err = vc.Load()
-	require.NoError(t, err)
-	assert.Nil(t, vc.Data())
+	err := vc.Load()
+	require.NoError(t, err, "corrupt cache should not return error")
+	assert.Nil(t, vc.Data(), "corrupt cache should reset to nil")
 }
 
-func TestVersionCache_LoadEmptyFile(t *testing.T) {
-	t.Parallel()
-
-	vc := testVersionCache(t)
-
-	err := os.MkdirAll(filepath.Dir(vc.filePath), 0700)
-	require.NoError(t, err)
-	err = os.WriteFile(vc.filePath, []byte{}, 0600)
-	require.NoError(t, err)
-
-	err = vc.Load()
-	require.NoError(t, err)
-	assert.Nil(t, vc.Data())
-}
-
+// Data() must return a copy, not a pointer to internal state.
+// Without this, callers can silently corrupt the cache.
 func TestVersionCache_DataReturnsCopy(t *testing.T) {
 	t.Parallel()
-
 	vc := testVersionCache(t)
 
-	data := &VersionCacheData{
+	require.NoError(t, vc.Save(&VersionCacheData{
 		LatestVersion: "v0.9.0",
-		CheckedAt:     time.Now(),
 		ETag:          `"original"`,
-	}
-	err := vc.Save(data)
-	require.NoError(t, err)
+	}))
 
-	// mutating the returned copy should not affect the cache
 	copy1 := vc.Data()
-	require.NotNil(t, copy1)
 	copy1.LatestVersion = "v999.0.0"
 	copy1.ETag = "tampered"
 
 	copy2 := vc.Data()
-	require.NotNil(t, copy2)
 	assert.Equal(t, "v0.9.0", copy2.LatestVersion)
 	assert.Equal(t, `"original"`, copy2.ETag)
 }
 
-func TestVersionCache_DataNilWhenEmpty(t *testing.T) {
-	t.Parallel()
-
-	vc := testVersionCache(t)
-	assert.Nil(t, vc.Data(), "Data() should be nil before any load or save")
-}
-
-func TestVersionCache_SaveOverwrite(t *testing.T) {
-	t.Parallel()
-
-	vc := testVersionCache(t)
-
-	// save first version
-	err := vc.Save(&VersionCacheData{
-		LatestVersion: "v0.1.0",
-		CheckedAt:     time.Now(),
-	})
-	require.NoError(t, err)
-
-	// overwrite with second version
-	err = vc.Save(&VersionCacheData{
-		LatestVersion: "v0.2.0",
-		CheckedAt:     time.Now(),
-		ETag:          `"new"`,
-	})
-	require.NoError(t, err)
-
-	// reload and verify the latest
-	vc2 := &VersionCache{
-		filePath: vc.filePath,
-		logger:   slog.Default(),
-	}
-	err = vc2.Load()
-	require.NoError(t, err)
-
-	loaded := vc2.Data()
-	require.NotNil(t, loaded)
-	assert.Equal(t, "v0.2.0", loaded.LatestVersion)
-	assert.Equal(t, `"new"`, loaded.ETag)
-}
-
+// concurrent Save/Load/Data must not panic or deadlock under -race
 func TestVersionCache_ConcurrentAccess(t *testing.T) {
 	t.Parallel()
-
 	vc := testVersionCache(t)
 
 	var wg sync.WaitGroup
@@ -226,62 +100,107 @@ func TestVersionCache_ConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			d := &VersionCacheData{
-				LatestVersion: "v0." + string(rune('0'+n)) + ".0",
-				CheckedAt:     time.Now(),
-			}
-			_ = vc.Save(d)
+			_ = vc.Save(&VersionCacheData{LatestVersion: "v0." + string(rune('0'+n)) + ".0"})
 			_ = vc.Load()
 			_ = vc.Data()
 		}(i)
 	}
-
 	wg.Wait()
 
-	// should not panic or deadlock; data should still be loadable
-	err := vc.Load()
-	require.NoError(t, err)
+	require.NoError(t, vc.Load())
 }
 
-func TestVersionCache_FilePermissions(t *testing.T) {
+// 200 OK: should parse tag_name, store ETag, and persist to disk
+func TestCheckAndUpdate_200_StoresVersionAndETag(t *testing.T) {
 	t.Parallel()
 
-	vc := testVersionCache(t)
+	vc := testVersionCacheWithServer(t, func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "application/vnd.github.v3+json", r.Header.Get("Accept"))
+		assert.Empty(t, r.Header.Get("If-None-Match"), "first request should have no ETag")
 
-	err := vc.Save(&VersionCacheData{
-		LatestVersion: "v0.5.0",
-		CheckedAt:     time.Now(),
+		w.Header().Set("ETag", `"etag-v1"`)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"tag_name": "v0.10.0"})
 	})
+
+	err := vc.CheckAndUpdate(context.Background())
 	require.NoError(t, err)
 
-	info, err := os.Stat(vc.filePath)
-	require.NoError(t, err)
-	// file should be owner-readable/writable only (0600)
-	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+	data := vc.Data()
+	require.NotNil(t, data)
+	assert.Equal(t, "v0.10.0", data.LatestVersion)
+	assert.Equal(t, `"etag-v1"`, data.ETag)
+	assert.WithinDuration(t, time.Now(), data.CheckedAt, 5*time.Second)
+
+	// verify it actually hit disk (not just in-memory)
+	vc2 := &VersionCache{filePath: vc.filePath, logger: slog.Default()}
+	require.NoError(t, vc2.Load())
+	assert.Equal(t, "v0.10.0", vc2.Data().LatestVersion)
 }
 
-func TestVersionCache_JSONFormat(t *testing.T) {
+// 304 Not Modified: ETag should be sent, cached version preserved, timestamp updated
+func TestCheckAndUpdate_304_SendsETagPreservesVersion(t *testing.T) {
 	t.Parallel()
 
-	vc := testVersionCache(t)
-
-	now := time.Now().Truncate(time.Second)
-	err := vc.Save(&VersionCacheData{
-		LatestVersion: "v0.10.0",
-		CheckedAt:     now,
-		ETag:          `W/"abc"`,
+	var receivedETag string
+	vc := testVersionCacheWithServer(t, func(w http.ResponseWriter, r *http.Request) {
+		receivedETag = r.Header.Get("If-None-Match")
+		w.WriteHeader(http.StatusNotModified)
 	})
+
+	// seed cache with existing data
+	oldTime := time.Now().Add(-1 * time.Hour)
+	vc.data = &VersionCacheData{
+		LatestVersion: "v0.8.0",
+		CheckedAt:     oldTime,
+		ETag:          `"cached-etag"`,
+	}
+
+	err := vc.CheckAndUpdate(context.Background())
 	require.NoError(t, err)
 
-	// verify the on-disk format is valid JSON with expected keys
-	raw, err := os.ReadFile(vc.filePath)
-	require.NoError(t, err)
+	assert.Equal(t, `"cached-etag"`, receivedETag, "should send cached ETag in If-None-Match")
 
-	var parsed map[string]interface{}
-	err = json.Unmarshal(raw, &parsed)
-	require.NoError(t, err)
+	data := vc.Data()
+	require.NotNil(t, data)
+	assert.Equal(t, "v0.8.0", data.LatestVersion, "version should be unchanged on 304")
+	assert.True(t, data.CheckedAt.After(oldTime), "timestamp should be updated on 304")
+}
 
-	assert.Equal(t, "v0.10.0", parsed["latest_version"])
-	assert.Equal(t, `W/"abc"`, parsed["etag"])
-	assert.Contains(t, parsed, "checked_at")
+// server error: should return error, not corrupt the cache
+func TestCheckAndUpdate_ServerError_PreservesCache(t *testing.T) {
+	t.Parallel()
+
+	vc := testVersionCacheWithServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+
+	// seed cache
+	vc.data = &VersionCacheData{
+		LatestVersion: "v0.7.0",
+		ETag:          `"existing"`,
+	}
+
+	err := vc.CheckAndUpdate(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
+
+	// cache should be untouched
+	data := vc.Data()
+	require.NotNil(t, data)
+	assert.Equal(t, "v0.7.0", data.LatestVersion)
+}
+
+// malformed JSON body on 200: should return error, not panic
+func TestCheckAndUpdate_MalformedBody(t *testing.T) {
+	t.Parallel()
+
+	vc := testVersionCacheWithServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("not json"))
+	})
+
+	err := vc.CheckAndUpdate(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode")
 }

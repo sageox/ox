@@ -29,14 +29,20 @@ type VersionCache struct {
 	data     *VersionCacheData
 	filePath string
 	logger   *slog.Logger
+
+	// injectable for testing
+	httpClient *http.Client
+	apiURL     string
 }
 
 // NewVersionCache creates a new version cache.
 // The cache file is stored at ~/.cache/sageox/version-check.json (or XDG equivalent).
 func NewVersionCache(log *slog.Logger) *VersionCache {
 	return &VersionCache{
-		filePath: paths.CacheDir() + "/version-check.json",
-		logger:   log,
+		filePath:   paths.CacheDir() + "/version-check.json",
+		logger:     log,
+		httpClient: http.DefaultClient,
+		apiURL:     "https://api.github.com/repos/sageox/ox/releases/latest",
 	}
 }
 
@@ -113,8 +119,7 @@ func (v *VersionCache) CheckAndUpdate(ctx context.Context) error {
 	checkCtx, cancel := context.WithTimeout(ctx, 1*time.Second)
 	defer cancel()
 
-	url := "https://api.github.com/repos/sageox/ox/releases/latest"
-	req, err := http.NewRequestWithContext(checkCtx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(checkCtx, "GET", v.apiURL, nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
@@ -133,18 +138,18 @@ func (v *VersionCache) CheckAndUpdate(ctx context.Context) error {
 		req.Header.Set("If-None-Match", cachedETag)
 	}
 
-	logger.LogHTTPRequest("GET", url)
+	logger.LogHTTPRequest("GET", v.apiURL)
 	start := time.Now()
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := v.httpClient.Do(req)
 	duration := time.Since(start)
 	if err != nil {
-		logger.LogHTTPError("GET", url, err, duration)
+		logger.LogHTTPError("GET", v.apiURL, err, duration)
 		return fmt.Errorf("fetch latest release: %w", err)
 	}
 	defer resp.Body.Close()
 
-	logger.LogHTTPResponse("GET", url, resp.StatusCode, duration)
+	logger.LogHTTPResponse("GET", v.apiURL, resp.StatusCode, duration)
 
 	switch resp.StatusCode {
 	case http.StatusNotModified:
