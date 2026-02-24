@@ -190,11 +190,6 @@ func viewHTMLBuildTemplateData(t *session.StoredSession) *sessionhtml.TemplateDa
 			if parsed, err := time.Parse(time.RFC3339Nano, closedAt); err == nil {
 				if data.Metadata != nil {
 					data.Metadata.EndedAt = parsed
-					// calculate duration if we have start time
-					if t.Meta != nil && !t.Meta.CreatedAt.IsZero() {
-						duration := parsed.Sub(t.Meta.CreatedAt)
-						data.Metadata.Duration = sessionhtml.FormatDuration(duration)
-					}
 				}
 			}
 		}
@@ -213,31 +208,13 @@ func viewHTMLBuildTemplateData(t *session.StoredSession) *sessionhtml.TemplateDa
 	}
 
 	// build messages from entries
-	var userMessages, toolCalls int
+	var userMessages int
 	for i, entry := range t.Entries {
 		msg := viewHTMLBuildMessageView(i+1, entry, userLabel, agentLabel)
 		data.Messages = append(data.Messages, msg)
 
-		// count for statistics
-		switch msg.Type {
-		case "user":
+		if msg.Type == "user" {
 			userMessages++
-		case "tool":
-			toolCalls++
-		}
-	}
-
-	// fallback: compute duration from entry timestamps when meta times are missing
-	if data.Metadata != nil && data.Metadata.Duration == "" && len(data.Messages) > 0 {
-		dur, first, last := sessionhtml.ComputeFallbackDuration(data.Messages)
-		if dur > 0 {
-			data.Metadata.Duration = sessionhtml.FormatDuration(dur)
-			if data.Metadata.StartedAt.IsZero() {
-				data.Metadata.StartedAt = first
-			}
-			if data.Metadata.EndedAt.IsZero() {
-				data.Metadata.EndedAt = last
-			}
 		}
 	}
 
@@ -245,10 +222,6 @@ func viewHTMLBuildTemplateData(t *session.StoredSession) *sessionhtml.TemplateDa
 	data.Statistics = &sessionhtml.StatsView{
 		TotalMessages: len(t.Entries),
 		UserMessages:  userMessages,
-		ToolCalls:     toolCalls,
-	}
-	if data.Metadata != nil && data.Metadata.Duration != "" {
-		data.Statistics.Duration = data.Metadata.Duration
 	}
 
 	return data
@@ -941,7 +914,6 @@ const viewHTMLTemplate = `<!DOCTYPE html>
                     {{if .Metadata.Username}}<div class="meta-item"><span class="meta-label">User:</span> <span class="meta-value">{{.Metadata.Username}}</span></div>{{end}}
                     {{if not .Metadata.StartedAt.IsZero}}<div class="meta-item"><span class="meta-label">Started:</span> <time class="meta-value">{{.Metadata.StartedAt.Format "2006-01-02 15:04:05"}}</time></div>{{end}}
                     {{if not .Metadata.EndedAt.IsZero}}<div class="meta-item"><span class="meta-label">Ended:</span> <time class="meta-value">{{.Metadata.EndedAt.Format "2006-01-02 15:04:05"}}</time></div>{{end}}
-                    {{if .Metadata.Duration}}<div class="meta-item"><span class="meta-label">Duration:</span> <span class="meta-value">{{.Metadata.Duration}}</span></div>{{end}}
                 </div>
                 {{end}}
             </div>
@@ -956,16 +928,6 @@ const viewHTMLTemplate = `<!DOCTYPE html>
                 <span class="stat-value">{{.Statistics.UserMessages}}</span>
                 <span class="stat-label">User Messages</span>
             </div>
-            <div class="stat-item">
-                <span class="stat-value">{{.Statistics.ToolCalls}}</span>
-                <span class="stat-label">Tool Calls</span>
-            </div>
-            {{if .Statistics.Duration}}
-            <div class="stat-item">
-                <span class="stat-value">{{.Statistics.Duration}}</span>
-                <span class="stat-label">Session Duration</span>
-            </div>
-            {{end}}
         </div>
         {{end}}
     </header>

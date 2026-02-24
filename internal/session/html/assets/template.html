@@ -33,7 +33,6 @@
                     {{if .Metadata.Username}}<div class="meta-item"><span class="meta-label">User:</span> <span class="meta-value">{{.Metadata.Username}}</span></div>{{end}}
                     {{if .Metadata.StartedAt}}<div class="meta-item"><span class="meta-label">Started:</span> <time class="meta-value">{{.Metadata.StartedAt.Format "2006-01-02 15:04:05"}}</time></div>{{end}}
                     {{if .Metadata.EndedAt}}<div class="meta-item"><span class="meta-label">Ended:</span> <time class="meta-value">{{.Metadata.EndedAt.Format "2006-01-02 15:04:05"}}</time></div>{{end}}
-                    {{if .Metadata.Duration}}<div class="meta-item"><span class="meta-label">Duration:</span> <span class="meta-value">{{.Metadata.Duration}}</span></div>{{end}}
                 </div>
             </div>
         </div>
@@ -47,16 +46,6 @@
                 <span class="stat-value">{{.Statistics.UserMessages}}</span>
                 <span class="stat-label">User Messages</span>
             </div>
-            <div class="stat-item">
-                <span class="stat-value">{{.Statistics.ToolCalls}}</span>
-                <span class="stat-label">Tool Calls</span>
-            </div>
-            {{if .Statistics.Duration}}
-            <div class="stat-item">
-                <span class="stat-value">{{.Statistics.Duration}}</span>
-                <span class="stat-label">Session Duration</span>
-            </div>
-            {{end}}
         </div>
         {{end}}
     </header>
@@ -100,28 +89,18 @@
             </div>
             <div class="message-content">{{.Content}}</div>
             {{if .ToolCall}}
+            {{if .ToolCall.IsSimple}}
+            <div class="tool-inline"><code class="tool-cmd" data-tool="{{.ToolCall.Name}}">{{.ToolCall.FormattedInput}}</code></div>
+            {{else}}
             <details class="tool-details">
-                <summary class="tool-summary">
-                    <svg class="tool-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M13 3L8 8L13 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                    <span class="tool-name">{{if .ToolCall.Summary}}{{.ToolCall.Summary}}{{else}}{{.ToolCall.Name}}{{end}}</span>
-                </summary>
+                <summary class="tool-summary"><code class="tool-cmd" data-tool="{{.ToolCall.Name}}">{{.ToolCall.FormattedInput}}</code></summary>
                 <div class="tool-io">
-                    {{if .ToolCall.Input}}
-                    <div class="tool-section">
-                        <h4 class="tool-section-title">Input</h4>
-                        <pre class="tool-input">{{.ToolCall.Input}}</pre>
-                    </div>
-                    {{end}}
                     {{if .ToolCall.Output}}
-                    <div class="tool-section">
-                        <h4 class="tool-section-title">Output</h4>
-                        <pre class="tool-output">{{.ToolCall.Output}}</pre>
-                    </div>
+                    <pre class="tool-output">{{.ToolCall.Output}}</pre>
                     {{end}}
                 </div>
             </details>
+            {{end}}
             {{end}}
         </article>
         {{end}}

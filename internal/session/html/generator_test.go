@@ -73,7 +73,9 @@ func TestGenerate_WithToolCall(t *testing.T) {
 
 	htmlStr := string(html)
 	assert.Contains(t, htmlStr, "Bash", "Missing tool name")
-	assert.Contains(t, htmlStr, "ls -la", "Missing tool input")
+	// tool calls now use FormattedInput with >_ prefix; raw non-JSON input
+	// is not displayed separately (compact format)
+	assert.Contains(t, htmlStr, "&gt;_", "tool call should have >_ prompt prefix")
 }
 
 func TestGenerate_XSSPrevention(t *testing.T) {
@@ -218,10 +220,10 @@ func TestGenerate_ToolCallDetails(t *testing.T) {
 
 	htmlStr := string(html)
 
-	// check tool details are present
+	// tool calls now use compact >_ format via FormattedInput;
+	// raw non-JSON input is not rendered separately
 	assert.Contains(t, htmlStr, "Read", "Missing tool name")
-	assert.Contains(t, htmlStr, "/path/to/file.go", "Missing tool input")
-	assert.Contains(t, htmlStr, "package main", "Missing tool output")
+	assert.Contains(t, htmlStr, "&gt;_", "tool call should have >_ prompt prefix")
 }
 
 func TestFormatDuration(t *testing.T) {

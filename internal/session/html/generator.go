@@ -154,7 +154,7 @@ func convertToTemplateData(t *session.StoredSession) *TemplateData {
 	}
 
 	// convert entries to message views, skipping empty ones
-	var userCount, toolCount int
+	var userCount int
 	for i, entry := range t.Entries {
 		msg := convertEntry(i, entry, userLabel, agentLabel)
 
@@ -165,12 +165,8 @@ func convertToTemplateData(t *session.StoredSession) *TemplateData {
 
 		data.Messages = append(data.Messages, msg)
 
-		// count message types
-		switch msg.Type {
-		case "user":
+		if msg.Type == "user" {
 			userCount++
-		case "tool", "tool_use", "tool_result":
-			toolCount++
 		}
 	}
 
@@ -178,8 +174,6 @@ func convertToTemplateData(t *session.StoredSession) *TemplateData {
 	data.Statistics = &StatsView{
 		TotalMessages: len(data.Messages),
 		UserMessages:  userCount,
-		ToolCalls:     toolCount,
-		Duration:      data.Metadata.Duration,
 	}
 
 	return data
@@ -216,16 +210,6 @@ func extractMetadata(t *session.StoredSession) *MetadataView {
 			if endTime, ok := session.ParseTimestamp(closedAt); ok {
 				meta.EndedAt = endTime
 			}
-		}
-	}
-
-	// calculate duration if we have both times
-	if !meta.StartedAt.IsZero() && !meta.EndedAt.IsZero() {
-		meta.Duration = FormatDuration(meta.EndedAt.Sub(meta.StartedAt))
-	} else if !meta.StartedAt.IsZero() {
-		// use file mod time as fallback
-		if !t.Info.ModTime.IsZero() {
-			meta.Duration = FormatDuration(t.Info.ModTime.Sub(meta.StartedAt))
 		}
 	}
 
@@ -278,9 +262,12 @@ func convertEntry(index int, entry map[string]any, userLabel, agentLabel string)
 	// extract tool call info if present
 	msg.ToolCall = extractToolCall(entry)
 
-	// populate tool call summary
+	// populate tool call display
 	if msg.ToolCall != nil {
 		msg.ToolCall.Summary = FormatToolSummary(msg.ToolCall)
+		msg.ToolCall.FormattedInput = formatToolInputCompact(msg.ToolCall)
+		outputLines := strings.Count(msg.ToolCall.Output, "\n") + 1
+		msg.ToolCall.IsSimple = msg.ToolCall.Output == "" || outputLines <= 3
 	}
 
 	return msg
@@ -465,6 +452,112 @@ func FormatToolSummary(tool *ToolCallView) string {
 	}
 
 	return tool.Name
+}
+
+// formatToolInputCompact renders a tool call as a compact terminal-style command.
+// e.g., ">_ Bash git status", ">_ Read cmd/ox/main.go"
+func formatToolInputCompact(tool *ToolCallView) template.HTML {
+	if tool == nil {
+		return ""
+	}
+
+	name := tool.Name
+	if name == "" {
+		name = "Tool"
+	}
+
+	// try to parse input as JSON for structured extraction
+	var data map[string]any
+	hasJSON := tool.Input != "" && json.Unmarshal([]byte(tool.Input), &data) == nil
+
+	// helper to build the final HTML: prompt + name + args
+	render := func(toolName, args string) template.HTML {
+		if args == "" {
+			return template.HTML(fmt.Sprintf(
+				`<span class="tool-prompt">&gt;_</span> <span class="tool-name-label">%s</span>`,
+				template.HTMLEscapeString(toolName)))
+		}
+		return template.HTML(fmt.Sprintf(
+			`<span class="tool-prompt">&gt;_</span> <span class="tool-name-label">%s</span>  <span class="tool-args">%s</span>`,
+			template.HTMLEscapeString(toolName), args))
+	}
+
+	switch strings.ToLower(name) {
+	case "bash":
+		if hasJSON {
+			if command, ok := data["command"].(string); ok {
+				return render("Bash", template.HTMLEscapeString(command))
+			}
+		}
+	case "read":
+		if hasJSON {
+			if fp, ok := data["file_path"].(string); ok {
+				return render("Read", template.HTMLEscapeString(shortenPath(fp)))
+			}
+		}
+	case "edit", "multiedit":
+		if hasJSON {
+			if fp, ok := data["file_path"].(string); ok {
+				args := template.HTMLEscapeString(shortenPath(fp))
+				added, removed := CountDiffLines(tool.Output)
+				if added > 0 || removed > 0 {
+					args += fmt.Sprintf("  (+%d / -%d lines)", added, removed)
+				}
+				return render(name, args)
+			}
+		}
+	case "write":
+		if hasJSON {
+			if fp, ok := data["file_path"].(string); ok {
+				return render("Write", template.HTMLEscapeString(shortenPath(fp)))
+			}
+		}
+	case "grep":
+		if hasJSON {
+			pattern, _ := data["pattern"].(string)
+			path, _ := data["path"].(string)
+			var args string
+			if pattern != "" {
+				args = fmt.Sprintf("&quot;%s&quot;", template.HTMLEscapeString(pattern))
+			}
+			if path != "" {
+				args += fmt.Sprintf(" %s", template.HTMLEscapeString(shortenPath(path)))
+			}
+			return render(name, args)
+		}
+	case "glob":
+		if hasJSON {
+			if pattern, ok := data["pattern"].(string); ok {
+				return render("Glob", template.HTMLEscapeString(pattern))
+			}
+		}
+	}
+
+	// fallback: tool name + first string param value
+	if hasJSON {
+		for _, v := range data {
+			if s, ok := v.(string); ok && s != "" {
+				if len(s) > 80 {
+					s = s[:80] + "..."
+				}
+				return render(name, template.HTMLEscapeString(s))
+			}
+		}
+	}
+
+	return render(name, "")
+}
+
+// shortenPath strips common home directory prefixes to make paths more readable.
+func shortenPath(p string) string {
+	// strip /Users/*/... or /home/*/... to relative-looking path
+	parts := strings.Split(p, "/")
+	for i, part := range parts {
+		if (part == "Users" || part == "home") && i+2 < len(parts) {
+			return strings.Join(parts[i+2:], "/")
+		}
+	}
+	return p
 }
 
 // ExtractFilePathFromInput parses tool input (JSON or raw) to find a file_path field.
