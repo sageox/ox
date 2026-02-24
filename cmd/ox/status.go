@@ -527,6 +527,29 @@ func fetchRemoteURLs(client *api.RepoClient, teamContexts []config.TeamContext) 
 }
 
 // renderGitReposSection renders the git repositories status section
+// shortenPathViaSymlink returns a short relative path (e.g. ".sageox/ledger")
+// if a .sageox/ symlink in projectRoot resolves to fullPath.
+// Checks candidates in order and returns the first match, or fullPath unchanged.
+func shortenPathViaSymlink(projectRoot, fullPath string, candidates ...string) string {
+	if projectRoot == "" || fullPath == "" {
+		return fullPath
+	}
+	for _, rel := range candidates {
+		abs := filepath.Join(projectRoot, rel)
+		target, err := os.Readlink(abs)
+		if err != nil {
+			continue
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(abs), target)
+		}
+		if filepath.Clean(target) == filepath.Clean(fullPath) {
+			return rel
+		}
+	}
+	return fullPath
+}
+
 // Shows ledger and team contexts grouped by endpoint
 // Always renders both sections, showing "(none)" if not configured
 func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, daemonStatus *daemon.StatusData) string {
@@ -644,7 +667,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		}
 
 		b.WriteString(statusLabelStyle.Render("  Path"))
-		b.WriteString(statusMutedStyle.Render(localCfg.Ledger.Path))
+		b.WriteString(statusMutedStyle.Render(shortenPathViaSymlink(projectRoot, localCfg.Ledger.Path, ".sageox/ledger")))
 		b.WriteString("\n")
 
 		// check if ledger doesn't exist locally and user doesn't have access (ErrLedgerNotFound)
@@ -693,7 +716,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		}
 		b.WriteString("\n")
 		b.WriteString(statusLabelStyle.Render("  Path"))
-		b.WriteString(statusMutedStyle.Render(expectedPath))
+		b.WriteString(statusMutedStyle.Render(shortenPathViaSymlink(projectRoot, expectedPath, ".sageox/ledger")))
 		b.WriteString("\n")
 		b.WriteString(statusLabelStyle.Render("  Remote"))
 		b.WriteString(statusMutedStyle.Render(cloudLedgerURL))
@@ -857,7 +880,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString("\n")
 
 		b.WriteString(statusLabelStyle.Render("  Path"))
-		b.WriteString(statusMutedStyle.Render(expectedPath))
+		b.WriteString(statusMutedStyle.Render(shortenPathViaSymlink(projectRoot, expectedPath, ".sageox/teams/primary", ".sageox/teams/"+cloudTC.StableID())))
 		b.WriteString("\n")
 
 		gitDir := filepath.Join(expectedPath, ".git")
@@ -930,7 +953,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString(renderVisibilityWithAccess(detailVisibility, detailTC.AccessLevel))
 		b.WriteString("\n")
 		b.WriteString(statusLabelStyle.Render("  Path"))
-		b.WriteString(statusMutedStyle.Render(expectedPath))
+		b.WriteString(statusMutedStyle.Render(shortenPathViaSymlink(projectRoot, expectedPath, ".sageox/teams/primary", ".sageox/teams/"+detailTC.StableID())))
 		b.WriteString("\n")
 
 		gitDir := filepath.Join(expectedPath, ".git")

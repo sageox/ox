@@ -648,6 +648,16 @@ func createOrUpdateSymlink(symlinkPath, targetPath string) error {
 	return os.Symlink(targetPath, symlinkPath)
 }
 
+// CreateOrUpdateProjectSymlink creates or updates a symlink inside the project root.
+// The rel path is relative to projectRoot (e.g. ".sageox/ledger").
+// If the symlink already points to targetPath, this is a no-op.
+func CreateOrUpdateProjectSymlink(projectRoot, rel, targetPath string) error {
+	if projectRoot == "" || rel == "" || targetPath == "" {
+		return nil
+	}
+	return createOrUpdateSymlink(filepath.Join(projectRoot, rel), targetPath)
+}
+
 // CreateProjectLedgerSymlink creates .sageox/ledger -> user-dir ledger path.
 func CreateProjectLedgerSymlink(projectRoot, repoID, ep string) error {
 	if projectRoot == "" || repoID == "" || ep == "" {

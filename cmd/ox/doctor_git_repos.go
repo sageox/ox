@@ -1843,6 +1843,95 @@ func checkLedgerStructureMigration() checkResult {
 	return SkippedCheck("Ledger structure", "no ledger configured", "")
 }
 
+// checkProjectSymlinks ensures .sageox/ledger and .sageox/teams/primary symlinks exist
+// and point to the actual configured paths (not just the XDG defaults).
+func checkProjectSymlinks(fix bool) checkResult {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck("Project symlinks", "not in git repo", "")
+	}
+	if !config.IsInitialized(gitRoot) {
+		return SkippedCheck("Project symlinks", "not initialized", "")
+	}
+
+	projectCfg, err := config.LoadProjectConfig(gitRoot)
+	if err != nil || projectCfg == nil {
+		return SkippedCheck("Project symlinks", "no project config", "")
+	}
+	ep := projectCfg.GetEndpoint()
+	if ep == "" {
+		return SkippedCheck("Project symlinks", "no endpoint", "")
+	}
+
+	localCfg, _ := config.LoadLocalConfig(gitRoot)
+
+	// determine the actual ledger path: prefer config.local.toml, fall back to XDG default
+	var ledgerTarget string
+	if localCfg != nil && localCfg.Ledger != nil && localCfg.Ledger.Path != "" {
+		ledgerTarget = localCfg.Ledger.Path
+	} else if projectCfg.RepoID != "" {
+		ledgerTarget = config.DefaultLedgerPath(projectCfg.RepoID, ep)
+	}
+
+	// determine the actual team context path
+	var teamTarget string
+	if projectCfg.TeamID != "" {
+		teamTarget = paths.TeamContextDir(projectCfg.TeamID, ep)
+	}
+
+	// checkSymlink returns true if the symlink exists and points to the expected target
+	checkSymlink := func(rel, expectedTarget string) bool {
+		if expectedTarget == "" {
+			return true // nothing to check
+		}
+		abs := filepath.Join(gitRoot, rel)
+		target, err := os.Readlink(abs)
+		if err != nil {
+			return false // missing or not a symlink
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(abs), target)
+		}
+		return filepath.Clean(target) == filepath.Clean(expectedTarget)
+	}
+
+	var issues []string
+	if ledgerTarget != "" && !checkSymlink(".sageox/ledger", ledgerTarget) {
+		issues = append(issues, ".sageox/ledger")
+	}
+	if teamTarget != "" && !checkSymlink(".sageox/teams/primary", teamTarget) {
+		issues = append(issues, ".sageox/teams/primary")
+	}
+
+	if len(issues) == 0 {
+		return PassedCheck("Project symlinks", "ok")
+	}
+
+	if !fix {
+		return WarningCheck("Project symlinks",
+			fmt.Sprintf("%d need repair: %s", len(issues), strings.Join(issues, ", ")),
+			"Run `ox doctor --fix` to create project symlinks")
+	}
+
+	// fix: create or update symlinks to point to actual configured paths
+	var fixed int
+	if ledgerTarget != "" {
+		if err := config.CreateOrUpdateProjectSymlink(gitRoot, ".sageox/ledger", ledgerTarget); err == nil {
+			fixed++
+		}
+	}
+	if teamTarget != "" {
+		if err := config.CreateProjectTeamSymlinks(gitRoot, projectCfg.TeamID, ep); err == nil {
+			fixed++
+		}
+	}
+
+	if fixed > 0 {
+		return PassedCheck("Project symlinks", fmt.Sprintf("fixed %d symlinks", fixed))
+	}
+	return WarningCheck("Project symlinks", "could not create symlinks", "")
+}
+
 // checkTeamContextSymlinks validates all team context symlinks in centralized location.
 // Returns a single check result summarizing symlink health.
 func checkTeamContextSymlinks() checkResult {
