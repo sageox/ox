@@ -141,14 +141,13 @@ func makeRequest(ctx context.Context, method, url, accessToken string, data inte
 	}
 
 	// create request with context for cancellation support
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	req, err := useragent.NewRequest(ctx, method, url, body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	// build headers
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
-	useragent.SetHeaders(req.Header)
 
 	// add Content-Type if sending JSON data
 	if data != nil {

@@ -1,7 +1,9 @@
 package useragent
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"runtime"
@@ -124,6 +126,17 @@ func OrchestratorType() string {
 		ot = os.Getenv("ORCHESTRATOR_ENV")
 	}
 	return ot
+}
+
+// NewRequest creates an HTTP request with standard ox headers (User-Agent, X-Orchestrator).
+// Prefer this over http.NewRequestWithContext + SetHeaders to ensure headers are never forgotten.
+func NewRequest(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, body)
+	if err != nil {
+		return nil, err
+	}
+	SetHeaders(req.Header)
+	return req, nil
 }
 
 // SetHeaders sets User-Agent and X-Orchestrator headers on the request.

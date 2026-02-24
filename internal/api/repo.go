@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,8 +14,8 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
-	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 )
 
@@ -164,14 +165,13 @@ func (c *RepoClient) RegisterRepo(req *RepoInitRequest) (*RepoInitResponse, erro
 	start := time.Now()
 
 	// create HTTP request
-	httpReq, err := http.NewRequest("POST", reqURL, bytes.NewReader(bodyBytes))
+	httpReq, err := useragent.NewRequest(context.Background(), "POST", reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	// set headers
 	httpReq.Header.Set("Content-Type", "application/json")
-	useragent.SetHeaders(httpReq.Header)
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}
@@ -242,12 +242,10 @@ func (c *RepoClient) GetDoctorIssues(repoID string) (*DoctorResponse, error) {
 	logger.LogHTTPRequest("GET", reqURL)
 	start := time.Now()
 
-	httpReq, err := http.NewRequest("GET", reqURL, nil)
+	httpReq, err := useragent.NewRequest(context.Background(), "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-
-	useragent.SetHeaders(httpReq.Header)
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}
@@ -313,13 +311,12 @@ func (c *RepoClient) NotifyUninstall(repoID, repoSalt string) error {
 	logger.LogHTTPRequest("POST", reqURL)
 	start := time.Now()
 
-	httpReq, err := http.NewRequest("POST", reqURL, bytes.NewReader(bodyBytes))
+	httpReq, err := useragent.NewRequest(context.Background(), "POST", reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	useragent.SetHeaders(httpReq.Header)
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}

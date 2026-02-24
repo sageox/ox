@@ -2,6 +2,7 @@ package session
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -174,14 +175,13 @@ func Summarize(entries []Entry, agentID, agentType, model, endpointURL string) (
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	httpReq, err := http.NewRequest("POST", reqURL, bytes.NewReader(body))
+	httpReq, err := useragent.NewRequest(context.Background(), "POST", reqURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
-	useragent.SetHeaders(httpReq.Header)
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
