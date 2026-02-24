@@ -230,6 +230,40 @@ func TestDetect_SkipsOrchestrators(t *testing.T) {
 	assert.Nil(t, detected)
 }
 
+func TestRequireAgent_NoAgent(t *testing.T) {
+	// Save and restore DefaultRegistry
+	orig := DefaultRegistry
+	defer func() { DefaultRegistry = orig }()
+
+	DefaultRegistry = NewRegistry()
+	// no agents registered — RequireAgent should return error message
+	msg := RequireAgent("ox session start")
+	assert.NotEmpty(t, msg, "RequireAgent should return error when no agent detected")
+	assert.Contains(t, msg, "ox session start")
+	assert.Contains(t, msg, "coding agent")
+}
+
+func TestRequireAgent_WithAgent(t *testing.T) {
+	orig := DefaultRegistry
+	defer func() { DefaultRegistry = orig }()
+
+	DefaultRegistry = NewRegistry()
+	DefaultRegistry.Register(&mockAgent{
+		agentType:    AgentTypeClaudeCode,
+		name:         "Claude Code",
+		detectResult: true,
+	})
+
+	msg := RequireAgent("ox session start")
+	assert.Empty(t, msg, "RequireAgent should return empty when agent is detected")
+}
+
+func TestRegister_Nil(t *testing.T) {
+	reg := NewRegistry()
+	err := reg.Register(nil)
+	assert.Error(t, err, "Register(nil) should error")
+}
+
 // mockAgent is a test implementation of Agent
 type mockAgent struct {
 	agentType    AgentType

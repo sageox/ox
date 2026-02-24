@@ -119,6 +119,9 @@ func (d *detector) detectByRole(ctx context.Context, role AgentRole) (Agent, err
 	return nil, nil
 }
 
+// DetectAll returns all detected agents and orchestrators regardless of role.
+// Unlike Detect (agents only) and DetectOrchestrator (orchestrators only),
+// this does not filter by role.
 func (d *detector) DetectAll(ctx context.Context) ([]Agent, error) {
 	env := d.getEnv()
 	var detected []Agent
