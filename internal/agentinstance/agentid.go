@@ -118,6 +118,33 @@ func isAlphanumeric(ch rune) bool {
 		(ch >= 'a' && ch <= 'z')
 }
 
+// ClassifyBadID returns a diagnostic message explaining why id is not a valid
+// agent ID. Returns empty string if id is valid or doesn't match a known
+// wrong-format pattern (caller should use generic error).
+func ClassifyBadID(id string) string {
+	if IsValidAgentID(id) {
+		return ""
+	}
+	if looksLikeUUID(id) {
+		return fmt.Sprintf("%q looks like a UUID, not an ox agent ID\nRun 'ox agent prime' to get your Ox<4-char> agent ID", id)
+	}
+	if strings.HasPrefix(id, "oxsid_") {
+		return fmt.Sprintf("%q is a server session ID, not an agent ID\nRun 'ox agent prime' to get your Ox<4-char> agent ID", id)
+	}
+	if len(id) >= 2 && strings.EqualFold(id[:2], "ox") {
+		return fmt.Sprintf("invalid agent ID format %q — expected Ox<4-char> (e.g., OxA1b2)\nRun 'ox agent prime' to get your agent ID", id)
+	}
+	return ""
+}
+
+// looksLikeUUID checks for standard 8-4-4-4-12 UUID structure.
+func looksLikeUUID(id string) bool {
+	if len(id) != 36 {
+		return false
+	}
+	return id[8] == '-' && id[13] == '-' && id[18] == '-' && id[23] == '-'
+}
+
 // ParseAgentID extracts the 4-char suffix from an agent ID.
 // Returns error if format is invalid.
 //

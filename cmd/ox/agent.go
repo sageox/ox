@@ -7,7 +7,6 @@ import (
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/daemon"
-	oxerrors "github.com/sageox/ox/internal/errors"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
 )
@@ -138,7 +137,10 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no agent ID: %q requires an agent ID (run 'ox agent prime' first)", firstArg)
 	}
 
-	// unknown argument
+	// unknown argument — check for common wrong-format patterns
+	if msg := agentinstance.ClassifyBadID(firstArg); msg != "" {
+		return fmt.Errorf("%s", msg)
+	}
 	return fmt.Errorf("unknown command or invalid agent_id: %s\nRun 'ox agent --help' for usage", firstArg)
 }
 
@@ -237,10 +239,6 @@ func resolveInstance(agentID string) (*agentinstance.Instance, error) {
 	inst, err := store.Get(agentID)
 	if err != nil {
 		return nil, fmt.Errorf("instance not found: %s\nRun 'ox agent prime' to create a new instance", agentID)
-	}
-
-	if inst.IsExpired() {
-		return nil, fmt.Errorf("%w %s\nRun 'ox agent prime' to create a new instance", oxerrors.ErrInvalidSession, agentID)
 	}
 
 	return inst, nil
