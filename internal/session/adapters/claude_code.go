@@ -108,9 +108,10 @@ func (a *ClaudeCodeAdapter) FindSessionFile(agentID string, since time.Time) (st
 		return "", fmt.Errorf("failed to get working directory: %w", err)
 	}
 
-	// convert cwd to Claude's project hash format: path separators become dashes
+	// convert cwd to Claude's project hash format: path separators and underscores become dashes
 	// e.g., /Users/ryan/Code/project -> -Users-ryan-Code-project
 	projectHash := strings.ReplaceAll(cwd, string(os.PathSeparator), "-")
+	projectHash = strings.ReplaceAll(projectHash, "_", "-")
 	projectDir := filepath.Join(projectsDir, projectHash)
 
 	// check if project-specific directory exists
