@@ -76,7 +76,7 @@ var agentContextualTips = map[string][]string{
 // Focus on progressive disclosure and context efficiency.
 var agentGeneralTips = []string{
 	"Use `ox doctor` to check project health and configuration",
-	"Sessions are recorded to the project ledger for team visibility",
+	"Sessions are recorded to the repo-specific ledger (not team context)",
 	"Run `ox status` to check daemon sync and project state",
 	"Use `ox config` to view and manage settings",
 }
@@ -86,7 +86,7 @@ var agentGeneralTips = []string{
 var primeUserTips = []string{
 	`Try asking %s: "Tell me recent major decisions from our SageOx team discussions"`,
 	"Sessions are auto-recorded and shared with your team. To disable: `ox config set session_recording disabled`",
-	"View your team's sessions and discussions in the browser with `ox view team`",
+	"View your team's knowledge base in the browser with `ox view team`",
 	"SageOx team context updates automatically — decisions from one session inform every future session",
 	"Record team discussions at sageox.ai to give all AI coworkers shared context",
 }

@@ -225,7 +225,8 @@ type agentPrimeOutput struct {
 	TokenEstimate   int                        `json:"token_estimate,omitempty"` // estimated token count
 	ContentLength   int                        `json:"content_length,omitempty"` // raw byte length
 	Session         *sessionStatus             `json:"session,omitempty"`        // session recording status
-	Ledger          *ledgerInfo                `json:"ledger,omitempty"`         // ledger discovery for team sessions
+	Ledger          *ledgerInfo                `json:"ledger,omitempty"`         // repo-specific archive of coding sessions (NOT team context)
+	Important       string                     `json:"important"`                // always-present disambiguation of knowledge sources
 	TeamContext       *teamContextInfo `json:"team_context,omitempty"`        // team context if configured
 	TeamContextStatus string           `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
 	UserNotification  string           `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user
@@ -544,6 +545,12 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		HooksInstalled:   hooksInstalled,
 	}
 
+	// always-present disambiguation of knowledge sources
+	output.Important = "SageOx has two SEPARATE knowledge sources. " +
+		"(1) TEAM CONTEXT: team-wide meetings, architecture decisions, and conventions shared across ALL repos. Read with: ox agent team-ctx. " +
+		"(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions for THIS repo only. Browse with: ox session list. " +
+		"These are unrelated — sessions are NOT discussions, and the ledger is NOT team context."
+
 	// set team context status hint for agents when team context hasn't synced yet
 	if output.TeamContext == nil {
 		// check if we have a team ID configured (team context expected but not yet synced)
@@ -563,9 +570,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			teamName = output.TeamContext.TeamID
 		}
 		if output.TeamContext.HasAgentContext {
-			notifParts = append(notifParts, fmt.Sprintf("Team context: %s (synced, discussions available)", teamName))
+			notifParts = append(notifParts, fmt.Sprintf("Team context: %s (synced — team-wide meetings/decisions)", teamName))
 		} else {
-			notifParts = append(notifParts, fmt.Sprintf("Team context: %s (synced)", teamName))
+			notifParts = append(notifParts, fmt.Sprintf("Team context: %s (synced — team-wide)", teamName))
 		}
 	} else if output.TeamContextStatus != "" {
 		notifParts = append(notifParts, "Team context: "+output.TeamContextStatus)
@@ -747,7 +754,7 @@ func loadTeamInstructions(teamCtxPath, teamName string) *TeamInstructions {
 func buildCapturePriorGuidance(agentID string) *capturePriorGuidance {
 	return &capturePriorGuidance{
 		Action:      "capture_prior_history",
-		Description: "To capture planning discussion from before session start",
+		Description: "To capture prior conversation from before session recording started",
 		Instructions: []string{
 			"Reconstruct your conversation history as JSONL",
 			"Include: seq (number), type (user|assistant), content, ts (ISO8601 if known)",
@@ -771,7 +778,7 @@ func buildGuidance(teamCtx *teamContextInfo, ledger *ledgerInfo) *agentGuidance 
 	// team discussions — only when team context exists
 	if teamCtx != nil {
 		cmds = append(cmds, intentCommand{
-			Intent:  "team discussions, architecture decisions, conventions, what to implement next",
+			Intent:  "team context (team-wide, all repos): recorded meetings, architecture decisions, conventions",
 			Command: "ox agent team-ctx",
 		})
 	}
@@ -791,7 +798,7 @@ func buildGuidance(teamCtx *teamContextInfo, ledger *ledgerInfo) *agentGuidance 
 	// session history — only when ledger is provisioned
 	if ledger != nil && ledger.Exists {
 		cmds = append(cmds, intentCommand{
-			Intent:  "session history, prior sessions, what was worked on before",
+			Intent:  "session history (this repo only): prior AI coworker coding sessions for this repo",
 			Command: "ox session list",
 		})
 	}
@@ -1192,6 +1199,15 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 		}
 	}
 
+	// knowledge sources disambiguation — always shown
+	fmt.Fprintln(cmd.OutOrStdout())
+	fmt.Fprintln(cmd.OutOrStdout(), "## Knowledge Sources")
+	fmt.Fprintln(cmd.OutOrStdout())
+	fmt.Fprintln(cmd.OutOrStdout(), "SageOx has two SEPARATE knowledge sources:")
+	fmt.Fprintln(cmd.OutOrStdout(), "  1. TEAM CONTEXT — team-wide meetings, decisions, conventions (all repos). Command: ox agent team-ctx")
+	fmt.Fprintln(cmd.OutOrStdout(), "  2. SESSIONS/LEDGER — repo-specific coding session archive (this repo only). Command: ox session list")
+	fmt.Fprintln(cmd.OutOrStdout(), "These are unrelated. Sessions are NOT discussions. The ledger is NOT team context.")
+
 	// ledger / repo session history section
 	if output.Ledger != nil {
 		fmt.Fprintln(cmd.OutOrStdout())
@@ -1317,12 +1333,12 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 			}
 		}
 
-		// always emit team context guidance — discussions may sync after prime runs
+		// always emit team context guidance — may sync after prime runs
 		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "**Team context available** — recorded team meetings and discussions")
-		fmt.Fprintln(cmd.OutOrStdout(), "(architecture, conventions, product direction).")
+		fmt.Fprintln(cmd.OutOrStdout(), "**Team context available** — team-wide recorded meetings and decisions")
+		fmt.Fprintln(cmd.OutOrStdout(), "(architecture, conventions, product direction — shared across all repos, NOT repo session history).")
 		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "  Read SageOx team discussions:  ox agent team-ctx")
+		fmt.Fprintln(cmd.OutOrStdout(), "  Read team context:  ox agent team-ctx")
 		fmt.Fprintln(cmd.OutOrStdout())
 		if !output.TeamContext.HasAgentContext {
 			fmt.Fprintln(cmd.OutOrStdout(), "Not yet synced — may appear shortly as the daemon syncs in the background.")
@@ -1334,7 +1350,7 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 		fmt.Fprintln(cmd.OutOrStdout())
 		fmt.Fprintln(cmd.OutOrStdout(), "## Session Capture")
 		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "To capture prior discussion, generate JSONL history and pipe to:")
+		fmt.Fprintln(cmd.OutOrStdout(), "To capture prior conversation from before recording started, generate JSONL and pipe to:")
 		fmt.Fprintf(cmd.OutOrStdout(), "  ox agent %s session capture-prior\n", output.AgentID)
 		fmt.Fprintln(cmd.OutOrStdout())
 		fmt.Fprintln(cmd.OutOrStdout(), "Format: {\"seq\":N,\"type\":\"user|assistant\",\"content\":\"...\",\"ts\":\"ISO8601\",\"source\":\"planning_history\"}")
