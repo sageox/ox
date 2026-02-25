@@ -126,6 +126,57 @@ func TestIsSafeForGitOps(t *testing.T) {
 	})
 }
 
+func TestStripLFSConfig(t *testing.T) {
+	t.Run("removes lfs section", func(t *testing.T) {
+		repo := t.TempDir()
+		gitDir := filepath.Join(repo, ".git")
+		require.NoError(t, os.MkdirAll(gitDir, 0755))
+
+		config := `[core]
+	repositoryformatversion = 0
+	bare = false
+[lfs]
+	repositoryformatversion = 0
+[remote "origin"]
+	url = https://example.com/repo.git
+`
+		require.NoError(t, os.WriteFile(filepath.Join(gitDir, "config"), []byte(config), 0644))
+
+		StripLFSConfig(repo)
+
+		data, err := os.ReadFile(filepath.Join(gitDir, "config"))
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), "[lfs]")
+		assert.NotContains(t, string(data), "lfs")
+		assert.Contains(t, string(data), "[core]")
+		assert.Contains(t, string(data), "[remote \"origin\"]")
+	})
+
+	t.Run("no-op without lfs section", func(t *testing.T) {
+		repo := t.TempDir()
+		gitDir := filepath.Join(repo, ".git")
+		require.NoError(t, os.MkdirAll(gitDir, 0755))
+
+		config := `[core]
+	repositoryformatversion = 0
+[remote "origin"]
+	url = https://example.com/repo.git
+`
+		require.NoError(t, os.WriteFile(filepath.Join(gitDir, "config"), []byte(config), 0644))
+
+		StripLFSConfig(repo)
+
+		data, err := os.ReadFile(filepath.Join(gitDir, "config"))
+		require.NoError(t, err)
+		assert.Equal(t, config, string(data))
+	})
+
+	t.Run("no-op without .git dir", func(t *testing.T) {
+		repo := t.TempDir()
+		StripLFSConfig(repo) // should not panic
+	})
+}
+
 func TestFetchHeadAge(t *testing.T) {
 	t.Run("no FETCH_HEAD", func(t *testing.T) {
 		repo := t.TempDir()

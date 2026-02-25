@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/logger"
 )
 
@@ -150,6 +151,10 @@ func cloneRepo(ctx context.Context, repoURL, path string, creds *GitCredentials,
 		}
 		return fmt.Errorf("%w: %w\n  debug: git %s", ErrCloneFailed, err, strings.Join(safeArgs, " "))
 	}
+
+	// strip lfs config that git-lfs may have injected during clone
+	// (prevents HTTP 403 on push when filter.lfs.required=true is global)
+	gitutil.StripLFSConfig(path)
 
 	logger.Info("repository cloned", "path", path)
 	return nil

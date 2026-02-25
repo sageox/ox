@@ -296,6 +296,10 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 		return fmt.Errorf("ledger blocked: %w", err)
 	}
 
+	// pre-flight: strip lfs.repositoryformatversion if set by git-lfs
+	// (causes HTTP 403 on push when filter.lfs.required=true is global)
+	gitutil.StripLFSConfig(ledgerPath)
+
 	// ensure remote has current credentials before pushing
 	ep := endpoint.GetForProject(findGitRoot())
 	if ep != "" {

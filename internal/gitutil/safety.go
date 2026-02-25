@@ -64,6 +64,51 @@ func IsSafeForGitOps(repoPath string) error {
 	return nil
 }
 
+// StripLFSConfig removes lfs.repositoryformatversion from local git config.
+// This config is set by git-lfs when filter.lfs.required=true is global, but
+// it causes HTTP 403 on push to GitLab when the server-side ALB doesn't
+// expect LFS-aware clients. Safe to call on any repo — no-op if not set.
+func StripLFSConfig(repoPath string) {
+	configPath := filepath.Join(repoPath, ".git", "config")
+	if _, err := os.Stat(configPath); err != nil {
+		return
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return
+	}
+
+	content := string(data)
+	if !strings.Contains(content, "[lfs]") {
+		return
+	}
+
+	// remove the [lfs] section and its contents
+	var lines []string
+	inLFS := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "[lfs]" {
+			inLFS = true
+			continue
+		}
+		if inLFS {
+			if strings.HasPrefix(trimmed, "[") {
+				inLFS = false
+			} else {
+				continue
+			}
+		}
+		lines = append(lines, line)
+	}
+
+	cleaned := strings.Join(lines, "\n")
+	if cleaned != content {
+		_ = os.WriteFile(configPath, []byte(cleaned), 0644)
+	}
+}
+
 // FetchHeadAge returns how long ago FETCH_HEAD was last modified.
 // Returns (0, false) if FETCH_HEAD doesn't exist or can't be read.
 func FetchHeadAge(repoPath string) (time.Duration, bool) {
