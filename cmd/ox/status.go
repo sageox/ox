@@ -1546,10 +1546,11 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			cli.PrintActionHint("ox init", "Initialize project for AI agent context", 2)
 		}
 
-		// fetch daemon status once, pass to both git repos and daemon sync sections
-		var daemonStatus *daemon.StatusData
-		var syncHistory []daemon.SyncEvent
+		// skip ledger/daemon sections when not in a git repo — nothing to show
 		if gitRoot != "" {
+			// fetch daemon status once, pass to both git repos and daemon sync sections
+			var daemonStatus *daemon.StatusData
+			var syncHistory []daemon.SyncEvent
 			client := daemon.TryConnectOrDirect()
 			if client != nil {
 				if ds, err := client.Status(); err == nil {
@@ -1557,16 +1558,12 @@ daemon health, and a tree view of all SageOx directory locations.`,
 					syncHistory, _ = client.SyncHistory()
 				}
 			}
-		}
 
-		// Ledger and Team Context sections - shows repos from cloud API
-		// Only displays repos that are actually provisioned
-		fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus))
+			// Ledger and Team Context sections - shows repos from cloud API
+			// Only displays repos that are actually provisioned
+			fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus))
 
-		// show daemon sync section - always show so user knows daemon status
-		if gitRoot == "" {
-			fmt.Print(renderDaemonSyncSection(nil, nil, true, projectInitialized))
-		} else {
+			// show daemon sync section
 			fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, false, projectInitialized))
 		}
 

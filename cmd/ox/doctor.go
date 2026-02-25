@@ -166,6 +166,25 @@ common issues, or --fix-slug to target specific checks.`,
 		// check if project is initialized (only relevant if in a git repo)
 		projectInitialized := gitRoot != "" && config.IsInitialized(gitRoot)
 
+		// short-circuit: not in a git repo
+		if gitRoot == "" {
+			w := cmd.OutOrStdout()
+			renderDoctorHeader(w, false)
+
+			var steps []string
+			steps = append(steps,
+				fmt.Sprintf("%s  Not inside a git repository",
+					ui.FailStyle.Render(ui.TimelineDot)),
+				fmt.Sprintf("%s  Run %s from a git repo to diagnose project issues",
+					ui.MutedStyle.Render(ui.TimelineBar),
+					cli.StyleCommand.Render("ox doctor")),
+			)
+			content := strings.Join(steps, "\n")
+			fmt.Fprintln(w, ui.RenderBox("No Git Repository", content, ui.BoxWarning))
+			fmt.Fprintln(w)
+			return nil
+		}
+
 		// short-circuit with setup guidance if not ready
 		if !authenticated || !projectInitialized {
 			w := cmd.OutOrStdout()
@@ -190,13 +209,7 @@ common issues, or --fix-slug to target specific checks.`,
 				)
 			}
 
-			if gitRoot == "" {
-				steps = append(steps,
-					fmt.Sprintf("%s  Step 2: Run %s inside a git repo",
-						ui.MutedStyle.Render(ui.TimelineCircle),
-						cli.StyleCommand.Render("ox init")),
-				)
-			} else if !projectInitialized {
+			if !projectInitialized {
 				steps = append(steps,
 					fmt.Sprintf("%s  Step 2: Run %s to initialize this project",
 						ui.MutedStyle.Render(ui.TimelineCircle),
