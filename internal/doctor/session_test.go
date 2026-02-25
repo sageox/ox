@@ -93,11 +93,13 @@ func TestSessionSyncCheck(t *testing.T) {
 	ctx := context.Background()
 	result := check.Run(ctx)
 
-	// when gitRoot has no config, behavior depends on CWD fallback:
-	// - skip if no ledger found at all
-	// - warn if CWD's project ledger exists but is not synced
-	assert.Contains(t, []Status{StatusSkip, StatusWarn}, result.Status,
-		"expected skip or warn, got: %v", result.Status)
+	// when gitRoot has no project config, checkLedgerHealth falls back to
+	// ledger.DefaultPath() (CWD-based). The result depends on the environment:
+	// - skip: no ledger found at all
+	// - warn: CWD ledger exists but is not synced with remote
+	// - pass: CWD ledger exists and is synced with remote
+	assert.Contains(t, []Status{StatusSkip, StatusWarn, StatusPass}, result.Status,
+		"expected skip, warn, or pass, got: %v", result.Status)
 }
 
 func TestSessionCheck(t *testing.T) {

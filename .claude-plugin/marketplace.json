@@ -12,7 +12,7 @@
       "name": "ox",
       "source": "./claude-plugin",
       "description": "Team context, session recording, and AI coworker coordination for collaborative development",
-      "version": "0.17.0"
+      "version": "0.2.0"
     }
   ]
 }

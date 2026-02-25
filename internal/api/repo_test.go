@@ -175,7 +175,7 @@ func TestGetDoctorIssues_Success_ReturnsIssues(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// verify request
 		assert.Equal(t, "GET", r.Method)
-		assert.True(t, strings.Contains(r.URL.Path, "/api/v1/repo/") && strings.HasSuffix(r.URL.Path, "/doctor"))
+		assert.True(t, strings.Contains(r.URL.Path, "/api/v1/public/repos/") && strings.HasSuffix(r.URL.Path, "/doctor"))
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{
