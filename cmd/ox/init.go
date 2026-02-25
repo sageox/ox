@@ -29,6 +29,7 @@ import (
 
 var initQuiet bool
 var initTeamFlag string
+var initForce bool
 
 // LegacyOxPrimeLine is the old multi-line block format.
 // Kept temporarily for upgrade detection during migration to single-line format.
@@ -130,6 +131,7 @@ Use --team to specify a team ID directly, or let ox init prompt you.`,
 func init() {
 	initCmd.Flags().BoolVarP(&initQuiet, "quiet", "q", false, "suppress non-essential output (default: false)")
 	initCmd.Flags().StringVar(&initTeamFlag, "team", "", "team ID to associate this repo with")
+	initCmd.Flags().BoolVar(&initForce, "force", false, "initialize even if .sageox/ exists on remote")
 }
 
 // initialCommitReadmeContent is the README placed in .sageox/ when creating
@@ -199,6 +201,92 @@ func ensureInitialCommit(gitRoot string) error {
 	return nil
 }
 
+// treeHasDir checks whether a git tree-ish contains a directory named dirName.
+// git ls-tree exits 0 even when the path is absent (it just produces no output),
+// so we must inspect the output rather than the exit code.
+func treeHasDir(gitRoot, treeish, dirName string) bool {
+	cmd := exec.Command("git", "-C", gitRoot, "ls-tree", "-d", treeish, dirName)
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) > 0
+}
+
+// checkRemoteSageoxExists checks if .sageox/ already exists on the remote default branch.
+// Returns (found, stale, error):
+//   - found=true: .sageox/ confirmed on remote
+//   - stale=true: local tracking refs are behind remote, can't verify
+//   - error: on any failure (no remote, etc.) -- caller should silently continue
+func checkRemoteSageoxExists(gitRoot string) (found bool, stale bool, err error) {
+	// tier 1: check local tracking refs (free, no network)
+	for _, ref := range []string{"origin/main", "origin/master"} {
+		if treeHasDir(gitRoot, ref, ".sageox") {
+			return true, false, nil
+		}
+	}
+
+	// tier 2: use git ls-remote to check if local refs are stale
+	cmd := exec.Command("git", "-C", gitRoot, "ls-remote", "--heads", "origin")
+	out, err := cmd.Output()
+	if err != nil {
+		return false, false, fmt.Errorf("ls-remote failed: %w", err)
+	}
+
+	// parse ls-remote output: "<sha>\trefs/heads/<branch>"
+	remoteBranches := make(map[string]string) // branch name -> SHA
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		sha := parts[0]
+		refPath := parts[1]
+		branch := strings.TrimPrefix(refPath, "refs/heads/")
+		remoteBranches[branch] = sha
+	}
+
+	// check main and master branches
+	for _, branch := range []string{"main", "master"} {
+		remoteSHA, ok := remoteBranches[branch]
+		if !ok {
+			continue
+		}
+
+		// get local tracking ref SHA
+		localRef := "origin/" + branch
+		localCmd := exec.Command("git", "-C", gitRoot, "rev-parse", localRef)
+		localOut, localErr := localCmd.Output()
+		if localErr != nil {
+			// no local tracking ref at all -- we're behind
+			return false, true, nil
+		}
+		localSHA := strings.TrimSpace(string(localOut))
+
+		if localSHA == remoteSHA {
+			// local is up to date with remote; tier 1 already checked and found nothing
+			continue
+		}
+
+		// local tracking ref differs from remote -- check if we have the remote commit locally
+		catCmd := exec.Command("git", "-C", gitRoot, "cat-file", "-e", remoteSHA)
+		if catCmd.Run() != nil {
+			// we don't have the remote commit locally; user is behind origin
+			return false, true, nil
+		}
+
+		// we have the commit object locally; check if it contains .sageox/
+		if treeHasDir(gitRoot, remoteSHA, ".sageox") {
+			return true, false, nil
+		}
+	}
+
+	return false, false, nil
+}
+
 func runInit() error {
 	// warn if using non-default endpoint (subtle, informational)
 	if endpoint.Get() != endpoint.Default {
@@ -236,6 +324,31 @@ func runInit() error {
 	// add remote URL hashes to fingerprint
 	if hashErr := fingerprint.WithRemoteHashes(); hashErr != nil {
 		cli.PrintWarning(fmt.Sprintf("Could not add remote hashes: %v", hashErr))
+	}
+
+	// check if remote already has .sageox/ (prevents duplicate init race condition)
+	if !initForce {
+		found, stale, err := checkRemoteSageoxExists(gitRoot)
+		if err != nil {
+			slog.Debug("remote sageox check skipped", "error", err)
+		} else if found {
+			fmt.Println()
+			cli.PrintWarning("This repo is already initialized on the remote")
+			fmt.Println()
+			fmt.Println(cli.StyleDim.Render("A teammate has already run 'ox init'. Pull their changes first:"))
+			fmt.Printf("  %s\n", cli.StyleCommand.Render("git pull"))
+			fmt.Println()
+			fmt.Printf("To initialize with a new team anyway: %s\n", cli.StyleCommand.Render("ox init --force"))
+			return cli.ErrSilent
+		} else if stale {
+			fmt.Println()
+			cli.PrintWarning("Your branch may be behind the remote")
+			fmt.Println()
+			fmt.Println(cli.StyleDim.Render("There may be new changes (including initialization) on the remote."))
+			fmt.Println(cli.StyleDim.Render("Consider pulling before running 'ox init':"))
+			fmt.Printf("  %s\n", cli.StyleCommand.Render("git pull"))
+			fmt.Println()
+		}
 	}
 
 	// === ENDPOINT SELECTION ===

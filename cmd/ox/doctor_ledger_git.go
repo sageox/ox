@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
@@ -20,6 +23,7 @@ const (
 	CheckSlugLedgerBranchStatus    = "ledger-branch-status"
 	CheckSlugLedgerCleanWorkdir    = "ledger-clean-workdir"
 	CheckSlugLedgerRemoteURLMatch  = "ledger-remote-url-match"
+	CheckSlugLedgerURLAPIMatch     = "ledger-url-api-match"
 )
 
 func init() {
@@ -61,6 +65,15 @@ func init() {
 		FixLevel:    FixLevelAuto,
 		Description: "Validates ledger remote credentials match current login",
 		Run:         func(fix bool) checkResult { return checkLedgerRemoteURLMatch(fix) },
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugLedgerURLAPIMatch,
+		Name:        "Ledger remote URL vs API",
+		Category:    "Ledger Git Health",
+		FixLevel:    FixLevelConfirm,
+		Description: "Verifies local ledger remote URL matches the API-authoritative URL",
+		Run:         checkLedgerURLAPIMatch,
 	})
 }
 
@@ -512,4 +525,121 @@ func fixLedgerStalePAT(ledgerPath, ep string) checkResult {
 	}
 
 	return PassedCheck("Ledger remote URL match", "credentials updated")
+}
+
+// stripURLCredentials removes userinfo (credentials) from a URL for safe comparison.
+// Returns the original string if parsing fails.
+func stripURLCredentials(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	parsed.User = nil
+	return parsed.String()
+}
+
+// checkLedgerURLAPIMatch compares the local ledger's git remote URL path against
+// the authoritative URL from the API. This catches cases where the ledger was
+// cloned with an old or incorrect URL that still authenticates but points to the
+// wrong repository.
+func checkLedgerURLAPIMatch(fix bool) checkResult {
+	const checkName = "Ledger remote URL vs API"
+
+	ledgerPath := getLedgerPath()
+	if ledgerPath == "" {
+		return SkippedCheck(checkName, "no ledger found", "")
+	}
+
+	if !isGitRepo(ledgerPath) {
+		return SkippedCheck(checkName, "ledger not a git repo", "")
+	}
+
+	// get local remote URL
+	localCmd := exec.Command("git", "-C", ledgerPath, "remote", "get-url", "origin")
+	localOutput, err := localCmd.Output()
+	if err != nil {
+		return SkippedCheck(checkName, "no origin remote", "")
+	}
+	localURL := strings.TrimSpace(string(localOutput))
+
+	// get repo_id from project config
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck(checkName, "not in git repo", "")
+	}
+
+	cfg, err := config.LoadProjectConfig(gitRoot)
+	if err != nil || cfg.RepoID == "" {
+		return SkippedCheck(checkName, "no repo_id configured", "")
+	}
+
+	// create API client with auth
+	projectEndpoint := endpoint.GetForProject(gitRoot)
+	client := api.NewRepoClientForProject(gitRoot)
+	if token, tokenErr := auth.GetTokenForEndpoint(projectEndpoint); tokenErr == nil && token != nil && token.AccessToken != "" {
+		client.WithAuthToken(token.AccessToken)
+	}
+
+	// call API for authoritative ledger URL
+	ledgerStatus, apiErr := client.GetLedgerStatus(cfg.RepoID)
+	if apiErr != nil {
+		// don't fail doctor for network issues
+		return SkippedCheck(checkName, "API unavailable", "")
+	}
+	if ledgerStatus == nil || ledgerStatus.RepoURL == "" {
+		return SkippedCheck(checkName, "no API URL available", "")
+	}
+
+	// strip credentials from both URLs for comparison
+	localStripped := stripURLCredentials(localURL)
+	apiStripped := stripURLCredentials(ledgerStatus.RepoURL)
+
+	if localStripped == apiStripped {
+		return PassedCheck(checkName, "URLs match")
+	}
+
+	// URLs differ
+	if !fix {
+		return FailedCheck(checkName, "URL mismatch",
+			fmt.Sprintf("Local:    %s\n       Expected: %s\n       Run `ox doctor --fix` to update",
+				localStripped, apiStripped))
+	}
+
+	// fix: build correct URL with current PAT embedded
+	ep := endpoint.GetForProject(gitRoot)
+	creds, credErr := gitserver.LoadCredentialsForEndpoint(ep)
+	if credErr != nil || creds == nil || creds.Token == "" {
+		return WarningCheck(checkName, "cannot fix (no credentials)",
+			"Run `ox login` first, then `ox doctor --fix`")
+	}
+
+	parsed, parseErr := url.Parse(ledgerStatus.RepoURL)
+	if parseErr != nil {
+		return WarningCheck(checkName, "cannot fix (invalid API URL)", parseErr.Error())
+	}
+	parsed.User = url.UserPassword("oauth2", creds.Token)
+	correctURL := parsed.String()
+
+	// update the remote URL
+	setCmd := exec.Command("git", "-C", ledgerPath, "remote", "set-url", "origin", correctURL)
+	if output, setErr := setCmd.CombinedOutput(); setErr != nil {
+		// sanitize output — git may echo the URL with embedded credentials
+		safeOutput := stripURLCredentials(strings.TrimSpace(string(output)))
+		return FailedCheck(checkName, "set-url failed",
+			fmt.Sprintf("git remote set-url error: %s", safeOutput))
+	}
+
+	// verify connectivity with a timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	verifyCmd := exec.CommandContext(ctx, "git", "-C", ledgerPath, "ls-remote", "--heads", "origin")
+	if verifyErr := verifyCmd.Run(); verifyErr != nil {
+		if ctx.Err() != nil {
+			return WarningCheck(checkName, "URL updated (verification timed out)",
+				"Remote URL was updated but connectivity check timed out after 5s")
+		}
+		return WarningCheck(checkName, "URL updated but verification failed",
+			"Remote URL was updated but could not verify connectivity")
+	}
+	return PassedCheck(checkName, "URL updated and verified")
 }
