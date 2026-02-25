@@ -21,6 +21,7 @@ import (
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/tips"
+	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -32,6 +33,13 @@ type statusJSONOutput struct {
 	Ledger       *statusLedgerJSON       `json:"ledger,omitempty"`
 	TeamContexts []statusTeamContextJSON `json:"team_contexts,omitempty"`
 	Daemon       *statusDaemonJSON       `json:"daemon,omitempty"`
+	Version      *statusVersionJSON      `json:"version,omitempty"`
+}
+
+type statusVersionJSON struct {
+	Current         string `json:"current"`
+	Latest          string `json:"latest,omitempty"`
+	UpdateAvailable bool   `json:"update_available"`
 }
 
 type statusAuthJSON struct {
@@ -1562,6 +1570,14 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, false, projectInitialized))
 		}
 
+		// show version update notice if available
+		if vResult := checkVersionFromCache(); vResult != nil {
+			fmt.Printf("\n%s  %s\n",
+				statusWarningStyle.Render("Update available"),
+				fmt.Sprintf("v%s → v%s — brew upgrade sageox", vResult.CurrentVersion, vResult.LatestVersion),
+			)
+		}
+
 		// show contextual tip
 		userCfg, _ := config.LoadUserConfig("")
 		tips.MaybeShow("status", tips.AlwaysShow, cfg.Quiet, !userCfg.AreTipsEnabled(), cfg.JSON)
@@ -1667,6 +1683,15 @@ func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, 
 			}
 		}
 	}
+
+	// version section
+	currentVersion := strings.TrimPrefix(version.Version, "v")
+	vJSON := &statusVersionJSON{Current: currentVersion}
+	if vResult := checkVersionFromCache(); vResult != nil {
+		vJSON.Latest = vResult.LatestVersion
+		vJSON.UpdateAvailable = true
+	}
+	output.Version = vJSON
 
 	return output
 }
