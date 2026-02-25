@@ -114,8 +114,8 @@ func TestDisplayDoctorResults_AllPassed(t *testing.T) {
 
 	output := buf.String()
 	assert.Contains(t, output, "4 passed", "output missing correct pass count")
-	assert.NotContains(t, output, "warning", "zero warnings should not appear in summary")
-	assert.NotContains(t, output, "failed", "zero failures should not appear in summary")
+	assert.NotContains(t, output, " 0 warning", "zero warnings should not appear in summary")
+	assert.NotContains(t, output, " 0 failed", "zero failures should not appear in summary")
 }
 
 // TestDisplayPrioritySummary_HealthyMessage verifies the "All checks passed"
@@ -254,7 +254,7 @@ func TestDisplayDoctorResults_OnlyWarnings(t *testing.T) {
 	output := buf.String()
 	assert.Contains(t, output, "1 passed", "output missing correct pass count")
 	assert.Contains(t, output, "2 warning", "output missing correct warning count")
-	assert.NotContains(t, output, "failed", "zero failures should not appear in summary")
+	assert.NotContains(t, output, " 0 failed", "zero failures should not appear in summary")
 }
 
 // TestDisplayDoctorResults_WithChildren properly handles nested child checks
@@ -395,7 +395,7 @@ func TestDisplayDoctorResults_WithChildren(t *testing.T) {
 			if tt.wantFail != "" {
 				assert.Contains(t, output, tt.wantFail, "output missing fail count")
 			} else {
-				assert.NotContains(t, output, "failed", "zero failures should not appear in summary")
+				assert.NotContains(t, output, " 0 failed", "zero failures should not appear in summary")
 			}
 		})
 	}

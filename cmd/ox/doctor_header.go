@@ -10,7 +10,7 @@ import (
 )
 
 // doctorASCIILines contains the 4-line SageOx ASCII wordmark.
-// "Sage" occupies runes 0-12, "Ox" occupies runes 13+.
+// "Sage" occupies runes 0-11, "Ox" occupies runes 12+.
 var doctorASCIILines = []string{
 	"▞▀▖         ▞▀▖   ",
 	"▚▄ ▝▀▖▞▀▌▞▀▖▌ ▌▚▗▘",

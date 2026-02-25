@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
@@ -1113,12 +1114,14 @@ func (c *SessionPushCheck) Run(ctx context.Context) CheckResult {
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if err := c.pushToRemote(ledgerPath); err != nil {
 			lastErr = err
-			// don't retry auth errors
+			// classify by stderr content embedded before the colon in the wrapped error
 			errStr := err.Error()
-			if strings.Contains(errStr, "Permission denied") ||
-				strings.Contains(errStr, "authentication") ||
+			isAuthErr := strings.Contains(errStr, "Permission denied") ||
+				strings.Contains(errStr, "authentication failed") ||
 				strings.Contains(errStr, "could not read Username") ||
-				strings.Contains(errStr, "401") {
+				strings.Contains(errStr, "HTTP 401") ||
+				strings.Contains(errStr, "fatal: 401")
+			if isAuthErr {
 				return CheckResult{
 					Name:    c.Name(),
 					Status:  StatusFail,
@@ -1127,13 +1130,19 @@ func (c *SessionPushCheck) Run(ctx context.Context) CheckResult {
 				}
 			}
 			// 403 = server rejected — could be permissions or stale token, don't retry
-			if strings.Contains(errStr, "403") {
+			isForbidden := strings.Contains(errStr, "HTTP 403") ||
+				strings.Contains(errStr, "fatal: 403")
+			if isForbidden {
 				return CheckResult{
 					Name:    c.Name(),
 					Status:  StatusFail,
 					Message: "push rejected (HTTP 403)",
 					Fix:     "Server rejected push - check remote permissions or run `ox login` to refresh token",
 				}
+			}
+			// backoff before retry
+			if attempt < maxRetries {
+				time.Sleep(time.Duration(attempt) * time.Second)
 			}
 			continue
 		}

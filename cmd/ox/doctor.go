@@ -1272,6 +1272,9 @@ func renderAgentRequiredBox(checks []checkResult) string {
 	for _, check := range checks {
 		icon, style := checkIconAndStyle(check)
 		lines = append(lines, style.Render(icon)+" "+check.name+messageAnnotation(check.message))
+		if check.detail != "" {
+			lines = append(lines, "  "+ui.MutedStyle.Render(cli.FormatTipText(check.detail)))
+		}
 	}
 
 	body := strings.Join(lines, "\n")

@@ -261,9 +261,11 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 	output, err := pullCmd.CombinedOutput()
 	if err != nil {
 		errStr := strings.TrimSpace(string(output))
+		// abort rebase to leave ledger in a clean state
+		_ = exec.Command("git", "-C", ledgerPath, "rebase", "--abort").Run()
 		return FailedCheck("Ledger branch status",
-			"pull failed",
-			fmt.Sprintf("git pull --rebase error: %s", errStr))
+			"pull --rebase failed (aborted)",
+			fmt.Sprintf("Conflict during rebase (aborted to restore clean state): %s", errStr))
 	}
 	return PassedCheck("Ledger branch status",
 		fmt.Sprintf("pulled %d commit(s)", behindCount))
@@ -276,9 +278,11 @@ func fixLedgerBranchDiverged(ledgerPath string, aheadCount, behindCount int) che
 	pullOutput, err := pullCmd.CombinedOutput()
 	if err != nil {
 		errStr := strings.TrimSpace(string(pullOutput))
+		// abort rebase to leave ledger in a clean state
+		_ = exec.Command("git", "-C", ledgerPath, "rebase", "--abort").Run()
 		return FailedCheck("Ledger branch status",
-			"rebase failed during reconcile",
-			fmt.Sprintf("git pull --rebase error: %s", errStr))
+			"rebase failed during reconcile (aborted)",
+			fmt.Sprintf("Conflict during rebase (aborted to restore clean state): %s", errStr))
 	}
 
 	// then push
