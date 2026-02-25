@@ -214,6 +214,64 @@ func TestNewSessionMeta_RoundTrip(t *testing.T) {
 	assert.Equal(t, "sha256:abc123", got.Files["raw.jsonl"].OID)
 }
 
+func TestUpdateMetaSummary(t *testing.T) {
+	tests := []struct {
+		name        string
+		setup       func(t *testing.T, dir string)
+		summary     string
+		wantErr     bool
+		wantErrMsg  string
+		wantSummary string
+		wantSession string
+		wantUser    string
+	}{
+		{
+			name: "updates summary and preserves other fields",
+			setup: func(t *testing.T, dir string) {
+				t.Helper()
+				meta := NewSessionMeta("test-session", "user@test.com", "Ox1234", "claude-code",
+					time.Date(2026, 1, 15, 10, 30, 0, 0, time.UTC)).
+					Summary("/ox-session-start\n\n5 user messages, 10 assistant responses").
+					Build()
+				require.NoError(t, WriteSessionMeta(dir, meta))
+			},
+			summary:     "Implemented auth system with OAuth2 flow",
+			wantSummary: "Implemented auth system with OAuth2 flow",
+			wantSession: "test-session",
+			wantUser:    "user@test.com",
+		},
+		{
+			name:       "returns error when meta.json missing",
+			setup:      func(t *testing.T, dir string) { t.Helper() },
+			summary:    "some summary",
+			wantErr:    true,
+			wantErrMsg: "meta.json not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "session")
+			require.NoError(t, os.MkdirAll(dir, 0755))
+			tt.setup(t, dir)
+
+			err := UpdateMetaSummary(dir, tt.summary)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErrMsg)
+				return
+			}
+			require.NoError(t, err)
+
+			got, err := ReadSessionMeta(dir)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantSummary, got.Summary)
+			assert.Equal(t, tt.wantSession, got.SessionName)
+			assert.Equal(t, tt.wantUser, got.Username)
+		})
+	}
+}
+
 func TestFileRef_BareOID(t *testing.T) {
 	tests := []struct {
 		oid      string

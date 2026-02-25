@@ -9,6 +9,19 @@ import (
 	"strings"
 )
 
+func init() {
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugHookCompleteness,
+		Name:        "Hook completeness",
+		Category:    "Integration",
+		FixLevel:    FixLevelSuggested,
+		Description: "Verifies project hooks have ox prime for all required events",
+		Run: func(fix bool) checkResult {
+			return checkProjectHookCompleteness(fix)
+		},
+	})
+}
+
 // checkSessionStartHookBug warns about Claude Code bug #10373 where SessionStart
 // hook output is discarded for new sessions.
 //
@@ -382,4 +395,53 @@ func checkProjectHookCommands() checkResult {
 	return WarningCheck("Project hook commands",
 		fmt.Sprintf("%d invalid command(s)", len(invalidCommands)),
 		detail)
+}
+
+// checkProjectHookCompleteness verifies that project-level hooks have ox prime
+// hooks for ALL required events (SessionStart and PreCompact). Detects partial
+// installations and can auto-repair by re-running InstallProjectClaudeHooks.
+func checkProjectHookCompleteness(fix bool) checkResult {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck("Hook completeness", "not in git repo", "")
+	}
+
+	settings, err := readProjectClaudeSettings(gitRoot)
+	if err != nil {
+		return SkippedCheck("Hook completeness", "no project settings", "")
+	}
+
+	if len(settings.Hooks) == 0 {
+		return SkippedCheck("Hook completeness", "no hooks configured", "")
+	}
+
+	// check each required event has ox prime hooks
+	var missing []string
+	for _, event := range []string{claudeSessionStart, claudePreCompact} {
+		found := false
+		for _, entry := range settings.Hooks[event] {
+			if hasOxPrimeHook(entry) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			missing = append(missing, event)
+		}
+	}
+
+	if len(missing) == 0 {
+		return PassedCheck("Hook completeness", "all events configured")
+	}
+
+	if fix {
+		if err := InstallProjectClaudeHooks(gitRoot); err != nil {
+			return FailedCheck("Hook completeness", "repair failed", err.Error())
+		}
+		return PassedCheck("Hook completeness", "repaired (re-installed hooks)")
+	}
+
+	return FailedCheck("Hook completeness",
+		fmt.Sprintf("missing hooks for: %s", strings.Join(missing, ", ")),
+		"Run `ox doctor --fix` to repair")
 }

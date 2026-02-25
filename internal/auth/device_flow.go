@@ -66,14 +66,13 @@ func RequestDeviceCode() (*DeviceCodeResponse, error) {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", endpointURL, strings.NewReader(string(jsonBody)))
+	req, err := useragent.NewRequest(context.Background(), "POST", endpointURL, strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("POST", endpointURL)
 	start := time.Now()
@@ -229,14 +228,13 @@ func pollToken(client *http.Client, endpoint, deviceCode string) (*TokenResponse
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", endpoint, strings.NewReader(string(jsonBody)))
+	req, err := useragent.NewRequest(context.Background(), "POST", endpoint, strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("POST", endpoint)
 	start := time.Now()
@@ -283,14 +281,13 @@ type JWTExchangeResponse struct {
 func exchangeForJWT(client *http.Client, apiURL, opaqueToken string) (*JWTExchangeResponse, error) {
 	endpoint := strings.TrimSuffix(apiURL, "/") + "/api/v1/cli/auth/token"
 
-	req, err := http.NewRequest("GET", endpoint, nil)
+	req, err := useragent.NewRequest(context.Background(), "GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+opaqueToken)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("GET", endpoint)
 	start := time.Now()
@@ -326,14 +323,13 @@ func exchangeForJWT(client *http.Client, apiURL, opaqueToken string) (*JWTExchan
 func fetchUserInfo(client *http.Client, apiURL, accessToken string) (*UserInfo, error) {
 	endpoint := apiURL + UserInfoEndpoint
 
-	req, err := http.NewRequest("GET", endpoint, nil)
+	req, err := useragent.NewRequest(context.Background(), "GET", endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("GET", endpoint)
 	start := time.Now()
@@ -383,14 +379,13 @@ func (c *AuthClient) RequestDeviceCode() (*DeviceCodeResponse, error) {
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", endpointURL, strings.NewReader(string(jsonBody)))
+	req, err := useragent.NewRequest(context.Background(), "POST", endpointURL, strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("POST", endpointURL)
 	start := time.Now()

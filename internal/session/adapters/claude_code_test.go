@@ -3,6 +3,7 @@ package adapters
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,6 +13,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// mustJSON marshals a string to a JSON string literal for embedding in test JSONL.
+func mustJSON(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
 
 func TestClaudeCodeAdapter_Name(t *testing.T) {
 	adapter := &ClaudeCodeAdapter{}
@@ -336,6 +343,56 @@ func TestClaudeCodeAdapter_ParseLine_UserMessage(t *testing.T) {
 		require.NotNil(t, entry)
 		assert.Equal(t, "system", entry.Role)
 	})
+
+	frameworkNoiseTests := []struct {
+		name           string
+		content        string
+		wantRole       string
+		wantContains   string
+		wantNotContain string
+	}{
+		{
+			name:     "command-name tag classified as system",
+			content:  "<command-name>/context</command-name>\n            <command-message>context</command-message>\n            <command-args></command-args>",
+			wantRole: "system",
+		},
+		{
+			name:     "task-notification classified as system",
+			content:  "<task-notification>\n<task-id>bec5bb9</task-id>\n<status>completed</status>\n<summary>Background command completed</summary>\n</task-notification>",
+			wantRole: "system",
+		},
+		{
+			name:     "request interrupted classified as system",
+			content:  "[Request interrupted by user for tool use]",
+			wantRole: "system",
+		},
+		{
+			name:           "mixed task-notification with user text keeps user text",
+			content:        "<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n</task-notification>\nPlease review the results",
+			wantRole:       "user",
+			wantContains:   "Please review the results",
+			wantNotContain: "task-notification",
+		},
+	}
+	for _, tt := range frameworkNoiseTests {
+		t.Run(tt.name, func(t *testing.T) {
+			jsonl := fmt.Sprintf(`{
+				"type": "user",
+				"timestamp": "2026-01-05T10:00:00.000Z",
+				"message": {"role": "user", "content": %s}
+			}`, mustJSON(tt.content))
+			entry, err := adapter.parseLine([]byte(jsonl))
+			require.NoError(t, err)
+			require.NotNil(t, entry)
+			assert.Equal(t, tt.wantRole, entry.Role)
+			if tt.wantContains != "" {
+				assert.Contains(t, entry.Content, tt.wantContains)
+			}
+			if tt.wantNotContain != "" {
+				assert.NotContains(t, entry.Content, tt.wantNotContain)
+			}
+		})
+	}
 
 	t.Run("mixed local-command-stdout with user text keeps user text", func(t *testing.T) {
 		jsonl := `{

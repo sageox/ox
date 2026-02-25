@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -251,6 +254,79 @@ func TestBuildStatusJSON_VisibilityAccessLevelCombinations(t *testing.T) {
 			require.NotNil(t, output.Ledger)
 			assert.Equal(t, tt.visibility, output.Ledger.Visibility)
 			assert.Equal(t, tt.accessLevel, output.Ledger.AccessLevel)
+		})
+	}
+}
+
+func TestShortenPathViaSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks require Developer Mode on Windows")
+	}
+	t.Parallel()
+
+	target := filepath.Join(t.TempDir(), "data", "ledger")
+	require.NoError(t, os.MkdirAll(target, 0755))
+
+	projectRoot := filepath.Join(t.TempDir(), "project")
+	sageoxDir := filepath.Join(projectRoot, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+	require.NoError(t, os.Symlink(target, filepath.Join(sageoxDir, "ledger")))
+
+	tests := []struct {
+		name       string
+		root       string
+		fullPath   string
+		candidates []string
+		want       string
+	}{
+		{
+			name:       "symlink matches",
+			root:       projectRoot,
+			fullPath:   target,
+			candidates: []string{".sageox/ledger"},
+			want:       ".sageox/ledger",
+		},
+		{
+			name:       "no match returns full path",
+			root:       projectRoot,
+			fullPath:   "/some/other/path",
+			candidates: []string{".sageox/ledger"},
+			want:       "/some/other/path",
+		},
+		{
+			name:       "empty root returns full path",
+			root:       "",
+			fullPath:   target,
+			candidates: []string{".sageox/ledger"},
+			want:       target,
+		},
+		{
+			name:       "empty fullPath returns empty",
+			root:       projectRoot,
+			fullPath:   "",
+			candidates: []string{".sageox/ledger"},
+			want:       "",
+		},
+		{
+			name:       "nonexistent symlink returns full path",
+			root:       projectRoot,
+			fullPath:   target,
+			candidates: []string{".sageox/teams/primary"},
+			want:       target,
+		},
+		{
+			name:       "first matching candidate wins",
+			root:       projectRoot,
+			fullPath:   target,
+			candidates: []string{".sageox/teams/primary", ".sageox/ledger"},
+			want:       ".sageox/ledger",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shortenPathViaSymlink(tt.root, tt.fullPath, tt.candidates...)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

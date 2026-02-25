@@ -28,7 +28,10 @@ func (a *CopilotAgent) Name() string {
 
 func (a *CopilotAgent) URL() string {
 	return "https://github.com/features/copilot"
+
 }
+
+func (a *CopilotAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
 
 // Detect checks if GitHub Copilot is the active agent.
 //

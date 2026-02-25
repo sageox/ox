@@ -7,7 +7,7 @@ import (
 	"github.com/sageox/ox/pkg/agentx"
 )
 
-// AmpAgent implements Agent for Amp by Sourcegraph (https://ampcode.io).
+// AmpAgent implements Agent for Amp by Sourcegraph (https://ampcode.com).
 type AmpAgent struct {
 	hookManager    agentx.HookManager
 	commandManager agentx.CommandManager
@@ -27,17 +27,25 @@ func (a *AmpAgent) Name() string {
 }
 
 func (a *AmpAgent) URL() string {
-	return "https://github.com/sourcegraph/amp"
+	return "https://ampcode.com"
 }
+
+func (a *AmpAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
 
 // Detect checks if Amp is the active agent.
 //
 // Detection methods:
 //   - AMP_AGENT=1 or AMP=1
+//   - AMP_THREAD_URL is set (present in all Amp sessions)
 //   - AGENT_ENV=amp
 func (a *AmpAgent) Detect(ctx context.Context, env agentx.Environment) (bool, error) {
 	// Check AMP env vars
 	if env.GetEnv("AMP") == "1" || env.GetEnv("AMP_AGENT") == "1" {
+		return true, nil
+	}
+
+	// AMP_THREAD_URL is set by Amp in all sessions
+	if env.GetEnv("AMP_THREAD_URL") != "" {
 		return true, nil
 	}
 
@@ -49,13 +57,13 @@ func (a *AmpAgent) Detect(ctx context.Context, env agentx.Environment) (bool, er
 	return false, nil
 }
 
-// UserConfigPath returns the Amp user configuration directory (~/.amp).
+// UserConfigPath returns the Amp user configuration directory (~/.config/amp).
 func (a *AmpAgent) UserConfigPath(env agentx.Environment) (string, error) {
-	home, err := env.HomeDir()
+	configDir, err := env.ConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".amp"), nil
+	return filepath.Join(configDir, "amp"), nil
 }
 
 // ProjectConfigPath returns empty as Amp is primarily user-level configuration.
@@ -68,9 +76,9 @@ func (a *AmpAgent) ContextFiles() []string {
 	return []string{"AGENTS.md"}
 }
 
-// SupportsXDGConfig returns false as Amp uses ~/.amp instead of XDG paths.
+// SupportsXDGConfig returns true as Amp uses ~/.config/amp (XDG-compliant).
 func (a *AmpAgent) SupportsXDGConfig() bool {
-	return false
+	return true
 }
 
 // Capabilities returns Amp's supported features.
@@ -80,7 +88,7 @@ func (a *AmpAgent) Capabilities() agentx.Capabilities {
 		MCPServers:     true,  // supports MCP
 		SystemPrompt:   true,  // custom instructions
 		ProjectContext: true,  // AGENTS.md
-		CustomCommands: false, // TBD
+		CustomCommands: true,  // toolboxes and skills
 		MinVersion:     "",
 	}
 }

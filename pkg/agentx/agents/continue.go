@@ -28,7 +28,10 @@ func (a *ContinueAgent) Name() string {
 
 func (a *ContinueAgent) URL() string {
 	return "https://github.com/continuedev/continue"
+
 }
+
+func (a *ContinueAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
 
 // Detect checks if Continue is the active agent.
 //

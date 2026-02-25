@@ -475,6 +475,72 @@ func TestStartRecording(t *testing.T) {
 		_, err := StartRecording("", opts)
 		assert.Error(t, err)
 	})
+
+	// Ghost session regression tests: when user exits Claude Code without
+	// stopping the session (e.g., after hooks restart notice), the .recording.json
+	// persists. A new instance with a different agent ID should auto-clear it,
+	// while the same agent ID starting twice should still error.
+	ghostTests := []struct {
+		name         string
+		firstAgent   string
+		secondAgent  string
+		wantError    bool
+		wantErrorIs  error
+	}{
+		{
+			name:        "clears ghost session from different agent",
+			firstAgent:  "OxOldAgent",
+			secondAgent: "OxNewAgent",
+			wantError:   false,
+		},
+		{
+			name:        "same agent duplicate start still blocked",
+			firstAgent:  "OxSameAgent",
+			secondAgent: "OxSameAgent",
+			wantError:   true,
+			wantErrorIs: ErrAlreadyRecording,
+		},
+	}
+	for _, tt := range ghostTests {
+		t.Run(tt.name, func(t *testing.T) {
+			cacheDir := t.TempDir()
+			projectRoot := setupRecordingTest(t, cacheDir)
+
+			// first agent starts a recording
+			firstState, err := StartRecording(projectRoot, StartRecordingOptions{
+				AgentID: tt.firstAgent, AdapterName: "claude-code", Username: "testuser",
+			})
+			require.NoError(t, err)
+			require.True(t, IsRecording(projectRoot))
+
+			// second agent (or same agent) tries to start
+			secondState, err := StartRecording(projectRoot, StartRecordingOptions{
+				AgentID: tt.secondAgent, AdapterName: "claude-code", Username: "testuser",
+			})
+
+			if tt.wantError {
+				assert.Error(t, err)
+				if tt.wantErrorIs != nil {
+					assert.True(t, errors.Is(err, tt.wantErrorIs))
+				}
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, secondState)
+				assert.Equal(t, tt.secondAgent, secondState.AgentID)
+
+				// old recording state should be gone
+				oldPath := filepath.Join(firstState.SessionPath, recordingFile)
+				_, statErr := os.Stat(oldPath)
+				assert.True(t, os.IsNotExist(statErr), "ghost .recording.json should be cleared")
+
+				// new recording should be the active one
+				loaded, loadErr := LoadRecordingState(projectRoot)
+				require.NoError(t, loadErr)
+				require.NotNil(t, loaded)
+				assert.Equal(t, tt.secondAgent, loaded.AgentID)
+			}
+		})
+	}
 }
 
 func TestStopRecording(t *testing.T) {

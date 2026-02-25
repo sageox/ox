@@ -61,6 +61,29 @@ func generateReport(run BenchmarkRun) string {
 	fmt.Fprintf(&b, "\nOverall: median calls-until-found=%d  found=%d/%d\n",
 		allMedian, totalFound, len(run.Queries))
 
+	// per-variant breakdown
+	fmt.Fprintf(&b, "\n=== Variant Breakdown ===\n")
+	for _, qid := range queryOrder() {
+		results, ok := grouped[qid]
+		if !ok {
+			continue
+		}
+
+		byVariant := groupByVariant(results)
+		for variant, vResults := range byVariant {
+			found := 0
+			for _, r := range vResults {
+				if r.FoundCorrectSource {
+					found++
+				}
+			}
+			med := medianFromResults(vResults)
+			prompt := truncatePrompt(vResults[0].PromptText, 50)
+			fmt.Fprintf(&b, "%-20s  v%d %-52s  %d/%d found  med: %d\n",
+				qid, variant, prompt, found, len(vResults), med)
+		}
+	}
+
 	return b.String()
 }
 
@@ -110,11 +133,13 @@ func checkRegression(t *testing.T, current, previous *BenchmarkRun) {
 func queryOrder() []string {
 	return []string{
 		"team-discussions",
-		"arch-decisions",
+		"project-guidance",
 		"session-history",
 		"team-conventions",
 		"sageox-issues",
 		"sageox-sync",
+		"attribution-guidance",
+		"subagent-discovery",
 	}
 }
 
@@ -150,6 +175,21 @@ func median(vals []int) int {
 		}
 	}
 	return sorted[len(sorted)/2]
+}
+
+func groupByVariant(results []QueryResult) map[int][]QueryResult {
+	grouped := make(map[int][]QueryResult)
+	for _, r := range results {
+		grouped[r.PromptVariant] = append(grouped[r.PromptVariant], r)
+	}
+	return grouped
+}
+
+func truncatePrompt(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 func intsToStr(vals []int) string {

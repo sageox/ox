@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,9 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sageox/ox/internal/useragent"
-
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/useragent"
 )
 
 const (
@@ -128,12 +128,11 @@ func (c *RepoClient) GetRepos() (*ReposResponse, error) {
 	logger.LogHTTPRequest("GET", reqURL)
 	start := time.Now()
 
-	httpReq, err := http.NewRequest("GET", reqURL, nil)
+	httpReq, err := useragent.NewRequest(context.Background(), "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("User-Agent", useragent.String())
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}
@@ -193,12 +192,11 @@ func (c *RepoClient) GetTeamInfo(teamID string) (*TeamInfoResponse, error) {
 	logger.LogHTTPRequest("GET", reqURL)
 	start := time.Now()
 
-	httpReq, err := http.NewRequest("GET", reqURL, nil)
+	httpReq, err := useragent.NewRequest(context.Background(), "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("User-Agent", useragent.String())
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}
@@ -271,12 +269,11 @@ func (c *RepoClient) GetRepoDetail(repoID string) (*RepoDetailResponse, error) {
 	logger.LogHTTPRequest("GET", reqURL)
 	start := time.Now()
 
-	httpReq, err := http.NewRequest("GET", reqURL, nil)
+	httpReq, err := useragent.NewRequest(context.Background(), "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	httpReq.Header.Set("User-Agent", useragent.String())
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}

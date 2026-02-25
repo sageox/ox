@@ -28,7 +28,10 @@ func (a *WindsurfAgent) Name() string {
 
 func (a *WindsurfAgent) URL() string {
 	return "https://github.com/codeium/windsurf"
+
 }
+
+func (a *WindsurfAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
 
 // Detect checks if Windsurf is the active agent.
 //

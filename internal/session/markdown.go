@@ -127,15 +127,6 @@ func (g *MarkdownGenerator) writeHeader(buf *bytes.Buffer, t *StoredSession) {
 
 	fmt.Fprintf(buf, "| **Entry Count** | %d |\n", len(t.Entries))
 
-	// duration calculation
-	if t.Meta != nil && !t.Meta.CreatedAt.IsZero() {
-		endTime := mdExtractEndTime(t)
-		if !endTime.IsZero() {
-			duration := endTime.Sub(t.Meta.CreatedAt)
-			fmt.Fprintf(buf, "| **Duration** | %s |\n", formatDuration(duration))
-		}
-	}
-
 	buf.WriteString("\n---\n\n")
 	buf.WriteString("## Conversation\n\n")
 }
@@ -267,31 +258,94 @@ func (g *MarkdownGenerator) writeMessageContent(buf *bytes.Buffer, entry map[str
 	}
 }
 
-// writeToolCall writes tool call details.
+// writeToolCall writes tool call details in compact command format.
 func (g *MarkdownGenerator) writeToolCall(buf *bytes.Buffer, entry map[string]any) {
 	toolName := mdExtractToolName(entry)
 	toolInput := mdExtractToolInput(entry)
 
-	if toolName != "" {
-		fmt.Fprintf(buf, "**Tool:** `%s`\n\n", toolName)
+	cmd := mdFormatToolCompact(toolName, toolInput)
+	fmt.Fprintf(buf, "`>_ %s`\n", cmd)
+}
+
+// mdFormatToolCompact renders a tool call as a compact command string.
+func mdFormatToolCompact(name, input string) string {
+	if name == "" {
+		return "Tool"
 	}
 
-	if toolInput != "" {
-		lines := strings.Count(toolInput, "\n") + 1
-		if lines > collapsibleThreshold || len(toolInput) > maxInlineContentLen {
-			buf.WriteString("<details>\n")
-			buf.WriteString("<summary>Input parameters</summary>\n\n")
-			buf.WriteString("```json\n")
-			buf.WriteString(toolInput)
-			buf.WriteString("\n```\n\n")
-			buf.WriteString("</details>\n")
-		} else {
-			buf.WriteString("**Input:**\n")
-			buf.WriteString("```json\n")
-			buf.WriteString(toolInput)
-			buf.WriteString("\n```\n")
+	var data map[string]any
+	hasJSON := input != "" && json.Unmarshal([]byte(input), &data) == nil
+
+	switch strings.ToLower(name) {
+	case "bash":
+		if hasJSON {
+			if command, ok := data["command"].(string); ok {
+				return fmt.Sprintf("Bash  %s", command)
+			}
+		}
+	case "read":
+		if hasJSON {
+			if fp, ok := data["file_path"].(string); ok {
+				return fmt.Sprintf("Read  %s", mdShortenPath(fp))
+			}
+		}
+	case "edit", "multiedit":
+		if hasJSON {
+			if fp, ok := data["file_path"].(string); ok {
+				return fmt.Sprintf("%s  %s", name, mdShortenPath(fp))
+			}
+		}
+	case "write":
+		if hasJSON {
+			if fp, ok := data["file_path"].(string); ok {
+				return fmt.Sprintf("Write  %s", mdShortenPath(fp))
+			}
+		}
+	case "grep":
+		if hasJSON {
+			pattern, _ := data["pattern"].(string)
+			path, _ := data["path"].(string)
+			parts := name
+			if pattern != "" {
+				parts += fmt.Sprintf(" \"%s\"", pattern)
+			}
+			if path != "" {
+				parts += fmt.Sprintf(" %s", mdShortenPath(path))
+			}
+			return parts
+		}
+	case "glob":
+		if hasJSON {
+			if pattern, ok := data["pattern"].(string); ok {
+				return fmt.Sprintf("Glob  %s", pattern)
+			}
 		}
 	}
+
+	// fallback: tool name + first string value
+	if hasJSON {
+		for _, v := range data {
+			if s, ok := v.(string); ok && s != "" {
+				if len(s) > 80 {
+					s = s[:80] + "..."
+				}
+				return fmt.Sprintf("%s  %s", name, s)
+			}
+		}
+	}
+
+	return name
+}
+
+// mdShortenPath strips home directory prefixes for readability.
+func mdShortenPath(p string) string {
+	parts := strings.Split(p, "/")
+	for i, part := range parts {
+		if (part == "Users" || part == "home") && i+2 < len(parts) {
+			return strings.Join(parts[i+2:], "/")
+		}
+	}
+	return p
 }
 
 // writeToolResult writes tool result/output.
@@ -336,18 +390,6 @@ func (g *MarkdownGenerator) writeToolResult(buf *bytes.Buffer, entry map[string]
 // writeFooter writes the closing section.
 func (g *MarkdownGenerator) writeFooter(buf *bytes.Buffer, t *StoredSession) {
 	buf.WriteString("\n---\n\n")
-	buf.WriteString("## Summary\n\n")
-
-	// entry counts by type
-	counts := mdCountEntryTypes(t.Entries)
-	buf.WriteString("| Type | Count |\n")
-	buf.WriteString("|------|-------|\n")
-	for entryType, count := range counts {
-		fmt.Fprintf(buf, "| %s | %d |\n", entryType, count)
-	}
-	fmt.Fprintf(buf, "| **Total** | **%d** |\n", len(t.Entries))
-
-	buf.WriteString("\n")
 
 	// footer metadata if available
 	if t.Footer != nil {

@@ -176,14 +176,25 @@ func DefaultSageoxSiblingDir(repoName, projectRoot string) string {
 	return filepath.Join(parentDir, safeName+"_sageox")
 }
 
-// DefaultLedgerPath returns the default path for the ledger repo,
-// which is inside the sageox sibling directory, namespaced by endpoint.
+// DefaultLedgerPath returns the CANONICAL path for the ledger git checkout.
+// Ledgers are stored in the user directory, shared across all worktrees of a repo.
+//
+// Format: ~/.local/share/sageox/<endpoint_slug>/ledgers/<repo_id>/
+//
+// IMPORTANT: This is the ONLY function that should determine the ledger checkout location.
+// NEVER construct ledger paths manually. Changes to path locations require Ryan's review.
+func DefaultLedgerPath(repoID, endpointURL string) string {
+	if repoID == "" || endpointURL == "" {
+		return ""
+	}
+	return paths.LedgersDataDir(repoID, endpointURL)
+}
+
+// SiblingLedgerPath returns the DEPRECATED sibling-directory path for the ledger repo.
+// This is used for migration detection when upgrading from the sibling to user-directory layout.
 //
 // Format: <project_parent>/<repo_name>_sageox/<endpoint_slug>/ledger
-//
-// Example: /path/to/myrepo with endpoint sageox.ai
-// -> /path/to/myrepo_sageox/sageox.ai/ledger
-func DefaultLedgerPath(repoName, projectRoot, endpointURL string) string {
+func SiblingLedgerPath(repoName, projectRoot, endpointURL string) string {
 	siblingDir := DefaultSageoxSiblingDir(repoName, projectRoot)
 	if siblingDir == "" {
 		return ""
@@ -276,11 +287,11 @@ func LegacyTeamContextPath(teamID, projectRoot string) string {
 }
 
 // GetLedgerPath returns the configured ledger path, or the default if not configured.
-func (c *LocalConfig) GetLedgerPath(repoName, projectRoot, endpointURL string) string {
+func (c *LocalConfig) GetLedgerPath(repoID, endpointURL string) string {
 	if c != nil && c.Ledger != nil && c.Ledger.Path != "" {
 		return c.Ledger.Path
 	}
-	return DefaultLedgerPath(repoName, projectRoot, endpointURL)
+	return DefaultLedgerPath(repoID, endpointURL)
 }
 
 // SetLedgerPath sets the ledger path in the config.
@@ -598,6 +609,97 @@ func RemoveTeamSymlink(repoName, projectRoot, teamID, ep string) error {
 	// clean up empty parent directories up to the sibling dir
 	siblingDir := DefaultSageoxSiblingDir(repoName, projectRoot)
 	cleanupEmptyParentDirs(symlinkPath, siblingDir)
+
+	return nil
+}
+
+// -----------------------------------------------------------------------------
+// .sageox/ Project Symlinks
+// -----------------------------------------------------------------------------
+// These symlinks live inside the project's .sageox/ directory (gitignored) and
+// provide discoverable paths to user-directory data (ledger, team context).
+
+// createOrUpdateSymlink is a helper that creates or updates a symlink atomically.
+// Returns nil on Windows (symlinks require Developer Mode).
+func createOrUpdateSymlink(symlinkPath, targetPath string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+
+	// ensure parent directory exists
+	if err := os.MkdirAll(filepath.Dir(symlinkPath), 0755); err != nil {
+		return fmt.Errorf("create symlink parent dir=%s: %w", filepath.Dir(symlinkPath), err)
+	}
+
+	// check if symlink already points to the right target
+	if info, err := os.Lstat(symlinkPath); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			existing, _ := os.Readlink(symlinkPath)
+			if existing == targetPath {
+				return nil
+			}
+			// wrong target, remove and recreate
+			_ = os.Remove(symlinkPath)
+		} else {
+			return fmt.Errorf("path exists and is not a symlink: %s", symlinkPath)
+		}
+	}
+
+	return os.Symlink(targetPath, symlinkPath)
+}
+
+// CreateOrUpdateProjectSymlink creates or updates a symlink inside the project root.
+// The rel path is relative to projectRoot (e.g. ".sageox/ledger").
+// If the symlink already points to targetPath, this is a no-op.
+func CreateOrUpdateProjectSymlink(projectRoot, rel, targetPath string) error {
+	if projectRoot == "" || rel == "" || targetPath == "" {
+		return nil
+	}
+	return createOrUpdateSymlink(filepath.Join(projectRoot, rel), targetPath)
+}
+
+// CreateProjectLedgerSymlink creates .sageox/ledger -> user-dir ledger path.
+func CreateProjectLedgerSymlink(projectRoot, repoID, ep string) error {
+	if projectRoot == "" || repoID == "" || ep == "" {
+		return nil
+	}
+
+	symlinkPath := filepath.Join(projectRoot, ".sageox", "ledger")
+	targetPath := DefaultLedgerPath(repoID, ep)
+	if targetPath == "" {
+		return nil
+	}
+
+	return createOrUpdateSymlink(symlinkPath, targetPath)
+}
+
+// CreateProjectTeamSymlinks creates .sageox/teams/<team_id> and .sageox/teams/primary.
+//
+// Today we only support a single team per repo, but that is not a hard requirement.
+// The "primary" symlink always points to the repo's team for convenient access.
+func CreateProjectTeamSymlinks(projectRoot, teamID, ep string) error {
+	if projectRoot == "" || teamID == "" || ep == "" {
+		return nil
+	}
+
+	teamsDir := filepath.Join(projectRoot, ".sageox", "teams")
+	targetPath := paths.TeamContextDir(teamID, ep)
+	if targetPath == "" {
+		return nil
+	}
+
+	// .sageox/teams/<team_id> -> user-dir team path
+	teamSymlink := filepath.Join(teamsDir, sanitizeRepoName(teamID))
+	if err := createOrUpdateSymlink(teamSymlink, targetPath); err != nil {
+		return fmt.Errorf("create team symlink: %w", err)
+	}
+
+	// .sageox/teams/primary -> same target (convenience alias)
+	// today we only support a single team per repo, but that is not a hard requirement
+	primarySymlink := filepath.Join(teamsDir, "primary")
+	if err := createOrUpdateSymlink(primarySymlink, targetPath); err != nil {
+		return fmt.Errorf("create primary team symlink: %w", err)
+	}
 
 	return nil
 }

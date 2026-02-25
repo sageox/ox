@@ -24,6 +24,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/telemetry"
+	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/tokens"
 	"github.com/sageox/ox/internal/ui"
 	"github.com/sageox/ox/internal/useragent"
@@ -79,6 +80,16 @@ func withAttributionGuidance(content string, loggedIn bool, attr config.Resolved
 		sb.WriteString("\n```\n")
 	}
 
+	// PR attribution for squash merges (always-on when any attribution is configured)
+	if attr.Commit != "" {
+		sb.WriteString("\n**PR Attribution (Critical for Squash Merges):**\n")
+		sb.WriteString("GitHub squash merges use the PR body as the commit message. To ensure attribution survives:\n")
+		sb.WriteString("- Always include the following as the **last line** of every PR body:\n")
+		sb.WriteString("```\n")
+		sb.WriteString(attr.Commit) // git trailer format, not markdown
+		sb.WriteString("\n```\n")
+	}
+
 	return sb.String()
 }
 
@@ -95,7 +106,7 @@ func buildAttributionTextSection(attr config.ResolvedAttribution) string {
 		sb.WriteString(fmt.Sprintf("- **Commits**: Add trailer \"%s\"\n", attr.Commit))
 	}
 	if attr.PR != "" {
-		sb.WriteString(fmt.Sprintf("- **PRs**: Add \"%s\"\n", attr.PR))
+		sb.WriteString(fmt.Sprintf("- **PRs**: End body with \"%s\" (survives squash merge)\n", attr.Commit))
 	}
 	return sb.String()
 }
@@ -182,10 +193,24 @@ type TeamInstructions struct {
 	Files    []string `json:"files"`               // which files contributed: ["AGENTS.md", "CLAUDE.md"]
 }
 
+// intentCommand maps a user intent to the ox command that resolves it.
+type intentCommand struct {
+	Intent  string `json:"intent"`  // natural language phrases the user might say
+	Command string `json:"command"` // exact ox CLI command to run
+}
+
+// agentGuidance provides a top-level intent-to-command lookup for agents.
+// Agents should consult this before exploring files or running ad-hoc discovery.
+type agentGuidance struct {
+	Hint     string          `json:"hint"`     // one-line instruction for the agent
+	Commands []intentCommand `json:"commands"` // ordered by query frequency
+}
+
 // agentPrimeOutput is the structured response for agent bootstrap (prime)
 type agentPrimeOutput struct {
 	Status          string                     `json:"status"` // fresh, unavailable
 	AgentID         string                     `json:"agent_id"`
+	Guidance        *agentGuidance             `json:"guidance,omitempty"` // intent-to-command lookup (scan first)
 	SessionID       string                     `json:"session_id,omitempty"`
 	AgentType       string                     `json:"agent_type,omitempty"`     // detected or specified agent type
 	AgentSupported  bool                       `json:"agent_supported"`          // true if agent is officially supported
@@ -200,8 +225,12 @@ type agentPrimeOutput struct {
 	TokenEstimate   int                        `json:"token_estimate,omitempty"` // estimated token count
 	ContentLength   int                        `json:"content_length,omitempty"` // raw byte length
 	Session         *sessionStatus             `json:"session,omitempty"`        // session recording status
-	Ledger          *ledgerInfo                `json:"ledger,omitempty"`         // ledger discovery for team sessions
-	TeamContext     *teamContextInfo           `json:"team_context,omitempty"`   // team context if configured
+	Ledger          *ledgerInfo                `json:"ledger,omitempty"`         // repo-specific archive of coding sessions (NOT team context)
+	Important       string                     `json:"important"`                // always-present disambiguation of knowledge sources
+	TeamContext       *teamContextInfo `json:"team_context,omitempty"`        // team context if configured
+	TeamContextStatus string           `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
+	UserNotification  string           `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user
+	AgentTip          string           `json:"agent_tip,omitempty"`           // contextual tip for the agent itself (not for the user)
 	// Prime call tracking
 	PrimeCallCount       int    `json:"prime_call_count,omitempty"`       // number of prime calls this session
 	PrimeExcessiveNotice string `json:"prime_excessive_notice,omitempty"` // warning if prime called excessively
@@ -211,6 +240,10 @@ type agentPrimeOutput struct {
 	// Hook auto-install
 	HooksInstalled     bool   `json:"hooks_installed,omitempty"`      // true if hooks were newly installed this prime
 	HooksRestartNotice string `json:"hooks_restart_notice,omitempty"` // message for agent to relay to user about restarting
+	// Version update advisory
+	UpdateAvailable bool   `json:"update_available,omitempty"` // true if newer ox version exists
+	LatestVersion   string `json:"latest_version,omitempty"`   // latest available version (without v prefix)
+	UpdateHint      string `json:"update_hint,omitempty"`      // human-readable update instruction
 }
 
 // agentPrimeCmd registers a new agent instance and starts a session
@@ -326,6 +359,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
+	if orchType := agentx.OrchestratorType(); orchType != "" {
+		useragent.SetOrchestratorType(orchType)
+	}
 
 	// load attribution from user and project configs
 	attribution := loadResolvedAttribution()
@@ -429,6 +465,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		doctorHint = "Run 'ox agent doctor' to finalize incomplete sessions"
 	}
 
+	// build intent-to-command guidance for agent consumption
+	guidance := buildGuidance(teamCtx, ledgerStatus)
+
 	// check for team context notifications using mtime-based approach
 	var lastNotified time.Time
 	if existingMarker != nil {
@@ -484,6 +523,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	output := agentPrimeOutput{
 		Status:           "fresh",
 		AgentID:          agentID,
+		Guidance:         guidance,
 		SessionID:        serverSessionID,
 		AgentType:        agentType,
 		AgentSupported:   isAgentSupported(agentType),
@@ -505,8 +545,63 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		HooksInstalled:   hooksInstalled,
 	}
 
+	// always-present disambiguation of knowledge sources
+	output.Important = "SageOx has two SEPARATE knowledge sources. " +
+		"(1) TEAM CONTEXT: team-wide meetings, architecture decisions, and conventions shared across ALL repos. Read with: ox agent team-ctx. " +
+		"(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions for THIS repo only. Browse with: ox session list. " +
+		"These are unrelated — sessions are NOT discussions, and the ledger is NOT team context."
+
+	// set team context status hint for agents when team context hasn't synced yet
+	if output.TeamContext == nil {
+		// check if we have a team ID configured (team context expected but not yet synced)
+		projCfg, _ := config.LoadProjectConfig(projectRoot)
+		if projCfg != nil && projCfg.TeamID != "" {
+			output.TeamContextStatus = "syncing"
+		}
+	}
+
+	// build pre-assembled notification for JSON-consuming agents.
+	// this duplicates the logic in outputAgentPrimeText so JSON consumers
+	// don't have to assemble the notification from individual fields.
+	var notifParts []string
+	if output.TeamContext != nil {
+		teamName := output.TeamContext.TeamName
+		if teamName == "" {
+			teamName = output.TeamContext.TeamID
+		}
+		if output.TeamContext.HasAgentContext {
+			notifParts = append(notifParts, fmt.Sprintf("Team context: %s (synced — team-wide meetings/decisions)", teamName))
+		} else {
+			notifParts = append(notifParts, fmt.Sprintf("Team context: %s (synced — team-wide)", teamName))
+		}
+	} else if output.TeamContextStatus != "" {
+		notifParts = append(notifParts, "Team context: "+output.TeamContextStatus)
+	}
+	if output.Session != nil && output.Session.Recording {
+		notifParts = append(notifParts, "Session recording: active")
+	} else {
+		notifParts = append(notifParts, "Session recording: available (/ox-session-start)")
+	}
+	if len(notifParts) > 0 {
+		output.UserNotification = "SageOx is active on this repo. " + strings.Join(notifParts, ". ") + "."
+	}
+
 	if hooksInstalled {
 		output.HooksRestartNotice = "SageOx hooks were just installed. Tell the user to exit this session and start a new one so the hooks take effect."
+	}
+
+	// check for version updates from daemon cache (pure file read, ~0ms)
+	if vResult := checkVersionFromCache(); vResult != nil {
+		output.UpdateAvailable = true
+		output.LatestVersion = vResult.LatestVersion
+		output.UpdateHint = fmt.Sprintf(
+			"v%s -> v%s available. Run 'brew upgrade sageox' or visit https://github.com/sageox/ox/releases",
+			vResult.CurrentVersion, vResult.LatestVersion,
+		)
+		// append to user notification
+		if output.UserNotification != "" {
+			output.UserNotification += " " + output.UpdateHint + "."
+		}
 	}
 
 	// write session marker for idempotent behavior (graceful failure)
@@ -659,7 +754,7 @@ func loadTeamInstructions(teamCtxPath, teamName string) *TeamInstructions {
 func buildCapturePriorGuidance(agentID string) *capturePriorGuidance {
 	return &capturePriorGuidance{
 		Action:      "capture_prior_history",
-		Description: "To capture planning discussion from before session start",
+		Description: "To capture prior conversation from before session recording started",
 		Instructions: []string{
 			"Reconstruct your conversation history as JSONL",
 			"Include: seq (number), type (user|assistant), content, ts (ISO8601 if known)",
@@ -672,6 +767,45 @@ func buildCapturePriorGuidance(agentID string) *capturePriorGuidance {
 {"seq":1,"type":"user","content":"<user prompt>","ts":"%s","source":"planning_history"}
 {"seq":2,"type":"assistant","content":"<assistant response>","ts":"%s","source":"planning_history"}
 EOF`, agentID, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339)),
+	}
+}
+
+// buildGuidance constructs state-aware command guidance for agent consumption.
+// Only includes entries when the underlying resource is available.
+func buildGuidance(teamCtx *teamContextInfo, ledger *ledgerInfo) *agentGuidance {
+	var cmds []intentCommand
+
+	// team discussions — only when team context exists
+	if teamCtx != nil {
+		cmds = append(cmds, intentCommand{
+			Intent:  "team context (team-wide, all repos): recorded meetings, architecture decisions, conventions",
+			Command: "ox agent team-ctx",
+		})
+	}
+
+	// health check — always available on initialized project
+	cmds = append(cmds, intentCommand{
+		Intent:  "setup issues, health check, configuration problems, known issues",
+		Command: "ox doctor",
+	})
+
+	// sync status — always available
+	cmds = append(cmds, intentCommand{
+		Intent:  "sync status, up to date, synchronized, stale",
+		Command: "ox status",
+	})
+
+	// session history — only when ledger is provisioned
+	if ledger != nil && ledger.Exists {
+		cmds = append(cmds, intentCommand{
+			Intent:  "session history (this repo only): prior AI coworker coding sessions for this repo",
+			Command: "ox session list",
+		})
+	}
+
+	return &agentGuidance{
+		Hint:     "Use these commands to answer user questions — check here before exploring files.",
+		Commands: cmds,
 	}
 }
 
@@ -813,6 +947,16 @@ func detectAgentSessionFile(agent agentx.Agent) string {
 //
 // Default (no flags): Pure JSON output optimized for agent consumption.
 func outputAgentPrime(cmd *cobra.Command, textMode, reviewMode bool, output agentPrimeOutput) error {
+	// always include tips: one for the agent, one for the agent to relay to the user
+	output.AgentTip = tips.GetTip("prime")
+	if userTip := tips.GetPrimeUserTip(output.AgentType); userTip != "" {
+		if output.UserNotification != "" {
+			output.UserNotification += "\n\nTip: " + userTip
+		} else {
+			output.UserNotification = "Tip: " + userTip
+		}
+	}
+
 	// --review takes precedence: show both human summary and JSON
 	if reviewMode {
 		humanSummary := buildHumanSummary(output)
@@ -871,6 +1015,10 @@ func buildHumanSummary(output agentPrimeOutput) string {
 		fmt.Fprintf(&sb, "- **Token Estimate:** %d\n", output.TokenEstimate)
 	}
 
+	if output.Guidance != nil {
+		fmt.Fprintf(&sb, "- **Guidance:** %d intent-to-command mappings\n", len(output.Guidance.Commands))
+	}
+
 	if output.ProjectGuidance != nil {
 		fmt.Fprintf(&sb, "- **Project Guidance:** AGENTS.md found (%d bytes, ~%d tokens)\n",
 			output.ProjectGuidance.Size, output.ProjectGuidance.Tokens)
@@ -919,6 +1067,10 @@ func buildHumanSummary(output agentPrimeOutput) string {
 		fmt.Fprintf(&sb, "- **Hooks Installed:** %s\n", output.HooksRestartNotice)
 	}
 
+	if output.UpdateAvailable {
+		fmt.Fprintf(&sb, "- **Update Available:** %s\n", output.UpdateHint)
+	}
+
 	return sb.String()
 }
 
@@ -930,9 +1082,56 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 		fmt.Fprintf(cmd.OutOrStdout(), "Session: %s\n", output.SessionID)
 	}
 
-	// instruct agent to notify user about SageOx
+	// instruct agent to notify user about SageOx.
+	// NOTE: all output from this function is consumed by the AI agent, not shown
+	// directly to the human. the agent decides how to relay this to the user.
+	// "NOTIFY USER NOW" is a behavioral directive — it tells the agent to surface
+	// this information immediately rather than silently absorbing it.
 	fmt.Fprintln(cmd.OutOrStdout())
-	fmt.Fprintln(cmd.OutOrStdout(), "**NOTIFY USER NOW:** Tell the user that SageOx is optimizing collaborative work on this repo.")
+	fmt.Fprintln(cmd.OutOrStdout(), "**NOTIFY USER NOW:** Tell the user that SageOx is active on this repo. Include these details:")
+	fmt.Fprintln(cmd.OutOrStdout())
+	// team context status — give agent concrete lines to relay
+	if output.TeamContext != nil {
+		teamName := output.TeamContext.TeamName
+		if teamName == "" {
+			teamName = output.TeamContext.TeamID
+		}
+		if output.TeamContext.HasAgentContext {
+			fmt.Fprintf(cmd.OutOrStdout(), "- Team context: %s (synced, discussions available via `ox agent team-ctx`)\n", teamName)
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "- Team context: %s (synced)\n", teamName)
+		}
+	} else if output.TeamContextStatus != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "- Team context: %s\n", output.TeamContextStatus)
+	}
+	// session recording status
+	if output.Session != nil && output.Session.Recording {
+		fmt.Fprintf(cmd.OutOrStdout(), "- Session recording: active\n")
+	} else {
+		fmt.Fprintln(cmd.OutOrStdout(), "- Session recording: available (`/ox-session-start`)")
+	}
+
+	// quick reference: intent-to-command lookup
+	if output.Guidance != nil && len(output.Guidance.Commands) > 0 {
+		fmt.Fprintln(cmd.OutOrStdout())
+		fmt.Fprintln(cmd.OutOrStdout(), "## Quick Reference")
+		fmt.Fprintln(cmd.OutOrStdout())
+		fmt.Fprintln(cmd.OutOrStdout(), output.Guidance.Hint)
+		fmt.Fprintln(cmd.OutOrStdout())
+		for _, ic := range output.Guidance.Commands {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %-60s  %s\n", ic.Intent, ic.Command)
+		}
+	}
+
+	// show version update notice
+	if output.UpdateAvailable {
+		fmt.Fprintln(cmd.OutOrStdout())
+		cli.PrintSuggestionBox(
+			"Update Available",
+			output.UpdateHint,
+			"brew upgrade sageox",
+		)
+	}
 
 	// show hooks restart notice prominently
 	if output.HooksInstalled {
@@ -999,6 +1198,15 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 			fmt.Fprintln(cmd.OutOrStdout(), "   Change mode: ox config set session_recording <none|infra|all>")
 		}
 	}
+
+	// knowledge sources disambiguation — always shown
+	fmt.Fprintln(cmd.OutOrStdout())
+	fmt.Fprintln(cmd.OutOrStdout(), "## Knowledge Sources")
+	fmt.Fprintln(cmd.OutOrStdout())
+	fmt.Fprintln(cmd.OutOrStdout(), "SageOx has two SEPARATE knowledge sources:")
+	fmt.Fprintln(cmd.OutOrStdout(), "  1. TEAM CONTEXT — team-wide meetings, decisions, conventions (all repos). Command: ox agent team-ctx")
+	fmt.Fprintln(cmd.OutOrStdout(), "  2. SESSIONS/LEDGER — repo-specific coding session archive (this repo only). Command: ox session list")
+	fmt.Fprintln(cmd.OutOrStdout(), "These are unrelated. Sessions are NOT discussions. The ledger is NOT team context.")
 
 	// ledger / repo session history section
 	if output.Ledger != nil {
@@ -1125,12 +1333,12 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 			}
 		}
 
-		// always emit team context guidance — discussions may sync after prime runs
+		// always emit team context guidance — may sync after prime runs
 		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "**Team context available** — recorded team meetings and discussions")
-		fmt.Fprintln(cmd.OutOrStdout(), "(architecture, conventions, product direction).")
+		fmt.Fprintln(cmd.OutOrStdout(), "**Team context available** — team-wide recorded meetings and decisions")
+		fmt.Fprintln(cmd.OutOrStdout(), "(architecture, conventions, product direction — shared across all repos, NOT repo session history).")
 		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "  Read SageOx team discussions:  ox agent team-ctx")
+		fmt.Fprintln(cmd.OutOrStdout(), "  Read team context:  ox agent team-ctx")
 		fmt.Fprintln(cmd.OutOrStdout())
 		if !output.TeamContext.HasAgentContext {
 			fmt.Fprintln(cmd.OutOrStdout(), "Not yet synced — may appear shortly as the daemon syncs in the background.")
@@ -1142,7 +1350,7 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 		fmt.Fprintln(cmd.OutOrStdout())
 		fmt.Fprintln(cmd.OutOrStdout(), "## Session Capture")
 		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "To capture prior discussion, generate JSONL history and pipe to:")
+		fmt.Fprintln(cmd.OutOrStdout(), "To capture prior conversation from before recording started, generate JSONL and pipe to:")
 		fmt.Fprintf(cmd.OutOrStdout(), "  ox agent %s session capture-prior\n", output.AgentID)
 		fmt.Fprintln(cmd.OutOrStdout())
 		fmt.Fprintln(cmd.OutOrStdout(), "Format: {\"seq\":N,\"type\":\"user|assistant\",\"content\":\"...\",\"ts\":\"ISO8601\",\"source\":\"planning_history\"}")
@@ -1351,11 +1559,7 @@ func ensureClaudeHooks(projectRoot string) bool {
 	if !detectClaudeCode() {
 		return false
 	}
-	status, err := listClaudeHooks()
-	if err != nil {
-		return false
-	}
-	if status[claudeSessionStart] && status[claudePreCompact] {
+	if HasProjectClaudeHooks(projectRoot) {
 		return false // already installed
 	}
 	if err := InstallProjectClaudeHooks(projectRoot); err != nil {

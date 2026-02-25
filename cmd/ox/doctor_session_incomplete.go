@@ -78,7 +78,7 @@ func buildIncompleteSessionHumanResult(incomplete []IncompleteSessionInfo) check
 		sb.WriteString(fmt.Sprintf("  ... and %d more\n", count-5))
 	}
 
-	sb.WriteString("\nRequires `ox agent doctor` to generate summaries and HTML viewers.")
+	sb.WriteString("\nRun `ox agent doctor` inside your AI coding session to fix.")
 
 	// mark as agent-required since summaries need LLM generation
 	return WarningCheck("incomplete sessions", msg, sb.String()).WithRequiresAgent()

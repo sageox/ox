@@ -35,6 +35,10 @@ agent_instances/
 # Ignore local-only config (sync state, machine-specific)
 config.local.toml
 
+# Ignore local symlinks to user-directory data
+ledger
+teams/
+
 # Keep core files (committed to git)
 !README.md
 !config.json
@@ -52,6 +56,8 @@ var requiredGitignoreEntries = []string{
 	".needs-doctor-agent",
 	"agent_instances/",
 	"config.local.toml",
+	"ledger",
+	"teams/",
 	"!README.md",
 	"!config.json",
 	"!discovered.jsonl",
@@ -644,13 +650,21 @@ func registerRepoWithSageOx(gitRoot string, cfg *config.ProjectConfig) (string, 
 	return resp.TeamID, nil
 }
 
-// checkCloudDoctor fetches cloud-side diagnostics if available.
-// Returns check results for issues the cloud can detect that the CLI cannot:
-// - Pending merge conflicts (same repo registered twice) - requires cross-repo knowledge
-// - Team invites pending acceptance - lives in cloud DB
-// - Guidance updates available - version comparison server-side
-// - Billing/quota warnings - enterprise only
-// - Team-wide health (X repos need updates) - aggregate view
+// checkCloudDoctor fetches cloud-side diagnostics from the public endpoint
+// /api/v1/public/repos/{repo_id}/doctor.
+//
+// This endpoint is intentionally unauthenticated — ox doctor needs to work
+// before auth is set up (e.g. diagnosing "repo not registered" or "CLI outdated").
+// It returns only non-PII data:
+//   - not_registered  — generic "run ox init" guidance
+//   - merge_pending   — repo IDs, match scores, hash counts (no user data)
+//   - cli_upgrade_required — generic "upgrade your CLI" guidance
+//
+// PII boundary is enforced by server-side tests (pii_boundary_test.go).
+//
+// The authenticated endpoint /api/v1/cli/doctor/context is separate and returns
+// user info, repos, teams, etc. behind Bearer auth. The split is by design:
+// public for "is this repo healthy?", private for "give me full diagnostic context".
 func checkCloudDoctor() []checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
@@ -686,6 +700,13 @@ func checkCloudDoctor() []checkResult {
 	// convert cloud issues to checkResults
 	var results []checkResult
 	for _, issue := range resp.Issues {
+		// skip "not_registered" from public endpoint — the CLI already
+		// verified the project is initialized with a valid repo ID above.
+		// The unauthenticated endpoint can't confirm registration.
+		if issue.Type == "not_registered" {
+			continue
+		}
+
 		var result checkResult
 		result.name = issue.Title
 

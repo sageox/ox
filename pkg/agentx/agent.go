@@ -8,7 +8,20 @@ import (
 	"strings"
 )
 
-// AgentType identifies a coding agent
+// AgentRole distinguishes agents from orchestrators.
+// Agents are coding tools (Claude Code, Cursor); orchestrators launch and
+// manage agents (OpenClaw, Conductor, Gas Town).
+type AgentRole string
+
+const (
+	// RoleAgent is a coding agent that directly invokes ox commands.
+	RoleAgent AgentRole = "agent"
+
+	// RoleOrchestrator launches and manages coding agents.
+	RoleOrchestrator AgentRole = "orchestrator"
+)
+
+// AgentType identifies a coding agent or orchestrator.
 type AgentType string
 
 const (
@@ -28,11 +41,16 @@ const (
 	AgentTypeCline      AgentType = "cline"
 	AgentTypeDroid      AgentType = "droid"
 	AgentTypeCustom     AgentType = "custom"
+
+	// Orchestrators
+	AgentTypeOpenClaw  AgentType = "openclaw"
+	AgentTypeConductor AgentType = "conductor"
 )
 
-// SupportedAgents is the canonical list of coding agents that agentx supports.
-// Use this when building agent-specific features or listing available agents.
+// SupportedAgents is the canonical list of coding agents and orchestrators
+// that agentx supports.
 var SupportedAgents = []AgentType{
+	// Agents
 	AgentTypeClaudeCode,
 	AgentTypeCursor,
 	AgentTypeWindsurf,
@@ -47,6 +65,10 @@ var SupportedAgents = []AgentType{
 	AgentTypeAmp,
 	AgentTypeCline,
 	AgentTypeDroid,
+
+	// Orchestrators
+	AgentTypeOpenClaw,
+	AgentTypeConductor,
 }
 
 // AgentIdentity provides basic agent identification.
@@ -61,6 +83,9 @@ type AgentIdentity interface {
 
 	// URL returns the official project URL (typically GitHub repo)
 	URL() string
+
+	// Role returns whether this is a coding agent or an orchestrator
+	Role() AgentRole
 }
 
 // AgentDetector provides agent detection capabilities.
@@ -153,12 +178,17 @@ type Capabilities struct {
 	MinVersion string
 }
 
-// Detector identifies which coding agent(s) are currently active.
+// Detector identifies which coding agent(s) and orchestrator(s) are currently active.
 type Detector interface {
-	// Detect identifies the active agent, returning nil if none detected
+	// Detect identifies the active coding agent (RoleAgent), returning nil if none detected.
+	// Orchestrators are excluded — use DetectOrchestrator for those.
 	Detect(ctx context.Context) (Agent, error)
 
-	// DetectAll returns all detected agents (some may run simultaneously)
+	// DetectOrchestrator returns the active orchestrator (RoleOrchestrator), or nil.
+	// This is independent of Detect() which returns the coding agent.
+	DetectOrchestrator(ctx context.Context) (Agent, error)
+
+	// DetectAll returns all detected agents and orchestrators
 	DetectAll(ctx context.Context) ([]Agent, error)
 
 	// DetectByType checks if a specific agent type is active

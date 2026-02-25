@@ -91,24 +91,22 @@ func (d *detector) getEnv() Environment {
 }
 
 func (d *detector) Detect(ctx context.Context) (Agent, error) {
+	return d.detectByRole(ctx, RoleAgent)
+}
+
+func (d *detector) DetectOrchestrator(ctx context.Context) (Agent, error) {
+	return d.detectByRole(ctx, RoleOrchestrator)
+}
+
+// detectByRole finds the first detected agent matching the given role.
+// Each agent's Detect() handles AGENT_ENV priority internally.
+func (d *detector) detectByRole(ctx context.Context, role AgentRole) (Agent, error) {
 	env := d.getEnv()
 
-	// First check explicit AGENT_ENV
-	if agentEnv := env.GetEnv("AGENT_ENV"); agentEnv != "" {
-		// Try to find matching agent
-		for _, agent := range d.registry.List() {
-			detected, err := agent.Detect(ctx, env)
-			if err != nil {
-				continue
-			}
-			if detected {
-				return agent, nil
-			}
-		}
-	}
-
-	// Then check each agent's native detection
 	for _, agent := range d.registry.List() {
+		if agent.Role() != role {
+			continue
+		}
 		detected, err := agent.Detect(ctx, env)
 		if err != nil {
 			continue
@@ -121,6 +119,9 @@ func (d *detector) Detect(ctx context.Context) (Agent, error) {
 	return nil, nil
 }
 
+// DetectAll returns all detected agents and orchestrators regardless of role.
+// Unlike Detect (agents only) and DetectOrchestrator (orchestrators only),
+// this does not filter by role.
 func (d *detector) DetectAll(ctx context.Context) ([]Agent, error) {
 	env := d.getEnv()
 	var detected []Agent
@@ -165,9 +166,26 @@ func RequireAgent(commandName string) string {
 		"If your agent doesn't set standard env vars, set AGENT_ENV=<agent-name> before running.", commandName)
 }
 
-// CurrentAgent returns the currently detected agent, or nil if none.
+// CurrentAgent returns the currently detected coding agent, or nil if none.
 func CurrentAgent() Agent {
 	ctx := context.Background()
 	agent, _ := NewDetector().Detect(ctx)
 	return agent
+}
+
+// CurrentOrchestrator returns the currently detected orchestrator, or nil if none.
+func CurrentOrchestrator() Agent {
+	ctx := context.Background()
+	orch, _ := NewDetector().DetectOrchestrator(ctx)
+	return orch
+}
+
+// OrchestratorType returns the type string of the detected orchestrator,
+// or empty string if none detected.
+func OrchestratorType() string {
+	orch := CurrentOrchestrator()
+	if orch == nil {
+		return ""
+	}
+	return string(orch.Type())
 }

@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -126,7 +127,7 @@ func refreshToken(token *StoredToken) (*StoredToken, error) {
 	data.Set("refresh_token", token.RefreshToken)
 
 	// create request
-	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
+	req, err := useragent.NewRequest(context.Background(), "POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, &TokenRefreshError{
 			Message: "failed to create refresh request",
@@ -136,7 +137,6 @@ func refreshToken(token *StoredToken) (*StoredToken, error) {
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("POST", tokenURL)
 	start := time.Now()
@@ -312,7 +312,7 @@ func (c *AuthClient) refreshToken(token *StoredToken) (*StoredToken, error) {
 	data.Set("refresh_token", token.RefreshToken)
 
 	// create request
-	req, err := http.NewRequest("POST", tokenURL, strings.NewReader(data.Encode()))
+	req, err := useragent.NewRequest(context.Background(), "POST", tokenURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, &TokenRefreshError{
 			Message: "failed to create refresh request",
@@ -322,7 +322,6 @@ func (c *AuthClient) refreshToken(token *StoredToken) (*StoredToken, error) {
 
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("POST", tokenURL)
 	start := time.Now()

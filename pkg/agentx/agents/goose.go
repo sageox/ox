@@ -29,7 +29,10 @@ func (a *GooseAgent) Name() string {
 
 func (a *GooseAgent) URL() string {
 	return "https://github.com/block/goose"
+
 }
+
+func (a *GooseAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
 
 // Detect checks if Goose is the active agent.
 //

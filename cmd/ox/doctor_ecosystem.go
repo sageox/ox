@@ -48,6 +48,9 @@ func checkForUpdates() checkResult {
 		}
 	}
 
+	// warm version cache for prime (side effect)
+	writeVersionCacheFromDoctor(latestVersion)
+
 	currentVersion := strings.TrimPrefix(version.Version, "v")
 	latestVersion = strings.TrimPrefix(latestVersion, "v")
 
@@ -80,7 +83,7 @@ func checkForUpdates() checkResult {
 
 // getLatestGitHubRelease fetches the latest release version from GitHub
 func getLatestGitHubRelease() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
 	url := "https://api.github.com/repos/sageox/ox/releases/latest"
@@ -89,6 +92,7 @@ func getLatestGitHubRelease() (string, error) {
 		return "", err
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	// only User-Agent for external API; no X-Orchestrator
 	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("GET", url)

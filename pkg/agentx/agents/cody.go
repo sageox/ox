@@ -28,7 +28,10 @@ func (a *CodyAgent) Name() string {
 
 func (a *CodyAgent) URL() string {
 	return "https://github.com/sourcegraph/cody"
+
 }
+
+func (a *CodyAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
 
 // Detect checks if Cody is the active agent.
 //

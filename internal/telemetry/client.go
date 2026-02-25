@@ -328,13 +328,12 @@ func (c *Client) sendEventsWithResult(ctx context.Context, events []Event) bool 
 	}
 
 	url := c.baseURL + telemetryPath
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	req, err := useragent.NewRequest(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return false
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("POST", url)
 	start := time.Now()
@@ -375,13 +374,12 @@ func (c *Client) sendEvents(ctx context.Context, events []Event) {
 	}
 
 	url := c.baseURL + telemetryPath
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	req, err := useragent.NewRequest(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
 
 	logger.LogHTTPRequest("POST", url)
 	start := time.Now()

@@ -34,6 +34,9 @@ type Config struct {
 	// Zero means never exit due to inactivity.
 	InactivityTimeout time.Duration
 
+	// VersionCheckInterval is how often to check GitHub for new releases.
+	VersionCheckInterval time.Duration
+
 	// AutoStart starts daemon on first ox command if true.
 	AutoStart bool
 
@@ -50,7 +53,8 @@ func DefaultConfig() *Config {
 		SyncIntervalRead:        5 * time.Minute,  // includes anti-entropy checks
 		TeamContextSyncInterval: 1 * time.Minute,
 		DebounceWindow:          500 * time.Millisecond,
-		InactivityTimeout:       1 * time.Hour, // exit after 1 hour of inactivity
+		VersionCheckInterval:    30 * time.Minute, // ETag conditional requests make this cheap
+		InactivityTimeout:       1 * time.Hour,    // exit after 1 hour of inactivity
 		AutoStart:               true,
 		LedgerPath:              "", // resolved at runtime
 		ProjectRoot:             "", // resolved at runtime

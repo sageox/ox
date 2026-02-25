@@ -1,6 +1,12 @@
 // internal/tips/content.go
 package tips
 
+import (
+	"fmt"
+	"math/rand" //nolint:gosec // G404: tip selection doesn't need crypto-secure randomness
+	"strings"
+)
+
 // Tips are organized into two audiences:
 //
 // 1. Human Tips (humanContextualTips, humanGeneralTips)
@@ -70,9 +76,61 @@ var agentContextualTips = map[string][]string{
 // Focus on progressive disclosure and context efficiency.
 var agentGeneralTips = []string{
 	"Use `ox doctor` to check project health and configuration",
-	"Sessions are recorded to the project ledger for team visibility",
+	"Sessions are recorded to the repo-specific ledger (not team context)",
 	"Run `ox status` to check daemon sync and project state",
 	"Use `ox config` to view and manage settings",
+}
+
+// primeUserTips are product tips shown to the user via the agent after ox agent prime.
+// Tips containing %s will have the agent name substituted (e.g., "Claude Code").
+var primeUserTips = []string{
+	`Try asking %s: "Tell me recent major decisions from our SageOx team discussions"`,
+	"Sessions are auto-recorded and shared with your team. To disable: `ox config set session_recording disabled`",
+	"View your team's knowledge base in the browser with `ox view team`",
+	"SageOx team context updates automatically — decisions from one session inform every future session",
+	"Record team discussions at sageox.ai to give all AI coworkers shared context",
+}
+
+// agentNameMap maps agent type strings to friendly display names.
+var agentNameMap = map[string]string{
+	"Claude Code": "Claude Code",
+	"claude-code": "Claude Code",
+	"claude":      "Claude Code",
+	"Cursor":      "Cursor",
+	"cursor":      "Cursor",
+	"Windsurf":    "Windsurf",
+	"windsurf":    "Windsurf",
+	"Copilot":     "Copilot",
+	"copilot":     "Copilot",
+	"Amp":         "Amp",
+	"amp":         "Amp",
+	"OpenCode":    "OpenCode",
+	"opencode":    "OpenCode",
+	"Gemini":      "Gemini",
+	"gemini":      "Gemini",
+	"Conductor":   "Conductor",
+	"conductor":   "Conductor",
+}
+
+// friendlyAgentName returns a human-readable agent name for tip text.
+func friendlyAgentName(agentType string) string {
+	if name, ok := agentNameMap[agentType]; ok {
+		return name
+	}
+	// capitalize first letter if non-empty
+	if agentType != "" {
+		return strings.ToUpper(agentType[:1]) + agentType[1:]
+	}
+	return "your AI coworker"
+}
+
+// GetPrimeUserTip returns a random product tip for the user, with agent name substituted.
+func GetPrimeUserTip(agentType string) string {
+	tip := primeUserTips[rand.Intn(len(primeUserTips))]
+	if strings.Contains(tip, "%s") {
+		return fmt.Sprintf(tip, friendlyAgentName(agentType))
+	}
+	return tip
 }
 
 // isAgentCommand returns true if the command is part of the agent UX.

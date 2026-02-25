@@ -29,7 +29,10 @@ func (a *AiderAgent) Name() string {
 
 func (a *AiderAgent) URL() string {
 	return "https://github.com/Aider-AI/aider"
+
 }
+
+func (a *AiderAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
 
 // Detect checks if Aider is the active agent.
 //

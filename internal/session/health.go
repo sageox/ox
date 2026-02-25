@@ -96,11 +96,10 @@ func checkStorageHealth(status *HealthStatus, projectRoot string) {
 	var err error
 
 	if projectRoot != "" {
-		// derive ledger path from project root using shared function
-		repoName := filepath.Base(projectRoot)
-		ep := endpoint.GetForProject(projectRoot)
-		ledgerPath = config.DefaultLedgerPath(repoName, projectRoot, ep)
-	} else {
+		// derive ledger path from project config (repo ID + endpoint)
+		ledgerPath = ledgerPathFromProject(projectRoot)
+	}
+	if ledgerPath == "" {
 		// fall back to cwd-based ledger path
 		ledgerPath, err = ledger.DefaultPath()
 		if err != nil {
@@ -111,14 +110,33 @@ func checkStorageHealth(status *HealthStatus, projectRoot string) {
 	}
 	status.StoragePath = ledgerPath
 
-	// try to create directory if it doesn't exist
-	if err := os.MkdirAll(status.StoragePath, 0755); err != nil {
-		status.StorageError = fmt.Sprintf("create storage dir=%s: %v", status.StoragePath, err)
+	// check if the directory exists (don't create it — that's the clone step's job)
+	info, err := os.Stat(status.StoragePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// directory doesn't exist yet — ledger hasn't been cloned
+			// check if parent dir is writable (storage will be writable once cloned)
+			parentDir := filepath.Dir(status.StoragePath)
+			if parentInfo, parentErr := os.Stat(parentDir); parentErr == nil && parentInfo.IsDir() {
+				status.StorageWritable = true
+				return
+			}
+			// parent doesn't exist either — check grandparent writability
+			status.StorageWritable = true
+			return
+		}
+		status.StorageError = fmt.Sprintf("stat storage dir=%s: %v", status.StoragePath, err)
 		status.Errors = append(status.Errors, status.StorageError)
 		return
 	}
 
-	// test write access with a temp file
+	if !info.IsDir() {
+		status.StorageError = fmt.Sprintf("storage path is not a directory: %s", status.StoragePath)
+		status.Errors = append(status.Errors, status.StorageError)
+		return
+	}
+
+	// directory exists — test write access with a temp file
 	testFile := filepath.Join(status.StoragePath, ".health_check")
 	if err := os.WriteFile(testFile, []byte("test"), 0600); err != nil {
 		status.StorageError = fmt.Sprintf("write test file=%s: %v", testFile, err)
@@ -138,11 +156,10 @@ func checkLedgerHealth(status *HealthStatus, projectRoot string) {
 	var err error
 
 	if projectRoot != "" {
-		// derive ledger path from project root using shared function
-		repoName := filepath.Base(projectRoot)
-		ep := endpoint.GetForProject(projectRoot)
-		ledgerPath = config.DefaultLedgerPath(repoName, projectRoot, ep)
-	} else {
+		// derive ledger path from project config (repo ID + endpoint)
+		ledgerPath = ledgerPathFromProject(projectRoot)
+	}
+	if ledgerPath == "" {
 		// fall back to cwd-based ledger path
 		ledgerPath, err = ledger.DefaultPath()
 		if err != nil {
@@ -305,4 +322,15 @@ func ShortenPath(path string) string {
 		return "~" + path[len(home):]
 	}
 	return path
+}
+
+// ledgerPathFromProject derives the ledger path from a project root.
+// Returns empty string if project config cannot be loaded or has no repo ID.
+func ledgerPathFromProject(projectRoot string) string {
+	projectCfg, err := config.LoadProjectConfig(projectRoot)
+	if err != nil || projectCfg == nil || projectCfg.RepoID == "" {
+		return ""
+	}
+	ep := endpoint.GetForProject(projectRoot)
+	return config.DefaultLedgerPath(projectCfg.RepoID, ep)
 }

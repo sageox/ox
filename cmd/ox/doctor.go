@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	lipgloss "charm.land/lipgloss/v2"
+
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
@@ -164,34 +166,59 @@ common issues, or --fix-slug to target specific checks.`,
 		// check if project is initialized (only relevant if in a git repo)
 		projectInitialized := gitRoot != "" && config.IsInitialized(gitRoot)
 
+		// short-circuit: not in a git repo
+		if gitRoot == "" {
+			w := cmd.OutOrStdout()
+			renderDoctorHeader(w, false)
+
+			var steps []string
+			steps = append(steps,
+				fmt.Sprintf("%s  Not inside a git repository",
+					ui.FailStyle.Render(ui.TimelineDot)),
+				fmt.Sprintf("%s  Run %s from a git repo to diagnose project issues",
+					ui.MutedStyle.Render(ui.TimelineBar),
+					cli.StyleCommand.Render("ox doctor")),
+			)
+			content := strings.Join(steps, "\n")
+			fmt.Fprintln(w, ui.RenderBox("No Git Repository", content, ui.BoxWarning))
+			fmt.Fprintln(w)
+			return nil
+		}
+
 		// short-circuit with setup guidance if not ready
 		if !authenticated || !projectInitialized {
 			w := cmd.OutOrStdout()
-			fmt.Fprintln(w)
-			fmt.Fprintln(w, cli.StyleWarning.Render("Setup Required"))
-			fmt.Fprintln(w, cli.StyleDim.Render("──────────────"))
+			renderDoctorHeader(w, false)
+
+			// build mini-timeline inside a box
+			var steps []string
 
 			if !authenticated {
-				fmt.Fprintf(w, "Step 1: Run %s to authenticate with %s\n",
-					cli.StyleCommand.Render("ox login"), endpointSlug)
+				steps = append(steps,
+					fmt.Sprintf("%s  Step 1: Run %s",
+						ui.AccentStyle.Render(ui.TimelineDot),
+						cli.StyleCommand.Render("ox login")),
+					fmt.Sprintf("%s  Authenticate with %s",
+						ui.MutedStyle.Render(ui.TimelineBar), endpointSlug),
+				)
 			} else {
-				fmt.Fprintf(w, "%s Logged in to %s\n",
-					cli.StyleSuccess.Render("✓"), endpointSlug)
+				steps = append(steps,
+					fmt.Sprintf("%s  %s Logged in to %s",
+						ui.PassStyle.Render(ui.TimelineDot),
+						ui.RenderPassIcon(), endpointSlug),
+				)
 			}
 
-			if gitRoot == "" {
-				fmt.Fprintf(w, "Step 2: Run %s inside a git repo to enable it to use %s\n",
-					cli.StyleCommand.Render("ox init"), cli.Wordmark())
-			} else if !projectInitialized {
-				fmt.Fprintf(w, "Step 2: Run %s to initialize this project\n",
-					cli.StyleCommand.Render("ox init"))
-				fmt.Fprintf(w, "\n%s If a coworker has already set up %s on this repo,\n"+
-					"  run %s first to pull their changes.\n",
-					cli.StyleDim.Render("Tip:"),
-					cli.Wordmark(),
-					cli.StyleCommand.Render("git pull"))
+			if !projectInitialized {
+				steps = append(steps,
+					fmt.Sprintf("%s  Step 2: Run %s to initialize this project",
+						ui.MutedStyle.Render(ui.TimelineCircle),
+						cli.StyleCommand.Render("ox init")),
+				)
 			}
 
+			content := strings.Join(steps, "\n")
+			fmt.Fprintln(w, ui.RenderBox("Setup Required", content, ui.BoxWarning))
 			fmt.Fprintln(w)
 			return nil
 		}
@@ -223,6 +250,11 @@ common issues, or --fix-slug to target specific checks.`,
 			fixSlugs: fixSlugs,
 			forceYes: forceYes,
 			verbose:  verbose,
+		}
+
+		// render branded header before checks run (so it appears before spinners)
+		if cfg == nil || !cfg.JSON {
+			renderDoctorHeader(cmd.OutOrStdout(), opts.fix)
 		}
 
 		categories := runDoctorChecks(opts)
@@ -426,6 +458,11 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		if !hookCmdCheck.skipped {
 			integrationChecks = append(integrationChecks, hookCmdCheck)
 		}
+		// check project-level hook completeness (all required events present)
+		completenessCheck := checkProjectHookCompleteness(opts.shouldFix(CheckSlugHookCompleteness))
+		if !completenessCheck.skipped {
+			integrationChecks = append(integrationChecks, completenessCheck)
+		}
 		// also check project-level hooks if present
 		projectHookCheck := checkProjectHookCommands()
 		if !projectHookCheck.skipped {
@@ -530,6 +567,11 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 	if !teamSymlinkCheck.skipped {
 		gitRepoChecks = append(gitRepoChecks, teamSymlinkCheck)
 	}
+	// ensure .sageox/ledger and .sageox/teams/primary symlinks exist
+	projectSymlinkCheck := checkProjectSymlinks(opts.shouldFix(CheckSlugProjectSymlinks))
+	if !projectSymlinkCheck.skipped {
+		gitRepoChecks = append(gitRepoChecks, projectSymlinkCheck)
+	}
 	categories = append(categories, checkCategory{
 		name:   "Git Repository Health",
 		checks: gitRepoChecks,
@@ -537,7 +579,13 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 
 	// Category 5b: Ledger Git Health (SageOx is multiplayer - always check)
 	progress.show("Ledger Git Health")
-	ledgerGitChecks := checkLedgerGitHealth(opts.fix, opts.shouldFix(CheckSlugLedgerRemote), opts.shouldFix(CheckSlugGitignoreMissing))
+	ledgerGitChecks := checkLedgerGitHealth(
+		opts.fix,
+		opts.shouldFix(CheckSlugLedgerRemote),
+		opts.shouldFix(CheckSlugGitignoreMissing),
+		opts.shouldFix(CheckSlugLedgerBranchStatus),
+		opts.shouldFix(CheckSlugLedgerCleanWorkdir),
+	)
 	if len(ledgerGitChecks) > 0 {
 		categories = append(categories, checkCategory{
 			name:   "Ledger Git Health",
@@ -735,7 +783,9 @@ func enrichCheckResult(check *checkResult) {
 //   - networkChecks: whether to run network checks (git ls-remote); only with --fix
 //   - fixRemote: whether to fix remote URL issues
 //   - fixGitignore: whether to fix .sageox/.gitignore issues in checkouts
-func checkLedgerGitHealth(networkChecks bool, fixRemote bool, fixGitignore bool) []checkResult {
+//   - fixBranch: whether to auto-sync branch (push/pull)
+//   - fixWorkdir: whether to auto-commit dirty workdir
+func checkLedgerGitHealth(networkChecks bool, fixRemote bool, fixGitignore bool, fixBranch bool, fixWorkdir bool) []checkResult {
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
 		return nil // no ledger found, skip entire category
@@ -753,8 +803,8 @@ func checkLedgerGitHealth(networkChecks bool, fixRemote bool, fixGitignore bool)
 		checks = append(checks, SkippedCheck("Ledger remote connectivity", "use --fix for network checks", ""))
 	}
 	checks = append(checks,
-		checkLedgerBranchStatus(),
-		checkLedgerCleanWorkdir(),
+		checkLedgerCleanWorkdir(fixWorkdir),
+		checkLedgerBranchStatus(fixBranch),
 		checkLedgerRemoteURLMatch(fixRemote),
 	)
 
@@ -778,7 +828,6 @@ func checkLedgerGitHealth(networkChecks bool, fixRemote bool, fixGitignore bool)
 // With --json: structured JSON output
 // Returns true if any checks failed (not warnings)
 func displayDoctorResults(cmd *cobra.Command, categories []checkCategory, opts doctorOptions) bool {
-	// check for JSON output mode
 	if cfg != nil && cfg.JSON {
 		return displayJSONResults(cmd, categories)
 	}
@@ -971,7 +1020,7 @@ func renderFixLevelBadge(level FixLevel) string {
 
 // renderAgentRequiredBadge returns a styled badge for agent-required checks
 func renderAgentRequiredBadge() string {
-	return ui.AccentStyle.Render("[agent]")
+	return ui.WarnStyle.Render("[agent]")
 }
 
 // renderFixableSlugs displays available fix slugs grouped by fix level
@@ -1021,14 +1070,11 @@ func renderFixableSlugs(cmd *cobra.Command, slugs []fixSlugInfo) {
 
 // displayPrioritySummary shows issues grouped by priority (default view)
 func displayPrioritySummary(cmd *cobra.Command, categories []checkCategory) bool {
-	fmt.Fprintln(cmd.OutOrStdout(), "\nox doctor")
-	fmt.Fprintln(cmd.OutOrStdout())
+	w := cmd.OutOrStdout()
 
 	var passCount, warnCount, failCount, skipCount int
 	var critical, attention, optional, agentRequired []checkResult
 	hasFailed := false
-
-	// collect fixable slugs for summary
 	var fixableSlugs []fixSlugInfo
 
 	// collect and categorize all checks
@@ -1046,52 +1092,46 @@ func displayPrioritySummary(cmd *cobra.Command, categories []checkCategory) bool
 		}
 	}
 
-	// render priority sections (grouped by remediation action)
+	// build timeline nodes from priority buckets
+	var nodes []ui.TimelineNode
+
 	if len(critical) > 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), ui.RenderFail(ui.IconFail+" CRITICAL"))
-		renderGroupedChecks(cmd, critical)
-		fmt.Fprintln(cmd.OutOrStdout())
+		nodes = append(nodes, priorityBucketToNode("Critical", ui.FailStyle, critical))
 	}
-
 	if len(attention) > 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), ui.RenderWarn(ui.IconWarn+" NEEDS ATTENTION"))
-		renderGroupedChecks(cmd, attention)
-		fmt.Fprintln(cmd.OutOrStdout())
+		nodes = append(nodes, priorityBucketToNode("Needs Attention", ui.WarnStyle, attention))
 	}
-
-	// agent-required section: issues that need `ox agent doctor` to resolve
-	if len(agentRequired) > 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), ui.RenderAccent(ui.IconAgent+" REQUIRES AGENT"))
-		renderGroupedChecks(cmd, agentRequired)
-		fmt.Fprintln(cmd.OutOrStdout())
-	}
-
+	// agent-required checks rendered separately as a prominent box (not a timeline node)
+	// so users clearly see they need to act inside their AI coding session
 	if len(optional) > 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), ui.MutedStyle.Render("ℹ OPTIONAL"))
-		renderGroupedChecks(cmd, optional)
-		fmt.Fprintln(cmd.OutOrStdout())
+		nodes = append(nodes, priorityBucketToNode("Optional", ui.MutedStyle, optional))
 	}
 
-	// summary line
-	fmt.Fprintln(cmd.OutOrStdout(), ui.RenderSeparator())
-	summary := fmt.Sprintf("Summary: %s %d passed  %s %d warnings  %s %d failed",
-		ui.RenderPassIcon(), passCount,
-		ui.RenderWarnIcon(), warnCount,
-		ui.RenderFailIcon(), failCount,
-	)
-	// add skipped count if any
-	if skipCount > 0 {
-		summary += fmt.Sprintf("  %s %d skipped", ui.MutedStyle.Render(ui.IconSkip), skipCount)
+	// if everything passed, show a single "all clear" node
+	if len(nodes) == 0 {
+		nodes = append(nodes, ui.TimelineNode{
+			Title:   "All checks passed",
+			Style:   ui.PassStyle,
+			Summary: fmt.Sprintf("%d checks", passCount),
+		})
 	}
-	fmt.Fprintln(cmd.OutOrStdout(), summary)
 
-	// show fixable slugs if any failed or warning checks have fixes
-	renderFixableSlugs(cmd, fixableSlugs)
+	// render timeline
+	fmt.Fprint(w, ui.RenderTimeline(nodes, "Done"))
 
-	if passCount > 0 && len(fixableSlugs) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), ui.MutedStyle.Render("Run ox doctor -v for full details"))
+	// agent-required box (prominent call-to-action)
+	if len(agentRequired) > 0 {
+		fmt.Fprintln(w, renderAgentRequiredBox(agentRequired))
 	}
+
+	// summary box
+	hint := fixableSlugsHint(fixableSlugs)
+	if hint == "" && failCount == 0 && warnCount == 0 {
+		hint = "Setup is healthy"
+	} else if hint == "" && passCount > 0 {
+		hint = "Run ox doctor -v for full details"
+	}
+	fmt.Fprintln(w, ui.RenderSummaryBox(passCount, warnCount, failCount, skipCount, hint))
 
 	return hasFailed
 }
@@ -1145,186 +1185,158 @@ func categorizeCheck(check checkResult, critical, attention, optional, agentRequ
 	// passed checks without warning are not shown in priority view
 }
 
-// checkGroup represents checks grouped by remediation action
-type checkGroup struct {
-	detail string
-	checks []checkResult
+// checkToTimelineItems converts a checkResult (and its children) into TimelineItems,
+// updating counters and collecting fixable slugs as a side effect.
+func checkToTimelineItems(check checkResult, passCount, warnCount, failCount, skipCount *int, hasFailed *bool, fixableSlugs *[]fixSlugInfo) []ui.TimelineItem {
+	var items []ui.TimelineItem
+
+	countCheck(check, passCount, warnCount, failCount, skipCount)
+	collectFixableSlugs(check, fixableSlugs)
+	if !check.passed && !check.skipped {
+		*hasFailed = true
+	}
+
+	items = append(items, singleCheckToItem(check))
+
+	for _, child := range check.children {
+		countCheck(child, passCount, warnCount, failCount, skipCount)
+		collectFixableSlugs(child, fixableSlugs)
+		if !child.passed && !child.skipped {
+			*hasFailed = true
+		}
+		items = append(items, singleCheckToItem(child))
+	}
+
+	return items
 }
 
-// renderGroupedChecks groups checks by remediation and renders them
-func renderGroupedChecks(cmd *cobra.Command, checks []checkResult) {
-	// group checks by detail (remediation action)
-	groups := groupChecksByDetail(checks)
+// singleCheckToItem converts one checkResult to a TimelineItem.
+func singleCheckToItem(check checkResult) ui.TimelineItem {
+	icon, style := checkIconAndStyle(check)
 
-	for _, group := range groups {
-		if len(group.checks) == 1 {
-			// single check - render normally
-			check := group.checks[0]
-			line := fmt.Sprintf("  %s", check.name)
-			// add agent-required badge if applicable
+	var badge string
+	if (!check.passed || check.warning) && !check.skipped {
+		if check.requiresAgent {
+			badge = renderAgentRequiredBadge()
+		} else if b := renderFixLevelBadge(check.fixLevel); b != "" {
+			badge = b
+		}
+	}
+
+	detail := check.detail
+	if detail != "" {
+		detail = cli.FormatTipText(detail)
+	}
+
+	return ui.TimelineItem{
+		Icon:   icon,
+		Style:  style,
+		Text:   check.name + messageAnnotation(check.message),
+		Detail: detail,
+		Badge:  badge,
+	}
+}
+
+// checkIconAndStyle returns the appropriate icon and lipgloss style for a check.
+func checkIconAndStyle(check checkResult) (string, lipgloss.Style) {
+	if check.skipped {
+		return ui.IconSkip, ui.MutedStyle
+	}
+	if check.passed {
+		if check.warning {
 			if check.requiresAgent {
-				line += " " + renderAgentRequiredBadge()
-			} else if badge := renderFixLevelBadge(check.fixLevel); badge != "" {
-				// add fix level badge if available (only if not agent-required)
-				line += " " + badge
+				return ui.IconAgent, ui.WarnStyle
 			}
-			if check.message != "" {
-				line += ui.MutedStyle.Render(" (" + check.message + ")")
-			}
-			fmt.Fprintln(cmd.OutOrStdout(), line)
-			if check.detail != "" {
-				formattedDetail := cli.FormatTipText(check.detail)
-				fmt.Fprintf(cmd.OutOrStdout(), "  %s%s\n", ui.MutedStyle.Render(ui.TreeLast), formattedDetail)
-			}
-		} else {
-			// multiple checks with same remediation - group them
-			action := extractActionHeader(group.detail)
-			header := fmt.Sprintf("  %s%s", action, ui.MutedStyle.Render(fmt.Sprintf(" (%d items)", len(group.checks))))
-			fmt.Fprintln(cmd.OutOrStdout(), header)
-
-			for _, check := range group.checks {
-				name := check.name
-				// add agent-required badge if applicable
-				if check.requiresAgent {
-					name += " " + renderAgentRequiredBadge()
-				} else if badge := renderFixLevelBadge(check.fixLevel); badge != "" {
-					// add fix level badge if available (only if not agent-required)
-					name += " " + badge
-				}
-				if check.message != "" {
-					name += ui.MutedStyle.Render(" (" + check.message + ")")
-				}
-				fmt.Fprintf(cmd.OutOrStdout(), "    %s %s\n", ui.MutedStyle.Render("•"), name)
-			}
+			return ui.IconWarn, ui.WarnStyle
 		}
+		return ui.IconPass, ui.PassStyle
 	}
+	if check.requiresAgent {
+		return ui.IconAgent, ui.WarnStyle
+	}
+	return ui.IconFail, ui.FailStyle
 }
 
-// groupChecksByDetail groups checks by their primary remediation command
-func groupChecksByDetail(checks []checkResult) []checkGroup {
-	// use ordered map to preserve insertion order
-	seen := make(map[string]int) // key -> index in groups
-	var groups []checkGroup
+// messageAnnotation returns a dimmed parenthesized message, or empty string.
+func messageAnnotation(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	return " " + ui.MutedStyle.Render("("+msg+")")
+}
 
+// priorityBucketToNode converts a priority bucket of checks into a TimelineNode.
+func priorityBucketToNode(title string, style lipgloss.Style, checks []checkResult) ui.TimelineNode {
+	node := ui.TimelineNode{
+		Title: title,
+		Style: style,
+	}
 	for _, check := range checks {
-		// extract the command from detail to use as grouping key
-		key := extractGroupingKey(check.detail)
-
-		if idx, ok := seen[key]; ok {
-			groups[idx].checks = append(groups[idx].checks, check)
-		} else {
-			seen[key] = len(groups)
-			groups = append(groups, checkGroup{
-				detail: check.detail,
-				checks: []checkResult{check},
-			})
-		}
+		item := singleCheckToItem(check)
+		node.Items = append(node.Items, item)
 	}
-
-	return groups
+	return node
 }
 
-// extractGroupingKey extracts the primary command from a detail string for grouping
-// e.g., "Run `ox init` to create it" -> "ox init"
-// e.g., "Run `ox doctor --fix` to add them" -> "ox doctor --fix"
-func extractGroupingKey(detail string) string {
-	if detail == "" {
-		return "__no_detail__"
-	}
-
-	// extract command from backticks
-	start := strings.Index(detail, "`")
-	if start != -1 {
-		end := strings.Index(detail[start+1:], "`")
-		if end != -1 {
-			return detail[start+1 : start+1+end]
+// renderAgentRequiredBox renders a prominent bordered box for checks that require
+// running `ox agent doctor` inside an AI coding session (e.g., Claude Code).
+func renderAgentRequiredBox(checks []checkResult) string {
+	var lines []string
+	for _, check := range checks {
+		icon, style := checkIconAndStyle(check)
+		lines = append(lines, style.Render(icon)+" "+check.name+messageAnnotation(check.message))
+		if check.detail != "" {
+			lines = append(lines, "  "+ui.MutedStyle.Render(cli.FormatTipText(check.detail)))
 		}
 	}
 
-	// no backticks - use full detail as key
-	return detail
+	body := strings.Join(lines, "\n")
+	body += "\n\n" + ui.MutedStyle.Render("Run ")+
+		cli.FormatTipText("`ox agent doctor`")+
+		ui.MutedStyle.Render(" inside your AI coding session (e.g., Claude Code)")
+
+	return ui.RenderBox("Requires AI Coworker", body, ui.BoxInfo)
 }
 
-// extractActionHeader extracts a short header from a detail string
-// e.g., "Run `ox init` to create it" -> "Run ox init"
-func extractActionHeader(detail string) string {
-	if detail == "" {
-		return "Other issues"
+// fixableSlugsHint builds a hint string from fixable slugs for the summary box.
+func fixableSlugsHint(slugs []fixSlugInfo) string {
+	if len(slugs) == 0 {
+		return ""
 	}
-
-	// take first line only
-	if idx := strings.Index(detail, "\n"); idx != -1 {
-		detail = detail[:idx]
-	}
-
-	// extract command from backticks if present
-	start := strings.Index(detail, "`")
-	if start != -1 {
-		end := strings.Index(detail[start+1:], "`")
-		if end != -1 {
-			cmd := detail[start+1 : start+1+end]
-			// return "Run <cmd>" format
-			if strings.HasPrefix(strings.ToLower(detail), "run") {
-				return "Run " + cmd
-			}
-			return cmd
-		}
-	}
-
-	// fallback: truncate at reasonable length
-	if len(detail) > 40 {
-		return detail[:37] + "..."
-	}
-	return detail
+	return "Run `ox doctor --fix` to repair"
 }
 
 // displayVerboseResults shows full category-based output (ox doctor -v)
 func displayVerboseResults(cmd *cobra.Command, categories []checkCategory) bool {
-	fmt.Fprintln(cmd.OutOrStdout(), "\nox doctor -v")
-	fmt.Fprintln(cmd.OutOrStdout())
+	w := cmd.OutOrStdout()
 
 	var passCount, warnCount, failCount, skipCount int
 	hasFailed := false
-
-	// collect fixable slugs for summary
 	var fixableSlugs []fixSlugInfo
 
+	// build timeline nodes from categories
+	var nodes []ui.TimelineNode
+
 	for _, cat := range categories {
-		// category header
-		fmt.Fprintln(cmd.OutOrStdout(), ui.RenderCategory(cat.name))
+		node := ui.TimelineNode{
+			Title: cat.name,
+			Style: ui.AccentStyle,
+		}
 
 		for _, check := range cat.checks {
-			renderCheck(cmd, check, 1, &passCount, &warnCount, &failCount, &skipCount)
-			if !check.passed && !check.warning && !check.skipped {
-				hasFailed = true
-			}
-			collectFixableSlugs(check, &fixableSlugs)
-
-			for _, child := range check.children {
-				if !child.passed && !child.warning && !child.skipped {
-					hasFailed = true
-				}
-				collectFixableSlugs(child, &fixableSlugs)
-			}
+			items := checkToTimelineItems(check, &passCount, &warnCount, &failCount, &skipCount, &hasFailed, &fixableSlugs)
+			node.Items = append(node.Items, items...)
 		}
-		fmt.Fprintln(cmd.OutOrStdout())
+
+		nodes = append(nodes, node)
 	}
 
-	// summary line
-	fmt.Fprintln(cmd.OutOrStdout(), ui.RenderSeparator())
-	summary := fmt.Sprintf("Summary: %s %d passed  %s %d warnings  %s %d failed",
-		ui.RenderPassIcon(), passCount,
-		ui.RenderWarnIcon(), warnCount,
-		ui.RenderFailIcon(), failCount,
-	)
-	// add skipped count if any
-	if skipCount > 0 {
-		summary += fmt.Sprintf("  %s %d skipped", ui.MutedStyle.Render(ui.IconSkip), skipCount)
-	}
-	fmt.Fprintln(cmd.OutOrStdout(), summary)
+	// render full timeline
+	fmt.Fprint(w, ui.RenderTimeline(nodes, "Done"))
 
-	// show fixable slugs if any failed or warning checks have fixes
-	renderFixableSlugs(cmd, fixableSlugs)
+	// summary box
+	hint := fixableSlugsHint(fixableSlugs)
+	fmt.Fprintln(w, ui.RenderSummaryBox(passCount, warnCount, failCount, skipCount, hint))
 
 	return hasFailed
 }
@@ -1341,7 +1353,7 @@ func renderCheck(cmd *cobra.Command, check checkResult, depth int, passCount, wa
 		if check.warning {
 			// use agent icon for agent-required warnings
 			if check.requiresAgent {
-				statusIcon = ui.AccentStyle.Render(ui.IconAgent)
+				statusIcon = ui.WarnStyle.Render(ui.IconAgent)
 			} else {
 				statusIcon = ui.WarnStyle.Render(ui.IconWarn)
 			}
@@ -1353,7 +1365,7 @@ func renderCheck(cmd *cobra.Command, check checkResult, depth int, passCount, wa
 	} else {
 		// use agent icon for agent-required failures
 		if check.requiresAgent {
-			statusIcon = ui.AccentStyle.Render(ui.IconAgent)
+			statusIcon = ui.WarnStyle.Render(ui.IconAgent)
 		} else {
 			statusIcon = ui.FailStyle.Render(ui.IconFail)
 		}
@@ -1396,7 +1408,7 @@ func renderCheck(cmd *cobra.Command, check checkResult, depth int, passCount, wa
 			if child.warning {
 				// use agent icon for agent-required warnings
 				if child.requiresAgent {
-					childIcon = ui.AccentStyle.Render(ui.IconAgent)
+					childIcon = ui.WarnStyle.Render(ui.IconAgent)
 				} else {
 					childIcon = ui.WarnStyle.Render(ui.IconWarn)
 				}
@@ -1408,7 +1420,7 @@ func renderCheck(cmd *cobra.Command, check checkResult, depth int, passCount, wa
 		} else {
 			// use agent icon for agent-required failures
 			if child.requiresAgent {
-				childIcon = ui.AccentStyle.Render(ui.IconAgent)
+				childIcon = ui.WarnStyle.Render(ui.IconAgent)
 			} else {
 				childIcon = ui.FailStyle.Render(ui.IconFail)
 			}

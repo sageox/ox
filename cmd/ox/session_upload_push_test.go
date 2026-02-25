@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -153,7 +154,7 @@ func TestPushLedger_ConflictWithDivergedRemote(t *testing.T) {
 	runGit(t, otherClone, "push")
 
 	// now push from local — should handle the non-fast-forward with rebase retry
-	err := pushLedger(clonePath)
+	err := pushLedger(context.Background(), clonePath)
 	require.NoError(t, err, "pushLedger should succeed after rebase retry on diverged remote")
 
 	// verify both commits exist on remote
@@ -187,7 +188,7 @@ func TestPushLedger_AuthFailureSurfacesClearError(t *testing.T) {
 	// also set GIT_TERMINAL_PROMPT=0 to prevent interactive prompt
 	t.Setenv("GIT_TERMINAL_PROMPT", "0")
 
-	err := pushLedger(clonePath)
+	err := pushLedger(context.Background(), clonePath)
 	require.Error(t, err, "should fail on auth error")
 	assert.Contains(t, err.Error(), "not retryable",
 		"auth errors should be flagged as not retryable")
@@ -212,7 +213,7 @@ func TestPushLedger_RetryExhaustion(t *testing.T) {
 	// error ("does not appear to be a git repository") that doesn't match permanent patterns
 	runGit(t, clonePath, "remote", "set-url", "origin", "/nonexistent/bare/repo.git")
 
-	err := pushLedger(clonePath)
+	err := pushLedger(context.Background(), clonePath)
 	require.Error(t, err, "should fail after retry exhaustion")
 	assert.Contains(t, err.Error(), "failed after 3 attempts",
 		"error should indicate retry exhaustion")

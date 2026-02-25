@@ -1,11 +1,13 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -54,18 +56,24 @@ func TestCheckHealth_RepoNotCloned(t *testing.T) {
 }
 
 func TestCheckHealth_RepoCloned(t *testing.T) {
-	// create a fake project with a sibling ledger containing .git directory
-	// new structure: <parent>/<repo>_sageox/<endpoint>/ledger/
+	// create a fake project with a user-dir ledger containing .git directory
 	tempDir := t.TempDir()
 	projectRoot := filepath.Join(tempDir, "my_project")
-	// new ledger path structure: <project>_sageox/<endpoint>/ledger
-	ledgerPath := filepath.Join(tempDir, "my_project_sageox", "sageox.ai", "ledger")
 
-	// create project directory
-	err := os.MkdirAll(projectRoot, 0755)
+	// create project directory with config
+	err := os.MkdirAll(filepath.Join(projectRoot, ".sageox"), 0755)
 	require.NoError(t, err)
 
-	// create ledger with .git directory
+	repoID := "repo_019c5812-01e9-7b7d-b5b1-321c471c9777"
+	cfgContent := fmt.Sprintf(`{"endpoint":"https://sageox.ai","repo_id":"%s"}`, repoID)
+	err = os.WriteFile(filepath.Join(projectRoot, ".sageox", "config.json"), []byte(cfgContent), 0644)
+	require.NoError(t, err)
+
+	// derive expected ledger path (user-dir based)
+	ep := "https://sageox.ai"
+	ledgerPath := config.DefaultLedgerPath(repoID, ep)
+
+	// create ledger with .git directory at the user-dir location
 	gitDir := filepath.Join(ledgerPath, ".git")
 	err = os.MkdirAll(gitDir, 0755)
 	require.NoError(t, err)
@@ -281,4 +289,35 @@ func TestCheckHealth_EmptyProjectRoot(t *testing.T) {
 
 	// recording should not be checked (no project root)
 	assert.False(t, status.IsRecordingActive)
+}
+
+// TestCheckHealth_DoesNotCreateSiblingDirectory verifies that CheckHealth
+// does not create the ledger directory as a side-effect. This was bug #35:
+// the storage writability check called os.MkdirAll, creating an empty
+// <project>_sageox/<endpoint>/ledger directory that then caused
+// checkGitRepoPaths to report a false "empty directory" failure.
+func TestCheckHealth_DoesNotCreateSiblingDirectory(t *testing.T) {
+	tempDir := t.TempDir()
+	projectRoot := filepath.Join(tempDir, "my_project")
+
+	err := os.MkdirAll(projectRoot, 0755)
+	require.NoError(t, err)
+
+	siblingDir := filepath.Join(tempDir, "my_project_sageox")
+
+	// precondition: sibling directory does not exist
+	_, err = os.Stat(siblingDir)
+	require.True(t, os.IsNotExist(err), "sibling dir should not exist before CheckHealth")
+
+	status := CheckHealth(projectRoot)
+
+	// CheckHealth should still report a storage path
+	assert.NotEmpty(t, status.StoragePath)
+	// storage should be considered writable (parent is writable)
+	assert.True(t, status.StorageWritable, "storage should be writable even without existing dir")
+
+	// critical assertion: the sibling directory must NOT have been created
+	_, err = os.Stat(siblingDir)
+	assert.True(t, os.IsNotExist(err),
+		"CheckHealth must not create sibling directory %s as side-effect", siblingDir)
 }

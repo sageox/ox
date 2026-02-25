@@ -25,6 +25,8 @@ func TestSupportedAgents(t *testing.T) {
 		AgentTypeAmp,
 		AgentTypeCline,
 		AgentTypeDroid,
+		AgentTypeOpenClaw,
+		AgentTypeConductor,
 	}
 
 	assert.Equal(t, len(expected), len(SupportedAgents), "SupportedAgents count mismatch")
@@ -61,6 +63,8 @@ func TestAgentTypeConstants(t *testing.T) {
 		{AgentTypeAmp, "amp"},
 		{AgentTypeCline, "cline"},
 		{AgentTypeDroid, "droid"},
+		{AgentTypeOpenClaw, "openclaw"},
+		{AgentTypeConductor, "conductor"},
 	}
 
 	for _, tt := range tests {
@@ -153,11 +157,119 @@ func TestDetector(t *testing.T) {
 	assert.Equal(t, AgentTypeClaudeCode, detected.Type(), "Detect() returned wrong type")
 }
 
+func TestDetectOrchestrator(t *testing.T) {
+	reg := NewRegistry()
+
+	agent := &mockAgent{
+		agentType:    AgentTypeClaudeCode,
+		name:         "Claude Code",
+		detectResult: true,
+	}
+	orch := &mockAgent{
+		agentType:    AgentTypeConductor,
+		name:         "Conductor",
+		role:         RoleOrchestrator,
+		detectResult: true,
+	}
+	reg.Register(agent)
+	reg.Register(orch)
+
+	ctx := context.Background()
+	d := reg.Detector()
+
+	// Detect() should return only the coding agent, not the orchestrator
+	detected, err := d.Detect(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, detected)
+	assert.Equal(t, AgentTypeClaudeCode, detected.Type())
+
+	// DetectOrchestrator() should return only the orchestrator
+	detectedOrch, err := d.DetectOrchestrator(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, detectedOrch)
+	assert.Equal(t, AgentTypeConductor, detectedOrch.Type())
+}
+
+func TestDetectOrchestrator_NoneRegistered(t *testing.T) {
+	reg := NewRegistry()
+
+	agent := &mockAgent{
+		agentType:    AgentTypeClaudeCode,
+		name:         "Claude Code",
+		detectResult: true,
+	}
+	reg.Register(agent)
+
+	ctx := context.Background()
+	d := reg.Detector()
+
+	// no orchestrators registered, should return nil
+	detectedOrch, err := d.DetectOrchestrator(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, detectedOrch)
+}
+
+func TestDetect_SkipsOrchestrators(t *testing.T) {
+	reg := NewRegistry()
+
+	// register only an orchestrator
+	orch := &mockAgent{
+		agentType:    AgentTypeOpenClaw,
+		name:         "OpenClaw",
+		role:         RoleOrchestrator,
+		detectResult: true,
+	}
+	reg.Register(orch)
+
+	ctx := context.Background()
+	d := reg.Detector()
+
+	// Detect() should return nil since only orchestrators are registered
+	detected, err := d.Detect(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, detected)
+}
+
+func TestRequireAgent_NoAgent(t *testing.T) {
+	// Save and restore DefaultRegistry
+	orig := DefaultRegistry
+	defer func() { DefaultRegistry = orig }()
+
+	DefaultRegistry = NewRegistry()
+	// no agents registered — RequireAgent should return error message
+	msg := RequireAgent("ox session start")
+	assert.NotEmpty(t, msg, "RequireAgent should return error when no agent detected")
+	assert.Contains(t, msg, "ox session start")
+	assert.Contains(t, msg, "coding agent")
+}
+
+func TestRequireAgent_WithAgent(t *testing.T) {
+	orig := DefaultRegistry
+	defer func() { DefaultRegistry = orig }()
+
+	DefaultRegistry = NewRegistry()
+	DefaultRegistry.Register(&mockAgent{
+		agentType:    AgentTypeClaudeCode,
+		name:         "Claude Code",
+		detectResult: true,
+	})
+
+	msg := RequireAgent("ox session start")
+	assert.Empty(t, msg, "RequireAgent should return empty when agent is detected")
+}
+
+func TestRegister_Nil(t *testing.T) {
+	reg := NewRegistry()
+	err := reg.Register(nil)
+	assert.Error(t, err, "Register(nil) should error")
+}
+
 // mockAgent is a test implementation of Agent
 type mockAgent struct {
 	agentType    AgentType
 	name         string
 	url          string
+	role         AgentRole
 	detectResult bool
 	capabilities Capabilities
 }
@@ -165,6 +277,12 @@ type mockAgent struct {
 func (a *mockAgent) Type() AgentType { return a.agentType }
 func (a *mockAgent) Name() string    { return a.name }
 func (a *mockAgent) URL() string     { return a.url }
+func (a *mockAgent) Role() AgentRole {
+	if a.role != "" {
+		return a.role
+	}
+	return RoleAgent
+}
 func (a *mockAgent) Detect(ctx context.Context, env Environment) (bool, error) {
 	return a.detectResult, nil
 }

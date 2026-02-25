@@ -40,18 +40,18 @@ func init() {
 		Slug:        CheckSlugLedgerBranchStatus,
 		Name:        "Ledger branch status",
 		Category:    "Ledger Git Health",
-		FixLevel:    FixLevelCheckOnly,
+		FixLevel:    FixLevelAuto,
 		Description: "Checks if local ledger branch is up-to-date with remote",
-		Run:         func(fix bool) checkResult { return checkLedgerBranchStatus() },
+		Run:         func(fix bool) checkResult { return checkLedgerBranchStatus(fix) },
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugLedgerCleanWorkdir,
 		Name:        "Ledger clean workdir",
 		Category:    "Ledger Git Health",
-		FixLevel:    FixLevelCheckOnly,
+		FixLevel:    FixLevelAuto,
 		Description: "Checks for uncommitted changes in ledger repository",
-		Run:         func(fix bool) checkResult { return checkLedgerCleanWorkdir() },
+		Run:         func(fix bool) checkResult { return checkLedgerCleanWorkdir(fix) },
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
@@ -154,7 +154,9 @@ func checkLedgerRemoteReachable() checkResult {
 
 // checkLedgerBranchStatus checks if local ledger branch is up-to-date with remote.
 // Reports if the branch is ahead, behind, or diverged from remote.
-func checkLedgerBranchStatus() checkResult {
+// With fix=true, auto-syncs: pushes when ahead, pulls when behind, rebase+push when diverged.
+// The ledger is fully ox-managed, so auto-sync is safe.
+func checkLedgerBranchStatus(fix bool) checkResult {
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
 		return SkippedCheck("Ledger branch status", "no ledger found", "")
@@ -210,29 +212,97 @@ func checkLedgerBranchStatus() checkResult {
 	fmt.Sscanf(behind, "%d", &behindCount)
 
 	if aheadCount > 0 && behindCount > 0 {
+		if fix {
+			return fixLedgerBranchDiverged(ledgerPath, aheadCount, behindCount)
+		}
 		return WarningCheck("Ledger branch status",
 			fmt.Sprintf("diverged: %d ahead, %d behind", aheadCount, behindCount),
-			"Run `ox sync` to reconcile ledger changes")
+			"Run `ox doctor --fix` to reconcile ledger changes")
 	}
 
 	if aheadCount > 0 {
+		if fix {
+			return fixLedgerBranchAhead(ledgerPath, aheadCount)
+		}
 		return WarningCheck("Ledger branch status",
 			fmt.Sprintf("%d commit(s) ahead", aheadCount),
-			"Run `ox sync` to push ledger changes to remote")
+			"Run `ox doctor --fix` to push ledger changes to remote")
 	}
 
 	if behindCount > 0 {
+		if fix {
+			return fixLedgerBranchBehind(ledgerPath, behindCount)
+		}
 		return WarningCheck("Ledger branch status",
 			fmt.Sprintf("%d commit(s) behind", behindCount),
-			"Run `ox sync` to pull latest ledger changes")
+			"Run `ox doctor --fix` to pull latest ledger changes")
 	}
 
 	return PassedCheck("Ledger branch status", "up to date")
 }
 
+// fixLedgerBranchAhead pushes local ledger commits to remote.
+func fixLedgerBranchAhead(ledgerPath string, aheadCount int) checkResult {
+	pushCmd := exec.Command("git", "-C", ledgerPath, "push")
+	output, err := pushCmd.CombinedOutput()
+	if err != nil {
+		errStr := strings.TrimSpace(string(output))
+		return FailedCheck("Ledger branch status",
+			"push failed",
+			fmt.Sprintf("git push error: %s", errStr))
+	}
+	return PassedCheck("Ledger branch status",
+		fmt.Sprintf("pushed %d commit(s)", aheadCount))
+}
+
+// fixLedgerBranchBehind pulls remote changes into local ledger.
+func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
+	pullCmd := exec.Command("git", "-C", ledgerPath, "pull", "--rebase")
+	output, err := pullCmd.CombinedOutput()
+	if err != nil {
+		errStr := strings.TrimSpace(string(output))
+		// abort rebase to leave ledger in a clean state
+		_ = exec.Command("git", "-C", ledgerPath, "rebase", "--abort").Run()
+		return FailedCheck("Ledger branch status",
+			"pull --rebase failed (aborted)",
+			fmt.Sprintf("Conflict during rebase (aborted to restore clean state): %s", errStr))
+	}
+	return PassedCheck("Ledger branch status",
+		fmt.Sprintf("pulled %d commit(s)", behindCount))
+}
+
+// fixLedgerBranchDiverged reconciles a diverged ledger by rebasing then pushing.
+func fixLedgerBranchDiverged(ledgerPath string, aheadCount, behindCount int) checkResult {
+	// pull --rebase first to linearize history
+	pullCmd := exec.Command("git", "-C", ledgerPath, "pull", "--rebase")
+	pullOutput, err := pullCmd.CombinedOutput()
+	if err != nil {
+		errStr := strings.TrimSpace(string(pullOutput))
+		// abort rebase to leave ledger in a clean state
+		_ = exec.Command("git", "-C", ledgerPath, "rebase", "--abort").Run()
+		return FailedCheck("Ledger branch status",
+			"rebase failed during reconcile (aborted)",
+			fmt.Sprintf("Conflict during rebase (aborted to restore clean state): %s", errStr))
+	}
+
+	// then push
+	pushCmd := exec.Command("git", "-C", ledgerPath, "push")
+	pushOutput, err := pushCmd.CombinedOutput()
+	if err != nil {
+		errStr := strings.TrimSpace(string(pushOutput))
+		return FailedCheck("Ledger branch status",
+			"push failed after rebase",
+			fmt.Sprintf("git push error: %s", errStr))
+	}
+
+	return PassedCheck("Ledger branch status",
+		fmt.Sprintf("reconciled: rebased %d + pushed %d commit(s)", behindCount, aheadCount))
+}
+
 // checkLedgerCleanWorkdir checks for uncommitted changes in the ledger repository.
 // Reports if there are staged, unstaged, or untracked files.
-func checkLedgerCleanWorkdir() checkResult {
+// With fix=true, auto-commits all changes. The ledger is fully ox-managed.
+func checkLedgerCleanWorkdir(fix bool) checkResult {
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
 		return SkippedCheck("Ledger clean workdir", "no ledger found", "")
@@ -297,11 +367,41 @@ func checkLedgerCleanWorkdir() checkResult {
 	total := staged + unstaged + untracked
 
 	if total > 0 {
+		if fix {
+			return fixLedgerDirtyWorkdir(ledgerPath, total)
+		}
 		return WarningCheck("Ledger clean workdir", msg,
-			"Run `ox sync` to commit and sync ledger changes")
+			"Run `ox doctor --fix` to commit and sync ledger changes")
 	}
 
 	return PassedCheck("Ledger clean workdir", "clean")
+}
+
+// fixLedgerDirtyWorkdir stages and commits all changes in the ledger.
+func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
+	// stage all changes
+	addCmd := exec.Command("git", "-C", ledgerPath, "add", "-A")
+	if output, err := addCmd.CombinedOutput(); err != nil {
+		return FailedCheck("Ledger clean workdir",
+			"staging failed",
+			fmt.Sprintf("git add error: %s", strings.TrimSpace(string(output))))
+	}
+
+	// commit
+	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "-m", "ox doctor: auto-commit ledger changes")
+	if output, err := commitCmd.CombinedOutput(); err != nil {
+		errStr := strings.TrimSpace(string(output))
+		// "nothing to commit" is fine (race with session auto-stage)
+		if strings.Contains(errStr, "nothing to commit") {
+			return PassedCheck("Ledger clean workdir", "clean (already committed)")
+		}
+		return FailedCheck("Ledger clean workdir",
+			"commit failed",
+			fmt.Sprintf("git commit error: %s", errStr))
+	}
+
+	return PassedCheck("Ledger clean workdir",
+		fmt.Sprintf("committed %d file(s)", fileCount))
 }
 
 // checkLedgerRemoteURLMatch detects stale PATs in the ledger's git remote URL.

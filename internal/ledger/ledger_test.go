@@ -18,9 +18,9 @@ func TestDefaultPath(t *testing.T) {
 
 	assert.NotEmpty(t, path)
 	assert.True(t, filepath.IsAbs(path), "expected absolute path, got: %s", path)
-	// new structure: path should contain _sageox (sibling dir), endpoint slug, and "ledger"
+	// path should be under user data dir (.local/share/sageox), sibling dir (_sageox),
 	// or fallback to legacy .cache/sageox/context
-	assert.True(t, strings.Contains(path, "_sageox") || strings.Contains(path, ".cache"), "expected path to contain _sageox or .cache, got: %s", path)
+	assert.True(t, strings.Contains(path, "sageox"), "expected path to contain sageox, got: %s", path)
 }
 
 func TestDefaultPathForEndpoint(t *testing.T) {

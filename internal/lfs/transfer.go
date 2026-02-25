@@ -37,6 +37,7 @@ func UploadObject(action *Action, content []byte) error {
 		return fmt.Errorf("create upload request: %w", err)
 	}
 
+	// only User-Agent for external Git host; no X-Orchestrator
 	req.Header.Set("User-Agent", useragent.String())
 
 	// set headers from action
@@ -74,6 +75,7 @@ func DownloadObject(action *Action) ([]byte, error) {
 		return nil, fmt.Errorf("create download request: %w", err)
 	}
 
+	// only User-Agent for external Git host; no X-Orchestrator
 	req.Header.Set("User-Agent", useragent.String())
 
 	// set headers from action

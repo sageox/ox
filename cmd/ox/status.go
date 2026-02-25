@@ -21,6 +21,7 @@ import (
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/tips"
+	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -32,6 +33,13 @@ type statusJSONOutput struct {
 	Ledger       *statusLedgerJSON       `json:"ledger,omitempty"`
 	TeamContexts []statusTeamContextJSON `json:"team_contexts,omitempty"`
 	Daemon       *statusDaemonJSON       `json:"daemon,omitempty"`
+	Version      *statusVersionJSON      `json:"version,omitempty"`
+}
+
+type statusVersionJSON struct {
+	Current         string `json:"current"`
+	Latest          string `json:"latest,omitempty"`
+	UpdateAvailable bool   `json:"update_available"`
 }
 
 type statusAuthJSON struct {
@@ -527,6 +535,29 @@ func fetchRemoteURLs(client *api.RepoClient, teamContexts []config.TeamContext) 
 }
 
 // renderGitReposSection renders the git repositories status section
+// shortenPathViaSymlink returns a short relative path (e.g. ".sageox/ledger")
+// if a .sageox/ symlink in projectRoot resolves to fullPath.
+// Checks candidates in order and returns the first match, or fullPath unchanged.
+func shortenPathViaSymlink(projectRoot, fullPath string, candidates ...string) string {
+	if projectRoot == "" || fullPath == "" {
+		return fullPath
+	}
+	for _, rel := range candidates {
+		abs := filepath.Join(projectRoot, rel)
+		target, err := os.Readlink(abs)
+		if err != nil {
+			continue
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(abs), target)
+		}
+		if filepath.Clean(target) == filepath.Clean(fullPath) {
+			return rel
+		}
+	}
+	return fullPath
+}
+
 // Shows ledger and team contexts grouped by endpoint
 // Always renders both sections, showing "(none)" if not configured
 func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, daemonStatus *daemon.StatusData) string {
@@ -644,7 +675,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		}
 
 		b.WriteString(statusLabelStyle.Render("  Path"))
-		b.WriteString(statusMutedStyle.Render(localCfg.Ledger.Path))
+		b.WriteString(statusMutedStyle.Render(shortenPathViaSymlink(projectRoot, localCfg.Ledger.Path, ".sageox/ledger")))
 		b.WriteString("\n")
 
 		// check if ledger doesn't exist locally and user doesn't have access (ErrLedgerNotFound)
@@ -693,7 +724,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		}
 		b.WriteString("\n")
 		b.WriteString(statusLabelStyle.Render("  Path"))
-		b.WriteString(statusMutedStyle.Render(expectedPath))
+		b.WriteString(statusMutedStyle.Render(shortenPathViaSymlink(projectRoot, expectedPath, ".sageox/ledger")))
 		b.WriteString("\n")
 		b.WriteString(statusLabelStyle.Render("  Remote"))
 		b.WriteString(statusMutedStyle.Render(cloudLedgerURL))
@@ -857,7 +888,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString("\n")
 
 		b.WriteString(statusLabelStyle.Render("  Path"))
-		b.WriteString(statusMutedStyle.Render(expectedPath))
+		b.WriteString(statusMutedStyle.Render(shortenPathViaSymlink(projectRoot, expectedPath, ".sageox/teams/primary", ".sageox/teams/"+cloudTC.StableID())))
 		b.WriteString("\n")
 
 		gitDir := filepath.Join(expectedPath, ".git")
@@ -930,7 +961,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString(renderVisibilityWithAccess(detailVisibility, detailTC.AccessLevel))
 		b.WriteString("\n")
 		b.WriteString(statusLabelStyle.Render("  Path"))
-		b.WriteString(statusMutedStyle.Render(expectedPath))
+		b.WriteString(statusMutedStyle.Render(shortenPathViaSymlink(projectRoot, expectedPath, ".sageox/teams/primary", ".sageox/teams/"+detailTC.StableID())))
 		b.WriteString("\n")
 
 		gitDir := filepath.Join(expectedPath, ".git")
@@ -1515,10 +1546,11 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			cli.PrintActionHint("ox init", "Initialize project for AI agent context", 2)
 		}
 
-		// fetch daemon status once, pass to both git repos and daemon sync sections
-		var daemonStatus *daemon.StatusData
-		var syncHistory []daemon.SyncEvent
+		// skip ledger/daemon sections when not in a git repo — nothing to show
 		if gitRoot != "" {
+			// fetch daemon status once, pass to both git repos and daemon sync sections
+			var daemonStatus *daemon.StatusData
+			var syncHistory []daemon.SyncEvent
 			client := daemon.TryConnectOrDirect()
 			if client != nil {
 				if ds, err := client.Status(); err == nil {
@@ -1526,17 +1558,21 @@ daemon health, and a tree view of all SageOx directory locations.`,
 					syncHistory, _ = client.SyncHistory()
 				}
 			}
+
+			// Ledger and Team Context sections - shows repos from cloud API
+			// Only displays repos that are actually provisioned
+			fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus))
+
+			// show daemon sync section
+			fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, false, projectInitialized))
 		}
 
-		// Ledger and Team Context sections - shows repos from cloud API
-		// Only displays repos that are actually provisioned
-		fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus))
-
-		// show daemon sync section - always show so user knows daemon status
-		if gitRoot == "" {
-			fmt.Print(renderDaemonSyncSection(nil, nil, true, projectInitialized))
-		} else {
-			fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, false, projectInitialized))
+		// show version update notice if available
+		if vResult := checkVersionFromCache(); vResult != nil {
+			fmt.Printf("\n%s  %s\n",
+				statusWarningStyle.Render("Update available"),
+				fmt.Sprintf("v%s → v%s — brew upgrade sageox", vResult.CurrentVersion, vResult.LatestVersion),
+			)
 		}
 
 		// show contextual tip
@@ -1644,6 +1680,15 @@ func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, 
 			}
 		}
 	}
+
+	// version section
+	currentVersion := strings.TrimPrefix(version.Version, "v")
+	vJSON := &statusVersionJSON{Current: currentVersion}
+	if vResult := checkVersionFromCache(); vResult != nil {
+		vJSON.Latest = vResult.LatestVersion
+		vJSON.UpdateAvailable = true
+	}
+	output.Version = vJSON
 
 	return output
 }

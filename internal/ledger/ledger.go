@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/repotools"
 )
@@ -55,9 +57,9 @@ func DefaultPath() (string, error) {
 }
 
 // DefaultPathForEndpoint returns the default ledger path for a specific endpoint.
-// Uses the sibling directory pattern with endpoint namespacing:
+// Uses the user directory with repo ID:
 //
-//	<project_parent>/<repo_name>_sageox/<endpoint_slug>/ledger
+//	~/.local/share/sageox/<endpoint_slug>/ledgers/<repo_id>/
 //
 // If endpointURL is empty, uses the current endpoint from environment or project config.
 // Falls back to legacy path (~/.cache/sageox/context) if not in a git repo.
@@ -65,7 +67,16 @@ func DefaultPathForEndpoint(endpointURL string) (string, error) {
 	// find main project root (resolves through worktrees to ensure shared ledger)
 	projectRoot, err := repotools.FindMainRepoRoot(repotools.VCSGit)
 	if err == nil && projectRoot != "" {
-		repoName := filepath.Base(projectRoot)
+		// load project config to get repo ID
+		projectCfg, cfgErr := config.LoadProjectConfig(projectRoot)
+		if cfgErr != nil {
+			return "", fmt.Errorf("load project config: %w", cfgErr)
+		}
+
+		repoID := projectCfg.RepoID
+		if repoID == "" {
+			return "", fmt.Errorf("project config missing repo_id (run 'ox init')")
+		}
 
 		// determine endpoint: explicit parameter > project config > env > default
 		ep := endpointURL
@@ -73,7 +84,7 @@ func DefaultPathForEndpoint(endpointURL string) (string, error) {
 			ep = endpoint.GetForProject(projectRoot)
 		}
 
-		return config.DefaultLedgerPath(repoName, projectRoot, ep), nil
+		return config.DefaultLedgerPath(repoID, ep), nil
 	}
 
 	// fallback to legacy path if not in a git repo
@@ -262,19 +273,22 @@ func GetStatusForEndpoint(endpointURL string) *Status {
 
 // checkSyncStatus checks the ahead/behind status with remote.
 func checkSyncStatus(path string, status *Status) {
-	// fetch to update tracking info (quiet, ignore errors)
-	fetchCmd := exec.Command("git", "-C", path, "fetch", "--quiet")
-	_ = fetchCmd.Run()
+	// skip fetch if daemon already fetched recently (prevents redundant network calls)
+	if age, ok := gitutil.FetchHeadAge(path); ok && age < gitutil.MinFetchHeadAge {
+		// use cached state — daemon keeps ledger current via its sync loop
+	} else {
+		// fetch with timeout to avoid hanging on network issues
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _ = gitutil.RunGit(ctx, path, "fetch", "--quiet")
+		cancel()
+	}
 
 	// check ahead/behind
-	cmd := exec.Command("git", "-C", path, "status", "--porcelain", "-b")
-	output, err := cmd.Output()
+	outputStr, err := gitutil.RunGit(context.Background(), path, "status", "--porcelain", "-b")
 	if err != nil {
 		status.SyncStatus = "unknown"
 		return
 	}
-
-	outputStr := string(output)
 
 	// parse branch line for ahead/behind: ## branch...origin/branch [ahead N, behind M]
 	if strings.Contains(outputStr, "[") {
@@ -293,13 +307,12 @@ func checkSyncStatus(path string, status *Status) {
 
 // countPendingChanges counts uncommitted changes in the ledger.
 func countPendingChanges(path string, status *Status) {
-	cmd := exec.Command("git", "-C", path, "status", "--porcelain")
-	output, err := cmd.Output()
+	output, err := gitutil.RunGit(context.Background(), path, "status", "--porcelain")
 	if err != nil {
 		return
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	lines := strings.Split(output, "\n")
 	for _, line := range lines {
 		if line != "" {
 			status.PendingChanges++

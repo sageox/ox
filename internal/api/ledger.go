@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,12 +55,10 @@ func (c *RepoClient) GetLedgerStatus(repoID string) (*LedgerStatusResponse, erro
 	logger.LogHTTPRequest("GET", reqURL)
 	start := time.Now()
 
-	httpReq, err := http.NewRequest("GET", reqURL, nil)
+	httpReq, err := useragent.NewRequest(context.Background(), "GET", reqURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
-
-	httpReq.Header.Set("User-Agent", useragent.String())
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}

@@ -612,6 +612,9 @@ func runInit() error {
 		regClient.WithAuthToken(token.AccessToken)
 	}
 
+	// tracks whether daemon sync was confirmed (used for next-steps guidance)
+	daemonSynced := false
+
 	// call API
 	resp, err := regClient.RegisterRepo(req)
 	if err != nil {
@@ -666,12 +669,44 @@ func runInit() error {
 			}
 		}
 
-		// trigger daemon to sync (clone missing team contexts and ledger)
+		// start daemon and trigger sync (clone team contexts and ledger)
+		// per IPC architecture: init starts daemon if not running
 		if daemon.IsRunning() {
-			go func() {
-				client := daemon.NewClient()
-				_ = client.RequestSync()
-			}()
+			client := daemon.NewClient()
+			if err := client.RequestSync(); err != nil {
+				slog.Debug("failed to request sync from running daemon", "error", err)
+			} else {
+				daemonSynced = true
+			}
+		} else {
+			if err := autoStartDaemon(); err != nil {
+				slog.Debug("failed to auto-start daemon", "error", err)
+			} else {
+				// wait up to 2s for daemon to be ready, then request sync.
+				// on slow machines or under Gatekeeper verification this may
+				// not be enough -- the daemon's own timer will sync later.
+				healthy := false
+				for i := 0; i < 20; i++ {
+					time.Sleep(100 * time.Millisecond)
+					if daemon.IsHealthy() == nil {
+						healthy = true
+						break
+					}
+				}
+				if healthy {
+					client := daemon.NewClient()
+					if err := client.RequestSync(); err != nil {
+						slog.Debug("failed to request sync after daemon start", "error", err)
+					} else {
+						daemonSynced = true
+					}
+				} else {
+					slog.Debug("daemon did not become healthy within 2s after auto-start; sync deferred to daemon timer")
+					if !initQuiet {
+						cli.PrintInfo("Background sync starting — run " + cli.StyleCommand.Render("ox status") + " to check progress")
+					}
+				}
+			}
 		}
 
 		// re-stage .sageox/ files after API registration updated config.json
@@ -695,37 +730,52 @@ func runInit() error {
 		fmt.Println(ui.RenderCategory("Next Steps"))
 		fmt.Println()
 
-		// step 1: commit and push (files are already staged by ForceAddSageoxFiles)
+		// next steps use a counter so numbering adjusts based on daemon status
+		step := 1
+
+		// step N: commit and push (files are already staged by ForceAddSageoxFiles)
 		// NOTE: do NOT suggest -a flag — we explicitly staged only .sageox/ files.
 		// Using -a could accidentally commit unrelated working tree changes.
-		fmt.Printf("  1. Commit and push SageOx files:\n")
+		fmt.Printf("  %d. Commit and push SageOx files:\n", step)
 		fmt.Printf("     %s\n", cli.StyleCommand.Render("git commit -m 'SageOx init' && git push"))
+		step++
 
-		// step 2: start background sync (clones ledger + team contexts, starts daemon if needed)
-		fmt.Printf("  2. Run %s to start background sync\n", cli.StyleCommand.Render("ox sync"))
+		// step N (conditional): if daemon sync was not confirmed, tell user to run ox sync
+		if !daemonSynced {
+			fmt.Printf("  %d. Run %s to start background sync\n", step, cli.StyleCommand.Render("ox sync"))
+			step++
+		}
 
-		// step 3: invite teammates (show dashboard URL if team info available)
+		// step N: health check
+		fmt.Printf("  %d. Run %s to confirm everything is working properly\n", step, cli.StyleCommand.Render("ox doctor"))
+		step++
+
+		// step N: invite teammates (show dashboard URL if team info available)
 		if cfg.TeamID != "" && cfg.Endpoint != "" {
 			teamDashURL := strings.TrimSuffix(cfg.Endpoint, "/") + "/team/" + cfg.TeamID
 			teamLabel := cfg.TeamName
 			if teamLabel == "" {
 				teamLabel = cfg.TeamID
 			}
-			fmt.Printf("  3. Invite teammates (%s):\n", teamLabel)
+			fmt.Printf("  %d. Invite teammates (%s):\n", step, teamLabel)
 			fmt.Printf("     Run %s or visit %s to get invite link\n", cli.StyleCommand.Render("ox view team"), teamDashURL)
 		} else {
-			fmt.Println("  3. Invite teammates from your team dashboard")
+			fmt.Printf("  %d. Invite teammates from your team dashboard\n", step)
 		}
+		step++
 
-		// step 4: health check
-		fmt.Printf("  4. Run %s to confirm everything is working properly\n", cli.StyleCommand.Render("ox doctor"))
+		// step N: start Claude Code (ox will auto-prime and surface team context)
+		fmt.Printf("  %d. Start Claude Code in this repo — ox will auto-prime and surface your team context\n", step)
 
-		// step 5: try session recording
-		fmt.Printf("  5. Start Claude Code in this repo\n")
-		fmt.Printf("     Run %s to try session recording\n", cli.StyleCommand.Render("/ox-session-start"))
-
-		// step 6: agent bootstrap
-		fmt.Printf("  6. Claude Code should auto-run: %s\n", cli.StyleCommand.Render("ox agent prime"))
+		// show team context sync status so user knows what's happening in the background
+		if cfg.TeamID != "" {
+			tc := config.FindRepoTeamContext(gitRoot)
+			if tc != nil {
+				fmt.Println()
+				fmt.Printf("  Team context syncing to: %s\n", tc.Path)
+				fmt.Printf("  Run %s to check sync progress.\n", cli.StyleCommand.Render("ox status"))
+			}
+		}
 
 		// show contextual tip
 		userCfg, _ := config.LoadUserConfig("")

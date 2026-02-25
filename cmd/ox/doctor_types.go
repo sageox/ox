@@ -125,6 +125,7 @@ const (
 	CheckSlugLedgerRemote       = "ledger-remote"
 	CheckSlugTeamContextPath    = "team-context-path"
 	CheckSlugTeamSymlink        = "team-symlink"
+	CheckSlugProjectSymlinks    = "project-symlinks"
 	CheckSlugLegacyStructure    = "legacy-structure"
 	CheckSlugGitConfig          = "git-config"
 	CheckSlugGitRemotes         = "git-remotes"
@@ -156,8 +157,9 @@ const (
 	CheckSlugGeminiHooks         = "gemini-hooks"
 	CheckSlugCodexHooks          = "codex-hooks"
 	CheckSlugCodePuppyHooks      = "code-puppy-hooks"
-	CheckSlugHookCommands        = "hook-commands"
-	CheckSlugSessionStartHookBug = "session-start-hook-bug"
+	CheckSlugHookCommands          = "hook-commands"
+	CheckSlugHookCompleteness      = "hook-completeness"
+	CheckSlugSessionStartHookBug   = "session-start-hook-bug"
 
 	// Team Context checks
 	CheckSlugTeamRegistration = "team-registration"

@@ -128,13 +128,12 @@ func (c *Client) Submit(ctx context.Context, events []FrictionEvent, opts *Submi
 	reqCtx, cancel := context.WithTimeout(ctx, c.config.Timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(body))
+	req, err := useragent.NewRequest(reqCtx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", useragent.String())
 	req.Header.Set("X-Client-Version", c.config.Version)
 
 	// add catalog version header if provided

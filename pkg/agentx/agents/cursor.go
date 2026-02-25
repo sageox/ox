@@ -29,7 +29,10 @@ func (a *CursorAgent) Name() string {
 
 func (a *CursorAgent) URL() string {
 	return "https://github.com/getcursor/cursor"
+
 }
+
+func (a *CursorAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
 
 // Detect checks if Cursor is the active agent.
 //

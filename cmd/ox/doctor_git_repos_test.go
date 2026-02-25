@@ -802,3 +802,37 @@ func TestCheckSSHAuth(t *testing.T) {
 	// result can be true or false depending on environment
 	_ = result
 }
+
+// TestExtractTeamIDFromRepoName_DisplayNames verifies that
+// extractTeamIDFromRepoName handles real API display names.
+// Bug #37: the API returns display names like "SageOx" not repo names
+// like "team-xxx-context", so extraction always failed.
+func TestExtractTeamIDFromRepoName(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		// patterns the function was designed for
+		{"team_ prefix", "team_abc123", "team_abc123"},
+		{"team- prefix", "team-abc123", "team_abc123"},
+		{"team_ with suffix", "team_abc123-context", "team_abc123"},
+		{"team- with suffix", "team-abc123-context", "team_abc123"},
+		{"xxx-team-context suffix", "myteam-team-context", "team_myteam"},
+
+		// real API display names that caused bug #37
+		{"display name SageOx", "SageOx", ""},
+		{"display name with spaces", "First Prod Walk of 2/11/26", ""},
+		{"display name SageOx Internal", "SageOx Internal", ""},
+		{"empty string", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractTeamIDFromRepoName(tt.input)
+			if got != tt.expected {
+				t.Errorf("extractTeamIDFromRepoName(%q) = %q, want %q", tt.input, got, tt.expected)
+			}
+		})
+	}
+}

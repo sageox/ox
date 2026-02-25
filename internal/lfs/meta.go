@@ -189,6 +189,18 @@ func NewFileRef(content []byte) FileRef {
 	}
 }
 
+// UpdateMetaSummary reads meta.json from sessionPath, updates the Summary field,
+// and re-writes it atomically. Used by push-summary to replace the local summary
+// with the AI-generated title.
+func UpdateMetaSummary(sessionPath, summary string) error {
+	meta, err := ReadSessionMeta(sessionPath)
+	if err != nil {
+		return fmt.Errorf("read meta for summary update: %w", err)
+	}
+	meta.Summary = summary
+	return WriteSessionMeta(sessionPath, meta)
+}
+
 // BareOID returns the hex digest without the "sha256:" prefix.
 func (f FileRef) BareOID() string {
 	if len(f.OID) > 7 && f.OID[:7] == "sha256:" {

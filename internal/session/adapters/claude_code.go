@@ -35,6 +35,10 @@ var (
 	reStripSystemInstructionHyphen = regexp.MustCompile(`(?s)<system-instruction>.*?</system-instruction>`)
 	reStripLocalCommandStdout      = regexp.MustCompile(`(?s)<local-command-stdout>.*?</local-command-stdout>`)
 	reStripLocalCommandCaveat      = regexp.MustCompile(`(?s)<local-command-caveat>.*?</local-command-caveat>`)
+	reStripCommandName             = regexp.MustCompile(`(?s)<command-name>.*?</command-name>`)
+	reStripCommandMessage          = regexp.MustCompile(`(?s)<command-message>.*?</command-message>`)
+	reStripCommandArgs             = regexp.MustCompile(`(?s)<command-args>.*?</command-args>`)
+	reStripTaskNotification        = regexp.MustCompile(`(?s)<task-notification>.*?</task-notification>`)
 )
 
 // debounceDelay is the time to wait after the last write event before reading
@@ -596,6 +600,11 @@ func classifyTextContent(text string) (string, userContentClass) {
 		return text, userContentSystem
 	}
 
+	// framework interrupt messages injected when user cancels tool execution
+	if strings.HasPrefix(trimmed, "[Request interrupted") {
+		return text, userContentSystem
+	}
+
 	// strip system tags and check what remains
 	cleaned := stripSystemTags(text)
 	cleanedTrimmed := strings.TrimSpace(cleaned)
@@ -618,6 +627,10 @@ func stripSystemTags(text string) string {
 	text = reStripSystemInstructionHyphen.ReplaceAllString(text, "")
 	text = reStripLocalCommandStdout.ReplaceAllString(text, "")
 	text = reStripLocalCommandCaveat.ReplaceAllString(text, "")
+	text = reStripCommandName.ReplaceAllString(text, "")
+	text = reStripCommandMessage.ReplaceAllString(text, "")
+	text = reStripCommandArgs.ReplaceAllString(text, "")
+	text = reStripTaskNotification.ReplaceAllString(text, "")
 	return text
 }
 

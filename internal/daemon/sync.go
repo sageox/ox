@@ -27,13 +27,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
@@ -42,28 +42,19 @@ import (
 
 // Sync timing constants - extracted for clarity and testability.
 const (
-	// minFetchHeadAge is the minimum age of FETCH_HEAD before we'll fetch again.
-	// Prevents redundant fetches if another process (e.g., user or another daemon) fetched recently.
-	minFetchHeadAge = 2 * time.Minute
-
 	// minTeamContextFetchAge is the minimum age before re-fetching a team context.
 	// Team contexts are shared across repos, so we use a longer interval to reduce redundant fetches.
 	minTeamContextFetchAge = 5 * time.Minute
+
+	// teamDiscoveryInterval is how often we re-fetch the team list from the API,
+	// independent of credential token expiry. This ensures new teams are discovered
+	// promptly even when the token is still fresh.
+	teamDiscoveryInterval = 5 * time.Minute
 
 	// maxConcurrentClones limits background clone operations to prevent resource exhaustion.
 	// 100 team contexts shouldn't spawn 100 concurrent git clones.
 	maxConcurrentClones = 3
 )
-
-// credentialPattern matches oauth2:TOKEN@ patterns in git output.
-// Used to sanitize credentials before logging.
-var credentialPattern = regexp.MustCompile(`oauth2:[^@]+@`)
-
-// sanitizeGitOutput removes credentials from git command output.
-// Replaces oauth2:TOKEN@ patterns with oauth2:***@ to prevent credential leaks in logs.
-func sanitizeGitOutput(output string) string {
-	return credentialPattern.ReplaceAllString(output, "oauth2:***@")
-}
 
 // ErrInvalidRepoPath indicates the repo path failed security validation.
 var ErrInvalidRepoPath = errors.New("invalid repo path: path traversal or unsafe location detected")
@@ -233,26 +224,6 @@ func p95Duration(durations []time.Duration) time.Duration {
 	return sorted[idx]
 }
 
-// hasLockFiles checks for stale git lock files that indicate crashed processes.
-// These files block all git operations and must be manually removed.
-// Returns a slice of lock file names found (e.g., "index.lock").
-func hasLockFiles(gitDir string) []string {
-	lockFiles := []string{
-		"index.lock",
-		"shallow.lock",
-		"config.lock",
-		"HEAD.lock",
-	}
-	var found []string
-	for _, lock := range lockFiles {
-		path := filepath.Join(gitDir, lock)
-		if _, err := os.Stat(path); err == nil {
-			found = append(found, lock)
-		}
-	}
-	return found
-}
-
 // SyncScheduler manages periodic sync operations.
 type SyncScheduler struct {
 	config *Config
@@ -266,6 +237,7 @@ type SyncScheduler struct {
 	// each operation only blocks itself, not unrelated operations
 	pullInProgress        bool
 	lastCredentialRefresh time.Time // dedup concurrent credential refresh calls
+	lastTeamDiscovery     time.Time // dedup concurrent team discovery calls
 
 	// error tracking
 	recentErrors  []syncError
@@ -302,6 +274,9 @@ type SyncScheduler struct {
 
 	// issues tracker for health check system
 	issues *IssueTracker
+
+	// version cache for GitHub release checks
+	versionCache *VersionCache
 }
 
 // syncError tracks a sync error with timestamp.
@@ -344,6 +319,7 @@ func NewSyncScheduler(cfg *Config, logger *slog.Logger) *SyncScheduler {
 		metrics:             NewSyncMetrics(),
 		remoteChangeTracker: NewActivityTracker(100),
 		workspaceRegistry:   NewWorkspaceRegistry(cfg.ProjectRoot, repoName),
+		versionCache:        NewVersionCache(logger),
 	}
 }
 
@@ -562,6 +538,19 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	heartbeatTicker := time.NewTicker(heartbeatInterval)
 	defer heartbeatTicker.Stop()
 
+	// version check ticker - check GitHub for new releases (ETag conditional requests)
+	var versionCheckTicker *time.Ticker
+	var versionCheckChan <-chan time.Time
+	if s.config.VersionCheckInterval > 0 {
+		versionCheckTicker = time.NewTicker(s.config.VersionCheckInterval)
+		versionCheckChan = versionCheckTicker.C
+		defer versionCheckTicker.Stop()
+
+		// load cached version data and do initial check on startup
+		_ = s.versionCache.Load()
+		go s.checkLatestVersion(ctx)
+	}
+
 	// team context sync (lower priority, less frequent)
 	var teamContextTicker *time.Ticker
 	var teamContextChan <-chan time.Time
@@ -609,6 +598,9 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		case <-heartbeatTicker.C:
 			s.writeHeartbeats()
 
+		case <-versionCheckChan:
+			s.checkLatestVersion(ctx)
+
 		case <-s.triggerChan:
 			// triggered by file watcher, do full sync
 			s.syncAll(ctx)
@@ -646,6 +638,14 @@ func (s *SyncScheduler) pullChanges(ctx context.Context) {
 	// anti-entropy: ensure missing workspaces get cloned
 	s.triggerMissingClones()
 	_ = s.doPull(ctx, nil, false)
+}
+
+// checkLatestVersion fetches the latest GitHub release using ETag conditional requests.
+// Called periodically by the sync scheduler to keep the version cache warm.
+func (s *SyncScheduler) checkLatestVersion(ctx context.Context) {
+	if err := s.versionCache.CheckAndUpdate(ctx); err != nil {
+		s.logger.Warn("version check failed", "error", err)
+	}
 }
 
 // shouldSyncOrBypass checks if a sync should proceed given backoff state.
@@ -717,20 +717,14 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	}
 
 	// skip if repo stuck in broken rebase state
-	rebaseMerge := filepath.Join(s.config.LedgerPath, ".git", "rebase-merge")
-	rebaseApply := filepath.Join(s.config.LedgerPath, ".git", "rebase-apply")
-	if _, err := os.Stat(rebaseMerge); err == nil {
+	if gitutil.IsRebaseInProgress(s.config.LedgerPath) {
 		s.logger.Debug("repo in rebase state, skipping pull", "path", s.config.LedgerPath)
-		return nil
-	}
-	if _, err := os.Stat(rebaseApply); err == nil {
-		s.logger.Debug("repo in rebase-apply state, skipping pull", "path", s.config.LedgerPath)
 		return nil
 	}
 
 	// check for stale lock files from crashed git processes
 	gitDir := filepath.Join(s.config.LedgerPath, ".git")
-	if locks := hasLockFiles(gitDir); len(locks) > 0 {
+	if locks := gitutil.HasLockFiles(gitDir); len(locks) > 0 {
 		s.logger.Warn("git lock files detected, skipping pull",
 			"path", s.config.LedgerPath,
 			"locks", strings.Join(locks, ", "))
@@ -788,6 +782,12 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		s.lastSync = time.Now()
 		s.mu.Unlock()
 
+		// persist sync timestamp so "ox status" shows when we last checked,
+		// not when content last changed
+		if err := s.workspaceRegistry.UpdateConfigLastSync("ledger"); err != nil {
+			s.logger.Warn("failed to update ledger config last sync", "error", err)
+		}
+
 		if progress != nil {
 			_ = progress.WriteStage("skipped", "Remote unchanged, skipping pull")
 		}
@@ -796,11 +796,14 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 
 	// FETCH_HEAD mtime dedup (secondary: cross-daemon coordination, crash loop protection).
 	// Kept as fallback for when ls-remote can't run (credential issues, etc).
-	fetchHead := filepath.Join(s.config.LedgerPath, ".git", "FETCH_HEAD")
-	if info, err := os.Stat(fetchHead); err == nil {
-		threshold := max(s.config.SyncIntervalRead/2, minFetchHeadAge)
-		if time.Since(info.ModTime()) < threshold {
-			s.logger.Debug("ledger recently fetched, skipping", "age", time.Since(info.ModTime()))
+	if age, ok := gitutil.FetchHeadAge(s.config.LedgerPath); ok {
+		threshold := max(s.config.SyncIntervalRead/2, gitutil.MinFetchHeadAge)
+		if age < threshold {
+			s.logger.Debug("ledger recently fetched, skipping", "age", age)
+			// persist sync timestamp — another daemon recently fetched, ledger is current
+			if err := s.workspaceRegistry.UpdateConfigLastSync("ledger"); err != nil {
+				s.logger.Warn("failed to update ledger config last sync", "error", err)
+			}
 			if progress != nil {
 				_ = progress.WriteStage("skipped", "Recently fetched, skipping pull")
 			}
@@ -823,7 +826,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	// git fetch (capture stderr for diagnosable error messages)
 	fetchCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "fetch", "--quiet")
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
-		detail := sanitizeGitOutput(strings.TrimSpace(string(output)))
+		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
 		s.logger.Warn("fetch failed", "error", err, "output", detail)
 		if detail != "" {
 			s.recordError(fmt.Sprintf("fetch failed: %s (%v)", detail, err))
@@ -839,7 +842,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	}
 
 	// track FETCH_HEAD mtime to record when remote had new content
-	if info, err := os.Stat(fetchHead); err == nil {
+	if info, err := os.Stat(filepath.Join(s.config.LedgerPath, ".git", "FETCH_HEAD")); err == nil {
 		s.recordRemoteChange(s.config.LedgerPath, info.ModTime())
 	}
 
@@ -868,7 +871,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	// git pull --rebase (capture stderr for diagnosable error messages)
 	pullCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "pull", "--rebase", "--quiet")
 	if output, err := pullCmd.CombinedOutput(); err != nil {
-		detail := sanitizeGitOutput(strings.TrimSpace(string(output)))
+		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
 		s.logger.Warn("pull failed", "error", err, "output", detail)
 		if detail != "" {
 			s.recordError(fmt.Sprintf("pull failed: %s (%v)", detail, err))
@@ -1034,6 +1037,96 @@ func (s *SyncScheduler) refreshCredentialsIfNeeded() {
 	}
 
 	s.logger.Info("git credentials refreshed successfully", "expires", newCreds.ExpiresAt)
+}
+
+// discoverTeams re-fetches the team list from the API independently of token refresh.
+// This ensures new teams are discovered promptly even when the credential token is still
+// fresh (far from expiry). Only updates the Repos map in credentials; token/expiry are
+// preserved from the existing credentials.
+func (s *SyncScheduler) discoverTeams() {
+	s.mu.Lock()
+	if !s.lastTeamDiscovery.IsZero() && time.Since(s.lastTeamDiscovery) < teamDiscoveryInterval {
+		s.mu.Unlock()
+		return
+	}
+	s.lastTeamDiscovery = time.Now()
+	s.mu.Unlock()
+
+	projectEndpoint := endpoint.GetForProject(s.config.ProjectRoot)
+
+	// load existing credentials — we need a valid token to call the API
+	creds, err := gitserver.LoadCredentialsForEndpoint(projectEndpoint)
+	if err != nil {
+		s.logger.Debug("failed to load credentials for team discovery", "error", err)
+		return
+	}
+	if creds == nil || creds.Token == "" {
+		// no credentials available; refreshCredentialsIfNeeded will handle this
+		return
+	}
+
+	// use the git PAT from credentials to call the repos API
+	token, err := auth.GetTokenForEndpoint(projectEndpoint)
+	if err != nil {
+		s.logger.Debug("failed to get auth token for team discovery", "error", err)
+		return
+	}
+	if token == nil || token.AccessToken == "" {
+		return
+	}
+
+	client := api.NewRepoClientWithEndpoint(projectEndpoint).WithAuthToken(token.AccessToken)
+	reposResp, err := client.GetRepos()
+	if err != nil {
+		s.logger.Warn("failed to fetch repos for team discovery", "error", err)
+		return
+	}
+	if reposResp == nil {
+		return
+	}
+
+	// build new repos map from API response
+	newRepos := make(map[string]gitserver.RepoEntry)
+	for _, repo := range reposResp.Repos {
+		entry := gitserver.RepoEntry{
+			Name:   repo.Name,
+			Type:   repo.Type,
+			URL:    repo.URL,
+			TeamID: repo.StableID(),
+		}
+		newRepos[entry.Name] = entry
+	}
+
+	// check if repos changed before writing
+	if reposEqual(creds.Repos, newRepos) {
+		return
+	}
+
+	// update only the repos map; preserve existing token, expiry, server URL
+	creds.Repos = newRepos
+	if err := gitserver.SaveCredentialsForEndpoint(projectEndpoint, *creds); err != nil {
+		s.logger.Warn("failed to save credentials after team discovery", "error", err)
+		return
+	}
+
+	s.logger.Info("team discovery found updated team list", "repo_count", len(newRepos))
+}
+
+// reposEqual checks if two repo maps have identical entries.
+func reposEqual(a, b map[string]gitserver.RepoEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, va := range a {
+		vb, ok := b[k]
+		if !ok {
+			return false
+		}
+		if va.Name != vb.Name || va.Type != vb.Type || va.URL != vb.URL || va.TeamID != vb.TeamID {
+			return false
+		}
+	}
+	return true
 }
 
 // fetchLedgerURLFromAPI fetches the ledger URL from the cloud API and caches it.
@@ -1430,7 +1523,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	cloneCmd := exec.CommandContext(ctx, "git", "clone", "--quiet", cloneURL, payload.RepoPath)
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
 		// sanitize output to prevent credential leaks (clone URL may contain PAT token)
-		sanitizedOutput := sanitizeGitOutput(string(output))
+		sanitizedOutput := gitutil.SanitizeOutput(string(output))
 		s.logger.Error("checkout: clone failed", "error", err, "output", sanitizedOutput)
 		s.recordError(fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
 		// include sanitized output in error for better debugging
@@ -1517,6 +1610,10 @@ func (s *SyncScheduler) TeamSync(progress *ProgressWriter) error {
 func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter, forceSync bool) {
 	// refresh credentials if expired or near expiry
 	s.refreshCredentialsIfNeeded()
+
+	// discover new teams independently of token refresh — ensures new teams
+	// are found even when the credential token is still fresh
+	s.discoverTeams()
 
 	if s.config.ProjectRoot == "" {
 		if progress != nil {
@@ -1857,20 +1954,14 @@ func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspac
 // so that CLI commands can "whisper" updates to agents.
 func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error {
 	// skip if repo stuck in broken rebase state
-	rebaseMerge := filepath.Join(path, ".git", "rebase-merge")
-	rebaseApply := filepath.Join(path, ".git", "rebase-apply")
-	if _, err := os.Stat(rebaseMerge); err == nil {
+	if gitutil.IsRebaseInProgress(path) {
 		s.logger.Debug("repo in rebase state, skipping pull", "path", path)
-		return nil
-	}
-	if _, err := os.Stat(rebaseApply); err == nil {
-		s.logger.Debug("repo in rebase-apply state, skipping pull", "path", path)
 		return nil
 	}
 
 	// check for stale lock files from crashed git processes
 	gitDir := filepath.Join(path, ".git")
-	if locks := hasLockFiles(gitDir); len(locks) > 0 {
+	if locks := gitutil.HasLockFiles(gitDir); len(locks) > 0 {
 		repoName := filepath.Base(path)
 		s.logger.Warn("git lock files detected, skipping pull",
 			"path", path,
@@ -1902,11 +1993,10 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 
 	// FETCH_HEAD mtime dedup (secondary: multi-daemon dedup on shared team context paths).
 	// Kept as fallback for when ls-remote can't run (credential issues, etc).
-	fetchHead := filepath.Join(path, ".git", "FETCH_HEAD")
-	if info, err := os.Stat(fetchHead); err == nil {
+	if age, ok := gitutil.FetchHeadAge(path); ok {
 		threshold := max(s.config.TeamContextSyncInterval/2, minTeamContextFetchAge)
-		if time.Since(info.ModTime()) < threshold {
-			s.logger.Debug("team context recently fetched, skipping", "path", path, "age", time.Since(info.ModTime()))
+		if age < threshold {
+			s.logger.Debug("team context recently fetched, skipping", "path", path, "age", age)
 			return nil
 		}
 	}
@@ -1921,7 +2011,7 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 	// git fetch (capture stderr for diagnosable error messages)
 	fetchCmd := exec.CommandContext(ctx, "git", "-C", path, "fetch", "--quiet")
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
-		detail := sanitizeGitOutput(strings.TrimSpace(string(output)))
+		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
 		if detail != "" {
 			return fmt.Errorf("fetch failed: %s (%w)", detail, err)
 		}
@@ -1929,14 +2019,14 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 	}
 
 	// track FETCH_HEAD mtime for team context repos
-	if info, err := os.Stat(fetchHead); err == nil {
+	if info, err := os.Stat(filepath.Join(path, ".git", "FETCH_HEAD")); err == nil {
 		s.recordRemoteChange(path, info.ModTime())
 	}
 
 	// git pull --rebase (capture stderr for diagnosable error messages)
 	pullCmd := exec.CommandContext(ctx, "git", "-C", path, "pull", "--rebase", "--quiet")
 	if output, err := pullCmd.CombinedOutput(); err != nil {
-		detail := sanitizeGitOutput(strings.TrimSpace(string(output)))
+		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
 
 		// check if it's a merge conflict
 		statusCmd := exec.CommandContext(ctx, "git", "-C", path, "status", "--porcelain")

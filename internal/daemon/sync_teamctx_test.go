@@ -436,3 +436,74 @@ path = %q
 		"clone URL should be populated from credentials even when team is defined in config")
 	assert.True(t, teamContexts[0].Exists)
 }
+
+// --- Test: reposEqual ---
+
+func TestReposEqual(t *testing.T) {
+	a := map[string]gitserver.RepoEntry{
+		"team-a": {Name: "team-a", Type: "team-context", URL: "https://a.git", TeamID: "team_a"},
+	}
+	b := map[string]gitserver.RepoEntry{
+		"team-a": {Name: "team-a", Type: "team-context", URL: "https://a.git", TeamID: "team_a"},
+	}
+	assert.True(t, reposEqual(a, b), "identical maps should be equal")
+
+	c := map[string]gitserver.RepoEntry{
+		"team-a": {Name: "team-a", Type: "team-context", URL: "https://a.git", TeamID: "team_a"},
+		"team-b": {Name: "team-b", Type: "team-context", URL: "https://b.git", TeamID: "team_b"},
+	}
+	assert.False(t, reposEqual(a, c), "different lengths should not be equal")
+
+	d := map[string]gitserver.RepoEntry{
+		"team-a": {Name: "team-a", Type: "team-context", URL: "https://changed.git", TeamID: "team_a"},
+	}
+	assert.False(t, reposEqual(a, d), "different URL should not be equal")
+
+	assert.True(t, reposEqual(nil, nil), "both nil should be equal")
+	assert.True(t, reposEqual(map[string]gitserver.RepoEntry{}, map[string]gitserver.RepoEntry{}), "both empty should be equal")
+}
+
+// --- Test: discoverTeams respects dedup interval ---
+
+func TestDiscoverTeams_RespectsDedup(t *testing.T) {
+	isolateCredentials(t)
+	projectDir := setupProjectWithConfig(t, "")
+	scheduler := newTestScheduler(projectDir)
+
+	// write credentials with a token that won't expire for a long time
+	writeCredentialsFile(t, "", gitserver.GitCredentials{
+		Token:     "test-token",
+		ServerURL: "https://git.fake.test.invalid",
+		Username:  "oauth2",
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+		Repos: map[string]gitserver.RepoEntry{
+			"team-a": {Name: "team-a", Type: "team-context", URL: "https://a.git", TeamID: "team_a"},
+		},
+	})
+
+	// first call should run (sets lastTeamDiscovery)
+	scheduler.discoverTeams()
+
+	// second immediate call should be deduped (no-op)
+	scheduler.discoverTeams()
+
+	// verify lastTeamDiscovery was set
+	scheduler.mu.Lock()
+	assert.False(t, scheduler.lastTeamDiscovery.IsZero(), "lastTeamDiscovery should be set after first call")
+	scheduler.mu.Unlock()
+}
+
+// --- Test: discoverTeams skips when no credentials ---
+
+func TestDiscoverTeams_SkipsWithNoCredentials(t *testing.T) {
+	isolateCredentials(t)
+	projectDir := setupProjectWithConfig(t, "")
+	scheduler := newTestScheduler(projectDir)
+
+	// call without any credentials file — should return without error
+	scheduler.discoverTeams()
+
+	scheduler.mu.Lock()
+	assert.False(t, scheduler.lastTeamDiscovery.IsZero(), "lastTeamDiscovery should still be stamped")
+	scheduler.mu.Unlock()
+}

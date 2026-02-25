@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/stretchr/testify/require"
 )
 
@@ -149,9 +150,13 @@ func isExpectedEmptyRepoIssue(category string, check checkResult) bool {
 	if strings.Contains(check.message, "not registered") {
 		return true
 	}
-	// Ledger for sessions not provisioned in test environment
-	if strings.Contains(check.name, "ledger for sessions") &&
-		strings.Contains(check.message, "not provisioned") {
+	// Ledger for sessions not provisioned/cloned in test environment
+	if strings.Contains(check.name, "ledger") &&
+		(strings.Contains(check.message, "not provisioned") || strings.Contains(check.message, "not found")) {
+		return true
+	}
+	// Agent environment detection (test runs inside an agent)
+	if strings.Contains(check.name, "AGENT_ENV") {
 		return true
 	}
 	return false
@@ -172,6 +177,12 @@ func createFreshSageoxStructure(t *testing.T, gitRoot string) {
 	repoID := "repo_01test000000000000000000"
 	markerPath := filepath.Join(sageoxDir, ".repo_"+repoID[5:]) // strip "repo_" prefix
 	require.NoError(t, os.WriteFile(markerPath, []byte("{}"), 0644), "failed to create repo marker")
+
+	// add repo_id to project config (needed for ledger path resolution)
+	cfg, err := config.LoadProjectConfig(gitRoot)
+	require.NoError(t, err)
+	cfg.RepoID = repoID
+	require.NoError(t, config.SaveProjectConfig(gitRoot, cfg))
 
 	// README.md
 	readmeContent := GetSageoxReadmeContent(nil)
@@ -254,6 +265,60 @@ func collectFixableIssues(check checkResult, category string, fixable *[]string)
 	}
 }
 
+// TestDoctorFreshCheckout_NoSideEffectDirectories verifies that running doctor
+// on a freshly checked-out repo (with .sageox/ committed) does not create
+// the sibling _sageox directory as a side-effect. This was the root cause of
+// bug #35: checkStorageHealth created an empty ledger directory, which then
+// caused checkGitRepoPaths to fail with "empty directory".
+func TestDoctorFreshCheckout_NoSideEffectDirectories(t *testing.T) {
+	// create a fresh git repo simulating a checkout that already has .sageox/
+	tmpDir := testGitRepo(t)
+
+	originalWd, _ := os.Getwd()
+	defer os.Chdir(originalWd)
+	os.Chdir(tmpDir)
+
+	// simulate a checkout that already has .sageox/ committed (like cloning ox)
+	createFreshSageoxStructure(t, tmpDir)
+
+	// record the parent directory contents before doctor
+	parentDir := filepath.Dir(tmpDir)
+	beforeEntries, err := os.ReadDir(parentDir)
+	require.NoError(t, err)
+	beforeNames := make(map[string]bool)
+	for _, e := range beforeEntries {
+		beforeNames[e.Name()] = true
+	}
+
+	// run doctor checks (no --fix)
+	opts := doctorOptions{
+		fix:      false,
+		verbose:  false,
+		forceYes: true,
+	}
+	_ = runDoctorChecks(opts)
+
+	// verify no new directories were created in the parent
+	afterEntries, err := os.ReadDir(parentDir)
+	require.NoError(t, err)
+
+	var newDirs []string
+	for _, e := range afterEntries {
+		if !beforeNames[e.Name()] && e.IsDir() {
+			newDirs = append(newDirs, e.Name())
+		}
+	}
+
+	repoName := filepath.Base(tmpDir)
+	siblingName := repoName + "_sageox"
+	for _, dir := range newDirs {
+		if dir == siblingName || strings.HasSuffix(dir, "_sageox") {
+			t.Errorf("ox doctor created sibling directory %q as side-effect; "+
+				"health checks must not create filesystem state", dir)
+		}
+	}
+}
+
 // filterTestEnvironmentIssues removes issues that are expected in a test environment
 // without real credentials, API access, or daemon running
 func filterTestEnvironmentIssues(issues []string) []string {
@@ -281,9 +346,10 @@ func filterTestEnvironmentIssues(issues []string) []string {
 			strings.Contains(issue, "Git remotes") {
 			continue
 		}
-		// skip repo paths when no ledger/team contexts configured
+		// skip repo paths when no ledger/team contexts configured or syncing
 		if strings.Contains(issue, "git repo paths") &&
-			strings.Contains(issue, "no repos configured") {
+			(strings.Contains(issue, "no repos configured") ||
+				strings.Contains(issue, "repos syncing")) {
 			continue
 		}
 		// skip ox in PATH - not expected in test environment
@@ -298,6 +364,14 @@ func filterTestEnvironmentIssues(issues []string) []string {
 		// skip ledger for sessions - not provisioned in test environment
 		if strings.Contains(issue, "ledger for sessions") &&
 			strings.Contains(issue, "not provisioned") {
+			continue
+		}
+		// skip agent environment detection (test runs inside an agent)
+		if strings.Contains(issue, "AGENT_ENV") {
+			continue
+		}
+		// skip uncommitted changes in test repos (test setup artifacts)
+		if strings.Contains(issue, "uncommitted change") {
 			continue
 		}
 		filtered = append(filtered, issue)

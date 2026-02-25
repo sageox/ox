@@ -65,10 +65,12 @@ type MessageView struct {
 
 // ToolCallView holds tool invocation details for display.
 type ToolCallView struct {
-	Name    string
-	Summary string // compact summary like "Edit(file.go) -- +5 / -3 lines"
-	Input   string
-	Output  string
+	Name           string
+	Summary        string        // compact summary like "Edit(file.go) -- +5 / -3 lines"
+	FormattedInput template.HTML // pre-rendered compact command (e.g., ">_ Bash git status")
+	IsSimple       bool          // true = render inline (no collapsible details)
+	Input          string
+	Output         string
 }
 
 // MetadataView holds session metadata for display.
@@ -79,15 +81,12 @@ type MetadataView struct {
 	Username     string
 	StartedAt    time.Time
 	EndedAt      time.Time
-	Duration     string
 }
 
 // StatsView holds session statistics for display.
 type StatsView struct {
 	TotalMessages int
 	UserMessages  int
-	ToolCalls     int
-	Duration      string
 }
 
 // BrandColors defines the SageOx brand color palette for CSS variable injection.

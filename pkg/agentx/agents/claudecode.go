@@ -30,6 +30,8 @@ func (a *ClaudeCodeAgent) URL() string {
 	return "https://github.com/anthropics/claude-code"
 }
 
+func (a *ClaudeCodeAgent) Role() agentx.AgentRole { return agentx.RoleAgent }
+
 // Detect checks if Claude Code is the active agent.
 //
 // Detection methods:

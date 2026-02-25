@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	iterationsPerQuery = 3
+	iterationsPerQuery = 5 // covers all prompt variants per query
 	queryTimeout       = 3 * time.Minute
 	maxRetries         = 2
 )
@@ -21,7 +21,8 @@ const (
 // TestPrimeEfficiencyBenchmark runs all benchmark queries against installed agents
 // and measures tool call efficiency.
 //
-// Cost: ~18 API calls per agent (~$0.50-1.00, ~36 min wall time for Claude).
+// Cost: ~40 API calls per agent (~$1.10-2.20, ~80 min wall time for Claude).
+// Each of 8 queries runs 5 iterations, cycling through prompt variants.
 func TestPrimeEfficiencyBenchmark(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping benchmark in short mode")
@@ -38,7 +39,10 @@ func TestPrimeEfficiencyBenchmark(t *testing.T) {
 		query := query
 		t.Run(query.ID, func(t *testing.T) {
 			for iter := 0; iter < iterationsPerQuery; iter++ {
-				result := runWithRetry(t, env, agent, query.Text, maxRetries)
+				variantIdx := iter % len(query.Texts)
+				prompt := query.Texts[variantIdx]
+
+				result := runWithRetry(t, env, agent, prompt, maxRetries)
 				if result == nil {
 					continue
 				}
@@ -51,6 +55,8 @@ func TestPrimeEfficiencyBenchmark(t *testing.T) {
 
 				qr := scoreQuery(calls, query)
 				qr.Iteration = iter
+				qr.PromptVariant = variantIdx
+				qr.PromptText = prompt
 				qr.Duration = result.Duration
 
 				// handle 0-tool-call case via response validation
@@ -63,8 +69,8 @@ func TestPrimeEfficiencyBenchmark(t *testing.T) {
 
 				run.Queries = append(run.Queries, qr)
 
-				t.Logf("  iter=%d found=%v calls_until=%d total=%d extraneous=%d duration=%v",
-					iter, qr.FoundCorrectSource, qr.ToolCallsUntilFound,
+				t.Logf("  iter=%d variant=%d found=%v calls_until=%d total=%d extraneous=%d duration=%v",
+					iter, variantIdx, qr.FoundCorrectSource, qr.ToolCallsUntilFound,
 					qr.ToolCallsTotal, qr.ExtraneousCalls, qr.Duration.Round(time.Second))
 			}
 		})
@@ -214,8 +220,8 @@ func TestParseClaudeToolCallsInvalid(t *testing.T) {
 
 func TestScoreQuery(t *testing.T) {
 	query := BenchmarkQuery{
-		ID:   "test",
-		Text: "test query",
+		ID:    "test",
+		Texts: []string{"test query"},
 		Validate: func(call ToolCall) bool {
 			return call.Name == "Bash" && containsCI(call.Input, "ox doctor")
 		},

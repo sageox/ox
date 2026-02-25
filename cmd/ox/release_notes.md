@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-02-24
+
+### Added
+
+**Redesigned `ox doctor` with timeline TUI**
+- Visual timeline showing check progress and results
+- Auto-sync ledger health checks detect drift before it causes problems
+- Doctor recovery options for common failure modes
+
+**Version update notifications**
+- `ox status` and `ox agent prime` notify when a newer release is available
+- Update check runs via daemon cache — no extra network calls in the CLI hot path
+
+**Smarter AI coworker context**
+- `ox agent prime` now includes user and agent tips for better session guidance
+- Intent-to-command guidance field helps coworkers discover the right `ox` command
+- Team docs progressive disclosure — coworkers get relevant team context without flooding their context window
+- Team instruction files emitted directly into agent context
+
+**Session abort command**
+- `ox session abort` discards a session without uploading, useful for throwaway explorations
+
+**Orchestrator detection**
+- Detects orchestration layers (e.g., multi-agent setups) via `X-Orchestrator` header
+- Improved Amp agent detection accuracy
+
+**Cleaner status output**
+- `.sageox/` symlink paths shown as short relative paths instead of full XDG paths
+- Repo-specific team context highlighted across `ox` commands
+
+### Changed
+- Ledger checkout moved to user data directory (XDG-compliant, keeps repo clean)
+- Session HTML compacted — tool calls are collapsed, duration/tool-count noise removed
+- Git safety primitives extracted into `internal/gitutil` for reuse
+- Daemon sync uses ls-remote pre-check and exponential backoff for resilience
+- Better agent ID error messages with diagnostic guidance
+- `ox init` now shows `ox sync` as step 2 in next-steps output
+
+### Fixed
+- Ghost sessions no longer appear after onboarding
+- Session summaries now generated from push-summary for accuracy
+- Tool noise filtered from session summarization
+- Project-level hook settings checked correctly during install detection
+- Team context discoverable without waiting for daemon sync
+- Stale PAT in git remote URLs fixed on login/logout
+- Daemon config cache no longer clobbers ledger path
+- System-injected content classified correctly in raw session data
+- Fresh checkout failures in `ox doctor` resolved
+- Credential token refresh separated from team discovery in daemon
+- Cloud Code project hash uses dashes instead of underscores
+
+[0.2.0]: https://github.com/sageox/ox/releases/tag/v0.2.0
+
 ## [0.1.1] - 2026-02-19
 
 ### Added

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1439,7 +1440,7 @@ func TestSanitizeGitOutput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := sanitizeGitOutput(tt.input)
+			result := gitutil.SanitizeOutput(tt.input)
 			assert.Equal(t, tt.expected, result)
 		})
 	}

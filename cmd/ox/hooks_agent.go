@@ -75,11 +75,16 @@ func (a *ClaudeAgent) HasHooks(user bool) bool {
 }
 
 func (a *ClaudeAgent) List() map[string]bool {
-	status, err := listClaudeHooks()
-	if err != nil {
-		return make(map[string]bool)
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		// fall back to user-level if not in a git repo
+		status, err := listClaudeHooks()
+		if err != nil {
+			return make(map[string]bool)
+		}
+		return status
 	}
-	return status
+	return listProjectClaudeHooks(gitRoot)
 }
 
 func (a *ClaudeAgent) Detect() bool {

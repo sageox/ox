@@ -118,6 +118,11 @@ func buildResummaryPrompt(entries []map[string]any, inputPath string, compact bo
 			continue
 		}
 
+		// filter out read-only tool noise
+		if isResummaryNoiseEntry(entry) {
+			continue
+		}
+
 		// extract message info
 		msgType := getEntryType(entry)
 		content := getEntryContent(entry)
@@ -204,4 +209,50 @@ func truncateForPrompt(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// isResummaryNoiseEntry returns true for tool entries that are read-only
+// exploration (read, glob, grep) and should be filtered from resummary prompts.
+func isResummaryNoiseEntry(entry map[string]any) bool {
+	entryType, _ := entry["type"].(string)
+	if entryType != "tool" {
+		return false
+	}
+
+	toolName, _ := entry["tool_name"].(string)
+	toolLower := strings.ToLower(toolName)
+
+	// read-only tools are noise unless they failed
+	readOnlyTools := map[string]bool{
+		"read": true, "glob": true, "grep": true,
+		"webfetch": true, "websearch": true,
+	}
+	if readOnlyTools[toolLower] {
+		// keep if output indicates an error
+		output, _ := entry["tool_output"].(string)
+		if output == "" {
+			output, _ = entry["content"].(string)
+		}
+		if session.IsNoiseCommand(output) {
+			return true
+		}
+		// simple heuristic: if no error keywords, it's noise
+		outputLower := strings.ToLower(output)
+		for _, errWord := range []string{"error:", "failed", "fatal:", "panic:", "not found"} {
+			if strings.Contains(outputLower, errWord) {
+				return false // keep errors
+			}
+		}
+		return true
+	}
+
+	// noise bash commands
+	if toolLower == "bash" || toolLower == "execute" {
+		input, _ := entry["tool_input"].(string)
+		if session.IsNoiseCommand(input) {
+			return true
+		}
+	}
+
+	return false
 }

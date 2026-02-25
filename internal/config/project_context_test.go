@@ -319,6 +319,7 @@ func TestProjectContext_DefaultLedgerPath(t *testing.T) {
 
 	cfg := &ProjectConfig{
 		Endpoint: "https://api.sageox.ai",
+		RepoID:   "repo_01jfk3mab",
 	}
 	require.NoError(t, SaveProjectConfig(projectDir, cfg))
 
@@ -326,9 +327,9 @@ func TestProjectContext_DefaultLedgerPath(t *testing.T) {
 	require.NoError(t, err)
 
 	ledgerPath := ctx.DefaultLedgerPath()
-	assert.Contains(t, ledgerPath, "test-repo_sageox")
 	assert.Contains(t, ledgerPath, "sageox.ai")
-	assert.Contains(t, ledgerPath, "ledger")
+	assert.Contains(t, ledgerPath, "ledgers")
+	assert.Contains(t, ledgerPath, "repo_01jfk3mab")
 }
 
 func TestProjectContext_DefaultLedgerPath_NonProduction(t *testing.T) {
@@ -340,6 +341,7 @@ func TestProjectContext_DefaultLedgerPath_NonProduction(t *testing.T) {
 
 	cfg := &ProjectConfig{
 		Endpoint: "https://staging.sageox.ai",
+		RepoID:   "repo_staging123",
 	}
 	require.NoError(t, SaveProjectConfig(projectDir, cfg))
 
@@ -347,9 +349,29 @@ func TestProjectContext_DefaultLedgerPath_NonProduction(t *testing.T) {
 	require.NoError(t, err)
 
 	ledgerPath := ctx.DefaultLedgerPath()
-	assert.Contains(t, ledgerPath, "staging-repo_sageox")
 	assert.Contains(t, ledgerPath, "staging.sageox.ai")
-	assert.Contains(t, ledgerPath, "ledger")
+	assert.Contains(t, ledgerPath, "ledgers")
+	assert.Contains(t, ledgerPath, "repo_staging123")
+}
+
+func TestProjectContext_DefaultLedgerPath_EmptyRepoID(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	projectDir := filepath.Join(tmpDir, "no-repo-id")
+	require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+	cfg := &ProjectConfig{
+		Endpoint: "https://sageox.ai",
+	}
+	require.NoError(t, SaveProjectConfig(projectDir, cfg))
+
+	ctx, err := LoadProjectContext(projectDir)
+	require.NoError(t, err)
+
+	// no repo ID means empty ledger path
+	ledgerPath := ctx.DefaultLedgerPath()
+	assert.Empty(t, ledgerPath)
 }
 
 // -----------------------------------------------------------------------------
@@ -525,9 +547,10 @@ func TestProjectContext_PathHelpers_WithEmptyEndpoint(t *testing.T) {
 	projectDir := filepath.Join(tmpDir, "empty-endpoint-repo")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
-	// config with no endpoint set
+	// config with no endpoint set but with repo ID
 	cfg := &ProjectConfig{
-		Org: "test",
+		Org:    "test",
+		RepoID: "repo_test_endpoint",
 	}
 	require.NoError(t, SaveProjectConfig(projectDir, cfg))
 
@@ -551,6 +574,7 @@ func TestProjectContext_PathHelpers_WithEmptyEndpoint(t *testing.T) {
 
 	ledgerPath := ctx.DefaultLedgerPath()
 	assert.Contains(t, ledgerPath, "sageox.ai")
+	assert.Contains(t, ledgerPath, "repo_test_endpoint")
 }
 
 func TestProjectContext_LocalhostEndpoint(t *testing.T) {
@@ -566,6 +590,7 @@ func TestProjectContext_LocalhostEndpoint(t *testing.T) {
 
 	cfg := &ProjectConfig{
 		Endpoint: "http://localhost:8080",
+		RepoID:   "repo_localhost_test",
 	}
 	require.NoError(t, SaveProjectConfig(projectDir, cfg))
 
@@ -580,6 +605,7 @@ func TestProjectContext_LocalhostEndpoint(t *testing.T) {
 	ledgerPath := ctx.DefaultLedgerPath()
 	assert.Contains(t, ledgerPath, "localhost")
 	assert.NotContains(t, ledgerPath, "8080")
+	assert.Contains(t, ledgerPath, "repo_localhost_test")
 }
 
 func TestProjectContext_ConfigDefaults(t *testing.T) {
