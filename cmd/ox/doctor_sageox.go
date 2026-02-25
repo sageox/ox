@@ -1449,36 +1449,23 @@ func checkDuplicateRepoMarkers(fix bool) checkResult {
 
 		selectedMarker := markers[idx]
 
-		// build markers map for merge API
+		// local cleanup first: user's choice is authoritative
+		cleanupDuplicateMarkers(repoRoot, sageoxDir, cfg, selectedMarker, markers)
+
+		// notify server for visibility/bookkeeping (best-effort, don't fail on error)
 		allMarkers := make(map[string]json.RawMessage)
 		for _, m := range markers {
 			allMarkers[m.filename] = m.raw
 		}
-
-		// create authenticated API client
 		gitRoot := findGitRoot()
-		if gitRoot == "" {
-			return WarningCheck(checkName, "merge failed", "not in a git repo")
-		}
-
-		client := api.NewRepoClientForProject(gitRoot)
-		projectEndpoint := endpoint.GetForProject(gitRoot)
-		if token, tokenErr := auth.GetTokenForEndpoint(projectEndpoint); tokenErr == nil && token != nil && token.AccessToken != "" {
-			client.WithAuthToken(token.AccessToken)
-		}
-
-		_, redirectInfo, mergeErr := client.MergeRepo(selectedMarker.data.RepoID, allMarkers)
-		if mergeErr != nil {
-			return WarningCheck(checkName, "merge API failed", mergeErr.Error())
-		}
-
-		// apply redirect if returned, otherwise local cleanup
-		if redirectInfo != nil {
-			if handleErr := api.HandleRedirect(repoRoot, redirectInfo); handleErr != nil {
-				return WarningCheck(checkName, "redirect handling failed", handleErr.Error())
+		if gitRoot != "" {
+			client := api.NewRepoClientForProject(gitRoot)
+			projectEndpoint := endpoint.GetForProject(gitRoot)
+			if token, tokenErr := auth.GetTokenForEndpoint(projectEndpoint); tokenErr == nil && token != nil && token.AccessToken != "" {
+				client.WithAuthToken(token.AccessToken)
 			}
-		} else {
-			cleanupDuplicateMarkers(repoRoot, sageoxDir, cfg, selectedMarker, markers)
+			// best-effort: server uses this for visibility/bookkeeping
+			_, _, _ = client.MergeRepo(selectedMarker.data.RepoID, allMarkers)
 		}
 	}
 

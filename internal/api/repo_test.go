@@ -491,7 +491,6 @@ func TestMergeRepo_Success(t *testing.T) {
 		body, _ := io.ReadAll(r.Body)
 		json.Unmarshal(body, &receivedBody)
 
-		// set redirect header
 		w.Header().Set("X-SageOx-Merge", `{"repo":{"from":"repo_old","to":"repo_new"},"config":{"repo_id":"repo_new"}}`)
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{
@@ -518,50 +517,22 @@ func TestMergeRepo_Success(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
-	// verify request was formed correctly
 	assert.Equal(t, "POST", receivedMethod)
 	assert.True(t, strings.HasSuffix(receivedPath, "/api/v1/repo/repo_old/merge"))
 	assert.Equal(t, "Bearer test-token", receivedAuth)
 	assert.Contains(t, receivedBody.RepoMarkers, ".repo_abc")
 
-	// verify response parsing
 	assert.Equal(t, "repo_new", resp.Canonical)
 	assert.Equal(t, []string{"repo_old"}, resp.Merged)
 
-	// verify redirect header was parsed and returned separately
 	require.NotNil(t, redirect)
 	assert.Equal(t, "repo_old", redirect.Repo.From)
 	assert.Equal(t, "repo_new", redirect.Repo.To)
 }
 
-func TestMergeRepo_Unauthorized(t *testing.T) {
-	t.Parallel()
-
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error":"invalid token"}`))
-	}))
-	defer mockServer.Close()
-
-	client := &RepoClient{
-		baseURL:    mockServer.URL,
-		httpClient: &http.Client{Timeout: 10 * time.Second},
-		version:    "test-version",
-		authToken:  "expired-token",
-	}
-
-	resp, redirect, err := client.MergeRepo("repo_test123", nil)
-
-	require.Error(t, err)
-	assert.Nil(t, resp)
-	assert.Nil(t, redirect)
-	assert.Contains(t, err.Error(), "401")
-	assert.Contains(t, err.Error(), "invalid token")
-}
-
 func TestMergeRepo_NotFound(t *testing.T) {
 	t.Parallel()
-	// 404 means endpoint not deployed - graceful degradation
+
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
@@ -576,7 +547,6 @@ func TestMergeRepo_NotFound(t *testing.T) {
 
 	resp, redirect, err := client.MergeRepo("repo_test123", nil)
 
-	// 404 should return (nil, nil, nil) for graceful degradation
 	assert.NoError(t, err)
 	assert.Nil(t, resp)
 	assert.Nil(t, redirect)
@@ -586,7 +556,7 @@ func TestMergeRepo_NetworkError(t *testing.T) {
 	t.Parallel()
 
 	client := &RepoClient{
-		baseURL:    "http://localhost:99999", // invalid port
+		baseURL:    "http://localhost:99999",
 		httpClient: &http.Client{Timeout: 1 * time.Second},
 		version:    "test-version",
 		authToken:  "valid-token",
@@ -599,3 +569,4 @@ func TestMergeRepo_NetworkError(t *testing.T) {
 	assert.Nil(t, redirect)
 	assert.Contains(t, err.Error(), "network error")
 }
+

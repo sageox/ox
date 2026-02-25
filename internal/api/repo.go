@@ -367,14 +367,13 @@ func (c *RepoClient) NotifyUninstall(repoID, repoSalt string) error {
 	}
 }
 
-// MergeRepo calls POST /api/v1/repo/{repo_id}/merge to resolve duplicate registrations.
-// Returns the merge response and redirect info parsed from the X-SageOx-Merge header.
-// Does NOT auto-apply HandleRedirect — the caller decides when to apply (e.g., doctor shows UX first).
+// MergeRepo calls POST /api/v1/repo/{repo_id}/merge to notify the server about
+// duplicate registration resolution. This is best-effort for server-side visibility
+// and bookkeeping — the local cleanup is authoritative.
 // Gracefully handles 404 (endpoint not yet deployed) by returning nil, nil, nil.
 func (c *RepoClient) MergeRepo(repoID string, markers map[string]json.RawMessage) (*MergeRepoResponse, *RedirectInfo, error) {
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(repoMergePath, repoID)
 
-	// marshal request body
 	mergeReq := &MergeRepoRequest{
 		RepoMarkers: markers,
 	}
@@ -387,19 +386,16 @@ func (c *RepoClient) MergeRepo(repoID string, markers map[string]json.RawMessage
 	// intentionally skip LogHTTPRequestBody — markers contain repo_salt (auth material)
 	start := time.Now()
 
-	// create HTTP request
 	httpReq, err := useragent.NewRequest(context.Background(), "POST", reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// set headers
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.authToken != "" {
 		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
 	}
 
-	// execute request
 	resp, err := c.httpClient.Do(httpReq)
 	duration := time.Since(start)
 
@@ -411,27 +407,22 @@ func (c *RepoClient) MergeRepo(repoID string, markers map[string]json.RawMessage
 
 	logger.LogHTTPResponse("POST", reqURL, resp.StatusCode, duration)
 
-	// check for version deprecation signals
 	if CheckVersionResponse(resp) {
 		return nil, nil, ErrVersionUnsupported
 	}
 
-	// parse redirect header (returned separately so caller can decide when to apply)
 	redirectInfo := ParseRedirectHeader(resp.Header)
 
-	// handle 404 gracefully - endpoint not yet deployed
 	if resp.StatusCode == http.StatusNotFound {
-		io.Copy(io.Discard, resp.Body) // drain body for connection reuse
+		io.Copy(io.Discard, resp.Body)
 		return nil, nil, nil
 	}
 
-	// read response body
 	bodyBytes, err = io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	// handle non-2xx responses
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		errMsg := strings.TrimSpace(string(bodyBytes))
 		if errMsg == "" {
@@ -440,10 +431,8 @@ func (c *RepoClient) MergeRepo(repoID string, markers map[string]json.RawMessage
 		return nil, nil, fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, reqURL, errMsg)
 	}
 
-	// log the raw response for debugging
 	logger.LogHTTPResponseBody(string(bodyBytes))
 
-	// decode successful response
 	var mergeResp MergeRepoResponse
 	if err := json.Unmarshal(bodyBytes, &mergeResp); err != nil {
 		return nil, nil, fmt.Errorf("failed to decode response: %w", err)
