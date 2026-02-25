@@ -470,3 +470,132 @@ func TestNotifyUninstall_ServerError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "server error")
 }
+
+// ============================================================================
+// MergeRepo Tests
+// ======
+
+func TestMergeRepo_Success(t *testing.T) {
+	t.Parallel()
+
+	var receivedMethod string
+	var receivedPath string
+	var receivedAuth string
+	var receivedBody MergeRepoRequest
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedMethod = r.Method
+		receivedPath = r.URL.Path
+		receivedAuth = r.Header.Get("Authorization")
+
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &receivedBody)
+
+		// set redirect header
+		w.Header().Set("X-SageOx-Merge", `{"repo":{"from":"repo_old","to":"repo_new"},"config":{"repo_id":"repo_new"}}`)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+			"canonical_repo_id": "repo_new",
+			"merged_repo_ids": ["repo_old"],
+			"redirect": {"repo":{"from":"repo_old","to":"repo_new"}}
+		}`))
+	}))
+	defer mockServer.Close()
+
+	client := &RepoClient{
+		baseURL:    mockServer.URL,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		version:    "test-version",
+		authToken:  "test-token",
+	}
+
+	markers := map[string]json.RawMessage{
+		".repo_abc": json.RawMessage(`{"repo_id":"repo_old","repo_salt":"deadbeef"}`),
+	}
+
+	resp, redirect, err := client.MergeRepo("repo_old", markers)
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	// verify request was formed correctly
+	assert.Equal(t, "POST", receivedMethod)
+	assert.True(t, strings.HasSuffix(receivedPath, "/api/v1/repo/repo_old/merge"))
+	assert.Equal(t, "Bearer test-token", receivedAuth)
+	assert.Contains(t, receivedBody.RepoMarkers, ".repo_abc")
+
+	// verify response parsing
+	assert.Equal(t, "repo_new", resp.Canonical)
+	assert.Equal(t, []string{"repo_old"}, resp.Merged)
+
+	// verify redirect header was parsed and returned separately
+	require.NotNil(t, redirect)
+	assert.Equal(t, "repo_old", redirect.Repo.From)
+	assert.Equal(t, "repo_new", redirect.Repo.To)
+}
+
+func TestMergeRepo_Unauthorized(t *testing.T) {
+	t.Parallel()
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"invalid token"}`))
+	}))
+	defer mockServer.Close()
+
+	client := &RepoClient{
+		baseURL:    mockServer.URL,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		version:    "test-version",
+		authToken:  "expired-token",
+	}
+
+	resp, redirect, err := client.MergeRepo("repo_test123", nil)
+
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Nil(t, redirect)
+	assert.Contains(t, err.Error(), "401")
+	assert.Contains(t, err.Error(), "invalid token")
+}
+
+func TestMergeRepo_NotFound(t *testing.T) {
+	t.Parallel()
+	// 404 means endpoint not deployed - graceful degradation
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer mockServer.Close()
+
+	client := &RepoClient{
+		baseURL:    mockServer.URL,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		version:    "test-version",
+		authToken:  "valid-token",
+	}
+
+	resp, redirect, err := client.MergeRepo("repo_test123", nil)
+
+	// 404 should return (nil, nil, nil) for graceful degradation
+	assert.NoError(t, err)
+	assert.Nil(t, resp)
+	assert.Nil(t, redirect)
+}
+
+func TestMergeRepo_NetworkError(t *testing.T) {
+	t.Parallel()
+
+	client := &RepoClient{
+		baseURL:    "http://localhost:99999", // invalid port
+		httpClient: &http.Client{Timeout: 1 * time.Second},
+		version:    "test-version",
+		authToken:  "valid-token",
+	}
+
+	resp, redirect, err := client.MergeRepo("repo_test123", nil)
+
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Nil(t, redirect)
+	assert.Contains(t, err.Error(), "network error")
+}

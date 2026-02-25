@@ -371,6 +371,15 @@ func init() {
 		Run:         checkEndpointNormalization,
 	})
 
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugDuplicateRepoMarkers,
+		Name:        "Duplicate repo registrations",
+		Category:    "SageOx Configuration",
+		FixLevel:    FixLevelConfirm,
+		Description: "Detects multiple repo registrations from the same endpoint",
+		Run:         checkDuplicateRepoMarkers,
+	})
+
 	// ============================================================
 	// Team Context checks
 	// ============================================================

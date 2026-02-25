@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -335,6 +336,25 @@ func (m *repoMarkerData) GetEndpoint() string {
 		return m.Endpoint
 	}
 	return m.APIEndpoint // fallback to legacy field
+}
+
+// repoMarkerFullData extends repoMarkerData with optional init metadata fields
+// used by checkDuplicateRepoMarkers for display purposes.
+type repoMarkerFullData struct {
+	RepoID      string `json:"repo_id"`
+	Endpoint    string `json:"endpoint"`
+	APIEndpoint string `json:"api_endpoint,omitempty"`
+	InitAt      string `json:"init_at,omitempty"`
+	InitByEmail string `json:"init_by_email,omitempty"`
+	InitByName  string `json:"init_by_name,omitempty"`
+}
+
+// GetEndpoint returns the endpoint, preferring new field over legacy
+func (m *repoMarkerFullData) GetEndpoint() string {
+	if m.Endpoint != "" {
+		return m.Endpoint
+	}
+	return m.APIEndpoint
 }
 
 // checkMultipleEndpoints detects if there are multiple .repo_* files from different endpoints.
@@ -1259,4 +1279,223 @@ func checkSiblingWithoutInit() checkResult {
 
 	// neither exists - skip (normal state before init)
 	return SkippedCheck("Sibling directory", "not present", "")
+}
+
+// duplicateMarker holds a parsed .repo_* marker and its raw JSON for the merge API.
+type duplicateMarker struct {
+	filename string
+	data     repoMarkerFullData
+	raw      json.RawMessage
+}
+
+// checkDuplicateRepoMarkers detects when 2+ .repo_* marker files exist for the
+// same endpoint, indicating two independent `ox init` runs created separate
+// registrations. With fix=true, prompts the user to choose which registration
+// to keep and calls the merge API.
+func checkDuplicateRepoMarkers(fix bool) checkResult {
+	const checkName = "Duplicate repo registrations"
+
+	repoRoot := findRepoRoot()
+	if repoRoot == "" {
+		return SkippedCheck(checkName, "not in a repository", "")
+	}
+
+	sageoxDir := filepath.Join(repoRoot, ".sageox")
+	if _, err := os.Stat(sageoxDir); os.IsNotExist(err) {
+		return SkippedCheck(checkName, ".sageox/ not initialized", "")
+	}
+
+	// read all .repo_* files
+	entries, err := os.ReadDir(sageoxDir)
+	if err != nil {
+		return WarningCheck(checkName, "read error", err.Error())
+	}
+
+	// parse each marker and group by normalized endpoint
+	endpointMarkers := make(map[string][]duplicateMarker)
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), ".repo_") {
+			continue
+		}
+
+		markerPath := filepath.Join(sageoxDir, entry.Name())
+		rawData, readErr := os.ReadFile(markerPath)
+		if readErr != nil {
+			continue
+		}
+
+		var m repoMarkerFullData
+		if json.Unmarshal(rawData, &m) != nil {
+			continue
+		}
+
+		ep := m.GetEndpoint()
+		if ep == "" {
+			ep = "(unknown)"
+		}
+		normalizedEP := endpoint.NormalizeEndpoint(ep)
+
+		endpointMarkers[normalizedEP] = append(endpointMarkers[normalizedEP], duplicateMarker{
+			filename: entry.Name(),
+			data:     m,
+			raw:      rawData,
+		})
+	}
+
+	// find endpoints with 2+ markers (duplicates)
+	var duplicateEndpoints []string
+	for ep, markers := range endpointMarkers {
+		if len(markers) >= 2 {
+			duplicateEndpoints = append(duplicateEndpoints, ep)
+		}
+	}
+
+	if len(duplicateEndpoints) == 0 {
+		return SkippedCheck(checkName, "no duplicates", "")
+	}
+
+	// sort for deterministic output
+	sort.Strings(duplicateEndpoints)
+
+	// load current config.json to identify which marker is "current"
+	cfg, _ := config.LoadProjectConfig(repoRoot)
+	currentRepoID := ""
+	if cfg != nil {
+		currentRepoID = cfg.RepoID
+	}
+
+	// build detail table for each endpoint with duplicates
+	var detailLines []string
+	var totalDuplicates int
+
+	for _, ep := range duplicateEndpoints {
+		markers := endpointMarkers[ep]
+		totalDuplicates += len(markers)
+		detailLines = append(detailLines, fmt.Sprintf("Endpoint: %s (%d registrations)", ep, len(markers)))
+
+		for _, m := range markers {
+			creator := m.data.InitByName
+			if creator == "" {
+				creator = m.data.InitByEmail
+			}
+			if creator == "" {
+				creator = "(unknown)"
+			}
+
+			createdAt := m.data.InitAt
+			if createdAt == "" {
+				createdAt = "(unknown)"
+			}
+
+			current := ""
+			if m.data.RepoID == currentRepoID {
+				current = " <- current"
+			}
+
+			detailLines = append(detailLines,
+				fmt.Sprintf("  %s  repo_id=%s  by=%s  at=%s%s",
+					m.filename, m.data.RepoID, creator, createdAt, current))
+		}
+	}
+
+	detail := strings.Join(detailLines, "\n       ")
+
+	if !fix {
+		return FailedCheck(checkName,
+			fmt.Sprintf("%d registrations across %d endpoint(s)", totalDuplicates, len(duplicateEndpoints)),
+			detail+"\n       Run `ox doctor --fix` to merge")
+	}
+
+	// fix mode: for each endpoint with duplicates, ask which to keep and merge
+	for _, ep := range duplicateEndpoints {
+		markers := endpointMarkers[ep]
+
+		// display the registrations
+		fmt.Println()
+		cli.PrintWarning(fmt.Sprintf("Duplicate registrations for %s", ep))
+		fmt.Println()
+
+		var options []string
+		for _, m := range markers {
+			creator := m.data.InitByName
+			if creator == "" {
+				creator = m.data.InitByEmail
+			}
+			if creator == "" {
+				creator = "(unknown)"
+			}
+
+			label := fmt.Sprintf("%s (by %s, %s)", m.data.RepoID, creator, m.data.InitAt)
+			if m.data.RepoID == currentRepoID {
+				label += " [current]"
+			}
+			options = append(options, label)
+		}
+
+		// default to current config's repo_id if found
+		defaultIdx := 0
+		for i, m := range markers {
+			if m.data.RepoID == currentRepoID {
+				defaultIdx = i
+				break
+			}
+		}
+
+		idx, selectErr := cli.SelectOne("Which registration to keep?", options, defaultIdx)
+		if selectErr != nil {
+			return WarningCheck(checkName, "selection canceled", selectErr.Error())
+		}
+
+		selectedMarker := markers[idx]
+
+		// build markers map for merge API
+		allMarkers := make(map[string]json.RawMessage)
+		for _, m := range markers {
+			allMarkers[m.filename] = m.raw
+		}
+
+		// create authenticated API client
+		gitRoot := findGitRoot()
+		if gitRoot == "" {
+			return WarningCheck(checkName, "merge failed", "not in a git repo")
+		}
+
+		client := api.NewRepoClientForProject(gitRoot)
+		projectEndpoint := endpoint.GetForProject(gitRoot)
+		if token, tokenErr := auth.GetTokenForEndpoint(projectEndpoint); tokenErr == nil && token != nil && token.AccessToken != "" {
+			client.WithAuthToken(token.AccessToken)
+		}
+
+		_, redirectInfo, mergeErr := client.MergeRepo(selectedMarker.data.RepoID, allMarkers)
+		if mergeErr != nil {
+			return WarningCheck(checkName, "merge API failed", mergeErr.Error())
+		}
+
+		// apply redirect if returned, otherwise local cleanup
+		if redirectInfo != nil {
+			if handleErr := api.HandleRedirect(repoRoot, redirectInfo); handleErr != nil {
+				return WarningCheck(checkName, "redirect handling failed", handleErr.Error())
+			}
+		} else {
+			cleanupDuplicateMarkers(repoRoot, sageoxDir, cfg, selectedMarker, markers)
+		}
+	}
+
+	return PassedCheck(checkName, "merged duplicate registrations")
+}
+
+// cleanupDuplicateMarkers performs local cleanup after a merge selection:
+// updates config.json repo_id to the selected marker and removes unchosen marker files.
+func cleanupDuplicateMarkers(repoRoot, sageoxDir string, cfg *config.ProjectConfig, selected duplicateMarker, all []duplicateMarker) {
+	if cfg != nil && cfg.RepoID != selected.data.RepoID {
+		cfg.RepoID = selected.data.RepoID
+		_ = config.SaveProjectConfig(repoRoot, cfg)
+	}
+	for _, m := range all {
+		if m.filename == selected.filename {
+			continue
+		}
+		_ = os.Remove(filepath.Join(sageoxDir, m.filename))
+	}
 }

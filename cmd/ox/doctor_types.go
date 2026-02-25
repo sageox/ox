@@ -169,6 +169,7 @@ const (
 	// SageOx Configuration checks
 	CheckSlugEndpointConsistency   = "endpoint-consistency"
 	CheckSlugEndpointNormalization = "endpoint-normalization"
+	CheckSlugDuplicateRepoMarkers  = "duplicate-repo-markers"
 
 	// Agent Health checks
 	CheckSlugInstanceStale       = "instance-stale"
