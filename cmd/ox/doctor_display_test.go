@@ -78,7 +78,7 @@ func TestCheckCategory_MixedResults(t *testing.T) {
 
 	output := buf.String()
 	assert.Contains(t, output, "1 passed", "output missing correct pass count")
-	assert.Contains(t, output, "1 warnings", "output missing correct warning count")
+	assert.Contains(t, output, "1 warning", "output missing correct warning count")
 	assert.Contains(t, output, "1 failed", "output missing correct fail count")
 	assert.Contains(t, output, "check1", "output missing check1")
 	assert.Contains(t, output, "check2", "output missing check2")
@@ -114,8 +114,8 @@ func TestDisplayDoctorResults_AllPassed(t *testing.T) {
 
 	output := buf.String()
 	assert.Contains(t, output, "4 passed", "output missing correct pass count")
-	assert.Contains(t, output, "0 warnings", "output missing warning count")
-	assert.Contains(t, output, "0 failed", "output missing fail count")
+	assert.NotContains(t, output, "warning", "zero warnings should not appear in summary")
+	assert.NotContains(t, output, "failed", "zero failures should not appear in summary")
 }
 
 // TestDisplayPrioritySummary_HealthyMessage verifies the "All checks passed"
@@ -253,8 +253,8 @@ func TestDisplayDoctorResults_OnlyWarnings(t *testing.T) {
 
 	output := buf.String()
 	assert.Contains(t, output, "1 passed", "output missing correct pass count")
-	assert.Contains(t, output, "2 warnings", "output missing correct warning count")
-	assert.Contains(t, output, "0 failed", "output missing fail count")
+	assert.Contains(t, output, "2 warning", "output missing correct warning count")
+	assert.NotContains(t, output, "failed", "zero failures should not appear in summary")
 }
 
 // TestDisplayDoctorResults_WithChildren properly handles nested child checks
@@ -265,7 +265,7 @@ func TestDisplayDoctorResults_WithChildren(t *testing.T) {
 		categories []checkCategory
 		wantFailed bool
 		wantPass   string
-		wantFail   string
+		wantFail   string // empty means zero failures (should NOT appear in output)
 	}{
 		{
 			name: "parent passed with passing children",
@@ -287,7 +287,7 @@ func TestDisplayDoctorResults_WithChildren(t *testing.T) {
 			},
 			wantFailed: false,
 			wantPass:   "3 passed",
-			wantFail:   "0 failed",
+			wantFail:   "",
 		},
 		{
 			name: "parent passed with failed child",
@@ -354,7 +354,7 @@ func TestDisplayDoctorResults_WithChildren(t *testing.T) {
 			},
 			wantFailed: false,
 			wantPass:   "2 passed",
-			wantFail:   "0 failed",
+			wantFail:   "",
 		},
 		{
 			name: "skipped child doesn't count as failure",
@@ -376,7 +376,7 @@ func TestDisplayDoctorResults_WithChildren(t *testing.T) {
 			},
 			wantFailed: false,
 			wantPass:   "2 passed",
-			wantFail:   "0 failed",
+			wantFail:   "",
 		},
 	}
 
@@ -392,7 +392,11 @@ func TestDisplayDoctorResults_WithChildren(t *testing.T) {
 
 			output := buf.String()
 			assert.Contains(t, output, tt.wantPass, "output missing pass count")
-			assert.Contains(t, output, tt.wantFail, "output missing fail count")
+			if tt.wantFail != "" {
+				assert.Contains(t, output, tt.wantFail, "output missing fail count")
+			} else {
+				assert.NotContains(t, output, "failed", "zero failures should not appear in summary")
+			}
 		})
 	}
 }

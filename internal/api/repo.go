@@ -21,7 +21,7 @@ import (
 
 const (
 	repoInitPath      = "/api/v1/repo/init"
-	repoDoctorPath    = "/api/v1/repo/%s/doctor"    // %s = repo_id
+	repoDoctorPath    = "/api/v1/public/repos/%s/doctor" // %s = repo_id; intentionally public (no PII, works pre-auth)
 	repoUninstallPath = "/api/v1/repo/%s/uninstall" // %s = repo_id
 )
 

@@ -1107,26 +1107,45 @@ func (c *SessionPushCheck) Run(ctx context.Context) CheckResult {
 		}
 	}
 
-	// attempt to push
-	if err := c.pushToRemote(ledgerPath); err != nil {
-		// categorize the error
-		errStr := err.Error()
-		if strings.Contains(errStr, "Permission denied") ||
-			strings.Contains(errStr, "authentication") ||
-			strings.Contains(errStr, "could not read Username") {
-			return CheckResult{
-				Name:    c.Name(),
-				Status:  StatusFail,
-				Message: "push failed (auth error)",
-				Fix:     "Check git credentials - run 'ox login' to refresh",
+	// attempt to push with retries
+	const maxRetries = 3
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if err := c.pushToRemote(ledgerPath); err != nil {
+			lastErr = err
+			// don't retry auth errors
+			errStr := err.Error()
+			if strings.Contains(errStr, "Permission denied") ||
+				strings.Contains(errStr, "authentication") ||
+				strings.Contains(errStr, "could not read Username") ||
+				strings.Contains(errStr, "401") {
+				return CheckResult{
+					Name:    c.Name(),
+					Status:  StatusFail,
+					Message: "push failed (auth error)",
+					Fix:     "Check git credentials - run `ox login` to refresh",
+				}
 			}
+			// 403 = server rejected — could be permissions or stale token, don't retry
+			if strings.Contains(errStr, "403") {
+				return CheckResult{
+					Name:    c.Name(),
+					Status:  StatusFail,
+					Message: "push rejected (HTTP 403)",
+					Fix:     "Server rejected push - check remote permissions or run `ox login` to refresh token",
+				}
+			}
+			continue
 		}
-
+		lastErr = nil
+		break
+	}
+	if lastErr != nil {
 		return CheckResult{
 			Name:    c.Name(),
 			Status:  StatusFail,
-			Message: "push failed",
-			Fix:     fmt.Sprintf("Run 'git -C %s push' to retry", ledgerPath),
+			Message: fmt.Sprintf("push failed after %d retries", maxRetries),
+			Fix:     fmt.Sprintf("Run `git -C %s push` to retry manually", ledgerPath),
 		}
 	}
 
