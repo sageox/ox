@@ -24,6 +24,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/telemetry"
+	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/tokens"
 	"github.com/sageox/ox/internal/ui"
 	"github.com/sageox/ox/internal/useragent"
@@ -228,6 +229,7 @@ type agentPrimeOutput struct {
 	TeamContext       *teamContextInfo `json:"team_context,omitempty"`        // team context if configured
 	TeamContextStatus string           `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
 	UserNotification  string           `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user
+	AgentTip          string           `json:"agent_tip,omitempty"`           // contextual tip for the agent itself (not for the user)
 	// Prime call tracking
 	PrimeCallCount       int    `json:"prime_call_count,omitempty"`       // number of prime calls this session
 	PrimeExcessiveNotice string `json:"prime_excessive_notice,omitempty"` // warning if prime called excessively
@@ -938,6 +940,16 @@ func detectAgentSessionFile(agent agentx.Agent) string {
 //
 // Default (no flags): Pure JSON output optimized for agent consumption.
 func outputAgentPrime(cmd *cobra.Command, textMode, reviewMode bool, output agentPrimeOutput) error {
+	// always include tips: one for the agent, one for the agent to relay to the user
+	output.AgentTip = tips.GetTip("prime")
+	if userTip := tips.GetPrimeUserTip(output.AgentType); userTip != "" {
+		if output.UserNotification != "" {
+			output.UserNotification += "\n\nTip: " + userTip
+		} else {
+			output.UserNotification = "Tip: " + userTip
+		}
+	}
+
 	// --review takes precedence: show both human summary and JSON
 	if reviewMode {
 		humanSummary := buildHumanSummary(output)

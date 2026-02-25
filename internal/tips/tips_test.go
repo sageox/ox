@@ -2,6 +2,7 @@
 package tips
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -96,4 +97,61 @@ func TestGetTip_AgentCommands(t *testing.T) {
 func TestMaybeShow_IntegratesWithCLI(t *testing.T) {
 	// verify it doesn't panic when called
 	MaybeShow("login", AlwaysShow, false, false, false)
+}
+
+func TestGetPrimeUserTip_ReturnsNonEmpty(t *testing.T) {
+	tip := GetPrimeUserTip("Claude Code")
+	assert.NotEmpty(t, tip, "expected a non-empty tip")
+}
+
+func TestGetPrimeUserTip_SubstitutesAgentName(t *testing.T) {
+	// run enough times to hit the %s tip
+	found := false
+	for i := 0; i < 100; i++ {
+		tip := GetPrimeUserTip("Claude Code")
+		if strings.Contains(tip, "Claude Code") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected at least one tip containing 'Claude Code'")
+}
+
+func TestGetPrimeUserTip_EmptyAgentType(t *testing.T) {
+	found := false
+	for i := 0; i < 100; i++ {
+		tip := GetPrimeUserTip("")
+		if strings.Contains(tip, "your AI coworker") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected fallback to 'your AI coworker' for empty agent type")
+}
+
+func TestFriendlyAgentName(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"Claude Code", "Claude Code"},
+		{"claude-code", "Claude Code"},
+		{"cursor", "Cursor"},
+		{"Windsurf", "Windsurf"},
+		{"", "your AI coworker"},
+		{"custom-agent", "Custom-agent"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			assert.Equal(t, tt.expected, friendlyAgentName(tt.input))
+		})
+	}
+}
+
+func TestPrimeUserTips_NotEmpty(t *testing.T) {
+	assert.NotEmpty(t, primeUserTips, "primeUserTips pool should not be empty")
+	for i, tip := range primeUserTips {
+		assert.NotEmpty(t, tip, "primeUserTips[%d] should not be empty", i)
+	}
 }
