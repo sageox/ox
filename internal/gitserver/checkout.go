@@ -35,6 +35,9 @@ type CheckoutOptions struct {
 
 	// Branch specifies the branch to checkout (empty = default branch)
 	Branch string
+
+	// SingleBranch clones only the specified branch (or default branch if Branch is empty)
+	SingleBranch bool
 }
 
 // DefaultCheckoutPath returns the default checkout path for a repo.
@@ -122,6 +125,9 @@ func cloneRepo(ctx context.Context, repoURL, path string, creds *GitCredentials,
 	if opts != nil {
 		if opts.Depth > 0 {
 			args = append(args, "--depth", fmt.Sprintf("%d", opts.Depth))
+		}
+		if opts.SingleBranch {
+			args = append(args, "--single-branch")
 		}
 		if opts.Branch != "" {
 			args = append(args, "--branch", opts.Branch)

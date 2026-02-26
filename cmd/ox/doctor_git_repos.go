@@ -1554,7 +1554,12 @@ func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	if err := gitserver.CloneFromURLWithEndpoint(ctx, cloneURL, targetPath, endpointURL, nil); err != nil {
+	// team contexts only need main branch
+	var cloneOpts *gitserver.CheckoutOptions
+	if repoType == "team_context" {
+		cloneOpts = &gitserver.CheckoutOptions{Branch: "main", SingleBranch: true}
+	}
+	if err := gitserver.CloneFromURLWithEndpoint(ctx, cloneURL, targetPath, endpointURL, cloneOpts); err != nil {
 		return fmt.Errorf("direct clone failed: %w", err)
 	}
 

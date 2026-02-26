@@ -1520,7 +1520,13 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 
 	// git clone with progress
 	// note: git clone --progress sends progress to stderr, could parse it for more detailed updates
-	cloneCmd := exec.CommandContext(ctx, "git", "clone", "--quiet", cloneURL, payload.RepoPath)
+	// team contexts only need main branch — skip fetching other branches
+	cloneArgs := []string{"clone", "--quiet"}
+	if payload.RepoType != "ledger" {
+		cloneArgs = append(cloneArgs, "--single-branch", "--branch", "main")
+	}
+	cloneArgs = append(cloneArgs, cloneURL, payload.RepoPath)
+	cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
 		// sanitize output to prevent credential leaks (clone URL may contain PAT token)
 		sanitizedOutput := gitutil.SanitizeOutput(string(output))
