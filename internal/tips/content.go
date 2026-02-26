@@ -34,12 +34,12 @@ var humanContextualTips = map[string][]string{
 		"Use `ox logout` to clear credentials when switching accounts",
 	},
 	"init": {
-		"`ox hooks install` sets up Claude Code integration automatically",
 		"Run `ox status` to see your new project configuration",
+		"Run `ox doctor` to verify everything is set up correctly",
 	},
 	"doctor": {
 		"Use `--fix` to automatically resolve common issues",
-		"`ox hooks install` sets up Claude Code integration",
+		"Use `-v` for detailed check results",
 	},
 	"logout": {
 		"Run `ox login` to authenticate with a different account",
