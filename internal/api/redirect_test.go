@@ -90,7 +90,7 @@ func TestRenameRepoMarker_NoMarkerExists(t *testing.T) {
 	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
 
 	// should not error when old marker doesn't exist
-	err := renameRepoMarker(tmpDir, "repo_oldid", "repo_newid")
+	err := RenameRepoMarker(tmpDir, "repo_oldid", "repo_newid")
 	assert.NoError(t, err)
 }
 
@@ -104,7 +104,7 @@ func TestRenameRepoMarker_Success(t *testing.T) {
 	oldMarker := filepath.Join(sageoxDir, ".repo_oldid")
 	require.NoError(t, os.WriteFile(oldMarker, []byte(`{"id":"repo_oldid"}`), 0600))
 
-	err := renameRepoMarker(tmpDir, "repo_oldid", "repo_newid")
+	err := RenameRepoMarker(tmpDir, "repo_oldid", "repo_newid")
 	assert.NoError(t, err)
 
 	// old marker should be gone
@@ -129,7 +129,7 @@ func TestRenameRepoMarker_NewAlreadyExists(t *testing.T) {
 	require.NoError(t, os.WriteFile(oldMarker, []byte(`{"id":"repo_oldid"}`), 0600))
 	require.NoError(t, os.WriteFile(newMarker, []byte(`{"id":"repo_newid"}`), 0600))
 
-	err := renameRepoMarker(tmpDir, "repo_oldid", "repo_newid")
+	err := RenameRepoMarker(tmpDir, "repo_oldid", "repo_newid")
 	assert.NoError(t, err)
 
 	// old marker should be removed

@@ -166,6 +166,70 @@ func TestRegisterRepo_Success_ReturnsResponse(t *testing.T) {
 	assert.Equal(t, "team_xyz", resp.TeamID)
 }
 
+func TestRegisterRepo_DuplicateDetection_ParsesExistingRepoFields(t *testing.T) {
+	t.Parallel()
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+			"repo_id":"repo_existing",
+			"team_id":"team_xyz",
+			"existing_repo_id":"repo_existing",
+			"duplicate_warning":"This repository is already registered in this team as repo_existing. Using existing registration."
+		}`))
+	}))
+	defer mockServer.Close()
+
+	client := &RepoClient{
+		baseURL:    mockServer.URL,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		version:    "test-version",
+	}
+
+	req := &RepoInitRequest{
+		RepoID: "repo_new_attempt",
+		Type:   "git",
+		InitAt: "2025-01-01T00:00:00Z",
+	}
+
+	resp, err := client.RegisterRepo(req)
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "repo_existing", resp.RepoID)
+	assert.Equal(t, "team_xyz", resp.TeamID)
+	assert.Equal(t, "repo_existing", resp.ExistingRepoID)
+	assert.Contains(t, resp.DuplicateWarning, "already registered")
+}
+
+func TestRegisterRepo_NoDuplicate_ExistingRepoFieldsEmpty(t *testing.T) {
+	t.Parallel()
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"repo_id":"repo_new","team_id":"team_xyz"}`))
+	}))
+	defer mockServer.Close()
+
+	client := &RepoClient{
+		baseURL:    mockServer.URL,
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+		version:    "test-version",
+	}
+
+	req := &RepoInitRequest{
+		RepoID: "repo_new",
+		Type:   "git",
+		InitAt: "2025-01-01T00:00:00Z",
+	}
+
+	resp, err := client.RegisterRepo(req)
+
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.Equal(t, "repo_new", resp.RepoID)
+	assert.Empty(t, resp.ExistingRepoID)
+	assert.Empty(t, resp.DuplicateWarning)
+}
+
 // ============================================================================
 // GetDoctorIssues Tests
 // ======

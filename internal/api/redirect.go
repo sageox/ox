@@ -78,7 +78,7 @@ func HandleRedirect(projectRoot string, info *RedirectInfo) error {
 
 	// rename marker file if repo changed
 	if info.Repo != nil {
-		if err := renameRepoMarker(projectRoot, info.Repo.From, info.Repo.To); err != nil {
+		if err := RenameRepoMarker(projectRoot, info.Repo.From, info.Repo.To); err != nil {
 			// log but don't fail - marker rename is best-effort
 			logger.Debug("failed to rename repo marker", "error", err)
 		}
@@ -110,9 +110,9 @@ func updateProjectConfig(projectRoot string, cfg *RedirectConfig) error {
 	return nil
 }
 
-// renameRepoMarker renames the .repo_* marker file from old ID to new ID using VCS
+// RenameRepoMarker renames the .repo_* marker file from old ID to new ID using VCS
 // and updates the repo_id value inside the marker file
-func renameRepoMarker(projectRoot, oldID, newID string) error {
+func RenameRepoMarker(projectRoot, oldID, newID string) error {
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
 
 	// extract UUID suffix from IDs (repo_xxx -> xxx)

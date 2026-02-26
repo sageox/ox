@@ -745,9 +745,18 @@ func runInit() error {
 			cli.PrintWarning(fmt.Sprintf("Could not save config: %v", err))
 		}
 	} else {
+		// handle duplicate detection: server found an existing repo with matching remote hashes
+		if resp.ExistingRepoID != "" && !initQuiet {
+			cli.PrintWarning(resp.DuplicateWarning)
+		}
+
 		// success - update config with all server-returned info
-		// repo_id may differ if server assigned canonical ID
+		// repo_id may differ if server assigned canonical ID or dedup matched existing repo
 		if resp.RepoID != "" && resp.RepoID != cfg.RepoID {
+			// rename local marker to match the canonical repo_id
+			if err := api.RenameRepoMarker(gitRoot, cfg.RepoID, resp.RepoID); err != nil {
+				slog.Debug("failed to rename repo marker after dedup", "error", err)
+			}
 			cfg.RepoID = resp.RepoID
 		}
 		if resp.TeamID != "" {

@@ -61,9 +61,11 @@ type RepoFingerprint struct {
 
 // RepoInitResponse represents the POST /api/v1/repo/init response
 type RepoInitResponse struct {
-	RepoID     string `json:"repo_id"`
-	TeamID     string `json:"team_id"`
-	WebBaseURL string `json:"web_base_url,omitempty"` // web dashboard base URL (for enterprise endpoints)
+	RepoID           string `json:"repo_id"`
+	TeamID           string `json:"team_id"`
+	WebBaseURL       string `json:"web_base_url,omitempty"`       // web dashboard base URL (for enterprise endpoints)
+	ExistingRepoID   string `json:"existing_repo_id,omitempty"`   // set when dedup matched a different repo_id
+	DuplicateWarning string `json:"duplicate_warning,omitempty"`  // human-readable warning for CLI display
 }
 
 // RepoUninstallRequest represents the POST /api/v1/repo/{repo_id}/uninstall request
