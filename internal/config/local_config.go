@@ -63,6 +63,7 @@ func (c *LedgerConfig) HasLastSync() bool {
 type TeamContext struct {
 	TeamID   string    `toml:"team_id"`
 	TeamName string    `toml:"team_name"`
+	Slug     string    `toml:"slug,omitempty"`
 	Path     string    `toml:"path"`
 	LastSync time.Time `toml:"last_sync"`
 }
@@ -438,6 +439,62 @@ func IsRepoTeamContext(projectRoot, teamID string) bool {
 		return false
 	}
 	return projectCfg.TeamID == teamID
+}
+
+// FindAllTeamContexts returns all team contexts available to the user.
+// Primary source is LocalConfig.TeamContexts (populated by daemon).
+// Falls back to scanning paths.TeamsDataDir(endpoint) subdirectories.
+// Returns empty slice (not nil) if none found.
+func FindAllTeamContexts(projectRoot string) []TeamContext {
+	// try LocalConfig first (daemon-populated, authoritative)
+	localCfg, err := LoadLocalConfig(projectRoot)
+	if err == nil && localCfg != nil && len(localCfg.TeamContexts) > 0 {
+		var result []TeamContext
+		for _, tc := range localCfg.TeamContexts {
+			if tc.Path == "" {
+				continue
+			}
+			if _, err := os.Stat(tc.Path); err == nil {
+				result = append(result, tc)
+			}
+		}
+		if len(result) > 0 {
+			return result
+		}
+	}
+
+	// fallback: scan TeamsDataDir for subdirectories
+	projectCfg, err := LoadProjectConfig(projectRoot)
+	if err != nil || projectCfg == nil {
+		return []TeamContext{}
+	}
+
+	ep := projectCfg.Endpoint
+	if ep == "" {
+		ep = endpoint.GetForProject(projectRoot)
+	}
+	if ep == "" {
+		return []TeamContext{}
+	}
+
+	teamsDir := paths.TeamsDataDir(ep)
+	entries, err := os.ReadDir(teamsDir)
+	if err != nil {
+		return []TeamContext{}
+	}
+
+	var result []TeamContext
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		teamPath := filepath.Join(teamsDir, entry.Name())
+		result = append(result, TeamContext{
+			TeamID: entry.Name(),
+			Path:   teamPath,
+		})
+	}
+	return result
 }
 
 // GetConfiguredEndpoints returns all unique endpoints configured for a project.

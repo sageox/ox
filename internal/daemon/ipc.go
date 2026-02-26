@@ -156,6 +156,7 @@ type WorkspaceSyncStatus struct {
 	Exists   bool      `json:"exists"`               // whether path exists locally
 	TeamID   string    `json:"team_id,omitempty"`    // team ID (for team contexts)
 	TeamName string    `json:"team_name,omitempty"`  // team name (for team contexts)
+	TeamSlug string    `json:"team_slug,omitempty"` // kebab-case team slug
 	LastSync time.Time `json:"last_sync,omitempty"`  // last successful sync
 	LastErr  string    `json:"last_error,omitempty"` // last error message
 	Syncing  bool      `json:"syncing,omitempty"`    // currently syncing

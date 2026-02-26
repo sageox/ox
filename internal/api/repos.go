@@ -27,6 +27,7 @@ type RepoInfo struct {
 	URL    string `json:"url"`               // git clone URL
 	Type   string `json:"type"`              // "team-context" (ledgers use separate API)
 	TeamID string `json:"team_id,omitempty"` // team_xxx (present for team-context repos)
+	Slug   string `json:"slug,omitempty"`    // kebab-case team slug (server-provided)
 }
 
 // StableID returns the stable team identifier (team_xxx) for path construction and lookups.
@@ -36,9 +37,10 @@ func (r RepoInfo) StableID() string {
 
 // TeamMembership represents a team the user belongs to
 type TeamMembership struct {
-	ID   string `json:"id"`   // team_xxx
-	Name string `json:"name"` // display name
-	Role string `json:"role"` // "owner", "admin", "member"
+	ID   string `json:"id"`             // team_xxx
+	Name string `json:"name"`           // display name
+	Slug string `json:"slug,omitempty"` // kebab-case team slug
+	Role string `json:"role"`           // "owner", "admin", "member"
 }
 
 // ReposResponse represents the GET /api/v1/cli/repos response.
@@ -68,6 +70,7 @@ func (r *ReposResponse) TeamMembershipsFromRepos() []TeamMembership {
 		teams = append(teams, TeamMembership{
 			ID:   repo.StableID(),
 			Name: repo.Name,
+			Slug: repo.Slug,
 		})
 	}
 	return teams
@@ -101,11 +104,12 @@ type RepoDetailLedger struct {
 
 // RepoDetailTeamContext is a team context in the repo detail response.
 type RepoDetailTeamContext struct {
-	TeamID      string `json:"team_id"`      // team_xxx
-	Name        string `json:"name"`         // display name
-	Visibility  string `json:"visibility"`   // "public" or "private"
-	AccessLevel string `json:"access_level"` // "member" or "viewer"
-	RepoURL     string `json:"repo_url"`     // git clone URL
+	TeamID      string `json:"team_id"`               // team_xxx
+	Name        string `json:"name"`                  // display name
+	Slug        string `json:"slug,omitempty"`         // kebab-case team slug
+	Visibility  string `json:"visibility"`            // "public" or "private"
+	AccessLevel string `json:"access_level"`          // "member" or "viewer"
+	RepoURL     string `json:"repo_url"`              // git clone URL
 }
 
 // StableID returns the stable team identifier (team_xxx) for path construction and lookups.
@@ -116,6 +120,20 @@ func (r RepoDetailTeamContext) StableID() string {
 // IsReadOnly returns true if the user has viewer (read-only) access.
 func (r *RepoDetailResponse) IsReadOnly() bool {
 	return r.AccessLevel == "viewer"
+}
+
+// DeriveSlug generates a kebab-case slug from a display name.
+// Used as fallback when the server doesn't provide a slug.
+func DeriveSlug(name string) string {
+	s := strings.ToLower(strings.TrimSpace(name))
+	s = strings.ReplaceAll(s, " ", "-")
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 // GetRepos calls GET /api/v1/cli/repos to fetch user's team context repos.

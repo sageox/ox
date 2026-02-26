@@ -34,6 +34,7 @@ type WorkspaceState struct {
 	// team-specific (only for team_context type)
 	TeamID   string `json:"team_id,omitempty"`
 	TeamName string `json:"team_name,omitempty"`
+	TeamSlug string `json:"team_slug,omitempty"` // kebab-case slug for CLI identifiers
 	CloneURL string `json:"clone_url,omitempty"` // git clone URL (from credentials)
 
 	// config (from config.local.toml)
@@ -264,6 +265,7 @@ func (r *WorkspaceRegistry) rebuildFromConfigLocked(cfg *config.LocalConfig) {
 
 		existing.TeamID = tc.TeamID
 		existing.TeamName = tc.TeamName
+		existing.TeamSlug = tc.Slug
 		existing.Path = tc.Path
 		existing.Endpoint = r.endpoint
 		existing.ConfigLastSync = tc.LastSync
@@ -274,6 +276,10 @@ func (r *WorkspaceRegistry) rebuildFromConfigLocked(cfg *config.LocalConfig) {
 			for _, repo := range creds.Repos {
 				if repo.Type == "team-context" && (repo.StableID() == tc.TeamID || repo.Name == tc.TeamName || repo.Name == tc.TeamID) {
 					existing.CloneURL = repo.URL
+					// backfill slug from credentials if not in config
+					if existing.TeamSlug == "" && repo.Slug != "" {
+						existing.TeamSlug = repo.Slug
+					}
 					break
 				}
 			}
@@ -317,6 +323,7 @@ func (r *WorkspaceRegistry) rebuildFromConfigLocked(cfg *config.LocalConfig) {
 
 			existing.TeamID = teamID
 			existing.TeamName = repo.Name
+			existing.TeamSlug = repo.Slug
 			existing.Endpoint = r.endpoint
 			// use centralized path: ~/.sageox/data/<endpoint>/teams/<team_id>/
 			existing.Path = paths.TeamContextDir(teamID, r.endpoint)
@@ -808,6 +815,7 @@ func (r *WorkspaceRegistry) RegisterTeamContextsFromAPI(teamContexts []api.RepoD
 			Type:     WorkspaceTypeTeamContext,
 			TeamID:   tc.TeamID,
 			TeamName: tc.Name,
+			TeamSlug: tc.Slug,
 			Endpoint: r.endpoint,
 			Path:     paths.TeamContextDir(tc.TeamID, r.endpoint),
 			CloneURL: tc.RepoURL,

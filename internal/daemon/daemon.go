@@ -353,6 +353,7 @@ func (d *Daemon) Start() error {
 						Exists:   ws.Exists,
 						TeamID:   ws.TeamID,
 						TeamName: ws.TeamName,
+						TeamSlug: ws.TeamSlug,
 						LastSync: ws.ConfigLastSync,
 						LastErr:  ws.LastErr,
 						Syncing:  ws.SyncInProgress,

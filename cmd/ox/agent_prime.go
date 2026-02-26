@@ -7,11 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/claude"
 	"github.com/sageox/ox/internal/cli"
@@ -21,6 +24,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/notification"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/telemetry"
@@ -165,6 +169,23 @@ type teamContextInfo struct {
 	TeamDocs []teamdocs.TeamDoc `json:"team_docs,omitempty"`
 }
 
+// otherTeams lists non-primary team contexts available to the agent.
+// Included in prime output so agents know what other teams exist.
+// Agents MUST NOT read these unless the user explicitly asks by team name.
+type otherTeams struct {
+	Root  string           `json:"root"`  // base directory for all team contexts
+	Hint  string           `json:"hint"`  // instruction for agent: only read when asked
+	Teams []otherTeamEntry `json:"teams"` // sorted by content freshness
+}
+
+// otherTeamEntry is a compact reference to a non-primary team context.
+type otherTeamEntry struct {
+	Slug string `json:"slug"`          // kebab-case identifier for CLI arg
+	Name string `json:"name"`          // display name
+	Dir  string `json:"dir"`           // subdirectory under root
+	Age  string `json:"age,omitempty"` // content freshness from git log
+}
+
 // teamClaudeInstructions holds paths to team instruction files.
 // These files should be read immediately by Claude for team-specific configuration.
 type teamClaudeInstructions struct {
@@ -229,6 +250,7 @@ type agentPrimeOutput struct {
 	Important       string                     `json:"important"`                // always-present disambiguation of knowledge sources
 	TeamContext       *teamContextInfo `json:"team_context,omitempty"`        // team context if configured
 	TeamContextStatus string           `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
+	OtherTeams        *otherTeams      `json:"other_teams,omitempty"`         // non-primary teams (nil when only 1 team)
 	UserNotification  string           `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user
 	AgentTip          string           `json:"agent_tip,omitempty"`           // contextual tip for the agent itself (not for the user)
 	// Prime call tracking
@@ -551,6 +573,29 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		"(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions for THIS repo only. Browse with: ox session list. " +
 		"These are unrelated — sessions are NOT discussions, and the ledger is NOT team context."
 
+	// discover other team contexts (non-primary)
+	primaryTeamID := ""
+	if teamCtx != nil {
+		primaryTeamID = teamCtx.TeamID
+	} else if projCfg, _ := config.LoadProjectConfig(projectRoot); projCfg != nil {
+		primaryTeamID = projCfg.TeamID
+	}
+	output.OtherTeams = discoverOtherTeamContexts(projectRoot, primaryTeamID)
+
+	// update Important text when multiple teams are available
+	totalTeams := 1 // primary
+	if output.OtherTeams != nil {
+		totalTeams += len(output.OtherTeams.Teams)
+	}
+	if totalTeams > 1 {
+		output.Important = fmt.Sprintf("SageOx has two SEPARATE knowledge sources. "+
+			"(1) TEAM CONTEXT: team-wide meetings, architecture decisions, and conventions shared across ALL repos. "+
+			"You have access to %d team contexts. Read with: ox agent team-ctx [slug]. "+
+			"(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions for THIS repo only. "+
+			"Browse with: ox session list. "+
+			"These are unrelated — sessions are NOT discussions, and the ledger is NOT team context.", totalTeams)
+	}
+
 	// set team context status hint for agents when team context hasn't synced yet
 	if output.TeamContext == nil {
 		// check if we have a team ID configured (team context expected but not yet synced)
@@ -676,12 +721,12 @@ func loadProjectGuidance(projectRoot string) *ProjectGuidance {
 	}
 
 	// search paths in priority order
-	paths := []string{
+	searchPaths := []string{
 		filepath.Join(projectRoot, "AGENTS.md"),
 		filepath.Join(projectRoot, ".sageox", "AGENTS.md"),
 	}
 
-	for _, p := range paths {
+	for _, p := range searchPaths {
 		data, err := os.ReadFile(p)
 		if err != nil {
 			continue // file not found or not readable
@@ -779,7 +824,7 @@ func buildGuidance(teamCtx *teamContextInfo, ledger *ledgerInfo) *agentGuidance 
 	if teamCtx != nil {
 		cmds = append(cmds, intentCommand{
 			Intent:  "team context (team-wide, all repos): recorded meetings, architecture decisions, conventions",
-			Command: "ox agent team-ctx",
+			Command: "ox agent team-ctx [slug]",
 		})
 	}
 
@@ -1043,6 +1088,10 @@ func buildHumanSummary(output agentPrimeOutput) string {
 		}
 	}
 
+	if output.OtherTeams != nil {
+		fmt.Fprintf(&sb, "- **Other Teams:** %d additional team contexts available\n", len(output.OtherTeams.Teams))
+	}
+
 	if output.PrimeCallCount > 0 {
 		fmt.Fprintf(&sb, "- **Prime Call Count:** %d\n", output.PrimeCallCount)
 	}
@@ -1204,9 +1253,23 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 	fmt.Fprintln(cmd.OutOrStdout(), "## Knowledge Sources")
 	fmt.Fprintln(cmd.OutOrStdout())
 	fmt.Fprintln(cmd.OutOrStdout(), "SageOx has two SEPARATE knowledge sources:")
-	fmt.Fprintln(cmd.OutOrStdout(), "  1. TEAM CONTEXT — team-wide meetings, decisions, conventions (all repos). Command: ox agent team-ctx")
+	fmt.Fprintln(cmd.OutOrStdout(), "  1. TEAM CONTEXT — team-wide meetings, decisions, conventions (all repos). Command: ox agent team-ctx [slug]")
 	fmt.Fprintln(cmd.OutOrStdout(), "  2. SESSIONS/LEDGER — repo-specific coding session archive (this repo only). Command: ox session list")
 	fmt.Fprintln(cmd.OutOrStdout(), "These are unrelated. Sessions are NOT discussions. The ledger is NOT team context.")
+
+	// other team contexts section
+	if output.OtherTeams != nil && len(output.OtherTeams.Teams) > 0 {
+		fmt.Fprintln(cmd.OutOrStdout())
+		fmt.Fprintf(cmd.OutOrStdout(), "## Other Team Contexts (%d)\n", len(output.OtherTeams.Teams))
+		fmt.Fprintln(cmd.OutOrStdout())
+		// column-aligned table
+		fmt.Fprintf(cmd.OutOrStdout(), "  %-20s %-30s %s\n", "slug", "name", "age")
+		for _, t := range output.OtherTeams.Teams {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %-20s %-30s %s\n", t.Slug, t.Name, t.Age)
+		}
+		fmt.Fprintln(cmd.OutOrStdout())
+		fmt.Fprintln(cmd.OutOrStdout(), "Read with: ox agent team-ctx <slug>")
+	}
 
 	// ledger / repo session history section
 	if output.Ledger != nil {
@@ -1531,6 +1594,160 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 	}
 
 	return info
+}
+
+// discoverOtherTeamContexts returns lightweight entries for non-primary team contexts.
+// Returns nil when the user only belongs to one team.
+func discoverOtherTeamContexts(projectRoot string, primaryTeamID string) *otherTeams {
+	allTeams := config.FindAllTeamContexts(projectRoot)
+	if len(allTeams) == 0 {
+		return nil
+	}
+
+	// filter out primary team
+	var others []config.TeamContext
+	for _, tc := range allTeams {
+		if tc.TeamID == primaryTeamID {
+			continue
+		}
+		others = append(others, tc)
+	}
+	if len(others) == 0 {
+		return nil
+	}
+
+	// get endpoint for root path
+	ep := endpoint.GetForProject(projectRoot)
+	if ep == "" {
+		return nil
+	}
+	root := paths.TeamsDataDir(ep)
+
+	var entries []otherTeamEntry
+	for _, tc := range others {
+		slug := tc.Slug
+		if slug == "" {
+			slug = api.DeriveSlug(tc.TeamName)
+		}
+		if slug == "" {
+			slug = tc.TeamID
+		}
+
+		// compute content age from git log
+		age := teamContextAge(tc.Path)
+
+		// extract dir relative to root
+		dir := tc.TeamID
+		if rel, err := filepath.Rel(root, tc.Path); err == nil {
+			dir = rel
+		}
+
+		name := tc.TeamName
+		if name == "" {
+			name = tc.TeamID
+		}
+
+		entries = append(entries, otherTeamEntry{
+			Slug: slug,
+			Name: name,
+			Dir:  dir,
+			Age:  age,
+		})
+	}
+
+	// sort by content freshness (entries with age come first, newest first)
+	sortOtherTeamsByAge(entries)
+
+	return &otherTeams{
+		Root:  root,
+		Hint:  "Only read when user asks about a specific team by name: ox agent team-ctx <slug>",
+		Teams: entries,
+	}
+}
+
+// teamContextAge returns a human-readable age of the most recent content change
+// in a team context directory, based on git log.
+func teamContextAge(teamCtxPath string) string {
+	if teamCtxPath == "" {
+		return ""
+	}
+	if _, err := os.Stat(teamCtxPath); os.IsNotExist(err) {
+		return ""
+	}
+	cmd := exec.Command("git", "-C", teamCtxPath, "log", "-1", "--format=%ci")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	dateStr := strings.TrimSpace(string(output))
+	if dateStr == "" {
+		return ""
+	}
+	t, err := time.Parse("2006-01-02 15:04:05 -0700", dateStr)
+	if err != nil {
+		return ""
+	}
+	return formatAge(time.Since(t))
+}
+
+// formatAge returns a human-readable relative time string.
+func formatAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		m := int(d.Minutes())
+		if m == 1 {
+			return "1m ago"
+		}
+		return fmt.Sprintf("%dm ago", m)
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		if h == 1 {
+			return "1h ago"
+		}
+		return fmt.Sprintf("%dh ago", h)
+	default:
+		days := int(d.Hours() / 24)
+		if days == 1 {
+			return "1d ago"
+		}
+		return fmt.Sprintf("%dd ago", days)
+	}
+}
+
+// sortOtherTeamsByAge sorts otherTeamEntry slices by content age.
+// Entries with a known age are sorted newest-first; entries without age go last.
+func sortOtherTeamsByAge(entries []otherTeamEntry) {
+	// parse age strings back to approximate durations for sorting
+	parseDuration := func(age string) time.Duration {
+		if age == "" {
+			return time.Duration(1<<63 - 1) // max duration, sort last
+		}
+		if age == "just now" {
+			return 0
+		}
+		// parse "Nm ago", "Nh ago", "Nd ago"
+		var n int
+		var unit string
+		if _, err := fmt.Sscanf(age, "%d%s", &n, &unit); err != nil {
+			return time.Duration(1<<63 - 1)
+		}
+		switch {
+		case strings.HasPrefix(unit, "m"):
+			return time.Duration(n) * time.Minute
+		case strings.HasPrefix(unit, "h"):
+			return time.Duration(n) * time.Hour
+		case strings.HasPrefix(unit, "d"):
+			return time.Duration(n) * 24 * time.Hour
+		default:
+			return time.Duration(1<<63 - 1)
+		}
+	}
+
+	sort.SliceStable(entries, func(i, j int) bool {
+		return parseDuration(entries[i].Age) < parseDuration(entries[j].Age)
+	})
 }
 
 // discoverLedger checks whether the ledger exists and returns actionable guidance

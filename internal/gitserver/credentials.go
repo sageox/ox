@@ -28,6 +28,7 @@ type RepoEntry struct {
 	Type   string `json:"type"`              // "team-context"
 	URL    string `json:"url"`               // git clone URL
 	TeamID string `json:"team_id,omitempty"` // stable team identifier (e.g., "team_jij1bg2btu")
+	Slug   string `json:"slug,omitempty"`    // kebab-case team slug (server-provided)
 }
 
 // StableID returns the stable team identifier (team_xxx) for path construction and lookups.

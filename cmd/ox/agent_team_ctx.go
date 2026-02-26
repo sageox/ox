@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
+	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -15,15 +17,19 @@ import (
 const recentDiscussionLimit = 15
 
 var agentTeamCtxCmd = &cobra.Command{
-	Use:   "team-ctx",
+	Use:   "team-ctx [slug]",
 	Short: "Output team context for AI agent planning",
 	Long: `Output team discussions and distilled context for AI agent planning.
+
+Without arguments: outputs the primary team's context (this repo's team).
+With a team slug: outputs that specific team's context.
 
 Lists the 15 most recent discussion files (read them for full detail),
 then outputs the distilled summary from agent-context/distilled-discussions.md.
 
 Output includes a content hash (team-ctx:<hash>) - if this marker is already
 in your context, you don't need to re-run this command.`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runAgentTeamCtx,
 }
 
@@ -33,9 +39,18 @@ func runAgentTeamCtx(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a SageOx project: %w", err)
 	}
 
-	tc := config.FindRepoTeamContext(projectRoot)
-	if tc == nil {
-		return fmt.Errorf("no team context configured for this project")
+	var tc *config.TeamContext
+
+	if len(args) > 0 {
+		tc = resolveTeamContext(projectRoot, args[0])
+		if tc == nil {
+			return fmt.Errorf("team context not found: %q (use ox agent prime to see available teams)", args[0])
+		}
+	} else {
+		tc = config.FindRepoTeamContext(projectRoot)
+		if tc == nil {
+			return fmt.Errorf("no team context configured for this project")
+		}
 	}
 
 	out := cmd.OutOrStdout()
@@ -50,6 +65,44 @@ func runAgentTeamCtx(cmd *cobra.Command, args []string) error {
 
 	if !hasDiscussions && !hasDistilled {
 		return fmt.Errorf("no team context available: no discussions or distilled context found in %s", tc.Path)
+	}
+
+	return nil
+}
+
+// resolveTeamContext finds a team context by slug, team ID, or name.
+// Resolution order: exact slug match -> exact team ID match -> case-insensitive name match.
+func resolveTeamContext(projectRoot, query string) *config.TeamContext {
+	allTeams := config.FindAllTeamContexts(projectRoot)
+	if len(allTeams) == 0 {
+		return nil
+	}
+
+	queryLower := strings.ToLower(strings.TrimSpace(query))
+
+	// pass 1: exact slug match
+	for i, tc := range allTeams {
+		slug := tc.Slug
+		if slug == "" {
+			slug = api.DeriveSlug(tc.TeamName)
+		}
+		if slug == queryLower {
+			return &allTeams[i]
+		}
+	}
+
+	// pass 2: exact team ID match
+	for i, tc := range allTeams {
+		if tc.TeamID == query {
+			return &allTeams[i]
+		}
+	}
+
+	// pass 3: case-insensitive name match
+	for i, tc := range allTeams {
+		if strings.EqualFold(tc.TeamName, query) {
+			return &allTeams[i]
+		}
 	}
 
 	return nil

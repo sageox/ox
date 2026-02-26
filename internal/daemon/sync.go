@@ -1028,6 +1028,7 @@ func (s *SyncScheduler) refreshCredentialsIfNeeded() {
 			Type:   repo.Type,
 			URL:    repo.URL,
 			TeamID: repo.StableID(),
+			Slug:   repo.Slug,
 		})
 	}
 
@@ -1093,6 +1094,7 @@ func (s *SyncScheduler) discoverTeams() {
 			Type:   repo.Type,
 			URL:    repo.URL,
 			TeamID: repo.StableID(),
+			Slug:   repo.Slug,
 		}
 		newRepos[entry.Name] = entry
 	}
@@ -1122,7 +1124,7 @@ func reposEqual(a, b map[string]gitserver.RepoEntry) bool {
 		if !ok {
 			return false
 		}
-		if va.Name != vb.Name || va.Type != vb.Type || va.URL != vb.URL || va.TeamID != vb.TeamID {
+		if va.Name != vb.Name || va.Type != vb.Type || va.URL != vb.URL || va.TeamID != vb.TeamID || va.Slug != vb.Slug {
 			return false
 		}
 	}
