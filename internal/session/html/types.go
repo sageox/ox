@@ -92,7 +92,6 @@ type StatsView struct {
 	UserMessages  int
 	ToolMessages  int    // count of tool call entries
 	FilesChanged  int    // count of distinct files modified
-	Duration      string // formatted session duration (e.g., "45m", "1h 23m")
 }
 
 // WorkBlockView groups consecutive tool/system calls between conversation turns.

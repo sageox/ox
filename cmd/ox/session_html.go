@@ -246,25 +246,12 @@ func buildTemplateData(t *session.StoredSession, summary *session.SummarizeRespo
 	}
 	data.Chapters = sessionhtml.GroupIntoChapters(data.Messages, chapterTitles)
 
-	// compute session duration
-	var durationStr string
-	if data.Metadata != nil && !data.Metadata.StartedAt.IsZero() && !data.Metadata.EndedAt.IsZero() {
-		dur := data.Metadata.EndedAt.Sub(data.Metadata.StartedAt)
-		durationStr = sessionhtml.FormatDuration(dur)
-	} else {
-		dur, _, _ := sessionhtml.ComputeFallbackDuration(data.Messages)
-		if dur > 0 {
-			durationStr = sessionhtml.FormatDuration(dur)
-		}
-	}
-
 	// build statistics
 	data.Statistics = &sessionhtml.StatsView{
 		TotalMessages: len(t.Entries),
 		UserMessages:  userMessages,
 		ToolMessages:  toolMessages,
 		FilesChanged:  len(data.FilesChanged),
-		Duration:      durationStr,
 	}
 
 	return data
@@ -1060,7 +1047,7 @@ const htmlTemplate = `<!DOCTYPE html>
                     {{if .Metadata.Model}}<div class="meta-item"><span class="meta-label">Model:</span> <span class="meta-value">{{.Metadata.Model}}</span></div>{{end}}
                     {{if .Metadata.Username}}<div class="meta-item"><span class="meta-label">User:</span> <span class="meta-value">{{.Metadata.Username}}</span></div>{{end}}
                     {{if not .Metadata.StartedAt.IsZero}}<div class="meta-item"><span class="meta-label">Started:</span> <time class="meta-value">{{.Metadata.StartedAt.Format "2006-01-02 15:04:05"}}</time></div>{{end}}
-                    {{if .Statistics}}{{if .Statistics.Duration}}<div class="meta-item"><span class="meta-label">Duration:</span> <span class="meta-value">{{.Statistics.Duration}}</span></div>{{end}}{{end}}
+
                 </div>
                 {{end}}
             </div>
