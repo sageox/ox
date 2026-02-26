@@ -113,7 +113,8 @@ func buildIncompleteSessionAgentResult(incomplete []IncompleteSessionInfo) check
 		ui.AccentStyle.Bold(true).Render("ox session export <name>") +
 		ui.MutedStyle.Render("  generate session.html"))
 
-	result := WarningCheck("incomplete sessions", msg, sb.String())
+	// detailRaw: pre-styled output, WithRequiresAgent: sets .needs-doctor-agent marker
+	result := WarningCheck("incomplete sessions", msg, sb.String()).WithRequiresAgent()
 	result.detailRaw = true
 	return result
 }

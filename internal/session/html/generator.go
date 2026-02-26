@@ -265,7 +265,7 @@ func convertEntry(index int, entry map[string]any, userLabel, agentLabel string)
 	// populate tool call display
 	if msg.ToolCall != nil {
 		msg.ToolCall.Summary = FormatToolSummary(msg.ToolCall)
-		msg.ToolCall.FormattedInput = formatToolInputCompact(msg.ToolCall)
+		msg.ToolCall.FormattedInput = FormatToolInputCompact(msg.ToolCall)
 		outputLines := strings.Count(msg.ToolCall.Output, "\n") + 1
 		msg.ToolCall.IsSimple = msg.ToolCall.Output == "" || outputLines <= 3
 	}
@@ -454,9 +454,9 @@ func FormatToolSummary(tool *ToolCallView) string {
 	return tool.Name
 }
 
-// formatToolInputCompact renders a tool call as a compact terminal-style command.
+// FormatToolInputCompact renders a tool call as a compact terminal-style command.
 // e.g., ">_ Bash git status", ">_ Read cmd/ox/main.go"
-func formatToolInputCompact(tool *ToolCallView) template.HTML {
+func FormatToolInputCompact(tool *ToolCallView) template.HTML {
 	if tool == nil {
 		return ""
 	}

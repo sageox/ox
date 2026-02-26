@@ -131,37 +131,9 @@ func viewAsWeb(sessionName string, projectRoot string) error {
 }
 
 // viewHTMLGenerate creates an HTML file from a stored session.
+// Delegates to generateHTML which has the full chapter/grouping logic.
 func viewHTMLGenerate(t *session.StoredSession, outputPath string) error {
-	// build template data
-	data := viewHTMLBuildTemplateData(t)
-
-	// parse and execute template
-	funcMap := template.FuncMap{
-		"renderDiffHTML": sessionhtml.RenderDiffHTML,
-		"isDiffOutput":   sessionhtml.IsDiffOutput,
-	}
-	tmpl, err := template.New("session").Funcs(funcMap).Parse(viewHTMLTemplate)
-	if err != nil {
-		return fmt.Errorf("parse template: %w", err)
-	}
-
-	// ensure output directory exists
-	outputDir := filepath.Dir(outputPath)
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return fmt.Errorf("create output directory: %w", err)
-	}
-
-	f, err := os.Create(outputPath)
-	if err != nil {
-		return fmt.Errorf("create output file: %w", err)
-	}
-	defer f.Close()
-
-	if err := tmpl.Execute(f, data); err != nil {
-		return fmt.Errorf("execute template: %w", err)
-	}
-
-	return nil
+	return generateHTML(t, outputPath)
 }
 
 // viewHTMLBuildTemplateData converts a stored session to template data.

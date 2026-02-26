@@ -37,6 +37,7 @@ Create a JSON object with this structure:
   "outcome": "success|partial|failed",
   "topics_found": ["topic1", "topic2"],
   "diagrams": ["mermaid diagram code if any were created"],
+  "chapter_titles": ["Problem Discussion", "Root Cause Analysis", "Implementation", "Testing & Verification"],
   "aha_moments": [
     {
       "seq": 7,
@@ -55,6 +56,13 @@ Create a JSON object with this structure:
     }
   ]
 }
+
+## Chapter Titles Guidelines
+
+Generate 3-8 short chapter titles (2-4 words each) that narrate the session's progression.
+Each title corresponds to a conversation phase (roughly one per user turn or topic shift).
+Good titles read like a story outline: "Problem Discovery", "Root Cause Analysis", "Design Decision", "Implementation", "Testing".
+Keep titles concise and action-oriented. Omit if the session is too short for meaningful chapters.
 
 ## Aha Moments Guidelines
 
@@ -129,17 +137,45 @@ type SageoxInsight struct {
 	Impact  string `json:"impact"`  // the outcome or value it provided
 }
 
-// SummarizeResponse contains the LLM-generated summary.
+// ChapterSummary is a structured chapter for summary.json.
+// Computed from the raw JSONL by the grouping algorithm, enriched with
+// LLM-generated titles when available. Any tool can consume these
+// without re-implementing the grouping logic.
+type ChapterSummary struct {
+	ID         int            `json:"id"`                    // 1-based chapter number
+	Title      string         `json:"title"`                 // LLM or heuristic title
+	StartSeq   int            `json:"start_seq"`             // first message seq in this chapter
+	EndSeq     int            `json:"end_seq"`               // last message seq in this chapter
+	ToolCounts map[string]int `json:"tool_counts,omitempty"` // aggregated tool usage {"Read": 5, "Edit": 3}
+	TotalTools int            `json:"total_tools"`           // total tool calls in chapter
+	HasEdits   bool           `json:"has_edits"`             // true if chapter contains file modifications
+}
+
+// FileSummary records a file modified during the session.
+// Extracted from Edit/Write tool calls in the raw JSONL.
+type FileSummary struct {
+	Path    string `json:"path"`              // shortened file path
+	Added   int    `json:"added"`             // lines added
+	Removed int    `json:"removed,omitempty"` // lines removed
+}
+
+// SummarizeResponse contains the LLM-generated summary plus computed metadata.
+// The LLM produces: title, summary, key_actions, outcome, topics_found,
+// chapter_titles, aha_moments, sageox_insights.
+// The CLI computes and appends: chapters, files_changed.
 type SummarizeResponse struct {
-	Title          string          `json:"title"`                     // short descriptive title for the session
-	Summary        string          `json:"summary"`                   // one paragraph executive summary
-	KeyActions     []string        `json:"key_actions"`               // bullet points of key actions taken
-	Outcome        string          `json:"outcome"`                   // success/partial/failed
-	TopicsFound    []string        `json:"topics_found"`              // topics detected during session
-	FinalPlan      string          `json:"final_plan,omitempty"`      // final plan/architecture from session
-	Diagrams       []string        `json:"diagrams,omitempty"`        // extracted mermaid diagrams
-	AhaMoments     []AhaMoment     `json:"aha_moments,omitempty"`     // pivotal moments of collaborative intelligence
-	SageoxInsights []SageoxInsight `json:"sageox_insights,omitempty"` // moments where SageOx guidance provided value
+	Title          string           `json:"title"`                      // short descriptive title for the session
+	Summary        string           `json:"summary"`                    // one paragraph executive summary
+	KeyActions     []string         `json:"key_actions"`                // bullet points of key actions taken
+	Outcome        string           `json:"outcome"`                    // success/partial/failed
+	TopicsFound    []string         `json:"topics_found"`               // topics detected during session
+	FinalPlan      string           `json:"final_plan,omitempty"`       // final plan/architecture from session
+	Diagrams       []string         `json:"diagrams,omitempty"`         // extracted mermaid diagrams
+	ChapterTitles  []string         `json:"chapter_titles,omitempty"`   // LLM-generated narrative chapter titles
+	Chapters       []ChapterSummary `json:"chapters,omitempty"`         // structured chapter data (computed from JSONL)
+	FilesChanged   []FileSummary    `json:"files_changed,omitempty"`    // files modified during session (computed from JSONL)
+	AhaMoments     []AhaMoment      `json:"aha_moments,omitempty"`     // pivotal moments of collaborative intelligence
+	SageoxInsights []SageoxInsight   `json:"sageox_insights,omitempty"` // moments where SageOx guidance provided value
 }
 
 // Summarize calls the SageOx API to generate an LLM summary of a session.

@@ -12,7 +12,9 @@ type TemplateData struct {
 	Title          string
 	Summary        *SummaryView // LLM-generated summary (may be nil)
 	Metadata       *MetadataView
-	Messages       []MessageView
+	Messages       []MessageView       // flat message list (kept for backward compat)
+	Chapters       []ChapterView       // grouped conversation view (preferred for rendering)
+	FilesChanged   []FileChangeView    // files modified during the session
 	AhaMoments     []AhaMomentView     // pivotal moments of collaborative intelligence
 	SageoxInsights []SageoxInsightView // moments where SageOx guidance provided value
 	Statistics     *StatsView
@@ -47,6 +49,7 @@ type SummaryView struct {
 	TopicsFound    []string            // topics detected during session
 	FinalPlan      string              // final plan/architecture from session
 	Diagrams       []string            // extracted mermaid diagrams (raw mermaid code)
+	ChapterTitles  []string            // LLM-generated chapter titles for narrative sections
 	SageoxInsights []SageoxInsightView // moments where SageOx guidance provided value
 }
 
@@ -87,6 +90,42 @@ type MetadataView struct {
 type StatsView struct {
 	TotalMessages int
 	UserMessages  int
+	ToolMessages  int    // count of tool call entries
+	FilesChanged  int    // count of distinct files modified
+	Duration      string // formatted session duration (e.g., "45m", "1h 23m")
+}
+
+// WorkBlockView groups consecutive tool/system calls between conversation turns.
+// Renders as a collapsed summary like "12 tool calls (Read 5, Grep 4, Bash 3)".
+type WorkBlockView struct {
+	Messages   []MessageView  // the tool/system messages in this block
+	ToolCounts map[string]int // tool name -> count (e.g., {"Read": 5, "Grep": 4})
+	Summary    string         // formatted summary text
+	TotalTools int            // total tool call count
+	HasEdits   bool           // true if block contains Edit/Write/MultiEdit calls
+}
+
+// FileChangeView represents a file modified during the session.
+type FileChangeView struct {
+	Path    string // shortened file path (home dir stripped)
+	Added   int    // lines added
+	Removed int    // lines removed
+}
+
+// ChapterView is a narrative section of the session, grouping conversation
+// turns and their associated work blocks into a coherent unit.
+type ChapterView struct {
+	ID    int           // 1-based chapter number
+	Title string        // chapter title (LLM-generated or heuristic)
+	Items []ChapterItem // interleaved conversation messages and work blocks
+}
+
+// ChapterItem is either a conversation message or a work block.
+// Exactly one of Message or WorkBlock is non-nil.
+type ChapterItem struct {
+	IsWorkBlock bool
+	Message     *MessageView  // non-nil for conversation messages
+	WorkBlock   *WorkBlockView // non-nil for grouped tool/system blocks
 }
 
 // BrandColors defines the SageOx brand color palette for CSS variable injection.
