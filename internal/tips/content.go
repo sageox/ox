@@ -47,7 +47,6 @@ var humanContextualTips = map[string][]string{
 	},
 	"hooks": {
 		"Hooks run `ox agent prime` automatically in Claude Code sessions",
-		"Use `ox hooks install --user` for global integration",
 	},
 }
 
