@@ -20,15 +20,17 @@ type TimelineNode struct {
 	Style   lipgloss.Style // node circle color
 	Items   []TimelineItem
 	Summary string // optional collapsed summary like "2 passed"
+	Box     string // optional: render a bordered box instead of items (set by caller)
 }
 
 // TimelineItem represents a single check within a timeline node
 type TimelineItem struct {
-	Icon   string         // one of IconPass, IconWarn, IconFail, IconSkip, IconInfo, IconAgent
-	Style  lipgloss.Style // color for the icon
-	Text   string         // check name
-	Detail string         // action hint (rendered dim, indented below)
-	Badge  string         // e.g., "[auto-fix]", "[--fix]"
+	Icon      string         // one of IconPass, IconWarn, IconFail, IconSkip, IconInfo, IconAgent
+	Style     lipgloss.Style // color for the icon
+	Text      string         // check name
+	Detail    string         // action hint (rendered dim, indented below)
+	DetailRaw bool           // if true, detail is pre-styled; skip MutedStyle wrapping
+	Badge     string         // e.g., "[auto-fix]", "[--fix]"
 }
 
 // RenderTimeline renders a complete timeline as a string.
@@ -69,6 +71,18 @@ func RenderTimelineNode(node TimelineNode) string {
 
 	bar := MutedStyle.Render(TimelineBar)
 
+	// if the node has a box, render it indented under the timeline bar
+	if node.Box != "" {
+		for _, line := range strings.Split(node.Box, "\n") {
+			if line == "" {
+				b.WriteString(bar + "\n")
+			} else {
+				b.WriteString(bar + "  " + line + "\n")
+			}
+		}
+		return b.String()
+	}
+
 	for _, item := range node.Items {
 		icon := item.Style.Render(item.Icon)
 
@@ -79,7 +93,13 @@ func RenderTimelineNode(node TimelineNode) string {
 		b.WriteString(line + "\n")
 
 		if item.Detail != "" {
-			b.WriteString(fmt.Sprintf("%s     %s\n", bar, MutedStyle.Render(item.Detail)))
+			for _, dline := range strings.Split(item.Detail, "\n") {
+				if item.DetailRaw {
+					b.WriteString(fmt.Sprintf("%s     %s\n", bar, dline))
+				} else {
+					b.WriteString(fmt.Sprintf("%s     %s\n", bar, MutedStyle.Render(dline)))
+				}
+			}
 		}
 	}
 

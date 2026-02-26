@@ -401,6 +401,32 @@ func TestHeartbeatHandler_EmptyVersion_NoCallback(t *testing.T) {
 	}
 }
 
+func TestHeartbeatHandler_SameSemverDifferentBuild_NoCallback(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := NewHeartbeatHandler(logger)
+
+	var callbackCalled bool
+
+	handler.SetVersionMismatchCallback(func(cliVersion, daemonVersion string) {
+		callbackCalled = true
+	})
+
+	// send heartbeat with same semver but different build timestamp
+	// this simulates `go install` rebuilding with a new timestamp
+	daemonSemver := semverOnly(Version())
+	cliVersion := daemonSemver + "+2099-01-01T00:00:00Z"
+
+	payload := HeartbeatPayload{
+		CLIVersion: cliVersion,
+		Timestamp:  time.Now(),
+	}
+	handler.Handle(mustMarshal(payload))
+
+	if callbackCalled {
+		t.Error("callback should NOT be called when semver matches (only build metadata differs)")
+	}
+}
+
 // ======
 // Auth Token Propagation Tests
 // ======

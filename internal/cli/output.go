@@ -259,7 +259,7 @@ func PrintDisclaimer() {
 		return
 	}
 	fmt.Println()
-	fmt.Println(Wordmark() + StyleSecondary.Render(" is designed for Claude Code. Using with other coding agents is untested."))
+	fmt.Println(Wordmark() + StyleSecondary.Render(" is designed initially for Claude Code. Using with other coding agents and claws is not yet being tested."))
 }
 
 // ErrHeadless is returned by OpenInBrowser when the environment has no graphical

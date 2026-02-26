@@ -8,8 +8,11 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -128,7 +131,7 @@ var daemonStatusCmd = &cobra.Command{
 			if jsonOutput {
 				fmt.Println(`{"running": false}`)
 			} else {
-				fmt.Println("Daemon is not running")
+				fmt.Print(daemon.FormatNotRunning(config.IsInitializedInCwd()))
 			}
 			return nil
 		}
@@ -146,18 +149,13 @@ var daemonStatusCmd = &cobra.Command{
 			return nil
 		}
 
-		// use new formatted output
+		// always fetch history for sparkline; verbose adds sync history table
+		history, _ := client.SyncHistory()
+		cliVer := version.Version
 		if verbose {
-			// verbose mode shows sync history table
-			history, err := client.SyncHistory()
-			if err != nil {
-				// fallback to basic output if history unavailable
-				fmt.Print(daemon.FormatStatus(status))
-			} else {
-				fmt.Print(daemon.FormatStatusVerbose(status, history))
-			}
+			fmt.Print(daemon.FormatStatusVerbose(status, history, cliVer))
 		} else {
-			fmt.Print(daemon.FormatStatus(status))
+			fmt.Print(daemon.FormatStatusWithSparkline(status, history, cliVer))
 		}
 
 		return nil
@@ -314,7 +312,8 @@ func startDaemonBackground(ledgerPath string) error {
 	// don't wait for the process
 	logFile.Close()
 
-	fmt.Printf("Daemon started (PID: %d)\n", cmd.Process.Pid)
-	fmt.Printf("Logs: %s\n", logPath)
+	cli.PrintSuccess(fmt.Sprintf("Daemon started (pid %d)", cmd.Process.Pid))
+	cli.PrintHint(fmt.Sprintf("  Logs: %s", shortenPath(logPath)))
+	cli.PrintHint("  Status: ox daemon status")
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/ui"
 	"github.com/sageox/ox/pkg/agentx"
 )
 
@@ -59,11 +60,10 @@ func buildIncompleteSessionHumanResult(incomplete []IncompleteSessionInfo) check
 	count := len(incomplete)
 	msg := fmt.Sprintf("%d found", count)
 
-	// build detail message with session list
+	// build detail with session list (CTA is rendered by the agent-required box)
 	var sb strings.Builder
 	sb.WriteString("Sessions needing finalization:\n")
 
-	// limit to first 5 for readability
 	showCount := count
 	if showCount > 5 {
 		showCount = 5
@@ -75,10 +75,8 @@ func buildIncompleteSessionHumanResult(incomplete []IncompleteSessionInfo) check
 	}
 
 	if count > 5 {
-		sb.WriteString(fmt.Sprintf("  ... and %d more\n", count-5))
+		sb.WriteString(fmt.Sprintf("  ... and %d more", count-5))
 	}
-
-	sb.WriteString("\nRun `ox agent doctor` inside your AI coding session to fix.")
 
 	// mark as agent-required since summaries need LLM generation
 	return WarningCheck("incomplete sessions", msg, sb.String()).WithRequiresAgent()
@@ -89,11 +87,10 @@ func buildIncompleteSessionAgentResult(incomplete []IncompleteSessionInfo) check
 	count := len(incomplete)
 	msg := fmt.Sprintf("%d found", count)
 
-	// build detail message with commands
+	// build pre-styled detail with prominent fix commands
 	var sb strings.Builder
-	sb.WriteString("Sessions needing finalization:\n")
+	sb.WriteString(ui.MutedStyle.Render("Sessions needing finalization:") + "\n")
 
-	// limit to first 5 for readability
 	showCount := count
 	if showCount > 5 {
 		showCount = 5
@@ -101,18 +98,22 @@ func buildIncompleteSessionAgentResult(incomplete []IncompleteSessionInfo) check
 
 	for i := 0; i < showCount; i++ {
 		info := incomplete[i]
-		sb.WriteString(fmt.Sprintf("  - %s (missing: %s)\n", info.SessionID, strings.Join(info.Missing, ", ")))
+		sb.WriteString(ui.MutedStyle.Render(fmt.Sprintf("  - %s (missing: %s)", info.SessionID, strings.Join(info.Missing, ", "))) + "\n")
 	}
 
 	if count > 5 {
-		sb.WriteString(fmt.Sprintf("  ... and %d more\n", count-5))
+		sb.WriteString(ui.MutedStyle.Render(fmt.Sprintf("  ... and %d more", count-5)) + "\n")
 	}
 
-	// provide agent commands
-	sb.WriteString("\nTo finalize sessions, run:\n")
-	sb.WriteString("  ox agent <id> doctor            # regenerate missing artifacts\n")
-	sb.WriteString("  ox session export <session-name> # generate session.html")
+	sb.WriteString("\n")
+	sb.WriteString(ui.AccentStyle.Render("→") + " " +
+		ui.AccentStyle.Bold(true).Render("ox agent <id> doctor") +
+		ui.MutedStyle.Render("  regenerate missing artifacts") + "\n")
+	sb.WriteString(ui.AccentStyle.Render("→") + " " +
+		ui.AccentStyle.Bold(true).Render("ox session export <name>") +
+		ui.MutedStyle.Render("  generate session.html"))
 
-	// when in agent context, don't mark as requires-agent (since we're already in agent context)
-	return WarningCheck("incomplete sessions", msg, sb.String())
+	result := WarningCheck("incomplete sessions", msg, sb.String())
+	result.detailRaw = true
+	return result
 }

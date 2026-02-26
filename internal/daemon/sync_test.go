@@ -692,7 +692,7 @@ func TestSyncScheduler_RecordSync_TeamContext(t *testing.T) {
 	scheduler := NewSyncScheduler(cfg, nil)
 
 	// record a team context sync
-	scheduler.recordSync("team_context", 150*time.Millisecond, 0)
+	scheduler.recordSync("team_context", "team_abc", 150*time.Millisecond, 0)
 
 	// verify history
 	history := scheduler.SyncHistory()
@@ -706,9 +706,9 @@ func TestSyncScheduler_SyncStats_WithTeamContext(t *testing.T) {
 	scheduler := NewSyncScheduler(cfg, nil)
 
 	// record various syncs
-	scheduler.recordSync("pull", 100*time.Millisecond, 0)
-	scheduler.recordSync("push", 200*time.Millisecond, 3)
-	scheduler.recordSync("team_context", 50*time.Millisecond, 0)
+	scheduler.recordSync("pull", "ledger", 100*time.Millisecond, 0)
+	scheduler.recordSync("push", "ledger", 200*time.Millisecond, 3)
+	scheduler.recordSync("team_context", "team_abc", 50*time.Millisecond, 0)
 
 	// verify stats
 	stats := scheduler.SyncStats()

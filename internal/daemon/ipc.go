@@ -94,7 +94,8 @@ type StatusData struct {
 
 	// workspaces being synced, keyed by type ("ledger", "team-context")
 	// each type maps to a list of workspaces of that type (ledger has 1, team-context may have many)
-	Workspaces map[string][]WorkspaceSyncStatus `json:"workspaces,omitempty"`
+	Workspaces    map[string][]WorkspaceSyncStatus `json:"workspaces,omitempty"`
+	ProjectTeamID string                           `json:"project_team_id,omitempty"` // primary team for this project
 
 	// team context sync (deprecated: use Workspaces["team-context"] instead)
 	TeamContexts []TeamContextSyncStatus `json:"team_contexts,omitempty"`
@@ -159,6 +160,23 @@ type WorkspaceSyncStatus struct {
 	LastSync time.Time `json:"last_sync,omitempty"`  // last successful sync
 	LastErr  string    `json:"last_error,omitempty"` // last error message
 	Syncing  bool      `json:"syncing,omitempty"`    // currently syncing
+}
+
+// LastSyncForPath returns the last sync time for a workspace at the given path.
+// Returns (time, true) if found and non-zero, (zero, false) otherwise.
+// Safe to call on nil receiver.
+func (s *StatusData) LastSyncForPath(path string) (time.Time, bool) {
+	if s == nil {
+		return time.Time{}, false
+	}
+	for _, wsList := range s.Workspaces {
+		for _, ws := range wsList {
+			if ws.Path == path && !ws.LastSync.IsZero() {
+				return ws.LastSync, true
+			}
+		}
+	}
+	return time.Time{}, false
 }
 
 // CheckoutPayload is the payload for checkout requests.

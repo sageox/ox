@@ -317,23 +317,29 @@ func (c *DaemonHeartbeatCheck) Run(ctx context.Context) CheckResult {
 
 	entry, err := daemon.ReadLastHeartbeatFromPath(heartbeatPath)
 	if err != nil || entry == nil {
-		// grace period: check if daemon just started
 		if daemon.IsRunning() {
+			// grace period: daemon just started
 			client := daemon.NewClient()
 			if dStatus, dErr := client.Status(); dErr == nil && dStatus.Uptime < DaemonBootstrapGrace {
 				return CheckResult{
 					Name:    c.Name(),
 					Status:  StatusSkip,
-					Message: "waiting for first heartbeat",
-					Fix:     "daemon just started, heartbeats not written yet",
+					Message: "daemon starting up",
 				}
 			}
+			// daemon is running but no heartbeat — it's not syncing this repo
+			return CheckResult{
+				Name:    c.Name(),
+				Status:  StatusWarn,
+				Message: "not syncing",
+				Fix:     "Daemon running but not monitoring this repo. Try `ox daemon restart`",
+			}
 		}
+		// daemon not running — skip, the "daemon running" check handles this
 		return CheckResult{
 			Name:    c.Name(),
-			Status:  StatusWarn,
-			Message: "no heartbeat",
-			Fix:     "Daemon may not be monitoring this repo. Run `ox daemon start`",
+			Status:  StatusSkip,
+			Message: "daemon not running",
 		}
 	}
 
@@ -341,11 +347,20 @@ func (c *DaemonHeartbeatCheck) Run(ctx context.Context) CheckResult {
 
 	// warning if last heartbeat was > 10 minutes ago (heartbeats every 5 min)
 	if sinceHeartbeat > 10*time.Minute {
+		// if daemon is not running, skip — the "daemon running" check already
+		// tells the user. Stale heartbeats are only actionable when daemon IS running.
+		if !daemon.IsRunning() {
+			return CheckResult{
+				Name:    c.Name(),
+				Status:  StatusSkip,
+				Message: fmt.Sprintf("last seen %s ago", formatDuration(sinceHeartbeat)),
+			}
+		}
 		return CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarn,
 			Message: formatDuration(sinceHeartbeat) + " ago",
-			Fix:     fmt.Sprintf("Stale heartbeat. Daemon may have stopped (PID was %d)", entry.DaemonPID),
+			Fix:     "Daemon running but not syncing this repo. Try `ox daemon restart`",
 		}
 	}
 

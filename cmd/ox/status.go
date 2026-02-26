@@ -21,6 +21,7 @@ import (
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/tips"
+	"github.com/sageox/ox/internal/tui"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -641,7 +642,14 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString(statusMutedStyle.Render("n/a (not in a git repo)"))
 		b.WriteString("\n")
 	} else if hasLedger {
-		status := getGitRepoStatus(localCfg.Ledger.Path, localCfg.Ledger.LastSync, localCfg.Ledger.HasLastSync())
+		// layered sync time: prefer daemon (freshest), fall back to config file (persistent)
+		ledgerLastSync := localCfg.Ledger.LastSync
+		ledgerHasSync := localCfg.Ledger.HasLastSync()
+		if daemonSync, ok := daemonStatus.LastSyncForPath(localCfg.Ledger.Path); ok {
+			ledgerLastSync = daemonSync
+			ledgerHasSync = true
+		}
+		status := getGitRepoStatus(localCfg.Ledger.Path, ledgerLastSync, ledgerHasSync)
 
 		repoID := ""
 		if projectCfg != nil {
@@ -893,30 +901,26 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 
 		gitDir := filepath.Join(expectedPath, ".git")
 		if _, err := os.Stat(gitDir); err == nil {
-			status := getGitRepoStatus(expectedPath, time.Time{}, false)
+			// layered sync time: prefer daemon (freshest), fall back to config file (persistent)
+			var tcLastSync time.Time
+			tcHasSync := false
+			if daemonSync, ok := daemonStatus.LastSyncForPath(expectedPath); ok {
+				tcLastSync = daemonSync
+				tcHasSync = true
+			} else if localCfg != nil {
+				if tc := localCfg.GetTeamContext(cloudTC.StableID()); tc != nil && tc.HasLastSync() {
+					tcLastSync = tc.LastSync
+					tcHasSync = true
+				}
+			}
+			status := getGitRepoStatus(expectedPath, tcLastSync, tcHasSync)
 			if status.Error != "" {
 				b.WriteString(statusLabelStyle.Render("  Status"))
 				b.WriteString(formatValue(status.Error, "error"))
-			} else if status.UncommittedCount > 0 {
-				b.WriteString(statusLabelStyle.Render("  Status"))
-				b.WriteString(formatValue(fmt.Sprintf("%d uncommitted", status.UncommittedCount), "warning"))
 			} else {
-				syncTimeStr := ""
-				if daemonStatus != nil {
-					for _, wsList := range daemonStatus.Workspaces {
-						for _, ws := range wsList {
-							if ws.Path == expectedPath && !ws.LastSync.IsZero() {
-								syncTimeStr = fmt.Sprintf(" (%s)", formatTimeAgo(ws.LastSync))
-								break
-							}
-						}
-						if syncTimeStr != "" {
-							break
-						}
-					}
-				}
+				statusText, semantic := formatGitRepoStatus(status)
 				b.WriteString(statusLabelStyle.Render("  Status"))
-				b.WriteString(formatValue("synced"+syncTimeStr, "success"))
+				b.WriteString(formatValue(statusText, semantic))
 			}
 			b.WriteString("\n")
 		} else {
@@ -1045,99 +1049,6 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 	return b.String()
 }
 
-// sparkline configuration constants
-const (
-	sparklineLevels       = 8  // number of vertical levels in sparkline
-	sparklineMaxLevel     = 7  // max index (sparklineLevels - 1)
-	sparklineEmptyLevel   = 0  // level for buckets with no events
-	sparklineBuckets      = 48 // 4 hours at 5-minute intervals
-	sparklineWindow       = 4 * time.Hour
-	sparklineBucketsPerHr = 12 // 60 min / 5 min intervals
-)
-
-// sparklineChars are Unicode block characters for sparkline rendering (8 levels)
-var sparklineChars = []rune{'▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
-
-// renderSparkline creates a sparkline visualization from sync events.
-// Buckets events into time slots and shows activity intensity.
-func renderSparkline(events []daemon.SyncEvent, buckets int, window time.Duration) string {
-	if len(events) == 0 || buckets <= 0 {
-		return statusMutedStyle.Render("─" + strings.Repeat("─", buckets))
-	}
-
-	now := time.Now()
-	bucketDuration := window / time.Duration(buckets)
-	counts := make([]int, buckets)
-
-	// count events in each bucket (most recent on right)
-	for _, e := range events {
-		age := now.Sub(e.Time)
-		if age >= window || age < 0 {
-			continue
-		}
-		// bucket 0 is oldest, bucket n-1 is most recent
-		idx := buckets - 1 - int(age/bucketDuration)
-		if idx >= 0 && idx < buckets {
-			counts[idx]++
-		}
-	}
-
-	// find max for scaling
-	maxCount := 1
-	for _, c := range counts {
-		if c > maxCount {
-			maxCount = c
-		}
-	}
-
-	// render sparkline with hour separators
-	var sb strings.Builder
-	for i, c := range counts {
-		// add hour separator (but not at the start)
-		if i > 0 && i%sparklineBucketsPerHr == 0 {
-			sb.WriteRune('|')
-		}
-
-		if c == 0 {
-			sb.WriteRune(sparklineChars[sparklineEmptyLevel]) // baseline for empty
-		} else {
-			// scale to sparklineMaxLevel range, minimum 1 for any non-zero count
-			level := (c * sparklineMaxLevel) / maxCount
-			if level < 1 {
-				level = 1 // ensure non-zero activity is visible
-			} else if level > sparklineMaxLevel {
-				level = sparklineMaxLevel
-			}
-			sb.WriteRune(sparklineChars[level])
-		}
-	}
-
-	return cli.StyleDim.Render(sb.String())
-}
-
-// renderSparklineTimeMarkers renders time markers aligned below the sparkline
-func renderSparklineTimeMarkers() string {
-	// sparkline total width: 48 buckets + 3 separators = 51 chars
-	// markers: "4h ago" at left, "2h" in center, "now" at right
-	const width = sparklineBuckets + 3 // 51
-
-	line := make([]byte, width)
-	for i := range line {
-		line[i] = ' '
-	}
-
-	// "4h ago" at position 0
-	copy(line[0:], "4h ago")
-
-	// "2h" centered around position 25-26 (the 2h separator)
-	copy(line[24:], "2h")
-
-	// "now" right-aligned, ending at position 50
-	copy(line[48:], "now")
-
-	return cli.StyleDim.Render(string(line))
-}
-
 // daemonSyncWarningThreshold is the uptime duration after which we expect syncs to have occurred
 const daemonSyncWarningThreshold = time.Minute
 
@@ -1171,7 +1082,7 @@ func daemonHasConfiguredRepos(status *daemon.StatusData) bool {
 }
 
 // renderDaemonSyncSection renders daemon sync statistics
-func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.SyncEvent, noProject bool, projectInitialized bool) string {
+func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.SyncEvent, localCfg *config.LocalConfig, noProject bool, projectInitialized bool) string {
 	var b strings.Builder
 
 	b.WriteString("\n")
@@ -1192,11 +1103,40 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 	if status == nil {
 		b.WriteString(statusLabelStyle.Render("Status"))
 		if projectInitialized {
-			b.WriteString(statusMutedStyle.Render("⟳ not started — will auto-start on next session"))
+			b.WriteString(statusMutedStyle.Render("⟳ not started — run 'ox daemon start' or will auto-start on next agentic coding session"))
 		} else {
 			b.WriteString(statusMutedStyle.Render("not running (expected until 'ox init' completed)"))
 		}
 		b.WriteString("\n")
+
+		// show last-known sync times from config file when daemon is not running
+		if localCfg != nil {
+			hasAny := false
+			if localCfg.Ledger != nil && localCfg.Ledger.HasLastSync() {
+				b.WriteString(statusLabelStyle.Render("  Last ledger sync"))
+				b.WriteString(statusMutedStyle.Render(formatTimeAgo(localCfg.Ledger.LastSync)))
+				b.WriteString("\n")
+				hasAny = true
+			}
+			for _, tc := range localCfg.TeamContexts {
+				if tc.HasLastSync() {
+					name := tc.TeamName
+					if name == "" {
+						name = tc.TeamID
+					}
+					b.WriteString(statusLabelStyle.Render(fmt.Sprintf("  Last %s sync", name)))
+					b.WriteString(statusMutedStyle.Render(formatTimeAgo(tc.LastSync)))
+					b.WriteString("\n")
+					hasAny = true
+				}
+			}
+			if !hasAny {
+				b.WriteString(statusLabelStyle.Render("  Last sync"))
+				b.WriteString(statusMutedStyle.Render("never"))
+				b.WriteString("\n")
+			}
+		}
+
 		return b.String()
 	}
 
@@ -1257,12 +1197,16 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 
 	// sparkline for last 4 hours (48 buckets = 5 min each)
 	if len(syncHistory) > 0 {
+		timestamps := make([]time.Time, len(syncHistory))
+		for i, e := range syncHistory {
+			timestamps[i] = e.Time
+		}
 		b.WriteString(statusLabelStyle.Render("Activity (4h)"))
-		b.WriteString(renderSparkline(syncHistory, sparklineBuckets, sparklineWindow))
+		b.WriteString(cli.StyleDim.Render(tui.RenderSparkline(timestamps, tui.SparklineBuckets, tui.SparklineWindow)))
 		b.WriteString("\n")
 		// time markers below sparkline
 		b.WriteString(statusLabelStyle.Render(""))
-		b.WriteString(renderSparklineTimeMarkers())
+		b.WriteString(cli.StyleDim.Render(tui.RenderSparklineTimeMarkers()))
 		b.WriteString("\n")
 	}
 
@@ -1564,7 +1508,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus))
 
 			// show daemon sync section
-			fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, false, projectInitialized))
+			fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, localCfg, false, projectInitialized))
 		}
 
 		// show version update notice if available

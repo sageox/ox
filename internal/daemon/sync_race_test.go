@@ -333,7 +333,7 @@ func TestConcurrentRecordSyncAndHistory(t *testing.T) {
 			defer wg.Done()
 			for j := range 20 {
 				d := time.Duration(id*20+j) * time.Millisecond
-				scheduler.recordSync("pull", d, id)
+				scheduler.recordSync("pull", "ledger", d, id)
 			}
 		}(i)
 	}

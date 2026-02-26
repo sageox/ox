@@ -288,7 +288,8 @@ type syncError struct {
 // SyncEvent tracks a successful sync with metadata.
 type SyncEvent struct {
 	Time         time.Time     `json:"time"`
-	Type         string        `json:"type"` // "pull", "push", "full", "team_context"
+	Type         string        `json:"type"`                    // "pull", "push", "full", "team_context"
+	WorkspaceID  string        `json:"workspace_id,omitempty"`  // workspace that was synced (e.g., "ledger", team_id)
 	Duration     time.Duration `json:"duration"`
 	FilesChanged int           `json:"files_changed"`
 }
@@ -376,12 +377,13 @@ func (s *SyncScheduler) recordActivity() {
 }
 
 // recordSync records a successful sync event and emits telemetry.
-func (s *SyncScheduler) recordSync(syncType string, duration time.Duration, filesChanged int) {
+func (s *SyncScheduler) recordSync(syncType string, workspaceID string, duration time.Duration, filesChanged int) {
 	s.mu.Lock()
 
 	s.syncHistory = append(s.syncHistory, SyncEvent{
 		Time:         time.Now(),
 		Type:         syncType,
+		WorkspaceID:  workspaceID,
 		Duration:     duration,
 		FilesChanged: filesChanged,
 	})
@@ -911,7 +913,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	}
 
 	duration := time.Since(startTime)
-	s.recordSync("pull", duration, 0) // pull doesn't track file count yet
+	s.recordSync("pull", "ledger", duration, 0)
 	s.metrics.RecordPullSuccess(duration)
 	s.recordActivity() // mark as activity
 
@@ -1728,7 +1730,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			syncedCount++
 
 			duration := time.Since(startTime)
-			s.recordSync("team_context", duration, 0)
+			s.recordSync("team_context", ws.ID, duration, 0)
 			s.metrics.RecordTeamSync()
 			s.recordActivity()
 			s.logger.Debug("team context synced", "team", ws.TeamName, "duration", duration)

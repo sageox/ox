@@ -466,7 +466,7 @@ func TestCheckGitRepoState_Clean(t *testing.T) {
 	restoreCwd := changeToDir(t, gitRoot)
 	defer restoreCwd()
 
-	// clean repo with no uncommitted changes
+	// clean repo — no uncommitted .sageox/ changes
 	result := checkGitRepoState()
 
 	if !result.passed {
@@ -477,26 +477,50 @@ func TestCheckGitRepoState_Clean(t *testing.T) {
 	}
 }
 
-func TestCheckGitRepoState_UncommittedChanges(t *testing.T) {
+func TestCheckGitRepoState_UncommittedSageoxChanges(t *testing.T) {
 	gitRoot, cleanup := setupTempGitRepo(t)
 	defer cleanup()
 
 	restoreCwd := changeToDir(t, gitRoot)
 	defer restoreCwd()
 
-	// create uncommitted file
-	testFile := filepath.Join(gitRoot, "uncommitted.txt")
-	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+	// create uncommitted file under .sageox/
+	sageoxDir := filepath.Join(gitRoot, ".sageox")
+	if err := os.MkdirAll(sageoxDir, 0755); err != nil {
+		t.Fatalf("failed to create .sageox dir: %v", err)
+	}
+	testFile := filepath.Join(sageoxDir, "config.json")
+	if err := os.WriteFile(testFile, []byte(`{"test": true}`), 0644); err != nil {
 		t.Fatalf("failed to create test file: %v", err)
 	}
 
 	result := checkGitRepoState()
 
 	if !result.warning {
-		t.Error("expected warning for uncommitted changes")
+		t.Error("expected warning for uncommitted .sageox/ changes")
 	}
 	if !strings.Contains(result.message, "uncommitted") {
 		t.Errorf("expected message to mention uncommitted changes, got: %s", result.message)
+	}
+}
+
+func TestCheckGitRepoState_IgnoresNonSageoxChanges(t *testing.T) {
+	gitRoot, cleanup := setupTempGitRepo(t)
+	defer cleanup()
+
+	restoreCwd := changeToDir(t, gitRoot)
+	defer restoreCwd()
+
+	// create uncommitted file outside .sageox/ — should NOT trigger warning
+	testFile := filepath.Join(gitRoot, "user-code.txt")
+	if err := os.WriteFile(testFile, []byte("user code"), 0644); err != nil {
+		t.Fatalf("failed to create test file: %v", err)
+	}
+
+	result := checkGitRepoState()
+
+	if result.warning {
+		t.Errorf("should not warn about non-.sageox/ changes, got: %s", result.message)
 	}
 }
 

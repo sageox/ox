@@ -134,10 +134,10 @@ func init() {
 
 	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugGitRepoState,
-		Name:        "Repo state",
+		Name:        "SageOx config",
 		Category:    "Git Repository Health",
 		FixLevel:    FixLevelCheckOnly,
-		Description: "Checks for uncommitted changes, detached HEAD, and behind remote",
+		Description: "Checks for uncommitted SageOx config changes in .sageox/",
 		Run:         func(fix bool) checkResult { return checkGitRepoState() },
 	})
 

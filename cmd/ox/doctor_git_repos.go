@@ -156,87 +156,36 @@ func checkGitConfig(fix bool) checkResult {
 	return PassedCheck("Git config", "user.name and user.email set")
 }
 
-// checkGitRepoState checks the current repository state for common issues.
-// Reports uncommitted changes, detached HEAD, and being behind remote.
+// checkGitRepoState checks for uncommitted SageOx config under .sageox/.
+// Only reports issues with SageOx-managed files — the user's repo state is their own business.
 func checkGitRepoState() checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
-		return SkippedCheck("Repo state", "not in git repo", "")
+		return SkippedCheck("SageOx config", "not in git repo", "")
 	}
 
-	var issues []string
-
-	// check for uncommitted changes
-	statusCmd := exec.Command("git", "status", "--porcelain")
+	// only check for uncommitted changes under .sageox/
+	statusCmd := exec.Command("git", "status", "--porcelain", ".sageox/")
 	statusCmd.Dir = gitRoot
 	output, err := statusCmd.Output()
 	if err == nil && len(output) > 0 {
 		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-		count := len(lines)
+		count := 0
+		for _, line := range lines {
+			if line != "" {
+				count++
+			}
+		}
 		if count > 0 {
-			issues = append(issues, fmt.Sprintf("%d uncommitted change(s)", count))
+			return WarningCheck("SageOx config",
+				fmt.Sprintf("%d uncommitted change(s) in .sageox/", count),
+				"Run 'git add .sageox/ && git commit' to persist config")
 		}
 	}
 
-	// check for detached HEAD
-	headCmd := exec.Command("git", "symbolic-ref", "-q", "HEAD")
-	headCmd.Dir = gitRoot
-	if err := headCmd.Run(); err != nil {
-		issues = append(issues, "detached HEAD")
-	}
-
-	// check if behind remote (only if origin exists and is reachable)
-	behindCount := checkBehindRemote(gitRoot)
-	if behindCount > 0 {
-		issues = append(issues, fmt.Sprintf("%d commit(s) behind remote", behindCount))
-	}
-
-	if len(issues) > 0 {
-		msg := strings.Join(issues, "; ")
-		return WarningCheck("Repo state", msg, "Consider committing or pulling changes")
-	}
-
-	return PassedCheck("Repo state", "clean and up to date")
+	return PassedCheck("SageOx config", "committed and up to date")
 }
 
-// checkBehindRemote checks if the current branch is behind its remote tracking branch.
-// Returns the number of commits behind, or 0 if up to date or unable to determine.
-// Uses cached tracking branch data (no git fetch) for speed. The daemon handles fetch.
-func checkBehindRemote(gitRoot string) int {
-	// get current branch
-	branchCmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	branchCmd.Dir = gitRoot
-	branchOutput, err := branchCmd.Output()
-	if err != nil {
-		return 0
-	}
-	branch := strings.TrimSpace(string(branchOutput))
-	if branch == "HEAD" {
-		return 0 // detached HEAD
-	}
-
-	// check if tracking branch exists
-	trackingCmd := exec.Command("git", "rev-parse", "--abbrev-ref", branch+"@{upstream}")
-	trackingCmd.Dir = gitRoot
-	if _, err := trackingCmd.Output(); err != nil {
-		return 0 // no tracking branch
-	}
-
-	// count commits behind using cached refs (no fetch - daemon handles that)
-	revListCmd := exec.Command("git", "rev-list", "--count", "HEAD.."+branch+"@{upstream}")
-	revListCmd.Dir = gitRoot
-	countOutput, err := revListCmd.Output()
-	if err != nil {
-		return 0
-	}
-
-	count := strings.TrimSpace(string(countOutput))
-	var behindCount int
-	if _, err := fmt.Sscanf(count, "%d", &behindCount); err != nil {
-		return 0
-	}
-	return behindCount
-}
 
 // checkGitRemotes validates configured git remotes.
 // Checks that origin is configured and URL format is valid.

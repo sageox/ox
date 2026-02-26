@@ -30,6 +30,7 @@ type checkResult struct {
 	priority      string // "critical", "info", or "" (default warning)
 	message       string
 	detail        string        // action hint shown on next line with └─
+	detailRaw     bool          // if true, detail is pre-styled; skip MutedStyle wrapping
 	children      []checkResult // nested child checks shown with ⎿
 	fixLevel      FixLevel      // how fix should behave (from DoctorCheck metadata)
 	slug          string        // unique identifier for programmatic reference
@@ -660,7 +661,7 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 			name: "Daemon",
 			checks: []checkResult{
 				SkippedCheck("daemon status", "not started",
-					"Daemon will auto-start on next session"),
+					"Daemon will auto-start on next agentic coding session"),
 			},
 		})
 	} else {
@@ -1101,8 +1102,13 @@ func displayPrioritySummary(cmd *cobra.Command, categories []checkCategory) bool
 	if len(attention) > 0 {
 		nodes = append(nodes, priorityBucketToNode("Needs Attention", ui.WarnStyle, attention))
 	}
-	// agent-required checks rendered separately as a prominent box (not a timeline node)
-	// so users clearly see they need to act inside their AI coding session
+	if len(agentRequired) > 0 {
+		nodes = append(nodes, ui.TimelineNode{
+			Title: "Requires AI Coworker",
+			Style: ui.WarnStyle,
+			Box:   renderAgentRequiredBoxContent(agentRequired),
+		})
+	}
 	if len(optional) > 0 {
 		nodes = append(nodes, priorityBucketToNode("Optional", ui.MutedStyle, optional))
 	}
@@ -1118,11 +1124,6 @@ func displayPrioritySummary(cmd *cobra.Command, categories []checkCategory) bool
 
 	// render timeline
 	fmt.Fprint(w, ui.RenderTimeline(nodes, "Done"))
-
-	// agent-required box (prominent call-to-action)
-	if len(agentRequired) > 0 {
-		fmt.Fprintln(w, renderAgentRequiredBox(agentRequired))
-	}
 
 	// summary box
 	hint := fixableSlugsHint(fixableSlugs)
@@ -1224,16 +1225,17 @@ func singleCheckToItem(check checkResult) ui.TimelineItem {
 	}
 
 	detail := check.detail
-	if detail != "" {
+	if detail != "" && !check.detailRaw {
 		detail = cli.FormatTipText(detail)
 	}
 
 	return ui.TimelineItem{
-		Icon:   icon,
-		Style:  style,
-		Text:   check.name + messageAnnotation(check.message),
-		Detail: detail,
-		Badge:  badge,
+		Icon:      icon,
+		Style:     style,
+		Text:      check.name + messageAnnotation(check.message),
+		Detail:    detail,
+		DetailRaw: check.detailRaw,
+		Badge:     badge,
 	}
 }
 
@@ -1278,9 +1280,9 @@ func priorityBucketToNode(title string, style lipgloss.Style, checks []checkResu
 	return node
 }
 
-// renderAgentRequiredBox renders a prominent bordered box for checks that require
-// running `ox agent doctor` inside an AI coding session (e.g., Claude Code).
-func renderAgentRequiredBox(checks []checkResult) string {
+// renderAgentRequiredBoxContent returns a bordered box body for checks that require
+// running `ox agent doctor` inside an AI coding session. Used as TimelineNode.Box content.
+func renderAgentRequiredBoxContent(checks []checkResult) string {
 	var lines []string
 	for _, check := range checks {
 		icon, style := checkIconAndStyle(check)
@@ -1291,11 +1293,11 @@ func renderAgentRequiredBox(checks []checkResult) string {
 	}
 
 	body := strings.Join(lines, "\n")
-	body += "\n\n" + ui.MutedStyle.Render("Run ")+
-		cli.FormatTipText("`ox agent doctor`")+
-		ui.MutedStyle.Render(" inside your AI coding session (e.g., Claude Code)")
+	body += "\n\n" + ui.AccentStyle.Render("→") + " " +
+		ui.AccentStyle.Bold(true).Render("ox agent doctor") +
+		ui.MutedStyle.Render("  run inside your AI coding session")
 
-	return ui.RenderBox("Requires AI Coworker", body, ui.BoxInfo)
+	return ui.RenderBox("", body, ui.BoxInfo)
 }
 
 // fixableSlugsHint builds a hint string from fixable slugs for the summary box.

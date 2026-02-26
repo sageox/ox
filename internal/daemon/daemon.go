@@ -338,7 +338,9 @@ func (d *Daemon) Start() error {
 			// get all workspaces being synced (ledger + team contexts)
 			// keyed by type for flexibility with future workspace types
 			workspaces := make(map[string][]WorkspaceSyncStatus)
+			projectTeamID := ""
 			if registry := d.scheduler.WorkspaceRegistry(); registry != nil {
+				projectTeamID = registry.ProjectTeamID()
 				for _, ws := range registry.GetAllWorkspaces() {
 					wsType := string(ws.Type)
 					// normalize type to match API convention (team_context -> team-context)
@@ -376,6 +378,7 @@ func (d *Daemon) Start() error {
 				SyncsLastHour:     stats.SyncsLastHour,
 				AvgSyncTime:       stats.AvgDuration,
 				Workspaces:        workspaces,
+				ProjectTeamID:     projectTeamID,
 				TeamContexts:      d.scheduler.TeamContextStatus(),
 				InactivityTimeout: d.config.InactivityTimeout,
 				TimeSinceActivity: d.timeSinceLastActivity(),

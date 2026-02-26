@@ -207,7 +207,9 @@ func (h *HeartbeatHandler) Handle(payload json.RawMessage) {
 	h.cbMu.RUnlock()
 
 	// check for version mismatch (CLI upgraded but daemon still running old version)
-	if hb.CLIVersion != "" && hb.CLIVersion != Version() {
+	// compare semver only — build timestamps differ on every rebuild and would
+	// cause restart loops during development (same 0.2.0 but different +builddate)
+	if hb.CLIVersion != "" && semverOnly(hb.CLIVersion) != semverOnly(Version()) {
 		h.logger.Warn("CLI/daemon version mismatch detected",
 			"cli_version", hb.CLIVersion,
 			"daemon_version", Version(),

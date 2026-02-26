@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/sageox/ox/internal/tui"
 )
 
 var (
@@ -35,127 +37,104 @@ const (
 	HealthCritical
 )
 
-// FormatStatus renders the daemon status with improved UX.
-// Uses compact format approved by user.
-func FormatStatus(status *StatusData) string {
+// FormatNotRunning renders the "daemon not running" state with context.
+// inProject indicates whether the user is inside an initialized SageOx project.
+func FormatNotRunning(inProject bool) string {
 	var out strings.Builder
 
-	// determine health status
-	health := determineHealth(status)
-
-	// header: ● Daemon: Healthy (2h 30m uptime)
-	out.WriteString(formatHeader(health, status))
+	out.WriteString(styleCritical.Render("○ Daemon: Not running"))
 	out.WriteString("\n\n")
 
-	// core info
-	if status.WorkspacePath != "" {
-		out.WriteString(formatKV("Workspace", shortenPath(status.WorkspacePath)))
+	if inProject {
+		out.WriteString(styleMuted.Render("  No active AI coworker session detected."))
 		out.WriteString("\n")
-	}
-	out.WriteString(formatKV("PID", fmt.Sprintf("%d", status.Pid)))
-	out.WriteString("\n")
-	out.WriteString(formatKV("Version", status.Version))
-	out.WriteString("\n")
-	if status.AuthenticatedUser != nil && status.AuthenticatedUser.Email != "" {
-		out.WriteString(formatKV("User", status.AuthenticatedUser.Email))
+		out.WriteString(styleMuted.Render("  The daemon auto-starts when a coding agent begins working."))
+		out.WriteString("\n\n")
+		out.WriteString(styleMuted.Render("  To start manually: "))
+		out.WriteString(styleHealthy.Render("ox daemon start"))
 		out.WriteString("\n")
-	}
-	out.WriteString(formatKV("Ledger", shortenPath(status.LedgerPath)))
-	out.WriteString("\n")
-	if status.SyncIntervalRead > 0 {
-		out.WriteString(formatKV("Sync every", formatDurationCompact(status.SyncIntervalRead)))
-		out.WriteString("\n")
-	}
-	out.WriteString("\n")
-
-	// sync line: Sync: ✓ 47 total  ✓ 12/hour  ✓ 1.2s avg
-	out.WriteString(formatSyncLine(status))
-	out.WriteString("\n")
-
-	// last sync
-	if !status.LastSync.IsZero() {
-		out.WriteString(formatKV("Last sync", formatRelativeTime(time.Since(status.LastSync))))
 	} else {
-		out.WriteString(formatKV("Last sync", styleMuted.Render("never")))
-	}
-	out.WriteString("\n\n")
-
-	// errors
-	errStr := fmt.Sprintf("%d in last hour", status.RecentErrorCount)
-	if status.RecentErrorCount > 0 {
-		errStr = styleCritical.Render(errStr)
-	}
-	errStr += fmt.Sprintf(" (%d unviewed)", status.UnviewedErrorCount)
-	out.WriteString(formatKV("Errors", errStr))
-	out.WriteString("\n")
-
-	// show last error if present
-	if status.LastError != "" {
+		out.WriteString(styleMuted.Render("  Not inside an initialized SageOx project."))
 		out.WriteString("\n")
-		lastErrLine := "  Last: " + status.LastError
-		if status.LastErrorTime != "" {
-			if t, err := time.Parse(time.RFC3339, status.LastErrorTime); err == nil {
-				lastErrLine += " (" + formatRelativeTime(time.Since(t)) + ")"
-			}
-		}
-		out.WriteString(styleMuted.Render(lastErrLine))
-		out.WriteString("\n")
-
-		// add hint based on error type
-		hint := getErrorHint(status.LastError)
-		if hint != "" {
-			out.WriteString(styleMuted.Render("  Hint: " + hint))
-			out.WriteString("\n")
-		}
-		out.WriteString(styleMuted.Render("  Logs: ox daemon logs"))
-		out.WriteString("\n")
-	}
-
-	// show ledgers if any (from Workspaces map)
-	if ledgers, ok := status.Workspaces["ledger"]; ok && len(ledgers) > 0 {
-		out.WriteString("\n")
-		out.WriteString(formatLedgers(ledgers))
-	}
-
-	// show team contexts if any
-	if len(status.TeamContexts) > 0 {
-		out.WriteString("\n")
-		out.WriteString(formatTeamContexts(status.TeamContexts))
-	}
-
-	// show activity if any
-	if activity := formatActivity(status.Activity); activity != "" {
-		out.WriteString("\n")
-		out.WriteString(activity)
-	}
-
-	// show issues if any
-	if issues := formatIssues(status.NeedsHelp, status.Issues); issues != "" {
-		out.WriteString("\n")
-		out.WriteString(issues)
-	}
-
-	// show inactivity info if enabled
-	if status.InactivityTimeout > 0 {
-		out.WriteString("\n")
-		remaining := status.InactivityTimeout - status.TimeSinceActivity
-		if remaining < 0 {
-			remaining = 0
-		}
-		out.WriteString(formatKV("Auto-exit", fmt.Sprintf("in %s (after %s inactivity)",
-			formatDurationCompact(remaining),
-			formatDurationCompact(status.InactivityTimeout))))
+		out.WriteString(styleMuted.Render("  Run 'ox init' in a git repo to get started."))
 		out.WriteString("\n")
 	}
 
 	return out.String()
 }
 
-// FormatStatusVerbose includes additional diagnostic details.
-func FormatStatusVerbose(status *StatusData, history []SyncEvent) string {
-	out := FormatStatus(status)
+// FormatStatus renders compact daemon status (Tufte-inspired: maximize data-ink ratio).
+// cliVersion is the current CLI version for match comparison.
+func FormatStatus(status *StatusData, cliVersion string) string {
+	var out strings.Builder
 
-	// add sync history table
+	health := determineHealth(status)
+
+	// line 1: ● Healthy — 3m uptime, v0.2.0 ✓ (matching)
+	out.WriteString(formatHeader(health, status, cliVersion))
+	out.WriteString("\n\n")
+
+	// line 2: operational summary
+	out.WriteString(formatSummaryLine(status))
+	out.WriteString("\n")
+
+	// errors (only when present)
+	if status.RecentErrorCount > 0 || status.LastError != "" {
+		out.WriteString(formatErrors(status))
+	}
+
+	// workspace sync groups
+	out.WriteString(formatWorkspaceGroups(status))
+
+	// issues (if any)
+	if issues := formatIssues(status.NeedsHelp, status.Issues); issues != "" {
+		out.WriteString("\n")
+		out.WriteString(issues)
+	}
+
+	// auto-exit (compact)
+	if status.InactivityTimeout > 0 {
+		remaining := status.InactivityTimeout - status.TimeSinceActivity
+		if remaining < 0 {
+			remaining = 0
+		}
+		out.WriteString("\n")
+		out.WriteString(styleMuted.Render("  Auto-exit in " + formatDurationCompact(remaining)))
+		out.WriteString("\n")
+	}
+
+	return out.String()
+}
+
+// FormatStatusWithSparkline adds a 4h activity sparkline to the status output.
+func FormatStatusWithSparkline(status *StatusData, history []SyncEvent, cliVersion string) string {
+	out := FormatStatus(status, cliVersion)
+	out += formatSparklineSection(history)
+	return out
+}
+
+// FormatStatusVerbose includes sparkline, internals, and sync history table.
+func FormatStatusVerbose(status *StatusData, history []SyncEvent, cliVersion string) string {
+	out := FormatStatus(status, cliVersion)
+	out += formatSparklineSection(history)
+
+	// verbose internals
+	out += "\n"
+	out += styleBold.Render("Internals") + "\n"
+	out += formatKV("PID", fmt.Sprintf("%d", status.Pid)) + "\n"
+	if status.WorkspacePath != "" {
+		out += formatKV("Workspace", shortenPath(status.WorkspacePath)) + "\n"
+	}
+	out += formatKV("Ledger", shortenPath(status.LedgerPath)) + "\n"
+	if status.AuthenticatedUser != nil && status.AuthenticatedUser.Email != "" {
+		out += formatKV("User", status.AuthenticatedUser.Email) + "\n"
+	}
+
+	// activity details
+	if activity := formatActivity(status.Activity); activity != "" {
+		out += "\n" + activity
+	}
+
 	if len(history) > 0 {
 		out += "\n" + formatSyncHistory(history)
 	}
@@ -163,7 +142,25 @@ func FormatStatusVerbose(status *StatusData, history []SyncEvent) string {
 	return out
 }
 
-func formatHeader(health HealthStatus, status *StatusData) string {
+func formatSparklineSection(history []SyncEvent) string {
+	if len(history) == 0 {
+		return ""
+	}
+	timestamps := make([]time.Time, len(history))
+	for i, e := range history {
+		timestamps[i] = e.Time
+	}
+	var out strings.Builder
+	out.WriteString("\n")
+	sparkline := styleMuted.Render(tui.RenderSparkline(timestamps, tui.SparklineBuckets, tui.SparklineWindow))
+	out.WriteString("  " + styleBold.Render("Activity (4h)") + "  " + sparkline)
+	out.WriteString("\n")
+	out.WriteString("                 " + styleMuted.Render(tui.RenderSparklineTimeMarkers()))
+	out.WriteString("\n")
+	return out.String()
+}
+
+func formatHeader(health HealthStatus, status *StatusData, cliVersion string) string {
 	var indicator, statusText string
 	var style lipgloss.Style
 
@@ -183,95 +180,245 @@ func formatHeader(health HealthStatus, status *StatusData) string {
 	}
 
 	uptime := formatDurationCompact(status.Uptime)
-	return style.Render(fmt.Sprintf("%s Daemon: %s", indicator, statusText)) +
-		styleMuted.Render(fmt.Sprintf(" (%s uptime)", uptime))
+	versionMatch := formatVersionMatch(status.Version, cliVersion)
+
+	return style.Render(fmt.Sprintf("%s %s", indicator, statusText)) +
+		styleMuted.Render(fmt.Sprintf(" — %s uptime, v%s ", uptime, semverOnly(status.Version))) +
+		versionMatch
 }
 
-func formatSyncLine(status *StatusData) string {
+// formatVersionMatch compares daemon and CLI semver, returns styled match indicator.
+func formatVersionMatch(daemonVersion, cliVersion string) string {
+	dv := semverOnly(daemonVersion)
+	cv := semverOnly(cliVersion)
+	if dv == cv {
+		return styleHealthy.Render("✓") + " " + styleMuted.Render("(matching)")
+	}
+	return styleWarning.Render("⚠") + " " + styleWarning.Render(fmt.Sprintf("(mismatch: daemon v%s)", dv))
+}
+
+// semverOnly strips build metadata (everything after +) from a version string.
+func semverOnly(v string) string {
+	if idx := strings.Index(v, "+"); idx >= 0 {
+		return v[:idx]
+	}
+	return v
+}
+
+// formatSummaryLine renders a single operational summary line.
+func formatSummaryLine(status *StatusData) string {
+	wsCount := countWorkspaces(status)
 	var parts []string
+
+	// sync interval
+	if status.SyncIntervalRead > 0 {
+		parts = append(parts, fmt.Sprintf("every %s", formatDurationCompact(status.SyncIntervalRead)))
+	}
 
 	// total syncs
 	if status.TotalSyncs > 0 {
-		parts = append(parts, styleHealthy.Render("✓")+" "+fmt.Sprintf("%d total", status.TotalSyncs))
-	} else {
-		parts = append(parts, styleMuted.Render("0 total"))
-	}
-
-	// syncs per hour
-	if status.SyncsLastHour > 0 {
-		parts = append(parts, styleHealthy.Render("✓")+" "+fmt.Sprintf("%d/hour", status.SyncsLastHour))
-	} else {
-		parts = append(parts, styleMuted.Render("0/hour"))
+		parts = append(parts, fmt.Sprintf("%d syncs", status.TotalSyncs))
 	}
 
 	// avg duration
 	if status.AvgSyncTime > 0 {
-		parts = append(parts, styleHealthy.Render("✓")+" "+formatDurationCompact(status.AvgSyncTime)+" avg")
+		parts = append(parts, formatDurationCompact(status.AvgSyncTime)+" avg")
 	}
 
-	return formatKV("Sync", strings.Join(parts, "  "))
+	// errors
+	if status.RecentErrorCount > 0 {
+		parts = append(parts, styleCritical.Render(fmt.Sprintf("%d errors", status.RecentErrorCount)))
+	} else {
+		parts = append(parts, "0 errors")
+	}
+
+	prefix := fmt.Sprintf("  Syncing %d repos", wsCount)
+	if len(parts) > 0 {
+		return styleMuted.Render(prefix) + " " + styleMuted.Render(strings.Join(parts, ", "))
+	}
+	return styleMuted.Render(prefix)
 }
 
-// formatLedgers renders ledger sync status.
-func formatLedgers(ledgers []WorkspaceSyncStatus) string {
+// countWorkspaces counts total workspaces being synced.
+func countWorkspaces(status *StatusData) int {
+	count := 0
+	for _, wsList := range status.Workspaces {
+		count += len(wsList)
+	}
+	return count
+}
+
+// formatErrors renders error details (only called when errors exist).
+func formatErrors(status *StatusData) string {
 	var out strings.Builder
 
-	out.WriteString(styleBold.Render("Ledgers"))
-	out.WriteString(styleMuted.Render(fmt.Sprintf(" (%d)", len(ledgers))))
-	out.WriteString("\n")
-
-	for _, l := range ledgers {
-		var status string
-		if !l.Exists {
-			status = styleMuted.Render("○ not cloned")
-		} else if l.LastErr != "" {
-			status = styleCritical.Render("○ " + l.LastErr)
-		} else if l.Syncing {
-			status = styleWarning.Render("◐ syncing...")
-		} else if l.LastSync.IsZero() {
-			status = styleWarning.Render("◐ not synced")
-		} else {
-			status = styleHealthy.Render("● synced " + formatRelativeTime(time.Since(l.LastSync)))
+	if status.LastError != "" {
+		out.WriteString("\n")
+		lastErrLine := "  " + styleCritical.Render("Last error: "+status.LastError)
+		if status.LastErrorTime != "" {
+			if t, err := time.Parse(time.RFC3339, status.LastErrorTime); err == nil {
+				lastErrLine += styleMuted.Render(" (" + formatRelativeTime(time.Since(t)) + ")")
+			}
 		}
+		out.WriteString(lastErrLine)
+		out.WriteString("\n")
 
-		// use path basename as display name
-		name := filepath.Base(l.Path)
-		if name == "" || name == "." {
-			name = l.ID
+		hint := getErrorHint(status.LastError)
+		if hint != "" {
+			out.WriteString(styleMuted.Render("  Hint: " + hint))
+			out.WriteString("\n")
 		}
-		out.WriteString(fmt.Sprintf("  %-20s %s\n", name+":", status))
 	}
 
 	return out.String()
 }
 
-// formatTeamContexts renders team context sync status.
-func formatTeamContexts(contexts []TeamContextSyncStatus) string {
+// formatWorkspaceGroups renders workspaces grouped: project (ledger + primary team) then other teams.
+// Uses tree visualization to make the relationship between ledger and team context clear.
+func formatWorkspaceGroups(status *StatusData) string {
 	var out strings.Builder
 
-	out.WriteString(styleBold.Render("Team Contexts"))
-	out.WriteString(styleMuted.Render(fmt.Sprintf(" (%d)", len(contexts))))
-	out.WriteString("\n")
+	ledgers := status.Workspaces["ledger"]
+	teamContexts := status.Workspaces["team-context"]
 
-	for _, tc := range contexts {
-		var status string
-		if !tc.Exists {
-			status = styleMuted.Render("○ not cloned")
-		} else if tc.LastErr != "" {
-			status = styleCritical.Render("○ " + tc.LastErr)
-		} else if tc.LastSync.IsZero() {
-			status = styleWarning.Render("◐ not synced")
+	// partition team contexts into project (primary) vs other
+	var projectTCs, otherTCs []WorkspaceSyncStatus
+	for _, tc := range teamContexts {
+		if status.ProjectTeamID != "" && tc.TeamID == status.ProjectTeamID {
+			projectTCs = append(projectTCs, tc)
 		} else {
-			status = styleHealthy.Render("● synced " + formatRelativeTime(time.Since(tc.LastSync)))
+			otherTCs = append(otherTCs, tc)
+		}
+	}
+
+	// project section: ledger + primary team context shown as a tree
+	projectCount := len(ledgers) + len(projectTCs)
+	if projectCount > 0 {
+		out.WriteString("\n")
+		out.WriteString(styleBold.Render("This Project"))
+		out.WriteString("\n")
+
+		// collect project items for tree rendering
+		type treeItem struct {
+			label  string
+			status string
+		}
+		var items []treeItem
+
+		for _, l := range ledgers {
+			items = append(items, treeItem{
+				label:  "Ledger",
+				status: formatWSStatus(l),
+			})
+		}
+		for _, tc := range projectTCs {
+			name := tc.TeamName
+			if name == "" {
+				name = tc.TeamID
+			}
+			items = append(items, treeItem{
+				label:  name + styleMuted.Render(" (team context)"),
+				status: formatWSStatus(tc),
+			})
 		}
 
-		out.WriteString(fmt.Sprintf("  %-20s %s\n", tc.TeamName+":", status))
+		// compute alignment width
+		alignWidth := 0
+		for _, item := range items {
+			// use raw label length for alignment (strip ANSI for measurement)
+			rawLen := len(stripANSI(item.label))
+			if rawLen > alignWidth {
+				alignWidth = rawLen
+			}
+		}
+		alignWidth += 2 // padding
+
+		for i, item := range items {
+			branch := "├── "
+			if i == len(items)-1 {
+				branch = "└── "
+			}
+			rawLen := len(stripANSI(item.label))
+			padding := strings.Repeat(" ", alignWidth-rawLen)
+			out.WriteString(styleMuted.Render("    "+branch) + item.label + padding + item.status + "\n")
+		}
+	}
+
+	// other team contexts
+	if len(otherTCs) > 0 {
+		out.WriteString("\n")
+		out.WriteString(styleBold.Render("Other Team Contexts"))
+		out.WriteString(styleMuted.Render(fmt.Sprintf(" (%d)", len(otherTCs))))
+		out.WriteString("\n")
+
+		// compute alignment width
+		alignWidth := 0
+		for _, tc := range otherTCs {
+			name := tc.TeamName
+			if name == "" {
+				name = tc.TeamID
+			}
+			if len(name) > alignWidth {
+				alignWidth = len(name)
+			}
+		}
+		alignWidth += 2 // padding
+
+		for i, tc := range otherTCs {
+			name := tc.TeamName
+			if name == "" {
+				name = tc.TeamID
+			}
+			branch := "├── "
+			if i == len(otherTCs)-1 {
+				branch = "└── "
+			}
+			padding := strings.Repeat(" ", alignWidth-len(name))
+			out.WriteString(styleMuted.Render("    "+branch) + name + padding + formatWSStatus(tc) + "\n")
+		}
 	}
 
 	return out.String()
 }
 
-// formatActivity renders heartbeat activity tracking.
+// stripANSI removes ANSI escape sequences for measuring display width.
+func stripANSI(s string) string {
+	var result strings.Builder
+	inEscape := false
+	for _, r := range s {
+		if r == '\033' {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+		result.WriteRune(r)
+	}
+	return result.String()
+}
+
+// formatWSStatus renders sync status for a single workspace (compact: icon + time).
+func formatWSStatus(ws WorkspaceSyncStatus) string {
+	if !ws.Exists {
+		return styleMuted.Render("○ not cloned")
+	}
+	if ws.LastErr != "" {
+		return styleCritical.Render("○ " + ws.LastErr)
+	}
+	if ws.Syncing {
+		return styleWarning.Render("◐ syncing...")
+	}
+	if ws.LastSync.IsZero() {
+		return styleWarning.Render("◐ not synced")
+	}
+	return styleHealthy.Render("● " + formatRelativeTime(time.Since(ws.LastSync)))
+}
+
+// formatActivity renders heartbeat activity tracking (verbose only).
 func formatActivity(activity *ActivitySummary) string {
 	if activity == nil {
 		return ""
