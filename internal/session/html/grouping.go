@@ -162,7 +162,10 @@ func buildWorkBlock(messages []MessageView) WorkBlockView {
 // FormatWorkBlockSummary creates a human-readable summary like
 // "12 tool calls (Read 5, Grep 4, Bash 3)".
 func FormatWorkBlockSummary(wb *WorkBlockView) string {
-	if wb == nil || wb.TotalTools == 0 {
+	if wb == nil {
+		return ""
+	}
+	if wb.TotalTools == 0 {
 		count := len(wb.Messages)
 		if count == 0 {
 			return ""
@@ -361,7 +364,7 @@ func isTestCommand(input string) bool {
 	cmd := strings.ToLower(strings.TrimSpace(input))
 	// match explicit test runner commands
 	testPrefixes := []string{
-		"go test", "pytest", "jest", "vitest", "make test", "make lint",
+		"go test", "pytest", "jest", "vitest", "make test",
 		"npm test", "npm run test", "yarn test", "pnpm test",
 		"cargo test", "mix test", "rspec", "phpunit",
 	}

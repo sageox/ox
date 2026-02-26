@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,7 +36,9 @@ func generateHTML(t *session.StoredSession, outputPath string) error {
 	if summary != nil {
 		enrichSummaryWithChapters(summary, data)
 		if enriched, err := json.MarshalIndent(summary, "", "  "); err == nil {
-			_ = os.WriteFile(summaryPath, enriched, 0644)
+			if writeErr := os.WriteFile(summaryPath, enriched, 0644); writeErr != nil {
+				slog.Warn("failed to write enriched summary", "path", summaryPath, "error", writeErr)
+			}
 		}
 	}
 
@@ -518,7 +521,7 @@ func toolCategory(name string) string {
 		return "read"
 	case "edit", "write", "multiedit", "notebookedit":
 		return "edit"
-	case "bash":
+	case "bash", "execute":
 		return "exec"
 	case "websearch", "webfetch":
 		return "search"

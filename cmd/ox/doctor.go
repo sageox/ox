@@ -269,10 +269,14 @@ common issues, or --fix-slug to target specific checks.`,
 			_ = doctor.ClearNeedsDoctorHuman(gitRoot)
 		}
 
-		// set .needs-doctor-agent marker if any check requires agent intervention
-		// (e.g., incomplete sessions) so ox agent prime prompts for ox agent doctor
-		if gitRoot != "" && hasRequiresAgentIssues(categories) {
-			_ = doctor.SetNeedsDoctorAgent(gitRoot)
+		// set or clear .needs-doctor-agent marker based on whether any check
+		// requires agent intervention (e.g., incomplete sessions)
+		if gitRoot != "" {
+			if hasRequiresAgentIssues(categories) {
+				_ = doctor.SetNeedsDoctorAgent(gitRoot)
+			} else {
+				_ = doctor.ClearNeedsDoctorAgent(gitRoot)
+			}
 		}
 
 		// show contextual tip before returning
