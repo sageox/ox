@@ -52,19 +52,15 @@ The redaction patterns are compiled into the ox binary and **cryptographically s
 during the release process. This prevents tampering:
 
 1. **At build time**: A deterministic manifest of all patterns is signed with Ed25519
-2. **At runtime**: `ox redaction verify` re-generates the manifest and verifies the signature
+2. **At runtime**: `ox session redaction verify` re-generates the manifest and verifies the signature
 3. **Public key**: Embedded in the binary, verifiable against SageOx releases
 
-Run `ox redaction verify` to confirm your binary hasn't been tampered with.
+Run `ox session redaction verify` to confirm your binary hasn't been tampered with.
 
 ## Inspecting the Policy
 
 ```bash
-# View all rules (built-in + custom) from all sources
-ox agent redact
-ox agent redact --text
-
-# View built-in patterns only
+# View built-in patterns
 ox session redaction policy
 
 # Verify signature integrity
@@ -103,13 +99,11 @@ regex "(?i)project\s+falcon" -> [REDACTED_CODENAME]
 
 Only content inside ` ```redact ` blocks is parsed. Everything else is documentation.
 
-### Inspecting & Testing
+### How It Works
 
-```bash
-ox agent redact                # view all rules (built-in + custom), JSON
-ox agent redact --text         # human-readable view
-ox agent redact test "text"    # test rules against sample text
-```
+Custom rules are applied automatically during session recording alongside
+built-in patterns. Your AI coworker can verify rules are working by using
+the redaction policy API during a session.
 
 If you find a secret type that should be redacted but isn't, please
 [open an issue](https://github.com/sageox/ox/issues).
@@ -121,6 +115,6 @@ This policy is designed for security team review:
 1. **Transparent**: All patterns are documented and inspectable
 2. **Deterministic**: Same patterns always produce same manifest hash
 3. **Signed**: Tamper-evident via Ed25519 signatures
-4. **Auditable**: `ox redaction policy --json` outputs machine-readable format
+4. **Auditable**: `ox session redaction policy --json` outputs machine-readable format
 
 The canonical pattern definitions live in `internal/session/secrets.go`.
