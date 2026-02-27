@@ -9,6 +9,59 @@ import (
 	"strings"
 )
 
+// skippedPrefixes lists command prefixes that should not appear in
+// public reference docs. These are internal/advanced commands that
+// would overwhelm users at launch.
+var skippedPrefixes = []string{
+	"ox_agent",
+	"ox_coworker",
+	"ox_daemon",
+	"ox_integrate",
+	"ox_config",
+	"ox_view",
+	"ox_session_commit",
+	"ox_session_download",
+	"ox_session_export",
+	"ox_session_push-summary",
+	"ox_session_redaction",
+	"ox_session_remove",
+	"ox_session_upload",
+	"ox_version",
+}
+
+// shouldSkipFile returns true if the file should be excluded from generated docs.
+func shouldSkipFile(filename string) bool {
+	base := strings.TrimSuffix(filename, ".md")
+	for _, prefix := range skippedPrefixes {
+		if base == prefix || strings.HasPrefix(base, prefix+"_") {
+			return true
+		}
+	}
+	return false
+}
+
+// isSkippedSeeAlsoLink returns true if the line is a SEE ALSO bullet that
+// links to a skipped command page (e.g. "* [ox agent](ox_agent.md) ...").
+func isSkippedSeeAlsoLink(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "* [") {
+		return false
+	}
+	// Extract the link target: "* [ox agent](ox_agent.md)..." → "ox_agent.md"
+	start := strings.Index(trimmed, "](")
+	end := strings.Index(trimmed, ")")
+	if start == -1 || end == -1 || end <= start+2 {
+		return false
+	}
+	target := trimmed[start+2 : end] // e.g. "ox_agent.md"
+	// If it doesn't end in .md, it's already transformed — convert back
+	if !strings.HasSuffix(target, ".md") {
+		target = strings.TrimPrefix(target, "/")
+		target = "ox_" + strings.ReplaceAll(target, "/", "_") + ".md"
+	}
+	return shouldSkipFile(target)
+}
+
 // PostProcess transforms flat Cobra markdown output into hierarchical MDX structure
 func PostProcess(srcDir, destDir string) error {
 	// Ensure destination directory exists
@@ -29,6 +82,9 @@ func PostProcess(srcDir, destDir string) error {
 			continue
 		}
 		if strings.HasSuffix(entry.Name(), ".md") {
+			if shouldSkipFile(entry.Name()) {
+				continue
+			}
 			files = append(files, entry.Name())
 		}
 	}
@@ -169,6 +225,10 @@ func transformFile(srcPath, destPath string, sidebarPosition int) error {
 
 		// Transform links in content
 		if frontmatterEnded {
+			// Remove SEE ALSO entries that link to skipped pages
+			if isSkippedSeeAlsoLink(line) {
+				continue
+			}
 			line = linkRegex.ReplaceAllStringFunc(line, func(match string) string {
 				return transformLink(match, destPath)
 			})

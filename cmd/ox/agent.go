@@ -49,6 +49,10 @@ Use the session:
   ox agent <agent_id> session recover       # Recover stale/crashed session
   ox agent <agent_id> session abort         # Discard active session (destructive)
 
+Redaction policy:
+  ox agent redact                           # View full redaction policy (all sources)
+  ox agent redact test "sample text"        # Test redaction against sample text
+
 Example:
   $ ox agent prime
   Agent: Oxa7b3
@@ -82,6 +86,7 @@ func init() {
 	agentCmd.AddCommand(agentPrimeCmd)
 	agentCmd.AddCommand(agentListCmd)
 	agentCmd.AddCommand(agentTeamCtxCmd)
+	agentCmd.AddCommand(agentRedactCmd)
 
 	// review flag - security audit mode for inspecting what agents receive
 	// shows both human-readable summary and machine JSON output

@@ -52,28 +52,58 @@ The redaction patterns are compiled into the ox binary and **cryptographically s
 during the release process. This prevents tampering:
 
 1. **At build time**: A deterministic manifest of all patterns is signed with Ed25519
-2. **At runtime**: `ox redaction verify` re-generates the manifest and verifies the signature
+2. **At runtime**: `ox session redaction verify` re-generates the manifest and verifies the signature
 3. **Public key**: Embedded in the binary, verifiable against SageOx releases
 
-Run `ox redaction verify` to confirm your binary hasn't been tampered with.
+Run `ox session redaction verify` to confirm your binary hasn't been tampered with.
 
 ## Inspecting the Policy
 
 ```bash
-# View the complete pattern list
-ox redaction policy
+# View built-in patterns
+ox session redaction policy
 
 # Verify signature integrity
-ox redaction verify
-
-# JSON output for automation
-ox redaction policy --json
+ox session redaction verify
 ```
 
-## Adding Custom Patterns
+## Custom Redaction Rules (REDACT.md)
 
-Custom redaction patterns can be added per-project (coming soon). For now,
-the default patterns cover most common secrets.
+Add custom patterns at three levels using `REDACT.md` files:
+
+| Level | Path | Scope |
+|-------|------|-------|
+| **Team** | `<team_context>/docs/REDACT.md` | All team members |
+| **Repo** | `.sageox/REDACT.md` | This repository |
+| **User** | `~/.config/sageox/REDACT.md` | Personal |
+
+Custom rules are **additive** -- they layer on top of built-in patterns.
+Built-in patterns cannot be disabled.
+
+### Format
+
+````markdown
+# My Redaction Rules
+
+```redact
+# Exact string match
+literal "api.internal.acme.com" -> [REDACTED_INTERNAL_HOST]
+
+# Regex pattern (Go syntax)
+regex "ACME-[a-f0-9]{32}" -> [REDACTED_ACME_KEY]
+
+# Case-insensitive via (?i)
+regex "(?i)project\s+falcon" -> [REDACTED_CODENAME]
+```
+````
+
+Only content inside ` ```redact ` blocks is parsed. Everything else is documentation.
+
+### How It Works
+
+Custom rules are applied automatically during session recording alongside
+built-in patterns. Your AI coworker can verify rules are working by using
+the redaction policy API during a session.
 
 If you find a secret type that should be redacted but isn't, please
 [open an issue](https://github.com/sageox/ox/issues).
@@ -85,6 +115,6 @@ This policy is designed for security team review:
 1. **Transparent**: All patterns are documented and inspectable
 2. **Deterministic**: Same patterns always produce same manifest hash
 3. **Signed**: Tamper-evident via Ed25519 signatures
-4. **Auditable**: `ox redaction policy --json` outputs machine-readable format
+4. **Auditable**: `ox session redaction policy --json` outputs machine-readable format
 
 The canonical pattern definitions live in `internal/session/secrets.go`.

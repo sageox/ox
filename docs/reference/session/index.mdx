@@ -1,7 +1,7 @@
 ---
 title: "ox session"
 description: "CLI reference for ox session"
-sidebar_position: 30
+sidebar_position: 7
 ---
 
 ## ox session
@@ -13,29 +13,13 @@ Manage AI coworker sessions
 View and manage sessions of human + AI coworker conversations.
 
 Sessions are recordings of interactive discussions between developers
-and AI coworkers (Claude Code, Cursor, etc.). Capture struggles,
-solutions, and learnings to build collective team knowledge.
+and AI coworkers. Capture struggles, solutions, and learnings to build
+collective team knowledge.
 
-Viewing:
+Commands:
   ox session list      List all sessions
   ox session view      View a session (html, text, or json)
-
-Export:
-  ox session export    Export session to HTML or markdown file
-
-Management:
-  ox session commit    Commit pending sessions
-  ox session remove    Remove a session
-  ox session download  Download session content from the ledger
-  ox session upload    Upload session content to the ledger
-
-Recording (for AI coworkers):
-  ox agent <id> session start   Start recording a session
-  ox agent <id> session stop    Stop recording and save
-
-Policy:
-  ox session redaction policy   View secret redaction patterns
-  ox session redaction verify   Verify redaction policy signature
+  ox session status    Check recording status
 
 ### Options
 
@@ -57,13 +41,7 @@ Policy:
 ### SEE ALSO
 
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
-* [ox session commit](/session/commit)	 - Commit pending sessions
-* [ox session download](/session/download)	 - Download session content from the ledger
-* [ox session export](/session/export)	 - Export session to HTML or markdown file
 * [ox session list](/session/list)	 - List sessions
-* [ox session redaction](/session/redaction)	 - Manage secret redaction policy
-* [ox session remove](/session/remove)	 - Remove a session
 * [ox session status](/session/status)	 - Check recording status
-* [ox session upload](/session/upload)	 - Upload session content to the ledger
 * [ox session view](/session/view)	 - View a session
 
