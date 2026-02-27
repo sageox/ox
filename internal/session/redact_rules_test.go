@@ -1,10 +1,12 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -568,4 +570,265 @@ func TestCustomRules_MultiSourceMerge(t *testing.T) {
 	assert.NotContains(t, output, "AKIAIOSFODNN7EXAMPLE")
 	assert.NotContains(t, output, "my-embarrassing-var-name")
 	assert.GreaterOrEqual(t, len(found), 3)
+}
+
+// TestCustomRules_OverlappingRules verifies that when multiple rules match
+// the same text, the first rule in pattern order wins (builtin before custom,
+// earlier custom sources before later ones).
+func TestCustomRules_OverlappingRules(t *testing.T) {
+	t.Run("builtin wins over custom for same text", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		sageoxDir := filepath.Join(tmpDir, ".sageox")
+		require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+
+		// custom rule that also targets GitHub tokens with a different replacement
+		content := "```redact\nregex \"ghp_[A-Za-z0-9_]{36,}\" -> [CUSTOM_GH_TOKEN]\n```\n"
+		require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "REDACT.md"), []byte(content), 0644))
+
+		redactor, errs := NewRedactorWithCustomRules(tmpDir)
+		require.Empty(t, errs)
+
+		input := "token=ghp_1234567890abcdefghijklmnopqrstuvwxyz12"
+		output, _ := redactor.RedactString(input)
+
+		// builtin github_token pattern runs first and wins
+		assert.Contains(t, output, "[REDACTED_GITHUB_TOKEN]")
+		assert.NotContains(t, output, "[CUSTOM_GH_TOKEN]")
+		assert.NotContains(t, output, "ghp_")
+	})
+
+	t.Run("repo rule wins over user rule for same literal", func(t *testing.T) {
+		// parse two files manually, merge repo before user (matching real merge order)
+		repoPath := filepath.Join(t.TempDir(), "repo-REDACT.md")
+		userPath := filepath.Join(t.TempDir(), "user-REDACT.md")
+
+		require.NoError(t, os.WriteFile(repoPath,
+			[]byte("```redact\nliteral \"shared-secret\" -> [REDACTED_REPO]\n```\n"), 0644))
+		require.NoError(t, os.WriteFile(userPath,
+			[]byte("```redact\nliteral \"shared-secret\" -> [REDACTED_USER]\n```\n"), 0644))
+
+		repoParsed, _ := ParseRedactFile(repoPath, RuleSourceRepo)
+		userParsed, _ := ParseRedactFile(userPath, RuleSourceUser)
+
+		var allRules []RedactRule
+		allRules = append(allRules, repoParsed.Rules...)
+		allRules = append(allRules, userParsed.Rules...)
+
+		customPatterns, _ := RulesToPatterns(allRules)
+		redactor := NewRedactorWithPatterns(customPatterns)
+
+		output, _ := redactor.RedactString("found shared-secret in config")
+
+		// repo rule runs first since it's earlier in the merged slice
+		assert.Contains(t, output, "[REDACTED_REPO]")
+		assert.NotContains(t, output, "[REDACTED_USER]")
+		assert.NotContains(t, output, "shared-secret")
+	})
+}
+
+// TestCustomRules_CascadingReplacement verifies behavior when a replacement
+// token from one rule could be matched by a subsequent rule.
+func TestCustomRules_CascadingReplacement(t *testing.T) {
+	t.Run("replacement token matched by later pattern", func(t *testing.T) {
+		// rule A replaces text, rule B's regex matches part of rule A's replacement
+		rules := []RedactRule{
+			{
+				Type:        "literal",
+				RawPattern:  "internal-api-key-abc123",
+				Replacement: "[REDACTED_INTERNAL_KEY]",
+				Source:      RuleSourceRepo,
+				SourcePath:  "test",
+				LineNumber:  1,
+			},
+			{
+				Type:        "regex",
+				RawPattern:  "INTERNAL",
+				Replacement: "[MATCHED_INTERNAL]",
+				Source:      RuleSourceUser,
+				SourcePath:  "test",
+				LineNumber:  2,
+			},
+		}
+
+		patterns, errs := RulesToPatterns(rules)
+		require.Empty(t, errs)
+		redactor := NewRedactorWithPatterns(patterns)
+
+		input := "key: internal-api-key-abc123"
+		output, _ := redactor.RedactString(input)
+
+		// rule A fires first, producing "[REDACTED_INTERNAL_KEY]"
+		// rule B then matches "INTERNAL" inside that replacement token
+		// this is the actual sequential-mutation behavior
+		assert.NotContains(t, output, "internal-api-key-abc123")
+		assert.Contains(t, output, "[MATCHED_INTERNAL]",
+			"later pattern matches text inside earlier replacement — this is expected sequential behavior")
+	})
+
+	t.Run("safe replacement tokens do not cascade", func(t *testing.T) {
+		// when replacement tokens use [REDACTED_...] format and no other
+		// pattern matches that specific string, no cascading occurs
+		rules := []RedactRule{
+			{
+				Type:        "literal",
+				RawPattern:  "my-db-host.internal.net",
+				Replacement: "[REDACTED_DB_HOST]",
+				Source:      RuleSourceRepo,
+				SourcePath:  "test",
+				LineNumber:  1,
+			},
+			{
+				Type:        "regex",
+				RawPattern:  "emp_[0-9]{6}",
+				Replacement: "[REDACTED_EMPLOYEE_ID]",
+				Source:      RuleSourceRepo,
+				SourcePath:  "test",
+				LineNumber:  2,
+			},
+		}
+
+		patterns, errs := RulesToPatterns(rules)
+		require.Empty(t, errs)
+		redactor := NewRedactorWithPatterns(patterns)
+
+		input := "connecting to my-db-host.internal.net as emp_123456"
+		output, _ := redactor.RedactString(input)
+
+		// both replacements are clean, no cascading
+		assert.Equal(t, "connecting to [REDACTED_DB_HOST] as [REDACTED_EMPLOYEE_ID]", output)
+	})
+}
+
+// TestCustomRules_TeamLevelDiscovery verifies that REDACT.md files in the
+// team context directory are discovered and applied via the full
+// NewRedactorWithCustomRules path (config.json -> config.local.toml -> team context).
+func TestCustomRules_TeamLevelDiscovery(t *testing.T) {
+	// set up project root with .sageox/config.json
+	projectRoot := t.TempDir()
+	sageoxDir := filepath.Join(projectRoot, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+
+	projectCfg := &config.ProjectConfig{
+		TeamID:   "team_redact_test",
+		TeamName: "Redact Test Team",
+		Endpoint: "https://test.sageox.ai",
+	}
+	cfgJSON, err := json.Marshal(projectCfg)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), cfgJSON, 0644))
+
+	// set up team context directory with docs/REDACT.md
+	teamContextDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(teamContextDir, "docs"), 0755))
+	teamRedact := "```redact\nliteral \"team-infra.internal.io\" -> [REDACTED_TEAM_HOST]\nregex \"TEAM-KEY-[a-f0-9]{16}\" -> [REDACTED_TEAM_KEY]\n```\n"
+	require.NoError(t, os.WriteFile(
+		filepath.Join(teamContextDir, "docs", "REDACT.md"),
+		[]byte(teamRedact), 0644,
+	))
+
+	// write config.local.toml pointing to team context
+	localCfg := &config.LocalConfig{
+		TeamContexts: []config.TeamContext{
+			{
+				TeamID:   "team_redact_test",
+				TeamName: "Redact Test Team",
+				Path:     teamContextDir,
+			},
+		},
+	}
+	require.NoError(t, config.SaveLocalConfig(projectRoot, localCfg))
+
+	// create redactor through the full discovery path
+	redactor, errs := NewRedactorWithCustomRules(projectRoot)
+	require.Empty(t, errs)
+
+	// verify team rules are active
+	output, found := redactor.RedactString("connecting to team-infra.internal.io with TEAM-KEY-0123456789abcdef")
+	assert.NotEmpty(t, found)
+	assert.Contains(t, output, "[REDACTED_TEAM_HOST]")
+	assert.Contains(t, output, "[REDACTED_TEAM_KEY]")
+	assert.NotContains(t, output, "team-infra.internal.io")
+	assert.NotContains(t, output, "TEAM-KEY-0123456789abcdef")
+
+	// verify builtin patterns still work alongside team rules
+	output2, found2 := redactor.RedactString("key=AKIAIOSFODNN7EXAMPLE")
+	assert.NotEmpty(t, found2)
+	assert.Contains(t, output2, "[REDACTED_AWS_KEY]")
+}
+
+// TestCustomRules_SessionStopPath simulates the redaction path used by
+// processSession/processAgentSession: NewRedactorWithCustomRules -> RedactEntries + RedactMap.
+// Verifies both builtin and custom rules apply through both code paths.
+func TestCustomRules_SessionStopPath(t *testing.T) {
+	// set up project with repo-level REDACT.md
+	projectRoot := t.TempDir()
+	sageoxDir := filepath.Join(projectRoot, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+
+	redactContent := "```redact\nliteral \"payments.internal.acme.net\" -> [REDACTED_INTERNAL]\nregex \"ACME-KEY-[a-f0-9]{32}\" -> [REDACTED_ACME_KEY]\n```\n"
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "REDACT.md"), []byte(redactContent), 0644))
+
+	redactor, errs := NewRedactorWithCustomRules(projectRoot)
+	require.Empty(t, errs)
+
+	// --- path 1: RedactEntries (structured session entries) ---
+	entries := []Entry{
+		{
+			Type:    EntryTypeUser,
+			Content: "Deploy to payments.internal.acme.net using ACME-KEY-deadbeef0123456789abcdef01234567",
+		},
+		{
+			Type:       EntryTypeTool,
+			Content:    "bash output",
+			ToolName:   "bash",
+			ToolInput:  "curl https://payments.internal.acme.net/health",
+			ToolOutput: "Connected. Token: ghp_1234567890abcdefghijklmnopqrstuvwxyz12",
+		},
+		{
+			Type:    EntryTypeAssistant,
+			Content: "The API key ACME-KEY-aabbccdd00112233445566778899eeff is in the config at payments.internal.acme.net",
+		},
+	}
+
+	entryCount := redactor.RedactEntries(entries)
+	assert.Equal(t, 3, entryCount, "all 3 entries should have secrets redacted")
+
+	// entry 0: custom rules in Content
+	assert.Contains(t, entries[0].Content, "[REDACTED_INTERNAL]")
+	assert.Contains(t, entries[0].Content, "[REDACTED_ACME_KEY]")
+	assert.NotContains(t, entries[0].Content, "payments.internal.acme.net")
+
+	// entry 1: custom rule in ToolInput, builtin rule in ToolOutput
+	assert.Contains(t, entries[1].ToolInput, "[REDACTED_INTERNAL]")
+	assert.Contains(t, entries[1].ToolOutput, "[REDACTED_GITHUB_TOKEN]")
+	assert.NotContains(t, entries[1].ToolOutput, "ghp_")
+
+	// entry 2: both custom rules in Content
+	assert.Contains(t, entries[2].Content, "[REDACTED_ACME_KEY]")
+	assert.Contains(t, entries[2].Content, "[REDACTED_INTERNAL]")
+
+	// --- path 2: RedactMap (raw JSON entries) ---
+	rawData := map[string]any{
+		"content":    "connecting to payments.internal.acme.net",
+		"tool_input": "ACME-KEY-deadbeef0123456789abcdef01234567",
+		"tool_output": map[string]any{
+			"result": "token ghp_1234567890abcdefghijklmnopqrstuvwxyz12 accepted",
+		},
+		"metadata": []any{
+			"host=payments.internal.acme.net",
+		},
+	}
+
+	redacted := redactor.RedactMap(rawData)
+	assert.True(t, redacted)
+
+	assert.Contains(t, rawData["content"], "[REDACTED_INTERNAL]")
+	assert.NotContains(t, rawData["content"], "payments.internal.acme.net")
+	assert.Contains(t, rawData["tool_input"], "[REDACTED_ACME_KEY]")
+
+	toolOutput := rawData["tool_output"].(map[string]any)
+	assert.Contains(t, toolOutput["result"], "[REDACTED_GITHUB_TOKEN]")
+
+	metadata := rawData["metadata"].([]any)
+	assert.Contains(t, metadata[0], "[REDACTED_INTERNAL]")
 }
