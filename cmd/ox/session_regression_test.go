@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/session"
+	sessionhtml "github.com/sageox/ox/internal/session/html"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -76,21 +77,21 @@ func buildRegressionStandardSession() *session.StoredSession {
 }
 
 // ============================================================
-// Path 2: cmd/ox/session_html.go (generateHTML + buildTemplateData)
+// Consolidated HTML generator (formerly Path 2 + Path 3, now single path)
 // ============================================================
 
-func TestRegression_Path2_ImportedSession_Metadata(t *testing.T) {
+func TestRegression_ImportedSession_Metadata(t *testing.T) {
 	sess := buildRegressionImportedSession()
-	data := buildTemplateData(sess, nil)
+	data := sessionhtml.BuildTemplateData(sess, nil)
 
 	require.NotNil(t, data.Metadata)
 	assert.Equal(t, "testdev", data.Metadata.Username, "username must appear in metadata")
 	assert.Equal(t, "claude-code", data.Metadata.AgentType, "agent type must appear")
 }
 
-func TestRegression_Path2_ImportedSession_RootLevelContent(t *testing.T) {
+func TestRegression_ImportedSession_RootLevelContent(t *testing.T) {
 	sess := buildRegressionImportedSession()
-	data := buildTemplateData(sess, nil)
+	data := sessionhtml.BuildTemplateData(sess, nil)
 
 	require.True(t, len(data.Messages) >= 3, "should have at least 3 messages")
 
@@ -102,7 +103,7 @@ func TestRegression_Path2_ImportedSession_RootLevelContent(t *testing.T) {
 			break
 		}
 	}
-	assert.True(t, found, "root-level user content must render in Path 2")
+	assert.True(t, found, "root-level user content must render")
 
 	// assistant messages with root-level content must render
 	found = false
@@ -112,12 +113,12 @@ func TestRegression_Path2_ImportedSession_RootLevelContent(t *testing.T) {
 			break
 		}
 	}
-	assert.True(t, found, "root-level assistant content must render in Path 2")
+	assert.True(t, found, "root-level assistant content must render")
 }
 
-func TestRegression_Path2_ImportedSession_EntryTypes(t *testing.T) {
+func TestRegression_ImportedSession_EntryTypes(t *testing.T) {
 	sess := buildRegressionImportedSession()
-	data := buildTemplateData(sess, nil)
+	data := sessionhtml.BuildTemplateData(sess, nil)
 
 	typeSet := make(map[string]bool)
 	for _, msg := range data.Messages {
@@ -130,11 +131,10 @@ func TestRegression_Path2_ImportedSession_EntryTypes(t *testing.T) {
 	assert.True(t, typeSet["system"], "should have system type entries")
 }
 
-func TestRegression_Path2_ImportedSession_SenderLabels(t *testing.T) {
+func TestRegression_ImportedSession_SenderLabels(t *testing.T) {
 	sess := buildRegressionImportedSession()
-	data := buildTemplateData(sess, nil)
+	data := sessionhtml.BuildTemplateData(sess, nil)
 
-	// find user messages and check sender labels
 	for _, msg := range data.Messages {
 		switch msg.Type {
 		case "user":
@@ -149,9 +149,9 @@ func TestRegression_Path2_ImportedSession_SenderLabels(t *testing.T) {
 	}
 }
 
-func TestRegression_Path2_StandardSession_NestedContent(t *testing.T) {
+func TestRegression_StandardSession_NestedContent(t *testing.T) {
 	sess := buildRegressionStandardSession()
-	data := buildTemplateData(sess, nil)
+	data := sessionhtml.BuildTemplateData(sess, nil)
 
 	found := false
 	for _, msg := range data.Messages {
@@ -160,20 +160,19 @@ func TestRegression_Path2_StandardSession_NestedContent(t *testing.T) {
 			break
 		}
 	}
-	assert.True(t, found, "nested data.content user messages must render in Path 2")
+	assert.True(t, found, "nested data.content user messages must render")
 }
 
-func TestRegression_Path2_StandardSession_Duration(t *testing.T) {
+func TestRegression_StandardSession_Duration(t *testing.T) {
 	sess := buildRegressionStandardSession()
-	data := buildTemplateData(sess, nil)
+	data := sessionhtml.BuildTemplateData(sess, nil)
 
-	// duration was removed from MetadataView; verify times are still populated
 	require.NotNil(t, data.Metadata)
 	assert.False(t, data.Metadata.StartedAt.IsZero(), "StartedAt should be set")
 	assert.False(t, data.Metadata.EndedAt.IsZero(), "EndedAt should be set")
 }
 
-func TestRegression_Path2_GenerateHTML_CreatesFile(t *testing.T) {
+func TestRegression_GenerateHTML_CreatesFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	outputPath := filepath.Join(tmpDir, "session.html")
 
@@ -191,11 +190,10 @@ func TestRegression_Path2_GenerateHTML_CreatesFile(t *testing.T) {
 	assert.Contains(t, htmlStr, "Fix the login validation bug", "user content must render")
 }
 
-func TestRegression_Path2_TimestampParsing(t *testing.T) {
+func TestRegression_TimestampParsing_Ts(t *testing.T) {
 	sess := buildRegressionImportedSession()
-	data := buildTemplateData(sess, nil)
+	data := sessionhtml.BuildTemplateData(sess, nil)
 
-	// entries with "ts" field should have parsed timestamps
 	for _, msg := range data.Messages {
 		if msg.Type == "user" || msg.Type == "assistant" {
 			assert.False(t, msg.Timestamp.IsZero(), "timestamp should be parsed from 'ts' field")
@@ -203,175 +201,29 @@ func TestRegression_Path2_TimestampParsing(t *testing.T) {
 	}
 }
 
-func TestRegression_Path2_TimestampParsing_Standard(t *testing.T) {
+func TestRegression_TimestampParsing_Standard(t *testing.T) {
 	sess := buildRegressionStandardSession()
-	data := buildTemplateData(sess, nil)
+	data := sessionhtml.BuildTemplateData(sess, nil)
 
-	// entries with "timestamp" field should have parsed timestamps
 	for _, msg := range data.Messages {
 		assert.False(t, msg.Timestamp.IsZero(), "timestamp should be parsed from 'timestamp' field")
 	}
 }
 
-// ============================================================
-// Path 3: cmd/ox/session_view_html.go (viewHTMLGenerate)
-// ============================================================
-
-func TestRegression_Path3_ImportedSession_Metadata(t *testing.T) {
+func TestRegression_MapEntryType_Correctness(t *testing.T) {
+	// regression: "user" and "assistant" were falling through to "info"
+	// now tested via the consolidated generator which uses the same mapping
 	sess := buildRegressionImportedSession()
-	data := viewHTMLBuildTemplateData(sess)
-
-	require.NotNil(t, data.Metadata)
-	assert.Equal(t, "testdev", data.Metadata.Username, "username must appear in Path 3 metadata")
-	assert.Equal(t, "claude-code", data.Metadata.AgentType, "agent type must appear")
-}
-
-func TestRegression_Path3_ImportedSession_RootLevelContent(t *testing.T) {
-	sess := buildRegressionImportedSession()
-	data := viewHTMLBuildTemplateData(sess)
-
-	found := false
-	for _, msg := range data.Messages {
-		if strings.Contains(string(msg.Content), "Fix the login validation bug") {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "root-level content must render in Path 3 (viewHTML)")
-}
-
-func TestRegression_Path3_ImportedSession_EntryTypes(t *testing.T) {
-	sess := buildRegressionImportedSession()
-	data := viewHTMLBuildTemplateData(sess)
+	data := sessionhtml.BuildTemplateData(sess, nil)
 
 	typeSet := make(map[string]bool)
 	for _, msg := range data.Messages {
 		typeSet[msg.Type] = true
 	}
 
-	assert.True(t, typeSet["user"], "should have user type (not 'info')")
-	assert.True(t, typeSet["assistant"], "should have assistant type (not 'info')")
-	assert.True(t, typeSet["tool"], "should have tool type")
-	assert.True(t, typeSet["system"], "should have system type")
-}
-
-func TestRegression_Path3_ImportedSession_SenderLabels(t *testing.T) {
-	sess := buildRegressionImportedSession()
-	data := viewHTMLBuildTemplateData(sess)
-
-	for _, msg := range data.Messages {
-		switch msg.Type {
-		case "user":
-			assert.Equal(t, "testdev", msg.SenderLabel, "Path 3 user should show username")
-		case "assistant":
-			assert.Equal(t, "Claude Code", msg.SenderLabel, "Path 3 assistant should show formatted agent type")
-		case "system":
-			assert.Equal(t, "System", msg.SenderLabel)
-		case "tool":
-			assert.Equal(t, "Tool Call", msg.SenderLabel)
-		}
-	}
-}
-
-func TestRegression_Path3_StandardSession_NestedContent(t *testing.T) {
-	sess := buildRegressionStandardSession()
-	data := viewHTMLBuildTemplateData(sess)
-
-	found := false
-	for _, msg := range data.Messages {
-		if strings.Contains(string(msg.Content), "Create a new API endpoint") {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "nested data.content must render in Path 3")
-}
-
-func TestRegression_Path3_ViewHTMLMapEntryType_Correctness(t *testing.T) {
-	// regression: "user" and "assistant" were falling through to "info"
-	tests := []struct {
-		input string
-		want  string
-	}{
-		{"user", "user"},
-		{"assistant", "assistant"},
-		{"message", "assistant"},
-		{"tool", "tool"},
-		{"tool_call", "tool"},
-		{"tool_result", "tool"},
-		{"system", "system"},
-		{"unknown", "info"},
-	}
-
-	for _, tt := range tests {
-		got := viewHTMLMapEntryType(tt.input)
-		assert.Equal(t, tt.want, got, "viewHTMLMapEntryType(%q)", tt.input)
-	}
-}
-
-func TestRegression_Path3_GenerateToFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	outputPath := filepath.Join(tmpDir, "session.html")
-
-	sess := buildRegressionImportedSession()
-	err := viewHTMLGenerate(sess, outputPath)
-	require.NoError(t, err)
-
-	content, err := os.ReadFile(outputPath)
-	require.NoError(t, err)
-	htmlStr := string(content)
-
-	assert.Contains(t, htmlStr, "<!DOCTYPE html>")
-	assert.Contains(t, htmlStr, "testdev", "username should appear in viewer HTML")
-	assert.Contains(t, htmlStr, "Fix the login validation bug", "content must render")
-}
-
-func TestRegression_Path3_TsTimestampParsing(t *testing.T) {
-	sess := buildRegressionImportedSession()
-	data := viewHTMLBuildTemplateData(sess)
-
-	for _, msg := range data.Messages {
-		if msg.Type == "user" || msg.Type == "assistant" {
-			assert.False(t, msg.Timestamp.IsZero(), "Path 3 should parse 'ts' timestamps")
-		}
-	}
-}
-
-func TestRegression_Path3_Duration(t *testing.T) {
-	sess := buildRegressionImportedSession()
-	data := viewHTMLBuildTemplateData(sess)
-
-	// duration was removed from MetadataView; verify times are still populated
-	require.NotNil(t, data.Metadata)
-	assert.False(t, data.Metadata.StartedAt.IsZero(), "StartedAt should be set")
-	assert.False(t, data.Metadata.EndedAt.IsZero(), "EndedAt should be set")
-}
-
-// ============================================================
-// Cross-path consistency checks
-// ============================================================
-
-func TestRegression_CrossPath_ConsistentMessageCount(t *testing.T) {
-	sess := buildRegressionImportedSession()
-
-	path2Data := buildTemplateData(sess, nil)
-	path3Data := viewHTMLBuildTemplateData(sess)
-
-	assert.Equal(t, len(path2Data.Messages), len(path3Data.Messages),
-		"Path 2 and Path 3 should produce the same number of messages for same input")
-}
-
-func TestRegression_CrossPath_ConsistentEntryTypes(t *testing.T) {
-	sess := buildRegressionImportedSession()
-
-	path2Data := buildTemplateData(sess, nil)
-	path3Data := viewHTMLBuildTemplateData(sess)
-
-	for i := range path2Data.Messages {
-		if i >= len(path3Data.Messages) {
-			break
-		}
-		assert.Equal(t, path2Data.Messages[i].Type, path3Data.Messages[i].Type,
-			"entry %d type should match between Path 2 and Path 3", i)
-	}
+	// verify no "info" type for known entry types
+	assert.True(t, typeSet["user"], "user should map correctly")
+	assert.True(t, typeSet["assistant"], "assistant should map correctly")
+	assert.True(t, typeSet["tool"], "tool should map correctly")
+	assert.True(t, typeSet["system"], "system should map correctly")
 }

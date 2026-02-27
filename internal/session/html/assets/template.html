@@ -7,72 +7,76 @@
     <base target="_blank">
     <meta name="color-scheme" content="dark light">
     <style>{{.Styles}}</style>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
 </head>
 <body>
-    <script>
-    (function() {
-      var params = new URLSearchParams(window.location.search);
-      if (params.get('embed') === '1') document.body.classList.add('embed');
-      if (params.get('theme') === 'light') document.body.classList.add('light-theme');
-    })();
-    </script>
+    <script>(function(){var p=new URLSearchParams(window.location.search);if(p.get('embed')==='1')document.body.classList.add('embed');if(p.get('theme')==='light')document.body.classList.add('light-theme');})()</script>
     <header class="page-header">
         <div class="header-content">
             <div class="brand">
                 <img class="logo-large" src="https://avatars.githubusercontent.com/u/224450799?s=96" alt="SageOx Logo" width="48" height="48">
                 <div class="brand-text">
-                    <h1>SageOx</h1>
+                    <h1><span class="brand-sage">Sage</span><span class="brand-ox">Ox</span></h1>
                     <p class="subtitle">Agent Session</p>
                 </div>
             </div>
             <div class="header-meta">
                 <h2 class="session-title">{{.Title}}</h2>
+                {{if .Metadata}}
                 <div class="meta-grid">
                     {{if .Metadata.AgentType}}<div class="meta-item"><span class="meta-label">Agent:</span> <span class="meta-value">{{.Metadata.AgentType}}</span></div>{{end}}
                     {{if .Metadata.Model}}<div class="meta-item"><span class="meta-label">Model:</span> <span class="meta-value">{{.Metadata.Model}}</span></div>{{end}}
                     {{if .Metadata.Username}}<div class="meta-item"><span class="meta-label">User:</span> <span class="meta-value">{{.Metadata.Username}}</span></div>{{end}}
-                    {{if .Metadata.StartedAt}}<div class="meta-item"><span class="meta-label">Started:</span> <time class="meta-value">{{.Metadata.StartedAt.Format "2006-01-02 15:04:05"}}</time></div>{{end}}
-                    {{if .Metadata.EndedAt}}<div class="meta-item"><span class="meta-label">Ended:</span> <time class="meta-value">{{.Metadata.EndedAt.Format "2006-01-02 15:04:05"}}</time></div>{{end}}
+                    {{if not .Metadata.StartedAt.IsZero}}<div class="meta-item"><span class="meta-label">Started:</span> <time class="meta-value">{{.Metadata.StartedAt.Format "2006-01-02 15:04:05"}}</time></div>{{end}}
+
                 </div>
+                {{end}}
             </div>
         </div>
-        {{if .Statistics}}
-        <div class="stats-bar">
-            <div class="stat-item">
-                <span class="stat-value">{{.Statistics.TotalMessages}}</span>
-                <span class="stat-label">Total Messages</span>
-            </div>
-            <div class="stat-item">
-                <span class="stat-value">{{.Statistics.UserMessages}}</span>
-                <span class="stat-label">User Messages</span>
-            </div>
-        </div>
-        {{end}}
     </header>
 
     {{if .Summary}}
-    <section class="summary-section">
-        <div class="summary-header">
-            <h2 class="summary-title">Session Summary</h2>
-            {{if .Summary.Outcome}}
-            <span class="outcome-badge outcome-{{.Summary.Outcome}}">{{.Summary.Outcome}}</span>
+    <section class="dashboard">
+        <div class="dashboard-header">
+            <h2 class="dashboard-title">{{.Title}}</h2>
+            {{if .Summary.Outcome}}<span class="outcome-badge outcome-{{.Summary.Outcome}}">{{.Summary.Outcome}}</span>{{end}}
+        </div>
+        <div class="dashboard-grid">
+            {{if .Summary.Text}}
+            <div class="dashboard-panel dashboard-summary-panel">
+                <p class="dashboard-summary">{{.Summary.Text}}</p>
+                {{if .FilesChanged}}
+                <div class="files-changed-list">
+                    {{range .FilesChanged}}
+                    <div class="file-change-row">
+                        <span class="file-change-indicator">M</span>
+                        <span class="file-change-path">{{.Path}}</span>
+                        {{if or .Added .Removed}}<span class="file-change-diff"><span class="diff-added">+{{.Added}}</span> <span class="diff-removed">-{{.Removed}}</span></span>{{end}}
+                    </div>
+                    {{end}}
+                </div>
+                {{end}}
+            </div>
+            {{end}}
+            {{if .Summary.KeyActions}}
+            <div class="dashboard-panel">
+                <h3 class="panel-title">Key Actions</h3>
+                <ul class="key-actions-list">
+                    {{range .Summary.KeyActions}}
+                    <li>{{.}}</li>
+                    {{end}}
+                </ul>
+            </div>
             {{end}}
         </div>
-        {{if .Summary.Text}}
-        <p class="summary-text">{{.Summary.Text}}</p>
-        {{end}}
-        {{if .Summary.KeyActions}}
-        <div class="key-actions">
-            <h3 class="actions-title">Key Actions</h3>
-            <ul class="actions-list">
-                {{range .Summary.KeyActions}}
-                <li>{{.}}</li>
-                {{end}}
-            </ul>
-        </div>
+        {{if .Summary.FinalPlan}}
+        <details class="plan-section">
+            <summary class="plan-toggle"><span class="plan-toggle-icon">&#9654;</span> Plan</summary>
+            <div class="plan-content">{{.Summary.FinalPlan}}</div>
+        </details>
         {{end}}
         {{if .Summary.TopicsFound}}
-        <div class="topics-found">
+        <div class="topics-bar">
             {{range .Summary.TopicsFound}}
             <span class="topic-tag">{{.}}</span>
             {{end}}
@@ -81,36 +85,150 @@
     </section>
     {{end}}
 
+    {{if .SageoxInsights}}
+    <section class="sageox-insights">
+        <div class="sageox-insights-header">
+            <h3 class="sageox-insights-title">SageOx Value</h3>
+            <span class="sageox-insights-badge">{{len .SageoxInsights}} Insight{{if gt (len .SageoxInsights) 1}}s{{end}}</span>
+        </div>
+        {{range .SageoxInsights}}
+        <div class="sageox-insight-card" onclick="navigateToMessage({{.Seq}})">
+            <div class="sageox-insight-topic">{{.Topic}}</div>
+            <div class="sageox-insight-text">{{.Insight}}</div>
+            {{if .Impact}}<div class="sageox-insight-impact">{{.Impact}}</div>{{end}}
+        </div>
+        {{end}}
+    </section>
+    {{end}}
+
+    {{if .AhaMoments}}
+    <nav class="key-moments-nav" id="key-moments">
+        <span class="nav-label">Key Moments:</span>
+        {{range $i, $m := .AhaMoments}}
+        <button class="moment-jump" onclick="navigateToMessage({{$m.Seq}})" title="{{$m.Type}}: {{$m.Highlight}}">
+            #{{add $i 1}} {{$m.Type}}
+        </button>
+        {{end}}
+        <button class="moment-ffwd" onclick="navigateAhaMoment(1)" title="Jump to next key moment (press 'a')">&#9654;&#9654;</button>
+    </nav>
+    {{end}}
+
+    <div class="view-controls">
+        {{if .Chapters}}
+        <div class="chapter-nav">
+            {{range .Chapters}}
+            <button class="chapter-jump" onclick="scrollToChapter({{.ID}})">{{.Title}}</button>
+            {{end}}
+        </div>
+        {{end}}
+        <div class="view-toggle">
+            <button class="view-btn view-btn-active" data-view="conversation" onclick="setViewMode('conversation')">Conversation</button>
+            <button class="view-btn" data-view="full" onclick="setViewMode('full')">Full</button>
+        </div>
+    </div>
+
     <main id="messages" class="messages-container">
+        {{if .Chapters}}
+        <div class="timeline">
+        {{range .Chapters}}
+        <div class="tl-item tl-item-phase" id="chapter-{{.ID}}">
+            <div class="tl-dot tl-dot-phase"></div>
+            <div class="tl-content"><span class="phase-label">{{.Title}}</span></div>
+        </div>
+            {{range .Items}}
+            {{if .IsWorkBlock}}
+            <div class="tl-item tl-item-tool">
+                <div class="tl-dot tl-dot-tool" title="Tool calls"></div>
+                <div class="tl-content">
+                    <div class="work-block" data-msg-type="work-block">
+                        <details class="work-block-details">
+                            <summary class="work-block-summary">
+                                <span class="work-block-icon">&#9881;</span>
+                                <span class="work-block-text">{{.WorkBlock.Summary}}</span>
+                                {{if .WorkBlock.HasEdits}}<span class="work-block-badge">edits</span>{{end}}
+                            </summary>
+                            <div class="work-block-tools tl-inner">
+                                {{range .WorkBlock.Messages}}
+                                <div class="tl-inner-item work-block-tool-entry" id="msg-{{.ID}}" data-type="{{.Type}}">
+                                    {{if .ToolCall}}<div class="tl-inner-dot tl-cat-{{toolCategory .ToolCall.Name}}"></div>
+                                    <div class="tool-cmd-line">{{if .ToolCall.FormattedInput}}{{.ToolCall.FormattedInput}}{{else}}<span class="tool-prompt">&gt;_</span> <span class="tool-name-label">{{.ToolCall.Name}}</span>{{end}}</div>
+                                    {{else}}<div class="tl-inner-dot tl-cat-other"></div>
+                                    <div class="work-block-tool-line">{{.SenderLabel}}: {{.Content}}</div>
+                                    {{end}}
+                                </div>
+                                {{end}}
+                            </div>
+                        </details>
+                    </div>
+                </div>
+            </div>
+            {{else}}
+            <div class="tl-item tl-item-{{.Message.Type}}">
+                <div class="tl-dot tl-dot-{{.Message.Type}}{{if .Message.IsAhaMoment}} tl-dot-aha{{end}}" title="{{.Message.SenderLabel}}"></div>
+                <div class="tl-content">
+                    <article class="message message-{{.Message.Type}}{{if .Message.IsAhaMoment}} message-aha{{if .Message.AhaMoment}}{{if eq .Message.AhaMoment.Role "user"}} message-aha-user{{end}}{{end}}{{end}}" id="msg-{{.Message.ID}}" data-type="{{.Message.Type}}" tabindex="0">
+                        <div class="message-header">
+                            <span class="message-type message-type-{{.Message.Type}}">{{.Message.SenderLabel}}</span>
+                            {{if .Message.IsAhaMoment}}<span class="aha-indicator" title="{{if .Message.AhaMoment}}{{.Message.AhaMoment.Type}}: {{.Message.AhaMoment.Why}}{{end}}">Key Moment #{{.Message.AhaMomentID}}</span><button class="aha-ffwd" onclick="navigateAhaMoment(1)" title="Next key moment (a)">&#9654;&#9654;</button>{{end}}
+                        </div>
+                        <div class="message-content">{{.Message.Content}}</div>
+                        {{if .Message.AhaMoment}}
+                        <div class="aha-inline-card">
+                            <div class="aha-inline-header">
+                                <span class="aha-inline-type">{{.Message.AhaMoment.Type}}{{if eq .Message.AhaMoment.Role "user"}} by Human{{else}} by AI{{end}}</span>
+                            </div>
+                            <div class="aha-inline-highlight">{{.Message.AhaMoment.Highlight}}</div>
+                            <div class="aha-inline-why">{{.Message.AhaMoment.Why}}</div>
+                        </div>
+                        {{end}}
+                        {{if .Message.ToolCall}}
+                        <details class="tool-details">
+                            <summary class="tool-summary">
+                                <svg class="tool-icon" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6 3L11 8L6 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                <span class="tool-name">{{if .Message.ToolCall.Summary}}{{.Message.ToolCall.Summary}}{{else}}{{.Message.ToolCall.Name}}{{end}}</span>
+                            </summary>
+                            <div class="tool-io">
+                                {{if .Message.ToolCall.Input}}<div class="tool-section"><h4 class="tool-section-title">Input</h4><pre class="tool-input">{{.Message.ToolCall.Input}}</pre></div>{{end}}
+                                {{if .Message.ToolCall.Output}}<div class="tool-section"><h4 class="tool-section-title">Output</h4>{{if isDiffOutput .Message.ToolCall.Output}}<pre class="tool-output">{{renderDiffHTML .Message.ToolCall.Output}}</pre>{{else}}<pre class="tool-output">{{.Message.ToolCall.Output}}</pre>{{end}}</div>{{end}}
+                            </div>
+                        </details>
+                        {{end}}
+                    </article>
+                </div>
+            </div>
+            {{end}}
+            {{end}}
+        {{end}}
+        </div>
+        {{else}}
         {{range .Messages}}
-        <article class="message message-{{.Type}}" id="msg-{{.ID}}" data-type="{{.Type}}">
+        <article class="message message-{{.Type}}" id="msg-{{.ID}}" data-type="{{.Type}}" tabindex="0">
             <div class="message-header">
                 <span class="message-type message-type-{{.Type}}">{{.SenderLabel}}</span>
             </div>
             <div class="message-content">{{.Content}}</div>
             {{if .ToolCall}}
-            {{if .ToolCall.IsSimple}}
-            <div class="tool-inline"><code class="tool-cmd" data-tool="{{.ToolCall.Name}}">{{.ToolCall.FormattedInput}}</code></div>
-            {{else}}
             <details class="tool-details">
-                <summary class="tool-summary"><code class="tool-cmd" data-tool="{{.ToolCall.Name}}">{{.ToolCall.FormattedInput}}</code></summary>
+                <summary class="tool-summary">
+                    <svg class="tool-icon" width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6 3L11 8L6 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                    <span class="tool-name">{{if .ToolCall.FormattedInput}}{{.ToolCall.FormattedInput}}{{else if .ToolCall.Summary}}{{.ToolCall.Summary}}{{else}}{{.ToolCall.Name}}{{end}}</span>
+                </summary>
                 <div class="tool-io">
-                    {{if .ToolCall.Output}}
-                    <pre class="tool-output">{{.ToolCall.Output}}</pre>
-                    {{end}}
+                    {{if .ToolCall.Input}}<div class="tool-section"><h4 class="tool-section-title">Input</h4><pre class="tool-input">{{.ToolCall.Input}}</pre></div>{{end}}
+                    {{if .ToolCall.Output}}<div class="tool-section"><h4 class="tool-section-title">Output</h4>{{if isDiffOutput .ToolCall.Output}}<pre class="tool-output">{{renderDiffHTML .ToolCall.Output}}</pre>{{else}}<pre class="tool-output">{{.ToolCall.Output}}</pre>{{end}}</div>{{end}}
                 </div>
             </details>
             {{end}}
-            {{end}}
         </article>
+        {{end}}
         {{end}}
     </main>
 
     <footer class="page-footer">
         <div class="footer-content">
             <a href="https://sageox.ai/" class="footer-brand" target="_blank" rel="noopener noreferrer">
-                <img class="logo-small" src="https://avatars.githubusercontent.com/u/224450799?s=24" alt="SageOx" width="24" height="24">
-                <span>Powered by SageOx</span>
+                <img class="logo-small" src="https://avatars.githubusercontent.com/u/224450799?s=48" alt="SageOx" width="24" height="24">
+                <span>Powered by <span class="brand-sage">Sage</span><span class="brand-ox">Ox</span></span>
             </a>
         </div>
     </footer>

@@ -33,14 +33,15 @@ import (
 // consumers of these commands.
 //
 // Flag behavior:
-//   --text:   Human-readable output for developers reviewing session results
-//   --review: Security audit mode showing both human summary and machine output
-//   --json:   Explicit JSON (same as default, for clarity)
+//
+//	--text:   Human-readable output for developers reviewing session results
+//	--review: Security audit mode showing both human summary and machine output
+//	--json:   Explicit JSON (same as default, for clarity)
 //
 // Priority (highest to lowest):
-//   1. --review: outputs both human summary and JSON
-//   2. --text: outputs human-readable text only
-//   3. default: outputs full JSON
+//  1. --review: outputs both human summary and JSON
+//  2. --text: outputs human-readable text only
+//  3. default: outputs full JSON
 
 // sessionStartGuidance is behavioral guidance for agents during a recorded session.
 // Returned in the session start JSON so all coding agents (not just Claude Code) receive it.
@@ -446,17 +447,17 @@ type agentSessionResult struct {
 // processAgentSession reads, redacts secrets, and saves the session.
 // Processes the agent session data into stored artifacts (raw, events, HTML, markdown).
 //
-// Architecture: cache → ledger two-phase design
+// Architecture: cache -> ledger two-phase design
 //
 // Session data is written to a local cache first (fast, never fails), then copied
 // to the ledger git repo and uploaded to LFS (network-dependent, can retry).
 // This ensures session stop never fails due to network issues.
 //
-//	Phase 1 (cache): redact secrets → write raw.jsonl, events.jsonl, HTML, markdown
-//	Phase 2 (ledger): copy files → LFS upload → write meta.json → git commit+push
+//	Phase 1 (cache): redact secrets -> write raw.jsonl, events.jsonl, HTML, markdown
+//	Phase 2 (ledger): copy files -> LFS upload -> write meta.json -> git commit+push
 //	Cleanup: on phase 2 success, prune the local cache (ledger is source of truth)
 //
-// raw.jsonl is the critical source of truth — all other artifacts (events, HTML,
+// raw.jsonl is the critical source of truth -- all other artifacts (events, HTML,
 // summary, markdown) can be regenerated from it. If phase 2 fails, doctor's
 // retrySessionUpload() recovers by re-copying from cache to ledger.
 //
@@ -486,6 +487,13 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	rawEntries, err := adapter.Read(state.SessionFile)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read session: %w", err)
+	}
+
+	// filter out entries from before session recording started.
+	// the adapter reads ALL entries from the JSONL file, but we only want
+	// entries created after ox session start was called.
+	if !state.StartedAt.IsZero() {
+		rawEntries = filterEntriesAfterStart(rawEntries, state.StartedAt)
 	}
 
 	if len(rawEntries) == 0 {
@@ -673,9 +681,12 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 
 	// generate local summary (no server API call - the calling agent will summarize via prompt)
 	localSummary := session.LocalSummary(entries)
-	summaryView := &sessionhtml.SummaryView{
-		Text: localSummary,
+	summaryResp := &session.SummarizeResponse{
+		Summary: localSummary,
 	}
+
+
+
 	sessionSummaryView := &session.SummaryView{
 		Text: localSummary,
 	}
@@ -708,7 +719,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			rawSession, readErr := store.ReadSession(filename)
 			if readErr == nil && rawSession != nil {
 				htmlPath := filepath.Join(filepath.Dir(result.RawPath), "session.html")
-				if genErr := htmlGen.GenerateToFileWithSummary(rawSession, summaryView, htmlPath); genErr == nil {
+				if genErr := htmlGen.GenerateToFileWithSummary(rawSession, summaryResp, htmlPath); genErr == nil {
 					result.HTMLPath = htmlPath
 				} else {
 					htmlGenFailed = true
@@ -758,10 +769,21 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		}
 	}
 
+	// check session publishing mode before attempting upload
+	publishMode := config.GetSessionPublishing(projectRoot)
+	if publishMode == config.SessionPublishingManual {
+		// manual mode: save locally, skip upload
+		slog.Info("session publishing mode is manual, skipping upload", "session", sessionName)
+		result.LedgerSessionDir = ""
+		result.UploadWarning = "Session saved locally (publishing mode: manual). Use 'ox session upload' to publish."
+		return result, nil
+	}
+
+
 	// LFS upload pipeline: upload content files to LFS blob storage,
 	// write meta.json to ledger, commit and push.
 	// This is best-effort -- session processing already succeeded.
-	// No spinner here — bubbletea conflicts with Claude Code's own epoll on stdin.
+	// No spinner here -- bubbletea conflicts with Claude Code's own epoll on stdin.
 	if ledgerErr != nil {
 		// couldn't resolve ledger path - skip upload
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
@@ -783,7 +805,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			}
 			result.LedgerSessionDir = "" // clear since upload didn't succeed
 		} else {
-			// all files copied and committed to ledger — prune local cache.
+			// all files copied and committed to ledger -- prune local cache.
 			// the ledger is now the source of truth; doctor checks the ledger
 			// directly for missing summaries (not the cache .needs-summary marker).
 			if cacheDir := filepath.Dir(result.RawPath); cacheDir != "" && cacheDir != "." {
@@ -797,11 +819,24 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	return result, nil
 }
 
+// filterEntriesAfterStart removes entries with timestamps before the session
+// recording start time. Entries with zero timestamps are preserved (defensive:
+// don't drop entries just because they lack timestamps).
+func filterEntriesAfterStart(entries []adapters.RawEntry, startedAt time.Time) []adapters.RawEntry {
+	filtered := make([]adapters.RawEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Timestamp.IsZero() || !entry.Timestamp.Before(startedAt) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
 // uploadSessionToLedger copies content files from cache to ledger, uploads to LFS,
 // writes meta.json, and commits+pushes. This is phase 2 of the two-phase design:
 // content files are uploaded to LFS blob storage first, then meta.json (containing
 // LFS OIDs) is committed to git. Content files themselves are .gitignore'd in the
-// ledger repo — only meta.json is tracked by git. Other machines fetch content via LFS.
+// ledger repo -- only meta.json is tracked by git. Other machines fetch content via LFS.
 // If this fails, the session data is safe in the local cache and doctor can retry.
 // ledgerPath and sessionName are pre-computed by the caller.
 func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string) error {
@@ -811,7 +846,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		return fmt.Errorf("create session dir: %w", err)
 	}
 
-	// raw.jsonl is the critical source of truth — copy and verify it first.
+	// raw.jsonl is the critical source of truth -- copy and verify it first.
 	// All other artifacts (events, HTML, summary, markdown) can be regenerated
 	// from raw.jsonl, so their copy failures are non-fatal.
 	if result.RawPath != "" {
@@ -825,7 +860,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		}
 	}
 
-	// copy secondary artifacts (best-effort — failures logged but don't abort upload)
+	// copy secondary artifacts (best-effort -- failures logged but don't abort upload)
 	secondaryFiles := map[string]string{
 		"events.jsonl": result.EventsPath,
 		"session.html": result.HTMLPath,
@@ -1054,6 +1089,10 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 			rawEntries, err := adapter.Read(state.SessionFile)
 			if err != nil {
 				return fmt.Errorf("failed to read session: %w", err)
+			}
+			// filter out entries from before session recording started
+			if !state.StartedAt.IsZero() {
+				rawEntries = filterEntriesAfterStart(rawEntries, state.StartedAt)
 			}
 			entries = convertRawEntries(rawEntries)
 			entryCount = len(entries)

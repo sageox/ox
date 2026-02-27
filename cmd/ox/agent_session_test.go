@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -374,5 +375,64 @@ func TestSessionEntryTypes(t *testing.T) {
 		for _, entryType := range types {
 			assert.NotEmpty(t, string(entryType))
 		}
+	})
+}
+
+// Regression test for ox-a9y: session recording must not capture entries
+// from before `ox session start` was called. The adapter reads ALL entries
+// from the Claude Code JSONL file, so we filter by StartedAt timestamp.
+func TestFilterEntriesAfterStart(t *testing.T) {
+	startedAt := time.Date(2026, 2, 26, 14, 0, 0, 0, time.UTC)
+
+	t.Run("excludes entries before session start", func(t *testing.T) {
+		entries := []adapters.RawEntry{
+			{Timestamp: startedAt.Add(-10 * time.Minute), Role: "user", Content: "before start"},
+			{Timestamp: startedAt.Add(-5 * time.Minute), Role: "assistant", Content: "also before"},
+			{Timestamp: startedAt.Add(1 * time.Second), Role: "user", Content: "after start"},
+			{Timestamp: startedAt.Add(2 * time.Minute), Role: "assistant", Content: "well after"},
+		}
+
+		filtered := filterEntriesAfterStart(entries, startedAt)
+		require.Len(t, filtered, 2)
+		assert.Equal(t, "after start", filtered[0].Content)
+		assert.Equal(t, "well after", filtered[1].Content)
+	})
+
+	t.Run("includes entries exactly at start time", func(t *testing.T) {
+		entries := []adapters.RawEntry{
+			{Timestamp: startedAt, Role: "user", Content: "exactly at start"},
+		}
+
+		filtered := filterEntriesAfterStart(entries, startedAt)
+		require.Len(t, filtered, 1)
+		assert.Equal(t, "exactly at start", filtered[0].Content)
+	})
+
+	t.Run("preserves entries with zero timestamp", func(t *testing.T) {
+		entries := []adapters.RawEntry{
+			{Timestamp: time.Time{}, Role: "system", Content: "no timestamp"},
+			{Timestamp: startedAt.Add(-5 * time.Minute), Role: "user", Content: "before start"},
+			{Timestamp: startedAt.Add(1 * time.Minute), Role: "user", Content: "after start"},
+		}
+
+		filtered := filterEntriesAfterStart(entries, startedAt)
+		require.Len(t, filtered, 2)
+		assert.Equal(t, "no timestamp", filtered[0].Content)
+		assert.Equal(t, "after start", filtered[1].Content)
+	})
+
+	t.Run("returns empty when all entries are before start", func(t *testing.T) {
+		entries := []adapters.RawEntry{
+			{Timestamp: startedAt.Add(-10 * time.Minute), Role: "user", Content: "old"},
+			{Timestamp: startedAt.Add(-1 * time.Second), Role: "assistant", Content: "also old"},
+		}
+
+		filtered := filterEntriesAfterStart(entries, startedAt)
+		assert.Empty(t, filtered)
+	})
+
+	t.Run("handles empty input", func(t *testing.T) {
+		filtered := filterEntriesAfterStart(nil, startedAt)
+		assert.Empty(t, filtered)
 	})
 }

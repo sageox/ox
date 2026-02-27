@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/theme"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 	gmhtml "github.com/yuin/goldmark/renderer/html"
@@ -40,14 +41,25 @@ func StripANSI(s string) string {
 
 // regex patterns for stripping internal tags from message content
 var (
-	reCommandMessage    = regexp.MustCompile(`(?s)<command-message>.*?</command-message>`)
-	reCommandName       = regexp.MustCompile(`<command-name>(.*?)</command-name>`)
-	reSystemReminder    = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
+	reCommandMessage     = regexp.MustCompile(`(?s)<command-message>.*?</command-message>`)
+	reCommandName        = regexp.MustCompile(`<command-name>(.*?)</command-name>`)
+	reSystemReminder     = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
 	reSystemInstruction  = regexp.MustCompile(`(?s)<system_instruction>.*?</system_instruction>`)
 	reSystemInstructHyp  = regexp.MustCompile(`(?s)<system-instruction>.*?</system-instruction>`)
 	reLocalCommandStdout = regexp.MustCompile(`(?s)<local-command-stdout>.*?</local-command-stdout>`)
 	reLocalCommandCaveat = regexp.MustCompile(`(?s)<local-command-caveat>.*?</local-command-caveat>`)
 )
+
+// TemplateFuncMap returns the template function map used by the HTML template.
+// Exported so callers can reuse the same helpers if needed.
+func TemplateFuncMap() template.FuncMap {
+	return template.FuncMap{
+		"add":            func(a, b int) int { return a + b },
+		"renderDiffHTML": RenderDiffHTML,
+		"isDiffOutput":   IsDiffOutput,
+		"toolCategory":   ToolCategory,
+	}
+}
 
 // Generator creates HTML session viewers from stored sessions.
 type Generator struct {
@@ -57,7 +69,7 @@ type Generator struct {
 // NewGenerator creates a generator with embedded templates.
 // The template is parsed once and reused for multiple Generate calls.
 func NewGenerator() (*Generator, error) {
-	tmpl, err := template.New("session").Parse(templateHTML)
+	tmpl, err := template.New("session").Funcs(TemplateFuncMap()).Parse(templateHTML)
 	if err != nil {
 		return nil, fmt.Errorf("parse template: %w", err)
 	}
@@ -97,13 +109,12 @@ func (g *Generator) GenerateToFile(t *session.StoredSession, outputPath string) 
 }
 
 // GenerateWithSummary creates HTML bytes from a StoredSession with a summary.
-func (g *Generator) GenerateWithSummary(t *session.StoredSession, summary *SummaryView) ([]byte, error) {
+func (g *Generator) GenerateWithSummary(t *session.StoredSession, summary *session.SummarizeResponse) ([]byte, error) {
 	if t == nil {
 		return nil, fmt.Errorf("session cannot be nil")
 	}
 
-	data := convertToTemplateData(t)
-	data.Summary = summary
+	data := buildFullTemplateData(t, summary)
 
 	var buf bytes.Buffer
 	if err := g.tmpl.Execute(&buf, data); err != nil {
@@ -115,7 +126,7 @@ func (g *Generator) GenerateWithSummary(t *session.StoredSession, summary *Summa
 
 // GenerateToFileWithSummary writes HTML to a file with a summary section.
 // TODO(server-side): move to server-side for MVP+1; client should not write to ledger directly.
-func (g *Generator) GenerateToFileWithSummary(t *session.StoredSession, summary *SummaryView, outputPath string) error {
+func (g *Generator) GenerateToFileWithSummary(t *session.StoredSession, summary *session.SummarizeResponse, outputPath string) error {
 	htmlBytes, err := g.GenerateWithSummary(t, summary)
 	if err != nil {
 		return err
@@ -128,12 +139,138 @@ func (g *Generator) GenerateToFileWithSummary(t *session.StoredSession, summary 
 	return nil
 }
 
-// convertToTemplateData transforms a StoredSession to TemplateData.
+// BuildTemplateData converts a stored session and optional summary into the
+// full template data model. Exported so callers (e.g., session_html.go) can
+// access the enriched data for writing back to summary.json.
+func BuildTemplateData(t *session.StoredSession, summary *session.SummarizeResponse) *TemplateData {
+	return buildFullTemplateData(t, summary)
+}
+
+// buildFullTemplateData converts a stored session + summary into the complete
+// template data with chapters, aha moments, files changed, insights, etc.
+func buildFullTemplateData(t *session.StoredSession, summary *session.SummarizeResponse) *TemplateData {
+	// get title from summary or fall back to heuristic
+	title := generateTitle(t)
+	if summary != nil && summary.Title != "" {
+		title = summary.Title
+	}
+
+	data := &TemplateData{
+		Title:       title,
+		BrandColors: DefaultBrandColors(),
+		Styles:      template.CSS(cssRootVars() + stylesCSS),
+		Scripts:     template.JS(viewerJS),
+		Messages:    make([]MessageView, 0, len(t.Entries)),
+	}
+
+	// populate summary section
+	if summary != nil {
+		data.Summary = &SummaryView{
+			Text:          summary.Summary,
+			KeyActions:    summary.KeyActions,
+			Outcome:       summary.Outcome,
+			TopicsFound:   summary.TopicsFound,
+			FinalPlan:     summary.FinalPlan,
+			Diagrams:      summary.Diagrams,
+			ChapterTitles: summary.ChapterTitles,
+		}
+		// populate SageOx insights
+		for _, si := range summary.SageoxInsights {
+			view := SageoxInsightView{
+				Seq:     si.Seq,
+				Topic:   si.Topic,
+				Insight: si.Insight,
+				Impact:  si.Impact,
+			}
+			data.Summary.SageoxInsights = append(data.Summary.SageoxInsights, view)
+			data.SageoxInsights = append(data.SageoxInsights, view)
+		}
+	}
+
+	// build aha moments lookup for message highlighting
+	type ahaEntry struct {
+		index int // 1-based
+		view  *AhaMomentView
+	}
+	ahaMomentsBySeq := make(map[int]ahaEntry)
+	if summary != nil && len(summary.AhaMoments) > 0 {
+		for i, am := range summary.AhaMoments {
+			ahaView := &AhaMomentView{
+				Seq:       am.Seq,
+				Role:      am.Role,
+				Type:      am.Type,
+				Highlight: am.Highlight,
+				Why:       am.Why,
+			}
+			ahaMomentsBySeq[am.Seq] = ahaEntry{index: i + 1, view: ahaView}
+			data.AhaMoments = append(data.AhaMoments, *ahaView)
+		}
+	}
+
+	// extract metadata
+	data.Metadata = extractMetadata(t)
+
+	// determine sender labels from metadata
+	userLabel := "User"
+	agentLabel := "Assistant"
+	if t.Meta != nil {
+		if t.Meta.Username != "" {
+			userLabel = t.Meta.Username
+		}
+		if t.Meta.AgentType != "" {
+			agentLabel = formatAgentName(t.Meta.AgentType)
+		}
+	}
+
+	// build messages from entries
+	var userMessages, toolMessages int
+	for i, entry := range t.Entries {
+		msg := buildMessageView(i+1, entry, userLabel, agentLabel)
+
+		// mark aha moments
+		if aha, ok := ahaMomentsBySeq[i+1]; ok {
+			msg.IsAhaMoment = true
+			msg.AhaMomentID = aha.index
+			msg.AhaMoment = aha.view
+		}
+
+		data.Messages = append(data.Messages, msg)
+
+		switch msg.Type {
+		case "user":
+			userMessages++
+		case "tool":
+			toolMessages++
+		}
+	}
+
+	// extract files changed from tool calls
+	data.FilesChanged = ExtractFilesChanged(data.Messages)
+
+	// group messages into chapters
+	var chapterTitles []string
+	if summary != nil {
+		chapterTitles = summary.ChapterTitles
+	}
+	data.Chapters = GroupIntoChapters(data.Messages, chapterTitles)
+
+	// build statistics
+	data.Statistics = &StatsView{
+		TotalMessages: len(t.Entries),
+		UserMessages:  userMessages,
+		ToolMessages:  toolMessages,
+		FilesChanged:  len(data.FilesChanged),
+	}
+
+	return data
+}
+
+// convertToTemplateData transforms a StoredSession to TemplateData (no summary).
 func convertToTemplateData(t *session.StoredSession) *TemplateData {
 	data := &TemplateData{
 		Title:       generateTitle(t),
 		BrandColors: DefaultBrandColors(),
-		Styles:      template.CSS(stylesCSS),
+		Styles:      template.CSS(cssRootVars() + stylesCSS),
 		Scripts:     template.JS(viewerJS),
 		Messages:    make([]MessageView, 0, len(t.Entries)),
 	}
@@ -179,6 +316,66 @@ func convertToTemplateData(t *session.StoredSession) *TemplateData {
 	return data
 }
 
+// cssRootVars generates the :root CSS variables from theme constants.
+func cssRootVars() string {
+	return `:root {
+  --color-primary: ` + theme.HexPrimary + `;
+  --color-secondary: ` + theme.HexSecondary + `;
+  --color-accent: ` + theme.HexAccent + `;
+  --color-text: ` + theme.HexText + `;
+  --color-text-dim: ` + theme.HexTextDim + `;
+  --color-bg-dark: ` + theme.HexBgDark + `;
+  --color-bg-card: ` + theme.HexBgCard + `;
+  --color-border: ` + theme.HexBorder + `;
+  --color-error: ` + theme.HexError + `;
+  --color-info: ` + theme.HexInfo + `;
+  --spacing-xs: 0.25rem;
+  --spacing-sm: 0.5rem;
+  --spacing-md: 1rem;
+  --spacing-lg: 1.5rem;
+  --spacing-xl: 2rem;
+  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'SF Mono', Monaco, 'Cascadia Code', Consolas, monospace;
+  --border-radius: 0.5rem;
+  --border-radius-sm: 0.25rem;
+  --border-width: 3px;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+  --shadow-md: 0 4px 6px rgba(0,0,0,0.4);
+  color-scheme: dark light;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-primary: ` + theme.HexLightPrimary + `;
+    --color-secondary: ` + theme.HexLightSecondary + `;
+    --color-accent: ` + theme.HexLightAccent + `;
+    --color-text: ` + theme.HexLightText + `;
+    --color-text-dim: ` + theme.HexLightTextDim + `;
+    --color-bg-dark: ` + theme.HexLightBgLight + `;
+    --color-bg-card: #FFFFFF;
+    --color-border: #D0D0D0;
+    --color-error: ` + theme.HexLightError + `;
+    --color-info: ` + theme.HexLightInfo + `;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.1);
+    --shadow-md: 0 4px 6px rgba(0,0,0,0.15);
+  }
+}
+body.light-theme {
+  --color-primary: ` + theme.HexLightPrimary + `;
+  --color-secondary: ` + theme.HexLightSecondary + `;
+  --color-accent: ` + theme.HexLightAccent + `;
+  --color-text: ` + theme.HexLightText + `;
+  --color-text-dim: ` + theme.HexLightTextDim + `;
+  --color-bg-dark: ` + theme.HexLightBgLight + `;
+  --color-bg-card: #FFFFFF;
+  --color-border: #D0D0D0;
+  --color-error: ` + theme.HexLightError + `;
+  --color-info: ` + theme.HexLightInfo + `;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.1);
+  --shadow-md: 0 4px 6px rgba(0,0,0,0.15);
+}
+`
+}
+
 // generateTitle creates a title from the session info.
 func generateTitle(t *session.StoredSession) string {
 	if t.Meta != nil && t.Meta.AgentType != "" {
@@ -216,7 +413,150 @@ func extractMetadata(t *session.StoredSession) *MetadataView {
 	return meta
 }
 
-// convertEntry transforms a raw entry map into a MessageView.
+// buildMessageView converts a session entry to a message view.
+// Uses 1-based IDs for consistency with the template (msg-1, msg-2, ...).
+func buildMessageView(id int, entry map[string]any, userLabel, agentLabel string) MessageView {
+	msg := MessageView{
+		ID: id,
+	}
+
+	// get entry type
+	entryType, _ := entry["type"].(string)
+	msg.Type = mapEntryType(entryType)
+
+	// set sender label based on type
+	switch msg.Type {
+	case "user":
+		msg.SenderLabel = userLabel
+	case "assistant":
+		msg.SenderLabel = agentLabel
+	case "system":
+		msg.SenderLabel = "System"
+	case "tool":
+		msg.SenderLabel = "Tool Call"
+	default:
+		msg.SenderLabel = msg.Type
+	}
+
+	// get timestamp - check both "timestamp" and "ts" field names
+	if ts, ok := entry["timestamp"].(string); ok {
+		if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			msg.Timestamp = parsed
+		} else if parsed, err := time.Parse(time.RFC3339, ts); err == nil {
+			msg.Timestamp = parsed
+		}
+	} else if ts, ok := entry["ts"].(string); ok {
+		if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+			msg.Timestamp = parsed
+		} else if parsed, err := time.Parse(time.RFC3339, ts); err == nil {
+			msg.Timestamp = parsed
+		}
+	}
+
+	// check for content at root level first (ox native format)
+	if content, ok := entry["content"].(string); ok && content != "" {
+		msg.Content = RenderMarkdown(content)
+	}
+
+	// handle tool entries with root-level fields (reference format)
+	if entryType == "tool" {
+		toolName, _ := entry["tool_name"].(string)
+		toolInput, _ := entry["tool_input"].(string)
+		toolOutput, _ := entry["tool_output"].(string)
+		if toolName != "" {
+			msg.Content = template.HTML("<p>Tool: " + template.HTMLEscapeString(toolName) + "</p>")
+			// compute formatted input from raw input BEFORE HTML-escaping
+			rawView := &ToolCallView{
+				Name:   toolName,
+				Input:  StripANSI(toolInput),
+				Output: StripANSI(truncateOutput(toolOutput, 10000)),
+			}
+			msg.ToolCall = &ToolCallView{
+				Name:           toolName,
+				Input:          escapeHTML(rawView.Input),
+				Output:         escapeHTML(rawView.Output),
+				FormattedInput: FormatToolInputCompact(rawView),
+			}
+			msg.ToolCall.Summary = FormatToolSummary(rawView)
+		}
+	}
+
+	// get content based on entry type from nested data
+	if data, ok := entry["data"].(map[string]any); ok {
+		switch entryType {
+		case "message":
+			if content, _ := data["content"].(string); content != "" {
+				msg.Content = RenderMarkdown(content)
+			}
+			if role, ok := data["role"].(string); ok {
+				msg.Type = mapRoleToType(role)
+				// update sender label to match the actual role
+				switch msg.Type {
+				case "user":
+					msg.SenderLabel = userLabel
+				case "assistant":
+					msg.SenderLabel = agentLabel
+				}
+			}
+
+		case "tool_call":
+			toolName, _ := data["tool_name"].(string)
+			input, _ := data["input"].(string)
+			msg.Type = "tool"
+			msg.Content = template.HTML("<p>Tool call: " + template.HTMLEscapeString(toolName) + "</p>")
+			rawView := &ToolCallView{
+				Name:  toolName,
+				Input: StripANSI(input),
+			}
+			msg.ToolCall = &ToolCallView{
+				Name:           toolName,
+				Input:          escapeHTML(rawView.Input),
+				FormattedInput: FormatToolInputCompact(rawView),
+			}
+			msg.ToolCall.Summary = FormatToolSummary(rawView)
+
+		case "tool_result":
+			toolName, _ := data["tool_name"].(string)
+			output, _ := data["output"].(string)
+			msg.Type = "tool"
+			msg.Content = template.HTML("<p>Tool result: " + template.HTMLEscapeString(toolName) + "</p>")
+			rawView := &ToolCallView{
+				Name:   toolName,
+				Output: StripANSI(truncateOutput(output, 10000)),
+			}
+			msg.ToolCall = &ToolCallView{
+				Name:           toolName,
+				Output:         escapeHTML(rawView.Output),
+				FormattedInput: FormatToolInputCompact(rawView),
+			}
+			msg.ToolCall.Summary = FormatToolSummary(rawView)
+
+		default:
+			// generic entry - get content from data if not already set
+			if msg.Content == "" {
+				if content, ok := data["content"].(string); ok {
+					msg.Content = RenderMarkdown(content)
+				}
+			}
+		}
+	}
+
+	// reclassify based on content patterns (tool output or system context
+	// that was incorrectly tagged as "user" in the session recording)
+	rawContent, _ := entry["content"].(string)
+	msg.Type = reclassifyByContent(msg.Type, string(msg.Content), rawContent)
+	switch msg.Type {
+	case "tool":
+		msg.SenderLabel = "Tool Call"
+	case "system":
+		msg.SenderLabel = "System"
+	}
+
+	return msg
+}
+
+// convertEntry transforms a raw entry map into a MessageView (legacy path for
+// Generate without summary).
 func convertEntry(index int, entry map[string]any, userLabel, agentLabel string) MessageView {
 	msg := MessageView{
 		ID:        index,
@@ -273,6 +613,78 @@ func convertEntry(index int, entry map[string]any, userLabel, agentLabel string)
 	return msg
 }
 
+// reclassifyByContent overrides the message type when content patterns indicate
+// tool output or system context that was misattributed as a user message.
+// rawContent is the original entry content before markdown rendering.
+func reclassifyByContent(msgType string, content string, rawContent string) string {
+	// only reclassify messages currently typed as "user"
+	if msgType != "user" {
+		return msgType
+	}
+
+	// skill prompt expansions contain an ox-hash marker in the raw content
+	if strings.Contains(rawContent, "<!-- ox-hash:") {
+		return "system"
+	}
+
+	// system-reminder blocks injected by the framework
+	if strings.Contains(content, "<system-reminder>") || strings.Contains(content, "&lt;system-reminder&gt;") {
+		return "system"
+	}
+
+	// strip leading HTML tags to reach the raw text prefix
+	trimmed := content
+	for strings.HasPrefix(trimmed, "<") {
+		idx := strings.Index(trimmed, ">")
+		if idx < 0 {
+			break
+		}
+		trimmed = strings.TrimSpace(trimmed[idx+1:])
+	}
+
+	// black circle prefix used by Claude Code for tool call display (U+23FA)
+	if strings.HasPrefix(trimmed, "\u23fa ") {
+		return "tool"
+	}
+
+	// left bracket used by Claude Code for tool result display (U+23BF)
+	if strings.HasPrefix(trimmed, "\u23bf") {
+		return "tool"
+	}
+
+	return msgType
+}
+
+// mapEntryType converts session entry types to display types.
+func mapEntryType(entryType string) string {
+	switch entryType {
+	case "user":
+		return "user"
+	case "assistant", "message":
+		return "assistant"
+	case "tool_call", "tool_result", "tool":
+		return "tool"
+	case "system":
+		return "system"
+	default:
+		return "info"
+	}
+}
+
+// mapRoleToType converts message roles to display types.
+func mapRoleToType(role string) string {
+	switch role {
+	case "user":
+		return "user"
+	case "assistant":
+		return "assistant"
+	case "system":
+		return "system"
+	default:
+		return "info"
+	}
+}
+
 // normalizeMessageType maps various type strings to display-friendly names.
 func normalizeMessageType(t string) string {
 	// use shared mapper with case-insensitive fallback
@@ -299,6 +711,25 @@ func formatAgentName(agentType string) string {
 		name := strings.ReplaceAll(agentType, "-", " ")
 		name = strings.ReplaceAll(name, "_", " ")
 		return strings.Title(name) //nolint:staticcheck // Title is fine for display names
+	}
+}
+
+// ToolCategory maps a tool name to a semantic category for timeline dot coloring.
+// Categories: read (investigation), edit (changes), exec (execution), search (research).
+func ToolCategory(name string) string {
+	switch strings.ToLower(name) {
+	case "read", "glob", "grep":
+		return "read"
+	case "edit", "write", "multiedit", "notebookedit":
+		return "edit"
+	case "bash", "execute":
+		return "exec"
+	case "websearch", "webfetch":
+		return "search"
+	case "task":
+		return "agent"
+	default:
+		return "other"
 	}
 }
 
@@ -446,7 +877,7 @@ func FormatToolSummary(tool *ToolCallView) string {
 		// count diff lines if output contains diff markers
 		added, removed := CountDiffLines(tool.Output)
 		if added > 0 || removed > 0 {
-			return fmt.Sprintf("%s(%s) — +%d / -%d lines", tool.Name, base, added, removed)
+			return fmt.Sprintf("%s(%s) \u2014 +%d / -%d lines", tool.Name, base, added, removed)
 		}
 		return fmt.Sprintf("%s(%s)", tool.Name, base)
 	}
@@ -706,4 +1137,22 @@ func ComputeFallbackDuration(messages []MessageView) (duration time.Duration, fi
 		duration = last.Sub(first)
 	}
 	return
+}
+
+// escapeHTML escapes HTML special characters.
+func escapeHTML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, "\"", "&quot;")
+	s = strings.ReplaceAll(s, "'", "&#39;")
+	return s
+}
+
+// truncateOutput truncates long output strings.
+func truncateOutput(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
