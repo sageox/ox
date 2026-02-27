@@ -631,6 +631,13 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	if len(notifParts) > 0 {
 		output.UserNotification = "SageOx is active on this repo. " + strings.Join(notifParts, ". ") + "."
 	}
+	if codexNote := codexLifecycleNotification(agentType); codexNote != "" {
+		if output.UserNotification != "" {
+			output.UserNotification += " " + codexNote
+		} else {
+			output.UserNotification = codexNote
+		}
+	}
 
 	if hooksInstalled {
 		output.HooksRestartNotice = "SageOx hooks were just installed. Tell the user to exit this session and start a new one so the hooks take effect."
@@ -1495,6 +1502,15 @@ func getAgentSupportNotice(agentType string) string {
 	}
 
 	return fmt.Sprintf("SageOx is explicitly designed for use with Claude Code. It is unknown if %s will appropriately interpret and effectively apply team context. You should review plans deeply to ensure %s has produced an insightful plan.", displayName, displayName)
+}
+
+// codexLifecycleNotification returns Codex-specific workflow guidance for non-hook contexts.
+func codexLifecycleNotification(agentType string) string {
+	if canonicalAgentType(agentType) != string(agentx.AgentTypeCodex) {
+		return ""
+	}
+
+	return "Codex uses AGENTS.md directly (no native hooks). Re-run `ox agent prime` when starting a new Codex session or after context resets (for example, /clear or compaction). Session recording enhancements for Codex are deferred; manual recording remains available via `ox agent session start` and `ox agent session stop`."
 }
 
 // trackInstanceStart tracks an agent instance start event

@@ -313,3 +313,36 @@ func TestCanonicalAgentType(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexLifecycleNotification(t *testing.T) {
+	tests := []struct {
+		name      string
+		agentType string
+		wantEmpty bool
+	}{
+		{name: "codex", agentType: "codex", wantEmpty: false},
+		{name: "codex display alias", agentType: "Codex", wantEmpty: false},
+		{name: "claude", agentType: "claude", wantEmpty: true},
+		{name: "empty", agentType: "", wantEmpty: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := codexLifecycleNotification(tt.agentType)
+			if tt.wantEmpty && got != "" {
+				t.Fatalf("codexLifecycleNotification(%q) = %q, want empty", tt.agentType, got)
+			}
+			if !tt.wantEmpty {
+				if got == "" {
+					t.Fatalf("codexLifecycleNotification(%q) = empty, want non-empty", tt.agentType)
+				}
+				if !strings.Contains(got, "no native hooks") {
+					t.Errorf("expected Codex lifecycle note to mention no hooks, got: %q", got)
+				}
+				if !strings.Contains(got, "ox agent session start") {
+					t.Errorf("expected Codex lifecycle note to mention manual session start, got: %q", got)
+				}
+			}
+		})
+	}
+}
