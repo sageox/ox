@@ -648,7 +648,7 @@ body.embed .messages-container { padding-top: var(--spacing-md); }
 .message-type-tool { color: var(--color-info); }
 .message-type-system { color: var(--color-secondary); }
 .message-type-info { color: var(--color-text-dim); }
-.message-content { color: var(--color-text); line-height: 1.5; white-space: pre-wrap; }
+.message-content { color: var(--color-text); line-height: 1.5; }
 .tool-details { margin-top: var(--spacing-lg); background: var(--color-bg-dark); border-radius: var(--border-radius); overflow: hidden; }
 .tool-summary { padding: var(--spacing-md); cursor: pointer; font-weight: 600; color: var(--color-info); background: rgba(127,167,200,0.1); display: flex; align-items: center; gap: var(--spacing-sm); }
 .tool-summary:hover { background: rgba(127,167,200,0.2); }
