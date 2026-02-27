@@ -139,6 +139,19 @@ type AgentExtensions interface {
 	CommandManager() CommandManager
 }
 
+// LifecycleEventMapper is implemented by agents that support lifecycle hooks.
+// It maps the agent's native hook events to canonical lifecycle phases,
+// enabling ox to handle events generically across different coding agents.
+type LifecycleEventMapper interface {
+	// EventPhases returns the mapping from this agent's native events to canonical phases.
+	EventPhases() EventPhaseMap
+
+	// AgentENVAliases returns the AGENT_ENV values that identify this agent in hook commands.
+	// The first value is the canonical/preferred alias used in hook installation.
+	// Example: Claude Code returns ["claude-code", "claudecode", "claude"].
+	AgentENVAliases() []string
+}
+
 // Agent represents a coding agent with full detection and configuration capabilities.
 // It embeds all focused interfaces for complete agent functionality.
 //
@@ -236,35 +249,161 @@ type MCPServerConfig struct {
 	Env     map[string]string `json:"env,omitempty"`
 }
 
-// HookEvent represents a coding agent lifecycle event that can trigger hooks.
-// These events allow tools to intercept and respond to agent actions.
-//
-// Reference: https://code.claude.com/docs/en/hooks-guide
-type HookEvent string
+// Phase represents a canonical agent lifecycle moment.
+// Phases are agent-agnostic — each agent maps its native events to these phases.
+type Phase string
 
 const (
-	// HookEventPreToolUse fires before a tool executes. Hooks can block or modify the call.
-	HookEventPreToolUse HookEvent = "PreToolUse"
-
-	// HookEventPostToolUse fires after a tool completes. Useful for validation or formatting.
-	HookEventPostToolUse HookEvent = "PostToolUse"
-
-	// HookEventUserPromptSubmit fires when a user submits a prompt.
-	HookEventUserPromptSubmit HookEvent = "UserPromptSubmit"
-
-	// HookEventPermissionRequest fires when the agent requests permission for an action.
-	// Hooks can allow, deny, or prompt. Available in Claude Code v2.0.45+.
-	HookEventPermissionRequest HookEvent = "PermissionRequest"
-
-	// HookEventStop fires when the agent finishes responding.
-	HookEventStop HookEvent = "Stop"
-
-	// HookEventSubagentStop fires when a subagent completes. Available in Claude Code v1.0.41+.
-	HookEventSubagentStop HookEvent = "SubagentStop"
-
-	// HookEventSessionEnd fires when the agent session terminates.
-	HookEventSessionEnd HookEvent = "SessionEnd"
+	PhaseStart      Phase = "start"       // session began
+	PhaseEnd        Phase = "end"         // session ending
+	PhaseBeforeTool Phase = "before_tool" // tool about to execute
+	PhaseAfterTool  Phase = "after_tool"  // tool just completed
+	PhasePrompt     Phase = "prompt"      // user submitted a prompt
+	PhaseStop       Phase = "stop"        // agent finished responding
+	PhaseCompact    Phase = "compact"     // context about to be compacted
 )
+
+// HookEvent represents a coding agent lifecycle event that can trigger hooks.
+// Each agent has its own native event names (e.g., Claude's "SessionStart" vs
+// Cursor's "sessionStart" vs Windsurf's "pre_read_code"). Use the agent-specific
+// constants below, or the canonical constants for events shared across agents.
+type HookEvent string
+
+// Canonical hook events shared across multiple agents.
+// Agents may use these exact strings or their own native names.
+const (
+	HookEventSessionStart      HookEvent = "SessionStart"
+	HookEventSessionEnd        HookEvent = "SessionEnd"
+	HookEventPreToolUse        HookEvent = "PreToolUse"
+	HookEventPostToolUse       HookEvent = "PostToolUse"
+	HookEventUserPromptSubmit  HookEvent = "UserPromptSubmit"
+	HookEventPermissionRequest HookEvent = "PermissionRequest"
+	HookEventStop              HookEvent = "Stop"
+	HookEventSubagentStop      HookEvent = "SubagentStop"
+	HookEventPreCompact        HookEvent = "PreCompact"
+)
+
+// Cursor-specific hook events.
+// Reference: https://cursor.com/docs/agent/hooks
+const (
+	CursorEventSessionStart         HookEvent = "sessionStart"
+	CursorEventSessionEnd           HookEvent = "sessionEnd"
+	CursorEventPreToolUse           HookEvent = "preToolUse"
+	CursorEventPostToolUse          HookEvent = "postToolUse"
+	CursorEventPostToolUseFailure   HookEvent = "postToolUseFailure"
+	CursorEventSubagentStart        HookEvent = "subagentStart"
+	CursorEventSubagentStop         HookEvent = "subagentStop"
+	CursorEventBeforeShellExecution HookEvent = "beforeShellExecution"
+	CursorEventAfterShellExecution  HookEvent = "afterShellExecution"
+	CursorEventBeforeMCPExecution   HookEvent = "beforeMCPExecution"
+	CursorEventAfterMCPExecution    HookEvent = "afterMCPExecution"
+	CursorEventBeforeReadFile       HookEvent = "beforeReadFile"
+	CursorEventAfterFileEdit        HookEvent = "afterFileEdit"
+	CursorEventBeforeSubmitPrompt   HookEvent = "beforeSubmitPrompt"
+	CursorEventPreCompact           HookEvent = "preCompact"
+	CursorEventStop                 HookEvent = "stop"
+	CursorEventAfterAgentResponse   HookEvent = "afterAgentResponse"
+	CursorEventAfterAgentThought    HookEvent = "afterAgentThought"
+)
+
+// Windsurf-specific hook events.
+// Reference: https://docs.windsurf.com/windsurf/cascade/hooks
+const (
+	WindsurfEventPreReadCode                       HookEvent = "pre_read_code"
+	WindsurfEventPostReadCode                      HookEvent = "post_read_code"
+	WindsurfEventPreWriteCode                      HookEvent = "pre_write_code"
+	WindsurfEventPostWriteCode                     HookEvent = "post_write_code"
+	WindsurfEventPreRunCommand                     HookEvent = "pre_run_command"
+	WindsurfEventPostRunCommand                    HookEvent = "post_run_command"
+	WindsurfEventPreMCPToolUse                     HookEvent = "pre_mcp_tool_use"
+	WindsurfEventPostMCPToolUse                    HookEvent = "post_mcp_tool_use"
+	WindsurfEventPreUserPrompt                     HookEvent = "pre_user_prompt"
+	WindsurfEventPostCascadeResponse               HookEvent = "post_cascade_response"
+	WindsurfEventPostCascadeResponseWithTranscript HookEvent = "post_cascade_response_with_transcript"
+	WindsurfEventPostSetupWorktree                 HookEvent = "post_setup_worktree"
+)
+
+// Kiro-specific hook events.
+// Reference: https://kiro.dev/docs/hooks/types/
+const (
+	KiroEventPromptSubmit      HookEvent = "PromptSubmit"
+	KiroEventAgentStop         HookEvent = "AgentStop"
+	KiroEventPreToolUse        HookEvent = "PreToolUse"  // same as canonical
+	KiroEventPostToolUse       HookEvent = "PostToolUse" // same as canonical
+	KiroEventFileCreate        HookEvent = "FileCreate"
+	KiroEventFileSave          HookEvent = "FileSave"
+	KiroEventFileDelete        HookEvent = "FileDelete"
+	KiroEventPreTaskExecution  HookEvent = "PreTaskExecution"
+	KiroEventPostTaskExecution HookEvent = "PostTaskExecution"
+	KiroEventManualTrigger     HookEvent = "ManualTrigger"
+)
+
+// Droid-specific hook events (Factory).
+// Reference: https://docs.factory.ai/reference/hooks-reference
+const (
+	DroidEventNotification HookEvent = "Notification"
+	// Droid also supports: SessionStart, SessionEnd, PreToolUse, PostToolUse,
+	// UserPromptSubmit, Stop, SubagentStop, PreCompact (same as canonical).
+)
+
+// Cline-specific hook events.
+// Reference: https://docs.cline.bot/features/hooks
+const (
+	ClineEventTaskStart        HookEvent = "TaskStart"
+	ClineEventTaskResume       HookEvent = "TaskResume"
+	ClineEventTaskCancel       HookEvent = "TaskCancel"
+	ClineEventTaskComplete     HookEvent = "TaskComplete"
+	ClineEventPreToolUse       HookEvent = "PreToolUse"  // same as canonical
+	ClineEventPostToolUse      HookEvent = "PostToolUse" // same as canonical
+	ClineEventUserPromptSubmit HookEvent = "UserPromptSubmit"
+	ClineEventPreCompact       HookEvent = "PreCompact"
+)
+
+// GitHub Copilot hook events.
+// Reference: https://docs.github.com/en/copilot/reference/hooks-configuration
+const (
+	CopilotEventSessionStart        HookEvent = "sessionStart"
+	CopilotEventSessionEnd          HookEvent = "sessionEnd"
+	CopilotEventUserPromptSubmitted HookEvent = "userPromptSubmitted"
+	CopilotEventPreToolUse          HookEvent = "preToolUse"
+	CopilotEventPostToolUse         HookEvent = "postToolUse"
+	CopilotEventErrorOccurred       HookEvent = "errorOccurred"
+)
+
+// Amp-specific hook events.
+// Reference: https://ampcode.com/news/hooks
+const (
+	AmpEventToolPreExecute  HookEvent = "tool:pre-execute"
+	AmpEventToolPostExecute HookEvent = "tool:post-execute"
+)
+
+// OpenCode-specific hook events (plugin system).
+// Reference: https://opencode.ai/docs/plugins/
+const (
+	OpenCodeEventSessionCreated    HookEvent = "session.created"
+	OpenCodeEventSessionCompacted  HookEvent = "session.compacted"
+	OpenCodeEventSessionDeleted    HookEvent = "session.deleted"
+	OpenCodeEventSessionError      HookEvent = "session.error"
+	OpenCodeEventSessionIdle       HookEvent = "session.idle"
+	OpenCodeEventSessionStatus     HookEvent = "session.status"
+	OpenCodeEventSessionUpdated    HookEvent = "session.updated"
+	OpenCodeEventToolExecuteBefore HookEvent = "tool.execute.before"
+	OpenCodeEventToolExecuteAfter  HookEvent = "tool.execute.after"
+	OpenCodeEventFileEdited        HookEvent = "file.edited"
+	OpenCodeEventPermissionAsked   HookEvent = "permission.asked"
+	OpenCodeEventPermissionReplied HookEvent = "permission.replied"
+	OpenCodeEventMessageUpdated    HookEvent = "message.updated"
+	OpenCodeEventCommandExecuted   HookEvent = "command.executed"
+)
+
+// EventPhaseMap maps an agent's native hook events to canonical lifecycle phases.
+type EventPhaseMap map[HookEvent]Phase
+
+// AllPhases is the ordered list of canonical lifecycle phases for matrix display.
+var AllPhases = []Phase{
+	PhaseStart, PhaseEnd, PhaseBeforeTool, PhaseAfterTool,
+	PhasePrompt, PhaseStop, PhaseCompact,
+}
 
 // HookRule defines when and how a hook triggers.
 // Rules use matchers to filter which tools activate the hook.

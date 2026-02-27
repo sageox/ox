@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/pkg/agentx"
 )
 
 // SessionMarkerDir returns the per-user directory for session markers.
@@ -28,13 +29,9 @@ type SessionMarker struct {
 	LastNotified    time.Time `json:"last_notified,omitempty"` // mtime of last context file check
 }
 
-// ClaudeHookInput represents the JSON input Claude Code passes to hooks via stdin.
-// Claude Code passes a JSON object with session_id and hook_event_name fields.
-type ClaudeHookInput struct {
-	SessionID     string `json:"session_id"`
-	HookEventName string `json:"hook_event_name"`
-	// Other fields may be present but we only need session_id
-}
+// ClaudeHookInput is an alias for agentx.HookInput for backward compatibility.
+// The generalized HookInput struct in agentx handles all agents, including Claude Code.
+type ClaudeHookInput = agentx.HookInput
 
 // markerPath returns the path to the marker file for a given Claude session ID.
 func markerPath(claudeSessionID string) string {
@@ -134,30 +131,10 @@ func DeleteSessionMarker(claudeSessionID string) error {
 }
 
 // ReadClaudeHookInput reads Claude hook input from stdin.
-// Returns nil if stdin is not available or doesn't contain valid JSON.
-// This is designed to be non-blocking and fail gracefully.
+// Delegates to agentx.ReadHookInputFromStdin and validates session_id is present.
 func ReadClaudeHookInput() *ClaudeHookInput {
-	// check if stdin has data (non-blocking check)
-	stat, err := os.Stdin.Stat()
-	if err != nil {
-		return nil
-	}
-
-	// check if stdin is a pipe or has data
-	if (stat.Mode() & os.ModeCharDevice) != 0 {
-		// stdin is a terminal, not a pipe - no hook input
-		return nil
-	}
-
-	// read up to 4KB (hook input should be small)
-	buf := make([]byte, 4096)
-	n, err := os.Stdin.Read(buf)
-	if err != nil || n == 0 {
-		return nil
-	}
-
-	var input ClaudeHookInput
-	if err := json.Unmarshal(buf[:n], &input); err != nil {
+	input := agentx.ReadHookInputFromStdin()
+	if input == nil {
 		return nil
 	}
 
@@ -166,7 +143,7 @@ func ReadClaudeHookInput() *ClaudeHookInput {
 		return nil
 	}
 
-	return &input
+	return input
 }
 
 // WriteToClaudeEnvFile writes environment variables to CLAUDE_ENV_FILE if available.

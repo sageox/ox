@@ -86,7 +86,7 @@ func TestInstallProjectHooksIdempotent(t *testing.T) {
 	for _, entry := range settings.Hooks[claudeSessionStart] {
 		oxCount := 0
 		for _, hook := range entry.Hooks {
-			if isOxPrimeCommand(hook.Command) {
+			if isAnyOxCommand(hook.Command) {
 				oxCount++
 			}
 		}
@@ -97,7 +97,7 @@ func TestInstallProjectHooksIdempotent(t *testing.T) {
 	for _, entry := range settings.Hooks[claudePreCompact] {
 		oxCount := 0
 		for _, hook := range entry.Hooks {
-			if isOxPrimeCommand(hook.Command) {
+			if isAnyOxCommand(hook.Command) {
 				oxCount++
 			}
 		}
@@ -162,13 +162,13 @@ func TestInstallPreservesExistingHooks(t *testing.T) {
 			if strings.Contains(hook.Command, "my custom hook") {
 				foundCustom = true
 			}
-			if strings.Contains(hook.Command, "ox agent prime") {
+			if strings.Contains(hook.Command, "ox agent hook") {
 				foundOx = true
 			}
 		}
 	}
 	assert.True(t, foundCustom, "custom SessionStart hook should be preserved")
-	assert.True(t, foundOx, "ox SessionStart hook should be added")
+	assert.True(t, foundOx, "ox lifecycle hook should be added")
 }
 
 // TestReadCorruptedSettingsJSON verifies graceful handling of malformed JSON.
@@ -289,23 +289,38 @@ func TestWriteProducesValidJSON(t *testing.T) {
 }
 
 // TestUpgradeLegacyHooksToCurrentFormat verifies that old-format hooks
-// are preserved alongside new matcher-specific hooks after install.
+// (ox agent prime with matchers) are replaced by new lifecycle hooks (ox agent hook).
 func TestUpgradeLegacyHooksToCurrentFormat(t *testing.T) {
 	tmpDir := t.TempDir()
 	claudeDir := filepath.Join(tmpDir, ".claude")
 	require.NoError(t, os.MkdirAll(claudeDir, 0755))
 
-	// write legacy-format hooks (no AGENT_ENV, no matchers)
+	// write legacy-format hooks (ox agent prime with matchers)
 	legacySettings := ClaudeSettings{
 		Hooks: map[string][]ClaudeHookEntry{
 			claudeSessionStart: {
 				{
-					Matcher: "",
+					Matcher: "startup",
 					Hooks: []ClaudeHook{
-						{
-							Type:    hookType,
-							Command: "if command -v ox >/dev/null 2>&1; then ox agent prime 2>&1 || true; else echo 'old message'; fi",
-						},
+						{Type: hookType, Command: "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent prime --idempotent 2>&1 || true; fi"},
+					},
+				},
+				{
+					Matcher: "resume",
+					Hooks: []ClaudeHook{
+						{Type: hookType, Command: "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent prime --idempotent 2>&1 || true; fi"},
+					},
+				},
+				{
+					Matcher: "clear",
+					Hooks: []ClaudeHook{
+						{Type: hookType, Command: "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent prime 2>&1 || true; fi"},
+					},
+				},
+				{
+					Matcher: "compact",
+					Hooks: []ClaudeHook{
+						{Type: hookType, Command: "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent prime 2>&1 || true; fi"},
 					},
 				},
 			},
@@ -313,10 +328,7 @@ func TestUpgradeLegacyHooksToCurrentFormat(t *testing.T) {
 				{
 					Matcher: "",
 					Hooks: []ClaudeHook{
-						{
-							Type:    hookType,
-							Command: "ox agent prime",
-						},
+						{Type: hookType, Command: "ox agent prime"},
 					},
 				},
 			},
@@ -326,7 +338,7 @@ func TestUpgradeLegacyHooksToCurrentFormat(t *testing.T) {
 	settingsPath := filepath.Join(claudeDir, "settings.local.json")
 	require.NoError(t, os.WriteFile(settingsPath, data, 0644))
 
-	// install adds new matcher-specific hooks alongside legacy
+	// install upgrades to new lifecycle format
 	err := InstallProjectClaudeHooks(tmpDir)
 	require.NoError(t, err)
 
@@ -334,45 +346,43 @@ func TestUpgradeLegacyHooksToCurrentFormat(t *testing.T) {
 	settings, err := readProjectClaudeSettings(tmpDir)
 	require.NoError(t, err)
 
-	// verify SessionStart now has the new matchers added
+	// verify SessionStart has new lifecycle hook
 	sessionStart := settings.Hooks[claudeSessionStart]
-	matchers := make(map[string]bool)
-	for _, entry := range sessionStart {
-		matchers[entry.Matcher] = true
-	}
-	assert.True(t, matchers[matcherStartup], "should have startup matcher after install")
-	assert.True(t, matchers[matcherResume], "should have resume matcher after install")
-	assert.True(t, matchers[matcherClear], "should have clear matcher after install")
-	assert.True(t, matchers[matcherCompact], "should have compact matcher after install")
+	require.NotEmpty(t, sessionStart)
 
-	// verify new hooks use current format with AGENT_ENV
+	foundLifecycleHook := false
+	foundOldPrime := false
 	for _, entry := range sessionStart {
-		if entry.Matcher == "" {
-			continue // skip legacy entry
-		}
 		for _, hook := range entry.Hooks {
+			if strings.Contains(hook.Command, "ox agent hook SessionStart") {
+				foundLifecycleHook = true
+			}
 			if isOxPrimeCommand(hook.Command) {
-				assert.Contains(t, hook.Command, "AGENT_ENV=claude-code",
-					"new hooks should have AGENT_ENV prefix (matcher=%q)", entry.Matcher)
-				assert.Contains(t, hook.Command, "command -v ox",
-					"new hooks should guard against missing ox (matcher=%q)", entry.Matcher)
+				foundOldPrime = true
 			}
 		}
 	}
+	assert.True(t, foundLifecycleHook, "SessionStart should have lifecycle hook after upgrade")
+	assert.False(t, foundOldPrime, "old ox agent prime should be removed after upgrade")
 
-	// verify PreCompact also got upgraded: legacy ox hook replaced, new one added
+	// verify PreCompact also got upgraded
 	preCompact := settings.Hooks[claudePreCompact]
 	require.NotEmpty(t, preCompact)
 
-	foundCurrentFormat := false
+	foundLifecycleHook = false
+	foundOldPrime = false
 	for _, entry := range preCompact {
 		for _, hook := range entry.Hooks {
-			if strings.Contains(hook.Command, "AGENT_ENV=claude-code") {
-				foundCurrentFormat = true
+			if strings.Contains(hook.Command, "ox agent hook PreCompact") {
+				foundLifecycleHook = true
+			}
+			if isOxPrimeCommand(hook.Command) {
+				foundOldPrime = true
 			}
 		}
 	}
-	assert.True(t, foundCurrentFormat, "PreCompact should have current-format hook after install")
+	assert.True(t, foundLifecycleHook, "PreCompact should have lifecycle hook after upgrade")
+	assert.False(t, foundOldPrime, "old ox agent prime should be removed from PreCompact")
 }
 
 // TestInstallOnEmptyProject verifies hook installation on a fresh project

@@ -213,9 +213,8 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 
 	fmt.Println(ui.PassStyle.Render("✓") + " Claude Code project hooks installed")
 	fmt.Println()
-	fmt.Println("Installed hooks to .claude/settings.local.json:")
-	fmt.Println("  - SessionStart: ox agent prime (with matchers)")
-	fmt.Println("  - PreCompact: ox agent prime")
+	fmt.Println("Installed lifecycle hooks to .claude/settings.local.json:")
+	fmt.Println("  - SessionStart, PreCompact, PostToolUse, Stop, SessionEnd, UserPromptSubmit")
 
 	// show contextual tip
 	userCfg, _ := config.LoadUserConfig("")

@@ -157,5 +157,24 @@ func (a *ClaudeCodeAgent) IsInstalled(ctx context.Context, env agentx.Environmen
 	return false, nil
 }
 
-// Ensure ClaudeCodeAgent implements Agent.
+// EventPhases returns Claude Code's native event-to-phase mapping.
+func (a *ClaudeCodeAgent) EventPhases() agentx.EventPhaseMap {
+	return agentx.EventPhaseMap{
+		agentx.HookEventSessionStart:     agentx.PhaseStart,
+		agentx.HookEventSessionEnd:       agentx.PhaseEnd,
+		agentx.HookEventPreToolUse:       agentx.PhaseBeforeTool,
+		agentx.HookEventPostToolUse:      agentx.PhaseAfterTool,
+		agentx.HookEventUserPromptSubmit: agentx.PhasePrompt,
+		agentx.HookEventStop:             agentx.PhaseStop,
+		agentx.HookEventPreCompact:       agentx.PhaseCompact,
+	}
+}
+
+// AgentENVAliases returns the AGENT_ENV values that identify Claude Code.
+func (a *ClaudeCodeAgent) AgentENVAliases() []string {
+	return []string{"claude-code", "claudecode", "claude"}
+}
+
+// Ensure ClaudeCodeAgent implements Agent and LifecycleEventMapper.
 var _ agentx.Agent = (*ClaudeCodeAgent)(nil)
+var _ agentx.LifecycleEventMapper = (*ClaudeCodeAgent)(nil)

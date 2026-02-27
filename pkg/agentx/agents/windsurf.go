@@ -153,4 +153,23 @@ func (a *WindsurfAgent) IsInstalled(ctx context.Context, env agentx.Environment)
 }
 
 // Ensure WindsurfAgent implements Agent.
+// EventPhases returns Windsurf's native event-to-phase mapping.
+// Reference: https://docs.windsurf.com/windsurf/cascade/hooks
+func (a *WindsurfAgent) EventPhases() agentx.EventPhaseMap {
+	return agentx.EventPhaseMap{
+		agentx.WindsurfEventPreReadCode:          agentx.PhaseBeforeTool,
+		agentx.WindsurfEventPostWriteCode:        agentx.PhaseAfterTool,
+		agentx.WindsurfEventPreRunCommand:        agentx.PhaseBeforeTool,
+		agentx.WindsurfEventPostRunCommand:       agentx.PhaseAfterTool,
+		agentx.WindsurfEventPreUserPrompt:        agentx.PhasePrompt,
+		agentx.WindsurfEventPostCascadeResponse:  agentx.PhaseStop,
+	}
+}
+
+// AgentENVAliases returns the AGENT_ENV values that identify Windsurf.
+func (a *WindsurfAgent) AgentENVAliases() []string {
+	return []string{"windsurf", "codeium"}
+}
+
 var _ agentx.Agent = (*WindsurfAgent)(nil)
+var _ agentx.LifecycleEventMapper = (*WindsurfAgent)(nil)

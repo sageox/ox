@@ -148,6 +148,95 @@ func (d *detector) DetectByType(ctx context.Context, agentType AgentType) (bool,
 	return agent.Detect(ctx, d.getEnv())
 }
 
+// BuildEventPhaseMap builds a map from AGENT_ENV alias → (native event → phase)
+// by iterating all registered agents that implement LifecycleEventMapper.
+// The returned map uses AGENT_ENV aliases as keys (e.g., "claude-code"),
+// not AgentType slugs (e.g., "claude").
+func BuildEventPhaseMap() map[string]EventPhaseMap {
+	return DefaultRegistry.(*registry).buildEventPhaseMap()
+}
+
+func (r *registry) buildEventPhaseMap() map[string]EventPhaseMap {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	result := make(map[string]EventPhaseMap)
+	for _, agent := range r.agents {
+		mapper, ok := agent.(LifecycleEventMapper)
+		if !ok {
+			continue
+		}
+		phases := mapper.EventPhases()
+		for _, alias := range mapper.AgentENVAliases() {
+			result[alias] = phases
+		}
+	}
+	return result
+}
+
+// ResolveAgentENV resolves an AGENT_ENV string to an AgentType.
+// Returns AgentTypeUnknown if not found.
+func ResolveAgentENV(agentEnv string) AgentType {
+	return DefaultRegistry.(*registry).resolveAgentENV(agentEnv)
+}
+
+func (r *registry) resolveAgentENV(agentEnv string) AgentType {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for _, agent := range r.agents {
+		mapper, ok := agent.(LifecycleEventMapper)
+		if !ok {
+			continue
+		}
+		for _, alias := range mapper.AgentENVAliases() {
+			if alias == agentEnv {
+				return agent.Type()
+			}
+		}
+	}
+	return AgentTypeUnknown
+}
+
+// HookSupportEntry represents one agent's lifecycle hook support.
+// Phases maps each canonical phase to the agent's native event name.
+type HookSupportEntry struct {
+	AgentType AgentType
+	AgentName string
+	Phases    map[Phase][]HookEvent // phase → native event names (may have multiple)
+}
+
+// HookSupportMatrix returns the hook support matrix for all registered agents
+// that implement LifecycleEventMapper. Each entry shows which phases the agent
+// supports and the native event name for each phase.
+func HookSupportMatrix() []HookSupportEntry {
+	return DefaultRegistry.(*registry).hookSupportMatrix()
+}
+
+func (r *registry) hookSupportMatrix() []HookSupportEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var entries []HookSupportEntry
+	for _, agent := range r.agents {
+		mapper, ok := agent.(LifecycleEventMapper)
+		if !ok {
+			continue
+		}
+		// Invert the event→phase map to phase→events
+		phaseEvents := make(map[Phase][]HookEvent)
+		for event, phase := range mapper.EventPhases() {
+			phaseEvents[phase] = append(phaseEvents[phase], event)
+		}
+		entries = append(entries, HookSupportEntry{
+			AgentType: agent.Type(),
+			AgentName: agent.Name(),
+			Phases:    phaseEvents,
+		})
+	}
+	return entries
+}
+
 // IsAgentContext returns true if running inside any coding agent.
 // This is a convenience function using the default registry.
 func IsAgentContext() bool {

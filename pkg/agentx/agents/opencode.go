@@ -79,7 +79,7 @@ func (a *OpenCodeAgent) SupportsXDGConfig() bool {
 // Capabilities returns OpenCode's supported features.
 func (a *OpenCodeAgent) Capabilities() agentx.Capabilities {
 	return agentx.Capabilities{
-		Hooks:          false, // TBD
+		Hooks:          true, // JS/TS plugin system
 		MCPServers:     true,  // supports MCP
 		SystemPrompt:   true,  // custom instructions
 		ProjectContext: true,  // AGENTS.md
@@ -130,4 +130,22 @@ func (a *OpenCodeAgent) IsInstalled(ctx context.Context, env agentx.Environment)
 	return false, nil
 }
 
+// EventPhases returns OpenCode's native event-to-phase mapping.
+// Reference: https://opencode.ai/docs/plugins/
+func (a *OpenCodeAgent) EventPhases() agentx.EventPhaseMap {
+	return agentx.EventPhaseMap{
+		agentx.OpenCodeEventSessionCreated:   agentx.PhaseStart,
+		agentx.OpenCodeEventSessionCompacted: agentx.PhaseCompact,
+		agentx.OpenCodeEventToolExecuteBefore: agentx.PhaseBeforeTool,
+		agentx.OpenCodeEventToolExecuteAfter:  agentx.PhaseAfterTool,
+		agentx.OpenCodeEventSessionIdle:       agentx.PhaseStop,
+	}
+}
+
+// AgentENVAliases returns the AGENT_ENV values that identify OpenCode.
+func (a *OpenCodeAgent) AgentENVAliases() []string {
+	return []string{"opencode"}
+}
+
 var _ agentx.Agent = (*OpenCodeAgent)(nil)
+var _ agentx.LifecycleEventMapper = (*OpenCodeAgent)(nil)

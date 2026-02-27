@@ -137,4 +137,21 @@ func (a *KiroAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bo
 	return false, nil
 }
 
+// EventPhases returns Kiro's native event-to-phase mapping.
+// Reference: https://kiro.dev/docs/hooks/types/
+func (a *KiroAgent) EventPhases() agentx.EventPhaseMap {
+	return agentx.EventPhaseMap{
+		agentx.KiroEventPromptSubmit: agentx.PhasePrompt,
+		agentx.KiroEventAgentStop:    agentx.PhaseStop,
+		agentx.KiroEventPreToolUse:   agentx.PhaseBeforeTool,
+		agentx.KiroEventPostToolUse:  agentx.PhaseAfterTool,
+	}
+}
+
+// AgentENVAliases returns the AGENT_ENV values that identify Kiro.
+func (a *KiroAgent) AgentENVAliases() []string {
+	return []string{"kiro"}
+}
+
 var _ agentx.Agent = (*KiroAgent)(nil)
+var _ agentx.LifecycleEventMapper = (*KiroAgent)(nil)

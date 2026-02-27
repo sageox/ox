@@ -86,7 +86,7 @@ func (a *CopilotAgent) SupportsXDGConfig() bool {
 // Note: Copilot's agent mode has different capabilities than the autocomplete.
 func (a *CopilotAgent) Capabilities() agentx.Capabilities {
 	return agentx.Capabilities{
-		Hooks:          false, // no hook system yet
+		Hooks:          true, // .github/hooks/ JSON files
 		MCPServers:     false, // runs in GitHub backend
 		SystemPrompt:   true,  // .github/copilot-instructions.md
 		ProjectContext: true,  // reads project context
@@ -141,5 +141,23 @@ func (a *CopilotAgent) IsInstalled(ctx context.Context, env agentx.Environment) 
 	return false, nil
 }
 
-// Ensure CopilotAgent implements Agent.
+// EventPhases returns GitHub Copilot's native event-to-phase mapping.
+// Reference: https://docs.github.com/en/copilot/reference/hooks-configuration
+func (a *CopilotAgent) EventPhases() agentx.EventPhaseMap {
+	return agentx.EventPhaseMap{
+		agentx.CopilotEventSessionStart:        agentx.PhaseStart,
+		agentx.CopilotEventSessionEnd:          agentx.PhaseEnd,
+		agentx.CopilotEventPreToolUse:          agentx.PhaseBeforeTool,
+		agentx.CopilotEventPostToolUse:         agentx.PhaseAfterTool,
+		agentx.CopilotEventUserPromptSubmitted: agentx.PhasePrompt,
+	}
+}
+
+// AgentENVAliases returns the AGENT_ENV values that identify GitHub Copilot.
+func (a *CopilotAgent) AgentENVAliases() []string {
+	return []string{"copilot", "github-copilot"}
+}
+
+// Ensure CopilotAgent implements Agent and LifecycleEventMapper.
 var _ agentx.Agent = (*CopilotAgent)(nil)
+var _ agentx.LifecycleEventMapper = (*CopilotAgent)(nil)

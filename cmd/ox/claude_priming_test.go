@@ -50,17 +50,17 @@ func TestClaudeCodePrimingIntegration(t *testing.T) {
 		require.True(t, ok, "SessionStart hooks should exist")
 		require.NotEmpty(t, sessionStartHooks, "SessionStart should have entries")
 
-		// check that at least one hook contains "ox agent prime"
-		foundOxAgentPrime := false
+		// check that at least one hook contains "ox agent hook" (lifecycle format)
+		foundOxHook := false
 		for _, entry := range sessionStartHooks {
 			for _, hook := range entry.Hooks {
-				if hook.Type == "command" && strings.Contains(hook.Command, "ox agent prime") {
-					foundOxAgentPrime = true
+				if hook.Type == "command" && strings.Contains(hook.Command, "ox agent hook") {
+					foundOxHook = true
 					break
 				}
 			}
 		}
-		assert.True(t, foundOxAgentPrime, "SessionStart should have 'ox agent prime' hook")
+		assert.True(t, foundOxHook, "SessionStart should have 'ox agent hook' lifecycle hook")
 	})
 
 	t.Run("ox agent prime output contains agent_id for Claude visibility", func(t *testing.T) {
@@ -203,14 +203,14 @@ func TestClaudeCodeHooksPreserveOtherHooks(t *testing.T) {
 			if strings.Contains(hook.Command, "other tool hook") {
 				foundOther = true
 			}
-			if strings.Contains(hook.Command, "ox agent prime") {
+			if strings.Contains(hook.Command, "ox agent hook") {
 				foundOx = true
 			}
 		}
 	}
 
 	assert.True(t, foundOther, "existing hooks should be preserved")
-	assert.True(t, foundOx, "ox agent prime should be added")
+	assert.True(t, foundOx, "ox agent hook should be added")
 }
 
 // TestHasProjectClaudeHooks verifies detection of existing ox hooks

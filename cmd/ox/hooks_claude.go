@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/constants"
 )
 
 // ClaudeHook represents a single hook configuration
@@ -108,10 +110,30 @@ func hasOxPrimeHook(entry ClaudeHookEntry) bool {
 	return false
 }
 
+// hasAnyOxHook checks if an entry contains any ox hook command (prime or lifecycle).
+func hasAnyOxHook(entry ClaudeHookEntry) bool {
+	for _, hook := range entry.Hooks {
+		if hook.Type == hookType && isAnyOxCommand(hook.Command) {
+			return true
+		}
+	}
+	return false
+}
+
 // isOxPrimeCommand checks if a command is any variant of ox agent prime.
 // Recognizes both legacy commands (without AGENT_ENV) and new commands (with AGENT_ENV prefix).
 func isOxPrimeCommand(cmd string) bool {
 	return cmd == oxPrimeCommand || cmd == oxPrimeLegacy || strings.Contains(cmd, "ox agent prime")
+}
+
+// isOxHookCommand checks if a command is any variant of ox agent hook.
+func isOxHookCommand(cmd string) bool {
+	return strings.Contains(cmd, "ox agent hook")
+}
+
+// isAnyOxCommand checks if a command is any ox hook command (prime or lifecycle hook).
+func isAnyOxCommand(cmd string) bool {
+	return isOxPrimeCommand(cmd) || isOxHookCommand(cmd)
 }
 
 func removeOxPrimeHook(entry *ClaudeHookEntry) {
@@ -131,13 +153,23 @@ func uninstallClaudeHooks() error {
 		return err
 	}
 
-	hookEvents := []string{claudeSessionStart, claudePreCompact}
+	// uninstall from both legacy events and all lifecycle events
+	allEvents := append([]string{claudeSessionStart, claudePreCompact}, claudeLifecycleEvents...)
+	// deduplicate
+	seen := make(map[string]bool)
+	var hookEvents []string
+	for _, e := range allEvents {
+		if !seen[e] {
+			seen[e] = true
+			hookEvents = append(hookEvents, e)
+		}
+	}
 
 	for _, eventName := range hookEvents {
 		entries := settings.Hooks[eventName]
 
 		for i := range entries {
-			removeOxPrimeHook(&entries[i])
+			removeAnyOxHook(&entries[i])
 		}
 
 		// remove empty entries
@@ -151,12 +183,22 @@ func uninstallClaudeHooks() error {
 		if len(filtered) > 0 {
 			settings.Hooks[eventName] = filtered
 		} else {
-			// remove the event key if no entries remain
 			delete(settings.Hooks, eventName)
 		}
 	}
 
 	return writeClaudeSettings(settings)
+}
+
+// removeAnyOxHook removes all ox commands (prime and lifecycle) from an entry.
+func removeAnyOxHook(entry *ClaudeHookEntry) {
+	filtered := make([]ClaudeHook, 0)
+	for _, hook := range entry.Hooks {
+		if !isAnyOxCommand(hook.Command) || hook.Type != hookType {
+			filtered = append(filtered, hook)
+		}
+	}
+	entry.Hooks = filtered
 }
 
 func listClaudeHooks() (map[string]bool, error) {
@@ -173,7 +215,7 @@ func listClaudeHooks() (map[string]bool, error) {
 		entries := settings.Hooks[eventName]
 
 		for _, entry := range entries {
-			if hasOxPrimeHook(entry) {
+			if hasAnyOxHook(entry) {
 				installed = true
 				break
 			}
@@ -257,75 +299,51 @@ func writeProjectClaudeSettings(gitRoot string, settings *ClaudeSettings) error 
 	return nil
 }
 
-// InstallProjectClaudeHooks installs ox prime hooks to .claude/settings.local.json in the project.
+// claudeLifecycleEvents lists all Claude Code events that get ox agent hook handlers.
+var claudeLifecycleEvents = []string{
+	"SessionStart",
+	"PreCompact",
+	"PostToolUse",
+	"Stop",
+	"SessionEnd",
+	"UserPromptSubmit",
+}
+
+// oxHookCommandForEvent returns the ox agent hook shell command for a Claude Code event.
+func oxHookCommandForEvent(event string) string {
+	return fmt.Sprintf(constants.OxHookCommandClaudeCodeTemplate, event)
+}
+
+// InstallProjectClaudeHooks installs ox lifecycle hooks to .claude/settings.local.json.
 //
-// Hook configuration (belt and suspenders approach):
-//
-// SessionStart hooks with matchers:
-//   - startup: New session → --idempotent (marker shouldn't exist, saves tokens if it does)
-//   - resume:  Continuing → --idempotent (context intact, skip if primed)
-//   - clear:   Context wiped → force (re-prime with same agent_id from marker)
-//   - compact: Context reduced → force (re-prime with same agent_id from marker)
-//
-// PreCompact hook:
-//   - Belt: force re-prime before compaction to ensure context survives
+// Uses the generalized ox agent hook command — one entry per event.
+// The hook handler reads stdin JSON to determine behavior (source, trigger, etc.)
+// so matchers are no longer needed.
 func InstallProjectClaudeHooks(gitRoot string) error {
 	settings, err := readProjectClaudeSettings(gitRoot)
 	if err != nil {
 		return err
 	}
 
-	// install SessionStart hooks with matchers for different sources
-	sessionStartEntries := []ClaudeHookEntry{
-		// startup: new session - idempotent (fresh session, marker shouldn't exist)
-		{
-			Matcher: matcherStartup,
+	for _, event := range claudeLifecycleEvents {
+		hookCmd := oxHookCommandForEvent(event)
+		newEntry := ClaudeHookEntry{
+			Matcher: emptyMatcher,
 			Hooks: []ClaudeHook{
-				{Command: oxPrimeCommandIdempotent, Type: hookType},
+				{Command: hookCmd, Type: hookType},
 			},
-		},
-		// resume: --resume/--continue - idempotent (context should be intact)
-		{
-			Matcher: matcherResume,
-			Hooks: []ClaudeHook{
-				{Command: oxPrimeCommandIdempotent, Type: hookType},
-			},
-		},
-		// clear: /clear command - force (context was wiped, need re-prime)
-		{
-			Matcher: matcherClear,
-			Hooks: []ClaudeHook{
-				{Command: oxPrimeCommand, Type: hookType},
-			},
-		},
-		// compact: auto/manual compaction - force (context was reduced, need re-prime)
-		{
-			Matcher: matcherCompact,
-			Hooks: []ClaudeHook{
-				{Command: oxPrimeCommand, Type: hookType},
-			},
-		},
-	}
+		}
 
-	// merge with existing SessionStart hooks (preserve non-ox hooks)
-	existingSessionStart := settings.Hooks[claudeSessionStart]
-	settings.Hooks[claudeSessionStart] = mergeHookEntries(existingSessionStart, sessionStartEntries)
-
-	// install PreCompact hook (belt: force re-prime before compaction)
-	preCompactEntry := ClaudeHookEntry{
-		Matcher: emptyMatcher,
-		Hooks: []ClaudeHook{
-			{Command: oxPrimeCommand, Type: hookType},
-		},
+		existing := settings.Hooks[event]
+		settings.Hooks[event] = mergeHookEntries(existing, []ClaudeHookEntry{newEntry})
 	}
-	existingPreCompact := settings.Hooks[claudePreCompact]
-	settings.Hooks[claudePreCompact] = mergeHookEntries(existingPreCompact, []ClaudeHookEntry{preCompactEntry})
 
 	return writeProjectClaudeSettings(gitRoot, settings)
 }
 
 // mergeHookEntries merges new hook entries with existing ones.
 // Preserves existing non-ox hooks while updating/adding ox hooks.
+// Strips both old (ox agent prime) and new (ox agent hook) commands during merge.
 func mergeHookEntries(existing, new []ClaudeHookEntry) []ClaudeHookEntry {
 	// build map of new entries by matcher
 	newByMatcher := make(map[string]ClaudeHookEntry)
@@ -342,9 +360,9 @@ func mergeHookEntries(existing, new []ClaudeHookEntry) []ClaudeHookEntry {
 		if newEntry, hasNew := newByMatcher[entry.Matcher]; hasNew {
 			// matcher exists in new - merge hooks
 			mergedHooks := make([]ClaudeHook, 0)
-			// add non-ox hooks from existing
+			// add non-ox hooks from existing (strip both old and new ox commands)
 			for _, hook := range entry.Hooks {
-				if !isOxPrimeCommand(hook.Command) {
+				if !isAnyOxCommand(hook.Command) {
 					mergedHooks = append(mergedHooks, hook)
 				}
 			}
@@ -356,8 +374,20 @@ func mergeHookEntries(existing, new []ClaudeHookEntry) []ClaudeHookEntry {
 			})
 			handled[entry.Matcher] = true
 		} else {
-			// no new entry for this matcher - preserve as-is
-			result = append(result, entry)
+			// check if this is an old ox-only entry with a specific matcher
+			// (e.g., old "startup", "resume", "clear", "compact" matchers)
+			// If it only contains ox commands, skip it entirely (superseded by new format)
+			hasNonOx := false
+			for _, hook := range entry.Hooks {
+				if !isAnyOxCommand(hook.Command) {
+					hasNonOx = true
+					break
+				}
+			}
+			if hasNonOx {
+				result = append(result, entry)
+			}
+			// else: pure ox entry with old matcher — drop it (superseded)
 		}
 	}
 
@@ -371,8 +401,9 @@ func mergeHookEntries(existing, new []ClaudeHookEntry) []ClaudeHookEntry {
 	return result
 }
 
-// HasProjectClaudeHooks checks if ox prime hooks are already in .claude/settings.local.json.
-// Returns true only if BOTH SessionStart AND PreCompact have at least one ox prime hook.
+// HasProjectClaudeHooks checks if ox hooks are already in .claude/settings.local.json.
+// Returns true only if BOTH SessionStart AND PreCompact have at least one ox hook
+// (either old ox agent prime format or new ox agent hook format).
 func HasProjectClaudeHooks(gitRoot string) bool {
 	settings, err := readProjectClaudeSettings(gitRoot)
 	if err != nil {
@@ -382,7 +413,7 @@ func HasProjectClaudeHooks(gitRoot string) bool {
 	for _, eventName := range []string{claudeSessionStart, claudePreCompact} {
 		found := false
 		for _, entry := range settings.Hooks[eventName] {
-			if hasOxPrimeHook(entry) {
+			if hasAnyOxHook(entry) {
 				found = true
 				break
 			}
@@ -403,7 +434,7 @@ func listProjectClaudeHooks(gitRoot string) map[string]bool {
 	status := make(map[string]bool)
 	for _, eventName := range []string{claudeSessionStart, claudePreCompact} {
 		for _, entry := range settings.Hooks[eventName] {
-			if hasOxPrimeHook(entry) {
+			if hasAnyOxHook(entry) {
 				status[eventName] = true
 				break
 			}

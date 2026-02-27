@@ -105,7 +105,7 @@ func (a *ClineAgent) SupportsXDGConfig() bool {
 // Capabilities returns Cline's supported features.
 func (a *ClineAgent) Capabilities() agentx.Capabilities {
 	return agentx.Capabilities{
-		Hooks:          false, // Cline doesn't support hooks yet
+		Hooks:          true, // Cline supports hooks (v3.36+)
 		MCPServers:     true,  // Cline supports MCP servers
 		SystemPrompt:   true,  // Custom instructions
 		ProjectContext: true,  // .clinerules at project level
@@ -160,5 +160,26 @@ func (a *ClineAgent) IsInstalled(ctx context.Context, env agentx.Environment) (b
 	return false, nil
 }
 
-// Ensure ClineAgent implements Agent.
+// EventPhases returns Cline's native event-to-phase mapping.
+// Reference: https://docs.cline.bot/features/hooks
+func (a *ClineAgent) EventPhases() agentx.EventPhaseMap {
+	return agentx.EventPhaseMap{
+		agentx.ClineEventTaskStart:        agentx.PhaseStart,
+		agentx.ClineEventTaskResume:       agentx.PhaseStart,
+		agentx.ClineEventTaskCancel:       agentx.PhaseEnd,
+		agentx.ClineEventTaskComplete:     agentx.PhaseEnd,
+		agentx.ClineEventPreToolUse:       agentx.PhaseBeforeTool,
+		agentx.ClineEventPostToolUse:      agentx.PhaseAfterTool,
+		agentx.ClineEventUserPromptSubmit: agentx.PhasePrompt,
+		agentx.ClineEventPreCompact:       agentx.PhaseCompact,
+	}
+}
+
+// AgentENVAliases returns the AGENT_ENV values that identify Cline.
+func (a *ClineAgent) AgentENVAliases() []string {
+	return []string{"cline", "claude-dev"}
+}
+
+// Ensure ClineAgent implements Agent and LifecycleEventMapper.
 var _ agentx.Agent = (*ClineAgent)(nil)
+var _ agentx.LifecycleEventMapper = (*ClineAgent)(nil)

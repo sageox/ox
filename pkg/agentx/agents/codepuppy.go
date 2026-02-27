@@ -81,7 +81,7 @@ func (a *CodePuppyAgent) SupportsXDGConfig() bool {
 // Capabilities returns Code Puppy's supported features.
 func (a *CodePuppyAgent) Capabilities() agentx.Capabilities {
 	return agentx.Capabilities{
-		Hooks:          true,  // supports hooks
+		Hooks:          false, // no hook system
 		MCPServers:     false, // TBD
 		SystemPrompt:   true,  // custom instructions
 		ProjectContext: true,  // reads project context

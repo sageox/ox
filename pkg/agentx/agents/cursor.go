@@ -151,5 +151,25 @@ func (a *CursorAgent) IsInstalled(ctx context.Context, env agentx.Environment) (
 	return false, nil
 }
 
-// Ensure CursorAgent implements Agent.
+// EventPhases returns Cursor's native event-to-phase mapping.
+// Reference: https://cursor.com/docs/agent/hooks
+func (a *CursorAgent) EventPhases() agentx.EventPhaseMap {
+	return agentx.EventPhaseMap{
+		agentx.CursorEventSessionStart:       agentx.PhaseStart,
+		agentx.CursorEventSessionEnd:         agentx.PhaseEnd,
+		agentx.CursorEventPreToolUse:         agentx.PhaseBeforeTool,
+		agentx.CursorEventPostToolUse:        agentx.PhaseAfterTool,
+		agentx.CursorEventBeforeSubmitPrompt: agentx.PhasePrompt,
+		agentx.CursorEventStop:               agentx.PhaseStop,
+		agentx.CursorEventPreCompact:         agentx.PhaseCompact,
+	}
+}
+
+// AgentENVAliases returns the AGENT_ENV values that identify Cursor.
+func (a *CursorAgent) AgentENVAliases() []string {
+	return []string{"cursor"}
+}
+
+// Ensure CursorAgent implements Agent and LifecycleEventMapper.
 var _ agentx.Agent = (*CursorAgent)(nil)
+var _ agentx.LifecycleEventMapper = (*CursorAgent)(nil)

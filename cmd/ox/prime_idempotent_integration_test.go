@@ -377,64 +377,41 @@ func TestInstallProjectClaudeHooksWithMatchers(t *testing.T) {
 	claudeDir := filepath.Join(tmpDir, ".claude")
 	require.NoError(t, os.MkdirAll(claudeDir, 0755))
 
-	t.Run("installs hooks with correct matchers", func(t *testing.T) {
+	t.Run("installs lifecycle hooks for all events", func(t *testing.T) {
 		err := InstallProjectClaudeHooks(tmpDir)
 		require.NoError(t, err)
 
-		// read settings
 		settings, err := readProjectClaudeSettings(tmpDir)
 		require.NoError(t, err)
 
-		// verify SessionStart hooks
+		// new format: one entry per lifecycle event using ox agent hook
+		for _, event := range claudeLifecycleEvents {
+			entries := settings.Hooks[event]
+			require.NotEmpty(t, entries, "should have hook for %s", event)
+			require.NotEmpty(t, entries[0].Hooks)
+			assert.Contains(t, entries[0].Hooks[0].Command, "ox agent hook "+event,
+				"hook for %s should use ox agent hook command", event)
+		}
+	})
+
+	t.Run("SessionStart uses ox agent hook", func(t *testing.T) {
+		settings, err := readProjectClaudeSettings(tmpDir)
+		require.NoError(t, err)
+
 		sessionStartHooks := settings.Hooks[claudeSessionStart]
-		require.NotEmpty(t, sessionStartHooks, "SessionStart hooks should be installed")
-
-		// collect matchers
-		matchers := make(map[string]bool)
-		for _, entry := range sessionStartHooks {
-			matchers[entry.Matcher] = true
-		}
-
-		assert.True(t, matchers[matcherStartup], "should have startup matcher")
-		assert.True(t, matchers[matcherResume], "should have resume matcher")
-		assert.True(t, matchers[matcherClear], "should have clear matcher")
-		assert.True(t, matchers[matcherCompact], "should have compact matcher")
+		require.NotEmpty(t, sessionStartHooks)
+		// single entry (not 4 matchers like the old format)
+		assert.Len(t, sessionStartHooks, 1, "new format uses single entry per event")
+		assert.Contains(t, sessionStartHooks[0].Hooks[0].Command, "ox agent hook SessionStart")
 	})
 
-	t.Run("startup/resume use idempotent command", func(t *testing.T) {
-		settings, err := readProjectClaudeSettings(tmpDir)
-		require.NoError(t, err)
-
-		for _, entry := range settings.Hooks[claudeSessionStart] {
-			if entry.Matcher == matcherStartup || entry.Matcher == matcherResume {
-				require.NotEmpty(t, entry.Hooks)
-				assert.Contains(t, entry.Hooks[0].Command, "--idempotent",
-					"startup/resume should use idempotent command")
-			}
-		}
-	})
-
-	t.Run("clear/compact use force command", func(t *testing.T) {
-		settings, err := readProjectClaudeSettings(tmpDir)
-		require.NoError(t, err)
-
-		for _, entry := range settings.Hooks[claudeSessionStart] {
-			if entry.Matcher == matcherClear || entry.Matcher == matcherCompact {
-				require.NotEmpty(t, entry.Hooks)
-				assert.NotContains(t, entry.Hooks[0].Command, "--idempotent",
-					"clear/compact should use force command (no --idempotent)")
-			}
-		}
-	})
-
-	t.Run("PreCompact uses force command", func(t *testing.T) {
+	t.Run("PreCompact uses ox agent hook", func(t *testing.T) {
 		settings, err := readProjectClaudeSettings(tmpDir)
 		require.NoError(t, err)
 
 		preCompactHooks := settings.Hooks[claudePreCompact]
 		require.NotEmpty(t, preCompactHooks)
 		require.NotEmpty(t, preCompactHooks[0].Hooks)
-		assert.NotContains(t, preCompactHooks[0].Hooks[0].Command, "--idempotent",
-			"PreCompact should use force command")
+		assert.Contains(t, preCompactHooks[0].Hooks[0].Command, "ox agent hook PreCompact")
 	})
 }

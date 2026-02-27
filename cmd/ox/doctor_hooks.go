@@ -61,6 +61,7 @@ func checkSessionStartHookBug() checkResult {
 // This is the source of truth for what commands can be invoked in hooks.
 var knownOxSubcommands = map[string]bool{
 	"ox agent prime": true,
+	"ox agent hook":  true,
 	"ox doctor":      true,
 	"ox init":        true,
 	"ox version":     true,
@@ -415,12 +416,12 @@ func checkProjectHookCompleteness(fix bool) checkResult {
 		return SkippedCheck("Hook completeness", "no hooks configured", "")
 	}
 
-	// check each required event has ox prime hooks
+	// check each required event has ox hooks (prime or lifecycle)
 	var missing []string
 	for _, event := range []string{claudeSessionStart, claudePreCompact} {
 		found := false
 		for _, entry := range settings.Hooks[event] {
-			if hasOxPrimeHook(entry) {
+			if hasAnyOxHook(entry) {
 				found = true
 				break
 			}

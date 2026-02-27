@@ -84,7 +84,7 @@ func (a *AmpAgent) SupportsXDGConfig() bool {
 // Capabilities returns Amp's supported features.
 func (a *AmpAgent) Capabilities() agentx.Capabilities {
 	return agentx.Capabilities{
-		Hooks:          false, // TBD
+		Hooks:          true, // amp.hooks in .vscode/settings.json
 		MCPServers:     true,  // supports MCP
 		SystemPrompt:   true,  // custom instructions
 		ProjectContext: true,  // AGENTS.md
@@ -135,4 +135,19 @@ func (a *AmpAgent) IsInstalled(ctx context.Context, env agentx.Environment) (boo
 	return false, nil
 }
 
+// EventPhases returns Amp's native event-to-phase mapping.
+// Reference: https://ampcode.com/news/hooks
+func (a *AmpAgent) EventPhases() agentx.EventPhaseMap {
+	return agentx.EventPhaseMap{
+		agentx.AmpEventToolPreExecute:  agentx.PhaseBeforeTool,
+		agentx.AmpEventToolPostExecute: agentx.PhaseAfterTool,
+	}
+}
+
+// AgentENVAliases returns the AGENT_ENV values that identify Amp.
+func (a *AmpAgent) AgentENVAliases() []string {
+	return []string{"amp"}
+}
+
 var _ agentx.Agent = (*AmpAgent)(nil)
+var _ agentx.LifecycleEventMapper = (*AmpAgent)(nil)

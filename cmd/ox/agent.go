@@ -218,8 +218,10 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		default:
 			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, remind, summarize, html, record, plan, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
 		}
+	case "hook":
+		return runAgentHook(subargs)
 	default:
-		return fmt.Errorf("unknown command: %s\nAvailable: doctor, session", subcommand)
+		return fmt.Errorf("unknown command: %s\nAvailable: doctor, hook, session", subcommand)
 	}
 }
 

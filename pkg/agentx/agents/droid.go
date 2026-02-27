@@ -166,5 +166,25 @@ func (a *DroidAgent) IsInstalled(ctx context.Context, env agentx.Environment) (b
 	return false, nil
 }
 
-// Ensure DroidAgent implements Agent.
+// EventPhases returns Droid's native event-to-phase mapping.
+// Reference: https://docs.factory.ai/reference/hooks-reference
+func (a *DroidAgent) EventPhases() agentx.EventPhaseMap {
+	return agentx.EventPhaseMap{
+		agentx.HookEventSessionStart:     agentx.PhaseStart,
+		agentx.HookEventSessionEnd:       agentx.PhaseEnd,
+		agentx.HookEventPreToolUse:       agentx.PhaseBeforeTool,
+		agentx.HookEventPostToolUse:      agentx.PhaseAfterTool,
+		agentx.HookEventUserPromptSubmit: agentx.PhasePrompt,
+		agentx.HookEventStop:             agentx.PhaseStop,
+		agentx.HookEventPreCompact:       agentx.PhaseCompact,
+	}
+}
+
+// AgentENVAliases returns the AGENT_ENV values that identify Droid.
+func (a *DroidAgent) AgentENVAliases() []string {
+	return []string{"droid", "factory-droid", "factory"}
+}
+
+// Ensure DroidAgent implements Agent and LifecycleEventMapper.
 var _ agentx.Agent = (*DroidAgent)(nil)
+var _ agentx.LifecycleEventMapper = (*DroidAgent)(nil)
