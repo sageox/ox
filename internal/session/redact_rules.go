@@ -148,10 +148,10 @@ func parseRuleLine(line string, lineNum int, path string, source RedactRuleSourc
 
 	if strings.HasPrefix(left, "literal ") {
 		ruleType = "literal"
-		pattern = strings.TrimSpace(strings.TrimPrefix(left, "literal"))
+		pattern = strings.TrimSpace(strings.TrimPrefix(left, "literal "))
 	} else if strings.HasPrefix(left, "regex ") {
 		ruleType = "regex"
-		pattern = strings.TrimSpace(strings.TrimPrefix(left, "regex"))
+		pattern = strings.TrimSpace(strings.TrimPrefix(left, "regex "))
 	} else {
 		return nil, makeErr("rule must start with 'literal' or 'regex'")
 	}
@@ -231,12 +231,13 @@ func RulesToPatterns(rules []RedactRule) ([]SecretPattern, []RedactParseError) {
 // RedactSourceInfo describes a REDACT.md source with its resolved path and rules.
 type RedactSourceInfo struct {
 	Source  RedactRuleSource
-	Path   string // empty if file not found
-	Rules  []RedactRule
-	Errors []RedactParseError
+	Path    string // empty if file not found
+	Rules   []RedactRule
+	Errors  []RedactParseError
+	IOError error // non-nil if file could not be read (permission denied, etc.)
 }
 
-// LoadCustomPatterns discovers and loads REDACT.md files from all 3 levels
+// LoadCustomPatterns discovers and loads REDACT.md files from all custom levels
 // (team, repo, user), merges them in order, and returns compiled patterns.
 // Returns patterns plus any parse errors encountered.
 func LoadCustomPatterns(projectRoot string) ([]SecretPattern, []RedactParseError) {
@@ -271,7 +272,10 @@ func DiscoverRedactSources(projectRoot string) []RedactSourceInfo {
 		if tc := config.FindRepoTeamContext(projectRoot); tc != nil && tc.Path != "" {
 			teamPath := filepath.Join(tc.Path, "docs", "REDACT.md")
 			teamSource.Path = teamPath
-			if parsed, err := ParseRedactFile(teamPath, RuleSourceTeam); err == nil && parsed != nil {
+			parsed, err := ParseRedactFile(teamPath, RuleSourceTeam)
+			if err != nil {
+				teamSource.IOError = err
+			} else if parsed != nil {
 				teamSource.Rules = parsed.Rules
 				teamSource.Errors = parsed.Errors
 			}
@@ -284,7 +288,10 @@ func DiscoverRedactSources(projectRoot string) []RedactSourceInfo {
 	if projectRoot != "" {
 		repoPath := filepath.Join(projectRoot, ".sageox", "REDACT.md")
 		repoSource.Path = repoPath
-		if parsed, err := ParseRedactFile(repoPath, RuleSourceRepo); err == nil && parsed != nil {
+		parsed, err := ParseRedactFile(repoPath, RuleSourceRepo)
+		if err != nil {
+			repoSource.IOError = err
+		} else if parsed != nil {
 			repoSource.Rules = parsed.Rules
 			repoSource.Errors = parsed.Errors
 		}
@@ -295,7 +302,10 @@ func DiscoverRedactSources(projectRoot string) []RedactSourceInfo {
 	userSource := RedactSourceInfo{Source: RuleSourceUser}
 	userPath := filepath.Join(paths.ConfigDir(), "REDACT.md")
 	userSource.Path = userPath
-	if parsed, err := ParseRedactFile(userPath, RuleSourceUser); err == nil && parsed != nil {
+	parsed, err := ParseRedactFile(userPath, RuleSourceUser)
+	if err != nil {
+		userSource.IOError = err
+	} else if parsed != nil {
 		userSource.Rules = parsed.Rules
 		userSource.Errors = parsed.Errors
 	}

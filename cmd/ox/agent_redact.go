@@ -154,6 +154,9 @@ func runAgentRedactPolicy(cmd *cobra.Command, args []string) error {
 				Line:    rule.LineNumber,
 			})
 		}
+		if src.IOError != nil {
+			allErrors = append(allErrors, fmt.Sprintf("%s: %s", src.Path, src.IOError))
+		}
 		for _, e := range src.Errors {
 			allErrors = append(allErrors, e.Error())
 		}
