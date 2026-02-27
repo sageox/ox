@@ -114,6 +114,11 @@ type ProjectConfig struct {
 	// Values: "disabled" (no recording), "auto" (automatic recording), "manual" (explicit start required)
 	// Empty string defaults to "auto".
 	SessionRecording string `json:"session_recording,omitempty"`
+
+	// SessionPublishing controls what happens when a session stops.
+	// Values: "auto" (upload to ledger on stop), "manual" (save locally, user uploads explicitly)
+	// Empty string defaults to "auto" for backward compatibility.
+	SessionPublishing string `json:"session_publishing,omitempty"`
 }
 
 // NeedsUpgrade returns true if the config version is older than CurrentConfigVersion

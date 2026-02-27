@@ -554,3 +554,129 @@ func TestBrandColors_AllFieldsSet(t *testing.T) {
 	assert.NotEmpty(t, colors.Error, "Error color should not be empty")
 	assert.NotEmpty(t, colors.Info, "Info color should not be empty")
 }
+
+// --- Tests migrated from cmd/ox/session_html_test.go for unexported functions ---
+
+func TestMapEntryType(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"user", "user"},
+		{"assistant", "assistant"},
+		{"message", "assistant"},
+		{"tool", "tool"},
+		{"tool_call", "tool"},
+		{"tool_result", "tool"},
+		{"system", "system"},
+		{"unknown", "info"},
+		{"", "info"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := mapEntryType(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestMapRoleToType(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"user", "user"},
+		{"assistant", "assistant"},
+		{"system", "system"},
+		{"unknown", "info"},
+		{"", "info"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := mapRoleToType(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestReclassifyByContent_SkillExpansion(t *testing.T) {
+	rawContent := "<!-- ox-hash: b1e68f3b2727 ver: 0.17.0 -->\nStart recording this agent session to the project ledger.\n\nUse when:\n- Beginning a new coding session"
+	got := reclassifyByContent("user", "<p>Start recording this agent session</p>", rawContent)
+	assert.Equal(t, "system", got, "skill expansion should be reclassified as system")
+}
+
+func TestReclassifyByContent_NormalUser(t *testing.T) {
+	got := reclassifyByContent("user", "<p>Fix the login bug</p>", "Fix the login bug")
+	assert.Equal(t, "user", got, "normal user message should stay as user")
+}
+
+func TestReclassifyByContent_SystemReminder(t *testing.T) {
+	got := reclassifyByContent("user", "<p>&lt;system-reminder&gt;context&lt;/system-reminder&gt;</p>", "<system-reminder>context</system-reminder>")
+	assert.Equal(t, "system", got, "system-reminder should be reclassified")
+}
+
+func TestReclassifyByContent_NonUserUnchanged(t *testing.T) {
+	got := reclassifyByContent("assistant", "<p>Hello</p>", "<!-- ox-hash: fake -->")
+	assert.Equal(t, "assistant", got, "assistant should not be reclassified even with ox-hash")
+}
+
+func TestBuildMessageView_SkillExpansionCollapsed(t *testing.T) {
+	entry := map[string]any{
+		"type":      "user",
+		"content":   "<!-- ox-hash: abc123 ver: 0.17.0 -->\nStart recording this session.\n\nKeywords: session start, record",
+		"timestamp": "2026-01-14T10:00:00Z",
+	}
+
+	msg := buildMessageView(1, entry, "User", "Assistant")
+	assert.Equal(t, "system", msg.Type, "skill expansion should be system")
+	assert.Equal(t, "System", msg.SenderLabel)
+}
+
+func TestBuildMessageView_OxNativeFormat(t *testing.T) {
+	entry := map[string]any{
+		"type":      "user",
+		"content":   "Hello world",
+		"timestamp": "2026-01-14T10:00:00Z",
+	}
+
+	msg := buildMessageView(1, entry, "User", "Assistant")
+
+	assert.Equal(t, 1, msg.ID)
+	assert.Equal(t, "user", msg.Type)
+	assert.Contains(t, msg.Content, "Hello world")
+	assert.False(t, msg.Timestamp.IsZero(), "timestamp should be parsed")
+}
+
+func TestBuildMessageView_LegacyNestedFormat(t *testing.T) {
+	entry := map[string]any{
+		"type":      "message",
+		"timestamp": "2026-01-14T10:00:00Z",
+		"data": map[string]any{
+			"role":    "user",
+			"content": "Hello from nested",
+		},
+	}
+
+	msg := buildMessageView(2, entry, "User", "Assistant")
+
+	assert.Equal(t, 2, msg.ID)
+	assert.Equal(t, "user", msg.Type)
+	assert.Contains(t, msg.Content, "Hello from nested")
+	assert.False(t, msg.Timestamp.IsZero())
+}
+
+func TestBuildMessageView_AlternativeTimestampField(t *testing.T) {
+	entry := map[string]any{
+		"type":    "user",
+		"content": "Hello with ts",
+		"ts":      "2026-01-14T10:00:00Z",
+	}
+
+	msg := buildMessageView(3, entry, "User", "Assistant")
+
+	assert.Equal(t, "user", msg.Type)
+	assert.Contains(t, msg.Content, "Hello with ts")
+	assert.False(t, msg.Timestamp.IsZero(), "should parse 'ts' field")
+}

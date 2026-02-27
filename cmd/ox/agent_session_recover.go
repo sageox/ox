@@ -9,6 +9,7 @@ import (
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
@@ -36,9 +37,9 @@ type sessionRecoverOutput struct {
 // whatever session data is available and uploads it to the ledger.
 //
 // Recovery strategy:
-//  1. If the adapter session file still exists → delegate to normal processAgentSession
-//  2. If only cache raw.jsonl exists → upload that directly to ledger
-//  3. If no data exists → clear stale state and warn
+//  1. If the adapter session file still exists -> delegate to normal processAgentSession
+//  2. If only cache raw.jsonl exists -> upload that directly to ledger
+//  3. If no data exists -> clear stale state and warn
 func runAgentSessionRecover(inst *agentinstance.Instance) error {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
@@ -57,7 +58,7 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 
 	slog.Info("recovering stale session", "agent_id", state.AgentID, "session_path", state.SessionPath)
 
-	// strategy 1: adapter session file still exists — use normal processing
+	// strategy 1: adapter session file still exists -- use normal processing
 	if state.SessionFile != "" {
 		if _, err := os.Stat(state.SessionFile); err == nil {
 			slog.Info("adapter session file found, using normal stop flow")
@@ -65,7 +66,7 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 		}
 	}
 
-	// strategy 2: cache raw.jsonl exists — upload directly
+	// strategy 2: cache raw.jsonl exists -- upload directly
 	if state.SessionPath != "" {
 		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
 		if _, err := os.Stat(rawPath); err == nil {
@@ -74,7 +75,7 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 		}
 	}
 
-	// strategy 3: no recoverable data — clear state and warn
+	// strategy 3: no recoverable data -- clear state and warn
 	_ = session.ClearRecordingState(projectRoot)
 
 	output := &sessionRecoverOutput{
@@ -119,9 +120,12 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, _ *s
 }
 
 // recoverFromCache uploads raw.jsonl from cache when the adapter file is gone.
-// raw.jsonl is the source of truth — all other artifacts (events, HTML, summary)
+// raw.jsonl is the source of truth -- all other artifacts (events, HTML, summary)
 // can be regenerated from it. This ensures no session data is lost even when
 // the AI coworker's original session file has been cleaned up.
+//
+// Interactive terminals get a confirmation prompt before uploading.
+// Non-interactive contexts (agents) auto-upload for backward compatibility.
 func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState, rawPath string) error {
 	// read raw session to get entry count and entries for summary prompt
 	stored, err := session.ReadSessionFromPath(rawPath)
@@ -132,6 +136,39 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 
 	entryCount := len(stored.Entries)
 	entries := convertStoredMapEntries(stored.Entries)
+
+	// interactive confirmation: prompt human users before uploading orphaned sessions
+	if cli.IsInteractive() {
+		prompt := fmt.Sprintf("Found orphaned session from %s (%d entries). Upload to ledger?",
+			state.StartedAt.Format("2006-01-02 15:04"), entryCount)
+		if !cli.ConfirmYesNo(prompt, false) {
+			// user declined -- offer to discard
+			if cli.ConfirmYesNo("Discard the orphaned session data?", false) {
+				_ = session.ClearRecordingState(projectRoot)
+				if state.SessionPath != "" {
+					_ = os.RemoveAll(state.SessionPath)
+				}
+				output := &sessionRecoverOutput{
+					Success: true,
+					Type:    "session_recover",
+					AgentID: inst.AgentID,
+					Message: "orphaned session discarded",
+				}
+				return outputRecoverJSON(output)
+			}
+			// user declined both upload and discard -- leave data in place
+			output := &sessionRecoverOutput{
+				Success:     true,
+				Type:        "session_recover",
+				AgentID:     inst.AgentID,
+				RawPath:     rawPath,
+				EntryCount:  entryCount,
+				SessionName: session.GetSessionName(state.SessionPath),
+				Message:     "recovery skipped (session data preserved locally)",
+			}
+			return outputRecoverJSON(output)
+		}
+	}
 
 	// resolve ledger path for upload
 	ledgerPath, ledgerErr := resolveLedgerPath()
@@ -211,7 +248,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	// clear stale recording state
 	_ = session.ClearRecordingState(projectRoot)
 
-	// all files copied and committed to ledger — prune local cache
+	// all files copied and committed to ledger -- prune local cache
 	if uploaded {
 		cacheDir := filepath.Dir(rawPath)
 		if cacheDir != "" && cacheDir != "." {

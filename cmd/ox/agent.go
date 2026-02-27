@@ -48,6 +48,7 @@ Use the session:
   ox agent <agent_id> session subagent-list # List subagent sessions
   ox agent <agent_id> session recover       # Recover stale/crashed session
   ox agent <agent_id> session abort         # Discard active session (destructive)
+  ox agent <agent_id> session delete <name> # Delete a completed session (destructive)
 
 Redaction policy:
   ox agent redact                           # View full redaction policy (all sources)
@@ -97,7 +98,7 @@ func init() {
 	agentCmd.PersistentFlags().Bool("text", false,
 		"human-readable text output (overrides JSON default)")
 
-	// force flag - skip confirmation for destructive operations (e.g., session abort)
+	// force flag - skip confirmation for destructive operations (e.g., session abort, delete)
 	agentCmd.PersistentFlags().Bool("force", false,
 		"skip confirmation for destructive operations")
 	_ = agentCmd.PersistentFlags().MarkHidden("force")
@@ -189,7 +190,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		return runAgentDoctor(inst)
 	case "session":
 		if len(subargs) == 0 {
-			return fmt.Errorf("session requires a subcommand\nUsage: ox agent %s session <start|stop|abort|remind|summarize|html|record|plan|import|capture-prior|subagent-complete|subagent-list|recover>", inst.AgentID)
+			return fmt.Errorf("session requires a subcommand\nUsage: ox agent %s session <start|stop|abort|delete|remind|summarize|html|record|plan|import|capture-prior|subagent-complete|subagent-list|recover>", inst.AgentID)
 		}
 		sessionCmd := subargs[0]
 		sessionArgs := subargs[1:]
@@ -220,8 +221,10 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 			return runAgentSessionRecover(inst)
 		case "abort":
 			return runAgentSessionAbort(inst, cmd)
+		case "delete":
+			return runAgentSessionDelete(inst, cmd, sessionArgs)
 		default:
-			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, remind, summarize, html, record, plan, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
+			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, delete, remind, summarize, html, record, plan, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
 		}
 	default:
 		return fmt.Errorf("unknown command: %s\nAvailable: doctor, session", subcommand)

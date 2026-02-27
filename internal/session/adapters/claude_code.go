@@ -275,13 +275,11 @@ func (a *ClaudeCodeAdapter) Read(sessionPath string) ([]RawEntry, error) {
 			continue
 		}
 
-		entry, err := a.parseLine(line)
+		parsed, err := a.parseLine(line)
 		if err != nil {
 			continue // skip malformed lines
 		}
-		if entry != nil {
-			entries = append(entries, *entry)
-		}
+		entries = append(entries, parsed...)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -403,13 +401,11 @@ func (a *ClaudeCodeAdapter) readFromOffset(path string, offset int64) ([]RawEntr
 			continue
 		}
 
-		entry, err := a.parseLine(line)
+		parsed, err := a.parseLine(line)
 		if err != nil {
 			continue
 		}
-		if entry != nil {
-			entries = append(entries, *entry)
-		}
+		entries = append(entries, parsed...)
 	}
 
 	// get new offset
@@ -421,8 +417,10 @@ func (a *ClaudeCodeAdapter) readFromOffset(path string, offset int64) ([]RawEntr
 	return entries, newOffset, nil
 }
 
-// parseLine converts a JSONL line into a RawEntry
-func (a *ClaudeCodeAdapter) parseLine(line []byte) (*RawEntry, error) {
+// parseLine converts a JSONL line into one or more RawEntries.
+// Assistant messages may contain multiple content blocks (text + tool_use),
+// each producing a separate RawEntry. User messages produce at most one.
+func (a *ClaudeCodeAdapter) parseLine(line []byte) ([]RawEntry, error) {
 	var raw claudeCodeEntry
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return nil, err
@@ -438,21 +436,21 @@ func (a *ClaudeCodeAdapter) parseLine(line []byte) (*RawEntry, error) {
 		return nil, nil // skip unknown types
 	}
 
-	entry := &RawEntry{
-		Raw: json.RawMessage(line),
-	}
-
-	// parse timestamp
-	if raw.Timestamp != "" {
-		t, err := time.Parse(time.RFC3339, raw.Timestamp)
-		if err == nil {
-			entry.Timestamp = t
-		}
-	}
-
 	// process based on type
 	switch raw.Type {
 	case "user":
+		entry := &RawEntry{
+			Raw: json.RawMessage(line),
+		}
+
+		// parse timestamp
+		if raw.Timestamp != "" {
+			t, err := time.Parse(time.RFC3339, raw.Timestamp)
+			if err == nil {
+				entry.Timestamp = t
+			}
+		}
+
 		content, class := a.classifyUserContent(&raw)
 		switch class {
 		case userContentSkip:
@@ -463,16 +461,17 @@ func (a *ClaudeCodeAdapter) parseLine(line []byte) (*RawEntry, error) {
 			entry.Role = "user"
 		}
 		entry.Content = content
+		return []RawEntry{*entry}, nil
+
 	case "assistant":
 		entries := a.extractAssistantContent(&raw)
 		if len(entries) == 0 {
 			return nil, nil
 		}
-		// return first entry, additional entries would need different handling
-		return &entries[0], nil
+		return entries, nil
 	}
 
-	return entry, nil
+	return nil, nil
 }
 
 // classifyUserContent extracts text content from user messages and classifies

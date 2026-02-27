@@ -7,13 +7,31 @@ const (
 	SessionRecordingAuto     = "auto"     // automatic recording
 )
 
+// SessionPublishing constants
+const (
+	SessionPublishingAuto   = "auto"   // upload to ledger on session stop (default)
+	SessionPublishingManual = "manual" // save locally, user uploads explicitly
+)
+
 // ValidSessionRecordingModes lists all valid session recording mode values.
 var ValidSessionRecordingModes = []string{SessionRecordingDisabled, SessionRecordingManual, SessionRecordingAuto}
+
+// ValidSessionPublishingModes lists all valid session publishing mode values.
+var ValidSessionPublishingModes = []string{SessionPublishingAuto, SessionPublishingManual}
 
 // IsValidSessionRecordingMode returns true if the mode is a recognized value.
 func IsValidSessionRecordingMode(mode string) bool {
 	switch mode {
 	case SessionRecordingDisabled, SessionRecordingManual, SessionRecordingAuto, "":
+		return true
+	}
+	return false
+}
+
+// IsValidSessionPublishingMode returns true if the mode is a recognized value.
+func IsValidSessionPublishingMode(mode string) bool {
+	switch mode {
+	case SessionPublishingAuto, SessionPublishingManual, "":
 		return true
 	}
 	return false
@@ -30,6 +48,17 @@ func NormalizeSessionRecording(mode string) string {
 		return SessionRecordingDisabled
 	default:
 		return SessionRecordingManual // default to manual (opt-in recording)
+	}
+}
+
+// NormalizeSessionPublishing normalizes session_publishing values.
+// Returns "auto" for unrecognized or empty values (backward compatible default).
+func NormalizeSessionPublishing(mode string) string {
+	switch mode {
+	case SessionPublishingAuto, SessionPublishingManual:
+		return mode
+	default:
+		return SessionPublishingAuto
 	}
 }
 
@@ -141,5 +170,43 @@ func loadTeamSessionRecording(projectRoot string) string {
 // GetSessionRecording is a convenience function that returns just the mode string.
 func GetSessionRecording(projectRoot string) string {
 	resolved := ResolveSessionRecording(projectRoot)
+	return resolved.Mode
+}
+
+// ResolvedSessionPublishing contains the effective publishing mode and its source.
+type ResolvedSessionPublishing struct {
+	Mode   string                 // effective mode: "auto" or "manual"
+	Source SessionRecordingSource // where the setting came from (reuses same source type)
+}
+
+// ResolveSessionPublishing determines the effective session publishing mode.
+// Priority: project config > "auto" (default)
+//
+// "auto" uploads to ledger on session stop (backward compatible default).
+// "manual" saves locally without uploading.
+func ResolveSessionPublishing(projectRoot string) *ResolvedSessionPublishing {
+	// check project config (.sageox/config.json)
+	if projectRoot != "" {
+		projectCfg, err := LoadProjectConfig(projectRoot)
+		if err == nil && projectCfg != nil {
+			if projectCfg.SessionPublishing != "" {
+				return &ResolvedSessionPublishing{
+					Mode:   NormalizeSessionPublishing(projectCfg.SessionPublishing),
+					Source: SessionRecordingSourceRepo,
+				}
+			}
+		}
+	}
+
+	// default to auto (upload on stop) for backward compatibility
+	return &ResolvedSessionPublishing{
+		Mode:   SessionPublishingAuto,
+		Source: SessionRecordingSourceDefault,
+	}
+}
+
+// GetSessionPublishing is a convenience function that returns just the publishing mode string.
+func GetSessionPublishing(projectRoot string) string {
+	resolved := ResolveSessionPublishing(projectRoot)
 	return resolved.Mode
 }
