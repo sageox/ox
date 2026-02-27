@@ -21,6 +21,7 @@ func TestSupportedAgents(t *testing.T) {
 		AgentTypeCodePuppy,
 		AgentTypeKiro,
 		AgentTypeOpenCode,
+		AgentTypeCodex,
 		AgentTypeGoose,
 		AgentTypeAmp,
 		AgentTypeCline,
@@ -59,6 +60,7 @@ func TestAgentTypeConstants(t *testing.T) {
 		{AgentTypeCodePuppy, "code-puppy"},
 		{AgentTypeKiro, "kiro"},
 		{AgentTypeOpenCode, "opencode"},
+		{AgentTypeCodex, "codex"},
 		{AgentTypeGoose, "goose"},
 		{AgentTypeAmp, "amp"},
 		{AgentTypeCline, "cline"},
@@ -294,4 +296,4 @@ func (a *mockAgent) Capabilities() Capabilities                                 
 func (a *mockAgent) HookManager() HookManager                                       { return nil }
 func (a *mockAgent) CommandManager() CommandManager                                 { return nil }
 func (a *mockAgent) IsInstalled(ctx context.Context, env Environment) (bool, error) { return true, nil }
-func (a *mockAgent) DetectVersion(_ context.Context, _ Environment) string           { return "" }
+func (a *mockAgent) DetectVersion(_ context.Context, _ Environment) string          { return "" }

@@ -46,6 +46,11 @@ linters:
         - G304  # file inclusion via variable - CLI reads user files
         - G306  # WriteFile perms - CLI needs readable config files
         - G404  # weak random - used for sampling, not crypto
+        - G702  # command injection via taint - CLI runs git/svn with known commands
+        - G703  # path traversal via taint - CLI reads/writes user-controlled paths by design
+        - G704  # SSRF via taint - CLI calls known API endpoints by design
+        - G115  # integer overflow int->rune - safe in bounded contexts
+        - G117  # exported field matches secret pattern - OAuth token structs need JSON export
 
     sloglint:
       kv-only: true

@@ -150,6 +150,7 @@ func TestPartialInitPrimingMatrix(t *testing.T) {
 			// isolated HOME so user-level checks don't leak
 			tmpHome := t.TempDir()
 			t.Setenv("HOME", tmpHome)
+			t.Setenv("AGENT_ENV", "claude-code")
 
 			// --- setup ---
 

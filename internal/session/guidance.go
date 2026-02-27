@@ -144,7 +144,7 @@ func FormatGuidanceText(phase GuidancePhase, agentID string, guidance SessionGui
 	if len(guidance.Include) > 0 {
 		sb.WriteString("INCLUDE in session:\n")
 		for _, item := range guidance.Include {
-			sb.WriteString(fmt.Sprintf("  - %s\n", item))
+			fmt.Fprintf(&sb, "  - %s\n", item)
 		}
 		sb.WriteString("\n")
 	}
@@ -152,7 +152,7 @@ func FormatGuidanceText(phase GuidancePhase, agentID string, guidance SessionGui
 	if len(guidance.Exclude) > 0 {
 		sb.WriteString("EXCLUDE from session:\n")
 		for _, item := range guidance.Exclude {
-			sb.WriteString(fmt.Sprintf("  - %s\n", item))
+			fmt.Fprintf(&sb, "  - %s\n", item)
 		}
 		sb.WriteString("\n")
 	}
@@ -160,14 +160,14 @@ func FormatGuidanceText(phase GuidancePhase, agentID string, guidance SessionGui
 	if len(guidance.Tips) > 0 {
 		sb.WriteString("Tips:\n")
 		for _, tip := range guidance.Tips {
-			sb.WriteString(fmt.Sprintf("  - %s\n", tip))
+			fmt.Fprintf(&sb, "  - %s\n", tip)
 		}
 		sb.WriteString("\n")
 	}
 
 	if phase == GuidancePhaseStart && guidance.ReminderInterval > 0 {
-		sb.WriteString(fmt.Sprintf("Reminder: After ~%d entries, run 'ox agent %s session remind'\n",
-			guidance.ReminderInterval, agentID))
+		fmt.Fprintf(&sb, "Reminder: After ~%d entries, run 'ox agent %s session remind'\n",
+			guidance.ReminderInterval, agentID)
 	}
 
 	return sb.String()
@@ -254,18 +254,18 @@ func FormatSummarizeGuidanceText(agentID string, guidance SummarizeGuidance) str
 	// show delegation hint prominently at top
 	if guidance.DelegationHint != nil && guidance.DelegationHint.Recommended {
 		sb.WriteString("DELEGATION RECOMMENDED:\n")
-		sb.WriteString(fmt.Sprintf("  Subagent: %s\n", guidance.DelegationHint.SubagentType))
-		sb.WriteString(fmt.Sprintf("  Model: %s\n", guidance.DelegationHint.ModelTier))
+		fmt.Fprintf(&sb, "  Subagent: %s\n", guidance.DelegationHint.SubagentType)
+		fmt.Fprintf(&sb, "  Model: %s\n", guidance.DelegationHint.ModelTier)
 		if guidance.DelegationHint.RunInBackground {
 			sb.WriteString("  Background: yes (non-blocking)\n")
 		}
-		sb.WriteString(fmt.Sprintf("  Reason: %s\n", guidance.DelegationHint.Reason))
+		fmt.Fprintf(&sb, "  Reason: %s\n", guidance.DelegationHint.Reason)
 		sb.WriteString("\n")
 	}
 
 	sb.WriteString("Instructions:\n")
 	for _, instr := range guidance.Instructions {
-		sb.WriteString(fmt.Sprintf("  - %s\n", instr))
+		fmt.Fprintf(&sb, "  - %s\n", instr)
 	}
 	sb.WriteString("\n")
 
@@ -275,11 +275,11 @@ func FormatSummarizeGuidanceText(agentID string, guidance SummarizeGuidance) str
 	sb.WriteString("\n```\n\n")
 
 	if guidance.SavePath != "" {
-		sb.WriteString(fmt.Sprintf("Save to: %s<session-date>-%s.md\n", guidance.SavePath, agentID))
+		fmt.Fprintf(&sb, "Save to: %s<session-date>-%s.md\n", guidance.SavePath, agentID)
 	}
 
 	if guidance.LedgerPath != "" {
-		sb.WriteString(fmt.Sprintf("Ledger: %s\n", guidance.LedgerPath))
+		fmt.Fprintf(&sb, "Ledger: %s\n", guidance.LedgerPath)
 	}
 
 	return sb.String()
@@ -354,32 +354,32 @@ func FormatHTMLGuidanceText(agentID string, guidance HTMLGuidance) string {
 	// show delegation hint prominently at top
 	if guidance.DelegationHint != nil && guidance.DelegationHint.Recommended {
 		sb.WriteString("DELEGATION RECOMMENDED:\n")
-		sb.WriteString(fmt.Sprintf("  Subagent: %s\n", guidance.DelegationHint.SubagentType))
-		sb.WriteString(fmt.Sprintf("  Model: %s\n", guidance.DelegationHint.ModelTier))
+		fmt.Fprintf(&sb, "  Subagent: %s\n", guidance.DelegationHint.SubagentType)
+		fmt.Fprintf(&sb, "  Model: %s\n", guidance.DelegationHint.ModelTier)
 		if guidance.DelegationHint.RunInBackground {
 			sb.WriteString("  Background: yes (non-blocking)\n")
 		}
-		sb.WriteString(fmt.Sprintf("  Reason: %s\n", guidance.DelegationHint.Reason))
+		fmt.Fprintf(&sb, "  Reason: %s\n", guidance.DelegationHint.Reason)
 		sb.WriteString("\n")
 	}
 
 	sb.WriteString("Instructions:\n")
 	for _, instr := range guidance.Instructions {
-		sb.WriteString(fmt.Sprintf("  - %s\n", instr))
+		fmt.Fprintf(&sb, "  - %s\n", instr)
 	}
 	sb.WriteString("\n")
 
 	if guidance.SourcePath != "" {
-		sb.WriteString(fmt.Sprintf("Source: %s\n", guidance.SourcePath))
+		fmt.Fprintf(&sb, "Source: %s\n", guidance.SourcePath)
 	}
 	if guidance.OutputPath != "" {
-		sb.WriteString(fmt.Sprintf("Output: %s\n", guidance.OutputPath))
+		fmt.Fprintf(&sb, "Output: %s\n", guidance.OutputPath)
 	}
 
 	if len(guidance.Features) > 0 {
 		sb.WriteString("\nFeatures included:\n")
 		for _, feature := range guidance.Features {
-			sb.WriteString(fmt.Sprintf("  - %s\n", feature))
+			fmt.Fprintf(&sb, "  - %s\n", feature)
 		}
 	}
 

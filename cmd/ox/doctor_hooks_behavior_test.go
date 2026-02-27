@@ -63,6 +63,7 @@ func TestHasUserLevelOxPrime_RequiresMarker(t *testing.T) {
 			require.NoError(t, os.WriteFile(claudeMDPath, []byte(tt.content), 0644))
 
 			t.Setenv("HOME", tmpHome)
+			t.Setenv("AGENT_ENV", "claude-code")
 
 			got := hasUserLevelOxPrime()
 			assert.Equal(t, tt.want, got, "hasUserLevelOxPrime() with content: %q", tt.content)
@@ -74,6 +75,7 @@ func TestHasUserLevelOxPrime_RequiresMarker(t *testing.T) {
 func TestHasUserLevelOxPrime_NoFile(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	t.Setenv("AGENT_ENV", "claude-code")
 
 	assert.False(t, hasUserLevelOxPrime(), "should return false when ~/.claude/CLAUDE.md doesn't exist")
 }

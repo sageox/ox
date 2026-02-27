@@ -107,10 +107,10 @@ func buildAttributionTextSection(attr config.ResolvedAttribution) string {
 		sb.WriteString("- **Plans**: Add footer noting SageOx guidance informed the approach\n")
 	}
 	if attr.Commit != "" {
-		sb.WriteString(fmt.Sprintf("- **Commits**: Add trailer \"%s\"\n", attr.Commit))
+		fmt.Fprintf(&sb, "- **Commits**: Add trailer \"%s\"\n", attr.Commit)
 	}
 	if attr.PR != "" {
-		sb.WriteString(fmt.Sprintf("- **PRs**: End body with \"%s\" (survives squash merge)\n", attr.Commit))
+		fmt.Fprintf(&sb, "- **PRs**: End body with \"%s\" (survives squash merge)\n", attr.Commit)
 	}
 	return sb.String()
 }
@@ -229,30 +229,30 @@ type agentGuidance struct {
 
 // agentPrimeOutput is the structured response for agent bootstrap (prime)
 type agentPrimeOutput struct {
-	Status          string                     `json:"status"` // fresh, unavailable
-	AgentID         string                     `json:"agent_id"`
-	Guidance        *agentGuidance             `json:"guidance,omitempty"` // intent-to-command lookup (scan first)
-	SessionID       string                     `json:"session_id,omitempty"`
-	AgentType       string                     `json:"agent_type,omitempty"`     // detected or specified agent type
-	AgentSupported  bool                       `json:"agent_supported"`          // true if agent is officially supported
-	SupportNotice   string                     `json:"support_notice,omitempty"` // warning for unsupported agents
-	Content         string                     `json:"content"`
-	Attribution     config.ResolvedAttribution `json:"attribution"`                // commit/PR attribution for ox-guided work
-	PlanFooter      string                     `json:"plan_footer,omitempty"`      // exact text for plan footer ("Guided by SageOx")
-	ProjectGuidance  *ProjectGuidance           `json:"project_guidance,omitempty"`  // AGENTS.md content if found
-	TeamInstructions *TeamInstructions           `json:"team_instructions,omitempty"` // team AGENTS.md/CLAUDE.md content if found
-	CapturePrior    *capturePriorGuidance      `json:"capture_prior,omitempty"`    // instructions for capturing prior history
-	Message         string                     `json:"message,omitempty"`
-	TokenEstimate   int                        `json:"token_estimate,omitempty"` // estimated token count
-	ContentLength   int                        `json:"content_length,omitempty"` // raw byte length
-	Session         *sessionStatus             `json:"session,omitempty"`        // session recording status
-	Ledger          *ledgerInfo                `json:"ledger,omitempty"`         // repo-specific archive of coding sessions (NOT team context)
-	Important       string                     `json:"important"`                // always-present disambiguation of knowledge sources
-	TeamContext       *teamContextInfo `json:"team_context,omitempty"`        // team context if configured
-	TeamContextStatus string           `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
-	OtherTeams        *otherTeams      `json:"other_teams,omitempty"`         // non-primary teams (nil when only 1 team)
-	UserNotification  string           `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user
-	AgentTip          string           `json:"agent_tip,omitempty"`           // contextual tip for the agent itself (not for the user)
+	Status            string                     `json:"status"` // fresh, unavailable
+	AgentID           string                     `json:"agent_id"`
+	Guidance          *agentGuidance             `json:"guidance,omitempty"` // intent-to-command lookup (scan first)
+	SessionID         string                     `json:"session_id,omitempty"`
+	AgentType         string                     `json:"agent_type,omitempty"`     // detected or specified agent type
+	AgentSupported    bool                       `json:"agent_supported"`          // true if agent is officially supported
+	SupportNotice     string                     `json:"support_notice,omitempty"` // warning for unsupported agents
+	Content           string                     `json:"content"`
+	Attribution       config.ResolvedAttribution `json:"attribution"`                 // commit/PR attribution for ox-guided work
+	PlanFooter        string                     `json:"plan_footer,omitempty"`       // exact text for plan footer ("Guided by SageOx")
+	ProjectGuidance   *ProjectGuidance           `json:"project_guidance,omitempty"`  // AGENTS.md content if found
+	TeamInstructions  *TeamInstructions          `json:"team_instructions,omitempty"` // team AGENTS.md/CLAUDE.md content if found
+	CapturePrior      *capturePriorGuidance      `json:"capture_prior,omitempty"`     // instructions for capturing prior history
+	Message           string                     `json:"message,omitempty"`
+	TokenEstimate     int                        `json:"token_estimate,omitempty"`      // estimated token count
+	ContentLength     int                        `json:"content_length,omitempty"`      // raw byte length
+	Session           *sessionStatus             `json:"session,omitempty"`             // session recording status
+	Ledger            *ledgerInfo                `json:"ledger,omitempty"`              // repo-specific archive of coding sessions (NOT team context)
+	Important         string                     `json:"important"`                     // always-present disambiguation of knowledge sources
+	TeamContext       *teamContextInfo           `json:"team_context,omitempty"`        // team context if configured
+	TeamContextStatus string                     `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
+	OtherTeams        *otherTeams                `json:"other_teams,omitempty"`         // non-primary teams (nil when only 1 team)
+	UserNotification  string                     `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user
+	AgentTip          string                     `json:"agent_tip,omitempty"`           // contextual tip for the agent itself (not for the user)
 	// Prime call tracking
 	PrimeCallCount       int    `json:"prime_call_count,omitempty"`       // number of prime calls this session
 	PrimeExcessiveNotice string `json:"prime_excessive_notice,omitempty"` // warning if prime called excessively
@@ -360,9 +360,10 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// use detected agent as fallback when --agent not provided
 	if agentType == "" {
 		if agent := agentx.CurrentAgent(); agent != nil {
-			agentType = agent.Name()
+			agentType = string(agent.Type())
 		}
 	}
+	agentType = canonicalAgentType(agentType)
 
 	// enrich User-Agent for all subsequent API calls in this process
 	if agentType != "" {
@@ -1440,30 +1441,56 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 // supportedAgents lists officially supported coding agents for MVP
 // Other agents may work but quality of guidance is not guaranteed
 var supportedAgents = map[string]bool{
-	"claude-code": true,
+	string(agentx.AgentTypeClaudeCode): true,
+	string(agentx.AgentTypeCodex):      true,
+}
+
+// canonicalAgentType normalizes display names and legacy aliases to canonical agent type slugs.
+func canonicalAgentType(agentType string) string {
+	slug := strings.ToLower(strings.TrimSpace(agentType))
+	switch slug {
+	case "":
+		return ""
+	case "claude-code", "claudecode", "claude code":
+		return string(agentx.AgentTypeClaudeCode)
+	case "codex":
+		return string(agentx.AgentTypeCodex)
+	}
+
+	// If the input is a display name from registry (e.g., "Cursor"), map to slug.
+	for _, agent := range agentx.DefaultRegistry.List() {
+		if strings.EqualFold(agent.Name(), agentType) {
+			return string(agent.Type())
+		}
+	}
+
+	return slug
 }
 
 // isAgentSupported returns true if the agent is officially supported
 func isAgentSupported(agentType string) bool {
-	if agentType == "" {
+	normalized := canonicalAgentType(agentType)
+	if normalized == "" {
 		return false // unknown agent is not supported
 	}
-	return supportedAgents[agentType]
+	return supportedAgents[normalized]
 }
 
 // getAgentSupportNotice returns a notice for unsupported agents, or empty string for supported ones
 func getAgentSupportNotice(agentType string) string {
+	normalized := canonicalAgentType(agentType)
+
 	if isAgentSupported(agentType) {
 		return ""
 	}
 
-	if agentType == "" {
+	if normalized == "" {
 		return "SageOx is explicitly designed for use with Claude Code. It is unknown if this agent will appropriately interpret and effectively apply team context. You should review plans deeply to ensure this agent has produced an insightful plan."
 	}
 
 	// get display name from registry (e.g., "cursor" -> "Cursor")
-	displayName := agentType
-	if agent, ok := agentx.DefaultRegistry.Get(agentx.AgentType(agentType)); ok {
+	displayName := normalized
+	if agent, ok := agentx.DefaultRegistry.Get(agentx.AgentType(normalized)); ok {
 		displayName = agent.Name()
 	}
 

@@ -56,6 +56,9 @@ func RegisterDefaultAgents() {
 	// OpenCode
 	agentx.DefaultRegistry.Register(agents.NewOpenCodeAgent())
 
+	// Codex
+	agentx.DefaultRegistry.Register(agents.NewCodexAgent())
+
 	// Goose
 	agentx.DefaultRegistry.Register(agents.NewGooseAgent())
 

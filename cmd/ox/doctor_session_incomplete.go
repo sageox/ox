@@ -71,11 +71,11 @@ func buildIncompleteSessionHumanResult(incomplete []IncompleteSessionInfo) check
 
 	for i := 0; i < showCount; i++ {
 		info := incomplete[i]
-		sb.WriteString(fmt.Sprintf("  - %s (missing: %s)\n", info.SessionID, strings.Join(info.Missing, ", ")))
+		fmt.Fprintf(&sb, "  - %s (missing: %s)\n", info.SessionID, strings.Join(info.Missing, ", "))
 	}
 
 	if count > 5 {
-		sb.WriteString(fmt.Sprintf("  ... and %d more", count-5))
+		fmt.Fprintf(&sb, "  ... and %d more", count-5)
 	}
 
 	// mark as agent-required since summaries need LLM generation

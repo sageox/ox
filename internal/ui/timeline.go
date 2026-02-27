@@ -67,7 +67,7 @@ func RenderTimelineNode(node TimelineNode) string {
 	if node.Summary != "" {
 		header = fmt.Sprintf("%s — %s", header, MutedStyle.Render(node.Summary))
 	}
-	b.WriteString(fmt.Sprintf("%s  %s\n", dot, header))
+	fmt.Fprintf(&b, "%s  %s\n", dot, header)
 
 	bar := MutedStyle.Render(TimelineBar)
 
@@ -95,9 +95,9 @@ func RenderTimelineNode(node TimelineNode) string {
 		if item.Detail != "" {
 			for _, dline := range strings.Split(item.Detail, "\n") {
 				if item.DetailRaw {
-					b.WriteString(fmt.Sprintf("%s     %s\n", bar, dline))
+					fmt.Fprintf(&b, "%s     %s\n", bar, dline)
 				} else {
-					b.WriteString(fmt.Sprintf("%s     %s\n", bar, MutedStyle.Render(dline)))
+					fmt.Fprintf(&b, "%s     %s\n", bar, MutedStyle.Render(dline))
 				}
 			}
 		}

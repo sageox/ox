@@ -589,7 +589,7 @@ func (m configModel) editView(width int) string {
 			desc = optionDescStyle.Render("  " + d)
 		}
 
-		b.WriteString(fmt.Sprintf("  %s %s%s\n", radio, valText, indicator))
+		fmt.Fprintf(&b, "  %s %s%s\n", radio, valText, indicator)
 		if desc != "" {
 			b.WriteString(desc + "\n")
 		}

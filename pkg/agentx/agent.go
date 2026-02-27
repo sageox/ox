@@ -36,6 +36,7 @@ const (
 	AgentTypeCodePuppy  AgentType = "code-puppy"
 	AgentTypeKiro       AgentType = "kiro"
 	AgentTypeOpenCode   AgentType = "opencode"
+	AgentTypeCodex      AgentType = "codex"
 	AgentTypeGoose      AgentType = "goose"
 	AgentTypeAmp        AgentType = "amp"
 	AgentTypeCline      AgentType = "cline"
@@ -61,6 +62,7 @@ var SupportedAgents = []AgentType{
 	AgentTypeCodePuppy,
 	AgentTypeKiro,
 	AgentTypeOpenCode,
+	AgentTypeCodex,
 	AgentTypeGoose,
 	AgentTypeAmp,
 	AgentTypeCline,
