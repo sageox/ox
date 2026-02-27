@@ -1,52 +1,63 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(ox agent:*)",
+      "Bash(grep:*)",
+      "Bash(python3:*)",
+      "Bash(ls:*)",
+      "Bash(go build:*)",
+      "Bash(go test:*)",
+      "Bash(make lint:*)"
+    ]
+  },
   "hooks": {
     "PreCompact": [
       {
+        "matcher": "",
         "hooks": [
           {
-            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=claude-code ox agent prime 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox-cli for optimized team context.'; fi",
-            "type": "command"
+            "type": "command",
+            "command": "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent prime 2>&1 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox-cli for optimized team context.'; fi"
           }
-        ],
-        "matcher": ""
+        ]
       }
     ],
     "SessionStart": [
       {
+        "matcher": "startup",
         "hooks": [
           {
-            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=claude-code ox agent prime --idempotent 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox-cli for optimized team context.'; fi",
-            "type": "command"
+            "type": "command",
+            "command": "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent prime --idempotent 2>&1 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox-cli for optimized team context.'; fi"
           }
-        ],
-        "matcher": "startup"
+        ]
       },
       {
+        "matcher": "resume",
         "hooks": [
           {
-            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=claude-code ox agent prime --idempotent 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox-cli for optimized team context.'; fi",
-            "type": "command"
+            "type": "command",
+            "command": "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent prime --idempotent 2>&1 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox-cli for optimized team context.'; fi"
           }
-        ],
-        "matcher": "resume"
+        ]
       },
       {
+        "matcher": "clear",
         "hooks": [
           {
-            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=claude-code ox agent prime 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox-cli for optimized team context.'; fi",
-            "type": "command"
+            "type": "command",
+            "command": "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent prime 2>&1 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox-cli for optimized team context.'; fi"
           }
-        ],
-        "matcher": "clear"
+        ]
       },
       {
+        "matcher": "compact",
         "hooks": [
           {
-            "command": "if command -v ox \u003e/dev/null 2\u003e\u00261; then AGENT_ENV=claude-code ox agent prime 2\u003e\u00261 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox-cli for optimized team context.'; fi",
-            "type": "command"
+            "type": "command",
+            "command": "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent prime 2>&1 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox-cli for optimized team context.'; fi"
           }
-        ],
-        "matcher": "compact"
+        ]
       }
     ]
   }

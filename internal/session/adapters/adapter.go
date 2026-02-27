@@ -119,6 +119,7 @@ func DetectAdapter() (Adapter, error) {
 var adapterAliases = map[string]string{
 	"claude code": "claude-code",
 	"claude":      "claude-code",
+	"codex":       "codex",
 }
 
 // GetAdapter returns a specific adapter by name.

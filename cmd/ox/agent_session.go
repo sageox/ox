@@ -24,6 +24,7 @@ import (
 	sessionhtml "github.com/sageox/ox/internal/session/html"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
+	"github.com/sageox/ox/pkg/agentx"
 )
 
 // Agent UX Decision: JSON is the default output format for session commands.
@@ -114,27 +115,45 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	// parse optional title from args (simple parsing: --title "value" or --title=value)
 	title := parseTitle(args)
 
-	// detect coding agent adapter
-	adapter, err := adapters.DetectAdapter()
-	if err != nil {
-		if errors.Is(err, adapters.ErrNoAdapterDetected) {
-			return fmt.Errorf("no coding agent detected\nSupported agents: Claude Code, Cursor, Windsurf")
+	agentType := canonicalAgentType(inst.AgentType)
+	adapterName := agentType
+	sessionFile := ""
+
+	if isManualSessionAgent(agentType) {
+		// Codex: use the codex adapter to find its session file.
+		// Codex stores plans inline in session files (no separate plan.md).
+		adapterName = string(agentx.AgentTypeCodex)
+		if codexAdapter, adapterErr := adapters.GetAdapter(string(agentx.AgentTypeCodex)); adapterErr == nil {
+			since := time.Now().Add(-5 * time.Minute)
+			if sf, findErr := codexAdapter.FindSessionFile(inst.AgentID, since); findErr == nil {
+				sessionFile = sf
+			}
+			// no session file is non-fatal: session tracking starts but content won't be captured
 		}
-		return fmt.Errorf("failed to detect coding agent: %w", err)
+	} else {
+		// detect coding agent adapter
+		adapter, err := adapters.DetectAdapter()
+		if err != nil {
+			if errors.Is(err, adapters.ErrNoAdapterDetected) {
+				return fmt.Errorf("no coding agent detected\nSupported agents: Claude Code, Cursor, Windsurf")
+			}
+			return fmt.Errorf("failed to detect coding agent: %w", err)
+		}
+
+		adapterName = adapter.Name()
+
+		// find the agent's session file
+		since := time.Now().Add(-5 * time.Minute)
+		sessionFile, err = adapter.FindSessionFile(inst.AgentID, since)
+		if err != nil {
+			if errors.Is(err, adapters.ErrSessionNotFound) {
+				return fmt.Errorf("no active %s session found", adapterName)
+			}
+			return fmt.Errorf("failed to find session file: %w", err)
+		}
 	}
 
-	adapterName := adapter.Name()
 	useragent.SetAgentType(adapterName)
-
-	// find the agent's session file
-	since := time.Now().Add(-5 * time.Minute)
-	sessionFile, err := adapter.FindSessionFile(inst.AgentID, since)
-	if err != nil {
-		if errors.Is(err, adapters.ErrSessionNotFound) {
-			return fmt.Errorf("no active %s session found", adapterName)
-		}
-		return fmt.Errorf("failed to find session file: %w", err)
-	}
 
 	// start recording with agent ID from session
 	opts := session.StartRecordingOptions{
@@ -225,6 +244,10 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	}
 	fmt.Println(string(jsonOut))
 	return nil
+}
+
+func isManualSessionAgent(agentType string) bool {
+	return canonicalAgentType(agentType) == string(agentx.AgentTypeCodex)
 }
 
 // runAgentSessionStop stops recording and saves the session.

@@ -59,6 +59,27 @@ func TestParseTitle(t *testing.T) {
 	}
 }
 
+func TestIsManualSessionAgent(t *testing.T) {
+	tests := []struct {
+		name      string
+		agentType string
+		want      bool
+	}{
+		{name: "codex canonical", agentType: "codex", want: true},
+		{name: "codex display alias", agentType: "Codex", want: true},
+		{name: "claude canonical", agentType: "claude", want: false},
+		{name: "claude legacy alias", agentType: "claude-code", want: false},
+		{name: "empty", agentType: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isManualSessionAgent(tt.agentType)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestFormatFilterModeDescription(t *testing.T) {
 	tests := []struct {
 		mode     string
