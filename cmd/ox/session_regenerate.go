@@ -451,27 +451,32 @@ func regenerateSessionRedact(projectRoot, ledgerPath, sessionsDir, nameArg strin
 		return result, nil
 	}
 
-	if entriesRedacted == 0 {
+	// redact summary.json if it exists (before early return so summary-only secrets are caught)
+	summaryRedacted := false
+	summaryPath := filepath.Join(sessionPath, "summary.json")
+	if _, err := os.Stat(summaryPath); err == nil {
+		var sumErr error
+		summaryRedacted, sumErr = redactSummaryJSON(summaryPath, redactor)
+		if sumErr != nil {
+			slog.Warn("summary.json redaction failed", "session", sessionName, "error", sumErr)
+		}
+	}
+
+	if entriesRedacted == 0 && !summaryRedacted {
 		result.Skipped = true
 		return result, nil
 	}
 
 	// re-write raw.jsonl with redacted content
-	if err := rewriteRawJSONL(rawPath, rawSession); err != nil {
-		return nil, fmt.Errorf("rewrite raw.jsonl for %s: %w", sessionName, err)
+	if entriesRedacted > 0 {
+		if err := rewriteRawJSONL(rawPath, rawSession); err != nil {
+			return nil, fmt.Errorf("rewrite raw.jsonl for %s: %w", sessionName, err)
+		}
 	}
 
 	// regenerate downstream artifacts
 	if err := regenerateArtifacts(sessionPath, rawSession); err != nil {
 		slog.Warn("artifact regeneration partially failed", "session", sessionName, "error", err)
-	}
-
-	// redact summary.json if it exists
-	summaryPath := filepath.Join(sessionPath, "summary.json")
-	if _, err := os.Stat(summaryPath); err == nil {
-		if err := redactSummaryJSON(summaryPath, redactor); err != nil {
-			slog.Warn("summary.json redaction failed", "session", sessionName, "error", err)
-		}
 	}
 
 	// upload all content files to LFS
@@ -578,6 +583,8 @@ func regenerateArtifacts(sessionPath string, rawSession *session.StoredSession) 
 		if err := htmlGen.GenerateToFile(rawSession, htmlPath); err != nil {
 			errs = append(errs, fmt.Sprintf("session.html: %s", err))
 		}
+	} else {
+		errs = append(errs, fmt.Sprintf("session.html init: %s", err))
 	}
 
 	// session.md
@@ -684,15 +691,16 @@ func downloadFileFromLFS(projectRoot, sessionPath string, meta *lfs.SessionMeta,
 }
 
 // redactSummaryJSON reads summary.json, redacts text fields, and re-writes it.
-func redactSummaryJSON(path string, redactor *session.Redactor) error {
+// Returns true if any changes were made.
+func redactSummaryJSON(path string, redactor *session.Redactor) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return false, err
 	}
 
 	var summary session.SummarizeResponse
 	if err := json.Unmarshal(data, &summary); err != nil {
-		return fmt.Errorf("parse summary.json: %w", err)
+		return false, fmt.Errorf("parse summary.json: %w", err)
 	}
 
 	changed := false
@@ -736,21 +744,47 @@ func redactSummaryJSON(path string, redactor *session.Redactor) error {
 			changed = true
 		}
 	}
+	for i, diagram := range summary.Diagrams {
+		if out, found := redactor.RedactString(diagram); len(found) > 0 {
+			summary.Diagrams[i] = out
+			changed = true
+		}
+	}
+	for i, title := range summary.ChapterTitles {
+		if out, found := redactor.RedactString(title); len(found) > 0 {
+			summary.ChapterTitles[i] = out
+			changed = true
+		}
+	}
+	for i := range summary.SageoxInsights {
+		if out, found := redactor.RedactString(summary.SageoxInsights[i].Topic); len(found) > 0 {
+			summary.SageoxInsights[i].Topic = out
+			changed = true
+		}
+		if out, found := redactor.RedactString(summary.SageoxInsights[i].Insight); len(found) > 0 {
+			summary.SageoxInsights[i].Insight = out
+			changed = true
+		}
+		if out, found := redactor.RedactString(summary.SageoxInsights[i].Impact); len(found) > 0 {
+			summary.SageoxInsights[i].Impact = out
+			changed = true
+		}
+	}
 
 	if !changed {
-		return nil
+		return false, nil
 	}
 
 	outData, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal summary.json: %w", err)
+		return false, fmt.Errorf("marshal summary.json: %w", err)
 	}
 
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, outData, 0644); err != nil {
-		return err
+		return false, err
 	}
-	return os.Rename(tmpPath, path)
+	return true, os.Rename(tmpPath, path)
 }
 
 // commitAndPushLedgerBatch commits all modified meta.json files in one commit and pushes.

@@ -298,8 +298,9 @@ func TestRedactSummaryJSON(t *testing.T) {
 		path := writeSummary(t, dir, summary)
 
 		redactor := session.NewRedactor()
-		err := redactSummaryJSON(path, redactor)
+		changed, err := redactSummaryJSON(path, redactor)
 		require.NoError(t, err)
+		assert.True(t, changed)
 
 		result := readSummary(t, path)
 
@@ -331,8 +332,9 @@ func TestRedactSummaryJSON(t *testing.T) {
 		require.NoError(t, err)
 
 		redactor := session.NewRedactor()
-		err = redactSummaryJSON(path, redactor)
+		changed, err := redactSummaryJSON(path, redactor)
 		require.NoError(t, err)
+		assert.False(t, changed)
 
 		// file should not have been rewritten (no temp file dance)
 		info2, err := os.Stat(path)
@@ -351,7 +353,7 @@ func TestRedactSummaryJSON(t *testing.T) {
 		path := filepath.Join(dir, "nonexistent.json")
 
 		redactor := session.NewRedactor()
-		err := redactSummaryJSON(path, redactor)
+		_, err := redactSummaryJSON(path, redactor)
 		assert.Error(t, err)
 	})
 
@@ -361,7 +363,7 @@ func TestRedactSummaryJSON(t *testing.T) {
 		require.NoError(t, os.WriteFile(path, []byte("{invalid json"), 0644))
 
 		redactor := session.NewRedactor()
-		err := redactSummaryJSON(path, redactor)
+		_, err := redactSummaryJSON(path, redactor)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "parse summary.json")
 	})
@@ -376,11 +378,45 @@ func TestRedactSummaryJSON(t *testing.T) {
 		path := writeSummary(t, dir, summary)
 
 		redactor := session.NewRedactor()
-		err := redactSummaryJSON(path, redactor)
+		changed, err := redactSummaryJSON(path, redactor)
 		require.NoError(t, err)
+		assert.True(t, changed)
 
 		result := readSummary(t, path)
 		assert.NotContains(t, result.FinalPlan, fakeKey)
+	})
+
+	t.Run("redacts Diagrams ChapterTitles and SageoxInsights", func(t *testing.T) {
+		dir := t.TempDir()
+		fakeKey := "AKIAIOSFODNN7EXAMPLE"
+		summary := session.SummarizeResponse{
+			Title:         "Session with extra fields",
+			Diagrams:      []string{"graph TD; A-->" + fakeKey, "clean diagram"},
+			ChapterTitles: []string{"Chapter about " + fakeKey, "Clean chapter"},
+			SageoxInsights: []session.SageoxInsight{
+				{
+					Seq:     1,
+					Topic:   "auth with " + fakeKey,
+					Insight: "Used " + fakeKey + " for deploy",
+					Impact:  "Deployed via " + fakeKey,
+				},
+			},
+		}
+		path := writeSummary(t, dir, summary)
+
+		redactor := session.NewRedactor()
+		changed, err := redactSummaryJSON(path, redactor)
+		require.NoError(t, err)
+		assert.True(t, changed)
+
+		result := readSummary(t, path)
+		assert.NotContains(t, result.Diagrams[0], fakeKey)
+		assert.Equal(t, "clean diagram", result.Diagrams[1])
+		assert.NotContains(t, result.ChapterTitles[0], fakeKey)
+		assert.Equal(t, "Clean chapter", result.ChapterTitles[1])
+		assert.NotContains(t, result.SageoxInsights[0].Topic, fakeKey)
+		assert.NotContains(t, result.SageoxInsights[0].Insight, fakeKey)
+		assert.NotContains(t, result.SageoxInsights[0].Impact, fakeKey)
 	})
 
 	t.Run("atomic write cleans up temp file", func(t *testing.T) {
@@ -392,7 +428,7 @@ func TestRedactSummaryJSON(t *testing.T) {
 		path := writeSummary(t, dir, summary)
 
 		redactor := session.NewRedactor()
-		err := redactSummaryJSON(path, redactor)
+		_, err := redactSummaryJSON(path, redactor)
 		require.NoError(t, err)
 
 		_, err = os.Stat(path + ".tmp")
