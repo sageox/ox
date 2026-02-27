@@ -99,6 +99,7 @@ func TestCheckAgentEnvValidity(t *testing.T) {
 
 		result := checkAgentEnvValidity()
 		assert.True(t, result.passed, "expected passed for valid AGENT_ENV=claude-code")
+		assert.Contains(t, result.message, "canonical: claude")
 	})
 
 	t.Run("valid agent case insensitive", func(t *testing.T) {
@@ -106,6 +107,22 @@ func TestCheckAgentEnvValidity(t *testing.T) {
 
 		result := checkAgentEnvValidity()
 		assert.True(t, result.passed, "expected passed for valid AGENT_ENV=Claude-Code (case insensitive)")
+	})
+
+	t.Run("valid canonical agent slug", func(t *testing.T) {
+		os.Setenv("AGENT_ENV", "claude")
+
+		result := checkAgentEnvValidity()
+		assert.True(t, result.passed, "expected passed for valid AGENT_ENV=claude")
+		assert.Contains(t, result.message, "canonical: claude")
+	})
+
+	t.Run("valid canonical code puppy slug", func(t *testing.T) {
+		os.Setenv("AGENT_ENV", "code-puppy")
+
+		result := checkAgentEnvValidity()
+		assert.True(t, result.passed, "expected passed for valid AGENT_ENV=code-puppy")
+		assert.Contains(t, result.message, "canonical: code-puppy")
 	})
 
 	t.Run("unknown agent", func(t *testing.T) {

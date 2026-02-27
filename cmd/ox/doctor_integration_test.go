@@ -608,7 +608,7 @@ func TestCheckCodexIntegration_ProjectDetected(t *testing.T) {
 	if !strings.Contains(result.message, "no hooks needed") {
 		t.Errorf("expected message to mention no hooks needed, got: %s", result.message)
 	}
-	if !strings.Contains(result.message, "ox agent session start") {
+	if !strings.Contains(result.message, "ox agent <id> session start") {
 		t.Errorf("expected message to mention manual session start, got: %s", result.message)
 	}
 }

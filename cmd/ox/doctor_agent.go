@@ -51,18 +51,32 @@ func checkAgentEnvValidity() checkResult {
 			"Set AGENT_ENV to override agent detection")
 	}
 
-	// check if it matches a known agent type
-	knownAgents := []string{
-		"claude-code", "cursor", "windsurf", "cline", "aider",
-		"codex", "opencode", "gemini", "codepuppy", "droid",
+	// Normalize aliases to canonical slugs so doctor output matches agentx
+	// AgentType constants. Keep legacy aliases accepted for compatibility.
+	aliases := map[string]string{
+		"claude-code": "claude",
+		"claudecode":  "claude",
+		"claude":      "claude",
+		"cursor":      "cursor",
+		"windsurf":    "windsurf",
+		"cline":       "cline",
+		"aider":       "aider",
+		"codex":       "codex",
+		"opencode":    "opencode",
+		"gemini":      "gemini",
+		"codepuppy":   "code-puppy",
+		"code-puppy":  "code-puppy",
+		"droid":       "droid",
+	}
+	agentEnvLower := strings.ToLower(agentEnv)
+	if canonical, ok := aliases[agentEnvLower]; ok {
+		return PassedCheck("AGENT_ENV",
+			fmt.Sprintf("Valid: %s (canonical: %s)", agentEnv, canonical))
 	}
 
-	agentEnvLower := strings.ToLower(agentEnv)
-	for _, known := range knownAgents {
-		if agentEnvLower == known {
-			return PassedCheck("AGENT_ENV",
-				fmt.Sprintf("Valid: %s", agentEnv))
-		}
+	knownAgents := []string{
+		"claude", "cursor", "windsurf", "cline", "aider",
+		"codex", "opencode", "gemini", "code-puppy", "droid",
 	}
 
 	return WarningCheck("AGENT_ENV",

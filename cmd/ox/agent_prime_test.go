@@ -339,7 +339,7 @@ func TestCodexLifecycleNotification(t *testing.T) {
 				if !strings.Contains(got, "no native hooks") {
 					t.Errorf("expected Codex lifecycle note to mention no hooks, got: %q", got)
 				}
-				if !strings.Contains(got, "ox agent session start") {
+				if !strings.Contains(got, "ox agent <id> session start") {
 					t.Errorf("expected Codex lifecycle note to mention manual session start, got: %q", got)
 				}
 			}

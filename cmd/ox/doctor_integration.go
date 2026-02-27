@@ -442,7 +442,7 @@ func detectCodePuppy() bool {
 func checkCodexIntegration() checkResult {
 	agent := &CodexAgent{}
 	projectDetected := agent.DetectProject()
-	manualLifecycle := "Manual lifecycle (optional): run `ox agent prime` at session start, and use `ox agent session start` / `ox agent session stop` for recording."
+	manualLifecycle := "Manual lifecycle (optional): run `ox agent prime` at session start, then use `ox agent <id> session start` / `ox agent <id> session stop` for recording."
 
 	if projectDetected {
 		// project has .codex/ - show as integrated via AGENTS.md

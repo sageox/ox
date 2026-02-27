@@ -1510,7 +1510,7 @@ func codexLifecycleNotification(agentType string) string {
 		return ""
 	}
 
-	return "Codex uses AGENTS.md directly (no native hooks). Re-run `ox agent prime` when starting a new Codex session or after context resets (for example, /clear or compaction). Session recording enhancements for Codex are deferred; manual recording remains available via `ox agent session start` and `ox agent session stop`."
+	return "Codex uses AGENTS.md directly (no native hooks). Re-run `ox agent prime` when starting a new Codex session or after context resets (for example, /clear or compaction). Session recording enhancements for Codex are deferred; manual recording remains available via `ox agent <id> session start` and `ox agent <id> session stop`."
 }
 
 // trackInstanceStart tracks an agent instance start event
