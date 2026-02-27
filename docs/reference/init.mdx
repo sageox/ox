@@ -1,7 +1,7 @@
 ---
 title: "ox init"
 description: "CLI reference for ox init"
-sidebar_position: 22
+sidebar_position: 24
 ---
 
 ## ox init
@@ -25,7 +25,7 @@ This command will:
 4. Inject 'ox agent prime' into AGENTS.md/CLAUDE.md
 5. Install agent hooks and slash commands
 6. Stage the created files in git
-7. Associate the repo with your team (prompts if multiple teams)
+7. Associate the repo with your team (prompts for team selection)
 8. Register repository with SageOx API
 
 Use --team to specify a team ID directly, or let ox init prompt you.
@@ -37,6 +37,7 @@ ox init [flags]
 ### Options
 
 ```
+      --force         initialize even if .sageox/ exists on remote
   -h, --help          help for init
   -q, --quiet         suppress non-essential output (default: false)
       --team string   team ID to associate this repo with

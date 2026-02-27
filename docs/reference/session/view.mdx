@@ -1,7 +1,7 @@
 ---
 title: "ox session view"
 description: "CLI reference for ox session view"
-sidebar_position: 41
+sidebar_position: 44
 ---
 
 ## ox session view
@@ -12,15 +12,15 @@ View a session
 
 View a session in your preferred format.
 
-Without arguments, shows the most recent session.
-Default format is configurable via 'ox config set view_format html|text|json'.
+Without arguments, shows the most recent session in the web viewer.
+Default format is configurable via 'ox config set view_format web|html|text|json'.
 
 Examples:
-  ox session view                         # latest, default format (html)
-  ox session view 2026-01-06T14-32-ryan   # specific session
-  ox session view --text                  # terminal markdown
-  ox session view --html                  # browser HTML
-  ox session view --json                  # structured JSON
+  ox session view                         # open in web viewer (default)
+  ox session view 2026-01-06T14-32-ryan   # specific session in web viewer
+  ox session view --html                  # view local session in browser (HTML)
+  ox session view --text                  # view local session in terminal (markdown)
+  ox session view --json                  # view local session as structured JSON
   ox session view --input /path/to/raw.jsonl
 
 ```
@@ -31,13 +31,13 @@ ox session view [session-name] [flags]
 
 ```
   -h, --help           help for view
-      --html           view in browser (HTML)
+      --html           view local session in browser (HTML)
   -i, --input string   input JSONL file path
-      --json           view as structured JSON
+      --json           view local session as structured JSON
       --latest         show most recent session
       --limit int      limit number of entries shown (0 = all)
       --metadata       show only metadata (no entries)
-      --text           view in terminal (markdown)
+      --text           view local session in terminal (markdown)
 ```
 
 ### Options inherited from parent commands

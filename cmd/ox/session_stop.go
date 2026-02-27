@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 
 	"github.com/sageox/ox/internal/endpoint"
@@ -81,7 +82,12 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 	// create redactor for secret scrubbing
 	// CRITICAL: Both raw and events sessions must have secrets scrubbed
 	// before storage to prevent credential leaks in ledgers
-	redactor := session.NewRedactor()
+	redactor, parseErrs := session.NewRedactorWithCustomRules(projectRoot)
+	if len(parseErrs) > 0 {
+		for _, pe := range parseErrs {
+			slog.Warn("redaction rule parse error", "file", pe.Path, "line", pe.Line, "error", pe.Message)
+		}
+	}
 
 	// convert raw entries to session entries and redact secrets
 	entries := make([]session.Entry, 0, len(rawEntries))

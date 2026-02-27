@@ -8,9 +8,10 @@ import (
 
 // SecretPattern defines a pattern for detecting secrets
 type SecretPattern struct {
-	Name    string         // identifier for the pattern
-	Pattern *regexp.Regexp // compiled regex
-	Redact  string         // replacement text, e.g., "[REDACTED_AWS_KEY]"
+	Name    string           // identifier for the pattern
+	Pattern *regexp.Regexp   // compiled regex
+	Redact  string           // replacement text, e.g., "[REDACTED_AWS_KEY]"
+	Source  RedactRuleSource // origin: builtin, team, repo, or user (zero = builtin)
 }
 
 // DefaultPatterns returns built-in secret patterns covering common credential types.

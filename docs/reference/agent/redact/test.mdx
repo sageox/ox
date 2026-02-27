@@ -1,31 +1,31 @@
 ---
-title: "ox agent team-ctx"
-description: "CLI reference for ox agent team-ctx"
-sidebar_position: 7
+title: "ox agent redact test"
+description: "CLI reference for ox agent redact test"
+sidebar_position: 6
 ---
 
-## ox agent team-ctx
+## ox agent redact test
 
-Output team context for AI agent planning
+Test redaction on sample text
 
 ### Synopsis
 
-Output team discussions and distilled context for AI agent planning.
+Apply all redaction rules (built-in + custom) to sample text.
 
-Lists the 15 most recent discussion files (read them for full detail),
-then outputs the distilled summary from agent-context/distilled-discussions.md.
+Pass text as an argument, or use '-' to read from stdin.
 
-Output includes a content hash (team-ctx:<hash>) - if this marker is already
-in your context, you don't need to re-run this command.
+Examples:
+  ox agent redact test "AKIA1234567890123456"
+  echo "password='hunter2'" | ox agent redact test -
 
 ```
-ox agent team-ctx [flags]
+ox agent redact test [text|-] [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for team-ctx
+  -h, --help   help for test
 ```
 
 ### Options inherited from parent commands
@@ -43,5 +43,5 @@ ox agent team-ctx [flags]
 
 ### SEE ALSO
 
-* [ox agent](/agent)	 - UX exposed to AI coding agents (Not for Human Use)
+* [ox agent redact](/agent/redact)	 - Show the complete redaction policy from all sources
 

@@ -60,20 +60,56 @@ Run `ox redaction verify` to confirm your binary hasn't been tampered with.
 ## Inspecting the Policy
 
 ```bash
-# View the complete pattern list
-ox redaction policy
+# View all rules (built-in + custom) from all sources
+ox agent redact
+ox agent redact --text
+
+# View built-in patterns only
+ox session redaction policy
 
 # Verify signature integrity
-ox redaction verify
-
-# JSON output for automation
-ox redaction policy --json
+ox session redaction verify
 ```
 
-## Adding Custom Patterns
+## Custom Redaction Rules (REDACT.md)
 
-Custom redaction patterns can be added per-project (coming soon). For now,
-the default patterns cover most common secrets.
+Add custom patterns at three levels using `REDACT.md` files:
+
+| Level | Path | Scope |
+|-------|------|-------|
+| **Team** | `<team_context>/docs/REDACT.md` | All team members |
+| **Repo** | `.sageox/REDACT.md` | This repository |
+| **User** | `~/.config/sageox/REDACT.md` | Personal |
+
+Custom rules are **additive** -- they layer on top of built-in patterns.
+Built-in patterns cannot be disabled.
+
+### Format
+
+````markdown
+# My Redaction Rules
+
+```redact
+# Exact string match
+literal "api.internal.acme.com" -> [REDACTED_INTERNAL_HOST]
+
+# Regex pattern (Go syntax)
+regex "ACME-[a-f0-9]{32}" -> [REDACTED_ACME_KEY]
+
+# Case-insensitive via (?i)
+regex "(?i)project\s+falcon" -> [REDACTED_CODENAME]
+```
+````
+
+Only content inside ` ```redact ` blocks is parsed. Everything else is documentation.
+
+### Inspecting & Testing
+
+```bash
+ox agent redact                # view all rules (built-in + custom), JSON
+ox agent redact --text         # human-readable view
+ox agent redact test "text"    # test rules against sample text
+```
 
 If you find a secret type that should be redacted but isn't, please
 [open an issue](https://github.com/sageox/ox/issues).

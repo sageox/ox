@@ -1,35 +1,31 @@
 ---
-title: "ox session status"
-description: "CLI reference for ox session status"
-sidebar_position: 42
+title: "ox session push-summary"
+description: "CLI reference for ox session push-summary"
+sidebar_position: 37
 ---
 
-## ox session status
+## ox session push-summary
 
-Check recording status
+Push session summary to ledger
 
 ### Synopsis
 
-Check the current session recording status.
+Push a generated summary JSON file to the session's ledger directory.
 
-Shows whether a recording is in progress, and if so, displays:
-- Recording title (if set)
-- Duration
-- Coding agent being recorded
-- Session file location
-
-Examples:
-  ox session status
-  ox session status --json
+Called automatically by coding agents after processing the summary_prompt
+from 'ox session stop'. The summary file is committed directly to git
+(no LFS needed) alongside meta.json.
 
 ```
-ox session status [flags]
+ox session push-summary [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for status
+      --file string          Path to the summary JSON file
+  -h, --help                 help for push-summary
+      --session-dir string   Path to the session directory in the ledger
 ```
 
 ### Options inherited from parent commands

@@ -1,7 +1,7 @@
 ---
 title: "ox session list"
 description: "CLI reference for ox session list"
-sidebar_position: 34
+sidebar_position: 36
 ---
 
 ## ox session list
@@ -12,7 +12,7 @@ List sessions
 
 List sessions in the ledger.
 
-Shows date, user, duration, and type for each session.
+Shows date, time, user, and hydration status for each session.
 Sessions are sorted by date with newest first.
 
 By default, only shows sessions from the last 7 days for performance.
@@ -22,8 +22,6 @@ Examples:
   ox session list              # show last 10 from past 7 days
   ox session list --limit 20   # show last 20 from past 7 days
   ox session list --all        # show all sessions (may be slow)
-  ox session list --raw        # show only raw sessions
-  ox session list --events     # show only events sessions
 
 ```
 ox session list [flags]
@@ -33,10 +31,8 @@ ox session list [flags]
 
 ```
       --all         show all sessions regardless of age (may be slow)
-      --events      show only events sessions
   -h, --help        help for list
       --limit int   maximum sessions to show (0 for no limit) (default 10)
-      --raw         show only raw sessions
 ```
 
 ### Options inherited from parent commands

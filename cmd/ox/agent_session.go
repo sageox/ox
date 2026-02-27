@@ -513,7 +513,12 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	filename := session.GetSessionName(state.SessionPath)
 
 	// create redactor for secret scrubbing
-	redactor := session.NewRedactor()
+	redactor, parseErrs := session.NewRedactorWithCustomRules(projectRoot)
+	if len(parseErrs) > 0 {
+		for _, pe := range parseErrs {
+			slog.Warn("redaction rule parse error", "file", pe.Path, "line", pe.Line, "error", pe.Message)
+		}
+	}
 
 	// convert raw entries to session entries and redact secrets
 	entries := make([]session.Entry, 0, len(rawEntries))

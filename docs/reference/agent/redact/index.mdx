@@ -1,0 +1,54 @@
+---
+title: "ox agent redact"
+description: "CLI reference for ox agent redact"
+sidebar_position: 5
+---
+
+## ox agent redact
+
+Show the complete redaction policy from all sources
+
+### Synopsis
+
+Display the complete redaction policy assembled from all 4 sources:
+  1. builtin  - Cryptographically signed patterns for common secrets
+  2. team     - Team-level patterns from team context REDACT.md
+  3. repo     - Repo-level patterns from .sageox/REDACT.md
+  4. user     - User-level patterns from ~/.config/sageox/REDACT.md
+
+Default output is JSON for agent consumption. Use --text for human-readable output.
+
+Examples:
+  ox agent redact              # JSON output (all sources)
+  ox agent redact --text       # human-readable output
+  ox agent redact test "AKIA1234567890123456"   # test redaction on sample text
+  echo "my secret" | ox agent redact test -     # test redaction from stdin
+
+```
+ox agent redact [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for redact
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+      --review           security audit mode: human summary + machine output
+      --text             human-readable text output (overrides JSON default)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox agent](/agent)	 - UX exposed to AI coding agents (Not for Human Use)
+* [ox agent redact test](/agent/redact/test)	 - Test redaction on sample text
+

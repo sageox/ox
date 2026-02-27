@@ -82,6 +82,7 @@ func init() {
 	agentCmd.AddCommand(agentPrimeCmd)
 	agentCmd.AddCommand(agentListCmd)
 	agentCmd.AddCommand(agentTeamCtxCmd)
+	agentCmd.AddCommand(agentRedactCmd)
 
 	// review flag - security audit mode for inspecting what agents receive
 	// shows both human-readable summary and machine JSON output
