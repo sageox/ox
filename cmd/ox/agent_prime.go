@@ -167,6 +167,14 @@ type teamContextInfo struct {
 	// Listed in prime output so agents know what's available and when to read each doc.
 	// Content is NOT inlined — agents read on demand via file path.
 	TeamDocs []teamdocs.TeamDoc `json:"team_docs,omitempty"`
+
+	// v4 Team Memory
+	MemoryContent string   `json:"memory_content,omitempty"` // full MEMORY.md content (always inlined)
+	SoulHint      string   `json:"soul_hint,omitempty"`      // path to SOUL.md (reference, not inlined)
+	TeamHint      string   `json:"team_hint,omitempty"`      // path to TEAM.md (reference, not inlined)
+	MemoryDaily   []string `json:"memory_daily,omitempty"`   // available daily summary files
+	MemoryWeekly  []string `json:"memory_weekly,omitempty"`  // available weekly summary files
+	MemoryMonthly []string `json:"memory_monthly,omitempty"` // available monthly summary files
 }
 
 // otherTeams lists non-primary team contexts available to the agent.
@@ -1331,6 +1339,9 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 			fmt.Fprintln(cmd.OutOrStdout(), output.TeamInstructions.Content)
 		}
 
+		// emit v4 team memory section
+		emitTeamMemorySection(cmd, output.TeamContext)
+
 		// emit Claude subagents section if any exist
 		if len(output.TeamContext.ClaudeAgents) > 0 {
 			fmt.Fprintln(cmd.OutOrStdout())
@@ -1581,6 +1592,9 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 		info.TeamDocs = docs
 	}
 
+	// v4 team memory loading
+	loadTeamMemory(info, tc.Path)
+
 	// check for agent-context/distilled-discussions.md
 	agentContextRelPath := filepath.Join("agent-context", "distilled-discussions.md")
 	agentContextPath := filepath.Join(tc.Path, agentContextRelPath)
@@ -1594,6 +1608,104 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 	}
 
 	return info
+}
+
+// loadTeamMemory populates v4 memory fields on teamContextInfo.
+// MEMORY.md is always fully inlined. SOUL.md and TEAM.md are reference
+// pointers only (agents read on demand to save tokens).
+func loadTeamMemory(info *teamContextInfo, teamDir string) {
+	// MEMORY.md — always load full content (critical file)
+	if content, err := os.ReadFile(filepath.Join(teamDir, "MEMORY.md")); err == nil {
+		info.MemoryContent = string(content)
+	}
+
+	// SOUL.md — reference pointer only
+	soulPath := filepath.Join(teamDir, "SOUL.md")
+	if _, err := os.Stat(soulPath); err == nil {
+		info.SoulHint = soulPath
+	}
+
+	// TEAM.md — reference pointer only
+	teamPath := filepath.Join(teamDir, "TEAM.md")
+	if _, err := os.Stat(teamPath); err == nil {
+		info.TeamHint = teamPath
+	}
+
+	// discover memory timeline files for progressive disclosure
+	info.MemoryDaily = discoverMemoryFiles(filepath.Join(teamDir, "memory", "daily"))
+	info.MemoryWeekly = discoverMemoryFiles(filepath.Join(teamDir, "memory", "weekly"))
+	info.MemoryMonthly = discoverMemoryFiles(filepath.Join(teamDir, "memory", "monthly"))
+}
+
+// discoverMemoryFiles lists .md files in a directory, sorted reverse-chronologically.
+func discoverMemoryFiles(dir string) []string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+			files = append(files, e.Name())
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(files)))
+	return files
+}
+
+// emitTeamMemorySection outputs the v4 team memory section in text mode.
+func emitTeamMemorySection(cmd *cobra.Command, tc *teamContextInfo) {
+	if tc == nil {
+		return
+	}
+
+	hasMemory := tc.MemoryContent != "" || tc.SoulHint != "" || tc.TeamHint != "" ||
+		len(tc.MemoryDaily) > 0 || len(tc.MemoryWeekly) > 0 || len(tc.MemoryMonthly) > 0
+
+	if !hasMemory {
+		return
+	}
+
+	out := cmd.OutOrStdout()
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "## Team Memory")
+	fmt.Fprintln(out)
+
+	// MEMORY.md — always full content
+	if tc.MemoryContent != "" {
+		fmt.Fprintln(out, "### MEMORY.md")
+		fmt.Fprintln(out, tc.MemoryContent)
+		fmt.Fprintln(out)
+	}
+
+	// SOUL.md and TEAM.md — reference pointers
+	if tc.SoulHint != "" || tc.TeamHint != "" {
+		fmt.Fprintln(out, "### Available Context")
+		if tc.SoulHint != "" {
+			fmt.Fprintf(out, "- SOUL.md: %s (team identity and values — read when needed)\n", tc.SoulHint)
+		}
+		if tc.TeamHint != "" {
+			fmt.Fprintf(out, "- TEAM.md: %s (team members and patterns — read when needed)\n", tc.TeamHint)
+		}
+		fmt.Fprintln(out)
+	}
+
+	// progressive disclosure
+	hasTimeline := len(tc.MemoryDaily) > 0 || len(tc.MemoryWeekly) > 0 || len(tc.MemoryMonthly) > 0
+	if hasTimeline {
+		fmt.Fprintln(out, "### Progressive Disclosure")
+		fmt.Fprintln(out, "For deeper context beyond MEMORY.md:")
+		if len(tc.MemoryDaily) > 0 {
+			fmt.Fprintf(out, "- Recent: memory/daily/ (%d files — what happened recently)\n", len(tc.MemoryDaily))
+		}
+		if len(tc.MemoryWeekly) > 0 {
+			fmt.Fprintf(out, "- Patterns: memory/weekly/ (%d files — weekly themes)\n", len(tc.MemoryWeekly))
+		}
+		if len(tc.MemoryMonthly) > 0 {
+			fmt.Fprintf(out, "- Trends: memory/monthly/ (%d files — monthly consolidation)\n", len(tc.MemoryMonthly))
+		}
+		fmt.Fprintln(out)
+	}
 }
 
 // discoverOtherTeamContexts returns lightweight entries for non-primary team contexts.
