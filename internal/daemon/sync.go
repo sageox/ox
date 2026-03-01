@@ -33,10 +33,11 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
-	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/version"
 )
 
@@ -1584,6 +1585,14 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		}
 	}
 
+	// apply manifest-driven sparse-checkout for team context repos
+	if payload.RepoType == "team-context" {
+		mCfg := s.applySparseCheckout(ctx, payload.RepoPath)
+		if mCfg != nil && mCfg.SyncIntervalMin > 0 {
+			s.workspaceRegistry.SetSyncIntervalMin(payload.RepoPath, mCfg.SyncIntervalMin)
+		}
+	}
+
 	return result, nil
 }
 
@@ -1731,6 +1740,13 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			if s.issues != nil {
 				s.issues.ClearIssue(IssueTypeSyncBackoff, ws.ID)
 			}
+
+			// apply manifest-driven sparse-checkout after successful pull
+			mCfg := s.applySparseCheckout(ctx, ws.Path)
+			if mCfg != nil && mCfg.SyncIntervalMin > 0 {
+				s.workspaceRegistry.SetSyncIntervalMin(ws.Path, mCfg.SyncIntervalMin)
+			}
+
 			// update last sync in registry and config file
 			if err := s.workspaceRegistry.UpdateConfigLastSync(ws.ID); err != nil {
 				s.logger.Warn("failed to update config last sync", "team", ws.TeamName, "error", err)
@@ -2004,7 +2020,12 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 	// FETCH_HEAD mtime dedup (secondary: multi-daemon dedup on shared team context paths).
 	// Kept as fallback for when ls-remote can't run (credential issues, etc).
 	if age, ok := gitutil.FetchHeadAge(path); ok {
-		threshold := max(s.config.TeamContextSyncInterval/2, minTeamContextFetchAge)
+		// use manifest-derived interval if available, otherwise fall back to default
+		minFetchAge := minTeamContextFetchAge
+		if intervalMin := s.workspaceRegistry.GetSyncIntervalMin(path); intervalMin > 0 {
+			minFetchAge = time.Duration(intervalMin) * time.Minute
+		}
+		threshold := max(s.config.TeamContextSyncInterval/2, minFetchAge)
 		if age < threshold {
 			s.logger.Debug("team context recently fetched, skipping", "path", path, "age", age)
 			return nil
@@ -2068,6 +2089,39 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 	}
 
 	return nil
+}
+
+// applySparseCheckout reads the manifest from a team context repo and applies
+// sparse-checkout rules. Returns the parsed ManifestConfig so callers can use
+// SyncIntervalMin. Errors are logged as warnings but never fatal.
+func (s *SyncScheduler) applySparseCheckout(ctx context.Context, tcPath string) *manifest.ManifestConfig {
+	manifestPath := filepath.Join(tcPath, ".sageox", "sync.manifest")
+	cfg := manifest.ParseFile(manifestPath)
+
+	sparsePaths := manifest.ComputeSparseSet(cfg)
+	if len(sparsePaths) == 0 {
+		s.logger.Debug("manifest: no sparse paths computed, skipping sparse-checkout", "path", tcPath)
+		return cfg
+	}
+
+	// init sparse-checkout in cone mode
+	if _, err := gitutil.RunGit(ctx, tcPath, "sparse-checkout", "init", "--cone"); err != nil {
+		s.logger.Warn("sparse-checkout init failed, continuing without sparse checkout",
+			"path", tcPath, "error", err)
+		return cfg
+	}
+
+	// set the sparse paths
+	args := append([]string{"sparse-checkout", "set"}, sparsePaths...)
+	if _, err := gitutil.RunGit(ctx, tcPath, args...); err != nil {
+		s.logger.Warn("sparse-checkout set failed, continuing without sparse checkout",
+			"path", tcPath, "error", err)
+		return cfg
+	}
+
+	s.logger.Debug("sparse-checkout applied",
+		"path", tcPath, "paths", sparsePaths, "sync_interval_min", cfg.SyncIntervalMin)
+	return cfg
 }
 
 // remoteRefCheck compares the remote tracking branch SHA to the local HEAD SHA via ls-remote.

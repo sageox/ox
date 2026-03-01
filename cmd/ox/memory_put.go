@@ -114,11 +114,20 @@ func runMemoryPut(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// TODO: integrate LLM redaction pass once LLM client is wired up
-	// For now, observations are written as-is. The redaction package
-	// (internal/redaction) is ready — just needs an LLMClient implementation.
+	// redaction is caller-side: the agent redacts content before calling ox memory put,
+	// using guidance from REDACT.md files (same pattern as session summary prompts).
 
-	// write JSONL file
+	if err := writeObservation(tc.Path, observations); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Recorded %d observation(s)\n", len(observations))
+	return nil
+}
+
+// writeObservation writes observations to a team context's memory directory.
+// Used by both `ox memory put` and session-end auto-observation.
+func writeObservation(teamContextPath string, observations []observation) error {
 	now := time.Now().UTC()
 	dateDir := now.Format("2006-01-02")
 	id, err := uuid.NewV7()
@@ -126,7 +135,7 @@ func runMemoryPut(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("generate observation ID: %w", err)
 	}
 
-	obsDir := filepath.Join(tc.Path, "memory", observationDirName, dateDir)
+	obsDir := filepath.Join(teamContextPath, "memory", observationDirName, dateDir)
 	if err := os.MkdirAll(obsDir, 0o755); err != nil {
 		return fmt.Errorf("create observations directory: %w", err)
 	}
@@ -142,7 +151,6 @@ func runMemoryPut(cmd *cobra.Command, args []string) error {
 
 	w := bufio.NewWriter(f)
 
-	// header line
 	header := observationHeader{
 		SchemaVersion: "1",
 		RecordedAt:    now.Format(time.RFC3339),
@@ -151,7 +159,6 @@ func runMemoryPut(cmd *cobra.Command, args []string) error {
 	w.Write(headerBytes)
 	w.WriteByte('\n')
 
-	// entry lines
 	for _, obs := range observations {
 		entryBytes, _ := json.Marshal(obs)
 		w.Write(entryBytes)
@@ -169,23 +176,21 @@ func runMemoryPut(cmd *cobra.Command, args []string) error {
 
 	relPath := filepath.Join("memory", observationDirName, dateDir, filename)
 
-	if _, err := gitutil.RunGit(ctx, tc.Path, "add", relPath); err != nil {
+	if _, err := gitutil.RunGit(ctx, teamContextPath, "add", relPath); err != nil {
 		return fmt.Errorf("git add: %w", err)
 	}
 
-	// commit message: first 50 chars of first observation
 	summary := observations[0].Content
 	if len(summary) > 50 {
 		summary = summary[:50] + "..."
 	}
 	commitMsg := fmt.Sprintf("observation: %s", summary)
 
-	if _, err := gitutil.RunGit(ctx, tc.Path, "commit", "-m", commitMsg); err != nil {
+	if _, err := gitutil.RunGit(ctx, teamContextPath, "commit", "-m", commitMsg); err != nil {
 		return fmt.Errorf("git commit: %w", err)
 	}
 
 	slog.Info("observation recorded", "file", relPath, "count", len(observations))
-	fmt.Fprintf(cmd.OutOrStdout(), "Recorded %d observation(s) to %s\n", len(observations), relPath)
 	return nil
 }
 

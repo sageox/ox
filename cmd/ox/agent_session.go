@@ -269,6 +269,9 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		}
 	}
 
+	// best-effort: record session-end observation to team memory
+	recordSessionObservation(projectRoot, processResult, duration)
+
 	// output format selection (priority: review > text > json default)
 	if cfg.Review {
 		// security audit mode: human summary first, then JSON
@@ -286,6 +289,38 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// default: JSON output
 	return outputSessionStopJSON(inst, state, duration, processResult)
+}
+
+// recordSessionObservation writes a session summary observation to team memory.
+// Best-effort only — failures are logged but never block session stop.
+func recordSessionObservation(projectRoot string, result *agentSessionResult, duration string) {
+	if result == nil || result.EntryCount == 0 {
+		return // nothing interesting to record
+	}
+
+	tc := config.FindRepoTeamContext(projectRoot)
+	if tc == nil {
+		return // no team context, skip silently
+	}
+
+	// build observation content
+	var b strings.Builder
+	fmt.Fprintf(&b, "Session ended: %s, %d entries", duration, result.EntryCount)
+	if result.Model != "" {
+		fmt.Fprintf(&b, ", model=%s", result.Model)
+	}
+	if result.Summary != "" {
+		summary := result.Summary
+		if len(summary) > 200 {
+			summary = summary[:200] + "..."
+		}
+		fmt.Fprintf(&b, ". Summary: %s", summary)
+	}
+
+	obs := []observation{{Content: b.String()}}
+	if err := writeObservation(tc.Path, obs); err != nil {
+		slog.Warn("failed to record session observation", "error", err)
+	}
 }
 
 // outputTextSummary renders the human-readable text summary for session stop.

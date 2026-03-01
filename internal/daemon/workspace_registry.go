@@ -54,6 +54,9 @@ type WorkspaceState struct {
 	// sync (fetch/pull) retry state — backoff on consecutive failures
 	SyncFailures    int       `json:"sync_failures,omitempty"`     // consecutive failed sync attempts
 	NextSyncAttempt time.Time `json:"next_sync_attempt,omitempty"` // when to retry sync (exponential backoff)
+
+	// manifest-derived settings (from .sageox/sync.manifest in the team context repo)
+	SyncIntervalMin int `json:"sync_interval_min,omitempty"` // minutes between syncs (0 = use default)
 }
 
 // WorkspaceRegistry tracks all workspaces (ledger + team contexts) for a daemon.
@@ -455,6 +458,35 @@ func (r *WorkspaceRegistry) SetSyncInProgress(id string, inProgress bool) {
 			ws.LastSyncAttempt = time.Now()
 		}
 	}
+}
+
+// SetSyncIntervalMin stores the manifest-derived sync interval for a workspace
+// identified by its local path. Uses path lookup since callers may not have the
+// workspace ID readily available.
+func (r *WorkspaceRegistry) SetSyncIntervalMin(path string, minutes int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, ws := range r.workspaces {
+		if ws.Path == path {
+			ws.SyncIntervalMin = minutes
+			return
+		}
+	}
+}
+
+// GetSyncIntervalMin returns the manifest-derived sync interval for a workspace
+// identified by its local path. Returns 0 if not set or workspace not found.
+func (r *WorkspaceRegistry) GetSyncIntervalMin(path string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for _, ws := range r.workspaces {
+		if ws.Path == path {
+			return ws.SyncIntervalMin
+		}
+	}
+	return 0
 }
 
 // RecordSyncAttempt records that a sync was attempted for a workspace.

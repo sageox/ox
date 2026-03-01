@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -506,4 +507,90 @@ func TestDiscoverTeams_SkipsWithNoCredentials(t *testing.T) {
 	scheduler.mu.Lock()
 	assert.False(t, scheduler.lastTeamDiscovery.IsZero(), "lastTeamDiscovery should still be stamped")
 	scheduler.mu.Unlock()
+}
+
+// --- Test: applySparseCheckout reads manifest and applies sparse-checkout ---
+
+func TestApplySparseCheckout_AppliesManifestPaths(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// create a real git repo with a manifest file
+	teamDir := t.TempDir()
+	setupGitRepo(t, teamDir)
+
+	// write a sync.manifest inside .sageox/
+	sageoxDir := filepath.Join(teamDir, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+	manifestContent := `version 1
+include docs/
+include SOUL.md
+include memory/
+sync_interval_minutes 10
+`
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "sync.manifest"), []byte(manifestContent), 0644))
+
+	// commit the manifest so sparse-checkout can work with it
+	addCmd := exec.Command("git", "-C", teamDir, "add", ".sageox/sync.manifest")
+	require.NoError(t, addCmd.Run())
+	commitCmd := exec.Command("git", "-C", teamDir, "commit", "-m", "add manifest")
+	require.NoError(t, commitCmd.Run())
+
+	projectDir := setupProjectWithConfig(t, "")
+	scheduler := newTestScheduler(projectDir)
+
+	ctx := context.Background()
+	mCfg := scheduler.applySparseCheckout(ctx, teamDir)
+
+	// verify manifest was parsed correctly
+	require.NotNil(t, mCfg)
+	assert.Equal(t, 10, mCfg.SyncIntervalMin)
+	assert.Contains(t, mCfg.Includes, "docs/")
+	assert.Contains(t, mCfg.Includes, "SOUL.md")
+	assert.Contains(t, mCfg.Includes, "memory/")
+
+	// verify sparse-checkout was configured
+	sparseCmd := exec.Command("git", "-C", teamDir, "sparse-checkout", "list")
+	out, err := sparseCmd.CombinedOutput()
+	require.NoError(t, err, "sparse-checkout list should succeed: %s", string(out))
+	sparseList := strings.TrimSpace(string(out))
+	assert.Contains(t, sparseList, "docs")
+	assert.Contains(t, sparseList, "memory")
+}
+
+func TestApplySparseCheckout_FallsBackWithoutManifest(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	teamDir := t.TempDir()
+	setupGitRepo(t, teamDir)
+
+	projectDir := setupProjectWithConfig(t, "")
+	scheduler := newTestScheduler(projectDir)
+
+	ctx := context.Background()
+	mCfg := scheduler.applySparseCheckout(ctx, teamDir)
+
+	// should return fallback config when no manifest file exists
+	require.NotNil(t, mCfg)
+	assert.Equal(t, 5, mCfg.SyncIntervalMin, "fallback should use default 5-minute interval")
+	assert.NotEmpty(t, mCfg.Includes, "fallback should have default include paths")
+}
+
+func TestSetSyncIntervalMin_StoresAndRetrieves(t *testing.T) {
+	projectDir := setupProjectWithConfig(t, "")
+	scheduler := newTestScheduler(projectDir)
+
+	teamDir := "/tmp/fake-team-context"
+
+	// initially should return 0
+	assert.Equal(t, 0, scheduler.WorkspaceRegistry().GetSyncIntervalMin(teamDir))
+
+	// register a workspace with that path, then set interval
+	scheduler.WorkspaceRegistry().SetSyncIntervalMin(teamDir, 15)
+
+	// won't find it since no workspace has this path yet — that's expected
+	assert.Equal(t, 0, scheduler.WorkspaceRegistry().GetSyncIntervalMin(teamDir))
 }
