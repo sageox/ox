@@ -123,6 +123,19 @@ gc_interval_days 14`,
 			wantGCDays:   DefaultGCIntervalDays,
 			wantIncludes: []string{".sageox/"},
 		},
+		{
+			name:         "tab-separated directives parsed",
+			input:        "version\t1\ninclude\t.sageox/\ndeny\tdata/\n",
+			wantVersion:  1,
+			wantIncludes: []string{".sageox/"},
+			wantDenies:   []string{"data/"},
+		},
+		{
+			name:         "mixed tabs and spaces",
+			input:        "version \t 1\ninclude\t\t.sageox/\n",
+			wantVersion:  1,
+			wantIncludes: []string{".sageox/"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -246,6 +259,24 @@ func TestComputeSparseSet(t *testing.T) {
 			name: "nil config",
 			cfg:  nil,
 			want: nil,
+		},
+		{
+			name: "include parent of deny is excluded",
+			cfg: &ManifestConfig{
+				Includes: []string{"data/"},
+				Denies:   []string{"data/secrets/"},
+			},
+			want:     nil,
+			wantNone: []string{"data/"},
+		},
+		{
+			name: "exact file deny blocks matching include",
+			cfg: &ManifestConfig{
+				Includes: []string{"README.md", ".sageox/"},
+				Denies:   []string{"README.md"},
+			},
+			want:     []string{".sageox/"},
+			wantNone: []string{"README.md"},
 		},
 	}
 

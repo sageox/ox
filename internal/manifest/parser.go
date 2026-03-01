@@ -40,14 +40,14 @@ func Parse(r io.Reader) (*ManifestConfig, error) {
 			continue
 		}
 
-		parts := strings.SplitN(line, " ", 2)
+		parts := strings.Fields(line)
 		if len(parts) < 2 {
 			slog.Warn("manifest: skipping malformed line", "line", lineNum, "content", line)
 			continue
 		}
 
 		directive := parts[0]
-		value := strings.TrimSpace(parts[1])
+		value := strings.Join(parts[1:], " ")
 
 		switch directive {
 		case "version":
@@ -169,10 +169,10 @@ func ComputeSparseSet(cfg *ManifestConfig) []string {
 		if denySet[inc] {
 			continue
 		}
-		// check if any deny is a parent of this include
+		// check if any deny overlaps this include (parent, child, or exact)
 		denied := false
 		for _, d := range cfg.Denies {
-			if strings.HasSuffix(d, "/") && strings.HasPrefix(inc, d) {
+			if pathOverlaps(d, inc) {
 				denied = true
 				break
 			}
@@ -183,6 +183,21 @@ func ComputeSparseSet(cfg *ManifestConfig) []string {
 	}
 
 	return result
+}
+
+// pathOverlaps returns true if a and b overlap: same path, or one is a
+// parent directory of the other.
+func pathOverlaps(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if strings.HasSuffix(a, "/") && strings.HasPrefix(b, a) {
+		return true
+	}
+	if strings.HasSuffix(b, "/") && strings.HasPrefix(a, b) {
+		return true
+	}
+	return false
 }
 
 func validatePath(path string, lineNum int) error {
