@@ -75,13 +75,15 @@ type statusLedgerJSON struct {
 }
 
 type statusTeamContextJSON struct {
-	TeamID   string `json:"team_id"`
-	TeamName string `json:"team_name,omitempty"`
-	Path     string `json:"path"`
-	Exists   bool   `json:"exists"`
-	Branch   string `json:"branch,omitempty"`
-	Status   string `json:"status,omitempty"`
-	Error    string `json:"error,omitempty"`
+	TeamID   string     `json:"team_id"`
+	TeamName string     `json:"team_name,omitempty"`
+	Path     string     `json:"path"`
+	Exists   bool       `json:"exists"`
+	Branch   string     `json:"branch,omitempty"`
+	Status   string     `json:"status,omitempty"`
+	Error    string     `json:"error,omitempty"`
+	LastSync *time.Time `json:"last_sync,omitempty"`
+	Stale    bool       `json:"stale,omitempty"`
 }
 
 type statusDaemonJSON struct {
@@ -923,6 +925,14 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 				b.WriteString(formatValue(statusText, semantic))
 			}
 			b.WriteString("\n")
+
+			// staleness warning
+			syncState := daemon.LoadSyncState(expectedPath)
+			if syncState.IsStale(daemon.DefaultStalenessThreshold) && !syncState.LastSync.IsZero() {
+				b.WriteString(statusLabelStyle.Render(""))
+				b.WriteString(statusWarningStyle.Render(fmt.Sprintf("⚠ stale (last sync %s)", formatTimeAgo(syncState.LastSync))))
+				b.WriteString("\n")
+			}
 		} else {
 			b.WriteString(statusLabelStyle.Render("  Status"))
 			if isDaemonBootstrapping(daemonStatus) {
@@ -982,6 +992,14 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 				b.WriteString(formatValue("synced", "success"))
 			}
 			b.WriteString("\n")
+
+			// staleness warning
+			syncState := daemon.LoadSyncState(expectedPath)
+			if syncState.IsStale(daemon.DefaultStalenessThreshold) && !syncState.LastSync.IsZero() {
+				b.WriteString(statusLabelStyle.Render(""))
+				b.WriteString(statusWarningStyle.Render(fmt.Sprintf("⚠ stale (last sync %s)", formatTimeAgo(syncState.LastSync))))
+				b.WriteString("\n")
+			}
 		} else {
 			b.WriteString(statusLabelStyle.Render("  Status"))
 			if isDaemonBootstrapping(daemonStatus) {
@@ -1604,6 +1622,13 @@ func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, 
 				tcJSON.Status = fmt.Sprintf("%d uncommitted", status.UncommittedCount)
 			} else {
 				tcJSON.Status = "synced"
+			}
+			// sync state staleness
+			syncState := daemon.LoadSyncState(tc.Path)
+			if !syncState.LastSync.IsZero() {
+				ls := syncState.LastSync
+				tcJSON.LastSync = &ls
+				tcJSON.Stale = syncState.IsStale(daemon.DefaultStalenessThreshold)
 			}
 			output.TeamContexts = append(output.TeamContexts, tcJSON)
 		}
