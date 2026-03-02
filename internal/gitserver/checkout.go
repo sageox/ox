@@ -38,6 +38,15 @@ type CheckoutOptions struct {
 
 	// SingleBranch clones only the specified branch (or default branch if Branch is empty)
 	SingleBranch bool
+
+	// PartialClone enables --filter=blob:none (treeless clone, blobs fetched on demand)
+	PartialClone bool
+
+	// Sparse enables --sparse (sparse checkout mode)
+	Sparse bool
+
+	// NoCheckout enables --no-checkout (skip working tree creation after clone)
+	NoCheckout bool
 }
 
 // DefaultCheckoutPath returns the default checkout path for a repo.
@@ -123,8 +132,17 @@ func cloneRepo(ctx context.Context, repoURL, path string, creds *GitCredentials,
 	args := []string{"clone"}
 
 	if opts != nil {
+		if opts.PartialClone {
+			args = append(args, "--filter=blob:none")
+		}
 		if opts.Depth > 0 {
 			args = append(args, "--depth", fmt.Sprintf("%d", opts.Depth))
+		}
+		if opts.Sparse {
+			args = append(args, "--sparse")
+		}
+		if opts.NoCheckout {
+			args = append(args, "--no-checkout")
 		}
 		if opts.SingleBranch {
 			args = append(args, "--single-branch")

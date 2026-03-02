@@ -2322,23 +2322,32 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 			continue
 		}
 
-		intervalDays := ws.GCIntervalDays
-		if intervalDays <= 0 {
-			intervalDays = manifest.DefaultGCIntervalDays
-		}
-		interval := time.Duration(intervalDays) * 24 * time.Hour
-
-		if !ws.LastGCTime.IsZero() && time.Since(ws.LastGCTime) < interval {
-			continue
-		}
-
 		// skip if clone is in flight
 		if _, loaded := s.cloneInFlight.Load(ws.ID); loaded {
 			continue
 		}
 
+		// trigger 1: GC interval exceeded
+		intervalDays := ws.GCIntervalDays
+		if intervalDays <= 0 {
+			intervalDays = manifest.DefaultGCIntervalDays
+		}
+		interval := time.Duration(intervalDays) * 24 * time.Hour
+		intervalExceeded := ws.LastGCTime.IsZero() || time.Since(ws.LastGCTime) >= interval
+
+		// trigger 2: full clone detected (upgrade pre-v4 installs to partial clone)
+		fullClone := !isPartialClone(ws.Path)
+
+		if !intervalExceeded && !fullClone {
+			continue
+		}
+
+		reason := "interval exceeded"
+		if fullClone {
+			reason = "full clone upgrade"
+		}
 		s.logger.Info("gc: workspace due for reclone", "team", ws.TeamName, "id", ws.ID,
-			"interval_days", intervalDays, "last_gc", ws.LastGCTime)
+			"reason", reason, "interval_days", intervalDays, "last_gc", ws.LastGCTime)
 
 		// run GC synchronously (one at a time) then release the flag
 		s.runBlueGreenGC(ctx, ws)

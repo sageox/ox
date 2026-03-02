@@ -979,3 +979,15 @@ func isCheckoutClean(path string) bool {
 	}
 	return strings.TrimSpace(string(output)) == ""
 }
+
+// isPartialClone returns true if a git repo was cloned with --filter (partial clone).
+// Checks for extensions.partialClone in git config, which git sets automatically
+// when --filter is used during clone.
+func isPartialClone(path string) bool {
+	cmd := exec.Command("git", "-C", path, "config", "--get", "extensions.partialClone")
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(output)) != ""
+}

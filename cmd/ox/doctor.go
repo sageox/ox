@@ -578,6 +578,12 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 	if !teamSymlinkCheck.skipped {
 		gitRepoChecks = append(gitRepoChecks, teamSymlinkCheck)
 	}
+	// check team context clone strategy (partial vs full)
+	for _, strategyCheck := range checkTeamContextCloneStrategy() {
+		if !strategyCheck.skipped {
+			gitRepoChecks = append(gitRepoChecks, strategyCheck)
+		}
+	}
 	// ensure .sageox/ledger and .sageox/teams/primary symlinks exist
 	projectSymlinkCheck := checkProjectSymlinks(opts.shouldFix(CheckSlugProjectSymlinks))
 	if !projectSymlinkCheck.skipped {
