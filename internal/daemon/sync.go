@@ -2179,126 +2179,22 @@ func (s *SyncScheduler) applySparseCheckout(ctx context.Context, tcPath string) 
 	return cfg
 }
 
-// twoPhaseClone performs a partial clone for team context repos:
-//
-// Phase 1: clone with --filter=blob:none --depth=1 --sparse --no-checkout to fetch
-// only tree objects, then materialize just .sageox/ to read the manifest.
-//
-// Phase 2: parse the manifest to compute sparse checkout paths, then materialize
-// only the declared includes (minus denies). Falls back to FallbackConfig if
-// manifest is missing or unparseable.
-//
-// After both phases, unshallows the clone so subsequent fetch/pull --rebase work.
+// twoPhaseClone delegates to the shared gitserver.TwoPhaseClone implementation,
+// adding progress reporting and validation on top.
 func (s *SyncScheduler) twoPhaseClone(ctx context.Context, cloneURL, repoPath string, progress *ProgressWriter) (*manifest.ManifestConfig, error) {
-	// phase 1: minimal clone — trees only, no blobs
-	cloneCmd := exec.CommandContext(ctx, "git", "clone",
-		"--filter=blob:none",
-		"--depth=1",
-		"--sparse",
-		"--no-checkout",
-		"--single-branch",
-		"--branch", "main",
-		"--quiet",
-		cloneURL, repoPath,
-	)
-	if output, err := cloneCmd.CombinedOutput(); err != nil {
-		sanitized := gitutil.SanitizeOutput(string(output))
-		if sanitized != "" {
-			return nil, fmt.Errorf("phase 1 clone failed: %s", sanitized)
-		}
-		return nil, fmt.Errorf("phase 1 clone failed: %w", err)
-	}
-
-	// materialize only .sageox/ to read the manifest.
-	// use --no-cone mode to support both file and directory patterns in Phase 2.
-	if _, err := gitutil.RunGit(ctx, repoPath, "sparse-checkout", "set", "--no-cone", ".sageox/"); err != nil {
-		return nil, fmt.Errorf("phase 1 sparse-checkout set .sageox: %w", err)
-	}
-	if _, err := gitutil.RunGit(ctx, repoPath, "checkout", "HEAD"); err != nil {
-		return nil, fmt.Errorf("phase 1 checkout HEAD: %w", err)
-	}
-
-	// phase 2: read manifest and materialize declared paths
 	if progress != nil {
 		_ = progress.WriteStage("materializing", "Reading manifest and materializing files...")
 	}
 
-	manifestPath := filepath.Join(repoPath, ".sageox", "sync.manifest")
-	cfg := manifest.ParseFile(manifestPath)
-
-	sparsePaths := manifest.ComputeSparseSet(cfg)
-	if len(sparsePaths) == 0 {
-		sparsePaths = []string{".sageox/"}
+	result, err := gitserver.TwoPhaseClone(ctx, cloneURL, repoPath)
+	if err != nil {
+		return nil, err
 	}
 
-	// ensure .sageox/ is always in the sparse set
-	hasSageox := false
-	for _, p := range sparsePaths {
-		if p == ".sageox/" || p == ".sageox" {
-			hasSageox = true
-			break
-		}
-	}
-	if !hasSageox {
-		sparsePaths = append([]string{".sageox/"}, sparsePaths...)
-	}
+	gitserver.ValidateTeamContextClone(repoPath, result.ManifestConfig)
 
-	args := append([]string{"sparse-checkout", "set", "--no-cone"}, sparsePaths...)
-	if _, err := gitutil.RunGit(ctx, repoPath, args...); err != nil {
-		s.logger.Warn("phase 2 sparse-checkout set failed, continuing with .sageox only",
-			"path", repoPath, "error", err)
-	}
-
-	// checkout HEAD to materialize the newly declared paths
-	if _, err := gitutil.RunGit(ctx, repoPath, "checkout", "HEAD"); err != nil {
-		return nil, fmt.Errorf("phase 2 checkout HEAD: %w", err)
-	}
-
-	// unshallow so subsequent fetch/pull --rebase work correctly.
-	// --depth=1 creates a shallow clone; fetch --unshallow converts to full depth
-	// but with --filter=blob:none active, only fetches commit/tree objects.
-	if _, err := gitutil.RunGit(ctx, repoPath, "fetch", "--unshallow", "--quiet"); err != nil {
-		// non-fatal: pull --rebase may still work if remote only has 1 commit
-		s.logger.Debug("unshallow fetch failed (may be single-commit repo)", "path", repoPath, "error", err)
-	}
-
-	s.validateTeamContextClone(repoPath, cfg)
-
-	s.logger.Info("two-phase clone complete", "path", repoPath, "sparse_paths", sparsePaths)
-	return cfg, nil
-}
-
-// validateTeamContextClone checks that a freshly cloned team context has
-// expected content. All checks are warning-only — a missing file does not
-// fail the clone.
-func (s *SyncScheduler) validateTeamContextClone(repoPath string, cfg *manifest.ManifestConfig) {
-	// at least one core file should exist
-	coreFiles := []string{"SOUL.md", "TEAM.md", "MEMORY.md"}
-	found := false
-	for _, f := range coreFiles {
-		if _, err := os.Stat(filepath.Join(repoPath, f)); err == nil {
-			found = true
-			break
-		}
-	}
-	if !found {
-		s.logger.Warn("team context missing all core files (SOUL.md, TEAM.md, MEMORY.md)",
-			"path", repoPath)
-	}
-
-	// check memory/ directory
-	if _, err := os.Stat(filepath.Join(repoPath, "memory")); os.IsNotExist(err) {
-		s.logger.Debug("team context has no memory/ directory", "path", repoPath)
-	}
-
-	// verify no denied paths materialized
-	if cfg != nil {
-		for _, denied := range cfg.Denies {
-			if _, err := os.Stat(filepath.Join(repoPath, denied)); err == nil {
-				s.logger.Warn("denied path exists after clone", "path", repoPath, "denied", denied)
-			}
-		}
-	}
+	s.logger.Info("two-phase clone complete", "path", repoPath, "sparse_paths", result.SparsePaths)
+	return result.ManifestConfig, nil
 }
 
 // checkAndRunGC iterates team context workspaces and triggers blue-green reclone

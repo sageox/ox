@@ -849,19 +849,16 @@ include memory/
 }
 
 func TestValidateTeamContextClone_MissingCoreFiles(t *testing.T) {
-	projectDir := setupProjectWithConfig(t, "")
-	scheduler := newTestScheduler(projectDir)
-
 	// create a dir with only .sageox but no core files
 	repoDir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".sageox"), 0755))
 
 	// should not panic; warnings are logged but not returned
-	scheduler.validateTeamContextClone(repoDir, nil)
+	gitserver.ValidateTeamContextClone(repoDir, nil)
 
 	// create one core file — should pass
 	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "TEAM.md"), []byte("# Team\n"), 0644))
-	scheduler.validateTeamContextClone(repoDir, nil)
+	gitserver.ValidateTeamContextClone(repoDir, nil)
 }
 
 func TestSetSyncIntervalMin_StoresAndRetrieves(t *testing.T) {

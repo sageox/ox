@@ -123,7 +123,7 @@ func cloneRepo(ctx context.Context, repoURL, path string, creds *GitCredentials,
 	}
 
 	// build authenticated URL
-	authURL, err := buildAuthURL(repoURL, creds)
+	authURL, err := BuildAuthURL(repoURL, creds)
 	if err != nil {
 		return fmt.Errorf("failed to build authenticated URL: %w", err)
 	}
@@ -226,11 +226,11 @@ func isSSHURL(repoURL string) bool {
 	return strings.Contains(repoURL, "@") && !strings.Contains(repoURL, "://")
 }
 
-// buildAuthURL embeds credentials into the git URL for authentication.
+// BuildAuthURL embeds credentials into the git URL for authentication.
 // Uses the PAT token with oauth2 username for GitLab-style auth.
 // SSH URLs are returned unchanged since they use SSH key auth.
 // Supports https:// URLs and http://localhost URLs (for local development).
-func buildAuthURL(repoURL string, creds *GitCredentials) (string, error) {
+func BuildAuthURL(repoURL string, creds *GitCredentials) (string, error) {
 	if creds == nil || creds.Token == "" {
 		return repoURL, nil
 	}

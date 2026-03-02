@@ -1492,54 +1492,38 @@ func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 	// ─────────────────────────────────────────────────────────────────────────
 	// This is a CRITICAL PATH EXCEPTION. Clone is required for product to
 	// function at all. See function-level comment for rationale.
-	//
-	// Uses gitserver.CloneFromURLWithEndpoint which:
-	// - Loads credentials from local credential store
-	// - Builds authenticated URL with oauth2:TOKEN format
-	// - Executes git clone directly
 	// ─────────────────────────────────────────────────────────────────────────
 	fmt.Println("    Note: Daemon not running, using direct clone")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// team contexts use two-phase partial clone (aligned with daemon strategy)
-	var cloneOpts *gitserver.CheckoutOptions
 	if repoType == "team_context" {
-		cloneOpts = &gitserver.CheckoutOptions{
-			Depth:        1,
-			PartialClone: true,
-			Sparse:       true,
-			NoCheckout:   true,
+		// team contexts use shared two-phase partial clone (same code as daemon)
+		creds, err := gitserver.LoadCredentialsForEndpoint(endpointURL)
+		if err != nil {
+			return fmt.Errorf("load credentials: %w", err)
 		}
-	}
-	if err := gitserver.CloneFromURLWithEndpoint(ctx, cloneURL, targetPath, endpointURL, cloneOpts); err != nil {
-		return fmt.Errorf("direct clone failed: %w", err)
-	}
-
-	// team context Phase 1: bootstrap .sageox/ so manifest can be read
-	if repoType == "team_context" {
-		if err := bootstrapTeamContextDirect(ctx, targetPath); err != nil {
-			slog.Warn("doctor: bootstrap phase 1 failed, sparse checkout may use fallback",
-				"path", targetPath, "error", err)
+		if creds == nil {
+			return fmt.Errorf("direct clone failed: %w", gitserver.ErrNoCredentials)
+		}
+		authURL, err := gitserver.BuildAuthURL(cloneURL, creds)
+		if err != nil {
+			return fmt.Errorf("build auth URL: %w", err)
+		}
+		result, err := gitserver.TwoPhaseClone(ctx, authURL, targetPath)
+		if err != nil {
+			return fmt.Errorf("direct clone failed: %w", err)
+		}
+		gitserver.ValidateTeamContextClone(targetPath, result.ManifestConfig)
+	} else {
+		// ledger: full clone
+		if err := gitserver.CloneFromURLWithEndpoint(ctx, cloneURL, targetPath, endpointURL, nil); err != nil {
+			return fmt.Errorf("direct clone failed: %w", err)
 		}
 	}
 
 	fmt.Println("    Cloned successfully (direct).")
-	return nil
-}
-
-// bootstrapTeamContextDirect runs Phase 1 of two-phase materialization for the
-// CLI fallback path: materializes only .sageox/ so the manifest can be read.
-func bootstrapTeamContextDirect(ctx context.Context, path string) error {
-	sparseCmd := exec.CommandContext(ctx, "git", "-C", path, "sparse-checkout", "set", ".sageox/")
-	if output, err := sparseCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("sparse-checkout set .sageox: %w (%s)", err, strings.TrimSpace(string(output)))
-	}
-	checkoutCmd := exec.CommandContext(ctx, "git", "-C", path, "checkout", "HEAD")
-	if output, err := checkoutCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("checkout HEAD: %w (%s)", err, strings.TrimSpace(string(output)))
-	}
 	return nil
 }
 

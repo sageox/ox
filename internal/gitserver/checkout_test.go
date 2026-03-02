@@ -167,7 +167,7 @@ func TestBuildAuthURL(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := buildAuthURL(tt.repoURL, tt.creds)
+			got, err := BuildAuthURL(tt.repoURL, tt.creds)
 
 			if tt.wantErr {
 				require.Error(t, err)
