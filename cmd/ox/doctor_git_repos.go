@@ -1373,7 +1373,7 @@ func fixMissingRepos(gitRoot string, localCfg *config.LocalConfig) checkResult {
 			continue
 		}
 
-		if err := cloneViaDaemon(tc.cloneURL, tcPath, "team_context", projectEndpoint); err != nil {
+		if err := cloneViaDaemon(tc.cloneURL, tcPath, "team-context", projectEndpoint); err != nil {
 			fmt.Printf("    Clone failed: %v\n", err)
 			skipped++
 			continue
@@ -1498,7 +1498,7 @@ func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	if repoType == "team_context" {
+	if repoType == "team-context" {
 		// team contexts use shared two-phase partial clone (same code as daemon)
 		creds, err := gitserver.LoadCredentialsForEndpoint(endpointURL)
 		if err != nil {
