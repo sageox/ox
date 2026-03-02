@@ -30,7 +30,7 @@ func (s *SyncState) IsStale(threshold time.Duration) bool {
 	if s.LastSync.IsZero() {
 		return true
 	}
-	return time.Since(s.LastSync) > threshold
+	return time.Since(s.LastSync) >= threshold
 }
 
 // StaleDuration returns how long since the last successful sync.

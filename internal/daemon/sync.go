@@ -265,6 +265,9 @@ type SyncScheduler struct {
 	cloneSem      chan struct{} // semaphore limiting concurrent clones
 	cloneInFlight sync.Map      // tracks workspace IDs with clone in progress (dedup)
 
+	// per-workspace locks for sync state file updates (load-mutate-save)
+	syncStateLocks sync.Map // map[string]*sync.Mutex
+
 	// test hooks (nil in production)
 	onBeforeCloneSem func() // called just before acquiring cloneSem; tests use this to observe blocking
 
@@ -2377,10 +2380,20 @@ func injectGitCredentials(gitURL, username, password string) string {
 	return gitURL
 }
 
+// syncStateLock returns a per-workspace mutex for serializing sync state updates.
+func (s *SyncScheduler) syncStateLock(path string) *sync.Mutex {
+	actual, _ := s.syncStateLocks.LoadOrStore(path, &sync.Mutex{})
+	return actual.(*sync.Mutex)
+}
+
 // recordSyncState captures git HEAD SHA and persists sync state for a workspace.
 // Called after successful pull/clone operations. Failures are logged but not propagated
 // since sync state is best-effort observability.
 func (s *SyncScheduler) recordSyncState(ctx context.Context, workspacePath string) {
+	lock := s.syncStateLock(workspacePath)
+	lock.Lock()
+	defer lock.Unlock()
+
 	sha, err := gitHeadSHA(ctx, workspacePath)
 	if err != nil {
 		s.logger.Debug("failed to get HEAD SHA for sync state", "path", workspacePath, "error", err)
@@ -2396,6 +2409,10 @@ func (s *SyncScheduler) recordSyncState(ctx context.Context, workspacePath strin
 
 // recordSyncStateFailure increments the failure counter in sync state.
 func (s *SyncScheduler) recordSyncStateFailure(workspacePath string) {
+	lock := s.syncStateLock(workspacePath)
+	lock.Lock()
+	defer lock.Unlock()
+
 	state := LoadSyncState(workspacePath)
 	state.RecordFailure()
 	if err := SaveSyncState(workspacePath, state); err != nil {

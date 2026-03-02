@@ -81,10 +81,16 @@ func TestSyncState_IsStale(t *testing.T) {
 			wantStale: true,
 		},
 		{
-			name:      "exactly at threshold boundary",
-			lastSync:  time.Now().Add(-24*time.Hour - time.Second),
+			name:      "at threshold is stale",
+			lastSync:  time.Now().Add(-24 * time.Hour),
 			threshold: 24 * time.Hour,
 			wantStale: true,
+		},
+		{
+			name:      "just under threshold is not stale",
+			lastSync:  time.Now().Add(-24*time.Hour + time.Minute),
+			threshold: 24 * time.Hour,
+			wantStale: false,
 		},
 	}
 
