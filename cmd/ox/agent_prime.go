@@ -278,6 +278,9 @@ type agentPrimeOutput struct {
 	UpdateAvailable bool   `json:"update_available,omitempty"` // true if newer ox version exists
 	LatestVersion   string `json:"latest_version,omitempty"`   // latest available version (without v prefix)
 	UpdateHint      string `json:"update_hint,omitempty"`      // human-readable update instruction
+	// Per-step timing instrumentation
+	ElapsedMs int64            `json:"elapsed_ms,omitempty"` // total prime execution time
+	Timing    map[string]int64 `json:"timing,omitempty"`     // per-phase timing (ms)
 }
 
 // agentPrimeCmd registers a new agent instance and starts a session
@@ -339,9 +342,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%s", errMsg)
 	}
 
+	primeStart := time.Now()
+	timing := make(map[string]int64)
+
 	// quick health check - non-blocking if daemon unavailable
 	// Note: called here because prime doesn't go through runWithAgentID
+	phaseStart := time.Now()
 	emitDaemonIssueWarnings()
+	timing["daemon_health"] = time.Since(phaseStart).Milliseconds()
 
 	textMode, _ := cmd.Flags().GetBool("text")
 	reviewMode, _ := cmd.Flags().GetBool("review")
@@ -469,18 +477,26 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// attempt to start session recording if enabled
+	phaseStart = time.Now()
 	sessionStat := startSessionRecording(projectRoot, agentID, agentType)
+	timing["session_start"] = time.Since(phaseStart).Milliseconds()
 
 	// discover team context if configured
+	phaseStart = time.Now()
 	teamCtx := discoverTeamContext(projectRoot)
+
+	// check team context staleness
+	checkTeamContextStaleness(teamCtx, projectRoot)
 
 	// load team instruction files (AGENTS.md / CLAUDE.md from team context root)
 	var teamInstructions *TeamInstructions
 	if teamCtx != nil {
 		teamInstructions = loadTeamInstructions(teamCtx.Path, teamCtx.TeamName)
 	}
+	timing["team_context"] = time.Since(phaseStart).Milliseconds()
 
 	// discover ledger for team session guidance (after team context so hint can include discussions path)
+	phaseStart = time.Now()
 	ledgerStatus := discoverLedger(teamCtx)
 
 	// load project guidance from AGENTS.md
@@ -501,6 +517,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// build intent-to-command guidance for agent consumption
 	guidance := buildGuidance(teamCtx, ledgerStatus)
+	timing["guidance_build"] = time.Since(phaseStart).Milliseconds()
 
 	// check for team context notifications using mtime-based approach
 	var lastNotified time.Time
@@ -692,6 +709,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		}
 		_ = WriteToClaudeEnvFile(envVars)
 	}
+
+	output.ElapsedMs = time.Since(primeStart).Milliseconds()
+	output.Timing = timing
 
 	err = outputAgentPrime(cmd, textMode, reviewMode, output)
 
@@ -1880,6 +1900,26 @@ func sortOtherTeamsByAge(entries []otherTeamEntry) {
 	sort.SliceStable(entries, func(i, j int) bool {
 		return parseDuration(entries[i].Age) < parseDuration(entries[j].Age)
 	})
+}
+
+// checkTeamContextStaleness checks if team context has been synced recently.
+// Uses daemon.LoadSyncState for cached sync state, with IPC fallback.
+func checkTeamContextStaleness(tc *teamContextInfo, _ string) {
+	if tc == nil {
+		return
+	}
+
+	syncState := daemon.LoadSyncState(tc.Path)
+	if syncState.LastSync.IsZero() {
+		tc.Stale = true
+		tc.StaleSince = "unknown"
+		return
+	}
+
+	if syncState.IsStale(daemon.DefaultStalenessThreshold) {
+		tc.Stale = true
+		tc.StaleSince = formatAge(time.Since(syncState.LastSync))
+	}
 }
 
 // discoverLedger checks whether the ledger exists and returns actionable guidance
