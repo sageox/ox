@@ -10,5 +10,6 @@ var memoryCmd = &cobra.Command{
 
 func init() {
 	memoryCmd.AddCommand(memoryPutCmd)
+	memoryCmd.AddCommand(memoryDistillCmd)
 	rootCmd.AddCommand(memoryCmd)
 }
