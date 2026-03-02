@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -228,6 +229,80 @@ func TestSyncIntegration_ProgressStageOrdering(t *testing.T) {
 	// verify the change actually landed
 	_, err = os.Stat(filepath.Join(ledgerDir, "change.txt"))
 	require.NoError(t, err, "change.txt should exist after sync")
+}
+
+// TestSyncIntegration_SyncStateWritten verifies that sync-state.json is persisted
+// after a successful pull with the correct HEAD commit SHA. This is a regression guard
+// to ensure recordSyncState stays wired into the pull path.
+func TestSyncIntegration_SyncStateWritten(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	isolateCredentials(t)
+
+	bareDir, ledgerDir := setupSyncIntegrationGitRepos(t)
+	pushCommitToRemote(t, bareDir, "data.txt", "sync state test")
+
+	client, cancel := startSyncDaemon(t, ledgerDir)
+	defer cancel()
+
+	// sync should pull the new commit
+	err := client.SyncWithProgress(func(stage string, percent *int, message string) {})
+	require.NoError(t, err)
+
+	// verify sync-state.json was written
+	state := LoadSyncState(ledgerDir)
+	assert.False(t, state.LastSync.IsZero(), "LastSync should be set after successful pull")
+	assert.Equal(t, 0, state.ConsecutiveFailures, "no failures expected")
+
+	// verify the commit SHA matches ledger HEAD
+	headCmd := exec.Command("git", "-C", ledgerDir, "rev-parse", "HEAD")
+	headOut, err := headCmd.Output()
+	require.NoError(t, err)
+	expectedSHA := strings.TrimSpace(string(headOut))
+	assert.Equal(t, expectedSHA, state.LastSyncCommit, "sync state commit should match ledger HEAD")
+
+	// verify the file was written to the correct location
+	statePath := filepath.Join(ledgerDir, ".sageox", "cache", "sync-state.json")
+	_, err = os.Stat(statePath)
+	assert.NoError(t, err, "sync-state.json should exist on disk")
+}
+
+// TestSyncIntegration_SyncStateUpToDate verifies that sync-state.json is written
+// even when the ledger is already up to date (the "remote unchanged" fast path).
+func TestSyncIntegration_SyncStateUpToDate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	isolateCredentials(t)
+
+	_, ledgerDir := setupSyncIntegrationGitRepos(t)
+
+	client, cancel := startSyncDaemon(t, ledgerDir)
+	defer cancel()
+
+	// sync with no new changes — exercises the "remote unchanged" fast path
+	err := client.SyncWithProgress(func(stage string, percent *int, message string) {})
+	require.NoError(t, err)
+
+	state := LoadSyncState(ledgerDir)
+	assert.False(t, state.LastSync.IsZero(), "LastSync should be set even when already up to date")
+	assert.Equal(t, 0, state.ConsecutiveFailures)
+
+	// commit SHA should match current HEAD
+	headCmd := exec.Command("git", "-C", ledgerDir, "rev-parse", "HEAD")
+	headOut, err := headCmd.Output()
+	require.NoError(t, err)
+	expectedSHA := strings.TrimSpace(string(headOut))
+	assert.Equal(t, expectedSHA, state.LastSyncCommit)
 }
 
 // gitConfig sets test-safe git user config in a specific directory (never in the real repo).
