@@ -1449,8 +1449,8 @@ func TestCheckCloudDoctor_HTTP500_ReturnsWarning(t *testing.T) {
 	if !result.warning {
 		t.Error("expected warning=true for unavailable cloud doctor")
 	}
-	if !strings.Contains(result.message, "unavailable") {
-		t.Errorf("expected message to mention 'unavailable', got %q", result.message)
+	if !strings.Contains(result.message, "skipped") {
+		t.Errorf("expected message to mention 'skipped', got %q", result.message)
 	}
 }
 

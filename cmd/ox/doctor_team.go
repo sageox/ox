@@ -251,9 +251,10 @@ func checkTeamAgentsMD(tc config.TeamContext) checkResult {
 	if os.IsNotExist(err) {
 		// AGENTS.md is critical - this is a warning, not a failure
 		return WarningCheck(name, "missing",
-			"Team context has no AGENTS.md file. This file is critical for establishing\n"+
-				"        team norms and conventions that guide AI agent planning.\n"+
-				"        Create: "+agentsMDPath)
+			"AGENTS.md tells AI coworkers your team's conventions (coding style, review\n"+
+				"        process, preferred tools). Without it, AI coworkers start each session\n"+
+				"        with no team context. Visit https://sageox.ai to add team norms, or\n"+
+				"        create the file manually at: "+agentsMDPath)
 	} else if err != nil {
 		return WarningCheck(name, "unreadable", fmt.Sprintf("Cannot read: %v", err))
 	}
