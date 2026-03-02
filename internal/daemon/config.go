@@ -37,6 +37,10 @@ type Config struct {
 	// VersionCheckInterval is how often to check GitHub for new releases.
 	VersionCheckInterval time.Duration
 
+	// GCCheckInterval is how often to check if any workspace needs a reclone GC.
+	// The actual GC cadence is per-workspace from gc_interval_days in the manifest.
+	GCCheckInterval time.Duration
+
 	// AutoStart starts daemon on first ox command if true.
 	AutoStart bool
 
@@ -54,6 +58,7 @@ func DefaultConfig() *Config {
 		TeamContextSyncInterval: 1 * time.Minute,
 		DebounceWindow:          500 * time.Millisecond,
 		VersionCheckInterval:    30 * time.Minute, // ETag conditional requests make this cheap
+		GCCheckInterval:         1 * time.Hour,    // check hourly, actual GC cadence is per-workspace
 		InactivityTimeout:       1 * time.Hour,    // exit after 1 hour of inactivity
 		AutoStart:               true,
 		LedgerPath:              "", // resolved at runtime

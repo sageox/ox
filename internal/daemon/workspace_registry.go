@@ -56,7 +56,9 @@ type WorkspaceState struct {
 	NextSyncAttempt time.Time `json:"next_sync_attempt,omitempty"` // when to retry sync (exponential backoff)
 
 	// manifest-derived settings (from .sageox/sync.manifest in the team context repo)
-	SyncIntervalMin int `json:"sync_interval_min,omitempty"` // minutes between syncs (0 = use default)
+	SyncIntervalMin int       `json:"sync_interval_min,omitempty"` // minutes between syncs (0 = use default)
+	GCIntervalDays  int       `json:"gc_interval_days,omitempty"`  // days between reclones (0 = default 7)
+	LastGCTime      time.Time `json:"last_gc_time,omitempty"`      // when last GC reclone completed
 }
 
 // WorkspaceRegistry tracks all workspaces (ledger + team contexts) for a daemon.
@@ -487,6 +489,57 @@ func (r *WorkspaceRegistry) GetSyncIntervalMin(path string) int {
 		}
 	}
 	return 0
+}
+
+// SetGCInterval stores the manifest-derived GC interval for a workspace.
+func (r *WorkspaceRegistry) SetGCInterval(path string, days int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, ws := range r.workspaces {
+		if ws.Path == path {
+			ws.GCIntervalDays = days
+			return
+		}
+	}
+}
+
+// GetGCInterval returns the GC interval for a workspace. Returns
+// manifest.DefaultGCIntervalDays (7) if not set or workspace not found.
+func (r *WorkspaceRegistry) GetGCInterval(path string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for _, ws := range r.workspaces {
+		if ws.Path == path {
+			if ws.GCIntervalDays > 0 {
+				return ws.GCIntervalDays
+			}
+			return 7 // default
+		}
+	}
+	return 7
+}
+
+// UpdateLastGC records that GC completed for a workspace.
+func (r *WorkspaceRegistry) UpdateLastGC(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if ws := r.workspaces[id]; ws != nil {
+		ws.LastGCTime = time.Now()
+	}
+}
+
+// GetLastGCTime returns when GC last ran for a workspace.
+func (r *WorkspaceRegistry) GetLastGCTime(id string) time.Time {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	if ws := r.workspaces[id]; ws != nil {
+		return ws.LastGCTime
+	}
+	return time.Time{}
 }
 
 // RecordSyncAttempt records that a sync was attempted for a workspace.

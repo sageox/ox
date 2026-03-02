@@ -30,6 +30,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sageox/ox/internal/api"
@@ -264,6 +265,9 @@ type SyncScheduler struct {
 	// worker pool for bounded clone concurrency
 	cloneSem      chan struct{} // semaphore limiting concurrent clones
 	cloneInFlight sync.Map      // tracks workspace IDs with clone in progress (dedup)
+
+	// GC state — only one GC runs at a time across all workspaces
+	gcInProgress int32
 
 	// test hooks (nil in production)
 	onBeforeCloneSem func() // called just before acquiring cloneSem; tests use this to observe blocking
@@ -580,6 +584,15 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		)
 	}
 
+	// GC reclone ticker — checks hourly if any workspace needs a fresh reclone
+	var gcTicker *time.Ticker
+	var gcChan <-chan time.Time
+	if s.config.GCCheckInterval > 0 && s.config.ProjectRoot != "" {
+		gcTicker = time.NewTicker(s.config.GCCheckInterval)
+		gcChan = gcTicker.C
+		defer gcTicker.Stop()
+	}
+
 	// write initial heartbeat
 	s.writeHeartbeats()
 
@@ -603,6 +616,9 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 
 		case <-versionCheckChan:
 			s.checkLatestVersion(ctx)
+
+		case <-gcChan:
+			s.checkAndRunGC(ctx)
 
 		case <-s.triggerChan:
 			// triggered by file watcher, do full sync
@@ -1458,19 +1474,38 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		// directory exists - check if it's a git repo
 		gitDir := filepath.Join(payload.RepoPath, ".git")
 		if _, err := os.Stat(gitDir); err == nil {
-			s.logger.Debug("checkout: repo already exists", "path", payload.RepoPath)
-			result.AlreadyExists = true
-			return result, nil
-		}
-		// directory exists but not a git repo - self-healing: move aside and clone fresh
-		// this handles corrupt/incomplete clones that need recovery
-		backupPath := fmt.Sprintf("%s.bak.%d", payload.RepoPath, time.Now().Unix())
-		s.logger.Warn("checkout: directory exists but not a git repo, moving aside for self-healing",
-			"path", payload.RepoPath, "backup", backupPath)
-		if err := os.Rename(payload.RepoPath, backupPath); err != nil {
-			// if rename fails, log and continue - git clone will fail if there's a real problem
-			s.logger.Error("checkout: failed to move directory aside, will attempt clone anyway",
-				"path", payload.RepoPath, "error", err)
+			// for team-context repos, detect incomplete two-phase clones
+			// (.git exists but .sageox/ never materialized)
+			incomplete := false
+			if payload.RepoType == "team-context" {
+				sageoxDir := filepath.Join(payload.RepoPath, ".sageox")
+				if _, sErr := os.Stat(sageoxDir); os.IsNotExist(sErr) {
+					incomplete = true
+					s.logger.Warn("checkout: .git exists but .sageox missing, treating as incomplete clone",
+						"path", payload.RepoPath)
+					backupPath := fmt.Sprintf("%s.bak.%d", payload.RepoPath, time.Now().Unix())
+					if rErr := os.Rename(payload.RepoPath, backupPath); rErr != nil {
+						s.logger.Error("checkout: failed to move incomplete clone aside", "error", rErr)
+					}
+				}
+			}
+			if !incomplete {
+				s.logger.Debug("checkout: repo already exists", "path", payload.RepoPath)
+				result.AlreadyExists = true
+				return result, nil
+			}
+			// fall through to clone below
+		} else {
+			// directory exists but not a git repo - self-healing: move aside and clone fresh
+			// this handles corrupt/incomplete clones that need recovery
+			backupPath := fmt.Sprintf("%s.bak.%d", payload.RepoPath, time.Now().Unix())
+			s.logger.Warn("checkout: directory exists but not a git repo, moving aside for self-healing",
+				"path", payload.RepoPath, "backup", backupPath)
+			if err := os.Rename(payload.RepoPath, backupPath); err != nil {
+				// if rename fails, log and continue - git clone will fail if there's a real problem
+				s.logger.Error("checkout: failed to move directory aside, will attempt clone anyway",
+					"path", payload.RepoPath, "error", err)
+			}
 		}
 		// continue with clone below
 	}
@@ -1523,25 +1558,53 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		s.logger.Warn("checkout: git credentials have empty token", "endpoint", endpoint)
 	}
 
-	// git clone with progress
-	// note: git clone --progress sends progress to stderr, could parse it for more detailed updates
-	// team contexts only need main branch — skip fetching other branches
-	cloneArgs := []string{"clone", "--quiet"}
-	if payload.RepoType != "ledger" {
-		cloneArgs = append(cloneArgs, "--single-branch", "--branch", "main")
-	}
-	cloneArgs = append(cloneArgs, cloneURL, payload.RepoPath)
-	cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)
-	if output, err := cloneCmd.CombinedOutput(); err != nil {
-		// sanitize output to prevent credential leaks (clone URL may contain PAT token)
-		sanitizedOutput := gitutil.SanitizeOutput(string(output))
-		s.logger.Error("checkout: clone failed", "error", err, "output", sanitizedOutput)
-		s.recordError(fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
-		// include sanitized output in error for better debugging
-		if sanitizedOutput != "" {
-			return nil, fmt.Errorf("git clone failed: %s", sanitizedOutput)
+	// branch on repo type: team contexts use two-phase partial clone,
+	// ledgers use full clone (they need complete history for CLI writes)
+	if payload.RepoType == "team-context" {
+		if progress != nil {
+			_ = progress.WriteStage("cloning", "Fetching repository structure...")
 		}
-		return nil, fmt.Errorf("git clone failed: %w", err)
+		mCfg, err := s.twoPhaseClone(ctx, cloneURL, payload.RepoPath, progress)
+		if err != nil {
+			s.logger.Error("checkout: two-phase clone failed", "error", err)
+			s.recordError(fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
+			return nil, err
+		}
+		if mCfg != nil {
+			if mCfg.SyncIntervalMin > 0 {
+				s.workspaceRegistry.SetSyncIntervalMin(payload.RepoPath, mCfg.SyncIntervalMin)
+			}
+			if mCfg.GCIntervalDays > 0 {
+				s.workspaceRegistry.SetGCInterval(payload.RepoPath, mCfg.GCIntervalDays)
+			}
+		}
+	} else {
+		// ledger: full clone
+		if progress != nil {
+			_ = progress.WriteStage("cloning", "Cloning repository...")
+		}
+		cloneArgs := []string{"clone", "--quiet", cloneURL, payload.RepoPath}
+		cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)
+		if output, err := cloneCmd.CombinedOutput(); err != nil {
+			sanitizedOutput := gitutil.SanitizeOutput(string(output))
+			s.logger.Error("checkout: clone failed", "error", err, "output", sanitizedOutput)
+			s.recordError(fmt.Sprintf("clone %s failed: %v", payload.RepoType, err))
+			if sanitizedOutput != "" {
+				return nil, fmt.Errorf("git clone failed: %s", sanitizedOutput)
+			}
+			return nil, fmt.Errorf("git clone failed: %w", err)
+		}
+
+		// create AGENTS.md for newly cloned ledger repos
+		if progress != nil {
+			_ = progress.WriteStage("initializing", "Creating AGENTS.md...")
+		}
+		agentsOpts := &gitserver.AgentsMDOptions{
+			RepoType: payload.RepoType,
+		}
+		if err := gitserver.CreateAgentsMD(ctx, payload.RepoPath, agentsOpts); err != nil {
+			s.logger.Warn("checkout: failed to create AGENTS.MD", "error", err)
+		}
 	}
 
 	// send progress: verifying
@@ -1556,10 +1619,8 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	}
 
 	// configure pull strategy to use rebase (avoids merge commits, cleaner history)
-	// This prevents git warnings about divergent branches on manual pulls
 	configCmd := exec.CommandContext(ctx, "git", "-C", payload.RepoPath, "config", "pull.rebase", "true")
 	if output, err := configCmd.CombinedOutput(); err != nil {
-		// log but don't fail - this is a nice-to-have config
 		s.logger.Warn("checkout: failed to set pull.rebase config", "error", err, "output", string(output))
 	}
 
@@ -1569,29 +1630,6 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 
 	// invalidate workspace registry cache after cloning new repo
 	s.workspaceRegistry.InvalidateConfigCache()
-
-	// create AGENTS.md for newly cloned ledger repos only.
-	// team-context repos have AGENTS.md pre-populated by the server.
-	if payload.RepoType == "ledger" {
-		if progress != nil {
-			_ = progress.WriteStage("initializing", "Creating AGENTS.md...")
-		}
-		agentsOpts := &gitserver.AgentsMDOptions{
-			RepoType: payload.RepoType,
-		}
-		if err := gitserver.CreateAgentsMD(ctx, payload.RepoPath, agentsOpts); err != nil {
-			// non-fatal: clone succeeded even if AGENTS.md creation fails
-			s.logger.Warn("checkout: failed to create AGENTS.MD", "error", err)
-		}
-	}
-
-	// apply manifest-driven sparse-checkout for team context repos
-	if payload.RepoType == "team-context" {
-		mCfg := s.applySparseCheckout(ctx, payload.RepoPath)
-		if mCfg != nil && mCfg.SyncIntervalMin > 0 {
-			s.workspaceRegistry.SetSyncIntervalMin(payload.RepoPath, mCfg.SyncIntervalMin)
-		}
-	}
 
 	return result, nil
 }
@@ -1743,8 +1781,13 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 
 			// apply manifest-driven sparse-checkout after successful pull
 			mCfg := s.applySparseCheckout(ctx, ws.Path)
-			if mCfg != nil && mCfg.SyncIntervalMin > 0 {
-				s.workspaceRegistry.SetSyncIntervalMin(ws.Path, mCfg.SyncIntervalMin)
+			if mCfg != nil {
+				if mCfg.SyncIntervalMin > 0 {
+					s.workspaceRegistry.SetSyncIntervalMin(ws.Path, mCfg.SyncIntervalMin)
+				}
+				if mCfg.GCIntervalDays > 0 {
+					s.workspaceRegistry.SetGCInterval(ws.Path, mCfg.GCIntervalDays)
+				}
 			}
 
 			// update last sync in registry and config file
@@ -2122,6 +2165,305 @@ func (s *SyncScheduler) applySparseCheckout(ctx context.Context, tcPath string) 
 	s.logger.Debug("sparse-checkout applied",
 		"path", tcPath, "paths", sparsePaths, "sync_interval_min", cfg.SyncIntervalMin)
 	return cfg
+}
+
+// twoPhaseClone performs a partial clone for team context repos:
+//
+// Phase 1: clone with --filter=blob:none --depth=1 --sparse --no-checkout to fetch
+// only tree objects, then materialize just .sageox/ to read the manifest.
+//
+// Phase 2: parse the manifest to compute sparse checkout paths, then materialize
+// only the declared includes (minus denies). Falls back to FallbackConfig if
+// manifest is missing or unparseable.
+//
+// After both phases, unshallows the clone so subsequent fetch/pull --rebase work.
+func (s *SyncScheduler) twoPhaseClone(ctx context.Context, cloneURL, repoPath string, progress *ProgressWriter) (*manifest.ManifestConfig, error) {
+	// phase 1: minimal clone — trees only, no blobs
+	cloneCmd := exec.CommandContext(ctx, "git", "clone",
+		"--filter=blob:none",
+		"--depth=1",
+		"--sparse",
+		"--no-checkout",
+		"--single-branch",
+		"--branch", "main",
+		"--quiet",
+		cloneURL, repoPath,
+	)
+	if output, err := cloneCmd.CombinedOutput(); err != nil {
+		sanitized := gitutil.SanitizeOutput(string(output))
+		if sanitized != "" {
+			return nil, fmt.Errorf("phase 1 clone failed: %s", sanitized)
+		}
+		return nil, fmt.Errorf("phase 1 clone failed: %w", err)
+	}
+
+	// materialize only .sageox/ to read the manifest.
+	// use --no-cone mode to support both file and directory patterns in Phase 2.
+	if _, err := gitutil.RunGit(ctx, repoPath, "sparse-checkout", "set", "--no-cone", ".sageox/"); err != nil {
+		return nil, fmt.Errorf("phase 1 sparse-checkout set .sageox: %w", err)
+	}
+	if _, err := gitutil.RunGit(ctx, repoPath, "checkout", "HEAD"); err != nil {
+		return nil, fmt.Errorf("phase 1 checkout HEAD: %w", err)
+	}
+
+	// phase 2: read manifest and materialize declared paths
+	if progress != nil {
+		_ = progress.WriteStage("materializing", "Reading manifest and materializing files...")
+	}
+
+	manifestPath := filepath.Join(repoPath, ".sageox", "sync.manifest")
+	cfg := manifest.ParseFile(manifestPath)
+
+	sparsePaths := manifest.ComputeSparseSet(cfg)
+	if len(sparsePaths) == 0 {
+		sparsePaths = []string{".sageox/"}
+	}
+
+	// ensure .sageox/ is always in the sparse set
+	hasSageox := false
+	for _, p := range sparsePaths {
+		if p == ".sageox/" || p == ".sageox" {
+			hasSageox = true
+			break
+		}
+	}
+	if !hasSageox {
+		sparsePaths = append([]string{".sageox/"}, sparsePaths...)
+	}
+
+	args := append([]string{"sparse-checkout", "set", "--no-cone"}, sparsePaths...)
+	if _, err := gitutil.RunGit(ctx, repoPath, args...); err != nil {
+		s.logger.Warn("phase 2 sparse-checkout set failed, continuing with .sageox only",
+			"path", repoPath, "error", err)
+	}
+
+	// checkout HEAD to materialize the newly declared paths
+	if _, err := gitutil.RunGit(ctx, repoPath, "checkout", "HEAD"); err != nil {
+		return nil, fmt.Errorf("phase 2 checkout HEAD: %w", err)
+	}
+
+	// unshallow so subsequent fetch/pull --rebase work correctly.
+	// --depth=1 creates a shallow clone; fetch --unshallow converts to full depth
+	// but with --filter=blob:none active, only fetches commit/tree objects.
+	if _, err := gitutil.RunGit(ctx, repoPath, "fetch", "--unshallow", "--quiet"); err != nil {
+		// non-fatal: pull --rebase may still work if remote only has 1 commit
+		s.logger.Debug("unshallow fetch failed (may be single-commit repo)", "path", repoPath, "error", err)
+	}
+
+	s.validateTeamContextClone(repoPath, cfg)
+
+	s.logger.Info("two-phase clone complete", "path", repoPath, "sparse_paths", sparsePaths)
+	return cfg, nil
+}
+
+// validateTeamContextClone checks that a freshly cloned team context has
+// expected content. All checks are warning-only — a missing file does not
+// fail the clone.
+func (s *SyncScheduler) validateTeamContextClone(repoPath string, cfg *manifest.ManifestConfig) {
+	// at least one core file should exist
+	coreFiles := []string{"SOUL.md", "TEAM.md", "MEMORY.md"}
+	found := false
+	for _, f := range coreFiles {
+		if _, err := os.Stat(filepath.Join(repoPath, f)); err == nil {
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.logger.Warn("team context missing all core files (SOUL.md, TEAM.md, MEMORY.md)",
+			"path", repoPath)
+	}
+
+	// check memory/ directory
+	if _, err := os.Stat(filepath.Join(repoPath, "memory")); os.IsNotExist(err) {
+		s.logger.Debug("team context has no memory/ directory", "path", repoPath)
+	}
+
+	// verify no denied paths materialized
+	if cfg != nil {
+		for _, denied := range cfg.Denies {
+			if _, err := os.Stat(filepath.Join(repoPath, denied)); err == nil {
+				s.logger.Warn("denied path exists after clone", "path", repoPath, "denied", denied)
+			}
+		}
+	}
+}
+
+// checkAndRunGC iterates team context workspaces and triggers blue-green reclone
+// for any that are past their gc_interval_days cadence.
+func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
+	// only one GC at a time
+	if !atomic.CompareAndSwapInt32(&s.gcInProgress, 0, 1) {
+		s.logger.Debug("gc: already in progress, skipping check")
+		return
+	}
+
+	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
+		s.logger.Warn("gc: failed to load workspace registry", "error", err)
+		atomic.StoreInt32(&s.gcInProgress, 0)
+		return
+	}
+
+	teamContexts := s.workspaceRegistry.GetTeamContexts()
+	for _, ws := range teamContexts {
+		if !ws.Exists || ws.CloneURL == "" {
+			continue
+		}
+
+		intervalDays := ws.GCIntervalDays
+		if intervalDays <= 0 {
+			intervalDays = manifest.DefaultGCIntervalDays
+		}
+		interval := time.Duration(intervalDays) * 24 * time.Hour
+
+		if !ws.LastGCTime.IsZero() && time.Since(ws.LastGCTime) < interval {
+			continue
+		}
+
+		// skip if clone is in flight
+		if _, loaded := s.cloneInFlight.Load(ws.ID); loaded {
+			continue
+		}
+
+		s.logger.Info("gc: workspace due for reclone", "team", ws.TeamName, "id", ws.ID,
+			"interval_days", intervalDays, "last_gc", ws.LastGCTime)
+
+		// run GC synchronously (one at a time) then release the flag
+		s.runBlueGreenGC(ctx, ws)
+		break // one GC per check cycle to avoid overloading
+	}
+
+	atomic.StoreInt32(&s.gcInProgress, 0)
+}
+
+// runBlueGreenGC performs a blue-green reclone for a single team context workspace.
+// Steps: verify clean → clone into .new → validate → atomic swap → remove old.
+func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) {
+	// step 1: verify clean working state
+	if !isCheckoutClean(ws.Path) {
+		s.logger.Warn("gc: skipping reclone, working tree has uncommitted changes",
+			"path", ws.Path, "team", ws.TeamName)
+		return
+	}
+
+	newPath := ws.Path + ".new"
+	oldPath := ws.Path + ".old"
+
+	// clean up leftover .new from a previous failed GC
+	if _, err := os.Stat(newPath); err == nil {
+		s.logger.Info("gc: cleaning up leftover .new directory", "path", newPath)
+		if err := os.RemoveAll(newPath); err != nil {
+			s.logger.Error("gc: failed to remove leftover .new", "path", newPath, "error", err)
+			return
+		}
+	}
+
+	// step 2: two-phase clone into .new
+	cloneURL := ws.CloneURL
+	ep := s.workspaceRegistry.GetEndpoint()
+	if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err == nil && creds != nil && creds.Token != "" {
+		cloneURL = injectGitCredentials(ws.CloneURL, "oauth2", creds.Token)
+	}
+
+	s.logger.Info("gc: starting reclone", "team", ws.TeamName, "path", newPath)
+	mCfg, err := s.twoPhaseClone(ctx, cloneURL, newPath, nil)
+	if err != nil {
+		s.logger.Error("gc: reclone failed, keeping old", "team", ws.TeamName, "error", err)
+		_ = os.RemoveAll(newPath)
+		return
+	}
+
+	// step 3: validate new clone
+	if !s.validateGCClone(newPath, mCfg) {
+		s.logger.Error("gc: validation failed, keeping old", "team", ws.TeamName)
+		_ = os.RemoveAll(newPath)
+		return
+	}
+
+	// configure pull.rebase=true on the new clone
+	if _, err := gitutil.RunGit(ctx, newPath, "config", "pull.rebase", "true"); err != nil {
+		s.logger.Warn("gc: failed to set pull.rebase on new clone", "error", err)
+	}
+
+	// step 4: atomic swap
+	// clean up any leftover .old from a previous GC
+	if _, err := os.Stat(oldPath); err == nil {
+		_ = os.RemoveAll(oldPath)
+	}
+
+	if err := os.Rename(ws.Path, oldPath); err != nil {
+		s.logger.Error("gc: failed to move old repo aside", "path", ws.Path, "error", err)
+		_ = os.RemoveAll(newPath)
+		return
+	}
+
+	if err := os.Rename(newPath, ws.Path); err != nil {
+		s.logger.Error("gc: failed to move new repo into place, restoring old", "error", err)
+		// try to restore
+		if restoreErr := os.Rename(oldPath, ws.Path); restoreErr != nil {
+			s.logger.Error("gc: CRITICAL failed to restore old repo", "error", restoreErr)
+		}
+		return
+	}
+
+	// step 5: cleanup
+	if err := os.RemoveAll(oldPath); err != nil {
+		s.logger.Warn("gc: failed to remove old clone", "path", oldPath, "error", err)
+	}
+
+	s.workspaceRegistry.UpdateLastGC(ws.ID)
+	if mCfg != nil {
+		if mCfg.SyncIntervalMin > 0 {
+			s.workspaceRegistry.SetSyncIntervalMin(ws.Path, mCfg.SyncIntervalMin)
+		}
+		if mCfg.GCIntervalDays > 0 {
+			s.workspaceRegistry.SetGCInterval(ws.Path, mCfg.GCIntervalDays)
+		}
+	}
+
+	s.logger.Info("gc: reclone complete", "team", ws.TeamName, "path", ws.Path)
+}
+
+// validateGCClone checks that a freshly cloned repo has the minimum expected
+// content for a team context. Returns false if validation fails.
+func (s *SyncScheduler) validateGCClone(repoPath string, cfg *manifest.ManifestConfig) bool {
+	// .git must exist
+	if _, err := os.Stat(filepath.Join(repoPath, ".git")); err != nil {
+		s.logger.Error("gc validate: .git missing", "path", repoPath)
+		return false
+	}
+
+	// .sageox must exist
+	if _, err := os.Stat(filepath.Join(repoPath, ".sageox")); err != nil {
+		s.logger.Error("gc validate: .sageox missing", "path", repoPath)
+		return false
+	}
+
+	// at least one core file
+	coreFiles := []string{"SOUL.md", "TEAM.md", "MEMORY.md"}
+	found := false
+	for _, f := range coreFiles {
+		if _, err := os.Stat(filepath.Join(repoPath, f)); err == nil {
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.logger.Error("gc validate: no core files (SOUL.md, TEAM.md, MEMORY.md)", "path", repoPath)
+		return false
+	}
+
+	// verify no denied paths materialized
+	if cfg != nil {
+		for _, denied := range cfg.Denies {
+			if _, err := os.Stat(filepath.Join(repoPath, denied)); err == nil {
+				s.logger.Error("gc validate: denied path materialized", "path", repoPath, "denied", denied)
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // remoteRefCheck compares the remote tracking branch SHA to the local HEAD SHA via ls-remote.
