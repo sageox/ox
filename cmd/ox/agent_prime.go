@@ -175,6 +175,10 @@ type teamContextInfo struct {
 	MemoryDaily   []string `json:"memory_daily,omitempty"`   // available daily summary files
 	MemoryWeekly  []string `json:"memory_weekly,omitempty"`  // available weekly summary files
 	MemoryMonthly []string `json:"memory_monthly,omitempty"` // available monthly summary files
+
+	// sync health
+	Stale      bool   `json:"stale,omitempty"`       // true if last sync exceeds staleness threshold
+	StaleSince string `json:"stale_since,omitempty"` // human-readable duration since last sync
 }
 
 // otherTeams lists non-primary team contexts available to the agent.
@@ -1595,6 +1599,18 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 	// v4 team memory loading
 	loadTeamMemory(info, tc.Path)
 
+	// sync health: check staleness
+	syncState := daemon.LoadSyncState(tc.Path)
+	if syncState.IsStale(daemon.DefaultStalenessThreshold) && !syncState.LastSync.IsZero() {
+		info.Stale = true
+		d := syncState.StaleDuration()
+		if d >= 24*time.Hour {
+			info.StaleSince = fmt.Sprintf("%dd", int(d.Hours()/24))
+		} else {
+			info.StaleSince = fmt.Sprintf("%dh", int(d.Hours()))
+		}
+	}
+
 	// check for agent-context/distilled-discussions.md
 	agentContextRelPath := filepath.Join("agent-context", "distilled-discussions.md")
 	agentContextPath := filepath.Join(tc.Path, agentContextRelPath)
@@ -1670,6 +1686,10 @@ func emitTeamMemorySection(cmd *cobra.Command, tc *teamContextInfo) {
 	fmt.Fprintln(out)
 	fmt.Fprintln(out, "## Team Memory")
 	fmt.Fprintln(out)
+
+	if tc.Stale {
+		fmt.Fprintf(out, "> **Warning:** Team memory may be stale (last sync %s ago). Run `ox doctor` to diagnose.\n\n", tc.StaleSince)
+	}
 
 	// MEMORY.md — always full content
 	if tc.MemoryContent != "" {
