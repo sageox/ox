@@ -66,8 +66,8 @@ func InstallGitHooks(gitRoot string) error {
 	}
 
 	if err == nil {
-		// hook file exists — check if already installed
-		if strings.Contains(string(existing), oxHookMarkerStart) {
+		// hook file exists — check if already installed (both markers + command present)
+		if hasValidOxHook(string(existing)) {
 			return nil // already installed
 		}
 
@@ -137,6 +137,14 @@ func UninstallGitHooks(gitRoot string) error {
 	return os.WriteFile(hookPath, []byte(cleaned+"\n"), 0755)
 }
 
+// hasValidOxHook returns true if content contains a complete ox hook section
+// (both markers and the command). Detects partially broken installs.
+func hasValidOxHook(content string) bool {
+	return strings.Contains(content, oxHookMarkerStart) &&
+		strings.Contains(content, oxHookMarkerEnd) &&
+		strings.Contains(content, "ox hooks commit-msg")
+}
+
 // HasGitHooks returns true if the ox prepare-commit-msg hook is installed.
 func HasGitHooks(gitRoot string) bool {
 	hooksDir := resolveHooksDir(gitRoot)
@@ -147,5 +155,5 @@ func HasGitHooks(gitRoot string) bool {
 		return false
 	}
 
-	return strings.Contains(string(content), oxHookMarkerStart)
+	return hasValidOxHook(string(content))
 }

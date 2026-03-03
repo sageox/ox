@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
@@ -19,5 +20,9 @@ func buildSessionURL(cfg *config.ProjectConfig, sessionName string) string {
 	if ep == "" {
 		return ""
 	}
-	return fmt.Sprintf("%s/repo/%s/sessions/%s/view", ep, cfg.RepoID, sessionName)
+	return fmt.Sprintf("%s/repo/%s/sessions/%s/view",
+		ep,
+		url.PathEscape(cfg.RepoID),
+		url.PathEscape(sessionName),
+	)
 }

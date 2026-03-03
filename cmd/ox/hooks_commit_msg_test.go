@@ -11,6 +11,12 @@ import (
 )
 
 func TestRunHooksCommitMsg_SkipsMergeSource(t *testing.T) {
+	prevSource, prevFile := hooksCommitMsgSource, hooksCommitMsgFile
+	t.Cleanup(func() {
+		hooksCommitMsgSource = prevSource
+		hooksCommitMsgFile = prevFile
+	})
+
 	hooksCommitMsgSource = "merge"
 	hooksCommitMsgFile = "/tmp/nonexistent"
 
@@ -19,23 +25,31 @@ func TestRunHooksCommitMsg_SkipsMergeSource(t *testing.T) {
 }
 
 func TestRunHooksCommitMsg_NoopWhenNotInitialized(t *testing.T) {
+	prevSource, prevFile := hooksCommitMsgSource, hooksCommitMsgFile
+	t.Cleanup(func() {
+		hooksCommitMsgSource = prevSource
+		hooksCommitMsgFile = prevFile
+	})
+
 	dir := t.TempDir()
 	msgFile := filepath.Join(dir, "COMMIT_EDITMSG")
 	require.NoError(t, os.WriteFile(msgFile, []byte("test commit\n"), 0644))
 
 	// save and restore cwd
-	origDir, _ := os.Getwd()
-	defer func() { _ = os.Chdir(origDir) }()
+	origDir, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
 	require.NoError(t, os.Chdir(dir))
 
 	hooksCommitMsgSource = ""
 	hooksCommitMsgFile = msgFile
 
-	err := runHooksCommitMsg(nil, nil)
+	err = runHooksCommitMsg(nil, nil)
 	assert.NoError(t, err)
 
 	// message should be unchanged
-	content, _ := os.ReadFile(msgFile)
+	content, err := os.ReadFile(msgFile)
+	require.NoError(t, err)
 	assert.Equal(t, "test commit\n", string(content))
 }
 
