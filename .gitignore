@@ -68,3 +68,7 @@ tests/integration/agents/benchmark/results.jsonl
 demo/credentials.sops.yaml
 demo/playwright/node_modules/
 .team-contexts/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
