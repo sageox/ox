@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
-	"github.com/google/uuid"
+	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
@@ -51,15 +54,26 @@ func init() {
 
 // docMeta is the metadata.json schema for imported documents.
 type docMeta struct {
-	Version        string                `json:"version"`
-	Title          string                `json:"title"`
-	SourceFilename string                `json:"source_filename"`
-	ContentType    string                `json:"content_type"`
-	SourceSize     int64                 `json:"source_size"`
-	CreatedAt      string                `json:"created_at"`
-	ImportedAt     string                `json:"imported_at"`
-	HasTextExtract bool                  `json:"has_text_extract"`
-	Files          map[string]lfs.FileRef `json:"files"`
+	Version        string              `json:"version"`
+	Title          string              `json:"title"`
+	SourceFilename string              `json:"source_filename"`
+	ContentType    string              `json:"content_type"`
+	SourceSize     int64               `json:"source_size"`
+	SourceOID      string              `json:"source_oid"`
+	CreatedAt      string              `json:"created_at"`
+	ImportedAt     string              `json:"imported_at"`
+	HasTextExtract bool                `json:"has_text_extract"`
+	Path           string              `json:"path"`
+	Sidecars       map[string]sidecar  `json:"sidecars"`
+}
+
+// sidecar describes an additional derived file associated with an imported document.
+// The map key in docMeta.Sidecars is the sidecar type (e.g., "text-extract").
+type sidecar struct {
+	Filename  string `json:"filename"`
+	OID       string `json:"oid"`
+	Size      int64  `json:"size"`
+	CreatedAt string `json:"created_at"`
 }
 
 func runImport(cmd *cobra.Command, args []string) error {
@@ -123,13 +137,22 @@ func runImport(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	docID := uuid.Must(uuid.NewV7()).String()
+	// derive directory name from --title or filename stem
+	dirName := importFlags.title
+	if dirName == "" {
+		dirName = inferTitle(srcPath)
+	}
+	dirSlug := slugify(dirName)
+
 	docDir := filepath.Join(docsBaseDir,
 		importDate.Format("2006"),
 		importDate.Format("01"),
 		importDate.Format("02"),
-		docID,
+		dirSlug,
 	)
+	if _, statErr := os.Stat(docDir); statErr == nil && !importFlags.force {
+		return fmt.Errorf("document directory already exists for this date — use --title to differentiate or --force to reimport: %s", docDir)
+	}
 	if err := os.MkdirAll(docDir, 0o755); err != nil {
 		return fmt.Errorf("create doc directory: %w", err)
 	}
@@ -165,7 +188,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("create LFS client: %w", err)
 	}
 
-	slog.Info("uploading doc to LFS", "doc_id", docID, "files", len(batchObjects))
+	slog.Info("uploading doc to LFS", "doc", dirSlug, "files", len(batchObjects))
 
 	resp, err := lfsClient.BatchUpload(batchObjects)
 	if err != nil {
@@ -183,10 +206,11 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("LFS upload failed:\n  %s", strings.Join(uploadErrors, "\n  "))
 	}
 
-	// write LFS pointer files
-	srcPointerPath := filepath.Join(docDir, "source.bin")
+	// write LFS pointer files (preserving original filename)
+	srcFilename := filepath.Base(srcPath)
+	srcPointerPath := filepath.Join(docDir, srcFilename)
 	if err := os.WriteFile(srcPointerPath, []byte(lfs.FormatPointer(srcRef.OID, srcRef.Size)), 0o644); err != nil {
-		return fmt.Errorf("write source.bin pointer: %w", err)
+		return fmt.Errorf("write source pointer: %w", err)
 	}
 
 	textPointerPath := filepath.Join(docDir, "extracted.md")
@@ -202,23 +226,32 @@ func runImport(cmd *cobra.Command, args []string) error {
 	}
 
 	// build and write metadata.json
-	files := map[string]lfs.FileRef{
-		"source.bin": srcRef,
-	}
+	// sidecars only includes additional derived files (source is described by top-level fields)
+	sidecars := map[string]sidecar{}
 	if hasText {
-		files["extracted.md"] = textRef
+		sidecars["text-extract"] = sidecar{
+			Filename:  "extracted.md",
+			OID:       textRef.OID,
+			Size:      textRef.Size,
+			CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		}
 	}
+
+	// relative path within team context (for cloud notification)
+	relDocDir, _ := filepath.Rel(tc.Path, docDir)
 
 	meta := docMeta{
 		Version:        "1",
 		Title:          title,
-		SourceFilename: filepath.Base(srcPath),
-		ContentType:    detectContentType(filepath.Base(srcPath), srcContent),
+		SourceFilename: srcFilename,
+		ContentType:    detectContentType(srcFilename, srcContent),
 		SourceSize:     srcRef.Size,
-		CreatedAt:      importDate.Format("2006-01-02"),
+		SourceOID:      srcRef.OID,
+		CreatedAt:      importDate.Format(time.RFC3339),
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
 		HasTextExtract: hasText,
-		Files:          files,
+		Path:           relDocDir,
+		Sidecars:       sidecars,
 	}
 
 	metaData, err := json.MarshalIndent(meta, "", "  ")
@@ -236,11 +269,14 @@ func runImport(cmd *cobra.Command, args []string) error {
 	}
 
 	ep := endpoint.GetForProject(projectRoot)
-	if err := commitAndPushDocImport(tc.Path, ep, docID, metaPath, srcPointerPath, textPointerPath, hasText); err != nil {
+	if err := commitAndPushDocImport(tc.Path, ep, dirSlug, metaPath, srcPointerPath, textPointerPath, hasText); err != nil {
 		return fmt.Errorf("commit and push: %w", err)
 	}
 
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Imported: %s\nID: %s\n", title, docID)
+	// fire-and-forget cloud notification
+	notifyImport(projectRoot, ep, meta)
+
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Imported: %s\nPath: %s\n", title, relDocDir)
 	return nil
 }
 
@@ -255,7 +291,7 @@ func inferTitle(path string) string {
 }
 
 // ensureMetadataGitattributes ensures metadata.json is excluded from LFS.
-// The data/** LFS rule covers source.bin and extracted.md, but metadata.json
+// The data/** LFS rule covers source files and extracted.md, but metadata.json
 // must remain a plain-text git object so AI coworkers can read it without hydration.
 func ensureMetadataGitattributes(tcPath string) error {
 	gitattrsPath := filepath.Join(tcPath, ".gitattributes")
@@ -280,7 +316,7 @@ func ensureMetadataGitattributes(tcPath string) error {
 }
 
 // findExistingDocByOID scans data/docs/ metadata.json files for a matching source OID.
-// Returns the doc-id (UUID directory name) if found.
+// Returns the doc directory name if found.
 func findExistingDocByOID(docsBaseDir, oid string) (string, bool) {
 	var docID string
 	var found bool
@@ -294,14 +330,12 @@ func findExistingDocByOID(docsBaseDir, oid string) (string, bool) {
 			return nil
 		}
 		var meta struct {
-			Files map[string]struct {
-				OID string `json:"oid"`
-			} `json:"files"`
+			SourceOID string `json:"source_oid"`
 		}
 		if json.Unmarshal(data, &meta) != nil {
 			return nil
 		}
-		if src, ok := meta.Files["source.bin"]; ok && src.OID == oid {
+		if meta.SourceOID == oid {
 			docID = filepath.Base(filepath.Dir(path))
 			found = true
 			return filepath.SkipAll
@@ -480,4 +514,43 @@ func pushTeamContext(ctx context.Context, tcPath, ep string) error {
 	}
 
 	return nil
+}
+
+// slugify converts a string to a filesystem-safe directory name.
+// Lowercase, spaces/underscores → hyphens, strip non-alphanumeric (keep hyphens).
+func slugify(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(unicode.ToLower(r))
+		case r == ' ' || r == '_' || r == '-':
+			b.WriteRune('-')
+		}
+	}
+	// collapse consecutive hyphens
+	re := regexp.MustCompile(`-{2,}`)
+	result := re.ReplaceAllString(b.String(), "-")
+	return strings.Trim(result, "-")
+}
+
+// notifyImport sends a fire-and-forget notification to the cloud about a new import.
+// Failures are logged but never block the import.
+func notifyImport(projectRoot, ep string, meta docMeta) {
+	projCfg, err := config.LoadProjectConfig(projectRoot)
+	if err != nil || projCfg.RepoID == "" {
+		slog.Debug("skipping import notification, no repo_id", "error", err)
+		return
+	}
+
+	storedToken, err := auth.GetTokenForEndpoint(ep)
+	if err != nil || storedToken == nil || storedToken.AccessToken == "" {
+		slog.Debug("skipping import notification, no auth token", "error", err)
+		return
+	}
+
+	client := api.NewRepoClientForProject(projectRoot).WithAuthToken(storedToken.AccessToken)
+	if err := client.NotifyImport(projCfg.RepoID, &meta); err != nil {
+		slog.Warn("import cloud notification failed", "error", err)
+	}
 }

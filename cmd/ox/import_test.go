@@ -51,37 +51,27 @@ func TestDetectContentTypeSniffFallback(t *testing.T) {
 func TestFindExistingDocByOID(t *testing.T) {
 	t.Run("found", func(t *testing.T) {
 		dir := t.TempDir()
-		docDir := filepath.Join(dir, "2026", "01", "15", "abc-123")
+		docDir := filepath.Join(dir, "2026", "01", "15", "q1-report")
 		require.NoError(t, os.MkdirAll(docDir, 0o755))
 
 		meta := map[string]any{
-			"files": map[string]any{
-				"source.bin": map[string]any{
-					"oid":  "sha256:deadbeef",
-					"size": 100,
-				},
-			},
+			"source_oid": "sha256:deadbeef",
 		}
 		data, _ := json.Marshal(meta)
 		require.NoError(t, os.WriteFile(filepath.Join(docDir, "metadata.json"), data, 0o644))
 
 		docID, found := findExistingDocByOID(dir, "sha256:deadbeef")
 		assert.True(t, found)
-		assert.Equal(t, "abc-123", docID)
+		assert.Equal(t, "q1-report", docID)
 	})
 
 	t.Run("not found", func(t *testing.T) {
 		dir := t.TempDir()
-		docDir := filepath.Join(dir, "2026", "01", "15", "abc-123")
+		docDir := filepath.Join(dir, "2026", "01", "15", "q1-report")
 		require.NoError(t, os.MkdirAll(docDir, 0o755))
 
 		meta := map[string]any{
-			"files": map[string]any{
-				"source.bin": map[string]any{
-					"oid":  "sha256:different",
-					"size": 100,
-				},
-			},
+			"source_oid": "sha256:different",
 		}
 		data, _ := json.Marshal(meta)
 		require.NoError(t, os.WriteFile(filepath.Join(docDir, "metadata.json"), data, 0o644))
@@ -165,6 +155,29 @@ func TestInferTitle(t *testing.T) {
 	}
 }
 
+func TestSlugify(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"Q1 2026 Report", "q1-2026-report"},
+		{"my_architecture_plan", "my-architecture-plan"},
+		{"Hello World", "hello-world"},
+		{"  multiple   spaces  ", "multiple-spaces"},
+		{"special!@#chars", "specialchars"},
+		{"already-slugified", "already-slugified"},
+		{"MiXeD CaSe", "mixed-case"},
+		{"trailing-", "trailing"},
+		{"-leading", "leading"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			assert.Equal(t, tt.want, slugify(tt.input))
+		})
+	}
+}
+
 func TestDocMetaSerialization(t *testing.T) {
 	srcContent := []byte("hello world")
 	textContent := []byte("# Extracted\nSome text")
@@ -172,18 +185,25 @@ func TestDocMetaSerialization(t *testing.T) {
 	srcRef := lfs.NewFileRef(srcContent)
 	textRef := lfs.NewFileRef(textContent)
 
+	now := time.Now().UTC().Format(time.RFC3339)
 	meta := docMeta{
 		Version:        "1",
 		Title:          "Test Doc",
 		SourceFilename: "test.pdf",
 		ContentType:    "application/pdf",
 		SourceSize:     srcRef.Size,
-		CreatedAt:      "2026-02-14",
-		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
+		SourceOID:      srcRef.OID,
+		CreatedAt:      time.Date(2026, 2, 14, 10, 30, 0, 0, time.UTC).Format(time.RFC3339),
+		ImportedAt:     now,
 		HasTextExtract: true,
-		Files: map[string]lfs.FileRef{
-			"source.bin":   srcRef,
-			"extracted.md": textRef,
+		Path:           "data/docs/2026/02/14/test-doc",
+		Sidecars: map[string]sidecar{
+			"text-extract": {
+				Filename:  "extracted.md",
+				OID:       textRef.OID,
+				Size:      textRef.Size,
+				CreatedAt: now,
+			},
 		},
 	}
 
@@ -199,17 +219,17 @@ func TestDocMetaSerialization(t *testing.T) {
 	assert.Equal(t, "test.pdf", parsed["source_filename"])
 	assert.Equal(t, "application/pdf", parsed["content_type"])
 	assert.Equal(t, float64(srcRef.Size), parsed["source_size"])
-	assert.Equal(t, "2026-02-14", parsed["created_at"])
+	assert.True(t, strings.HasPrefix(parsed["source_oid"].(string), "sha256:"))
+	assert.Equal(t, "2026-02-14T10:30:00Z", parsed["created_at"])
 	assert.Equal(t, true, parsed["has_text_extract"])
+	assert.Equal(t, "data/docs/2026/02/14/test-doc", parsed["path"])
 
-	// verify files map has correct OIDs
-	files := parsed["files"].(map[string]any)
-	srcFile := files["source.bin"].(map[string]any)
-	assert.True(t, strings.HasPrefix(srcFile["oid"].(string), "sha256:"))
-	assert.Equal(t, float64(len(srcContent)), srcFile["size"])
-
-	textFile := files["extracted.md"].(map[string]any)
-	assert.True(t, strings.HasPrefix(textFile["oid"].(string), "sha256:"))
-	assert.Equal(t, float64(len(textContent)), textFile["size"])
+	// verify sidecars keyed by type with filename inside
+	sidecars := parsed["sidecars"].(map[string]any)
+	assert.Len(t, sidecars, 1)
+	textExtract := sidecars["text-extract"].(map[string]any)
+	assert.Equal(t, "extracted.md", textExtract["filename"])
+	assert.True(t, strings.HasPrefix(textExtract["oid"].(string), "sha256:"))
+	assert.Equal(t, float64(len(textContent)), textExtract["size"])
+	assert.NotEmpty(t, textExtract["created_at"])
 }
-
