@@ -37,22 +37,30 @@ func NewThrottle(opts ...ThrottleOption) *Throttle {
 }
 
 // Wait blocks until the minimum interval has passed since the last request.
-// If enough time has passed, returns immediately.
+// If enough time has passed, returns immediately. Concurrent callers sleep in
+// parallel rather than serializing behind the lock.
 func (t *Throttle) Wait() {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 
 	if t.lastRequest.IsZero() {
 		t.lastRequest = time.Now()
+		t.mu.Unlock()
 		return
 	}
 
 	elapsed := time.Since(t.lastRequest)
-	if elapsed < t.minInterval {
-		time.Sleep(t.minInterval - elapsed)
+	sleepFor := t.minInterval - elapsed
+	if sleepFor > 0 {
+		// reserve our time slot so the next caller computes from our expected completion
+		t.lastRequest = time.Now().Add(sleepFor)
+	} else {
+		t.lastRequest = time.Now()
 	}
+	t.mu.Unlock()
 
-	t.lastRequest = time.Now()
+	if sleepFor > 0 {
+		time.Sleep(sleepFor)
+	}
 }
 
 // MinInterval returns the configured minimum interval
