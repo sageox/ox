@@ -301,6 +301,34 @@ func TestGetPR(t *testing.T) {
 	}
 }
 
+func TestSessionAttribution(t *testing.T) {
+	// default: session is nil (auto)
+	attr := DefaultAttribution()
+	assert.Nil(t, attr.Session, "default session should be nil (auto)")
+
+	// merge: nil defaults to "auto"
+	result := MergeAttribution(nil, nil)
+	assert.Equal(t, "auto", result.Session, "merged session should default to auto")
+
+	// user disables session
+	disabled := ""
+	result = MergeAttribution(nil, &Attribution{Session: &disabled})
+	assert.Equal(t, "", result.Session, "user should be able to disable session")
+
+	// project re-enables session
+	auto := "auto"
+	result = MergeAttribution(&Attribution{Session: &auto}, &Attribution{Session: &disabled})
+	assert.Equal(t, "auto", result.Session, "project should override user")
+
+	// helpers
+	assert.False(t, (*Attribution)(nil).IsSessionSet())
+	assert.False(t, (&Attribution{}).IsSessionSet())
+	assert.True(t, (&Attribution{Session: &disabled}).IsSessionSet())
+	assert.Equal(t, "", (*Attribution)(nil).GetSession())
+	assert.Equal(t, "", (&Attribution{Session: &disabled}).GetSession())
+	assert.Equal(t, "auto", (&Attribution{Session: &auto}).GetSession())
+}
+
 func TestStringPtr(t *testing.T) {
 	s := "test"
 	ptr := StringPtr(s)
