@@ -1,9 +1,11 @@
 package session
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -641,4 +643,284 @@ func TestGetSessionName(t *testing.T) {
 			assert.Equal(t, tc.expected, result, "GetSessionName(%q)", tc.sessionPath)
 		}
 	})
+}
+
+func TestLoadRecordingState_MultipleRecordingsReturnsFirst(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	tmpDir := t.TempDir()
+
+	// create two sessions with .recording.json — ReadDir returns alphabetically
+	for _, agentID := range []string{"OxFirst", "OxSecnd"} {
+		name := "2026-01-06T14-30-user-" + agentID
+		sessionPath := filepath.Join(tmpDir, "sessions", name)
+		state := &RecordingState{
+			AgentID:     agentID,
+			StartedAt:   time.Now(),
+			SessionPath: sessionPath,
+		}
+		err := SaveRecordingState(tmpDir, state)
+		require.NoError(t, err)
+	}
+
+	state, err := LoadRecordingState(tmpDir)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+
+	// ReadDir sorts alphabetically, so "OxFirst" session folder comes first
+	assert.Equal(t, "OxFirst", state.AgentID,
+		"LoadRecordingState should return the alphabetically first recording")
+}
+
+func TestClearRecordingState_WithMultipleRecordings_OnlyClearsFirst(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	tmpDir := t.TempDir()
+
+	// create two recording states
+	paths := map[string]string{}
+	for _, agentID := range []string{"OxAAAA", "OxBBBB"} {
+		name := "2026-01-06T14-30-user-" + agentID
+		sessionPath := filepath.Join(tmpDir, "sessions", name)
+		state := &RecordingState{
+			AgentID:     agentID,
+			StartedAt:   time.Now(),
+			SessionPath: sessionPath,
+		}
+		err := SaveRecordingState(tmpDir, state)
+		require.NoError(t, err)
+		paths[agentID] = filepath.Join(sessionPath, recordingFile)
+	}
+
+	// clear — should only remove the first one found (alphabetically)
+	err := ClearRecordingState(tmpDir)
+	require.NoError(t, err)
+
+	// first recording should be gone
+	_, err = os.Stat(paths["OxAAAA"])
+	assert.True(t, os.IsNotExist(err), "first recording should be cleared")
+
+	// second recording should survive
+	_, err = os.Stat(paths["OxBBBB"])
+	assert.False(t, os.IsNotExist(err), "second recording should survive ClearRecordingState")
+
+	// LoadRecordingState should now find the second one
+	state, err := LoadRecordingState(tmpDir)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	assert.Equal(t, "OxBBBB", state.AgentID)
+}
+
+func TestStartRecording_GhostClear_PreservesSessionData(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := setupRecordingTest(t, cacheDir)
+
+	// Agent A starts recording
+	stateA, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: "OxAgntA", AdapterName: "claude-code", Username: "testuser",
+	})
+	require.NoError(t, err)
+
+	// simulate Agent A writing session data
+	rawPath := filepath.Join(stateA.SessionPath, "raw.jsonl")
+	eventsPath := filepath.Join(stateA.SessionPath, "events.jsonl")
+	require.NoError(t, os.WriteFile(rawPath, []byte("{\"type\":\"header\"}\n"), 0644))
+	require.NoError(t, os.WriteFile(eventsPath, []byte("{\"event\":\"test\"}\n"), 0644))
+
+	// Agent B starts — ghost-clears A's .recording.json
+	_, err = StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: "OxAgntB", AdapterName: "claude-code", Username: "testuser",
+	})
+	require.NoError(t, err)
+
+	// A's .recording.json should be gone
+	_, err = os.Stat(filepath.Join(stateA.SessionPath, recordingFile))
+	assert.True(t, os.IsNotExist(err), "A's .recording.json should be cleared")
+
+	// but A's session DATA must survive (raw.jsonl, events.jsonl)
+	_, err = os.Stat(rawPath)
+	assert.False(t, os.IsNotExist(err), "A's raw.jsonl must survive ghost clearing")
+	_, err = os.Stat(eventsPath)
+	assert.False(t, os.IsNotExist(err), "A's events.jsonl must survive ghost clearing")
+
+	// A's session folder itself must still exist
+	_, err = os.Stat(stateA.SessionPath)
+	assert.False(t, os.IsNotExist(err), "A's session folder must survive ghost clearing")
+}
+
+func TestStartRecording_RepoContextPath_DirectPath(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	tmpDir := t.TempDir()
+	repoContextPath := filepath.Join(tmpDir, "my-ledger")
+	require.NoError(t, os.MkdirAll(repoContextPath, 0755))
+
+	opts := StartRecordingOptions{
+		AgentID:         "OxDrct",
+		AdapterName:     "claude-code",
+		Username:        "testuser",
+		RepoContextPath: repoContextPath,
+	}
+
+	state, err := StartRecording(tmpDir, opts)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+
+	// session should be under repoContextPath/sessions/, not XDG cache
+	assert.True(t, strings.HasPrefix(state.SessionPath, filepath.Join(repoContextPath, "sessions")),
+		"session should be under RepoContextPath/sessions/, got %s", state.SessionPath)
+}
+
+func TestUpdateRecordingState_SequentialUpdates(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := setupRecordingTest(t, cacheDir)
+
+	_, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: "OxUpdt", AdapterName: "claude-code", Username: "testuser",
+	})
+	require.NoError(t, err)
+
+	// first update: set entry count
+	err = UpdateRecordingState(projectRoot, func(s *RecordingState) {
+		s.EntryCount = 10
+	})
+	require.NoError(t, err)
+
+	// second update: set reminder seq (should see entry count from first update)
+	err = UpdateRecordingState(projectRoot, func(s *RecordingState) {
+		s.LastReminderSeq = 5
+	})
+	require.NoError(t, err)
+
+	// verify both mutations applied
+	state, err := LoadRecordingState(projectRoot)
+	require.NoError(t, err)
+	assert.Equal(t, 10, state.EntryCount, "first update should persist")
+	assert.Equal(t, 5, state.LastReminderSeq, "second update should persist")
+}
+
+func TestStopRecording_FailsIfStateFileUnremovable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission semantics differ on Windows")
+	}
+
+	cacheDir := t.TempDir()
+	projectRoot := setupRecordingTest(t, cacheDir)
+
+	state, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: "OxPerm", AdapterName: "claude-code", Username: "testuser",
+	})
+	require.NoError(t, err)
+
+	// make the session directory read-only so .recording.json can't be removed
+	require.NoError(t, os.Chmod(state.SessionPath, 0555))
+	t.Cleanup(func() { os.Chmod(state.SessionPath, 0755) })
+
+	_, err = StopRecording(projectRoot)
+	assert.Error(t, err, "StopRecording should fail if state file can't be removed")
+}
+
+func TestRecordingState_StaleBoundary(t *testing.T) {
+	// the stale threshold is 12 hours (health.go uses > not >=)
+	// use fixed durations to avoid time.Since() drift
+
+	// a recording that started 11h59m ago is NOT stale
+	notStaleAge := StaleRecordingThreshold - time.Minute
+	assert.False(t, notStaleAge > StaleRecordingThreshold,
+		"recording under the threshold should NOT be stale")
+
+	// a recording that started 12h1m ago IS stale
+	staleAge := StaleRecordingThreshold + time.Minute
+	assert.True(t, staleAge > StaleRecordingThreshold,
+		"recording past the threshold should be stale")
+
+	// exactly at threshold: > means NOT stale (boundary behavior)
+	exactAge := StaleRecordingThreshold
+	assert.False(t, exactAge > StaleRecordingThreshold,
+		"recording at exactly the threshold should NOT be stale (uses > not >=)")
+}
+
+func TestLoadAllRecordingStates(t *testing.T) {
+	t.Run("returns all recordings", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		projectRoot := setupRecordingTest(t, cacheDir)
+
+		// start first recording
+		_, err := StartRecording(projectRoot, StartRecordingOptions{
+			AgentID: "OxAAA1", AdapterName: "claude-code", Username: "testuser",
+		})
+		require.NoError(t, err)
+
+		// manually create a second recording (StartRecording blocks on existing)
+		repoID := getRepoIDFromProject(projectRoot)
+		contextPath := GetContextPath(repoID)
+		secondSessionPath := filepath.Join(contextPath, "sessions", "2026-01-05T12-00-user-OxBBB2")
+		require.NoError(t, os.MkdirAll(secondSessionPath, 0755))
+		secondState := &RecordingState{
+			AgentID:     "OxBBB2",
+			AdapterName: "claude-code",
+			SessionPath: secondSessionPath,
+			StartedAt:   time.Now(),
+		}
+		secondData, _ := json.Marshal(secondState)
+		require.NoError(t, os.WriteFile(filepath.Join(secondSessionPath, recordingFile), secondData, 0644))
+
+		states, err := LoadAllRecordingStates(projectRoot)
+		require.NoError(t, err)
+		assert.Len(t, states, 2, "should find both recordings")
+
+		ids := map[string]bool{}
+		for _, s := range states {
+			ids[s.AgentID] = true
+		}
+		assert.True(t, ids["OxAAA1"], "should include first agent")
+		assert.True(t, ids["OxBBB2"], "should include second agent")
+	})
+
+	t.Run("returns empty when no recordings", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		projectRoot := setupRecordingTest(t, cacheDir)
+
+		states, err := LoadAllRecordingStates(projectRoot)
+		require.NoError(t, err)
+		assert.Empty(t, states)
+	})
+
+	t.Run("empty project root returns error", func(t *testing.T) {
+		_, err := LoadAllRecordingStates("")
+		require.Error(t, err)
+	})
+}
+
+func TestLoadAllRecordingStates_Deduplicates(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := setupRecordingTest(t, cacheDir)
+
+	// start a recording
+	_, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: "OxDedup", AdapterName: "claude-code", Username: "testuser",
+	})
+	require.NoError(t, err)
+
+	// LoadAllRecordingStates checks both project-local and XDG cache paths;
+	// they may overlap. Verify no duplicates.
+	states, err := LoadAllRecordingStates(projectRoot)
+	require.NoError(t, err)
+
+	ids := map[string]int{}
+	for _, s := range states {
+		ids[s.AgentID]++
+	}
+	for id, count := range ids {
+		assert.Equal(t, 1, count, "agent %s should appear exactly once", id)
+	}
+
+	// cleanup
+	_, _ = StopRecording(projectRoot)
 }

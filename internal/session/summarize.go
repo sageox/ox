@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -366,18 +365,17 @@ func BuildSummaryPrompt(entries []Entry, rawPath, ledgerSessionDir string) strin
 	fmt.Fprintf(&sb, "The file is JSONL format with %d entries. Each line is a JSON object with `type`, `content`, and optional `tool_name` fields.\n", len(entries))
 	sb.WriteString("Focus on user/assistant dialog and write/edit tool calls. Skip read/glob/grep tool entries — they are exploratory noise.\n\n")
 
-	// save-to path
-	summaryPath := filepath.Join(filepath.Dir(rawPath), "summary.json")
 	sb.WriteString("## Instructions\n\n")
 	sb.WriteString("1. Read the session recording file at the path above\n")
 	sb.WriteString("2. Identify the main goal and what was accomplished\n")
 	sb.WriteString("3. Find the pivotal aha moments (questions, insights, decisions)\n")
 	sb.WriteString("4. Generate the JSON with all required fields from the Output Format above\n")
-	fmt.Fprintf(&sb, "5. Save to: `%s`\n", summaryPath)
+	sb.WriteString("5. Save the summary JSON to a temporary file (e.g., `/tmp/ox-summary.json` or `.ox-summary.json` in the workspace root)\n")
 
 	// if ledger session dir is available, add push instruction
 	if ledgerSessionDir != "" {
-		fmt.Fprintf(&sb, "6. Push summary to ledger by running: `ox session push-summary --file %s --session-dir %s`\n", summaryPath, ledgerSessionDir)
+		fmt.Fprintf(&sb, "6. Push summary to ledger by running: `ox session push-summary --file <path-to-summary-file> --session-dir %s`\n", ledgerSessionDir)
+		sb.WriteString("   Replace `<path-to-summary-file>` with the actual path where you saved the summary in step 5\n")
 	}
 
 	return sb.String()

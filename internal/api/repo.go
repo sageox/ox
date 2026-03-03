@@ -24,6 +24,7 @@ const (
 	repoDoctorPath    = "/api/v1/public/repos/%s/doctor" // %s = repo_id; intentionally public (no PII, works pre-auth)
 	repoUninstallPath = "/api/v1/repo/%s/uninstall"      // %s = repo_id
 	repoMergePath     = "/api/v1/repo/%s/merge"          // %s = repo_id
+	gitImportPath     = "/api/v1/git/import"
 )
 
 // RepoInitRequest represents the POST /api/v1/repo/init request
@@ -83,6 +84,14 @@ type MergeRepoResponse struct {
 	Canonical string        `json:"canonical_repo_id"` // the winning repo_id
 	Merged    []string      `json:"merged_repo_ids"`   // repo_ids that were marked as merged
 	Redirect  *RedirectInfo `json:"redirect,omitempty"` // redirect info (also in header)
+}
+
+// ImportNotification is the POST /api/v1/git/import request body.
+// The Metadata field is passed as-is (json.RawMessage) to avoid coupling
+// the API package to the docMeta struct in cmd/ox.
+type ImportNotification struct {
+	RepoID   string          `json:"repo_id"`
+	Metadata json.RawMessage `json:"metadata"`
 }
 
 // DoctorIssue represents a single diagnostic issue from the cloud
@@ -441,6 +450,64 @@ func (c *RepoClient) MergeRepo(repoID string, markers map[string]json.RawMessage
 	}
 
 	return &mergeResp, redirectInfo, nil
+}
+
+// NotifyImport sends a fire-and-forget notification about a new document import.
+// The metadata argument should be JSON-marshalable (typically the docMeta struct).
+// Returns nil on network error, 404, or any non-2xx — never fails the caller's operation.
+func (c *RepoClient) NotifyImport(repoID string, metadata any) error {
+	metaBytes, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("marshal metadata: %w", err)
+	}
+
+	reqBody := ImportNotification{
+		RepoID:   repoID,
+		Metadata: metaBytes,
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("marshal request: %w", err)
+	}
+
+	reqURL := strings.TrimSuffix(c.baseURL, "/") + gitImportPath
+
+	logger.LogHTTPRequest("POST", reqURL)
+	start := time.Now()
+
+	httpReq, err := useragent.NewRequest(context.Background(), "POST", reqURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.authToken != "" {
+		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	duration := time.Since(start)
+
+	if err != nil {
+		logger.LogHTTPError("POST", reqURL, err, duration)
+		return nil // graceful degradation
+	}
+	defer resp.Body.Close()
+
+	logger.LogHTTPResponse("POST", reqURL, resp.StatusCode, duration)
+
+	io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil // endpoint not yet deployed
+	}
+
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("import notification failed (%d)", resp.StatusCode)
+	}
+
+	return nil
 }
 
 // RepoMarkerData holds parsed data from a .repo_* marker file

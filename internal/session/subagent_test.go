@@ -1,8 +1,10 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -223,4 +225,106 @@ func TestSubagentSessionTimestamp(t *testing.T) {
 	assert.False(t, sessions[0].CompletedAt.IsZero())
 	assert.True(t, sessions[0].CompletedAt.After(before) || sessions[0].CompletedAt.Equal(before))
 	assert.True(t, sessions[0].CompletedAt.Before(after) || sessions[0].CompletedAt.Equal(after))
+}
+
+func TestSubagentRegistry_ConcurrentRegistrations(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionPath := filepath.Join(tmpDir, "concurrent-session")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	registry, err := NewSubagentRegistry(sessionPath)
+	require.NoError(t, err)
+
+	const numGoroutines = 20
+	var wg sync.WaitGroup
+
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sub := &SubagentSession{
+				SubagentID: fmt.Sprintf("Ox%04d", idx),
+				Summary:    fmt.Sprintf("task %d", idx),
+				EntryCount: idx,
+				DurationMs: int64(idx * 100),
+			}
+			regErr := registry.Register(sub)
+			assert.NoError(t, regErr, "registration %d should succeed", idx)
+		}(i)
+	}
+	wg.Wait()
+
+	// all registrations should be present
+	sessions, err := registry.List()
+	require.NoError(t, err)
+	assert.Len(t, sessions, numGoroutines,
+		"all concurrent registrations should be persisted")
+
+	// verify each entry is complete (not truncated/interleaved)
+	ids := map[string]bool{}
+	for _, s := range sessions {
+		assert.NotEmpty(t, s.SubagentID, "each entry should have a subagent_id")
+		ids[s.SubagentID] = true
+	}
+	assert.Len(t, ids, numGoroutines, "all agent IDs should be unique")
+}
+
+func TestSubagentRegistry_RegisterAfterParentStop(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := setupRecordingTest(t, cacheDir)
+
+	// start parent recording
+	parentState, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: "OxPrnt", AdapterName: "claude-code", Username: "testuser",
+	})
+	require.NoError(t, err)
+	parentSessionPath := parentState.SessionPath
+
+	// stop parent recording (clears .recording.json but folder persists)
+	_, err = StopRecording(projectRoot)
+	require.NoError(t, err)
+
+	// parent session folder should still exist
+	_, err = os.Stat(parentSessionPath)
+	require.NoError(t, err, "parent session folder should persist after stop")
+
+	// subagent reports completion AFTER parent stop — should succeed
+	err = ReportSubagentComplete(SubagentCompleteOptions{
+		SubagentID:        "OxChld",
+		ParentSessionPath: parentSessionPath,
+		Summary:           "late completion",
+		EntryCount:        5,
+	})
+	require.NoError(t, err, "subagent should be able to register after parent stop")
+
+	// verify the registration was recorded
+	sessions, err := GetSubagentSessions(parentSessionPath)
+	require.NoError(t, err)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "OxChld", sessions[0].SubagentID)
+}
+
+func TestSubagentRegistry_DuplicateRegistration(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionPath := filepath.Join(tmpDir, "dedup-test")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	registry, err := NewSubagentRegistry(sessionPath)
+	require.NoError(t, err)
+
+	// register same subagent ID twice
+	for i := 0; i < 2; i++ {
+		err := registry.Register(&SubagentSession{
+			SubagentID: "OxDupe",
+			Summary:    fmt.Sprintf("attempt %d", i),
+		})
+		require.NoError(t, err)
+	}
+
+	// JSONL is append-only — both entries should exist (no dedup)
+	sessions, err := registry.List()
+	require.NoError(t, err)
+	assert.Len(t, sessions, 2, "duplicate registrations should both be stored (append-only)")
+	assert.Equal(t, "attempt 0", sessions[0].Summary)
+	assert.Equal(t, "attempt 1", sessions[1].Summary)
 }

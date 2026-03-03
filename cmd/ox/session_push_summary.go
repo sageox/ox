@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -30,7 +31,7 @@ from 'ox session stop'. The summary file is committed directly to git
 }
 
 func init() {
-	sessionPushSummaryCmd.Flags().String("file", "", "Path to the summary JSON file")
+	sessionPushSummaryCmd.Flags().String("file", "", "Path to the summary JSON file (use '-' for stdin)")
 	sessionPushSummaryCmd.Flags().String("session-dir", "", "Path to the session directory in the ledger")
 	_ = sessionPushSummaryCmd.MarkFlagRequired("file")
 	_ = sessionPushSummaryCmd.MarkFlagRequired("session-dir")
@@ -65,8 +66,14 @@ func runSessionPushSummary(cmd *cobra.Command, args []string) error {
 
 // pushSummaryToLedger validates inputs, copies the summary file, and commits+pushes.
 func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
-	// validate --file exists and is valid JSON
-	data, err := os.ReadFile(filePath)
+	// read summary data from file or stdin
+	var data []byte
+	var err error
+	if filePath == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(filePath)
+	}
 	if err != nil {
 		return &pushSummaryOutput{
 			Success: false,

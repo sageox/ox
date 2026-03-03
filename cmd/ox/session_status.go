@@ -15,39 +15,54 @@ var sessionStatusCmd = &cobra.Command{
 	Short: "Check recording status",
 	Long: `Check the current session recording status.
 
-Shows whether a recording is in progress, and if so, displays:
-- Recording title (if set)
-- Duration
-- Coding agent being recorded
-- Session file location
+Shows all active recordings in this project. With multiple worktrees
+or agents, there may be several recordings in progress simultaneously.
+
+Use --current to filter to the calling agent's recording only
+(requires SAGEOX_AGENT_ID environment variable).
 
 Examples:
-  ox session status
-  ox session status --json`,
+  ox session status              # show all active recordings
+  ox session status --json       # JSON output
+  ox session status --current    # only this agent's recording`,
 	RunE: runSessionStatus,
 }
 
 // sessionStatusOutput is the JSON output format for session status.
 type sessionStatusOutput struct {
-	Recording    bool   `json:"recording"`
+	Recording    bool                    `json:"recording"`
+	Guidance     string                  `json:"guidance,omitempty"`
+	Count        int                     `json:"count,omitempty"`
+	Sessions     []sessionRecordingEntry `json:"sessions,omitempty"`
+	Title        string                  `json:"title,omitempty"`
+	DurationSecs int                     `json:"duration_seconds,omitempty"`
+	Duration     string                  `json:"duration,omitempty"`
+	Agent        string                  `json:"agent,omitempty"`
+	AgentID      string                  `json:"agent_id,omitempty"`
+	SessionFile  string                  `json:"session_file,omitempty"`
+	StartedAt    string                  `json:"started_at,omitempty"`
+}
+
+// sessionRecordingEntry represents one active recording in the multi-session output.
+type sessionRecordingEntry struct {
+	AgentID      string `json:"agent_id"`
 	Title        string `json:"title,omitempty"`
-	DurationSecs int    `json:"duration_seconds,omitempty"`
-	Duration     string `json:"duration,omitempty"`
 	Agent        string `json:"agent,omitempty"`
-	AgentID      string `json:"agent_id,omitempty"`
+	DurationSecs int    `json:"duration_seconds"`
+	Duration     string `json:"duration"`
+	StartedAt    string `json:"started_at"`
 	SessionFile  string `json:"session_file,omitempty"`
-	StartedAt    string `json:"started_at,omitempty"`
 }
 
 func init() {
 	sessionCmd.AddCommand(sessionStatusCmd)
+	sessionStatusCmd.Flags().Bool("current", false, "only show this agent's recording (uses SAGEOX_AGENT_ID)")
 }
 
 func runSessionStatus(cmd *cobra.Command, args []string) error {
-	// check for --json flag from root command
 	jsonOutput, _ := cmd.Root().PersistentFlags().GetBool("json")
+	currentOnly, _ := cmd.Flags().GetBool("current")
 
-	// find project root using helper
 	projectRoot, err := requireProjectRoot()
 	if err != nil {
 		if jsonOutput {
@@ -56,8 +71,8 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// load recording state
-	state, err := session.LoadRecordingState(projectRoot)
+	// load all recording states
+	states, err := session.LoadAllRecordingStates(projectRoot)
 	if err != nil {
 		if jsonOutput {
 			return outputJSON(sessionStatusOutput{Recording: false})
@@ -65,53 +80,124 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to check recording state: %w", err)
 	}
 
-	// not recording
-	if state == nil {
-		if jsonOutput {
-			return outputJSON(sessionStatusOutput{Recording: false})
+	// filter to current agent if --current
+	if currentOnly {
+		agentID := os.Getenv("SAGEOX_AGENT_ID")
+		if agentID == "" {
+			if jsonOutput {
+				return outputJSON(sessionStatusOutput{Recording: false})
+			}
+			return fmt.Errorf("--current requires SAGEOX_AGENT_ID environment variable (set by 'ox agent prime')")
 		}
+		var filtered []*session.RecordingState
+		for _, s := range states {
+			if s.AgentID == agentID {
+				filtered = append(filtered, s)
+			}
+		}
+		states = filtered
+	}
 
+	// no recordings
+	if len(states) == 0 {
+		if jsonOutput {
+			return outputJSON(sessionStatusOutput{
+				Recording: false,
+				Guidance:  "Run 'ox agent <id> session start' to begin recording",
+			})
+		}
 		fmt.Println(cli.StyleDim.Render("Not recording"))
 		fmt.Println()
 		fmt.Println("Run 'ox agent <id> session start' to begin recording")
 		return nil
 	}
 
-	// recording in progress
-	duration := state.Duration()
-	durationStr := formatDurationHuman(duration)
+	// single recording — backward-compatible output
+	if len(states) == 1 {
+		state := states[0]
+		duration := state.Duration()
+		durationStr := formatDurationHuman(duration)
 
-	if jsonOutput {
-		output := sessionStatusOutput{
-			Recording:    true,
-			Title:        state.Title,
-			DurationSecs: int(duration.Seconds()),
-			Duration:     durationStr,
-			Agent:        state.AdapterName,
-			AgentID:      state.AgentID,
-			SessionFile:  state.SessionFile,
-			StartedAt:    state.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+		if jsonOutput {
+			output := sessionStatusOutput{
+				Recording:    true,
+				Guidance:     "Run 'ox agent <id> session stop' to save the recording",
+				Count:        1,
+				Title:        state.Title,
+				DurationSecs: int(duration.Seconds()),
+				Duration:     durationStr,
+				Agent:        state.AdapterName,
+				AgentID:      state.AgentID,
+				SessionFile:  state.SessionFile,
+				StartedAt:    state.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+			}
+			return outputJSON(output)
 		}
-		return outputJSON(output)
+
+		fmt.Println(cli.StyleSuccess.Render("Recording in progress"))
+		fmt.Println()
+		if state.Title != "" {
+			fmt.Printf("  Title:    %s\n", state.Title)
+		}
+		fmt.Printf("  Duration: %s\n", durationStr)
+		fmt.Printf("  Agent:    %s\n", state.AdapterName)
+		fmt.Printf("  Started:  %s\n", state.StartedAt.Format("15:04:05"))
+		if state.AgentID != "" {
+			fmt.Printf("  Agent ID: %s\n", state.AgentID)
+		}
+		fmt.Println()
+		fmt.Println(cli.StyleDim.Render("Run 'ox agent <id> session stop' to save the recording"))
+		return nil
 	}
 
-	// text output
-	fmt.Println(cli.StyleSuccess.Render("Recording in progress"))
+	// multiple recordings
+	if jsonOutput {
+		var entries []sessionRecordingEntry
+		for _, s := range states {
+			d := s.Duration()
+			entries = append(entries, sessionRecordingEntry{
+				AgentID:      s.AgentID,
+				Title:        s.Title,
+				Agent:        s.AdapterName,
+				DurationSecs: int(d.Seconds()),
+				Duration:     formatDurationHuman(d),
+				StartedAt:    s.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+				SessionFile:  s.SessionFile,
+			})
+		}
+		return outputJSON(sessionStatusOutput{
+			Recording: true,
+			Guidance:  "Use --current to filter to this agent's recording",
+			Count:     len(states),
+			Sessions:  entries,
+		})
+	}
+
+	// text output for multiple recordings
+	fmt.Println(cli.StyleSuccess.Render(fmt.Sprintf("%d recordings in progress", len(states))))
 	fmt.Println()
 
-	if state.Title != "" {
-		fmt.Printf("  Title:    %s\n", state.Title)
-	}
-	fmt.Printf("  Duration: %s\n", durationStr)
-	fmt.Printf("  Agent:    %s\n", state.AdapterName)
-	fmt.Printf("  Started:  %s\n", state.StartedAt.Format("15:04:05"))
+	for i, state := range states {
+		if i > 0 {
+			fmt.Println()
+		}
+		durationStr := formatDurationHuman(state.Duration())
 
-	if state.AgentID != "" {
-		fmt.Printf("  Agent ID: %s\n", state.AgentID)
+		label := state.AgentID
+		if label == "" {
+			label = state.AdapterName
+		}
+		fmt.Printf("  %s %s\n", cli.StyleBold.Render(label), cli.StyleDim.Render("("+durationStr+")"))
+
+		if state.Title != "" {
+			fmt.Printf("    Title:   %s\n", state.Title)
+		}
+		fmt.Printf("    Agent:   %s\n", state.AdapterName)
+		fmt.Printf("    Started: %s\n", state.StartedAt.Format("15:04:05"))
 	}
 
 	fmt.Println()
-	fmt.Println(cli.StyleDim.Render("Run 'ox agent <id> session stop' to save the recording"))
+	fmt.Println(cli.StyleDim.Render("Use --current to filter to this agent's recording"))
 
 	return nil
 }
