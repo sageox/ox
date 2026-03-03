@@ -810,6 +810,63 @@ func TestStore_ListSessions_LargeCount(t *testing.T) {
 	}
 }
 
+func TestStore_ListSessions_IncludesInflightRecordings(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := NewStore(tmpDir)
+
+	// create a completed session with raw.jsonl
+	writer, _ := store.CreateRaw("2026-01-05T10-30-user1-Oxa7b3")
+	writer.WriteEntry(&testWritable{Message: "completed"})
+	writer.Close()
+
+	// create an inflight recording (only .recording.json, no raw.jsonl or meta.json)
+	inflightDir := filepath.Join(store.basePath, "2026-01-05T11-00-user2-Oxb8c4")
+	require.NoError(t, os.MkdirAll(inflightDir, 0755))
+	recState := RecordingState{
+		AgentID:   "Oxb8c4",
+		StartedAt: time.Now().Add(-5 * time.Minute),
+	}
+	recData, _ := json.Marshal(recState)
+	require.NoError(t, os.WriteFile(filepath.Join(inflightDir, recordingFile), recData, 0644))
+
+	// create an inflight recording WITH raw.jsonl (recording in progress with entries)
+	inflightWithRaw := filepath.Join(store.basePath, "2026-01-05T11-30-user3-Oxc9d5")
+	require.NoError(t, os.MkdirAll(inflightWithRaw, 0755))
+	recState2 := RecordingState{
+		AgentID:   "Oxc9d5",
+		StartedAt: time.Now().Add(-10 * time.Minute),
+	}
+	recData2, _ := json.Marshal(recState2)
+	require.NoError(t, os.WriteFile(filepath.Join(inflightWithRaw, recordingFile), recData2, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(inflightWithRaw, "raw.jsonl"), []byte(`{"type":"header"}`+"\n"), 0644))
+
+	sessions, err := store.ListAllSessions()
+	require.NoError(t, err)
+
+	// all three should be listed
+	assert.Len(t, sessions, 3, "should include completed + 2 inflight recordings")
+
+	// build lookup by session name
+	byName := map[string]SessionInfo{}
+	for _, s := range sessions {
+		byName[s.SessionName] = s
+	}
+
+	// completed session: not recording
+	completed := byName["2026-01-05T10-30-user1-Oxa7b3"]
+	assert.False(t, completed.Recording, "completed session should not be recording")
+
+	// inflight without raw.jsonl: recording
+	inflightNoRaw := byName["2026-01-05T11-00-user2-Oxb8c4"]
+	assert.True(t, inflightNoRaw.Recording, "inflight session without raw.jsonl should be recording")
+	assert.Equal(t, "Oxb8c4", inflightNoRaw.AgentID)
+
+	// inflight with raw.jsonl: recording
+	inflightHasRaw := byName["2026-01-05T11-30-user3-Oxc9d5"]
+	assert.True(t, inflightHasRaw.Recording, "inflight session with raw.jsonl should be recording")
+	assert.Equal(t, "Oxc9d5", inflightHasRaw.AgentID)
+}
+
 func TestStore_ReadSession_EmptyFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := NewStore(tmpDir)
