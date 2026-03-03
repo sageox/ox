@@ -356,9 +356,11 @@ func (d *Daemon) Start() error {
 						TeamID:   ws.TeamID,
 						TeamName: ws.TeamName,
 						TeamSlug: ws.TeamSlug,
-						LastSync: ws.ConfigLastSync,
-						LastErr:  ws.LastErr,
-						Syncing:  ws.SyncInProgress,
+						LastSync:       ws.ConfigLastSync,
+						LastErr:        ws.LastErr,
+						Syncing:        ws.SyncInProgress,
+						LastGCTime:     ws.LastGCTime,
+						GCIntervalDays: ws.GCIntervalDays,
 					})
 				}
 			}
@@ -413,6 +415,11 @@ func (d *Daemon) Start() error {
 		return &DoctorResponse{
 			AntiEntropyTriggered: true,
 		}
+	})
+
+	// set trigger_gc handler for forced GC reclone (triggered by ox doctor --gc)
+	d.server.SetTriggerGCHandler(func() *TriggerGCResponse {
+		return d.scheduler.TriggerGC(d.ctx)
 	})
 
 	// set checkout handler for ledger/team context clones

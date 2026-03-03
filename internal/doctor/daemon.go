@@ -242,6 +242,68 @@ func (c *DaemonSyncErrorsCheck) Run(ctx context.Context) CheckResult {
 	}
 }
 
+// DaemonDirtyTeamContextCheck detects team contexts with uncommitted changes
+// that are blocking GC. GC is a disk-space optimization (reclone) — it must
+// not destroy user edits (docs/, conventions, etc.), so the daemon skips dirty
+// workspaces and raises a DaemonIssue instead.
+type DaemonDirtyTeamContextCheck struct{}
+
+// NewDaemonDirtyTeamContextCheck creates a dirty team context check.
+func NewDaemonDirtyTeamContextCheck() *DaemonDirtyTeamContextCheck {
+	return &DaemonDirtyTeamContextCheck{}
+}
+
+// Name returns the check name.
+func (c *DaemonDirtyTeamContextCheck) Name() string {
+	return "team context clean"
+}
+
+// Run checks daemon issues for dirty_workspace entries.
+func (c *DaemonDirtyTeamContextCheck) Run(ctx context.Context) CheckResult {
+	if !daemon.IsRunning() {
+		return CheckResult{
+			Name:   c.Name(),
+			Status: StatusSkip,
+		}
+	}
+
+	client := daemon.NewClient()
+	status, err := client.Status()
+	if err != nil {
+		return CheckResult{
+			Name:   c.Name(),
+			Status: StatusSkip,
+		}
+	}
+
+	// look for dirty_workspace issues
+	var dirty []string
+	for _, issue := range status.Issues {
+		if issue.Type == daemon.IssueTypeDirtyWorkspace {
+			name := issue.Repo
+			if name == "" {
+				name = "unknown"
+			}
+			dirty = append(dirty, name)
+		}
+	}
+
+	if len(dirty) == 0 {
+		return CheckResult{
+			Name:    c.Name(),
+			Status:  StatusPass,
+			Message: "ok",
+		}
+	}
+
+	return CheckResult{
+		Name:    c.Name(),
+		Status:  StatusWarn,
+		Message: fmt.Sprintf("%d with uncommitted changes", len(dirty)),
+		Fix:     fmt.Sprintf("Team contexts with local edits blocking GC: %s. Commit or discard changes to allow reclone.", strings.Join(dirty, ", ")),
+	}
+}
+
 // DaemonHeartbeatCheck verifies heartbeats are being written to repos.
 type DaemonHeartbeatCheck struct {
 	Type        string // "workspace", "ledger", "team"

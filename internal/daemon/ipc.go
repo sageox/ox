@@ -41,6 +41,7 @@ const (
 	MsgTypeSessions    = "sessions"    // get active agent sessions (deprecated: use instances)
 	MsgTypeInstances   = "instances"   // get active agent instances
 	MsgTypeDoctor      = "doctor"      // trigger daemon health checks (anti-entropy, etc.)
+	MsgTypeTriggerGC   = "trigger_gc"  // force GC reclone for team contexts
 )
 
 // Protocol Design Decision: NDJSON (Newline-Delimited JSON)
@@ -158,9 +159,11 @@ type WorkspaceSyncStatus struct {
 	TeamID   string    `json:"team_id,omitempty"`    // team ID (for team contexts)
 	TeamName string    `json:"team_name,omitempty"`  // team name (for team contexts)
 	TeamSlug string    `json:"team_slug,omitempty"` // kebab-case team slug
-	LastSync time.Time `json:"last_sync,omitempty"`  // last successful sync
-	LastErr  string    `json:"last_error,omitempty"` // last error message
-	Syncing  bool      `json:"syncing,omitempty"`    // currently syncing
+	LastSync       time.Time `json:"last_sync,omitempty"`        // last successful sync
+	LastErr        string    `json:"last_error,omitempty"`       // last error message
+	Syncing        bool      `json:"syncing,omitempty"`          // currently syncing
+	LastGCTime     time.Time `json:"last_gc_time,omitempty"`     // last successful GC reclone
+	GCIntervalDays int       `json:"gc_interval_days,omitempty"` // configured GC cadence (0 = default 7)
 }
 
 // LastSyncForPath returns the last sync time for a workspace at the given path.
@@ -309,6 +312,16 @@ type DoctorResponse struct {
 	Errors               []string `json:"errors,omitempty"`
 }
 
+// TriggerGCResponse is the response for trigger_gc requests.
+// Errors include both failures (clone/validation errors) and skips due to
+// uncommitted changes — GC is a disk-space optimization and must never
+// destroy user work.
+type TriggerGCResponse struct {
+	Triggered int      `json:"triggered"`
+	Skipped   int      `json:"skipped,omitempty"`
+	Errors    []string `json:"errors,omitempty"`
+}
+
 // ProgressWriter allows handlers to send progress updates during long operations.
 type ProgressWriter struct {
 	conn net.Conn
@@ -429,6 +442,7 @@ type Server struct {
 	onInstances        func() []InstanceInfo                                                            // get active agent instances
 	onSyncHistory      func() []SyncEvent                                                               // get sync history
 	onDoctor           func() *DoctorResponse                                                           // trigger health checks
+	onTriggerGC        func() *TriggerGCResponse                                                        // force GC reclone
 
 	startTime time.Time
 }
@@ -464,6 +478,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeSessions, handleSessions)
 	router.Register(MsgTypeInstances, handleInstances)
 	router.Register(MsgTypeDoctor, handleDoctor)
+	router.Register(MsgTypeTriggerGC, handleTriggerGC)
 
 	return router
 }
@@ -747,6 +762,22 @@ func handleDoctor(s *Server, _ Message, _ net.Conn) HandlerResult {
 	return HandlerResult{Response: marshalResponse(resp)}
 }
 
+func handleTriggerGC(s *Server, _ Message, _ net.Conn) HandlerResult {
+	s.mu.Lock()
+	handler := s.onTriggerGC
+	s.mu.Unlock()
+
+	var resp *TriggerGCResponse
+	if handler != nil {
+		resp = handler()
+	}
+	if resp == nil {
+		resp = &TriggerGCResponse{}
+	}
+
+	return HandlerResult{Response: marshalResponse(resp)}
+}
+
 // SetHandlers sets the message handlers.
 func (s *Server) SetHandlers(onSync func() error, onStop func(), onStatus func() *StatusData) {
 	s.mu.Lock()
@@ -844,6 +875,13 @@ func (s *Server) SetDoctorHandler(handler func() *DoctorResponse) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onDoctor = handler
+}
+
+// SetTriggerGCHandler sets the handler for forced GC reclone.
+func (s *Server) SetTriggerGCHandler(handler func() *TriggerGCResponse) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onTriggerGC = handler
 }
 
 // Start starts the IPC server.
@@ -1216,6 +1254,23 @@ func (c *Client) Doctor() (*DoctorResponse, error) {
 		return nil, fmt.Errorf("unmarshal doctor response: %w", err)
 	}
 	return &doctorResp, nil
+}
+
+// TriggerGC requests the daemon to force a GC reclone of team contexts.
+func (c *Client) TriggerGC() (*TriggerGCResponse, error) {
+	resp, err := c.sendMessage(Message{Type: MsgTypeTriggerGC})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, errors.New(resp.Error)
+	}
+
+	var gcResp TriggerGCResponse
+	if err := json.Unmarshal(resp.Data, &gcResp); err != nil {
+		return nil, fmt.Errorf("unmarshal trigger_gc response: %w", err)
+	}
+	return &gcResp, nil
 }
 
 // RequestSync requests the daemon to perform a sync.

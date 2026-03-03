@@ -143,6 +143,12 @@ git health, agent environment, and connected services. Use --fix to auto-repair
 common issues, or --fix-slug to target specific checks.`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// --gc: trigger blue/green GC in daemon (standalone, early return)
+		gc, _ := cmd.Flags().GetBool("gc")
+		if gc {
+			return runGC(cmd)
+		}
+
 		gitRoot := findGitRoot()
 
 		// trigger daemon health checks (anti-entropy, etc.) if daemon is running
@@ -303,10 +309,48 @@ func getAvailableSlugs() []string {
 }
 
 func init() {
+	doctorCmd.Flags().Bool("gc", false, "force garbage collection (reclone) of team contexts")
 	doctorCmd.Flags().Bool("fix", false, "automatically fix issues where possible")
 	doctorCmd.Flags().StringSlice("fix-slug", nil, "fix specific issue(s) by slug (repeatable, e.g., --fix-slug=ledger-path --fix-slug=team-symlink)")
 	doctorCmd.Flags().BoolP("yes", "y", false, "answer yes to all prompts (for non-interactive use)")
 	doctorCmd.Flags().BoolP("verbose", "v", false, "show all checks including passed and skipped")
+}
+
+// runGC triggers blue/green GC in the daemon, starting it if needed.
+func runGC(cmd *cobra.Command) error {
+	w := cmd.OutOrStdout()
+
+	if err := daemon.EnsureDaemon(); err != nil {
+		return fmt.Errorf("failed to start daemon: %w", err)
+	}
+
+	client := daemon.NewClient()
+
+	resp, err := cli.WithSpinner("Running garbage collection...", func() (*daemon.TriggerGCResponse, error) {
+		return client.TriggerGC()
+	})
+	if err != nil {
+		return fmt.Errorf("gc failed: %w", err)
+	}
+
+	if resp.Triggered == 0 && resp.Skipped == 0 && len(resp.Errors) == 0 {
+		fmt.Fprintln(w, "No team contexts eligible for GC")
+		return nil
+	}
+
+	if resp.Triggered > 0 {
+		fmt.Fprintf(w, "%s  Recloned %d team context(s)\n",
+			ui.PassStyle.Render(ui.RenderPassIcon()), resp.Triggered)
+	}
+	if resp.Skipped > 0 {
+		fmt.Fprintf(w, "%s  Skipped %d (GC already in progress)\n",
+			ui.MutedStyle.Render("○"), resp.Skipped)
+	}
+	for _, e := range resp.Errors {
+		fmt.Fprintf(w, "%s  %s\n", ui.FailStyle.Render("✗"), e)
+	}
+
+	return nil
 }
 
 // detectDoctorState detects environment state for conditional check suppression
