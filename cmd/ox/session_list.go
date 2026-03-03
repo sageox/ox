@@ -199,14 +199,18 @@ func printSessionRow(t session.SessionInfo, uploaded bool, localUser string) {
 		name = t.Filename
 	}
 
-	// status: uploaded or not
+	// status: recording > uploaded > local only
 	var statusStr string
-	var statusUploaded bool
-	if uploaded {
+	var statusStyle string // "recording", "uploaded", or "local"
+	if t.Recording {
+		statusStr = "● recording"
+		statusStyle = "recording"
+	} else if uploaded {
 		statusStr = "✓ uploaded"
-		statusUploaded = true
+		statusStyle = "uploaded"
 	} else {
 		statusStr = "✗ local only"
+		statusStyle = "local"
 	}
 
 	// user display: prefer meta.json username, fallback to local user
@@ -235,9 +239,12 @@ func printSessionRow(t session.SessionInfo, uploaded bool, localUser string) {
 		sessionDurationStyle.Render(timeCol) +
 		sessionSummaryStyle.Render(userCol)
 
-	if statusUploaded {
+	switch statusStyle {
+	case "recording":
+		row += sessionTypeStyle.Render(statusCol)
+	case "uploaded":
 		row += sessionDurationStyle.Render(statusCol)
-	} else {
+	default:
 		row += sessionHydrationStyle.Render(statusCol)
 	}
 

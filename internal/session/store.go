@@ -317,6 +317,8 @@ type SessionInfo struct {
 	HydrationStatus lfs.HydrationStatus `json:"hydration_status,omitempty"` // hydrated/dehydrated/partial
 	Username        string              `json:"username,omitempty"`         // from meta.json
 	Summary         string              `json:"summary,omitempty"`          // from meta.json
+	Recording       bool                `json:"recording,omitempty"`        // true if session is actively being recorded
+	AgentID         string              `json:"agent_id,omitempty"`         // from .recording.json when recording
 }
 
 // ListSessions returns session files from the last 7 days, sorted by date descending.
@@ -399,6 +401,21 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			createdAt = parsedTime
 		}
 
+		// check if this session is actively being recorded
+		var isRecording bool
+		var recordingAgentID string
+		recPath := filepath.Join(sessionPath, recordingFile)
+		if recData, recErr := os.ReadFile(recPath); recErr == nil {
+			var recState RecordingState
+			if err := json.Unmarshal(recData, &recState); err == nil {
+				isRecording = true
+				recordingAgentID = recState.AgentID
+				if !recState.StartedAt.IsZero() && createdAt.IsZero() {
+					createdAt = recState.StartedAt
+				}
+			}
+		}
+
 		// Create ONE entry per session directory (not per file)
 		// Prefer raw.jsonl as the primary file, fallback to checking for any content
 		rawPath := filepath.Join(sessionPath, rawFilename)
@@ -407,7 +424,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var modTime time.Time
 
 		if info, err := os.Stat(rawPath); err == nil {
-			// raw.jsonl exists (hydrated)
+			// raw.jsonl exists (hydrated or recording in progress)
 			filePath = rawPath
 			fileSize = info.Size()
 			modTime = info.ModTime()
@@ -429,8 +446,19 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			if createdAt.IsZero() {
 				createdAt = time.Now()
 			}
+		} else if isRecording {
+			// no raw.jsonl yet but recording is active (just started)
+			filePath = recPath
+			if recInfo, statErr := os.Stat(recPath); statErr == nil {
+				modTime = recInfo.ModTime()
+				if createdAt.IsZero() {
+					createdAt = recInfo.ModTime()
+				}
+			} else {
+				modTime = createdAt
+			}
 		} else {
-			// no meta.json and no raw.jsonl - skip this directory
+			// no meta.json, no raw.jsonl, no recording — skip
 			continue
 		}
 
@@ -439,13 +467,15 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			SessionName:     name,
 			Filename:        filepath.Base(filePath),
 			FilePath:        filePath,
-			Type:            "raw", // deprecated but kept for --raw/--events flag compatibility
+			Type:            "raw",
 			Size:            fileSize,
 			CreatedAt:       createdAt,
 			ModTime:         modTime,
 			HydrationStatus: hydrationStatus,
 			Username:        username,
 			Summary:         summary,
+			Recording:       isRecording,
+			AgentID:         recordingAgentID,
 		})
 	}
 

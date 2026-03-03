@@ -398,3 +398,57 @@ func TestFindGitRootFrom(t *testing.T) {
 		assert.Error(t, err, "should error when no .git exists")
 	})
 }
+
+func TestPushLedger_RebaseConflict_LocalCommitPreserved(t *testing.T) {
+	barePath, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+
+	// create a file that will conflict
+	conflictFile := filepath.Join(clonePath, "conflict.txt")
+	require.NoError(t, os.WriteFile(conflictFile, []byte("local version"), 0644))
+	runGit(t, clonePath, "add", "conflict.txt")
+	runGit(t, clonePath, "commit", "--no-verify", "-m", "local change")
+	localCommitHash := runGit(t, clonePath, "rev-parse", "HEAD")
+
+	// push a conflicting change from another clone
+	otherClone := cloneBare(t, barePath)
+	otherConflictFile := filepath.Join(otherClone, "conflict.txt")
+	require.NoError(t, os.WriteFile(otherConflictFile, []byte("remote version"), 0644))
+	runGit(t, otherClone, "add", "conflict.txt")
+	runGit(t, otherClone, "commit", "--no-verify", "-m", "conflicting remote change")
+	runGit(t, otherClone, "push")
+
+	// push from local — rebase will conflict
+	err := pushLedger(context.Background(), clonePath)
+	require.Error(t, err, "push should fail when rebase encounters conflict")
+	assert.Contains(t, err.Error(), "rebase",
+		"failure should come from rebase conflict handling")
+
+	// critical safety: the local commit must survive a failed rebase
+	currentHead := runGit(t, clonePath, "rev-parse", "HEAD")
+	assert.Equal(t, localCommitHash, currentHead,
+		"local commit must be preserved after failed rebase — HEAD should be restored")
+
+	// verify the local file content is intact
+	content, readErr := os.ReadFile(conflictFile)
+	require.NoError(t, readErr)
+	assert.Equal(t, "local version", string(content),
+		"local file content must be preserved after failed rebase")
+}
+
+func TestCommitAndPushLedger_EmptySessionDir(t *testing.T) {
+	_, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+
+	sessionName := "2026-01-01T00-00-testuser-OxEmty"
+	// create the session directory but put NO files in it
+	sessionsDir := filepath.Join(clonePath, "sessions")
+	sessionDir := filepath.Join(sessionsDir, sessionName)
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+	require.NoError(t, ensureSessionsGitignore(sessionsDir))
+
+	err := commitAndPushLedger(clonePath, sessionName)
+	require.Error(t, err, "should error when session dir exists but has no files to commit")
+	assert.Contains(t, err.Error(), "git add failed",
+		"error should indicate files were missing for git add")
+}

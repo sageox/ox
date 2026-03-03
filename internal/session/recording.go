@@ -146,6 +146,68 @@ func LoadRecordingState(projectRoot string) (*RecordingState, error) {
 	return nil, nil // no recording state found
 }
 
+// LoadAllRecordingStates returns all active recording states by searching for
+// .recording.json in session folders. Unlike LoadRecordingState which returns
+// only the first match, this returns all concurrent recordings (e.g., from
+// multiple worktrees or agents).
+func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
+	if projectRoot == "" {
+		return nil, fmt.Errorf("%w: project root", ErrEmptyPath)
+	}
+
+	sessionsPaths := []string{
+		filepath.Join(projectRoot, "sessions"),
+	}
+
+	repoID := getRepoIDFromProject(projectRoot)
+	if repoID != "" {
+		contextPath := GetContextPath(repoID)
+		if contextPath != "" {
+			sessionsPaths = append(sessionsPaths, filepath.Join(contextPath, "sessions"))
+		}
+	}
+
+	seen := make(map[string]struct{}) // deduplicate by canonical recording file path
+	var states []*RecordingState
+
+	for _, sessionsDir := range sessionsPaths {
+		entries, err := os.ReadDir(sessionsDir)
+		if err != nil {
+			continue
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+
+			recordingPath := filepath.Join(sessionsDir, entry.Name(), recordingFile)
+			canonicalKey := recordingPath
+			if resolved, err := filepath.EvalSymlinks(recordingPath); err == nil {
+				canonicalKey = resolved
+			}
+			if _, ok := seen[canonicalKey]; ok {
+				continue
+			}
+
+			data, err := os.ReadFile(recordingPath)
+			if err != nil {
+				continue
+			}
+
+			var state RecordingState
+			if err := json.Unmarshal(data, &state); err != nil {
+				continue
+			}
+
+			seen[canonicalKey] = struct{}{}
+			states = append(states, &state)
+		}
+	}
+
+	return states, nil
+}
+
 // ClearRecordingState removes the recording state file from the session folder.
 func ClearRecordingState(projectRoot string) error {
 	if projectRoot == "" {

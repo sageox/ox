@@ -150,3 +150,47 @@ func TestAbortForceViaCobraFlag(t *testing.T) {
 
 	assert.False(t, session.IsRecording(projectRoot), "session should be aborted")
 }
+
+func TestAbortDifferentAgent_AbortsFirstFoundSession(t *testing.T) {
+	projectRoot, state := setupAbortTest(t)
+
+	// Agent A (OxAbrt) has an active recording from setupAbortTest
+	require.True(t, session.IsRecording(projectRoot))
+	assert.Equal(t, "OxAbrt", state.AgentID)
+
+	setForceFlag(t, true)
+
+	// Agent B calls abort — abort doesn't filter by agent ID,
+	// so it loads and aborts A's session
+	instB := &agentinstance.Instance{AgentID: "OxOthr"}
+	err := runAgentSessionAbort(instB, agentCmd)
+	require.NoError(t, err, "abort should succeed even from a different agent")
+
+	// A's recording should be cleared
+	assert.False(t, session.IsRecording(projectRoot),
+		"recording should be cleared after abort by different agent")
+
+	// A's session folder should be removed
+	_, err = os.Stat(state.SessionPath)
+	assert.True(t, os.IsNotExist(err),
+		"session folder should be removed even when aborted by different agent")
+}
+
+func TestAbort_SessionFolderWithReadOnlyFiles(t *testing.T) {
+	_, state := setupAbortTest(t)
+
+	// make a file read-only inside session folder
+	readOnlyFile := filepath.Join(state.SessionPath, "readonly.dat")
+	require.NoError(t, os.WriteFile(readOnlyFile, []byte("protected"), 0444))
+
+	setForceFlag(t, true)
+
+	inst := &agentinstance.Instance{AgentID: "OxAbrt"}
+	err := runAgentSessionAbort(inst, agentCmd)
+	require.NoError(t, err, "abort should succeed even with read-only files in session folder")
+
+	// session folder should be fully removed
+	_, err = os.Stat(state.SessionPath)
+	assert.True(t, os.IsNotExist(err),
+		"session folder with read-only files should be fully removed after abort")
+}
