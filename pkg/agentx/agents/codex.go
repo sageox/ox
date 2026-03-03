@@ -137,4 +137,9 @@ func (a *CodexAgent) IsInstalled(ctx context.Context, env agentx.Environment) (b
 	return false, nil
 }
 
+func (a *CodexAgent) SupportsSession() bool { return true }
+func (a *CodexAgent) SessionID(env agentx.Environment) string {
+	return env.GetEnv("CODEX_THREAD_ID")
+}
+
 var _ agentx.Agent = (*CodexAgent)(nil)

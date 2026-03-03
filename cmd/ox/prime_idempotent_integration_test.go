@@ -17,14 +17,14 @@ import (
 // and skips output on subsequent runs with --idempotent flag.
 func TestIdempotentPrimeOnStartup(t *testing.T) {
 	// create a unique session ID for this test
-	claudeSessionID := "test_startup_" + time.Now().Format("20060102150405.000")
+	agentSessionID := "test_startup_" + time.Now().Format("20060102150405.000")
 	t.Cleanup(func() {
-		DeleteSessionMarker(claudeSessionID)
+		DeleteSessionMarker(agentSessionID)
 	})
 
 	t.Run("first prime creates marker", func(t *testing.T) {
 		// simulate first prime (no marker exists)
-		marker, err := ReadSessionMarker(claudeSessionID)
+		marker, err := ReadSessionMarker(agentSessionID)
 		require.NoError(t, err)
 		assert.Nil(t, marker, "marker should not exist before first prime")
 
@@ -34,14 +34,14 @@ func TestIdempotentPrimeOnStartup(t *testing.T) {
 		newMarker := &SessionMarker{
 			AgentID:         agentID,
 			SessionID:       sessionID,
-			ClaudeSessionID: claudeSessionID,
+			AgentSessionID: agentSessionID,
 			PrimedAt:        time.Now(),
 		}
 		err = WriteSessionMarker(newMarker)
 		require.NoError(t, err)
 
 		// verify marker was created
-		marker, err = ReadSessionMarker(claudeSessionID)
+		marker, err = ReadSessionMarker(agentSessionID)
 		require.NoError(t, err)
 		require.NotNil(t, marker, "marker should exist after first prime")
 		assert.Equal(t, agentID, marker.AgentID)
@@ -50,7 +50,7 @@ func TestIdempotentPrimeOnStartup(t *testing.T) {
 
 	t.Run("idempotent mode skips when marker exists", func(t *testing.T) {
 		// marker should already exist from previous test
-		marker, err := ReadSessionMarker(claudeSessionID)
+		marker, err := ReadSessionMarker(agentSessionID)
 		require.NoError(t, err)
 		require.NotNil(t, marker, "marker should exist")
 
@@ -65,7 +65,7 @@ func TestIdempotentPrimeOnStartup(t *testing.T) {
 	})
 
 	t.Run("non-idempotent mode outputs even when marker exists", func(t *testing.T) {
-		marker, err := ReadSessionMarker(claudeSessionID)
+		marker, err := ReadSessionMarker(agentSessionID)
 		require.NoError(t, err)
 		require.NotNil(t, marker)
 
@@ -81,9 +81,9 @@ func TestIdempotentPrimeOnStartup(t *testing.T) {
 // TestAgentIDPreservedAfterClear verifies that agent_id is preserved
 // when /clear is executed (marker survives, agent_id is reused).
 func TestAgentIDPreservedAfterClear(t *testing.T) {
-	claudeSessionID := "test_clear_" + time.Now().Format("20060102150405.000")
+	agentSessionID := "test_clear_" + time.Now().Format("20060102150405.000")
 	t.Cleanup(func() {
-		DeleteSessionMarker(claudeSessionID)
+		DeleteSessionMarker(agentSessionID)
 	})
 
 	originalAgentID := "OxClear"
@@ -94,14 +94,14 @@ func TestAgentIDPreservedAfterClear(t *testing.T) {
 		marker := &SessionMarker{
 			AgentID:         originalAgentID,
 			SessionID:       originalSessionID,
-			ClaudeSessionID: claudeSessionID,
+			AgentSessionID: agentSessionID,
 			PrimedAt:        time.Now(),
 		}
 		err := WriteSessionMarker(marker)
 		require.NoError(t, err)
 
 		// verify
-		read, err := ReadSessionMarker(claudeSessionID)
+		read, err := ReadSessionMarker(agentSessionID)
 		require.NoError(t, err)
 		require.NotNil(t, read)
 		assert.Equal(t, originalAgentID, read.AgentID)
@@ -112,7 +112,7 @@ func TestAgentIDPreservedAfterClear(t *testing.T) {
 		// the marker file persists because it's outside Claude's control
 
 		// simulate SessionStart:clear hook - marker should still exist
-		marker, err := ReadSessionMarker(claudeSessionID)
+		marker, err := ReadSessionMarker(agentSessionID)
 		require.NoError(t, err)
 		require.NotNil(t, marker, "marker should survive /clear")
 		assert.Equal(t, originalAgentID, marker.AgentID, "agent_id should be preserved after /clear")
@@ -121,7 +121,7 @@ func TestAgentIDPreservedAfterClear(t *testing.T) {
 	t.Run("re-prime after /clear reuses agent_id", func(t *testing.T) {
 		// simulate what happens in runAgentPrime after /clear
 		// (non-idempotent mode because matcher is "clear")
-		existingMarker, err := ReadSessionMarker(claudeSessionID)
+		existingMarker, err := ReadSessionMarker(agentSessionID)
 		require.NoError(t, err)
 		require.NotNil(t, existingMarker)
 
@@ -139,14 +139,14 @@ func TestAgentIDPreservedAfterClear(t *testing.T) {
 		newMarker := &SessionMarker{
 			AgentID:         agentID,
 			SessionID:       "oxsid_clear_reprime",
-			ClaudeSessionID: claudeSessionID,
+			AgentSessionID: agentSessionID,
 			PrimedAt:        time.Now(),
 		}
 		err = WriteSessionMarker(newMarker)
 		require.NoError(t, err)
 
 		// verify agent_id is still the same
-		final, err := ReadSessionMarker(claudeSessionID)
+		final, err := ReadSessionMarker(agentSessionID)
 		require.NoError(t, err)
 		assert.Equal(t, originalAgentID, final.AgentID, "agent_id should remain unchanged")
 	})
@@ -155,9 +155,9 @@ func TestAgentIDPreservedAfterClear(t *testing.T) {
 // TestAgentIDPreservedAfterCompact verifies that agent_id is preserved
 // when compaction occurs.
 func TestAgentIDPreservedAfterCompact(t *testing.T) {
-	claudeSessionID := "test_compact_" + time.Now().Format("20060102150405.000")
+	agentSessionID := "test_compact_" + time.Now().Format("20060102150405.000")
 	t.Cleanup(func() {
-		DeleteSessionMarker(claudeSessionID)
+		DeleteSessionMarker(agentSessionID)
 	})
 
 	originalAgentID := "OxCompact"
@@ -167,7 +167,7 @@ func TestAgentIDPreservedAfterCompact(t *testing.T) {
 		marker := &SessionMarker{
 			AgentID:         originalAgentID,
 			SessionID:       "oxsid_compact1",
-			ClaudeSessionID: claudeSessionID,
+			AgentSessionID: agentSessionID,
 			PrimedAt:        time.Now(),
 		}
 		err := WriteSessionMarker(marker)
@@ -175,19 +175,19 @@ func TestAgentIDPreservedAfterCompact(t *testing.T) {
 
 		// simulate PreCompact hook (belt)
 		// marker should exist, we re-prime with same agent_id
-		existing, _ := ReadSessionMarker(claudeSessionID)
+		existing, _ := ReadSessionMarker(agentSessionID)
 		require.NotNil(t, existing)
 		assert.Equal(t, originalAgentID, existing.AgentID)
 
 		// simulate SessionStart:compact hook (suspenders)
 		// again, marker should exist, we re-prime with same agent_id
-		existing2, _ := ReadSessionMarker(claudeSessionID)
+		existing2, _ := ReadSessionMarker(agentSessionID)
 		require.NotNil(t, existing2)
 		assert.Equal(t, originalAgentID, existing2.AgentID, "agent_id preserved after compact")
 	})
 }
 
-// TestMultipleSessionsHaveIndependentMarkers verifies that different Claude
+// TestMultipleSessionsHaveIndependentMarkers verifies that different coding agent
 // sessions (e.g., multiple terminal windows) have independent markers.
 func TestMultipleSessionsHaveIndependentMarkers(t *testing.T) {
 	session1 := "test_multi_session1_" + time.Now().Format("20060102150405.000")
@@ -202,7 +202,7 @@ func TestMultipleSessionsHaveIndependentMarkers(t *testing.T) {
 		marker1 := &SessionMarker{
 			AgentID:         "OxSess1",
 			SessionID:       "oxsid_sess1",
-			ClaudeSessionID: session1,
+			AgentSessionID: session1,
 			PrimedAt:        time.Now(),
 		}
 		err := WriteSessionMarker(marker1)
@@ -212,7 +212,7 @@ func TestMultipleSessionsHaveIndependentMarkers(t *testing.T) {
 		marker2 := &SessionMarker{
 			AgentID:         "OxSess2",
 			SessionID:       "oxsid_sess2",
-			ClaudeSessionID: session2,
+			AgentSessionID: session2,
 			PrimedAt:        time.Now(),
 		}
 		err = WriteSessionMarker(marker2)
@@ -259,16 +259,16 @@ func TestMarkerCleanupOnReboot(t *testing.T) {
 
 // TestHookBehaviorMatrix tests the expected behavior for each hook type.
 func TestHookBehaviorMatrix(t *testing.T) {
-	claudeSessionID := "test_matrix_" + time.Now().Format("20060102150405.000")
+	agentSessionID := "test_matrix_" + time.Now().Format("20060102150405.000")
 	t.Cleanup(func() {
-		DeleteSessionMarker(claudeSessionID)
+		DeleteSessionMarker(agentSessionID)
 	})
 
 	originalAgentID := "OxMatrix"
 
 	// helper to simulate prime behavior
 	simulatePrime := func(idempotent bool) (outputGenerated bool, agentIDUsed string) {
-		marker, _ := ReadSessionMarker(claudeSessionID)
+		marker, _ := ReadSessionMarker(agentSessionID)
 
 		if marker != nil && idempotent {
 			// idempotent mode: skip if marker exists
@@ -285,7 +285,7 @@ func TestHookBehaviorMatrix(t *testing.T) {
 		// write marker
 		newMarker := &SessionMarker{
 			AgentID:         agentIDUsed,
-			ClaudeSessionID: claudeSessionID,
+			AgentSessionID: agentSessionID,
 			PrimedAt:        time.Now(),
 		}
 		_ = WriteSessionMarker(newMarker)
@@ -343,7 +343,7 @@ func TestGracefulMarkerFailure(t *testing.T) {
 		// but we verify the error handling exists
 		marker := &SessionMarker{
 			AgentID:         "OxFail",
-			ClaudeSessionID: "", // empty session ID should be handled
+			AgentSessionID: "", // empty session ID should be handled
 		}
 		err := WriteSessionMarker(marker)
 		assert.Error(t, err, "should error on empty session ID")

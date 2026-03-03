@@ -154,6 +154,24 @@ type LifecycleEventMapper interface {
 	AgentENVAliases() []string
 }
 
+// AgentSession provides access to the agent's native session identifier.
+// Agents that support sessions (most hook-based agents) return true from
+// SupportsSession. The actual session ID may come from an environment variable
+// (e.g., CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID) or from hook stdin JSON
+// (HookInput.SessionID, handled separately).
+type AgentSession interface {
+	// SupportsSession returns true if this agent has a native session/thread
+	// concept. True means the agent CAN provide a session ID, even if one
+	// isn't available right now (e.g., agent not running, env var not set).
+	SupportsSession() bool
+
+	// SessionID returns the agent's native session identifier from the
+	// environment. Returns empty string if not currently available.
+	// For hook-based agents without a dedicated env var, this returns ""
+	// and the caller should use HookInput.SessionID instead.
+	SessionID(env Environment) string
+}
+
 // Agent represents a coding agent with full detection and configuration capabilities.
 // It embeds all focused interfaces for complete agent functionality.
 //
@@ -163,12 +181,14 @@ type LifecycleEventMapper interface {
 //   - AgentDetector: when you need to check if agent is running/installed
 //   - AgentConfig: when you need configuration paths
 //   - AgentExtensions: when you need hooks
+//   - AgentSession: when you need session identification
 //   - Agent: when you need full functionality or storage/registry
 type Agent interface {
 	AgentIdentity
 	AgentDetector
 	AgentConfig
 	AgentExtensions
+	AgentSession
 }
 
 // Capabilities describes what features a coding agent supports.

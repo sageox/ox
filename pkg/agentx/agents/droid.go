@@ -185,6 +185,10 @@ func (a *DroidAgent) AgentENVAliases() []string {
 	return []string{"droid", "factory-droid", "factory"}
 }
 
+// SupportsSession returns true; Droid provides session IDs via hook stdin JSON.
+func (a *DroidAgent) SupportsSession() bool                 { return true }
+func (a *DroidAgent) SessionID(_ agentx.Environment) string { return "" }
+
 // Ensure DroidAgent implements Agent and LifecycleEventMapper.
 var _ agentx.Agent = (*DroidAgent)(nil)
 var _ agentx.LifecycleEventMapper = (*DroidAgent)(nil)

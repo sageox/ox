@@ -114,9 +114,9 @@ func TestMergeHookEntries(t *testing.T) {
 	})
 }
 
-func TestClaudeHookInput(t *testing.T) {
+func TestAgentHookInput(t *testing.T) {
 	t.Run("struct fields are correct", func(t *testing.T) {
-		input := ClaudeHookInput{
+		input := AgentHookInput{
 			SessionID:     "test-session-123",
 			HookEventName: "SessionStart",
 		}

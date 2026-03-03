@@ -138,4 +138,7 @@ func (a *GooseAgent) IsInstalled(ctx context.Context, env agentx.Environment) (b
 	return false, nil
 }
 
+func (a *GooseAgent) SupportsSession() bool                 { return false }
+func (a *GooseAgent) SessionID(_ agentx.Environment) string { return "" }
+
 var _ agentx.Agent = (*GooseAgent)(nil)

@@ -171,5 +171,9 @@ func (a *WindsurfAgent) AgentENVAliases() []string {
 	return []string{"windsurf", "codeium"}
 }
 
+// SupportsSession returns true; Windsurf provides session IDs via hook stdin JSON.
+func (a *WindsurfAgent) SupportsSession() bool                 { return true }
+func (a *WindsurfAgent) SessionID(_ agentx.Environment) string { return "" }
+
 var _ agentx.Agent = (*WindsurfAgent)(nil)
 var _ agentx.LifecycleEventMapper = (*WindsurfAgent)(nil)

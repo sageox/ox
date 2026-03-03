@@ -137,4 +137,7 @@ func (a *AiderAgent) IsInstalled(ctx context.Context, env agentx.Environment) (b
 	return false, nil
 }
 
+func (a *AiderAgent) SupportsSession() bool                 { return false }
+func (a *AiderAgent) SessionID(_ agentx.Environment) string { return "" }
+
 var _ agentx.Agent = (*AiderAgent)(nil)

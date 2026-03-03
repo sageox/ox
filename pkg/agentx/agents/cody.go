@@ -129,4 +129,7 @@ func (a *CodyAgent) IsInstalled(ctx context.Context, env agentx.Environment) (bo
 	return false, nil
 }
 
+func (a *CodyAgent) SupportsSession() bool                 { return false }
+func (a *CodyAgent) SessionID(_ agentx.Environment) string { return "" }
+
 var _ agentx.Agent = (*CodyAgent)(nil)

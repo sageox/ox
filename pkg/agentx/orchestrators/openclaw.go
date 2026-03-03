@@ -89,4 +89,7 @@ func (a *OpenClawAgent) IsInstalled(_ context.Context, env agentx.Environment) (
 	return false, nil
 }
 
+func (a *OpenClawAgent) SupportsSession() bool                 { return false }
+func (a *OpenClawAgent) SessionID(_ agentx.Environment) string { return "" }
+
 var _ agentx.Agent = (*OpenClawAgent)(nil)

@@ -170,6 +170,10 @@ func (a *CursorAgent) AgentENVAliases() []string {
 	return []string{"cursor"}
 }
 
+// SupportsSession returns true; Cursor provides session IDs via hook stdin JSON.
+func (a *CursorAgent) SupportsSession() bool                 { return true }
+func (a *CursorAgent) SessionID(_ agentx.Environment) string { return "" }
+
 // Ensure CursorAgent implements Agent and LifecycleEventMapper.
 var _ agentx.Agent = (*CursorAgent)(nil)
 var _ agentx.LifecycleEventMapper = (*CursorAgent)(nil)
