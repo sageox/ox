@@ -100,9 +100,13 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no team context configured — run 'ox init' first")
 	}
 
-	// no sparse checkout expansion needed: git add stages files outside the
-	// sparse cone, and we create the directory ourselves. The files may be
-	// cleaned up on the next checkout, but they're already pushed by then.
+	// data/ is excluded from the team context sparse checkout (deny list in
+	// sync.manifest). We create the directory ourselves and git add stages
+	// files outside the sparse cone. After commit+push, these local files are
+	// ephemeral — the daemon's next reclone (gc_interval_days, default 7d)
+	// produces a fresh sparse checkout that omits data/ entirely. The actual
+	// document content lives on the LFS server; only pointer files and
+	// metadata.json are in git history.
 	docsBaseDir := filepath.Join(tc.Path, "data", "docs")
 	if err := os.MkdirAll(docsBaseDir, 0o755); err != nil {
 		return fmt.Errorf("create data/docs directory: %w", err)
@@ -183,7 +187,9 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("LFS upload failed:\n  %s", strings.Join(uploadErrors, "\n  "))
 	}
 
-	// write LFS pointer files
+	// write LFS pointer files (~200 bytes each, referencing content on LFS server).
+	// these are committed to git and survive in history, but the local working-tree
+	// copies are cleaned up on the next sparse-checkout reclone (data/ is denied).
 	srcPointerPath := filepath.Join(docDir, "source.bin")
 	if err := os.WriteFile(srcPointerPath, []byte(lfs.FormatPointer(srcRef.OID, srcRef.Size)), 0o644); err != nil {
 		return fmt.Errorf("write source.bin pointer: %w", err)
@@ -201,7 +207,9 @@ func runImport(cmd *cobra.Command, args []string) error {
 		title = inferTitle(srcPath)
 	}
 
-	// build and write metadata.json
+	// build and write metadata.json (plain git, not LFS — stays readable without
+	// hydration). like pointer files, the local copy is ephemeral and cleaned up
+	// on sparse-checkout reclone, but persists in git history.
 	files := map[string]lfs.FileRef{
 		"source.bin": srcRef,
 	}
