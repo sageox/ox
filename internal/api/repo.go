@@ -24,7 +24,7 @@ const (
 	repoDoctorPath    = "/api/v1/public/repos/%s/doctor" // %s = repo_id; intentionally public (no PII, works pre-auth)
 	repoUninstallPath = "/api/v1/repo/%s/uninstall"      // %s = repo_id
 	repoMergePath     = "/api/v1/repo/%s/merge"          // %s = repo_id
-	gitImportPath     = "/api/v1/git/import"
+	gitImportPath     = "/api/v1/teams/%s/context/import" // %s = team_id
 )
 
 // RepoInitRequest represents the POST /api/v1/repo/init request
@@ -86,7 +86,7 @@ type MergeRepoResponse struct {
 	Redirect  *RedirectInfo `json:"redirect,omitempty"` // redirect info (also in header)
 }
 
-// ImportNotification is the POST /api/v1/git/import request body.
+// ImportNotification is the POST /api/v1/teams/{team_id}/context/import request body.
 // Imports target a team context (not a project repo), so team_id is the
 // primary identifier. The Metadata field is passed as-is (json.RawMessage)
 // to avoid coupling the API package to the docMeta struct in cmd/ox.
@@ -473,7 +473,7 @@ func (c *RepoClient) NotifyImport(teamID string, metadata any) error {
 		return fmt.Errorf("marshal request: %w", err)
 	}
 
-	reqURL := strings.TrimSuffix(c.baseURL, "/") + gitImportPath
+	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(gitImportPath, teamID)
 
 	logger.LogHTTPRequest("POST", reqURL)
 	start := time.Now()
