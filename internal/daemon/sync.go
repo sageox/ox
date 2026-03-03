@@ -602,6 +602,10 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	// immediate anti-entropy check on startup (same logic as periodic ticker)
 	s.triggerMissingClones()
 
+	// immediate initial pull so last_sync gets populated right away
+	// (don't wait 5 minutes for the first readTicker)
+	go s.pullChanges(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -2159,15 +2163,9 @@ func (s *SyncScheduler) applySparseCheckout(ctx context.Context, tcPath string) 
 		return cfg
 	}
 
-	// init sparse-checkout in cone mode
-	if _, err := gitutil.RunGit(ctx, tcPath, "sparse-checkout", "init", "--cone"); err != nil {
-		s.logger.Warn("sparse-checkout init failed, continuing without sparse checkout",
-			"path", tcPath, "error", err)
-		return cfg
-	}
-
-	// set the sparse paths
-	args := append([]string{"sparse-checkout", "set"}, sparsePaths...)
+	// use --no-cone mode to support both file and directory patterns
+	// (cone mode only supports directories, but fallback includes files like AGENTS.md)
+	args := append([]string{"sparse-checkout", "set", "--no-cone"}, sparsePaths...)
 	if _, err := gitutil.RunGit(ctx, tcPath, args...); err != nil {
 		s.logger.Warn("sparse-checkout set failed, continuing without sparse checkout",
 			"path", tcPath, "error", err)

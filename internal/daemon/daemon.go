@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sageox/ox/internal/auth"
@@ -157,6 +158,10 @@ type Daemon struct {
 	running      bool
 	startTime    time.Time // daemon start time for uptime tracking
 	lastActivity time.Time // tracks last activity for inactivity timeout
+
+	// startup timing (populated during Start())
+	startupDuration  time.Duration
+	throttleDuration time.Duration
 }
 
 // New creates a new daemon instance.
@@ -192,10 +197,15 @@ func (d *Daemon) timeSinceLastActivity() time.Duration {
 // Start starts the daemon in the foreground.
 // This blocks until Stop is called or a termination signal is received.
 func (d *Daemon) Start() error {
+	startTotal := time.Now()
+
 	// check for restart loop before proceeding
+	var throttleDuration time.Duration
 	if delay := checkRestartLoop(d.logger); delay > 0 {
 		d.logger.Info("throttling startup due to restart loop", "delay", delay)
+		throttleStart := time.Now()
 		time.Sleep(delay)
+		throttleDuration = time.Since(throttleStart)
 	}
 
 	// record this startup attempt for loop detection
@@ -214,6 +224,8 @@ func (d *Daemon) Start() error {
 	d.mu.Unlock()
 
 	d.logger.Info("daemon starting", "ledger", d.config.LedgerPath, "version", Version)
+
+	startSetup := time.Now()
 
 	// write PID file (informational only)
 	if err := d.writePidFile(); err != nil {
@@ -387,8 +399,10 @@ func (d *Daemon) Start() error {
 				TimeSinceActivity: d.timeSinceLastActivity(),
 				Activity:          activitySummary,
 				AuthenticatedUser: authUser,
-				NeedsHelp:         needsHelp,
-				Issues:            issues,
+				NeedsHelp:          needsHelp,
+				Issues:             issues,
+				StartupDurationMs:  d.startupDuration.Milliseconds(),
+				ThrottleDurationMs: d.throttleDuration.Milliseconds(),
 			}
 		},
 	)
@@ -450,6 +464,8 @@ func (d *Daemon) Start() error {
 		return d.getAgentInstances()
 	})
 
+	setupDuration := time.Since(startSetup)
+
 	// start telemetry background sender
 	d.telemetry.Start()
 
@@ -485,6 +501,16 @@ func (d *Daemon) Start() error {
 
 	// set activity callback on server (IPC requests = activity)
 	d.server.SetActivityCallback(d.recordActivity)
+
+	// record startup timing
+	totalDuration := time.Since(startTotal)
+	d.startupDuration = totalDuration
+	d.throttleDuration = throttleDuration
+	d.logger.Info("daemon startup complete",
+		"total", totalDuration,
+		"throttle", throttleDuration,
+		"setup", setupDuration,
+	)
 
 	// NOTE: no activity callback on scheduler — the daemon's own background
 	// syncs must NOT reset the inactivity timer, or it will never self-exit.
@@ -730,4 +756,25 @@ func (d *Daemon) cleanup() {
 func IsRunning() bool {
 	client := NewClientWithTimeout(100 * time.Millisecond)
 	return client.Ping() == nil
+}
+
+// IsStarting checks if a daemon process exists (PID file with live process)
+// but is not yet responding to IPC. This happens during startup throttling
+// or initial setup before the IPC socket is ready.
+func IsStarting() bool {
+	data, err := os.ReadFile(PidPath())
+	if err != nil {
+		return false
+	}
+	var pid int
+	if _, err := fmt.Sscanf(string(data), "%d", &pid); err != nil {
+		return false
+	}
+	// check if process is alive (signal 0 = no signal, just check existence)
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	// on Unix, FindProcess always succeeds; use Signal(0) to check liveness
+	return proc.Signal(syscall.Signal(0)) == nil
 }

@@ -63,6 +63,18 @@ func FormatNotRunning(inProject bool) string {
 	return out.String()
 }
 
+// FormatStarting renders the daemon status when the process exists but IPC isn't ready yet.
+func FormatStarting() string {
+	var out strings.Builder
+	out.WriteString(styleWarning.Render("◐ Daemon: Starting"))
+	out.WriteString("\n\n")
+	out.WriteString(styleMuted.Render("  Process is running but not yet accepting connections."))
+	out.WriteString("\n")
+	out.WriteString(styleMuted.Render("  This may take a few seconds (longer if recently restarted)."))
+	out.WriteString("\n")
+	return out.String()
+}
+
 // FormatStatus renders compact daemon status (Tufte-inspired: maximize data-ink ratio).
 // cliVersion is the current CLI version for match comparison.
 func FormatStatus(status *StatusData, cliVersion string) string {
@@ -132,6 +144,13 @@ func FormatStatusVerbose(status *StatusData, history []SyncEvent, cliVersion str
 	out += formatKV("Ledger", shortenPath(status.LedgerPath)) + "\n"
 	if status.AuthenticatedUser != nil && status.AuthenticatedUser.Email != "" {
 		out += formatKV("User", status.AuthenticatedUser.Email) + "\n"
+	}
+	if status.StartupDurationMs > 0 {
+		startupStr := fmt.Sprintf("%dms", status.StartupDurationMs)
+		if status.ThrottleDurationMs > 0 {
+			startupStr += fmt.Sprintf(" (throttled %dms)", status.ThrottleDurationMs)
+		}
+		out += formatKV("Startup", startupStr) + "\n"
 	}
 
 	// activity details

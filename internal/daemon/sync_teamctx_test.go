@@ -581,6 +581,66 @@ func TestApplySparseCheckout_FallsBackWithoutManifest(t *testing.T) {
 	assert.NotEmpty(t, mCfg.Includes, "fallback should have default include paths")
 }
 
+// TestApplySparseCheckout_FallbackWithFilePatterns is a regression test for
+// the bug where applySparseCheckout used --cone mode, which only supports
+// directories. The fallback manifest includes files like AGENTS.md, SOUL.md,
+// etc., which caused: fatal: 'AGENTS.md' is not a directory.
+// Fix: use --no-cone mode to support both files and directories.
+func TestApplySparseCheckout_FallbackWithFilePatterns(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	teamDir := t.TempDir()
+	setupGitRepo(t, teamDir)
+
+	// create files matching fallback includes (files AND directories)
+	fallbackFiles := map[string]string{
+		"AGENTS.md": "# Agents\n",
+		"SOUL.md":   "# Soul\n",
+		"TEAM.md":   "# Team\n",
+		"MEMORY.md": "# Memory\n",
+	}
+	fallbackDirs := []string{"docs", "memory", "coworkers", ".sageox"}
+	for _, dir := range fallbackDirs {
+		require.NoError(t, os.MkdirAll(filepath.Join(teamDir, dir), 0755))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(teamDir, dir, "placeholder.md"),
+			[]byte("placeholder\n"), 0644))
+	}
+	for name, content := range fallbackFiles {
+		require.NoError(t, os.WriteFile(filepath.Join(teamDir, name), []byte(content), 0644))
+	}
+
+	// commit so sparse-checkout has content to work with
+	addCmd := exec.Command("git", "-C", teamDir, "add", ".")
+	require.NoError(t, addCmd.Run())
+	commitCmd := exec.Command("git", "-C", teamDir, "commit", "-m", "add fallback files")
+	require.NoError(t, commitCmd.Run())
+
+	projectDir := setupProjectWithConfig(t, "")
+	scheduler := newTestScheduler(projectDir)
+
+	ctx := context.Background()
+	mCfg := scheduler.applySparseCheckout(ctx, teamDir)
+
+	// should succeed without errors (was failing with --cone mode)
+	require.NotNil(t, mCfg)
+
+	// verify sparse-checkout was configured and includes file patterns
+	sparseCmd := exec.Command("git", "-C", teamDir, "sparse-checkout", "list")
+	out, err := sparseCmd.CombinedOutput()
+	require.NoError(t, err, "sparse-checkout list should succeed: %s", string(out))
+
+	sparseList := string(out)
+	// verify file patterns are included (these broke with --cone mode)
+	assert.Contains(t, sparseList, "AGENTS.md", "file patterns must work in sparse-checkout")
+	assert.Contains(t, sparseList, "SOUL.md", "file patterns must work in sparse-checkout")
+	// verify directory patterns too
+	assert.Contains(t, sparseList, "docs/", "directory patterns must work in sparse-checkout")
+	assert.Contains(t, sparseList, "memory/", "directory patterns must work in sparse-checkout")
+}
+
 // --- Two-phase clone tests ---
 
 // setupTeamContextBareRepo creates a bare git repo populated with team context

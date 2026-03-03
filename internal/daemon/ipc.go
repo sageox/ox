@@ -126,6 +126,10 @@ type StatusData struct {
 	// UnviewedErrorCount is the number of persisted errors that haven't been viewed.
 	// These are errors that persist across daemon restarts for user notification.
 	UnviewedErrorCount int `json:"unviewed_error_count,omitempty"`
+
+	// startup timing (how long the daemon took to start)
+	StartupDurationMs  int64 `json:"startup_duration_ms,omitempty"`
+	ThrottleDurationMs int64 `json:"throttle_duration_ms,omitempty"`
 }
 
 // ExtendedStatus provides additional status info for diagnostics.
