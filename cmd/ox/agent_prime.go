@@ -323,7 +323,7 @@ func initAgentPrimeCmd() {
 	agentPrimeCmd.Flags().String("agent-ver", "", "Agent version (e.g., 1.0.42) (default: none)")
 
 	// Idempotent mode: skip priming if session already primed (token optimization).
-	// Uses marker files in /tmp/<user>/sageox/sessions/{claude_session_id}.json to track primed sessions.
+	// Uses marker files in /tmp/<user>/sageox/sessions/{agent_session_id}.json to track primed sessions.
 	// When true and marker exists: outputs nothing, exits 0 (saves ~1k tokens).
 	// When false (default): always outputs context (safe, may waste tokens on duplicate calls).
 	agentPrimeCmd.Flags().Bool("idempotent", false, "Skip priming if session already primed (token optimization)")
@@ -337,8 +337,8 @@ func initAgentPrimeCmd() {
 // Do NOT refactor this to require an agent ID - that would break the bootstrap flow.
 //
 // Idempotent behavior:
-// - Reads Claude session_id from stdin (hook JSON context)
-// - Uses session markers at /tmp/<user>/sageox/sessions/{session_id}.json
+// - Reads agent session_id from stdin (hook JSON context)
+// - Uses session markers at /tmp/<user>/sageox/sessions/{agent_session_id}.json
 // - With --idempotent: skips priming if marker exists (saves ~1k tokens)
 // - Without --idempotent: always outputs but reuses agent_id from marker if exists
 //
@@ -367,18 +367,26 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	agentVer, _ := cmd.Flags().GetString("agent-ver")
 	idempotent, _ := cmd.Flags().GetBool("idempotent")
 
-	// read Claude hook input from stdin (session_id for marker keying)
+	// read agent hook input from stdin (session_id for marker keying)
 	// this is non-blocking and returns nil if not in hook context
-	hookInput := ReadClaudeHookInput()
-	var claudeSessionID string
+	hookInput := ReadAgentHookInput()
+	var agentSessionID string
 	if hookInput != nil {
-		claudeSessionID = hookInput.SessionID
+		agentSessionID = hookInput.SessionID
+	}
+
+	// fallback: if no session ID from hook stdin, try agent's native env var
+	// (e.g., CODEX_THREAD_ID, AMP_THREAD_URL, CLAUDE_CODE_SESSION_ID)
+	if agentSessionID == "" {
+		if agent := agentx.CurrentAgent(); agent != nil && agent.SupportsSession() {
+			agentSessionID = agent.SessionID(agentx.NewSystemEnvironment())
+		}
 	}
 
 	// check session marker for idempotent behavior
 	var existingMarker *SessionMarker
-	if claudeSessionID != "" {
-		existingMarker, _ = ReadSessionMarker(claudeSessionID)
+	if agentSessionID != "" {
+		existingMarker, _ = ReadSessionMarker(agentSessionID)
 		if existingMarker != nil && idempotent {
 			// idempotent mode: session already primed, output nothing
 			// this saves ~1k tokens on redundant prime calls
@@ -707,7 +715,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// write session marker for idempotent behavior (graceful failure)
-	if claudeSessionID != "" {
+	if agentSessionID != "" {
 		// determine LastNotified: use latestMtime if we have files, else preserve existing
 		newLastNotified := latestMtime
 		if newLastNotified.IsZero() && existingMarker != nil {
@@ -715,11 +723,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		}
 
 		marker := &SessionMarker{
-			AgentID:         agentID,
-			SessionID:       serverSessionID,
-			ClaudeSessionID: claudeSessionID,
-			PrimedAt:        time.Now(),
-			LastNotified:    newLastNotified,
+			AgentID:        agentID,
+			SessionID:      serverSessionID,
+			AgentSessionID: agentSessionID,
+			PrimedAt:       time.Now(),
+			LastNotified:   newLastNotified,
 		}
 		if err := WriteSessionMarker(marker); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to write session marker: %v\n", err)
@@ -735,7 +743,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		if agentVer != "" {
 			envVars["AGENT_VERSION"] = agentVer
 		}
-		_ = WriteToClaudeEnvFile(envVars)
+		_ = WriteToAgentEnvFile(envVars)
 	}
 
 	output.ElapsedMs = time.Since(primeStart).Milliseconds()

@@ -180,6 +180,10 @@ func (a *ClineAgent) AgentENVAliases() []string {
 	return []string{"cline", "claude-dev"}
 }
 
+// SupportsSession returns true; Cline provides session IDs via hook stdin JSON.
+func (a *ClineAgent) SupportsSession() bool                 { return true }
+func (a *ClineAgent) SessionID(_ agentx.Environment) string { return "" }
+
 // Ensure ClineAgent implements Agent and LifecycleEventMapper.
 var _ agentx.Agent = (*ClineAgent)(nil)
 var _ agentx.LifecycleEventMapper = (*ClineAgent)(nil)

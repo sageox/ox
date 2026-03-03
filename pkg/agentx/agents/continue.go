@@ -129,4 +129,7 @@ func (a *ContinueAgent) IsInstalled(ctx context.Context, env agentx.Environment)
 	return false, nil
 }
 
+func (a *ContinueAgent) SupportsSession() bool                 { return false }
+func (a *ContinueAgent) SessionID(_ agentx.Environment) string { return "" }
+
 var _ agentx.Agent = (*ContinueAgent)(nil)

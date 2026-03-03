@@ -149,5 +149,10 @@ func (a *AmpAgent) AgentENVAliases() []string {
 	return []string{"amp"}
 }
 
+func (a *AmpAgent) SupportsSession() bool { return true }
+func (a *AmpAgent) SessionID(env agentx.Environment) string {
+	return env.GetEnv("AMP_THREAD_URL")
+}
+
 var _ agentx.Agent = (*AmpAgent)(nil)
 var _ agentx.LifecycleEventMapper = (*AmpAgent)(nil)

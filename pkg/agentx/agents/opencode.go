@@ -147,5 +147,9 @@ func (a *OpenCodeAgent) AgentENVAliases() []string {
 	return []string{"opencode"}
 }
 
+// SupportsSession returns true; OpenCode provides session IDs via plugin events.
+func (a *OpenCodeAgent) SupportsSession() bool                 { return true }
+func (a *OpenCodeAgent) SessionID(_ agentx.Environment) string { return "" }
+
 var _ agentx.Agent = (*OpenCodeAgent)(nil)
 var _ agentx.LifecycleEventMapper = (*OpenCodeAgent)(nil)

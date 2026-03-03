@@ -158,6 +158,10 @@ func (a *CopilotAgent) AgentENVAliases() []string {
 	return []string{"copilot", "github-copilot"}
 }
 
+// SupportsSession returns true; Copilot provides session IDs via hook stdin JSON.
+func (a *CopilotAgent) SupportsSession() bool                 { return true }
+func (a *CopilotAgent) SessionID(_ agentx.Environment) string { return "" }
+
 // Ensure CopilotAgent implements Agent and LifecycleEventMapper.
 var _ agentx.Agent = (*CopilotAgent)(nil)
 var _ agentx.LifecycleEventMapper = (*CopilotAgent)(nil)

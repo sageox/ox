@@ -136,4 +136,7 @@ func (a *CodePuppyAgent) IsInstalled(ctx context.Context, env agentx.Environment
 	return false, nil
 }
 
+func (a *CodePuppyAgent) SupportsSession() bool                 { return false }
+func (a *CodePuppyAgent) SessionID(_ agentx.Environment) string { return "" }
+
 var _ agentx.Agent = (*CodePuppyAgent)(nil)

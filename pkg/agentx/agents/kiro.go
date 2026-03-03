@@ -153,5 +153,9 @@ func (a *KiroAgent) AgentENVAliases() []string {
 	return []string{"kiro"}
 }
 
+// SupportsSession returns true; Kiro provides session IDs via hook stdin JSON.
+func (a *KiroAgent) SupportsSession() bool                 { return true }
+func (a *KiroAgent) SessionID(_ agentx.Environment) string { return "" }
+
 var _ agentx.Agent = (*KiroAgent)(nil)
 var _ agentx.LifecycleEventMapper = (*KiroAgent)(nil)

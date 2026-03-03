@@ -13,30 +13,43 @@ import (
 )
 
 // SessionMarkerDir returns the per-user directory for session markers.
-// Uses paths.TempDir()/sessions/ for user isolation. See TempDir() for
-// why /tmp/<user>/sageox/ instead of /tmp/sageox/.
+//
+// Markers are stored in /tmp/<user>/sageox/sessions/ intentionally — they are
+// ephemeral and the OS cleans them on reboot. No explicit cleanup is needed.
+// Stale markers from crashed or abandoned sessions are harmless.
+//
+// See paths.TempDir() for why /tmp/<user>/sageox/ instead of /tmp/sageox/.
 func SessionMarkerDir() string {
 	return filepath.Join(paths.TempDir(), "sessions")
 }
 
-// SessionMarker represents the contents of a session marker file.
-// Stored as JSON for structured data access.
+// SessionMarker tracks a primed coding agent session.
+//
+// Created by `ox agent prime`, one marker per coding agent session (any agent,
+// not just Claude Code). Keyed by the agent's native session identifier, which
+// comes from hook stdin JSON (HookInput.SessionID) or an agent-specific env var
+// (e.g., CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID, AMP_THREAD_URL).
+//
+// Purpose:
+//   - Idempotency: re-priming the same session reuses the ox agent ID
+//   - Notification throttling: LastNotified prevents spamming context-update alerts
+//   - Hook context: agent_hook.go reads markers to pass agent state to handlers
 type SessionMarker struct {
-	AgentID         string    `json:"agent_id"`
-	SessionID       string    `json:"session_id,omitempty"`    // ox session ID, not Claude's
-	ClaudeSessionID string    `json:"claude_session_id"`       // Claude's session_id from hook JSON
-	PrimedAt        time.Time `json:"primed_at"`               // when session was primed
-	LastNotified    time.Time `json:"last_notified,omitempty"` // mtime of last context file check
+	AgentID        string    `json:"agent_id"`
+	SessionID      string    `json:"session_id,omitempty"`       // ox-generated server session ID
+	AgentSessionID string    `json:"agent_session_id"`           // coding agent's native session identifier
+	PrimedAt       time.Time `json:"primed_at"`                  // when session was primed
+	LastNotified   time.Time `json:"last_notified,omitempty"`    // mtime of last context file check
 }
 
-// ClaudeHookInput is an alias for agentx.HookInput for backward compatibility.
-// The generalized HookInput struct in agentx handles all agents, including Claude Code.
-type ClaudeHookInput = agentx.HookInput
+// AgentHookInput is an alias for agentx.HookInput.
+// All coding agents that support hooks pipe session context via stdin JSON.
+type AgentHookInput = agentx.HookInput
 
-// markerPath returns the path to the marker file for a given Claude session ID.
-func markerPath(claudeSessionID string) string {
+// markerPath returns the path to the marker file for a given agent session ID.
+func markerPath(agentSessionID string) string {
 	// sanitize session ID to prevent path traversal
-	sanitized := strings.ReplaceAll(claudeSessionID, "/", "_")
+	sanitized := strings.ReplaceAll(agentSessionID, "/", "_")
 	sanitized = strings.ReplaceAll(sanitized, "\\", "_")
 	sanitized = strings.ReplaceAll(sanitized, "..", "_")
 	return filepath.Join(SessionMarkerDir(), sanitized+".json")
@@ -44,12 +57,12 @@ func markerPath(claudeSessionID string) string {
 
 // ReadSessionMarker reads a session marker from disk.
 // Returns nil, nil if the marker doesn't exist.
-func ReadSessionMarker(claudeSessionID string) (*SessionMarker, error) {
-	if claudeSessionID == "" {
+func ReadSessionMarker(agentSessionID string) (*SessionMarker, error) {
+	if agentSessionID == "" {
 		return nil, nil
 	}
 
-	path := markerPath(claudeSessionID)
+	path := markerPath(agentSessionID)
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -63,9 +76,9 @@ func ReadSessionMarker(claudeSessionID string) (*SessionMarker, error) {
 		return nil, fmt.Errorf("failed to parse marker: %w", err)
 	}
 
-	// ensure ClaudeSessionID is set (may not be in old files)
-	if marker.ClaudeSessionID == "" {
-		marker.ClaudeSessionID = claudeSessionID
+	// ensure AgentSessionID is set (may not be in old marker files)
+	if marker.AgentSessionID == "" {
+		marker.AgentSessionID = agentSessionID
 	}
 
 	return &marker, nil
@@ -75,8 +88,8 @@ func ReadSessionMarker(claudeSessionID string) (*SessionMarker, error) {
 // Creates the marker directory if it doesn't exist.
 // Uses atomic write pattern (temp file + rename) for safety.
 func WriteSessionMarker(marker *SessionMarker) error {
-	if marker.ClaudeSessionID == "" {
-		return fmt.Errorf("claude session ID is required")
+	if marker.AgentSessionID == "" {
+		return fmt.Errorf("agent session ID is required")
 	}
 
 	// ensure directory exists
@@ -84,7 +97,7 @@ func WriteSessionMarker(marker *SessionMarker) error {
 		return fmt.Errorf("failed to create marker directory: %w", err)
 	}
 
-	path := markerPath(marker.ClaudeSessionID)
+	path := markerPath(marker.AgentSessionID)
 
 	data, err := json.MarshalIndent(marker, "", "  ")
 	if err != nil {
@@ -118,11 +131,13 @@ func (m *SessionMarker) UpdateLastNotified(t time.Time) error {
 }
 
 // DeleteSessionMarker removes a session marker from disk.
-func DeleteSessionMarker(claudeSessionID string) error {
-	if claudeSessionID == "" {
+// Used for test cleanup only — production markers are ephemeral in /tmp
+// and cleaned by the OS on reboot.
+func DeleteSessionMarker(agentSessionID string) error {
+	if agentSessionID == "" {
 		return nil
 	}
-	path := markerPath(claudeSessionID)
+	path := markerPath(agentSessionID)
 	err := os.Remove(path)
 	if os.IsNotExist(err) {
 		return nil
@@ -130,9 +145,10 @@ func DeleteSessionMarker(claudeSessionID string) error {
 	return err
 }
 
-// ReadClaudeHookInput reads Claude hook input from stdin.
+// ReadAgentHookInput reads hook input from stdin.
 // Delegates to agentx.ReadHookInputFromStdin and validates session_id is present.
-func ReadClaudeHookInput() *ClaudeHookInput {
+// Works for any coding agent that pipes hook context via stdin JSON.
+func ReadAgentHookInput() *AgentHookInput {
 	input := agentx.ReadHookInputFromStdin()
 	if input == nil {
 		return nil
@@ -146,17 +162,18 @@ func ReadClaudeHookInput() *ClaudeHookInput {
 	return input
 }
 
-// WriteToClaudeEnvFile writes environment variables to CLAUDE_ENV_FILE if available.
-// This makes the variables available to subsequent Bash tool calls in the same session.
-func WriteToClaudeEnvFile(vars map[string]string) error {
+// WriteToAgentEnvFile writes environment variables to the agent's env file if available.
+// Currently supports CLAUDE_ENV_FILE (Claude Code). Other agents may use different
+// mechanisms for injecting env vars into subsequent tool calls.
+func WriteToAgentEnvFile(vars map[string]string) error {
 	envFilePath := os.Getenv("CLAUDE_ENV_FILE")
 	if envFilePath == "" {
-		return nil // not in Claude context or env file not available
+		return nil // not in an agent context with env file support
 	}
 
 	file, err := os.OpenFile(envFilePath, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
-		return fmt.Errorf("failed to open CLAUDE_ENV_FILE: %w", err)
+		return fmt.Errorf("failed to open agent env file: %w", err)
 	}
 	defer file.Close()
 
@@ -168,11 +185,9 @@ func WriteToClaudeEnvFile(vars map[string]string) error {
 	return nil
 }
 
-// IsClaudeHookContext detects if we're running in a Claude Code hook context.
-// Returns true if either:
-// - CLAUDE_PROJECT_DIR is set (environment variable)
-// - Stdin contains valid hook JSON with session_id
-func IsClaudeHookContext() bool {
+// IsAgentHookContext detects if we're running in a coding agent's hook context.
+// Currently checks Claude Code env vars; extend for other agents as needed.
+func IsAgentHookContext() bool {
 	// check CLAUDE_PROJECT_DIR (set by Claude Code)
 	if os.Getenv("CLAUDE_PROJECT_DIR") != "" {
 		return true

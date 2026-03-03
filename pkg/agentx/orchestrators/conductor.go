@@ -74,4 +74,7 @@ func (a *ConductorAgent) IsInstalled(_ context.Context, env agentx.Environment) 
 	return false, nil
 }
 
+func (a *ConductorAgent) SupportsSession() bool                 { return false }
+func (a *ConductorAgent) SessionID(_ agentx.Environment) string { return "" }
+
 var _ agentx.Agent = (*ConductorAgent)(nil)

@@ -36,3 +36,20 @@ func TestClaudeCodeAgentENVAliases(t *testing.T) {
 func TestClaudeCodeImplementsLifecycleEventMapper(t *testing.T) {
 	var _ agentx.LifecycleEventMapper = (*ClaudeCodeAgent)(nil)
 }
+
+func TestClaudeCodeSessionID(t *testing.T) {
+	agent := NewClaudeCodeAgent()
+	assert.True(t, agent.SupportsSession())
+
+	t.Run("returns session ID from env var", func(t *testing.T) {
+		env := agentx.NewMockEnvironment(map[string]string{
+			"CLAUDE_CODE_SESSION_ID": "sess_abc123",
+		})
+		assert.Equal(t, "sess_abc123", agent.SessionID(env))
+	})
+
+	t.Run("returns empty when env var not set", func(t *testing.T) {
+		env := agentx.NewMockEnvironment(nil)
+		assert.Equal(t, "", agent.SessionID(env))
+	})
+}

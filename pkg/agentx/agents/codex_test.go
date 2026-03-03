@@ -139,3 +139,20 @@ func TestCodexIsInstalled(t *testing.T) {
 		assert.False(t, installed)
 	})
 }
+
+func TestCodexSessionID(t *testing.T) {
+	agent := NewCodexAgent()
+	assert.True(t, agent.SupportsSession())
+
+	t.Run("returns thread ID from env var", func(t *testing.T) {
+		env := agentx.NewMockEnvironment(map[string]string{
+			"CODEX_THREAD_ID": "thread_xyz789",
+		})
+		assert.Equal(t, "thread_xyz789", agent.SessionID(env))
+	})
+
+	t.Run("returns empty when env var not set", func(t *testing.T) {
+		env := agentx.NewMockEnvironment(nil)
+		assert.Equal(t, "", agent.SessionID(env))
+	})
+}

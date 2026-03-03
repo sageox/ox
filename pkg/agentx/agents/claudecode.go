@@ -176,5 +176,10 @@ func (a *ClaudeCodeAgent) AgentENVAliases() []string {
 }
 
 // Ensure ClaudeCodeAgent implements Agent and LifecycleEventMapper.
+func (a *ClaudeCodeAgent) SupportsSession() bool { return true }
+func (a *ClaudeCodeAgent) SessionID(env agentx.Environment) string {
+	return env.GetEnv("CLAUDE_CODE_SESSION_ID")
+}
+
 var _ agentx.Agent = (*ClaudeCodeAgent)(nil)
 var _ agentx.LifecycleEventMapper = (*ClaudeCodeAgent)(nil)
