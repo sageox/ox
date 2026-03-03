@@ -32,9 +32,10 @@ This step is critical for session completeness — without it, the session has n
 1. Read the prompt carefully — it references the raw session file on disk
 2. Read the raw session file at the path specified in the prompt
 3. Generate the summary JSON following the Output Format in the prompt
-4. Save it to the exact path specified (typically `summary.json` in the session cache dir)
-5. If the prompt includes a `push-summary` step, run that command immediately
+4. Save it to a temporary file (e.g., `.ox-summary.json` in the workspace root, or `/tmp/ox-summary.json`) — do NOT write to the session cache dir as it may be outside the workspace sandbox
+5. If the prompt includes a `push-summary` step, run that command with `--file` pointing to your temp file
 6. Verify the push succeeded by checking the JSON output for `"success": true`
+7. Clean up the temporary summary file
 
 **If summary generation fails:**
 - Run `ox agent <id> doctor` — it can detect and help recover missing summaries
