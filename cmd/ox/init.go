@@ -1669,6 +1669,21 @@ func installAgentHooks(gitRoot string, quiet bool) []string {
 		}
 	}
 
+	// install git commit hooks (prepare-commit-msg for trailers)
+	if HasGitHooks(gitRoot) {
+		if !quiet {
+			cli.PrintPreserved("Git commit hooks")
+		}
+	} else {
+		if err := InstallGitHooks(gitRoot); err != nil {
+			cli.PrintWarning(fmt.Sprintf("Could not install git commit hooks: %v", err))
+		} else {
+			if !quiet {
+				cli.PrintSuccess("Installed git commit hooks")
+			}
+		}
+	}
+
 	return installedHooks
 }
 

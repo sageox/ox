@@ -1,0 +1,21 @@
+package main
+
+import (
+	"fmt"
+
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
+)
+
+// buildSessionURL constructs the canonical web URL for viewing a session.
+// Returns empty string if required config (repo_id, endpoint) is missing.
+func buildSessionURL(cfg *config.ProjectConfig, sessionName string) string {
+	if cfg == nil || cfg.RepoID == "" || sessionName == "" {
+		return ""
+	}
+	ep := endpoint.NormalizeEndpoint(cfg.GetEndpoint())
+	if ep == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/repo/%s/sessions/%s/view", ep, cfg.RepoID, sessionName)
+}

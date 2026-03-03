@@ -160,6 +160,7 @@ const (
 	CheckSlugHookCommands          = "hook-commands"
 	CheckSlugHookCompleteness      = "hook-completeness"
 	CheckSlugSessionStartHookBug   = "session-start-hook-bug"
+	CheckSlugGitCommitHooks        = "git-commit-hooks"
 
 	// Team Context checks
 	CheckSlugTeamRegistration = "team-registration"

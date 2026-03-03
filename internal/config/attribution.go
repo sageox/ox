@@ -3,9 +3,10 @@ package config
 // Attribution configures how ox-guided work is credited in plans, git commits, and PRs.
 // Use pointer fields to distinguish between "not set" (nil) and "explicitly disabled" ("").
 type Attribution struct {
-	Plan   *string `yaml:"plan,omitempty" json:"plan,omitempty"`
-	Commit *string `yaml:"commit,omitempty" json:"commit,omitempty"`
-	PR     *string `yaml:"pr,omitempty" json:"pr,omitempty"`
+	Plan    *string `yaml:"plan,omitempty" json:"plan,omitempty"`
+	Commit  *string `yaml:"commit,omitempty" json:"commit,omitempty"`
+	PR      *string `yaml:"pr,omitempty" json:"pr,omitempty"`
+	Session *string `yaml:"session,omitempty" json:"session,omitempty"` // session URL trailer; nil=auto, ""=disabled
 }
 
 // default attribution values - friendly for humans, concise for git
@@ -29,6 +30,10 @@ func DefaultAttribution() Attribution {
 	}
 }
 
+// defaultSessionAttribution is the default value for session trailer attribution.
+// "auto" means append SageOx-Session trailer when a session is actively recording.
+var defaultSessionAttribution = "auto"
+
 // ResolvedAttribution holds the final resolved attribution values (non-pointer).
 // Use this after merging configs for easier consumption.
 type ResolvedAttribution struct {
@@ -36,6 +41,7 @@ type ResolvedAttribution struct {
 	PlanFooter string `json:"plan_footer"` // exact footer text for plans ("Guided by SageOx")
 	Commit     string `json:"commit"`
 	PR         string `json:"pr"`
+	Session    string `json:"session"` // "auto" = append when recording, "" = disabled
 }
 
 // GetPlan returns the plan attribution value, or empty string if nil
@@ -77,6 +83,19 @@ func (a *Attribution) IsPRSet() bool {
 	return a != nil && a.PR != nil
 }
 
+// GetSession returns the session attribution value, or empty string if nil
+func (a *Attribution) GetSession() string {
+	if a == nil || a.Session == nil {
+		return ""
+	}
+	return *a.Session
+}
+
+// IsSessionSet returns true if session attribution is explicitly set (including to empty string)
+func (a *Attribution) IsSessionSet() bool {
+	return a != nil && a.Session != nil
+}
+
 // MergeAttribution merges project and user attribution with project taking precedence.
 // Returns resolved values with defaults applied where not overridden.
 //
@@ -93,6 +112,7 @@ func MergeAttribution(project, user *Attribution) ResolvedAttribution {
 		PlanFooter: defaultPlanFooterAttribution,
 		Commit:     defaultCommitAttribution,
 		PR:         defaultPRAttribution,
+		Session:    defaultSessionAttribution,
 	}
 
 	// apply user config first (lower priority)
@@ -106,6 +126,9 @@ func MergeAttribution(project, user *Attribution) ResolvedAttribution {
 		if user.PR != nil {
 			result.PR = *user.PR
 		}
+		if user.Session != nil {
+			result.Session = *user.Session
+		}
 	}
 
 	// project config overrides (higher priority)
@@ -118,6 +141,9 @@ func MergeAttribution(project, user *Attribution) ResolvedAttribution {
 		}
 		if project.PR != nil {
 			result.PR = *project.PR
+		}
+		if project.Session != nil {
+			result.Session = *project.Session
 		}
 	}
 

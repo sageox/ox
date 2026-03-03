@@ -124,6 +124,7 @@ type sessionStatus struct {
 	LedgerNeeded     bool   `json:"ledger_needed,omitempty"`     // true if ledger not yet provisioned by cloud
 	AutoStarted      bool   `json:"auto_started,omitempty"`      // true if started by ox agent prime
 	UserNotification string `json:"user_notification,omitempty"` // message for agent to relay to user
+	SessionURL       string `json:"session_url,omitempty"`       // web URL to view this session recording
 }
 
 // ledgerInfo represents discovered ledger state for prime output
@@ -595,6 +596,17 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		NeedsDoctorAgent: needsDoctorAgent,
 		DoctorHint:       doctorHint,
 		HooksInstalled:   hooksInstalled,
+	}
+
+	// populate session URL if recording
+	if output.Session != nil && output.Session.Recording {
+		if projCfg, cfgErr := config.LoadProjectConfig(projectRoot); cfgErr == nil {
+			state, _ := session.LoadRecordingState(projectRoot)
+			if state != nil {
+				sessionName := session.GetSessionName(state.SessionPath)
+				output.Session.SessionURL = buildSessionURL(projCfg, sessionName)
+			}
+		}
 	}
 
 	// always-present disambiguation of knowledge sources

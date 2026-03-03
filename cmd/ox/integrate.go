@@ -216,6 +216,14 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 	fmt.Println("Installed lifecycle hooks to .claude/settings.local.json:")
 	fmt.Println("  - SessionStart, PreCompact, PostToolUse, Stop, SessionEnd, UserPromptSubmit")
 
+	// install git commit hooks (prepare-commit-msg for trailers)
+	if err := InstallGitHooks(gitRoot); err != nil {
+		cli.PrintWarning(fmt.Sprintf("Could not install git commit hooks: %v", err))
+	} else {
+		fmt.Println(ui.PassStyle.Render("✓") + " Git commit hooks installed")
+		fmt.Println("  - prepare-commit-msg (Co-Authored-By, SageOx-Session trailers)")
+	}
+
 	// show contextual tip
 	userCfg, _ := config.LoadUserConfig("")
 	tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
@@ -289,6 +297,16 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("✓ Claude Code integration uninstalled")
 
+	// uninstall git commit hooks
+	gitRoot := findGitRoot()
+	if gitRoot != "" {
+		if err := UninstallGitHooks(gitRoot); err != nil {
+			cli.PrintWarning(fmt.Sprintf("Could not uninstall git commit hooks: %v", err))
+		} else {
+			fmt.Println("✓ Git commit hooks uninstalled")
+		}
+	}
+
 	// show contextual tip
 	userCfg, _ := config.LoadUserConfig("")
 	tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
@@ -359,6 +377,16 @@ func runIntegrateList(cmd *cobra.Command, args []string) error {
 	// 	}
 	// }
 
+	// git commit hooks status
+	fmt.Println("Git commit hooks:")
+	if gitRoot == "" {
+		fmt.Println("  (not in a git repo)")
+	} else if HasGitHooks(gitRoot) {
+		fmt.Printf("  %s prepare-commit-msg: installed\n", ui.PassStyle.Render("✓"))
+	} else {
+		fmt.Printf("  %s prepare-commit-msg: not installed\n", ui.FailStyle.Render("✗"))
+	}
+
 	// show contextual tip
 	userCfg, _ := config.LoadUserConfig("")
 	tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
@@ -397,6 +425,12 @@ func uninstallAllIntegrations(force bool) error {
 	// check code_puppy
 	if hasCodePuppyHooks(true) {
 		installed = append(installed, "code_puppy (user plugin)")
+	}
+
+	// check git commit hooks
+	gitRoot := findGitRoot()
+	if gitRoot != "" && HasGitHooks(gitRoot) {
+		installed = append(installed, "Git commit hooks (prepare-commit-msg)")
 	}
 
 	if len(installed) == 0 {
@@ -439,6 +473,11 @@ func uninstallAllIntegrations(force bool) error {
 	}
 	if err := uninstallCodePuppyHooks(true); err != nil {
 		errors = append(errors, fmt.Sprintf("code_puppy (user): %v", err))
+	}
+	if gitRoot != "" {
+		if err := UninstallGitHooks(gitRoot); err != nil {
+			errors = append(errors, fmt.Sprintf("Git commit hooks: %v", err))
+		}
 	}
 
 	if len(errors) > 0 {

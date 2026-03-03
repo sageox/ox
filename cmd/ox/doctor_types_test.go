@@ -191,6 +191,7 @@ func TestCheckSlugConstants_Unique(t *testing.T) {
 		CheckSlugCodexHooks,
 		CheckSlugCodePuppyHooks,
 		CheckSlugHookCommands,
+		CheckSlugGitCommitHooks,
 		CheckSlugTeamRegistration,
 		CheckSlugLegacyTeamCtx,
 		CheckSlugOrphanedTeamDirs,

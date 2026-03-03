@@ -9,7 +9,6 @@ import (
 	lipgloss "charm.land/lipgloss/v2"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -109,8 +108,10 @@ func viewAsWeb(sessionName string, projectRoot string) error {
 		return fmt.Errorf("session %q has not been pushed to the ledger yet\n\nRun 'ox session stop' to finalize, or use --html to view locally", sessionName)
 	}
 
-	ep := endpoint.NormalizeEndpoint(cfg.GetEndpoint())
-	url := fmt.Sprintf("%s/repo/%s/sessions/%s/view", ep, cfg.RepoID, sessionName)
+	url := buildSessionURL(cfg, sessionName)
+	if url == "" {
+		return fmt.Errorf("could not build session URL (missing repo ID or endpoint)\n\nUse --html to view locally")
+	}
 
 	if err := cli.OpenInBrowser(url); err != nil {
 		if errors.Is(err, cli.ErrHeadless) {
