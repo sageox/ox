@@ -281,8 +281,9 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("commit and push: %w", err)
 	}
 
-	// fire-and-forget cloud notification
-	notifyImport(projectRoot, ep, meta)
+	// fire-and-forget cloud notification — uses team_id since imports
+	// target team contexts, not project repos
+	notifyImport(tc.TeamID, ep, meta)
 
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Imported: %s\nPath: %s\n", title, relDocDir)
 	return nil
@@ -543,11 +544,11 @@ func slugify(s string) string {
 }
 
 // notifyImport sends a fire-and-forget notification to the cloud about a new import.
+// Uses team_id since imports target team contexts, not project repos.
 // Failures are logged but never block the import.
-func notifyImport(projectRoot, ep string, meta docMeta) {
-	projCfg, err := config.LoadProjectConfig(projectRoot)
-	if err != nil || projCfg.RepoID == "" {
-		slog.Debug("skipping import notification, no repo_id", "error", err)
+func notifyImport(teamID, ep string, meta docMeta) {
+	if teamID == "" {
+		slog.Debug("skipping import notification, no team_id")
 		return
 	}
 
@@ -557,8 +558,8 @@ func notifyImport(projectRoot, ep string, meta docMeta) {
 		return
 	}
 
-	client := api.NewRepoClientForProject(projectRoot).WithAuthToken(storedToken.AccessToken)
-	if err := client.NotifyImport(projCfg.RepoID, &meta); err != nil {
+	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(storedToken.AccessToken)
+	if err := client.NotifyImport(teamID, &meta); err != nil {
 		slog.Warn("import cloud notification failed", "error", err)
 	}
 }

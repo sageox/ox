@@ -87,10 +87,11 @@ type MergeRepoResponse struct {
 }
 
 // ImportNotification is the POST /api/v1/git/import request body.
-// The Metadata field is passed as-is (json.RawMessage) to avoid coupling
-// the API package to the docMeta struct in cmd/ox.
+// Imports target a team context (not a project repo), so team_id is the
+// primary identifier. The Metadata field is passed as-is (json.RawMessage)
+// to avoid coupling the API package to the docMeta struct in cmd/ox.
 type ImportNotification struct {
-	RepoID   string          `json:"repo_id"`
+	TeamID   string          `json:"team_id"`
 	Metadata json.RawMessage `json:"metadata"`
 }
 
@@ -453,16 +454,17 @@ func (c *RepoClient) MergeRepo(repoID string, markers map[string]json.RawMessage
 }
 
 // NotifyImport sends a fire-and-forget notification about a new document import.
+// Imports target a team context, so teamID identifies where the document lives.
 // The metadata argument should be JSON-marshalable (typically the docMeta struct).
 // Returns nil on network error, 404, or any non-2xx — never fails the caller's operation.
-func (c *RepoClient) NotifyImport(repoID string, metadata any) error {
+func (c *RepoClient) NotifyImport(teamID string, metadata any) error {
 	metaBytes, err := json.Marshal(metadata)
 	if err != nil {
 		return fmt.Errorf("marshal metadata: %w", err)
 	}
 
 	reqBody := ImportNotification{
-		RepoID:   repoID,
+		TeamID:   teamID,
 		Metadata: metaBytes,
 	}
 
