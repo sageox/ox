@@ -112,6 +112,7 @@ const (
 	IssueTypeGitLock            = "git_lock"
 	IssueTypeCloneFailed        = "clone_failed"
 	IssueTypeSyncBackoff        = "sync_backoff"
+	IssueTypeDirtyWorkspace     = "dirty_workspace"
 )
 
 // severityRank returns a numeric rank for sorting (higher = more severe).

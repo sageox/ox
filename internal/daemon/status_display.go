@@ -66,6 +66,10 @@ func FormatNotRunning(inProject bool) string {
 // FormatStatus renders compact daemon status (Tufte-inspired: maximize data-ink ratio).
 // cliVersion is the current CLI version for match comparison.
 func FormatStatus(status *StatusData, cliVersion string) string {
+	return formatStatusCore(status, cliVersion, false)
+}
+
+func formatStatusCore(status *StatusData, cliVersion string, verbose bool) string {
 	var out strings.Builder
 
 	health := determineHealth(status)
@@ -84,7 +88,7 @@ func FormatStatus(status *StatusData, cliVersion string) string {
 	}
 
 	// workspace sync groups
-	out.WriteString(formatWorkspaceGroups(status))
+	out.WriteString(formatWorkspaceGroups(status, verbose))
 
 	// issues (if any)
 	if issues := formatIssues(status.NeedsHelp, status.Issues); issues != "" {
@@ -115,7 +119,7 @@ func FormatStatusWithSparkline(status *StatusData, history []SyncEvent, cliVersi
 
 // FormatStatusVerbose includes sparkline, internals, and sync history table.
 func FormatStatusVerbose(status *StatusData, history []SyncEvent, cliVersion string) string {
-	out := FormatStatus(status, cliVersion)
+	out := formatStatusCore(status, cliVersion, true)
 	out += formatSparklineSection(history)
 
 	// verbose internals
@@ -275,7 +279,7 @@ func formatErrors(status *StatusData) string {
 
 // formatWorkspaceGroups renders workspaces grouped: project (ledger + primary team) then other teams.
 // Uses tree visualization to make the relationship between ledger and team context clear.
-func formatWorkspaceGroups(status *StatusData) string {
+func formatWorkspaceGroups(status *StatusData, verbose bool) string {
 	var out strings.Builder
 
 	ledgers := status.Workspaces["ledger"]
@@ -318,7 +322,7 @@ func formatWorkspaceGroups(status *StatusData) string {
 			}
 			items = append(items, treeItem{
 				label:  name + styleMuted.Render(" (team context)"),
-				status: formatWSStatus(tc),
+				status: formatWSStatus(tc) + formatGCStatus(tc, verbose),
 			})
 		}
 
@@ -374,7 +378,7 @@ func formatWorkspaceGroups(status *StatusData) string {
 				branch = "└── "
 			}
 			padding := strings.Repeat(" ", alignWidth-len(name))
-			out.WriteString(styleMuted.Render("    "+branch) + name + padding + formatWSStatus(tc) + "\n")
+			out.WriteString(styleMuted.Render("    "+branch) + name + padding + formatWSStatus(tc) + formatGCStatus(tc, verbose) + "\n")
 		}
 	}
 
@@ -416,6 +420,42 @@ func formatWSStatus(ws WorkspaceSyncStatus) string {
 		return styleWarning.Render("◐ not synced")
 	}
 	return styleHealthy.Render("● " + formatRelativeTime(time.Since(ws.LastSync)))
+}
+
+// formatGCStatus renders GC timing suffix for team context items.
+// Leads with the actionable info: when the next GC will happen.
+//
+//   Default:  "· gc in 4d"              (countdown to next reclone)
+//   Verbose:  "· gc in 4d (last 3d ago)" (countdown + history)
+//   Overdue:  "· gc due"                (interval exceeded, runs on next hourly check)
+//   Never:    "· gc due"                (first GC, runs on next hourly check)
+func formatGCStatus(ws WorkspaceSyncStatus, verbose bool) string {
+	if ws.LastGCTime.IsZero() {
+		// GC has never run — will trigger on the next hourly check cycle
+		return styleMuted.Render(" · gc due")
+	}
+
+	intervalDays := ws.GCIntervalDays
+	if intervalDays <= 0 {
+		intervalDays = 7 // DefaultGCIntervalDays
+	}
+
+	age := time.Since(ws.LastGCTime)
+	interval := time.Duration(intervalDays) * 24 * time.Hour
+	remaining := interval - age
+
+	var s string
+	if remaining <= 0 {
+		s = styleMuted.Render(" · gc due")
+	} else {
+		s = styleMuted.Render(" · gc in " + formatRelativeTime(remaining))
+	}
+
+	if verbose {
+		s += styleMuted.Render(" (last " + formatRelativeTime(age) + " ago)")
+	}
+
+	return s
 }
 
 // formatActivity renders heartbeat activity tracking (verbose only).

@@ -2246,21 +2246,104 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 			"reason", reason, "interval_days", intervalDays, "last_gc", ws.LastGCTime)
 
 		// run GC synchronously (one at a time) then release the flag
-		s.runBlueGreenGC(ctx, ws)
+		result := s.runBlueGreenGC(ctx, ws)
+
+		repoName := ws.TeamName
+		if repoName == "" {
+			repoName = ws.ID
+		}
+		switch result {
+		case gcSkippedDirty:
+			// surface dirty workspace so ox doctor / ox daemon status can notify the user
+			s.issues.SetIssue(DaemonIssue{
+				Type:     IssueTypeDirtyWorkspace,
+				Severity: SeverityWarning,
+				Repo:     repoName,
+				Summary:  "uncommitted changes blocking GC (commit or discard to allow reclone)",
+			})
+		case gcSuccess:
+			s.issues.ClearIssue(IssueTypeDirtyWorkspace, repoName)
+		}
+
 		break // one GC per check cycle to avoid overloading
 	}
 
 	atomic.StoreInt32(&s.gcInProgress, 0)
 }
 
+// TriggerGC forces a GC reclone of all eligible team contexts, bypassing the interval check.
+// Returns immediately if GC is already in progress. Runs synchronously.
+func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
+	if !atomic.CompareAndSwapInt32(&s.gcInProgress, 0, 1) {
+		return &TriggerGCResponse{Skipped: 1}
+	}
+	defer atomic.StoreInt32(&s.gcInProgress, 0)
+
+	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
+		return &TriggerGCResponse{Errors: []string{fmt.Sprintf("load registry: %v", err)}}
+	}
+
+	resp := &TriggerGCResponse{}
+	teamContexts := s.workspaceRegistry.GetTeamContexts()
+	for _, ws := range teamContexts {
+		if !ws.Exists || ws.CloneURL == "" {
+			continue
+		}
+		if _, loaded := s.cloneInFlight.Load(ws.ID); loaded {
+			resp.Skipped++
+			continue
+		}
+
+		s.logger.Info("trigger_gc: forced reclone", "team", ws.TeamName, "id", ws.ID)
+		name := ws.TeamName
+		if name == "" {
+			name = ws.ID
+		}
+
+		result := s.runBlueGreenGC(ctx, ws)
+		switch result {
+		case gcSuccess:
+			resp.Triggered++
+			s.issues.ClearIssue(IssueTypeDirtyWorkspace, name)
+		case gcSkippedDirty:
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: uncommitted changes (commit or discard before GC)", name))
+			s.issues.SetIssue(DaemonIssue{
+				Type:     IssueTypeDirtyWorkspace,
+				Severity: SeverityWarning,
+				Repo:     name,
+				Summary:  "uncommitted changes blocking GC (commit or discard to allow reclone)",
+			})
+		case gcFailed:
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: reclone failed (check daemon logs)", name))
+		}
+	}
+
+	return resp
+}
+
+// gcResult indicates the outcome of a blue-green GC attempt.
+type gcResult int
+
+const (
+	gcSuccess      gcResult = iota // reclone completed successfully
+	gcSkippedDirty                 // skipped: working tree has uncommitted changes
+	gcFailed                       // reclone attempted but failed (clone, validation, or swap error)
+)
+
 // runBlueGreenGC performs a blue-green reclone for a single team context workspace.
 // Steps: verify clean → clone into .new → validate → atomic swap → remove old.
-func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) {
+//
+// GC is a disk-space optimization — it should never impair the user experience.
+// If the user has in-flight changes (uncommitted edits to docs/, etc.), GC skips
+// that workspace and reports gcSkippedDirty so callers can surface this to the user.
+func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) gcResult {
 	// step 1: verify clean working state
+	// Users may have edited team context files (docs/, conventions, etc.).
+	// Never destroy their work — skip GC and let the caller notify them.
 	if !isCheckoutClean(ws.Path) {
 		s.logger.Warn("gc: skipping reclone, working tree has uncommitted changes",
 			"path", ws.Path, "team", ws.TeamName)
-		return
+		return gcSkippedDirty
 	}
 
 	newPath := ws.Path + ".new"
@@ -2271,7 +2354,7 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) {
 		s.logger.Info("gc: cleaning up leftover .new directory", "path", newPath)
 		if err := os.RemoveAll(newPath); err != nil {
 			s.logger.Error("gc: failed to remove leftover .new", "path", newPath, "error", err)
-			return
+			return gcFailed
 		}
 	}
 
@@ -2287,14 +2370,14 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) {
 	if err != nil {
 		s.logger.Error("gc: reclone failed, keeping old", "team", ws.TeamName, "error", err)
 		_ = os.RemoveAll(newPath)
-		return
+		return gcFailed
 	}
 
 	// step 3: validate new clone
 	if !s.validateGCClone(newPath, mCfg) {
 		s.logger.Error("gc: validation failed, keeping old", "team", ws.TeamName)
 		_ = os.RemoveAll(newPath)
-		return
+		return gcFailed
 	}
 
 	// configure pull.rebase=true on the new clone
@@ -2311,7 +2394,7 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) {
 	if err := os.Rename(ws.Path, oldPath); err != nil {
 		s.logger.Error("gc: failed to move old repo aside", "path", ws.Path, "error", err)
 		_ = os.RemoveAll(newPath)
-		return
+		return gcFailed
 	}
 
 	if err := os.Rename(newPath, ws.Path); err != nil {
@@ -2320,7 +2403,7 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) {
 		if restoreErr := os.Rename(oldPath, ws.Path); restoreErr != nil {
 			s.logger.Error("gc: CRITICAL failed to restore old repo", "error", restoreErr)
 		}
-		return
+		return gcFailed
 	}
 
 	// step 5: cleanup
@@ -2339,6 +2422,7 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) {
 	}
 
 	s.logger.Info("gc: reclone complete", "team", ws.TeamName, "path", ws.Path)
+	return gcSuccess
 }
 
 // validateGCClone checks that a freshly cloned repo has the minimum expected

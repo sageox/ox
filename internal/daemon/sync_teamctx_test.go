@@ -8,10 +8,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/manifest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1345,4 +1347,340 @@ func TestBlueGreenGC_MissingGitDir(t *testing.T) {
 	assert.NoDirExists(t, teamDir+".old")
 	// original dir should still exist
 	assert.DirExists(t, teamDir)
+}
+
+func TestBlueGreenGC_WorkspacePathDoesNotExist(t *testing.T) {
+	projectDir := setupProjectWithConfig(t, "")
+	scheduler := newTestScheduler(projectDir)
+
+	// workspace path doesn't exist — isCheckoutClean returns false, GC skips
+	ws := WorkspaceState{
+		ID:       "team_nopath",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     filepath.Join(t.TempDir(), "does-not-exist"),
+		TeamName: "nopath-team",
+		CloneURL: "file:///nonexistent/repo.git",
+		Exists:   true,
+	}
+
+	ctx := context.Background()
+	scheduler.runBlueGreenGC(ctx, ws)
+
+	// should skip gracefully — no dirs created
+	assert.NoDirExists(t, ws.Path+".new")
+	assert.NoDirExists(t, ws.Path+".old")
+}
+
+func TestBlueGreenGC_PreExistingOldDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	manifest := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude memory/\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifest, nil)
+
+	// create a pre-existing .old directory (leftover from a previous failed cleanup)
+	oldPath := teamDir + ".old"
+	require.NoError(t, os.MkdirAll(oldPath, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(oldPath, "stale"), []byte("leftover"), 0644))
+
+	ws := WorkspaceState{
+		ID:       "team_preold",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     teamDir,
+		TeamName: "preold-team",
+		CloneURL: "file://" + bareDir,
+		Exists:   true,
+	}
+	registry := scheduler.WorkspaceRegistry()
+	registry.mu.Lock()
+	registry.workspaces[ws.ID] = &ws
+	registry.mu.Unlock()
+
+	ctx := context.Background()
+	scheduler.runBlueGreenGC(ctx, ws)
+
+	// GC should succeed — pre-existing .old should be removed
+	assert.FileExists(t, filepath.Join(teamDir, "SOUL.md"))
+	assert.NoDirExists(t, oldPath)
+	assert.NoDirExists(t, teamDir+".new")
+
+	lastGC := scheduler.WorkspaceRegistry().GetLastGCTime("team_preold")
+	assert.False(t, lastGC.IsZero())
+}
+
+func TestValidateGCClone_FailsWithDeniedPaths(t *testing.T) {
+	projectDir := setupProjectWithConfig(t, "")
+	scheduler := newTestScheduler(projectDir)
+
+	repoDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".git"), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".sageox"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "SOUL.md"), []byte("# Soul\n"), 0644))
+
+	// create a denied path that should not be materialized
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, "data"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "data", "leak.bin"), []byte("leaked"), 0644))
+
+	cfg := &manifest.ManifestConfig{
+		Denies: []string{"data"},
+	}
+
+	assert.False(t, scheduler.validateGCClone(repoDir, cfg),
+		"validation should fail when denied paths are materialized")
+}
+
+func TestValidateGCClone_FailsWithoutSageoxDir(t *testing.T) {
+	projectDir := setupProjectWithConfig(t, "")
+	scheduler := newTestScheduler(projectDir)
+
+	repoDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".git"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "SOUL.md"), []byte("# Soul\n"), 0644))
+	// no .sageox directory
+
+	assert.False(t, scheduler.validateGCClone(repoDir, nil),
+		"validation should fail without .sageox directory")
+}
+
+func TestValidateGCClone_PassesWithDeniesNotMaterialized(t *testing.T) {
+	projectDir := setupProjectWithConfig(t, "")
+	scheduler := newTestScheduler(projectDir)
+
+	repoDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".git"), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".sageox"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "SOUL.md"), []byte("# Soul\n"), 0644))
+
+	cfg := &manifest.ManifestConfig{
+		Denies: []string{"data", "sessions", "coworkers"},
+	}
+
+	assert.True(t, scheduler.validateGCClone(repoDir, cfg),
+		"validation should pass when denied paths don't exist")
+}
+
+func TestBlueGreenGC_ConcurrentSkipped(t *testing.T) {
+	projectDir := setupProjectWithConfig(t, "")
+	scheduler := newTestScheduler(projectDir)
+
+	// simulate GC already in progress by setting the atomic flag
+	atomic.StoreInt32(&scheduler.gcInProgress, 1)
+
+	ws := WorkspaceState{
+		ID:       "team_concurrent",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     "/tmp/fake-gc-path",
+		Exists:   true,
+		CloneURL: "file:///fake",
+	}
+	registry := scheduler.WorkspaceRegistry()
+	registry.mu.Lock()
+	registry.workspaces[ws.ID] = &ws
+	registry.mu.Unlock()
+
+	ctx := context.Background()
+	scheduler.checkAndRunGC(ctx)
+
+	// GC should have been skipped entirely — flag still set
+	assert.Equal(t, int32(1), atomic.LoadInt32(&scheduler.gcInProgress),
+		"gcInProgress flag should remain set (not cleared by skipped check)")
+}
+
+func TestBlueGreenGC_SkipsCloneInFlight(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	manifest := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude memory/\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifest, nil)
+
+	ws := WorkspaceState{
+		ID:             "team_inflight",
+		Type:           WorkspaceTypeTeamContext,
+		Path:           teamDir,
+		TeamName:       "inflight-team",
+		CloneURL:       "file://" + bareDir,
+		Exists:         true,
+		GCIntervalDays: 1,
+		LastGCTime:     time.Time{}, // never run = due for GC
+	}
+	registry := scheduler.WorkspaceRegistry()
+	registry.mu.Lock()
+	registry.workspaces[ws.ID] = &ws
+	registry.mu.Unlock()
+
+	// mark this workspace as having a clone in flight
+	scheduler.cloneInFlight.Store(ws.ID, true)
+
+	ctx := context.Background()
+	scheduler.checkAndRunGC(ctx)
+
+	// GC should have been skipped — no .new or .old dirs
+	assert.NoDirExists(t, teamDir+".new")
+	assert.NoDirExists(t, teamDir+".old")
+
+	// LastGCTime should NOT be updated
+	lastGC := scheduler.WorkspaceRegistry().GetLastGCTime("team_inflight")
+	assert.True(t, lastGC.IsZero())
+}
+
+func TestBlueGreenGC_UpdatesManifestConfig(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// manifest with custom gc_interval_days and sync_interval_minutes
+	manifestContent := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude memory/\ngc_interval_days 14\nsync_interval_minutes 10\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifestContent, nil)
+
+	ws := WorkspaceState{
+		ID:       "team_config",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     teamDir,
+		TeamName: "config-team",
+		CloneURL: "file://" + bareDir,
+		Exists:   true,
+	}
+	registry := scheduler.WorkspaceRegistry()
+	registry.mu.Lock()
+	registry.workspaces[ws.ID] = &ws
+	registry.mu.Unlock()
+
+	ctx := context.Background()
+	scheduler.runBlueGreenGC(ctx, ws)
+
+	// verify GC succeeded
+	assert.FileExists(t, filepath.Join(teamDir, "SOUL.md"))
+	assert.NoDirExists(t, teamDir+".old")
+	assert.NoDirExists(t, teamDir+".new")
+
+	lastGC := scheduler.WorkspaceRegistry().GetLastGCTime("team_config")
+	assert.False(t, lastGC.IsZero())
+
+	// verify manifest config was propagated to registry
+	registry.mu.Lock()
+	updatedWs := registry.workspaces["team_config"]
+	gcInterval := updatedWs.GCIntervalDays
+	syncInterval := updatedWs.SyncIntervalMin
+	registry.mu.Unlock()
+
+	assert.Equal(t, 14, gcInterval, "gc_interval_days should be updated from manifest")
+	assert.Equal(t, 10, syncInterval, "sync_interval_min should be updated from manifest")
+}
+
+func TestBlueGreenGC_ValidationFailsKeepsOld(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// create a bare repo WITHOUT core files — clone will succeed but validation will fail
+	tmpDir := t.TempDir()
+	bareDir := filepath.Join(tmpDir, "bare.git")
+	workDir := filepath.Join(tmpDir, "work")
+
+	require.NoError(t, exec.Command("git", "init", "--bare", bareDir).Run())
+	require.NoError(t, exec.Command("git", "-C", bareDir, "config", "uploadpack.allowfilter", "true").Run())
+	require.NoError(t, exec.Command("git", "clone", bareDir, workDir).Run())
+	gitConfig(t, workDir)
+
+	// only create .sageox with manifest, but NO core files (SOUL.md, TEAM.md, MEMORY.md)
+	sageoxDir := filepath.Join(workDir, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+	manifestContent := "version 1\ninclude .sageox/\ninclude SOUL.md\n"
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "sync.manifest"), []byte(manifestContent), 0644))
+	require.NoError(t, exec.Command("git", "-C", workDir, "add", ".").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "commit", "-m", "init").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "push", "origin", "HEAD:main").Run())
+
+	// set up a valid existing team context (with SOUL.md) that should be preserved
+	manifest := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude memory/\n"
+	_, teamDir, scheduler := setupClonedTeamContext(t, manifest, nil)
+	origSoul, err := os.ReadFile(filepath.Join(teamDir, "SOUL.md"))
+	require.NoError(t, err)
+
+	ws := WorkspaceState{
+		ID:       "team_valfail",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     teamDir,
+		TeamName: "valfail-team",
+		CloneURL: "file://" + bareDir, // points to repo without core files
+		Exists:   true,
+	}
+	registry := scheduler.WorkspaceRegistry()
+	registry.mu.Lock()
+	registry.workspaces[ws.ID] = &ws
+	registry.mu.Unlock()
+
+	ctx := context.Background()
+	scheduler.runBlueGreenGC(ctx, ws)
+
+	// old repo should still be intact because validation failed
+	newSoul, err := os.ReadFile(filepath.Join(teamDir, "SOUL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, string(origSoul), string(newSoul), "original content preserved after validation failure")
+
+	// .new should be cleaned up
+	assert.NoDirExists(t, teamDir+".new")
+
+	// LastGCTime should NOT be updated
+	lastGC := scheduler.WorkspaceRegistry().GetLastGCTime("team_valfail")
+	assert.True(t, lastGC.IsZero())
+}
+
+func TestBlueGreenGC_EmptyWorkspacePath(t *testing.T) {
+	projectDir := setupProjectWithConfig(t, "")
+	scheduler := newTestScheduler(projectDir)
+
+	ws := WorkspaceState{
+		ID:       "team_empty",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     "", // empty path
+		Exists:   true,
+		CloneURL: "file:///fake",
+	}
+
+	ctx := context.Background()
+	// should not panic on empty path
+	scheduler.runBlueGreenGC(ctx, ws)
+}
+
+func TestBlueGreenGC_LeftoverNewRemovalFails(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	manifest := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude memory/\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifest, nil)
+
+	// create a leftover .new dir that cannot be removed (read-only parent of contents)
+	newPath := teamDir + ".new"
+	innerDir := filepath.Join(newPath, "inner")
+	require.NoError(t, os.MkdirAll(innerDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(innerDir, "file"), []byte("stuck"), 0644))
+	// make inner dir non-writable so RemoveAll fails on the file inside
+	require.NoError(t, os.Chmod(innerDir, 0555))
+	t.Cleanup(func() {
+		os.Chmod(innerDir, 0755)
+		os.RemoveAll(newPath)
+	})
+
+	ws := WorkspaceState{
+		ID:       "team_stucknew",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     teamDir,
+		TeamName: "stucknew-team",
+		CloneURL: "file://" + bareDir,
+		Exists:   true,
+	}
+
+	ctx := context.Background()
+	scheduler.runBlueGreenGC(ctx, ws)
+
+	// GC should bail out because it can't remove leftover .new
+	// original repo should still be intact
+	assert.FileExists(t, filepath.Join(teamDir, "SOUL.md"))
+
+	// restore permissions for cleanup
+	os.Chmod(innerDir, 0755)
 }
