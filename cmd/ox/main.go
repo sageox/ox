@@ -49,11 +49,12 @@ func init() {
 		os.Setenv("NO_COLOR", "1")
 	}
 
-	// When stdout is not a TTY (piped to less, cat, etc.), intercept os.Stdout
-	// with an ANSI-stripping pipe. Lipgloss v2 beta always emits ANSI via
-	// Style.Render() regardless of NO_COLOR — the colorprofile.Writer is the
-	// intended stripping layer, but ~300 call sites use fmt.Print(style.Render(...))
-	// which bypasses it. This pipe catches everything globally.
+	// When stdout/stderr are not a TTY (piped, captured by agent, etc.),
+	// intercept with ANSI-stripping pipes. Lipgloss v2 beta always emits ANSI
+	// via Style.Render() regardless of NO_COLOR — the colorprofile.Writer is
+	// the intended stripping layer, but ~300 call sites use
+	// fmt.Print(style.Render(...)) which bypasses it. These pipes catch
+	// everything globally for both streams.
 	if !isatty.IsTerminal(os.Stdout.Fd()) && !isatty.IsCygwinTerminal(os.Stdout.Fd()) {
 		os.Setenv("NO_COLOR", "1") // keep for libraries that do check it
 
@@ -66,6 +67,19 @@ func init() {
 			go func() {
 				defer stripWg.Done()
 				io.Copy(&ansiStripper{realStdout}, pr) //nolint:errcheck // best-effort
+			}()
+		}
+	}
+	if !isatty.IsTerminal(os.Stderr.Fd()) && !isatty.IsCygwinTerminal(os.Stderr.Fd()) {
+		pr, pw, err := os.Pipe()
+		if err == nil {
+			realStderr := os.Stderr
+			os.Stderr = pw
+
+			stripWg.Add(1)
+			go func() {
+				defer stripWg.Done()
+				io.Copy(&ansiStripper{realStderr}, pr) //nolint:errcheck // best-effort
 			}()
 		}
 	}
@@ -85,8 +99,9 @@ func main() {
 	args := os.Args[1:]
 	exitCode := executeWithFrictionRecovery(args, 0)
 
-	// close the pipe writer so the ANSI-stripping goroutine sees EOF and flushes
+	// close pipe writers so ANSI-stripping goroutines see EOF and flush
 	os.Stdout.Close()
+	os.Stderr.Close()
 	stripWg.Wait()
 
 	os.Exit(exitCode)
