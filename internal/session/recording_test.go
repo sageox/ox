@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -805,8 +806,8 @@ func TestUpdateRecordingState_SequentialUpdates(t *testing.T) {
 }
 
 func TestStopRecording_FailsIfStateFileUnremovable(t *testing.T) {
-	if os.Getenv("CI") != "" {
-		t.Skip("skipping permission test in CI")
+	if runtime.GOOS == "windows" {
+		t.Skip("permission semantics differ on Windows")
 	}
 
 	cacheDir := t.TempDir()

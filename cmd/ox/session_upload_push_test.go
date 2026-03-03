@@ -420,7 +420,9 @@ func TestPushLedger_RebaseConflict_LocalCommitPreserved(t *testing.T) {
 
 	// push from local — rebase will conflict
 	err := pushLedger(context.Background(), clonePath)
-	assert.Error(t, err, "push should fail when rebase encounters conflict")
+	require.Error(t, err, "push should fail when rebase encounters conflict")
+	assert.Contains(t, err.Error(), "rebase",
+		"failure should come from rebase conflict handling")
 
 	// critical safety: the local commit must survive a failed rebase
 	currentHead := runGit(t, clonePath, "rev-parse", "HEAD")
@@ -446,5 +448,7 @@ func TestCommitAndPushLedger_EmptySessionDir(t *testing.T) {
 	require.NoError(t, ensureSessionsGitignore(sessionsDir))
 
 	err := commitAndPushLedger(clonePath, sessionName)
-	assert.Error(t, err, "should error when session dir exists but has no files to commit")
+	require.Error(t, err, "should error when session dir exists but has no files to commit")
+	assert.Contains(t, err.Error(), "git add failed",
+		"error should indicate files were missing for git add")
 }

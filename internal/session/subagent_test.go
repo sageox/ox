@@ -286,7 +286,7 @@ func TestSubagentRegistry_RegisterAfterParentStop(t *testing.T) {
 
 	// parent session folder should still exist
 	_, err = os.Stat(parentSessionPath)
-	require.False(t, os.IsNotExist(err), "parent session folder should persist after stop")
+	require.NoError(t, err, "parent session folder should persist after stop")
 
 	// subagent reports completion AFTER parent stop — should succeed
 	err = ReportSubagentComplete(SubagentCompleteOptions{

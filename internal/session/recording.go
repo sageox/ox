@@ -167,7 +167,7 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 		}
 	}
 
-	seen := make(map[string]bool) // deduplicate across paths
+	seen := make(map[string]struct{}) // deduplicate by canonical recording file path
 	var states []*RecordingState
 
 	for _, sessionsDir := range sessionsPaths {
@@ -181,11 +181,15 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 				continue
 			}
 
-			if seen[entry.Name()] {
+			recordingPath := filepath.Join(sessionsDir, entry.Name(), recordingFile)
+			canonicalKey := recordingPath
+			if resolved, err := filepath.EvalSymlinks(recordingPath); err == nil {
+				canonicalKey = resolved
+			}
+			if _, ok := seen[canonicalKey]; ok {
 				continue
 			}
 
-			recordingPath := filepath.Join(sessionsDir, entry.Name(), recordingFile)
 			data, err := os.ReadFile(recordingPath)
 			if err != nil {
 				continue
@@ -196,7 +200,7 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 				continue
 			}
 
-			seen[entry.Name()] = true
+			seen[canonicalKey] = struct{}{}
 			states = append(states, &state)
 		}
 	}

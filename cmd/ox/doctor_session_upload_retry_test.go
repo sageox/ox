@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFindOrphanedSessions(t *testing.T) {
@@ -277,13 +278,13 @@ func TestFindOrphanedSessions_CorruptRawJSONL(t *testing.T) {
 	tmpDir := t.TempDir()
 	cacheDir := filepath.Join(tmpDir, "cache", "sessions")
 	ledgerDir := filepath.Join(tmpDir, "ledger")
-	os.MkdirAll(cacheDir, 0755)
-	os.MkdirAll(filepath.Join(ledgerDir, "sessions"), 0755)
+	require.NoError(t, os.MkdirAll(cacheDir, 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(ledgerDir, "sessions"), 0755))
 
 	// create session with corrupt raw.jsonl (not valid JSON header)
 	dir := filepath.Join(cacheDir, "2026-01-15T10-30-ryan-OxCorr")
-	os.MkdirAll(dir, 0755)
-	os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte("this is not json\n"), 0644)
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte("this is not json\n"), 0644))
 
 	orphans := scanCacheDirForOrphans(cacheDir, ledgerDir)
 	assert.Empty(t, orphans, "corrupt raw.jsonl should be excluded from orphan list")
@@ -293,14 +294,14 @@ func TestFindOrphanedSessions_ActiveRecordingWithRawJSONL(t *testing.T) {
 	tmpDir := t.TempDir()
 	cacheDir := filepath.Join(tmpDir, "cache", "sessions")
 	ledgerDir := filepath.Join(tmpDir, "ledger")
-	os.MkdirAll(cacheDir, 0755)
-	os.MkdirAll(filepath.Join(ledgerDir, "sessions"), 0755)
+	require.NoError(t, os.MkdirAll(cacheDir, 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(ledgerDir, "sessions"), 0755))
 
 	// session has BOTH .recording.json AND raw.jsonl — still actively recording
 	dir := filepath.Join(cacheDir, "2026-01-15T10-30-ryan-OxActv")
-	os.MkdirAll(dir, 0755)
+	require.NoError(t, os.MkdirAll(dir, 0755))
 	writeTestRawJSONL(t, filepath.Join(dir, "raw.jsonl"))
-	os.WriteFile(filepath.Join(dir, ".recording.json"), []byte(`{"agent_id":"OxActv"}`), 0644)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), []byte(`{"agent_id":"OxActv"}`), 0644))
 
 	orphans := scanCacheDirForOrphans(cacheDir, ledgerDir)
 	assert.Empty(t, orphans,

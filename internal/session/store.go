@@ -406,9 +406,9 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var recordingAgentID string
 		recPath := filepath.Join(sessionPath, recordingFile)
 		if recData, recErr := os.ReadFile(recPath); recErr == nil {
-			isRecording = true
 			var recState RecordingState
 			if err := json.Unmarshal(recData, &recState); err == nil {
+				isRecording = true
 				recordingAgentID = recState.AgentID
 				if !recState.StartedAt.IsZero() && createdAt.IsZero() {
 					createdAt = recState.StartedAt
@@ -449,7 +449,14 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		} else if isRecording {
 			// no raw.jsonl yet but recording is active (just started)
 			filePath = recPath
-			modTime = createdAt
+			if recInfo, statErr := os.Stat(recPath); statErr == nil {
+				modTime = recInfo.ModTime()
+				if createdAt.IsZero() {
+					createdAt = recInfo.ModTime()
+				}
+			} else {
+				modTime = createdAt
+			}
 		} else {
 			// no meta.json, no raw.jsonl, no recording — skip
 			continue

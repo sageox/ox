@@ -853,16 +853,19 @@ func TestStore_ListSessions_IncludesInflightRecordings(t *testing.T) {
 	}
 
 	// completed session: not recording
-	completed := byName["2026-01-05T10-30-user1-Oxa7b3"]
+	completed, ok := byName["2026-01-05T10-30-user1-Oxa7b3"]
+	require.True(t, ok, "completed session missing from results")
 	assert.False(t, completed.Recording, "completed session should not be recording")
 
 	// inflight without raw.jsonl: recording
-	inflightNoRaw := byName["2026-01-05T11-00-user2-Oxb8c4"]
+	inflightNoRaw, ok := byName["2026-01-05T11-00-user2-Oxb8c4"]
+	require.True(t, ok, "inflight (no raw) session missing from results")
 	assert.True(t, inflightNoRaw.Recording, "inflight session without raw.jsonl should be recording")
 	assert.Equal(t, "Oxb8c4", inflightNoRaw.AgentID)
 
 	// inflight with raw.jsonl: recording
-	inflightHasRaw := byName["2026-01-05T11-30-user3-Oxc9d5"]
+	inflightHasRaw, ok := byName["2026-01-05T11-30-user3-Oxc9d5"]
+	require.True(t, ok, "inflight (with raw) session missing from results")
 	assert.True(t, inflightHasRaw.Recording, "inflight session with raw.jsonl should be recording")
 	assert.Equal(t, "Oxc9d5", inflightHasRaw.AgentID)
 }

@@ -31,6 +31,7 @@ Examples:
 // sessionStatusOutput is the JSON output format for session status.
 type sessionStatusOutput struct {
 	Recording    bool                    `json:"recording"`
+	Guidance     string                  `json:"guidance,omitempty"`
 	Count        int                     `json:"count,omitempty"`
 	Sessions     []sessionRecordingEntry `json:"sessions,omitempty"`
 	Title        string                  `json:"title,omitempty"`
@@ -100,7 +101,10 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 	// no recordings
 	if len(states) == 0 {
 		if jsonOutput {
-			return outputJSON(sessionStatusOutput{Recording: false})
+			return outputJSON(sessionStatusOutput{
+				Recording: false,
+				Guidance:  "Run 'ox agent <id> session start' to begin recording",
+			})
 		}
 		fmt.Println(cli.StyleDim.Render("Not recording"))
 		fmt.Println()
@@ -117,6 +121,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		if jsonOutput {
 			output := sessionStatusOutput{
 				Recording:    true,
+				Guidance:     "Run 'ox agent <id> session stop' to save the recording",
 				Count:        1,
 				Title:        state.Title,
 				DurationSecs: int(duration.Seconds()),
@@ -162,6 +167,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		}
 		return outputJSON(sessionStatusOutput{
 			Recording: true,
+			Guidance:  "Use --current to filter to this agent's recording",
 			Count:     len(states),
 			Sessions:  entries,
 		})
