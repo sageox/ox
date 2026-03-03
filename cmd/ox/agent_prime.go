@@ -94,6 +94,14 @@ func withAttributionGuidance(content string, loggedIn bool, attr config.Resolved
 		sb.WriteString("\n```\n")
 	}
 
+	// session recording link in PRs
+	sb.WriteString("\n**Session Recording in PRs:**\n")
+	sb.WriteString("When creating a PR, if `session_url` was provided in this prime output, include a session recording link in the PR body:\n")
+	sb.WriteString("```\n")
+	sb.WriteString("## Session Recording\n")
+	sb.WriteString("[View session recording](<session_url>)\n")
+	sb.WriteString("```\n")
+
 	return sb.String()
 }
 
