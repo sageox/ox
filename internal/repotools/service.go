@@ -172,3 +172,14 @@ func IsPublicRepo() (bool, error) {
 
 	return false, nil
 }
+
+// GetCurrentBranch returns the current git branch for the given directory.
+// Returns empty string on any error (best-effort).
+func GetCurrentBranch(dir string) string {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}

@@ -30,28 +30,32 @@ Examples:
 
 // sessionStatusOutput is the JSON output format for session status.
 type sessionStatusOutput struct {
-	Recording    bool                    `json:"recording"`
-	Guidance     string                  `json:"guidance,omitempty"`
-	Count        int                     `json:"count,omitempty"`
-	Sessions     []sessionRecordingEntry `json:"sessions,omitempty"`
-	Title        string                  `json:"title,omitempty"`
-	DurationSecs int                     `json:"duration_seconds,omitempty"`
-	Duration     string                  `json:"duration,omitempty"`
-	Agent        string                  `json:"agent,omitempty"`
-	AgentID      string                  `json:"agent_id,omitempty"`
-	SessionFile  string                  `json:"session_file,omitempty"`
-	StartedAt    string                  `json:"started_at,omitempty"`
+	Recording     bool                    `json:"recording"`
+	Guidance      string                  `json:"guidance,omitempty"`
+	Count         int                     `json:"count,omitempty"`
+	Sessions      []sessionRecordingEntry `json:"sessions,omitempty"`
+	Title         string                  `json:"title,omitempty"`
+	DurationSecs  int                     `json:"duration_seconds,omitempty"`
+	Duration      string                  `json:"duration,omitempty"`
+	Agent         string                  `json:"agent,omitempty"`
+	AgentID       string                  `json:"agent_id,omitempty"`
+	SessionFile   string                  `json:"session_file,omitempty"`
+	StartedAt     string                  `json:"started_at,omitempty"`
+	WorkspacePath string                  `json:"workspace_path,omitempty"`
+	Branch        string                  `json:"branch,omitempty"`
 }
 
 // sessionRecordingEntry represents one active recording in the multi-session output.
 type sessionRecordingEntry struct {
-	AgentID      string `json:"agent_id"`
-	Title        string `json:"title,omitempty"`
-	Agent        string `json:"agent,omitempty"`
-	DurationSecs int    `json:"duration_seconds"`
-	Duration     string `json:"duration"`
-	StartedAt    string `json:"started_at"`
-	SessionFile  string `json:"session_file,omitempty"`
+	AgentID       string `json:"agent_id"`
+	Title         string `json:"title,omitempty"`
+	Agent         string `json:"agent,omitempty"`
+	DurationSecs  int    `json:"duration_seconds"`
+	Duration      string `json:"duration"`
+	StartedAt     string `json:"started_at"`
+	SessionFile   string `json:"session_file,omitempty"`
+	WorkspacePath string `json:"workspace_path,omitempty"`
+	Branch        string `json:"branch,omitempty"`
 }
 
 func init() {
@@ -120,16 +124,18 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 
 		if jsonOutput {
 			output := sessionStatusOutput{
-				Recording:    true,
-				Guidance:     "Run 'ox agent <id> session stop' to save the recording",
-				Count:        1,
-				Title:        state.Title,
-				DurationSecs: int(duration.Seconds()),
-				Duration:     durationStr,
-				Agent:        state.AdapterName,
-				AgentID:      state.AgentID,
-				SessionFile:  state.SessionFile,
-				StartedAt:    state.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+				Recording:     true,
+				Guidance:      "Run 'ox agent <id> session stop' to save the recording",
+				Count:         1,
+				Title:         state.Title,
+				DurationSecs:  int(duration.Seconds()),
+				Duration:      durationStr,
+				Agent:         state.AdapterName,
+				AgentID:       state.AgentID,
+				SessionFile:   state.SessionFile,
+				StartedAt:     state.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+				WorkspacePath: state.WorkspacePath,
+				Branch:        state.Branch,
 			}
 			return outputJSON(output)
 		}
@@ -145,6 +151,12 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		if state.AgentID != "" {
 			fmt.Printf("  Agent ID: %s\n", state.AgentID)
 		}
+		if state.WorkspacePath != "" {
+			fmt.Printf("  Workspace: %s\n", state.WorkspacePath)
+		}
+		if state.Branch != "" {
+			fmt.Printf("  Branch:   %s\n", state.Branch)
+		}
 		fmt.Println()
 		fmt.Println(cli.StyleDim.Render("Run 'ox agent <id> session stop' to save the recording"))
 		return nil
@@ -156,13 +168,15 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		for _, s := range states {
 			d := s.Duration()
 			entries = append(entries, sessionRecordingEntry{
-				AgentID:      s.AgentID,
-				Title:        s.Title,
-				Agent:        s.AdapterName,
-				DurationSecs: int(d.Seconds()),
-				Duration:     formatDurationHuman(d),
-				StartedAt:    s.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
-				SessionFile:  s.SessionFile,
+				AgentID:       s.AgentID,
+				Title:         s.Title,
+				Agent:         s.AdapterName,
+				DurationSecs:  int(d.Seconds()),
+				Duration:      formatDurationHuman(d),
+				StartedAt:     s.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+				SessionFile:   s.SessionFile,
+				WorkspacePath: s.WorkspacePath,
+				Branch:        s.Branch,
 			})
 		}
 		return outputJSON(sessionStatusOutput{
@@ -194,6 +208,12 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("    Agent:   %s\n", state.AdapterName)
 		fmt.Printf("    Started: %s\n", state.StartedAt.Format("15:04:05"))
+		if state.WorkspacePath != "" {
+			fmt.Printf("    Workspace: %s\n", state.WorkspacePath)
+		}
+		if state.Branch != "" {
+			fmt.Printf("    Branch:  %s\n", state.Branch)
+		}
 	}
 
 	fmt.Println()

@@ -37,6 +37,8 @@ type RecordingState struct {
 	LastReminderSeq  int       `json:"last_reminder_seq"`
 	ReminderInterval int       `json:"reminder_interval"`
 	FilterMode       string    `json:"filter_mode,omitempty"` // "infra" or "all" - controls event filtering
+	WorkspacePath    string    `json:"workspace_path,omitempty"` // git root / project directory
+	Branch           string    `json:"branch,omitempty"`         // git branch at recording start
 
 	// Parent-child session tracking for subagent workflows
 	// When a parent spawns subagents, each subagent can report its session
@@ -261,6 +263,8 @@ type StartRecordingOptions struct {
 	RepoContextPath  string // path to repo context directory (for storing sessions)
 	ReminderInterval int    // defaults to DefaultReminderInterval if 0
 	FilterMode       string // "infra" or "all" - controls event filtering on stop
+	WorkspacePath    string // git root / project directory
+	Branch           string // git branch at recording start
 
 	// Parent session tracking for subagent workflows
 	ParentSessionPath string // path to parent's session folder (optional)
@@ -352,6 +356,8 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		LastReminderSeq:   0,
 		ReminderInterval:  reminderInterval,
 		FilterMode:        opts.FilterMode,
+		WorkspacePath:     opts.WorkspacePath,
+		Branch:            opts.Branch,
 		ParentSessionPath: opts.ParentSessionPath,
 		ParentAgentID:     opts.ParentAgentID,
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	sessionhtml "github.com/sageox/ox/internal/session/html"
@@ -157,11 +158,13 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	// start recording with agent ID from session
 	opts := session.StartRecordingOptions{
-		AgentID:     inst.AgentID,
-		AdapterName: adapterName,
-		SessionFile: sessionFile,
-		Title:       title,
-		Username:    getSessionUsername(),
+		AgentID:       inst.AgentID,
+		AdapterName:   adapterName,
+		SessionFile:   sessionFile,
+		Title:         title,
+		Username:      getSessionUsername(),
+		WorkspacePath: projectRoot,
+		Branch:        repotools.GetCurrentBranch(projectRoot),
 	}
 
 	state, err := session.StartRecording(projectRoot, opts)
