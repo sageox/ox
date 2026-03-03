@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -159,9 +160,9 @@ type Daemon struct {
 	startTime    time.Time // daemon start time for uptime tracking
 	lastActivity time.Time // tracks last activity for inactivity timeout
 
-	// startup timing (populated during Start())
-	startupDuration  time.Duration
-	throttleDuration time.Duration
+	// startup timing (written once in Start(), read by IPC status handler)
+	startupDurationMs  atomic.Int64
+	throttleDurationMs atomic.Int64
 }
 
 // New creates a new daemon instance.
@@ -401,8 +402,8 @@ func (d *Daemon) Start() error {
 				AuthenticatedUser: authUser,
 				NeedsHelp:          needsHelp,
 				Issues:             issues,
-				StartupDurationMs:  d.startupDuration.Milliseconds(),
-				ThrottleDurationMs: d.throttleDuration.Milliseconds(),
+				StartupDurationMs:  d.startupDurationMs.Load(),
+				ThrottleDurationMs: d.throttleDurationMs.Load(),
 			}
 		},
 	)
@@ -504,8 +505,8 @@ func (d *Daemon) Start() error {
 
 	// record startup timing
 	totalDuration := time.Since(startTotal)
-	d.startupDuration = totalDuration
-	d.throttleDuration = throttleDuration
+	d.startupDurationMs.Store(totalDuration.Milliseconds())
+	d.throttleDurationMs.Store(throttleDuration.Milliseconds())
 	d.logger.Info("daemon startup complete",
 		"total", totalDuration,
 		"throttle", throttleDuration,
