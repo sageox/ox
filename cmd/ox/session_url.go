@@ -9,6 +9,8 @@ import (
 
 // buildSessionURL constructs the canonical web URL for viewing a session.
 // Returns empty string if required config (repo_id, endpoint) is missing.
+// Used for best-effort commit trailers — the URL is only available while a
+// session is actively recording.
 func buildSessionURL(cfg *config.ProjectConfig, sessionName string) string {
 	if cfg == nil || cfg.RepoID == "" || sessionName == "" {
 		return ""

@@ -14,6 +14,12 @@ import (
 
 // hooksCommitMsgCmd appends configured trailers to a commit message file.
 //
+// Best-effort linking: session URLs are only available when a recording is
+// active at commit time. Multiple commits per session will share the same
+// session URL, and commits after session-stop won't have one. For reliable
+// bidirectional linking (commit→session and session→commit), grant SageOx
+// GitHub permissions so cloud services can correlate commits with sessions.
+//
 // This is a deterministic hook called by git's prepare-commit-msg, not by AI
 // agents. It emits predictable output based on config and recording state.
 // Compare with "ox agent <id> hook" which handles AI coworker lifecycle

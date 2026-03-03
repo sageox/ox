@@ -47,6 +47,10 @@ func resolveHooksDir(gitRoot string) string {
 // InstallGitHooks installs the ox prepare-commit-msg hook into the resolved
 // hooks directory. If the hook file already exists, appends the ox section
 // (delimited by markers) without disturbing existing content. Idempotent.
+//
+// This is best-effort CLI-side linking. Commits made outside an active session
+// won't get a session trailer. For full commit↔session correlation, grant
+// SageOx GitHub repo permissions so cloud services can match after the fact.
 func InstallGitHooks(gitRoot string) error {
 	hooksDir := resolveHooksDir(gitRoot)
 	hookPath := filepath.Join(hooksDir, prepareCommitMsgHookName)
