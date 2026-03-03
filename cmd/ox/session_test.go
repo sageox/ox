@@ -224,6 +224,50 @@ func TestGetSessionUsername(t *testing.T) {
 	// we don't test the specific value since it depends on git config
 }
 
+func TestSessionStatusOutput_MultipleRecordings_JSONFormat(t *testing.T) {
+	output := sessionStatusOutput{
+		Recording: true,
+		Count:     2,
+		Sessions: []sessionRecordingEntry{
+			{
+				AgentID:      "OxAAA1",
+				Agent:        "claude-code",
+				DurationSecs: 300,
+				Duration:     "5 minutes",
+				StartedAt:    "2026-01-05T10:00:00Z",
+			},
+			{
+				AgentID:      "OxBBB2",
+				Agent:        "claude-code",
+				DurationSecs: 600,
+				Duration:     "10 minutes",
+				StartedAt:    "2026-01-05T09:50:00Z",
+			},
+		},
+	}
+
+	data, err := json.Marshal(output)
+	require.NoError(t, err)
+
+	// unmarshal to verify structure
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(data, &parsed))
+
+	assert.Equal(t, true, parsed["recording"])
+	assert.Equal(t, float64(2), parsed["count"])
+
+	// sessions array should be present with 2 entries
+	sessions, ok := parsed["sessions"].([]any)
+	require.True(t, ok, "sessions should be an array")
+	assert.Len(t, sessions, 2)
+
+	// top-level single-session fields should be absent
+	_, hasTopAgentID := parsed["agent_id"]
+	assert.False(t, hasTopAgentID, "top-level agent_id should be omitted for multi-session")
+	_, hasTopTitle := parsed["title"]
+	assert.False(t, hasTopTitle, "top-level title should be omitted for multi-session")
+}
+
 func TestSessionStatusOutput_NotRecording_JSONFormat(t *testing.T) {
 	// verify the JSON output structure when not recording
 	output := sessionStatusOutput{

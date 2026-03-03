@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -842,4 +843,83 @@ func TestRecordingState_StaleBoundary(t *testing.T) {
 	exactAge := StaleRecordingThreshold
 	assert.False(t, exactAge > StaleRecordingThreshold,
 		"recording at exactly the threshold should NOT be stale (uses > not >=)")
+}
+
+func TestLoadAllRecordingStates(t *testing.T) {
+	t.Run("returns all recordings", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		projectRoot := setupRecordingTest(t, cacheDir)
+
+		// start first recording
+		_, err := StartRecording(projectRoot, StartRecordingOptions{
+			AgentID: "OxAAA1", AdapterName: "claude-code", Username: "testuser",
+		})
+		require.NoError(t, err)
+
+		// manually create a second recording (StartRecording blocks on existing)
+		repoID := getRepoIDFromProject(projectRoot)
+		contextPath := GetContextPath(repoID)
+		secondSessionPath := filepath.Join(contextPath, "sessions", "2026-01-05T12-00-user-OxBBB2")
+		require.NoError(t, os.MkdirAll(secondSessionPath, 0755))
+		secondState := &RecordingState{
+			AgentID:     "OxBBB2",
+			AdapterName: "claude-code",
+			SessionPath: secondSessionPath,
+			StartedAt:   time.Now(),
+		}
+		secondData, _ := json.Marshal(secondState)
+		require.NoError(t, os.WriteFile(filepath.Join(secondSessionPath, recordingFile), secondData, 0644))
+
+		states, err := LoadAllRecordingStates(projectRoot)
+		require.NoError(t, err)
+		assert.Len(t, states, 2, "should find both recordings")
+
+		ids := map[string]bool{}
+		for _, s := range states {
+			ids[s.AgentID] = true
+		}
+		assert.True(t, ids["OxAAA1"], "should include first agent")
+		assert.True(t, ids["OxBBB2"], "should include second agent")
+	})
+
+	t.Run("returns empty when no recordings", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		projectRoot := setupRecordingTest(t, cacheDir)
+
+		states, err := LoadAllRecordingStates(projectRoot)
+		require.NoError(t, err)
+		assert.Empty(t, states)
+	})
+
+	t.Run("empty project root returns error", func(t *testing.T) {
+		_, err := LoadAllRecordingStates("")
+		require.Error(t, err)
+	})
+}
+
+func TestLoadAllRecordingStates_Deduplicates(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := setupRecordingTest(t, cacheDir)
+
+	// start a recording
+	_, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: "OxDedup", AdapterName: "claude-code", Username: "testuser",
+	})
+	require.NoError(t, err)
+
+	// LoadAllRecordingStates checks both project-local and XDG cache paths;
+	// they may overlap. Verify no duplicates.
+	states, err := LoadAllRecordingStates(projectRoot)
+	require.NoError(t, err)
+
+	ids := map[string]int{}
+	for _, s := range states {
+		ids[s.AgentID]++
+	}
+	for id, count := range ids {
+		assert.Equal(t, 1, count, "agent %s should appear exactly once", id)
+	}
+
+	// cleanup
+	_, _ = StopRecording(projectRoot)
 }
