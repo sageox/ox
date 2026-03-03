@@ -375,6 +375,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		agentSessionID = hookInput.SessionID
 	}
 
+	// fallback: if no session ID from hook stdin, try agent's native env var
+	// (e.g., CODEX_THREAD_ID, AMP_THREAD_URL, CLAUDE_CODE_SESSION_ID)
+	if agentSessionID == "" {
+		if agent := agentx.CurrentAgent(); agent != nil && agent.SupportsSession() {
+			agentSessionID = agent.SessionID(agentx.NewSystemEnvironment())
+		}
+	}
+
 	// check session marker for idempotent behavior
 	var existingMarker *SessionMarker
 	if agentSessionID != "" {

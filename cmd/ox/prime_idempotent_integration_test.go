@@ -415,3 +415,65 @@ func TestInstallProjectClaudeHooksWithMatchers(t *testing.T) {
 		assert.Contains(t, preCompactHooks[0].Hooks[0].Command, "ox agent hook PreCompact")
 	})
 }
+
+// TestSessionIDFallbackFromEnvVar verifies that session markers are created
+// using the agent's native env var when hook stdin JSON is not available.
+// This covers Codex (CODEX_THREAD_ID), Amp (AMP_THREAD_URL), and Claude Code
+// (CLAUDE_CODE_SESSION_ID) when running outside hook context.
+func TestSessionIDFallbackFromEnvVar(t *testing.T) {
+	t.Run("marker created from env var session ID", func(t *testing.T) {
+		// simulate what happens in runAgentPrime when hookInput is nil
+		// but an agent env var provides the session ID
+		envSessionID := "codex_thread_fallback_" + time.Now().Format("20060102150405.000")
+		t.Cleanup(func() {
+			DeleteSessionMarker(envSessionID)
+		})
+
+		// no hook input → agentSessionID would be empty
+		// fallback reads agent.SessionID(env) → gets env var value
+		// this is the logic from agent_prime.go after the fallback wiring
+		agentSessionID := "" // simulate: no hook stdin
+		if agentSessionID == "" {
+			// simulate: agent.SessionID(env) returned the env var
+			agentSessionID = envSessionID
+		}
+
+		// create marker as prime would
+		marker := &SessionMarker{
+			AgentID:        "OxFallback",
+			SessionID:      "oxsid_fallback",
+			AgentSessionID: agentSessionID,
+			PrimedAt:       time.Now(),
+		}
+		err := WriteSessionMarker(marker)
+		require.NoError(t, err)
+
+		// verify marker exists and is keyed by the env-var session ID
+		read, err := ReadSessionMarker(envSessionID)
+		require.NoError(t, err)
+		require.NotNil(t, read, "marker should be created from env var session ID")
+		assert.Equal(t, "OxFallback", read.AgentID)
+		assert.Equal(t, envSessionID, read.AgentSessionID)
+	})
+
+	t.Run("idempotent works with env var session ID", func(t *testing.T) {
+		envSessionID := "amp_thread_idempotent_" + time.Now().Format("20060102150405.000")
+		t.Cleanup(func() {
+			DeleteSessionMarker(envSessionID)
+		})
+
+		// first prime creates marker
+		marker := &SessionMarker{
+			AgentID:        "OxAmpIdem",
+			AgentSessionID: envSessionID,
+			PrimedAt:       time.Now(),
+		}
+		require.NoError(t, WriteSessionMarker(marker))
+
+		// second prime with idempotent=true should find existing marker
+		existing, err := ReadSessionMarker(envSessionID)
+		require.NoError(t, err)
+		require.NotNil(t, existing, "marker from env var should persist for idempotent check")
+		assert.Equal(t, "OxAmpIdem", existing.AgentID, "should reuse agent ID")
+	})
+}

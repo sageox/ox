@@ -119,3 +119,20 @@ func TestAmpIsInstalled(t *testing.T) {
 		assert.False(t, installed)
 	})
 }
+
+func TestAmpSessionID(t *testing.T) {
+	agent := NewAmpAgent()
+	assert.True(t, agent.SupportsSession())
+
+	t.Run("returns thread URL from env var", func(t *testing.T) {
+		env := agentx.NewMockEnvironment(map[string]string{
+			"AMP_THREAD_URL": "https://ampcode.com/threads/abc123",
+		})
+		assert.Equal(t, "https://ampcode.com/threads/abc123", agent.SessionID(env))
+	})
+
+	t.Run("returns empty when env var not set", func(t *testing.T) {
+		env := agentx.NewMockEnvironment(nil)
+		assert.Equal(t, "", agent.SessionID(env))
+	})
+}
