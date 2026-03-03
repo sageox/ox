@@ -36,7 +36,8 @@ var daemonStartCmd = &cobra.Command{
 
 		// check if already running
 		if daemon.IsRunning() {
-			fmt.Println("Daemon is already running")
+			cli.PrintInfo("Daemon is already running")
+			cli.PrintHint("  Run 'ox daemon status' to see details")
 			return nil
 		}
 
@@ -111,12 +112,7 @@ var daemonRestartCmd = &cobra.Command{
 		}
 
 		// start in background
-		if err := startDaemonBackground(ledgerPath); err != nil {
-			return err
-		}
-
-		fmt.Println("Daemon restarted")
-		return nil
+		return startDaemonBackground(ledgerPath)
 	},
 }
 
@@ -332,10 +328,10 @@ func startDaemonBackground(ledgerPath string) error {
 		}
 	}
 	if !ready {
-		cli.PrintHint("  Daemon starting (may be delayed due to recent restarts)")
+		cli.PrintHint("  May be delayed due to recent restarts")
 	}
 
-	cli.PrintHint(fmt.Sprintf("  Logs: %s", shortenPath(logPath)))
-	cli.PrintHint("  Status: ox daemon status")
+	cli.PrintHint(fmt.Sprintf("  Logs: %s", logPath))
+	cli.PrintHint("  Run 'ox daemon status' to see details")
 	return nil
 }
