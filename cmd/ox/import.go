@@ -56,7 +56,7 @@ func init() {
 	importCmd.Flags().StringVar(&importFlags.text, "text", "", "path to pre-extracted text/markdown for indexing")
 	importCmd.Flags().StringVar(&importFlags.date, "date", "", "document date for filing (YYYY-MM-DD, default: file mtime)")
 	importCmd.Flags().BoolVar(&importFlags.force, "force", false, "re-import even if content hash already exists")
-	importCmd.Flags().StringVar(&importFlags.team, "team", "", "team slug, ID, or name (default: auto-discover from repo)")
+	importCmd.Flags().StringVar(&importFlags.team, "team", "", "team ID (or slug/name when inside a repo)")
 }
 
 // docMeta is the metadata.json schema for imported documents.
