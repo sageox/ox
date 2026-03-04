@@ -104,7 +104,7 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 	// ensure .sageox/.gitignore excludes daemon-written files (cache/, checkout.json, etc.)
 	// so they don't appear as untracked and block blue-green GC reclone
 	if err := EnsureCheckoutGitignoreCtx(ctx, repoPath); err != nil {
-		slog.Warn("failed to ensure checkout .gitignore", "path", repoPath, "error", err)
+		return nil, fmt.Errorf("ensure checkout .gitignore: %w", err)
 	}
 
 	return &TwoPhaseCloneResult{

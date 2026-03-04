@@ -2,6 +2,7 @@ package gitserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -51,8 +52,11 @@ func EnsureCheckoutGitignoreCtx(ctx context.Context, repoPath string) error {
 	gitignorePath := filepath.Join(sageoxDir, ".gitignore")
 
 	var existing string
-	if data, err := os.ReadFile(gitignorePath); err == nil {
+	data, err := os.ReadFile(gitignorePath)
+	if err == nil {
 		existing = string(data)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read .sageox/.gitignore: %w", err)
 	}
 
 	// find which required entries are missing
@@ -110,9 +114,15 @@ func CheckoutGitignoreNeedsFix(repoPath string) bool {
 		return true // missing or unreadable
 	}
 
-	content := string(data)
+	lines := make(map[string]struct{})
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			lines[trimmed] = struct{}{}
+		}
+	}
 	for _, entry := range checkoutRequiredEntries {
-		if !strings.Contains(content, entry) {
+		if _, ok := lines[entry]; !ok {
 			return true
 		}
 	}
@@ -131,8 +141,9 @@ func commitCheckoutGitignore(ctx context.Context, repoPath string) error {
 	commitCmd := exec.CommandContext(ctx, "git", "-C", repoPath,
 		"commit", "-m", "chore: add .sageox/.gitignore to exclude daemon cache files")
 	if output, err := commitCmd.CombinedOutput(); err != nil {
-		// "nothing to commit" is fine — file was already committed
-		if strings.Contains(string(output), "nothing to commit") {
+		// exit code 1 = nothing to commit (file already committed)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
 			return nil
 		}
 		return fmt.Errorf("git commit .sageox/.gitignore: %w: %s", err, output)

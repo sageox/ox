@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -307,8 +308,16 @@ func checkGCBlockedByUntracked(fix bool) checkResult {
 			continue
 		}
 
-		output, err := runGitStatus(tc.Path)
-		if err != nil || output == "" {
+		output, gitErr := runGitStatus(tc.Path)
+		if gitErr != nil {
+			teamName := tc.TeamName
+			if teamName == "" {
+				teamName = tc.TeamID
+			}
+			return WarningCheck("GC blocked", "status check failed",
+				fmt.Sprintf("failed to inspect team context %s: %v", teamName, gitErr))
+		}
+		if output == "" {
 			continue
 		}
 
@@ -375,10 +384,15 @@ func checkGCBlockedByUntracked(fix bool) checkResult {
 
 // runGitStatus runs git status --porcelain on a directory and returns the output.
 func runGitStatus(dir string) (string, error) {
-	cmd := exec.Command("git", "-C", dir, "status", "--porcelain")
-	output, err := cmd.Output()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "status", "--porcelain")
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("git status timed out for %s", dir)
+	}
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("git status failed for %s: %s", dir, strings.TrimSpace(string(output)))
 	}
 	return strings.TrimSpace(string(output)), nil
 }
