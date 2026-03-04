@@ -163,6 +163,14 @@ func readHeartbeatsFromPath(heartbeatPath string) ([]HeartbeatEntry, error) {
 	}
 	defer f.Close()
 
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat heartbeat file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("not a regular file: %s", heartbeatPath)
+	}
+
 	var entries []HeartbeatEntry
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {

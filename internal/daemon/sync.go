@@ -56,6 +56,10 @@ const (
 	// maxConcurrentClones limits background clone operations to prevent resource exhaustion.
 	// 100 team contexts shouldn't spawn 100 concurrent git clones.
 	maxConcurrentClones = 3
+
+	// cloneSemTimeout is the maximum time to wait for a clone semaphore slot.
+	// Prevents indefinite blocking when all clone slots are hung.
+	cloneSemTimeout = 2 * time.Minute
 )
 
 // ErrInvalidRepoPath indicates the repo path failed security validation.
@@ -268,7 +272,8 @@ type SyncScheduler struct {
 	syncStateLocks sync.Map // map[string]*sync.Mutex
 
 	// test hooks (nil in production)
-	onBeforeCloneSem func() // called just before acquiring cloneSem; tests use this to observe blocking
+	onBeforeCloneSem         func()        // called just before acquiring cloneSem; tests use this to observe blocking
+	cloneSemTimeoutOverride  time.Duration // override cloneSemTimeout for tests (0 = use default)
 
 	// callbacks
 	onActivity   func()                                                           // called on any sync activity
@@ -693,6 +698,15 @@ func (s *SyncScheduler) shouldSyncOrBypass(id string, forceSync bool) bool {
 	return false
 }
 
+// isValidGitRepo runs git rev-parse --git-dir to verify the repo is functional,
+// not just that .git directory exists. Catches partial/corrupt clones from interrupted operations.
+func isValidGitRepo(path string) bool {
+	cmd := exec.Command("git", "-C", path, "rev-parse", "--git-dir")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	return cmd.Run() == nil
+}
+
 // doPull fetches and pulls from remote with optional progress updates.
 // If ledger doesn't exist locally but has a clone URL, spawns background clone.
 // Returns an error if fetch or pull fails (for on-demand sync error reporting).
@@ -735,6 +749,20 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 			}
 		}
 		return nil // can't pull from repo that isn't cloned yet
+	}
+
+	// validate the repo is functional (not just .git dir exists)
+	// catches partial/corrupt clones from interrupted git clone operations
+	if !isValidGitRepo(s.config.LedgerPath) {
+		backupPath := fmt.Sprintf("%s.bak.%d", s.config.LedgerPath, time.Now().Unix())
+		s.logger.Warn("ledger repo corrupt, moving aside for re-clone",
+			"path", s.config.LedgerPath, "backup", backupPath)
+		if err := os.Rename(s.config.LedgerPath, backupPath); err != nil {
+			s.logger.Error("failed to move corrupt ledger aside", "error", err)
+			return fmt.Errorf("corrupt ledger at %s but rename failed: %w", s.config.LedgerPath, err)
+		}
+		// trigger re-clone on next cycle
+		return nil
 	}
 
 	// skip if repo stuck in broken rebase state
@@ -1523,7 +1551,17 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	if s.onBeforeCloneSem != nil {
 		s.onBeforeCloneSem()
 	}
-	s.cloneSem <- struct{}{}
+	// acquire clone slot with timeout to prevent indefinite blocking
+	semTimeout := s.cloneSemTimeoutOverride
+	if semTimeout == 0 {
+		semTimeout = cloneSemTimeout
+	}
+	select {
+	case s.cloneSem <- struct{}{}:
+		// acquired
+	case <-time.After(semTimeout):
+		return nil, fmt.Errorf("clone semaphore timeout after %v: all %d slots busy", semTimeout, maxConcurrentClones)
+	}
 	defer func() { <-s.cloneSem }()
 
 	// validate clone URL to prevent SSRF attacks

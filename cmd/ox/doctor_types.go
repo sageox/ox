@@ -184,5 +184,10 @@ const (
 	CheckSlugSessionPush        = "session-push"
 	CheckSlugSessionIncomplete  = "session-incomplete"
 	CheckSlugSessionAutoStage   = "session-auto-stage"
-	CheckSlugSessionUploadRetry = "session-upload-retry"
+	CheckSlugSessionUploadRetry  = "session-upload-retry"
+	CheckSlugSessionUncommitted = "session-uncommitted"
+
+	// Authentication checks (credential health)
+	CheckSlugGitCredsFreshness   = "git-creds-freshness"
+	CheckSlugCredentialIntegrity = "credential-integrity"
 )

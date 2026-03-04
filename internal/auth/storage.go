@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -140,25 +141,9 @@ func saveAuthStore(store *AuthStore) error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// marshal store to JSON
-	data, err := json.MarshalIndent(store, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal auth store: %w", err)
-	}
-
-	// SECURITY: atomic write pattern prevents partial/corrupt token files.
-	// Write to temp file, then atomic rename. This prevents:
-	//   1. Partial writes on crash leaving corrupt auth state
-	//   2. Race conditions where another process reads mid-write
-	//   3. Token leakage via temp files (0600 = owner-only read/write)
-	tempPath := authPath + ".tmp"
-	if err := os.WriteFile(tempPath, data, 0600); err != nil {
-		return fmt.Errorf("failed to write temp auth file: %w", err)
-	}
-
-	if err := os.Rename(tempPath, authPath); err != nil {
-		os.Remove(tempPath) // cleanup temp file on error
-		return fmt.Errorf("failed to rename temp auth file: %w", err)
+	// SECURITY: atomic write with fsync prevents partial/corrupt token files.
+	if err := fileutil.AtomicWriteJSON(authPath, store, 0600); err != nil {
+		return fmt.Errorf("failed to save auth store: %w", err)
 	}
 
 	return nil
@@ -384,21 +369,9 @@ func (c *AuthClient) saveAuthStore(store *AuthStore) error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// marshal store to JSON
-	data, err := json.MarshalIndent(store, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal auth store: %w", err)
-	}
-
-	// SECURITY: atomic write pattern prevents partial/corrupt token files.
-	tempPath := authPath + ".tmp"
-	if err := os.WriteFile(tempPath, data, 0600); err != nil {
-		return fmt.Errorf("failed to write temp auth file: %w", err)
-	}
-
-	if err := os.Rename(tempPath, authPath); err != nil {
-		os.Remove(tempPath) // cleanup temp file on error
-		return fmt.Errorf("failed to rename temp auth file: %w", err)
+	// SECURITY: atomic write with fsync prevents partial/corrupt token files.
+	if err := fileutil.AtomicWriteJSON(authPath, store, 0600); err != nil {
+		return fmt.Errorf("failed to save auth store: %w", err)
 	}
 
 	return nil

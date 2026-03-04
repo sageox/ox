@@ -124,6 +124,11 @@ func extractTitleFromContent(path string) string {
 	}
 	defer file.Close()
 
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+
 	scanner := bufio.NewScanner(file)
 	inFrontmatter := false
 	lineCount := 0
@@ -166,6 +171,11 @@ func extractDescriptionFromContent(path string) string {
 		return ""
 	}
 	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
 
 	scanner := bufio.NewScanner(file)
 	inFrontmatter := false

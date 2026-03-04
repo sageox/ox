@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -178,31 +179,34 @@ func TestCheckout_CorruptRepoSelfHealing(t *testing.T) {
 }
 
 // TestDoPull_CorruptGitHeadDetection verifies that doPull detects when .git/HEAD
-// is corrupted (making the directory fail pathIsGitRepo) and enters the clone
-// path instead of attempting git operations on a broken repo.
+// is corrupted (making the repo fail isValidGitRepo) and self-heals by moving
+// the corrupt directory aside so a re-clone can happen on the next cycle.
 func TestDoPull_CorruptGitHeadDetection(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
 	tmpDir := t.TempDir()
 	ledgerDir := filepath.Join(tmpDir, "ledger")
 	require.NoError(t, os.MkdirAll(ledgerDir, 0755))
 
 	// create a .git directory but no valid git structure
 	// pathIsGitRepo checks for .git directory existence, so this should pass
-	// but git commands would fail
+	// but isValidGitRepo (git rev-parse --git-dir) will fail
 	gitDir := filepath.Join(ledgerDir, ".git")
 	require.NoError(t, os.MkdirAll(gitDir, 0755))
 
-	// pathIsGitRepo only checks if .git exists, so this IS detected as a git repo.
-	// the daemon will attempt fetch/pull and get git errors.
-	// verify pathIsGitRepo reports true for a directory with .git
+	// verify pathIsGitRepo reports true (shallow check passes)
 	assert.True(t, pathIsGitRepo(ledgerDir), "pathIsGitRepo should return true when .git exists")
+
+	// verify isValidGitRepo reports false (deep check fails)
+	assert.False(t, isValidGitRepo(ledgerDir), "isValidGitRepo should return false for empty .git dir")
 
 	// without a .git directory, pathIsGitRepo should return false
 	emptyDir := filepath.Join(tmpDir, "empty")
 	require.NoError(t, os.MkdirAll(emptyDir, 0755))
 	assert.False(t, pathIsGitRepo(emptyDir), "pathIsGitRepo should return false without .git")
 
-	// doPull with a directory that has .git but is not a real git repo
-	// should fail on git fetch (not panic or hang)
 	cfg := DefaultConfig()
 	cfg.LedgerPath = ledgerDir
 	cfg.SyncIntervalRead = 1 * time.Second
@@ -211,12 +215,17 @@ func TestDoPull_CorruptGitHeadDetection(t *testing.T) {
 	scheduler := NewSyncScheduler(cfg, logger)
 	ctx := context.Background()
 
-	// this will pass the pathIsGitRepo check but fail on git operations
+	// doPull should detect the corrupt repo via isValidGitRepo and move it aside
 	err := scheduler.doPull(ctx, nil, true)
-	// should error (fetch fails on non-git dir) rather than panic
-	// the error might be nil if ls-remote skips or other early returns,
-	// but it should NOT panic
-	_ = err // we just verify no panic; the exact error depends on git version
+	assert.NoError(t, err, "doPull should return nil after moving corrupt repo aside")
+
+	// verify the original directory was moved to .bak
+	_, statErr := os.Stat(ledgerDir)
+	assert.True(t, os.IsNotExist(statErr), "original ledger dir should be moved aside")
+
+	// verify backup exists
+	backups, _ := filepath.Glob(filepath.Join(tmpDir, "ledger.bak.*"))
+	require.Len(t, backups, 1, "exactly one backup should be created")
 }
 
 // TestDoPull_FetchFailureRecordsBackoff verifies that when git fetch fails
@@ -615,4 +624,90 @@ func TestDoPull_RebaseStateSkips(t *testing.T) {
 
 	err := scheduler.doPull(context.Background(), nil, false)
 	assert.NoError(t, err, "doPull should skip gracefully when in rebase state")
+}
+
+// TestDoPull_PartialGitDirTriggersReclone verifies that doPull detects a partial
+// .git directory (from an interrupted clone) and self-heals by moving it aside.
+// The directory passes pathIsGitRepo (.git exists) but fails isValidGitRepo
+// (git rev-parse --git-dir fails), triggering the self-healing path.
+func TestDoPull_PartialGitDirTriggersReclone(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	tmpDir := t.TempDir()
+	ledgerDir := filepath.Join(tmpDir, "ledger")
+	require.NoError(t, os.MkdirAll(ledgerDir, 0755))
+
+	// simulate an interrupted clone: .git exists but is empty/incomplete
+	gitDir := filepath.Join(ledgerDir, ".git")
+	require.NoError(t, os.MkdirAll(gitDir, 0755))
+
+	// create a marker file to verify backup preserves content
+	require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, "partial.txt"), []byte("interrupted"), 0644))
+
+	// precondition: pathIsGitRepo passes, isValidGitRepo fails
+	require.True(t, pathIsGitRepo(ledgerDir), "precondition: .git dir must exist")
+	require.False(t, isValidGitRepo(ledgerDir), "precondition: repo must be invalid")
+
+	cfg := DefaultConfig()
+	cfg.LedgerPath = ledgerDir
+	cfg.SyncIntervalRead = 1 * time.Second
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	scheduler := NewSyncScheduler(cfg, logger)
+	ctx := context.Background()
+
+	err := scheduler.doPull(ctx, nil, false)
+	assert.NoError(t, err, "doPull should return nil after self-healing corrupt repo")
+
+	// original directory should be gone (renamed to .bak)
+	_, statErr := os.Stat(ledgerDir)
+	assert.True(t, os.IsNotExist(statErr), "original ledger dir should be moved aside")
+
+	// backup should exist with .bak.* suffix
+	backups, _ := filepath.Glob(filepath.Join(tmpDir, "ledger.bak.*"))
+	require.Len(t, backups, 1, "exactly one backup should be created")
+
+	// verify backup preserved original content
+	backupContent, err := os.ReadFile(filepath.Join(backups[0], "partial.txt"))
+	require.NoError(t, err, "backup should contain original files")
+	assert.Equal(t, "interrupted", string(backupContent))
+}
+
+// TestCheckout_SemaphoreTimeout verifies that Checkout returns an error when
+// all clone semaphore slots are occupied and the timeout expires, rather than
+// blocking indefinitely.
+func TestCheckout_SemaphoreTimeout(t *testing.T) {
+	cfg := DefaultConfig()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// use a very short timeout for the test
+	scheduler.cloneSemTimeoutOverride = 100 * time.Millisecond
+
+	// fill all clone semaphore slots
+	for i := 0; i < maxConcurrentClones; i++ {
+		scheduler.cloneSem <- struct{}{}
+	}
+
+	// Checkout should timeout trying to acquire a slot
+	parentDir := t.TempDir()
+	repoDir := filepath.Join(parentDir, "test-repo")
+
+	result, err := scheduler.Checkout(CheckoutPayload{
+		RepoPath: repoDir,
+		CloneURL: "https://example.com/repo.git",
+		RepoType: "ledger",
+	}, nil)
+
+	require.Error(t, err, "Checkout should fail when semaphore is full")
+	assert.Nil(t, result)
+	assert.True(t, strings.Contains(err.Error(), "clone semaphore timeout"),
+		"error should mention semaphore timeout, got: %s", err.Error())
+
+	// drain semaphore slots to clean up
+	for i := 0; i < maxConcurrentClones; i++ {
+		<-scheduler.cloneSem
+	}
 }
