@@ -16,7 +16,7 @@ import (
 // initTestGitRepo creates a minimal git repo at dir with an initial commit.
 func initTestGitRepo(t *testing.T, dir string) {
 	t.Helper()
-	gitEnv := append(os.Environ(),
+	gitEnv := append(os.Environ(), // safe: git subprocess in temp dir, not ox
 		"GIT_AUTHOR_NAME=Test User",
 		"GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=Test User",

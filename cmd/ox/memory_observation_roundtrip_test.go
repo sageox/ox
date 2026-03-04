@@ -23,7 +23,7 @@ func initTestGitRepoForRoundtrip(t *testing.T, dir string) {
 	for _, args := range cmds {
 		cmd := exec.Command(args[0], args[1:]...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: git subprocess in temp dir, not ox
 			"GIT_AUTHOR_NAME=Test User",
 			"GIT_AUTHOR_EMAIL=test@example.com",
 			"GIT_COMMITTER_NAME=Test User",
@@ -36,7 +36,7 @@ func initTestGitRepoForRoundtrip(t *testing.T, dir string) {
 	require.NoError(t, os.WriteFile(readme, []byte("repo"), 0644))
 	cmd := exec.Command("git", "add", "README.md")
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(os.Environ(), // safe: git subprocess in temp dir, not ox
 		"GIT_AUTHOR_NAME=Test User",
 		"GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=Test User",
@@ -46,7 +46,7 @@ func initTestGitRepoForRoundtrip(t *testing.T, dir string) {
 	require.NoError(t, err, "git add: %s", string(out))
 	cmd = exec.Command("git", "commit", "-m", "initial")
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(os.Environ(), // safe: git subprocess in temp dir, not ox
 		"GIT_AUTHOR_NAME=Test User",
 		"GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=Test User",

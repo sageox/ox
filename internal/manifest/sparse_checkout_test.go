@@ -54,7 +54,7 @@ func TestComputeSparseSet_FallbackConfigExcludesData(t *testing.T) {
 // gitEnv returns environment variables that provide git identity
 // so tests don't depend on global git config.
 func gitEnv() []string {
-	return append(os.Environ(),
+	return append(os.Environ(), // safe: git subprocess in temp dir, not ox
 		"GIT_AUTHOR_NAME=Test User",
 		"GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=Test User",

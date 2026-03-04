@@ -301,8 +301,8 @@ func getGitRepoStatus(repoPath string, lastSync time.Time, hasLastSync bool) git
 	}
 	status.Branch = strings.TrimSpace(string(branchOutput))
 
-	// get uncommitted changes count
-	statusCmd := exec.Command("git", "-C", repoPath, "status", "--porcelain")
+	// get uncommitted changes count (ignore untracked files like .sageox/, .observations/)
+	statusCmd := exec.Command("git", "-C", repoPath, "status", "--porcelain", "-uno")
 	statusOutput, err := statusCmd.Output()
 	if err == nil && len(statusOutput) > 0 {
 		lines := strings.Split(strings.TrimSpace(string(statusOutput)), "\n")

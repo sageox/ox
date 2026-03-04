@@ -970,7 +970,9 @@ func (r *WorkspaceRegistry) CleanupRevokedTeamContexts(currentTeamIDs map[string
 	}
 }
 
-// isCheckoutClean returns true if a git repo has no uncommitted changes.
+// isCheckoutClean returns true if a git repo has no uncommitted or untracked changes.
+// Includes untracked files — GC (blue/green reclone) destroys the old directory,
+// so untracked files like .sageox/cache/ and pending .observations/ would be lost.
 func isCheckoutClean(path string) bool {
 	cmd := exec.Command("git", "-C", path, "status", "--porcelain")
 	output, err := cmd.Output()
