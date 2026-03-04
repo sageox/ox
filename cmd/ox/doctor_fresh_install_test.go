@@ -374,6 +374,10 @@ func filterTestEnvironmentIssues(issues []string) []string {
 		if strings.Contains(issue, "uncommitted change") {
 			continue
 		}
+		// skip git hooks — fresh installs don't have hooks until `ox integrate install`
+		if strings.Contains(issue, "hook not installed") {
+			continue
+		}
 		filtered = append(filtered, issue)
 	}
 	return filtered

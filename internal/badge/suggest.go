@@ -25,7 +25,7 @@ func ShouldSuggest(gitRoot string) bool {
 	}
 
 	// 2. check if user previously declined globally
-	userCfg, err := config.LoadUserConfig("")
+	userCfg, err := config.LoadUserConfig()
 	if err != nil || userCfg == nil {
 		return false
 	}
@@ -67,7 +67,7 @@ func MarkDeclined(gitRoot string) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	// update user config (global decline)
-	userCfg, err := config.LoadUserConfig("")
+	userCfg, err := config.LoadUserConfig()
 	if err != nil {
 		userCfg = &config.UserConfig{}
 	}
@@ -92,7 +92,7 @@ func MarkDeclined(gitRoot string) {
 // This is stored at both user-level and project-level to avoid re-suggesting.
 func MarkAdded(gitRoot string) {
 	// update user config
-	userCfg, err := config.LoadUserConfig("")
+	userCfg, err := config.LoadUserConfig()
 	if err != nil {
 		userCfg = &config.UserConfig{}
 	}

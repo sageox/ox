@@ -110,7 +110,7 @@ func isTelemetryEnabled() bool {
 		return false
 	}
 	// check user config
-	if cfg, err := config.LoadUserConfig(""); err == nil {
+	if cfg, err := config.LoadUserConfig(); err == nil {
 		return cfg.IsTelemetryEnabled()
 	}
 	return true

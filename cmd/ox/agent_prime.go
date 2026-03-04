@@ -765,7 +765,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 // Project config takes precedence over user config, which takes precedence over defaults.
 func loadResolvedAttribution() config.ResolvedAttribution {
 	// load user config (ignore errors, use defaults)
-	userCfg, _ := config.LoadUserConfig("")
+	userCfg, _ := config.LoadUserConfig()
 	var userAttr *config.Attribution
 	if userCfg != nil {
 		userAttr = userCfg.Attribution

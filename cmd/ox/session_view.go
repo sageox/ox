@@ -68,7 +68,7 @@ func runSessionView(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("specify only one of --html, --text, or --json")
 	}
 	if format == "" {
-		cfg, err := config.LoadUserConfig("")
+		cfg, err := config.LoadUserConfig()
 		if err != nil {
 			format = "web"
 		} else {

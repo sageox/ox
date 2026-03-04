@@ -660,10 +660,12 @@ func TestDetectCodex_NotDetected(t *testing.T) {
 	restoreCwd := changeToDir(t, gitRoot)
 	defer restoreCwd()
 
-	detected := detectCodex()
+	// test project-level detection only — DetectCLI depends on host PATH
+	agent := &CodexAgent{}
+	detected := agent.DetectProject()
 
 	if detected {
-		t.Error("expected detectCodex()=false when .codex directory does not exist")
+		t.Error("expected DetectProject()=false when .codex directory does not exist")
 	}
 }
 

@@ -164,7 +164,7 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 	}
 
 	// load user config
-	userCfg, _ := config.LoadUserConfig("")
+	userCfg, _ := config.LoadUserConfig()
 
 	// load repo config
 	var repoCfg *config.ProjectConfig
@@ -303,7 +303,7 @@ func SetConfigValue(key, value string, level ConfigLevel, projectRoot string) er
 }
 
 func setUserConfig(key, value string) error {
-	cfg, err := config.LoadUserConfig("")
+	cfg, err := config.LoadUserConfig()
 	if err != nil {
 		cfg = &config.UserConfig{}
 	}

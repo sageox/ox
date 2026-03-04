@@ -120,7 +120,7 @@ func sendFrictionEvent(event *uxfriction.FrictionEvent) {
 	if strings.ToLower(os.Getenv("SAGEOX_FRICTION")) == "false" {
 		return
 	}
-	if userCfg, err := config.LoadUserConfig(""); err == nil && !userCfg.IsTelemetryEnabled() {
+	if userCfg, err := config.LoadUserConfig(); err == nil && !userCfg.IsTelemetryEnabled() {
 		return
 	}
 

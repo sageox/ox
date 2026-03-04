@@ -1299,8 +1299,12 @@ func (c *Client) SyncWithProgress(onProgress ProgressCallback) error {
 	}
 	defer conn.Close()
 
-	// longer timeout for sync operations
-	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	// use configured timeout, with minimum floor for sync operations
+	syncTimeout := 30 * time.Second
+	if c.timeout > 0 && c.timeout < syncTimeout {
+		syncTimeout = c.timeout
+	}
+	conn.SetDeadline(time.Now().Add(syncTimeout))
 
 	msg := Message{
 		Type:        MsgTypeSync,
@@ -1353,8 +1357,12 @@ func (c *Client) TeamSyncWithProgress(onProgress ProgressCallback) error {
 	}
 	defer conn.Close()
 
-	// longer timeout for team sync operations
-	conn.SetDeadline(time.Now().Add(60 * time.Second))
+	// use configured timeout, with minimum floor for team sync operations
+	teamSyncTimeout := 60 * time.Second
+	if c.timeout > 0 && c.timeout < teamSyncTimeout {
+		teamSyncTimeout = c.timeout
+	}
+	conn.SetDeadline(time.Now().Add(teamSyncTimeout))
 
 	msg := Message{
 		Type:        MsgTypeTeamSync,
@@ -1423,8 +1431,12 @@ func (c *Client) Checkout(payload CheckoutPayload, onProgress ProgressCallback) 
 	}
 	defer conn.Close()
 
-	// long timeout for clone operations
-	conn.SetDeadline(time.Now().Add(60 * time.Second))
+	// use configured timeout, with minimum floor for clone operations
+	checkoutTimeout := 60 * time.Second
+	if c.timeout > 0 && c.timeout < checkoutTimeout {
+		checkoutTimeout = c.timeout
+	}
+	conn.SetDeadline(time.Now().Add(checkoutTimeout))
 
 	// marshal payload
 	payloadData, _ := json.Marshal(payload)

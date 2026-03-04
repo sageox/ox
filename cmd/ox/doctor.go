@@ -286,7 +286,7 @@ common issues, or --fix-slug to target specific checks.`,
 		}
 
 		// show contextual tip before returning
-		userCfg, _ := config.LoadUserConfig("")
+		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("doctor", tips.RandomChance, cfg.Quiet, !userCfg.AreTipsEnabled(), cfg.JSON)
 
 		cli.PrintDisclaimer()

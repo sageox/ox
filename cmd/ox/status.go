@@ -1538,7 +1538,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		}
 
 		// show contextual tip
-		userCfg, _ := config.LoadUserConfig("")
+		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("status", tips.AlwaysShow, cfg.Quiet, !userCfg.AreTipsEnabled(), cfg.JSON)
 
 		return nil

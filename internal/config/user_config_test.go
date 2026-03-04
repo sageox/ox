@@ -14,7 +14,7 @@ func TestLoadUserConfig_DefaultsToTipsEnabled(t *testing.T) {
 	// use temp dir with no config file
 	tmpDir := t.TempDir()
 
-	cfg, err := LoadUserConfig(tmpDir)
+	cfg, err := LoadUserConfigFrom(tmpDir)
 	require.NoError(t, err, "unexpected error")
 
 	assert.True(t, cfg.AreTipsEnabled(), "expected tips to be enabled by default")
@@ -28,7 +28,7 @@ func TestLoadUserConfig_RespectsDisabledTips(t *testing.T) {
 	content := []byte("tips_enabled: false\n")
 	require.NoError(t, os.WriteFile(configPath, content, 0644), "failed to write test config")
 
-	cfg, err := LoadUserConfig(tmpDir)
+	cfg, err := LoadUserConfigFrom(tmpDir)
 	require.NoError(t, err, "unexpected error")
 
 	assert.False(t, cfg.AreTipsEnabled(), "expected tips to be disabled")
@@ -38,7 +38,7 @@ func TestLoadUserConfig_ContextGitDefaults(t *testing.T) {
 	// use temp dir with no config file
 	tmpDir := t.TempDir()
 
-	cfg, err := LoadUserConfig(tmpDir)
+	cfg, err := LoadUserConfigFrom(tmpDir)
 	require.NoError(t, err, "unexpected error")
 
 	// auto_commit defaults to true
@@ -59,7 +59,7 @@ func TestLoadUserConfig_RespectsContextGitSettings(t *testing.T) {
 `)
 	require.NoError(t, os.WriteFile(configPath, content, 0644), "failed to write test config")
 
-	cfg, err := LoadUserConfig(tmpDir)
+	cfg, err := LoadUserConfigFrom(tmpDir)
 	require.NoError(t, err, "unexpected error")
 
 	assert.False(t, cfg.GetContextGitAutoCommit(), "expected context_git.auto_commit to be false")
@@ -119,7 +119,7 @@ func TestSaveAndLoadUserConfig_ContextGit(t *testing.T) {
 	require.NoError(t, SaveUserConfig(cfg), "failed to save config")
 
 	// load and verify
-	loaded, err := LoadUserConfig("")
+	loaded, err := LoadUserConfig()
 	require.NoError(t, err, "failed to load config")
 
 	assert.False(t, loaded.GetContextGitAutoCommit(), "expected loaded auto_commit to be false")
@@ -137,7 +137,7 @@ func TestContextGitConfig_PartialSettings(t *testing.T) {
 `)
 	require.NoError(t, os.WriteFile(configPath, content, 0644), "failed to write test config")
 
-	cfg, err := LoadUserConfig(tmpDir)
+	cfg, err := LoadUserConfigFrom(tmpDir)
 	require.NoError(t, err, "unexpected error")
 
 	assert.False(t, cfg.GetContextGitAutoCommit(), "expected context_git.auto_commit to be false")
@@ -161,7 +161,7 @@ func TestLoadUserConfig_SessionsDefaults(t *testing.T) {
 	// use temp dir with no config file
 	tmpDir := t.TempDir()
 
-	cfg, err := LoadUserConfig(tmpDir)
+	cfg, err := LoadUserConfigFrom(tmpDir)
 	require.NoError(t, err, "unexpected error")
 
 	// sessions.enabled defaults to false
@@ -178,7 +178,7 @@ func TestLoadUserConfig_RespectsSessionsSettings(t *testing.T) {
 `)
 	require.NoError(t, os.WriteFile(configPath, content, 0644), "failed to write test config")
 
-	cfg, err := LoadUserConfig(tmpDir)
+	cfg, err := LoadUserConfigFrom(tmpDir)
 	require.NoError(t, err, "unexpected error")
 
 	assert.True(t, cfg.AreSessionsEnabled(), "expected sessions.enabled to be true")
@@ -218,7 +218,7 @@ func TestSaveAndLoadUserConfig_Sessions(t *testing.T) {
 	require.NoError(t, SaveUserConfig(cfg), "failed to save config")
 
 	// load and verify
-	loaded, err := LoadUserConfig("")
+	loaded, err := LoadUserConfig()
 	require.NoError(t, err, "failed to load config")
 
 	assert.True(t, loaded.AreSessionsEnabled(), "expected loaded sessions.enabled to be true")
@@ -256,7 +256,7 @@ func TestSaveAndLoadUserConfig_SessionTermsShown(t *testing.T) {
 	cfg.SetSessionTermsShown(true)
 	require.NoError(t, SaveUserConfig(cfg), "failed to save config")
 
-	loaded, err := LoadUserConfig("")
+	loaded, err := LoadUserConfig()
 	require.NoError(t, err, "failed to load config")
 	assert.True(t, loaded.HasSeenSessionTerms(), "expected loaded session_terms_shown to be true")
 }
@@ -268,7 +268,7 @@ func TestLoadUserConfig_RespectsSessionTermsShown(t *testing.T) {
 	content := []byte("session_terms_shown: true\n")
 	require.NoError(t, os.WriteFile(configPath, content, 0644))
 
-	cfg, err := LoadUserConfig(tmpDir)
+	cfg, err := LoadUserConfigFrom(tmpDir)
 	require.NoError(t, err)
 	assert.True(t, cfg.HasSeenSessionTerms())
 }
@@ -301,7 +301,7 @@ func TestLoadUserConfig_CorruptYAML(t *testing.T) {
 	// write corrupt YAML (the bug this whole refactor fixes)
 	require.NoError(t, os.WriteFile(configPath, []byte("e"), 0644))
 
-	_, err := LoadUserConfig(tmpDir)
+	_, err := LoadUserConfigFrom(tmpDir)
 	assert.Error(t, err, "corrupt YAML should return an error")
 }
 
@@ -328,7 +328,7 @@ func TestLoadConfig_CIDetection(t *testing.T) {
 func TestLoadUserConfig_ViewFormatDefault(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	cfg, err := LoadUserConfig(tmpDir)
+	cfg, err := LoadUserConfigFrom(tmpDir)
 	require.NoError(t, err)
 
 	assert.Equal(t, "web", cfg.GetViewFormat(), "expected view_format to default to web")
@@ -341,7 +341,7 @@ func TestLoadUserConfig_RespectsViewFormat(t *testing.T) {
 	content := []byte("view_format: text\n")
 	require.NoError(t, os.WriteFile(configPath, content, 0644))
 
-	cfg, err := LoadUserConfig(tmpDir)
+	cfg, err := LoadUserConfigFrom(tmpDir)
 	require.NoError(t, err)
 
 	assert.Equal(t, "text", cfg.GetViewFormat(), "expected view_format to be text")
@@ -354,7 +354,7 @@ func TestSaveAndLoadUserConfig_ViewFormat(t *testing.T) {
 	cfg := &UserConfig{ViewFormat: "json"}
 	require.NoError(t, SaveUserConfig(cfg))
 
-	loaded, err := LoadUserConfig("")
+	loaded, err := LoadUserConfig()
 	require.NoError(t, err)
 	assert.Equal(t, "json", loaded.GetViewFormat())
 }
@@ -381,7 +381,7 @@ func TestLoadUserConfig_RespectsDisplayName(t *testing.T) {
 	content := []byte("display_name: port8080\n")
 	require.NoError(t, os.WriteFile(configPath, content, 0644))
 
-	cfg, err := LoadUserConfig(tmpDir)
+	cfg, err := LoadUserConfigFrom(tmpDir)
 	require.NoError(t, err)
 	assert.Equal(t, "port8080", cfg.GetDisplayName())
 }
@@ -394,7 +394,7 @@ func TestSaveAndLoadUserConfig_DisplayName(t *testing.T) {
 	cfg.SetDisplayName("cooldev")
 	require.NoError(t, SaveUserConfig(cfg))
 
-	loaded, err := LoadUserConfig("")
+	loaded, err := LoadUserConfig()
 	require.NoError(t, err)
 	assert.Equal(t, "cooldev", loaded.GetDisplayName())
 }
@@ -460,7 +460,7 @@ func TestLoadUserConfig_OxUserConfigEnv(t *testing.T) {
 
 		t.Setenv("OX_USER_CONFIG", configFile)
 
-		cfg, err := LoadUserConfig("")
+		cfg, err := LoadUserConfig()
 		require.NoError(t, err)
 		assert.Equal(t, "pipeline-bot", cfg.GetDisplayName())
 		assert.Equal(t, "auto", cfg.Sessions.GetMode())
@@ -469,7 +469,7 @@ func TestLoadUserConfig_OxUserConfigEnv(t *testing.T) {
 	t.Run("missing file returns empty config", func(t *testing.T) {
 		t.Setenv("OX_USER_CONFIG", filepath.Join(t.TempDir(), "nonexistent.yaml"))
 
-		cfg, err := LoadUserConfig("")
+		cfg, err := LoadUserConfig()
 		require.NoError(t, err)
 		assert.Equal(t, "", cfg.GetDisplayName())
 	})
@@ -486,7 +486,7 @@ func TestLoadUserConfig_OxUserConfigEnv(t *testing.T) {
 			filepath.Join(explicitDir, "config.yaml"),
 			[]byte("display_name: from-dir\n"), 0644))
 
-		cfg, err := LoadUserConfig(explicitDir)
+		cfg, err := LoadUserConfigFrom(explicitDir)
 		require.NoError(t, err)
 		assert.Equal(t, "from-dir", cfg.GetDisplayName())
 	})

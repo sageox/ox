@@ -112,7 +112,7 @@ func isFrictionEnabled() bool {
 		return false
 	}
 	// check user config for telemetry setting (friction piggybacks on this)
-	if cfg, err := config.LoadUserConfig(""); err == nil {
+	if cfg, err := config.LoadUserConfig(); err == nil {
 		return cfg.IsTelemetryEnabled()
 	}
 	return true

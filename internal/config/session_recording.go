@@ -103,7 +103,7 @@ func (r *ResolvedSessionRecording) IsManual() bool {
 // users can override team/repo settings, and teams can set defaults.
 func ResolveSessionRecording(projectRoot string) *ResolvedSessionRecording {
 	// 0. check OX_SESSION_RECORDING env var - highest priority (for pipelines/automation)
-	if envMode := os.Getenv("OX_SESSION_RECORDING"); envMode != "" {
+	if envMode := os.Getenv(EnvSessionRecording); envMode != "" {
 		normalized := NormalizeSessionRecording(envMode)
 		return &ResolvedSessionRecording{
 			Mode:   normalized,
@@ -112,7 +112,7 @@ func ResolveSessionRecording(projectRoot string) *ResolvedSessionRecording {
 	}
 
 	// 1. check user config (~/.config/sageox/config.yaml) - USER ALWAYS WINS
-	userCfg, err := LoadUserConfig("")
+	userCfg, err := LoadUserConfig()
 	if err == nil && userCfg != nil && userCfg.Sessions != nil {
 		mode := userCfg.Sessions.GetMode()
 		if mode != "" && mode != "none" {

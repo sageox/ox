@@ -103,7 +103,7 @@ func WithProjectRoot(projectRoot string) ClientOption {
 func NewClient(sessionID string, opts ...ClientOption) *Client {
 	// check user preference
 	enabled := true
-	if cfg, err := config.LoadUserConfig(""); err == nil {
+	if cfg, err := config.LoadUserConfig(); err == nil {
 		enabled = cfg.IsTelemetryEnabled()
 	}
 

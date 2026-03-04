@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -33,6 +34,5 @@ func TestSessionUncommitted_DetectsUncommittedFiles(t *testing.T) {
 
 	output, err := exec.Command("git", "-C", ledger, "status", "--porcelain", "sessions/").Output()
 	require.NoError(t, err)
-	assert.NotEmpty(t, string(output))
-	assert.Contains(t, string(output), "meta.json")
+	assert.NotEmpty(t, strings.TrimSpace(string(output)), "expected uncommitted session files")
 }

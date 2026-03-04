@@ -154,7 +154,11 @@ func (d *FaultDaemon) serve() {
 		}
 
 		d.connCount.Add(1)
-		go d.handleConn(conn)
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.handleConn(conn)
+		}()
 	}
 }
 

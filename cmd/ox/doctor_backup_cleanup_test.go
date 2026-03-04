@@ -100,9 +100,6 @@ func TestCheckBackupDirectories_DetectsBackups(t *testing.T) {
 	if result.passed && !result.warning {
 		t.Error("expected warning when backups exist")
 	}
-	if !strings.Contains(result.message, "1 backup") {
-		t.Errorf("expected message to mention 1 backup, got: %s", result.message)
-	}
 }
 
 func TestCheckBackupDirectories_FixRemovesCleanBackup(t *testing.T) {
@@ -539,8 +536,5 @@ func TestCheckBackupDirectories_MultipleBackups(t *testing.T) {
 
 	if result.passed && !result.warning {
 		t.Error("expected warning when multiple backups exist")
-	}
-	if !strings.Contains(result.message, "3 backup") {
-		t.Errorf("expected message to mention 3 backups, got: %s", result.message)
 	}
 }

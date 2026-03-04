@@ -1866,7 +1866,7 @@ const sessionTermsNotice = "When you record a session, the full conversation bet
 // and marks it as shown. Returns empty string if already seen.
 // Best-effort: config load/save errors return empty (don't block session start).
 func getSessionTermsNotice() string {
-	userCfg, err := config.LoadUserConfig("")
+	userCfg, err := config.LoadUserConfig()
 	if err != nil {
 		return ""
 	}

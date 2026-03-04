@@ -139,7 +139,7 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Installed %s-level plugin:\n", location)
 		fmt.Printf("  - %s/%s/%s\n", path, codePuppyPluginDir, codePuppyPluginFileName)
 
-		userCfg, _ := config.LoadUserConfig("")
+		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 		return nil
 	}
@@ -161,7 +161,7 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Installed %s-level hooks:\n", location)
 		fmt.Printf("  - %s/%s (SessionStart)\n", path, geminiSettingsFileName)
 
-		userCfg, _ := config.LoadUserConfig("")
+		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 		return nil
 	}
@@ -183,7 +183,7 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Installed %s-level plugin:\n", location)
 		fmt.Printf("  - %s/%s\n", path, openCodePluginFileName)
 
-		userCfg, _ := config.LoadUserConfig("")
+		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 		return nil
 	}
@@ -196,7 +196,7 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		}
 
 		// show contextual tip
-		userCfg, _ := config.LoadUserConfig("")
+		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 		return nil
 	}
@@ -225,7 +225,7 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 	}
 
 	// show contextual tip
-	userCfg, _ := config.LoadUserConfig("")
+	userCfg, _ := config.LoadUserConfig()
 	tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 	return nil
 }
@@ -251,7 +251,7 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("✓ code_puppy %s-level integration uninstalled\n", location)
 
-		userCfg, _ := config.LoadUserConfig("")
+		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 		return nil
 	}
@@ -268,7 +268,7 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("✓ Gemini CLI %s-level integration uninstalled\n", location)
 
-		userCfg, _ := config.LoadUserConfig("")
+		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 		return nil
 	}
@@ -285,7 +285,7 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Printf("✓ OpenCode %s-level integration uninstalled\n", location)
 
-		userCfg, _ := config.LoadUserConfig("")
+		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 		return nil
 	}
@@ -308,7 +308,7 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 	}
 
 	// show contextual tip
-	userCfg, _ := config.LoadUserConfig("")
+	userCfg, _ := config.LoadUserConfig()
 	tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 	return nil
 }
@@ -388,7 +388,7 @@ func runIntegrateList(cmd *cobra.Command, args []string) error {
 	}
 
 	// show contextual tip
-	userCfg, _ := config.LoadUserConfig("")
+	userCfg, _ := config.LoadUserConfig()
 	tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 	return nil
 }

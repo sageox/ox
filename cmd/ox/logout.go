@@ -127,7 +127,7 @@ var logoutCmd = &cobra.Command{
 		}
 
 		// show contextual tip
-		userCfg, _ := config.LoadUserConfig("")
+		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("logout", tips.AlwaysShow, false, !userCfg.AreTipsEnabled(), false)
 
 		return nil

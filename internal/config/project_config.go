@@ -316,7 +316,7 @@ func FindProjectConfigPath() (string, error) {
 // project root override. Returns the resolved path if valid, empty string otherwise.
 // This is the single source of truth for the env var — all callers should use this.
 func ResolveProjectRootOverride() string {
-	override := os.Getenv("OX_PROJECT_ROOT")
+	override := os.Getenv(EnvProjectRoot)
 	if override == "" {
 		return ""
 	}

@@ -433,7 +433,7 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 	}
 
 	// show contextual tip
-	userCfg, _ := config.LoadUserConfig("")
+	userCfg, _ := config.LoadUserConfig()
 	tips.MaybeShow("login", tips.AlwaysShow, cfg.Quiet, !userCfg.AreTipsEnabled(), cfg.JSON)
 
 	cli.PrintDisclaimer()

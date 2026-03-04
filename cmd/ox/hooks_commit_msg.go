@@ -125,7 +125,7 @@ func runHooksCommitMsg(cmd *cobra.Command, args []string) error {
 
 // resolveProjectAttribution loads and merges attribution for the project.
 func resolveProjectAttribution(cfg *config.ProjectConfig) config.ResolvedAttribution {
-	userCfg, _ := config.LoadUserConfig("")
+	userCfg, _ := config.LoadUserConfig()
 	var userAttr *config.Attribution
 	if userCfg != nil {
 		userAttr = userCfg.Attribution
