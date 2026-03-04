@@ -37,7 +37,6 @@ func TestCommitAndPushDocImport_Success(t *testing.T) {
 		CreatedAt:      "2026-01-15",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
 		HasTextExtract: false,
-		Files:          map[string]lfs.FileRef{"source.bin": srcRef},
 	}
 	metaData, err := json.MarshalIndent(meta, "", "  ")
 	require.NoError(t, err)
@@ -90,10 +89,6 @@ func TestCommitAndPushDocImport_WithTextExtract(t *testing.T) {
 		CreatedAt:      "2026-02-14",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
 		HasTextExtract: true,
-		Files: map[string]lfs.FileRef{
-			"source.bin":   srcRef,
-			"extracted.md": textRef,
-		},
 	}
 	metaData, err := json.MarshalIndent(meta, "", "  ")
 	require.NoError(t, err)
@@ -140,7 +135,6 @@ func TestCommitAndPushDocImport_GitattributesIncluded(t *testing.T) {
 		CreatedAt:      "2026-03-01",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
 		HasTextExtract: false,
-		Files:          map[string]lfs.FileRef{"source.bin": srcRef},
 	}
 	metaData, err := json.MarshalIndent(meta, "", "  ")
 	require.NoError(t, err)
@@ -181,7 +175,6 @@ func TestCommitAndPushDocImport_NothingToCommit(t *testing.T) {
 		CreatedAt:      "2026-01-01",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
 		HasTextExtract: false,
-		Files:          map[string]lfs.FileRef{"source.bin": srcRef},
 	}
 	metaData, err := json.MarshalIndent(meta, "", "  ")
 	require.NoError(t, err)
@@ -333,7 +326,6 @@ func TestImportEmptyFile(t *testing.T) {
 		CreatedAt:      "2026-01-01",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
 		HasTextExtract: false,
-		Files:          map[string]lfs.FileRef{"source.bin": ref},
 	}
 	data, err := json.Marshal(meta)
 	require.NoError(t, err)
@@ -341,7 +333,6 @@ func TestImportEmptyFile(t *testing.T) {
 	var parsed docMeta
 	require.NoError(t, json.Unmarshal(data, &parsed))
 	assert.Equal(t, int64(0), parsed.SourceSize)
-	assert.Equal(t, ref.OID, parsed.Files["source.bin"].OID)
 }
 
 // --- date validation tests ---
