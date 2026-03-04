@@ -169,6 +169,68 @@ func TestFindProjectRoot(t *testing.T) {
 	})
 }
 
+func TestFindProjectRoot_OxProjectRootEnv(t *testing.T) {
+	t.Run("OX_PROJECT_ROOT overrides cwd discovery", func(t *testing.T) {
+		// create a project dir with .sageox
+		projectDir := t.TempDir()
+		sageoxDir := filepath.Join(projectDir, ".sageox")
+		if err := os.MkdirAll(sageoxDir, 0755); err != nil {
+			t.Fatalf("failed to create .sageox dir: %v", err)
+		}
+
+		// cwd is somewhere else entirely
+		otherDir := t.TempDir()
+		originalCwd, _ := os.Getwd()
+		defer os.Chdir(originalCwd)
+		if err := os.Chdir(otherDir); err != nil {
+			t.Fatalf("failed to change dir: %v", err)
+		}
+
+		t.Setenv("OX_PROJECT_ROOT", projectDir)
+
+		root, err := findProjectRoot()
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		expectedRoot, _ := filepath.EvalSymlinks(projectDir)
+		actualRoot, _ := filepath.EvalSymlinks(root)
+		if actualRoot != expectedRoot {
+			t.Errorf("expected root %s, got %s", expectedRoot, actualRoot)
+		}
+	})
+
+	t.Run("invalid OX_PROJECT_ROOT falls back to cwd discovery", func(t *testing.T) {
+		// create a project dir with .sageox in cwd
+		projectDir := t.TempDir()
+		sageoxDir := filepath.Join(projectDir, ".sageox")
+		if err := os.MkdirAll(sageoxDir, 0755); err != nil {
+			t.Fatalf("failed to create .sageox dir: %v", err)
+		}
+
+		originalCwd, _ := os.Getwd()
+		defer os.Chdir(originalCwd)
+		if err := os.Chdir(projectDir); err != nil {
+			t.Fatalf("failed to change dir: %v", err)
+		}
+
+		// point env var at a dir without .sageox
+		t.Setenv("OX_PROJECT_ROOT", t.TempDir())
+
+		root, err := findProjectRoot()
+		if err != nil {
+			t.Fatalf("expected no error, got %v", err)
+		}
+
+		// should fall back to cwd-based discovery
+		expectedRoot, _ := filepath.EvalSymlinks(projectDir)
+		actualRoot, _ := filepath.EvalSymlinks(root)
+		if actualRoot != expectedRoot {
+			t.Errorf("expected root %s, got %s", expectedRoot, actualRoot)
+		}
+	})
+}
+
 func TestGetUserSlug(t *testing.T) {
 	slug := getUserSlug()
 

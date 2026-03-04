@@ -1,5 +1,7 @@
 package config
 
+import "os"
+
 // SessionRecording constants: disabled -> manual -> auto
 const (
 	SessionRecordingDisabled = "disabled" // no recording
@@ -67,6 +69,7 @@ type SessionRecordingSource string
 
 const (
 	SessionRecordingSourceDefault SessionRecordingSource = "default" // no config, using default
+	SessionRecordingSourceEnv     SessionRecordingSource = "env"     // from OX_SESSION_RECORDING env var
 	SessionRecordingSourceUser    SessionRecordingSource = "user"    // from user config
 	SessionRecordingSourceTeam    SessionRecordingSource = "team"    // from team defaults (future)
 	SessionRecordingSourceRepo    SessionRecordingSource = "repo"    // from .sageox/config.json
@@ -94,11 +97,20 @@ func (r *ResolvedSessionRecording) IsManual() bool {
 }
 
 // ResolveSessionRecording determines the effective session recording mode.
-// Priority: user config > project config > team config > "manual"
+// Priority: OX_SESSION_RECORDING env > user config > project config > team config > "manual"
 //
-// This priority ensures users can always override team/repo settings.
-// If user sets "disabled", recording is disabled regardless of team/repo settings.
+// This priority ensures env vars (for pipelines) override everything,
+// users can override team/repo settings, and teams can set defaults.
 func ResolveSessionRecording(projectRoot string) *ResolvedSessionRecording {
+	// 0. check OX_SESSION_RECORDING env var - highest priority (for pipelines/automation)
+	if envMode := os.Getenv("OX_SESSION_RECORDING"); envMode != "" {
+		normalized := NormalizeSessionRecording(envMode)
+		return &ResolvedSessionRecording{
+			Mode:   normalized,
+			Source: SessionRecordingSourceEnv,
+		}
+	}
+
 	// 1. check user config (~/.config/sageox/config.yaml) - USER ALWAYS WINS
 	userCfg, err := LoadUserConfig("")
 	if err == nil && userCfg != nil && userCfg.Sessions != nil {

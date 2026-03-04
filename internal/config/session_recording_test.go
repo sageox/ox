@@ -66,6 +66,12 @@ func TestResolveSessionRecording_DefaultsToAuto(t *testing.T) {
 
 func TestResolveSessionRecording_ReadsFromProjectConfig(t *testing.T) {
 	tmpDir := t.TempDir()
+	userConfigDir := t.TempDir()
+
+	// isolate from real user config and env vars
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", userConfigDir)
+	t.Setenv("OX_SESSION_RECORDING", "")
 
 	// create .sageox/config.json with session_recording
 	sageoxDir := filepath.Join(tmpDir, ".sageox")
@@ -109,6 +115,12 @@ func TestResolveSessionRecording_EmptyProjectConfig_FallsThrough(t *testing.T) {
 
 func TestGetSessionRecording(t *testing.T) {
 	tmpDir := t.TempDir()
+	userConfigDir := t.TempDir()
+
+	// isolate from real user config and env vars
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", userConfigDir)
+	t.Setenv("OX_SESSION_RECORDING", "")
 
 	// create .sageox/config.json with session_recording
 	sageoxDir := filepath.Join(tmpDir, ".sageox")
@@ -162,6 +174,61 @@ func TestSessionsConfig_GetMode(t *testing.T) {
 			assert.Equal(t, tt.expected, tt.config.GetMode())
 		})
 	}
+}
+
+func TestResolveSessionRecording_EnvVarOverridesAll(t *testing.T) {
+	tests := []struct {
+		name     string
+		envValue string
+		wantMode string
+	}{
+		{"auto", "auto", SessionRecordingAuto},
+		{"disabled", "disabled", SessionRecordingDisabled},
+		{"manual", "manual", SessionRecordingManual},
+		{"unrecognized normalizes to manual", "bogus", SessionRecordingManual},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			userConfigDir := t.TempDir()
+
+			t.Setenv("OX_XDG_ENABLE", "1")
+			t.Setenv("XDG_CONFIG_HOME", userConfigDir)
+			t.Setenv("OX_SESSION_RECORDING", tt.envValue)
+
+			// even with project config set to something else, env wins
+			sageoxDir := filepath.Join(tmpDir, ".sageox")
+			require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+			configContent := `{"config_version": "2", "session_recording": "manual"}`
+			require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(configContent), 0644))
+
+			resolved := ResolveSessionRecording(tmpDir)
+
+			assert.Equal(t, tt.wantMode, resolved.Mode)
+			assert.Equal(t, SessionRecordingSourceEnv, resolved.Source)
+		})
+	}
+}
+
+func TestResolveSessionRecording_EnvVarDisabledOverridesAutoConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	userConfigDir := t.TempDir()
+
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", userConfigDir)
+	t.Setenv("OX_SESSION_RECORDING", "disabled")
+
+	// project config says auto
+	sageoxDir := filepath.Join(tmpDir, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+	configContent := `{"config_version": "2", "session_recording": "auto"}`
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(configContent), 0644))
+
+	resolved := ResolveSessionRecording(tmpDir)
+
+	assert.Equal(t, SessionRecordingDisabled, resolved.Mode)
+	assert.Equal(t, SessionRecordingSourceEnv, resolved.Source)
 }
 
 func boolPtr(b bool) *bool {
