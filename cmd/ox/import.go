@@ -114,6 +114,9 @@ func runImport(cmd *cobra.Command, args []string) error {
 	// projectRoot is optional — import works outside a repo when --team is given
 	projectRoot, _ := findProjectRoot()
 
+	// resolve endpoint once, used consistently for team resolution, LFS, and push
+	ep := resolveImportEndpoint(projectRoot)
+
 	var tc *config.TeamContext
 	if importFlags.team != "" {
 		if projectRoot != "" {
@@ -121,7 +124,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 		}
 		if tc == nil {
 			// no project root or team not found via project — scan by endpoint
-			tc = resolveTeamContextByEndpoint(importFlags.team)
+			tc = resolveTeamContextByEndpoint(importFlags.team, ep)
 		}
 		if tc == nil {
 			return fmt.Errorf("team context not found: %q (use ox agent prime to see available teams)", importFlags.team)
@@ -132,7 +135,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 		}
 		if tc == nil {
 			// no project or no team in project — try single-team auto-discovery
-			tc = autoDiscoverSingleTeam()
+			tc = autoDiscoverSingleTeam(ep)
 		}
 		if tc == nil {
 			if projectRoot == "" {
@@ -215,7 +218,6 @@ func runImport(cmd *cobra.Command, args []string) error {
 	}
 
 	// upload content to LFS
-	ep := resolveImportEndpoint(projectRoot)
 	lfsClient, err := getTeamContextLFSClient(ep, tc)
 	if err != nil {
 		return fmt.Errorf("create LFS client: %w", err)
@@ -428,8 +430,7 @@ func resolveImportEndpoint(projectRoot string) string {
 
 // autoDiscoverSingleTeam returns the team context if exactly one team is synced
 // locally. Returns nil if zero or multiple teams are found.
-func autoDiscoverSingleTeam() *config.TeamContext {
-	ep := endpoint.Get()
+func autoDiscoverSingleTeam(ep string) *config.TeamContext {
 	if ep == "" {
 		return nil
 	}
@@ -456,55 +457,21 @@ func autoDiscoverSingleTeam() *config.TeamContext {
 	}
 }
 
-// resolveTeamContextByEndpoint finds a team context by slug/ID/name using only
+// resolveTeamContextByEndpoint finds a team context by team ID using only
 // the endpoint (no project root required). Scans the teams data directory.
-func resolveTeamContextByEndpoint(query string) *config.TeamContext {
-	ep := endpoint.Get()
+// Only matches by team ID since directory names are team IDs — slug/name
+// metadata is not available from the filesystem scan alone.
+func resolveTeamContextByEndpoint(query, ep string) *config.TeamContext {
 	if ep == "" {
 		return nil
 	}
 
 	teamsDir := paths.TeamsDataDir(ep)
-	entries, err := os.ReadDir(teamsDir)
-	if err != nil {
-		return nil
-	}
-
-	var allTeams []config.TeamContext
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		allTeams = append(allTeams, config.TeamContext{
-			TeamID: entry.Name(),
-			Path:   filepath.Join(teamsDir, entry.Name()),
-		})
-	}
-
-	queryLower := strings.ToLower(strings.TrimSpace(query))
-
-	// exact team ID match
-	for i, tc := range allTeams {
-		if tc.TeamID == query {
-			return &allTeams[i]
-		}
-	}
-
-	// slug match
-	for i, tc := range allTeams {
-		slug := tc.Slug
-		if slug == "" {
-			slug = api.DeriveSlug(tc.TeamName)
-		}
-		if slug == queryLower {
-			return &allTeams[i]
-		}
-	}
-
-	// case-insensitive name match
-	for i, tc := range allTeams {
-		if strings.EqualFold(tc.TeamName, query) {
-			return &allTeams[i]
+	teamPath := filepath.Join(teamsDir, query)
+	if info, err := os.Stat(teamPath); err == nil && info.IsDir() {
+		return &config.TeamContext{
+			TeamID: query,
+			Path:   teamPath,
 		}
 	}
 
