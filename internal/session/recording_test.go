@@ -325,10 +325,14 @@ func TestStartRecording(t *testing.T) {
 		cacheDir := t.TempDir()
 		projectRoot := setupRecordingTest(t, cacheDir)
 
+		// create a real session file for validation
+		sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+		require.NoError(t, os.WriteFile(sessionFile, []byte("{}\n"), 0644))
+
 		opts := StartRecordingOptions{
 			AgentID:     "OxA1b2",
 			AdapterName: "claude-code",
-			SessionFile: "/path/to/session.jsonl",
+			SessionFile: sessionFile,
 			Title:       "Test recording",
 			Username:    "testuser",
 			// no RepoContextPath - uses XDG cache via repo_id
@@ -426,6 +430,23 @@ func TestStartRecording(t *testing.T) {
 		recordingPath := filepath.Join(firstState.SessionPath, recordingFile)
 		_, err = os.Stat(recordingPath)
 		assert.False(t, os.IsNotExist(err), "original .recording.json must not be deleted")
+	})
+
+	t.Run("rejects directory as session file", func(t *testing.T) {
+		// regression: directory path stored as SessionFile caused read failures (ox-5eu5)
+		cacheDir := t.TempDir()
+		projectRoot := setupRecordingTest(t, cacheDir)
+
+		opts := StartRecordingOptions{
+			AgentID:     "OxA1b2",
+			AdapterName: "claude-code",
+			SessionFile: t.TempDir(), // a directory, not a file
+			Username:    "testuser",
+		}
+
+		_, err := StartRecording(projectRoot, opts)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not a regular file")
 	})
 
 	t.Run("session name from state matches GetSessionName", func(t *testing.T) {

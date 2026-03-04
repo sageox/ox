@@ -1011,3 +1011,23 @@ func TestClaudeCodeAdapter_ReadMetadata_NoModel(t *testing.T) {
 	assert.Equal(t, "1.0.3", meta.AgentVersion)
 	assert.Empty(t, meta.Model)
 }
+
+func TestClaudeCodeAdapter_Read_DirectoryPath(t *testing.T) {
+	// regression: Read() must reject directory paths (ox-5eu5)
+	adapter := &ClaudeCodeAdapter{}
+	dir := t.TempDir()
+
+	_, err := adapter.Read(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a regular file")
+}
+
+func TestClaudeCodeAdapter_ReadMetadata_DirectoryPath(t *testing.T) {
+	// regression: ReadMetadata() must reject directory paths (ox-5eu5)
+	adapter := &ClaudeCodeAdapter{}
+	dir := t.TempDir()
+
+	_, err := adapter.ReadMetadata(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a regular file")
+}

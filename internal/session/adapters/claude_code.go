@@ -101,10 +101,11 @@ func (a *ClaudeCodeAdapter) Detect() bool {
 // It searches through all project directories for JSONL files modified after 'since',
 // then scans for content matching the agentID (from ox agent prime output).
 func (a *ClaudeCodeAdapter) FindSessionFile(agentID string, since time.Time) (string, error) {
-	projectsDir := filepath.Join(a.claudeDir(), "projects")
-	if projectsDir == "" {
+	claudeDir := a.claudeDir()
+	if claudeDir == "" {
 		return "", ErrSessionNotFound
 	}
+	projectsDir := filepath.Join(claudeDir, "projects")
 
 	// get current working directory to find project-specific sessions
 	cwd, err := os.Getwd()
@@ -211,6 +212,14 @@ func (a *ClaudeCodeAdapter) ReadMetadata(sessionPath string) (*SessionMetadata, 
 	}
 	defer f.Close()
 
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat session file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("session path is not a regular file: %s", sessionPath)
+	}
+
 	meta := &SessionMetadata{}
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 64*1024)
@@ -262,6 +271,14 @@ func (a *ClaudeCodeAdapter) Read(sessionPath string) ([]RawEntry, error) {
 		return nil, fmt.Errorf("failed to open session file: %w", err)
 	}
 	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("failed to stat session file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("session path is not a regular file: %s", sessionPath)
+	}
 
 	var entries []RawEntry
 	scanner := bufio.NewScanner(f)
