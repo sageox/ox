@@ -1,6 +1,9 @@
 package main
 
-import "github.com/spf13/cobra"
+import (
+	"github.com/sageox/ox/internal/auth"
+	"github.com/spf13/cobra"
+)
 
 var memoryCmd = &cobra.Command{
 	Use:   "memory",
@@ -11,5 +14,7 @@ var memoryCmd = &cobra.Command{
 func init() {
 	memoryCmd.AddCommand(memoryPutCmd)
 	memoryCmd.AddCommand(memoryDistillCmd)
-	rootCmd.AddCommand(memoryCmd)
+	if auth.IsMemoryEnabled() {
+		rootCmd.AddCommand(memoryCmd)
+	}
 }

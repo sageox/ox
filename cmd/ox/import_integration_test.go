@@ -37,7 +37,6 @@ func TestCommitAndPushDocImport_Success(t *testing.T) {
 		SourceOID:      srcRef.OID,
 		CreatedAt:      "2026-01-15",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
-		HasTextExtract: false,
 	}
 	metaData, err := json.MarshalIndent(meta, "", "  ")
 	require.NoError(t, err)
@@ -90,7 +89,6 @@ func TestCommitAndPushDocImport_WithTextExtract(t *testing.T) {
 		SourceOID:      srcRef.OID,
 		CreatedAt:      "2026-02-14",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
-		HasTextExtract: true,
 		Sidecars: map[string]sidecar{
 			"text-extract": {
 				Filename:  "extracted.md",
@@ -145,7 +143,6 @@ func TestCommitAndPushDocImport_GitattributesIncluded(t *testing.T) {
 		SourceOID:      srcRef.OID,
 		CreatedAt:      "2026-03-01",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
-		HasTextExtract: false,
 	}
 	metaData, err := json.MarshalIndent(meta, "", "  ")
 	require.NoError(t, err)
@@ -186,7 +183,6 @@ func TestCommitAndPushDocImport_NothingToCommit(t *testing.T) {
 		SourceOID:      srcRef.OID,
 		CreatedAt:      "2026-01-01",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
-		HasTextExtract: false,
 	}
 	metaData, err := json.MarshalIndent(meta, "", "  ")
 	require.NoError(t, err)
@@ -332,7 +328,6 @@ func TestImportEmptyFile(t *testing.T) {
 		SourceOID:      ref.OID,
 		CreatedAt:      "2026-01-01",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
-		HasTextExtract: false,
 	}
 	data, err := json.Marshal(meta)
 	require.NoError(t, err)

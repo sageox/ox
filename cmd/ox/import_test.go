@@ -195,8 +195,7 @@ func TestDocMetaSerialization(t *testing.T) {
 		SourceOID:      srcRef.OID,
 		CreatedAt:      time.Date(2026, 2, 14, 10, 30, 0, 0, time.UTC).Format(time.RFC3339),
 		ImportedAt:     now,
-		HasTextExtract: true,
-		Path:           "data/docs/2026/02/14/test-doc",
+		Path: "data/docs/2026/02/14/test-doc",
 		Sidecars: map[string]sidecar{
 			"text-extract": {
 				Filename:  "extracted.md",
@@ -221,7 +220,6 @@ func TestDocMetaSerialization(t *testing.T) {
 	assert.Equal(t, float64(srcRef.Size), parsed["source_size"])
 	assert.True(t, strings.HasPrefix(parsed["source_oid"].(string), "sha256:"))
 	assert.Equal(t, "2026-02-14T10:30:00Z", parsed["created_at"])
-	assert.Equal(t, true, parsed["has_text_extract"])
 	assert.Equal(t, "data/docs/2026/02/14/test-doc", parsed["path"])
 
 	// verify sidecars keyed by type with filename inside

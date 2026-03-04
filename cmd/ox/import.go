@@ -26,7 +26,6 @@ import (
 )
 
 var importFlags struct {
-	title string
 	text  string
 	date  string
 	force bool
@@ -41,7 +40,7 @@ var importCmd = &cobra.Command{
 Documents are stored with LFS-backed content and git-tracked metadata.
 AI coworkers extract text before importing for indexing:
 
-  ox import report.pdf --text extracted.md --title "Q1 Report"
+  ox import report.pdf --text extracted.md
   ox import notes.md --date 2026-01-15
   ox import report.pdf --team my-team
 
@@ -52,30 +51,45 @@ or when working outside an initialized repo.`,
 }
 
 func init() {
-	importCmd.Flags().StringVar(&importFlags.title, "title", "", "document title (default: filename stem)")
-	importCmd.Flags().StringVar(&importFlags.text, "text", "", "path to pre-extracted text/markdown for indexing")
-	importCmd.Flags().StringVar(&importFlags.date, "date", "", "document date for filing (YYYY-MM-DD, default: file mtime)")
+	importCmd.Flags().StringVar(&importFlags.text, "text", "", "path to pre-extracted text/markdown for indexing (optional)")
+	importCmd.Flags().SetAnnotation("text", "cobra_annotation_flag_value_name", []string{"file"})
+	importCmd.Flags().StringVar(&importFlags.date, "date", "", "document date for filing (YYYY-MM-DD, default: attempts to auto-detect from file metadata)")
 	importCmd.Flags().BoolVar(&importFlags.force, "force", false, "re-import even if content hash already exists")
 	importCmd.Flags().StringVar(&importFlags.team, "team", "", "team ID (or slug/name when inside a repo)")
 }
 
 // docMeta is the metadata.json schema for imported documents.
+//
+// This manifest is a living document — the CLI creates it at import time with
+// the source file and any client-provided sidecars (e.g., "text-extract").
+// The SageOx server may later add or update server-generated sidecars such as
+// "what-matters" (a cached summary of what's relevant to the team from this
+// document). Server-side sidecars are versioned through normal git commits, so
+// the history of how a document's relevance evolves over time is preserved.
 type docMeta struct {
-	Version        string              `json:"version"`
-	Title          string              `json:"title"`
-	SourceFilename string              `json:"source_filename"`
-	ContentType    string              `json:"content_type"`
-	SourceSize     int64               `json:"source_size"`
-	SourceOID      string              `json:"source_oid"`
-	CreatedAt      string              `json:"created_at"`
-	ImportedAt     string              `json:"imported_at"`
-	HasTextExtract bool                `json:"has_text_extract"`
-	Path           string              `json:"path"`
-	Sidecars       map[string]sidecar  `json:"sidecars"`
+	Version        string             `json:"version"`
+	Title          string             `json:"title"`
+	SourceFilename string             `json:"source_filename"`
+	ContentType    string             `json:"content_type"`
+	SourceSize     int64              `json:"source_size"`
+	SourceOID      string             `json:"source_oid"`
+	CreatedAt      string             `json:"created_at"`
+	ImportedAt     string             `json:"imported_at"`
+	Path           string             `json:"path"`
+	Sidecars       map[string]sidecar `json:"sidecars"`
 }
 
 // sidecar describes an additional derived file associated with an imported document.
-// The map key in docMeta.Sidecars is the sidecar type (e.g., "text-extract").
+// The map key in docMeta.Sidecars is the sidecar type.
+//
+// Client-created sidecars (at import time):
+//   - "text-extract" — pre-extracted text/markdown for indexing
+//
+// Server-generated sidecars (added/updated post-import):
+//   - "what-matters" — a short summary of what's relevant to the team from this
+//     document. Periodically re-summarized as team context evolves, so it may be
+//     recommitted over time. Git history preserves how the document's relevance
+//     changes until it no longer matters at all.
 type sidecar struct {
 	Filename  string `json:"filename"`
 	OID       string `json:"oid"`
@@ -172,11 +186,8 @@ func runImport(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// derive directory name from --title or filename stem
-	dirName := importFlags.title
-	if dirName == "" {
-		dirName = inferTitle(srcPath)
-	}
+	// derive directory name from filename stem
+	dirName := inferTitle(srcPath)
 	dirSlug := slugify(dirName)
 
 	docDir := filepath.Join(docsBaseDir,
@@ -186,7 +197,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 		dirSlug,
 	)
 	if _, statErr := os.Stat(docDir); statErr == nil && !importFlags.force {
-		return fmt.Errorf("document directory already exists for this date — use --title to differentiate or --force to reimport: %s", docDir)
+		return fmt.Errorf("document directory already exists for this date — use --force to reimport: %s", docDir)
 	}
 	if err := os.MkdirAll(docDir, 0o755); err != nil {
 		return fmt.Errorf("create doc directory: %w", err)
@@ -257,10 +268,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	title := importFlags.title
-	if title == "" {
-		title = inferTitle(srcPath)
-	}
+	title := inferTitle(srcPath)
 
 	// build and write metadata.json (plain git, not LFS — stays readable without
 	// hydration). like pointer files, the local copy is ephemeral and cleaned up
@@ -288,7 +296,6 @@ func runImport(cmd *cobra.Command, args []string) error {
 		SourceOID:      srcRef.OID,
 		CreatedAt:      importDate.Format(time.RFC3339),
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
-		HasTextExtract: hasText,
 		Path:           relDocDir,
 		Sidecars:       sidecars,
 	}

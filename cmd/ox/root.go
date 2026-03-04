@@ -275,7 +275,7 @@ func brandedHelp(cmd *cobra.Command, args []string) {
 				flagStr = fmt.Sprintf("      --%s", flag.Name)
 			}
 			if flag.Value.Type() != "bool" {
-				flagStr += " " + flag.Value.Type()
+				flagStr += " " + flagValueLabel(flag)
 			}
 			padded := fmt.Sprintf("%-26s", flagStr)
 			fmt.Printf("%s %s\n", cli.StyleFlag.Render(padded), formatUsage(flag.Usage))
@@ -297,7 +297,7 @@ func brandedHelp(cmd *cobra.Command, args []string) {
 				flagStr = fmt.Sprintf("      --%s", flag.Name)
 			}
 			if flag.Value.Type() != "bool" {
-				flagStr += " " + flag.Value.Type()
+				flagStr += " " + flagValueLabel(flag)
 			}
 			padded := fmt.Sprintf("%-26s", flagStr)
 			fmt.Printf("%s %s\n", cli.StyleFlag.Render(padded), formatUsage(flag.Usage))
@@ -343,6 +343,16 @@ func formatDescription(desc string) string {
 }
 
 // formatUsage styles flag usage text with highlighted file paths
+// flagValueLabel returns the display label for a flag's value placeholder.
+// Uses the "cobra_annotation_flag_value_name" annotation if set (e.g., "file"),
+// otherwise falls back to pflag's Type() (e.g., "string").
+func flagValueLabel(flag *pflag.Flag) string {
+	if ann, ok := flag.Annotations["cobra_annotation_flag_value_name"]; ok && len(ann) > 0 {
+		return ann[0]
+	}
+	return flag.Value.Type()
+}
+
 func formatUsage(usage string) string {
 	// find all file path matches
 	matches := filePathPattern.FindAllStringIndex(usage, -1)

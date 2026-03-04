@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/repotools"
@@ -155,12 +156,14 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 // Used to distinguish `ox agent session start` (missing agent ID)
 // from `ox agent typo` (genuinely unknown command).
 var agentSubcommands = map[string]bool{
-	"distill": true,
 	"doctor":  true,
 	"session": true,
 }
 
 func isAgentSubcommand(name string) bool {
+	if name == "distill" {
+		return auth.IsMemoryEnabled()
+	}
 	return agentSubcommands[name]
 }
 
@@ -229,11 +232,18 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, delete, remind, summarize, html, record, plan, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
 		}
 	case "distill":
+		if !auth.IsMemoryEnabled() {
+			return fmt.Errorf("memory features are not enabled\nSet FEATURE_MEMORY=true to enable")
+		}
 		return runAgentDistill(inst, cmd)
 	case "hook":
 		return runAgentHook(subargs)
 	default:
-		return fmt.Errorf("unknown command: %s\nAvailable: distill, doctor, hook, session", subcommand)
+		available := "doctor, hook, session"
+		if auth.IsMemoryEnabled() {
+			available = "distill, " + available
+		}
+		return fmt.Errorf("unknown command: %s\nAvailable: %s", subcommand, available)
 	}
 }
 

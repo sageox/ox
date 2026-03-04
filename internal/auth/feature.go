@@ -56,3 +56,11 @@ func IsPostMVPEnabled() bool {
 	value := strings.ToLower(os.Getenv("FEATURE_POST_MVP"))
 	return value == "true" || value == "1" || value == "yes"
 }
+
+// IsMemoryEnabled checks if memory features (ox memory, ox agent <id> distill) are enabled.
+// Memory is experimental and not included in the default experience.
+// Set FEATURE_MEMORY=true to enable.
+func IsMemoryEnabled() bool {
+	value := strings.ToLower(os.Getenv("FEATURE_MEMORY"))
+	return value == "true" || value == "1" || value == "yes"
+}
