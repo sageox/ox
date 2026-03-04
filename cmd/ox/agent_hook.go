@@ -7,24 +7,9 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/spf13/cobra"
-
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/pkg/agentx"
 )
-
-// agentHookCmd handles lifecycle hooks from AI coworkers.
-// Registered as a direct cobra subcommand (no agent ID required) because
-// hooks fire before ox agent prime — no agent ID exists yet.
-var agentHookCmd = &cobra.Command{
-	Use:    "hook <event>",
-	Short:  "Handle lifecycle hooks from AI coworkers",
-	Hidden: true,
-	Args:   cobra.MinimumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runAgentHook(args)
-	},
-}
 
 // ReadHookInput reads hook input from stdin.
 // Delegates to agentx.ReadHookInputFromStdin for the actual implementation.

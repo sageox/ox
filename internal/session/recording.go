@@ -330,6 +330,17 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		return nil, ErrNoLedger
 	}
 
+	// validate session file is a regular file (not a directory) before creating dirs
+	if opts.SessionFile != "" {
+		info, err := os.Stat(opts.SessionFile)
+		if err != nil {
+			return nil, fmt.Errorf("session file not accessible: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("session file is not a regular file: %s", opts.SessionFile)
+		}
+	}
+
 	// create session folder path
 	sessionPath := filepath.Join(sessionsBasePath, sessionName)
 
@@ -342,17 +353,6 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	sessionFile := opts.SessionFile
 	if sessionFile == "" {
 		sessionFile = filepath.Join(sessionPath, "raw.jsonl")
-	}
-
-	// validate session file is a regular file (not a directory)
-	if opts.SessionFile != "" {
-		info, err := os.Stat(opts.SessionFile)
-		if err != nil {
-			return nil, fmt.Errorf("session file not accessible: %w", err)
-		}
-		if !info.Mode().IsRegular() {
-			return nil, fmt.Errorf("session file is not a regular file: %s", opts.SessionFile)
-		}
 	}
 
 	state := &RecordingState{

@@ -85,7 +85,6 @@ var agentListCmd = &cobra.Command{
 func init() {
 	// register subcommands under agent
 	agentCmd.AddCommand(agentPrimeCmd)
-	agentCmd.AddCommand(agentHookCmd)
 	agentCmd.AddCommand(agentListCmd)
 	agentCmd.AddCommand(agentTeamCtxCmd)
 	agentCmd.AddCommand(agentRedactCmd)

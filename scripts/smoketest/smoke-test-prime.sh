@@ -69,6 +69,23 @@ if ! echo "$output" | jq -e '.attribution' > /dev/null 2>&1; then
     exit 1
 fi
 
+# if session recording is active, validate the file path
+session_file=$(echo "$output" | jq -r '.session.file // empty')
+session_recording=$(echo "$output" | jq -r '.session.recording // false')
+if [[ "$session_recording" == "true" && -n "$session_file" ]]; then
+    # session file must be a regular file, not a directory
+    if [[ -d "$session_file" ]]; then
+        echo "error: session.file is a directory, not a file: $session_file"
+        exit 1
+    fi
+    # session file should end in .jsonl
+    if [[ "$session_file" != *.jsonl ]]; then
+        echo "error: session.file does not end in .jsonl: $session_file"
+        exit 1
+    fi
+    echo "Session file validated: $session_file"
+fi
+
 echo "JSON valid: status=$status agent_id=$agent_id"
 echo "ox agent prime test passed"
 exit 0

@@ -965,13 +965,6 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 		}
 	}
 
-	// detect agent adapter for session file location
-	var sessionFile string
-	if agent := agentx.CurrentAgent(); agent != nil {
-		// try to find agent session file based on agent type
-		sessionFile = detectAgentSessionFile(agent)
-	}
-
 	// generate session file path
 	timestamp := time.Now().Format("2006-01-02-150405")
 	outputFile := filepath.Join(projectRoot, ".sageox", "sessions", fmt.Sprintf("%s-%s.md", timestamp, agentID))
@@ -980,8 +973,7 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 	opts := session.StartRecordingOptions{
 		AgentID:     agentID,
 		AdapterName: agentType,
-		SessionFile: sessionFile,
-		OutputFile:  outputFile,
+		OutputFile: outputFile,
 		FilterMode:  resolved.Mode,
 	}
 
@@ -1023,22 +1015,6 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 		AutoStarted:      true,
 		UserNotification: notificationMsg,
 	}
-}
-
-// detectAgentSessionFile attempts to find the session file for the current agent.
-// Returns empty string if not found or agent doesn't support session files.
-func detectAgentSessionFile(agent agentx.Agent) string {
-	// claude-code stores sessions in ~/.claude/projects/<hash>/session.jsonl
-	if agent.Type() == agentx.AgentTypeClaudeCode {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
-		// the exact project hash is not easily determinable here
-		// return the base path for now
-		return filepath.Join(home, ".claude", "projects")
-	}
-	return ""
 }
 
 // outputAgentPrime emits bootstrap output based on the selected output mode.

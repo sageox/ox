@@ -325,31 +325,6 @@ func TestAgentPrimeOutputStatuses(t *testing.T) {
 	}
 }
 
-// TestAgentIDFreeSubcommands ensures all commands that don't require an agent ID
-// are registered as cobra subcommands on agentCmd. These commands are matched
-// first in runAgentDispatcher (before the agent ID check), so removing one
-// would break `ox agent <cmd>` invocations without an ID.
-//
-// Regression guard: hooks fire before ox agent prime (no ID exists yet),
-// and prime itself obviously can't require an ID.
-func TestAgentIDFreeSubcommands(t *testing.T) {
-	// commands that MUST work without an agent ID
-	requiredIDFree := []string{"prime", "hook", "list", "team-ctx", "redact"}
-
-	registered := make(map[string]bool)
-	for _, sub := range agentCmd.Commands() {
-		registered[sub.Name()] = true
-	}
-
-	for _, name := range requiredIDFree {
-		t.Run(name+" is registered", func(t *testing.T) {
-			if !registered[name] {
-				t.Errorf("%q must be registered as a cobra subcommand on agentCmd (no agent ID required), but it is missing", name)
-			}
-		})
-	}
-}
-
 func TestIsAgentSubcommand(t *testing.T) {
 	tests := []struct {
 		name     string

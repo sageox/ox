@@ -34,6 +34,7 @@ func TestCommitAndPushDocImport_Success(t *testing.T) {
 		SourceFilename: "test.pdf",
 		ContentType:    "application/pdf",
 		SourceSize:     srcRef.Size,
+		SourceOID:      srcRef.OID,
 		CreatedAt:      "2026-01-15",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
 		HasTextExtract: false,
@@ -86,9 +87,18 @@ func TestCommitAndPushDocImport_WithTextExtract(t *testing.T) {
 		SourceFilename: "report.pdf",
 		ContentType:    "application/pdf",
 		SourceSize:     srcRef.Size,
+		SourceOID:      srcRef.OID,
 		CreatedAt:      "2026-02-14",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
 		HasTextExtract: true,
+		Sidecars: map[string]sidecar{
+			"text-extract": {
+				Filename:  "extracted.md",
+				OID:       textRef.OID,
+				Size:      textRef.Size,
+				CreatedAt: time.Now().UTC().Format(time.RFC3339),
+			},
+		},
 	}
 	metaData, err := json.MarshalIndent(meta, "", "  ")
 	require.NoError(t, err)
@@ -132,6 +142,7 @@ func TestCommitAndPushDocImport_GitattributesIncluded(t *testing.T) {
 		SourceFilename: "test.txt",
 		ContentType:    "text/plain",
 		SourceSize:     srcRef.Size,
+		SourceOID:      srcRef.OID,
 		CreatedAt:      "2026-03-01",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
 		HasTextExtract: false,
@@ -172,6 +183,7 @@ func TestCommitAndPushDocImport_NothingToCommit(t *testing.T) {
 		SourceFilename: "test.txt",
 		ContentType:    "text/plain",
 		SourceSize:     srcRef.Size,
+		SourceOID:      srcRef.OID,
 		CreatedAt:      "2026-01-01",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
 		HasTextExtract: false,
@@ -258,11 +270,10 @@ func TestFindExistingDocByOID_CorruptedMetadata(t *testing.T) {
 		content string
 	}{
 		{"empty file", ""},
-		{"partial json", `{"files": {`},
-		{"missing files field", `{"version": "1", "title": "test"}`},
-		{"files not a map", `{"files": "not a map"}`},
-		{"null files", `{"files": null}`},
-		{"source.bin missing oid", `{"files": {"source.bin": {"size": 100}}}`},
+		{"partial json", `{"source_oid": "`},
+		{"missing source_oid", `{"version": "1", "title": "test"}`},
+		{"empty source_oid", `{"source_oid": ""}`},
+		{"null source_oid", `{"source_oid": null}`},
 	}
 
 	for _, tt := range tests {
@@ -290,12 +301,7 @@ func TestImportDedup_SameContentDifferentFilename(t *testing.T) {
 	require.NoError(t, os.MkdirAll(docDir, 0o755))
 
 	meta := map[string]any{
-		"files": map[string]any{
-			"source.bin": map[string]any{
-				"oid":  ref.OID,
-				"size": ref.Size,
-			},
-		},
+		"source_oid": ref.OID,
 	}
 	metaData, err := json.Marshal(meta)
 	require.NoError(t, err)
@@ -323,6 +329,7 @@ func TestImportEmptyFile(t *testing.T) {
 		SourceFilename: "empty.txt",
 		ContentType:    "text/plain",
 		SourceSize:     ref.Size,
+		SourceOID:      ref.OID,
 		CreatedAt:      "2026-01-01",
 		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
 		HasTextExtract: false,
@@ -333,6 +340,7 @@ func TestImportEmptyFile(t *testing.T) {
 	var parsed docMeta
 	require.NoError(t, json.Unmarshal(data, &parsed))
 	assert.Equal(t, int64(0), parsed.SourceSize)
+	assert.Equal(t, ref.OID, parsed.SourceOID)
 }
 
 // --- date validation tests ---

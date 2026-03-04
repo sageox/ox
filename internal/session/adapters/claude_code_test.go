@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1010,6 +1011,100 @@ func TestClaudeCodeAdapter_ReadMetadata_NoModel(t *testing.T) {
 	// should have version but no model
 	assert.Equal(t, "1.0.3", meta.AgentVersion)
 	assert.Empty(t, meta.Model)
+}
+
+func TestClaudeCodeAdapter_FindSessionFile(t *testing.T) {
+	adapter := &ClaudeCodeAdapter{}
+
+	// compute project hash from CWD (same logic as FindSessionFile)
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	projectHash := strings.ReplaceAll(cwd, string(os.PathSeparator), "-")
+	projectHash = strings.ReplaceAll(projectHash, "_", "-")
+
+	t.Run("returns JSONL file path", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+
+		projectDir := filepath.Join(tmpHome, ".claude", "projects", projectHash)
+		require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+		jsonlPath := filepath.Join(projectDir, "abc123.jsonl")
+		require.NoError(t, os.WriteFile(jsonlPath, []byte(`{"type":"user","content":"hello"}`+"\n"), 0644))
+
+		result, err := adapter.FindSessionFile("", time.Now().Add(-1*time.Minute))
+		require.NoError(t, err)
+		assert.True(t, strings.HasSuffix(result, ".jsonl"), "expected .jsonl suffix, got: %s", result)
+
+		info, err := os.Stat(result)
+		require.NoError(t, err)
+		assert.True(t, info.Mode().IsRegular(), "result must be a regular file, not a directory")
+	})
+
+	t.Run("returns error when no JSONL files", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+
+		projectDir := filepath.Join(tmpHome, ".claude", "projects", projectHash)
+		require.NoError(t, os.MkdirAll(projectDir, 0755))
+		// create a subdirectory but no JSONL files
+		require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "subdir"), 0755))
+
+		_, err := adapter.FindSessionFile("", time.Now().Add(-1*time.Minute))
+		assert.ErrorIs(t, err, ErrSessionNotFound)
+	})
+
+	t.Run("returns error when project dir missing", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+		// don't create project dir at all
+
+		_, err := adapter.FindSessionFile("", time.Now().Add(-1*time.Minute))
+		assert.ErrorIs(t, err, ErrSessionNotFound)
+	})
+
+	t.Run("matches agentID in content", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+
+		projectDir := filepath.Join(tmpHome, ".claude", "projects", projectHash)
+		require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+		// file without agentID
+		other := filepath.Join(projectDir, "other.jsonl")
+		require.NoError(t, os.WriteFile(other, []byte(`{"type":"user","content":"no agent"}`+"\n"), 0644))
+
+		// file with agentID
+		target := filepath.Join(projectDir, "target.jsonl")
+		require.NoError(t, os.WriteFile(target, []byte(`{"type":"system","content":"agent_id=TestAgent42"}`+"\n"), 0644))
+
+		result, err := adapter.FindSessionFile("TestAgent42", time.Now().Add(-1*time.Minute))
+		require.NoError(t, err)
+		assert.Equal(t, target, result)
+	})
+
+	t.Run("never returns a directory path", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+
+		projectDir := filepath.Join(tmpHome, ".claude", "projects", projectHash)
+		require.NoError(t, os.MkdirAll(projectDir, 0755))
+
+		// create subdirectories that could be confused with session files
+		require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "session-dir"), 0755))
+		require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "another-dir.jsonl"), 0755))
+
+		// also create a real JSONL file
+		realFile := filepath.Join(projectDir, "real.jsonl")
+		require.NoError(t, os.WriteFile(realFile, []byte(`{"type":"user"}`+"\n"), 0644))
+
+		result, err := adapter.FindSessionFile("", time.Now().Add(-1*time.Minute))
+		require.NoError(t, err)
+
+		info, err := os.Stat(result)
+		require.NoError(t, err)
+		assert.False(t, info.IsDir(), "FindSessionFile must never return a directory: %s", result)
+	})
 }
 
 func TestClaudeCodeAdapter_Read_DirectoryPath(t *testing.T) {
