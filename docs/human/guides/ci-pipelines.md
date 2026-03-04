@@ -1,7 +1,7 @@
 <!-- doc-audience: human -->
 # Using ox in CI/CD Pipelines
 
-Run ox in ephemeral environments — CI runners, containers, and automated pipelines — where there's no interactive human or persistent home directory.
+> **Work in progress.** Full CI/CD pipeline support is not yet available. As of March 2026, `ox login` requires interactive browser-based authentication — there is no service account or token-based auth for headless environments yet. The environment variables below are available now and useful for **devroot workflows** (running ox from a parent directory) and **local automation** (scripts on an already-authenticated machine).
 
 ---
 
@@ -60,21 +60,22 @@ sessions:
 
 ---
 
-## Minimal CI Setup
+## Local Automation Example
+
+On a machine where `ox login` has already been run interactively:
 
 ```bash
-# 1. authenticate (use a service account token)
-ox login --token "$SAGEOX_TOKEN"
+# point to the project (when cwd isn't inside it)
+export OX_PROJECT_ROOT="$PROJECT_DIR"
 
-# 2. point to the project
-export OX_PROJECT_ROOT="$CI_PROJECT_DIR"
-
-# 3. record sessions automatically
+# record sessions automatically
 export OX_SESSION_RECORDING=auto
 
-# 4. prime the AI coworker
+# prime the AI coworker
 ox agent prime
 ```
+
+> **Future:** Service account and token-based auth (`ox login --token`) is planned but not yet implemented. Once available, this pattern will work in true headless CI/CD environments.
 
 ---
 
