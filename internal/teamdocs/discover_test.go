@@ -281,6 +281,20 @@ func TestExtractDescriptionFromContent(t *testing.T) {
 	}
 }
 
+func TestExtractTitleFromContent_DirectoryPath(t *testing.T) {
+	got := extractTitleFromContent(t.TempDir())
+	if got != "" {
+		t.Errorf("expected empty string for directory path, got %q", got)
+	}
+}
+
+func TestExtractDescriptionFromContent_DirectoryPath(t *testing.T) {
+	got := extractDescriptionFromContent(t.TempDir())
+	if got != "" {
+		t.Errorf("expected empty string for directory path, got %q", got)
+	}
+}
+
 func TestTitleFromFilename(t *testing.T) {
 	tests := []struct {
 		input string

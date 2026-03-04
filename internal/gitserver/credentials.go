@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/zalando/go-keyring"
 )
@@ -433,21 +434,9 @@ func saveCredentialsToFileForEndpoint(endpointURL string, creds GitCredentials) 
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// marshal credentials to JSON with indentation for readability
-	data, err := json.MarshalIndent(creds, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal git credentials: %w", err)
-	}
-
-	// atomic write pattern
-	tempPath := credsPath + ".tmp"
-	if err := os.WriteFile(tempPath, data, 0600); err != nil {
-		return fmt.Errorf("failed to write temp git credentials file: %w", err)
-	}
-
-	if err := os.Rename(tempPath, credsPath); err != nil {
-		os.Remove(tempPath)
-		return fmt.Errorf("failed to rename temp git credentials file: %w", err)
+	// atomic write with fsync prevents partial/corrupt credential files
+	if err := fileutil.AtomicWriteJSON(credsPath, creds, 0600); err != nil {
+		return fmt.Errorf("failed to save git credentials: %w", err)
 	}
 
 	return nil

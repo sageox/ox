@@ -18,13 +18,18 @@ import (
 // CheckSlugBackupCleanup is the slug for the backup directory cleanup check.
 const CheckSlugBackupCleanup = "backup-cleanup"
 
+// staleBackupThreshold is the minimum age a .bak directory must have before
+// it is flagged for cleanup. Recent backups may still be needed if a clone
+// retry is in progress.
+const staleBackupThreshold = 7 * 24 * time.Hour
+
 func init() {
 	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugBackupCleanup,
 		Name:        "Backup directories",
 		Category:    "Git Repository Health",
 		FixLevel:    FixLevelSuggested,
-		Description: "Detects and cleans up .bak.* directories left by failed clone operations",
+		Description: "Detects and cleans up stale .bak.* directories (older than 7 days) left by failed clone operations",
 		Run: func(fix bool) checkResult {
 			return checkBackupDirectories(fix)
 		},
@@ -52,7 +57,17 @@ func checkBackupDirectories(fix bool) checkResult {
 		return SkippedCheck("Backup directories", "not in git repo", "")
 	}
 
-	backups := discoverBackupDirs(gitRoot)
+	allBackups := discoverBackupDirs(gitRoot)
+
+	// filter to only stale backups (older than threshold)
+	now := time.Now()
+	var backups []backupDirInfo
+	for _, b := range allBackups {
+		if now.Sub(b.timestamp) >= staleBackupThreshold {
+			backups = append(backups, b)
+		}
+	}
+
 	if len(backups) == 0 {
 		return PassedCheck("Backup directories", "none found")
 	}
@@ -75,7 +90,7 @@ func checkBackupDirectories(fix bool) checkResult {
 
 	// report mode: show what was found
 	sizeStr := humanSize(totalSize)
-	msg := fmt.Sprintf("%d backup(s), %s", len(backups), sizeStr)
+	msg := fmt.Sprintf("%d stale backup(s) older than 7 days, %s", len(backups), sizeStr)
 
 	var detailLines []string
 	for _, b := range backups {

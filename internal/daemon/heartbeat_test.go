@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -669,5 +670,16 @@ func TestHeartbeatHandler_RejectsExpiredHeartbeatCredentials(t *testing.T) {
 	creds, _ := handler.GetCredentials()
 	if creds.Token != "valid-token" {
 		t.Error("expired heartbeat credentials should be rejected, keeping old valid ones")
+	}
+}
+
+func TestReadHeartbeatsFromPath_DirectoryPath(t *testing.T) {
+	dirPath := t.TempDir()
+	_, err := readHeartbeatsFromPath(dirPath)
+	if err == nil {
+		t.Fatal("expected error for directory path, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("expected 'not a regular file' error, got: %v", err)
 	}
 }

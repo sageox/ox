@@ -168,6 +168,14 @@ func readCacheSessionMeta(rawPath string) (*session.StoreMeta, int, error) {
 	}
 	defer f.Close()
 
+	info, err := f.Stat()
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to stat file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, 0, fmt.Errorf("not a regular file: %s", rawPath)
+	}
+
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 256*1024), 256*1024) // 256KB line buffer
 
@@ -301,6 +309,14 @@ func validateRawJSONLHeader(rawPath string) error {
 	}
 	defer f.Close()
 
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file: %s", rawPath)
+	}
+
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 64*1024), 64*1024)
 
@@ -327,6 +343,14 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	defer in.Close()
+
+	info, err := in.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file: %s", src)
+	}
 
 	out, err := os.Create(dst)
 	if err != nil {

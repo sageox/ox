@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -288,6 +289,40 @@ func TestFindOrphanedSessions_CorruptRawJSONL(t *testing.T) {
 
 	orphans := scanCacheDirForOrphans(cacheDir, ledgerDir)
 	assert.Empty(t, orphans, "corrupt raw.jsonl should be excluded from orphan list")
+}
+
+func TestReadCacheSessionMeta_DirectoryPath(t *testing.T) {
+	dirPath := t.TempDir()
+	_, _, err := readCacheSessionMeta(dirPath)
+	if err == nil {
+		t.Fatal("expected error for directory path, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("expected 'not a regular file' error, got: %v", err)
+	}
+}
+
+func TestValidateRawJSONLHeader_DirectoryPath(t *testing.T) {
+	dirPath := t.TempDir()
+	err := validateRawJSONLHeader(dirPath)
+	if err == nil {
+		t.Fatal("expected error for directory path, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("expected 'not a regular file' error, got: %v", err)
+	}
+}
+
+func TestCopyFile_DirectoryPath(t *testing.T) {
+	dirPath := t.TempDir()
+	dstPath := filepath.Join(t.TempDir(), "out.txt")
+	err := copyFile(dirPath, dstPath)
+	if err == nil {
+		t.Fatal("expected error for directory path, got nil")
+	}
+	if !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("expected 'not a regular file' error, got: %v", err)
+	}
 }
 
 func TestFindOrphanedSessions_ActiveRecordingWithRawJSONL(t *testing.T) {

@@ -177,6 +177,14 @@ func transformFile(srcPath, destPath string, sidebarPosition int) error {
 	}
 	defer srcFile.Close()
 
+	info, err := srcFile.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat source file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file: %s", srcPath)
+	}
+
 	// Create destination file
 	destFile, err := os.Create(destPath)
 	if err != nil {
