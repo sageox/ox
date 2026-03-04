@@ -591,3 +591,37 @@ func TestFindProjectRoot_OxProjectRootEnv(t *testing.T) {
 		assert.Equal(t, expectedRoot, actualRoot)
 	})
 }
+
+func TestResolveProjectRootOverride(t *testing.T) {
+	t.Run("returns resolved path for valid initialized project", func(t *testing.T) {
+		projectDir := CreateInitializedProjectWithConfig(t, nil)
+		t.Setenv("OX_PROJECT_ROOT", projectDir)
+
+		result := ResolveProjectRootOverride()
+
+		expectedRoot, _ := filepath.EvalSymlinks(projectDir)
+		actualRoot, _ := filepath.EvalSymlinks(result)
+		assert.Equal(t, expectedRoot, actualRoot)
+	})
+
+	t.Run("returns empty for dir without config.json", func(t *testing.T) {
+		// .sageox/ exists but no config.json — not properly initialized
+		tmpDir := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0755))
+		t.Setenv("OX_PROJECT_ROOT", tmpDir)
+
+		assert.Equal(t, "", ResolveProjectRootOverride())
+	})
+
+	t.Run("returns empty for nonexistent path", func(t *testing.T) {
+		t.Setenv("OX_PROJECT_ROOT", "/nonexistent/path/that/does/not/exist")
+
+		assert.Equal(t, "", ResolveProjectRootOverride())
+	})
+
+	t.Run("returns empty when env var not set", func(t *testing.T) {
+		t.Setenv("OX_PROJECT_ROOT", "")
+
+		assert.Equal(t, "", ResolveProjectRootOverride())
+	})
+}

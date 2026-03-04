@@ -171,11 +171,14 @@ func TestFindProjectRoot(t *testing.T) {
 
 func TestFindProjectRoot_OxProjectRootEnv(t *testing.T) {
 	t.Run("OX_PROJECT_ROOT overrides cwd discovery", func(t *testing.T) {
-		// create a project dir with .sageox
+		// create a fully initialized project dir (.sageox/config.json)
 		projectDir := t.TempDir()
 		sageoxDir := filepath.Join(projectDir, ".sageox")
 		if err := os.MkdirAll(sageoxDir, 0755); err != nil {
 			t.Fatalf("failed to create .sageox dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(`{"config_version":"2"}`), 0644); err != nil {
+			t.Fatalf("failed to create config.json: %v", err)
 		}
 
 		// cwd is somewhere else entirely

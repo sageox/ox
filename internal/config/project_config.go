@@ -312,20 +312,32 @@ func FindProjectConfigPath() (string, error) {
 	return findProjectConfigPathFromDir(cwd)
 }
 
+// ResolveProjectRootOverride checks OX_PROJECT_ROOT env var for an explicit
+// project root override. Returns the resolved path if valid, empty string otherwise.
+// This is the single source of truth for the env var — all callers should use this.
+func ResolveProjectRootOverride() string {
+	override := os.Getenv("OX_PROJECT_ROOT")
+	if override == "" {
+		return ""
+	}
+	resolved := os.ExpandEnv(override)
+	if abs, err := filepath.Abs(resolved); err == nil {
+		resolved = abs
+	}
+	if IsInitialized(resolved) {
+		return resolved
+	}
+	return ""
+}
+
 // FindProjectRoot walks up from the current working directory looking for .sageox directory.
 // Returns the project root if found, empty string if not found.
 // This is useful for finding the project root without requiring a config file to exist.
 //
 // OX_PROJECT_ROOT env var overrides discovery when set to a valid initialized project.
 func FindProjectRoot() string {
-	if override := os.Getenv("OX_PROJECT_ROOT"); override != "" {
-		resolved := os.ExpandEnv(override)
-		if abs, err := filepath.Abs(resolved); err == nil {
-			resolved = abs
-		}
-		if IsInitialized(resolved) {
-			return resolved
-		}
+	if resolved := ResolveProjectRootOverride(); resolved != "" {
+		return resolved
 	}
 
 	cwd, err := os.Getwd()
