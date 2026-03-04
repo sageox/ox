@@ -237,7 +237,17 @@ func (c *UserConfig) GetViewFormat() string {
 
 // LoadUserConfig loads user configuration from the specified config directory.
 // If configDir is empty, uses GetUserConfigDir() which respects XDG_CONFIG_HOME.
+//
+// OX_USER_CONFIG env var can override the config file path directly.
+// This is useful in CI/CD pipelines and ephemeral environments where
+// no home directory exists. When set, it takes precedence over configDir
+// and XDG discovery.
 func LoadUserConfig(configDir string) (*UserConfig, error) {
+	// OX_USER_CONFIG overrides all path discovery — for CI/ephemeral environments
+	if envPath := os.Getenv("OX_USER_CONFIG"); envPath != "" && configDir == "" {
+		return loadUserConfigFromFile(envPath)
+	}
+
 	if configDir == "" {
 		configDir = GetUserConfigDir()
 		if configDir == "" {
@@ -258,6 +268,24 @@ func LoadUserConfig(configDir string) (*UserConfig, error) {
 	var cfg UserConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return &UserConfig{}, fmt.Errorf("parsing config: %w", err)
+	}
+
+	return &cfg, nil
+}
+
+// loadUserConfigFromFile loads user config from an explicit file path.
+func loadUserConfigFromFile(path string) (*UserConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return &UserConfig{}, nil
+		}
+		return &UserConfig{}, fmt.Errorf("reading config from OX_USER_CONFIG=%s: %w", path, err)
+	}
+
+	var cfg UserConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return &UserConfig{}, fmt.Errorf("parsing config from OX_USER_CONFIG=%s: %w", path, err)
 	}
 
 	return &cfg, nil

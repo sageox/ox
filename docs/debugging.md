@@ -111,6 +111,9 @@ cat $XDG_RUNTIME_DIR/sageox/daemon/registry.json 2>/dev/null || \
 |----------|---------|
 | `SAGEOX_ENDPOINT` | Override endpoint URL |
 | `OX_XDG_DISABLE=1` | Legacy path mode (`~/.sageox/` instead of XDG) |
+| `OX_PROJECT_ROOT` | Override project root discovery (for CI/devroot) |
+| `OX_SESSION_RECORDING` | Override session recording mode (`auto`/`manual`/`disabled`) |
+| `OX_USER_CONFIG` | Load user config from explicit file path |
 
 ---
 

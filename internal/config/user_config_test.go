@@ -451,3 +451,43 @@ func TestSetDisplayName_Sanitizes(t *testing.T) {
 	cfg.SetDisplayName("   ")
 	assert.Equal(t, "", cfg.GetDisplayName())
 }
+
+func TestLoadUserConfig_OxUserConfigEnv(t *testing.T) {
+	t.Run("loads config from explicit file path", func(t *testing.T) {
+		configFile := filepath.Join(t.TempDir(), "custom-config.yaml")
+		content := []byte("display_name: pipeline-bot\nsessions:\n  mode: auto\n")
+		require.NoError(t, os.WriteFile(configFile, content, 0644))
+
+		t.Setenv("OX_USER_CONFIG", configFile)
+
+		cfg, err := LoadUserConfig("")
+		require.NoError(t, err)
+		assert.Equal(t, "pipeline-bot", cfg.GetDisplayName())
+		assert.Equal(t, "auto", cfg.Sessions.GetMode())
+	})
+
+	t.Run("missing file returns empty config", func(t *testing.T) {
+		t.Setenv("OX_USER_CONFIG", filepath.Join(t.TempDir(), "nonexistent.yaml"))
+
+		cfg, err := LoadUserConfig("")
+		require.NoError(t, err)
+		assert.Equal(t, "", cfg.GetDisplayName())
+	})
+
+	t.Run("explicit configDir takes precedence over env var", func(t *testing.T) {
+		// env var points to one config
+		envFile := filepath.Join(t.TempDir(), "env-config.yaml")
+		require.NoError(t, os.WriteFile(envFile, []byte("display_name: from-env\n"), 0644))
+		t.Setenv("OX_USER_CONFIG", envFile)
+
+		// explicit configDir points to another
+		explicitDir := t.TempDir()
+		require.NoError(t, os.WriteFile(
+			filepath.Join(explicitDir, "config.yaml"),
+			[]byte("display_name: from-dir\n"), 0644))
+
+		cfg, err := LoadUserConfig(explicitDir)
+		require.NoError(t, err)
+		assert.Equal(t, "from-dir", cfg.GetDisplayName())
+	})
+}
