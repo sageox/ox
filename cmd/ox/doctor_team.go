@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -271,4 +272,113 @@ func checkTeamAgentsMD(tc config.TeamContext) checkResult {
 	}
 
 	return PassedCheck(name, fmt.Sprintf("ok (~%d tokens)", tokenCount))
+}
+
+// checkGCBlockedByUntracked detects team contexts where untracked or modified files
+// are blocking blue-green GC reclone. The daemon's isCheckoutClean() uses
+// `git status --porcelain` and skips GC if there's any output.
+//
+// POLICY: We currently require user confirmation before removing any
+// untracked files from team context checkouts that aren't covered by
+// .sageox/.gitignore. In the future, we may define "safe zones"
+// (e.g., docs/) where users are expected to make local edits, and
+// treat everything outside those zones as eligible for automatic
+// cleanup during GC. Until that policy is decided, we surface the
+// blocking files and let the user choose.
+//
+// .observations/ must ALWAYS block GC — it may contain un-pushed session data.
+func checkGCBlockedByUntracked(fix bool) checkResult {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck("GC blocked", "not in git repo", "")
+	}
+
+	localCfg, err := config.LoadLocalConfig(gitRoot)
+	if err != nil || len(localCfg.TeamContexts) == 0 {
+		return SkippedCheck("GC blocked", "no team contexts", "")
+	}
+
+	var dirtyTeams []string
+	var allFiles []string
+	var hasSageoxFiles, hasObservationFiles, hasOtherFiles bool
+
+	for _, tc := range localCfg.TeamContexts {
+		if tc.Path == "" || !isGitRepo(tc.Path) {
+			continue
+		}
+
+		output, err := runGitStatus(tc.Path)
+		if err != nil || output == "" {
+			continue
+		}
+
+		teamName := tc.TeamName
+		if teamName == "" {
+			teamName = tc.TeamID
+		}
+		dirtyTeams = append(dirtyTeams, teamName)
+
+		for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+			if len(line) < 4 {
+				continue
+			}
+			// porcelain format: XY filename (3rd char is space)
+			file := strings.TrimSpace(line[3:])
+			allFiles = append(allFiles, file)
+
+			switch {
+			case strings.HasPrefix(file, ".sageox/"):
+				hasSageoxFiles = true
+			case strings.HasPrefix(file, ".observations/"):
+				hasObservationFiles = true
+			default:
+				hasOtherFiles = true
+			}
+		}
+	}
+
+	if len(dirtyTeams) == 0 {
+		return PassedCheck("GC blocked", "all team contexts clean")
+	}
+
+	// build detail message showing the blocking files and what to do
+	var detail strings.Builder
+	detail.WriteString(fmt.Sprintf("Teams with dirty checkouts: %s\n", strings.Join(dirtyTeams, ", ")))
+	detail.WriteString("        Blocking files:\n")
+	for _, f := range allFiles {
+		detail.WriteString(fmt.Sprintf("          %s\n", f))
+	}
+
+	if hasSageoxFiles && !hasOtherFiles && !hasObservationFiles {
+		// only .sageox/ files blocking — auto-fixable via gitignore
+		if fix {
+			// the gitignore-missing check handles this; just note it
+			detail.WriteString("        Fix: run `ox doctor --fix gitignore-missing` to update .sageox/.gitignore")
+		} else {
+			detail.WriteString("        Fix: run `ox doctor --fix` to update .sageox/.gitignore")
+		}
+		return WarningCheck("GC blocked", fmt.Sprintf("%d team(s) blocked by .sageox/ files", len(dirtyTeams)),
+			detail.String())
+	}
+
+	if hasObservationFiles {
+		detail.WriteString("        .observations/ files may contain un-pushed session data — do not delete\n")
+	}
+	if hasOtherFiles {
+		detail.WriteString("        Other files need manual review: commit, stash, or remove them")
+	}
+
+	return WarningCheck("GC blocked",
+		fmt.Sprintf("%d team(s) with uncommitted changes blocking GC", len(dirtyTeams)),
+		detail.String())
+}
+
+// runGitStatus runs git status --porcelain on a directory and returns the output.
+func runGitStatus(dir string) (string, error) {
+	cmd := exec.Command("git", "-C", dir, "status", "--porcelain")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }

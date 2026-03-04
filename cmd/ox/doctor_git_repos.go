@@ -2082,10 +2082,11 @@ func checkTeamContextGitignore(fix bool) checkResult {
 
 // checkoutDotSageoxGitignoreContent is the default content for .sageox/.gitignore
 // inside ledger and team context checkout directories.
-// This prevents checkout.json and workspaces.jsonl from being committed.
-const checkoutDotSageoxGitignoreContent = `# Local-only files - do not commit
-checkout.json
-workspaces.jsonl
+// Ignores everything, then re-includes files that must be committed.
+const checkoutDotSageoxGitignoreContent = `# Ignore all daemon-written files; re-include committed files
+*
+!.gitignore
+!sync.manifest
 `
 
 // checkLedgerCheckoutGitignore checks if .sageox/.gitignore exists in the ledger checkout
@@ -2125,61 +2126,33 @@ func checkLedgerCheckoutGitignore(fix bool) checkResult {
 		return SkippedCheck("Ledger checkout .gitignore", "ledger not a git repo", "")
 	}
 
-	// check for .sageox/.gitignore inside the ledger checkout
+	// check if .sageox directory exists in the ledger checkout
 	sageoxDir := filepath.Join(ledgerPath, ".sageox")
-	gitignorePath := filepath.Join(sageoxDir, ".gitignore")
-
-	// check if .sageox directory exists
 	if _, err := os.Stat(sageoxDir); os.IsNotExist(err) {
-		// .sageox doesn't exist - this is fine, no checkout.json to protect
 		return SkippedCheck("Ledger checkout .gitignore", "no .sageox in ledger", "")
 	}
 
-	// .sageox exists - check if .gitignore exists
-	if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
-		if fix {
-			// create .gitignore
-			if err := os.WriteFile(gitignorePath, []byte(checkoutDotSageoxGitignoreContent), 0644); err != nil {
-				return FailedCheck("Ledger checkout .gitignore", "create failed", err.Error())
-			}
-			return PassedCheck("Ledger checkout .gitignore", "created")
-		}
-		return checkResult{
-			name:    "Ledger checkout .gitignore",
-			passed:  false,
-			message: "missing",
-			detail:  "Run `ox doctor --fix` or `ox doctor --fix gitignore-missing` to create",
-		}
+	// Use EnsureCheckoutGitignore to check and fix in one call.
+	// It handles: missing file, missing entries, writing, and committing.
+	// Without cache/ in the gitignore, daemon-written files appear as
+	// untracked in git status and permanently block blue-green GC reclone.
+	if !gitserver.CheckoutGitignoreNeedsFix(ledgerPath) {
+		return PassedCheck("Ledger checkout .gitignore", "all entries present")
 	}
 
-	// .gitignore exists - verify it contains checkout.json
-	content, err := os.ReadFile(gitignorePath)
-	if err != nil {
-		return WarningCheck("Ledger checkout .gitignore", "read error", err.Error())
+	if fix {
+		if err := gitserver.EnsureCheckoutGitignore(ledgerPath); err != nil {
+			return FailedCheck("Ledger checkout .gitignore", "fix failed", err.Error())
+		}
+		return PassedCheck("Ledger checkout .gitignore", "updated")
 	}
 
-	if !strings.Contains(string(content), "checkout.json") {
-		if fix {
-			// append checkout.json to existing .gitignore
-			newContent := string(content)
-			if !strings.HasSuffix(newContent, "\n") {
-				newContent += "\n"
-			}
-			newContent += "checkout.json\n"
-			if err := os.WriteFile(gitignorePath, []byte(newContent), 0644); err != nil {
-				return FailedCheck("Ledger checkout .gitignore", "update failed", err.Error())
-			}
-			return PassedCheck("Ledger checkout .gitignore", "updated")
-		}
-		return checkResult{
-			name:    "Ledger checkout .gitignore",
-			passed:  false,
-			message: "checkout.json not ignored",
-			detail:  "Run `ox doctor --fix` or `ox doctor --fix gitignore-missing` to add",
-		}
+	return checkResult{
+		name:    "Ledger checkout .gitignore",
+		passed:  false,
+		message: "missing or incomplete",
+		detail:  "Run `ox doctor --fix` or `ox doctor --fix gitignore-missing` to fix",
 	}
-
-	return PassedCheck("Ledger checkout .gitignore", "checkout.json ignored")
 }
 
 // checkTeamContextCheckoutGitignore checks if .sageox/.gitignore exists in all team context
@@ -2221,41 +2194,17 @@ func checkTeamContextCheckoutGitignore(fix bool) checkResult {
 		}
 
 		total++
-		gitignorePath := filepath.Join(sageoxDir, ".gitignore")
 
-		// check if .gitignore exists
-		if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
+		// Use EnsureCheckoutGitignore to check and fix in one call.
+		// It handles: missing file, missing entries, writing, and committing.
+		// Without cache/ in the gitignore, daemon-written files like
+		// cache/sync-state.json appear as untracked in git status and
+		// permanently block blue-green GC reclone.
+		needsFix := gitserver.CheckoutGitignoreNeedsFix(tc.Path)
+		if needsFix {
 			if fix {
-				// create .gitignore
-				if err := os.WriteFile(gitignorePath, []byte(checkoutDotSageoxGitignoreContent), 0644); err != nil {
-					slog.Warn("failed to create .sageox/.gitignore in team context",
-						"path", tc.Path, "error", err)
-					missing++
-					continue
-				}
-				fixed++
-			} else {
-				missing++
-			}
-			continue
-		}
-
-		// .gitignore exists - verify it contains checkout.json
-		content, err := os.ReadFile(gitignorePath)
-		if err != nil {
-			continue
-		}
-
-		if !strings.Contains(string(content), "checkout.json") {
-			if fix {
-				// append checkout.json
-				newContent := string(content)
-				if !strings.HasSuffix(newContent, "\n") {
-					newContent += "\n"
-				}
-				newContent += "checkout.json\n"
-				if err := os.WriteFile(gitignorePath, []byte(newContent), 0644); err != nil {
-					slog.Warn("failed to update .sageox/.gitignore in team context",
+				if err := gitserver.EnsureCheckoutGitignore(tc.Path); err != nil {
+					slog.Warn("failed to fix .sageox/.gitignore in team context",
 						"path", tc.Path, "error", err)
 					notIgnored++
 					continue

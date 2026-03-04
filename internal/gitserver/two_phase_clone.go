@@ -101,6 +101,12 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 	// strip lfs config that git-lfs may have injected during clone
 	gitutil.StripLFSConfig(repoPath)
 
+	// ensure .sageox/.gitignore excludes daemon-written files (cache/, checkout.json, etc.)
+	// so they don't appear as untracked and block blue-green GC reclone
+	if err := EnsureCheckoutGitignoreCtx(ctx, repoPath); err != nil {
+		slog.Warn("failed to ensure checkout .gitignore", "path", repoPath, "error", err)
+	}
+
 	return &TwoPhaseCloneResult{
 		ManifestConfig: cfg,
 		SparsePaths:    sparsePaths,

@@ -2416,6 +2416,12 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 		s.logger.Warn("gc: failed to set pull.rebase on new clone", "error", err)
 	}
 
+	// ensure .sageox/.gitignore excludes daemon-written files (cache/, checkout.json, etc.)
+	// so they don't appear as untracked and block future GC reclone cycles
+	if err := gitserver.EnsureCheckoutGitignoreCtx(ctx, newPath); err != nil {
+		s.logger.Warn("gc: failed to ensure checkout .gitignore on new clone", "error", err)
+	}
+
 	// step 4: atomic swap
 	// clean up any leftover .old from a previous GC
 	if _, err := os.Stat(oldPath); err == nil {

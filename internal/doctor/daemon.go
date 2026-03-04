@@ -299,8 +299,11 @@ func (c *DaemonDirtyTeamContextCheck) Run(ctx context.Context) CheckResult {
 	return CheckResult{
 		Name:    c.Name(),
 		Status:  StatusWarn,
-		Message: fmt.Sprintf("%d with uncommitted changes", len(dirty)),
-		Fix:     fmt.Sprintf("Team contexts with local edits blocking GC: %s. Commit or discard changes to allow reclone.", strings.Join(dirty, ", ")),
+		Message: fmt.Sprintf("%d with uncommitted changes blocking GC", len(dirty)),
+		Fix: fmt.Sprintf("Team contexts blocking GC reclone: %s\n"+
+			"Run `ox doctor --fix gc-blocked-untracked` for details on which files are blocking.\n"+
+			"Common cause: missing cache/ entry in .sageox/.gitignore — run `ox doctor --fix gitignore-missing` to fix.",
+			strings.Join(dirty, ", ")),
 	}
 }
 

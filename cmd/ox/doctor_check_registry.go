@@ -422,6 +422,15 @@ func init() {
 		},
 	})
 
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugGCBlockedUntracked,
+		Name:        "GC blocked by untracked files",
+		Category:    "Team Context",
+		FixLevel:    FixLevelSuggested,
+		Description: "Detects team contexts where untracked or modified files block blue-green GC reclone",
+		Run:         checkGCBlockedByUntracked,
+	})
+
 	// ============================================================
 	// Daemon checks
 	// ============================================================
