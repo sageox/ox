@@ -28,7 +28,7 @@ func TestFindOrphanedSessions(t *testing.T) {
 			setup: func(t *testing.T, cacheDir, ledgerDir string) {
 				dir := filepath.Join(cacheDir, "2026-01-15T10-30-ryan-Oxa1b2")
 				os.MkdirAll(dir, 0755)
-				writeTestRawJSONL(t, filepath.Join(dir, "raw.jsonl"))
+				writeTestRawJSONL(t, filepath.Join(dir, ledgerFileRaw))
 				os.WriteFile(filepath.Join(dir, ".recording.json"), []byte("{}"), 0644)
 			},
 			expected: 0,
@@ -48,7 +48,7 @@ func TestFindOrphanedSessions(t *testing.T) {
 				sessionName := "2026-01-15T10-30-ryan-Oxa1b2"
 				dir := filepath.Join(cacheDir, sessionName)
 				os.MkdirAll(dir, 0755)
-				writeTestRawJSONL(t, filepath.Join(dir, "raw.jsonl"))
+				writeTestRawJSONL(t, filepath.Join(dir, ledgerFileRaw))
 				// meta.json exists in ledger
 				ledgerSession := filepath.Join(ledgerDir, "sessions", sessionName)
 				os.MkdirAll(ledgerSession, 0755)
@@ -61,7 +61,7 @@ func TestFindOrphanedSessions(t *testing.T) {
 			setup: func(t *testing.T, cacheDir, ledgerDir string) {
 				dir := filepath.Join(cacheDir, "2026-01-15T10-30-ryan-Oxa1b2")
 				os.MkdirAll(dir, 0755)
-				writeTestRawJSONL(t, filepath.Join(dir, "raw.jsonl"))
+				writeTestRawJSONL(t, filepath.Join(dir, ledgerFileRaw))
 			},
 			expected: 1,
 		},
@@ -71,7 +71,7 @@ func TestFindOrphanedSessions(t *testing.T) {
 				for _, name := range []string{"2026-01-15T10-30-ryan-Oxa1b2", "2026-01-15T11-00-ryan-Oxc3d4"} {
 					dir := filepath.Join(cacheDir, name)
 					os.MkdirAll(dir, 0755)
-					writeTestRawJSONL(t, filepath.Join(dir, "raw.jsonl"))
+					writeTestRawJSONL(t, filepath.Join(dir, ledgerFileRaw))
 				}
 			},
 			expected: 2,
@@ -113,7 +113,7 @@ func TestFindOrphanedSessions(t *testing.T) {
 func TestReadCacheSessionMeta(t *testing.T) {
 	t.Run("valid header with footer", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		rawPath := filepath.Join(tmpDir, "raw.jsonl")
+		rawPath := filepath.Join(tmpDir, ledgerFileRaw)
 		writeTestRawJSONLWithEntries(t, rawPath, 5)
 
 		meta, count, err := readCacheSessionMeta(rawPath)
@@ -140,7 +140,7 @@ func TestReadCacheSessionMeta(t *testing.T) {
 
 	t.Run("corrupt header", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		rawPath := filepath.Join(tmpDir, "raw.jsonl")
+		rawPath := filepath.Join(tmpDir, ledgerFileRaw)
 		os.WriteFile(rawPath, []byte("not json\n"), 0644)
 
 		_, _, err := readCacheSessionMeta(rawPath)
@@ -151,7 +151,7 @@ func TestReadCacheSessionMeta(t *testing.T) {
 
 	t.Run("header only no footer", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		rawPath := filepath.Join(tmpDir, "raw.jsonl")
+		rawPath := filepath.Join(tmpDir, ledgerFileRaw)
 		writeTestRawJSONL(t, rawPath) // header only
 
 		meta, count, err := readCacheSessionMeta(rawPath)
@@ -192,7 +192,7 @@ func scanCacheDirForOrphans(cacheSessionsDir, ledgerPath string) []orphanedSessi
 			continue
 		}
 
-		rawPath := filepath.Join(sessionDir, "raw.jsonl")
+		rawPath := filepath.Join(sessionDir, ledgerFileRaw)
 		if _, err := os.Stat(rawPath); os.IsNotExist(err) {
 			continue
 		}
@@ -285,7 +285,7 @@ func TestFindOrphanedSessions_CorruptRawJSONL(t *testing.T) {
 	// create session with corrupt raw.jsonl (not valid JSON header)
 	dir := filepath.Join(cacheDir, "2026-01-15T10-30-ryan-OxCorr")
 	require.NoError(t, os.MkdirAll(dir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte("this is not json\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileRaw), []byte("this is not json\n"), 0644))
 
 	orphans := scanCacheDirForOrphans(cacheDir, ledgerDir)
 	assert.Empty(t, orphans, "corrupt raw.jsonl should be excluded from orphan list")
@@ -335,7 +335,7 @@ func TestFindOrphanedSessions_ActiveRecordingWithRawJSONL(t *testing.T) {
 	// session has BOTH .recording.json AND raw.jsonl — still actively recording
 	dir := filepath.Join(cacheDir, "2026-01-15T10-30-ryan-OxActv")
 	require.NoError(t, os.MkdirAll(dir, 0755))
-	writeTestRawJSONL(t, filepath.Join(dir, "raw.jsonl"))
+	writeTestRawJSONL(t, filepath.Join(dir, ledgerFileRaw))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), []byte(`{"agent_id":"OxActv"}`), 0644))
 
 	orphans := scanCacheDirForOrphans(cacheDir, ledgerDir)

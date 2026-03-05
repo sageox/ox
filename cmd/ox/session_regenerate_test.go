@@ -125,7 +125,7 @@ func TestMapEntriesToTyped(t *testing.T) {
 func TestRewriteRawJSONL(t *testing.T) {
 	t.Run("round trip preserves header entries and footer", func(t *testing.T) {
 		dir := t.TempDir()
-		path := filepath.Join(dir, "raw.jsonl")
+		path := filepath.Join(dir, ledgerFileRaw)
 
 		now := time.Now().Truncate(time.Second).UTC()
 		original := &session.StoredSession{
@@ -177,7 +177,7 @@ func TestRewriteRawJSONL(t *testing.T) {
 
 	t.Run("no header when Meta is nil", func(t *testing.T) {
 		dir := t.TempDir()
-		path := filepath.Join(dir, "raw.jsonl")
+		path := filepath.Join(dir, ledgerFileRaw)
 
 		sess := &session.StoredSession{
 			Entries: []map[string]any{
@@ -196,7 +196,7 @@ func TestRewriteRawJSONL(t *testing.T) {
 
 	t.Run("no footer when Footer is nil", func(t *testing.T) {
 		dir := t.TempDir()
-		path := filepath.Join(dir, "raw.jsonl")
+		path := filepath.Join(dir, ledgerFileRaw)
 
 		sess := &session.StoredSession{
 			Meta: &session.StoreMeta{Version: "1"},
@@ -215,7 +215,7 @@ func TestRewriteRawJSONL(t *testing.T) {
 
 	t.Run("atomic write cleans up temp file on success", func(t *testing.T) {
 		dir := t.TempDir()
-		path := filepath.Join(dir, "raw.jsonl")
+		path := filepath.Join(dir, ledgerFileRaw)
 
 		sess := &session.StoredSession{
 			Entries: []map[string]any{
@@ -237,7 +237,7 @@ func TestRewriteRawJSONL(t *testing.T) {
 
 	t.Run("empty entries produces valid file", func(t *testing.T) {
 		dir := t.TempDir()
-		path := filepath.Join(dir, "raw.jsonl")
+		path := filepath.Join(dir, ledgerFileRaw)
 
 		sess := &session.StoredSession{
 			Meta:    &session.StoreMeta{Version: "1"},
@@ -460,7 +460,7 @@ func TestRegenerateArtifacts(t *testing.T) {
 		require.NoError(t, err)
 
 		// events.jsonl should be created
-		eventsPath := filepath.Join(sessionPath, "events.jsonl")
+		eventsPath := filepath.Join(sessionPath, ledgerFileEvents)
 		_, err = os.Stat(eventsPath)
 		assert.NoError(t, err, "events.jsonl should exist")
 		eventsData, err := os.ReadFile(eventsPath)
@@ -468,7 +468,7 @@ func TestRegenerateArtifacts(t *testing.T) {
 		assert.NotEmpty(t, eventsData, "events.jsonl should have content")
 
 		// session.html should be created
-		htmlPath := filepath.Join(sessionPath, "session.html")
+		htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
 		_, err = os.Stat(htmlPath)
 		assert.NoError(t, err, "session.html should exist")
 		htmlData, err := os.ReadFile(htmlPath)
@@ -476,7 +476,7 @@ func TestRegenerateArtifacts(t *testing.T) {
 		assert.Contains(t, string(htmlData), "<!DOCTYPE html", "session.html should contain HTML")
 
 		// session.md should be created
-		mdPath := filepath.Join(sessionPath, "session.md")
+		mdPath := filepath.Join(sessionPath, ledgerFileSessionMD)
 		_, err = os.Stat(mdPath)
 		assert.NoError(t, err, "session.md should exist")
 		mdData, err := os.ReadFile(mdPath)
@@ -515,7 +515,7 @@ func TestRegenerateArtifacts(t *testing.T) {
 		err = regenerateArtifacts(sessionPath, rawSession)
 		require.NoError(t, err)
 
-		summaryMdPath := filepath.Join(sessionPath, "summary.md")
+		summaryMdPath := filepath.Join(sessionPath, ledgerFileSummaryMD)
 		_, err = os.Stat(summaryMdPath)
 		assert.NoError(t, err, "summary.md should exist when summary.json is present")
 		summaryMd, err := os.ReadFile(summaryMdPath)
@@ -538,7 +538,7 @@ func TestRegenerateArtifacts(t *testing.T) {
 		err := regenerateArtifacts(sessionPath, rawSession)
 		require.NoError(t, err)
 
-		summaryMdPath := filepath.Join(sessionPath, "summary.md")
+		summaryMdPath := filepath.Join(sessionPath, ledgerFileSummaryMD)
 		_, err = os.Stat(summaryMdPath)
 		assert.True(t, os.IsNotExist(err), "summary.md should not exist without summary.json")
 	})

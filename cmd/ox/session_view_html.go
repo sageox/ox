@@ -29,7 +29,7 @@ func viewAsHTML(_ *session.Store, storedSession *session.StoredSession, projectR
 	}
 
 	// determine HTML path (session.html in the session directory)
-	htmlPath := filepath.Join(filepath.Dir(storedSession.Info.FilePath), "session.html")
+	htmlPath := filepath.Join(filepath.Dir(storedSession.Info.FilePath), ledgerFileHTML)
 
 	// check if HTML exists and is up-to-date
 	needsGeneration := false

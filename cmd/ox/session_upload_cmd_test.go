@@ -73,13 +73,13 @@ func TestHasContentFiles(t *testing.T) {
 
 	t.Run("returns true when raw.jsonl exists", func(t *testing.T) {
 		dir := t.TempDir()
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte("{}"), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileRaw), []byte("{}"), 0644))
 		assert.True(t, hasContentFiles(dir))
 	})
 
 	t.Run("returns true when summary.md exists", func(t *testing.T) {
 		dir := t.TempDir()
-		require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.md"), []byte("# Summary"), 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, ledgerFileSummaryMD), []byte("# Summary"), 0644))
 		assert.True(t, hasContentFiles(dir))
 	})
 }

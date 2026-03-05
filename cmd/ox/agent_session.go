@@ -56,6 +56,17 @@ Troubleshooting: If 'session already active' error, run session stop first. If a
 // sessionStopGuidance is behavioral guidance returned in the session stop JSON output.
 const sessionStopGuidance = `Session stopped and saved. Check the summary_prompt field — if present, follow its instructions to generate and push a rich summary. If summary generation fails, the session data is safe; run 'ox agent <id> doctor' to recover.`
 
+// ledger artifact filenames — single source of truth used by both
+// uploadSessionToLedger (write) and the post-prune path rewrite (read-back).
+const (
+	ledgerFileRaw       = "raw.jsonl"
+	ledgerFileEvents    = "events.jsonl" // likely deprecated long-term; raw.jsonl is the source of truth
+	ledgerFileHTML      = "session.html"
+	ledgerFileSummaryMD = "summary.md"
+	ledgerFileSessionMD = "session.md"
+	ledgerFilePlan      = "plan.md" // may contain multiple plans as separate Markdown sections
+)
+
 // genericFormatHint shows the expected JSONL format for generic adapter session files.
 const genericFormatHint = `{"type":"user","content":"Fix the login bug","timestamp":"2026-03-05T19:32:01Z"}
 {"type":"assistant","content":"I'll investigate the auth flow...","timestamp":"2026-03-05T19:32:05Z"}
@@ -850,7 +861,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			// read back the raw session
 			rawSession, readErr := store.ReadSession(filename)
 			if readErr == nil && rawSession != nil {
-				htmlPath := filepath.Join(filepath.Dir(result.RawPath), "session.html")
+				htmlPath := filepath.Join(filepath.Dir(result.RawPath), ledgerFileHTML)
 				if genErr := htmlGen.GenerateToFileWithSummary(rawSession, summaryResp, htmlPath); genErr == nil {
 					result.HTMLPath = htmlPath
 				} else {
@@ -890,10 +901,10 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	}
 
 	// check for plan.md saved during session (via `ox agent <id> session plan`)
-	planSrcPath := filepath.Join(state.SessionPath, "plan.md")
+	planSrcPath := filepath.Join(state.SessionPath, ledgerFilePlan)
 	if _, statErr := os.Stat(planSrcPath); statErr == nil {
 		cacheDir := filepath.Dir(result.RawPath)
-		planDstPath := filepath.Join(cacheDir, "plan.md")
+		planDstPath := filepath.Join(cacheDir, ledgerFilePlan)
 		if data, readErr := os.ReadFile(planSrcPath); readErr == nil {
 			if writeErr := os.WriteFile(planDstPath, data, 0644); writeErr == nil {
 				result.PlanPath = planDstPath
@@ -937,13 +948,42 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			}
 			result.LedgerSessionDir = "" // clear since upload didn't succeed
 		} else {
-			// all files copied and committed to ledger -- prune local cache.
-			// the ledger is now the source of truth; doctor checks the ledger
-			// directly for missing summaries (not the cache .needs-summary marker).
+			// ORDERING: prune MUST happen before the path rewrite below.
+			// result.RawPath still points to cache here; after rewrite it points
+			// to ledger. Swapping the order would RemoveAll the ledger directory.
 			if cacheDir := filepath.Dir(result.RawPath); cacheDir != "" && cacheDir != "." {
 				if err := os.RemoveAll(cacheDir); err != nil {
 					slog.Debug("prune session cache", "dir", cacheDir, "error", err)
 				}
+			}
+
+			// rewrite cache paths → ledger equivalents so JSON output and
+			// summary_prompt reference files that actually exist.
+			// raw.jsonl is guaranteed present (upload fails if copy fails);
+			// secondary artifacts are best-effort so we verify existence.
+			if result.LedgerSessionDir != "" {
+				// raw is always present after successful upload
+				result.RawPath = filepath.Join(result.LedgerSessionDir, ledgerFileRaw)
+
+				rewriteIfExists := func(field *string, name string) {
+					if *field == "" {
+						return
+					}
+					p := filepath.Join(result.LedgerSessionDir, name)
+					if _, err := os.Stat(p); err == nil {
+						*field = p
+					} else {
+						*field = "" // didn't make it to ledger
+					}
+				}
+				rewriteIfExists(&result.EventsPath, ledgerFileEvents)
+				rewriteIfExists(&result.HTMLPath, ledgerFileHTML)
+				rewriteIfExists(&result.SummaryMDPath, ledgerFileSummaryMD)
+				rewriteIfExists(&result.SessionMDPath, ledgerFileSessionMD)
+				rewriteIfExists(&result.PlanPath, ledgerFilePlan)
+
+				// rebuild summary prompt with ledger path; entries unchanged since redaction
+				result.SummaryPrompt = session.BuildSummaryPrompt(entries, result.RawPath, result.LedgerSessionDir)
 			}
 		}
 	}
@@ -982,23 +1022,23 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	// All other artifacts (events, HTML, summary, markdown) can be regenerated
 	// from raw.jsonl, so their copy failures are non-fatal.
 	if result.RawPath != "" {
-		dstPath := filepath.Join(sessionDir, "raw.jsonl")
+		dstPath := filepath.Join(sessionDir, ledgerFileRaw)
 		data, err := os.ReadFile(result.RawPath)
 		if err != nil {
-			return fmt.Errorf("read raw.jsonl: %w", err)
+			return fmt.Errorf("read %s: %w", ledgerFileRaw, err)
 		}
 		if err := os.WriteFile(dstPath, data, 0644); err != nil {
-			return fmt.Errorf("copy raw.jsonl to ledger: %w", err)
+			return fmt.Errorf("copy %s to ledger: %w", ledgerFileRaw, err)
 		}
 	}
 
 	// copy secondary artifacts (best-effort -- failures logged but don't abort upload)
 	secondaryFiles := map[string]string{
-		"events.jsonl": result.EventsPath,
-		"session.html": result.HTMLPath,
-		"summary.md":   result.SummaryMDPath,
-		"session.md":   result.SessionMDPath,
-		"plan.md":      result.PlanPath,
+		ledgerFileEvents:    result.EventsPath,
+		ledgerFileHTML:      result.HTMLPath,
+		ledgerFileSummaryMD: result.SummaryMDPath,
+		ledgerFileSessionMD: result.SessionMDPath,
+		ledgerFilePlan:      result.PlanPath,
 	}
 	for name, srcPath := range secondaryFiles {
 		if srcPath == "" {
@@ -1357,7 +1397,7 @@ func runAgentSessionHTML(inst *agentinstance.Instance, args []string) error {
 	var htmlPath string
 
 	if filePath != "" {
-		htmlPath = filepath.Join(filepath.Dir(filePath), "session.html")
+		htmlPath = filepath.Join(filepath.Dir(filePath), ledgerFileHTML)
 	} else {
 		// find latest session
 		repoID := getRepoIDOrDefault(projectRoot)
@@ -1374,7 +1414,7 @@ func runAgentSessionHTML(inst *agentinstance.Instance, args []string) error {
 			return fmt.Errorf("no sessions found: %w", err)
 		}
 		rawPath := latest.FilePath
-		htmlPath = filepath.Join(filepath.Dir(rawPath), "session.html")
+		htmlPath = filepath.Join(filepath.Dir(rawPath), ledgerFileHTML)
 	}
 
 	// check if HTML already exists
@@ -1671,7 +1711,7 @@ func runAgentSessionPlan(inst *agentinstance.Instance) error {
 	if session.IsRecordingForAgent(projectRoot, inst.AgentID) {
 		state, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
 		if err == nil && state.SessionPath != "" {
-			planPath = filepath.Join(state.SessionPath, "plan.md")
+			planPath = filepath.Join(state.SessionPath, ledgerFilePlan)
 			sessionID = session.GetSessionName(state.SessionPath)
 		}
 	}
@@ -1699,7 +1739,7 @@ func runAgentSessionPlan(inst *agentinstance.Instance) error {
 			return fmt.Errorf("create session dir: %w", err)
 		}
 
-		planPath = filepath.Join(sessionPath, "plan.md")
+		planPath = filepath.Join(sessionPath, ledgerFilePlan)
 	}
 
 	// write plan to file
@@ -1846,7 +1886,7 @@ func recordEntriesToSession(state *session.RecordingState, entries []sessionReco
 	}
 
 	// open raw session file for append
-	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	rawPath := filepath.Join(state.SessionPath, ledgerFileRaw)
 	f, err := os.OpenFile(rawPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return 0, fmt.Errorf("open raw session: %w", err)

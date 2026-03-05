@@ -156,7 +156,7 @@ func regenerateAllSessionsHTML(store *session.Store, projectRoot string, force b
 					continue
 				}
 				sessionPath := store.GetSessionPath(info.SessionName)
-				htmlPath := filepath.Join(sessionPath, "session.html")
+				htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
 				if _, statErr := os.Stat(htmlPath); statErr != nil {
 					continue
 				}
@@ -180,7 +180,7 @@ func regenerateAllSessionsHTML(store *session.Store, projectRoot string, force b
 
 // regenerateSessionHTML deletes any existing session.html and generates a new one.
 func regenerateSessionHTML(storedSession *session.StoredSession, sessionPath string) error {
-	htmlPath := filepath.Join(sessionPath, "session.html")
+	htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
 
 	if err := os.Remove(htmlPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove existing HTML: %w", err)
@@ -396,17 +396,17 @@ func regenerateSessionRedact(projectRoot, ledgerPath, sessionsDir, nameArg strin
 	}
 
 	// ensure raw.jsonl is available locally
-	rawPath := filepath.Join(sessionPath, "raw.jsonl")
+	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 	if _, err := os.Stat(rawPath); err != nil {
-		if err := downloadFileFromLFS(projectRoot, sessionPath, meta, "raw.jsonl"); err != nil {
-			return nil, fmt.Errorf("download raw.jsonl for %s: %w", sessionName, err)
+		if err := downloadFileFromLFS(projectRoot, sessionPath, meta, ledgerFileRaw); err != nil {
+			return nil, fmt.Errorf("download %s for %s: %w", ledgerFileRaw, sessionName, err)
 		}
 	}
 
 	// read raw.jsonl entries as maps (preserves original JSONL structure)
 	rawSession, err := session.ReadSessionFromPath(rawPath)
 	if err != nil {
-		return nil, fmt.Errorf("read raw.jsonl for %s: %w", sessionName, err)
+		return nil, fmt.Errorf("read %s for %s: %w", ledgerFileRaw, sessionName, err)
 	}
 
 	if len(rawSession.Entries) == 0 {
@@ -571,27 +571,27 @@ func regenerateArtifacts(sessionPath string, rawSession *session.StoredSession) 
 
 	// events.jsonl
 	eventLog := session.NewEventLog(entries, "", "")
-	eventsPath := filepath.Join(sessionPath, "events.jsonl")
+	eventsPath := filepath.Join(sessionPath, ledgerFileEvents)
 	if err := session.WriteEventLog(eventsPath, eventLog); err != nil {
-		errs = append(errs, fmt.Sprintf("events.jsonl: %s", err))
+		errs = append(errs, fmt.Sprintf("%s: %s", ledgerFileEvents, err))
 	}
 
 	// session.html
 	htmlGen, err := sessionhtml.NewGenerator()
 	if err == nil {
-		htmlPath := filepath.Join(sessionPath, "session.html")
+		htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
 		if err := htmlGen.GenerateToFile(rawSession, htmlPath); err != nil {
-			errs = append(errs, fmt.Sprintf("session.html: %s", err))
+			errs = append(errs, fmt.Sprintf("%s: %s", ledgerFileHTML, err))
 		}
 	} else {
-		errs = append(errs, fmt.Sprintf("session.html init: %s", err))
+		errs = append(errs, fmt.Sprintf("%s init: %s", ledgerFileHTML, err))
 	}
 
 	// session.md
 	mdGen := session.NewMarkdownGenerator()
-	mdPath := filepath.Join(sessionPath, "session.md")
+	mdPath := filepath.Join(sessionPath, ledgerFileSessionMD)
 	if err := mdGen.GenerateToFile(rawSession, mdPath); err != nil {
-		errs = append(errs, fmt.Sprintf("session.md: %s", err))
+		errs = append(errs, fmt.Sprintf("%s: %s", ledgerFileSessionMD, err))
 	}
 
 	// summary.md — regenerate from summary.json if available
@@ -610,9 +610,9 @@ func regenerateArtifacts(sessionPath string, rawSession *session.StoredSession) 
 			summaryMdGen := session.NewSummaryMarkdownGenerator()
 			summaryMdBytes, err := summaryMdGen.Generate(rawSession.Meta, summaryView, rawSession.Entries)
 			if err == nil {
-				summaryMdPath := filepath.Join(sessionPath, "summary.md")
+				summaryMdPath := filepath.Join(sessionPath, ledgerFileSummaryMD)
 				if writeErr := os.WriteFile(summaryMdPath, summaryMdBytes, 0644); writeErr != nil {
-					errs = append(errs, fmt.Sprintf("summary.md: %s", writeErr))
+					errs = append(errs, fmt.Sprintf("%s: %s", ledgerFileSummaryMD, writeErr))
 				}
 			}
 		}

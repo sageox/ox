@@ -68,7 +68,7 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 
 	// strategy 2: cache raw.jsonl exists -- upload directly
 	if state.SessionPath != "" {
-		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+		rawPath := filepath.Join(state.SessionPath, ledgerFileRaw)
 		if _, err := os.Stat(rawPath); err == nil {
 			slog.Info("cache raw.jsonl found, recovering from cache")
 			return recoverFromCache(inst, projectRoot, state, rawPath)
@@ -185,7 +185,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 			// copy raw.jsonl to ledger (the critical artifact)
 			data, err := os.ReadFile(rawPath)
 			if err == nil {
-				dstPath := filepath.Join(ledgerSessionDir, "raw.jsonl")
+				dstPath := filepath.Join(ledgerSessionDir, ledgerFileRaw)
 				if err := os.WriteFile(dstPath, data, 0644); err != nil {
 					slog.Warn("copy raw.jsonl to ledger failed", "error", err)
 				}
@@ -193,7 +193,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 
 			// copy other artifacts if they exist in cache
 			cacheDir := filepath.Dir(rawPath)
-			for _, name := range []string{"events.jsonl", "session.html", "summary.md", "session.md", "summary.json"} {
+			for _, name := range []string{ledgerFileEvents, ledgerFileHTML, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"} {
 				src := filepath.Join(cacheDir, name)
 				if srcData, err := os.ReadFile(src); err == nil {
 					dst := filepath.Join(ledgerSessionDir, name)

@@ -168,16 +168,16 @@ func checkSessionCompleteness(sessionPath string) []string {
 
 	// expected files in a complete session
 	expectedFiles := map[string]string{
-		"raw.jsonl":    "raw",
-		"events.jsonl": "events",
-		"session.html": "html",
-		"summary.md":   "summary",
-		"session.md":   "session_md",
-		"summary.json": "summary_json",
+		ledgerFileRaw:       "raw",
+		ledgerFileEvents:    "events",
+		ledgerFileHTML:      "html",
+		ledgerFileSummaryMD: "summary",
+		ledgerFileSessionMD: "session_md",
+		"summary.json":      "summary_json",
 	}
 
 	// raw.jsonl is required - if missing, the session is invalid
-	rawPath := filepath.Join(sessionPath, "raw.jsonl")
+	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 	if _, err := os.Stat(rawPath); os.IsNotExist(err) {
 		// no raw file means no session data to process
 		return nil
@@ -204,18 +204,15 @@ func buildFinalizeCommands(sessionName, agentID string, missing []string, sessio
 	for _, artifact := range missing {
 		switch artifact {
 		case "html":
-			// command to generate HTML viewer
-			rawPath := filepath.Join(sessionPath, "raw.jsonl")
+			rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 			commands = append(commands, fmt.Sprintf("ox session export --input %s", rawPath))
 		case "summary":
-			// command to summarize - agent should use the prompt instead
-			rawPath := filepath.Join(sessionPath, "raw.jsonl")
+			rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 			commands = append(commands, fmt.Sprintf("ox agent %s session summarize --file %s", agentID, rawPath))
 		case "events":
-			// events are generated during session stop, can't easily regenerate
-			commands = append(commands, fmt.Sprintf("# events.jsonl missing for %s (regenerate by re-processing raw)", sessionName))
+			commands = append(commands, fmt.Sprintf("# %s missing for %s (regenerate by re-processing raw)", ledgerFileEvents, sessionName))
 		case "session_md":
-			rawPath := filepath.Join(sessionPath, "raw.jsonl")
+			rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 			commands = append(commands, fmt.Sprintf("ox session export --markdown --input %s", rawPath))
 		case "summary_json":
 			commands = append(commands, fmt.Sprintf("# summary.json missing for %s (run ox agent doctor to regenerate)", sessionName))
@@ -227,7 +224,7 @@ func buildFinalizeCommands(sessionName, agentID string, missing []string, sessio
 
 // buildSummarizePromptForSession reads the session and builds a summary prompt
 func buildSummarizePromptForSession(sessionPath string) string {
-	rawPath := filepath.Join(sessionPath, "raw.jsonl")
+	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 
 	// read the session file
 	stored, err := session.ReadSessionFromPath(rawPath)

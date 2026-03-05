@@ -34,7 +34,7 @@ func TestCheckSessionCompleteness(t *testing.T) {
 		}
 
 		// create all expected files (including summary.json)
-		files := []string{"raw.jsonl", "events.jsonl", "session.html", "summary.md", "session.md", "summary.json"}
+		files := []string{ledgerFileRaw, ledgerFileEvents, ledgerFileHTML, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"}
 		for _, f := range files {
 			if err := os.WriteFile(filepath.Join(sessionDir, f), []byte("test"), 0644); err != nil {
 				t.Fatal(err)
@@ -56,7 +56,7 @@ func TestCheckSessionCompleteness(t *testing.T) {
 		}
 
 		// create only raw.jsonl
-		if err := os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte("test"), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(sessionDir, ledgerFileRaw), []byte("test"), 0644); err != nil {
 			t.Fatal(err)
 		}
 

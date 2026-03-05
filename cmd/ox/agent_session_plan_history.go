@@ -120,7 +120,7 @@ func runAgentSessionPlanHistory(inst *agentinstance.Instance, args []string) err
 	}
 
 	// write raw.jsonl with planning entries
-	rawPath := filepath.Join(sessionPath, "raw.jsonl")
+	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 	if err := writePlanHistoryRaw(rawPath, entries, meta, inst.AgentID); err != nil {
 		return fmt.Errorf("write raw session: %w", err)
 	}
@@ -128,7 +128,7 @@ func runAgentSessionPlanHistory(inst *agentinstance.Instance, args []string) err
 	// write plan.md if we found plan content
 	var planPath string
 	if planContent != "" {
-		planPath = filepath.Join(sessionPath, "plan.md")
+		planPath = filepath.Join(sessionPath, ledgerFilePlan)
 		if err := os.WriteFile(planPath, []byte(planContent), 0644); err != nil {
 			return fmt.Errorf("write plan file: %w", err)
 		}
@@ -138,20 +138,20 @@ func runAgentSessionPlanHistory(inst *agentinstance.Instance, args []string) err
 	stored, readErr := session.ReadSessionFromPath(rawPath)
 	if readErr == nil && stored != nil {
 		// session.html
-		htmlPath := filepath.Join(sessionPath, "session.html")
+		htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
 		if genErr := generateHTML(stored, htmlPath); genErr != nil {
 			slog.Debug("generate session HTML", "error", genErr)
 		}
 
 		// session.md (full session markdown)
-		sessionMDPath := filepath.Join(sessionPath, "session.md")
+		sessionMDPath := filepath.Join(sessionPath, ledgerFileSessionMD)
 		mdGen := session.NewMarkdownGenerator()
 		if mdErr := mdGen.GenerateToFile(stored, sessionMDPath); mdErr != nil {
 			slog.Debug("generate session markdown", "error", mdErr)
 		}
 
 		// summary.md
-		summaryMDPath := filepath.Join(sessionPath, "summary.md")
+		summaryMDPath := filepath.Join(sessionPath, ledgerFileSummaryMD)
 		summaryMDGen := session.NewSummaryMarkdownGenerator()
 		summaryBytes, summaryErr := summaryMDGen.Generate(stored.Meta, nil, stored.Entries)
 		if summaryErr == nil {

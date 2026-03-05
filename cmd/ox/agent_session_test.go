@@ -312,7 +312,7 @@ func TestReadEntriesFromFile(t *testing.T) {
 {"type":"assistant","content":"Hi there!","ts":"` + now + `"}
 {"type":"footer","entry_count":2}`
 
-		tmpFile := filepath.Join(sessionDir, "raw.jsonl")
+		tmpFile := filepath.Join(sessionDir, ledgerFileRaw)
 		require.NoError(t, os.WriteFile(tmpFile, []byte(content), 0644))
 
 		entries, err := readEntriesFromFile(tmpFile)
@@ -331,7 +331,7 @@ func TestReadEntriesFromFile(t *testing.T) {
 		sessionDir := filepath.Join(baseDir, "sessions", "empty")
 		require.NoError(t, os.MkdirAll(sessionDir, 0755))
 
-		tmpFile := filepath.Join(sessionDir, "raw.jsonl")
+		tmpFile := filepath.Join(sessionDir, ledgerFileRaw)
 		require.NoError(t, os.WriteFile(tmpFile, []byte(""), 0644))
 
 		entries, err := readEntriesFromFile(tmpFile)

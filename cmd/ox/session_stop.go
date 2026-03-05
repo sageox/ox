@@ -255,7 +255,7 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 			// read back the raw session
 			rawSession, readErr := store.ReadSession(filename)
 			if readErr == nil && rawSession != nil {
-				htmlPath := filepath.Join(filepath.Dir(result.RawPath), "session.html")
+				htmlPath := filepath.Join(filepath.Dir(result.RawPath), ledgerFileHTML)
 				if genErr := htmlGen.GenerateToFile(rawSession, htmlPath); genErr == nil {
 					result.HTMLPath = htmlPath
 				}

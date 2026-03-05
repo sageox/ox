@@ -108,11 +108,11 @@ Example:
 // hasContentFiles checks if a session directory has at least one content file.
 func hasContentFiles(sessionPath string) bool {
 	contentFiles := []string{
-		"raw.jsonl",
-		"events.jsonl",
-		"summary.md",
-		"session.md",
-		"session.html",
+		ledgerFileRaw,
+		ledgerFileEvents,
+		ledgerFileSummaryMD,
+		ledgerFileSessionMD,
+		ledgerFileHTML,
 	}
 	for _, name := range contentFiles {
 		if _, err := os.Stat(filepath.Join(sessionPath, name)); err == nil {
@@ -143,10 +143,10 @@ func buildSessionMeta(sessionPath, sessionName string, fileRefs map[string]lfs.F
 	ts, username, agentID := parseSessionDirName(sessionName)
 
 	// count entries in raw.jsonl if present
-	entryCount := countJSONLLines(filepath.Join(sessionPath, "raw.jsonl"))
+	entryCount := countJSONLLines(filepath.Join(sessionPath, ledgerFileRaw))
 
 	// read summary if present
-	summary := readFileString(filepath.Join(sessionPath, "summary.md"))
+	summary := readFileString(filepath.Join(sessionPath, ledgerFileSummaryMD))
 
 	// initialize Files with empty map if nil
 	if fileRefs == nil {

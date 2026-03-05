@@ -235,7 +235,7 @@ func regenerateLocalCacheHTML(sessionName string, summaryData []byte) {
 	cacheSessionDir := filepath.Join(contextPath, "sessions", sessionName)
 
 	// find raw.jsonl in cache dir
-	rawPath := filepath.Join(cacheSessionDir, "raw.jsonl")
+	rawPath := filepath.Join(cacheSessionDir, ledgerFileRaw)
 	if _, err := os.Stat(rawPath); err != nil {
 		slog.Debug("no raw.jsonl in cache for HTML regen", "path", rawPath)
 		return
@@ -257,7 +257,7 @@ func regenerateLocalCacheHTML(sessionName string, summaryData []byte) {
 
 	// regenerate HTML using generateHTML() which reads summary.json from
 	// the same directory and populates aha moments, SageOx insights, etc.
-	htmlPath := filepath.Join(filepath.Dir(rawPath), "session.html")
+	htmlPath := filepath.Join(filepath.Dir(rawPath), ledgerFileHTML)
 	if err := generateHTML(stored, htmlPath); err != nil {
 		slog.Debug("regenerate HTML with rich summary", "error", err)
 		return

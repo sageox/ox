@@ -72,12 +72,12 @@ func uploadSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, 
 
 	// content file patterns to upload (everything except meta.json)
 	contentFiles := []string{
-		"raw.jsonl",
-		"events.jsonl",
-		"summary.md",
-		"session.md",
-		"session.html",
-		"plan.md",
+		ledgerFileRaw,
+		ledgerFileEvents,
+		ledgerFileSummaryMD,
+		ledgerFileSessionMD,
+		ledgerFileHTML,
+		ledgerFilePlan,
 	}
 
 	// read all content files that exist

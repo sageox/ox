@@ -249,7 +249,7 @@ func TestReadPlanHistoryEntries_FileNotFound(t *testing.T) {
 
 func TestWritePlanHistoryRaw(t *testing.T) {
 	tmpDir := t.TempDir()
-	rawPath := filepath.Join(tmpDir, "raw.jsonl")
+	rawPath := filepath.Join(tmpDir, ledgerFileRaw)
 
 	entries := []planHistoryEntry{
 		{Type: "user", Content: "Question", Seq: 1, Source: "planning_history"},
@@ -293,7 +293,7 @@ func TestWritePlanHistoryRaw(t *testing.T) {
 
 func TestWritePlanHistoryRaw_NilMeta(t *testing.T) {
 	tmpDir := t.TempDir()
-	rawPath := filepath.Join(tmpDir, "raw.jsonl")
+	rawPath := filepath.Join(tmpDir, ledgerFileRaw)
 
 	entries := []planHistoryEntry{
 		{Type: "user", Content: "Test content"},
@@ -568,7 +568,7 @@ func TestPlanFileCreation(t *testing.T) {
 	require.NoError(t, err)
 
 	planContent := "## Final Plan\n\n1. Deploy to staging\n2. Run smoke tests\n3. Deploy to production"
-	planPath := filepath.Join(sessionPath, "plan.md")
+	planPath := filepath.Join(sessionPath, ledgerFilePlan)
 
 	err = os.WriteFile(planPath, []byte(planContent), 0644)
 	require.NoError(t, err)
@@ -620,7 +620,7 @@ func TestPlanHistoryIntegration(t *testing.T) {
 	err = os.MkdirAll(sessionPath, 0755)
 	require.NoError(t, err)
 
-	rawPath := filepath.Join(sessionPath, "raw.jsonl")
+	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 	err = writePlanHistoryRaw(rawPath, entries, meta, "OxIntg")
 	require.NoError(t, err)
 
@@ -629,7 +629,7 @@ func TestPlanHistoryIntegration(t *testing.T) {
 	require.NoError(t, err)
 
 	// write plan.md
-	planPath := filepath.Join(sessionPath, "plan.md")
+	planPath := filepath.Join(sessionPath, ledgerFilePlan)
 	err = os.WriteFile(planPath, []byte(planContent), 0644)
 	require.NoError(t, err)
 

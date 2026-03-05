@@ -151,7 +151,7 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 		}
 
 		// skip if no raw.jsonl (corrupt/empty)
-		rawPath := filepath.Join(sessionDir, "raw.jsonl")
+		rawPath := filepath.Join(sessionDir, ledgerFileRaw)
 		if _, err := os.Stat(rawPath); os.IsNotExist(err) {
 			continue
 		}
@@ -256,20 +256,20 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 	}
 
 	// validate raw.jsonl integrity before uploading — skip corrupted files
-	rawSrc := filepath.Join(orphan.CachePath, "raw.jsonl")
+	rawSrc := filepath.Join(orphan.CachePath, ledgerFileRaw)
 	if err := validateRawJSONLHeader(rawSrc); err != nil {
-		return fmt.Errorf("raw.jsonl validation failed (skipping corrupt session): %w", err)
+		return fmt.Errorf("%s validation failed (skipping corrupt session): %w", ledgerFileRaw, err)
 	}
 
 	// raw.jsonl is the critical source of truth — copy it first and fail fast if missing.
 	// All other artifacts can be regenerated from raw.jsonl.
-	rawDst := filepath.Join(sessionDir, "raw.jsonl")
+	rawDst := filepath.Join(sessionDir, ledgerFileRaw)
 	if err := copyFile(rawSrc, rawDst); err != nil {
-		return fmt.Errorf("copy raw.jsonl (critical): %w", err)
+		return fmt.Errorf("copy %s (critical): %w", ledgerFileRaw, err)
 	}
 
 	// copy secondary artifacts (best-effort — skip missing files, don't abort on failure)
-	secondaryFiles := []string{"events.jsonl", "session.html", "summary.md", "session.md", "summary.json"}
+	secondaryFiles := []string{ledgerFileEvents, ledgerFileHTML, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"}
 	for _, name := range secondaryFiles {
 		src := filepath.Join(orphan.CachePath, name)
 		dst := filepath.Join(sessionDir, name)

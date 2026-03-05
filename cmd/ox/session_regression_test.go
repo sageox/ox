@@ -18,7 +18,7 @@ import (
 func buildRegressionImportedSession() *session.StoredSession {
 	return &session.StoredSession{
 		Info: session.SessionInfo{
-			Filename: "raw.jsonl",
+			Filename: ledgerFileRaw,
 			FilePath: "/tmp/test/sessions/2026-01-20T14-00-testdev-Ox1234/raw.jsonl",
 		},
 		Meta: &session.StoreMeta{
@@ -50,7 +50,7 @@ func buildRegressionImportedSession() *session.StoredSession {
 func buildRegressionStandardSession() *session.StoredSession {
 	return &session.StoredSession{
 		Info: session.SessionInfo{
-			Filename: "raw.jsonl",
+			Filename: ledgerFileRaw,
 			FilePath: "/tmp/test/sessions/2026-01-20T14-00-testdev-Ox5678/raw.jsonl",
 		},
 		Meta: &session.StoreMeta{
@@ -174,7 +174,7 @@ func TestRegression_StandardSession_Duration(t *testing.T) {
 
 func TestRegression_GenerateHTML_CreatesFile(t *testing.T) {
 	tmpDir := t.TempDir()
-	outputPath := filepath.Join(tmpDir, "session.html")
+	outputPath := filepath.Join(tmpDir, ledgerFileHTML)
 
 	sess := buildRegressionImportedSession()
 	err := generateHTML(sess, outputPath)
