@@ -23,6 +23,19 @@ func TestMinimalEnv_InjectsNoDaemon(t *testing.T) {
 	assert.True(t, found, "MinimalEnv should always inject OX_NO_DAEMON=1")
 }
 
+func TestMinimalEnv_InjectsDoNotTrack(t *testing.T) {
+	env := MinimalEnv(nil)
+
+	found := false
+	for _, kv := range env {
+		if kv == "DO_NOT_TRACK=1" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "MinimalEnv should always inject DO_NOT_TRACK=1")
+}
+
 func TestMinimalEnv_ExcludesSageoxEndpoint(t *testing.T) {
 	// even if SAGEOX_ENDPOINT is in the real env, MinimalEnv should NOT inherit it
 	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")

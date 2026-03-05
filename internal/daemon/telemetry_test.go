@@ -502,6 +502,42 @@ func TestTelemetryCollector_Stop_Concurrent(t *testing.T) {
 	}, "concurrent Stop() calls should not panic")
 }
 
+// TestTelemetryCollector_FlushCooldown_PreventsThunderingHerd verifies that rapid
+// event recording does not trigger unbounded HTTP requests. Before this fix,
+// every Record() call above the batch threshold (50) spawned a new flush goroutine
+// with no cooldown, creating unbounded HTTP POSTs under rapid input.
+func TestTelemetryCollector_FlushCooldown_PreventsThunderingHerd(t *testing.T) {
+	var requestCount atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("SAGEOX_TELEMETRY", "")
+	t.Setenv("SAGEOX_TELEMETRY_ENDPOINT", server.URL)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	collector := NewTelemetryCollector(logger)
+
+	// rapidly record 200 events (well above batch threshold of 50)
+	for i := range 200 {
+		collector.Record("test:rapid", map[string]any{"index": i})
+	}
+
+	// allow goroutines to settle
+	time.Sleep(100 * time.Millisecond)
+
+	// with cooldown, at most 1 early flush should have fired
+	count := requestCount.Load()
+	if count > 1 {
+		t.Errorf("requestCount = %d, want <= 1 (cooldown should prevent thundering herd)", count)
+	}
+}
+
 func TestTelemetryCollector_RecordDuringShutdown(t *testing.T) {
 	t.Setenv("DO_NOT_TRACK", "")
 	t.Setenv("SAGEOX_TELEMETRY", "")
