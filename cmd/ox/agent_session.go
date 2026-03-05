@@ -50,7 +50,11 @@ import (
 const sessionStartGuidance = `During this recorded session:
 1. Plan capture: After creating or revising a plan, immediately save it with: cat <plan-file> | ox agent <id> session plan
 2. After stopping: Check the session stop output for plan_path. If empty and you created a plan, save it now with: cat <plan-file> | ox agent <id> session plan
-3. Session boundaries: One plan per session. If work shifts to an unrelated feature, suggest stopping this session and starting a new one.`
+3. Session boundaries: One plan per session. If work shifts to an unrelated feature, suggest stopping this session and starting a new one.
+Troubleshooting: If 'session already active' error, run session stop first. If agent ID missing, run 'ox agent prime'. If not initialized, run 'ox init'.`
+
+// sessionStopGuidance is behavioral guidance returned in the session stop JSON output.
+const sessionStopGuidance = `Session stopped and saved. Check the summary_prompt field — if present, follow its instructions to generate and push a rich summary. If summary generation fails, the session data is safe; run 'ox agent <id> doctor' to recover.`
 
 // sessionStartOutput is the JSON output format for session start.
 type sessionStartOutput struct {
@@ -419,6 +423,7 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 		Type:     "session_stop",
 		AgentID:  inst.AgentID,
 		Duration: duration,
+		Guidance: sessionStopGuidance,
 	}
 	if state.Title != "" {
 		output.Title = state.Title
@@ -474,6 +479,7 @@ type sessionStopOutput struct {
 	EventsAfterFilter  int    `json:"events_after_filter,omitempty"`  // events after filtering
 	LedgerSessionDir   string `json:"ledger_session_dir,omitempty"`   // path to session dir in ledger
 	UploadWarning      string `json:"upload_warning,omitempty"`       // set when ledger upload failed
+	Guidance           string `json:"guidance,omitempty"`             // behavioral guidance for the agent
 }
 
 // parseTitle extracts --title value from args

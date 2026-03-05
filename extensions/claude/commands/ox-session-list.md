@@ -3,11 +3,6 @@
      Skills are agent-specific wrappers; ox serves all agents (Codex, etc.). -->
 List recent sessions from the project ledger and offer to view one.
 
-## When to Use
-- Reviewing what happened in recent sessions
-- Viewing a teammate's session
-- Checking session history for context
-
 ## Steps
 
 1. Run the command below to show recent sessions:
