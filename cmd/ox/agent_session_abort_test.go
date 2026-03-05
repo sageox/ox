@@ -1,7 +1,9 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -193,4 +195,29 @@ func TestAbort_SessionFolderWithReadOnlyFiles(t *testing.T) {
 	_, err = os.Stat(state.SessionPath)
 	assert.True(t, os.IsNotExist(err),
 		"session folder with read-only files should be fully removed after abort")
+}
+
+func TestAbortOutputIncludesGuidance(t *testing.T) {
+	setupAbortTest(t)
+	setForceFlag(t, true)
+
+	// capture stdout
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	inst := &agentinstance.Instance{AgentID: "OxAbrt"}
+	err := runAgentSessionAbort(inst, agentCmd)
+
+	w.Close()
+	os.Stdout = oldStdout
+
+	require.NoError(t, err)
+
+	out, _ := io.ReadAll(r)
+	var output sessionAbortOutput
+	require.NoError(t, json.Unmarshal(out, &output), "output should be valid JSON")
+	assert.True(t, output.Success)
+	assert.NotEmpty(t, output.Guidance, "abort JSON output must include guidance field")
+	assert.Contains(t, output.Guidance, "No further action needed")
 }

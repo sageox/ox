@@ -1,4 +1,7 @@
 <!-- ox-hash: placeholder ver: 0.17.0 -->
+<!-- Keep this file thin. Behavioral guidance (use-when, common-issues, errors)
+     belongs in the ox CLI JSON output (guidance field), not here.
+     Skills are agent-specific wrappers; ox serves all agents (Codex, etc.). -->
 Check the status of all active session recordings in this project.
 
 Use when:

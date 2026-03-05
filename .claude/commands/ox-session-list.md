@@ -1,3 +1,6 @@
+<!-- Keep this file thin. Behavioral guidance (use-when, common-issues, errors)
+     belongs in the ox CLI JSON output (guidance field), not here.
+     Skills are agent-specific wrappers; ox serves all agents (Codex, etc.). -->
 List recent sessions from the project ledger and offer to view one.
 
 ## When to Use

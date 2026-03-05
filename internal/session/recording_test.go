@@ -945,3 +945,64 @@ func TestLoadAllRecordingStates_Deduplicates(t *testing.T) {
 	// cleanup
 	_, _ = StopRecording(projectRoot)
 }
+
+func TestStopThenStartSameAgent(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := setupRecordingTest(t, cacheDir)
+
+	// start recording
+	_, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: "OxSame1", AdapterName: "claude-code", Username: "testuser",
+	})
+	require.NoError(t, err)
+	require.True(t, IsRecording(projectRoot))
+
+	// stop recording
+	_, err = StopRecording(projectRoot)
+	require.NoError(t, err)
+	require.False(t, IsRecording(projectRoot))
+
+	// start again with same agent — must succeed
+	state2, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: "OxSame1", AdapterName: "claude-code", Username: "testuser",
+	})
+	require.NoError(t, err, "start after stop with same agent must succeed")
+	require.NotNil(t, state2)
+	assert.Equal(t, "OxSame1", state2.AgentID)
+
+	// cleanup
+	_, _ = StopRecording(projectRoot)
+}
+
+func TestExplicitStopMarker(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionsDir := filepath.Join(tmpDir, "sessions")
+	require.NoError(t, os.MkdirAll(sessionsDir, 0755))
+
+	// no marker initially
+	assert.False(t, ConsumeExplicitStop(tmpDir), "no marker should exist initially")
+
+	// write marker
+	require.NoError(t, MarkExplicitStop(tmpDir))
+
+	// marker file should exist
+	markerPath := filepath.Join(sessionsDir, explicitStopMarker)
+	_, err := os.Stat(markerPath)
+	assert.NoError(t, err, "marker file should exist after MarkExplicitStop")
+
+	// consume removes it and returns true
+	assert.True(t, ConsumeExplicitStop(tmpDir), "ConsumeExplicitStop should return true when marker exists")
+
+	// second consume returns false (already consumed)
+	assert.False(t, ConsumeExplicitStop(tmpDir), "ConsumeExplicitStop should return false after already consumed")
+
+	// marker file should be gone
+	_, err = os.Stat(markerPath)
+	assert.True(t, os.IsNotExist(err), "marker file should be removed after consume")
+}
+
+func TestExplicitStopMarker_EmptyProjectRoot(t *testing.T) {
+	err := MarkExplicitStop("")
+	assert.Error(t, err, "MarkExplicitStop with empty root should error")
+	assert.False(t, ConsumeExplicitStop(""), "ConsumeExplicitStop with empty root should return false")
+}

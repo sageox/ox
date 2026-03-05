@@ -104,22 +104,7 @@ func LoadRecordingState(projectRoot string) (*RecordingState, error) {
 		return nil, fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
 
-	// search for .recording.json in sessions directory structure
-	// check both project-local and XDG cache locations
-	sessionsPaths := []string{
-		filepath.Join(projectRoot, "sessions"),
-	}
-
-	// also check XDG cache location if we can determine repo ID
-	repoID := getRepoIDFromProject(projectRoot)
-	if repoID != "" {
-		contextPath := GetContextPath(repoID)
-		if contextPath != "" {
-			sessionsPaths = append(sessionsPaths, filepath.Join(contextPath, "sessions"))
-		}
-	}
-
-	for _, sessionsDir := range sessionsPaths {
+	for _, sessionsDir := range sessionsSearchPaths(projectRoot) {
 		entries, err := os.ReadDir(sessionsDir)
 		if err != nil {
 			continue // directory doesn't exist, try next
@@ -157,22 +142,10 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 		return nil, fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
 
-	sessionsPaths := []string{
-		filepath.Join(projectRoot, "sessions"),
-	}
-
-	repoID := getRepoIDFromProject(projectRoot)
-	if repoID != "" {
-		contextPath := GetContextPath(repoID)
-		if contextPath != "" {
-			sessionsPaths = append(sessionsPaths, filepath.Join(contextPath, "sessions"))
-		}
-	}
-
 	seen := make(map[string]struct{}) // deduplicate by canonical recording file path
 	var states []*RecordingState
 
-	for _, sessionsDir := range sessionsPaths {
+	for _, sessionsDir := range sessionsSearchPaths(projectRoot) {
 		entries, err := os.ReadDir(sessionsDir)
 		if err != nil {
 			continue
@@ -240,6 +213,59 @@ func ClearRecordingState(projectRoot string) error {
 func IsRecording(projectRoot string) bool {
 	state, err := LoadRecordingState(projectRoot)
 	return err == nil && state != nil
+}
+
+const explicitStopMarker = ".session_stopped"
+
+// MarkExplicitStop writes a breadcrumb indicating the user explicitly stopped
+// recording. This prevents the next auto-start cycle (e.g. from /clear hook
+// re-prime) from silently restarting the session.
+func MarkExplicitStop(projectRoot string) error {
+	if projectRoot == "" {
+		return fmt.Errorf("%w: project root", ErrEmptyPath)
+	}
+	for _, dir := range sessionsSearchPaths(projectRoot) {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			continue
+		}
+		markerPath := filepath.Join(dir, explicitStopMarker)
+		if err := os.WriteFile(markerPath, []byte(time.Now().Format(time.RFC3339)), 0600); err != nil {
+			continue
+		}
+		return nil
+	}
+	return fmt.Errorf("could not write explicit stop marker for project=%s", projectRoot)
+}
+
+// ConsumeExplicitStop checks for and removes the explicit-stop marker.
+// Returns true if the marker existed (meaning an auto-start should be skipped).
+func ConsumeExplicitStop(projectRoot string) bool {
+	if projectRoot == "" {
+		return false
+	}
+	for _, dir := range sessionsSearchPaths(projectRoot) {
+		markerPath := filepath.Join(dir, explicitStopMarker)
+		if err := os.Remove(markerPath); err == nil {
+			return true // marker existed and was removed
+		}
+	}
+	return false
+}
+
+// sessionsSearchPaths returns the sessions directory paths to search
+// (both project-local and XDG cache).
+func sessionsSearchPaths(projectRoot string) []string {
+	paths := []string{
+		filepath.Join(projectRoot, "sessions"),
+	}
+	repoID := getRepoIDFromProject(projectRoot)
+	if repoID != "" {
+		contextPath := GetContextPath(repoID)
+		if contextPath != "" {
+			paths = append(paths, filepath.Join(contextPath, "sessions"))
+		}
+	}
+	return paths
 }
 
 // GetRecordingDuration returns how long the current recording has been running.

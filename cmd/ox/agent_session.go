@@ -94,6 +94,9 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		// non-ErrReadOnly errors fall through (fail-open)
 	}
 
+	// explicit start re-enables recording — clear any stop breadcrumb
+	session.ConsumeExplicitStop(projectRoot)
+
 	// one-time session recording notice (returned to caller via JSON)
 	notice := getSessionTermsNotice()
 
@@ -280,6 +283,9 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		_ = doctor.SetNeedsDoctorAgent(projectRoot) // session data may be lost
 		return fmt.Errorf("failed to stop recording: %w", err)
 	}
+
+	// mark explicit stop so /clear hook doesn't silently auto-restart the session
+	_ = session.MarkExplicitStop(projectRoot)
 
 	duration := formatDurationHuman(state.Duration())
 

@@ -18,6 +18,7 @@ type sessionAbortOutput struct {
 	AgentID     string `json:"agent_id"`
 	SessionName string `json:"session_name,omitempty"`
 	Message     string `json:"message"`
+	Guidance    string `json:"guidance,omitempty"`
 }
 
 // runAgentSessionAbort discards the active session without uploading to ledger.
@@ -78,6 +79,7 @@ func runAgentSessionAbort(inst *agentinstance.Instance, cmd *cobra.Command) erro
 		AgentID:     inst.AgentID,
 		SessionName: sessionName,
 		Message:     "session aborted and discarded",
+		Guidance:    "Session aborted and discarded. No further action needed. Continue with your current task.",
 	}
 
 	if cfg.Text || cfg.Review {

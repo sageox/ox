@@ -947,6 +947,11 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 		}
 	}
 
+	// respect explicit session stop — user ran /ox-session-stop, don't auto-restart
+	if session.ConsumeExplicitStop(projectRoot) {
+		return nil
+	}
+
 	// check if already recording
 	if session.IsRecording(projectRoot) {
 		state, err := session.LoadRecordingState(projectRoot)

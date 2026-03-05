@@ -1,4 +1,9 @@
 <!-- ox-hash: b1e68f3b2727 ver: 0.17.0 -->
+<!-- Keep this file thin. Behavioral guidance (use-when, common-issues, errors)
+     belongs in the ox CLI JSON output (guidance field), not here.
+     Skills are agent-specific wrappers; ox serves all agents (Codex, etc.).
+     Exception: Post-Command sections that require agent-side actions (e.g.,
+     displaying a notice, generating a summary) are legitimate here. -->
 Start recording this agent session to the project ledger.
 
 Use when:
