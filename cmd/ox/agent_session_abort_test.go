@@ -153,7 +153,7 @@ func TestAbortForceViaCobraFlag(t *testing.T) {
 	assert.False(t, session.IsRecording(projectRoot), "session should be aborted")
 }
 
-func TestAbortDifferentAgent_AbortsFirstFoundSession(t *testing.T) {
+func TestAbortDifferentAgent_CannotAbortOtherAgentSession(t *testing.T) {
 	projectRoot, state := setupAbortTest(t)
 
 	// Agent A (OxAbrt) has an active recording from setupAbortTest
@@ -162,20 +162,19 @@ func TestAbortDifferentAgent_AbortsFirstFoundSession(t *testing.T) {
 
 	setForceFlag(t, true)
 
-	// Agent B calls abort — abort doesn't filter by agent ID,
-	// so it loads and aborts A's session
+	// Agent B calls abort — agent-scoped, so B cannot see or abort A's session
 	instB := &agentinstance.Instance{AgentID: "OxOthr"}
 	err := runAgentSessionAbort(instB, agentCmd)
-	require.NoError(t, err, "abort should succeed even from a different agent")
+	require.Error(t, err, "abort should fail when agent has no active session")
+	assert.Contains(t, err.Error(), "no active session")
 
-	// A's recording should be cleared
-	assert.False(t, session.IsRecording(projectRoot),
-		"recording should be cleared after abort by different agent")
+	// A's recording should still be active (untouched by B)
+	assert.True(t, session.IsRecordingForAgent(projectRoot, "OxAbrt"),
+		"A's recording should still be active after B's failed abort")
 
-	// A's session folder should be removed
+	// A's session folder should still exist
 	_, err = os.Stat(state.SessionPath)
-	assert.True(t, os.IsNotExist(err),
-		"session folder should be removed even when aborted by different agent")
+	assert.NoError(t, err, "A's session folder should still exist")
 }
 
 func TestAbort_SessionFolderWithReadOnlyFiles(t *testing.T) {

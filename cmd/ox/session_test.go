@@ -154,7 +154,7 @@ func TestSessionStatusRecording(t *testing.T) {
 	assert.Equal(t, opts.AdapterName, state.AdapterName, "AdapterName mismatch")
 
 	// clean up
-	_, err = session.StopRecording(projectRoot)
+	_, err = session.StopRecording(projectRoot, "OxTest")
 	require.NoError(t, err, "failed to stop recording")
 }
 
@@ -184,7 +184,7 @@ func TestSessionStartStopWorkflow(t *testing.T) {
 	assert.Error(t, err, "expected error when starting second recording")
 
 	// step 5: stop recording
-	stopState, err := session.StopRecording(projectRoot)
+	stopState, err := session.StopRecording(projectRoot, "OxFlow")
 	require.NoError(t, err, "failed to stop recording")
 
 	assert.Equal(t, startOpts.AgentID, stopState.AgentID, "AgentID mismatch after stop")
@@ -193,7 +193,7 @@ func TestSessionStartStopWorkflow(t *testing.T) {
 	assert.False(t, session.IsRecording(projectRoot), "expected no recording after stop")
 
 	// step 7: try to stop again (should fail)
-	_, err = session.StopRecording(projectRoot)
+	_, err = session.StopRecording(projectRoot, "OxFlow")
 	assert.Error(t, err, "expected error when stopping while not recording")
 }
 

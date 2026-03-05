@@ -499,71 +499,59 @@ func TestStartRecording(t *testing.T) {
 		assert.Error(t, err)
 	})
 
-	// Ghost session regression tests: when user exits Claude Code without
-	// stopping the session (e.g., after hooks restart notice), the .recording.json
-	// persists. A new instance with a different agent ID should auto-clear it,
-	// while the same agent ID starting twice should still error.
-	ghostTests := []struct {
-		name         string
-		firstAgent   string
-		secondAgent  string
-		wantError    bool
-		wantErrorIs  error
-	}{
-		{
-			name:        "clears ghost session from different agent",
-			firstAgent:  "OxOldAgent",
-			secondAgent: "OxNewAgent",
-			wantError:   false,
-		},
-		{
-			name:        "same agent duplicate start still blocked",
-			firstAgent:  "OxSameAgent",
-			secondAgent: "OxSameAgent",
-			wantError:   true,
-			wantErrorIs: ErrAlreadyRecording,
-		},
-	}
-	for _, tt := range ghostTests {
-		t.Run(tt.name, func(t *testing.T) {
-			cacheDir := t.TempDir()
-			projectRoot := setupRecordingTest(t, cacheDir)
+	// Concurrent agent tests: different agents can record simultaneously.
+	// The same agent starting twice is still blocked.
+	t.Run("different agents can record concurrently", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		projectRoot := setupRecordingTest(t, cacheDir)
 
-			// first agent starts a recording
-			firstState, err := StartRecording(projectRoot, StartRecordingOptions{
-				AgentID: tt.firstAgent, AdapterName: "claude-code", Username: "testuser",
-			})
-			require.NoError(t, err)
-			require.True(t, IsRecording(projectRoot))
-
-			// second agent (or same agent) tries to start
-			secondState, err := StartRecording(projectRoot, StartRecordingOptions{
-				AgentID: tt.secondAgent, AdapterName: "claude-code", Username: "testuser",
-			})
-
-			if tt.wantError {
-				assert.Error(t, err)
-				if tt.wantErrorIs != nil {
-					assert.True(t, errors.Is(err, tt.wantErrorIs))
-				}
-			} else {
-				require.NoError(t, err)
-				require.NotNil(t, secondState)
-				assert.Equal(t, tt.secondAgent, secondState.AgentID)
-
-				// old recording state should be gone
-				oldPath := filepath.Join(firstState.SessionPath, recordingFile)
-				_, statErr := os.Stat(oldPath)
-				assert.True(t, os.IsNotExist(statErr), "ghost .recording.json should be cleared")
-
-				// new recording should be the active one
-				loaded, loadErr := LoadRecordingState(projectRoot)
-				require.NoError(t, loadErr)
-				require.NotNil(t, loaded)
-				assert.Equal(t, tt.secondAgent, loaded.AgentID)
-			}
+		// first agent starts a recording
+		firstState, err := StartRecording(projectRoot, StartRecordingOptions{
+			AgentID: "OxOldAgent", AdapterName: "claude-code", Username: "testuser",
 		})
-	}
+		require.NoError(t, err)
+		require.True(t, IsRecording(projectRoot))
+
+		// second agent starts — should succeed (coexistence, not destruction)
+		secondState, err := StartRecording(projectRoot, StartRecordingOptions{
+			AgentID: "OxNewAgent", AdapterName: "claude-code", Username: "testuser",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, secondState)
+		assert.Equal(t, "OxNewAgent", secondState.AgentID)
+
+		// first agent's recording should still exist
+		assert.True(t, IsRecordingForAgent(projectRoot, "OxOldAgent"),
+			"first agent's recording should survive second agent's start")
+		oldPath := filepath.Join(firstState.SessionPath, recordingFile)
+		_, statErr := os.Stat(oldPath)
+		assert.False(t, os.IsNotExist(statErr), "first agent's .recording.json should still exist")
+
+		// second agent's recording should also exist
+		assert.True(t, IsRecordingForAgent(projectRoot, "OxNewAgent"),
+			"second agent should be recording")
+
+		// both recordings should be returned by LoadAllRecordingStates
+		all, loadErr := LoadAllRecordingStates(projectRoot)
+		require.NoError(t, loadErr)
+		assert.Len(t, all, 2, "both agents should have active recordings")
+	})
+
+	t.Run("same agent duplicate start still blocked", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		projectRoot := setupRecordingTest(t, cacheDir)
+
+		_, err := StartRecording(projectRoot, StartRecordingOptions{
+			AgentID: "OxSameAgent", AdapterName: "claude-code", Username: "testuser",
+		})
+		require.NoError(t, err)
+
+		_, err = StartRecording(projectRoot, StartRecordingOptions{
+			AgentID: "OxSameAgent", AdapterName: "claude-code", Username: "testuser",
+		})
+		assert.Error(t, err)
+		assert.True(t, errors.Is(err, ErrAlreadyRecording))
+	})
 }
 
 func TestStopRecording(t *testing.T) {
@@ -583,7 +571,7 @@ func TestStopRecording(t *testing.T) {
 		require.NoError(t, err, "failed to start recording")
 
 		// stop the recording
-		state, err := StopRecording(projectRoot)
+		state, err := StopRecording(projectRoot, "OxA1b2")
 		require.NoError(t, err)
 		require.NotNil(t, state, "expected state to be returned")
 
@@ -607,13 +595,13 @@ func TestStopRecording(t *testing.T) {
 
 		tmpDir := t.TempDir()
 
-		_, err := StopRecording(tmpDir)
+		_, err := StopRecording(tmpDir, "test-agent")
 		assert.Error(t, err, "expected error when not recording")
 		assert.True(t, errors.Is(err, ErrNotRecording))
 	})
 
 	t.Run("returns error for empty project root", func(t *testing.T) {
-		_, err := StopRecording("")
+		_, err := StopRecording("", "test-agent")
 		assert.Error(t, err)
 	})
 }
@@ -736,7 +724,7 @@ func TestClearRecordingState_WithMultipleRecordings_OnlyClearsFirst(t *testing.T
 	assert.Equal(t, "OxBBBB", state.AgentID)
 }
 
-func TestStartRecording_GhostClear_PreservesSessionData(t *testing.T) {
+func TestStartRecording_ConcurrentAgents_PreservesSessionData(t *testing.T) {
 	cacheDir := t.TempDir()
 	projectRoot := setupRecordingTest(t, cacheDir)
 
@@ -752,25 +740,33 @@ func TestStartRecording_GhostClear_PreservesSessionData(t *testing.T) {
 	require.NoError(t, os.WriteFile(rawPath, []byte("{\"type\":\"header\"}\n"), 0644))
 	require.NoError(t, os.WriteFile(eventsPath, []byte("{\"event\":\"test\"}\n"), 0644))
 
-	// Agent B starts — ghost-clears A's .recording.json
-	_, err = StartRecording(projectRoot, StartRecordingOptions{
+	// Agent B starts — both recordings should coexist
+	stateB, err := StartRecording(projectRoot, StartRecordingOptions{
 		AgentID: "OxAgntB", AdapterName: "claude-code", Username: "testuser",
 	})
 	require.NoError(t, err)
 
-	// A's .recording.json should be gone
+	// A's .recording.json should still exist (no ghost clearing)
 	_, err = os.Stat(filepath.Join(stateA.SessionPath, recordingFile))
-	assert.True(t, os.IsNotExist(err), "A's .recording.json should be cleared")
+	assert.False(t, os.IsNotExist(err), "A's .recording.json should still exist")
 
-	// but A's session DATA must survive (raw.jsonl, events.jsonl)
+	// B's .recording.json should also exist
+	_, err = os.Stat(filepath.Join(stateB.SessionPath, recordingFile))
+	assert.False(t, os.IsNotExist(err), "B's .recording.json should exist")
+
+	// A's session DATA must survive (raw.jsonl, events.jsonl)
 	_, err = os.Stat(rawPath)
-	assert.False(t, os.IsNotExist(err), "A's raw.jsonl must survive ghost clearing")
+	assert.False(t, os.IsNotExist(err), "A's raw.jsonl must survive")
 	_, err = os.Stat(eventsPath)
-	assert.False(t, os.IsNotExist(err), "A's events.jsonl must survive ghost clearing")
+	assert.False(t, os.IsNotExist(err), "A's events.jsonl must survive")
 
 	// A's session folder itself must still exist
 	_, err = os.Stat(stateA.SessionPath)
-	assert.False(t, os.IsNotExist(err), "A's session folder must survive ghost clearing")
+	assert.False(t, os.IsNotExist(err), "A's session folder must survive")
+
+	// both agents should be recording
+	assert.True(t, IsRecordingForAgent(projectRoot, "OxAgntA"), "Agent A should still be recording")
+	assert.True(t, IsRecordingForAgent(projectRoot, "OxAgntB"), "Agent B should be recording")
 }
 
 func TestStartRecording_RepoContextPath_DirectPath(t *testing.T) {
@@ -843,7 +839,7 @@ func TestStopRecording_FailsIfStateFileUnremovable(t *testing.T) {
 	require.NoError(t, os.Chmod(state.SessionPath, 0555))
 	t.Cleanup(func() { os.Chmod(state.SessionPath, 0755) })
 
-	_, err = StopRecording(projectRoot)
+	_, err = StopRecording(projectRoot, "OxPerm")
 	assert.Error(t, err, "StopRecording should fail if state file can't be removed")
 }
 
@@ -943,7 +939,139 @@ func TestLoadAllRecordingStates_Deduplicates(t *testing.T) {
 	}
 
 	// cleanup
-	_, _ = StopRecording(projectRoot)
+	_, _ = StopRecording(projectRoot, "OxDedup")
+}
+
+// createTestSessionProject creates a project root with .sageox/ and XDG cache
+// suitable for concurrent agent tests. Sessions are stored via repo_id -> XDG cache
+// so that LoadAllRecordingStates, IsRecordingForAgent, etc. can find them.
+func createTestSessionProject(t *testing.T) (string, string) {
+	t.Helper()
+	cacheDir := t.TempDir()
+	projectRoot := setupRecordingTest(t, cacheDir)
+	// second return value is empty string — tests should NOT pass RepoContextPath,
+	// letting sessions flow through the XDG cache path that load functions search
+	return projectRoot, ""
+}
+
+func TestConcurrentAgentRecording(t *testing.T) {
+	projectRoot, _ := createTestSessionProject(t)
+
+	agentA := "OxAgentA"
+	agentB := "OxAgentB"
+
+	// both agents start recording
+	stateA, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID:         agentA,
+		AdapterName:     "claude-code",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, stateA)
+
+	stateB, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID:         agentB,
+		AdapterName:     "claude-code",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, stateB)
+
+	// both should be recording
+	assert.True(t, IsRecordingForAgent(projectRoot, agentA))
+	assert.True(t, IsRecordingForAgent(projectRoot, agentB))
+	assert.True(t, IsRecording(projectRoot)) // any-agent check
+
+	// LoadAllRecordingStates returns both
+	all, err := LoadAllRecordingStates(projectRoot)
+	require.NoError(t, err)
+	assert.Len(t, all, 2)
+}
+
+func TestConcurrentAgentStop(t *testing.T) {
+	projectRoot, _ := createTestSessionProject(t)
+
+	agentA := "OxAgentA"
+	agentB := "OxAgentB"
+
+	_, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID:         agentA,
+		AdapterName:     "claude-code",
+	})
+	require.NoError(t, err)
+
+	_, err = StartRecording(projectRoot, StartRecordingOptions{
+		AgentID:         agentB,
+		AdapterName:     "claude-code",
+	})
+	require.NoError(t, err)
+
+	// stop agent A
+	_, err = StopRecording(projectRoot, agentA)
+	require.NoError(t, err)
+
+	// agent A stopped, agent B survives
+	assert.False(t, IsRecordingForAgent(projectRoot, agentA))
+	assert.True(t, IsRecordingForAgent(projectRoot, agentB))
+}
+
+func TestConcurrentAgentClear(t *testing.T) {
+	projectRoot, _ := createTestSessionProject(t)
+
+	agentA := "OxAgentA"
+	agentB := "OxAgentB"
+
+	_, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID:         agentA,
+		AdapterName:     "claude-code",
+	})
+	require.NoError(t, err)
+
+	_, err = StartRecording(projectRoot, StartRecordingOptions{
+		AgentID:         agentB,
+		AdapterName:     "claude-code",
+	})
+	require.NoError(t, err)
+
+	// clear agent A only
+	err = ClearRecordingStateForAgent(projectRoot, agentA)
+	require.NoError(t, err)
+
+	assert.False(t, IsRecordingForAgent(projectRoot, agentA))
+	assert.True(t, IsRecordingForAgent(projectRoot, agentB))
+}
+
+func TestUpdateRecordingStateForAgent_Isolation(t *testing.T) {
+	projectRoot, _ := createTestSessionProject(t)
+
+	agentA := "OxAgentA"
+	agentB := "OxAgentB"
+
+	_, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID:         agentA,
+		AdapterName:     "claude-code",
+	})
+	require.NoError(t, err)
+
+	_, err = StartRecording(projectRoot, StartRecordingOptions{
+		AgentID:         agentB,
+		AdapterName:     "claude-code",
+	})
+	require.NoError(t, err)
+
+	// update agent A's entry count
+	err = UpdateRecordingStateForAgent(projectRoot, agentA, func(s *RecordingState) {
+		s.EntryCount = 42
+	})
+	require.NoError(t, err)
+
+	// verify agent A updated
+	stateA, _ := LoadRecordingStateForAgent(projectRoot, agentA)
+	require.NotNil(t, stateA)
+	assert.Equal(t, 42, stateA.EntryCount)
+
+	// verify agent B untouched
+	stateB, _ := LoadRecordingStateForAgent(projectRoot, agentB)
+	require.NotNil(t, stateB)
+	assert.Equal(t, 0, stateB.EntryCount)
 }
 
 func TestStopThenStartSameAgent(t *testing.T) {
@@ -958,7 +1086,7 @@ func TestStopThenStartSameAgent(t *testing.T) {
 	require.True(t, IsRecording(projectRoot))
 
 	// stop recording
-	_, err = StopRecording(projectRoot)
+	_, err = StopRecording(projectRoot, "OxSame1")
 	require.NoError(t, err)
 	require.False(t, IsRecording(projectRoot))
 
@@ -971,7 +1099,7 @@ func TestStopThenStartSameAgent(t *testing.T) {
 	assert.Equal(t, "OxSame1", state2.AgentID)
 
 	// cleanup
-	_, _ = StopRecording(projectRoot)
+	_, _ = StopRecording(projectRoot, "OxSame1")
 }
 
 func TestExplicitStopMarker(t *testing.T) {
@@ -1025,7 +1153,7 @@ func TestStopClearStartLifecycle(t *testing.T) {
 	require.NoError(t, err)
 
 	// 2. user runs /ox-session-stop (StopRecording + MarkExplicitStop)
-	_, err = StopRecording(projectRoot)
+	_, err = StopRecording(projectRoot, "OxUser1")
 	require.NoError(t, err)
 	require.NoError(t, MarkExplicitStop(projectRoot))
 
@@ -1046,7 +1174,7 @@ func TestStopClearStartLifecycle(t *testing.T) {
 	assert.Equal(t, "OxUser1", state.AgentID)
 
 	// cleanup
-	_, _ = StopRecording(projectRoot)
+	_, _ = StopRecording(projectRoot, "OxUser1")
 }
 
 // TestExplicitStopMarker_XDGPaths verifies the marker works when sessions

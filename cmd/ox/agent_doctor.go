@@ -95,8 +95,8 @@ func buildAgentDoctorOutput(agentID, projectRoot string) *AgentDoctorOutput {
 	output.IncompleteSessions = incompleteSessions
 
 	// check for orphaned/stale recordings
-	if session.IsRecording(projectRoot) {
-		state, _ := session.LoadRecordingState(projectRoot)
+	if session.IsRecordingForAgent(projectRoot, agentID) {
+		state, _ := session.LoadRecordingStateForAgent(projectRoot, agentID)
 		if state != nil {
 			age := state.Duration()
 			if age.Hours() > 24 {

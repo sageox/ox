@@ -617,7 +617,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// populate session URL if recording
 	if output.Session != nil && output.Session.Recording {
 		if projCfg, cfgErr := config.LoadProjectConfig(projectRoot); cfgErr == nil {
-			state, _ := session.LoadRecordingState(projectRoot)
+			state, _ := session.LoadRecordingStateForAgent(projectRoot, agentID)
 			if state != nil {
 				sessionName := session.GetSessionName(state.SessionPath)
 				output.Session.SessionURL = buildSessionURL(projCfg, sessionName)
@@ -953,19 +953,11 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 	}
 
 	// check if already recording
-	if session.IsRecording(projectRoot) {
-		state, err := session.LoadRecordingState(projectRoot)
-		if err == nil && state != nil {
-			return &sessionStatus{
-				Recording: true,
-				File:      state.SessionFile,
-				Mode:      state.FilterMode,
-				Source:    string(resolved.Source),
-			}
-		}
+	if existing, err := session.LoadRecordingStateForAgent(projectRoot, agentID); err == nil && existing != nil {
 		return &sessionStatus{
 			Recording: true,
-			Mode:      resolved.Mode,
+			File:      existing.SessionFile,
+			Mode:      existing.FilterMode,
 			Source:    string(resolved.Source),
 		}
 	}
@@ -986,7 +978,7 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 	if err != nil {
 		// already recording is not an error
 		if errors.Is(err, session.ErrAlreadyRecording) {
-			existingState, _ := session.LoadRecordingState(projectRoot)
+			existingState, _ := session.LoadRecordingStateForAgent(projectRoot, agentID)
 			if existingState != nil {
 				return &sessionStatus{
 					Recording: true,

@@ -281,7 +281,7 @@ func TestSubagentRegistry_RegisterAfterParentStop(t *testing.T) {
 	parentSessionPath := parentState.SessionPath
 
 	// stop parent recording (clears .recording.json but folder persists)
-	_, err = StopRecording(projectRoot)
+	_, err = StopRecording(projectRoot, "OxPrnt")
 	require.NoError(t, err)
 
 	// parent session folder should still exist

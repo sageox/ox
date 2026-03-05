@@ -183,7 +183,52 @@ func LoadAllRecordingStates(projectRoot string) ([]*RecordingState, error) {
 	return states, nil
 }
 
+// LoadRecordingStateForAgent loads recording state for a specific agent.
+// Returns nil, nil if no recording for that agent exists.
+// Use this instead of LoadRecordingState when you have an agent ID to avoid
+// accidentally operating on another concurrent agent's recording.
+func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, error) {
+	if agentID == "" {
+		return nil, fmt.Errorf("%w: agent ID", ErrEmptyPath)
+	}
+	states, err := LoadAllRecordingStates(projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range states {
+		if s.AgentID == agentID {
+			return s, nil
+		}
+	}
+	return nil, nil
+}
+
+// IsRecordingForAgent checks if a specific agent has an active recording.
+func IsRecordingForAgent(projectRoot, agentID string) bool {
+	state, _ := LoadRecordingStateForAgent(projectRoot, agentID)
+	return state != nil
+}
+
+// ClearRecordingStateForAgent removes recording state for a specific agent only.
+// Safe for concurrent use: only touches this agent's .recording.json.
+func ClearRecordingStateForAgent(projectRoot, agentID string) error {
+	state, err := LoadRecordingStateForAgent(projectRoot, agentID)
+	if err != nil {
+		return err
+	}
+	if state == nil {
+		return nil // idempotent: nothing to clear
+	}
+	statePath := recordingStatePath(state.SessionPath)
+	if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove recording state file=%s: %w", statePath, err)
+	}
+	return nil
+}
+
 // ClearRecordingState removes the recording state file from the session folder.
+// Note: returns first-match state. Use ClearRecordingStateForAgent in agent-context
+// code to avoid clearing another concurrent agent's recording.
 func ClearRecordingState(projectRoot string) error {
 	if projectRoot == "" {
 		return fmt.Errorf("%w: project root", ErrEmptyPath)
@@ -304,22 +349,13 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		return nil, fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
 
-	// check if already recording
-	existing, err := LoadRecordingState(projectRoot)
+	// check if THIS agent already has a recording; other agents' recordings are valid
+	existing, err := LoadRecordingStateForAgent(projectRoot, opts.AgentID)
 	if err != nil {
 		return nil, fmt.Errorf("check recording state project=%s: %w", projectRoot, err)
 	}
 	if existing != nil {
-		if existing.AgentID == opts.AgentID {
-			// same agent trying to start again — genuine conflict
-			return nil, fmt.Errorf("%w: agent_id=%s started_at=%s", ErrAlreadyRecording, existing.AgentID, existing.StartedAt.Format(time.RFC3339))
-		}
-		// different agent — ghost session from a previous instance.
-		// auto-clear so this session can start. the caller (agent_session.go)
-		// should have already cleared it, but handle it here as defense-in-depth.
-		if err := ClearRecordingState(projectRoot); err != nil {
-			return nil, fmt.Errorf("clear ghost recording state project=%s: %w", projectRoot, err)
-		}
+		return nil, fmt.Errorf("%w: agent_id=%s started_at=%s", ErrAlreadyRecording, existing.AgentID, existing.StartedAt.Format(time.RFC3339))
 	}
 
 	reminderInterval := opts.ReminderInterval
@@ -406,8 +442,26 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	return state, nil
 }
 
+// UpdateRecordingStateForAgent updates recording state for a specific agent.
+// Safe for concurrent use: only touches this agent's .recording.json.
+func UpdateRecordingStateForAgent(projectRoot, agentID string, updateFn func(*RecordingState)) error {
+	state, err := LoadRecordingStateForAgent(projectRoot, agentID)
+	if err != nil {
+		return fmt.Errorf("load recording state: %w", err)
+	}
+	if state == nil {
+		return ErrNotRecording
+	}
+	updateFn(state)
+	if err := SaveRecordingState(projectRoot, state); err != nil {
+		return fmt.Errorf("save recording state: %w", err)
+	}
+	return nil
+}
+
 // UpdateRecordingState updates and persists the recording state.
 // Useful for updating entry count or last reminder sequence.
+// Note: uses first-match state. Use UpdateRecordingStateForAgent in agent-context code.
 func UpdateRecordingState(projectRoot string, updateFn func(*RecordingState)) error {
 	state, err := LoadRecordingState(projectRoot)
 	if err != nil {
@@ -425,23 +479,25 @@ func UpdateRecordingState(projectRoot string, updateFn func(*RecordingState)) er
 	return nil
 }
 
-// StopRecording ends an active recording session.
-// Returns the final state and ErrNotRecording if no recording is active.
-func StopRecording(projectRoot string) (*RecordingState, error) {
+// StopRecording ends an active recording session for a specific agent.
+// Returns the final state and ErrNotRecording if no recording is active for this agent.
+func StopRecording(projectRoot, agentID string) (*RecordingState, error) {
 	if projectRoot == "" {
 		return nil, fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
+	if agentID == "" {
+		return nil, fmt.Errorf("%w: agent ID", ErrEmptyPath)
+	}
 
-	state, err := LoadRecordingState(projectRoot)
+	state, err := LoadRecordingStateForAgent(projectRoot, agentID)
 	if err != nil {
-		return nil, fmt.Errorf("load recording state project=%s: %w", projectRoot, err)
+		return nil, fmt.Errorf("load recording state project=%s agent=%s: %w", projectRoot, agentID, err)
 	}
 	if state == nil {
-		return nil, fmt.Errorf("%w: project=%s", ErrNotRecording, projectRoot)
+		return nil, fmt.Errorf("%w: project=%s agent=%s", ErrNotRecording, projectRoot, agentID)
 	}
 
-	// clear the recording state file from session folder
-	if err := ClearRecordingState(projectRoot); err != nil {
+	if err := ClearRecordingStateForAgent(projectRoot, agentID); err != nil {
 		return nil, fmt.Errorf("clear recording state project=%s: %w", projectRoot, err)
 	}
 
@@ -453,9 +509,20 @@ func GetSessionName(sessionPath string) string {
 	return filepath.Base(strings.TrimSuffix(sessionPath, "/"))
 }
 
+// FindParentSessionPathForAgent looks up the recording state for a specific agent
+// and returns its session path. Used by subagents to discover parent session.
+func FindParentSessionPathForAgent(projectRoot, agentID string) string {
+	state, _ := LoadRecordingStateForAgent(projectRoot, agentID)
+	if state == nil {
+		return ""
+	}
+	return state.SessionPath
+}
+
 // FindParentSessionPath looks up the active recording state and returns its session path.
 // Used by subagents to discover where to report completion.
 // Returns empty string if no recording is active.
+// Note: returns first-match. Use FindParentSessionPathForAgent when agent ID is known.
 func FindParentSessionPath(projectRoot string) string {
 	state, err := LoadRecordingState(projectRoot)
 	if err != nil || state == nil {

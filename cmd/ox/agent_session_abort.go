@@ -35,7 +35,7 @@ func runAgentSessionAbort(inst *agentinstance.Instance, cmd *cobra.Command) erro
 		return fmt.Errorf("could not find project root: %w", err)
 	}
 
-	state, err := session.LoadRecordingState(projectRoot)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
 	if err != nil {
 		return fmt.Errorf("failed to load recording state: %w", err)
 	}
@@ -59,7 +59,7 @@ func runAgentSessionAbort(inst *agentinstance.Instance, cmd *cobra.Command) erro
 	sessionName := session.GetSessionName(state.SessionPath)
 
 	// clear .recording.json so future session start works
-	if err := session.ClearRecordingState(projectRoot); err != nil {
+	if err := session.ClearRecordingStateForAgent(projectRoot, inst.AgentID); err != nil {
 		return fmt.Errorf("failed to clear recording state: %w", err)
 	}
 

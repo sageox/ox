@@ -104,20 +104,9 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	// one-time session recording notice (returned to caller via JSON)
 	notice := getSessionTermsNotice()
 
-	// check for existing recording state
-	existingState, _ := session.LoadRecordingState(projectRoot)
-	if existingState != nil {
-		if existingState.AgentID == inst.AgentID {
-			// same agent — genuine duplicate start, refuse
-			return fmt.Errorf("a session is already being recorded\nRun 'ox agent %s session stop' first, then start a new session", inst.AgentID)
-		}
-		// different agent ID — this is a ghost session from a previous Claude Code
-		// instance (e.g., user restarted after hooks install notice). auto-clear it
-		// so the new session can start cleanly.
-		slog.Info("clearing ghost session from previous agent", "old_agent", existingState.AgentID, "new_agent", inst.AgentID, "started_at", existingState.StartedAt)
-		if err := session.ClearRecordingState(projectRoot); err != nil {
-			slog.Warn("failed to clear ghost session", "error", err)
-		}
+	// check for existing recording state for this agent
+	if session.IsRecordingForAgent(projectRoot, inst.AgentID) {
+		return fmt.Errorf("a session is already being recorded\nRun 'ox agent %s session stop' first, then start a new session", inst.AgentID)
 	}
 
 	// parse optional title from args (simple parsing: --title "value" or --title=value)
@@ -273,12 +262,12 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	}
 
 	// check if actually recording
-	if !session.IsRecording(projectRoot) {
+	if !session.IsRecordingForAgent(projectRoot, inst.AgentID) {
 		return fmt.Errorf("not currently recording\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
 	}
 
 	// stop recording and get final state
-	state, err := session.StopRecording(projectRoot)
+	state, err := session.StopRecording(projectRoot, inst.AgentID)
 	if err != nil {
 		if errors.Is(err, session.ErrNotRecording) {
 			return fmt.Errorf("not currently recording\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
@@ -1021,17 +1010,17 @@ func runAgentSessionRemind(inst *agentinstance.Instance) error {
 	}
 
 	// check if recording is active
-	if !session.IsRecording(projectRoot) {
+	if !session.IsRecordingForAgent(projectRoot, inst.AgentID) {
 		return fmt.Errorf("not currently recording\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
 	}
 
-	state, err := session.LoadRecordingState(projectRoot)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
 	if err != nil {
 		return fmt.Errorf("failed to load recording state: %w", err)
 	}
 
 	// update last reminder sequence
-	if err := session.UpdateRecordingState(projectRoot, func(s *session.RecordingState) {
+	if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
 		s.LastReminderSeq = s.EntryCount
 	}); err != nil {
 		// non-fatal - continue with reminder
@@ -1152,7 +1141,7 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 		entryCount = len(entries)
 	} else {
 		// get from current recording or latest session
-		state, _ := session.LoadRecordingState(projectRoot)
+		state, _ := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
 		if state != nil && state.SessionFile != "" {
 			// read from active recording
 			adapter, err := adapters.GetAdapter(state.AdapterName)
@@ -1483,11 +1472,11 @@ func runAgentSessionRecord(inst *agentinstance.Instance, args []string) error {
 	}
 
 	// check if recording is active
-	if !session.IsRecording(projectRoot) {
+	if !session.IsRecordingForAgent(projectRoot, inst.AgentID) {
 		return fmt.Errorf("not currently recording\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
 	}
 
-	state, err := session.LoadRecordingState(projectRoot)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
 	if err != nil {
 		return fmt.Errorf("failed to load recording state: %w", err)
 	}
@@ -1509,7 +1498,7 @@ func runAgentSessionRecord(inst *agentinstance.Instance, args []string) error {
 	}
 
 	// update entry count in recording state
-	if err := session.UpdateRecordingState(projectRoot, func(s *session.RecordingState) {
+	if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
 		s.EntryCount += recorded
 	}); err != nil {
 		// non-fatal - entries were recorded
@@ -1517,7 +1506,7 @@ func runAgentSessionRecord(inst *agentinstance.Instance, args []string) error {
 	}
 
 	// reload state for updated count
-	state, _ = session.LoadRecordingState(projectRoot)
+	state, _ = session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
 	totalCount := 0
 	if state != nil {
 		totalCount = state.EntryCount
@@ -1609,8 +1598,8 @@ func runAgentSessionPlan(inst *agentinstance.Instance) error {
 	var sessionID string
 
 	// check if there's an active recording - save to that session folder
-	if session.IsRecording(projectRoot) {
-		state, err := session.LoadRecordingState(projectRoot)
+	if session.IsRecordingForAgent(projectRoot, inst.AgentID) {
+		state, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
 		if err == nil && state.SessionPath != "" {
 			planPath = filepath.Join(state.SessionPath, "plan.md")
 			sessionID = session.GetSessionName(state.SessionPath)

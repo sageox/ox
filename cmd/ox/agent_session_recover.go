@@ -47,7 +47,7 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 	}
 
 	// load stale recording state
-	state, err := session.LoadRecordingState(projectRoot)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
 	if err != nil {
 		return fmt.Errorf("no recording state found: %w", err)
 	}
@@ -76,7 +76,7 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 	}
 
 	// strategy 3: no recoverable data -- clear state and warn
-	_ = session.ClearRecordingState(projectRoot)
+	_ = session.ClearRecordingStateForAgent(projectRoot, state.AgentID)
 
 	output := &sessionRecoverOutput{
 		Success: true,
@@ -90,10 +90,10 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 // recoverViaNormalStop uses the normal session stop flow when the adapter file exists.
 func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, _ *session.RecordingState) error {
 	// stop recording (clears .recording.json and returns final state)
-	state, err := session.StopRecording(projectRoot)
+	state, err := session.StopRecording(projectRoot, inst.AgentID)
 	if err != nil {
 		// if stop fails, force-clear and continue
-		_ = session.ClearRecordingState(projectRoot)
+		_ = session.ClearRecordingStateForAgent(projectRoot, inst.AgentID)
 		return fmt.Errorf("failed to stop recording: %w", err)
 	}
 
@@ -130,7 +130,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	// read raw session to get entry count and entries for summary prompt
 	stored, err := session.ReadSessionFromPath(rawPath)
 	if err != nil {
-		_ = session.ClearRecordingState(projectRoot)
+		_ = session.ClearRecordingStateForAgent(projectRoot, state.AgentID)
 		return fmt.Errorf("failed to read cached session: %w", err)
 	}
 
@@ -144,7 +144,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 		if !cli.ConfirmYesNo(prompt, false) {
 			// user declined -- offer to discard
 			if cli.ConfirmYesNo("Discard the orphaned session data?", false) {
-				_ = session.ClearRecordingState(projectRoot)
+				_ = session.ClearRecordingStateForAgent(projectRoot, state.AgentID)
 				if state.SessionPath != "" {
 					_ = os.RemoveAll(state.SessionPath)
 				}
@@ -246,7 +246,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	}
 
 	// clear stale recording state
-	_ = session.ClearRecordingState(projectRoot)
+	_ = session.ClearRecordingStateForAgent(projectRoot, state.AgentID)
 
 	// all files copied and committed to ledger -- prune local cache
 	if uploaded {
