@@ -27,6 +27,12 @@ const (
 	// frictionBatchThreshold triggers early flush when buffer reaches this count.
 	frictionBatchThreshold = 20
 
+	// frictionFlushCooldown is the minimum interval between any two flush operations.
+	// Prevents thundering herd: without this, every Record() call above the batch
+	// threshold spawns a new flush goroutine, creating unbounded HTTP POSTs under
+	// rapid input (e.g., a runaway client generating unique args in a loop).
+	frictionFlushCooldown = 15 * time.Minute
+
 	// frictionDefaultEndpoint is the fallback friction API endpoint when no project
 	// endpoint is configured. Matches endpoint.Default.
 	frictionDefaultEndpoint = "https://sageox.ai"
@@ -41,6 +47,7 @@ type FrictionCollector struct {
 	buffer       *uxfriction.RingBuffer
 	client       *uxfriction.Client
 	catalogCache *CatalogCache
+	throttle     *FlushThrottle
 
 	enabled      bool
 	shutdown     chan struct{}
@@ -71,6 +78,7 @@ func NewFrictionCollector(logger *slog.Logger, projectEndpoint string) *Friction
 	fc := &FrictionCollector{
 		buffer:       uxfriction.NewRingBuffer(frictionBufferSize),
 		catalogCache: NewCatalogCache(),
+		throttle:     NewFlushThrottle(frictionFlushCooldown),
 		enabled:      enabled,
 		shutdown:     make(chan struct{}),
 		logger:       logger,
@@ -183,13 +191,12 @@ func (f *FrictionCollector) Record(event uxfriction.FrictionEvent) {
 
 	f.buffer.Add(event)
 
-	// trigger early flush if threshold reached
-	if f.buffer.Count() >= frictionBatchThreshold {
+	// trigger early flush if threshold reached AND cooldown has elapsed
+	if f.buffer.Count() >= frictionBatchThreshold && f.throttle.TryFlush() {
 		select {
 		case <-f.shutdown:
 			// don't trigger if shutting down
 		default:
-			// non-blocking signal to flush
 			go f.flush()
 		}
 	}
@@ -228,6 +235,10 @@ func (f *FrictionCollector) flush() {
 	if len(events) == 0 {
 		return
 	}
+
+	// record flush time to enforce cooldown in Record()
+	// only reset when actually sending to avoid empty ticker flushes consuming the window
+	f.throttle.RecordFlush()
 
 	// submit events
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

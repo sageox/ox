@@ -103,6 +103,7 @@ func MinimalEnv(testVars []string) []string {
 		}
 	}
 	env = append(env, "OX_NO_DAEMON=1")
+	env = append(env, "DO_NOT_TRACK=1") // prevent friction telemetry hitting production
 	env = append(env, testVars...)
 	return env
 }

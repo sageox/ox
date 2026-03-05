@@ -692,6 +692,7 @@ func TestFrictionCollector_CatalogVersionHeader(t *testing.T) {
 		buffer:       uxfriction.NewRingBuffer(frictionBufferSize),
 		client:       uxfriction.NewClient(uxfriction.ClientConfig{Endpoint: server.URL, Version: "test"}),
 		catalogCache: &CatalogCache{filePath: catalogPath},
+		throttle:     NewFlushThrottle(frictionFlushCooldown),
 		enabled:      true,
 		shutdown:     make(chan struct{}),
 		logger:       logger,
@@ -736,6 +737,7 @@ func TestFrictionCollector_CatalogUpdateFromResponse(t *testing.T) {
 		buffer:       uxfriction.NewRingBuffer(frictionBufferSize),
 		client:       uxfriction.NewClient(uxfriction.ClientConfig{Endpoint: server.URL, Version: "test"}),
 		catalogCache: &CatalogCache{filePath: catalogPath},
+		throttle:     NewFlushThrottle(frictionFlushCooldown),
 		enabled:      true,
 		shutdown:     make(chan struct{}),
 		logger:       logger,
@@ -801,6 +803,7 @@ func TestFrictionCollector_CatalogNotUpdatedWhenSameVersion(t *testing.T) {
 		buffer:       uxfriction.NewRingBuffer(frictionBufferSize),
 		client:       uxfriction.NewClient(uxfriction.ClientConfig{Endpoint: server.URL, Version: "test"}),
 		catalogCache: &CatalogCache{filePath: catalogPath},
+		throttle:     NewFlushThrottle(frictionFlushCooldown),
 		enabled:      true,
 		shutdown:     make(chan struct{}),
 		logger:       logger,
@@ -832,6 +835,7 @@ func TestFrictionCollector_UpdateCatalog(t *testing.T) {
 		buffer:       uxfriction.NewRingBuffer(frictionBufferSize),
 		client:       uxfriction.NewClient(uxfriction.ClientConfig{Endpoint: "http://test", Version: "test"}),
 		catalogCache: &CatalogCache{filePath: catalogPath},
+		throttle:     NewFlushThrottle(frictionFlushCooldown),
 		enabled:      true,
 		shutdown:     make(chan struct{}),
 		logger:       logger,
@@ -878,6 +882,7 @@ func TestFrictionCollector_StatsIncludesCatalogVersion(t *testing.T) {
 		buffer:       uxfriction.NewRingBuffer(frictionBufferSize),
 		client:       uxfriction.NewClient(uxfriction.ClientConfig{Endpoint: "http://test", Version: "test"}),
 		catalogCache: &CatalogCache{filePath: catalogPath},
+		throttle:     NewFlushThrottle(frictionFlushCooldown),
 		enabled:      true,
 		shutdown:     make(chan struct{}),
 		logger:       logger,
@@ -886,6 +891,45 @@ func TestFrictionCollector_StatsIncludesCatalogVersion(t *testing.T) {
 
 	stats := fc.Stats()
 	assert.Equal(t, "v2026-01-17-005", stats.CatalogVersion)
+}
+
+// TestFrictionCollector_FlushCooldown_PreventsThunderingHerd verifies that rapid
+// event recording does not trigger unbounded HTTP requests. Before this fix,
+// every Record() call above the batch threshold spawned a new flush goroutine,
+// creating ~1 HTTP POST per 20 events with no cooldown. This caused 1,443 POSTs
+// to hit production in 15 seconds during a test run on 2026-03-04.
+func TestFrictionCollector_FlushCooldown_PreventsThunderingHerd(t *testing.T) {
+	var requestCount atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	t.Setenv("SAGEOX_FRICTION_ENDPOINT", server.URL)
+
+	logger := testLogger()
+	fc := NewFrictionCollector(logger, "")
+
+	// rapidly record 200 events with unique inputs (bypasses dedup)
+	for i := range 200 {
+		fc.Record(uxfriction.FrictionEvent{
+			Kind:  "unknown-command",
+			Input: fmt.Sprintf("rapid-test-%d", i),
+		})
+	}
+
+	// allow goroutines to settle
+	time.Sleep(100 * time.Millisecond)
+
+	// with cooldown, at most 1 early flush should have fired (the first one
+	// that crosses the batch threshold). Subsequent Record() calls see that
+	// lastFlush is recent and skip the flush goroutine.
+	count := requestCount.Load()
+	if count > 1 {
+		t.Errorf("requestCount = %d, want <= 1 (cooldown should prevent thundering herd)", count)
+	}
 }
 
 // TestFrictionEvent_SynchronousDelivery_ExitSafe verifies that friction event

@@ -32,6 +32,11 @@ const (
 	// telemetrySendTimeout for HTTP requests
 	telemetrySendTimeout = 5 * time.Second
 
+	// telemetryFlushCooldown is the minimum interval between any two flush operations.
+	// Prevents thundering herd: without this, every Record() call above the batch
+	// threshold spawns a new flush goroutine, creating unbounded HTTP POSTs.
+	telemetryFlushCooldown = 15 * time.Minute
+
 	// telemetryEndpoint is the default telemetry API endpoint
 	telemetryEndpoint = "https://telemetry.sageox.ai/tevents"
 )
@@ -54,6 +59,7 @@ type TelemetryCollector struct {
 	head       int              // next write position
 	count      int              // current number of events (0 to bufferSize)
 	bufferSize int              // max capacity
+	throttle   *FlushThrottle
 
 	sendInterval time.Duration // from server header (default 60s)
 	lastSend     time.Time
@@ -85,6 +91,7 @@ func NewTelemetryCollector(logger *slog.Logger) *TelemetryCollector {
 	return &TelemetryCollector{
 		buffer:       make([]TelemetryEvent, telemetryBufferSize),
 		bufferSize:   telemetryBufferSize,
+		throttle:     NewFlushThrottle(telemetryFlushCooldown),
 		sendInterval: telemetryDefaultInterval,
 		clientID:     getOrCreateClientID(),
 		appType:      "ox-daemon",
@@ -206,13 +213,12 @@ func (c *TelemetryCollector) Record(event string, props map[string]any) {
 	shouldFlush := c.count >= telemetryBatchThreshold
 	c.mu.Unlock()
 
-	// trigger early flush if threshold reached
-	if shouldFlush {
+	// trigger early flush if threshold reached AND cooldown has elapsed
+	if shouldFlush && c.throttle.TryFlush() {
 		select {
 		case <-c.shutdown:
 			// don't trigger if shutting down
 		default:
-			// non-blocking signal to flush
 			go c.flush()
 		}
 	}
@@ -274,6 +280,8 @@ func (c *TelemetryCollector) flush() {
 		return
 	}
 
+	// only reset cooldown when actually sending data
+	c.throttle.RecordFlush()
 	c.sendEvents(events)
 }
 
