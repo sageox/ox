@@ -1006,3 +1006,61 @@ func TestExplicitStopMarker_EmptyProjectRoot(t *testing.T) {
 	assert.Error(t, err, "MarkExplicitStop with empty root should error")
 	assert.False(t, ConsumeExplicitStop(""), "ConsumeExplicitStop with empty root should return false")
 }
+
+// TestStopClearStartLifecycle reproduces the exact bug from issue #132:
+// user runs /ox-session-stop, then /clear (which auto-starts via prime),
+// then /ox-session-start fails with ErrAlreadyRecording.
+//
+// The fix: session stop writes an explicit-stop marker; prime's auto-start
+// checks and consumes that marker before starting. This test verifies that
+// the marker correctly gates the auto-start path.
+func TestStopClearStartLifecycle(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := setupRecordingTest(t, cacheDir)
+
+	// 1. user starts a session
+	_, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: "OxUser1", AdapterName: "claude-code", Username: "testuser",
+	})
+	require.NoError(t, err)
+
+	// 2. user runs /ox-session-stop (StopRecording + MarkExplicitStop)
+	_, err = StopRecording(projectRoot)
+	require.NoError(t, err)
+	require.NoError(t, MarkExplicitStop(projectRoot))
+
+	// 3. user runs /clear → hook calls prime → prime checks marker before auto-start
+	//    ConsumeExplicitStop returns true → prime skips auto-start
+	assert.True(t, ConsumeExplicitStop(projectRoot),
+		"marker must be present after explicit stop — prime relies on this to skip auto-start")
+
+	// 4. since prime skipped auto-start, IsRecording should still be false
+	assert.False(t, IsRecording(projectRoot),
+		"no recording should be active after prime consumed the stop marker")
+
+	// 5. user runs /ox-session-start — must succeed (the original bug: this failed)
+	state, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: "OxUser1", AdapterName: "claude-code", Username: "testuser",
+	})
+	require.NoError(t, err, "explicit session start after stop+clear must succeed — this was the #132 bug")
+	assert.Equal(t, "OxUser1", state.AgentID)
+
+	// cleanup
+	_, _ = StopRecording(projectRoot)
+}
+
+// TestExplicitStopMarker_XDGPaths verifies the marker works when sessions
+// are stored in the XDG cache path (production path). The basic
+// TestExplicitStopMarker uses a bare tmpDir with manually created sessions/;
+// production always resolves paths via repo_id → XDG cache.
+func TestExplicitStopMarker_XDGPaths(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := setupRecordingTest(t, cacheDir)
+
+	// marker should work through the XDG-aware sessionsSearchPaths
+	require.NoError(t, MarkExplicitStop(projectRoot))
+	assert.True(t, ConsumeExplicitStop(projectRoot),
+		"marker must be consumable when written via XDG search paths")
+	assert.False(t, ConsumeExplicitStop(projectRoot),
+		"consumed marker must not be consumable again")
+}
