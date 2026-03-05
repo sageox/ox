@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +46,10 @@ type RecordingState struct {
 	// back to the parent session for aggregation.
 	ParentSessionPath string `json:"parent_session_path,omitempty"` // path to parent's session folder
 	ParentAgentID     string `json:"parent_agent_id,omitempty"`     // parent's agent ID (e.g., "Oxa7b3")
+
+	AgentType      string `json:"agent_type,omitempty"`       // original agent type for metadata: "codex", "amp", etc. Falls back to AdapterName if empty.
+	StopIncomplete bool   `json:"stop_incomplete,omitempty"`  // set when stop returned retry guidance (empty file)
+	Model          string `json:"model,omitempty"`            // LLM model for generic adapters where ReadMetadata returns nil
 }
 
 // Duration returns how long the recording has been running.
@@ -249,6 +254,12 @@ func ClearRecordingState(projectRoot string) error {
 		if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove recording state file=%s: %w", statePath, err)
 		}
+
+		// clean up any stale .lock files left by crashed session log processes
+		lockFiles, _ := filepath.Glob(filepath.Join(state.SessionPath, "*.lock"))
+		for _, lockFile := range lockFiles {
+			_ = os.Remove(lockFile)
+		}
 	}
 
 	return nil
@@ -340,6 +351,9 @@ type StartRecordingOptions struct {
 	// Parent session tracking for subagent workflows
 	ParentSessionPath string // path to parent's session folder (optional)
 	ParentAgentID     string // parent's agent ID (optional)
+
+	AgentType string // original agent type for metadata (e.g., "codex", "amp")
+	Model     string // LLM model for generic adapters
 }
 
 // StartRecording begins a new recording session.
@@ -355,7 +369,15 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		return nil, fmt.Errorf("check recording state project=%s: %w", projectRoot, err)
 	}
 	if existing != nil {
-		return nil, fmt.Errorf("%w: agent_id=%s started_at=%s", ErrAlreadyRecording, existing.AgentID, existing.StartedAt.Format(time.RFC3339))
+		if existing.StopIncomplete {
+			// previous stop returned retry but agent restarted — clear stale state
+			slog.Info("clearing incomplete stop state", "agent_id", existing.AgentID)
+			if err := ClearRecordingStateForAgent(projectRoot, opts.AgentID); err != nil {
+				return nil, fmt.Errorf("clear incomplete recording state: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("%w: agent_id=%s started_at=%s", ErrAlreadyRecording, existing.AgentID, existing.StartedAt.Format(time.RFC3339))
+		}
 	}
 
 	reminderInterval := opts.ReminderInterval
@@ -433,6 +455,8 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		Branch:            opts.Branch,
 		ParentSessionPath: opts.ParentSessionPath,
 		ParentAgentID:     opts.ParentAgentID,
+		AgentType:         opts.AgentType,
+		Model:             opts.Model,
 	}
 
 	if err := SaveRecordingState(projectRoot, state); err != nil {

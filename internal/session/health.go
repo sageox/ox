@@ -46,6 +46,12 @@ type HealthStatus struct {
 	// StaleRecordingAge is how long the stale recording has been running
 	StaleRecordingAge time.Duration
 
+	// IsStopIncomplete indicates the recording was stopped but the session file was empty
+	IsStopIncomplete bool
+
+	// StopIncompleteAge is how long since the incomplete stop occurred
+	StopIncompleteAge time.Duration
+
 	// PendingCount is the number of sessions pending commit
 	PendingCount int
 
@@ -206,6 +212,12 @@ func checkRecordingState(status *HealthStatus, projectRoot string) {
 	if state != nil {
 		status.IsRecordingActive = true
 		status.Recording = state
+
+		// check if stop was attempted but session file was empty
+		if state.StopIncomplete {
+			status.IsStopIncomplete = true
+			status.StopIncompleteAge = time.Since(state.StartedAt)
+		}
 
 		// check if recording is stale (running for too long)
 		age := time.Since(state.StartedAt)

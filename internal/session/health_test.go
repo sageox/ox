@@ -111,6 +111,30 @@ func TestCheckHealth_RecordingActive(t *testing.T) {
 	assert.Equal(t, "Oxa7b3", status.Recording.AgentID)
 }
 
+func TestCheckHealth_StopIncomplete(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+
+	projectRoot := t.TempDir()
+	sessionPath := filepath.Join(projectRoot, "sessions", "2026-01-06T14-30-user-OxInc1")
+
+	state := &RecordingState{
+		AgentID:        "OxInc1",
+		StartedAt:      time.Now().Add(-5 * time.Minute),
+		AdapterName:    "generic",
+		SessionPath:    sessionPath,
+		StopIncomplete: true,
+	}
+	err := SaveRecordingState(projectRoot, state)
+	require.NoError(t, err)
+
+	status := CheckHealth(projectRoot)
+
+	assert.True(t, status.IsRecordingActive)
+	assert.True(t, status.IsStopIncomplete)
+	assert.True(t, status.StopIncompleteAge > 0)
+}
+
 func TestCheckHealth_RecordingNotActive(t *testing.T) {
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)

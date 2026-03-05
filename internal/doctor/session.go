@@ -231,10 +231,15 @@ func (c *SessionRecordingCheck) Run(ctx context.Context) CheckResult {
 	duration := session.RecordingDurationString(status.Recording)
 	agentID := status.Recording.AgentID
 
+	msg := fmt.Sprintf("Active (%s, %s)", duration, agentID)
+	if status.Recording.AdapterName != "" && status.Recording.AdapterName != "claude-code" {
+		msg = fmt.Sprintf("Active (%s, %s, adapter: %s)", duration, agentID, status.Recording.AdapterName)
+	}
+
 	return CheckResult{
 		Name:    c.Name(),
 		Status:  StatusPass,
-		Message: fmt.Sprintf("Active (%s, %s)", duration, agentID),
+		Message: msg,
 	}
 }
 
@@ -566,6 +571,51 @@ func (c *SessionOrphanedCheck) Run(ctx context.Context) CheckResult {
 	return CheckResult{
 		Name:   c.Name(),
 		Status: StatusSkip,
+	}
+}
+
+// SessionStopIncompleteCheck detects recordings where stop was attempted
+// but the session file was empty (agent crashed before writing entries).
+type SessionStopIncompleteCheck struct {
+	gitRoot      string
+	cachedStatus *session.HealthStatus
+}
+
+func (c *SessionStopIncompleteCheck) SetHealthStatus(status *session.HealthStatus) {
+	c.cachedStatus = status
+}
+
+// NewSessionStopIncompleteCheck creates a stop-incomplete check.
+func NewSessionStopIncompleteCheck(gitRoot string) *SessionStopIncompleteCheck {
+	return &SessionStopIncompleteCheck{gitRoot: gitRoot}
+}
+
+// Name returns the check name.
+func (c *SessionStopIncompleteCheck) Name() string {
+	return "incomplete stop"
+}
+
+// Run detects recordings with StopIncomplete=true.
+func (c *SessionStopIncompleteCheck) Run(ctx context.Context) CheckResult {
+	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
+
+	if !status.IsStopIncomplete {
+		return CheckResult{
+			Name:   c.Name(),
+			Status: StatusSkip,
+		}
+	}
+
+	agentID := "unknown"
+	if status.Recording != nil {
+		agentID = status.Recording.AgentID
+	}
+
+	return CheckResult{
+		Name:    c.Name(),
+		Status:  StatusWarn,
+		Message: fmt.Sprintf("session stop found empty file (%s)", agentID),
+		Fix:     fmt.Sprintf("Run 'ox agent %s session abort --force' to discard, or restart the agent to write entries and stop again", agentID),
 	}
 }
 

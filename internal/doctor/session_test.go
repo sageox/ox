@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -116,6 +117,102 @@ func TestSessionCheck(t *testing.T) {
 
 	// should return a result (pass or warn)
 	assert.True(t, result.Status == StatusPass || result.Status == StatusWarn, "unexpected status: %v", result.Status)
+}
+
+func TestSessionStopIncompleteCheck_Name(t *testing.T) {
+	check := NewSessionStopIncompleteCheck("/tmp/test")
+	assert.Equal(t, "incomplete stop", check.Name())
+}
+
+func TestSessionStopIncompleteCheck_NoRecording(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	check := NewSessionStopIncompleteCheck(tmpDir)
+
+	ctx := context.Background()
+	result := check.Run(ctx)
+
+	// no recording active → skip
+	assert.Equal(t, StatusSkip, result.Status)
+}
+
+func TestSessionStopIncompleteCheck_WithCachedStatus(t *testing.T) {
+	check := NewSessionStopIncompleteCheck("/tmp/test")
+
+	// inject cached status with StopIncomplete
+	check.SetHealthStatus(&session.HealthStatus{
+		IsRecordingActive: true,
+		IsStopIncomplete:  true,
+		Recording: &session.RecordingState{
+			AgentID: "OxTest1",
+		},
+	})
+
+	ctx := context.Background()
+	result := check.Run(ctx)
+
+	assert.Equal(t, StatusWarn, result.Status)
+	assert.Contains(t, result.Message, "empty file")
+	assert.Contains(t, result.Message, "OxTest1")
+	assert.Contains(t, result.Fix, "abort --force")
+}
+
+func TestSessionStopIncompleteCheck_ActiveButNotIncomplete(t *testing.T) {
+	check := NewSessionStopIncompleteCheck("/tmp/test")
+
+	// inject cached status without StopIncomplete
+	check.SetHealthStatus(&session.HealthStatus{
+		IsRecordingActive: true,
+		IsStopIncomplete:  false,
+		Recording: &session.RecordingState{
+			AgentID: "OxTest2",
+		},
+	})
+
+	ctx := context.Background()
+	result := check.Run(ctx)
+
+	assert.Equal(t, StatusSkip, result.Status)
+}
+
+func TestSessionRecordingCheck_GenericAdapterInfo(t *testing.T) {
+	check := NewSessionRecordingCheck("/tmp/test")
+
+	// inject cached status with generic adapter
+	check.SetHealthStatus(&session.HealthStatus{
+		IsRecordingActive: true,
+		Recording: &session.RecordingState{
+			AgentID:     "OxGen1",
+			AdapterName: "generic",
+		},
+	})
+
+	ctx := context.Background()
+	result := check.Run(ctx)
+
+	assert.Equal(t, StatusPass, result.Status)
+	assert.Contains(t, result.Message, "adapter: generic")
+	assert.Contains(t, result.Message, "OxGen1")
+}
+
+func TestSessionRecordingCheck_ClaudeCodeNoAdapterSuffix(t *testing.T) {
+	check := NewSessionRecordingCheck("/tmp/test")
+
+	// inject cached status with claude-code adapter
+	check.SetHealthStatus(&session.HealthStatus{
+		IsRecordingActive: true,
+		Recording: &session.RecordingState{
+			AgentID:     "OxCC1",
+			AdapterName: "claude-code",
+		},
+	})
+
+	ctx := context.Background()
+	result := check.Run(ctx)
+
+	assert.Equal(t, StatusPass, result.Status)
+	assert.NotContains(t, result.Message, "adapter:")
+	assert.Contains(t, result.Message, "OxCC1")
 }
 
 func TestSessionIncompleteCheck_Name(t *testing.T) {

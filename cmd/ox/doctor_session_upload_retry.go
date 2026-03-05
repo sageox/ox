@@ -124,9 +124,30 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 			continue
 		}
 
-		// skip if still recording (.recording.json present)
-		if _, err := os.Stat(filepath.Join(sessionDir, ".recording.json")); err == nil {
-			continue
+		// check if still recording (.recording.json present)
+		recordingPath := filepath.Join(sessionDir, ".recording.json")
+		if _, err := os.Stat(recordingPath); err == nil {
+			// read recording state to check for StopIncomplete
+			recData, readErr := os.ReadFile(recordingPath)
+			if readErr != nil {
+				continue // can't read, skip
+			}
+			var recState session.RecordingState
+			if json.Unmarshal(recData, &recState) != nil {
+				continue // corrupt, skip
+			}
+			if !recState.StopIncomplete {
+				continue // genuinely active recording, skip
+			}
+			// StopIncomplete: stop was attempted but session file was empty.
+			// Clear the recording state so this session can be recovered.
+			slog.Info("clearing stop-incomplete recording for retry", "session", sessionName, "agent_id", recState.AgentID)
+			_ = os.Remove(recordingPath)
+			// also clean up lock files
+			lockFiles, _ := filepath.Glob(filepath.Join(sessionDir, "*.lock"))
+			for _, lf := range lockFiles {
+				_ = os.Remove(lf)
+			}
 		}
 
 		// skip if no raw.jsonl (corrupt/empty)

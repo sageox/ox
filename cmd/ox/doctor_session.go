@@ -37,7 +37,8 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 		doctor.NewSessionRepoCheck(gitRoot),
 		doctor.NewSessionRecordingCheck(gitRoot),
 		doctor.NewSessionStaleCheck(gitRoot),
-		doctor.NewSessionOrphanedCheck(gitRoot), // detect orphaned recordings
+		doctor.NewSessionOrphanedCheck(gitRoot),       // detect orphaned recordings
+		doctor.NewSessionStopIncompleteCheck(gitRoot), // detect stuck stop-incomplete recordings
 		doctor.NewSessionPendingCheck(gitRoot),
 		doctor.NewSessionSyncCheck(gitRoot),
 		doctor.NewSessionAutoStageCheck(gitRoot), // auto-stage session files (FixLevelAuto)

@@ -205,6 +205,35 @@ func TestClearRecordingState(t *testing.T) {
 		assert.True(t, os.IsNotExist(err), "expected .recording.json to be removed")
 	})
 
+	t.Run("cleans up stale lock files", func(t *testing.T) {
+		tempHome := t.TempDir()
+		t.Setenv("HOME", tempHome)
+		t.Setenv("XDG_CACHE_HOME", "")
+
+		tmpDir := t.TempDir()
+		sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-06T14-30-user-OxLock")
+
+		state := &RecordingState{
+			AgentID:     "OxLock",
+			StartedAt:   time.Now(),
+			SessionPath: sessionPath,
+		}
+
+		err := SaveRecordingState(tmpDir, state)
+		require.NoError(t, err)
+
+		// create stale lock files
+		lockFile := filepath.Join(sessionPath, "input.jsonl.lock")
+		require.NoError(t, os.WriteFile(lockFile, []byte(""), 0600))
+
+		err = ClearRecordingState(tmpDir)
+		require.NoError(t, err)
+
+		// lock file should be cleaned up
+		_, err = os.Stat(lockFile)
+		assert.True(t, os.IsNotExist(err), "lock file should be removed")
+	})
+
 	t.Run("succeeds when no state exists", func(t *testing.T) {
 		tempHome := t.TempDir()
 		t.Setenv("HOME", tempHome)
