@@ -140,12 +140,23 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 		return nil, fmt.Errorf("failed to create raw session: %w", err)
 	}
 
+	// use AgentType from recording state if set, fall back to AdapterName
+	agentTypeForMeta := state.AgentType
+	if agentTypeForMeta == "" {
+		agentTypeForMeta = state.AdapterName
+	}
+
+	// fall back to recording state model for generic adapters
+	if result.Model == "" && state.Model != "" {
+		result.Model = state.Model
+	}
+
 	// write header with metadata
 	meta := &session.StoreMeta{
 		Version:      "1.0",
 		CreatedAt:    state.StartedAt,
 		AgentID:      state.AgentID,
-		AgentType:    state.AdapterName,
+		AgentType:    agentTypeForMeta,
 		AgentVersion: result.AgentVersion,
 		Model:        result.Model,
 		Username:     getDisplayName(projectEndpoint),
@@ -196,7 +207,7 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 		Version:      "1.0",
 		CreatedAt:    state.StartedAt,
 		AgentID:      state.AgentID,
-		AgentType:    state.AdapterName,
+		AgentType:    agentTypeForMeta,
 		AgentVersion: result.AgentVersion,
 		Model:        result.Model,
 		Username:     getDisplayName(projectEndpoint),

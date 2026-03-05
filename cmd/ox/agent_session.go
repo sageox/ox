@@ -56,6 +56,11 @@ Troubleshooting: If 'session already active' error, run session stop first. If a
 // sessionStopGuidance is behavioral guidance returned in the session stop JSON output.
 const sessionStopGuidance = `Session stopped and saved. Check the summary_prompt field — if present, follow its instructions to generate and push a rich summary. If summary generation fails, the session data is safe; run 'ox agent <id> doctor' to recover.`
 
+// genericFormatHint shows the expected JSONL format for generic adapter session files.
+const genericFormatHint = `{"type":"user","content":"Fix the login bug","timestamp":"2026-03-05T19:32:01Z"}
+{"type":"assistant","content":"I'll investigate the auth flow...","timestamp":"2026-03-05T19:32:05Z"}
+{"type":"tool","content":"PASS","tool_name":"bash","tool_input":"go test ./...","timestamp":"2026-03-05T19:32:10Z"}`
+
 // sessionStartOutput is the JSON output format for session start.
 type sessionStartOutput struct {
 	Success bool   `json:"success"`
@@ -67,6 +72,10 @@ type sessionStartOutput struct {
 	Hint     string `json:"hint,omitempty"`     // suggests how to end recording
 	Notice   string `json:"notice,omitempty"`   // one-time notice the agent MUST show to the user
 	Guidance string `json:"guidance,omitempty"` // behavioral guidance for the agent during the session
+	// Generic adapter fields (omitted for deep adapters)
+	SessionFile string   `json:"session_file,omitempty"`
+	FormatHint  string   `json:"format_hint,omitempty"`
+	NextActions []string `json:"next_actions,omitempty"`
 }
 
 // runAgentSessionStart starts recording a session for the agent.
@@ -104,50 +113,62 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	// one-time session recording notice (returned to caller via JSON)
 	notice := getSessionTermsNotice()
 
-	// check for existing recording state for this agent
-	if session.IsRecordingForAgent(projectRoot, inst.AgentID) {
-		return fmt.Errorf("a session is already being recorded\nRun 'ox agent %s session stop' first, then start a new session", inst.AgentID)
-	}
+	// Ghost session handling and conflict resolution is delegated to
+	// StartRecording() which is the single authority for recording state.
+	// It handles: same-agent StopIncomplete, same-agent duplicate, and
+	// different-agent ghost sessions.
 
 	// parse optional title from args (simple parsing: --title "value" or --title=value)
 	title := parseTitle(args)
 
 	agentType := canonicalAgentType(inst.AgentType)
-	adapterName := agentType
+	adapterName := ""          // canonical adapter name for GetAdapter() lookup
+	agentTypeName := agentType // original type for metadata
 	sessionFile := ""
 
-	if isManualSessionAgent(agentType) {
-		// Codex: use the codex adapter to find its session file.
-		// Codex stores plans inline in session files (no separate plan.md).
-		adapterName = string(agentx.AgentTypeCodex)
-		if codexAdapter, adapterErr := adapters.GetAdapter(string(agentx.AgentTypeCodex)); adapterErr == nil {
+	// Deep adapter detection: only for Claude Code or unknown agents.
+	// For known non-Claude agents, skip detection to avoid false positives
+	// (ClaudeCodeAdapter.Detect() returns true if ~/.claude exists, which is
+	// common on machines where multiple agents are installed).
+	if agentType == string(agentx.AgentTypeClaudeCode) || agentType == "" {
+		if adapter, detectErr := adapters.DetectAdapter(); detectErr == nil {
+			adapterName = adapter.Name()
 			since := time.Now().Add(-5 * time.Minute)
-			if sf, findErr := codexAdapter.FindSessionFile(inst.AgentID, since); findErr == nil {
-				sessionFile = sf
-			}
-			// no session file is non-fatal: session tracking starts but content won't be captured
+			sessionFile, _ = adapter.FindSessionFile(inst.AgentID, since)
 		}
-	} else {
-		// detect coding agent adapter
-		adapter, err := adapters.DetectAdapter()
-		if err != nil {
-			if errors.Is(err, adapters.ErrNoAdapterDetected) {
-				return fmt.Errorf("no coding agent detected\nSupported agents: Claude Code, Cursor, Windsurf")
-			}
-			return fmt.Errorf("failed to detect coding agent: %w", err)
-		}
+	}
 
-		adapterName = adapter.Name()
-
-		// find the agent's session file
-		since := time.Now().Add(-5 * time.Minute)
-		sessionFile, err = adapter.FindSessionFile(inst.AgentID, since)
-		if err != nil {
-			if errors.Is(err, adapters.ErrSessionNotFound) {
-				return fmt.Errorf("no active %s session found", adapterName)
-			}
-			return fmt.Errorf("failed to find session file: %w", err)
+	// Non-Claude agent, or deep detection failed -> use generic adapter
+	if adapterName == "" {
+		adapterName = "generic"
+		if agentTypeName == "" {
+			agentTypeName = "generic"
 		}
+	}
+
+	// For generic adapters, create the drop file for the agent to write to.
+	// Must happen BEFORE StartRecording because it validates SessionFile exists.
+	if sessionFile == "" && adapterName == "generic" {
+		username := getSessionUsername()
+		sessionName := session.GenerateSessionName(inst.AgentID, username)
+
+		repoID := getRepoIDOrDefault(projectRoot)
+		contextPath := session.GetContextPath(repoID)
+		if contextPath == "" {
+			return fmt.Errorf("no ledger configured for this project\n\nTo enable session recording:\n  1. Run 'ox init' to set up this repository\n  2. This creates a ledger to store session history")
+		}
+		sessionsBase := filepath.Join(contextPath, "sessions")
+		sessionPath := filepath.Join(sessionsBase, sessionName)
+
+		if err := os.MkdirAll(sessionPath, 0755); err != nil {
+			return fmt.Errorf("create session dir: %w", err)
+		}
+		dropFile := filepath.Join(sessionPath, "input.jsonl")
+		if err := os.WriteFile(dropFile, []byte{}, 0600); err != nil {
+			_ = os.RemoveAll(sessionPath) // clean up orphan dir
+			return fmt.Errorf("create session drop file: %w", err)
+		}
+		sessionFile = dropFile
 	}
 
 	useragent.SetAgentType(adapterName)
@@ -156,6 +177,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	opts := session.StartRecordingOptions{
 		AgentID:       inst.AgentID,
 		AdapterName:   adapterName,
+		AgentType:     agentTypeName,
 		SessionFile:   sessionFile,
 		Title:         title,
 		Username:      getSessionUsername(),
@@ -174,69 +196,19 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		return fmt.Errorf("failed to start recording: %w", err)
 	}
 
+	// build output once, render based on mode
+	output := buildSessionStartOutput(inst.AgentID, adapterName, sessionFile, title, notice, state.StartedAt)
+
 	// output format selection (priority: review > text > json default)
-	if cfg.Review {
-		// security audit mode: human summary first, then JSON
-		if notice != "" {
-			fmt.Printf("\n  %s\n\n", notice)
+	if cfg.Review || cfg.Text {
+		printSessionStartText(inst.AgentID, adapterName, title, notice, state.StartedAt)
+		if !cfg.Review {
+			return nil
 		}
-		if title != "" {
-			cli.PrintSuccess(fmt.Sprintf("%s session recording started: %q", cli.Wordmark(), title))
-		} else {
-			cli.PrintSuccess(cli.Wordmark() + " session recording started")
-		}
-		fmt.Printf("  Agent: %s (%s)\n", inst.AgentID, adapterName)
-		fmt.Printf("  Started: %s\n", state.StartedAt.Format("15:04:05"))
-		fmt.Printf("  Run %s to end recording\n", cli.StyleCommand.Render("/ox-session-stop"))
 		fmt.Println()
 		fmt.Println("--- Machine Output ---")
-		output := sessionStartOutput{
-			Success:  true,
-			Type:     "session_start",
-			AgentID:  inst.AgentID,
-			Title:    title,
-			Adapter:  adapterName,
-			Started:  state.StartedAt.Format(time.RFC3339),
-			Hint:     "Run /ox-session-stop to end recording",
-			Notice:   notice,
-			Guidance: sessionStartGuidance,
-		}
-		jsonOut, err := json.MarshalIndent(output, "", "  ")
-		if err != nil {
-			return fmt.Errorf("format start JSON: %w", err)
-		}
-		fmt.Println(string(jsonOut))
-		return nil
 	}
 
-	if cfg.Text {
-		// human-readable text output
-		if notice != "" {
-			fmt.Printf("\n  %s\n\n", notice)
-		}
-		if title != "" {
-			cli.PrintSuccess(fmt.Sprintf("%s session recording started: %q", cli.Wordmark(), title))
-		} else {
-			cli.PrintSuccess(cli.Wordmark() + " session recording started")
-		}
-		fmt.Printf("  Agent: %s (%s)\n", inst.AgentID, adapterName)
-		fmt.Printf("  Started: %s\n", state.StartedAt.Format("15:04:05"))
-		fmt.Printf("  Run %s to end recording\n", cli.StyleCommand.Render("/ox-session-stop"))
-		return nil
-	}
-
-	// default: JSON output (or explicit --json)
-	output := sessionStartOutput{
-		Success:  true,
-		Type:     "session_start",
-		AgentID:  inst.AgentID,
-		Title:    title,
-		Adapter:  adapterName,
-		Started:  state.StartedAt.Format(time.RFC3339),
-		Hint:     "Run /ox-session-stop to end recording",
-		Notice:   notice,
-		Guidance: sessionStartGuidance,
-	}
 	jsonOut, err := json.MarshalIndent(output, "", "  ")
 	if err != nil {
 		return fmt.Errorf("format start JSON: %w", err)
@@ -245,8 +217,49 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	return nil
 }
 
-func isManualSessionAgent(agentType string) bool {
-	return canonicalAgentType(agentType) == string(agentx.AgentTypeCodex)
+// buildSessionStartOutput constructs the JSON output for session start.
+func buildSessionStartOutput(agentID, adapterName, sessionFile, title, notice string, startedAt time.Time) sessionStartOutput {
+	output := sessionStartOutput{
+		Success:  true,
+		Type:     "session_start",
+		AgentID:  agentID,
+		Title:    title,
+		Adapter:  adapterName,
+		Started:  startedAt.Format(time.RFC3339),
+		Hint:     "Run /ox-session-stop to end recording",
+		Notice:   notice,
+		Guidance: sessionStartGuidance,
+	}
+	if isGenericAdapter(adapterName) {
+		output.SessionFile = sessionFile
+		output.FormatHint = genericFormatHint
+		output.NextActions = []string{
+			fmt.Sprintf("Use 'ox agent %s session log --role user --content \"...\"' to record conversation turns", agentID),
+			"Or write JSONL directly to session_file (see format_hint)",
+			"Run /ox-session-stop when done",
+		}
+	}
+	return output
+}
+
+// printSessionStartText renders the human-readable text summary for session start.
+func printSessionStartText(agentID, adapterName, title, notice string, startedAt time.Time) {
+	if notice != "" {
+		fmt.Printf("\n  %s\n\n", notice)
+	}
+	if title != "" {
+		cli.PrintSuccess(fmt.Sprintf("%s session recording started: %q", cli.Wordmark(), title))
+	} else {
+		cli.PrintSuccess(cli.Wordmark() + " session recording started")
+	}
+	fmt.Printf("  Agent: %s (%s)\n", agentID, adapterName)
+	fmt.Printf("  Started: %s\n", startedAt.Format("15:04:05"))
+	fmt.Printf("  Run %s to end recording\n", cli.StyleCommand.Render("/ox-session-stop"))
+}
+
+// isGenericAdapter returns true if the adapter name indicates the generic adapter.
+func isGenericAdapter(adapterName string) bool {
+	return adapterName == "generic"
 }
 
 // runAgentSessionStop stops recording and saves the session.
@@ -264,6 +277,46 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// check if actually recording
 	if !session.IsRecordingForAgent(projectRoot, inst.AgentID) {
 		return fmt.Errorf("not currently recording\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
+	}
+
+	// For generic adapters: check if the drop file has content BEFORE clearing state.
+	// If empty, mark as incomplete and return retry guidance instead of processing.
+	// This must happen before StopRecording because that clears the recording state.
+	existingRecState, loadErr := session.LoadRecordingState(projectRoot)
+	if loadErr != nil {
+		slog.Warn("could not load recording state for empty-file check", "error", loadErr)
+	}
+	if existingRecState != nil && isGenericAdapter(existingRecState.AdapterName) && existingRecState.SessionFile != "" {
+		info, statErr := os.Stat(existingRecState.SessionFile)
+		if statErr != nil || info.Size() == 0 {
+			// mark recording as incomplete (allows restart without "already recording" error)
+			_ = session.UpdateRecordingState(projectRoot, func(s *session.RecordingState) {
+				s.StopIncomplete = true
+			})
+
+			type retryOutput struct {
+				Success       bool     `json:"success"`
+				Type          string   `json:"type"`
+				AgentID       string   `json:"agent_id"`
+				SessionFile   string   `json:"session_file,omitempty"`
+				RetryGuidance string   `json:"retry_guidance,omitempty"`
+				NextActions   []string `json:"next_actions,omitempty"`
+			}
+			retry := retryOutput{
+				Success:       false,
+				Type:          "session_stop_retry",
+				AgentID:       inst.AgentID,
+				SessionFile:   existingRecState.SessionFile,
+				RetryGuidance: fmt.Sprintf("No session data captured. Use 'ox agent %s session log --stdin' to write your conversation, then re-run this command.", inst.AgentID),
+				NextActions: []string{
+					fmt.Sprintf("Dump conversation as JSONL: ox agent %s session log --role user --stdin", inst.AgentID),
+					fmt.Sprintf("Re-run: ox agent %s session stop", inst.AgentID),
+				},
+			}
+			jsonOut, _ := json.MarshalIndent(retry, "", "  ")
+			fmt.Println(string(jsonOut))
+			return nil
+		}
 	}
 
 	// stop recording and get final state
@@ -292,6 +345,12 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 			// non-fatal - continue with output
 			fmt.Fprintf(os.Stderr, "warning: failed to process session: %v\n", err)
 		}
+	}
+
+	// clean up the drop file after successful processing.
+	// it contains pre-redaction content that should not be committed to the ledger.
+	if isGenericAdapter(state.AdapterName) && state.SessionFile != "" {
+		_ = os.Remove(state.SessionFile) // best-effort
 	}
 
 	// best-effort: record session-end observation to team memory
@@ -627,12 +686,23 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		return nil, fmt.Errorf("failed to create raw session: %w", err)
 	}
 
+	// use AgentType from recording state if set, fall back to AdapterName
+	agentTypeForMeta := state.AgentType
+	if agentTypeForMeta == "" {
+		agentTypeForMeta = state.AdapterName
+	}
+
+	// fall back to recording state model for generic adapters
+	if result.Model == "" && state.Model != "" {
+		result.Model = state.Model
+	}
+
 	// write header with metadata
 	meta := &session.StoreMeta{
 		Version:      "1.0",
 		CreatedAt:    state.StartedAt,
 		AgentID:      state.AgentID,
-		AgentType:    state.AdapterName,
+		AgentType:    agentTypeForMeta,
 		AgentVersion: result.AgentVersion,
 		Model:        result.Model,
 		Username:     getDisplayName(projectEndpoint),
@@ -694,7 +764,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		Version:      "1.0",
 		CreatedAt:    state.StartedAt,
 		AgentID:      state.AgentID,
-		AgentType:    state.AdapterName,
+		AgentType:    agentTypeForMeta,
 		AgentVersion: result.AgentVersion,
 		Model:        result.Model,
 		Username:     getDisplayName(projectEndpoint),

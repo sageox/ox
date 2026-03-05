@@ -19,6 +19,9 @@ var (
 
 	// ErrSessionNotFound is returned when a session file cannot be located
 	ErrSessionNotFound = errors.New("session file not found")
+
+	// ErrWatchNotSupported is returned when an adapter does not support real-time watching
+	ErrWatchNotSupported = errors.New("watch not supported for this adapter")
 )
 
 // RawEntry represents a conversation turn from any agent
@@ -116,10 +119,27 @@ func DetectAdapter() (Adapter, error) {
 }
 
 // adapterAliases maps common display names and shorthand to canonical adapter names.
+// Deep adapters have their own display name aliases. Agents without a deep adapter
+// fall back to the generic adapter (remove the alias when a deep adapter is added).
 var adapterAliases = map[string]string{
+	// deep adapter display names
 	"claude code": "claude-code",
 	"claude":      "claude-code",
-	"codex":       "codex",
+
+	// generic adapter fallbacks (remove alias when deep adapter is added)
+	"codex":    "generic",
+	"amp":      "generic",
+	"cursor":   "generic",
+	"windsurf": "generic",
+	"copilot":  "generic",
+	"aider":    "generic",
+	"cody":     "generic",
+	"continue": "generic",
+	"cline":    "generic",
+	"goose":    "generic",
+	"kiro":     "generic",
+	"opencode": "generic",
+	"droid":    "generic",
 }
 
 // GetAdapter returns a specific adapter by name.

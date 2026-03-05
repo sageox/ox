@@ -59,22 +59,22 @@ func TestParseTitle(t *testing.T) {
 	}
 }
 
-func TestIsManualSessionAgent(t *testing.T) {
+func TestIsGenericAdapter(t *testing.T) {
 	tests := []struct {
-		name      string
-		agentType string
-		want      bool
+		name        string
+		adapterName string
+		want        bool
 	}{
-		{name: "codex canonical", agentType: "codex", want: true},
-		{name: "codex display alias", agentType: "Codex", want: true},
-		{name: "claude canonical", agentType: "claude", want: false},
-		{name: "claude legacy alias", agentType: "claude-code", want: false},
-		{name: "empty", agentType: "", want: false},
+		{name: "generic adapter", adapterName: "generic", want: true},
+		{name: "claude-code adapter", adapterName: "claude-code", want: false},
+		{name: "empty string", adapterName: "", want: false},
+		{name: "codex is not generic func match", adapterName: "codex", want: false},
+		{name: "case sensitive", adapterName: "Generic", want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isManualSessionAgent(tt.agentType)
+			got := isGenericAdapter(tt.adapterName)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -219,6 +219,75 @@ func TestRecordingState(t *testing.T) {
 		duration := state.Duration()
 		// allow 1 second margin for test execution
 		assert.InDelta(t, 5*time.Minute, duration, float64(time.Second))
+	})
+
+	t.Run("new fields serialize and deserialize", func(t *testing.T) {
+		tempHome := t.TempDir()
+		t.Setenv("HOME", tempHome)
+		t.Setenv("XDG_CACHE_HOME", "")
+
+		projectDir := t.TempDir()
+		sageoxDir := filepath.Join(projectDir, ".sageox")
+		require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+
+		sessionsDir := filepath.Join(projectDir, "sessions")
+		sessionName := "2026-03-05T10-30-testuser-OxTest"
+		sessionPath := filepath.Join(sessionsDir, sessionName)
+		require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+		recordingState := &session.RecordingState{
+			AgentID:        "OxTest",
+			StartedAt:      time.Now(),
+			SessionPath:    sessionPath,
+			AdapterName:    "generic",
+			AgentType:      "codex",
+			StopIncomplete: true,
+			Model:          "o3-2025-04-16",
+		}
+
+		require.NoError(t, session.SaveRecordingState(projectDir, recordingState))
+
+		state, err := session.LoadRecordingState(projectDir)
+		require.NoError(t, err)
+		require.NotNil(t, state)
+		assert.Equal(t, "codex", state.AgentType)
+		assert.True(t, state.StopIncomplete)
+		assert.Equal(t, "o3-2025-04-16", state.Model)
+	})
+
+	t.Run("omitempty leaves fields absent when unset", func(t *testing.T) {
+		tempHome := t.TempDir()
+		t.Setenv("HOME", tempHome)
+		t.Setenv("XDG_CACHE_HOME", "")
+
+		projectDir := t.TempDir()
+		sessionsDir := filepath.Join(projectDir, "sessions")
+		sessionName := "2026-03-05T10-30-testuser-OxEmpty"
+		sessionPath := filepath.Join(sessionsDir, sessionName)
+		require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+		recordingState := &session.RecordingState{
+			AgentID:     "OxEmpty",
+			StartedAt:   time.Now(),
+			SessionPath: sessionPath,
+			AdapterName: "claude-code",
+			// AgentType, StopIncomplete, Model all zero-valued
+		}
+
+		require.NoError(t, session.SaveRecordingState(projectDir, recordingState))
+
+		// read raw JSON to verify omitempty behavior
+		data, err := os.ReadFile(filepath.Join(sessionPath, ".recording.json"))
+		require.NoError(t, err)
+		var raw map[string]any
+		require.NoError(t, json.Unmarshal(data, &raw))
+
+		_, hasAgentType := raw["agent_type"]
+		_, hasStopIncomplete := raw["stop_incomplete"]
+		_, hasModel := raw["model"]
+		assert.False(t, hasAgentType, "agent_type should be omitted when empty")
+		assert.False(t, hasStopIncomplete, "stop_incomplete should be omitted when false")
+		assert.False(t, hasModel, "model should be omitted when empty")
 	})
 }
 

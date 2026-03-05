@@ -48,6 +48,7 @@ Use the session:
   ox agent <agent_id> session capture-prior # Capture prior history (schema-validated)
   ox agent <agent_id> session subagent-complete # Report subagent completion to parent
   ox agent <agent_id> session subagent-list # List subagent sessions
+  ox agent <agent_id> session log            # Append a single conversation entry
   ox agent <agent_id> session recover       # Recover stale/crashed session
   ox agent <agent_id> session abort         # Discard active session (destructive)
   ox agent <agent_id> session delete <name> # Delete a completed session (destructive)
@@ -195,7 +196,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		return runAgentDoctor(inst)
 	case "session":
 		if len(subargs) == 0 {
-			return fmt.Errorf("session requires a subcommand\nUsage: ox agent %s session <start|stop|abort|delete|remind|summarize|html|record|plan|import|capture-prior|subagent-complete|subagent-list|recover>", inst.AgentID)
+			return fmt.Errorf("session requires a subcommand\nUsage: ox agent %s session <start|stop|abort|delete|log|remind|summarize|html|record|plan|import|capture-prior|subagent-complete|subagent-list|recover>", inst.AgentID)
 		}
 		sessionCmd := subargs[0]
 		sessionArgs := subargs[1:]
@@ -212,6 +213,8 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 			return runAgentSessionHTML(inst, sessionArgs)
 		case "record":
 			return runAgentSessionRecord(inst, sessionArgs)
+		case "log":
+			return runAgentSessionLog(inst, sessionArgs)
 		case "plan":
 			return runAgentSessionPlan(inst)
 		case "import":
@@ -229,7 +232,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		case "delete":
 			return runAgentSessionDelete(inst, cmd, sessionArgs)
 		default:
-			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, delete, remind, summarize, html, record, plan, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
+			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, delete, log, remind, summarize, html, record, plan, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
 		}
 	case "distill":
 		if !auth.IsMemoryEnabled() {

@@ -249,6 +249,62 @@ The `ox agent <id> session capture-prior` command accepts a slightly different J
 5. `tool` entries SHOULD include `tool_name`
 6. At least one entry is required for capture-prior
 
+## Generic Agent Input Format
+
+For coding agents without a deep adapter (Codex, Amp, Cursor, etc.), ox provides a generic session capture mechanism. The agent writes JSONL to a "drop file" that ox creates at session start.
+
+### How It Works
+
+1. `ox agent <id> session start` returns JSON with `session_file` (path to write to), `format_hint` (example entries), and `next_actions` (machine-parseable steps)
+2. During the session, the agent writes entries using `ox agent <id> session log` or direct JSONL appends
+3. `ox agent <id> session stop` reads the file via the generic adapter, redacts secrets, and saves to the ledger
+4. The drop file (`input.jsonl`) is deleted after successful processing (it contains pre-redaction content)
+
+### Writing Entries
+
+**Recommended: Use the `session log` command** (handles formatting, timestamps, seq numbers, file locking):
+
+```bash
+ox agent <id> session log --role user --content "Fix the login bug"
+ox agent <id> session log --role assistant --content "I'll investigate the auth flow..."
+ox agent <id> session log --role tool --tool-name bash --tool-input "go test ./..." --content "PASS"
+echo "Long content" | ox agent <id> session log --role assistant --stdin
+```
+
+**Alternative: Write JSONL directly** to `session_file`:
+
+```jsonl
+{"type":"user","content":"Fix the login bug","timestamp":"2026-03-05T19:32:01Z"}
+{"type":"assistant","content":"I'll investigate the auth flow...","timestamp":"2026-03-05T19:32:05Z"}
+{"type":"tool","content":"PASS","tool_name":"bash","tool_input":"go test ./...","timestamp":"2026-03-05T19:32:10Z"}
+```
+
+### Entry Fields (Generic Input)
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | yes | Entry type: `user`, `assistant`, `system`, `tool` |
+| `content` | string | yes | Message text or tool output |
+| `timestamp` | ISO8601 | no | When the entry occurred (auto-added by `session log`) |
+| `seq` | integer | no | Sequence number (auto-added by `session log`) |
+| `tool_name` | string | no | Tool name (for `type:"tool"` entries) |
+| `tool_input` | string | no | Tool input (for `type:"tool"` entries) |
+
+### Optional Header
+
+An optional header line provides metadata. If present, it must be the first line:
+
+```json
+{"type":"header","metadata":{"agent_type":"codex","model":"gpt-4.1","agent_version":"0.1.2"}}
+```
+
+### Error Tolerance
+
+- Malformed JSON lines are skipped (logged as warnings), not fatal
+- Duplicate headers (from retry concatenation) are skipped
+- Empty files return zero entries (not an error)
+- Missing timestamps default to current time during processing
+
 ## Security
 
 - Secret redaction is applied before writing: API keys, tokens, passwords, and other sensitive patterns are replaced with `[REDACTED:pattern_name]`
