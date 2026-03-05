@@ -188,22 +188,22 @@ func getLFSClient(projectRoot string) (*lfs.Client, error) {
 }
 
 // ensureSessionsGitignore ensures the sessions/.gitignore exists in the ledger.
-// Content files are stored in LFS, only meta.json is tracked by git.
+// LFS pointer files and meta.json are committed to git; pointer files (~130 bytes)
+// reference uploaded LFS objects by OID to prevent garbage collection.
+// Overwrites legacy .gitignore that excluded content file extensions.
 func ensureSessionsGitignore(sessionsDir string) error {
 	gitignorePath := filepath.Join(sessionsDir, ".gitignore")
 
-	// check if it already exists
-	if _, err := os.Stat(gitignorePath); err == nil {
-		return nil // already exists
+	newContent := "# LFS pointer files and meta.json are committed to git.\n" +
+		"# Content is stored in LFS; pointer files (~130 bytes) reference\n" +
+		"# uploaded objects by OID to prevent garbage collection.\n"
+
+	existing, _ := os.ReadFile(gitignorePath)
+	if string(existing) == newContent {
+		return nil // already up to date
 	}
 
-	content := `# Content files are stored in LFS blob storage, not git
-*.jsonl
-*.html
-*.md
-!meta.json
-`
-	return os.WriteFile(gitignorePath, []byte(content), 0644)
+	return os.WriteFile(gitignorePath, []byte(newContent), 0644)
 }
 
 // commitAndPushLedger commits meta.json and .gitignore, then pushes to remote.
@@ -216,8 +216,15 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 	metaPath := filepath.Join(sessionDir, "meta.json")
 	gitignorePath := filepath.Join(sessionsDir, ".gitignore")
 
-	// git add specific files only
-	addCmd := exec.Command("git", "-C", ledgerPath, "add", metaPath, gitignorePath)
+	// stage meta.json, .gitignore, and any LFS pointer files
+	filesToAdd := []string{metaPath, gitignorePath}
+	for _, pattern := range []string{"*.jsonl", "*.html", "*.md"} {
+		matches, _ := filepath.Glob(filepath.Join(sessionDir, pattern))
+		filesToAdd = append(filesToAdd, matches...)
+	}
+
+	addArgs := append([]string{"-C", ledgerPath, "add"}, filesToAdd...)
+	addCmd := exec.Command("git", addArgs...)
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add failed: %s: %w", string(output), err)
 	}
@@ -250,6 +257,11 @@ func commitAndPushLedgerWithExtras(ledgerPath, sessionName string, includeSummar
 	}
 	if includeSummary {
 		filesToAdd = append(filesToAdd, filepath.Join(sessionDir, "summary.json"))
+	}
+	// stage LFS pointer files
+	for _, pattern := range []string{"*.jsonl", "*.html", "*.md"} {
+		matches, _ := filepath.Glob(filepath.Join(sessionDir, pattern))
+		filesToAdd = append(filesToAdd, matches...)
 	}
 
 	args := append([]string{"-C", ledgerPath, "add"}, filesToAdd...)

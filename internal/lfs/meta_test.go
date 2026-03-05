@@ -272,6 +272,127 @@ func TestUpdateMetaSummary(t *testing.T) {
 	}
 }
 
+func TestWriteSessionMeta_ReplacesContentWithPointers(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	// write real content files that simulate post-upload state
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(`{"event":"test"}`), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.md"), []byte("# Summary"), 0644))
+
+	meta := &SessionMeta{
+		Version:     "1.0",
+		SessionName: "test",
+		Username:    "test@example.com",
+		AgentID:     "OxTest",
+		AgentType:   "claude-code",
+		CreatedAt:   time.Now(),
+		Files: map[string]FileRef{
+			"raw.jsonl":  {OID: "sha256:abc123", Size: 16},
+			"summary.md": {OID: "sha256:def456", Size: 9},
+		},
+	}
+
+	err := WriteSessionMeta(sessionDir, meta)
+	require.NoError(t, err)
+
+	// content files should now be pointer files
+	assert.True(t, IsPointerFile(filepath.Join(sessionDir, "raw.jsonl")),
+		"raw.jsonl should be replaced with a pointer file")
+	assert.True(t, IsPointerFile(filepath.Join(sessionDir, "summary.md")),
+		"summary.md should be replaced with a pointer file")
+
+	// pointer files should round-trip correctly
+	ref, err := ReadPointerFile(filepath.Join(sessionDir, "raw.jsonl"))
+	require.NoError(t, err)
+	assert.Equal(t, "sha256:abc123", ref.OID)
+	assert.Equal(t, int64(16), ref.Size)
+}
+
+func TestWriteSessionMeta_EmptyFiles_NoReplace(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	// write a content file
+	contentPath := filepath.Join(sessionDir, "raw.jsonl")
+	content := []byte(`{"event":"test"}`)
+	require.NoError(t, os.WriteFile(contentPath, content, 0644))
+
+	meta := &SessionMeta{
+		Version:     "1.0",
+		SessionName: "test",
+		Username:    "test@example.com",
+		AgentID:     "OxTest",
+		AgentType:   "claude-code",
+		CreatedAt:   time.Now(),
+		Files:       map[string]FileRef{}, // empty
+	}
+
+	err := WriteSessionMeta(sessionDir, meta)
+	require.NoError(t, err)
+
+	// content file should NOT be replaced
+	got, err := os.ReadFile(contentPath)
+	require.NoError(t, err)
+	assert.Equal(t, content, got, "content file should be unchanged when Files is empty")
+}
+
+func TestCheckHydrationStatus_WithPointers(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	// write pointer files (not real content)
+	require.NoError(t, WritePointerFile(
+		filepath.Join(sessionDir, "raw.jsonl"),
+		FileRef{OID: "sha256:abc", Size: 100},
+	))
+	require.NoError(t, WritePointerFile(
+		filepath.Join(sessionDir, "events.jsonl"),
+		FileRef{OID: "sha256:def", Size: 200},
+	))
+
+	meta := &SessionMeta{
+		Files: map[string]FileRef{
+			"raw.jsonl":    {OID: "sha256:abc", Size: 100},
+			"events.jsonl": {OID: "sha256:def", Size: 200},
+		},
+	}
+
+	status := CheckHydrationStatus(sessionDir, meta)
+	assert.Equal(t, HydrationStatusDehydrated, status,
+		"pointer files should be detected as dehydrated")
+}
+
+func TestCheckHydrationStatus_MixedPointerAndContent(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	// one pointer file, one real content file
+	require.NoError(t, WritePointerFile(
+		filepath.Join(sessionDir, "raw.jsonl"),
+		FileRef{OID: "sha256:abc", Size: 100},
+	))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessionDir, "events.jsonl"),
+		[]byte(`{"event":"real content that is long enough"}`), 0644,
+	))
+
+	meta := &SessionMeta{
+		Files: map[string]FileRef{
+			"raw.jsonl":    {OID: "sha256:abc", Size: 100},
+			"events.jsonl": {OID: "sha256:def", Size: 44},
+		},
+	}
+
+	status := CheckHydrationStatus(sessionDir, meta)
+	assert.Equal(t, HydrationStatusPartial, status,
+		"mix of pointer and content should be partial")
+}
+
 func TestFileRef_BareOID(t *testing.T) {
 	tests := []struct {
 		oid      string

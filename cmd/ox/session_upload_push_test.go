@@ -318,8 +318,8 @@ func TestEnsureSessionsGitignore(t *testing.T) {
 
 		content, err := os.ReadFile(filepath.Join(sessionsDir, ".gitignore"))
 		require.NoError(t, err)
-		assert.Contains(t, string(content), "*.jsonl", "should exclude jsonl files")
-		assert.Contains(t, string(content), "!meta.json", "should include meta.json")
+		assert.Contains(t, string(content), "LFS pointer files")
+		assert.Contains(t, string(content), "committed to git")
 	})
 
 	t.Run("idempotent when gitignore exists", func(t *testing.T) {
@@ -330,6 +330,75 @@ func TestEnsureSessionsGitignore(t *testing.T) {
 		require.NoError(t, ensureSessionsGitignore(sessionsDir))
 		require.NoError(t, ensureSessionsGitignore(sessionsDir))
 	})
+
+	t.Run("overwrites legacy gitignore", func(t *testing.T) {
+		dir := t.TempDir()
+		sessionsDir := filepath.Join(dir, "sessions")
+		require.NoError(t, os.MkdirAll(sessionsDir, 0755))
+
+		// write legacy content that excluded pointer files
+		legacy := "*.jsonl\n*.html\n*.md\n!meta.json\n"
+		require.NoError(t, os.WriteFile(filepath.Join(sessionsDir, ".gitignore"), []byte(legacy), 0644))
+
+		err := ensureSessionsGitignore(sessionsDir)
+		require.NoError(t, err)
+
+		content, err := os.ReadFile(filepath.Join(sessionsDir, ".gitignore"))
+		require.NoError(t, err)
+		assert.NotContains(t, string(content), "*.jsonl", "should remove legacy exclusion patterns")
+		assert.NotContains(t, string(content), "!meta.json", "should remove legacy inclusion pattern")
+		assert.Contains(t, string(content), "LFS pointer files")
+	})
+}
+
+func TestCommitAndPushLedger_IncludesPointerFiles(t *testing.T) {
+	barePath, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+
+	sessionName := "2026-01-01T00-00-testuser-OxPtr1"
+	sessionDir := writeSessionFiles(t, clonePath, sessionName)
+
+	// write LFS pointer files (simulating what WriteSessionMeta does)
+	pointerContent := "version https://git-lfs.github.com/spec/v1\noid sha256:abc123\nsize 1024\n"
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(pointerContent), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.md"), []byte(pointerContent), 0644))
+
+	err := commitAndPushLedger(clonePath, sessionName)
+	require.NoError(t, err)
+
+	// verify pointer files reached remote
+	verifyClone := cloneBare(t, barePath)
+	for _, name := range []string{"raw.jsonl", "summary.md"} {
+		path := filepath.Join(verifyClone, "sessions", sessionName, name)
+		data, readErr := os.ReadFile(path)
+		require.NoError(t, readErr, "%s should exist on remote", name)
+		assert.Contains(t, string(data), "sha256:abc123", "%s should contain OID reference", name)
+	}
+}
+
+func TestCommitAndPushLedgerWithExtras_IncludesPointerFiles(t *testing.T) {
+	barePath, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+
+	sessionName := "2026-01-01T00-00-testuser-OxPtr2"
+	sessionDir := writeSessionFiles(t, clonePath, sessionName)
+
+	// write pointer files and summary.json
+	pointerContent := "version https://git-lfs.github.com/spec/v1\noid sha256:def456\nsize 2048\n"
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte(pointerContent), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "session.html"), []byte(pointerContent), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.json"), []byte(`{"key":"value"}`), 0644))
+
+	err := commitAndPushLedgerWithExtras(clonePath, sessionName, true)
+	require.NoError(t, err)
+
+	// verify pointer files and summary.json reached remote
+	verifyClone := cloneBare(t, barePath)
+	for _, name := range []string{"events.jsonl", "session.html", "summary.json"} {
+		path := filepath.Join(verifyClone, "sessions", sessionName, name)
+		_, readErr := os.Stat(path)
+		assert.NoError(t, readErr, "%s should exist on remote", name)
+	}
 }
 
 func TestCommitAndPushLedgerWithExtras_IncludesSummary(t *testing.T) {

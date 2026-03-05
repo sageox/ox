@@ -3,14 +3,16 @@ package lfs
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
 )
 
 // SessionMeta is the git-tracked metadata + OID manifest for a session.
-// Stored as meta.json in each session folder. This is the ONLY file tracked by git;
-// all content files are gitignored and stored in LFS blob storage.
+// Stored as meta.json in each session folder. When Files is populated,
+// WriteSessionMeta also writes LFS pointer files (standard git-lfs naming)
+// to replace content files, preventing LFS garbage collection.
 type SessionMeta struct {
 	Version     string             `json:"version"` // "1.0"
 	SessionName string             `json:"session_name"`
@@ -108,6 +110,9 @@ func (b *SessionMetaBuilder) Build() *SessionMeta {
 const metaFilename = "meta.json"
 
 // WriteSessionMeta writes meta.json to the given session directory.
+// When meta.Files is populated, also replaces content files with LFS pointer
+// files (standard git-lfs naming). Pointer write failures are non-fatal —
+// session data is safe in LFS + meta.json regardless.
 func WriteSessionMeta(sessionPath string, meta *SessionMeta) error {
 	if meta == nil {
 		return fmt.Errorf("nil session meta")
@@ -128,6 +133,13 @@ func WriteSessionMeta(sessionPath string, meta *SessionMeta) error {
 	if err := os.Rename(tmpPath, metaPath); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename session meta: %w", err)
+	}
+
+	// replace content files with LFS pointer files for GC protection
+	if len(meta.Files) > 0 {
+		if _, err := WritePointerFiles(sessionPath, meta.Files); err != nil {
+			slog.Warn("LFS pointer file write failed", "error", err, "path", sessionPath)
+		}
 	}
 
 	return nil
@@ -153,25 +165,28 @@ func ReadSessionMeta(sessionPath string) (*SessionMeta, error) {
 	return &meta, nil
 }
 
-// CheckHydrationStatus checks which content files exist locally for a session.
-// Returns hydrated if all files in the OID manifest are present,
-// dehydrated if none are present, partial if some are present.
+// CheckHydrationStatus checks which content files are present as real content
+// (not LFS pointers) for a session. Files that are missing or contain only an
+// LFS pointer are considered dehydrated.
 func CheckHydrationStatus(sessionPath string, meta *SessionMeta) HydrationStatus {
 	if meta == nil || len(meta.Files) == 0 {
 		return HydrationStatusDehydrated
 	}
 
-	present := 0
+	hydrated := 0
 	total := len(meta.Files)
 
 	for filename := range meta.Files {
 		filePath := filepath.Join(sessionPath, filename)
-		if _, err := os.Stat(filePath); err == nil {
-			present++
+		if _, err := os.Stat(filePath); err != nil {
+			continue // missing = dehydrated
+		}
+		if !IsPointerFile(filePath) {
+			hydrated++ // real content, not a pointer
 		}
 	}
 
-	switch present {
+	switch hydrated {
 	case 0:
 		return HydrationStatusDehydrated
 	case total:

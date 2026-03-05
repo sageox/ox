@@ -257,15 +257,13 @@ func runImport(cmd *cobra.Command, args []string) error {
 	// copies are cleaned up on the next sparse-checkout reclone (data/ is denied).
 	srcFilename := filepath.Base(srcPath)
 	srcPointerPath := filepath.Join(docDir, srcFilename)
-	if err := os.WriteFile(srcPointerPath, []byte(lfs.FormatPointer(srcRef.OID, srcRef.Size)), 0o644); err != nil {
-		return fmt.Errorf("write source pointer: %w", err)
-	}
-
 	textPointerPath := filepath.Join(docDir, "extracted.md")
+	pointerFiles := map[string]lfs.FileRef{srcFilename: srcRef}
 	if hasText {
-		if err := os.WriteFile(textPointerPath, []byte(lfs.FormatPointer(textRef.OID, textRef.Size)), 0o644); err != nil {
-			return fmt.Errorf("write extracted.md pointer: %w", err)
-		}
+		pointerFiles["extracted.md"] = textRef
+	}
+	if _, err := lfs.WritePointerFiles(docDir, pointerFiles); err != nil {
+		return fmt.Errorf("write pointer files: %w", err)
 	}
 
 	title := inferTitle(srcPath)

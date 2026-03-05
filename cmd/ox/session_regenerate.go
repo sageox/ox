@@ -794,11 +794,17 @@ func commitAndPushLedgerBatch(ledgerPath string, sessionNames []string) error {
 	// collect files to stage
 	var filesToAdd []string
 	for _, name := range sessionNames {
-		filesToAdd = append(filesToAdd, filepath.Join(sessionsDir, name, "meta.json"))
+		sessionDir := filepath.Join(sessionsDir, name)
+		filesToAdd = append(filesToAdd, filepath.Join(sessionDir, "meta.json"))
 		// summary.json is git-tracked (not LFS)
-		summaryPath := filepath.Join(sessionsDir, name, "summary.json")
+		summaryPath := filepath.Join(sessionDir, "summary.json")
 		if _, err := os.Stat(summaryPath); err == nil {
 			filesToAdd = append(filesToAdd, summaryPath)
+		}
+		// stage LFS pointer files
+		for _, pattern := range []string{"*.jsonl", "*.html", "*.md"} {
+			matches, _ := filepath.Glob(filepath.Join(sessionDir, pattern))
+			filesToAdd = append(filesToAdd, matches...)
 		}
 	}
 	filesToAdd = append(filesToAdd, filepath.Join(sessionsDir, ".gitignore"))
