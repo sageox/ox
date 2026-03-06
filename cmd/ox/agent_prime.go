@@ -646,7 +646,10 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		HooksInstalled:   hooksInstalled,
 	}
 
-	// populate cumulative context stats from daemon (best-effort)
+	// populate cumulative context stats from daemon (best-effort).
+	// read BEFORE sending this command's heartbeat — intentional: these report
+	// "consumed so far", not including the prime output about to be emitted.
+	// heartbeats are async fire-and-forget, so ordering wouldn't be guaranteed anyway.
 	if daemonClient := daemon.TryConnect(); daemonClient != nil {
 		if instances, err := daemonClient.Instances(); err == nil {
 			for _, di := range instances {
