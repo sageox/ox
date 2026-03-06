@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-06
+
+### Added
+
+**Semantic search**
+- Agents can search over team knowledge via the CLI
+
+**Document import (`ox import`)**
+- Import documents into team context
+- `--team` flag for explicit team targeting
+
+**Session improvements**
+- `ox session regenerate` to re-generate session summaries on demand
+- Multi-session status with inflight recording detection
+- Workspace path and branch shown in session status
+- Redesigned HTML viewer with narrative timeline and semantic phases
+
+**Improvements**
+- Various prime improvements to enable better discovery of context
+- Sync reliability improvements
+- Sync staleness detection and warnings
+- All team contexts surfaced to agents with slug-based lookup
+- Doctor warnings made actionable for non-technical users
+- Agent support tiers and scorecard specs
+- Daemon status redesigned with actionable CTAs
+- Consolidated environment variables for config overrides
+- User-defined REDACT.md rules for filtering sensitive content from sessions
+- Metadata improvements and sandbox safety fixes
+- Initial work towards supporting Codex
+
+### Fixed
+- Codex integration silently absorbing errors and creating empty session files
+- Squash merge stomping that lost changes
+- Doctor false warnings after fresh `ox init`
+- Sparse checkout: `--sparse` on all git add calls, `--autostash` on pulls
+- Stale cache paths not rewritten to ledger after prune
+- Session start after clear + abort lifecycle edge cases
+- RecordFlush cooldown reset on empty buffers
+- Duplicate repo detection during `ox init`
+- Doctor/status output improved when run outside a git repo
+- Daemon startup visibility and performance
+- File I/O hardening, clone recovery, and credential safety
+
+[0.3.0]: https://github.com/sageox/ox/releases/tag/v0.3.0
+
 ## [0.2.0] - 2026-02-24
 
 ### Added
