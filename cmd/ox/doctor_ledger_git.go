@@ -255,11 +255,16 @@ func checkLedgerBranchStatus(fix bool) checkResult {
 }
 
 // fixLedgerBranchAhead pushes local ledger commits to remote.
+// Falls back to pull --rebase + push if the remote has diverged (stale tracking info).
 func fixLedgerBranchAhead(ledgerPath string, aheadCount int) checkResult {
 	pushCmd := exec.Command("git", "-C", ledgerPath, "push")
 	output, err := pushCmd.CombinedOutput()
 	if err != nil {
 		errStr := strings.TrimSpace(string(output))
+		// if push rejected because remote has new commits, try pull --rebase then push
+		if strings.Contains(errStr, "rejected") || strings.Contains(errStr, "fetch first") || strings.Contains(errStr, "non-fast-forward") {
+			return fixLedgerBranchDiverged(ledgerPath, aheadCount, 0)
+		}
 		return FailedCheck("Ledger branch status",
 			"push failed",
 			fmt.Sprintf("git push error: %s", errStr))

@@ -181,12 +181,11 @@ func checkGitStatus() checkResult {
 			}
 		}
 
-		// all changes are staged - informational, ready to commit
+		// all changes are staged — informational, ready to commit
 		return checkResult{
 			name:    ".sageox/ changes",
 			passed:  true,
-			message: "staged",
-			detail:  "Commit to track convention updates",
+			message: "staged, ready to commit",
 		}
 	}
 

@@ -229,11 +229,12 @@ func createFreshSageoxStructure(t *testing.T, gitRoot string) {
 	require.NoError(t, cmd.Run(), "failed to git commit")
 }
 
-// collectIssues recursively collects warnings and failures from check results
+// collectIssues recursively collects warnings and failures from check results.
+// Info-priority checks (priority="info") are excluded — they are informational, not actionable.
 func collectIssues(check checkResult, category string, warnings, failures *[]string) {
 	prefix := category + ": " + check.name + ": "
 
-	if check.warning {
+	if check.warning && check.priority != "info" {
 		*warnings = append(*warnings, prefix+check.message)
 	}
 	if !check.passed && !check.skipped && !check.warning {
@@ -370,10 +371,8 @@ func filterTestEnvironmentIssues(issues []string) []string {
 		if strings.Contains(issue, "AGENT_ENV") {
 			continue
 		}
-		// skip uncommitted changes in test repos (test setup artifacts)
-		if strings.Contains(issue, "uncommitted change") {
-			continue
-		}
+		// NOTE: "uncommitted change" filter was intentionally removed —
+		// it was hiding a real bug where init didn't properly re-stage files.
 		// skip git hooks — fresh installs don't have hooks until `ox integrate install`
 		if strings.Contains(issue, "hook not installed") {
 			continue
