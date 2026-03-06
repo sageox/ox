@@ -12,7 +12,7 @@ Keywords: session stop, save, finish, end, done, wrap up, stop recording, upload
 
 ### Not recording
 **Symptom:** `no active session` or similar error
-**Solution:** No session is currently active. Run `ox agent <id> session start` first
+**Solution:** No session is currently active. Run `ox agent $AGENT_ID session start` first
 
 ### LFS upload failed
 **Symptom:** Session saved locally but upload to ledger failed
@@ -36,7 +36,7 @@ This step is critical for session completeness - without it, the session has no 
 6. Verify the push succeeded by checking the JSON output for `"success": true`
 
 **If summary generation fails:**
-- Run `ox agent <id> doctor` - it can detect and help recover missing summaries
+- Run `ox agent $AGENT_ID doctor` - it can detect and help recover missing summaries
 - The session data is safe regardless; only the rich summary is missing
 
-$ox agent session stop
+$ox agent $AGENT_ID session stop

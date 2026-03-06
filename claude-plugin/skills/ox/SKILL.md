@@ -10,7 +10,7 @@ ox is a CLI that gives AI coworkers shared team context: conventions, architectu
 ## When to Use
 
 - **Starting work**: Run `ox agent prime` to load team context (conventions, norms, decisions)
-- **Recording sessions**: `ox agent session start` / `ox agent session stop` to capture work to the project ledger
+- **Recording sessions**: `ox agent $AGENT_ID session start` / `ox agent $AGENT_ID session stop` to capture work to the project ledger
 - **Checking health**: `ox status` for auth/sync/daemon state, `ox doctor` for diagnostics
 - **Initializing**: `ox init` to set up SageOx in a new repository
 
@@ -26,8 +26,8 @@ ox is a CLI that gives AI coworkers shared team context: conventions, architectu
 | Command | Purpose |
 |---------|---------|
 | `ox agent prime` | Load team context for this session |
-| `ox agent session start` | Begin recording a session |
-| `ox agent session stop` | Stop recording and push to ledger |
+| `ox agent $AGENT_ID session start` | Begin recording a session |
+| `ox agent $AGENT_ID session stop` | Stop recording and push to ledger |
 | `ox status` | Check auth, sync, daemon health |
 | `ox doctor` | Run diagnostic checks |
 | `ox init` | Initialize SageOx in a repository |

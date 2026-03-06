@@ -12,7 +12,7 @@ Keywords: session start, record, capture, begin, log, track, ledger, start recor
 
 ### Already recording
 **Symptom:** `session already active` or similar error
-**Solution:** A session is already in progress. Run `ox agent <id> session stop` first if you need to restart
+**Solution:** A session is already in progress. Run `ox agent $AGENT_ID session stop` first if you need to restart
 
 ### No agent detected
 **Symptom:** Agent ID is missing or unrecognized
@@ -28,4 +28,4 @@ After the command completes, check the JSON output for a `notice` field.
 If present, you MUST display the notice text to the user verbatim. This is a one-time
 transparency notice about session recording that the user needs to see.
 
-$ox agent session start
+$ox agent $AGENT_ID session start

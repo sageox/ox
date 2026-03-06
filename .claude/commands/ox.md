@@ -35,8 +35,8 @@ Check authentication, project initialization, sync, and daemon health.
 
 ## Session Recording
 ```bash
-ox agent <id> session start   # begin recording
-ox agent <id> session stop    # stop and save to ledger
+ox agent $AGENT_ID session start   # begin recording
+ox agent $AGENT_ID session stop    # stop and save to ledger
 ```
 Record agent sessions to the project ledger for team visibility.
 

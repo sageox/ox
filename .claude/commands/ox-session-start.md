@@ -12,4 +12,4 @@ After the command completes, check the JSON output:
 - **`notice`**: If present, display the notice text to the user verbatim. This is a one-time transparency notice about session recording.
 - **`guidance`**: Follow this guidance throughout the session. It contains instructions about plan capture, session boundaries, and troubleshooting.
 
-$ox agent session start
+$ox agent $AGENT_ID session start
