@@ -176,7 +176,9 @@ func writeObservation(teamContextPath string, observations []observation) error 
 
 	relPath := filepath.Join("memory", observationDirName, dateDir, filename)
 
-	if _, err := gitutil.RunGit(ctx, teamContextPath, "add", relPath); err != nil {
+	// --sparse: team context repos use sparse-checkout; without this flag
+	// git refuses to stage files outside the sparse definition
+	if _, err := gitutil.RunGit(ctx, teamContextPath, "add", "--sparse", relPath); err != nil {
 		return fmt.Errorf("git add: %w", err)
 	}
 

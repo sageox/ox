@@ -223,7 +223,9 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 		filesToAdd = append(filesToAdd, matches...)
 	}
 
-	addArgs := append([]string{"-C", ledgerPath, "add"}, filesToAdd...)
+	// --sparse: ledger repos use sparse-checkout (cone mode); this flag
+	// prevents git from blocking adds if sparse rules change or edge cases arise
+	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, filesToAdd...)
 	addCmd := exec.Command("git", addArgs...)
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add failed: %s: %w", string(output), err)
@@ -264,7 +266,8 @@ func commitAndPushLedgerWithExtras(ledgerPath, sessionName string, includeSummar
 		filesToAdd = append(filesToAdd, matches...)
 	}
 
-	args := append([]string{"-C", ledgerPath, "add"}, filesToAdd...)
+	// --sparse: see commitAndPushLedger for rationale
+	args := append([]string{"-C", ledgerPath, "add", "--sparse"}, filesToAdd...)
 	addCmd := exec.Command("git", args...)
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add failed: %s: %w", string(output), err)
@@ -363,7 +366,7 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 			}
 
 			pullCtx, pullCancel := context.WithTimeout(ctx, opTimeout)
-			pullOut, pullErr := gitutil.RunGit(pullCtx, ledgerPath, "pull", "--rebase", "--quiet")
+			pullOut, pullErr := gitutil.RunGit(pullCtx, ledgerPath, "pull", "--rebase", "--autostash", "--quiet")
 			pullCancel()
 			if pullErr != nil {
 				// abort rebase to avoid leaving repo in broken state

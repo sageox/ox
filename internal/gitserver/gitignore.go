@@ -133,9 +133,13 @@ func CheckoutGitignoreNeedsFix(repoPath string) bool {
 // Non-fatal: if the commit fails (e.g., nothing to commit), we still have
 // the file on disk which protects against the GC blocking bug.
 func commitCheckoutGitignore(ctx context.Context, repoPath string) error {
-	addCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "add", ".sageox/.gitignore")
-	if err := addCmd.Run(); err != nil {
-		return fmt.Errorf("git add .sageox/.gitignore: %w", err)
+	// --sparse: repos may have sparse-checkout enabled (team contexts use --no-cone);
+	// without this flag git blocks staging new files even inside included paths.
+	// -f: the root .gitignore may exclude .sageox/ to hide daemon-created local state;
+	// force-add overrides this so the committed .gitignore inside .sageox/ is tracked.
+	addCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "add", "--sparse", "-f", ".sageox/.gitignore")
+	if output, err := addCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add .sageox/.gitignore: %s: %w", strings.TrimSpace(string(output)), err)
 	}
 
 	commitCmd := exec.CommandContext(ctx, "git", "-C", repoPath,

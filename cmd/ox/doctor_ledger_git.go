@@ -270,7 +270,8 @@ func fixLedgerBranchAhead(ledgerPath string, aheadCount int) checkResult {
 
 // fixLedgerBranchBehind pulls remote changes into local ledger.
 func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
-	pullCmd := exec.Command("git", "-C", ledgerPath, "pull", "--rebase")
+	// --autostash: uncommitted local changes must not block the pull
+	pullCmd := exec.Command("git", "-C", ledgerPath, "pull", "--rebase", "--autostash")
 	output, err := pullCmd.CombinedOutput()
 	if err != nil {
 		errStr := strings.TrimSpace(string(output))
@@ -287,7 +288,8 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 // fixLedgerBranchDiverged reconciles a diverged ledger by rebasing then pushing.
 func fixLedgerBranchDiverged(ledgerPath string, aheadCount, behindCount int) checkResult {
 	// pull --rebase first to linearize history
-	pullCmd := exec.Command("git", "-C", ledgerPath, "pull", "--rebase")
+	// --autostash: uncommitted local changes must not block the pull
+	pullCmd := exec.Command("git", "-C", ledgerPath, "pull", "--rebase", "--autostash")
 	pullOutput, err := pullCmd.CombinedOutput()
 	if err != nil {
 		errStr := strings.TrimSpace(string(pullOutput))
@@ -393,7 +395,8 @@ func checkLedgerCleanWorkdir(fix bool) checkResult {
 // fixLedgerDirtyWorkdir stages and commits all changes in the ledger.
 func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 	// stage all changes
-	addCmd := exec.Command("git", "-C", ledgerPath, "add", "-A")
+	// --sparse: ledger repos use sparse-checkout
+	addCmd := exec.Command("git", "-C", ledgerPath, "add", "--sparse", "-A")
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return FailedCheck("Ledger clean workdir",
 			"staging failed",

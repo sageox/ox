@@ -157,7 +157,9 @@ func commitAndPushAgentsMD(ctx context.Context, repoPath string) error {
 // commitAgentsMD commits the AGENTS.md file.
 func commitAgentsMD(ctx context.Context, repoPath string) error {
 	// add file
-	addCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "add", "AGENTS.md")
+	// --sparse: defensive; user repos don't typically use sparse-checkout but
+	// this ensures compatibility if they do
+	addCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "add", "--sparse", "AGENTS.md")
 	if err := addCmd.Run(); err != nil {
 		return fmt.Errorf("git add: %w", err)
 	}

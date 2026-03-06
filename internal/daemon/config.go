@@ -7,10 +7,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/paths"
+)
+
+// cachedWorkspaceID stores the workspace ID computed from CWD on first call.
+// This ensures a stable ID even if the daemon's CWD becomes invalid later
+// (e.g. tmpdir cleanup on macOS while the daemon is running).
+var (
+	cachedWorkspaceID     string
+	cachedWorkspaceIDOnce sync.Once
 )
 
 // IsDaemonDisabled returns true if the daemon has been explicitly disabled
@@ -83,12 +92,19 @@ func WorkspaceID(workspacePath string) string {
 }
 
 // CurrentWorkspaceID returns the ID for the current working directory.
+// The result is cached on first call so the daemon continues to use the
+// correct workspace ID even if its CWD is later deleted (e.g. macOS
+// tmpdir cleanup while the daemon is running long-term).
 func CurrentWorkspaceID() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "default"
-	}
-	return WorkspaceID(cwd)
+	cachedWorkspaceIDOnce.Do(func() {
+		cwd, err := os.Getwd()
+		if err != nil {
+			cachedWorkspaceID = "default"
+			return
+		}
+		cachedWorkspaceID = WorkspaceID(cwd)
+	})
+	return cachedWorkspaceID
 }
 
 // SocketPath returns the path to the daemon Unix socket for the current workspace.
@@ -99,6 +115,18 @@ func SocketPath() string {
 // SocketPathForWorkspace returns the socket path for a specific workspace.
 func SocketPathForWorkspace(workspaceID string) string {
 	return paths.DaemonSocketFile(workspaceID)
+}
+
+// StabilizeCWD moves the daemon's working directory to $HOME so that git
+// commands don't fail if the original CWD is deleted (e.g. tmpdir cleanup).
+// Must be called AFTER CurrentWorkspaceID() has cached the workspace ID.
+func StabilizeCWD() {
+	// ensure workspace ID is cached before changing CWD
+	_ = CurrentWorkspaceID()
+
+	if home, err := os.UserHomeDir(); err == nil {
+		_ = os.Chdir(home)
+	}
 }
 
 // LogPath returns the path to the daemon log file for the current workspace.
