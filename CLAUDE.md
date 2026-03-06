@@ -194,6 +194,20 @@ These are separate APIs by design. Do not conflate them.
 
 **IPC Architecture:** When implementing or fixing IPC issues between CLI and daemon, read [docs/ai/specs/ipc-architecture.md](docs/ai/specs/ipc-architecture.md). Key principles: IPC is never required (daemon works independently), fire-and-forget for non-critical ops, clone has a fallback (critical path exception).
 
+**Team Context and Ledger Repos Are NOT Read-Only Mirrors (Critical):**
+
+Team context repos and ledger repos are **collaborative workspaces** with both remote and local writes:
+- **Remote** pushes team knowledge (SOUL.md, docs/, memory/) and session data
+- **Local** writes happen via `ox import` (data/), daemon (`EnsureCheckoutGitignore`), `ox remember` (memory/), and direct user edits (docs/, memory/)
+- Uncommitted local changes represent **valuable in-progress work**, not garbage
+
+**NEVER discard uncommitted changes** in team context or ledger repos. Use `--autostash` on pulls to preserve local state while syncing. During blue-green GC reclone, carry dirty files from the old clone into the new one.
+
+**Git operations in sparse-checkout repos:**
+- All `git add` calls MUST use `--sparse` — without it, git (2.37+) refuses to stage files outside the sparse definition
+- All `git pull --rebase` calls MUST use `--autostash` — without it, uncommitted local changes block the pull entirely
+- Use `git add -f` when adding files inside paths excluded by `.gitignore` (e.g., `.sageox/.gitignore` when root `.gitignore` excludes `.sageox/`)
+
 **Daemon-CLI Git Operations Split:**
 
 The daemon only performs git pull (read) operations on ledgers and team contexts.
@@ -208,8 +222,9 @@ The CLI performs add/commit/push (write) operations directly on the ledger. This
 |-----------|-------|-------|
 | `git clone` | daemon | Initial setup / anti-entropy |
 | `git fetch` | daemon | Background sync timer |
-| `git pull --rebase` | daemon | Background sync timer |
-| `git add/commit` | CLI | Session upload pipeline |
+| `git pull --rebase --autostash` | daemon | Background sync timer |
+| `git add --sparse` | CLI | Session upload, import, doctor |
+| `git commit` | CLI | Session upload pipeline |
 | `git push` | CLI | Session upload pipeline |
 
 ```go

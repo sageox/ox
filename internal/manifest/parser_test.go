@@ -236,7 +236,7 @@ func TestComputeSparseSet(t *testing.T) {
 				Includes: []string{".sageox/", "memory/", "data/"},
 				Denies:   []string{"data/"},
 			},
-			want:     []string{".sageox/", "memory/"},
+			want:     []string{"/*", "!/*/", ".sageox/", "memory/"},
 			wantNone: []string{"data/"},
 		},
 		{
@@ -245,7 +245,7 @@ func TestComputeSparseSet(t *testing.T) {
 				Includes: []string{"data/slack/"},
 				Denies:   []string{"data/"},
 			},
-			want:     nil,
+			want:     []string{"/*", "!/*/"},
 			wantNone: []string{"data/slack/"},
 		},
 		{
@@ -253,7 +253,7 @@ func TestComputeSparseSet(t *testing.T) {
 			cfg: &ManifestConfig{
 				Includes: []string{".sageox/", "SOUL.md", "memory/"},
 			},
-			want: []string{".sageox/", "SOUL.md", "memory/"},
+			want: []string{"/*", "!/*/", ".sageox/", "SOUL.md", "memory/"},
 		},
 		{
 			name: "nil config",
@@ -266,7 +266,7 @@ func TestComputeSparseSet(t *testing.T) {
 				Includes: []string{"data/"},
 				Denies:   []string{"data/secrets/"},
 			},
-			want:     nil,
+			want:     []string{"/*", "!/*/"},
 			wantNone: []string{"data/"},
 		},
 		{
@@ -275,7 +275,7 @@ func TestComputeSparseSet(t *testing.T) {
 				Includes: []string{"README.md", ".sageox/"},
 				Denies:   []string{"README.md"},
 			},
-			want:     []string{".sageox/"},
+			want:     []string{"/*", "!/*/", ".sageox/"},
 			wantNone: []string{"README.md"},
 		},
 	}
