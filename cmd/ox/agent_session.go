@@ -293,6 +293,12 @@ func isGenericAdapter(adapterName string) bool {
 	return adapterName == "generic"
 }
 
+// isManualSessionAgent returns true for agent types that require explicit
+// adapter selection instead of generic/deep autodetection.
+func isManualSessionAgent(agentType string) bool {
+	return canonicalAgentType(agentType) == string(agentx.AgentTypeCodex)
+}
+
 // runAgentSessionStop stops recording and saves the session.
 // Usage: ox agent <id> session stop
 func runAgentSessionStop(inst *agentinstance.Instance) error {

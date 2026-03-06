@@ -127,7 +127,7 @@ var adapterAliases = map[string]string{
 	"claude":      "claude-code",
 
 	// generic adapter fallbacks (remove alias when deep adapter is added)
-	"codex":    "generic",
+	"codex":    "codex",
 	"amp":      "generic",
 	"cursor":   "generic",
 	"windsurf": "generic",
