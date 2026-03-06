@@ -151,6 +151,14 @@ func (t *ActivityTracker) Get(key string) []time.Time {
 	return ring.Slice()
 }
 
+// Has returns true if the key has been recorded at least once.
+func (t *ActivityTracker) Has(key string) bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	_, ok := t.rings[key]
+	return ok
+}
+
 // Count returns the number of recorded events for the key.
 func (t *ActivityTracker) Count(key string) int {
 	t.mu.RLock()

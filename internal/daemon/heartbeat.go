@@ -297,8 +297,10 @@ func (h *HeartbeatHandler) Handle(payload json.RawMessage) {
 	if hb.AgentID != "" {
 		h.agentActivity.Record(hb.AgentID)
 
-		// accumulate context tokens if reported
-		if hb.ContextTokens > 0 {
+		// accumulate context tokens if reported.
+		// only track agents already admitted by the bounded activity tracker
+		// to prevent unbounded map growth from spoofed agent IDs.
+		if hb.ContextTokens > 0 && h.agentActivity.Has(hb.AgentID) {
 			h.ctxMu.Lock()
 			h.agentContextTokens[hb.AgentID] += hb.ContextTokens
 			h.agentCommandCount[hb.AgentID]++
