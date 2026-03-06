@@ -54,7 +54,7 @@ Use the session:
   ox agent <agent_id> session delete <name> # Delete a completed session (destructive)
 
 Query team knowledge:
-  ox agent <agent_id> query "search text"   # Semantic search over team context & ledger
+  ox agent <agent_id> query "search text"   # Semantic search (--limit, --team, --repo)
 
 Redaction policy:
   ox agent redact                           # View full redaction policy (all sources)
