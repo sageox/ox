@@ -576,13 +576,17 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	var primeCallCount int
 
 	if existingMarker != nil && existingMarker.AgentID != "" {
-		// re-prime: increment existing instance's prime call count
-		if updated, isExcessive, err := store.IncrementPrimeCallCount(agentID); err == nil {
+		// re-prime: increment existing instance's prime call count.
+		// Only fall through to fresh-prime on "not found"; real errors (lock, I/O) are returned.
+		updated, isExcessive, err := store.IncrementPrimeCallCount(agentID)
+		if err == nil {
 			inst = updated
 			primeCallCount = updated.PrimeCallCount
 			if isExcessive {
 				trackPrimeExcessive(updated)
 			}
+		} else if !errors.Is(err, agentinstance.ErrInstanceNotFound) {
+			return fmt.Errorf("failed to update instance: %w", err)
 		}
 	}
 

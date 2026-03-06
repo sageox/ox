@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,9 @@ import (
 
 	"github.com/gofrs/flock"
 )
+
+// ErrInstanceNotFound is returned when an operation targets an agent ID that doesn't exist in the store.
+var ErrInstanceNotFound = errors.New("instance not found")
 
 // Design decision: JSONL storage format
 // Rationale: Append-only enables concurrent writes; scan newest-first for O(recent) lookups;
@@ -271,7 +275,7 @@ func (s *Store) IncrementPrimeCallCount(agentID string) (*Instance, bool, error)
 	}
 
 	if updatedInst == nil {
-		return nil, false, fmt.Errorf("instance not found for agent_id: %s", agentID)
+		return nil, false, fmt.Errorf("%w: %s", ErrInstanceNotFound, agentID)
 	}
 
 	if err := s.rewriteInstances(instances); err != nil {
