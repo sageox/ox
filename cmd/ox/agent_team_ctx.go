@@ -73,7 +73,7 @@ func runAgentTeamCtx(cmd *cobra.Command, args []string) error {
 	// so send context heartbeat directly if agent ID is available
 	if bytes := cw.BytesWritten(); bytes > 0 {
 		if agentID := os.Getenv("SAGEOX_AGENT_ID"); agentID != "" {
-			sendContextHeartbeat(agentID, bytes)
+			sendContextHeartbeat(agentID, bytes, "team-ctx")
 		}
 	}
 	return nil

@@ -81,7 +81,7 @@ func Heartbeat(repoPath string, teamIDs []string, agentID string) {
 // then sends to daemon. Fire-and-forget: never blocks CLI.
 //
 // TODO: fold into a unified post-command heartbeat (see consolidation note above).
-func sendContextHeartbeat(agentID string, bytes int64) {
+func sendContextHeartbeat(agentID string, bytes int64, commandName string) {
 	tokens := estimateTokens(bytes)
 	if tokens <= 0 {
 		return
@@ -91,6 +91,7 @@ func sendContextHeartbeat(agentID string, bytes int64) {
 		payload := daemon.HeartbeatPayload{
 			AgentID:       agentID,
 			ContextTokens: int64(tokens),
+			CommandName:   commandName,
 			Timestamp:     time.Now(),
 		}
 		data, err := json.Marshal(payload)

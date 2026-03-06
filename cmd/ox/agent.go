@@ -210,15 +210,15 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		Heartbeat(gitRoot, nil, agentID)
 	}
 
+	subcommand := args[0]
+
 	// reset context byte counter; deferred heartbeat sends accumulated bytes
 	contextBytesProduced.Store(0)
 	defer func() {
 		if bytes := contextBytesProduced.Load(); bytes > 0 {
-			sendContextHeartbeat(agentID, bytes)
+			sendContextHeartbeat(agentID, bytes, subcommand)
 		}
 	}()
-
-	subcommand := args[0]
 	subargs := args[1:]
 
 	switch subcommand {

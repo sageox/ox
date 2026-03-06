@@ -1139,7 +1139,7 @@ func outputAgentPrime(cmd *cobra.Command, textMode, reviewMode bool, output agen
 
 	// prime is not dispatched via runWithAgentID, send heartbeat directly
 	if bytes := cw.BytesWritten(); bytes > 0 && output.AgentID != "" {
-		sendContextHeartbeat(output.AgentID, bytes)
+		sendContextHeartbeat(output.AgentID, bytes, "prime")
 	}
 	return nil
 }

@@ -51,6 +51,10 @@ type HeartbeatPayload struct {
 	// Accumulated per-agent by the daemon for visibility into context budget usage.
 	// Zero means no context tracking for this heartbeat (e.g., non-agent commands).
 	ContextTokens int64 `json:"context_tokens,omitempty"`
+
+	// CommandName identifies which ox subcommand produced this context (e.g., "prime",
+	// "team-ctx", "session list"). Used for per-command breakdown (ox-aw0).
+	CommandName string `json:"command_name,omitempty"`
 }
 
 // HeartbeatCreds contains credentials for the daemon.
