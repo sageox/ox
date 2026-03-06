@@ -53,6 +53,9 @@ Use the session:
   ox agent <agent_id> session abort         # Discard active session (destructive)
   ox agent <agent_id> session delete <name> # Delete a completed session (destructive)
 
+Query team knowledge:
+  ox agent <agent_id> query "search text"   # Semantic search (--limit, --team, --repo)
+
 Redaction policy:
   ox agent redact                           # View full redaction policy (all sources)
   ox agent redact test "sample text"        # Test redaction against sample text
@@ -158,6 +161,7 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 // from `ox agent typo` (genuinely unknown command).
 var agentSubcommands = map[string]bool{
 	"doctor":  true,
+	"query":   true,
 	"session": true,
 }
 
@@ -234,6 +238,8 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		default:
 			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, delete, log, remind, summarize, html, record, plan, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
 		}
+	case "query":
+		return runAgentQuery(inst, subargs)
 	case "distill":
 		if !auth.IsMemoryEnabled() {
 			return fmt.Errorf("memory features are not enabled\nSet FEATURE_MEMORY=true to enable")
@@ -242,7 +248,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	case "hook":
 		return runAgentHook(subargs)
 	default:
-		available := "doctor, hook, session"
+		available := "doctor, hook, query, session"
 		if auth.IsMemoryEnabled() {
 			available = "distill, " + available
 		}

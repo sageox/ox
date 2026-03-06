@@ -534,7 +534,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// build intent-to-command guidance for agent consumption
-	guidance := buildGuidance(teamCtx, ledgerStatus)
+	guidance := buildGuidance(agentID, teamCtx, ledgerStatus)
 	timing["guidance_build"] = time.Since(phaseStart).Milliseconds()
 
 	// check for team context notifications using mtime-based approach
@@ -885,7 +885,7 @@ EOF`, agentID, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339),
 
 // buildGuidance constructs state-aware command guidance for agent consumption.
 // Only includes entries when the underlying resource is available.
-func buildGuidance(teamCtx *teamContextInfo, ledger *ledgerInfo) *agentGuidance {
+func buildGuidance(agentID string, teamCtx *teamContextInfo, ledger *ledgerInfo) *agentGuidance {
 	var cmds []intentCommand
 
 	// team discussions — only when team context exists
@@ -913,6 +913,14 @@ func buildGuidance(teamCtx *teamContextInfo, ledger *ledgerInfo) *agentGuidance 
 		cmds = append(cmds, intentCommand{
 			Intent:  "session history (this repo only): prior AI coworker coding sessions for this repo",
 			Command: "ox session list",
+		})
+	}
+
+	// semantic search — when primed context isn't enough, query for depth
+	if teamCtx != nil || (ledger != nil && ledger.Exists) {
+		cmds = append(cmds, intentCommand{
+			Intent:  "deep search team discussions, session recordings, team context: use when MEMORY.md and its links don't answer",
+			Command: fmt.Sprintf("ox agent %s query \"<your question>\"", agentID),
 		})
 	}
 
