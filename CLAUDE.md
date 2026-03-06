@@ -372,7 +372,7 @@ See:
 
 ## Development Standards
 
-See [docs/human/guides/development-philosophy.md](docs/human/guides/development-philosophy.md) for philosophy, [docs/ai/specs/go-conventions.md](docs/ai/specs/go-conventions.md) for Go conventions, [docs/ai/specs/cli-design-system.md](docs/ai/specs/cli-design-system.md) for CLI design system, [docs/ai/specs/agent-ux-principles.md](docs/ai/specs/agent-ux-principles.md) for Agent UX principles, and [docs/ai/specs/agent-ux-ox-implementation.md](docs/ai/specs/agent-ux-ox-implementation.md) for ox-specific implementation.
+See [docs/human/guides/development-philosophy.md](docs/human/guides/development-philosophy.md) for philosophy, [docs/ai/specs/go-conventions.md](docs/ai/specs/go-conventions.md) for Go conventions, [docs/ai/specs/cli-design-system.md](docs/ai/specs/cli-design-system.md) for CLI design system, [docs/ai/specs/agent-ux-principles.md](docs/ai/specs/agent-ux-principles.md) for Agent UX principles, [docs/ai/specs/agent-ux-ox-implementation.md](docs/ai/specs/agent-ux-ox-implementation.md) for ox-specific implementation, [docs/ai/specs/agent-support-tiers.md](docs/ai/specs/agent-support-tiers.md) for agent support tier definitions (Bronze/Silver/Gold), and [docs/ai/specs/agent-scorecard.md](docs/ai/specs/agent-scorecard.md) for per-agent integration status.
 
 Always confirm with human before doing a git commit or a git push in this repo.
 
