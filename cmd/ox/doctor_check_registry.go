@@ -431,15 +431,6 @@ func init() {
 		Run:         checkGCBlockedByUntracked,
 	})
 
-	RegisterDoctorCheck(&DoctorCheck{
-		Slug:        CheckSlugTeamSparseCheckout,
-		Name:        "Team sparse checkout",
-		Category:    "Team Context",
-		FixLevel:    FixLevelAuto,
-		Description: "Ensures team context sparse-checkout includes root-level file patterns (/* and !/*/)",
-		Run:         checkTeamSparseCheckout,
-	})
-
 	// ============================================================
 	// Daemon checks
 	// ============================================================

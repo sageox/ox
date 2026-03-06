@@ -163,9 +163,13 @@ func RegisterDaemon(workspacePath, version string) error {
 }
 
 // UnregisterDaemon removes the current daemon from the registry.
-// Uses cached workspace ID since CWD may have been stabilized to $HOME.
 func UnregisterDaemon() error {
-	workspaceID := CurrentWorkspaceID()
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	workspaceID := WorkspaceID(cwd)
 	reg, err := LoadRegistry()
 	if err != nil {
 		return err

@@ -73,9 +73,8 @@ func GetSageoxFilesToCommit() []string {
 	return files
 }
 
-// ForceAddSageoxFiles stages .sageox/ config files with git add -f (force stage, NOT force push).
-// Only matches top-level .sageox/ files via non-recursive glob — cache/ subdirectory is never touched.
-// The -f flag overrides .gitignore, used because files may have been previously ignored.
+// ForceAddSageoxFiles adds all .sageox/ files to the VCS (git or svn).
+// For git, uses -f flag in case files were previously ignored.
 func ForceAddSageoxFiles() error {
 	repoRoot := findRepoRoot()
 	if repoRoot == "" {
@@ -182,11 +181,12 @@ func checkGitStatus() checkResult {
 			}
 		}
 
-		// all changes are staged — informational, ready to commit
+		// all changes are staged - informational, ready to commit
 		return checkResult{
 			name:    ".sageox/ changes",
 			passed:  true,
-			message: "staged, ready to commit",
+			message: "staged",
+			detail:  "Commit to track convention updates",
 		}
 	}
 

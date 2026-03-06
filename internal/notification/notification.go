@@ -27,8 +27,8 @@ var TeamContextFiles = []string{
 	"AGENTS.md",  // team instructions (root)
 	"CLAUDE.md",  // team instructions (root, Claude-specific)
 	"agent-context/distilled-discussions.md",
-	"coworkers/ai/claude/AGENTS.md",
-	"coworkers/ai/claude/CLAUDE.md",
+	"coworkers/AGENTS.md",
+	"coworkers/CLAUDE.md",
 }
 
 // CheckForUpdates checks if any team context files have been modified.

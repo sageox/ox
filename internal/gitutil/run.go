@@ -18,11 +18,6 @@ func RunGit(ctx context.Context, repoPath string, args ...string) (string, error
 	cmdArgs = append(cmdArgs, args...)
 
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
-	// set cmd.Dir so git doesn't fail on getcwd() when the process CWD
-	// has been deleted (e.g. daemon started from a tmpdir that was cleaned)
-	if repoPath != "" {
-		cmd.Dir = repoPath
-	}
 	output, err := cmd.CombinedOutput()
 	sanitized := SanitizeOutput(strings.TrimSpace(string(output)))
 

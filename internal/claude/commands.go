@@ -18,12 +18,12 @@ import (
 //
 // Expected directory structure:
 //
-//	<team_ledger>/coworkers/ai/claude/commands/
+//	<team_context>/coworkers/commands/
 //	├── index.md          # Optional: token-optimized descriptions
 //	├── deploy.md         # /deploy command
 //	└── review-pr.md      # /review-pr command
 func DiscoverTeamCommands(teamPath string) ([]Command, error) {
-	commandsDir := filepath.Join(teamPath, ClaudeDir, "commands")
+	commandsDir := filepath.Join(teamPath, CommandsDir)
 
 	if _, err := os.Stat(commandsDir); os.IsNotExist(err) {
 		return nil, nil

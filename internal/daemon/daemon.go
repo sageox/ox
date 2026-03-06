@@ -243,11 +243,6 @@ func (d *Daemon) Start() error {
 		d.logger.Warn("failed to register daemon", "error", err)
 	}
 
-	// move CWD to $HOME so git commands don't fail if the original CWD
-	// is deleted (e.g. tmpdir cleanup on macOS). Must happen after
-	// workspace ID is cached and PID file is written.
-	StabilizeCWD()
-
 	// start IPC server
 	d.server = NewServer(d.logger)
 
@@ -329,8 +324,8 @@ func (d *Daemon) Start() error {
 				lastErrTimeStr = lastErrTime.Format(time.RFC3339)
 			}
 			stats := d.scheduler.SyncStats()
-			// get workspace path (use config, not CWD — CWD may have been stabilized to $HOME)
-			workspacePath := d.config.ProjectRoot
+			// get workspace path
+			workspacePath, _ := os.Getwd()
 
 			// get activity summary from heartbeat handler
 			var activitySummary *ActivitySummary

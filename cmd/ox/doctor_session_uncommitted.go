@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/gitserver"
 )
 
 func init() {
@@ -70,11 +69,7 @@ func checkSessionUncommitted(fix bool) checkResult {
 func fixSessionUncommitted(ledgerPath string, count int) checkResult {
 	const name = "uncommitted session files"
 
-	// ensure .gitignore is in place before any commit to prevent cache file leakage
-	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
-
-	// --sparse: ledger repos use sparse-checkout
-	if out, err := exec.Command("git", "-C", ledgerPath, "add", "--sparse", "sessions/").CombinedOutput(); err != nil {
+	if out, err := exec.Command("git", "-C", ledgerPath, "add", "sessions/").CombinedOutput(); err != nil {
 		return FailedCheck(name, "staging failed",
 			fmt.Sprintf("git add error: %s", strings.TrimSpace(string(out))))
 	}
@@ -88,7 +83,6 @@ func fixSessionUncommitted(ledgerPath string, count int) checkResult {
 			fmt.Sprintf("git commit error: %s", errStr))
 	}
 
-	// no --force: ledger history must never be rewritten
 	if out, err := exec.Command("git", "-C", ledgerPath, "push").CombinedOutput(); err != nil {
 		return WarningCheck(name,
 			fmt.Sprintf("committed %d file(s) but push failed", count),

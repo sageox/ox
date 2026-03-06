@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
@@ -134,15 +133,11 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
-	// ensure .gitignore is in place before any commit to prevent cache file leakage
-	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
-
 	// extract session name from session dir path for commit message
 	sessionName := filepath.Base(sessionDir)
 
 	// git add the summary file (and meta.json if updated)
-	// --sparse: ledger repos use sparse-checkout
-	addArgs := []string{"-C", ledgerPath, "add", "--sparse", summaryDst}
+	addArgs := []string{"-C", ledgerPath, "add", summaryDst}
 	if metaUpdated {
 		addArgs = append(addArgs, filepath.Join(sessionDir, "meta.json"))
 	}

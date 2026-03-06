@@ -1083,8 +1083,7 @@ func (c *SessionAutoStageCheck) stageSessionFiles(ledgerPath string, files []str
 
 	// stage files using git add
 	// use sessions/ directory to catch all session files in one command
-	// --sparse: ledger repos use sparse-checkout
-	cmd := exec.Command("git", "-C", ledgerPath, "add", "--sparse", "sessions/")
+	cmd := exec.Command("git", "-C", ledgerPath, "add", "sessions/")
 	if err := cmd.Run(); err != nil {
 		return 0, fmt.Errorf("git add sessions/: %w", err)
 	}

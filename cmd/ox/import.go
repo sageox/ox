@@ -528,9 +528,7 @@ func commitAndPushDocImport(tcPath, ep, docID, metaPath, srcPointerPath, textPoi
 		filesToAdd = append(filesToAdd, gitattrsPath)
 	}
 
-	// --sparse: team context repos use sparse-checkout; without this flag
-	// git refuses to stage files outside the sparse definition (e.g. .gitattributes at root)
-	addArgs := append([]string{"-C", tcPath, "add", "--sparse"}, filesToAdd...)
+	addArgs := append([]string{"-C", tcPath, "add"}, filesToAdd...)
 	addCmd := exec.CommandContext(ctx, "git", addArgs...)
 	if out, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add failed: %s: %w", string(out), err)
@@ -603,7 +601,7 @@ func pushTeamContext(ctx context.Context, tcPath, ep string) error {
 			}
 
 			pullCtx, pullCancel := context.WithTimeout(ctx, opTimeout)
-			pullOut, pullErr := gitutil.RunGit(pullCtx, tcPath, "pull", "--rebase", "--autostash", "--quiet")
+			pullOut, pullErr := gitutil.RunGit(pullCtx, tcPath, "pull", "--rebase", "--quiet")
 			pullCancel()
 			if pullErr != nil {
 				abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)

@@ -1,13 +1,19 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/claude"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/pkg/agentx"
@@ -32,8 +38,8 @@ type coworkerInfo struct {
 	TeamName    string `json:"team_name,omitempty"`
 }
 
-// coworkerAgentOutput is the JSON output structure for ox coworker agent <name>
-type coworkerAgentOutput struct {
+// coworkerLoadOutput is the JSON output structure for ox coworker load <name>
+type coworkerLoadOutput struct {
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	Model       string `json:"model,omitempty"`
@@ -55,7 +61,9 @@ directory and can be listed and loaded on demand.
 
 Commands:
   list       List available coworkers
-  agent      Load a coworker's prompt into context`,
+  load       Load a coworker's prompt into context
+  add        Add a coworker to the team
+  remove     Remove a coworker from the team`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cmd.Help()
 	},
@@ -66,43 +74,111 @@ var coworkerListCmd = &cobra.Command{
 	Short: "List available team coworkers",
 	Long: `List all available coworkers from team contexts at the current endpoint.
 
-Coworkers are expert AI subagents defined in coworkers/ai/claude/agents/.
-Use 'ox coworker agent <name>' to load a coworker's expertise into your context.
-
-If you have multiple teams at the current endpoint, coworkers from all teams
-are listed with their team attribution.`,
+Coworkers are expert AI subagents defined in coworkers/agents/.
+Use 'ox coworker load <name>' to load a coworker's expertise into your context.`,
 	RunE: runCoworkerList,
 }
 
-var coworkerAgentCmd = &cobra.Command{
-	Use:   "agent <name>",
+var coworkerLoadCmd = &cobra.Command{
+	Use:   "load <name>",
 	Short: "Load a coworker's prompt into context",
-	Long: `Load a coworker's full prompt content into your agent context.
+	Long: `Load a coworker's full prompt content into your AI coworker context.
 
-This outputs the coworker's expertise as markdown, which Claude can then
-use for specialized tasks. The load event is also logged to the session
-for metrics on coworker usage.
-
-Searches all team contexts at the current endpoint for the named coworker.
+This outputs the coworker's expertise as markdown, which can then be used
+for specialized tasks. The load event is also logged to the session for
+metrics on coworker usage.
 
 Example:
-  ox coworker agent code-reviewer
-  ox coworker agent code-reviewer --model opus`,
+  ox coworker load code-reviewer
+  ox coworker load code-reviewer --model opus`,
 	Args: cobra.ExactArgs(1),
-	RunE: runCoworkerAgent,
+	RunE: runCoworkerLoad,
+}
+
+var coworkerAddCmd = &cobra.Command{
+	Use:   "add <file>",
+	Short: "Add a coworker to the team",
+	Long: `Add an expert coworker to your team's context.
+
+Validates the file has YAML frontmatter with a description field,
+copies it to the team's coworkers/agents/ directory, and commits it.
+
+Agent file format (follows Claude Code's .claude/agents/ frontmatter style):
+  ---
+  description: "Expert code reviewer"
+  model: "opus"
+  ---
+  # Code Reviewer
+  You are an expert code reviewer...
+
+Required frontmatter: description
+Optional frontmatter: model (opus, sonnet, haiku)
+
+Example:
+  ox coworker add reviewer.md
+  ox coworker add ~/agents/security-expert.md`,
+	Args: cobra.ExactArgs(1),
+	RunE: runCoworkerAdd,
+}
+
+var coworkerRemoveCmd = &cobra.Command{
+	Use:   "remove <name>",
+	Short: "Remove a coworker from the team",
+	Long: `Remove an expert coworker from your team's context.
+
+Removes the coworker's agent file from coworkers/agents/ and commits
+the deletion. Use --force to skip confirmation.
+
+Example:
+  ox coworker remove code-reviewer
+  ox coworker remove code-reviewer --force`,
+	Args: cobra.ExactArgs(1),
+	RunE: runCoworkerRemove,
 }
 
 func init() {
+	// shared --team flag on all subcommands
+	for _, cmd := range []*cobra.Command{coworkerListCmd, coworkerLoadCmd, coworkerAddCmd, coworkerRemoveCmd} {
+		cmd.Flags().String("team", "", "Team ID to use (defaults to this repo's team)")
+	}
+
 	// coworker list flags
 	coworkerListCmd.Flags().Bool("json", false, "Output as JSON")
 
-	// coworker agent flags
-	coworkerAgentCmd.Flags().String("model", "", "Override the coworker's default model (sonnet, opus, haiku)")
-	coworkerAgentCmd.Flags().Bool("json", false, "Output as JSON")
+	// coworker load flags
+	coworkerLoadCmd.Flags().String("model", "", "Override the coworker's default model (sonnet, opus, haiku)")
+	coworkerLoadCmd.Flags().Bool("json", false, "Output as JSON")
+
+	// coworker remove flags
+	coworkerRemoveCmd.Flags().Bool("force", false, "Skip confirmation prompt")
 
 	coworkerCmd.AddCommand(coworkerListCmd)
-	coworkerCmd.AddCommand(coworkerAgentCmd)
+	coworkerCmd.AddCommand(coworkerLoadCmd)
+	coworkerCmd.AddCommand(coworkerAddCmd)
+	coworkerCmd.AddCommand(coworkerRemoveCmd)
 	rootCmd.AddCommand(coworkerCmd)
+}
+
+// resolveTeamContext returns the team context for a coworker command.
+// If --team is set, looks up that team ID from local config.
+// Otherwise falls back to the repo's configured team.
+func resolveCoworkerTeam(cmd *cobra.Command, projectRoot string) (*config.TeamContext, error) {
+	teamFlag, _ := cmd.Flags().GetString("team")
+	if teamFlag != "" {
+		// search local config first, then all known teams (global teams directory)
+		allTeams := config.FindAllTeamContexts(projectRoot)
+		for i, tc := range allTeams {
+			if tc.TeamID == teamFlag {
+				return &allTeams[i], nil
+			}
+		}
+		return nil, fmt.Errorf("team %q not found; check ox status for available teams", teamFlag)
+	}
+	tc := config.FindRepoTeamContext(projectRoot)
+	if tc == nil {
+		return nil, fmt.Errorf("no team context configured; run 'ox init' to set up or use --team")
+	}
+	return tc, nil
 }
 
 func runCoworkerList(cmd *cobra.Command, args []string) error {
@@ -117,9 +193,8 @@ func runCoworkerList(cmd *cobra.Command, args []string) error {
 	// get current endpoint
 	currentEndpoint := endpoint.GetForProject(projectRoot)
 
-	// load team contexts
-	localCfg, err := config.LoadLocalConfig(projectRoot)
-	if err != nil || len(localCfg.TeamContexts) == 0 {
+	tc, err := resolveCoworkerTeam(cmd, projectRoot)
+	if err != nil {
 		if jsonMode {
 			output := coworkerListOutput{
 				Coworkers: []coworkerInfo{},
@@ -133,41 +208,11 @@ func runCoworkerList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// filter team contexts by current endpoint
-	matchingTeams := filterTeamsByEndpoint(localCfg.TeamContexts, currentEndpoint)
-
-	if len(matchingTeams) == 0 {
-		if jsonMode {
-			output := coworkerListOutput{
-				Coworkers: []coworkerInfo{},
-				Source:    "no_matching_teams",
-				Endpoint:  currentEndpoint,
-			}
-			return json.NewEncoder(cmd.OutOrStdout()).Encode(output)
-		}
-		fmt.Fprintf(cmd.OutOrStdout(), "No team contexts found for endpoint: %s\n", currentEndpoint)
-		fmt.Fprintln(cmd.OutOrStdout(), "Run 'ox init' to set up team context.")
-		return nil
-	}
-
-	// aggregate coworkers from all matching teams
+	// discover coworkers for this repo's team
 	var allCoworkers []coworkerInfo
-	var teamIDs []string
 
-	for _, tc := range matchingTeams {
-		// verify team context path exists
-		if _, err := os.Stat(tc.Path); os.IsNotExist(err) {
-			continue
-		}
-
-		// discover agents for this team
-		agents, err := claude.DiscoverAgents(tc.Path)
-		if err != nil {
-			continue
-		}
-
-		teamIDs = append(teamIDs, tc.TeamID)
-
+	agents, err := claude.DiscoverAgents(tc.Path)
+	if err == nil {
 		for _, agent := range agents {
 			allCoworkers = append(allCoworkers, coworkerInfo{
 				Name:        agent.Name,
@@ -185,71 +230,68 @@ func runCoworkerList(cmd *cobra.Command, args []string) error {
 			Coworkers: allCoworkers,
 			Source:    "team_context",
 			Endpoint:  currentEndpoint,
-			Teams:     teamIDs,
+			Teams:     []string{tc.TeamID},
 		}
 		encoder := json.NewEncoder(cmd.OutOrStdout())
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(output)
 	}
 
-	// text output
+	// resolve display name for team
+	teamLabel := tc.TeamName
+	if teamLabel == "" {
+		teamLabel = tc.TeamID
+	}
+
+	w := cmd.OutOrStdout()
+
+	// text output — empty state
 	if len(allCoworkers) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No Claude subagents found in team contexts.")
-		fmt.Fprintln(cmd.OutOrStdout(), "Add agent files to coworkers/ai/claude/agents/ in your team context.")
+		fmt.Fprintf(w, "%s No SageOx coworkers found in %s team.\n",
+			cli.Styles.Info.Render("ℹ"), teamLabel)
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "  Add one with: %s\n", cli.StyleCommand.Render("ox coworker add <file>.md"))
+		fmt.Fprintf(w, "  See format:   %s\n", cli.StyleCommand.Render("ox coworker add --help"))
 		return nil
 	}
 
-	fmt.Fprintln(cmd.OutOrStdout(), "Claude Subagents")
-	fmt.Fprintln(cmd.OutOrStdout())
+	// header with underline (matches ox help style)
+	header := fmt.Sprintf("Expert Coworkers (%s)", teamLabel)
+	fmt.Fprintln(w, cli.StyleGroupHeader.Render(header))
+	fmt.Fprintln(w, cli.StyleDim.Render(strings.Repeat("─", len(header))))
 
-	// group coworkers by team to avoid repeating team name on every row
-	coworkersByTeam := make(map[string][]coworkerInfo)
-	teamOrder := make([]string, 0) // preserve order
+	// build rows for dynamic column alignment
+	rows := make([][]string, 0, len(allCoworkers))
 	for _, cw := range allCoworkers {
-		key := cw.TeamID
-		if _, exists := coworkersByTeam[key]; !exists {
-			teamOrder = append(teamOrder, key)
+		desc := cw.Description
+		if desc == "" {
+			desc = "(no description)"
 		}
-		coworkersByTeam[key] = append(coworkersByTeam[key], cw)
+		rows = append(rows, []string{cw.Name, desc})
+	}
+	widths := cli.ColumnWidths(rows, []int{8, 12}, []int{24, 60})
+
+	// data rows — name in brand, description in dim
+	for _, row := range rows {
+		name := fmt.Sprintf("%-*s", widths[0], row[0])
+		fmt.Fprintf(w, "  %s  %s\n",
+			cli.StyleCalloutBold.Render(name),
+			cli.StyleDim.Render(row[1]),
+		)
 	}
 
-	// output grouped by team
-	for _, teamID := range teamOrder {
-		coworkers := coworkersByTeam[teamID]
-		if len(coworkers) == 0 {
-			continue
-		}
-
-		// team header (only if multiple teams)
-		if len(teamOrder) > 1 {
-			teamDisplay := teamID
-			if coworkers[0].TeamName != "" {
-				teamDisplay = coworkers[0].TeamName
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "## %s\n", teamDisplay)
-			fmt.Fprintln(cmd.OutOrStdout())
-		}
-
-		fmt.Fprintln(cmd.OutOrStdout(), "| Name | When to Use |")
-		fmt.Fprintln(cmd.OutOrStdout(), "|------|-------------|")
-		for _, cw := range coworkers {
-			desc := cw.Description
-			if desc == "" {
-				desc = "(no description)"
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "| %s | %s |\n", cw.Name, desc)
-		}
-		fmt.Fprintln(cmd.OutOrStdout())
-	}
-
-	fmt.Fprintln(cmd.OutOrStdout(), "Load: ox coworker agent <name>")
+	// load hint
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "  %s Load with %s\n",
+		cli.StyleDim.Render("▸"),
+		cli.StyleCommand.Render("ox coworker load <name>"))
 
 	return nil
 }
 
-func runCoworkerAgent(cmd *cobra.Command, args []string) error {
+func runCoworkerLoad(cmd *cobra.Command, args []string) error {
 	// gate: require agent context
-	if errMsg := agentx.RequireAgent("ox coworker agent"); errMsg != "" {
+	if errMsg := agentx.RequireAgent("ox coworker load"); errMsg != "" {
 		return fmt.Errorf("%s", errMsg)
 	}
 
@@ -262,38 +304,16 @@ func runCoworkerAgent(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("could not find project root: %w", err)
 	}
 
-	// get current endpoint
-	currentEndpoint := endpoint.GetForProject(projectRoot)
-
-	// load team contexts
-	localCfg, err := config.LoadLocalConfig(projectRoot)
-	if err != nil || len(localCfg.TeamContexts) == 0 {
-		return fmt.Errorf("no team context configured; run 'ox init' to set up")
+	tc, err := resolveCoworkerTeam(cmd, projectRoot)
+	if err != nil {
+		return err
 	}
 
-	// filter team contexts by current endpoint
-	matchingTeams := filterTeamsByEndpoint(localCfg.TeamContexts, currentEndpoint)
-
-	if len(matchingTeams) == 0 {
-		return fmt.Errorf("no team contexts found for endpoint %s; run 'ox init' to set up", currentEndpoint)
+	agentContent, err := claude.LoadAgent(tc.Path, name)
+	if err != nil || agentContent == nil {
+		return fmt.Errorf("coworker %q not found in team context", name)
 	}
-
-	// search for agent in matching team contexts only
-	var agentContent *claude.AgentContent
-	var foundTeam *config.TeamContext
-	for i := range matchingTeams {
-		tc := &matchingTeams[i]
-		content, err := claude.LoadAgent(tc.Path, name)
-		if err == nil && content != nil {
-			agentContent = content
-			foundTeam = tc
-			break
-		}
-	}
-
-	if agentContent == nil {
-		return fmt.Errorf("coworker %q not found in team contexts for endpoint %s", name, currentEndpoint)
-	}
+	foundTeam := tc
 
 	// apply model override if provided
 	model := agentContent.Model
@@ -308,7 +328,7 @@ func runCoworkerAgent(cmd *cobra.Command, args []string) error {
 	trackCoworkerLoad(name, model, foundTeam.TeamID)
 
 	if jsonMode {
-		output := coworkerAgentOutput{
+		output := coworkerLoadOutput{
 			Name:        agentContent.Name,
 			Description: agentContent.Description,
 			Model:       model,
@@ -340,25 +360,116 @@ func runCoworkerAgent(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// filterTeamsByEndpoint returns team contexts that match the given endpoint.
-// Team contexts are now always derived from the project's endpoint configuration,
-// so all team contexts for this project use the same endpoint.
-// This function validates that the current endpoint is a valid production or
-// non-production endpoint for filtering purposes.
-func filterTeamsByEndpoint(teams []config.TeamContext, currentEndpoint string) []config.TeamContext {
-	// all team contexts in a project now use the project's endpoint
-	// the filtering is implicit: if the project has team contexts configured,
-	// they are already scoped to this project's endpoint
-	//
-	// we still validate that the current endpoint is sensible (production or explicit)
-	// but all configured teams match since they're derived from project config
-	if currentEndpoint == "" || endpoint.IsProduction(currentEndpoint) {
-		// production endpoint or default - all teams match
-		return teams
+func runCoworkerAdd(cmd *cobra.Command, args []string) error {
+	srcPath := args[0]
+
+	// validate the file
+	description, model, err := claude.ValidateAgentFile(srcPath)
+	if err != nil {
+		return fmt.Errorf("invalid coworker file: %w", err)
 	}
 
-	// non-production endpoint - all teams still match since they're project-scoped
-	return teams
+	projectRoot, err := findProjectRoot()
+	if err != nil {
+		return fmt.Errorf("could not find project root: %w", err)
+	}
+
+	tc, err := resolveCoworkerTeam(cmd, projectRoot)
+	if err != nil {
+		return err
+	}
+
+	// derive coworker name from filename (strip .md extension)
+	name := strings.TrimSuffix(filepath.Base(srcPath), ".md")
+
+	// ensure coworkers/agents/ directory exists
+	agentsDir := filepath.Join(tc.Path, claude.AgentsDir)
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		return fmt.Errorf("create agents directory: %w", err)
+	}
+
+	// copy file to team context
+	destPath := filepath.Join(agentsDir, name+".md")
+	if _, err := os.Stat(destPath); err == nil {
+		return fmt.Errorf("coworker %q already exists; remove it first with: ox coworker remove %s", name, name)
+	}
+
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return fmt.Errorf("read source file: %w", err)
+	}
+	if err := os.WriteFile(destPath, data, 0644); err != nil {
+		return fmt.Errorf("write coworker file: %w", err)
+	}
+
+	// git add + commit in team context repo
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	relPath := filepath.Join(claude.AgentsDir, name+".md")
+	if _, err := gitutil.RunGit(ctx, tc.Path, "add", relPath); err != nil {
+		return fmt.Errorf("git add: %w", err)
+	}
+
+	commitMsg := fmt.Sprintf("add coworker: %s", name)
+	if _, err := gitutil.RunGit(ctx, tc.Path, "commit", "-m", commitMsg); err != nil {
+		return fmt.Errorf("git commit: %w", err)
+	}
+
+	modelInfo := model
+	if modelInfo == "" {
+		modelInfo = "inherit"
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Added coworker %q (model: %s)\n", name, modelInfo)
+	fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", description)
+
+	return nil
+}
+
+func runCoworkerRemove(cmd *cobra.Command, args []string) error {
+	name := args[0]
+	force, _ := cmd.Flags().GetBool("force")
+
+	projectRoot, err := findProjectRoot()
+	if err != nil {
+		return fmt.Errorf("could not find project root: %w", err)
+	}
+
+	tc, err := resolveCoworkerTeam(cmd, projectRoot)
+	if err != nil {
+		return err
+	}
+
+	agentPath := filepath.Join(tc.Path, claude.AgentsDir, name+".md")
+	if _, err := os.Stat(agentPath); os.IsNotExist(err) {
+		return fmt.Errorf("coworker %q not found", name)
+	}
+
+	if !force {
+		fmt.Fprintf(cmd.OutOrStdout(), "Remove coworker %q? [y/N] ", name)
+		var answer string
+		if _, err := fmt.Fscanln(cmd.InOrStdin(), &answer); err != nil || !strings.EqualFold(answer, "y") {
+			fmt.Fprintln(cmd.OutOrStdout(), "Canceled.")
+			return nil
+		}
+	}
+
+	// git rm + commit in team context repo
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	relPath := filepath.Join(claude.AgentsDir, name+".md")
+	if _, err := gitutil.RunGit(ctx, tc.Path, "rm", relPath); err != nil {
+		return fmt.Errorf("git rm: %w", err)
+	}
+
+	commitMsg := fmt.Sprintf("remove coworker: %s", name)
+	if _, err := gitutil.RunGit(ctx, tc.Path, "commit", "-m", commitMsg); err != nil {
+		return fmt.Errorf("git commit: %w", err)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Removed coworker %q\n", name)
+	return nil
 }
 
 // logCoworkerLoad writes a coworker load entry to the session if recording.

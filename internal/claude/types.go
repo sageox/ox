@@ -20,17 +20,23 @@ type Command struct {
 	FromIndex   bool   `json:"from_index"`  // true if description came from index.md
 }
 
-// TeamCustomizations holds all Claude customizations discovered from a team context.
+// TeamCustomizations holds all coworker customizations discovered from a team context.
 type TeamCustomizations struct {
 	TeamPath string `json:"team_path"` // base path of team context
 
-	// Instruction files (CLAUDE.md, AGENTS.md)
-	ClaudeMDPath string `json:"claude_md_path,omitempty"` // coworkers/ai/claude/CLAUDE.md
-	AgentsMDPath string `json:"agents_md_path,omitempty"` // coworkers/ai/claude/AGENTS.md
+	// Instruction files (CLAUDE.md, AGENTS.md) in coworkers/
+	ClaudeMDPath string `json:"claude_md_path,omitempty"` // coworkers/CLAUDE.md
+	AgentsMDPath string `json:"agents_md_path,omitempty"` // coworkers/AGENTS.md
 	HasClaudeMD  bool   `json:"has_claude_md"`
 	HasAgentsMD  bool   `json:"has_agents_md"`
 
-	// Agents index (coworkers/ai/claude/agents/index.md)
+	// Agents-level AGENTS.md (coworkers/agents/AGENTS.md)
+	// Content is read (first MaxAgentsMDLines lines) and inlined into prime output.
+	AgentsAgentsMDPath    string `json:"agents_agents_md_path,omitempty"` // coworkers/agents/AGENTS.md
+	AgentsAgentsMDContent string `json:"agents_agents_md_content,omitempty"`
+	HasAgentsAgentsMD     bool   `json:"has_agents_agents_md,omitempty"`
+
+	// Agents index (coworkers/agents/index.md)
 	HasAgentsIndex  bool   `json:"has_agents_index,omitempty"`
 	AgentsIndexPath string `json:"agents_index_path,omitempty"` // path to index.md if exists
 
@@ -46,5 +52,5 @@ func (tc *TeamCustomizations) HasInstructionFiles() bool {
 
 // HasAnyCustomizations returns true if any customizations were discovered.
 func (tc *TeamCustomizations) HasAnyCustomizations() bool {
-	return tc.HasClaudeMD || tc.HasAgentsMD || len(tc.Agents) > 0 || len(tc.Commands) > 0
+	return tc.HasClaudeMD || tc.HasAgentsMD || tc.HasAgentsAgentsMD || len(tc.Agents) > 0 || len(tc.Commands) > 0
 }
