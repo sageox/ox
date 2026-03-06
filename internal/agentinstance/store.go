@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -52,6 +53,14 @@ type Instance struct {
 	AgentType string `json:"agent_type,omitempty"` // claude-code, droid, cursor, windsurf
 	AgentVer  string `json:"agent_ver,omitempty"`  // Agent version (e.g., "1.0.42")
 	Model     string `json:"model,omitempty"`      // Model used (e.g., "claude-opus-4-5")
+	// Process tracking — PPID is the parent agent process (e.g., Claude Code).
+	// Captured at prime time via os.Getppid(). Used by "ox agent list" to
+	// check liveness with kill(pid, 0) without needing the daemon.
+	ParentPID int `json:"parent_pid,omitempty"`
+	// Agent hierarchy — detected at prime time by reading SAGEOX_AGENT_ID env var.
+	// If already set when a new agent primes, the existing value is the parent
+	// (orchestrator inherits env vars to subagents).
+	ParentAgentID string `json:"parent_agent_id,omitempty"`
 	// Usage tracking
 	PrimeCallCount int `json:"prime_call_count,omitempty"` // number of times prime was called
 }
@@ -59,6 +68,21 @@ type Instance struct {
 // IsExpired checks if the instance has expired
 func (i *Instance) IsExpired() bool {
 	return time.Now().After(i.ExpiresAt)
+}
+
+// IsProcessAlive checks if the parent agent process is still running.
+// Uses kill(pid, 0) which checks existence without sending a signal.
+// Returns false if no PID was recorded or the process is gone.
+func (i *Instance) IsProcessAlive() bool {
+	if i.ParentPID <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(i.ParentPID)
+	if err != nil {
+		return false
+	}
+	// signal 0: test if process exists without actually signaling it
+	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 // IsPrimeExcessive returns true if prime has been called more than the threshold.

@@ -381,19 +381,75 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 	dim := cli.StyleDim
 	green := cli.StyleSuccess
 
-	fmt.Printf("Active AI coworkers (%d):\n\n", len(instances))
+	// filter to agents whose parent process is still running.
+	// PID check is definitive (kill -0); falls back to daemon/recording heuristics
+	// for instances created before PID tracking was added.
+	var alive []*agentinstance.Instance
+	for _, inst := range instances {
+		if inst.IsProcessAlive() {
+			alive = append(alive, inst)
+			continue
+		}
+		// fallback for pre-PID instances: daemon knows about them or actively recording
+		if inst.ParentPID == 0 {
+			_, knownToDaemon := daemonStats[inst.AgentID]
+			if knownToDaemon || session.IsRecordingForAgent(projectRoot, inst.AgentID) {
+				alive = append(alive, inst)
+			}
+		}
+	}
+
+	if len(alive) == 0 {
+		fmt.Println("No active AI coworkers.")
+		fmt.Println("\nRun 'ox agent prime' to start one.")
+		return nil
+	}
+
+	// check if workspaces are heterogeneous — only show column when useful
+	workspaces := make(map[string]bool)
+	for _, inst := range alive {
+		ws := filepath.Base(projectRoot)
+		if ds, ok := daemonStats[inst.AgentID]; ok && ds.WorkspacePath != "" {
+			ws = filepath.Base(ds.WorkspacePath)
+		}
+		workspaces[ws] = true
+	}
+	showWorkspace := len(workspaces) > 1
+
+	// build agent hierarchy — group subagents under their parent
+	aliveSet := make(map[string]*agentinstance.Instance)
+	children := make(map[string][]string) // parentID -> child IDs
+	var roots []string                    // agents with no parent (or parent not alive)
+	for _, inst := range alive {
+		aliveSet[inst.AgentID] = inst
+	}
+	for _, inst := range alive {
+		if inst.ParentAgentID != "" {
+			if _, parentAlive := aliveSet[inst.ParentAgentID]; parentAlive {
+				children[inst.ParentAgentID] = append(children[inst.ParentAgentID], inst.AgentID)
+				continue
+			}
+		}
+		roots = append(roots, inst.AgentID)
+	}
+
+	fmt.Printf("Active AI coworkers (%d):\n\n", len(alive))
 	// dim headers — minimize non-data ink (Tufte)
-	fmt.Printf("  %s  %s  %s  %s  %s  %s  %s\n",
+	header := fmt.Sprintf("  %s  %s  %s  %s  %s  %s",
 		dim.Render(fmt.Sprintf("%-8s", "ID")),
 		dim.Render(fmt.Sprintf("%-10s", "Type")),
 		dim.Render(fmt.Sprintf("%8s", "Tokens")),
 		dim.Render(fmt.Sprintf("%5s", "Cmds")),
 		dim.Render(fmt.Sprintf("%7s", "Uptime")),
 		dim.Render(fmt.Sprintf("%-3s", "Rec")),
-		dim.Render(fmt.Sprintf("%-6s", "Status")),
 	)
+	if showWorkspace {
+		header += "  " + dim.Render(fmt.Sprintf("%-20s", "Workspace"))
+	}
+	fmt.Println(header)
 
-	for _, inst := range instances {
+	// renderRow prints one agent row with optional tree prefix
+	renderRow := func(inst *agentinstance.Instance, prefix string) {
 		agentType := inst.AgentType
 		if agentType == "" {
 			agentType = "-"
@@ -416,21 +472,41 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 			rec = green.Render(fmt.Sprintf("%-3s", "rec"))
 		}
 
-		// daemon status (active/idle)
-		status := dim.Render(fmt.Sprintf("%-6s", "idle"))
-		if ds, ok := daemonStats[inst.AgentID]; ok && ds.Status == "active" {
-			status = green.Render(fmt.Sprintf("%-6s", "active"))
+		// ID column: tree prefix (dim) + agent ID (gold)
+		idCol := dim.Render(prefix) + cli.StyleSecondary.Render(inst.AgentID)
+		// pad to account for prefix width: 2 (indent) + 8 (id field)
+		padded := fmt.Sprintf("%-8s", prefix+inst.AgentID)
+		_ = padded // use visual width from styled rendering
+		idWidth := len(prefix) + len(inst.AgentID)
+		idPad := ""
+		if idWidth < 8 {
+			idPad = fmt.Sprintf("%*s", 8-idWidth, "")
 		}
 
-		fmt.Printf("  %s  %-10s  %s  %s  %s  %s  %s\n",
-			cli.StyleSecondary.Render(fmt.Sprintf("%-8s", inst.AgentID)),
+		row := fmt.Sprintf("  %s%s  %-10s  %s  %s  %s  %s",
+			idCol, idPad,
 			agentType,
 			dim.Render(tokens),
 			dim.Render(cmds),
 			dim.Render(uptime),
 			rec,
-			status,
 		)
+		if showWorkspace {
+			workspace := filepath.Base(projectRoot)
+			if ds, ok := daemonStats[inst.AgentID]; ok && ds.WorkspacePath != "" {
+				workspace = filepath.Base(ds.WorkspacePath)
+			}
+			row += "  " + dim.Render(fmt.Sprintf("%-20s", workspace))
+		}
+		fmt.Println(row)
+	}
+
+	// render tree: roots first, then their children indented
+	for _, rootID := range roots {
+		renderRow(aliveSet[rootID], "")
+		for _, childID := range children[rootID] {
+			renderRow(aliveSet[childID], " \u2514")
+		}
 	}
 
 	return nil

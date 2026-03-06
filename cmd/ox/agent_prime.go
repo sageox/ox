@@ -586,6 +586,13 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// detect parent agent: if SAGEOX_AGENT_ID is already set, this is a subagent
+	// and the existing value identifies the parent (orchestrator inherits env vars)
+	parentAgentID := ""
+	if existing := os.Getenv("SAGEOX_AGENT_ID"); existing != "" && existing != agentID {
+		parentAgentID = existing
+	}
+
 	if inst == nil {
 		// fresh prime (or re-prime where instance wasn't found): create new
 		serverSessionID := auth.NewServerSessionID()
@@ -597,6 +604,8 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			AgentType:       agentType,
 			AgentVer:        agentVer,
 			Model:           model,
+			ParentPID:       os.Getppid(),
+			ParentAgentID:   parentAgentID,
 			PrimeCallCount:  1,
 		}
 		if err := store.Add(inst); err != nil {
