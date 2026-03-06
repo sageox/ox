@@ -64,12 +64,14 @@ The agent supports hooks that ox can install to automate the lifecycle.
 | MUST | **Tool hooks** | At least `PreToolUse` and `PostToolUse` (or equivalent) events mapped |
 | MUST | **`ox init` installs hooks** | Running `ox init` sets up hooks for this agent automatically |
 | MUST | **`ox doctor` validates hooks** | Doctor checks that hooks are installed and not stale |
+| MUST | **MEMORY.md from team context** | Agent receives MEMORY.md from team context (if available) for cross-project knowledge |
+| MUST | **MEMORY.md from ledger** | Agent receives MEMORY.md from the ledger (project context, if available) for project-specific knowledge |
 | SHOULD | **Native session ID** | `SupportsSession()` + `SessionID()` return the agent's native session/thread identifier (env var or hook stdin) |
 | SHOULD | **AGENT_ENV aliases** | `AgentENVAliases()` returns identifiers for hook commands |
 | SHOULD | **Prompt submit hook** | `UserPromptSubmit` (or equivalent) event triggers context refresh |
 | MAY | **Compact/context-reset hook** | `PreCompact` (or equivalent) event triggers re-priming |
 
-**What users get:** Automatic priming on session start. Hooks fire on lifecycle events. Session recording can be triggered by hooks. `ox doctor` repairs broken hook installations.
+**What users get:** Automatic priming on session start. Hooks fire on lifecycle events. Session recording can be triggered by hooks. `ox doctor` repairs broken hook installations. MEMORY.md from both team context and ledger (project context) flows to the agent.
 
 **What's missing:** No custom commands/skills, no auto-session capture, no deep session adapter.
 
@@ -89,8 +91,9 @@ The agent has hooks, auto-session capture, custom commands/skills, and deep sess
 | SHOULD | **Deep session adapter** | Dedicated adapter in `internal/session/adapters/` that reads the agent's native transcript format |
 | SHOULD | **MCP support** | `Capabilities().MCPServers == true` (if the agent supports MCP) |
 | MAY | **Compact/context-reset hook** | `PreCompact` (or equivalent) event triggers re-priming |
+| MAY | **Agent memory import** | ox imports the agent's own native per-project memory (e.g., Claude's user-specific `MEMORY.md`) into the ledger, making one agent's learnings available to other agents on the team |
 
-**What users get:** Zero-configuration experience. Sessions auto-start and auto-stop. Custom commands/skills provide agent-native UX for ox features. Full lifecycle telemetry. Context refreshes on compaction.
+**What users get:** Zero-configuration experience. Sessions auto-start and auto-stop. Custom commands/skills provide agent-native UX for ox features. Full lifecycle telemetry. Context refreshes on compaction. Agent-specific memory can flow into the shared ledger.
 
 ---
 
@@ -123,6 +126,8 @@ Bronze -> Silver:
   [ ] Tool use events (pre/post) mapped
   [ ] Hook installation via ox init
   [ ] Hook validation via ox doctor
+  [ ] MEMORY.md from team context delivered (if available)
+  [ ] MEMORY.md from ledger (project context) delivered (if available)
   [ ] Test hook install/uninstall/validate cycle
   SHOULD:
   [ ] Native session ID available (env var or hook stdin JSON)
@@ -141,6 +146,8 @@ Silver -> Gold:
   [ ] CommandManager implemented (or equivalent)
   [ ] Deep session adapter (or verify generic adapter is sufficient)
   [ ] MCP server integration (if agent supports MCP)
+  MAY:
+  [ ] Agent memory import (agent's native per-project memory into ledger)
 ```
 
 ## Tier Blockers (Upstream Limitations)
