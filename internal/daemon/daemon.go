@@ -639,12 +639,15 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 			status = StatusIdle
 		}
 
+		ctxStats := d.heartbeat.GetAgentContextStats(agentID)
 		instances = append(instances, InstanceInfo{
-			AgentID:        agentID,
-			WorkspacePath:  workspacePath,
-			LastHeartbeat:  last,
-			HeartbeatCount: count,
-			Status:         status,
+			AgentID:                agentID,
+			WorkspacePath:          workspacePath,
+			LastHeartbeat:          last,
+			HeartbeatCount:         count,
+			Status:                 status,
+			CumulativeContextTokens: ctxStats.ContextTokens,
+			CommandCount:           ctxStats.CommandCount,
 		})
 	}
 

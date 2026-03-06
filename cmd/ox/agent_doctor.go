@@ -346,6 +346,7 @@ func outputAgentDoctorJSON(output *AgentDoctorOutput) error {
 	if err != nil {
 		return fmt.Errorf("format doctor JSON: %w", err)
 	}
+	trackContextBytes(int64(len(jsonOut)))
 	fmt.Println(string(jsonOut))
 	return nil
 }

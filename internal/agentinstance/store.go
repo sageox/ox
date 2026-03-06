@@ -365,7 +365,8 @@ func (s *Store) readInstances() ([]*Instance, int, int, error) {
 	return s.readInstancesNoLock()
 }
 
-// readInstancesNoLock reads instances without acquiring the mutex (caller must hold lock)
+// readInstancesNoLock reads instances without acquiring the mutex (caller must hold lock).
+// Deduplicates by AgentID, keeping the latest entry (last-write-wins in append-only JSONL).
 func (s *Store) readInstancesNoLock() ([]*Instance, int, int, error) {
 	f, err := os.Open(s.instancesPath)
 	if err != nil {
@@ -376,7 +377,9 @@ func (s *Store) readInstancesNoLock() ([]*Instance, int, int, error) {
 	}
 	defer f.Close()
 
-	var instances []*Instance
+	// last-write-wins: later lines in the JSONL override earlier ones for the same AgentID
+	seen := make(map[string]*Instance)
+	var order []string // preserve insertion order
 	var totalCount int
 	now := time.Now()
 
@@ -385,17 +388,26 @@ func (s *Store) readInstancesNoLock() ([]*Instance, int, int, error) {
 		totalCount++
 		var inst Instance
 		if err := json.Unmarshal(scanner.Bytes(), &inst); err != nil {
-			// skip invalid lines but continue reading
 			continue
 		}
 
-		if !now.After(inst.ExpiresAt) {
-			instances = append(instances, &inst)
+		if now.After(inst.ExpiresAt) {
+			continue
 		}
+
+		if _, exists := seen[inst.AgentID]; !exists {
+			order = append(order, inst.AgentID)
+		}
+		seen[inst.AgentID] = &inst
 	}
 
 	if err := scanner.Err(); err != nil {
 		return nil, 0, 0, fmt.Errorf("failed to read instances: %w", err)
+	}
+
+	instances := make([]*Instance, 0, len(order))
+	for _, id := range order {
+		instances = append(instances, seen[id])
 	}
 
 	expiredCount := totalCount - len(instances)

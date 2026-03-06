@@ -302,6 +302,12 @@ type InstanceInfo struct {
 
 	// Status is "active" (recent heartbeat) or "idle" (stale heartbeat).
 	Status string `json:"status"`
+
+	// CumulativeContextTokens is the estimated total tokens of context this agent consumed from ox commands.
+	CumulativeContextTokens int64 `json:"cumulative_context_tokens,omitempty"`
+
+	// CommandCount is the number of ox commands that produced context output for this agent.
+	CommandCount int `json:"command_count,omitempty"`
 }
 
 // InstancesResponse is the response for the instances IPC message.

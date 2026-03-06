@@ -4,14 +4,32 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
+	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
+
+// contextBytesProduced accumulates the number of context bytes written by the
+// current ox agent subcommand. Reset at the start of runWithAgentID and read
+// in a deferred heartbeat after the command completes. Best-effort tracking.
+// Bytes are converted to estimated tokens at the heartbeat boundary (sendContextHeartbeat).
+var contextBytesProduced atomic.Int64
+
+// trackContextBytes adds n bytes to the current command's context byte counter.
+// Called by agent subcommands after producing output (e.g., JSON responses).
+// Conversion to tokens happens later in sendContextHeartbeat, not here,
+// so callers pass the natural measurement (bytes written).
+func trackContextBytes(n int64) {
+	contextBytesProduced.Add(n)
+}
 
 // SageOx is multiplayer - offline API mode is not supported.
 // See internal/auth/feature.go for the multiplayer philosophy.
@@ -192,6 +210,14 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		Heartbeat(gitRoot, nil, agentID)
 	}
 
+	// reset context byte counter; deferred heartbeat sends accumulated bytes
+	contextBytesProduced.Store(0)
+	defer func() {
+		if bytes := contextBytesProduced.Load(); bytes > 0 {
+			sendContextHeartbeat(agentID, bytes)
+		}
+	}()
+
 	subcommand := args[0]
 	subargs := args[1:]
 
@@ -319,7 +345,7 @@ func getInstanceStore(projectRoot string) (*agentinstance.Store, error) {
 	return agentinstance.NewStoreForUser(projectRoot, getUserSlug())
 }
 
-// runAgentList lists active agent instances (debug only)
+// runAgentList lists active AI coworkers with context consumption and session info.
 func runAgentList(cmd *cobra.Command, args []string) error {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
@@ -337,28 +363,74 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(instances) == 0 {
-		fmt.Println("No active agent instances.")
-		fmt.Println("\nRun 'ox agent prime' to create a new instance.")
+		fmt.Println("No active AI coworkers.")
+		fmt.Println("\nRun 'ox agent prime' to start one.")
 		return nil
 	}
 
-	fmt.Printf("Active agent instances (%d):\n\n", len(instances))
-	fmt.Printf("%-8s %-12s %-10s %s\n", "ID", "Agent", "Model", "Created")
-	fmt.Println("──────── ──────────── ────────── ────────────────────")
+	// build lookup of daemon context stats by agent ID
+	daemonStats := make(map[string]daemon.InstanceInfo)
+	if client := daemon.TryConnect(); client != nil {
+		if daemonInstances, err := client.Instances(); err == nil {
+			for _, di := range daemonInstances {
+				daemonStats[di.AgentID] = di
+			}
+		}
+	}
+
+	dim := cli.StyleDim
+	green := cli.StyleSuccess
+
+	fmt.Printf("Active AI coworkers (%d):\n\n", len(instances))
+	// dim headers — minimize non-data ink (Tufte)
+	fmt.Printf("  %s  %s  %s  %s  %s  %s  %s\n",
+		dim.Render(fmt.Sprintf("%-8s", "ID")),
+		dim.Render(fmt.Sprintf("%-10s", "Type")),
+		dim.Render(fmt.Sprintf("%8s", "Tokens")),
+		dim.Render(fmt.Sprintf("%5s", "Cmds")),
+		dim.Render(fmt.Sprintf("%7s", "Uptime")),
+		dim.Render(fmt.Sprintf("%-3s", "Rec")),
+		dim.Render(fmt.Sprintf("%-6s", "Status")),
+	)
+
 	for _, inst := range instances {
 		agentType := inst.AgentType
 		if agentType == "" {
 			agentType = "-"
 		}
-		model := inst.Model
-		if model == "" {
-			model = "-"
+
+		// token count from daemon (already estimated at source)
+		tokens := fmt.Sprintf("%8s", "-")
+		cmds := fmt.Sprintf("%5s", "-")
+		if ds, ok := daemonStats[inst.AgentID]; ok && ds.CumulativeContextTokens > 0 {
+			tokens = fmt.Sprintf("%8s", "~"+formatTokenCount(int(ds.CumulativeContextTokens)))
+			cmds = fmt.Sprintf("%5d", ds.CommandCount)
 		}
-		fmt.Printf("%-8s %-12s %-10s %s\n",
-			inst.AgentID,
+
+		// session uptime
+		uptime := fmt.Sprintf("%7s", formatDurationShort(time.Since(inst.CreatedAt)))
+
+		// recording status
+		rec := dim.Render(fmt.Sprintf("%-3s", "-"))
+		if session.IsRecordingForAgent(projectRoot, inst.AgentID) {
+			rec = green.Render(fmt.Sprintf("%-3s", "rec"))
+		}
+
+		// daemon status (active/idle)
+		status := dim.Render(fmt.Sprintf("%-6s", "idle"))
+		if ds, ok := daemonStats[inst.AgentID]; ok && ds.Status == "active" {
+			status = green.Render(fmt.Sprintf("%-6s", "active"))
+		}
+
+		fmt.Printf("  %s  %-10s  %s  %s  %s  %s  %s\n",
+			cli.StyleSecondary.Render(fmt.Sprintf("%-8s", inst.AgentID)),
 			agentType,
-			model,
-			inst.CreatedAt.Format("2006-01-02 15:04"))
+			dim.Render(tokens),
+			dim.Render(cmds),
+			dim.Render(uptime),
+			rec,
+			status,
+		)
 	}
 
 	return nil

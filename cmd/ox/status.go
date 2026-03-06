@@ -33,8 +33,17 @@ type statusJSONOutput struct {
 	Project      *statusProjectJSON      `json:"project"`
 	Ledger       *statusLedgerJSON       `json:"ledger,omitempty"`
 	TeamContexts []statusTeamContextJSON `json:"team_contexts,omitempty"`
+	AICoworkers  []statusAICoworkerJSON  `json:"ai_coworkers,omitempty"`
 	Daemon       *statusDaemonJSON       `json:"daemon,omitempty"`
 	Version      *statusVersionJSON      `json:"version,omitempty"`
+}
+
+type statusAICoworkerJSON struct {
+	AgentID       string `json:"agent_id"`
+	ContextTokens int64  `json:"context_tokens"`
+	CommandCount  int    `json:"command_count"`
+	Status        string `json:"status"`
+	Age           string `json:"age"`
 }
 
 type statusVersionJSON struct {
@@ -1358,6 +1367,61 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 	return b.String()
 }
 
+// renderAICoworkersSection renders active AI coworker instances with context stats.
+// Only shown when there are active instances.
+func renderAICoworkersSection(client *daemon.Client) string {
+	if client == nil {
+		return ""
+	}
+	instances, err := client.Instances()
+	if err != nil || len(instances) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(statusHeaderStyle.Render("AI Coworkers"))
+	b.WriteString("\n")
+	b.WriteString(statusMutedStyle.Render("────────────"))
+	b.WriteString("\n")
+
+	for _, inst := range instances {
+		// agent ID and status
+		status := inst.Status
+		statusSemantic := "success"
+		if status == "idle" {
+			statusSemantic = "muted"
+		}
+
+		b.WriteString(statusLabelStyle.Render(inst.AgentID))
+		b.WriteString(formatValue(status, statusSemantic))
+
+		// context stats inline (daemon provides token counts directly)
+		if inst.CumulativeContextTokens > 0 {
+			b.WriteString(statusMutedStyle.Render(fmt.Sprintf("  ~%s tokens  %d cmds", formatTokenCount(int(inst.CumulativeContextTokens)), inst.CommandCount)))
+		}
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+// estimateTokens estimates token count from byte count (~4 bytes per token for English/code)
+func estimateTokens(bytes int64) int {
+	return int(bytes / 4)
+}
+
+// formatTokenCount formats a token count in human-readable form (e.g., "3.1K", "1.2M")
+func formatTokenCount(tokens int) string {
+	if tokens < 1000 {
+		return fmt.Sprintf("%d", tokens)
+	}
+	if tokens < 1_000_000 {
+		return fmt.Sprintf("%.1fK", float64(tokens)/1000)
+	}
+	return fmt.Sprintf("%.1fM", float64(tokens)/1_000_000)
+}
+
 // formatDurationShort formats a duration in a short human-readable form
 func formatDurationShort(d time.Duration) string {
 	if d < time.Second {
@@ -1527,6 +1591,9 @@ daemon health, and a tree view of all SageOx directory locations.`,
 
 			// show daemon sync section
 			fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, localCfg, false, projectInitialized))
+
+			// show active AI coworkers with context stats
+			fmt.Print(renderAICoworkersSection(client))
 		}
 
 		// show version update notice if available
@@ -1634,7 +1701,7 @@ func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, 
 		}
 	}
 
-	// daemon section
+	// daemon section + AI coworkers
 	if gitRoot != "" {
 		output.Daemon = &statusDaemonJSON{}
 		client := daemon.TryConnectOrDirect()
@@ -1646,6 +1713,18 @@ func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, 
 				output.Daemon.TotalSyncs = daemonStatus.TotalSyncs
 				output.Daemon.SyncsLastHour = daemonStatus.SyncsLastHour
 				output.Daemon.LastError = daemonStatus.LastError
+			}
+			// AI coworkers with context stats
+			if instances, err := client.Instances(); err == nil && len(instances) > 0 {
+				for _, inst := range instances {
+					output.AICoworkers = append(output.AICoworkers, statusAICoworkerJSON{
+						AgentID:       inst.AgentID,
+						ContextTokens: inst.CumulativeContextTokens,
+						CommandCount:  inst.CommandCount,
+						Status:        inst.Status,
+						Age:           formatTimeAgo(inst.LastHeartbeat),
+					})
+				}
 			}
 		}
 	}

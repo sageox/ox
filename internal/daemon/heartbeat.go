@@ -46,6 +46,11 @@ type HeartbeatPayload struct {
 	// Daemon compares this to its own version; mismatch triggers daemon restart
 	// to ensure CLI and daemon stay in sync after upgrades.
 	CLIVersion string `json:"cli_version,omitempty"`
+
+	// ContextTokens is the estimated token count of context this command produced.
+	// Accumulated per-agent by the daemon for visibility into context budget usage.
+	// Zero means no context tracking for this heartbeat (e.g., non-agent commands).
+	ContextTokens int64 `json:"context_tokens,omitempty"`
 }
 
 // HeartbeatCreds contains credentials for the daemon.
@@ -107,6 +112,11 @@ type HeartbeatHandler struct {
 	workspaceActivity *ActivityTracker
 	agentActivity     *ActivityTracker // tracks connected agent sessions
 
+	// per-agent context consumption tracking
+	ctxMu              sync.RWMutex
+	agentContextTokens map[string]int64 // agent_id → cumulative estimated tokens
+	agentCommandCount  map[string]int   // agent_id → command count
+
 	// credentials (updated from heartbeats) - protected by credMu
 	credMu          sync.RWMutex
 	credentials     *HeartbeatCreds
@@ -139,6 +149,8 @@ func NewHeartbeatHandler(logger *slog.Logger) *HeartbeatHandler {
 		teamActivity:      NewActivityTrackerWithMaxKeys(activityCap, maxTeams),
 		workspaceActivity: NewActivityTrackerWithMaxKeys(activityCap, maxWorkspaces),
 		agentActivity:     NewActivityTrackerWithMaxKeys(activityCap, maxAgents),
+		agentContextTokens: make(map[string]int64),
+		agentCommandCount: make(map[string]int),
 	}
 }
 
@@ -284,6 +296,14 @@ func (h *HeartbeatHandler) Handle(payload json.RawMessage) {
 	// record activity by agent (capped at maxAgents unique agents)
 	if hb.AgentID != "" {
 		h.agentActivity.Record(hb.AgentID)
+
+		// accumulate context tokens if reported
+		if hb.ContextTokens > 0 {
+			h.ctxMu.Lock()
+			h.agentContextTokens[hb.AgentID] += hb.ContextTokens
+			h.agentCommandCount[hb.AgentID]++
+			h.ctxMu.Unlock()
+		}
 	}
 
 	// record activity by team and trigger lazy loading if needed
@@ -370,6 +390,22 @@ func (h *HeartbeatHandler) GetWorkspaceActivity() *ActivityTracker {
 // GetAgentActivity returns the activity tracker for connected agents.
 func (h *HeartbeatHandler) GetAgentActivity() *ActivityTracker {
 	return h.agentActivity
+}
+
+// AgentContextStats holds cumulative context consumption for an agent.
+type AgentContextStats struct {
+	ContextTokens int64 `json:"context_tokens"`
+	CommandCount  int   `json:"command_count"`
+}
+
+// GetAgentContextStats returns the cumulative context consumption for a given agent.
+func (h *HeartbeatHandler) GetAgentContextStats(agentID string) AgentContextStats {
+	h.ctxMu.RLock()
+	defer h.ctxMu.RUnlock()
+	return AgentContextStats{
+		ContextTokens: h.agentContextTokens[agentID],
+		CommandCount:  h.agentCommandCount[agentID],
+	}
 }
 
 // ActivitySummary returns a summary of all activity for status display.

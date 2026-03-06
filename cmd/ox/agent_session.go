@@ -224,6 +224,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	if err != nil {
 		return fmt.Errorf("format start JSON: %w", err)
 	}
+	trackContextBytes(int64(len(jsonOut)))
 	fmt.Println(string(jsonOut))
 	return nil
 }
@@ -325,7 +326,8 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 				},
 			}
 			jsonOut, _ := json.MarshalIndent(retry, "", "  ")
-			fmt.Println(string(jsonOut))
+			trackContextBytes(int64(len(jsonOut)))
+	fmt.Println(string(jsonOut))
 			return nil
 		}
 	}
@@ -510,6 +512,7 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 	if err != nil {
 		return fmt.Errorf("format stop JSON: %w", err)
 	}
+	trackContextBytes(int64(len(jsonOut)))
 	fmt.Println(string(jsonOut))
 	return nil
 }
@@ -1155,7 +1158,8 @@ func runAgentSessionRemind(inst *agentinstance.Instance) error {
 		if err != nil {
 			return fmt.Errorf("format remind JSON: %w", err)
 		}
-		fmt.Println(string(jsonOut))
+		trackContextBytes(int64(len(jsonOut)))
+	fmt.Println(string(jsonOut))
 		return nil
 	}
 
@@ -1176,6 +1180,7 @@ func runAgentSessionRemind(inst *agentinstance.Instance) error {
 	if err != nil {
 		return fmt.Errorf("format remind JSON: %w", err)
 	}
+	trackContextBytes(int64(len(jsonOut)))
 	fmt.Println(string(jsonOut))
 	return nil
 }
@@ -1331,7 +1336,8 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 		if err != nil {
 			return fmt.Errorf("format summarize JSON: %w", err)
 		}
-		fmt.Println(string(jsonOut))
+		trackContextBytes(int64(len(jsonOut)))
+	fmt.Println(string(jsonOut))
 		return nil
 	}
 
@@ -1360,6 +1366,7 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 	if err != nil {
 		return fmt.Errorf("format summarize JSON: %w", err)
 	}
+	trackContextBytes(int64(len(jsonOut)))
 	fmt.Println(string(jsonOut))
 	return nil
 }
@@ -1452,7 +1459,8 @@ func runAgentSessionHTML(inst *agentinstance.Instance, args []string) error {
 		if err != nil {
 			return fmt.Errorf("format HTML JSON: %w", err)
 		}
-		fmt.Println(string(jsonOut))
+		trackContextBytes(int64(len(jsonOut)))
+	fmt.Println(string(jsonOut))
 		return nil
 	}
 
@@ -1479,6 +1487,7 @@ func runAgentSessionHTML(inst *agentinstance.Instance, args []string) error {
 	if err != nil {
 		return fmt.Errorf("format HTML JSON: %w", err)
 	}
+	trackContextBytes(int64(len(jsonOut)))
 	fmt.Println(string(jsonOut))
 	return nil
 }
@@ -1641,7 +1650,8 @@ func runAgentSessionRecord(inst *agentinstance.Instance, args []string) error {
 		if err != nil {
 			return fmt.Errorf("format record JSON: %w", err)
 		}
-		fmt.Println(string(jsonOut))
+		trackContextBytes(int64(len(jsonOut)))
+	fmt.Println(string(jsonOut))
 		return nil
 	}
 
@@ -1665,6 +1675,7 @@ func runAgentSessionRecord(inst *agentinstance.Instance, args []string) error {
 	if err != nil {
 		return fmt.Errorf("format record JSON: %w", err)
 	}
+	trackContextBytes(int64(len(jsonOut)))
 	fmt.Println(string(jsonOut))
 	return nil
 }
@@ -1764,7 +1775,8 @@ func runAgentSessionPlan(inst *agentinstance.Instance) error {
 			Diagrams:     diagrams,
 		}
 		jsonOut, _ := json.MarshalIndent(output, "", "  ")
-		fmt.Println(string(jsonOut))
+		trackContextBytes(int64(len(jsonOut)))
+	fmt.Println(string(jsonOut))
 		return nil
 	}
 
@@ -1786,6 +1798,7 @@ func runAgentSessionPlan(inst *agentinstance.Instance) error {
 		Diagrams:     diagrams,
 	}
 	jsonOut, _ := json.MarshalIndent(output, "", "  ")
+	trackContextBytes(int64(len(jsonOut)))
 	fmt.Println(string(jsonOut))
 	return nil
 }

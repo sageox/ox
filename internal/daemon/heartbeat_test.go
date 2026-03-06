@@ -673,6 +673,66 @@ func TestHeartbeatHandler_RejectsExpiredHeartbeatCredentials(t *testing.T) {
 	}
 }
 
+func TestHeartbeatHandler_ContextTokensTracking(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := NewHeartbeatHandler(logger)
+
+	// send heartbeat with context tokens
+	handler.Handle(mustMarshal(HeartbeatPayload{
+		AgentID:       "Oxa7b3",
+		ContextTokens: 1250,
+		Timestamp:     time.Now(),
+	}))
+
+	stats := handler.GetAgentContextStats("Oxa7b3")
+	if stats.ContextTokens != 1250 {
+		t.Errorf("expected 1250 context tokens, got %d", stats.ContextTokens)
+	}
+	if stats.CommandCount != 1 {
+		t.Errorf("expected 1 command, got %d", stats.CommandCount)
+	}
+
+	// send another heartbeat — should accumulate
+	handler.Handle(mustMarshal(HeartbeatPayload{
+		AgentID:       "Oxa7b3",
+		ContextTokens: 750,
+		Timestamp:     time.Now(),
+	}))
+
+	stats = handler.GetAgentContextStats("Oxa7b3")
+	if stats.ContextTokens != 2000 {
+		t.Errorf("expected 2000 cumulative context tokens, got %d", stats.ContextTokens)
+	}
+	if stats.CommandCount != 2 {
+		t.Errorf("expected 2 commands, got %d", stats.CommandCount)
+	}
+
+	// different agent should have zero
+	stats = handler.GetAgentContextStats("OxZ9k2")
+	if stats.ContextTokens != 0 {
+		t.Errorf("expected 0 for unknown agent, got %d", stats.ContextTokens)
+	}
+}
+
+func TestHeartbeatHandler_ContextTokensZeroIgnored(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := NewHeartbeatHandler(logger)
+
+	// heartbeat without context tokens should not create entry
+	handler.Handle(mustMarshal(HeartbeatPayload{
+		AgentID:   "Oxa7b3",
+		Timestamp: time.Now(),
+	}))
+
+	stats := handler.GetAgentContextStats("Oxa7b3")
+	if stats.ContextTokens != 0 {
+		t.Errorf("expected 0 context tokens for heartbeat without context, got %d", stats.ContextTokens)
+	}
+	if stats.CommandCount != 0 {
+		t.Errorf("expected 0 commands for heartbeat without context, got %d", stats.CommandCount)
+	}
+}
+
 func TestReadHeartbeatsFromPath_DirectoryPath(t *testing.T) {
 	dirPath := t.TempDir()
 	_, err := readHeartbeatsFromPath(dirPath)

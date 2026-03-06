@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
 	"github.com/spf13/cobra"
@@ -53,7 +54,8 @@ func runAgentTeamCtx(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	out := cmd.OutOrStdout()
+	cw := agentinstance.NewCountingWriter(cmd.OutOrStdout())
+	out := io.Writer(cw)
 
 	// list recent discussion files
 	discussionsDir := filepath.Join(tc.Path, "discussions")
@@ -67,6 +69,13 @@ func runAgentTeamCtx(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no team context available: no discussions or distilled context found in %s", tc.Path)
 	}
 
+	// team-ctx is a direct cobra subcommand (not via runWithAgentID),
+	// so send context heartbeat directly if agent ID is available
+	if bytes := cw.BytesWritten(); bytes > 0 {
+		if agentID := os.Getenv("SAGEOX_AGENT_ID"); agentID != "" {
+			sendContextHeartbeat(agentID, bytes)
+		}
+	}
 	return nil
 }
 
