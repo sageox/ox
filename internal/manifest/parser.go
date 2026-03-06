@@ -154,11 +154,6 @@ func ParseFile(path string) *ManifestConfig {
 
 // ComputeSparseSet returns the effective sparse checkout paths:
 // includes minus any paths that match a deny prefix. Deny always wins.
-//
-// The result always starts with "/*" and "!/*/" to include root-level files
-// (like .gitattributes) without pulling in root-level directories. Specific
-// directories from includes are then re-added. This ensures root-level
-// control files are materialized in sparse-checkout --no-cone mode.
 func ComputeSparseSet(cfg *ManifestConfig) []string {
 	if cfg == nil {
 		return nil
@@ -169,12 +164,7 @@ func ComputeSparseSet(cfg *ManifestConfig) []string {
 		denySet[d] = true
 	}
 
-	// start with root-level files: /* includes everything at root,
-	// !/*/ excludes root-level directories only (re-included explicitly below).
-	// The leading / anchors to the repo root so subdirectories inside
-	// included paths (e.g., memory/daily/) are not accidentally excluded.
-	result := []string{"/*", "!/*/"}
-
+	var result []string
 	for _, inc := range cfg.Includes {
 		if denySet[inc] {
 			continue

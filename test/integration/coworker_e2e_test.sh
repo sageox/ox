@@ -3,7 +3,7 @@
 #
 # This script sets up a mock environment and validates that:
 # 1. ox coworker list shows the mock agents
-# 2. ox coworker agent <name> outputs the expected content with magic string
+# 2. ox coworker load <name> outputs the expected content with magic string
 # 3. ox agent prime shows the coworker subagents
 # 4. (--with-claude) Claude AUTOMATICALLY uses the coworker without being told
 #
@@ -146,7 +146,7 @@ cat > "$PROJECT_DIR/CLAUDE.md" << CLAUDE_EOF
 Your team has specialized Claude subagents with domain expertise.
 **When the user's task matches a subagent's description, load it first:**
 
-  $OX coworker agent <name>
+  $OX coworker load <name>
 
 | Subagent | When to Use |
 |----------|-------------|
@@ -186,13 +186,13 @@ else
     exit 1
 fi
 
-# Test 2: ox coworker agent terraform-expert
+# Test 2: ox coworker load terraform-expert
 echo ""
 echo "----------------------------------------"
-echo "Test 2: ox coworker agent terraform-expert"
+echo "Test 2: ox coworker load terraform-expert"
 echo "----------------------------------------"
 
-AGENT_OUTPUT=$($OX coworker agent terraform-expert 2>&1 || true)
+AGENT_OUTPUT=$($OX coworker load terraform-expert 2>&1 || true)
 echo "$AGENT_OUTPUT"
 echo ""
 
@@ -227,10 +227,10 @@ else
         exit 1
     fi
 
-    if echo "$PRIME_OUTPUT" | grep -q "ox coworker agent"; then
-        echo -e "${GREEN}✓ 'ox coworker agent' instruction found${NC}"
+    if echo "$PRIME_OUTPUT" | grep -q "ox coworker load"; then
+        echo -e "${GREEN}✓ 'ox coworker load' instruction found${NC}"
     else
-        echo -e "${RED}✗ 'ox coworker agent' instruction NOT found${NC}"
+        echo -e "${RED}✗ 'ox coworker load' instruction NOT found${NC}"
         exit 1
     fi
 
@@ -271,7 +271,7 @@ if [[ "$1" == "--with-claude" ]]; then
     SUBTLE_PROMPT="I'm trying to debug a Terraform configuration issue. My terraform plan is showing unexpected changes and I'm not sure how to structure my modules. Can you help?"
 
     # System prompt that reinforces the CLAUDE.md instructions
-    SYSTEM_PROMPT="IMPORTANT: Before answering questions about specialized domains, check if a matching Claude subagent is available via 'ox coworker agent <name>'. The subagent table in CLAUDE.md shows available specialists. If the user's task matches a subagent's 'When to Use' description, ALWAYS load it first by running: ox coworker agent <name>"
+    SYSTEM_PROMPT="IMPORTANT: Before answering questions about specialized domains, check if a matching Claude subagent is available via 'ox coworker load <name>'. The subagent table in CLAUDE.md shows available specialists. If the user's task matches a subagent's 'When to Use' description, ALWAYS load it first by running: ox coworker load <name>"
 
     echo -e "${YELLOW}Prompt (no coworker mention):${NC}"
     echo "  \"$SUBTLE_PROMPT\""
@@ -290,12 +290,12 @@ if [[ "$1" == "--with-claude" ]]; then
     echo "=========================================="
     echo ""
 
-    # Check if Claude called coworker agent terraform-expert (may use full path)
-    if echo "$CLAUDE_OUTPUT" | grep -q "coworker agent terraform-expert"; then
-        echo -e "${GREEN}✓ Claude called 'coworker agent terraform-expert'${NC}"
+    # Check if Claude called coworker load terraform-expert (may use full path)
+    if echo "$CLAUDE_OUTPUT" | grep -q "coworker load terraform-expert"; then
+        echo -e "${GREEN}✓ Claude called 'coworker load terraform-expert'${NC}"
         CALLED_COWORKER=true
     else
-        echo -e "${RED}✗ Claude did NOT call 'coworker agent terraform-expert'${NC}"
+        echo -e "${RED}✗ Claude did NOT call 'coworker load terraform-expert'${NC}"
         CALLED_COWORKER=false
     fi
 

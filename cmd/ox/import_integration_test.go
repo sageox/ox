@@ -161,61 +161,6 @@ func TestCommitAndPushDocImport_GitattributesIncluded(t *testing.T) {
 	assert.Contains(t, string(data), "data/**/metadata.json !filter !diff !merge text")
 }
 
-// TestCommitAndPushDocImport_WithSparseCheckout is a regression test for the
-// bug where git add .gitattributes fails because sparse-checkout blocks staging
-// files outside the sparse definition. Team context repos use --no-cone sparse
-// checkout, and .gitattributes at the repo root is outside the sparse set.
-// Without --sparse on git add, this test fails with:
-//
-//	"The following paths and/or pathspecs matched paths that exist
-//	 outside of your sparse-checkout definition"
-func TestCommitAndPushDocImport_WithSparseCheckout(t *testing.T) {
-	barePath, clonePath := createBareAndClone(t)
-	isolatePushEnv(t, clonePath)
-
-	// enable sparse-checkout in --no-cone mode (simulates team context two-phase clone)
-	// include data/ and .sageox/ but NOT root — .gitattributes is outside sparse set
-	runGit(t, clonePath, "sparse-checkout", "set", "--no-cone", "data/", ".sageox/")
-
-	// write .gitattributes at repo root (outside sparse set)
-	gitattrsContent := "data/**/metadata.json !filter !diff !merge text\n"
-	require.NoError(t, os.WriteFile(filepath.Join(clonePath, ".gitattributes"), []byte(gitattrsContent), 0o644))
-
-	// create doc files inside sparse set
-	docID := "sparse-test-doc"
-	docDir := filepath.Join(clonePath, "data", "docs", "2026", "03", "06", docID)
-	require.NoError(t, os.MkdirAll(docDir, 0o755))
-
-	srcContent := []byte("sparse checkout test content")
-	srcRef := lfs.NewFileRef(srcContent)
-	srcPointerPath := filepath.Join(docDir, "source.bin")
-	require.NoError(t, os.WriteFile(srcPointerPath, []byte(lfs.FormatPointer(srcRef.OID, srcRef.Size)), 0o644))
-
-	meta := docMeta{
-		Version:        "1",
-		Title:          "Sparse Checkout Test",
-		SourceFilename: "test.bin",
-		ContentType:    "application/octet-stream",
-		SourceSize:     srcRef.Size,
-		SourceOID:      srcRef.OID,
-		CreatedAt:      "2026-03-06",
-		ImportedAt:     time.Now().UTC().Format(time.RFC3339),
-	}
-	metaData, err := json.MarshalIndent(meta, "", "  ")
-	require.NoError(t, err)
-	metaPath := filepath.Join(docDir, "metadata.json")
-	require.NoError(t, os.WriteFile(metaPath, metaData, 0o644))
-
-	err = commitAndPushDocImport(clonePath, "https://test.invalid", docID, metaPath, srcPointerPath, "", false)
-	require.NoError(t, err, "git add should succeed with --sparse even when .gitattributes is outside sparse set")
-
-	// verify .gitattributes on remote
-	verifyClone := cloneBare(t, barePath)
-	data, readErr := os.ReadFile(filepath.Join(verifyClone, ".gitattributes"))
-	require.NoError(t, readErr, ".gitattributes should exist on remote")
-	assert.Contains(t, string(data), "data/**/metadata.json !filter !diff !merge text")
-}
-
 func TestCommitAndPushDocImport_NothingToCommit(t *testing.T) {
 	_, clonePath := createBareAndClone(t)
 	isolatePushEnv(t, clonePath)

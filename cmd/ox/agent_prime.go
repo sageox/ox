@@ -19,6 +19,7 @@ import (
 	"github.com/sageox/ox/internal/claude"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/constants"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
@@ -159,11 +160,13 @@ type teamContextInfo struct {
 	Agents     []string `json:"agents,omitempty"`     // discovered agent names
 	Escalation string   `json:"escalation,omitempty"` // path to human escalation roster if exists
 
-	// Claude customizations from coworkers/ai/claude/
-	ClaudeInstructions *teamClaudeInstructions `json:"claude_instructions,omitempty"`
-	ClaudeAgents       []claude.Agent          `json:"claude_agents,omitempty"`
-	ClaudeCommands     []claude.Command        `json:"claude_commands,omitempty"`
-	AgentsIndexPath    string                  `json:"agents_index_path,omitempty"` // path to agents/index.md if exists
+	// Coworker customizations from coworkers/
+	CoworkerInstructions *teamCoworkerInstructions `json:"coworker_instructions,omitempty"`
+	Coworkers            []claude.Agent            `json:"coworkers,omitempty"`
+	CoworkerCommands     []claude.Command          `json:"coworker_commands,omitempty"`
+	AgentsIndexPath       string                    `json:"agents_index_path,omitempty"`        // path to agents/index.md if exists
+	AgentsAgentsMDContent string                    `json:"agents_agents_md_content,omitempty"` // coworkers/agents/AGENTS.md content (first 200 lines)
+	CoworkerHint          string                    `json:"coworker_hint,omitempty"`            // hint for agents about available coworkers
 
 	// Agent context - distilled knowledge for AI agents
 	HasAgentContext     bool   `json:"has_agent_context,omitempty"`      // true if agent-context/distilled-discussions.md exists
@@ -207,11 +210,11 @@ type otherTeamEntry struct {
 	Age  string `json:"age,omitempty"` // content freshness from git log
 }
 
-// teamClaudeInstructions holds paths to team instruction files.
-// These files should be read immediately by Claude for team-specific configuration.
-type teamClaudeInstructions struct {
-	ClaudeMDPath string `json:"claude_md_path,omitempty"` // coworkers/ai/claude/CLAUDE.md
-	AgentsMDPath string `json:"agents_md_path,omitempty"` // coworkers/ai/claude/AGENTS.md
+// teamCoworkerInstructions holds paths to team instruction files.
+// These files should be read immediately for team-specific configuration.
+type teamCoworkerInstructions struct {
+	ClaudeMDPath string `json:"claude_md_path,omitempty"` // coworkers/CLAUDE.md
+	AgentsMDPath string `json:"agents_md_path,omitempty"` // coworkers/AGENTS.md
 	HasClaudeMD  bool   `json:"has_claude_md"`
 	HasAgentsMD  bool   `json:"has_agents_md"`
 }
@@ -1196,7 +1199,7 @@ func buildHumanSummary(output agentPrimeOutput) string {
 
 	if output.TeamContext != nil {
 		fmt.Fprintf(&sb, "- **Team Context:** %s\n", output.TeamContext.TeamID)
-		if ci := output.TeamContext.ClaudeInstructions; ci != nil && ci.HasAgentsMD {
+		if ci := output.TeamContext.CoworkerInstructions; ci != nil && ci.HasAgentsMD {
 			fmt.Fprintf(&sb, "- **Team AGENTS.md:** %s\n", shortenPath(ci.AgentsMDPath))
 		}
 	}
@@ -1447,15 +1450,21 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 		// emit v4 team memory section
 		emitTeamMemorySection(cmd, output.TeamContext)
 
-		// emit Claude subagents section if any exist
-		if len(output.TeamContext.ClaudeAgents) > 0 {
+		// emit agents-level AGENTS.md if present (team-authored agent instructions)
+		if output.TeamContext.AgentsAgentsMDContent != "" {
 			fmt.Fprintln(cmd.OutOrStdout())
-			fmt.Fprintln(cmd.OutOrStdout(), "## Claude Subagents")
+			fmt.Fprintln(cmd.OutOrStdout(), output.TeamContext.AgentsAgentsMDContent)
+		}
+
+		// emit coworkers section if any exist
+		if len(output.TeamContext.Coworkers) > 0 {
 			fmt.Fprintln(cmd.OutOrStdout())
-			fmt.Fprintln(cmd.OutOrStdout(), "Your team has specialized Claude subagents with domain expertise.")
-			fmt.Fprintln(cmd.OutOrStdout(), "**When the user's task matches a subagent's description, load it first:**")
+			fmt.Fprintln(cmd.OutOrStdout(), "## Expert Coworkers")
 			fmt.Fprintln(cmd.OutOrStdout())
-			fmt.Fprintln(cmd.OutOrStdout(), "  ox coworker agent <name>")
+			fmt.Fprintln(cmd.OutOrStdout(), "Your team has expert coworkers (specialized subagents) with domain expertise.")
+			fmt.Fprintln(cmd.OutOrStdout(), "**When the user's task matches a coworker's description, load it first:**")
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "  ox coworker load <name>")
 			fmt.Fprintln(cmd.OutOrStdout())
 
 			// reference the index.md catalog if it exists
@@ -1464,9 +1473,9 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 				fmt.Fprintln(cmd.OutOrStdout())
 			}
 
-			fmt.Fprintln(cmd.OutOrStdout(), "| Subagent | When to Use |")
+			fmt.Fprintln(cmd.OutOrStdout(), "| Coworker | When to Use |")
 			fmt.Fprintln(cmd.OutOrStdout(), "|----------|-------------|")
-			for _, agent := range output.TeamContext.ClaudeAgents {
+			for _, agent := range output.TeamContext.Coworkers {
 				desc := agent.Description
 				if desc == "" {
 					desc = "(no description)"
@@ -1474,17 +1483,17 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 				fmt.Fprintf(cmd.OutOrStdout(), "| %s | %s |\n", agent.Name, desc)
 			}
 			fmt.Fprintln(cmd.OutOrStdout())
-			fmt.Fprintln(cmd.OutOrStdout(), "Loading a subagent outputs its full expertise into your context for the task.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Loading a coworker outputs its full expertise into your context for the task.")
 		}
 
 		// emit team commands table if any exist
-		if len(output.TeamContext.ClaudeCommands) > 0 {
+		if len(output.TeamContext.CoworkerCommands) > 0 {
 			fmt.Fprintln(cmd.OutOrStdout())
 			fmt.Fprintln(cmd.OutOrStdout(), "## Team Commands")
 			fmt.Fprintln(cmd.OutOrStdout())
 			fmt.Fprintln(cmd.OutOrStdout(), "| Command | Trigger | Description |")
 			fmt.Fprintln(cmd.OutOrStdout(), "|---------|---------|-------------|")
-			for _, tcmd := range output.TeamContext.ClaudeCommands {
+			for _, tcmd := range output.TeamContext.CoworkerCommands {
 				desc := tcmd.Description
 				if desc == "" {
 					desc = "(no description)"
@@ -1681,31 +1690,19 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 		return info
 	}
 
-	// discover agents: capabilities/ai/claude/agents/*.md
-	agentsDir := filepath.Join(tc.Path, "capabilities", "ai", "claude", "agents")
-	if entries, err := os.ReadDir(agentsDir); err == nil {
-		for _, entry := range entries {
-			if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".md") {
-				// strip .md extension for agent name
-				name := strings.TrimSuffix(entry.Name(), ".md")
-				info.Agents = append(info.Agents, name)
-			}
-		}
-	}
-
 	// check for human escalation roster
 	escalationPath := filepath.Join(tc.Path, "capabilities", "team", "index.md")
 	if _, err := os.Stat(escalationPath); err == nil {
 		info.Escalation = "capabilities/team/index.md"
 	}
 
-	// discover Claude customizations from coworkers/ai/claude/
-	// this is the new standard path for team Claude configurations
+	// discover coworker customizations from coworkers/
+	// agents in coworkers/agents/, commands in coworkers/commands/
 	customizations, err := claude.DiscoverAll(tc.Path)
 	if err == nil && customizations != nil && customizations.HasAnyCustomizations() {
 		// populate instruction file paths
 		if customizations.HasInstructionFiles() {
-			info.ClaudeInstructions = &teamClaudeInstructions{
+			info.CoworkerInstructions = &teamCoworkerInstructions{
 				ClaudeMDPath: customizations.ClaudeMDPath,
 				AgentsMDPath: customizations.AgentsMDPath,
 				HasClaudeMD:  customizations.HasClaudeMD,
@@ -1714,12 +1711,32 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 		}
 
 		// populate discovered agents/commands
-		info.ClaudeAgents = customizations.Agents
-		info.ClaudeCommands = customizations.Commands
+		info.Coworkers = customizations.Agents
+		info.CoworkerCommands = customizations.Commands
 
 		// populate agents index path if exists
 		if customizations.HasAgentsIndex {
 			info.AgentsIndexPath = customizations.AgentsIndexPath
+		}
+
+		// populate agents-level AGENTS.md content if exists
+		if customizations.HasAgentsAgentsMD {
+			info.AgentsAgentsMDContent = customizations.AgentsAgentsMDContent
+		}
+
+		// build coworker hint when agents are available
+		if len(customizations.Agents) > 0 {
+			var sb strings.Builder
+			sb.WriteString("Expert subagents are available from your team. Load with: ox coworker load <name>\n\n")
+			sb.WriteString("| Name | Description |\n|------|-------------|\n")
+			for _, a := range customizations.Agents {
+				desc := a.Description
+				if desc == "" {
+					desc = "(no description)"
+				}
+				sb.WriteString(fmt.Sprintf("| %s | %s |\n", a.Name, desc))
+			}
+			info.CoworkerHint = sb.String()
 		}
 	}
 
@@ -1766,9 +1783,9 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 // MEMORY.md is always fully inlined. SOUL.md and TEAM.md are reference
 // pointers only (agents read on demand to save tokens).
 func loadTeamMemory(info *teamContextInfo, teamDir string) {
-	// MEMORY.md — always load full content (critical file)
-	if content, err := os.ReadFile(filepath.Join(teamDir, "MEMORY.md")); err == nil {
-		info.MemoryContent = string(content)
+	// MEMORY.md — load first N lines to cap context bloat
+	if content := claude.ReadFirstLines(filepath.Join(teamDir, "MEMORY.md"), constants.MaxInlineContextLines); content != "" {
+		info.MemoryContent = content
 	}
 
 	// SOUL.md — reference pointer only

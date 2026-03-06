@@ -641,29 +641,19 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 	})
 
 	// Category 5b: Ledger Git Health (SageOx is multiplayer - always check)
-	// Skip during bootstrap — ledger is still being cloned/initialized
 	progress.show("Ledger Git Health")
-	if state.isBootstrapping {
+	ledgerGitChecks := checkLedgerGitHealth(
+		opts.fix,
+		opts.shouldFix(CheckSlugLedgerRemote),
+		opts.shouldFix(CheckSlugGitignoreMissing),
+		opts.shouldFix(CheckSlugLedgerBranchStatus),
+		opts.shouldFix(CheckSlugLedgerCleanWorkdir),
+	)
+	if len(ledgerGitChecks) > 0 {
 		categories = append(categories, checkCategory{
-			name: "Ledger Git Health",
-			checks: []checkResult{
-				InfoCheck("Ledger git", "initial sync in progress", "Run `ox doctor` again in a minute"),
-			},
+			name:   "Ledger Git Health",
+			checks: ledgerGitChecks,
 		})
-	} else {
-		ledgerGitChecks := checkLedgerGitHealth(
-			opts.fix,
-			opts.shouldFix(CheckSlugLedgerRemote),
-			opts.shouldFix(CheckSlugGitignoreMissing),
-			opts.shouldFix(CheckSlugLedgerBranchStatus),
-			opts.shouldFix(CheckSlugLedgerCleanWorkdir),
-		)
-		if len(ledgerGitChecks) > 0 {
-			categories = append(categories, checkCategory{
-				name:   "Ledger Git Health",
-				checks: ledgerGitChecks,
-			})
-		}
 	}
 
 	// Category 6: Auth Security
@@ -701,23 +691,13 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 	})
 
 	// Category 9: Sessions
-	// Skip during bootstrap — session infrastructure depends on ledger being ready
 	progress.show("Sessions")
-	if state.isBootstrapping {
+	sessionChecks := checkSessionHealth(opts)
+	if len(sessionChecks) > 0 {
 		categories = append(categories, checkCategory{
-			name: "Sessions",
-			checks: []checkResult{
-				InfoCheck("Sessions", "waiting for initial sync", ""),
-			},
+			name:   "Sessions",
+			checks: sessionChecks,
 		})
-	} else {
-		sessionChecks := checkSessionHealth(opts)
-		if len(sessionChecks) > 0 {
-			categories = append(categories, checkCategory{
-				name:   "Sessions",
-				checks: sessionChecks,
-			})
-		}
 	}
 
 	// Category 10: Daemon

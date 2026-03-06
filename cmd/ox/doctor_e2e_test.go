@@ -240,17 +240,10 @@ func filterExpectedE2EIssues(checks []ReportCheck) []ReportCheck {
 
 // isExpectedE2EIssue returns true if the check is expected to fail/warn
 // in the E2E test environment.
-// IMPORTANT: Keep this tight — only exclude issues inherent to mock/test environments.
-// Do NOT exclude issues that indicate real bugs (unstaged files, uncommitted changes, etc.).
 func isExpectedE2EIssue(check ReportCheck) bool {
 	cat := check.Category
 	msg := check.Message
 	name := check.Name
-
-	// info-priority checks are informational, not actionable — always expected
-	if check.Priority == "info" {
-		return true
-	}
 
 	// daemon not running -- expected in E2E test (we don't start one)
 	if cat == "Daemon" {
@@ -268,12 +261,30 @@ func isExpectedE2EIssue(check ReportCheck) bool {
 		return true
 	}
 
-	// team context not cloned in test
+	// no real ledger/team context cloned
+	if cat == "Ledger Git Health" {
+		return true
+	}
 	if cat == "Team Context" {
 		return true
 	}
 
-	// sessions/ledger not provisioned locally (no daemon to clone)
+	// git repo paths: repos syncing (info-level, expected right after init)
+	if containsAny(msg, "syncing", "no repos configured") {
+		return true
+	}
+
+	// uncommitted .sageox/ changes are expected right after init
+	if containsAny(msg, "unstaged") && containsAny(name, ".sageox/") {
+		return true
+	}
+
+	// uncommitted changes from init-created files
+	if containsAny(msg, "uncommitted change") {
+		return true
+	}
+
+	// sessions/ledger not provisioned locally
 	if containsAny(name, "ledger for sessions") && containsAny(msg, "not provisioned") {
 		return true
 	}

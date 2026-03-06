@@ -21,7 +21,7 @@ Follow the `guidance` field for next steps. The summary step is critical for ses
 7. Clean up the temporary summary file
 
 **If summary generation fails:**
-- Run `ox agent $AGENT_ID doctor` — it can detect and help recover missing summaries
+- Run `ox agent <id> doctor` — it can detect and help recover missing summaries
 - The session data is safe regardless; only the rich summary is missing
 
-$ox agent $AGENT_ID session stop
+$ox agent session stop

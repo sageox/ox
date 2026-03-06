@@ -163,11 +163,10 @@ const (
 	CheckSlugGitCommitHooks        = "git-commit-hooks"
 
 	// Team Context checks
-	CheckSlugTeamRegistration      = "team-registration"
-	CheckSlugLegacyTeamCtx         = "legacy-team-contexts"
-	CheckSlugOrphanedTeamDirs      = "orphaned-team-dirs"
-	CheckSlugGCBlockedUntracked    = "gc-blocked-untracked"
-	CheckSlugTeamSparseCheckout    = "team-sparse-checkout"
+	CheckSlugTeamRegistration   = "team-registration"
+	CheckSlugLegacyTeamCtx      = "legacy-team-contexts"
+	CheckSlugOrphanedTeamDirs   = "orphaned-team-dirs"
+	CheckSlugGCBlockedUntracked = "gc-blocked-untracked"
 
 	// SageOx Configuration checks
 	CheckSlugEndpointConsistency   = "endpoint-consistency"

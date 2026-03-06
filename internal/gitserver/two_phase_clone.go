@@ -30,14 +30,7 @@ type TwoPhaseCloneResult struct {
 // This function is used by both the daemon (normal path) and the CLI
 // (doctor fallback when daemon unavailable).
 func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseCloneResult, error) {
-	// phase 1: minimal clone — trees only, no blobs.
-	// Set cmd.Dir to the parent of repoPath so git doesn't fail with
-	// "Unable to read current working directory" when the daemon's CWD
-	// has been deleted (e.g. tmpdir cleanup on macOS).
-	parentDir := filepath.Dir(repoPath)
-	if err := os.MkdirAll(parentDir, 0755); err != nil {
-		return nil, fmt.Errorf("create parent dir %s: %w", parentDir, err)
-	}
+	// phase 1: minimal clone — trees only, no blobs
 	cloneCmd := exec.CommandContext(ctx, "git", "clone",
 		"--filter=blob:none",
 		"--depth=1",
@@ -48,7 +41,6 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 		"--quiet",
 		cloneURL, repoPath,
 	)
-	cloneCmd.Dir = parentDir
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
 		sanitized := gitutil.SanitizeOutput(string(output))
 		if sanitized != "" {

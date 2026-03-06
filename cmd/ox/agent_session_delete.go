@@ -151,7 +151,7 @@ func runAgentSessionDelete(inst *agentinstance.Instance, cmd *cobra.Command, arg
 }
 
 // deleteSessionFromLedger removes the session folder from the ledger git repo,
-// commits the removal, and pushes. NEVER uses --force push.
+// commits the removal, and pushes.
 func deleteSessionFromLedger(ledgerPath, sessionName, sessionDir string) error {
 	// git rm -r the session folder
 	gitRm := exec.Command("git", "rm", "-r", "--force", filepath.Join("sessions", sessionName))
@@ -168,7 +168,7 @@ func deleteSessionFromLedger(ledgerPath, sessionName, sessionDir string) error {
 		return fmt.Errorf("git commit: %s: %w", string(out), err)
 	}
 
-	// push — no --force: ledger history must never be rewritten
+	// push
 	gitPush := exec.Command("git", "push")
 	gitPush.Dir = ledgerPath
 	if out, err := gitPush.CombinedOutput(); err != nil {

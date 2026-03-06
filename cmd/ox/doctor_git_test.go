@@ -849,7 +849,7 @@ func TestCheckGitStatus_StagedButUncommitted(t *testing.T) {
 	if result.name != ".sageox/ changes" {
 		t.Errorf("unexpected name: %s", result.name)
 	}
-	if result.message != "staged, ready to commit" {
+	if result.message != "staged" {
 		t.Errorf("unexpected message: %s", result.message)
 	}
 }

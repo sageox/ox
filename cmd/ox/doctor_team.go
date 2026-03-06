@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/tokens"
 )
 
@@ -382,125 +380,6 @@ func checkGCBlockedByUntracked(fix bool) checkResult {
 	return WarningCheck("GC blocked",
 		fmt.Sprintf("%d team(s) with uncommitted changes blocking GC", len(dirtyTeams)),
 		detail.String())
-}
-
-// checkTeamSparseCheckout verifies that every team context repo with
-// sparse-checkout enabled includes the root-level file patterns (/* and !/*/).
-// Without these, git blocks staging root-level files like .gitattributes.
-func checkTeamSparseCheckout(fix bool) checkResult {
-	gitRoot := findGitRoot()
-	if gitRoot == "" {
-		return SkippedCheck("Team sparse checkout", "not in git repo", "")
-	}
-
-	localCfg, err := config.LoadLocalConfig(gitRoot)
-	if err != nil || len(localCfg.TeamContexts) == 0 {
-		return SkippedCheck("Team sparse checkout", "no team contexts", "")
-	}
-
-	var needsFix, fixed, checked int
-
-	for _, tc := range localCfg.TeamContexts {
-		if tc.Path == "" || !isGitRepo(tc.Path) {
-			continue
-		}
-
-		// check if sparse-checkout is enabled
-		sparseFile := filepath.Join(tc.Path, ".git", "info", "sparse-checkout")
-		content, err := os.ReadFile(sparseFile)
-		if err != nil {
-			// no sparse-checkout file = not using sparse checkout, skip
-			continue
-		}
-
-		checked++
-
-		// check for root-level file patterns: /* and !/*/
-		// git may write the negation as \!/*/ (escaped) in the file
-		lines := strings.Split(string(content), "\n")
-		hasRootGlob := false
-		hasNegateRootDirs := false
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "/*" {
-				hasRootGlob = true
-			}
-			if trimmed == "!/*/" || trimmed == "\\!/*/" {
-				hasNegateRootDirs = true
-			}
-		}
-
-		if hasRootGlob && hasNegateRootDirs {
-			continue
-		}
-
-		needsFix++
-
-		if fix {
-			if repairErr := repairTeamSparseCheckout(tc.Path); repairErr != nil {
-				slog.Warn("failed to repair sparse-checkout",
-					"path", tc.Path, "error", repairErr)
-				continue
-			}
-			fixed++
-		}
-	}
-
-	if checked == 0 {
-		return SkippedCheck("Team sparse checkout", "no sparse-checkout repos", "")
-	}
-
-	if needsFix == 0 {
-		return PassedCheck("Team sparse checkout",
-			fmt.Sprintf("%d repo(s) have root-level patterns", checked))
-	}
-
-	if fix && fixed == needsFix {
-		return PassedCheck("Team sparse checkout",
-			fmt.Sprintf("repaired %d repo(s)", fixed))
-	}
-
-	unfixed := needsFix - fixed
-	return FailedCheck("Team sparse checkout",
-		fmt.Sprintf("%d repo(s) missing root-level patterns (/* and !/*/)", unfixed),
-		"Root-level files like .gitattributes cannot be staged without these patterns.\n"+
-			"        Run `ox doctor` to auto-fix (FixLevelAuto)")
-}
-
-// repairTeamSparseCheckout re-applies sparse-checkout from the manifest
-// with root-level file patterns included.
-func repairTeamSparseCheckout(tcPath string) error {
-	manifestPath := filepath.Join(tcPath, ".sageox", "sync.manifest")
-	cfg := manifest.ParseFile(manifestPath)
-
-	sparsePaths := manifest.ComputeSparseSet(cfg)
-	if len(sparsePaths) == 0 {
-		return fmt.Errorf("no sparse paths computed from manifest")
-	}
-
-	// ensure .sageox/ is always in the sparse set
-	hasSageox := false
-	for _, p := range sparsePaths {
-		if p == ".sageox/" || p == ".sageox" {
-			hasSageox = true
-			break
-		}
-	}
-	if !hasSageox {
-		sparsePaths = append([]string{".sageox/"}, sparsePaths...)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	args := append([]string{"-C", tcPath, "sparse-checkout", "set", "--no-cone"}, sparsePaths...)
-	cmd := exec.CommandContext(ctx, "git", args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git sparse-checkout set: %w: %s", err, strings.TrimSpace(string(output)))
-	}
-
-	return nil
 }
 
 // runGitStatus runs git status --porcelain on a directory and returns the output.
