@@ -208,7 +208,11 @@ func ensureSessionsGitignore(sessionsDir string) error {
 
 // commitAndPushLedger commits meta.json and .gitignore, then pushes to remote.
 // Uses pull --rebase with retry to handle concurrent pushes from other team members.
+// NEVER uses --force push. Conflicts are resolved via pull --rebase.
 func commitAndPushLedger(ledgerPath, sessionName string) error {
+	// ensure .gitignore is in place before any commit to prevent cache file leakage
+	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
+
 	// stage meta.json and .gitignore
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
@@ -249,7 +253,10 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 // commitAndPushLedgerWithExtras commits meta.json, .gitignore, and optionally summary.json,
 // then pushes to remote. Used by doctor retry path where summary.json may have been
 // copied from cache alongside the LFS upload retry.
+// NEVER uses --force push. Conflicts are resolved via pull --rebase.
 func commitAndPushLedgerWithExtras(ledgerPath, sessionName string, includeSummary bool) error {
+	// ensure .gitignore is in place before any commit to prevent cache file leakage
+	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
 
@@ -302,6 +309,8 @@ func resolveLedgerPath() (string, error) {
 }
 
 // pushLedger pushes ledger changes to remote with conflict retry.
+// NEVER uses --force. Ledger and team context history must not be rewritten.
+// Conflicts are resolved via pull --rebase, never by overwriting remote history.
 // Retries on transient failures (network, rejection). Fails fast on permanent errors
 // (auth, config) to avoid wasting time on retries that will never succeed.
 // Uses context for timeout control (60s per git operation).
@@ -337,6 +346,7 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		attemptCtx, cancel := context.WithTimeout(ctx, opTimeout)
+		// no --force: conflicts resolved via pull --rebase, never by overwriting remote history
 		outStr, err := gitutil.RunGit(attemptCtx, ledgerPath, "push", "--quiet")
 		cancel()
 		if err == nil {

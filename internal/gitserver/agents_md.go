@@ -144,7 +144,7 @@ func commitAndPushAgentsMD(ctx context.Context, repoPath string) error {
 		return err
 	}
 
-	// push
+	// push — no --force: team context history must never be rewritten
 	pushCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "push", "--quiet")
 	if err := pushCmd.Run(); err != nil {
 		return fmt.Errorf("push: %w", err)
