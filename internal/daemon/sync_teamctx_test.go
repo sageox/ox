@@ -1012,16 +1012,17 @@ func TestBlueGreenGC_Success(t *testing.T) {
 	assert.False(t, lastGC.IsZero(), "LastGCTime should be set after GC")
 }
 
-func TestBlueGreenGC_SkipsDirtyWorkingState(t *testing.T) {
+func TestBlueGreenGC_PreservesUncommittedTrackedChanges(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
 
-	manifest := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude memory/\n"
-	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifest, nil)
+	manifestContent := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude TEAM.md\ninclude memory/\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifestContent, nil)
 
-	// make the working tree dirty
-	require.NoError(t, os.WriteFile(filepath.Join(teamDir, "SOUL.md"), []byte("dirty"), 0644))
+	// modify a tracked file (unstaged change)
+	dirtyContent := "# Soul\nmodified by user\n"
+	require.NoError(t, os.WriteFile(filepath.Join(teamDir, "SOUL.md"), []byte(dirtyContent), 0644))
 
 	ws := WorkspaceState{
 		ID:       "team_test",
@@ -1033,15 +1034,20 @@ func TestBlueGreenGC_SkipsDirtyWorkingState(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	scheduler.runBlueGreenGC(ctx, ws)
+	result := scheduler.runBlueGreenGC(ctx, ws)
 
-	// GC should have been skipped — no .new or .old dirs
+	assert.Equal(t, gcSuccess, result, "GC should succeed with dirty tree")
 	assert.NoDirExists(t, teamDir+".new")
 	assert.NoDirExists(t, teamDir+".old")
 
-	// LastGCTime should NOT be set
-	lastGC := scheduler.WorkspaceRegistry().GetLastGCTime("team_test")
-	assert.True(t, lastGC.IsZero(), "LastGCTime should not be set when GC was skipped")
+	// the user's modification must survive the reclone
+	content, err := os.ReadFile(filepath.Join(teamDir, "SOUL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, dirtyContent, string(content), "uncommitted change should be preserved")
+
+	// no leftover preservation artifacts
+	assert.NoFileExists(t, teamDir+".gc-diff")
+	assert.NoDirExists(t, teamDir+".gc-untracked")
 }
 
 func TestBlueGreenGC_CloneFailsKeepsOld(t *testing.T) {
@@ -1743,4 +1749,345 @@ func TestBlueGreenGC_LeftoverNewRemovalFails(t *testing.T) {
 
 	// restore permissions for cleanup
 	os.Chmod(innerDir, 0755)
+}
+
+// --- Dirty-tree preservation regression tests ---
+
+func TestBlueGreenGC_PreservesStagedChanges(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	manifestContent := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude TEAM.md\ninclude memory/\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifestContent, nil)
+
+	// stage a change
+	stagedContent := "# Soul\nstaged modification\n"
+	require.NoError(t, os.WriteFile(filepath.Join(teamDir, "SOUL.md"), []byte(stagedContent), 0644))
+	require.NoError(t, exec.Command("git", "-C", teamDir, "add", "SOUL.md").Run())
+
+	ws := WorkspaceState{
+		ID:       "team_staged",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     teamDir,
+		TeamName: "test-team",
+		CloneURL: "file://" + bareDir,
+		Exists:   true,
+	}
+
+	result := scheduler.runBlueGreenGC(context.Background(), ws)
+	assert.Equal(t, gcSuccess, result)
+
+	content, err := os.ReadFile(filepath.Join(teamDir, "SOUL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, stagedContent, string(content), "staged change should be preserved")
+}
+
+func TestBlueGreenGC_PreservesMixedStagedAndUnstaged(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	manifestContent := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude TEAM.md\ninclude memory/\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifestContent, nil)
+
+	// stage a change, then make a further unstaged change
+	require.NoError(t, os.WriteFile(filepath.Join(teamDir, "SOUL.md"), []byte("staged version"), 0644))
+	require.NoError(t, exec.Command("git", "-C", teamDir, "add", "SOUL.md").Run())
+	finalContent := "unstaged version on top of staged"
+	require.NoError(t, os.WriteFile(filepath.Join(teamDir, "SOUL.md"), []byte(finalContent), 0644))
+
+	ws := WorkspaceState{
+		ID:       "team_mixed",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     teamDir,
+		TeamName: "test-team",
+		CloneURL: "file://" + bareDir,
+		Exists:   true,
+	}
+
+	result := scheduler.runBlueGreenGC(context.Background(), ws)
+	assert.Equal(t, gcSuccess, result)
+
+	// the latest (unstaged) content should be what survives
+	content, err := os.ReadFile(filepath.Join(teamDir, "SOUL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, finalContent, string(content), "latest working tree content should be preserved")
+}
+
+func TestBlueGreenGC_PreservesUntrackedFiles(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	manifestContent := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude TEAM.md\ninclude memory/\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifestContent, nil)
+
+	// create an untracked file
+	untrackedContent := "user's custom notes\n"
+	require.NoError(t, os.WriteFile(filepath.Join(teamDir, "my-notes.md"), []byte(untrackedContent), 0644))
+
+	ws := WorkspaceState{
+		ID:       "team_untracked",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     teamDir,
+		TeamName: "test-team",
+		CloneURL: "file://" + bareDir,
+		Exists:   true,
+	}
+
+	result := scheduler.runBlueGreenGC(context.Background(), ws)
+	assert.Equal(t, gcSuccess, result)
+
+	content, err := os.ReadFile(filepath.Join(teamDir, "my-notes.md"))
+	require.NoError(t, err)
+	assert.Equal(t, untrackedContent, string(content), "untracked file should be preserved")
+}
+
+func TestBlueGreenGC_PreservesUntrackedInSubdirs(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	manifestContent := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude TEAM.md\ninclude memory/\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifestContent, nil)
+
+	// create untracked files in nested subdirectories
+	nestedDir := filepath.Join(teamDir, "notes", "2024")
+	require.NoError(t, os.MkdirAll(nestedDir, 0755))
+	nestedContent := "january notes\n"
+	require.NoError(t, os.WriteFile(filepath.Join(nestedDir, "jan.md"), []byte(nestedContent), 0644))
+
+	ws := WorkspaceState{
+		ID:       "team_nested",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     teamDir,
+		TeamName: "test-team",
+		CloneURL: "file://" + bareDir,
+		Exists:   true,
+	}
+
+	result := scheduler.runBlueGreenGC(context.Background(), ws)
+	assert.Equal(t, gcSuccess, result)
+
+	content, err := os.ReadFile(filepath.Join(teamDir, "notes", "2024", "jan.md"))
+	require.NoError(t, err)
+	assert.Equal(t, nestedContent, string(content), "nested untracked file should be preserved")
+}
+
+func TestBlueGreenGC_PushesUnpushedCommitsBeforeReclone(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	manifestContent := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude TEAM.md\ninclude memory/\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifestContent, nil)
+
+	// make a local commit that is NOT pushed
+	newContent := "# Soul\nlocal commit content\n"
+	require.NoError(t, os.WriteFile(filepath.Join(teamDir, "SOUL.md"), []byte(newContent), 0644))
+	gitConfig(t, teamDir)
+	require.NoError(t, exec.Command("git", "-C", teamDir, "add", "SOUL.md").Run())
+	require.NoError(t, exec.Command("git", "-C", teamDir, "commit", "-m", "local change").Run())
+
+	// verify there are unpushed commits (user commit + auto-commit from TwoPhaseClone)
+	countOut, err := exec.Command("git", "-C", teamDir, "rev-list", "--count", "origin/main..HEAD").CombinedOutput()
+	require.NoError(t, err)
+	count := strings.TrimSpace(string(countOut))
+	assert.True(t, count >= "1", "should have at least 1 unpushed commit, got %s", count)
+
+	ws := WorkspaceState{
+		ID:       "team_push",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     teamDir,
+		TeamName: "test-team",
+		CloneURL: "file://" + bareDir,
+		Exists:   true,
+	}
+
+	result := scheduler.runBlueGreenGC(context.Background(), ws)
+	assert.Equal(t, gcSuccess, result)
+
+	// verify the commit was pushed to the bare repo
+	logOut, err := exec.Command("git", "-C", bareDir, "log", "--oneline", "main").CombinedOutput()
+	require.NoError(t, err)
+	assert.Contains(t, string(logOut), "local change", "unpushed commit should be in bare repo after GC")
+
+	// the recloned repo should have the committed content
+	content, err := os.ReadFile(filepath.Join(teamDir, "SOUL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, newContent, string(content))
+}
+
+func TestBlueGreenGC_SkipsWhenPushFails(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	manifestContent := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude TEAM.md\ninclude memory/\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifestContent, nil)
+
+	// make a local commit
+	require.NoError(t, os.WriteFile(filepath.Join(teamDir, "SOUL.md"), []byte("local change"), 0644))
+	gitConfig(t, teamDir)
+	require.NoError(t, exec.Command("git", "-C", teamDir, "add", "SOUL.md").Run())
+	require.NoError(t, exec.Command("git", "-C", teamDir, "commit", "-m", "unpushable").Run())
+
+	// break the bare repo so push will fail
+	require.NoError(t, os.RemoveAll(bareDir))
+
+	ws := WorkspaceState{
+		ID:       "team_pushfail",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     teamDir,
+		TeamName: "test-team",
+		CloneURL: "file://" + bareDir,
+		Exists:   true,
+	}
+
+	result := scheduler.runBlueGreenGC(context.Background(), ws)
+	assert.Equal(t, gcSkippedDirty, result, "GC should skip when push fails")
+
+	// original repo should be untouched
+	assert.FileExists(t, filepath.Join(teamDir, "SOUL.md"))
+	content, err := os.ReadFile(filepath.Join(teamDir, "SOUL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "local change", string(content))
+}
+
+func TestBlueGreenGC_DiffApplyConflictPreservesDiffFile(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	manifestContent := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude TEAM.md\ninclude memory/\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifestContent, nil)
+
+	// push the auto-commit from TwoPhaseClone so the local is in sync with remote
+	require.NoError(t, exec.Command("git", "-C", teamDir, "push", "origin", "HEAD", "--quiet").Run())
+
+	// push a conflicting change to the bare repo via a temp clone
+	// this completely replaces SOUL.md content, so the local diff can't apply cleanly
+	pusherDir := filepath.Join(t.TempDir(), "pusher")
+	require.NoError(t, exec.Command("git", "clone", bareDir, pusherDir).Run())
+	gitConfig(t, pusherDir)
+	require.NoError(t, os.WriteFile(filepath.Join(pusherDir, "SOUL.md"), []byte("completely different remote content\nwith multiple lines\nthat conflict\n"), 0644))
+	require.NoError(t, exec.Command("git", "-C", pusherDir, "add", "SOUL.md").Run())
+	require.NoError(t, exec.Command("git", "-C", pusherDir, "commit", "-m", "conflict").Run())
+	require.NoError(t, exec.Command("git", "-C", pusherDir, "push", "origin", "HEAD:main").Run())
+
+	// now make a local uncommitted change to SOUL.md that conflicts
+	require.NoError(t, os.WriteFile(filepath.Join(teamDir, "SOUL.md"), []byte("local user edit\nwith different content\nthat also conflicts\n"), 0644))
+
+	ws := WorkspaceState{
+		ID:       "team_conflict",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     teamDir,
+		TeamName: "test-team",
+		CloneURL: "file://" + bareDir,
+		Exists:   true,
+	}
+
+	result := scheduler.runBlueGreenGC(context.Background(), ws)
+	// reclone succeeds even if diff apply fails — the repo is valid
+	assert.Equal(t, gcSuccess, result)
+
+	// the .gc-diff file should be preserved for manual recovery
+	diffFile := teamDir + ".gc-diff"
+	assert.FileExists(t, diffFile, "diff file should be preserved when apply fails")
+
+	// clean up
+	t.Cleanup(func() { os.Remove(diffFile) })
+}
+
+func TestBlueGreenGC_PreservesBinaryUntrackedFile(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	manifestContent := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude TEAM.md\ninclude memory/\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifestContent, nil)
+
+	// create a binary untracked file
+	binaryContent := make([]byte, 256)
+	for i := range binaryContent {
+		binaryContent[i] = byte(i)
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(teamDir, "diagram.png"), binaryContent, 0644))
+
+	ws := WorkspaceState{
+		ID:       "team_binary",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     teamDir,
+		TeamName: "test-team",
+		CloneURL: "file://" + bareDir,
+		Exists:   true,
+	}
+
+	result := scheduler.runBlueGreenGC(context.Background(), ws)
+	assert.Equal(t, gcSuccess, result)
+
+	content, err := os.ReadFile(filepath.Join(teamDir, "diagram.png"))
+	require.NoError(t, err)
+	assert.Equal(t, binaryContent, content, "binary untracked file should survive reclone with identical content")
+}
+
+func TestBlueGreenGC_StagedDeletePreserved(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	manifestContent := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude TEAM.md\ninclude memory/\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifestContent, nil)
+
+	// stage a deletion of TEAM.md
+	require.NoError(t, exec.Command("git", "-C", teamDir, "rm", "TEAM.md").Run())
+
+	ws := WorkspaceState{
+		ID:       "team_delete",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     teamDir,
+		TeamName: "test-team",
+		CloneURL: "file://" + bareDir,
+		Exists:   true,
+	}
+
+	result := scheduler.runBlueGreenGC(context.Background(), ws)
+	assert.Equal(t, gcSuccess, result)
+
+	// TEAM.md should not exist after reclone (the deletion should be re-applied)
+	assert.NoFileExists(t, filepath.Join(teamDir, "TEAM.md"), "staged delete should be preserved")
+}
+
+func TestBlueGreenGC_CleanTreeStillWorks(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// verify clean tree GC still works identically with the new code path
+	manifestContent := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude TEAM.md\ninclude memory/\ngc_interval_days 7\n"
+	bareDir, teamDir, scheduler := setupClonedTeamContext(t, manifestContent, nil)
+
+	origContent, err := os.ReadFile(filepath.Join(teamDir, "SOUL.md"))
+	require.NoError(t, err)
+
+	ws := WorkspaceState{
+		ID:       "team_clean",
+		Type:     WorkspaceTypeTeamContext,
+		Path:     teamDir,
+		TeamName: "test-team",
+		CloneURL: "file://" + bareDir,
+		Exists:   true,
+	}
+
+	result := scheduler.runBlueGreenGC(context.Background(), ws)
+	assert.Equal(t, gcSuccess, result)
+
+	content, err := os.ReadFile(filepath.Join(teamDir, "SOUL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, string(origContent), string(content))
+
+	// no preservation artifacts
+	assert.NoFileExists(t, teamDir+".gc-diff")
+	assert.NoDirExists(t, teamDir+".gc-untracked")
 }

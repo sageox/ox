@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2290,7 +2292,7 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 				Type:     IssueTypeDirtyWorkspace,
 				Severity: SeverityWarning,
 				Repo:     repoName,
-				Summary:  "uncommitted changes blocking GC (commit or discard to allow reclone)",
+				Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
 			})
 		case gcSuccess:
 			s.issues.ClearIssue(IssueTypeDirtyWorkspace, repoName)
@@ -2337,12 +2339,12 @@ func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 			resp.Triggered++
 			s.issues.ClearIssue(IssueTypeDirtyWorkspace, name)
 		case gcSkippedDirty:
-			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: uncommitted changes (commit or discard before GC)", name))
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: local changes could not be preserved for GC", name))
 			s.issues.SetIssue(DaemonIssue{
 				Type:     IssueTypeDirtyWorkspace,
 				Severity: SeverityWarning,
 				Repo:     name,
-				Summary:  "uncommitted changes blocking GC (commit or discard to allow reclone)",
+				Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
 			})
 		case gcFailed:
 			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: reclone failed (check daemon logs)", name))
@@ -2357,39 +2359,61 @@ type gcResult int
 
 const (
 	gcSuccess      gcResult = iota // reclone completed successfully
-	gcSkippedDirty                 // skipped: working tree has uncommitted changes
+	gcSkippedDirty                 // skipped: local changes could not be preserved
 	gcFailed                       // reclone attempted but failed (clone, validation, or swap error)
 )
 
 // runBlueGreenGC performs a blue-green reclone for a single team context workspace.
-// Steps: verify clean → clone into .new → validate → atomic swap → remove old.
+// Steps: preserve local state → clone .new → validate → atomic swap → remove old → restore state.
 //
 // GC is a disk-space optimization — it should never impair the user experience.
-// If the user has in-flight changes (uncommitted edits to docs/, etc.), GC skips
-// that workspace and reports gcSkippedDirty so callers can surface this to the user.
+// Local changes (unpushed commits, uncommitted edits, untracked files) are preserved
+// across the reclone. If preservation fails, GC is skipped rather than risk data loss.
 func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) gcResult {
-	// step 1: verify clean working state
-	// Users may have edited team context files (docs/, conventions, etc.).
-	// Never destroy their work — skip GC and let the caller notify them.
-	if !isCheckoutClean(ws.Path) {
-		s.logger.Warn("gc: skipping reclone, working tree has uncommitted changes",
-			"path", ws.Path, "team", ws.TeamName)
-		return gcSkippedDirty
-	}
-
 	newPath := ws.Path + ".new"
 	oldPath := ws.Path + ".old"
+	diffFile := ws.Path + ".gc-diff"
+	untrackedDir := ws.Path + ".gc-untracked"
 
-	// clean up leftover .new from a previous failed GC
-	if _, err := os.Stat(newPath); err == nil {
-		s.logger.Info("gc: cleaning up leftover .new directory", "path", newPath)
-		if err := os.RemoveAll(newPath); err != nil {
-			s.logger.Error("gc: failed to remove leftover .new", "path", newPath, "error", err)
-			return gcFailed
+	// clean up leftover artifacts from a previous failed GC
+	for _, leftover := range []string{newPath, diffFile, untrackedDir} {
+		if _, err := os.Stat(leftover); err == nil {
+			s.logger.Info("gc: cleaning up leftover artifact", "path", leftover)
+			if err := os.RemoveAll(leftover); err != nil {
+				s.logger.Error("gc: failed to remove leftover artifact", "path", leftover, "error", err)
+				return gcFailed
+			}
 		}
 	}
 
-	// step 2: two-phase clone into .new
+	// --- phase 0: preserve local state ---
+
+	// step 0a: push unpushed commits so they survive reclone
+	if err := s.gcPushUnpushedCommits(ctx, ws); err != nil {
+		s.logger.Warn("gc: skipping reclone, cannot push unpushed commits",
+			"path", ws.Path, "team", ws.TeamName, "error", err)
+		return gcSkippedDirty
+	}
+
+	// step 0b: capture uncommitted tracked changes (staged + unstaged)
+	hasDiff, err := s.gcCaptureDiff(ctx, ws.Path, diffFile)
+	if err != nil {
+		s.logger.Warn("gc: skipping reclone, cannot capture uncommitted changes",
+			"path", ws.Path, "team", ws.TeamName, "error", err)
+		return gcSkippedDirty
+	}
+
+	// step 0c: capture untracked files
+	hasUntracked, err := s.gcCaptureUntracked(ctx, ws.Path, untrackedDir)
+	if err != nil {
+		s.logger.Warn("gc: skipping reclone, cannot capture untracked files",
+			"path", ws.Path, "team", ws.TeamName, "error", err)
+		return gcSkippedDirty
+	}
+
+	// --- phase 1: clone, validate, swap (existing logic) ---
+
+	// step 1: two-phase clone into .new
 	cloneURL := ws.CloneURL
 	ep := s.workspaceRegistry.GetEndpoint()
 	if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err == nil && creds != nil && creds.Token != "" {
@@ -2404,7 +2428,7 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 		return gcFailed
 	}
 
-	// step 3: validate new clone
+	// step 2: validate new clone
 	if !s.validateGCClone(newPath, mCfg) {
 		s.logger.Error("gc: validation failed, keeping old", "team", ws.TeamName)
 		_ = os.RemoveAll(newPath)
@@ -2417,13 +2441,11 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 	}
 
 	// ensure .sageox/.gitignore excludes daemon-written files (cache/, checkout.json, etc.)
-	// so they don't appear as untracked and block future GC reclone cycles
 	if err := gitserver.EnsureCheckoutGitignoreCtx(ctx, newPath); err != nil {
 		s.logger.Warn("gc: failed to ensure checkout .gitignore on new clone", "error", err)
 	}
 
-	// step 4: atomic swap
-	// clean up any leftover .old from a previous GC
+	// step 3: atomic swap
 	if _, err := os.Stat(oldPath); err == nil {
 		_ = os.RemoveAll(oldPath)
 	}
@@ -2436,16 +2458,42 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 
 	if err := os.Rename(newPath, ws.Path); err != nil {
 		s.logger.Error("gc: failed to move new repo into place, restoring old", "error", err)
-		// try to restore
 		if restoreErr := os.Rename(oldPath, ws.Path); restoreErr != nil {
 			s.logger.Error("gc: CRITICAL failed to restore old repo", "error", restoreErr)
 		}
 		return gcFailed
 	}
 
-	// step 5: cleanup
+	// step 4: cleanup old
 	if err := os.RemoveAll(oldPath); err != nil {
 		s.logger.Warn("gc: failed to remove old clone", "path", oldPath, "error", err)
+	}
+
+	// --- phase 2: restore local state ---
+
+	diffApplied := true
+	if hasDiff {
+		if err := s.gcRestoreDiff(ctx, ws.Path, diffFile); err != nil {
+			diffApplied = false
+			s.logger.Warn("gc: reclone succeeded but failed to restore uncommitted changes",
+				"path", ws.Path, "team", ws.TeamName, "error", err,
+				"recovery_file", diffFile)
+		}
+	}
+
+	if hasUntracked {
+		if err := s.gcRestoreUntracked(ws.Path, untrackedDir); err != nil {
+			s.logger.Warn("gc: reclone succeeded but failed to restore some untracked files",
+				"path", ws.Path, "team", ws.TeamName, "error", err)
+		}
+	}
+
+	// clean up preservation artifacts (keep diff file if apply failed for manual recovery)
+	if hasDiff && diffApplied {
+		_ = os.Remove(diffFile)
+	}
+	if hasUntracked {
+		_ = os.RemoveAll(untrackedDir)
 	}
 
 	s.workspaceRegistry.UpdateLastGC(ws.ID)
@@ -2460,6 +2508,198 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 
 	s.logger.Info("gc: reclone complete", "team", ws.TeamName, "path", ws.Path)
 	return gcSuccess
+}
+
+// gcPushUnpushedCommits pushes any local commits not yet on the remote.
+// Returns nil if there are no unpushed commits or if push succeeds.
+// Returns an error if unpushed commits exist and push fails.
+func (s *SyncScheduler) gcPushUnpushedCommits(ctx context.Context, ws WorkspaceState) error {
+	// count unpushed commits against the upstream tracking branch
+	countOutput, err := gitutil.RunGit(ctx, ws.Path, "rev-list", "--count", "@{upstream}..HEAD")
+	if err != nil {
+		// no tracking branch — fall back to origin/main
+		countOutput, err = gitutil.RunGit(ctx, ws.Path, "rev-list", "--count", "origin/main..HEAD")
+		if err != nil {
+			return fmt.Errorf("cannot determine unpushed commit count: %w", err)
+		}
+	}
+
+	count := strings.TrimSpace(countOutput)
+	if count == "" || count == "0" {
+		return nil
+	}
+
+	s.logger.Info("gc: pushing unpushed commits before reclone", "path", ws.Path, "count", count)
+
+	// inject credentials for push (same pattern as clone)
+	pushURL := ws.CloneURL
+	ep := s.workspaceRegistry.GetEndpoint()
+	if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err == nil && creds != nil && creds.Token != "" {
+		pushURL = injectGitCredentials(ws.CloneURL, "oauth2", creds.Token)
+	}
+
+	// temporarily set push URL with credentials, push, then restore
+	origURL, _ := gitutil.RunGit(ctx, ws.Path, "remote", "get-url", "origin")
+	origURL = strings.TrimSpace(origURL)
+
+	if _, err := gitutil.RunGit(ctx, ws.Path, "remote", "set-url", "origin", pushURL); err != nil {
+		return fmt.Errorf("failed to set push URL: %w", err)
+	}
+	defer func() {
+		if origURL != "" {
+			_, _ = gitutil.RunGit(ctx, ws.Path, "remote", "set-url", "origin", origURL)
+		}
+	}()
+
+	if _, err := gitutil.RunGit(ctx, ws.Path, "push", "origin", "HEAD", "--quiet"); err != nil {
+		return fmt.Errorf("push failed: %w", err)
+	}
+
+	return nil
+}
+
+// gcCaptureDiff captures all uncommitted tracked changes (staged + unstaged)
+// as a binary-safe patch file. Returns (hasDiff, error).
+// Uses exec.Command directly (not RunGit) to avoid CombinedOutput mixing
+// stderr into the patch data.
+func (s *SyncScheduler) gcCaptureDiff(ctx context.Context, repoPath, diffFile string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "diff", "--binary", "HEAD")
+	stdout, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git diff HEAD: %w", err)
+	}
+
+	if len(strings.TrimSpace(string(stdout))) == 0 {
+		return false, nil
+	}
+
+	if err := os.WriteFile(diffFile, stdout, 0600); err != nil {
+		return false, fmt.Errorf("write diff file: %w", err)
+	}
+
+	s.logger.Info("gc: captured uncommitted changes", "path", repoPath, "diff_size", len(stdout))
+	return true, nil
+}
+
+// gcCaptureUntracked copies untracked files (excluding gitignored) to a temp directory.
+// Returns (hasFiles, error).
+func (s *SyncScheduler) gcCaptureUntracked(ctx context.Context, repoPath, destDir string) (bool, error) {
+	output, err := gitutil.RunGit(ctx, repoPath, "ls-files", "--others", "--exclude-standard")
+	if err != nil {
+		return false, fmt.Errorf("git ls-files: %w", err)
+	}
+
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return false, nil
+	}
+
+	files := strings.Split(output, "\n")
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return false, fmt.Errorf("create untracked dir: %w", err)
+	}
+
+	copied := 0
+	for _, relPath := range files {
+		relPath = strings.TrimSpace(relPath)
+		if relPath == "" {
+			continue
+		}
+
+		srcPath := filepath.Join(repoPath, relPath)
+		dstPath := filepath.Join(destDir, relPath)
+
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+			s.logger.Warn("gc: failed to create dir for untracked file", "path", relPath, "error", err)
+			continue
+		}
+
+		if err := copyFile(srcPath, dstPath); err != nil {
+			s.logger.Warn("gc: failed to copy untracked file", "path", relPath, "error", err)
+			continue
+		}
+		copied++
+	}
+
+	s.logger.Info("gc: captured untracked files", "path", repoPath, "count", copied)
+	return copied > 0, nil
+}
+
+// gcRestoreDiff applies a previously captured diff to the recloned repo.
+// Tries --3way first for merge support, falls back to --reject for partial apply.
+func (s *SyncScheduler) gcRestoreDiff(ctx context.Context, repoPath, diffFile string) error {
+	// try clean apply with 3-way merge
+	if _, err := gitutil.RunGit(ctx, repoPath, "apply", "--3way", diffFile); err == nil {
+		s.logger.Info("gc: restored uncommitted changes", "path", repoPath)
+		return nil
+	}
+
+	// fall back to --reject (applies what it can, creates .rej for conflicts)
+	if _, err := gitutil.RunGit(ctx, repoPath, "apply", "--reject", diffFile); err != nil {
+		return fmt.Errorf("git apply failed (diff preserved at %s): %w", diffFile, err)
+	}
+
+	s.logger.Warn("gc: restored uncommitted changes with conflicts (.rej files created)", "path", repoPath)
+	return nil
+}
+
+// gcRestoreUntracked copies previously captured untracked files back into the repo.
+func (s *SyncScheduler) gcRestoreUntracked(repoPath, untrackedDir string) error {
+	var firstErr error
+	err := filepath.WalkDir(untrackedDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+
+		relPath, err := filepath.Rel(untrackedDir, path)
+		if err != nil {
+			return nil
+		}
+
+		dstPath := filepath.Join(repoPath, relPath)
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+			s.logger.Warn("gc: failed to create dir for untracked restore", "path", relPath, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			return nil
+		}
+
+		if err := copyFile(path, dstPath); err != nil {
+			s.logger.Warn("gc: failed to restore untracked file", "path", relPath, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return firstErr
+}
+
+// copyFile copies src to dst, preserving file mode.
+func copyFile(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
 }
 
 // validateGCClone checks that a freshly cloned repo has the minimum expected
