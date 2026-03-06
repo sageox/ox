@@ -137,7 +137,8 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	sessionName := filepath.Base(sessionDir)
 
 	// git add the summary file (and meta.json if updated)
-	addArgs := []string{"-C", ledgerPath, "add", summaryDst}
+	// --sparse: ledger repos use sparse-checkout
+	addArgs := []string{"-C", ledgerPath, "add", "--sparse", summaryDst}
 	if metaUpdated {
 		addArgs = append(addArgs, filepath.Join(sessionDir, "meta.json"))
 	}

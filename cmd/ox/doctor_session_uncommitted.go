@@ -69,7 +69,8 @@ func checkSessionUncommitted(fix bool) checkResult {
 func fixSessionUncommitted(ledgerPath string, count int) checkResult {
 	const name = "uncommitted session files"
 
-	if out, err := exec.Command("git", "-C", ledgerPath, "add", "sessions/").CombinedOutput(); err != nil {
+	// --sparse: ledger repos use sparse-checkout
+	if out, err := exec.Command("git", "-C", ledgerPath, "add", "--sparse", "sessions/").CombinedOutput(); err != nil {
 		return FailedCheck(name, "staging failed",
 			fmt.Sprintf("git add error: %s", strings.TrimSpace(string(out))))
 	}

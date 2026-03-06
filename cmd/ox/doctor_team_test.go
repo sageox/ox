@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -482,4 +483,153 @@ func TestCheckTeamContextHealth_MultipleTeamsOneFailing(t *testing.T) {
 
 	assert.True(t, okCheck.passed, "OK team should pass")
 	assert.False(t, missingCheck.passed, "missing team should fail")
+}
+
+// --- sparse-checkout doctor check tests ---
+
+// setupTeamContextWithSparseCheckout creates a git repo with sparse-checkout
+// configured using the given patterns, plus a local config pointing to it.
+func setupTeamContextWithSparseCheckout(t *testing.T, gitRoot string, patterns []string) string {
+	t.Helper()
+
+	teamDir := filepath.Join(t.TempDir(), "team-sparse")
+	require.NoError(t, os.MkdirAll(teamDir, 0755))
+
+	// init git repo
+	cmd := exec.Command("git", "init")
+	cmd.Dir = teamDir
+	require.NoError(t, cmd.Run())
+
+	// create .sageox/ with a manifest
+	sageoxDir := filepath.Join(teamDir, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+	manifestContent := "version 1\ninclude .sageox/\ninclude SOUL.md\ninclude docs/\ninclude memory/\n"
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "sync.manifest"), []byte(manifestContent), 0644))
+
+	// initial commit so sparse-checkout has something to work with
+	cmd = exec.Command("git", "-C", teamDir, "add", "-A")
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "-C", teamDir, "commit", "-m", "init", "--allow-empty")
+	cmd.Env = append(os.Environ(), // safe: git commit in temp dir needs author identity
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com")
+	require.NoError(t, cmd.Run())
+
+	// set up sparse-checkout with given patterns
+	args := append([]string{"-C", teamDir, "sparse-checkout", "set", "--no-cone"}, patterns...)
+	cmd = exec.Command("git", args...)
+	require.NoError(t, cmd.Run())
+
+	// register in local config
+	localCfg := &config.LocalConfig{}
+	localCfg.SetTeamContext("sparse-team", "Sparse Team", teamDir)
+	require.NoError(t, config.SaveLocalConfig(gitRoot, localCfg))
+
+	return teamDir
+}
+
+func TestCheckTeamSparseCheckout_MissingRootPatterns(t *testing.T) {
+	skipIntegration(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	gitRoot, cleanup := setupTempGitRepo(t)
+	defer cleanup()
+	restoreCwd := changeToDir(t, gitRoot)
+	defer restoreCwd()
+	requireSageoxDir(t, gitRoot)
+
+	// set up sparse-checkout WITHOUT root patterns (old format)
+	setupTeamContextWithSparseCheckout(t, gitRoot, []string{".sageox/", "SOUL.md", "docs/", "memory/"})
+
+	result := checkTeamSparseCheckout(false)
+	assert.False(t, result.passed, "should fail when root patterns are missing")
+	assert.Contains(t, result.message, "missing root-level patterns")
+}
+
+func TestCheckTeamSparseCheckout_HasRootPatterns(t *testing.T) {
+	skipIntegration(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	gitRoot, cleanup := setupTempGitRepo(t)
+	defer cleanup()
+	restoreCwd := changeToDir(t, gitRoot)
+	defer restoreCwd()
+	requireSageoxDir(t, gitRoot)
+
+	// set up sparse-checkout WITH root patterns (new format)
+	setupTeamContextWithSparseCheckout(t, gitRoot, []string{"/*", "!/*/", ".sageox/", "SOUL.md", "docs/", "memory/"})
+
+	result := checkTeamSparseCheckout(false)
+	assert.True(t, result.passed || result.skipped, "should pass when root patterns are present")
+}
+
+func TestCheckTeamSparseCheckout_AutoFix(t *testing.T) {
+	skipIntegration(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	gitRoot, cleanup := setupTempGitRepo(t)
+	defer cleanup()
+	restoreCwd := changeToDir(t, gitRoot)
+	defer restoreCwd()
+	requireSageoxDir(t, gitRoot)
+
+	// set up sparse-checkout WITHOUT root patterns
+	teamDir := setupTeamContextWithSparseCheckout(t, gitRoot, []string{".sageox/", "SOUL.md", "docs/", "memory/"})
+
+	// auto-fix (FixLevelAuto — fix=true always for auto checks)
+	result := checkTeamSparseCheckout(true)
+	assert.True(t, result.passed, "should pass after auto-fix: %s", result.message)
+
+	// verify sparse-checkout file now has root patterns
+	sparseFile := filepath.Join(teamDir, ".git", "info", "sparse-checkout")
+	content, err := os.ReadFile(sparseFile)
+	require.NoError(t, err)
+
+	lines := strings.Split(string(content), "\n")
+	hasRootGlob := false
+	hasNegateRootDirs := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "/*" {
+			hasRootGlob = true
+		}
+		if trimmed == "!/*/" || trimmed == "\\!/*/" {
+			hasNegateRootDirs = true
+		}
+	}
+	assert.True(t, hasRootGlob, "sparse-checkout should contain /*")
+	assert.True(t, hasNegateRootDirs, "sparse-checkout should contain !/*/ or \\!/*/")
+}
+
+func TestCheckTeamSparseCheckout_NoSparseCheckout(t *testing.T) {
+	skipIntegration(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	gitRoot, cleanup := setupTempGitRepo(t)
+	defer cleanup()
+	restoreCwd := changeToDir(t, gitRoot)
+	defer restoreCwd()
+	requireSageoxDir(t, gitRoot)
+
+	// create team context WITHOUT sparse-checkout
+	teamDir := filepath.Join(t.TempDir(), "team-no-sparse")
+	require.NoError(t, os.MkdirAll(teamDir, 0755))
+	cmd := exec.Command("git", "init")
+	cmd.Dir = teamDir
+	require.NoError(t, cmd.Run())
+
+	localCfg := &config.LocalConfig{}
+	localCfg.SetTeamContext("no-sparse-team", "No Sparse Team", teamDir)
+	require.NoError(t, config.SaveLocalConfig(gitRoot, localCfg))
+
+	result := checkTeamSparseCheckout(false)
+	assert.True(t, result.skipped, "should skip when no sparse-checkout repos found")
 }
