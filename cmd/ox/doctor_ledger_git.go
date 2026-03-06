@@ -24,6 +24,7 @@ const (
 	CheckSlugLedgerCleanWorkdir    = "ledger-clean-workdir"
 	CheckSlugLedgerRemoteURLMatch  = "ledger-remote-url-match"
 	CheckSlugLedgerURLAPIMatch     = "ledger-url-api-match"
+	CheckSlugLedgerCacheTracked    = "ledger-cache-tracked"
 )
 
 func init() {
@@ -56,6 +57,15 @@ func init() {
 		FixLevel:    FixLevelAuto,
 		Description: "Checks for uncommitted changes in ledger repository",
 		Run:         func(fix bool) checkResult { return checkLedgerCleanWorkdir(fix) },
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugLedgerCacheTracked,
+		Name:        "Ledger cache files untracked",
+		Category:    "Ledger Git Health",
+		FixLevel:    FixLevelAuto,
+		Description: "Detects local-only cache files that were accidentally committed to the ledger",
+		Run:         func(fix bool) checkResult { return checkLedgerCacheTracked(fix) },
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
@@ -255,11 +265,16 @@ func checkLedgerBranchStatus(fix bool) checkResult {
 }
 
 // fixLedgerBranchAhead pushes local ledger commits to remote.
+// Falls back to pull --rebase + push if the remote has diverged (stale tracking info).
 func fixLedgerBranchAhead(ledgerPath string, aheadCount int) checkResult {
 	pushCmd := exec.Command("git", "-C", ledgerPath, "push")
 	output, err := pushCmd.CombinedOutput()
 	if err != nil {
 		errStr := strings.TrimSpace(string(output))
+		// if push rejected because remote has new commits, try pull --rebase then push
+		if strings.Contains(errStr, "rejected") || strings.Contains(errStr, "fetch first") || strings.Contains(errStr, "non-fast-forward") {
+			return fixLedgerBranchDiverged(ledgerPath, aheadCount, 0)
+		}
 		return FailedCheck("Ledger branch status",
 			"push failed",
 			fmt.Sprintf("git push error: %s", errStr))
@@ -270,7 +285,8 @@ func fixLedgerBranchAhead(ledgerPath string, aheadCount int) checkResult {
 
 // fixLedgerBranchBehind pulls remote changes into local ledger.
 func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
-	pullCmd := exec.Command("git", "-C", ledgerPath, "pull", "--rebase")
+	// --autostash: uncommitted local changes must not block the pull
+	pullCmd := exec.Command("git", "-C", ledgerPath, "pull", "--rebase", "--autostash")
 	output, err := pullCmd.CombinedOutput()
 	if err != nil {
 		errStr := strings.TrimSpace(string(output))
@@ -287,7 +303,8 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 // fixLedgerBranchDiverged reconciles a diverged ledger by rebasing then pushing.
 func fixLedgerBranchDiverged(ledgerPath string, aheadCount, behindCount int) checkResult {
 	// pull --rebase first to linearize history
-	pullCmd := exec.Command("git", "-C", ledgerPath, "pull", "--rebase")
+	// --autostash: uncommitted local changes must not block the pull
+	pullCmd := exec.Command("git", "-C", ledgerPath, "pull", "--rebase", "--autostash")
 	pullOutput, err := pullCmd.CombinedOutput()
 	if err != nil {
 		errStr := strings.TrimSpace(string(pullOutput))
@@ -392,8 +409,13 @@ func checkLedgerCleanWorkdir(fix bool) checkResult {
 
 // fixLedgerDirtyWorkdir stages and commits all changes in the ledger.
 func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
+	// ensure .gitignore exists and untrack any cache files BEFORE staging.
+	// without this, git add -A will commit local-only files like sync-state.json.
+	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
+
 	// stage all changes
-	addCmd := exec.Command("git", "-C", ledgerPath, "add", "-A")
+	// --sparse: ledger repos use sparse-checkout
+	addCmd := exec.Command("git", "-C", ledgerPath, "add", "--sparse", "-A")
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return FailedCheck("Ledger clean workdir",
 			"staging failed",
@@ -415,6 +437,51 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 
 	return PassedCheck("Ledger clean workdir",
 		fmt.Sprintf("committed %d file(s)", fileCount))
+}
+
+// checkLedgerCacheTracked detects .sageox/cache/ files that are tracked by git in the ledger.
+// Cache files are local-only machine state (e.g., sync-state.json) and must never be committed.
+// This can happen when commits occurred before .sageox/.gitignore was in place.
+// With fix=true, untracks them via `git rm --cached` (preserves local files).
+func checkLedgerCacheTracked(fix bool) checkResult {
+	const name = "Ledger cache files untracked"
+
+	ledgerPath := getLedgerPath()
+	if ledgerPath == "" {
+		return SkippedCheck(name, "no ledger found", "")
+	}
+
+	if !isGitRepo(ledgerPath) {
+		return SkippedCheck(name, "ledger not a git repo", "")
+	}
+
+	if !gitserver.CacheFilesTracked(ledgerPath) {
+		return PassedCheck(name, "no cache files tracked")
+	}
+
+	if !fix {
+		return WarningCheck(name,
+			"local-only cache files are tracked in ledger git history",
+			"run `ox doctor --fix` to untrack (local files preserved)")
+	}
+
+	// untrack cache files and ensure gitignore is in place
+	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
+
+	// check if untracking created staged changes that need committing
+	statusCmd := exec.Command("git", "-C", ledgerPath, "diff", "--cached", "--name-only")
+	if out, err := statusCmd.Output(); err == nil && len(strings.TrimSpace(string(out))) > 0 {
+		commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "-m", "chore: untrack local-only cache files")
+		if commitOut, err := commitCmd.CombinedOutput(); err != nil {
+			errStr := strings.TrimSpace(string(commitOut))
+			if !strings.Contains(errStr, "nothing to commit") {
+				return FailedCheck(name, "commit failed after untracking",
+					fmt.Sprintf("git commit error: %s", errStr))
+			}
+		}
+	}
+
+	return PassedCheck(name, "untracked cache files from ledger")
 }
 
 // checkLedgerRemoteURLMatch detects stale PATs in the ledger's git remote URL.

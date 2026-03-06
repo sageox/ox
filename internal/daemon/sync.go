@@ -920,8 +920,10 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		_ = progress.WriteStage("pulling", "Pulling changes...")
 	}
 
-	// git pull --rebase (capture stderr for diagnosable error messages)
-	pullCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "pull", "--rebase", "--quiet")
+	// git pull --rebase --autostash (capture stderr for diagnosable error messages)
+	// --autostash: local uncommitted changes (from CLI writes, user edits) must not
+	// block background sync — stash before rebase, pop after
+	pullCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "pull", "--rebase", "--autostash", "--quiet")
 	if output, err := pullCmd.CombinedOutput(); err != nil {
 		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
 		s.logger.Warn("pull failed", "error", err, "output", detail)
@@ -1630,6 +1632,11 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		}
 		cloneArgs := []string{"clone", "--quiet", cloneURL, payload.RepoPath}
 		cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)
+		// set cmd.Dir so git doesn't fail when daemon CWD has been deleted
+		if parentDir := filepath.Dir(payload.RepoPath); parentDir != "" {
+			_ = os.MkdirAll(parentDir, 0755)
+			cloneCmd.Dir = parentDir
+		}
 		if output, err := cloneCmd.CombinedOutput(); err != nil {
 			sanitizedOutput := gitutil.SanitizeOutput(string(output))
 			s.logger.Error("checkout: clone failed", "error", err, "output", sanitizedOutput)
@@ -2146,8 +2153,10 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		s.recordRemoteChange(path, info.ModTime())
 	}
 
-	// git pull --rebase (capture stderr for diagnosable error messages)
-	pullCmd := exec.CommandContext(ctx, "git", "-C", path, "pull", "--rebase", "--quiet")
+	// git pull --rebase --autostash (capture stderr for diagnosable error messages)
+	// --autostash: team context repos are collaborative workspaces — users may have
+	// uncommitted local edits (docs/, data/) that must not block background sync
+	pullCmd := exec.CommandContext(ctx, "git", "-C", path, "pull", "--rebase", "--autostash", "--quiet")
 	if output, err := pullCmd.CombinedOutput(); err != nil {
 		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
 

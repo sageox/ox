@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -129,13 +130,63 @@ func CheckoutGitignoreNeedsFix(repoPath string) bool {
 	return false
 }
 
+// EnsureGitignoreBeforeCommit is a guard that MUST be called before any git commit
+// to a ledger or team context. It ensures .sageox/.gitignore is in place so that
+// local-only cache files (e.g., sync-state.json) are never committed.
+//
+// Without this guard, broad operations like `git add -A` will stage cache files.
+// Even with explicit file lists, this guard prevents future regressions.
+//
+// Also untracks any cache files that were committed before .gitignore existed
+// (git rm --cached does not delete the local file).
+func EnsureGitignoreBeforeCommit(repoPath string) {
+	EnsureGitignoreBeforeCommitCtx(context.Background(), repoPath)
+}
+
+// EnsureGitignoreBeforeCommitCtx is like EnsureGitignoreBeforeCommit but accepts a context.
+func EnsureGitignoreBeforeCommitCtx(ctx context.Context, repoPath string) {
+	if repoPath == "" {
+		return
+	}
+
+	// ensure .gitignore exists with required entries
+	if err := EnsureCheckoutGitignoreCtx(ctx, repoPath); err != nil {
+		slog.Debug("pre-commit gitignore guard failed", "path", repoPath, "error", err)
+	}
+
+	// untrack cache files that were committed before .gitignore existed.
+	// --cached removes from git index only, local files are preserved.
+	// --ignore-unmatch avoids errors when nothing is tracked.
+	rmCmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+		"rm", "--cached", "-r", "--ignore-unmatch", ".sageox/cache/")
+	if out, err := rmCmd.CombinedOutput(); err != nil {
+		slog.Debug("pre-commit cache untrack failed", "path", repoPath, "error", err, "output", strings.TrimSpace(string(out)))
+	}
+}
+
+// CacheFilesTracked returns true if any .sageox/cache/ files are tracked by git.
+// Used by doctor checks to detect cache files that were committed before
+// .gitignore was in place.
+func CacheFilesTracked(repoPath string) bool {
+	cmd := exec.Command("git", "-C", repoPath, "ls-files", ".sageox/cache/")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) > 0
+}
+
 // commitCheckoutGitignore stages and commits .sageox/.gitignore.
 // Non-fatal: if the commit fails (e.g., nothing to commit), we still have
 // the file on disk which protects against the GC blocking bug.
 func commitCheckoutGitignore(ctx context.Context, repoPath string) error {
-	addCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "add", ".sageox/.gitignore")
-	if err := addCmd.Run(); err != nil {
-		return fmt.Errorf("git add .sageox/.gitignore: %w", err)
+	// --sparse: repos may have sparse-checkout enabled (team contexts use --no-cone);
+	// without this flag git blocks staging new files even inside included paths.
+	// -f: the root .gitignore may exclude .sageox/ to hide daemon-created local state;
+	// force-add overrides this so the committed .gitignore inside .sageox/ is tracked.
+	addCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "add", "--sparse", "-f", ".sageox/.gitignore")
+	if output, err := addCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add .sageox/.gitignore: %s: %w", strings.TrimSpace(string(output)), err)
 	}
 
 	commitCmd := exec.CommandContext(ctx, "git", "-C", repoPath,

@@ -34,18 +34,29 @@ func checkGitAuth() checkResult {
 
 	// check if credential helper is configured
 	credHelper := getGitConfigValue("credential.helper")
-	if credHelper == "" {
-		// no credential helper - check if SSH key exists as fallback
-		sshConfigured := checkSSHAuth()
-		if sshConfigured {
-			return PassedCheck("Git auth", "SSH configured")
-		}
-		return WarningCheck("Git auth", "no credential helper",
-			"Configure git credentials for remote operations")
+	if credHelper != "" {
+		return PassedCheck("Git auth", credHelper)
 	}
 
-	// credential helper is configured
-	return PassedCheck("Git auth", credHelper)
+	// no credential helper - check if SSH key exists as fallback
+	if checkSSHAuth() {
+		return PassedCheck("Git auth", "SSH configured")
+	}
+
+	// check if ox has its own PAT-based credentials for this project
+	if config.IsInitialized(gitRoot) {
+		projectEndpoint := endpoint.GetForProject(gitRoot)
+		if projectEndpoint == "" {
+			projectEndpoint = endpoint.Get()
+		}
+		creds, err := gitserver.LoadCredentialsForEndpoint(projectEndpoint)
+		if err == nil && creds != nil && !creds.IsExpired() {
+			return PassedCheck("Git auth", "SageOx credentials")
+		}
+	}
+
+	return WarningCheck("Git auth", "no credential helper",
+		"Configure git credentials for remote operations")
 }
 
 // checkSSHAuth checks if SSH authentication is likely configured for git.
@@ -158,10 +169,11 @@ func checkGitConfig(fix bool) checkResult {
 
 // checkGitRepoState checks for uncommitted SageOx config under .sageox/.
 // Only reports issues with SageOx-managed files — the user's repo state is their own business.
+// Distinguishes staged (ready to commit, informational) from unstaged (needs action, warning).
 func checkGitRepoState() checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
-		return SkippedCheck("SageOx config", "not in git repo", "")
+		return SkippedCheck("Repo state", "not in git repo", "")
 	}
 
 	// only check for uncommitted changes under .sageox/
@@ -170,22 +182,33 @@ func checkGitRepoState() checkResult {
 	output, err := statusCmd.Output()
 	if err == nil && len(output) > 0 {
 		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		hasUnstaged := false
 		count := 0
 		for _, line := range lines {
-			if line != "" {
-				count++
+			if line == "" {
+				continue
+			}
+			count++
+			// porcelain format: XY filename (X=index, Y=worktree)
+			if len(line) >= 2 && line[1] != ' ' {
+				hasUnstaged = true
 			}
 		}
 		if count > 0 {
-			return WarningCheck("SageOx config",
-				fmt.Sprintf("%d uncommitted change(s) in .sageox/", count),
-				"Run 'git add .sageox/ && git commit' to persist config")
+			if hasUnstaged {
+				return WarningCheck("Repo state",
+					fmt.Sprintf("%d uncommitted change(s) in .sageox/", count),
+					"Run 'git add .sageox/ && git commit' to persist config")
+			}
+			// all changes are staged — informational, expected after init
+			return InfoCheck("Repo state",
+				fmt.Sprintf("%d staged change(s) in .sageox/", count),
+				"Run 'git commit' to persist config")
 		}
 	}
 
-	return PassedCheck("SageOx config", "committed and up to date")
+	return PassedCheck("Repo state", "committed and up to date")
 }
-
 
 // checkGitRemotes validates configured git remotes.
 // Checks that origin is configured and URL format is valid.
@@ -2390,7 +2413,6 @@ func checkLedgerPathMismatch(fix bool) checkResult {
 
 	return WarningCheck("Ledger path config", "path mismatch", detail)
 }
-
 
 // getTeamURLFromCredentials reads a team context URL from locally saved git credentials.
 // Matches by repo name (team slug). This avoids a duplicate API call.
