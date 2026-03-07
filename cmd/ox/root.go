@@ -134,6 +134,7 @@ func init() {
 	// software development commands
 	initCmd.GroupID = "dev"
 	importCmd.GroupID = "dev"
+	queryCmd.GroupID = "dev"
 
 	// auth commands
 	loginCmd.GroupID = "auth"
@@ -149,6 +150,7 @@ func init() {
 	// register commands
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(importCmd)
+	rootCmd.AddCommand(queryCmd)
 	// agentCmd is registered in agent.go
 
 	// auth commands

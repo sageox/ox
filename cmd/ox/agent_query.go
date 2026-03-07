@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -85,7 +86,7 @@ func parseQueryArgs(args []string) (*queryArgs, error) {
 	return qa, nil
 }
 
-const queryUsage = `Usage: ox agent <id> query "search text" [flags]
+const queryUsage = `Usage: ox query "search text" [flags]
 
 Flags:
   --limit N    Max results to return (default: 5)
@@ -93,28 +94,43 @@ Flags:
   --repo ID    Repo ID to search (default: from project config)
 
 Searches across team discussions, docs, and session history.
-Use when MEMORY.md or AGENTS.md don't have the answer.`
+Use when MEMORY.md or AGENTS.md don't have the answer.
+
+Also available as: ox agent <id> query "search text"`
 
 // runAgentQuery handles `ox agent <id> query "search text"`.
-// Searches team context and ledger data via the vector search API.
+// Thin wrapper around executeQuery that adds context byte tracking.
 func runAgentQuery(inst *agentinstance.Instance, args []string) error {
 	qa, err := parseQueryArgs(args)
 	if err != nil {
 		return fmt.Errorf("%w\n\n%s", err, queryUsage)
 	}
 
-	// Resolve project config for team/repo IDs
+	outputBytes, err := executeQuery(qa, inst.AgentID, inst.AgentType)
+	if err != nil {
+		return err
+	}
+
+	// track context bytes for agent-specific cumulative tracking
+	slog.Debug("query response context cost", "agent_id", inst.AgentID, "bytes", outputBytes)
+	trackContextBytes(int64(outputBytes))
+	return nil
+}
+
+// executeQuery performs the core query: resolves project config, calls the API,
+// and writes JSON results to stdout. Returns bytes written for context tracking.
+// agentID and agentType are optional — passed to the server for analytics.
+func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
-		return fmt.Errorf("could not find project root: %w", err)
+		return 0, fmt.Errorf("could not find project root: %w", err)
 	}
 
 	cfg, err := config.LoadProjectConfig(projectRoot)
 	if err != nil {
-		return fmt.Errorf("could not load project config: %w", err)
+		return 0, fmt.Errorf("could not load project config: %w", err)
 	}
 
-	// Use project config defaults if not overridden
 	if qa.teamID == "" {
 		qa.teamID = cfg.TeamID
 	}
@@ -122,11 +138,12 @@ func runAgentQuery(inst *agentinstance.Instance, args []string) error {
 		qa.repoID = cfg.RepoID
 	}
 
-	// Build request — include whichever IDs are available
 	req := &api.QueryRequest{
-		Query: qa.query,
-		Mode:  qa.mode,
-		K:     qa.limit,
+		Query:     qa.query,
+		Mode:      qa.mode,
+		K:         qa.limit,
+		AgentID:   agentID,
+		AgentType: agentType,
 	}
 	if qa.teamID != "" {
 		req.Teams = []string{qa.teamID}
@@ -135,36 +152,36 @@ func runAgentQuery(inst *agentinstance.Instance, args []string) error {
 		req.Repos = []string{qa.repoID}
 	}
 	if len(req.Teams) == 0 && len(req.Repos) == 0 {
-		return fmt.Errorf("no team or repo ID available. Run 'ox init' first or pass --team/--repo flags")
+		return 0, fmt.Errorf("no team or repo ID available. Run 'ox init' first or pass --team/--repo flags")
 	}
 
-	// Get auth token and create client
 	ep := endpoint.GetForProject(projectRoot)
 	token, err := auth.GetTokenForEndpoint(ep)
 	if err != nil || token == nil || token.AccessToken == "" {
-		return fmt.Errorf("not authenticated. Run 'ox login' first")
+		return 0, fmt.Errorf("not authenticated. Run 'ox login' first")
 	}
 
 	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
 
-	// Execute query
 	resp, err := client.Query(req)
 	if err != nil {
-		return fmt.Errorf("query failed: %w", err)
+		if errors.Is(err, api.ErrUnauthorized) {
+			return 0, fmt.Errorf("not authenticated. Run 'ox login' first")
+		}
+		if errors.Is(err, api.ErrVersionUnsupported) {
+			return 0, fmt.Errorf("CLI version too old. Run 'ox version' and update")
+		}
+		return 0, fmt.Errorf("query failed (is sageox.ai reachable?): %w", err)
 	}
 
-	// encode to buffer so we can measure context cost before writing to stdout
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(resp); err != nil {
-		return fmt.Errorf("failed to encode response: %w", err)
+		return 0, fmt.Errorf("failed to encode response: %w", err)
 	}
 
-	// TODO(ox-hwe): wire this into per-agent cumulative context tracking
 	outputBytes := buf.Len()
-	slog.Debug("query response context cost", "agent_id", inst.AgentID, "results", len(resp.Results), "bytes", outputBytes)
-
 	_, err = buf.WriteTo(os.Stdout)
-	return err
+	return outputBytes, err
 }

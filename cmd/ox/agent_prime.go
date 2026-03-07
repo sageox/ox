@@ -978,7 +978,7 @@ func buildGuidance(agentID string, teamCtx *teamContextInfo, ledger *ledgerInfo)
 	if teamCtx != nil || (ledger != nil && ledger.Exists) {
 		cmds = append(cmds, intentCommand{
 			Intent:  "deep search team discussions, session recordings, team context: use when MEMORY.md and its links don't answer",
-			Command: fmt.Sprintf("ox agent %s query \"<your question>\"", agentID),
+			Command: "ox query \"<your question>\"",
 		})
 	}
 

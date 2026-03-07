@@ -20,11 +20,13 @@ const (
 
 // QueryRequest represents the POST /api/v1/query request body.
 type QueryRequest struct {
-	Query string   `json:"query"`
-	Mode  string   `json:"mode,omitempty"` // "hybrid", "knn", "bm25" (default: hybrid)
-	K     int      `json:"k,omitempty"`    // number of results (default: 10, max: 100)
-	Teams []string `json:"teams"`          // team IDs to search team-context indexes
-	Repos []string `json:"repos"`          // repo IDs to search ledger indexes
+	Query     string   `json:"query"`
+	Mode      string   `json:"mode,omitempty"`       // "hybrid", "knn", "bm25" (default: hybrid)
+	K         int      `json:"k,omitempty"`           // number of results (default: 10, max: 100)
+	Teams     []string `json:"teams"`                 // team IDs to search team-context indexes
+	Repos     []string `json:"repos"`                 // repo IDs to search ledger indexes
+	AgentID   string   `json:"agent_id,omitempty"`    // querying agent instance (e.g. "Oxa7b3")
+	AgentType string   `json:"agent_type,omitempty"`  // querying agent type (e.g. "claude-code")
 }
 
 // QueryResponse represents the POST /api/v1/query response.
