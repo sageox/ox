@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,8 +14,11 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/codedb"
+	"github.com/sageox/ox/internal/codedb/search"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/paths"
 )
 
 // queryArgs holds parsed arguments for the query command.
@@ -24,6 +28,7 @@ type queryArgs struct {
 	limit  int
 	teamID string
 	repoID string
+	source string // "all" (default), "teamctx", "code"
 }
 
 // parseQueryArgs extracts flags and the positional query from raw args.
@@ -31,8 +36,9 @@ type queryArgs struct {
 // agents and humans guess --limit first
 func parseQueryArgs(args []string) (*queryArgs, error) {
 	qa := &queryArgs{
-		mode:  "hybrid",
-		limit: 5,
+		mode:   "hybrid",
+		limit:  5,
+		source: "all",
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -67,6 +73,11 @@ func parseQueryArgs(args []string) (*queryArgs, error) {
 			i++
 		case strings.HasPrefix(args[i], "--repo="):
 			qa.repoID = strings.TrimPrefix(args[i], "--repo=")
+		case args[i] == "--source" && i+1 < len(args):
+			qa.source = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--source="):
+			qa.source = strings.TrimPrefix(args[i], "--source=")
 		case !strings.HasPrefix(args[i], "--"):
 			qa.query = args[i]
 		}
@@ -83,6 +94,13 @@ func parseQueryArgs(args []string) (*queryArgs, error) {
 		return nil, fmt.Errorf("invalid mode %q: must be hybrid, knn, or bm25", qa.mode)
 	}
 
+	switch qa.source {
+	case "all", "teamctx", "code":
+		// ok
+	default:
+		return nil, fmt.Errorf("invalid source %q: must be all, teamctx, or code", qa.source)
+	}
+
 	return qa, nil
 }
 
@@ -93,11 +111,23 @@ Flags:
   --mode MODE    Search mode: hybrid, knn, or bm25 (default: hybrid)
   --team ID      Team ID to search (default: from project config)
   --repo ID      Repo ID to search (default: from project config)
+  --source SRC   Search source: all (default), teamctx, code
 
-Searches across team discussions, docs, and session history.
+Sources:
+  all       Search both team context and local code index
+  teamctx   Search team discussions, docs, and session history only
+  code      Search local code index only (Sourcegraph-style queries)
+
+Searches across team discussions, docs, session history, and local code.
 Use when MEMORY.md or AGENTS.md don't have the answer.
 
 Also available as: ox agent <id> query "search text"`
+
+// combinedQueryResponse holds results from both team context and local code search.
+type combinedQueryResponse struct {
+	TeamContext *api.QueryResponse `json:"team_context,omitempty"`
+	CodeResults []search.Result    `json:"code_results,omitempty"`
+}
 
 // runAgentQuery handles `ox agent <id> query "search text"`.
 // Thin wrapper around executeQuery that adds context byte tracking.
@@ -118,8 +148,9 @@ func runAgentQuery(inst *agentinstance.Instance, args []string) error {
 	return nil
 }
 
-// executeQuery performs the core query: resolves project config, calls the API,
-// and writes JSON results to stdout. Returns bytes written for context tracking.
+// executeQuery performs the core query: resolves project config, searches team context
+// and/or local code index based on --source flag, and writes JSON results to stdout.
+// Returns bytes written for context tracking.
 // agentID and agentType are optional — passed to the server for analytics.
 func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) {
 	projectRoot, err := findProjectRoot()
@@ -127,9 +158,55 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 		return 0, fmt.Errorf("could not find project root: %w", err)
 	}
 
+	if qa.limit <= 0 {
+		return 0, fmt.Errorf("invalid --limit: must be > 0")
+	}
+
+	combined := &combinedQueryResponse{}
+
+	// query team context if source is "all" or "teamctx"
+	if qa.source == "all" || qa.source == "teamctx" {
+		resp, err := queryTeamContext(qa, projectRoot, agentID, agentType)
+		if err != nil {
+			if qa.source == "teamctx" {
+				return 0, fmt.Errorf("team context query failed: %w", err)
+			}
+			slog.Warn("team context query failed, continuing with code search", "error", err)
+		} else {
+			combined.TeamContext = resp
+		}
+	}
+
+	// query local code index if source is "all" or "code"
+	if qa.source == "all" || qa.source == "code" {
+		results, err := queryCodeDB(qa)
+		if err != nil {
+			if qa.source == "code" {
+				return 0, fmt.Errorf("code search failed: %w", err)
+			}
+			slog.Warn("code search failed, continuing with team context", "error", err)
+		} else {
+			combined.CodeResults = results
+		}
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(combined); err != nil {
+		return 0, fmt.Errorf("failed to encode response: %w", err)
+	}
+
+	outputBytes := buf.Len()
+	_, err = buf.WriteTo(os.Stdout)
+	return outputBytes, err
+}
+
+// queryTeamContext searches team context via the vector search API.
+func queryTeamContext(qa *queryArgs, projectRoot, agentID, agentType string) (*api.QueryResponse, error) {
 	cfg, err := config.LoadProjectConfig(projectRoot)
 	if err != nil {
-		return 0, fmt.Errorf("could not load project config: %w", err)
+		return nil, fmt.Errorf("could not load project config: %w", err)
 	}
 
 	if qa.teamID == "" {
@@ -137,10 +214,6 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 	}
 	if qa.repoID == "" {
 		qa.repoID = cfg.RepoID
-	}
-
-	if qa.limit <= 0 {
-		return 0, fmt.Errorf("invalid --limit: must be > 0")
 	}
 
 	req := &api.QueryRequest{
@@ -157,13 +230,13 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 		req.Repos = []string{qa.repoID}
 	}
 	if len(req.Teams) == 0 && len(req.Repos) == 0 {
-		return 0, fmt.Errorf("no team or repo ID available. Run 'ox init' first or pass --team/--repo flags")
+		return nil, fmt.Errorf("no team or repo ID available. Run 'ox init' first or pass --team/--repo flags")
 	}
 
 	ep := endpoint.GetForProject(projectRoot)
 	token, err := auth.GetTokenForEndpoint(ep)
 	if err != nil || token == nil || token.AccessToken == "" {
-		return 0, fmt.Errorf("not authenticated. Run 'ox login' first")
+		return nil, fmt.Errorf("not authenticated. Run 'ox login' first")
 	}
 
 	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
@@ -171,26 +244,32 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 	resp, err := client.Query(req)
 	if err != nil {
 		if errors.Is(err, api.ErrUnauthorized) {
-			return 0, fmt.Errorf("not authenticated. Run 'ox login' first")
+			return nil, fmt.Errorf("not authenticated. Run 'ox login' first")
 		}
 		if errors.Is(err, api.ErrVersionUnsupported) {
-			return 0, fmt.Errorf("CLI version too old. Run 'ox version' and update")
+			return nil, fmt.Errorf("CLI version too old. Run 'ox version' and update")
 		}
-		// only suggest reachability for network-level errors, not HTTP status errors
 		if isNetworkError(err) {
-			return 0, fmt.Errorf("query failed (is %s reachable?): %w", endpoint.NormalizeEndpoint(ep), err)
+			return nil, fmt.Errorf("query failed (is %s reachable?): %w", endpoint.NormalizeEndpoint(ep), err)
 		}
-		return 0, fmt.Errorf("query failed: %w", err)
+		return nil, fmt.Errorf("query failed: %w", err)
 	}
 
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(resp); err != nil {
-		return 0, fmt.Errorf("failed to encode response: %w", err)
+	return resp, nil
+}
+
+// queryCodeDB searches the local code index.
+func queryCodeDB(qa *queryArgs) ([]search.Result, error) {
+	dataDir := paths.CodeDBDataDir()
+	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
+		return nil, nil // no index yet, return empty
 	}
 
-	outputBytes := buf.Len()
-	_, err = buf.WriteTo(os.Stdout)
-	return outputBytes, err
+	db, err := codedb.Open(dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("open codedb: %w", err)
+	}
+	defer db.Close()
+
+	return db.Search(context.Background(), qa.query)
 }

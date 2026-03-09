@@ -29,6 +29,7 @@ func init() {
 	queryCmd.Flags().String("team", "", "team ID to search (default: from project config)")
 	queryCmd.Flags().String("repo", "", "repo ID to search (default: from project config)")
 	queryCmd.Flags().String("mode", "hybrid", "search mode: hybrid, knn, or bm25")
+	queryCmd.Flags().String("source", "all", "search source: all, teamctx, or code")
 }
 
 // runQuery handles the top-level `ox query "search text"` command.
@@ -38,6 +39,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	teamID, _ := cmd.Flags().GetString("team")
 	repoID, _ := cmd.Flags().GetString("repo")
 	mode, _ := cmd.Flags().GetString("mode")
+	source, _ := cmd.Flags().GetString("source")
 
 	query := strings.TrimSpace(args[0])
 	if query == "" {
@@ -50,6 +52,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		limit:  limit,
 		teamID: teamID,
 		repoID: repoID,
+		source: source,
 	}
 
 	switch qa.mode {
@@ -57,6 +60,13 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		// ok
 	default:
 		return fmt.Errorf("invalid mode %q: must be hybrid, knn, or bm25", qa.mode)
+	}
+
+	switch qa.source {
+	case "all", "teamctx", "code":
+		// ok
+	default:
+		return fmt.Errorf("invalid source %q: must be all, teamctx, or code", qa.source)
 	}
 
 	agentID, agentType := detectAgentContext()
