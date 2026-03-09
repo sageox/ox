@@ -75,17 +75,20 @@ func runQuery(cmd *cobra.Command, args []string) error {
 func detectAgentContext() (agentID string, agentType string) {
 	// try instance store lookup first — gives both ID and type
 	if envID := os.Getenv("SAGEOX_AGENT_ID"); agentinstance.IsValidAgentID(envID) {
+		agentID = envID
 		inst, err := resolveInstance(envID)
 		if err == nil {
-			return inst.AgentID, inst.AgentType
+			agentID = inst.AgentID
+			agentType = inst.AgentType
 		}
-		// instance lookup failed but we still have the ID
-		agentID = envID
 	}
 
-	// fall back to runtime agent detection for type
-	if agent := agentx.CurrentAgent(); agent != nil {
-		agentType = string(agent.Type())
+	// fall back to runtime agent detection for type when instance lookup
+	// didn't provide one (missing instance or empty AgentType field)
+	if agentType == "" {
+		if agent := agentx.CurrentAgent(); agent != nil {
+			agentType = string(agent.Type())
+		}
 	}
 
 	return agentID, agentType

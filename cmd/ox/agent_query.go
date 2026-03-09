@@ -89,9 +89,10 @@ func parseQueryArgs(args []string) (*queryArgs, error) {
 const queryUsage = `Usage: ox query "search text" [flags]
 
 Flags:
-  --limit N    Max results to return (default: 5)
-  --team ID    Team ID to search (default: from project config)
-  --repo ID    Repo ID to search (default: from project config)
+  --limit N      Max results to return (default: 5)
+  --mode MODE    Search mode: hybrid, knn, or bm25 (default: hybrid)
+  --team ID      Team ID to search (default: from project config)
+  --repo ID      Repo ID to search (default: from project config)
 
 Searches across team discussions, docs, and session history.
 Use when MEMORY.md or AGENTS.md don't have the answer.
