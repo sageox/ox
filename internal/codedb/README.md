@@ -33,3 +33,23 @@ ox codedb sql <sql>            # raw SQL against the DB
 ```
 
 Data lives in `~/.local/share/sageox/codedb/` (XDG).
+
+## Benchmarks
+
+Run with `bash internal/codedb/bench.sh`. Only the default branch (main/master) is indexed.
+
+| Metric | sageox/ox | ylow/SFrameRust | tokio-rs/tokio |
+|---|---|---|---|
+| Commits | 118 | 195 | 4,415 |
+| Blobs | 1,729 | 662 | 18,689 |
+| **Index (s)** | 9 | 4 | 82 |
+| **Re-index (s)** | 1 | 0 | 49* |
+| SQLite DB (MB) | 1 | 1 | 7 |
+| Bleve FTS (MB) | 89 | 55 | 629 |
+| Git repos (MB) | 7 | 3 | 20 |
+| Total (MB) | 96 | 57 | 655 |
+| Search latency (ms) | ~68 | ~76 | ~68 |
+
+\* tokio re-index time is dominated by `git fetch` network I/O (48.8s); actual re-index work is 0ms.
+
+Search queries tested: `spawn`, `type:symbol Runtime`, `lang:go func`, `type:diff streaming`, `file:main.go func` (median of 3 iterations).

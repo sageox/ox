@@ -39,6 +39,11 @@ func (db *DB) IndexRepo(ctx context.Context, url string, opts index.IndexOptions
 	return index.IndexRepo(ctx, db.store, url, opts)
 }
 
+// IndexLocalRepo indexes a local git repository in-place, including dirty working tree files.
+func (db *DB) IndexLocalRepo(ctx context.Context, localPath string, opts index.IndexOptions) error {
+	return index.IndexLocalRepo(ctx, db.store, localPath, opts)
+}
+
 // ParseSymbols extracts symbols from all unparsed blobs with supported languages.
 func (db *DB) ParseSymbols(ctx context.Context, progress func(string)) (index.ParseStats, error) {
 	return index.ParseSymbols(ctx, db.store, index.ProgressFunc(progress))

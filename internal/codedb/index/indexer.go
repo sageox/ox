@@ -2,11 +2,16 @@ package index
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/blevesearch/bleve/v2"
@@ -114,6 +119,7 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	}
 
 	// 1. Clone or fetch
+	t0 := time.Now()
 	report("Cloning/fetching repository...")
 	dirName, err := RepoDirFromURL(url)
 	if err != nil {
@@ -124,8 +130,10 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	if err != nil {
 		return fmt.Errorf("clone/fetch %s: %w", url, err)
 	}
+	report(fmt.Sprintf("  clone/fetch: %s", time.Since(t0).Round(time.Millisecond)))
 
 	// 2. Upsert repo record
+	t1 := time.Now()
 	repoName, err := RepoNameFromURL(url)
 	if err != nil {
 		return err
@@ -141,13 +149,13 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 		return err
 	}
 
-	// 4. List refs
-	report("Listing refs...")
-	refList, err := listResolvedRefs(repo)
+	// 4. Resolve default branch
+	defaultRef, err := resolveDefaultBranch(repo)
 	if err != nil {
 		return err
 	}
-	report(fmt.Sprintf("Found %d refs.", len(refList)))
+	report(fmt.Sprintf("  setup: %s, branch %s, %d known commits",
+		time.Since(t1).Round(time.Millisecond), defaultRef.name, len(knownCommits)))
 
 	// 5. Begin transaction
 	tx, err := s.BeginTx(ctx, nil)
@@ -168,20 +176,26 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 		report:       report,
 	}
 
-	// 6. Process each ref
-	for refIdx, ri := range refList {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := st.processRef(ctx, ri, refIdx, len(refList), opts.MaxHistoryDepth); err != nil {
-			return err
-		}
+	// 6. Check if default branch tip has changed
+	existingRefs, err := loadExistingRefs(s, repoID)
+	if err != nil {
+		return err
 	}
 
+	t2 := time.Now()
+	if prev, ok := existingRefs[defaultRef.name]; ok && prev == defaultRef.tipOID.String() {
+		report(fmt.Sprintf("  default branch unchanged, skipping (%s)", time.Since(t2).Round(time.Millisecond)))
+	} else {
+		if err := st.processRef(ctx, defaultRef, 0, 1, opts.MaxHistoryDepth, existingRefs); err != nil {
+			return err
+		}
+		report(fmt.Sprintf("  indexed default branch: %s (%s)",
+			time.Since(t2).Round(time.Millisecond), defaultRef.name))
+	}
 	report(fmt.Sprintf("Indexing complete: %d new commits, %d new blobs.", st.newCommits, st.newBlobs))
 
-	// 7. Flush remaining batches and commit transaction
-	report("Committing indexes...")
+	// 8. Flush remaining batches and commit transaction
+	t3 := time.Now()
 	if err := st.flushCodeBatch(true); err != nil {
 		return err
 	}
@@ -191,8 +205,259 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit transaction: %w", err)
 	}
+	report(fmt.Sprintf("  flush+commit: %s", time.Since(t3).Round(time.Millisecond)))
+	report(fmt.Sprintf("  total: %s", time.Since(t0).Round(time.Millisecond)))
 
 	return nil
+}
+
+// IndexLocalRepo indexes a local git repository in-place (no clone).
+// It indexes all committed history AND the current working tree, including
+// uncommitted (dirty) files.
+func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts IndexOptions) error {
+	report := func(msg string) {
+		if opts.Progress != nil {
+			opts.Progress(msg)
+		}
+	}
+
+	t0 := time.Now()
+
+	// 1. Open the repo in-place
+	report("Opening local repository...")
+	repo, err := git.PlainOpen(localPath)
+	if err != nil {
+		return fmt.Errorf("open local repo %s: %w", localPath, err)
+	}
+
+	// 2. Upsert repo record — use the local path as both name and path
+	repoName := filepath.Base(localPath)
+	repoID, err := upsertRepo(s, repoName, localPath)
+	if err != nil {
+		return err
+	}
+
+	// 3. Load known commits
+	knownCommits, err := loadKnownCommits(s, repoID)
+	if err != nil {
+		return err
+	}
+
+	// 4. Resolve default branch
+	defaultRef, err := resolveDefaultBranch(repo)
+	if err != nil {
+		return err
+	}
+	report(fmt.Sprintf("  branch %s, %d known commits", defaultRef.name, len(knownCommits)))
+
+	// 5. Begin transaction
+	tx, err := s.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	st := &indexState{
+		tx:           tx,
+		store:        s,
+		repo:         repo,
+		repoID:       repoID,
+		codeBatch:    s.CodeIndex.NewBatch(),
+		diffBatch:    s.DiffIndex.NewBatch(),
+		knownCommits: knownCommits,
+		treeCache:    make(map[plumbing.Hash]map[string]plumbing.Hash),
+		report:       report,
+	}
+
+	// 6. Check if default branch tip has changed
+	existingRefs, err := loadExistingRefs(s, repoID)
+	if err != nil {
+		return err
+	}
+
+	t2 := time.Now()
+	if prev, ok := existingRefs[defaultRef.name]; ok && prev == defaultRef.tipOID.String() {
+		report(fmt.Sprintf("  default branch unchanged (%s)", time.Since(t2).Round(time.Millisecond)))
+	} else {
+		if err := st.processRef(ctx, defaultRef, 0, 1, opts.MaxHistoryDepth, existingRefs); err != nil {
+			return err
+		}
+		report(fmt.Sprintf("  indexed default branch: %s (%s)",
+			time.Since(t2).Round(time.Millisecond), defaultRef.name))
+	}
+
+	// 8. Index working tree (dirty files)
+	t4 := time.Now()
+	worktreeBlobs, err := indexWorktree(ctx, st, localPath)
+	if err != nil {
+		report(fmt.Sprintf("Warning: working tree indexing failed: %v", err))
+	} else {
+		report(fmt.Sprintf("  working tree: %s, %d files indexed",
+			time.Since(t4).Round(time.Millisecond), worktreeBlobs))
+	}
+
+	report(fmt.Sprintf("Indexing complete: %d new commits, %d new blobs.", st.newCommits, st.newBlobs))
+
+	// 9. Flush remaining batches and commit transaction
+	t3 := time.Now()
+	if err := st.flushCodeBatch(true); err != nil {
+		return err
+	}
+	if err := st.flushDiffBatch(true); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+	report(fmt.Sprintf("  flush+commit: %s", time.Since(t3).Round(time.Millisecond)))
+	report(fmt.Sprintf("  total: %s", time.Since(t0).Round(time.Millisecond)))
+
+	return nil
+}
+
+// indexWorktree walks the working tree on disk and indexes files that are
+// not already in the git object store (i.e., dirty/uncommitted files).
+// Returns the number of new files indexed.
+func indexWorktree(ctx context.Context, st *indexState, rootPath string) (int, error) {
+	indexed := 0
+
+	// Get HEAD tree entries so we can detect dirty files
+	headRef, err := st.repo.Head()
+	var headEntries map[string]plumbing.Hash
+	if err == nil {
+		headCommit, cErr := st.repo.CommitObject(headRef.Hash())
+		if cErr == nil {
+			headEntries, _ = getTreeEntries(st.repo, headCommit.TreeHash, st.treeCache)
+		}
+	}
+	if headEntries == nil {
+		headEntries = make(map[string]plumbing.Hash)
+	}
+
+	// Walk the working tree
+	err = filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		// Skip .git directory and hidden directories
+		name := d.Name()
+		if d.IsDir() {
+			if name == ".git" || name == "node_modules" || name == ".sageox" || name == "vendor" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// Get path relative to repo root
+		relPath, rErr := filepath.Rel(rootPath, path)
+		if rErr != nil {
+			return nil
+		}
+
+		// Skip non-code files (no detected language)
+		lang := language.Detect(relPath)
+		if lang == "" {
+			return nil
+		}
+
+		// Read the file
+		content, rErr := os.ReadFile(path)
+		if rErr != nil || !utf8.Valid(content) || len(content) == 0 {
+			return nil
+		}
+
+		// Compute content hash
+		h := sha256.Sum256(content)
+		contentHash := "worktree:" + hex.EncodeToString(h[:])
+
+		// Check if this file's content matches what's in HEAD — if so, skip it
+		// (it's already indexed via commit processing)
+		if headBlobOID, ok := headEntries[relPath]; ok {
+			headBlob, bErr := st.repo.BlobObject(headBlobOID)
+			if bErr == nil {
+				reader, rr := headBlob.Reader()
+				if rr == nil {
+					headContent, re := io.ReadAll(reader)
+					reader.Close()
+					if re == nil && string(headContent) == string(content) {
+						return nil // file unchanged from HEAD
+					}
+				}
+			}
+		}
+
+		// Insert blob for this working tree file
+		var langPtr *string
+		if lang != "" {
+			langPtr = &lang
+		}
+		_, err = st.tx.Exec(
+			"INSERT OR IGNORE INTO blobs (content_hash, language) VALUES (?, ?)",
+			contentHash, langPtr,
+		)
+		if err != nil {
+			return nil // skip on error
+		}
+
+		var blobDBID int64
+		err = st.tx.QueryRow("SELECT id FROM blobs WHERE content_hash = ?", contentHash).Scan(&blobDBID)
+		if err != nil {
+			return nil
+		}
+
+		// Index content in Bleve
+		st.codeBatch.Index(fmt.Sprintf("blob_%d", blobDBID), BleveCodeDoc{Content: string(content)})
+		st.codeBatchN++
+		if err := st.flushCodeBatch(false); err != nil {
+			return err
+		}
+
+		// Create a file_revs entry so the file is searchable
+		// Use a synthetic "worktree" ref to hold working tree state
+		worktreeRefID, wErr := ensureWorktreeRef(st)
+		if wErr != nil {
+			return nil
+		}
+		_, _ = st.tx.Exec(
+			"INSERT OR REPLACE INTO file_revs (commit_id, path, blob_id) VALUES (?, ?, ?)",
+			worktreeRefID, relPath, blobDBID,
+		)
+
+		indexed++
+		st.newBlobs++
+		return nil
+	})
+
+	return indexed, err
+}
+
+// ensureWorktreeRef creates a synthetic commit record to represent the working tree state.
+func ensureWorktreeRef(st *indexState) (int64, error) {
+	const worktreeHash = "0000000000000000000000000000000000worktree"
+
+	var id int64
+	err := st.tx.QueryRow("SELECT id FROM commits WHERE hash = ? AND repo_id = ?",
+		worktreeHash, st.repoID).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+
+	_, err = st.tx.Exec(
+		`INSERT OR IGNORE INTO commits (repo_id, hash, author, message, timestamp)
+		 VALUES (?, ?, 'worktree', 'Working tree (uncommitted)', ?)`,
+		st.repoID, worktreeHash, time.Now().Unix(),
+	)
+	if err != nil {
+		return 0, fmt.Errorf("insert worktree commit: %w", err)
+	}
+
+	err = st.tx.QueryRow("SELECT id FROM commits WHERE hash = ? AND repo_id = ?",
+		worktreeHash, st.repoID).Scan(&id)
+	return id, err
 }
 
 // upsertRepo inserts or updates a repo record and returns its ID.
@@ -234,29 +499,56 @@ func loadKnownCommits(s *store.Store, repoID int64) (map[string]bool, error) {
 	return known, nil
 }
 
-// listResolvedRefs returns all refs with symbolic references resolved to their target.
-func listResolvedRefs(repo *git.Repository) ([]refInfo, error) {
-	var refList []refInfo
-	refs, err := repo.References()
+// loadExistingRefs returns a map of ref name -> tip commit hash for a repo.
+func loadExistingRefs(s *store.Store, repoID int64) (map[string]string, error) {
+	refs := make(map[string]string)
+	rows, err := s.Query(
+		`SELECT r.name, c.hash FROM refs r JOIN commits c ON r.commit_id = c.id WHERE r.repo_id = ?`,
+		repoID,
+	)
 	if err != nil {
-		return nil, fmt.Errorf("list refs: %w", err)
+		return nil, fmt.Errorf("load existing refs: %w", err)
 	}
-	refs.ForEach(func(ref *plumbing.Reference) error {
-		resolved := ref
-		if ref.Type() == plumbing.SymbolicReference {
-			r, err := repo.Reference(ref.Name(), true)
-			if err != nil {
-				return nil // skip broken refs
-			}
-			resolved = r
+	defer rows.Close()
+	for rows.Next() {
+		var name, hash string
+		if err := rows.Scan(&name, &hash); err != nil {
+			return nil, err
 		}
-		refList = append(refList, refInfo{
-			name:   ref.Name().String(),
-			tipOID: resolved.Hash(),
-		})
-		return nil
-	})
-	return refList, nil
+		refs[name] = hash
+	}
+	return refs, rows.Err()
+}
+
+// resolveDefaultBranch returns the single default branch ref (main/master).
+// It checks HEAD first, then falls back to common default branch names.
+func resolveDefaultBranch(repo *git.Repository) (refInfo, error) {
+	// Try HEAD — in bare repos this points to the default branch
+	headRef, err := repo.Head()
+	if err == nil {
+		return refInfo{
+			name:   headRef.Name().String(),
+			tipOID: headRef.Hash(),
+		}, nil
+	}
+
+	// Fallback: try common default branch names
+	for _, name := range []string{
+		"refs/heads/main",
+		"refs/heads/master",
+		"refs/remotes/origin/main",
+		"refs/remotes/origin/master",
+	} {
+		ref, err := repo.Reference(plumbing.ReferenceName(name), true)
+		if err == nil {
+			return refInfo{
+				name:   ref.Name().String(),
+				tipOID: ref.Hash(),
+			}, nil
+		}
+	}
+
+	return refInfo{}, fmt.Errorf("no default branch found (tried HEAD, main, master)")
 }
 
 // walkNewCommits discovers commits reachable from tip that aren't in knownCommits.
@@ -311,7 +603,7 @@ func walkNewCommits(repo *git.Repository, tip plumbing.Hash, knownCommits map[st
 }
 
 // processRef walks a single ref's history and indexes new commits, diffs, and file_revs.
-func (st *indexState) processRef(ctx context.Context, ri refInfo, refIdx, totalRefs, maxDepth int) error {
+func (st *indexState) processRef(ctx context.Context, ri refInfo, refIdx, totalRefs, maxDepth int, existingRefs map[string]string) error {
 	newCommits, depthTruncated := walkNewCommits(st.repo, ri.tipOID, st.knownCommits, maxDepth)
 
 	if len(newCommits) > 0 {
@@ -330,6 +622,11 @@ func (st *indexState) processRef(ctx context.Context, ri refInfo, refIdx, totalR
 		if err := st.indexCommit(cd); err != nil {
 			return err
 		}
+	}
+
+	// Skip file_revs rebuild if tip hasn't changed
+	if prev, ok := existingRefs[ri.name]; ok && prev == ri.tipOID.String() {
+		return nil
 	}
 
 	// Build file_revs for tip
@@ -580,18 +877,27 @@ func getTreeEntries(repo *git.Repository, treeHash plumbing.Hash, cache map[plum
 }
 
 // ensureBlob inserts a blob record if not already present and indexes its content
-// in Bleve if it hasn't been indexed yet (parsed == 0).
+// in Bleve only for newly inserted blobs.
 // Returns (blobDBID, indexedInBleve, error).
 func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, bool, error) {
 	contentHash := blobOID.String()
-	lang := language.Detect(path)
 
+	// Fast path: check if blob already exists
+	var blobDBID int64
+	err := st.tx.QueryRow("SELECT id FROM blobs WHERE content_hash = ?", contentHash).Scan(&blobDBID)
+	if err == nil {
+		// Blob already exists — no need to re-read or re-index
+		return blobDBID, false, nil
+	}
+
+	// New blob — insert and index in Bleve
+	lang := language.Detect(path)
 	var langPtr *string
 	if lang != "" {
 		langPtr = &lang
 	}
 
-	_, err := st.tx.Exec(
+	_, err = st.tx.Exec(
 		"INSERT OR IGNORE INTO blobs (content_hash, language) VALUES (?, ?)",
 		contentHash, langPtr,
 	)
@@ -599,20 +905,14 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, boo
 		return 0, false, fmt.Errorf("insert blob: %w", err)
 	}
 
-	var blobDBID int64
 	err = st.tx.QueryRow("SELECT id FROM blobs WHERE content_hash = ?", contentHash).Scan(&blobDBID)
 	if err != nil {
 		return 0, false, fmt.Errorf("get blob id: %w", err)
 	}
 
-	var parsed int
-	if err := st.tx.QueryRow("SELECT parsed FROM blobs WHERE id = ?", blobDBID).Scan(&parsed); err != nil && err != sql.ErrNoRows {
-		return 0, false, fmt.Errorf("check parsed status: %w", err)
-	}
-
 	indexed := false
 	blobObj, bErr := st.repo.BlobObject(blobOID)
-	if bErr == nil && parsed == 0 {
+	if bErr == nil {
 		reader, rErr := blobObj.Reader()
 		if rErr == nil {
 			content, readErr := io.ReadAll(reader)

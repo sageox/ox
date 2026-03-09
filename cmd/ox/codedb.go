@@ -10,6 +10,7 @@ import (
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
 )
 
@@ -20,11 +21,10 @@ var codedbCmd = &cobra.Command{
 }
 
 var codedbIndexCmd = &cobra.Command{
-	Use:   "index <url>",
-	Short: "Index a git repository",
-	Args:  cobra.ExactArgs(1),
+	Use:   "index [url]",
+	Short: "Index a git repository (defaults to current repo)",
+	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		url := args[0]
 		dataDir := paths.CodeDBDataDir()
 		if err := os.MkdirAll(dataDir, 0o755); err != nil {
 			return fmt.Errorf("create codedb dir: %w", err)
@@ -36,10 +36,29 @@ var codedbIndexCmd = &cobra.Command{
 		}
 		defer db.Close()
 
-		fmt.Fprintf(os.Stderr, "Indexing %s...\n", url)
-		opts := index.IndexOptions{}
-		if err := db.IndexRepo(context.Background(), url, opts); err != nil {
-			return fmt.Errorf("index: %w", err)
+		opts := index.IndexOptions{
+			Progress: func(msg string) {
+				fmt.Fprintf(os.Stderr, "  %s\n", msg)
+			},
+		}
+
+		if len(args) > 0 {
+			// Remote URL: clone/fetch and index
+			url := args[0]
+			fmt.Fprintf(os.Stderr, "Indexing %s...\n", url)
+			if err := db.IndexRepo(context.Background(), url, opts); err != nil {
+				return fmt.Errorf("index: %w", err)
+			}
+		} else {
+			// No args: index current git repo in-place (including dirty files)
+			root, err := repotools.FindRepoRoot(repotools.VCSGit)
+			if err != nil {
+				return fmt.Errorf("not in a git repository (specify a URL or run from a git repo)")
+			}
+			fmt.Fprintf(os.Stderr, "Indexing local repo %s...\n", root)
+			if err := db.IndexLocalRepo(context.Background(), root, opts); err != nil {
+				return fmt.Errorf("index local: %w", err)
+			}
 		}
 
 		fmt.Fprintf(os.Stderr, "Parsing symbols...\n")
