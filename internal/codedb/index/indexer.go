@@ -29,8 +29,9 @@ type ProgressFunc func(msg string)
 
 // IndexOptions configures the indexing process.
 type IndexOptions struct {
-	MaxHistoryDepth int // 0 = unlimited
+	MaxHistoryDepth int             // 0 = unlimited
 	Progress        ProgressFunc
+	SkipDirs        map[string]bool // directories to skip in worktree indexing; nil = use defaultSkipDirs
 }
 
 // BleveCodeDoc is the document indexed into the code Bleve index.
@@ -60,6 +61,23 @@ type refInfo struct {
 }
 
 const bleveBatchSize = 200
+
+// defaultSkipDirs is the default set of directories to skip when indexing a working tree.
+// Override via IndexOptions.SkipDirs.
+var defaultSkipDirs = map[string]bool{
+	".git":         true,
+	"node_modules": true,
+	".sageox":      true,
+	"vendor":       true,
+}
+
+// defaultBranchFallbacks lists ref names to try when HEAD cannot be resolved.
+var defaultBranchFallbacks = []string{
+	"refs/heads/main",
+	"refs/heads/master",
+	"refs/remotes/origin/main",
+	"refs/remotes/origin/master",
+}
 
 // indexState holds mutable state shared across indexing sub-operations.
 type indexState struct {
@@ -123,7 +141,7 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	report("Cloning/fetching repository...")
 	dirName, err := RepoDirFromURL(url)
 	if err != nil {
-		return err
+		return fmt.Errorf("derive repo dir from URL: %w", err)
 	}
 	repoPath := filepath.Join(s.ReposDir(), dirName)
 	repo, err := CloneOrFetch(url, repoPath)
@@ -136,23 +154,23 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	t1 := time.Now()
 	repoName, err := RepoNameFromURL(url)
 	if err != nil {
-		return err
+		return fmt.Errorf("derive repo name from URL: %w", err)
 	}
 	repoID, err := upsertRepo(s, repoName, repoPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("upsert repo record: %w", err)
 	}
 
 	// 3. Load known commits
 	knownCommits, err := loadKnownCommits(s, repoID)
 	if err != nil {
-		return err
+		return fmt.Errorf("load known commits: %w", err)
 	}
 
 	// 4. Resolve default branch
 	defaultRef, err := resolveDefaultBranch(repo)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve default branch: %w", err)
 	}
 	report(fmt.Sprintf("  setup: %s, branch %s, %d known commits",
 		time.Since(t1).Round(time.Millisecond), defaultRef.name, len(knownCommits)))
@@ -160,7 +178,7 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	// 5. Begin transaction
 	tx, err := s.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -179,7 +197,7 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	// 6. Check if default branch tip has changed
 	existingRefs, err := loadExistingRefs(s, repoID)
 	if err != nil {
-		return err
+		return fmt.Errorf("load existing refs: %w", err)
 	}
 
 	t2 := time.Now()
@@ -187,7 +205,7 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 		report(fmt.Sprintf("  default branch unchanged, skipping (%s)", time.Since(t2).Round(time.Millisecond)))
 	} else {
 		if err := st.processRef(ctx, defaultRef, 0, 1, opts.MaxHistoryDepth, existingRefs); err != nil {
-			return err
+			return fmt.Errorf("process default branch: %w", err)
 		}
 		report(fmt.Sprintf("  indexed default branch: %s (%s)",
 			time.Since(t2).Round(time.Millisecond), defaultRef.name))
@@ -234,26 +252,26 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 	repoName := filepath.Base(localPath)
 	repoID, err := upsertRepo(s, repoName, localPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("upsert repo record: %w", err)
 	}
 
 	// 3. Load known commits
 	knownCommits, err := loadKnownCommits(s, repoID)
 	if err != nil {
-		return err
+		return fmt.Errorf("load known commits: %w", err)
 	}
 
 	// 4. Resolve default branch
 	defaultRef, err := resolveDefaultBranch(repo)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve default branch: %w", err)
 	}
 	report(fmt.Sprintf("  branch %s, %d known commits", defaultRef.name, len(knownCommits)))
 
 	// 5. Begin transaction
 	tx, err := s.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -272,7 +290,7 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 	// 6. Check if default branch tip has changed
 	existingRefs, err := loadExistingRefs(s, repoID)
 	if err != nil {
-		return err
+		return fmt.Errorf("load existing refs: %w", err)
 	}
 
 	t2 := time.Now()
@@ -280,7 +298,7 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 		report(fmt.Sprintf("  default branch unchanged (%s)", time.Since(t2).Round(time.Millisecond)))
 	} else {
 		if err := st.processRef(ctx, defaultRef, 0, 1, opts.MaxHistoryDepth, existingRefs); err != nil {
-			return err
+			return fmt.Errorf("process default branch: %w", err)
 		}
 		report(fmt.Sprintf("  indexed default branch: %s (%s)",
 			time.Since(t2).Round(time.Millisecond), defaultRef.name))
@@ -288,7 +306,11 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 
 	// 8. Index working tree (dirty files)
 	t4 := time.Now()
-	worktreeBlobs, err := indexWorktree(ctx, st, localPath)
+	skipDirs := opts.SkipDirs
+	if skipDirs == nil {
+		skipDirs = defaultSkipDirs
+	}
+	worktreeBlobs, err := indexWorktree(ctx, st, localPath, skipDirs)
 	if err != nil {
 		report(fmt.Sprintf("Warning: working tree indexing failed: %v", err))
 	} else {
@@ -318,7 +340,7 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 // indexWorktree walks the working tree on disk and indexes files that are
 // not already in the git object store (i.e., dirty/uncommitted files).
 // Returns the number of new files indexed.
-func indexWorktree(ctx context.Context, st *indexState, rootPath string) (int, error) {
+func indexWorktree(ctx context.Context, st *indexState, rootPath string, skipDirs map[string]bool) (int, error) {
 	indexed := 0
 
 	// Get HEAD tree entries so we can detect dirty files
@@ -343,10 +365,10 @@ func indexWorktree(ctx context.Context, st *indexState, rootPath string) (int, e
 			return err
 		}
 
-		// Skip .git directory and hidden directories
+		// Skip directories in the skip list
 		name := d.Name()
 		if d.IsDir() {
-			if name == ".git" || name == "node_modules" || name == ".sageox" || name == "vendor" {
+			if skipDirs[name] {
 				return filepath.SkipDir
 			}
 			return nil
@@ -375,10 +397,11 @@ func indexWorktree(ctx context.Context, st *indexState, rootPath string) (int, e
 		contentHash := "worktree:" + hex.EncodeToString(h[:])
 
 		// Check if this file's content matches what's in HEAD — if so, skip it
-		// (it's already indexed via commit processing)
+		// (it's already indexed via commit processing).
+		// Compare blob size first to avoid reading content for differently-sized files.
 		if headBlobOID, ok := headEntries[relPath]; ok {
 			headBlob, bErr := st.repo.BlobObject(headBlobOID)
-			if bErr == nil {
+			if bErr == nil && headBlob.Size == int64(len(content)) {
 				reader, rr := headBlob.Reader()
 				if rr == nil {
 					headContent, re := io.ReadAll(reader)
@@ -437,7 +460,7 @@ func indexWorktree(ctx context.Context, st *indexState, rootPath string) (int, e
 
 // ensureWorktreeRef creates a synthetic commit record to represent the working tree state.
 func ensureWorktreeRef(st *indexState) (int64, error) {
-	const worktreeHash = "0000000000000000000000000000000000worktree"
+	const worktreeHash = "00000000000000000000000000000000w0c47cee" // synthetic 40-char hash for worktree
 
 	var id int64
 	err := st.tx.QueryRow("SELECT id FROM commits WHERE hash = ? AND repo_id = ?",
@@ -457,7 +480,10 @@ func ensureWorktreeRef(st *indexState) (int64, error) {
 
 	err = st.tx.QueryRow("SELECT id FROM commits WHERE hash = ? AND repo_id = ?",
 		worktreeHash, st.repoID).Scan(&id)
-	return id, err
+	if err != nil {
+		return 0, fmt.Errorf("select worktree commit id: %w", err)
+	}
+	return id, nil
 }
 
 // upsertRepo inserts or updates a repo record and returns its ID.
@@ -483,18 +509,18 @@ func loadKnownCommits(s *store.Store, repoID int64) (map[string]bool, error) {
 	known := make(map[string]bool)
 	rows, err := s.Query("SELECT hash FROM commits WHERE repo_id = ?", repoID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query known commits: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var h string
 		if err := rows.Scan(&h); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan commit hash: %w", err)
 		}
 		known[h] = true
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("iterate known commits: %w", err)
 	}
 	return known, nil
 }
@@ -513,11 +539,14 @@ func loadExistingRefs(s *store.Store, repoID int64) (map[string]string, error) {
 	for rows.Next() {
 		var name, hash string
 		if err := rows.Scan(&name, &hash); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan ref row: %w", err)
 		}
 		refs[name] = hash
 	}
-	return refs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate refs: %w", err)
+	}
+	return refs, nil
 }
 
 // resolveDefaultBranch returns the single default branch ref (main/master).
@@ -533,12 +562,7 @@ func resolveDefaultBranch(repo *git.Repository) (refInfo, error) {
 	}
 
 	// Fallback: try common default branch names
-	for _, name := range []string{
-		"refs/heads/main",
-		"refs/heads/master",
-		"refs/remotes/origin/main",
-		"refs/remotes/origin/master",
-	} {
+	for _, name := range defaultBranchFallbacks {
 		ref, err := repo.Reference(plumbing.ReferenceName(name), true)
 		if err == nil {
 			return refInfo{

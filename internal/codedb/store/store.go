@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -73,7 +74,7 @@ func (s *Store) ReposDir() string {
 // Close closes all resources.
 func (s *Store) Close() error {
 	var firstErr error
-	if err := s.CodeIndex.Close(); err != nil && firstErr == nil {
+	if err := s.CodeIndex.Close(); err != nil {
 		firstErr = err
 	}
 	if err := s.DiffIndex.Close(); err != nil && firstErr == nil {
@@ -87,7 +88,7 @@ func (s *Store) Close() error {
 
 func openOrCreateBleveIndex(path string) (bleve.Index, error) {
 	idx, err := bleve.Open(path)
-	if err == bleve.ErrorIndexPathDoesNotExist {
+	if errors.Is(err, bleve.ErrorIndexPathDoesNotExist) {
 		mapping := bleve.NewIndexMapping()
 		return bleve.New(path, mapping)
 	}

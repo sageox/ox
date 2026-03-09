@@ -1,6 +1,7 @@
 package index
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -9,31 +10,14 @@ import (
 	"github.com/go-git/go-git/v5/config"
 )
 
-// RepoDirFromURL derives a local directory name from a repo URL.
-// "https://github.com/user/repo/" -> "github.com/user/repo.git"
-func RepoDirFromURL(url string) (string, error) {
+// normalizeRepoURL strips scheme prefixes, trailing slashes, and .git suffix
+// from a repo URL, returning the bare host/path form.
+// Returns an error if the result is empty.
+func normalizeRepoURL(url string) (string, error) {
 	stripped := url
 	for _, prefix := range []string{"https://", "http://", "git://"} {
-		if strings.HasPrefix(stripped, prefix) {
-			stripped = strings.TrimPrefix(stripped, prefix)
-			break
-		}
-	}
-	stripped = strings.TrimRight(stripped, "/")
-	stripped = strings.TrimSuffix(stripped, ".git")
-	if stripped == "" {
-		return "", fmt.Errorf("invalid repo URL: %s", url)
-	}
-	return stripped + ".git", nil
-}
-
-// RepoNameFromURL derives a human-readable name from a URL.
-// "https://github.com/user/repo" -> "github.com/user/repo"
-func RepoNameFromURL(url string) (string, error) {
-	stripped := url
-	for _, prefix := range []string{"https://", "http://", "git://"} {
-		if strings.HasPrefix(stripped, prefix) {
-			stripped = strings.TrimPrefix(stripped, prefix)
+		if after, found := strings.CutPrefix(stripped, prefix); found {
+			stripped = after
 			break
 		}
 	}
@@ -45,6 +29,22 @@ func RepoNameFromURL(url string) (string, error) {
 	return stripped, nil
 }
 
+// RepoDirFromURL derives a local directory name from a repo URL.
+// "https://github.com/user/repo/" -> "github.com/user/repo.git"
+func RepoDirFromURL(url string) (string, error) {
+	normalized, err := normalizeRepoURL(url)
+	if err != nil {
+		return "", err
+	}
+	return normalized + ".git", nil
+}
+
+// RepoNameFromURL derives a human-readable name from a URL.
+// "https://github.com/user/repo" -> "github.com/user/repo"
+func RepoNameFromURL(url string) (string, error) {
+	return normalizeRepoURL(url)
+}
+
 // CloneOrFetch clones a bare repo at repoPath, or fetches if it already exists.
 // Returns the opened go-git Repository.
 func CloneOrFetch(url, repoPath string) (*git.Repository, error) {
@@ -53,10 +53,9 @@ func CloneOrFetch(url, repoPath string) (*git.Repository, error) {
 		if err != nil {
 			return nil, fmt.Errorf("open existing repo: %w", err)
 		}
-		if err := fetch(repo); err != nil {
-			// Non-fatal: fetch may fail if remote is unreachable
-			// but we can still use the local clone
-		}
+		// Non-fatal: fetch may fail if remote is unreachable
+		// but we can still use the local clone.
+		_ = fetch(repo)
 		return repo, nil
 	}
 	return cloneBare(url, repoPath)
@@ -78,7 +77,7 @@ func fetch(repo *git.Repository) error {
 		RefSpecs:   []config.RefSpec{"+refs/*:refs/*"},
 		Force:      true,
 	})
-	if err == git.NoErrAlreadyUpToDate {
+	if errors.Is(err, git.NoErrAlreadyUpToDate) {
 		return nil
 	}
 	return err

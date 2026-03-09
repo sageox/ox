@@ -19,7 +19,7 @@ type DB struct {
 func Open(root string) (*DB, error) {
 	s, err := store.Open(root)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open codedb store: %w", err)
 	}
 	return &DB{store: s}, nil
 }
@@ -53,7 +53,7 @@ func (db *DB) ParseSymbols(ctx context.Context, progress func(string)) (index.Pa
 func (db *DB) Search(ctx context.Context, input string) ([]search.Result, error) {
 	query, err := search.ParseQuery(input)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse query: %w", err)
 	}
 	return search.Execute(ctx, db.store, query)
 }
@@ -62,7 +62,7 @@ func (db *DB) Search(ctx context.Context, input string) ([]search.Result, error)
 func (db *DB) TranslateQuery(input string) (*search.TranslatedQuery, error) {
 	query, err := search.ParseQuery(input)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse query: %w", err)
 	}
 	return search.Translate(query)
 }
@@ -77,7 +77,7 @@ func (db *DB) RawSQL(query string) ([]string, [][]string, error) {
 
 	cols, err := rows.Columns()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("get columns: %w", err)
 	}
 
 	var results [][]string

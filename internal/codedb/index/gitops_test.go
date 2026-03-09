@@ -37,8 +37,13 @@ func TestRepoNameFromURL(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{name: "valid", url: "https://github.com/ylow/SFrameRust/", want: "github.com/ylow/SFrameRust"},
-		{name: "invalid", url: "https://", wantErr: true},
+		{name: "valid https", url: "https://github.com/ylow/SFrameRust/", want: "github.com/ylow/SFrameRust"},
+		{name: "valid git", url: "git://github.com/ylow/SFrameRust", want: "github.com/ylow/SFrameRust"},
+		{name: "strips .git suffix", url: "https://github.com/ylow/SFrameRust.git", want: "github.com/ylow/SFrameRust"},
+		{name: "empty after scheme strip", url: "https://", wantErr: true},
+		{name: "empty string", url: "", wantErr: true},
+		{name: "only slashes", url: "https:///", wantErr: true},
+		{name: "scheme with .git only", url: "http://.git", wantErr: true},
 	}
 
 	for _, tt := range tests {
