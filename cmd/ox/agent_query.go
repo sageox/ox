@@ -171,7 +171,7 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 		if errors.Is(err, api.ErrVersionUnsupported) {
 			return 0, fmt.Errorf("CLI version too old. Run 'ox version' and update")
 		}
-		return 0, fmt.Errorf("query failed (is sageox.ai reachable?): %w", err)
+		return 0, fmt.Errorf("query failed (is %s reachable?): %w", endpoint.NormalizeEndpoint(ep), err)
 	}
 
 	var buf bytes.Buffer

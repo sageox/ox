@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/sageox/ox/internal/agentinstance"
@@ -17,36 +18,53 @@ var queryCmd = &cobra.Command{
 Examples:
   ox query "how do we handle authentication?"
   ox query "database migration patterns" --limit 10
-  ox query "deployment process" --team team_abc123
+  ox query "deployment process" --team team_abc123`,
+	Args: cobra.ExactArgs(1),
+	RunE: runQuery,
+}
 
-Flags:
-  --limit N    Max results to return (default: 5)
-  --team ID    Team ID to search (default: from project config)
-  --repo ID    Repo ID to search (default: from project config)`,
-	Args:               cobra.ArbitraryArgs,
-	DisableFlagParsing: true,
-	RunE:               runQuery,
+func init() {
+	queryCmd.Flags().IntP("limit", "k", 5, "max results to return")
+	queryCmd.Flags().String("team", "", "team ID to search (default: from project config)")
+	queryCmd.Flags().String("repo", "", "repo ID to search (default: from project config)")
+	queryCmd.Flags().String("mode", "hybrid", "search mode: hybrid, knn, or bm25")
 }
 
 // runQuery handles the top-level `ox query "search text"` command.
 // Auto-detects agent context when available for server-side analytics.
 func runQuery(cmd *cobra.Command, args []string) error {
-	// handle --help manually since DisableFlagParsing is true
-	for _, arg := range args {
-		if arg == "--help" || arg == "-h" {
-			return cmd.Help()
-		}
+	limit, _ := cmd.Flags().GetInt("limit")
+	teamID, _ := cmd.Flags().GetString("team")
+	repoID, _ := cmd.Flags().GetString("repo")
+	mode, _ := cmd.Flags().GetString("mode")
+
+	qa := &queryArgs{
+		query:  args[0],
+		mode:   mode,
+		limit:  limit,
+		teamID: teamID,
+		repoID: repoID,
 	}
 
-	qa, err := parseQueryArgs(args)
-	if err != nil {
-		return fmt.Errorf("%w\n\n%s", err, queryUsage)
+	switch qa.mode {
+	case "hybrid", "knn", "bm25":
+		// ok
+	default:
+		return fmt.Errorf("invalid mode %q: must be hybrid, knn, or bm25", qa.mode)
 	}
 
 	agentID, agentType := detectAgentContext()
 
-	_, err = executeQuery(qa, agentID, agentType)
-	return err
+	outputBytes, err := executeQuery(qa, agentID, agentType)
+	if err != nil {
+		return err
+	}
+
+	if agentID != "" {
+		slog.Debug("query response context cost", "agent_id", agentID, "bytes", outputBytes)
+		trackContextBytes(int64(outputBytes))
+	}
+	return nil
 }
 
 // detectAgentContext returns the agent ID and type if running inside an agent session.
