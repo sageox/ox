@@ -31,11 +31,31 @@ func TestRepoDirFromURLInvalid(t *testing.T) {
 }
 
 func TestRepoNameFromURL(t *testing.T) {
-	got, err := RepoNameFromURL("https://github.com/ylow/SFrameRust/")
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name    string
+		url     string
+		want    string
+		wantErr bool
+	}{
+		{name: "valid", url: "https://github.com/ylow/SFrameRust/", want: "github.com/ylow/SFrameRust"},
+		{name: "invalid", url: "https://", wantErr: true},
 	}
-	if got != "github.com/ylow/SFrameRust" {
-		t.Errorf("got %q", got)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := RepoNameFromURL(tt.url)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("RepoNameFromURL(%q): expected error", tt.url)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RepoNameFromURL(%q): %v", tt.url, err)
+			}
+			if got != tt.want {
+				t.Fatalf("RepoNameFromURL(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
 	}
 }

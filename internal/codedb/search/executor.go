@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/search/query"
 	blevesearch "github.com/blevesearch/bleve/v2/search"
 
 	"github.com/sageox/ox/internal/codedb/store"
@@ -115,7 +116,14 @@ func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, 
 		idx = s.DiffIndex
 	}
 
-	bleveQuery := bleve.NewQueryStringQuery(plan.BleveQuery)
+	var bleveQuery query.Query
+	if plan.IsRegex {
+		rq := bleve.NewRegexpQuery(plan.BleveQuery)
+		rq.SetField("content")
+		bleveQuery = rq
+	} else {
+		bleveQuery = bleve.NewQueryStringQuery(plan.BleveQuery)
+	}
 	searchReq := bleve.NewSearchRequestOptions(bleveQuery, plan.Limit*5, 0, false)
 	searchReq.Fields = []string{"content"}
 	searchReq.Highlight = bleve.NewHighlightWithStyle("ansi")

@@ -28,8 +28,8 @@ func Open(root string) (*Store, error) {
 	bleveCodeDir := filepath.Join(bleveDir, "code")
 	bleveDiffDir := filepath.Join(bleveDir, "diff")
 
-	for _, dir := range []string{reposDir, bleveDir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+	for _, dir := range []string{root, reposDir, bleveDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create dir %s: %w", dir, err)
 		}
 	}

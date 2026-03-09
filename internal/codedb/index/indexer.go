@@ -220,15 +220,17 @@ func loadKnownCommits(s *store.Store, repoID int64) (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		var h string
 		if err := rows.Scan(&h); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		known[h] = true
 	}
-	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return known, nil
 }
 
@@ -604,7 +606,9 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, boo
 	}
 
 	var parsed int
-	st.tx.QueryRow("SELECT parsed FROM blobs WHERE id = ?", blobDBID).Scan(&parsed)
+	if err := st.tx.QueryRow("SELECT parsed FROM blobs WHERE id = ?", blobDBID).Scan(&parsed); err != nil && err != sql.ErrNoRows {
+		return 0, false, fmt.Errorf("check parsed status: %w", err)
+	}
 
 	indexed := false
 	blobObj, bErr := st.repo.BlobObject(blobOID)
