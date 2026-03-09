@@ -208,7 +208,11 @@ func ensureSessionsGitignore(sessionsDir string) error {
 
 // commitAndPushLedger commits meta.json and .gitignore, then pushes to remote.
 // Uses pull --rebase with retry to handle concurrent pushes from other team members.
+// NEVER uses --force push. Conflicts are resolved via pull --rebase.
 func commitAndPushLedger(ledgerPath, sessionName string) error {
+	// ensure .gitignore is in place before any commit to prevent cache file leakage
+	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
+
 	// stage meta.json and .gitignore
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
@@ -223,7 +227,9 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 		filesToAdd = append(filesToAdd, matches...)
 	}
 
-	addArgs := append([]string{"-C", ledgerPath, "add"}, filesToAdd...)
+	// --sparse: ledger repos use sparse-checkout (cone mode); this flag
+	// prevents git from blocking adds if sparse rules change or edge cases arise
+	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, filesToAdd...)
 	addCmd := exec.Command("git", addArgs...)
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add failed: %s: %w", string(output), err)
@@ -247,7 +253,10 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 // commitAndPushLedgerWithExtras commits meta.json, .gitignore, and optionally summary.json,
 // then pushes to remote. Used by doctor retry path where summary.json may have been
 // copied from cache alongside the LFS upload retry.
+// NEVER uses --force push. Conflicts are resolved via pull --rebase.
 func commitAndPushLedgerWithExtras(ledgerPath, sessionName string, includeSummary bool) error {
+	// ensure .gitignore is in place before any commit to prevent cache file leakage
+	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
 
@@ -264,7 +273,8 @@ func commitAndPushLedgerWithExtras(ledgerPath, sessionName string, includeSummar
 		filesToAdd = append(filesToAdd, matches...)
 	}
 
-	args := append([]string{"-C", ledgerPath, "add"}, filesToAdd...)
+	// --sparse: see commitAndPushLedger for rationale
+	args := append([]string{"-C", ledgerPath, "add", "--sparse"}, filesToAdd...)
 	addCmd := exec.Command("git", args...)
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add failed: %s: %w", string(output), err)
@@ -299,6 +309,8 @@ func resolveLedgerPath() (string, error) {
 }
 
 // pushLedger pushes ledger changes to remote with conflict retry.
+// NEVER uses --force. Ledger and team context history must not be rewritten.
+// Conflicts are resolved via pull --rebase, never by overwriting remote history.
 // Retries on transient failures (network, rejection). Fails fast on permanent errors
 // (auth, config) to avoid wasting time on retries that will never succeed.
 // Uses context for timeout control (60s per git operation).
@@ -334,6 +346,7 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		attemptCtx, cancel := context.WithTimeout(ctx, opTimeout)
+		// no --force: conflicts resolved via pull --rebase, never by overwriting remote history
 		outStr, err := gitutil.RunGit(attemptCtx, ledgerPath, "push", "--quiet")
 		cancel()
 		if err == nil {
@@ -363,7 +376,7 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 			}
 
 			pullCtx, pullCancel := context.WithTimeout(ctx, opTimeout)
-			pullOut, pullErr := gitutil.RunGit(pullCtx, ledgerPath, "pull", "--rebase", "--quiet")
+			pullOut, pullErr := gitutil.RunGit(pullCtx, ledgerPath, "pull", "--rebase", "--autostash", "--quiet")
 			pullCancel()
 			if pullErr != nil {
 				// abort rebase to avoid leaving repo in broken state

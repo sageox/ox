@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1893,8 +1894,10 @@ func TestBlueGreenGC_PushesUnpushedCommitsBeforeReclone(t *testing.T) {
 	// verify there are unpushed commits (user commit + auto-commit from TwoPhaseClone)
 	countOut, err := exec.Command("git", "-C", teamDir, "rev-list", "--count", "origin/main..HEAD").CombinedOutput()
 	require.NoError(t, err)
-	count := strings.TrimSpace(string(countOut))
-	assert.True(t, count >= "1", "should have at least 1 unpushed commit, got %s", count)
+	countStr := strings.TrimSpace(string(countOut))
+	count, parseErr := strconv.Atoi(countStr)
+	require.NoError(t, parseErr, "failed to parse commit count")
+	assert.GreaterOrEqual(t, count, 1, "should have at least 1 unpushed commit")
 
 	ws := WorkspaceState{
 		ID:       "team_push",

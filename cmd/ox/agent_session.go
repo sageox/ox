@@ -74,12 +74,12 @@ const genericFormatHint = `{"type":"user","content":"Fix the login bug","timesta
 
 // sessionStartOutput is the JSON output format for session start.
 type sessionStartOutput struct {
-	Success bool   `json:"success"`
-	Type    string `json:"type"`
-	AgentID string `json:"agent_id"`
-	Title   string `json:"title,omitempty"`
-	Adapter string `json:"adapter"`
-	Started string `json:"started"`
+	Success  bool   `json:"success"`
+	Type     string `json:"type"`
+	AgentID  string `json:"agent_id"`
+	Title    string `json:"title,omitempty"`
+	Adapter  string `json:"adapter"`
+	Started  string `json:"started"`
 	Hint     string `json:"hint,omitempty"`     // suggests how to end recording
 	Notice   string `json:"notice,omitempty"`   // one-time notice the agent MUST show to the user
 	Guidance string `json:"guidance,omitempty"` // behavioral guidance for the agent during the session
@@ -137,15 +137,34 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	agentTypeName := agentType // original type for metadata
 	sessionFile := ""
 
-	// Deep adapter detection: only for Claude Code or unknown agents.
-	// For known non-Claude agents, skip detection to avoid false positives
-	// (ClaudeCodeAdapter.Detect() returns true if ~/.claude exists, which is
-	// common on machines where multiple agents are installed).
-	if agentType == string(agentx.AgentTypeClaudeCode) || agentType == "" {
-		if adapter, detectErr := adapters.DetectAdapter(); detectErr == nil {
-			adapterName = adapter.Name()
-			since := time.Now().Add(-5 * time.Minute)
-			sessionFile, _ = adapter.FindSessionFile(inst.AgentID, since)
+	if isManualSessionAgent(agentType) {
+		// Codex: use the codex adapter to find its session file.
+		// Codex stores plans inline in session files (no separate plan.md).
+		adapterName = string(agentx.AgentTypeCodex)
+		codexAdapter, adapterErr := adapters.GetAdapter(string(agentx.AgentTypeCodex))
+		if adapterErr != nil {
+			return fmt.Errorf("codex adapter unavailable: %w", adapterErr)
+		}
+		since := time.Now().Add(-5 * time.Minute)
+		sf, findErr := codexAdapter.FindSessionFile(inst.AgentID, since)
+		if findErr != nil {
+			if errors.Is(findErr, adapters.ErrSessionNotFound) {
+				return fmt.Errorf("no active codex session found\nStart a Codex conversation in this repo, then run 'ox agent %s session start'", inst.AgentID)
+			}
+			return fmt.Errorf("failed to find Codex session file: %w", findErr)
+		}
+		sessionFile = sf
+	} else {
+		// Deep adapter detection: only for Claude Code or unknown agents.
+		// For known non-Claude agents, skip detection to avoid false positives
+		// (ClaudeCodeAdapter.Detect() returns true if ~/.claude exists, which is
+		// common on machines where multiple agents are installed).
+		if agentType == string(agentx.AgentTypeClaudeCode) || agentType == "" {
+			if adapter, detectErr := adapters.DetectAdapter(); detectErr == nil {
+				adapterName = adapter.Name()
+				since := time.Now().Add(-5 * time.Minute)
+				sessionFile, _ = adapter.FindSessionFile(inst.AgentID, since)
+			}
 		}
 	}
 
@@ -274,6 +293,12 @@ func isGenericAdapter(adapterName string) bool {
 	return adapterName == "generic"
 }
 
+// isManualSessionAgent returns true for agent types that require explicit
+// adapter selection instead of generic/deep autodetection.
+func isManualSessionAgent(agentType string) bool {
+	return canonicalAgentType(agentType) == string(agentx.AgentTypeCodex)
+}
+
 // runAgentSessionStop stops recording and saves the session.
 // Usage: ox agent <id> session stop
 func runAgentSessionStop(inst *agentinstance.Instance) error {
@@ -293,13 +318,16 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// For generic adapters: check if the drop file has content BEFORE clearing state.
 	// If empty, mark as incomplete and return retry guidance instead of processing.
-	// This must happen before StopRecording because that clears the recording state.
-	existingRecState, loadErr := session.LoadRecordingState(projectRoot)
-	if loadErr != nil {
-		slog.Warn("could not load recording state for empty-file check", "error", loadErr)
+	// This must happen before clearing recording state.
+	state, err := session.LoadRecordingState(projectRoot)
+	if err != nil {
+		return fmt.Errorf("failed to load recording state: %w", err)
 	}
-	if existingRecState != nil && isGenericAdapter(existingRecState.AdapterName) && existingRecState.SessionFile != "" {
-		info, statErr := os.Stat(existingRecState.SessionFile)
+	if state == nil {
+		return fmt.Errorf("not currently recording\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
+	}
+	if isGenericAdapter(state.AdapterName) && state.SessionFile != "" {
+		info, statErr := os.Stat(state.SessionFile)
 		if statErr != nil || info.Size() == 0 {
 			// mark recording as incomplete (allows restart without "already recording" error)
 			_ = session.UpdateRecordingState(projectRoot, func(s *session.RecordingState) {
@@ -318,7 +346,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 				Success:       false,
 				Type:          "session_stop_retry",
 				AgentID:       inst.AgentID,
-				SessionFile:   existingRecState.SessionFile,
+				SessionFile:   state.SessionFile,
 				RetryGuidance: fmt.Sprintf("No session data captured. Use 'ox agent %s session log --stdin' to write your conversation, then re-run this command.", inst.AgentID),
 				NextActions: []string{
 					fmt.Sprintf("Dump conversation as JSONL: ox agent %s session log --role user --stdin", inst.AgentID),
@@ -327,20 +355,9 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 			}
 			jsonOut, _ := json.MarshalIndent(retry, "", "  ")
 			trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
+			fmt.Println(string(jsonOut))
 			return nil
 		}
-	}
-
-	// stop recording and get final state
-	state, err := session.StopRecording(projectRoot, inst.AgentID)
-	if err != nil {
-		if errors.Is(err, session.ErrNotRecording) {
-			return fmt.Errorf("not currently recording\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
-		}
-		// set marker so future ox agent prime knows doctor is needed
-		_ = doctor.SetNeedsDoctorAgent(projectRoot) // session data may be lost
-		return fmt.Errorf("failed to stop recording: %w", err)
 	}
 
 	// mark explicit stop so /clear hook doesn't silently auto-restart the session
@@ -355,8 +372,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		if err != nil {
 			// set marker so future ox agent prime knows doctor is needed
 			_ = doctor.SetNeedsDoctorAgent(projectRoot) // best effort
-			// non-fatal - continue with output
-			fmt.Fprintf(os.Stderr, "warning: failed to process session: %v\n", err)
+			return fmt.Errorf("failed to process session: %w\nrecording state preserved; run 'ox agent %s session recover' or retry stop", err, inst.AgentID)
 		}
 	}
 
@@ -369,6 +385,11 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// best-effort: record session-end observation to team memory
 	recordSessionObservation(projectRoot, processResult, duration)
 
+	// processing succeeded (or no source file to process) - clear active state.
+	if err := session.ClearRecordingState(projectRoot); err != nil {
+		_ = doctor.SetNeedsDoctorAgent(projectRoot)
+		return fmt.Errorf("failed to finalize recording stop: %w", err)
+	}
 	// output format selection (priority: review > text > json default)
 	if cfg.Review {
 		// security audit mode: human summary first, then JSON
@@ -831,8 +852,6 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		Summary: localSummary,
 	}
 
-
-
 	sessionSummaryView := &session.SummaryView{
 		Text: localSummary,
 	}
@@ -924,7 +943,6 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		result.UploadWarning = "Session saved locally (publishing mode: manual). Use 'ox session upload' to publish."
 		return result, nil
 	}
-
 
 	// LFS upload pipeline: upload content files to LFS blob storage,
 	// write meta.json to ledger, commit and push.
@@ -1159,7 +1177,7 @@ func runAgentSessionRemind(inst *agentinstance.Instance) error {
 			return fmt.Errorf("format remind JSON: %w", err)
 		}
 		trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
+		fmt.Println(string(jsonOut))
 		return nil
 	}
 
@@ -1337,7 +1355,7 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 			return fmt.Errorf("format summarize JSON: %w", err)
 		}
 		trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
+		fmt.Println(string(jsonOut))
 		return nil
 	}
 
@@ -1460,7 +1478,7 @@ func runAgentSessionHTML(inst *agentinstance.Instance, args []string) error {
 			return fmt.Errorf("format HTML JSON: %w", err)
 		}
 		trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
+		fmt.Println(string(jsonOut))
 		return nil
 	}
 
@@ -1651,7 +1669,7 @@ func runAgentSessionRecord(inst *agentinstance.Instance, args []string) error {
 			return fmt.Errorf("format record JSON: %w", err)
 		}
 		trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
+		fmt.Println(string(jsonOut))
 		return nil
 	}
 
@@ -1776,7 +1794,7 @@ func runAgentSessionPlan(inst *agentinstance.Instance) error {
 		}
 		jsonOut, _ := json.MarshalIndent(output, "", "  ")
 		trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
+		fmt.Println(string(jsonOut))
 		return nil
 	}
 

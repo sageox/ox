@@ -2,13 +2,22 @@ package claude
 
 import (
 	"bufio"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/constants"
 )
 
-// ClaudeDir is the standard path for Claude customizations within a team context.
-const ClaudeDir = "coworkers/ai/claude"
+// CoworkersDir is the base path for coworker customizations within a team context.
+const CoworkersDir = "coworkers"
+
+// AgentsDir is the path for agent definitions within a team context.
+const AgentsDir = "coworkers/agents"
+
+// CommandsDir is the path for slash command definitions within a team context.
+const CommandsDir = "coworkers/commands"
 
 // DiscoverAll finds all Claude customizations in a team context path.
 // This is the main entry point for discovering team Claude customizations.
@@ -21,16 +30,16 @@ func DiscoverAll(teamPath string) (*TeamCustomizations, error) {
 		TeamPath: teamPath,
 	}
 
-	claudeBase := filepath.Join(teamPath, ClaudeDir)
+	base := filepath.Join(teamPath, CoworkersDir)
 
 	// check for instruction files
-	claudeMD := filepath.Join(claudeBase, "CLAUDE.md")
+	claudeMD := filepath.Join(base, "CLAUDE.md")
 	if _, err := os.Stat(claudeMD); err == nil {
 		tc.ClaudeMDPath = claudeMD
 		tc.HasClaudeMD = true
 	}
 
-	agentsMD := filepath.Join(claudeBase, "AGENTS.md")
+	agentsMD := filepath.Join(base, "AGENTS.md")
 	if _, err := os.Stat(agentsMD); err == nil {
 		tc.AgentsMDPath = agentsMD
 		tc.HasAgentsMD = true
@@ -40,14 +49,22 @@ func DiscoverAll(teamPath string) (*TeamCustomizations, error) {
 	agents, _ := DiscoverAgents(teamPath)
 	tc.Agents = agents
 
+	// check for agents-level AGENTS.md (coworkers/agents/AGENTS.md)
+	agentsAgentsMD := filepath.Join(teamPath, AgentsDir, "AGENTS.md")
+	if _, err := os.Stat(agentsAgentsMD); err == nil {
+		tc.HasAgentsAgentsMD = true
+		tc.AgentsAgentsMDPath = agentsAgentsMD
+		tc.AgentsAgentsMDContent = ReadFirstLines(agentsAgentsMD, constants.MaxInlineContextLines)
+	}
+
 	// check for agents index.md (provides catalog of available specialists)
-	agentsIndexPath := filepath.Join(claudeBase, "agents", "index.md")
+	agentsIndexPath := filepath.Join(teamPath, AgentsDir, "index.md")
 	if _, err := os.Stat(agentsIndexPath); err == nil {
 		tc.HasAgentsIndex = true
 		tc.AgentsIndexPath = agentsIndexPath
 	}
 
-	// discover commands (uses DiscoverTeamCommands from commands.go)
+	// discover commands
 	commands, _ := DiscoverTeamCommands(teamPath)
 	tc.Commands = commands
 
@@ -57,7 +74,7 @@ func DiscoverAll(teamPath string) (*TeamCustomizations, error) {
 // DiscoverAgents finds all agents in a team context.
 // Checks index.md first (token-optimized), falls back to individual files.
 func DiscoverAgents(teamPath string) ([]Agent, error) {
-	agentsDir := filepath.Join(teamPath, ClaudeDir, "agents")
+	agentsDir := filepath.Join(teamPath, AgentsDir)
 
 	// check if agents directory exists
 	if _, err := os.Stat(agentsDir); os.IsNotExist(err) {
@@ -80,6 +97,10 @@ func DiscoverAgents(teamPath string) ([]Agent, error) {
 		}
 		if entry.Name() == "index.md" {
 			continue // skip index itself
+		}
+		// skip non-agent files (AGENTS.md, README.md, etc.)
+		if entry.Name()[0] >= 'A' && entry.Name()[0] <= 'Z' {
+			continue
 		}
 
 		name := strings.TrimSuffix(entry.Name(), ".md")
@@ -163,14 +184,14 @@ type AgentContent struct {
 }
 
 // LoadAgent loads the full content of an agent file by name.
-// Searches in the standard coworkers/ai/claude/agents/ directory.
+// Searches in the standard coworkers/agents/ directory.
 // Returns the full file content along with parsed frontmatter metadata.
 func LoadAgent(teamPath, name string) (*AgentContent, error) {
 	if teamPath == "" || name == "" {
 		return nil, nil
 	}
 
-	agentPath := filepath.Join(teamPath, ClaudeDir, "agents", name+".md")
+	agentPath := filepath.Join(teamPath, AgentsDir, name+".md")
 
 	data, err := os.ReadFile(agentPath)
 	if err != nil {
@@ -186,6 +207,28 @@ func LoadAgent(teamPath, name string) (*AgentContent, error) {
 		Path:        agentPath,
 		Content:     string(data),
 	}, nil
+}
+
+// ValidateAgentFile validates that a file is a valid coworker agent definition.
+// Returns the parsed description and model, or an error if validation fails.
+// Requires: YAML frontmatter with a description field.
+func ValidateAgentFile(path string) (description, model string, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", fmt.Errorf("cannot read file: %w", err)
+	}
+
+	content := string(data)
+	if !strings.HasPrefix(strings.TrimSpace(content), "---") {
+		return "", "", fmt.Errorf("missing YAML frontmatter (file must start with ---)")
+	}
+
+	description, model = parseAgentFrontmatter(path)
+	if description == "" {
+		return "", "", fmt.Errorf("frontmatter missing required 'description' field")
+	}
+
+	return description, model, nil
 }
 
 // FindAgent looks up an agent by name across all configured team contexts.
@@ -261,4 +304,25 @@ func parseFirstDescription(path string) string {
 	}
 
 	return ""
+}
+
+// ReadFirstLines reads up to maxLines lines from a file.
+// Returns the content as a string, truncated at the line limit.
+// Exported for reuse in prime output (e.g., MEMORY.md, AGENTS.md).
+func ReadFirstLines(path string, maxLines int) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	var lines []string
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+		if len(lines) >= maxLines {
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
 }

@@ -18,6 +18,9 @@ const (
 
 // SyncState tracks the sync health of a workspace (team context or ledger).
 // Stored in .sageox/cache/sync-state.json within the workspace directory.
+//
+// This is local-only machine state — never committed or pushed to the remote.
+// Protected by .sageox/.gitignore (cache/ is gitignored).
 type SyncState struct {
 	LastSync            time.Time `json:"last_sync"`
 	LastSyncCommit      string    `json:"last_sync_commit"`
@@ -76,6 +79,7 @@ func LoadSyncState(workspacePath string) *SyncState {
 }
 
 // SaveSyncState writes sync state to .sageox/cache/sync-state.json within workspacePath.
+// Writes to .sageox/cache/ which is gitignored — local-only, never committed to the ledger.
 func SaveSyncState(workspacePath string, state *SyncState) error {
 	if workspacePath == "" || state == nil {
 		return nil

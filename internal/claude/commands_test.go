@@ -22,7 +22,7 @@ func TestDiscoverTeamCommands_WithCommands(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// create commands directory
-	commandsDir := filepath.Join(tmpDir, ClaudeDir, "commands")
+	commandsDir := filepath.Join(tmpDir, CommandsDir)
 	if err := os.MkdirAll(commandsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ Deploys the current branch to production.
 func TestDiscoverTeamCommands_WithIndex(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	commandsDir := filepath.Join(tmpDir, ClaudeDir, "commands")
+	commandsDir := filepath.Join(tmpDir, CommandsDir)
 	if err := os.MkdirAll(commandsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ Some content.
 func TestDiscoverTeamCommands_FallbackToFrontmatter(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	commandsDir := filepath.Join(tmpDir, ClaudeDir, "commands")
+	commandsDir := filepath.Join(tmpDir, CommandsDir)
 	if err := os.MkdirAll(commandsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ Does something custom.
 func TestDiscoverTeamCommands_MultipleCommands(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	commandsDir := filepath.Join(tmpDir, ClaudeDir, "commands")
+	commandsDir := filepath.Join(tmpDir, CommandsDir)
 	if err := os.MkdirAll(commandsDir, 0755); err != nil {
 		t.Fatal(err)
 	}

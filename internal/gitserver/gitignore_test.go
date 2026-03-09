@@ -11,6 +11,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// runGit runs a git command in the given directory and fails the test on error.
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %v failed: %s", args, string(out))
+}
+
 // setupGitRepoWithSageox creates a git repo with a committed .sageox/sync.manifest.
 func setupGitRepoWithSageox(t *testing.T) string {
 	t.Helper()
@@ -251,4 +260,38 @@ func TestCheckoutGitignoreNeedsFix_Complete(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, ".gitignore"),
 		[]byte("*\n!.gitignore\n!sync.manifest\n"), 0644))
 	assert.False(t, CheckoutGitignoreNeedsFix(dir), "should not need fix when all entries present")
+}
+
+// TestEnsureCheckoutGitignore_WithSparseCheckout is a regression test for the
+// bug where git add .sageox/.gitignore fails during TwoPhaseClone because
+// sparse-checkout blocks staging files outside the sparse definition.
+// Without --sparse on git add, this test fails with:
+//
+//	"The following paths and/or pathspecs matched paths that exist
+//	 outside of your sparse-checkout definition"
+func TestEnsureCheckoutGitignore_WithSparseCheckout(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dir := setupGitRepoWithSageox(t)
+
+	// enable sparse-checkout in --no-cone mode (same as TwoPhaseClone)
+	runGit(t, dir, "sparse-checkout", "set", "--no-cone", ".sageox/")
+
+	// this is the exact call that fails during TwoPhaseClone (line 106)
+	require.NoError(t, EnsureCheckoutGitignore(dir))
+
+	// verify file exists with required entries
+	content, err := os.ReadFile(filepath.Join(dir, ".sageox", ".gitignore"))
+	require.NoError(t, err)
+	for _, entry := range checkoutRequiredEntries {
+		assert.Contains(t, string(content), entry)
+	}
+
+	// verify committed (not untracked)
+	output, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
+	require.NoError(t, err)
+	assert.Empty(t, strings.TrimSpace(string(output)),
+		"gitignore should be committed, not untracked")
 }

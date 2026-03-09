@@ -40,7 +40,7 @@ type SessionEntry struct {
 	ToolOutput string `json:"tool_output,omitempty"`
 
 	// CoworkerName identifies the coworker or subagent that contributed to this entry.
-	// This includes both team coworkers (loaded via ox coworker agent) and built-in
+	// This includes both team coworkers (loaded via ox coworker load) and built-in
 	// Claude Code subagents (invoked via Task tool, e.g., code-reviewer, debugger).
 	CoworkerName string `json:"coworker_name,omitempty"`
 

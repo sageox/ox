@@ -45,6 +45,7 @@ internal/session/sessions/
 # beads profiling/debug files
 bd-*
 *.prof
+.beads/backup
 
 # generated docs - raw markdown only (MDX is manually curated)
 docs/reference/*.md

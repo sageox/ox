@@ -147,8 +147,8 @@ func TestCheckForUpdates_MultipleFiles(t *testing.T) {
 		name string
 	}{
 		{"agent-context", "distilled-discussions.md"},
-		{"coworkers/ai/claude", "AGENTS.md"},
-		{"coworkers/ai/claude", "CLAUDE.md"},
+		{"coworkers", "AGENTS.md"},
+		{"coworkers", "CLAUDE.md"},
 	}
 
 	for _, f := range files {

@@ -23,6 +23,21 @@ func TestComputeSparseSet_DenyDataExcludesData(t *testing.T) {
 	assert.NotContains(t, result, "data/")
 }
 
+func TestComputeSparseSet_IncludesRootFiles(t *testing.T) {
+	cfg := &ManifestConfig{
+		Includes: []string{"memory/", ".sageox/"},
+		Denies:   []string{"data/"},
+	}
+
+	result := ComputeSparseSet(cfg)
+
+	// /* and !/*/ must be the first two entries: include root-level files,
+	// exclude root-level directories (re-included explicitly by includes)
+	require.Len(t, result, 4, "expected /* + !/*/ + 2 includes")
+	assert.Equal(t, "/*", result[0], "first entry should be /* to include root files")
+	assert.Equal(t, "!/*/", result[1], "second entry should be !/*/ to exclude root dirs")
+}
+
 func TestComputeSparseSet_DenyDataBlocksDataSubdirs(t *testing.T) {
 	cfg := &ManifestConfig{
 		Includes: []string{"data/slack/"},
@@ -31,7 +46,8 @@ func TestComputeSparseSet_DenyDataBlocksDataSubdirs(t *testing.T) {
 
 	result := ComputeSparseSet(cfg)
 
-	assert.Empty(t, result, "deny on parent data/ should block child data/slack/")
+	// only root-file patterns remain — no include dirs survived the deny
+	assert.Equal(t, []string{"/*", "!/*/"}, result, "deny on parent data/ should block child data/slack/")
 }
 
 func TestComputeSparseSet_FallbackConfigExcludesData(t *testing.T) {
@@ -98,11 +114,12 @@ func TestSparseCheckout_DataExcludedFromWorkingTree(t *testing.T) {
 
 	dir := t.TempDir()
 
-	// create repo with files in data/, memory/, and .sageox/
+	// create repo with files in data/, memory/, .sageox/, and root-level files
 	initGitRepo(t, dir, map[string]string{
-		"data/raw.txt":                  "raw data content",
-		"memory/daily/2026-01-01.md":    "daily memory",
-		".sageox/config.json":           `{"version": 1}`,
+		"data/raw.txt":               "raw data content",
+		"memory/daily/2026-01-01.md": "daily memory",
+		".sageox/config.json":        `{"version": 1}`,
+		".gitattributes":             "data/** filter=lfs\n",
 	})
 
 	// compute sparse set from a manifest that denies data/
@@ -113,9 +130,8 @@ func TestSparseCheckout_DataExcludedFromWorkingTree(t *testing.T) {
 	sparseSet := ComputeSparseSet(cfg)
 	require.NotEmpty(t, sparseSet)
 
-	// enable sparse checkout
-	runGit(t, dir, "sparse-checkout", "init", "--cone")
-	runGit(t, dir, append([]string{"sparse-checkout", "set"}, sparseSet...)...)
+	// enable sparse checkout in --no-cone mode (matches TwoPhaseClone)
+	runGit(t, dir, append([]string{"sparse-checkout", "set", "--no-cone"}, sparseSet...)...)
 
 	// data/raw.txt should NOT exist in the working tree
 	_, err := os.Stat(filepath.Join(dir, "data", "raw.txt"))
@@ -128,6 +144,10 @@ func TestSparseCheckout_DataExcludedFromWorkingTree(t *testing.T) {
 	// .sageox/ files should exist
 	_, err = os.Stat(filepath.Join(dir, ".sageox", "config.json"))
 	assert.NoError(t, err, ".sageox/config.json should exist in sparse working tree")
+
+	// root-level files (like .gitattributes) should exist via /* pattern
+	_, err = os.Stat(filepath.Join(dir, ".gitattributes"))
+	assert.NoError(t, err, ".gitattributes should exist in sparse working tree (root-level files included)")
 }
 
 func TestSparseCheckout_FreshCloneExcludesData(t *testing.T) {
@@ -142,9 +162,10 @@ func TestSparseCheckout_FreshCloneExcludesData(t *testing.T) {
 	// create a working repo, add files, push to bare
 	srcDir := t.TempDir()
 	initGitRepo(t, srcDir, map[string]string{
-		"data/file.txt":     "should be excluded",
-		"memory/obs.jsonl":  `{"observation": "test"}`,
-		".sageox/soul.md":   "team soul",
+		"data/file.txt":    "should be excluded",
+		"memory/obs.jsonl": `{"observation": "test"}`,
+		".sageox/soul.md":  "team soul",
+		".gitattributes":   "data/** filter=lfs\n",
 	})
 	runGit(t, srcDir, "remote", "add", "origin", bareDir)
 	runGit(t, srcDir, "push", "origin", "HEAD:main")
@@ -164,7 +185,7 @@ func TestSparseCheckout_FreshCloneExcludesData(t *testing.T) {
 	sparseSet := ComputeSparseSet(cfg)
 	require.NotEmpty(t, sparseSet)
 
-	runGit(t, cloneDir, append([]string{"sparse-checkout", "set"}, sparseSet...)...)
+	runGit(t, cloneDir, append([]string{"sparse-checkout", "set", "--no-cone"}, sparseSet...)...)
 
 	// data/ should not be in the working tree
 	_, err = os.Stat(filepath.Join(cloneDir, "data"))
@@ -173,4 +194,8 @@ func TestSparseCheckout_FreshCloneExcludesData(t *testing.T) {
 	// memory/ should be present
 	_, err = os.Stat(filepath.Join(cloneDir, "memory", "obs.jsonl"))
 	assert.NoError(t, err, "memory/obs.jsonl should exist in sparse clone")
+
+	// root-level files should be present via /* pattern
+	_, err = os.Stat(filepath.Join(cloneDir, ".gitattributes"))
+	assert.NoError(t, err, ".gitattributes should exist in sparse clone (root-level files included)")
 }

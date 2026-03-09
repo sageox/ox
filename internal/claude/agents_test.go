@@ -22,7 +22,7 @@ func TestDiscoverAgents_WithAgents(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// create agents directory
-	agentsDir := filepath.Join(tmpDir, ClaudeDir, "agents")
+	agentsDir := filepath.Join(tmpDir, AgentsDir)
 	if err := os.MkdirAll(agentsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ A test agent for reviewing code.
 func TestDiscoverAgents_WithIndex(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	agentsDir := filepath.Join(tmpDir, ClaudeDir, "agents")
+	agentsDir := filepath.Join(tmpDir, AgentsDir)
 	if err := os.MkdirAll(agentsDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -108,21 +108,48 @@ Some content.
 	}
 }
 
+func TestDiscoverAgents_SkipsUppercaseFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	agentsDir := filepath.Join(tmpDir, AgentsDir)
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// uppercase documentation files should be excluded
+	os.WriteFile(filepath.Join(agentsDir, "AGENTS.md"), []byte("# Agents Guide"), 0644)
+	os.WriteFile(filepath.Join(agentsDir, "README.md"), []byte("# README"), 0644)
+
+	// lowercase agent file should be included
+	os.WriteFile(filepath.Join(agentsDir, "reviewer.md"), []byte("---\ndescription: Reviews code\n---\n# Reviewer\n"), 0644)
+
+	agents, err := DiscoverAgents(tmpDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent (uppercase files excluded), got %d", len(agents))
+	}
+	if agents[0].Name != "reviewer" {
+		t.Errorf("expected 'reviewer', got %q", agents[0].Name)
+	}
+}
+
 func TestDiscoverAll(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	claudeDir := filepath.Join(tmpDir, ClaudeDir)
-	if err := os.MkdirAll(claudeDir, 0755); err != nil {
+	coworkersDir := filepath.Join(tmpDir, CoworkersDir)
+	if err := os.MkdirAll(coworkersDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 
 	// create CLAUDE.md
-	if err := os.WriteFile(filepath.Join(claudeDir, "CLAUDE.md"), []byte("# Team Claude Config"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(coworkersDir, "CLAUDE.md"), []byte("# Team Claude Config"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
 	// create AGENTS.md
-	if err := os.WriteFile(filepath.Join(claudeDir, "AGENTS.md"), []byte("# Team Agents"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(coworkersDir, "AGENTS.md"), []byte("# Team Agents"), 0644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -137,7 +164,7 @@ func TestDiscoverAll(t *testing.T) {
 	if !tc.HasAgentsMD {
 		t.Error("expected HasAgentsMD to be true")
 	}
-	if tc.ClaudeMDPath != filepath.Join(claudeDir, "CLAUDE.md") {
+	if tc.ClaudeMDPath != filepath.Join(coworkersDir, "CLAUDE.md") {
 		t.Errorf("unexpected ClaudeMDPath: %s", tc.ClaudeMDPath)
 	}
 	if !tc.HasInstructionFiles() {
@@ -170,4 +197,79 @@ func TestParseIndex(t *testing.T) {
 	if result["agent-three"] != "Third with dash separator" {
 		t.Errorf("agent-three: got %q", result["agent-three"])
 	}
+}
+
+func TestValidateAgentFile(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     string
+		wantDesc    string
+		wantModel   string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:      "valid with description and model",
+			content:   "---\ndescription: Expert reviewer\nmodel: opus\n---\n# Reviewer\n",
+			wantDesc:  "Expert reviewer",
+			wantModel: "opus",
+		},
+		{
+			name:     "valid with description only",
+			content:  "---\ndescription: Security auditor\n---\n# Security\n",
+			wantDesc: "Security auditor",
+		},
+		{
+			name:        "missing frontmatter",
+			content:     "# Just markdown\nNo frontmatter here.\n",
+			wantErr:     true,
+			errContains: "missing YAML frontmatter",
+		},
+		{
+			name:        "missing description",
+			content:     "---\nmodel: sonnet\n---\n# Agent\n",
+			wantErr:     true,
+			errContains: "missing required 'description'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpFile := filepath.Join(t.TempDir(), "agent.md")
+			if err := os.WriteFile(tmpFile, []byte(tt.content), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			desc, model, err := ValidateAgentFile(tmpFile)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateAgentFile() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr && tt.errContains != "" {
+				if err == nil || !contains(err.Error(), tt.errContains) {
+					t.Errorf("error = %v, want to contain %q", err, tt.errContains)
+				}
+				return
+			}
+			if desc != tt.wantDesc {
+				t.Errorf("description = %q, want %q", desc, tt.wantDesc)
+			}
+			if model != tt.wantModel {
+				t.Errorf("model = %q, want %q", model, tt.wantModel)
+			}
+		})
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstr(s, substr))
+}
+
+func containsSubstr(s, sub string) bool {
+	for i := 0; i <= len(s)-len(sub); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }

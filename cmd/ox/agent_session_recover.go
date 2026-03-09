@@ -88,20 +88,17 @@ func runAgentSessionRecover(inst *agentinstance.Instance) error {
 }
 
 // recoverViaNormalStop uses the normal session stop flow when the adapter file exists.
-func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, _ *session.RecordingState) error {
-	// stop recording (clears .recording.json and returns final state)
-	state, err := session.StopRecording(projectRoot, inst.AgentID)
-	if err != nil {
-		// if stop fails, force-clear and continue
-		_ = session.ClearRecordingStateForAgent(projectRoot, inst.AgentID)
-		return fmt.Errorf("failed to stop recording: %w", err)
-	}
-
+func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, state *session.RecordingState) error {
 	// process session through the normal pipeline
 	result, err := processAgentSession(projectRoot, state)
 	if err != nil {
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("failed to process session: %w", err)
+	}
+
+	if err := session.ClearRecordingState(projectRoot); err != nil {
+		_ = doctor.SetNeedsDoctorAgent(projectRoot)
+		return fmt.Errorf("failed to clear recovered recording state: %w", err)
 	}
 
 	output := &sessionRecoverOutput{
