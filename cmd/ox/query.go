@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/pkg/agentx"
@@ -38,8 +39,13 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	repoID, _ := cmd.Flags().GetString("repo")
 	mode, _ := cmd.Flags().GetString("mode")
 
+	query := strings.TrimSpace(args[0])
+	if query == "" {
+		return fmt.Errorf("query text is required")
+	}
+
 	qa := &queryArgs{
-		query:  args[0],
+		query:  query,
 		mode:   mode,
 		limit:  limit,
 		teamID: teamID,

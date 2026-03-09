@@ -139,6 +139,10 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 		qa.repoID = cfg.RepoID
 	}
 
+	if qa.limit <= 0 {
+		return 0, fmt.Errorf("invalid --limit: must be > 0")
+	}
+
 	req := &api.QueryRequest{
 		Query:     qa.query,
 		Mode:      qa.mode,
@@ -172,7 +176,11 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 		if errors.Is(err, api.ErrVersionUnsupported) {
 			return 0, fmt.Errorf("CLI version too old. Run 'ox version' and update")
 		}
-		return 0, fmt.Errorf("query failed (is %s reachable?): %w", endpoint.NormalizeEndpoint(ep), err)
+		// only suggest reachability for network-level errors, not HTTP status errors
+		if isNetworkError(err) {
+			return 0, fmt.Errorf("query failed (is %s reachable?): %w", endpoint.NormalizeEndpoint(ep), err)
+		}
+		return 0, fmt.Errorf("query failed: %w", err)
 	}
 
 	var buf bytes.Buffer
