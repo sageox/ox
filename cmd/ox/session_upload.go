@@ -87,6 +87,18 @@ func uploadSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, 
 
 	for _, name := range contentFiles {
 		filePath := filepath.Join(sessionPath, name)
+
+		// if file is already an LFS pointer, extract its ref directly —
+		// don't re-upload the pointer text as content
+		if lfs.IsPointerFile(filePath) {
+			ref, err := lfs.ReadPointerFile(filePath)
+			if err != nil {
+				return nil, fmt.Errorf("read pointer %s: %w", name, err)
+			}
+			fileRefs[name] = ref
+			continue
+		}
+
 		content, err := os.ReadFile(filePath)
 		if err != nil {
 			if os.IsNotExist(err) {
