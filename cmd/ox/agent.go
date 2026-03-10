@@ -151,6 +151,12 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// "hook" dispatched directly — no agent_id required.
+	// hooks fire before prime, so no agent ID exists yet.
+	if firstArg == "hook" {
+		return runAgentHook(args[1:])
+	}
+
 	// check if first arg looks like an agent_id (Ox<4-char>)
 	if agentinstance.IsValidAgentID(firstArg) {
 		return runWithAgentID(cmd, firstArg, args[1:])
