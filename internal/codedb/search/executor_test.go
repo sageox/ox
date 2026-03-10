@@ -303,3 +303,34 @@ func TestExecuteCommitDateFilter(t *testing.T) {
 		}
 	}
 }
+
+func TestExecuteSymbolSearchMasterBranch(t *testing.T) {
+	s := openTestStore(t)
+	// seed data with master branch instead of main — regression test for repos
+	// that use "master" as their default branch returning zero results
+	stmts := []string{
+		`INSERT INTO repos (id, name, path) VALUES (1, 'github.com/test/repo', '/tmp/repo')`,
+		`INSERT INTO commits (id, repo_id, hash, author, message, timestamp) VALUES (1, 1, 'abc1234567', 'alice', 'initial commit', 1700000000)`,
+		`INSERT INTO refs (id, repo_id, name, commit_id) VALUES (1, 1, 'refs/heads/master', 1)`,
+		`INSERT INTO blobs (id, content_hash, language, parsed) VALUES (1, 'hash1', 'go', 1)`,
+		`INSERT INTO file_revs (id, commit_id, path, blob_id) VALUES (1, 1, 'main.go', 1)`,
+		`INSERT INTO symbols (id, blob_id, name, kind, line, col, end_line, end_col) VALUES (1, 1, 'handler', 'function', 1, 1, 5, 1)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.Exec(stmt); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	q, err := ParseQuery("type:symbol handler")
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := Execute(context.Background(), s, q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected results for symbol search on master branch repo")
+	}
+}

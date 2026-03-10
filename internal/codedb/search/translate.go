@@ -78,7 +78,14 @@ func resolveRevRef(rev string) string {
 }
 
 // addRevFilter appends a ref name condition.
+// When no rev is specified, matches both main and master default branches.
 func addRevFilter(p *paramCollector, conditions *[]string, rev string) {
+	if rev == "" {
+		phMain := p.add("refs/heads/main")
+		phMaster := p.add("refs/heads/master")
+		*conditions = append(*conditions, "AND r.name IN ("+phMain+", "+phMaster+")")
+		return
+	}
 	ph := p.add(resolveRevRef(rev))
 	*conditions = append(*conditions, "AND r.name = "+ph)
 }

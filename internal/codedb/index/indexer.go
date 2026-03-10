@@ -580,20 +580,21 @@ func resolveDefaultBranch(repo *git.Repository) (refInfo, error) {
 }
 
 // walkNewCommits discovers commits reachable from tip that aren't in knownCommits.
-// Returns commits in oldest-first order. Respects maxDepth (0 = unlimited).
+// Returns commits in oldest-first (topological) order. Respects maxDepth (0 = unlimited).
+// Uses BFS so that after reversal, parents always appear before children even with merges.
 func walkNewCommits(repo *git.Repository, tip plumbing.Hash, knownCommits map[string]bool, maxDepth int) ([]commitData, bool) {
 	var newCommits []commitData
 	visited := make(map[plumbing.Hash]bool)
-	walkStack := []plumbing.Hash{tip}
+	queue := []plumbing.Hash{tip}
 	depthTruncated := false
 
-	for len(walkStack) > 0 {
+	for len(queue) > 0 {
 		if maxDepth > 0 && len(newCommits) >= maxDepth {
 			depthTruncated = true
 			break
 		}
-		oid := walkStack[len(walkStack)-1]
-		walkStack = walkStack[:len(walkStack)-1]
+		oid := queue[0]
+		queue = queue[1:]
 
 		oidHex := oid.String()
 		if knownCommits[oidHex] || visited[oid] {
@@ -609,7 +610,7 @@ func walkNewCommits(repo *git.Repository, tip plumbing.Hash, knownCommits map[st
 		var parentIDs []plumbing.Hash
 		for _, p := range commitObj.ParentHashes {
 			parentIDs = append(parentIDs, p)
-			walkStack = append(walkStack, p)
+			queue = append(queue, p)
 		}
 
 		newCommits = append(newCommits, commitData{
@@ -622,7 +623,7 @@ func walkNewCommits(repo *git.Repository, tip plumbing.Hash, knownCommits map[st
 		})
 	}
 
-	// Reverse for oldest-first processing
+	// Reverse for oldest-first (topological) processing
 	for i, j := 0, len(newCommits)-1; i < j; i, j = i+1, j-1 {
 		newCommits[i], newCommits[j] = newCommits[j], newCommits[i]
 	}
@@ -1121,25 +1122,39 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 			report(fmt.Sprintf("Parsing symbols: %d/%d blobs...", i+1, len(blobs)))
 		}
 
-		oid := plumbing.NewHash(blob.contentHash)
 		var content []byte
-		for _, r := range repos {
-			blobObj, bErr := r.BlobObject(oid)
-			if bErr != nil {
-				continue
+		if strings.HasPrefix(blob.contentHash, "worktree:") {
+			// worktree blobs: find file path from file_revs, read from disk
+			var filePath, repoPath string
+			err := tx.QueryRow(`
+				SELECT fr.path, rp.path FROM file_revs fr
+				JOIN commits c ON c.id = fr.commit_id
+				JOIN repos rp ON rp.id = c.repo_id
+				WHERE fr.blob_id = ? LIMIT 1`, blob.id).Scan(&filePath, &repoPath)
+			if err == nil {
+				fullPath := filepath.Join(repoPath, filePath)
+				content, _ = os.ReadFile(fullPath)
 			}
-			reader, rErr := blobObj.Reader()
-			if rErr != nil {
-				continue
+		} else {
+			oid := plumbing.NewHash(blob.contentHash)
+			for _, r := range repos {
+				blobObj, bErr := r.BlobObject(oid)
+				if bErr != nil {
+					continue
+				}
+				reader, rErr := blobObj.Reader()
+				if rErr != nil {
+					continue
+				}
+				var readErr error
+				content, readErr = io.ReadAll(reader)
+				reader.Close()
+				if readErr != nil {
+					content = nil
+					continue
+				}
+				break
 			}
-			var readErr error
-			content, readErr = io.ReadAll(reader)
-			reader.Close()
-			if readErr != nil {
-				content = nil
-				continue
-			}
-			break
 		}
 		if content == nil || !utf8.Valid(content) {
 			tx.Exec("UPDATE blobs SET parsed = 1 WHERE id = ?", blob.id)

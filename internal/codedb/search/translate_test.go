@@ -533,3 +533,18 @@ func TestTranslateRepoAtRevision(t *testing.T) {
 		t.Errorf("missing develop ref: %v", tq.Params)
 	}
 }
+
+func TestTranslateCaseSensitiveBracketEscape(t *testing.T) {
+	// Regression: bracket chars in symbol names (e.g. "Array[Int]") must be
+	// escaped for GLOB so SQLite treats them as literals, not character classes
+	tq := mustTranslate(t, "type:symbol case:yes Array[Int]")
+	found := false
+	for _, p := range tq.Params {
+		if strings.Contains(p, "[[]") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected bracket escape in params, got: %v", tq.Params)
+	}
+}
