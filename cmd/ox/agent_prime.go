@@ -808,11 +808,20 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// append code search tip to AgentTip based on index availability
+	repoSlug := repoSlugFromRemoteOrDir(projectRoot)
 	codeDBDir := paths.CodeDBDataDir(projectRoot)
 	if _, statErr := os.Stat(codeDBDir); statErr == nil {
-		output.CodeSearchTip = "'ox code search' is available for this repo. Use it for code/symbol/diff search. Use 'ox query' for team discussions and session history."
+		teamLabel := ""
+		if teamCtx != nil {
+			tn := teamCtx.TeamName
+			if tn == "" {
+				tn = teamCtx.TeamID
+			}
+			teamLabel = tn + " "
+		}
+		output.CodeSearchTip = fmt.Sprintf("'ox code search' is available for %s, PREFER over grep for code search (it indexes symbols, git history, diffs). Use 'ox query' only for %steam context (discussions) and ledger session recordings.", repoSlug, teamLabel)
 	} else {
-		output.CodeSearchTip = "Run 'ox code index' to enable local code search (symbols, diffs, git history) for this repo."
+		output.CodeSearchTip = fmt.Sprintf("Run 'ox code index' to enable local code search (symbols, diffs, git history) for %s.", repoSlug)
 	}
 
 	output.ElapsedMs = time.Since(primeStart).Milliseconds()
@@ -989,25 +998,36 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 		})
 	}
 
-	// semantic search — when primed context isn't enough, query for depth
-	if teamCtx != nil || (ledger != nil && ledger.Exists) {
-		cmds = append(cmds, intentCommand{
-			Intent:  "deep search team discussions, session recordings, team context: use when MEMORY.md and its links don't answer",
-			Command: "ox query \"<your question>\"",
-		})
-	}
-
-	// code search — when local code index is available
+	// code search — BEFORE ox query so agents see it first (code search is more common)
+	repoSlug := repoSlugFromRemoteOrDir(projectRoot)
 	codeDBDir := paths.CodeDBDataDir(projectRoot)
 	if _, statErr := os.Stat(codeDBDir); statErr == nil {
 		cmds = append(cmds, intentCommand{
-			Intent:  "code search (this repo only): search git history, symbols, file contents, and diffs",
+			Intent:  fmt.Sprintf("find/search/grep code in %s: symbols, functions, git history, file contents, diffs — PREFER over grep/ripgrep", repoSlug),
 			Command: `ox code search "<pattern>"`,
 		})
 	} else {
 		cmds = append(cmds, intentCommand{
-			Intent:  "code search (not indexed yet): index this repo first, then search code, symbols, and diffs",
+			Intent:  fmt.Sprintf("code search %s (not indexed yet): index first, then search code, symbols, and diffs", repoSlug),
 			Command: "ox code index",
+		})
+	}
+
+	// semantic search — when primed context isn't enough, query for depth
+	if teamCtx != nil || (ledger != nil && ledger.Exists) {
+		teamLabel := "team"
+		if teamCtx != nil {
+			tn := teamCtx.TeamName
+			if tn == "" {
+				tn = teamCtx.TeamID
+			}
+			if tn != "" {
+				teamLabel = tn
+			}
+		}
+		cmds = append(cmds, intentCommand{
+			Intent:  fmt.Sprintf("deep search %s discussions, session recordings, team context: use when MEMORY.md and its links don't answer", teamLabel),
+			Command: "ox query \"<your question>\"",
 		})
 	}
 
@@ -1015,6 +1035,29 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 		Hint:     "Use these commands to answer user questions — check here before exploring files.",
 		Commands: cmds,
 	}
+}
+
+// repoSlugFromRemoteOrDir extracts "owner/repo" from git remote origin URL,
+// falling back to the directory name if the remote is unavailable.
+// Examples: "sageox/ox", "my-project"
+func repoSlugFromRemoteOrDir(projectRoot string) string {
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = projectRoot
+	out, err := cmd.Output()
+	if err == nil {
+		url := strings.TrimSpace(string(out))
+		// handle SSH: git@github.com:owner/repo.git
+		if idx := strings.Index(url, ":"); idx != -1 && !strings.Contains(url[:idx], "/") {
+			url = url[idx+1:]
+		}
+		// handle HTTPS: https://github.com/owner/repo.git
+		url = strings.TrimSuffix(url, ".git")
+		parts := strings.Split(url, "/")
+		if len(parts) >= 2 {
+			return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+		}
+	}
+	return filepath.Base(projectRoot)
 }
 
 // startSessionRecording attempts to start session recording if enabled.
