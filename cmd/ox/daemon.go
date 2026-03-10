@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/mattn/go-isatty"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
@@ -187,9 +188,26 @@ var daemonLogsCmd = &cobra.Command{
 		tailArgs = append(tailArgs, logPath)
 
 		tailCmd := exec.Command("tail", tailArgs...)
-		tailCmd.Stdout = os.Stdout
 		tailCmd.Stderr = os.Stderr
-		return tailCmd.Run()
+
+		// colorize when output is a terminal
+		colorize := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+		if !colorize {
+			tailCmd.Stdout = os.Stdout
+			return tailCmd.Run()
+		}
+
+		stdout, err := tailCmd.StdoutPipe()
+		if err != nil {
+			return fmt.Errorf("failed to create pipe: %w", err)
+		}
+
+		if err := tailCmd.Start(); err != nil {
+			return fmt.Errorf("failed to start tail: %w", err)
+		}
+
+		cli.StreamFormattedLogs(stdout, os.Stdout)
+		return tailCmd.Wait()
 	},
 }
 
