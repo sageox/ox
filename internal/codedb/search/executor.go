@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/blevesearch/bleve/v2"
@@ -74,6 +75,7 @@ func executePlanSQL(ctx context.Context, s *store.Store, plan *ExecutionPlan) ([
 			ptrs[i] = &values[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
+			slog.Warn("scan error, skipping row", "err", err)
 			continue
 		}
 
@@ -102,6 +104,9 @@ func executePlanSQL(ctx context.Context, s *store.Store, plan *ExecutionPlan) ([
 			}
 		}
 		results = append(results, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
 	}
 
 	return results, nil
@@ -196,12 +201,16 @@ func enrichDiffHit(ctx context.Context, s *store.Store, hit *blevesearch.Documen
 	for rows.Next() {
 		var hash, author, message, path string
 		if err := rows.Scan(&hash, &author, &message, &path); err != nil {
+			slog.Warn("diff hit scan error, skipping row", "err", err)
 			continue
 		}
 		results = append(results, Result{
 			CommitHash: hash, Author: author, Message: message,
 			FilePath: path, Score: hit.Score, Content: fragment,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate diff rows: %w", err)
 	}
 	return results, nil
 }
@@ -210,9 +219,9 @@ func enrichDiffHit(ctx context.Context, s *store.Store, hit *blevesearch.Documen
 func enrichCodeHit(ctx context.Context, s *store.Store, hit *blevesearch.DocumentMatch, fragment string, filters *Filters) ([]Result, error) {
 	blobID := strings.TrimPrefix(hit.ID, "blob_")
 
-	revRef := "refs/heads/main"
+	var revFilter string
 	if filters != nil && filters.Rev != "" {
-		revRef = resolveRevRef(filters.Rev)
+		revFilter = resolveRevRef(filters.Rev)
 	}
 
 	sqlQ := `
@@ -221,8 +230,13 @@ func enrichCodeHit(ctx context.Context, s *store.Store, hit *blevesearch.Documen
 		JOIN file_revs fr ON fr.blob_id = b.id
 		JOIN refs r ON r.commit_id = fr.commit_id
 		JOIN repos rp ON rp.id = r.repo_id
-		WHERE b.id = ? AND r.name = ?`
-	args := []interface{}{blobID, revRef}
+		WHERE b.id = ?`
+	args := []interface{}{blobID}
+
+	if revFilter != "" {
+		sqlQ += " AND r.name = ?"
+		args = append(args, revFilter)
+	}
 
 	if filters != nil {
 		addCodeFilters(&sqlQ, &args, filters)
@@ -239,6 +253,7 @@ func enrichCodeHit(ctx context.Context, s *store.Store, hit *blevesearch.Documen
 		var path string
 		var lang, repo sql.NullString
 		if err := rows.Scan(&path, &lang, &repo); err != nil {
+			slog.Warn("code hit scan error, skipping row", "err", err)
 			continue
 		}
 		results = append(results, Result{
@@ -246,25 +261,28 @@ func enrichCodeHit(ctx context.Context, s *store.Store, hit *blevesearch.Documen
 			Language: lang.String, Repo: repo.String,
 		})
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate code rows: %w", err)
+	}
 	return results, nil
 }
 
 // addDiffFilters appends SQL WHERE clauses for diff metadata filtering.
 func addDiffFilters(sqlQ *string, args *[]interface{}, f *Filters) {
 	if f.Repo != "" {
-		*sqlQ += " AND c.repo_id IN (SELECT id FROM repos WHERE " + likeOrGlob("name", f.Repo, false) + ")"
+		*sqlQ += " AND c.repo_id IN (SELECT id FROM repos WHERE " + likeOrGlob("name", f.Repo, f.Case) + ")"
 		*args = append(*args, likeOrGlobParam(f.Repo))
 	}
 	if f.NegRepo != "" {
-		*sqlQ += " AND c.repo_id NOT IN (SELECT id FROM repos WHERE " + likeOrGlob("name", f.NegRepo, false) + ")"
+		*sqlQ += " AND c.repo_id NOT IN (SELECT id FROM repos WHERE " + likeOrGlob("name", f.NegRepo, f.Case) + ")"
 		*args = append(*args, likeOrGlobParam(f.NegRepo))
 	}
 	if f.File != "" {
-		*sqlQ += " AND " + likeOrGlob("d.path", f.File, false)
+		*sqlQ += " AND " + likeOrGlob("d.path", f.File, f.Case)
 		*args = append(*args, likeOrGlobParam(f.File))
 	}
 	if f.NegFile != "" {
-		*sqlQ += " AND NOT (" + likeOrGlob("d.path", f.NegFile, false) + ")"
+		*sqlQ += " AND NOT (" + likeOrGlob("d.path", f.NegFile, f.Case) + ")"
 		*args = append(*args, likeOrGlobParam(f.NegFile))
 	}
 	if f.Author != "" {
@@ -288,19 +306,19 @@ func addDiffFilters(sqlQ *string, args *[]interface{}, f *Filters) {
 // addCodeFilters appends SQL WHERE clauses for code metadata filtering.
 func addCodeFilters(sqlQ *string, args *[]interface{}, f *Filters) {
 	if f.Repo != "" {
-		*sqlQ += " AND " + likeOrGlob("rp.name", f.Repo, false)
+		*sqlQ += " AND " + likeOrGlob("rp.name", f.Repo, f.Case)
 		*args = append(*args, likeOrGlobParam(f.Repo))
 	}
 	if f.NegRepo != "" {
-		*sqlQ += " AND NOT (" + likeOrGlob("rp.name", f.NegRepo, false) + ")"
+		*sqlQ += " AND NOT (" + likeOrGlob("rp.name", f.NegRepo, f.Case) + ")"
 		*args = append(*args, likeOrGlobParam(f.NegRepo))
 	}
 	if f.File != "" {
-		*sqlQ += " AND " + likeOrGlob("fr.path", f.File, false)
+		*sqlQ += " AND " + likeOrGlob("fr.path", f.File, f.Case)
 		*args = append(*args, likeOrGlobParam(f.File))
 	}
 	if f.NegFile != "" {
-		*sqlQ += " AND NOT (" + likeOrGlob("fr.path", f.NegFile, false) + ")"
+		*sqlQ += " AND NOT (" + likeOrGlob("fr.path", f.NegFile, f.Case) + ")"
 		*args = append(*args, likeOrGlobParam(f.NegFile))
 	}
 	if f.Lang != "" {

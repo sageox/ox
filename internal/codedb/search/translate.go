@@ -32,11 +32,20 @@ func patternMatchClause(column, pattern string, p *paramCollector) string {
 		return fmt.Sprintf("lower(%s) GLOB %s", column, ph)
 	}
 	if p.caseSensitive {
-		ph := p.add("*" + pattern + "*")
+		escaped := escapeGlobChars(pattern)
+		ph := p.add("*" + escaped + "*")
 		return fmt.Sprintf("%s GLOB %s", column, ph)
 	}
 	ph := p.add("%" + pattern + "%")
 	return fmt.Sprintf("%s LIKE %s", column, ph)
+}
+
+// escapeGlobChars escapes SQLite GLOB metacharacters in a literal string.
+func escapeGlobChars(s string) string {
+	r := strings.NewReplacer(
+		"[", "[[]",
+	)
+	return r.Replace(s)
 }
 
 // orMatchClause generates (col LIKE ? OR col LIKE ?) for multiple OR groups.

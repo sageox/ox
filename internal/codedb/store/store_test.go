@@ -266,15 +266,14 @@ func TestCloseIdempotent(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 
-	// first close should succeed without error
 	if err := s.Close(); err != nil {
 		t.Errorf("first Close returned unexpected error: %v", err)
 	}
 
-	// NOTE: calling Close() a second time panics in the bleve library
-	// (close of closed channel). This is a known limitation -- callers
-	// must not call Close more than once. This test documents that
-	// constraint rather than asserting double-close safety.
+	// second close should be safe (no panic, no error)
+	if err := s.Close(); err != nil {
+		t.Errorf("second Close returned unexpected error: %v", err)
+	}
 }
 
 func TestReposDir(t *testing.T) {

@@ -212,16 +212,20 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	}
 	report(fmt.Sprintf("Indexing complete: %d new commits, %d new blobs.", st.newCommits, st.newBlobs))
 
-	// 8. Flush remaining batches and commit transaction
+	// 8. Commit SQL transaction first, then flush Bleve batches.
+	// This ordering ensures Bleve never contains documents without
+	// corresponding SQL rows (split-brain). If SQL commit fails,
+	// Bleve is unchanged. If Bleve flush fails after SQL commit,
+	// a re-index will re-populate Bleve from the committed SQL data.
 	t3 := time.Now()
-	if err := st.flushCodeBatch(true); err != nil {
-		return err
-	}
-	if err := st.flushDiffBatch(true); err != nil {
-		return err
-	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit transaction: %w", err)
+	}
+	if err := st.flushCodeBatch(true); err != nil {
+		return fmt.Errorf("flush code index after commit: %w", err)
+	}
+	if err := st.flushDiffBatch(true); err != nil {
+		return fmt.Errorf("flush diff index after commit: %w", err)
 	}
 	report(fmt.Sprintf("  flush+commit: %s", time.Since(t3).Round(time.Millisecond)))
 	report(fmt.Sprintf("  total: %s", time.Since(t0).Round(time.Millisecond)))
@@ -320,16 +324,16 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 
 	report(fmt.Sprintf("Indexing complete: %d new commits, %d new blobs.", st.newCommits, st.newBlobs))
 
-	// 9. Flush remaining batches and commit transaction
+	// 9. Commit SQL transaction first, then flush Bleve batches.
 	t3 := time.Now()
-	if err := st.flushCodeBatch(true); err != nil {
-		return err
-	}
-	if err := st.flushDiffBatch(true); err != nil {
-		return err
-	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit transaction: %w", err)
+	}
+	if err := st.flushCodeBatch(true); err != nil {
+		return fmt.Errorf("flush code index after commit: %w", err)
+	}
+	if err := st.flushDiffBatch(true); err != nil {
+		return fmt.Errorf("flush diff index after commit: %w", err)
 	}
 	report(fmt.Sprintf("  flush+commit: %s", time.Since(t3).Round(time.Millisecond)))
 	report(fmt.Sprintf("  total: %s", time.Since(t0).Round(time.Millisecond)))
@@ -1083,6 +1087,9 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 		repoPaths = append(repoPaths, p)
 	}
 	repoRows.Close()
+	if err := repoRows.Err(); err != nil {
+		return stats, fmt.Errorf("iterate repo paths: %w", err)
+	}
 
 	if len(repoPaths) == 0 {
 		return stats, fmt.Errorf("no repos found in database")

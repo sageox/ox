@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/blevesearch/bleve/v2"
 	_ "modernc.org/sqlite"
@@ -23,6 +24,7 @@ type Store struct {
 	CodeIndex bleve.Index
 	DiffIndex bleve.Index
 	Root      string
+	closeOnce sync.Once
 }
 
 // Open opens (or creates) a Store at the given root directory.
@@ -90,18 +92,20 @@ func (s *Store) ReposDir() string {
 	return filepath.Join(s.Root, "repos")
 }
 
-// Close closes all resources.
+// Close closes all resources. It is safe to call multiple times.
 func (s *Store) Close() error {
 	var firstErr error
-	if err := s.CodeIndex.Close(); err != nil {
-		firstErr = err
-	}
-	if err := s.DiffIndex.Close(); err != nil && firstErr == nil {
-		firstErr = err
-	}
-	if err := s.db.Close(); err != nil && firstErr == nil {
-		firstErr = err
-	}
+	s.closeOnce.Do(func() {
+		if err := s.CodeIndex.Close(); err != nil {
+			firstErr = err
+		}
+		if err := s.DiffIndex.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if err := s.db.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	})
 	return firstErr
 }
 
@@ -152,7 +156,7 @@ func openOrCreateBleveIndex(path string) (bleve.Index, error) {
 	if err == nil {
 		return idx, nil
 	}
-	if err == bleve.ErrorIndexPathDoesNotExist {
+	if errors.Is(err, bleve.ErrorIndexPathDoesNotExist) {
 		mapping := bleve.NewIndexMapping()
 		return bleve.New(path, mapping)
 	}

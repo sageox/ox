@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 
 	"github.com/sageox/ox/internal/codedb/index"
 	"github.com/sageox/ox/internal/codedb/search"
@@ -88,6 +89,7 @@ func (db *DB) RawSQL(query string) ([]string, [][]string, error) {
 			ptrs[i] = &values[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
+			slog.Warn("raw sql scan error, skipping row", "err", err)
 			continue
 		}
 		row := make([]string, len(cols))
@@ -99,6 +101,9 @@ func (db *DB) RawSQL(query string) ([]string, [][]string, error) {
 			}
 		}
 		results = append(results, row)
+	}
+	if err := rows.Err(); err != nil {
+		return cols, results, fmt.Errorf("iterate rows: %w", err)
 	}
 
 	return cols, results, nil
