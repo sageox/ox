@@ -102,6 +102,8 @@ func formatStatusCore(status *StatusData, cliVersion string, verbose bool) strin
 	// workspace sync groups
 	out.WriteString(formatWorkspaceGroups(status, verbose))
 
+	// code index is now part of the "This Project" tree — see formatWorkspaceGroups
+
 	// issues (if any)
 	if issues := formatIssues(status.NeedsHelp, status.Issues); issues != "" {
 		out.WriteString("\n")
@@ -314,8 +316,12 @@ func formatWorkspaceGroups(status *StatusData, verbose bool) string {
 		}
 	}
 
-	// project section: ledger + primary team context shown as a tree
+	// project section: ledger + primary team context + code index shown as a tree
 	projectCount := len(ledgers) + len(projectTCs)
+	hasCodeIndex := status.CodeDB != nil
+	if hasCodeIndex {
+		projectCount++
+	}
 	if projectCount > 0 {
 		out.WriteString("\n")
 		out.WriteString(styleBold.Render("This Project"))
@@ -342,6 +348,14 @@ func formatWorkspaceGroups(status *StatusData, verbose bool) string {
 			items = append(items, treeItem{
 				label:  name + styleMuted.Render(" (team context)"),
 				status: formatWSStatus(tc) + formatGCStatus(tc, verbose),
+			})
+		}
+
+		// code index as tree item
+		if hasCodeIndex {
+			items = append(items, treeItem{
+				label:  "Code index",
+				status: formatCodeIndexInline(status, verbose),
 			})
 		}
 
@@ -402,6 +416,43 @@ func formatWorkspaceGroups(status *StatusData, verbose bool) string {
 	}
 
 	return out.String()
+}
+
+// formatCodeIndexInline renders a compact single-line code index status for tree display.
+func formatCodeIndexInline(status *StatusData, verbose bool) string {
+	cs := status.CodeDB
+	if cs == nil {
+		return styleMuted.Render("○ unknown")
+	}
+
+	var line string
+	switch {
+	case cs.IndexingNow:
+		line = styleWarning.Render("◐ indexing…")
+	case !cs.IndexExists:
+		line = styleWarning.Render("○ pending")
+	case cs.LastError != "" && cs.Commits == 0:
+		line = styleWarning.Render("○ pending")
+	case cs.LastError != "":
+		line = styleCritical.Render("○ " + cs.LastError)
+	case !cs.LastIndexed.IsZero():
+		age := formatRelativeTime(time.Since(cs.LastIndexed))
+		metrics := fmt.Sprintf("%d commits, %d blobs", cs.Commits, cs.Blobs)
+		line = styleHealthy.Render("● "+age) + "  " + styleMuted.Render(metrics)
+	default:
+		line = styleHealthy.Render("● ready")
+	}
+
+	if verbose && cs.IndexExists && cs.Commits > 0 {
+		if cs.DataDir != "" {
+			line += "\n" + styleMuted.Render("              "+shortenPath(cs.DataDir))
+		}
+		for _, r := range cs.Repos {
+			line += "\n" + styleMuted.Render(fmt.Sprintf("              %s  %d commits, %d blobs", r.Name, r.Commits, r.Blobs))
+		}
+	}
+
+	return line
 }
 
 // stripANSI removes ANSI escape sequences for measuring display width.

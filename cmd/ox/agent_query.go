@@ -131,7 +131,14 @@ Also available as: ox agent <id> query "search text"`
 // combinedQueryResponse holds results from both team context and local code search.
 type combinedQueryResponse struct {
 	TeamContext *api.QueryResponse `json:"team_context,omitempty"`
-	CodeResults []search.Result    `json:"code_results,omitempty"`
+	CodeResults []search.Result    `json:"code_results,omitempty"` // used by --full-json only
+}
+
+// compactQueryResponse is the default agent query output — minimal context footprint.
+type compactQueryResponse struct {
+	TeamContext *api.QueryResponse    `json:"team_context,omitempty"`
+	CodeResults []compactSearchResult `json:"code_results,omitempty"`
+	Guidance    string                `json:"guidance,omitempty"`
 }
 
 // runAgentQuery handles `ox agent <id> query "search text"`.
@@ -183,6 +190,7 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 	}
 
 	// query local code index if source is "all" or "code"
+	var codeResults []search.Result
 	if qa.source == "all" || qa.source == "code" {
 		results, err := queryCodeDB(qa, projectRoot)
 		if err != nil {
@@ -191,14 +199,24 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 			}
 			slog.Warn("code search failed, continuing with team context", "error", err)
 		} else {
-			combined.CodeResults = results
+			codeResults = results
 		}
+	}
+
+	// compact output — minimal context footprint for agents
+	resp := compactQueryResponse{
+		TeamContext: combined.TeamContext,
+	}
+	if len(codeResults) > 0 {
+		compact := compactSearchResults(codeResults, qa.limit)
+		resp.CodeResults = compact.Results
+		resp.Guidance = compact.Guidance
 	}
 
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(combined); err != nil {
+	if err := enc.Encode(resp); err != nil {
 		return 0, fmt.Errorf("failed to encode response: %w", err)
 	}
 

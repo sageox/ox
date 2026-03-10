@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -245,9 +246,11 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 
 	t0 := time.Now()
 
-	// 1. Open the repo in-place
+	// 1. Open the repo — for linked worktrees, open the main repo so
+	// go-git can access the shared object store (packfiles, loose objects).
 	report("Opening local repository...")
-	repo, err := git.PlainOpen(localPath)
+	repoOpenPath, isWorktree := resolveGitDir(localPath)
+	repo, err := git.PlainOpen(repoOpenPath)
 	if err != nil {
 		return fmt.Errorf("open local repo %s: %w", localPath, err)
 	}
@@ -265,8 +268,14 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 		return fmt.Errorf("load known commits: %w", err)
 	}
 
-	// 4. Resolve default branch
-	defaultRef, err := resolveDefaultBranch(repo)
+	// 4. Resolve default branch — for linked worktrees, always use git CLI
+	// since go-git opened the main repo (which has a different HEAD)
+	var defaultRef refInfo
+	if isWorktree {
+		defaultRef, err = resolveDefaultBranchGit(localPath)
+	} else {
+		defaultRef, err = resolveDefaultBranchWithPath(repo, localPath)
+	}
 	if err != nil {
 		return fmt.Errorf("resolve default branch: %w", err)
 	}
@@ -555,6 +564,8 @@ func loadExistingRefs(s *store.Store, repoID int64) (map[string]string, error) {
 
 // resolveDefaultBranch returns the single default branch ref (main/master).
 // It checks HEAD first, then falls back to common default branch names.
+// For linked worktrees (where .git is a file), go-git may fail to resolve HEAD,
+// so we fall back to the git CLI.
 func resolveDefaultBranch(repo *git.Repository) (refInfo, error) {
 	// Try HEAD — in bare repos this points to the default branch
 	headRef, err := repo.Head()
@@ -577,6 +588,86 @@ func resolveDefaultBranch(repo *git.Repository) (refInfo, error) {
 	}
 
 	return refInfo{}, fmt.Errorf("no default branch found (tried HEAD, main, master)")
+}
+
+// resolveDefaultBranchWithPath resolves the default branch, falling back to
+// the git CLI for linked worktrees where go-git can't resolve HEAD.
+func resolveDefaultBranchWithPath(repo *git.Repository, localPath string) (refInfo, error) {
+	ref, err := resolveDefaultBranch(repo)
+	if err == nil {
+		return ref, nil
+	}
+
+	// go-git fails on linked worktrees — fall back to git CLI
+	return resolveDefaultBranchGit(localPath)
+}
+
+// resolveDefaultBranchGit uses the git CLI to resolve HEAD when go-git can't
+// (e.g., linked worktrees where .git is a file).
+func resolveDefaultBranchGit(repoPath string) (refInfo, error) {
+	// get the symbolic ref name (e.g., refs/heads/main)
+	nameCmd := exec.Command("git", "symbolic-ref", "HEAD")
+	nameCmd.Dir = repoPath
+	nameOut, err := nameCmd.Output()
+	if err != nil {
+		return refInfo{}, fmt.Errorf("git symbolic-ref HEAD: %w", err)
+	}
+	refName := strings.TrimSpace(string(nameOut))
+
+	// get the commit hash
+	hashCmd := exec.Command("git", "rev-parse", "HEAD")
+	hashCmd.Dir = repoPath
+	hashOut, err := hashCmd.Output()
+	if err != nil {
+		return refInfo{}, fmt.Errorf("git rev-parse HEAD: %w", err)
+	}
+	hashStr := strings.TrimSpace(string(hashOut))
+
+	return refInfo{
+		name:   refName,
+		tipOID: plumbing.NewHash(hashStr),
+	}, nil
+}
+
+// resolveGitDir returns the path to open with go-git and whether it's a linked
+// worktree. For linked worktrees (where .git is a file containing "gitdir: ..."),
+// it follows the pointer to the main repo's .git directory so go-git can access
+// the shared object store. For normal repos, returns the path unchanged.
+func resolveGitDir(repoPath string) (string, bool) {
+	dotGit := filepath.Join(repoPath, ".git")
+	info, err := os.Lstat(dotGit)
+	if err != nil || info.IsDir() {
+		return repoPath, false // normal repo or no .git
+	}
+
+	// .git is a file → linked worktree, read "gitdir: <path>"
+	content, err := os.ReadFile(dotGit)
+	if err != nil {
+		return repoPath, false
+	}
+	line := strings.TrimSpace(string(content))
+	if !strings.HasPrefix(line, "gitdir: ") {
+		return repoPath, false
+	}
+	worktreeGitDir := strings.TrimPrefix(line, "gitdir: ")
+	if !filepath.IsAbs(worktreeGitDir) {
+		worktreeGitDir = filepath.Join(repoPath, worktreeGitDir)
+	}
+
+	// read commondir to find the shared .git (e.g., "../.." → main .git)
+	commondirFile := filepath.Join(worktreeGitDir, "commondir")
+	commondirBytes, err := os.ReadFile(commondirFile)
+	if err != nil {
+		return repoPath, false
+	}
+	commondir := strings.TrimSpace(string(commondirBytes))
+	if !filepath.IsAbs(commondir) {
+		commondir = filepath.Join(worktreeGitDir, commondir)
+	}
+
+	// commondir points to the main .git dir; the repo root is its parent
+	mainRepoRoot := filepath.Dir(commondir)
+	return mainRepoRoot, true
 }
 
 // walkNewCommits discovers commits reachable from tip that aren't in knownCommits.

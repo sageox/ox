@@ -169,13 +169,9 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 }
 
 // CheckFreshness checks if the index needs refreshing and triggers a background
-// re-index if stale. This is non-blocking and safe to call from the scheduler.
+// re-index if needed. If no index exists yet, creates the initial index.
+// This is non-blocking and safe to call from the scheduler or daemon startup.
 func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
-	dataDir := paths.CodeDBDataDir(m.projectRoot)
-	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
-		return // no index yet, nothing to refresh
-	}
-
 	m.mu.Lock()
 	if m.indexing {
 		m.mu.Unlock()
@@ -183,12 +179,26 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 	}
 	m.mu.Unlock()
 
-	// run a quick background re-index (incremental — skips if tip unchanged)
+	dataDir := paths.CodeDBDataDir(m.projectRoot)
+	isInitial := false
+	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
+		isInitial = true
+	}
+
+	// run background index (initial build or incremental refresh)
 	go func() {
-		m.logger.Debug("codedb freshness check starting")
+		if isInitial {
+			m.logger.Info("codedb auto-indexing repo for first time")
+		} else {
+			m.logger.Debug("codedb freshness check starting")
+		}
 		_, err := m.Index(ctx, CodeIndexPayload{}, nil)
 		if err != nil {
-			m.logger.Debug("codedb freshness check failed", "error", err)
+			if isInitial {
+				m.logger.Warn("codedb initial index failed", "error", err)
+			} else {
+				m.logger.Debug("codedb freshness check failed", "error", err)
+			}
 		}
 	}()
 }

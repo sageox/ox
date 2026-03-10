@@ -231,12 +231,17 @@ func TestConcurrentSearchWhileIndexing(t *testing.T) {
 
 // TestMultipleManagersCheckFreshness simulates multiple daemons (worktrees)
 // calling CheckFreshness simultaneously. CheckFreshness is non-blocking and
-// should not panic or deadlock.
+// should not panic or deadlock. When no index exists, it fires a background
+// goroutine to create the initial index.
 func TestMultipleManagersCheckFreshness(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	tmpDir := t.TempDir()
+
+	// use a cancellable context so background indexing goroutines stop before cleanup
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	const managers = 10
 	var wg sync.WaitGroup
@@ -246,8 +251,7 @@ func TestMultipleManagersCheckFreshness(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			mgr := NewCodeDBManager(tmpDir, logger)
-			// CheckFreshness should return immediately when no index exists
-			mgr.CheckFreshness(context.Background())
+			mgr.CheckFreshness(ctx)
 		}()
 	}
 
@@ -262,6 +266,11 @@ func TestMultipleManagersCheckFreshness(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("CheckFreshness deadlocked under concurrent calls")
 	}
+
+	// cancel to stop any background indexing before temp dir cleanup
+	cancel()
+	// brief pause for goroutines to notice cancellation
+	time.Sleep(50 * time.Millisecond)
 }
 
 // TestConcurrentStatsWithPerRepoData verifies Stats() returns correct per-repo

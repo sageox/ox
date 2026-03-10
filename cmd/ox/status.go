@@ -67,9 +67,20 @@ type statusConfigJSON struct {
 }
 
 type statusProjectJSON struct {
-	Initialized bool   `json:"initialized"`
-	Directory   string `json:"directory"`
-	ConfigPath  string `json:"config_path,omitempty"`
+	Initialized bool                  `json:"initialized"`
+	Directory   string                `json:"directory"`
+	ConfigPath  string                `json:"config_path,omitempty"`
+	CodeIndex   *statusCodeIndexJSON  `json:"code_index,omitempty"`
+}
+
+type statusCodeIndexJSON struct {
+	Indexed     bool       `json:"indexed"`
+	LastIndexed *time.Time `json:"last_indexed,omitempty"`
+	IndexingNow bool       `json:"indexing_now"`
+	Commits     int        `json:"commits,omitempty"`
+	Blobs       int        `json:"blobs,omitempty"`
+	Symbols     int        `json:"symbols,omitempty"`
+	Error       string     `json:"error,omitempty"`
 }
 
 type statusLedgerJSON struct {
@@ -1537,10 +1548,28 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			}
 		}
 
+		// connect to daemon early — needed for project status (code index) and later sections
+		var daemonStatus *daemon.StatusData
+		var syncHistory []daemon.SyncEvent
+		var codeStats *daemon.CodeDBStats
+		var client *daemon.Client
+		if gitRoot != "" {
+			client = daemon.TryConnectOrDirect()
+			if client != nil {
+				if ds, err := client.Status(); err == nil {
+					daemonStatus = ds
+					syncHistory, _ = client.SyncHistory()
+				}
+				if cs, err := client.CodeStatus(); err == nil {
+					codeStats = cs
+				}
+			}
+		}
+
 		// JSON output mode
 		if statusJSONFlag {
 			output := buildStatusJSON(authenticated, token, endpointSlug, authFile, authFileExists,
-				userConfigDir, cwd, sageoxDir, projectInitialized, localCfg, gitRoot, repoDetail)
+				userConfigDir, cwd, sageoxDir, projectInitialized, localCfg, gitRoot, repoDetail, codeStats)
 			jsonBytes, err := json.MarshalIndent(output, "", "  ")
 			if err != nil {
 				return fmt.Errorf("failed to marshal JSON: %w", err)
@@ -1567,23 +1596,17 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		}
 		fmt.Print(renderTable("Configuration", configRows))
 
-		fmt.Print(renderProjectStatus(cwd, gitRoot, projectInitialized))
+		fmt.Print(renderProjectStatus(cwd, gitRoot, projectInitialized, codeStats))
 		if gitRoot != "" && !projectInitialized {
 			cli.PrintActionHint("ox init", "Initialize project for AI agent context", 2)
+		}
+		if gitRoot != "" && projectInitialized && codeStats == nil {
+			// no daemon connected — suggest manual indexing
+			cli.PrintActionHint("ox code index", "Index repo for local code search", 0)
 		}
 
 		// skip ledger/daemon sections when not in a git repo — nothing to show
 		if gitRoot != "" {
-			// fetch daemon status once, pass to both git repos and daemon sync sections
-			var daemonStatus *daemon.StatusData
-			var syncHistory []daemon.SyncEvent
-			client := daemon.TryConnectOrDirect()
-			if client != nil {
-				if ds, err := client.Status(); err == nil {
-					daemonStatus = ds
-					syncHistory, _ = client.SyncHistory()
-				}
-			}
 
 			// Ledger and Team Context sections - shows repos from cloud API
 			// Only displays repos that are actually provisioned
@@ -1615,7 +1638,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 // buildStatusJSON constructs the JSON output structure for ox status --json
 func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, authFile string, authFileExists bool,
 	userConfigDir, cwd, sageoxDir string, projectInitialized bool, localCfg *config.LocalConfig, gitRoot string,
-	repoDetail *api.RepoDetailResponse) statusJSONOutput {
+	repoDetail *api.RepoDetailResponse, codeStats *daemon.CodeDBStats) statusJSONOutput {
 
 	output := statusJSONOutput{}
 
@@ -1644,6 +1667,20 @@ func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, 
 	}
 	if projectInitialized {
 		output.Project.ConfigPath = sageoxDir
+		if codeStats != nil {
+			ci := &statusCodeIndexJSON{
+				Indexed:     codeStats.IndexExists,
+				IndexingNow: codeStats.IndexingNow,
+				Commits:     codeStats.Commits,
+				Blobs:       codeStats.Blobs,
+				Symbols:     codeStats.Symbols,
+				Error:       codeStats.LastError,
+			}
+			if !codeStats.LastIndexed.IsZero() {
+				ci.LastIndexed = &codeStats.LastIndexed
+			}
+			output.Project.CodeIndex = ci
+		}
 	}
 
 	// ledger section
@@ -1796,7 +1833,7 @@ func renderAuthStatus(authFile string) string {
 
 // renderProjectStatus renders the project status section with tree-like structure.
 // gitRoot is empty when not inside a git repository.
-func renderProjectStatus(cwd, gitRoot string, initialized bool) string {
+func renderProjectStatus(cwd, gitRoot string, initialized bool, codeStats *daemon.CodeDBStats) string {
 	var b strings.Builder
 
 	b.WriteString("\n")
@@ -1821,13 +1858,44 @@ func renderProjectStatus(cwd, gitRoot string, initialized bool) string {
 
 	b.WriteString(statusLabelStyle.Render("  " + cli.Wordmark() + " state"))
 	if initialized {
-		b.WriteString(statusMutedStyle.Render("└── .sageox/ dir "))
+		b.WriteString(statusMutedStyle.Render("├── .sageox/ dir "))
 		b.WriteString(statusSuccessStyle.Render("✓"))
 	} else {
 		b.WriteString(statusMutedStyle.Render("└── .sageox/ dir "))
 		b.WriteString(statusWarningStyle.Render("(not initialized)"))
 	}
 	b.WriteString("\n")
+
+	// code index status — only show when project is initialized
+	if initialized {
+		b.WriteString(statusLabelStyle.Render("  Code indexed"))
+		switch {
+		case codeStats == nil:
+			b.WriteString(statusMutedStyle.Render("└── unknown (no daemon)"))
+		case codeStats.IndexingNow:
+			b.WriteString(statusMutedStyle.Render("└── "))
+			b.WriteString(statusWarningStyle.Render("indexing…"))
+		case !codeStats.IndexExists:
+			// no index yet — daemon auto-indexes on start
+			b.WriteString(statusMutedStyle.Render("└── "))
+			b.WriteString(statusWarningStyle.Render("pending"))
+		case codeStats.LastError != "" && codeStats.Commits == 0:
+			// index dir exists but empty — initial index failed, will retry
+			b.WriteString(statusMutedStyle.Render("└── "))
+			b.WriteString(statusWarningStyle.Render("pending"))
+		case codeStats.LastError != "":
+			b.WriteString(statusMutedStyle.Render("└── "))
+			b.WriteString(statusErrorStyle.Render("error: " + codeStats.LastError))
+		default:
+			b.WriteString(statusMutedStyle.Render("└── "))
+			if !codeStats.LastIndexed.IsZero() {
+				b.WriteString(statusSuccessStyle.Render(formatTimeAgo(codeStats.LastIndexed)))
+			} else {
+				b.WriteString(statusSuccessStyle.Render("✓"))
+			}
+		}
+		b.WriteString("\n")
+	}
 
 	return b.String()
 }

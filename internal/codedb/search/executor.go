@@ -8,8 +8,9 @@ import (
 	"strings"
 
 	"github.com/blevesearch/bleve/v2"
-	"github.com/blevesearch/bleve/v2/search/query"
 	blevesearch "github.com/blevesearch/bleve/v2/search"
+	_ "github.com/blevesearch/bleve/v2/search/highlight/highlighter/ansi"
+	"github.com/blevesearch/bleve/v2/search/query"
 
 	"github.com/sageox/ox/internal/codedb/store"
 )
