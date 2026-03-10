@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Agents can search your codebase locally via a built-in code search engine
 - Integrated with the daemon for background indexing and worktree support
 - Compact inline results surfaced in `ox status`
+- [See how CodeDB came together in just a few days](https://www.youtube.com/watch?v=ODMZyEU3Bz8)
 
 **`ox query` command**
 - New top-level command for querying team knowledge directly from the CLI
