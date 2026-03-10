@@ -665,9 +665,10 @@ func determineHealth(status *StatusData) HealthStatus {
 	if !status.LastSync.IsZero() {
 		sinceLast := time.Since(status.LastSync)
 
-		// if last sync is > 2x expected interval, something's wrong
-		if sinceLast > status.SyncIntervalRead*2 {
-			return HealthCritical
+		// stale sync is a warning, not critical — syncs can lag during
+		// GC, indexing, or slow networks without indicating a real problem
+		if sinceLast > status.SyncIntervalRead*4 {
+			return HealthWarning
 		}
 	}
 

@@ -266,6 +266,10 @@ type SyncScheduler struct {
 	// worker pool for bounded clone concurrency
 	cloneSem      chan struct{} // semaphore limiting concurrent clones
 	cloneInFlight sync.Map      // tracks workspace IDs with clone in progress (dedup)
+	cloneWg       sync.WaitGroup // tracks in-flight background clone goroutines
+
+	// lifecycle context — canceled when scheduler stops
+	ctx context.Context
 
 	// GC state — only one GC runs at a time across all workspaces
 	gcInProgress int32
@@ -545,6 +549,8 @@ func (s *SyncScheduler) LastError() (string, time.Time) {
 
 // Start starts the sync scheduler.
 func (s *SyncScheduler) Start(ctx context.Context) {
+	s.ctx = ctx
+
 	// load initial workspace state from config
 	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
 		s.logger.Warn("failed to load workspace registry", "error", err)
@@ -621,6 +627,14 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			// wait briefly for in-flight background clones to finish
+			cloneDone := make(chan struct{})
+			go func() { s.cloneWg.Wait(); close(cloneDone) }()
+			select {
+			case <-cloneDone:
+			case <-time.After(3 * time.Second):
+				s.logger.Warn("timed out waiting for background clones")
+			}
 			s.logger.Info("sync scheduler stopped")
 			return
 
@@ -1772,10 +1786,15 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		_ = progress.WriteStage("starting", fmt.Sprintf("Syncing %d team context(s)...", len(teamContexts)))
 	}
 
-	var syncedCount, skippedCount, cloningCount int
+	var skippedCount, cloningCount int
+
+	// partition: repos ready to sync vs skipped/cloning
+	type syncTarget struct {
+		ws WorkspaceState
+	}
+	var targets []syncTarget
 
 	for _, ws := range teamContexts {
-		// check if path exists
 		if ws.Path == "" {
 			s.workspaceRegistry.SetWorkspaceError(ws.ID, "no path configured")
 			skippedCount++
@@ -1783,9 +1802,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		}
 
 		if !ws.Exists {
-			// auto-clone if we have a clone URL
 			if ws.CloneURL != "" {
-				// check if we should retry (respects exponential backoff)
 				if !s.workspaceRegistry.ShouldRetryClone(ws.ID) {
 					attempts, nextRetry := s.workspaceRegistry.GetCloneRetryInfo(ws.ID)
 					s.logger.Debug("team context clone in backoff, skipping",
@@ -1799,7 +1816,6 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 				if progress != nil {
 					_ = progress.WriteStage("cloning", fmt.Sprintf("Cloning team %s in background...", ws.TeamName))
 				}
-				// clone in background goroutine - don't block sync loop
 				go s.cloneInBackground(ws.CloneURL, ws.Path, "team-context", ws.ID)
 				cloningCount++
 			} else {
@@ -1813,68 +1829,85 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			continue
 		}
 
-		// sync backoff — skip if recent sync failures triggered backoff
 		if !s.shouldSyncOrBypass(ws.ID, forceSync) {
 			skippedCount++
 			continue
 		}
 
+		targets = append(targets, syncTarget{ws: ws})
+	}
+
+	// sync eligible repos in parallel — each operates on its own repo path,
+	// and the network I/O (ls-remote, fetch, pull) dominates wall time
+	type syncResult struct {
+		ws       WorkspaceState
+		err      error
+		duration time.Duration
+	}
+	results := make([]syncResult, len(targets))
+	var wg sync.WaitGroup
+
+	for i, t := range targets {
+		s.workspaceRegistry.SetSyncInProgress(t.ws.ID, true)
 		if progress != nil {
-			_ = progress.WriteStage("syncing", fmt.Sprintf("Syncing team: %s", ws.TeamName))
+			_ = progress.WriteStage("syncing", fmt.Sprintf("Syncing team: %s", t.ws.TeamName))
 		}
 
-		// mark sync in progress
-		s.workspaceRegistry.SetSyncInProgress(ws.ID, true)
+		wg.Add(1)
+		go func(idx int, ws WorkspaceState) {
+			defer wg.Done()
+			start := time.Now()
+			pullErr := s.pullTeamContext(ctx, ws.Path)
+			results[idx] = syncResult{ws: ws, err: pullErr, duration: time.Since(start)}
+		}(i, t.ws)
+	}
+	wg.Wait()
 
-		// pull changes (read-only, no push)
-		startTime := time.Now()
-		pullErr := s.pullTeamContext(ctx, ws.Path)
+	// process results sequentially (registry updates, progress messages)
+	var syncedCount int
+	for _, r := range results {
+		s.workspaceRegistry.SetSyncInProgress(r.ws.ID, false)
 
-		// mark sync complete
-		s.workspaceRegistry.SetSyncInProgress(ws.ID, false)
-
-		if pullErr != nil {
-			s.workspaceRegistry.SetWorkspaceError(ws.ID, pullErr.Error())
-			s.workspaceRegistry.RecordSyncFailure(ws.ID)
-			s.recordSyncStateFailure(ws.Path)
-			s.logger.Debug("team context pull failed", "team", ws.TeamName, "error", pullErr)
+		if r.err != nil {
+			s.workspaceRegistry.SetWorkspaceError(r.ws.ID, r.err.Error())
+			s.workspaceRegistry.RecordSyncFailure(r.ws.ID)
+			s.recordSyncStateFailure(r.ws.Path)
+			s.logger.Debug("team context pull failed", "team", r.ws.TeamName, "error", r.err)
 			s.metrics.RecordTeamSyncError()
 			if progress != nil {
-				_ = progress.WriteStage("error", fmt.Sprintf("Team %s: %v", ws.TeamName, pullErr))
+				_ = progress.WriteStage("error", fmt.Sprintf("Team %s: %v", r.ws.TeamName, r.err))
 			}
-		} else {
-			s.workspaceRegistry.ClearWorkspaceError(ws.ID)
-			s.workspaceRegistry.ClearSyncFailures(ws.ID)
-			if s.issues != nil {
-				s.issues.ClearIssue(IssueTypeSyncBackoff, ws.ID)
-			}
+			continue
+		}
 
-			// apply manifest-driven sparse-checkout after successful pull
-			mCfg := s.applySparseCheckout(ctx, ws.Path)
-			if mCfg != nil {
-				if mCfg.SyncIntervalMin > 0 {
-					s.workspaceRegistry.SetSyncIntervalMin(ws.Path, mCfg.SyncIntervalMin)
-				}
-				if mCfg.GCIntervalDays > 0 {
-					s.workspaceRegistry.SetGCInterval(ws.Path, mCfg.GCIntervalDays)
-				}
-			}
+		s.workspaceRegistry.ClearWorkspaceError(r.ws.ID)
+		s.workspaceRegistry.ClearSyncFailures(r.ws.ID)
+		if s.issues != nil {
+			s.issues.ClearIssue(IssueTypeSyncBackoff, r.ws.ID)
+		}
 
-			// update last sync in registry and config file
-			if err := s.workspaceRegistry.UpdateConfigLastSync(ws.ID); err != nil {
-				s.logger.Warn("failed to update config last sync", "team", ws.TeamName, "error", err)
+		mCfg := s.applySparseCheckout(ctx, r.ws.Path)
+		if mCfg != nil {
+			if mCfg.SyncIntervalMin > 0 {
+				s.workspaceRegistry.SetSyncIntervalMin(r.ws.Path, mCfg.SyncIntervalMin)
 			}
-			s.recordSyncState(ctx, ws.Path)
-			syncedCount++
+			if mCfg.GCIntervalDays > 0 {
+				s.workspaceRegistry.SetGCInterval(r.ws.Path, mCfg.GCIntervalDays)
+			}
+		}
 
-			duration := time.Since(startTime)
-			s.recordSync("team_context", ws.ID, duration, 0)
-			s.metrics.RecordTeamSync()
-			s.recordActivity()
-			s.logger.Debug("team context synced", "team", ws.TeamName, "duration", duration)
-			if progress != nil {
-				_ = progress.WriteStage("synced", fmt.Sprintf("Team %s synced", ws.TeamName))
-			}
+		if err := s.workspaceRegistry.UpdateConfigLastSync(r.ws.ID); err != nil {
+			s.logger.Warn("failed to update config last sync", "team", r.ws.TeamName, "error", err)
+		}
+		s.recordSyncState(ctx, r.ws.Path)
+		syncedCount++
+
+		s.recordSync("team_context", r.ws.ID, r.duration, 0)
+		s.metrics.RecordTeamSync()
+		s.recordActivity()
+		s.logger.Debug("team context synced", "team", r.ws.TeamName, "duration", r.duration)
+		if progress != nil {
+			_ = progress.WriteStage("synced", fmt.Sprintf("Team %s synced", r.ws.TeamName))
 		}
 	}
 
@@ -1957,11 +1990,22 @@ func isClonePermanentError(msg string) bool {
 //
 // Concurrency is bounded by cloneSem inside Checkout().
 func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspaceID string) {
+	// bail out if scheduler is shutting down
+	if s.ctx != nil {
+		select {
+		case <-s.ctx.Done():
+			return
+		default:
+		}
+	}
+
 	// deduplicate: skip if clone already in progress for this workspace
 	if _, loaded := s.cloneInFlight.LoadOrStore(workspaceID, true); loaded {
 		s.logger.Debug("clone already in progress, skipping duplicate", "type", repoType, "id", workspaceID)
 		return
 	}
+	s.cloneWg.Add(1)
+	defer s.cloneWg.Done()
 	defer s.cloneInFlight.Delete(workspaceID)
 
 	s.logger.Info("background clone starting", "type", repoType, "path", repoPath)

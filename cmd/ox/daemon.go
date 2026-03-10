@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mattn/go-isatty"
@@ -141,9 +142,18 @@ var daemonStatusCmd = &cobra.Command{
 			return nil
 		}
 
-		client := daemon.NewClient()
+		// status is human-initiated, use longer timeout than default 50ms IPC;
+		// retry once with even longer timeout if daemon is busy (initial sync, GC)
+		client := daemon.NewClientWithTimeout(500 * time.Millisecond)
 		status, err := client.Status()
+		if err != nil && isTimeoutErr(err) {
+			client = daemon.NewClientWithTimeout(2 * time.Second)
+			status, err = client.Status()
+		}
 		if err != nil {
+			if isTimeoutErr(err) {
+				return fmt.Errorf("daemon is busy (likely syncing), try again in a moment")
+			}
 			return fmt.Errorf("failed to get status: %w", err)
 		}
 
@@ -352,4 +362,9 @@ func startDaemonBackground(ledgerPath string) error {
 	cli.PrintHint(fmt.Sprintf("  Logs: %s", logPath))
 	cli.PrintHint("  Run 'ox daemon status' to see details")
 	return nil
+}
+
+// isTimeoutErr returns true if the error is a socket I/O timeout.
+func isTimeoutErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "i/o timeout")
 }
