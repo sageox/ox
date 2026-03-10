@@ -519,6 +519,14 @@ func TestFrictionCollector_MaxEventsPerRequest(t *testing.T) {
 
 // TestFrictionCollector_StartStop verifies lifecycle management.
 func TestFrictionCollector_StartStop(t *testing.T) {
+	// use a local server so the shutdown flush doesn't hit the real network,
+	// which would race against the 5-second test timeout
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	t.Setenv("SAGEOX_FRICTION_ENDPOINT", server.URL)
+
 	logger := testLogger()
 	fc := NewFrictionCollector(logger, "")
 
