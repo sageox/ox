@@ -319,7 +319,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// For generic adapters: check if the drop file has content BEFORE clearing state.
 	// If empty, mark as incomplete and return retry guidance instead of processing.
 	// This must happen before clearing recording state.
-	state, err := session.LoadRecordingState(projectRoot)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
 	if err != nil {
 		return fmt.Errorf("failed to load recording state: %w", err)
 	}
@@ -330,7 +330,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		info, statErr := os.Stat(state.SessionFile)
 		if statErr != nil || info.Size() == 0 {
 			// mark recording as incomplete (allows restart without "already recording" error)
-			_ = session.UpdateRecordingState(projectRoot, func(s *session.RecordingState) {
+			_ = session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
 				s.StopIncomplete = true
 			})
 
@@ -386,7 +386,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	recordSessionObservation(projectRoot, processResult, duration)
 
 	// processing succeeded (or no source file to process) - clear active state.
-	if err := session.ClearRecordingState(projectRoot); err != nil {
+	if err := session.ClearRecordingStateForAgent(projectRoot, inst.AgentID); err != nil {
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("failed to finalize recording stop: %w", err)
 	}

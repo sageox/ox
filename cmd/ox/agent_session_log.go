@@ -98,7 +98,7 @@ func runAgentSessionLog(inst *agentinstance.Instance, args []string) error {
 	}
 
 	// load recording state
-	state, err := session.LoadRecordingState(projectRoot)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
 	if err != nil {
 		return fmt.Errorf("failed to load recording state: %w", err)
 	}

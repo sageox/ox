@@ -70,6 +70,10 @@ demo/credentials.sops.yaml
 demo/playwright/node_modules/
 .team-contexts/
 
+# Conductor workspace artifacts (blue-green GC reclone)
+.gc-diff
+.gc-untracked/
+
 # Dolt database files (added by bd init)
 .dolt/
 *.db
