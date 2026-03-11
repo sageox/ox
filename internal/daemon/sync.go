@@ -693,6 +693,10 @@ func (s *SyncScheduler) pullChanges(ctx context.Context) {
 
 	// check code index freshness (non-blocking)
 	if s.codedb != nil {
+		// update ledger path so CodeDB can index GitHub data from the ledger
+		if ledger := s.workspaceRegistry.GetLedger(); ledger != nil && ledger.Path != "" && ledger.Exists {
+			s.codedb.SetLedgerPath(ledger.Path)
+		}
 		s.codedb.CheckFreshness(ctx)
 	}
 }

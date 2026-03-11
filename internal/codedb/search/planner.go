@@ -64,6 +64,10 @@ func Plan(query *ParsedQuery) (*ExecutionPlan, error) {
 		return planSQLOnly(query)
 	case SearchTypeSymbol:
 		return planSQLOnly(query)
+	case SearchTypePR:
+		return planSQLOnly(query)
+	case SearchTypeIssue:
+		return planSQLOnly(query)
 	case SearchTypeCode:
 		return planCodeSearch(query)
 	case SearchTypeDiff:

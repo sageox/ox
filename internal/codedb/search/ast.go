@@ -11,6 +11,8 @@ const (
 	SearchTypeCommit
 	SearchTypeSymbol
 	SearchTypeComment
+	SearchTypePR
+	SearchTypeIssue
 )
 
 func (st SearchType) String() string {
@@ -23,6 +25,10 @@ func (st SearchType) String() string {
 		return "symbol"
 	case SearchTypeComment:
 		return "comment"
+	case SearchTypePR:
+		return "pr"
+	case SearchTypeIssue:
+		return "issue"
 	default:
 		return "code"
 	}
@@ -62,6 +68,7 @@ type Filters struct {
 	CalledBy    string
 	Returns     string
 	CommentKind string
+	State       string
 }
 
 // ParsedQuery is the result of parsing a query string.

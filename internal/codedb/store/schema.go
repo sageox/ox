@@ -81,6 +81,56 @@ CREATE TABLE IF NOT EXISTS symbol_refs (
     col       INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS pull_requests (
+    id          INTEGER PRIMARY KEY,
+    number      INTEGER NOT NULL UNIQUE,
+    title       TEXT NOT NULL,
+    body        TEXT,
+    author      TEXT,
+    state       TEXT NOT NULL,
+    labels      TEXT,
+    created_at  INTEGER,
+    merged_at   INTEGER,
+    closed_at   INTEGER,
+    updated_at  INTEGER,
+    merge_commit TEXT,
+    url         TEXT,
+    source_path TEXT
+);
+
+CREATE TABLE IF NOT EXISTS pr_comments (
+    id    INTEGER PRIMARY KEY,
+    pr_id INTEGER NOT NULL REFERENCES pull_requests(id),
+    author TEXT,
+    body   TEXT,
+    path   TEXT,
+    line   INTEGER,
+    created_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS issues (
+    id          INTEGER PRIMARY KEY,
+    number      INTEGER NOT NULL UNIQUE,
+    title       TEXT NOT NULL,
+    body        TEXT,
+    author      TEXT,
+    state       TEXT NOT NULL,
+    labels      TEXT,
+    created_at  INTEGER,
+    closed_at   INTEGER,
+    updated_at  INTEGER,
+    url         TEXT,
+    source_path TEXT
+);
+
+CREATE TABLE IF NOT EXISTS issue_comments (
+    id       INTEGER PRIMARY KEY,
+    issue_id INTEGER NOT NULL REFERENCES issues(id),
+    author   TEXT,
+    body     TEXT,
+    created_at INTEGER
+);
+
 CREATE INDEX IF NOT EXISTS idx_commits_repo ON commits(repo_id);
 CREATE INDEX IF NOT EXISTS idx_refs_repo ON refs(repo_id);
 CREATE INDEX IF NOT EXISTS idx_file_revs_commit ON file_revs(commit_id);
@@ -91,6 +141,19 @@ CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(name);
 CREATE INDEX IF NOT EXISTS idx_symbol_refs_blob ON symbol_refs(blob_id);
 CREATE INDEX IF NOT EXISTS idx_symbol_refs_name ON symbol_refs(ref_name);
 CREATE INDEX IF NOT EXISTS idx_symbol_refs_symbol ON symbol_refs(symbol_id);
+CREATE INDEX IF NOT EXISTS idx_pull_requests_number ON pull_requests(number);
+CREATE INDEX IF NOT EXISTS idx_pull_requests_state ON pull_requests(state);
+CREATE INDEX IF NOT EXISTS idx_pull_requests_author ON pull_requests(author);
+CREATE INDEX IF NOT EXISTS idx_pr_comments_pr ON pr_comments(pr_id);
+CREATE INDEX IF NOT EXISTS idx_issues_number ON issues(number);
+CREATE INDEX IF NOT EXISTS idx_issues_state ON issues(state);
+CREATE INDEX IF NOT EXISTS idx_issues_author ON issues(author);
+CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id);
+
+CREATE TABLE IF NOT EXISTS github_file_mtimes (
+    source_path TEXT NOT NULL PRIMARY KEY,
+    mtime_unix  INTEGER NOT NULL
+);
 `
 
 // CreateSchema initializes the SQLite tables and indexes.
@@ -102,7 +165,10 @@ func CreateSchema(db *sql.DB) error {
 	if err := migrateAddTypeInfo(db); err != nil {
 		return err
 	}
-	return migrateAddComments(db)
+	if err := migrateAddComments(db); err != nil {
+		return err
+	}
+	return migrateAddGitHubTables(db)
 }
 
 // migrateAddTypeInfo adds signature, return_type, and params columns to the
@@ -173,5 +239,85 @@ func migrateAddComments(db *sql.DB) error {
 		}
 	}
 
+	return nil
+}
+
+// migrateAddGitHubTables adds pull_requests, pr_comments, issues, and
+// issue_comments tables for databases created before GitHub data indexing.
+func migrateAddGitHubTables(db *sql.DB) error {
+	var exists bool
+	err := db.QueryRow(`SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='pull_requests'`).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS pull_requests (
+			id          INTEGER PRIMARY KEY,
+			number      INTEGER NOT NULL UNIQUE,
+			title       TEXT NOT NULL,
+			body        TEXT,
+			author      TEXT,
+			state       TEXT NOT NULL,
+			labels      TEXT,
+			created_at  INTEGER,
+			merged_at   INTEGER,
+			closed_at   INTEGER,
+			updated_at  INTEGER,
+			merge_commit TEXT,
+			url         TEXT,
+			source_path TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS pr_comments (
+			id    INTEGER PRIMARY KEY,
+			pr_id INTEGER NOT NULL REFERENCES pull_requests(id),
+			author TEXT,
+			body   TEXT,
+			path   TEXT,
+			line   INTEGER,
+			created_at INTEGER
+		)`,
+		`CREATE TABLE IF NOT EXISTS issues (
+			id          INTEGER PRIMARY KEY,
+			number      INTEGER NOT NULL UNIQUE,
+			title       TEXT NOT NULL,
+			body        TEXT,
+			author      TEXT,
+			state       TEXT NOT NULL,
+			labels      TEXT,
+			created_at  INTEGER,
+			closed_at   INTEGER,
+			updated_at  INTEGER,
+			url         TEXT,
+			source_path TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS issue_comments (
+			id       INTEGER PRIMARY KEY,
+			issue_id INTEGER NOT NULL REFERENCES issues(id),
+			author   TEXT,
+			body     TEXT,
+			created_at INTEGER
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pull_requests_number ON pull_requests(number)`,
+		`CREATE INDEX IF NOT EXISTS idx_pull_requests_state ON pull_requests(state)`,
+		`CREATE INDEX IF NOT EXISTS idx_pull_requests_author ON pull_requests(author)`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_comments_pr ON pr_comments(pr_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_number ON issues(number)`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_state ON issues(state)`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_author ON issues(author)`,
+		`CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id)`,
+		`CREATE TABLE IF NOT EXISTS github_file_mtimes (
+			source_path TEXT NOT NULL PRIMARY KEY,
+			mtime_unix  INTEGER NOT NULL
+		)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			return err
+		}
+	}
 	return nil
 }

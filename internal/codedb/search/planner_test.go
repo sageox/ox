@@ -314,3 +314,98 @@ func TestJoinStrategyString(t *testing.T) {
 		}
 	}
 }
+
+func TestPlanPRSQLOnly(t *testing.T) {
+	q := &ParsedQuery{
+		SearchTerms: []string{"auth"},
+		Type:        SearchTypePR,
+	}
+	plan, err := Plan(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Strategy != JoinSQLOnly {
+		t.Errorf("strategy = %v, want SQLOnly", plan.Strategy)
+	}
+	if plan.SearchType != SearchTypePR {
+		t.Errorf("search type = %v, want pr", plan.SearchType)
+	}
+	if plan.SQL == "" {
+		t.Error("expected non-empty SQL")
+	}
+}
+
+func TestPlanPREmptyPatternWithState(t *testing.T) {
+	q := &ParsedQuery{
+		Type:    SearchTypePR,
+		Filters: Filters{State: "open"},
+	}
+	plan, err := Plan(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Strategy != JoinSQLOnly {
+		t.Errorf("strategy = %v, want SQLOnly", plan.Strategy)
+	}
+}
+
+func TestPlanIssueSQLOnly(t *testing.T) {
+	q := &ParsedQuery{
+		SearchTerms: []string{"bug"},
+		Type:        SearchTypeIssue,
+	}
+	plan, err := Plan(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Strategy != JoinSQLOnly {
+		t.Errorf("strategy = %v, want SQLOnly", plan.Strategy)
+	}
+	if plan.SearchType != SearchTypeIssue {
+		t.Errorf("search type = %v, want issue", plan.SearchType)
+	}
+	if plan.SQL == "" {
+		t.Error("expected non-empty SQL")
+	}
+}
+
+func TestPlanIssueEmptyPatternWithState(t *testing.T) {
+	q := &ParsedQuery{
+		Type:    SearchTypeIssue,
+		Filters: Filters{State: "closed"},
+	}
+	plan, err := Plan(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Strategy != JoinSQLOnly {
+		t.Errorf("strategy = %v, want SQLOnly", plan.Strategy)
+	}
+}
+
+func TestPlanPRCustomCount(t *testing.T) {
+	q := &ParsedQuery{
+		SearchTerms: []string{"fix"},
+		Type:        SearchTypePR,
+		Filters:     Filters{Count: 10},
+	}
+	plan, err := Plan(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Limit != 10 {
+		t.Errorf("limit = %d, want 10", plan.Limit)
+	}
+}
+
+func TestSearchTypeStringPR(t *testing.T) {
+	if got := SearchTypePR.String(); got != "pr" {
+		t.Errorf("SearchTypePR.String() = %q, want pr", got)
+	}
+}
+
+func TestSearchTypeStringIssue(t *testing.T) {
+	if got := SearchTypeIssue.String(); got != "issue" {
+		t.Errorf("SearchTypeIssue.String() = %q, want issue", got)
+	}
+}

@@ -193,6 +193,10 @@ func Translate(query *ParsedQuery) (*TranslatedQuery, error) {
 		return translateSymbol(query)
 	case SearchTypeComment:
 		return translateComment(query)
+	case SearchTypePR:
+		return translatePR(query)
+	case SearchTypeIssue:
+		return translateIssue(query)
 	default:
 		return translateCode(query)
 	}
@@ -528,5 +532,103 @@ func translateCallees(query *ParsedQuery) (*TranslatedQuery, error) {
 		SQL:        sql,
 		Params:     p.params,
 		SearchType: SearchTypeSymbol,
+	}, nil
+}
+
+func translatePR(query *ParsedQuery) (*TranslatedQuery, error) {
+	if query.IsRegex {
+		return nil, fmt.Errorf("regex patterns are only supported for code and diff search")
+	}
+
+	f := query.Filters
+	p := newParamCollector(f.Case)
+	var conditions []string
+
+	if !query.HasEmptyPattern() {
+		for _, group := range query.SearchTerms {
+			if group == "" {
+				continue
+			}
+			ph := p.add("%" + group + "%")
+			conditions = append(conditions, fmt.Sprintf("AND (p.title LIKE %s OR p.body LIKE %s OR pc.body LIKE %s)", ph, ph, ph))
+		}
+	}
+
+	if f.Author != "" {
+		ph := p.add(f.Author)
+		conditions = append(conditions, "AND p.author = "+ph)
+	}
+	if f.State != "" {
+		ph := p.add(f.State)
+		conditions = append(conditions, "AND p.state = "+ph)
+	}
+	if f.Before != "" {
+		ph := p.add(f.Before)
+		conditions = append(conditions, fmt.Sprintf("AND p.updated_at < %s", ph))
+	}
+	if f.After != "" {
+		ph := p.add(f.After)
+		conditions = append(conditions, fmt.Sprintf("AND p.updated_at > %s", ph))
+	}
+
+	limit := resolveLimit(f.Count)
+
+	sql := fmt.Sprintf(
+		"SELECT p.number, p.title, p.author, p.state, p.url\nFROM pull_requests p\nLEFT JOIN pr_comments pc ON pc.pr_id = p.id\nWHERE 1=1%s\nGROUP BY p.id\nORDER BY p.updated_at DESC\nLIMIT %d",
+		conditionsSQL(conditions), limit)
+
+	return &TranslatedQuery{
+		SQL:        sql,
+		Params:     p.params,
+		SearchType: SearchTypePR,
+	}, nil
+}
+
+func translateIssue(query *ParsedQuery) (*TranslatedQuery, error) {
+	if query.IsRegex {
+		return nil, fmt.Errorf("regex patterns are only supported for code and diff search")
+	}
+
+	f := query.Filters
+	p := newParamCollector(f.Case)
+	var conditions []string
+
+	if !query.HasEmptyPattern() {
+		for _, group := range query.SearchTerms {
+			if group == "" {
+				continue
+			}
+			ph := p.add("%" + group + "%")
+			conditions = append(conditions, fmt.Sprintf("AND (i.title LIKE %s OR i.body LIKE %s OR ic.body LIKE %s)", ph, ph, ph))
+		}
+	}
+
+	if f.Author != "" {
+		ph := p.add(f.Author)
+		conditions = append(conditions, "AND i.author = "+ph)
+	}
+	if f.State != "" {
+		ph := p.add(f.State)
+		conditions = append(conditions, "AND i.state = "+ph)
+	}
+	if f.Before != "" {
+		ph := p.add(f.Before)
+		conditions = append(conditions, fmt.Sprintf("AND i.updated_at < %s", ph))
+	}
+	if f.After != "" {
+		ph := p.add(f.After)
+		conditions = append(conditions, fmt.Sprintf("AND i.updated_at > %s", ph))
+	}
+
+	limit := resolveLimit(f.Count)
+
+	sql := fmt.Sprintf(
+		"SELECT i.number, i.title, i.author, i.state, i.url\nFROM issues i\nLEFT JOIN issue_comments ic ON ic.issue_id = i.id\nWHERE 1=1%s\nGROUP BY i.id\nORDER BY i.updated_at DESC\nLIMIT %d",
+		conditionsSQL(conditions), limit)
+
+	return &TranslatedQuery{
+		SQL:        sql,
+		Params:     p.params,
+		SearchType: SearchTypeIssue,
 	}, nil
 }

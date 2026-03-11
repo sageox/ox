@@ -80,6 +80,11 @@ func (db *DB) ParseComments(ctx context.Context, progress func(string)) (index.C
 	return index.ParseComments(ctx, db.store, index.ProgressFunc(progress))
 }
 
+// IndexGitHubData reads PR/issue JSON files from the ledger and indexes them into CodeDB.
+func (db *DB) IndexGitHubData(ctx context.Context, ledgerPath string, progress func(string)) (*index.GitHubIndexStats, error) {
+	return index.IndexGitHubData(ctx, db.store, ledgerPath, index.ProgressFunc(progress))
+}
+
 // Search parses and executes a query.
 func (db *DB) Search(ctx context.Context, input string) ([]search.Result, error) {
 	query, err := search.ParseQuery(input)

@@ -54,7 +54,7 @@ func Execute(ctx context.Context, s *store.Store, query *ParsedQuery) ([]Result,
 	}
 }
 
-// executePlanSQL executes a plan that only needs SQL (commits, symbols, calls).
+// executePlanSQL executes a plan that only needs SQL (commits, symbols, calls, PRs, issues).
 func executePlanSQL(ctx context.Context, s *store.Store, plan *ExecutionPlan) ([]Result, error) {
 	args := make([]interface{}, len(plan.SQLParams))
 	for i, p := range plan.SQLParams {
@@ -108,6 +108,14 @@ func executePlanSQL(ctx context.Context, s *store.Store, plan *ExecutionPlan) ([
 				r.Content = val
 			case "language":
 				r.Language = val
+			case "number":
+				fmt.Sscanf(val, "%d", &r.Line)
+			case "title":
+				r.Content = val
+			case "state":
+				r.SymbolKind = val
+			case "url":
+				r.FilePath = val
 			}
 		}
 		results = append(results, r)

@@ -27,6 +27,7 @@ import (
 // be needed.
 type CodeDBManager struct {
 	projectRoot string
+	ledgerPath  string // path to ledger checkout; empty if no ledger exists
 	logger      *slog.Logger
 	telemetry   *TelemetryCollector
 
@@ -43,6 +44,8 @@ type CodeDBStats struct {
 	Blobs       int       `json:"blobs"`
 	Symbols     int       `json:"symbols"`
 	Comments    int       `json:"comments"`
+	PRs         int       `json:"prs"`
+	Issues      int       `json:"issues"`
 	Repos       []RepoStats `json:"repos,omitempty"`
 	LastIndexed time.Time `json:"last_indexed,omitempty"`
 	IndexingNow bool      `json:"indexing_now"`
@@ -102,6 +105,14 @@ func (m *CodeDBManager) resolveSharedDataDir() string {
 	}
 	m.logger.Debug("falling back to legacy codedb path", "reason", err)
 	return paths.CodeDBDataDir(m.projectRoot)
+}
+
+// SetLedgerPath sets the ledger checkout path for GitHub data indexing.
+// Called by the daemon when the ledger workspace is discovered.
+func (m *CodeDBManager) SetLedgerPath(path string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ledgerPath = path
 }
 
 // Index runs indexing with progress reporting. Only one indexing operation runs at a time.
@@ -228,6 +239,28 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 	}
 	totalDuration := time.Since(totalStart)
 
+	// index GitHub data from ledger (PRs, issues)
+	m.mu.Lock()
+	lp := m.ledgerPath
+	m.mu.Unlock()
+
+	if lp != "" {
+		if pw != nil {
+			_ = pw.WriteStage("github", "Indexing GitHub data from ledger...")
+		}
+		ghStats, ghErr := db.IndexGitHubData(ctx, lp, func(msg string) {
+			if pw != nil {
+				_ = pw.WriteMessage(msg)
+			}
+		})
+		if ghErr != nil {
+			m.logger.Warn("github data indexing failed", "error", ghErr)
+			// non-fatal: don't fail the whole index for GitHub data
+		} else if ghStats.PRsIndexed > 0 || ghStats.IssuesIndexed > 0 {
+			m.logger.Info("github data indexed", "prs", ghStats.PRsIndexed, "issues", ghStats.IssuesIndexed)
+		}
+	}
+
 	m.mu.Lock()
 	m.lastIndex = time.Now()
 	m.lastErr = nil
@@ -324,6 +357,8 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 			_ = db.Store().QueryRow("SELECT COUNT(*) FROM blobs").Scan(&stats.Blobs)
 			_ = db.Store().QueryRow("SELECT COUNT(*) FROM symbols").Scan(&stats.Symbols)
 			_ = db.Store().QueryRow("SELECT COUNT(*) FROM comments").Scan(&stats.Comments)
+			_ = db.Store().QueryRow("SELECT COUNT(*) FROM pull_requests").Scan(&stats.PRs)
+			_ = db.Store().QueryRow("SELECT COUNT(*) FROM issues").Scan(&stats.Issues)
 
 			// per-repo breakdown
 			rows, err := db.Store().Query(`

@@ -347,3 +347,77 @@ func TestParseCaseDefault(t *testing.T) {
 		t.Error("expected case insensitive by default")
 	}
 }
+
+func TestParseTypePR(t *testing.T) {
+	q, err := ParseQuery("type:pr auth migration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Type != SearchTypePR {
+		t.Errorf("type = %v, want pr", q.Type)
+	}
+	if q.SearchPattern() != "auth migration" {
+		t.Errorf("pattern = %q", q.SearchPattern())
+	}
+}
+
+func TestParseTypeIssue(t *testing.T) {
+	q, err := ParseQuery("type:issue memory leak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Type != SearchTypeIssue {
+		t.Errorf("type = %v, want issue", q.Type)
+	}
+	if q.SearchPattern() != "memory leak" {
+		t.Errorf("pattern = %q", q.SearchPattern())
+	}
+}
+
+func TestParseTypePRWithState(t *testing.T) {
+	q, err := ParseQuery("type:pr state:open author:alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Type != SearchTypePR {
+		t.Errorf("type = %v, want pr", q.Type)
+	}
+	if q.Filters.State != "open" {
+		t.Errorf("state = %q, want open", q.Filters.State)
+	}
+	if q.Filters.Author != "alice" {
+		t.Errorf("author = %q, want alice", q.Filters.Author)
+	}
+}
+
+func TestParseTypeIssueWithFilters(t *testing.T) {
+	q, err := ParseQuery("type:issue state:closed before:2026-01-01 count:10 bug")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.Type != SearchTypeIssue {
+		t.Errorf("type = %v, want issue", q.Type)
+	}
+	if q.Filters.State != "closed" {
+		t.Errorf("state = %q", q.Filters.State)
+	}
+	if q.Filters.Before != "2026-01-01" {
+		t.Errorf("before = %q", q.Filters.Before)
+	}
+	if q.Filters.Count != 10 {
+		t.Errorf("count = %d", q.Filters.Count)
+	}
+	if q.SearchPattern() != "bug" {
+		t.Errorf("pattern = %q", q.SearchPattern())
+	}
+}
+
+func TestParseUnknownTypeErrorIncludesPRIssue(t *testing.T) {
+	_, err := ParseQuery("type:bogus foo")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "pr") || !strings.Contains(err.Error(), "issue") {
+		t.Errorf("error should mention pr and issue: %v", err)
+	}
+}

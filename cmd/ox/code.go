@@ -273,7 +273,7 @@ var codeStatsCmd = &cobra.Command{
 		}
 
 		// query DB directly for counts (daemon stats may lag)
-		var totalCommits, totalBlobs, totalSymbols, totalComments int
+		var totalCommits, totalBlobs, totalSymbols, totalComments, totalPRs, totalIssues int
 		type repoRow struct {
 			name    string
 			path    string
@@ -289,6 +289,8 @@ var codeStatsCmd = &cobra.Command{
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM blobs").Scan(&totalBlobs)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM symbols").Scan(&totalSymbols)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM comments").Scan(&totalComments)
+				_ = db.Store().QueryRow("SELECT COUNT(*) FROM pull_requests").Scan(&totalPRs)
+				_ = db.Store().QueryRow("SELECT COUNT(*) FROM issues").Scan(&totalIssues)
 
 				rows, qErr := db.Store().Query(`
 					SELECT r.name, r.path, COUNT(DISTINCT c.id), COUNT(DISTINCT fr.blob_id)
@@ -322,6 +324,8 @@ var codeStatsCmd = &cobra.Command{
 				Blobs       int              `json:"blobs"`
 				Symbols     int              `json:"symbols"`
 				Comments    int              `json:"comments"`
+				PRs         int              `json:"prs"`
+				Issues      int              `json:"issues"`
 				Repos       []jsonRepoStats  `json:"repos"`
 				DataDir     string           `json:"data_dir"`
 				IndexExists bool             `json:"index_exists"`
@@ -334,6 +338,8 @@ var codeStatsCmd = &cobra.Command{
 				Blobs:       totalBlobs,
 				Symbols:     totalSymbols,
 				Comments:    totalComments,
+				PRs:         totalPRs,
+				Issues:      totalIssues,
 				DataDir:     dataDir,
 				IndexExists: indexExists,
 			}
@@ -426,6 +432,16 @@ var codeStatsCmd = &cobra.Command{
 			b.WriteString("\n")
 			b.WriteString(statusLabelStyle.Render("Blobs"))
 			b.WriteString(statusValueStyle.Render(formatComma(totalBlobs)))
+			b.WriteString("\n")
+		}
+
+		// GitHub data — only show when there's data
+		if totalPRs > 0 || totalIssues > 0 {
+			b.WriteString(statusLabelStyle.Render("PRs"))
+			b.WriteString(statusValueStyle.Render(formatComma(totalPRs)))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render("Issues"))
+			b.WriteString(statusValueStyle.Render(formatComma(totalIssues)))
 			b.WriteString("\n")
 		}
 

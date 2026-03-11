@@ -548,3 +548,187 @@ func TestTranslateCaseSensitiveBracketEscape(t *testing.T) {
 		t.Errorf("expected bracket escape in params, got: %v", tq.Params)
 	}
 }
+
+func TestTranslatePRBasic(t *testing.T) {
+	tq := mustTranslate(t, "type:pr auth migration")
+	if tq.SearchType != SearchTypePR {
+		t.Errorf("type = %v, want pr", tq.SearchType)
+	}
+	if !strings.Contains(tq.SQL, "pull_requests p") {
+		t.Errorf("sql missing pull_requests: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "LEFT JOIN pr_comments pc") {
+		t.Errorf("sql missing pr_comments join: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "p.title LIKE") {
+		t.Errorf("sql missing p.title LIKE: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "p.body LIKE") {
+		t.Errorf("sql missing p.body LIKE: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "pc.body LIKE") {
+		t.Errorf("sql missing pc.body LIKE: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "GROUP BY p.id") {
+		t.Errorf("sql missing GROUP BY: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "ORDER BY p.updated_at DESC") {
+		t.Errorf("sql missing ORDER BY: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "LIMIT 20") {
+		t.Errorf("sql missing LIMIT 20: %s", tq.SQL)
+	}
+	if !hasParamContaining(tq.Params, "auth migration") {
+		t.Errorf("missing search param: %v", tq.Params)
+	}
+}
+
+func TestTranslatePRWithAuthor(t *testing.T) {
+	tq := mustTranslate(t, "type:pr author:alice fix")
+	if !strings.Contains(tq.SQL, "p.author = ") {
+		t.Errorf("sql missing p.author: %s", tq.SQL)
+	}
+	if !hasParam(tq.Params, "alice") {
+		t.Errorf("missing alice param: %v", tq.Params)
+	}
+}
+
+func TestTranslatePRWithState(t *testing.T) {
+	tq := mustTranslate(t, "type:pr state:open")
+	if !strings.Contains(tq.SQL, "p.state = ") {
+		t.Errorf("sql missing p.state: %s", tq.SQL)
+	}
+	if !hasParam(tq.Params, "open") {
+		t.Errorf("missing open param: %v", tq.Params)
+	}
+}
+
+func TestTranslatePREmptyPattern(t *testing.T) {
+	// PR search allows empty pattern (listing mode)
+	tq := mustTranslate(t, "type:pr state:open")
+	if tq.SearchType != SearchTypePR {
+		t.Errorf("type = %v, want pr", tq.SearchType)
+	}
+	// should not have title/body LIKE clauses when no pattern
+	if strings.Contains(tq.SQL, "p.title LIKE") {
+		t.Errorf("sql should not have title LIKE with empty pattern: %s", tq.SQL)
+	}
+}
+
+func TestTranslatePRWithCount(t *testing.T) {
+	tq := mustTranslate(t, "type:pr count:5 state:open")
+	if !strings.Contains(tq.SQL, "LIMIT 5") {
+		t.Errorf("sql missing LIMIT 5: %s", tq.SQL)
+	}
+}
+
+func TestTranslatePRWithDates(t *testing.T) {
+	tq := mustTranslate(t, "type:pr before:2026-01-01 after:2025-06-01 fix")
+	if !strings.Contains(tq.SQL, "p.updated_at <") {
+		t.Errorf("sql missing updated_at <: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "p.updated_at >") {
+		t.Errorf("sql missing updated_at >: %s", tq.SQL)
+	}
+}
+
+func TestTranslatePRRegexError(t *testing.T) {
+	q := mustParse(t, "type:pr /foo.*/")
+	_, err := Translate(q)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "only supported for code and diff") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestTranslatePRSelectColumns(t *testing.T) {
+	tq := mustTranslate(t, "type:pr fix")
+	if !strings.Contains(tq.SQL, "p.number") {
+		t.Errorf("sql missing p.number: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "p.url") {
+		t.Errorf("sql missing p.url: %s", tq.SQL)
+	}
+}
+
+func TestTranslateIssueBasic(t *testing.T) {
+	tq := mustTranslate(t, "type:issue memory leak")
+	if tq.SearchType != SearchTypeIssue {
+		t.Errorf("type = %v, want issue", tq.SearchType)
+	}
+	if !strings.Contains(tq.SQL, "issues i") {
+		t.Errorf("sql missing issues: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "LEFT JOIN issue_comments ic") {
+		t.Errorf("sql missing issue_comments join: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "i.title LIKE") {
+		t.Errorf("sql missing i.title LIKE: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "i.body LIKE") {
+		t.Errorf("sql missing i.body LIKE: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "ic.body LIKE") {
+		t.Errorf("sql missing ic.body LIKE: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "GROUP BY i.id") {
+		t.Errorf("sql missing GROUP BY: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "ORDER BY i.updated_at DESC") {
+		t.Errorf("sql missing ORDER BY: %s", tq.SQL)
+	}
+}
+
+func TestTranslateIssueWithState(t *testing.T) {
+	tq := mustTranslate(t, "type:issue state:closed")
+	if !strings.Contains(tq.SQL, "i.state = ") {
+		t.Errorf("sql missing i.state: %s", tq.SQL)
+	}
+	if !hasParam(tq.Params, "closed") {
+		t.Errorf("missing closed param: %v", tq.Params)
+	}
+}
+
+func TestTranslateIssueWithAuthor(t *testing.T) {
+	tq := mustTranslate(t, "type:issue author:bob bug")
+	if !strings.Contains(tq.SQL, "i.author = ") {
+		t.Errorf("sql missing i.author: %s", tq.SQL)
+	}
+	if !hasParam(tq.Params, "bob") {
+		t.Errorf("missing bob param: %v", tq.Params)
+	}
+}
+
+func TestTranslateIssueEmptyPattern(t *testing.T) {
+	// issue search allows empty pattern (listing mode)
+	tq := mustTranslate(t, "type:issue state:open")
+	if tq.SearchType != SearchTypeIssue {
+		t.Errorf("type = %v, want issue", tq.SearchType)
+	}
+	if strings.Contains(tq.SQL, "i.title LIKE") {
+		t.Errorf("sql should not have title LIKE with empty pattern: %s", tq.SQL)
+	}
+}
+
+func TestTranslateIssueRegexError(t *testing.T) {
+	q := mustParse(t, "type:issue /foo.*/")
+	_, err := Translate(q)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "only supported for code and diff") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestTranslateIssueWithDates(t *testing.T) {
+	tq := mustTranslate(t, "type:issue before:2026-01-01 after:2025-06-01 bug")
+	if !strings.Contains(tq.SQL, "i.updated_at <") {
+		t.Errorf("sql missing updated_at <: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "i.updated_at >") {
+		t.Errorf("sql missing updated_at >: %s", tq.SQL)
+	}
+}
