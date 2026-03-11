@@ -681,26 +681,32 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 	instances := make([]InstanceInfo, 0, len(keys))
 
 	now := time.Now()
-	idleThreshold := IdleThreshold
 
 	for _, agentID := range keys {
 		last := tracker.Last(agentID)
 		count := tracker.Count(agentID)
 
+		elapsed := now.Sub(last)
+
+		// skip stale instances (no heartbeat in >5min) — they're dead sessions
+		if elapsed > StaleThreshold {
+			continue
+		}
+
 		status := StatusActive
-		if now.Sub(last) > idleThreshold {
+		if elapsed > IdleThreshold {
 			status = StatusIdle
 		}
 
 		ctxStats := d.heartbeat.GetAgentContextStats(agentID)
 		instances = append(instances, InstanceInfo{
-			AgentID:                agentID,
-			WorkspacePath:          workspacePath,
-			LastHeartbeat:          last,
-			HeartbeatCount:         count,
-			Status:                 status,
+			AgentID:                 agentID,
+			WorkspacePath:           workspacePath,
+			LastHeartbeat:           last,
+			HeartbeatCount:          count,
+			Status:                  status,
 			CumulativeContextTokens: ctxStats.ContextTokens,
-			CommandCount:           ctxStats.CommandCount,
+			CommandCount:            ctxStats.CommandCount,
 		})
 	}
 

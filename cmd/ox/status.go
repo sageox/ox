@@ -1378,8 +1378,8 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 	return b.String()
 }
 
-// renderAICoworkersSection renders active AI coworker instances with context stats.
-// Only shown when there are active instances.
+// renderAICoworkersSection renders a one-line summary of active AI coworkers.
+// Detail belongs in `ox agent list`.
 func renderAICoworkersSection(client *daemon.Client) string {
 	if client == nil {
 		return ""
@@ -1389,30 +1389,27 @@ func renderAICoworkersSection(client *daemon.Client) string {
 		return ""
 	}
 
+	active := 0
+	for _, inst := range instances {
+		if inst.Status == daemon.StatusActive {
+			active++
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString("\n")
-	b.WriteString(statusHeaderStyle.Render("AI Coworkers"))
-	b.WriteString("\n")
-	b.WriteString(statusMutedStyle.Render("────────────"))
-	b.WriteString("\n")
+	b.WriteString(statusLabelStyle.Render("AI Coworkers"))
 
-	for _, inst := range instances {
-		// agent ID and status
-		status := inst.Status
-		statusSemantic := "success"
-		if status == "idle" {
-			statusSemantic = "muted"
-		}
-
-		b.WriteString(statusLabelStyle.Render(inst.AgentID))
-		b.WriteString(formatValue(status, statusSemantic))
-
-		// context stats inline (daemon provides token counts directly)
-		if inst.CumulativeContextTokens > 0 {
-			b.WriteString(statusMutedStyle.Render(fmt.Sprintf("  ~%s tokens  %d cmds", formatTokenCount(int(inst.CumulativeContextTokens)), inst.CommandCount)))
-		}
-		b.WriteString("\n")
+	total := len(instances)
+	if active == total {
+		b.WriteString(formatValue(fmt.Sprintf("%d active", total), "success"))
+	} else if active > 0 {
+		b.WriteString(formatValue(fmt.Sprintf("%d active, %d idle", active, total-active), "success"))
+	} else {
+		b.WriteString(formatValue(fmt.Sprintf("%d idle", total), "muted"))
 	}
+	b.WriteString(statusMutedStyle.Render("  (ox agent list)"))
+	b.WriteString("\n")
 
 	return b.String()
 }
