@@ -40,14 +40,44 @@ func (db *DB) IndexRepo(ctx context.Context, url string, opts index.IndexOptions
 	return index.IndexRepo(ctx, db.store, url, opts)
 }
 
-// IndexLocalRepo indexes a local git repository in-place, including dirty working tree files.
+// IndexLocalRepo indexes a local git repository's committed content.
 func (db *DB) IndexLocalRepo(ctx context.Context, localPath string, opts index.IndexOptions) error {
 	return index.IndexLocalRepo(ctx, db.store, localPath, opts)
+}
+
+// BuildDirtyIndex builds an on-disk Bleve index of dirty (uncommitted) files.
+// Called by the daemon after committed content indexing.
+func (db *DB) BuildDirtyIndex(ctx context.Context, localPath string, opts index.IndexOptions) (int, error) {
+	dirtyPath := index.DirtyIndexPath(db.store.Root, localPath)
+	return index.BuildDirtyIndex(ctx, localPath, dirtyPath, opts)
+}
+
+// AttachDirtyIndex opens the daemon-built on-disk dirty overlay and aliases it
+// with the shared CodeIndex for transparent search.
+func (db *DB) AttachDirtyIndex(worktreePath string) error {
+	dirtyPath := index.DirtyIndexPath(db.store.Root, worktreePath)
+	return db.store.AttachDirtyIndex(dirtyPath)
+}
+
+// AttachDirtyOverlay creates an in-memory Bleve overlay for dirty worktree files.
+// Primarily used in tests; production uses AttachDirtyIndex for on-disk overlays.
+func (db *DB) AttachDirtyOverlay() error {
+	return db.store.AttachDirtyOverlay()
+}
+
+// DetachDirtyOverlay closes any attached dirty overlay.
+func (db *DB) DetachDirtyOverlay() {
+	db.store.DetachDirtyOverlay()
 }
 
 // ParseSymbols extracts symbols from all unparsed blobs with supported languages.
 func (db *DB) ParseSymbols(ctx context.Context, progress func(string)) (index.ParseStats, error) {
 	return index.ParseSymbols(ctx, db.store, index.ProgressFunc(progress))
+}
+
+// ParseComments extracts comments from all unparsed blobs with supported languages.
+func (db *DB) ParseComments(ctx context.Context, progress func(string)) (index.CommentStats, error) {
+	return index.ParseComments(ctx, db.store, index.ProgressFunc(progress))
 }
 
 // Search parses and executes a query.

@@ -1,13 +1,13 @@
 package index
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +20,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 
+	"github.com/sageox/ox/internal/codedb/comments"
 	"github.com/sageox/ox/internal/codedb/language"
 	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/codedb/symbols"
@@ -317,20 +318,6 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 			time.Since(t2).Round(time.Millisecond), defaultRef.name))
 	}
 
-	// 8. Index working tree (dirty files)
-	t4 := time.Now()
-	skipDirs := opts.SkipDirs
-	if skipDirs == nil {
-		skipDirs = defaultSkipDirs
-	}
-	worktreeBlobs, err := indexWorktree(ctx, st, localPath, skipDirs)
-	if err != nil {
-		report(fmt.Sprintf("Warning: working tree indexing failed: %v", err))
-	} else {
-		report(fmt.Sprintf("  working tree: %s, %d files indexed",
-			time.Since(t4).Round(time.Millisecond), worktreeBlobs))
-	}
-
 	report(fmt.Sprintf("Indexing complete: %d new commits, %d new blobs.", st.newCommits, st.newBlobs))
 
 	// 9. Commit SQL transaction first, then flush Bleve batches.
@@ -350,153 +337,128 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 	return nil
 }
 
-// indexWorktree walks the working tree on disk and indexes files that are
-// not already in the git object store (i.e., dirty/uncommitted files).
-// Returns the number of new files indexed.
-func indexWorktree(ctx context.Context, st *indexState, rootPath string, skipDirs map[string]bool) (int, error) {
-	indexed := 0
-
-	// Get HEAD tree entries so we can detect dirty files
-	headRef, err := st.repo.Head()
-	var headEntries map[string]plumbing.Hash
-	if err == nil {
-		headCommit, cErr := st.repo.CommitObject(headRef.Hash())
-		if cErr == nil {
-			headEntries, _ = getTreeEntries(st.repo, headCommit.TreeHash, st.treeCache)
-		}
-	}
-	if headEntries == nil {
-		headEntries = make(map[string]plumbing.Hash)
-	}
-
-	// Walk the working tree
-	err = filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip unreadable
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		// Skip directories in the skip list
-		name := d.Name()
-		if d.IsDir() {
-			if skipDirs[name] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		// Get path relative to repo root
-		relPath, rErr := filepath.Rel(rootPath, path)
-		if rErr != nil {
-			return nil
-		}
-
-		// Skip non-code files (no detected language)
-		lang := language.Detect(relPath)
-		if lang == "" {
-			return nil
-		}
-
-		// Read the file
-		content, rErr := os.ReadFile(path)
-		if rErr != nil || !utf8.Valid(content) || len(content) == 0 {
-			return nil
-		}
-
-		// Compute content hash
-		h := sha256.Sum256(content)
-		contentHash := "worktree:" + hex.EncodeToString(h[:])
-
-		// Check if this file's content matches what's in HEAD — if so, skip it
-		// (it's already indexed via commit processing).
-		// Compare blob size first to avoid reading content for differently-sized files.
-		if headBlobOID, ok := headEntries[relPath]; ok {
-			headBlob, bErr := st.repo.BlobObject(headBlobOID)
-			if bErr == nil && headBlob.Size == int64(len(content)) {
-				reader, rr := headBlob.Reader()
-				if rr == nil {
-					headContent, re := io.ReadAll(reader)
-					reader.Close()
-					if re == nil && string(headContent) == string(content) {
-						return nil // file unchanged from HEAD
-					}
-				}
-			}
-		}
-
-		// Insert blob for this working tree file
-		var langPtr *string
-		if lang != "" {
-			langPtr = &lang
-		}
-		_, err = st.tx.Exec(
-			"INSERT OR IGNORE INTO blobs (content_hash, language) VALUES (?, ?)",
-			contentHash, langPtr,
-		)
-		if err != nil {
-			return nil // skip on error
-		}
-
-		var blobDBID int64
-		err = st.tx.QueryRow("SELECT id FROM blobs WHERE content_hash = ?", contentHash).Scan(&blobDBID)
-		if err != nil {
-			return nil
-		}
-
-		// Index content in Bleve
-		st.codeBatch.Index(fmt.Sprintf("blob_%d", blobDBID), BleveCodeDoc{Content: string(content)})
-		st.codeBatchN++
-		if err := st.flushCodeBatch(false); err != nil {
-			return err
-		}
-
-		// Create a file_revs entry so the file is searchable
-		// Use a synthetic "worktree" ref to hold working tree state
-		worktreeRefID, wErr := ensureWorktreeRef(st)
-		if wErr != nil {
-			return nil
-		}
-		_, _ = st.tx.Exec(
-			"INSERT OR REPLACE INTO file_revs (commit_id, path, blob_id) VALUES (?, ?, ?)",
-			worktreeRefID, relPath, blobDBID,
-		)
-
-		indexed++
-		st.newBlobs++
-		return nil
-	})
-
-	return indexed, err
+// DirtyIndexPath returns the on-disk path for a worktree's dirty overlay index.
+// The path is deterministic based on the worktree's absolute path, allowing the
+// CLI to find the daemon-built dirty index without IPC.
+func DirtyIndexPath(codedbDir, worktreePath string) string {
+	h := sha256.Sum256([]byte(worktreePath))
+	return filepath.Join(codedbDir, "bleve", "dirty", hex.EncodeToString(h[:8]))
 }
 
-// ensureWorktreeRef creates a synthetic commit record to represent the working tree state.
-func ensureWorktreeRef(st *indexState) (int64, error) {
-	const worktreeHash = "00000000000000000000000000000000w0c47cee" // synthetic 40-char hash for worktree
-
-	var id int64
-	err := st.tx.QueryRow("SELECT id FROM commits WHERE hash = ? AND repo_id = ?",
-		worktreeHash, st.repoID).Scan(&id)
-	if err == nil {
-		return id, nil
-	}
-
-	_, err = st.tx.Exec(
-		`INSERT OR IGNORE INTO commits (repo_id, hash, author, message, timestamp)
-		 VALUES (?, ?, 'worktree', 'Working tree (uncommitted)', ?)`,
-		st.repoID, worktreeHash, time.Now().Unix(),
-	)
+// BuildDirtyIndex creates an on-disk Bleve index of dirty (uncommitted) files.
+// Uses git status to identify dirty files (fast) rather than walking the full tree.
+// The dirty index at dirtyPath is fully rebuilt on each call via atomic swap
+// (write to .tmp, then rename) so CLI readers never see a partially-written index.
+// Files are indexed as "dirty_<relPath>" for enrichment without SQL.
+func BuildDirtyIndex(ctx context.Context, localPath, dirtyPath string, opts IndexOptions) (int, error) {
+	dirtyFiles, err := gitStatusDirtyFiles(ctx, localPath)
 	if err != nil {
-		return 0, fmt.Errorf("insert worktree commit: %w", err)
+		return 0, fmt.Errorf("git status: %w", err)
 	}
 
-	err = st.tx.QueryRow("SELECT id FROM commits WHERE hash = ? AND repo_id = ?",
-		worktreeHash, st.repoID).Scan(&id)
-	if err != nil {
-		return 0, fmt.Errorf("select worktree commit id: %w", err)
+	if len(dirtyFiles) == 0 {
+		// no dirty files — remove stale index if it exists
+		_ = os.RemoveAll(dirtyPath)
+		return 0, nil
 	}
-	return id, nil
+
+	// build into a temp path, then atomic-swap to dirtyPath
+	tmpPath := dirtyPath + ".tmp"
+	_ = os.RemoveAll(tmpPath)
+
+	mapping := bleve.NewIndexMapping()
+	dirtyIdx, err := bleve.New(tmpPath, mapping)
+	if err != nil {
+		return 0, fmt.Errorf("create dirty index: %w", err)
+	}
+
+	indexed := 0
+	batch := dirtyIdx.NewBatch()
+
+	for _, relPath := range dirtyFiles {
+		if ctx.Err() != nil {
+			break
+		}
+
+		lang := language.Detect(relPath)
+		if lang == "" {
+			continue
+		}
+
+		absPath := filepath.Join(localPath, relPath)
+		content, rErr := os.ReadFile(absPath)
+		if rErr != nil || !utf8.Valid(content) || len(content) == 0 || len(content) > 1<<20 {
+			continue
+		}
+
+		batch.Index("dirty_"+relPath, BleveCodeDoc{Content: string(content)})
+		indexed++
+	}
+
+	if indexed > 0 {
+		if err := dirtyIdx.Batch(batch); err != nil {
+			dirtyIdx.Close()
+			_ = os.RemoveAll(tmpPath)
+			return 0, fmt.Errorf("batch dirty index: %w", err)
+		}
+	}
+	dirtyIdx.Close()
+
+	// atomic swap: remove old, rename tmp into place
+	_ = os.RemoveAll(dirtyPath)
+	if err := os.Rename(tmpPath, dirtyPath); err != nil {
+		_ = os.RemoveAll(tmpPath)
+		return 0, fmt.Errorf("swap dirty index: %w", err)
+	}
+
+	if opts.Progress != nil {
+		opts.Progress(fmt.Sprintf("indexed %d dirty files", indexed))
+	}
+
+	return indexed, nil
+}
+
+// gitStatusDirtyFiles returns relative paths of dirty files using git status -z.
+// The -z flag uses NUL delimiters, avoiding all quoting/escaping issues with
+// filenames containing spaces, non-ASCII, or special characters.
+func gitStatusDirtyFiles(ctx context.Context, repoPath string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", "-z")
+	cmd.Dir = repoPath
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	if len(out) == 0 {
+		return nil, nil
+	}
+
+	var files []string
+	entries := bytes.Split(out, []byte{0})
+
+	for i := 0; i < len(entries); i++ {
+		entry := entries[i]
+		if len(entry) < 4 {
+			continue
+		}
+
+		xy := entry[:2]
+		path := string(entry[3:])
+
+		// skip deleted files (no content to index)
+		if xy[0] == 'D' || xy[1] == 'D' {
+			continue
+		}
+
+		// renames/copies: with -z, the "from" path is in the next NUL-separated entry
+		if xy[0] == 'R' || xy[0] == 'C' {
+			i++ // skip the "from" path
+		}
+
+		files = append(files, path)
+	}
+
+	return files, nil
 }
 
 // upsertRepo inserts or updates a repo record and returns its ID.
@@ -1214,38 +1176,24 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 		}
 
 		var content []byte
-		if strings.HasPrefix(blob.contentHash, "worktree:") {
-			// worktree blobs: find file path from file_revs, read from disk
-			var filePath, repoPath string
-			err := tx.QueryRow(`
-				SELECT fr.path, rp.path FROM file_revs fr
-				JOIN commits c ON c.id = fr.commit_id
-				JOIN repos rp ON rp.id = c.repo_id
-				WHERE fr.blob_id = ? LIMIT 1`, blob.id).Scan(&filePath, &repoPath)
-			if err == nil {
-				fullPath := filepath.Join(repoPath, filePath)
-				content, _ = os.ReadFile(fullPath)
+		oid := plumbing.NewHash(blob.contentHash)
+		for _, r := range repos {
+			blobObj, bErr := r.BlobObject(oid)
+			if bErr != nil {
+				continue
 			}
-		} else {
-			oid := plumbing.NewHash(blob.contentHash)
-			for _, r := range repos {
-				blobObj, bErr := r.BlobObject(oid)
-				if bErr != nil {
-					continue
-				}
-				reader, rErr := blobObj.Reader()
-				if rErr != nil {
-					continue
-				}
-				var readErr error
-				content, readErr = io.ReadAll(reader)
-				reader.Close()
-				if readErr != nil {
-					content = nil
-					continue
-				}
-				break
+			reader, rErr := blobObj.Reader()
+			if rErr != nil {
+				continue
 			}
+			var readErr error
+			content, readErr = io.ReadAll(reader)
+			reader.Close()
+			if readErr != nil {
+				content = nil
+				continue
+			}
+			break
 		}
 		if content == nil || !utf8.Valid(content) {
 			tx.Exec("UPDATE blobs SET parsed = 1 WHERE id = ?", blob.id)
@@ -1305,6 +1253,206 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 
 	report(fmt.Sprintf("Symbol parsing complete: %d blobs parsed, %d symbols extracted.",
 		stats.BlobsParsed, stats.SymbolsExtracted))
+
+	return stats, nil
+}
+
+// CommentStats holds statistics from the comment parsing phase.
+type CommentStats struct {
+	BlobsParsed       uint64
+	CommentsExtracted uint64
+}
+
+// BleveCommentDoc is the document indexed into the comment Bleve index.
+type BleveCommentDoc struct {
+	Content string `json:"content"`
+}
+
+// ParseComments extracts comments from all blobs that haven't been comment-parsed
+// yet and inserts them into the comments table and CommentIndex.
+func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (CommentStats, error) {
+	report := func(msg string) {
+		if progress != nil {
+			progress(msg)
+		}
+	}
+
+	var stats CommentStats
+
+	supported := comments.SupportedLanguages()
+	if len(supported) == 0 {
+		return stats, nil
+	}
+
+	placeholders := make([]string, len(supported))
+	args := make([]interface{}, len(supported))
+	for i, lang := range supported {
+		placeholders[i] = "?"
+		args[i] = lang
+	}
+	inClause := strings.Join(placeholders, ", ")
+
+	query := fmt.Sprintf(
+		"SELECT id, content_hash, language FROM blobs WHERE comments_parsed = 0 AND language IN (%s)",
+		inClause,
+	)
+	rows, err := s.Query(query, args...)
+	if err != nil {
+		return stats, fmt.Errorf("query unparsed blobs: %w", err)
+	}
+
+	type blobRow struct {
+		id          int64
+		contentHash string
+		language    string
+	}
+	var blobs []blobRow
+	for rows.Next() {
+		var b blobRow
+		if err := rows.Scan(&b.id, &b.contentHash, &b.language); err != nil {
+			rows.Close()
+			return stats, fmt.Errorf("scan blob row: %w", err)
+		}
+		blobs = append(blobs, b)
+	}
+	rows.Close()
+
+	if len(blobs) == 0 {
+		report("No blobs to parse for comments.")
+		return stats, nil
+	}
+	report(fmt.Sprintf("Parsing comments from %d blobs...", len(blobs)))
+
+	repoRows, err := s.Query("SELECT path FROM repos")
+	if err != nil {
+		return stats, fmt.Errorf("query repo paths: %w", err)
+	}
+	var repoPaths []string
+	for repoRows.Next() {
+		var p string
+		if err := repoRows.Scan(&p); err != nil {
+			repoRows.Close()
+			return stats, fmt.Errorf("scan repo path: %w", err)
+		}
+		repoPaths = append(repoPaths, p)
+	}
+	repoRows.Close()
+	if err := repoRows.Err(); err != nil {
+		return stats, fmt.Errorf("iterate repo paths: %w", err)
+	}
+
+	if len(repoPaths) == 0 {
+		return stats, fmt.Errorf("no repos found in database")
+	}
+
+	var repos []*git.Repository
+	for _, rp := range repoPaths {
+		r, err := git.PlainOpen(rp)
+		if err != nil {
+			continue
+		}
+		repos = append(repos, r)
+	}
+	if len(repos) == 0 {
+		return stats, fmt.Errorf("could not open any git repos")
+	}
+
+	tx, err := s.Begin()
+	if err != nil {
+		return stats, fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	const maxCommentsPerBlob = 1000
+	const maxBlobSize = 1 << 20 // 1MB
+
+	commentBatch := s.CommentIndex.NewBatch()
+	commentBatchN := 0
+
+	for i, blob := range blobs {
+		if err := ctx.Err(); err != nil {
+			return stats, err
+		}
+		if (i+1)%100 == 0 {
+			report(fmt.Sprintf("Parsing comments: %d/%d blobs...", i+1, len(blobs)))
+		}
+
+		var content []byte
+		oid := plumbing.NewHash(blob.contentHash)
+		for _, r := range repos {
+			blobObj, bErr := r.BlobObject(oid)
+			if bErr != nil {
+				continue
+			}
+			reader, rErr := blobObj.Reader()
+			if rErr != nil {
+				continue
+			}
+			var readErr error
+			content, readErr = io.ReadAll(reader)
+			reader.Close()
+			if readErr != nil {
+				content = nil
+				continue
+			}
+			break
+		}
+		if content == nil || !utf8.Valid(content) || len(content) > maxBlobSize {
+			tx.Exec("UPDATE blobs SET comments_parsed = 1 WHERE id = ?", blob.id)
+			continue
+		}
+
+		extracted := comments.Extract(string(content), blob.language)
+
+		count := len(extracted)
+		if count > maxCommentsPerBlob {
+			count = maxCommentsPerBlob
+		}
+
+		for j := 0; j < count; j++ {
+			cm := extracted[j]
+			res, err := tx.Exec(
+				`INSERT INTO comments (blob_id, text, kind, line, end_line, col, end_col) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				blob.id, cm.Text, cm.Kind, cm.Line, cm.EndLine, cm.Col, cm.EndCol,
+			)
+			if err != nil {
+				return stats, fmt.Errorf("insert comment: %w", err)
+			}
+			commentID, _ := res.LastInsertId()
+			commentBatch.Index(fmt.Sprintf("comment_%d", commentID), BleveCommentDoc{Content: cm.Text})
+			commentBatchN++
+			stats.CommentsExtracted++
+
+			if commentBatchN >= 200 {
+				if err := s.CommentIndex.Batch(commentBatch); err != nil {
+					return stats, fmt.Errorf("flush comment batch: %w", err)
+				}
+				commentBatch = s.CommentIndex.NewBatch()
+				commentBatchN = 0
+			}
+		}
+
+		_, err = tx.Exec("UPDATE blobs SET comments_parsed = 1 WHERE id = ?", blob.id)
+		if err != nil {
+			return stats, fmt.Errorf("mark blob comments_parsed: %w", err)
+		}
+
+		stats.BlobsParsed++
+	}
+
+	if err := tx.Commit(); err != nil {
+		return stats, fmt.Errorf("commit transaction: %w", err)
+	}
+
+	// flush remaining bleve batch after SQL commit
+	if commentBatchN > 0 {
+		if err := s.CommentIndex.Batch(commentBatch); err != nil {
+			return stats, fmt.Errorf("flush final comment batch: %w", err)
+		}
+	}
+
+	report(fmt.Sprintf("Comment parsing complete: %d blobs parsed, %d comments extracted.",
+		stats.BlobsParsed, stats.CommentsExtracted))
 
 	return stats, nil
 }

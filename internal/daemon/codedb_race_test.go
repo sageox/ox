@@ -59,7 +59,7 @@ func TestConcurrentIndexAttempts(t *testing.T) {
 
 	mgrs := make([]*CodeDBManager, managers)
 	for i := range managers {
-		mgrs[i] = NewCodeDBManager(tmpDir, logger)
+		mgrs[i] = NewCodeDBManager(tmpDir, logger, nil)
 	}
 
 	var wg sync.WaitGroup
@@ -112,7 +112,7 @@ func TestConcurrentStatsWhileIndexing(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	tmpDir := t.TempDir()
-	mgr := NewCodeDBManager(tmpDir, logger)
+	mgr := NewCodeDBManager(tmpDir, logger, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -250,7 +250,7 @@ func TestMultipleManagersCheckFreshness(t *testing.T) {
 	for range managers {
 		go func() {
 			defer wg.Done()
-			mgr := NewCodeDBManager(tmpDir, logger)
+			mgr := NewCodeDBManager(tmpDir, logger, nil)
 			mgr.CheckFreshness(ctx)
 		}()
 	}

@@ -809,7 +809,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// append code search tip to AgentTip based on index availability
 	repoSlug := repoSlugFromRemoteOrDir(projectRoot)
-	codeDBDir := paths.CodeDBDataDir(projectRoot)
+	codeDBDir := resolveCodeDBDir(projectRoot)
 	if _, statErr := os.Stat(codeDBDir); statErr == nil {
 		teamLabel := ""
 		if teamCtx != nil {
@@ -1000,7 +1000,7 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 
 	// code search — BEFORE ox query so agents see it first (code search is more common)
 	repoSlug := repoSlugFromRemoteOrDir(projectRoot)
-	codeDBDir := paths.CodeDBDataDir(projectRoot)
+	codeDBDir := resolveCodeDBDir(projectRoot)
 	if _, statErr := os.Stat(codeDBDir); statErr == nil {
 		cmds = append(cmds, intentCommand{
 			Intent:  fmt.Sprintf("find/search/grep code in %s: symbols, functions, git history, file contents, diffs — PREFER over grep/ripgrep", repoSlug),

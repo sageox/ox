@@ -9,6 +9,7 @@ Local code search engine integrated into ox. Indexes git repositories into SQLit
 - **search** — Query parser, execution planner (SQL/Bleve/Intersect), SQL translator
 - **store** — SQLite + Bleve storage layer (schema, migrations, convenience methods)
 - **symbols** — Symbol/ref types and parser interface (stub — no CGO tree-sitter)
+- **comments** — Comment extraction via character-level scanner (pure Go, no CGO)
 - **language** — File extension → language detection
 
 ## Query syntax
@@ -17,6 +18,8 @@ Local code search engine integrated into ox. Indexes git repositories into SQLit
 spawn                          # bare text search
 lang:rust file:*.rs fn         # filters
 type:symbol Runtime            # symbol search
+type:comment retry             # comment search
+type:comment ckind:doc lang:go # doc comments in Go
 type:commit author:alice       # commit search
 type:diff streaming            # diff search
 calls:groupby                  # call graph

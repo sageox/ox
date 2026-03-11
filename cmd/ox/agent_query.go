@@ -18,7 +18,6 @@ import (
 	"github.com/sageox/ox/internal/codedb/search"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
-	"github.com/sageox/ox/internal/paths"
 )
 
 // queryArgs holds parsed arguments for the query command.
@@ -283,7 +282,7 @@ func queryTeamContext(qa *queryArgs, projectRoot, agentID, agentType string) (*a
 
 // queryCodeDB searches the local code index.
 func queryCodeDB(qa *queryArgs, projectRoot string) ([]search.Result, error) {
-	dataDir := paths.CodeDBDataDir(projectRoot)
+	dataDir := resolveCodeDBDir(projectRoot)
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 		return nil, nil // no index yet, return empty
 	}
@@ -293,6 +292,11 @@ func queryCodeDB(qa *queryArgs, projectRoot string) ([]search.Result, error) {
 		return nil, fmt.Errorf("open codedb: %w", err)
 	}
 	defer db.Close()
+
+	// attach daemon-built dirty overlay for uncommitted file search
+	if err := db.AttachDirtyIndex(projectRoot); err != nil {
+		slog.Debug("dirty overlay not available, searching committed content only", "err", err)
+	}
 
 	return db.Search(context.Background(), qa.query)
 }

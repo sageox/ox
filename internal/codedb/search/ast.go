@@ -10,6 +10,7 @@ const (
 	SearchTypeDiff
 	SearchTypeCommit
 	SearchTypeSymbol
+	SearchTypeComment
 )
 
 func (st SearchType) String() string {
@@ -20,6 +21,8 @@ func (st SearchType) String() string {
 		return "commit"
 	case SearchTypeSymbol:
 		return "symbol"
+	case SearchTypeComment:
+		return "comment"
 	default:
 		return "code"
 	}
@@ -38,26 +41,27 @@ const (
 
 // Filters parsed from the query string.
 type Filters struct {
-	Repo       string
-	NegRepo    string
-	File       string
-	NegFile    string
-	Lang       string
-	NegLang    string
-	Rev        string
-	Count      int // 0 means default (20)
-	Case       bool
-	Author     string
-	NegAuthor  string
-	Before     string
-	After      string
-	Message    string
-	NegMessage string
-	Select     SelectType
-	SelectKind string // for SelectSymbolKind
-	Calls      string
-	CalledBy   string
-	Returns    string
+	Repo        string
+	NegRepo     string
+	File        string
+	NegFile     string
+	Lang        string
+	NegLang     string
+	Rev         string
+	Count       int // 0 means default (20)
+	Case        bool
+	Author      string
+	NegAuthor   string
+	Before      string
+	After       string
+	Message     string
+	NegMessage  string
+	Select      SelectType
+	SelectKind  string // for SelectSymbolKind
+	Calls       string
+	CalledBy    string
+	Returns     string
+	CommentKind string
 }
 
 // ParsedQuery is the result of parsing a query string.

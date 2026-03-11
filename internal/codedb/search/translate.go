@@ -191,6 +191,8 @@ func Translate(query *ParsedQuery) (*TranslatedQuery, error) {
 		return translateCommit(query)
 	case SearchTypeSymbol:
 		return translateSymbol(query)
+	case SearchTypeComment:
+		return translateComment(query)
 	default:
 		return translateCode(query)
 	}
@@ -409,6 +411,48 @@ func translateSymbol(query *ParsedQuery) (*TranslatedQuery, error) {
 		SQL:        sql,
 		Params:     p.params,
 		SearchType: SearchTypeSymbol,
+	}, nil
+}
+
+func translateComment(query *ParsedQuery) (*TranslatedQuery, error) {
+	f := query.Filters
+	p := newParamCollector(f.Case)
+
+	joins := []string{
+		"JOIN blobs b ON b.id = cm.blob_id",
+		"JOIN file_revs fr ON fr.blob_id = b.id",
+		"JOIN refs r ON r.commit_id = fr.commit_id",
+	}
+	var conditions []string
+
+	if !query.HasEmptyPattern() {
+		clause := orMatchClause("cm.text", query.SearchTerms, p)
+		conditions = append(conditions, "AND "+clause)
+	}
+	if f.CommentKind != "" {
+		ph := p.add(f.CommentKind)
+		conditions = append(conditions, "AND cm.kind = "+ph)
+	}
+
+	addRepoFilter(p, &joins, &conditions, f.Repo, f.NegRepo, "r.repo_id")
+	addFileFilter(p, &conditions, f.File, f.NegFile, "fr.path")
+	addLangFilter(p, &conditions, f.Lang, f.NegLang)
+	addRevFilter(p, &conditions, f.Rev)
+
+	if query.HasEmptyPattern() && f.CommentKind == "" && f.Lang == "" && f.File == "" {
+		return nil, fmt.Errorf("comment search requires a search pattern or filter (ckind:, lang:, file:)")
+	}
+
+	limit := resolveLimit(f.Count)
+
+	sql := fmt.Sprintf(
+		"SELECT fr.path, cm.text AS snippet, cm.kind, cm.line, b.language\nFROM comments cm\n%s\nWHERE 1=1%s\nORDER BY fr.path, cm.line\nLIMIT %d",
+		strings.Join(joins, "\n"), conditionsSQL(conditions), limit)
+
+	return &TranslatedQuery{
+		SQL:        sql,
+		Params:     p.params,
+		SearchType: SearchTypeComment,
 	}, nil
 }
 

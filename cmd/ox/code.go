@@ -12,11 +12,24 @@ import (
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/search"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
 )
+
+// resolveCodeDBDir returns the shared CodeDB directory for the given repo root.
+// Uses project config to resolve via ledger cache; falls back to legacy path.
+func resolveCodeDBDir(root string) string {
+	ctx, err := config.LoadProjectContext(root)
+	if err == nil {
+		if dir := paths.CodeDBSharedDir(ctx.RepoID(), ctx.Endpoint()); dir != "" {
+			return dir
+		}
+	}
+	return paths.CodeDBDataDir(root)
+}
 
 var codeCmd = &cobra.Command{
 	Use:   "code",
@@ -52,8 +65,9 @@ var codeIndexCmd = &cobra.Command{
 			return fmt.Errorf("index: %w", err)
 		}
 
-		fmt.Fprintf(os.Stderr, "Done. Parsed %d blobs, %d symbols\n",
-			result.BlobsParsed, result.SymbolsExtracted)
+		fmt.Fprintf(os.Stderr, "Done. Parsed %d blobs, %d symbols, %d comments (%s)\n",
+			result.BlobsParsed, result.SymbolsExtracted, result.CommentsExtracted,
+			formatIndexTiming(result))
 		return nil
 	},
 }
@@ -69,13 +83,18 @@ var codeSearchCmd = &cobra.Command{
 		}
 
 		query := strings.Join(args, " ")
-		dataDir := paths.CodeDBDataDir(root)
+		dataDir := resolveCodeDBDir(root)
 
 		db, err := codedb.Open(dataDir)
 		if err != nil {
 			return fmt.Errorf("open codedb: %w", err)
 		}
 		defer db.Close()
+
+		// attach daemon-built dirty overlay for uncommitted file search
+		if err := db.AttachDirtyIndex(root); err != nil {
+			slog.Debug("dirty overlay not available, searching committed content only", "err", err)
+		}
 
 		results, err := db.Search(context.Background(), query)
 		if err != nil {
@@ -117,11 +136,12 @@ var codeSearchCmd = &cobra.Command{
 
 // compactSearchResult is a minimal search result optimized for agent context.
 type compactSearchResult struct {
-	File    string `json:"file"`
-	Line    int    `json:"line,omitempty"`
-	Lang    string `json:"lang,omitempty"`
-	Snippet string `json:"snippet"`
-	Symbol  string `json:"symbol,omitempty"`
+	File        string `json:"file"`
+	Line        int    `json:"line,omitempty"`
+	Lang        string `json:"lang,omitempty"`
+	Snippet     string `json:"snippet"`
+	Symbol      string `json:"symbol,omitempty"`
+	CommentKind string `json:"comment_kind,omitempty"`
 }
 
 // compactSearchResponse is the default search output — minimal context footprint.
@@ -143,11 +163,12 @@ func compactSearchResults(results []search.Result, limit int) compactSearchRespo
 		snippet := stripANSIEscapes(r.Content)
 		snippet = compactSnippet(snippet, 120)
 		cr := compactSearchResult{
-			File:    r.FilePath,
-			Line:    r.Line,
-			Lang:    r.Language,
-			Snippet: snippet,
-			Symbol:  r.SymbolName,
+			File:        r.FilePath,
+			Line:        r.Line,
+			Lang:        r.Language,
+			Snippet:     snippet,
+			Symbol:      r.SymbolName,
+			CommentKind: r.CommentKind,
 		}
 		compact = append(compact, cr)
 	}
@@ -230,7 +251,7 @@ var codeSQLCmd = &cobra.Command{
 			return fmt.Errorf("not in a git repository")
 		}
 
-		dataDir := paths.CodeDBDataDir(root)
+		dataDir := resolveCodeDBDir(root)
 
 		db, err := codedb.Open(dataDir)
 		if err != nil {
@@ -261,7 +282,7 @@ var codeStatsCmd = &cobra.Command{
 			return fmt.Errorf("not in a git repository")
 		}
 
-		dataDir := paths.CodeDBDataDir(root)
+		dataDir := resolveCodeDBDir(root)
 		indexExists := false
 		if _, err := os.Stat(dataDir); err == nil {
 			indexExists = true
@@ -279,7 +300,7 @@ var codeStatsCmd = &cobra.Command{
 		}
 
 		// query DB directly for counts (daemon stats may lag)
-		var totalCommits, totalBlobs, totalSymbols int
+		var totalCommits, totalBlobs, totalSymbols, totalComments int
 		type repoRow struct {
 			name    string
 			path    string
@@ -294,6 +315,7 @@ var codeStatsCmd = &cobra.Command{
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM commits").Scan(&totalCommits)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM blobs").Scan(&totalBlobs)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM symbols").Scan(&totalSymbols)
+				_ = db.Store().QueryRow("SELECT COUNT(*) FROM comments").Scan(&totalComments)
 
 				rows, qErr := db.Store().Query(`
 					SELECT r.name, r.path, COUNT(DISTINCT c.id), COUNT(DISTINCT fr.blob_id)
@@ -326,6 +348,7 @@ var codeStatsCmd = &cobra.Command{
 				Commits     int              `json:"commits"`
 				Blobs       int              `json:"blobs"`
 				Symbols     int              `json:"symbols"`
+				Comments    int              `json:"comments"`
 				Repos       []jsonRepoStats  `json:"repos"`
 				DataDir     string           `json:"data_dir"`
 				IndexExists bool             `json:"index_exists"`
@@ -337,6 +360,7 @@ var codeStatsCmd = &cobra.Command{
 				Commits:     totalCommits,
 				Blobs:       totalBlobs,
 				Symbols:     totalSymbols,
+				Comments:    totalComments,
 				DataDir:     dataDir,
 				IndexExists: indexExists,
 			}
@@ -421,6 +445,9 @@ var codeStatsCmd = &cobra.Command{
 			b.WriteString(statusLabelStyle.Render("Symbols"))
 			b.WriteString(statusHighlightStyle.Render(formatComma(totalSymbols)))
 			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render("Comments"))
+			b.WriteString(statusHighlightStyle.Render(formatComma(totalComments)))
+			b.WriteString("\n")
 			b.WriteString(statusLabelStyle.Render("Commits"))
 			b.WriteString(statusValueStyle.Render(formatComma(totalCommits)))
 			b.WriteString("\n")
@@ -489,6 +516,17 @@ func formatComma(n int) string {
 		result.WriteRune(c)
 	}
 	return result.String()
+}
+
+// formatIndexTiming formats per-stage timing from a CodeIndexResult.
+func formatIndexTiming(r *daemon.CodeIndexResult) string {
+	total := time.Duration(r.TotalDurationMs) * time.Millisecond
+	idx := time.Duration(r.IndexDurationMs) * time.Millisecond
+	sym := time.Duration(r.SymbolDurationMs) * time.Millisecond
+	cmt := time.Duration(r.CommentDurationMs) * time.Millisecond
+	return fmt.Sprintf("total %s: index %s, symbols %s, comments %s",
+		formatDurationBrief(total), formatDurationBrief(idx),
+		formatDurationBrief(sym), formatDurationBrief(cmt))
 }
 
 func init() {

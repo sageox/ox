@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	"github.com/blevesearch/bleve/v2"
@@ -12,22 +13,25 @@ import (
 	_ "github.com/blevesearch/bleve/v2/search/highlight/highlighter/ansi"
 	"github.com/blevesearch/bleve/v2/search/query"
 
+	"github.com/sageox/ox/internal/codedb/language"
 	"github.com/sageox/ox/internal/codedb/store"
 )
 
 // Result represents a single search result.
 type Result struct {
-	Repo       string  `json:"repo,omitempty"`
-	FilePath   string  `json:"file_path,omitempty"`
-	Content    string  `json:"content,omitempty"`
-	Score      float64 `json:"score,omitempty"`
-	Line       int     `json:"line,omitempty"`
-	Language   string  `json:"language,omitempty"`
-	CommitHash string  `json:"commit_hash,omitempty"`
-	Author     string  `json:"author,omitempty"`
-	Message    string  `json:"message,omitempty"`
-	SymbolName string  `json:"symbol_name,omitempty"`
-	SymbolKind string  `json:"symbol_kind,omitempty"`
+	Repo        string  `json:"repo,omitempty"`
+	FilePath    string  `json:"file_path,omitempty"`
+	Content     string  `json:"content,omitempty"`
+	Score       float64 `json:"score,omitempty"`
+	Line        int     `json:"line,omitempty"`
+	Language    string  `json:"language,omitempty"`
+	CommitHash  string  `json:"commit_hash,omitempty"`
+	Author      string  `json:"author,omitempty"`
+	Message     string  `json:"message,omitempty"`
+	SymbolName  string  `json:"symbol_name,omitempty"`
+	SymbolKind  string  `json:"symbol_kind,omitempty"`
+	CommentKind string  `json:"comment_kind,omitempty"`
+	CommentText string  `json:"comment_text,omitempty"`
 }
 
 // Execute runs a parsed query against the store using the planner to determine
@@ -102,6 +106,8 @@ func executePlanSQL(ctx context.Context, s *store.Store, plan *ExecutionPlan) ([
 				fmt.Sscanf(val, "%f", &r.Score)
 			case "snippet":
 				r.Content = val
+			case "language":
+				r.Language = val
 			}
 		}
 		results = append(results, r)
@@ -117,9 +123,14 @@ func executePlanSQL(ctx context.Context, s *store.Store, plan *ExecutionPlan) ([
 // When filters is non-nil (intersect strategy), metadata filters are applied.
 // When filters is nil (bleve-only strategy), no additional filtering is done.
 func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, filters *Filters) ([]Result, error) {
-	idx := s.CodeIndex
-	if plan.BleveIndex == "diff" {
+	var idx bleve.Index
+	switch plan.BleveIndex {
+	case "diff":
 		idx = s.DiffIndex
+	case "comment":
+		idx = s.CommentIndex
+	default:
+		idx = s.CombinedCodeIndex
 	}
 
 	var bleveQuery query.Query
@@ -143,6 +154,7 @@ func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, 
 	}
 
 	var results []Result
+	seen := make(map[string]bool) // dedup by file:line to avoid worktree/committed duplicates
 	for _, hit := range searchResult.Hits {
 		if err := ctx.Err(); err != nil {
 			return results, err
@@ -151,15 +163,29 @@ func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, 
 		fragment := extractFragment(hit)
 
 		var hitResults []Result
-		if plan.BleveIndex == "diff" {
+		switch plan.BleveIndex {
+		case "diff":
 			hitResults, err = enrichDiffHit(ctx, s, hit, fragment, filters)
-		} else {
-			hitResults, err = enrichCodeHit(ctx, s, hit, fragment, filters)
+		case "comment":
+			hitResults, err = enrichCommentHit(ctx, s, hit, fragment, filters)
+		default:
+			if strings.HasPrefix(hit.ID, "dirty_") {
+				hitResults, err = enrichDirtyHit(hit, fragment)
+			} else {
+				hitResults, err = enrichCodeHit(ctx, s, hit, fragment, filters)
+			}
 		}
 		if err != nil {
 			continue
 		}
-		results = append(results, hitResults...)
+		for _, r := range hitResults {
+			key := fmt.Sprintf("%s:%d:%s", r.FilePath, r.Line, r.Content)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			results = append(results, r)
+		}
 
 		if len(results) >= plan.Limit {
 			results = results[:plan.Limit]
@@ -229,8 +255,8 @@ func enrichCodeHit(ctx context.Context, s *store.Store, hit *blevesearch.Documen
 		SELECT fr.path, b.language, rp.name
 		FROM blobs b
 		JOIN file_revs fr ON fr.blob_id = b.id
-		JOIN refs r ON r.commit_id = fr.commit_id
-		JOIN repos rp ON rp.id = r.repo_id
+		LEFT JOIN refs r ON r.commit_id = fr.commit_id
+		LEFT JOIN repos rp ON rp.id = r.repo_id
 		WHERE b.id = ?`
 	args := []interface{}{blobID}
 
@@ -242,6 +268,8 @@ func enrichCodeHit(ctx context.Context, s *store.Store, hit *blevesearch.Documen
 	if filters != nil {
 		addCodeFilters(&sqlQ, &args, filters)
 	}
+
+	sqlQ += " GROUP BY fr.path"
 
 	rows, err := s.QueryContext(ctx, sqlQ, args...)
 	if err != nil {
@@ -266,6 +294,80 @@ func enrichCodeHit(ctx context.Context, s *store.Store, hit *blevesearch.Documen
 		return nil, fmt.Errorf("iterate code rows: %w", err)
 	}
 	return results, nil
+}
+
+// enrichCommentHit looks up comment metadata from SQL for a Bleve comment hit.
+func enrichCommentHit(ctx context.Context, s *store.Store, hit *blevesearch.DocumentMatch, fragment string, filters *Filters) ([]Result, error) {
+	commentID := strings.TrimPrefix(hit.ID, "comment_")
+
+	sqlQ := `
+		SELECT fr.path, b.language, rp.name, cm.kind, cm.text, cm.line
+		FROM comments cm
+		JOIN blobs b ON b.id = cm.blob_id
+		JOIN file_revs fr ON fr.blob_id = b.id
+		LEFT JOIN refs r ON r.commit_id = fr.commit_id
+		LEFT JOIN repos rp ON rp.id = r.repo_id
+		WHERE cm.id = ?`
+	args := []interface{}{commentID}
+
+	if filters != nil {
+		addCommentFilters(&sqlQ, &args, filters)
+	}
+
+	sqlQ += " GROUP BY fr.path"
+
+	rows, err := s.QueryContext(ctx, sqlQ, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []Result
+	for rows.Next() {
+		var path string
+		var lang, repo sql.NullString
+		var kind, text string
+		var line int
+		if err := rows.Scan(&path, &lang, &repo, &kind, &text, &line); err != nil {
+			slog.Warn("comment hit scan error, skipping row", "err", err)
+			continue
+		}
+		content := fragment
+		if content == "" {
+			content = text
+		}
+		results = append(results, Result{
+			FilePath:    path,
+			Score:       hit.Score,
+			Content:     content,
+			Language:    lang.String,
+			Repo:        repo.String,
+			Line:        line,
+			CommentKind: kind,
+			CommentText: text,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate comment rows: %w", err)
+	}
+	return results, nil
+}
+
+// enrichDirtyHit creates a result for a dirty worktree Bleve hit (no SQL metadata).
+// The doc ID encodes the relative path: "dirty_<relPath>".
+func enrichDirtyHit(hit *blevesearch.DocumentMatch, fragment string) ([]Result, error) {
+	relPath := strings.TrimPrefix(hit.ID, "dirty_")
+	lang := language.Detect(relPath)
+	ext := filepath.Ext(relPath)
+	if lang == "" && ext != "" {
+		lang = strings.TrimPrefix(ext, ".")
+	}
+	return []Result{{
+		FilePath: relPath,
+		Score:    hit.Score,
+		Content:  fragment,
+		Language: lang,
+	}}, nil
 }
 
 // addDiffFilters appends SQL WHERE clauses for diff metadata filtering.
@@ -329,6 +431,38 @@ func addCodeFilters(sqlQ *string, args *[]interface{}, f *Filters) {
 	if f.NegLang != "" {
 		*sqlQ += " AND b.language != ?"
 		*args = append(*args, f.NegLang)
+	}
+}
+
+// addCommentFilters appends SQL WHERE clauses for comment metadata filtering.
+func addCommentFilters(sqlQ *string, args *[]interface{}, f *Filters) {
+	if f.Repo != "" {
+		*sqlQ += " AND " + likeOrGlob("rp.name", f.Repo, f.Case)
+		*args = append(*args, likeOrGlobParam(f.Repo))
+	}
+	if f.NegRepo != "" {
+		*sqlQ += " AND NOT (" + likeOrGlob("rp.name", f.NegRepo, f.Case) + ")"
+		*args = append(*args, likeOrGlobParam(f.NegRepo))
+	}
+	if f.File != "" {
+		*sqlQ += " AND " + likeOrGlob("fr.path", f.File, f.Case)
+		*args = append(*args, likeOrGlobParam(f.File))
+	}
+	if f.NegFile != "" {
+		*sqlQ += " AND NOT (" + likeOrGlob("fr.path", f.NegFile, f.Case) + ")"
+		*args = append(*args, likeOrGlobParam(f.NegFile))
+	}
+	if f.Lang != "" {
+		*sqlQ += " AND b.language = ?"
+		*args = append(*args, f.Lang)
+	}
+	if f.NegLang != "" {
+		*sqlQ += " AND b.language != ?"
+		*args = append(*args, f.NegLang)
+	}
+	if f.CommentKind != "" {
+		*sqlQ += " AND cm.kind = ?"
+		*args = append(*args, f.CommentKind)
 	}
 }
 

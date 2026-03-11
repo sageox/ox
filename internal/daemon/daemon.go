@@ -307,7 +307,7 @@ func (d *Daemon) Start() error {
 
 	// initialize code index manager (if project root is set)
 	if d.config.ProjectRoot != "" {
-		d.codedb = NewCodeDBManager(d.config.ProjectRoot, d.logger)
+		d.codedb = NewCodeDBManager(d.config.ProjectRoot, d.logger, d.telemetry)
 	}
 
 	// wire auth token getter so scheduler and friction can authenticate API calls
@@ -469,7 +469,15 @@ func (d *Daemon) Start() error {
 	// set code index handler for indexing via IPC
 	if d.codedb != nil {
 		d.server.SetCodeIndexHandler(func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) {
-			return d.codedb.Index(d.ctx, payload, progress)
+			result, err := d.codedb.Index(d.ctx, payload, progress)
+			if d.telemetry != nil && result != nil {
+				status := "success"
+				if err != nil {
+					status = "error"
+				}
+				d.telemetry.RecordCodeIndexComplete(result, status)
+			}
+			return result, err
 		})
 		d.server.SetCodeStatusHandler(func() *CodeDBStats {
 			stats := d.codedb.Stats()

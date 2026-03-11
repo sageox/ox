@@ -220,12 +220,12 @@ func TestIndexLocalRepo_LinkedWorktree(t *testing.T) {
 	err = IndexLocalRepo(context.Background(), s, worktreeDir, IndexOptions{})
 	require.NoError(t, err)
 
-	// verify commits: 5 from main + 3 from worktree branch + 1 synthetic worktree commit = 9
+	// verify commits: 5 from main + 3 from worktree branch = 8
 	var commitCount int
 	require.NoError(t, s.QueryRow("SELECT COUNT(*) FROM commits").Scan(&commitCount))
-	assert.Equal(t, 9, commitCount, "should index all commits reachable from worktree HEAD plus synthetic worktree commit")
+	assert.Equal(t, 8, commitCount, "should index all commits reachable from worktree HEAD")
 
-	// verify blobs exist (from both committed files and working tree)
+	// verify blobs exist from committed files
 	var blobCount int
 	require.NoError(t, s.QueryRow("SELECT COUNT(*) FROM blobs").Scan(&blobCount))
 	assert.Greater(t, blobCount, 0, "should have indexed blobs")

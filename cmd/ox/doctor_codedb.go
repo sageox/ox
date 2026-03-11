@@ -6,7 +6,6 @@ import (
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/store"
-	"github.com/sageox/ox/internal/paths"
 )
 
 func init() {
@@ -26,7 +25,7 @@ func checkCodeIndex(fix bool) checkResult {
 		return SkippedCheck("Code index", "not in a project", "")
 	}
 
-	dataDir := paths.CodeDBDataDir(projectRoot)
+	dataDir := resolveCodeDBDir(projectRoot)
 
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 		return PassedCheck("Code index", "no index (run 'ox code index' to create)")

@@ -267,6 +267,30 @@ The flow should be:
 
 We use git-lfs for large file storage, but the CLI must work for users who do not have git-lfs installed. This is possible because we use GitLab APIs directly for LFS operations rather than relying on the git-lfs CLI.
 
+**Ledger Cache for Local-Only Repo State:**
+
+When a feature needs to store computed or derived data per-repo that should be:
+- **Shared across worktrees** (not duplicated per checkout)
+- **Persistent across re-clones** (survives `rm -rf` of the project)
+- **Local-only** (never synced to cloud, never committed to git)
+
+Store it in the ledger's `.sageox/cache/` directory:
+
+```
+~/.local/share/sageox/<endpoint>/ledgers/<repo_id>/.sageox/cache/<feature>/
+```
+
+This directory is gitignored in the ledger repo. Every SageOx repo already has `ox init` run, so the ledger always exists. Resolve the ledger location via `ProjectContext.DefaultLedgerPath()` or `config.DefaultLedgerPath(repoID, endpointURL)`.
+
+| Storage Location | Use When |
+|-----------------|----------|
+| Project `.sageox/cache/` | Never — per-worktree, lost on re-clone |
+| Ledger `.sageox/cache/` | Computed indexes, derived data, local caches |
+| Ledger git-tracked | Sessions, data that syncs to cloud |
+| XDG cache (`~/.cache/sageox/`) | User-level caches not tied to a specific repo |
+
+Current consumer: `codedb` (SQLite + Bleve indexes). Future consumers should follow the same pattern.
+
 ---
 
 ## Known Latency (Future Improvement)

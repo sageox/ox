@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -27,6 +28,7 @@ import (
 type CodeDBManager struct {
 	projectRoot string
 	logger      *slog.Logger
+	telemetry   *TelemetryCollector
 
 	mu        sync.Mutex
 	indexing   bool
@@ -40,6 +42,7 @@ type CodeDBStats struct {
 	Commits     int       `json:"commits"`
 	Blobs       int       `json:"blobs"`
 	Symbols     int       `json:"symbols"`
+	Comments    int       `json:"comments"`
 	Repos       []RepoStats `json:"repos,omitempty"`
 	LastIndexed time.Time `json:"last_indexed,omitempty"`
 	IndexingNow bool      `json:"indexing_now"`
@@ -64,16 +67,39 @@ type CodeIndexPayload struct {
 
 // CodeIndexResult is the result of a code_index operation.
 type CodeIndexResult struct {
-	BlobsParsed      uint64 `json:"blobs_parsed"`
-	SymbolsExtracted uint64 `json:"symbols_extracted"`
+	BlobsParsed       uint64 `json:"blobs_parsed"`
+	SymbolsExtracted  uint64 `json:"symbols_extracted"`
+	CommentsExtracted uint64 `json:"comments_extracted"`
+
+	// Per-stage timing in milliseconds
+	IndexDurationMs   int64 `json:"index_duration_ms"`
+	SymbolDurationMs  int64 `json:"symbol_duration_ms"`
+	CommentDurationMs int64 `json:"comment_duration_ms"`
+	TotalDurationMs   int64 `json:"total_duration_ms"`
 }
 
 // NewCodeDBManager creates a new CodeDB manager for the given project root.
-func NewCodeDBManager(projectRoot string, logger *slog.Logger) *CodeDBManager {
+// Resolves the shared CodeDB path via project config (ledger cache).
+// Falls back to the legacy per-worktree path if project config is unavailable.
+func NewCodeDBManager(projectRoot string, logger *slog.Logger, telemetry *TelemetryCollector) *CodeDBManager {
 	return &CodeDBManager{
 		projectRoot: projectRoot,
 		logger:      logger,
+		telemetry:   telemetry,
 	}
+}
+
+// resolveSharedDataDir returns the shared CodeDB directory from project config.
+// Falls back to legacy per-worktree path if config is unavailable.
+func (m *CodeDBManager) resolveSharedDataDir() string {
+	ctx, err := config.LoadProjectContext(m.projectRoot)
+	if err == nil {
+		if dir := paths.CodeDBSharedDir(ctx.RepoID(), ctx.Endpoint()); dir != "" {
+			return dir
+		}
+	}
+	m.logger.Debug("falling back to legacy codedb path", "reason", err)
+	return paths.CodeDBDataDir(m.projectRoot)
 }
 
 // Index runs indexing with progress reporting. Only one indexing operation runs at a time.
@@ -101,7 +127,7 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 		m.mu.Unlock()
 	}()
 
-	dataDir := paths.CodeDBDataDir(m.projectRoot)
+	dataDir := m.resolveSharedDataDir()
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create codedb dir: %w", err)
 	}
@@ -112,6 +138,8 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 	}
 	defer db.Close()
 
+	totalStart := time.Now()
+
 	opts := index.IndexOptions{
 		Progress: func(msg string) {
 			if pw != nil {
@@ -120,6 +148,8 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 		},
 	}
 
+	// stage 1: git indexing (committed content only)
+	indexStart := time.Now()
 	if payload.URL != "" {
 		if pw != nil {
 			_ = pw.WriteStage("indexing", fmt.Sprintf("Indexing %s...", payload.URL))
@@ -129,7 +159,6 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 			return nil, fmt.Errorf("index: %w", err)
 		}
 	} else {
-		// index local repo; IndexLocalRepo validates the path is a git repo
 		if pw != nil {
 			_ = pw.WriteStage("indexing", fmt.Sprintf("Indexing local repo %s...", m.projectRoot))
 		}
@@ -138,7 +167,10 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 			return nil, fmt.Errorf("index local: %w", err)
 		}
 	}
+	indexDuration := time.Since(indexStart)
 
+	// stage 2: symbol extraction
+	symbolStart := time.Now()
 	if pw != nil {
 		_ = pw.WriteStage("symbols", "Parsing symbols...")
 	}
@@ -151,20 +183,68 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 		m.setError(err)
 		return nil, fmt.Errorf("parse symbols: %w", err)
 	}
+	symbolDuration := time.Since(symbolStart)
+
+	// stage 3: comment extraction
+	commentStart := time.Now()
+	if pw != nil {
+		_ = pw.WriteStage("comments", "Extracting comments...")
+	}
+	cStats, err := db.ParseComments(ctx, func(msg string) {
+		if pw != nil {
+			_ = pw.WriteMessage(msg)
+		}
+	})
+	if err != nil {
+		m.setError(err)
+		return nil, fmt.Errorf("parse comments: %w", err)
+	}
+	commentDuration := time.Since(commentStart)
+
+	// stage 4: build dirty overlay index for uncommitted worktree files
+	var dirtyDuration time.Duration
+	if payload.URL == "" {
+		dirtyStart := time.Now()
+		if pw != nil {
+			_ = pw.WriteStage("dirty", "Indexing dirty files...")
+		}
+		dirtyCount, dirtyErr := db.BuildDirtyIndex(ctx, m.projectRoot, opts)
+		if dirtyErr != nil {
+			m.logger.Warn("dirty index build failed", "error", dirtyErr)
+		} else if dirtyCount > 0 {
+			m.logger.Debug("dirty index built", "files", dirtyCount)
+		}
+		dirtyDuration = time.Since(dirtyStart)
+	}
+	totalDuration := time.Since(totalStart)
 
 	m.mu.Lock()
 	m.lastIndex = time.Now()
 	m.lastErr = nil
 	m.mu.Unlock()
 
-	m.logger.Info("codedb indexing complete",
+	logArgs := []any{
 		"blobs_parsed", stats.BlobsParsed,
 		"symbols_extracted", stats.SymbolsExtracted,
-	)
+		"comments_extracted", cStats.CommentsExtracted,
+		"index_ms", indexDuration.Milliseconds(),
+		"symbols_ms", symbolDuration.Milliseconds(),
+		"comments_ms", commentDuration.Milliseconds(),
+		"total_ms", totalDuration.Milliseconds(),
+	}
+	if dirtyDuration > 0 {
+		logArgs = append(logArgs, "dirty_ms", dirtyDuration.Milliseconds())
+	}
+	m.logger.Info("codedb indexing complete", logArgs...)
 
 	return &CodeIndexResult{
-		BlobsParsed:      stats.BlobsParsed,
-		SymbolsExtracted: stats.SymbolsExtracted,
+		BlobsParsed:       stats.BlobsParsed,
+		SymbolsExtracted:  stats.SymbolsExtracted,
+		CommentsExtracted: cStats.CommentsExtracted,
+		IndexDurationMs:   indexDuration.Milliseconds(),
+		SymbolDurationMs:  symbolDuration.Milliseconds(),
+		CommentDurationMs: commentDuration.Milliseconds(),
+		TotalDurationMs:   totalDuration.Milliseconds(),
 	}, nil
 }
 
@@ -179,7 +259,7 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 	}
 	m.mu.Unlock()
 
-	dataDir := paths.CodeDBDataDir(m.projectRoot)
+	dataDir := m.resolveSharedDataDir()
 	isInitial := false
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 		isInitial = true
@@ -192,13 +272,16 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 		} else {
 			m.logger.Debug("codedb freshness check starting")
 		}
-		_, err := m.Index(ctx, CodeIndexPayload{}, nil)
+		result, err := m.Index(ctx, CodeIndexPayload{}, nil)
 		if err != nil {
 			if isInitial {
 				m.logger.Warn("codedb initial index failed", "error", err)
 			} else {
 				m.logger.Debug("codedb freshness check failed", "error", err)
 			}
+		}
+		if m.telemetry != nil && result != nil {
+			m.telemetry.RecordCodeIndexComplete(result, "success")
 		}
 	}()
 }
@@ -211,7 +294,7 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 	lastErr := m.lastErr
 	m.mu.Unlock()
 
-	dataDir := paths.CodeDBDataDir(m.projectRoot)
+	dataDir := m.resolveSharedDataDir()
 	stats := CodeDBStats{
 		DataDir:     dataDir,
 		IndexingNow: indexing,
@@ -230,6 +313,7 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 			_ = db.Store().QueryRow("SELECT COUNT(*) FROM commits").Scan(&stats.Commits)
 			_ = db.Store().QueryRow("SELECT COUNT(*) FROM blobs").Scan(&stats.Blobs)
 			_ = db.Store().QueryRow("SELECT COUNT(*) FROM symbols").Scan(&stats.Symbols)
+			_ = db.Store().QueryRow("SELECT COUNT(*) FROM comments").Scan(&stats.Comments)
 
 			// per-repo breakdown
 			rows, err := db.Store().Query(`

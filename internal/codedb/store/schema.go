@@ -99,7 +99,10 @@ func CreateSchema(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	return migrateAddTypeInfo(db)
+	if err := migrateAddTypeInfo(db); err != nil {
+		return err
+	}
+	return migrateAddComments(db)
 }
 
 // migrateAddTypeInfo adds signature, return_type, and params columns to the
@@ -125,5 +128,50 @@ func migrateAddTypeInfo(db *sql.DB) error {
 			return err
 		}
 	}
+	return nil
+}
+
+// migrateAddComments creates the comments table and adds the comments_parsed
+// column to blobs for databases created before comment indexing existed.
+func migrateAddComments(db *sql.DB) error {
+	var exists bool
+	err := db.QueryRow(`SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='comments'`).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		stmts := []string{
+			`CREATE TABLE IF NOT EXISTS comments (
+				id       INTEGER PRIMARY KEY,
+				blob_id  INTEGER NOT NULL REFERENCES blobs(id),
+				text     TEXT NOT NULL,
+				kind     TEXT NOT NULL,
+				line     INTEGER NOT NULL,
+				end_line INTEGER NOT NULL,
+				col      INTEGER NOT NULL,
+				end_col  INTEGER NOT NULL
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_comments_blob ON comments(blob_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_comments_kind ON comments(kind)`,
+		}
+		for _, s := range stmts {
+			if _, err := db.Exec(s); err != nil {
+				return err
+			}
+		}
+	}
+
+	// add comments_parsed column to blobs if missing
+	var colExists bool
+	err = db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('blobs') WHERE name='comments_parsed'`).Scan(&colExists)
+	if err != nil {
+		return err
+	}
+	if !colExists {
+		if _, err := db.Exec(`ALTER TABLE blobs ADD COLUMN comments_parsed INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }

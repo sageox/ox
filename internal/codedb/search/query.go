@@ -113,8 +113,10 @@ func ParseQuery(input string) (*ParsedQuery, error) {
 					searchType = SearchTypeCommit
 				case "symbol":
 					searchType = SearchTypeSymbol
+				case "comment":
+					searchType = SearchTypeComment
 				default:
-					return nil, fmt.Errorf("unknown search type '%s'. Valid types: code, symbol, diff, commit", value)
+					return nil, fmt.Errorf("unknown search type '%s'. Valid types: code, symbol, diff, commit, comment", value)
 				}
 			case !negated && (key == "rev" || key == "revision"):
 				filters.Rev = value
@@ -160,6 +162,8 @@ func ParseQuery(input string) (*ParsedQuery, error) {
 				filters.CalledBy = value
 			case !negated && key == "returns":
 				filters.Returns = value
+			case !negated && (key == "ckind" || key == "comment-kind"):
+				filters.CommentKind = value
 			case negated:
 				return nil, fmt.Errorf("negation not supported for '%s:'", key)
 			default:

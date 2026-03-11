@@ -133,8 +133,18 @@ func StateDir() string {
 	return filepath.Join(SageoxDir(), "state")
 }
 
-// CodeDBDataDir returns the directory for CodeDB indexes (SQLite + Bleve).
-// Stored per-project in .sageox/cache/codedb/ — gitignored, shared across worktrees.
+// CodeDBSharedDir returns the directory for the shared CodeDB index (committed content).
+// Stored inside the ledger's local cache, shared across all worktrees for the same repo.
+// Format: ~/.local/share/sageox/<endpoint>/ledgers/<repoID>/codedb/
+func CodeDBSharedDir(repoID, endpointURL string) string {
+	if repoID == "" || endpointURL == "" {
+		return ""
+	}
+	return filepath.Join(LedgersDataDir(repoID, endpointURL), "codedb")
+}
+
+// CodeDBDataDir returns the legacy per-worktree CodeDB directory.
+// Deprecated: Use CodeDBSharedDir for new code. This is kept for migration detection.
 func CodeDBDataDir(projectRoot string) string {
 	return filepath.Join(projectRoot, ".sageox", "cache", "codedb")
 }

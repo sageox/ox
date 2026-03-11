@@ -68,6 +68,8 @@ func Plan(query *ParsedQuery) (*ExecutionPlan, error) {
 		return planCodeSearch(query)
 	case SearchTypeDiff:
 		return planDiffSearch(query)
+	case SearchTypeComment:
+		return planCommentSearch(query)
 	default:
 		return planCodeSearch(query)
 	}
@@ -172,6 +174,48 @@ func planDiffSearch(query *ParsedQuery) (*ExecutionPlan, error) {
 		SQL:        sql,
 		SQLParams:  sqlParams,
 		SearchType: SearchTypeDiff,
+		Limit:      limit,
+		IsRegex:    query.IsRegex,
+	}, nil
+}
+
+func planCommentSearch(query *ParsedQuery) (*ExecutionPlan, error) {
+	if query.HasEmptyPattern() {
+		// allow filter-only comment queries (e.g. ckind:doc lang:go)
+		return planSQLOnly(query)
+	}
+
+	limit := query.Filters.Count
+	if limit == 0 {
+		limit = 20
+	}
+
+	hasMetadataFilters := query.Filters.Repo != "" || query.Filters.NegRepo != "" ||
+		query.Filters.File != "" || query.Filters.NegFile != "" ||
+		query.Filters.Lang != "" || query.Filters.NegLang != "" ||
+		query.Filters.Rev != "" ||
+		query.Filters.CommentKind != ""
+
+	strategy := JoinBleveOnly
+	if hasMetadataFilters {
+		strategy = JoinIntersect
+	}
+
+	translated, _ := Translate(query)
+	var sql string
+	var sqlParams []string
+	if translated != nil {
+		sql = translated.SQL
+		sqlParams = translated.Params
+	}
+
+	return &ExecutionPlan{
+		Strategy:   strategy,
+		BleveQuery: query.SearchPattern(),
+		BleveIndex: "comment",
+		SQL:        sql,
+		SQLParams:  sqlParams,
+		SearchType: SearchTypeComment,
 		Limit:      limit,
 		IsRegex:    query.IsRegex,
 	}, nil

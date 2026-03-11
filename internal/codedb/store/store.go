@@ -19,12 +19,24 @@ var ErrCorrupt = fmt.Errorf("codedb index is corrupt")
 
 // Store wraps a SQLite database and Bleve full-text search indexes.
 // All SQL access goes through the convenience methods below.
+//
+// The store supports a two-tier architecture:
+//   - Shared indexes (on-disk): committed content, shared across worktrees
+//   - Dirty overlay (on-disk or in-memory): uncommitted worktree files, per-worktree
+//
+// When a dirty overlay is attached, CombinedCodeIndex transparently merges
+// results from both tiers via Bleve IndexAlias.
 type Store struct {
-	db        *sql.DB
-	CodeIndex bleve.Index
-	DiffIndex bleve.Index
-	Root      string
-	closeOnce sync.Once
+	db           *sql.DB
+	CodeIndex    bleve.Index
+	DiffIndex    bleve.Index
+	CommentIndex bleve.Index
+	Root         string
+	closeOnce    sync.Once
+
+	// dirty overlay for uncommitted worktree files (in-memory Bleve)
+	dirtyCodeIndex    bleve.Index
+	CombinedCodeIndex bleve.Index // alias of CodeIndex + dirtyCodeIndex, or just CodeIndex
 }
 
 // Open opens (or creates) a Store at the given root directory.
@@ -36,6 +48,7 @@ func Open(root string) (*Store, error) {
 	bleveDir := filepath.Join(root, "bleve")
 	bleveCodeDir := filepath.Join(bleveDir, "code")
 	bleveDiffDir := filepath.Join(bleveDir, "diff")
+	bleveCommentDir := filepath.Join(bleveDir, "comment")
 
 	for _, dir := range []string{root, reposDir, bleveDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -79,12 +92,23 @@ func Open(root string) (*Store, error) {
 		return nil, fmt.Errorf("open diff index: %w", err)
 	}
 
-	return &Store{
-		db:        db,
-		CodeIndex: codeIndex,
-		DiffIndex: diffIndex,
-		Root:      root,
-	}, nil
+	commentIndex, err := openOrCreateBleveIndex(bleveCommentDir)
+	if err != nil {
+		db.Close()
+		codeIndex.Close()
+		diffIndex.Close()
+		return nil, fmt.Errorf("open comment index: %w", err)
+	}
+
+	s := &Store{
+		db:           db,
+		CodeIndex:    codeIndex,
+		DiffIndex:    diffIndex,
+		CommentIndex: commentIndex,
+		Root:         root,
+	}
+	s.CombinedCodeIndex = s.CodeIndex // default: no overlay
+	return s, nil
 }
 
 // ReposDir returns the path to the bare git repos directory.
@@ -96,10 +120,14 @@ func (s *Store) ReposDir() string {
 func (s *Store) Close() error {
 	var firstErr error
 	s.closeOnce.Do(func() {
+		s.DetachDirtyOverlay()
 		if err := s.CodeIndex.Close(); err != nil {
 			firstErr = err
 		}
 		if err := s.DiffIndex.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if err := s.CommentIndex.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		if err := s.db.Close(); err != nil && firstErr == nil {
@@ -109,7 +137,45 @@ func (s *Store) Close() error {
 	return firstErr
 }
 
-// CheckIntegrity validates that the SQLite database and both Bleve indexes
+// AttachDirtyOverlay creates an in-memory Bleve index for dirty worktree files
+// and combines it with the shared CodeIndex via IndexAlias. Search code using
+// CombinedCodeIndex will transparently search both.
+// Primarily used in tests; production uses AttachDirtyIndex for on-disk overlays.
+func (s *Store) AttachDirtyOverlay() error {
+	s.DetachDirtyOverlay() // close any existing overlay first
+	mapping := bleve.NewIndexMapping()
+	dirtyIdx, err := bleve.NewMemOnly(mapping)
+	if err != nil {
+		return fmt.Errorf("create in-memory dirty index: %w", err)
+	}
+	s.dirtyCodeIndex = dirtyIdx
+	s.CombinedCodeIndex = bleve.NewIndexAlias(s.CodeIndex, s.dirtyCodeIndex)
+	return nil
+}
+
+// AttachDirtyIndex opens an existing on-disk dirty overlay index (built by the
+// daemon) and aliases it with the shared CodeIndex for transparent search.
+func (s *Store) AttachDirtyIndex(dirtyBlevePath string) error {
+	s.DetachDirtyOverlay() // close any existing overlay first
+	dirtyIdx, err := bleve.Open(dirtyBlevePath)
+	if err != nil {
+		return fmt.Errorf("open dirty index: %w", err)
+	}
+	s.dirtyCodeIndex = dirtyIdx
+	s.CombinedCodeIndex = bleve.NewIndexAlias(s.CodeIndex, s.dirtyCodeIndex)
+	return nil
+}
+
+// DetachDirtyOverlay closes any attached dirty overlay and resets CombinedCodeIndex.
+func (s *Store) DetachDirtyOverlay() {
+	if s.dirtyCodeIndex != nil {
+		s.dirtyCodeIndex.Close()
+		s.dirtyCodeIndex = nil
+	}
+	s.CombinedCodeIndex = s.CodeIndex
+}
+
+// CheckIntegrity validates that the SQLite database and all Bleve indexes
 // are healthy. Returns nil if everything is fine, ErrCorrupt otherwise.
 func (s *Store) CheckIntegrity() error {
 	if err := checkSQLiteIntegrity(s.db); err != nil {
@@ -117,7 +183,7 @@ func (s *Store) CheckIntegrity() error {
 	}
 
 	// validate bleve indexes can serve a basic query
-	for name, idx := range map[string]bleve.Index{"code": s.CodeIndex, "diff": s.DiffIndex} {
+	for name, idx := range map[string]bleve.Index{"code": s.CodeIndex, "diff": s.DiffIndex, "comment": s.CommentIndex} {
 		q := bleve.NewMatchNoneQuery()
 		req := bleve.NewSearchRequest(q)
 		req.Size = 0
