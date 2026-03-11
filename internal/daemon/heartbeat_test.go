@@ -38,7 +38,7 @@ func TestHeartbeatHandler_Handle(t *testing.T) {
 		Timestamp: time.Now(),
 	}
 	data, _ := json.Marshal(payload)
-	handler.Handle(data)
+	handler.Handle("", data)
 
 	// verify activity callback was called
 	if !activityCalled {
@@ -84,7 +84,7 @@ func TestHeartbeatHandler_PartialPayload(t *testing.T) {
 		Timestamp: time.Now(),
 	}
 	data, _ := json.Marshal(payload)
-	handler.Handle(data)
+	handler.Handle("", data)
 
 	if handler.GetRepoActivity().Count("/path/to/repo") != 1 {
 		t.Error("expected repo activity to be recorded")
@@ -108,7 +108,7 @@ func TestHeartbeatHandler_ExpiredCredentials(t *testing.T) {
 		Timestamp: time.Now(),
 	}
 	data, _ := json.Marshal(payload)
-	handler.Handle(data)
+	handler.Handle("", data)
 
 	if handler.HasValidCredentials() {
 		t.Error("expected credentials to be invalid (expired)")
@@ -129,7 +129,7 @@ func TestHeartbeatHandler_NoExpirationCredentials(t *testing.T) {
 		Timestamp: time.Now(),
 	}
 	data, _ := json.Marshal(payload)
-	handler.Handle(data)
+	handler.Handle("", data)
 
 	if !handler.HasValidCredentials() {
 		t.Error("expected credentials with no expiration to be valid")
@@ -141,12 +141,12 @@ func TestHeartbeatHandler_InvalidPayload(t *testing.T) {
 	handler := NewHeartbeatHandler(logger)
 
 	// invalid JSON should not panic
-	handler.Handle([]byte("not json"))
+	handler.Handle("", []byte("not json"))
 
 	// should still work after invalid payload
 	payload := HeartbeatPayload{RepoPath: "/valid"}
 	data, _ := json.Marshal(payload)
-	handler.Handle(data)
+	handler.Handle("", data)
 
 	if handler.GetRepoActivity().Count("/valid") != 1 {
 		t.Error("handler should work after invalid payload")
@@ -159,13 +159,13 @@ func TestHeartbeatHandler_ActivitySummary(t *testing.T) {
 
 	// record some activity
 	for i := 0; i < 3; i++ {
-		handler.Handle(mustMarshal(HeartbeatPayload{
+		handler.Handle("", mustMarshal(HeartbeatPayload{
 			RepoPath:    "/repo-a",
 			WorkspaceID: "ws-1",
 			TeamIDs:     []string{"team-x"},
 		}))
 	}
-	handler.Handle(mustMarshal(HeartbeatPayload{
+	handler.Handle("", mustMarshal(HeartbeatPayload{
 		RepoPath: "/repo-b",
 	}))
 
@@ -224,7 +224,7 @@ func TestHeartbeatHandler_ConcurrentCallbackAccess(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < 100; j++ {
-				handler.Handle(mustMarshal(HeartbeatPayload{
+				handler.Handle("", mustMarshal(HeartbeatPayload{
 					RepoPath:    "/repo",
 					WorkspaceID: "ws",
 					TeamIDs:     []string{"team"},
@@ -264,7 +264,7 @@ func TestHeartbeatHandler_CallbackDeadlockPrevention(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		handler.Handle(mustMarshal(HeartbeatPayload{
+		handler.Handle("", mustMarshal(HeartbeatPayload{
 			RepoPath: "/repo",
 			TeamIDs:  []string{"team-a"},
 			Credentials: &HeartbeatCreds{
@@ -344,7 +344,7 @@ func TestHeartbeatHandler_VersionMismatch_TriggersCallback(t *testing.T) {
 		CLIVersion: "9.9.9", // different from daemon's Version constant
 		Timestamp:  time.Now(),
 	}
-	handler.Handle(mustMarshal(payload))
+	handler.Handle("", mustMarshal(payload))
 
 	if !callbackCalled {
 		t.Error("expected version mismatch callback to be called")
@@ -372,7 +372,7 @@ func TestHeartbeatHandler_VersionMatch_NoCallback(t *testing.T) {
 		CLIVersion: Version(), // same as daemon's version
 		Timestamp:  time.Now(),
 	}
-	handler.Handle(mustMarshal(payload))
+	handler.Handle("", mustMarshal(payload))
 
 	if callbackCalled {
 		t.Error("callback should NOT be called when versions match")
@@ -395,7 +395,7 @@ func TestHeartbeatHandler_EmptyVersion_NoCallback(t *testing.T) {
 		Timestamp: time.Now(),
 		// CLIVersion is empty
 	}
-	handler.Handle(mustMarshal(payload))
+	handler.Handle("", mustMarshal(payload))
 
 	if callbackCalled {
 		t.Error("callback should NOT be called when CLI version is empty (backward compat)")
@@ -421,7 +421,7 @@ func TestHeartbeatHandler_SameSemverDifferentBuild_NoCallback(t *testing.T) {
 		CLIVersion: cliVersion,
 		Timestamp:  time.Now(),
 	}
-	handler.Handle(mustMarshal(payload))
+	handler.Handle("", mustMarshal(payload))
 
 	if callbackCalled {
 		t.Error("callback should NOT be called when semver matches (only build metadata differs)")
@@ -446,7 +446,7 @@ func TestHeartbeatHandler_AuthTokenPropagation(t *testing.T) {
 		},
 		Timestamp: time.Now(),
 	}
-	handler.Handle(mustMarshal(payload))
+	handler.Handle("", mustMarshal(payload))
 
 	// verify auth token is accessible
 	authToken := handler.GetAuthToken()
@@ -478,7 +478,7 @@ func TestHeartbeatHandler_AuthTokenUpdate(t *testing.T) {
 			ExpiresAt: time.Now().Add(1 * time.Hour),
 		},
 	}
-	handler.Handle(mustMarshal(payload1))
+	handler.Handle("", mustMarshal(payload1))
 
 	if handler.GetAuthToken() != "token-v1" {
 		t.Error("expected token-v1")
@@ -492,7 +492,7 @@ func TestHeartbeatHandler_AuthTokenUpdate(t *testing.T) {
 			ExpiresAt: time.Now().Add(1 * time.Hour),
 		},
 	}
-	handler.Handle(mustMarshal(payload2))
+	handler.Handle("", mustMarshal(payload2))
 
 	if handler.GetAuthToken() != "token-v2" {
 		t.Error("expected token-v2 after update")
@@ -517,7 +517,7 @@ func TestHeartbeatHandler_UserInfoPropagation(t *testing.T) {
 		},
 		Timestamp: time.Now(),
 	}
-	handler.Handle(mustMarshal(payload))
+	handler.Handle("", mustMarshal(payload))
 
 	// verify user info is accessible
 	user := handler.GetAuthenticatedUser()
@@ -555,7 +555,7 @@ func TestHeartbeatHandler_UserWithEmptyEmail(t *testing.T) {
 			// UserEmail is empty
 		},
 	}
-	handler.Handle(mustMarshal(payload))
+	handler.Handle("", mustMarshal(payload))
 
 	user := handler.GetAuthenticatedUser()
 	if user != nil {
@@ -576,7 +576,7 @@ func TestHeartbeatHandler_UserChange(t *testing.T) {
 			UserID:    "user_alice",
 		},
 	}
-	handler.Handle(mustMarshal(payload1))
+	handler.Handle("", mustMarshal(payload1))
 
 	user1 := handler.GetAuthenticatedUser()
 	if user1.Email != "alice@example.com" {
@@ -592,7 +592,7 @@ func TestHeartbeatHandler_UserChange(t *testing.T) {
 			UserID:    "user_bob",
 		},
 	}
-	handler.Handle(mustMarshal(payload2))
+	handler.Handle("", mustMarshal(payload2))
 
 	user2 := handler.GetAuthenticatedUser()
 	if user2.Email != "bob@example.com" {
@@ -616,7 +616,7 @@ func TestHeartbeatHandler_CredentialsFreshness(t *testing.T) {
 			ExpiresAt: time.Now().Add(1 * time.Hour),
 		},
 	}
-	handler.Handle(mustMarshal(payload))
+	handler.Handle("", mustMarshal(payload))
 
 	_, updatedAt := handler.GetCredentials()
 
@@ -664,7 +664,7 @@ func TestHeartbeatHandler_RejectsExpiredHeartbeatCredentials(t *testing.T) {
 			ExpiresAt: time.Now().Add(-1 * time.Hour),
 		},
 	}
-	handler.Handle(mustMarshal(payload))
+	handler.Handle("", mustMarshal(payload))
 
 	// should still have the old valid credentials
 	creds, _ := handler.GetCredentials()
@@ -678,7 +678,7 @@ func TestHeartbeatHandler_ContextTokensTracking(t *testing.T) {
 	handler := NewHeartbeatHandler(logger)
 
 	// send heartbeat with context tokens
-	handler.Handle(mustMarshal(HeartbeatPayload{
+	handler.Handle("", mustMarshal(HeartbeatPayload{
 		AgentID:       "Oxa7b3",
 		ContextTokens: 1250,
 		Timestamp:     time.Now(),
@@ -693,7 +693,7 @@ func TestHeartbeatHandler_ContextTokensTracking(t *testing.T) {
 	}
 
 	// send another heartbeat — should accumulate
-	handler.Handle(mustMarshal(HeartbeatPayload{
+	handler.Handle("", mustMarshal(HeartbeatPayload{
 		AgentID:       "Oxa7b3",
 		ContextTokens: 750,
 		Timestamp:     time.Now(),
@@ -719,7 +719,7 @@ func TestHeartbeatHandler_ContextTokensZeroIgnored(t *testing.T) {
 	handler := NewHeartbeatHandler(logger)
 
 	// heartbeat without context tokens should not create entry
-	handler.Handle(mustMarshal(HeartbeatPayload{
+	handler.Handle("", mustMarshal(HeartbeatPayload{
 		AgentID:   "Oxa7b3",
 		Timestamp: time.Now(),
 	}))
@@ -730,6 +730,78 @@ func TestHeartbeatHandler_ContextTokensZeroIgnored(t *testing.T) {
 	}
 	if stats.CommandCount != 0 {
 		t.Errorf("expected 0 commands for heartbeat without context, got %d", stats.CommandCount)
+	}
+}
+
+func TestHeartbeatHandler_CallerTracking(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := NewHeartbeatHandler(logger)
+
+	// initially empty
+	if got := handler.LastCallerPath(); got != "" {
+		t.Errorf("expected empty caller path initially, got %q", got)
+	}
+	if got := handler.GetCallers(); len(got) != 0 {
+		t.Errorf("expected no callers initially, got %d", len(got))
+	}
+
+	// heartbeat without callerID doesn't register a caller
+	handler.Handle("", mustMarshal(HeartbeatPayload{
+		RepoPath:  "/some/repo",
+		Timestamp: time.Now(),
+	}))
+	if got := handler.GetCallers(); len(got) != 0 {
+		t.Errorf("expected no callers after empty callerID, got %d", len(got))
+	}
+
+	// heartbeat from stuttgart
+	handler.Handle("ab12cd34", mustMarshal(HeartbeatPayload{
+		CallerPath: "/Users/dev/conductor/workspaces/ox/stuttgart-v1",
+		AgentID:    "OxA1b2",
+		Timestamp:  time.Now(),
+	}))
+	callers := handler.GetCallers()
+	if len(callers) != 1 {
+		t.Fatalf("expected 1 caller, got %d", len(callers))
+	}
+	if callers[0].Path != "/Users/dev/conductor/workspaces/ox/stuttgart-v1" {
+		t.Errorf("expected stuttgart path, got %q", callers[0].Path)
+	}
+	if callers[0].ID != "ab12cd34" {
+		t.Errorf("expected caller ID ab12cd34, got %q", callers[0].ID)
+	}
+	if callers[0].AgentID != "OxA1b2" {
+		t.Errorf("expected agent ID OxA1b2, got %q", callers[0].AgentID)
+	}
+
+	// heartbeat from zagreb (different clone, different callerID)
+	handler.Handle("ef56gh78", mustMarshal(HeartbeatPayload{
+		CallerPath: "/Users/dev/conductor/workspaces/ox/zagreb-v2",
+		Timestamp:  time.Now(),
+	}))
+	callers = handler.GetCallers()
+	if len(callers) != 2 {
+		t.Fatalf("expected 2 callers, got %d", len(callers))
+	}
+
+	// LastCallerPath returns the most recent
+	if got := handler.LastCallerPath(); got != "/Users/dev/conductor/workspaces/ox/zagreb-v2" {
+		t.Errorf("expected zagreb as most recent, got %q", got)
+	}
+
+	// stuttgart sends another heartbeat — it should update, not duplicate
+	handler.Handle("ab12cd34", mustMarshal(HeartbeatPayload{
+		CallerPath: "/Users/dev/conductor/workspaces/ox/stuttgart-v1",
+		Timestamp:  time.Now(),
+	}))
+	callers = handler.GetCallers()
+	if len(callers) != 2 {
+		t.Fatalf("expected still 2 callers after update, got %d", len(callers))
+	}
+
+	// now stuttgart is most recent
+	if got := handler.LastCallerPath(); got != "/Users/dev/conductor/workspaces/ox/stuttgart-v1" {
+		t.Errorf("expected stuttgart as most recent after update, got %q", got)
 	}
 }
 

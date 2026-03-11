@@ -340,8 +340,14 @@ func (d *Daemon) Start() error {
 				lastErrTimeStr = lastErrTime.Format(time.RFC3339)
 			}
 			stats := d.scheduler.SyncStats()
-			// get workspace path (use config, not CWD — CWD may have been stabilized to $HOME)
+			// prefer most recent caller path from heartbeats (stays fresh across clones)
+			// fall back to config.ProjectRoot (the clone that started the daemon)
 			workspacePath := d.config.ProjectRoot
+			if d.heartbeat != nil {
+				if callerPath := d.heartbeat.LastCallerPath(); callerPath != "" {
+					workspacePath = callerPath
+				}
+			}
 
 			// get activity summary from heartbeat handler
 			var activitySummary *ActivitySummary
@@ -354,6 +360,12 @@ func (d *Daemon) Start() error {
 			var authUser *AuthenticatedUser
 			if d.heartbeat != nil {
 				authUser = d.heartbeat.GetAuthenticatedUser()
+			}
+
+			// get connected callers (clones/worktrees)
+			var callers []CallerInfo
+			if d.heartbeat != nil {
+				callers = d.heartbeat.GetCallers()
 			}
 
 			// get issues from issue tracker
@@ -428,6 +440,7 @@ func (d *Daemon) Start() error {
 				StartupDurationMs:  d.startupDurationMs.Load(),
 				ThrottleDurationMs: d.throttleDurationMs.Load(),
 				CodeDB:             codeDBStats,
+				Callers:            callers,
 			}
 		},
 	)

@@ -35,6 +35,7 @@ func Heartbeat(repoPath string, teamIDs []string, agentID string) {
 
 		payload := daemon.HeartbeatPayload{
 			RepoPath:   repoPath,
+			CallerPath: repoPath,
 			TeamIDs:    teamIDs,
 			AgentID:    agentID,
 			Timestamp:  time.Now(),
@@ -114,6 +115,7 @@ func HeartbeatWithCreds(repoPath string, teamIDs []string, agentID string, creds
 
 		payload := daemon.HeartbeatPayload{
 			RepoPath:   repoPath,
+			CallerPath: repoPath,
 			TeamIDs:    teamIDs,
 			AgentID:    agentID,
 			Timestamp:  time.Now(),

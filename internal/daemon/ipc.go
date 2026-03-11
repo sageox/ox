@@ -64,7 +64,7 @@ const (
 type Message struct {
 	Type        string          `json:"type"`
 	WorkspaceID string          `json:"workspace_id,omitempty"` // repo-scoped daemon identity
-	WorktreeID  string          `json:"worktree_id,omitempty"`  // identifies calling clone/worktree
+	CallerID string `json:"caller_id,omitempty"` // identifies calling clone/worktree (path-based hash)
 	Payload     json.RawMessage `json:"payload,omitempty"`
 }
 
@@ -136,6 +136,9 @@ type StatusData struct {
 
 	// code index status
 	CodeDB *CodeDBStats `json:"code_db,omitempty"`
+
+	// connected clones/worktrees that have sent heartbeats
+	Callers []CallerInfo `json:"callers,omitempty"`
 }
 
 // ExtendedStatus provides additional status info for diagnostics.
@@ -448,7 +451,7 @@ type Server struct {
 	onStop             func()                                                                           //
 	onStatus           func() *StatusData                                                               //
 	onActivity         func()                                                                           // called on any IPC activity
-	onHeartbeat        func(payload json.RawMessage)                                                    //
+	onHeartbeat        func(callerID string, payload json.RawMessage)                                   //
 	onCheckout         func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error) //
 	onTelemetry        func(payload json.RawMessage)                                                    // fire-and-forget telemetry
 	onFriction         func(payload FrictionPayload)                                                    // fire-and-forget friction event
@@ -633,7 +636,7 @@ func handleHeartbeat(s *Server, msg Message, _ net.Conn) HandlerResult {
 	s.mu.Unlock()
 
 	if handler != nil {
-		handler(msg.Payload)
+		handler(msg.CallerID, msg.Payload)
 	}
 
 	// fire-and-forget: no response needed, credential loss is acceptable
@@ -875,7 +878,8 @@ func (s *Server) SetActivityCallback(cb func()) {
 }
 
 // SetHeartbeatHandler sets the handler for heartbeat messages.
-func (s *Server) SetHeartbeatHandler(cb func(payload json.RawMessage)) {
+// callerID identifies which clone/worktree sent the heartbeat (path-based hash).
+func (s *Server) SetHeartbeatHandler(cb func(callerID string, payload json.RawMessage)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onHeartbeat = cb
@@ -1063,11 +1067,11 @@ func (s *Server) handleConnection(_ context.Context, conn net.Conn) {
 		return
 	}
 
-	s.logger.Debug("received message", "type", msg.Type, "workspace_id", msg.WorkspaceID, "worktree_id", msg.WorktreeID)
+	s.logger.Debug("received message", "type", msg.Type, "workspace_id", msg.WorkspaceID, "caller_id", msg.CallerID)
 
 	// validate workspace ID if provided (warn on mismatch, still process for backward compatibility)
 	if msg.WorkspaceID != "" && msg.WorkspaceID != CurrentWorkspaceID() {
-		s.logger.Warn("workspace mismatch", "expected", CurrentWorkspaceID(), "got", msg.WorkspaceID, "worktree_id", msg.WorktreeID)
+		s.logger.Warn("workspace mismatch", "expected", CurrentWorkspaceID(), "got", msg.WorkspaceID, "caller_id", msg.CallerID)
 	}
 
 	// record activity on any IPC message
@@ -1172,8 +1176,8 @@ func (c *Client) sendMessage(msg Message) (*Response, error) {
 	}
 
 	// identify which clone/worktree is sending this message
-	if msg.WorktreeID == "" {
-		msg.WorktreeID = LegacyWorkspaceID()
+	if msg.CallerID == "" {
+		msg.CallerID = LegacyWorkspaceID()
 	}
 
 	// send message
@@ -1216,6 +1220,9 @@ func (c *Client) SendOneWay(msg Message) error {
 
 	if msg.WorkspaceID == "" {
 		msg.WorkspaceID = CurrentWorkspaceID()
+	}
+	if msg.CallerID == "" {
+		msg.CallerID = LegacyWorkspaceID()
 	}
 
 	data, _ := json.Marshal(msg)

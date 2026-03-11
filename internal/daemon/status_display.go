@@ -143,6 +143,15 @@ func FormatStatusVerbose(status *StatusData, history []SyncEvent, cliVersion str
 	if status.WorkspacePath != "" {
 		out += formatKV("Workspace", shortenPath(status.WorkspacePath)) + "\n"
 	}
+	if len(status.Callers) > 0 {
+		for _, c := range status.Callers {
+			label := shortenPath(c.Path)
+			if c.AgentID != "" {
+				label += fmt.Sprintf(" (%s)", c.AgentID)
+			}
+			out += formatKV("  Clone", label) + "\n"
+		}
+	}
 	out += formatKV("Ledger", shortenPath(status.LedgerPath)) + "\n"
 	if status.AuthenticatedUser != nil && status.AuthenticatedUser.Email != "" {
 		out += formatKV("User", status.AuthenticatedUser.Email) + "\n"
