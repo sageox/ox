@@ -119,27 +119,27 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 	prsOnly, _ := cmd.Flags().GetBool("prs-only")
 	issuesOnly, _ := cmd.Flags().GetBool("issues-only")
 
-	// --full: selectively clear sync state so items are re-fetched from GitHub.
-	// Composes with --prs-only/--issues-only to allow targeted rebuilds:
-	//   ox index github --full                → reset all sync state
-	//   ox index github --full --prs-only     → reset PR state only
-	//   ox index github --full --issues-only  → reset issue state only
-	if full {
-		if err := resetGitHubSyncState(gitRoot, prsOnly, issuesOnly); err != nil {
-			return err
-		}
-	}
-
 	// check master github_sync toggle
 	if config.ResolveGitHubSync(gitRoot) == config.GitHubSyncDisabled {
 		fmt.Println("GitHub sync is disabled. Enable with: ox config set github_sync enabled")
 		return nil
 	}
 
-	// resolve ledger path
+	// resolve ledger path (needed for sync state stored in ledger cache)
 	ledgerPath, err := resolveLedgerPath()
 	if err != nil {
 		return fmt.Errorf("resolve ledger: %w", err)
+	}
+
+	// --full: selectively clear sync state so items are re-fetched from GitHub.
+	// Composes with --prs-only/--issues-only to allow targeted rebuilds:
+	//   ox index github --full                → reset all sync state
+	//   ox index github --full --prs-only     → reset PR state only
+	//   ox index github --full --issues-only  → reset issue state only
+	if full {
+		if err := resetGitHubSyncState(ledgerPath, prsOnly, issuesOnly); err != nil {
+			return err
+		}
 	}
 
 	// detect GitHub remote (graceful skip for non-GitHub repos)
@@ -173,7 +173,7 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	result, err := syncGitHubToLedger(cmd.Context(), gitRoot, ledgerPath, owner, repo, token, maxDays, syncPRs, syncIssues)
+	result, err := syncGitHubToLedger(cmd.Context(), ledgerPath, owner, repo, token, maxDays, syncPRs, syncIssues)
 	if err != nil {
 		return fmt.Errorf("sync GitHub data: %w", err)
 	}
@@ -209,18 +209,18 @@ type githubSyncResult struct {
 	issueUpdated int
 }
 
-func syncGitHubToLedger(ctx context.Context, projectRoot, ledgerPath, owner, repo, token string, maxDays int, syncPRs, syncIssues bool) (*githubSyncResult, error) {
+func syncGitHubToLedger(ctx context.Context, ledgerPath, owner, repo, token string, maxDays int, syncPRs, syncIssues bool) (*githubSyncResult, error) {
 	client := gh.NewClient(token)
 	result := &githubSyncResult{}
 
 	if syncPRs {
-		if err := syncPRsToLedger(ctx, client, projectRoot, ledgerPath, owner, repo, maxDays, result); err != nil {
+		if err := syncPRsToLedger(ctx, client, ledgerPath, owner, repo, maxDays, result); err != nil {
 			return result, fmt.Errorf("sync PRs: %w", err)
 		}
 	}
 
 	if syncIssues {
-		if err := syncIssuesToLedger(ctx, client, projectRoot, ledgerPath, owner, repo, maxDays, result); err != nil {
+		if err := syncIssuesToLedger(ctx, client, ledgerPath, owner, repo, maxDays, result); err != nil {
 			return result, fmt.Errorf("sync issues: %w", err)
 		}
 	}
@@ -228,8 +228,8 @@ func syncGitHubToLedger(ctx context.Context, projectRoot, ledgerPath, owner, rep
 	return result, nil
 }
 
-func syncPRsToLedger(ctx context.Context, client *gh.Client, projectRoot, ledgerPath, owner, repo string, maxDays int, result *githubSyncResult) error {
-	state, err := ledger.ReadGitHubTypeSyncState(projectRoot, "pr")
+func syncPRsToLedger(ctx context.Context, client *gh.Client, ledgerPath, owner, repo string, maxDays int, result *githubSyncResult) error {
+	state, err := ledger.ReadGitHubTypeSyncState(ledgerPath, "pr")
 	if err != nil {
 		return fmt.Errorf("read pr sync state: %w", err)
 	}
@@ -310,7 +310,7 @@ func syncPRsToLedger(ctx context.Context, client *gh.Client, projectRoot, ledger
 	// persist updated state
 	state.LastSyncAt = time.Now()
 	state.Count += result.prCreated
-	if err := ledger.WriteGitHubTypeSyncState(projectRoot, "pr", state); err != nil {
+	if err := ledger.WriteGitHubTypeSyncState(ledgerPath, "pr", state); err != nil {
 		return fmt.Errorf("write pr sync state: %w", err)
 	}
 
@@ -351,8 +351,8 @@ func fetchPRComments(ctx context.Context, client *gh.Client, owner, repo string,
 	return comments
 }
 
-func syncIssuesToLedger(ctx context.Context, client *gh.Client, projectRoot, ledgerPath, owner, repo string, maxDays int, result *githubSyncResult) error {
-	state, err := ledger.ReadGitHubTypeSyncState(projectRoot, "issue")
+func syncIssuesToLedger(ctx context.Context, client *gh.Client, ledgerPath, owner, repo string, maxDays int, result *githubSyncResult) error {
+	state, err := ledger.ReadGitHubTypeSyncState(ledgerPath, "issue")
 	if err != nil {
 		return fmt.Errorf("read issue sync state: %w", err)
 	}
@@ -436,7 +436,7 @@ func syncIssuesToLedger(ctx context.Context, client *gh.Client, projectRoot, led
 	// persist updated state
 	state.LastSyncAt = time.Now()
 	state.Count += result.issueCreated
-	if err := ledger.WriteGitHubTypeSyncState(projectRoot, "issue", state); err != nil {
+	if err := ledger.WriteGitHubTypeSyncState(ledgerPath, "issue", state); err != nil {
 		return fmt.Errorf("write issue sync state: %w", err)
 	}
 
@@ -463,10 +463,10 @@ func detectGitHubRemote() (owner, repo string, err error) {
 // resetGitHubSyncState selectively clears sync state for a full re-fetch.
 // When neither prsOnly nor issuesOnly is set, wipes everything.
 // When one is set, clears only that type's state file.
-func resetGitHubSyncState(gitRoot string, prsOnly, issuesOnly bool) error {
+func resetGitHubSyncState(ledgerPath string, prsOnly, issuesOnly bool) error {
 	if !prsOnly && !issuesOnly {
 		// wipe everything
-		cacheDir := ledger.GitHubSyncCacheDir(gitRoot)
+		cacheDir := ledger.GitHubSyncCacheDir(ledgerPath)
 		if err := os.RemoveAll(cacheDir); err != nil {
 			return fmt.Errorf("remove github sync cache: %w", err)
 		}
@@ -475,13 +475,13 @@ func resetGitHubSyncState(gitRoot string, prsOnly, issuesOnly bool) error {
 	}
 
 	if prsOnly {
-		if err := ledger.ResetGitHubTypeSyncState(gitRoot, "pr"); err != nil {
+		if err := ledger.ResetGitHubTypeSyncState(ledgerPath, "pr"); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "Cleared PR sync state, re-fetching PRs from scratch...\n")
 	}
 	if issuesOnly {
-		if err := ledger.ResetGitHubTypeSyncState(gitRoot, "issue"); err != nil {
+		if err := ledger.ResetGitHubTypeSyncState(ledgerPath, "issue"); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "Cleared issue sync state, re-fetching issues from scratch...\n")

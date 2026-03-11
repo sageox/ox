@@ -154,16 +154,17 @@ func WriteGitHubIssue(ledgerPath string, issue *IssueFile) error {
 }
 
 // GitHubSyncCacheDir returns the local cache directory for GitHub sync state.
-// Path: .sageox/cache/github_sync/ — gitignored, local-only, not committed.
-func GitHubSyncCacheDir(projectRoot string) string {
-	return filepath.Join(projectRoot, ".sageox", "cache", githubSyncCacheDir)
+// Path: <ledger>/.sageox/cache/github_sync/ — gitignored, local-only, not committed.
+// Uses the ledger path (not project root) so the cursor is shared across worktrees.
+func GitHubSyncCacheDir(ledgerPath string) string {
+	return filepath.Join(ledgerPath, ".sageox", "cache", githubSyncCacheDir)
 }
 
 // ReadGitHubTypeSyncState reads the sync cursor for a specific data type.
 // dataType should be "pr" or "issue".
 // Returns a zero-value state (not an error) if the file does not exist.
-func ReadGitHubTypeSyncState(projectRoot, dataType string) (*GitHubTypeSyncState, error) {
-	path := filepath.Join(GitHubSyncCacheDir(projectRoot), syncStateFile(dataType))
+func ReadGitHubTypeSyncState(ledgerPath, dataType string) (*GitHubTypeSyncState, error) {
+	path := filepath.Join(GitHubSyncCacheDir(ledgerPath), syncStateFile(dataType))
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -188,8 +189,8 @@ func ReadGitHubTypeSyncState(projectRoot, dataType string) (*GitHubTypeSyncState
 
 // WriteGitHubTypeSyncState writes the sync cursor for a specific data type.
 // dataType should be "pr" or "issue".
-func WriteGitHubTypeSyncState(projectRoot, dataType string, state *GitHubTypeSyncState) error {
-	dir := GitHubSyncCacheDir(projectRoot)
+func WriteGitHubTypeSyncState(ledgerPath, dataType string, state *GitHubTypeSyncState) error {
+	dir := GitHubSyncCacheDir(ledgerPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("create github sync cache dir: %w", err)
 	}
@@ -209,8 +210,8 @@ func WriteGitHubTypeSyncState(projectRoot, dataType string, state *GitHubTypeSyn
 
 // ResetGitHubTypeSyncState removes the sync state file for a specific data type,
 // causing the next sync to re-fetch everything within the --days window.
-func ResetGitHubTypeSyncState(projectRoot, dataType string) error {
-	path := filepath.Join(GitHubSyncCacheDir(projectRoot), syncStateFile(dataType))
+func ResetGitHubTypeSyncState(ledgerPath, dataType string) error {
+	path := filepath.Join(GitHubSyncCacheDir(ledgerPath), syncStateFile(dataType))
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove %s sync state: %w", dataType, err)
 	}
