@@ -9,10 +9,13 @@ import (
 	"strings"
 	"time"
 
+	"log/slog"
+
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/ledger"
 )
@@ -290,11 +293,19 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 	output, err := pullCmd.CombinedOutput()
 	if err != nil {
 		errStr := strings.TrimSpace(string(output))
-		// abort rebase to leave ledger in a clean state
-		_ = exec.Command("git", "-C", ledgerPath, "rebase", "--abort").Run()
-		return FailedCheck("Ledger branch status",
-			"pull --rebase failed (aborted)",
-			fmt.Sprintf("Conflict during rebase (aborted to restore clean state): %s", errStr))
+		// try accept-theirs for data/github/ conflicts
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		resolveErr := gitutil.ResolveRebaseAcceptTheirs(ctx, ledgerPath, ledgerAutoResolvePrefixes)
+		cancel()
+		if resolveErr != nil {
+			slog.Debug("rebase auto-resolve failed", "error", resolveErr)
+			_ = exec.Command("git", "-C", ledgerPath, "rebase", "--abort").Run()
+			return FailedCheck("Ledger branch status",
+				"pull --rebase failed (aborted)",
+				fmt.Sprintf("Conflict during rebase (aborted to restore clean state): %s", errStr))
+		}
+		return PassedCheck("Ledger branch status",
+			fmt.Sprintf("pulled %d commit(s) (auto-resolved conflicts)", behindCount))
 	}
 	return PassedCheck("Ledger branch status",
 		fmt.Sprintf("pulled %d commit(s)", behindCount))
@@ -308,11 +319,18 @@ func fixLedgerBranchDiverged(ledgerPath string, aheadCount, behindCount int) che
 	pullOutput, err := pullCmd.CombinedOutput()
 	if err != nil {
 		errStr := strings.TrimSpace(string(pullOutput))
-		// abort rebase to leave ledger in a clean state
-		_ = exec.Command("git", "-C", ledgerPath, "rebase", "--abort").Run()
-		return FailedCheck("Ledger branch status",
-			"rebase failed during reconcile (aborted)",
-			fmt.Sprintf("Conflict during rebase (aborted to restore clean state): %s", errStr))
+		// try accept-theirs for data/github/ conflicts
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		resolveErr := gitutil.ResolveRebaseAcceptTheirs(ctx, ledgerPath, ledgerAutoResolvePrefixes)
+		cancel()
+		if resolveErr != nil {
+			slog.Debug("rebase auto-resolve failed in reconcile", "error", resolveErr)
+			_ = exec.Command("git", "-C", ledgerPath, "rebase", "--abort").Run()
+			return FailedCheck("Ledger branch status",
+				"rebase failed during reconcile (aborted)",
+				fmt.Sprintf("Conflict during rebase (aborted to restore clean state): %s", errStr))
+		}
+		slog.Info("auto-resolved rebase conflicts during reconcile", "strategy", "accept-theirs")
 	}
 
 	// then push

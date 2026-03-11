@@ -19,7 +19,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const defaultGitHubSyncMaxDays = 90
+// defaultGitHubSyncMaxDays matches ledger.DefaultGitHubDataWindowDays — no point
+// fetching more history than the sparse checkout keeps on disk.
+const defaultGitHubSyncMaxDays = 30
 
 var indexCmd = &cobra.Command{
 	Use:   "index",

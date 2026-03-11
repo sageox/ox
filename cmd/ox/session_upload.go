@@ -326,6 +326,14 @@ func resolveLedgerPath() (string, error) {
 // Retries on transient failures (network, rejection). Fails fast on permanent errors
 // (auth, config) to avoid wasting time on retries that will never succeed.
 // Uses context for timeout control (60s per git operation).
+// ledgerAutoResolvePrefixes lists path prefixes in the ledger where
+// accept-theirs conflict resolution is safe. These directories contain data
+// derived from external sources (GitHub API) that will be re-fetched on the
+// next sync cycle — last-write-wins is correct.
+var ledgerAutoResolvePrefixes = []string{
+	"data/github/",
+}
+
 func pushLedger(ctx context.Context, ledgerPath string) error {
 	// pre-flight: check for lock files and broken rebase state
 	if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
@@ -391,11 +399,20 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 			pullOut, pullErr := gitutil.RunGit(pullCtx, ledgerPath, "pull", "--rebase", "--autostash", "--quiet")
 			pullCancel()
 			if pullErr != nil {
-				// abort rebase to avoid leaving repo in broken state
-				abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-				_, _ = gitutil.RunGit(abortCtx, ledgerPath, "rebase", "--abort")
-				abortCancel()
-				return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
+				// try accept-theirs for data/github/ conflicts (last-write-wins is safe
+				// since the next sync re-fetches from the API anyway)
+				resolveCtx, resolveCancel := context.WithTimeout(ctx, opTimeout)
+				resolveErr := gitutil.ResolveRebaseAcceptTheirs(resolveCtx, ledgerPath, ledgerAutoResolvePrefixes)
+				resolveCancel()
+				if resolveErr != nil {
+					// can't auto-resolve — abort rebase to avoid leaving repo broken
+					slog.Debug("rebase auto-resolve failed", "error", resolveErr)
+					abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
+					_, _ = gitutil.RunGit(abortCtx, ledgerPath, "rebase", "--abort")
+					abortCancel()
+					return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
+				}
+				slog.Info("auto-resolved rebase conflicts", "strategy", "accept-theirs")
 			}
 		}
 
