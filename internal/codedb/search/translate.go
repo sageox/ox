@@ -545,12 +545,19 @@ func translatePR(query *ParsedQuery) (*TranslatedQuery, error) {
 	var conditions []string
 
 	if !query.HasEmptyPattern() {
+		// build a single OR expression across all groups to preserve OR semantics
+		var groupClauses []string
 		for _, group := range query.SearchTerms {
 			if group == "" {
 				continue
 			}
 			ph := p.add("%" + group + "%")
-			conditions = append(conditions, fmt.Sprintf("AND (p.title LIKE %s OR p.body LIKE %s OR pc.body LIKE %s)", ph, ph, ph))
+			groupClauses = append(groupClauses, fmt.Sprintf("(p.title LIKE %s OR p.body LIKE %s OR pc.body LIKE %s)", ph, ph, ph))
+		}
+		if len(groupClauses) == 1 {
+			conditions = append(conditions, "AND "+groupClauses[0])
+		} else if len(groupClauses) > 1 {
+			conditions = append(conditions, "AND ("+strings.Join(groupClauses, " OR ")+")")
 		}
 	}
 
@@ -564,11 +571,11 @@ func translatePR(query *ParsedQuery) (*TranslatedQuery, error) {
 	}
 	if f.Before != "" {
 		ph := p.add(f.Before)
-		conditions = append(conditions, fmt.Sprintf("AND p.updated_at < %s", ph))
+		conditions = append(conditions, fmt.Sprintf("AND p.updated_at < CAST(strftime('%%s', %s) AS INTEGER)", ph))
 	}
 	if f.After != "" {
 		ph := p.add(f.After)
-		conditions = append(conditions, fmt.Sprintf("AND p.updated_at > %s", ph))
+		conditions = append(conditions, fmt.Sprintf("AND p.updated_at > CAST(strftime('%%s', %s) AS INTEGER)", ph))
 	}
 
 	limit := resolveLimit(f.Count)
@@ -594,12 +601,19 @@ func translateIssue(query *ParsedQuery) (*TranslatedQuery, error) {
 	var conditions []string
 
 	if !query.HasEmptyPattern() {
+		// build a single OR expression across all groups to preserve OR semantics
+		var groupClauses []string
 		for _, group := range query.SearchTerms {
 			if group == "" {
 				continue
 			}
 			ph := p.add("%" + group + "%")
-			conditions = append(conditions, fmt.Sprintf("AND (i.title LIKE %s OR i.body LIKE %s OR ic.body LIKE %s)", ph, ph, ph))
+			groupClauses = append(groupClauses, fmt.Sprintf("(i.title LIKE %s OR i.body LIKE %s OR ic.body LIKE %s)", ph, ph, ph))
+		}
+		if len(groupClauses) == 1 {
+			conditions = append(conditions, "AND "+groupClauses[0])
+		} else if len(groupClauses) > 1 {
+			conditions = append(conditions, "AND ("+strings.Join(groupClauses, " OR ")+")")
 		}
 	}
 
@@ -613,11 +627,11 @@ func translateIssue(query *ParsedQuery) (*TranslatedQuery, error) {
 	}
 	if f.Before != "" {
 		ph := p.add(f.Before)
-		conditions = append(conditions, fmt.Sprintf("AND i.updated_at < %s", ph))
+		conditions = append(conditions, fmt.Sprintf("AND i.updated_at < CAST(strftime('%%s', %s) AS INTEGER)", ph))
 	}
 	if f.After != "" {
 		ph := p.add(f.After)
-		conditions = append(conditions, fmt.Sprintf("AND i.updated_at > %s", ph))
+		conditions = append(conditions, fmt.Sprintf("AND i.updated_at > CAST(strftime('%%s', %s) AS INTEGER)", ph))
 	}
 
 	limit := resolveLimit(f.Count)

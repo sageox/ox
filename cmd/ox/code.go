@@ -109,12 +109,18 @@ var codeSearchCmd = &cobra.Command{
 
 // compactSearchResult is a minimal search result optimized for agent context.
 type compactSearchResult struct {
-	File        string `json:"file"`
+	File        string `json:"file,omitempty"`
 	Line        int    `json:"line,omitempty"`
 	Lang        string `json:"lang,omitempty"`
 	Snippet     string `json:"snippet"`
 	Symbol      string `json:"symbol,omitempty"`
 	CommentKind string `json:"comment_kind,omitempty"`
+
+	// PR/issue fields
+	Number int    `json:"number,omitempty"`
+	Title  string `json:"title,omitempty"`
+	State  string `json:"state,omitempty"`
+	URL    string `json:"url,omitempty"`
 }
 
 // compactSearchResponse is the default search output — minimal context footprint.
@@ -142,6 +148,10 @@ func compactSearchResults(results []search.Result, limit int) compactSearchRespo
 			Snippet:     snippet,
 			Symbol:      r.SymbolName,
 			CommentKind: r.CommentKind,
+			Number:      r.Number,
+			Title:       r.Title,
+			State:       r.State,
+			URL:         r.URL,
 		}
 		compact = append(compact, cr)
 	}
@@ -524,6 +534,9 @@ func init() {
 
 	codeQueryCmd.Flags().Bool("full-json", false, "full uncompacted JSON output (~6x more context tokens)")
 	codeQueryCmd.Flags().Int("limit", 10, "max results to return")
+
+	// mirror indexCodeCmd flags so the alias works correctly
+	codeIndexCmd.Flags().Bool("full", false, "wipe index and rebuild from scratch")
 
 	codeStatsCmd.Flags().Bool("json", false, "output as JSON")
 

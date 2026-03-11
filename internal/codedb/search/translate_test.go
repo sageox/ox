@@ -630,6 +630,9 @@ func TestTranslatePRWithDates(t *testing.T) {
 	if !strings.Contains(tq.SQL, "p.updated_at >") {
 		t.Errorf("sql missing updated_at >: %s", tq.SQL)
 	}
+	if !strings.Contains(tq.SQL, "strftime") {
+		t.Errorf("sql missing strftime for date conversion: %s", tq.SQL)
+	}
 }
 
 func TestTranslatePRRegexError(t *testing.T) {
@@ -712,6 +715,33 @@ func TestTranslateIssueEmptyPattern(t *testing.T) {
 	}
 }
 
+func TestTranslatePRORSemantics(t *testing.T) {
+	tq := mustTranslate(t, "type:pr auth OR migration")
+	if !strings.Contains(tq.SQL, " OR ") {
+		t.Errorf("sql missing OR: %s", tq.SQL)
+	}
+	// should have two separate search params
+	if !hasParamContaining(tq.Params, "auth") {
+		t.Errorf("missing auth param: %v", tq.Params)
+	}
+	if !hasParamContaining(tq.Params, "migration") {
+		t.Errorf("missing migration param: %v", tq.Params)
+	}
+}
+
+func TestTranslateIssueORSemantics(t *testing.T) {
+	tq := mustTranslate(t, "type:issue bug OR crash")
+	if !strings.Contains(tq.SQL, " OR ") {
+		t.Errorf("sql missing OR: %s", tq.SQL)
+	}
+	if !hasParamContaining(tq.Params, "bug") {
+		t.Errorf("missing bug param: %v", tq.Params)
+	}
+	if !hasParamContaining(tq.Params, "crash") {
+		t.Errorf("missing crash param: %v", tq.Params)
+	}
+}
+
 func TestTranslateIssueRegexError(t *testing.T) {
 	q := mustParse(t, "type:issue /foo.*/")
 	_, err := Translate(q)
@@ -730,5 +760,8 @@ func TestTranslateIssueWithDates(t *testing.T) {
 	}
 	if !strings.Contains(tq.SQL, "i.updated_at >") {
 		t.Errorf("sql missing updated_at >: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "strftime") {
+		t.Errorf("sql missing strftime for date conversion: %s", tq.SQL)
 	}
 }

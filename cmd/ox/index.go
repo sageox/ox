@@ -269,9 +269,10 @@ func syncPRsToLedger(ctx context.Context, client *gh.Client, projectRoot, ledger
 			labels = append(labels, l.Name)
 		}
 
-		// fetch comments when new or state changed
-		// on state change (open→closed/merged), re-extract all comments
-		// to capture any final review comments added at merge time
+		// fetch comments when new or state changed.
+		// known limitation: comments added without a state change won't be
+		// captured until --full re-sync. Acceptable for MVP — next sync cycle
+		// with --full will pick them up.
 		var comments []ledger.PRComment
 		if !known || stateChanged {
 			comments = fetchPRComments(ctx, client, owner, repo, pr.Number)

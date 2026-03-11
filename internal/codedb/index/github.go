@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/codedb/store"
@@ -196,8 +195,9 @@ func indexPRFile(s *store.Store, path string) (int64, error) {
 		return 0, fmt.Errorf("check existing PR %d: %w", pr.Number, err)
 	}
 
-	// insert PR
-	labels := strings.Join(pr.Labels, ",")
+	// insert PR — JSON-encode labels to handle commas in label names
+	labelsJSON, _ := json.Marshal(pr.Labels)
+	labels := string(labelsJSON)
 	res, err := tx.Exec(`INSERT INTO pull_requests
 		(number, title, body, author, state, labels, created_at, merged_at, closed_at, updated_at, merge_commit, url, source_path)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -266,8 +266,9 @@ func indexIssueFile(s *store.Store, path string) (int64, error) {
 		return 0, fmt.Errorf("check existing issue %d: %w", issue.Number, err)
 	}
 
-	// insert issue
-	labels := strings.Join(issue.Labels, ",")
+	// insert issue — JSON-encode labels to handle commas in label names
+	labelsJSON, _ := json.Marshal(issue.Labels)
+	labels := string(labelsJSON)
 	res, err := tx.Exec(`INSERT INTO issues
 		(number, title, body, author, state, labels, created_at, closed_at, updated_at, url, source_path)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

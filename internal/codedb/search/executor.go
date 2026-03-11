@@ -32,6 +32,12 @@ type Result struct {
 	SymbolKind  string  `json:"symbol_kind,omitempty"`
 	CommentKind string  `json:"comment_kind,omitempty"`
 	CommentText string  `json:"comment_text,omitempty"`
+
+	// PR/issue-specific fields (populated for type:pr and type:issue results)
+	Number int    `json:"number,omitempty"`
+	Title  string `json:"title,omitempty"`
+	State  string `json:"state,omitempty"`
+	URL    string `json:"url,omitempty"`
 }
 
 // Execute runs a parsed query against the store using the planner to determine
@@ -109,13 +115,14 @@ func executePlanSQL(ctx context.Context, s *store.Store, plan *ExecutionPlan) ([
 			case "language":
 				r.Language = val
 			case "number":
-				fmt.Sscanf(val, "%d", &r.Line)
+				fmt.Sscanf(val, "%d", &r.Number)
 			case "title":
+				r.Title = val
 				r.Content = val
 			case "state":
-				r.SymbolKind = val
+				r.State = val
 			case "url":
-				r.FilePath = val
+				r.URL = val
 			}
 		}
 		results = append(results, r)
