@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -135,8 +136,11 @@ func EnsureDaemonAttached() error {
 // ensureDaemonInternal starts the daemon if it's not already running.
 func ensureDaemonInternal() error {
 	if IsRunning() {
-		return nil // already running
+		return nil // already running on new (repo-based) socket
 	}
+
+	// migration: stop old path-based daemon if one exists on a legacy socket
+	stopLegacyDaemon()
 
 	// get the path to the current executable
 	exe, err := os.Executable()
@@ -180,4 +184,40 @@ func ensureDaemonInternal() error {
 	}
 
 	return fmt.Errorf("daemon started but not responding")
+}
+
+// stopLegacyDaemon stops a daemon running under the old path-based workspace ID.
+// This handles migration from path-hash to repo_id-hash identity: when the new
+// repo-based ID differs from the old path-based ID, we stop the old daemon so
+// the new one can take over.
+func stopLegacyDaemon() {
+	legacyID := LegacyWorkspaceID()
+	currentID := CurrentWorkspaceID()
+
+	// same hash means no migration needed (non-initialized repo, or hash collision)
+	if legacyID == currentID {
+		return
+	}
+
+	legacySocket := SocketPathForWorkspace(legacyID)
+	client := NewClientWithSocket(legacySocket)
+
+	if err := client.Ping(); err != nil {
+		// legacy daemon not running, clean up stale socket if present
+		_ = os.Remove(legacySocket)
+		return
+	}
+
+	slog.Info("stopping legacy path-based daemon", "legacy_id", legacyID, "new_id", currentID)
+
+	if err := client.Stop(); err != nil {
+		slog.Warn("failed to stop legacy daemon", "legacy_id", legacyID, "error", err)
+		return
+	}
+
+	// brief wait for graceful shutdown
+	time.Sleep(500 * time.Millisecond)
+
+	// clean up stale socket if still present
+	_ = os.Remove(legacySocket)
 }

@@ -63,7 +63,8 @@ const (
 // Message represents an IPC message.
 type Message struct {
 	Type        string          `json:"type"`
-	WorkspaceID string          `json:"workspace_id,omitempty"` // identifies the workspace/repo
+	WorkspaceID string          `json:"workspace_id,omitempty"` // repo-scoped daemon identity
+	WorktreeID  string          `json:"worktree_id,omitempty"`  // identifies calling clone/worktree
 	Payload     json.RawMessage `json:"payload,omitempty"`
 }
 
@@ -1062,11 +1063,11 @@ func (s *Server) handleConnection(_ context.Context, conn net.Conn) {
 		return
 	}
 
-	s.logger.Debug("received message", "type", msg.Type, "workspace_id", msg.WorkspaceID)
+	s.logger.Debug("received message", "type", msg.Type, "workspace_id", msg.WorkspaceID, "worktree_id", msg.WorktreeID)
 
 	// validate workspace ID if provided (warn on mismatch, still process for backward compatibility)
 	if msg.WorkspaceID != "" && msg.WorkspaceID != CurrentWorkspaceID() {
-		s.logger.Warn("workspace mismatch", "expected", CurrentWorkspaceID(), "got", msg.WorkspaceID)
+		s.logger.Warn("workspace mismatch", "expected", CurrentWorkspaceID(), "got", msg.WorkspaceID, "worktree_id", msg.WorktreeID)
 	}
 
 	// record activity on any IPC message
@@ -1168,6 +1169,11 @@ func (c *Client) sendMessage(msg Message) (*Response, error) {
 	// always include workspace ID for request routing/validation
 	if msg.WorkspaceID == "" {
 		msg.WorkspaceID = CurrentWorkspaceID()
+	}
+
+	// identify which clone/worktree is sending this message
+	if msg.WorktreeID == "" {
+		msg.WorktreeID = LegacyWorkspaceID()
 	}
 
 	// send message

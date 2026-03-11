@@ -7,12 +7,15 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/sageox/ox/internal/config"
 )
 
 // DaemonInfo represents information about a running daemon.
 type DaemonInfo struct {
 	WorkspaceID   string    `json:"workspace_id"`
 	WorkspacePath string    `json:"workspace_path"`
+	RepoID        string    `json:"repo_id,omitempty"` // identifies repo-scoped daemons across clones
 	SocketPath    string    `json:"socket_path"`
 	PID           int       `json:"pid"`
 	Version       string    `json:"version"`
@@ -145,10 +148,12 @@ func RegisterDaemon(workspacePath, version string) error {
 		}
 	}
 
-	workspaceID := WorkspaceID(cwd)
+	workspaceID := CurrentWorkspaceID()
+	repoID := config.GetRepoID(cwd)
 	info := DaemonInfo{
 		WorkspaceID:   workspaceID,
 		WorkspacePath: cwd,
+		RepoID:        repoID,
 		SocketPath:    SocketPathForWorkspace(workspaceID),
 		PID:           os.Getpid(),
 		Version:       version,
@@ -171,6 +176,39 @@ func UnregisterDaemon() error {
 		return err
 	}
 	return reg.Unregister(workspaceID)
+}
+
+// FindDaemonForRepo scans the registry for a daemon with a matching repo_id.
+// Returns the DaemonInfo if found, nil otherwise.
+func FindDaemonForRepo(repoID string) *DaemonInfo {
+	if repoID == "" {
+		return nil
+	}
+
+	reg, err := LoadRegistry()
+	if err != nil {
+		return nil
+	}
+
+	return reg.FindByRepoID(repoID)
+}
+
+// FindByRepoID returns the first daemon entry matching the given repo_id,
+// or nil if no match is found. Empty repoID always returns nil.
+func (r *Registry) FindByRepoID(repoID string) *DaemonInfo {
+	if repoID == "" {
+		return nil
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, info := range r.Daemons {
+		if info.RepoID == repoID {
+			return &info
+		}
+	}
+	return nil
 }
 
 // KillAllDaemons stops all running daemons gracefully.

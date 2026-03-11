@@ -4,6 +4,7 @@ package daemon
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,9 @@ import (
 var (
 	cachedWorkspaceID     string
 	cachedWorkspaceIDOnce sync.Once
+
+	cachedLegacyWorkspaceID     string
+	cachedLegacyWorkspaceIDOnce sync.Once
 )
 
 // IsDaemonDisabled returns true if the daemon has been explicitly disabled
@@ -75,8 +79,9 @@ func DefaultConfig() *Config {
 	}
 }
 
-// WorkspaceID generates a stable identifier for a workspace.
+// WorkspaceID generates a stable identifier for a workspace path.
 // Uses SHA256 of the real (symlink-resolved) absolute path, truncated to 8 chars.
+// This is the legacy path-based ID, still used for non-initialized repos.
 func WorkspaceID(workspacePath string) string {
 	absPath, err := filepath.Abs(workspacePath)
 	if err != nil {
@@ -91,7 +96,21 @@ func WorkspaceID(workspacePath string) string {
 	return hex.EncodeToString(hash[:])[:8]
 }
 
+// RepoBasedWorkspaceID returns a workspace ID derived from repo_id in .sageox/config.json.
+// Multiple clones or worktrees of the same repo produce the same ID, so they
+// share a single daemon. Falls back to path-based WorkspaceID if repo_id is unavailable.
+func RepoBasedWorkspaceID(projectRoot string) string {
+	repoID := config.GetRepoID(projectRoot)
+	if repoID == "" {
+		return WorkspaceID(projectRoot)
+	}
+	hash := sha256.Sum256([]byte(repoID))
+	return hex.EncodeToString(hash[:])[:8]
+}
+
 // CurrentWorkspaceID returns the ID for the current working directory.
+// Prefers repo_id-based identity so multiple clones/worktrees of the same repo
+// share one daemon. Falls back to path-based ID for non-initialized repos.
 // The result is cached on first call so the daemon continues to use the
 // correct workspace ID even if its CWD is later deleted (e.g. macOS
 // tmpdir cleanup while the daemon is running long-term).
@@ -102,9 +121,25 @@ func CurrentWorkspaceID() string {
 			cachedWorkspaceID = "default"
 			return
 		}
-		cachedWorkspaceID = WorkspaceID(cwd)
+		cachedWorkspaceID = RepoBasedWorkspaceID(cwd)
+		slog.Debug("resolved workspace ID", "workspace_id", cachedWorkspaceID, "cwd", cwd)
 	})
 	return cachedWorkspaceID
+}
+
+// LegacyWorkspaceID returns the old path-based workspace ID for the current working directory.
+// Needed for migration: stopping daemons that were started under the old path-hash scheme.
+// Cached separately from CurrentWorkspaceID to avoid interference.
+func LegacyWorkspaceID() string {
+	cachedLegacyWorkspaceIDOnce.Do(func() {
+		cwd, err := os.Getwd()
+		if err != nil {
+			cachedLegacyWorkspaceID = "default"
+			return
+		}
+		cachedLegacyWorkspaceID = WorkspaceID(cwd)
+	})
+	return cachedLegacyWorkspaceID
 }
 
 // SocketPath returns the path to the daemon Unix socket for the current workspace.
@@ -123,6 +158,8 @@ func SocketPathForWorkspace(workspaceID string) string {
 func StabilizeCWD() {
 	// ensure workspace ID is cached before changing CWD
 	_ = CurrentWorkspaceID()
+	// also cache legacy ID while CWD is still valid
+	_ = LegacyWorkspaceID()
 
 	if home, err := os.UserHomeDir(); err == nil {
 		_ = os.Chdir(home)

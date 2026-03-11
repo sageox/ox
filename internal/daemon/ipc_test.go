@@ -52,6 +52,47 @@ func TestMessage_WorkspaceID_OmittedWhenEmpty(t *testing.T) {
 	assert.NotContains(t, string(data), "workspace_id")
 }
 
+func TestMessage_WorktreeID(t *testing.T) {
+	t.Run("present", func(t *testing.T) {
+		msg := Message{
+			Type:        MsgTypeStatus,
+			WorkspaceID: "a1b2c3d4",
+			WorktreeID:  "e5f6g7h8",
+		}
+
+		data, err := json.Marshal(msg)
+		require.NoError(t, err)
+		assert.Contains(t, string(data), `"worktree_id":"e5f6g7h8"`)
+
+		var decoded Message
+		err = json.Unmarshal(data, &decoded)
+		require.NoError(t, err)
+		assert.Equal(t, "e5f6g7h8", decoded.WorktreeID)
+	})
+
+	t.Run("omitted_when_empty", func(t *testing.T) {
+		msg := Message{
+			Type: MsgTypePing,
+		}
+
+		data, err := json.Marshal(msg)
+		require.NoError(t, err)
+		assert.NotContains(t, string(data), "worktree_id")
+	})
+
+	t.Run("backwards_compat_missing_field", func(t *testing.T) {
+		// JSON from an older client that doesn't send worktree_id
+		oldJSON := `{"type":"status","workspace_id":"a1b2c3d4"}`
+
+		var decoded Message
+		err := json.Unmarshal([]byte(oldJSON), &decoded)
+		require.NoError(t, err)
+		assert.Equal(t, "status", decoded.Type)
+		assert.Equal(t, "a1b2c3d4", decoded.WorkspaceID)
+		assert.Empty(t, decoded.WorktreeID, "missing worktree_id should default to empty string")
+	})
+}
+
 func TestResponse_MarshalJSON(t *testing.T) {
 	resp := Response{
 		Success: true,
