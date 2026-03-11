@@ -14,4 +14,16 @@ const (
 	// EnvUserConfig overrides the user config file path.
 	// Consumed by: LoadUserConfig()
 	EnvUserConfig = "OX_USER_CONFIG"
+
+	// EnvGitHubSync overrides the master GitHub sync mode.
+	// Consumed by: ResolveGitHubSync()
+	EnvGitHubSync = "OX_GITHUB_SYNC"
+
+	// EnvGitHubSyncPRs overrides the PR sync mode.
+	// Consumed by: ResolveGitHubSyncPRs()
+	EnvGitHubSyncPRs = "OX_GITHUB_SYNC_PRS"
+
+	// EnvGitHubSyncIssues overrides the issue sync mode.
+	// Consumed by: ResolveGitHubSyncIssues()
+	EnvGitHubSyncIssues = "OX_GITHUB_SYNC_ISSUES"
 )

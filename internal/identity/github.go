@@ -22,7 +22,7 @@ import (
 //
 // Privacy: Only called if a remote points to github.com.
 func getGitHubIdentity() (*Identity, error) {
-	token := getGitHubToken()
+	token := GetGitHubToken()
 	if token == "" {
 		return nil, fmt.Errorf("no GitHub token found")
 	}
@@ -30,8 +30,8 @@ func getGitHubIdentity() (*Identity, error) {
 	return fetchGitHubUser(token)
 }
 
-// getGitHubToken retrieves GitHub token from environment or gh CLI config.
-func getGitHubToken() string {
+// GetGitHubToken retrieves GitHub token from environment or gh CLI config.
+func GetGitHubToken() string {
 	// 1. Environment variables (CI/CD friendly)
 	if t := os.Getenv("GITHUB_TOKEN"); t != "" {
 		return t

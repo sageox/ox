@@ -63,6 +63,8 @@ type RepoStats struct {
 type CodeIndexPayload struct {
 	// URL is an optional remote git URL to index. If empty, indexes the local repo.
 	URL string `json:"url,omitempty"`
+	// Full wipes the existing index before rebuilding. Used by 'ox index --full'.
+	Full bool `json:"full,omitempty"`
 }
 
 // CodeIndexResult is the result of a code_index operation.
@@ -128,6 +130,14 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 	}()
 
 	dataDir := m.resolveSharedDataDir()
+
+	// --full: wipe existing index so we rebuild from scratch
+	if payload.Full {
+		m.logger.Info("codedb full reindex requested, wiping existing index", "path", dataDir)
+		if err := os.RemoveAll(dataDir); err != nil {
+			return nil, fmt.Errorf("wipe codedb for full reindex: %w", err)
+		}
+	}
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create codedb dir: %w", err)
 	}

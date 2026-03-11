@@ -37,39 +37,12 @@ var codeCmd = &cobra.Command{
 	Long:  "Search git history and current code of this repo using queries.",
 }
 
+// codeIndexCmd is an alias for 'ox index code' — kept for back-compat and discoverability
 var codeIndexCmd = &cobra.Command{
 	Use:   "index [url]",
-	Short: "Index a git repository (defaults to current repo)",
+	Short: "Index a git repository (alias for 'ox index code')",
 	Args:  cobra.MaximumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		// ensure daemon is running — indexing happens in the daemon
-		if err := daemon.EnsureDaemon(); err != nil {
-			return fmt.Errorf("daemon required for indexing: %w", err)
-		}
-
-		payload := daemon.CodeIndexPayload{}
-		if len(args) > 0 {
-			payload.URL = args[0]
-			fmt.Fprintf(os.Stderr, "Indexing %s...\n", args[0])
-		} else {
-			fmt.Fprintf(os.Stderr, "Indexing local repo...\n")
-		}
-
-		client := daemon.NewClientWithTimeout(5 * time.Minute)
-		result, err := client.CodeIndex(payload, func(stage string, percent *int, message string) {
-			if message != "" {
-				fmt.Fprintf(os.Stderr, "  %s\n", message)
-			}
-		})
-		if err != nil {
-			return fmt.Errorf("index: %w", err)
-		}
-
-		fmt.Fprintf(os.Stderr, "Done. Parsed %d blobs, %d symbols, %d comments (%s)\n",
-			result.BlobsParsed, result.SymbolsExtracted, result.CommentsExtracted,
-			formatIndexTiming(result))
-		return nil
-	},
+	RunE:  indexCodeCmd.RunE,
 }
 
 var codeSearchCmd = &cobra.Command{

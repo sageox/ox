@@ -2369,8 +2369,15 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 		break // one GC per check cycle to avoid overloading
 	}
 
+	// TODO: ledger GC reclone — same blue-green pattern as team contexts.
+	// When implemented, call checkAndRunLedgerGC(ctx) here to prune old
+	// GitHub data directories outside the sparse checkout sliding window.
+	// The ledger already has ConfigureSparseCheckout() and time-partitioned
+	// data/github/ directories ready for this.
+
 	atomic.StoreInt32(&s.gcInProgress, 0)
 }
+
 
 // TriggerGC forces a GC reclone of all eligible team contexts, bypassing the interval check.
 // Returns immediately if GC is already in progress. Runs synchronously.
@@ -2418,6 +2425,11 @@ func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: reclone failed (check daemon logs)", name))
 		}
 	}
+
+	// TODO: trigger ledger GC here when implemented (same blue-green pattern).
+	// The ledger already uses partial+sparse clone with a 30-day sliding window
+	// on data/github/ directories via ConfigureSparseCheckout(). GC reclone will
+	// prune old data outside the window, keeping local disk usage <10MB per ledger.
 
 	return resp
 }
