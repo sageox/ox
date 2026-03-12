@@ -423,6 +423,14 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 		} else {
 			m.CreatedAt = di.LastHeartbeat
 		}
+		// daemon heartbeat info works cross-worktree; use as fallback
+		// when disk instance store is not available (different worktree)
+		if m.AgentType == "" && di.AgentType != "" {
+			m.AgentType = di.AgentType
+		}
+		if m.ParentAgentID == "" && di.ParentAgentID != "" {
+			m.ParentAgentID = di.ParentAgentID
+		}
 		merged = append(merged, m)
 		seen[di.AgentID] = true
 	}

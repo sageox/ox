@@ -60,6 +60,14 @@ type HeartbeatPayload struct {
 	// CommandName identifies which ox subcommand produced this context (e.g., "prime",
 	// "team-ctx", "session list"). Used for per-command breakdown (ox-aw0).
 	CommandName string `json:"command_name,omitempty"`
+
+	// ParentAgentID is the agent ID of the parent that spawned this agent (e.g., "Oxa7b3").
+	// Empty for top-level agents. Used for tree structure in `ox agent list`.
+	ParentAgentID string `json:"parent_agent_id,omitempty"`
+
+	// AgentType identifies the kind of agent (e.g., "claude-code", "explore").
+	// Used for display in `ox agent list`.
+	AgentType string `json:"agent_type,omitempty"`
 }
 
 // HeartbeatCreds contains credentials for the daemon.
@@ -134,6 +142,11 @@ type HeartbeatHandler struct {
 	agentContextTokens map[string]int64 // agent_id → cumulative estimated tokens
 	agentCommandCount  map[string]int   // agent_id → command count
 
+	// per-agent metadata (parent/type) from heartbeats — enables cross-worktree visibility
+	metaMu        sync.RWMutex
+	agentParentID map[string]string // agent_id → parent agent ID
+	agentType     map[string]string // agent_id → agent type
+
 	// credentials (updated from heartbeats) - protected by credMu
 	credMu          sync.RWMutex
 	credentials     *HeartbeatCreds
@@ -173,6 +186,8 @@ func NewHeartbeatHandler(logger *slog.Logger) *HeartbeatHandler {
 		callers:            make(map[string]CallerInfo),
 		agentContextTokens: make(map[string]int64),
 		agentCommandCount:  make(map[string]int),
+		agentParentID:      make(map[string]string),
+		agentType:          make(map[string]string),
 	}
 }
 
@@ -346,6 +361,19 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 			h.agentCommandCount[hb.AgentID]++
 			h.ctxMu.Unlock()
 		}
+
+		// store agent metadata (parent/type) if provided.
+		// only track agents already admitted by the bounded activity tracker.
+		if h.agentActivity.Has(hb.AgentID) && (hb.ParentAgentID != "" || hb.AgentType != "") {
+			h.metaMu.Lock()
+			if hb.ParentAgentID != "" {
+				h.agentParentID[hb.AgentID] = hb.ParentAgentID
+			}
+			if hb.AgentType != "" {
+				h.agentType[hb.AgentID] = hb.AgentType
+			}
+			h.metaMu.Unlock()
+		}
 	}
 
 	// record activity by team and trigger lazy loading if needed
@@ -475,6 +503,22 @@ func (h *HeartbeatHandler) GetAgentContextStats(agentID string) AgentContextStat
 		ContextTokens: h.agentContextTokens[agentID],
 		CommandCount:  h.agentCommandCount[agentID],
 	}
+}
+
+// GetAgentParentID returns the parent agent ID for a given agent.
+// Returns empty string if no parent is known.
+func (h *HeartbeatHandler) GetAgentParentID(agentID string) string {
+	h.metaMu.RLock()
+	defer h.metaMu.RUnlock()
+	return h.agentParentID[agentID]
+}
+
+// GetAgentType returns the agent type for a given agent.
+// Returns empty string if no type is known.
+func (h *HeartbeatHandler) GetAgentType(agentID string) string {
+	h.metaMu.RLock()
+	defer h.metaMu.RUnlock()
+	return h.agentType[agentID]
 }
 
 // ActivitySummary returns a summary of all activity for status display.

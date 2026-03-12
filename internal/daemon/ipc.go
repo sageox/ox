@@ -323,6 +323,14 @@ type InstanceInfo struct {
 
 	// CommandCount is the number of ox commands that produced context output for this agent.
 	CommandCount int `json:"command_count,omitempty"`
+
+	// ParentAgentID is the parent agent that spawned this agent (empty for top-level agents).
+	// Populated from heartbeat tracking, enabling cross-worktree tree display.
+	ParentAgentID string `json:"parent_agent_id,omitempty"`
+
+	// AgentType identifies the kind of agent (e.g., "claude-code", "explore").
+	// Populated from heartbeat tracking, enabling cross-worktree type display.
+	AgentType string `json:"agent_type,omitempty"`
 }
 
 // InstancesResponse is the response for the instances IPC message.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"time"
 
 	"github.com/sageox/ox/internal/auth"
@@ -25,6 +26,23 @@ import (
 // A post-command heartbeat that includes both credentials and token count would halve
 // the IPC traffic per agent command.
 
+// resolveAgentMetadata returns the parent agent ID and agent type for the given agent
+// by reading environment variables. Lightweight (no disk I/O).
+//
+// Parent detection: if SAGEOX_AGENT_ID is set and differs from agentID, it's the parent
+// (subagents inherit the parent's env, then ox agent prime overwrites SAGEOX_AGENT_ID).
+// Agent type: read from AGENT_ENV (set by ox agent prime).
+func resolveAgentMetadata(agentID string) (parentAgentID, agentType string) {
+	if agentID == "" {
+		return "", ""
+	}
+	if envID := os.Getenv("SAGEOX_AGENT_ID"); envID != "" && envID != agentID {
+		parentAgentID = envID
+	}
+	agentType = os.Getenv("AGENT_ENV")
+	return parentAgentID, agentType
+}
+
 // Heartbeat sends async context to daemon. Never blocks CLI.
 // This is fire-and-forget: the goroutine handles the send in background,
 // and the calling function returns immediately.
@@ -33,13 +51,16 @@ func Heartbeat(repoPath string, teamIDs []string, agentID string) {
 	go func() {
 		client := daemon.NewClientWithTimeout(50 * time.Millisecond)
 
+		parentAgentID, agentType := resolveAgentMetadata(agentID)
 		payload := daemon.HeartbeatPayload{
-			RepoPath:   repoPath,
-			CallerPath: repoPath,
-			TeamIDs:    teamIDs,
-			AgentID:    agentID,
-			Timestamp:  time.Now(),
-			CLIVersion: version.Full(),
+			RepoPath:      repoPath,
+			CallerPath:    repoPath,
+			TeamIDs:       teamIDs,
+			AgentID:       agentID,
+			Timestamp:     time.Now(),
+			CLIVersion:    version.Full(),
+			ParentAgentID: parentAgentID,
+			AgentType:     agentType,
 		}
 
 		// include workspace ID if available
@@ -89,11 +110,14 @@ func sendContextHeartbeat(agentID string, bytes int64, commandName string) {
 	}
 	go func() {
 		client := daemon.NewClientWithTimeout(50 * time.Millisecond)
+		parentAgentID, agentType := resolveAgentMetadata(agentID)
 		payload := daemon.HeartbeatPayload{
 			AgentID:       agentID,
 			ContextTokens: int64(tokens),
 			CommandName:   commandName,
 			Timestamp:     time.Now(),
+			ParentAgentID: parentAgentID,
+			AgentType:     agentType,
 		}
 		data, err := json.Marshal(payload)
 		if err != nil {
@@ -113,13 +137,16 @@ func HeartbeatWithCreds(repoPath string, teamIDs []string, agentID string, creds
 	go func() {
 		client := daemon.NewClientWithTimeout(50 * time.Millisecond)
 
+		parentAgentID, agentType := resolveAgentMetadata(agentID)
 		payload := daemon.HeartbeatPayload{
-			RepoPath:   repoPath,
-			CallerPath: repoPath,
-			TeamIDs:    teamIDs,
-			AgentID:    agentID,
-			Timestamp:  time.Now(),
-			CLIVersion: version.Full(),
+			RepoPath:      repoPath,
+			CallerPath:    repoPath,
+			TeamIDs:       teamIDs,
+			AgentID:       agentID,
+			Timestamp:     time.Now(),
+			CLIVersion:    version.Full(),
+			ParentAgentID: parentAgentID,
+			AgentType:     agentType,
 		}
 
 		// include workspace ID if available

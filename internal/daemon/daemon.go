@@ -780,6 +780,8 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 			Status:                  status,
 			CumulativeContextTokens: ctxStats.ContextTokens,
 			CommandCount:            ctxStats.CommandCount,
+			ParentAgentID:           d.heartbeat.GetAgentParentID(agentID),
+			AgentType:               d.heartbeat.GetAgentType(agentID),
 		})
 	}
 
