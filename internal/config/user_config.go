@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -108,17 +109,139 @@ func (c *SessionsConfig) GetMode() string {
 	return "none"
 }
 
+// AllowedAgentTypes is the set of valid AgentWorkerConfig.AgentType values.
+var AllowedAgentTypes = []string{"claude"}
+
+// AgentWorkerConfig controls daemon-spawned AI coworker invocations.
+type AgentWorkerConfig struct {
+	// Enabled controls whether the daemon can spawn AI coworker processes.
+	// Default: false
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// AgentType is the agent CLI to use. Validated against AllowedAgentTypes.
+	// Default: "claude"
+	AgentType string `yaml:"agent_type,omitempty"`
+
+	// MaxInvocationsPerHour rate-limits agent spawning per daemon.
+	// Default: 10
+	MaxInvocationsPerHour *int `yaml:"max_invocations_per_hour,omitempty"`
+
+	// MaxConcurrent limits parallel agent processes per daemon.
+	// Default: 1
+	MaxConcurrent *int `yaml:"max_concurrent,omitempty"`
+
+	// SessionFinalize enables automatic session anti-entropy (generating
+	// missing summaries, HTML, and markdown for incomplete sessions).
+	// Requires Enabled=true as a prerequisite. Default: false
+	SessionFinalize *bool `yaml:"session_finalize,omitempty"`
+}
+
+// IsEnabled returns true if agent worker spawning is enabled (default: false)
+func (c *AgentWorkerConfig) IsEnabled() bool {
+	if c == nil || c.Enabled == nil {
+		return false
+	}
+	return *c.Enabled
+}
+
+// GetAgentType returns the configured agent type (default: "claude")
+func (c *AgentWorkerConfig) GetAgentType() string {
+	if c == nil || c.AgentType == "" {
+		return "claude"
+	}
+	return c.AgentType
+}
+
+// GetMaxInvocationsPerHour returns the rate limit (default: 10)
+func (c *AgentWorkerConfig) GetMaxInvocationsPerHour() int {
+	if c == nil || c.MaxInvocationsPerHour == nil {
+		return 10
+	}
+	return *c.MaxInvocationsPerHour
+}
+
+// GetMaxConcurrent returns the concurrency limit (default: 1)
+func (c *AgentWorkerConfig) GetMaxConcurrent() int {
+	if c == nil || c.MaxConcurrent == nil {
+		return 1
+	}
+	return *c.MaxConcurrent
+}
+
+// IsSessionFinalizeEnabled returns true if session anti-entropy is enabled (default: false).
+// Also requires the master Enabled switch to be true.
+func (c *AgentWorkerConfig) IsSessionFinalizeEnabled() bool {
+	if c == nil || c.SessionFinalize == nil {
+		return false
+	}
+	return *c.SessionFinalize && c.IsEnabled()
+}
+
+// Validate checks the config for invalid values.
+// Returns an error if agent_type is not in AllowedAgentTypes or limits are non-positive.
+func (c *AgentWorkerConfig) Validate() error {
+	if c == nil {
+		return nil
+	}
+
+	if c.AgentType != "" && !slices.Contains(AllowedAgentTypes, c.AgentType) {
+		return fmt.Errorf("unknown agent_type %q, allowed: %v", c.AgentType, AllowedAgentTypes)
+	}
+
+	if c.MaxInvocationsPerHour != nil && *c.MaxInvocationsPerHour < 1 {
+		return fmt.Errorf("max_invocations_per_hour must be >= 1, got %d", *c.MaxInvocationsPerHour)
+	}
+
+	if c.MaxConcurrent != nil && *c.MaxConcurrent < 1 {
+		return fmt.Errorf("max_concurrent must be >= 1, got %d", *c.MaxConcurrent)
+	}
+
+	return nil
+}
+
+// WithDefaults returns a copy of the config with zero-value fields set to defaults.
+// Does not modify the receiver.
+func (c *AgentWorkerConfig) WithDefaults() *AgentWorkerConfig {
+	out := &AgentWorkerConfig{}
+	if c != nil {
+		*out = *c
+	}
+
+	if out.Enabled == nil {
+		f := false
+		out.Enabled = &f
+	}
+	if out.AgentType == "" {
+		out.AgentType = "claude"
+	}
+	if out.MaxInvocationsPerHour == nil {
+		v := 10
+		out.MaxInvocationsPerHour = &v
+	}
+	if out.MaxConcurrent == nil {
+		v := 1
+		out.MaxConcurrent = &v
+	}
+	if out.SessionFinalize == nil {
+		f := false
+		out.SessionFinalize = &f
+	}
+
+	return out
+}
+
 // UserConfig holds user-level configuration from config.yaml
 type UserConfig struct {
-	DisplayName       string            `yaml:"display_name,omitempty"`
-	TipsEnabled       *bool             `yaml:"tips_enabled,omitempty"`
-	TelemetryEnabled  *bool             `yaml:"telemetry_enabled,omitempty"`
-	SessionTermsShown *bool             `yaml:"session_terms_shown,omitempty"`
-	Attribution       *Attribution      `yaml:"attribution,omitempty"`
-	Badge             *BadgeConfig      `yaml:"badge,omitempty"`
-	ContextGit        *ContextGitConfig `yaml:"context_git,omitempty"`
-	Sessions          *SessionsConfig   `yaml:"sessions,omitempty"`
-	ViewFormat        string            `yaml:"view_format,omitempty"` // "html", "text", "json" (default: "html")
+	DisplayName       string             `yaml:"display_name,omitempty"`
+	TipsEnabled       *bool              `yaml:"tips_enabled,omitempty"`
+	TelemetryEnabled  *bool              `yaml:"telemetry_enabled,omitempty"`
+	SessionTermsShown *bool              `yaml:"session_terms_shown,omitempty"`
+	Attribution       *Attribution       `yaml:"attribution,omitempty"`
+	Badge             *BadgeConfig       `yaml:"badge,omitempty"`
+	ContextGit        *ContextGitConfig  `yaml:"context_git,omitempty"`
+	Sessions          *SessionsConfig    `yaml:"sessions,omitempty"`
+	AgentWorker       *AgentWorkerConfig `yaml:"agent_worker,omitempty"`
+	ViewFormat        string             `yaml:"view_format,omitempty"` // "html", "text", "json" (default: "html")
 }
 
 // BadgeConfig tracks badge suggestion state across all projects.
@@ -224,6 +347,28 @@ func (c *UserConfig) SetSessionsEnabled(enabled bool) {
 		c.Sessions = &SessionsConfig{}
 	}
 	c.Sessions.Enabled = &enabled
+}
+
+// GetAgentWorkerConfig returns the agent worker config, or nil if not set.
+func (c *UserConfig) GetAgentWorkerConfig() *AgentWorkerConfig {
+	return c.AgentWorker
+}
+
+// IsAgentWorkerEnabled returns whether daemon agent spawning is enabled.
+// Default: false
+func (c *UserConfig) IsAgentWorkerEnabled() bool {
+	if c.AgentWorker == nil {
+		return false
+	}
+	return c.AgentWorker.IsEnabled()
+}
+
+// SetAgentWorkerEnabled sets the agent worker enabled preference.
+func (c *UserConfig) SetAgentWorkerEnabled(enabled bool) {
+	if c.AgentWorker == nil {
+		c.AgentWorker = &AgentWorkerConfig{}
+	}
+	c.AgentWorker.Enabled = &enabled
 }
 
 // GetViewFormat returns the preferred session view format.

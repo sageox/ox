@@ -16,6 +16,7 @@ import (
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/version"
 )
@@ -146,14 +147,15 @@ type Daemon struct {
 	wg     sync.WaitGroup
 
 	// components
-	server    *Server
-	scheduler *SyncScheduler
-	watcher   *Watcher
-	heartbeat *HeartbeatHandler
-	telemetry *TelemetryCollector
-	friction  *FrictionCollector
-	issues    *IssueTracker
-	codedb    *CodeDBManager
+	server      *Server
+	scheduler   *SyncScheduler
+	watcher     *Watcher
+	heartbeat   *HeartbeatHandler
+	telemetry   *TelemetryCollector
+	friction    *FrictionCollector
+	issues      *IssueTracker
+	codedb      *CodeDBManager
+	agentWorker *agentwork.Manager
 
 	// state
 	mu           sync.Mutex
@@ -310,6 +312,39 @@ func (d *Daemon) Start() error {
 		d.codedb = NewCodeDBManager(d.config.ProjectRoot, d.logger, d.telemetry)
 	}
 
+	// initialize agent work manager (if ledger path is set)
+	if d.config.LedgerPath != "" {
+		agentWorkSignal := make(chan struct{}, 1)
+		runner := agentwork.NewClaudeRunner(d.logger)
+		configLoader := func() *config.AgentWorkerConfig {
+			cfg, err := config.LoadUserConfig()
+			if err != nil {
+				d.logger.Debug("failed to load user config for agent worker", "error", err)
+				return (&config.AgentWorkerConfig{}).WithDefaults()
+			}
+			awCfg := cfg.GetAgentWorkerConfig()
+			if awCfg == nil {
+				return (&config.AgentWorkerConfig{}).WithDefaults()
+			}
+			return awCfg
+		}
+		d.agentWorker = agentwork.NewManager(runner, d.logger, configLoader, agentWorkSignal, d.config.LedgerPath)
+		d.agentWorker.SetOnComplete(func(result agentwork.WorkResult) {
+			status := "success"
+			if !result.Success {
+				status = "failed"
+			}
+			d.logger.Info("agent work complete",
+				"type", result.Item.Type,
+				"status", status,
+				"duration", result.Duration,
+			)
+		})
+
+		// pass agent work signal channel to sync scheduler
+		d.scheduler.SetAgentWorkSignal(agentWorkSignal)
+	}
+
 	// wire auth token getter so scheduler and friction can authenticate API calls
 	d.scheduler.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
 	d.friction.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
@@ -383,6 +418,13 @@ func (d *Daemon) Start() error {
 				codeDBStats = &stats
 			}
 
+			// get agent work status
+			var agentWorkStatus *agentwork.AgentWorkStatus
+			if d.agentWorker != nil {
+				s := d.agentWorker.Status()
+				agentWorkStatus = &s
+			}
+
 			// get all workspaces being synced (ledger + team contexts)
 			// keyed by type for flexibility with future workspace types
 			workspaces := make(map[string][]WorkspaceSyncStatus)
@@ -440,6 +482,7 @@ func (d *Daemon) Start() error {
 				StartupDurationMs:  d.startupDurationMs.Load(),
 				ThrottleDurationMs: d.throttleDurationMs.Load(),
 				CodeDB:             codeDBStats,
+				AgentWork:          agentWorkStatus,
 				Callers:            callers,
 			}
 		},
@@ -553,6 +596,15 @@ func (d *Daemon) Start() error {
 				d.recordActivity() // file changes = activity
 				d.scheduler.TriggerSync()
 			})
+		}()
+	}
+
+	// start agent work manager (if initialized)
+	if d.agentWorker != nil {
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.agentWorker.Start(d.ctx)
 		}()
 	}
 

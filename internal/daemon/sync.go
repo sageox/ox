@@ -294,6 +294,9 @@ type SyncScheduler struct {
 
 	// code index manager for periodic freshness checks
 	codedb *CodeDBManager
+
+	// agent work signal channel — notified after successful ledger pull
+	agentWorkSignal chan<- struct{}
 }
 
 // syncError tracks a sync error with timestamp.
@@ -378,6 +381,14 @@ func (s *SyncScheduler) SetCodeDBManager(m *CodeDBManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.codedb = m
+}
+
+// SetAgentWorkSignal sets the channel used to notify the agent work manager
+// after a successful ledger pull.
+func (s *SyncScheduler) SetAgentWorkSignal(ch chan<- struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.agentWorkSignal = ch
 }
 
 // Metrics returns the sync metrics for observability.
@@ -1063,6 +1074,14 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		s.logger.Warn("failed to update ledger config last sync", "error", err)
 	}
 	s.recordSyncState(ctx, s.config.LedgerPath)
+
+	// notify agent work manager that new ledger content may be available
+	if s.agentWorkSignal != nil {
+		select {
+		case s.agentWorkSignal <- struct{}{}:
+		default:
+		}
+	}
 
 	s.logger.Debug("pull complete", "duration", duration)
 	return nil

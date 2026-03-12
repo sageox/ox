@@ -13,6 +13,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/sageox/ox/internal/daemon/agentwork"
 )
 
 // maxIPCMessageSize limits the maximum size of an IPC message to prevent DoS.
@@ -136,6 +138,9 @@ type StatusData struct {
 
 	// code index status
 	CodeDB *CodeDBStats `json:"code_db,omitempty"`
+
+	// agent work manager status
+	AgentWork *agentwork.AgentWorkStatus `json:"agent_work,omitempty"`
 
 	// connected clones/worktrees that have sent heartbeats
 	Callers []CallerInfo `json:"callers,omitempty"`
