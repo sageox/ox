@@ -163,7 +163,12 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 			if adapter, detectErr := adapters.DetectAdapter(); detectErr == nil {
 				adapterName = adapter.Name()
 				since := time.Now().Add(-5 * time.Minute)
-				sessionFile, _ = adapter.FindSessionFile(inst.AgentID, since)
+				sf, findErr := adapter.FindSessionFile(inst.AgentID, since)
+				if findErr != nil {
+					slog.Info("session file not found at start (will retry at stop)", "adapter", adapterName, "error", findErr)
+				} else {
+					sessionFile = sf
+				}
 			}
 		}
 	}
@@ -365,6 +370,19 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	duration := formatDurationHuman(state.Duration())
 
+	// re-discover session file if it was empty at start time
+	// (Claude Code session JSONL may not have existed yet when recording started)
+	if state.SessionFile == "" && state.AdapterName != "" && state.AdapterName != "generic" {
+		if adapter, adapterErr := adapters.GetAdapter(state.AdapterName); adapterErr == nil {
+			if sf, findErr := adapter.FindSessionFile(state.AgentID, state.StartedAt); findErr == nil {
+				slog.Info("session file discovered at stop time", "file", sf, "adapter", state.AdapterName)
+				state.SessionFile = sf
+			} else {
+				slog.Warn("session file not found at stop time", "adapter", state.AdapterName, "error", findErr)
+			}
+		}
+	}
+
 	// process session: read, redact secrets, extract events, save
 	var processResult *agentSessionResult
 	if state.SessionFile != "" {
@@ -374,6 +392,8 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 			_ = doctor.SetNeedsDoctorAgent(projectRoot) // best effort
 			return fmt.Errorf("failed to process session: %w\nrecording state preserved; run 'ox agent %s session recover' or retry stop", err, inst.AgentID)
 		}
+	} else {
+		slog.Warn("no session file — session data not uploaded", "agent_id", state.AgentID, "adapter", state.AdapterName)
 	}
 
 	// clean up the drop file after successful processing.
@@ -528,6 +548,9 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 		output.EventsAfterFilter = processResult.EventsAfterFilter
 		output.LedgerSessionDir = processResult.LedgerSessionDir
 		output.UploadWarning = processResult.UploadWarning
+	} else {
+		output.UploadWarning = "no session file found — session data was not uploaded to ledger"
+		output.Guidance = "Session stopped but no conversation data was found. The session recording may be empty. Run 'ox doctor' to check for recoverable sessions."
 	}
 	jsonOut, err := json.MarshalIndent(output, "", "  ")
 	if err != nil {
