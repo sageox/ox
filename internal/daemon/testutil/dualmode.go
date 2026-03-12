@@ -380,7 +380,7 @@ func (m *MockDaemon) handleConn(conn net.Conn) {
 	case daemon.MsgTypeStop:
 		resp = daemon.Response{Success: true}
 
-	case daemon.MsgTypeHeartbeat, daemon.MsgTypeTelemetry, daemon.MsgTypeFriction:
+	case daemon.MsgTypeHeartbeat, daemon.MsgTypeTelemetry, daemon.MsgTypeFriction, daemon.MsgTypeSessionFinalize:
 		// fire-and-forget messages - no response
 		return
 

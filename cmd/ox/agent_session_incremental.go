@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
@@ -332,7 +333,9 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		result.LedgerSessionDir = ""
 		result.UploadWarning = "Session saved locally but ledger upload skipped (no ledger). Run 'ox doctor' to retry."
 	} else {
+		uploadStart := time.Now()
 		uploadErr := uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		result.UploadMs = time.Since(uploadStart).Milliseconds()
 		if uploadErr != nil {
 			if errors.Is(uploadErr, api.ErrReadOnly) {
 				fmt.Fprintln(os.Stderr, "\nUpload skipped — you have read-only access to this public repo.")

@@ -562,6 +562,29 @@ func (d *Daemon) Start() error {
 		d.friction.RecordFromIPC(payload)
 	})
 
+	// set session finalize handler for async session upload+finalization
+	d.server.SetSessionFinalizeHandler(func(payload SessionFinalizeIPCPayload) {
+		if d.agentWorker == nil {
+			d.logger.Warn("session_finalize received but agent worker not initialized")
+			return
+		}
+		d.logger.Info("session_finalize received, enqueueing",
+			"session", payload.SessionName,
+			"ledger", payload.LedgerPath,
+		)
+		d.agentWorker.Enqueue(&agentwork.WorkItem{
+			Type:     "session-finalize",
+			Priority: 1, // high priority (vs 10 for doctor-detected)
+			DedupKey: "session-finalize:" + payload.SessionName,
+			Payload: &agentwork.SessionFinalizePayload{
+				SessionDir: filepath.Join(payload.LedgerPath, "sessions", payload.SessionName),
+				RawPath:    filepath.Join(payload.LedgerPath, "sessions", payload.SessionName, "raw.jsonl"),
+				Missing:    []string{"summary.md", "summary.json", "session.html", "session.md"},
+				LedgerPath: payload.LedgerPath,
+			},
+		})
+	})
+
 	// set sessions handler for agent session tracking (deprecated)
 	d.server.SetSessionsHandler(func() []AgentSession {
 		return d.getAgentSessions()

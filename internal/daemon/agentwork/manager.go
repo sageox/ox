@@ -103,7 +103,8 @@ type Manager struct {
 	ledgerPath string
 
 	// signals
-	syncSignal <-chan struct{}
+	syncSignal    <-chan struct{}
+	processSignal chan struct{}
 }
 
 // NewManager creates a Manager wired to the given runner and config loader.
@@ -129,17 +130,18 @@ func NewManager(
 	maxPerHour := cfg.GetMaxInvocationsPerHour()
 
 	return &Manager{
-		runner:       runner,
-		queue:        NewWorkQueue(logger),
-		logger:       logger,
-		handlers:     make(map[string]WorkHandler),
-		lastDetect:   make(map[string]time.Time),
-		active:       make(map[string]AgentProcess),
-		rateLimiter:  NewRateLimiter(maxPerHour, time.Hour),
-		sem:          make(chan struct{}, maxConcurrent),
-		configLoader: configLoader,
-		ledgerPath:   ledgerPath,
-		syncSignal:   syncSignal,
+		runner:        runner,
+		queue:         NewWorkQueue(logger),
+		logger:        logger,
+		handlers:      make(map[string]WorkHandler),
+		lastDetect:    make(map[string]time.Time),
+		active:        make(map[string]AgentProcess),
+		rateLimiter:   NewRateLimiter(maxPerHour, time.Hour),
+		sem:           make(chan struct{}, maxConcurrent),
+		configLoader:  configLoader,
+		ledgerPath:    ledgerPath,
+		syncSignal:    syncSignal,
+		processSignal: make(chan struct{}, 1),
 	}
 }
 
@@ -159,8 +161,18 @@ func (m *Manager) SetOnComplete(fn func(result WorkResult)) {
 }
 
 // Enqueue adds a work item to the queue. Safe for external callers (e.g., IPC).
+// Signals the main loop to process immediately so externally-enqueued items
+// (e.g., from IPC) don't wait for syncSignal or doctorTicker.
 func (m *Manager) Enqueue(item *WorkItem) bool {
-	return m.queue.Enqueue(item)
+	ok := m.queue.Enqueue(item)
+	if ok {
+		// notify main loop to process immediately
+		select {
+		case m.processSignal <- struct{}{}:
+		default:
+		}
+	}
+	return ok
 }
 
 // Start runs the main loop until ctx is canceled.
@@ -190,6 +202,8 @@ func (m *Manager) Start(ctx context.Context) {
 				return
 			}
 			// drain queue only — detection runs on the doctor timer
+			m.processQueue(ctx)
+		case <-m.processSignal:
 			m.processQueue(ctx)
 		case <-doctorTicker.C:
 			m.logger.Debug("doctor timer fired, running detection")

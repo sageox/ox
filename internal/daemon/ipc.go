@@ -46,7 +46,8 @@ const (
 	MsgTypeTriggerGC   = "trigger_gc"  // force GC reclone for team contexts
 	MsgTypeCodeIndex   = "code_index"   // index local code with progress
 	MsgTypeCodeStatus     = "code_status"    // get code index status/stats
-	MsgTypeNotifications = "notifications"  // query pending team context change notifications
+	MsgTypeNotifications    = "notifications"      // query pending team context change notifications
+	MsgTypeSessionFinalize = "session_finalize" // one-way, trigger async session upload+finalization
 )
 
 // Protocol Design Decision: NDJSON (Newline-Delimited JSON)
@@ -269,6 +270,15 @@ type FrictionPayload struct {
 	ErrorMsg string `json:"error_msg"`
 }
 
+// SessionFinalizeIPCPayload carries the minimum info needed for the daemon
+// to upload and finalize a session that was saved locally by the CLI.
+type SessionFinalizeIPCPayload struct {
+	SessionName string `json:"session_name"` // e.g. "2026-03-12T11-09-ryan-OxTndR"
+	LedgerPath  string `json:"ledger_path"`  // ledger repo root
+	CachePath   string `json:"cache_path"`   // local cache session dir (source files)
+	ProjectRoot string `json:"project_root"` // for endpoint/auth resolution
+}
+
 // MarkErrorsPayload is the payload for marking errors as viewed.
 type MarkErrorsPayload struct {
 	// IDs to mark as viewed. If empty, marks all errors as viewed.
@@ -473,6 +483,7 @@ type Server struct {
 	onCheckout         func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error) //
 	onTelemetry        func(payload json.RawMessage)                                                    // fire-and-forget telemetry
 	onFriction         func(payload FrictionPayload)                                                    // fire-and-forget friction event
+	onSessionFinalize  func(payload SessionFinalizeIPCPayload)                                           // fire-and-forget session finalize
 	onGetErrors        func() []StoredError                                                             // get unviewed errors
 	onMarkErrors       func(ids []string)                                                               // mark errors as viewed
 	onSessions         func() []AgentSession                                                            // get active agent sessions (deprecated)
@@ -512,6 +523,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeHeartbeat, handleHeartbeat)
 	router.Register(MsgTypeTelemetry, handleTelemetry)
 	router.Register(MsgTypeFriction, handleFriction)
+	router.Register(MsgTypeSessionFinalize, handleSessionFinalize)
 	router.Register(MsgTypeGetErrors, handleGetErrors)
 	router.Register(MsgTypeMarkErrors, handleMarkErrors)
 	router.Register(MsgTypeCheckout, handleCheckout)
@@ -685,6 +697,24 @@ func handleFriction(s *Server, msg Message, _ net.Conn) HandlerResult {
 		var payload FrictionPayload
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 			s.logger.Debug("failed to parse friction payload", "error", err)
+		} else {
+			handler(payload)
+		}
+	}
+
+	// fire-and-forget: no response
+	return HandlerResult{SkipDefault: true}
+}
+
+func handleSessionFinalize(s *Server, msg Message, _ net.Conn) HandlerResult {
+	s.mu.Lock()
+	handler := s.onSessionFinalize
+	s.mu.Unlock()
+
+	if handler != nil {
+		var payload SessionFinalizeIPCPayload
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			s.logger.Debug("failed to parse session_finalize payload", "error", err)
 		} else {
 			handler(payload)
 		}
@@ -958,6 +988,14 @@ func (s *Server) SetFrictionHandler(cb func(payload FrictionPayload)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onFriction = cb
+}
+
+// SetSessionFinalizeHandler sets the handler for session finalize messages.
+// Session finalize events are fire-and-forget - no response is sent.
+func (s *Server) SetSessionFinalizeHandler(fn func(payload SessionFinalizeIPCPayload)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onSessionFinalize = fn
 }
 
 // SetErrorsHandler sets the handler for retrieving unviewed errors.
@@ -1763,6 +1801,20 @@ func (c *Client) CodeStatus() (*CodeDBStats, error) {
 		return nil, fmt.Errorf("unmarshal code status: %w", err)
 	}
 	return &stats, nil
+}
+
+// SessionFinalize sends a fire-and-forget request to finalize a session.
+// The daemon will upload to LFS, commit, push, and generate summary artifacts.
+func (c *Client) SessionFinalize(payload SessionFinalizeIPCPayload) error {
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal session_finalize payload: %w", err)
+	}
+	// fire-and-forget: ignore response
+	return c.SendOneWay(Message{
+		Type:    MsgTypeSessionFinalize,
+		Payload: payloadBytes,
+	})
 }
 
 // TryConnectForCheckout attempts to connect for checkout operations.

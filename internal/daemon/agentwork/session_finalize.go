@@ -215,6 +215,11 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 // with near-zero conflict risk, and must run asynchronously (no CLI available).
 // If this architecture is rejected, the alternative is an IPC endpoint that
 // delegates writes back to the CLI.
+//
+// When triggered via async session upload (SAGEOX_ASYNC_SESSION_UPLOAD=1),
+// content files are committed as regular files (not LFS pointers). This is
+// acceptable for the initial rollout; LFS upload will be added to this handler
+// as a follow-up to avoid committing large blobs to git.
 func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult) error {
 	payload, err := extractPayload(item)
 	if err != nil {

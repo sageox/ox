@@ -13,6 +13,7 @@ import (
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
@@ -312,6 +313,9 @@ func isManualSessionAgent(agentType string) bool {
 // runAgentSessionStop stops recording and saves the session.
 // Usage: ox agent <id> session stop
 func runAgentSessionStop(inst *agentinstance.Instance) error {
+	stopStart := time.Now()
+	timing := make(map[string]int64)
+
 	// verify redaction signature before stopping - warn if tampered
 	// this is critical as secrets are about to be redacted and saved
 	warnIfRedactionSignatureInvalid()
@@ -391,7 +395,9 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// process session: read, redact secrets, extract events, save
 	var processResult *agentSessionResult
 	if state.SessionFile != "" {
+		processStart := time.Now()
 		processResult, err = processAgentSession(projectRoot, state)
+		timing["process_ms"] = time.Since(processStart).Milliseconds()
 		if err != nil {
 			// set marker so future ox agent prime knows doctor is needed
 			_ = doctor.SetNeedsDoctorAgent(projectRoot) // best effort
@@ -399,6 +405,11 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		}
 	} else {
 		slog.Warn("no session file — session data not uploaded", "agent_id", state.AgentID, "adapter", state.AdapterName)
+	}
+
+	// capture upload timing from processResult
+	if processResult != nil && processResult.UploadMs > 0 {
+		timing["upload_ms"] = processResult.UploadMs
 	}
 
 	// clean up the drop file after successful processing.
@@ -415,13 +426,16 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("failed to finalize recording stop: %w", err)
 	}
+	// finalize timing
+	timing["total_ms"] = time.Since(stopStart).Milliseconds()
+
 	// output format selection (priority: review > text > json default)
 	if cfg.Review {
 		// security audit mode: human summary first, then JSON
 		outputTextSummary(state, duration, processResult)
 		fmt.Println()
 		fmt.Println("--- Machine Output ---")
-		return outputSessionStopJSON(inst, state, duration, processResult)
+		return outputSessionStopJSON(inst, state, duration, processResult, timing)
 	}
 
 	if cfg.Text {
@@ -431,7 +445,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	}
 
 	// default: JSON output
-	return outputSessionStopJSON(inst, state, duration, processResult)
+	return outputSessionStopJSON(inst, state, duration, processResult, timing)
 }
 
 // recordSessionObservation writes a session summary observation to team memory.
@@ -524,13 +538,15 @@ func outputTextSummary(state *session.RecordingState, duration string, processRe
 }
 
 // outputSessionStopJSON renders JSON output for session stop.
-func outputSessionStopJSON(inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult) error {
+func outputSessionStopJSON(inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, timing map[string]int64) error {
 	output := sessionStopOutput{
 		Success:  true,
 		Type:     "session_stop",
 		AgentID:  inst.AgentID,
 		Duration: duration,
 		Guidance: sessionStopGuidance,
+		TotalMs:  timing["total_ms"],
+		Timing:   timing,
 	}
 	if state.Title != "" {
 		output.Title = state.Title
@@ -554,6 +570,10 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 		output.LedgerSessionDir = processResult.LedgerSessionDir
 		output.UploadWarning = processResult.UploadWarning
 		output.DataWarnings = processResult.DataWarnings
+		// async mode: summary_prompt is empty, update guidance
+		if processResult.SummaryPrompt == "" {
+			output.Guidance = "Session stopped and saved. Upload and summary generation happen automatically in the background."
+		}
 	} else {
 		output.UploadWarning = "no session file found — session data was not uploaded to ledger"
 		output.Guidance = "Session stopped but no conversation data was found. The session recording may be empty. Run 'ox doctor' to check for recoverable sessions."
@@ -593,6 +613,8 @@ type sessionStopOutput struct {
 	UploadWarning      string   `json:"upload_warning,omitempty"`       // set when ledger upload failed
 	DataWarnings       []string `json:"data_warnings,omitempty"`       // data quality warnings from validation
 	Guidance           string   `json:"guidance,omitempty"`             // behavioral guidance for the agent
+	TotalMs            int64            `json:"total_ms,omitempty"`    // wall clock for entire session stop
+	Timing             map[string]int64 `json:"timing,omitempty"`     // per-phase breakdown (ms)
 }
 
 // parseTitle extracts --title value from args
@@ -629,6 +651,7 @@ type agentSessionResult struct {
 	LedgerSessionDir   string   // full path to session dir in ledger (empty if upload failed)
 	UploadWarning      string   // non-empty when ledger upload failed (explains recovery)
 	DataWarnings       []string // data quality warnings from validation (reported to agent)
+	UploadMs           int64    // time spent on LFS upload + git push (ms)
 }
 
 // processAgentSession reads, redacts secrets, and saves the session.
@@ -975,14 +998,38 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// write meta.json to ledger, commit and push.
 	// This is best-effort -- session processing already succeeded.
 	// No spinner here -- bubbletea conflicts with Claude Code's own epoll on stdin.
+	asyncUpload := os.Getenv("SAGEOX_ASYNC_SESSION_UPLOAD") == "1"
+
 	if ledgerErr != nil {
 		// couldn't resolve ledger path - skip upload
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		fmt.Fprintf(os.Stderr, "warning: LFS upload skipped (no ledger): %v\n", ledgerErr)
 		result.LedgerSessionDir = "" // clear since upload didn't happen
 		result.UploadWarning = "Session saved locally but ledger upload skipped (no ledger). Run 'ox doctor' to retry."
+	} else if asyncUpload {
+		// async mode: copy files to ledger dir locally, signal daemon to upload+finalize
+		if copyErr := copySessionCacheToLedger(result, ledgerPath, sessionName); copyErr != nil {
+			slog.Warn("async copy to ledger failed", "error", copyErr)
+			_ = doctor.SetNeedsDoctorAgent(projectRoot)
+			result.UploadWarning = "Session saved locally but async copy failed. Run 'ox doctor' to retry."
+			result.LedgerSessionDir = ""
+		} else {
+			// signal daemon to finalize (fire-and-forget)
+			signalStart := time.Now()
+			signalErr := signalDaemonSessionFinalize(sessionName, ledgerPath, filepath.Dir(result.RawPath), projectRoot)
+			result.UploadMs = time.Since(signalStart).Milliseconds()
+			if signalErr != nil {
+				slog.Info("daemon signal failed, doctor will catch it", "error", signalErr)
+				_ = doctor.SetNeedsDoctorAgent(projectRoot)
+			}
+			// clear summary prompt — daemon handles summary generation
+			result.SummaryPrompt = ""
+			result.UploadWarning = ""
+		}
 	} else {
+		uploadStart := time.Now()
 		uploadErr := uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		result.UploadMs = time.Since(uploadStart).Milliseconds()
 		if uploadErr != nil {
 			if errors.Is(uploadErr, api.ErrReadOnly) {
 				fmt.Fprintln(os.Stderr, "\nUpload skipped — you have read-only access to this public repo.")
@@ -1147,6 +1194,65 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	}
 
 	return nil
+}
+
+// copySessionCacheToLedger copies raw.jsonl and secondary artifacts from the local
+// cache to the ledger session directory. This is a fast, local-only operation that
+// makes the session data available for the daemon to upload+finalize asynchronously.
+func copySessionCacheToLedger(result *agentSessionResult, ledgerPath, sessionName string) error {
+	sessionsDir := filepath.Join(ledgerPath, "sessions")
+	sessionDir := filepath.Join(sessionsDir, sessionName)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		return fmt.Errorf("create session dir: %w", err)
+	}
+
+	// raw.jsonl is critical — must succeed
+	if result.RawPath != "" {
+		data, err := os.ReadFile(result.RawPath)
+		if err != nil {
+			return fmt.Errorf("read raw.jsonl: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(sessionDir, ledgerFileRaw), data, 0644); err != nil {
+			return fmt.Errorf("copy raw.jsonl: %w", err)
+		}
+	}
+
+	// secondary artifacts — best-effort
+	secondaryFiles := map[string]string{
+		ledgerFileEvents:    result.EventsPath,
+		ledgerFileHTML:      result.HTMLPath,
+		ledgerFileSummaryMD: result.SummaryMDPath,
+		ledgerFileSessionMD: result.SessionMDPath,
+		ledgerFilePlan:      result.PlanPath,
+	}
+	for name, srcPath := range secondaryFiles {
+		if srcPath == "" {
+			continue
+		}
+		data, err := os.ReadFile(srcPath)
+		if err != nil {
+			slog.Debug("skip secondary artifact in async copy", "file", name, "error", err)
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(sessionDir, name), data, 0644); err != nil {
+			slog.Debug("skip secondary artifact in async copy", "file", name, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// signalDaemonSessionFinalize sends a fire-and-forget IPC message to the daemon
+// to upload and finalize a session asynchronously. Returns nil if daemon is
+// unreachable (doctor will catch it on next daemon start).
+func signalDaemonSessionFinalize(sessionName, ledgerPath, cachePath, projectRoot string) error {
+	client := daemon.NewClientWithTimeout(100 * time.Millisecond)
+	return client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
+		SessionName: sessionName,
+		LedgerPath:  ledgerPath,
+		CachePath:   cachePath,
+		ProjectRoot: projectRoot,
+	})
 }
 
 // Note: getAuthenticatedUsername is defined in session_helpers.go
