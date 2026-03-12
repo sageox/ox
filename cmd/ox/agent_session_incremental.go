@@ -119,13 +119,15 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 
 				if appendErr := appendRedactedEntries(rawPath, drainEntries); appendErr != nil {
 					slog.Debug("finalize: append entries failed", "error", appendErr)
+				} else {
+					// only advance offset/count after successful append;
+					// leaving them unchanged lets the next drain retry these entries
+					_ = session.UpdateRecordingStateForAgent(projectRoot, state.AgentID, func(s *session.RecordingState) {
+						s.SourceOffset = newOffset
+						s.EntryCount += len(entries)
+					})
 				}
 			}
-
-			_ = session.UpdateRecordingStateForAgent(projectRoot, state.AgentID, func(s *session.RecordingState) {
-				s.SourceOffset = newOffset
-				s.EntryCount += len(entries)
-			})
 		}
 	}
 

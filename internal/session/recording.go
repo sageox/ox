@@ -281,6 +281,9 @@ func MarkExplicitStop(projectRoot, agentID string) error {
 	if projectRoot == "" {
 		return fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
+	if agentID == "" {
+		return fmt.Errorf("agentID must not be empty")
+	}
 	marker := explicitStopMarker + "." + agentID
 	for _, dir := range sessionsSearchPaths(projectRoot) {
 		if err := os.MkdirAll(dir, 0755); err != nil {
@@ -300,6 +303,9 @@ func MarkExplicitStop(projectRoot, agentID string) error {
 // Also cleans up any legacy global marker (without agent suffix) as a migration path.
 func ConsumeExplicitStop(projectRoot, agentID string) bool {
 	if projectRoot == "" {
+		return false
+	}
+	if agentID == "" {
 		return false
 	}
 	found := false

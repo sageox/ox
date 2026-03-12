@@ -200,6 +200,8 @@ func (e *TestEnvironment) setupEnvironment() {
 	// Remove CLAUDECODE env var so spawned Claude Code sessions don't refuse
 	// to start with "cannot be launched inside another Claude Code session"
 	e.EnvVars = removeEnvVar(e.EnvVars, "CLAUDECODE")
+	// ensure subprocesses use XDG layout matching our fixture paths
+	e.EnvVars = removeEnvVar(e.EnvVars, "OX_XDG_DISABLE")
 
 	// Create required directories
 	for _, dir := range []string{"config", "data", "cache", "state"} {

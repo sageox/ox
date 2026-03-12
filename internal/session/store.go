@@ -245,9 +245,6 @@ func (w *SessionWriter) WriteEntry(entry Writable) error {
 	if err := w.encoder.Encode(record); err != nil {
 		return fmt.Errorf("write entry seq=%d file=%s: %w", w.count, w.filePath, err)
 	}
-	if err := w.file.Sync(); err != nil {
-		return fmt.Errorf("sync entry seq=%d file=%s: %w", w.count, w.filePath, err)
-	}
 
 	w.count++
 	return nil
@@ -269,9 +266,6 @@ func (w *SessionWriter) WriteRaw(data map[string]any) error {
 
 	if err := w.encoder.Encode(data); err != nil {
 		return fmt.Errorf("write raw entry seq=%d file=%s: %w", w.count, w.filePath, err)
-	}
-	if err := w.file.Sync(); err != nil {
-		return fmt.Errorf("sync raw entry seq=%d file=%s: %w", w.count, w.filePath, err)
 	}
 
 	w.count++

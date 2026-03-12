@@ -109,7 +109,7 @@ interface (6 methods). Register it in `init()` and add alias mappings. See
 
 ### 2. Create Integration Test Directory
 
-```
+```text
 tests/integration/agents/<agent-name>/
   prime_test.go               # Prime output understanding
   incremental_recording_test.go  # Session recording pipeline

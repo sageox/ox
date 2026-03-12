@@ -199,22 +199,15 @@ func handleAfterTool(ctx *HookContext) error {
 		agentID = ctx.Marker.AgentID
 	}
 
-	// Load recording state — try by agent ID first, fall back to any active recording
-	var state *session.RecordingState
-	var err error
-	if agentID != "" {
-		state, err = session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
+	// Load recording state for this specific agent only — never fall back to repo-wide
+	// lookup, which could return a different agent's state in multi-agent repos
+	if agentID == "" {
+		slog.Debug("hook: afterTool skipped, no agent ID available")
+		return nil
 	}
-	if state == nil {
-		// fallback: marker lookup failed or agent ID not in marker — find any active recording
-		state, err = session.LoadRecordingState(ctx.ProjectRoot)
-		if state != nil {
-			agentID = state.AgentID
-			slog.Debug("hook: afterTool using fallback recording state", "agent_id", agentID)
-		}
-	}
+	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil {
-		return nil // not recording, silent noop
+		return nil // not recording for this agent, silent noop
 	}
 
 	adapter, adapterErr := adapters.GetAdapter(state.AdapterName)

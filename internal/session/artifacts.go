@@ -68,19 +68,20 @@ func WriteSessionArtifacts(sessionDir string, stored *StoredSession, summaryResp
 	}
 
 	// --- session.html ---
-	if htmlGen != nil {
-		htmlPath := filepath.Join(sessionDir, "session.html")
-		var err error
-		if summaryResp != nil {
-			err = htmlGen.GenerateToFileWithSummary(stored, summaryResp, htmlPath)
-		} else {
-			err = htmlGen.GenerateToFile(stored, htmlPath)
-		}
-		if err != nil {
+	if htmlGen == nil {
+		return nil, fmt.Errorf("generate session.html: html generator is nil")
+	}
+	htmlPath := filepath.Join(sessionDir, "session.html")
+	if summaryResp != nil {
+		if err := htmlGen.GenerateToFileWithSummary(stored, summaryResp, htmlPath); err != nil {
 			return nil, fmt.Errorf("generate session.html: %w", err)
 		}
-		paths.HTML = htmlPath
+	} else {
+		if err := htmlGen.GenerateToFile(stored, htmlPath); err != nil {
+			return nil, fmt.Errorf("generate session.html: %w", err)
+		}
 	}
+	paths.HTML = htmlPath
 
 	// --- session.md ---
 	sessionMDPath := filepath.Join(sessionDir, "session.md")

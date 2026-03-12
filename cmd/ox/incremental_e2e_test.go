@@ -51,7 +51,7 @@ func TestIncrementalE2E_SingleAgent(t *testing.T) {
 	sourceFile := createClaudeSourceFile(t, env)
 
 	// write session marker (simulates what ox agent prime does)
-	writeE2ESessionMarker(t, env.home, agentID, claudeSessionID)
+	writeE2ESessionMarker(t, env, agentID, claudeSessionID)
 
 	// create agent instance (simulates what ox agent prime does)
 	createE2EAgentInstance(t, env.workspace, agentID)
@@ -129,8 +129,8 @@ func TestIncrementalE2E_MultiAgent(t *testing.T) {
 	sourceA := createClaudeSourceFile(t, env)
 	sourceB := createClaudeSourceFileNamed(t, env, "agent-b-session.jsonl")
 
-	writeE2ESessionMarker(t, env.home, agentA, sessionA)
-	writeE2ESessionMarker(t, env.home, agentB, sessionB)
+	writeE2ESessionMarker(t, env, agentA, sessionA)
+	writeE2ESessionMarker(t, env, agentB, sessionB)
 
 	createE2EAgentInstance(t, env.workspace, agentA)
 	createE2EAgentInstance(t, env.workspace, agentB)
@@ -170,6 +170,27 @@ func TestIncrementalE2E_MultiAgent(t *testing.T) {
 
 	// stop agent B
 	runOx(t, oxBin, env, agentB, "session", "stop")
+
+	// verify per-agent isolation: each agent's raw.jsonl should only contain its own entries
+	allRaws := findAllRawJSONL(t, env)
+	require.GreaterOrEqual(t, len(allRaws), 2, "should have raw.jsonl for both agents")
+
+	for _, rawPath := range allRaws {
+		data, err := os.ReadFile(rawPath)
+		require.NoError(t, err)
+		content := string(data)
+		lines := e2eCountLines(t, rawPath)
+		assert.GreaterOrEqual(t, lines, 2, "raw.jsonl at %s should have header + entries", rawPath)
+
+		// check cross-contamination: if path contains agent A's ID, it shouldn't have agent B's content
+		if strings.Contains(rawPath, agentA) {
+			assert.NotContains(t, content, "Agent B working", "agent A's raw.jsonl should not contain agent B entries")
+			assert.NotContains(t, content, "Agent B still working", "agent A's raw.jsonl should not contain agent B entries")
+		}
+		if strings.Contains(rawPath, agentB) {
+			assert.NotContains(t, content, "Agent A working", "agent B's raw.jsonl should not contain agent A entries")
+		}
+	}
 }
 
 // TestIncrementalE2E_CtrlC_AntiEntropy simulates a user pressing Ctrl-C during
@@ -197,7 +218,7 @@ func TestIncrementalE2E_CtrlC_AntiEntropy(t *testing.T) {
 	sourceFile := createClaudeSourceFile(t, env)
 
 	// write session marker and agent instance
-	writeE2ESessionMarker(t, env.home, agentID, claudeSessionID)
+	writeE2ESessionMarker(t, env, agentID, claudeSessionID)
 	createE2EAgentInstance(t, env.workspace, agentID)
 
 	// --- session start ---
@@ -343,6 +364,7 @@ type e2eEnv struct {
 	workspace string // git repo with .sageox/
 	home      string // fake HOME for isolation
 	cacheDir  string // XDG_CACHE_HOME
+	username  string // synthetic username for test isolation
 }
 
 func buildOxBinary(t *testing.T) string {
@@ -419,10 +441,14 @@ func setupE2EWorkspace(t *testing.T, oxBin string) e2eEnv {
 		time.Now().Add(24*time.Hour).Format(time.RFC3339))
 	require.NoError(t, os.WriteFile(filepath.Join(authDir, "auth.json"), []byte(authJSON), 0644))
 
+	// synthetic username prevents colliding with developer's real session markers
+	username := "oxtest-" + strings.ReplaceAll(t.Name(), "/", "-")
+
 	return e2eEnv{
 		workspace: workspace,
 		home:      home,
 		cacheDir:  cacheDir,
+		username:  username,
 	}
 }
 
@@ -434,7 +460,7 @@ func oxEnv(env e2eEnv) []string {
 		"OX_XDG_ENABLE=1",
 		"PATH=" + os.Getenv("PATH"),
 		"AGENT_ENV=claude-code",
-		"USER=" + os.Getenv("USER"),
+		"USER=" + env.username,
 		// prevent real daemon IPC
 		"OX_NO_DAEMON=1",
 		// prevent real network calls
@@ -449,9 +475,7 @@ func runOx(t *testing.T, oxBin string, env e2eEnv, agentID string, args ...strin
 	cmd.Dir = env.workspace
 	cmd.Env = oxEnv(env)
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Logf("ox agent %s %v returned error: %v\noutput: %s", agentID, args, err, string(out))
-	}
+	require.NoError(t, err, "ox agent %s %v failed:\n%s", agentID, args, string(out))
 	return string(out)
 }
 
@@ -466,9 +490,7 @@ func runOxHook(t *testing.T, oxBin string, env e2eEnv, agentID, event, sessionID
 	cmd.Stdin = strings.NewReader(hookInput)
 
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Logf("hook %s returned error: %v\noutput: %s", event, err, string(out))
-	}
+	require.NoError(t, err, "hook %s failed:\n%s", event, string(out))
 	return string(out)
 }
 
@@ -500,15 +522,12 @@ func createClaudeSourceFileNamed(t *testing.T, env e2eEnv, filename string) stri
 	return sourceFile
 }
 
-func writeE2ESessionMarker(t *testing.T, _ /* home */, agentID, sessionID string) {
+func writeE2ESessionMarker(t *testing.T, env e2eEnv, agentID, sessionID string) {
 	t.Helper()
 
 	// session markers live in /tmp/<user>/sageox/sessions/ (not under HOME)
-	username := os.Getenv("USER")
-	if username == "" {
-		username = "sageox"
-	}
-	markerDir := filepath.Join("/tmp", username, "sageox", "sessions")
+	// use synthetic username to avoid colliding with developer's real sessions
+	markerDir := filepath.Join("/tmp", env.username, "sageox", "sessions")
 	require.NoError(t, os.MkdirAll(markerDir, 0700))
 
 	marker := map[string]any{
@@ -522,7 +541,10 @@ func writeE2ESessionMarker(t *testing.T, _ /* home */, agentID, sessionID string
 	markerFile := filepath.Join(markerDir, sessionID+".json")
 	require.NoError(t, os.WriteFile(markerFile, data, 0644))
 
-	t.Cleanup(func() { os.Remove(markerFile) })
+	t.Cleanup(func() {
+		os.Remove(markerFile)
+		os.RemoveAll(filepath.Join("/tmp", env.username))
+	})
 }
 
 func writeClaudeEntry(t *testing.T, sourceFile, jsonLine string) {
@@ -572,6 +594,32 @@ func findRawJSONL(t *testing.T, env e2eEnv) string {
 		})
 	}
 
+	return found
+}
+
+func findAllRawJSONL(t *testing.T, env e2eEnv) []string {
+	t.Helper()
+	var found []string
+	cacheRoot := filepath.Join(env.cacheDir, "sageox")
+	filepath.Walk(cacheRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.Name() == "raw.jsonl" {
+			found = append(found, path)
+		}
+		return nil
+	})
+	// also check workspace
+	filepath.Walk(env.workspace, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.Name() == "raw.jsonl" {
+			found = append(found, path)
+		}
+		return nil
+	})
 	return found
 }
 

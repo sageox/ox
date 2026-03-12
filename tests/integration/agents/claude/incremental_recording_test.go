@@ -387,11 +387,12 @@ func TestIncrementalRecording_NoToolUse(t *testing.T) {
 	stopSession(t, env, agentID)
 
 	rawPath := findRawJSONL(t, env)
-	if rawPath != "" {
-		entries := readRawJSONL(t, rawPath)
-		t.Logf("raw.jsonl has %d entries after stop (batch drain)", len(entries))
-	} else {
-		t.Log("no raw.jsonl found (acceptable if hooks didn't fire and stop drain is not yet implemented)")
+	if rawPath == "" {
+		t.Fatal("raw.jsonl must exist after stop — stop-path drain should produce output")
+	}
+	entries := readRawJSONL(t, rawPath)
+	if len(entries) == 0 {
+		t.Fatal("raw.jsonl must contain entries after stop-path drain")
 	}
 }
 
@@ -948,21 +949,37 @@ func TestRecordingFidelity_LLMEval(t *testing.T) {
 	}
 	t.Logf("claude source JSONL: %s", claudeSourcePath)
 
-	// Find our raw.jsonl
+	// Find our raw.jsonl — select the one matching the active agent
 	rawPaths := findAllRawJSONL(t, env)
 	if len(rawPaths) == 0 {
 		t.Fatal("no raw.jsonl found — nothing to compare")
 	}
 
+	// pick the raw.jsonl belonging to this agent's session
+	activeRaw := rawPaths[0] // fallback
+	for _, rp := range rawPaths {
+		entries := readRawJSONL(t, rp)
+		for _, e := range entries {
+			// check both new ("metadata") and old ("_meta") header schemas
+			for _, metaKey := range []string{"metadata", "_meta"} {
+				if meta, ok := e[metaKey].(map[string]interface{}); ok {
+					if aid, ok := meta["agent_id"].(string); ok && aid == agentID {
+						activeRaw = rp
+					}
+				}
+			}
+		}
+	}
+
 	// Extract the recording time window from raw.jsonl header or recording state.
 	// The LLM judge should ONLY evaluate entries between session start and stop —
 	// anything outside that window is not our responsibility to capture.
-	startTS, stopTS := extractRecordingWindow(t, env, rawPaths[0])
+	startTS, stopTS := extractRecordingWindow(t, env, activeRaw)
 	t.Logf("recording window: %s → %s", startTS, stopTS)
 
 	// Read Claude's source and filter to recording window, then truncate
 	claudeSource := readAndFilterToWindow(t, claudeSourcePath, startTS, stopTS, 15000)
-	oxRaw := readAndTruncate(t, rawPaths[0], 15000)
+	oxRaw := readAndTruncate(t, activeRaw, 15000)
 
 	t.Logf("claude source (windowed): %d chars, ox raw: %d chars", len(claudeSource), len(oxRaw))
 
@@ -1087,36 +1104,38 @@ func extractRecordingWindow(t *testing.T, env *common.TestEnvironment, rawPath s
 
 	entries := readRawJSONL(t, rawPath)
 
-	// Find start time from header entry or first non-header entry
+	// Find start time from header entry or first non-header entry.
+	// Supports both old schema (_meta.started_at, ts) and new schema (metadata.created_at, timestamp).
 	for _, e := range entries {
 		eType, _ := e["type"].(string)
 		if eType == "header" {
-			if meta, ok := e["_meta"].(map[string]interface{}); ok {
-				if ts, ok := meta["started_at"].(string); ok {
-					if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
-						startTS = parsed
+			// try both "metadata" (new) and "_meta" (old) header schemas
+			for _, metaKey := range []string{"metadata", "_meta"} {
+				if meta, ok := e[metaKey].(map[string]interface{}); ok {
+					for _, tsKey := range []string{"created_at", "started_at"} {
+						if ts, ok := meta[tsKey].(string); ok {
+							if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+								startTS = parsed
+							}
+						}
 					}
 				}
 			}
 			continue
 		}
-		// First non-header entry as fallback start
+		// First non-header entry as fallback start — use extractTimestamp which handles both schemas
 		if startTS.IsZero() {
-			if ts, ok := e["ts"].(string); ok {
-				if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
-					startTS = parsed
-				}
+			if parsed := extractTimestamp(e); !parsed.IsZero() {
+				startTS = parsed
 			}
 		}
 	}
 
 	// Stop time: use last entry timestamp as upper bound
 	for i := len(entries) - 1; i >= 0; i-- {
-		if ts, ok := entries[i]["ts"].(string); ok {
-			if parsed, err := time.Parse(time.RFC3339Nano, ts); err == nil {
-				stopTS = parsed
-				break
-			}
+		if parsed := extractTimestamp(entries[i]); !parsed.IsZero() {
+			stopTS = parsed
+			break
 		}
 	}
 

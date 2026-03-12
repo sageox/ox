@@ -41,7 +41,7 @@ make smoke-test
 
 This runs end-to-end tests against test.sageox.ai: auth, init, doctor, status, re-init, agent prime, session list, and clone-without-ox. If smoke tests fail, investigate before proceeding — these verify ox works in a real environment.
 
-**Tip:** Run lint, test-all, test-integration, and test-slow in parallel background tasks to save time.
+**Tip:** Run lint, test-all, and test-integration in parallel background tasks to save time.
 
 ### Step 2: Create Release Branch
 
