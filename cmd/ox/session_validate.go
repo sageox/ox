@@ -167,6 +167,10 @@ func validateRawJSONLFile(path string) *sessionValidation {
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		v.Errors = append(v.Errors, fmt.Sprintf("error reading raw.jsonl: %s", err))
+	}
+
 	if totalEntries == 0 {
 		v.Errors = append(v.Errors, "raw.jsonl has no entries")
 	}
