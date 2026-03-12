@@ -61,6 +61,18 @@ Example:
 			return fmt.Errorf("no content files found in session %s\nExpected at least one of: raw.jsonl, events.jsonl, summary.md, session.md, session.html", sessionName)
 		}
 
+		// validate raw.jsonl data quality before uploading
+		rawPath := filepath.Join(sessionPath, ledgerFileRaw)
+		if _, err := os.Stat(rawPath); err == nil {
+			if validation := validateRawJSONLFile(rawPath); len(validation.Errors) > 0 {
+				fmt.Fprintf(os.Stderr, "warning: session data has issues:\n")
+				for _, e := range validation.Errors {
+					fmt.Fprintf(os.Stderr, "  - %s\n", e)
+				}
+				fmt.Fprintln(os.Stderr, "Uploading anyway — run 'ox session lint' for details.")
+			}
+		}
+
 		// build or create meta.json first (before LFS upload) to preserve metadata even if LFS fails
 		uploadEndpoint := endpoint.GetForProject(projectRoot)
 		meta, err := buildSessionMeta(sessionPath, sessionName, nil, uploadEndpoint)

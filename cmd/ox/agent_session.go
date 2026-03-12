@@ -548,6 +548,7 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 		output.EventsAfterFilter = processResult.EventsAfterFilter
 		output.LedgerSessionDir = processResult.LedgerSessionDir
 		output.UploadWarning = processResult.UploadWarning
+		output.DataWarnings = processResult.DataWarnings
 	} else {
 		output.UploadWarning = "no session file found — session data was not uploaded to ledger"
 		output.Guidance = "Session stopped but no conversation data was found. The session recording may be empty. Run 'ox doctor' to check for recoverable sessions."
@@ -583,9 +584,10 @@ type sessionStopOutput struct {
 	FilterMode         string `json:"filter_mode,omitempty"`          // "infra" or "all"
 	EventsBeforeFilter int    `json:"events_before_filter,omitempty"` // events before filtering
 	EventsAfterFilter  int    `json:"events_after_filter,omitempty"`  // events after filtering
-	LedgerSessionDir   string `json:"ledger_session_dir,omitempty"`   // path to session dir in ledger
-	UploadWarning      string `json:"upload_warning,omitempty"`       // set when ledger upload failed
-	Guidance           string `json:"guidance,omitempty"`             // behavioral guidance for the agent
+	LedgerSessionDir   string   `json:"ledger_session_dir,omitempty"`   // path to session dir in ledger
+	UploadWarning      string   `json:"upload_warning,omitempty"`       // set when ledger upload failed
+	DataWarnings       []string `json:"data_warnings,omitempty"`       // data quality warnings from validation
+	Guidance           string   `json:"guidance,omitempty"`             // behavioral guidance for the agent
 }
 
 // parseTitle extracts --title value from args
@@ -619,8 +621,9 @@ type agentSessionResult struct {
 	EventsAfterFilter  int    // event count after filtering
 	PlanPath           string // path to plan.md (empty if no plan captured)
 	SessionName        string // ledger session folder name (e.g. 2026-02-06T14-32-ryan-Ox7f3a)
-	LedgerSessionDir   string // full path to session dir in ledger (empty if upload failed)
-	UploadWarning      string // non-empty when ledger upload failed (explains recovery)
+	LedgerSessionDir   string   // full path to session dir in ledger (empty if upload failed)
+	UploadWarning      string   // non-empty when ledger upload failed (explains recovery)
+	DataWarnings       []string // data quality warnings from validation (reported to agent)
 }
 
 // processAgentSession reads, redacts secrets, and saves the session.
@@ -735,6 +738,18 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 					}
 				}
 			}
+		}
+	}
+
+	// validate processed entries for data quality issues
+	if validation := validateEntries(entries); validation.hasIssues() {
+		result.DataWarnings = append(result.DataWarnings, validation.Errors...)
+		result.DataWarnings = append(result.DataWarnings, validation.Warnings...)
+		for _, e := range validation.Errors {
+			slog.Warn("session data error", "issue", e, "session", state.AgentID)
+		}
+		for _, w := range validation.Warnings {
+			slog.Info("session data warning", "issue", w, "session", state.AgentID)
 		}
 	}
 
@@ -909,6 +924,12 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 				htmlPath := filepath.Join(filepath.Dir(result.RawPath), ledgerFileHTML)
 				if genErr := htmlGen.GenerateToFileWithSummary(rawSession, summaryResp, htmlPath); genErr == nil {
 					result.HTMLPath = htmlPath
+
+					// validate HTML consistency with raw.jsonl
+					if htmlVal := validateHTMLConsistency(htmlPath, result.RawPath); htmlVal.hasIssues() {
+						result.DataWarnings = append(result.DataWarnings, htmlVal.Warnings...)
+						result.DataWarnings = append(result.DataWarnings, htmlVal.Errors...)
+					}
 				} else {
 					htmlGenFailed = true
 				}

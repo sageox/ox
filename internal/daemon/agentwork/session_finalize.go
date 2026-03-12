@@ -179,6 +179,14 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 		return RunRequest{}, fmt.Errorf("read session %s: %w", payload.RawPath, err)
 	}
 
+	// validate session data quality
+	if warnings := validateStoredEntries(stored.Entries, h.logger); len(warnings) > 0 {
+		h.logger.Warn("session data quality issues detected",
+			"session", filepath.Base(payload.SessionDir),
+			"issues", len(warnings),
+		)
+	}
+
 	// cache for ProcessResult to avoid re-reading
 	payload.storedSession = stored
 
@@ -440,4 +448,51 @@ func parseSummaryJSON(output string) (*session.SummarizeResponse, error) {
 	}
 
 	return nil, fmt.Errorf("no valid summary JSON found in LLM output")
+}
+
+// invalidLeakedTypes are internal Claude Code types that should never appear
+// in processed session data. Their presence indicates an adapter bug.
+var invalidLeakedTypes = map[string]bool{
+	"queue-operation":       true,
+	"file-history-snapshot": true,
+	"progress":              true,
+	"summary":               true,
+	"last-prompt":           true,
+}
+
+// validSessionEntryTypes are types the web viewer can display.
+var validSessionEntryTypes = map[string]bool{
+	"user":      true,
+	"assistant": true,
+	"system":    true,
+	"tool":      true,
+}
+
+// validateStoredEntries checks stored session entries for data quality issues.
+// Returns a list of warning strings. Logs each issue at appropriate level.
+func validateStoredEntries(entries []map[string]any, logger *slog.Logger) []string {
+	var warnings []string
+	counts := make(map[string]int)
+
+	for _, entry := range entries {
+		entryType, _ := entry["type"].(string)
+		counts[entryType]++
+
+		if invalidLeakedTypes[entryType] {
+			msg := fmt.Sprintf("internal type %q leaked into raw.jsonl (adapter bug)", entryType)
+			warnings = append(warnings, msg)
+			logger.Warn(msg, "type", entryType)
+			if len(warnings) > 20 {
+				break
+			}
+		}
+	}
+
+	if counts["user"] == 0 && len(entries) > 5 {
+		msg := "no user messages in session — may be missing human prompts"
+		warnings = append(warnings, msg)
+		logger.Info(msg)
+	}
+
+	return warnings
 }
