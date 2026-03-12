@@ -109,6 +109,21 @@ func (c *SessionsConfig) GetMode() string {
 	return "none"
 }
 
+// NotificationsConfig controls team context change notifications for AI coworkers.
+type NotificationsConfig struct {
+	// Enabled controls whether agents receive team context change notifications.
+	// Default: false (off)
+	Enabled *bool `yaml:"enabled,omitempty"`
+}
+
+// AreNotificationsEnabled returns true if notifications are enabled (default: false).
+func (c *NotificationsConfig) AreNotificationsEnabled() bool {
+	if c == nil || c.Enabled == nil {
+		return false
+	}
+	return *c.Enabled
+}
+
 // AllowedAgentTypes is the set of valid AgentWorkerConfig.AgentType values.
 var AllowedAgentTypes = []string{"claude"}
 
@@ -241,6 +256,7 @@ type UserConfig struct {
 	ContextGit        *ContextGitConfig  `yaml:"context_git,omitempty"`
 	Sessions          *SessionsConfig    `yaml:"sessions,omitempty"`
 	AgentWorker       *AgentWorkerConfig `yaml:"agent_worker,omitempty"`
+	Notifications     *NotificationsConfig `yaml:"notifications,omitempty"`
 	ViewFormat        string             `yaml:"view_format,omitempty"` // "html", "text", "json" (default: "html")
 }
 

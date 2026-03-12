@@ -217,7 +217,10 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	}
 
 	// check for team context change notifications (non-blocking, ~50ms max)
-	emitTeamContextNotifications(agentID)
+	// controlled by user config: `ox config set notifications on` (default: off)
+	if userCfg, _ := config.LoadUserConfig(); userCfg != nil && userCfg.Notifications.AreNotificationsEnabled() {
+		emitTeamContextNotifications(agentID)
+	}
 
 	subcommand := args[0]
 
