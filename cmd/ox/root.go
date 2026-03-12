@@ -130,6 +130,7 @@ func init() {
 	rootCmd.AddGroup(&cobra.Group{ID: "diagnostics", Title: "Diagnostics:"})
 	rootCmd.AddGroup(&cobra.Group{ID: "agent-interface", Title: "Agent Integration:"})
 	agentCmd.GroupID = "agent-interface"
+	coworkerCmd.GroupID = "agent-interface"
 
 	// software development commands
 	initCmd.GroupID = "dev"

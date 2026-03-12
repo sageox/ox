@@ -993,6 +993,22 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 		})
 	}
 
+	// expert coworker agents — only when team has coworkers defined
+	if teamCtx != nil && len(teamCtx.Coworkers) > 0 {
+		names := make([]string, 0, len(teamCtx.Coworkers))
+		for _, cw := range teamCtx.Coworkers {
+			names = append(names, cw.Name)
+		}
+		cmds = append(cmds, intentCommand{
+			Intent:  fmt.Sprintf("expert coworker agents for tasks, reviews, and specialized work: %s", strings.Join(names, ", ")),
+			Command: "ox coworker load <name>",
+		})
+		cmds = append(cmds, intentCommand{
+			Intent:  "list all expert coworker agents and their specialties",
+			Command: "ox coworker list",
+		})
+	}
+
 	// semantic search — when primed context isn't enough, query for depth
 	if teamCtx != nil || (ledger != nil && ledger.Exists) {
 		teamLabel := "team"
@@ -1780,18 +1796,15 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 		}
 
 		// build coworker hint when agents are available
+		// keep minimal — structured data is in Coworkers[], guidance has the commands
 		if len(customizations.Agents) > 0 {
-			var sb strings.Builder
-			sb.WriteString("Expert subagents are available from your team. Load with: ox coworker load <name>\n\n")
-			sb.WriteString("| Name | Description |\n|------|-------------|\n")
+			names := make([]string, 0, len(customizations.Agents))
 			for _, a := range customizations.Agents {
-				desc := a.Description
-				if desc == "" {
-					desc = "(no description)"
-				}
-				sb.WriteString(fmt.Sprintf("| %s | %s |\n", a.Name, desc))
+				names = append(names, a.Name)
 			}
-			info.CoworkerHint = sb.String()
+			info.CoworkerHint = fmt.Sprintf(
+				"%d expert coworker agents available: %s. Load: 'ox coworker load <name>'",
+				len(names), strings.Join(names, ", "))
 		}
 	}
 

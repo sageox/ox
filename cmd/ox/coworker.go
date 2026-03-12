@@ -52,18 +52,19 @@ type coworkerLoadOutput struct {
 
 var coworkerCmd = &cobra.Command{
 	Use:   "coworker",
-	Short: "Manage team coworkers (AI subagents)",
-	Long: `Manage team coworkers - expert AI subagents defined in your team context.
+	Short: "Manage expert agents and subagents for your team",
+	Long: `Manage expert coworker agents defined in your team context.
 
-Coworkers are specialized agents with domain expertise that can be loaded
-into your context when needed. They are defined in your team's coworkers/
-directory and can be listed and loaded on demand.
+Coworkers are expert agents and subagents with deep domain expertise
+that can be loaded into context for handling tasks, code reviews, and
+specialized work. They carry project-specific knowledge that generic
+agents lack.
 
 Commands:
-  list       List available coworkers
-  load       Load a coworker's prompt into context
-  add        Add a coworker to the team
-  remove     Remove a coworker from the team`,
+  list       List available expert agents and their specialties
+  load       Load an expert agent's prompt into context
+  add        Add an expert agent to the team
+  remove     Remove an expert agent from the team`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cmd.Help()
 	},
