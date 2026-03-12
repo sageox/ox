@@ -193,9 +193,12 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 
 // ProcessResult writes the LLM output and generates deterministic artifacts.
 //
-// daemon_writes: intentional exception to CLI-writes-only rule.
-// Session finalization writes to unique session paths with low conflict risk.
-// See CLAUDE.md "Daemon Write Exception" section.
+// NOTE: this method performs git add/commit/push from the daemon, which is an
+// intentional exception to the Daemon-CLI Git Operations Split documented in
+// CLAUDE.md. Session finalization writes to unique, timestamped session paths
+// with near-zero conflict risk, and must run asynchronously (no CLI available).
+// If this architecture is rejected, the alternative is an IPC endpoint that
+// delegates writes back to the CLI.
 func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult) error {
 	payload, err := extractPayload(item)
 	if err != nil {

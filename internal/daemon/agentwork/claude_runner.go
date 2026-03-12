@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"sync"
 	"time"
 )
 
@@ -33,12 +32,10 @@ type claudeUsage struct {
 
 // ClaudeRunner implements Runner using `claude --jsonl`.
 // It spawns Claude Code CLI in non-interactive mode.
+// ClaudeRunner is safe for concurrent use — each Run() call is independent.
 type ClaudeRunner struct {
 	binaryPath string
 	logger     *slog.Logger
-
-	mu  sync.Mutex
-	cmd *exec.Cmd // current running process, nil when idle
 }
 
 // NewClaudeRunner creates a ClaudeRunner by resolving the `claude` binary.
@@ -62,16 +59,6 @@ func (r *ClaudeRunner) Available() bool {
 	}
 	_, err := os.Stat(r.binaryPath)
 	return err == nil
-}
-
-// GetPID returns the PID of the currently running claude process, or 0 if idle.
-func (r *ClaudeRunner) GetPID() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.cmd != nil && r.cmd.Process != nil {
-		return r.cmd.Process.Pid
-	}
-	return 0
 }
 
 // parseResult holds the output of the async JSONL parser.
@@ -120,16 +107,6 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 		return nil, fmt.Errorf("start claude: %w", err)
 	}
 
-	r.mu.Lock()
-	r.cmd = cmd
-	r.mu.Unlock()
-
-	defer func() {
-		r.mu.Lock()
-		r.cmd = nil
-		r.mu.Unlock()
-	}()
-
 	r.logger.Debug("claude process started", "pid", cmd.Process.Pid)
 
 	// read stderr in background
@@ -160,8 +137,11 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	}
 
 	// context cancellation or timeout
+	// note: exec.CommandContext already kills the process on ctx cancellation,
+	// so by the time Wait() returns the process is already reaped and the PID
+	// is released. Calling killProcessGroup here would risk killing an unrelated
+	// process that recycled the PID.
 	if ctx.Err() != nil {
-		killProcessGroup(cmd)
 		return nil, fmt.Errorf("claude timed out after %s: %w", timeout, ctx.Err())
 	}
 

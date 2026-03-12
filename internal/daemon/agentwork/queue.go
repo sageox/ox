@@ -165,6 +165,37 @@ func (q *WorkQueue) Complete(dedupKey string) {
 	delete(q.inProgress, dedupKey)
 }
 
+// Requeue atomically moves a dedup key from in-progress back to queued.
+// This prevents a race where a concurrent detectAndEnqueue could see the key
+// absent from both sets and enqueue a duplicate.
+func (q *WorkQueue) Requeue(item *WorkItem) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.items.Len() >= maxQueueDepth {
+		q.logger.Warn("requeue skipped: queue full", "depth", q.items.Len(), "max", maxQueueDepth, "dedup_key", item.DedupKey)
+		delete(q.inProgress, item.DedupKey)
+		return false
+	}
+
+	// atomically: remove from inProgress, add to queued + heap
+	delete(q.inProgress, item.DedupKey)
+
+	if item.ID == "" {
+		item.ID = newItemID()
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = time.Now()
+	}
+
+	heap.Push(&q.items, item)
+	if item.DedupKey != "" {
+		q.queued[item.DedupKey] = struct{}{}
+	}
+	q.logger.Debug("requeued work item", "id", item.ID, "type", item.Type, "priority", item.Priority, "dedup_key", item.DedupKey, "attempts", item.Attempts)
+	return true
+}
+
 // InProgress reports whether the given dedup key is currently being processed.
 func (q *WorkQueue) InProgress(dedupKey string) bool {
 	q.mu.Lock()

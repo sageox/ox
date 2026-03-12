@@ -48,11 +48,6 @@ func TestClaudeRunner_Available_BinaryRemoved(t *testing.T) {
 	assert.False(t, r.Available())
 }
 
-func TestClaudeRunner_GetPID_Idle(t *testing.T) {
-	r := &ClaudeRunner{logger: slog.Default()}
-	assert.Equal(t, 0, r.GetPID())
-}
-
 func TestParseClaudeOutput_Success(t *testing.T) {
 	jsonl := strings.Join([]string{
 		`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hello"}]}}`,

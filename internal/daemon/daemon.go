@@ -329,6 +329,7 @@ func (d *Daemon) Start() error {
 			return awCfg
 		}
 		d.agentWorker = agentwork.NewManager(runner, d.logger, configLoader, agentWorkSignal, d.config.LedgerPath)
+		d.agentWorker.RegisterHandler(agentwork.NewSessionFinalizeHandler(d.logger))
 		d.agentWorker.SetOnComplete(func(result agentwork.WorkResult) {
 			status := "success"
 			if !result.Success {

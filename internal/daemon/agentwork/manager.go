@@ -389,8 +389,7 @@ func (m *Manager) executeItem(ctx context.Context, item *WorkItem) {
 				"max_attempts", maxRetries,
 				"error", runErr,
 			)
-			m.queue.Complete(item.DedupKey)
-			m.queue.Enqueue(item)
+			m.queue.Requeue(item)
 		} else {
 			m.logger.Error("agent run failed after max retries",
 				"type", item.Type,
