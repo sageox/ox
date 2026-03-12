@@ -195,6 +195,7 @@ func TestCheckSlugConstants_Unique(t *testing.T) {
 		CheckSlugTeamRegistration,
 		CheckSlugLegacyTeamCtx,
 		CheckSlugOrphanedTeamDirs,
+		CheckSlugSessionOrphaned,
 	}
 
 	seen := make(map[string]bool)

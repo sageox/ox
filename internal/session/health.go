@@ -46,6 +46,18 @@ type HealthStatus struct {
 	// StaleRecordingAge is how long the stale recording has been running
 	StaleRecordingAge time.Duration
 
+	// AllRecordings contains all active recording states found
+	AllRecordings []*RecordingState
+
+	// StaleRecordings contains recordings older than StaleRecordingThreshold
+	StaleRecordings []*RecordingState
+
+	// EmptyStaleCount is the number of stale recordings with no raw.jsonl (empty stubs)
+	EmptyStaleCount int
+
+	// ContentStaleCount is the number of stale recordings that have raw.jsonl content
+	ContentStaleCount int
+
 	// IsStopIncomplete indicates the recording was stopped but the session file was empty
 	IsStopIncomplete bool
 
@@ -203,27 +215,44 @@ func checkRecordingState(status *HealthStatus, projectRoot string) {
 		return
 	}
 
-	state, err := LoadRecordingState(projectRoot)
+	states, err := LoadAllRecordingStates(projectRoot)
 	if err != nil {
 		status.Errors = append(status.Errors, fmt.Sprintf("read recording state project=%s: %v", projectRoot, err))
 		return
 	}
 
-	if state != nil {
-		status.IsRecordingActive = true
-		status.Recording = state
+	if len(states) == 0 {
+		return
+	}
 
-		// check if stop was attempted but session file was empty
-		if state.StopIncomplete {
+	status.IsRecordingActive = true
+	status.AllRecordings = states
+	status.Recording = states[0] // backward compat: first match
+
+	for _, state := range states {
+		age := time.Since(state.StartedAt)
+
+		// check for stop-incomplete (first match only, backward compat)
+		if state.StopIncomplete && !status.IsStopIncomplete {
 			status.IsStopIncomplete = true
 			status.StopIncompleteAge = time.Since(state.StartedAt)
 		}
 
-		// check if recording is stale (running for too long)
-		age := time.Since(state.StartedAt)
+		// classify stale recordings
 		if age > StaleRecordingThreshold {
-			status.IsStaleRecording = true
-			status.StaleRecordingAge = age
+			if !status.IsStaleRecording {
+				status.IsStaleRecording = true
+				status.StaleRecordingAge = age
+			}
+			status.StaleRecordings = append(status.StaleRecordings, state)
+
+			// check if this stale recording has content
+			rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+			if _, err := os.Stat(rawPath); err == nil {
+				status.ContentStaleCount++
+			} else {
+				status.EmptyStaleCount++
+			}
 		}
 	}
 }

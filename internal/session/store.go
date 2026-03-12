@@ -404,15 +404,25 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		// check if this session is actively being recorded
 		var isRecording bool
 		var recordingAgentID string
+		var recordingStartedAt time.Time
 		recPath := filepath.Join(sessionPath, recordingFile)
 		if recData, recErr := os.ReadFile(recPath); recErr == nil {
 			var recState RecordingState
 			if err := json.Unmarshal(recData, &recState); err == nil {
 				isRecording = true
 				recordingAgentID = recState.AgentID
+				recordingStartedAt = recState.StartedAt
 				if !recState.StartedAt.IsZero() && createdAt.IsZero() {
 					createdAt = recState.StartedAt
 				}
+			}
+		}
+
+		// skip empty stale recording stubs (no raw.jsonl, older than 48 hours)
+		// these accumulate when agents exit without calling session stop
+		if isRecording && !recordingStartedAt.IsZero() && time.Since(recordingStartedAt) > 48*time.Hour {
+			if _, statErr := os.Stat(filepath.Join(sessionPath, rawFilename)); statErr != nil {
+				continue // empty stub, skip
 			}
 		}
 

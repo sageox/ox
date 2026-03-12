@@ -188,6 +188,7 @@ const (
 	CheckSlugSessionAutoStage   = "session-auto-stage"
 	CheckSlugSessionUploadRetry  = "session-upload-retry"
 	CheckSlugSessionUncommitted = "session-uncommitted"
+	CheckSlugSessionOrphaned    = "session-orphaned"
 
 	// Authentication checks (credential health)
 	CheckSlugGitCredsFreshness   = "git-creds-freshness"

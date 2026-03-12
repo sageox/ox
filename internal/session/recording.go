@@ -334,6 +334,55 @@ func GetRecordingDuration(projectRoot string) time.Duration {
 	return time.Since(state.StartedAt)
 }
 
+// staleEmptyThreshold defines how long an empty recording stub must exist
+// before it's eligible for automatic cleanup. Set to 48 hours because coding
+// sessions can run 12+ hours and raw.jsonl isn't written until session stop.
+const staleEmptyThreshold = 48 * time.Hour
+
+// cleanupStaleEmptyRecordings removes stale recording stubs that have no session
+// content (no raw.jsonl). These accumulate when agents start sessions but exit
+// without calling session stop. Best-effort: errors are logged but not returned.
+func cleanupStaleEmptyRecordings(projectRoot string) {
+	states, err := LoadAllRecordingStates(projectRoot)
+	if err != nil {
+		return
+	}
+
+	for _, state := range states {
+		if time.Since(state.StartedAt) < staleEmptyThreshold {
+			continue
+		}
+		if state.SessionPath == "" {
+			continue
+		}
+		// only clean empty stubs (no raw.jsonl)
+		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+		if _, err := os.Stat(rawPath); err == nil {
+			continue // has content, don't auto-delete
+		}
+		// remove .recording.json
+		recPath := recordingStatePath(state.SessionPath)
+		if err := os.Remove(recPath); err != nil {
+			slog.Debug("cleanup stale empty recording", "path", recPath, "error", err)
+			continue
+		}
+		// remove empty session directory
+		removeEmptyDir(state.SessionPath)
+		slog.Debug("cleaned stale empty recording", "session", filepath.Base(state.SessionPath))
+	}
+}
+
+// removeEmptyDir removes a directory only if it's empty.
+func removeEmptyDir(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	if len(entries) == 0 {
+		_ = os.Remove(dir)
+	}
+}
+
 // StartRecordingOptions contains options for starting a recording.
 type StartRecordingOptions struct {
 	AgentID          string
@@ -362,6 +411,9 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	if projectRoot == "" {
 		return nil, fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
+
+	// clean up stale empty recording stubs to prevent accumulation
+	cleanupStaleEmptyRecordings(projectRoot)
 
 	// check if THIS agent already has a recording; other agents' recordings are valid
 	existing, err := LoadRecordingStateForAgent(projectRoot, opts.AgentID)

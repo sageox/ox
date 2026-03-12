@@ -522,6 +522,7 @@ func formatModeSource(source config.SessionRecordingSource) string {
 // SessionOrphanedCheck detects orphaned .recording.json files.
 type SessionOrphanedCheck struct {
 	gitRoot      string
+	fix          bool
 	cachedStatus *session.HealthStatus
 }
 
@@ -530,8 +531,8 @@ func (c *SessionOrphanedCheck) SetHealthStatus(status *session.HealthStatus) {
 }
 
 // NewSessionOrphanedCheck creates an orphaned recording check.
-func NewSessionOrphanedCheck(gitRoot string) *SessionOrphanedCheck {
-	return &SessionOrphanedCheck{gitRoot: gitRoot}
+func NewSessionOrphanedCheck(gitRoot string, fix bool) *SessionOrphanedCheck {
+	return &SessionOrphanedCheck{gitRoot: gitRoot, fix: fix}
 }
 
 // Name returns the check name.
@@ -543,34 +544,63 @@ func (c *SessionOrphanedCheck) Name() string {
 func (c *SessionOrphanedCheck) Run(ctx context.Context) CheckResult {
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
 
-	// check for orphaned recordings (recording state exists but is very old)
-	if !status.IsRecordingActive {
+	totalStale := len(status.StaleRecordings)
+	if totalStale == 0 {
 		return CheckResult{
 			Name:   c.Name(),
 			Status: StatusSkip,
 		}
 	}
 
-	// a recording older than 24 hours without activity is likely orphaned
-	if status.IsStaleRecording && status.StaleRecordingAge.Hours() > 24 {
-		agentID := "unknown"
-		if status.Recording != nil {
-			agentID = status.Recording.AgentID
-		}
+	emptyCount := status.EmptyStaleCount
+	contentCount := status.ContentStaleCount
 
-		days := int(status.StaleRecordingAge.Hours()) / 24
-
+	if !c.fix {
+		msg := fmt.Sprintf("found %d orphaned recording(s) (%d empty, %d with content)", totalStale, emptyCount, contentCount)
 		return CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarn,
-			Message: fmt.Sprintf("found %d-day old recording (%s)", days, agentID),
-			Fix:     fmt.Sprintf("Run 'ox agent %s session recover' to upload to ledger, or 'ox agent %s session abort --force' to discard", agentID, agentID),
+			Message: msg,
+			Fix:     "Run 'ox doctor --fix' to clean up stale recordings",
 		}
 	}
 
+	// auto-fix: clean up stale recordings
+	cleaned := 0
+	for _, state := range status.StaleRecordings {
+		if state.SessionPath == "" {
+			continue
+		}
+		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+		hasContent := false
+		if _, err := os.Stat(rawPath); err == nil {
+			hasContent = true
+		}
+
+		if !hasContent {
+			// empty stub: remove .recording.json and empty dir
+			recPath := filepath.Join(state.SessionPath, ".recording.json")
+			_ = os.Remove(recPath)
+			// remove dir if empty
+			entries, _ := os.ReadDir(state.SessionPath)
+			if len(entries) == 0 {
+				_ = os.Remove(state.SessionPath)
+			}
+			cleaned++
+		} else {
+			// has content: just clear .recording.json so it stops showing as "recording"
+			// data preserved for 'ox session recover'
+			recPath := filepath.Join(state.SessionPath, ".recording.json")
+			_ = os.Remove(recPath)
+			cleaned++
+		}
+	}
+
+	msg := fmt.Sprintf("cleaned %d orphaned recording(s) (%d empty stubs removed, %d with content cleared)", cleaned, emptyCount, contentCount)
 	return CheckResult{
-		Name:   c.Name(),
-		Status: StatusSkip,
+		Name:    c.Name(),
+		Status:  StatusPass,
+		Message: msg,
 	}
 }
 
