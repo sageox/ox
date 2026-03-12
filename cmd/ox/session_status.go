@@ -37,6 +37,9 @@ type sessionStatusOutput struct {
 	Title         string                  `json:"title,omitempty"`
 	DurationSecs  int                     `json:"duration_seconds,omitempty"`
 	Duration      string                  `json:"duration,omitempty"`
+	EntryCount    int                     `json:"entry_count,omitempty"`
+	FilterMode    string                  `json:"filter_mode,omitempty"`
+	Model         string                  `json:"model,omitempty"`
 	Agent         string                  `json:"agent,omitempty"`
 	AgentID       string                  `json:"agent_id,omitempty"`
 	SessionFile   string                  `json:"session_file,omitempty"`
@@ -52,6 +55,9 @@ type sessionRecordingEntry struct {
 	Agent         string `json:"agent,omitempty"`
 	DurationSecs  int    `json:"duration_seconds"`
 	Duration      string `json:"duration"`
+	EntryCount    int    `json:"entry_count"`
+	FilterMode    string `json:"filter_mode,omitempty"`
+	Model         string `json:"model,omitempty"`
 	StartedAt     string `json:"started_at"`
 	SessionFile   string `json:"session_file,omitempty"`
 	WorkspacePath string `json:"workspace_path,omitempty"`
@@ -130,6 +136,9 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 				Title:         state.Title,
 				DurationSecs:  int(duration.Seconds()),
 				Duration:      durationStr,
+				EntryCount:    state.EntryCount,
+				FilterMode:    state.FilterMode,
+				Model:         state.Model,
 				Agent:         state.AdapterName,
 				AgentID:       state.AgentID,
 				SessionFile:   state.SessionFile,
@@ -146,6 +155,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Title:    %s\n", state.Title)
 		}
 		fmt.Printf("  Duration: %s\n", durationStr)
+		fmt.Printf("  Entries:  %d\n", state.EntryCount)
 		fmt.Printf("  Agent:    %s\n", state.AdapterName)
 		fmt.Printf("  Started:  %s\n", state.StartedAt.Format("15:04:05"))
 		if state.AgentID != "" {
@@ -173,6 +183,9 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 				Agent:         s.AdapterName,
 				DurationSecs:  int(d.Seconds()),
 				Duration:      formatDurationHuman(d),
+				EntryCount:    s.EntryCount,
+				FilterMode:    s.FilterMode,
+				Model:         s.Model,
 				StartedAt:     s.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
 				SessionFile:   s.SessionFile,
 				WorkspacePath: s.WorkspacePath,
@@ -201,7 +214,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		if label == "" {
 			label = state.AdapterName
 		}
-		fmt.Printf("  %s %s\n", cli.StyleBold.Render(label), cli.StyleDim.Render("("+durationStr+")"))
+		fmt.Printf("  %s %s\n", cli.StyleBold.Render(label), cli.StyleDim.Render(fmt.Sprintf("(%s, %d entries)", durationStr, state.EntryCount)))
 
 		if state.Title != "" {
 			fmt.Printf("    Title:   %s\n", state.Title)
