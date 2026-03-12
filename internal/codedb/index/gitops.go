@@ -49,7 +49,7 @@ func RepoNameFromURL(url string) (string, error) {
 // Returns the opened go-git Repository.
 func CloneOrFetch(url, repoPath string) (*git.Repository, error) {
 	if _, err := os.Stat(repoPath); err == nil {
-		repo, err := git.PlainOpen(repoPath)
+		repo, err := plainOpenTolerant(repoPath)
 		if err != nil {
 			return nil, fmt.Errorf("open existing repo: %w", err)
 		}

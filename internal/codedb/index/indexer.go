@@ -251,7 +251,7 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 	// go-git can access the shared object store (packfiles, loose objects).
 	report("Opening local repository...")
 	repoOpenPath, isWorktree := resolveGitDir(localPath)
-	repo, err := git.PlainOpen(repoOpenPath)
+	repo, err := plainOpenTolerant(repoOpenPath)
 	if err != nil {
 		return fmt.Errorf("open local repo %s: %w", localPath, err)
 	}
@@ -1151,7 +1151,7 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 
 	var repos []*git.Repository
 	for _, rp := range repoPaths {
-		r, err := git.PlainOpen(rp)
+		r, err := plainOpenTolerant(rp)
 		if err != nil {
 			continue
 		}
@@ -1347,7 +1347,7 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 
 	var repos []*git.Repository
 	for _, rp := range repoPaths {
-		r, err := git.PlainOpen(rp)
+		r, err := plainOpenTolerant(rp)
 		if err != nil {
 			continue
 		}
