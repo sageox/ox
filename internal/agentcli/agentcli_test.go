@@ -83,7 +83,7 @@ func TestDailyPromptWithGuidelines(t *testing.T) {
 	guidelines := "Always highlight security decisions.\nIgnore dependency update noise."
 	prompt := DailyPrompt(obs, "2026-03-11", guidelines)
 
-	if !strings.Contains(prompt, "Team Distillation Guidelines") {
+	if !strings.Contains(prompt, "<team-guidelines>") {
 		t.Error("prompt should contain guidelines header")
 	}
 	if !strings.Contains(prompt, "security decisions") {
@@ -98,27 +98,24 @@ func TestDailyPromptWithoutGuidelines(t *testing.T) {
 	obs := []string{"observation 1"}
 	prompt := DailyPrompt(obs, "2026-03-11", "")
 
-	if strings.Contains(prompt, "Team Distillation Guidelines") {
+	if strings.Contains(prompt, "<team-guidelines>") {
 		t.Error("prompt should not contain guidelines header when empty")
 	}
 }
 
-func TestDailyPromptWithDiscussionFacts(t *testing.T) {
+func TestDailyPromptWithDiscussionFactPaths(t *testing.T) {
 	obs := []string{"observation 1"}
-	facts := []string{"Decision: use PostgreSQL", "Action: review auth module"}
-	prompt := DailyPrompt(obs, "2026-03-11", "", facts...)
+	paths := []string{"memory/.discussion-facts/2026-03-10.md", "memory/.discussion-facts/2026-03-11.md"}
+	prompt := DailyPrompt(obs, "2026-03-11", "", paths...)
 
-	if !strings.Contains(prompt, "Discussion Facts") {
-		t.Error("prompt should contain Discussion Facts section")
+	if !strings.Contains(prompt, "Discussion Fact Files") {
+		t.Error("prompt should contain Discussion Fact Files section")
 	}
-	if !strings.Contains(prompt, "Discussion 1") {
-		t.Error("prompt should number discussion facts")
+	if !strings.Contains(prompt, "memory/.discussion-facts/2026-03-10.md") {
+		t.Error("prompt should contain file path")
 	}
-	if !strings.Contains(prompt, "use PostgreSQL") {
-		t.Error("prompt should contain fact content")
-	}
-	if !strings.Contains(prompt, "Synthesize both") {
-		t.Error("prompt should instruct synthesis of both sources")
+	if !strings.Contains(prompt, "Read each discussion fact file") {
+		t.Error("prompt should instruct reading of fact files")
 	}
 	if !strings.Contains(prompt, "1. observation 1") {
 		t.Error("prompt should still contain observations")
@@ -129,11 +126,11 @@ func TestDailyPromptWithoutDiscussionFacts(t *testing.T) {
 	obs := []string{"observation 1"}
 	prompt := DailyPrompt(obs, "2026-03-11", "")
 
-	if strings.Contains(prompt, "Discussion Facts") {
-		t.Error("prompt should not contain Discussion Facts section when empty")
+	if strings.Contains(prompt, "Discussion Fact Files") {
+		t.Error("prompt should not contain Discussion Fact Files section when empty")
 	}
-	if strings.Contains(prompt, "Synthesize both") {
-		t.Error("prompt should not mention synthesis when no discussion facts")
+	if strings.Contains(prompt, "Read each discussion fact file") {
+		t.Error("prompt should not mention reading files when no discussion facts")
 	}
 }
 
@@ -182,7 +179,7 @@ func TestDiscussionFactsPromptEmptyTranscript(t *testing.T) {
 func TestDiscussionFactsPromptWithGuidelines(t *testing.T) {
 	prompt := DiscussionFactsPrompt("Title", "summary", "transcript", "Focus on security decisions")
 
-	if !strings.Contains(prompt, "Team Distillation Guidelines") {
+	if !strings.Contains(prompt, "<team-guidelines>") {
 		t.Error("prompt should contain guidelines header")
 	}
 	if !strings.Contains(prompt, "security decisions") {

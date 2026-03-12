@@ -166,12 +166,20 @@ func TestReadPendingDiscussionFacts(t *testing.T) {
 	os.WriteFile(filepath.Join(factsDir, "discussion-a.md"), []byte("Fact A"), 0o644)
 	os.WriteFile(filepath.Join(factsDir, "discussion-b.md"), []byte("Fact B"), 0o644)
 
-	facts, err := readPendingDiscussionFacts(tcPath, time.Time{})
+	contents, paths, err := readPendingDiscussionFacts(tcPath, time.Time{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(facts) != 2 {
-		t.Errorf("expected 2 facts, got %d", len(facts))
+	if len(contents) != 2 {
+		t.Errorf("expected 2 contents, got %d", len(contents))
+	}
+	if len(paths) != 2 {
+		t.Errorf("expected 2 paths, got %d", len(paths))
+	}
+	for _, p := range paths {
+		if !strings.HasPrefix(p, "memory/.discussion-facts/") {
+			t.Errorf("expected relative path, got %q", p)
+		}
 	}
 }
 
@@ -192,24 +200,30 @@ func TestReadPendingDiscussionFactsSince(t *testing.T) {
 
 	// read with since = 24h ago — should skip the old file
 	since := time.Now().Add(-24 * time.Hour)
-	facts, err := readPendingDiscussionFacts(tcPath, since)
+	contents, paths, err := readPendingDiscussionFacts(tcPath, since)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(facts) != 0 {
-		t.Errorf("expected 0 facts (file is older than since), got %d", len(facts))
+	if len(contents) != 0 {
+		t.Errorf("expected 0 contents (file is older than since), got %d", len(contents))
+	}
+	if len(paths) != 0 {
+		t.Errorf("expected 0 paths (file is older than since), got %d", len(paths))
 	}
 }
 
 func TestReadPendingDiscussionFactsEmptyDir(t *testing.T) {
 	tcPath := t.TempDir() // no .discussion-facts dir
 
-	facts, err := readPendingDiscussionFacts(tcPath, time.Time{})
+	contents, paths, err := readPendingDiscussionFacts(tcPath, time.Time{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(facts) != 0 {
-		t.Errorf("expected 0 facts for nonexistent dir, got %d", len(facts))
+	if len(contents) != 0 {
+		t.Errorf("expected 0 contents for nonexistent dir, got %d", len(contents))
+	}
+	if len(paths) != 0 {
+		t.Errorf("expected 0 paths for nonexistent dir, got %d", len(paths))
 	}
 }
 

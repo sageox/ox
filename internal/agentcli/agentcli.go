@@ -23,6 +23,9 @@ type Backend interface {
 type Claude struct {
 	// Timeout for the claude process. Zero means no timeout (uses ctx).
 	Timeout time.Duration
+	// WorkDir sets the working directory for the claude process.
+	// When set, relative file paths in prompts resolve from this directory.
+	WorkDir string
 }
 
 func (c *Claude) Name() string { return "claude" }
@@ -39,8 +42,11 @@ func (c *Claude) Run(ctx context.Context, prompt string) (string, error) {
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(ctx, "claude", "-p", "--output-format", "text")
+	cmd := exec.CommandContext(ctx, "claude", "-p", "--output-format", "text", "--tools", "Read")
 	cmd.Stdin = strings.NewReader(prompt)
+	if c.WorkDir != "" {
+		cmd.Dir = c.WorkDir
+	}
 
 	out, err := cmd.Output()
 	if err != nil {

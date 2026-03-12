@@ -156,17 +156,17 @@ func discussionContentHash(dirPath string) string {
 
 // readPendingDiscussionFacts reads fact files from memory/.discussion-facts/
 // that were created since the given timestamp.
-func readPendingDiscussionFacts(tcPath string, since time.Time) ([]string, error) {
+// Returns file contents (for hashing) and relative paths from the team context root (for prompts).
+func readPendingDiscussionFacts(tcPath string, since time.Time) (contents []string, relPaths []string, err error) {
 	factsDir := filepath.Join(tcPath, "memory", ".discussion-facts")
 	entries, err := os.ReadDir(factsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, fmt.Errorf("read discussion-facts dir: %w", err)
+		return nil, nil, fmt.Errorf("read discussion-facts dir: %w", err)
 	}
 
-	var facts []string
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
 			continue
@@ -186,9 +186,10 @@ func readPendingDiscussionFacts(tcPath string, since time.Time) ([]string, error
 			continue
 		}
 		if content := strings.TrimSpace(string(data)); content != "" {
-			facts = append(facts, content)
+			contents = append(contents, content)
+			relPaths = append(relPaths, filepath.Join("memory", ".discussion-facts", entry.Name()))
 		}
 	}
 
-	return facts, nil
+	return contents, relPaths, nil
 }
