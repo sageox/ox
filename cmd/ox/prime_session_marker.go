@@ -32,14 +32,12 @@ func SessionMarkerDir() string {
 //
 // Purpose:
 //   - Idempotency: re-priming the same session reuses the ox agent ID
-//   - Notification throttling: LastNotified prevents spamming context-update alerts
 //   - Hook context: agent_hook.go reads markers to pass agent state to handlers
 type SessionMarker struct {
 	AgentID        string    `json:"agent_id"`
 	SessionID      string    `json:"session_id,omitempty"`       // ox-generated server session ID
 	AgentSessionID string    `json:"agent_session_id"`           // coding agent's native session identifier
 	PrimedAt       time.Time `json:"primed_at"`                  // when session was primed
-	LastNotified   time.Time `json:"last_notified,omitempty"`    // mtime of last context file check
 }
 
 // AgentHookInput is an alias for agentx.HookInput.
@@ -114,19 +112,6 @@ func WriteSessionMarker(marker *SessionMarker) error {
 		return fmt.Errorf("failed to rename marker: %w", err)
 	}
 
-	return nil
-}
-
-// UpdateLastNotified updates the LastNotified field and writes to disk.
-// On write failure, rolls back the in-memory value.
-func (m *SessionMarker) UpdateLastNotified(t time.Time) error {
-	oldValue := m.LastNotified
-	m.LastNotified = t
-
-	if err := WriteSessionMarker(m); err != nil {
-		m.LastNotified = oldValue // rollback on failure
-		return err
-	}
 	return nil
 }
 

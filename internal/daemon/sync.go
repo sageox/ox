@@ -297,6 +297,9 @@ type SyncScheduler struct {
 
 	// agent work signal channel — notified after successful ledger pull
 	agentWorkSignal chan<- struct{}
+
+	// notification store for team context change tracking
+	notifications *NotificationStore
 }
 
 // syncError tracks a sync error with timestamp.
@@ -389,6 +392,57 @@ func (s *SyncScheduler) SetAgentWorkSignal(ch chan<- struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.agentWorkSignal = ch
+}
+
+// SetNotificationStore sets the notification store for team context change tracking.
+func (s *SyncScheduler) SetNotificationStore(store *NotificationStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notifications = store
+}
+
+// captureHEAD returns the current HEAD SHA for a git repo.
+// Used before a pull to establish a baseline for change detection.
+func (s *SyncScheduler) captureHEAD(repoPath string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// detectChangedFiles runs git diff to find files changed between baseSHA and HEAD.
+// Returns nil if baseSHA is empty or on error — graceful degradation.
+func (s *SyncScheduler) detectChangedFiles(repoPath, baseSHA string) []string {
+	if baseSHA == "" {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+		"diff", "--name-only", baseSHA, "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	lines := strings.TrimSpace(string(output))
+	if lines == "" {
+		return nil
+	}
+
+	var files []string
+	for _, line := range strings.Split(lines, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			files = append(files, line)
+		}
+	}
+	return files
 }
 
 // Metrics returns the sync metrics for observability.
@@ -1912,9 +1966,10 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 	// sync eligible repos in parallel — each operates on its own repo path,
 	// and the network I/O (ls-remote, fetch, pull) dominates wall time
 	type syncResult struct {
-		ws       WorkspaceState
-		err      error
-		duration time.Duration
+		ws         WorkspaceState
+		err        error
+		duration   time.Duration
+		prePullSHA string
 	}
 	results := make([]syncResult, len(targets))
 	var wg sync.WaitGroup
@@ -1928,9 +1983,10 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		wg.Add(1)
 		go func(idx int, ws WorkspaceState) {
 			defer wg.Done()
+			preSHA := s.captureHEAD(ws.Path)
 			start := time.Now()
 			pullErr := s.pullTeamContext(ctx, ws.Path)
-			results[idx] = syncResult{ws: ws, err: pullErr, duration: time.Since(start)}
+			results[idx] = syncResult{ws: ws, err: pullErr, duration: time.Since(start), prePullSHA: preSHA}
 		}(i, t.ws)
 	}
 	wg.Wait()
@@ -1977,6 +2033,17 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		s.recordSync("team_context", r.ws.ID, r.duration, 0)
 		s.metrics.RecordTeamSync()
 		s.recordActivity()
+
+		// detect changed files for notification system.
+		// Primary team only for now — avoids noise from secondary team contexts.
+		// TODO: expand to all teams when multi-team notification UX is designed.
+		if s.notifications != nil && r.ws.TeamID == s.workspaceRegistry.ProjectTeamID() {
+			if changedFiles := s.detectChangedFiles(r.ws.Path, r.prePullSHA); len(changedFiles) > 0 {
+				s.notifications.RecordChanges(changedFiles, r.ws.TeamID, r.ws.TeamName)
+				s.logger.Debug("team context changes detected",
+					"team", r.ws.TeamName, "count", len(changedFiles))
+			}
+		}
 		s.logger.Debug("team context synced", "team", r.ws.TeamName, "duration", r.duration)
 		if progress != nil {
 			_ = progress.WriteStage("synced", fmt.Sprintf("Team %s synced", r.ws.TeamName))

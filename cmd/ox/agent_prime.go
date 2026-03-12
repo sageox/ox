@@ -24,7 +24,6 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ledger"
-	"github.com/sageox/ox/internal/notification"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/teamdocs"
@@ -548,37 +547,6 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	guidance := buildGuidance(agentID, projectRoot, teamCtx, ledgerStatus)
 	timing["guidance_build"] = time.Since(phaseStart).Milliseconds()
 
-	// check for team context notifications using mtime-based approach
-	var lastNotified time.Time
-	if existingMarker != nil {
-		lastNotified = existingMarker.LastNotified
-	}
-	var teamCtxPath string
-	if teamCtx != nil {
-		teamCtxPath = teamCtx.Path
-	}
-	latestMtime, updatedFiles := notification.CheckForUpdates(teamCtxPath, lastNotified)
-
-	// emit notification if there are updates (before main output)
-	if len(updatedFiles) > 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "## SageOx Team Context Updated")
-		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "Your SageOx team knowledge has been updated. Please inform the user and re-read these files:")
-		fmt.Fprintln(cmd.OutOrStdout())
-		for _, f := range updatedFiles {
-			relPath := f
-			if teamCtxPath != "" {
-				if rel, err := filepath.Rel(teamCtxPath, f); err == nil {
-					relPath = rel
-				}
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "- %s\n", relPath)
-		}
-		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "---")
-		fmt.Fprintln(cmd.OutOrStdout())
-	}
-
 	// register or update agent instance locally (bootstrap completes without cloud API)
 	var inst *agentinstance.Instance
 	var primeCallCount int
@@ -788,18 +756,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// write session marker for idempotent behavior (graceful failure)
 	if agentSessionID != "" {
-		// determine LastNotified: use latestMtime if we have files, else preserve existing
-		newLastNotified := latestMtime
-		if newLastNotified.IsZero() && existingMarker != nil {
-			newLastNotified = existingMarker.LastNotified
-		}
-
 		marker := &SessionMarker{
 			AgentID:        agentID,
 			SessionID:      inst.ServerSessionID,
 			AgentSessionID: agentSessionID,
 			PrimedAt:       time.Now(),
-			LastNotified:   newLastNotified,
 		}
 		if err := WriteSessionMarker(marker); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to write session marker: %v\n", err)

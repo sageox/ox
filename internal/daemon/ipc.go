@@ -45,7 +45,8 @@ const (
 	MsgTypeDoctor      = "doctor"      // trigger daemon health checks (anti-entropy, etc.)
 	MsgTypeTriggerGC   = "trigger_gc"  // force GC reclone for team contexts
 	MsgTypeCodeIndex   = "code_index"   // index local code with progress
-	MsgTypeCodeStatus  = "code_status"  // get code index status/stats
+	MsgTypeCodeStatus     = "code_status"    // get code index status/stats
+	MsgTypeNotifications = "notifications"  // query pending team context change notifications
 )
 
 // Protocol Design Decision: NDJSON (Newline-Delimited JSON)
@@ -329,6 +330,18 @@ type InstancesResponse struct {
 	Instances []InstanceInfo `json:"instances"`
 }
 
+
+// NotificationsPayload is the payload for notifications requests.
+type NotificationsPayload struct {
+	AgentID string `json:"agent_id"`
+}
+
+// NotificationsResponse is the response for notifications requests.
+type NotificationsResponse struct {
+	Files []ChangeEntry `json:"files"`
+	Stale bool          `json:"stale"`
+}
+
 // DoctorResponse is the response for the doctor IPC message.
 type DoctorResponse struct {
 	AntiEntropyTriggered bool     `json:"anti_entropy_triggered"`
@@ -469,6 +482,7 @@ type Server struct {
 	onTriggerGC        func() *TriggerGCResponse                                                        // force GC reclone
 	onCodeIndex         func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) // index local code
 	onCodeStatus        func() *CodeDBStats                                                               // get code index stats
+	onNotifications     func(agentID string) ([]ChangeEntry, bool)                                        // get pending notifications
 
 	startTime time.Time
 }
@@ -507,6 +521,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeTriggerGC, handleTriggerGC)
 	router.Register(MsgTypeCodeIndex, handleCodeIndex)
 	router.Register(MsgTypeCodeStatus, handleCodeStatus)
+	router.Register(MsgTypeNotifications, handleNotifications)
 
 	return router
 }
@@ -851,6 +866,37 @@ func handleCodeStatus(s *Server, _ Message, _ net.Conn) HandlerResult {
 	}
 }
 
+func handleNotifications(s *Server, msg Message, _ net.Conn) HandlerResult {
+	s.mu.Lock()
+	handler := s.onNotifications
+	s.mu.Unlock()
+
+	if handler == nil {
+		resp := NotificationsResponse{Files: []ChangeEntry{}, Stale: false}
+		return HandlerResult{Response: marshalResponse(resp)}
+	}
+
+	var payload NotificationsPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		return HandlerResult{
+			Response: &Response{Success: false, Error: fmt.Sprintf("invalid payload: %v", err)},
+		}
+	}
+
+	if payload.AgentID == "" {
+		return HandlerResult{
+			Response: &Response{Success: false, Error: "agent_id required"},
+		}
+	}
+
+	files, stale := handler(payload.AgentID)
+	if files == nil {
+		files = []ChangeEntry{} // ensure JSON array, not null
+	}
+	resp := NotificationsResponse{Files: files, Stale: stale}
+	return HandlerResult{Response: marshalResponse(resp)}
+}
+
 // SetHandlers sets the message handlers.
 func (s *Server) SetHandlers(onSync func() error, onStop func(), onStatus func() *StatusData) {
 	s.mu.Lock()
@@ -971,6 +1017,13 @@ func (s *Server) SetCodeStatusHandler(cb func() *CodeDBStats) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onCodeStatus = cb
+}
+
+// SetNotificationsHandler sets the handler for notification queries.
+func (s *Server) SetNotificationsHandler(cb func(agentID string) ([]ChangeEntry, bool)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onNotifications = cb
 }
 
 // Start starts the IPC server.
@@ -1368,6 +1421,28 @@ func (c *Client) TriggerGC() (*TriggerGCResponse, error) {
 		return nil, fmt.Errorf("unmarshal trigger_gc response: %w", err)
 	}
 	return &gcResp, nil
+}
+
+// Notifications queries pending team context change notifications for an agent.
+// Returns changes since the agent last checked. The first call registers the cursor
+// and returns empty; subsequent calls return changes since the previous call.
+func (c *Client) Notifications(agentID string) (*NotificationsResponse, error) {
+	payload, _ := json.Marshal(NotificationsPayload{AgentID: agentID})
+	resp, err := c.sendMessage(Message{
+		Type:    MsgTypeNotifications,
+		Payload: payload,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, errors.New(resp.Error)
+	}
+	var result NotificationsResponse
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal notifications: %w", err)
+	}
+	return &result, nil
 }
 
 // RequestSync requests the daemon to perform a sync.

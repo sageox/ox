@@ -142,34 +142,6 @@ func TestSessionMarkerJSONFormat(t *testing.T) {
 	assert.Contains(t, string(content), `"agent_session_id"`)
 }
 
-func TestSessionMarkerUpdateLastNotified(t *testing.T) {
-	sessionID := "test_update_" + time.Now().Format("20060102150405.000")
-	marker := &SessionMarker{
-		AgentID:        "OxUpd",
-		AgentSessionID: sessionID,
-		PrimedAt:       time.Now(),
-	}
-
-	err := WriteSessionMarker(marker)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		DeleteSessionMarker(sessionID)
-	})
-
-	// update last notified
-	newTime := time.Now().Add(1 * time.Hour)
-	err = marker.UpdateLastNotified(newTime)
-	require.NoError(t, err)
-
-	// verify the in-memory value was updated
-	assert.Equal(t, newTime.Unix(), marker.LastNotified.Unix())
-
-	// read back and verify persisted
-	read, err := ReadSessionMarker(sessionID)
-	require.NoError(t, err)
-	assert.Equal(t, newTime.Unix(), read.LastNotified.Unix())
-}
-
 func TestIsAgentHookContext(t *testing.T) {
 	// save original env
 	origProjectDir := os.Getenv("CLAUDE_PROJECT_DIR")

@@ -155,7 +155,8 @@ type Daemon struct {
 	friction    *FrictionCollector
 	issues      *IssueTracker
 	codedb      *CodeDBManager
-	agentWorker *agentwork.Manager
+	agentWorker    *agentwork.Manager
+	notifications  *NotificationStore
 
 	// state
 	mu           sync.Mutex
@@ -271,6 +272,9 @@ func (d *Daemon) Start() error {
 	// initialize issue tracker for health check system
 	d.issues = NewIssueTracker()
 
+	// initialize notification store for team context change tracking
+	d.notifications = NewNotificationStore(200)
+
 	// start heartbeat handler
 	d.heartbeat = NewHeartbeatHandler(d.logger)
 	d.heartbeat.SetActivityCallback(d.recordActivity)
@@ -352,6 +356,9 @@ func (d *Daemon) Start() error {
 
 	// wire issue tracker so scheduler can report issues needing LLM reasoning
 	d.scheduler.SetIssueTracker(d.issues)
+
+	// wire notification store so scheduler can record team context changes
+	d.scheduler.SetNotificationStore(d.notifications)
 
 	// wire code index manager into scheduler for periodic freshness checks
 	if d.codedb != nil {
@@ -563,6 +570,11 @@ func (d *Daemon) Start() error {
 	// set instances handler for agent instance tracking
 	d.server.SetInstancesHandler(func() []InstanceInfo {
 		return d.getAgentInstances()
+	})
+
+	// set notifications handler for team context change queries
+	d.server.SetNotificationsHandler(func(agentID string) ([]ChangeEntry, bool) {
+		return d.notifications.GetNotifications(agentID)
 	})
 
 	setupDuration := time.Since(startSetup)
