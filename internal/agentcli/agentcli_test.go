@@ -103,6 +103,93 @@ func TestDailyPromptWithoutGuidelines(t *testing.T) {
 	}
 }
 
+func TestDailyPromptWithDiscussionFacts(t *testing.T) {
+	obs := []string{"observation 1"}
+	facts := []string{"Decision: use PostgreSQL", "Action: review auth module"}
+	prompt := DailyPrompt(obs, "2026-03-11", "", facts...)
+
+	if !strings.Contains(prompt, "Discussion Facts") {
+		t.Error("prompt should contain Discussion Facts section")
+	}
+	if !strings.Contains(prompt, "Discussion 1") {
+		t.Error("prompt should number discussion facts")
+	}
+	if !strings.Contains(prompt, "use PostgreSQL") {
+		t.Error("prompt should contain fact content")
+	}
+	if !strings.Contains(prompt, "Synthesize both") {
+		t.Error("prompt should instruct synthesis of both sources")
+	}
+	if !strings.Contains(prompt, "1. observation 1") {
+		t.Error("prompt should still contain observations")
+	}
+}
+
+func TestDailyPromptWithoutDiscussionFacts(t *testing.T) {
+	obs := []string{"observation 1"}
+	prompt := DailyPrompt(obs, "2026-03-11", "")
+
+	if strings.Contains(prompt, "Discussion Facts") {
+		t.Error("prompt should not contain Discussion Facts section when empty")
+	}
+	if strings.Contains(prompt, "Synthesize both") {
+		t.Error("prompt should not mention synthesis when no discussion facts")
+	}
+}
+
+func TestDiscussionFactsPrompt(t *testing.T) {
+	prompt := DiscussionFactsPrompt("Arch Review", "We discussed architecture", "Speaker 1: Let's review\nSpeaker 2: Sounds good", "")
+
+	if !strings.Contains(prompt, "Arch Review") {
+		t.Error("prompt should contain the discussion title")
+	}
+	if !strings.Contains(prompt, "We discussed architecture") {
+		t.Error("prompt should contain the summary")
+	}
+	if !strings.Contains(prompt, "Speaker 1:") {
+		t.Error("prompt should contain transcript text")
+	}
+	if !strings.Contains(prompt, "Decisions") {
+		t.Error("prompt should mention expected categories")
+	}
+	if !strings.Contains(prompt, "Action Items") {
+		t.Error("prompt should mention Action Items category")
+	}
+}
+
+func TestDiscussionFactsPromptEmptySummary(t *testing.T) {
+	prompt := DiscussionFactsPrompt("Title", "", "transcript text", "")
+
+	if strings.Contains(prompt, "### Summary") {
+		t.Error("prompt should not contain Summary section when empty")
+	}
+	if !strings.Contains(prompt, "transcript text") {
+		t.Error("prompt should contain transcript even with empty summary")
+	}
+}
+
+func TestDiscussionFactsPromptEmptyTranscript(t *testing.T) {
+	prompt := DiscussionFactsPrompt("Title", "summary text", "", "")
+
+	if !strings.Contains(prompt, "summary text") {
+		t.Error("prompt should contain summary")
+	}
+	if strings.Contains(prompt, "### Transcript") {
+		t.Error("prompt should not contain Transcript section when empty")
+	}
+}
+
+func TestDiscussionFactsPromptWithGuidelines(t *testing.T) {
+	prompt := DiscussionFactsPrompt("Title", "summary", "transcript", "Focus on security decisions")
+
+	if !strings.Contains(prompt, "Team Distillation Guidelines") {
+		t.Error("prompt should contain guidelines header")
+	}
+	if !strings.Contains(prompt, "security decisions") {
+		t.Error("prompt should contain guideline content")
+	}
+}
+
 // TestClaudeRunRequiresCLI verifies Run fails gracefully when claude is not available.
 func TestClaudeRunRequiresCLI(t *testing.T) {
 	t.Setenv("PATH", "")
