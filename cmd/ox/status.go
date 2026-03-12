@@ -1551,8 +1551,10 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		var codeStats *daemon.CodeDBStats
 		var client *daemon.Client
 		if gitRoot != "" {
-			client = daemon.TryConnectOrDirect()
-			if client != nil {
+			// use longer timeout for status queries — the status handler collects data
+			// from multiple subsystems and can exceed 50ms under sync load
+			client = daemon.NewClientWithTimeout(500 * time.Millisecond)
+			if client.Ping() == nil {
 				if ds, err := client.Status(); err == nil {
 					daemonStatus = ds
 					syncHistory, _ = client.SyncHistory()
@@ -1560,6 +1562,8 @@ daemon health, and a tree view of all SageOx directory locations.`,
 				if cs, err := client.CodeStatus(); err == nil {
 					codeStats = cs
 				}
+			} else {
+				client = nil
 			}
 		}
 
@@ -1738,8 +1742,8 @@ func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, 
 	// daemon section + AI coworkers
 	if gitRoot != "" {
 		output.Daemon = &statusDaemonJSON{}
-		client := daemon.TryConnectOrDirect()
-		if client != nil {
+		client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+		if client.Ping() == nil {
 			if daemonStatus, err := client.Status(); err == nil {
 				output.Daemon.Running = daemonStatus.Running
 				output.Daemon.Pid = daemonStatus.Pid

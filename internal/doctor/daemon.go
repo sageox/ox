@@ -105,7 +105,7 @@ func (c *DaemonSyncStatusCheck) Run(ctx context.Context) CheckResult {
 		}
 	}
 
-	client := daemon.NewClient()
+	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
 	status, err := client.Status()
 	if err != nil {
 		return CheckResult{
@@ -176,7 +176,7 @@ func (c *DaemonUptimeCheck) Run(ctx context.Context) CheckResult {
 		}
 	}
 
-	client := daemon.NewClient()
+	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
 	status, err := client.Status()
 	if err != nil {
 		return CheckResult{
@@ -214,7 +214,7 @@ func (c *DaemonSyncErrorsCheck) Run(ctx context.Context) CheckResult {
 		}
 	}
 
-	client := daemon.NewClient()
+	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
 	status, err := client.Status()
 	if err != nil {
 		return CheckResult{
@@ -267,7 +267,7 @@ func (c *DaemonDirtyTeamContextCheck) Run(ctx context.Context) CheckResult {
 		}
 	}
 
-	client := daemon.NewClient()
+	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
 	status, err := client.Status()
 	if err != nil {
 		return CheckResult{
@@ -384,7 +384,7 @@ func (c *DaemonHeartbeatCheck) Run(ctx context.Context) CheckResult {
 	if err != nil || entry == nil {
 		if daemon.IsRunning() {
 			// grace period: daemon just started
-			client := daemon.NewClient()
+			client := daemon.NewClientWithTimeout(500 * time.Millisecond)
 			if dStatus, dErr := client.Status(); dErr == nil && dStatus.Uptime < DaemonBootstrapGrace {
 				return CheckResult{
 					Name:    c.Name(),

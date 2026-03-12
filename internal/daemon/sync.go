@@ -3046,17 +3046,16 @@ func (s *SyncScheduler) writeHeartbeats() {
 		return
 	}
 
-	// CRITICAL: Use BOTH repo_id AND workspace_id for heartbeat filenames.
-	// - workspace_id (hash of path) prevents collisions between worktrees
-	// - repo_id makes debugging easier - you can see which repo it belongs to
-	// See UserHeartbeatPath() docs for full explanation.
+	// Use repo_id + repo-based workspace_id for heartbeat filenames.
+	// With 1 daemon per repo, all worktrees share a daemon and should
+	// see the same heartbeat files. Repo-based ID is consistent across clones.
 	repoID := s.workspaceRegistry.GetRepoID()
 	if repoID == "" {
 		s.logger.Debug("no repo_id available for heartbeat")
 		return
 	}
 
-	workspaceID := WorkspaceID(s.config.ProjectRoot)
+	workspaceID := CurrentWorkspaceID()
 	if workspaceID == "" {
 		s.logger.Debug("no workspace_id available for heartbeat")
 		return
