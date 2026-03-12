@@ -96,7 +96,7 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 		return fmt.Errorf("failed to process session: %w", err)
 	}
 
-	if err := session.ClearRecordingState(projectRoot); err != nil {
+	if err := session.ClearRecordingStateForAgent(projectRoot, inst.AgentID); err != nil {
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("failed to clear recovered recording state: %w", err)
 	}

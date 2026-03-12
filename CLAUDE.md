@@ -637,6 +637,22 @@ This data is essential for learning what's working, what's broken, and where age
 
 **Release gate:** All friction telemetry tests MUST pass before any `ox` release. Do not ship if `internal/uxfriction/` or `internal/daemon/friction*` tests are failing.
 
+### Release Gate: E2E Integration Tests with Real Claude Code
+
+**Before ANY release**, the E2E integration tests that launch real Claude Code instances MUST pass:
+
+```bash
+make test-integration  # build tag: integration, requires claude CLI + ANTHROPIC_API_KEY
+```
+
+These tests (`tests/integration/agents/claude/`) start actual Claude Code processes, exercise real hooks, send real SIGINT signals, and verify the full session recording and anti-entropy pipelines. They are the final quality gate — do not ship if they fail.
+
+Key tests:
+- **Multi-turn recording**: Verifies incremental hook-driven recording produces valid raw.jsonl with correct entries
+- **Ctrl-C anti-entropy**: Starts real Claude, sends SIGINT, verifies the daemon's anti-entropy finalization recovers the interrupted session and generates all 4 artifacts (summary.md, summary.json, session.html, session.md)
+
+**Hard rule: E2E tests MUST use real agent CLI instances.** Never simulate Claude entries, mock agents, or use fake JSONL in `tests/integration/`. Component tests with simulated data belong in `cmd/ox/` under the `slow` build tag.
+
 ### Reference Docs
 
 Reference docs (`docs/reference/`) are generated from cobra command definitions. To regenerate:

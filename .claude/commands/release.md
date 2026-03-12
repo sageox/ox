@@ -25,7 +25,15 @@ make test-slow  # build tag: slow (real session tests)
 
 If tests or lint fail, fix issues before proceeding.
 
-### Step 1b: Smoke Tests (requires SAGEOX_CI_PASSWORD)
+### Step 1b: E2E Integration Tests (MANDATORY — requires claude CLI + ANTHROPIC_API_KEY)
+
+```bash
+make test-integration
+```
+
+**This is a hard release gate.** These tests launch real Claude Code instances, exercise real hooks, send real SIGINT signals, and verify the full session recording and anti-entropy pipelines end-to-end. Do NOT proceed if integration tests fail.
+
+### Step 1c: Smoke Tests (requires SAGEOX_CI_PASSWORD)
 
 ```bash
 make smoke-test
@@ -33,7 +41,7 @@ make smoke-test
 
 This runs end-to-end tests against test.sageox.ai: auth, init, doctor, status, re-init, agent prime, session list, and clone-without-ox. If smoke tests fail, investigate before proceeding — these verify ox works in a real environment.
 
-**Tip:** Run lint, test-all, and test-slow in parallel background tasks to save time.
+**Tip:** Run lint, test-all, test-integration, and test-slow in parallel background tasks to save time.
 
 ### Step 2: Create Release Branch
 

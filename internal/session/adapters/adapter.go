@@ -84,6 +84,12 @@ type Adapter interface {
 	Watch(ctx context.Context, sessionPath string) (<-chan RawEntry, error)
 }
 
+// IncrementalReader is an optional interface for adapters that support
+// offset-based incremental reading (used by hook-driven recording).
+type IncrementalReader interface {
+	ReadFromOffset(path string, offset int64) ([]RawEntry, int64, error)
+}
+
 // registry holds all registered adapters
 var (
 	registry   = make(map[string]Adapter)

@@ -116,7 +116,7 @@ func runAgentSessionLog(inst *agentinstance.Instance, args []string) error {
 	}
 
 	// update entry count in recording state (best-effort)
-	if updateErr := session.UpdateRecordingState(projectRoot, func(s *session.RecordingState) {
+	if updateErr := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
 		s.EntryCount++
 		// if SessionFile was empty (generic adapter), persist the file path
 		if s.SessionFile == "" {

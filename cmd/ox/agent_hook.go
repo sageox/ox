@@ -1,13 +1,17 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/pkg/agentx"
 )
 
@@ -30,17 +34,19 @@ const (
 // activePhaseBehavior tracks which phases currently have behavior.
 // Phases not in this set return immediately (fast-path noop).
 var activePhaseBehavior = map[string]bool{
-	phaseStart:   true,
-	phaseCompact: true,
+	phaseStart:     true,
+	phaseCompact:   true,
+	phaseAfterTool: true,
+	phaseStop:      true,
 }
 
 // HookContext carries everything a phase handler needs.
 type HookContext struct {
-	Phase       string              // resolved lifecycle phase
-	AgentType   string              // from AGENT_ENV: "claude-code", "gemini", etc.
-	Input       *agentx.HookInput   // parsed stdin JSON
-	Marker      *SessionMarker      // nil if not yet primed
-	ProjectRoot string              // git root with .sageox/
+	Phase       string            // resolved lifecycle phase
+	AgentType   string            // from AGENT_ENV: "claude-code", "gemini", etc.
+	Input       *agentx.HookInput // parsed stdin JSON
+	Marker      *SessionMarker    // nil if not yet primed
+	ProjectRoot string            // git root with .sageox/
 }
 
 // runAgentHook is the entry point for `ox agent hook <event>`.
@@ -133,6 +139,10 @@ func dispatchPhase(ctx *HookContext) error {
 		return handleStart(ctx)
 	case phaseCompact:
 		return handleCompact(ctx)
+	case phaseAfterTool:
+		return handleAfterTool(ctx)
+	case phaseStop:
+		return handleAfterTool(ctx) // same drain logic on stop
 	default:
 		return nil
 	}
@@ -179,6 +189,154 @@ func handleCompact(ctx *HookContext) error {
 		agentID = ctx.Marker.AgentID
 	}
 	return runPrimeForHook(agentID, ctx)
+}
+
+// handleAfterTool incrementally drains new entries from the source JSONL
+// into raw.jsonl. Called on PostToolUse and Stop hooks.
+func handleAfterTool(ctx *HookContext) error {
+	agentID := ""
+	if ctx.Marker != nil {
+		agentID = ctx.Marker.AgentID
+	}
+
+	// Load recording state — try by agent ID first, fall back to any active recording
+	var state *session.RecordingState
+	var err error
+	if agentID != "" {
+		state, err = session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
+	}
+	if state == nil {
+		// fallback: marker lookup failed or agent ID not in marker — find any active recording
+		state, err = session.LoadRecordingState(ctx.ProjectRoot)
+		if state != nil {
+			agentID = state.AgentID
+			slog.Debug("hook: afterTool using fallback recording state", "agent_id", agentID)
+		}
+	}
+	if err != nil || state == nil {
+		return nil // not recording, silent noop
+	}
+
+	adapter, adapterErr := adapters.GetAdapter(state.AdapterName)
+	if adapterErr != nil {
+		return nil
+	}
+	reader, ok := adapter.(adapters.IncrementalReader)
+	if !ok {
+		return nil // adapter doesn't support incremental reads
+	}
+
+	if state.SessionFile == "" {
+		// discover session file on first hook call (Claude Code JSONL may not exist at prime time)
+		if sf, findErr := adapter.FindSessionFile(agentID, state.StartedAt); findErr == nil && sf != "" {
+			state.SessionFile = sf
+			_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+				s.SessionFile = sf
+			})
+			slog.Debug("hook: discovered session file", "file", sf)
+		} else {
+			return nil // session file not available yet
+		}
+	}
+
+	entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, state.SourceOffset)
+	if readErr != nil {
+		slog.Debug("hook: incremental read failed", "error", readErr)
+		return nil // non-fatal, will catch up at stop
+	}
+
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// filter entries after session start time
+	if !state.StartedAt.IsZero() {
+		filtered := make([]adapters.RawEntry, 0, len(entries))
+		for _, e := range entries {
+			if !e.Timestamp.Before(state.StartedAt) {
+				filtered = append(filtered, e)
+			}
+		}
+		entries = filtered
+	}
+
+	if len(entries) == 0 {
+		// update offset even if no entries passed filter
+		_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+			s.SourceOffset = newOffset
+		})
+		return nil
+	}
+
+	redactor, _ := session.NewRedactorWithCustomRules(ctx.ProjectRoot)
+
+	sessionEntries := make([]session.Entry, 0, len(entries))
+	for _, raw := range entries {
+		entry := session.Entry{
+			Timestamp: raw.Timestamp,
+			Content:   raw.Content,
+			ToolName:  raw.ToolName,
+			ToolInput: raw.ToolInput,
+		}
+		entry.Type = mapRoleToEntryType(raw.Role)
+		sessionEntries = append(sessionEntries, entry)
+	}
+	redactor.RedactEntries(sessionEntries)
+
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+
+	// ensure raw.jsonl header exists before appending entries
+	if _, statErr := os.Stat(rawPath); os.IsNotExist(statErr) {
+		if headerErr := writeRawHeader(ctx.ProjectRoot, state); headerErr != nil {
+			slog.Debug("hook: failed to write raw.jsonl header", "error", headerErr)
+		}
+	}
+
+	if appendErr := appendRedactedEntries(rawPath, sessionEntries); appendErr != nil {
+		slog.Debug("hook: append entries failed", "error", appendErr)
+		return nil // non-fatal
+	}
+
+	_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+		s.SourceOffset = newOffset
+		s.EntryCount += len(sessionEntries)
+	})
+
+	return nil
+}
+
+// appendRedactedEntries appends redacted session entries to a raw.jsonl file.
+// ox is the sole writer to raw.jsonl, so no file locking is needed.
+// Uses fsync for durability so entries survive process crashes.
+func appendRedactedEntries(rawPath string, entries []session.Entry) error {
+	f, err := os.OpenFile(rawPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("open raw.jsonl: %w", err)
+	}
+	defer f.Close()
+
+	encoder := json.NewEncoder(f)
+	for _, entry := range entries {
+		data := map[string]any{
+			"type":      string(entry.Type),
+			"content":   entry.Content,
+			"timestamp": entry.Timestamp,
+		}
+		if entry.ToolName != "" {
+			data["tool_name"] = entry.ToolName
+		}
+		if entry.ToolInput != "" {
+			data["tool_input"] = entry.ToolInput
+		}
+		if entry.ToolOutput != "" {
+			data["tool_output"] = entry.ToolOutput
+		}
+		if err := encoder.Encode(data); err != nil {
+			return fmt.Errorf("encode entry: %w", err)
+		}
+	}
+
+	return f.Sync()
 }
 
 // runPrimeForHook runs ox agent prime as a subprocess.

@@ -56,6 +56,7 @@ func runAgentSessionSubagentComplete(inst *agentinstance.Instance, args []string
 	if parentPath == "" {
 		projectRoot, err := findProjectRoot()
 		if err == nil {
+			// first-found variant: subagent does not know parent agent ID
 			parentPath = session.FindParentSessionPath(projectRoot)
 		}
 	}

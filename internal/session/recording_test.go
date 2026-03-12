@@ -1137,21 +1137,21 @@ func TestExplicitStopMarker(t *testing.T) {
 	require.NoError(t, os.MkdirAll(sessionsDir, 0755))
 
 	// no marker initially
-	assert.False(t, ConsumeExplicitStop(tmpDir), "no marker should exist initially")
+	assert.False(t, ConsumeExplicitStop(tmpDir, "test-agent"), "no marker should exist initially")
 
 	// write marker
-	require.NoError(t, MarkExplicitStop(tmpDir))
+	require.NoError(t, MarkExplicitStop(tmpDir, "test-agent"))
 
 	// marker file should exist
-	markerPath := filepath.Join(sessionsDir, explicitStopMarker)
+	markerPath := filepath.Join(sessionsDir, explicitStopMarker+".test-agent")
 	_, err := os.Stat(markerPath)
 	assert.NoError(t, err, "marker file should exist after MarkExplicitStop")
 
 	// consume removes it and returns true
-	assert.True(t, ConsumeExplicitStop(tmpDir), "ConsumeExplicitStop should return true when marker exists")
+	assert.True(t, ConsumeExplicitStop(tmpDir, "test-agent"), "ConsumeExplicitStop should return true when marker exists")
 
 	// second consume returns false (already consumed)
-	assert.False(t, ConsumeExplicitStop(tmpDir), "ConsumeExplicitStop should return false after already consumed")
+	assert.False(t, ConsumeExplicitStop(tmpDir, "test-agent"), "ConsumeExplicitStop should return false after already consumed")
 
 	// marker file should be gone
 	_, err = os.Stat(markerPath)
@@ -1159,9 +1159,9 @@ func TestExplicitStopMarker(t *testing.T) {
 }
 
 func TestExplicitStopMarker_EmptyProjectRoot(t *testing.T) {
-	err := MarkExplicitStop("")
+	err := MarkExplicitStop("", "test-agent")
 	assert.Error(t, err, "MarkExplicitStop with empty root should error")
-	assert.False(t, ConsumeExplicitStop(""), "ConsumeExplicitStop with empty root should return false")
+	assert.False(t, ConsumeExplicitStop("", "test-agent"), "ConsumeExplicitStop with empty root should return false")
 }
 
 // TestStopClearStartLifecycle reproduces the exact bug from issue #132:
@@ -1184,11 +1184,11 @@ func TestStopClearStartLifecycle(t *testing.T) {
 	// 2. user runs /ox-session-stop (StopRecording + MarkExplicitStop)
 	_, err = StopRecording(projectRoot, "OxUser1")
 	require.NoError(t, err)
-	require.NoError(t, MarkExplicitStop(projectRoot))
+	require.NoError(t, MarkExplicitStop(projectRoot, "OxUser1"))
 
 	// 3. user runs /clear → hook calls prime → prime checks marker before auto-start
 	//    ConsumeExplicitStop returns true → prime skips auto-start
-	assert.True(t, ConsumeExplicitStop(projectRoot),
+	assert.True(t, ConsumeExplicitStop(projectRoot, "OxUser1"),
 		"marker must be present after explicit stop — prime relies on this to skip auto-start")
 
 	// 4. since prime skipped auto-start, IsRecording should still be false
@@ -1215,10 +1215,10 @@ func TestExplicitStopMarker_XDGPaths(t *testing.T) {
 	projectRoot := setupRecordingTest(t, cacheDir)
 
 	// marker should work through the XDG-aware sessionsSearchPaths
-	require.NoError(t, MarkExplicitStop(projectRoot))
-	assert.True(t, ConsumeExplicitStop(projectRoot),
+	require.NoError(t, MarkExplicitStop(projectRoot, "OxUser1"))
+	assert.True(t, ConsumeExplicitStop(projectRoot, "OxUser1"),
 		"marker must be consumable when written via XDG search paths")
-	assert.False(t, ConsumeExplicitStop(projectRoot),
+	assert.False(t, ConsumeExplicitStop(projectRoot, "OxUser1"),
 		"consumed marker must not be consumable again")
 }
 

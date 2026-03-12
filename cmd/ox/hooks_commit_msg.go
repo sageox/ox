@@ -91,6 +91,7 @@ func runHooksCommitMsg(cmd *cobra.Command, args []string) error {
 
 	// session trailer (only when actively recording)
 	if attr.Session != "" {
+		// first-found variant: git hook has no agent ID context
 		state, loadErr := session.LoadRecordingState(projectRoot)
 		if loadErr == nil && state != nil {
 			sessionName := session.GetSessionName(state.SessionPath)

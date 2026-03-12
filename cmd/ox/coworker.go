@@ -474,10 +474,12 @@ func runCoworkerRemove(cmd *cobra.Command, args []string) error {
 
 // logCoworkerLoad writes a coworker load entry to the session if recording.
 func logCoworkerLoad(projectRoot, name, model string) {
+	// first-found variant: no agent ID available in coworker load context
 	if !session.IsRecording(projectRoot) {
 		return
 	}
 
+	// first-found variant: no agent ID available (see IsRecording above)
 	state, err := session.LoadRecordingState(projectRoot)
 	if err != nil || state == nil {
 		return

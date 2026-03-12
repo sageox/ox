@@ -119,7 +119,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	}
 
 	// explicit start re-enables recording — clear any stop breadcrumb
-	session.ConsumeExplicitStop(projectRoot)
+	session.ConsumeExplicitStop(projectRoot, inst.AgentID)
 
 	// one-time session recording notice (returned to caller via JSON)
 	notice := getSessionTermsNotice()
@@ -229,6 +229,11 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 			return fmt.Errorf("no ledger configured for this project\n\nTo enable session recording:\n  1. Run 'ox init' to set up this repository\n  2. This creates a ledger to store session history\n\nSee 'ox init --help' for options")
 		}
 		return fmt.Errorf("failed to start recording: %w", err)
+	}
+	// write raw.jsonl header immediately so incremental hooks can append entries
+	if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
+		slog.Warn("failed to write raw.jsonl header at start", "error", writeErr)
+		// non-fatal: processAgentSession will write header at stop time as fallback
 	}
 
 	// build output once, render based on mode
@@ -366,7 +371,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	}
 
 	// mark explicit stop so /clear hook doesn't silently auto-restart the session
-	_ = session.MarkExplicitStop(projectRoot)
+	_ = session.MarkExplicitStop(projectRoot, inst.AgentID)
 
 	duration := formatDurationHuman(state.Duration())
 
@@ -665,6 +670,16 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		result.Model = sessionMeta.Model
 	}
 
+	// check if raw.jsonl already has entries from incremental hooks.
+	// a header-only file has exactly 1 line; 2+ lines means hooks appended entries.
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	hasIncrementalEntries := rawJSONLHasEntries(rawPath)
+
+	if hasIncrementalEntries {
+		// incremental hooks already wrote entries -- do final drain, write footer, and generate artifacts
+		return finalizeIncrementalSession(projectRoot, state, rawPath, adapter, result)
+	}
+
 	// read entries from session file
 	rawEntries, err := adapter.Read(state.SessionFile)
 	if err != nil {
@@ -890,9 +905,6 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		Summary: localSummary,
 	}
 
-	sessionSummaryView := &session.SummaryView{
-		Text: localSummary,
-	}
 	result.Summary = localSummary
 
 	// use the session name from recording state (generated at start time)
@@ -912,58 +924,29 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	sessionCacheDir := filepath.Dir(result.RawPath)
 	_ = session.WriteNeedsSummaryMarker(sessionCacheDir, result.RawPath, result.LedgerSessionDir)
 
-	// generate HTML viewer with summary
-	// failures here are non-fatal but we track them for doctor
-	var htmlGenFailed, summaryGenFailed bool
+	// generate all session artifacts via shared path
 	if result.RawPath != "" {
-		htmlGen, err := sessionhtml.NewGenerator()
-		if err == nil {
-			// read back the raw session
-			rawSession, readErr := store.ReadSession(filename)
-			if readErr == nil && rawSession != nil {
-				htmlPath := filepath.Join(filepath.Dir(result.RawPath), ledgerFileHTML)
-				if genErr := htmlGen.GenerateToFileWithSummary(rawSession, summaryResp, htmlPath); genErr == nil {
-					result.HTMLPath = htmlPath
+		rawSession, readErr := store.ReadSession(filename)
+		if readErr == nil && rawSession != nil {
+			htmlGen, _ := sessionhtml.NewGenerator()
+			artifactPaths, artifactErr := session.WriteSessionArtifacts(filepath.Dir(result.RawPath), rawSession, summaryResp, htmlGen)
+			if artifactErr != nil {
+				_ = doctor.SetNeedsDoctorAgent(projectRoot)
+				slog.Debug("artifact generation failed", "error", artifactErr)
+			} else {
+				result.HTMLPath = artifactPaths.HTML
+				result.SummaryMDPath = artifactPaths.SummaryMD
+				result.SessionMDPath = artifactPaths.SessionMD
 
-					// validate HTML consistency with raw.jsonl
-					if htmlVal := validateHTMLConsistency(htmlPath, result.RawPath); htmlVal.hasIssues() {
+				// validate HTML consistency with raw.jsonl
+				if artifactPaths.HTML != "" {
+					if htmlVal := validateHTMLConsistency(artifactPaths.HTML, result.RawPath); htmlVal.hasIssues() {
 						result.DataWarnings = append(result.DataWarnings, htmlVal.Warnings...)
 						result.DataWarnings = append(result.DataWarnings, htmlVal.Errors...)
 					}
-				} else {
-					htmlGenFailed = true
 				}
-
-				// generate summary markdown
-				summaryMDPath := strings.TrimSuffix(result.RawPath, ".jsonl") + "-summary.md"
-				summaryMDGen := session.NewSummaryMarkdownGenerator()
-				summaryMDBytes, summaryMDErr := summaryMDGen.Generate(rawSession.Meta, sessionSummaryView, rawSession.Entries)
-				if summaryMDErr == nil {
-					if writeErr := os.WriteFile(summaryMDPath, summaryMDBytes, 0644); writeErr == nil {
-						result.SummaryMDPath = summaryMDPath
-					} else {
-						summaryGenFailed = true
-					}
-				} else {
-					summaryGenFailed = true
-				}
-
-				// generate full session markdown
-				sessionMDPath := strings.TrimSuffix(result.RawPath, ".jsonl") + "-session.md"
-				sessionMDGen := session.NewMarkdownGenerator()
-				if sessionMDErr := sessionMDGen.GenerateToFile(rawSession, sessionMDPath); sessionMDErr == nil {
-					result.SessionMDPath = sessionMDPath
-				}
-				// session MD failure is not critical, no marker needed
 			}
-		} else {
-			htmlGenFailed = true
 		}
-	}
-
-	// if HTML or summary generation failed, set marker for doctor
-	if htmlGenFailed || summaryGenFailed {
-		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 	}
 
 	// check for plan.md saved during session (via `ox agent <id> session plan`)
@@ -2078,4 +2061,25 @@ func formatFilterModeDescription(mode string) string {
 	default:
 		return mode
 	}
+}
+
+
+// rawJSONLHasEntries returns true if raw.jsonl exists and contains more than
+// just a header line, indicating incremental hooks have appended entries.
+func rawJSONLHasEntries(rawPath string) bool {
+	f, err := os.Open(rawPath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	lineCount := 0
+	for scanner.Scan() {
+		lineCount++
+		if lineCount > 1 {
+			return true // more than just the header
+		}
+	}
+	return false
 }

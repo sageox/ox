@@ -73,6 +73,14 @@ func NewSessionFinalizeHandler(logger *slog.Logger) *SessionFinalizeHandler {
 	return &SessionFinalizeHandler{logger: logger}
 }
 
+// NewSessionFinalizeHandlerForTest creates a handler with git operations disabled.
+// Use in tests that don't have a real git repository.
+func NewSessionFinalizeHandlerForTest(logger *slog.Logger) *SessionFinalizeHandler {
+	h := NewSessionFinalizeHandler(logger)
+	h.skipGit = true
+	return h
+}
+
 // Type implements WorkHandler.
 func (h *SessionFinalizeHandler) Type() string { return sessionFinalizeType }
 
@@ -213,32 +221,19 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		return err
 	}
 
-	sessionDir := payload.SessionDir
 	llmOutput := result.Output
 
-	// --- summary.md (always written first) ---
-	summaryMDPath := filepath.Join(sessionDir, artifactSummaryMD)
-	if err := os.WriteFile(summaryMDPath, []byte(llmOutput), 0644); err != nil {
-		return fmt.Errorf("write summary.md: %w", err)
-	}
-	h.logger.Info("wrote summary.md", "path", summaryMDPath)
-
-	// --- summary.json (best-effort parse of LLM JSON output) ---
+	// parse LLM output into SummarizeResponse
 	var summaryResp *session.SummarizeResponse
 	parsed, parseErr := parseSummaryJSON(llmOutput)
 	if parseErr != nil {
-		h.logger.Warn("could not parse summary JSON from LLM output, skipping summary.json", "err", parseErr)
+		h.logger.Warn("could not parse summary JSON from LLM output, using raw text", "err", parseErr)
+		// fall back to raw LLM output as summary text
+		summaryResp = &session.SummarizeResponse{
+			Summary: llmOutput,
+		}
 	} else {
 		summaryResp = parsed
-		summaryJSON, err := json.MarshalIndent(parsed, "", "  ")
-		if err == nil {
-			summaryJSONPath := filepath.Join(sessionDir, artifactSummJSON)
-			if wErr := os.WriteFile(summaryJSONPath, summaryJSON, 0644); wErr != nil {
-				h.logger.Warn("failed to write summary.json", "err", wErr)
-			} else {
-				h.logger.Info("wrote summary.json", "path", summaryJSONPath)
-			}
-		}
 	}
 
 	// use cached session from BuildPrompt, fall back to re-reading
@@ -253,39 +248,26 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		}
 	}
 
-	// --- session.html ---
-	htmlPath := filepath.Join(sessionDir, artifactHTML)
-	if htmlErr := h.generateHTML(stored, summaryResp, htmlPath); htmlErr != nil {
-		h.logger.Warn("html generation failed", "err", htmlErr)
+	// generate all artifacts via shared path
+	htmlGen, htmlErr := html.NewGenerator()
+	var gen session.HTMLGenerator
+	if htmlErr == nil {
+		gen = htmlGen
 	}
-
-	// --- session.md ---
-	mdPath := filepath.Join(sessionDir, artifactSessionMD)
-	if mdErr := h.generateMarkdown(stored, mdPath); mdErr != nil {
-		h.logger.Warn("markdown generation failed", "err", mdErr)
+	artifactPaths, artifactErr := session.WriteSessionArtifacts(payload.SessionDir, stored, summaryResp, gen)
+	if artifactErr != nil {
+		h.logger.Warn("artifact generation failed", "err", artifactErr)
+	} else {
+		h.logger.Info("wrote session artifacts",
+			"summary_md", artifactPaths.SummaryMD,
+			"summary_json", artifactPaths.SummaryJSON,
+			"html", artifactPaths.HTML,
+			"session_md", artifactPaths.SessionMD,
+		)
 	}
 
 	h.gitCommitAndPush(payload)
 	return nil
-}
-
-// generateHTML creates session.html using the html generator.
-func (h *SessionFinalizeHandler) generateHTML(stored *session.StoredSession, summary *session.SummarizeResponse, outputPath string) error {
-	gen, err := html.NewGenerator()
-	if err != nil {
-		return fmt.Errorf("create html generator: %w", err)
-	}
-
-	if summary != nil {
-		return gen.GenerateToFileWithSummary(stored, summary, outputPath)
-	}
-	return gen.GenerateToFile(stored, outputPath)
-}
-
-// generateMarkdown creates session.md using the markdown generator.
-func (h *SessionFinalizeHandler) generateMarkdown(stored *session.StoredSession, outputPath string) error {
-	gen := session.NewMarkdownGenerator()
-	return gen.GenerateToFile(stored, outputPath)
 }
 
 // gitCommitAndPush stages, commits, and pushes the finalized session.

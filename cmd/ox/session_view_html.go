@@ -25,6 +25,7 @@ func viewAsHTML(_ *session.Store, storedSession *session.StoredSession, projectR
 	// check if recording is in progress
 	isRecording := false
 	if projectRoot != "" {
+		// first-found variant: display check for any active recording, no agent context
 		isRecording = session.IsRecording(projectRoot)
 	}
 

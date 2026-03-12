@@ -50,6 +50,7 @@ type RecordingState struct {
 	AgentType      string `json:"agent_type,omitempty"`       // original agent type for metadata: "codex", "amp", etc. Falls back to AdapterName if empty.
 	StopIncomplete bool   `json:"stop_incomplete,omitempty"`  // set when stop returned retry guidance (empty file)
 	Model          string `json:"model,omitempty"`            // LLM model for generic adapters where ReadMetadata returns nil
+	SourceOffset   int64  `json:"source_offset,omitempty"`   // byte offset in source file for incremental reading
 }
 
 // Duration returns how long the recording has been running.
@@ -273,39 +274,47 @@ func IsRecording(projectRoot string) bool {
 
 const explicitStopMarker = ".session_stopped"
 
-// MarkExplicitStop writes a breadcrumb indicating the user explicitly stopped
-// recording. This prevents the next auto-start cycle (e.g. from /clear hook
-// re-prime) from silently restarting the session.
-func MarkExplicitStop(projectRoot string) error {
+// MarkExplicitStop writes a per-agent breadcrumb indicating the user explicitly
+// stopped recording. This prevents the next auto-start cycle (e.g. from /clear
+// hook re-prime) from silently restarting the session for this specific agent.
+func MarkExplicitStop(projectRoot, agentID string) error {
 	if projectRoot == "" {
 		return fmt.Errorf("%w: project root", ErrEmptyPath)
 	}
+	marker := explicitStopMarker + "." + agentID
 	for _, dir := range sessionsSearchPaths(projectRoot) {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			continue
 		}
-		markerPath := filepath.Join(dir, explicitStopMarker)
+		markerPath := filepath.Join(dir, marker)
 		if err := os.WriteFile(markerPath, []byte(time.Now().Format(time.RFC3339)), 0600); err != nil {
 			continue
 		}
 		return nil
 	}
-	return fmt.Errorf("could not write explicit stop marker for project=%s", projectRoot)
+	return fmt.Errorf("could not write explicit stop marker for project=%s agent=%s", projectRoot, agentID)
 }
 
-// ConsumeExplicitStop checks for and removes the explicit-stop marker.
+// ConsumeExplicitStop checks for and removes the per-agent explicit-stop marker.
 // Returns true if the marker existed (meaning an auto-start should be skipped).
-func ConsumeExplicitStop(projectRoot string) bool {
+// Also cleans up any legacy global marker (without agent suffix) as a migration path.
+func ConsumeExplicitStop(projectRoot, agentID string) bool {
 	if projectRoot == "" {
 		return false
 	}
+	found := false
+	marker := explicitStopMarker + "." + agentID
 	for _, dir := range sessionsSearchPaths(projectRoot) {
-		markerPath := filepath.Join(dir, explicitStopMarker)
+		// check per-agent marker
+		markerPath := filepath.Join(dir, marker)
 		if err := os.Remove(markerPath); err == nil {
-			return true // marker existed and was removed
+			found = true
 		}
+		// clean up legacy global marker (backward compat migration)
+		legacyPath := filepath.Join(dir, explicitStopMarker)
+		_ = os.Remove(legacyPath)
 	}
-	return false
+	return found
 }
 
 // sessionsSearchPaths returns the sessions directory paths to search

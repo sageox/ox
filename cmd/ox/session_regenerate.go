@@ -599,14 +599,7 @@ func regenerateArtifacts(sessionPath string, rawSession *session.StoredSession) 
 	if data, err := os.ReadFile(summaryJSONPath); err == nil {
 		var summaryResp session.SummarizeResponse
 		if json.Unmarshal(data, &summaryResp) == nil {
-			summaryView := &session.SummaryView{
-				Text:        summaryResp.Summary,
-				KeyActions:  summaryResp.KeyActions,
-				Outcome:     summaryResp.Outcome,
-				TopicsFound: summaryResp.TopicsFound,
-				FinalPlan:   summaryResp.FinalPlan,
-				Diagrams:    summaryResp.Diagrams,
-			}
+			summaryView := session.SummarizeResponseToSummaryView(&summaryResp)
 			summaryMdGen := session.NewSummaryMarkdownGenerator()
 			summaryMdBytes, err := summaryMdGen.Generate(rawSession.Meta, summaryView, rawSession.Entries)
 			if err == nil {

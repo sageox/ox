@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1066,7 +1067,7 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 	}
 
 	// respect explicit session stop — user ran /ox-session-stop, don't auto-restart
-	if session.ConsumeExplicitStop(projectRoot) {
+	if session.ConsumeExplicitStop(projectRoot, agentID) {
 		return nil
 	}
 
@@ -1114,6 +1115,11 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 		// non-fatal but visible — agent sees stderr and can surface it
 		fmt.Fprintf(os.Stderr, "warning: session recording failed to start: %v\n", err)
 		return nil
+	}
+
+	// write raw.jsonl header immediately so incremental hooks can append entries
+	if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
+		slog.Warn("failed to write raw.jsonl header at auto-start", "error", writeErr)
 	}
 
 	// build user notification message

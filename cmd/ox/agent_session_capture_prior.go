@@ -57,7 +57,7 @@ func runAgentSessionCapturePrior(inst *agentinstance.Instance, args []string) er
 	opts := session.CaptureOptions{
 		AgentID:         inst.AgentID,
 		Title:           title,
-		MergeWithActive: session.IsRecording(mustFindProjectRoot()),
+		MergeWithActive: session.IsRecordingForAgent(mustFindProjectRoot(), inst.AgentID),
 	}
 
 	result, err := session.CapturePrior(reader, opts)
