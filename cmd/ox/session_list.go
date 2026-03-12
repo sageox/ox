@@ -102,8 +102,10 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 		if jsonOutput {
 			cwd, _ := os.Getwd()
 			return outputJSON(sessionListOutput{
-				Sessions: []sessionListEntry{},
-				RepoName: filepath.Base(cwd),
+				Sessions:        []sessionListEntry{},
+				RepoName:        filepath.Base(cwd),
+				RepoID:          "",
+				LedgerAvailable: false,
 			})
 		}
 		cwd, _ := os.Getwd()
