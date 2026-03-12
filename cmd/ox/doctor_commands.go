@@ -79,7 +79,7 @@ func init() {
 		Slug:        CheckSlugClaudeCommands,
 		Name:        "Claude commands",
 		Category:    "Integration",
-		FixLevel:    FixLevelSuggested,
+		FixLevel:    FixLevelAuto,
 		Description: "Verifies ox slash commands are installed in .claude/commands/",
 		Run:         checkClaudeCommands,
 	})
