@@ -566,37 +566,47 @@ func (c *SessionOrphanedCheck) Run(ctx context.Context) CheckResult {
 	}
 
 	// auto-fix: clean up stale recordings
-	cleaned := 0
+	// empty stubs require 48h staleness (sessions can run 12+ hours, raw.jsonl written on stop)
+	const emptyStubFixThreshold = 48 * time.Hour
+	cleanedEmpty := 0
+	cleanedContent := 0
 	for _, state := range status.StaleRecordings {
 		if state.SessionPath == "" {
 			continue
 		}
 		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
-		hasContent := false
-		if _, err := os.Stat(rawPath); err == nil {
-			hasContent = true
+		_, rawErr := os.Stat(rawPath)
+		hasContent := rawErr == nil
+		if rawErr != nil && !os.IsNotExist(rawErr) {
+			continue // transient/permission error, skip
 		}
 
 		if !hasContent {
-			// empty stub: remove .recording.json and empty dir
+			// empty stubs need the longer 48h threshold
+			if time.Since(state.StartedAt) < emptyStubFixThreshold {
+				continue
+			}
 			recPath := filepath.Join(state.SessionPath, ".recording.json")
-			_ = os.Remove(recPath)
-			// remove dir if empty
-			entries, _ := os.ReadDir(state.SessionPath)
-			if len(entries) == 0 {
+			if err := os.Remove(recPath); err != nil && !os.IsNotExist(err) {
+				continue
+			}
+			if entries, err := os.ReadDir(state.SessionPath); err == nil && len(entries) == 0 {
 				_ = os.Remove(state.SessionPath)
 			}
-			cleaned++
+			cleanedEmpty++
 		} else {
-			// has content: just clear .recording.json so it stops showing as "recording"
+			// has content: clear .recording.json so it stops showing as "recording"
 			// data preserved for 'ox session recover'
 			recPath := filepath.Join(state.SessionPath, ".recording.json")
-			_ = os.Remove(recPath)
-			cleaned++
+			if err := os.Remove(recPath); err != nil && !os.IsNotExist(err) {
+				continue
+			}
+			cleanedContent++
 		}
 	}
 
-	msg := fmt.Sprintf("cleaned %d orphaned recording(s) (%d empty stubs removed, %d with content cleared)", cleaned, emptyCount, contentCount)
+	cleaned := cleanedEmpty + cleanedContent
+	msg := fmt.Sprintf("cleaned %d orphaned recording(s) (%d empty stubs removed, %d with content cleared)", cleaned, cleanedEmpty, cleanedContent)
 	return CheckResult{
 		Name:    c.Name(),
 		Status:  StatusPass,

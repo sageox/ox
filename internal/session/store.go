@@ -421,7 +421,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		// skip empty stale recording stubs (no raw.jsonl, older than 48 hours)
 		// these accumulate when agents exit without calling session stop
 		if isRecording && !recordingStartedAt.IsZero() && time.Since(recordingStartedAt) > 48*time.Hour {
-			if _, statErr := os.Stat(filepath.Join(sessionPath, rawFilename)); statErr != nil {
+			if _, statErr := os.Stat(filepath.Join(sessionPath, rawFilename)); os.IsNotExist(statErr) {
 				continue // empty stub, skip
 			}
 		}

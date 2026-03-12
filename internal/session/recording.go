@@ -359,10 +359,13 @@ func cleanupStaleEmptyRecordings(projectRoot string) {
 		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
 		if _, err := os.Stat(rawPath); err == nil {
 			continue // has content, don't auto-delete
+		} else if !os.IsNotExist(err) {
+			slog.Debug("cleanup stale empty recording: stat error", "path", rawPath, "error", err)
+			continue // transient/permission error, skip
 		}
 		// remove .recording.json
 		recPath := recordingStatePath(state.SessionPath)
-		if err := os.Remove(recPath); err != nil {
+		if err := os.Remove(recPath); err != nil && !os.IsNotExist(err) {
 			slog.Debug("cleanup stale empty recording", "path", recPath, "error", err)
 			continue
 		}
