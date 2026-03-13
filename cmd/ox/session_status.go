@@ -32,6 +32,7 @@ Examples:
 // sessionStatusOutput is the JSON output format for session status.
 type sessionStatusOutput struct {
 	Recording     bool                    `json:"recording"`
+	AgentAlive    *bool                   `json:"agent_alive,omitempty"`    // nil if no PID available, false if agent exited
 	Guidance      string                  `json:"guidance,omitempty"`
 	Count         int                     `json:"count,omitempty"`
 	Sessions      []sessionRecordingEntry `json:"sessions,omitempty"`
@@ -54,6 +55,7 @@ type sessionStatusOutput struct {
 // sessionRecordingEntry represents one active recording in the multi-session output.
 type sessionRecordingEntry struct {
 	AgentID       string `json:"agent_id"`
+	AgentAlive    *bool  `json:"agent_alive,omitempty"`    // nil if no PID available, false if agent exited
 	Title         string `json:"title,omitempty"`
 	Agent         string `json:"agent,omitempty"`
 	DurationSecs  int    `json:"duration_seconds"`
@@ -114,7 +116,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	// build agent liveness map: agent_id → alive (true/false)
-	// Two sources: disk instance store (PID check) and daemon heartbeats.
+	// Three sources: recording state PID, disk instance store PID, and daemon heartbeats.
 	agentAlive := resolveAgentLiveness(projectRoot, states)
 
 	// no recordings
@@ -141,6 +143,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		if jsonOutput {
 			output := sessionStatusOutput{
 				Recording:     true,
+				AgentAlive:    agentAlivePtr(state),
 				Guidance:      "Run 'ox agent <id> session stop' to save the recording",
 				Count:         1,
 				Title:         state.Title,
@@ -161,7 +164,11 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 			return outputJSON(output)
 		}
 
-		fmt.Println(cli.StyleSuccess.Render("Recording in progress"))
+		if !state.IsAgentAlive() {
+			fmt.Println(cli.StyleWarning.Render("Recording in progress (agent exited)"))
+		} else {
+			fmt.Println(cli.StyleSuccess.Render("Recording in progress"))
+		}
 		fmt.Println()
 		if state.Title != "" {
 			fmt.Printf("  Title:    %s\n", state.Title)
@@ -197,6 +204,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 			alive, status := agentLivenessFor(agentAlive, s.AgentID)
 			entries = append(entries, sessionRecordingEntry{
 				AgentID:       s.AgentID,
+				AgentAlive:    agentAlivePtr(s),
 				Title:         s.Title,
 				Agent:         s.AdapterName,
 				DurationSecs:  int(d.Seconds()),
@@ -258,8 +266,8 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 }
 
 // resolveAgentLiveness builds a map of agent_id → alive status.
-// Uses two sources: disk instance store (PID via kill(pid,0)) and daemon heartbeats.
-// Returns nil map if no liveness info is available (non-fatal).
+// Uses three sources: recording state PID (direct), disk instance store PID,
+// and daemon heartbeats. Returns nil map if no liveness info is available.
 func resolveAgentLiveness(projectRoot string, states []*session.RecordingState) map[string]bool {
 	if len(states) == 0 {
 		return nil
@@ -275,10 +283,20 @@ func resolveAgentLiveness(projectRoot string, states []*session.RecordingState) 
 		}
 	}
 
-	// source 1: disk instance store — PID-based liveness check
+	// source 1: recording state PID — direct from .recording.json
+	for _, s := range states {
+		if s.AgentID != "" && s.ParentPID > 0 {
+			result[s.AgentID] = s.IsAgentAlive()
+		}
+	}
+
+	// source 2: disk instance store — PID-based liveness check
 	store, err := getInstanceStore(projectRoot)
 	if err == nil {
 		for agentID := range agentIDs {
+			if _, known := result[agentID]; known {
+				continue // already resolved from recording state
+			}
 			inst, err := store.Get(agentID)
 			if err != nil {
 				continue
@@ -287,7 +305,7 @@ func resolveAgentLiveness(projectRoot string, states []*session.RecordingState) 
 		}
 	}
 
-	// source 2: daemon heartbeat instances — recent heartbeat means alive
+	// source 3: daemon heartbeat instances — recent heartbeat means alive
 	if client := daemon.TryConnect(); client != nil {
 		instances, err := client.Instances()
 		if err == nil {
@@ -319,6 +337,16 @@ func agentLivenessFor(livenessMap map[string]bool, agentID string) (*bool, strin
 		status = "alive"
 	}
 	return &alive, status
+}
+
+// agentAlivePtr returns a *bool indicating agent liveness from PID.
+// Returns nil if no PID is recorded (backward compat with old recordings).
+func agentAlivePtr(state *session.RecordingState) *bool {
+	if state == nil || state.ParentPID <= 0 {
+		return nil
+	}
+	alive := state.IsAgentAlive()
+	return &alive
 }
 
 // formatProcessStatus returns a styled string for process status display.

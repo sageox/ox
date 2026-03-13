@@ -184,7 +184,20 @@ func TestBackgroundTickerPlusManualSyncRace(t *testing.T) {
 		t.Skip("git not installed")
 	}
 
-	tmpDir := t.TempDir()
+	// use manual temp dir with retry cleanup — t.TempDir() races with
+	// in-flight git subprocesses that may still hold file handles after
+	// the scheduler goroutine returns
+	tmpDir, err := os.MkdirTemp("", "sync-race-*")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		for range 5 {
+			if err := os.RemoveAll(tmpDir); err == nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		// best-effort: OS will clean /tmp eventually
+	})
 	ledgerDir := tmpDir + "/ledger"
 	require.NoError(t, os.MkdirAll(ledgerDir, 0755))
 	setupGitRepo(t, ledgerDir)

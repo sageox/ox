@@ -219,6 +219,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		Username:      getSessionUsername(),
 		WorkspacePath: projectRoot,
 		Branch:        repotools.GetCurrentBranch(projectRoot),
+		ParentPID:     inst.ParentPID,
 	}
 
 	state, err := session.StartRecording(projectRoot, opts)

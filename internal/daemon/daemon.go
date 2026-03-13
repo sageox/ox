@@ -333,7 +333,9 @@ func (d *Daemon) Start() error {
 			return awCfg
 		}
 		d.agentWorker = agentwork.NewManager(runner, d.logger, configLoader, agentWorkSignal, d.config.LedgerPath)
-		d.agentWorker.RegisterHandler(agentwork.NewSessionFinalizeHandler(d.logger))
+		sfh := agentwork.NewSessionFinalizeHandler(d.logger)
+		sfh.SetPIDLookup(d.heartbeat.GetAgentPID)
+		d.agentWorker.RegisterHandler(sfh)
 		d.agentWorker.SetOnComplete(func(result agentwork.WorkResult) {
 			status := "success"
 			if !result.Success {
@@ -794,6 +796,15 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 			status = StatusIdle
 		}
 
+		// instant liveness check: if PID is known and process is dead, mark as exited
+		agentPID := d.heartbeat.GetAgentPID(agentID)
+		if agentPID > 0 {
+			proc, procErr := os.FindProcess(agentPID)
+			if procErr != nil || proc.Signal(syscall.Signal(0)) != nil {
+				status = StatusExited
+			}
+		}
+
 		ctxStats := d.heartbeat.GetAgentContextStats(agentID)
 		instances = append(instances, InstanceInfo{
 			AgentID:                 agentID,
@@ -805,6 +816,7 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 			CommandCount:            ctxStats.CommandCount,
 			ParentAgentID:           d.heartbeat.GetAgentParentID(agentID),
 			AgentType:               d.heartbeat.GetAgentType(agentID),
+			ParentPID:               d.heartbeat.GetAgentPID(agentID),
 		})
 	}
 
