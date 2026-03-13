@@ -58,7 +58,7 @@ Example:
 
 		// verify at least one content file exists
 		if !hasContentFiles(sessionPath) {
-			return fmt.Errorf("no content files found in session %s\nExpected at least one of: raw.jsonl, events.jsonl, summary.md, session.md, session.html", sessionName)
+			return fmt.Errorf("no content files found in session %s\nExpected at least one of: raw.jsonl, summary.md, session.md, session.html", sessionName)
 		}
 
 		// validate raw.jsonl data quality before uploading
@@ -121,7 +121,6 @@ Example:
 func hasContentFiles(sessionPath string) bool {
 	contentFiles := []string{
 		ledgerFileRaw,
-		ledgerFileEvents,
 		ledgerFileSummaryMD,
 		ledgerFileSessionMD,
 		ledgerFileHTML,

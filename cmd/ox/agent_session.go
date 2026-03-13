@@ -61,7 +61,6 @@ const sessionStopGuidance = `Session stopped and saved. Check the summary_prompt
 // uploadSessionToLedger (write) and the post-prune path rewrite (read-back).
 const (
 	ledgerFileRaw       = "raw.jsonl"
-	ledgerFileEvents    = "events.jsonl" // likely deprecated long-term; raw.jsonl is the source of truth
 	ledgerFileHTML      = "session.html"
 	ledgerFileSummaryMD = "summary.md"
 	ledgerFileSessionMD = "session.md"
@@ -496,23 +495,11 @@ func outputTextSummary(state *session.RecordingState, duration string, processRe
 			fmt.Printf("  Model: %s\n", processResult.Model)
 		}
 
-		// show filter mode with event counts
-		if processResult.FilterMode != "" && processResult.EventsBeforeFilter > 0 {
-			modeDesc := formatFilterModeDescription(processResult.FilterMode)
-			fmt.Printf("\n  Mode: %s (%s)\n", processResult.FilterMode, modeDesc)
-			fmt.Printf("  Events: %d total -> %d after filtering\n",
-				processResult.EventsBeforeFilter,
-				processResult.EventsAfterFilter)
-		}
-
 		// show generated files with descriptions
 		if processResult.RawPath != "" || processResult.HTMLPath != "" || processResult.SummaryMDPath != "" {
 			fmt.Println("\n  Generated files:")
 			if processResult.RawPath != "" {
 				fmt.Printf("    Raw session:     %s\n", processResult.RawPath)
-			}
-			if processResult.EventsPath != "" {
-				fmt.Printf("    Events log:      %s\n", processResult.EventsPath)
 			}
 			if processResult.HTMLPath != "" {
 				fmt.Printf("    HTML viewer:     %s\n", processResult.HTMLPath)
@@ -553,7 +540,6 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 	}
 	if processResult != nil {
 		output.RawPath = processResult.RawPath
-		output.EventsPath = processResult.EventsPath
 		output.HTMLPath = processResult.HTMLPath
 		output.SummaryMDPath = processResult.SummaryMDPath
 		output.SessionMDPath = processResult.SessionMDPath
@@ -564,9 +550,6 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 		output.SummaryPrompt = processResult.SummaryPrompt
 		output.Model = processResult.Model
 		output.AgentVersion = processResult.AgentVersion
-		output.FilterMode = processResult.FilterMode
-		output.EventsBeforeFilter = processResult.EventsBeforeFilter
-		output.EventsAfterFilter = processResult.EventsAfterFilter
 		output.LedgerSessionDir = processResult.LedgerSessionDir
 		output.UploadWarning = processResult.UploadWarning
 		output.DataWarnings = processResult.DataWarnings
@@ -595,7 +578,6 @@ type sessionStopOutput struct {
 	Title              string `json:"title,omitempty"`
 	Duration           string `json:"duration"`
 	RawPath            string `json:"raw_path,omitempty"`
-	EventsPath         string `json:"events_path,omitempty"`
 	HTMLPath           string `json:"html_path,omitempty"`
 	SummaryMDPath      string `json:"summary_md_path,omitempty"`
 	SessionMDPath      string `json:"session_md_path,omitempty"`
@@ -606,9 +588,6 @@ type sessionStopOutput struct {
 	SummaryPrompt      string `json:"summary_prompt,omitempty"`
 	Model              string `json:"model,omitempty"`
 	AgentVersion       string `json:"agent_version,omitempty"`
-	FilterMode         string `json:"filter_mode,omitempty"`          // "infra" or "all"
-	EventsBeforeFilter int    `json:"events_before_filter,omitempty"` // events before filtering
-	EventsAfterFilter  int    `json:"events_after_filter,omitempty"`  // events after filtering
 	LedgerSessionDir   string   `json:"ledger_session_dir,omitempty"`   // path to session dir in ledger
 	UploadWarning      string   `json:"upload_warning,omitempty"`       // set when ledger upload failed
 	DataWarnings       []string `json:"data_warnings,omitempty"`       // data quality warnings from validation
@@ -633,7 +612,6 @@ func parseTitle(args []string) string {
 // agentSessionResult contains outcomes from session processing
 type agentSessionResult struct {
 	RawPath            string
-	EventsPath         string
 	HTMLPath           string
 	SummaryMDPath      string
 	SessionMDPath      string
@@ -643,9 +621,6 @@ type agentSessionResult struct {
 	Model              string
 	Summary            string // local summary text
 	SummaryPrompt      string // prompt for calling agent to generate full summary
-	FilterMode         string // "infra" or "all"
-	EventsBeforeFilter int    // event count before filtering
-	EventsAfterFilter  int    // event count after filtering
 	PlanPath           string // path to plan.md (empty if no plan captured)
 	SessionName        string // ledger session folder name (e.g. 2026-02-06T14-32-ryan-Ox7f3a)
 	LedgerSessionDir   string   // full path to session dir in ledger (empty if upload failed)
@@ -663,7 +638,7 @@ type agentSessionResult struct {
 // to the ledger git repo and uploaded to LFS (network-dependent, can retry).
 // This ensures session stop never fails due to network issues.
 //
-//	Phase 1 (cache): redact secrets -> write raw.jsonl, events.jsonl, HTML, markdown
+//	Phase 1 (cache): redact secrets -> write raw.jsonl, HTML, markdown
 //	Phase 2 (ledger): copy files -> LFS upload -> write meta.json -> git commit+push
 //	Cleanup: on phase 2 success, prune the local cache (ledger is source of truth)
 //
@@ -852,76 +827,6 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	}
 	result.RawPath = rawWriter.FilePath()
 
-	// generate and write events session
-	eventLog := session.NewEventLog(entries, state.AgentID, state.AdapterName)
-
-	// apply filtering based on session mode
-	result.EventsBeforeFilter = len(eventLog.Events)
-	result.FilterMode = state.FilterMode
-	if state.FilterMode != "" {
-		eventLog.Events = session.FilterEvents(eventLog.Events, session.SessionFilterMode(state.FilterMode))
-	}
-	result.EventsAfterFilter = len(eventLog.Events)
-
-	eventsWriter, err := store.CreateEvents(filename)
-	if err != nil {
-		// raw session was saved but events failed - set marker
-		_ = doctor.SetNeedsDoctorAgent(projectRoot)
-		return nil, fmt.Errorf("failed to create events session: %w", err)
-	}
-
-	// write events header
-	eventsMeta := &session.StoreMeta{
-		Version:      "1.0",
-		CreatedAt:    state.StartedAt,
-		AgentID:      state.AgentID,
-		AgentType:    agentTypeForMeta,
-		AgentVersion: result.AgentVersion,
-		Model:        result.Model,
-		Username:     getDisplayName(projectEndpoint),
-		RepoID:       repoID,
-	}
-	if err := eventsWriter.WriteHeader(eventsMeta); err != nil {
-		eventsWriter.Close()
-		// raw session was saved but events header failed - set marker
-		_ = doctor.SetNeedsDoctorAgent(projectRoot)
-		return nil, fmt.Errorf("failed to write events header: %w", err)
-	}
-
-	// write events
-	for _, event := range eventLog.Events {
-		data := map[string]any{
-			"type":      string(event.Type),
-			"summary":   event.Summary,
-			"timestamp": event.Timestamp,
-		}
-		if event.Details != "" {
-			data["details"] = event.Details
-		}
-		if event.ErrorMsg != "" {
-			data["error"] = event.ErrorMsg
-		}
-		if event.RelatedFile != "" {
-			data["file"] = event.RelatedFile
-		}
-		if event.Success != nil {
-			data["success"] = *event.Success
-		}
-		if err := eventsWriter.WriteRaw(data); err != nil {
-			eventsWriter.Close()
-			// raw session was saved but events failed - set marker
-			_ = doctor.SetNeedsDoctorAgent(projectRoot)
-			return nil, fmt.Errorf("failed to write event: %w", err)
-		}
-	}
-
-	if err := eventsWriter.Close(); err != nil {
-		// raw session was saved but events failed - set marker
-		_ = doctor.SetNeedsDoctorAgent(projectRoot)
-		return nil, fmt.Errorf("failed to close events session: %w", err)
-	}
-	result.EventsPath = eventsWriter.FilePath()
-
 	// generate local summary (no server API call - the calling agent will summarize via prompt)
 	localSummary := session.LocalSummary(entries)
 	summaryResp := &session.SummarizeResponse{
@@ -1072,7 +977,6 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 						*field = "" // didn't make it to ledger
 					}
 				}
-				rewriteIfExists(&result.EventsPath, ledgerFileEvents)
 				rewriteIfExists(&result.HTMLPath, ledgerFileHTML)
 				rewriteIfExists(&result.SummaryMDPath, ledgerFileSummaryMD)
 				rewriteIfExists(&result.SessionMDPath, ledgerFileSessionMD)
@@ -1130,7 +1034,6 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 
 	// copy secondary artifacts (best-effort -- failures logged but don't abort upload)
 	secondaryFiles := map[string]string{
-		ledgerFileEvents:    result.EventsPath,
 		ledgerFileHTML:      result.HTMLPath,
 		ledgerFileSummaryMD: result.SummaryMDPath,
 		ledgerFileSessionMD: result.SessionMDPath,
@@ -1220,7 +1123,6 @@ func copySessionCacheToLedger(result *agentSessionResult, ledgerPath, sessionNam
 
 	// secondary artifacts — best-effort
 	secondaryFiles := map[string]string{
-		ledgerFileEvents:    result.EventsPath,
 		ledgerFileHTML:      result.HTMLPath,
 		ledgerFileSummaryMD: result.SummaryMDPath,
 		ledgerFileSessionMD: result.SessionMDPath,
@@ -2155,21 +2057,6 @@ func getSessionTermsNotice() string {
 
 	return sessionTermsNotice
 }
-
-// formatFilterModeDescription returns a human-readable description of the filter mode.
-func formatFilterModeDescription(mode string) string {
-	switch mode {
-	case "infra":
-		return "infrastructure events only"
-	case "all":
-		return "all events"
-	case "none":
-		return "disabled"
-	default:
-		return mode
-	}
-}
-
 
 // rawJSONLHasEntries returns true if raw.jsonl exists and contains more than
 // just a header line, indicating incremental hooks have appended entries.

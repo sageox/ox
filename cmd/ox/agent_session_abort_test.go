@@ -33,7 +33,6 @@ func setupAbortTest(t *testing.T) (string, *session.RecordingState) {
 
 	// populate session folder
 	require.NoError(t, os.WriteFile(filepath.Join(state.SessionPath, ledgerFileRaw), []byte(`{"test":true}`), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(state.SessionPath, ledgerFileEvents), []byte(`{"event":true}`), 0644))
 
 	origDir, _ := os.Getwd()
 	require.NoError(t, os.Chdir(projectRoot))

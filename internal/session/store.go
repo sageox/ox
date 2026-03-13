@@ -10,7 +10,6 @@
 //	sessions/
 //	└── <session-name>/
 //	    ├── raw.jsonl        # unprocessed session capture
-//	    ├── events.jsonl     # processed/structured events
 //	    ├── summary.md       # ai-generated summary
 //	    ├── session.md    # markdown session
 //	    └── session.html  # html session
@@ -34,9 +33,8 @@ import (
 )
 
 const (
-	rawFilename    = "raw.jsonl"
-	eventsFilename = "events.jsonl"
-	jsonlExt       = ".jsonl"
+	rawFilename = "raw.jsonl"
+	jsonlExt    = ".jsonl"
 )
 
 // Store manages session storage in the ledger.
@@ -134,13 +132,6 @@ func (s *Store) CreateRaw(sessionName string) (*SessionWriter, error) {
 	return s.createSessionSession(sessionName, rawFilename)
 }
 
-// CreateEvents creates a new events session file and returns a writer.
-// Uses session-folder structure: <session>/events.jsonl
-// The sessionName should be generated using GenerateSessionName().
-func (s *Store) CreateEvents(sessionName string) (*SessionWriter, error) {
-	return s.createSessionSession(sessionName, eventsFilename)
-}
-
 // createSessionSession creates a session file in a session folder.
 // TODO(server-side): move to server-side for MVP+1; client should not write to ledger directly.
 func (s *Store) createSessionSession(sessionName, filename string) (*SessionWriter, error) {
@@ -184,7 +175,6 @@ type SessionWriter struct {
 }
 
 // StoreMeta contains session storage metadata written to the header.
-// This is distinct from Metadata in eventlog.go which tracks event extraction metadata.
 type StoreMeta struct {
 	Version      string    `json:"version"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -198,7 +188,6 @@ type StoreMeta struct {
 }
 
 // Writable is an interface for entries that can be written to a session.
-// This is distinct from Entry in secrets.go and eventlog.go.
 type Writable interface {
 	// EntryType returns the type identifier for this entry (e.g., "message", "tool_call")
 	EntryType() string
@@ -450,10 +439,6 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			if ref, ok := meta.Files[rawFilename]; ok {
 				filePath = rawPath
 				fileSize = ref.Size
-			} else if ref, ok := meta.Files[eventsFilename]; ok {
-				// fallback to events.jsonl if raw.jsonl not in manifest
-				filePath = filepath.Join(sessionPath, eventsFilename)
-				fileSize = ref.Size
 			}
 			modTime = createdAt
 			if createdAt.IsZero() {
@@ -629,13 +614,11 @@ func (s *Store) ReadLFSSessionMeta(sessionName string) (*lfs.SessionMeta, error)
 	return lfs.ReadSessionMeta(sessionPath)
 }
 
-// inferTypeFromFilename returns "raw" or "events" for session files, empty string otherwise.
+// inferTypeFromFilename returns "raw" for session files, empty string otherwise.
 func inferTypeFromFilename(filename string) string {
 	switch filename {
 	case rawFilename: // "raw.jsonl"
 		return "raw"
-	case eventsFilename: // "events.jsonl"
-		return "events"
 	default:
 		return ""
 	}
@@ -677,12 +660,6 @@ func (s *Store) ReadSession(name string) (*StoredSession, error) {
 		return s.readSessionFile(sessionRawPath, "raw", sessionName)
 	}
 
-	// check session folder for events.jsonl
-	sessionEventsPath := filepath.Join(s.basePath, sessionName, eventsFilename)
-	if _, err := os.Stat(sessionEventsPath); err == nil {
-		return s.readSessionFile(sessionEventsPath, "events", sessionName)
-	}
-
 	return nil, fmt.Errorf("%w: name=%s", ErrSessionNotFound, name)
 }
 
@@ -692,24 +669,11 @@ func (s *Store) ReadSessionRaw(sessionName string) (*StoredSession, error) {
 	return s.readSessionFile(filePath, "raw", sessionName)
 }
 
-// ReadSessionEvents reads the events session from a session folder.
-func (s *Store) ReadSessionEvents(sessionName string) (*StoredSession, error) {
-	filePath := filepath.Join(s.basePath, sessionName, eventsFilename)
-	return s.readSessionFile(filePath, "events", sessionName)
-}
-
 // ReadRawSession reads the raw session file from a session folder.
 func (s *Store) ReadRawSession(filename string) (*StoredSession, error) {
 	sessionName := strings.TrimSuffix(filename, jsonlExt)
 	sessionPath := filepath.Join(s.basePath, sessionName, rawFilename)
 	return s.readSessionFile(sessionPath, "raw", sessionName)
-}
-
-// ReadEventsSession reads the events session file from a session folder.
-func (s *Store) ReadEventsSession(filename string) (*StoredSession, error) {
-	sessionName := strings.TrimSuffix(filename, jsonlExt)
-	sessionPath := filepath.Join(s.basePath, sessionName, eventsFilename)
-	return s.readSessionFile(sessionPath, "events", sessionName)
 }
 
 // readSessionFile reads and parses a session file.

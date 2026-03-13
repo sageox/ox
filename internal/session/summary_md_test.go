@@ -125,7 +125,7 @@ func TestSummaryMarkdownGenerator_ExtractFileModifications(t *testing.T) {
 			name: "file_edited event",
 			entries: []map[string]any{
 				{
-					"type": string(ExtractedEventFileEdited),
+					"type": "file_edited",
 					"file": "/path/to/file.go",
 				},
 			},
@@ -257,7 +257,7 @@ func TestSummaryMarkdownGenerator_EscapePipeInPath(t *testing.T) {
 
 	entries := []map[string]any{
 		{
-			"type": string(ExtractedEventFileEdited),
+			"type": "file_edited",
 			"file": "/path/with|pipe.go",
 		},
 	}

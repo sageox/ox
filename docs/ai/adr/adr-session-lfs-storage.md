@@ -8,7 +8,7 @@
 
 ## Context
 
-Session recordings (raw.jsonl, events.jsonl, HTML views, summaries) can be large (10KB–1GB+). They must be stored in the ledger git repo for collaboration and history, but committing large binary-ish files directly to git bloats the repo and slows clones.
+Session recordings (raw.jsonl, HTML views, summaries) can be large (10KB–1GB+). They must be stored in the ledger git repo for collaboration and history, but committing large binary-ish files directly to git bloats the repo and slows clones.
 
 Git LFS (Large File Storage) solves this by storing large files on a separate blob server and replacing them with small "pointer files" in the git tree. The standard git-lfs workflow uses smudge/clean filters: on checkout, pointer files are automatically replaced with real content; on commit, content is automatically uploaded and replaced with pointers.
 
@@ -24,7 +24,6 @@ We needed to decide: use standard git-lfs pointer files, or build a custom conte
 sessions/<session-name>/
 ├── meta.json        ← git-tracked (committed + pushed)
 ├── raw.jsonl        ← .gitignored, stored in LFS blob storage
-├── events.jsonl     ← .gitignored, stored in LFS blob storage
 ├── summary.md       ← .gitignored, stored in LFS blob storage
 ├── session.html     ← .gitignored, stored in LFS blob storage
 ├── session.md       ← .gitignored, stored in LFS blob storage
@@ -46,8 +45,7 @@ Content files are explicitly `.gitignored` via patterns in `sessions/.gitignore`
   "session_name": "2026-01-06T14-32-ryan-Ox7f3a",
   "agent_id": "Ox7f3a",
   "files": {
-    "raw.jsonl": {"oid": "sha256:abc123...", "size": 156280},
-    "events.jsonl": {"oid": "sha256:def456...", "size": 8420}
+    "raw.jsonl": {"oid": "sha256:abc123...", "size": 156280}
   }
 }
 ```

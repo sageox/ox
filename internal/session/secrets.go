@@ -288,7 +288,6 @@ func (r *Redactor) RedactStringWithDetails(input string) (output string, results
 
 // RedactEntry redacts secrets from an Entry's content.
 // Returns true if any secrets were found and redacted.
-// Uses the Entry type defined in eventlog.go which has Content field.
 func (r *Redactor) RedactEntry(entry *Entry) (redacted bool) {
 	if entry == nil {
 		return false

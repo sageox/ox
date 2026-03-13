@@ -339,8 +339,23 @@ func hasToolError(e Entry) bool {
 	if output == "" {
 		return false
 	}
-	hasErr, _ := eventLogDetectError(output)
-	return hasErr
+	return detectError(output)
+}
+
+// detectError checks content for error indicators.
+func detectError(content string) bool {
+	contentLower := strings.ToLower(content)
+	for _, pattern := range []string{
+		"error:", "failed", "fatal:", "panic:", "exception",
+	} {
+		if strings.Contains(contentLower, pattern) {
+			return true
+		}
+	}
+	if strings.Contains(contentLower, "exit code") && !strings.Contains(contentLower, "exit code 0") {
+		return true
+	}
+	return false
 }
 
 // BuildSummaryPrompt builds a prompt for the calling agent to generate a session summary.

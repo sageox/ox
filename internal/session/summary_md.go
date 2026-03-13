@@ -3,9 +3,13 @@ package session
 import (
 	"bytes"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
+
+// filePathRegex matches common file extensions in content.
+var filePathRegex = regexp.MustCompile(`[/\w.-]+\.(jsonl|json|yaml|yml|bash|html|toml|go|py|ts|js|md|txt|sh|sql|css|xml)`)
 
 // SummaryMarkdownGenerator generates markdown summaries from session data.
 type SummaryMarkdownGenerator struct{}
@@ -240,7 +244,7 @@ func (g *SummaryMarkdownGenerator) extractFileModifications(entries []map[string
 		entryType, _ := entry["type"].(string)
 
 		switch entryType {
-		case string(ExtractedEventFileEdited):
+		case "file_edited":
 			if file, ok := entry["file"].(string); ok && file != "" {
 				seen[file] = "Modified"
 			} else if summary, ok := entry["summary"].(string); ok {
@@ -249,7 +253,7 @@ func (g *SummaryMarkdownGenerator) extractFileModifications(entries []map[string
 				}
 			}
 
-		case string(ExtractedEventCommandRun):
+		case "command_run":
 			// look for file creation/deletion in command output
 			if summary, ok := entry["summary"].(string); ok {
 				g.parseCommandForFiles(summary, seen)
@@ -397,7 +401,7 @@ func summaryExtractPath(summary string) string {
 
 // summaryExtractPathFromContent extracts a file path from content using the regex.
 func summaryExtractPathFromContent(content string) string {
-	match := eventLogFilePathRegex.FindString(content)
+	match := filePathRegex.FindString(content)
 	if match != "" {
 		// clean up path
 		if strings.HasPrefix(match, "/") || !strings.Contains(match, "/") {

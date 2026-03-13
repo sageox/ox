@@ -765,9 +765,7 @@ func TestStartRecording_ConcurrentAgents_PreservesSessionData(t *testing.T) {
 
 	// simulate Agent A writing session data
 	rawPath := filepath.Join(stateA.SessionPath, "raw.jsonl")
-	eventsPath := filepath.Join(stateA.SessionPath, "events.jsonl")
 	require.NoError(t, os.WriteFile(rawPath, []byte("{\"type\":\"header\"}\n"), 0644))
-	require.NoError(t, os.WriteFile(eventsPath, []byte("{\"event\":\"test\"}\n"), 0644))
 
 	// Agent B starts — both recordings should coexist
 	stateB, err := StartRecording(projectRoot, StartRecordingOptions{
@@ -783,11 +781,9 @@ func TestStartRecording_ConcurrentAgents_PreservesSessionData(t *testing.T) {
 	_, err = os.Stat(filepath.Join(stateB.SessionPath, recordingFile))
 	assert.False(t, os.IsNotExist(err), "B's .recording.json should exist")
 
-	// A's session DATA must survive (raw.jsonl, events.jsonl)
+	// A's session DATA must survive (raw.jsonl)
 	_, err = os.Stat(rawPath)
 	assert.False(t, os.IsNotExist(err), "A's raw.jsonl must survive")
-	_, err = os.Stat(eventsPath)
-	assert.False(t, os.IsNotExist(err), "A's events.jsonl must survive")
 
 	// A's session folder itself must still exist
 	_, err = os.Stat(stateA.SessionPath)

@@ -84,14 +84,13 @@ func TestWritePointerFile(t *testing.T) {
 func TestWritePointerFiles(t *testing.T) {
 	dir := t.TempDir()
 	files := map[string]FileRef{
-		"raw.jsonl":    {OID: "sha256:aaa", Size: 100},
-		"events.jsonl": {OID: "sha256:bbb", Size: 200},
-		"summary.md":   {OID: "sha256:ccc", Size: 300},
+		"raw.jsonl":  {OID: "sha256:aaa", Size: 100},
+		"summary.md": {OID: "sha256:ccc", Size: 300},
 	}
 
 	paths, err := WritePointerFiles(dir, files)
 	require.NoError(t, err)
-	assert.Len(t, paths, 3)
+	assert.Len(t, paths, 2)
 
 	// paths should be sorted
 	for i := 1; i < len(paths); i++ {
@@ -127,7 +126,7 @@ func TestIsPointerFile(t *testing.T) {
 	require.NoError(t, WritePointerFile(pointerPath, FileRef{OID: "sha256:abc", Size: 100}))
 
 	// write a real content file (too large to be a pointer)
-	contentPath := filepath.Join(dir, "events.jsonl")
+	contentPath := filepath.Join(dir, "content.jsonl")
 	require.NoError(t, os.WriteFile(contentPath, make([]byte, 1024), 0644))
 
 	// write a small non-pointer file

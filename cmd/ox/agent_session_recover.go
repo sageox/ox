@@ -190,7 +190,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 
 			// copy other artifacts if they exist in cache
 			cacheDir := filepath.Dir(rawPath)
-			for _, name := range []string{ledgerFileEvents, ledgerFileHTML, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"} {
+			for _, name := range []string{ledgerFileHTML, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"} {
 				src := filepath.Join(cacheDir, name)
 				if srcData, err := os.ReadFile(src); err == nil {
 					dst := filepath.Join(ledgerSessionDir, name)

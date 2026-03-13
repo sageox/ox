@@ -80,26 +80,6 @@ func TestIsGenericAdapter(t *testing.T) {
 	}
 }
 
-func TestFormatFilterModeDescription(t *testing.T) {
-	tests := []struct {
-		mode     string
-		expected string
-	}{
-		{"infra", "infrastructure events only"},
-		{"all", "all events"},
-		{"none", "disabled"},
-		{"custom", "custom"},
-		{"", ""},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.mode, func(t *testing.T) {
-			result := formatFilterModeDescription(tt.mode)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
 func TestMapRoleToEntryType(t *testing.T) {
 	tests := []struct {
 		role     string
@@ -365,12 +345,10 @@ func TestSessionRecordInput(t *testing.T) {
 func TestAgentSessionResult(t *testing.T) {
 	t.Run("output structure for stop command", func(t *testing.T) {
 		result := &agentSessionResult{
-			EventsPath:      "/path/to/events.jsonl",
 			EntryCount:      10,
 			SecretsRedacted: 3,
 		}
 
-		assert.NotEmpty(t, result.EventsPath)
 		assert.Equal(t, 10, result.EntryCount)
 		assert.Equal(t, 3, result.SecretsRedacted)
 	})

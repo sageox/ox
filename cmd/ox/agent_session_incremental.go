@@ -196,87 +196,8 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 		result.Model = state.Model
 	}
 
-	repoID := getRepoIDOrDefault(projectRoot)
 	sessionName := session.GetSessionName(state.SessionPath)
 	result.SessionName = sessionName
-
-	// generate events
-	eventLog := session.NewEventLog(sessionEntries, state.AgentID, state.AdapterName)
-	result.EventsBeforeFilter = len(eventLog.Events)
-	result.FilterMode = state.FilterMode
-	if state.FilterMode != "" {
-		eventLog.Events = session.FilterEvents(eventLog.Events, session.SessionFilterMode(state.FilterMode))
-	}
-	result.EventsAfterFilter = len(eventLog.Events)
-
-	// write events
-	contextPath := session.GetContextPath(repoID)
-	if contextPath == "" {
-		return nil, fmt.Errorf("failed to get context path")
-	}
-	store, err := session.NewStore(contextPath)
-	if err != nil {
-		return nil, fmt.Errorf("create store: %w", err)
-	}
-
-	projectEndpoint := endpoint.GetForProject(projectRoot)
-	agentTypeForMeta := state.AgentType
-	if agentTypeForMeta == "" {
-		agentTypeForMeta = state.AdapterName
-	}
-
-	eventsWriter, err := store.CreateEvents(sessionName)
-	if err != nil {
-		_ = doctor.SetNeedsDoctorAgent(projectRoot)
-		return nil, fmt.Errorf("create events session: %w", err)
-	}
-
-	eventsMeta := &session.StoreMeta{
-		Version:      "1.0",
-		CreatedAt:    state.StartedAt,
-		AgentID:      state.AgentID,
-		AgentType:    agentTypeForMeta,
-		AgentVersion: result.AgentVersion,
-		Model:        result.Model,
-		Username:     getDisplayName(projectEndpoint),
-		RepoID:       repoID,
-	}
-	if err := eventsWriter.WriteHeader(eventsMeta); err != nil {
-		eventsWriter.Close()
-		_ = doctor.SetNeedsDoctorAgent(projectRoot)
-		return nil, fmt.Errorf("write events header: %w", err)
-	}
-
-	for _, event := range eventLog.Events {
-		data := map[string]any{
-			"type":      string(event.Type),
-			"summary":   event.Summary,
-			"timestamp": event.Timestamp,
-		}
-		if event.Details != "" {
-			data["details"] = event.Details
-		}
-		if event.ErrorMsg != "" {
-			data["error"] = event.ErrorMsg
-		}
-		if event.RelatedFile != "" {
-			data["file"] = event.RelatedFile
-		}
-		if event.Success != nil {
-			data["success"] = *event.Success
-		}
-		if err := eventsWriter.WriteRaw(data); err != nil {
-			eventsWriter.Close()
-			_ = doctor.SetNeedsDoctorAgent(projectRoot)
-			return nil, fmt.Errorf("write event: %w", err)
-		}
-	}
-
-	if err := eventsWriter.Close(); err != nil {
-		_ = doctor.SetNeedsDoctorAgent(projectRoot)
-		return nil, fmt.Errorf("close events session: %w", err)
-	}
-	result.EventsPath = eventsWriter.FilePath()
 
 	// generate summary
 	localSummary := session.LocalSummary(sessionEntries)
@@ -367,7 +288,6 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 						*field = ""
 					}
 				}
-				rewriteIfExists(&result.EventsPath, ledgerFileEvents)
 				rewriteIfExists(&result.HTMLPath, ledgerFileHTML)
 				rewriteIfExists(&result.SummaryMDPath, ledgerFileSummaryMD)
 				rewriteIfExists(&result.SessionMDPath, ledgerFileSessionMD)

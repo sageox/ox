@@ -19,7 +19,6 @@ import (
 // processResult contains outcomes from session processing
 type processResult struct {
 	RawPath         string
-	EventsPath      string
 	HTMLPath        string
 	EntryCount      int
 	SecretsRedacted int
@@ -194,59 +193,6 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 		return nil, fmt.Errorf("failed to close raw session: %w", err)
 	}
 	result.RawPath = rawWriter.FilePath()
-
-	// generate and write events session
-	eventLog := session.NewEventLog(entries, state.AgentID, state.AdapterName)
-	eventsWriter, err := store.CreateEvents(filename)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create events session: %w", err)
-	}
-
-	// write events header
-	eventsMeta := &session.StoreMeta{
-		Version:      "1.0",
-		CreatedAt:    state.StartedAt,
-		AgentID:      state.AgentID,
-		AgentType:    agentTypeForMeta,
-		AgentVersion: result.AgentVersion,
-		Model:        result.Model,
-		Username:     getDisplayName(projectEndpoint),
-		RepoID:       repoID,
-	}
-	if err := eventsWriter.WriteHeader(eventsMeta); err != nil {
-		eventsWriter.Close()
-		return nil, fmt.Errorf("failed to write events header: %w", err)
-	}
-
-	// write events (events are derived from already-scrubbed entries)
-	for _, event := range eventLog.Events {
-		data := map[string]any{
-			"type":      string(event.Type),
-			"summary":   event.Summary,
-			"timestamp": event.Timestamp,
-		}
-		if event.Details != "" {
-			data["details"] = event.Details
-		}
-		if event.ErrorMsg != "" {
-			data["error"] = event.ErrorMsg
-		}
-		if event.RelatedFile != "" {
-			data["file"] = event.RelatedFile
-		}
-		if event.Success != nil {
-			data["success"] = *event.Success
-		}
-		if err := eventsWriter.WriteRaw(data); err != nil {
-			eventsWriter.Close()
-			return nil, fmt.Errorf("failed to write event: %w", err)
-		}
-	}
-
-	if err := eventsWriter.Close(); err != nil {
-		return nil, fmt.Errorf("failed to close events session: %w", err)
-	}
-	result.EventsPath = eventsWriter.FilePath()
 
 	// generate HTML viewer
 	if result.RawPath != "" {

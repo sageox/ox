@@ -174,21 +174,6 @@ func TestStore_CreateRaw_SessionFolder(t *testing.T) {
 	assert.Equal(t, sessionName, writer.SessionName())
 }
 
-func TestStore_CreateEvents_SessionFolder(t *testing.T) {
-	tmpDir := t.TempDir()
-	store, err := NewStore(tmpDir)
-	require.NoError(t, err, "failed to create store")
-
-	sessionName := "2026-01-06T14-32-testuser-Oxa7b3"
-	writer, err := store.CreateEvents(sessionName)
-	require.NoError(t, err, "failed to create events session")
-	defer writer.Close()
-
-	expectedPath := filepath.Join(tmpDir, "sessions", sessionName, "events.jsonl")
-	assert.Equal(t, expectedPath, writer.FilePath())
-	assert.Equal(t, sessionName, writer.SessionName())
-}
-
 func TestStore_CreateRaw_StripsJsonlExtension(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := NewStore(tmpDir)
@@ -485,21 +470,6 @@ func TestStore_ReadSessionRaw(t *testing.T) {
 	assert.Equal(t, "raw", sess.Info.Type)
 }
 
-func TestStore_ReadSessionEvents(t *testing.T) {
-	tmpDir := t.TempDir()
-	store, _ := NewStore(tmpDir)
-
-	sessionName := "test-session"
-	writer, _ := store.CreateEvents(sessionName)
-	writer.WriteEntry(&testWritable{Message: "events data"})
-	writer.Close()
-
-	sess, err := store.ReadSessionEvents(sessionName)
-	require.NoError(t, err, "failed to read session events")
-
-	assert.Equal(t, "events", sess.Info.Type)
-}
-
 func TestStore_GetLatest(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := NewStore(tmpDir)
@@ -552,12 +522,9 @@ func TestStore_Delete_SessionFolder(t *testing.T) {
 
 	sessionName := "to-delete-session"
 
-	// create raw and events in session
+	// create raw in session
 	rawWriter, _ := store.CreateRaw(sessionName)
 	rawWriter.Close()
-
-	eventsWriter, _ := store.CreateEvents(sessionName)
-	eventsWriter.Close()
 
 	// verify exists
 	_, err := store.ReadSession(sessionName)
@@ -1054,40 +1021,6 @@ func TestSessionWriter_SessionName(t *testing.T) {
 	defer writer.Close()
 
 	assert.Equal(t, sessionName, writer.SessionName())
-}
-
-func TestStore_BothRawAndEventsInSession(t *testing.T) {
-	tmpDir := t.TempDir()
-	store, _ := NewStore(tmpDir)
-
-	sessionName := "dual-session"
-
-	// create both raw and events
-	rawWriter, _ := store.CreateRaw(sessionName)
-	rawWriter.WriteEntry(&testWritable{Message: "raw"})
-	rawWriter.Close()
-
-	eventsWriter, _ := store.CreateEvents(sessionName)
-	eventsWriter.WriteEntry(&testWritable{Message: "events"})
-	eventsWriter.Close()
-
-	// verify both files exist in same session folder
-	sessionPath := store.GetSessionPath(sessionName)
-
-	rawPath := filepath.Join(sessionPath, "raw.jsonl")
-	_, err := os.Stat(rawPath)
-	assert.False(t, os.IsNotExist(err), "expected raw.jsonl to exist in session folder")
-
-	eventsPath := filepath.Join(sessionPath, "events.jsonl")
-	_, err = os.Stat(eventsPath)
-	assert.False(t, os.IsNotExist(err), "expected events.jsonl to exist in session folder")
-
-	// read both back
-	rawSess, _ := store.ReadSessionRaw(sessionName)
-	assert.Equal(t, "raw", rawSess.Info.Type)
-
-	eventsSess, _ := store.ReadSessionEvents(sessionName)
-	assert.Equal(t, "events", eventsSess.Info.Type)
 }
 
 func TestReadSessionFromPath_ValidFile(t *testing.T) {

@@ -28,7 +28,7 @@ Useful when the HTML template has been updated and you want to
 refresh existing sessions with the new design.
 
 With --redact, re-applies all current REDACT.md rules (team + repo + user
-layers), regenerates all downstream artifacts (events.jsonl, session.html,
+layers), regenerates all downstream artifacts (session.html,
 session.md, summary.md), and uploads updated content to LFS.
 Old LFS blobs become orphaned after regeneration. Server-side blob purge
 will be handled by the /api/v1/git/lfs/purge cloud API endpoint.
@@ -561,20 +561,10 @@ func rewriteRawJSONL(path string, sess *session.StoredSession) error {
 	return os.Rename(tmpPath, path)
 }
 
-// regenerateArtifacts regenerates events.jsonl, session.html, session.md, and summary.md
+// regenerateArtifacts regenerates session.html, session.md, and summary.md
 // from the re-redacted raw session data.
 func regenerateArtifacts(sessionPath string, rawSession *session.StoredSession) error {
 	var errs []string
-
-	// convert map entries to typed entries for event extraction
-	entries := mapEntriesToTyped(rawSession.Entries)
-
-	// events.jsonl
-	eventLog := session.NewEventLog(entries, "", "")
-	eventsPath := filepath.Join(sessionPath, ledgerFileEvents)
-	if err := session.WriteEventLog(eventsPath, eventLog); err != nil {
-		errs = append(errs, fmt.Sprintf("%s: %s", ledgerFileEvents, err))
-	}
 
 	// session.html
 	htmlGen, err := sessionhtml.NewGenerator()

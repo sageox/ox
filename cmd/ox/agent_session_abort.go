@@ -63,7 +63,7 @@ func runAgentSessionAbort(inst *agentinstance.Instance, cmd *cobra.Command) erro
 		return fmt.Errorf("failed to clear recording state: %w", err)
 	}
 
-	// remove entire session cache folder (raw.jsonl, events.jsonl, plan.md, etc.)
+	// remove entire session cache folder (raw.jsonl, plan.md, etc.)
 	// guard against empty path — os.RemoveAll("") would delete cwd
 	if state.SessionPath != "" {
 		if err := os.RemoveAll(state.SessionPath); err != nil {
