@@ -674,6 +674,65 @@ func TestFindRepoTeamContext_NoProjectConfig(t *testing.T) {
 	assert.Nil(t, tc, "expected nil with no project config and no local config")
 }
 
+func TestFindRepoTeamContext_MultiTeam_MatchesCorrect(t *testing.T) {
+	// regression: with multiple teams in config.local.toml, must return the
+	// repo's own team (by ProjectConfig.TeamID), not TeamContexts[0]
+	tmpDir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
+		TeamID:   "team_abc",
+		TeamName: "Team ABC",
+		Endpoint: "https://sageox.ai",
+	})
+	localCfg := &LocalConfig{
+		TeamContexts: []TeamContext{
+			{TeamID: "team_xyz", TeamName: "Team XYZ", Path: "/path/xyz"},
+			{TeamID: "team_abc", TeamName: "Team ABC", Path: "/path/abc"},
+			{TeamID: "team_def", TeamName: "Team DEF", Path: "/path/def"},
+		},
+	}
+	require.NoError(t, SaveLocalConfig(tmpDir, localCfg))
+
+	tc := FindRepoTeamContext(tmpDir)
+	require.NotNil(t, tc, "expected team context for repo's team")
+	assert.Equal(t, "team_abc", tc.TeamID, "must return repo's own team, not TeamContexts[0]")
+	assert.Equal(t, "/path/abc", tc.Path)
+}
+
+func TestFindRepoTeamContext_MultiTeam_NoMatchReturnsNil(t *testing.T) {
+	// regression: when repo's TeamID doesn't match any local config entry and
+	// no computed-path dir exists, must return nil — never return TeamContexts[0]
+	tmpDir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
+		TeamID:   "team_missing",
+		TeamName: "Missing Team",
+		Endpoint: "https://sageox.ai",
+	})
+	localCfg := &LocalConfig{
+		TeamContexts: []TeamContext{
+			{TeamID: "team_xyz", TeamName: "Team XYZ", Path: "/path/xyz"},
+			{TeamID: "team_def", TeamName: "Team DEF", Path: "/path/def"},
+		},
+	}
+	require.NoError(t, SaveLocalConfig(tmpDir, localCfg))
+
+	tc := FindRepoTeamContext(tmpDir)
+	assert.Nil(t, tc, "must return nil when repo's team not found, not a random team")
+}
+
+func TestFindRepoTeamContext_NoProjectConfig_WithTeams_ReturnsNil(t *testing.T) {
+	// regression: with no config.json but teams in config.local.toml,
+	// must return nil — never guess from TeamContexts[0]
+	tmpDir := CreateInitializedProject(t)
+	localCfg := &LocalConfig{
+		TeamContexts: []TeamContext{
+			{TeamID: "team_xyz", TeamName: "Team XYZ", Path: "/path/xyz"},
+			{TeamID: "team_abc", TeamName: "Team ABC", Path: "/path/abc"},
+		},
+	}
+	require.NoError(t, SaveLocalConfig(tmpDir, localCfg))
+
+	tc := FindRepoTeamContext(tmpDir)
+	assert.Nil(t, tc, "must return nil without project config, not TeamContexts[0]")
+}
+
 // -----------------------------------------------------------------------------
 // Team Symlink Tests
 // -----------------------------------------------------------------------------
