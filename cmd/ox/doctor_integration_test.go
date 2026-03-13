@@ -193,7 +193,7 @@ func TestCheckClaudeCodeIntegration_ProjectHooksInstalled(t *testing.T) {
 	if !result.passed {
 		t.Errorf("expected passed=true when project hooks installed, got: %+v", result)
 	}
-	if result.message != "installed (project)" {
+	if result.message != "installed (shared)" {
 		t.Errorf("unexpected message: %s", result.message)
 	}
 }

@@ -192,7 +192,7 @@ func TestCheckProjectHookCommands_InvalidCommand(t *testing.T) {
 		},
 	}
 	data, _ := json.MarshalIndent(settings, "", "  ")
-	settingsPath := filepath.Join(claudeDir, "settings.local.json")
+	settingsPath := filepath.Join(claudeDir, "settings.json")
 	require.NoError(t, os.WriteFile(settingsPath, data, 0644))
 
 	origDir, _ := os.Getwd()

@@ -61,9 +61,10 @@ const (
 	emptyMatcher = ""
 
 	// file permissions
-	dirPerm      = 0755
-	settingsPerm = 0600
-	pluginPerm   = 0644
+	dirPerm            = 0755
+	settingsPerm       = 0600
+	sharedSettingsPerm = 0644 // git-tracked shared settings
+	pluginPerm         = 0644
 )
 
 var (
@@ -201,7 +202,7 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// install project-level hooks to .claude/settings.local.json
+	// install project-level hooks to .claude/settings.json (shared)
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
 		return fmt.Errorf("not in a git repository — run from a project directory")
@@ -213,7 +214,7 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 
 	fmt.Println(ui.PassStyle.Render("✓") + " Claude Code project hooks installed")
 	fmt.Println()
-	fmt.Println("Installed lifecycle hooks to .claude/settings.local.json:")
+	fmt.Println("Installed lifecycle hooks to .claude/settings.json:")
 	fmt.Println("  - SessionStart, PreCompact, PostToolUse, Stop, SessionEnd, UserPromptSubmit")
 
 	// install git commit hooks (prepare-commit-msg for trailers)
@@ -320,7 +321,7 @@ func runIntegrateList(cmd *cobra.Command, args []string) error {
 	if gitRoot == "" {
 		fmt.Println("  (not in a git repo)")
 	} else if HasProjectClaudeHooks(gitRoot) {
-		fmt.Printf("  %s hooks: installed (.claude/settings.local.json)\n", ui.PassStyle.Render("✓"))
+		fmt.Printf("  %s hooks: installed (.claude/settings.json)\n", ui.PassStyle.Render("✓"))
 	} else {
 		fmt.Printf("  %s hooks: not installed\n", ui.FailStyle.Render("✗"))
 	}

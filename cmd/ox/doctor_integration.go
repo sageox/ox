@@ -251,7 +251,7 @@ func outputAgentUpgradeInstructions(file, filePath, content string) checkResult 
 }
 
 // checkClaudeCodeHooks checks if project-level Claude Code hooks are properly installed
-// in .claude/settings.local.json.
+// in .claude/settings.json (shared).
 func checkClaudeCodeHooks(fix bool) checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
@@ -259,7 +259,7 @@ func checkClaudeCodeHooks(fix bool) checkResult {
 	}
 
 	if HasProjectClaudeHooks(gitRoot) {
-		return PassedCheck("Claude Code hooks", "installed (project)")
+		return PassedCheck("Claude Code hooks", "installed (shared)")
 	}
 
 	// hooks not installed
@@ -267,11 +267,11 @@ func checkClaudeCodeHooks(fix bool) checkResult {
 		if err := InstallProjectClaudeHooks(gitRoot); err != nil {
 			return FailedCheck("Claude Code hooks", "install failed", err.Error())
 		}
-		return PassedCheck("Claude Code hooks", "installed (project)")
+		return PassedCheck("Claude Code hooks", "installed (shared)")
 	}
 
 	return FailedCheck("Claude Code hooks", "not installed",
-		"Run `ox init` or `ox doctor --fix` to install project-level hooks")
+		"Run `ox init` or `ox doctor --fix` to install hooks in .claude/settings.json")
 }
 
 // checkUserLevelIntegration checks if the ox:prime marker exists in the

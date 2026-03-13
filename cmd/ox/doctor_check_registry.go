@@ -341,6 +341,28 @@ func init() {
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugSharedHookValues,
+		Name:        "Shared hook values",
+		Category:    "Integration",
+		FixLevel:    FixLevelSuggested,
+		Description: "Validates ox hook commands in .claude/settings.json match current expected values",
+		Run: func(fix bool) checkResult {
+			return checkSharedHookValues(fix)
+		},
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugStaleLocalHooks,
+		Name:        "Stale local hooks",
+		Category:    "Integration",
+		FixLevel:    FixLevelSuggested,
+		Description: "Detects ox hooks in settings.local.json that should be in settings.json",
+		Run: func(fix bool) checkResult {
+			return checkStaleLocalHooks(fix)
+		},
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugSessionStartHookBug,
 		Name:        "SessionStart hook reliability",
 		Category:    "Integration",
