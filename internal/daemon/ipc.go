@@ -715,6 +715,8 @@ func handleSessionFinalize(s *Server, msg Message, _ net.Conn) HandlerResult {
 		var payload SessionFinalizeIPCPayload
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 			s.logger.Debug("failed to parse session_finalize payload", "error", err)
+		} else if payload.SessionName == "" || payload.LedgerPath == "" {
+			s.logger.Debug("session_finalize payload missing required fields", "session_name", payload.SessionName, "ledger_path", payload.LedgerPath)
 		} else {
 			handler(payload)
 		}

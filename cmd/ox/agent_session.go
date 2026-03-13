@@ -1021,10 +1021,11 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			if signalErr != nil {
 				slog.Info("daemon signal failed, doctor will catch it", "error", signalErr)
 				_ = doctor.SetNeedsDoctorAgent(projectRoot)
+			} else {
+				// clear summary prompt — daemon handles summary generation
+				result.SummaryPrompt = ""
+				result.UploadWarning = ""
 			}
-			// clear summary prompt — daemon handles summary generation
-			result.SummaryPrompt = ""
-			result.UploadWarning = ""
 		}
 	} else {
 		uploadStart := time.Now()
@@ -1243,8 +1244,8 @@ func copySessionCacheToLedger(result *agentSessionResult, ledgerPath, sessionNam
 }
 
 // signalDaemonSessionFinalize sends a fire-and-forget IPC message to the daemon
-// to upload and finalize a session asynchronously. Returns nil if daemon is
-// unreachable (doctor will catch it on next daemon start).
+// to upload and finalize a session asynchronously. Returns an error if the daemon
+// is unreachable or the IPC message fails (caller should flag for doctor).
 func signalDaemonSessionFinalize(sessionName, ledgerPath, cachePath, projectRoot string) error {
 	client := daemon.NewClientWithTimeout(100 * time.Millisecond)
 	return client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
