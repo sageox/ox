@@ -262,6 +262,41 @@ func TestCheckoutGitignoreNeedsFix_Complete(t *testing.T) {
 	assert.False(t, CheckoutGitignoreNeedsFix(dir), "should not need fix when all entries present")
 }
 
+// TestEnsureGitignoreBeforeCommit_UntracksRootCodeDB is a regression test for the
+// bug where codedb/ was committed to the ledger root because CodeDBSharedDir
+// pointed to the ledger root instead of .sageox/cache/codedb/.
+func TestEnsureGitignoreBeforeCommit_UntracksRootCodeDB(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	dir := setupGitRepoWithSageox(t)
+
+	// simulate: codedb/ was committed at the ledger root (the old bug)
+	codedbDir := filepath.Join(dir, "codedb")
+	require.NoError(t, os.MkdirAll(codedbDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(codedbDir, "index.db"), []byte("fake-db"), 0644))
+	runGit(t, dir, "add", "codedb/")
+	runGit(t, dir, "commit", "-m", "accidentally commit codedb")
+
+	// verify codedb/ is tracked before the fix
+	lsOut, err := exec.Command("git", "-C", dir, "ls-files", "codedb/").Output()
+	require.NoError(t, err)
+	assert.NotEmpty(t, strings.TrimSpace(string(lsOut)), "codedb/ should be tracked before fix")
+
+	// run the pre-commit guard
+	EnsureGitignoreBeforeCommit(dir)
+
+	// verify codedb/ is no longer tracked
+	lsOut, err = exec.Command("git", "-C", dir, "ls-files", "codedb/").Output()
+	require.NoError(t, err)
+	assert.Empty(t, strings.TrimSpace(string(lsOut)), "codedb/ should be untracked after fix")
+
+	// verify codedb/ directory was deleted from disk (prevents git add -A re-staging)
+	_, err = os.Stat(codedbDir)
+	assert.True(t, os.IsNotExist(err), "codedb/ should be deleted from disk after fix")
+}
+
 // TestEnsureCheckoutGitignore_WithSparseCheckout is a regression test for the
 // bug where git add .sageox/.gitignore fails during TwoPhaseClone because
 // sparse-checkout blocks staging files outside the sparse definition.

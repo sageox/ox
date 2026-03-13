@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -100,6 +101,15 @@ func (m *CodeDBManager) resolveSharedDataDir() string {
 	ctx, err := config.LoadProjectContext(m.projectRoot)
 	if err == nil {
 		if dir := paths.CodeDBSharedDir(ctx.RepoID(), ctx.Endpoint()); dir != "" {
+			// clean up legacy root-level codedb/ if it exists
+			legacyDir := paths.LedgersDataDir(ctx.RepoID(), ctx.Endpoint())
+			if legacyDir != "" {
+				legacyCodedb := filepath.Join(legacyDir, "codedb")
+				if _, statErr := os.Stat(legacyCodedb); statErr == nil {
+					m.logger.Info("removing legacy codedb at ledger root", "old", legacyCodedb, "new", dir)
+					_ = os.RemoveAll(legacyCodedb)
+				}
+			}
 			return dir
 		}
 	}

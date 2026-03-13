@@ -577,6 +577,39 @@ func TestLedgersDataDir(t *testing.T) {
 	})
 }
 
+func TestCodeDBSharedDir(t *testing.T) {
+	saved := saveEnv("OX_XDG_ENABLE", "SAGEOX_ENDPOINT")
+	defer restoreEnv(saved)
+
+	clearXDGEnv()
+	os.Unsetenv("SAGEOX_ENDPOINT")
+
+	t.Run("returns path under .sageox/cache", func(t *testing.T) {
+		dir := CodeDBSharedDir("repo123", "https://sageox.ai")
+		if !strings.Contains(dir, filepath.Join(".sageox", "cache", "codedb")) {
+			t.Errorf("CodeDBSharedDir() = %q, want path containing .sageox/cache/codedb", dir)
+		}
+	})
+
+	t.Run("not at ledger root", func(t *testing.T) {
+		dir := CodeDBSharedDir("repo123", "https://sageox.ai")
+		ledgerRoot := LedgersDataDir("repo123", "https://sageox.ai")
+		badPath := filepath.Join(ledgerRoot, "codedb")
+		if dir == badPath {
+			t.Errorf("CodeDBSharedDir() = %q, must not be at ledger root", dir)
+		}
+	})
+
+	t.Run("empty inputs return empty", func(t *testing.T) {
+		if dir := CodeDBSharedDir("", "https://sageox.ai"); dir != "" {
+			t.Errorf("CodeDBSharedDir('', endpoint) = %q, want empty", dir)
+		}
+		if dir := CodeDBSharedDir("repo123", ""); dir != "" {
+			t.Errorf("CodeDBSharedDir(repo, '') = %q, want empty", dir)
+		}
+	})
+}
+
 func TestDaemonPaths(t *testing.T) {
 	saved := saveEnv("OX_XDG_ENABLE")
 	defer restoreEnv(saved)

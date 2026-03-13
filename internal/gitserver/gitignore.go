@@ -162,6 +162,22 @@ func EnsureGitignoreBeforeCommitCtx(ctx context.Context, repoPath string) {
 	if out, err := rmCmd.CombinedOutput(); err != nil {
 		slog.Debug("pre-commit cache untrack failed", "path", repoPath, "error", err, "output", strings.TrimSpace(string(out)))
 	}
+
+	// untrack root-level codedb/ that was committed before the path was fixed
+	// (codedb now lives at .sageox/cache/codedb/ inside the ledger).
+	rmCodedbCmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+		"rm", "--cached", "-r", "--ignore-unmatch", "codedb/")
+	if out, err := rmCodedbCmd.CombinedOutput(); err != nil {
+		slog.Debug("pre-commit codedb untrack failed", "path", repoPath, "error", err, "output", strings.TrimSpace(string(out)))
+	}
+
+	// delete root-level codedb/ from disk — it's a rebuildable index and without
+	// deletion, git add -A would re-stage it (no root .gitignore entry covers it).
+	codedbDir := filepath.Join(repoPath, "codedb")
+	if _, err := os.Stat(codedbDir); err == nil {
+		slog.Info("removing legacy codedb at repo root", "path", codedbDir)
+		_ = os.RemoveAll(codedbDir)
+	}
 }
 
 // CacheFilesTracked returns true if any .sageox/cache/ files are tracked by git.

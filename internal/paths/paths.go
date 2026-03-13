@@ -135,12 +135,12 @@ func StateDir() string {
 
 // CodeDBSharedDir returns the directory for the shared CodeDB index (committed content).
 // Stored inside the ledger's local cache, shared across all worktrees for the same repo.
-// Format: ~/.local/share/sageox/<endpoint>/ledgers/<repoID>/codedb/
+// Format: ~/.local/share/sageox/<endpoint>/ledgers/<repoID>/.sageox/cache/codedb/
 func CodeDBSharedDir(repoID, endpointURL string) string {
 	if repoID == "" || endpointURL == "" {
 		return ""
 	}
-	return filepath.Join(LedgersDataDir(repoID, endpointURL), "codedb")
+	return filepath.Join(LedgersDataDir(repoID, endpointURL), ".sageox", "cache", "codedb")
 }
 
 // CodeDBDataDir returns the legacy per-worktree CodeDB directory.
