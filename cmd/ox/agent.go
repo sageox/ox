@@ -383,7 +383,7 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(daemonInstances) == 0 && len(diskInstances) == 0 {
-		fmt.Println("No active AI coworkers.")
+		fmt.Println("No active SageOx enriched agents.")
 		fmt.Println("\nRun 'ox agent prime' to start one.")
 		return nil
 	}
@@ -455,7 +455,7 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(merged) == 0 {
-		fmt.Println("No active AI coworkers.")
+		fmt.Println("No active SageOx enriched agents.")
 		fmt.Println("\nRun 'ox agent prime' to start one.")
 		return nil
 	}
@@ -491,7 +491,7 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 		roots = append(roots, m.AgentID)
 	}
 
-	fmt.Printf("Active AI coworkers (%d):\n\n", len(merged))
+	fmt.Printf("Active SageOx enriched agents (%d):\n\n", len(merged))
 	header := fmt.Sprintf("  %s  %s  %s  %s  %s  %s",
 		dim.Render(fmt.Sprintf("%-8s", "ID")),
 		dim.Render(fmt.Sprintf("%-10s", "Type")),

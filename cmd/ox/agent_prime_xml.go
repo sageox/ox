@@ -245,13 +245,6 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 	// all sessions for the same repo+team, or you'll bust the cache
 	// for every user on every session start.
 	// ════════════════════════════════════════════════════════════
-	sb.WriteString("\n<!-- ═══════════════════════════════════════════════════════════════ -->\n")
-	sb.WriteString("<!-- CACHE BOUNDARY — everything below here is unique per session.  -->\n")
-	sb.WriteString("<!-- Adding content above this line? It MUST be identical across    -->\n")
-	sb.WriteString("<!-- all sessions for the same repo+team, or you'll bust the cache -->\n")
-	sb.WriteString("<!-- for every user on every session start.                         -->\n")
-	sb.WriteString("<!-- ═══════════════════════════════════════════════════════════════ -->\n")
-
 	// cache-tier: session — unique every session
 
 	// session context: binds all per-session dynamic values
