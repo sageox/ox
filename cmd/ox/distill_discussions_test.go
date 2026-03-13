@@ -246,6 +246,19 @@ func TestDiscussionContentHash(t *testing.T) {
 	if h2 != h3 {
 		t.Error("hash should be stable for same content")
 	}
+
+	// metadata.json change should change hash
+	os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(`{"title":"v1"}`), 0o644)
+	h4 := discussionContentHash(dir)
+	if h3 == h4 {
+		t.Error("hash should change when metadata.json is added")
+	}
+
+	os.WriteFile(filepath.Join(dir, "metadata.json"), []byte(`{"title":"v2"}`), 0o644)
+	h5 := discussionContentHash(dir)
+	if h4 == h5 {
+		t.Error("hash should change when metadata.json content changes")
+	}
 }
 
 func TestDistillStateProcessedDiscussionsRoundtrip(t *testing.T) {

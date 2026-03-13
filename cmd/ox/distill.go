@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -178,9 +179,12 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	}
 
 	// extract facts from unprocessed discussions before daily distill
-	if err := extractDiscussionFacts(ctx, cmd, backend, tc, state, guidelines); err != nil {
-		// non-fatal — daily distill proceeds with available data
-		slog.Warn("discussion fact extraction failed", "error", err)
+	if slices.Contains(layers, "daily") {
+		if err := extractDiscussionFacts(ctx, cmd, backend, tc, state, guidelines); err != nil {
+			slog.Warn("discussion fact extraction failed", "error", err)
+		} else if err := saveDistillStateV2(projectRoot, state); err != nil {
+			slog.Warn("failed to save distill state after discussion extraction", "error", err)
+		}
 	}
 
 	for _, layer := range layers {

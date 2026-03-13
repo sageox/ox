@@ -60,6 +60,7 @@ func DailyPrompt(observations []string, date, guidelines string, discussionFactP
 	if len(discussionFactPaths) > 0 {
 		sb.WriteString("Read each discussion fact file listed below and synthesize their content\n")
 		sb.WriteString("together with the observations into a cohesive summary.\n")
+		sb.WriteString("Exception: You MAY use the Read tool to access the discussion fact files listed below.\n")
 	}
 	sb.WriteString("</task>\n\n")
 

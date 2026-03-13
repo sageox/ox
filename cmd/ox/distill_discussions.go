@@ -70,7 +70,10 @@ func scanPendingDiscussions(tcPath string, processed map[string]string) ([]discu
 			continue
 		}
 
-		createdAt, _ := time.Parse(time.RFC3339, meta.CreatedAt)
+		createdAt, err := time.Parse(time.RFC3339, meta.CreatedAt)
+		if err != nil {
+			slog.Debug("malformed discussion timestamp, using zero time", "dir", dirName, "raw", meta.CreatedAt, "error", err)
+		}
 
 		di := discussionInput{
 			DirName:    dirName,
@@ -140,10 +143,13 @@ func loadDiscussionTranscript(dirPath string) string {
 }
 
 // discussionContentHash computes a hash of a discussion's content files
-// for change detection. Includes summary.md and transcript.vtt.
+// for change detection. Includes metadata.json, summary.md, and transcript.vtt.
 func discussionContentHash(dirPath string) string {
 	var parts []string
 
+	if data, err := os.ReadFile(filepath.Join(dirPath, "metadata.json")); err == nil {
+		parts = append(parts, string(data))
+	}
 	if data, err := os.ReadFile(filepath.Join(dirPath, "summary.md")); err == nil {
 		parts = append(parts, string(data))
 	}
