@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"log/slog"
+	"os"
 	"slices"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -12,6 +14,7 @@ const (
 	StatusActive = "active" // recently received heartbeat
 	StatusIdle   = "idle"   // no heartbeat within idle threshold
 	StatusStale  = "stale"  // no heartbeat within stale threshold
+	StatusExited = "exited" // parent process confirmed dead via kill(pid, 0)
 )
 
 // Default instance timing thresholds.
@@ -58,6 +61,24 @@ type Instance struct {
 	// Status is the computed instance status: "active", "idle", or "stale".
 	// Computed from LastHeartbeat relative to current time.
 	Status string `json:"status"`
+
+	// ParentPID is the process ID of the parent agent process.
+	// Used for instant liveness detection via kill(pid, 0).
+	ParentPID int `json:"parent_pid,omitempty"`
+}
+
+// IsProcessAlive checks if the parent agent process is still running.
+// Uses kill(pid, 0) which checks existence without sending a signal.
+// Returns false if no PID was recorded or the process is gone.
+func (i *Instance) IsProcessAlive() bool {
+	if i.ParentPID <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(i.ParentPID)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 // computeStatus determines the instance status based on the last heartbeat.
@@ -153,6 +174,14 @@ func (s *InstanceStore) cleanup() {
 			continue
 		}
 
+		// remove instances whose parent process has exited
+		if inst.ParentPID > 0 && !inst.IsProcessAlive() {
+			delete(s.instances, id)
+			removed++
+			s.logger.Debug("instance removed: process exited", "id", id, "pid", inst.ParentPID)
+			continue
+		}
+
 		// remove stale instances (no heartbeat for a while)
 		if inst.computeStatus(now) == StatusStale {
 			delete(s.instances, id)
@@ -190,6 +219,9 @@ func (s *InstanceStore) Register(inst *Instance) {
 		}
 		if inst.AgentType != "" {
 			existing.AgentType = inst.AgentType
+		}
+		if inst.ParentPID > 0 {
+			existing.ParentPID = inst.ParentPID
 		}
 		s.logger.Debug("instance updated", "id", inst.ID)
 		return

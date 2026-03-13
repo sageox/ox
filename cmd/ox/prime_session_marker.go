@@ -38,6 +38,7 @@ type SessionMarker struct {
 	SessionID      string    `json:"session_id,omitempty"`       // ox-generated server session ID
 	AgentSessionID string    `json:"agent_session_id"`           // coding agent's native session identifier
 	PrimedAt       time.Time `json:"primed_at"`                  // when session was primed
+	ParentPID      int       `json:"parent_pid,omitempty"`          // parent agent process ID
 }
 
 // AgentHookInput is an alias for agentx.HookInput.

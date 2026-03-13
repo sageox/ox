@@ -341,6 +341,10 @@ type InstanceInfo struct {
 	// AgentType identifies the kind of agent (e.g., "claude-code", "explore").
 	// Populated from heartbeat tracking, enabling cross-worktree type display.
 	AgentType string `json:"agent_type,omitempty"`
+
+	// ParentPID is the parent process ID of the agent.
+	// Enables instant liveness detection without heartbeat timeout.
+	ParentPID int `json:"parent_pid,omitempty"`
 }
 
 // InstancesResponse is the response for the instances IPC message.

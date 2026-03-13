@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sageox/ox/internal/session"
@@ -63,6 +64,10 @@ type SessionFinalizeHandler struct {
 	logger *slog.Logger
 	// skipGit disables git add/commit/push in tests
 	skipGit bool
+	// pidLookup returns the parent PID for a given agent ID from daemon in-memory state.
+	// Used as fallback when .recording.json predates the ParentPID field (rollout compat).
+	// Returns 0 if unknown.
+	pidLookup func(agentID string) int
 }
 
 // NewSessionFinalizeHandler creates a handler with the given logger.
@@ -71,6 +76,12 @@ func NewSessionFinalizeHandler(logger *slog.Logger) *SessionFinalizeHandler {
 		logger = slog.Default()
 	}
 	return &SessionFinalizeHandler{logger: logger}
+}
+
+// SetPIDLookup sets the function used to look up agent PIDs from daemon in-memory state.
+// This enables PID-based liveness detection for recordings that predate the ParentPID field.
+func (h *SessionFinalizeHandler) SetPIDLookup(fn func(agentID string) int) {
+	h.pidLookup = fn
 }
 
 // NewSessionFinalizeHandlerForTest creates a handler with git operations disabled.
@@ -123,7 +134,7 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 		recPath := filepath.Join(sessionDir, recordingMarker)
 		if recInfo, statErr := os.Stat(recPath); statErr == nil {
 			// .recording.json exists — check if it's stale (abandoned)
-			stale, recAge := isStaleRecording(recPath, recInfo)
+			stale, recAge := isStaleRecording(recPath, recInfo, h.pidLookup)
 			if !stale {
 				h.logger.Debug("skipping session with active recording", "session", name)
 				continue
@@ -339,23 +350,51 @@ func extractPayload(item *WorkItem) (*SessionFinalizePayload, error) {
 }
 
 // isStaleRecording reads a .recording.json file and determines if the recording
-// is abandoned (started more than staleRecordingThreshold ago). Falls back to
-// file mod time if the JSON can't be parsed.
-func isStaleRecording(recPath string, info os.FileInfo) (bool, time.Duration) {
-	// try to read StartedAt from the recording state JSON
+// is abandoned. Checks PID liveness first (instant detection), then falls back
+// to the 24h staleRecordingThreshold.
+//
+// pidLookup is an optional function that returns the parent PID for a given agent ID
+// from daemon in-memory state. Used as fallback when .recording.json predates the
+// ParentPID field (rollout compat). Pass nil if unavailable.
+func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) int) (bool, time.Duration) {
 	data, err := os.ReadFile(recPath)
-	if err == nil {
-		var state struct {
-			StartedAt time.Time `json:"started_at"`
-		}
-		if jsonErr := json.Unmarshal(data, &state); jsonErr == nil && !state.StartedAt.IsZero() {
-			age := time.Since(state.StartedAt)
-			return age > staleRecordingThreshold, age
+	if err != nil {
+		// can't read file — fall back to mod time
+		age := time.Since(info.ModTime())
+		return age > staleRecordingThreshold, age
+	}
+
+	var state struct {
+		StartedAt time.Time `json:"started_at"`
+		AgentID   string    `json:"agent_id"`
+		ParentPID int       `json:"parent_pid"`
+	}
+	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
+		age := time.Since(info.ModTime())
+		return age > staleRecordingThreshold, age
+	}
+
+	// determine age
+	age := time.Since(info.ModTime())
+	if !state.StartedAt.IsZero() {
+		age = time.Since(state.StartedAt)
+	}
+
+	// try PID from .recording.json first, then fall back to daemon in-memory PID
+	pid := state.ParentPID
+	if pid <= 0 && pidLookup != nil && state.AgentID != "" {
+		pid = pidLookup(state.AgentID)
+	}
+
+	// if we have a PID, check liveness — dead process = stale immediately
+	if pid > 0 {
+		proc, procErr := os.FindProcess(pid)
+		if procErr != nil || proc.Signal(syscall.Signal(0)) != nil {
+			return true, age
 		}
 	}
 
-	// fallback: use file modification time
-	age := time.Since(info.ModTime())
+	// fall back to time-based threshold
 	return age > staleRecordingThreshold, age
 }
 

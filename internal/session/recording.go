@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -50,6 +51,7 @@ type RecordingState struct {
 	AgentType      string `json:"agent_type,omitempty"`       // original agent type for metadata: "codex", "amp", etc. Falls back to AdapterName if empty.
 	StopIncomplete bool   `json:"stop_incomplete,omitempty"`  // set when stop returned retry guidance (empty file)
 	Model          string `json:"model,omitempty"`            // LLM model for generic adapters where ReadMetadata returns nil
+	ParentPID      int    `json:"parent_pid,omitempty"`           // parent agent process ID for liveness detection
 	SourceOffset   int64  `json:"source_offset,omitempty"`   // byte offset in source file for incremental reading
 }
 
@@ -59,6 +61,20 @@ func (r *RecordingState) Duration() time.Duration {
 		return 0
 	}
 	return time.Since(r.StartedAt)
+}
+
+// IsAgentAlive checks if the recording agent's parent process is still running.
+// Uses kill(pid, 0) for instant liveness detection.
+// Returns true if no PID is recorded (assume alive for backward compat).
+func (r *RecordingState) IsAgentAlive() bool {
+	if r == nil || r.ParentPID <= 0 {
+		return true // no PID recorded — assume alive
+	}
+	proc, err := os.FindProcess(r.ParentPID)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
 }
 
 // IsSubagent returns true if this session has a parent session.
@@ -421,6 +437,7 @@ type StartRecordingOptions struct {
 
 	AgentType string // original agent type for metadata (e.g., "codex", "amp")
 	Model     string // LLM model for generic adapters
+	ParentPID int    // parent agent process ID for liveness detection
 }
 
 // StartRecording begins a new recording session.
@@ -527,6 +544,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		ParentAgentID:     opts.ParentAgentID,
 		AgentType:         opts.AgentType,
 		Model:             opts.Model,
+		ParentPID:         opts.ParentPID,
 	}
 
 	if err := SaveRecordingState(projectRoot, state); err != nil {

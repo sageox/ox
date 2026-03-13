@@ -61,6 +61,7 @@ func Heartbeat(repoPath string, teamIDs []string, agentID string) {
 			CLIVersion:    version.Full(),
 			ParentAgentID: parentAgentID,
 			AgentType:     agentType,
+			ParentPID:     os.Getppid(),
 		}
 
 		// include workspace ID if available
@@ -118,6 +119,7 @@ func sendContextHeartbeat(agentID string, bytes int64, commandName string) {
 			Timestamp:     time.Now(),
 			ParentAgentID: parentAgentID,
 			AgentType:     agentType,
+			ParentPID:     os.Getppid(),
 		}
 		data, err := json.Marshal(payload)
 		if err != nil {
@@ -147,6 +149,7 @@ func HeartbeatWithCreds(repoPath string, teamIDs []string, agentID string, creds
 			CLIVersion:    version.Full(),
 			ParentAgentID: parentAgentID,
 			AgentType:     agentType,
+			ParentPID:     os.Getppid(),
 		}
 
 		// include workspace ID if available

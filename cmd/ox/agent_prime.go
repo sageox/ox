@@ -764,6 +764,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			SessionID:      inst.ServerSessionID,
 			AgentSessionID: agentSessionID,
 			PrimedAt:       time.Now(),
+			ParentPID:      os.Getppid(),
 		}
 		if err := WriteSessionMarker(marker); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to write session marker: %v\n", err)
@@ -1085,8 +1086,9 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 	opts := session.StartRecordingOptions{
 		AgentID:     agentID,
 		AdapterName: agentType,
-		OutputFile: outputFile,
+		OutputFile:  outputFile,
 		FilterMode:  resolved.Mode,
+		ParentPID:   os.Getppid(),
 	}
 
 	state, err := session.StartRecording(projectRoot, opts)

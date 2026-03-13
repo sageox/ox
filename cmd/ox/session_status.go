@@ -31,6 +31,7 @@ Examples:
 // sessionStatusOutput is the JSON output format for session status.
 type sessionStatusOutput struct {
 	Recording     bool                    `json:"recording"`
+	AgentAlive    *bool                   `json:"agent_alive,omitempty"` // nil if no PID available, false if agent exited
 	Guidance      string                  `json:"guidance,omitempty"`
 	Count         int                     `json:"count,omitempty"`
 	Sessions      []sessionRecordingEntry `json:"sessions,omitempty"`
@@ -51,6 +52,7 @@ type sessionStatusOutput struct {
 // sessionRecordingEntry represents one active recording in the multi-session output.
 type sessionRecordingEntry struct {
 	AgentID       string `json:"agent_id"`
+	AgentAlive    *bool  `json:"agent_alive,omitempty"` // nil if no PID available, false if agent exited
 	Title         string `json:"title,omitempty"`
 	Agent         string `json:"agent,omitempty"`
 	DurationSecs  int    `json:"duration_seconds"`
@@ -131,6 +133,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		if jsonOutput {
 			output := sessionStatusOutput{
 				Recording:     true,
+				AgentAlive:    agentAlivePtr(state),
 				Guidance:      "Run 'ox agent <id> session stop' to save the recording",
 				Count:         1,
 				Title:         state.Title,
@@ -149,7 +152,11 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 			return outputJSON(output)
 		}
 
-		fmt.Println(cli.StyleSuccess.Render("Recording in progress"))
+		if !state.IsAgentAlive() {
+			fmt.Println(cli.StyleWarning.Render("Recording in progress (agent exited)"))
+		} else {
+			fmt.Println(cli.StyleSuccess.Render("Recording in progress"))
+		}
 		fmt.Println()
 		if state.Title != "" {
 			fmt.Printf("  Title:    %s\n", state.Title)
@@ -179,6 +186,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 			d := s.Duration()
 			entries = append(entries, sessionRecordingEntry{
 				AgentID:       s.AgentID,
+				AgentAlive:    agentAlivePtr(s),
 				Title:         s.Title,
 				Agent:         s.AdapterName,
 				DurationSecs:  int(d.Seconds()),
@@ -214,7 +222,11 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		if label == "" {
 			label = state.AdapterName
 		}
-		fmt.Printf("  %s %s\n", cli.StyleBold.Render(label), cli.StyleDim.Render(fmt.Sprintf("(%s, %d entries)", durationStr, state.EntryCount)))
+		statusSuffix := ""
+		if !state.IsAgentAlive() {
+			statusSuffix = " " + cli.StyleWarning.Render("agent exited")
+		}
+		fmt.Printf("  %s %s%s\n", cli.StyleBold.Render(label), cli.StyleDim.Render(fmt.Sprintf("(%s, %d entries)", durationStr, state.EntryCount)), statusSuffix)
 
 		if state.Title != "" {
 			fmt.Printf("    Title:   %s\n", state.Title)
@@ -233,6 +245,16 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 	fmt.Println(cli.StyleDim.Render("Use --current to filter to this agent's recording"))
 
 	return nil
+}
+
+// agentAlivePtr returns a *bool indicating agent liveness from PID.
+// Returns nil if no PID is recorded (backward compat with old recordings).
+func agentAlivePtr(state *session.RecordingState) *bool {
+	if state == nil || state.ParentPID <= 0 {
+		return nil
+	}
+	alive := state.IsAgentAlive()
+	return &alive
 }
 
 // outputJSON writes JSON to stdout.

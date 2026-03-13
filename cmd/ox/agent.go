@@ -534,8 +534,11 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 
 		// status indicator for non-active
 		statusStr := ""
-		if m.Status == "idle" {
+		switch m.Status {
+		case "idle":
 			statusStr = " " + dim.Render("idle")
+		case "exited":
+			statusStr = " " + dim.Render("exited")
 		}
 
 		row := fmt.Sprintf("  %s%s  %-10s  %s  %s  %s  %s%s",

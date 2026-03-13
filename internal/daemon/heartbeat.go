@@ -68,6 +68,11 @@ type HeartbeatPayload struct {
 	// AgentType identifies the kind of agent (e.g., "claude-code", "explore").
 	// Used for display in `ox agent list`.
 	AgentType string `json:"agent_type,omitempty"`
+
+	// ParentPID is the process ID of the parent agent process (e.g., Claude Code).
+	// Captured via os.Getppid() in the CLI. Used by the daemon for instant liveness
+	// detection via kill(pid, 0) instead of waiting for heartbeat timeout.
+	ParentPID int `json:"parent_pid,omitempty"`
 }
 
 // HeartbeatCreds contains credentials for the daemon.
@@ -146,6 +151,7 @@ type HeartbeatHandler struct {
 	metaMu        sync.RWMutex
 	agentParentID map[string]string // agent_id → parent agent ID
 	agentType     map[string]string // agent_id → agent type
+	agentPID      map[string]int    // agent_id → parent process ID
 
 	// credentials (updated from heartbeats) - protected by credMu
 	credMu          sync.RWMutex
@@ -188,6 +194,7 @@ func NewHeartbeatHandler(logger *slog.Logger) *HeartbeatHandler {
 		agentCommandCount:  make(map[string]int),
 		agentParentID:      make(map[string]string),
 		agentType:          make(map[string]string),
+		agentPID:           make(map[string]int),
 	}
 }
 
@@ -362,15 +369,18 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 			h.ctxMu.Unlock()
 		}
 
-		// store agent metadata (parent/type) if provided.
+		// store agent metadata (parent/type/pid) if provided.
 		// only track agents already admitted by the bounded activity tracker.
-		if h.agentActivity.Has(hb.AgentID) && (hb.ParentAgentID != "" || hb.AgentType != "") {
+		if h.agentActivity.Has(hb.AgentID) && (hb.ParentAgentID != "" || hb.AgentType != "" || hb.ParentPID > 0) {
 			h.metaMu.Lock()
 			if hb.ParentAgentID != "" {
 				h.agentParentID[hb.AgentID] = hb.ParentAgentID
 			}
 			if hb.AgentType != "" {
 				h.agentType[hb.AgentID] = hb.AgentType
+			}
+			if hb.ParentPID > 0 {
+				h.agentPID[hb.AgentID] = hb.ParentPID
 			}
 			h.metaMu.Unlock()
 		}
@@ -519,6 +529,14 @@ func (h *HeartbeatHandler) GetAgentType(agentID string) string {
 	h.metaMu.RLock()
 	defer h.metaMu.RUnlock()
 	return h.agentType[agentID]
+}
+
+// GetAgentPID returns the parent process ID for a given agent.
+// Returns 0 if not known.
+func (h *HeartbeatHandler) GetAgentPID(agentID string) int {
+	h.metaMu.RLock()
+	defer h.metaMu.RUnlock()
+	return h.agentPID[agentID]
 }
 
 // ActivitySummary returns a summary of all activity for status display.
