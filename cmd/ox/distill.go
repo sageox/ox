@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -72,6 +73,10 @@ type distillStateV2 struct {
 	LastDailyHash   string `json:"last_daily_hash,omitempty"`
 	LastWeeklyHash  string `json:"last_weekly_hash,omitempty"`
 	LastMonthlyHash string `json:"last_monthly_hash,omitempty"`
+	// ProcessedDiscussions tracks which discussion dirs have been processed.
+	// Key: directory name, Value: content hash at time of processing.
+	// Map-based (not timestamp cursor) because discussions arrive out of order via daemon sync.
+	ProcessedDiscussions map[string]string `json:"processed_discussions,omitempty"`
 	// v1 compat fields (read for migration, not written)
 	LastDistilled    string `json:"last_distilled,omitempty"`
 	ObservationCount int    `json:"observation_count,omitempty"`
@@ -111,6 +116,15 @@ func (s *distillStateV2) lastMonthlyTime() time.Time {
 	return time.Time{}
 }
 
+// logPrompt logs the full prompt to stderr when --verbose is set.
+func logPrompt(cmd *cobra.Command, label, prompt string) {
+	verbose, _ := cmd.Flags().GetBool("verbose")
+	if !verbose {
+		return
+	}
+	fmt.Fprintf(cmd.ErrOrStderr(), "--- prompt (%s) ---\n%s--- end prompt ---\n", label, prompt)
+}
+
 func runDistill(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 	if ctx == nil {
@@ -131,6 +145,11 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	backend, err := agentcli.Detect()
 	if err != nil && !distillDryRun {
 		return fmt.Errorf("distillation requires an AI coworker CLI: %w", err)
+	}
+
+	// set working directory so relative file paths in prompts resolve correctly
+	if claude, ok := backend.(*agentcli.Claude); ok {
+		claude.WorkDir = tc.Path
 	}
 
 	// load distill state (v2 format, backward compat with v1)
@@ -157,6 +176,15 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	if len(layers) == 0 {
 		fmt.Fprintln(cmd.OutOrStdout(), "Nothing to distill")
 		return nil
+	}
+
+	// extract facts from unprocessed discussions before daily distill
+	if slices.Contains(layers, "daily") {
+		if err := extractDiscussionFacts(ctx, cmd, backend, tc, state, guidelines); err != nil {
+			slog.Warn("discussion fact extraction failed", "error", err)
+		} else if err := saveDistillStateV2(projectRoot, state); err != nil {
+			slog.Warn("failed to save distill state after discussion extraction", "error", err)
+		}
 	}
 
 	for _, layer := range layers {
@@ -208,6 +236,84 @@ func determineLayers(state *distillStateV2, explicit string, now time.Time) []st
 	return layers
 }
 
+// extractDiscussionFacts scans for unprocessed discussions and writes fact files.
+// Each discussion gets a fact file in memory/.discussion-facts/{dirName}.md.
+// Uses LLM to extract structured facts, or writes stub if in dry-run mode.
+func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, guidelines string) error {
+	if state.ProcessedDiscussions == nil {
+		state.ProcessedDiscussions = make(map[string]string)
+	}
+
+	pending, err := scanPendingDiscussions(tc.Path, state.ProcessedDiscussions)
+	if err != nil {
+		return fmt.Errorf("scan discussions: %w", err)
+	}
+
+	if len(pending) == 0 {
+		return nil
+	}
+
+	if distillDryRun {
+		fmt.Fprintf(cmd.OutOrStdout(), "Pending discussions: %d\n", len(pending))
+		for _, d := range pending {
+			fmt.Fprintf(cmd.OutOrStdout(), "  - %s: %s\n", d.DirName, d.Title)
+		}
+		return nil
+	}
+
+	factsDir := filepath.Join(tc.Path, "memory", ".discussion-facts")
+	if err := os.MkdirAll(factsDir, 0o755); err != nil {
+		return fmt.Errorf("create discussion-facts dir: %w", err)
+	}
+
+	for _, d := range pending {
+		factContent, err := extractSingleDiscussionFacts(ctx, cmd, backend, d, guidelines)
+		if err != nil {
+			// non-fatal per discussion — log and continue
+			slog.Warn("skip discussion fact extraction", "dir", d.DirName, "error", err)
+			continue
+		}
+
+		factFile := filepath.Join("memory", ".discussion-facts", d.DirName+".md")
+		if err := writeMemoryFile(tc.Path, factFile, factContent); err != nil {
+			slog.Warn("failed to write discussion facts", "dir", d.DirName, "error", err)
+			continue
+		}
+
+		if err := commitMemoryFile(tc.Path, factFile, fmt.Sprintf("memory: extract facts from %s", d.Title)); err != nil {
+			slog.Warn("failed to commit discussion facts", "dir", d.DirName, "error", err)
+		}
+
+		// track as processed with content hash
+		hash := discussionContentHash(filepath.Join(tc.Path, "discussions", d.DirName))
+		state.ProcessedDiscussions[d.DirName] = hash
+
+		fmt.Fprintf(cmd.OutOrStdout(), "Extracted facts from discussion: %s\n", d.Title)
+	}
+
+	return nil
+}
+
+// extractSingleDiscussionFacts generates facts for one discussion via LLM.
+func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, d discussionInput, guidelines string) (string, error) {
+	prompt := agentcli.DiscussionFactsPrompt(d.Title, d.Summary, d.Transcript, guidelines)
+	logPrompt(cmd, "discussion-facts: "+d.Title, prompt)
+	output, err := backend.Run(ctx, prompt)
+	if err != nil {
+		return "", fmt.Errorf("AI agent: %w", err)
+	}
+
+	// format with metadata header
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "# Facts: %s\n\n", d.Title)
+	sb.WriteString(output)
+	if !strings.HasSuffix(output, "\n") {
+		sb.WriteByte('\n')
+	}
+	fmt.Fprintf(&sb, "\n---\n*Extracted from discussion: %s (created %s)*\n", d.DirName, d.CreatedAt.Format("2006-01-02"))
+	return sb.String(), nil
+}
+
 func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, projectRoot string, now time.Time, guidelines string) error {
 	obsDir := filepath.Join(tc.Path, "memory", ".observations")
 	since := state.lastDailyTime()
@@ -217,8 +323,14 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 		return fmt.Errorf("scan observations: %w", err)
 	}
 
-	if len(observations) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No pending observations for daily distill")
+	// read discussion facts created since last daily
+	factContents, factPaths, err := readPendingDiscussionFacts(tc.Path, since)
+	if err != nil {
+		slog.Warn("failed to read discussion facts", "error", err)
+	}
+
+	if len(observations) == 0 && len(factContents) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No pending observations or discussion facts for daily distill")
 		return nil
 	}
 
@@ -228,22 +340,26 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 		contents[i] = obs.Content
 	}
 
-	// check if input is unchanged since last distill — skip LLM call if so
-	hash := contentHash(contents...)
+	// combined hash incorporates both sources — new facts trigger re-distill
+	hashInputs := append(contents, factContents...)
+	hash := contentHash(hashInputs...)
 	if hash == state.LastDailyHash {
-		fmt.Fprintln(cmd.OutOrStdout(), "Daily observations unchanged since last distill, skipping")
+		fmt.Fprintln(cmd.OutOrStdout(), "Daily input unchanged since last distill, skipping")
 		return nil
 	}
 
 	date := now.Format("2006-01-02")
 
 	if distillDryRun {
-		fmt.Fprintf(cmd.OutOrStdout(), "Daily distill: %d observations for %s (hash: %s)\n", len(observations), date, hash[:8])
+		fmt.Fprintf(cmd.OutOrStdout(), "Daily distill: %d observations and %d discussion facts for %s (hash: %s)\n",
+			len(observations), len(factContents), date, hash[:8])
 		return nil
 	}
 
-	prompt := agentcli.DailyPrompt(contents, date, guidelines)
-	fmt.Fprintf(cmd.OutOrStdout(), "Distilling %d observations into daily summary for %s...\n", len(observations), date)
+	prompt := agentcli.DailyPrompt(contents, date, guidelines, factPaths...)
+	logPrompt(cmd, "daily", prompt)
+	fmt.Fprintf(cmd.OutOrStdout(), "Distilling %d observations and %d discussion facts into daily summary for %s...\n",
+		len(observations), len(factContents), date)
 
 	output, err := backend.Run(ctx, prompt)
 	if err != nil {
@@ -252,7 +368,7 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 
 	// write daily memory file
 	filePath := filepath.Join("memory", "daily", date+".md")
-	content := formatDailyMemory(date, output, len(observations))
+	content := formatDailyMemory(date, output, len(observations), len(factContents))
 
 	if err := writeMemoryFile(tc.Path, filePath, content); err != nil {
 		return fmt.Errorf("write daily memory: %w", err)
@@ -294,6 +410,7 @@ func distillWeekly(ctx context.Context, cmd *cobra.Command, backend agentcli.Bac
 	}
 
 	prompt := agentcli.WeeklyPrompt(dailySummaries, weekID, guidelines)
+	logPrompt(cmd, "weekly", prompt)
 	fmt.Fprintf(cmd.OutOrStdout(), "Synthesizing %d daily summaries into weekly %s...\n", len(dailySummaries), weekID)
 
 	output, err := backend.Run(ctx, prompt)
@@ -343,6 +460,7 @@ func distillMonthly(ctx context.Context, cmd *cobra.Command, backend agentcli.Ba
 	}
 
 	prompt := agentcli.MonthlyPrompt(weeklySummaries, month, guidelines)
+	logPrompt(cmd, "monthly", prompt)
 	fmt.Fprintf(cmd.OutOrStdout(), "Synthesizing %d weekly summaries into monthly %s...\n", len(weeklySummaries), month)
 
 	output, err := backend.Run(ctx, prompt)
@@ -409,8 +527,17 @@ func readRecentMemoryFiles(dir string, maxFiles int) ([]string, []string, error)
 	return contents, names, nil
 }
 
-func formatDailyMemory(date, content string, obsCount int) string {
-	return fmt.Sprintf("# Daily Memory — %s\n\n%s\n\n---\n*Distilled from %d observations*\n", date, content, obsCount)
+func formatDailyMemory(date, content string, obsCount, discussionCount int) string {
+	var source string
+	switch {
+	case obsCount > 0 && discussionCount > 0:
+		source = fmt.Sprintf("%d observations and %d discussions", obsCount, discussionCount)
+	case discussionCount > 0:
+		source = fmt.Sprintf("%d discussions", discussionCount)
+	default:
+		source = fmt.Sprintf("%d observations", obsCount)
+	}
+	return fmt.Sprintf("# Daily Memory — %s\n\n%s\n\n---\n*Distilled from %s*\n", date, content, source)
 }
 
 // loadDistillStateV2 loads distill state, migrating from v1 if needed.

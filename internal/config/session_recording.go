@@ -159,14 +159,8 @@ func ResolveSessionRecording(projectRoot string) *ResolvedSessionRecording {
 // Checks for config.toml in the team context directory.
 // Returns empty string if no team context or no setting configured.
 func loadTeamSessionRecording(projectRoot string) string {
-	localCfg, err := LoadLocalConfig(projectRoot)
-	if err != nil || len(localCfg.TeamContexts) == 0 {
-		return ""
-	}
-
-	// use the first configured team context
-	tc := localCfg.TeamContexts[0]
-	if tc.Path == "" {
+	tc := FindRepoTeamContext(projectRoot)
+	if tc == nil || tc.Path == "" {
 		return ""
 	}
 

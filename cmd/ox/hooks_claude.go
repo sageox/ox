@@ -410,7 +410,9 @@ func HasProjectClaudeHooks(gitRoot string) bool {
 		return false
 	}
 
-	for _, eventName := range []string{claudeSessionStart, claudePreCompact} {
+	// check all lifecycle events, not just SessionStart/PreCompact,
+	// to detect stale hook installations missing newer events like PostToolUse
+	for _, eventName := range claudeLifecycleEvents {
 		found := false
 		for _, entry := range settings.Hooks[eventName] {
 			if hasAnyOxHook(entry) {
@@ -432,7 +434,7 @@ func listProjectClaudeHooks(gitRoot string) map[string]bool {
 		return make(map[string]bool)
 	}
 	status := make(map[string]bool)
-	for _, eventName := range []string{claudeSessionStart, claudePreCompact} {
+	for _, eventName := range claudeLifecycleEvents {
 		for _, entry := range settings.Hooks[eventName] {
 			if hasAnyOxHook(entry) {
 				status[eventName] = true

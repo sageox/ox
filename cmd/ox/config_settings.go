@@ -187,12 +187,11 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 		repoCfg, _ = config.LoadProjectConfig(projectRoot)
 	}
 
-	// load team config
+	// load team config (repo's own team, not cross-team)
 	var teamCfg *config.TeamConfig
 	if projectRoot != "" {
-		localCfg, _ := config.LoadLocalConfig(projectRoot)
-		if localCfg != nil && len(localCfg.TeamContexts) > 0 {
-			teamCfg, _ = config.LoadTeamConfig(localCfg.TeamContexts[0].Path)
+		if tc := config.FindRepoTeamContext(projectRoot); tc != nil {
+			teamCfg, _ = config.LoadTeamConfig(tc.Path)
 		}
 	}
 
@@ -404,12 +403,12 @@ func setTeamConfig(key, value, projectRoot string) error {
 		return fmt.Errorf("not in a SageOx project")
 	}
 
-	localCfg, err := config.LoadLocalConfig(projectRoot)
-	if err != nil || len(localCfg.TeamContexts) == 0 {
+	tc := config.FindRepoTeamContext(projectRoot)
+	if tc == nil {
 		return fmt.Errorf("no team context configured")
 	}
 
-	teamPath := localCfg.TeamContexts[0].Path
+	teamPath := tc.Path
 	cfg, err := config.LoadTeamConfig(teamPath)
 	if err != nil {
 		cfg = &config.TeamConfig{}

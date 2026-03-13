@@ -26,6 +26,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/telemetry"
@@ -1084,11 +1085,14 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 
 	// start recording with filter mode
 	opts := session.StartRecordingOptions{
-		AgentID:     agentID,
-		AdapterName: agentType,
-		OutputFile:  outputFile,
-		FilterMode:  resolved.Mode,
-		ParentPID:   os.Getppid(),
+		AgentID:       agentID,
+		AdapterName:   agentType,
+		OutputFile:    outputFile,
+		FilterMode:    resolved.Mode,
+		ParentPID:     os.Getppid(),
+		Username:      getSessionUsername(),
+		WorkspacePath: projectRoot,
+		Branch:        repotools.GetCurrentBranch(projectRoot),
 	}
 
 	state, err := session.StartRecording(projectRoot, opts)

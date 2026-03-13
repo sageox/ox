@@ -28,6 +28,7 @@ func ensureMemoryDirs(tcPath string) error {
 		filepath.Join(tcPath, "memory", "daily"),
 		filepath.Join(tcPath, "memory", "weekly"),
 		filepath.Join(tcPath, "memory", "monthly"),
+		filepath.Join(tcPath, "memory", ".discussion-facts"),
 	}
 	for _, dir := range dirs {
 		if err := os.MkdirAll(dir, 0o755); err != nil {

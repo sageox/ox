@@ -41,6 +41,7 @@ const (
 // global daemon, which would eliminate the multi-writer locking problem.
 type LocalConfig struct {
 	Ledger       *LedgerConfig `toml:"ledger,omitempty"`
+	// TeamContexts lists all teams for this user — use FindRepoTeamContext() to get the repo's own team.
 	TeamContexts []TeamContext `toml:"team_contexts,omitempty"`
 }
 
@@ -372,7 +373,7 @@ func (c *LocalConfig) RemoveTeamContext(teamID string) {
 
 // FindRepoTeamContext returns the team context that belongs to this repo's team.
 // Loads ProjectConfig.TeamID and matches it against LocalConfig.TeamContexts.
-// Falls back to the first configured team context if no match is found.
+// Returns nil if no match is found (never guesses a cross-team context).
 //
 // If no team contexts are configured in config.local.toml (daemon hasn't synced yet),
 // falls back to computing the expected path from config.json's team_id + endpoint.
@@ -386,10 +387,6 @@ func FindRepoTeamContext(projectRoot string) *TeamContext {
 
 	projectCfg, err := LoadProjectConfig(projectRoot)
 	if err != nil || projectCfg == nil {
-		// no project config — can only use local config entries
-		if len(localCfg.TeamContexts) > 0 {
-			return &localCfg.TeamContexts[0]
-		}
 		return nil
 	}
 
@@ -398,11 +395,6 @@ func FindRepoTeamContext(projectRoot string) *TeamContext {
 		if tc := localCfg.GetTeamContext(projectCfg.TeamID); tc != nil {
 			return tc
 		}
-	}
-
-	// fallback: any configured team context
-	if len(localCfg.TeamContexts) > 0 {
-		return &localCfg.TeamContexts[0]
 	}
 
 	// fallback: compute path from config.json team_id + endpoint (no daemon needed)
