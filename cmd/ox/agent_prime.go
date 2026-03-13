@@ -329,6 +329,7 @@ func initAgentPrimeCmd() {
 	// --review: For security engineers to audit what agents receive (shows both)
 	agentPrimeCmd.Flags().Bool("text", false, "Output human-readable text instead of JSON")
 	agentPrimeCmd.Flags().Bool("review", false, "Security audit mode: show English summary + JSON")
+	agentPrimeCmd.Flags().String("format", "", "Output format: xml (default) or json")
 
 	// Future optimization: agent/model can be used to tune output for specific agent/model combinations.
 	agentPrimeCmd.Flags().String("agent", "", "Agent identifier (claude-code, cursor, droid, windsurf) (default: none)")
@@ -1151,7 +1152,11 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 //
 //	Retains the original hybrid format with markdown.
 //
-// Default (no flags): Pure JSON output optimized for agent consumption.
+// Output format selection:
+// XML is the preferred format for LLM agent consumption (structured, semantic, token-efficient).
+// JSON is retained for backward compatibility, debugging, and programmatic consumers.
+// XML output is ordered for prompt caching: static content first, per-session content last.
+// See: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices#structure-prompts-with-xml-tags
 func outputAgentPrime(cmd *cobra.Command, textMode, reviewMode bool, output agentPrimeOutput) error {
 	// always include tips: one for the agent, one for the agent to relay to the user
 	output.AgentTip = tips.GetTip("prime")
@@ -1188,20 +1193,30 @@ func outputAgentPrime(cmd *cobra.Command, textMode, reviewMode bool, output agen
 		return outputAgentPrimeText(cmd, output)
 	}
 
-	// default: JSON output for agent consumption
-	// This is the primary use case - agents consume JSON directly without parsing overhead
-	cw := agentinstance.NewCountingWriter(cmd.OutOrStdout())
-	encoder := json.NewEncoder(cw)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(output); err != nil {
-		return err
+	// determine output format: xml (default) or json
+	formatFlag, _ := cmd.Flags().GetString("format")
+	if formatFlag == "" {
+		formatFlag = "xml" // default for all callers — all consumers are LLMs
 	}
 
-	// prime is not dispatched via runWithAgentID, send heartbeat directly
-	if bytes := cw.BytesWritten(); bytes > 0 && output.AgentID != "" {
-		sendContextHeartbeat(output.AgentID, bytes, "prime")
+	switch formatFlag {
+	case "json":
+		// legacy JSON output for debugging and programmatic consumers
+		cw := agentinstance.NewCountingWriter(cmd.OutOrStdout())
+		encoder := json.NewEncoder(cw)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(output); err != nil {
+			return err
+		}
+		// prime is not dispatched via runWithAgentID, send heartbeat directly
+		if bytes := cw.BytesWritten(); bytes > 0 && output.AgentID != "" {
+			sendContextHeartbeat(output.AgentID, bytes, "prime")
+		}
+		return nil
+	default:
+		// XML: structured tags optimized for LLM consumption and prompt caching
+		return outputAgentPrimeXML(cmd, output)
 	}
-	return nil
 }
 
 // buildHumanSummary creates a human-readable summary for --review mode
