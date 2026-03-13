@@ -175,11 +175,11 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 
 	combined := &combinedQueryResponse{}
 
-	// query team context if source is "all" or "teamctx"
-	if qa.source == "all" || qa.source == "teamctx" {
+	// query team context if source is "all" or "team"
+	if qa.source == "all" || qa.source == "team" {
 		resp, err := queryTeamContext(qa, projectRoot, agentID, agentType)
 		if err != nil {
-			if qa.source == "teamctx" {
+			if qa.source == "team" {
 				return 0, fmt.Errorf("team context query failed: %w", err)
 			}
 			slog.Warn("team context query failed, continuing with code search", "error", err)
