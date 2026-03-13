@@ -181,7 +181,9 @@ func setupRealTeamContext(t *testing.T, env *common.TestEnvironment) {
 			"GIT_COMMITTER_NAME=Test",
 			"GIT_COMMITTER_EMAIL=test@test.com",
 		)
-		cmd.CombinedOutput()
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("failed to stage team context files: %v\n%s", err, output)
+		}
 		cmd = exec.Command("git", "commit", "--allow-empty", "-m", "init")
 		cmd.Dir = destTeamPath
 		cmd.Env = append(os.Environ(),
@@ -190,7 +192,9 @@ func setupRealTeamContext(t *testing.T, env *common.TestEnvironment) {
 			"GIT_COMMITTER_NAME=Test",
 			"GIT_COMMITTER_EMAIL=test@test.com",
 		)
-		cmd.CombinedOutput()
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("failed to create initial commit in team context: %v\n%s", err, output)
+		}
 	}
 
 	// Patch project config.json to include the real team_id
@@ -224,13 +228,17 @@ func setupRealTeamContext(t *testing.T, env *common.TestEnvironment) {
 func findRealTeamContextPath(t *testing.T) string {
 	t.Helper()
 
-	// Standard XDG path for the real team context
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skipf("cannot determine home dir: %v", err)
+	// Resolve via XDG_DATA_HOME (respects custom XDG config), fallback to ~/.local/share
+	dataHome := os.Getenv("XDG_DATA_HOME")
+	if dataHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Skipf("cannot determine home dir: %v", err)
+		}
+		dataHome = filepath.Join(home, ".local", "share")
 	}
 
-	teamPath := filepath.Join(home, ".local", "share", "sageox", "sageox.ai", "teams", "team_jihjpfkt8b")
+	teamPath := filepath.Join(dataHome, "sageox", "sageox.ai", "teams", "team_jihjpfkt8b")
 
 	if _, err := os.Stat(teamPath); os.IsNotExist(err) {
 		t.Skipf("real team context not found at %s — requires ox to be synced on this machine", teamPath)
