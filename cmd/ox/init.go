@@ -1642,7 +1642,7 @@ func installAgentHooks(gitRoot string, quiet bool) []string {
 			if !quiet {
 				cli.PrintSuccess("Installed Claude Code integration")
 			}
-			installedHooks = append(installedHooks, ".claude/settings.local.json")
+			installedHooks = append(installedHooks, ".claude/settings.json")
 		}
 	}
 

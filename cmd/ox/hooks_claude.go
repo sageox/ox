@@ -27,6 +27,83 @@ type ClaudeSettings struct {
 	Hooks map[string][]ClaudeHookEntry `json:"hooks,omitempty"`
 }
 
+// readSettingsFileRaw reads a settings file preserving all top-level keys.
+// Returns typed hooks and a raw map of everything else, preventing data loss
+// when writing back (e.g., preserving "permissions" alongside "hooks").
+func readSettingsFileRaw(path string) (*ClaudeSettings, map[string]json.RawMessage, error) {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return &ClaudeSettings{
+			Hooks: make(map[string][]ClaudeHookEntry),
+		}, make(map[string]json.RawMessage), nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read settings file: %w", err)
+	}
+
+	if len(data) == 0 {
+		return &ClaudeSettings{
+			Hooks: make(map[string][]ClaudeHookEntry),
+		}, make(map[string]json.RawMessage), nil
+	}
+
+	// parse all top-level keys as raw JSON
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawMap); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse settings file: %w", err)
+	}
+
+	// extract hooks into typed struct
+	var settings ClaudeSettings
+	if hooksRaw, ok := rawMap["hooks"]; ok {
+		if err := json.Unmarshal(hooksRaw, &settings.Hooks); err != nil {
+			return nil, nil, fmt.Errorf("failed to parse hooks: %w", err)
+		}
+	}
+	if settings.Hooks == nil {
+		settings.Hooks = make(map[string][]ClaudeHookEntry)
+	}
+
+	return &settings, rawMap, nil
+}
+
+// writeSettingsFileRaw writes settings back, merging typed hooks into the raw map
+// to preserve all non-hook keys (permissions, etc.).
+func writeSettingsFileRaw(path string, settings *ClaudeSettings, rawMap map[string]json.RawMessage, perm os.FileMode) error {
+	// ensure parent directory exists
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, dirPerm); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+
+	// marshal hooks back into raw map
+	if rawMap == nil {
+		rawMap = make(map[string]json.RawMessage)
+	}
+
+	if settings.Hooks != nil && len(settings.Hooks) > 0 {
+		hooksJSON, err := json.Marshal(settings.Hooks)
+		if err != nil {
+			return fmt.Errorf("failed to marshal hooks: %w", err)
+		}
+		rawMap["hooks"] = hooksJSON
+	} else {
+		delete(rawMap, "hooks")
+	}
+
+	data, err := json.MarshalIndent(rawMap, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal settings: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, perm); err != nil {
+		return fmt.Errorf("failed to write settings file: %w", err)
+	}
+
+	return nil
+}
+
 func getClaudeSettingsPath() (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -233,70 +310,47 @@ func hasUserLevelOxPrime() bool {
 	return hasUserLevelAgentMarker(detectActiveAgent())
 }
 
-// getProjectClaudeSettingsPath returns the path to .claude/settings.local.json in the project
-func getProjectClaudeSettingsPath(gitRoot string) string {
+// getSharedClaudeSettingsPath returns the path to .claude/settings.json (shared, git-tracked).
+func getSharedClaudeSettingsPath(gitRoot string) string {
+	return filepath.Join(gitRoot, ".claude", "settings.json")
+}
+
+// getLocalClaudeSettingsPath returns the path to .claude/settings.local.json (gitignored, personal).
+func getLocalClaudeSettingsPath(gitRoot string) string {
 	return filepath.Join(gitRoot, ".claude", "settings.local.json")
 }
 
-// readProjectClaudeSettings reads .claude/settings.local.json from the project
-func readProjectClaudeSettings(gitRoot string) (*ClaudeSettings, error) {
-	settingsPath := getProjectClaudeSettingsPath(gitRoot)
-
-	// create settings file if it doesn't exist
-	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
-		return &ClaudeSettings{
-			Hooks: make(map[string][]ClaudeHookEntry),
-		}, nil
-	}
-
-	// read existing settings
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read settings file: %w", err)
-	}
-
-	// handle empty file
-	if len(data) == 0 {
-		return &ClaudeSettings{
-			Hooks: make(map[string][]ClaudeHookEntry),
-		}, nil
-	}
-
-	var settings ClaudeSettings
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return nil, fmt.Errorf("failed to parse settings file: %w", err)
-	}
-
-	// ensure hooks map exists
-	if settings.Hooks == nil {
-		settings.Hooks = make(map[string][]ClaudeHookEntry)
-	}
-
-	return &settings, nil
+// readSharedClaudeSettings reads .claude/settings.json using raw-preserving parse.
+func readSharedClaudeSettings(gitRoot string) (*ClaudeSettings, map[string]json.RawMessage, error) {
+	return readSettingsFileRaw(getSharedClaudeSettingsPath(gitRoot))
 }
 
-// writeProjectClaudeSettings writes .claude/settings.local.json to the project
-func writeProjectClaudeSettings(gitRoot string, settings *ClaudeSettings) error {
-	settingsPath := getProjectClaudeSettingsPath(gitRoot)
+// writeSharedClaudeSettings writes .claude/settings.json using raw-preserving write.
+func writeSharedClaudeSettings(gitRoot string, settings *ClaudeSettings, rawMap map[string]json.RawMessage) error {
+	return writeSettingsFileRaw(getSharedClaudeSettingsPath(gitRoot), settings, rawMap, sharedSettingsPerm)
+}
 
-	// ensure .claude directory exists
-	claudeDir := filepath.Dir(settingsPath)
-	if err := os.MkdirAll(claudeDir, dirPerm); err != nil {
-		return fmt.Errorf("failed to create .claude directory: %w", err)
-	}
-
-	// marshal with indentation for readability
-	data, err := json.MarshalIndent(settings, "", "  ")
+// readProjectClaudeSettings reads .claude/settings.json (shared) from the project.
+// Falls back to settings.local.json during migration period.
+func readProjectClaudeSettings(gitRoot string) (*ClaudeSettings, error) {
+	settings, _, err := readSharedClaudeSettings(gitRoot)
 	if err != nil {
-		return fmt.Errorf("failed to marshal settings: %w", err)
+		return nil, err
 	}
 
-	// write to file
-	if err := os.WriteFile(settingsPath, data, settingsPerm); err != nil {
-		return fmt.Errorf("failed to write settings file: %w", err)
+	// if shared file has ox hooks, use it
+	if len(settings.Hooks) > 0 {
+		return settings, nil
 	}
 
-	return nil
+	// fall back to local file for migration period
+	localPath := getLocalClaudeSettingsPath(gitRoot)
+	localSettings, _, err := readSettingsFileRaw(localPath)
+	if err != nil {
+		return settings, nil // return empty shared settings on local read error
+	}
+
+	return localSettings, nil
 }
 
 // claudeLifecycleEvents lists all Claude Code events that get ox agent hook handlers.
@@ -314,13 +368,16 @@ func oxHookCommandForEvent(event string) string {
 	return fmt.Sprintf(constants.OxHookCommandClaudeCodeTemplate, event)
 }
 
-// InstallProjectClaudeHooks installs ox lifecycle hooks to .claude/settings.local.json.
+// InstallProjectClaudeHooks installs ox lifecycle hooks to .claude/settings.json (shared).
 //
 // Uses the generalized ox agent hook command — one entry per event.
 // The hook handler reads stdin JSON to determine behavior (source, trigger, etc.)
 // so matchers are no longer needed.
+//
+// Uses raw JSON preservation to avoid dropping non-hook keys (permissions, etc.).
+// After successful install, cleans up stale ox hooks from settings.local.json.
 func InstallProjectClaudeHooks(gitRoot string) error {
-	settings, err := readProjectClaudeSettings(gitRoot)
+	settings, rawMap, err := readSharedClaudeSettings(gitRoot)
 	if err != nil {
 		return err
 	}
@@ -338,7 +395,14 @@ func InstallProjectClaudeHooks(gitRoot string) error {
 		settings.Hooks[event] = mergeHookEntries(existing, []ClaudeHookEntry{newEntry})
 	}
 
-	return writeProjectClaudeSettings(gitRoot, settings)
+	if err := writeSharedClaudeSettings(gitRoot, settings, rawMap); err != nil {
+		return err
+	}
+
+	// clean up stale ox hooks from settings.local.json
+	_ = cleanupLocalSettingsOxHooks(gitRoot)
+
+	return nil
 }
 
 // mergeHookEntries merges new hook entries with existing ones.
@@ -401,9 +465,9 @@ func mergeHookEntries(existing, new []ClaudeHookEntry) []ClaudeHookEntry {
 	return result
 }
 
-// HasProjectClaudeHooks checks if ox hooks are already in .claude/settings.local.json.
-// Returns true only if BOTH SessionStart AND PreCompact have at least one ox hook
-// (either old ox agent prime format or new ox agent hook format).
+// HasProjectClaudeHooks checks if ox hooks are in .claude/settings.json (shared).
+// Falls back to settings.local.json during migration period.
+// Returns true only if BOTH SessionStart AND PreCompact have at least one ox hook.
 func HasProjectClaudeHooks(gitRoot string) bool {
 	settings, err := readProjectClaudeSettings(gitRoot)
 	if err != nil {
@@ -428,6 +492,7 @@ func HasProjectClaudeHooks(gitRoot string) bool {
 }
 
 // listProjectClaudeHooks returns per-event hook status from project-level settings.
+// Checks shared settings.json first, falls back to settings.local.json.
 func listProjectClaudeHooks(gitRoot string) map[string]bool {
 	settings, err := readProjectClaudeSettings(gitRoot)
 	if err != nil {
@@ -443,4 +508,78 @@ func listProjectClaudeHooks(gitRoot string) map[string]bool {
 		}
 	}
 	return status
+}
+
+// cleanupLocalSettingsOxHooks removes ox hooks from settings.local.json,
+// preserving non-ox content. Deletes the file if it becomes empty.
+func cleanupLocalSettingsOxHooks(gitRoot string) error {
+	localPath := getLocalClaudeSettingsPath(gitRoot)
+
+	settings, rawMap, err := readSettingsFileRaw(localPath)
+	if err != nil {
+		return err
+	}
+
+	// if no hooks at all, nothing to clean
+	if len(settings.Hooks) == 0 {
+		return nil
+	}
+
+	// strip ox hooks from all events
+	changed := false
+	for eventName, entries := range settings.Hooks {
+		var filtered []ClaudeHookEntry
+		for _, entry := range entries {
+			before := len(entry.Hooks)
+			removeAnyOxHook(&entry)
+			if len(entry.Hooks) != before {
+				changed = true
+			}
+			if len(entry.Hooks) > 0 {
+				filtered = append(filtered, entry)
+			}
+		}
+		if len(filtered) > 0 {
+			settings.Hooks[eventName] = filtered
+		} else {
+			delete(settings.Hooks, eventName)
+			changed = true
+		}
+	}
+
+	if !changed {
+		return nil
+	}
+
+	// check if file is now effectively empty (no hooks and no other keys)
+	hasOtherKeys := false
+	for k := range rawMap {
+		if k != "hooks" {
+			hasOtherKeys = true
+			break
+		}
+	}
+
+	if len(settings.Hooks) == 0 && !hasOtherKeys {
+		return os.Remove(localPath)
+	}
+
+	return writeSettingsFileRaw(localPath, settings, rawMap, settingsPerm)
+}
+
+// hasLocalSettingsOxHooks checks if settings.local.json contains any ox hooks.
+func hasLocalSettingsOxHooks(gitRoot string) bool {
+	localPath := getLocalClaudeSettingsPath(gitRoot)
+	settings, _, err := readSettingsFileRaw(localPath)
+	if err != nil {
+		return false
+	}
+	for _, entries := range settings.Hooks {
+		for _, entry := range entries {
+			if hasAnyOxHook(entry) {
+				return true
+			}
+		}
+	}
+	return false
 }

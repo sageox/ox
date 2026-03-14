@@ -157,17 +157,19 @@ const (
 	CheckSlugGeminiHooks         = "gemini-hooks"
 	CheckSlugCodexHooks          = "codex-hooks"
 	CheckSlugCodePuppyHooks      = "code-puppy-hooks"
-	CheckSlugHookCommands          = "hook-commands"
-	CheckSlugHookCompleteness      = "hook-completeness"
-	CheckSlugSessionStartHookBug   = "session-start-hook-bug"
-	CheckSlugGitCommitHooks        = "git-commit-hooks"
+	CheckSlugHookCommands        = "hook-commands"
+	CheckSlugHookCompleteness    = "hook-completeness"
+	CheckSlugSharedHookValues    = "shared-hook-values"
+	CheckSlugStaleLocalHooks     = "stale-local-hooks"
+	CheckSlugSessionStartHookBug = "session-start-hook-bug"
+	CheckSlugGitCommitHooks      = "git-commit-hooks"
 
 	// Team Context checks
-	CheckSlugTeamRegistration      = "team-registration"
-	CheckSlugLegacyTeamCtx         = "legacy-team-contexts"
-	CheckSlugOrphanedTeamDirs      = "orphaned-team-dirs"
-	CheckSlugGCBlockedUntracked    = "gc-blocked-untracked"
-	CheckSlugTeamSparseCheckout    = "team-sparse-checkout"
+	CheckSlugTeamRegistration   = "team-registration"
+	CheckSlugLegacyTeamCtx      = "legacy-team-contexts"
+	CheckSlugOrphanedTeamDirs   = "orphaned-team-dirs"
+	CheckSlugGCBlockedUntracked = "gc-blocked-untracked"
+	CheckSlugTeamSparseCheckout = "team-sparse-checkout"
 
 	// SageOx Configuration checks
 	CheckSlugEndpointConsistency   = "endpoint-consistency"
@@ -186,7 +188,7 @@ const (
 	CheckSlugSessionPush        = "session-push"
 	CheckSlugSessionIncomplete  = "session-incomplete"
 	CheckSlugSessionAutoStage   = "session-auto-stage"
-	CheckSlugSessionUploadRetry  = "session-upload-retry"
+	CheckSlugSessionUploadRetry = "session-upload-retry"
 	CheckSlugSessionUncommitted = "session-uncommitted"
 	CheckSlugSessionOrphaned    = "session-orphaned"
 

@@ -15,7 +15,7 @@ import (
 // across every partial ox init state in Claude Code.
 //
 // Three independent priming paths exist:
-//  1. Hook       – SessionStart hook in .claude/settings.local.json
+//  1. Hook       – SessionStart hook in .claude/settings.json
 //  2. Header     – ox:prime-check marker at top of AGENTS.md / CLAUDE.md
 //  3. Footer     – ox:prime marker at bottom of AGENTS.md / CLAUDE.md
 //  4. UserMarker – ox:prime in ~/.claude/CLAUDE.md (global fallback)

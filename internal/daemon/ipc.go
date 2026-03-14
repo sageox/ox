@@ -366,9 +366,11 @@ type NotificationsResponse struct {
 
 // DoctorResponse is the response for the doctor IPC message.
 type DoctorResponse struct {
-	AntiEntropyTriggered bool     `json:"anti_entropy_triggered"`
-	ClonesTriggered      int      `json:"clones_triggered"`
-	Errors               []string `json:"errors,omitempty"`
+	AntiEntropyTriggered     bool     `json:"anti_entropy_triggered"`
+	ClonesTriggered          int      `json:"clones_triggered"`
+	SessionFinalizeTriggered bool     `json:"session_finalize_triggered"`
+	SessionFinalizeQueued    int      `json:"session_finalize_queued"`
+	Errors                   []string `json:"errors,omitempty"`
 }
 
 // TriggerGCResponse is the response for trigger_gc requests.
