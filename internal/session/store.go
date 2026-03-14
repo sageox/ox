@@ -444,7 +444,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			// raw.jsonl exists (hydrated or recording in progress)
 			filePath = rawPath
 			fileSize = info.Size()
-			hasRawData = info.Size() > 0
+			hasRawData = HasSubstantiveEntries(rawPath)
 			modTime = info.ModTime()
 			if createdAt.IsZero() {
 				createdAt = info.ModTime()

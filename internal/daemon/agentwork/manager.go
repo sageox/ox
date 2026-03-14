@@ -18,13 +18,14 @@ const (
 	// maxRecentEntries is the number of completed processes to keep for observability.
 	maxRecentEntries = 10
 	// doctorInterval is the periodic timer for running detection scans
-	// independent of sync signals. Catches time-based conditions (e.g.,
-	// stale recordings hitting the 24h threshold) that won't trigger from
-	// a sync signal alone.
-	doctorInterval = 1 * time.Hour
+	// independent of sync signals. Catches orphaned sessions, stale
+	// recordings, and other time-based conditions. Kept short (5m) because
+	// detection is cheap (directory listing + PID checks) and the daemon
+	// auto-exits after 1h idle — a long interval risks never running.
+	doctorInterval = 5 * time.Minute
 	// detectCooldown is the minimum interval between detection scans for a handler.
 	// Prevents expensive ledger scans from running on every sync signal.
-	detectCooldown = 1 * time.Hour
+	detectCooldown = 5 * time.Minute
 
 	// status constants for AgentProcess
 	statusRunning   = "running"
