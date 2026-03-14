@@ -220,6 +220,10 @@ func ensureSessionsGitignore(sessionsDir string) error {
 // commitAndPushLedger commits meta.json and .gitignore, then pushes to remote.
 // Uses pull --rebase with retry to handle concurrent pushes from other team members.
 // NEVER uses --force push. Conflicts are resolved via pull --rebase.
+//
+// Uses exec.Command("git") rather than go-git for the same reasons as the daemon
+// (see daemon/sync.go doPull): rebase support, process isolation, and lock safety.
+// This is a low-volume path (once per session stop), so subprocess overhead is negligible.
 func commitAndPushLedger(ledgerPath, sessionName string) error {
 	// ensure .gitignore is in place before any commit to prevent cache file leakage
 	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)

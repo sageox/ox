@@ -866,6 +866,14 @@ func isValidGitRepo(path string) bool {
 // Returns an error if fetch or pull fails (for on-demand sync error reporting).
 // Callers that don't need the error (background scheduler) can ignore it.
 // forceSync=true bypasses backoff (user-initiated syncs via IPC).
+//
+// Architecture note: uses exec.Command("git") rather than go-git because:
+//   - process isolation: a hung or crashed git subprocess can be killed without
+//     taking down the daemon; an in-process go-git hang blocks the goroutine
+//   - --rebase and --autostash: go-git's PullOptions lacks rebase support, which
+//     is required for clean linear history on shared ledger repos
+//   - lock file safety: if a git process crashes, its .git/index.lock is released
+//     by the OS; an in-process crash may leave stale locks in the same process
 func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, forceSync bool) error {
 	if s.config.LedgerPath == "" {
 		return nil

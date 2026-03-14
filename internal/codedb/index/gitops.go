@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/go-git/go-git/v5"
-	"github.com/go-git/go-git/v5/config"
+	"github.com/go-git/go-git/v6"
+	"github.com/go-git/go-git/v6/config"
 )
 
 // normalizeRepoURL strips scheme prefixes, trailing slashes, and .git suffix
@@ -62,8 +62,9 @@ func CloneOrFetch(url, repoPath string) (*git.Repository, error) {
 }
 
 func cloneBare(url, path string) (*git.Repository, error) {
-	repo, err := git.PlainClone(path, true, &git.CloneOptions{
-		URL: url,
+	repo, err := git.PlainClone(path, &git.CloneOptions{
+		URL:  url,
+		Bare: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("clone %s: %w", url, err)
