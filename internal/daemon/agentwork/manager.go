@@ -277,6 +277,58 @@ func (m *Manager) detectAndEnqueue() {
 	}
 }
 
+// ForceDetect runs detection on all enabled handlers, bypassing the cooldown.
+// Returns the total number of work items enqueued. Safe to call from IPC handlers.
+func (m *Manager) ForceDetect() int {
+	cfg := m.configLoader()
+	if cfg == nil || !cfg.IsEnabled() {
+		return 0
+	}
+
+	m.mu.Lock()
+	handlers := make([]WorkHandler, 0, len(m.handlers))
+	for _, h := range m.handlers {
+		handlers = append(handlers, h)
+	}
+	m.mu.Unlock()
+
+	total := 0
+	now := time.Now()
+	for _, h := range handlers {
+		if !isHandlerEnabled(cfg, h.Type()) {
+			m.logger.Debug("handler disabled by config", "type", h.Type())
+			continue
+		}
+
+		items, err := h.Detect(m.ledgerPath)
+		if err != nil {
+			m.logger.Warn("handler detect failed", "type", h.Type(), "error", err)
+			continue
+		}
+
+		// update cooldown timestamp even on forced detect
+		m.mu.Lock()
+		m.lastDetect[h.Type()] = now
+		m.mu.Unlock()
+
+		for _, item := range items {
+			if m.queue.Enqueue(item) {
+				m.logger.Info("detected agent work", "type", item.Type, "dedup_key", item.DedupKey)
+				total++
+			}
+		}
+	}
+
+	// signal queue processor
+	select {
+	case m.processSignal <- struct{}{}:
+	default:
+	}
+
+	m.logger.Info("force detect complete", "items_queued", total)
+	return total
+}
+
 // processQueue drains the queue, respecting config, rate limits, and concurrency.
 func (m *Manager) processQueue(ctx context.Context) {
 	cfg := m.configLoader()

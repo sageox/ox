@@ -134,7 +134,7 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 		recPath := filepath.Join(sessionDir, recordingMarker)
 		if recInfo, statErr := os.Stat(recPath); statErr == nil {
 			// .recording.json exists — check if it's stale (abandoned)
-			stale, recAge := isStaleRecording(recPath, recInfo, h.pidLookup)
+			stale, recAge, method := isStaleRecording(recPath, recInfo, h.pidLookup, h.logger)
 			if !stale {
 				h.logger.Debug("skipping session with active recording", "session", name)
 				continue
@@ -151,6 +151,7 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 			h.logger.Info("clearing stale recording for anti-entropy finalization",
 				"session", name,
 				"recording_age", recAge.Round(time.Hour),
+				"detection_method", method,
 			)
 			if err := os.Remove(recPath); err != nil {
 				h.logger.Warn("failed to remove stale recording marker", "session", name, "err", err)
@@ -173,6 +174,11 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 			Missing:    missing,
 			LedgerPath: ledgerPath,
 		}
+
+		h.logger.Info("session needs finalization",
+			"session", name,
+			"missing", missing,
+		)
 
 		items = append(items, &WorkItem{
 			Type:     sessionFinalizeType,
@@ -271,8 +277,13 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		gen = htmlGen
 	}
 	artifactPaths, artifactErr := session.WriteSessionArtifacts(payload.SessionDir, stored, summaryResp, gen)
+	sessionName := filepath.Base(payload.SessionDir)
 	if artifactErr != nil {
 		h.logger.Warn("artifact generation failed", "err", artifactErr)
+		h.logger.Warn("session recovery incomplete",
+			"session", sessionName,
+			"err", artifactErr,
+		)
 	} else {
 		h.logger.Info("wrote session artifacts",
 			"summary_md", artifactPaths.SummaryMD,
@@ -280,6 +291,12 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 			"html", artifactPaths.HTML,
 			"session_md", artifactPaths.SessionMD,
 		)
+		h.gitCommitAndPush(payload)
+		h.logger.Info("session recovered via anti-entropy",
+			"session", sessionName,
+			"artifacts_generated", len(requiredArtifacts),
+		)
+		return nil
 	}
 
 	h.gitCommitAndPush(payload)
@@ -356,12 +373,15 @@ func extractPayload(item *WorkItem) (*SessionFinalizePayload, error) {
 // pidLookup is an optional function that returns the parent PID for a given agent ID
 // from daemon in-memory state. Used as fallback when .recording.json predates the
 // ParentPID field (rollout compat). Pass nil if unavailable.
-func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) int) (bool, time.Duration) {
+func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) int, logger *slog.Logger) (stale bool, age time.Duration, method string) {
 	data, err := os.ReadFile(recPath)
 	if err != nil {
 		// can't read file — fall back to mod time
-		age := time.Since(info.ModTime())
-		return age > staleRecordingThreshold, age
+		age = time.Since(info.ModTime())
+		if age > staleRecordingThreshold {
+			return true, age, "time_threshold"
+		}
+		return false, age, "time_not_reached"
 	}
 
 	var state struct {
@@ -370,32 +390,51 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 		ParentPID int       `json:"parent_pid"`
 	}
 	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
-		age := time.Since(info.ModTime())
-		return age > staleRecordingThreshold, age
+		age = time.Since(info.ModTime())
+		if age > staleRecordingThreshold {
+			return true, age, "time_threshold"
+		}
+		return false, age, "time_not_reached"
 	}
 
 	// determine age
-	age := time.Since(info.ModTime())
+	age = time.Since(info.ModTime())
 	if !state.StartedAt.IsZero() {
 		age = time.Since(state.StartedAt)
 	}
 
 	// try PID from .recording.json first, then fall back to daemon in-memory PID
 	pid := state.ParentPID
+	if pid > 0 {
+		logger.Debug("recording PID from marker", "pid", pid, "session", filepath.Base(recPath))
+	}
 	if pid <= 0 && pidLookup != nil && state.AgentID != "" {
 		pid = pidLookup(state.AgentID)
+		if pid > 0 {
+			logger.Debug("recording PID from daemon lookup", "pid", pid, "agent_id", state.AgentID)
+		}
 	}
 
 	// if we have a PID, check liveness — dead process = stale immediately
 	if pid > 0 {
 		proc, procErr := os.FindProcess(pid)
 		if procErr != nil || proc.Signal(syscall.Signal(0)) != nil {
-			return true, age
+			logger.Debug("recording process dead, marking stale", "pid", pid, "age", age)
+			return true, age, "pid_dead"
 		}
+		logger.Debug("recording process alive, skipping", "pid", pid)
+		return false, age, "pid_alive"
 	}
 
+	logger.Debug("no PID available, using time threshold", "session", filepath.Base(recPath))
+
 	// fall back to time-based threshold
-	return age > staleRecordingThreshold, age
+	if age > staleRecordingThreshold {
+		logger.Debug("recording exceeded stale threshold", "age", age, "threshold", staleRecordingThreshold)
+		return true, age, "time_threshold"
+	}
+	logger.Debug("recording within stale threshold", "age", age, "threshold", staleRecordingThreshold)
+	return false, age, "time_not_reached"
 }
 
 // missingArtifacts returns the list of required artifacts not present in sessionDir.

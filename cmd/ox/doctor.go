@@ -143,6 +143,12 @@ git health, agent environment, and connected services. Use --fix to auto-repair
 common issues, or --fix-slug to target specific checks.`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// --force-session-uploads: force detection and upload of incomplete sessions
+		forceSessionUploads, _ := cmd.Flags().GetBool("force-session-uploads")
+		if forceSessionUploads {
+			return runForceSessionUploads(cmd)
+		}
+
 		// --gc: trigger blue/green GC in daemon (standalone, early return)
 		gc, _ := cmd.Flags().GetBool("gc")
 		if gc {
@@ -309,11 +315,38 @@ func getAvailableSlugs() []string {
 }
 
 func init() {
+	doctorCmd.Flags().Bool("force-session-uploads", false, "Force detection and upload of incomplete sessions")
 	doctorCmd.Flags().Bool("gc", false, "force garbage collection (reclone) of team contexts")
 	doctorCmd.Flags().Bool("fix", false, "automatically fix issues where possible")
 	doctorCmd.Flags().StringSlice("fix-slug", nil, "fix specific issue(s) by slug (repeatable, e.g., --fix-slug=ledger-path --fix-slug=team-symlink)")
 	doctorCmd.Flags().BoolP("yes", "y", false, "answer yes to all prompts (for non-interactive use)")
 	doctorCmd.Flags().BoolP("verbose", "v", false, "show all checks including passed and skipped")
+}
+
+// runForceSessionUploads triggers the daemon to detect and upload incomplete sessions.
+func runForceSessionUploads(cmd *cobra.Command) error {
+	if err := daemon.EnsureDaemon(); err != nil {
+		return fmt.Errorf("daemon required for session finalization: %w", err)
+	}
+	client := daemon.NewClient()
+	resp, err := cli.WithSpinner("Scanning for incomplete sessions...", func() (*daemon.DoctorResponse, error) {
+		return client.Doctor()
+	})
+	if err != nil {
+		return fmt.Errorf("session finalization trigger failed: %w", err)
+	}
+
+	w := cmd.OutOrStdout()
+	if resp.SessionFinalizeQueued > 0 {
+		fmt.Fprintf(w, "%s  Queued %d session(s) for finalization\n",
+			ui.PassStyle.Render(ui.TimelineDot), resp.SessionFinalizeQueued)
+		fmt.Fprintf(w, "%s  Sessions will be finalized in the background by the daemon\n",
+			ui.MutedStyle.Render(ui.TimelineBar))
+	} else {
+		fmt.Fprintf(w, "%s  No incomplete sessions found\n",
+			ui.PassStyle.Render(ui.TimelineDot))
+	}
+	return nil
 }
 
 // runGC triggers blue/green GC in the daemon, starting it if needed.
