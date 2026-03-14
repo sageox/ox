@@ -631,11 +631,11 @@ This same progressive disclosure pattern applies to agent guidance:
 
 ### MVP-Critical: Agent Friction Telemetry
 
-The friction telemetry system (`internal/uxfriction/`, `internal/daemon/friction.go`, `cmd/ox/friction.go`) is **MVP-critical**. It measures how effectively `ox` is working with coding agents by capturing friction events (tool failures, retries, errors, slowdowns) during agent sessions.
+The friction telemetry system (`github.com/sageox/frictionax`, `internal/daemon/friction.go`, `cmd/ox/friction.go`) is **MVP-critical**. It measures how effectively `ox` is working with coding agents by capturing friction events (tool failures, retries, errors, slowdowns) during agent sessions.
 
 This data is essential for learning what's working, what's broken, and where agent workflows hit friction — directly informing product decisions.
 
-**Release gate:** All friction telemetry tests MUST pass before any `ox` release. Do not ship if `internal/uxfriction/` or `internal/daemon/friction*` tests are failing.
+**Release gate:** All friction telemetry tests MUST pass before any `ox` release. Do not ship if `cmd/ox/friction*` or `internal/daemon/friction*` tests are failing.
 
 ### Release Gate: E2E Integration Tests with Real Claude Code
 

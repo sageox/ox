@@ -27,7 +27,6 @@ const (
 type FrictionCollector struct {
 	mu           sync.Mutex
 	engine       *friction.Friction
-	enabled      bool
 	logger       *slog.Logger
 	getAuthToken func() string
 }
@@ -39,8 +38,6 @@ type FrictionCollector struct {
 // If empty, falls back to the default production endpoint.
 // SAGEOX_FRICTION_ENDPOINT env var always takes precedence when set.
 func NewFrictionCollector(logger *slog.Logger, projectEndpoint string) *FrictionCollector {
-	enabled := isFrictionEnabled()
-
 	// precedence: env var > project endpoint > default
 	ep := os.Getenv("SAGEOX_FRICTION_ENDPOINT")
 	if ep == "" {
@@ -51,8 +48,7 @@ func NewFrictionCollector(logger *slog.Logger, projectEndpoint string) *Friction
 	}
 
 	fc := &FrictionCollector{
-		enabled: enabled,
-		logger:  logger,
+		logger: logger,
 	}
 
 	fc.engine = friction.New(nil, // nil adapter: daemon only records events, never parses CLI errors
@@ -140,7 +136,7 @@ func (f *FrictionCollector) RecordFromIPC(payload FrictionPayload) {
 // Record adds a friction event to the buffer.
 // This is non-blocking and safe for concurrent use.
 func (f *FrictionCollector) Record(event friction.FrictionEvent) {
-	if !f.enabled || f.engine == nil {
+	if !isFrictionEnabled() || f.engine == nil {
 		return
 	}
 
@@ -153,17 +149,18 @@ func (f *FrictionCollector) Record(event friction.FrictionEvent) {
 
 // IsEnabled returns whether friction collection is enabled.
 func (f *FrictionCollector) IsEnabled() bool {
-	return f.enabled
+	return isFrictionEnabled()
 }
 
 // Stats returns current friction stats for status display.
 func (f *FrictionCollector) Stats() FrictionStats {
+	enabled := isFrictionEnabled()
 	if f.engine == nil {
-		return FrictionStats{Enabled: f.enabled}
+		return FrictionStats{Enabled: enabled}
 	}
 	s := f.engine.Stats()
 	return FrictionStats{
-		Enabled:        f.enabled,
+		Enabled:        enabled,
 		BufferCount:    s.BufferCount,
 		BufferSize:     s.BufferSize,
 		SampleRate:     s.SampleRate,
