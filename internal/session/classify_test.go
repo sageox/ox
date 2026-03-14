@@ -116,22 +116,22 @@ func TestClassifySession(t *testing.T) {
 			want:       StatusUploaded,
 		},
 		{
-			name: "cancelled → cancelled (even if uploaded somehow)",
+			name: "canceled → canceled (even if uploaded somehow)",
 			info: SessionInfo{
 				Recording:  false,
-				StopReason: StopReasonCancelled,
+				StopReason: StopReasonCanceled,
 			},
 			isUploaded: true,
-			want:       StatusCancelled,
+			want:       StatusCanceled,
 		},
 		{
-			name: "cancelled, not uploaded → cancelled",
+			name: "canceled, not uploaded → canceled",
 			info: SessionInfo{
 				Recording:  false,
-				StopReason: StopReasonCancelled,
+				StopReason: StopReasonCanceled,
 			},
 			isUploaded: false,
-			want:       StatusCancelled,
+			want:       StatusCanceled,
 		},
 		{
 			name: "recovered → local (no special display)",

@@ -332,8 +332,8 @@ func printSessionRow(t session.SessionInfo, uploaded bool, localUser string) {
 	case session.StatusUploaded:
 		statusStr = "✓ uploaded"
 		statusStyle = "uploaded"
-	case session.StatusCancelled:
-		statusStr = "✗ cancelled"
+	case session.StatusCanceled:
+		statusStr = "✗ canceled"
 		statusStyle = "ghost" // dim — discarded
 	default:
 		statusStr = "✗ local only"

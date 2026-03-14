@@ -31,7 +31,7 @@ import (
 //	      └──────────┘
 //
 //	      ┌──────────┐
-//	      │ cancelled  │  (terminal — data discarded)
+//	      │ canceled  │  (terminal — data discarded)
 //	      └──────────┘
 type SessionStatus string
 
@@ -42,7 +42,7 @@ const (
 	StatusOrphan    SessionStatus = "orphan"    // parent dead, has data — needs recovery/finalization
 	StatusLocal     SessionStatus = "local"     // exists locally, not uploaded (may have been recovered from orphan)
 	StatusUploaded  SessionStatus = "uploaded"  // committed to ledger
-	StatusCancelled SessionStatus = "cancelled" // user explicitly discarded session (terminal — data deleted)
+	StatusCanceled SessionStatus = "canceled" // user explicitly discarded session (terminal — data deleted)
 )
 
 // ghostHeuristicAge is the minimum age before a session with no PID is labeled ghost.
@@ -52,7 +52,7 @@ const ghostHeuristicAge = 5 * time.Minute
 // StopReason constants for how a session ended.
 const (
 	StopReasonStopped   = "stopped"   // user explicitly stopped via /ox-session-stop
-	StopReasonCancelled = "cancelled" // user explicitly cancelled via /ox-session-abort
+	StopReasonCanceled = "canceled" // user explicitly canceled via /ox-session-abort
 	StopReasonRecovered = "recovered" // recovered from orphan by daemon anti-entropy
 )
 
@@ -62,8 +62,8 @@ const (
 func ClassifySession(info SessionInfo, isUploaded bool) SessionStatus {
 	if !info.Recording {
 		// check stop reason for terminal states
-		if info.StopReason == StopReasonCancelled {
-			return StatusCancelled
+		if info.StopReason == StopReasonCanceled {
+			return StatusCanceled
 		}
 		if isUploaded {
 			return StatusUploaded
