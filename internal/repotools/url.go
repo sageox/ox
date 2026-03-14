@@ -7,22 +7,24 @@ import (
 )
 
 // normalizeGitURL converts various git URL formats to a canonical form
-// Handles: git@github.com:org/repo.git, https://github.com/org/repo.git, etc.
+// Handles: git@github.com:org/repo.git, https://github.com/org/repo.git,
+// ssh://git@github.com/org/repo.git, etc.
 func normalizeGitURL(url string) string {
 	// remove .git suffix
 	url = strings.TrimSuffix(url, ".git")
 
+	// remove protocol prefixes first so ssh://git@... is handled correctly
+	url = strings.TrimPrefix(url, "https://")
+	url = strings.TrimPrefix(url, "http://")
+	url = strings.TrimPrefix(url, "ssh://")
+
 	// convert SSH to HTTPS-like format for consistency
 	// git@github.com:org/repo -> github.com/org/repo
+	// git@github.com/org/repo -> github.com/org/repo (after ssh:// strip)
 	if strings.HasPrefix(url, "git@") {
 		url = strings.TrimPrefix(url, "git@")
 		url = strings.Replace(url, ":", "/", 1)
 	}
-
-	// remove protocol prefixes for consistent hashing
-	url = strings.TrimPrefix(url, "https://")
-	url = strings.TrimPrefix(url, "http://")
-	url = strings.TrimPrefix(url, "ssh://")
 
 	// lowercase for consistency
 	return strings.ToLower(url)
