@@ -295,12 +295,13 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 
 	sessionName := filepath.Base(payload.SessionDir)
 
-	// check quality score — gate upload/discard before generating artifacts
-	score := summaryResp.QualityScore
-	if score < h.qualityDiscardThreshold {
+	// evaluate quality using shared function
+	disposition := session.EvaluateQuality(summaryResp.QualityScore, h.qualityUploadThreshold, h.qualityDiscardThreshold)
+
+	if disposition == session.QualityDiscard {
 		h.logger.Info("session below discard threshold, removing",
 			"session", sessionName,
-			"quality_score", score,
+			"quality_score", summaryResp.QualityScore,
 			"threshold", h.qualityDiscardThreshold,
 			"reason", summaryResp.ScoreReason,
 		)
@@ -342,14 +343,13 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		"summary_json", artifactPaths.SummaryJSON,
 		"html", artifactPaths.HTML,
 		"session_md", artifactPaths.SessionMD,
-		"quality_score", score,
+		"quality_score", summaryResp.QualityScore,
 	)
 
-	// only upload to ledger if quality meets upload threshold
-	if score < h.qualityUploadThreshold {
+	if disposition == session.QualityLocalOnly {
 		h.logger.Info("session below upload threshold, keeping locally",
 			"session", sessionName,
-			"quality_score", score,
+			"quality_score", summaryResp.QualityScore,
 			"threshold", h.qualityUploadThreshold,
 			"reason", summaryResp.ScoreReason,
 		)
@@ -359,7 +359,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	h.gitCommitAndPush(payload)
 	h.logger.Info("session recovered via anti-entropy",
 		"session", sessionName,
-		"quality_score", score,
+		"quality_score", summaryResp.QualityScore,
 		"artifacts_generated", len(requiredArtifacts),
 	)
 	return nil

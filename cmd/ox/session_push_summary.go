@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
@@ -40,11 +41,13 @@ func init() {
 
 // pushSummaryOutput is the JSON output format for push-summary.
 type pushSummaryOutput struct {
-	Success     bool   `json:"success"`
-	Type        string `json:"type"`
-	SummaryPath string `json:"summary_path,omitempty"`
-	Message     string `json:"message,omitempty"`
-	Error       string `json:"error,omitempty"`
+	Success      bool   `json:"success"`
+	Type         string `json:"type"`
+	SummaryPath  string `json:"summary_path,omitempty"`
+	Message      string `json:"message,omitempty"`
+	Error        string `json:"error,omitempty"`
+	Disposition  string `json:"disposition,omitempty"`   // "upload", "local_only", "discard"
+	QualityScore float64 `json:"quality_score,omitempty"` // 0.0-1.0 from LLM
 }
 
 func runSessionPushSummary(cmd *cobra.Command, args []string) error {
@@ -91,6 +94,37 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
+	// parse quality score from the summary JSON for gating
+	var summaryParsed session.SummarizeResponse
+	_ = json.Unmarshal(data, &summaryParsed)
+
+	// load quality thresholds from user config
+	userCfg, _ := config.LoadUserConfig()
+	awCfg := userCfg.GetAgentWorkerConfig()
+	uploadThreshold := (&config.AgentWorkerConfig{}).GetQualityUploadThreshold()
+	discardThreshold := (&config.AgentWorkerConfig{}).GetQualityDiscardThreshold()
+	if awCfg != nil {
+		uploadThreshold = awCfg.GetQualityUploadThreshold()
+		discardThreshold = awCfg.GetQualityDiscardThreshold()
+	}
+
+	disposition := session.EvaluateQuality(summaryParsed.QualityScore, uploadThreshold, discardThreshold)
+
+	if disposition == session.QualityDiscard {
+		slog.Info("session below discard threshold, skipping push",
+			"quality_score", summaryParsed.QualityScore,
+			"threshold", discardThreshold,
+			"reason", summaryParsed.ScoreReason,
+		)
+		return &pushSummaryOutput{
+			Success:      true,
+			Type:         "push_summary",
+			Message:      "session discarded (below quality threshold)",
+			Disposition:  string(session.QualityDiscard),
+			QualityScore: summaryParsed.QualityScore,
+		}
+	}
+
 	// validate --session-dir exists
 	if _, err := os.Stat(sessionDir); os.IsNotExist(err) {
 		return &pushSummaryOutput{
@@ -134,11 +168,34 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
-	// ensure .gitignore is in place before any commit to prevent cache file leakage
-	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
-
 	// extract session name from session dir path for commit message
 	sessionName := filepath.Base(sessionDir)
+
+	// regenerate local cache HTML with rich summary regardless of disposition
+	regenerateLocalCacheHTML(sessionName, data)
+
+	// if below upload threshold, keep locally but don't push
+	if disposition == session.QualityLocalOnly {
+		slog.Info("session below upload threshold, keeping locally",
+			"session", sessionName,
+			"quality_score", summaryParsed.QualityScore,
+			"threshold", uploadThreshold,
+			"reason", summaryParsed.ScoreReason,
+		)
+		clearNeedsSummaryMarkerForSession(sessionName)
+		return &pushSummaryOutput{
+			Success:      true,
+			Type:         "push_summary",
+			SummaryPath:  summaryDst,
+			Message:      "summary saved locally (below upload threshold)",
+			Disposition:  string(session.QualityLocalOnly),
+			QualityScore: summaryParsed.QualityScore,
+		}
+	}
+
+	// disposition == QualityUpload — commit and push to ledger
+	// ensure .gitignore is in place before any commit to prevent cache file leakage
+	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
 
 	// git add the summary file (and meta.json if updated)
 	// --sparse: ledger repos use sparse-checkout
@@ -161,12 +218,13 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	if output, err := commitCmd.CombinedOutput(); err != nil {
 		outStr := string(output)
 		if strings.Contains(outStr, "nothing to commit") {
-			// file was already committed (e.g., re-run)
 			return &pushSummaryOutput{
-				Success:     true,
-				Type:        "push_summary",
-				SummaryPath: summaryDst,
-				Message:     "summary already committed",
+				Success:      true,
+				Type:         "push_summary",
+				SummaryPath:  summaryDst,
+				Message:      "summary already committed",
+				Disposition:  string(session.QualityUpload),
+				QualityScore: summaryParsed.QualityScore,
 			}
 		}
 		return &pushSummaryOutput{
@@ -189,14 +247,13 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	// clear .needs-summary marker in cache if we can find it
 	clearNeedsSummaryMarkerForSession(sessionName)
 
-	// regenerate local cache HTML with rich summary (aha moments, insights, etc.)
-	regenerateLocalCacheHTML(sessionName, data)
-
 	return &pushSummaryOutput{
-		Success:     true,
-		Type:        "push_summary",
-		SummaryPath: summaryDst,
-		Message:     "summary pushed to ledger",
+		Success:      true,
+		Type:         "push_summary",
+		SummaryPath:  summaryDst,
+		Message:      "summary pushed to ledger",
+		Disposition:  string(session.QualityUpload),
+		QualityScore: summaryParsed.QualityScore,
 	}
 }
 
