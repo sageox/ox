@@ -753,6 +753,8 @@ func TestNormalizeGitURL_EdgeCases(t *testing.T) {
 		{"gitlab ssh", "git@gitlab.com:group/subgroup/repo.git", "gitlab.com/group/subgroup/repo"},
 		{"http insecure", "http://internal.example.com/team/repo.git", "internal.example.com/team/repo"},
 		{"ssh protocol", "ssh://git@github.com/sageox/ox.git", "github.com/sageox/ox"},
+		{"ssh with port", "ssh://git@github.com:2222/org/repo.git", "github.com/org/repo"},
+		{"scp with port", "git@selfhosted.example.com:2222/team/project.git", "selfhosted.example.com/team/project"},
 		{"mixed case", "git@GitHub.Com:SageOx/Ox.git", "github.com/sageox/ox"},
 		{"empty", "", ""},
 		{"just .git", ".git", ""},

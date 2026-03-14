@@ -21,13 +21,45 @@ func normalizeGitURL(url string) string {
 	// convert SSH to HTTPS-like format for consistency
 	// git@github.com:org/repo -> github.com/org/repo
 	// git@github.com/org/repo -> github.com/org/repo (after ssh:// strip)
+	// git@host:2222/org/repo -> host/org/repo (port stripped)
 	if strings.HasPrefix(url, "git@") {
 		url = strings.TrimPrefix(url, "git@")
-		url = strings.Replace(url, ":", "/", 1)
+		// SCP-style uses colon as path separator (host:path).
+		// If a slash exists and a colon precedes it, the colon is either:
+		//   - an SCP path separator (host:org/repo) -> replace with /
+		//   - a port separator (host:2222/org/repo) -> strip host:port, keep /path
+		if slashIdx := strings.Index(url, "/"); slashIdx >= 0 {
+			if colonIdx := strings.Index(url, ":"); colonIdx >= 0 && colonIdx < slashIdx {
+				portOrPath := url[colonIdx+1 : slashIdx]
+				if isNumeric(portOrPath) {
+					// port: host:2222/org/repo -> host/org/repo
+					url = url[:colonIdx] + url[slashIdx:]
+				} else {
+					// SCP path: host:org/repo -> host/org/repo
+					url = url[:colonIdx] + "/" + url[colonIdx+1:]
+				}
+			}
+		} else if colonIdx := strings.Index(url, ":"); colonIdx >= 0 {
+			// no slash at all: host:org (rare SCP without subpath)
+			url = url[:colonIdx] + "/" + url[colonIdx+1:]
+		}
 	}
 
 	// lowercase for consistency
 	return strings.ToLower(url)
+}
+
+// isNumeric returns true if s is a non-empty string of digits (e.g. a port number).
+func isNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // HashRemoteURLs creates salted SHA256 hashes of remote URLs.
