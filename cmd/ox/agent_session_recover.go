@@ -210,6 +210,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 					EntryCount(entryCount).
 					UserID(auth.GetUserID(recoverEndpoint)).
 					RepoID(getRepoIDOrDefault(projectRoot)).
+					StopReason(session.StopReasonRecovered).
 					WithFiles(fileRefs).
 					Build()
 				if err := lfs.WriteSessionMeta(ledgerSessionDir, meta); err != nil {

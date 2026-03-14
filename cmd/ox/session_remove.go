@@ -318,6 +318,7 @@ func removedLocationLabel(local, ledger bool) string {
 // Uses pushLedger() for push with pull --rebase retry on conflict.
 func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (int, error) {
 	var staged int
+	var lastStaged string
 	for _, name := range sessionNames {
 		gitRm := exec.Command("git", "rm", "-r", "--force", filepath.Join("sessions", name))
 		gitRm.Dir = ledgerPath
@@ -326,6 +327,7 @@ func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (in
 			continue
 		}
 		staged++
+		lastStaged = name
 	}
 
 	if staged == 0 {
@@ -335,7 +337,7 @@ func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (in
 	// single commit for all removals
 	commitMsg := fmt.Sprintf("session: delete %d session(s)", staged)
 	if staged == 1 {
-		commitMsg = fmt.Sprintf("session: delete %s", sessionNames[0])
+		commitMsg = fmt.Sprintf("session: delete %s", lastStaged)
 	}
 	gitCommit := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
 	if out, err := gitCommit.CombinedOutput(); err != nil {

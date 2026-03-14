@@ -1,7 +1,6 @@
 package agentwork
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -171,7 +170,7 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 		}
 
 		// skip raw.jsonl files with zero substantive entries (header-only)
-		if !hasSubstantiveEntries(rawPath) {
+		if !session.HasSubstantiveEntries(rawPath) {
 			h.logger.Debug("skipping header-only session", "session", name)
 			continue
 		}
@@ -460,28 +459,6 @@ func missingArtifacts(sessionDir string) []string {
 		}
 	}
 	return missing
-}
-
-// hasSubstantiveEntries returns true if raw.jsonl has at least one entry beyond the
-// metadata header line. A header-only file (1 line) has no real session content.
-func hasSubstantiveEntries(rawPath string) bool {
-	f, err := os.Open(rawPath)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 64*1024)
-
-	lineCount := 0
-	for scanner.Scan() {
-		lineCount++
-		if lineCount >= 2 {
-			return true // at least one line beyond header
-		}
-	}
-	return false
 }
 
 // convertStoredEntries converts []map[string]any from StoredSession to []session.Entry.

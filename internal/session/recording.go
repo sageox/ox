@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/sageox/agentx"
@@ -73,11 +72,7 @@ func (r *RecordingState) IsAgentAlive() bool {
 	if r == nil || r.ParentPID <= 0 {
 		return true // no PID recorded — assume alive
 	}
-	proc, err := os.FindProcess(r.ParentPID)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
+	return isPIDAlive(r.ParentPID)
 }
 
 // IsSubagent returns true if this session was spawned by a parent agent.
@@ -467,8 +462,7 @@ func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
 		}
 
 		// parent is dead — check if there's any real data
-		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
-		if info, statErr := os.Stat(rawPath); statErr == nil && info.Size() > 0 {
+		if RawJSONLHasData(state.SessionPath) {
 			// has raw.jsonl with content — this is an orphan, not a ghost.
 			// don't delete: it has recoverable data.
 			continue

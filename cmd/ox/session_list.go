@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	lipgloss "charm.land/lipgloss/v2"
@@ -225,20 +224,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 		entries := make([]sessionListEntry, 0, len(sessions))
 		for _, t := range sessions {
 			uploaded := uploadedSessions[t.SessionName]
-			status := "local"
-			if t.Recording {
-				if isGhostSession(t) {
-					if t.EntryCount > 0 {
-						status = "orphan"
-					} else {
-						status = "ghost"
-					}
-				} else {
-					status = "recording"
-				}
-			} else if uploaded {
-				status = "uploaded"
-			}
+			status := string(session.ClassifySession(t, uploaded))
 			user := t.Username
 			if user == "" {
 				user = localUser
@@ -326,23 +312,30 @@ func printSessionRow(t session.SessionInfo, uploaded bool, localUser string) {
 		name = "↳ " + name
 	}
 
-	// status: ghost/orphan > recording > uploaded > local only
-	ghost := t.Recording && isGhostSession(t)
+	// status via canonical classifier
+	sessionStatus := session.ClassifySession(t, uploaded)
 	var statusStr string
-	var statusStyle string // "recording", "ghost", "uploaded", or "local"
-	if ghost && t.EntryCount > 0 {
-		statusStr = "⊘ orphan"
-		statusStyle = "orphan"
-	} else if ghost {
-		statusStr = "⊘ ghost"
-		statusStyle = "ghost"
-	} else if t.Recording {
+	var statusStyle string
+	switch sessionStatus {
+	case session.StatusRecording:
 		statusStr = "● recording"
 		statusStyle = "recording"
-	} else if uploaded {
+	case session.StatusPaused:
+		statusStr = "⏸ paused"
+		statusStyle = "local"
+	case session.StatusGhost:
+		statusStr = "⊘ ghost"
+		statusStyle = "ghost"
+	case session.StatusOrphan:
+		statusStr = "⊘ orphan"
+		statusStyle = "orphan"
+	case session.StatusUploaded:
 		statusStr = "✓ uploaded"
 		statusStyle = "uploaded"
-	} else {
+	case session.StatusCancelled:
+		statusStr = "✗ cancelled"
+		statusStyle = "ghost" // dim — discarded
+	default:
 		statusStr = "✗ local only"
 		statusStyle = "local"
 	}
@@ -426,27 +419,3 @@ func formatSessionDuration(d time.Duration) string {
 	return fmt.Sprintf("%dh%dm", hours, mins)
 }
 
-// isGhostSession detects abandoned recording sessions.
-// A ghost is a session marked as "recording" but whose parent process is dead
-// and has captured zero meaningful entries.
-func isGhostSession(t session.SessionInfo) bool {
-	if !t.Recording {
-		return false
-	}
-	// if parent PID is known and the process is dead → ghost
-	if t.ParentPID > 0 {
-		proc, err := os.FindProcess(t.ParentPID)
-		if err != nil {
-			return true // can't find process → dead
-		}
-		if proc.Signal(syscall.Signal(0)) != nil {
-			return true // signal failed → process dead
-		}
-		// process alive — not a ghost even if 0 turns (still recording)
-		return false
-	}
-	// no PID recorded — fall back to heuristic: 0 turns AND old enough.
-	// new sessions start with 0 entries; don't label them as ghosts until
-	// they've been sitting idle for at least 5 minutes.
-	return t.EntryCount == 0 && time.Since(t.CreatedAt) > 5*time.Minute
-}

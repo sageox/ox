@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/internal/session"
 )
 
 // createTestSession creates a session directory with raw.jsonl and optional artifacts.
@@ -1045,7 +1047,7 @@ func TestHasSubstantiveEntries(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.name == "nonexistent file" {
-				if hasSubstantiveEntries("/nonexistent/raw.jsonl") {
+				if session.HasSubstantiveEntries("/nonexistent/raw.jsonl") {
 					t.Error("nonexistent file should return false")
 				}
 				return
@@ -1055,9 +1057,9 @@ func TestHasSubstantiveEntries(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tt.content), 0644); err != nil {
 				t.Fatal(err)
 			}
-			got := hasSubstantiveEntries(path)
+			got := session.HasSubstantiveEntries(path)
 			if got != tt.want {
-				t.Errorf("hasSubstantiveEntries() = %v, want %v", got, tt.want)
+				t.Errorf("session.HasSubstantiveEntries() = %v, want %v", got, tt.want)
 			}
 		})
 	}

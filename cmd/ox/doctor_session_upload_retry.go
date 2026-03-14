@@ -258,17 +258,17 @@ func readCacheSessionMeta(rawPath string) (*session.StoreMeta, int, error) {
 // the authoritative copy; raw.jsonl is the critical file from which all others
 // can be regenerated.
 func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) error {
+	// guard: never upload a session with zero substantive entries
+	if orphan.EntryCount == 0 {
+		slog.Info("skipping retry upload: zero entries", "session", orphan.SessionName)
+		return nil
+	}
+
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, orphan.SessionName)
 
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
 		return fmt.Errorf("create session dir: %w", err)
-	}
-
-	// guard: never upload a session with zero substantive entries
-	if orphan.EntryCount == 0 {
-		slog.Info("skipping retry upload: zero entries", "session", orphan.SessionName)
-		return nil
 	}
 
 	// validate raw.jsonl integrity before uploading — skip corrupted files
@@ -311,6 +311,7 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 		EntryCount(orphan.EntryCount).
 		UserID(auth.GetUserID(retryEndpoint)).
 		RepoID(orphan.Meta.RepoID).
+		StopReason(session.StopReasonRecovered).
 		WithFiles(fileRefs).
 		Build()
 	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {

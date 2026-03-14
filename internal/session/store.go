@@ -315,6 +315,8 @@ type SessionInfo struct {
 	IsSubagent      bool                `json:"is_subagent,omitempty"`      // true if spawned by a parent session
 	ParentPID       int                 `json:"parent_pid,omitempty"`       // from .recording.json for liveness detection
 	Origin          string              `json:"origin,omitempty"`           // session origin: "human", "subagent", "agent"
+	HasRawData      bool                `json:"has_raw_data,omitempty"`     // true if raw.jsonl exists with content on disk
+	StopReason      string              `json:"stop_reason,omitempty"`      // how session ended: "stopped", "aborted", "recovered"
 }
 
 // ListSessions returns session files from the last 7 days, sorted by date descending.
@@ -436,11 +438,13 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var filePath string
 		var fileSize int64
 		var modTime time.Time
+		var hasRawData bool
 
 		if info, err := os.Stat(rawPath); err == nil {
 			// raw.jsonl exists (hydrated or recording in progress)
 			filePath = rawPath
 			fileSize = info.Size()
+			hasRawData = info.Size() > 0
 			modTime = info.ModTime()
 			if createdAt.IsZero() {
 				createdAt = info.ModTime()
@@ -490,10 +494,20 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			IsSubagent:      isSubagent,
 			ParentPID:       parentPID,
 			Origin:          origin,
+			HasRawData:      hasRawData,
+			StopReason:      stopReason(meta),
 		})
 	}
 
 	return sessions, nil
+}
+
+// stopReason extracts the stop reason from meta.json, if present.
+func stopReason(meta *lfs.SessionMeta) string {
+	if meta != nil {
+		return meta.StopReason
+	}
+	return ""
 }
 
 // entryCount returns the best available entry count for a session.

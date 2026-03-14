@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -81,7 +82,7 @@ Example:
 		}
 
 		// guard: never upload a session with zero substantive entries
-		if countSubstantiveLines(rawPath) == 0 {
+		if !session.HasSubstantiveEntries(rawPath) {
 			return fmt.Errorf("session %s has no substantive entries (only metadata header) — nothing to upload", sessionName)
 		}
 
@@ -220,30 +221,6 @@ func countJSONLLines(path string) int {
 	count := 0
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		count++
-	}
-	return count
-}
-
-// countSubstantiveLines counts lines in a raw.jsonl that are actual session entries,
-// excluding the metadata header (first line with "metadata" key) and any footer lines.
-// Returns 0 for header-only files or files that don't exist.
-func countSubstantiveLines(path string) int {
-	f, err := os.Open(path)
-	if err != nil {
-		return 0
-	}
-	defer f.Close()
-
-	count := 0
-	isFirst := true
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
-	for scanner.Scan() {
-		if isFirst {
-			isFirst = false
-			continue // skip metadata header
-		}
 		count++
 	}
 	return count

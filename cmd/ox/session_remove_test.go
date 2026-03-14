@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -188,7 +189,7 @@ func TestBatchDeleteSessionsFromLedger_UsesCanonicalPushLedger(t *testing.T) {
 	}
 }
 
-func TestCountSubstantiveLines(t *testing.T) {
+func TestCountSubstantiveEntries(t *testing.T) {
 	tests := []struct {
 		name     string
 		content  string
@@ -224,13 +225,13 @@ func TestCountSubstantiveLines(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.name == "nonexistent file" {
-				assert.Equal(t, 0, countSubstantiveLines("/nonexistent/raw.jsonl"))
+				assert.Equal(t, 0, session.CountSubstantiveEntries("/nonexistent/raw.jsonl"))
 				return
 			}
 			tmpDir := t.TempDir()
 			path := filepath.Join(tmpDir, "raw.jsonl")
 			require.NoError(t, os.WriteFile(path, []byte(tt.content), 0644))
-			assert.Equal(t, tt.expected, countSubstantiveLines(path))
+			assert.Equal(t, tt.expected, session.CountSubstantiveEntries(path))
 		})
 	}
 }

@@ -1130,6 +1130,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		Summary(result.Summary).
 		UserID(auth.GetUserID(projectEndpoint)).
 		RepoID(getRepoIDOrDefault(projectRoot)).
+		StopReason(session.StopReasonStopped).
 		Build()
 	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
 		return fmt.Errorf("write meta.json: %w", err)
