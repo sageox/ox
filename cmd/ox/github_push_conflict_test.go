@@ -388,8 +388,8 @@ func TestMultiMachine_CommitAndPushGitHubData_Integration(t *testing.T) {
 
 	// machine A uses commitAndPushGitHubData (the real function)
 	writeGitHubPRFile(t, machineA, makePR(701, "PR from A", "alice", "merged"))
-	result := &githubSyncResult{prTotal: 1}
-	err := commitAndPushGitHubData(machineA, "org", "repo", result)
+	result := &ledger.SyncResult{PRTotal: 1}
+	err := ledger.CommitAndPushGitHubData(context.Background(), machineA, "org", "repo", result, pushLedger)
 	require.NoError(t, err, "commitAndPushGitHubData should handle diverged remote")
 
 	// verify both PRs on remote

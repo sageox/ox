@@ -367,6 +367,16 @@ func (d *Daemon) Start() error {
 		d.scheduler.SetCodeDBManager(d.codedb)
 	}
 
+	// initialize GitHub sync manager for automatic PR/issue fetching
+	if d.config.ProjectRoot != "" {
+		githubSync := NewGitHubSyncManager(d.config.ProjectRoot, d.scheduler.LedgerMu(), d.logger)
+		githubSync.SetIssueTracker(d.issues)
+		if d.codedb != nil {
+			githubSync.SetCodeDBManager(d.codedb)
+		}
+		d.scheduler.SetGitHubSyncManager(githubSync)
+	}
+
 	// set telemetry callback on scheduler for sync:complete events
 	d.scheduler.SetTelemetryCallback(func(syncType, operation, status string, duration time.Duration) {
 		if d.telemetry != nil {

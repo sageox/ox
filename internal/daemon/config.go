@@ -58,6 +58,10 @@ type Config struct {
 	// Zero disables automatic distillation.
 	DistillInterval time.Duration
 
+	// GitHubSyncInterval is how often to sync PRs/issues from GitHub.
+	// Zero disables automatic GitHub sync.
+	GitHubSyncInterval time.Duration
+
 	// AutoStart starts daemon on first ox command if true.
 	AutoStart bool
 
@@ -77,6 +81,7 @@ func DefaultConfig() *Config {
 		VersionCheckInterval:    30 * time.Minute, // ETag conditional requests make this cheap
 		GCCheckInterval:         1 * time.Hour,    // check hourly, actual GC cadence is per-workspace
 		DistillInterval:         6 * time.Hour,    // distill memory every 6 hours
+		GitHubSyncInterval:     15 * time.Minute, // sync PRs/issues every 15 minutes
 		InactivityTimeout:       1 * time.Hour,    // exit after 1 hour of inactivity
 		AutoStart:               true,
 		LedgerPath:              "", // resolved at runtime

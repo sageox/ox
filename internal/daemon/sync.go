@@ -1,7 +1,9 @@
 // Package daemon implements the background sync daemon for ledger and team contexts.
 //
-// The daemon only performs git pull (read) operations. The CLI handles
-// add/commit/push (write) operations directly via the session upload pipeline.
+// The daemon performs git pull (read) operations for ledger and team context sync.
+// The CLI handles add/commit/push (write) operations via the session upload pipeline.
+// Exception: GitHubSyncManager also performs add/commit/push for data/github/ files,
+// since these are idempotent and last-write-wins safe (accept-theirs conflict resolution).
 //
 // # NETWORK DISCONNECTION HANDLING
 //
@@ -300,6 +302,12 @@ type SyncScheduler struct {
 	// code index manager for periodic freshness checks
 	codedb *CodeDBManager
 
+	// github sync manager for automatic PR/issue sync
+	githubSync *GitHubSyncManager
+
+	// shared mutex for all ledger git operations (pull, push, etc.)
+	ledgerMu sync.Mutex
+
 	// agent work signal channel — notified after successful ledger pull
 	agentWorkSignal chan<- struct{}
 
@@ -389,6 +397,18 @@ func (s *SyncScheduler) SetCodeDBManager(m *CodeDBManager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.codedb = m
+}
+
+// SetGitHubSyncManager sets the GitHub sync manager for periodic PR/issue sync.
+func (s *SyncScheduler) SetGitHubSyncManager(m *GitHubSyncManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.githubSync = m
+}
+
+// LedgerMu returns the shared ledger mutex for git operations.
+func (s *SyncScheduler) LedgerMu() *sync.Mutex {
+	return &s.ledgerMu
 }
 
 // SetAgentWorkSignal sets the channel used to notify the agent work manager
@@ -693,6 +713,23 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		defer distillTicker.Stop()
 	}
 
+	// github sync ticker — fetches PRs/issues from GitHub API
+	var githubSyncTicker *time.Ticker
+	var githubSyncChan <-chan time.Time
+	if s.config.GitHubSyncInterval > 0 && s.config.ProjectRoot != "" && s.githubSync != nil {
+		githubSyncTicker = time.NewTicker(s.config.GitHubSyncInterval)
+		githubSyncChan = githubSyncTicker.C
+		defer githubSyncTicker.Stop()
+
+		// initial sync after short delay (let ledger pull complete first)
+		go func() {
+			time.Sleep(30 * time.Second)
+			if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
+				s.githubSync.CheckAndSync(ctx, l.Path)
+			}
+		}()
+	}
+
 	// write initial heartbeat
 	s.writeHeartbeats()
 
@@ -734,6 +771,13 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 
 		case <-distillChan:
 			s.triggerDistill(ctx)
+
+		case <-githubSyncChan:
+			if s.githubSync != nil {
+				if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
+					s.githubSync.CheckAndSync(ctx, l.Path)
+				}
+			}
 
 		case <-s.triggerChan:
 			// triggered by file watcher, do full sync
@@ -1027,89 +1071,97 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		s.logger.Warn("ledger remote credential refresh failed", "error", err)
 	}
 
-	// git fetch
-	// git fetch (capture stderr for diagnosable error messages)
-	fetchCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "fetch", "--quiet")
-	if output, err := fetchCmd.CombinedOutput(); err != nil {
-		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
-		s.logger.Warn("fetch failed", "error", err, "output", detail)
-		if detail != "" {
-			s.recordError(fmt.Sprintf("fetch failed: %s (%v)", detail, err))
-		} else {
-			s.recordError(fmt.Sprintf("fetch failed: %v", err))
+	// acquire ledger mutex to prevent concurrent git operations with GitHub sync push.
+	// Released after fetch+pull completes (success or failure).
+	s.ledgerMu.Lock()
+	fetchPullErr := func() error {
+		// git fetch (capture stderr for diagnosable error messages)
+		fetchCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "fetch", "--quiet")
+		if output, err := fetchCmd.CombinedOutput(); err != nil {
+			detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
+			s.logger.Warn("fetch failed", "error", err, "output", detail)
+			if detail != "" {
+				s.recordError(fmt.Sprintf("fetch failed: %s (%v)", detail, err))
+			} else {
+				s.recordError(fmt.Sprintf("fetch failed: %v", err))
+			}
+			s.metrics.RecordPullFailure()
+			s.workspaceRegistry.RecordSyncFailure("ledger")
+			s.recordSyncStateFailure(s.config.LedgerPath)
+			if detail != "" {
+				return fmt.Errorf("ledger fetch failed: %s (%w)", detail, err)
+			}
+			return fmt.Errorf("ledger fetch failed: %w", err)
 		}
-		s.metrics.RecordPullFailure()
-		s.workspaceRegistry.RecordSyncFailure("ledger")
-		s.recordSyncStateFailure(s.config.LedgerPath)
-		if detail != "" {
-			return fmt.Errorf("ledger fetch failed: %s (%w)", detail, err)
+
+		// track FETCH_HEAD mtime to record when remote had new content
+		if info, err := os.Stat(filepath.Join(s.config.LedgerPath, ".git", "FETCH_HEAD")); err == nil {
+			s.recordRemoteChange(s.config.LedgerPath, info.ModTime().UTC())
 		}
-		return fmt.Errorf("ledger fetch failed: %w", err)
-	}
 
-	// track FETCH_HEAD mtime to record when remote had new content
-	if info, err := os.Stat(filepath.Join(s.config.LedgerPath, ".git", "FETCH_HEAD")); err == nil {
-		s.recordRemoteChange(s.config.LedgerPath, info.ModTime().UTC())
-	}
-
-	// detect force push (diverged branches)
-	if s.detectForcePush(ctx) {
-		s.logger.Warn("force push detected on ledger, skipping pull")
-		s.metrics.RecordForcePush()
-		if progress != nil {
-			_ = progress.WriteStage("skipped", "Force push detected, skipping pull")
-		}
-		if s.issues != nil {
-			s.issues.SetIssue(DaemonIssue{
-				Type:     IssueTypeDiverged,
-				Repo:     "ledger",
-				Severity: SeverityError,
-				Summary:  "Ledger has diverged from remote (force push detected). Run 'ox doctor --fix' to re-clone.",
-			})
-		}
-		return errors.New("ledger diverged from remote (force push detected)")
-	}
-
-	if progress != nil {
-		_ = progress.WriteStage("pulling", "Pulling changes...")
-	}
-
-	// git pull --rebase --autostash (capture stderr for diagnosable error messages)
-	// --autostash: local uncommitted changes (from CLI writes, user edits) must not
-	// block background sync — stash before rebase, pop after
-	pullCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "pull", "--rebase", "--autostash", "--quiet")
-	if output, err := pullCmd.CombinedOutput(); err != nil {
-		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
-		s.logger.Warn("pull failed", "error", err, "output", detail)
-		if detail != "" {
-			s.recordError(fmt.Sprintf("pull failed: %s (%v)", detail, err))
-		} else {
-			s.recordError(fmt.Sprintf("pull failed: %v", err))
-		}
-		s.metrics.RecordPullFailure()
-		s.workspaceRegistry.RecordSyncFailure("ledger")
-		s.recordSyncStateFailure(s.config.LedgerPath)
-
-		// check if it's a merge conflict
-		statusCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "status", "--porcelain")
-		if statusOutput, _ := statusCmd.Output(); strings.Contains(string(statusOutput), "UU") {
-			s.metrics.RecordConflict()
-
-			// report issue — daemon does not write; next pull will skip via rebase-state check
+		// detect force push (diverged branches)
+		if s.detectForcePush(ctx) {
+			s.logger.Warn("force push detected on ledger, skipping pull")
+			s.metrics.RecordForcePush()
+			if progress != nil {
+				_ = progress.WriteStage("skipped", "Force push detected, skipping pull")
+			}
 			if s.issues != nil {
 				s.issues.SetIssue(DaemonIssue{
-					Type:            IssueTypeMergeConflict,
-					Severity:        SeverityError,
-					Repo:            "ledger",
-					Summary:         "Ledger has merge conflicts. Run 'ox doctor --fix' to re-clone.",
-					RequiresConfirm: true, // merge resolution needs human approval
+					Type:     IssueTypeDiverged,
+					Repo:     "ledger",
+					Severity: SeverityError,
+					Summary:  "Ledger has diverged from remote (force push detected). Run 'ox doctor --fix' to re-clone.",
 				})
 			}
+			return errors.New("ledger diverged from remote (force push detected)")
 		}
-		if detail != "" {
-			return fmt.Errorf("ledger pull failed: %s (%w)", detail, err)
+
+		if progress != nil {
+			_ = progress.WriteStage("pulling", "Pulling changes...")
 		}
-		return fmt.Errorf("ledger pull failed: %w", err)
+
+		// git pull --rebase --autostash
+		// --autostash: local uncommitted changes (from CLI writes, user edits) must not
+		// block background sync — stash before rebase, pop after
+		pullCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "pull", "--rebase", "--autostash", "--quiet")
+		if output, err := pullCmd.CombinedOutput(); err != nil {
+			detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
+			s.logger.Warn("pull failed", "error", err, "output", detail)
+			if detail != "" {
+				s.recordError(fmt.Sprintf("pull failed: %s (%v)", detail, err))
+			} else {
+				s.recordError(fmt.Sprintf("pull failed: %v", err))
+			}
+			s.metrics.RecordPullFailure()
+			s.workspaceRegistry.RecordSyncFailure("ledger")
+			s.recordSyncStateFailure(s.config.LedgerPath)
+
+			// check if it's a merge conflict
+			statusCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "status", "--porcelain")
+			if statusOutput, _ := statusCmd.Output(); strings.Contains(string(statusOutput), "UU") {
+				s.metrics.RecordConflict()
+				if s.issues != nil {
+					s.issues.SetIssue(DaemonIssue{
+						Type:            IssueTypeMergeConflict,
+						Severity:        SeverityError,
+						Repo:            "ledger",
+						Summary:         "Ledger has merge conflicts. Run 'ox doctor --fix' to re-clone.",
+						RequiresConfirm: true,
+					})
+				}
+			}
+			if detail != "" {
+				return fmt.Errorf("ledger pull failed: %s (%w)", detail, err)
+			}
+			return fmt.Errorf("ledger pull failed: %w", err)
+		}
+		return nil
+	}()
+	s.ledgerMu.Unlock()
+
+	if fetchPullErr != nil {
+		return fetchPullErr
 	}
 
 	// sync succeeded - clear failure backoff, merge conflict, and sync backoff issues

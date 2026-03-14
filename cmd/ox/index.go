@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -132,10 +131,6 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 	}
 
 	// --full: selectively clear sync state so items are re-fetched from GitHub.
-	// Composes with --prs-only/--issues-only to allow targeted rebuilds:
-	//   ox index github --full                → reset all sync state
-	//   ox index github --full --prs-only     → reset PR state only
-	//   ox index github --full --issues-only  → reset issue state only
 	if full {
 		if err := resetGitHubSyncState(ledgerPath, prsOnly, issuesOnly); err != nil {
 			return err
@@ -173,273 +168,49 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	result, err := syncGitHubToLedger(cmd.Context(), ledgerPath, owner, repo, token, maxDays, syncPRs, syncIssues)
-	if err != nil {
-		return fmt.Errorf("sync GitHub data: %w", err)
+	fetcher := gh.NewFetcher(gh.NewClient(token))
+	logger := slog.Default()
+	combined := &ledger.SyncResult{}
+
+	if syncPRs {
+		prResult, prErr := ledger.SyncPRs(cmd.Context(), fetcher, ledgerPath, owner, repo, maxDays, logger)
+		if prErr != nil {
+			return fmt.Errorf("sync PRs: %w", prErr)
+		}
+		combined.PRTotal = prResult.PRTotal
+		combined.PRCreated = prResult.PRCreated
+		combined.PRUpdated = prResult.PRUpdated
+	}
+
+	if syncIssues {
+		issueResult, issueErr := ledger.SyncIssues(cmd.Context(), fetcher, ledgerPath, owner, repo, maxDays, logger)
+		if issueErr != nil {
+			return fmt.Errorf("sync issues: %w", issueErr)
+		}
+		combined.IssueTotal = issueResult.IssueTotal
+		combined.IssueCreated = issueResult.IssueCreated
+		combined.IssueUpdated = issueResult.IssueUpdated
 	}
 
 	if syncPRs {
 		fmt.Printf("Synced %d PRs (%d new, %d updated) from %s/%s\n",
-			result.prTotal, result.prCreated, result.prUpdated, owner, repo)
+			combined.PRTotal, combined.PRCreated, combined.PRUpdated, owner, repo)
 	}
 	if syncIssues {
 		fmt.Printf("Synced %d issues (%d new, %d updated) from %s/%s\n",
-			result.issueTotal, result.issueCreated, result.issueUpdated, owner, repo)
+			combined.IssueTotal, combined.IssueCreated, combined.IssueUpdated, owner, repo)
 	}
 
-	totalItems := result.prTotal + result.issueTotal
+	totalItems := combined.PRTotal + combined.IssueTotal
 	if totalItems == 0 || noPush {
 		return nil
 	}
 
-	if err := commitAndPushGitHubData(ledgerPath, owner, repo, result); err != nil {
+	if err := ledger.CommitAndPushGitHubData(context.Background(), ledgerPath, owner, repo, combined, pushLedger); err != nil {
 		return fmt.Errorf("push to ledger: %w", err)
 	}
 
 	fmt.Println("GitHub data pushed to ledger.")
-	return nil
-}
-
-type githubSyncResult struct {
-	prTotal      int
-	prCreated    int
-	prUpdated    int
-	issueTotal   int
-	issueCreated int
-	issueUpdated int
-}
-
-func syncGitHubToLedger(ctx context.Context, ledgerPath, owner, repo, token string, maxDays int, syncPRs, syncIssues bool) (*githubSyncResult, error) {
-	client := gh.NewClient(token)
-	result := &githubSyncResult{}
-
-	if syncPRs {
-		if err := syncPRsToLedger(ctx, client, ledgerPath, owner, repo, maxDays, result); err != nil {
-			return result, fmt.Errorf("sync PRs: %w", err)
-		}
-	}
-
-	if syncIssues {
-		if err := syncIssuesToLedger(ctx, client, ledgerPath, owner, repo, maxDays, result); err != nil {
-			return result, fmt.Errorf("sync issues: %w", err)
-		}
-	}
-
-	return result, nil
-}
-
-func syncPRsToLedger(ctx context.Context, client *gh.Client, ledgerPath, owner, repo string, maxDays int, result *githubSyncResult) error {
-	state, err := ledger.ReadGitHubTypeSyncState(ledgerPath, "pr")
-	if err != nil {
-		return fmt.Errorf("read pr sync state: %w", err)
-	}
-
-	since := time.Now().AddDate(0, 0, -maxDays)
-	if !state.LastSyncAt.IsZero() && state.LastSyncAt.After(since) {
-		since = state.LastSyncAt
-	}
-
-	slog.Info("fetching PRs from GitHub", "owner", owner, "repo", repo, "since", since.Format(time.RFC3339))
-
-	prs, _, err := client.ListPullRequests(ctx, owner, repo, gh.ListPRsOptions{
-		State: "all",
-		Since: since,
-	})
-	if err != nil {
-		return fmt.Errorf("list PRs: %w", err)
-	}
-
-	for _, pr := range prs {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		// determine state: GitHub uses "open"/"closed", we add "merged"
-		prState := pr.State
-		if pr.MergedAt != nil {
-			prState = "merged"
-		}
-
-		// detect state transitions (open→closed/merged) to trigger full comment re-extract
-		prevState, known := state.KnownStates[pr.Number]
-		stateChanged := known && prevState != prState
-
-		var labels []string
-		for _, l := range pr.Labels {
-			labels = append(labels, l.Name)
-		}
-
-		// fetch comments when new or state changed.
-		// known limitation: comments added without a state change won't be
-		// captured until --full re-sync. Acceptable for MVP — next sync cycle
-		// with --full will pick them up.
-		var comments []ledger.PRComment
-		if !known || stateChanged {
-			comments = fetchPRComments(ctx, client, owner, repo, pr.Number)
-		}
-
-		prFile := &ledger.PRFile{
-			Number:      pr.Number,
-			Title:       pr.Title,
-			Body:        pr.Body,
-			Author:      pr.User.Login,
-			State:       prState,
-			Labels:      labels,
-			CreatedAt:   pr.CreatedAt,
-			MergedAt:    pr.MergedAt,
-			UpdatedAt:   pr.UpdatedAt,
-			MergeCommit: pr.MergeSHA,
-			URL:         pr.HTMLURL,
-			Comments:    comments,
-		}
-
-		if !known {
-			result.prCreated++
-		} else {
-			result.prUpdated++
-		}
-
-		if err := ledger.WriteGitHubPR(ledgerPath, prFile); err != nil {
-			return fmt.Errorf("write PR %d: %w", pr.Number, err)
-		}
-
-		state.KnownStates[pr.Number] = prState
-		result.prTotal++
-	}
-
-	// persist updated state
-	state.LastSyncAt = time.Now()
-	state.Count += result.prCreated
-	if err := ledger.WriteGitHubTypeSyncState(ledgerPath, "pr", state); err != nil {
-		return fmt.Errorf("write pr sync state: %w", err)
-	}
-
-	return nil
-}
-
-func fetchPRComments(ctx context.Context, client *gh.Client, owner, repo string, number int) []ledger.PRComment {
-	var comments []ledger.PRComment
-
-	reviewComments, err := client.ListPRComments(ctx, owner, repo, number)
-	if err != nil {
-		slog.Warn("fetch review comments failed", "pr", number, "error", err)
-	} else {
-		for _, c := range reviewComments {
-			comments = append(comments, ledger.PRComment{
-				Author:    c.User.Login,
-				Body:      c.Body,
-				Path:      c.Path,
-				Line:      c.Line,
-				CreatedAt: c.CreatedAt,
-			})
-		}
-	}
-
-	issueComments, err := client.ListIssueComments(ctx, owner, repo, number)
-	if err != nil {
-		slog.Warn("fetch issue comments failed", "pr", number, "error", err)
-	} else {
-		for _, c := range issueComments {
-			comments = append(comments, ledger.PRComment{
-				Author:    c.User.Login,
-				Body:      c.Body,
-				CreatedAt: c.CreatedAt,
-			})
-		}
-	}
-
-	return comments
-}
-
-func syncIssuesToLedger(ctx context.Context, client *gh.Client, ledgerPath, owner, repo string, maxDays int, result *githubSyncResult) error {
-	state, err := ledger.ReadGitHubTypeSyncState(ledgerPath, "issue")
-	if err != nil {
-		return fmt.Errorf("read issue sync state: %w", err)
-	}
-
-	since := time.Now().AddDate(0, 0, -maxDays)
-	if !state.LastSyncAt.IsZero() && state.LastSyncAt.After(since) {
-		since = state.LastSyncAt
-	}
-
-	slog.Info("fetching issues from GitHub", "owner", owner, "repo", repo, "since", since.Format(time.RFC3339))
-
-	issues, _, err := client.ListIssues(ctx, owner, repo, gh.ListIssuesOptions{
-		State: "all",
-		Since: since,
-	})
-	if err != nil {
-		return fmt.Errorf("list issues: %w", err)
-	}
-
-	for _, issue := range issues {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		// detect state transitions (open→closed) to trigger full comment re-extract
-		prevState, known := state.KnownStates[issue.Number]
-		stateChanged := known && prevState != issue.State
-
-		var labels []string
-		for _, l := range issue.Labels {
-			labels = append(labels, l.Name)
-		}
-
-		// fetch comments when new or state changed
-		// on state change (open→closed), re-extract all comments
-		// to capture any final discussion added at close time
-		var comments []ledger.IssueComment
-		if !known || stateChanged {
-			issueComments, cErr := client.ListIssueComments(ctx, owner, repo, issue.Number)
-			if cErr != nil {
-				slog.Warn("fetch issue comments failed", "issue", issue.Number, "error", cErr)
-			} else {
-				for _, c := range issueComments {
-					comments = append(comments, ledger.IssueComment{
-						Author:    c.User.Login,
-						Body:      c.Body,
-						CreatedAt: c.CreatedAt,
-					})
-				}
-			}
-		}
-
-		issueFile := &ledger.IssueFile{
-			Number:    issue.Number,
-			Title:     issue.Title,
-			Body:      issue.Body,
-			Author:    issue.User.Login,
-			State:     issue.State,
-			Labels:    labels,
-			CreatedAt: issue.CreatedAt,
-			ClosedAt:  issue.ClosedAt,
-			UpdatedAt: issue.UpdatedAt,
-			URL:       issue.HTMLURL,
-			Comments:  comments,
-		}
-
-		if !known {
-			result.issueCreated++
-		} else {
-			result.issueUpdated++
-		}
-
-		if err := ledger.WriteGitHubIssue(ledgerPath, issueFile); err != nil {
-			return fmt.Errorf("write issue %d: %w", issue.Number, err)
-		}
-
-		state.KnownStates[issue.Number] = issue.State
-		result.issueTotal++
-	}
-
-	// persist updated state
-	state.LastSyncAt = time.Now()
-	state.Count += result.issueCreated
-	if err := ledger.WriteGitHubTypeSyncState(ledgerPath, "issue", state); err != nil {
-		return fmt.Errorf("write issue sync state: %w", err)
-	}
-
 	return nil
 }
 
@@ -461,11 +232,8 @@ func detectGitHubRemote() (owner, repo string, err error) {
 }
 
 // resetGitHubSyncState selectively clears sync state for a full re-fetch.
-// When neither prsOnly nor issuesOnly is set, wipes everything.
-// When one is set, clears only that type's state file.
 func resetGitHubSyncState(ledgerPath string, prsOnly, issuesOnly bool) error {
 	if !prsOnly && !issuesOnly {
-		// wipe everything
 		cacheDir := ledger.GitHubSyncCacheDir(ledgerPath)
 		if err := os.RemoveAll(cacheDir); err != nil {
 			return fmt.Errorf("remove github sync cache: %w", err)
@@ -487,37 +255,6 @@ func resetGitHubSyncState(ledgerPath string, prsOnly, issuesOnly bool) error {
 		fmt.Fprintf(os.Stderr, "Cleared issue sync state, re-fetching issues from scratch...\n")
 	}
 	return nil
-}
-
-// commitAndPushGitHubData stages data/github/ directory, commits, and pushes to the ledger.
-func commitAndPushGitHubData(ledgerPath, owner, repo string, result *githubSyncResult) error {
-	dataDir := ledger.GitHubDataDir(ledgerPath)
-
-	// stage all files in data/github/ with --sparse
-	addCmd := exec.Command("git", "-C", ledgerPath, "add", "--sparse", dataDir)
-	if output, err := addCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git add failed: %s: %w", string(output), err)
-	}
-
-	// commit
-	var parts []string
-	if result.prTotal > 0 {
-		parts = append(parts, fmt.Sprintf("%d PRs", result.prTotal))
-	}
-	if result.issueTotal > 0 {
-		parts = append(parts, fmt.Sprintf("%d issues", result.issueTotal))
-	}
-	commitMsg := fmt.Sprintf("github: sync %s from %s/%s", strings.Join(parts, ", "), owner, repo)
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(output), "nothing to commit") {
-			return nil
-		}
-		return fmt.Errorf("git commit failed: %s: %w", string(output), err)
-	}
-
-	// push with retry
-	return pushLedger(context.Background(), ledgerPath)
 }
 
 func init() {
