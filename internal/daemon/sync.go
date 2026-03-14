@@ -2620,6 +2620,9 @@ const (
 func acquireGCLock(lockPath string) (*os.File, error) {
 	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 	if err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("gc lock create failed: %w", err)
+		}
 		// lock file exists — check if stale (>5 min old = likely crashed process)
 		if info, statErr := os.Stat(lockPath); statErr == nil {
 			if time.Since(info.ModTime()) > 5*time.Minute {
