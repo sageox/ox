@@ -269,6 +269,83 @@ func TestRenderInsightsHuman_WithData(t *testing.T) {
 	}
 }
 
+func TestGenerateHints(t *testing.T) {
+	tests := []struct {
+		name         string
+		setupExtra   string // additional SQL to run
+		openPRs      []insightPR
+		openIssues   []insightIssue
+		wantNil      bool
+		wantPR       bool
+		wantIssue    bool
+	}{
+		{
+			name:    "no github data at all",
+			setupExtra: "DELETE FROM pull_requests; DELETE FROM issues",
+			wantNil: true,
+		},
+		{
+			name:    "open PRs and issues present",
+			openPRs: []insightPR{{Number: 1}},
+			openIssues: []insightIssue{{Number: 1}},
+			wantPR:  true,
+			wantIssue: true,
+		},
+		{
+			name:       "only closed/merged PRs in DB, no open",
+			setupExtra: "DELETE FROM pull_requests; INSERT INTO pull_requests (id, number, title, state) VALUES (99, 200, 'merged pr', 'merged')",
+			wantPR:     true,
+			wantIssue:  true, // test DB still has issues from setupInsightsDB
+		},
+		{
+			name:       "only closed issues in DB, no open",
+			setupExtra: "DELETE FROM issues; DELETE FROM pull_requests; INSERT INTO issues (id, number, title, state) VALUES (99, 300, 'closed issue', 'closed')",
+			wantPR:     false,
+			wantIssue:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := setupInsightsDB(t)
+			if tt.setupExtra != "" {
+				if _, err := s.Exec(tt.setupExtra); err != nil {
+					t.Fatal(err)
+				}
+			}
+			hints := generateHints(s, tt.openPRs, tt.openIssues)
+			if tt.wantNil {
+				if hints != nil {
+					t.Errorf("expected nil hints, got %+v", hints)
+				}
+				return
+			}
+			if hints == nil {
+				t.Fatal("expected non-nil hints")
+			}
+			if tt.wantPR && hints.PRDetails == "" {
+				t.Error("expected PR hint")
+			}
+			if !tt.wantPR && hints.PRDetails != "" {
+				t.Error("unexpected PR hint")
+			}
+			if tt.wantIssue && hints.IssueDetails == "" {
+				t.Error("expected issue hint")
+			}
+			if !tt.wantIssue && hints.IssueDetails != "" {
+				t.Error("unexpected issue hint")
+			}
+			// verify hint text mentions the search command
+			if hints.PRDetails != "" && !strings.Contains(hints.PRDetails, "type:pr") {
+				t.Error("PR hint should mention type:pr search syntax")
+			}
+			if hints.IssueDetails != "" && !strings.Contains(hints.IssueDetails, "type:issue") {
+				t.Error("issue hint should mention type:issue search syntax")
+			}
+		})
+	}
+}
+
 func TestSplitAndTrim(t *testing.T) {
 	tests := []struct {
 		input string

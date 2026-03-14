@@ -147,8 +147,18 @@ type AgentWorkerConfig struct {
 
 	// SessionFinalize enables automatic session anti-entropy (generating
 	// missing summaries, HTML, and markdown for incomplete sessions).
-	// Requires Enabled=true as a prerequisite. Default: false
+	// Default: true (runs automatically when daemon is enabled)
 	SessionFinalize *bool `yaml:"session_finalize,omitempty"`
+
+	// QualityUploadThreshold is the minimum quality score (0.0-1.0) for a
+	// session to be uploaded to the team ledger. Sessions below this score
+	// are kept locally but not shared. Default: 0.3 (capture more initially)
+	QualityUploadThreshold *float64 `yaml:"quality_upload_threshold,omitempty"`
+
+	// QualityDiscardThreshold is the quality score (0.0-1.0) below which a
+	// session is deleted entirely. Only truly empty/abandoned sessions should
+	// score this low. Default: 0.1
+	QualityDiscardThreshold *float64 `yaml:"quality_discard_threshold,omitempty"`
 }
 
 // IsEnabled returns true if agent worker spawning is enabled (default: false)
@@ -183,13 +193,32 @@ func (c *AgentWorkerConfig) GetMaxConcurrent() int {
 	return *c.MaxConcurrent
 }
 
-// IsSessionFinalizeEnabled returns true if session anti-entropy is enabled (default: false).
+// IsSessionFinalizeEnabled returns true if session anti-entropy is enabled (default: true).
 // Also requires the master Enabled switch to be true.
 func (c *AgentWorkerConfig) IsSessionFinalizeEnabled() bool {
-	if c == nil || c.SessionFinalize == nil {
+	if c == nil {
 		return false
 	}
+	if c.SessionFinalize == nil {
+		return c.IsEnabled() // default: enabled when daemon is enabled
+	}
 	return *c.SessionFinalize && c.IsEnabled()
+}
+
+// GetQualityUploadThreshold returns the minimum quality score for ledger upload (default: 0.3).
+func (c *AgentWorkerConfig) GetQualityUploadThreshold() float64 {
+	if c == nil || c.QualityUploadThreshold == nil {
+		return 0.3
+	}
+	return *c.QualityUploadThreshold
+}
+
+// GetQualityDiscardThreshold returns the quality score below which sessions are deleted (default: 0.1).
+func (c *AgentWorkerConfig) GetQualityDiscardThreshold() float64 {
+	if c == nil || c.QualityDiscardThreshold == nil {
+		return 0.1
+	}
+	return *c.QualityDiscardThreshold
 }
 
 // Validate checks the config for invalid values.
@@ -238,8 +267,16 @@ func (c *AgentWorkerConfig) WithDefaults() *AgentWorkerConfig {
 		out.MaxConcurrent = &v
 	}
 	if out.SessionFinalize == nil {
-		f := false
-		out.SessionFinalize = &f
+		t := true
+		out.SessionFinalize = &t
+	}
+	if out.QualityUploadThreshold == nil {
+		v := 0.3
+		out.QualityUploadThreshold = &v
+	}
+	if out.QualityDiscardThreshold == nil {
+		v := 0.1
+		out.QualityDiscardThreshold = &v
 	}
 
 	return out

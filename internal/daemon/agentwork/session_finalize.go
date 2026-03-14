@@ -69,6 +69,9 @@ type SessionFinalizeHandler struct {
 	// Used as fallback when .recording.json predates the ParentPID field (rollout compat).
 	// Returns 0 if unknown.
 	pidLookup func(agentID string) int
+	// quality thresholds (configurable via AgentWorkerConfig)
+	qualityUploadThreshold  float64
+	qualityDiscardThreshold float64
 }
 
 // NewSessionFinalizeHandler creates a handler with the given logger.
@@ -76,7 +79,17 @@ func NewSessionFinalizeHandler(logger *slog.Logger) *SessionFinalizeHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &SessionFinalizeHandler{logger: logger}
+	return &SessionFinalizeHandler{
+		logger:                  logger,
+		qualityUploadThreshold:  0.3,
+		qualityDiscardThreshold: 0.1,
+	}
+}
+
+// SetQualityThresholds configures the quality score thresholds for upload/discard.
+func (h *SessionFinalizeHandler) SetQualityThresholds(upload, discard float64) {
+	h.qualityUploadThreshold = upload
+	h.qualityDiscardThreshold = discard
 }
 
 // SetPIDLookup sets the function used to look up agent PIDs from daemon in-memory state.
@@ -270,12 +283,31 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	parsed, parseErr := parseSummaryJSON(llmOutput)
 	if parseErr != nil {
 		h.logger.Warn("could not parse summary JSON from LLM output, using raw text", "err", parseErr)
-		// fall back to raw LLM output as summary text
+		// fall back to raw LLM output as summary text; default to upload (benefit of the doubt)
 		summaryResp = &session.SummarizeResponse{
-			Summary: llmOutput,
+			Summary:      llmOutput,
+			QualityScore: 1.0,
+			ScoreReason:  "unparsable LLM output, defaulting to upload",
 		}
 	} else {
 		summaryResp = parsed
+	}
+
+	sessionName := filepath.Base(payload.SessionDir)
+
+	// check quality score — gate upload/discard before generating artifacts
+	score := summaryResp.QualityScore
+	if score < h.qualityDiscardThreshold {
+		h.logger.Info("session below discard threshold, removing",
+			"session", sessionName,
+			"quality_score", score,
+			"threshold", h.qualityDiscardThreshold,
+			"reason", summaryResp.ScoreReason,
+		)
+		if err := os.RemoveAll(payload.SessionDir); err != nil {
+			h.logger.Warn("failed to remove low-quality session", "session", sessionName, "err", err)
+		}
+		return nil
 	}
 
 	// use cached session from BuildPrompt, fall back to re-reading
@@ -285,7 +317,6 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		stored, readErr = session.ReadSessionFromPath(payload.RawPath)
 		if readErr != nil {
 			h.logger.Warn("could not read session for export", "err", readErr)
-			h.gitCommitAndPush(payload)
 			return nil
 		}
 	}
@@ -297,29 +328,40 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		gen = htmlGen
 	}
 	artifactPaths, artifactErr := session.WriteSessionArtifacts(payload.SessionDir, stored, summaryResp, gen)
-	sessionName := filepath.Base(payload.SessionDir)
 	if artifactErr != nil {
 		h.logger.Warn("artifact generation failed", "err", artifactErr)
 		h.logger.Warn("session recovery incomplete",
 			"session", sessionName,
 			"err", artifactErr,
 		)
-	} else {
-		h.logger.Info("wrote session artifacts",
-			"summary_md", artifactPaths.SummaryMD,
-			"summary_json", artifactPaths.SummaryJSON,
-			"html", artifactPaths.HTML,
-			"session_md", artifactPaths.SessionMD,
-		)
-		h.gitCommitAndPush(payload)
-		h.logger.Info("session recovered via anti-entropy",
+		return nil
+	}
+
+	h.logger.Info("wrote session artifacts",
+		"summary_md", artifactPaths.SummaryMD,
+		"summary_json", artifactPaths.SummaryJSON,
+		"html", artifactPaths.HTML,
+		"session_md", artifactPaths.SessionMD,
+		"quality_score", score,
+	)
+
+	// only upload to ledger if quality meets upload threshold
+	if score < h.qualityUploadThreshold {
+		h.logger.Info("session below upload threshold, keeping locally",
 			"session", sessionName,
-			"artifacts_generated", len(requiredArtifacts),
+			"quality_score", score,
+			"threshold", h.qualityUploadThreshold,
+			"reason", summaryResp.ScoreReason,
 		)
 		return nil
 	}
 
 	h.gitCommitAndPush(payload)
+	h.logger.Info("session recovered via anti-entropy",
+		"session", sessionName,
+		"quality_score", score,
+		"artifacts_generated", len(requiredArtifacts),
+	)
 	return nil
 }
 

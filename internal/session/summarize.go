@@ -53,7 +53,9 @@ Create a JSON object with this structure:
       "insight": "What SageOx guidance was applied",
       "impact": "The outcome or value it provided"
     }
-  ]
+  ],
+  "quality_score": 0.75,
+  "score_reason": "New feature with architectural decision and test coverage"
 }
 
 ## Chapter Titles Guidelines
@@ -97,6 +99,30 @@ For each insight, capture:
 
 Only include moments where SageOx guidance demonstrably improved the outcome.
 If no SageOx attributions are present in the session, leave sageox_insights empty.
+
+## Quality Score Guidelines
+
+Rate the session's value to the team on a 0.0-1.0 scale. This determines whether the session
+is shared with the team (uploaded to ledger) or kept locally/discarded.
+
+**Score high (0.7-1.0):**
+- Architectural decisions or design rationale documented
+- Bugs found with root cause analysis
+- Reusable patterns or approaches discovered
+- Knowledge that would save a future coworker time
+
+**Score medium (0.3-0.7):**
+- Routine feature implementation with some decisions
+- Bug fixes without broader insights
+- Configuration or setup with team-relevant details
+
+**Score low (0.0-0.3):**
+- Routine maintenance (version bumps, formatting, rebasing)
+- Abandoned sessions (started, backed out, no real work)
+- Boilerplate-only (just ran prime, asked one question, left)
+- Repetitive work already captured in a prior session
+
+The score_reason should be a single sentence explaining the rating.
 `
 
 // SummarizeRequest contains the session data to summarize.
@@ -175,6 +201,8 @@ type SummarizeResponse struct {
 	FilesChanged   []FileSummary    `json:"files_changed,omitempty"`   // files modified during session (computed from JSONL)
 	AhaMoments     []AhaMoment      `json:"aha_moments,omitempty"`     // pivotal moments of collaborative intelligence
 	SageoxInsights []SageoxInsight  `json:"sageox_insights,omitempty"` // moments where SageOx guidance provided value
+	QualityScore   float64          `json:"quality_score"`             // 0.0-1.0 session value for team sharing
+	ScoreReason    string           `json:"score_reason,omitempty"`    // brief explanation of the quality score
 }
 
 // Summarize calls the SageOx API to generate an LLM summary of a session.

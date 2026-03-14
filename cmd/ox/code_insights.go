@@ -59,6 +59,14 @@ type insightsOutput struct {
 	OpenPRs       []insightPR         `json:"open_prs,omitempty"`
 	OpenIssues    []insightIssue      `json:"open_issues,omitempty"`
 	Guidance      string              `json:"guidance,omitempty"`
+	Hints         *insightHints       `json:"hints,omitempty"`
+}
+
+// insightHints provides progressive disclosure — tells agents how to access
+// deeper data beyond the summary layer.
+type insightHints struct {
+	PRDetails    string `json:"pr_details,omitempty"`
+	IssueDetails string `json:"issue_details,omitempty"`
 }
 
 var codeInsightsCmd = &cobra.Command{
@@ -94,6 +102,7 @@ var codeInsightsCmd = &cobra.Command{
 		out.OpenPRs, _ = queryOpenPRs(s, limit)
 		out.OpenIssues, _ = queryOpenIssues(s, limit)
 		out.Guidance = generateGuidance(out.Hotspots, out.Contention)
+		out.Hints = generateHints(s, out.OpenPRs, out.OpenIssues)
 
 		var outputBytes int
 		if jsonOut {
@@ -292,6 +301,42 @@ func queryOpenIssues(s *store.Store, limit int) ([]insightIssue, error) {
 		results = append(results, i)
 	}
 	return results, nil
+}
+
+// generateHints returns progressive disclosure hints when GitHub data is present.
+// Checks total counts (not just open) since agents most often need merged PR content.
+func generateHints(s *store.Store, openPRs []insightPR, openIssues []insightIssue) *insightHints {
+	hasPRs := len(openPRs) > 0
+	hasIssues := len(openIssues) > 0
+
+	// check for any indexed PRs/issues if none are open
+	if !hasPRs {
+		var count int
+		row := s.QueryRow("SELECT COUNT(*) FROM pull_requests")
+		if row.Scan(&count) == nil && count > 0 {
+			hasPRs = true
+		}
+	}
+	if !hasIssues {
+		var count int
+		row := s.QueryRow("SELECT COUNT(*) FROM issues")
+		if row.Scan(&count) == nil && count > 0 {
+			hasIssues = true
+		}
+	}
+
+	if !hasPRs && !hasIssues {
+		return nil
+	}
+
+	h := &insightHints{}
+	if hasPRs {
+		h.PRDetails = `Use 'ox code search "<query>" type:pr' for full PR descriptions, review comments, and discussion`
+	}
+	if hasIssues {
+		h.IssueDetails = `Use 'ox code search "<query>" type:issue' for issue descriptions and comments`
+	}
+	return h
 }
 
 func generateGuidance(hotspots []insightHotspot, contention []insightContention) string {

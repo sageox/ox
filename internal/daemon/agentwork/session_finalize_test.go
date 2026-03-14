@@ -237,11 +237,13 @@ func TestProcessResult(t *testing.T) {
 
 	// simulate LLM output with valid JSON
 	summaryJSON := map[string]any{
-		"title":        "Test Session",
-		"summary":      "A test session.",
-		"key_actions":  []string{"said hello"},
-		"outcome":      "success",
-		"topics_found": []string{"testing"},
+		"title":         "Test Session",
+		"summary":       "A test session.",
+		"key_actions":   []string{"said hello"},
+		"outcome":       "success",
+		"topics_found":  []string{"testing"},
+		"quality_score": 0.8,
+		"score_reason":  "Substantive test session",
 	}
 	jsonBytes, _ := json.MarshalIndent(summaryJSON, "", "  ")
 	llmOutput := string(jsonBytes)
@@ -606,14 +608,16 @@ func TestCtrlC_FullFinalizationPipeline(t *testing.T) {
 	}
 
 	// Step 3: ProcessResult with simulated LLM output generates all artifacts
-	summaryJSON := map[string]any{
-		"title":        "README Review and Error Handling",
-		"summary":      "Read the README and added error handling to the main HTTP handler with proper status codes.",
-		"key_actions":  []string{"read README.md", "added error handling to handler.go"},
-		"outcome":      "success",
-		"topics_found": []string{"error handling", "HTTP", "REST API"},
+	summaryJSON2 := map[string]any{
+		"title":         "README Review and Error Handling",
+		"summary":       "Read the README and added error handling to the main HTTP handler with proper status codes.",
+		"key_actions":   []string{"read README.md", "added error handling to handler.go"},
+		"outcome":       "success",
+		"topics_found":  []string{"error handling", "HTTP", "REST API"},
+		"quality_score": 0.75,
+		"score_reason":  "Feature implementation with code changes",
 	}
-	jsonBytes, _ := json.MarshalIndent(summaryJSON, "", "  ")
+	jsonBytes, _ := json.MarshalIndent(summaryJSON2, "", "  ")
 
 	result := &RunResult{
 		Output:   string(jsonBytes),
@@ -1454,4 +1458,142 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 			t.Error("expected recovery to fail when all entries are before start time")
 		}
 	})
+}
+
+func TestProcessResult_QualityScoreDiscard(t *testing.T) {
+	ledgerPath := createTestSession(t, "test-discard", nil)
+	sessionDir := filepath.Join(ledgerPath, "sessions", "test-discard")
+
+	handler := NewSessionFinalizeHandlerForTest(slog.Default())
+	handler.SetQualityThresholds(0.3, 0.1)
+
+	item := &WorkItem{
+		ID:       "test-1",
+		Type:     sessionFinalizeType,
+		DedupKey: "session-finalize:test-discard",
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
+			Missing:    []string{"summary.md"},
+			LedgerPath: ledgerPath,
+		},
+	}
+
+	// score below discard threshold — session dir should be removed
+	result := &RunResult{
+		Output: `{"title":"Routine rebasing","summary":"Just a rebase","key_actions":[],"outcome":"success","topics_found":[],"quality_score":0.05,"score_reason":"Trivial maintenance"}`,
+	}
+
+	err := handler.ProcessResult(item, result)
+	if err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	// session dir should be removed
+	if _, statErr := os.Stat(sessionDir); !os.IsNotExist(statErr) {
+		t.Error("expected session directory to be removed for quality below discard threshold")
+	}
+}
+
+func TestProcessResult_QualityScoreBelowUpload(t *testing.T) {
+	ledgerPath := createTestSession(t, "test-local", nil)
+	sessionDir := filepath.Join(ledgerPath, "sessions", "test-local")
+
+	handler := NewSessionFinalizeHandlerForTest(slog.Default())
+	handler.SetQualityThresholds(0.3, 0.1)
+
+	item := &WorkItem{
+		ID:       "test-2",
+		Type:     sessionFinalizeType,
+		DedupKey: "session-finalize:test-local",
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
+			Missing:    []string{"summary.md", "summary.json", "session.html", "session.md"},
+			LedgerPath: ledgerPath,
+		},
+	}
+
+	// score above discard but below upload — artifacts generated, no push
+	result := &RunResult{
+		Output: `{"title":"Quick fix","summary":"Minor config change","key_actions":["updated config"],"outcome":"success","topics_found":["config"],"quality_score":0.2,"score_reason":"Routine config update"}`,
+	}
+
+	err := handler.ProcessResult(item, result)
+	if err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	// session dir should still exist (not discarded)
+	if _, statErr := os.Stat(sessionDir); os.IsNotExist(statErr) {
+		t.Error("expected session directory to still exist for quality between discard and upload thresholds")
+	}
+
+	// summary.json should be written (artifacts generated locally)
+	if _, statErr := os.Stat(filepath.Join(sessionDir, "summary.json")); os.IsNotExist(statErr) {
+		t.Error("expected summary.json to be generated even below upload threshold")
+	}
+}
+
+func TestProcessResult_QualityScoreAboveUpload(t *testing.T) {
+	ledgerPath := createTestSession(t, "test-upload", nil)
+	sessionDir := filepath.Join(ledgerPath, "sessions", "test-upload")
+
+	handler := NewSessionFinalizeHandlerForTest(slog.Default())
+	handler.SetQualityThresholds(0.3, 0.1)
+
+	item := &WorkItem{
+		ID:       "test-3",
+		Type:     sessionFinalizeType,
+		DedupKey: "session-finalize:test-upload",
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
+			Missing:    []string{"summary.md", "summary.json", "session.html", "session.md"},
+			LedgerPath: ledgerPath,
+		},
+	}
+
+	// score above upload threshold — should proceed to git push (skipped in test mode)
+	result := &RunResult{
+		Output: `{"title":"Feature implementation","summary":"Implemented quality scoring","key_actions":["added scoring","updated config"],"outcome":"success","topics_found":["architecture"],"quality_score":0.8,"score_reason":"New feature with design decisions"}`,
+	}
+
+	err := handler.ProcessResult(item, result)
+	if err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	// session dir should still exist
+	if _, statErr := os.Stat(sessionDir); os.IsNotExist(statErr) {
+		t.Error("expected session directory to still exist for high quality session")
+	}
+
+	// artifacts should be generated
+	for _, artifact := range []string{"summary.json", "summary.md"} {
+		if _, statErr := os.Stat(filepath.Join(sessionDir, artifact)); os.IsNotExist(statErr) {
+			t.Errorf("expected %s to be generated for high quality session", artifact)
+		}
+	}
+}
+
+func TestSetQualityThresholds(t *testing.T) {
+	handler := NewSessionFinalizeHandler(slog.Default())
+
+	// defaults
+	if handler.qualityUploadThreshold != 0.3 {
+		t.Errorf("expected default upload threshold 0.3, got %f", handler.qualityUploadThreshold)
+	}
+	if handler.qualityDiscardThreshold != 0.1 {
+		t.Errorf("expected default discard threshold 0.1, got %f", handler.qualityDiscardThreshold)
+	}
+
+	// custom
+	handler.SetQualityThresholds(0.6, 0.2)
+	if handler.qualityUploadThreshold != 0.6 {
+		t.Errorf("expected upload threshold 0.6, got %f", handler.qualityUploadThreshold)
+	}
+	if handler.qualityDiscardThreshold != 0.2 {
+		t.Errorf("expected discard threshold 0.2, got %f", handler.qualityDiscardThreshold)
+	}
 }

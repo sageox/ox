@@ -335,6 +335,9 @@ func (d *Daemon) Start() error {
 		d.agentWorker = agentwork.NewManager(runner, d.logger, configLoader, agentWorkSignal, d.config.LedgerPath)
 		sfh := agentwork.NewSessionFinalizeHandler(d.logger)
 		sfh.SetPIDLookup(d.heartbeat.GetAgentPID)
+		// wire quality thresholds from user config
+		awCfg := configLoader()
+		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
 		d.agentWorker.RegisterHandler(sfh)
 		d.agentWorker.SetOnComplete(func(result agentwork.WorkResult) {
 			status := "success"

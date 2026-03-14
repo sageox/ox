@@ -688,3 +688,72 @@ func TestUserConfig_AgentWorkerOmittedWhenNil(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), "agent_worker", "agent_worker should be omitted when nil")
 }
+
+func TestAgentWorkerConfig_SessionFinalizeEnabledByDefault(t *testing.T) {
+	enabled := true
+	cfg := &AgentWorkerConfig{Enabled: &enabled}
+
+	// session finalize should be enabled when daemon is enabled and no explicit setting
+	assert.True(t, cfg.IsSessionFinalizeEnabled(), "session finalize should default to enabled when daemon is enabled")
+
+	// explicitly disabled should override
+	f := false
+	cfg.SessionFinalize = &f
+	assert.False(t, cfg.IsSessionFinalizeEnabled(), "explicit false should disable session finalize")
+
+	// explicitly enabled
+	tr := true
+	cfg.SessionFinalize = &tr
+	assert.True(t, cfg.IsSessionFinalizeEnabled(), "explicit true should enable session finalize")
+}
+
+func TestAgentWorkerConfig_SessionFinalizeRequiresEnabled(t *testing.T) {
+	// session finalize requires master Enabled switch
+	cfg := &AgentWorkerConfig{} // Enabled is nil (disabled)
+	assert.False(t, cfg.IsSessionFinalizeEnabled(), "session finalize should be false when daemon is disabled")
+}
+
+func TestAgentWorkerConfig_QualityThresholdDefaults(t *testing.T) {
+	var nilCfg *AgentWorkerConfig
+	assert.InDelta(t, 0.3, nilCfg.GetQualityUploadThreshold(), 0.001)
+	assert.InDelta(t, 0.1, nilCfg.GetQualityDiscardThreshold(), 0.001)
+
+	cfg := (&AgentWorkerConfig{}).WithDefaults()
+	assert.InDelta(t, 0.3, cfg.GetQualityUploadThreshold(), 0.001)
+	assert.InDelta(t, 0.1, cfg.GetQualityDiscardThreshold(), 0.001)
+}
+
+func TestAgentWorkerConfig_QualityThresholdCustom(t *testing.T) {
+	upload := 0.6
+	discard := 0.2
+	cfg := &AgentWorkerConfig{
+		QualityUploadThreshold:  &upload,
+		QualityDiscardThreshold: &discard,
+	}
+	assert.InDelta(t, 0.6, cfg.GetQualityUploadThreshold(), 0.001)
+	assert.InDelta(t, 0.2, cfg.GetQualityDiscardThreshold(), 0.001)
+}
+
+func TestAgentWorkerConfig_WithDefaults_SessionFinalizeTrue(t *testing.T) {
+	cfg := (&AgentWorkerConfig{}).WithDefaults()
+	assert.NotNil(t, cfg.SessionFinalize)
+	assert.True(t, *cfg.SessionFinalize, "WithDefaults should set SessionFinalize to true")
+}
+
+func TestLoadUserConfig_QualityThresholds(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	content := []byte(`agent_worker:
+  enabled: true
+  quality_upload_threshold: 0.5
+  quality_discard_threshold: 0.15
+`)
+	require.NoError(t, os.WriteFile(configPath, content, 0644))
+
+	cfg, err := LoadUserConfigFrom(tmpDir)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.AgentWorker)
+	assert.InDelta(t, 0.5, cfg.AgentWorker.GetQualityUploadThreshold(), 0.001)
+	assert.InDelta(t, 0.15, cfg.AgentWorker.GetQualityDiscardThreshold(), 0.001)
+}
