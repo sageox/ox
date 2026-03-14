@@ -1529,3 +1529,118 @@ func TestLoadAllRecordingStates_MixedValidAndCorrupt(t *testing.T) {
 	require.Len(t, states, 1, "should return only the valid recording state")
 	assert.Equal(t, "OxGood", states[0].AgentID)
 }
+
+// --- Ghost session cleanup tests ---
+
+func TestCleanupGhostSessionsInDir_RemovesDeadPIDNoData(t *testing.T) {
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxDead")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// create recording with a PID that doesn't exist (99999999)
+	state := &RecordingState{
+		AgentID:     "OxDead",
+		StartedAt:   time.Now().Add(-10 * time.Minute),
+		SessionPath: sessionPath,
+		ParentPID:   99999999, // guaranteed dead
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+
+	result := CleanupGhostSessionsInDir(sessionsDir)
+	assert.Equal(t, 1, result.Removed)
+	assert.Contains(t, result.Names, "2026-01-01T00-00-user-OxDead")
+
+	// .recording.json should be gone
+	_, err := os.Stat(filepath.Join(sessionPath, recordingFile))
+	assert.True(t, os.IsNotExist(err), "ghost recording marker should be removed")
+}
+
+func TestCleanupGhostSessionsInDir_PreservesOrphanWithData(t *testing.T) {
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxOrph")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// dead PID but has raw.jsonl with content = orphan, not ghost
+	state := &RecordingState{
+		AgentID:     "OxOrph",
+		StartedAt:   time.Now().Add(-2 * time.Hour),
+		SessionPath: sessionPath,
+		ParentPID:   99999999,
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"), []byte(`{"metadata":{}}`+"\n"+`{"type":"user"}`+"\n"), 0600))
+
+	result := CleanupGhostSessionsInDir(sessionsDir)
+	assert.Equal(t, 0, result.Removed, "orphan with data should NOT be cleaned up")
+
+	// .recording.json should still exist
+	_, err := os.Stat(filepath.Join(sessionPath, recordingFile))
+	assert.NoError(t, err, "orphan recording marker should be preserved")
+}
+
+func TestCleanupGhostSessionsInDir_SkipsLiveProcess(t *testing.T) {
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxLive")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// use current PID (definitely alive)
+	state := &RecordingState{
+		AgentID:     "OxLive",
+		StartedAt:   time.Now().Add(-10 * time.Minute),
+		SessionPath: sessionPath,
+		ParentPID:   os.Getpid(),
+		EntryCount:  0,
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+
+	result := CleanupGhostSessionsInDir(sessionsDir)
+	assert.Equal(t, 0, result.Removed, "live process session should NOT be cleaned up")
+
+	_, err := os.Stat(filepath.Join(sessionPath, recordingFile))
+	assert.NoError(t, err, "live session recording marker should be preserved")
+}
+
+func TestCleanupGhostSessionsInDir_SkipsNoPID(t *testing.T) {
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxNoPd")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// no ParentPID recorded — can't determine liveness, skip
+	state := &RecordingState{
+		AgentID:     "OxNoPd",
+		StartedAt:   time.Now().Add(-72 * time.Hour),
+		SessionPath: sessionPath,
+		ParentPID:   0,
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+
+	result := CleanupGhostSessionsInDir(sessionsDir)
+	assert.Equal(t, 0, result.Removed, "session without PID should NOT be cleaned by ghost cleanup")
+}
+
+func TestCleanupGhostSessionsInDir_DoubleCleanupIsIdempotent(t *testing.T) {
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxDbl1")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	state := &RecordingState{
+		AgentID:     "OxDbl1",
+		StartedAt:   time.Now().Add(-1 * time.Hour),
+		SessionPath: sessionPath,
+		ParentPID:   99999999,
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+
+	// first cleanup
+	r1 := CleanupGhostSessionsInDir(sessionsDir)
+	assert.Equal(t, 1, r1.Removed)
+
+	// second cleanup — should be a no-op (no .recording.json left to find)
+	r2 := CleanupGhostSessionsInDir(sessionsDir)
+	assert.Equal(t, 0, r2.Removed, "second cleanup should find nothing — idempotent")
+}

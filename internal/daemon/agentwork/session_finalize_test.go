@@ -1005,6 +1005,94 @@ func TestDetect_PIDLookupFallback(t *testing.T) {
 	})
 }
 
+// TestHasSubstantiveEntries verifies the guard that prevents header-only
+// raw.jsonl files from being finalized. This is the regression test for the
+// zero-entry upload bug: sessions with only a metadata header were being
+// uploaded to the ledger, creating ghost stubs.
+func TestHasSubstantiveEntries(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{
+			name:    "header plus entries",
+			content: "{\"metadata\":{\"agent_id\":\"Ox1\"}}\n{\"type\":\"user\",\"content\":\"hello\"}\n",
+			want:    true,
+		},
+		{
+			name:    "header only",
+			content: "{\"metadata\":{\"agent_id\":\"Ox1\"}}\n",
+			want:    false,
+		},
+		{
+			name:    "empty file",
+			content: "",
+			want:    false,
+		},
+		{
+			name:    "nonexistent file",
+			content: "", // won't be written
+			want:    false,
+		},
+		{
+			name:    "multi-turn session",
+			content: "{\"metadata\":{}}\n{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n{\"type\":\"tool\"}\n",
+			want:    true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.name == "nonexistent file" {
+				if hasSubstantiveEntries("/nonexistent/raw.jsonl") {
+					t.Error("nonexistent file should return false")
+				}
+				return
+			}
+			dir := t.TempDir()
+			path := filepath.Join(dir, "raw.jsonl")
+			if err := os.WriteFile(path, []byte(tt.content), 0644); err != nil {
+				t.Fatal(err)
+			}
+			got := hasSubstantiveEntries(path)
+			if got != tt.want {
+				t.Errorf("hasSubstantiveEntries() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDetect_SkipsHeaderOnlySessions verifies that Detect skips sessions where
+// raw.jsonl exists but contains only the metadata header (zero substantive entries).
+// These are ghost sessions created by ox session start without any actual work.
+func TestDetect_SkipsHeaderOnlySessions(t *testing.T) {
+	handler := NewSessionFinalizeHandler(slog.Default())
+
+	ledgerPath := t.TempDir()
+	sessionName := "2026-01-10T09-00-testuser-OxHDR0"
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// raw.jsonl with ONLY the metadata header — no real session content
+	headerOnly := `{"metadata":{"agent_id":"OxHDR0","agent_type":"claude","version":"1.0"},"type":"header"}` + "\n"
+	if err := os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(headerOnly), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	items, err := handler.Detect(ledgerPath)
+	if err != nil {
+		t.Fatalf("Detect failed: %v", err)
+	}
+
+	if len(items) != 0 {
+		t.Errorf("expected 0 items for header-only session, got %d — "+
+			"header-only sessions should be skipped to prevent ghost stubs in the ledger", len(items))
+	}
+}
+
 // TestDetect_ConcurrentRemoval verifies that Detect handles gracefully the
 // race condition where .recording.json disappears mid-scan (e.g., concurrent
 // `ox session stop`). No panics, no corrupt results.

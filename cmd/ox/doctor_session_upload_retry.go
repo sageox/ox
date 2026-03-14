@@ -265,6 +265,12 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 		return fmt.Errorf("create session dir: %w", err)
 	}
 
+	// guard: never upload a session with zero substantive entries
+	if orphan.EntryCount == 0 {
+		slog.Info("skipping retry upload: zero entries", "session", orphan.SessionName)
+		return nil
+	}
+
 	// validate raw.jsonl integrity before uploading — skip corrupted files
 	rawSrc := filepath.Join(orphan.CachePath, ledgerFileRaw)
 	if err := validateRawJSONLHeader(rawSrc); err != nil {

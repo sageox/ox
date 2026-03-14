@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -314,8 +315,7 @@ func removedLocationLabel(local, ledger bool) string {
 
 // batchDeleteSessionsFromLedger removes multiple sessions from the ledger in a
 // single git commit + push. Returns the count of successfully staged removals.
-// On push failure, resets the local commit to prevent orphaned commits from
-// leaking into future git operations.
+// Uses pushLedger() for push with pull --rebase retry on conflict.
 func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (int, error) {
 	var staged int
 	for _, name := range sessionNames {
@@ -337,23 +337,14 @@ func batchDeleteSessionsFromLedger(ledgerPath string, sessionNames []string) (in
 	if staged == 1 {
 		commitMsg = fmt.Sprintf("session: delete %s", sessionNames[0])
 	}
-	gitCommit := exec.Command("git", "commit", "-m", commitMsg)
-	gitCommit.Dir = ledgerPath
+	gitCommit := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
 	if out, err := gitCommit.CombinedOutput(); err != nil {
 		return 0, fmt.Errorf("git commit: %s: %w", string(out), err)
 	}
 
-	// single push — on failure, reset to prevent orphaned commit
-	gitPush := exec.Command("git", "push")
-	gitPush.Dir = ledgerPath
-	if out, err := gitPush.CombinedOutput(); err != nil {
-		// reset the commit so it doesn't leak into future pushes
-		gitReset := exec.Command("git", "reset", "HEAD~1")
-		gitReset.Dir = ledgerPath
-		if resetOut, resetErr := gitReset.CombinedOutput(); resetErr != nil {
-			slog.Warn("git_reset_after_push_fail", "err", fmt.Sprintf("%s: %v", string(resetOut), resetErr))
-		}
-		return 0, fmt.Errorf("git push: %s: %w", string(out), err)
+	// push with retry (pull --rebase --autostash on conflict)
+	if err := pushLedger(context.Background(), ledgerPath); err != nil {
+		return 0, fmt.Errorf("push: %w", err)
 	}
 
 	return staged, nil

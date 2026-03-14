@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/sageox/agentx"
 )
 
 var (
@@ -53,6 +55,7 @@ type RecordingState struct {
 	Model          string `json:"model,omitempty"`           // LLM model for generic adapters where ReadMetadata returns nil
 	ParentPID      int    `json:"parent_pid,omitempty"`      // parent agent process ID for liveness detection
 	SourceOffset   int64  `json:"source_offset,omitempty"`   // byte offset in source file for incremental reading
+	Origin         string `json:"origin,omitempty"`          // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
 }
 
 // Duration returns how long the recording has been running.
@@ -77,9 +80,13 @@ func (r *RecordingState) IsAgentAlive() bool {
 	return proc.Signal(syscall.Signal(0)) == nil
 }
 
-// IsSubagent returns true if this session has a parent session.
+// IsSubagent returns true if this session was spawned by a parent agent.
+// Checks both explicit parent tracking and environment-detected origin.
 func (r *RecordingState) IsSubagent() bool {
-	return r != nil && r.ParentSessionPath != ""
+	if r == nil {
+		return false
+	}
+	return r.ParentSessionPath != "" || r.Origin == "subagent"
 }
 
 // recordingStatePath returns the path to .recording.json for the given session folder.
@@ -406,6 +413,115 @@ func cleanupStaleEmptyRecordings(projectRoot string) {
 	}
 }
 
+// GhostCleanupResult reports what was cleaned up.
+type GhostCleanupResult struct {
+	Removed int      // number of ghost sessions removed
+	Names   []string // session folder names that were removed
+}
+
+// CleanupGhostSessions removes abandoned recording stubs where the parent process
+// is dead and no meaningful data was captured. Uses PID liveness for instant
+// detection — no time threshold needed.
+//
+// Ghost = .recording.json exists + parent PID dead + no substantive raw.jsonl.
+// Sessions with real data (raw.jsonl with entries) are NOT removed — those are
+// orphans that need recovery, not cleanup.
+//
+// Safe to call from daemon anti-entropy, doctor --fix, or session start.
+// Uses projectRoot to find session directories via sessionsSearchPaths.
+func CleanupGhostSessions(projectRoot string) GhostCleanupResult {
+	states, err := LoadAllRecordingStates(projectRoot)
+	if err != nil {
+		return GhostCleanupResult{}
+	}
+	return cleanupGhosts(states)
+}
+
+// CleanupGhostSessionsInDir removes ghost sessions from a specific sessions directory.
+// Used by the daemon which has a ledgerPath rather than a projectRoot.
+func CleanupGhostSessionsInDir(sessionsDir string) GhostCleanupResult {
+	states, err := loadRecordingStatesFromDir(sessionsDir)
+	if err != nil {
+		return GhostCleanupResult{}
+	}
+	return cleanupGhosts(states)
+}
+
+// cleanupGhosts is the shared implementation for ghost session cleanup.
+func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
+	var result GhostCleanupResult
+
+	for _, state := range states {
+		if state.SessionPath == "" {
+			continue
+		}
+
+		// skip if parent PID is unknown — can't determine liveness
+		if state.ParentPID <= 0 {
+			continue
+		}
+
+		// skip if parent process is alive — still recording
+		if state.IsAgentAlive() {
+			continue
+		}
+
+		// parent is dead — check if there's any real data
+		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+		if info, statErr := os.Stat(rawPath); statErr == nil && info.Size() > 0 {
+			// has raw.jsonl with content — this is an orphan, not a ghost.
+			// don't delete: it has recoverable data.
+			continue
+		}
+
+		// ghost confirmed: dead PID, no meaningful data
+		sessionName := filepath.Base(state.SessionPath)
+		recPath := recordingStatePath(state.SessionPath)
+		if err := os.Remove(recPath); err != nil && !os.IsNotExist(err) {
+			slog.Debug("ghost cleanup: failed to remove recording marker", "session", sessionName, "error", err)
+			continue
+		}
+
+		// remove empty session directory
+		removeEmptyDir(state.SessionPath)
+
+		result.Removed++
+		result.Names = append(result.Names, sessionName)
+		slog.Debug("ghost cleanup: removed", "session", sessionName, "parent_pid", state.ParentPID)
+	}
+
+	return result
+}
+
+// loadRecordingStatesFromDir loads recording states from a single sessions directory.
+func loadRecordingStatesFromDir(sessionsDir string) ([]*RecordingState, error) {
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	var states []*RecordingState
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		recordingPath := filepath.Join(sessionsDir, entry.Name(), recordingFile)
+		data, readErr := os.ReadFile(recordingPath)
+		if readErr != nil {
+			continue
+		}
+		var state RecordingState
+		if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
+			continue
+		}
+		if state.SessionPath == "" {
+			state.SessionPath = filepath.Join(sessionsDir, entry.Name())
+		}
+		states = append(states, &state)
+	}
+	return states, nil
+}
+
 // removeEmptyDir removes a directory only if it's empty.
 func removeEmptyDir(dir string) {
 	entries, err := os.ReadDir(dir)
@@ -438,6 +554,7 @@ type StartRecordingOptions struct {
 	AgentType string // original agent type for metadata (e.g., "codex", "amp")
 	Model     string // LLM model for generic adapters
 	ParentPID int    // parent agent process ID for liveness detection
+	Origin    string // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
 }
 
 // StartRecording begins a new recording session.
@@ -526,6 +643,12 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		sessionFile = filepath.Join(sessionPath, "raw.jsonl")
 	}
 
+	// auto-detect session origin if not explicitly provided
+	origin := opts.Origin
+	if origin == "" {
+		origin = string(agentx.DetectOriginFromOS(""))
+	}
+
 	state := &RecordingState{
 		AgentID:           opts.AgentID,
 		AdapterName:       opts.AdapterName,
@@ -545,6 +668,12 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		AgentType:         opts.AgentType,
 		Model:             opts.Model,
 		ParentPID:         opts.ParentPID,
+		Origin:            origin,
+	}
+
+	// always capture parent PID for liveness detection and ghost cleanup
+	if state.ParentPID <= 0 {
+		state.ParentPID = os.Getppid()
 	}
 
 	if err := SaveRecordingState(projectRoot, state); err != nil {

@@ -542,13 +542,24 @@ func (c *SessionOrphanedCheck) Name() string {
 
 // Run executes the orphaned recording check.
 func (c *SessionOrphanedCheck) Run(ctx context.Context) CheckResult {
+	// phase 1: instant ghost cleanup using PID liveness (no time threshold)
+	ghostResult := session.CleanupGhostSessions(c.gitRoot)
+
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
 
 	totalStale := len(status.StaleRecordings)
-	if totalStale == 0 {
+	if totalStale == 0 && ghostResult.Removed == 0 {
 		return CheckResult{
 			Name:   c.Name(),
 			Status: StatusSkip,
+		}
+	}
+
+	if totalStale == 0 && ghostResult.Removed > 0 {
+		return CheckResult{
+			Name:    c.Name(),
+			Status:  StatusPass,
+			Message: fmt.Sprintf("cleaned %d ghost session(s)", ghostResult.Removed),
 		}
 	}
 
@@ -557,6 +568,9 @@ func (c *SessionOrphanedCheck) Run(ctx context.Context) CheckResult {
 
 	if !c.fix {
 		msg := fmt.Sprintf("found %d orphaned recording(s) (%d empty, %d with content)", totalStale, emptyCount, contentCount)
+		if ghostResult.Removed > 0 {
+			msg += fmt.Sprintf(" (also cleaned %d ghost sessions)", ghostResult.Removed)
+		}
 		return CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarn,
@@ -565,7 +579,7 @@ func (c *SessionOrphanedCheck) Run(ctx context.Context) CheckResult {
 		}
 	}
 
-	// auto-fix: clean up stale recordings
+	// phase 2: time-based cleanup for remaining stale recordings
 	// empty stubs require 48h staleness (sessions can run 12+ hours, raw.jsonl written on stop)
 	const emptyStubFixThreshold = 48 * time.Hour
 	cleanedEmpty := 0
@@ -607,6 +621,9 @@ func (c *SessionOrphanedCheck) Run(ctx context.Context) CheckResult {
 
 	cleaned := cleanedEmpty + cleanedContent
 	msg := fmt.Sprintf("cleaned %d orphaned recording(s) (%d empty stubs removed, %d with content cleared)", cleaned, cleanedEmpty, cleanedContent)
+	if ghostResult.Removed > 0 {
+		msg += fmt.Sprintf(", %d ghost sessions removed", ghostResult.Removed)
+	}
 	return CheckResult{
 		Name:    c.Name(),
 		Status:  StatusPass,

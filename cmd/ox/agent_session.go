@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -117,6 +118,11 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		}
 		// non-ErrReadOnly errors fall through (fail-open)
 	}
+
+	// ensure prime has run — team context and agent identity are critical for sessions.
+	// detection: check session marker (written by prime on success).
+	// if missing, run prime as subprocess so its output reaches the agent's context.
+	ensurePrimeBeforeSession(inst.AgentID)
 
 	// explicit start re-enables recording — clear any stop breadcrumb
 	session.ConsumeExplicitStop(projectRoot, inst.AgentID)
@@ -308,6 +314,58 @@ func isGenericAdapter(adapterName string) bool {
 // adapter selection instead of generic/deep autodetection.
 func isManualSessionAgent(agentType string) bool {
 	return canonicalAgentType(agentType) == string(agentx.AgentTypeCodex)
+}
+
+// ensurePrimeBeforeSession checks if `ox agent prime` has run for the current
+// agent session and runs it inline if not. Prime provides team context and
+// creates the session marker — both critical for meaningful sessions.
+//
+// Detection: session markers are written by prime, keyed by the agent's native
+// session ID (e.g., CLAUDE_CODE_SESSION_ID). No marker = prime hasn't run.
+//
+// If prime hasn't run, we exec it as a subprocess (same pattern as hooks).
+// Its output goes directly to stdout so the agent receives team context.
+// Failure is non-fatal — session recording proceeds regardless.
+func ensurePrimeBeforeSession(agentID string) {
+	// get agent session ID from env var (same detection as prime itself)
+	var agentSessionID string
+	if agent := agentx.CurrentAgent(); agent != nil && agent.SupportsSession() {
+		agentSessionID = agent.SessionID(agentx.NewSystemEnvironment())
+	}
+
+	if agentSessionID == "" {
+		// no session ID available — can't check marker, skip
+		slog.Debug("session start: no agent session ID, skipping prime check")
+		return
+	}
+
+	// check if prime already ran for this session
+	marker, _ := ReadSessionMarker(agentSessionID)
+	if marker != nil {
+		slog.Debug("session start: prime already ran", "agent_id", marker.AgentID, "primed_at", marker.PrimedAt)
+		return
+	}
+
+	// prime hasn't run — execute it inline
+	slog.Info("session start: prime not detected, running inline", "agent_session_id", agentSessionID)
+
+	oxPath, err := os.Executable()
+	if err != nil {
+		slog.Warn("session start: cannot find ox executable for inline prime", "error", err)
+		return
+	}
+
+	cmd := exec.Command(oxPath, "agent", "prime")
+	cmd.Env = os.Environ()
+	// prime output goes to stderr to avoid corrupting session start JSON on stdout.
+	// agents read both stdout and stderr, so prime context still reaches the agent.
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		slog.Warn("session start: inline prime failed", "error", err)
+		// non-fatal: proceed with session start anyway
+	}
 }
 
 // runAgentSessionStop stops recording and saves the session.
@@ -1013,6 +1071,12 @@ func filterEntriesAfterStart(entries []adapters.RawEntry, startedAt time.Time) [
 // If this fails, the session data is safe in the local cache and doctor can retry.
 // ledgerPath and sessionName are pre-computed by the caller.
 func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string) error {
+	// guard: never upload a session with zero substantive entries
+	if result.EntryCount == 0 {
+		slog.Info("skipping upload: zero entries", "session", sessionName)
+		return nil
+	}
+
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
@@ -1105,6 +1169,12 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 // cache to the ledger session directory. This is a fast, local-only operation that
 // makes the session data available for the daemon to upload+finalize asynchronously.
 func copySessionCacheToLedger(result *agentSessionResult, ledgerPath, sessionName string) error {
+	// guard: never copy a session with zero substantive entries
+	if result.EntryCount == 0 {
+		slog.Info("skipping async copy: zero entries", "session", sessionName)
+		return nil
+	}
+
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
