@@ -79,6 +79,13 @@ func (oxActorDetector) DetectActor() (friction.Actor, string) {
 // Fire-and-forget with a 5ms timeout — must complete synchronously so os.Exit()
 // after this call doesn't kill a background goroutine mid-flight.
 func sendFrictionEvent(event *friction.FrictionEvent) {
+	sendFrictionEventTo(event, "")
+}
+
+// sendFrictionEventTo sends a friction event via IPC. If socketPath is non-empty,
+// it connects to that socket instead of the default daemon socket.
+// Extracted for testability — tests inject a socket path to verify the real code path.
+func sendFrictionEventTo(event *friction.FrictionEvent, socketPath string) {
 	if event == nil {
 		return
 	}
@@ -95,7 +102,12 @@ func sendFrictionEvent(event *friction.FrictionEvent) {
 		return
 	}
 
-	client := daemon.NewClientWithTimeout(5 * time.Millisecond)
+	var client *daemon.Client
+	if socketPath != "" {
+		client = daemon.NewClientWithSocket(socketPath)
+	} else {
+		client = daemon.NewClientWithTimeout(5 * time.Millisecond)
+	}
 
 	payload := daemon.FrictionPayload{
 		Timestamp:  event.Timestamp,

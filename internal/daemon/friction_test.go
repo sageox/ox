@@ -190,8 +190,11 @@ func TestFrictionCollector_BoundedMemory_ConcurrentLoad(t *testing.T) {
 
 	wg.Wait()
 
-	// verify buffer is bounded (frictionax default buffer size is 100)
+	// verify buffer is bounded
 	stats := fc.Stats()
+	if stats.BufferSize <= 0 {
+		t.Fatalf("BufferSize = %d, expected positive value", stats.BufferSize)
+	}
 	if stats.BufferCount > stats.BufferSize {
 		t.Errorf("BufferCount = %d, exceeds buffer size %d after concurrent load", stats.BufferCount, stats.BufferSize)
 	}

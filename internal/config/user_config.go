@@ -257,7 +257,7 @@ type UserConfig struct {
 	Sessions          *SessionsConfig      `yaml:"sessions,omitempty"`
 	AgentWorker       *AgentWorkerConfig   `yaml:"agent_worker,omitempty"`
 	Notifications     *NotificationsConfig `yaml:"notifications,omitempty"`
-	ViewFormat        string               `yaml:"view_format,omitempty"` // "html", "text", "json" (default: "html")
+	ViewFormat        string               `yaml:"view_format,omitempty"` // "web", "text", "json" (default: "web")
 }
 
 // BadgeConfig tracks badge suggestion state across all projects.

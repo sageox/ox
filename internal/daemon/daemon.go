@@ -468,8 +468,8 @@ func (d *Daemon) Start() error {
 			return &StatusData{
 				Running:            true,
 				Pid:                os.Getpid(),
-				Version:            version.Version,
-				Uptime:             time.Since(d.server.startTime),
+				Version:            Version(),
+				Uptime:             time.Since(d.startTime),
 				WorkspacePath:      workspacePath,
 				LedgerPath:         d.config.LedgerPath,
 				LastSync:           d.scheduler.LastSync(),

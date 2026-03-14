@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -81,7 +82,7 @@ func catalogCacheFile() string {
 	if err != nil {
 		return ""
 	}
-	return cacheDir + "/sageox/friction-catalog.json"
+	return filepath.Join(cacheDir, "sageox", "friction-catalog.json")
 }
 
 // SetAuthTokenGetter sets the callback to get auth token from heartbeat cache.

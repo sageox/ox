@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -11,12 +10,11 @@ import (
 	"time"
 
 	friction "github.com/sageox/frictionax"
-	"github.com/sageox/ox/internal/daemon"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestSendFrictionEvent_DeliversToSocket verifies that sendFrictionEvent sends
+// TestSendFrictionEvent_DeliversToSocket verifies that sendFrictionEventTo sends
 // a friction event to the daemon socket via IPC. This is a regression test —
 // the sendFrictionEvent call was silently dropped during the frictionax migration,
 // breaking the CLI→daemon telemetry pipeline with zero test failures.
@@ -55,29 +53,8 @@ func TestSendFrictionEvent_DeliversToSocket(t *testing.T) {
 		ErrorMsg:   "unknown command \"badcommand\" for \"ox\"",
 	}
 
-	// send via the same code path as production, but with a custom socket
-	payload := daemon.FrictionPayload{
-		Timestamp:  event.Timestamp,
-		Kind:       string(event.Kind),
-		Command:    event.Command,
-		Subcommand: event.Subcommand,
-		Actor:      event.Actor,
-		AgentType:  event.AgentType,
-		PathBucket: event.PathBucket,
-		Input:      event.Input,
-		ErrorMsg:   event.ErrorMsg,
-	}
-
-	data, err := json.Marshal(payload)
-	require.NoError(t, err)
-
-	// NewClientWithSocket uses default 50ms timeout, sufficient for localhost
-	client := daemon.NewClientWithSocket(socketPath)
-	sendErr := client.SendOneWay(daemon.Message{
-		Type:    daemon.MsgTypeFriction,
-		Payload: data,
-	})
-	require.NoError(t, sendErr)
+	// exercise the real sendFrictionEventTo with injected socket
+	sendFrictionEventTo(event, socketPath)
 
 	select {
 	case msg := <-received:
@@ -147,7 +124,8 @@ func TestSendFrictionEvent_DoNotTrack(t *testing.T) {
 		Input: "ox bad",
 	}
 
-	sendFrictionEvent(event)
+	// exercise the real sendFrictionEventTo — should be blocked by DO_NOT_TRACK
+	sendFrictionEventTo(event, socketPath)
 
 	select {
 	case <-received:
