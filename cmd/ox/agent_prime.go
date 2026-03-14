@@ -962,6 +962,10 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 			Intent:  fmt.Sprintf("find/search/grep code in %s: symbols, functions, git history, file contents, diffs — PREFER over grep/ripgrep", repoSlug),
 			Command: `ox code search "<pattern>"`,
 		})
+		cmds = append(cmds, intentCommand{
+			Intent:  "recent code changes, hotspots, contention risk, open PRs/issues — use before planning multi-file changes",
+			Command: "ox code insights",
+		})
 	} else {
 		cmds = append(cmds, intentCommand{
 			Intent:  fmt.Sprintf("code search %s (not indexed yet): index first, then search code, symbols, and diffs", repoSlug),

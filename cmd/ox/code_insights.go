@@ -85,6 +85,12 @@ var codeInsightsCmd = &cobra.Command{
 		limit, _ := cmd.Flags().GetInt("limit")
 		jsonOut, _ := cmd.Flags().GetBool("json")
 
+		// auto-detect: default to JSON when called by an agent
+		agentID, _ := detectAgentContext()
+		if agentID != "" && !cmd.Flags().Changed("json") {
+			jsonOut = true
+		}
+
 		s := db.Store()
 		out := insightsOutput{}
 
@@ -113,7 +119,6 @@ var codeInsightsCmd = &cobra.Command{
 			fmt.Print(rendered)
 		}
 
-		agentID, _ := detectAgentContext()
 		if agentID != "" {
 			slog.Debug("code insights context cost", "agent_id", agentID, "bytes", outputBytes)
 			trackContextBytes(int64(outputBytes))
