@@ -159,6 +159,8 @@ const (
 	CheckSlugCodePuppyHooks      = "code-puppy-hooks"
 	CheckSlugHookCommands        = "hook-commands"
 	CheckSlugHookCompleteness    = "hook-completeness"
+	CheckSlugSharedHookValues    = "shared-hook-values"
+	CheckSlugStaleLocalHooks     = "stale-local-hooks"
 	CheckSlugSessionStartHookBug = "session-start-hook-bug"
 	CheckSlugGitCommitHooks      = "git-commit-hooks"
 

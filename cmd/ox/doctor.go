@@ -523,6 +523,16 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		if !projectHookCheck.skipped {
 			integrationChecks = append(integrationChecks, projectHookCheck)
 		}
+		// validate shared hook command values are current
+		sharedValuesCheck := checkSharedHookValues(opts.shouldFix(CheckSlugSharedHookValues))
+		if !sharedValuesCheck.skipped {
+			integrationChecks = append(integrationChecks, sharedValuesCheck)
+		}
+		// detect stale ox hooks in settings.local.json
+		staleLocalCheck := checkStaleLocalHooks(opts.shouldFix(CheckSlugStaleLocalHooks))
+		if !staleLocalCheck.skipped {
+			integrationChecks = append(integrationChecks, staleLocalCheck)
+		}
 	}
 	if detectOpenCode() {
 		integrationChecks = append(integrationChecks, checkOpenCodeHooks(opts.shouldFix(CheckSlugOpenCodeHooks)))
