@@ -175,7 +175,7 @@ func setupRealTeamContext(t *testing.T, env *common.TestEnvironment) {
 		}
 		cmd = exec.Command("git", "add", "-A")
 		cmd.Dir = destTeamPath
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: raw git command, not ox subprocess
 			"GIT_AUTHOR_NAME=Test",
 			"GIT_AUTHOR_EMAIL=test@test.com",
 			"GIT_COMMITTER_NAME=Test",
@@ -186,7 +186,7 @@ func setupRealTeamContext(t *testing.T, env *common.TestEnvironment) {
 		}
 		cmd = exec.Command("git", "commit", "--allow-empty", "-m", "init")
 		cmd.Dir = destTeamPath
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: raw git command, not ox subprocess
 			"GIT_AUTHOR_NAME=Test",
 			"GIT_AUTHOR_EMAIL=test@test.com",
 			"GIT_COMMITTER_NAME=Test",

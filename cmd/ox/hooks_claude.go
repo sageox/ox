@@ -82,7 +82,7 @@ func writeSettingsFileRaw(path string, settings *ClaudeSettings, rawMap map[stri
 		rawMap = make(map[string]json.RawMessage)
 	}
 
-	if settings.Hooks != nil && len(settings.Hooks) > 0 {
+	if len(settings.Hooks) > 0 {
 		hooksJSON, err := json.Marshal(settings.Hooks)
 		if err != nil {
 			return fmt.Errorf("failed to marshal hooks: %w", err)
