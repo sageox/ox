@@ -679,6 +679,32 @@ func TestGetRepoName_UsesGitRoot_NotCWD(t *testing.T) {
 		"GetRepoName should use gitRoot's remotes, not CWD's remotes")
 }
 
+// TestGetRepoName_PrefersOrigin verifies that GetRepoName uses the "origin"
+// remote even when another remote comes first alphabetically.
+func TestGetRepoName_PrefersOrigin(t *testing.T) {
+	if !IsInstalled(VCSGit) {
+		t.Skip("git not installed")
+	}
+
+	dir := t.TempDir()
+	cmd := exec.Command("git", "init")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// "abc-backup" sorts before "origin" alphabetically
+	cmd = exec.Command("git", "remote", "add", "abc-backup", "https://github.com/other/backup.git")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	cmd = exec.Command("git", "remote", "add", "origin", "https://github.com/real/project.git")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	name := GetRepoName(dir)
+	assert.Equal(t, "real/project", name,
+		"GetRepoName should prefer origin remote over alphabetically-first remote")
+}
+
 // TestGetRepoName_NoRemote_FallsBackToDir verifies that when a repo has
 // no remotes, GetRepoName returns the directory basename from gitRoot.
 func TestGetRepoName_NoRemote_FallsBackToDir(t *testing.T) {
