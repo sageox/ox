@@ -67,6 +67,11 @@ const (
 // ErrInvalidRepoPath indicates the repo path failed security validation.
 var ErrInvalidRepoPath = errors.New("invalid repo path: path traversal or unsafe location detected")
 
+// ErrCloneSemaphoreTimeout indicates all clone slots were busy and the wait timed out.
+// This is a transient error that should be retried on the next sync cycle without
+// exponential backoff — the slots will free up when in-progress clones finish.
+var ErrCloneSemaphoreTimeout = errors.New("clone semaphore timeout")
+
 // SyncMetrics tracks observability counters and timing for sync operations.
 // Counters and timestamps use lock-free atomics; only pullDurations needs a mutex.
 type SyncMetrics struct {
@@ -1719,9 +1724,30 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	case s.cloneSem <- struct{}{}:
 		// acquired
 	case <-time.After(semTimeout):
-		return nil, fmt.Errorf("clone semaphore timeout after %v: all %d slots busy", semTimeout, maxConcurrentClones)
+		return nil, fmt.Errorf("%w after %v: all %d slots busy", ErrCloneSemaphoreTimeout, semTimeout, maxConcurrentClones)
 	}
 	defer func() { <-s.cloneSem }()
+
+	// TOCTOU fix: re-verify directory state after acquiring semaphore.
+	// While waiting for a slot, another process may have completed the clone.
+	if info, statErr := os.Stat(payload.RepoPath); statErr == nil && info.IsDir() {
+		gitDir := filepath.Join(payload.RepoPath, ".git")
+		if _, err := os.Stat(gitDir); err == nil {
+			if payload.RepoType != "team-context" {
+				// non-team-context: .git exists = already cloned
+				s.logger.Debug("checkout: repo appeared while waiting for semaphore", "path", payload.RepoPath)
+				result.AlreadyExists = true
+				return result, nil
+			}
+			// team-context: check if .sageox/ now exists (clone completed by another process)
+			sageoxDir := filepath.Join(payload.RepoPath, ".sageox")
+			if _, sErr := os.Stat(sageoxDir); sErr == nil {
+				s.logger.Debug("checkout: team-context completed while waiting for semaphore", "path", payload.RepoPath)
+				result.AlreadyExists = true
+				return result, nil
+			}
+		}
+	}
 
 	// validate clone URL to prevent SSRF attacks
 	// must be done before any network operations
@@ -2162,6 +2188,12 @@ func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspac
 	if err != nil {
 		s.logger.Error("background clone failed", "type", repoType, "path", repoPath, "error", err)
 
+		// semaphore timeout is transient — retry next cycle without escalating backoff
+		if errors.Is(err, ErrCloneSemaphoreTimeout) {
+			s.logger.Info("clone semaphore busy, will retry next cycle", "type", repoType, "path", repoPath)
+			return
+		}
+
 		// increment attempt count and calculate backoff
 		newAttempts := attempts + 1
 
@@ -2582,6 +2614,31 @@ const (
 	gcFailed                       // reclone attempted but failed (clone, validation, or swap error)
 )
 
+// acquireGCLock creates an exclusive filesystem lock for the GC swap window.
+// Returns the lock file handle on success, or an error if the lock is already held.
+// The lock is short-lived (only held during the two-rename atomic swap).
+func acquireGCLock(lockPath string) (*os.File, error) {
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		// lock file exists — check if stale (>5 min old = likely crashed process)
+		if info, statErr := os.Stat(lockPath); statErr == nil {
+			if time.Since(info.ModTime()) > 5*time.Minute {
+				// stale lock from a crashed process — remove and retry once
+				_ = os.Remove(lockPath)
+				return os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+			}
+		}
+		return nil, fmt.Errorf("gc lock held: %w", err)
+	}
+	return f, nil
+}
+
+// releaseGCLock closes and removes the GC lock file.
+func releaseGCLock(f *os.File, lockPath string) {
+	_ = f.Close()
+	_ = os.Remove(lockPath)
+}
+
 // runBlueGreenGC performs a blue-green reclone for a single team context workspace.
 // Steps: preserve local state → clone .new → validate → atomic swap → remove old → restore state.
 //
@@ -2593,9 +2650,10 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 	oldPath := ws.Path + ".old"
 	diffFile := ws.Path + ".gc-diff"
 	untrackedDir := ws.Path + ".gc-untracked"
+	lockPath := ws.Path + ".gc-lock"
 
 	// clean up leftover artifacts from a previous failed GC
-	for _, leftover := range []string{newPath, diffFile, untrackedDir} {
+	for _, leftover := range []string{newPath, diffFile, untrackedDir, lockPath} {
 		if _, err := os.Stat(leftover); err == nil {
 			s.logger.Info("gc: cleaning up leftover artifact", "path", leftover)
 			if err := os.RemoveAll(leftover); err != nil {
@@ -2664,7 +2722,16 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 		s.logger.Warn("gc: failed to ensure checkout .gitignore on new clone", "error", err)
 	}
 
-	// step 3: atomic swap
+	// step 3: atomic swap — protected by filesystem lock so concurrent daemons
+	// don't see the directory disappear between the two renames
+	lockFile, lockErr := acquireGCLock(lockPath)
+	if lockErr != nil {
+		s.logger.Warn("gc: another process holds the GC lock, skipping swap", "lock", lockPath, "error", lockErr)
+		_ = os.RemoveAll(newPath)
+		return gcFailed
+	}
+	defer releaseGCLock(lockFile, lockPath)
+
 	if _, err := os.Stat(oldPath); err == nil {
 		_ = os.RemoveAll(oldPath)
 	}
