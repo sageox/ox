@@ -330,18 +330,18 @@ var codeStatsCmd = &cobra.Command{
 				Blobs   int    `json:"blobs"`
 			}
 			type jsonStats struct {
-				Commits     int              `json:"commits"`
-				Blobs       int              `json:"blobs"`
-				Symbols     int              `json:"symbols"`
-				Comments    int              `json:"comments"`
-				PRs         int              `json:"prs"`
-				Issues      int              `json:"issues"`
-				Repos       []jsonRepoStats  `json:"repos"`
-				DataDir     string           `json:"data_dir"`
-				IndexExists bool             `json:"index_exists"`
-				IndexingNow bool             `json:"indexing_now"`
-				LastIndexed *time.Time       `json:"last_indexed,omitempty"`
-				LastError   string           `json:"last_error,omitempty"`
+				Commits     int             `json:"commits"`
+				Blobs       int             `json:"blobs"`
+				Symbols     int             `json:"symbols"`
+				Comments    int             `json:"comments"`
+				PRs         int             `json:"prs"`
+				Issues      int             `json:"issues"`
+				Repos       []jsonRepoStats `json:"repos"`
+				DataDir     string          `json:"data_dir"`
+				IndexExists bool            `json:"index_exists"`
+				IndexingNow bool            `json:"indexing_now"`
+				LastIndexed *time.Time      `json:"last_indexed,omitempty"`
+				LastError   string          `json:"last_error,omitempty"`
 			}
 			out := jsonStats{
 				Commits:     totalCommits,

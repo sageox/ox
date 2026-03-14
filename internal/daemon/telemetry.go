@@ -448,15 +448,15 @@ func (c *TelemetryCollector) RecordSyncComplete(syncType, operation, status stri
 // RecordCodeIndexComplete records a code index completion event with per-stage timing.
 func (c *TelemetryCollector) RecordCodeIndexComplete(result *CodeIndexResult, status string) {
 	c.Record("codedb:index_complete", map[string]any{
-		"app_type":           "ox-daemon",
-		"status":             status,
-		"blobs_parsed":       result.BlobsParsed,
-		"symbols_extracted":  result.SymbolsExtracted,
-		"comments_extracted": result.CommentsExtracted,
-		"index_duration_ms":  result.IndexDurationMs,
-		"symbol_duration_ms": result.SymbolDurationMs,
+		"app_type":            "ox-daemon",
+		"status":              status,
+		"blobs_parsed":        result.BlobsParsed,
+		"symbols_extracted":   result.SymbolsExtracted,
+		"comments_extracted":  result.CommentsExtracted,
+		"index_duration_ms":   result.IndexDurationMs,
+		"symbol_duration_ms":  result.SymbolDurationMs,
 		"comment_duration_ms": result.CommentDurationMs,
-		"total_duration_ms":  result.TotalDurationMs,
+		"total_duration_ms":   result.TotalDurationMs,
 	})
 }
 

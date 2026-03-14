@@ -138,11 +138,11 @@ func TestLocalSummary_SkillInvocations(t *testing.T) {
 
 func TestFilterForSummarization(t *testing.T) {
 	tests := []struct {
-		name       string
-		entries    []Entry
-		wantCount  int
-		wantTypes  []EntryType // expected types of remaining entries
-		wantTools  []string    // expected tool names of remaining tool entries
+		name      string
+		entries   []Entry
+		wantCount int
+		wantTypes []EntryType // expected types of remaining entries
+		wantTools []string    // expected tool names of remaining tool entries
 	}{
 		{
 			name:      "empty entries",

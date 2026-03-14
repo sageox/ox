@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 )
 

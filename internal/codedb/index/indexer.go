@@ -31,7 +31,7 @@ type ProgressFunc func(msg string)
 
 // IndexOptions configures the indexing process.
 type IndexOptions struct {
-	MaxHistoryDepth int             // 0 = unlimited
+	MaxHistoryDepth int // 0 = unlimited
 	Progress        ProgressFunc
 	SkipDirs        map[string]bool // directories to skip in worktree indexing; nil = use defaultSkipDirs
 }

@@ -8,7 +8,7 @@ type TeamDoc struct {
 	Title       string `json:"title"`                 // from frontmatter or first H1 heading
 	Description string `json:"description,omitempty"` // one-line summary for catalog
 	Path        string `json:"path"`                  // absolute path — agent reads on demand
-	When        string `json:"when,omitempty"`         // natural language triggers for when to read
+	When        string `json:"when,omitempty"`        // natural language triggers for when to read
 	Visibility  string `json:"visibility"`            // always | indexed | hidden
 }
 

@@ -356,4 +356,3 @@ func TestCheckoutOptions(t *testing.T) {
 	assert.Equal(t, 1, opts.Depth)
 	assert.Equal(t, "main", opts.Branch)
 }
-

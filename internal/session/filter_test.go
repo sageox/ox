@@ -70,4 +70,3 @@ func TestIsNoiseCommand(t *testing.T) {
 		})
 	}
 }
-

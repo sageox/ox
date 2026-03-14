@@ -15,14 +15,14 @@ import (
 
 // lintResult holds the outcome of linting a session's raw.jsonl.
 type lintResult struct {
-	SessionName string   `json:"session_name"`
-	Valid       bool     `json:"valid"`
-	Errors      []string `json:"errors,omitempty"`
-	Warnings    []string `json:"warnings,omitempty"`
-	EntryCount  int      `json:"entry_count"`
+	SessionName string         `json:"session_name"`
+	Valid       bool           `json:"valid"`
+	Errors      []string       `json:"errors,omitempty"`
+	Warnings    []string       `json:"warnings,omitempty"`
+	EntryCount  int            `json:"entry_count"`
 	TypeCounts  map[string]int `json:"type_counts"`
-	HasHeader   bool     `json:"has_header"`
-	HasFooter   bool     `json:"has_footer"`
+	HasHeader   bool           `json:"has_header"`
+	HasFooter   bool           `json:"has_footer"`
 }
 
 // validRawEntryTypes are the types the web viewer can display.

@@ -9,12 +9,11 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/joho/godotenv"
 	"github.com/mattn/go-isatty"
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/cli"
-	"github.com/sageox/ox/internal/uxfriction"
-	"github.com/sageox/ox/pkg/agentx"
 
 	// registers all supported agents for detection
-	_ "github.com/sageox/ox/pkg/agentx/setup"
+	_ "github.com/sageox/agentx/setup"
 )
 
 // maxFrictionRetries limits auto-execute attempts to prevent infinite loops.
@@ -129,12 +128,12 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 	}
 
 	// try friction recovery
-	if frictionHandler == nil {
+	if frictionEngine == nil {
 		printError(err)
 		return 1
 	}
 
-	result := frictionHandler.HandleWithAutoExecute(args, err)
+	result := frictionEngine.Handle(args, err)
 	if result == nil {
 		printError(err)
 		return 1
@@ -147,10 +146,10 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 	jsonMode := cfg != nil && cfg.JSON
 
 	// emit correction/suggestion for learning
-	uxfriction.EmitCorrection(result, jsonMode)
+	result.Emit(jsonMode || agentx.IsAgentContext())
 
 	// auto-execute if high confidence and within retry limit
-	if result.Action == uxfriction.ActionAutoExecute && attempt < maxFrictionRetries {
+	if result.AutoExecute && attempt < maxFrictionRetries {
 		return executeWithFrictionRecovery(result.CorrectedArgs, attempt+1)
 	}
 

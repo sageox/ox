@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sageox/ox/pkg/agentx"
+	"github.com/sageox/agentx"
 )
 
 func TestCheckAgentsIntegration_NoFiles(t *testing.T) {

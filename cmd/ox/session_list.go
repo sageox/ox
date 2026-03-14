@@ -69,12 +69,12 @@ func init() {
 
 // sessionListOutput is the JSON output format for session list.
 type sessionListOutput struct {
-	Sessions       []sessionListEntry `json:"sessions"`
-	Total          int                `json:"total"`
-	Window         string             `json:"window,omitempty"`
-	RepoName       string             `json:"repo_name"`
-	RepoID         string             `json:"repo_id"`
-	LedgerAvailable bool              `json:"ledger_available"`
+	Sessions        []sessionListEntry `json:"sessions"`
+	Total           int                `json:"total"`
+	Window          string             `json:"window,omitempty"`
+	RepoName        string             `json:"repo_name"`
+	RepoID          string             `json:"repo_id"`
+	LedgerAvailable bool               `json:"ledger_available"`
 }
 
 // sessionListEntry is a single session in JSON output.

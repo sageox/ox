@@ -49,8 +49,8 @@ var validSessionEntryTypes = map[string]bool{
 // invalidLeakedTypes are internal Claude Code types that should never appear
 // in processed session data. Their presence indicates an adapter bug.
 var invalidLeakedTypes = map[string]bool{
-	"queue-operation":        true,
-	"file-history-snapshot":  true,
+	"queue-operation":       true,
+	"file-history-snapshot": true,
 	"progress":              true,
 	"summary":               true,
 	"last-prompt":           true,

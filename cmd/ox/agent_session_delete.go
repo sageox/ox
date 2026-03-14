@@ -16,12 +16,12 @@ import (
 
 // sessionDeleteOutput is the JSON output format for session delete.
 type sessionDeleteOutput struct {
-	Status      string `json:"status"`
-	SessionName string `json:"session_name"`
-	AgentID     string `json:"agent_id"`
-	LocalDelete bool   `json:"local_deleted"`
-	LedgerDelete bool  `json:"ledger_deleted"`
-	Warning     string `json:"warning,omitempty"`
+	Status       string `json:"status"`
+	SessionName  string `json:"session_name"`
+	AgentID      string `json:"agent_id"`
+	LocalDelete  bool   `json:"local_deleted"`
+	LedgerDelete bool   `json:"ledger_deleted"`
+	Warning      string `json:"warning,omitempty"`
 }
 
 // runAgentSessionDelete deletes a completed session from the local cache and ledger.

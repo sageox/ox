@@ -403,9 +403,6 @@ func (g *MarkdownGenerator) writeFooter(buf *bytes.Buffer, t *StoredSession) {
 	buf.WriteString("\n---\n")
 }
 
-
-
-
 // mdExtractToolName gets the tool name from an entry.
 func mdExtractToolName(entry map[string]any) string {
 	if name, ok := entry["tool_name"].(string); ok {

@@ -6,10 +6,10 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/sageox/agentx"
+	_ "github.com/sageox/agentx/setup"
 	"github.com/sageox/ox/extensions/claude"
 	"github.com/sageox/ox/internal/version"
-	"github.com/sageox/ox/pkg/agentx"
-	_ "github.com/sageox/ox/pkg/agentx/setup"
 )
 
 // checkClaudeCommands validates that ox slash commands are installed in .claude/commands/.

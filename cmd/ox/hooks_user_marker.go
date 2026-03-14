@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/ui"
-	"github.com/sageox/ox/pkg/agentx"
 )
 
 // agentUserContextFile maps agent types to the context file (relative to

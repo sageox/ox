@@ -27,26 +27,26 @@ const maxConcurrentConnections = 100
 
 // Message types for IPC communication.
 const (
-	MsgTypeStatus      = "status"
-	MsgTypeSync        = "sync"
-	MsgTypeTeamSync    = "team_sync" // on-demand team context sync
-	MsgTypePing        = "ping"
-	MsgTypeStop        = "stop"
-	MsgTypeVersion     = "version"
-	MsgTypeSyncHistory = "sync_history"
-	MsgTypeHeartbeat   = "heartbeat"   // one-way, no response expected
-	MsgTypeCheckout    = "checkout"    // synchronous git clone operation
-	MsgTypeTelemetry   = "telemetry"   // one-way, no response expected
-	MsgTypeFriction    = "friction"    // one-way, friction event for analytics
-	MsgTypeGetErrors   = "get_errors"  // retrieve unviewed daemon errors
-	MsgTypeMarkErrors  = "mark_errors" // mark errors as viewed
-	MsgTypeSessions    = "sessions"    // get active agent sessions (deprecated: use instances)
-	MsgTypeInstances   = "instances"   // get active agent instances
-	MsgTypeDoctor      = "doctor"      // trigger daemon health checks (anti-entropy, etc.)
-	MsgTypeTriggerGC   = "trigger_gc"  // force GC reclone for team contexts
-	MsgTypeCodeIndex   = "code_index"   // index local code with progress
-	MsgTypeCodeStatus     = "code_status"    // get code index status/stats
-	MsgTypeNotifications    = "notifications"      // query pending team context change notifications
+	MsgTypeStatus          = "status"
+	MsgTypeSync            = "sync"
+	MsgTypeTeamSync        = "team_sync" // on-demand team context sync
+	MsgTypePing            = "ping"
+	MsgTypeStop            = "stop"
+	MsgTypeVersion         = "version"
+	MsgTypeSyncHistory     = "sync_history"
+	MsgTypeHeartbeat       = "heartbeat"        // one-way, no response expected
+	MsgTypeCheckout        = "checkout"         // synchronous git clone operation
+	MsgTypeTelemetry       = "telemetry"        // one-way, no response expected
+	MsgTypeFriction        = "friction"         // one-way, friction event for analytics
+	MsgTypeGetErrors       = "get_errors"       // retrieve unviewed daemon errors
+	MsgTypeMarkErrors      = "mark_errors"      // mark errors as viewed
+	MsgTypeSessions        = "sessions"         // get active agent sessions (deprecated: use instances)
+	MsgTypeInstances       = "instances"        // get active agent instances
+	MsgTypeDoctor          = "doctor"           // trigger daemon health checks (anti-entropy, etc.)
+	MsgTypeTriggerGC       = "trigger_gc"       // force GC reclone for team contexts
+	MsgTypeCodeIndex       = "code_index"       // index local code with progress
+	MsgTypeCodeStatus      = "code_status"      // get code index status/stats
+	MsgTypeNotifications   = "notifications"    // query pending team context change notifications
 	MsgTypeSessionFinalize = "session_finalize" // one-way, trigger async session upload+finalization
 )
 
@@ -68,7 +68,7 @@ const (
 type Message struct {
 	Type        string          `json:"type"`
 	WorkspaceID string          `json:"workspace_id,omitempty"` // repo-scoped daemon identity
-	CallerID string `json:"caller_id,omitempty"` // identifies calling clone/worktree (path-based hash)
+	CallerID    string          `json:"caller_id,omitempty"`    // identifies calling clone/worktree (path-based hash)
 	Payload     json.RawMessage `json:"payload,omitempty"`
 }
 
@@ -171,14 +171,14 @@ func GetExtendedStatus(s *StatusData) (ExtendedStatus, bool) {
 // WorkspaceSyncStatus represents the sync status of a workspace (ledger or team context).
 // Provides a unified view of all repos the daemon is syncing.
 type WorkspaceSyncStatus struct {
-	ID       string    `json:"id"`                   // workspace ID (e.g., "ledger", team_id)
-	Type     string    `json:"type"`                 // "ledger" or "team_context"
-	Path     string    `json:"path"`                 // local filesystem path
-	CloneURL string    `json:"clone_url,omitempty"`  // git remote URL
-	Exists   bool      `json:"exists"`               // whether path exists locally
-	TeamID   string    `json:"team_id,omitempty"`    // team ID (for team contexts)
-	TeamName string    `json:"team_name,omitempty"`  // team name (for team contexts)
-	TeamSlug string    `json:"team_slug,omitempty"` // kebab-case team slug
+	ID             string    `json:"id"`                         // workspace ID (e.g., "ledger", team_id)
+	Type           string    `json:"type"`                       // "ledger" or "team_context"
+	Path           string    `json:"path"`                       // local filesystem path
+	CloneURL       string    `json:"clone_url,omitempty"`        // git remote URL
+	Exists         bool      `json:"exists"`                     // whether path exists locally
+	TeamID         string    `json:"team_id,omitempty"`          // team ID (for team contexts)
+	TeamName       string    `json:"team_name,omitempty"`        // team name (for team contexts)
+	TeamSlug       string    `json:"team_slug,omitempty"`        // kebab-case team slug
 	LastSync       time.Time `json:"last_sync,omitempty"`        // last successful sync
 	LastErr        string    `json:"last_error,omitempty"`       // last error message
 	Syncing        bool      `json:"syncing,omitempty"`          // currently syncing
@@ -352,7 +352,6 @@ type InstancesResponse struct {
 	Instances []InstanceInfo `json:"instances"`
 }
 
-
 // NotificationsPayload is the payload for notifications requests.
 type NotificationsPayload struct {
 	AgentID string `json:"agent_id"`
@@ -485,27 +484,27 @@ type Server struct {
 	connSem  chan struct{}  // semaphore for connection limit
 
 	// callbacks for handling messages
-	onSync             func() error                                                                     // simple sync (backward compat)
-	onSyncWithProgress func(progress *ProgressWriter) error                                             // sync with progress
-	onTeamSync         func(progress *ProgressWriter) error                                             // team context sync with progress
-	onStop             func()                                                                           //
-	onStatus           func() *StatusData                                                               //
-	onActivity         func()                                                                           // called on any IPC activity
-	onHeartbeat        func(callerID string, payload json.RawMessage)                                   //
-	onCheckout         func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error) //
-	onTelemetry        func(payload json.RawMessage)                                                    // fire-and-forget telemetry
-	onFriction         func(payload FrictionPayload)                                                    // fire-and-forget friction event
-	onSessionFinalize  func(payload SessionFinalizeIPCPayload)                                           // fire-and-forget session finalize
-	onGetErrors        func() []StoredError                                                             // get unviewed errors
-	onMarkErrors       func(ids []string)                                                               // mark errors as viewed
-	onSessions         func() []AgentSession                                                            // get active agent sessions (deprecated)
-	onInstances        func() []InstanceInfo                                                            // get active agent instances
-	onSyncHistory      func() []SyncEvent                                                               // get sync history
-	onDoctor           func() *DoctorResponse                                                           // trigger health checks
-	onTriggerGC        func() *TriggerGCResponse                                                        // force GC reclone
-	onCodeIndex         func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) // index local code
-	onCodeStatus        func() *CodeDBStats                                                               // get code index stats
-	onNotifications     func(agentID string) ([]ChangeEntry, bool)                                        // get pending notifications
+	onSync             func() error                                                                       // simple sync (backward compat)
+	onSyncWithProgress func(progress *ProgressWriter) error                                               // sync with progress
+	onTeamSync         func(progress *ProgressWriter) error                                               // team context sync with progress
+	onStop             func()                                                                             //
+	onStatus           func() *StatusData                                                                 //
+	onActivity         func()                                                                             // called on any IPC activity
+	onHeartbeat        func(callerID string, payload json.RawMessage)                                     //
+	onCheckout         func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error)   //
+	onTelemetry        func(payload json.RawMessage)                                                      // fire-and-forget telemetry
+	onFriction         func(payload FrictionPayload)                                                      // fire-and-forget friction event
+	onSessionFinalize  func(payload SessionFinalizeIPCPayload)                                            // fire-and-forget session finalize
+	onGetErrors        func() []StoredError                                                               // get unviewed errors
+	onMarkErrors       func(ids []string)                                                                 // mark errors as viewed
+	onSessions         func() []AgentSession                                                              // get active agent sessions (deprecated)
+	onInstances        func() []InstanceInfo                                                              // get active agent instances
+	onSyncHistory      func() []SyncEvent                                                                 // get sync history
+	onDoctor           func() *DoctorResponse                                                             // trigger health checks
+	onTriggerGC        func() *TriggerGCResponse                                                          // force GC reclone
+	onCodeIndex        func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) // index local code
+	onCodeStatus       func() *CodeDBStats                                                                // get code index stats
+	onNotifications    func(agentID string) ([]ChangeEntry, bool)                                         // get pending notifications
 
 	startTime time.Time
 }

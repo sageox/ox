@@ -32,7 +32,7 @@ Examples:
 // sessionStatusOutput is the JSON output format for session status.
 type sessionStatusOutput struct {
 	Recording     bool                    `json:"recording"`
-	AgentAlive    *bool                   `json:"agent_alive,omitempty"`    // nil if no PID available, false if agent exited
+	AgentAlive    *bool                   `json:"agent_alive,omitempty"` // nil if no PID available, false if agent exited
 	Guidance      string                  `json:"guidance,omitempty"`
 	Count         int                     `json:"count,omitempty"`
 	Sessions      []sessionRecordingEntry `json:"sessions,omitempty"`
@@ -55,7 +55,7 @@ type sessionStatusOutput struct {
 // sessionRecordingEntry represents one active recording in the multi-session output.
 type sessionRecordingEntry struct {
 	AgentID       string `json:"agent_id"`
-	AgentAlive    *bool  `json:"agent_alive,omitempty"`    // nil if no PID available, false if agent exited
+	AgentAlive    *bool  `json:"agent_alive,omitempty"` // nil if no PID available, false if agent exited
 	Title         string `json:"title,omitempty"`
 	Agent         string `json:"agent,omitempty"`
 	DurationSecs  int    `json:"duration_seconds"`

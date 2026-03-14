@@ -11,10 +11,10 @@ import (
 
 func TestWorkQueue_EnqueueDequeue(t *testing.T) {
 	tests := []struct {
-		name       string
-		items      []*WorkItem
-		wantOrder  []string // expected dequeue order by Type
-		wantLen    int      // queue length after all enqueues
+		name      string
+		items     []*WorkItem
+		wantOrder []string // expected dequeue order by Type
+		wantLen   int      // queue length after all enqueues
 	}{
 		{
 			name: "single item",

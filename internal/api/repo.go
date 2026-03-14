@@ -21,9 +21,9 @@ import (
 
 const (
 	repoInitPath      = "/api/v1/repo/init"
-	repoDoctorPath    = "/api/v1/public/repos/%s/doctor" // %s = repo_id; intentionally public (no PII, works pre-auth)
-	repoUninstallPath = "/api/v1/repo/%s/uninstall"      // %s = repo_id
-	repoMergePath     = "/api/v1/repo/%s/merge"          // %s = repo_id
+	repoDoctorPath    = "/api/v1/public/repos/%s/doctor"  // %s = repo_id; intentionally public (no PII, works pre-auth)
+	repoUninstallPath = "/api/v1/repo/%s/uninstall"       // %s = repo_id
+	repoMergePath     = "/api/v1/repo/%s/merge"           // %s = repo_id
 	gitImportPath     = "/api/v1/teams/%s/context/import" // %s = team_id
 )
 
@@ -64,9 +64,9 @@ type RepoFingerprint struct {
 type RepoInitResponse struct {
 	RepoID           string `json:"repo_id"`
 	TeamID           string `json:"team_id"`
-	WebBaseURL       string `json:"web_base_url,omitempty"`       // web dashboard base URL (for enterprise endpoints)
-	ExistingRepoID   string `json:"existing_repo_id,omitempty"`   // set when dedup matched a different repo_id
-	DuplicateWarning string `json:"duplicate_warning,omitempty"`  // human-readable warning for CLI display
+	WebBaseURL       string `json:"web_base_url,omitempty"`      // web dashboard base URL (for enterprise endpoints)
+	ExistingRepoID   string `json:"existing_repo_id,omitempty"`  // set when dedup matched a different repo_id
+	DuplicateWarning string `json:"duplicate_warning,omitempty"` // human-readable warning for CLI display
 }
 
 // RepoUninstallRequest represents the POST /api/v1/repo/{repo_id}/uninstall request
@@ -81,8 +81,8 @@ type MergeRepoRequest struct {
 
 // MergeRepoResponse represents the merge API response
 type MergeRepoResponse struct {
-	Canonical string        `json:"canonical_repo_id"` // the winning repo_id
-	Merged    []string      `json:"merged_repo_ids"`   // repo_ids that were marked as merged
+	Canonical string        `json:"canonical_repo_id"`  // the winning repo_id
+	Merged    []string      `json:"merged_repo_ids"`    // repo_ids that were marked as merged
 	Redirect  *RedirectInfo `json:"redirect,omitempty"` // redirect info (also in header)
 }
 

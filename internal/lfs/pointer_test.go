@@ -279,8 +279,8 @@ func TestWritePointerFiles_PartialFailure(t *testing.T) {
 
 	// create a subdirectory that doesn't exist to trigger a write error
 	files := map[string]FileRef{
-		"good.jsonl":               {OID: "sha256:aaa", Size: 100},
-		"nonexistent/bad.jsonl":    {OID: "sha256:bbb", Size: 200},
+		"good.jsonl":            {OID: "sha256:aaa", Size: 100},
+		"nonexistent/bad.jsonl": {OID: "sha256:bbb", Size: 200},
 	}
 
 	paths, err := WritePointerFiles(dir, files)

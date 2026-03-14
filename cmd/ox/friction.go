@@ -3,62 +3,46 @@ package main
 import (
 	_ "embed"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/sageox/agentx"
+	friction "github.com/sageox/frictionax"
+	frictioncobra "github.com/sageox/frictionax/adapters/cobra"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
-	"github.com/sageox/ox/internal/uxfriction"
-	"github.com/sageox/ox/internal/uxfriction/adapters"
 	"github.com/spf13/cobra"
 )
 
 //go:embed default_catalog.json
 var defaultCatalogJSON []byte
 
-var (
-	frictionHandler *uxfriction.Handler
-	frictionCatalog *uxfriction.FrictionCatalog
-)
+var frictionEngine *friction.Friction
 
 // initFriction initializes the friction handling system.
 // Should be called after rootCmd is fully initialized.
 //
-// The catalog is loaded eagerly at startup for simplicity. The catalog is small
-// (typically <10KB) and loading is fast (<1ms). If catalog becomes large,
-// consider lazy loading on first error.
-//
 // Loading order:
 // 1. Embedded default catalog (bundled with CLI release)
-// 2. Cache file (user's cached catalog from server sync)
-//
-// The cache file can contain updated patterns from the server, but the embedded
-// default provides a baseline for offline/first-run scenarios.
+// 2. Cache file overlay (user's cached catalog from server sync, via WithCachePath)
 func initFriction(rootCmd *cobra.Command) {
-	// create catalog
-	frictionCatalog = uxfriction.NewFrictionCatalog()
+	adapter := frictioncobra.NewCobraAdapter(rootCmd)
 
-	// load embedded default catalog first (baseline patterns)
+	frictionEngine = friction.New(adapter,
+		friction.WithCatalog("ox"),
+		friction.WithCachePath(getCatalogCachePath()),
+		friction.WithActorDetector(&oxActorDetector{}),
+	)
+
+	// load embedded default catalog (baseline patterns for offline/first-run)
 	if len(defaultCatalogJSON) > 0 {
-		var defaultData uxfriction.CatalogData
-		if err := json.Unmarshal(defaultCatalogJSON, &defaultData); err == nil {
-			_ = frictionCatalog.Update(defaultData)
+		var data friction.CatalogData
+		if err := json.Unmarshal(defaultCatalogJSON, &data); err == nil {
+			_ = frictionEngine.UpdateCatalog(data)
 		}
 	}
-
-	// overlay with cache if available (may contain server updates)
-	if data, err := loadCatalogCache(); err == nil && data != nil {
-		_ = frictionCatalog.Update(*data)
-	}
-
-	// create Cobra adapter
-	adapter := adapters.NewCobraAdapter(rootCmd)
-
-	// create handler
-	frictionHandler = uxfriction.NewHandler(adapter, frictionCatalog)
 }
 
 // getCatalogCachePath returns the path to the friction catalog cache file.
@@ -66,7 +50,6 @@ func initFriction(rootCmd *cobra.Command) {
 func getCatalogCachePath() string {
 	cacheDir, err := os.UserCacheDir()
 	if err != nil {
-		// fallback to home directory
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
 			return ""
@@ -76,38 +59,26 @@ func getCatalogCachePath() string {
 	return filepath.Join(cacheDir, "sageox", "friction-catalog.json")
 }
 
-// loadCatalogCache reads and unmarshals the friction catalog from the cache file.
-// Returns nil, err if the file doesn't exist or is invalid.
-func loadCatalogCache() (*uxfriction.CatalogData, error) {
-	cachePath := getCatalogCachePath()
-	if cachePath == "" {
-		return nil, fmt.Errorf("could not determine cache path")
-	}
+// oxActorDetector uses agentx for agent detection in friction events.
+type oxActorDetector struct{}
 
-	data, err := os.ReadFile(cachePath)
-	if err != nil {
-		return nil, err
+func (oxActorDetector) DetectActor() (friction.Actor, string) {
+	if agentx.IsAgentContext() {
+		if a := agentx.CurrentAgent(); a != nil {
+			return friction.ActorAgent, string(a.Type())
+		}
+		return friction.ActorAgent, ""
 	}
-
-	var catalogData uxfriction.CatalogData
-	if err := json.Unmarshal(data, &catalogData); err != nil {
-		return nil, err
+	if os.Getenv("CI") != "" {
+		return friction.ActorAgent, "ci"
 	}
-
-	return &catalogData, nil
+	return friction.ActorHuman, ""
 }
 
-// Note: handleFriction was removed in favor of executeWithFrictionRecovery in main.go
-// which provides auto-execute support for high-confidence catalog matches.
-
-// sendFrictionEvent sends a friction event to the daemon for aggregation and upload.
-// The send is synchronous with a 5ms IPC timeout. On a local Unix socket, 5ms is
-// ample for connect+write. If the daemon is unreachable, we fail fast and lose the
-// event (acceptable per fire-and-forget principle).
-//
-// This avoids the race condition where a background goroutine gets killed by os.Exit()
-// before it can complete the IPC send.
-func sendFrictionEvent(event *uxfriction.FrictionEvent) {
+// sendFrictionEvent sends a friction event to the daemon via IPC for telemetry.
+// Fire-and-forget with a 5ms timeout — must complete synchronously so os.Exit()
+// after this call doesn't kill a background goroutine mid-flight.
+func sendFrictionEvent(event *friction.FrictionEvent) {
 	if event == nil {
 		return
 	}
@@ -126,7 +97,6 @@ func sendFrictionEvent(event *uxfriction.FrictionEvent) {
 
 	client := daemon.NewClientWithTimeout(5 * time.Millisecond)
 
-	// convert uxfriction event to daemon payload
 	payload := daemon.FrictionPayload{
 		Timestamp:  event.Timestamp,
 		Kind:       string(event.Kind),

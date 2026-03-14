@@ -170,7 +170,7 @@ func init() {
 	rootCmd.SilenceErrors = true
 	rootCmd.SilenceUsage = true
 
-	// disable Cobra's built-in suggestions - we use uxfriction for "did you mean?"
+	// disable Cobra's built-in suggestions - we use frictionax for "did you mean?"
 	rootCmd.DisableSuggestions = true
 
 	// hide completion command unless post-MVP features are enabled

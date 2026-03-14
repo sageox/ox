@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
@@ -34,7 +35,6 @@ import (
 	"github.com/sageox/ox/internal/tokens"
 	"github.com/sageox/ox/internal/ui"
 	"github.com/sageox/ox/internal/useragent"
-	"github.com/sageox/ox/pkg/agentx"
 	"github.com/spf13/cobra"
 )
 
@@ -162,9 +162,9 @@ type teamContextInfo struct {
 	Escalation string   `json:"escalation,omitempty"` // path to human escalation roster if exists
 
 	// Coworker customizations from coworkers/
-	CoworkerInstructions *teamCoworkerInstructions `json:"coworker_instructions,omitempty"`
-	Coworkers            []claude.Agent            `json:"coworkers,omitempty"`
-	CoworkerCommands     []claude.Command          `json:"coworker_commands,omitempty"`
+	CoworkerInstructions  *teamCoworkerInstructions `json:"coworker_instructions,omitempty"`
+	Coworkers             []claude.Agent            `json:"coworkers,omitempty"`
+	CoworkerCommands      []claude.Command          `json:"coworker_commands,omitempty"`
 	AgentsIndexPath       string                    `json:"agents_index_path,omitempty"`        // path to agents/index.md if exists
 	AgentsAgentsMDContent string                    `json:"agents_agents_md_content,omitempty"` // coworkers/agents/AGENTS.md content (first 200 lines)
 	CoworkerHint          string                    `json:"coworker_hint,omitempty"`            // hint for agents about available coworkers
@@ -182,11 +182,11 @@ type teamContextInfo struct {
 	TeamDocs []teamdocs.TeamDoc `json:"team_docs,omitempty"`
 
 	// v4 Team Memory
-	MemoryContent string   `json:"memory_content,omitempty"` // full MEMORY.md content (always inlined)
-	SoulHint      string   `json:"soul_hint,omitempty"`      // path to SOUL.md (reference, not inlined)
-	TeamHint      string   `json:"team_hint,omitempty"`      // path to TEAM.md (reference, not inlined)
-	MemoryDaily   []string `json:"memory_daily,omitempty"`   // available daily summary files
-	MemoryWeekly  []string `json:"memory_weekly,omitempty"`  // available weekly summary files
+	MemoryContent        string   `json:"memory_content,omitempty"`         // full MEMORY.md content (always inlined)
+	SoulHint             string   `json:"soul_hint,omitempty"`              // path to SOUL.md (reference, not inlined)
+	TeamHint             string   `json:"team_hint,omitempty"`              // path to TEAM.md (reference, not inlined)
+	MemoryDaily          []string `json:"memory_daily,omitempty"`           // available daily summary files
+	MemoryWeekly         []string `json:"memory_weekly,omitempty"`          // available weekly summary files
 	MemoryMonthly        []string `json:"memory_monthly,omitempty"`         // available monthly summary files
 	ObservationGuideHint string   `json:"observation_guide_hint,omitempty"` // path to memory/GUIDE.md (read when needed)
 
@@ -223,12 +223,12 @@ type teamCoworkerInstructions struct {
 
 // ProjectGuidance represents parsed AGENTS.md content from the project
 type ProjectGuidance struct {
-	Source     string `json:"source"`                    // path where AGENTS.md was found
-	Content    string `json:"content"`                   // raw content of AGENTS.md
-	Size       int    `json:"size"`                      // byte size of content
-	Tokens     int    `json:"tokens,omitempty"`          // estimated token count
-	Skipped    bool   `json:"skipped,omitempty"`         // true if content was not injected
-	SkipReason string `json:"skip_reason,omitempty"`     // why content was skipped
+	Source     string `json:"source"`                // path where AGENTS.md was found
+	Content    string `json:"content"`               // raw content of AGENTS.md
+	Size       int    `json:"size"`                  // byte size of content
+	Tokens     int    `json:"tokens,omitempty"`      // estimated token count
+	Skipped    bool   `json:"skipped,omitempty"`     // true if content was not injected
+	SkipReason string `json:"skip_reason,omitempty"` // why content was skipped
 }
 
 // TeamInstructions represents team-level instruction files (AGENTS.md / CLAUDE.md)

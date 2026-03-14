@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/paths"
-	"github.com/sageox/ox/pkg/agentx"
 )
 
 // SessionMarkerDir returns the per-user directory for session markers.
@@ -35,10 +35,10 @@ func SessionMarkerDir() string {
 //   - Hook context: agent_hook.go reads markers to pass agent state to handlers
 type SessionMarker struct {
 	AgentID        string    `json:"agent_id"`
-	SessionID      string    `json:"session_id,omitempty"`       // ox-generated server session ID
-	AgentSessionID string    `json:"agent_session_id"`           // coding agent's native session identifier
-	PrimedAt       time.Time `json:"primed_at"`                  // when session was primed
-	ParentPID      int       `json:"parent_pid,omitempty"`          // parent agent process ID
+	SessionID      string    `json:"session_id,omitempty"` // ox-generated server session ID
+	AgentSessionID string    `json:"agent_session_id"`     // coding agent's native session identifier
+	PrimedAt       time.Time `json:"primed_at"`            // when session was primed
+	ParentPID      int       `json:"parent_pid,omitempty"` // parent agent process ID
 }
 
 // AgentHookInput is an alias for agentx.HookInput.

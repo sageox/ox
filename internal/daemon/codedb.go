@@ -33,7 +33,7 @@ type CodeDBManager struct {
 	telemetry   *TelemetryCollector
 
 	mu        sync.Mutex
-	indexing   bool
+	indexing  bool
 	lastIndex time.Time
 	lastErr   error
 	stats     CodeDBStats
@@ -41,18 +41,18 @@ type CodeDBManager struct {
 
 // CodeDBStats tracks index statistics.
 type CodeDBStats struct {
-	Commits     int       `json:"commits"`
-	Blobs       int       `json:"blobs"`
-	Symbols     int       `json:"symbols"`
-	Comments    int       `json:"comments"`
-	PRs         int       `json:"prs"`
-	Issues      int       `json:"issues"`
+	Commits     int         `json:"commits"`
+	Blobs       int         `json:"blobs"`
+	Symbols     int         `json:"symbols"`
+	Comments    int         `json:"comments"`
+	PRs         int         `json:"prs"`
+	Issues      int         `json:"issues"`
 	Repos       []RepoStats `json:"repos,omitempty"`
-	LastIndexed time.Time `json:"last_indexed,omitempty"`
-	IndexingNow bool      `json:"indexing_now"`
-	LastError   string    `json:"last_error,omitempty"`
-	DataDir     string    `json:"data_dir"`
-	IndexExists bool      `json:"index_exists"`
+	LastIndexed time.Time   `json:"last_indexed,omitempty"`
+	IndexingNow bool        `json:"indexing_now"`
+	LastError   string      `json:"last_error,omitempty"`
+	DataDir     string      `json:"data_dir"`
+	IndexExists bool        `json:"index_exists"`
 }
 
 // RepoStats tracks per-repo statistics within the index.

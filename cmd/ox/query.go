@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/agentinstance"
-	"github.com/sageox/ox/pkg/agentx"
 	"github.com/spf13/cobra"
 )
 

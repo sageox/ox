@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	lipgloss "charm.land/lipgloss/v2"
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/ui"
-	"github.com/sageox/ox/pkg/agentx"
 )
 
 // checkAgentFileExists checks if any agent instruction file exists

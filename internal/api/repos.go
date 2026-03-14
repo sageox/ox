@@ -104,12 +104,12 @@ type RepoDetailLedger struct {
 
 // RepoDetailTeamContext is a team context in the repo detail response.
 type RepoDetailTeamContext struct {
-	TeamID      string `json:"team_id"`               // team_xxx
-	Name        string `json:"name"`                  // display name
-	Slug        string `json:"slug,omitempty"`         // kebab-case team slug
-	Visibility  string `json:"visibility"`            // "public" or "private"
-	AccessLevel string `json:"access_level"`          // "member" or "viewer"
-	RepoURL     string `json:"repo_url"`              // git clone URL
+	TeamID      string `json:"team_id"`        // team_xxx
+	Name        string `json:"name"`           // display name
+	Slug        string `json:"slug,omitempty"` // kebab-case team slug
+	Visibility  string `json:"visibility"`     // "public" or "private"
+	AccessLevel string `json:"access_level"`   // "member" or "viewer"
+	RepoURL     string `json:"repo_url"`       // git clone URL
 }
 
 // StableID returns the stable team identifier (team_xxx) for path construction and lookups.

@@ -147,16 +147,16 @@ type Daemon struct {
 	wg     sync.WaitGroup
 
 	// components
-	server      *Server
-	scheduler   *SyncScheduler
-	watcher     *Watcher
-	heartbeat   *HeartbeatHandler
-	telemetry   *TelemetryCollector
-	friction    *FrictionCollector
-	issues      *IssueTracker
-	codedb      *CodeDBManager
-	agentWorker    *agentwork.Manager
-	notifications  *NotificationStore
+	server        *Server
+	scheduler     *SyncScheduler
+	watcher       *Watcher
+	heartbeat     *HeartbeatHandler
+	telemetry     *TelemetryCollector
+	friction      *FrictionCollector
+	issues        *IssueTracker
+	codedb        *CodeDBManager
+	agentWorker   *agentwork.Manager
+	notifications *NotificationStore
 
 	// state
 	mu           sync.Mutex
@@ -448,14 +448,14 @@ func (d *Daemon) Start() error {
 						wsType = "team-context"
 					}
 					workspaces[wsType] = append(workspaces[wsType], WorkspaceSyncStatus{
-						ID:       ws.ID,
-						Type:     wsType,
-						Path:     ws.Path,
-						CloneURL: ws.CloneURL,
-						Exists:   ws.Exists,
-						TeamID:   ws.TeamID,
-						TeamName: ws.TeamName,
-						TeamSlug: ws.TeamSlug,
+						ID:             ws.ID,
+						Type:           wsType,
+						Path:           ws.Path,
+						CloneURL:       ws.CloneURL,
+						Exists:         ws.Exists,
+						TeamID:         ws.TeamID,
+						TeamName:       ws.TeamName,
+						TeamSlug:       ws.TeamSlug,
 						LastSync:       ws.ConfigLastSync,
 						LastErr:        ws.LastErr,
 						Syncing:        ws.SyncInProgress,
@@ -466,27 +466,27 @@ func (d *Daemon) Start() error {
 			}
 
 			return &StatusData{
-				Running:           true,
-				Pid:               os.Getpid(),
-				Version:           version.Version,
-				Uptime:            time.Since(d.server.startTime),
-				WorkspacePath:     workspacePath,
-				LedgerPath:        d.config.LedgerPath,
-				LastSync:          d.scheduler.LastSync(),
-				SyncIntervalRead:  d.config.SyncIntervalRead,
-				RecentErrorCount:  d.scheduler.RecentErrorCount(),
-				LastError:         lastErr,
-				LastErrorTime:     lastErrTimeStr,
-				TotalSyncs:        stats.TotalSyncs,
-				SyncsLastHour:     stats.SyncsLastHour,
-				AvgSyncTime:       stats.AvgDuration,
-				Workspaces:        workspaces,
-				ProjectTeamID:     projectTeamID,
-				TeamContexts:      d.scheduler.TeamContextStatus(),
-				InactivityTimeout: d.config.InactivityTimeout,
-				TimeSinceActivity: d.timeSinceLastActivity(),
-				Activity:          activitySummary,
-				AuthenticatedUser: authUser,
+				Running:            true,
+				Pid:                os.Getpid(),
+				Version:            version.Version,
+				Uptime:             time.Since(d.server.startTime),
+				WorkspacePath:      workspacePath,
+				LedgerPath:         d.config.LedgerPath,
+				LastSync:           d.scheduler.LastSync(),
+				SyncIntervalRead:   d.config.SyncIntervalRead,
+				RecentErrorCount:   d.scheduler.RecentErrorCount(),
+				LastError:          lastErr,
+				LastErrorTime:      lastErrTimeStr,
+				TotalSyncs:         stats.TotalSyncs,
+				SyncsLastHour:      stats.SyncsLastHour,
+				AvgSyncTime:        stats.AvgDuration,
+				Workspaces:         workspaces,
+				ProjectTeamID:      projectTeamID,
+				TeamContexts:       d.scheduler.TeamContextStatus(),
+				InactivityTimeout:  d.config.InactivityTimeout,
+				TimeSinceActivity:  d.timeSinceLastActivity(),
+				Activity:           activitySummary,
+				AuthenticatedUser:  authUser,
 				NeedsHelp:          needsHelp,
 				Issues:             issues,
 				StartupDurationMs:  d.startupDurationMs.Load(),

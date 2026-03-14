@@ -205,7 +205,7 @@ func TestBackgroundTickerPlusManualSyncRace(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.LedgerPath = ledgerDir
 	cfg.SyncIntervalRead = 50 * time.Millisecond // fast ticks to maximize race window
-	cfg.TeamContextSyncInterval = 0               // disable team context sync
+	cfg.TeamContextSyncInterval = 0              // disable team context sync
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	scheduler := NewSyncScheduler(cfg, logger)
 

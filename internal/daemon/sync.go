@@ -22,10 +22,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
-	"net/url"
 	"io"
 	"io/fs"
+	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -264,8 +264,8 @@ type SyncScheduler struct {
 	triggerChan chan struct{}
 
 	// worker pool for bounded clone concurrency
-	cloneSem      chan struct{} // semaphore limiting concurrent clones
-	cloneInFlight sync.Map      // tracks workspace IDs with clone in progress (dedup)
+	cloneSem      chan struct{}  // semaphore limiting concurrent clones
+	cloneInFlight sync.Map       // tracks workspace IDs with clone in progress (dedup)
 	cloneWg       sync.WaitGroup // tracks in-flight background clone goroutines
 
 	// lifecycle context — canceled when scheduler stops
@@ -278,8 +278,8 @@ type SyncScheduler struct {
 	syncStateLocks sync.Map // map[string]*sync.Mutex
 
 	// test hooks (nil in production)
-	onBeforeCloneSem         func()        // called just before acquiring cloneSem; tests use this to observe blocking
-	cloneSemTimeoutOverride  time.Duration // override cloneSemTimeout for tests (0 = use default)
+	onBeforeCloneSem        func()        // called just before acquiring cloneSem; tests use this to observe blocking
+	cloneSemTimeoutOverride time.Duration // override cloneSemTimeout for tests (0 = use default)
 
 	// callbacks
 	onActivity   func()                                                           // called on any sync activity
@@ -311,8 +311,8 @@ type syncError struct {
 // SyncEvent tracks a successful sync with metadata.
 type SyncEvent struct {
 	Time         time.Time     `json:"time"`
-	Type         string        `json:"type"`                    // "pull", "push", "full", "team_context"
-	WorkspaceID  string        `json:"workspace_id,omitempty"`  // workspace that was synced (e.g., "ledger", team_id)
+	Type         string        `json:"type"`                   // "pull", "push", "full", "team_context"
+	WorkspaceID  string        `json:"workspace_id,omitempty"` // workspace that was synced (e.g., "ledger", team_id)
 	Duration     time.Duration `json:"duration"`
 	FilesChanged int           `json:"files_changed"`
 }
@@ -2516,7 +2516,6 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 
 	atomic.StoreInt32(&s.gcInProgress, 0)
 }
-
 
 // TriggerGC forces a GC reclone of all eligible team contexts, bypassing the interval check.
 // Returns immediately if GC is already in progress. Runs synchronously.

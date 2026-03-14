@@ -1176,7 +1176,7 @@ func TestBlueGreenGC_OldStyleFullClone(t *testing.T) {
 	extraFiles := map[string]string{
 		"src/main.go":      "package main\n",
 		"assets/big.bin":   "binary stuff",
-		"docs/readme.md":  "# docs\n",
+		"docs/readme.md":   "# docs\n",
 		"coworkers/bob.md": "# bob\n",
 	}
 	bareDir := setupTeamContextBareRepo(t, manifest, extraFiles)

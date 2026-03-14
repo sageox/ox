@@ -146,10 +146,10 @@ func TestParseQueryArgs_Source(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		args        []string
-		wantSource  string
-		wantErr     string // substring match; empty means no error
+		name       string
+		args       []string
+		wantSource string
+		wantErr    string // substring match; empty means no error
 	}{
 		{
 			name:       "default source is team",

@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/ui"
-	"github.com/sageox/ox/pkg/agentx"
 )
 
 func init() {

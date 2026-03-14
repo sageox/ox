@@ -8,10 +8,10 @@ import (
 
 func TestParseSlogLine(t *testing.T) {
 	tests := []struct {
-		name    string
-		line    string
-		want    SlogLine
-		wantOK  bool
+		name   string
+		line   string
+		want   SlogLine
+		wantOK bool
 	}{
 		{
 			name: "info with quoted msg",

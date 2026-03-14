@@ -1798,8 +1798,8 @@ func TestExponentialBackoff(t *testing.T) {
 		{3, 4 * time.Minute},
 		{4, 8 * time.Minute},
 		{5, 16 * time.Minute},
-		{6, 30 * time.Minute}, // 32min capped to 30
-		{7, 30 * time.Minute}, // still capped
+		{6, 30 * time.Minute},   // 32min capped to 30
+		{7, 30 * time.Minute},   // still capped
 		{100, 30 * time.Minute}, // extreme value, still capped
 	}
 	for _, tt := range tests {

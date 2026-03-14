@@ -32,10 +32,10 @@ func TestIdempotentPrimeOnStartup(t *testing.T) {
 		agentID := "OxTest"
 		sessionID := "oxsid_test123"
 		newMarker := &SessionMarker{
-			AgentID:         agentID,
-			SessionID:       sessionID,
+			AgentID:        agentID,
+			SessionID:      sessionID,
 			AgentSessionID: agentSessionID,
-			PrimedAt:        time.Now(),
+			PrimedAt:       time.Now(),
 		}
 		err = WriteSessionMarker(newMarker)
 		require.NoError(t, err)
@@ -92,10 +92,10 @@ func TestAgentIDPreservedAfterClear(t *testing.T) {
 	t.Run("initial prime creates marker with agent_id", func(t *testing.T) {
 		// simulate SessionStart:startup hook
 		marker := &SessionMarker{
-			AgentID:         originalAgentID,
-			SessionID:       originalSessionID,
+			AgentID:        originalAgentID,
+			SessionID:      originalSessionID,
 			AgentSessionID: agentSessionID,
-			PrimedAt:        time.Now(),
+			PrimedAt:       time.Now(),
 		}
 		err := WriteSessionMarker(marker)
 		require.NoError(t, err)
@@ -137,10 +137,10 @@ func TestAgentIDPreservedAfterClear(t *testing.T) {
 
 		// update marker with new prime time (but same agent_id)
 		newMarker := &SessionMarker{
-			AgentID:         agentID,
-			SessionID:       "oxsid_clear_reprime",
+			AgentID:        agentID,
+			SessionID:      "oxsid_clear_reprime",
 			AgentSessionID: agentSessionID,
-			PrimedAt:        time.Now(),
+			PrimedAt:       time.Now(),
 		}
 		err = WriteSessionMarker(newMarker)
 		require.NoError(t, err)
@@ -165,10 +165,10 @@ func TestAgentIDPreservedAfterCompact(t *testing.T) {
 	t.Run("initial prime and compact preserves agent_id", func(t *testing.T) {
 		// initial prime
 		marker := &SessionMarker{
-			AgentID:         originalAgentID,
-			SessionID:       "oxsid_compact1",
+			AgentID:        originalAgentID,
+			SessionID:      "oxsid_compact1",
 			AgentSessionID: agentSessionID,
-			PrimedAt:        time.Now(),
+			PrimedAt:       time.Now(),
 		}
 		err := WriteSessionMarker(marker)
 		require.NoError(t, err)
@@ -200,20 +200,20 @@ func TestMultipleSessionsHaveIndependentMarkers(t *testing.T) {
 	t.Run("different sessions have different agent_ids", func(t *testing.T) {
 		// session 1 gets primed
 		marker1 := &SessionMarker{
-			AgentID:         "OxSess1",
-			SessionID:       "oxsid_sess1",
+			AgentID:        "OxSess1",
+			SessionID:      "oxsid_sess1",
 			AgentSessionID: session1,
-			PrimedAt:        time.Now(),
+			PrimedAt:       time.Now(),
 		}
 		err := WriteSessionMarker(marker1)
 		require.NoError(t, err)
 
 		// session 2 gets primed (different agent_id)
 		marker2 := &SessionMarker{
-			AgentID:         "OxSess2",
-			SessionID:       "oxsid_sess2",
+			AgentID:        "OxSess2",
+			SessionID:      "oxsid_sess2",
 			AgentSessionID: session2,
-			PrimedAt:        time.Now(),
+			PrimedAt:       time.Now(),
 		}
 		err = WriteSessionMarker(marker2)
 		require.NoError(t, err)
@@ -284,9 +284,9 @@ func TestHookBehaviorMatrix(t *testing.T) {
 
 		// write marker
 		newMarker := &SessionMarker{
-			AgentID:         agentIDUsed,
+			AgentID:        agentIDUsed,
 			AgentSessionID: agentSessionID,
-			PrimedAt:        time.Now(),
+			PrimedAt:       time.Now(),
 		}
 		_ = WriteSessionMarker(newMarker)
 
@@ -342,7 +342,7 @@ func TestGracefulMarkerFailure(t *testing.T) {
 		// we can't easily test unwritable paths without modifying permissions
 		// but we verify the error handling exists
 		marker := &SessionMarker{
-			AgentID:         "OxFail",
+			AgentID:        "OxFail",
 			AgentSessionID: "", // empty session ID should be handled
 		}
 		err := WriteSessionMarker(marker)

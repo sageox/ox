@@ -987,15 +987,15 @@ func TestConcurrentAgentRecording(t *testing.T) {
 
 	// both agents start recording
 	stateA, err := StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentA,
-		AdapterName:     "claude-code",
+		AgentID:     agentA,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, stateA)
 
 	stateB, err := StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentB,
-		AdapterName:     "claude-code",
+		AgentID:     agentB,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, stateB)
@@ -1018,14 +1018,14 @@ func TestConcurrentAgentStop(t *testing.T) {
 	agentB := "OxAgentB"
 
 	_, err := StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentA,
-		AdapterName:     "claude-code",
+		AgentID:     agentA,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 
 	_, err = StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentB,
-		AdapterName:     "claude-code",
+		AgentID:     agentB,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 
@@ -1045,14 +1045,14 @@ func TestConcurrentAgentClear(t *testing.T) {
 	agentB := "OxAgentB"
 
 	_, err := StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentA,
-		AdapterName:     "claude-code",
+		AgentID:     agentA,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 
 	_, err = StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentB,
-		AdapterName:     "claude-code",
+		AgentID:     agentB,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 
@@ -1071,14 +1071,14 @@ func TestUpdateRecordingStateForAgent_Isolation(t *testing.T) {
 	agentB := "OxAgentB"
 
 	_, err := StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentA,
-		AdapterName:     "claude-code",
+		AgentID:     agentA,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 
 	_, err = StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentB,
-		AdapterName:     "claude-code",
+		AgentID:     agentB,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 

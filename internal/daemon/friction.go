@@ -1,58 +1,33 @@
 package daemon
 
 import (
-	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/uxfriction"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
+
+	friction "github.com/sageox/frictionax"
 )
 
 const (
-	// frictionBufferSize is the max number of events in the ring buffer.
-	// Matches MaxEventsPerRequest (100) so a full buffer can be sent in one request.
-	frictionBufferSize = 100
-
-	// frictionFlushInterval is the default interval between flush attempts.
-	// 15 minutes is appropriate because friction events are rare (typos/unknown
-	// commands), and we don't want to generate unnecessary traffic. The daemon
-	// also flushes on shutdown, and the batch threshold handles burst scenarios.
-	frictionFlushInterval = 15 * time.Minute
-
-	// frictionBatchThreshold triggers early flush when buffer reaches this count.
-	frictionBatchThreshold = 20
-
-	// frictionFlushCooldown is the minimum interval between any two flush operations.
-	// Prevents thundering herd: without this, every Record() call above the batch
-	// threshold spawns a new flush goroutine, creating unbounded HTTP POSTs under
-	// rapid input (e.g., a runaway client generating unique args in a loop).
-	frictionFlushCooldown = 15 * time.Minute
-
 	// frictionDefaultEndpoint is the fallback friction API endpoint when no project
 	// endpoint is configured. Matches endpoint.Default.
 	frictionDefaultEndpoint = "https://sageox.ai"
 )
 
 // FrictionCollector manages friction event buffering and transmission to the cloud.
-// It uses a ring buffer for bounded memory usage (no unbounded growth even if backend
-// is unavailable) and respects server-controlled rate limiting via X-SageOx-Sample-Rate
-// and Retry-After headers.
+// It delegates to a frictionax.Friction instance which handles the ring buffer,
+// background flush loop, rate limiting, and catalog caching internally.
 type FrictionCollector struct {
 	mu           sync.Mutex
-	buffer       *uxfriction.RingBuffer
-	client       *uxfriction.Client
-	catalogCache *CatalogCache
-	throttle     *FlushThrottle
-
+	engine       *friction.Friction
 	enabled      bool
-	shutdown     chan struct{}
-	stopped      sync.Once
-	wg           sync.WaitGroup
 	logger       *slog.Logger
 	getAuthToken func() string
 }
@@ -76,29 +51,37 @@ func NewFrictionCollector(logger *slog.Logger, projectEndpoint string) *Friction
 	}
 
 	fc := &FrictionCollector{
-		buffer:       uxfriction.NewRingBuffer(frictionBufferSize),
-		catalogCache: NewCatalogCache(),
-		throttle:     NewFlushThrottle(frictionFlushCooldown),
-		enabled:      enabled,
-		shutdown:     make(chan struct{}),
-		logger:       logger,
+		enabled: enabled,
+		logger:  logger,
 	}
 
-	// AuthFunc calls through to fc.getAuthToken, which is wired later via
-	// SetAuthTokenGetter. This lazy indirection lets us create the collector
-	// before the heartbeat handler is ready.
-	fc.client = uxfriction.NewClient(uxfriction.ClientConfig{
-		Endpoint: ep,
-		Version:  version.Version,
-		AuthFunc: func() string {
+	fc.engine = friction.New(nil, // nil adapter: daemon only records events, never parses CLI errors
+		friction.WithCatalog("ox"),
+		friction.WithTelemetry(ep, version.Version),
+		friction.WithAuth(func() string {
 			if fc.getAuthToken != nil {
 				return fc.getAuthToken()
 			}
 			return ""
-		},
-	})
+		}),
+		friction.WithCachePath(catalogCacheFile()),
+		friction.WithRequestDecorator(func(r *http.Request) {
+			r.Header.Set("User-Agent", useragent.DaemonString())
+		}),
+		friction.WithIsEnabled(func() bool { return isFrictionEnabled() }),
+		friction.WithLogger(logger),
+	)
 
 	return fc
+}
+
+// catalogCacheFile returns the path to the catalog cache file.
+func catalogCacheFile() string {
+	cacheDir, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return cacheDir + "/sageox/friction-catalog.json"
 }
 
 // SetAuthTokenGetter sets the callback to get auth token from heartbeat cache.
@@ -111,15 +94,12 @@ func (f *FrictionCollector) SetAuthTokenGetter(cb func() string) {
 
 // isFrictionEnabled checks if friction telemetry should be collected.
 func isFrictionEnabled() bool {
-	// standard opt-out
 	if os.Getenv("DO_NOT_TRACK") == "1" {
 		return false
 	}
-	// sageox-specific opt-out for friction
 	if strings.ToLower(os.Getenv("SAGEOX_FRICTION")) == "false" {
 		return false
 	}
-	// check user config for telemetry setting (friction piggybacks on this)
 	if cfg, err := config.LoadUserConfig(); err == nil {
 		return cfg.IsTelemetryEnabled()
 	}
@@ -127,41 +107,25 @@ func isFrictionEnabled() bool {
 }
 
 // Start begins background processing of friction events.
-// Also loads any cached catalog from disk.
+// frictionax starts its background sender automatically in New(), so this
+// is retained for API compatibility but is effectively a no-op.
 func (f *FrictionCollector) Start() {
-	if !f.enabled {
-		return
-	}
-
-	// load cached catalog
-	if err := f.catalogCache.Load(); err != nil {
-		f.logger.Debug("failed to load catalog cache", "error", err)
-	} else if v := f.catalogCache.Version(); v != "" {
-		f.logger.Debug("loaded catalog cache", "version", v)
-	}
-
-	f.wg.Add(1)
-	go f.backgroundSender()
+	// frictionax collector is started automatically during New()
 }
 
 // Stop gracefully shuts down the friction collector.
 // Performs a final flush before returning. Safe to call multiple times.
 func (f *FrictionCollector) Stop() {
-	if !f.enabled {
-		return
+	if f.engine != nil {
+		f.engine.Close()
 	}
-
-	f.stopped.Do(func() {
-		close(f.shutdown)
-	})
-	f.wg.Wait()
 }
 
 // RecordFromIPC adds a friction event from an IPC payload.
 func (f *FrictionCollector) RecordFromIPC(payload FrictionPayload) {
-	event := uxfriction.FrictionEvent{
+	event := friction.FrictionEvent{
 		Timestamp:  payload.Timestamp,
-		Kind:       uxfriction.FailureKind(payload.Kind),
+		Kind:       friction.FailureKind(payload.Kind),
 		Command:    payload.Command,
 		Subcommand: payload.Subcommand,
 		Actor:      payload.Actor,
@@ -175,97 +139,16 @@ func (f *FrictionCollector) RecordFromIPC(payload FrictionPayload) {
 
 // Record adds a friction event to the buffer.
 // This is non-blocking and safe for concurrent use.
-// Events are silently dropped if the buffer is full (ring buffer overwrites oldest).
-func (f *FrictionCollector) Record(event uxfriction.FrictionEvent) {
-	if !f.enabled {
+func (f *FrictionCollector) Record(event friction.FrictionEvent) {
+	if !f.enabled || f.engine == nil {
 		return
 	}
 
-	// ensure timestamp is set
 	if event.Timestamp == "" {
 		event.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
 
-	// truncate fields to max length
-	event.Truncate()
-
-	f.buffer.Add(event)
-
-	// trigger early flush if threshold reached AND cooldown has elapsed
-	if f.buffer.Count() >= frictionBatchThreshold && f.throttle.TryFlush() {
-		select {
-		case <-f.shutdown:
-			// don't trigger if shutting down
-		default:
-			go f.flush()
-		}
-	}
-}
-
-// backgroundSender periodically flushes events to the server.
-func (f *FrictionCollector) backgroundSender() {
-	defer f.wg.Done()
-
-	ticker := time.NewTicker(frictionFlushInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			f.flush()
-
-		case <-f.shutdown:
-			f.flush() // final flush
-			return
-		}
-	}
-}
-
-// flush sends buffered events to the server.
-func (f *FrictionCollector) flush() {
-	// check if we should send based on rate limiting
-	if !f.client.ShouldSend() {
-		f.logger.Debug("friction flush skipped due to rate limiting",
-			"sample_rate", f.client.SampleRate(),
-			"retry_after", f.client.RetryAfter())
-		return
-	}
-
-	events := f.buffer.Drain()
-	if len(events) == 0 {
-		return
-	}
-
-	// record flush time to enforce cooldown in Record()
-	// only reset when actually sending to avoid empty ticker flushes consuming the window
-	f.throttle.RecordFlush()
-
-	// submit events
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	opts := &uxfriction.SubmitOptions{
-		CatalogVersion: f.catalogCache.Version(),
-	}
-
-	resp, err := f.client.Submit(ctx, events, opts)
-	if err != nil {
-		f.logger.Debug("friction submit failed", "error", err, "events", len(events))
-		return // best effort - silently discard on error
-	}
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		f.logger.Debug("friction events sent", "events", len(events), "status", resp.StatusCode)
-
-		// update catalog cache if response contains new catalog data
-		if resp.Catalog != nil {
-			if _, err := f.catalogCache.Update(resp.Catalog); err != nil {
-				f.logger.Debug("failed to update catalog cache", "error", err)
-			}
-		}
-	} else {
-		f.logger.Debug("friction submit returned non-success", "events", len(events), "status", resp.StatusCode)
-	}
+	f.engine.Record(event)
 }
 
 // IsEnabled returns whether friction collection is enabled.
@@ -273,42 +156,26 @@ func (f *FrictionCollector) IsEnabled() bool {
 	return f.enabled
 }
 
-// CatalogVersion returns the current cached catalog version.
-// Returns empty string if no catalog is cached.
-func (f *FrictionCollector) CatalogVersion() string {
-	return f.catalogCache.Version()
-}
-
-// CatalogData returns the current cached catalog data.
-// Returns nil if no catalog is cached.
-func (f *FrictionCollector) CatalogData() *uxfriction.CatalogData {
-	return f.catalogCache.Data()
-}
-
-// UpdateCatalog updates the catalog cache with new data.
-// Returns true if the catalog was updated (version changed).
-func (f *FrictionCollector) UpdateCatalog(catalog *uxfriction.CatalogData) (bool, error) {
-	return f.catalogCache.Update(catalog)
-}
-
 // Stats returns current friction stats for status display.
 func (f *FrictionCollector) Stats() FrictionStats {
+	if f.engine == nil {
+		return FrictionStats{Enabled: f.enabled}
+	}
+	s := f.engine.Stats()
 	return FrictionStats{
 		Enabled:        f.enabled,
-		BufferCount:    f.buffer.Count(),
-		BufferSize:     frictionBufferSize,
-		SampleRate:     f.client.SampleRate(),
-		RetryAfter:     f.client.RetryAfter(),
-		CatalogVersion: f.catalogCache.Version(),
+		BufferCount:    s.BufferCount,
+		BufferSize:     s.BufferSize,
+		SampleRate:     s.SampleRate,
+		CatalogVersion: s.CatalogVersion,
 	}
 }
 
 // FrictionStats holds friction statistics for status display.
 type FrictionStats struct {
-	Enabled        bool      `json:"enabled"`
-	BufferCount    int       `json:"buffer_count"`
-	BufferSize     int       `json:"buffer_size"`
-	SampleRate     float64   `json:"sample_rate"`
-	RetryAfter     time.Time `json:"retry_after"`
-	CatalogVersion string    `json:"catalog_version,omitempty"`
+	Enabled        bool    `json:"enabled"`
+	BufferCount    int     `json:"buffer_count"`
+	BufferSize     int     `json:"buffer_size"`
+	SampleRate     float64 `json:"sample_rate"`
+	CatalogVersion string  `json:"catalog_version,omitempty"`
 }

@@ -99,4 +99,3 @@ func runAgentSessionAbort(inst *agentinstance.Instance, cmd *cobra.Command) erro
 	fmt.Println(string(jsonOut))
 	return nil
 }
-

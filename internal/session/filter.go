@@ -46,4 +46,3 @@ func IsNoiseCommand(cmd string) bool {
 	}
 	return false
 }
-

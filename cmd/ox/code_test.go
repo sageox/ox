@@ -35,9 +35,9 @@ func TestFormatIndexTiming(t *testing.T) {
 			want: "total 1s: index 1s, symbols <1s, comments <1s",
 		},
 		{
-			name: "all zeros",
+			name:   "all zeros",
 			result: &daemon.CodeIndexResult{},
-			want: "total <1s: index <1s, symbols <1s, comments <1s",
+			want:   "total <1s: index <1s, symbols <1s, comments <1s",
 		},
 		{
 			name: "large repo with minutes",

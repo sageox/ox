@@ -11,10 +11,10 @@ import (
 
 // WorkItem represents a unit of background agent work.
 type WorkItem struct {
-	ID        string    // UUIDv7
-	Type      string    // e.g. "session-finalize"
-	Priority  int       // lower = higher priority
-	Payload   any       // type-specific data
+	ID        string // UUIDv7
+	Type      string // e.g. "session-finalize"
+	Priority  int    // lower = higher priority
+	Payload   any    // type-specific data
 	CreatedAt time.Time
 	Attempts  int
 	LastErr   string

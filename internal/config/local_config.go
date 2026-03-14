@@ -40,7 +40,7 @@ const (
 // FUTURE: Consider replacing this with a user-level file if we move to a single
 // global daemon, which would eliminate the multi-writer locking problem.
 type LocalConfig struct {
-	Ledger       *LedgerConfig `toml:"ledger,omitempty"`
+	Ledger *LedgerConfig `toml:"ledger,omitempty"`
 	// TeamContexts lists all teams for this user — use FindRepoTeamContext() to get the repo's own team.
 	TeamContexts []TeamContext `toml:"team_contexts,omitempty"`
 }

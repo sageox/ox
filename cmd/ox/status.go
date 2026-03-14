@@ -67,10 +67,10 @@ type statusConfigJSON struct {
 }
 
 type statusProjectJSON struct {
-	Initialized bool                  `json:"initialized"`
-	Directory   string                `json:"directory"`
-	ConfigPath  string                `json:"config_path,omitempty"`
-	CodeIndex   *statusCodeIndexJSON  `json:"code_index,omitempty"`
+	Initialized bool                 `json:"initialized"`
+	Directory   string               `json:"directory"`
+	ConfigPath  string               `json:"config_path,omitempty"`
+	CodeIndex   *statusCodeIndexJSON `json:"code_index,omitempty"`
 }
 
 type statusCodeIndexJSON struct {

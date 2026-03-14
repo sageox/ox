@@ -504,10 +504,10 @@ func formatWSStatus(ws WorkspaceSyncStatus) string {
 // formatGCStatus renders GC timing suffix for team context items.
 // Leads with the actionable info: when the next GC will happen.
 //
-//   Default:  "· gc in 4d"              (countdown to next reclone)
-//   Verbose:  "· gc in 4d (last 3d ago)" (countdown + history)
-//   Overdue:  "· gc due"                (interval exceeded, runs on next hourly check)
-//   Never:    "· gc due"                (first GC, runs on next hourly check)
+//	Default:  "· gc in 4d"              (countdown to next reclone)
+//	Verbose:  "· gc in 4d (last 3d ago)" (countdown + history)
+//	Overdue:  "· gc due"                (interval exceeded, runs on next hourly check)
+//	Never:    "· gc due"                (first GC, runs on next hourly check)
 func formatGCStatus(ws WorkspaceSyncStatus, verbose bool) string {
 	if ws.LastGCTime.IsZero() {
 		// GC has never run — will trigger on the next hourly check cycle

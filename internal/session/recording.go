@@ -38,7 +38,7 @@ type RecordingState struct {
 	EntryCount       int       `json:"entry_count"`
 	LastReminderSeq  int       `json:"last_reminder_seq"`
 	ReminderInterval int       `json:"reminder_interval"`
-	FilterMode       string    `json:"filter_mode,omitempty"` // "infra" or "all" - controls event filtering
+	FilterMode       string    `json:"filter_mode,omitempty"`    // "infra" or "all" - controls event filtering
 	WorkspacePath    string    `json:"workspace_path,omitempty"` // git root / project directory
 	Branch           string    `json:"branch,omitempty"`         // git branch at recording start
 
@@ -48,10 +48,10 @@ type RecordingState struct {
 	ParentSessionPath string `json:"parent_session_path,omitempty"` // path to parent's session folder
 	ParentAgentID     string `json:"parent_agent_id,omitempty"`     // parent's agent ID (e.g., "Oxa7b3")
 
-	AgentType      string `json:"agent_type,omitempty"`       // original agent type for metadata: "codex", "amp", etc. Falls back to AdapterName if empty.
-	StopIncomplete bool   `json:"stop_incomplete,omitempty"`  // set when stop returned retry guidance (empty file)
-	Model          string `json:"model,omitempty"`            // LLM model for generic adapters where ReadMetadata returns nil
-	ParentPID      int    `json:"parent_pid,omitempty"`           // parent agent process ID for liveness detection
+	AgentType      string `json:"agent_type,omitempty"`      // original agent type for metadata: "codex", "amp", etc. Falls back to AdapterName if empty.
+	StopIncomplete bool   `json:"stop_incomplete,omitempty"` // set when stop returned retry guidance (empty file)
+	Model          string `json:"model,omitempty"`           // LLM model for generic adapters where ReadMetadata returns nil
+	ParentPID      int    `json:"parent_pid,omitempty"`      // parent agent process ID for liveness detection
 	SourceOffset   int64  `json:"source_offset,omitempty"`   // byte offset in source file for incremental reading
 }
 

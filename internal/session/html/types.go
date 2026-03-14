@@ -90,8 +90,8 @@ type MetadataView struct {
 type StatsView struct {
 	TotalMessages int
 	UserMessages  int
-	ToolMessages  int    // count of tool call entries
-	FilesChanged  int    // count of distinct files modified
+	ToolMessages  int // count of tool call entries
+	FilesChanged  int // count of distinct files modified
 }
 
 // WorkBlockView groups consecutive tool/system calls between conversation turns.
@@ -123,7 +123,7 @@ type ChapterView struct {
 // Exactly one of Message or WorkBlock is non-nil.
 type ChapterItem struct {
 	IsWorkBlock bool
-	Message     *MessageView  // non-nil for conversation messages
+	Message     *MessageView   // non-nil for conversation messages
 	WorkBlock   *WorkBlockView // non-nil for grouped tool/system blocks
 }
 

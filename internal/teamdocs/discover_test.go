@@ -49,10 +49,10 @@ func TestDiscoverDocs(t *testing.T) {
 		{
 			name: "non-md files ignored",
 			files: map[string]string{
-				"guide.md":   "# Guide\nContent.",
-				"image.png":  "binary data",
-				"data.json":  `{"key": "value"}`,
-				"notes.txt":  "some notes",
+				"guide.md":  "# Guide\nContent.",
+				"image.png": "binary data",
+				"data.json": `{"key": "value"}`,
+				"notes.txt": "some notes",
 			},
 			wantDocs: []string{"guide.md"},
 			wantNot:  []string{"image.png", "data.json", "notes.txt"},

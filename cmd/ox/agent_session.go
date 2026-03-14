@@ -11,12 +11,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
-	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
@@ -26,7 +27,6 @@ import (
 	sessionhtml "github.com/sageox/ox/internal/session/html"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
-	"github.com/sageox/ox/pkg/agentx"
 )
 
 // Agent UX Decision: JSON is the default output format for session commands.
@@ -573,28 +573,28 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 
 // sessionStopOutput is the JSON output format for session stop.
 type sessionStopOutput struct {
-	Success            bool   `json:"success"`
-	Type               string `json:"type"`
-	AgentID            string `json:"agent_id"`
-	Title              string `json:"title,omitempty"`
-	Duration           string `json:"duration"`
-	RawPath            string `json:"raw_path,omitempty"`
-	HTMLPath           string `json:"html_path,omitempty"`
-	SummaryMDPath      string `json:"summary_md_path,omitempty"`
-	SessionMDPath      string `json:"session_md_path,omitempty"`
-	PlanPath           string `json:"plan_path,omitempty"`
-	EntryCount         int    `json:"entry_count,omitempty"`
-	SecretsRedacted    int    `json:"secrets_redacted,omitempty"`
-	Summary            string `json:"summary,omitempty"`
-	SummaryPrompt      string `json:"summary_prompt,omitempty"`
-	Model              string `json:"model,omitempty"`
-	AgentVersion       string `json:"agent_version,omitempty"`
-	LedgerSessionDir   string   `json:"ledger_session_dir,omitempty"`   // path to session dir in ledger
-	UploadWarning      string   `json:"upload_warning,omitempty"`       // set when ledger upload failed
-	DataWarnings       []string `json:"data_warnings,omitempty"`       // data quality warnings from validation
-	Guidance           string   `json:"guidance,omitempty"`             // behavioral guidance for the agent
-	TotalMs            int64            `json:"total_ms,omitempty"`    // wall clock for entire session stop
-	Timing             map[string]int64 `json:"timing,omitempty"`     // per-phase breakdown (ms)
+	Success          bool             `json:"success"`
+	Type             string           `json:"type"`
+	AgentID          string           `json:"agent_id"`
+	Title            string           `json:"title,omitempty"`
+	Duration         string           `json:"duration"`
+	RawPath          string           `json:"raw_path,omitempty"`
+	HTMLPath         string           `json:"html_path,omitempty"`
+	SummaryMDPath    string           `json:"summary_md_path,omitempty"`
+	SessionMDPath    string           `json:"session_md_path,omitempty"`
+	PlanPath         string           `json:"plan_path,omitempty"`
+	EntryCount       int              `json:"entry_count,omitempty"`
+	SecretsRedacted  int              `json:"secrets_redacted,omitempty"`
+	Summary          string           `json:"summary,omitempty"`
+	SummaryPrompt    string           `json:"summary_prompt,omitempty"`
+	Model            string           `json:"model,omitempty"`
+	AgentVersion     string           `json:"agent_version,omitempty"`
+	LedgerSessionDir string           `json:"ledger_session_dir,omitempty"` // path to session dir in ledger
+	UploadWarning    string           `json:"upload_warning,omitempty"`     // set when ledger upload failed
+	DataWarnings     []string         `json:"data_warnings,omitempty"`      // data quality warnings from validation
+	Guidance         string           `json:"guidance,omitempty"`           // behavioral guidance for the agent
+	TotalMs          int64            `json:"total_ms,omitempty"`           // wall clock for entire session stop
+	Timing           map[string]int64 `json:"timing,omitempty"`             // per-phase breakdown (ms)
 }
 
 // parseTitle extracts --title value from args
@@ -612,22 +612,22 @@ func parseTitle(args []string) string {
 
 // agentSessionResult contains outcomes from session processing
 type agentSessionResult struct {
-	RawPath            string
-	HTMLPath           string
-	SummaryMDPath      string
-	SessionMDPath      string
-	EntryCount         int
-	SecretsRedacted    int
-	AgentVersion       string
-	Model              string
-	Summary            string // local summary text
-	SummaryPrompt      string // prompt for calling agent to generate full summary
-	PlanPath           string // path to plan.md (empty if no plan captured)
-	SessionName        string // ledger session folder name (e.g. 2026-02-06T14-32-ryan-Ox7f3a)
-	LedgerSessionDir   string   // full path to session dir in ledger (empty if upload failed)
-	UploadWarning      string   // non-empty when ledger upload failed (explains recovery)
-	DataWarnings       []string // data quality warnings from validation (reported to agent)
-	UploadMs           int64    // time spent on LFS upload + git push (ms)
+	RawPath          string
+	HTMLPath         string
+	SummaryMDPath    string
+	SessionMDPath    string
+	EntryCount       int
+	SecretsRedacted  int
+	AgentVersion     string
+	Model            string
+	Summary          string   // local summary text
+	SummaryPrompt    string   // prompt for calling agent to generate full summary
+	PlanPath         string   // path to plan.md (empty if no plan captured)
+	SessionName      string   // ledger session folder name (e.g. 2026-02-06T14-32-ryan-Ox7f3a)
+	LedgerSessionDir string   // full path to session dir in ledger (empty if upload failed)
+	UploadWarning    string   // non-empty when ledger upload failed (explains recovery)
+	DataWarnings     []string // data quality warnings from validation (reported to agent)
+	UploadMs         int64    // time spent on LFS upload + git push (ms)
 }
 
 // processAgentSession reads, redacts secrets, and saves the session.
