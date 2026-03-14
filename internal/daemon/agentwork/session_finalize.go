@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/html"
 )
 
@@ -123,8 +124,8 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 		rawPath := filepath.Join(sessionDir, artifactRaw)
 
 		// raw.jsonl must exist and be committed/pushed to the ledger.
-		// Without it there is nothing to summarize. Recovery of abandoned
-		// recordings that never produced raw.jsonl is tracked in #184.
+		// Without it there is nothing to summarize. For stale recordings
+		// missing raw.jsonl, recovery is attempted from the adapter source file.
 		hasRaw := false
 		if _, statErr := os.Stat(rawPath); statErr == nil {
 			hasRaw = true
@@ -140,12 +141,19 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 				continue
 			}
 			if !hasRaw {
-				// stale recording but no raw.jsonl — nothing we can do yet (#184)
-				h.logger.Info("stale recording without raw.jsonl, skipping",
-					"session", name,
-					"recording_age", recAge.Round(time.Hour),
-				)
-				continue
+				// attempt recovery from adapter source file (#184)
+				if recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath) {
+					hasRaw = true
+				} else {
+					h.logger.Warn("stale recording unrecoverable, clearing marker",
+						"session", name,
+						"recording_age", recAge.Round(time.Hour),
+					)
+					if rmErr := os.Remove(recPath); rmErr != nil {
+						h.logger.Warn("failed to remove unrecoverable recording marker", "err", rmErr)
+					}
+					continue
+				}
 			}
 			// stale recording with raw.jsonl: clear the marker so we can finalize
 			h.logger.Info("clearing stale recording for anti-entropy finalization",
@@ -561,4 +569,138 @@ func validateStoredEntries(entries []map[string]any, logger *slog.Logger) []stri
 	}
 
 	return warnings
+}
+
+// recoverRawFromSessionFile attempts to generate raw.jsonl from the adapter's
+// source file when a stale recording has no raw.jsonl. Handles the case where
+// an agent crashed before any hooks fired but the source file still exists.
+func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath string) bool {
+	// read .recording.json
+	data, err := os.ReadFile(recPath)
+	if err != nil {
+		logger.Warn("recovery: cannot read recording state", "path", recPath, "err", err)
+		return false
+	}
+	var state session.RecordingState
+	if err := json.Unmarshal(data, &state); err != nil {
+		logger.Warn("recovery: invalid recording state", "path", recPath, "err", err)
+		return false
+	}
+
+	// check SessionFile exists and has content
+	if state.SessionFile == "" {
+		logger.Info("recovery: no session file path in recording state", "session_dir", sessionDir)
+		return false
+	}
+	info, err := os.Stat(state.SessionFile)
+	if err != nil || info.Size() == 0 {
+		logger.Info("recovery: session file missing or empty",
+			"session_file", state.SessionFile,
+			"exists", err == nil,
+		)
+		return false
+	}
+
+	// get adapter
+	adapter, err := adapters.GetAdapter(state.AdapterName)
+	if err != nil {
+		logger.Warn("recovery: unknown adapter", "adapter", state.AdapterName, "err", err)
+		return false
+	}
+
+	// read all entries from source
+	rawEntries, err := adapter.Read(state.SessionFile)
+	if err != nil {
+		logger.Warn("recovery: failed to read session file", "path", state.SessionFile, "err", err)
+		return false
+	}
+
+	// filter entries by StartedAt
+	var filtered []adapters.RawEntry
+	for _, e := range rawEntries {
+		if !e.Timestamp.IsZero() && e.Timestamp.Before(state.StartedAt) {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+
+	if len(filtered) == 0 {
+		logger.Info("recovery: no entries after session start time",
+			"session_file", state.SessionFile,
+			"started_at", state.StartedAt,
+			"total_entries", len(rawEntries),
+		)
+		return false
+	}
+
+	// convert to session entries
+	entries := session.ConvertRawEntries(filtered)
+
+	// redact secrets
+	projectRoot := state.WorkspacePath
+	if projectRoot != "" {
+		redactor, _ := session.NewRedactorWithCustomRules(projectRoot)
+		if redactor != nil {
+			redactor.RedactEntries(entries)
+		}
+	}
+
+	// write to a temp file first so a partial write never leaves a corrupt
+	// raw.jsonl that a future Detect cycle would treat as valid
+	tmpPath := rawPath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		logger.Warn("recovery: cannot create temp file", "path", tmpPath, "err", err)
+		return false
+	}
+	defer func() {
+		f.Close()
+		os.Remove(tmpPath) // no-op after successful rename
+	}()
+
+	enc := json.NewEncoder(f)
+
+	// write header
+	header := map[string]any{
+		"_meta": map[string]any{
+			"schema_version": "1",
+			"agent_id":       state.AgentID,
+			"agent_type":     state.AdapterName,
+			"started_at":     state.StartedAt,
+			"recovered":      true,
+		},
+	}
+	if err := enc.Encode(header); err != nil {
+		logger.Warn("recovery: failed to write header", "err", err)
+		return false
+	}
+
+	for _, entry := range entries {
+		if err := enc.Encode(entry); err != nil {
+			logger.Warn("recovery: failed to write entry", "err", err)
+			return false
+		}
+	}
+
+	if err := f.Sync(); err != nil {
+		logger.Warn("recovery: fsync failed", "err", err)
+		return false
+	}
+
+	if err := f.Close(); err != nil {
+		logger.Warn("recovery: close failed", "err", err)
+		return false
+	}
+
+	if err := os.Rename(tmpPath, rawPath); err != nil {
+		logger.Warn("recovery: atomic rename failed", "err", err)
+		return false
+	}
+
+	logger.Info("recovery: raw.jsonl recovered from session file",
+		"session_dir", sessionDir,
+		"entries", len(entries),
+		"source", state.SessionFile,
+	)
+	return true
 }

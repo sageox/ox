@@ -263,17 +263,7 @@ func handleAfterTool(ctx *HookContext) error {
 
 	redactor, _ := session.NewRedactorWithCustomRules(ctx.ProjectRoot)
 
-	sessionEntries := make([]session.Entry, 0, len(entries))
-	for _, raw := range entries {
-		entry := session.Entry{
-			Timestamp: raw.Timestamp,
-			Content:   raw.Content,
-			ToolName:  raw.ToolName,
-			ToolInput: raw.ToolInput,
-		}
-		entry.Type = mapRoleToEntryType(raw.Role)
-		sessionEntries = append(sessionEntries, entry)
-	}
+	sessionEntries := session.ConvertRawEntries(entries)
 	redactor.RedactEntries(sessionEntries)
 
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")

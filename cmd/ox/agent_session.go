@@ -725,18 +725,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	}
 
 	// convert raw entries to session entries and redact secrets
-	entries := make([]session.Entry, 0, len(rawEntries))
-	for _, raw := range rawEntries {
-		entry := session.Entry{
-			Timestamp: raw.Timestamp,
-			Content:   raw.Content,
-			ToolName:  raw.ToolName,
-			ToolInput: raw.ToolInput,
-		}
-
-		entry.Type = mapRoleToEntryType(raw.Role)
-		entries = append(entries, entry)
-	}
+	entries := session.ConvertRawEntries(rawEntries)
 
 	// redact secrets from entries (modifies in place)
 	result.SecretsRedacted = redactor.RedactEntries(entries)
@@ -1547,36 +1536,14 @@ func runAgentSessionHTML(inst *agentinstance.Instance, args []string) error {
 	return nil
 }
 
-// mapRoleToEntryType converts a role string to session.EntryType.
+// mapRoleToEntryType delegates to session.MapRoleToEntryType.
 func mapRoleToEntryType(role string) session.EntryType {
-	switch role {
-	case "user":
-		return session.EntryTypeUser
-	case "assistant":
-		return session.EntryTypeAssistant
-	case "system":
-		return session.EntryTypeSystem
-	case "tool":
-		return session.EntryTypeTool
-	default:
-		return session.EntryTypeSystem
-	}
+	return session.MapRoleToEntryType(role)
 }
 
-// convertRawEntries converts adapter raw entries to session entries.
+// convertRawEntries delegates to session.ConvertRawEntries.
 func convertRawEntries(rawEntries []adapters.RawEntry) []session.Entry {
-	entries := make([]session.Entry, 0, len(rawEntries))
-	for _, raw := range rawEntries {
-		entry := session.Entry{
-			Timestamp: raw.Timestamp,
-			Content:   raw.Content,
-			ToolName:  raw.ToolName,
-			ToolInput: raw.ToolInput,
-		}
-		entry.Type = mapRoleToEntryType(raw.Role)
-		entries = append(entries, entry)
-	}
-	return entries
+	return session.ConvertRawEntries(rawEntries)
 }
 
 // convertStoredEntries converts stored session entries to session.Entry.

@@ -105,17 +105,7 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 			if len(entries) > 0 {
 				redactor, _ := session.NewRedactorWithCustomRules(projectRoot)
 
-				drainEntries := make([]session.Entry, 0, len(entries))
-				for _, raw := range entries {
-					entry := session.Entry{
-						Timestamp: raw.Timestamp,
-						Content:   raw.Content,
-						ToolName:  raw.ToolName,
-						ToolInput: raw.ToolInput,
-					}
-					entry.Type = mapRoleToEntryType(raw.Role)
-					drainEntries = append(drainEntries, entry)
-				}
+				drainEntries := session.ConvertRawEntries(entries)
 				redactor.RedactEntries(drainEntries)
 
 				if appendErr := appendRedactedEntries(rawPath, drainEntries); appendErr != nil {
