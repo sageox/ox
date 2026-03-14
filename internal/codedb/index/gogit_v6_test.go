@@ -104,7 +104,7 @@ func TestV6_TreeFilesReturnsFullPaths(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: git in temp dir, not ox subprocess
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=t@t.com",
 			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=t@t.com")
 		out, err := cmd.CombinedOutput()
@@ -184,7 +184,7 @@ func TestV6_CloneOrFetchUpdatesOnRefetch(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = srcDir
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: git in temp dir, not ox subprocess
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=t@t.com",
 			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=t@t.com")
 		out, err := cmd.CombinedOutput()
@@ -221,7 +221,7 @@ func TestV6_GetTreeEntriesWithSubdirs(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: git in temp dir, not ox subprocess
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=t@t.com",
 			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=t@t.com")
 		out, err := cmd.CombinedOutput()

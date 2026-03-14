@@ -252,5 +252,4 @@ func parseFactDate(content, filename string) string {
 		}
 	}
 	return ""
-	return ""
 }
