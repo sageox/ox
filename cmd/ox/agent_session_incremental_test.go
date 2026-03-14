@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -767,4 +768,62 @@ func TestAppendLargeEntries(t *testing.T) {
 	content, ok := lines[0]["content"].(string)
 	require.True(t, ok)
 	assert.Len(t, content, 1024*1024)
+}
+
+// --- Empty session stop path ---
+
+func TestRawJSONLHasEntries_EmptyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	rawPath := filepath.Join(tmpDir, "raw.jsonl")
+	require.NoError(t, os.WriteFile(rawPath, []byte{}, 0644))
+	assert.False(t, rawJSONLHasEntries(rawPath))
+}
+
+func TestRawJSONLHasEntries_HeaderOnly(t *testing.T) {
+	tmpDir := t.TempDir()
+	rawPath := filepath.Join(tmpDir, "raw.jsonl")
+	header := `{"_meta":{"schema_version":"1","agent_type":"claude-code"}}` + "\n"
+	require.NoError(t, os.WriteFile(rawPath, []byte(header), 0644))
+	assert.False(t, rawJSONLHasEntries(rawPath))
+}
+
+func TestRawJSONLHasEntries_WithContent(t *testing.T) {
+	tmpDir := t.TempDir()
+	rawPath := filepath.Join(tmpDir, "raw.jsonl")
+	content := `{"_meta":{"schema_version":"1","agent_type":"claude-code"}}` + "\n" +
+		`{"type":"user","content":"hello world","timestamp":"2026-01-01T00:00:00Z"}` + "\n"
+	require.NoError(t, os.WriteFile(rawPath, []byte(content), 0644))
+	assert.True(t, rawJSONLHasEntries(rawPath))
+}
+
+func TestRawJSONLHasEntries_MissingFile(t *testing.T) {
+	assert.False(t, rawJSONLHasEntries(filepath.Join(t.TempDir(), "does-not-exist.jsonl")))
+}
+
+func TestFinalizeIncrementalSession_EmptySession(t *testing.T) {
+	projectRoot := setupIncrementalTest(t)
+	state := startTestRecording(t, projectRoot, "OxEmpty", "claude-code")
+
+	// write header only (no conversation entries) to raw.jsonl
+	require.NoError(t, writeRawHeader(projectRoot, state))
+
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+
+	// confirm raw.jsonl has no entries beyond the header
+	assert.False(t, rawJSONLHasEntries(rawPath))
+
+	adapter, err := adapters.GetAdapter("claude-code")
+	require.NoError(t, err)
+
+	result := &agentSessionResult{}
+	got, err := finalizeIncrementalSession(projectRoot, state, rawPath, adapter, result)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	// finalize should return cleanly with zero entries and no artifact paths
+	assert.Equal(t, 0, got.EntryCount)
+	assert.Equal(t, rawPath, got.RawPath, "RawPath should still be set even for empty sessions")
+	assert.Empty(t, got.HTMLPath, "no HTML should be generated for empty session")
+	assert.Empty(t, got.SummaryMDPath, "no summary should be generated for empty session")
+	assert.Empty(t, got.SessionMDPath, "no session markdown should be generated for empty session")
 }

@@ -178,7 +178,7 @@ func TestNormalizeGitURL(t *testing.T) {
 		{
 			name:  "SSH protocol format",
 			input: "ssh://git@github.com/org/repo.git",
-			want:  "git@github.com/org/repo",
+			want:  "github.com/org/repo",
 		},
 		{
 			name:  "GitLab SSH",
@@ -629,6 +629,192 @@ func TestGetRepoName_FallbackToDirectory(t *testing.T) {
 					got = cleaned[idx+1:]
 				} else {
 					got = cleaned
+				}
+			}
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestGetRepoName_UsesGitRoot_NotCWD verifies that GetRepoName extracts the
+// repo name from the given gitRoot's remotes, not from CWD's remotes.
+// This catches a real bug: GetRemoteURLs() runs `git remote -v` in CWD,
+// ignoring the gitRoot parameter entirely.
+func TestGetRepoName_UsesGitRoot_NotCWD(t *testing.T) {
+	if !IsInstalled(VCSGit) {
+		t.Skip("git not installed")
+	}
+
+	// create two separate git repos with different remotes
+	repoA := t.TempDir()
+	repoB := t.TempDir()
+
+	for _, setup := range []struct {
+		dir    string
+		remote string
+	}{
+		{repoA, "https://github.com/alice/project-a.git"},
+		{repoB, "https://github.com/bob/project-b.git"},
+	} {
+		cmd := exec.Command("git", "init")
+		cmd.Dir = setup.dir
+		require.NoError(t, cmd.Run())
+
+		cmd = exec.Command("git", "remote", "add", "origin", setup.remote)
+		cmd.Dir = setup.dir
+		require.NoError(t, cmd.Run())
+	}
+
+	// cd into repoA, then call GetRepoName(repoB)
+	origDir, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(origDir)
+
+	require.NoError(t, os.Chdir(repoA))
+
+	name := GetRepoName(repoB)
+
+	// must return repoB's remote name, not repoA's (CWD)
+	assert.Equal(t, "bob/project-b", name,
+		"GetRepoName should use gitRoot's remotes, not CWD's remotes")
+}
+
+// TestGetRepoName_PrefersOrigin verifies that GetRepoName uses the "origin"
+// remote even when another remote comes first alphabetically.
+func TestGetRepoName_PrefersOrigin(t *testing.T) {
+	if !IsInstalled(VCSGit) {
+		t.Skip("git not installed")
+	}
+
+	dir := t.TempDir()
+	cmd := exec.Command("git", "init")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	// "abc-backup" sorts before "origin" alphabetically
+	cmd = exec.Command("git", "remote", "add", "abc-backup", "https://github.com/other/backup.git")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	cmd = exec.Command("git", "remote", "add", "origin", "https://github.com/real/project.git")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	name := GetRepoName(dir)
+	assert.Equal(t, "real/project", name,
+		"GetRepoName should prefer origin remote over alphabetically-first remote")
+}
+
+// TestGetRepoName_NoRemote_FallsBackToDir verifies that when a repo has
+// no remotes, GetRepoName returns the directory basename from gitRoot.
+func TestGetRepoName_NoRemote_FallsBackToDir(t *testing.T) {
+	if !IsInstalled(VCSGit) {
+		t.Skip("git not installed")
+	}
+
+	// create a git repo with no remotes
+	dir := t.TempDir() + "/my-project"
+	require.NoError(t, os.Mkdir(dir, 0755))
+
+	cmd := exec.Command("git", "init")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+
+	origDir, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(origDir)
+	require.NoError(t, os.Chdir(dir))
+
+	name := GetRepoName(dir)
+	assert.Equal(t, "my-project", name, "should fall back to directory name when no remotes exist")
+}
+
+// TestGetRepoName_NonGitDir_FallsBackToDir verifies that when gitRoot
+// points to a non-git directory, GetRepoName returns the directory basename.
+func TestGetRepoName_NonGitDir_FallsBackToDir(t *testing.T) {
+	dir := t.TempDir() + "/some-workspace"
+	require.NoError(t, os.Mkdir(dir, 0755))
+
+	// not in any git repo
+	origDir, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(origDir)
+	require.NoError(t, os.Chdir(dir))
+
+	name := GetRepoName(dir)
+	assert.Equal(t, "some-workspace", name)
+}
+
+// TestGetRepoName_EmptyGitRoot verifies graceful handling of empty gitRoot.
+func TestGetRepoName_EmptyGitRoot(t *testing.T) {
+	if !IsInstalled(VCSGit) {
+		t.Skip("git not installed")
+	}
+
+	// when CWD is not a git repo and gitRoot is empty, should return ""
+	dir := t.TempDir()
+	origDir, err := os.Getwd()
+	require.NoError(t, err)
+	defer os.Chdir(origDir)
+	require.NoError(t, os.Chdir(dir))
+
+	name := GetRepoName("")
+	// empty gitRoot in a non-git CWD should return empty string
+	assert.Empty(t, name, "GetRepoName with empty gitRoot in non-git dir should return empty")
+}
+
+// TestNormalizeGitURL_EdgeCases tests URL normalization edge cases that
+// affect repo name extraction. A bug here means GetRepoName returns
+// wrong names for SSH, HTTP, or unconventional git URLs.
+func TestNormalizeGitURL_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"ssh standard", "git@github.com:sageox/ox.git", "github.com/sageox/ox"},
+		{"https standard", "https://github.com/sageox/ox.git", "github.com/sageox/ox"},
+		{"https no .git", "https://github.com/sageox/ox", "github.com/sageox/ox"},
+		{"ssh no .git", "git@github.com:sageox/ox", "github.com/sageox/ox"},
+		{"gitlab ssh", "git@gitlab.com:group/subgroup/repo.git", "gitlab.com/group/subgroup/repo"},
+		{"http insecure", "http://internal.example.com/team/repo.git", "internal.example.com/team/repo"},
+		{"ssh protocol", "ssh://git@github.com/sageox/ox.git", "github.com/sageox/ox"},
+		{"ssh with port", "ssh://git@github.com:2222/org/repo.git", "github.com/org/repo"},
+		{"scp with port", "git@selfhosted.example.com:2222/team/project.git", "selfhosted.example.com/team/project"},
+		{"mixed case", "git@GitHub.Com:SageOx/Ox.git", "github.com/sageox/ox"},
+		{"empty", "", ""},
+		{"just .git", ".git", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeGitURL(tt.url)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestGetRepoName_ExtractsOwnerRepo tests the full extraction pipeline:
+// normalizeGitURL → strip host → owner/repo. This catches bugs where
+// the host-stripping logic breaks for multi-segment paths (gitlab subgroups).
+func TestGetRepoName_ExtractsOwnerRepo(t *testing.T) {
+	tests := []struct {
+		name       string
+		normalized string // output of normalizeGitURL
+		want       string // expected from GetRepoName's host-stripping logic
+	}{
+		{"github", "github.com/sageox/ox", "sageox/ox"},
+		{"gitlab subgroup", "gitlab.com/group/subgroup/repo", "group/subgroup/repo"},
+		{"no slash", "localhost", ""},
+		{"trailing slash", "github.com/", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// replicate the extraction logic from GetRepoName
+			var got string
+			if idx := strings.Index(tt.normalized, "/"); idx >= 0 {
+				ownerRepo := tt.normalized[idx+1:]
+				if ownerRepo != "" {
+					got = ownerRepo
 				}
 			}
 			assert.Equal(t, tt.want, got)

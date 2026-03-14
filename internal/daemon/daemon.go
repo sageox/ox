@@ -517,9 +517,16 @@ func (d *Daemon) Start() error {
 	d.server.SetDoctorHandler(func() *DoctorResponse {
 		// trigger anti-entropy (self-healing for missing repos)
 		d.scheduler.TriggerAntiEntropy()
-		return &DoctorResponse{
+		resp := &DoctorResponse{
 			AntiEntropyTriggered: true,
 		}
+		// trigger session finalization detection (bypasses hourly cooldown)
+		if d.agentWorker != nil {
+			queued := d.agentWorker.ForceDetect()
+			resp.SessionFinalizeTriggered = true
+			resp.SessionFinalizeQueued = queued
+		}
+		return resp
 	})
 
 	// set trigger_gc handler for forced GC reclone (triggered by ox doctor --gc)

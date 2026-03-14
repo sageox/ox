@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -281,6 +282,8 @@ var daemonKillCmd = &cobra.Command{
 
 func init() {
 	daemonStartCmd.Flags().Bool("foreground", false, "run in foreground (for debugging)")
+	daemonStartCmd.Flags().String("repo", "", "repo name (for ps identification)")
+	daemonStartCmd.Flags().MarkHidden("repo")
 	daemonStatusCmd.Flags().BoolP("verbose", "v", false, "show detailed sync history")
 	daemonLogsCmd.Flags().IntP("lines", "n", 50, "number of lines to show")
 	daemonLogsCmd.Flags().BoolP("follow", "f", false, "follow log output")
@@ -330,9 +333,17 @@ func startDaemonBackground(ledgerPath string) error {
 		return fmt.Errorf("failed to open log file: %w", err)
 	}
 
+	// build args with repo name for ps visibility
+	args := []string{"daemon", "start", "--foreground"}
+	if gitRoot := findGitRoot(); gitRoot != "" {
+		if name := repotools.GetRepoName(gitRoot); name != "" {
+			args = append(args, "--repo="+name)
+		}
+	}
+
 	// start daemon process
 	// NOTE: No setsid/detach — Claude manages the daemon process lifecycle.
-	cmd := exec.Command(exe, "daemon", "start", "--foreground")
+	cmd := exec.Command(exe, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 

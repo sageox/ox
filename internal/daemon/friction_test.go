@@ -36,7 +36,7 @@ func TestNewFrictionCollector(t *testing.T) {
 		t.Error("engine should be initialized")
 	}
 
-	if !fc.enabled {
+	if !fc.IsEnabled() {
 		t.Error("collector should be enabled by default")
 	}
 }
