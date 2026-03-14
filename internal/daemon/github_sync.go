@@ -180,8 +180,10 @@ func (m *GitHubSyncManager) doSync(ctx context.Context, ledgerPath string) {
 	if totalItems > 0 {
 		// acquire ledger mutex before git operations
 		m.ledgerMu.Lock()
-		pushErr := ledger.CommitAndPushGitHubData(ctx, ledgerPath, owner, repo, combined, m.pushLedger)
-		m.ledgerMu.Unlock()
+		pushErr := func() error {
+			defer m.ledgerMu.Unlock()
+			return ledger.CommitAndPushGitHubData(ctx, ledgerPath, owner, repo, combined, m.pushLedger)
+		}()
 
 		if pushErr != nil {
 			m.handleError(fmt.Errorf("commit/push: %w", pushErr))

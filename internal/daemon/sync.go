@@ -1072,9 +1072,9 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	}
 
 	// acquire ledger mutex to prevent concurrent git operations with GitHub sync push.
-	// Released after fetch+pull completes (success or failure).
 	s.ledgerMu.Lock()
 	fetchPullErr := func() error {
+		defer s.ledgerMu.Unlock()
 		// git fetch (capture stderr for diagnosable error messages)
 		fetchCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "fetch", "--quiet")
 		if output, err := fetchCmd.CombinedOutput(); err != nil {
@@ -1158,7 +1158,6 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		}
 		return nil
 	}()
-	s.ledgerMu.Unlock()
 
 	if fetchPullErr != nil {
 		return fetchPullErr

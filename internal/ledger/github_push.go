@@ -40,7 +40,8 @@ func CommitAndPushGitHubData(ctx context.Context, ledgerPath, owner, repo string
 	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
 	if output, err := commitCmd.CombinedOutput(); err != nil {
 		if strings.Contains(string(output), "nothing to commit") {
-			return nil
+			// still push — a prior run may have committed but failed to push
+			return pushFn(ctx, ledgerPath)
 		}
 		return fmt.Errorf("git commit failed: %s: %w", string(output), err)
 	}

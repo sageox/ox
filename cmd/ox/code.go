@@ -545,6 +545,7 @@ func init() {
 	codeCmd.AddCommand(codeQueryCmd)
 	codeCmd.AddCommand(codeSQLCmd)
 	codeCmd.AddCommand(codeStatsCmd)
+	codeCmd.AddCommand(codeInsightsCmd)
 	codeCmd.GroupID = "dev"
 	rootCmd.AddCommand(codeCmd)
 }

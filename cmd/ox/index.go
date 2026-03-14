@@ -201,8 +201,7 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 			combined.IssueTotal, combined.IssueCreated, combined.IssueUpdated, owner, repo)
 	}
 
-	totalItems := combined.PRTotal + combined.IssueTotal
-	if totalItems == 0 || noPush {
+	if noPush {
 		return nil
 	}
 
