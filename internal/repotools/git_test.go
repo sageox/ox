@@ -733,9 +733,8 @@ func TestGetRepoName_EmptyGitRoot(t *testing.T) {
 	require.NoError(t, os.Chdir(dir))
 
 	name := GetRepoName("")
-	// either empty (no remote, no fallback) or could get CWD remote if
-	// somehow in a git repo - the point is it shouldn't panic
-	t.Logf("GetRepoName('') = %q", name)
+	// empty gitRoot in a non-git CWD should return empty string
+	assert.Empty(t, name, "GetRepoName with empty gitRoot in non-git dir should return empty")
 }
 
 // TestNormalizeGitURL_EdgeCases tests URL normalization edge cases that
