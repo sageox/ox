@@ -124,7 +124,7 @@ func fileUnchanged(path string, knownMtimes map[string]int64) bool {
 	if !ok {
 		return false // never indexed
 	}
-	return info.ModTime().UnixNano() == stored
+	return info.ModTime().UTC().UnixNano() == stored
 }
 
 // loadFileMtimes reads all stored mtimes into a map for O(1) lookup.
@@ -162,7 +162,7 @@ func indexPRFile(s *store.Store, path string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("stat %s: %w", path, err)
 	}
-	mtimeNano := info.ModTime().UnixNano()
+	mtimeNano := info.ModTime().UTC().UnixNano()
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -234,7 +234,7 @@ func indexIssueFile(s *store.Store, path string) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("stat %s: %w", path, err)
 	}
-	mtimeNano := info.ModTime().UnixNano()
+	mtimeNano := info.ModTime().UTC().UnixNano()
 
 	data, err := os.ReadFile(path)
 	if err != nil {

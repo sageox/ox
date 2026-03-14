@@ -533,7 +533,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		OutputFile:        sessionFile,
 		SessionPath:       sessionPath,
 		Title:             opts.Title,
-		StartedAt:         time.Now(),
+		StartedAt:         time.Now().UTC(),
 		EntryCount:        0,
 		LastReminderSeq:   0,
 		ReminderInterval:  reminderInterval,

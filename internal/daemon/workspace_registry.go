@@ -678,7 +678,7 @@ func (r *WorkspaceRegistry) HasFetchHead(id string) (exists bool, mtime time.Tim
 	if err != nil {
 		return false, time.Time{}
 	}
-	return true, info.ModTime()
+	return true, info.ModTime().UTC()
 }
 
 // GetRepoID returns the repo ID from project config.

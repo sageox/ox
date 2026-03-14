@@ -1049,7 +1049,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 
 	// track FETCH_HEAD mtime to record when remote had new content
 	if info, err := os.Stat(filepath.Join(s.config.LedgerPath, ".git", "FETCH_HEAD")); err == nil {
-		s.recordRemoteChange(s.config.LedgerPath, info.ModTime())
+		s.recordRemoteChange(s.config.LedgerPath, info.ModTime().UTC())
 	}
 
 	// detect force push (diverged branches)
@@ -2624,7 +2624,7 @@ func acquireGCLock(lockPath string) (*os.File, error) {
 		}
 		// lock file exists — check if stale (>5 min old = likely crashed process)
 		if info, statErr := os.Stat(lockPath); statErr == nil {
-			if time.Since(info.ModTime()) > 5*time.Minute {
+			if time.Since(info.ModTime().UTC()) > 5*time.Minute {
 				// stale lock from a crashed process — remove and retry once
 				_ = os.Remove(lockPath)
 				return os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)

@@ -516,13 +516,13 @@ func checkGitLockFiles() checkResult {
 
 	var found []string
 	var oldLocks []string
-	oneHourAgo := time.Now().Add(-1 * time.Hour)
+	oneHourAgo := time.Now().UTC().Add(-1 * time.Hour)
 
 	for _, lock := range lockFiles {
 		path := filepath.Join(gitDir, lock)
 		if info, err := os.Stat(path); err == nil {
 			found = append(found, lock)
-			if info.ModTime().Before(oneHourAgo) {
+			if info.ModTime().UTC().Before(oneHourAgo) {
 				oldLocks = append(oldLocks, lock)
 			}
 		}
@@ -2489,7 +2489,7 @@ func isRecentlyInitialized(gitRoot string) bool {
 	if err != nil {
 		return false
 	}
-	return time.Since(info.ModTime()) < bootstrapGracePeriod
+	return time.Since(info.ModTime().UTC()) < bootstrapGracePeriod
 }
 
 // checkTeamContextCloneStrategy detects team context clones that are full clones

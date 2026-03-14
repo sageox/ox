@@ -934,7 +934,7 @@ func (d *Daemon) cleanup() {
 // Uses socket-based ping detection. Claude manages the daemon process lifecycle,
 // so flock-based locking is no longer needed.
 func IsRunning() bool {
-	client := NewClientWithTimeout(100 * time.Millisecond)
+	client := NewClientWithTimeout(500 * time.Millisecond)
 	return client.Ping() == nil
 }
 

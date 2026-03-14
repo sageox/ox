@@ -1140,7 +1140,9 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 	// handle nil status (daemon not connected)
 	if status == nil {
 		b.WriteString(statusLabelStyle.Render("Status"))
-		if projectInitialized {
+		if daemon.IsStarting() {
+			b.WriteString(statusMutedStyle.Render("◐ starting — process is running but not yet accepting connections"))
+		} else if projectInitialized {
 			b.WriteString(statusMutedStyle.Render("⟳ not started — run 'ox daemon start' or will auto-start on next agentic coding session"))
 		} else {
 			b.WriteString(statusMutedStyle.Render("not running (expected until 'ox init' completed)"))
@@ -1570,7 +1572,8 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		// JSON output mode
 		if statusJSONFlag {
 			output := buildStatusJSON(authenticated, token, endpointSlug, authFile, authFileExists,
-				userConfigDir, cwd, sageoxDir, projectInitialized, localCfg, gitRoot, repoDetail, codeStats)
+				userConfigDir, cwd, sageoxDir, projectInitialized, localCfg, gitRoot, repoDetail, codeStats,
+				daemonStatus, client)
 			jsonBytes, err := json.MarshalIndent(output, "", "  ")
 			if err != nil {
 				return fmt.Errorf("failed to marshal JSON: %w", err)
@@ -1636,10 +1639,13 @@ daemon health, and a tree view of all SageOx directory locations.`,
 	},
 }
 
-// buildStatusJSON constructs the JSON output structure for ox status --json
+// buildStatusJSON constructs the JSON output structure for ox status --json.
+// daemonStatus and daemonClient are pre-fetched from the daemon to avoid a second ping
+// that could race with the first (one succeeds, the other times out = contradictory output).
 func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, authFile string, authFileExists bool,
 	userConfigDir, cwd, sageoxDir string, projectInitialized bool, localCfg *config.LocalConfig, gitRoot string,
-	repoDetail *api.RepoDetailResponse, codeStats *daemon.CodeDBStats) statusJSONOutput {
+	repoDetail *api.RepoDetailResponse, codeStats *daemon.CodeDBStats,
+	daemonStatus *daemon.StatusData, daemonClient *daemon.Client) statusJSONOutput {
 
 	output := statusJSONOutput{}
 
@@ -1739,21 +1745,21 @@ func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, 
 		}
 	}
 
-	// daemon section + AI coworkers
+	// daemon section + AI coworkers — use pre-fetched data to avoid a second
+	// ping that could race with the first and produce contradictory output
 	if gitRoot != "" {
 		output.Daemon = &statusDaemonJSON{}
-		client := daemon.NewClientWithTimeout(500 * time.Millisecond)
-		if client.Ping() == nil {
-			if daemonStatus, err := client.Status(); err == nil {
-				output.Daemon.Running = daemonStatus.Running
-				output.Daemon.Pid = daemonStatus.Pid
-				output.Daemon.UptimeSeconds = int64(daemonStatus.Uptime.Seconds())
-				output.Daemon.TotalSyncs = daemonStatus.TotalSyncs
-				output.Daemon.SyncsLastHour = daemonStatus.SyncsLastHour
-				output.Daemon.LastError = daemonStatus.LastError
-			}
+		if daemonStatus != nil {
+			output.Daemon.Running = daemonStatus.Running
+			output.Daemon.Pid = daemonStatus.Pid
+			output.Daemon.UptimeSeconds = int64(daemonStatus.Uptime.Seconds())
+			output.Daemon.TotalSyncs = daemonStatus.TotalSyncs
+			output.Daemon.SyncsLastHour = daemonStatus.SyncsLastHour
+			output.Daemon.LastError = daemonStatus.LastError
+		}
+		if daemonClient != nil {
 			// AI coworkers with context stats
-			if instances, err := client.Instances(); err == nil && len(instances) > 0 {
+			if instances, err := daemonClient.Instances(); err == nil && len(instances) > 0 {
 				for _, inst := range instances {
 					output.AICoworkers = append(output.AICoworkers, statusAICoworkerJSON{
 						AgentID:       inst.AgentID,
