@@ -466,11 +466,24 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString(statusValueStyle.Render(fmt.Sprintf("%d", len(repos))))
 			b.WriteString("\n")
 
-			// compute max name width for column alignment
+			// identify primary worktree (most commits = full history)
+			primaryIdx := 0
+			for i, r := range repos {
+				if r.commits > repos[primaryIdx].commits {
+					primaryIdx = i
+				}
+			}
+			primaryCommits := repos[primaryIdx].commits
+
+			// compute max name width for column alignment (including " (primary)" suffix)
 			maxNameLen := 0
-			for _, r := range repos {
-				if len(r.name) > maxNameLen {
-					maxNameLen = len(r.name)
+			for i, r := range repos {
+				nameLen := len(r.name)
+				if i == primaryIdx {
+					nameLen += len(" (primary)")
+				}
+				if nameLen > maxNameLen {
+					maxNameLen = nameLen
 				}
 			}
 
@@ -479,11 +492,24 @@ var codeStatusCmd = &cobra.Command{
 				if i == len(repos)-1 {
 					connector = "└── "
 				}
-				padded := r.name + strings.Repeat(" ", maxNameLen-len(r.name))
 				b.WriteString(statusLabelStyle.Render(""))
 				b.WriteString(statusMutedStyle.Render(connector))
-				b.WriteString(statusHighlightStyle.Render(padded))
-				b.WriteString(statusMutedStyle.Render(fmt.Sprintf("  %s commits, %s blobs", formatComma(r.commits), formatComma(r.blobs))))
+
+				if i == primaryIdx {
+					label := r.name + " (primary)"
+					padded := label + strings.Repeat(" ", maxNameLen-len(label))
+					b.WriteString(statusHighlightStyle.Render(padded))
+					b.WriteString(statusMutedStyle.Render(fmt.Sprintf("  %s commits, %s blobs", formatComma(r.commits), formatComma(r.blobs))))
+				} else {
+					padded := r.name + strings.Repeat(" ", maxNameLen-len(r.name))
+					b.WriteString(statusValueStyle.Render(padded))
+					// show incremental commits relative to primary
+					if r.commits > 0 && primaryCommits > 0 {
+						b.WriteString(statusMutedStyle.Render(fmt.Sprintf("  +%s commits, %s blobs", formatComma(r.commits), formatComma(r.blobs))))
+					} else {
+						b.WriteString(statusMutedStyle.Render(fmt.Sprintf("  %s commits, %s blobs", formatComma(r.commits), formatComma(r.blobs))))
+					}
+				}
 				b.WriteString("\n")
 			}
 		}
