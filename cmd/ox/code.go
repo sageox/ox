@@ -380,6 +380,9 @@ var codeStatusCmd = &cobra.Command{
 			return enc.Encode(out)
 		}
 
+		// detect GitHub remote for repo identity
+		ghOwner, ghRepo, _ := detectGitHubRemote()
+
 		// human-readable output — Tufte-inspired, matching ox status
 		var b strings.Builder
 
@@ -395,7 +398,9 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString(statusWarningStyle.Render("⚠ not indexed"))
 			b.WriteString("\n")
 			b.WriteString(statusLabelStyle.Render(""))
-			b.WriteString(statusMutedStyle.Render("Run 'ox code index' to create one"))
+			b.WriteString(statusMutedStyle.Render("Run "))
+			b.WriteString(statusHighlightStyle.Render("ox code index"))
+			b.WriteString(statusMutedStyle.Render(" to create one"))
 			b.WriteString("\n")
 			fmt.Print(b.String())
 			return nil
@@ -415,13 +420,45 @@ var codeStatusCmd = &cobra.Command{
 		}
 		b.WriteString("\n")
 
-		// repo identity
-		if len(repos) == 1 {
+		// repo identity — show GitHub remote name if detected
+		if ghOwner != "" && ghRepo != "" {
 			b.WriteString(statusLabelStyle.Render("Repository"))
-			b.WriteString(statusHighlightStyle.Render(repos[0].name))
+			b.WriteString(statusHighlightStyle.Render(ghOwner + "/" + ghRepo))
 			b.WriteString("\n")
-		} else if len(repos) > 1 {
-			b.WriteString(statusLabelStyle.Render("Repositories"))
+		}
+
+		b.WriteString("\n")
+
+		// git history section
+		b.WriteString(statusHeaderStyle.Render("Git History"))
+		b.WriteString("\n")
+
+		if totalCommits > 0 || totalBlobs > 0 {
+			b.WriteString(statusLabelStyle.Render("Commits"))
+			b.WriteString(statusValueStyle.Render(formatComma(totalCommits)))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render("Blobs"))
+			b.WriteString(statusValueStyle.Render(formatComma(totalBlobs)))
+			b.WriteString("\n")
+			if totalSymbols > 0 {
+				b.WriteString(statusLabelStyle.Render("Symbols"))
+				b.WriteString(statusHighlightStyle.Render(formatComma(totalSymbols)))
+				b.WriteString("\n")
+			}
+			if totalComments > 0 {
+				b.WriteString(statusLabelStyle.Render("Comments"))
+				b.WriteString(statusHighlightStyle.Render(formatComma(totalComments)))
+				b.WriteString("\n")
+			}
+		} else {
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("no git history indexed"))
+			b.WriteString("\n")
+		}
+
+		// local worktrees — only show when multiple repos indexed
+		if len(repos) > 1 {
+			b.WriteString(statusLabelStyle.Render("Worktrees"))
 			b.WriteString(statusValueStyle.Render(fmt.Sprintf("%d", len(repos))))
 			b.WriteString("\n")
 			for i, r := range repos {
@@ -437,31 +474,32 @@ var codeStatusCmd = &cobra.Command{
 			}
 		}
 
-		// counts — only show when there's data
-		if totalCommits > 0 || totalBlobs > 0 || totalSymbols > 0 {
-			b.WriteString(statusLabelStyle.Render("Symbols"))
-			b.WriteString(statusHighlightStyle.Render(formatComma(totalSymbols)))
+		b.WriteString("\n")
+
+		// GitHub section
+		b.WriteString(statusHeaderStyle.Render("GitHub"))
+		b.WriteString("\n")
+
+		if totalPRs > 0 || totalIssues > 0 {
+			b.WriteString(statusLabelStyle.Render("PRs"))
+			b.WriteString(statusHighlightStyle.Render(formatComma(totalPRs)))
 			b.WriteString("\n")
-			b.WriteString(statusLabelStyle.Render("Comments"))
-			b.WriteString(statusHighlightStyle.Render(formatComma(totalComments)))
+			b.WriteString(statusLabelStyle.Render("Issues"))
+			b.WriteString(statusHighlightStyle.Render(formatComma(totalIssues)))
 			b.WriteString("\n")
-			b.WriteString(statusLabelStyle.Render("Commits"))
-			b.WriteString(statusValueStyle.Render(formatComma(totalCommits)))
+		} else if ghOwner != "" {
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("not yet indexed — run "))
+			b.WriteString(statusHighlightStyle.Render("ox index github"))
+			b.WriteString(statusMutedStyle.Render(" or wait for daemon"))
 			b.WriteString("\n")
-			b.WriteString(statusLabelStyle.Render("Blobs"))
-			b.WriteString(statusValueStyle.Render(formatComma(totalBlobs)))
+		} else {
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("no GitHub remote detected"))
 			b.WriteString("\n")
 		}
 
-		// GitHub data — only show when there's data
-		if totalPRs > 0 || totalIssues > 0 {
-			b.WriteString(statusLabelStyle.Render("PRs"))
-			b.WriteString(statusValueStyle.Render(formatComma(totalPRs)))
-			b.WriteString("\n")
-			b.WriteString(statusLabelStyle.Render("Issues"))
-			b.WriteString(statusValueStyle.Render(formatComma(totalIssues)))
-			b.WriteString("\n")
-		}
+		b.WriteString("\n")
 
 		// next check — only when daemon is running and index exists
 		if codeStats != nil && !codeStats.IndexingNow && indexExists && syncInterval > 0 && !codeStats.LastIndexed.IsZero() {
