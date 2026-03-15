@@ -465,14 +465,24 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString(statusLabelStyle.Render("Worktrees"))
 			b.WriteString(statusValueStyle.Render(fmt.Sprintf("%d", len(repos))))
 			b.WriteString("\n")
+
+			// compute max name width for column alignment
+			maxNameLen := 0
+			for _, r := range repos {
+				if len(r.name) > maxNameLen {
+					maxNameLen = len(r.name)
+				}
+			}
+
 			for i, r := range repos {
 				connector := "├── "
 				if i == len(repos)-1 {
 					connector = "└── "
 				}
+				padded := r.name + strings.Repeat(" ", maxNameLen-len(r.name))
 				b.WriteString(statusLabelStyle.Render(""))
 				b.WriteString(statusMutedStyle.Render(connector))
-				b.WriteString(statusHighlightStyle.Render(r.name))
+				b.WriteString(statusHighlightStyle.Render(padded))
 				b.WriteString(statusMutedStyle.Render(fmt.Sprintf("  %s commits, %s blobs", formatComma(r.commits), formatComma(r.blobs))))
 				b.WriteString("\n")
 			}
