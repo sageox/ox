@@ -440,16 +440,20 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString(statusLabelStyle.Render("Blobs"))
 			b.WriteString(statusValueStyle.Render(formatComma(totalBlobs)))
 			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render("Symbols"))
 			if totalSymbols > 0 {
-				b.WriteString(statusLabelStyle.Render("Symbols"))
 				b.WriteString(statusHighlightStyle.Render(formatComma(totalSymbols)))
-				b.WriteString("\n")
+			} else {
+				b.WriteString(statusWarningStyle.Render("0"))
 			}
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render("Comments"))
 			if totalComments > 0 {
-				b.WriteString(statusLabelStyle.Render("Comments"))
 				b.WriteString(statusHighlightStyle.Render(formatComma(totalComments)))
-				b.WriteString("\n")
+			} else {
+				b.WriteString(statusWarningStyle.Render("0"))
 			}
+			b.WriteString("\n")
 		} else {
 			b.WriteString(statusLabelStyle.Render(""))
 			b.WriteString(statusMutedStyle.Render("no git history indexed"))
