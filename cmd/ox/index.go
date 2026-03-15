@@ -276,6 +276,25 @@ func init() {
 
 	indexCmd.AddCommand(indexCodeCmd)
 	indexCmd.AddCommand(indexGitHubCmd)
+
+	// ox index status → delegates to ox code status (read-only, no side effects)
+	indexStatusCmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show index status (alias for 'ox code status')",
+		RunE:  codeStatusCmd.RunE,
+	}
+	indexStatusCmd.Flags().Bool("json", false, "output as JSON")
+	indexCmd.AddCommand(indexStatusCmd)
+
+	// hidden alias: ox index stats → ox index status
+	indexStatsAlias := &cobra.Command{
+		Use:    "stats",
+		Hidden: true,
+		RunE:   codeStatusCmd.RunE,
+	}
+	indexStatsAlias.Flags().Bool("json", false, "output as JSON")
+	indexCmd.AddCommand(indexStatsAlias)
+
 	indexCmd.GroupID = "dev"
 	rootCmd.AddCommand(indexCmd)
 }
