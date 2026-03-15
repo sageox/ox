@@ -1,6 +1,7 @@
 package agentwork
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/html"
@@ -393,6 +395,13 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	if err := h.runGit(ledgerPath, "commit", "-m", msg); err != nil {
 		h.logger.Warn("git commit failed", "err", err)
 		return
+	}
+
+	// repair missing LFS objects before push (lost during GC reclone)
+	if repaired, repairErr := gitutil.RepairMissingLFSObjects(context.Background(), ledgerPath); repairErr != nil {
+		h.logger.Warn("lfs repair failed", "err", repairErr)
+	} else if repaired > 0 {
+		h.logger.Info("repaired missing LFS pointers before push", "count", repaired)
 	}
 
 	// git push (best-effort)

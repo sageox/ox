@@ -347,6 +347,14 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 	// (causes HTTP 403 on push when filter.lfs.required=true is global)
 	gitutil.StripLFSConfig(ledgerPath)
 
+	// pre-flight: repair missing LFS objects that would block push
+	// (lost during GC reclone or interrupted uploads)
+	if repaired, err := gitutil.RepairMissingLFSObjects(ctx, ledgerPath); err != nil {
+		slog.Warn("lfs repair failed", "error", err)
+	} else if repaired > 0 {
+		slog.Info("repaired missing LFS pointers before push", "count", repaired)
+	}
+
 	// ensure remote has current credentials before pushing
 	ep := endpoint.GetForProject(findGitRoot())
 	if ep != "" {
