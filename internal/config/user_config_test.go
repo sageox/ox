@@ -44,8 +44,8 @@ func TestLoadUserConfig_ContextGitDefaults(t *testing.T) {
 	// auto_commit defaults to true
 	assert.True(t, cfg.GetContextGitAutoCommit(), "expected context_git.auto_commit to default to true")
 
-	// auto_push defaults to false
-	assert.False(t, cfg.GetContextGitAutoPush(), "expected context_git.auto_push to default to false")
+	// auto_push defaults to true
+	assert.True(t, cfg.GetContextGitAutoPush(), "expected context_git.auto_push to default to true")
 }
 
 func TestLoadUserConfig_RespectsContextGitSettings(t *testing.T) {
@@ -73,7 +73,7 @@ func TestContextGitConfig_NilReceiver(t *testing.T) {
 	// nil receiver should return defaults
 	assert.True(t, cfg.IsAutoCommitEnabled(), "expected nil ContextGitConfig.IsAutoCommitEnabled() to return true")
 
-	assert.False(t, cfg.IsAutoPushEnabled(), "expected nil ContextGitConfig.IsAutoPushEnabled() to return false")
+	assert.True(t, cfg.IsAutoPushEnabled(), "expected nil ContextGitConfig.IsAutoPushEnabled() to return true")
 }
 
 func TestUserConfig_SetContextGitAutoCommit(t *testing.T) {
@@ -142,8 +142,8 @@ func TestContextGitConfig_PartialSettings(t *testing.T) {
 
 	assert.False(t, cfg.GetContextGitAutoCommit(), "expected context_git.auto_commit to be false")
 
-	// auto_push should still default to false
-	assert.False(t, cfg.GetContextGitAutoPush(), "expected context_git.auto_push to default to false")
+	// auto_push should still default to true
+	assert.True(t, cfg.GetContextGitAutoPush(), "expected context_git.auto_push to default to true")
 }
 
 func TestUserConfig_GetContextGitWithNilContextGit(t *testing.T) {
@@ -154,7 +154,7 @@ func TestUserConfig_GetContextGitWithNilContextGit(t *testing.T) {
 	// should return defaults when ContextGit is nil
 	assert.True(t, cfg.GetContextGitAutoCommit(), "expected GetContextGitAutoCommit to return true with nil ContextGit")
 
-	assert.False(t, cfg.GetContextGitAutoPush(), "expected GetContextGitAutoPush to return false with nil ContextGit")
+	assert.True(t, cfg.GetContextGitAutoPush(), "expected GetContextGitAutoPush to return true with nil ContextGit")
 }
 
 func TestLoadUserConfig_SessionsDefaults(t *testing.T) {
@@ -501,8 +501,8 @@ func TestAgentWorkerConfig_NilReceiver(t *testing.T) {
 
 	assert.False(t, cfg.IsEnabled(), "nil receiver should default to disabled")
 	assert.Equal(t, "claude", cfg.GetAgentType(), "nil receiver should default to claude")
-	assert.Equal(t, 10, cfg.GetMaxInvocationsPerHour(), "nil receiver should default to 10")
-	assert.Equal(t, 1, cfg.GetMaxConcurrent(), "nil receiver should default to 1")
+	assert.Equal(t, 60, cfg.GetMaxInvocationsPerHour(), "nil receiver should default to 60")
+	assert.Equal(t, 4, cfg.GetMaxConcurrent(), "nil receiver should default to 4")
 	assert.NoError(t, cfg.Validate(), "nil receiver should validate cleanly")
 }
 
@@ -511,8 +511,8 @@ func TestAgentWorkerConfig_Defaults(t *testing.T) {
 
 	assert.False(t, cfg.IsEnabled())
 	assert.Equal(t, "claude", cfg.GetAgentType())
-	assert.Equal(t, 10, cfg.GetMaxInvocationsPerHour())
-	assert.Equal(t, 1, cfg.GetMaxConcurrent())
+	assert.Equal(t, 60, cfg.GetMaxInvocationsPerHour())
+	assert.Equal(t, 4, cfg.GetMaxConcurrent())
 }
 
 func TestAgentWorkerConfig_WithDefaults_PreservesExplicitValues(t *testing.T) {
@@ -538,8 +538,8 @@ func TestAgentWorkerConfig_WithDefaults_NilReceiver(t *testing.T) {
 
 	assert.False(t, result.IsEnabled())
 	assert.Equal(t, "claude", result.GetAgentType())
-	assert.Equal(t, 10, result.GetMaxInvocationsPerHour())
-	assert.Equal(t, 1, result.GetMaxConcurrent())
+	assert.Equal(t, 60, result.GetMaxInvocationsPerHour())
+	assert.Equal(t, 4, result.GetMaxConcurrent())
 }
 
 func TestAgentWorkerConfig_Validate_ValidType(t *testing.T) {
@@ -645,8 +645,8 @@ func TestLoadUserConfig_AgentWorkerPartialSettings(t *testing.T) {
 	require.NotNil(t, cfg.AgentWorker)
 	assert.True(t, cfg.IsAgentWorkerEnabled())
 	assert.Equal(t, "claude", cfg.AgentWorker.GetAgentType())
-	assert.Equal(t, 10, cfg.AgentWorker.GetMaxInvocationsPerHour())
-	assert.Equal(t, 1, cfg.AgentWorker.GetMaxConcurrent())
+	assert.Equal(t, 60, cfg.AgentWorker.GetMaxInvocationsPerHour())
+	assert.Equal(t, 4, cfg.AgentWorker.GetMaxConcurrent())
 }
 
 func TestSaveAndLoadUserConfig_AgentWorker(t *testing.T) {

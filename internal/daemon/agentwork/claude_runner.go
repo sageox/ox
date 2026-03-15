@@ -15,7 +15,7 @@ import (
 
 const defaultTimeout = 5 * time.Minute
 
-// claudeMessage represents a single JSONL message from `claude --jsonl`.
+// claudeMessage represents a single JSONL message from `claude --output-format stream-json`.
 type claudeMessage struct {
 	Type       string       `json:"type"`
 	Subtype    string       `json:"subtype,omitempty"`
@@ -30,7 +30,7 @@ type claudeUsage struct {
 	OutputTokens int `json:"output_tokens"`
 }
 
-// ClaudeRunner implements Runner using `claude --jsonl`.
+// ClaudeRunner implements Runner using `claude --output-format stream-json`.
 // It spawns Claude Code CLI in non-interactive mode.
 // ClaudeRunner is safe for concurrent use — each Run() call is independent.
 type ClaudeRunner struct {
@@ -81,7 +81,7 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	args := []string{"--jsonl", "-p", req.Prompt}
+	args := []string{"--output-format", "stream-json", "-p", req.Prompt}
 	if req.MaxTokens > 0 {
 		args = append(args, "--max-tokens", fmt.Sprintf("%d", req.MaxTokens))
 	}

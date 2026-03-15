@@ -50,7 +50,7 @@ type ContextGitConfig struct {
 	AutoCommit *bool `yaml:"auto_commit,omitempty"`
 
 	// AutoPush controls whether to push after commit.
-	// Default: false
+	// Default: true
 	AutoPush *bool `yaml:"auto_push,omitempty"`
 }
 
@@ -62,10 +62,10 @@ func (c *ContextGitConfig) IsAutoCommitEnabled() bool {
 	return *c.AutoCommit
 }
 
-// IsAutoPushEnabled returns true if auto-push is enabled (default: false)
+// IsAutoPushEnabled returns true if auto-push is enabled (default: true)
 func (c *ContextGitConfig) IsAutoPushEnabled() bool {
 	if c == nil || c.AutoPush == nil {
-		return false
+		return true
 	}
 	return *c.AutoPush
 }
@@ -138,11 +138,11 @@ type AgentWorkerConfig struct {
 	AgentType string `yaml:"agent_type,omitempty"`
 
 	// MaxInvocationsPerHour rate-limits agent spawning per daemon.
-	// Default: 10
+	// Default: 60
 	MaxInvocationsPerHour *int `yaml:"max_invocations_per_hour,omitempty"`
 
 	// MaxConcurrent limits parallel agent processes per daemon.
-	// Default: 1
+	// Default: 4
 	MaxConcurrent *int `yaml:"max_concurrent,omitempty"`
 
 	// SessionFinalize enables automatic session anti-entropy (generating
@@ -177,18 +177,18 @@ func (c *AgentWorkerConfig) GetAgentType() string {
 	return c.AgentType
 }
 
-// GetMaxInvocationsPerHour returns the rate limit (default: 10)
+// GetMaxInvocationsPerHour returns the rate limit (default: 60)
 func (c *AgentWorkerConfig) GetMaxInvocationsPerHour() int {
 	if c == nil || c.MaxInvocationsPerHour == nil {
-		return 10
+		return 60
 	}
 	return *c.MaxInvocationsPerHour
 }
 
-// GetMaxConcurrent returns the concurrency limit (default: 1)
+// GetMaxConcurrent returns the concurrency limit (default: 4)
 func (c *AgentWorkerConfig) GetMaxConcurrent() int {
 	if c == nil || c.MaxConcurrent == nil {
-		return 1
+		return 4
 	}
 	return *c.MaxConcurrent
 }
@@ -259,11 +259,11 @@ func (c *AgentWorkerConfig) WithDefaults() *AgentWorkerConfig {
 		out.AgentType = "claude"
 	}
 	if out.MaxInvocationsPerHour == nil {
-		v := 10
+		v := 60
 		out.MaxInvocationsPerHour = &v
 	}
 	if out.MaxConcurrent == nil {
-		v := 1
+		v := 4
 		out.MaxConcurrent = &v
 	}
 	if out.SessionFinalize == nil {
@@ -361,10 +361,10 @@ func (c *UserConfig) GetContextGitAutoCommit() bool {
 }
 
 // GetContextGitAutoPush returns whether auto-push is enabled for context git.
-// Default: false
+// Default: true
 func (c *UserConfig) GetContextGitAutoPush() bool {
 	if c.ContextGit == nil {
-		return false
+		return true
 	}
 	return c.ContextGit.IsAutoPushEnabled()
 }

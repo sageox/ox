@@ -182,10 +182,10 @@ func (m *Manager) Enqueue(item *WorkItem) bool {
 //   - syncSignal: fires after a successful ledger pull. Only drains the
 //     existing queue — does NOT trigger detection scans (syncs are too
 //     frequent for doctor-style work).
-//   - doctorTicker: fires every doctorInterval (1h). Runs detect+process.
+//   - doctorTicker: fires every doctorInterval (5m). Runs detect+process.
 //     This is the sole trigger for detection scans, catching both
 //     newly-synced incomplete sessions and time-based conditions (e.g.,
-//     stale recordings hitting the 24h threshold).
+//     stale recordings with dead parent PIDs).
 func (m *Manager) Start(ctx context.Context) {
 	doctorTicker := time.NewTicker(doctorInterval)
 	defer doctorTicker.Stop()
@@ -227,7 +227,13 @@ func isHandlerEnabled(cfg *config.AgentWorkerConfig, handlerType string) bool {
 
 // detectAndEnqueue runs Detect on every registered handler and enqueues the results.
 // Handlers are skipped if their work type is disabled in config.
+//
+// Before running full detection, lightweight session cleanup (ghost removal) runs
+// unconditionally — it requires no LLM and is safe regardless of agent_worker.enabled.
 func (m *Manager) detectAndEnqueue() {
+	// ghost cleanup always runs — filesystem-only, no LLM needed
+	m.runSessionCleanup()
+
 	cfg := m.configLoader()
 	if cfg == nil || !cfg.IsEnabled() {
 		return
@@ -278,9 +284,29 @@ func (m *Manager) detectAndEnqueue() {
 	}
 }
 
+// runSessionCleanup runs lightweight filesystem cleanup for the session-finalize
+// handler regardless of agent_worker.enabled. Only removes ghost sessions (dead PID
+// + no data). Does NOT clear .recording.json markers on sessions with recoverable
+// data — those markers are preserved until full Detect() + LLM processing can run.
+func (m *Manager) runSessionCleanup() {
+	m.mu.Lock()
+	h, ok := m.handlers[sessionFinalizeType]
+	m.mu.Unlock()
+	if !ok {
+		return
+	}
+	if sfh, ok := h.(*SessionFinalizeHandler); ok {
+		sfh.Cleanup(m.ledgerPath)
+	}
+}
+
 // ForceDetect runs detection on all enabled handlers, bypassing the cooldown.
 // Returns the total number of work items enqueued. Safe to call from IPC handlers.
+// Always runs session cleanup (ghost removal) regardless of agent_worker.enabled.
 func (m *Manager) ForceDetect() int {
+	// ghost cleanup always runs
+	m.runSessionCleanup()
+
 	cfg := m.configLoader()
 	if cfg == nil || !cfg.IsEnabled() {
 		return 0
@@ -371,7 +397,14 @@ func (m *Manager) processQueue(ctx context.Context) {
 		}
 
 		go func(item *WorkItem) {
-			defer func() { <-m.sem }()
+			defer func() {
+				<-m.sem
+				// signal queue to pick up next item immediately
+				select {
+				case m.processSignal <- struct{}{}:
+				default:
+				}
+			}()
 			m.executeItem(ctx, item)
 		}(item)
 	}

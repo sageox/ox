@@ -204,6 +204,40 @@ func SessionCacheDir(repoID string) string {
 	return filepath.Join(base, repoID)
 }
 
+// LegacySessionCacheDirs returns additional session cache directories from older
+// ox versions that used different cache paths. On macOS, older versions used
+// ~/Library/Caches/sageox/sessions/ (native cache) before the switch to XDG
+// (~/.cache/sageox/sessions/). Returns only directories that exist on disk.
+// The repoID parameter scopes to a specific repo; empty returns all legacy bases.
+func LegacySessionCacheDirs(repoID string) []string {
+	home := getHomeDir()
+	if home == "" {
+		return nil
+	}
+
+	current := SessionCacheDir(repoID)
+
+	// macOS native cache: ~/Library/Caches/sageox/sessions/
+	candidates := []string{
+		filepath.Join(home, "Library", "Caches", "sageox", "sessions"),
+	}
+
+	var dirs []string
+	for _, base := range candidates {
+		path := base
+		if repoID != "" {
+			path = filepath.Join(base, repoID)
+		}
+		if path == current {
+			continue // skip if it's the same as the current XDG path
+		}
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			dirs = append(dirs, path)
+		}
+	}
+	return dirs
+}
+
 // TempDir returns the base temporary directory for SageOx ephemeral files.
 //
 // CRITICAL: Uses /tmp/<username>/sageox/ to avoid multi-user permission conflicts.

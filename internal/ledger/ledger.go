@@ -67,33 +67,42 @@ func DefaultPathForEndpoint(endpointURL string) (string, error) {
 	// find main project root (resolves through worktrees to ensure shared ledger)
 	projectRoot, err := repotools.FindMainRepoRoot(repotools.VCSGit)
 	if err == nil && projectRoot != "" {
-		// load project config to get repo ID
-		projectCfg, cfgErr := config.LoadProjectConfig(projectRoot)
-		if cfgErr != nil {
-			return "", fmt.Errorf("load project config: %w", cfgErr)
-		}
-
-		repoID := projectCfg.RepoID
-		if repoID == "" {
-			return "", fmt.Errorf("project config missing repo_id (run 'ox init')")
-		}
-
-		// determine endpoint: explicit parameter > project config > env > default
-		ep := endpointURL
-		if ep == "" {
-			ep = endpoint.GetForProject(projectRoot)
-		}
-
-		return config.DefaultLedgerPath(repoID, ep), nil
+		// git works — use the git-resolved root (may be the main repo for worktrees)
+		return resolveFromProjectRoot(projectRoot, endpointURL)
 	}
 
-	// fallback to legacy path if not in a git repo
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("get home directory: %w", err)
+	// git unavailable (sandbox, broken worktree) — fall back to .sageox/ in CWD
+	if cwd, cwdErr := os.Getwd(); cwdErr == nil && config.IsInitialized(cwd) {
+		return resolveFromProjectRoot(cwd, endpointURL)
+	}
+
+	// not in a SageOx project at all — legacy path
+	home, homeErr := os.UserHomeDir()
+	if homeErr != nil {
+		return "", fmt.Errorf("get home directory: %w", homeErr)
 	}
 
 	return filepath.Join(home, ".cache", "sageox", "context"), nil
+}
+
+// resolveFromProjectRoot loads project config and computes the ledger path.
+func resolveFromProjectRoot(projectRoot, endpointURL string) (string, error) {
+	projectCfg, err := config.LoadProjectConfig(projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("load project config: %w", err)
+	}
+
+	repoID := projectCfg.RepoID
+	if repoID == "" {
+		return "", fmt.Errorf("project config missing repo_id (run 'ox init')")
+	}
+
+	ep := endpointURL
+	if ep == "" {
+		ep = endpoint.GetForProject(projectRoot)
+	}
+
+	return config.DefaultLedgerPath(repoID, ep), nil
 }
 
 // LegacyPath returns the legacy ledger path for the current project.

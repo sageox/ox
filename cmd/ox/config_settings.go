@@ -115,12 +115,13 @@ Note: The ledger is specific to this repository. Each repo where
 		LongDescription: `Controls automatic syncing of sessions to the repo's ledger.
 
 When enabled, sessions are automatically synced to the remote ledger
-after being saved locally.
+after being saved locally. This completes the end-to-end session
+pipeline: record → commit → push → anti-entropy finalizes.
 
 When disabled, sessions stay local until you manually sync them.`,
 		Category:    "Sessions",
 		ValidValues: []string{"on", "off"},
-		Default:     "off",
+		Default:     "on",
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
@@ -151,6 +152,25 @@ Override per-invocation with --html, --text, or --json flags.`,
 		Category:    "Display",
 		ValidValues: []string{"html", "text", "json"},
 		Default:     "html",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
+		Key:         "agent_worker",
+		Description: "Daemon AI coworker spawning",
+		LongDescription: `Controls whether the daemon can spawn AI coworker processes for
+background tasks like session anti-entropy (generating missing
+summaries for orphaned sessions).
+
+When enabled, the daemon automatically detects incomplete sessions
+and spawns a Claude process to generate summaries, then uploads
+them to the ledger. Rate-limited to 60 invocations/hour, 4 concurrent.
+
+When disabled (default), only lightweight cleanup runs (removing
+ghost sessions with no data). Sessions with recoverable data are
+preserved until this is enabled.`,
+		Category:    "Sessions",
+		ValidValues: []string{"on", "off"},
+		Default:     "off",
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 }
@@ -259,6 +279,15 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 	case "view_format":
 		if userCfg != nil && userCfg.ViewFormat != "" {
 			cv.UserVal = userCfg.ViewFormat
+		}
+
+	case "agent_worker":
+		if userCfg != nil && userCfg.AgentWorker != nil && userCfg.AgentWorker.Enabled != nil {
+			if *userCfg.AgentWorker.Enabled {
+				cv.UserVal = "on"
+			} else {
+				cv.UserVal = "off"
+			}
 		}
 	}
 
@@ -369,6 +398,10 @@ func setUserConfig(key, value string) error {
 
 	case "view_format":
 		cfg.ViewFormat = value
+
+	case "agent_worker":
+		enabled := value == "on"
+		cfg.SetAgentWorkerEnabled(enabled)
 
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)

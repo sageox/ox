@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/html"
@@ -109,16 +110,112 @@ func NewSessionFinalizeHandlerForTest(logger *slog.Logger) *SessionFinalizeHandl
 // Type implements WorkHandler.
 func (h *SessionFinalizeHandler) Type() string { return sessionFinalizeType }
 
-// Detect scans <ledgerPath>/sessions/ for sessions missing artifacts.
-func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) {
-	sessionsDir := filepath.Join(ledgerPath, "sessions")
+// Cleanup performs lightweight filesystem housekeeping that doesn't require LLM
+// processing: ghost session removal (dead PID + no data). Safe to run regardless
+// of agent_worker.enabled. Does NOT clear .recording.json markers on sessions
+// that have recoverable data — that's Detect()'s job when LLM processing follows.
+//
+// Cleans both the ledger sessions dir and the session cache dir (where ox session
+// list reads from). The cache dir is derived from the repoID in the ledger path.
+func (h *SessionFinalizeHandler) Cleanup(ledgerPath string) {
+	// clean ledger sessions
+	ledgerSessionsDir := filepath.Join(ledgerPath, "sessions")
+	if ghostResult := session.CleanupGhostSessionsInDir(ledgerSessionsDir); ghostResult.Removed > 0 {
+		h.logger.Info("ghost cleanup (ledger): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
+	}
 
-	// ghost cleanup: remove abandoned recordings with dead parent PID and no data.
-	// runs on every detect cycle (hourly) for automatic hygiene.
-	if ghostResult := session.CleanupGhostSessionsInDir(sessionsDir); ghostResult.Removed > 0 {
+	// clean session cache (where ox session list reads from)
+	repoID := filepath.Base(ledgerPath)
+	if repoID != "" && repoID != "." {
+		cacheSessionsDir := filepath.Join(paths.SessionCacheDir(repoID), "sessions")
+		if ghostResult := session.CleanupGhostSessionsInDir(cacheSessionsDir); ghostResult.Removed > 0 {
+			h.logger.Info("ghost cleanup (cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
+		}
+
+		// also clean legacy cache paths (e.g. ~/Library/Caches/sageox on macOS)
+		for _, legacyDir := range paths.LegacySessionCacheDirs(repoID) {
+			legacySessionsDir := filepath.Join(legacyDir, "sessions")
+			if ghostResult := session.CleanupGhostSessionsInDir(legacySessionsDir); ghostResult.Removed > 0 {
+				h.logger.Info("ghost cleanup (legacy cache): removed abandoned recordings", "dir", legacyDir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
+			}
+		}
+	}
+}
+
+// Detect scans both the ledger and session cache for sessions missing artifacts.
+// The cache dir is where sessions are initially recorded; the ledger is where they
+// are pushed after finalization. Both must be scanned to catch orphans.
+func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) {
+	ledgerSessionsDir := filepath.Join(ledgerPath, "sessions")
+
+	// ghost cleanup also runs via Cleanup() on every doctor cycle regardless of
+	// agent_worker.enabled. Run it here too for callers that invoke Detect() directly
+	// (e.g. ForceDetect, tests).
+	if ghostResult := session.CleanupGhostSessionsInDir(ledgerSessionsDir); ghostResult.Removed > 0 {
 		h.logger.Info("ghost cleanup: removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
 	}
 
+	// scan ledger sessions dir
+	items, err := h.detectInDir(ledgerSessionsDir, ledgerPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// also scan session cache dir (where sessions are initially recorded)
+	repoID := filepath.Base(ledgerPath)
+	if repoID != "" && repoID != "." {
+		cacheSessionsDir := filepath.Join(paths.SessionCacheDir(repoID), "sessions")
+		if cacheSessionsDir != ledgerSessionsDir {
+			if ghostResult := session.CleanupGhostSessionsInDir(cacheSessionsDir); ghostResult.Removed > 0 {
+				h.logger.Info("ghost cleanup (cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
+			}
+
+			cacheItems, cacheErr := h.detectInDir(cacheSessionsDir, ledgerPath)
+			if cacheErr == nil {
+				// deduplicate by session name (prefer ledger copy)
+				seen := make(map[string]bool)
+				for _, item := range items {
+					seen[item.DedupKey] = true
+				}
+				for _, item := range cacheItems {
+					if !seen[item.DedupKey] {
+						items = append(items, item)
+					}
+				}
+			}
+		}
+
+		// also scan legacy cache paths (e.g. ~/Library/Caches/sageox on macOS)
+		for _, legacyDir := range paths.LegacySessionCacheDirs(repoID) {
+			legacySessionsDir := filepath.Join(legacyDir, "sessions")
+			if legacySessionsDir == ledgerSessionsDir {
+				continue
+			}
+			if ghostResult := session.CleanupGhostSessionsInDir(legacySessionsDir); ghostResult.Removed > 0 {
+				h.logger.Info("ghost cleanup (legacy cache): removed abandoned recordings", "dir", legacyDir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
+			}
+
+			legacyItems, legacyErr := h.detectInDir(legacySessionsDir, ledgerPath)
+			if legacyErr == nil {
+				seen := make(map[string]bool)
+				for _, item := range items {
+					seen[item.DedupKey] = true
+				}
+				for _, item := range legacyItems {
+					if !seen[item.DedupKey] {
+						items = append(items, item)
+					}
+				}
+			}
+		}
+	}
+
+	h.logger.Info("session finalize detect complete", "ledger", ledgerPath, "items", len(items))
+	return items, nil
+}
+
+// detectInDir scans a single sessions directory for sessions needing finalization.
+func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]*WorkItem, error) {
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -221,7 +318,6 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 		})
 	}
 
-	h.logger.Info("session finalize detect complete", "ledger", ledgerPath, "items", len(items))
 	return items, nil
 }
 
