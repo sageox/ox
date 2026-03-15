@@ -277,6 +277,13 @@ func (m *GitHubSyncManager) pushLedger(ctx context.Context, ledgerPath string) e
 
 	gitutil.StripLFSConfig(ledgerPath)
 
+	// repair missing LFS objects that would block push
+	if repaired, err := gitutil.RepairMissingLFSObjects(ctx, ledgerPath); err != nil {
+		m.logger.Warn("lfs repair failed", "error", err)
+	} else if repaired > 0 {
+		m.logger.Info("repaired missing LFS pointers before push", "count", repaired)
+	}
+
 	// refresh credentials
 	ep := endpoint.GetForProject(m.projectRoot)
 	if ep != "" {

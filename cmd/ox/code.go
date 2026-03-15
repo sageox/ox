@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -223,6 +224,14 @@ var codeQueryCmd = &cobra.Command{
 	RunE:   codeSearchCmd.RunE,
 }
 
+// codeStatsAliasCmd is a hidden alias for codeStatusCmd — back-compat for "ox code stats"
+var codeStatsAliasCmd = &cobra.Command{
+	Use:    "stats",
+	Hidden: true,
+	Short:  codeStatusCmd.Short,
+	RunE:   codeStatusCmd.RunE,
+}
+
 var codeSQLCmd = &cobra.Command{
 	Use:    "sql <query>",
 	Short:  "Execute raw SQL against the CodeDB database",
@@ -256,9 +265,9 @@ var codeSQLCmd = &cobra.Command{
 	},
 }
 
-var codeStatsCmd = &cobra.Command{
-	Use:   "stats",
-	Short: "Show code index statistics",
+var codeStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show code index status",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root, err := repotools.FindRepoRoot(repotools.VCSGit)
 		if err != nil {
@@ -285,10 +294,11 @@ var codeStatsCmd = &cobra.Command{
 		// query DB directly for counts (daemon stats may lag)
 		var totalCommits, totalBlobs, totalSymbols, totalComments, totalPRs, totalIssues int
 		type repoRow struct {
-			name    string
-			path    string
-			commits int
-			blobs   int
+			name      string
+			path      string
+			commits   int
+			blobs     int
+			lastCommit int64 // unix timestamp of most recent commit
 		}
 		var repos []repoRow
 
@@ -303,7 +313,10 @@ var codeStatsCmd = &cobra.Command{
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM issues").Scan(&totalIssues)
 
 				rows, qErr := db.Store().Query(`
-					SELECT r.name, r.path, COUNT(DISTINCT c.id), COUNT(DISTINCT fr.blob_id)
+					SELECT r.name, r.path,
+					       COUNT(DISTINCT c.id),
+					       COUNT(DISTINCT fr.blob_id),
+					       COALESCE(MAX(c.timestamp), 0)
 					FROM repos r
 					LEFT JOIN commits c ON c.repo_id = r.id
 					LEFT JOIN file_revs fr ON fr.commit_id = c.id
@@ -311,7 +324,7 @@ var codeStatsCmd = &cobra.Command{
 				if qErr == nil {
 					for rows.Next() {
 						var r repoRow
-						if rows.Scan(&r.name, &r.path, &r.commits, &r.blobs) == nil {
+						if rows.Scan(&r.name, &r.path, &r.commits, &r.blobs, &r.lastCommit) == nil {
 							repos = append(repos, r)
 						}
 					}
@@ -372,6 +385,9 @@ var codeStatsCmd = &cobra.Command{
 			return enc.Encode(out)
 		}
 
+		// detect GitHub remote for repo identity
+		ghOwner, ghRepo, _ := detectGitHubRemote()
+
 		// human-readable output — Tufte-inspired, matching ox status
 		var b strings.Builder
 
@@ -387,7 +403,9 @@ var codeStatsCmd = &cobra.Command{
 			b.WriteString(statusWarningStyle.Render("⚠ not indexed"))
 			b.WriteString("\n")
 			b.WriteString(statusLabelStyle.Render(""))
-			b.WriteString(statusMutedStyle.Render("Run 'ox code index' to create one"))
+			b.WriteString(statusMutedStyle.Render("Run "))
+			b.WriteString(statusHighlightStyle.Render("ox code index"))
+			b.WriteString(statusMutedStyle.Render(" to create one"))
 			b.WriteString("\n")
 			fmt.Print(b.String())
 			return nil
@@ -407,15 +425,115 @@ var codeStatsCmd = &cobra.Command{
 		}
 		b.WriteString("\n")
 
-		// repo identity
-		if len(repos) == 1 {
+		// repo identity — show GitHub remote name if detected
+		if ghOwner != "" && ghRepo != "" {
 			b.WriteString(statusLabelStyle.Render("Repository"))
-			b.WriteString(statusHighlightStyle.Render(repos[0].name))
+			b.WriteString(statusHighlightStyle.Render(ghOwner + "/" + ghRepo))
 			b.WriteString("\n")
-		} else if len(repos) > 1 {
-			b.WriteString(statusLabelStyle.Render("Repositories"))
+		}
+
+		b.WriteString("\n")
+
+		// git history section
+		b.WriteString(statusHeaderStyle.Render("Git History"))
+		b.WriteString("\n")
+
+		if totalCommits > 0 || totalBlobs > 0 {
+			b.WriteString(statusLabelStyle.Render("Commits"))
+			b.WriteString(statusValueStyle.Render(formatComma(totalCommits)))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render("Blobs"))
+			b.WriteString(statusValueStyle.Render(formatComma(totalBlobs)))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render("Symbols"))
+			if totalSymbols > 0 {
+				b.WriteString(statusHighlightStyle.Render(formatComma(totalSymbols)))
+			} else {
+				b.WriteString(statusWarningStyle.Render("0"))
+			}
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render("Comments"))
+			if totalComments > 0 {
+				b.WriteString(statusHighlightStyle.Render(formatComma(totalComments)))
+			} else {
+				b.WriteString(statusWarningStyle.Render("0"))
+			}
+			b.WriteString("\n")
+		} else {
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("no git history indexed"))
+			b.WriteString("\n")
+		}
+
+		// local worktrees — only show when multiple repos indexed
+		if len(repos) > 1 {
+			b.WriteString(statusLabelStyle.Render("Worktrees"))
 			b.WriteString(statusValueStyle.Render(fmt.Sprintf("%d", len(repos))))
 			b.WriteString("\n")
+
+			// identify primary worktree (most commits = full history)
+			primaryIdx := 0
+			for i, r := range repos {
+				if r.commits > repos[primaryIdx].commits {
+					primaryIdx = i
+				}
+			}
+			primaryCommits := repos[primaryIdx].commits
+			primaryName := repos[primaryIdx].name
+
+			// sort: primary first, then alphabetical
+			sort.Slice(repos, func(i, j int) bool {
+				iPrimary := repos[i].name == primaryName
+				jPrimary := repos[j].name == primaryName
+				if iPrimary != jPrimary {
+					return iPrimary
+				}
+				return repos[i].name < repos[j].name
+			})
+			// primary is always index 0 after sort
+			primaryIdx = 0
+
+			// compute max name width for column alignment (including " (primary)" suffix)
+			maxNameLen := 0
+			for i, r := range repos {
+				nameLen := len(r.name)
+				if i == primaryIdx {
+					nameLen += len(" (primary)")
+				}
+				if nameLen > maxNameLen {
+					maxNameLen = nameLen
+				}
+			}
+
+			// pre-compute commit strings for column alignment
+			type worktreeLine struct {
+				commitStr string
+			}
+			lines := make([]worktreeLine, len(repos))
+			maxCommitLen := 0
+			for i, r := range repos {
+				if i == primaryIdx {
+					lines[i].commitStr = formatComma(r.commits) + " commits"
+				} else if r.commits > 0 && primaryCommits > 0 {
+					lines[i].commitStr = "+" + formatComma(r.commits) + " commits"
+				} else {
+					lines[i].commitStr = formatComma(r.commits) + " commits"
+				}
+				if len(lines[i].commitStr) > maxCommitLen {
+					maxCommitLen = len(lines[i].commitStr)
+				}
+			}
+
+			// pre-compute blob strings for column alignment
+			maxBlobLen := 0
+			blobStrs := make([]string, len(repos))
+			for i, r := range repos {
+				blobStrs[i] = formatComma(r.blobs) + " blobs"
+				if len(blobStrs[i]) > maxBlobLen {
+					maxBlobLen = len(blobStrs[i])
+				}
+			}
+
 			for i, r := range repos {
 				connector := "├── "
 				if i == len(repos)-1 {
@@ -423,37 +541,55 @@ var codeStatsCmd = &cobra.Command{
 				}
 				b.WriteString(statusLabelStyle.Render(""))
 				b.WriteString(statusMutedStyle.Render(connector))
-				b.WriteString(statusHighlightStyle.Render(r.name))
-				b.WriteString(statusMutedStyle.Render(fmt.Sprintf("  %s commits, %s blobs", formatComma(r.commits), formatComma(r.blobs))))
+
+				if i == primaryIdx {
+					label := r.name + " (primary)"
+					padded := label + strings.Repeat(" ", maxNameLen-len(label))
+					b.WriteString(statusSuccessStyle.Render(padded))
+				} else {
+					padded := r.name + strings.Repeat(" ", maxNameLen-len(r.name))
+					b.WriteString(statusValueStyle.Render(padded))
+				}
+
+				paddedCommits := lines[i].commitStr + strings.Repeat(" ", maxCommitLen-len(lines[i].commitStr))
+				paddedBlobs := blobStrs[i] + strings.Repeat(" ", maxBlobLen-len(blobStrs[i]))
+				b.WriteString(statusMutedStyle.Render("  " + paddedCommits + ", " + paddedBlobs))
+
+				// show last commit age if available
+				if r.lastCommit > 0 {
+					age := formatTimeAgo(time.Unix(r.lastCommit, 0))
+					b.WriteString(statusMutedStyle.Render("  " + age))
+				}
 				b.WriteString("\n")
 			}
 		}
 
-		// counts — only show when there's data
-		if totalCommits > 0 || totalBlobs > 0 || totalSymbols > 0 {
-			b.WriteString(statusLabelStyle.Render("Symbols"))
-			b.WriteString(statusHighlightStyle.Render(formatComma(totalSymbols)))
+		b.WriteString("\n")
+
+		// GitHub section
+		b.WriteString(statusHeaderStyle.Render("GitHub"))
+		b.WriteString("\n")
+
+		if totalPRs > 0 || totalIssues > 0 {
+			b.WriteString(statusLabelStyle.Render("PRs"))
+			b.WriteString(statusHighlightStyle.Render(formatComma(totalPRs)))
 			b.WriteString("\n")
-			b.WriteString(statusLabelStyle.Render("Comments"))
-			b.WriteString(statusHighlightStyle.Render(formatComma(totalComments)))
+			b.WriteString(statusLabelStyle.Render("Issues"))
+			b.WriteString(statusHighlightStyle.Render(formatComma(totalIssues)))
 			b.WriteString("\n")
-			b.WriteString(statusLabelStyle.Render("Commits"))
-			b.WriteString(statusValueStyle.Render(formatComma(totalCommits)))
+		} else if ghOwner != "" {
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("not yet indexed — run "))
+			b.WriteString(statusHighlightStyle.Render("ox index github"))
+			b.WriteString(statusMutedStyle.Render(" or wait for daemon"))
 			b.WriteString("\n")
-			b.WriteString(statusLabelStyle.Render("Blobs"))
-			b.WriteString(statusValueStyle.Render(formatComma(totalBlobs)))
+		} else {
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("no GitHub remote detected"))
 			b.WriteString("\n")
 		}
 
-		// GitHub data — only show when there's data
-		if totalPRs > 0 || totalIssues > 0 {
-			b.WriteString(statusLabelStyle.Render("PRs"))
-			b.WriteString(statusValueStyle.Render(formatComma(totalPRs)))
-			b.WriteString("\n")
-			b.WriteString(statusLabelStyle.Render("Issues"))
-			b.WriteString(statusValueStyle.Render(formatComma(totalIssues)))
-			b.WriteString("\n")
-		}
+		b.WriteString("\n")
 
 		// next check — only when daemon is running and index exists
 		if codeStats != nil && !codeStats.IndexingNow && indexExists && syncInterval > 0 && !codeStats.LastIndexed.IsZero() {
@@ -538,13 +674,15 @@ func init() {
 	// mirror indexCodeCmd flags so the alias works correctly
 	codeIndexCmd.Flags().Bool("full", false, "wipe index and rebuild from scratch")
 
-	codeStatsCmd.Flags().Bool("json", false, "output as JSON")
+	codeStatusCmd.Flags().Bool("json", false, "output as JSON")
+	codeStatsAliasCmd.Flags().Bool("json", false, "output as JSON")
 
 	codeCmd.AddCommand(codeIndexCmd)
 	codeCmd.AddCommand(codeSearchCmd)
 	codeCmd.AddCommand(codeQueryCmd)
 	codeCmd.AddCommand(codeSQLCmd)
-	codeCmd.AddCommand(codeStatsCmd)
+	codeCmd.AddCommand(codeStatusCmd)
+	codeCmd.AddCommand(codeStatsAliasCmd)
 	codeCmd.AddCommand(codeInsightsCmd)
 	codeCmd.GroupID = "dev"
 	rootCmd.AddCommand(codeCmd)

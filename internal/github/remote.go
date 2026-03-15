@@ -34,6 +34,10 @@ func ParseGitHubRemote(remoteURL string) (owner, repo string, ok bool) {
 		}
 		path = strings.TrimPrefix(after, "github.com/")
 
+	case strings.HasPrefix(raw, "github.com/"):
+		// normalized form: github.com/owner/repo (from repotools.normalizeGitURL)
+		path = strings.TrimPrefix(raw, "github.com/")
+
 	default:
 		return "", "", false
 	}

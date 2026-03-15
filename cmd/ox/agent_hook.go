@@ -280,9 +280,14 @@ func handleAfterTool(ctx *HookContext) error {
 		return nil // non-fatal
 	}
 
+	currentPPID := os.Getppid()
 	_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
 		s.SourceOffset = newOffset
 		s.EntryCount += len(sessionEntries)
+		// update PID if it changed (fixes Conductor where prime runs in a short-lived wrapper)
+		if currentPPID > 0 && s.ParentPID != currentPPID {
+			s.ParentPID = currentPPID
+		}
 	})
 
 	return nil

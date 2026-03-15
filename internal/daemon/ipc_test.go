@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1070,4 +1072,290 @@ func TestServerClient_TeamSyncWithProgress_NoHandler(t *testing.T) {
 	assert.Contains(t, err.Error(), "team sync handler not set")
 
 	cancel()
+}
+
+// --- Regression tests: IPC status must remain responsive during long-running operations ---
+// These tests verify the architectural guarantee that each IPC connection runs in its own
+// goroutine, so a slow handler on one connection cannot block status/ping on another.
+// Regression for: ox daemon status timed out because status handler blocked on SQLite during indexing.
+
+// TestServerClient_StatusNonBlocking verifies that status requests complete quickly
+// even when another handler (sync) is slow and occupying a different connection.
+func TestServerClient_StatusNonBlocking(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "ox-ipc-nonblock-")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	server := NewServer(logger)
+
+	// status handler returns cached data instantly
+	server.SetHandlers(
+		func() error { return nil },
+		func() {},
+		func() *StatusData {
+			return &StatusData{Running: true, Pid: os.Getpid(), LedgerPath: "/cached"}
+		},
+	)
+
+	// sync handler simulates a slow operation (2s)
+	syncStarted := make(chan struct{})
+	server.SetSyncHandler(func(progress *ProgressWriter) error {
+		close(syncStarted)
+		time.Sleep(2 * time.Second)
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go server.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// start slow sync in background
+	go func() {
+		client := &Client{socketPath: SocketPath(), timeout: 5 * time.Second}
+		_ = client.SyncWithProgress(nil)
+	}()
+
+	// wait for sync handler to be actively running
+	<-syncStarted
+
+	// now send a status request — it must complete quickly despite the slow sync
+	client := &Client{socketPath: SocketPath(), timeout: 5 * time.Second}
+	start := time.Now()
+	status, err := client.Status()
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	assert.True(t, status.Running)
+	assert.Equal(t, "/cached", status.LedgerPath)
+	assert.Less(t, elapsed, 100*time.Millisecond,
+		"status should complete in <100ms, not be blocked by slow sync (took %v)", elapsed)
+}
+
+// TestServerClient_StatusDuringSlowHandler verifies that status does not block when a
+// code_index handler is performing heavy work on a different connection.
+func TestServerClient_StatusDuringSlowHandler(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "ox-ipc-slowidx-")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	server := NewServer(logger)
+
+	server.SetHandlers(
+		func() error { return nil },
+		func() {},
+		func() *StatusData {
+			return &StatusData{Running: true, Pid: os.Getpid()}
+		},
+	)
+
+	// simulate a slow code_index handler (3s, like SQLite during indexing)
+	indexStarted := make(chan struct{})
+	server.SetCodeIndexHandler(func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) {
+		close(indexStarted)
+		time.Sleep(3 * time.Second)
+		return &CodeIndexResult{BlobsParsed: 100}, nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go server.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// start code_index request in background
+	go func() {
+		client := &Client{socketPath: SocketPath(), timeout: 10 * time.Second}
+		payload, _ := json.Marshal(CodeIndexPayload{URL: "/test"})
+		_, _ = client.sendMessage(Message{Type: MsgTypeCodeIndex, Payload: payload})
+	}()
+
+	// wait for index handler to be actively running
+	<-indexStarted
+
+	// status request must complete quickly
+	client := &Client{socketPath: SocketPath(), timeout: 5 * time.Second}
+	start := time.Now()
+	status, err := client.Status()
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	assert.True(t, status.Running)
+	assert.Less(t, elapsed, 200*time.Millisecond,
+		"status should complete in <200ms during code indexing (took %v)", elapsed)
+}
+
+// TestServerClient_ConcurrentStatusRequests verifies that multiple concurrent status
+// calls are served in parallel, not serialized.
+func TestServerClient_ConcurrentStatusRequests(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "ox-ipc-concstatus-")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	server := NewServer(logger)
+
+	// status handler takes 50ms (simulating light work)
+	server.SetHandlers(
+		func() error { return nil },
+		func() {},
+		func() *StatusData {
+			time.Sleep(50 * time.Millisecond)
+			return &StatusData{Running: true}
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go server.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// send 10 concurrent status requests
+	const numRequests = 10
+	results := make(chan time.Duration, numRequests)
+
+	overallStart := time.Now()
+	for i := 0; i < numRequests; i++ {
+		go func() {
+			client := &Client{socketPath: SocketPath(), timeout: 5 * time.Second}
+			start := time.Now()
+			_, err := client.Status()
+			if err != nil {
+				results <- -1
+				return
+			}
+			results <- time.Since(start)
+		}()
+	}
+
+	// collect all results
+	for i := 0; i < numRequests; i++ {
+		d := <-results
+		assert.Greater(t, d, time.Duration(0), "request %d should succeed", i)
+	}
+	overallElapsed := time.Since(overallStart)
+
+	// if serialized: 10 * 50ms = 500ms minimum
+	// if parallel: ~50ms + overhead
+	// allow generous margin but catch serialization
+	assert.Less(t, overallElapsed, 500*time.Millisecond,
+		"10 concurrent status requests should complete in <500ms if parallel (took %v); serialized would take 500ms+", overallElapsed)
+}
+
+// TestServer_StatusHandler_NeverBlocks verifies the status handler isolation by calling
+// it concurrently many times and ensuring all complete within a reasonable window.
+func TestServer_StatusHandler_NeverBlocks(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "ox-ipc-statusiso-")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	server := NewServer(logger)
+
+	var callCount atomic.Int64
+	server.SetHandlers(
+		func() error { return nil },
+		func() {},
+		func() *StatusData {
+			callCount.Add(1)
+			return &StatusData{Running: true}
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go server.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// send 100 concurrent status requests
+	const numRequests = 100
+	done := make(chan struct{}, numRequests)
+
+	overallStart := time.Now()
+	for i := 0; i < numRequests; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			client := &Client{socketPath: SocketPath(), timeout: 5 * time.Second}
+			_, _ = client.Status()
+		}()
+	}
+
+	// wait for all to complete
+	for i := 0; i < numRequests; i++ {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("status request %d timed out after 5s", i)
+		}
+	}
+	overallElapsed := time.Since(overallStart)
+
+	assert.Less(t, overallElapsed, 1*time.Second,
+		"100 concurrent status calls should complete in <1s (took %v)", overallElapsed)
+	assert.Equal(t, int64(numRequests), callCount.Load(),
+		"all %d status handler invocations should have been called", numRequests)
+}
+
+// TestServerClient_PingDuringSlowStatus verifies that ping (health check) is not blocked
+// by a slow status handler running on a different connection.
+func TestServerClient_PingDuringSlowStatus(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "ox-ipc-pingblock-")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	server := NewServer(logger)
+
+	// status handler with artificial 2s delay (simulates blocked SQLite query)
+	statusStarted := make(chan struct{})
+	var statusOnce sync.Once
+	server.SetHandlers(
+		func() error { return nil },
+		func() {},
+		func() *StatusData {
+			statusOnce.Do(func() { close(statusStarted) })
+			time.Sleep(2 * time.Second)
+			return &StatusData{Running: true}
+		},
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	go server.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// start slow status request in background
+	go func() {
+		client := &Client{socketPath: SocketPath(), timeout: 5 * time.Second}
+		_, _ = client.Status()
+	}()
+
+	// wait for status handler to be actively running
+	<-statusStarted
+
+	// ping must complete quickly despite slow status on another connection
+	client := &Client{socketPath: SocketPath(), timeout: 5 * time.Second}
+	start := time.Now()
+	err = client.Ping()
+	elapsed := time.Since(start)
+
+	require.NoError(t, err)
+	assert.Less(t, elapsed, 100*time.Millisecond,
+		"ping should complete in <100ms during slow status (took %v)", elapsed)
 }

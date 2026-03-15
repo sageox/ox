@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mattn/go-isatty"
@@ -184,15 +185,27 @@ var daemonLogsCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		lines, _ := cmd.Flags().GetInt("lines")
 		follow, _ := cmd.Flags().GetBool("follow")
+		showPath, _ := cmd.Flags().GetBool("path")
+		all, _ := cmd.Flags().GetBool("all")
 
 		logPath := daemon.LogPath()
+
+		if showPath {
+			fmt.Println(logPath)
+			return nil
+		}
 
 		if _, err := os.Stat(logPath); os.IsNotExist(err) {
 			fmt.Println("No daemon logs found")
 			return nil
 		}
 
-		tailArgs := []string{"-n", fmt.Sprintf("%d", lines)}
+		var tailArgs []string
+		if all {
+			tailArgs = []string{"-n", "+1"} // entire file from line 1
+		} else {
+			tailArgs = []string{"-n", fmt.Sprintf("%d", lines)}
+		}
 		if follow {
 			tailArgs = append(tailArgs, "-f")
 		}
@@ -287,6 +300,8 @@ func init() {
 	daemonStatusCmd.Flags().BoolP("verbose", "v", false, "show detailed sync history")
 	daemonLogsCmd.Flags().IntP("lines", "n", 50, "number of lines to show")
 	daemonLogsCmd.Flags().BoolP("follow", "f", false, "follow log output")
+	daemonLogsCmd.Flags().Bool("path", false, "print log file path and exit")
+	daemonLogsCmd.Flags().Bool("all", false, "show all log lines")
 	daemonKillCmd.Flags().Bool("all", false, "kill all running ox daemons")
 
 	daemonCmd.AddCommand(daemonStartCmd)
@@ -296,6 +311,18 @@ func init() {
 	daemonCmd.AddCommand(daemonLogsCmd)
 	daemonCmd.AddCommand(daemonListCmd)
 	daemonCmd.AddCommand(daemonKillCmd)
+
+	// hidden alias: 'ox daemon log' → 'ox daemon logs'
+	daemonLogCmd := &cobra.Command{
+		Use:    "log",
+		Hidden: true,
+		RunE:   daemonLogsCmd.RunE,
+	}
+	daemonLogCmd.Flags().IntP("lines", "n", 50, "number of lines to show")
+	daemonLogCmd.Flags().BoolP("follow", "f", false, "follow log output")
+	daemonLogCmd.Flags().Bool("path", false, "print log file path and exit")
+	daemonLogCmd.Flags().Bool("all", false, "show all log lines")
+	daemonCmd.AddCommand(daemonLogCmd)
 }
 
 // runDaemonForeground runs the daemon in the foreground.
@@ -310,7 +337,21 @@ func runDaemonForeground(ledgerPath string) error {
 	}))
 
 	d := daemon.New(cfg, logger)
-	return d.Start()
+	if err := d.Start(); err != nil {
+		return err
+	}
+
+	if !d.RestartRequested() {
+		return nil
+	}
+
+	// version mismatch: re-exec with updated binary (same PID, same FDs)
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("self-restart: resolve executable: %w", err)
+	}
+	logger.Info("re-executing daemon with updated binary", "exe", exe)
+	return syscall.Exec(exe, os.Args, os.Environ())
 }
 
 // startDaemonBackground starts the daemon as a background process.

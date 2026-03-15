@@ -347,6 +347,14 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 	// (causes HTTP 403 on push when filter.lfs.required=true is global)
 	gitutil.StripLFSConfig(ledgerPath)
 
+	// pre-flight: repair missing LFS objects that would block push
+	// (lost during GC reclone or interrupted uploads)
+	if repaired, err := gitutil.RepairMissingLFSObjects(ctx, ledgerPath); err != nil {
+		slog.Warn("lfs repair failed", "error", err)
+	} else if repaired > 0 {
+		slog.Info("repaired missing LFS pointers before push", "count", repaired)
+	}
+
 	// ensure remote has current credentials before pushing
 	ep := endpoint.GetForProject(findGitRoot())
 	if ep != "" {
@@ -381,6 +389,20 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 			if strings.Contains(outStr, pattern) {
 				return fmt.Errorf("git push failed (not retryable): %s", outStr)
 			}
+		}
+
+		// server rejected due to missing LFS objects in history — force push
+		// is safe for ledger repos (append-only session data, not code)
+		if gitutil.IsLFSPushError(outStr) {
+			slog.Info("server rejected push due to missing LFS objects, force pushing")
+			forceCtx, forceCancel := context.WithTimeout(ctx, opTimeout)
+			forceOut, forceErr := gitutil.RunGit(forceCtx, ledgerPath, "push", "--force-with-lease", "--quiet")
+			forceCancel()
+			if forceErr == nil {
+				return nil
+			}
+			slog.Warn("force push also failed", "output", forceOut)
+			return fmt.Errorf("git push failed (LFS missing, force push failed): %s", forceOut)
 		}
 
 		if attempt == maxRetries {

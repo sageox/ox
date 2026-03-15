@@ -36,7 +36,8 @@ type CodeDBManager struct {
 	indexing  bool
 	lastIndex time.Time
 	lastErr   error
-	stats     CodeDBStats
+	stats     CodeDBStats // cached after each index run; read by Stats() without opening DB
+	dataDir   string      // cached data dir; resolved once on first use
 }
 
 // CodeDBStats tracks index statistics.
@@ -97,7 +98,16 @@ func NewCodeDBManager(projectRoot string, logger *slog.Logger, telemetry *Teleme
 
 // resolveSharedDataDir returns the shared CodeDB directory from project config.
 // Falls back to legacy per-worktree path if config is unavailable.
+// Result is cached after first resolution.
 func (m *CodeDBManager) resolveSharedDataDir() string {
+	m.mu.Lock()
+	if m.dataDir != "" {
+		dir := m.dataDir
+		m.mu.Unlock()
+		return dir
+	}
+	m.mu.Unlock()
+
 	ctx, err := config.LoadProjectContext(m.projectRoot)
 	if err == nil {
 		if dir := paths.CodeDBSharedDir(ctx.RepoID(), ctx.Endpoint()); dir != "" {
@@ -110,11 +120,18 @@ func (m *CodeDBManager) resolveSharedDataDir() string {
 					_ = os.RemoveAll(legacyCodedb)
 				}
 			}
+			m.mu.Lock()
+			m.dataDir = dir
+			m.mu.Unlock()
 			return dir
 		}
 	}
 	m.logger.Debug("falling back to legacy codedb path", "reason", err)
-	return paths.CodeDBDataDir(m.projectRoot)
+	dir := paths.CodeDBDataDir(m.projectRoot)
+	m.mu.Lock()
+	m.dataDir = dir
+	m.mu.Unlock()
+	return dir
 }
 
 // SetLedgerPath sets the ledger checkout path for GitHub data indexing.
@@ -152,6 +169,12 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 
 	dataDir := m.resolveSharedDataDir()
 
+	target := m.projectRoot
+	if payload.URL != "" {
+		target = payload.URL
+	}
+	m.logger.Info("codedb indexing started", "target", target, "data_dir", dataDir, "full", payload.Full)
+
 	// --full: wipe existing index so we rebuild from scratch
 	if payload.Full {
 		m.logger.Info("codedb full reindex requested, wiping existing index", "path", dataDir)
@@ -170,6 +193,22 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 	defer db.Close()
 
 	totalStart := time.Now()
+
+	// periodic progress logging for long-running indexing
+	progressCtx, progressCancel := context.WithCancel(ctx)
+	defer progressCancel()
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-progressCtx.Done():
+				return
+			case <-ticker.C:
+				m.logger.Info("codedb indexing in progress", "elapsed", time.Since(totalStart).Round(time.Second), "target", target)
+			}
+		}
+	}()
 
 	opts := index.IndexOptions{
 		Progress: func(msg string) {
@@ -199,6 +238,7 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 		}
 	}
 	indexDuration := time.Since(indexStart)
+	m.logger.Info("codedb stage complete", "stage", "git-index", "duration", indexDuration.Round(time.Millisecond))
 
 	// stage 2: symbol extraction
 	symbolStart := time.Now()
@@ -215,6 +255,7 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 		return nil, fmt.Errorf("parse symbols: %w", err)
 	}
 	symbolDuration := time.Since(symbolStart)
+	m.logger.Info("codedb stage complete", "stage", "symbols", "duration", symbolDuration.Round(time.Millisecond), "extracted", stats.SymbolsExtracted)
 
 	// stage 3: comment extraction
 	commentStart := time.Now()
@@ -231,6 +272,7 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 		return nil, fmt.Errorf("parse comments: %w", err)
 	}
 	commentDuration := time.Since(commentStart)
+	m.logger.Info("codedb stage complete", "stage", "comments", "duration", commentDuration.Round(time.Millisecond), "extracted", cStats.CommentsExtracted)
 
 	// stage 4: build dirty overlay index for uncommitted worktree files
 	var dirtyDuration time.Duration
@@ -258,6 +300,7 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 		if pw != nil {
 			_ = pw.WriteStage("github", "Indexing GitHub data from ledger...")
 		}
+		ghStart := time.Now()
 		ghStats, ghErr := db.IndexGitHubData(ctx, lp, func(msg string) {
 			if pw != nil {
 				_ = pw.WriteMessage(msg)
@@ -267,13 +310,17 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 			m.logger.Warn("github data indexing failed", "error", ghErr)
 			// non-fatal: don't fail the whole index for GitHub data
 		} else if ghStats.PRsIndexed > 0 || ghStats.IssuesIndexed > 0 {
-			m.logger.Info("github data indexed", "prs", ghStats.PRsIndexed, "issues", ghStats.IssuesIndexed)
+			m.logger.Info("codedb stage complete", "stage", "github-data", "duration", time.Since(ghStart).Round(time.Millisecond), "prs", ghStats.PRsIndexed, "issues", ghStats.IssuesIndexed)
 		}
 	}
+
+	// cache stats from the still-open DB connection so Stats() never has to reopen
+	cachedStats := queryStatsFromDB(db, dataDir)
 
 	m.mu.Lock()
 	m.lastIndex = time.Now()
 	m.lastErr = nil
+	m.stats = cachedStats
 	m.mu.Unlock()
 
 	logArgs := []any{
@@ -323,7 +370,7 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 		if isInitial {
 			m.logger.Info("codedb auto-indexing repo for first time")
 		} else {
-			m.logger.Debug("codedb freshness check starting")
+			m.logger.Info("codedb freshness check starting")
 		}
 		result, err := m.Index(ctx, CodeIndexPayload{}, nil)
 		if err != nil {
@@ -340,53 +387,100 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 }
 
 // Stats returns current index statistics.
+// Returns cached stats from the last index run to avoid blocking on SQLite
+// during active indexing. Only queries the DB on cold start (no cached stats
+// and not currently indexing).
 func (m *CodeDBManager) Stats() CodeDBStats {
 	m.mu.Lock()
 	indexing := m.indexing
 	lastIndex := m.lastIndex
 	lastErr := m.lastErr
+	cached := m.stats
 	m.mu.Unlock()
 
 	dataDir := m.resolveSharedDataDir()
-	stats := CodeDBStats{
+
+	// if we have cached stats, return them with live metadata
+	if cached.IndexExists {
+		cached.IndexingNow = indexing
+		cached.LastIndexed = lastIndex
+		cached.DataDir = dataDir
+		cached.LastError = ""
+		if lastErr != nil {
+			cached.LastError = lastErr.Error()
+		}
+		return cached
+	}
+
+	// no cached stats yet — cold start before first index completes
+	result := CodeDBStats{
 		DataDir:     dataDir,
 		IndexingNow: indexing,
 		LastIndexed: lastIndex,
 	}
 	if lastErr != nil {
-		stats.LastError = lastErr.Error()
+		result.LastError = lastErr.Error()
 	}
 
+	// if indexing is active, don't try to open the DB (it will block)
+	if indexing {
+		if _, err := os.Stat(dataDir); err == nil {
+			result.IndexExists = true
+		}
+		return result
+	}
+
+	// not indexing and no cache: try a quick read to populate initial stats
 	if _, err := os.Stat(dataDir); err == nil {
-		stats.IndexExists = true
+		result.IndexExists = true
 
 		db, err := codedb.Open(dataDir)
 		if err == nil {
 			defer db.Close()
-			_ = db.Store().QueryRow("SELECT COUNT(*) FROM commits").Scan(&stats.Commits)
-			_ = db.Store().QueryRow("SELECT COUNT(*) FROM blobs").Scan(&stats.Blobs)
-			_ = db.Store().QueryRow("SELECT COUNT(*) FROM symbols").Scan(&stats.Symbols)
-			_ = db.Store().QueryRow("SELECT COUNT(*) FROM comments").Scan(&stats.Comments)
-			_ = db.Store().QueryRow("SELECT COUNT(*) FROM pull_requests").Scan(&stats.PRs)
-			_ = db.Store().QueryRow("SELECT COUNT(*) FROM issues").Scan(&stats.Issues)
+			result = queryStatsFromDB(db, dataDir)
+			result.IndexingNow = indexing
+			result.LastIndexed = lastIndex
+			if lastErr != nil {
+				result.LastError = lastErr.Error()
+			}
 
-			// per-repo breakdown
-			rows, err := db.Store().Query(`
-				SELECT r.name, r.path, COUNT(DISTINCT c.id) as commits,
-				       COUNT(DISTINCT fr.blob_id) as blobs
-				FROM repos r
-				LEFT JOIN commits c ON c.repo_id = r.id
-				LEFT JOIN file_revs fr ON fr.commit_id = c.id
-				GROUP BY r.id
-				ORDER BY r.name`)
-			if err == nil {
-				defer rows.Close()
-				for rows.Next() {
-					var rs RepoStats
-					if rows.Scan(&rs.Name, &rs.Path, &rs.Commits, &rs.Blobs) == nil {
-						stats.Repos = append(stats.Repos, rs)
-					}
-				}
+			// cache for future calls
+			m.mu.Lock()
+			m.stats = result
+			m.mu.Unlock()
+		}
+	}
+
+	return result
+}
+
+// queryStatsFromDB reads index stats from an already-open DB connection.
+func queryStatsFromDB(db *codedb.DB, dataDir string) CodeDBStats {
+	stats := CodeDBStats{
+		DataDir:     dataDir,
+		IndexExists: true,
+	}
+	_ = db.Store().QueryRow("SELECT COUNT(*) FROM commits").Scan(&stats.Commits)
+	_ = db.Store().QueryRow("SELECT COUNT(*) FROM blobs").Scan(&stats.Blobs)
+	_ = db.Store().QueryRow("SELECT COUNT(*) FROM symbols").Scan(&stats.Symbols)
+	_ = db.Store().QueryRow("SELECT COUNT(*) FROM comments").Scan(&stats.Comments)
+	_ = db.Store().QueryRow("SELECT COUNT(*) FROM pull_requests").Scan(&stats.PRs)
+	_ = db.Store().QueryRow("SELECT COUNT(*) FROM issues").Scan(&stats.Issues)
+
+	rows, err := db.Store().Query(`
+		SELECT r.name, r.path, COUNT(DISTINCT c.id) as commits,
+		       COUNT(DISTINCT fr.blob_id) as blobs
+		FROM repos r
+		LEFT JOIN commits c ON c.repo_id = r.id
+		LEFT JOIN file_revs fr ON fr.commit_id = c.id
+		GROUP BY r.id
+		ORDER BY r.name`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var rs RepoStats
+			if rows.Scan(&rs.Name, &rs.Path, &rs.Commits, &rs.Blobs) == nil {
+				stats.Repos = append(stats.Repos, rs)
 			}
 		}
 	}

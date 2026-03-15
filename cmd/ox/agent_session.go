@@ -224,7 +224,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		Username:      getSessionUsername(),
 		WorkspacePath: projectRoot,
 		Branch:        repotools.GetCurrentBranch(projectRoot),
-		ParentPID:     inst.ParentPID,
+		ParentPID:     os.Getppid(), // use current parent, not stale prime-time PID (fixes Conductor orphan detection)
 	}
 
 	state, err := session.StartRecording(projectRoot, opts)

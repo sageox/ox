@@ -159,10 +159,11 @@ type Daemon struct {
 	notifications *NotificationStore
 
 	// state
-	mu           sync.Mutex
-	running      bool
-	startTime    time.Time // daemon start time for uptime tracking
-	lastActivity time.Time // tracks last activity for inactivity timeout
+	mu               sync.Mutex
+	running          bool
+	restartRequested bool      // set when version mismatch triggers restart
+	startTime        time.Time // daemon start time for uptime tracking
+	lastActivity     time.Time // tracks last activity for inactivity timeout
 
 	// startup timing (written once in Start(), read by IPC status handler)
 	startupDurationMs  atomic.Int64
@@ -199,6 +200,14 @@ func (d *Daemon) timeSinceLastActivity() time.Duration {
 	return time.Since(d.lastActivity)
 }
 
+// RestartRequested returns true if the daemon stopped due to a version mismatch
+// and should be re-executed with the updated binary.
+func (d *Daemon) RestartRequested() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.restartRequested
+}
+
 // Start starts the daemon in the foreground.
 // This blocks until Stop is called or a termination signal is received.
 func (d *Daemon) Start() error {
@@ -228,7 +237,7 @@ func (d *Daemon) Start() error {
 	d.running = true
 	d.mu.Unlock()
 
-	d.logger.Info("daemon starting", "ledger", d.config.LedgerPath, "version", Version)
+	d.logger.Info("daemon starting", "ledger", d.config.LedgerPath, "version", Version())
 
 	startSetup := time.Now()
 
@@ -283,12 +292,13 @@ func (d *Daemon) Start() error {
 		d.logger.Debug("team context needed", "team_id", teamID)
 	})
 	d.heartbeat.SetVersionMismatchCallback(func(cliVersion, daemonVersion string) {
-		// CLI has been upgraded - daemon should restart to match
 		d.logger.Info("restarting due to version mismatch",
 			"cli_version", cliVersion,
 			"daemon_version", daemonVersion,
 		)
-		// stop gracefully - CLI will restart daemon with new version
+		d.mu.Lock()
+		d.restartRequested = true
+		d.mu.Unlock()
 		go d.Stop()
 	})
 	d.server.SetHeartbeatHandler(d.heartbeat.Handle)
