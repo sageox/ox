@@ -17,7 +17,6 @@ type Runner interface {
 type RunRequest struct {
 	Prompt          string
 	WorkDir         string
-	MaxTokens       int
 	TimeoutOverride time.Duration
 }
 

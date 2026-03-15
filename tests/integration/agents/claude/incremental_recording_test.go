@@ -573,13 +573,20 @@ func runOxPrime(t *testing.T, env *common.TestEnvironment) string {
 func extractAgentID(t *testing.T, primeOutput string) string {
 	t.Helper()
 
-	// Find the first '{' that starts the JSON object
-	start := strings.Index(primeOutput, "{")
-	if start == -1 {
-		t.Fatalf("no JSON found in prime output:\n%.500s", primeOutput)
+	// XML format: agent_id is an attribute on <session-context agent_id="XYZ">
+	if idx := strings.Index(primeOutput, `agent_id="`); idx != -1 {
+		rest := primeOutput[idx+len(`agent_id="`):]
+		if end := strings.Index(rest, `"`); end > 0 {
+			return rest[:end]
+		}
 	}
 
-	// Find the matching closing brace
+	// fallback: JSON format (legacy)
+	start := strings.Index(primeOutput, "{")
+	if start == -1 {
+		t.Fatalf("no agent_id found in prime output:\n%.500s", primeOutput)
+	}
+
 	jsonStr := primeOutput[start:]
 	depth := 0
 	end := -1

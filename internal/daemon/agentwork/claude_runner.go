@@ -81,10 +81,7 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	args := []string{"--output-format", "stream-json", "-p", req.Prompt}
-	if req.MaxTokens > 0 {
-		args = append(args, "--max-tokens", fmt.Sprintf("%d", req.MaxTokens))
-	}
+	args := []string{"--output-format", "stream-json", "--verbose", "-p", req.Prompt}
 
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	if req.WorkDir != "" {
