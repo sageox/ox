@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/spf13/cobra"
@@ -32,28 +33,34 @@ var sessionMigrateLFSCmd = &cobra.Command{
 
 		sessionsDir := filepath.Join(ledgerPath, "sessions")
 
+		var failed []string
 		for _, sessionName := range args {
 			sessionPath := filepath.Join(sessionsDir, sessionName)
 			if _, err := os.Stat(sessionPath); os.IsNotExist(err) {
 				fmt.Fprintf(os.Stderr, "session not found: %s\n", sessionName)
+				failed = append(failed, sessionName)
 				continue
 			}
 
 			if err := migrateSessionToLFS(projectRoot, ledgerPath, sessionPath, sessionName); err != nil {
 				fmt.Fprintf(os.Stderr, "failed to migrate %s: %v\n", sessionName, err)
+				failed = append(failed, sessionName)
 				continue
 			}
 
 			fmt.Printf("migrated %s to LFS\n", sessionName)
 		}
 
+		if len(failed) > 0 {
+			return fmt.Errorf("migrate-lfs failed for %d session(s): %s", len(failed), strings.Join(failed, ", "))
+		}
 		return nil
 	},
 }
 
 func migrateSessionToLFS(projectRoot, ledgerPath, sessionPath, sessionName string) error {
 	// check if already migrated (all content files are pointers)
-	contentFiles := []string{ledgerFileRaw, ledgerFileSummaryMD, ledgerFileSessionMD, ledgerFileHTML}
+	contentFiles := []string{ledgerFileRaw, ledgerFileSummaryMD, ledgerFileSessionMD, ledgerFileHTML, ledgerFilePlan}
 	allPointers := true
 	hasContent := false
 	for _, name := range contentFiles {

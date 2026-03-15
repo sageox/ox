@@ -431,6 +431,12 @@ Always confirm with human before doing a git commit or a git push in this repo.
 - Write for humans who skim — lead with the most important change, use headings and bullets
 - **Squash merges use "PR title + description"** — the PR body becomes the squash commit message on main, so write it as the permanent record
 
+**Resolving CodeRabbit PR comments:**
+When addressing CodeRabbit review comments, after fixing the code:
+1. Reply "Fixed." to each review comment via `gh api repos/{owner}/{repo}/pulls/{pr}/comments/{id}/replies -f body="Fixed."`
+2. Resolve each thread via GraphQL: `gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thread_id>"}) { thread { isResolved } } }'`
+3. Get thread IDs from: `gh api graphql -f query='{ repository(owner: "{owner}", name: "{repo}") { pullRequest(number: {n}) { reviewThreads(first: 50) { nodes { id isResolved comments(first: 1) { nodes { databaseId path } } } } } } }'`
+
 ### Key Practices
 
 - **Simplicity**: Don't over-engineer; minimum complexity for current needs

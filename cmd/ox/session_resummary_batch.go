@@ -53,6 +53,15 @@ func runSessionHydrateLFS(cmd *cobra.Command, args []string) error {
 		sessionPath := filepath.Join(sessionsDir, sessionName)
 		rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 
+		if _, err := os.Stat(sessionPath); os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "%s: session not found\n", sessionName)
+			continue
+		}
+		if _, err := os.Stat(rawPath); os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "%s: missing %s\n", sessionName, ledgerFileRaw)
+			continue
+		}
+
 		if !lfs.IsPointerFile(rawPath) {
 			fmt.Printf("%s: already hydrated (%d bytes)\n", sessionName, fileSize(rawPath))
 			continue
@@ -122,12 +131,18 @@ func resummarySession(projectRoot, ledgerPath, sessionPath, sessionName, ep stri
 		return fmt.Errorf("read meta.json: %w", err)
 	}
 
-	// ensure raw.jsonl is hydrated (not just a pointer)
+	// ensure raw.jsonl is local (not just a pointer)
 	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 	if lfs.IsPointerFile(rawPath) {
 		slog.Info("downloading raw.jsonl from LFS", "session", sessionName)
 		if err := downloadFileFromLFS(projectRoot, sessionPath, meta, ledgerFileRaw); err != nil {
 			return fmt.Errorf("download raw.jsonl: %w", err)
+		}
+		// restore pointer on any exit path to avoid leaving large content in ledger
+		if ref, ok := meta.Files[ledgerFileRaw]; ok {
+			defer func() {
+				_ = lfs.WritePointerFile(rawPath, ref)
+			}()
 		}
 	}
 
@@ -164,12 +179,9 @@ func resummarySession(projectRoot, ledgerPath, sessionPath, sessionName, ep stri
 
 	// update meta.json title
 	if result.Title != "" {
-		_ = lfs.UpdateMetaSummary(sessionPath, result.Title)
-	}
-
-	// restore raw.jsonl to pointer (don't leave hydrated content in ledger)
-	if ref, ok := meta.Files[ledgerFileRaw]; ok {
-		_ = lfs.WritePointerFile(rawPath, ref)
+		if err := lfs.UpdateMetaSummary(sessionPath, result.Title); err != nil {
+			slog.Warn("failed to update meta.json title", "session", sessionName, "err", err)
+		}
 	}
 
 	// commit and push summary.json (git-tracked, not LFS)
