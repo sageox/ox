@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -293,10 +294,11 @@ var codeStatusCmd = &cobra.Command{
 		// query DB directly for counts (daemon stats may lag)
 		var totalCommits, totalBlobs, totalSymbols, totalComments, totalPRs, totalIssues int
 		type repoRow struct {
-			name    string
-			path    string
-			commits int
-			blobs   int
+			name      string
+			path      string
+			commits   int
+			blobs     int
+			lastCommit int64 // unix timestamp of most recent commit
 		}
 		var repos []repoRow
 
@@ -311,7 +313,10 @@ var codeStatusCmd = &cobra.Command{
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM issues").Scan(&totalIssues)
 
 				rows, qErr := db.Store().Query(`
-					SELECT r.name, r.path, COUNT(DISTINCT c.id), COUNT(DISTINCT fr.blob_id)
+					SELECT r.name, r.path,
+					       COUNT(DISTINCT c.id),
+					       COUNT(DISTINCT fr.blob_id),
+					       COALESCE(MAX(c.timestamp), 0)
 					FROM repos r
 					LEFT JOIN commits c ON c.repo_id = r.id
 					LEFT JOIN file_revs fr ON fr.commit_id = c.id
@@ -319,7 +324,7 @@ var codeStatusCmd = &cobra.Command{
 				if qErr == nil {
 					for rows.Next() {
 						var r repoRow
-						if rows.Scan(&r.name, &r.path, &r.commits, &r.blobs) == nil {
+						if rows.Scan(&r.name, &r.path, &r.commits, &r.blobs, &r.lastCommit) == nil {
 							repos = append(repos, r)
 						}
 					}
@@ -474,6 +479,19 @@ var codeStatusCmd = &cobra.Command{
 				}
 			}
 			primaryCommits := repos[primaryIdx].commits
+			primaryName := repos[primaryIdx].name
+
+			// sort: primary first, then alphabetical
+			sort.Slice(repos, func(i, j int) bool {
+				iPrimary := repos[i].name == primaryName
+				jPrimary := repos[j].name == primaryName
+				if iPrimary != jPrimary {
+					return iPrimary
+				}
+				return repos[i].name < repos[j].name
+			})
+			// primary is always index 0 after sort
+			primaryIdx = 0
 
 			// compute max name width for column alignment (including " (primary)" suffix)
 			maxNameLen := 0
@@ -484,6 +502,35 @@ var codeStatusCmd = &cobra.Command{
 				}
 				if nameLen > maxNameLen {
 					maxNameLen = nameLen
+				}
+			}
+
+			// pre-compute commit strings for column alignment
+			type worktreeLine struct {
+				commitStr string
+			}
+			lines := make([]worktreeLine, len(repos))
+			maxCommitLen := 0
+			for i, r := range repos {
+				if i == primaryIdx {
+					lines[i].commitStr = formatComma(r.commits) + " commits"
+				} else if r.commits > 0 && primaryCommits > 0 {
+					lines[i].commitStr = "+" + formatComma(r.commits) + " commits"
+				} else {
+					lines[i].commitStr = formatComma(r.commits) + " commits"
+				}
+				if len(lines[i].commitStr) > maxCommitLen {
+					maxCommitLen = len(lines[i].commitStr)
+				}
+			}
+
+			// pre-compute blob strings for column alignment
+			maxBlobLen := 0
+			blobStrs := make([]string, len(repos))
+			for i, r := range repos {
+				blobStrs[i] = formatComma(r.blobs) + " blobs"
+				if len(blobStrs[i]) > maxBlobLen {
+					maxBlobLen = len(blobStrs[i])
 				}
 			}
 
@@ -498,17 +545,20 @@ var codeStatusCmd = &cobra.Command{
 				if i == primaryIdx {
 					label := r.name + " (primary)"
 					padded := label + strings.Repeat(" ", maxNameLen-len(label))
-					b.WriteString(statusHighlightStyle.Render(padded))
-					b.WriteString(statusMutedStyle.Render(fmt.Sprintf("  %s commits, %s blobs", formatComma(r.commits), formatComma(r.blobs))))
+					b.WriteString(statusSuccessStyle.Render(padded))
 				} else {
 					padded := r.name + strings.Repeat(" ", maxNameLen-len(r.name))
 					b.WriteString(statusValueStyle.Render(padded))
-					// show incremental commits relative to primary
-					if r.commits > 0 && primaryCommits > 0 {
-						b.WriteString(statusMutedStyle.Render(fmt.Sprintf("  +%s commits, %s blobs", formatComma(r.commits), formatComma(r.blobs))))
-					} else {
-						b.WriteString(statusMutedStyle.Render(fmt.Sprintf("  %s commits, %s blobs", formatComma(r.commits), formatComma(r.blobs))))
-					}
+				}
+
+				paddedCommits := lines[i].commitStr + strings.Repeat(" ", maxCommitLen-len(lines[i].commitStr))
+				paddedBlobs := blobStrs[i] + strings.Repeat(" ", maxBlobLen-len(blobStrs[i]))
+				b.WriteString(statusMutedStyle.Render("  " + paddedCommits + ", " + paddedBlobs))
+
+				// show last commit age if available
+				if r.lastCommit > 0 {
+					age := formatTimeAgo(time.Unix(r.lastCommit, 0))
+					b.WriteString(statusMutedStyle.Render("  " + age))
 				}
 				b.WriteString("\n")
 			}
