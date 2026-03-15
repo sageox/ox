@@ -16,6 +16,13 @@ import (
 // them with empty content so future pushes aren't blocked by the remote's
 // pre-receive hook rejecting missing LFS objects.
 //
+// The repair:
+// 1. Detects missing LFS objects via `git lfs ls-files`
+// 2. Replaces each orphaned pointer with empty content
+// 3. Commits the fix
+// 4. Sets lfs.allowincompletepush=true so the local pre-push hook doesn't block
+//    (the server may still reject — caller should retry with force push if needed)
+//
 // Returns the number of repaired files and any error. Safe to call on repos
 // without LFS — returns (0, nil) immediately.
 func RepairMissingLFSObjects(ctx context.Context, repoPath string) (int, error) {
@@ -25,40 +32,10 @@ func RepairMissingLFSObjects(ctx context.Context, repoPath string) (int, error) 
 		return 0, nil
 	}
 
-	// list LFS files with status: '*' = present, '-' = missing
-	lsCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	output, err := RunGit(lsCtx, repoPath, "lfs", "ls-files", "--long")
+	missingFiles, err := findMissingLFSFiles(ctx, repoPath)
 	if err != nil {
-		// git-lfs not installed or not an LFS repo — skip silently
-		if strings.Contains(output, "not found") || strings.Contains(err.Error(), "not found") {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("git lfs ls-files: %w", err)
+		return 0, err
 	}
-
-	if strings.TrimSpace(output) == "" {
-		return 0, nil
-	}
-
-	// parse output: each line is "<oid> <status> <path>"
-	// status: '*' = present locally, '-' = missing locally
-	var missingFiles []string
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	for scanner.Scan() {
-		line := scanner.Text()
-		// format: "abc123def4 - path/to/file" or "abc123def4 * path/to/file"
-		parts := strings.SplitN(line, " ", 3)
-		if len(parts) < 3 {
-			continue
-		}
-		status := parts[1]
-		path := parts[2]
-		if status == "-" {
-			missingFiles = append(missingFiles, path)
-		}
-	}
-
 	if len(missingFiles) == 0 {
 		return 0, nil
 	}
@@ -122,4 +99,55 @@ func RepairMissingLFSObjects(ctx context.Context, repoPath string) (int, error) 
 
 	slog.Info("lfs repair complete", "repaired", repaired)
 	return repaired, nil
+}
+
+// findMissingLFSFiles returns paths of LFS-tracked files whose backing objects
+// are missing locally. Returns nil if LFS is not installed or no files are missing.
+func findMissingLFSFiles(ctx context.Context, repoPath string) ([]string, error) {
+	lsCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	output, err := RunGit(lsCtx, repoPath, "lfs", "ls-files", "--long")
+	if err != nil {
+		// git-lfs not installed or not an LFS repo — skip silently
+		if strings.Contains(output, "not found") || strings.Contains(err.Error(), "not found") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("git lfs ls-files: %w", err)
+	}
+
+	if strings.TrimSpace(output) == "" {
+		return nil, nil
+	}
+
+	// parse output: each line is "<oid> <status> <path>"
+	// status: '*' = present locally, '-' = missing locally
+	var missing []string
+	scanner := bufio.NewScanner(strings.NewReader(output))
+	for scanner.Scan() {
+		line := scanner.Text()
+		parts := strings.SplitN(line, " ", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		if parts[1] == "-" {
+			missing = append(missing, parts[2])
+		}
+	}
+	return missing, nil
+}
+
+// HasMissingLFSObjects returns true if the repo has LFS-tracked files whose
+// backing objects are missing locally.
+func HasMissingLFSObjects(ctx context.Context, repoPath string) bool {
+	missing, err := findMissingLFSFiles(ctx, repoPath)
+	return err == nil && len(missing) > 0
+}
+
+// IsLFSPushError returns true if the error output indicates a push failure
+// caused by missing LFS objects (either local pre-push hook or server-side).
+func IsLFSPushError(output string) bool {
+	return strings.Contains(output, "LFS objects are missing") ||
+		strings.Contains(output, "missing or corrupt local objects") ||
+		strings.Contains(output, "failed to store") ||
+		(strings.Contains(output, "LFS upload") && strings.Contains(output, "missing"))
 }

@@ -391,6 +391,20 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 			}
 		}
 
+		// server rejected due to missing LFS objects in history — force push
+		// is safe for ledger repos (append-only session data, not code)
+		if gitutil.IsLFSPushError(outStr) {
+			slog.Info("server rejected push due to missing LFS objects, force pushing")
+			forceCtx, forceCancel := context.WithTimeout(ctx, opTimeout)
+			forceOut, forceErr := gitutil.RunGit(forceCtx, ledgerPath, "push", "--force-with-lease", "--quiet")
+			forceCancel()
+			if forceErr == nil {
+				return nil
+			}
+			slog.Warn("force push also failed", "output", forceOut)
+			return fmt.Errorf("git push failed (LFS missing, force push failed): %s", forceOut)
+		}
+
 		if attempt == maxRetries {
 			return fmt.Errorf("git push failed after %d attempts: %s", maxRetries, outStr)
 		}
