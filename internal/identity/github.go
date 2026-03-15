@@ -1,12 +1,15 @@
 package identity
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/logger"
@@ -40,8 +43,18 @@ func GetGitHubToken() string {
 		return t
 	}
 
-	// 2. Read gh CLI config (no gh binary needed)
-	return readGHHostsConfig()
+	// 2. Read gh CLI config file (no subprocess needed)
+	if t := readGHHostsConfig(); t != "" {
+		return t
+	}
+
+	// 3. Fall back to gh CLI subprocess (handles keychain-stored tokens)
+	return readGHAuthToken()
+}
+
+// IsGitHubAvailable returns true if a GitHub token can be resolved from any source.
+func IsGitHubAvailable() bool {
+	return GetGitHubToken() != ""
 }
 
 // ghHostsConfig represents the structure of ~/.config/gh/hosts.yml
@@ -72,6 +85,19 @@ func readGHHostsConfig() string {
 	}
 
 	return ""
+}
+
+// readGHAuthToken runs `gh auth token` to get the token from whatever
+// credential store gh is configured to use (keychain, hosts.yml, etc.).
+func readGHAuthToken() string {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "auth", "token")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
 }
 
 // gitHubUserResponse represents the GitHub API user response.

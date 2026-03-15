@@ -79,6 +79,18 @@ func TestParseGitHubRemote(t *testing.T) {
 			wantRepo:  "repo",
 			wantOK:    true,
 		},
+		{
+			name:      "normalized form from repotools",
+			url:       "github.com/sageox/ox",
+			wantOwner: "sageox",
+			wantRepo:  "ox",
+			wantOK:    true,
+		},
+		{
+			name:   "normalized form non-github",
+			url:    "gitlab.com/org/repo",
+			wantOK: false,
+		},
 	}
 
 	for _, tt := range tests {

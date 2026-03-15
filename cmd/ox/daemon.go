@@ -296,6 +296,16 @@ func init() {
 	daemonCmd.AddCommand(daemonLogsCmd)
 	daemonCmd.AddCommand(daemonListCmd)
 	daemonCmd.AddCommand(daemonKillCmd)
+
+	// hidden alias: 'ox daemon log' → 'ox daemon logs'
+	daemonLogCmd := &cobra.Command{
+		Use:    "log",
+		Hidden: true,
+		RunE:   daemonLogsCmd.RunE,
+	}
+	daemonLogCmd.Flags().IntP("lines", "n", 50, "number of lines to show")
+	daemonLogCmd.Flags().BoolP("follow", "f", false, "follow log output")
+	daemonCmd.AddCommand(daemonLogCmd)
 }
 
 // runDaemonForeground runs the daemon in the foreground.

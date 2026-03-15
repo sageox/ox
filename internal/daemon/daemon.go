@@ -228,7 +228,7 @@ func (d *Daemon) Start() error {
 	d.running = true
 	d.mu.Unlock()
 
-	d.logger.Info("daemon starting", "ledger", d.config.LedgerPath, "version", Version)
+	d.logger.Info("daemon starting", "ledger", d.config.LedgerPath, "version", Version())
 
 	startSetup := time.Now()
 

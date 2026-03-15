@@ -447,6 +447,9 @@ func formatCodeIndexInline(status *StatusData, verbose bool) string {
 	case !cs.LastIndexed.IsZero():
 		age := formatRelativeTime(time.Since(cs.LastIndexed))
 		metrics := fmt.Sprintf("%d commits, %d blobs", cs.Commits, cs.Blobs)
+		if cs.PRs > 0 || cs.Issues > 0 {
+			metrics += fmt.Sprintf(", %d PRs, %d issues", cs.PRs, cs.Issues)
+		}
 		line = styleHealthy.Render("● "+age) + "  " + styleMuted.Render(metrics)
 	default:
 		line = styleHealthy.Render("● ready")

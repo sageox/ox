@@ -223,6 +223,14 @@ var codeQueryCmd = &cobra.Command{
 	RunE:   codeSearchCmd.RunE,
 }
 
+// codeStatsAliasCmd is a hidden alias for codeStatusCmd — back-compat for "ox code stats"
+var codeStatsAliasCmd = &cobra.Command{
+	Use:    "stats",
+	Hidden: true,
+	Short:  codeStatusCmd.Short,
+	RunE:   codeStatusCmd.RunE,
+}
+
 var codeSQLCmd = &cobra.Command{
 	Use:    "sql <query>",
 	Short:  "Execute raw SQL against the CodeDB database",
@@ -256,9 +264,9 @@ var codeSQLCmd = &cobra.Command{
 	},
 }
 
-var codeStatsCmd = &cobra.Command{
-	Use:   "stats",
-	Short: "Show code index statistics",
+var codeStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Show code index status",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root, err := repotools.FindRepoRoot(repotools.VCSGit)
 		if err != nil {
@@ -538,13 +546,15 @@ func init() {
 	// mirror indexCodeCmd flags so the alias works correctly
 	codeIndexCmd.Flags().Bool("full", false, "wipe index and rebuild from scratch")
 
-	codeStatsCmd.Flags().Bool("json", false, "output as JSON")
+	codeStatusCmd.Flags().Bool("json", false, "output as JSON")
+	codeStatsAliasCmd.Flags().Bool("json", false, "output as JSON")
 
 	codeCmd.AddCommand(codeIndexCmd)
 	codeCmd.AddCommand(codeSearchCmd)
 	codeCmd.AddCommand(codeQueryCmd)
 	codeCmd.AddCommand(codeSQLCmd)
-	codeCmd.AddCommand(codeStatsCmd)
+	codeCmd.AddCommand(codeStatusCmd)
+	codeCmd.AddCommand(codeStatsAliasCmd)
 	codeCmd.AddCommand(codeInsightsCmd)
 	codeCmd.GroupID = "dev"
 	rootCmd.AddCommand(codeCmd)

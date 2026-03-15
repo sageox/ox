@@ -1900,6 +1900,20 @@ func renderProjectStatus(cwd, gitRoot string, initialized bool, codeStats *daemo
 			} else {
 				b.WriteString(statusSuccessStyle.Render("✓"))
 			}
+			// show what sources have been indexed
+			var sources []string
+			if codeStats.Commits > 0 {
+				sources = append(sources, "git history")
+			}
+			if codeStats.Symbols > 0 {
+				sources = append(sources, "symbols")
+			}
+			if codeStats.PRs > 0 || codeStats.Issues > 0 {
+				sources = append(sources, "github")
+			}
+			if len(sources) > 0 {
+				b.WriteString(statusMutedStyle.Render("  (" + strings.Join(sources, ", ") + ")"))
+			}
 		}
 		b.WriteString("\n")
 	}
