@@ -61,7 +61,7 @@ func Open(root string) (*Store, error) {
 	// write locks instead of failing immediately. This matters when multiple
 	// daemons (one per worktree) share the same index. Long-term fix is
 	// one-daemon-per-repo; until then busy_timeout provides best-effort safety.
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)&_pragma=cache_size(-65536)&_pragma=mmap_size(268435456)&_pragma=temp_store(MEMORY)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}

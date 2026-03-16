@@ -149,6 +149,7 @@ CREATE INDEX IF NOT EXISTS idx_issues_number ON issues(number);
 CREATE INDEX IF NOT EXISTS idx_issues_state ON issues(state);
 CREATE INDEX IF NOT EXISTS idx_issues_author ON issues(author);
 CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id);
+CREATE INDEX IF NOT EXISTS idx_blobs_parsed_lang ON blobs(parsed, language);
 
 CREATE TABLE IF NOT EXISTS github_file_mtimes (
     source_path TEXT NOT NULL PRIMARY KEY,
@@ -237,6 +238,11 @@ func migrateAddComments(db *sql.DB) error {
 		if _, err := db.Exec(`ALTER TABLE blobs ADD COLUMN comments_parsed INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return err
 		}
+	}
+
+	// index for fast unparsed-comments lookups
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_blobs_comments_parsed ON blobs(comments_parsed)`); err != nil {
+		return err
 	}
 
 	return nil

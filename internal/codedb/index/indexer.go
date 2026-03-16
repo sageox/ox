@@ -63,7 +63,7 @@ type refInfo struct {
 	tipOID plumbing.Hash
 }
 
-const bleveBatchSize = 200
+const bleveBatchSize = 500
 
 // defaultSkipDirs is the default set of directories to skip when indexing a working tree.
 // Override via IndexOptions.SkipDirs.
@@ -749,9 +749,9 @@ func (st *indexState) indexCommit(cd commitData) error {
 	}
 
 	// Evict tree cache periodically to bound memory usage.
-	// 32 entries ~ 32 full tree snapshots; keeps memory reasonable for large repos
-	// while avoiding re-parsing recently seen trees.
-	if len(st.treeCache) >= 32 {
+	// 256 entries keeps memory reasonable while preserving cache hits across
+	// adjacent commits that share tree objects.
+	if len(st.treeCache) >= 256 {
 		st.treeCache = make(map[plumbing.Hash]map[string]plumbing.Hash)
 	}
 
