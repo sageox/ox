@@ -11,6 +11,8 @@ var fallbackIncludes = []string{
 	"memory/",
 	"docs/",
 	"coworkers/",
+	"discussions/",
+	"agent-context/",
 }
 
 // FallbackConfig returns a ManifestConfig with hardcoded control-plane

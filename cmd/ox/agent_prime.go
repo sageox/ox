@@ -6,13 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
@@ -24,8 +27,8 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ledger"
-	"github.com/sageox/ox/internal/notification"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/telemetry"
@@ -33,7 +36,6 @@ import (
 	"github.com/sageox/ox/internal/tokens"
 	"github.com/sageox/ox/internal/ui"
 	"github.com/sageox/ox/internal/useragent"
-	"github.com/sageox/ox/pkg/agentx"
 	"github.com/spf13/cobra"
 )
 
@@ -161,9 +163,9 @@ type teamContextInfo struct {
 	Escalation string   `json:"escalation,omitempty"` // path to human escalation roster if exists
 
 	// Coworker customizations from coworkers/
-	CoworkerInstructions *teamCoworkerInstructions `json:"coworker_instructions,omitempty"`
-	Coworkers            []claude.Agent            `json:"coworkers,omitempty"`
-	CoworkerCommands     []claude.Command          `json:"coworker_commands,omitempty"`
+	CoworkerInstructions  *teamCoworkerInstructions `json:"coworker_instructions,omitempty"`
+	Coworkers             []claude.Agent            `json:"coworkers,omitempty"`
+	CoworkerCommands      []claude.Command          `json:"coworker_commands,omitempty"`
 	AgentsIndexPath       string                    `json:"agents_index_path,omitempty"`        // path to agents/index.md if exists
 	AgentsAgentsMDContent string                    `json:"agents_agents_md_content,omitempty"` // coworkers/agents/AGENTS.md content (first 200 lines)
 	CoworkerHint          string                    `json:"coworker_hint,omitempty"`            // hint for agents about available coworkers
@@ -181,12 +183,13 @@ type teamContextInfo struct {
 	TeamDocs []teamdocs.TeamDoc `json:"team_docs,omitempty"`
 
 	// v4 Team Memory
-	MemoryContent string   `json:"memory_content,omitempty"` // full MEMORY.md content (always inlined)
-	SoulHint      string   `json:"soul_hint,omitempty"`      // path to SOUL.md (reference, not inlined)
-	TeamHint      string   `json:"team_hint,omitempty"`      // path to TEAM.md (reference, not inlined)
-	MemoryDaily   []string `json:"memory_daily,omitempty"`   // available daily summary files
-	MemoryWeekly  []string `json:"memory_weekly,omitempty"`  // available weekly summary files
-	MemoryMonthly []string `json:"memory_monthly,omitempty"` // available monthly summary files
+	MemoryContent        string   `json:"memory_content,omitempty"`         // full MEMORY.md content (always inlined)
+	SoulHint             string   `json:"soul_hint,omitempty"`              // path to SOUL.md (reference, not inlined)
+	TeamHint             string   `json:"team_hint,omitempty"`              // path to TEAM.md (reference, not inlined)
+	MemoryDaily          []string `json:"memory_daily,omitempty"`           // available daily summary files
+	MemoryWeekly         []string `json:"memory_weekly,omitempty"`          // available weekly summary files
+	MemoryMonthly        []string `json:"memory_monthly,omitempty"`         // available monthly summary files
+	ObservationGuideHint string   `json:"observation_guide_hint,omitempty"` // path to memory/GUIDE.md (read when needed)
 
 	// sync health
 	Stale      bool   `json:"stale,omitempty"`       // true if last sync exceeds staleness threshold
@@ -221,10 +224,12 @@ type teamCoworkerInstructions struct {
 
 // ProjectGuidance represents parsed AGENTS.md content from the project
 type ProjectGuidance struct {
-	Source  string `json:"source"`           // path where AGENTS.md was found
-	Content string `json:"content"`          // raw content of AGENTS.md
-	Size    int    `json:"size"`             // byte size of content
-	Tokens  int    `json:"tokens,omitempty"` // estimated token count
+	Source     string `json:"source"`                // path where AGENTS.md was found
+	Content    string `json:"content"`               // raw content of AGENTS.md
+	Size       int    `json:"size"`                  // byte size of content
+	Tokens     int    `json:"tokens,omitempty"`      // estimated token count
+	Skipped    bool   `json:"skipped,omitempty"`     // true if content was not injected
+	SkipReason string `json:"skip_reason,omitempty"` // why content was skipped
 }
 
 // TeamInstructions represents team-level instruction files (AGENTS.md / CLAUDE.md)
@@ -286,6 +291,10 @@ type agentPrimeOutput struct {
 	// Doctor agent marker
 	NeedsDoctorAgent bool   `json:"needs_doctor_agent,omitempty"` // true if .needs-doctor-agent marker exists
 	DoctorHint       string `json:"doctor_hint,omitempty"`        // hint for agent to run ox agent doctor
+	// Observation recording directive (behavioral, not just a tool reference)
+	ObservationDirective string `json:"observation_directive,omitempty"` // proactive instruction to record observations via ox memory put
+	// Code search availability
+	CodeSearchTip string `json:"code_search_tip,omitempty"` // guidance on code search availability for this repo
 	// Hook auto-install
 	HooksInstalled     bool   `json:"hooks_installed,omitempty"`      // true if hooks were newly installed this prime
 	HooksRestartNotice string `json:"hooks_restart_notice,omitempty"` // message for agent to relay to user about restarting
@@ -322,6 +331,7 @@ func initAgentPrimeCmd() {
 	// --review: For security engineers to audit what agents receive (shows both)
 	agentPrimeCmd.Flags().Bool("text", false, "Output human-readable text instead of JSON")
 	agentPrimeCmd.Flags().Bool("review", false, "Security audit mode: show English summary + JSON")
+	agentPrimeCmd.Flags().String("format", "", "Output format: xml (default) or json")
 
 	// Future optimization: agent/model can be used to tune output for specific agent/model combinations.
 	agentPrimeCmd.Flags().String("agent", "", "Agent identifier (claude-code, cursor, droid, windsurf) (default: none)")
@@ -524,7 +534,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	ledgerStatus := discoverLedger(teamCtx)
 
 	// load project guidance from AGENTS.md
-	projectGuidance := loadProjectGuidance(projectRoot)
+	projectGuidance := loadProjectGuidance(projectRoot, agentType)
 
 	// build capture-prior guidance with current agent ID
 	capturePrior := buildCapturePriorGuidance(agentID)
@@ -536,43 +546,12 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	needsDoctorAgent := doctor.NeedsDoctorAgent(projectRoot)
 	var doctorHint string
 	if needsDoctorAgent {
-		doctorHint = "Run 'ox agent doctor' to finalize incomplete sessions"
+		doctorHint = "Run 'ox agent doctor' to finalize incomplete sessions" // quote command names in prose for scannability
 	}
 
 	// build intent-to-command guidance for agent consumption
-	guidance := buildGuidance(agentID, teamCtx, ledgerStatus)
+	guidance := buildGuidance(agentID, projectRoot, teamCtx, ledgerStatus)
 	timing["guidance_build"] = time.Since(phaseStart).Milliseconds()
-
-	// check for team context notifications using mtime-based approach
-	var lastNotified time.Time
-	if existingMarker != nil {
-		lastNotified = existingMarker.LastNotified
-	}
-	var teamCtxPath string
-	if teamCtx != nil {
-		teamCtxPath = teamCtx.Path
-	}
-	latestMtime, updatedFiles := notification.CheckForUpdates(teamCtxPath, lastNotified)
-
-	// emit notification if there are updates (before main output)
-	if len(updatedFiles) > 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "## SageOx Team Context Updated")
-		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "Your SageOx team knowledge has been updated. Please inform the user and re-read these files:")
-		fmt.Fprintln(cmd.OutOrStdout())
-		for _, f := range updatedFiles {
-			relPath := f
-			if teamCtxPath != "" {
-				if rel, err := filepath.Rel(teamCtxPath, f); err == nil {
-					relPath = rel
-				}
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "- %s\n", relPath)
-		}
-		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "---")
-		fmt.Fprintln(cmd.OutOrStdout())
-	}
 
 	// register or update agent instance locally (bootstrap completes without cloud API)
 	var inst *agentinstance.Instance
@@ -684,9 +663,10 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// always-present disambiguation of knowledge sources
+	// quote command names in prose for scannability
 	output.Important = "SageOx has two SEPARATE knowledge sources. " +
-		"(1) TEAM CONTEXT: team-wide meetings, architecture decisions, and conventions shared across ALL repos. Read with: ox agent team-ctx. " +
-		"(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions for THIS repo only. Browse with: ox session list. " +
+		"(1) TEAM CONTEXT: team-wide meetings, architecture decisions, and conventions shared across ALL repos. Read with: 'ox agent team-ctx'. " +
+		"(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions for THIS repo only. Browse with: 'ox session list'. " +
 		"These are unrelated — sessions are NOT discussions, and the ledger is NOT team context."
 
 	// discover other team contexts (non-primary)
@@ -706,9 +686,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	if totalTeams > 1 {
 		output.Important = fmt.Sprintf("SageOx has two SEPARATE knowledge sources. "+
 			"(1) TEAM CONTEXT: team-wide meetings, architecture decisions, and conventions shared across ALL repos. "+
-			"You have access to %d team contexts. Read with: ox agent team-ctx [slug]. "+
+			"You have access to %d team contexts. Read with: 'ox agent team-ctx [slug]'. "+
 			"(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions for THIS repo only. "+
-			"Browse with: ox session list. "+
+			"Browse with: 'ox session list'. "+
 			"These are unrelated — sessions are NOT discussions, and the ledger is NOT team context.", totalTeams)
 	}
 
@@ -719,6 +699,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		if projCfg != nil && projCfg.TeamID != "" {
 			output.TeamContextStatus = "syncing"
 		}
+	}
+
+	// observation directive — behavioral instruction for agents to proactively record
+	if teamCtx != nil && auth.IsMemoryEnabled() && teamCtx.ObservationGuideHint != "" {
+		output.ObservationDirective = fmt.Sprintf(
+			"Proactively record observations throughout this session using `ox memory put`. "+
+				"Record decisions, discoveries, questions, and notable events as they happen — don't wait to be asked. "+
+				"Read GUIDE.md first for what to capture: %s", teamCtx.ObservationGuideHint)
 	}
 
 	// build pre-assembled notification for JSON-consuming agents.
@@ -774,18 +762,12 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// write session marker for idempotent behavior (graceful failure)
 	if agentSessionID != "" {
-		// determine LastNotified: use latestMtime if we have files, else preserve existing
-		newLastNotified := latestMtime
-		if newLastNotified.IsZero() && existingMarker != nil {
-			newLastNotified = existingMarker.LastNotified
-		}
-
 		marker := &SessionMarker{
 			AgentID:        agentID,
 			SessionID:      inst.ServerSessionID,
 			AgentSessionID: agentSessionID,
 			PrimedAt:       time.Now(),
-			LastNotified:   newLastNotified,
+			ParentPID:      os.Getppid(),
 		}
 		if err := WriteSessionMarker(marker); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to write session marker: %v\n", err)
@@ -802,6 +784,23 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			envVars["AGENT_VERSION"] = agentVer
 		}
 		_ = WriteToAgentEnvFile(envVars)
+	}
+
+	// append code search tip to AgentTip based on index availability
+	repoSlug := repoSlugFromRemoteOrDir(projectRoot)
+	codeDBDir := resolveCodeDBDir(projectRoot)
+	if _, statErr := os.Stat(codeDBDir); statErr == nil {
+		teamLabel := ""
+		if teamCtx != nil {
+			tn := teamCtx.TeamName
+			if tn == "" {
+				tn = teamCtx.TeamID
+			}
+			teamLabel = tn + " "
+		}
+		output.CodeSearchTip = fmt.Sprintf("'ox code search' is available for %s, PREFER over grep for code search (it indexes symbols, git history, diffs). Use 'ox query' only for %steam context (discussions) and ledger session recordings.", repoSlug, teamLabel)
+	} else {
+		output.CodeSearchTip = fmt.Sprintf("Run 'ox code index' to enable local code search (symbols, diffs, git history) for %s.", repoSlug)
 	}
 
 	output.ElapsedMs = time.Since(primeStart).Milliseconds()
@@ -839,35 +838,13 @@ func loadResolvedAttribution() config.ResolvedAttribution {
 	return config.MergeAttribution(projectAttr, userAttr)
 }
 
-// loadProjectGuidance loads AGENTS.md from the project root or .sageox/ directory.
-// Returns nil if no AGENTS.md is found (not an error - it's optional).
-func loadProjectGuidance(projectRoot string) *ProjectGuidance {
-	if projectRoot == "" {
-		return nil
-	}
-
-	// search paths in priority order
-	searchPaths := []string{
-		filepath.Join(projectRoot, "AGENTS.md"),
-		filepath.Join(projectRoot, ".sageox", "AGENTS.md"),
-	}
-
-	for _, p := range searchPaths {
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue // file not found or not readable
-		}
-
-		content := string(data)
-		return &ProjectGuidance{
-			Source:  p,
-			Content: content,
-			Size:    len(data),
-			Tokens:  tokens.EstimateTokens(content),
-		}
-	}
-
-	return nil // no AGENTS.md found (not an error)
+// loadProjectGuidance is intentionally a no-op.
+// The project's AGENTS.md / CLAUDE.md are already loaded natively by AI coding tools
+// (Claude Code reads CLAUDE.md, Codex reads AGENTS.md, etc.), so ox agent prime
+// must NOT re-inject them — that would waste tokens on duplicate content.
+// Only team-context-level instructions (loaded via loadTeamInstructions) are emitted.
+func loadProjectGuidance(projectRoot string, agentType string) *ProjectGuidance {
+	return nil // project guidance loaded natively by the AI tool, not by prime
 }
 
 // isAutoGeneratedAgentsMD returns true if the content is the auto-generated
@@ -943,7 +920,11 @@ EOF`, agentID, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339),
 
 // buildGuidance constructs state-aware command guidance for agent consumption.
 // Only includes entries when the underlying resource is available.
-func buildGuidance(agentID string, teamCtx *teamContextInfo, ledger *ledgerInfo) *agentGuidance {
+//
+// Convention: Command fields are machine-parsed (no quoting). Prose fields
+// (Hint, Important, CodeSearchTip, etc.) must single-quote command names
+// (e.g. 'ox query') for scannability by both humans and agents.
+func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger *ledgerInfo) *agentGuidance {
 	var cmds []intentCommand
 
 	// team discussions — only when team context exists
@@ -974,11 +955,64 @@ func buildGuidance(agentID string, teamCtx *teamContextInfo, ledger *ledgerInfo)
 		})
 	}
 
+	// code search — BEFORE ox query so agents see it first (code search is more common)
+	repoSlug := repoSlugFromRemoteOrDir(projectRoot)
+	codeDBDir := resolveCodeDBDir(projectRoot)
+	if _, statErr := os.Stat(codeDBDir); statErr == nil {
+		cmds = append(cmds, intentCommand{
+			Intent:  fmt.Sprintf("find/search/grep code in %s: symbols, functions, git history, file contents, diffs — PREFER over grep/ripgrep", repoSlug),
+			Command: `ox code search "<pattern>"`,
+		})
+		cmds = append(cmds, intentCommand{
+			Intent:  "recent code changes, hotspots, contention risk, open PRs/issues — use before planning multi-file changes",
+			Command: "ox code insights",
+		})
+	} else {
+		cmds = append(cmds, intentCommand{
+			Intent:  fmt.Sprintf("code search %s (not indexed yet): index first, then search code, symbols, and diffs", repoSlug),
+			Command: "ox code index",
+		})
+	}
+
+	// record observations — only when GUIDE.md exists and memory feature is enabled
+	if teamCtx != nil && auth.IsMemoryEnabled() && teamCtx.ObservationGuideHint != "" {
+		cmds = append(cmds, intentCommand{
+			Intent:  "record observation, note decision, capture learning, remember for team — read GUIDE.md first",
+			Command: `ox memory put '{"content": "<observation>"}'`,
+		})
+	}
+
+	// expert coworker agents — only when team has coworkers defined
+	if teamCtx != nil && len(teamCtx.Coworkers) > 0 {
+		names := make([]string, 0, len(teamCtx.Coworkers))
+		for _, cw := range teamCtx.Coworkers {
+			names = append(names, cw.Name)
+		}
+		cmds = append(cmds, intentCommand{
+			Intent:  fmt.Sprintf("expert coworker agents for tasks, reviews, and specialized work: %s", strings.Join(names, ", ")),
+			Command: "ox coworker load <name>",
+		})
+		cmds = append(cmds, intentCommand{
+			Intent:  "list all expert coworker agents and their specialties",
+			Command: "ox coworker list",
+		})
+	}
+
 	// semantic search — when primed context isn't enough, query for depth
 	if teamCtx != nil || (ledger != nil && ledger.Exists) {
+		teamLabel := "team"
+		if teamCtx != nil {
+			tn := teamCtx.TeamName
+			if tn == "" {
+				tn = teamCtx.TeamID
+			}
+			if tn != "" {
+				teamLabel = tn
+			}
+		}
 		cmds = append(cmds, intentCommand{
-			Intent:  "deep search team discussions, session recordings, team context: use when MEMORY.md and its links don't answer",
-			Command: fmt.Sprintf("ox agent %s query \"<your question>\"", agentID),
+			Intent:  fmt.Sprintf("deep search %s discussions, session recordings, team context: use when MEMORY.md and its links don't answer", teamLabel),
+			Command: "ox query \"<your question>\"",
 		})
 	}
 
@@ -986,6 +1020,29 @@ func buildGuidance(agentID string, teamCtx *teamContextInfo, ledger *ledgerInfo)
 		Hint:     "Use these commands to answer user questions — check here before exploring files.",
 		Commands: cmds,
 	}
+}
+
+// repoSlugFromRemoteOrDir extracts "owner/repo" from git remote origin URL,
+// falling back to the directory name if the remote is unavailable.
+// Examples: "sageox/ox", "my-project"
+func repoSlugFromRemoteOrDir(projectRoot string) string {
+	cmd := exec.Command("git", "remote", "get-url", "origin")
+	cmd.Dir = projectRoot
+	out, err := cmd.Output()
+	if err == nil {
+		url := strings.TrimSpace(string(out))
+		// handle SSH: git@github.com:owner/repo.git
+		if idx := strings.Index(url, ":"); idx != -1 && !strings.Contains(url[:idx], "/") {
+			url = url[idx+1:]
+		}
+		// handle HTTPS: https://github.com/owner/repo.git
+		url = strings.TrimSuffix(url, ".git")
+		parts := strings.Split(url, "/")
+		if len(parts) >= 2 {
+			return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+		}
+	}
+	return filepath.Base(projectRoot)
 }
 
 // startSessionRecording attempts to start session recording if enabled.
@@ -1014,7 +1071,7 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 	}
 
 	// respect explicit session stop — user ran /ox-session-stop, don't auto-restart
-	if session.ConsumeExplicitStop(projectRoot) {
+	if session.ConsumeExplicitStop(projectRoot, agentID) {
 		return nil
 	}
 
@@ -1033,11 +1090,24 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 	outputFile := filepath.Join(projectRoot, ".sageox", "sessions", fmt.Sprintf("%s-%s.md", timestamp, agentID))
 
 	// start recording with filter mode
+	// prefer OX_PARENT_PID (set by hook) — it's the long-lived agent process.
+	// os.Getppid() here would be the transient hook process which exits immediately.
+	parentPID := os.Getppid()
+	if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
+		if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
+			parentPID = parsed
+		}
+	}
+
 	opts := session.StartRecordingOptions{
-		AgentID:     agentID,
-		AdapterName: agentType,
-		OutputFile: outputFile,
-		FilterMode:  resolved.Mode,
+		AgentID:       agentID,
+		AdapterName:   agentType,
+		OutputFile:    outputFile,
+		FilterMode:    resolved.Mode,
+		ParentPID:     parentPID,
+		Username:      getSessionUsername(),
+		WorkspacePath: projectRoot,
+		Branch:        repotools.GetCurrentBranch(projectRoot),
 	}
 
 	state, err := session.StartRecording(projectRoot, opts)
@@ -1062,6 +1132,11 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 		// non-fatal but visible — agent sees stderr and can surface it
 		fmt.Fprintf(os.Stderr, "warning: session recording failed to start: %v\n", err)
 		return nil
+	}
+
+	// write raw.jsonl header immediately so incremental hooks can append entries
+	if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
+		slog.Warn("failed to write raw.jsonl header at auto-start", "error", writeErr)
 	}
 
 	// build user notification message
@@ -1097,10 +1172,17 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 //
 //	Retains the original hybrid format with markdown.
 //
-// Default (no flags): Pure JSON output optimized for agent consumption.
+// Output format selection:
+// XML is the preferred format for LLM agent consumption (structured, semantic, token-efficient).
+// JSON is retained for backward compatibility, debugging, and programmatic consumers.
+// XML output is ordered for prompt caching: static content first, per-session content last.
+// See: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/claude-prompting-best-practices#structure-prompts-with-xml-tags
 func outputAgentPrime(cmd *cobra.Command, textMode, reviewMode bool, output agentPrimeOutput) error {
 	// always include tips: one for the agent, one for the agent to relay to the user
 	output.AgentTip = tips.GetTip("prime")
+	if output.CodeSearchTip != "" {
+		output.AgentTip += " " + output.CodeSearchTip
+	}
 	if userTip := tips.GetPrimeUserTip(output.AgentType); userTip != "" {
 		if output.UserNotification != "" {
 			output.UserNotification += "\n\nTip: " + userTip
@@ -1131,20 +1213,30 @@ func outputAgentPrime(cmd *cobra.Command, textMode, reviewMode bool, output agen
 		return outputAgentPrimeText(cmd, output)
 	}
 
-	// default: JSON output for agent consumption
-	// This is the primary use case - agents consume JSON directly without parsing overhead
-	cw := agentinstance.NewCountingWriter(cmd.OutOrStdout())
-	encoder := json.NewEncoder(cw)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(output); err != nil {
-		return err
+	// determine output format: xml (default) or json
+	formatFlag, _ := cmd.Flags().GetString("format")
+	if formatFlag == "" {
+		formatFlag = "xml" // default for all callers — all consumers are LLMs
 	}
 
-	// prime is not dispatched via runWithAgentID, send heartbeat directly
-	if bytes := cw.BytesWritten(); bytes > 0 && output.AgentID != "" {
-		sendContextHeartbeat(output.AgentID, bytes, "prime")
+	switch formatFlag {
+	case "json":
+		// legacy JSON output for debugging and programmatic consumers
+		cw := agentinstance.NewCountingWriter(cmd.OutOrStdout())
+		encoder := json.NewEncoder(cw)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(output); err != nil {
+			return err
+		}
+		// prime is not dispatched via runWithAgentID, send heartbeat directly
+		if bytes := cw.BytesWritten(); bytes > 0 && output.AgentID != "" {
+			sendContextHeartbeat(output.AgentID, bytes, "prime")
+		}
+		return nil
+	default:
+		// XML: structured tags optimized for LLM consumption and prompt caching
+		return outputAgentPrimeXML(cmd, output)
 	}
-	return nil
 }
 
 // buildHumanSummary creates a human-readable summary for --review mode
@@ -1181,8 +1273,12 @@ func buildHumanSummary(output agentPrimeOutput) string {
 	}
 
 	if output.ProjectGuidance != nil {
-		fmt.Fprintf(&sb, "- **Project Guidance:** AGENTS.md found (%d bytes, ~%d tokens)\n",
-			output.ProjectGuidance.Size, output.ProjectGuidance.Tokens)
+		if output.ProjectGuidance.Skipped {
+			fmt.Fprintf(&sb, "- **Project Guidance:** AGENTS.md skipped (%s)\n", output.ProjectGuidance.SkipReason)
+		} else {
+			fmt.Fprintf(&sb, "- **Project Guidance:** AGENTS.md found (%d bytes, ~%d tokens)\n",
+				output.ProjectGuidance.Size, output.ProjectGuidance.Tokens)
+		}
 	}
 
 	if output.CapturePrior != nil {
@@ -1418,10 +1514,15 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 
 	// output project guidance if found
 	if output.ProjectGuidance != nil {
-		fmt.Fprintln(cmd.OutOrStdout())
-		fmt.Fprintln(cmd.OutOrStdout(), "---PROJECT_GUIDANCE---")
-		fmt.Fprintln(cmd.OutOrStdout(), output.ProjectGuidance.Content)
-		fmt.Fprintln(cmd.OutOrStdout(), "---END_PROJECT_GUIDANCE---")
+		if output.ProjectGuidance.Skipped {
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintf(cmd.OutOrStdout(), "\n## Project Guidance\n\n_Skipped: %s_\n", output.ProjectGuidance.SkipReason)
+		} else {
+			fmt.Fprintln(cmd.OutOrStdout())
+			fmt.Fprintln(cmd.OutOrStdout(), "---PROJECT_GUIDANCE---")
+			fmt.Fprintln(cmd.OutOrStdout(), output.ProjectGuidance.Content)
+			fmt.Fprintln(cmd.OutOrStdout(), "---END_PROJECT_GUIDANCE---")
+		}
 	}
 
 	// output team context if configured
@@ -1681,7 +1782,7 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 		TeamName:    tc.TeamName,
 		IsRepoTeam:  isRepoTeam,
 		Path:        tc.Path,
-		ReadCommand: "ox agent team-ctx",
+		ReadCommand: "ox agent team-ctx", // not quoted: this is a machine-parsed command field
 	}
 
 	// if team context directory hasn't synced yet, return partial info
@@ -1725,18 +1826,15 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 		}
 
 		// build coworker hint when agents are available
+		// keep minimal — structured data is in Coworkers[], guidance has the commands
 		if len(customizations.Agents) > 0 {
-			var sb strings.Builder
-			sb.WriteString("Expert subagents are available from your team. Load with: ox coworker load <name>\n\n")
-			sb.WriteString("| Name | Description |\n|------|-------------|\n")
+			names := make([]string, 0, len(customizations.Agents))
 			for _, a := range customizations.Agents {
-				desc := a.Description
-				if desc == "" {
-					desc = "(no description)"
-				}
-				sb.WriteString(fmt.Sprintf("| %s | %s |\n", a.Name, desc))
+				names = append(names, a.Name)
 			}
-			info.CoworkerHint = sb.String()
+			info.CoworkerHint = fmt.Sprintf(
+				"%d expert coworker agents available: %s. Load: 'ox coworker load <name>'",
+				len(names), strings.Join(names, ", "))
 		}
 	}
 
@@ -1800,6 +1898,12 @@ func loadTeamMemory(info *teamContextInfo, teamDir string) {
 		info.TeamHint = teamPath
 	}
 
+	// memory/GUIDE.md — observation guidance reference pointer
+	guidePath := filepath.Join(teamDir, "memory", "GUIDE.md")
+	if _, err := os.Stat(guidePath); err == nil {
+		info.ObservationGuideHint = guidePath
+	}
+
 	// discover memory timeline files for progressive disclosure
 	info.MemoryDaily = discoverMemoryFiles(filepath.Join(teamDir, "memory", "daily"))
 	info.MemoryWeekly = discoverMemoryFiles(filepath.Join(teamDir, "memory", "weekly"))
@@ -1828,7 +1932,8 @@ func emitTeamMemorySection(cmd *cobra.Command, tc *teamContextInfo) {
 		return
 	}
 
-	hasMemory := tc.MemoryContent != "" || tc.SoulHint != "" || tc.TeamHint != "" ||
+	guideEnabled := tc.ObservationGuideHint != "" && auth.IsMemoryEnabled()
+	hasMemory := tc.MemoryContent != "" || tc.SoulHint != "" || tc.TeamHint != "" || guideEnabled ||
 		len(tc.MemoryDaily) > 0 || len(tc.MemoryWeekly) > 0 || len(tc.MemoryMonthly) > 0
 
 	if !hasMemory {
@@ -1851,8 +1956,8 @@ func emitTeamMemorySection(cmd *cobra.Command, tc *teamContextInfo) {
 		fmt.Fprintln(out)
 	}
 
-	// SOUL.md and TEAM.md — reference pointers
-	if tc.SoulHint != "" || tc.TeamHint != "" {
+	// SOUL.md, TEAM.md, GUIDE.md — reference pointers
+	if tc.SoulHint != "" || tc.TeamHint != "" || guideEnabled {
 		fmt.Fprintln(out, "### Available Context")
 		if tc.SoulHint != "" {
 			fmt.Fprintf(out, "- SOUL.md: %s (team identity and values — read when needed)\n", tc.SoulHint)
@@ -1860,6 +1965,18 @@ func emitTeamMemorySection(cmd *cobra.Command, tc *teamContextInfo) {
 		if tc.TeamHint != "" {
 			fmt.Fprintf(out, "- TEAM.md: %s (team members and patterns — read when needed)\n", tc.TeamHint)
 		}
+		if guideEnabled {
+			fmt.Fprintf(out, "- GUIDE.md: %s (observation guidance — read before using 'ox memory put')\n", tc.ObservationGuideHint)
+		}
+		fmt.Fprintln(out)
+	}
+
+	// observation recording — behavioral directive (not just a tool reference)
+	if guideEnabled {
+		fmt.Fprintln(out, "### Observation Recording (Active)")
+		fmt.Fprintln(out, "Proactively record observations throughout this session using `ox memory put`.")
+		fmt.Fprintln(out, "Record decisions, discoveries, questions, and notable events as they happen — don't wait to be asked.")
+		fmt.Fprintf(out, "Read GUIDE.md first for what to capture: %s\n", tc.ObservationGuideHint)
 		fmt.Fprintln(out)
 	}
 
@@ -1945,7 +2062,7 @@ func discoverOtherTeamContexts(projectRoot string, primaryTeamID string) *otherT
 
 	return &otherTeams{
 		Root:  root,
-		Hint:  "Only read when user asks about a specific team by name: ox agent team-ctx <slug>",
+		Hint:  "Only read when user asks about a specific team by name: 'ox agent team-ctx <slug>'",
 		Teams: entries,
 	}
 }
@@ -2064,7 +2181,7 @@ func discoverLedger(teamCtx *teamContextInfo) *ledgerInfo {
 		return &ledgerInfo{Exists: false}
 	}
 
-	hint := "The ledger is a repo-specific archive of prior AI coworker coding sessions. It is NOT team context. Only consult when explicitly asked to review prior sessions. Use 'ox session list' to browse and 'ox session view <name> --text' to view one. Do not read ledger files directly (LFS stubs)."
+	hint := "The ledger is a repo-specific archive of prior AI coworker coding sessions. It is NOT team context. Only consult when explicitly asked to review prior sessions. Use 'ox session list' to browse and 'ox session view <name> --text' to view one. Do not read ledger files directly (LFS stubs)." // commands already quoted
 
 	return &ledgerInfo{
 		Exists: true,

@@ -25,8 +25,8 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/repotools"
 )
 
@@ -67,33 +67,42 @@ func DefaultPathForEndpoint(endpointURL string) (string, error) {
 	// find main project root (resolves through worktrees to ensure shared ledger)
 	projectRoot, err := repotools.FindMainRepoRoot(repotools.VCSGit)
 	if err == nil && projectRoot != "" {
-		// load project config to get repo ID
-		projectCfg, cfgErr := config.LoadProjectConfig(projectRoot)
-		if cfgErr != nil {
-			return "", fmt.Errorf("load project config: %w", cfgErr)
-		}
-
-		repoID := projectCfg.RepoID
-		if repoID == "" {
-			return "", fmt.Errorf("project config missing repo_id (run 'ox init')")
-		}
-
-		// determine endpoint: explicit parameter > project config > env > default
-		ep := endpointURL
-		if ep == "" {
-			ep = endpoint.GetForProject(projectRoot)
-		}
-
-		return config.DefaultLedgerPath(repoID, ep), nil
+		// git works — use the git-resolved root (may be the main repo for worktrees)
+		return resolveFromProjectRoot(projectRoot, endpointURL)
 	}
 
-	// fallback to legacy path if not in a git repo
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("get home directory: %w", err)
+	// git unavailable (sandbox, broken worktree) — fall back to .sageox/ in CWD
+	if cwd, cwdErr := os.Getwd(); cwdErr == nil && config.IsInitialized(cwd) {
+		return resolveFromProjectRoot(cwd, endpointURL)
+	}
+
+	// not in a SageOx project at all — legacy path
+	home, homeErr := os.UserHomeDir()
+	if homeErr != nil {
+		return "", fmt.Errorf("get home directory: %w", homeErr)
 	}
 
 	return filepath.Join(home, ".cache", "sageox", "context"), nil
+}
+
+// resolveFromProjectRoot loads project config and computes the ledger path.
+func resolveFromProjectRoot(projectRoot, endpointURL string) (string, error) {
+	projectCfg, err := config.LoadProjectConfig(projectRoot)
+	if err != nil {
+		return "", fmt.Errorf("load project config: %w", err)
+	}
+
+	repoID := projectCfg.RepoID
+	if repoID == "" {
+		return "", fmt.Errorf("project config missing repo_id (run 'ox init')")
+	}
+
+	ep := endpointURL
+	if ep == "" {
+		ep = endpoint.GetForProject(projectRoot)
+	}
+
+	return config.DefaultLedgerPath(repoID, ep), nil
 }
 
 // LegacyPath returns the legacy ledger path for the current project.
@@ -360,8 +369,8 @@ func InitForEndpoint(endpointURL string, remoteURL string) (*Ledger, error) {
 }
 
 // cloneWithSparseCheckout clones a remote repo with sparse checkout enabled.
-// Only .sync/, sessions/, and audit/ directories are checked out.
-// The assets/ directory is excluded to save space.
+// Only .sync/, sessions/, audit/, and recent data/github/ directories are checked out.
+// The assets/ directory and older GitHub data are excluded to save space.
 func cloneWithSparseCheckout(path, remoteURL string) error {
 	// remove existing directory if empty
 	entries, _ := os.ReadDir(path)
@@ -381,35 +390,50 @@ func cloneWithSparseCheckout(path, remoteURL string) error {
 	}
 
 	// configure sparse checkout
-	if err := configureSparseCheckout(path); err != nil {
+	if err := ConfigureSparseCheckout(path); err != nil {
 		return fmt.Errorf("configure sparse checkout: %w", err)
 	}
 
 	return nil
 }
 
-// configureSparseCheckout sets up sparse checkout for the ledger.
-// Includes: .sync/, sessions/, audit/
-// Excludes: assets/ (large files)
-func configureSparseCheckout(path string) error {
+// ConfigureSparseCheckout sets up sparse checkout for the ledger.
+// Includes: .sync/, sessions/, audit/, and a sliding window of recent GitHub data
+// Excludes: assets/ (large files), older GitHub data outside the window
+//
+// Called during initial clone (cloneWithSparseCheckout) and by EnableSparseCheckout.
+// Future: daemon GC reclone will also call this to reconfigure the sliding window
+// on fresh clones, pruning old data/github/ directories outside the 30-day window.
+//
+// TODO: consolidate with team context sparse checkout (gitserver). Both use similar
+// clone/sparse/pull plumbing but different implementations. See team context's
+// ComputeSparseSet() and manifest-driven approach vs this static list + sliding window.
+func ConfigureSparseCheckout(path string) error {
 	// init sparse checkout in cone mode
 	initCmd := exec.Command("git", "-C", path, "sparse-checkout", "init", "--cone")
 	if output, err := initCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("sparse-checkout init: %w: %s", err, output)
 	}
 
-	// set directories to include (excludes everything else like assets/)
-	setCmd := exec.Command("git", "-C", path, "sparse-checkout", "set",
+	// base directories always included
+	dirs := []string{
 		".sync",
 		"sessions",
 		"audit",
-	)
+	}
+
+	// add sliding window of recent GitHub data (last N days, default 30)
+	// keeps local disk usage small; older data lives in git history
+	dirs = append(dirs, ComputeGitHubDataPaths(DefaultGitHubDataWindowDays)...)
+
+	// set directories to include (excludes everything else like assets/)
+	args := append([]string{"-C", path, "sparse-checkout", "set"}, dirs...)
+	setCmd := exec.Command("git", args...)
 	if output, err := setCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("sparse-checkout set: %w: %s", err, output)
 	}
 
 	// configure pull strategy to use rebase (avoids merge commits, cleaner history)
-	// This prevents git warnings about divergent branches on manual pulls
 	configCmd := exec.Command("git", "-C", path, "config", "pull.rebase", "true")
 	if output, err := configCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("config pull.rebase: %w: %s", err, output)
@@ -425,7 +449,7 @@ func (l *Ledger) EnableSparseCheckout() error {
 		return ErrNotProvisioned
 	}
 
-	return configureSparseCheckout(l.Path)
+	return ConfigureSparseCheckout(l.Path)
 }
 
 // DisableSparseCheckout disables sparse checkout, fetching all content.

@@ -12,6 +12,11 @@ import (
 	"github.com/sageox/ox/internal/useragent"
 )
 
+// lfsHTTPClient is shared across LFS operations for connection reuse.
+var lfsHTTPClient = &http.Client{
+	Timeout: 5 * time.Minute,
+}
+
 // ComputeOID computes the SHA256 hex digest of content (the LFS OID).
 func ComputeOID(content []byte) string {
 	h := sha256.Sum256(content)
@@ -30,7 +35,7 @@ func UploadObject(action *Action, content []byte) error {
 		return fmt.Errorf("no upload action provided")
 	}
 
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := lfsHTTPClient
 
 	req, err := http.NewRequest("PUT", action.Href, nil)
 	if err != nil {
@@ -68,7 +73,7 @@ func DownloadObject(action *Action) ([]byte, error) {
 		return nil, fmt.Errorf("no download action provided")
 	}
 
-	client := &http.Client{Timeout: 5 * time.Minute}
+	client := lfsHTTPClient
 
 	req, err := http.NewRequest("GET", action.Href, nil)
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
@@ -64,9 +65,9 @@ func checkDaemonHealth(opts doctorOptions) []checkResult {
 			goto skipHeartbeats
 		}
 
-		// Get both repo_id (for debugging) and workspace_id (for uniqueness)
+		// Get repo_id and repo-based workspace_id (consistent across worktrees)
 		repoID := config.GetRepoID(gitRoot)
-		workspaceID := daemon.WorkspaceID(gitRoot)
+		workspaceID := daemon.RepoBasedWorkspaceID(gitRoot)
 		if repoID == "" || workspaceID == "" {
 			goto skipHeartbeats
 		}
@@ -190,7 +191,7 @@ func checkDaemonVersion(fix bool) checkResult {
 		}
 	}
 
-	client := daemon.NewClient()
+	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
 	status, err := client.Status()
 	if err != nil {
 		return checkResult{

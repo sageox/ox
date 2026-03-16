@@ -54,12 +54,12 @@ func init() {
 // --- JSON output types ---
 
 type redactSourceJSON struct {
-	Name            string               `json:"name"`
-	Description     string               `json:"description,omitempty"`
-	Path            string               `json:"path,omitempty"`
-	PatternCount    int                  `json:"pattern_count"`
-	SignatureStatus string               `json:"signature_status,omitempty"`
-	Patterns        []redactPatternJSON  `json:"patterns"`
+	Name            string              `json:"name"`
+	Description     string              `json:"description,omitempty"`
+	Path            string              `json:"path,omitempty"`
+	PatternCount    int                 `json:"pattern_count"`
+	SignatureStatus string              `json:"signature_status,omitempty"`
+	Patterns        []redactPatternJSON `json:"patterns"`
 }
 
 type redactPatternJSON struct {
@@ -78,10 +78,10 @@ type redactPolicyJSON struct {
 }
 
 type redactTestJSON struct {
-	Input    string              `json:"input"`
-	Output   string              `json:"output"`
-	Matches  []redactMatchJSON   `json:"matches"`
-	Redacted bool                `json:"redacted"`
+	Input    string            `json:"input"`
+	Output   string            `json:"output"`
+	Matches  []redactMatchJSON `json:"matches"`
+	Redacted bool              `json:"redacted"`
 }
 
 type redactMatchJSON struct {

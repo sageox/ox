@@ -13,6 +13,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/sageox/ox/internal/daemon/agentwork"
 )
 
 // maxIPCMessageSize limits the maximum size of an IPC message to prevent DoS.
@@ -25,23 +27,27 @@ const maxConcurrentConnections = 100
 
 // Message types for IPC communication.
 const (
-	MsgTypeStatus      = "status"
-	MsgTypeSync        = "sync"
-	MsgTypeTeamSync    = "team_sync" // on-demand team context sync
-	MsgTypePing        = "ping"
-	MsgTypeStop        = "stop"
-	MsgTypeVersion     = "version"
-	MsgTypeSyncHistory = "sync_history"
-	MsgTypeHeartbeat   = "heartbeat"   // one-way, no response expected
-	MsgTypeCheckout    = "checkout"    // synchronous git clone operation
-	MsgTypeTelemetry   = "telemetry"   // one-way, no response expected
-	MsgTypeFriction    = "friction"    // one-way, friction event for analytics
-	MsgTypeGetErrors   = "get_errors"  // retrieve unviewed daemon errors
-	MsgTypeMarkErrors  = "mark_errors" // mark errors as viewed
-	MsgTypeSessions    = "sessions"    // get active agent sessions (deprecated: use instances)
-	MsgTypeInstances   = "instances"   // get active agent instances
-	MsgTypeDoctor      = "doctor"      // trigger daemon health checks (anti-entropy, etc.)
-	MsgTypeTriggerGC   = "trigger_gc"  // force GC reclone for team contexts
+	MsgTypeStatus          = "status"
+	MsgTypeSync            = "sync"
+	MsgTypeTeamSync        = "team_sync" // on-demand team context sync
+	MsgTypePing            = "ping"
+	MsgTypeStop            = "stop"
+	MsgTypeVersion         = "version"
+	MsgTypeSyncHistory     = "sync_history"
+	MsgTypeHeartbeat       = "heartbeat"        // one-way, no response expected
+	MsgTypeCheckout        = "checkout"         // synchronous git clone operation
+	MsgTypeTelemetry       = "telemetry"        // one-way, no response expected
+	MsgTypeFriction        = "friction"         // one-way, friction event for analytics
+	MsgTypeGetErrors       = "get_errors"       // retrieve unviewed daemon errors
+	MsgTypeMarkErrors      = "mark_errors"      // mark errors as viewed
+	MsgTypeSessions        = "sessions"         // get active agent sessions (deprecated: use instances)
+	MsgTypeInstances       = "instances"        // get active agent instances
+	MsgTypeDoctor          = "doctor"           // trigger daemon health checks (anti-entropy, etc.)
+	MsgTypeTriggerGC       = "trigger_gc"       // force GC reclone for team contexts
+	MsgTypeCodeIndex       = "code_index"       // index local code with progress
+	MsgTypeCodeStatus      = "code_status"      // get code index status/stats
+	MsgTypeNotifications   = "notifications"    // query pending team context change notifications
+	MsgTypeSessionFinalize = "session_finalize" // one-way, trigger async session upload+finalization
 )
 
 // Protocol Design Decision: NDJSON (Newline-Delimited JSON)
@@ -61,7 +67,8 @@ const (
 // Message represents an IPC message.
 type Message struct {
 	Type        string          `json:"type"`
-	WorkspaceID string          `json:"workspace_id,omitempty"` // identifies the workspace/repo
+	WorkspaceID string          `json:"workspace_id,omitempty"` // repo-scoped daemon identity
+	CallerID    string          `json:"caller_id,omitempty"`    // identifies calling clone/worktree (path-based hash)
 	Payload     json.RawMessage `json:"payload,omitempty"`
 }
 
@@ -130,6 +137,15 @@ type StatusData struct {
 	// startup timing (how long the daemon took to start)
 	StartupDurationMs  int64 `json:"startup_duration_ms,omitempty"`
 	ThrottleDurationMs int64 `json:"throttle_duration_ms,omitempty"`
+
+	// code index status
+	CodeDB *CodeDBStats `json:"code_db,omitempty"`
+
+	// agent work manager status
+	AgentWork *agentwork.AgentWorkStatus `json:"agent_work,omitempty"`
+
+	// connected clones/worktrees that have sent heartbeats
+	Callers []CallerInfo `json:"callers,omitempty"`
 }
 
 // ExtendedStatus provides additional status info for diagnostics.
@@ -155,14 +171,14 @@ func GetExtendedStatus(s *StatusData) (ExtendedStatus, bool) {
 // WorkspaceSyncStatus represents the sync status of a workspace (ledger or team context).
 // Provides a unified view of all repos the daemon is syncing.
 type WorkspaceSyncStatus struct {
-	ID       string    `json:"id"`                   // workspace ID (e.g., "ledger", team_id)
-	Type     string    `json:"type"`                 // "ledger" or "team_context"
-	Path     string    `json:"path"`                 // local filesystem path
-	CloneURL string    `json:"clone_url,omitempty"`  // git remote URL
-	Exists   bool      `json:"exists"`               // whether path exists locally
-	TeamID   string    `json:"team_id,omitempty"`    // team ID (for team contexts)
-	TeamName string    `json:"team_name,omitempty"`  // team name (for team contexts)
-	TeamSlug string    `json:"team_slug,omitempty"` // kebab-case team slug
+	ID             string    `json:"id"`                         // workspace ID (e.g., "ledger", team_id)
+	Type           string    `json:"type"`                       // "ledger" or "team_context"
+	Path           string    `json:"path"`                       // local filesystem path
+	CloneURL       string    `json:"clone_url,omitempty"`        // git remote URL
+	Exists         bool      `json:"exists"`                     // whether path exists locally
+	TeamID         string    `json:"team_id,omitempty"`          // team ID (for team contexts)
+	TeamName       string    `json:"team_name,omitempty"`        // team name (for team contexts)
+	TeamSlug       string    `json:"team_slug,omitempty"`        // kebab-case team slug
 	LastSync       time.Time `json:"last_sync,omitempty"`        // last successful sync
 	LastErr        string    `json:"last_error,omitempty"`       // last error message
 	Syncing        bool      `json:"syncing,omitempty"`          // currently syncing
@@ -254,6 +270,15 @@ type FrictionPayload struct {
 	ErrorMsg string `json:"error_msg"`
 }
 
+// SessionFinalizeIPCPayload carries the minimum info needed for the daemon
+// to upload and finalize a session that was saved locally by the CLI.
+type SessionFinalizeIPCPayload struct {
+	SessionName string `json:"session_name"` // e.g. "2026-03-12T11-09-ryan-OxTndR"
+	LedgerPath  string `json:"ledger_path"`  // ledger repo root
+	CachePath   string `json:"cache_path"`   // local cache session dir (source files)
+	ProjectRoot string `json:"project_root"` // for endpoint/auth resolution
+}
+
 // MarkErrorsPayload is the payload for marking errors as viewed.
 type MarkErrorsPayload struct {
 	// IDs to mark as viewed. If empty, marks all errors as viewed.
@@ -308,6 +333,18 @@ type InstanceInfo struct {
 
 	// CommandCount is the number of ox commands that produced context output for this agent.
 	CommandCount int `json:"command_count,omitempty"`
+
+	// ParentAgentID is the parent agent that spawned this agent (empty for top-level agents).
+	// Populated from heartbeat tracking, enabling cross-worktree tree display.
+	ParentAgentID string `json:"parent_agent_id,omitempty"`
+
+	// AgentType identifies the kind of agent (e.g., "claude-code", "explore").
+	// Populated from heartbeat tracking, enabling cross-worktree type display.
+	AgentType string `json:"agent_type,omitempty"`
+
+	// ParentPID is the parent process ID of the agent.
+	// Enables instant liveness detection without heartbeat timeout.
+	ParentPID int `json:"parent_pid,omitempty"`
 }
 
 // InstancesResponse is the response for the instances IPC message.
@@ -315,11 +352,24 @@ type InstancesResponse struct {
 	Instances []InstanceInfo `json:"instances"`
 }
 
+// NotificationsPayload is the payload for notifications requests.
+type NotificationsPayload struct {
+	AgentID string `json:"agent_id"`
+}
+
+// NotificationsResponse is the response for notifications requests.
+type NotificationsResponse struct {
+	Files []ChangeEntry `json:"files"`
+	Stale bool          `json:"stale"`
+}
+
 // DoctorResponse is the response for the doctor IPC message.
 type DoctorResponse struct {
-	AntiEntropyTriggered bool     `json:"anti_entropy_triggered"`
-	ClonesTriggered      int      `json:"clones_triggered"`
-	Errors               []string `json:"errors,omitempty"`
+	AntiEntropyTriggered     bool     `json:"anti_entropy_triggered"`
+	ClonesTriggered          int      `json:"clones_triggered"`
+	SessionFinalizeTriggered bool     `json:"session_finalize_triggered"`
+	SessionFinalizeQueued    int      `json:"session_finalize_queued"`
+	Errors                   []string `json:"errors,omitempty"`
 }
 
 // TriggerGCResponse is the response for trigger_gc requests.
@@ -436,23 +486,27 @@ type Server struct {
 	connSem  chan struct{}  // semaphore for connection limit
 
 	// callbacks for handling messages
-	onSync             func() error                                                                     // simple sync (backward compat)
-	onSyncWithProgress func(progress *ProgressWriter) error                                             // sync with progress
-	onTeamSync         func(progress *ProgressWriter) error                                             // team context sync with progress
-	onStop             func()                                                                           //
-	onStatus           func() *StatusData                                                               //
-	onActivity         func()                                                                           // called on any IPC activity
-	onHeartbeat        func(payload json.RawMessage)                                                    //
-	onCheckout         func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error) //
-	onTelemetry        func(payload json.RawMessage)                                                    // fire-and-forget telemetry
-	onFriction         func(payload FrictionPayload)                                                    // fire-and-forget friction event
-	onGetErrors        func() []StoredError                                                             // get unviewed errors
-	onMarkErrors       func(ids []string)                                                               // mark errors as viewed
-	onSessions         func() []AgentSession                                                            // get active agent sessions (deprecated)
-	onInstances        func() []InstanceInfo                                                            // get active agent instances
-	onSyncHistory      func() []SyncEvent                                                               // get sync history
-	onDoctor           func() *DoctorResponse                                                           // trigger health checks
-	onTriggerGC        func() *TriggerGCResponse                                                        // force GC reclone
+	onSync             func() error                                                                       // simple sync (backward compat)
+	onSyncWithProgress func(progress *ProgressWriter) error                                               // sync with progress
+	onTeamSync         func(progress *ProgressWriter) error                                               // team context sync with progress
+	onStop             func()                                                                             //
+	onStatus           func() *StatusData                                                                 //
+	onActivity         func()                                                                             // called on any IPC activity
+	onHeartbeat        func(callerID string, payload json.RawMessage)                                     //
+	onCheckout         func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error)   //
+	onTelemetry        func(payload json.RawMessage)                                                      // fire-and-forget telemetry
+	onFriction         func(payload FrictionPayload)                                                      // fire-and-forget friction event
+	onSessionFinalize  func(payload SessionFinalizeIPCPayload)                                            // fire-and-forget session finalize
+	onGetErrors        func() []StoredError                                                               // get unviewed errors
+	onMarkErrors       func(ids []string)                                                                 // mark errors as viewed
+	onSessions         func() []AgentSession                                                              // get active agent sessions (deprecated)
+	onInstances        func() []InstanceInfo                                                              // get active agent instances
+	onSyncHistory      func() []SyncEvent                                                                 // get sync history
+	onDoctor           func() *DoctorResponse                                                             // trigger health checks
+	onTriggerGC        func() *TriggerGCResponse                                                          // force GC reclone
+	onCodeIndex        func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) // index local code
+	onCodeStatus       func() *CodeDBStats                                                                // get code index stats
+	onNotifications    func(agentID string) ([]ChangeEntry, bool)                                         // get pending notifications
 
 	startTime time.Time
 }
@@ -482,6 +536,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeHeartbeat, handleHeartbeat)
 	router.Register(MsgTypeTelemetry, handleTelemetry)
 	router.Register(MsgTypeFriction, handleFriction)
+	router.Register(MsgTypeSessionFinalize, handleSessionFinalize)
 	router.Register(MsgTypeGetErrors, handleGetErrors)
 	router.Register(MsgTypeMarkErrors, handleMarkErrors)
 	router.Register(MsgTypeCheckout, handleCheckout)
@@ -489,6 +544,9 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeInstances, handleInstances)
 	router.Register(MsgTypeDoctor, handleDoctor)
 	router.Register(MsgTypeTriggerGC, handleTriggerGC)
+	router.Register(MsgTypeCodeIndex, handleCodeIndex)
+	router.Register(MsgTypeCodeStatus, handleCodeStatus)
+	router.Register(MsgTypeNotifications, handleNotifications)
 
 	return router
 }
@@ -623,7 +681,7 @@ func handleHeartbeat(s *Server, msg Message, _ net.Conn) HandlerResult {
 	s.mu.Unlock()
 
 	if handler != nil {
-		handler(msg.Payload)
+		handler(msg.CallerID, msg.Payload)
 	}
 
 	// fire-and-forget: no response needed, credential loss is acceptable
@@ -652,6 +710,26 @@ func handleFriction(s *Server, msg Message, _ net.Conn) HandlerResult {
 		var payload FrictionPayload
 		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 			s.logger.Debug("failed to parse friction payload", "error", err)
+		} else {
+			handler(payload)
+		}
+	}
+
+	// fire-and-forget: no response
+	return HandlerResult{SkipDefault: true}
+}
+
+func handleSessionFinalize(s *Server, msg Message, _ net.Conn) HandlerResult {
+	s.mu.Lock()
+	handler := s.onSessionFinalize
+	s.mu.Unlock()
+
+	if handler != nil {
+		var payload SessionFinalizeIPCPayload
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			s.logger.Debug("failed to parse session_finalize payload", "error", err)
+		} else if payload.SessionName == "" || payload.LedgerPath == "" {
+			s.logger.Debug("session_finalize payload missing required fields", "session_name", payload.SessionName, "ledger_path", payload.LedgerPath)
 		} else {
 			handler(payload)
 		}
@@ -788,6 +866,82 @@ func handleTriggerGC(s *Server, _ Message, _ net.Conn) HandlerResult {
 	return HandlerResult{Response: marshalResponse(resp)}
 }
 
+func handleCodeIndex(s *Server, msg Message, conn net.Conn) HandlerResult {
+	s.mu.Lock()
+	handler := s.onCodeIndex
+	s.mu.Unlock()
+
+	if handler == nil {
+		return HandlerResult{
+			Response: &Response{Success: false, Error: "code index handler not set"},
+		}
+	}
+
+	var payload CodeIndexPayload
+	if len(msg.Payload) > 0 {
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			return HandlerResult{
+				Response: &Response{Success: false, Error: fmt.Sprintf("invalid code_index payload: %v", err)},
+			}
+		}
+	}
+
+	pw := &ProgressWriter{conn: conn}
+	result, err := handler(payload, pw)
+	if err != nil {
+		return HandlerResult{
+			Response: &Response{Success: false, Error: err.Error()},
+		}
+	}
+
+	return HandlerResult{Response: marshalResponse(result)}
+}
+
+func handleCodeStatus(s *Server, _ Message, _ net.Conn) HandlerResult {
+	s.mu.Lock()
+	handler := s.onCodeStatus
+	s.mu.Unlock()
+
+	if handler != nil {
+		stats := handler()
+		return HandlerResult{Response: marshalResponse(stats)}
+	}
+	return HandlerResult{
+		Response: &Response{Success: true, Data: json.RawMessage(`{}`)},
+	}
+}
+
+func handleNotifications(s *Server, msg Message, _ net.Conn) HandlerResult {
+	s.mu.Lock()
+	handler := s.onNotifications
+	s.mu.Unlock()
+
+	if handler == nil {
+		resp := NotificationsResponse{Files: []ChangeEntry{}, Stale: false}
+		return HandlerResult{Response: marshalResponse(resp)}
+	}
+
+	var payload NotificationsPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		return HandlerResult{
+			Response: &Response{Success: false, Error: fmt.Sprintf("invalid payload: %v", err)},
+		}
+	}
+
+	if payload.AgentID == "" {
+		return HandlerResult{
+			Response: &Response{Success: false, Error: "agent_id required"},
+		}
+	}
+
+	files, stale := handler(payload.AgentID)
+	if files == nil {
+		files = []ChangeEntry{} // ensure JSON array, not null
+	}
+	resp := NotificationsResponse{Files: files, Stale: stale}
+	return HandlerResult{Response: marshalResponse(resp)}
+}
+
 // SetHandlers sets the message handlers.
 func (s *Server) SetHandlers(onSync func() error, onStop func(), onStatus func() *StatusData) {
 	s.mu.Lock()
@@ -820,7 +974,8 @@ func (s *Server) SetActivityCallback(cb func()) {
 }
 
 // SetHeartbeatHandler sets the handler for heartbeat messages.
-func (s *Server) SetHeartbeatHandler(cb func(payload json.RawMessage)) {
+// callerID identifies which clone/worktree sent the heartbeat (path-based hash).
+func (s *Server) SetHeartbeatHandler(cb func(callerID string, payload json.RawMessage)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onHeartbeat = cb
@@ -848,6 +1003,14 @@ func (s *Server) SetFrictionHandler(cb func(payload FrictionPayload)) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onFriction = cb
+}
+
+// SetSessionFinalizeHandler sets the handler for session finalize messages.
+// Session finalize events are fire-and-forget - no response is sent.
+func (s *Server) SetSessionFinalizeHandler(fn func(payload SessionFinalizeIPCPayload)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onSessionFinalize = fn
 }
 
 // SetErrorsHandler sets the handler for retrieving unviewed errors.
@@ -892,6 +1055,28 @@ func (s *Server) SetTriggerGCHandler(handler func() *TriggerGCResponse) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onTriggerGC = handler
+}
+
+// SetCodeIndexHandler sets the handler for code indexing requests.
+// The handler receives a ProgressWriter to send progress updates during indexing.
+func (s *Server) SetCodeIndexHandler(cb func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onCodeIndex = cb
+}
+
+// SetCodeStatusHandler sets the handler for code index status requests.
+func (s *Server) SetCodeStatusHandler(cb func() *CodeDBStats) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onCodeStatus = cb
+}
+
+// SetNotificationsHandler sets the handler for notification queries.
+func (s *Server) SetNotificationsHandler(cb func(agentID string) ([]ChangeEntry, bool)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onNotifications = cb
 }
 
 // Start starts the IPC server.
@@ -993,11 +1178,11 @@ func (s *Server) handleConnection(_ context.Context, conn net.Conn) {
 		return
 	}
 
-	s.logger.Debug("received message", "type", msg.Type, "workspace_id", msg.WorkspaceID)
+	s.logger.Debug("received message", "type", msg.Type, "workspace_id", msg.WorkspaceID, "caller_id", msg.CallerID)
 
 	// validate workspace ID if provided (warn on mismatch, still process for backward compatibility)
 	if msg.WorkspaceID != "" && msg.WorkspaceID != CurrentWorkspaceID() {
-		s.logger.Warn("workspace mismatch", "expected", CurrentWorkspaceID(), "got", msg.WorkspaceID)
+		s.logger.Warn("workspace mismatch", "expected", CurrentWorkspaceID(), "got", msg.WorkspaceID, "caller_id", msg.CallerID)
 	}
 
 	// record activity on any IPC message
@@ -1101,6 +1286,11 @@ func (c *Client) sendMessage(msg Message) (*Response, error) {
 		msg.WorkspaceID = CurrentWorkspaceID()
 	}
 
+	// identify which clone/worktree is sending this message
+	if msg.CallerID == "" {
+		msg.CallerID = LegacyWorkspaceID()
+	}
+
 	// send message
 	data, _ := json.Marshal(msg)
 	data = append(data, '\n')
@@ -1141,6 +1331,9 @@ func (c *Client) SendOneWay(msg Message) error {
 
 	if msg.WorkspaceID == "" {
 		msg.WorkspaceID = CurrentWorkspaceID()
+	}
+	if msg.CallerID == "" {
+		msg.CallerID = LegacyWorkspaceID()
 	}
 
 	data, _ := json.Marshal(msg)
@@ -1281,6 +1474,28 @@ func (c *Client) TriggerGC() (*TriggerGCResponse, error) {
 		return nil, fmt.Errorf("unmarshal trigger_gc response: %w", err)
 	}
 	return &gcResp, nil
+}
+
+// Notifications queries pending team context change notifications for an agent.
+// Returns changes since the agent last checked. The first call registers the cursor
+// and returns empty; subsequent calls return changes since the previous call.
+func (c *Client) Notifications(agentID string) (*NotificationsResponse, error) {
+	payload, _ := json.Marshal(NotificationsPayload{AgentID: agentID})
+	resp, err := c.sendMessage(Message{
+		Type:    MsgTypeNotifications,
+		Payload: payload,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, errors.New(resp.Error)
+	}
+	var result NotificationsResponse
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal notifications: %w", err)
+	}
+	return &result, nil
 }
 
 // RequestSync requests the daemon to perform a sync.
@@ -1526,6 +1741,95 @@ func (c *Client) MarkErrorsViewed(ids []string) error {
 		return errors.New(resp.Error)
 	}
 	return nil
+}
+
+// CodeIndex requests the daemon to index code with progress updates.
+// Uses a long timeout (5 minutes) since indexing can take time for large repos.
+func (c *Client) CodeIndex(payload CodeIndexPayload, onProgress ProgressCallback) (*CodeIndexResult, error) {
+	conn, err := c.Connect()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	// indexing can take minutes for large repos
+	indexTimeout := 5 * time.Minute
+	conn.SetDeadline(time.Now().Add(indexTimeout))
+
+	payloadData, _ := json.Marshal(payload)
+	msg := Message{
+		Type:        MsgTypeCodeIndex,
+		WorkspaceID: CurrentWorkspaceID(),
+		Payload:     payloadData,
+	}
+
+	data, _ := json.Marshal(msg)
+	data = append(data, '\n')
+	if _, err := conn.Write(data); err != nil {
+		return nil, fmt.Errorf("write: %w", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			return nil, fmt.Errorf("read: %w", err)
+		}
+
+		var resp ProgressResponse
+		if err := json.Unmarshal(line, &resp); err != nil {
+			return nil, fmt.Errorf("unmarshal response: %w", err)
+		}
+
+		if resp.Progress != nil {
+			if onProgress != nil {
+				onProgress(resp.Progress.Stage, resp.Progress.Percent, resp.Progress.Message)
+			}
+			continue
+		}
+
+		if !resp.Success {
+			return nil, errors.New(resp.Error)
+		}
+
+		var result CodeIndexResult
+		if len(resp.Data) > 0 {
+			if err := json.Unmarshal(resp.Data, &result); err != nil {
+				return nil, fmt.Errorf("unmarshal result: %w", err)
+			}
+		}
+		return &result, nil
+	}
+}
+
+// CodeStatus requests the current code index status from the daemon.
+func (c *Client) CodeStatus() (*CodeDBStats, error) {
+	resp, err := c.sendMessage(Message{Type: MsgTypeCodeStatus})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, errors.New(resp.Error)
+	}
+	var stats CodeDBStats
+	if err := json.Unmarshal(resp.Data, &stats); err != nil {
+		return nil, fmt.Errorf("unmarshal code status: %w", err)
+	}
+	return &stats, nil
+}
+
+// SessionFinalize sends a fire-and-forget request to finalize a session.
+// The daemon will upload to LFS, commit, push, and generate summary artifacts.
+func (c *Client) SessionFinalize(payload SessionFinalizeIPCPayload) error {
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal session_finalize payload: %w", err)
+	}
+	// fire-and-forget: ignore response
+	return c.SendOneWay(Message{
+		Type:    MsgTypeSessionFinalize,
+		Payload: payloadBytes,
+	})
 }
 
 // TryConnectForCheckout attempts to connect for checkout operations.

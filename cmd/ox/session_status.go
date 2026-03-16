@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -31,14 +32,20 @@ Examples:
 // sessionStatusOutput is the JSON output format for session status.
 type sessionStatusOutput struct {
 	Recording     bool                    `json:"recording"`
+	AgentAlive    *bool                   `json:"agent_alive,omitempty"` // nil if no PID available, false if agent exited
 	Guidance      string                  `json:"guidance,omitempty"`
 	Count         int                     `json:"count,omitempty"`
 	Sessions      []sessionRecordingEntry `json:"sessions,omitempty"`
 	Title         string                  `json:"title,omitempty"`
 	DurationSecs  int                     `json:"duration_seconds,omitempty"`
 	Duration      string                  `json:"duration,omitempty"`
+	EntryCount    int                     `json:"entry_count,omitempty"`
+	FilterMode    string                  `json:"filter_mode,omitempty"`
+	Model         string                  `json:"model,omitempty"`
 	Agent         string                  `json:"agent,omitempty"`
 	AgentID       string                  `json:"agent_id,omitempty"`
+	ProcessAlive  *bool                   `json:"process_alive,omitempty"`  // nil if unknown, true/false if checked
+	ProcessStatus string                  `json:"process_status,omitempty"` // "alive", "dead", or "unknown"
 	SessionFile   string                  `json:"session_file,omitempty"`
 	StartedAt     string                  `json:"started_at,omitempty"`
 	WorkspacePath string                  `json:"workspace_path,omitempty"`
@@ -48,10 +55,16 @@ type sessionStatusOutput struct {
 // sessionRecordingEntry represents one active recording in the multi-session output.
 type sessionRecordingEntry struct {
 	AgentID       string `json:"agent_id"`
+	AgentAlive    *bool  `json:"agent_alive,omitempty"` // nil if no PID available, false if agent exited
 	Title         string `json:"title,omitempty"`
 	Agent         string `json:"agent,omitempty"`
 	DurationSecs  int    `json:"duration_seconds"`
 	Duration      string `json:"duration"`
+	EntryCount    int    `json:"entry_count"`
+	FilterMode    string `json:"filter_mode,omitempty"`
+	Model         string `json:"model,omitempty"`
+	ProcessAlive  *bool  `json:"process_alive,omitempty"`  // nil if unknown, true/false if checked
+	ProcessStatus string `json:"process_status,omitempty"` // "alive", "dead", or "unknown"
 	StartedAt     string `json:"started_at"`
 	SessionFile   string `json:"session_file,omitempty"`
 	WorkspacePath string `json:"workspace_path,omitempty"`
@@ -102,6 +115,10 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		states = filtered
 	}
 
+	// build agent liveness map: agent_id → alive (true/false)
+	// Three sources: recording state PID, disk instance store PID, and daemon heartbeats.
+	agentAlive := resolveAgentLiveness(projectRoot, states)
+
 	// no recordings
 	if len(states) == 0 {
 		if jsonOutput {
@@ -121,17 +138,24 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		state := states[0]
 		duration := state.Duration()
 		durationStr := formatDurationHuman(duration)
+		alive, status := agentLivenessFor(agentAlive, state.AgentID)
 
 		if jsonOutput {
 			output := sessionStatusOutput{
 				Recording:     true,
+				AgentAlive:    agentAlivePtr(state),
 				Guidance:      "Run 'ox agent <id> session stop' to save the recording",
 				Count:         1,
 				Title:         state.Title,
 				DurationSecs:  int(duration.Seconds()),
 				Duration:      durationStr,
+				EntryCount:    state.EntryCount,
+				FilterMode:    state.FilterMode,
+				Model:         state.Model,
 				Agent:         state.AdapterName,
 				AgentID:       state.AgentID,
+				ProcessAlive:  alive,
+				ProcessStatus: status,
 				SessionFile:   state.SessionFile,
 				StartedAt:     state.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
 				WorkspacePath: state.WorkspacePath,
@@ -140,17 +164,23 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 			return outputJSON(output)
 		}
 
-		fmt.Println(cli.StyleSuccess.Render("Recording in progress"))
+		if !state.IsAgentAlive() {
+			fmt.Println(cli.StyleWarning.Render("Recording in progress (agent exited)"))
+		} else {
+			fmt.Println(cli.StyleSuccess.Render("Recording in progress"))
+		}
 		fmt.Println()
 		if state.Title != "" {
 			fmt.Printf("  Title:    %s\n", state.Title)
 		}
 		fmt.Printf("  Duration: %s\n", durationStr)
+		fmt.Printf("  Entries:  %d\n", state.EntryCount)
 		fmt.Printf("  Agent:    %s\n", state.AdapterName)
 		fmt.Printf("  Started:  %s\n", state.StartedAt.Format("15:04:05"))
 		if state.AgentID != "" {
 			fmt.Printf("  Agent ID: %s\n", state.AgentID)
 		}
+		fmt.Printf("  Process:  %s\n", formatProcessStatus(status))
 		if state.WorkspacePath != "" {
 			fmt.Printf("  Workspace: %s\n", state.WorkspacePath)
 		}
@@ -158,7 +188,11 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Branch:   %s\n", state.Branch)
 		}
 		fmt.Println()
-		fmt.Println(cli.StyleDim.Render("Run 'ox agent <id> session stop' to save the recording"))
+		if status == "dead" {
+			fmt.Println(cli.StyleWarning.Render("Agent process is no longer running. Run 'ox agent <id> session stop' to finalize."))
+		} else {
+			fmt.Println(cli.StyleDim.Render("Run 'ox agent <id> session stop' to save the recording"))
+		}
 		return nil
 	}
 
@@ -167,12 +201,19 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		var entries []sessionRecordingEntry
 		for _, s := range states {
 			d := s.Duration()
+			alive, status := agentLivenessFor(agentAlive, s.AgentID)
 			entries = append(entries, sessionRecordingEntry{
 				AgentID:       s.AgentID,
+				AgentAlive:    agentAlivePtr(s),
 				Title:         s.Title,
 				Agent:         s.AdapterName,
 				DurationSecs:  int(d.Seconds()),
 				Duration:      formatDurationHuman(d),
+				EntryCount:    s.EntryCount,
+				FilterMode:    s.FilterMode,
+				Model:         s.Model,
+				ProcessAlive:  alive,
+				ProcessStatus: status,
 				StartedAt:     s.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
 				SessionFile:   s.SessionFile,
 				WorkspacePath: s.WorkspacePath,
@@ -196,12 +237,14 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 			fmt.Println()
 		}
 		durationStr := formatDurationHuman(state.Duration())
+		_, status := agentLivenessFor(agentAlive, state.AgentID)
 
 		label := state.AgentID
 		if label == "" {
 			label = state.AdapterName
 		}
-		fmt.Printf("  %s %s\n", cli.StyleBold.Render(label), cli.StyleDim.Render("("+durationStr+")"))
+		statusTag := formatProcessStatus(status)
+		fmt.Printf("  %s %s %s\n", cli.StyleBold.Render(label), statusTag, cli.StyleDim.Render(fmt.Sprintf("(%s, %d entries)", durationStr, state.EntryCount)))
 
 		if state.Title != "" {
 			fmt.Printf("    Title:   %s\n", state.Title)
@@ -220,6 +263,102 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 	fmt.Println(cli.StyleDim.Render("Use --current to filter to this agent's recording"))
 
 	return nil
+}
+
+// resolveAgentLiveness builds a map of agent_id → alive status.
+// Uses three sources: recording state PID (direct), disk instance store PID,
+// and daemon heartbeats. Returns nil map if no liveness info is available.
+func resolveAgentLiveness(projectRoot string, states []*session.RecordingState) map[string]bool {
+	if len(states) == 0 {
+		return nil
+	}
+
+	result := make(map[string]bool)
+
+	// collect agent IDs we care about
+	agentIDs := make(map[string]bool)
+	for _, s := range states {
+		if s.AgentID != "" {
+			agentIDs[s.AgentID] = true
+		}
+	}
+
+	// source 1: recording state PID — direct from .recording.json
+	for _, s := range states {
+		if s.AgentID != "" && s.ParentPID > 0 {
+			result[s.AgentID] = s.IsAgentAlive()
+		}
+	}
+
+	// source 2: disk instance store — PID-based liveness check
+	store, err := getInstanceStore(projectRoot)
+	if err == nil {
+		for agentID := range agentIDs {
+			if _, known := result[agentID]; known {
+				continue // already resolved from recording state
+			}
+			inst, err := store.Get(agentID)
+			if err != nil {
+				continue
+			}
+			result[agentID] = inst.IsProcessAlive()
+		}
+	}
+
+	// source 3: daemon heartbeat instances — recent heartbeat means alive
+	if client := daemon.TryConnect(); client != nil {
+		instances, err := client.Instances()
+		if err == nil {
+			for _, inst := range instances {
+				if !agentIDs[inst.AgentID] {
+					continue
+				}
+				if inst.Status == daemon.StatusActive {
+					result[inst.AgentID] = true
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+// agentLivenessFor returns the process_alive pointer and status string for a given agent.
+func agentLivenessFor(livenessMap map[string]bool, agentID string) (*bool, string) {
+	if agentID == "" || livenessMap == nil {
+		return nil, "unknown"
+	}
+	alive, known := livenessMap[agentID]
+	if !known {
+		return nil, "unknown"
+	}
+	status := "dead"
+	if alive {
+		status = "alive"
+	}
+	return &alive, status
+}
+
+// agentAlivePtr returns a *bool indicating agent liveness from PID.
+// Returns nil if no PID is recorded (backward compat with old recordings).
+func agentAlivePtr(state *session.RecordingState) *bool {
+	if state == nil || state.ParentPID <= 0 {
+		return nil
+	}
+	alive := state.IsAgentAlive()
+	return &alive
+}
+
+// formatProcessStatus returns a styled string for process status display.
+func formatProcessStatus(status string) string {
+	switch status {
+	case "alive":
+		return cli.StyleSuccess.Render("alive")
+	case "dead":
+		return cli.StyleWarning.Render("dead")
+	default:
+		return cli.StyleDim.Render("unknown")
+	}
 }
 
 // outputJSON writes JSON to stdout.

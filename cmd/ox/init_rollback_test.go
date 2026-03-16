@@ -254,7 +254,7 @@ func TestRollbackInit_RollsBackAgentFiles(t *testing.T) {
 	// simulate hook file being created
 	hookDir := filepath.Join(tmpDir, ".claude")
 	require.NoError(t, os.MkdirAll(hookDir, 0755))
-	hookPath := filepath.Join(hookDir, "settings.local.json")
+	hookPath := filepath.Join(hookDir, "settings.json")
 	require.NoError(t, os.WriteFile(hookPath, []byte("{}"), 0644))
 
 	tracker := newInitTracker(tmpDir)

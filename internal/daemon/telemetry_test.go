@@ -256,6 +256,61 @@ func TestTelemetryCollector_RecordSyncComplete(t *testing.T) {
 	assert.Equal(t, int64(150), events[0].Props["duration_ms"])
 }
 
+func TestTelemetryCollector_RecordCodeIndexComplete(t *testing.T) {
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("SAGEOX_TELEMETRY", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	collector := NewTelemetryCollector(logger)
+
+	result := &CodeIndexResult{
+		BlobsParsed:       42,
+		SymbolsExtracted:  100,
+		CommentsExtracted: 250,
+		IndexDurationMs:   5000,
+		SymbolDurationMs:  1200,
+		CommentDurationMs: 800,
+		TotalDurationMs:   7000,
+	}
+	collector.RecordCodeIndexComplete(result, "success")
+
+	events := collector.drainBuffer()
+	require.Len(t, events, 1)
+	assert.Equal(t, "codedb:index_complete", events[0].Event)
+	assert.Equal(t, "ox-daemon", events[0].Props["app_type"])
+	assert.Equal(t, "success", events[0].Props["status"])
+	assert.Equal(t, uint64(42), events[0].Props["blobs_parsed"])
+	assert.Equal(t, uint64(100), events[0].Props["symbols_extracted"])
+	assert.Equal(t, uint64(250), events[0].Props["comments_extracted"])
+	assert.Equal(t, int64(5000), events[0].Props["index_duration_ms"])
+	assert.Equal(t, int64(1200), events[0].Props["symbol_duration_ms"])
+	assert.Equal(t, int64(800), events[0].Props["comment_duration_ms"])
+	assert.Equal(t, int64(7000), events[0].Props["total_duration_ms"])
+}
+
+func TestTelemetryCollector_RecordCodeIndexComplete_Error(t *testing.T) {
+	t.Setenv("DO_NOT_TRACK", "")
+	t.Setenv("SAGEOX_TELEMETRY", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	collector := NewTelemetryCollector(logger)
+
+	// partial result from a failed indexing (only index stage completed)
+	result := &CodeIndexResult{
+		IndexDurationMs: 3000,
+		TotalDurationMs: 3000,
+	}
+	collector.RecordCodeIndexComplete(result, "error")
+
+	events := collector.drainBuffer()
+	require.Len(t, events, 1)
+	assert.Equal(t, "error", events[0].Props["status"])
+	assert.Equal(t, int64(3000), events[0].Props["total_duration_ms"])
+	assert.Equal(t, uint64(0), events[0].Props["blobs_parsed"])
+}
+
 func TestTelemetryCollector_Stats(t *testing.T) {
 	t.Setenv("DO_NOT_TRACK", "")
 	t.Setenv("SAGEOX_TELEMETRY", "")

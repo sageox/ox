@@ -12,7 +12,7 @@ func TestNewPersonInfo(t *testing.T) {
 		name              string
 		email             string
 		fullName          string
-		gitUsername        string
+		gitUsername       string
 		configDisplayName string
 		wantDisplayName   string
 	}{
@@ -46,7 +46,7 @@ func TestNewPersonInfo(t *testing.T) {
 		},
 		{
 			name:            "git username with hyphen delimiter",
-			gitUsername:      "person-a",
+			gitUsername:     "person-a",
 			wantDisplayName: "Person A.",
 		},
 		{
@@ -70,7 +70,7 @@ func TestNewPersonInfo(t *testing.T) {
 		},
 		{
 			name:            "git username with dots",
-			gitUsername:      "person.b",
+			gitUsername:     "person.b",
 			wantDisplayName: "Person B.",
 		},
 		{

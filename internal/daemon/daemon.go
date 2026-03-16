@@ -16,6 +16,7 @@ import (
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/version"
 )
@@ -146,19 +147,23 @@ type Daemon struct {
 	wg     sync.WaitGroup
 
 	// components
-	server    *Server
-	scheduler *SyncScheduler
-	watcher   *Watcher
-	heartbeat *HeartbeatHandler
-	telemetry *TelemetryCollector
-	friction  *FrictionCollector
-	issues    *IssueTracker
+	server        *Server
+	scheduler     *SyncScheduler
+	watcher       *Watcher
+	heartbeat     *HeartbeatHandler
+	telemetry     *TelemetryCollector
+	friction      *FrictionCollector
+	issues        *IssueTracker
+	codedb        *CodeDBManager
+	agentWorker   *agentwork.Manager
+	notifications *NotificationStore
 
 	// state
-	mu           sync.Mutex
-	running      bool
-	startTime    time.Time // daemon start time for uptime tracking
-	lastActivity time.Time // tracks last activity for inactivity timeout
+	mu               sync.Mutex
+	running          bool
+	restartRequested bool      // set when version mismatch triggers restart
+	startTime        time.Time // daemon start time for uptime tracking
+	lastActivity     time.Time // tracks last activity for inactivity timeout
 
 	// startup timing (written once in Start(), read by IPC status handler)
 	startupDurationMs  atomic.Int64
@@ -195,6 +200,14 @@ func (d *Daemon) timeSinceLastActivity() time.Duration {
 	return time.Since(d.lastActivity)
 }
 
+// RestartRequested returns true if the daemon stopped due to a version mismatch
+// and should be re-executed with the updated binary.
+func (d *Daemon) RestartRequested() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.restartRequested
+}
+
 // Start starts the daemon in the foreground.
 // This blocks until Stop is called or a termination signal is received.
 func (d *Daemon) Start() error {
@@ -224,7 +237,7 @@ func (d *Daemon) Start() error {
 	d.running = true
 	d.mu.Unlock()
 
-	d.logger.Info("daemon starting", "ledger", d.config.LedgerPath, "version", Version)
+	d.logger.Info("daemon starting", "ledger", d.config.LedgerPath, "version", Version())
 
 	startSetup := time.Now()
 
@@ -268,6 +281,9 @@ func (d *Daemon) Start() error {
 	// initialize issue tracker for health check system
 	d.issues = NewIssueTracker()
 
+	// initialize notification store for team context change tracking
+	d.notifications = NewNotificationStore(200)
+
 	// start heartbeat handler
 	d.heartbeat = NewHeartbeatHandler(d.logger)
 	d.heartbeat.SetActivityCallback(d.recordActivity)
@@ -276,12 +292,13 @@ func (d *Daemon) Start() error {
 		d.logger.Debug("team context needed", "team_id", teamID)
 	})
 	d.heartbeat.SetVersionMismatchCallback(func(cliVersion, daemonVersion string) {
-		// CLI has been upgraded - daemon should restart to match
 		d.logger.Info("restarting due to version mismatch",
 			"cli_version", cliVersion,
 			"daemon_version", daemonVersion,
 		)
-		// stop gracefully - CLI will restart daemon with new version
+		d.mu.Lock()
+		d.restartRequested = true
+		d.mu.Unlock()
 		go d.Stop()
 	})
 	d.server.SetHeartbeatHandler(d.heartbeat.Handle)
@@ -304,12 +321,74 @@ func (d *Daemon) Start() error {
 	// start sync scheduler
 	d.scheduler = NewSyncScheduler(d.config, d.logger)
 
+	// initialize code index manager (if project root is set)
+	if d.config.ProjectRoot != "" {
+		d.codedb = NewCodeDBManager(d.config.ProjectRoot, d.logger, d.telemetry)
+	}
+
+	// initialize agent work manager (if ledger path is set)
+	if d.config.LedgerPath != "" {
+		agentWorkSignal := make(chan struct{}, 1)
+		runner := agentwork.NewClaudeRunner(d.logger)
+		configLoader := func() *config.AgentWorkerConfig {
+			cfg, err := config.LoadUserConfig()
+			if err != nil {
+				d.logger.Debug("failed to load user config for agent worker", "error", err)
+				return (&config.AgentWorkerConfig{}).WithDefaults()
+			}
+			awCfg := cfg.GetAgentWorkerConfig()
+			if awCfg == nil {
+				return (&config.AgentWorkerConfig{}).WithDefaults()
+			}
+			return awCfg
+		}
+		d.agentWorker = agentwork.NewManager(runner, d.logger, configLoader, agentWorkSignal, d.config.LedgerPath)
+		sfh := agentwork.NewSessionFinalizeHandler(d.logger)
+		sfh.SetPIDLookup(d.heartbeat.GetAgentPID)
+		// wire quality thresholds from user config
+		awCfg := configLoader()
+		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
+		d.agentWorker.RegisterHandler(sfh)
+		d.agentWorker.SetOnComplete(func(result agentwork.WorkResult) {
+			status := "success"
+			if !result.Success {
+				status = "failed"
+			}
+			d.logger.Info("agent work complete",
+				"type", result.Item.Type,
+				"status", status,
+				"duration", result.Duration,
+			)
+		})
+
+		// pass agent work signal channel to sync scheduler
+		d.scheduler.SetAgentWorkSignal(agentWorkSignal)
+	}
+
 	// wire auth token getter so scheduler and friction can authenticate API calls
 	d.scheduler.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
 	d.friction.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
 
 	// wire issue tracker so scheduler can report issues needing LLM reasoning
 	d.scheduler.SetIssueTracker(d.issues)
+
+	// wire notification store so scheduler can record team context changes
+	d.scheduler.SetNotificationStore(d.notifications)
+
+	// wire code index manager into scheduler for periodic freshness checks
+	if d.codedb != nil {
+		d.scheduler.SetCodeDBManager(d.codedb)
+	}
+
+	// initialize GitHub sync manager for automatic PR/issue fetching
+	if d.config.ProjectRoot != "" {
+		githubSync := NewGitHubSyncManager(d.config.ProjectRoot, d.scheduler.LedgerMu(), d.logger)
+		githubSync.SetIssueTracker(d.issues)
+		if d.codedb != nil {
+			githubSync.SetCodeDBManager(d.codedb)
+		}
+		d.scheduler.SetGitHubSyncManager(githubSync)
+	}
 
 	// set telemetry callback on scheduler for sync:complete events
 	d.scheduler.SetTelemetryCallback(func(syncType, operation, status string, duration time.Duration) {
@@ -329,8 +408,14 @@ func (d *Daemon) Start() error {
 				lastErrTimeStr = lastErrTime.Format(time.RFC3339)
 			}
 			stats := d.scheduler.SyncStats()
-			// get workspace path (use config, not CWD — CWD may have been stabilized to $HOME)
+			// prefer most recent caller path from heartbeats (stays fresh across clones)
+			// fall back to config.ProjectRoot (the clone that started the daemon)
 			workspacePath := d.config.ProjectRoot
+			if d.heartbeat != nil {
+				if callerPath := d.heartbeat.LastCallerPath(); callerPath != "" {
+					workspacePath = callerPath
+				}
+			}
 
 			// get activity summary from heartbeat handler
 			var activitySummary *ActivitySummary
@@ -345,12 +430,32 @@ func (d *Daemon) Start() error {
 				authUser = d.heartbeat.GetAuthenticatedUser()
 			}
 
+			// get connected callers (clones/worktrees)
+			var callers []CallerInfo
+			if d.heartbeat != nil {
+				callers = d.heartbeat.GetCallers()
+			}
+
 			// get issues from issue tracker
 			var issues []DaemonIssue
 			needsHelp := false
 			if d.issues != nil {
 				issues = d.issues.GetIssues()
 				needsHelp = d.issues.NeedsHelp()
+			}
+
+			// get code index stats
+			var codeDBStats *CodeDBStats
+			if d.codedb != nil {
+				stats := d.codedb.Stats()
+				codeDBStats = &stats
+			}
+
+			// get agent work status
+			var agentWorkStatus *agentwork.AgentWorkStatus
+			if d.agentWorker != nil {
+				s := d.agentWorker.Status()
+				agentWorkStatus = &s
 			}
 
 			// get all workspaces being synced (ledger + team contexts)
@@ -366,14 +471,14 @@ func (d *Daemon) Start() error {
 						wsType = "team-context"
 					}
 					workspaces[wsType] = append(workspaces[wsType], WorkspaceSyncStatus{
-						ID:       ws.ID,
-						Type:     wsType,
-						Path:     ws.Path,
-						CloneURL: ws.CloneURL,
-						Exists:   ws.Exists,
-						TeamID:   ws.TeamID,
-						TeamName: ws.TeamName,
-						TeamSlug: ws.TeamSlug,
+						ID:             ws.ID,
+						Type:           wsType,
+						Path:           ws.Path,
+						CloneURL:       ws.CloneURL,
+						Exists:         ws.Exists,
+						TeamID:         ws.TeamID,
+						TeamName:       ws.TeamName,
+						TeamSlug:       ws.TeamSlug,
 						LastSync:       ws.ConfigLastSync,
 						LastErr:        ws.LastErr,
 						Syncing:        ws.SyncInProgress,
@@ -384,31 +489,34 @@ func (d *Daemon) Start() error {
 			}
 
 			return &StatusData{
-				Running:           true,
-				Pid:               os.Getpid(),
-				Version:           version.Version,
-				Uptime:            time.Since(d.server.startTime),
-				WorkspacePath:     workspacePath,
-				LedgerPath:        d.config.LedgerPath,
-				LastSync:          d.scheduler.LastSync(),
-				SyncIntervalRead:  d.config.SyncIntervalRead,
-				RecentErrorCount:  d.scheduler.RecentErrorCount(),
-				LastError:         lastErr,
-				LastErrorTime:     lastErrTimeStr,
-				TotalSyncs:        stats.TotalSyncs,
-				SyncsLastHour:     stats.SyncsLastHour,
-				AvgSyncTime:       stats.AvgDuration,
-				Workspaces:        workspaces,
-				ProjectTeamID:     projectTeamID,
-				TeamContexts:      d.scheduler.TeamContextStatus(),
-				InactivityTimeout: d.config.InactivityTimeout,
-				TimeSinceActivity: d.timeSinceLastActivity(),
-				Activity:          activitySummary,
-				AuthenticatedUser: authUser,
+				Running:            true,
+				Pid:                os.Getpid(),
+				Version:            Version(),
+				Uptime:             time.Since(d.startTime),
+				WorkspacePath:      workspacePath,
+				LedgerPath:         d.config.LedgerPath,
+				LastSync:           d.scheduler.LastSync(),
+				SyncIntervalRead:   d.config.SyncIntervalRead,
+				RecentErrorCount:   d.scheduler.RecentErrorCount(),
+				LastError:          lastErr,
+				LastErrorTime:      lastErrTimeStr,
+				TotalSyncs:         stats.TotalSyncs,
+				SyncsLastHour:      stats.SyncsLastHour,
+				AvgSyncTime:        stats.AvgDuration,
+				Workspaces:         workspaces,
+				ProjectTeamID:      projectTeamID,
+				TeamContexts:       d.scheduler.TeamContextStatus(),
+				InactivityTimeout:  d.config.InactivityTimeout,
+				TimeSinceActivity:  d.timeSinceLastActivity(),
+				Activity:           activitySummary,
+				AuthenticatedUser:  authUser,
 				NeedsHelp:          needsHelp,
 				Issues:             issues,
 				StartupDurationMs:  d.startupDurationMs.Load(),
 				ThrottleDurationMs: d.throttleDurationMs.Load(),
+				CodeDB:             codeDBStats,
+				AgentWork:          agentWorkStatus,
+				Callers:            callers,
 			}
 		},
 	)
@@ -432,9 +540,16 @@ func (d *Daemon) Start() error {
 	d.server.SetDoctorHandler(func() *DoctorResponse {
 		// trigger anti-entropy (self-healing for missing repos)
 		d.scheduler.TriggerAntiEntropy()
-		return &DoctorResponse{
+		resp := &DoctorResponse{
 			AntiEntropyTriggered: true,
 		}
+		// trigger session finalization detection (bypasses hourly cooldown)
+		if d.agentWorker != nil {
+			queued := d.agentWorker.ForceDetect()
+			resp.SessionFinalizeTriggered = true
+			resp.SessionFinalizeQueued = queued
+		}
+		return resp
 	})
 
 	// set trigger_gc handler for forced GC reclone (triggered by ox doctor --gc)
@@ -446,6 +561,25 @@ func (d *Daemon) Start() error {
 	d.server.SetCheckoutHandler(func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error) {
 		return d.scheduler.Checkout(payload, progress)
 	})
+
+	// set code index handler for indexing via IPC
+	if d.codedb != nil {
+		d.server.SetCodeIndexHandler(func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) {
+			result, err := d.codedb.Index(d.ctx, payload, progress)
+			if d.telemetry != nil && result != nil {
+				status := "success"
+				if err != nil {
+					status = "error"
+				}
+				d.telemetry.RecordCodeIndexComplete(result, status)
+			}
+			return result, err
+		})
+		d.server.SetCodeStatusHandler(func() *CodeDBStats {
+			stats := d.codedb.Stats()
+			return &stats
+		})
+	}
 
 	// set telemetry handler for CLI events
 	d.server.SetTelemetryHandler(func(payload json.RawMessage) {
@@ -460,6 +594,29 @@ func (d *Daemon) Start() error {
 		d.friction.RecordFromIPC(payload)
 	})
 
+	// set session finalize handler for async session upload+finalization
+	d.server.SetSessionFinalizeHandler(func(payload SessionFinalizeIPCPayload) {
+		if d.agentWorker == nil {
+			d.logger.Warn("session_finalize received but agent worker not initialized")
+			return
+		}
+		d.logger.Info("session_finalize received, enqueueing",
+			"session", payload.SessionName,
+			"ledger", payload.LedgerPath,
+		)
+		d.agentWorker.Enqueue(&agentwork.WorkItem{
+			Type:     "session-finalize",
+			Priority: 1, // high priority (vs 10 for doctor-detected)
+			DedupKey: "session-finalize:" + payload.SessionName,
+			Payload: &agentwork.SessionFinalizePayload{
+				SessionDir: filepath.Join(payload.LedgerPath, "sessions", payload.SessionName),
+				RawPath:    filepath.Join(payload.LedgerPath, "sessions", payload.SessionName, "raw.jsonl"),
+				Missing:    []string{"summary.md", "summary.json", "session.html", "session.md"},
+				LedgerPath: payload.LedgerPath,
+			},
+		})
+	})
+
 	// set sessions handler for agent session tracking (deprecated)
 	d.server.SetSessionsHandler(func() []AgentSession {
 		return d.getAgentSessions()
@@ -468,6 +625,11 @@ func (d *Daemon) Start() error {
 	// set instances handler for agent instance tracking
 	d.server.SetInstancesHandler(func() []InstanceInfo {
 		return d.getAgentInstances()
+	})
+
+	// set notifications handler for team context change queries
+	d.server.SetNotificationsHandler(func(agentID string) ([]ChangeEntry, bool) {
+		return d.notifications.GetNotifications(agentID)
 	})
 
 	setupDuration := time.Since(startSetup)
@@ -503,6 +665,20 @@ func (d *Daemon) Start() error {
 				d.scheduler.TriggerSync()
 			})
 		}()
+	}
+
+	// start agent work manager (if initialized)
+	if d.agentWorker != nil {
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.agentWorker.Start(d.ctx)
+		}()
+	}
+
+	// check code index freshness on startup (non-blocking)
+	if d.codedb != nil {
+		go d.codedb.CheckFreshness(d.ctx)
 	}
 
 	// set activity callback on server (IPC requests = activity)
@@ -633,26 +809,44 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 	instances := make([]InstanceInfo, 0, len(keys))
 
 	now := time.Now()
-	idleThreshold := IdleThreshold
 
 	for _, agentID := range keys {
 		last := tracker.Last(agentID)
 		count := tracker.Count(agentID)
 
+		elapsed := now.Sub(last)
+
+		// skip stale instances (no heartbeat in >5min) — they're dead sessions
+		if elapsed > StaleThreshold {
+			continue
+		}
+
 		status := StatusActive
-		if now.Sub(last) > idleThreshold {
+		if elapsed > IdleThreshold {
 			status = StatusIdle
+		}
+
+		// instant liveness check: if PID is known and process is dead, mark as exited
+		agentPID := d.heartbeat.GetAgentPID(agentID)
+		if agentPID > 0 {
+			proc, procErr := os.FindProcess(agentPID)
+			if procErr != nil || proc.Signal(syscall.Signal(0)) != nil {
+				status = StatusExited
+			}
 		}
 
 		ctxStats := d.heartbeat.GetAgentContextStats(agentID)
 		instances = append(instances, InstanceInfo{
-			AgentID:                agentID,
-			WorkspacePath:          workspacePath,
-			LastHeartbeat:          last,
-			HeartbeatCount:         count,
-			Status:                 status,
+			AgentID:                 agentID,
+			WorkspacePath:           workspacePath,
+			LastHeartbeat:           last,
+			HeartbeatCount:          count,
+			Status:                  status,
 			CumulativeContextTokens: ctxStats.ContextTokens,
-			CommandCount:           ctxStats.CommandCount,
+			CommandCount:            ctxStats.CommandCount,
+			ParentAgentID:           d.heartbeat.GetAgentParentID(agentID),
+			AgentType:               d.heartbeat.GetAgentType(agentID),
+			ParentPID:               d.heartbeat.GetAgentPID(agentID),
 		})
 	}
 
@@ -763,7 +957,7 @@ func (d *Daemon) cleanup() {
 // Uses socket-based ping detection. Claude manages the daemon process lifecycle,
 // so flock-based locking is no longer needed.
 func IsRunning() bool {
-	client := NewClientWithTimeout(100 * time.Millisecond)
+	client := NewClientWithTimeout(500 * time.Millisecond)
 	return client.Ping() == nil
 }
 

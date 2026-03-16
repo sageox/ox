@@ -78,8 +78,8 @@ type WorkspaceRegistry struct {
 	mu sync.RWMutex
 
 	// project context
-	projectRoot string
-	repoName    string
+	projectRoot   string
+	repoName      string
 	endpoint      string // SageOx API endpoint from project config
 	repoID        string // repo ID from project config (for API calls)
 	projectTeamID string // primary team ID from project config
@@ -678,7 +678,7 @@ func (r *WorkspaceRegistry) HasFetchHead(id string) (exists bool, mtime time.Tim
 	if err != nil {
 		return false, time.Time{}
 	}
-	return true, info.ModTime()
+	return true, info.ModTime().UTC()
 }
 
 // GetRepoID returns the repo ID from project config.

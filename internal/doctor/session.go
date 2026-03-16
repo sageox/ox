@@ -522,6 +522,7 @@ func formatModeSource(source config.SessionRecordingSource) string {
 // SessionOrphanedCheck detects orphaned .recording.json files.
 type SessionOrphanedCheck struct {
 	gitRoot      string
+	fix          bool
 	cachedStatus *session.HealthStatus
 }
 
@@ -530,8 +531,8 @@ func (c *SessionOrphanedCheck) SetHealthStatus(status *session.HealthStatus) {
 }
 
 // NewSessionOrphanedCheck creates an orphaned recording check.
-func NewSessionOrphanedCheck(gitRoot string) *SessionOrphanedCheck {
-	return &SessionOrphanedCheck{gitRoot: gitRoot}
+func NewSessionOrphanedCheck(gitRoot string, fix bool) *SessionOrphanedCheck {
+	return &SessionOrphanedCheck{gitRoot: gitRoot, fix: fix}
 }
 
 // Name returns the check name.
@@ -541,36 +542,92 @@ func (c *SessionOrphanedCheck) Name() string {
 
 // Run executes the orphaned recording check.
 func (c *SessionOrphanedCheck) Run(ctx context.Context) CheckResult {
+	// phase 1: instant ghost cleanup using PID liveness (no time threshold)
+	ghostResult := session.CleanupGhostSessions(c.gitRoot)
+
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
 
-	// check for orphaned recordings (recording state exists but is very old)
-	if !status.IsRecordingActive {
+	totalStale := len(status.StaleRecordings)
+	if totalStale == 0 && ghostResult.Removed == 0 {
 		return CheckResult{
 			Name:   c.Name(),
 			Status: StatusSkip,
 		}
 	}
 
-	// a recording older than 24 hours without activity is likely orphaned
-	if status.IsStaleRecording && status.StaleRecordingAge.Hours() > 24 {
-		agentID := "unknown"
-		if status.Recording != nil {
-			agentID = status.Recording.AgentID
-		}
-
-		days := int(status.StaleRecordingAge.Hours()) / 24
-
+	if totalStale == 0 && ghostResult.Removed > 0 {
 		return CheckResult{
 			Name:    c.Name(),
-			Status:  StatusWarn,
-			Message: fmt.Sprintf("found %d-day old recording (%s)", days, agentID),
-			Fix:     fmt.Sprintf("Run 'ox agent %s session recover' to upload to ledger, or 'ox agent %s session abort --force' to discard", agentID, agentID),
+			Status:  StatusPass,
+			Message: fmt.Sprintf("cleaned %d ghost session(s)", ghostResult.Removed),
 		}
 	}
 
+	emptyCount := status.EmptyStaleCount
+	contentCount := status.ContentStaleCount
+
+	if !c.fix {
+		msg := fmt.Sprintf("found %d orphaned recording(s) (%d empty, %d with content)", totalStale, emptyCount, contentCount)
+		if ghostResult.Removed > 0 {
+			msg += fmt.Sprintf(" (also cleaned %d ghost sessions)", ghostResult.Removed)
+		}
+		return CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarn,
+			Message: msg,
+			Fix:     "Run 'ox doctor --fix' to clean up stale recordings",
+		}
+	}
+
+	// phase 2: time-based cleanup for remaining stale recordings
+	// empty stubs require 48h staleness (sessions can run 12+ hours, raw.jsonl written on stop)
+	const emptyStubFixThreshold = 48 * time.Hour
+	cleanedEmpty := 0
+	cleanedContent := 0
+	for _, state := range status.StaleRecordings {
+		if state.SessionPath == "" {
+			continue
+		}
+		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+		_, rawErr := os.Stat(rawPath)
+		hasContent := rawErr == nil
+		if rawErr != nil && !os.IsNotExist(rawErr) {
+			continue // transient/permission error, skip
+		}
+
+		if !hasContent {
+			// empty stubs need the longer 48h threshold
+			if time.Since(state.StartedAt) < emptyStubFixThreshold {
+				continue
+			}
+			recPath := filepath.Join(state.SessionPath, ".recording.json")
+			if err := os.Remove(recPath); err != nil && !os.IsNotExist(err) {
+				continue
+			}
+			if entries, err := os.ReadDir(state.SessionPath); err == nil && len(entries) == 0 {
+				_ = os.Remove(state.SessionPath)
+			}
+			cleanedEmpty++
+		} else {
+			// has content: clear .recording.json so it stops showing as "recording"
+			// data preserved for 'ox session recover'
+			recPath := filepath.Join(state.SessionPath, ".recording.json")
+			if err := os.Remove(recPath); err != nil && !os.IsNotExist(err) {
+				continue
+			}
+			cleanedContent++
+		}
+	}
+
+	cleaned := cleanedEmpty + cleanedContent
+	msg := fmt.Sprintf("cleaned %d orphaned recording(s) (%d empty stubs removed, %d with content cleared)", cleaned, cleanedEmpty, cleanedContent)
+	if ghostResult.Removed > 0 {
+		msg += fmt.Sprintf(", %d ghost sessions removed", ghostResult.Removed)
+	}
 	return CheckResult{
-		Name:   c.Name(),
-		Status: StatusSkip,
+		Name:    c.Name(),
+		Status:  StatusPass,
+		Message: msg,
 	}
 }
 

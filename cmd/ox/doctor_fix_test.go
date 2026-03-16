@@ -690,8 +690,8 @@ func TestCheckClaudeCodeHooks_FixInstalls(t *testing.T) {
 	if !result.passed {
 		t.Errorf("expected passed=true, got false: %s", result.message)
 	}
-	if result.message != "installed (project)" {
-		t.Errorf("expected message='installed (project)', got %q", result.message)
+	if result.message != "installed (shared)" {
+		t.Errorf("expected message='installed (shared)', got %q", result.message)
 	}
 
 	if !HasProjectClaudeHooks(gitRoot) {

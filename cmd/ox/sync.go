@@ -48,7 +48,7 @@ var syncCmd = &cobra.Command{
 NOTE: You should RARELY need this command. The background daemon automatically
 keeps your ledger and team contexts synchronized. This command exists only for:
   - Troubleshooting sync issues
-  - Forcing an immediate sync
+  - Triggering an immediate sync (this command itself forces sync)
   - Diagnostic purposes
 
 The daemon syncs automatically on:

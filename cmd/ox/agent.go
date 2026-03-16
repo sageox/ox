@@ -151,6 +151,12 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// "hook" dispatched directly — no agent_id required.
+	// hooks fire before prime, so no agent ID exists yet.
+	if firstArg == "hook" {
+		return runAgentHook(args[1:])
+	}
+
 	// check if first arg looks like an agent_id (Ox<4-char>)
 	if agentinstance.IsValidAgentID(firstArg) {
 		return runWithAgentID(cmd, firstArg, args[1:])
@@ -210,6 +216,12 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		Heartbeat(gitRoot, nil, agentID)
 	}
 
+	// check for team context change notifications (non-blocking, ~50ms max)
+	// controlled by user config: `ox config set notifications on` (default: off)
+	if userCfg, _ := config.LoadUserConfig(); userCfg != nil && userCfg.Notifications.AreNotificationsEnabled() {
+		emitTeamContextNotifications(agentID)
+	}
+
 	subcommand := args[0]
 
 	// reset context byte counter; deferred heartbeat sends accumulated bytes
@@ -258,7 +270,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		case "recover":
 			return runAgentSessionRecover(inst)
 		case "abort":
-			return runAgentSessionAbort(inst, cmd)
+			return runAgentSessionAbort(inst, cmd, sessionArgs)
 		case "delete":
 			return runAgentSessionDelete(inst, cmd, sessionArgs)
 		default:
@@ -346,95 +358,140 @@ func getInstanceStore(projectRoot string) (*agentinstance.Store, error) {
 }
 
 // runAgentList lists active AI coworkers with context consumption and session info.
+// Uses daemon as primary source (heartbeat-based), merges with disk instances for metadata.
 func runAgentList(cmd *cobra.Command, args []string) error {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
 		return fmt.Errorf("could not find project root: %w", err)
 	}
 
+	// primary source: daemon heartbeat-tracked instances
+	var daemonInstances []daemon.InstanceInfo
+	if client := daemon.TryConnect(); client != nil {
+		daemonInstances, _ = client.Instances()
+	}
+
+	// secondary source: disk-based instance store (has agent type, PID, parent info)
 	store, err := getInstanceStore(projectRoot)
 	if err != nil {
 		return fmt.Errorf("failed to access instance store: %w", err)
 	}
-
-	instances, err := store.List()
-	if err != nil {
-		return fmt.Errorf("failed to list instances: %w", err)
+	diskInstances, _ := store.List()
+	diskByID := make(map[string]*agentinstance.Instance)
+	for _, inst := range diskInstances {
+		diskByID[inst.AgentID] = inst
 	}
 
-	if len(instances) == 0 {
-		fmt.Println("No active AI coworkers.")
+	if len(daemonInstances) == 0 && len(diskInstances) == 0 {
+		fmt.Println("No active SageOx enriched agents.")
 		fmt.Println("\nRun 'ox agent prime' to start one.")
 		return nil
 	}
 
-	// build lookup of daemon context stats by agent ID
-	daemonStats := make(map[string]daemon.InstanceInfo)
-	if client := daemon.TryConnect(); client != nil {
-		if daemonInstances, err := client.Instances(); err == nil {
-			for _, di := range daemonInstances {
-				daemonStats[di.AgentID] = di
-			}
+	// merge: daemon instances are authoritative for liveness, disk provides metadata
+	type mergedInstance struct {
+		AgentID       string
+		AgentType     string
+		Status        string
+		Tokens        int64
+		CommandCount  int
+		LastHeartbeat time.Time
+		CreatedAt     time.Time
+		WorkspacePath string
+		ParentAgentID string
+		Recording     bool
+	}
+
+	var merged []mergedInstance
+	seen := make(map[string]bool)
+
+	// daemon-known instances first (authoritative)
+	for _, di := range daemonInstances {
+		m := mergedInstance{
+			AgentID:       di.AgentID,
+			Status:        di.Status,
+			Tokens:        di.CumulativeContextTokens,
+			CommandCount:  di.CommandCount,
+			LastHeartbeat: di.LastHeartbeat,
+			WorkspacePath: di.WorkspacePath,
+			Recording:     session.IsRecordingForAgent(projectRoot, di.AgentID),
 		}
+		if disk, ok := diskByID[di.AgentID]; ok {
+			m.AgentType = disk.AgentType
+			m.CreatedAt = disk.CreatedAt
+			m.ParentAgentID = disk.ParentAgentID
+		} else {
+			m.CreatedAt = di.LastHeartbeat
+		}
+		// daemon heartbeat info works cross-worktree; use as fallback
+		// when disk instance store is not available (different worktree)
+		if m.AgentType == "" && di.AgentType != "" {
+			m.AgentType = di.AgentType
+		}
+		if m.ParentAgentID == "" && di.ParentAgentID != "" {
+			m.ParentAgentID = di.ParentAgentID
+		}
+		merged = append(merged, m)
+		seen[di.AgentID] = true
+	}
+
+	// disk instances not known to daemon (only if process is alive)
+	for _, inst := range diskInstances {
+		if seen[inst.AgentID] {
+			continue
+		}
+		if !inst.IsProcessAlive() {
+			continue
+		}
+		merged = append(merged, mergedInstance{
+			AgentID:       inst.AgentID,
+			AgentType:     inst.AgentType,
+			Status:        "active",
+			CreatedAt:     inst.CreatedAt,
+			ParentAgentID: inst.ParentAgentID,
+			WorkspacePath: projectRoot,
+			Recording:     session.IsRecordingForAgent(projectRoot, inst.AgentID),
+		})
+	}
+
+	if len(merged) == 0 {
+		fmt.Println("No active SageOx enriched agents.")
+		fmt.Println("\nRun 'ox agent prime' to start one.")
+		return nil
 	}
 
 	dim := cli.StyleDim
 	green := cli.StyleSuccess
 
-	// filter to agents whose parent process is still running.
-	// PID check is definitive (kill -0); falls back to daemon/recording heuristics
-	// for instances created before PID tracking was added.
-	var alive []*agentinstance.Instance
-	for _, inst := range instances {
-		if inst.IsProcessAlive() {
-			alive = append(alive, inst)
-			continue
-		}
-		// fallback for pre-PID instances: daemon knows about them or actively recording
-		if inst.ParentPID == 0 {
-			_, knownToDaemon := daemonStats[inst.AgentID]
-			if knownToDaemon || session.IsRecordingForAgent(projectRoot, inst.AgentID) {
-				alive = append(alive, inst)
-			}
-		}
-	}
-
-	if len(alive) == 0 {
-		fmt.Println("No active AI coworkers.")
-		fmt.Println("\nRun 'ox agent prime' to start one.")
-		return nil
-	}
-
-	// check if workspaces are heterogeneous — only show column when useful
+	// check if workspaces are heterogeneous
 	workspaces := make(map[string]bool)
-	for _, inst := range alive {
+	for _, m := range merged {
 		ws := filepath.Base(projectRoot)
-		if ds, ok := daemonStats[inst.AgentID]; ok && ds.WorkspacePath != "" {
-			ws = filepath.Base(ds.WorkspacePath)
+		if m.WorkspacePath != "" {
+			ws = filepath.Base(m.WorkspacePath)
 		}
 		workspaces[ws] = true
 	}
 	showWorkspace := len(workspaces) > 1
 
-	// build agent hierarchy — group subagents under their parent
-	aliveSet := make(map[string]*agentinstance.Instance)
-	children := make(map[string][]string) // parentID -> child IDs
-	var roots []string                    // agents with no parent (or parent not alive)
-	for _, inst := range alive {
-		aliveSet[inst.AgentID] = inst
+	// build agent hierarchy
+	mergedByID := make(map[string]mergedInstance)
+	children := make(map[string][]string)
+	var roots []string
+	for _, m := range merged {
+		mergedByID[m.AgentID] = m
 	}
-	for _, inst := range alive {
-		if inst.ParentAgentID != "" {
-			if _, parentAlive := aliveSet[inst.ParentAgentID]; parentAlive {
-				children[inst.ParentAgentID] = append(children[inst.ParentAgentID], inst.AgentID)
+	for _, m := range merged {
+		if m.ParentAgentID != "" {
+			if _, parentExists := mergedByID[m.ParentAgentID]; parentExists {
+				children[m.ParentAgentID] = append(children[m.ParentAgentID], m.AgentID)
 				continue
 			}
 		}
-		roots = append(roots, inst.AgentID)
+		roots = append(roots, m.AgentID)
 	}
 
-	fmt.Printf("Active AI coworkers (%d):\n\n", len(alive))
-	// dim headers — minimize non-data ink (Tufte)
+	fmt.Printf("Active SageOx enriched agents (%d):\n\n", len(merged))
 	header := fmt.Sprintf("  %s  %s  %s  %s  %s  %s",
 		dim.Render(fmt.Sprintf("%-8s", "ID")),
 		dim.Render(fmt.Sprintf("%-10s", "Type")),
@@ -448,68 +505,94 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println(header)
 
-	// renderRow prints one agent row with optional tree prefix
-	renderRow := func(inst *agentinstance.Instance, prefix string) {
-		agentType := inst.AgentType
+	renderRow := func(m mergedInstance, prefix string) {
+		agentType := m.AgentType
 		if agentType == "" {
 			agentType = "-"
 		}
 
-		// token count from daemon (already estimated at source)
 		tokens := fmt.Sprintf("%8s", "-")
 		cmds := fmt.Sprintf("%5s", "-")
-		if ds, ok := daemonStats[inst.AgentID]; ok && ds.CumulativeContextTokens > 0 {
-			tokens = fmt.Sprintf("%8s", "~"+formatTokenCount(int(ds.CumulativeContextTokens)))
-			cmds = fmt.Sprintf("%5d", ds.CommandCount)
+		if m.Tokens > 0 {
+			tokens = fmt.Sprintf("%8s", "~"+formatTokenCount(int(m.Tokens)))
+			cmds = fmt.Sprintf("%5d", m.CommandCount)
 		}
 
-		// session uptime
-		uptime := fmt.Sprintf("%7s", formatDurationShort(time.Since(inst.CreatedAt)))
+		uptime := fmt.Sprintf("%7s", formatDurationShort(time.Since(m.CreatedAt)))
 
-		// recording status
 		rec := dim.Render(fmt.Sprintf("%-3s", "-"))
-		if session.IsRecordingForAgent(projectRoot, inst.AgentID) {
+		if m.Recording {
 			rec = green.Render(fmt.Sprintf("%-3s", "rec"))
 		}
 
-		// ID column: tree prefix (dim) + agent ID (gold)
-		idCol := dim.Render(prefix) + cli.StyleSecondary.Render(inst.AgentID)
-		// pad to account for prefix width: 2 (indent) + 8 (id field)
-		padded := fmt.Sprintf("%-8s", prefix+inst.AgentID)
-		_ = padded // use visual width from styled rendering
-		idWidth := len(prefix) + len(inst.AgentID)
+		idCol := dim.Render(prefix) + cli.StyleSecondary.Render(m.AgentID)
+		idWidth := len(prefix) + len(m.AgentID)
 		idPad := ""
 		if idWidth < 8 {
 			idPad = fmt.Sprintf("%*s", 8-idWidth, "")
 		}
 
-		row := fmt.Sprintf("  %s%s  %-10s  %s  %s  %s  %s",
+		// status indicator for non-active
+		statusStr := ""
+		switch m.Status {
+		case "idle":
+			statusStr = " " + dim.Render("idle")
+		case "exited":
+			statusStr = " " + dim.Render("exited")
+		}
+
+		row := fmt.Sprintf("  %s%s  %-10s  %s  %s  %s  %s%s",
 			idCol, idPad,
 			agentType,
 			dim.Render(tokens),
 			dim.Render(cmds),
 			dim.Render(uptime),
 			rec,
+			statusStr,
 		)
 		if showWorkspace {
 			workspace := filepath.Base(projectRoot)
-			if ds, ok := daemonStats[inst.AgentID]; ok && ds.WorkspacePath != "" {
-				workspace = filepath.Base(ds.WorkspacePath)
+			if m.WorkspacePath != "" {
+				workspace = filepath.Base(m.WorkspacePath)
 			}
 			row += "  " + dim.Render(fmt.Sprintf("%-20s", workspace))
 		}
 		fmt.Println(row)
 	}
 
-	// render tree: roots first, then their children indented
 	for _, rootID := range roots {
-		renderRow(aliveSet[rootID], "")
+		renderRow(mergedByID[rootID], "")
 		for _, childID := range children[rootID] {
-			renderRow(aliveSet[childID], " \u2514")
+			renderRow(mergedByID[childID], " \u2514")
 		}
 	}
 
 	return nil
+}
+
+// emitTeamContextNotifications checks daemon for pending team context changes.
+// Non-blocking: if daemon is unavailable, silently returns.
+// Called on every ox agent <id> <command> invocation via runWithAgentID().
+func emitTeamContextNotifications(agentID string) {
+	client := daemon.NewClient() // 50ms timeout
+	notifs, err := client.Notifications(agentID)
+	if err != nil || notifs == nil {
+		return
+	}
+
+	if len(notifs.Files) == 0 && !notifs.Stale {
+		return
+	}
+
+	if notifs.Stale {
+		fmt.Fprintln(os.Stderr, "NOTICE: Team context changed significantly. Re-read via `ox agent team-ctx` if relevant to current work.")
+		return
+	}
+
+	fmt.Fprintln(os.Stderr, "NOTICE: Team context updated. Re-read only if relevant to current work:")
+	for _, f := range notifs.Files {
+		fmt.Fprintf(os.Stderr, "  %s\n", f.Path)
+	}
 }
 
 // emitDaemonIssueWarnings checks for daemon issues and emits warnings to stderr.

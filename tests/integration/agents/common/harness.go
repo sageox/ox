@@ -3,6 +3,9 @@
 // Package common provides a shared test harness for agent integration tests.
 // This harness is designed to be agent-agnostic, supporting Claude Code, OpenCode,
 // Codex, and other legitimate CLI coding agents that integrate with ox CLI.
+//
+// IMPORTANT: All tests using this harness MUST run real agent CLI binaries.
+// Never simulate agent output or use fake JSONL — these are E2E tests.
 package common
 
 import (
@@ -133,14 +136,20 @@ func SetupTestEnvironment(t *testing.T) *TestEnvironment {
 		t.Fatalf("failed to copy team context fixtures: %v", err)
 	}
 
-	// Create ledger directory
-	ledgerDir := filepath.Join(rootDir, "ledger")
+	// Create ledger directory at the XDG data path ox expects:
+	// $XDG_DATA_HOME/sageox/<endpoint_slug>/ledgers/<repo_id>/
+	// The endpoint and repo_id must match the fixture config.json.
+	ledgerDir := filepath.Join(rootDir, "data", "sageox", "sageox.ai", "ledgers", "repo_test-integration-001")
 	os.MkdirAll(ledgerDir, 0755)
 
 	// Initialize git repos in fixtures
 	initGitRepo(t, env.ProjectDir)
 	initGitRepo(t, ledgerDir)
 	initGitRepo(t, teamContextDir)
+
+	// Copy .claude/commands/ skill files from the repo root so Claude Code
+	// recognizes slash commands like /ox-session-start in -p mode.
+	copySlashCommands(t, env.ProjectDir)
 
 	// Fix placeholder paths in local.json to be absolute
 	fixLocalConfigPaths(t, env, teamContextDir, ledgerDir)
@@ -179,9 +188,6 @@ func (e *TestEnvironment) setupEnvironment() {
 		// Force offline mode to avoid cloud API calls
 		"OX_OFFLINE": "1",
 
-		// Disable XDG mode to use project .sageox/ directory
-		"OX_XDG_DISABLE": "1",
-
 		// Add ox binary to PATH
 		"PATH": filepath.Dir(e.OxBinaryPath) + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
@@ -194,6 +200,8 @@ func (e *TestEnvironment) setupEnvironment() {
 	// Remove CLAUDECODE env var so spawned Claude Code sessions don't refuse
 	// to start with "cannot be launched inside another Claude Code session"
 	e.EnvVars = removeEnvVar(e.EnvVars, "CLAUDECODE")
+	// ensure subprocesses use XDG layout matching our fixture paths
+	e.EnvVars = removeEnvVar(e.EnvVars, "OX_XDG_DISABLE")
 
 	// Create required directories
 	for _, dir := range []string{"config", "data", "cache", "state"} {
@@ -332,6 +340,42 @@ func findFixturesDir(t *testing.T) string {
 	}
 
 	return fixturesDir
+}
+
+// copySlashCommands copies .claude/commands/ox-*.md skill files from the repo
+// root into the test project so Claude Code recognizes ox slash commands in -p mode.
+// In production, ox init installs these. The test fixture skips init, so we copy directly.
+func copySlashCommands(t *testing.T, projectDir string) {
+	t.Helper()
+
+	repoRoot := findRepoRoot(t)
+	srcDir := filepath.Join(repoRoot, ".claude", "commands")
+	dstDir := filepath.Join(projectDir, ".claude", "commands")
+
+	entries, err := os.ReadDir(srcDir)
+	if err != nil {
+		t.Logf("no .claude/commands/ in repo root — skipping slash command copy: %v", err)
+		return
+	}
+
+	os.MkdirAll(dstDir, 0755)
+
+	copied := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "ox-") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(srcDir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dstDir, entry.Name()), data, 0644); err != nil {
+			t.Logf("failed to copy skill file %s: %v", entry.Name(), err)
+			continue
+		}
+		copied++
+	}
+	t.Logf("copied %d ox slash command files to test project", copied)
 }
 
 func buildOxCLI(t *testing.T, outputDir string) string {

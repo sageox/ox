@@ -7,15 +7,18 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
@@ -25,7 +28,6 @@ import (
 	sessionhtml "github.com/sageox/ox/internal/session/html"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
-	"github.com/sageox/ox/pkg/agentx"
 )
 
 // Agent UX Decision: JSON is the default output format for session commands.
@@ -60,7 +62,6 @@ const sessionStopGuidance = `Session stopped and saved. Check the summary_prompt
 // uploadSessionToLedger (write) and the post-prune path rewrite (read-back).
 const (
 	ledgerFileRaw       = "raw.jsonl"
-	ledgerFileEvents    = "events.jsonl" // likely deprecated long-term; raw.jsonl is the source of truth
 	ledgerFileHTML      = "session.html"
 	ledgerFileSummaryMD = "summary.md"
 	ledgerFileSessionMD = "session.md"
@@ -118,8 +119,13 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		// non-ErrReadOnly errors fall through (fail-open)
 	}
 
+	// ensure prime has run — team context and agent identity are critical for sessions.
+	// detection: check session marker (written by prime on success).
+	// if missing, run prime as subprocess so its output reaches the agent's context.
+	ensurePrimeBeforeSession(inst.AgentID)
+
 	// explicit start re-enables recording — clear any stop breadcrumb
-	session.ConsumeExplicitStop(projectRoot)
+	session.ConsumeExplicitStop(projectRoot, inst.AgentID)
 
 	// one-time session recording notice (returned to caller via JSON)
 	notice := getSessionTermsNotice()
@@ -163,7 +169,12 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 			if adapter, detectErr := adapters.DetectAdapter(); detectErr == nil {
 				adapterName = adapter.Name()
 				since := time.Now().Add(-5 * time.Minute)
-				sessionFile, _ = adapter.FindSessionFile(inst.AgentID, since)
+				sf, findErr := adapter.FindSessionFile(inst.AgentID, since)
+				if findErr != nil {
+					slog.Info("session file not found at start (will retry at stop)", "adapter", adapterName, "error", findErr)
+				} else {
+					sessionFile = sf
+				}
 			}
 		}
 	}
@@ -213,6 +224,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		Username:      getSessionUsername(),
 		WorkspacePath: projectRoot,
 		Branch:        repotools.GetCurrentBranch(projectRoot),
+		ParentPID:     os.Getppid(), // use current parent, not stale prime-time PID (fixes Conductor orphan detection)
 	}
 
 	state, err := session.StartRecording(projectRoot, opts)
@@ -224,6 +236,11 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 			return fmt.Errorf("no ledger configured for this project\n\nTo enable session recording:\n  1. Run 'ox init' to set up this repository\n  2. This creates a ledger to store session history\n\nSee 'ox init --help' for options")
 		}
 		return fmt.Errorf("failed to start recording: %w", err)
+	}
+	// write raw.jsonl header immediately so incremental hooks can append entries
+	if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
+		slog.Warn("failed to write raw.jsonl header at start", "error", writeErr)
+		// non-fatal: processAgentSession will write header at stop time as fallback
 	}
 
 	// build output once, render based on mode
@@ -299,9 +316,64 @@ func isManualSessionAgent(agentType string) bool {
 	return canonicalAgentType(agentType) == string(agentx.AgentTypeCodex)
 }
 
+// ensurePrimeBeforeSession checks if `ox agent prime` has run for the current
+// agent session and runs it inline if not. Prime provides team context and
+// creates the session marker — both critical for meaningful sessions.
+//
+// Detection: session markers are written by prime, keyed by the agent's native
+// session ID (e.g., CLAUDE_CODE_SESSION_ID). No marker = prime hasn't run.
+//
+// If prime hasn't run, we exec it as a subprocess (same pattern as hooks).
+// Its output goes directly to stdout so the agent receives team context.
+// Failure is non-fatal — session recording proceeds regardless.
+func ensurePrimeBeforeSession(agentID string) {
+	// get agent session ID from env var (same detection as prime itself)
+	var agentSessionID string
+	if agent := agentx.CurrentAgent(); agent != nil && agent.SupportsSession() {
+		agentSessionID = agent.SessionID(agentx.NewSystemEnvironment())
+	}
+
+	if agentSessionID == "" {
+		// no session ID available — can't check marker, skip
+		slog.Debug("session start: no agent session ID, skipping prime check")
+		return
+	}
+
+	// check if prime already ran for this session
+	marker, _ := ReadSessionMarker(agentSessionID)
+	if marker != nil {
+		slog.Debug("session start: prime already ran", "agent_id", marker.AgentID, "primed_at", marker.PrimedAt)
+		return
+	}
+
+	// prime hasn't run — execute it inline
+	slog.Info("session start: prime not detected, running inline", "agent_session_id", agentSessionID)
+
+	oxPath, err := os.Executable()
+	if err != nil {
+		slog.Warn("session start: cannot find ox executable for inline prime", "error", err)
+		return
+	}
+
+	cmd := exec.Command(oxPath, "agent", "prime")
+	cmd.Env = os.Environ()
+	// prime output goes to stderr to avoid corrupting session start JSON on stdout.
+	// agents read both stdout and stderr, so prime context still reaches the agent.
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		slog.Warn("session start: inline prime failed", "error", err)
+		// non-fatal: proceed with session start anyway
+	}
+}
+
 // runAgentSessionStop stops recording and saves the session.
 // Usage: ox agent <id> session stop
 func runAgentSessionStop(inst *agentinstance.Instance) error {
+	stopStart := time.Now()
+	timing := make(map[string]int64)
+
 	// verify redaction signature before stopping - warn if tampered
 	// this is critical as secrets are about to be redacted and saved
 	warnIfRedactionSignatureInvalid()
@@ -319,7 +391,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// For generic adapters: check if the drop file has content BEFORE clearing state.
 	// If empty, mark as incomplete and return retry guidance instead of processing.
 	// This must happen before clearing recording state.
-	state, err := session.LoadRecordingState(projectRoot)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
 	if err != nil {
 		return fmt.Errorf("failed to load recording state: %w", err)
 	}
@@ -330,7 +402,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		info, statErr := os.Stat(state.SessionFile)
 		if statErr != nil || info.Size() == 0 {
 			// mark recording as incomplete (allows restart without "already recording" error)
-			_ = session.UpdateRecordingState(projectRoot, func(s *session.RecordingState) {
+			_ = session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
 				s.StopIncomplete = true
 			})
 
@@ -361,19 +433,41 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	}
 
 	// mark explicit stop so /clear hook doesn't silently auto-restart the session
-	_ = session.MarkExplicitStop(projectRoot)
+	_ = session.MarkExplicitStop(projectRoot, inst.AgentID)
 
 	duration := formatDurationHuman(state.Duration())
+
+	// re-discover session file if it was empty at start time
+	// (Claude Code session JSONL may not have existed yet when recording started)
+	if state.SessionFile == "" && state.AdapterName != "" && state.AdapterName != "generic" {
+		if adapter, adapterErr := adapters.GetAdapter(state.AdapterName); adapterErr == nil {
+			if sf, findErr := adapter.FindSessionFile(state.AgentID, state.StartedAt); findErr == nil {
+				slog.Info("session file discovered at stop time", "file", sf, "adapter", state.AdapterName)
+				state.SessionFile = sf
+			} else {
+				slog.Warn("session file not found at stop time", "adapter", state.AdapterName, "error", findErr)
+			}
+		}
+	}
 
 	// process session: read, redact secrets, extract events, save
 	var processResult *agentSessionResult
 	if state.SessionFile != "" {
+		processStart := time.Now()
 		processResult, err = processAgentSession(projectRoot, state)
+		timing["process_ms"] = time.Since(processStart).Milliseconds()
 		if err != nil {
 			// set marker so future ox agent prime knows doctor is needed
 			_ = doctor.SetNeedsDoctorAgent(projectRoot) // best effort
 			return fmt.Errorf("failed to process session: %w\nrecording state preserved; run 'ox agent %s session recover' or retry stop", err, inst.AgentID)
 		}
+	} else {
+		slog.Warn("no session file — session data not uploaded", "agent_id", state.AgentID, "adapter", state.AdapterName)
+	}
+
+	// capture upload timing from processResult
+	if processResult != nil && processResult.UploadMs > 0 {
+		timing["upload_ms"] = processResult.UploadMs
 	}
 
 	// clean up the drop file after successful processing.
@@ -386,17 +480,20 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	recordSessionObservation(projectRoot, processResult, duration)
 
 	// processing succeeded (or no source file to process) - clear active state.
-	if err := session.ClearRecordingState(projectRoot); err != nil {
+	if err := session.ClearRecordingStateForAgent(projectRoot, inst.AgentID); err != nil {
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("failed to finalize recording stop: %w", err)
 	}
+	// finalize timing
+	timing["total_ms"] = time.Since(stopStart).Milliseconds()
+
 	// output format selection (priority: review > text > json default)
 	if cfg.Review {
 		// security audit mode: human summary first, then JSON
 		outputTextSummary(state, duration, processResult)
 		fmt.Println()
 		fmt.Println("--- Machine Output ---")
-		return outputSessionStopJSON(inst, state, duration, processResult)
+		return outputSessionStopJSON(inst, state, duration, processResult, timing)
 	}
 
 	if cfg.Text {
@@ -406,7 +503,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	}
 
 	// default: JSON output
-	return outputSessionStopJSON(inst, state, duration, processResult)
+	return outputSessionStopJSON(inst, state, duration, processResult, timing)
 }
 
 // recordSessionObservation writes a session summary observation to team memory.
@@ -457,23 +554,11 @@ func outputTextSummary(state *session.RecordingState, duration string, processRe
 			fmt.Printf("  Model: %s\n", processResult.Model)
 		}
 
-		// show filter mode with event counts
-		if processResult.FilterMode != "" && processResult.EventsBeforeFilter > 0 {
-			modeDesc := formatFilterModeDescription(processResult.FilterMode)
-			fmt.Printf("\n  Mode: %s (%s)\n", processResult.FilterMode, modeDesc)
-			fmt.Printf("  Events: %d total -> %d after filtering\n",
-				processResult.EventsBeforeFilter,
-				processResult.EventsAfterFilter)
-		}
-
 		// show generated files with descriptions
 		if processResult.RawPath != "" || processResult.HTMLPath != "" || processResult.SummaryMDPath != "" {
 			fmt.Println("\n  Generated files:")
 			if processResult.RawPath != "" {
 				fmt.Printf("    Raw session:     %s\n", processResult.RawPath)
-			}
-			if processResult.EventsPath != "" {
-				fmt.Printf("    Events log:      %s\n", processResult.EventsPath)
 			}
 			if processResult.HTMLPath != "" {
 				fmt.Printf("    HTML viewer:     %s\n", processResult.HTMLPath)
@@ -499,20 +584,21 @@ func outputTextSummary(state *session.RecordingState, duration string, processRe
 }
 
 // outputSessionStopJSON renders JSON output for session stop.
-func outputSessionStopJSON(inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult) error {
+func outputSessionStopJSON(inst *agentinstance.Instance, state *session.RecordingState, duration string, processResult *agentSessionResult, timing map[string]int64) error {
 	output := sessionStopOutput{
 		Success:  true,
 		Type:     "session_stop",
 		AgentID:  inst.AgentID,
 		Duration: duration,
 		Guidance: sessionStopGuidance,
+		TotalMs:  timing["total_ms"],
+		Timing:   timing,
 	}
 	if state.Title != "" {
 		output.Title = state.Title
 	}
 	if processResult != nil {
 		output.RawPath = processResult.RawPath
-		output.EventsPath = processResult.EventsPath
 		output.HTMLPath = processResult.HTMLPath
 		output.SummaryMDPath = processResult.SummaryMDPath
 		output.SessionMDPath = processResult.SessionMDPath
@@ -523,11 +609,16 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 		output.SummaryPrompt = processResult.SummaryPrompt
 		output.Model = processResult.Model
 		output.AgentVersion = processResult.AgentVersion
-		output.FilterMode = processResult.FilterMode
-		output.EventsBeforeFilter = processResult.EventsBeforeFilter
-		output.EventsAfterFilter = processResult.EventsAfterFilter
 		output.LedgerSessionDir = processResult.LedgerSessionDir
 		output.UploadWarning = processResult.UploadWarning
+		output.DataWarnings = processResult.DataWarnings
+		// async mode: summary_prompt is empty, update guidance
+		if processResult.SummaryPrompt == "" {
+			output.Guidance = "Session stopped and saved. Upload and summary generation happen automatically in the background."
+		}
+	} else {
+		output.UploadWarning = "no session file found — session data was not uploaded to ledger"
+		output.Guidance = "Session stopped but no conversation data was found. The session recording may be empty. Run 'ox doctor' to check for recoverable sessions."
 	}
 	jsonOut, err := json.MarshalIndent(output, "", "  ")
 	if err != nil {
@@ -540,29 +631,28 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 
 // sessionStopOutput is the JSON output format for session stop.
 type sessionStopOutput struct {
-	Success            bool   `json:"success"`
-	Type               string `json:"type"`
-	AgentID            string `json:"agent_id"`
-	Title              string `json:"title,omitempty"`
-	Duration           string `json:"duration"`
-	RawPath            string `json:"raw_path,omitempty"`
-	EventsPath         string `json:"events_path,omitempty"`
-	HTMLPath           string `json:"html_path,omitempty"`
-	SummaryMDPath      string `json:"summary_md_path,omitempty"`
-	SessionMDPath      string `json:"session_md_path,omitempty"`
-	PlanPath           string `json:"plan_path,omitempty"`
-	EntryCount         int    `json:"entry_count,omitempty"`
-	SecretsRedacted    int    `json:"secrets_redacted,omitempty"`
-	Summary            string `json:"summary,omitempty"`
-	SummaryPrompt      string `json:"summary_prompt,omitempty"`
-	Model              string `json:"model,omitempty"`
-	AgentVersion       string `json:"agent_version,omitempty"`
-	FilterMode         string `json:"filter_mode,omitempty"`          // "infra" or "all"
-	EventsBeforeFilter int    `json:"events_before_filter,omitempty"` // events before filtering
-	EventsAfterFilter  int    `json:"events_after_filter,omitempty"`  // events after filtering
-	LedgerSessionDir   string `json:"ledger_session_dir,omitempty"`   // path to session dir in ledger
-	UploadWarning      string `json:"upload_warning,omitempty"`       // set when ledger upload failed
-	Guidance           string `json:"guidance,omitempty"`             // behavioral guidance for the agent
+	Success          bool             `json:"success"`
+	Type             string           `json:"type"`
+	AgentID          string           `json:"agent_id"`
+	Title            string           `json:"title,omitempty"`
+	Duration         string           `json:"duration"`
+	RawPath          string           `json:"raw_path,omitempty"`
+	HTMLPath         string           `json:"html_path,omitempty"`
+	SummaryMDPath    string           `json:"summary_md_path,omitempty"`
+	SessionMDPath    string           `json:"session_md_path,omitempty"`
+	PlanPath         string           `json:"plan_path,omitempty"`
+	EntryCount       int              `json:"entry_count,omitempty"`
+	SecretsRedacted  int              `json:"secrets_redacted,omitempty"`
+	Summary          string           `json:"summary,omitempty"`
+	SummaryPrompt    string           `json:"summary_prompt,omitempty"`
+	Model            string           `json:"model,omitempty"`
+	AgentVersion     string           `json:"agent_version,omitempty"`
+	LedgerSessionDir string           `json:"ledger_session_dir,omitempty"` // path to session dir in ledger
+	UploadWarning    string           `json:"upload_warning,omitempty"`     // set when ledger upload failed
+	DataWarnings     []string         `json:"data_warnings,omitempty"`      // data quality warnings from validation
+	Guidance         string           `json:"guidance,omitempty"`           // behavioral guidance for the agent
+	TotalMs          int64            `json:"total_ms,omitempty"`           // wall clock for entire session stop
+	Timing           map[string]int64 `json:"timing,omitempty"`             // per-phase breakdown (ms)
 }
 
 // parseTitle extracts --title value from args
@@ -580,24 +670,22 @@ func parseTitle(args []string) string {
 
 // agentSessionResult contains outcomes from session processing
 type agentSessionResult struct {
-	RawPath            string
-	EventsPath         string
-	HTMLPath           string
-	SummaryMDPath      string
-	SessionMDPath      string
-	EntryCount         int
-	SecretsRedacted    int
-	AgentVersion       string
-	Model              string
-	Summary            string // local summary text
-	SummaryPrompt      string // prompt for calling agent to generate full summary
-	FilterMode         string // "infra" or "all"
-	EventsBeforeFilter int    // event count before filtering
-	EventsAfterFilter  int    // event count after filtering
-	PlanPath           string // path to plan.md (empty if no plan captured)
-	SessionName        string // ledger session folder name (e.g. 2026-02-06T14-32-ryan-Ox7f3a)
-	LedgerSessionDir   string // full path to session dir in ledger (empty if upload failed)
-	UploadWarning      string // non-empty when ledger upload failed (explains recovery)
+	RawPath          string
+	HTMLPath         string
+	SummaryMDPath    string
+	SessionMDPath    string
+	EntryCount       int
+	SecretsRedacted  int
+	AgentVersion     string
+	Model            string
+	Summary          string   // local summary text
+	SummaryPrompt    string   // prompt for calling agent to generate full summary
+	PlanPath         string   // path to plan.md (empty if no plan captured)
+	SessionName      string   // ledger session folder name (e.g. 2026-02-06T14-32-ryan-Ox7f3a)
+	LedgerSessionDir string   // full path to session dir in ledger (empty if upload failed)
+	UploadWarning    string   // non-empty when ledger upload failed (explains recovery)
+	DataWarnings     []string // data quality warnings from validation (reported to agent)
+	UploadMs         int64    // time spent on LFS upload + git push (ms)
 }
 
 // processAgentSession reads, redacts secrets, and saves the session.
@@ -609,7 +697,7 @@ type agentSessionResult struct {
 // to the ledger git repo and uploaded to LFS (network-dependent, can retry).
 // This ensures session stop never fails due to network issues.
 //
-//	Phase 1 (cache): redact secrets -> write raw.jsonl, events.jsonl, HTML, markdown
+//	Phase 1 (cache): redact secrets -> write raw.jsonl, HTML, markdown
 //	Phase 2 (ledger): copy files -> LFS upload -> write meta.json -> git commit+push
 //	Cleanup: on phase 2 success, prune the local cache (ledger is source of truth)
 //
@@ -637,6 +725,16 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	if sessionMeta != nil {
 		result.AgentVersion = sessionMeta.AgentVersion
 		result.Model = sessionMeta.Model
+	}
+
+	// check if raw.jsonl already has entries from incremental hooks.
+	// a header-only file has exactly 1 line; 2+ lines means hooks appended entries.
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	hasIncrementalEntries := rawJSONLHasEntries(rawPath)
+
+	if hasIncrementalEntries {
+		// incremental hooks already wrote entries -- do final drain, write footer, and generate artifacts
+		return finalizeIncrementalSession(projectRoot, state, rawPath, adapter, result)
 	}
 
 	// read entries from session file
@@ -685,18 +783,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	}
 
 	// convert raw entries to session entries and redact secrets
-	entries := make([]session.Entry, 0, len(rawEntries))
-	for _, raw := range rawEntries {
-		entry := session.Entry{
-			Timestamp: raw.Timestamp,
-			Content:   raw.Content,
-			ToolName:  raw.ToolName,
-			ToolInput: raw.ToolInput,
-		}
-
-		entry.Type = mapRoleToEntryType(raw.Role)
-		entries = append(entries, entry)
-	}
+	entries := session.ConvertRawEntries(rawEntries)
 
 	// redact secrets from entries (modifies in place)
 	result.SecretsRedacted = redactor.RedactEntries(entries)
@@ -712,6 +799,18 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 					}
 				}
 			}
+		}
+	}
+
+	// validate processed entries for data quality issues
+	if validation := validateEntries(entries); validation.hasIssues() {
+		result.DataWarnings = append(result.DataWarnings, validation.Errors...)
+		result.DataWarnings = append(result.DataWarnings, validation.Warnings...)
+		for _, e := range validation.Errors {
+			slog.Warn("session data error", "issue", e, "session", state.AgentID)
+		}
+		for _, w := range validation.Warnings {
+			slog.Info("session data warning", "issue", w, "session", state.AgentID)
 		}
 	}
 
@@ -776,85 +875,12 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	}
 	result.RawPath = rawWriter.FilePath()
 
-	// generate and write events session
-	eventLog := session.NewEventLog(entries, state.AgentID, state.AdapterName)
-
-	// apply filtering based on session mode
-	result.EventsBeforeFilter = len(eventLog.Events)
-	result.FilterMode = state.FilterMode
-	if state.FilterMode != "" {
-		eventLog.Events = session.FilterEvents(eventLog.Events, session.SessionFilterMode(state.FilterMode))
-	}
-	result.EventsAfterFilter = len(eventLog.Events)
-
-	eventsWriter, err := store.CreateEvents(filename)
-	if err != nil {
-		// raw session was saved but events failed - set marker
-		_ = doctor.SetNeedsDoctorAgent(projectRoot)
-		return nil, fmt.Errorf("failed to create events session: %w", err)
-	}
-
-	// write events header
-	eventsMeta := &session.StoreMeta{
-		Version:      "1.0",
-		CreatedAt:    state.StartedAt,
-		AgentID:      state.AgentID,
-		AgentType:    agentTypeForMeta,
-		AgentVersion: result.AgentVersion,
-		Model:        result.Model,
-		Username:     getDisplayName(projectEndpoint),
-		RepoID:       repoID,
-	}
-	if err := eventsWriter.WriteHeader(eventsMeta); err != nil {
-		eventsWriter.Close()
-		// raw session was saved but events header failed - set marker
-		_ = doctor.SetNeedsDoctorAgent(projectRoot)
-		return nil, fmt.Errorf("failed to write events header: %w", err)
-	}
-
-	// write events
-	for _, event := range eventLog.Events {
-		data := map[string]any{
-			"type":      string(event.Type),
-			"summary":   event.Summary,
-			"timestamp": event.Timestamp,
-		}
-		if event.Details != "" {
-			data["details"] = event.Details
-		}
-		if event.ErrorMsg != "" {
-			data["error"] = event.ErrorMsg
-		}
-		if event.RelatedFile != "" {
-			data["file"] = event.RelatedFile
-		}
-		if event.Success != nil {
-			data["success"] = *event.Success
-		}
-		if err := eventsWriter.WriteRaw(data); err != nil {
-			eventsWriter.Close()
-			// raw session was saved but events failed - set marker
-			_ = doctor.SetNeedsDoctorAgent(projectRoot)
-			return nil, fmt.Errorf("failed to write event: %w", err)
-		}
-	}
-
-	if err := eventsWriter.Close(); err != nil {
-		// raw session was saved but events failed - set marker
-		_ = doctor.SetNeedsDoctorAgent(projectRoot)
-		return nil, fmt.Errorf("failed to close events session: %w", err)
-	}
-	result.EventsPath = eventsWriter.FilePath()
-
 	// generate local summary (no server API call - the calling agent will summarize via prompt)
 	localSummary := session.LocalSummary(entries)
 	summaryResp := &session.SummarizeResponse{
 		Summary: localSummary,
 	}
 
-	sessionSummaryView := &session.SummaryView{
-		Text: localSummary,
-	}
 	result.Summary = localSummary
 
 	// use the session name from recording state (generated at start time)
@@ -874,52 +900,29 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	sessionCacheDir := filepath.Dir(result.RawPath)
 	_ = session.WriteNeedsSummaryMarker(sessionCacheDir, result.RawPath, result.LedgerSessionDir)
 
-	// generate HTML viewer with summary
-	// failures here are non-fatal but we track them for doctor
-	var htmlGenFailed, summaryGenFailed bool
+	// generate all session artifacts via shared path
 	if result.RawPath != "" {
-		htmlGen, err := sessionhtml.NewGenerator()
-		if err == nil {
-			// read back the raw session
-			rawSession, readErr := store.ReadSession(filename)
-			if readErr == nil && rawSession != nil {
-				htmlPath := filepath.Join(filepath.Dir(result.RawPath), ledgerFileHTML)
-				if genErr := htmlGen.GenerateToFileWithSummary(rawSession, summaryResp, htmlPath); genErr == nil {
-					result.HTMLPath = htmlPath
-				} else {
-					htmlGenFailed = true
-				}
+		rawSession, readErr := store.ReadSession(filename)
+		if readErr == nil && rawSession != nil {
+			htmlGen, _ := sessionhtml.NewGenerator()
+			artifactPaths, artifactErr := session.WriteSessionArtifacts(filepath.Dir(result.RawPath), rawSession, summaryResp, htmlGen)
+			if artifactErr != nil {
+				_ = doctor.SetNeedsDoctorAgent(projectRoot)
+				slog.Debug("artifact generation failed", "error", artifactErr)
+			} else {
+				result.HTMLPath = artifactPaths.HTML
+				result.SummaryMDPath = artifactPaths.SummaryMD
+				result.SessionMDPath = artifactPaths.SessionMD
 
-				// generate summary markdown
-				summaryMDPath := strings.TrimSuffix(result.RawPath, ".jsonl") + "-summary.md"
-				summaryMDGen := session.NewSummaryMarkdownGenerator()
-				summaryMDBytes, summaryMDErr := summaryMDGen.Generate(rawSession.Meta, sessionSummaryView, rawSession.Entries)
-				if summaryMDErr == nil {
-					if writeErr := os.WriteFile(summaryMDPath, summaryMDBytes, 0644); writeErr == nil {
-						result.SummaryMDPath = summaryMDPath
-					} else {
-						summaryGenFailed = true
+				// validate HTML consistency with raw.jsonl
+				if artifactPaths.HTML != "" {
+					if htmlVal := validateHTMLConsistency(artifactPaths.HTML, result.RawPath); htmlVal.hasIssues() {
+						result.DataWarnings = append(result.DataWarnings, htmlVal.Warnings...)
+						result.DataWarnings = append(result.DataWarnings, htmlVal.Errors...)
 					}
-				} else {
-					summaryGenFailed = true
 				}
-
-				// generate full session markdown
-				sessionMDPath := strings.TrimSuffix(result.RawPath, ".jsonl") + "-session.md"
-				sessionMDGen := session.NewMarkdownGenerator()
-				if sessionMDErr := sessionMDGen.GenerateToFile(rawSession, sessionMDPath); sessionMDErr == nil {
-					result.SessionMDPath = sessionMDPath
-				}
-				// session MD failure is not critical, no marker needed
 			}
-		} else {
-			htmlGenFailed = true
 		}
-	}
-
-	// if HTML or summary generation failed, set marker for doctor
-	if htmlGenFailed || summaryGenFailed {
-		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 	}
 
 	// check for plan.md saved during session (via `ox agent <id> session plan`)
@@ -948,14 +951,39 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// write meta.json to ledger, commit and push.
 	// This is best-effort -- session processing already succeeded.
 	// No spinner here -- bubbletea conflicts with Claude Code's own epoll on stdin.
+	asyncUpload := os.Getenv("SAGEOX_ASYNC_SESSION_UPLOAD") == "1"
+
 	if ledgerErr != nil {
 		// couldn't resolve ledger path - skip upload
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		fmt.Fprintf(os.Stderr, "warning: LFS upload skipped (no ledger): %v\n", ledgerErr)
 		result.LedgerSessionDir = "" // clear since upload didn't happen
 		result.UploadWarning = "Session saved locally but ledger upload skipped (no ledger). Run 'ox doctor' to retry."
+	} else if asyncUpload {
+		// async mode: copy files to ledger dir locally, signal daemon to upload+finalize
+		if copyErr := copySessionCacheToLedger(result, ledgerPath, sessionName); copyErr != nil {
+			slog.Warn("async copy to ledger failed", "error", copyErr)
+			_ = doctor.SetNeedsDoctorAgent(projectRoot)
+			result.UploadWarning = "Session saved locally but async copy failed. Run 'ox doctor' to retry."
+			result.LedgerSessionDir = ""
+		} else {
+			// signal daemon to finalize (fire-and-forget)
+			signalStart := time.Now()
+			signalErr := signalDaemonSessionFinalize(sessionName, ledgerPath, filepath.Dir(result.RawPath), projectRoot)
+			result.UploadMs = time.Since(signalStart).Milliseconds()
+			if signalErr != nil {
+				slog.Info("daemon signal failed, doctor will catch it", "error", signalErr)
+				_ = doctor.SetNeedsDoctorAgent(projectRoot)
+			} else {
+				// clear summary prompt — daemon handles summary generation
+				result.SummaryPrompt = ""
+				result.UploadWarning = ""
+			}
+		}
 	} else {
+		uploadStart := time.Now()
 		uploadErr := uploadSessionToLedger(projectRoot, result, state, ledgerPath, sessionName)
+		result.UploadMs = time.Since(uploadStart).Milliseconds()
 		if uploadErr != nil {
 			if errors.Is(uploadErr, api.ErrReadOnly) {
 				fmt.Fprintln(os.Stderr, "\nUpload skipped — you have read-only access to this public repo.")
@@ -997,7 +1025,6 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 						*field = "" // didn't make it to ledger
 					}
 				}
-				rewriteIfExists(&result.EventsPath, ledgerFileEvents)
 				rewriteIfExists(&result.HTMLPath, ledgerFileHTML)
 				rewriteIfExists(&result.SummaryMDPath, ledgerFileSummaryMD)
 				rewriteIfExists(&result.SessionMDPath, ledgerFileSessionMD)
@@ -1033,6 +1060,12 @@ func filterEntriesAfterStart(entries []adapters.RawEntry, startedAt time.Time) [
 // If this fails, the session data is safe in the local cache and doctor can retry.
 // ledgerPath and sessionName are pre-computed by the caller.
 func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string) error {
+	// guard: never upload a session with zero substantive entries
+	if result.EntryCount == 0 {
+		slog.Info("skipping upload: zero entries", "session", sessionName)
+		return nil
+	}
+
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
 	if err := os.MkdirAll(sessionDir, 0755); err != nil {
@@ -1055,7 +1088,6 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 
 	// copy secondary artifacts (best-effort -- failures logged but don't abort upload)
 	secondaryFiles := map[string]string{
-		ledgerFileEvents:    result.EventsPath,
 		ledgerFileHTML:      result.HTMLPath,
 		ledgerFileSummaryMD: result.SummaryMDPath,
 		ledgerFileSessionMD: result.SessionMDPath,
@@ -1087,6 +1119,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		Summary(result.Summary).
 		UserID(auth.GetUserID(projectEndpoint)).
 		RepoID(getRepoIDOrDefault(projectRoot)).
+		StopReason(session.StopReasonStopped).
 		Build()
 	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
 		return fmt.Errorf("write meta.json: %w", err)
@@ -1120,6 +1153,70 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	}
 
 	return nil
+}
+
+// copySessionCacheToLedger copies raw.jsonl and secondary artifacts from the local
+// cache to the ledger session directory. This is a fast, local-only operation that
+// makes the session data available for the daemon to upload+finalize asynchronously.
+func copySessionCacheToLedger(result *agentSessionResult, ledgerPath, sessionName string) error {
+	// guard: never copy a session with zero substantive entries
+	if result.EntryCount == 0 {
+		slog.Info("skipping async copy: zero entries", "session", sessionName)
+		return nil
+	}
+
+	sessionsDir := filepath.Join(ledgerPath, "sessions")
+	sessionDir := filepath.Join(sessionsDir, sessionName)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		return fmt.Errorf("create session dir: %w", err)
+	}
+
+	// raw.jsonl is critical — must succeed
+	if result.RawPath != "" {
+		data, err := os.ReadFile(result.RawPath)
+		if err != nil {
+			return fmt.Errorf("read raw.jsonl: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(sessionDir, ledgerFileRaw), data, 0644); err != nil {
+			return fmt.Errorf("copy raw.jsonl: %w", err)
+		}
+	}
+
+	// secondary artifacts — best-effort
+	secondaryFiles := map[string]string{
+		ledgerFileHTML:      result.HTMLPath,
+		ledgerFileSummaryMD: result.SummaryMDPath,
+		ledgerFileSessionMD: result.SessionMDPath,
+		ledgerFilePlan:      result.PlanPath,
+	}
+	for name, srcPath := range secondaryFiles {
+		if srcPath == "" {
+			continue
+		}
+		data, err := os.ReadFile(srcPath)
+		if err != nil {
+			slog.Debug("skip secondary artifact in async copy", "file", name, "error", err)
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(sessionDir, name), data, 0644); err != nil {
+			slog.Debug("skip secondary artifact in async copy", "file", name, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// signalDaemonSessionFinalize sends a fire-and-forget IPC message to the daemon
+// to upload and finalize a session asynchronously. Returns an error if the daemon
+// is unreachable or the IPC message fails (caller should flag for doctor).
+func signalDaemonSessionFinalize(sessionName, ledgerPath, cachePath, projectRoot string) error {
+	client := daemon.NewClientWithTimeout(100 * time.Millisecond)
+	return client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
+		SessionName: sessionName,
+		LedgerPath:  ledgerPath,
+		CachePath:   cachePath,
+		ProjectRoot: projectRoot,
+	})
 }
 
 // Note: getAuthenticatedUsername is defined in session_helpers.go
@@ -1510,36 +1607,14 @@ func runAgentSessionHTML(inst *agentinstance.Instance, args []string) error {
 	return nil
 }
 
-// mapRoleToEntryType converts a role string to session.EntryType.
+// mapRoleToEntryType delegates to session.MapRoleToEntryType.
 func mapRoleToEntryType(role string) session.EntryType {
-	switch role {
-	case "user":
-		return session.EntryTypeUser
-	case "assistant":
-		return session.EntryTypeAssistant
-	case "system":
-		return session.EntryTypeSystem
-	case "tool":
-		return session.EntryTypeTool
-	default:
-		return session.EntryTypeSystem
-	}
+	return session.MapRoleToEntryType(role)
 }
 
-// convertRawEntries converts adapter raw entries to session entries.
+// convertRawEntries delegates to session.ConvertRawEntries.
 func convertRawEntries(rawEntries []adapters.RawEntry) []session.Entry {
-	entries := make([]session.Entry, 0, len(rawEntries))
-	for _, raw := range rawEntries {
-		entry := session.Entry{
-			Timestamp: raw.Timestamp,
-			Content:   raw.Content,
-			ToolName:  raw.ToolName,
-			ToolInput: raw.ToolInput,
-		}
-		entry.Type = mapRoleToEntryType(raw.Role)
-		entries = append(entries, entry)
-	}
-	return entries
+	return session.ConvertRawEntries(rawEntries)
 }
 
 // convertStoredEntries converts stored session entries to session.Entry.
@@ -2022,16 +2097,22 @@ func getSessionTermsNotice() string {
 	return sessionTermsNotice
 }
 
-// formatFilterModeDescription returns a human-readable description of the filter mode.
-func formatFilterModeDescription(mode string) string {
-	switch mode {
-	case "infra":
-		return "infrastructure events only"
-	case "all":
-		return "all events"
-	case "none":
-		return "disabled"
-	default:
-		return mode
+// rawJSONLHasEntries returns true if raw.jsonl exists and contains more than
+// just a header line, indicating incremental hooks have appended entries.
+func rawJSONLHasEntries(rawPath string) bool {
+	f, err := os.Open(rawPath)
+	if err != nil {
+		return false
 	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	lineCount := 0
+	for scanner.Scan() {
+		lineCount++
+		if lineCount > 1 {
+			return true // more than just the header
+		}
+	}
+	return false
 }

@@ -10,7 +10,6 @@
 //	sessions/
 //	└── <session-name>/
 //	    ├── raw.jsonl        # unprocessed session capture
-//	    ├── events.jsonl     # processed/structured events
 //	    ├── summary.md       # ai-generated summary
 //	    ├── session.md    # markdown session
 //	    └── session.html  # html session
@@ -34,9 +33,8 @@ import (
 )
 
 const (
-	rawFilename    = "raw.jsonl"
-	eventsFilename = "events.jsonl"
-	jsonlExt       = ".jsonl"
+	rawFilename = "raw.jsonl"
+	jsonlExt    = ".jsonl"
 )
 
 // Store manages session storage in the ledger.
@@ -134,13 +132,6 @@ func (s *Store) CreateRaw(sessionName string) (*SessionWriter, error) {
 	return s.createSessionSession(sessionName, rawFilename)
 }
 
-// CreateEvents creates a new events session file and returns a writer.
-// Uses session-folder structure: <session>/events.jsonl
-// The sessionName should be generated using GenerateSessionName().
-func (s *Store) CreateEvents(sessionName string) (*SessionWriter, error) {
-	return s.createSessionSession(sessionName, eventsFilename)
-}
-
 // createSessionSession creates a session file in a session folder.
 // TODO(server-side): move to server-side for MVP+1; client should not write to ledger directly.
 func (s *Store) createSessionSession(sessionName, filename string) (*SessionWriter, error) {
@@ -184,7 +175,6 @@ type SessionWriter struct {
 }
 
 // StoreMeta contains session storage metadata written to the header.
-// This is distinct from Metadata in eventlog.go which tracks event extraction metadata.
 type StoreMeta struct {
 	Version      string    `json:"version"`
 	CreatedAt    time.Time `json:"created_at"`
@@ -198,7 +188,6 @@ type StoreMeta struct {
 }
 
 // Writable is an interface for entries that can be written to a session.
-// This is distinct from Entry in secrets.go and eventlog.go.
 type Writable interface {
 	// EntryType returns the type identifier for this entry (e.g., "message", "tool_call")
 	EntryType() string
@@ -222,6 +211,9 @@ func (w *SessionWriter) WriteHeader(meta *StoreMeta) error {
 
 	if err := w.encoder.Encode(header); err != nil {
 		return fmt.Errorf("write header file=%s: %w", w.filePath, err)
+	}
+	if err := w.file.Sync(); err != nil {
+		return fmt.Errorf("sync header file=%s: %w", w.filePath, err)
 	}
 	return nil
 }
@@ -319,6 +311,12 @@ type SessionInfo struct {
 	Summary         string              `json:"summary,omitempty"`          // from meta.json
 	Recording       bool                `json:"recording,omitempty"`        // true if session is actively being recorded
 	AgentID         string              `json:"agent_id,omitempty"`         // from .recording.json when recording
+	EntryCount      int                 `json:"entry_count,omitempty"`      // from .recording.json or meta.json
+	IsSubagent      bool                `json:"is_subagent,omitempty"`      // true if spawned by a parent session
+	ParentPID       int                 `json:"parent_pid,omitempty"`       // from .recording.json for liveness detection
+	Origin          string              `json:"origin,omitempty"`           // session origin: "human", "subagent", "agent"
+	HasRawData      bool                `json:"has_raw_data,omitempty"`     // true if raw.jsonl exists with content on disk
+	StopReason      string              `json:"stop_reason,omitempty"`      // how session ended: "stopped", "aborted", "recovered"
 }
 
 // ListSessions returns session files from the last 7 days, sorted by date descending.
@@ -404,15 +402,33 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		// check if this session is actively being recorded
 		var isRecording bool
 		var recordingAgentID string
+		var recordingStartedAt time.Time
+		var recordingEntryCount int
+		var isSubagent bool
+		var parentPID int
+		var origin string
 		recPath := filepath.Join(sessionPath, recordingFile)
 		if recData, recErr := os.ReadFile(recPath); recErr == nil {
 			var recState RecordingState
 			if err := json.Unmarshal(recData, &recState); err == nil {
 				isRecording = true
 				recordingAgentID = recState.AgentID
+				recordingStartedAt = recState.StartedAt
+				recordingEntryCount = recState.EntryCount
+				isSubagent = recState.IsSubagent()
+				parentPID = recState.ParentPID
+				origin = recState.Origin
 				if !recState.StartedAt.IsZero() && createdAt.IsZero() {
 					createdAt = recState.StartedAt
 				}
+			}
+		}
+
+		// skip empty stale recording stubs (no raw.jsonl, older than 48 hours)
+		// these accumulate when agents exit without calling session stop
+		if isRecording && !recordingStartedAt.IsZero() && time.Since(recordingStartedAt) > 48*time.Hour {
+			if _, statErr := os.Stat(filepath.Join(sessionPath, rawFilename)); os.IsNotExist(statErr) {
+				continue // empty stub, skip
 			}
 		}
 
@@ -422,11 +438,13 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var filePath string
 		var fileSize int64
 		var modTime time.Time
+		var hasRawData bool
 
 		if info, err := os.Stat(rawPath); err == nil {
 			// raw.jsonl exists (hydrated or recording in progress)
 			filePath = rawPath
 			fileSize = info.Size()
+			hasRawData = HasSubstantiveEntries(rawPath)
 			modTime = info.ModTime()
 			if createdAt.IsZero() {
 				createdAt = info.ModTime()
@@ -436,10 +454,6 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			// use raw.jsonl reference from manifest if available
 			if ref, ok := meta.Files[rawFilename]; ok {
 				filePath = rawPath
-				fileSize = ref.Size
-			} else if ref, ok := meta.Files[eventsFilename]; ok {
-				// fallback to events.jsonl if raw.jsonl not in manifest
-				filePath = filepath.Join(sessionPath, eventsFilename)
 				fileSize = ref.Size
 			}
 			modTime = createdAt
@@ -476,10 +490,37 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			Summary:         summary,
 			Recording:       isRecording,
 			AgentID:         recordingAgentID,
+			EntryCount:      entryCount(isRecording, recordingEntryCount, meta),
+			IsSubagent:      isSubagent,
+			ParentPID:       parentPID,
+			Origin:          origin,
+			HasRawData:      hasRawData,
+			StopReason:      stopReason(meta),
 		})
 	}
 
 	return sessions, nil
+}
+
+// stopReason extracts the stop reason from meta.json, if present.
+func stopReason(meta *lfs.SessionMeta) string {
+	if meta != nil {
+		return meta.StopReason
+	}
+	return ""
+}
+
+// entryCount returns the best available entry count for a session.
+// For active recordings, uses the live count from .recording.json.
+// For uploaded sessions, uses the count stored in meta.json.
+func entryCount(isRecording bool, recordingCount int, meta *lfs.SessionMeta) int {
+	if isRecording {
+		return recordingCount
+	}
+	if meta != nil {
+		return meta.EntryCount
+	}
+	return 0
 }
 
 // ListRawSessionsSince returns only raw session files created after the given time.
@@ -616,13 +657,11 @@ func (s *Store) ReadLFSSessionMeta(sessionName string) (*lfs.SessionMeta, error)
 	return lfs.ReadSessionMeta(sessionPath)
 }
 
-// inferTypeFromFilename returns "raw" or "events" for session files, empty string otherwise.
+// inferTypeFromFilename returns "raw" for session files, empty string otherwise.
 func inferTypeFromFilename(filename string) string {
 	switch filename {
 	case rawFilename: // "raw.jsonl"
 		return "raw"
-	case eventsFilename: // "events.jsonl"
-		return "events"
 	default:
 		return ""
 	}
@@ -664,12 +703,6 @@ func (s *Store) ReadSession(name string) (*StoredSession, error) {
 		return s.readSessionFile(sessionRawPath, "raw", sessionName)
 	}
 
-	// check session folder for events.jsonl
-	sessionEventsPath := filepath.Join(s.basePath, sessionName, eventsFilename)
-	if _, err := os.Stat(sessionEventsPath); err == nil {
-		return s.readSessionFile(sessionEventsPath, "events", sessionName)
-	}
-
 	return nil, fmt.Errorf("%w: name=%s", ErrSessionNotFound, name)
 }
 
@@ -679,24 +712,11 @@ func (s *Store) ReadSessionRaw(sessionName string) (*StoredSession, error) {
 	return s.readSessionFile(filePath, "raw", sessionName)
 }
 
-// ReadSessionEvents reads the events session from a session folder.
-func (s *Store) ReadSessionEvents(sessionName string) (*StoredSession, error) {
-	filePath := filepath.Join(s.basePath, sessionName, eventsFilename)
-	return s.readSessionFile(filePath, "events", sessionName)
-}
-
 // ReadRawSession reads the raw session file from a session folder.
 func (s *Store) ReadRawSession(filename string) (*StoredSession, error) {
 	sessionName := strings.TrimSuffix(filename, jsonlExt)
 	sessionPath := filepath.Join(s.basePath, sessionName, rawFilename)
 	return s.readSessionFile(sessionPath, "raw", sessionName)
-}
-
-// ReadEventsSession reads the events session file from a session folder.
-func (s *Store) ReadEventsSession(filename string) (*StoredSession, error) {
-	sessionName := strings.TrimSuffix(filename, jsonlExt)
-	sessionPath := filepath.Join(s.basePath, sessionName, eventsFilename)
-	return s.readSessionFile(sessionPath, "events", sessionName)
 }
 
 // readSessionFile reads and parses a session file.

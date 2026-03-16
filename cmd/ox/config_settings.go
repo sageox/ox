@@ -115,10 +115,26 @@ Note: The ledger is specific to this repository. Each repo where
 		LongDescription: `Controls automatic syncing of sessions to the repo's ledger.
 
 When enabled, sessions are automatically synced to the remote ledger
-after being saved locally.
+after being saved locally. This completes the end-to-end session
+pipeline: record → commit → push → anti-entropy finalizes.
 
 When disabled, sessions stay local until you manually sync them.`,
 		Category:    "Sessions",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
+		Key:         "notifications",
+		Description: "Team context change notifications",
+		LongDescription: `Controls whether AI coworkers receive notifications when team context
+changes are detected by the daemon after git pull.
+
+When enabled, every 'ox agent <id> <command>' call checks for updated
+team context files and emits a notice to stderr listing changed paths.
+
+When disabled (default), notifications are silently skipped.`,
+		Category:    "Notifications",
 		ValidValues: []string{"on", "off"},
 		Default:     "off",
 		Levels:      []ConfigLevel{ConfigLevelUser},
@@ -136,6 +152,25 @@ Override per-invocation with --html, --text, or --json flags.`,
 		Category:    "Display",
 		ValidValues: []string{"html", "text", "json"},
 		Default:     "html",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
+		Key:         "agent_worker",
+		Description: "Daemon AI coworker spawning",
+		LongDescription: `Controls whether the daemon can spawn AI coworker processes for
+background tasks like session anti-entropy (generating missing
+summaries for orphaned sessions).
+
+When enabled, the daemon automatically detects incomplete sessions
+and spawns a Claude process to generate summaries, then uploads
+them to the ledger. Rate-limited to 60 invocations/hour, 4 concurrent.
+
+When disabled (default), only lightweight cleanup runs (removing
+ghost sessions with no data). Sessions with recoverable data are
+preserved until this is enabled.`,
+		Category:    "Sessions",
+		ValidValues: []string{"on", "off"},
+		Default:     "off",
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 }
@@ -172,12 +207,11 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 		repoCfg, _ = config.LoadProjectConfig(projectRoot)
 	}
 
-	// load team config
+	// load team config (repo's own team, not cross-team)
 	var teamCfg *config.TeamConfig
 	if projectRoot != "" {
-		localCfg, _ := config.LoadLocalConfig(projectRoot)
-		if localCfg != nil && len(localCfg.TeamContexts) > 0 {
-			teamCfg, _ = config.LoadTeamConfig(localCfg.TeamContexts[0].Path)
+		if tc := config.FindRepoTeamContext(projectRoot); tc != nil {
+			teamCfg, _ = config.LoadTeamConfig(tc.Path)
 		}
 	}
 
@@ -233,9 +267,27 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			}
 		}
 
+	case "notifications":
+		if userCfg != nil && userCfg.Notifications != nil && userCfg.Notifications.Enabled != nil {
+			if *userCfg.Notifications.Enabled {
+				cv.UserVal = "on"
+			} else {
+				cv.UserVal = "off"
+			}
+		}
+
 	case "view_format":
 		if userCfg != nil && userCfg.ViewFormat != "" {
 			cv.UserVal = userCfg.ViewFormat
+		}
+
+	case "agent_worker":
+		if userCfg != nil && userCfg.AgentWorker != nil && userCfg.AgentWorker.Enabled != nil {
+			if *userCfg.AgentWorker.Enabled {
+				cv.UserVal = "on"
+			} else {
+				cv.UserVal = "off"
+			}
 		}
 	}
 
@@ -337,8 +389,19 @@ func setUserConfig(key, value string) error {
 		enabled := value == "on"
 		cfg.ContextGit.AutoPush = &enabled
 
+	case "notifications":
+		if cfg.Notifications == nil {
+			cfg.Notifications = &config.NotificationsConfig{}
+		}
+		enabled := value == "on"
+		cfg.Notifications.Enabled = &enabled
+
 	case "view_format":
 		cfg.ViewFormat = value
+
+	case "agent_worker":
+		enabled := value == "on"
+		cfg.SetAgentWorkerEnabled(enabled)
 
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)
@@ -373,12 +436,12 @@ func setTeamConfig(key, value, projectRoot string) error {
 		return fmt.Errorf("not in a SageOx project")
 	}
 
-	localCfg, err := config.LoadLocalConfig(projectRoot)
-	if err != nil || len(localCfg.TeamContexts) == 0 {
+	tc := config.FindRepoTeamContext(projectRoot)
+	if tc == nil {
 		return fmt.Errorf("no team context configured")
 	}
 
-	teamPath := localCfg.TeamContexts[0].Path
+	teamPath := tc.Path
 	cfg, err := config.LoadTeamConfig(teamPath)
 	if err != nil {
 		cfg = &config.TeamConfig{}

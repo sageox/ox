@@ -169,7 +169,6 @@ func checkSessionCompleteness(sessionPath string) []string {
 	// expected files in a complete session
 	expectedFiles := map[string]string{
 		ledgerFileRaw:       "raw",
-		ledgerFileEvents:    "events",
 		ledgerFileHTML:      "html",
 		ledgerFileSummaryMD: "summary",
 		ledgerFileSessionMD: "session_md",
@@ -209,8 +208,6 @@ func buildFinalizeCommands(sessionName, agentID string, missing []string, sessio
 		case "summary":
 			rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 			commands = append(commands, fmt.Sprintf("ox agent %s session summarize --file %s", agentID, rawPath))
-		case "events":
-			commands = append(commands, fmt.Sprintf("# %s missing for %s (regenerate by re-processing raw)", ledgerFileEvents, sessionName))
 		case "session_md":
 			rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 			commands = append(commands, fmt.Sprintf("ox session export --markdown --input %s", rawPath))

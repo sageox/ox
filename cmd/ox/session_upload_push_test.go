@@ -385,7 +385,6 @@ func TestCommitAndPushLedgerWithExtras_IncludesPointerFiles(t *testing.T) {
 
 	// write pointer files and summary.json
 	pointerContent := "version https://git-lfs.github.com/spec/v1\noid sha256:def456\nsize 2048\n"
-	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte(pointerContent), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "session.html"), []byte(pointerContent), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.json"), []byte(`{"key":"value"}`), 0644))
 
@@ -394,7 +393,7 @@ func TestCommitAndPushLedgerWithExtras_IncludesPointerFiles(t *testing.T) {
 
 	// verify pointer files and summary.json reached remote
 	verifyClone := cloneBare(t, barePath)
-	for _, name := range []string{"events.jsonl", "session.html", "summary.json"} {
+	for _, name := range []string{"session.html", "summary.json"} {
 		path := filepath.Join(verifyClone, "sessions", sessionName, name)
 		_, readErr := os.Stat(path)
 		assert.NoError(t, readErr, "%s should exist on remote", name)

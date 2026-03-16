@@ -266,9 +266,10 @@ func TestGenericJSONLAdapter_Watch(t *testing.T) {
 func TestGenericJSONLAdapter_AliasResolution(t *testing.T) {
 	ResetRegistry()
 
-	// register both adapters so aliases can resolve
+	// register all adapters needed for alias resolution
 	Register(&GenericJSONLAdapter{})
 	Register(&mockAdapter{name: "claude-code", detect: true})
+	Register(&CodexAdapter{})
 
 	tests := []struct {
 		name     string
@@ -276,8 +277,8 @@ func TestGenericJSONLAdapter_AliasResolution(t *testing.T) {
 		wantName string
 		wantErr  bool
 	}{
-		{"codex resolves to generic", "codex", "generic", false},
-		{"Codex case-insensitive", "Codex", "generic", false},
+		{"codex resolves to codex", "codex", "codex", false},
+		{"Codex case-insensitive", "Codex", "codex", false},
 		{"amp resolves to generic", "amp", "generic", false},
 		{"Amp case-insensitive", "AMP", "generic", false},
 		{"cursor resolves to generic", "cursor", "generic", false},

@@ -24,6 +24,11 @@ type HeartbeatPayload struct {
 	// Enables multi-workspace daemon support and request routing.
 	WorkspaceID string `json:"workspace_id,omitempty"`
 
+	// CallerPath is the absolute path of the clone/worktree sending this heartbeat.
+	// With per-repo daemons, multiple clones share one daemon — CallerPath lets the
+	// daemon know which clone paths are alive and keeps registry.workspace_path fresh.
+	CallerPath string `json:"caller_path,omitempty"`
+
 	// AgentID identifies the agent session (e.g., "Oxa7b3").
 	// Used for tracking which agents are actively connected to the daemon.
 	// Empty for non-agent CLI commands.
@@ -55,6 +60,19 @@ type HeartbeatPayload struct {
 	// CommandName identifies which ox subcommand produced this context (e.g., "prime",
 	// "team-ctx", "session list"). Used for per-command breakdown (ox-aw0).
 	CommandName string `json:"command_name,omitempty"`
+
+	// ParentAgentID is the agent ID of the parent that spawned this agent (e.g., "Oxa7b3").
+	// Empty for top-level agents. Used for tree structure in `ox agent list`.
+	ParentAgentID string `json:"parent_agent_id,omitempty"`
+
+	// AgentType identifies the kind of agent (e.g., "claude-code", "explore").
+	// Used for display in `ox agent list`.
+	AgentType string `json:"agent_type,omitempty"`
+
+	// ParentPID is the process ID of the parent agent process (e.g., Claude Code).
+	// Captured via os.Getppid() in the CLI. Used by the daemon for instant liveness
+	// detection via kill(pid, 0) instead of waiting for heartbeat timeout.
+	ParentPID int `json:"parent_pid,omitempty"`
 }
 
 // HeartbeatCreds contains credentials for the daemon.
@@ -105,6 +123,14 @@ func (c *HeartbeatCreds) Copy() *HeartbeatCreds {
 	return &newCreds
 }
 
+// CallerInfo tracks a connected clone/worktree.
+type CallerInfo struct {
+	ID       string    `json:"id"`                 // CallerID (path-based hash)
+	Path     string    `json:"path"`               // absolute path of the clone/worktree
+	LastSeen time.Time `json:"last_seen"`          // last heartbeat received
+	AgentID  string    `json:"agent_id,omitempty"` // last known agent in this clone
+}
+
 // HeartbeatHandler processes incoming heartbeats from CLI commands.
 type HeartbeatHandler struct {
 	logger *slog.Logger
@@ -121,10 +147,20 @@ type HeartbeatHandler struct {
 	agentContextTokens map[string]int64 // agent_id → cumulative estimated tokens
 	agentCommandCount  map[string]int   // agent_id → command count
 
+	// per-agent metadata (parent/type) from heartbeats — enables cross-worktree visibility
+	metaMu        sync.RWMutex
+	agentParentID map[string]string // agent_id → parent agent ID
+	agentType     map[string]string // agent_id → agent type
+	agentPID      map[string]int    // agent_id → parent process ID
+
 	// credentials (updated from heartbeats) - protected by credMu
 	credMu          sync.RWMutex
 	credentials     *HeartbeatCreds
 	credentialsTime time.Time
+
+	// caller tracking: maps CallerID → CallerInfo for all known clones/worktrees
+	callerMu sync.RWMutex
+	callers  map[string]CallerInfo
 
 	// callbacks - protected by cbMu
 	cbMu              sync.RWMutex
@@ -132,6 +168,10 @@ type HeartbeatHandler struct {
 	onActivity        func()
 	onVersionMismatch func(cliVersion, daemonVersion string) // triggers daemon restart
 }
+
+// maxCallers limits the callers map to prevent unbounded growth.
+// When exceeded, the entry with the oldest LastSeen is evicted.
+const maxCallers = 200
 
 // NewHeartbeatHandler creates a new heartbeat handler.
 func NewHeartbeatHandler(logger *slog.Logger) *HeartbeatHandler {
@@ -148,13 +188,17 @@ func NewHeartbeatHandler(logger *slog.Logger) *HeartbeatHandler {
 	)
 
 	return &HeartbeatHandler{
-		logger:            logger,
-		repoActivity:      NewActivityTrackerWithMaxKeys(activityCap, maxRepos),
-		teamActivity:      NewActivityTrackerWithMaxKeys(activityCap, maxTeams),
-		workspaceActivity: NewActivityTrackerWithMaxKeys(activityCap, maxWorkspaces),
-		agentActivity:     NewActivityTrackerWithMaxKeys(activityCap, maxAgents),
+		logger:             logger,
+		repoActivity:       NewActivityTrackerWithMaxKeys(activityCap, maxRepos),
+		teamActivity:       NewActivityTrackerWithMaxKeys(activityCap, maxTeams),
+		workspaceActivity:  NewActivityTrackerWithMaxKeys(activityCap, maxWorkspaces),
+		agentActivity:      NewActivityTrackerWithMaxKeys(activityCap, maxAgents),
+		callers:            make(map[string]CallerInfo),
 		agentContextTokens: make(map[string]int64),
-		agentCommandCount: make(map[string]int),
+		agentCommandCount:  make(map[string]int),
+		agentParentID:      make(map[string]string),
+		agentType:          make(map[string]string),
+		agentPID:           make(map[string]int),
 	}
 }
 
@@ -199,7 +243,8 @@ func (h *HeartbeatHandler) SetInitialCredentials(creds *HeartbeatCreds) {
 }
 
 // Handle processes an incoming heartbeat message.
-func (h *HeartbeatHandler) Handle(payload json.RawMessage) {
+// callerID identifies the clone/worktree that sent the heartbeat (path-based hash).
+func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 	var hb HeartbeatPayload
 	if err := json.Unmarshal(payload, &hb); err != nil {
 		h.logger.Debug("failed to unmarshal heartbeat", "error", err)
@@ -209,6 +254,7 @@ func (h *HeartbeatHandler) Handle(payload json.RawMessage) {
 	h.logger.Debug("heartbeat received",
 		"repo", hb.RepoPath,
 		"workspace", hb.WorkspaceID,
+		"caller_path", hb.CallerPath,
 		"agent_id", hb.AgentID,
 		"teams", hb.TeamIDs,
 		"has_creds", hb.Credentials != nil,
@@ -287,6 +333,37 @@ func (h *HeartbeatHandler) Handle(payload json.RawMessage) {
 		}
 	}
 
+	// track caller clone/worktree identity
+	if callerID != "" {
+		h.callerMu.Lock()
+		info := h.callers[callerID]
+		info.ID = callerID
+		info.LastSeen = time.Now()
+		if hb.CallerPath != "" {
+			info.Path = hb.CallerPath
+		}
+		if hb.AgentID != "" {
+			info.AgentID = hb.AgentID
+		}
+		h.callers[callerID] = info
+
+		// evict oldest entry when over capacity
+		if len(h.callers) > maxCallers {
+			var oldestID string
+			var oldestTime time.Time
+			for id, ci := range h.callers {
+				if oldestID == "" || ci.LastSeen.Before(oldestTime) {
+					oldestID = id
+					oldestTime = ci.LastSeen
+				}
+			}
+			if oldestID != "" {
+				delete(h.callers, oldestID)
+			}
+		}
+		h.callerMu.Unlock()
+	}
+
 	// record activity by repo
 	if hb.RepoPath != "" {
 		h.repoActivity.Record(hb.RepoPath)
@@ -309,6 +386,22 @@ func (h *HeartbeatHandler) Handle(payload json.RawMessage) {
 			h.agentContextTokens[hb.AgentID] += hb.ContextTokens
 			h.agentCommandCount[hb.AgentID]++
 			h.ctxMu.Unlock()
+		}
+
+		// store agent metadata (parent/type/pid) if provided.
+		// only track agents already admitted by the bounded activity tracker.
+		if h.agentActivity.Has(hb.AgentID) && (hb.ParentAgentID != "" || hb.AgentType != "" || hb.ParentPID > 0) {
+			h.metaMu.Lock()
+			if hb.ParentAgentID != "" {
+				h.agentParentID[hb.AgentID] = hb.ParentAgentID
+			}
+			if hb.AgentType != "" {
+				h.agentType[hb.AgentID] = hb.AgentType
+			}
+			if hb.ParentPID > 0 {
+				h.agentPID[hb.AgentID] = hb.ParentPID
+			}
+			h.metaMu.Unlock()
 		}
 	}
 
@@ -378,6 +471,33 @@ func (h *HeartbeatHandler) GetAuthenticatedUser() *AuthenticatedUser {
 	}
 }
 
+// LastCallerPath returns the most recent caller clone/worktree path from heartbeats.
+// Returns empty string if no heartbeat with CallerPath has been received.
+func (h *HeartbeatHandler) LastCallerPath() string {
+	h.callerMu.RLock()
+	defer h.callerMu.RUnlock()
+
+	var latest CallerInfo
+	for _, info := range h.callers {
+		if info.Path != "" && info.LastSeen.After(latest.LastSeen) {
+			latest = info
+		}
+	}
+	return latest.Path
+}
+
+// GetCallers returns all known callers (clones/worktrees) that have sent heartbeats.
+func (h *HeartbeatHandler) GetCallers() []CallerInfo {
+	h.callerMu.RLock()
+	defer h.callerMu.RUnlock()
+
+	result := make([]CallerInfo, 0, len(h.callers))
+	for _, info := range h.callers {
+		result = append(result, info)
+	}
+	return result
+}
+
 // GetRepoActivity returns the activity tracker for repos.
 func (h *HeartbeatHandler) GetRepoActivity() *ActivityTracker {
 	return h.repoActivity
@@ -412,6 +532,67 @@ func (h *HeartbeatHandler) GetAgentContextStats(agentID string) AgentContextStat
 		ContextTokens: h.agentContextTokens[agentID],
 		CommandCount:  h.agentCommandCount[agentID],
 	}
+}
+
+// GetAgentParentID returns the parent agent ID for a given agent.
+// Returns empty string if no parent is known.
+func (h *HeartbeatHandler) GetAgentParentID(agentID string) string {
+	h.metaMu.RLock()
+	defer h.metaMu.RUnlock()
+	return h.agentParentID[agentID]
+}
+
+// GetAgentType returns the agent type for a given agent.
+// Returns empty string if no type is known.
+func (h *HeartbeatHandler) GetAgentType(agentID string) string {
+	h.metaMu.RLock()
+	defer h.metaMu.RUnlock()
+	return h.agentType[agentID]
+}
+
+// GetAgentPID returns the parent process ID for a given agent.
+// Returns 0 if not known.
+func (h *HeartbeatHandler) GetAgentPID(agentID string) int {
+	h.metaMu.RLock()
+	defer h.metaMu.RUnlock()
+	return h.agentPID[agentID]
+}
+
+// CleanupStaleAgents removes entries from all agent-keyed maps for agents
+// not in the active set. Call periodically (e.g., after liveness checks) to
+// prevent unbounded growth of context and metadata maps.
+func (h *HeartbeatHandler) CleanupStaleAgents(activeIDs []string) {
+	active := make(map[string]struct{}, len(activeIDs))
+	for _, id := range activeIDs {
+		active[id] = struct{}{}
+	}
+
+	h.ctxMu.Lock()
+	for id := range h.agentContextTokens {
+		if _, ok := active[id]; !ok {
+			delete(h.agentContextTokens, id)
+			delete(h.agentCommandCount, id)
+		}
+	}
+	h.ctxMu.Unlock()
+
+	h.metaMu.Lock()
+	for id := range h.agentParentID {
+		if _, ok := active[id]; !ok {
+			delete(h.agentParentID, id)
+		}
+	}
+	for id := range h.agentType {
+		if _, ok := active[id]; !ok {
+			delete(h.agentType, id)
+		}
+	}
+	for id := range h.agentPID {
+		if _, ok := active[id]; !ok {
+			delete(h.agentPID, id)
+		}
+	}
+	h.metaMu.Unlock()
 }
 
 // ActivitySummary returns a summary of all activity for status display.

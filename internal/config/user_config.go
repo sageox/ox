@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -49,7 +50,7 @@ type ContextGitConfig struct {
 	AutoCommit *bool `yaml:"auto_commit,omitempty"`
 
 	// AutoPush controls whether to push after commit.
-	// Default: false
+	// Default: true
 	AutoPush *bool `yaml:"auto_push,omitempty"`
 }
 
@@ -61,10 +62,10 @@ func (c *ContextGitConfig) IsAutoCommitEnabled() bool {
 	return *c.AutoCommit
 }
 
-// IsAutoPushEnabled returns true if auto-push is enabled (default: false)
+// IsAutoPushEnabled returns true if auto-push is enabled (default: true)
 func (c *ContextGitConfig) IsAutoPushEnabled() bool {
 	if c == nil || c.AutoPush == nil {
-		return false
+		return true
 	}
 	return *c.AutoPush
 }
@@ -108,17 +109,192 @@ func (c *SessionsConfig) GetMode() string {
 	return "none"
 }
 
+// NotificationsConfig controls team context change notifications for AI coworkers.
+type NotificationsConfig struct {
+	// Enabled controls whether agents receive team context change notifications.
+	// Default: false (off)
+	Enabled *bool `yaml:"enabled,omitempty"`
+}
+
+// AreNotificationsEnabled returns true if notifications are enabled (default: false).
+func (c *NotificationsConfig) AreNotificationsEnabled() bool {
+	if c == nil || c.Enabled == nil {
+		return false
+	}
+	return *c.Enabled
+}
+
+// AllowedAgentTypes is the set of valid AgentWorkerConfig.AgentType values.
+var AllowedAgentTypes = []string{"claude"}
+
+// AgentWorkerConfig controls daemon-spawned AI coworker invocations.
+type AgentWorkerConfig struct {
+	// Enabled controls whether the daemon can spawn AI coworker processes.
+	// Default: false
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// AgentType is the agent CLI to use. Validated against AllowedAgentTypes.
+	// Default: "claude"
+	AgentType string `yaml:"agent_type,omitempty"`
+
+	// MaxInvocationsPerHour rate-limits agent spawning per daemon.
+	// Default: 60
+	MaxInvocationsPerHour *int `yaml:"max_invocations_per_hour,omitempty"`
+
+	// MaxConcurrent limits parallel agent processes per daemon.
+	// Default: 4
+	MaxConcurrent *int `yaml:"max_concurrent,omitempty"`
+
+	// SessionFinalize enables automatic session anti-entropy (generating
+	// missing summaries, HTML, and markdown for incomplete sessions).
+	// Default: true (runs automatically when daemon is enabled)
+	SessionFinalize *bool `yaml:"session_finalize,omitempty"`
+
+	// QualityUploadThreshold is the minimum quality score (0.0-1.0) for a
+	// session to be uploaded to the team ledger. Sessions below this score
+	// are kept locally but not shared. Default: 0.3 (capture more initially)
+	QualityUploadThreshold *float64 `yaml:"quality_upload_threshold,omitempty"`
+
+	// QualityDiscardThreshold is the quality score (0.0-1.0) below which a
+	// session is deleted entirely. Only truly empty/abandoned sessions should
+	// score this low. Default: 0.1
+	QualityDiscardThreshold *float64 `yaml:"quality_discard_threshold,omitempty"`
+}
+
+// IsEnabled returns true if agent worker spawning is enabled (default: false)
+func (c *AgentWorkerConfig) IsEnabled() bool {
+	if c == nil || c.Enabled == nil {
+		return false
+	}
+	return *c.Enabled
+}
+
+// GetAgentType returns the configured agent type (default: "claude")
+func (c *AgentWorkerConfig) GetAgentType() string {
+	if c == nil || c.AgentType == "" {
+		return "claude"
+	}
+	return c.AgentType
+}
+
+// GetMaxInvocationsPerHour returns the rate limit (default: 60)
+func (c *AgentWorkerConfig) GetMaxInvocationsPerHour() int {
+	if c == nil || c.MaxInvocationsPerHour == nil {
+		return 60
+	}
+	return *c.MaxInvocationsPerHour
+}
+
+// GetMaxConcurrent returns the concurrency limit (default: 4)
+func (c *AgentWorkerConfig) GetMaxConcurrent() int {
+	if c == nil || c.MaxConcurrent == nil {
+		return 4
+	}
+	return *c.MaxConcurrent
+}
+
+// IsSessionFinalizeEnabled returns true if session anti-entropy is enabled (default: true).
+// Also requires the master Enabled switch to be true.
+func (c *AgentWorkerConfig) IsSessionFinalizeEnabled() bool {
+	if c == nil {
+		return false
+	}
+	if c.SessionFinalize == nil {
+		return c.IsEnabled() // default: enabled when daemon is enabled
+	}
+	return *c.SessionFinalize && c.IsEnabled()
+}
+
+// GetQualityUploadThreshold returns the minimum quality score for ledger upload (default: 0.3).
+func (c *AgentWorkerConfig) GetQualityUploadThreshold() float64 {
+	if c == nil || c.QualityUploadThreshold == nil {
+		return 0.3
+	}
+	return *c.QualityUploadThreshold
+}
+
+// GetQualityDiscardThreshold returns the quality score below which sessions are deleted (default: 0.1).
+func (c *AgentWorkerConfig) GetQualityDiscardThreshold() float64 {
+	if c == nil || c.QualityDiscardThreshold == nil {
+		return 0.1
+	}
+	return *c.QualityDiscardThreshold
+}
+
+// Validate checks the config for invalid values.
+// Returns an error if agent_type is not in AllowedAgentTypes or limits are non-positive.
+func (c *AgentWorkerConfig) Validate() error {
+	if c == nil {
+		return nil
+	}
+
+	if c.AgentType != "" && !slices.Contains(AllowedAgentTypes, c.AgentType) {
+		return fmt.Errorf("unknown agent_type %q, allowed: %v", c.AgentType, AllowedAgentTypes)
+	}
+
+	if c.MaxInvocationsPerHour != nil && *c.MaxInvocationsPerHour < 1 {
+		return fmt.Errorf("max_invocations_per_hour must be >= 1, got %d", *c.MaxInvocationsPerHour)
+	}
+
+	if c.MaxConcurrent != nil && *c.MaxConcurrent < 1 {
+		return fmt.Errorf("max_concurrent must be >= 1, got %d", *c.MaxConcurrent)
+	}
+
+	return nil
+}
+
+// WithDefaults returns a copy of the config with zero-value fields set to defaults.
+// Does not modify the receiver.
+func (c *AgentWorkerConfig) WithDefaults() *AgentWorkerConfig {
+	out := &AgentWorkerConfig{}
+	if c != nil {
+		*out = *c
+	}
+
+	if out.Enabled == nil {
+		f := false
+		out.Enabled = &f
+	}
+	if out.AgentType == "" {
+		out.AgentType = "claude"
+	}
+	if out.MaxInvocationsPerHour == nil {
+		v := 60
+		out.MaxInvocationsPerHour = &v
+	}
+	if out.MaxConcurrent == nil {
+		v := 4
+		out.MaxConcurrent = &v
+	}
+	if out.SessionFinalize == nil {
+		t := true
+		out.SessionFinalize = &t
+	}
+	if out.QualityUploadThreshold == nil {
+		v := 0.3
+		out.QualityUploadThreshold = &v
+	}
+	if out.QualityDiscardThreshold == nil {
+		v := 0.1
+		out.QualityDiscardThreshold = &v
+	}
+
+	return out
+}
+
 // UserConfig holds user-level configuration from config.yaml
 type UserConfig struct {
-	DisplayName       string            `yaml:"display_name,omitempty"`
-	TipsEnabled       *bool             `yaml:"tips_enabled,omitempty"`
-	TelemetryEnabled  *bool             `yaml:"telemetry_enabled,omitempty"`
-	SessionTermsShown *bool             `yaml:"session_terms_shown,omitempty"`
-	Attribution       *Attribution      `yaml:"attribution,omitempty"`
-	Badge             *BadgeConfig      `yaml:"badge,omitempty"`
-	ContextGit        *ContextGitConfig `yaml:"context_git,omitempty"`
-	Sessions          *SessionsConfig   `yaml:"sessions,omitempty"`
-	ViewFormat        string            `yaml:"view_format,omitempty"` // "html", "text", "json" (default: "html")
+	DisplayName       string               `yaml:"display_name,omitempty"`
+	TipsEnabled       *bool                `yaml:"tips_enabled,omitempty"`
+	TelemetryEnabled  *bool                `yaml:"telemetry_enabled,omitempty"`
+	SessionTermsShown *bool                `yaml:"session_terms_shown,omitempty"`
+	Attribution       *Attribution         `yaml:"attribution,omitempty"`
+	Badge             *BadgeConfig         `yaml:"badge,omitempty"`
+	ContextGit        *ContextGitConfig    `yaml:"context_git,omitempty"`
+	Sessions          *SessionsConfig      `yaml:"sessions,omitempty"`
+	AgentWorker       *AgentWorkerConfig   `yaml:"agent_worker,omitempty"`
+	Notifications     *NotificationsConfig `yaml:"notifications,omitempty"`
+	ViewFormat        string               `yaml:"view_format,omitempty"` // "web", "text", "json" (default: "web")
 }
 
 // BadgeConfig tracks badge suggestion state across all projects.
@@ -185,10 +361,10 @@ func (c *UserConfig) GetContextGitAutoCommit() bool {
 }
 
 // GetContextGitAutoPush returns whether auto-push is enabled for context git.
-// Default: false
+// Default: true
 func (c *UserConfig) GetContextGitAutoPush() bool {
 	if c.ContextGit == nil {
-		return false
+		return true
 	}
 	return c.ContextGit.IsAutoPushEnabled()
 }
@@ -224,6 +400,28 @@ func (c *UserConfig) SetSessionsEnabled(enabled bool) {
 		c.Sessions = &SessionsConfig{}
 	}
 	c.Sessions.Enabled = &enabled
+}
+
+// GetAgentWorkerConfig returns the agent worker config, or nil if not set.
+func (c *UserConfig) GetAgentWorkerConfig() *AgentWorkerConfig {
+	return c.AgentWorker
+}
+
+// IsAgentWorkerEnabled returns whether daemon agent spawning is enabled.
+// Default: false
+func (c *UserConfig) IsAgentWorkerEnabled() bool {
+	if c.AgentWorker == nil {
+		return false
+	}
+	return c.AgentWorker.IsEnabled()
+}
+
+// SetAgentWorkerEnabled sets the agent worker enabled preference.
+func (c *UserConfig) SetAgentWorkerEnabled(enabled bool) {
+	if c.AgentWorker == nil {
+		c.AgentWorker = &AgentWorkerConfig{}
+	}
+	c.AgentWorker.Enabled = &enabled
 }
 
 // GetViewFormat returns the preferred session view format.

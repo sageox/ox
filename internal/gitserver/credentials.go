@@ -297,7 +297,6 @@ type RefreshResult struct {
 // providing authentication context.
 type CredentialFetcher func() (*GitCredentials, error)
 
-
 // --- Per-Endpoint Credential Storage ---
 // These functions support multi-endpoint setups where each endpoint has its own
 // GitLab server and credentials. Credentials are stored in separate files per endpoint.

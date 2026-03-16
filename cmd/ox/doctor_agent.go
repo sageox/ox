@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/daemon"
-	"github.com/sageox/ox/pkg/agentx"
 )
 
 // staleInstanceThreshold defines when an agent instance is considered stale (no activity in 24 hours)

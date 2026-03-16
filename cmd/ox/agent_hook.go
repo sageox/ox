@@ -1,14 +1,18 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/pkg/agentx"
+	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 )
 
 // ReadHookInput reads hook input from stdin.
@@ -30,17 +34,19 @@ const (
 // activePhaseBehavior tracks which phases currently have behavior.
 // Phases not in this set return immediately (fast-path noop).
 var activePhaseBehavior = map[string]bool{
-	phaseStart:   true,
-	phaseCompact: true,
+	phaseStart:     true,
+	phaseCompact:   true,
+	phaseAfterTool: true,
+	phaseStop:      true,
 }
 
 // HookContext carries everything a phase handler needs.
 type HookContext struct {
-	Phase       string              // resolved lifecycle phase
-	AgentType   string              // from AGENT_ENV: "claude-code", "gemini", etc.
-	Input       *agentx.HookInput   // parsed stdin JSON
-	Marker      *SessionMarker      // nil if not yet primed
-	ProjectRoot string              // git root with .sageox/
+	Phase       string            // resolved lifecycle phase
+	AgentType   string            // from AGENT_ENV: "claude-code", "gemini", etc.
+	Input       *agentx.HookInput // parsed stdin JSON
+	Marker      *SessionMarker    // nil if not yet primed
+	ProjectRoot string            // git root with .sageox/
 }
 
 // runAgentHook is the entry point for `ox agent hook <event>`.
@@ -133,6 +139,10 @@ func dispatchPhase(ctx *HookContext) error {
 		return handleStart(ctx)
 	case phaseCompact:
 		return handleCompact(ctx)
+	case phaseAfterTool:
+		return handleAfterTool(ctx)
+	case phaseStop:
+		return handleAfterTool(ctx) // same drain logic on stop
 	default:
 		return nil
 	}
@@ -167,6 +177,14 @@ func handleStart(ctx *HookContext) error {
 		return err
 	}
 
+	// reload marker after prime — prime runs as a subprocess and writes the
+	// marker to disk, but ctx.Marker is still nil from before prime ran.
+	// Without this reload, the safety-net recording call below uses agentID=""
+	// which fails with "path cannot be empty: agent ID".
+	if ctx.Marker == nil && ctx.Input != nil && ctx.Input.SessionID != "" {
+		ctx.Marker, _ = ReadSessionMarker(ctx.Input.SessionID)
+	}
+
 	startSessionRecordingIfConfigured(ctx)
 	return nil
 }
@@ -179,6 +197,142 @@ func handleCompact(ctx *HookContext) error {
 		agentID = ctx.Marker.AgentID
 	}
 	return runPrimeForHook(agentID, ctx)
+}
+
+// handleAfterTool incrementally drains new entries from the source JSONL
+// into raw.jsonl. Called on PostToolUse and Stop hooks.
+func handleAfterTool(ctx *HookContext) error {
+	agentID := ""
+	if ctx.Marker != nil {
+		agentID = ctx.Marker.AgentID
+	}
+
+	// Load recording state for this specific agent only — never fall back to repo-wide
+	// lookup, which could return a different agent's state in multi-agent repos
+	if agentID == "" {
+		slog.Debug("hook: afterTool skipped, no agent ID available")
+		return nil
+	}
+	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
+	if err != nil || state == nil {
+		return nil // not recording for this agent, silent noop
+	}
+
+	adapter, adapterErr := adapters.GetAdapter(state.AdapterName)
+	if adapterErr != nil {
+		return nil
+	}
+	reader, ok := adapter.(adapters.IncrementalReader)
+	if !ok {
+		return nil // adapter doesn't support incremental reads
+	}
+
+	if state.SessionFile == "" {
+		// discover session file on first hook call (Claude Code JSONL may not exist at prime time)
+		if sf, findErr := adapter.FindSessionFile(agentID, state.StartedAt); findErr == nil && sf != "" {
+			state.SessionFile = sf
+			_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+				s.SessionFile = sf
+			})
+			slog.Debug("hook: discovered session file", "file", sf)
+		} else {
+			return nil // session file not available yet
+		}
+	}
+
+	entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, state.SourceOffset)
+	if readErr != nil {
+		slog.Debug("hook: incremental read failed", "error", readErr)
+		return nil // non-fatal, will catch up at stop
+	}
+
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// filter entries after session start time
+	if !state.StartedAt.IsZero() {
+		filtered := make([]adapters.RawEntry, 0, len(entries))
+		for _, e := range entries {
+			if !e.Timestamp.Before(state.StartedAt) {
+				filtered = append(filtered, e)
+			}
+		}
+		entries = filtered
+	}
+
+	if len(entries) == 0 {
+		// update offset even if no entries passed filter
+		_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+			s.SourceOffset = newOffset
+		})
+		return nil
+	}
+
+	redactor, _ := session.NewRedactorWithCustomRules(ctx.ProjectRoot)
+
+	sessionEntries := session.ConvertRawEntries(entries)
+	redactor.RedactEntries(sessionEntries)
+
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+
+	// ensure raw.jsonl header exists before appending entries
+	if _, statErr := os.Stat(rawPath); os.IsNotExist(statErr) {
+		if headerErr := writeRawHeader(ctx.ProjectRoot, state); headerErr != nil {
+			slog.Debug("hook: failed to write raw.jsonl header", "error", headerErr)
+		}
+	}
+
+	if appendErr := appendRedactedEntries(rawPath, sessionEntries); appendErr != nil {
+		slog.Debug("hook: append entries failed", "error", appendErr)
+		return nil // non-fatal
+	}
+
+	currentPPID := os.Getppid()
+	_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+		s.SourceOffset = newOffset
+		s.EntryCount += len(sessionEntries)
+		// update PID if it changed (fixes Conductor where prime runs in a short-lived wrapper)
+		if currentPPID > 0 && s.ParentPID != currentPPID {
+			s.ParentPID = currentPPID
+		}
+	})
+
+	return nil
+}
+
+// appendRedactedEntries appends redacted session entries to a raw.jsonl file.
+// ox is the sole writer to raw.jsonl, so no file locking is needed.
+// Uses fsync for durability so entries survive process crashes.
+func appendRedactedEntries(rawPath string, entries []session.Entry) error {
+	f, err := os.OpenFile(rawPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("open raw.jsonl: %w", err)
+	}
+	defer f.Close()
+
+	encoder := json.NewEncoder(f)
+	for _, entry := range entries {
+		data := map[string]any{
+			"type":      string(entry.Type),
+			"content":   entry.Content,
+			"timestamp": entry.Timestamp,
+		}
+		if entry.ToolName != "" {
+			data["tool_name"] = entry.ToolName
+		}
+		if entry.ToolInput != "" {
+			data["tool_input"] = entry.ToolInput
+		}
+		if entry.ToolOutput != "" {
+			data["tool_output"] = entry.ToolOutput
+		}
+		if err := encoder.Encode(data); err != nil {
+			return fmt.Errorf("encode entry: %w", err)
+		}
+	}
+
+	return f.Sync()
 }
 
 // runPrimeForHook runs ox agent prime as a subprocess.
@@ -195,7 +349,12 @@ func runPrimeForHook(agentID string, ctx *HookContext) error {
 	slog.Debug("hook: running prime", "agent_id", agentID, "phase", ctx.Phase)
 
 	cmd := exec.Command(oxPath, args...)
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(),
+		// Pass the agent's parent PID (Claude Code process) to prime so session
+		// recording captures the long-lived agent PID, not the transient hook PID.
+		// The hook's parent is the agent; prime's parent is the hook (transient).
+		fmt.Sprintf("OX_PARENT_PID=%d", os.Getppid()),
+	)
 	// pass original raw bytes to preserve unknown fields (not re-serialized)
 	if ctx.Input != nil && len(ctx.Input.RawBytes) > 0 {
 		cmd.Stdin = strings.NewReader(string(ctx.Input.RawBytes))

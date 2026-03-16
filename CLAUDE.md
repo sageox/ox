@@ -267,6 +267,30 @@ The flow should be:
 
 We use git-lfs for large file storage, but the CLI must work for users who do not have git-lfs installed. This is possible because we use GitLab APIs directly for LFS operations rather than relying on the git-lfs CLI.
 
+**Ledger Cache for Local-Only Repo State:**
+
+When a feature needs to store computed or derived data per-repo that should be:
+- **Shared across worktrees** (not duplicated per checkout)
+- **Persistent across re-clones** (survives `rm -rf` of the project)
+- **Local-only** (never synced to cloud, never committed to git)
+
+Store it in the ledger's `.sageox/cache/` directory:
+
+```
+~/.local/share/sageox/<endpoint>/ledgers/<repo_id>/.sageox/cache/<feature>/
+```
+
+This directory is gitignored in the ledger repo. Every SageOx repo already has `ox init` run, so the ledger always exists. Resolve the ledger location via `ProjectContext.DefaultLedgerPath()` or `config.DefaultLedgerPath(repoID, endpointURL)`.
+
+| Storage Location | Use When |
+|-----------------|----------|
+| Project `.sageox/cache/` | Never — per-worktree, lost on re-clone |
+| Ledger `.sageox/cache/` | Computed indexes, derived data, local caches |
+| Ledger git-tracked | Sessions, data that syncs to cloud |
+| XDG cache (`~/.cache/sageox/`) | User-level caches not tied to a specific repo |
+
+Current consumer: `codedb` (SQLite + Bleve indexes). Future consumers should follow the same pattern.
+
 ---
 
 ## Known Latency (Future Improvement)
@@ -406,6 +430,12 @@ Always confirm with human before doing a git commit or a git push in this repo.
 - Use tables, screenshots, or before/after comparisons where they reduce cognitive load
 - Write for humans who skim — lead with the most important change, use headings and bullets
 - **Squash merges use "PR title + description"** — the PR body becomes the squash commit message on main, so write it as the permanent record
+
+**Resolving CodeRabbit PR comments:**
+When addressing CodeRabbit review comments, after fixing the code:
+1. Reply "Fixed." to each review comment via `gh api repos/{owner}/{repo}/pulls/{pr}/comments/{id}/replies -f body="Fixed."`
+2. Resolve each thread via GraphQL: `gh api graphql -f query='mutation { resolveReviewThread(input: {threadId: "<thread_id>"}) { thread { isResolved } } }'`
+3. Get thread IDs from: `gh api graphql -f query='{ repository(owner: "{owner}", name: "{repo}") { pullRequest(number: {n}) { reviewThreads(first: 50) { nodes { id isResolved comments(first: 1) { nodes { databaseId path } } } } } } }'`
 
 ### Key Practices
 
@@ -607,11 +637,27 @@ This same progressive disclosure pattern applies to agent guidance:
 
 ### MVP-Critical: Agent Friction Telemetry
 
-The friction telemetry system (`internal/uxfriction/`, `internal/daemon/friction.go`, `cmd/ox/friction.go`) is **MVP-critical**. It measures how effectively `ox` is working with coding agents by capturing friction events (tool failures, retries, errors, slowdowns) during agent sessions.
+The friction telemetry system (`github.com/sageox/frictionax`, `internal/daemon/friction.go`, `cmd/ox/friction.go`) is **MVP-critical**. It measures how effectively `ox` is working with coding agents by capturing friction events (tool failures, retries, errors, slowdowns) during agent sessions.
 
 This data is essential for learning what's working, what's broken, and where agent workflows hit friction — directly informing product decisions.
 
-**Release gate:** All friction telemetry tests MUST pass before any `ox` release. Do not ship if `internal/uxfriction/` or `internal/daemon/friction*` tests are failing.
+**Release gate:** All friction telemetry tests MUST pass before any `ox` release. Do not ship if `cmd/ox/friction*` or `internal/daemon/friction*` tests are failing.
+
+### Release Gate: E2E Integration Tests with Real Claude Code
+
+**Before ANY release**, the E2E integration tests that launch real Claude Code instances MUST pass:
+
+```bash
+make test-integration  # build tag: integration, requires claude CLI + ANTHROPIC_API_KEY
+```
+
+These tests (`tests/integration/agents/claude/`) start actual Claude Code processes, exercise real hooks, send real SIGINT signals, and verify the full session recording and anti-entropy pipelines. They are the final quality gate — do not ship if they fail.
+
+Key tests:
+- **Multi-turn recording**: Verifies incremental hook-driven recording produces valid raw.jsonl with correct entries
+- **Ctrl-C anti-entropy**: Starts real Claude, sends SIGINT, verifies the daemon's anti-entropy finalization recovers the interrupted session and generates all 4 artifacts (summary.md, summary.json, session.html, session.md)
+
+**Hard rule: E2E tests MUST use real agent CLI instances.** Never simulate Claude entries, mock agents, or use fake JSONL in `tests/integration/`. Component tests with simulated data belong in `cmd/ox/` under the `slow` build tag.
 
 ### Reference Docs
 

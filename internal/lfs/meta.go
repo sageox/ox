@@ -25,6 +25,7 @@ type SessionMeta struct {
 	CreatedAt   time.Time          `json:"created_at"`
 	EntryCount  int                `json:"entry_count,omitempty"`
 	Summary     string             `json:"summary,omitempty"`
+	StopReason  string             `json:"stop_reason,omitempty"` // how session ended: "stopped", "aborted", "recovered", ""
 	RepoID      string             `json:"repo_id,omitempty"`
 	Files       map[string]FileRef `json:"files"` // OID manifest: filename -> ref
 }
@@ -94,6 +95,11 @@ func (b *SessionMetaBuilder) UserID(id string) *SessionMetaBuilder {
 
 func (b *SessionMetaBuilder) RepoID(id string) *SessionMetaBuilder {
 	b.meta.RepoID = id
+	return b
+}
+
+func (b *SessionMetaBuilder) StopReason(reason string) *SessionMetaBuilder {
+	b.meta.StopReason = reason
 	return b
 }
 

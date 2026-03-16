@@ -34,7 +34,7 @@ func TestCheckSessionCompleteness(t *testing.T) {
 		}
 
 		// create all expected files (including summary.json)
-		files := []string{ledgerFileRaw, ledgerFileEvents, ledgerFileHTML, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"}
+		files := []string{ledgerFileRaw, ledgerFileHTML, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"}
 		for _, f := range files {
 			if err := os.WriteFile(filepath.Join(sessionDir, f), []byte("test"), 0644); err != nil {
 				t.Fatal(err)
@@ -61,13 +61,12 @@ func TestCheckSessionCompleteness(t *testing.T) {
 		}
 
 		missing := checkSessionCompleteness(sessionDir)
-		if len(missing) != 5 {
-			t.Errorf("expected 5 missing artifacts, got %d: %v", len(missing), missing)
+		if len(missing) != 4 {
+			t.Errorf("expected 4 missing artifacts, got %d: %v", len(missing), missing)
 		}
 
 		// verify expected items are in missing list
 		expectedMissing := map[string]bool{
-			"events":       true,
 			"html":         true,
 			"summary":      true,
 			"session_md":   true,

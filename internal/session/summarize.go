@@ -53,7 +53,9 @@ Create a JSON object with this structure:
       "insight": "What SageOx guidance was applied",
       "impact": "The outcome or value it provided"
     }
-  ]
+  ],
+  "quality_score": 0.75,
+  "score_reason": "New feature with architectural decision and test coverage"
 }
 
 ## Chapter Titles Guidelines
@@ -97,6 +99,30 @@ For each insight, capture:
 
 Only include moments where SageOx guidance demonstrably improved the outcome.
 If no SageOx attributions are present in the session, leave sageox_insights empty.
+
+## Quality Score Guidelines
+
+Rate the session's value to the team on a 0.0-1.0 scale. This determines whether the session
+is shared with the team (uploaded to ledger) or kept locally/discarded.
+
+**Score high (0.7-1.0):**
+- Architectural decisions or design rationale documented
+- Bugs found with root cause analysis
+- Reusable patterns or approaches discovered
+- Knowledge that would save a future coworker time
+
+**Score medium (0.3-0.7):**
+- Routine feature implementation with some decisions
+- Bug fixes without broader insights
+- Configuration or setup with team-relevant details
+
+**Score low (0.0-0.3):**
+- Routine maintenance (version bumps, formatting, rebasing)
+- Abandoned sessions (started, backed out, no real work)
+- Boilerplate-only (just ran prime, asked one question, left)
+- Repetitive work already captured in a prior session
+
+The score_reason should be a single sentence explaining the rating.
 `
 
 // SummarizeRequest contains the session data to summarize.
@@ -163,18 +189,20 @@ type FileSummary struct {
 // chapter_titles, aha_moments, sageox_insights.
 // The CLI computes and appends: chapters, files_changed.
 type SummarizeResponse struct {
-	Title          string           `json:"title"`                      // short descriptive title for the session
-	Summary        string           `json:"summary"`                    // one paragraph executive summary
-	KeyActions     []string         `json:"key_actions"`                // bullet points of key actions taken
-	Outcome        string           `json:"outcome"`                    // success/partial/failed
-	TopicsFound    []string         `json:"topics_found"`               // topics detected during session
-	FinalPlan      string           `json:"final_plan,omitempty"`       // final plan/architecture from session
-	Diagrams       []string         `json:"diagrams,omitempty"`         // extracted mermaid diagrams
-	ChapterTitles  []string         `json:"chapter_titles,omitempty"`   // LLM-generated narrative chapter titles
-	Chapters       []ChapterSummary `json:"chapters,omitempty"`         // structured chapter data (computed from JSONL)
-	FilesChanged   []FileSummary    `json:"files_changed,omitempty"`    // files modified during session (computed from JSONL)
+	Title          string           `json:"title"`                     // short descriptive title for the session
+	Summary        string           `json:"summary"`                   // one paragraph executive summary
+	KeyActions     []string         `json:"key_actions"`               // bullet points of key actions taken
+	Outcome        string           `json:"outcome"`                   // success/partial/failed
+	TopicsFound    []string         `json:"topics_found"`              // topics detected during session
+	FinalPlan      string           `json:"final_plan,omitempty"`      // final plan/architecture from session
+	Diagrams       []string         `json:"diagrams,omitempty"`        // extracted mermaid diagrams
+	ChapterTitles  []string         `json:"chapter_titles,omitempty"`  // LLM-generated narrative chapter titles
+	Chapters       []ChapterSummary `json:"chapters,omitempty"`        // structured chapter data (computed from JSONL)
+	FilesChanged   []FileSummary    `json:"files_changed,omitempty"`   // files modified during session (computed from JSONL)
 	AhaMoments     []AhaMoment      `json:"aha_moments,omitempty"`     // pivotal moments of collaborative intelligence
-	SageoxInsights []SageoxInsight   `json:"sageox_insights,omitempty"` // moments where SageOx guidance provided value
+	SageoxInsights []SageoxInsight  `json:"sageox_insights,omitempty"` // moments where SageOx guidance provided value
+	QualityScore   float64          `json:"quality_score"`             // 0.0-1.0 session value for team sharing
+	ScoreReason    string           `json:"score_reason,omitempty"`    // brief explanation of the quality score
 }
 
 // Summarize calls the SageOx API to generate an LLM summary of a session.
@@ -339,8 +367,23 @@ func hasToolError(e Entry) bool {
 	if output == "" {
 		return false
 	}
-	hasErr, _ := eventLogDetectError(output)
-	return hasErr
+	return detectError(output)
+}
+
+// detectError checks content for error indicators.
+func detectError(content string) bool {
+	contentLower := strings.ToLower(content)
+	for _, pattern := range []string{
+		"error:", "failed", "fatal:", "panic:", "exception",
+	} {
+		if strings.Contains(contentLower, pattern) {
+			return true
+		}
+	}
+	if strings.Contains(contentLower, "exit code") && !strings.Contains(contentLower, "exit code 0") {
+		return true
+	}
+	return false
 }
 
 // BuildSummaryPrompt builds a prompt for the calling agent to generate a session summary.

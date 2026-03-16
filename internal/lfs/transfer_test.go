@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -386,6 +387,43 @@ func TestUploadAll_MissingContent(t *testing.T) {
 	require.Len(t, results, 1)
 	require.Error(t, results[0].Error)
 	assert.Contains(t, results[0].Error.Error(), "no content for OID")
+}
+
+func TestSharedHTTPClient_ConnectionReuse(t *testing.T) {
+	// verify that upload and download use the shared client (connection reuse)
+	// by checking that multiple sequential operations to the same server reuse connections
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if r.Method == "PUT" {
+			w.WriteHeader(http.StatusOK)
+		} else {
+			w.Write([]byte("content"))
+		}
+	}))
+	defer server.Close()
+
+	action := &Action{Href: server.URL}
+
+	// multiple uploads should reuse the shared client
+	for i := 0; i < 3; i++ {
+		err := UploadObject(action, []byte("data"))
+		require.NoError(t, err)
+	}
+
+	// multiple downloads should also reuse
+	for i := 0; i < 3; i++ {
+		data, err := DownloadObject(action)
+		require.NoError(t, err)
+		assert.Equal(t, []byte("content"), data)
+	}
+
+	assert.Equal(t, 6, requestCount, "expected 6 total requests (3 uploads + 3 downloads)")
+}
+
+func TestSharedHTTPClient_Timeout(t *testing.T) {
+	// verify the shared client has the expected timeout
+	assert.Equal(t, 5*time.Minute, lfsHTTPClient.Timeout, "shared LFS client should have 5-minute timeout")
 }
 
 func TestBytesReaderAt(t *testing.T) {

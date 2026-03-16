@@ -34,9 +34,9 @@ func TestClaudeCodePrimingIntegration(t *testing.T) {
 		err := InstallProjectClaudeHooks(tmpDir)
 		require.NoError(t, err, "InstallProjectClaudeHooks should succeed")
 
-		// verify settings.local.json was created
-		settingsPath := filepath.Join(claudeDir, "settings.local.json")
-		require.FileExists(t, settingsPath, "settings.local.json should be created")
+		// verify settings.json was created
+		settingsPath := filepath.Join(claudeDir, "settings.json")
+		require.FileExists(t, settingsPath, "settings.json should be created")
 
 		// read and parse the settings
 		data, err := os.ReadFile(settingsPath)
@@ -179,14 +179,14 @@ func TestClaudeCodeHooksPreserveOtherHooks(t *testing.T) {
 		},
 	}
 	data, _ := json.Marshal(existingSettings)
-	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, "settings.local.json"), data, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(claudeDir, "settings.json"), data, 0644))
 
 	// install ox hooks
 	err := InstallProjectClaudeHooks(tmpDir)
 	require.NoError(t, err)
 
 	// read updated settings
-	data, err = os.ReadFile(filepath.Join(claudeDir, "settings.local.json"))
+	data, err = os.ReadFile(filepath.Join(claudeDir, "settings.json"))
 	require.NoError(t, err)
 
 	var settings ClaudeSettings

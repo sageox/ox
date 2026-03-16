@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -58,7 +59,19 @@ Example:
 
 		// verify at least one content file exists
 		if !hasContentFiles(sessionPath) {
-			return fmt.Errorf("no content files found in session %s\nExpected at least one of: raw.jsonl, events.jsonl, summary.md, session.md, session.html", sessionName)
+			return fmt.Errorf("no content files found in session %s\nExpected at least one of: raw.jsonl, summary.md, session.md, session.html", sessionName)
+		}
+
+		// validate raw.jsonl data quality before uploading
+		rawPath := filepath.Join(sessionPath, ledgerFileRaw)
+		if _, err := os.Stat(rawPath); err == nil {
+			if validation := validateRawJSONLFile(rawPath); len(validation.Errors) > 0 {
+				fmt.Fprintf(os.Stderr, "warning: session data has issues:\n")
+				for _, e := range validation.Errors {
+					fmt.Fprintf(os.Stderr, "  - %s\n", e)
+				}
+				fmt.Fprintln(os.Stderr, "Uploading anyway — run 'ox session lint' for details.")
+			}
 		}
 
 		// build or create meta.json first (before LFS upload) to preserve metadata even if LFS fails
@@ -66,6 +79,11 @@ Example:
 		meta, err := buildSessionMeta(sessionPath, sessionName, nil, uploadEndpoint)
 		if err != nil {
 			return fmt.Errorf("build meta.json: %w", err)
+		}
+
+		// guard: never upload a session with zero substantive entries
+		if !session.HasSubstantiveEntries(rawPath) {
+			return fmt.Errorf("session %s has no substantive entries (only metadata header) — nothing to upload", sessionName)
 		}
 
 		if err := lfs.WriteSessionMeta(sessionPath, meta); err != nil {
@@ -109,7 +127,6 @@ Example:
 func hasContentFiles(sessionPath string) bool {
 	contentFiles := []string{
 		ledgerFileRaw,
-		ledgerFileEvents,
 		ledgerFileSummaryMD,
 		ledgerFileSessionMD,
 		ledgerFileHTML,

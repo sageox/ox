@@ -628,3 +628,65 @@ func TestFetchUserInfo_Unauthorized(t *testing.T) {
 	// verify error message contains status code
 	assert.Contains(t, err.Error(), "401")
 }
+
+func TestExchangeForJWT_ResponseFormats(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		response    string
+		wantToken   string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:      "flat OAuth-style response",
+			response:  `{"access_token":"jwt-flat","token_type":"bearer","expires_in":3600}`,
+			wantToken: "jwt-flat",
+		},
+		{
+			name:      "enveloped data response from older server",
+			response:  `{"success":true,"data":{"access_token":"jwt-envelope","token_type":"bearer","expires_in":3600}}`,
+			wantToken: "jwt-envelope",
+		},
+		{
+			name:        "empty access token returns error",
+			response:    `{"token_type":"bearer","expires_in":3600}`,
+			wantErr:     true,
+			errContains: "empty access token",
+		},
+		{
+			name:        "empty data envelope returns error",
+			response:    `{"success":true,"data":{"token_type":"bearer"}}`,
+			wantErr:     true,
+			errContains: "empty access token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte(tt.response))
+			}))
+			defer server.Close()
+
+			client := &http.Client{Timeout: 5 * time.Second}
+			resp, err := exchangeForJWT(client, server.URL, "test-opaque-token")
+
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantToken, resp.AccessToken)
+		})
+	}
+}

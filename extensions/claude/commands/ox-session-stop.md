@@ -5,12 +5,12 @@
      displaying a notice, generating a summary) are legitimate here. -->
 Stop recording and save this agent session to the project ledger.
 
-## Post-Command: Generate and Push Summary (REQUIRED)
+## Post-Command
 
 After the command completes, check the JSON output for `guidance` and `summary_prompt` fields.
-Follow the `guidance` field for next steps. The summary step is critical for session completeness.
+Follow the `guidance` field for next steps.
 
-**If `summary_prompt` is present:**
+**If `summary_prompt` is present (sync mode):**
 1. Read the prompt carefully — it references the raw session file on disk
 2. Read the raw session file at the path specified in the prompt
 3. Generate the summary JSON following the Output Format in the prompt
@@ -18,6 +18,9 @@ Follow the `guidance` field for next steps. The summary step is critical for ses
 5. If the prompt includes a `push-summary` step, run that command with `--file` pointing to your temp file
 6. Verify the push succeeded by checking the JSON output for `"success": true`
 7. Clean up the temporary summary file
+
+**If `summary_prompt` is absent (async mode):**
+No agent action required. Upload and summary generation happen automatically in the background.
 
 **If summary generation fails:**
 - Run `ox agent <id> doctor` — it can detect and help recover missing summaries

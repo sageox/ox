@@ -633,4 +633,3 @@ func TestMergeRepo_NetworkError(t *testing.T) {
 	assert.Nil(t, redirect)
 	assert.Contains(t, err.Error(), "network error")
 }
-

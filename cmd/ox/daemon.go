@@ -6,12 +6,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
+	"github.com/mattn/go-isatty"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -140,9 +144,18 @@ var daemonStatusCmd = &cobra.Command{
 			return nil
 		}
 
-		client := daemon.NewClient()
+		// status is human-initiated, use longer timeout than default 50ms IPC;
+		// retry once with even longer timeout if daemon is busy (initial sync, GC)
+		client := daemon.NewClientWithTimeout(500 * time.Millisecond)
 		status, err := client.Status()
+		if err != nil && isTimeoutErr(err) {
+			client = daemon.NewClientWithTimeout(2 * time.Second)
+			status, err = client.Status()
+		}
 		if err != nil {
+			if isTimeoutErr(err) {
+				return fmt.Errorf("daemon is busy (likely syncing), try again in a moment")
+			}
 			return fmt.Errorf("failed to get status: %w", err)
 		}
 
@@ -172,24 +185,53 @@ var daemonLogsCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		lines, _ := cmd.Flags().GetInt("lines")
 		follow, _ := cmd.Flags().GetBool("follow")
+		showPath, _ := cmd.Flags().GetBool("path")
+		all, _ := cmd.Flags().GetBool("all")
 
 		logPath := daemon.LogPath()
+
+		if showPath {
+			fmt.Println(logPath)
+			return nil
+		}
 
 		if _, err := os.Stat(logPath); os.IsNotExist(err) {
 			fmt.Println("No daemon logs found")
 			return nil
 		}
 
-		tailArgs := []string{"-n", fmt.Sprintf("%d", lines)}
+		var tailArgs []string
+		if all {
+			tailArgs = []string{"-n", "+1"} // entire file from line 1
+		} else {
+			tailArgs = []string{"-n", fmt.Sprintf("%d", lines)}
+		}
 		if follow {
 			tailArgs = append(tailArgs, "-f")
 		}
 		tailArgs = append(tailArgs, logPath)
 
 		tailCmd := exec.Command("tail", tailArgs...)
-		tailCmd.Stdout = os.Stdout
 		tailCmd.Stderr = os.Stderr
-		return tailCmd.Run()
+
+		// colorize when output is a terminal
+		colorize := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+		if !colorize {
+			tailCmd.Stdout = os.Stdout
+			return tailCmd.Run()
+		}
+
+		stdout, err := tailCmd.StdoutPipe()
+		if err != nil {
+			return fmt.Errorf("failed to create pipe: %w", err)
+		}
+
+		if err := tailCmd.Start(); err != nil {
+			return fmt.Errorf("failed to start tail: %w", err)
+		}
+
+		cli.StreamFormattedLogs(stdout, os.Stdout)
+		return tailCmd.Wait()
 	},
 }
 
@@ -253,9 +295,13 @@ var daemonKillCmd = &cobra.Command{
 
 func init() {
 	daemonStartCmd.Flags().Bool("foreground", false, "run in foreground (for debugging)")
+	daemonStartCmd.Flags().String("repo", "", "repo name (for ps identification)")
+	daemonStartCmd.Flags().MarkHidden("repo")
 	daemonStatusCmd.Flags().BoolP("verbose", "v", false, "show detailed sync history")
 	daemonLogsCmd.Flags().IntP("lines", "n", 50, "number of lines to show")
 	daemonLogsCmd.Flags().BoolP("follow", "f", false, "follow log output")
+	daemonLogsCmd.Flags().Bool("path", false, "print log file path and exit")
+	daemonLogsCmd.Flags().Bool("all", false, "show all log lines")
 	daemonKillCmd.Flags().Bool("all", false, "kill all running ox daemons")
 
 	daemonCmd.AddCommand(daemonStartCmd)
@@ -265,6 +311,18 @@ func init() {
 	daemonCmd.AddCommand(daemonLogsCmd)
 	daemonCmd.AddCommand(daemonListCmd)
 	daemonCmd.AddCommand(daemonKillCmd)
+
+	// hidden alias: 'ox daemon log' → 'ox daemon logs'
+	daemonLogCmd := &cobra.Command{
+		Use:    "log",
+		Hidden: true,
+		RunE:   daemonLogsCmd.RunE,
+	}
+	daemonLogCmd.Flags().IntP("lines", "n", 50, "number of lines to show")
+	daemonLogCmd.Flags().BoolP("follow", "f", false, "follow log output")
+	daemonLogCmd.Flags().Bool("path", false, "print log file path and exit")
+	daemonLogCmd.Flags().Bool("all", false, "show all log lines")
+	daemonCmd.AddCommand(daemonLogCmd)
 }
 
 // runDaemonForeground runs the daemon in the foreground.
@@ -279,7 +337,21 @@ func runDaemonForeground(ledgerPath string) error {
 	}))
 
 	d := daemon.New(cfg, logger)
-	return d.Start()
+	if err := d.Start(); err != nil {
+		return err
+	}
+
+	if !d.RestartRequested() {
+		return nil
+	}
+
+	// version mismatch: re-exec with updated binary (same PID, same FDs)
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("self-restart: resolve executable: %w", err)
+	}
+	logger.Info("re-executing daemon with updated binary", "exe", exe)
+	return syscall.Exec(exe, os.Args, os.Environ())
 }
 
 // startDaemonBackground starts the daemon as a background process.
@@ -302,9 +374,17 @@ func startDaemonBackground(ledgerPath string) error {
 		return fmt.Errorf("failed to open log file: %w", err)
 	}
 
+	// build args with repo name for ps visibility
+	args := []string{"daemon", "start", "--foreground"}
+	if gitRoot := findGitRoot(); gitRoot != "" {
+		if name := repotools.GetRepoName(gitRoot); name != "" {
+			args = append(args, "--repo="+name)
+		}
+	}
+
 	// start daemon process
 	// NOTE: No setsid/detach — Claude manages the daemon process lifecycle.
-	cmd := exec.Command(exe, "daemon", "start", "--foreground")
+	cmd := exec.Command(exe, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
@@ -334,4 +414,9 @@ func startDaemonBackground(ledgerPath string) error {
 	cli.PrintHint(fmt.Sprintf("  Logs: %s", logPath))
 	cli.PrintHint("  Run 'ox daemon status' to see details")
 	return nil
+}
+
+// isTimeoutErr returns true if the error is a socket I/O timeout.
+func isTimeoutErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "i/o timeout")
 }

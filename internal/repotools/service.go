@@ -85,13 +85,24 @@ func GetInitialCommitHash() (string, error) {
 	return lines[0], nil
 }
 
-// GetRemoteURLs returns all configured git remote URLs
+// GetRemoteURLs returns all configured git remote URLs for the current directory.
 func GetRemoteURLs() ([]string, error) {
+	return GetRemoteURLsForDir("")
+}
+
+// GetRemoteURLsForDir returns all configured git remote URLs for the given directory.
+// If dir is empty, uses the current working directory.
+func GetRemoteURLsForDir(dir string) ([]string, error) {
 	if err := RequireVCS(VCSGit); err != nil {
 		return nil, err
 	}
 
-	cmd := exec.Command("git", "remote", "-v")
+	var cmd *exec.Cmd
+	if dir != "" {
+		cmd = exec.Command("git", "-C", dir, "remote", "-v")
+	} else {
+		cmd = exec.Command("git", "remote", "-v")
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get remotes: %w", err)
@@ -116,20 +127,47 @@ func GetRemoteURLs() ([]string, error) {
 	return urls, nil
 }
 
+// getOriginURL returns the normalized URL for the "origin" remote in the given directory.
+// Returns empty string if origin doesn't exist or git fails.
+func getOriginURL(dir string) string {
+	var cmd *exec.Cmd
+	if dir != "" {
+		cmd = exec.Command("git", "-C", dir, "remote", "get-url", "origin")
+	} else {
+		cmd = exec.Command("git", "remote", "get-url", "origin")
+	}
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	url := strings.TrimSpace(string(output))
+	if url == "" {
+		return ""
+	}
+	return normalizeGitURL(url)
+}
+
 // GetRepoName returns a human-readable repo name derived from git remotes.
 // Prefers "owner/repo" extracted from the first remote origin URL
 // (e.g. git@github.com:sageox/ox.git → "sageox/ox").
 // Falls back to the git root directory name if no remote is available.
+// Uses gitRoot to query remotes (via git -C), not the current working directory.
 func GetRepoName(gitRoot string) string {
-	// try first remote origin
-	urls, err := GetRemoteURLs()
+	// prefer origin remote explicitly to avoid non-determinism with multiple remotes
+	if normalized := getOriginURL(gitRoot); normalized != "" {
+		if idx := strings.Index(normalized, "/"); idx >= 0 {
+			if ownerRepo := normalized[idx+1:]; ownerRepo != "" {
+				return ownerRepo
+			}
+		}
+	}
+
+	// fall back to first available remote
+	urls, err := GetRemoteURLsForDir(gitRoot)
 	if err == nil && len(urls) > 0 {
-		// urls are already normalized: "github.com/sageox/ox"
-		// strip the host to get "sageox/ox"
 		normalized := urls[0]
 		if idx := strings.Index(normalized, "/"); idx >= 0 {
-			ownerRepo := normalized[idx+1:]
-			if ownerRepo != "" {
+			if ownerRepo := normalized[idx+1:]; ownerRepo != "" {
 				return ownerRepo
 			}
 		}

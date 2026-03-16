@@ -31,7 +31,8 @@ func TestBuildStatusJSON_WithRepoDetail(t *testing.T) {
 	output := buildStatusJSON(
 		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
-		localCfg, "", repoDetail,
+		localCfg, "", repoDetail, nil,
+		nil, nil,
 	)
 
 	require.NotNil(t, output.Ledger, "ledger section should be populated when localCfg.Ledger has a path")
@@ -53,7 +54,8 @@ func TestBuildStatusJSON_WithoutRepoDetail(t *testing.T) {
 	output := buildStatusJSON(
 		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
-		localCfg, "", nil,
+		localCfg, "", nil, nil,
+		nil, nil,
 	)
 
 	require.NotNil(t, output.Ledger, "ledger section should be populated even without repoDetail")
@@ -79,7 +81,8 @@ func TestBuildStatusJSON_ViewerAccess(t *testing.T) {
 	output := buildStatusJSON(
 		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
-		localCfg, "", repoDetail,
+		localCfg, "", repoDetail, nil,
+		nil, nil,
 	)
 
 	require.NotNil(t, output.Ledger)
@@ -101,10 +104,12 @@ func TestBuildStatusJSON_NoLedgerConfig(t *testing.T) {
 	output := buildStatusJSON(
 		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
-		localCfg, "", repoDetail,
+		localCfg, "", repoDetail, nil,
+		nil, nil,
 	)
 
-	assert.Nil(t, output.Ledger, "ledger section should be nil when no ledger config exists")
+	require.NotNil(t, output.Ledger, "ledger section should always be present")
+	assert.False(t, output.Ledger.Configured, "ledger should not be configured")
 }
 
 func TestBuildStatusJSON_NilLocalConfig(t *testing.T) {
@@ -113,10 +118,12 @@ func TestBuildStatusJSON_NilLocalConfig(t *testing.T) {
 	output := buildStatusJSON(
 		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
-		nil, "", nil,
+		nil, "", nil, nil,
+		nil, nil,
 	)
 
-	assert.Nil(t, output.Ledger, "ledger section should be nil when localCfg is nil")
+	require.NotNil(t, output.Ledger, "ledger section should always be present")
+	assert.False(t, output.Ledger.Configured, "ledger should not be configured")
 	assert.Nil(t, output.TeamContexts, "team_contexts should be nil when localCfg is nil")
 }
 
@@ -136,7 +143,8 @@ func TestBuildStatusJSON_LedgerPathNotExists(t *testing.T) {
 	output := buildStatusJSON(
 		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
-		localCfg, "", repoDetail,
+		localCfg, "", repoDetail, nil,
+		nil, nil,
 	)
 
 	require.NotNil(t, output.Ledger)
@@ -164,7 +172,8 @@ func TestBuildStatusJSON_AuthenticatedWithToken(t *testing.T) {
 	output := buildStatusJSON(
 		true, token, "test.sageox.ai", "/tmp/auth.json", true,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", true,
-		nil, "", nil,
+		nil, "", nil, nil,
+		nil, nil,
 	)
 
 	require.NotNil(t, output.Auth)
@@ -180,7 +189,8 @@ func TestBuildStatusJSON_ProjectInitialized(t *testing.T) {
 	output := buildStatusJSON(
 		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", true,
-		nil, "", nil,
+		nil, "", nil, nil,
+		nil, nil,
 	)
 
 	require.NotNil(t, output.Project)
@@ -194,7 +204,8 @@ func TestBuildStatusJSON_ProjectNotInitialized(t *testing.T) {
 	output := buildStatusJSON(
 		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
-		nil, "", nil,
+		nil, "", nil, nil,
+		nil, nil,
 	)
 
 	require.NotNil(t, output.Project)
@@ -248,7 +259,8 @@ func TestBuildStatusJSON_VisibilityAccessLevelCombinations(t *testing.T) {
 			output := buildStatusJSON(
 				false, nil, "test.sageox.ai", "/tmp/auth.json", false,
 				"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
-				localCfg, "", repoDetail,
+				localCfg, "", repoDetail, nil,
+				nil, nil,
 			)
 
 			require.NotNil(t, output.Ledger)

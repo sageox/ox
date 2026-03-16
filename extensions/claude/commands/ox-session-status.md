@@ -9,6 +9,7 @@ After the command completes, check the JSON output:
 - **`recording: true`** — A session is active. Continue working normally.
 - **`recording: false`** — No active session. Consider running `/ox-session-start` if you want to record.
 - **`guidance`** — Follow any guidance returned by the CLI.
+- **`entry_count`** — Number of entries captured so far.
 - **`count > 1`** — Multiple concurrent recordings. The `sessions` array shows each one.
 - **`agent_id`** — The agent ID of the recording. Compare with your own to identify your session.
 

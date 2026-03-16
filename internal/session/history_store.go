@@ -89,7 +89,7 @@ func GetHistoryStoragePath(agentID string, activeRecording bool) string {
 	}
 
 	if activeRecording {
-		state, err := LoadRecordingState(cwd)
+		state, err := LoadRecordingStateForAgent(cwd, agentID)
 		if err == nil && state != nil && state.SessionPath != "" {
 			return filepath.Join(state.SessionPath, rawFilename)
 		}

@@ -31,7 +31,7 @@ type statusJSONOutput struct {
 	Auth         *statusAuthJSON         `json:"auth"`
 	Config       *statusConfigJSON       `json:"config"`
 	Project      *statusProjectJSON      `json:"project"`
-	Ledger       *statusLedgerJSON       `json:"ledger,omitempty"`
+	Ledger       *statusLedgerJSON       `json:"ledger"`
 	TeamContexts []statusTeamContextJSON `json:"team_contexts,omitempty"`
 	AICoworkers  []statusAICoworkerJSON  `json:"ai_coworkers,omitempty"`
 	Daemon       *statusDaemonJSON       `json:"daemon,omitempty"`
@@ -67,9 +67,20 @@ type statusConfigJSON struct {
 }
 
 type statusProjectJSON struct {
-	Initialized bool   `json:"initialized"`
-	Directory   string `json:"directory"`
-	ConfigPath  string `json:"config_path,omitempty"`
+	Initialized bool                 `json:"initialized"`
+	Directory   string               `json:"directory"`
+	ConfigPath  string               `json:"config_path,omitempty"`
+	CodeIndex   *statusCodeIndexJSON `json:"code_index,omitempty"`
+}
+
+type statusCodeIndexJSON struct {
+	Indexed     bool       `json:"indexed"`
+	LastIndexed *time.Time `json:"last_indexed,omitempty"`
+	IndexingNow bool       `json:"indexing_now"`
+	Commits     int        `json:"commits,omitempty"`
+	Blobs       int        `json:"blobs,omitempty"`
+	Symbols     int        `json:"symbols,omitempty"`
+	Error       string     `json:"error,omitempty"`
 }
 
 type statusLedgerJSON struct {
@@ -1129,7 +1140,9 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 	// handle nil status (daemon not connected)
 	if status == nil {
 		b.WriteString(statusLabelStyle.Render("Status"))
-		if projectInitialized {
+		if daemon.IsStarting() {
+			b.WriteString(statusMutedStyle.Render("◐ starting — process is running but not yet accepting connections"))
+		} else if projectInitialized {
 			b.WriteString(statusMutedStyle.Render("⟳ not started — run 'ox daemon start' or will auto-start on next agentic coding session"))
 		} else {
 			b.WriteString(statusMutedStyle.Render("not running (expected until 'ox init' completed)"))
@@ -1367,8 +1380,8 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 	return b.String()
 }
 
-// renderAICoworkersSection renders active AI coworker instances with context stats.
-// Only shown when there are active instances.
+// renderAICoworkersSection renders a one-line summary of active AI coworkers.
+// Detail belongs in `ox agent list`.
 func renderAICoworkersSection(client *daemon.Client) string {
 	if client == nil {
 		return ""
@@ -1378,30 +1391,27 @@ func renderAICoworkersSection(client *daemon.Client) string {
 		return ""
 	}
 
+	active := 0
+	for _, inst := range instances {
+		if inst.Status == daemon.StatusActive {
+			active++
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString("\n")
-	b.WriteString(statusHeaderStyle.Render("AI Coworkers"))
-	b.WriteString("\n")
-	b.WriteString(statusMutedStyle.Render("────────────"))
-	b.WriteString("\n")
+	b.WriteString(statusLabelStyle.Render("AI Coworkers"))
 
-	for _, inst := range instances {
-		// agent ID and status
-		status := inst.Status
-		statusSemantic := "success"
-		if status == "idle" {
-			statusSemantic = "muted"
-		}
-
-		b.WriteString(statusLabelStyle.Render(inst.AgentID))
-		b.WriteString(formatValue(status, statusSemantic))
-
-		// context stats inline (daemon provides token counts directly)
-		if inst.CumulativeContextTokens > 0 {
-			b.WriteString(statusMutedStyle.Render(fmt.Sprintf("  ~%s tokens  %d cmds", formatTokenCount(int(inst.CumulativeContextTokens)), inst.CommandCount)))
-		}
-		b.WriteString("\n")
+	total := len(instances)
+	if active == total {
+		b.WriteString(formatValue(fmt.Sprintf("%d active", total), "success"))
+	} else if active > 0 {
+		b.WriteString(formatValue(fmt.Sprintf("%d active, %d idle", active, total-active), "success"))
+	} else {
+		b.WriteString(formatValue(fmt.Sprintf("%d idle", total), "muted"))
 	}
+	b.WriteString(statusMutedStyle.Render("  (ox agent list)"))
+	b.WriteString("\n")
 
 	return b.String()
 }
@@ -1537,10 +1547,33 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			}
 		}
 
+		// connect to daemon early — needed for project status (code index) and later sections
+		var daemonStatus *daemon.StatusData
+		var syncHistory []daemon.SyncEvent
+		var codeStats *daemon.CodeDBStats
+		var client *daemon.Client
+		if gitRoot != "" {
+			// use longer timeout for status queries — the status handler collects data
+			// from multiple subsystems and can exceed 50ms under sync load
+			client = daemon.NewClientWithTimeout(500 * time.Millisecond)
+			if client.Ping() == nil {
+				if ds, err := client.Status(); err == nil {
+					daemonStatus = ds
+					syncHistory, _ = client.SyncHistory()
+				}
+				if cs, err := client.CodeStatus(); err == nil {
+					codeStats = cs
+				}
+			} else {
+				client = nil
+			}
+		}
+
 		// JSON output mode
 		if statusJSONFlag {
 			output := buildStatusJSON(authenticated, token, endpointSlug, authFile, authFileExists,
-				userConfigDir, cwd, sageoxDir, projectInitialized, localCfg, gitRoot, repoDetail)
+				userConfigDir, cwd, sageoxDir, projectInitialized, localCfg, gitRoot, repoDetail, codeStats,
+				daemonStatus, client)
 			jsonBytes, err := json.MarshalIndent(output, "", "  ")
 			if err != nil {
 				return fmt.Errorf("failed to marshal JSON: %w", err)
@@ -1567,23 +1600,17 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		}
 		fmt.Print(renderTable("Configuration", configRows))
 
-		fmt.Print(renderProjectStatus(cwd, gitRoot, projectInitialized))
+		fmt.Print(renderProjectStatus(cwd, gitRoot, projectInitialized, codeStats))
 		if gitRoot != "" && !projectInitialized {
 			cli.PrintActionHint("ox init", "Initialize project for AI agent context", 2)
+		}
+		if gitRoot != "" && projectInitialized && codeStats == nil {
+			// no daemon connected — suggest manual indexing
+			cli.PrintActionHint("ox code index", "Index repo for local code search", 0)
 		}
 
 		// skip ledger/daemon sections when not in a git repo — nothing to show
 		if gitRoot != "" {
-			// fetch daemon status once, pass to both git repos and daemon sync sections
-			var daemonStatus *daemon.StatusData
-			var syncHistory []daemon.SyncEvent
-			client := daemon.TryConnectOrDirect()
-			if client != nil {
-				if ds, err := client.Status(); err == nil {
-					daemonStatus = ds
-					syncHistory, _ = client.SyncHistory()
-				}
-			}
 
 			// Ledger and Team Context sections - shows repos from cloud API
 			// Only displays repos that are actually provisioned
@@ -1612,10 +1639,13 @@ daemon health, and a tree view of all SageOx directory locations.`,
 	},
 }
 
-// buildStatusJSON constructs the JSON output structure for ox status --json
+// buildStatusJSON constructs the JSON output structure for ox status --json.
+// daemonStatus and daemonClient are pre-fetched from the daemon to avoid a second ping
+// that could race with the first (one succeeds, the other times out = contradictory output).
 func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, authFile string, authFileExists bool,
 	userConfigDir, cwd, sageoxDir string, projectInitialized bool, localCfg *config.LocalConfig, gitRoot string,
-	repoDetail *api.RepoDetailResponse) statusJSONOutput {
+	repoDetail *api.RepoDetailResponse, codeStats *daemon.CodeDBStats,
+	daemonStatus *daemon.StatusData, daemonClient *daemon.Client) statusJSONOutput {
 
 	output := statusJSONOutput{}
 
@@ -1644,6 +1674,20 @@ func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, 
 	}
 	if projectInitialized {
 		output.Project.ConfigPath = sageoxDir
+		if codeStats != nil {
+			ci := &statusCodeIndexJSON{
+				Indexed:     codeStats.IndexExists,
+				IndexingNow: codeStats.IndexingNow,
+				Commits:     codeStats.Commits,
+				Blobs:       codeStats.Blobs,
+				Symbols:     codeStats.Symbols,
+				Error:       codeStats.LastError,
+			}
+			if !codeStats.LastIndexed.IsZero() {
+				ci.LastIndexed = &codeStats.LastIndexed
+			}
+			output.Project.CodeIndex = ci
+		}
 	}
 
 	// ledger section
@@ -1666,6 +1710,15 @@ func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, 
 		if repoDetail != nil {
 			output.Ledger.Visibility = repoDetail.Visibility
 			output.Ledger.AccessLevel = repoDetail.AccessLevel
+		}
+	} else {
+		// ledger not configured locally — report provisioning status from API
+		output.Ledger = &statusLedgerJSON{Configured: false}
+		if repoDetail != nil && repoDetail.Ledger != nil {
+			output.Ledger.Status = repoDetail.Ledger.Status
+			if repoDetail.Ledger.Message != "" {
+				output.Ledger.Error = repoDetail.Ledger.Message
+			}
 		}
 	}
 
@@ -1701,21 +1754,21 @@ func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, 
 		}
 	}
 
-	// daemon section + AI coworkers
+	// daemon section + AI coworkers — use pre-fetched data to avoid a second
+	// ping that could race with the first and produce contradictory output
 	if gitRoot != "" {
 		output.Daemon = &statusDaemonJSON{}
-		client := daemon.TryConnectOrDirect()
-		if client != nil {
-			if daemonStatus, err := client.Status(); err == nil {
-				output.Daemon.Running = daemonStatus.Running
-				output.Daemon.Pid = daemonStatus.Pid
-				output.Daemon.UptimeSeconds = int64(daemonStatus.Uptime.Seconds())
-				output.Daemon.TotalSyncs = daemonStatus.TotalSyncs
-				output.Daemon.SyncsLastHour = daemonStatus.SyncsLastHour
-				output.Daemon.LastError = daemonStatus.LastError
-			}
+		if daemonStatus != nil {
+			output.Daemon.Running = daemonStatus.Running
+			output.Daemon.Pid = daemonStatus.Pid
+			output.Daemon.UptimeSeconds = int64(daemonStatus.Uptime.Seconds())
+			output.Daemon.TotalSyncs = daemonStatus.TotalSyncs
+			output.Daemon.SyncsLastHour = daemonStatus.SyncsLastHour
+			output.Daemon.LastError = daemonStatus.LastError
+		}
+		if daemonClient != nil {
 			// AI coworkers with context stats
-			if instances, err := client.Instances(); err == nil && len(instances) > 0 {
+			if instances, err := daemonClient.Instances(); err == nil && len(instances) > 0 {
 				for _, inst := range instances {
 					output.AICoworkers = append(output.AICoworkers, statusAICoworkerJSON{
 						AgentID:       inst.AgentID,
@@ -1796,7 +1849,7 @@ func renderAuthStatus(authFile string) string {
 
 // renderProjectStatus renders the project status section with tree-like structure.
 // gitRoot is empty when not inside a git repository.
-func renderProjectStatus(cwd, gitRoot string, initialized bool) string {
+func renderProjectStatus(cwd, gitRoot string, initialized bool, codeStats *daemon.CodeDBStats) string {
 	var b strings.Builder
 
 	b.WriteString("\n")
@@ -1821,13 +1874,58 @@ func renderProjectStatus(cwd, gitRoot string, initialized bool) string {
 
 	b.WriteString(statusLabelStyle.Render("  " + cli.Wordmark() + " state"))
 	if initialized {
-		b.WriteString(statusMutedStyle.Render("└── .sageox/ dir "))
+		b.WriteString(statusMutedStyle.Render("├── .sageox/ dir "))
 		b.WriteString(statusSuccessStyle.Render("✓"))
 	} else {
 		b.WriteString(statusMutedStyle.Render("└── .sageox/ dir "))
 		b.WriteString(statusWarningStyle.Render("(not initialized)"))
 	}
 	b.WriteString("\n")
+
+	// code index status — only show when project is initialized
+	if initialized {
+		b.WriteString(statusLabelStyle.Render("  Code indexed"))
+		switch {
+		case codeStats == nil:
+			b.WriteString(statusMutedStyle.Render("└── unknown (no daemon)"))
+		case codeStats.IndexingNow:
+			b.WriteString(statusMutedStyle.Render("└── "))
+			b.WriteString(statusWarningStyle.Render("indexing…"))
+		case !codeStats.IndexExists:
+			// no index yet — daemon auto-indexes on start
+			b.WriteString(statusMutedStyle.Render("└── "))
+			b.WriteString(statusWarningStyle.Render("pending"))
+		case codeStats.LastError != "" && codeStats.Commits == 0:
+			// index dir exists but empty — initial index failed, will retry
+			b.WriteString(statusMutedStyle.Render("└── "))
+			b.WriteString(statusWarningStyle.Render("pending"))
+		case codeStats.LastError != "":
+			b.WriteString(statusMutedStyle.Render("└── "))
+			b.WriteString(statusErrorStyle.Render("error: " + codeStats.LastError))
+		default:
+			b.WriteString(statusMutedStyle.Render("└── "))
+			if !codeStats.LastIndexed.IsZero() {
+				b.WriteString(statusSuccessStyle.Render(formatTimeAgo(codeStats.LastIndexed)))
+			} else {
+				b.WriteString(statusSuccessStyle.Render("✓"))
+			}
+			// show what sources have been indexed
+			var sources []string
+			if codeStats.Commits > 0 {
+				sources = append(sources, "git history")
+			}
+			if codeStats.Symbols > 0 {
+				sources = append(sources, "symbols")
+			}
+			if codeStats.PRs > 0 || codeStats.Issues > 0 {
+				sources = append(sources, "github")
+			}
+			if len(sources) > 0 {
+				b.WriteString(statusMutedStyle.Render("  (" + strings.Join(sources, ", ") + ")"))
+			}
+		}
+		b.WriteString("\n")
+	}
 
 	return b.String()
 }

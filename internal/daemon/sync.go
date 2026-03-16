@@ -1,7 +1,9 @@
 // Package daemon implements the background sync daemon for ledger and team contexts.
 //
-// The daemon only performs git pull (read) operations. The CLI handles
-// add/commit/push (write) operations directly via the session upload pipeline.
+// The daemon performs git pull (read) operations for ledger and team context sync.
+// The CLI handles add/commit/push (write) operations via the session upload pipeline.
+// Exception: GitHubSyncManager also performs add/commit/push for data/github/ files,
+// since these are idempotent and last-write-wins safe (accept-theirs conflict resolution).
 //
 // # NETWORK DISCONNECTION HANDLING
 //
@@ -22,6 +24,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -64,6 +68,11 @@ const (
 
 // ErrInvalidRepoPath indicates the repo path failed security validation.
 var ErrInvalidRepoPath = errors.New("invalid repo path: path traversal or unsafe location detected")
+
+// ErrCloneSemaphoreTimeout indicates all clone slots were busy and the wait timed out.
+// This is a transient error that should be retried on the next sync cycle without
+// exponential backoff — the slots will free up when in-progress clones finish.
+var ErrCloneSemaphoreTimeout = errors.New("clone semaphore timeout")
 
 // SyncMetrics tracks observability counters and timing for sync operations.
 // Counters and timestamps use lock-free atomics; only pullDurations needs a mutex.
@@ -262,8 +271,12 @@ type SyncScheduler struct {
 	triggerChan chan struct{}
 
 	// worker pool for bounded clone concurrency
-	cloneSem      chan struct{} // semaphore limiting concurrent clones
-	cloneInFlight sync.Map      // tracks workspace IDs with clone in progress (dedup)
+	cloneSem      chan struct{}  // semaphore limiting concurrent clones
+	cloneInFlight sync.Map       // tracks workspace IDs with clone in progress (dedup)
+	cloneWg       sync.WaitGroup // tracks in-flight background clone goroutines
+
+	// lifecycle context — canceled when scheduler stops
+	ctx context.Context
 
 	// GC state — only one GC runs at a time across all workspaces
 	gcInProgress int32
@@ -272,8 +285,8 @@ type SyncScheduler struct {
 	syncStateLocks sync.Map // map[string]*sync.Mutex
 
 	// test hooks (nil in production)
-	onBeforeCloneSem         func()        // called just before acquiring cloneSem; tests use this to observe blocking
-	cloneSemTimeoutOverride  time.Duration // override cloneSemTimeout for tests (0 = use default)
+	onBeforeCloneSem        func()        // called just before acquiring cloneSem; tests use this to observe blocking
+	cloneSemTimeoutOverride time.Duration // override cloneSemTimeout for tests (0 = use default)
 
 	// callbacks
 	onActivity   func()                                                           // called on any sync activity
@@ -285,6 +298,21 @@ type SyncScheduler struct {
 
 	// version cache for GitHub release checks
 	versionCache *VersionCache
+
+	// code index manager for periodic freshness checks
+	codedb *CodeDBManager
+
+	// github sync manager for automatic PR/issue sync
+	githubSync *GitHubSyncManager
+
+	// shared mutex for all ledger git operations (pull, push, etc.)
+	ledgerMu sync.Mutex
+
+	// agent work signal channel — notified after successful ledger pull
+	agentWorkSignal chan<- struct{}
+
+	// notification store for team context change tracking
+	notifications *NotificationStore
 }
 
 // syncError tracks a sync error with timestamp.
@@ -296,8 +324,8 @@ type syncError struct {
 // SyncEvent tracks a successful sync with metadata.
 type SyncEvent struct {
 	Time         time.Time     `json:"time"`
-	Type         string        `json:"type"`                    // "pull", "push", "full", "team_context"
-	WorkspaceID  string        `json:"workspace_id,omitempty"`  // workspace that was synced (e.g., "ledger", team_id)
+	Type         string        `json:"type"`                   // "pull", "push", "full", "team_context"
+	WorkspaceID  string        `json:"workspace_id,omitempty"` // workspace that was synced (e.g., "ledger", team_id)
 	Duration     time.Duration `json:"duration"`
 	FilesChanged int           `json:"files_changed"`
 }
@@ -362,6 +390,84 @@ func (s *SyncScheduler) SetIssueTracker(tracker *IssueTracker) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.issues = tracker
+}
+
+// SetCodeDBManager sets the CodeDB manager for periodic freshness checks.
+func (s *SyncScheduler) SetCodeDBManager(m *CodeDBManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.codedb = m
+}
+
+// SetGitHubSyncManager sets the GitHub sync manager for periodic PR/issue sync.
+func (s *SyncScheduler) SetGitHubSyncManager(m *GitHubSyncManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.githubSync = m
+}
+
+// LedgerMu returns the shared ledger mutex for git operations.
+func (s *SyncScheduler) LedgerMu() *sync.Mutex {
+	return &s.ledgerMu
+}
+
+// SetAgentWorkSignal sets the channel used to notify the agent work manager
+// after a successful ledger pull.
+func (s *SyncScheduler) SetAgentWorkSignal(ch chan<- struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.agentWorkSignal = ch
+}
+
+// SetNotificationStore sets the notification store for team context change tracking.
+func (s *SyncScheduler) SetNotificationStore(store *NotificationStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notifications = store
+}
+
+// captureHEAD returns the current HEAD SHA for a git repo.
+// Used before a pull to establish a baseline for change detection.
+func (s *SyncScheduler) captureHEAD(repoPath string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "rev-parse", "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(output))
+}
+
+// detectChangedFiles runs git diff to find files changed between baseSHA and HEAD.
+// Returns nil if baseSHA is empty or on error — graceful degradation.
+func (s *SyncScheduler) detectChangedFiles(repoPath, baseSHA string) []string {
+	if baseSHA == "" {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+		"diff", "--name-only", baseSHA, "HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	lines := strings.TrimSpace(string(output))
+	if lines == "" {
+		return nil
+	}
+
+	var files []string
+	for _, line := range strings.Split(lines, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			files = append(files, line)
+		}
+	}
+	return files
 }
 
 // Metrics returns the sync metrics for observability.
@@ -533,6 +639,8 @@ func (s *SyncScheduler) LastError() (string, time.Time) {
 
 // Start starts the sync scheduler.
 func (s *SyncScheduler) Start(ctx context.Context) {
+	s.ctx = ctx
+
 	// load initial workspace state from config
 	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
 		s.logger.Warn("failed to load workspace registry", "error", err)
@@ -596,6 +704,32 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		defer gcTicker.Stop()
 	}
 
+	// memory distillation ticker — spawns `ox distill` as subprocess
+	var distillTicker *time.Ticker
+	var distillChan <-chan time.Time
+	if s.config.DistillInterval > 0 && s.config.ProjectRoot != "" {
+		distillTicker = time.NewTicker(s.config.DistillInterval)
+		distillChan = distillTicker.C
+		defer distillTicker.Stop()
+	}
+
+	// github sync ticker — fetches PRs/issues from GitHub API
+	var githubSyncTicker *time.Ticker
+	var githubSyncChan <-chan time.Time
+	if s.config.GitHubSyncInterval > 0 && s.config.ProjectRoot != "" && s.githubSync != nil {
+		githubSyncTicker = time.NewTicker(s.config.GitHubSyncInterval)
+		githubSyncChan = githubSyncTicker.C
+		defer githubSyncTicker.Stop()
+
+		// initial sync after short delay (let ledger pull complete first)
+		go func() {
+			time.Sleep(30 * time.Second)
+			if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
+				s.githubSync.CheckAndSync(ctx, l.Path)
+			}
+		}()
+	}
+
 	// write initial heartbeat
 	s.writeHeartbeats()
 
@@ -609,6 +743,14 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			// wait briefly for in-flight background clones to finish
+			cloneDone := make(chan struct{})
+			go func() { s.cloneWg.Wait(); close(cloneDone) }()
+			select {
+			case <-cloneDone:
+			case <-time.After(3 * time.Second):
+				s.logger.Warn("timed out waiting for background clones")
+			}
 			s.logger.Info("sync scheduler stopped")
 			return
 
@@ -627,11 +769,58 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		case <-gcChan:
 			s.checkAndRunGC(ctx)
 
+		case <-distillChan:
+			s.triggerDistill(ctx)
+
+		case <-githubSyncChan:
+			if s.githubSync != nil {
+				if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
+					s.githubSync.CheckAndSync(ctx, l.Path)
+				}
+			}
+
 		case <-s.triggerChan:
 			// triggered by file watcher, do full sync
 			s.syncAll(ctx)
 		}
 	}
+}
+
+// triggerDistill spawns `ox distill` as a subprocess for memory distillation.
+// The daemon only triggers the process; all writes happen in the subprocess.
+func (s *SyncScheduler) triggerDistill(ctx context.Context) {
+	// guard: only distill if FEATURE_MEMORY is enabled
+	if !auth.IsMemoryEnabled() {
+		return
+	}
+
+	// guard: need claude CLI available
+	if _, err := exec.LookPath("claude"); err != nil {
+		s.logger.Debug("distill skipped: claude CLI not in PATH")
+		return
+	}
+
+	s.logger.Info("triggering memory distillation")
+	start := time.Now()
+
+	oxPath, err := os.Executable()
+	if err != nil {
+		oxPath = "ox" // fall back to PATH lookup
+	}
+
+	cmd := exec.CommandContext(ctx, oxPath, "distill")
+	cmd.Dir = s.config.ProjectRoot
+	cmd.Env = append(os.Environ(), "FEATURE_MEMORY=true")
+
+	out, err := cmd.CombinedOutput()
+	duration := time.Since(start)
+
+	if err != nil {
+		s.logger.Warn("distill failed", "error", err, "output", strings.TrimSpace(string(out)), "duration", duration)
+		return
+	}
+
+	s.logger.Info("distill completed", "output", strings.TrimSpace(string(out)), "duration", duration)
 }
 
 // TriggerSync triggers an immediate sync (debounced by watcher).
@@ -664,6 +853,15 @@ func (s *SyncScheduler) pullChanges(ctx context.Context) {
 	// anti-entropy: ensure missing workspaces get cloned
 	s.triggerMissingClones()
 	_ = s.doPull(ctx, nil, false)
+
+	// check code index freshness (non-blocking)
+	if s.codedb != nil {
+		// update ledger path so CodeDB can index GitHub data from the ledger
+		if ledger := s.workspaceRegistry.GetLedger(); ledger != nil && ledger.Path != "" && ledger.Exists {
+			s.codedb.SetLedgerPath(ledger.Path)
+		}
+		s.codedb.CheckFreshness(ctx)
+	}
 }
 
 // checkLatestVersion fetches the latest GitHub release using ETag conditional requests.
@@ -712,6 +910,14 @@ func isValidGitRepo(path string) bool {
 // Returns an error if fetch or pull fails (for on-demand sync error reporting).
 // Callers that don't need the error (background scheduler) can ignore it.
 // forceSync=true bypasses backoff (user-initiated syncs via IPC).
+//
+// Architecture note: uses exec.Command("git") rather than go-git because:
+//   - process isolation: a hung or crashed git subprocess can be killed without
+//     taking down the daemon; an in-process go-git hang blocks the goroutine
+//   - --rebase and --autostash: go-git's PullOptions lacks rebase support, which
+//     is required for clean linear history on shared ledger repos
+//   - lock file safety: if a git process crashes, its .git/index.lock is released
+//     by the OS; an in-process crash may leave stale locks in the same process
 func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, forceSync bool) error {
 	if s.config.LedgerPath == "" {
 		return nil
@@ -873,89 +1079,96 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		s.logger.Warn("ledger remote credential refresh failed", "error", err)
 	}
 
-	// git fetch
-	// git fetch (capture stderr for diagnosable error messages)
-	fetchCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "fetch", "--quiet")
-	if output, err := fetchCmd.CombinedOutput(); err != nil {
-		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
-		s.logger.Warn("fetch failed", "error", err, "output", detail)
-		if detail != "" {
-			s.recordError(fmt.Sprintf("fetch failed: %s (%v)", detail, err))
-		} else {
-			s.recordError(fmt.Sprintf("fetch failed: %v", err))
+	// acquire ledger mutex to prevent concurrent git operations with GitHub sync push.
+	s.ledgerMu.Lock()
+	fetchPullErr := func() error {
+		defer s.ledgerMu.Unlock()
+		// git fetch (capture stderr for diagnosable error messages)
+		fetchCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "fetch", "--quiet")
+		if output, err := fetchCmd.CombinedOutput(); err != nil {
+			detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
+			s.logger.Warn("fetch failed", "error", err, "output", detail)
+			if detail != "" {
+				s.recordError(fmt.Sprintf("fetch failed: %s (%v)", detail, err))
+			} else {
+				s.recordError(fmt.Sprintf("fetch failed: %v", err))
+			}
+			s.metrics.RecordPullFailure()
+			s.workspaceRegistry.RecordSyncFailure("ledger")
+			s.recordSyncStateFailure(s.config.LedgerPath)
+			if detail != "" {
+				return fmt.Errorf("ledger fetch failed: %s (%w)", detail, err)
+			}
+			return fmt.Errorf("ledger fetch failed: %w", err)
 		}
-		s.metrics.RecordPullFailure()
-		s.workspaceRegistry.RecordSyncFailure("ledger")
-		s.recordSyncStateFailure(s.config.LedgerPath)
-		if detail != "" {
-			return fmt.Errorf("ledger fetch failed: %s (%w)", detail, err)
+
+		// track FETCH_HEAD mtime to record when remote had new content
+		if info, err := os.Stat(filepath.Join(s.config.LedgerPath, ".git", "FETCH_HEAD")); err == nil {
+			s.recordRemoteChange(s.config.LedgerPath, info.ModTime().UTC())
 		}
-		return fmt.Errorf("ledger fetch failed: %w", err)
-	}
 
-	// track FETCH_HEAD mtime to record when remote had new content
-	if info, err := os.Stat(filepath.Join(s.config.LedgerPath, ".git", "FETCH_HEAD")); err == nil {
-		s.recordRemoteChange(s.config.LedgerPath, info.ModTime())
-	}
-
-	// detect force push (diverged branches)
-	if s.detectForcePush(ctx) {
-		s.logger.Warn("force push detected on ledger, skipping pull")
-		s.metrics.RecordForcePush()
-		if progress != nil {
-			_ = progress.WriteStage("skipped", "Force push detected, skipping pull")
-		}
-		if s.issues != nil {
-			s.issues.SetIssue(DaemonIssue{
-				Type:     IssueTypeDiverged,
-				Repo:     "ledger",
-				Severity: SeverityError,
-				Summary:  "Ledger has diverged from remote (force push detected). Run 'ox doctor --fix' to re-clone.",
-			})
-		}
-		return errors.New("ledger diverged from remote (force push detected)")
-	}
-
-	if progress != nil {
-		_ = progress.WriteStage("pulling", "Pulling changes...")
-	}
-
-	// git pull --rebase --autostash (capture stderr for diagnosable error messages)
-	// --autostash: local uncommitted changes (from CLI writes, user edits) must not
-	// block background sync — stash before rebase, pop after
-	pullCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "pull", "--rebase", "--autostash", "--quiet")
-	if output, err := pullCmd.CombinedOutput(); err != nil {
-		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
-		s.logger.Warn("pull failed", "error", err, "output", detail)
-		if detail != "" {
-			s.recordError(fmt.Sprintf("pull failed: %s (%v)", detail, err))
-		} else {
-			s.recordError(fmt.Sprintf("pull failed: %v", err))
-		}
-		s.metrics.RecordPullFailure()
-		s.workspaceRegistry.RecordSyncFailure("ledger")
-		s.recordSyncStateFailure(s.config.LedgerPath)
-
-		// check if it's a merge conflict
-		statusCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "status", "--porcelain")
-		if statusOutput, _ := statusCmd.Output(); strings.Contains(string(statusOutput), "UU") {
-			s.metrics.RecordConflict()
-
-			// report issue — daemon does not write; next pull will skip via rebase-state check
+		// detect force push (diverged branches)
+		if s.detectForcePush(ctx) {
+			s.logger.Warn("force push detected on ledger, skipping pull")
+			s.metrics.RecordForcePush()
+			if progress != nil {
+				_ = progress.WriteStage("skipped", "Force push detected, skipping pull")
+			}
 			if s.issues != nil {
 				s.issues.SetIssue(DaemonIssue{
-					Type:            IssueTypeMergeConflict,
-					Severity:        SeverityError,
-					Repo:            "ledger",
-					Summary:         "Ledger has merge conflicts. Run 'ox doctor --fix' to re-clone.",
-					RequiresConfirm: true, // merge resolution needs human approval
+					Type:     IssueTypeDiverged,
+					Repo:     "ledger",
+					Severity: SeverityError,
+					Summary:  "Ledger has diverged from remote (force push detected). Run 'ox doctor --fix' to re-clone.",
 				})
 			}
+			return errors.New("ledger diverged from remote (force push detected)")
 		}
-		if detail != "" {
-			return fmt.Errorf("ledger pull failed: %s (%w)", detail, err)
+
+		if progress != nil {
+			_ = progress.WriteStage("pulling", "Pulling changes...")
 		}
-		return fmt.Errorf("ledger pull failed: %w", err)
+
+		// git pull --rebase --autostash
+		// --autostash: local uncommitted changes (from CLI writes, user edits) must not
+		// block background sync — stash before rebase, pop after
+		pullCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "pull", "--rebase", "--autostash", "--quiet")
+		if output, err := pullCmd.CombinedOutput(); err != nil {
+			detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
+			s.logger.Warn("pull failed", "error", err, "output", detail)
+			if detail != "" {
+				s.recordError(fmt.Sprintf("pull failed: %s (%v)", detail, err))
+			} else {
+				s.recordError(fmt.Sprintf("pull failed: %v", err))
+			}
+			s.metrics.RecordPullFailure()
+			s.workspaceRegistry.RecordSyncFailure("ledger")
+			s.recordSyncStateFailure(s.config.LedgerPath)
+
+			// check if it's a merge conflict
+			statusCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "status", "--porcelain")
+			if statusOutput, _ := statusCmd.Output(); strings.Contains(string(statusOutput), "UU") {
+				s.metrics.RecordConflict()
+				if s.issues != nil {
+					s.issues.SetIssue(DaemonIssue{
+						Type:            IssueTypeMergeConflict,
+						Severity:        SeverityError,
+						Repo:            "ledger",
+						Summary:         "Ledger has merge conflicts. Run 'ox doctor --fix' to re-clone.",
+						RequiresConfirm: true,
+					})
+				}
+			}
+			if detail != "" {
+				return fmt.Errorf("ledger pull failed: %s (%w)", detail, err)
+			}
+			return fmt.Errorf("ledger pull failed: %w", err)
+		}
+		return nil
+	}()
+
+	if fetchPullErr != nil {
+		return fetchPullErr
 	}
 
 	// sync succeeded - clear failure backoff, merge conflict, and sync backoff issues
@@ -979,6 +1192,14 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		s.logger.Warn("failed to update ledger config last sync", "error", err)
 	}
 	s.recordSyncState(ctx, s.config.LedgerPath)
+
+	// notify agent work manager that new ledger content may be available
+	if s.agentWorkSignal != nil {
+		select {
+		case s.agentWorkSignal <- struct{}{}:
+		default:
+		}
+	}
 
 	s.logger.Debug("pull complete", "duration", duration)
 	return nil
@@ -1562,9 +1783,30 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	case s.cloneSem <- struct{}{}:
 		// acquired
 	case <-time.After(semTimeout):
-		return nil, fmt.Errorf("clone semaphore timeout after %v: all %d slots busy", semTimeout, maxConcurrentClones)
+		return nil, fmt.Errorf("%w after %v: all %d slots busy", ErrCloneSemaphoreTimeout, semTimeout, maxConcurrentClones)
 	}
 	defer func() { <-s.cloneSem }()
+
+	// TOCTOU fix: re-verify directory state after acquiring semaphore.
+	// While waiting for a slot, another process may have completed the clone.
+	if info, statErr := os.Stat(payload.RepoPath); statErr == nil && info.IsDir() {
+		gitDir := filepath.Join(payload.RepoPath, ".git")
+		if _, err := os.Stat(gitDir); err == nil {
+			if payload.RepoType != "team-context" {
+				// non-team-context: .git exists = already cloned
+				s.logger.Debug("checkout: repo appeared while waiting for semaphore", "path", payload.RepoPath)
+				result.AlreadyExists = true
+				return result, nil
+			}
+			// team-context: check if .sageox/ now exists (clone completed by another process)
+			sageoxDir := filepath.Join(payload.RepoPath, ".sageox")
+			if _, sErr := os.Stat(sageoxDir); sErr == nil {
+				s.logger.Debug("checkout: team-context completed while waiting for semaphore", "path", payload.RepoPath)
+				result.AlreadyExists = true
+				return result, nil
+			}
+		}
+	}
 
 	// validate clone URL to prevent SSRF attacks
 	// must be done before any network operations
@@ -1755,10 +1997,15 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		_ = progress.WriteStage("starting", fmt.Sprintf("Syncing %d team context(s)...", len(teamContexts)))
 	}
 
-	var syncedCount, skippedCount, cloningCount int
+	var skippedCount, cloningCount int
+
+	// partition: repos ready to sync vs skipped/cloning
+	type syncTarget struct {
+		ws WorkspaceState
+	}
+	var targets []syncTarget
 
 	for _, ws := range teamContexts {
-		// check if path exists
 		if ws.Path == "" {
 			s.workspaceRegistry.SetWorkspaceError(ws.ID, "no path configured")
 			skippedCount++
@@ -1766,9 +2013,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		}
 
 		if !ws.Exists {
-			// auto-clone if we have a clone URL
 			if ws.CloneURL != "" {
-				// check if we should retry (respects exponential backoff)
 				if !s.workspaceRegistry.ShouldRetryClone(ws.ID) {
 					attempts, nextRetry := s.workspaceRegistry.GetCloneRetryInfo(ws.ID)
 					s.logger.Debug("team context clone in backoff, skipping",
@@ -1782,7 +2027,6 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 				if progress != nil {
 					_ = progress.WriteStage("cloning", fmt.Sprintf("Cloning team %s in background...", ws.TeamName))
 				}
-				// clone in background goroutine - don't block sync loop
 				go s.cloneInBackground(ws.CloneURL, ws.Path, "team-context", ws.ID)
 				cloningCount++
 			} else {
@@ -1796,68 +2040,98 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			continue
 		}
 
-		// sync backoff — skip if recent sync failures triggered backoff
 		if !s.shouldSyncOrBypass(ws.ID, forceSync) {
 			skippedCount++
 			continue
 		}
 
+		targets = append(targets, syncTarget{ws: ws})
+	}
+
+	// sync eligible repos in parallel — each operates on its own repo path,
+	// and the network I/O (ls-remote, fetch, pull) dominates wall time
+	type syncResult struct {
+		ws         WorkspaceState
+		err        error
+		duration   time.Duration
+		prePullSHA string
+	}
+	results := make([]syncResult, len(targets))
+	var wg sync.WaitGroup
+
+	for i, t := range targets {
+		s.workspaceRegistry.SetSyncInProgress(t.ws.ID, true)
 		if progress != nil {
-			_ = progress.WriteStage("syncing", fmt.Sprintf("Syncing team: %s", ws.TeamName))
+			_ = progress.WriteStage("syncing", fmt.Sprintf("Syncing team: %s", t.ws.TeamName))
 		}
 
-		// mark sync in progress
-		s.workspaceRegistry.SetSyncInProgress(ws.ID, true)
+		wg.Add(1)
+		go func(idx int, ws WorkspaceState) {
+			defer wg.Done()
+			preSHA := s.captureHEAD(ws.Path)
+			start := time.Now()
+			pullErr := s.pullTeamContext(ctx, ws.Path)
+			results[idx] = syncResult{ws: ws, err: pullErr, duration: time.Since(start), prePullSHA: preSHA}
+		}(i, t.ws)
+	}
+	wg.Wait()
 
-		// pull changes (read-only, no push)
-		startTime := time.Now()
-		pullErr := s.pullTeamContext(ctx, ws.Path)
+	// process results sequentially (registry updates, progress messages)
+	var syncedCount int
+	for _, r := range results {
+		s.workspaceRegistry.SetSyncInProgress(r.ws.ID, false)
 
-		// mark sync complete
-		s.workspaceRegistry.SetSyncInProgress(ws.ID, false)
-
-		if pullErr != nil {
-			s.workspaceRegistry.SetWorkspaceError(ws.ID, pullErr.Error())
-			s.workspaceRegistry.RecordSyncFailure(ws.ID)
-			s.recordSyncStateFailure(ws.Path)
-			s.logger.Debug("team context pull failed", "team", ws.TeamName, "error", pullErr)
+		if r.err != nil {
+			s.workspaceRegistry.SetWorkspaceError(r.ws.ID, r.err.Error())
+			s.workspaceRegistry.RecordSyncFailure(r.ws.ID)
+			s.recordSyncStateFailure(r.ws.Path)
+			s.logger.Debug("team context pull failed", "team", r.ws.TeamName, "error", r.err)
 			s.metrics.RecordTeamSyncError()
 			if progress != nil {
-				_ = progress.WriteStage("error", fmt.Sprintf("Team %s: %v", ws.TeamName, pullErr))
+				_ = progress.WriteStage("error", fmt.Sprintf("Team %s: %v", r.ws.TeamName, r.err))
 			}
-		} else {
-			s.workspaceRegistry.ClearWorkspaceError(ws.ID)
-			s.workspaceRegistry.ClearSyncFailures(ws.ID)
-			if s.issues != nil {
-				s.issues.ClearIssue(IssueTypeSyncBackoff, ws.ID)
-			}
+			continue
+		}
 
-			// apply manifest-driven sparse-checkout after successful pull
-			mCfg := s.applySparseCheckout(ctx, ws.Path)
-			if mCfg != nil {
-				if mCfg.SyncIntervalMin > 0 {
-					s.workspaceRegistry.SetSyncIntervalMin(ws.Path, mCfg.SyncIntervalMin)
-				}
-				if mCfg.GCIntervalDays > 0 {
-					s.workspaceRegistry.SetGCInterval(ws.Path, mCfg.GCIntervalDays)
-				}
-			}
+		s.workspaceRegistry.ClearWorkspaceError(r.ws.ID)
+		s.workspaceRegistry.ClearSyncFailures(r.ws.ID)
+		if s.issues != nil {
+			s.issues.ClearIssue(IssueTypeSyncBackoff, r.ws.ID)
+		}
 
-			// update last sync in registry and config file
-			if err := s.workspaceRegistry.UpdateConfigLastSync(ws.ID); err != nil {
-				s.logger.Warn("failed to update config last sync", "team", ws.TeamName, "error", err)
+		mCfg := s.applySparseCheckout(ctx, r.ws.Path)
+		if mCfg != nil {
+			if mCfg.SyncIntervalMin > 0 {
+				s.workspaceRegistry.SetSyncIntervalMin(r.ws.Path, mCfg.SyncIntervalMin)
 			}
-			s.recordSyncState(ctx, ws.Path)
-			syncedCount++
+			if mCfg.GCIntervalDays > 0 {
+				s.workspaceRegistry.SetGCInterval(r.ws.Path, mCfg.GCIntervalDays)
+			}
+		}
 
-			duration := time.Since(startTime)
-			s.recordSync("team_context", ws.ID, duration, 0)
-			s.metrics.RecordTeamSync()
-			s.recordActivity()
-			s.logger.Debug("team context synced", "team", ws.TeamName, "duration", duration)
-			if progress != nil {
-				_ = progress.WriteStage("synced", fmt.Sprintf("Team %s synced", ws.TeamName))
+		if err := s.workspaceRegistry.UpdateConfigLastSync(r.ws.ID); err != nil {
+			s.logger.Warn("failed to update config last sync", "team", r.ws.TeamName, "error", err)
+		}
+		s.recordSyncState(ctx, r.ws.Path)
+		syncedCount++
+
+		s.recordSync("team_context", r.ws.ID, r.duration, 0)
+		s.metrics.RecordTeamSync()
+		s.recordActivity()
+
+		// detect changed files for notification system.
+		// Primary team only for now — avoids noise from secondary team contexts.
+		// TODO: expand to all teams when multi-team notification UX is designed.
+		if s.notifications != nil && r.ws.TeamID == s.workspaceRegistry.ProjectTeamID() {
+			if changedFiles := s.detectChangedFiles(r.ws.Path, r.prePullSHA); len(changedFiles) > 0 {
+				s.notifications.RecordChanges(changedFiles, r.ws.TeamID, r.ws.TeamName)
+				s.logger.Debug("team context changes detected",
+					"team", r.ws.TeamName, "count", len(changedFiles))
 			}
+		}
+		s.logger.Debug("team context synced", "team", r.ws.TeamName, "duration", r.duration)
+		if progress != nil {
+			_ = progress.WriteStage("synced", fmt.Sprintf("Team %s synced", r.ws.TeamName))
 		}
 	}
 
@@ -1940,11 +2214,22 @@ func isClonePermanentError(msg string) bool {
 //
 // Concurrency is bounded by cloneSem inside Checkout().
 func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspaceID string) {
+	// bail out if scheduler is shutting down
+	if s.ctx != nil {
+		select {
+		case <-s.ctx.Done():
+			return
+		default:
+		}
+	}
+
 	// deduplicate: skip if clone already in progress for this workspace
 	if _, loaded := s.cloneInFlight.LoadOrStore(workspaceID, true); loaded {
 		s.logger.Debug("clone already in progress, skipping duplicate", "type", repoType, "id", workspaceID)
 		return
 	}
+	s.cloneWg.Add(1)
+	defer s.cloneWg.Done()
 	defer s.cloneInFlight.Delete(workspaceID)
 
 	s.logger.Info("background clone starting", "type", repoType, "path", repoPath)
@@ -1961,6 +2246,12 @@ func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspac
 
 	if err != nil {
 		s.logger.Error("background clone failed", "type", repoType, "path", repoPath, "error", err)
+
+		// semaphore timeout is transient — retry next cycle without escalating backoff
+		if errors.Is(err, ErrCloneSemaphoreTimeout) {
+			s.logger.Info("clone semaphore busy, will retry next cycle", "type", repoType, "path", repoPath)
+			return
+		}
 
 		// increment attempt count and calculate backoff
 		newAttempts := attempts + 1
@@ -2299,7 +2590,7 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 				Type:     IssueTypeDirtyWorkspace,
 				Severity: SeverityWarning,
 				Repo:     repoName,
-				Summary:  "uncommitted changes blocking GC (commit or discard to allow reclone)",
+				Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
 			})
 		case gcSuccess:
 			s.issues.ClearIssue(IssueTypeDirtyWorkspace, repoName)
@@ -2307,6 +2598,12 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 
 		break // one GC per check cycle to avoid overloading
 	}
+
+	// TODO: ledger GC reclone — same blue-green pattern as team contexts.
+	// When implemented, call checkAndRunLedgerGC(ctx) here to prune old
+	// GitHub data directories outside the sparse checkout sliding window.
+	// The ledger already has ConfigureSparseCheckout() and time-partitioned
+	// data/github/ directories ready for this.
 
 	atomic.StoreInt32(&s.gcInProgress, 0)
 }
@@ -2346,17 +2643,22 @@ func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 			resp.Triggered++
 			s.issues.ClearIssue(IssueTypeDirtyWorkspace, name)
 		case gcSkippedDirty:
-			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: uncommitted changes (commit or discard before GC)", name))
+			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: local changes could not be preserved for GC", name))
 			s.issues.SetIssue(DaemonIssue{
 				Type:     IssueTypeDirtyWorkspace,
 				Severity: SeverityWarning,
 				Repo:     name,
-				Summary:  "uncommitted changes blocking GC (commit or discard to allow reclone)",
+				Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
 			})
 		case gcFailed:
 			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: reclone failed (check daemon logs)", name))
 		}
 	}
+
+	// TODO: trigger ledger GC here when implemented (same blue-green pattern).
+	// The ledger already uses partial+sparse clone with a 30-day sliding window
+	// on data/github/ directories via ConfigureSparseCheckout(). GC reclone will
+	// prune old data outside the window, keeping local disk usage <10MB per ledger.
 
 	return resp
 }
@@ -2366,39 +2668,90 @@ type gcResult int
 
 const (
 	gcSuccess      gcResult = iota // reclone completed successfully
-	gcSkippedDirty                 // skipped: working tree has uncommitted changes
+	gcSkippedDirty                 // skipped: local changes could not be preserved
 	gcFailed                       // reclone attempted but failed (clone, validation, or swap error)
 )
 
+// acquireGCLock creates an exclusive filesystem lock for the GC swap window.
+// Returns the lock file handle on success, or an error if the lock is already held.
+// The lock is short-lived (only held during the two-rename atomic swap).
+func acquireGCLock(lockPath string) (*os.File, error) {
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+	if err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("gc lock create failed: %w", err)
+		}
+		// lock file exists — check if stale (>5 min old = likely crashed process)
+		if info, statErr := os.Stat(lockPath); statErr == nil {
+			if time.Since(info.ModTime().UTC()) > 5*time.Minute {
+				// stale lock from a crashed process — remove and retry once
+				_ = os.Remove(lockPath)
+				return os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+			}
+		}
+		return nil, fmt.Errorf("gc lock held: %w", err)
+	}
+	return f, nil
+}
+
+// releaseGCLock closes and removes the GC lock file.
+func releaseGCLock(f *os.File, lockPath string) {
+	_ = f.Close()
+	_ = os.Remove(lockPath)
+}
+
 // runBlueGreenGC performs a blue-green reclone for a single team context workspace.
-// Steps: verify clean → clone into .new → validate → atomic swap → remove old.
+// Steps: preserve local state → clone .new → validate → atomic swap → remove old → restore state.
 //
 // GC is a disk-space optimization — it should never impair the user experience.
-// If the user has in-flight changes (uncommitted edits to docs/, etc.), GC skips
-// that workspace and reports gcSkippedDirty so callers can surface this to the user.
+// Local changes (unpushed commits, uncommitted edits, untracked files) are preserved
+// across the reclone. If preservation fails, GC is skipped rather than risk data loss.
 func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) gcResult {
-	// step 1: verify clean working state
-	// Users may have edited team context files (docs/, conventions, etc.).
-	// Never destroy their work — skip GC and let the caller notify them.
-	if !isCheckoutClean(ws.Path) {
-		s.logger.Warn("gc: skipping reclone, working tree has uncommitted changes",
-			"path", ws.Path, "team", ws.TeamName)
-		return gcSkippedDirty
-	}
-
 	newPath := ws.Path + ".new"
 	oldPath := ws.Path + ".old"
+	diffFile := ws.Path + ".gc-diff"
+	untrackedDir := ws.Path + ".gc-untracked"
+	lockPath := ws.Path + ".gc-lock"
 
-	// clean up leftover .new from a previous failed GC
-	if _, err := os.Stat(newPath); err == nil {
-		s.logger.Info("gc: cleaning up leftover .new directory", "path", newPath)
-		if err := os.RemoveAll(newPath); err != nil {
-			s.logger.Error("gc: failed to remove leftover .new", "path", newPath, "error", err)
-			return gcFailed
+	// clean up leftover artifacts from a previous failed GC
+	for _, leftover := range []string{newPath, diffFile, untrackedDir, lockPath} {
+		if _, err := os.Stat(leftover); err == nil {
+			s.logger.Info("gc: cleaning up leftover artifact", "path", leftover)
+			if err := os.RemoveAll(leftover); err != nil {
+				s.logger.Error("gc: failed to remove leftover artifact", "path", leftover, "error", err)
+				return gcFailed
+			}
 		}
 	}
 
-	// step 2: two-phase clone into .new
+	// --- phase 0: preserve local state ---
+
+	// step 0a: push unpushed commits so they survive reclone
+	if err := s.gcPushUnpushedCommits(ctx, ws); err != nil {
+		s.logger.Warn("gc: skipping reclone, cannot push unpushed commits",
+			"path", ws.Path, "team", ws.TeamName, "error", err)
+		return gcSkippedDirty
+	}
+
+	// step 0b: capture uncommitted tracked changes (staged + unstaged)
+	hasDiff, err := s.gcCaptureDiff(ctx, ws.Path, diffFile)
+	if err != nil {
+		s.logger.Warn("gc: skipping reclone, cannot capture uncommitted changes",
+			"path", ws.Path, "team", ws.TeamName, "error", err)
+		return gcSkippedDirty
+	}
+
+	// step 0c: capture untracked files
+	hasUntracked, err := s.gcCaptureUntracked(ctx, ws.Path, untrackedDir)
+	if err != nil {
+		s.logger.Warn("gc: skipping reclone, cannot capture untracked files",
+			"path", ws.Path, "team", ws.TeamName, "error", err)
+		return gcSkippedDirty
+	}
+
+	// --- phase 1: clone, validate, swap (existing logic) ---
+
+	// step 1: two-phase clone into .new
 	cloneURL := ws.CloneURL
 	ep := s.workspaceRegistry.GetEndpoint()
 	if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err == nil && creds != nil && creds.Token != "" {
@@ -2413,7 +2766,7 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 		return gcFailed
 	}
 
-	// step 3: validate new clone
+	// step 2: validate new clone
 	if !s.validateGCClone(newPath, mCfg) {
 		s.logger.Error("gc: validation failed, keeping old", "team", ws.TeamName)
 		_ = os.RemoveAll(newPath)
@@ -2426,13 +2779,20 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 	}
 
 	// ensure .sageox/.gitignore excludes daemon-written files (cache/, checkout.json, etc.)
-	// so they don't appear as untracked and block future GC reclone cycles
 	if err := gitserver.EnsureCheckoutGitignoreCtx(ctx, newPath); err != nil {
 		s.logger.Warn("gc: failed to ensure checkout .gitignore on new clone", "error", err)
 	}
 
-	// step 4: atomic swap
-	// clean up any leftover .old from a previous GC
+	// step 3: atomic swap — protected by filesystem lock so concurrent daemons
+	// don't see the directory disappear between the two renames
+	lockFile, lockErr := acquireGCLock(lockPath)
+	if lockErr != nil {
+		s.logger.Warn("gc: another process holds the GC lock, skipping swap", "lock", lockPath, "error", lockErr)
+		_ = os.RemoveAll(newPath)
+		return gcFailed
+	}
+	defer releaseGCLock(lockFile, lockPath)
+
 	if _, err := os.Stat(oldPath); err == nil {
 		_ = os.RemoveAll(oldPath)
 	}
@@ -2445,16 +2805,42 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 
 	if err := os.Rename(newPath, ws.Path); err != nil {
 		s.logger.Error("gc: failed to move new repo into place, restoring old", "error", err)
-		// try to restore
 		if restoreErr := os.Rename(oldPath, ws.Path); restoreErr != nil {
 			s.logger.Error("gc: CRITICAL failed to restore old repo", "error", restoreErr)
 		}
 		return gcFailed
 	}
 
-	// step 5: cleanup
+	// step 4: cleanup old
 	if err := os.RemoveAll(oldPath); err != nil {
 		s.logger.Warn("gc: failed to remove old clone", "path", oldPath, "error", err)
+	}
+
+	// --- phase 2: restore local state ---
+
+	diffApplied := true
+	if hasDiff {
+		if err := s.gcRestoreDiff(ctx, ws.Path, diffFile); err != nil {
+			diffApplied = false
+			s.logger.Warn("gc: reclone succeeded but failed to restore uncommitted changes",
+				"path", ws.Path, "team", ws.TeamName, "error", err,
+				"recovery_file", diffFile)
+		}
+	}
+
+	if hasUntracked {
+		if err := s.gcRestoreUntracked(ws.Path, untrackedDir); err != nil {
+			s.logger.Warn("gc: reclone succeeded but failed to restore some untracked files",
+				"path", ws.Path, "team", ws.TeamName, "error", err)
+		}
+	}
+
+	// clean up preservation artifacts (keep diff file if apply failed for manual recovery)
+	if hasDiff && diffApplied {
+		_ = os.Remove(diffFile)
+	}
+	if hasUntracked {
+		_ = os.RemoveAll(untrackedDir)
 	}
 
 	s.workspaceRegistry.UpdateLastGC(ws.ID)
@@ -2469,6 +2855,198 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 
 	s.logger.Info("gc: reclone complete", "team", ws.TeamName, "path", ws.Path)
 	return gcSuccess
+}
+
+// gcPushUnpushedCommits pushes any local commits not yet on the remote.
+// Returns nil if there are no unpushed commits or if push succeeds.
+// Returns an error if unpushed commits exist and push fails.
+func (s *SyncScheduler) gcPushUnpushedCommits(ctx context.Context, ws WorkspaceState) error {
+	// count unpushed commits against the upstream tracking branch
+	countOutput, err := gitutil.RunGit(ctx, ws.Path, "rev-list", "--count", "@{upstream}..HEAD")
+	if err != nil {
+		// no tracking branch — fall back to origin/main
+		countOutput, err = gitutil.RunGit(ctx, ws.Path, "rev-list", "--count", "origin/main..HEAD")
+		if err != nil {
+			return fmt.Errorf("cannot determine unpushed commit count: %w", err)
+		}
+	}
+
+	count := strings.TrimSpace(countOutput)
+	if count == "" || count == "0" {
+		return nil
+	}
+
+	s.logger.Info("gc: pushing unpushed commits before reclone", "path", ws.Path, "count", count)
+
+	// inject credentials for push (same pattern as clone)
+	pushURL := ws.CloneURL
+	ep := s.workspaceRegistry.GetEndpoint()
+	if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err == nil && creds != nil && creds.Token != "" {
+		pushURL = injectGitCredentials(ws.CloneURL, "oauth2", creds.Token)
+	}
+
+	// temporarily set push URL with credentials, push, then restore
+	origURL, _ := gitutil.RunGit(ctx, ws.Path, "remote", "get-url", "origin")
+	origURL = strings.TrimSpace(origURL)
+
+	if _, err := gitutil.RunGit(ctx, ws.Path, "remote", "set-url", "origin", pushURL); err != nil {
+		return fmt.Errorf("failed to set push URL: %w", err)
+	}
+	defer func() {
+		if origURL != "" {
+			_, _ = gitutil.RunGit(ctx, ws.Path, "remote", "set-url", "origin", origURL)
+		}
+	}()
+
+	if _, err := gitutil.RunGit(ctx, ws.Path, "push", "origin", "HEAD", "--quiet"); err != nil {
+		return fmt.Errorf("push failed: %w", err)
+	}
+
+	return nil
+}
+
+// gcCaptureDiff captures all uncommitted tracked changes (staged + unstaged)
+// as a binary-safe patch file. Returns (hasDiff, error).
+// Uses exec.Command directly (not RunGit) to avoid CombinedOutput mixing
+// stderr into the patch data.
+func (s *SyncScheduler) gcCaptureDiff(ctx context.Context, repoPath, diffFile string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "diff", "--binary", "HEAD")
+	stdout, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("git diff HEAD: %w", err)
+	}
+
+	if len(strings.TrimSpace(string(stdout))) == 0 {
+		return false, nil
+	}
+
+	if err := os.WriteFile(diffFile, stdout, 0600); err != nil {
+		return false, fmt.Errorf("write diff file: %w", err)
+	}
+
+	s.logger.Info("gc: captured uncommitted changes", "path", repoPath, "diff_size", len(stdout))
+	return true, nil
+}
+
+// gcCaptureUntracked copies untracked files (excluding gitignored) to a temp directory.
+// Returns (hasFiles, error).
+func (s *SyncScheduler) gcCaptureUntracked(ctx context.Context, repoPath, destDir string) (bool, error) {
+	output, err := gitutil.RunGit(ctx, repoPath, "ls-files", "--others", "--exclude-standard")
+	if err != nil {
+		return false, fmt.Errorf("git ls-files: %w", err)
+	}
+
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return false, nil
+	}
+
+	files := strings.Split(output, "\n")
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		return false, fmt.Errorf("create untracked dir: %w", err)
+	}
+
+	copied := 0
+	for _, relPath := range files {
+		relPath = strings.TrimSpace(relPath)
+		if relPath == "" {
+			continue
+		}
+
+		srcPath := filepath.Join(repoPath, relPath)
+		dstPath := filepath.Join(destDir, relPath)
+
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+			s.logger.Warn("gc: failed to create dir for untracked file", "path", relPath, "error", err)
+			continue
+		}
+
+		if err := copyFile(srcPath, dstPath); err != nil {
+			s.logger.Warn("gc: failed to copy untracked file", "path", relPath, "error", err)
+			continue
+		}
+		copied++
+	}
+
+	s.logger.Info("gc: captured untracked files", "path", repoPath, "count", copied)
+	return copied > 0, nil
+}
+
+// gcRestoreDiff applies a previously captured diff to the recloned repo.
+// Tries --3way first for merge support, falls back to --reject for partial apply.
+func (s *SyncScheduler) gcRestoreDiff(ctx context.Context, repoPath, diffFile string) error {
+	// try clean apply with 3-way merge
+	if _, err := gitutil.RunGit(ctx, repoPath, "apply", "--3way", diffFile); err == nil {
+		s.logger.Info("gc: restored uncommitted changes", "path", repoPath)
+		return nil
+	}
+
+	// fall back to --reject (applies what it can, creates .rej for conflicts)
+	if _, err := gitutil.RunGit(ctx, repoPath, "apply", "--reject", diffFile); err != nil {
+		return fmt.Errorf("git apply failed (diff preserved at %s): %w", diffFile, err)
+	}
+
+	s.logger.Warn("gc: restored uncommitted changes with conflicts (.rej files created)", "path", repoPath)
+	return nil
+}
+
+// gcRestoreUntracked copies previously captured untracked files back into the repo.
+func (s *SyncScheduler) gcRestoreUntracked(repoPath, untrackedDir string) error {
+	var firstErr error
+	err := filepath.WalkDir(untrackedDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+
+		relPath, err := filepath.Rel(untrackedDir, path)
+		if err != nil {
+			return nil
+		}
+
+		dstPath := filepath.Join(repoPath, relPath)
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+			s.logger.Warn("gc: failed to create dir for untracked restore", "path", relPath, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+			return nil
+		}
+
+		if err := copyFile(path, dstPath); err != nil {
+			s.logger.Warn("gc: failed to restore untracked file", "path", relPath, "error", err)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return firstErr
+}
+
+// copyFile copies src to dst, preserving file mode.
+func copyFile(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	_, err = io.Copy(out, in)
+	return err
 }
 
 // validateGCClone checks that a freshly cloned repo has the minimum expected
@@ -2596,17 +3174,16 @@ func (s *SyncScheduler) writeHeartbeats() {
 		return
 	}
 
-	// CRITICAL: Use BOTH repo_id AND workspace_id for heartbeat filenames.
-	// - workspace_id (hash of path) prevents collisions between worktrees
-	// - repo_id makes debugging easier - you can see which repo it belongs to
-	// See UserHeartbeatPath() docs for full explanation.
+	// Use repo_id + repo-based workspace_id for heartbeat filenames.
+	// With 1 daemon per repo, all worktrees share a daemon and should
+	// see the same heartbeat files. Repo-based ID is consistent across clones.
 	repoID := s.workspaceRegistry.GetRepoID()
 	if repoID == "" {
 		s.logger.Debug("no repo_id available for heartbeat")
 		return
 	}
 
-	workspaceID := WorkspaceID(s.config.ProjectRoot)
+	workspaceID := CurrentWorkspaceID()
 	if workspaceID == "" {
 		s.logger.Debug("no workspace_id available for heartbeat")
 		return

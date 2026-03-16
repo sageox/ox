@@ -302,7 +302,7 @@ func buildSubagentSessionFromSession(sessionPath, sessionName string) *SubagentS
 		SubagentID:  agentID,
 		SessionName: sessionName,
 		SessionPath: rawPath,
-		CompletedAt: info.ModTime(),
+		CompletedAt: info.ModTime().UTC(),
 	}
 
 	// try to read entry count and metadata from raw.jsonl

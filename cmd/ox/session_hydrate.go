@@ -18,7 +18,7 @@ var sessionHydrateCmd = &cobra.Command{
 
 Sessions authored by other team members arrive as stubs (metadata only)
 via ledger sync. This command downloads the actual content files (raw.jsonl,
-events.jsonl, summary.md, session.md, session.html) from the ledger.
+summary.md, session.md, session.html) from the ledger.
 
 Example:
   ox session download 2026-01-06T14-32-ryan-Ox7f3a`,

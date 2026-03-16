@@ -228,11 +228,11 @@ func TestScoreQuery(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		calls       []ToolCall
-		wantFound   bool
-		wantUntil   int
-		wantExtra   int
+		name      string
+		calls     []ToolCall
+		wantFound bool
+		wantUntil int
+		wantExtra int
 	}{
 		{
 			name:      "direct hit",

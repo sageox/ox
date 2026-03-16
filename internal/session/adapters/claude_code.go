@@ -395,6 +395,12 @@ func (a *ClaudeCodeAdapter) Watch(ctx context.Context, sessionPath string) (<-ch
 	return ch, nil
 }
 
+// ReadFromOffset reads new entries starting at the given byte offset.
+// Returns the entries and the new offset position.
+func (a *ClaudeCodeAdapter) ReadFromOffset(path string, offset int64) ([]RawEntry, int64, error) {
+	return a.readFromOffset(path, offset)
+}
+
 // readFromOffset reads new entries from a file starting at the given byte offset
 func (a *ClaudeCodeAdapter) readFromOffset(path string, offset int64) ([]RawEntry, int64, error) {
 	f, err := os.Open(path)
@@ -437,20 +443,22 @@ func (a *ClaudeCodeAdapter) readFromOffset(path string, offset int64) ([]RawEntr
 // parseLine converts a JSONL line into one or more RawEntries.
 // Assistant messages may contain multiple content blocks (text + tool_use),
 // each producing a separate RawEntry. User messages produce at most one.
+//
+// Excluded by design: tool result content, hook/progress events, thinking blocks.
 func (a *ClaudeCodeAdapter) parseLine(line []byte) ([]RawEntry, error) {
 	var raw claudeCodeEntry
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return nil, err
 	}
 
-	// skip non-conversation entries
+	// skip non-conversation entries (hook/progress events, internal metadata)
 	switch raw.Type {
 	case "user", "assistant":
 		// process these
 	case "file-history-snapshot", "queue-operation", "summary":
-		return nil, nil // skip these types
+		return nil, nil // internal Claude metadata — not session content
 	default:
-		return nil, nil // skip unknown types
+		return nil, nil // hook events, progress updates, etc. — not recorded
 	}
 
 	// process based on type
@@ -500,8 +508,11 @@ func (a *ClaudeCodeAdapter) parseLine(line []byte) ([]RawEntry, error) {
 // framework-injected content so raw.jsonl stores correct entry types.
 //
 // See docs/ai/specs/session-raw-jsonl.md for the output format spec.
-// tool_result blocks are omitted because the corresponding tool call is
-// already captured from the assistant's tool_use block (deduplication).
+//
+// Intentionally excluded from recordings:
+//   - Tool result content (file contents, command output) — captured via tool_use instead
+//   - Hook/progress events — internal Claude metadata, not session content
+//   - Thinking/reasoning blocks — extended thinking content
 func (a *ClaudeCodeAdapter) classifyUserContent(raw *claudeCodeEntry) (string, userContentClass) {
 	if raw.Message == nil {
 		return "", userContentSkip
@@ -540,8 +551,9 @@ func (a *ClaudeCodeAdapter) classifyUserContent(raw *claudeCodeEntry) (string, u
 				}
 			case "tool_result":
 				hasToolResult = true
-				// tool_result blocks are protocol plumbing — the tool call
-				// is already captured from the assistant's tool_use block
+				// tool result content (file contents, command output) is intentionally
+				// excluded — we capture tool calls (name + input) from the assistant's
+				// tool_use block but not the returned data, which can be very large
 			}
 		}
 
@@ -701,7 +713,7 @@ func (a *ClaudeCodeAdapter) extractAssistantContent(raw *claudeCodeEntry) []RawE
 				ToolInput: string(inputJSON),
 			})
 		case "thinking":
-			// skip thinking blocks for now
+			// thinking/reasoning blocks are intentionally excluded from recordings
 		}
 	}
 

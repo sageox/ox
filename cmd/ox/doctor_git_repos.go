@@ -103,34 +103,28 @@ func checkGitConnectivity() checkResult {
 	}
 
 	// create a command with timeout
-	lsCmd := exec.Command("git", "ls-remote", "--exit-code", "-q", "origin", "HEAD")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	lsCmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", "-q", "origin", "HEAD")
 	lsCmd.Dir = gitRoot
 
-	// run with timeout using goroutine
-	done := make(chan error, 1)
-	go func() {
-		done <- lsCmd.Run()
-	}()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			// check if it's an auth error vs network error
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) && exitErr.ExitCode() == 128 {
-				return WarningCheck("Git connectivity", "auth failed",
-					"Check credentials or SSH keys")
-			}
-			return WarningCheck("Git connectivity", "unreachable",
-				"Check network connection or firewall settings")
-		}
-		return PassedCheck("Git connectivity", "reachable")
-	case <-time.After(5 * time.Second):
-		// kill the process on timeout
-		_ = lsCmd.Process.Kill()
+	err = lsCmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
 		return WarningCheck("Git connectivity", "timeout",
 			"Remote did not respond within 5s")
 	}
+	if err != nil {
+		// check if it's an auth error vs network error
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 128 {
+			return WarningCheck("Git connectivity", "auth failed",
+				"Check credentials or SSH keys")
+		}
+		return WarningCheck("Git connectivity", "unreachable",
+			"Check network connection or firewall settings")
+	}
+	return PassedCheck("Git connectivity", "reachable")
 }
 
 // checkGitConfig verifies local git configuration is properly set.
@@ -516,13 +510,13 @@ func checkGitLockFiles() checkResult {
 
 	var found []string
 	var oldLocks []string
-	oneHourAgo := time.Now().Add(-1 * time.Hour)
+	oneHourAgo := time.Now().UTC().Add(-1 * time.Hour)
 
 	for _, lock := range lockFiles {
 		path := filepath.Join(gitDir, lock)
 		if info, err := os.Stat(path); err == nil {
 			found = append(found, lock)
-			if info.ModTime().Before(oneHourAgo) {
+			if info.ModTime().UTC().Before(oneHourAgo) {
 				oldLocks = append(oldLocks, lock)
 			}
 		}
@@ -2489,7 +2483,7 @@ func isRecentlyInitialized(gitRoot string) bool {
 	if err != nil {
 		return false
 	}
-	return time.Since(info.ModTime()) < bootstrapGracePeriod
+	return time.Since(info.ModTime().UTC()) < bootstrapGracePeriod
 }
 
 // checkTeamContextCloneStrategy detects team context clones that are full clones

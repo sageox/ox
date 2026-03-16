@@ -102,6 +102,8 @@ func formatStatusCore(status *StatusData, cliVersion string, verbose bool) strin
 	// workspace sync groups
 	out.WriteString(formatWorkspaceGroups(status, verbose))
 
+	// code index is now part of the "This Project" tree — see formatWorkspaceGroups
+
 	// issues (if any)
 	if issues := formatIssues(status.NeedsHelp, status.Issues); issues != "" {
 		out.WriteString("\n")
@@ -140,6 +142,15 @@ func FormatStatusVerbose(status *StatusData, history []SyncEvent, cliVersion str
 	out += formatKV("PID", fmt.Sprintf("%d", status.Pid)) + "\n"
 	if status.WorkspacePath != "" {
 		out += formatKV("Workspace", shortenPath(status.WorkspacePath)) + "\n"
+	}
+	if len(status.Callers) > 0 {
+		for _, c := range status.Callers {
+			label := shortenPath(c.Path)
+			if c.AgentID != "" {
+				label += fmt.Sprintf(" (%s)", c.AgentID)
+			}
+			out += formatKV("  Clone", label) + "\n"
+		}
 	}
 	out += formatKV("Ledger", shortenPath(status.LedgerPath)) + "\n"
 	if status.AuthenticatedUser != nil && status.AuthenticatedUser.Email != "" {
@@ -314,8 +325,12 @@ func formatWorkspaceGroups(status *StatusData, verbose bool) string {
 		}
 	}
 
-	// project section: ledger + primary team context shown as a tree
+	// project section: ledger + primary team context + code index shown as a tree
 	projectCount := len(ledgers) + len(projectTCs)
+	hasCodeIndex := status.CodeDB != nil
+	if hasCodeIndex {
+		projectCount++
+	}
 	if projectCount > 0 {
 		out.WriteString("\n")
 		out.WriteString(styleBold.Render("This Project"))
@@ -342,6 +357,14 @@ func formatWorkspaceGroups(status *StatusData, verbose bool) string {
 			items = append(items, treeItem{
 				label:  name + styleMuted.Render(" (team context)"),
 				status: formatWSStatus(tc) + formatGCStatus(tc, verbose),
+			})
+		}
+
+		// code index as tree item
+		if hasCodeIndex {
+			items = append(items, treeItem{
+				label:  "Code index",
+				status: formatCodeIndexInline(status, verbose),
 			})
 		}
 
@@ -404,6 +427,46 @@ func formatWorkspaceGroups(status *StatusData, verbose bool) string {
 	return out.String()
 }
 
+// formatCodeIndexInline renders a compact single-line code index status for tree display.
+func formatCodeIndexInline(status *StatusData, verbose bool) string {
+	cs := status.CodeDB
+	if cs == nil {
+		return styleMuted.Render("○ unknown")
+	}
+
+	var line string
+	switch {
+	case cs.IndexingNow:
+		line = styleWarning.Render("◐ indexing…")
+	case !cs.IndexExists:
+		line = styleWarning.Render("○ pending")
+	case cs.LastError != "" && cs.Commits == 0:
+		line = styleWarning.Render("○ pending")
+	case cs.LastError != "":
+		line = styleCritical.Render("○ " + cs.LastError)
+	case !cs.LastIndexed.IsZero():
+		age := formatRelativeTime(time.Since(cs.LastIndexed))
+		metrics := fmt.Sprintf("%d commits, %d blobs", cs.Commits, cs.Blobs)
+		if cs.PRs > 0 || cs.Issues > 0 {
+			metrics += fmt.Sprintf(", %d PRs, %d issues", cs.PRs, cs.Issues)
+		}
+		line = styleHealthy.Render("● "+age) + "  " + styleMuted.Render(metrics)
+	default:
+		line = styleHealthy.Render("● ready")
+	}
+
+	if verbose && cs.IndexExists && cs.Commits > 0 {
+		if cs.DataDir != "" {
+			line += "\n" + styleMuted.Render("              "+shortenPath(cs.DataDir))
+		}
+		for _, r := range cs.Repos {
+			line += "\n" + styleMuted.Render(fmt.Sprintf("              %s  %d commits, %d blobs", r.Name, r.Commits, r.Blobs))
+		}
+	}
+
+	return line
+}
+
 // stripANSI removes ANSI escape sequences for measuring display width.
 func stripANSI(s string) string {
 	var result strings.Builder
@@ -444,10 +507,10 @@ func formatWSStatus(ws WorkspaceSyncStatus) string {
 // formatGCStatus renders GC timing suffix for team context items.
 // Leads with the actionable info: when the next GC will happen.
 //
-//   Default:  "· gc in 4d"              (countdown to next reclone)
-//   Verbose:  "· gc in 4d (last 3d ago)" (countdown + history)
-//   Overdue:  "· gc due"                (interval exceeded, runs on next hourly check)
-//   Never:    "· gc due"                (first GC, runs on next hourly check)
+//	Default:  "· gc in 4d"              (countdown to next reclone)
+//	Verbose:  "· gc in 4d (last 3d ago)" (countdown + history)
+//	Overdue:  "· gc due"                (interval exceeded, runs on next hourly check)
+//	Never:    "· gc due"                (first GC, runs on next hourly check)
 func formatGCStatus(ws WorkspaceSyncStatus, verbose bool) string {
 	if ws.LastGCTime.IsZero() {
 		// GC has never run — will trigger on the next hourly check cycle
@@ -614,9 +677,10 @@ func determineHealth(status *StatusData) HealthStatus {
 	if !status.LastSync.IsZero() {
 		sinceLast := time.Since(status.LastSync)
 
-		// if last sync is > 2x expected interval, something's wrong
-		if sinceLast > status.SyncIntervalRead*2 {
-			return HealthCritical
+		// stale sync is a warning, not critical — syncs can lag during
+		// GC, indexing, or slow networks without indicating a real problem
+		if sinceLast > status.SyncIntervalRead*4 {
+			return HealthWarning
 		}
 	}
 

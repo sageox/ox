@@ -4,6 +4,17 @@ These tests verify that coding agents properly understand and use ox CLI feature
 after running `ox agent prime`. The framework is designed to support multiple
 agents, though currently only Claude Code is implemented.
 
+## Hard Rule: Real Agent Instances Only
+
+**E2E / integration tests MUST use real agent CLI instances (e.g., real `claude`
+binary). Simulated entries, mock agents, or fake JSONL files are NOT permitted
+in this directory.** The entire purpose of these tests is to catch regressions
+in the real agent-to-ox integration: JSONL format changes, hook stdin format
+changes, session file path changes, etc. Simulated data cannot catch these.
+
+If you need component-level tests that exercise ox internals with synthetic data,
+put them in `cmd/ox/` under the `slow` build tag — not here.
+
 ## Supported Agents
 
 | Agent | Status | CLI | Notes |
@@ -83,6 +94,79 @@ The harness (`harness.go`):
 2. **Guidance System Usage**
    - Claude fetches guidance for relevant paths
    - Claude uses progressive disclosure (fetches deeper guidance when needed)
+
+## Adding a New Coding Agent
+
+To add support for a new coding agent, you need both an adapter (Go code) and
+E2E test coverage. A coding agent is only considered **supported** when all
+required E2E tests pass.
+
+### 1. Implement the Adapter
+
+Create a new adapter in `internal/session/adapters/` implementing the `Adapter`
+interface (6 methods). Register it in `init()` and add alias mappings. See
+`claude_code.go` or `codex.go` for reference implementations.
+
+### 2. Create Integration Test Directory
+
+```text
+tests/integration/agents/<agent-name>/
+  prime_test.go               # Prime output understanding
+  incremental_recording_test.go  # Session recording pipeline
+```
+
+### 3. Required E2E Tests (Minimum for "Supported" Status)
+
+Every supported agent MUST have passing E2E tests for each category below.
+Tests use the real agent CLI binary — no mocks.
+
+#### Session Recording Pipeline
+
+| Test | What It Verifies |
+|------|-----------------|
+| `TestIncrementalRecording_PostToolUse` | PostToolUse hooks write entries to raw.jsonl during the session (not just at stop time). Verifies incremental recording works. |
+| `TestIncrementalRecording_ContinueSession` | Recording survives a session resume (`--continue`). Entries accumulate across invocations. |
+| `TestIncrementalRecording_CompactHook` | PreCompact hook re-primes without losing recording state. Entries survive compaction. |
+| `TestIncrementalRecording_NoToolUse` | Sessions without tool use still produce valid raw.jsonl via the stop-time batch drain. |
+
+#### Content Fidelity
+
+| Test | What It Verifies |
+|------|-----------------|
+| `user_prompt_captured` (subtest) | The actual user prompt text appears in `user`-type entries in raw.jsonl. |
+| `tool_calls_tagged` (subtest) | Tool entries have `tool_name` populated (tool call metadata is preserved). |
+
+#### Slash Commands (ox CLI Commands)
+
+| Test | What It Verifies | Underlying Command |
+|------|------------------|--------------------|
+| `TestSlashCommand_SessionStartStop` | `/ox-session-start` creates recording state; `/ox-session-stop` finalizes raw.jsonl with entries. | `ox agent session start` / `ox agent <id> session stop` |
+| `TestSlashCommand_SessionList` | `/ox-session-list` runs without crashing, both via direct CLI and through the agent. | `ox session list --limit 5` |
+| `TestSlashCommand_SessionAbort` | `/ox-session-abort` discards session data and clears recording state. | `ox agent <id> session abort --force` |
+
+#### Prime & Context Discovery
+
+| Test | What It Verifies |
+|------|-----------------|
+| `TestHookExecution` | `ox agent prime` runs via the agent's session-start hook mechanism. |
+| `TestPrimeDiscovery` | Agent discovers ox commands from prime output, AGENTS.md, or team context. |
+
+### 4. Update Support Matrix
+
+Update the table at the top of this README when the agent reaches "Implemented" status.
+
+### 5. Key Constraints
+
+- **Hooks must exist before agent launch**: `ox init` installs hooks into
+  `.claude/settings.local.json`. Claude Code caches hook config at startup,
+  so hooks must be on disk before the agent starts. The test fixture lacks
+  this file, so tests run `runOxPrime()` first (which auto-installs hooks
+  if missing via `tryAutoInstallClaudeHooks()`).
+- **Multiple agent IDs**: Prime, SessionStart hook, and AGENTS.md prime may each
+  create separate agent instances. Tests should use `findActiveAgentID()` to
+  discover the right one.
+- **Isolated environments**: Tests must use `SetupTestEnvironment()` for XDG
+  isolation. Never touch real user config.
 
 ## Adding New Tests
 

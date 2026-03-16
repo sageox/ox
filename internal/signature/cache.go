@@ -213,7 +213,6 @@ func GetCachedResult(filePath, contentHash string) (*CacheEntry, error) {
 		return nil, err
 	}
 
-	// search for matching entry
 	for _, entry := range cache.Entries {
 		if entry.FilePath == filePath && entry.ContentHash == contentHash {
 			return &entry, nil
@@ -230,27 +229,21 @@ func SetCachedResult(filePath, contentHash string, verified bool) error {
 		return err
 	}
 
-	// check if entry already exists
-	found := false
 	for i, entry := range cache.Entries {
 		if entry.FilePath == filePath && entry.ContentHash == contentHash {
-			// update existing entry
 			cache.Entries[i].Verified = verified
 			cache.Entries[i].Timestamp = time.Now()
-			found = true
-			break
+			return SaveCache(cache)
 		}
 	}
 
-	if !found {
-		// add new entry
-		cache.Entries = append(cache.Entries, CacheEntry{
-			FilePath:    filePath,
-			ContentHash: contentHash,
-			Verified:    verified,
-			Timestamp:   time.Now(),
-		})
-	}
+	// not found — add new entry
+	cache.Entries = append(cache.Entries, CacheEntry{
+		FilePath:    filePath,
+		ContentHash: contentHash,
+		Verified:    verified,
+		Timestamp:   time.Now(),
+	})
 
 	return SaveCache(cache)
 }

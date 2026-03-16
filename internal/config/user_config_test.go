@@ -44,8 +44,8 @@ func TestLoadUserConfig_ContextGitDefaults(t *testing.T) {
 	// auto_commit defaults to true
 	assert.True(t, cfg.GetContextGitAutoCommit(), "expected context_git.auto_commit to default to true")
 
-	// auto_push defaults to false
-	assert.False(t, cfg.GetContextGitAutoPush(), "expected context_git.auto_push to default to false")
+	// auto_push defaults to true
+	assert.True(t, cfg.GetContextGitAutoPush(), "expected context_git.auto_push to default to true")
 }
 
 func TestLoadUserConfig_RespectsContextGitSettings(t *testing.T) {
@@ -73,7 +73,7 @@ func TestContextGitConfig_NilReceiver(t *testing.T) {
 	// nil receiver should return defaults
 	assert.True(t, cfg.IsAutoCommitEnabled(), "expected nil ContextGitConfig.IsAutoCommitEnabled() to return true")
 
-	assert.False(t, cfg.IsAutoPushEnabled(), "expected nil ContextGitConfig.IsAutoPushEnabled() to return false")
+	assert.True(t, cfg.IsAutoPushEnabled(), "expected nil ContextGitConfig.IsAutoPushEnabled() to return true")
 }
 
 func TestUserConfig_SetContextGitAutoCommit(t *testing.T) {
@@ -142,8 +142,8 @@ func TestContextGitConfig_PartialSettings(t *testing.T) {
 
 	assert.False(t, cfg.GetContextGitAutoCommit(), "expected context_git.auto_commit to be false")
 
-	// auto_push should still default to false
-	assert.False(t, cfg.GetContextGitAutoPush(), "expected context_git.auto_push to default to false")
+	// auto_push should still default to true
+	assert.True(t, cfg.GetContextGitAutoPush(), "expected context_git.auto_push to default to true")
 }
 
 func TestUserConfig_GetContextGitWithNilContextGit(t *testing.T) {
@@ -154,7 +154,7 @@ func TestUserConfig_GetContextGitWithNilContextGit(t *testing.T) {
 	// should return defaults when ContextGit is nil
 	assert.True(t, cfg.GetContextGitAutoCommit(), "expected GetContextGitAutoCommit to return true with nil ContextGit")
 
-	assert.False(t, cfg.GetContextGitAutoPush(), "expected GetContextGitAutoPush to return false with nil ContextGit")
+	assert.True(t, cfg.GetContextGitAutoPush(), "expected GetContextGitAutoPush to return true with nil ContextGit")
 }
 
 func TestLoadUserConfig_SessionsDefaults(t *testing.T) {
@@ -490,4 +490,270 @@ func TestLoadUserConfig_OxUserConfigEnv(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "from-dir", cfg.GetDisplayName())
 	})
+}
+
+// ---------------------------------------------------------------------------
+// AgentWorkerConfig tests
+// ---------------------------------------------------------------------------
+
+func TestAgentWorkerConfig_NilReceiver(t *testing.T) {
+	var cfg *AgentWorkerConfig
+
+	assert.False(t, cfg.IsEnabled(), "nil receiver should default to disabled")
+	assert.Equal(t, "claude", cfg.GetAgentType(), "nil receiver should default to claude")
+	assert.Equal(t, 60, cfg.GetMaxInvocationsPerHour(), "nil receiver should default to 60")
+	assert.Equal(t, 4, cfg.GetMaxConcurrent(), "nil receiver should default to 4")
+	assert.NoError(t, cfg.Validate(), "nil receiver should validate cleanly")
+}
+
+func TestAgentWorkerConfig_Defaults(t *testing.T) {
+	cfg := (&AgentWorkerConfig{}).WithDefaults()
+
+	assert.False(t, cfg.IsEnabled())
+	assert.Equal(t, "claude", cfg.GetAgentType())
+	assert.Equal(t, 60, cfg.GetMaxInvocationsPerHour())
+	assert.Equal(t, 4, cfg.GetMaxConcurrent())
+}
+
+func TestAgentWorkerConfig_WithDefaults_PreservesExplicitValues(t *testing.T) {
+	enabled := true
+	invocations := 5
+	concurrent := 3
+	cfg := (&AgentWorkerConfig{
+		Enabled:               &enabled,
+		AgentType:             "claude",
+		MaxInvocationsPerHour: &invocations,
+		MaxConcurrent:         &concurrent,
+	}).WithDefaults()
+
+	assert.True(t, cfg.IsEnabled())
+	assert.Equal(t, "claude", cfg.GetAgentType())
+	assert.Equal(t, 5, cfg.GetMaxInvocationsPerHour())
+	assert.Equal(t, 3, cfg.GetMaxConcurrent())
+}
+
+func TestAgentWorkerConfig_WithDefaults_NilReceiver(t *testing.T) {
+	var cfg *AgentWorkerConfig
+	result := cfg.WithDefaults()
+
+	assert.False(t, result.IsEnabled())
+	assert.Equal(t, "claude", result.GetAgentType())
+	assert.Equal(t, 60, result.GetMaxInvocationsPerHour())
+	assert.Equal(t, 4, result.GetMaxConcurrent())
+}
+
+func TestAgentWorkerConfig_Validate_ValidType(t *testing.T) {
+	cfg := &AgentWorkerConfig{AgentType: "claude"}
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestAgentWorkerConfig_Validate_EmptyTypeIsValid(t *testing.T) {
+	// empty means "use default" — validation only rejects explicitly wrong values
+	cfg := &AgentWorkerConfig{}
+	assert.NoError(t, cfg.Validate())
+}
+
+func TestAgentWorkerConfig_Validate_UnknownType(t *testing.T) {
+	cfg := &AgentWorkerConfig{AgentType: "gpt-pilot"}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown agent_type")
+	assert.Contains(t, err.Error(), "gpt-pilot")
+}
+
+func TestAgentWorkerConfig_Validate_ZeroInvocations(t *testing.T) {
+	zero := 0
+	cfg := &AgentWorkerConfig{MaxInvocationsPerHour: &zero}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_invocations_per_hour")
+}
+
+func TestAgentWorkerConfig_Validate_NegativeConcurrent(t *testing.T) {
+	neg := -1
+	cfg := &AgentWorkerConfig{MaxConcurrent: &neg}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max_concurrent")
+}
+
+func TestUserConfig_AgentWorkerDefaults(t *testing.T) {
+	cfg := &UserConfig{}
+
+	assert.Nil(t, cfg.GetAgentWorkerConfig(), "expected nil when not configured")
+	assert.False(t, cfg.IsAgentWorkerEnabled(), "expected disabled by default")
+}
+
+func TestUserConfig_SetAgentWorkerEnabled(t *testing.T) {
+	cfg := &UserConfig{}
+
+	// setting on nil AgentWorker should create it
+	cfg.SetAgentWorkerEnabled(true)
+
+	require.NotNil(t, cfg.AgentWorker, "expected AgentWorker to be created")
+	assert.True(t, cfg.IsAgentWorkerEnabled(), "expected agent_worker.enabled to be true after setting")
+
+	cfg.SetAgentWorkerEnabled(false)
+	assert.False(t, cfg.IsAgentWorkerEnabled(), "expected agent_worker.enabled to be false after unsetting")
+}
+
+func TestLoadUserConfig_AgentWorkerDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	cfg, err := LoadUserConfigFrom(tmpDir)
+	require.NoError(t, err)
+
+	assert.False(t, cfg.IsAgentWorkerEnabled(), "expected agent_worker to default to disabled")
+	assert.Nil(t, cfg.AgentWorker, "expected agent_worker to be nil when not in config")
+}
+
+func TestLoadUserConfig_RespectsAgentWorkerSettings(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	content := []byte(`agent_worker:
+  enabled: true
+  agent_type: claude
+  max_invocations_per_hour: 20
+  max_concurrent: 2
+`)
+	require.NoError(t, os.WriteFile(configPath, content, 0644))
+
+	cfg, err := LoadUserConfigFrom(tmpDir)
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.AgentWorker)
+	assert.True(t, cfg.IsAgentWorkerEnabled())
+	assert.Equal(t, "claude", cfg.AgentWorker.GetAgentType())
+	assert.Equal(t, 20, cfg.AgentWorker.GetMaxInvocationsPerHour())
+	assert.Equal(t, 2, cfg.AgentWorker.GetMaxConcurrent())
+}
+
+func TestLoadUserConfig_AgentWorkerPartialSettings(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	// only enabled set — other fields should use defaults via accessors
+	content := []byte(`agent_worker:
+  enabled: true
+`)
+	require.NoError(t, os.WriteFile(configPath, content, 0644))
+
+	cfg, err := LoadUserConfigFrom(tmpDir)
+	require.NoError(t, err)
+
+	require.NotNil(t, cfg.AgentWorker)
+	assert.True(t, cfg.IsAgentWorkerEnabled())
+	assert.Equal(t, "claude", cfg.AgentWorker.GetAgentType())
+	assert.Equal(t, 60, cfg.AgentWorker.GetMaxInvocationsPerHour())
+	assert.Equal(t, 4, cfg.AgentWorker.GetMaxConcurrent())
+}
+
+func TestSaveAndLoadUserConfig_AgentWorker(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	cfg := &UserConfig{}
+	cfg.SetAgentWorkerEnabled(true)
+	cfg.AgentWorker.AgentType = "claude"
+	invocations := 15
+	cfg.AgentWorker.MaxInvocationsPerHour = &invocations
+	concurrent := 2
+	cfg.AgentWorker.MaxConcurrent = &concurrent
+
+	require.NoError(t, SaveUserConfig(cfg))
+
+	loaded, err := LoadUserConfig()
+	require.NoError(t, err)
+
+	require.NotNil(t, loaded.AgentWorker)
+	assert.True(t, loaded.IsAgentWorkerEnabled())
+	assert.Equal(t, "claude", loaded.AgentWorker.GetAgentType())
+	assert.Equal(t, 15, loaded.AgentWorker.GetMaxInvocationsPerHour())
+	assert.Equal(t, 2, loaded.AgentWorker.GetMaxConcurrent())
+}
+
+func TestUserConfig_AgentWorkerOmittedWhenNil(t *testing.T) {
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	// save config without agent_worker
+	cfg := &UserConfig{}
+	cfg.SetDisplayName("tester")
+	require.NoError(t, SaveUserConfig(cfg))
+
+	// verify agent_worker key is not in the YAML
+	configPath := filepath.Join(tmpDir, "sageox", "config.yaml")
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "agent_worker", "agent_worker should be omitted when nil")
+}
+
+func TestAgentWorkerConfig_SessionFinalizeEnabledByDefault(t *testing.T) {
+	enabled := true
+	cfg := &AgentWorkerConfig{Enabled: &enabled}
+
+	// session finalize should be enabled when daemon is enabled and no explicit setting
+	assert.True(t, cfg.IsSessionFinalizeEnabled(), "session finalize should default to enabled when daemon is enabled")
+
+	// explicitly disabled should override
+	f := false
+	cfg.SessionFinalize = &f
+	assert.False(t, cfg.IsSessionFinalizeEnabled(), "explicit false should disable session finalize")
+
+	// explicitly enabled
+	tr := true
+	cfg.SessionFinalize = &tr
+	assert.True(t, cfg.IsSessionFinalizeEnabled(), "explicit true should enable session finalize")
+}
+
+func TestAgentWorkerConfig_SessionFinalizeRequiresEnabled(t *testing.T) {
+	// session finalize requires master Enabled switch
+	cfg := &AgentWorkerConfig{} // Enabled is nil (disabled)
+	assert.False(t, cfg.IsSessionFinalizeEnabled(), "session finalize should be false when daemon is disabled")
+}
+
+func TestAgentWorkerConfig_QualityThresholdDefaults(t *testing.T) {
+	var nilCfg *AgentWorkerConfig
+	assert.InDelta(t, 0.3, nilCfg.GetQualityUploadThreshold(), 0.001)
+	assert.InDelta(t, 0.1, nilCfg.GetQualityDiscardThreshold(), 0.001)
+
+	cfg := (&AgentWorkerConfig{}).WithDefaults()
+	assert.InDelta(t, 0.3, cfg.GetQualityUploadThreshold(), 0.001)
+	assert.InDelta(t, 0.1, cfg.GetQualityDiscardThreshold(), 0.001)
+}
+
+func TestAgentWorkerConfig_QualityThresholdCustom(t *testing.T) {
+	upload := 0.6
+	discard := 0.2
+	cfg := &AgentWorkerConfig{
+		QualityUploadThreshold:  &upload,
+		QualityDiscardThreshold: &discard,
+	}
+	assert.InDelta(t, 0.6, cfg.GetQualityUploadThreshold(), 0.001)
+	assert.InDelta(t, 0.2, cfg.GetQualityDiscardThreshold(), 0.001)
+}
+
+func TestAgentWorkerConfig_WithDefaults_SessionFinalizeTrue(t *testing.T) {
+	cfg := (&AgentWorkerConfig{}).WithDefaults()
+	assert.NotNil(t, cfg.SessionFinalize)
+	assert.True(t, *cfg.SessionFinalize, "WithDefaults should set SessionFinalize to true")
+}
+
+func TestLoadUserConfig_QualityThresholds(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	content := []byte(`agent_worker:
+  enabled: true
+  quality_upload_threshold: 0.5
+  quality_discard_threshold: 0.15
+`)
+	require.NoError(t, os.WriteFile(configPath, content, 0644))
+
+	cfg, err := LoadUserConfigFrom(tmpDir)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.AgentWorker)
+	assert.InDelta(t, 0.5, cfg.AgentWorker.GetQualityUploadThreshold(), 0.001)
+	assert.InDelta(t, 0.15, cfg.AgentWorker.GetQualityDiscardThreshold(), 0.001)
 }

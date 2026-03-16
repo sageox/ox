@@ -29,6 +29,15 @@ type TwoPhaseCloneResult struct {
 //
 // This function is used by both the daemon (normal path) and the CLI
 // (doctor fallback when daemon unavailable).
+//
+// TODO(investigate): go-git v6 has native support for this entire sequence:
+//   - CloneOptions.Filter, Depth, NoCheckout, SingleBranch for phase 1
+//   - CheckoutOptions.SparseCheckoutDirectories for phase 2
+//   This could replace 6 sequential exec.Command calls with ~10 lines of typed Go.
+//   Blockers to verify before migrating:
+//   1. SparseCheckoutDirectories uses --no-cone mode (ox uses file-level patterns)
+//   2. go-git network performance vs native git for clone
+//   3. credential injection (URL-embedded tokens) works correctly
 func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseCloneResult, error) {
 	// phase 1: minimal clone — trees only, no blobs.
 	// Set cmd.Dir to the parent of repoPath so git doesn't fail with

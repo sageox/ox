@@ -364,8 +364,8 @@ regex "emp_[0-9]{6}" -> [REDACTED_EMPLOYEE_ID]
 	tests := []struct {
 		name     string
 		input    string
-		contains []string    // must appear in output
-		absent   []string    // must NOT appear in output
+		contains []string // must appear in output
+		absent   []string // must NOT appear in output
 	}{
 		{
 			name: "bash tool output with internal hostname",
@@ -375,8 +375,8 @@ regex "emp_[0-9]{6}" -> [REDACTED_EMPLOYEE_ID]
 			absent:   []string{"payments.internal.acmecorp.net"},
 		},
 		{
-			name: "assistant mentions codename",
-			input: `I see this is part of Project Nightingale. The migration script at db/migrate/003_nightingale.sql needs updating.`,
+			name:     "assistant mentions codename",
+			input:    `I see this is part of Project Nightingale. The migration script at db/migrate/003_nightingale.sql needs updating.`,
 			contains: []string{"[REDACTED_CODENAME]", "migration script"},
 			absent:   []string{"Project Nightingale"},
 		},

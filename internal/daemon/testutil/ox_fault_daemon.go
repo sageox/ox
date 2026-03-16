@@ -184,7 +184,7 @@ func generateOxResponse(request []byte, config OxFaultConfig) []byte {
 		data, _ := json.Marshal(result)
 		resp = daemon.Response{Success: true, Data: data}
 
-	case daemon.MsgTypeHeartbeat, daemon.MsgTypeTelemetry, daemon.MsgTypeFriction:
+	case daemon.MsgTypeHeartbeat, daemon.MsgTypeTelemetry, daemon.MsgTypeFriction, daemon.MsgTypeSessionFinalize:
 		// fire-and-forget messages - still send response for consistency
 		return nil
 

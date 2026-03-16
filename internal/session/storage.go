@@ -35,14 +35,7 @@ func (s *Store) Save(filename, sessionType string, meta *StoreMeta, entries []ma
 	var writer *SessionWriter
 	var err error
 
-	switch sessionType {
-	case "raw":
-		writer, err = s.CreateRaw(filename)
-	case "events":
-		writer, err = s.CreateEvents(filename)
-	default:
-		writer, err = s.CreateRaw(filename)
-	}
+	writer, err = s.CreateRaw(filename)
 	if err != nil {
 		return err
 	}

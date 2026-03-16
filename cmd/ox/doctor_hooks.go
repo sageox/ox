@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -324,19 +323,17 @@ func ClaudeSettingsForValidation() (map[string][]string, error) {
 	return result, nil
 }
 
-// checkProjectHookCommands validates ox commands in project-level .claude/settings.local.json.
-// This is similar to checkHookCommands but for project-level hooks.
+// checkProjectHookCommands validates ox commands in project-level .claude/settings.json.
 func checkProjectHookCommands() checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
 		return SkippedCheck("Project hook commands", "not in git repo", "")
 	}
 
-	settingsPath := filepath.Join(gitRoot, ".claude", "settings.local.json")
+	settingsPath := getSharedClaudeSettingsPath(gitRoot)
 
-	// check if settings.local.json exists
 	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
-		return SkippedCheck("Project hook commands", "no settings.local.json", "")
+		return SkippedCheck("Project hook commands", "no settings.json", "")
 	}
 
 	data, err := os.ReadFile(settingsPath)
@@ -396,6 +393,111 @@ func checkProjectHookCommands() checkResult {
 	return WarningCheck("Project hook commands",
 		fmt.Sprintf("%d invalid command(s)", len(invalidCommands)),
 		detail)
+}
+
+// checkSharedHookValues validates that ox hook commands in .claude/settings.json
+// match the current expected values. Detects stale/mismatched commands.
+func checkSharedHookValues(fix bool) checkResult {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck("Shared hook values", "not in git repo", "")
+	}
+
+	settingsPath := getSharedClaudeSettingsPath(gitRoot)
+	if _, err := os.Stat(settingsPath); os.IsNotExist(err) {
+		return SkippedCheck("Shared hook values", "no settings.json", "")
+	}
+
+	settings, _, err := readSharedClaudeSettings(gitRoot)
+	if err != nil {
+		return WarningCheck("Shared hook values", "read error", err.Error())
+	}
+
+	// check each lifecycle event for correct ox hook command
+	var stale []string
+	for _, event := range claudeLifecycleEvents {
+		expected := oxHookCommandForEvent(event)
+		found := false
+		for _, entry := range settings.Hooks[event] {
+			for _, hook := range entry.Hooks {
+				if hook.Type == hookType && isAnyOxCommand(hook.Command) {
+					if hook.Command == expected {
+						found = true
+					} else {
+						stale = append(stale, fmt.Sprintf("%s: stale command", event))
+					}
+				}
+			}
+		}
+		if !found {
+			// check if there's any ox hook at all for this event
+			hasOx := false
+			for _, entry := range settings.Hooks[event] {
+				if hasAnyOxHook(entry) {
+					hasOx = true
+					break
+				}
+			}
+			if hasOx {
+				stale = append(stale, fmt.Sprintf("%s: outdated command", event))
+			}
+		}
+	}
+
+	if len(stale) == 0 {
+		// no stale commands, but also check if hooks exist at all
+		hasAny := false
+		for _, event := range claudeLifecycleEvents {
+			for _, entry := range settings.Hooks[event] {
+				if hasAnyOxHook(entry) {
+					hasAny = true
+					break
+				}
+			}
+			if hasAny {
+				break
+			}
+		}
+		if !hasAny {
+			return SkippedCheck("Shared hook values", "no ox hooks in settings.json", "")
+		}
+		return PassedCheck("Shared hook values", "all commands current")
+	}
+
+	if fix {
+		if err := InstallProjectClaudeHooks(gitRoot); err != nil {
+			return FailedCheck("Shared hook values", "repair failed", err.Error())
+		}
+		return PassedCheck("Shared hook values", "updated hook commands")
+	}
+
+	return FailedCheck("Shared hook values",
+		fmt.Sprintf("%d stale hook(s)", len(stale)),
+		strings.Join(stale, ", ")+"\n       Run `ox doctor --fix` to update")
+}
+
+// checkStaleLocalHooks detects ox hooks still present in settings.local.json
+// that should have been migrated to settings.json.
+func checkStaleLocalHooks(fix bool) checkResult {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck("Stale local hooks", "not in git repo", "")
+	}
+
+	if !hasLocalSettingsOxHooks(gitRoot) {
+		return SkippedCheck("Stale local hooks", "no ox hooks in local settings", "")
+	}
+
+	if fix {
+		if err := cleanupLocalSettingsOxHooks(gitRoot); err != nil {
+			return FailedCheck("Stale local hooks", "cleanup failed", err.Error())
+		}
+		return PassedCheck("Stale local hooks", "cleaned up")
+	}
+
+	return WarningCheck("Stale local hooks",
+		"ox hooks found in settings.local.json",
+		"ox hooks should be in settings.json (shared). Run `ox doctor --fix` to migrate.")
 }
 
 // checkProjectHookCompleteness verifies that project-level hooks have ox prime

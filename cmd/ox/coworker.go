@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/claude"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
@@ -16,7 +17,6 @@ import (
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/telemetry"
-	"github.com/sageox/ox/pkg/agentx"
 	"github.com/spf13/cobra"
 )
 
@@ -52,18 +52,19 @@ type coworkerLoadOutput struct {
 
 var coworkerCmd = &cobra.Command{
 	Use:   "coworker",
-	Short: "Manage team coworkers (AI subagents)",
-	Long: `Manage team coworkers - expert AI subagents defined in your team context.
+	Short: "Manage expert agents and subagents for your team",
+	Long: `Manage expert coworker agents defined in your team context.
 
-Coworkers are specialized agents with domain expertise that can be loaded
-into your context when needed. They are defined in your team's coworkers/
-directory and can be listed and loaded on demand.
+Coworkers are expert agents and subagents with deep domain expertise
+that can be loaded into context for handling tasks, code reviews, and
+specialized work. They carry project-specific knowledge that generic
+agents lack.
 
 Commands:
-  list       List available coworkers
-  load       Load a coworker's prompt into context
-  add        Add a coworker to the team
-  remove     Remove a coworker from the team`,
+  list       List available expert agents and their specialties
+  load       Load an expert agent's prompt into context
+  add        Add an expert agent to the team
+  remove     Remove an expert agent from the team`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cmd.Help()
 	},
@@ -321,8 +322,9 @@ func runCoworkerLoad(cmd *cobra.Command, args []string) error {
 		model = modelOverride
 	}
 
-	// log to session if recording
-	logCoworkerLoad(projectRoot, name, model)
+	// log to session if recording — use caller's agent ID for multi-agent isolation
+	callerAgentID := os.Getenv("SAGEOX_AGENT_ID")
+	logCoworkerLoad(projectRoot, callerAgentID, name, model)
 
 	// track coworker load via telemetry
 	trackCoworkerLoad(name, model, foundTeam.TeamID)
@@ -473,12 +475,16 @@ func runCoworkerRemove(cmd *cobra.Command, args []string) error {
 }
 
 // logCoworkerLoad writes a coworker load entry to the session if recording.
-func logCoworkerLoad(projectRoot, name, model string) {
-	if !session.IsRecording(projectRoot) {
+func logCoworkerLoad(projectRoot, agentID, name, model string) {
+	// per-agent lookup to avoid writing to wrong agent's session in multi-agent repos
+	if agentID == "" {
+		return
+	}
+	if !session.IsRecordingForAgent(projectRoot, agentID) {
 		return
 	}
 
-	state, err := session.LoadRecordingState(projectRoot)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	if err != nil || state == nil {
 		return
 	}

@@ -133,6 +133,22 @@ func StateDir() string {
 	return filepath.Join(SageoxDir(), "state")
 }
 
+// CodeDBSharedDir returns the directory for the shared CodeDB index (committed content).
+// Stored inside the ledger's local cache, shared across all worktrees for the same repo.
+// Format: ~/.local/share/sageox/<endpoint>/ledgers/<repoID>/.sageox/cache/codedb/
+func CodeDBSharedDir(repoID, endpointURL string) string {
+	if repoID == "" || endpointURL == "" {
+		return ""
+	}
+	return filepath.Join(LedgersDataDir(repoID, endpointURL), ".sageox", "cache", "codedb")
+}
+
+// CodeDBDataDir returns the legacy per-worktree CodeDB directory.
+// Deprecated: Use CodeDBSharedDir for new code. This is kept for migration detection.
+func CodeDBDataDir(projectRoot string) string {
+	return filepath.Join(projectRoot, ".sageox", "cache", "codedb")
+}
+
 // -----------------------------------------------------------------------------
 // Config Files
 // -----------------------------------------------------------------------------
@@ -186,6 +202,40 @@ func SessionCacheDir(repoID string) string {
 		return base
 	}
 	return filepath.Join(base, repoID)
+}
+
+// LegacySessionCacheDirs returns additional session cache directories from older
+// ox versions that used different cache paths. On macOS, older versions used
+// ~/Library/Caches/sageox/sessions/ (native cache) before the switch to XDG
+// (~/.cache/sageox/sessions/). Returns only directories that exist on disk.
+// The repoID parameter scopes to a specific repo; empty returns all legacy bases.
+func LegacySessionCacheDirs(repoID string) []string {
+	home := getHomeDir()
+	if home == "" {
+		return nil
+	}
+
+	current := SessionCacheDir(repoID)
+
+	// macOS native cache: ~/Library/Caches/sageox/sessions/
+	candidates := []string{
+		filepath.Join(home, "Library", "Caches", "sageox", "sessions"),
+	}
+
+	var dirs []string
+	for _, base := range candidates {
+		path := base
+		if repoID != "" {
+			path = filepath.Join(base, repoID)
+		}
+		if path == current {
+			continue // skip if it's the same as the current XDG path
+		}
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			dirs = append(dirs, path)
+		}
+	}
+	return dirs
 }
 
 // TempDir returns the base temporary directory for SageOx ephemeral files.

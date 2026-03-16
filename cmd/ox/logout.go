@@ -53,6 +53,9 @@ var logoutCmd = &cobra.Command{
 		} else if len(loggedInEndpoints) == 1 {
 			// only one endpoint, use it
 			endpointsToLogout = loggedInEndpoints
+		} else if logoutForce {
+			// --force with multiple endpoints: log out from all (non-interactive)
+			endpointsToLogout = loggedInEndpoints
 		} else {
 			// multiple endpoints - prompt for selection
 			fmt.Println()

@@ -124,8 +124,8 @@ func TestDisplayPrioritySummary_HealthyMessage(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		checks     []checkResult
+		name        string
+		checks      []checkResult
 		wantHealthy bool
 	}{
 		{

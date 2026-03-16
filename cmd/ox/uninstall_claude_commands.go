@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/sageox/agentx"
+	_ "github.com/sageox/agentx/setup"
 	"github.com/sageox/ox/internal/cli"
-	"github.com/sageox/ox/pkg/agentx"
-	_ "github.com/sageox/ox/pkg/agentx/setup"
 )
 
 // removeClaudeCommands removes ox slash commands from .claude/commands/.

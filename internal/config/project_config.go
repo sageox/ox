@@ -119,6 +119,18 @@ type ProjectConfig struct {
 	// Values: "auto" (upload to ledger on stop), "manual" (save locally, user uploads explicitly)
 	// Empty string defaults to "auto" for backward compatibility.
 	SessionPublishing string `json:"session_publishing,omitempty"`
+
+	// GitHubSync controls GitHub data extraction to the ledger (master toggle).
+	// Values: "enabled" (default), "disabled"
+	GitHubSync string `json:"github_sync,omitempty"`
+
+	// GitHubSyncPRs controls PR sync independently.
+	// Values: "enabled" (default), "disabled"
+	GitHubSyncPRs string `json:"github_sync_prs,omitempty"`
+
+	// GitHubSyncIssues controls issue sync independently.
+	// Values: "enabled" (default), "disabled"
+	GitHubSyncIssues string `json:"github_sync_issues,omitempty"`
 }
 
 // NeedsUpgrade returns true if the config version is older than CurrentConfigVersion

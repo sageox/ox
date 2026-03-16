@@ -254,7 +254,7 @@ func checkReadmeFile(fix bool) checkResult {
 
 	// check if file is stale (older than 7 days) - even if content matches
 	// this ensures the modtime is fresh for cache purposes
-	modTime := info.ModTime()
+	modTime := info.ModTime().UTC()
 	age := time.Since(modTime)
 	sevenDays := 7 * 24 * time.Hour
 

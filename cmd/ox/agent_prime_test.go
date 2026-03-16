@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestIsAgentSupported(t *testing.T) {
@@ -341,6 +344,188 @@ func TestCodexLifecycleNotification(t *testing.T) {
 				}
 				if !strings.Contains(got, "ox agent <id> session start") {
 					t.Errorf("expected Codex lifecycle note to mention manual session start, got: %q", got)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadTeamMemory_ObservationGuide(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(dir string) // create files under dir
+		wantGuide bool
+	}{
+		{
+			name: "GUIDE.md exists",
+			setup: func(dir string) {
+				memDir := filepath.Join(dir, "memory")
+				os.MkdirAll(memDir, 0755)
+				os.WriteFile(filepath.Join(memDir, "GUIDE.md"), []byte("# Observation Guide\n"), 0644)
+			},
+			wantGuide: true,
+		},
+		{
+			name:      "GUIDE.md absent",
+			setup:     func(dir string) {},
+			wantGuide: false,
+		},
+		{
+			name: "memory dir exists but no GUIDE.md",
+			setup: func(dir string) {
+				os.MkdirAll(filepath.Join(dir, "memory"), 0755)
+			},
+			wantGuide: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tt.setup(dir)
+
+			info := &teamContextInfo{}
+			loadTeamMemory(info, dir)
+
+			if tt.wantGuide {
+				want := filepath.Join(dir, "memory", "GUIDE.md")
+				if info.ObservationGuideHint != want {
+					t.Errorf("ObservationGuideHint = %q, want %q", info.ObservationGuideHint, want)
+				}
+			} else {
+				if info.ObservationGuideHint != "" {
+					t.Errorf("ObservationGuideHint = %q, want empty", info.ObservationGuideHint)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildGuidance_MemoryPut(t *testing.T) {
+	tests := []struct {
+		name       string
+		teamCtx    *teamContextInfo
+		featureEnv string // FEATURE_MEMORY value
+		wantPut    bool
+	}{
+		{
+			name:       "all conditions met",
+			teamCtx:    &teamContextInfo{TeamID: "t", ObservationGuideHint: "/path/GUIDE.md"},
+			featureEnv: "true",
+			wantPut:    true,
+		},
+		{
+			name:       "no GUIDE.md",
+			teamCtx:    &teamContextInfo{TeamID: "t"},
+			featureEnv: "true",
+			wantPut:    false,
+		},
+		{
+			name:       "flag off",
+			teamCtx:    &teamContextInfo{TeamID: "t", ObservationGuideHint: "/path/GUIDE.md"},
+			featureEnv: "",
+			wantPut:    false,
+		},
+		{
+			name:       "nil team ctx",
+			teamCtx:    nil,
+			featureEnv: "true",
+			wantPut:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("FEATURE_MEMORY", tt.featureEnv)
+
+			projectRoot := t.TempDir()
+			g := buildGuidance("test-agent", projectRoot, tt.teamCtx, nil)
+
+			found := false
+			for _, cmd := range g.Commands {
+				if strings.Contains(cmd.Command, "ox memory put") {
+					found = true
+					break
+				}
+			}
+			if found != tt.wantPut {
+				t.Errorf("ox memory put in guidance = %v, want %v", found, tt.wantPut)
+			}
+		})
+	}
+}
+
+func TestEmitTeamMemorySection_ObservationGuide(t *testing.T) {
+	tests := []struct {
+		name          string
+		tc            *teamContextInfo
+		featureEnv    string
+		wantGuide     bool // expect "GUIDE.md:" in output
+		wantDirective bool // expect "Observation Recording (Active)" behavioral directive
+		wantMemory    bool // expect "## Team Memory" header
+		wantSoul      bool // expect "SOUL.md:" in output
+	}{
+		{
+			name:          "GUIDE.md with flag on",
+			tc:            &teamContextInfo{ObservationGuideHint: "/team/memory/GUIDE.md"},
+			featureEnv:    "true",
+			wantGuide:     true,
+			wantDirective: true,
+			wantMemory:    true,
+		},
+		{
+			name:       "GUIDE.md with flag off",
+			tc:         &teamContextInfo{ObservationGuideHint: "/team/memory/GUIDE.md"},
+			featureEnv: "",
+			wantGuide:  false,
+			wantMemory: false,
+		},
+		{
+			name:          "GUIDE.md and SOUL.md with flag on",
+			tc:            &teamContextInfo{SoulHint: "/team/SOUL.md", ObservationGuideHint: "/team/memory/GUIDE.md"},
+			featureEnv:    "true",
+			wantGuide:     true,
+			wantDirective: true,
+			wantMemory:    true,
+			wantSoul:      true,
+		},
+		{
+			name:       "no hints at all",
+			tc:         &teamContextInfo{},
+			featureEnv: "true",
+			wantGuide:  false,
+			wantMemory: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("FEATURE_MEMORY", tt.featureEnv)
+
+			var buf bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&buf)
+
+			emitTeamMemorySection(cmd, tt.tc)
+			out := buf.String()
+
+			if got := strings.Contains(out, "## Team Memory"); got != tt.wantMemory {
+				t.Errorf("'## Team Memory' present = %v, want %v\noutput: %s", got, tt.wantMemory, out)
+			}
+			if got := strings.Contains(out, "GUIDE.md:"); got != tt.wantGuide {
+				t.Errorf("'GUIDE.md:' present = %v, want %v\noutput: %s", got, tt.wantGuide, out)
+			}
+			if got := strings.Contains(out, "Observation Recording (Active)"); got != tt.wantDirective {
+				t.Errorf("'Observation Recording (Active)' present = %v, want %v\noutput: %s", got, tt.wantDirective, out)
+			}
+			if tt.wantDirective {
+				if !strings.Contains(out, "Proactively record observations") {
+					t.Errorf("expected proactive instruction in output, got: %s", out)
+				}
+			}
+			if tt.wantSoul {
+				if !strings.Contains(out, "SOUL.md:") {
+					t.Errorf("expected 'SOUL.md:' in output, got: %s", out)
 				}
 			}
 		})

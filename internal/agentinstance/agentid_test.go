@@ -13,10 +13,10 @@ func TestLooksLikeUUID(t *testing.T) {
 		{"019568a5-e1e2-7cd1-8da8-b2d7440e3aab", true},
 		{"00000000-0000-0000-0000-000000000000", true},
 		{"ffffffff-ffff-ffff-ffff-ffffffffffff", true},
-		{"019568a5e1e27cd18da8b2d7440e3aab", false},  // no hyphens
-		{"019568a5-e1e2-7cd1-8da8-b2d7440e3aa", false}, // too short (35)
+		{"019568a5e1e27cd18da8b2d7440e3aab", false},      // no hyphens
+		{"019568a5-e1e2-7cd1-8da8-b2d7440e3aa", false},   // too short (35)
 		{"019568a5-e1e2-7cd1-8da8-b2d7440e3aabb", false}, // too long (37)
-		{"019568a5-e1e27cd1-8da8-b2d7440e3aab", false}, // wrong hyphen positions (missing at 13)
+		{"019568a5-e1e27cd1-8da8-b2d7440e3aab", false},   // wrong hyphen positions (missing at 13)
 		{"OxA1b2", false},
 		{"", false},
 	}
@@ -31,9 +31,9 @@ func TestLooksLikeUUID(t *testing.T) {
 
 func TestClassifyBadID(t *testing.T) {
 	tests := []struct {
-		input       string
-		wantSubstr  string
-		wantEmpty   bool
+		input      string
+		wantSubstr string
+		wantEmpty  bool
 	}{
 		// valid agent ID — returns empty
 		{"OxA1b2", "", true},

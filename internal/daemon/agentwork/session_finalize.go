@@ -1,0 +1,865 @@
+package agentwork
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/html"
+)
+
+const (
+	sessionFinalizeType     = "session-finalize"
+	sessionFinalizePriority = 10
+
+	artifactRaw       = "raw.jsonl"
+	artifactSummaryMD = "summary.md"
+	artifactSummJSON  = "summary.json"
+	artifactHTML      = "session.html"
+	artifactSessionMD = "session.md"
+
+	// recordingMarker is the file that indicates a session is still being recorded.
+	// Sessions with this file present are NOT safe to finalize unless stale.
+	recordingMarker = ".recording.json"
+
+	// staleRecordingThreshold is how long a recording can sit with no progress
+	// before the daemon considers it abandoned and eligible for anti-entropy
+	// finalization. More conservative than the 12h health check warning.
+	staleRecordingThreshold = 24 * time.Hour
+)
+
+// requiredArtifacts lists artifacts that should exist alongside raw.jsonl.
+// TODO: session.html will be deprecated in favor of the web viewer at sageox.ai.
+// When removed, drop artifactHTML from this list and remove generateHTML.
+var requiredArtifacts = []string{
+	artifactSummaryMD,
+	artifactSummJSON,
+	artifactHTML,
+	artifactSessionMD,
+}
+
+// SessionFinalizePayload carries per-item context through the pipeline.
+type SessionFinalizePayload struct {
+	SessionDir string   `json:"session_dir"` // absolute path to session directory
+	RawPath    string   `json:"raw_path"`    // path to raw.jsonl
+	Missing    []string `json:"missing"`     // which artifacts need generation
+	LedgerPath string   `json:"ledger_path"` // ledger repo root (for git operations)
+
+	// storedSession is populated by BuildPrompt and reused by ProcessResult
+	// to avoid reading raw.jsonl twice.
+	storedSession *session.StoredSession `json:"-"`
+}
+
+// SessionFinalizeHandler detects and finalizes incomplete sessions in the ledger.
+// It generates missing artifacts: summary.md (via LLM), summary.json,
+// session.html, and session.md (deterministic exports).
+type SessionFinalizeHandler struct {
+	logger *slog.Logger
+	// skipGit disables git add/commit/push in tests
+	skipGit bool
+	// pidLookup returns the parent PID for a given agent ID from daemon in-memory state.
+	// Used as fallback when .recording.json predates the ParentPID field (rollout compat).
+	// Returns 0 if unknown.
+	pidLookup func(agentID string) int
+	// quality thresholds (configurable via AgentWorkerConfig)
+	qualityUploadThreshold  float64
+	qualityDiscardThreshold float64
+}
+
+// NewSessionFinalizeHandler creates a handler with the given logger.
+func NewSessionFinalizeHandler(logger *slog.Logger) *SessionFinalizeHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &SessionFinalizeHandler{
+		logger:                  logger,
+		qualityUploadThreshold:  0.3,
+		qualityDiscardThreshold: 0.1,
+	}
+}
+
+// SetQualityThresholds configures the quality score thresholds for upload/discard.
+func (h *SessionFinalizeHandler) SetQualityThresholds(upload, discard float64) {
+	h.qualityUploadThreshold = upload
+	h.qualityDiscardThreshold = discard
+}
+
+// SetPIDLookup sets the function used to look up agent PIDs from daemon in-memory state.
+// This enables PID-based liveness detection for recordings that predate the ParentPID field.
+func (h *SessionFinalizeHandler) SetPIDLookup(fn func(agentID string) int) {
+	h.pidLookup = fn
+}
+
+// NewSessionFinalizeHandlerForTest creates a handler with git operations disabled.
+// Use in tests that don't have a real git repository.
+func NewSessionFinalizeHandlerForTest(logger *slog.Logger) *SessionFinalizeHandler {
+	h := NewSessionFinalizeHandler(logger)
+	h.skipGit = true
+	return h
+}
+
+// Type implements WorkHandler.
+func (h *SessionFinalizeHandler) Type() string { return sessionFinalizeType }
+
+// Cleanup performs lightweight filesystem housekeeping that doesn't require LLM
+// processing: ghost session removal (dead PID + no data). Safe to run regardless
+// of agent_worker.enabled. Does NOT clear .recording.json markers on sessions
+// that have recoverable data — that's Detect()'s job when LLM processing follows.
+//
+// Cleans both the ledger sessions dir and the session cache dir (where ox session
+// list reads from). The cache dir is derived from the repoID in the ledger path.
+func (h *SessionFinalizeHandler) Cleanup(ledgerPath string) {
+	// clean ledger sessions
+	ledgerSessionsDir := filepath.Join(ledgerPath, "sessions")
+	if ghostResult := session.CleanupGhostSessionsInDir(ledgerSessionsDir); ghostResult.Removed > 0 {
+		h.logger.Info("ghost cleanup (ledger): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
+	}
+
+	// clean session cache (where ox session list reads from)
+	repoID := filepath.Base(ledgerPath)
+	if repoID != "" && repoID != "." {
+		cacheSessionsDir := filepath.Join(paths.SessionCacheDir(repoID), "sessions")
+		if ghostResult := session.CleanupGhostSessionsInDir(cacheSessionsDir); ghostResult.Removed > 0 {
+			h.logger.Info("ghost cleanup (cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
+		}
+
+		// also clean legacy cache paths (e.g. ~/Library/Caches/sageox on macOS)
+		for _, legacyDir := range paths.LegacySessionCacheDirs(repoID) {
+			legacySessionsDir := filepath.Join(legacyDir, "sessions")
+			if ghostResult := session.CleanupGhostSessionsInDir(legacySessionsDir); ghostResult.Removed > 0 {
+				h.logger.Info("ghost cleanup (legacy cache): removed abandoned recordings", "dir", legacyDir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
+			}
+		}
+	}
+}
+
+// Detect scans both the ledger and session cache for sessions missing artifacts.
+// The cache dir is where sessions are initially recorded; the ledger is where they
+// are pushed after finalization. Both must be scanned to catch orphans.
+func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) {
+	ledgerSessionsDir := filepath.Join(ledgerPath, "sessions")
+
+	// ghost cleanup also runs via Cleanup() on every doctor cycle regardless of
+	// agent_worker.enabled. Run it here too for callers that invoke Detect() directly
+	// (e.g. ForceDetect, tests).
+	if ghostResult := session.CleanupGhostSessionsInDir(ledgerSessionsDir); ghostResult.Removed > 0 {
+		h.logger.Info("ghost cleanup: removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
+	}
+
+	// scan ledger sessions dir
+	items, err := h.detectInDir(ledgerSessionsDir, ledgerPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// also scan session cache dir (where sessions are initially recorded)
+	repoID := filepath.Base(ledgerPath)
+	if repoID != "" && repoID != "." {
+		cacheSessionsDir := filepath.Join(paths.SessionCacheDir(repoID), "sessions")
+		if cacheSessionsDir != ledgerSessionsDir {
+			if ghostResult := session.CleanupGhostSessionsInDir(cacheSessionsDir); ghostResult.Removed > 0 {
+				h.logger.Info("ghost cleanup (cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
+			}
+
+			cacheItems, cacheErr := h.detectInDir(cacheSessionsDir, ledgerPath)
+			if cacheErr == nil {
+				// deduplicate by session name (prefer ledger copy)
+				seen := make(map[string]bool)
+				for _, item := range items {
+					seen[item.DedupKey] = true
+				}
+				for _, item := range cacheItems {
+					if !seen[item.DedupKey] {
+						items = append(items, item)
+					}
+				}
+			}
+		}
+
+		// also scan legacy cache paths (e.g. ~/Library/Caches/sageox on macOS)
+		for _, legacyDir := range paths.LegacySessionCacheDirs(repoID) {
+			legacySessionsDir := filepath.Join(legacyDir, "sessions")
+			if legacySessionsDir == ledgerSessionsDir {
+				continue
+			}
+			if ghostResult := session.CleanupGhostSessionsInDir(legacySessionsDir); ghostResult.Removed > 0 {
+				h.logger.Info("ghost cleanup (legacy cache): removed abandoned recordings", "dir", legacyDir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
+			}
+
+			legacyItems, legacyErr := h.detectInDir(legacySessionsDir, ledgerPath)
+			if legacyErr == nil {
+				seen := make(map[string]bool)
+				for _, item := range items {
+					seen[item.DedupKey] = true
+				}
+				for _, item := range legacyItems {
+					if !seen[item.DedupKey] {
+						items = append(items, item)
+					}
+				}
+			}
+		}
+	}
+
+	h.logger.Info("session finalize detect complete", "ledger", ledgerPath, "items", len(items))
+	return items, nil
+}
+
+// detectInDir scans a single sessions directory for sessions needing finalization.
+func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]*WorkItem, error) {
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read sessions dir: %w", err)
+	}
+
+	var items []*WorkItem
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		// skip legacy subdirs
+		if name == "raw" || name == "events" {
+			continue
+		}
+
+		sessionDir := filepath.Join(sessionsDir, name)
+		rawPath := filepath.Join(sessionDir, artifactRaw)
+
+		// raw.jsonl must exist and be committed/pushed to the ledger.
+		// Without it there is nothing to summarize. For stale recordings
+		// missing raw.jsonl, recovery is attempted from the adapter source file.
+		hasRaw := false
+		if _, statErr := os.Stat(rawPath); statErr == nil {
+			hasRaw = true
+		}
+
+		// check for active recording
+		recPath := filepath.Join(sessionDir, recordingMarker)
+		if recInfo, statErr := os.Stat(recPath); statErr == nil {
+			// .recording.json exists — check if it's stale (abandoned)
+			stale, recAge, method := isStaleRecording(recPath, recInfo, h.pidLookup, h.logger)
+			if !stale {
+				h.logger.Debug("skipping session with active recording", "session", name)
+				continue
+			}
+			if !hasRaw {
+				// attempt recovery from adapter source file (#184)
+				if recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath) {
+					hasRaw = true
+				} else {
+					h.logger.Warn("stale recording unrecoverable, clearing marker",
+						"session", name,
+						"recording_age", recAge.Round(time.Hour),
+					)
+					if rmErr := os.Remove(recPath); rmErr != nil {
+						h.logger.Warn("failed to remove unrecoverable recording marker", "err", rmErr)
+					}
+					continue
+				}
+			}
+			// stale recording with raw.jsonl: clear the marker so we can finalize
+			h.logger.Info("clearing stale recording for anti-entropy finalization",
+				"session", name,
+				"recording_age", recAge.Round(time.Hour),
+				"detection_method", method,
+			)
+			if err := os.Remove(recPath); err != nil {
+				h.logger.Warn("failed to remove stale recording marker", "session", name, "err", err)
+				continue
+			}
+		}
+
+		if !hasRaw {
+			continue
+		}
+
+		// skip raw.jsonl files with zero substantive entries (header-only)
+		if !session.HasSubstantiveEntries(rawPath) {
+			h.logger.Debug("skipping header-only session", "session", name)
+			continue
+		}
+
+		missing := missingArtifacts(sessionDir)
+		if len(missing) == 0 {
+			continue
+		}
+
+		payload := &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    rawPath,
+			Missing:    missing,
+			LedgerPath: ledgerPath,
+		}
+
+		h.logger.Info("session needs finalization",
+			"session", name,
+			"missing", missing,
+		)
+
+		items = append(items, &WorkItem{
+			Type:     sessionFinalizeType,
+			Priority: sessionFinalizePriority,
+			DedupKey: sessionFinalizeType + ":" + name,
+			Payload:  payload,
+		})
+	}
+
+	return items, nil
+}
+
+// BuildPrompt reads the raw session and constructs a summarization prompt.
+func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error) {
+	payload, err := extractPayload(item)
+	if err != nil {
+		return RunRequest{}, err
+	}
+
+	stored, err := session.ReadSessionFromPath(payload.RawPath)
+	if err != nil {
+		return RunRequest{}, fmt.Errorf("read session %s: %w", payload.RawPath, err)
+	}
+
+	// validate session data quality
+	if warnings := validateStoredEntries(stored.Entries, h.logger); len(warnings) > 0 {
+		h.logger.Warn("session data quality issues detected",
+			"session", filepath.Base(payload.SessionDir),
+			"issues", len(warnings),
+		)
+	}
+
+	// cache for ProcessResult to avoid re-reading
+	payload.storedSession = stored
+
+	entries := convertStoredEntries(stored.Entries)
+	prompt := session.BuildSummaryPrompt(entries, payload.RawPath, payload.SessionDir)
+
+	return RunRequest{
+		Prompt:  prompt,
+		WorkDir: payload.LedgerPath,
+	}, nil
+}
+
+// ProcessResult writes the LLM output and generates deterministic artifacts.
+//
+// NOTE: this method performs git add/commit/push from the daemon, which is an
+// intentional exception to the Daemon-CLI Git Operations Split documented in
+// CLAUDE.md. Session finalization writes to unique, timestamped session paths
+// with near-zero conflict risk, and must run asynchronously (no CLI available).
+// If this architecture is rejected, the alternative is an IPC endpoint that
+// delegates writes back to the CLI.
+//
+// When triggered via async session upload (SAGEOX_ASYNC_SESSION_UPLOAD=1),
+// content files are committed as regular files (not LFS pointers). This is
+// acceptable for the initial rollout; LFS upload will be added to this handler
+// as a follow-up to avoid committing large blobs to git.
+func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult) error {
+	payload, err := extractPayload(item)
+	if err != nil {
+		return err
+	}
+
+	llmOutput := result.Output
+
+	// parse LLM output into SummarizeResponse
+	var summaryResp *session.SummarizeResponse
+	parsed, parseErr := parseSummaryJSON(llmOutput)
+	if parseErr != nil {
+		h.logger.Warn("could not parse summary JSON from LLM output, using raw text", "err", parseErr)
+		// fall back to raw LLM output as summary text; default to upload (benefit of the doubt)
+		summaryResp = &session.SummarizeResponse{
+			Summary:      llmOutput,
+			QualityScore: 1.0,
+			ScoreReason:  "unparsable LLM output, defaulting to upload",
+		}
+	} else {
+		summaryResp = parsed
+	}
+
+	sessionName := filepath.Base(payload.SessionDir)
+
+	// evaluate quality using shared function
+	disposition := session.EvaluateQuality(summaryResp.QualityScore, h.qualityUploadThreshold, h.qualityDiscardThreshold)
+
+	if disposition == session.QualityDiscard {
+		h.logger.Info("session below discard threshold, removing",
+			"session", sessionName,
+			"quality_score", summaryResp.QualityScore,
+			"threshold", h.qualityDiscardThreshold,
+			"reason", summaryResp.ScoreReason,
+		)
+		if err := os.RemoveAll(payload.SessionDir); err != nil {
+			h.logger.Warn("failed to remove low-quality session", "session", sessionName, "err", err)
+		}
+		return nil
+	}
+
+	// use cached session from BuildPrompt, fall back to re-reading
+	stored := payload.storedSession
+	if stored == nil {
+		var readErr error
+		stored, readErr = session.ReadSessionFromPath(payload.RawPath)
+		if readErr != nil {
+			h.logger.Warn("could not read session for export", "err", readErr)
+			return nil
+		}
+	}
+
+	// generate all artifacts via shared path
+	htmlGen, htmlErr := html.NewGenerator()
+	var gen session.HTMLGenerator
+	if htmlErr == nil {
+		gen = htmlGen
+	}
+	artifactPaths, artifactErr := session.WriteSessionArtifacts(payload.SessionDir, stored, summaryResp, gen)
+	if artifactErr != nil {
+		h.logger.Warn("artifact generation failed", "err", artifactErr)
+		h.logger.Warn("session recovery incomplete",
+			"session", sessionName,
+			"err", artifactErr,
+		)
+		return nil
+	}
+
+	h.logger.Info("wrote session artifacts",
+		"summary_md", artifactPaths.SummaryMD,
+		"summary_json", artifactPaths.SummaryJSON,
+		"html", artifactPaths.HTML,
+		"session_md", artifactPaths.SessionMD,
+		"quality_score", summaryResp.QualityScore,
+	)
+
+	if disposition == session.QualityLocalOnly {
+		h.logger.Info("session below upload threshold, keeping locally",
+			"session", sessionName,
+			"quality_score", summaryResp.QualityScore,
+			"threshold", h.qualityUploadThreshold,
+			"reason", summaryResp.ScoreReason,
+		)
+		return nil
+	}
+
+	h.gitCommitAndPush(payload)
+	h.logger.Info("session recovered via anti-entropy",
+		"session", sessionName,
+		"quality_score", summaryResp.QualityScore,
+		"artifacts_generated", len(requiredArtifacts),
+	)
+	return nil
+}
+
+// gitCommitAndPush stages, commits, and pushes the finalized session.
+// Push failures are non-fatal.
+func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayload) {
+	if h.skipGit {
+		return
+	}
+
+	ledgerPath := payload.LedgerPath
+	sessionName := filepath.Base(payload.SessionDir)
+
+	// relative path from ledger root for git add
+	relDir, err := filepath.Rel(ledgerPath, payload.SessionDir)
+	if err != nil {
+		h.logger.Warn("could not compute relative session path", "err", err)
+		return
+	}
+
+	// git add --sparse <session-dir>/
+	if err := h.runGit(ledgerPath, "add", "--sparse", relDir+"/"); err != nil {
+		h.logger.Warn("git add failed", "err", err)
+		return
+	}
+
+	// git commit
+	msg := fmt.Sprintf("finalize session %s", sessionName)
+	if err := h.runGit(ledgerPath, "commit", "-m", msg); err != nil {
+		h.logger.Warn("git commit failed", "err", err)
+		return
+	}
+
+	// repair missing LFS objects before push (lost during GC reclone)
+	if repaired, repairErr := gitutil.RepairMissingLFSObjects(context.Background(), ledgerPath); repairErr != nil {
+		h.logger.Warn("lfs repair failed", "err", repairErr)
+	} else if repaired > 0 {
+		h.logger.Info("repaired missing LFS pointers before push", "count", repaired)
+	}
+
+	// git push (best-effort)
+	if err := h.runGit(ledgerPath, "push"); err != nil {
+		h.logger.Warn("git push failed (non-fatal)", "err", err)
+	}
+}
+
+// runGit executes a git command in the ledger directory.
+func (h *SessionFinalizeHandler) runGit(repoPath string, args ...string) error {
+	fullArgs := append([]string{"-C", repoPath}, args...)
+	cmd := exec.Command("git", fullArgs...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s: %s: %w", args[0], strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+// --- helpers ---
+
+// extractPayload type-asserts the work item payload.
+func extractPayload(item *WorkItem) (*SessionFinalizePayload, error) {
+	if item.Payload == nil {
+		return nil, fmt.Errorf("nil payload for item %s", item.ID)
+	}
+	p, ok := item.Payload.(*SessionFinalizePayload)
+	if !ok {
+		return nil, fmt.Errorf("unexpected payload type %T for item %s", item.Payload, item.ID)
+	}
+	return p, nil
+}
+
+// isStaleRecording reads a .recording.json file and determines if the recording
+// is abandoned. Checks PID liveness first (instant detection), then falls back
+// to the 24h staleRecordingThreshold.
+//
+// pidLookup is an optional function that returns the parent PID for a given agent ID
+// from daemon in-memory state. Used as fallback when .recording.json predates the
+// ParentPID field (rollout compat). Pass nil if unavailable.
+func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) int, logger *slog.Logger) (stale bool, age time.Duration, method string) {
+	data, err := os.ReadFile(recPath)
+	if err != nil {
+		// can't read file — fall back to mod time
+		age = time.Since(info.ModTime())
+		if age > staleRecordingThreshold {
+			return true, age, "time_threshold"
+		}
+		return false, age, "time_not_reached"
+	}
+
+	var state struct {
+		StartedAt time.Time `json:"started_at"`
+		AgentID   string    `json:"agent_id"`
+		ParentPID int       `json:"parent_pid"`
+	}
+	if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
+		age = time.Since(info.ModTime())
+		if age > staleRecordingThreshold {
+			return true, age, "time_threshold"
+		}
+		return false, age, "time_not_reached"
+	}
+
+	// determine age
+	age = time.Since(info.ModTime())
+	if !state.StartedAt.IsZero() {
+		age = time.Since(state.StartedAt)
+	}
+
+	// try PID from .recording.json first, then fall back to daemon in-memory PID
+	pid := state.ParentPID
+	if pid > 0 {
+		logger.Debug("recording PID from marker", "pid", pid, "session", filepath.Base(recPath))
+	}
+	if pid <= 0 && pidLookup != nil && state.AgentID != "" {
+		pid = pidLookup(state.AgentID)
+		if pid > 0 {
+			logger.Debug("recording PID from daemon lookup", "pid", pid, "agent_id", state.AgentID)
+		}
+	}
+
+	// if we have a PID, check liveness — dead process = stale immediately,
+	// live process = never stale (wait for next cycle)
+	if pid > 0 {
+		proc, procErr := os.FindProcess(pid)
+		if procErr != nil || proc.Signal(syscall.Signal(0)) != nil {
+			logger.Debug("recording process dead, marking stale", "pid", pid, "age", age)
+			return true, age, "pid_dead"
+		}
+		logger.Debug("recording process alive, skipping", "pid", pid)
+		return false, age, "pid_alive"
+	}
+
+	logger.Debug("no PID available, using time threshold", "session", filepath.Base(recPath))
+
+	// fall back to time-based threshold
+	if age > staleRecordingThreshold {
+		logger.Debug("recording exceeded stale threshold", "age", age, "threshold", staleRecordingThreshold)
+		return true, age, "time_threshold"
+	}
+	logger.Debug("recording within stale threshold", "age", age, "threshold", staleRecordingThreshold)
+	return false, age, "time_not_reached"
+}
+
+// missingArtifacts returns the list of required artifacts not present in sessionDir.
+func missingArtifacts(sessionDir string) []string {
+	var missing []string
+	for _, name := range requiredArtifacts {
+		if _, err := os.Stat(filepath.Join(sessionDir, name)); os.IsNotExist(err) {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
+// convertStoredEntries converts []map[string]any from StoredSession to []session.Entry.
+func convertStoredEntries(stored []map[string]any) []session.Entry {
+	entries := make([]session.Entry, 0, len(stored))
+	for _, m := range stored {
+		e := session.Entry{}
+		if t, ok := m["type"].(string); ok {
+			e.Type = session.EntryType(t)
+		}
+		if c, ok := m["content"].(string); ok {
+			e.Content = c
+		}
+		if tn, ok := m["tool_name"].(string); ok {
+			e.ToolName = tn
+		}
+		if ti, ok := m["tool_input"].(string); ok {
+			e.ToolInput = ti
+		}
+		if ts, ok := m["timestamp"].(string); ok {
+			if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
+				e.Timestamp = t
+			} else if t, err := time.Parse(time.RFC3339, ts); err == nil {
+				e.Timestamp = t
+			}
+		}
+		entries = append(entries, e)
+	}
+	return entries
+}
+
+// parseSummaryJSON attempts to extract a SummarizeResponse from the LLM output.
+// The output may contain the JSON embedded in markdown code fences or as raw JSON.
+func parseSummaryJSON(output string) (*session.SummarizeResponse, error) {
+	// try raw JSON first
+	var resp session.SummarizeResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &resp); err == nil && resp.Title != "" {
+		return &resp, nil
+	}
+
+	// try extracting from ```json ... ``` fences
+	if idx := strings.Index(output, "```json"); idx >= 0 {
+		start := idx + len("```json")
+		if end := strings.Index(output[start:], "```"); end >= 0 {
+			jsonStr := strings.TrimSpace(output[start : start+end])
+			if err := json.Unmarshal([]byte(jsonStr), &resp); err == nil && resp.Title != "" {
+				return &resp, nil
+			}
+		}
+	}
+
+	// try extracting from generic ``` ... ``` fences
+	if idx := strings.Index(output, "```"); idx >= 0 {
+		start := idx + len("```")
+		// skip to newline if present (e.g., ```\n{...}\n```)
+		if nlIdx := strings.Index(output[start:], "\n"); nlIdx >= 0 {
+			start += nlIdx + 1
+		}
+		if end := strings.Index(output[start:], "```"); end >= 0 {
+			jsonStr := strings.TrimSpace(output[start : start+end])
+			if err := json.Unmarshal([]byte(jsonStr), &resp); err == nil && resp.Title != "" {
+				return &resp, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("no valid summary JSON found in LLM output")
+}
+
+// invalidLeakedTypes are internal Claude Code types that should never appear
+// in processed session data. Their presence indicates an adapter bug.
+var invalidLeakedTypes = map[string]bool{
+	"queue-operation":       true,
+	"file-history-snapshot": true,
+	"progress":              true,
+	"summary":               true,
+	"last-prompt":           true,
+}
+
+// validSessionEntryTypes are types the web viewer can display.
+var validSessionEntryTypes = map[string]bool{
+	"user":      true,
+	"assistant": true,
+	"system":    true,
+	"tool":      true,
+}
+
+// validateStoredEntries checks stored session entries for data quality issues.
+// Returns a list of warning strings. Logs each issue at appropriate level.
+func validateStoredEntries(entries []map[string]any, logger *slog.Logger) []string {
+	var warnings []string
+	counts := make(map[string]int)
+
+	for _, entry := range entries {
+		entryType, _ := entry["type"].(string)
+		counts[entryType]++
+
+		if invalidLeakedTypes[entryType] {
+			msg := fmt.Sprintf("internal type %q leaked into raw.jsonl (adapter bug)", entryType)
+			warnings = append(warnings, msg)
+			logger.Warn(msg, "type", entryType)
+			if len(warnings) > 20 {
+				break
+			}
+		}
+	}
+
+	if counts["user"] == 0 && len(entries) > 5 {
+		msg := "no user messages in session — may be missing human prompts"
+		warnings = append(warnings, msg)
+		logger.Info(msg)
+	}
+
+	return warnings
+}
+
+// recoverRawFromSessionFile attempts to generate raw.jsonl from the adapter's
+// source file when a stale recording has no raw.jsonl. Handles the case where
+// an agent crashed before any hooks fired but the source file still exists.
+func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath string) bool {
+	// read .recording.json
+	data, err := os.ReadFile(recPath)
+	if err != nil {
+		logger.Warn("recovery: cannot read recording state", "path", recPath, "err", err)
+		return false
+	}
+	var state session.RecordingState
+	if err := json.Unmarshal(data, &state); err != nil {
+		logger.Warn("recovery: invalid recording state", "path", recPath, "err", err)
+		return false
+	}
+
+	// check SessionFile exists and has content
+	if state.SessionFile == "" {
+		logger.Info("recovery: no session file path in recording state", "session_dir", sessionDir)
+		return false
+	}
+	info, err := os.Stat(state.SessionFile)
+	if err != nil || info.Size() == 0 {
+		logger.Info("recovery: session file missing or empty",
+			"session_file", state.SessionFile,
+			"exists", err == nil,
+		)
+		return false
+	}
+
+	// get adapter
+	adapter, err := adapters.GetAdapter(state.AdapterName)
+	if err != nil {
+		logger.Warn("recovery: unknown adapter", "adapter", state.AdapterName, "err", err)
+		return false
+	}
+
+	// read all entries from source
+	rawEntries, err := adapter.Read(state.SessionFile)
+	if err != nil {
+		logger.Warn("recovery: failed to read session file", "path", state.SessionFile, "err", err)
+		return false
+	}
+
+	// filter entries by StartedAt
+	var filtered []adapters.RawEntry
+	for _, e := range rawEntries {
+		if !e.Timestamp.IsZero() && e.Timestamp.Before(state.StartedAt) {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+
+	if len(filtered) == 0 {
+		logger.Info("recovery: no entries after session start time",
+			"session_file", state.SessionFile,
+			"started_at", state.StartedAt,
+			"total_entries", len(rawEntries),
+		)
+		return false
+	}
+
+	// convert to session entries
+	entries := session.ConvertRawEntries(filtered)
+
+	// redact secrets
+	projectRoot := state.WorkspacePath
+	if projectRoot != "" {
+		redactor, _ := session.NewRedactorWithCustomRules(projectRoot)
+		if redactor != nil {
+			redactor.RedactEntries(entries)
+		}
+	}
+
+	// write to a temp file first so a partial write never leaves a corrupt
+	// raw.jsonl that a future Detect cycle would treat as valid
+	tmpPath := rawPath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		logger.Warn("recovery: cannot create temp file", "path", tmpPath, "err", err)
+		return false
+	}
+	defer func() {
+		f.Close()
+		os.Remove(tmpPath) // no-op after successful rename
+	}()
+
+	enc := json.NewEncoder(f)
+
+	// write header
+	header := map[string]any{
+		"_meta": map[string]any{
+			"schema_version": "1",
+			"agent_id":       state.AgentID,
+			"agent_type":     state.AdapterName,
+			"started_at":     state.StartedAt,
+			"recovered":      true,
+		},
+	}
+	if err := enc.Encode(header); err != nil {
+		logger.Warn("recovery: failed to write header", "err", err)
+		return false
+	}
+
+	for _, entry := range entries {
+		if err := enc.Encode(entry); err != nil {
+			logger.Warn("recovery: failed to write entry", "err", err)
+			return false
+		}
+	}
+
+	if err := f.Sync(); err != nil {
+		logger.Warn("recovery: fsync failed", "err", err)
+		return false
+	}
+
+	if err := f.Close(); err != nil {
+		logger.Warn("recovery: close failed", "err", err)
+		return false
+	}
+
+	if err := os.Rename(tmpPath, rawPath); err != nil {
+		logger.Warn("recovery: atomic rename failed", "err", err)
+		return false
+	}
+
+	logger.Info("recovery: raw.jsonl recovered from session file",
+		"session_dir", sessionDir,
+		"entries", len(entries),
+		"source", state.SessionFile,
+	)
+	return true
+}

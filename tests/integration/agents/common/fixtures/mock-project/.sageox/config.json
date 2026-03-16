@@ -1,0 +1,6 @@
+{
+  "config_version": "2",
+  "repo_id": "repo_test-integration-001",
+  "endpoint": "https://sageox.ai",
+  "session_recording": "auto"
+}

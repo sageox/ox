@@ -98,7 +98,7 @@ func runAgentSessionLog(inst *agentinstance.Instance, args []string) error {
 	}
 
 	// load recording state
-	state, err := session.LoadRecordingState(projectRoot)
+	state, err := session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
 	if err != nil {
 		return fmt.Errorf("failed to load recording state: %w", err)
 	}
@@ -116,7 +116,7 @@ func runAgentSessionLog(inst *agentinstance.Instance, args []string) error {
 	}
 
 	// update entry count in recording state (best-effort)
-	if updateErr := session.UpdateRecordingState(projectRoot, func(s *session.RecordingState) {
+	if updateErr := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
 		s.EntryCount++
 		// if SessionFile was empty (generic adapter), persist the file path
 		if s.SessionFile == "" {

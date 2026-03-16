@@ -141,3 +141,83 @@ func TestParseQueryArgs_KAliasInvalidValue(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid --limit")
 }
+
+func TestParseQueryArgs_Source(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantSource string
+		wantErr    string // substring match; empty means no error
+	}{
+		{
+			name:       "default source is team",
+			args:       []string{"search query"},
+			wantSource: "team",
+		},
+		{
+			name:       "source team canonical",
+			args:       []string{"--source", "team", "search query"},
+			wantSource: "team",
+		},
+		{
+			name:       "source team equals syntax",
+			args:       []string{"--source=team", "search query"},
+			wantSource: "team",
+		},
+		{
+			name:       "source code",
+			args:       []string{"--source", "code", "search query"},
+			wantSource: "code",
+		},
+		{
+			name:       "source all",
+			args:       []string{"--source=all", "search query"},
+			wantSource: "all",
+		},
+		{
+			name:       "teamctx alias normalizes to team",
+			args:       []string{"--source", "teamctx", "search query"},
+			wantSource: "team",
+		},
+		{
+			name:       "teamctx alias equals syntax",
+			args:       []string{"--source=teamctx", "search query"},
+			wantSource: "team",
+		},
+		{
+			name:    "invalid source errors",
+			args:    []string{"--source", "invalid", "search query"},
+			wantErr: "invalid source",
+		},
+		{
+			name:       "source team with mode knn",
+			args:       []string{"--source=team", "--mode=knn", "search query"},
+			wantSource: "team",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			qa, err := parseQueryArgs(tt.args)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantSource, qa.source)
+		})
+	}
+}
+
+func TestParseQueryArgs_SourceWithModeKnn(t *testing.T) {
+	t.Parallel()
+	qa, err := parseQueryArgs([]string{"--source=team", "--mode=knn", "search query"})
+	require.NoError(t, err)
+	assert.Equal(t, "team", qa.source)
+	assert.Equal(t, "knn", qa.mode)
+	assert.Equal(t, "search query", qa.query)
+}

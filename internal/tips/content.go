@@ -88,6 +88,7 @@ var primeUserTips = []string{
 	"View your team's knowledge base in the browser with `ox view team`",
 	"SageOx team context updates automatically — decisions from one session inform every future session",
 	"Record team discussions at sageox.ai to give all AI coworkers shared context",
+	`Launch %s and ask: "Based on the SageOx team context, what would be the next task that would bring all the recent work of the team into better alignment?"`,
 }
 
 // agentNameMap maps agent type strings to friendly display names.

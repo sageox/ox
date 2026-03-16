@@ -15,8 +15,8 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/constants"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
@@ -1642,7 +1642,7 @@ func installAgentHooks(gitRoot string, quiet bool) []string {
 			if !quiet {
 				cli.PrintSuccess("Installed Claude Code integration")
 			}
-			installedHooks = append(installedHooks, ".claude/settings.local.json")
+			installedHooks = append(installedHooks, ".claude/settings.json")
 		}
 	}
 

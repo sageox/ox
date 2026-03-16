@@ -27,7 +27,6 @@ func TestWriteAndReadSessionMeta(t *testing.T) {
 		Summary:     "Implemented LFS pipeline",
 		Files: map[string]FileRef{
 			"raw.jsonl":    {OID: "sha256:abc123", Size: 1024},
-			"events.jsonl": {OID: "sha256:def456", Size: 512},
 			"summary.md":   {OID: "sha256:ghi789", Size: 256},
 			"session.md":   {OID: "sha256:jkl012", Size: 2048},
 			"session.html": {OID: "sha256:mno345", Size: 4096},
@@ -52,7 +51,7 @@ func TestWriteAndReadSessionMeta(t *testing.T) {
 	assert.Equal(t, meta.Model, got.Model)
 	assert.Equal(t, meta.EntryCount, got.EntryCount)
 	assert.Equal(t, meta.Summary, got.Summary)
-	assert.Len(t, got.Files, 5)
+	assert.Len(t, got.Files, 4)
 	assert.Equal(t, "sha256:abc123", got.Files["raw.jsonl"].OID)
 	assert.Equal(t, int64(1024), got.Files["raw.jsonl"].Size)
 }
@@ -76,12 +75,12 @@ func TestCheckHydrationStatus_Hydrated(t *testing.T) {
 
 	// create content files
 	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte("data"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "events.jsonl"), []byte("data"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.md"), []byte("data"), 0644))
 
 	meta := &SessionMeta{
 		Files: map[string]FileRef{
-			"raw.jsonl":    {OID: "sha256:abc", Size: 4},
-			"events.jsonl": {OID: "sha256:def", Size: 4},
+			"raw.jsonl":  {OID: "sha256:abc", Size: 4},
+			"summary.md": {OID: "sha256:def", Size: 4},
 		},
 	}
 
@@ -96,8 +95,8 @@ func TestCheckHydrationStatus_Dehydrated(t *testing.T) {
 
 	meta := &SessionMeta{
 		Files: map[string]FileRef{
-			"raw.jsonl":    {OID: "sha256:abc", Size: 100},
-			"events.jsonl": {OID: "sha256:def", Size: 200},
+			"raw.jsonl":  {OID: "sha256:abc", Size: 100},
+			"summary.md": {OID: "sha256:def", Size: 200},
 		},
 	}
 
@@ -115,8 +114,8 @@ func TestCheckHydrationStatus_Partial(t *testing.T) {
 
 	meta := &SessionMeta{
 		Files: map[string]FileRef{
-			"raw.jsonl":    {OID: "sha256:abc", Size: 4},
-			"events.jsonl": {OID: "sha256:def", Size: 200},
+			"raw.jsonl":  {OID: "sha256:abc", Size: 4},
+			"summary.md": {OID: "sha256:def", Size: 200},
 		},
 	}
 
@@ -350,14 +349,14 @@ func TestCheckHydrationStatus_WithPointers(t *testing.T) {
 		FileRef{OID: "sha256:abc", Size: 100},
 	))
 	require.NoError(t, WritePointerFile(
-		filepath.Join(sessionDir, "events.jsonl"),
+		filepath.Join(sessionDir, "summary.md"),
 		FileRef{OID: "sha256:def", Size: 200},
 	))
 
 	meta := &SessionMeta{
 		Files: map[string]FileRef{
-			"raw.jsonl":    {OID: "sha256:abc", Size: 100},
-			"events.jsonl": {OID: "sha256:def", Size: 200},
+			"raw.jsonl":  {OID: "sha256:abc", Size: 100},
+			"summary.md": {OID: "sha256:def", Size: 200},
 		},
 	}
 
@@ -377,14 +376,14 @@ func TestCheckHydrationStatus_MixedPointerAndContent(t *testing.T) {
 		FileRef{OID: "sha256:abc", Size: 100},
 	))
 	require.NoError(t, os.WriteFile(
-		filepath.Join(sessionDir, "events.jsonl"),
-		[]byte(`{"event":"real content that is long enough"}`), 0644,
+		filepath.Join(sessionDir, "summary.md"),
+		[]byte("# Summary with enough content to not be a pointer"), 0644,
 	))
 
 	meta := &SessionMeta{
 		Files: map[string]FileRef{
-			"raw.jsonl":    {OID: "sha256:abc", Size: 100},
-			"events.jsonl": {OID: "sha256:def", Size: 44},
+			"raw.jsonl":  {OID: "sha256:abc", Size: 100},
+			"summary.md": {OID: "sha256:def", Size: 50},
 		},
 	}
 

@@ -96,7 +96,7 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 		return fmt.Errorf("failed to process session: %w", err)
 	}
 
-	if err := session.ClearRecordingState(projectRoot); err != nil {
+	if err := session.ClearRecordingStateForAgent(projectRoot, inst.AgentID); err != nil {
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("failed to clear recovered recording state: %w", err)
 	}
@@ -190,7 +190,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 
 			// copy other artifacts if they exist in cache
 			cacheDir := filepath.Dir(rawPath)
-			for _, name := range []string{ledgerFileEvents, ledgerFileHTML, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"} {
+			for _, name := range []string{ledgerFileHTML, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"} {
 				src := filepath.Join(cacheDir, name)
 				if srcData, err := os.ReadFile(src); err == nil {
 					dst := filepath.Join(ledgerSessionDir, name)
@@ -210,6 +210,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 					EntryCount(entryCount).
 					UserID(auth.GetUserID(recoverEndpoint)).
 					RepoID(getRepoIDOrDefault(projectRoot)).
+					StopReason(session.StopReasonRecovered).
 					WithFiles(fileRefs).
 					Build()
 				if err := lfs.WriteSessionMeta(ledgerSessionDir, meta); err != nil {

@@ -38,7 +38,7 @@ WARNING: This is a destructive operation and cannot be undone.
 This command will:
 1. Remove .sageox/ directory and all contents
 2. Remove git hooks (prepare-commit-msg, etc.)
-3. Clean up agent integration files (.claude/settings.local.json, etc.)
+3. Clean up agent integration files (.claude/settings.json, etc.)
 4. Remove 'ox agent prime' from AGENTS.md/CLAUDE.md
 5. Optionally remove user-level integration hooks
 
@@ -723,7 +723,7 @@ func cleanupAgentFiles(gitRoot string) error {
 	}
 
 	// TODO: implement cleanup for other agent integrations:
-	// - .claude/settings.local.json (project-level, use existing hooks_claude.go helpers)
+	// - .claude/settings.json (project-level shared hooks, use existing hooks_claude.go helpers)
 	// - .opencode/plugin/ox-prime.ts (project-level, use existing hooks_opencode.go helpers)
 	// - .cursorrules (SageOx sections if any)
 	// - .windsurfrules (SageOx sections if any)

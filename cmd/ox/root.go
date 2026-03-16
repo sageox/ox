@@ -130,10 +130,12 @@ func init() {
 	rootCmd.AddGroup(&cobra.Group{ID: "diagnostics", Title: "Diagnostics:"})
 	rootCmd.AddGroup(&cobra.Group{ID: "agent-interface", Title: "Agent Integration:"})
 	agentCmd.GroupID = "agent-interface"
+	coworkerCmd.GroupID = "agent-interface"
 
 	// software development commands
 	initCmd.GroupID = "dev"
 	importCmd.GroupID = "dev"
+	queryCmd.GroupID = "dev"
 
 	// auth commands
 	loginCmd.GroupID = "auth"
@@ -149,6 +151,7 @@ func init() {
 	// register commands
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(importCmd)
+	rootCmd.AddCommand(queryCmd)
 	// agentCmd is registered in agent.go
 
 	// auth commands
@@ -167,7 +170,7 @@ func init() {
 	rootCmd.SilenceErrors = true
 	rootCmd.SilenceUsage = true
 
-	// disable Cobra's built-in suggestions - we use uxfriction for "did you mean?"
+	// disable Cobra's built-in suggestions - we use frictionax for "did you mean?"
 	rootCmd.DisableSuggestions = true
 
 	// hide completion command unless post-MVP features are enabled

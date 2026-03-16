@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
@@ -127,7 +128,7 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 		// check if still recording (.recording.json present)
 		recordingPath := filepath.Join(sessionDir, ".recording.json")
 		if _, err := os.Stat(recordingPath); err == nil {
-			// read recording state to check for StopIncomplete
+			// read recording state to check for StopIncomplete or staleness
 			recData, readErr := os.ReadFile(recordingPath)
 			if readErr != nil {
 				continue // can't read, skip
@@ -136,12 +137,21 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 			if json.Unmarshal(recData, &recState) != nil {
 				continue // corrupt, skip
 			}
-			if !recState.StopIncomplete {
+
+			// determine if this recording is stale (older than threshold)
+			isStale := !recState.StartedAt.IsZero() && time.Since(recState.StartedAt) > session.StaleRecordingThreshold
+
+			if recState.StopIncomplete {
+				// StopIncomplete: stop was attempted but session file was empty.
+				slog.Info("clearing stop-incomplete recording for retry", "session", sessionName, "agent_id", recState.AgentID)
+			} else if isStale {
+				// stale recording with content — agent exited without calling stop.
+				// clear recording state so session can be recovered.
+				slog.Info("clearing stale recording for retry", "session", sessionName, "agent_id", recState.AgentID, "age", time.Since(recState.StartedAt))
+			} else {
 				continue // genuinely active recording, skip
 			}
-			// StopIncomplete: stop was attempted but session file was empty.
-			// Clear the recording state so this session can be recovered.
-			slog.Info("clearing stop-incomplete recording for retry", "session", sessionName, "agent_id", recState.AgentID)
+
 			_ = os.Remove(recordingPath)
 			// also clean up lock files
 			lockFiles, _ := filepath.Glob(filepath.Join(sessionDir, "*.lock"))
@@ -248,6 +258,12 @@ func readCacheSessionMeta(rawPath string) (*session.StoreMeta, int, error) {
 // the authoritative copy; raw.jsonl is the critical file from which all others
 // can be regenerated.
 func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) error {
+	// guard: never upload a session with zero substantive entries
+	if orphan.EntryCount == 0 {
+		slog.Info("skipping retry upload: zero entries", "session", orphan.SessionName)
+		return nil
+	}
+
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, orphan.SessionName)
 
@@ -269,7 +285,7 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 	}
 
 	// copy secondary artifacts (best-effort — skip missing files, don't abort on failure)
-	secondaryFiles := []string{ledgerFileEvents, ledgerFileHTML, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"}
+	secondaryFiles := []string{ledgerFileHTML, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"}
 	for _, name := range secondaryFiles {
 		src := filepath.Join(orphan.CachePath, name)
 		dst := filepath.Join(sessionDir, name)
@@ -295,6 +311,7 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 		EntryCount(orphan.EntryCount).
 		UserID(auth.GetUserID(retryEndpoint)).
 		RepoID(orphan.Meta.RepoID).
+		StopReason(session.StopReasonRecovered).
 		WithFiles(fileRefs).
 		Build()
 	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {

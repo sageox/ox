@@ -459,14 +459,6 @@ func TestRegenerateArtifacts(t *testing.T) {
 		err := regenerateArtifacts(sessionPath, rawSession)
 		require.NoError(t, err)
 
-		// events.jsonl should be created
-		eventsPath := filepath.Join(sessionPath, ledgerFileEvents)
-		_, err = os.Stat(eventsPath)
-		assert.NoError(t, err, "events.jsonl should exist")
-		eventsData, err := os.ReadFile(eventsPath)
-		require.NoError(t, err)
-		assert.NotEmpty(t, eventsData, "events.jsonl should have content")
-
 		// session.html should be created
 		htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
 		_, err = os.Stat(htmlPath)

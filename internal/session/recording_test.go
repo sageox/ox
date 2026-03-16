@@ -765,9 +765,7 @@ func TestStartRecording_ConcurrentAgents_PreservesSessionData(t *testing.T) {
 
 	// simulate Agent A writing session data
 	rawPath := filepath.Join(stateA.SessionPath, "raw.jsonl")
-	eventsPath := filepath.Join(stateA.SessionPath, "events.jsonl")
 	require.NoError(t, os.WriteFile(rawPath, []byte("{\"type\":\"header\"}\n"), 0644))
-	require.NoError(t, os.WriteFile(eventsPath, []byte("{\"event\":\"test\"}\n"), 0644))
 
 	// Agent B starts — both recordings should coexist
 	stateB, err := StartRecording(projectRoot, StartRecordingOptions{
@@ -783,11 +781,9 @@ func TestStartRecording_ConcurrentAgents_PreservesSessionData(t *testing.T) {
 	_, err = os.Stat(filepath.Join(stateB.SessionPath, recordingFile))
 	assert.False(t, os.IsNotExist(err), "B's .recording.json should exist")
 
-	// A's session DATA must survive (raw.jsonl, events.jsonl)
+	// A's session DATA must survive (raw.jsonl)
 	_, err = os.Stat(rawPath)
 	assert.False(t, os.IsNotExist(err), "A's raw.jsonl must survive")
-	_, err = os.Stat(eventsPath)
-	assert.False(t, os.IsNotExist(err), "A's events.jsonl must survive")
 
 	// A's session folder itself must still exist
 	_, err = os.Stat(stateA.SessionPath)
@@ -991,15 +987,15 @@ func TestConcurrentAgentRecording(t *testing.T) {
 
 	// both agents start recording
 	stateA, err := StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentA,
-		AdapterName:     "claude-code",
+		AgentID:     agentA,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, stateA)
 
 	stateB, err := StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentB,
-		AdapterName:     "claude-code",
+		AgentID:     agentB,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 	require.NotNil(t, stateB)
@@ -1022,14 +1018,14 @@ func TestConcurrentAgentStop(t *testing.T) {
 	agentB := "OxAgentB"
 
 	_, err := StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentA,
-		AdapterName:     "claude-code",
+		AgentID:     agentA,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 
 	_, err = StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentB,
-		AdapterName:     "claude-code",
+		AgentID:     agentB,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 
@@ -1049,14 +1045,14 @@ func TestConcurrentAgentClear(t *testing.T) {
 	agentB := "OxAgentB"
 
 	_, err := StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentA,
-		AdapterName:     "claude-code",
+		AgentID:     agentA,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 
 	_, err = StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentB,
-		AdapterName:     "claude-code",
+		AgentID:     agentB,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 
@@ -1075,14 +1071,14 @@ func TestUpdateRecordingStateForAgent_Isolation(t *testing.T) {
 	agentB := "OxAgentB"
 
 	_, err := StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentA,
-		AdapterName:     "claude-code",
+		AgentID:     agentA,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 
 	_, err = StartRecording(projectRoot, StartRecordingOptions{
-		AgentID:         agentB,
-		AdapterName:     "claude-code",
+		AgentID:     agentB,
+		AdapterName: "claude-code",
 	})
 	require.NoError(t, err)
 
@@ -1137,21 +1133,21 @@ func TestExplicitStopMarker(t *testing.T) {
 	require.NoError(t, os.MkdirAll(sessionsDir, 0755))
 
 	// no marker initially
-	assert.False(t, ConsumeExplicitStop(tmpDir), "no marker should exist initially")
+	assert.False(t, ConsumeExplicitStop(tmpDir, "test-agent"), "no marker should exist initially")
 
 	// write marker
-	require.NoError(t, MarkExplicitStop(tmpDir))
+	require.NoError(t, MarkExplicitStop(tmpDir, "test-agent"))
 
 	// marker file should exist
-	markerPath := filepath.Join(sessionsDir, explicitStopMarker)
+	markerPath := filepath.Join(sessionsDir, explicitStopMarker+".test-agent")
 	_, err := os.Stat(markerPath)
 	assert.NoError(t, err, "marker file should exist after MarkExplicitStop")
 
 	// consume removes it and returns true
-	assert.True(t, ConsumeExplicitStop(tmpDir), "ConsumeExplicitStop should return true when marker exists")
+	assert.True(t, ConsumeExplicitStop(tmpDir, "test-agent"), "ConsumeExplicitStop should return true when marker exists")
 
 	// second consume returns false (already consumed)
-	assert.False(t, ConsumeExplicitStop(tmpDir), "ConsumeExplicitStop should return false after already consumed")
+	assert.False(t, ConsumeExplicitStop(tmpDir, "test-agent"), "ConsumeExplicitStop should return false after already consumed")
 
 	// marker file should be gone
 	_, err = os.Stat(markerPath)
@@ -1159,9 +1155,9 @@ func TestExplicitStopMarker(t *testing.T) {
 }
 
 func TestExplicitStopMarker_EmptyProjectRoot(t *testing.T) {
-	err := MarkExplicitStop("")
+	err := MarkExplicitStop("", "test-agent")
 	assert.Error(t, err, "MarkExplicitStop with empty root should error")
-	assert.False(t, ConsumeExplicitStop(""), "ConsumeExplicitStop with empty root should return false")
+	assert.False(t, ConsumeExplicitStop("", "test-agent"), "ConsumeExplicitStop with empty root should return false")
 }
 
 // TestStopClearStartLifecycle reproduces the exact bug from issue #132:
@@ -1184,11 +1180,11 @@ func TestStopClearStartLifecycle(t *testing.T) {
 	// 2. user runs /ox-session-stop (StopRecording + MarkExplicitStop)
 	_, err = StopRecording(projectRoot, "OxUser1")
 	require.NoError(t, err)
-	require.NoError(t, MarkExplicitStop(projectRoot))
+	require.NoError(t, MarkExplicitStop(projectRoot, "OxUser1"))
 
 	// 3. user runs /clear → hook calls prime → prime checks marker before auto-start
 	//    ConsumeExplicitStop returns true → prime skips auto-start
-	assert.True(t, ConsumeExplicitStop(projectRoot),
+	assert.True(t, ConsumeExplicitStop(projectRoot, "OxUser1"),
 		"marker must be present after explicit stop — prime relies on this to skip auto-start")
 
 	// 4. since prime skipped auto-start, IsRecording should still be false
@@ -1215,9 +1211,436 @@ func TestExplicitStopMarker_XDGPaths(t *testing.T) {
 	projectRoot := setupRecordingTest(t, cacheDir)
 
 	// marker should work through the XDG-aware sessionsSearchPaths
-	require.NoError(t, MarkExplicitStop(projectRoot))
-	assert.True(t, ConsumeExplicitStop(projectRoot),
+	require.NoError(t, MarkExplicitStop(projectRoot, "OxUser1"))
+	assert.True(t, ConsumeExplicitStop(projectRoot, "OxUser1"),
 		"marker must be consumable when written via XDG search paths")
-	assert.False(t, ConsumeExplicitStop(projectRoot),
+	assert.False(t, ConsumeExplicitStop(projectRoot, "OxUser1"),
 		"consumed marker must not be consumable again")
+}
+
+// TestMultiAgentLoadForAgent_ReturnsCorrectAgent is a regression test for
+// https://github.com/sageox/ox/issues/168 — LoadRecordingState (first-found)
+// returned the wrong agent's state when multiple agents recorded concurrently,
+// causing session stop to process an empty subagent recording instead of the
+// real one.
+func TestMultiAgentLoadForAgent_ReturnsCorrectAgent(t *testing.T) {
+	projectRoot, _ := createTestSessionProject(t)
+
+	// simulate Conductor: main agent has a real session file, subagents have empty ones
+	mainAgent := "OxzJGM" // alphabetically AFTER subagents
+	subAgents := []string{"Ox0OE4", "Ox88vV", "OxHc7U", "Oxsv7q"}
+
+	// start subagents first (empty session_file, generic adapter)
+	for _, id := range subAgents {
+		state, err := StartRecording(projectRoot, StartRecordingOptions{
+			AgentID:     id,
+			AdapterName: "claude",
+		})
+		require.NoError(t, err)
+		require.NotNil(t, state)
+		assert.Empty(t, state.SessionFile, "subagent %s should have empty session_file", id)
+	}
+
+	// start main agent with a real session file (claude-code adapter finds JSONL)
+	mainState, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID:     mainAgent,
+		AdapterName: "claude-code",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, mainState)
+
+	// simulate claude-code adapter finding a real JSONL file
+	fakeJSONL := filepath.Join(t.TempDir(), "session.jsonl")
+	require.NoError(t, os.WriteFile(fakeJSONL, []byte(`{"type":"user","content":"hello"}`), 0600))
+	err = UpdateRecordingStateForAgent(projectRoot, mainAgent, func(s *RecordingState) {
+		s.SessionFile = fakeJSONL
+	})
+	require.NoError(t, err)
+
+	// BUG SCENARIO: LoadRecordingState (first-found) returns Ox0OE4 or Ox88vV
+	// (alphabetically first), which has empty SessionFile.
+	// LoadRecordingStateForAgent must return the correct agent.
+	firstFound, err := LoadRecordingState(projectRoot)
+	require.NoError(t, err)
+	require.NotNil(t, firstFound)
+
+	agentSpecific, err := LoadRecordingStateForAgent(projectRoot, mainAgent)
+	require.NoError(t, err)
+	require.NotNil(t, agentSpecific)
+
+	// the first-found state is NOT the main agent (it's a subagent sorted first)
+	assert.NotEqual(t, mainAgent, firstFound.AgentID,
+		"first-found should return a subagent (alphabetically first), demonstrating the bug")
+	assert.Empty(t, firstFound.SessionFile,
+		"first-found subagent has empty session_file — this is what the bug processed")
+
+	// agent-specific returns the correct state with the real session file
+	assert.Equal(t, mainAgent, agentSpecific.AgentID)
+	assert.Equal(t, fakeJSONL, agentSpecific.SessionFile,
+		"agent-specific must return the correct session file")
+}
+
+// TestMultiAgentClearForAgent_OnlyClearsTargetAgent is a regression test for
+// https://github.com/sageox/ox/issues/168 — ClearRecordingState (first-found)
+// cleared the wrong agent's recording, leaving the target agent orphaned.
+func TestMultiAgentClearForAgent_OnlyClearsTargetAgent(t *testing.T) {
+	projectRoot, _ := createTestSessionProject(t)
+
+	mainAgent := "OxzJGM"
+	subAgent := "Ox88vV" // alphabetically before main
+
+	_, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: subAgent, AdapterName: "claude",
+	})
+	require.NoError(t, err)
+
+	_, err = StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: mainAgent, AdapterName: "claude-code",
+	})
+	require.NoError(t, err)
+
+	// clear the main agent specifically
+	err = ClearRecordingStateForAgent(projectRoot, mainAgent)
+	require.NoError(t, err)
+
+	// main agent cleared
+	assert.False(t, IsRecordingForAgent(projectRoot, mainAgent),
+		"main agent should no longer be recording")
+
+	// subagent must survive — the bug would have cleared this one instead
+	assert.True(t, IsRecordingForAgent(projectRoot, subAgent),
+		"subagent must still be recording after clearing a different agent")
+
+	// verify via load
+	subState, err := LoadRecordingStateForAgent(projectRoot, subAgent)
+	require.NoError(t, err)
+	require.NotNil(t, subState, "subagent state must still exist")
+	assert.Equal(t, subAgent, subState.AgentID)
+}
+
+// TestMultiAgentUpdateForAgent_Isolation verifies that UpdateRecordingStateForAgent
+// only modifies the target agent's state in a multi-agent scenario.
+// Regression test for https://github.com/sageox/ox/issues/168
+func TestMultiAgentUpdateForAgent_Isolation(t *testing.T) {
+	projectRoot, _ := createTestSessionProject(t)
+
+	mainAgent := "OxzJGM"
+	subAgent := "Ox88vV"
+
+	_, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: subAgent, AdapterName: "claude",
+	})
+	require.NoError(t, err)
+
+	_, err = StartRecording(projectRoot, StartRecordingOptions{
+		AgentID: mainAgent, AdapterName: "claude-code",
+	})
+	require.NoError(t, err)
+
+	// mark main agent as incomplete (the StopIncomplete path from the bug)
+	err = UpdateRecordingStateForAgent(projectRoot, mainAgent, func(s *RecordingState) {
+		s.StopIncomplete = true
+	})
+	require.NoError(t, err)
+
+	// main agent updated
+	mainState, err := LoadRecordingStateForAgent(projectRoot, mainAgent)
+	require.NoError(t, err)
+	assert.True(t, mainState.StopIncomplete)
+
+	// subagent untouched
+	subState, err := LoadRecordingStateForAgent(projectRoot, subAgent)
+	require.NoError(t, err)
+	assert.False(t, subState.StopIncomplete,
+		"subagent must not be affected by updating a different agent")
+}
+
+// --- Gap 3: cleanupStaleEmptyRecordings tests ---
+
+func TestCleanupStaleEmptyRecordings_RemovesOldStubs(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	tmpDir := t.TempDir()
+	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxStale")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// create a .recording.json with StartedAt > 48h ago, no raw.jsonl
+	state := &RecordingState{
+		AgentID:     "OxStale",
+		StartedAt:   time.Now().Add(-72 * time.Hour),
+		SessionPath: sessionPath,
+	}
+	data, err := json.Marshal(state)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+
+	cleanupStaleEmptyRecordings(tmpDir)
+
+	// .recording.json should be removed
+	_, err = os.Stat(filepath.Join(sessionPath, recordingFile))
+	assert.True(t, os.IsNotExist(err), ".recording.json should be removed for stale empty stub")
+}
+
+func TestCleanupStaleEmptyRecordings_KeepsRecentStubs(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	tmpDir := t.TempDir()
+	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxNew1")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// create a .recording.json with StartedAt < 48h ago, no raw.jsonl
+	state := &RecordingState{
+		AgentID:     "OxNew1",
+		StartedAt:   time.Now().Add(-1 * time.Hour),
+		SessionPath: sessionPath,
+	}
+	data, err := json.Marshal(state)
+	require.NoError(t, err)
+	recPath := filepath.Join(sessionPath, recordingFile)
+	require.NoError(t, os.WriteFile(recPath, data, 0600))
+
+	cleanupStaleEmptyRecordings(tmpDir)
+
+	// .recording.json should still exist
+	_, err = os.Stat(recPath)
+	assert.False(t, os.IsNotExist(err), ".recording.json should be preserved for recent stub")
+}
+
+func TestCleanupStaleEmptyRecordings_KeepsWithRawJSONL(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	tmpDir := t.TempDir()
+	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxHasR")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// create a .recording.json with StartedAt > 48h ago AND raw.jsonl present
+	state := &RecordingState{
+		AgentID:     "OxHasR",
+		StartedAt:   time.Now().Add(-72 * time.Hour),
+		SessionPath: sessionPath,
+	}
+	data, err := json.Marshal(state)
+	require.NoError(t, err)
+	recPath := filepath.Join(sessionPath, recordingFile)
+	require.NoError(t, os.WriteFile(recPath, data, 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"), []byte("{}\n"), 0600))
+
+	cleanupStaleEmptyRecordings(tmpDir)
+
+	// .recording.json should still exist because raw.jsonl is present
+	_, err = os.Stat(recPath)
+	assert.False(t, os.IsNotExist(err), ".recording.json should be preserved when raw.jsonl exists")
+}
+
+func TestCleanupStaleEmptyRecordings_RemovesEmptyDir(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	tmpDir := t.TempDir()
+	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxEmDr")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// create a stale .recording.json (only file in the dir)
+	state := &RecordingState{
+		AgentID:     "OxEmDr",
+		StartedAt:   time.Now().Add(-72 * time.Hour),
+		SessionPath: sessionPath,
+	}
+	data, err := json.Marshal(state)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+
+	cleanupStaleEmptyRecordings(tmpDir)
+
+	// session directory should be removed since it became empty after cleanup
+	_, err = os.Stat(sessionPath)
+	assert.True(t, os.IsNotExist(err), "empty session directory should be removed after cleanup")
+}
+
+// --- Gap 4: Corrupted .recording.json recovery tests ---
+
+func TestLoadRecordingState_CorruptJSON(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	tmpDir := t.TempDir()
+	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxBadJ")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// write truncated JSON
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), []byte(`{"agent_id": "Ox`), 0600))
+
+	state, err := LoadRecordingState(tmpDir)
+	require.NoError(t, err, "corrupt JSON should not return an error")
+	assert.Nil(t, state, "corrupt JSON should return nil state")
+}
+
+func TestLoadRecordingState_EmptyFile(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	tmpDir := t.TempDir()
+	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxMtyF")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// write empty file
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), []byte{}, 0600))
+
+	state, err := LoadRecordingState(tmpDir)
+	require.NoError(t, err, "empty file should not return an error")
+	assert.Nil(t, state, "empty file should return nil state")
+}
+
+func TestLoadAllRecordingStates_MixedValidAndCorrupt(t *testing.T) {
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	tmpDir := t.TempDir()
+
+	// create a valid session
+	validSessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxGood")
+	require.NoError(t, os.MkdirAll(validSessionPath, 0755))
+	validState := &RecordingState{
+		AgentID:     "OxGood",
+		StartedAt:   time.Now(),
+		SessionPath: validSessionPath,
+	}
+	validData, err := json.Marshal(validState)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(validSessionPath, recordingFile), validData, 0600))
+
+	// create a corrupt session
+	corruptSessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxBad1")
+	require.NoError(t, os.MkdirAll(corruptSessionPath, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(corruptSessionPath, recordingFile), []byte(`{corrupted`), 0600))
+
+	states, err := LoadAllRecordingStates(tmpDir)
+	require.NoError(t, err, "mixed valid/corrupt should not return an error")
+	require.Len(t, states, 1, "should return only the valid recording state")
+	assert.Equal(t, "OxGood", states[0].AgentID)
+}
+
+// --- Ghost session cleanup tests ---
+
+func TestCleanupGhostSessionsInDir_RemovesDeadPIDNoData(t *testing.T) {
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxDead")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// create recording with a PID that doesn't exist (99999999)
+	state := &RecordingState{
+		AgentID:     "OxDead",
+		StartedAt:   time.Now().Add(-10 * time.Minute),
+		SessionPath: sessionPath,
+		ParentPID:   99999999, // guaranteed dead
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+
+	result := CleanupGhostSessionsInDir(sessionsDir)
+	assert.Equal(t, 1, result.Removed)
+	assert.Contains(t, result.Names, "2026-01-01T00-00-user-OxDead")
+
+	// .recording.json should be gone
+	_, err := os.Stat(filepath.Join(sessionPath, recordingFile))
+	assert.True(t, os.IsNotExist(err), "ghost recording marker should be removed")
+}
+
+func TestCleanupGhostSessionsInDir_PreservesOrphanWithData(t *testing.T) {
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxOrph")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// dead PID but has raw.jsonl with content = orphan, not ghost
+	state := &RecordingState{
+		AgentID:     "OxOrph",
+		StartedAt:   time.Now().Add(-2 * time.Hour),
+		SessionPath: sessionPath,
+		ParentPID:   99999999,
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"), []byte(`{"metadata":{}}`+"\n"+`{"type":"user"}`+"\n"), 0600))
+
+	result := CleanupGhostSessionsInDir(sessionsDir)
+	assert.Equal(t, 0, result.Removed, "orphan with data should NOT be cleaned up")
+
+	// .recording.json should still exist
+	_, err := os.Stat(filepath.Join(sessionPath, recordingFile))
+	assert.NoError(t, err, "orphan recording marker should be preserved")
+}
+
+func TestCleanupGhostSessionsInDir_SkipsLiveProcess(t *testing.T) {
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxLive")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// use current PID (definitely alive)
+	state := &RecordingState{
+		AgentID:     "OxLive",
+		StartedAt:   time.Now().Add(-10 * time.Minute),
+		SessionPath: sessionPath,
+		ParentPID:   os.Getpid(),
+		EntryCount:  0,
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+
+	result := CleanupGhostSessionsInDir(sessionsDir)
+	assert.Equal(t, 0, result.Removed, "live process session should NOT be cleaned up")
+
+	_, err := os.Stat(filepath.Join(sessionPath, recordingFile))
+	assert.NoError(t, err, "live session recording marker should be preserved")
+}
+
+func TestCleanupGhostSessionsInDir_SkipsNoPID(t *testing.T) {
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxNoPd")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// no ParentPID recorded — can't determine liveness, skip
+	state := &RecordingState{
+		AgentID:     "OxNoPd",
+		StartedAt:   time.Now().Add(-72 * time.Hour),
+		SessionPath: sessionPath,
+		ParentPID:   0,
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+
+	result := CleanupGhostSessionsInDir(sessionsDir)
+	assert.Equal(t, 0, result.Removed, "session without PID should NOT be cleaned by ghost cleanup")
+}
+
+func TestCleanupGhostSessionsInDir_DoubleCleanupIsIdempotent(t *testing.T) {
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxDbl1")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	state := &RecordingState{
+		AgentID:     "OxDbl1",
+		StartedAt:   time.Now().Add(-1 * time.Hour),
+		SessionPath: sessionPath,
+		ParentPID:   99999999,
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+
+	// first cleanup
+	r1 := CleanupGhostSessionsInDir(sessionsDir)
+	assert.Equal(t, 1, r1.Removed)
+
+	// second cleanup — should be a no-op (no .recording.json left to find)
+	r2 := CleanupGhostSessionsInDir(sessionsDir)
+	assert.Equal(t, 0, r2.Removed, "second cleanup should find nothing — idempotent")
 }

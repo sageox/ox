@@ -195,7 +195,7 @@ func TestDocMetaSerialization(t *testing.T) {
 		SourceOID:      srcRef.OID,
 		CreatedAt:      time.Date(2026, 2, 14, 10, 30, 0, 0, time.UTC).Format(time.RFC3339),
 		ImportedAt:     now,
-		Path: "data/docs/2026/02/14/test-doc",
+		Path:           "data/docs/2026/02/14/test-doc",
 		Sidecars: map[string]sidecar{
 			"text-extract": {
 				Filename:  "extracted.md",
