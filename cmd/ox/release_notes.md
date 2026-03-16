@@ -5,16 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.1] - 2026-03-15
+## [0.5.1] - 2026-03-16
 
 ### Added
 
 - `ox agent session abort <session-name> --force` aborts orphaned, ghost, or stale sessions by name with partial name resolution
 
+### Changed
+
+- Faster code search and indexing via buffer reuse, optimized parsing, and in-memory blob caching
+- Daemon notification deduplication is now O(1) instead of O(n)
+- LFS upload/download reuses a shared HTTP client for connection pooling
+
 ### Fixed
 
 - Session recording ParentPID now tracks the long-lived agent process instead of the transient hook process, preventing sessions from appearing as orphans immediately after startup
 - Hook safety-net recording call no longer fails with "path cannot be empty" after prime subprocess completes
+- `ox logout --force` now correctly skips confirmation prompt for scripted/non-interactive use
+- `ox status` always shows ledger provisioning status, even when ledger isn't configured locally
+- JWT exchange errors during authentication handled more securely with cleaner error messages
+- Stale Personal Access Tokens automatically removed from git remote URLs on logout
+- Race condition in `ox doctor` git connectivity check fixed (used `context.WithTimeout` instead of manual goroutine)
 
 ## [0.5.0] - 2026-03-15
 
