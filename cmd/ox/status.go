@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -1625,9 +1626,13 @@ daemon health, and a tree view of all SageOx directory locations.`,
 
 		// show version update notice if available
 		if vResult := checkVersionFromCache(); vResult != nil {
+			upgradeHint := "brew upgrade sageox"
+			if runtime.GOOS != "darwin" {
+				upgradeHint = "https://github.com/sageox/ox/releases"
+			}
 			fmt.Printf("\n%s  %s\n",
 				statusWarningStyle.Render("Update available"),
-				fmt.Sprintf("v%s → v%s — brew upgrade sageox", vResult.CurrentVersion, vResult.LatestVersion),
+				fmt.Sprintf("v%s → v%s — %s", vResult.CurrentVersion, vResult.LatestVersion, upgradeHint),
 			)
 		}
 
