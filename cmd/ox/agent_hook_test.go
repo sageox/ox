@@ -341,6 +341,177 @@ func appendClaudeEntries(t *testing.T, path string, _ time.Time, lines ...string
 	}
 }
 
+// --- Session recording lifecycle regression tests ---
+
+// TestAfterTool_FindsRecordingFromSessionStart verifies that handleAfterTool
+// can find a recording created during the SessionStart flow (via StartRecording).
+// This catches path resolution mismatches between StartRecording (which creates the
+// session in XDG cache) and LoadRecordingStateForAgent (which searches for it).
+func TestAfterTool_FindsRecordingFromSessionStart(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := t.TempDir()
+
+	// initialize project
+	sageoxDir := filepath.Join(projectRoot, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+	cfg := `{"config_version":"2","repo_id":"test-repo-pathcheck"}`
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
+
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("HOME", cacheDir)
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+
+	agentID := "OxPath1"
+
+	// simulate SessionStart: create recording via StartRecording (same as prime does)
+	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+		AgentID:     agentID,
+		AdapterName: "claude-code",
+		Username:    "testuser",
+		ParentPID:   os.Getpid(),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, state.SessionPath)
+
+	// simulate AfterTool: load recording state using the SAME projectRoot
+	// this is the exact path handleAfterTool takes (line 216 in agent_hook.go)
+	loaded, loadErr := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, loaded, "AfterTool must find recording created by SessionStart")
+	assert.Equal(t, agentID, loaded.AgentID)
+	assert.Equal(t, state.SessionPath, loaded.SessionPath)
+}
+
+// TestGhostCleanup_DoesNotEatFreshRecordingWithAlivePID is a regression test for the
+// pre-fix scenario: if ParentPID is the test process (alive), ghost cleanup must not
+// remove the session even if it has no raw.jsonl data yet.
+func TestGhostCleanup_DoesNotEatFreshRecordingWithAlivePID(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := t.TempDir()
+
+	sageoxDir := filepath.Join(projectRoot, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+	cfg := `{"config_version":"2","repo_id":"test-repo-ghost"}`
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
+
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("HOME", cacheDir)
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+
+	// create a recording with alive PID but NO raw.jsonl data (fresh session)
+	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+		AgentID:     "OxFresh",
+		AdapterName: "claude-code",
+		Username:    "testuser",
+		ParentPID:   os.Getpid(), // alive
+	})
+	require.NoError(t, err)
+
+	// run ghost cleanup — should NOT remove this session
+	result := session.CleanupGhostSessions(projectRoot)
+	assert.Equal(t, 0, result.Removed, "ghost cleanup must not remove session with alive PID")
+
+	// verify recording is still findable
+	loaded, loadErr := session.LoadRecordingStateForAgent(projectRoot, "OxFresh")
+	require.NoError(t, loadErr)
+	require.NotNil(t, loaded, "recording should survive ghost cleanup")
+	assert.Equal(t, state.SessionPath, loaded.SessionPath)
+}
+
+// TestGhostCleanup_RemovesFreshRecordingWithDeadPID demonstrates the pre-fix behavior:
+// if ParentPID is dead and there's no data, ghost cleanup removes the session.
+// This is the exact scenario that caused sessions to disappear before the OX_PARENT_PID fix.
+func TestGhostCleanup_RemovesFreshRecordingWithDeadPID(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := t.TempDir()
+
+	sageoxDir := filepath.Join(projectRoot, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+	cfg := `{"config_version":"2","repo_id":"test-repo-deadpid"}`
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
+
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("HOME", cacheDir)
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+
+	// create a recording with a dead PID (simulates the pre-fix hook subprocess PID)
+	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+		AgentID:     "OxDead",
+		AdapterName: "claude-code",
+		Username:    "testuser",
+		ParentPID:   99999999, // dead
+	})
+	require.NoError(t, err)
+
+	// raw.jsonl has only the header (no substantive entries) — ghost cleanup should eat it
+	result := session.CleanupGhostSessions(projectRoot)
+	assert.Equal(t, 1, result.Removed, "ghost cleanup should remove dead-PID session with no data")
+
+	// recording should be gone
+	loaded, loadErr := session.LoadRecordingStateForAgent(projectRoot, "OxDead")
+	require.NoError(t, loadErr)
+	assert.Nil(t, loaded, "dead-PID ghost session should be cleaned up")
+
+	// session directory should be cleaned up if empty
+	_, statErr := os.Stat(state.SessionPath)
+	assert.True(t, os.IsNotExist(statErr), "ghost session folder should be removed")
+}
+
+// TestStartRecording_IdempotentWhenAlreadyRecording verifies that calling
+// StartRecording twice for the same agent returns ErrAlreadyRecording.
+// This is the behavior the safety-net call in handleStart depends on.
+func TestStartRecording_IdempotentWhenAlreadyRecording(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := t.TempDir()
+
+	sageoxDir := filepath.Join(projectRoot, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+	cfg := `{"config_version":"2","repo_id":"test-repo-idemp"}`
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
+
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("HOME", cacheDir)
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+
+	agentID := "OxIdem"
+	opts := session.StartRecordingOptions{
+		AgentID:     agentID,
+		AdapterName: "claude-code",
+		Username:    "testuser",
+	}
+
+	// first call succeeds
+	_, err := session.StartRecording(projectRoot, opts)
+	require.NoError(t, err)
+
+	// second call returns ErrAlreadyRecording
+	_, err = session.StartRecording(projectRoot, opts)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, session.ErrAlreadyRecording)
+
+	// a different agent can still start recording
+	opts2 := opts
+	opts2.AgentID = "OxOthr"
+	_, err = session.StartRecording(projectRoot, opts2)
+	require.NoError(t, err, "different agent should be able to start recording concurrently")
+}
+
+// TestAfterTool_NilMarkerSkipsGracefully verifies that handleAfterTool
+// returns nil (not an error) when ctx.Marker is nil. This happens when
+// the hook fires before prime has run (e.g., tool use before session start).
+func TestAfterTool_NilMarkerSkipsGracefully(t *testing.T) {
+	projectRoot := t.TempDir()
+
+	ctx := &HookContext{
+		Phase:       phaseAfterTool,
+		ProjectRoot: projectRoot,
+		Marker:      nil, // no marker — prime hasn't run yet
+	}
+
+	err := handleAfterTool(ctx)
+	assert.NoError(t, err, "handleAfterTool should noop gracefully with nil marker")
+}
+
 // readJSONLFile reads a JSONL file and returns parsed lines.
 func readJSONLFile(t *testing.T, path string) []map[string]any {
 	t.Helper()

@@ -59,7 +59,7 @@ func TestAbortNotRecording(t *testing.T) {
 	setForceFlag(t, true)
 
 	inst := &agentinstance.Instance{AgentID: "OxTest"}
-	err := runAgentSessionAbort(inst, agentCmd)
+	err := runAgentSessionAbort(inst, agentCmd, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no active session")
 }
@@ -72,7 +72,7 @@ func TestAbortClearsRecordingState(t *testing.T) {
 	setForceFlag(t, true)
 
 	inst := &agentinstance.Instance{AgentID: "OxAbrt"}
-	err := runAgentSessionAbort(inst, agentCmd)
+	err := runAgentSessionAbort(inst, agentCmd, nil)
 	require.NoError(t, err)
 
 	// if .recording.json survives, next session start fails with "already recording"
@@ -88,7 +88,7 @@ func TestAbortRemovesSessionFolder(t *testing.T) {
 	setForceFlag(t, true)
 
 	inst := &agentinstance.Instance{AgentID: "OxAbrt"}
-	err = runAgentSessionAbort(inst, agentCmd)
+	err = runAgentSessionAbort(inst, agentCmd, nil)
 	require.NoError(t, err)
 
 	// entire folder must be gone so doctor doesn't detect orphaned data
@@ -108,7 +108,7 @@ func TestAbortEmptySessionPathDoesNotDeleteCwd(t *testing.T) {
 	setForceFlag(t, true)
 
 	inst := &agentinstance.Instance{AgentID: "OxAbrt"}
-	err := runAgentSessionAbort(inst, agentCmd)
+	err := runAgentSessionAbort(inst, agentCmd, nil)
 	// abort may succeed or error — either is fine, but cwd must survive
 	_ = err
 
@@ -126,7 +126,7 @@ func TestAbortRequiresForce(t *testing.T) {
 
 	// --force defaults to false, so no need to set it
 	inst := &agentinstance.Instance{AgentID: "OxAbrt"}
-	err := runAgentSessionAbort(inst, agentCmd)
+	err := runAgentSessionAbort(inst, agentCmd, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "destructive")
 }
@@ -146,7 +146,7 @@ func TestAbortForceViaCobraFlag(t *testing.T) {
 	setForceFlag(t, true)
 
 	inst := &agentinstance.Instance{AgentID: "OxAbrt"}
-	err := runAgentSessionAbort(inst, agentCmd)
+	err := runAgentSessionAbort(inst, agentCmd, nil)
 	require.NoError(t, err, "--force via cobra flag should skip confirmation")
 
 	assert.False(t, session.IsRecording(projectRoot), "session should be aborted")
@@ -161,9 +161,9 @@ func TestAbortDifferentAgent_CannotAbortOtherAgentSession(t *testing.T) {
 
 	setForceFlag(t, true)
 
-	// Agent B calls abort — agent-scoped, so B cannot see or abort A's session
+	// Agent B calls abort with no args — agent-scoped, so B cannot see or abort A's session
 	instB := &agentinstance.Instance{AgentID: "OxOthr"}
-	err := runAgentSessionAbort(instB, agentCmd)
+	err := runAgentSessionAbort(instB, agentCmd, nil)
 	require.Error(t, err, "abort should fail when agent has no active session")
 	assert.Contains(t, err.Error(), "no active session")
 
@@ -186,7 +186,7 @@ func TestAbort_SessionFolderWithReadOnlyFiles(t *testing.T) {
 	setForceFlag(t, true)
 
 	inst := &agentinstance.Instance{AgentID: "OxAbrt"}
-	err := runAgentSessionAbort(inst, agentCmd)
+	err := runAgentSessionAbort(inst, agentCmd, nil)
 	require.NoError(t, err, "abort should succeed even with read-only files in session folder")
 
 	// session folder should be fully removed
@@ -205,7 +205,7 @@ func TestAbortOutputIncludesGuidance(t *testing.T) {
 	os.Stdout = w
 
 	inst := &agentinstance.Instance{AgentID: "OxAbrt"}
-	err := runAgentSessionAbort(inst, agentCmd)
+	err := runAgentSessionAbort(inst, agentCmd, nil)
 
 	w.Close()
 	os.Stdout = oldStdout
@@ -218,4 +218,188 @@ func TestAbortOutputIncludesGuidance(t *testing.T) {
 	assert.True(t, output.Success)
 	assert.NotEmpty(t, output.Guidance, "abort JSON output must include guidance field")
 	assert.Contains(t, output.Guidance, "No further action needed")
+}
+
+// --- Tests for abort-by-name (orphaned/non-recording sessions) ---
+
+// makeOrphanSession creates a session folder with a .recording.json pointing to a
+// dead PID, simulating an orphaned session (parent process exited without stopping).
+func makeOrphanSession(t *testing.T, projectRoot, agentID string) (string, string) {
+	t.Helper()
+
+	repoID := getRepoIDOrDefault(projectRoot)
+	contextPath := session.GetContextPath(repoID)
+	sessionName := fmt.Sprintf("2026-03-15T10-00-testuser-%s", agentID)
+	sessionPath := filepath.Join(contextPath, "sessions", sessionName)
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// write raw.jsonl with content so it classifies as orphan (not ghost)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessionPath, "raw.jsonl"),
+		[]byte("{\"type\":\"header\"}\n{\"type\":\"message\",\"seq\":0}\n"),
+		0644,
+	))
+
+	// write .recording.json with a dead PID (99999999 — guaranteed not running)
+	recState := fmt.Sprintf(`{"agent_id":"%s","started_at":"2026-03-15T10:00:00Z","adapter_name":"test","session_path":"%s","parent_pid":99999999,"entry_count":1}`,
+		agentID, sessionPath)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessionPath, ".recording.json"),
+		[]byte(recState),
+		0644,
+	))
+
+	return sessionName, sessionPath
+}
+
+func TestAbortByName_OrphanedSession(t *testing.T) {
+	cfg = &config.Config{}
+	projectRoot := setupSessionTestProject(t)
+
+	origDir, _ := os.Getwd()
+	require.NoError(t, os.Chdir(projectRoot))
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	sessionName, sessionPath := makeOrphanSession(t, projectRoot, "OxDead")
+
+	setForceFlag(t, true)
+
+	// different agent aborts the orphan by name
+	inst := &agentinstance.Instance{AgentID: "OxOthr"}
+	err := runAgentSessionAbort(inst, agentCmd, []string{sessionName})
+	require.NoError(t, err)
+
+	_, err = os.Stat(sessionPath)
+	assert.True(t, os.IsNotExist(err), "orphaned session folder should be removed")
+}
+
+func TestAbortByName_GhostSession(t *testing.T) {
+	cfg = &config.Config{}
+	projectRoot := setupSessionTestProject(t)
+
+	origDir, _ := os.Getwd()
+	require.NoError(t, os.Chdir(projectRoot))
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	// ghost = dead PID + no substantive data
+	repoID := getRepoIDOrDefault(projectRoot)
+	contextPath := session.GetContextPath(repoID)
+	sessionName := "2026-03-15T10-00-testuser-OxGhst"
+	sessionPath := filepath.Join(contextPath, "sessions", sessionName)
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	recState := fmt.Sprintf(`{"agent_id":"OxGhst","started_at":"2026-03-15T10:00:00Z","adapter_name":"test","session_path":"%s","parent_pid":99999999}`, sessionPath)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, ".recording.json"), []byte(recState), 0644))
+
+	setForceFlag(t, true)
+
+	inst := &agentinstance.Instance{AgentID: "OxTest"}
+	err := runAgentSessionAbort(inst, agentCmd, []string{sessionName})
+	require.NoError(t, err)
+
+	_, err = os.Stat(sessionPath)
+	assert.True(t, os.IsNotExist(err), "ghost session should be removed")
+}
+
+func TestAbortByName_NonRecordingSession(t *testing.T) {
+	// session folder with raw.jsonl but no .recording.json = local-only status
+	cfg = &config.Config{}
+	projectRoot := setupSessionTestProject(t)
+
+	origDir, _ := os.Getwd()
+	require.NoError(t, os.Chdir(projectRoot))
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	repoID := getRepoIDOrDefault(projectRoot)
+	contextPath := session.GetContextPath(repoID)
+	sessionName := "2026-03-15T10-00-testuser-OxDead"
+	sessionPath := filepath.Join(contextPath, "sessions", sessionName)
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"), []byte(`{"type":"header"}`), 0644))
+
+	setForceFlag(t, true)
+
+	inst := &agentinstance.Instance{AgentID: "OxTest"}
+	err := runAgentSessionAbort(inst, agentCmd, []string{sessionName})
+	require.NoError(t, err)
+
+	_, err = os.Stat(sessionPath)
+	assert.True(t, os.IsNotExist(err), "non-recording session folder should be removed")
+}
+
+func TestAbortByName_RejectsRecordingSession(t *testing.T) {
+	// abort-by-name should reject actively recording sessions (alive PID)
+	_, state := setupAbortTest(t)
+	sessionName := session.GetSessionName(state.SessionPath)
+
+	setForceFlag(t, true)
+
+	inst := &agentinstance.Instance{AgentID: "OxOthr"}
+	err := runAgentSessionAbort(inst, agentCmd, []string{sessionName})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "actively recording")
+
+	// session folder should still exist
+	_, err = os.Stat(state.SessionPath)
+	assert.NoError(t, err, "recording session should not be removed by named abort")
+}
+
+func TestAbortByName_PartialNameResolution(t *testing.T) {
+	cfg = &config.Config{}
+	projectRoot := setupSessionTestProject(t)
+
+	origDir, _ := os.Getwd()
+	require.NoError(t, os.Chdir(projectRoot))
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	// create an orphaned session, then abort via partial suffix
+	_, sessionPath := makeOrphanSession(t, projectRoot, "OxPrtl")
+
+	setForceFlag(t, true)
+
+	inst := &agentinstance.Instance{AgentID: "OxTest"}
+	err := runAgentSessionAbort(inst, agentCmd, []string{"OxPrtl"})
+	require.NoError(t, err)
+
+	_, err = os.Stat(sessionPath)
+	assert.True(t, os.IsNotExist(err), "session should be removed via partial name")
+}
+
+func TestAbortByName_NotFound(t *testing.T) {
+	cfg = &config.Config{}
+	projectRoot := setupSessionTestProject(t)
+
+	origDir, _ := os.Getwd()
+	require.NoError(t, os.Chdir(projectRoot))
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	setForceFlag(t, true)
+
+	inst := &agentinstance.Instance{AgentID: "OxTest"}
+	err := runAgentSessionAbort(inst, agentCmd, []string{"nonexistent-session"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "session not found")
+}
+
+func TestAbortByName_RequiresForce(t *testing.T) {
+	cfg = &config.Config{}
+	projectRoot := setupSessionTestProject(t)
+
+	origDir, _ := os.Getwd()
+	require.NoError(t, os.Chdir(projectRoot))
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	_, sessionPath := makeOrphanSession(t, projectRoot, "OxFrce")
+
+	cli.SetNoInteractive(true)
+	t.Cleanup(func() { cli.SetNoInteractive(false) })
+
+	inst := &agentinstance.Instance{AgentID: "OxTest"}
+	err := runAgentSessionAbort(inst, agentCmd, []string{"2026-03-15T10-00-testuser-OxFrce"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "destructive")
+
+	// session should still exist
+	_, err = os.Stat(sessionPath)
+	assert.NoError(t, err, "session should not be removed without --force")
 }

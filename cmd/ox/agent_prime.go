@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1089,12 +1090,21 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 	outputFile := filepath.Join(projectRoot, ".sageox", "sessions", fmt.Sprintf("%s-%s.md", timestamp, agentID))
 
 	// start recording with filter mode
+	// prefer OX_PARENT_PID (set by hook) — it's the long-lived agent process.
+	// os.Getppid() here would be the transient hook process which exits immediately.
+	parentPID := os.Getppid()
+	if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
+		if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
+			parentPID = parsed
+		}
+	}
+
 	opts := session.StartRecordingOptions{
 		AgentID:       agentID,
 		AdapterName:   agentType,
 		OutputFile:    outputFile,
 		FilterMode:    resolved.Mode,
-		ParentPID:     os.Getppid(),
+		ParentPID:     parentPID,
 		Username:      getSessionUsername(),
 		WorkspacePath: projectRoot,
 		Branch:        repotools.GetCurrentBranch(projectRoot),

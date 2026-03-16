@@ -177,6 +177,14 @@ func handleStart(ctx *HookContext) error {
 		return err
 	}
 
+	// reload marker after prime — prime runs as a subprocess and writes the
+	// marker to disk, but ctx.Marker is still nil from before prime ran.
+	// Without this reload, the safety-net recording call below uses agentID=""
+	// which fails with "path cannot be empty: agent ID".
+	if ctx.Marker == nil && ctx.Input != nil && ctx.Input.SessionID != "" {
+		ctx.Marker, _ = ReadSessionMarker(ctx.Input.SessionID)
+	}
+
 	startSessionRecordingIfConfigured(ctx)
 	return nil
 }
@@ -341,7 +349,12 @@ func runPrimeForHook(agentID string, ctx *HookContext) error {
 	slog.Debug("hook: running prime", "agent_id", agentID, "phase", ctx.Phase)
 
 	cmd := exec.Command(oxPath, args...)
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(),
+		// Pass the agent's parent PID (Claude Code process) to prime so session
+		// recording captures the long-lived agent PID, not the transient hook PID.
+		// The hook's parent is the agent; prime's parent is the hook (transient).
+		fmt.Sprintf("OX_PARENT_PID=%d", os.Getppid()),
+	)
 	// pass original raw bytes to preserve unknown fields (not re-serialized)
 	if ctx.Input != nil && len(ctx.Input.RawBytes) > 0 {
 		cmd.Stdin = strings.NewReader(string(ctx.Input.RawBytes))

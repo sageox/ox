@@ -270,7 +270,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		case "recover":
 			return runAgentSessionRecover(inst)
 		case "abort":
-			return runAgentSessionAbort(inst, cmd)
+			return runAgentSessionAbort(inst, cmd, sessionArgs)
 		case "delete":
 			return runAgentSessionDelete(inst, cmd, sessionArgs)
 		default:
