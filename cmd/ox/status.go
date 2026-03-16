@@ -31,7 +31,7 @@ type statusJSONOutput struct {
 	Auth         *statusAuthJSON         `json:"auth"`
 	Config       *statusConfigJSON       `json:"config"`
 	Project      *statusProjectJSON      `json:"project"`
-	Ledger       *statusLedgerJSON       `json:"ledger,omitempty"`
+	Ledger       *statusLedgerJSON       `json:"ledger"`
 	TeamContexts []statusTeamContextJSON `json:"team_contexts,omitempty"`
 	AICoworkers  []statusAICoworkerJSON  `json:"ai_coworkers,omitempty"`
 	Daemon       *statusDaemonJSON       `json:"daemon,omitempty"`
@@ -1710,6 +1710,15 @@ func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, 
 		if repoDetail != nil {
 			output.Ledger.Visibility = repoDetail.Visibility
 			output.Ledger.AccessLevel = repoDetail.AccessLevel
+		}
+	} else {
+		// ledger not configured locally — report provisioning status from API
+		output.Ledger = &statusLedgerJSON{Configured: false}
+		if repoDetail != nil && repoDetail.Ledger != nil {
+			output.Ledger.Status = repoDetail.Ledger.Status
+			if repoDetail.Ledger.Message != "" {
+				output.Ledger.Error = repoDetail.Ledger.Message
+			}
 		}
 	}
 

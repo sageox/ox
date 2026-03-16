@@ -108,7 +108,8 @@ func TestBuildStatusJSON_NoLedgerConfig(t *testing.T) {
 		nil, nil,
 	)
 
-	assert.Nil(t, output.Ledger, "ledger section should be nil when no ledger config exists")
+	require.NotNil(t, output.Ledger, "ledger section should always be present")
+	assert.False(t, output.Ledger.Configured, "ledger should not be configured")
 }
 
 func TestBuildStatusJSON_NilLocalConfig(t *testing.T) {
@@ -121,7 +122,8 @@ func TestBuildStatusJSON_NilLocalConfig(t *testing.T) {
 		nil, nil,
 	)
 
-	assert.Nil(t, output.Ledger, "ledger section should be nil when localCfg is nil")
+	require.NotNil(t, output.Ledger, "ledger section should always be present")
+	assert.False(t, output.Ledger.Configured, "ledger should not be configured")
 	assert.Nil(t, output.TeamContexts, "team_contexts should be nil when localCfg is nil")
 }
 

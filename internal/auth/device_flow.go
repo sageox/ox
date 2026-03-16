@@ -315,7 +315,19 @@ func exchangeForJWT(client *http.Client, apiURL, opaqueToken string) (*JWTExchan
 	if err := json.Unmarshal(body, &jwtResp); err != nil {
 		return nil, fmt.Errorf("failed to parse JWT response: %w", err)
 	}
-
+	// handle older server versions that wrap response in {"data": {...}} envelope
+	if jwtResp.AccessToken == "" {
+		var envelope struct {
+			Data JWTExchangeResponse `json:"data"`
+		}
+		if err := json.Unmarshal(body, &envelope); err == nil && envelope.Data.AccessToken != "" {
+			jwtResp = envelope.Data
+		}
+	}
+	if jwtResp.AccessToken == "" {
+		slog.Debug("JWT exchange returned empty access token", "body", string(body))
+		return nil, fmt.Errorf("JWT exchange returned empty access token")
+	}
 	return &jwtResp, nil
 }
 
