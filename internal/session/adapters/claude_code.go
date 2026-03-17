@@ -97,6 +97,17 @@ func (a *ClaudeCodeAdapter) Detect() bool {
 	return len(entries) > 0
 }
 
+// claudeProjectHash converts an absolute directory path to Claude Code's
+// project hash format used for ~/.claude/projects/ directory names.
+// All path separators, underscores, and dots are replaced with dashes.
+// e.g., /home/user/src/github.com/org/my_project -> -home-user-src-github-com-org-my-project
+func claudeProjectHash(path string) string {
+	h := strings.ReplaceAll(path, string(os.PathSeparator), "-")
+	h = strings.ReplaceAll(h, "_", "-")
+	h = strings.ReplaceAll(h, ".", "-")
+	return h
+}
+
 // FindSessionFile locates the most recent session file matching criteria.
 // It searches through all project directories for JSONL files modified after 'since',
 // then scans for content matching the agentID (from ox agent prime output).
@@ -113,10 +124,7 @@ func (a *ClaudeCodeAdapter) FindSessionFile(agentID string, since time.Time) (st
 		return "", fmt.Errorf("failed to get working directory: %w", err)
 	}
 
-	// convert cwd to Claude's project hash format: path separators and underscores become dashes
-	// e.g., /Users/ryan/Code/my_project -> -Users-ryan-Code-my-project
-	projectHash := strings.ReplaceAll(cwd, string(os.PathSeparator), "-")
-	projectHash = strings.ReplaceAll(projectHash, "_", "-")
+	projectHash := claudeProjectHash(cwd)
 	projectDir := filepath.Join(projectsDir, projectHash)
 
 	// check if project-specific directory exists

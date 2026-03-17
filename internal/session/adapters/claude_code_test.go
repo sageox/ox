@@ -1016,11 +1016,9 @@ func TestClaudeCodeAdapter_ReadMetadata_NoModel(t *testing.T) {
 func TestClaudeCodeAdapter_FindSessionFile(t *testing.T) {
 	adapter := &ClaudeCodeAdapter{}
 
-	// compute project hash from CWD (same logic as FindSessionFile)
 	cwd, err := os.Getwd()
 	require.NoError(t, err)
-	projectHash := strings.ReplaceAll(cwd, string(os.PathSeparator), "-")
-	projectHash = strings.ReplaceAll(projectHash, "_", "-")
+	projectHash := claudeProjectHash(cwd)
 
 	t.Run("returns JSONL file path", func(t *testing.T) {
 		tmpHome := t.TempDir()
@@ -1105,6 +1103,50 @@ func TestClaudeCodeAdapter_FindSessionFile(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, info.IsDir(), "FindSessionFile must never return a directory: %s", result)
 	})
+}
+
+func TestClaudeProjectHash(t *testing.T) {
+	// Regression: dots in paths (e.g. github.com) must be replaced with dashes
+	// to match Claude Code's project directory naming.
+	// See: https://github.com/sageox/ox/issues/261
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{
+			name: "simple path",
+			path: "/Users/ryan/Code/project",
+			want: "-Users-ryan-Code-project",
+		},
+		{
+			name: "path with underscore",
+			path: "/Users/ryan/Code/my_project",
+			want: "-Users-ryan-Code-my-project",
+		},
+		{
+			name: "github.com path with dot",
+			path: "/home/user/src/github.com/org/repo",
+			want: "-home-user-src-github-com-org-repo",
+		},
+		{
+			name: "multiple dots",
+			path: "/home/user/src/git.internal.company.io/team/repo",
+			want: "-home-user-src-git-internal-company-io-team-repo",
+		},
+		{
+			name: "dots and underscores combined",
+			path: "/home/user/src/github.com/org/my_project",
+			want: "-home-user-src-github-com-org-my-project",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := claudeProjectHash(tt.path)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
 func TestClaudeCodeAdapter_Read_DirectoryPath(t *testing.T) {
