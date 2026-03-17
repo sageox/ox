@@ -19,6 +19,11 @@ jobs:
         with:
           go-version: '1.24'
 
+      - name: Configure git identity for tests
+        run: |
+          git config --global user.email "ci@sageox.ai"
+          git config --global user.name "CI"
+
       - name: Build
         run: go build -v ./...
 

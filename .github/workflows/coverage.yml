@@ -18,10 +18,16 @@ jobs:
         with:
           go-version: '1.24'
 
+      - name: Configure git identity for tests
+        run: |
+          git config --global user.email "ci@sageox.ai"
+          git config --global user.name "CI"
+
       - name: Test with coverage
         run: go test -short -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage
+        if: always()
         uses: codecov/codecov-action@v5
         with:
           files: coverage.out
