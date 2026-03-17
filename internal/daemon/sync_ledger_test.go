@@ -782,49 +782,39 @@ func TestBlueGreenGC_Ledger_CleanTreeStillWorks(t *testing.T) {
 // These test ledger-only divergence points: ledgerMu, cache restore failure,
 // and the scheduling interval check in checkAndRunGC.
 
-func TestBlueGreenGC_Ledger_CacheRestoreFailureRetainsBackup(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
+func TestGcRestoreCache_FailureRetainsBackup(t *testing.T) {
+	// unit test: gcRestoreCache fails when destination is unwritable,
+	// and the backup dir is NOT removed by the caller on error.
+	backupDir := filepath.Join(t.TempDir(), "cache-backup")
+	require.NoError(t, os.MkdirAll(filepath.Join(backupDir, "codedb"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(backupDir, "codedb", "index.db"), []byte("precious-data"), 0644))
 
-	bareDir, ledgerDir, scheduler := setupClonedLedger(t)
+	// make restore destination unwritable: create .sageox as a FILE so MkdirAll fails
+	dstRepo := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dstRepo, ".sageox"), []byte("blocker"), 0444))
+	t.Cleanup(func() { os.Chmod(filepath.Join(dstRepo, ".sageox"), 0755) })
 
-	// create cache
-	cacheDir := filepath.Join(ledgerDir, ".sageox", "cache", "codedb")
-	require.NoError(t, os.MkdirAll(cacheDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "index.db"), []byte("precious-data"), 0644))
+	err := gcRestoreCache(backupDir, dstRepo)
+	require.Error(t, err, "restore should fail when .sageox is a file, not a directory")
 
-	ws := WorkspaceState{
-		ID:       "ledger",
-		Type:     WorkspaceTypeLedger,
-		Path:     ledgerDir,
-		CloneURL: "file://" + bareDir,
-		Exists:   true,
-	}
-	registry := scheduler.WorkspaceRegistry()
-	registry.mu.Lock()
-	registry.ledger = &ws
-	registry.workspaces[ws.ID] = &ws
-	registry.mu.Unlock()
-
-	// make the restore destination unwritable AFTER the swap completes by
-	// pre-creating .sageox as a file (not dir) in the new clone's path.
-	// We can't do this before GC runs because the swap replaces the dir.
-	// Instead, verify the normal path works — the cache backup dir is
-	// cleaned up on success, retained on failure.
-	result := scheduler.runBlueGreenGC(context.Background(), ws)
-	assert.Equal(t, gcSuccess, result)
-
-	// on success, cache backup should be cleaned up
-	assert.NoDirExists(t, ledgerDir+".gc-cache", "cache backup should be cleaned up on success")
-
-	// and cache should be restored
-	content, err := os.ReadFile(filepath.Join(ledgerDir, ".sageox", "cache", "codedb", "index.db"))
-	require.NoError(t, err)
-	assert.Equal(t, "precious-data", string(content))
+	// backup must still exist for manual recovery
+	assert.DirExists(t, backupDir, "backup should be retained on restore failure")
+	content, readErr := os.ReadFile(filepath.Join(backupDir, "codedb", "index.db"))
+	require.NoError(t, readErr)
+	assert.Equal(t, "precious-data", string(content), "backup content should be intact")
 }
 
-func TestBlueGreenGC_Ledger_MutexReleasedOnSwapFailure(t *testing.T) {
+func TestGcPreserveCache_NoCacheReturnsNil(t *testing.T) {
+	// unit test: gcPreserveCache returns nil when no cache exists
+	srcRepo := t.TempDir()
+	backupDir := filepath.Join(t.TempDir(), "backup")
+
+	err := gcPreserveCache(srcRepo, backupDir)
+	require.NoError(t, err, "should succeed when no cache exists")
+	assert.NoDirExists(t, backupDir, "no backup should be created when no cache exists")
+}
+
+func TestBlueGreenGC_Ledger_MutexReleasedAfterSuccess(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -844,11 +834,11 @@ func TestBlueGreenGC_Ledger_MutexReleasedOnSwapFailure(t *testing.T) {
 	registry.workspaces[ws.ID] = &ws
 	registry.mu.Unlock()
 
-	// run GC successfully first
+	// run GC successfully
 	result := scheduler.runBlueGreenGC(context.Background(), ws)
 	assert.Equal(t, gcSuccess, result)
 
-	// run GC again — if the mutex was not released, this would deadlock
+	// run GC again — would deadlock if ledgerMu was not released
 	result = scheduler.runBlueGreenGC(context.Background(), ws)
 	assert.Equal(t, gcSuccess, result, "second GC should succeed, proving mutex was released after first")
 }
