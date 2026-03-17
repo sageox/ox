@@ -3,7 +3,6 @@ package search
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"testing"
 
 	"github.com/sageox/ox/internal/codedb/store"
@@ -34,70 +33,6 @@ func BenchmarkExecutePlanSQL(b *testing.B) {
 		if len(results) == 0 {
 			b.Fatal("no results")
 		}
-	}
-}
-
-// BenchmarkDedupKeyFmtSprintf measures the current fmt.Sprintf dedup key construction.
-func BenchmarkDedupKeyFmtSprintf(b *testing.B) {
-	filePath := "internal/codedb/search/executor.go"
-	line := 42
-	content := "func Execute(ctx context.Context, s *store.Store, query *ParsedQuery) ([]Result, error) {"
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = fmt.Sprintf("%s:%d:%s", filePath, line, content)
-	}
-}
-
-// BenchmarkDedupKeyStrconv measures the optimized string concat dedup key construction.
-func BenchmarkDedupKeyStrconv(b *testing.B) {
-	filePath := "internal/codedb/search/executor.go"
-	line := 42
-	content := "func Execute(ctx context.Context, s *store.Store, query *ParsedQuery) ([]Result, error) {"
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = filePath + ":" + strconv.Itoa(line) + ":" + content
-	}
-}
-
-// BenchmarkSscanfInt measures fmt.Sscanf for integer parsing (current code).
-func BenchmarkSscanfInt(b *testing.B) {
-	val := "12345"
-	var n int
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		fmt.Sscanf(val, "%d", &n)
-	}
-}
-
-// BenchmarkStrconvAtoi measures strconv.Atoi for integer parsing (optimized).
-func BenchmarkStrconvAtoi(b *testing.B) {
-	val := "12345"
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		n, _ := strconv.Atoi(val)
-		_ = n
-	}
-}
-
-// BenchmarkSscanfFloat measures fmt.Sscanf for float parsing (current code).
-func BenchmarkSscanfFloat(b *testing.B) {
-	val := "3.14159"
-	var f float64
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		fmt.Sscanf(val, "%f", &f)
-	}
-}
-
-// BenchmarkStrconvParseFloat measures strconv.ParseFloat for float parsing (optimized).
-func BenchmarkStrconvParseFloat(b *testing.B) {
-	val := "3.14159"
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		f, _ := strconv.ParseFloat(val, 64)
-		_ = f
 	}
 }
 
