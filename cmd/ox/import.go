@@ -44,12 +44,16 @@ var importCmd = &cobra.Command{
 
 File imports are stored with LFS-backed content and git-tracked metadata.
 URL imports submit a video for cloud processing (transcription, summarization).
+Supports Loom, Cap, and direct video URLs.
 
   ox import report.pdf --text extracted.md
   ox import notes.md --date 2026-01-15
+  ox import https://www.loom.com/share/abc123 --title "Architecture Review"
+  ox import https://cap.link/abc123 --title "Sprint Retro"
   ox import https://example.com/meeting.mp4 --title "Team Standup"
-  ox import --status rec_01234567
-  ox import --list --team my-team
+  ox import --list                              # find import IDs
+  ox import --status rec_01234567               # check processing once
+  ox import --status rec_01234567 --watch       # wait until complete
 
 The team is auto-discovered from the current repo. Use --team to override
 or when working outside an initialized repo.`,
@@ -60,13 +64,13 @@ or when working outside an initialized repo.`,
 func init() {
 	importCmd.Flags().StringVar(&importFlags.text, "text", "", "path to pre-extracted text/markdown for indexing (optional)")
 	importCmd.Flags().SetAnnotation("text", "cobra_annotation_flag_value_name", []string{"file"})
-	importCmd.Flags().StringVar(&importFlags.date, "date", "", "document date for filing (YYYY-MM-DD, default: attempts to auto-detect from file metadata)")
+	importCmd.Flags().StringVar(&importFlags.date, "date", "", "date for filing (YYYY-MM-DD, default: auto-detect from metadata)")
 	importCmd.Flags().BoolVar(&importFlags.force, "force", false, "re-import even if content hash already exists")
 	importCmd.Flags().StringVar(&importFlags.team, "team", "", "team ID (or slug/name when inside a repo)")
 	importCmd.Flags().StringVar(&importFlags.title, "title", "", "display title for URL imports")
-	importCmd.Flags().StringVar(&importFlags.status, "status", "", "check processing status of a recording ID")
-	importCmd.Flags().BoolVar(&importFlags.watch, "watch", false, "poll status until complete (use with --status)")
-	importCmd.Flags().BoolVar(&importFlags.list, "list", false, "list team recordings")
+	importCmd.Flags().StringVar(&importFlags.status, "status", "", "check processing status of a URL import (use --list to find IDs)")
+	importCmd.Flags().BoolVar(&importFlags.watch, "watch", false, "poll --status until processing completes or fails")
+	importCmd.Flags().BoolVar(&importFlags.list, "list", false, "list imports and their processing status")
 }
 
 // docMeta is the metadata.json schema for imported documents.
