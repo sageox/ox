@@ -22,7 +22,7 @@ func setupLedgerBareRepo(t *testing.T) string {
 	bareDir := filepath.Join(tmpDir, "ledger.bare")
 	workDir := filepath.Join(tmpDir, "work")
 
-	require.NoError(t, exec.Command("git", "init", "--bare", bareDir).Run())
+	require.NoError(t, exec.Command("git", "init", "--bare", "--initial-branch=main", bareDir).Run())
 	require.NoError(t, exec.Command("git", "-C", bareDir, "config", "uploadpack.allowfilter", "true").Run())
 
 	require.NoError(t, exec.Command("git", "clone", bareDir, workDir).Run())
@@ -316,7 +316,7 @@ func TestBlueGreenGC_Ledger_ValidationFailsKeepsOld(t *testing.T) {
 	bareDir := filepath.Join(tmpDir, "ledger.bare")
 	workDir := filepath.Join(tmpDir, "work")
 
-	require.NoError(t, exec.Command("git", "init", "--bare", bareDir).Run())
+	require.NoError(t, exec.Command("git", "init", "--bare", "--initial-branch=main", bareDir).Run())
 	require.NoError(t, exec.Command("git", "-C", bareDir, "config", "uploadpack.allowfilter", "true").Run())
 	require.NoError(t, exec.Command("git", "clone", bareDir, workDir).Run())
 	gitConfig(t, workDir)
