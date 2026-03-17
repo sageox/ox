@@ -234,8 +234,11 @@ path = %q
 		wg.Wait()
 	})
 
+	// wait for background clone goroutines to finish before temp dir cleanup
+	s1.cloneWg.Wait()
+	s2.cloneWg.Wait()
+
 	// both schedulers should at least discover the team context in their registry
-	// (even if clone hasn't completed yet, the workspace entry should exist)
 	for i, s := range []*SyncScheduler{s1, s2} {
 		tcs := s.WorkspaceRegistry().GetTeamContexts()
 		require.NotEmpty(t, tcs, "scheduler %d should have team context in registry", i+1)

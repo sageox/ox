@@ -951,6 +951,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 						_ = progress.WriteStage("cloning", "Cloning ledger in background...")
 					}
 					// clone in background goroutine - don't block sync loop
+					s.cloneWg.Add(1)
 					go s.cloneInBackground(ledger.CloneURL, ledger.Path, "ledger", ledger.ID)
 				}
 			}
@@ -1536,6 +1537,7 @@ func (s *SyncScheduler) persistLedgerPath() {
 	if !ledger.Exists && ledger.CloneURL != "" {
 		if s.workspaceRegistry.ShouldRetryClone(ledger.ID) {
 			s.logger.Info("triggering ledger clone after API fetch", "path", ledger.Path)
+			s.cloneWg.Add(1)
 			go s.cloneInBackground(ledger.CloneURL, ledger.Path, "ledger", ledger.ID)
 		}
 	}
@@ -2028,6 +2030,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 				if progress != nil {
 					_ = progress.WriteStage("cloning", fmt.Sprintf("Cloning team %s in background...", ws.TeamName))
 				}
+				s.cloneWg.Add(1)
 				go s.cloneInBackground(ws.CloneURL, ws.Path, "team-context", ws.ID)
 				cloningCount++
 			} else {
@@ -2161,6 +2164,7 @@ func (s *SyncScheduler) triggerMissingClones() {
 	if ledger != nil && !ledger.Exists && ledger.CloneURL != "" {
 		if s.workspaceRegistry.ShouldRetryClone(ledger.ID) {
 			s.logger.Info("triggering immediate ledger clone (self-healing)", "path", ledger.Path)
+			s.cloneWg.Add(1)
 			go s.cloneInBackground(ledger.CloneURL, ledger.Path, "ledger", ledger.ID)
 		}
 	}
@@ -2171,6 +2175,7 @@ func (s *SyncScheduler) triggerMissingClones() {
 			if s.workspaceRegistry.ShouldRetryClone(ws.ID) {
 				s.logger.Info("triggering immediate team context clone (self-healing)",
 					"team", ws.TeamName, "path", ws.Path)
+				s.cloneWg.Add(1)
 				go s.cloneInBackground(ws.CloneURL, ws.Path, "team-context", ws.ID)
 			}
 		}
@@ -2215,6 +2220,10 @@ func isClonePermanentError(msg string) bool {
 //
 // Concurrency is bounded by cloneSem inside Checkout().
 func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspaceID string) {
+	// cloneWg.Add(1) is called by the caller BEFORE the go statement to
+	// avoid a race between Add and Wait.
+	defer s.cloneWg.Done()
+
 	// bail out if scheduler is shutting down
 	if s.ctx != nil {
 		select {
@@ -2229,8 +2238,6 @@ func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspac
 		s.logger.Debug("clone already in progress, skipping duplicate", "type", repoType, "id", workspaceID)
 		return
 	}
-	s.cloneWg.Add(1)
-	defer s.cloneWg.Done()
 	defer s.cloneInFlight.Delete(workspaceID)
 
 	s.logger.Info("background clone starting", "type", repoType, "path", repoPath)
