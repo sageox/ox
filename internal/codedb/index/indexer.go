@@ -39,7 +39,14 @@ type IndexOptions struct {
 	MaxHistoryDepth int // 0 = unlimited
 	Progress        ProgressFunc
 	SkipDirs        map[string]bool // directories to skip in worktree indexing; nil = use defaultSkipDirs
+	TreeCacheLimit  int             // max tree snapshots cached during commit walking; 0 = default (128)
 }
+
+// defaultTreeCacheLimit is the default max entries in the tree cache.
+// Each entry stores a map[string]plumbing.Hash (path → blob OID) for one tree.
+// Memory cost per entry ≈ numFiles × 76 bytes (path + hash + map overhead).
+// At 128 entries: ~1MB for small repos (<100 files), ~10MB for 1K files, ~95MB for 10K files.
+const defaultTreeCacheLimit = 128
 
 // BleveCodeDoc is the document indexed into the code Bleve index.
 type BleveCodeDoc struct {
@@ -88,20 +95,21 @@ var defaultBranchFallbacks = []string{
 
 // indexState holds mutable state shared across indexing sub-operations.
 type indexState struct {
-	tx           *sql.Tx
-	store        *store.Store
-	repo         *git.Repository
-	repoID       int64
-	codeBatch    *bleve.Batch
-	diffBatch    *bleve.Batch
-	codeBatchN   int
-	diffBatchN   int
-	knownCommits map[string]bool
-	treeCache    map[plumbing.Hash]map[string]plumbing.Hash
-	blobIDCache  map[string]int64 // content_hash -> blob DB ID; avoids repeated SQL lookups
-	newCommits   int
-	newBlobs     int
-	report       func(string)
+	tx             *sql.Tx
+	store          *store.Store
+	repo           *git.Repository
+	repoID         int64
+	codeBatch      *bleve.Batch
+	diffBatch      *bleve.Batch
+	codeBatchN     int
+	diffBatchN     int
+	knownCommits   map[string]bool
+	treeCache      map[plumbing.Hash]map[string]plumbing.Hash
+	treeCacheLimit int
+	blobIDCache    map[string]int64 // content_hash -> blob DB ID; avoids repeated SQL lookups
+	newCommits     int
+	newBlobs       int
+	report         func(string)
 }
 
 // flushCodeBatch commits the code batch if it has reached the threshold.
@@ -183,6 +191,11 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	report(fmt.Sprintf("  setup: %s, branch %s, %d known commits",
 		time.Since(t1).Round(time.Millisecond), defaultRef.name, len(knownCommits)))
 
+	treeCacheLimit := opts.TreeCacheLimit
+	if treeCacheLimit <= 0 {
+		treeCacheLimit = defaultTreeCacheLimit
+	}
+
 	// 5. Begin transaction
 	tx, err := s.BeginTx(ctx, nil)
 	if err != nil {
@@ -191,16 +204,17 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	defer tx.Rollback()
 
 	st := &indexState{
-		tx:           tx,
-		store:        s,
-		repo:         repo,
-		repoID:       repoID,
-		codeBatch:    s.CodeIndex.NewBatch(),
-		diffBatch:    s.DiffIndex.NewBatch(),
-		knownCommits: knownCommits,
-		treeCache:    make(map[plumbing.Hash]map[string]plumbing.Hash),
-		blobIDCache:  make(map[string]int64),
-		report:       report,
+		tx:             tx,
+		store:          s,
+		repo:           repo,
+		repoID:         repoID,
+		codeBatch:      s.CodeIndex.NewBatch(),
+		diffBatch:      s.DiffIndex.NewBatch(),
+		knownCommits:   knownCommits,
+		treeCache:      make(map[plumbing.Hash]map[string]plumbing.Hash),
+		treeCacheLimit: treeCacheLimit,
+		blobIDCache:    make(map[string]int64),
+		report:         report,
 	}
 
 	// 6. Check if default branch tip has changed
@@ -289,6 +303,11 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 	}
 	report(fmt.Sprintf("  branch %s, %d known commits", defaultRef.name, len(knownCommits)))
 
+	treeCacheLimit := opts.TreeCacheLimit
+	if treeCacheLimit <= 0 {
+		treeCacheLimit = defaultTreeCacheLimit
+	}
+
 	// 5. Begin transaction
 	tx, err := s.BeginTx(ctx, nil)
 	if err != nil {
@@ -297,16 +316,17 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 	defer tx.Rollback()
 
 	st := &indexState{
-		tx:           tx,
-		store:        s,
-		repo:         repo,
-		repoID:       repoID,
-		codeBatch:    s.CodeIndex.NewBatch(),
-		diffBatch:    s.DiffIndex.NewBatch(),
-		knownCommits: knownCommits,
-		treeCache:    make(map[plumbing.Hash]map[string]plumbing.Hash),
-		blobIDCache:  make(map[string]int64),
-		report:       report,
+		tx:             tx,
+		store:          s,
+		repo:           repo,
+		repoID:         repoID,
+		codeBatch:      s.CodeIndex.NewBatch(),
+		diffBatch:      s.DiffIndex.NewBatch(),
+		knownCommits:   knownCommits,
+		treeCache:      make(map[plumbing.Hash]map[string]plumbing.Hash),
+		treeCacheLimit: treeCacheLimit,
+		blobIDCache:    make(map[string]int64),
+		report:         report,
 	}
 
 	// 6. Check if default branch tip has changed
@@ -753,9 +773,8 @@ func (st *indexState) indexCommit(cd commitData) error {
 	}
 
 	// Evict tree cache periodically to bound memory usage.
-	// 256 entries keeps memory reasonable while preserving cache hits across
-	// adjacent commits that share tree objects.
-	if len(st.treeCache) >= 256 {
+	// Memory per entry ≈ numFiles × 76 bytes. Configurable via IndexOptions.TreeCacheLimit.
+	if len(st.treeCache) >= st.treeCacheLimit {
 		st.treeCache = make(map[plumbing.Hash]map[string]plumbing.Hash)
 	}
 
