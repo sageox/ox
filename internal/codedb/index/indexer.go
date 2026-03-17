@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1095,8 +1096,12 @@ func newRepoPool(repos []*git.Repository) *repoPool {
 	}
 }
 
+// maxPrefetchBlobSize caps individual blob reads during prefetch to prevent OOM.
+// Matches the maxBlobSize used in ParseComments.
+const maxPrefetchBlobSize = 1 << 20 // 1 MB
+
 // readBlob reads blob content from one of the repos, thread-safe.
-// Returns nil if unreadable or binary.
+// Returns nil if unreadable, binary, or larger than maxPrefetchBlobSize.
 func (rp *repoPool) readBlob(contentHash string) []byte {
 	oid := plumbing.NewHash(contentHash)
 	for i, r := range rp.repos {
@@ -1111,11 +1116,14 @@ func (rp *repoPool) readBlob(contentHash string) []byte {
 			rp.locks[i].Unlock()
 			continue
 		}
-		content, err := io.ReadAll(reader)
+		content, err := io.ReadAll(io.LimitReader(reader, maxPrefetchBlobSize+1))
 		reader.Close()
 		rp.locks[i].Unlock()
 		if err != nil {
 			continue
+		}
+		if len(content) > maxPrefetchBlobSize {
+			return nil // too large
 		}
 		if !utf8.Valid(content) {
 			return nil
@@ -1167,11 +1175,13 @@ func prefetchBlobContents(ctx context.Context, repos []*git.Repository, hashes [
 		}()
 	}
 
+sendLoop:
 	for _, h := range hashes {
-		if ctx.Err() != nil {
-			break
+		select {
+		case <-ctx.Done():
+			break sendLoop
+		case ch <- h:
 		}
-		ch <- h
 	}
 	close(ch)
 	wg.Wait()
@@ -1186,12 +1196,14 @@ func openReposFromDB(s *store.Store) ([]*git.Repository, error) {
 		return nil, fmt.Errorf("query repo paths: %w", err)
 	}
 	var repos []*git.Repository
+	var pathCount int
 	for repoRows.Next() {
 		var p string
 		if err := repoRows.Scan(&p); err != nil {
 			repoRows.Close()
 			return nil, fmt.Errorf("scan repo path: %w", err)
 		}
+		pathCount++
 		r, err := plainOpenTolerant(p)
 		if err != nil {
 			continue
@@ -1202,8 +1214,11 @@ func openReposFromDB(s *store.Store) ([]*git.Repository, error) {
 	if err := repoRows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate repo paths: %w", err)
 	}
+	if pathCount == 0 {
+		return nil, fmt.Errorf("no repos found in database")
+	}
 	if len(repos) == 0 {
-		return nil, fmt.Errorf("could not open any git repos")
+		return nil, fmt.Errorf("could not open any of %d git repos from database", pathCount)
 	}
 	return repos, nil
 }
@@ -1299,7 +1314,9 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 
 		content, ok := blobCache[blob.contentHash]
 		if !ok || len(content) == 0 {
-			tx.Exec("UPDATE blobs SET parsed = 1 WHERE id = ?", blob.id)
+			if _, err := tx.Exec("UPDATE blobs SET parsed = 1 WHERE id = ?", blob.id); err != nil {
+				slog.Warn("mark unreadable blob parsed", "blob_id", blob.id, "err", err)
+			}
 			continue
 		}
 
@@ -1330,7 +1347,10 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 				return stats, fmt.Errorf("batch insert symbols: %w", err)
 			}
 			lastID, _ := res.LastInsertId()
-			// SQLite guarantees sequential IDs within a single INSERT
+			count, _ := res.RowsAffected()
+			if count != int64(len(batch)) {
+				return stats, fmt.Errorf("symbols batch: expected %d rows inserted, got %d", len(batch), count)
+			}
 			for k := range batch {
 				symDBIDs[batchStart+k] = lastID - int64(len(batch)-1-k)
 			}
@@ -1365,7 +1385,7 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 					sb.WriteByte(',')
 				}
 				sb.WriteString("(?,?,?,?,?,?)")
-				var symbolID int64
+				var symbolID interface{} // nil → SQL NULL when ContainingSymIdx is invalid
 				if ref.ContainingSymIdx >= 0 && ref.ContainingSymIdx < len(symDBIDs) {
 					symbolID = symDBIDs[ref.ContainingSymIdx]
 				}
@@ -1526,11 +1546,13 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 		}()
 	}
 
+sendLoop:
 	for i := range blobs {
-		if ctx.Err() != nil {
-			break
+		select {
+		case <-ctx.Done():
+			break sendLoop
+		case ch <- i:
 		}
-		ch <- i
 	}
 	close(ch)
 	wg.Wait()
@@ -1562,7 +1584,9 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 		}
 
 		if result.skip || len(result.comments) == 0 {
-			tx.Exec("UPDATE blobs SET comments_parsed = 1 WHERE id = ?", result.blobID)
+			if _, err := tx.Exec("UPDATE blobs SET comments_parsed = 1 WHERE id = ?", result.blobID); err != nil {
+				slog.Warn("mark blob comments_parsed", "blob_id", result.blobID, "err", err)
+			}
 			if !result.skip {
 				stats.BlobsParsed++
 			}
@@ -1595,6 +1619,10 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 
 			// Index in Bleve using sequential IDs from the batch insert
 			lastID, _ := res.LastInsertId()
+			count, _ := res.RowsAffected()
+			if count != int64(len(batch)) {
+				return stats, fmt.Errorf("comments batch: expected %d rows inserted, got %d", len(batch), count)
+			}
 			firstID := lastID - int64(len(batch)-1)
 			for k, cm := range batch {
 				commentID := firstID + int64(k)
@@ -1602,7 +1630,6 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 				commentBatchN++
 				stats.CommentsExtracted++
 
-				_ = cm // suppress unused warning
 				if commentBatchN >= bleveBatchSize {
 					if err := s.CommentIndex.Batch(commentBatch); err != nil {
 						return stats, fmt.Errorf("flush comment batch: %w", err)

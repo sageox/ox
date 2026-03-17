@@ -46,6 +46,9 @@ func findCodeDB() (string, error) {
 
 // runCodeDB executes the codedb binary with the given arguments,
 // streaming stdout/stderr to the terminal.
+// On subprocess failure, os.Exit preserves the exit code for passthrough
+// semantics. This bypasses PersistentPostRunE cleanup (profiling, telemetry)
+// which is acceptable for a thin wrapper delegating entirely to an external binary.
 func runCodeDB(bin string, args []string) error {
 	c := exec.Command(bin, args...)
 	c.Stdout = os.Stdout
