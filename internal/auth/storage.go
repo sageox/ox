@@ -149,12 +149,18 @@ func saveAuthStore(store *AuthStore) error {
 	return nil
 }
 
-// GetToken loads the authentication token for the current API endpoint
+// GetToken loads the raw stored token for the current endpoint.
+// Internal use only (refresh logic, display/identity checks).
+// Callers making API requests MUST use EnsureValidToken(300) or
+// EnsureValidTokenForEndpoint(ep, 300) instead — raw tokens may be expired.
 func GetToken() (*StoredToken, error) {
 	return GetTokenForEndpoint(endpoint.Get())
 }
 
-// GetTokenForEndpoint loads the authentication token for a specific API endpoint
+// GetTokenForEndpoint loads the raw stored token for a specific endpoint.
+// Internal use only (refresh logic, display/identity checks).
+// Callers making API requests MUST use EnsureValidTokenForEndpoint(ep, 300)
+// instead — raw tokens may be expired.
 func GetTokenForEndpoint(ep string) (*StoredToken, error) {
 	ep = endpoint.NormalizeEndpoint(ep)
 

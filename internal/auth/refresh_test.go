@@ -619,3 +619,77 @@ func TestEnsureValidToken_NegativeBuffer(t *testing.T) {
 	// should return original token
 	assert.Equal(t, token.AccessToken, result.AccessToken, "expected no refresh with negative buffer")
 }
+
+func TestEnsureValidTokenForEndpoint_NoToken(t *testing.T) {
+	t.Parallel()
+
+	client := NewAuthClientWithDir(t.TempDir())
+
+	token, err := client.EnsureValidTokenForEndpoint("https://other.example.com", 300)
+	require.NoError(t, err)
+	assert.Nil(t, token, "want nil when no token exists for endpoint")
+}
+
+func TestEnsureValidTokenForEndpoint_ValidToken(t *testing.T) {
+	t.Parallel()
+
+	client := NewAuthClientWithDir(t.TempDir())
+	ep := "https://other.example.com"
+
+	// save token for a specific endpoint
+	original := createTestToken(1 * time.Hour)
+	require.NoError(t, client.SaveTokenForEndpoint(ep, original))
+
+	// should return token as-is without refresh
+	token, err := client.EnsureValidTokenForEndpoint(ep, 300)
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	assert.Equal(t, original.AccessToken, token.AccessToken)
+}
+
+func TestEnsureValidTokenForEndpoint_ExpiredToken(t *testing.T) {
+	t.Parallel()
+
+	// mock server that handles refresh + JWT exchange
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case TokenEndpoint:
+			require.NoError(t, r.ParseForm())
+			assert.Equal(t, "refresh_token", r.Form.Get("grant_type"))
+			assert.Equal(t, "test-refresh-token", r.Form.Get("refresh_token"))
+
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "refreshed-opaque",
+				"refresh_token": "refreshed-refresh",
+				"token_type":    "Bearer",
+				"expires_in":    3600,
+			})
+		case "/api/v1/cli/auth/token":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token": "refreshed-jwt",
+				"token_type":   "Bearer",
+				"expires_in":   900,
+			})
+		default:
+			t.Errorf("unexpected endpoint: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mockServer.Close()
+
+	client := NewAuthClientWithDir(t.TempDir())
+
+	// save expired token for the mock server endpoint
+	expired := createTestToken(-1 * time.Hour)
+	require.NoError(t, client.SaveTokenForEndpoint(mockServer.URL, expired))
+
+	// should refresh using the correct endpoint
+	token, err := client.EnsureValidTokenForEndpoint(mockServer.URL, 300)
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	assert.Equal(t, "refreshed-jwt", token.AccessToken)
+	assert.Equal(t, "refreshed-refresh", token.RefreshToken)
+	assert.Equal(t, expired.UserInfo.UserID, token.UserInfo.UserID)
+}

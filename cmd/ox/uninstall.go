@@ -250,8 +250,8 @@ func notifyCloudUninstall(marker *api.RepoMarkerData) {
 		return
 	}
 
-	// get auth token for this endpoint
-	token, err := auth.GetTokenForEndpoint(ep)
+	// get auth token for this endpoint (proactive refresh if expiring soon)
+	token, err := auth.EnsureValidTokenForEndpoint(ep, 300)
 	if err != nil {
 		slog.Warn("uninstall cloud notification", "skipped", "failed to get auth token", "error", err)
 		fmt.Println(cli.StyleWarning.Render("⚠ Could not notify cloud (auth error). Cloud resources may need manual cleanup."))

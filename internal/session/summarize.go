@@ -213,9 +213,9 @@ func Summarize(entries []Entry, agentID, agentType, model, endpointURL string) (
 	var token *auth.StoredToken
 	var err error
 	if endpointURL != "" {
-		token, err = auth.GetTokenForEndpoint(endpointURL)
+		token, err = auth.EnsureValidTokenForEndpoint(endpointURL, 300)
 	} else {
-		token, err = auth.GetToken()
+		token, err = auth.EnsureValidToken(300)
 	}
 	if err != nil || token == nil {
 		return nil, fmt.Errorf("authentication required for summarization")

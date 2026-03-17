@@ -396,7 +396,7 @@ func runInit() error {
 	} else {
 		// fetch teams from API to determine if selection is needed
 		teamClient := api.NewRepoClient()
-		if token, err := auth.GetToken(); err == nil && token != nil && token.AccessToken != "" {
+		if token, err := auth.EnsureValidToken(300); err == nil && token != nil && token.AccessToken != "" {
 			teamClient.WithAuthToken(token.AccessToken)
 		}
 
@@ -721,7 +721,7 @@ func runInit() error {
 
 	// create client and add auth token (already verified authenticated above)
 	regClient := api.NewRepoClient()
-	if token, err := auth.GetToken(); err == nil && token != nil && token.AccessToken != "" {
+	if token, err := auth.EnsureValidToken(300); err == nil && token != nil && token.AccessToken != "" {
 		regClient.WithAuthToken(token.AccessToken)
 	}
 

@@ -81,6 +81,26 @@ func EnsureValidToken(bufferSeconds int) (*StoredToken, error) {
 	return token, nil
 }
 
+// EnsureValidTokenForEndpoint ensures we have a valid token for a specific endpoint,
+// refreshing proactively if the token expires within bufferSeconds.
+// Use this instead of GetTokenForEndpoint when the token will be used for API requests.
+func EnsureValidTokenForEndpoint(ep string, bufferSeconds int) (*StoredToken, error) {
+	token, err := GetTokenForEndpoint(ep)
+	if err != nil {
+		return nil, err
+	}
+
+	if token == nil {
+		return nil, nil
+	}
+
+	if token.IsExpired(bufferSeconds) {
+		return refreshTokenForEndpoint(token, ep)
+	}
+
+	return token, nil
+}
+
 // Handle401Error handles 401 Unauthorized by attempting token refresh.
 //
 // Reactive refresh: Called when a request returns 401, attempt refresh
@@ -117,7 +137,12 @@ func Handle401Error(token *StoredToken) (*StoredToken, error) {
 // Raises:
 //   - TokenRefreshError if refresh fails due to network, invalid token, or server error
 func refreshToken(token *StoredToken) (*StoredToken, error) {
-	baseURL := endpoint.Get()
+	return refreshTokenForEndpoint(token, endpoint.Get())
+}
+
+// refreshTokenForEndpoint performs token refresh against a specific endpoint.
+func refreshTokenForEndpoint(token *StoredToken, ep string) (*StoredToken, error) {
+	baseURL := ep
 	tokenURL := baseURL + TokenEndpoint
 
 	// prepare form data for token refresh
@@ -263,8 +288,8 @@ func refreshToken(token *StoredToken) (*StoredToken, error) {
 		UserInfo:     token.UserInfo, // preserve user info from original token
 	}
 
-	// save new token
-	if err := SaveToken(newToken); err != nil {
+	// save new token for the endpoint we refreshed against
+	if err := SaveTokenForEndpoint(baseURL, newToken); err != nil {
 		return nil, &TokenRefreshError{
 			Message: "failed to save refreshed token",
 			Err:     err,
@@ -290,6 +315,27 @@ func (c *AuthClient) EnsureValidToken(bufferSeconds int) (*StoredToken, error) {
 	// check if token needs refresh (expired or will expire within buffer)
 	if token.IsExpired(bufferSeconds) {
 		return c.refreshToken(token)
+	}
+
+	return token, nil
+}
+
+// EnsureValidTokenForEndpoint ensures we have a valid token for a specific endpoint,
+// refreshing proactively if the token expires within bufferSeconds.
+func (c *AuthClient) EnsureValidTokenForEndpoint(ep string, bufferSeconds int) (*StoredToken, error) {
+	token, err := c.GetTokenForEndpoint(ep)
+	if err != nil {
+		return nil, err
+	}
+
+	if token == nil {
+		return nil, nil
+	}
+
+	if token.IsExpired(bufferSeconds) {
+		// use endpoint-specific refresh by creating a temporary client
+		epClient := c.WithEndpoint(ep)
+		return epClient.refreshToken(token)
 	}
 
 	return token, nil
