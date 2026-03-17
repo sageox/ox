@@ -81,7 +81,6 @@ func (c *RepoClient) ImportVideoURL(teamID string, req *ImportVideoURLRequest) (
 	}
 
 	logger.LogHTTPRequest("POST", reqURL)
-	logger.LogHTTPRequestBody(string(bodyBytes))
 	start := time.Now()
 
 	httpReq, err := useragent.NewRequest(context.Background(), "POST", reqURL, bytes.NewReader(bodyBytes))
@@ -156,13 +155,13 @@ func (c *RepoClient) GetVideoStatus(teamID, recordingID string) (*VideoStatusRes
 
 	if err != nil {
 		logger.LogHTTPError("GET", reqURL, err, duration)
-		return nil, nil
+		return nil, fmt.Errorf("get video status: %w", err)
 	}
 	defer resp.Body.Close()
 
 	logger.LogHTTPResponse("GET", reqURL, resp.StatusCode, duration)
 
-	// handle 404 gracefully
+	// handle 404 gracefully — recording not found
 	if resp.StatusCode == http.StatusNotFound {
 		io.Copy(io.Discard, resp.Body)
 		return nil, nil
@@ -170,24 +169,27 @@ func (c *RepoClient) GetVideoStatus(teamID, recordingID string) (*VideoStatusRes
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("read video status response: %w", err)
 	}
 
-	// handle non-2xx responses silently
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, nil
+		errMsg := strings.TrimSpace(string(bodyBytes))
+		if errMsg == "" {
+			return nil, fmt.Errorf("get video status: HTTP %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("get video status: HTTP %d: %s", resp.StatusCode, errMsg)
 	}
 
 	var statusResp VideoStatusResponse
 	if err := json.Unmarshal(bodyBytes, &statusResp); err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("decode video status: %w", err)
 	}
 
 	return &statusResp, nil
 }
 
 // ListVideos calls GET /api/v1/teams/{team_id}/recordings with pagination
-// Returns nil, nil on 404 or network error (graceful degradation)
+// Returns nil, nil on 404 (graceful degradation)
 func (c *RepoClient) ListVideos(teamID string, limit, offset int) (*ListVideosResponse, error) {
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(videoListPath, teamID)
 	reqURL += fmt.Sprintf("?limit=%d&offset=%d", limit, offset)
@@ -208,13 +210,13 @@ func (c *RepoClient) ListVideos(teamID string, limit, offset int) (*ListVideosRe
 
 	if err != nil {
 		logger.LogHTTPError("GET", reqURL, err, duration)
-		return nil, nil
+		return nil, fmt.Errorf("list videos: %w", err)
 	}
 	defer resp.Body.Close()
 
 	logger.LogHTTPResponse("GET", reqURL, resp.StatusCode, duration)
 
-	// handle 404 gracefully
+	// handle 404 gracefully — endpoint not deployed
 	if resp.StatusCode == http.StatusNotFound {
 		io.Copy(io.Discard, resp.Body)
 		return nil, nil
@@ -222,17 +224,20 @@ func (c *RepoClient) ListVideos(teamID string, limit, offset int) (*ListVideosRe
 
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("read list videos response: %w", err)
 	}
 
-	// handle non-2xx responses silently
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, nil
+		errMsg := strings.TrimSpace(string(bodyBytes))
+		if errMsg == "" {
+			return nil, fmt.Errorf("list videos: HTTP %d", resp.StatusCode)
+		}
+		return nil, fmt.Errorf("list videos: HTTP %d: %s", resp.StatusCode, errMsg)
 	}
 
 	var listResp ListVideosResponse
 	if err := json.Unmarshal(bodyBytes, &listResp); err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("decode list videos: %w", err)
 	}
 
 	return &listResp, nil

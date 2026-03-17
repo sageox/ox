@@ -132,7 +132,7 @@ func TestGetVideoStatus_404_ReturnsNil(t *testing.T) {
 	assert.Nil(t, resp)
 }
 
-func TestGetVideoStatus_NetworkError_ReturnsNil(t *testing.T) {
+func TestGetVideoStatus_NetworkError_ReturnsError(t *testing.T) {
 	t.Parallel()
 	// use a closed server to simulate network error
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
@@ -141,8 +141,25 @@ func TestGetVideoStatus_NetworkError_ReturnsNil(t *testing.T) {
 	client := newTestClient(server.URL)
 	resp, err := client.GetVideoStatus("team-123", "rec_abc")
 
-	assert.NoError(t, err)
+	require.Error(t, err)
 	assert.Nil(t, resp)
+	assert.Contains(t, err.Error(), "get video status")
+}
+
+func TestGetVideoStatus_500_ReturnsError(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal server error"))
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	resp, err := client.GetVideoStatus("team-123", "rec_abc")
+
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Contains(t, err.Error(), "500")
 }
 
 // ============================================================================
@@ -191,6 +208,35 @@ func TestListVideos_404_ReturnsNil(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.Nil(t, resp)
+}
+
+func TestListVideos_500_ReturnsError(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("internal server error"))
+	}))
+	defer server.Close()
+
+	client := newTestClient(server.URL)
+	resp, err := client.ListVideos("team-123", 50, 0)
+
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Contains(t, err.Error(), "500")
+}
+
+func TestListVideos_NetworkError_ReturnsError(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	server.Close()
+
+	client := newTestClient(server.URL)
+	resp, err := client.ListVideos("team-123", 50, 0)
+
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Contains(t, err.Error(), "list videos")
 }
 
 func TestListVideos_EmptyResponse(t *testing.T) {

@@ -766,8 +766,14 @@ func runImportStatus(cmd *cobra.Command, jsonOutput bool) error {
 		}
 
 		if jsonOutput {
-			out, _ := json.MarshalIndent(resp, "", "  ")
-			fmt.Fprintln(cmd.OutOrStdout(), string(out))
+			if importFlags.watch {
+				// JSONL: one compact JSON object per line for streaming
+				out, _ := json.Marshal(resp)
+				fmt.Fprintln(cmd.OutOrStdout(), string(out))
+			} else {
+				out, _ := json.MarshalIndent(resp, "", "  ")
+				fmt.Fprintln(cmd.OutOrStdout(), string(out))
+			}
 		} else {
 			printVideoStatus(cmd, resp)
 		}
@@ -777,8 +783,9 @@ func runImportStatus(cmd *cobra.Command, jsonOutput bool) error {
 		}
 
 		time.Sleep(3 * time.Second)
-		// clear previous output for watch mode
-		fmt.Fprintln(cmd.OutOrStdout(), "\n---")
+		if !jsonOutput {
+			fmt.Fprintln(cmd.OutOrStdout(), "\n---")
+		}
 	}
 }
 
