@@ -38,6 +38,7 @@ Thumbs.db
 
 # test coverage
 coverage/
+coverage.html
 
 # test session artifacts
 internal/session/sessions/

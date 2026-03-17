@@ -1,0 +1,22 @@
+codecov:
+  require_ci_to_pass: true
+
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: 80%
+
+comment:
+  layout: "reach,diff,flags,files"
+  behavior: default
+
+ignore:
+  - "cmd/ox/docs.go"
+  - "scripts/**"
+  - "tests/integration/**"
+  - "**/*_generated.go"

@@ -1,6 +1,6 @@
 # Makefile for ox CLI tool
 
-.PHONY: help build install clean dev run test test-all test-slow test-integration test-benchmark test-sequential test-profile test-watch coverage smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version
+.PHONY: help build install clean dev run test test-all test-slow test-integration test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version
 
 # Variables
 GO := go
@@ -28,7 +28,7 @@ clean: ## Remove build artifacts
 	@echo "Cleaning build artifacts..."
 	@rm -rf bin/ dist/ tmp/
 	@rm -f $(BINARY_NAME)
-	@rm -f coverage.out coverage.html
+	@rm -f coverage.out coverage.html coverage-all.out .coverage-baseline.out
 	@echo "Clean complete"
 
 # Development
@@ -76,10 +76,65 @@ test-watch: ## Run tests in watch mode (requires gotestsum)
 	@which gotestsum > /dev/null || (echo "gotestsum not found. Install with: go install gotest.tools/gotestsum@latest" && exit 1)
 	gotestsum --watch
 
-coverage: test ## Generate coverage report
-	@echo "Generating coverage report..."
-	$(GO) tool cover -html=coverage.out -o coverage.html
-	@echo "Coverage report generated: coverage.html"
+# Coverage
+COVERDIR := tmp/coverage
+COVERAGE_THRESHOLD ?= 50
+
+coverage: test ## Run tests and open coverage report
+	@$(GO) tool cover -func=coverage.out | tail -1
+	@$(GO) tool cover -html=coverage.out -o coverage.html
+	@open coverage.html 2>/dev/null || xdg-open coverage.html 2>/dev/null || echo "Open coverage.html in your browser"
+
+coverage-report: ## Open coverage report from last test run (no re-run)
+	@test -f coverage.out || (echo "No coverage.out found. Run 'make test' first." && exit 1)
+	@$(GO) tool cover -func=coverage.out | tail -1
+	@$(GO) tool cover -html=coverage.out -o coverage.html
+	@open coverage.html 2>/dev/null || xdg-open coverage.html 2>/dev/null || echo "Open coverage.html in your browser"
+
+coverage-func: ## Show per-function coverage in terminal
+	@test -f coverage.out || (echo "No coverage.out found. Run 'make test' first." && exit 1)
+	@$(GO) tool cover -func=coverage.out
+
+coverage-baseline: test ## Save current coverage as baseline for diffs
+	@cp coverage.out .coverage-baseline.out
+	@$(GO) tool cover -func=.coverage-baseline.out | tail -1
+	@echo "Baseline saved."
+
+coverage-diff: test ## Show coverage change vs saved baseline
+	@test -f .coverage-baseline.out || (echo "No baseline. Run 'make coverage-baseline' first." && exit 1)
+	@echo "=== Coverage: baseline → current ==="
+	@echo "Baseline: $$($(GO) tool cover -func=.coverage-baseline.out | grep total: | awk '{print $$3}')"
+	@echo "Current:  $$($(GO) tool cover -func=coverage.out | grep total: | awk '{print $$3}')"
+	@echo ""
+	@echo "Changed functions:"
+	@diff <($(GO) tool cover -func=.coverage-baseline.out) <($(GO) tool cover -func=coverage.out) | grep '^[<>]' | head -30 || echo "  (none)"
+
+coverage-check: ## Fail if coverage is below threshold (default: 50%)
+	@test -f coverage.out || (echo "No coverage.out found. Run 'make test' first." && exit 1)
+	@total=$$($(GO) tool cover -func=coverage.out | grep total: | awk '{print $$3}' | tr -d '%'); \
+	 echo "Coverage: $${total}% (threshold: $(COVERAGE_THRESHOLD)%)"; \
+	 if [ $$(echo "$${total} < $(COVERAGE_THRESHOLD)" | bc) -eq 1 ]; then \
+	   echo "FAIL: coverage below threshold"; exit 1; \
+	 fi
+
+build-cover: ## Build ox binary with coverage instrumentation
+	@mkdir -p bin $(COVERDIR)/integration
+	@GOCOVERDIR=$(COVERDIR)/integration $(GO) build -cover $(LDFLAGS) -o bin/$(BINARY_NAME)-cover ./cmd/ox
+	@echo "Instrumented binary: bin/$(BINARY_NAME)-cover"
+	@echo "Run with: GOCOVERDIR=$(COVERDIR)/integration bin/$(BINARY_NAME)-cover ..."
+
+coverage-integration: build-cover test ## Merge unit + integration coverage
+	@echo "Converting integration profile..."
+	@$(GO) tool covdata textfmt -i=$(COVERDIR)/integration -o=$(COVERDIR)/integration.out 2>/dev/null || true
+	@echo "Merging profiles..."
+	@if [ -f $(COVERDIR)/integration.out ]; then \
+	  $(GO) tool covdata merge -i=$(COVERDIR)/integration -o=$(COVERDIR)/merged 2>/dev/null && \
+	  $(GO) tool covdata textfmt -i=$(COVERDIR)/merged -o=coverage-all.out; \
+	else \
+	  cp coverage.out coverage-all.out; \
+	fi
+	@$(GO) tool cover -func=coverage-all.out | tail -1
+	@echo "Combined profile: coverage-all.out"
 
 smoke-test: build ## Run smoke tests against SageOx cloud (requires SAGEOX_CI_PASSWORD)
 	@echo "Running smoke tests..."
