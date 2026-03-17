@@ -1586,11 +1586,11 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 		}()
 	}
 
-sendLoop:
+sendLoop2:
 	for i := range blobs {
 		select {
 		case <-ctx.Done():
-			break sendLoop
+			break sendLoop2
 		case ch <- i:
 		}
 	}
