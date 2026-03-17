@@ -22,15 +22,16 @@ const (
 
 // ImportVideoURLRequest represents the POST request to import a video by URL
 type ImportVideoURLRequest struct {
-	URL   string `json:"url"`
+	URL   string `json:"source_url"`
 	Title string `json:"title,omitempty"`
 }
 
 // ImportVideoURLResponse represents the response from importing a video URL
 type ImportVideoURLResponse struct {
-	RecordingID string `json:"recording_id"`
+	WorkflowID  string `json:"workflow_id"`
+	RecordingID string `json:"recording_id,omitempty"`
 	Status      string `json:"status"`
-	Title       string `json:"title"`
+	Title       string `json:"title,omitempty"`
 }
 
 // VideoStatusResponse represents the status of a single recording

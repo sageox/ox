@@ -742,12 +742,16 @@ func runImportURL(cmd *cobra.Command, url string, jsonOutput bool) error {
 	}
 
 	cli.PrintSuccess("Import started")
-	fmt.Fprintf(cmd.OutOrStdout(), "  Recording: %s\n", resp.RecordingID)
 	fmt.Fprintf(cmd.OutOrStdout(), "  Status:    %s\n", resp.Status)
 	if resp.Title != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "  Title:     %s\n", resp.Title)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "\n  Check progress: ox import --status %s\n", resp.RecordingID)
+	// the server returns a workflow ID while processing; once complete, a recording ID is assigned
+	if resp.RecordingID != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "\n  Check progress: ox import --status %s\n", resp.RecordingID)
+	} else {
+		fmt.Fprintf(cmd.OutOrStdout(), "\n  Check progress: ox import --list\n")
+	}
 	return nil
 }
 
@@ -811,9 +815,9 @@ func printVideoStatus(cmd *cobra.Command, resp *api.VideoStatusResponse) {
 			status, _ := step["status"].(string)
 			icon := "·"
 			switch status {
-			case "complete":
+			case "complete", "completed":
 				icon = "✓"
-			case "in_progress":
+			case "in_progress", "processing":
 				icon = "◐"
 			case "failed":
 				icon = "✗"
