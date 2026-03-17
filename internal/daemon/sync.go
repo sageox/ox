@@ -2584,17 +2584,19 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 		if repoName == "" {
 			repoName = ws.ID
 		}
-		switch result {
-		case gcSkippedDirty:
-			// surface dirty workspace so ox doctor / ox daemon status can notify the user
-			s.issues.SetIssue(DaemonIssue{
-				Type:     IssueTypeDirtyWorkspace,
-				Severity: SeverityWarning,
-				Repo:     repoName,
-				Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
-			})
-		case gcSuccess:
-			s.issues.ClearIssue(IssueTypeDirtyWorkspace, repoName)
+		if s.issues != nil {
+			switch result {
+			case gcSkippedDirty:
+				// surface dirty workspace so ox doctor / ox daemon status can notify the user
+				s.issues.SetIssue(DaemonIssue{
+					Type:     IssueTypeDirtyWorkspace,
+					Severity: SeverityWarning,
+					Repo:     repoName,
+					Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
+				})
+			case gcSuccess:
+				s.issues.ClearIssue(IssueTypeDirtyWorkspace, repoName)
+			}
 		}
 
 		break // one GC per check cycle to avoid overloading
@@ -2620,16 +2622,18 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 					"reason", reason, "interval_days", intervalDays, "last_gc", l.LastGCTime)
 
 				result := s.runBlueGreenGC(ctx, *l)
-				switch result {
-				case gcSkippedDirty:
-					s.issues.SetIssue(DaemonIssue{
-						Type:     IssueTypeDirtyWorkspace,
-						Severity: SeverityWarning,
-						Repo:     "ledger",
-						Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
-					})
-				case gcSuccess:
-					s.issues.ClearIssue(IssueTypeDirtyWorkspace, "ledger")
+				if s.issues != nil {
+					switch result {
+					case gcSkippedDirty:
+						s.issues.SetIssue(DaemonIssue{
+							Type:     IssueTypeDirtyWorkspace,
+							Severity: SeverityWarning,
+							Repo:     "ledger",
+							Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
+						})
+					case gcSuccess:
+						s.issues.ClearIssue(IssueTypeDirtyWorkspace, "ledger")
+					}
 				}
 			}
 		}
@@ -2671,15 +2675,19 @@ func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 		switch result {
 		case gcSuccess:
 			resp.Triggered++
-			s.issues.ClearIssue(IssueTypeDirtyWorkspace, name)
+			if s.issues != nil {
+				s.issues.ClearIssue(IssueTypeDirtyWorkspace, name)
+			}
 		case gcSkippedDirty:
 			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: local changes could not be preserved for GC", name))
-			s.issues.SetIssue(DaemonIssue{
-				Type:     IssueTypeDirtyWorkspace,
-				Severity: SeverityWarning,
-				Repo:     name,
-				Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
-			})
+			if s.issues != nil {
+				s.issues.SetIssue(DaemonIssue{
+					Type:     IssueTypeDirtyWorkspace,
+					Severity: SeverityWarning,
+					Repo:     name,
+					Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
+				})
+			}
 		case gcFailed:
 			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: reclone failed (check daemon logs)", name))
 		}
@@ -2693,15 +2701,19 @@ func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 			switch result {
 			case gcSuccess:
 				resp.LedgerTriggered = true
-				s.issues.ClearIssue(IssueTypeDirtyWorkspace, "ledger")
+				if s.issues != nil {
+					s.issues.ClearIssue(IssueTypeDirtyWorkspace, "ledger")
+				}
 			case gcSkippedDirty:
 				resp.Errors = append(resp.Errors, "ledger: local changes could not be preserved for GC")
-				s.issues.SetIssue(DaemonIssue{
-					Type:     IssueTypeDirtyWorkspace,
-					Severity: SeverityWarning,
-					Repo:     "ledger",
-					Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
-				})
+				if s.issues != nil {
+					s.issues.SetIssue(DaemonIssue{
+						Type:     IssueTypeDirtyWorkspace,
+						Severity: SeverityWarning,
+						Repo:     "ledger",
+						Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
+					})
+				}
 			case gcFailed:
 				resp.Errors = append(resp.Errors, "ledger: reclone failed (check daemon logs)")
 			}
@@ -2806,11 +2818,13 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 	}
 
 	// step 0d (ledger only): preserve .sageox/cache/ (gitignored, contains codedb indexes)
+	// cache must survive reclones — abort GC if preservation fails
 	hasCache := false
 	if isLedger {
 		if err := gcPreserveCache(ws.Path, cacheBackupDir); err != nil {
-			s.logger.Warn("gc: failed to preserve cache, continuing anyway",
+			s.logger.Warn("gc: skipping reclone, cannot preserve cache",
 				"path", ws.Path, "error", err)
+			return gcFailed
 		} else if _, err := os.Stat(cacheBackupDir); err == nil {
 			hasCache = true
 		}
@@ -2924,10 +2938,12 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 	// --- phase 1.5 (ledger only): restore cache ---
 	if isLedger && hasCache {
 		if err := gcRestoreCache(cacheBackupDir, ws.Path); err != nil {
-			s.logger.Warn("gc: failed to restore cache (will rebuild on next trigger)",
-				"path", ws.Path, "error", err)
+			// keep backup so manual recovery is possible
+			s.logger.Error("gc: failed to restore cache, backup retained",
+				"path", ws.Path, "backup", cacheBackupDir, "error", err)
+		} else {
+			_ = os.RemoveAll(cacheBackupDir)
 		}
-		_ = os.RemoveAll(cacheBackupDir)
 	}
 
 	// --- phase 2: restore local state ---
