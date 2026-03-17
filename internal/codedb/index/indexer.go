@@ -1314,9 +1314,15 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 		}
 
 		content, ok := blobCache[blob.contentHash]
-		if !ok || len(content) == 0 {
+		if !ok {
+			// prefetch miss — may be transient (packfile lock, I/O error);
+			// leave parsed=0 so the blob is retried on the next index run.
+			continue
+		}
+		if len(content) == 0 {
+			// genuinely empty file — mark parsed so we don't retry
 			if _, err := tx.Exec("UPDATE blobs SET parsed = 1 WHERE id = ?", blob.id); err != nil {
-				slog.Warn("mark unreadable blob parsed", "blob_id", blob.id, "err", err)
+				slog.Warn("mark empty blob parsed", "blob_id", blob.id, "err", err)
 			}
 			continue
 		}
@@ -1442,7 +1448,8 @@ type BleveCommentDoc struct {
 type commentResult struct {
 	blobID   int64
 	comments []comments.Comment
-	skip     bool // true if blob was unreadable/too large
+	skip     bool // true if blob was empty/too large (permanent — mark parsed)
+	miss     bool // true if blob was not in cache (transient — leave unparsed for retry)
 }
 
 // ParseComments extracts comments from all blobs that haven't been comment-parsed
@@ -1541,7 +1548,9 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 				}
 				blob := blobs[idx]
 				content, ok := blobCache[blob.contentHash]
-				if !ok || len(content) == 0 || len(content) > maxBlobSize {
+				if !ok {
+					results[idx] = commentResult{blobID: blob.id, miss: true}
+				} else if len(content) == 0 || len(content) > maxBlobSize {
 					results[idx] = commentResult{blobID: blob.id, skip: true}
 				} else {
 					cms := comments.Extract(string(content), blob.language)
@@ -1595,6 +1604,10 @@ sendLoop:
 			report(fmt.Sprintf("  inserting comments: %d/%d blobs...", i+1, len(results)))
 		}
 
+		if result.miss {
+			// prefetch miss — may be transient; leave comments_parsed=0 for retry
+			continue
+		}
 		if result.skip || len(result.comments) == 0 {
 			if _, err := tx.Exec("UPDATE blobs SET comments_parsed = 1 WHERE id = ?", result.blobID); err != nil {
 				slog.Warn("mark blob comments_parsed", "blob_id", result.blobID, "err", err)
@@ -1657,6 +1670,9 @@ sendLoop:
 				return stats, fmt.Errorf("iterate inserted comment ids: %w", err)
 			}
 			rows.Close()
+			if cmIdx != len(batch) {
+				return stats, fmt.Errorf("comments batch: expected %d returned ids, got %d", len(batch), cmIdx)
+			}
 		}
 
 		_, err = tx.Exec("UPDATE blobs SET comments_parsed = 1 WHERE id = ?", result.blobID)

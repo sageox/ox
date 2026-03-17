@@ -77,7 +77,7 @@ ox codedb index --depth 100 https://github.com/sageox/ox
 |----------|--------|-----------|
 | Binary discovery | `$PATH` lookup only | Simplest approach; `codedb` is actively developed and installed locally. Config override or auto-install can come later. |
 | Flag handling | Full passthrough (`DisableFlagParsing: true`) | Zero maintenance when codedb adds flags. Ox help points to `codedb <cmd> --help` for full reference. |
-| Data directory | CodeDBGo default (`~/.local/share/sageox/codedb/`) | CodeDBGo already uses the `sageox` XDG namespace. Ox does not pass `--root`. |
+| Data directory | Per-ledger (`<ledger>/.sageox/cache/codedb/`) via `paths.CodeDBSharedDir()` | Indexes are stored in the ledger cache, shared across worktrees. Both CLI and native indexer use this path. |
 | Help group | `dev` group | Code search is a core developer workflow tool, alongside `init`, `login`, `status`. |
 | Output handling | Stream stdout/stderr directly | No reformatting. Exit code propagated. |
 | CodeDBGo modifications | None | CodeDBGo is under active parallel development. This integration is a pure wrapper. |
@@ -192,22 +192,17 @@ func init() {
 
 ## Data Directory Convention
 
-CodeDBGo stores all data at `~/.local/share/sageox/codedb/` by default, following XDG Base Directory Specification:
+CodeDB indexes are stored per-repo in the ledger cache via `paths.CodeDBSharedDir()`:
 
 ```text
-~/.local/share/sageox/codedb/
+<ledger>/.sageox/cache/codedb/
 +-- metadata.db          # SQLite database (repos, commits, symbols, refs)
 +-- bleve/
 |   +-- code/            # Full-text index for file contents
 |   +-- diff/            # Full-text index for commit diffs
-+-- repos/
-    +-- github.com/
-    |   +-- user/repo.git/    # Bare git clone
-    +-- gitlab.com/
-        +-- org/project.git/  # Bare git clone
 ```
 
-ox does NOT manage this directory. It is owned entirely by `codedb`. The `--root` flag is available to users via passthrough if they need a custom location.
+This location is shared across worktrees for the same repo and persists across re-clones (lives in the ledger, not the project checkout).
 
 ## What This Does NOT Do
 
