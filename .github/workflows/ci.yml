@@ -22,15 +22,8 @@ jobs:
       - name: Build
         run: go build -v ./...
 
-      - name: Test with coverage
-        run: go test -short -race -coverprofile=coverage.out -covermode=atomic ./...
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v5
-        with:
-          files: coverage.out
-          token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: false
+      - name: Test
+        run: go test -short -race ./...
 
   lint:
     runs-on: ubuntu-latest
