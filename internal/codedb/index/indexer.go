@@ -1206,6 +1206,7 @@ func openReposFromDB(s *store.Store) ([]*git.Repository, error) {
 		pathCount++
 		r, err := plainOpenTolerant(p)
 		if err != nil {
+			slog.Debug("skipping repo that failed to open", "path", p, "err", err)
 			continue
 		}
 		repos = append(repos, r)
@@ -1287,7 +1288,7 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 
 	repos, err := openReposFromDB(s)
 	if err != nil {
-		return stats, err
+		return stats, fmt.Errorf("open repos for symbol parsing: %w", err)
 	}
 
 	// Prefetch all blob content in parallel
@@ -1342,17 +1343,28 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 				sb.WriteString("(?,NULL,?,?,?,?,?,?,?,?,?)")
 				sqlArgs = append(sqlArgs, blob.id, sym.Name, sym.Kind, sym.Line, sym.Col, sym.EndLine, sym.EndCol, sym.Signature, sym.ReturnType, sym.Params)
 			}
-			res, err := tx.Exec(sb.String(), sqlArgs...)
+			sb.WriteString(" RETURNING id")
+			rows, err := tx.Query(sb.String(), sqlArgs...)
 			if err != nil {
 				return stats, fmt.Errorf("batch insert symbols: %w", err)
 			}
-			lastID, _ := res.LastInsertId()
-			count, _ := res.RowsAffected()
-			if count != int64(len(batch)) {
-				return stats, fmt.Errorf("symbols batch: expected %d rows inserted, got %d", len(batch), count)
+			k := 0
+			for rows.Next() {
+				var id int64
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
+					return stats, fmt.Errorf("scan inserted symbol id: %w", err)
+				}
+				symDBIDs[batchStart+k] = id
+				k++
 			}
-			for k := range batch {
-				symDBIDs[batchStart+k] = lastID - int64(len(batch)-1-k)
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return stats, fmt.Errorf("iterate inserted symbol ids: %w", err)
+			}
+			rows.Close()
+			if k != len(batch) {
+				return stats, fmt.Errorf("symbols batch: expected %d returned ids, got %d", len(batch), k)
 			}
 			stats.SymbolsExtracted += uint64(len(batch))
 		}
@@ -1491,7 +1503,7 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 
 	repos, err := openReposFromDB(s)
 	if err != nil {
-		return stats, err
+		return stats, fmt.Errorf("open repos for comment parsing: %w", err)
 	}
 
 	// Prefetch all blob content in parallel
@@ -1612,32 +1624,39 @@ sendLoop:
 				sb.WriteString("(?,?,?,?,?,?,?)")
 				sqlArgs = append(sqlArgs, result.blobID, cm.Text, cm.Kind, cm.Line, cm.EndLine, cm.Col, cm.EndCol)
 			}
-			res, err := tx.Exec(sb.String(), sqlArgs...)
+			sb.WriteString(" RETURNING id")
+			rows, err := tx.Query(sb.String(), sqlArgs...)
 			if err != nil {
 				return stats, fmt.Errorf("batch insert comments: %w", err)
 			}
-
-			// Index in Bleve using sequential IDs from the batch insert
-			lastID, _ := res.LastInsertId()
-			count, _ := res.RowsAffected()
-			if count != int64(len(batch)) {
-				return stats, fmt.Errorf("comments batch: expected %d rows inserted, got %d", len(batch), count)
-			}
-			firstID := lastID - int64(len(batch)-1)
-			for k, cm := range batch {
-				commentID := firstID + int64(k)
-				commentBatch.Index("comment_"+strconv.FormatInt(commentID, 10), BleveCommentDoc{Content: cm.Text})
+			cmIdx := 0
+			for rows.Next() {
+				var commentID int64
+				if err := rows.Scan(&commentID); err != nil {
+					rows.Close()
+					return stats, fmt.Errorf("scan inserted comment id: %w", err)
+				}
+				if cmIdx < len(batch) {
+					commentBatch.Index("comment_"+strconv.FormatInt(commentID, 10), BleveCommentDoc{Content: batch[cmIdx].Text})
+				}
+				cmIdx++
 				commentBatchN++
 				stats.CommentsExtracted++
 
 				if commentBatchN >= bleveBatchSize {
 					if err := s.CommentIndex.Batch(commentBatch); err != nil {
+						rows.Close()
 						return stats, fmt.Errorf("flush comment batch: %w", err)
 					}
 					commentBatch = s.CommentIndex.NewBatch()
 					commentBatchN = 0
 				}
 			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return stats, fmt.Errorf("iterate inserted comment ids: %w", err)
+			}
+			rows.Close()
 		}
 
 		_, err = tx.Exec("UPDATE blobs SET comments_parsed = 1 WHERE id = ?", result.blobID)

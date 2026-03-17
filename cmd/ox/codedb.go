@@ -35,11 +35,11 @@ func findCodeDB() (string, error) {
 	path, err := exec.LookPath("codedb")
 	if err != nil {
 		return "", fmt.Errorf(
-			"codedb not found in PATH.\n\n" +
-				"Install CodeDB:\n" +
-				"  go install github.com/sageox/CodeDBGo/cmd/codedb@latest\n\n" +
-				"Or build from source:\n" +
-				"  cd CodeDBGo && make build && make install")
+			"codedb not found in PATH: %w\n\n"+
+				"Install CodeDB:\n"+
+				"  go install github.com/sageox/CodeDBGo/cmd/codedb@latest\n\n"+
+				"Or build from source:\n"+
+				"  cd CodeDBGo && make build && make install", err)
 	}
 	return path, nil
 }

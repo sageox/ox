@@ -9,7 +9,7 @@ CodeDBGo is a Sourcegraph-style code search engine built in Go that indexes git 
 
 ## Architecture
 
-```
+```text
 User -> ox codedb search "lang:go Iterator" --json
           |
           +-- Find `codedb` in $PATH
@@ -84,7 +84,7 @@ ox codedb index --depth 100 https://github.com/sageox/ox
 
 ## File Structure
 
-```
+```text
 cmd/ox/
 +-- codedb.go            # Parent command + binary lookup + shared exec helper
 +-- codedb_index.go      # index subcommand
@@ -103,11 +103,11 @@ func findCodeDB() (string, error) {
     path, err := exec.LookPath("codedb")
     if err != nil {
         return "", fmt.Errorf(
-            "codedb not found in PATH.\n\n" +
-            "Install CodeDB:\n" +
-            "  go install github.com/sageox/CodeDBGo/cmd/codedb@latest\n\n" +
-            "Or build from source:\n" +
-            "  cd CodeDBGo && make build && make install")
+            "codedb not found in PATH: %w\n\n"+
+            "Install CodeDB:\n"+
+            "  go install github.com/sageox/CodeDBGo/cmd/codedb@latest\n\n"+
+            "Or build from source:\n"+
+            "  cd CodeDBGo && make build && make install", err)
     }
     return path, nil
 }
@@ -116,12 +116,22 @@ func findCodeDB() (string, error) {
 ### Subprocess Execution (shared helper in codedb.go)
 
 ```go
+// os.Exit preserves the subprocess exit code for passthrough semantics.
+// This bypasses PersistentPostRunE cleanup (profiling, telemetry) which is
+// acceptable for a thin wrapper delegating entirely to an external binary.
 func runCodeDB(bin string, args []string) error {
     c := exec.Command(bin, args...)
     c.Stdout = os.Stdout
     c.Stderr = os.Stderr
     c.Stdin = os.Stdin
-    return c.Run()
+    if err := c.Run(); err != nil {
+        var exitErr *exec.ExitError
+        if errors.As(err, &exitErr) {
+            os.Exit(exitErr.ExitCode())
+        }
+        return fmt.Errorf("failed to run codedb: %w", err)
+    }
+    return nil
 }
 ```
 
@@ -184,7 +194,7 @@ func init() {
 
 CodeDBGo stores all data at `~/.local/share/sageox/codedb/` by default, following XDG Base Directory Specification:
 
-```
+```text
 ~/.local/share/sageox/codedb/
 +-- metadata.db          # SQLite database (repos, commits, symbols, refs)
 +-- bleve/
