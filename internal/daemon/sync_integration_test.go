@@ -26,7 +26,7 @@ func setupSyncIntegrationGitRepos(t *testing.T) (bareDir, ledgerDir string) {
 	ledgerDir = filepath.Join(tmpDir, "ledger")
 	initWorkDir := filepath.Join(tmpDir, "init-work")
 
-	require.NoError(t, exec.Command("git", "init", "--bare", bareDir).Run())
+	require.NoError(t, exec.Command("git", "init", "--bare", "--initial-branch=main", bareDir).Run())
 	require.NoError(t, exec.Command("git", "clone", bareDir, initWorkDir).Run())
 	gitConfig(t, initWorkDir)
 	require.NoError(t, os.WriteFile(filepath.Join(initWorkDir, "README.md"), []byte("initial"), 0644))

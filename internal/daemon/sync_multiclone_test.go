@@ -380,7 +380,7 @@ path = %q
 
 	// Phase 2: manually create the clone dir (simulates another process cloning it)
 	teamBareDir := filepath.Join(t.TempDir(), "bare-backoff")
-	require.NoError(t, exec.Command("git", "init", "--bare", teamBareDir).Run())
+	require.NoError(t, exec.Command("git", "init", "--bare", "--initial-branch=main", teamBareDir).Run())
 	initDir := filepath.Join(t.TempDir(), "init-backoff")
 	require.NoError(t, exec.Command("git", "clone", teamBareDir, initDir).Run())
 	gitConfig(t, initDir)

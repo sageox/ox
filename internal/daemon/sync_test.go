@@ -228,7 +228,7 @@ func TestSyncScheduler_SyncWithProgress_PropagatesPullError(t *testing.T) {
 	ledgerDir := filepath.Join(tmpDir, "ledger")
 
 	// create bare repo with initial commit
-	require.NoError(t, exec.Command("git", "init", "--bare", bareDir).Run())
+	require.NoError(t, exec.Command("git", "init", "--bare", "--initial-branch=main", bareDir).Run())
 
 	// clone, add initial commit
 	require.NoError(t, exec.Command("git", "clone", bareDir, ledgerDir).Run())
@@ -970,7 +970,7 @@ func TestSyncScheduler_Checkout_Clone_LocalPathRejected(t *testing.T) {
 
 	// create bare repo to clone from
 	bareDir := t.TempDir()
-	initBareCmd := exec.Command("git", "init", "--bare")
+	initBareCmd := exec.Command("git", "init", "--bare", "--initial-branch=main")
 	initBareCmd.Dir = bareDir
 	require.NoError(t, initBareCmd.Run())
 
@@ -1071,12 +1071,12 @@ func setupGitRepo(t *testing.T, dir string) {
 	bareDir := filepath.Join(filepath.Dir(dir), filepath.Base(dir)+".bare")
 	require.NoError(t, os.MkdirAll(bareDir, 0755))
 
-	initBareCmd := exec.Command("git", "init", "--bare")
+	initBareCmd := exec.Command("git", "init", "--bare", "--initial-branch=main")
 	initBareCmd.Dir = bareDir
 	require.NoError(t, initBareCmd.Run())
 
 	// init the working repo
-	initCmd := exec.Command("git", "init")
+	initCmd := exec.Command("git", "init", "--initial-branch=main")
 	initCmd.Dir = dir
 	require.NoError(t, initCmd.Run())
 
