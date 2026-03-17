@@ -351,7 +351,7 @@ func Init(path string, remoteURL string) (*Ledger, error) {
 	}
 
 	// clone with sparse checkout from cloud-provisioned URL
-	if err := cloneWithSparseCheckout(path, remoteURL); err != nil {
+	if err := CloneWithSparseCheckout(path, remoteURL); err != nil {
 		return nil, fmt.Errorf("clone: %w", err)
 	}
 
@@ -368,10 +368,11 @@ func InitForEndpoint(endpointURL string, remoteURL string) (*Ledger, error) {
 	return Init(path, remoteURL)
 }
 
-// cloneWithSparseCheckout clones a remote repo with sparse checkout enabled.
+// CloneWithSparseCheckout clones a remote repo with sparse checkout enabled.
 // Only .sync/, sessions/, audit/, and recent data/github/ directories are checked out.
 // The assets/ directory and older GitHub data are excluded to save space.
-func cloneWithSparseCheckout(path, remoteURL string) error {
+// Exported for use by the daemon's GC reclone (fresh clone with sparse checkout).
+func CloneWithSparseCheckout(path, remoteURL string) error {
 	// remove existing directory if empty
 	entries, _ := os.ReadDir(path)
 	if len(entries) == 0 {
@@ -401,7 +402,7 @@ func cloneWithSparseCheckout(path, remoteURL string) error {
 // Includes: .sync/, sessions/, audit/, and a sliding window of recent GitHub data
 // Excludes: assets/ (large files), older GitHub data outside the window
 //
-// Called during initial clone (cloneWithSparseCheckout) and by EnableSparseCheckout.
+// Called during initial clone (CloneWithSparseCheckout) and by EnableSparseCheckout.
 // Future: daemon GC reclone will also call this to reconfigure the sliding window
 // on fresh clones, pruning old data/github/ directories outside the 30-day window.
 //

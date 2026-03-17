@@ -366,14 +366,18 @@ func runGC(cmd *cobra.Command) error {
 		return fmt.Errorf("gc failed: %w", err)
 	}
 
-	if resp.Triggered == 0 && resp.Skipped == 0 && len(resp.Errors) == 0 {
-		fmt.Fprintln(w, "No team contexts eligible for GC")
+	if resp.Triggered == 0 && !resp.LedgerTriggered && resp.Skipped == 0 && len(resp.Errors) == 0 {
+		fmt.Fprintln(w, "No workspaces eligible for GC")
 		return nil
 	}
 
 	if resp.Triggered > 0 {
 		fmt.Fprintf(w, "%s  Recloned %d team context(s)\n",
 			ui.PassStyle.Render(ui.RenderPassIcon()), resp.Triggered)
+	}
+	if resp.LedgerTriggered {
+		fmt.Fprintf(w, "%s  Recloned ledger\n",
+			ui.PassStyle.Render(ui.RenderPassIcon()))
 	}
 	if resp.Skipped > 0 {
 		fmt.Fprintf(w, "%s  Skipped %d (GC already in progress)\n",

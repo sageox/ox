@@ -377,9 +377,10 @@ type DoctorResponse struct {
 // uncommitted changes — GC is a disk-space optimization and must never
 // destroy user work.
 type TriggerGCResponse struct {
-	Triggered int      `json:"triggered"`
-	Skipped   int      `json:"skipped,omitempty"`
-	Errors    []string `json:"errors,omitempty"`
+	Triggered       int      `json:"triggered"`
+	Skipped         int      `json:"skipped,omitempty"`
+	LedgerTriggered bool     `json:"ledger_triggered,omitempty"`
+	Errors          []string `json:"errors,omitempty"`
 }
 
 // ProgressWriter allows handlers to send progress updates during long operations.

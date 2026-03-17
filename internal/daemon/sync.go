@@ -42,6 +42,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/version"
 )
@@ -2599,11 +2600,40 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 		break // one GC per check cycle to avoid overloading
 	}
 
-	// TODO: ledger GC reclone — same blue-green pattern as team contexts.
-	// When implemented, call checkAndRunLedgerGC(ctx) here to prune old
-	// GitHub data directories outside the sparse checkout sliding window.
-	// The ledger already has ConfigureSparseCheckout() and time-partitioned
-	// data/github/ directories ready for this.
+	// ledger GC reclone — same blue-green pattern as team contexts
+	if l := s.workspaceRegistry.GetLedger(); l != nil && l.Exists && l.CloneURL != "" {
+		if _, loaded := s.cloneInFlight.Load(l.ID); !loaded {
+			intervalDays := l.GCIntervalDays
+			if intervalDays <= 0 {
+				intervalDays = manifest.DefaultGCIntervalDays
+			}
+			interval := time.Duration(intervalDays) * 24 * time.Hour
+			intervalExceeded := l.LastGCTime.IsZero() || time.Since(l.LastGCTime) >= interval
+			fullClone := !isPartialClone(l.Path)
+
+			if intervalExceeded || fullClone {
+				reason := "interval exceeded"
+				if fullClone {
+					reason = "full clone upgrade"
+				}
+				s.logger.Info("gc: ledger due for reclone", "id", l.ID,
+					"reason", reason, "interval_days", intervalDays, "last_gc", l.LastGCTime)
+
+				result := s.runBlueGreenGC(ctx, *l)
+				switch result {
+				case gcSkippedDirty:
+					s.issues.SetIssue(DaemonIssue{
+						Type:     IssueTypeDirtyWorkspace,
+						Severity: SeverityWarning,
+						Repo:     "ledger",
+						Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
+					})
+				case gcSuccess:
+					s.issues.ClearIssue(IssueTypeDirtyWorkspace, "ledger")
+				}
+			}
+		}
+	}
 
 	atomic.StoreInt32(&s.gcInProgress, 0)
 }
@@ -2655,10 +2685,28 @@ func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 		}
 	}
 
-	// TODO: trigger ledger GC here when implemented (same blue-green pattern).
-	// The ledger already uses partial+sparse clone with a 30-day sliding window
-	// on data/github/ directories via ConfigureSparseCheckout(). GC reclone will
-	// prune old data outside the window, keeping local disk usage <10MB per ledger.
+	// ledger GC reclone
+	if l := s.workspaceRegistry.GetLedger(); l != nil && l.Exists && l.CloneURL != "" {
+		if _, loaded := s.cloneInFlight.Load(l.ID); !loaded {
+			s.logger.Info("trigger_gc: forced ledger reclone", "id", l.ID)
+			result := s.runBlueGreenGC(ctx, *l)
+			switch result {
+			case gcSuccess:
+				resp.LedgerTriggered = true
+				s.issues.ClearIssue(IssueTypeDirtyWorkspace, "ledger")
+			case gcSkippedDirty:
+				resp.Errors = append(resp.Errors, "ledger: local changes could not be preserved for GC")
+				s.issues.SetIssue(DaemonIssue{
+					Type:     IssueTypeDirtyWorkspace,
+					Severity: SeverityWarning,
+					Repo:     "ledger",
+					Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
+				})
+			case gcFailed:
+				resp.Errors = append(resp.Errors, "ledger: reclone failed (check daemon logs)")
+			}
+		}
+	}
 
 	return resp
 }
@@ -2700,7 +2748,7 @@ func releaseGCLock(f *os.File, lockPath string) {
 	_ = os.Remove(lockPath)
 }
 
-// runBlueGreenGC performs a blue-green reclone for a single team context workspace.
+// runBlueGreenGC performs a blue-green reclone for a single workspace (team context or ledger).
 // Steps: preserve local state → clone .new → validate → atomic swap → remove old → restore state.
 //
 // GC is a disk-space optimization — it should never impair the user experience.
@@ -2712,9 +2760,17 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 	diffFile := ws.Path + ".gc-diff"
 	untrackedDir := ws.Path + ".gc-untracked"
 	lockPath := ws.Path + ".gc-lock"
+	cacheBackupDir := ws.Path + ".gc-cache"
+	isLedger := ws.Type == WorkspaceTypeLedger
+
+	wsLabel := ws.TeamName
+	if wsLabel == "" {
+		wsLabel = ws.ID
+	}
 
 	// clean up leftover artifacts from a previous failed GC
-	for _, leftover := range []string{newPath, diffFile, untrackedDir, lockPath} {
+	leftovers := []string{newPath, diffFile, untrackedDir, lockPath, cacheBackupDir}
+	for _, leftover := range leftovers {
 		if _, err := os.Stat(leftover); err == nil {
 			s.logger.Info("gc: cleaning up leftover artifact", "path", leftover)
 			if err := os.RemoveAll(leftover); err != nil {
@@ -2729,7 +2785,7 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 	// step 0a: push unpushed commits so they survive reclone
 	if err := s.gcPushUnpushedCommits(ctx, ws); err != nil {
 		s.logger.Warn("gc: skipping reclone, cannot push unpushed commits",
-			"path", ws.Path, "team", ws.TeamName, "error", err)
+			"path", ws.Path, "workspace", wsLabel, "error", err)
 		return gcSkippedDirty
 	}
 
@@ -2737,7 +2793,7 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 	hasDiff, err := s.gcCaptureDiff(ctx, ws.Path, diffFile)
 	if err != nil {
 		s.logger.Warn("gc: skipping reclone, cannot capture uncommitted changes",
-			"path", ws.Path, "team", ws.TeamName, "error", err)
+			"path", ws.Path, "workspace", wsLabel, "error", err)
 		return gcSkippedDirty
 	}
 
@@ -2745,37 +2801,66 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 	hasUntracked, err := s.gcCaptureUntracked(ctx, ws.Path, untrackedDir)
 	if err != nil {
 		s.logger.Warn("gc: skipping reclone, cannot capture untracked files",
-			"path", ws.Path, "team", ws.TeamName, "error", err)
+			"path", ws.Path, "workspace", wsLabel, "error", err)
 		return gcSkippedDirty
 	}
 
-	// --- phase 1: clone, validate, swap (existing logic) ---
+	// step 0d (ledger only): preserve .sageox/cache/ (gitignored, contains codedb indexes)
+	hasCache := false
+	if isLedger {
+		if err := gcPreserveCache(ws.Path, cacheBackupDir); err != nil {
+			s.logger.Warn("gc: failed to preserve cache, continuing anyway",
+				"path", ws.Path, "error", err)
+		} else if _, err := os.Stat(cacheBackupDir); err == nil {
+			hasCache = true
+		}
+	}
 
-	// step 1: two-phase clone into .new
+	// --- phase 1: clone, validate, swap ---
+
 	cloneURL := ws.CloneURL
 	ep := s.workspaceRegistry.GetEndpoint()
 	if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err == nil && creds != nil && creds.Token != "" {
 		cloneURL = injectGitCredentials(ws.CloneURL, "oauth2", creds.Token)
 	}
 
-	s.logger.Info("gc: starting reclone", "team", ws.TeamName, "path", newPath)
-	mCfg, err := s.twoPhaseClone(ctx, cloneURL, newPath, nil)
-	if err != nil {
-		s.logger.Error("gc: reclone failed, keeping old", "team", ws.TeamName, "error", err)
-		_ = os.RemoveAll(newPath)
-		return gcFailed
+	s.logger.Info("gc: starting reclone", "workspace", wsLabel, "path", newPath)
+
+	// step 1: clone into .new (method depends on workspace type)
+	var mCfg *manifest.ManifestConfig
+	if isLedger {
+		if err := ledger.CloneWithSparseCheckout(newPath, cloneURL); err != nil {
+			s.logger.Error("gc: reclone failed, keeping old", "workspace", wsLabel, "error", err)
+			_ = os.RemoveAll(newPath)
+			return gcFailed
+		}
+	} else {
+		mCfg, err = s.twoPhaseClone(ctx, cloneURL, newPath, nil)
+		if err != nil {
+			s.logger.Error("gc: reclone failed, keeping old", "workspace", wsLabel, "error", err)
+			_ = os.RemoveAll(newPath)
+			return gcFailed
+		}
 	}
 
 	// step 2: validate new clone
-	if !s.validateGCClone(newPath, mCfg) {
-		s.logger.Error("gc: validation failed, keeping old", "team", ws.TeamName)
+	valid := false
+	if isLedger {
+		valid = s.validateLedgerGCClone(newPath)
+	} else {
+		valid = s.validateGCClone(newPath, mCfg)
+	}
+	if !valid {
+		s.logger.Error("gc: validation failed, keeping old", "workspace", wsLabel)
 		_ = os.RemoveAll(newPath)
 		return gcFailed
 	}
 
-	// configure pull.rebase=true on the new clone
-	if _, err := gitutil.RunGit(ctx, newPath, "config", "pull.rebase", "true"); err != nil {
-		s.logger.Warn("gc: failed to set pull.rebase on new clone", "error", err)
+	// configure pull.rebase=true on the new clone (ledger's ConfigureSparseCheckout already sets this)
+	if !isLedger {
+		if _, err := gitutil.RunGit(ctx, newPath, "config", "pull.rebase", "true"); err != nil {
+			s.logger.Warn("gc: failed to set pull.rebase on new clone", "error", err)
+		}
 	}
 
 	// ensure .sageox/.gitignore excludes daemon-written files (cache/, checkout.json, etc.)
@@ -2784,20 +2869,31 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 	}
 
 	// step 3: atomic swap — protected by filesystem lock so concurrent daemons
-	// don't see the directory disappear between the two renames
+	// don't see the directory disappear between the two renames.
+	// For ledger repos, also acquire ledgerMu to prevent concurrent pull/push conflicts.
+	if isLedger {
+		s.ledgerMu.Lock()
+	}
+
 	lockFile, lockErr := acquireGCLock(lockPath)
 	if lockErr != nil {
+		if isLedger {
+			s.ledgerMu.Unlock()
+		}
 		s.logger.Warn("gc: another process holds the GC lock, skipping swap", "lock", lockPath, "error", lockErr)
 		_ = os.RemoveAll(newPath)
 		return gcFailed
 	}
-	defer releaseGCLock(lockFile, lockPath)
 
 	if _, err := os.Stat(oldPath); err == nil {
 		_ = os.RemoveAll(oldPath)
 	}
 
 	if err := os.Rename(ws.Path, oldPath); err != nil {
+		releaseGCLock(lockFile, lockPath)
+		if isLedger {
+			s.ledgerMu.Unlock()
+		}
 		s.logger.Error("gc: failed to move old repo aside", "path", ws.Path, "error", err)
 		_ = os.RemoveAll(newPath)
 		return gcFailed
@@ -2808,12 +2904,30 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 		if restoreErr := os.Rename(oldPath, ws.Path); restoreErr != nil {
 			s.logger.Error("gc: CRITICAL failed to restore old repo", "error", restoreErr)
 		}
+		releaseGCLock(lockFile, lockPath)
+		if isLedger {
+			s.ledgerMu.Unlock()
+		}
 		return gcFailed
+	}
+
+	releaseGCLock(lockFile, lockPath)
+	if isLedger {
+		s.ledgerMu.Unlock()
 	}
 
 	// step 4: cleanup old
 	if err := os.RemoveAll(oldPath); err != nil {
 		s.logger.Warn("gc: failed to remove old clone", "path", oldPath, "error", err)
+	}
+
+	// --- phase 1.5 (ledger only): restore cache ---
+	if isLedger && hasCache {
+		if err := gcRestoreCache(cacheBackupDir, ws.Path); err != nil {
+			s.logger.Warn("gc: failed to restore cache (will rebuild on next trigger)",
+				"path", ws.Path, "error", err)
+		}
+		_ = os.RemoveAll(cacheBackupDir)
 	}
 
 	// --- phase 2: restore local state ---
@@ -2823,7 +2937,7 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 		if err := s.gcRestoreDiff(ctx, ws.Path, diffFile); err != nil {
 			diffApplied = false
 			s.logger.Warn("gc: reclone succeeded but failed to restore uncommitted changes",
-				"path", ws.Path, "team", ws.TeamName, "error", err,
+				"path", ws.Path, "workspace", wsLabel, "error", err,
 				"recovery_file", diffFile)
 		}
 	}
@@ -2831,7 +2945,7 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 	if hasUntracked {
 		if err := s.gcRestoreUntracked(ws.Path, untrackedDir); err != nil {
 			s.logger.Warn("gc: reclone succeeded but failed to restore some untracked files",
-				"path", ws.Path, "team", ws.TeamName, "error", err)
+				"path", ws.Path, "workspace", wsLabel, "error", err)
 		}
 	}
 
@@ -2853,7 +2967,7 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 		}
 	}
 
-	s.logger.Info("gc: reclone complete", "team", ws.TeamName, "path", ws.Path)
+	s.logger.Info("gc: reclone complete", "workspace", wsLabel, "path", ws.Path)
 	return gcSuccess
 }
 
@@ -3089,6 +3203,68 @@ func (s *SyncScheduler) validateGCClone(repoPath string, cfg *manifest.ManifestC
 	}
 
 	return true
+}
+
+// validateLedgerGCClone checks that a freshly cloned repo has the minimum expected
+// content for a ledger. Returns false if validation fails.
+func (s *SyncScheduler) validateLedgerGCClone(repoPath string) bool {
+	// .git must exist
+	if _, err := os.Stat(filepath.Join(repoPath, ".git")); err != nil {
+		s.logger.Error("gc validate: .git missing", "path", repoPath)
+		return false
+	}
+
+	// sessions/ directory must exist (core ledger directory)
+	if _, err := os.Stat(filepath.Join(repoPath, "sessions")); err != nil {
+		s.logger.Error("gc validate: sessions/ missing", "path", repoPath)
+		return false
+	}
+
+	return true
+}
+
+// gcPreserveCache copies the .sageox/cache/ directory from the old clone to a temp location.
+// Cache is gitignored and contains codedb indexes that are expensive to rebuild.
+// Returns nil if no cache exists (nothing to preserve).
+func gcPreserveCache(srcRepo, cacheBackupDir string) error {
+	cacheDir := filepath.Join(srcRepo, ".sageox", "cache")
+	if _, err := os.Stat(cacheDir); err != nil {
+		return nil // no cache to preserve
+	}
+	return copyDir(cacheDir, cacheBackupDir)
+}
+
+// gcRestoreCache copies preserved cache back into the new clone's .sageox/cache/ directory.
+func gcRestoreCache(cacheBackupDir, dstRepo string) error {
+	if _, err := os.Stat(cacheBackupDir); err != nil {
+		return nil // no backup to restore
+	}
+	dstCache := filepath.Join(dstRepo, ".sageox", "cache")
+	if err := os.MkdirAll(filepath.Dir(dstCache), 0755); err != nil {
+		return fmt.Errorf("create .sageox dir: %w", err)
+	}
+	return copyDir(cacheBackupDir, dstCache)
+}
+
+// copyDir recursively copies a directory tree from src to dst.
+func copyDir(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		dstPath := filepath.Join(dst, relPath)
+
+		if d.IsDir() {
+			return os.MkdirAll(dstPath, 0755)
+		}
+
+		return copyFile(path, dstPath)
+	})
 }
 
 // remoteRefCheck compares the remote tracking branch SHA to the local HEAD SHA via ls-remote.
