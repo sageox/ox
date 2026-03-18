@@ -356,10 +356,14 @@ func runInit() error {
 	// === ENDPOINT SELECTION ===
 	// Priority: --endpoint flag > SAGEOX_ENDPOINT env var > interactive picker
 	if initEndpointFlag != "" {
-		os.Setenv(endpoint.EnvVar, endpoint.NormalizeEndpoint(initEndpointFlag))
+		resolvedEndpoint := endpoint.NormalizeEndpoint(initEndpointFlag)
+		if resolvedEndpoint == "" {
+			return fmt.Errorf("invalid --endpoint value: %q", initEndpointFlag)
+		}
+		os.Setenv(endpoint.EnvVar, resolvedEndpoint)
 		if !initQuiet {
 			fmt.Println()
-			fmt.Printf("Using endpoint: %s\n", cli.StyleBold.Render(endpoint.NormalizeSlug(initEndpointFlag)))
+			fmt.Printf("Using endpoint: %s\n", cli.StyleBold.Render(endpoint.NormalizeSlug(resolvedEndpoint)))
 		}
 	} else if os.Getenv(endpoint.EnvVar) == "" {
 		selectedEndpoint, needsLogin := selectInitEndpoint()
