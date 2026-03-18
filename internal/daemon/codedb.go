@@ -106,9 +106,10 @@ func (m *CodeDBManager) resolveSharedDataDir() string {
 		m.mu.Unlock()
 		return dir
 	}
+	projectRoot := m.projectRoot // snapshot under lock to avoid races with UpdateProjectRoot
 	m.mu.Unlock()
 
-	ctx, err := config.LoadProjectContext(m.projectRoot)
+	ctx, err := config.LoadProjectContext(projectRoot)
 	if err == nil {
 		if dir := paths.CodeDBSharedDir(ctx.RepoID(), ctx.Endpoint()); dir != "" {
 			// clean up legacy root-level codedb/ if it exists
@@ -127,7 +128,7 @@ func (m *CodeDBManager) resolveSharedDataDir() string {
 		}
 	}
 	m.logger.Debug("falling back to legacy codedb path", "reason", err)
-	dir := paths.CodeDBDataDir(m.projectRoot)
+	dir := paths.CodeDBDataDir(projectRoot)
 	m.mu.Lock()
 	m.dataDir = dir
 	m.mu.Unlock()
@@ -159,6 +160,7 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 		return nil, fmt.Errorf("indexing already in progress")
 	}
 	m.indexing = true
+	projectRoot := m.projectRoot // snapshot under lock to avoid races with UpdateProjectRoot
 	m.mu.Unlock()
 
 	defer func() {
@@ -169,7 +171,7 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 
 	dataDir := m.resolveSharedDataDir()
 
-	target := m.projectRoot
+	target := projectRoot
 	if payload.URL != "" {
 		target = payload.URL
 	}
@@ -230,9 +232,9 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 		}
 	} else {
 		if pw != nil {
-			_ = pw.WriteStage("indexing", fmt.Sprintf("Indexing local repo %s...", m.projectRoot))
+			_ = pw.WriteStage("indexing", fmt.Sprintf("Indexing local repo %s...", projectRoot))
 		}
-		if err := db.IndexLocalRepo(ctx, m.projectRoot, opts); err != nil {
+		if err := db.IndexLocalRepo(ctx, projectRoot, opts); err != nil {
 			m.setError(err)
 			return nil, fmt.Errorf("index local: %w", err)
 		}
@@ -281,7 +283,7 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 		if pw != nil {
 			_ = pw.WriteStage("dirty", "Indexing dirty files...")
 		}
-		dirtyCount, dirtyErr := db.BuildDirtyIndex(ctx, m.projectRoot, opts)
+		dirtyCount, dirtyErr := db.BuildDirtyIndex(ctx, projectRoot, opts)
 		if dirtyErr != nil {
 			m.logger.Warn("dirty index build failed", "error", dirtyErr)
 		} else if dirtyCount > 0 {
@@ -494,10 +496,13 @@ func queryStatsFromDB(db *codedb.DB, dataDir string) CodeDBStats {
 func (m *CodeDBManager) UpdateProjectRoot(path string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if path != "" && path != m.projectRoot {
-		m.logger.Info("codedb project root updated", "old", m.projectRoot, "new", path)
-		m.projectRoot = path
+	if path == "" || path == m.projectRoot {
+		return
 	}
+	old := m.projectRoot
+	m.projectRoot = path
+	m.dataDir = "" // force re-resolve under the new root
+	m.logger.Info("codedb project root updated", "old", old, "new", path)
 }
 
 func (m *CodeDBManager) setError(err error) {

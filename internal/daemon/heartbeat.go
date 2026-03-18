@@ -344,6 +344,8 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 	}
 
 	// track caller clone/worktree identity
+	var callerPathCb func(string)
+	var callerPath string
 	if callerID != "" {
 		h.callerMu.Lock()
 		info := h.callers[callerID]
@@ -351,21 +353,15 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 		info.LastSeen = time.Now()
 		if hb.CallerPath != "" {
 			info.Path = hb.CallerPath
+			callerPath = hb.CallerPath
+			h.cbMu.RLock()
+			callerPathCb = h.onCallerPath
+			h.cbMu.RUnlock()
 		}
 		if hb.AgentID != "" {
 			info.AgentID = hb.AgentID
 		}
 		h.callers[callerID] = info
-
-		// notify listeners when caller path changes (e.g., workspace moved)
-		if hb.CallerPath != "" {
-			h.cbMu.RLock()
-			callerPathCb := h.onCallerPath
-			h.cbMu.RUnlock()
-			if callerPathCb != nil {
-				callerPathCb(hb.CallerPath)
-			}
-		}
 
 		// evict oldest entry when over capacity
 		if len(h.callers) > maxCallers {
@@ -382,6 +378,11 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 			}
 		}
 		h.callerMu.Unlock()
+
+		// notify after releasing callerMu to avoid lock-coupling with callback targets
+		if callerPathCb != nil {
+			callerPathCb(callerPath)
+		}
 	}
 
 	// record activity by repo
