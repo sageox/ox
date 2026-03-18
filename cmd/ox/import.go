@@ -742,16 +742,12 @@ func runImportURL(cmd *cobra.Command, url string, jsonOutput bool) error {
 	}
 
 	cli.PrintSuccess("Import started")
+	fmt.Fprintf(cmd.OutOrStdout(), "  ID:        %s\n", resp.RecordingID)
 	fmt.Fprintf(cmd.OutOrStdout(), "  Status:    %s\n", resp.Status)
 	if resp.Title != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "  Title:     %s\n", resp.Title)
 	}
-	// the server returns a workflow ID while processing; once complete, a recording ID is assigned
-	if resp.RecordingID != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "\n  Check progress: ox import --status %s\n", resp.RecordingID)
-	} else {
-		fmt.Fprintf(cmd.OutOrStdout(), "\n  Check progress: ox import --list\n")
-	}
+	fmt.Fprintf(cmd.OutOrStdout(), "\n  Track progress: ox import --status %s --watch\n", resp.RecordingID)
 	return nil
 }
 
@@ -764,13 +760,31 @@ func runImportStatus(cmd *cobra.Command, jsonOutput bool) error {
 
 	recordingID := importFlags.status
 
+	// The recording row may not exist yet: the API pre-generates the ID before
+	// starting the Temporal workflow, and the DB insert happens inside the workflow
+	// (CreateVideoRecording activity). Treat 404 as status="starting" rather than
+	// an error, since the ID is known-valid.
 	for {
 		resp, err := client.GetVideoStatus(tc.TeamID, recordingID)
 		if err != nil {
 			return fmt.Errorf("status check failed: %w", err)
 		}
 		if resp == nil {
-			return fmt.Errorf("recording not found: %s", recordingID)
+			// row not yet created — show as "starting"
+			if jsonOutput {
+				if importFlags.watch {
+					fmt.Fprintf(cmd.OutOrStdout(), "{\"id\":%q,\"status\":\"starting\"}\n", recordingID)
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "{\n  \"id\": %q,\n  \"status\": \"starting\"\n}\n", recordingID)
+				}
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Recording: %s\nStatus:    starting\n", recordingID)
+			}
+			if !importFlags.watch {
+				return nil
+			}
+			time.Sleep(3 * time.Second)
+			continue
 		}
 
 		if jsonOutput {

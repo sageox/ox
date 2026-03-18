@@ -26,10 +26,12 @@ type ImportVideoURLRequest struct {
 	Title string `json:"title,omitempty"`
 }
 
-// ImportVideoURLResponse represents the response from importing a video URL
+// ImportVideoURLResponse represents the response from importing a video URL.
+// import_id and recording_id are the same value — a stable ID assigned upfront
+// that can be used with --status immediately, before processing completes.
 type ImportVideoURLResponse struct {
-	WorkflowID  string `json:"workflow_id"`
-	RecordingID string `json:"recording_id,omitempty"`
+	ImportID    string `json:"import_id"`
+	RecordingID string `json:"recording_id"`
 	Status      string `json:"status"`
 	Title       string `json:"title,omitempty"`
 }
