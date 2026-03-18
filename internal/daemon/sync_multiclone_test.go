@@ -220,6 +220,13 @@ path = %q
 	s1 := newTestScheduler(project1)
 	s2 := newTestScheduler(project2)
 
+	// drain background clone goroutines before t.TempDir() cleanup fires;
+	// registered after setup so it runs first (t.Cleanup is LIFO)
+	t.Cleanup(func() {
+		s1.cloneWg.Wait()
+		s2.cloneWg.Wait()
+	})
+
 	ctx := context.Background()
 
 	// both fire concurrently — both will see ws.Exists=false and spawn
