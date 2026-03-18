@@ -138,7 +138,7 @@ func (c *RepoClient) ImportVideoURL(teamID string, req *ImportVideoURLRequest) (
 }
 
 // GetVideoStatus calls GET /api/v1/teams/{team_id}/recordings/{recording_id}
-// Returns nil, nil on 404 or network error (graceful degradation)
+// Returns nil, nil on 404 (graceful degradation); all other errors are returned.
 func (c *RepoClient) GetVideoStatus(teamID, recordingID string) (*VideoStatusResponse, error) {
 	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(videoStatusPath, teamID, recordingID)
 

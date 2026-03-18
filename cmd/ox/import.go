@@ -707,7 +707,10 @@ func resolveImportTeamAndClient() (*config.TeamContext, *api.RepoClient, error) 
 	}
 
 	storedToken, err := auth.GetTokenForEndpoint(ep)
-	if err != nil || storedToken == nil || storedToken.AccessToken == "" {
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read auth store: %w", err)
+	}
+	if storedToken == nil || storedToken.AccessToken == "" {
 		return nil, nil, fmt.Errorf("not authenticated — run 'ox login' first")
 	}
 
