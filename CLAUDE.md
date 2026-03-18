@@ -738,6 +738,8 @@ docs/ai → machine grounding and detail
 
 **IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.
 
+**If beads is broken or missing**, run `make beads-setup` to bootstrap (installs shared Dolt server, imports issues from JSONL).
+
 ### Why bd?
 
 - Dependency-aware: Track blockers and relationships between issues
