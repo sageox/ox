@@ -30,6 +30,7 @@ import (
 var initQuiet bool
 var initTeamFlag string
 var initForce bool
+var initEndpointFlag string
 
 // LegacyOxPrimeLine is the old multi-line block format.
 // Kept temporarily for upgrade detection during migration to single-line format.
@@ -132,6 +133,7 @@ func init() {
 	initCmd.Flags().BoolVarP(&initQuiet, "quiet", "q", false, "suppress non-essential output (default: false)")
 	initCmd.Flags().StringVar(&initTeamFlag, "team", "", "team ID to associate this repo with")
 	initCmd.Flags().BoolVar(&initForce, "force", false, "initialize even if .sageox/ exists on remote")
+	initCmd.Flags().StringVar(&initEndpointFlag, "endpoint", "", "SageOx endpoint URL (overrides SAGEOX_ENDPOINT)")
 }
 
 // initialCommitReadmeContent is the README placed in .sageox/ when creating
@@ -352,9 +354,14 @@ func runInit() error {
 	}
 
 	// === ENDPOINT SELECTION ===
-	// When multiple endpoints available and no explicit selection, prompt user
-	// Show all stored endpoints (even expired) plus production endpoint
-	if os.Getenv(endpoint.EnvVar) == "" {
+	// Priority: --endpoint flag > SAGEOX_ENDPOINT env var > interactive picker
+	if initEndpointFlag != "" {
+		os.Setenv(endpoint.EnvVar, endpoint.NormalizeEndpoint(initEndpointFlag))
+		if !initQuiet {
+			fmt.Println()
+			fmt.Printf("Using endpoint: %s\n", cli.StyleBold.Render(endpoint.NormalizeSlug(initEndpointFlag)))
+		}
+	} else if os.Getenv(endpoint.EnvVar) == "" {
 		selectedEndpoint, needsLogin := selectInitEndpoint()
 		if selectedEndpoint != "" {
 			if needsLogin {
