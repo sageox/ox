@@ -238,7 +238,8 @@ beads-setup: ## Bootstrap beads issue tracking (shared Dolt server + JSONL impor
 		echo "Initializing beads with shared server..."; \
 		bd init --prefix ox --shared-server $$([ -f .beads/issues.jsonl ] && echo "--from-jsonl") --force; \
 	fi
-	@bd doctor --fix --yes 2>&1 | tail -5
+	@bd doctor --fix --yes
+	@bd list --status=open > /dev/null || (echo "Beads setup failed. Run 'bd doctor' for details." && exit 1)
 	@echo ""
 	@echo "Beads setup complete. Run 'bd list --status=open' to see issues."
 
