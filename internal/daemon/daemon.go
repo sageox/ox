@@ -324,6 +324,11 @@ func (d *Daemon) Start() error {
 	// initialize code index manager (if project root is set)
 	if d.config.ProjectRoot != "" {
 		d.codedb = NewCodeDBManager(d.config.ProjectRoot, d.logger, d.telemetry)
+		// keep codedb project root fresh when workspace path changes
+		// (Conductor creates new workspace dirs, deleting old ones)
+		d.heartbeat.SetCallerPathCallback(func(path string) {
+			d.codedb.UpdateProjectRoot(path)
+		})
 	}
 
 	// initialize agent work manager (if ledger path is set)

@@ -853,7 +853,12 @@ func (s *SyncScheduler) LastSync() time.Time {
 func (s *SyncScheduler) pullChanges(ctx context.Context) {
 	// anti-entropy: ensure missing workspaces get cloned
 	s.triggerMissingClones()
-	_ = s.doPull(ctx, nil, false)
+
+	// bound background sync to 60s so a DNS/network hang doesn't block
+	// the scheduler for minutes (the caller ctx has no deadline)
+	pullCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	_ = s.doPull(pullCtx, nil, false)
 
 	// check code index freshness (non-blocking)
 	if s.codedb != nil {
@@ -1943,7 +1948,12 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 func (s *SyncScheduler) pullTeamContexts(ctx context.Context) {
 	// anti-entropy: ensure missing workspaces get cloned
 	s.triggerMissingClones()
-	s.doTeamSync(ctx, nil, false)
+
+	// bound background sync to 60s so a DNS/network hang doesn't block
+	// the scheduler for minutes (the caller ctx has no deadline)
+	teamCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	s.doTeamSync(teamCtx, nil, false)
 }
 
 // TeamSync performs an on-demand sync of all team contexts with progress updates.

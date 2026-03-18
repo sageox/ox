@@ -167,6 +167,7 @@ type HeartbeatHandler struct {
 	onTeamNeeded      func(teamID string)
 	onActivity        func()
 	onVersionMismatch func(cliVersion, daemonVersion string) // triggers daemon restart
+	onCallerPath      func(path string)                      // fires when CallerPath changes
 }
 
 // maxCallers limits the callers map to prevent unbounded growth.
@@ -221,6 +222,15 @@ func (h *HeartbeatHandler) SetActivityCallback(cb func()) {
 func (h *HeartbeatHandler) SetVersionMismatchCallback(cb func(cliVersion, daemonVersion string)) {
 	h.cbMu.Lock()
 	h.onVersionMismatch = cb
+	h.cbMu.Unlock()
+}
+
+// SetCallerPathCallback sets the callback for when a heartbeat arrives with a
+// CallerPath. Used to update components (e.g., CodeDBManager) when the active
+// workspace changes (common with Conductor which creates new workspace dirs).
+func (h *HeartbeatHandler) SetCallerPathCallback(cb func(path string)) {
+	h.cbMu.Lock()
+	h.onCallerPath = cb
 	h.cbMu.Unlock()
 }
 
@@ -346,6 +356,16 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 			info.AgentID = hb.AgentID
 		}
 		h.callers[callerID] = info
+
+		// notify listeners when caller path changes (e.g., workspace moved)
+		if hb.CallerPath != "" {
+			h.cbMu.RLock()
+			callerPathCb := h.onCallerPath
+			h.cbMu.RUnlock()
+			if callerPathCb != nil {
+				callerPathCb(hb.CallerPath)
+			}
+		}
 
 		// evict oldest entry when over capacity
 		if len(h.callers) > maxCallers {

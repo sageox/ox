@@ -488,6 +488,18 @@ func queryStatsFromDB(db *codedb.DB, dataDir string) CodeDBStats {
 	return stats
 }
 
+// UpdateProjectRoot updates the project root path used for indexing.
+// Called when a heartbeat arrives from a different workspace (e.g., Conductor
+// creates a new workspace after deleting the old one).
+func (m *CodeDBManager) UpdateProjectRoot(path string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if path != "" && path != m.projectRoot {
+		m.logger.Info("codedb project root updated", "old", m.projectRoot, "new", path)
+		m.projectRoot = path
+	}
+}
+
 func (m *CodeDBManager) setError(err error) {
 	m.mu.Lock()
 	m.lastErr = err
