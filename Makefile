@@ -1,6 +1,6 @@
 # Makefile for ox CLI tool
 
-.PHONY: help build install clean dev run test test-all test-slow test-integration test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version
+.PHONY: help build install clean dev run test test-all test-slow test-integration test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
 
 # Variables
 GO := go
@@ -218,6 +218,29 @@ refresh-friction-catalog: ## Fetch friction catalog from API and generate Go cod
 	@go run ./scripts/gen-friction-catalog/main.go < tmp/friction-catalog.json > internal/uxfriction/catalog_generated.go
 	@gofmt -w internal/uxfriction/catalog_generated.go
 	@echo "Catalog updated: internal/uxfriction/catalog_generated.go"
+
+# Beads (issue tracking)
+beads-setup: ## Bootstrap beads issue tracking (shared Dolt server + JSONL import)
+	@echo "Setting up beads issue tracking..."
+	@which bd > /dev/null || (echo "bd not found. Install with: brew install beads" && exit 1)
+	@if [ -f .beads/issues.jsonl ]; then \
+		echo "Found .beads/issues.jsonl ($$(wc -l < .beads/issues.jsonl | tr -d ' ') issues)"; \
+	elif git show beads-sync:.beads/issues.jsonl > /dev/null 2>&1; then \
+		echo "Extracting issues from beads-sync branch..."; \
+		git show beads-sync:.beads/issues.jsonl > .beads/issues.jsonl; \
+		echo "Extracted $$(wc -l < .beads/issues.jsonl | tr -d ' ') issues"; \
+	else \
+		echo "No issues found (fresh project)"; \
+	fi
+	@if bd list > /dev/null 2>&1; then \
+		echo "Beads already working. Run 'bd doctor' to verify."; \
+	else \
+		echo "Initializing beads with shared server..."; \
+		bd init --prefix ox --shared-server $$([ -f .beads/issues.jsonl ] && echo "--from-jsonl") --force; \
+	fi
+	@bd doctor --fix --yes 2>&1 | tail -5
+	@echo ""
+	@echo "Beads setup complete. Run 'bd list --status=open' to see issues."
 
 # Version management
 bump-version: ## Bump version across all files (usage: make bump-version NEW_VERSION=0.10.0)
