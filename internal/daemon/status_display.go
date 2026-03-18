@@ -288,7 +288,7 @@ func formatErrors(status *StatusData) string {
 
 	if status.LastError != "" {
 		out.WriteString("\n")
-		lastErrLine := "  " + styleCritical.Render("Last error: "+status.LastError)
+		lastErrLine := "  " + styleCritical.Render("Last error: "+humanizeError(status.LastError))
 		if status.LastErrorTime != "" {
 			if t, err := time.Parse(time.RFC3339, status.LastErrorTime); err == nil {
 				lastErrLine += styleMuted.Render(" (" + formatRelativeTime(time.Since(t)) + ")")
@@ -443,7 +443,7 @@ func formatCodeIndexInline(status *StatusData, verbose bool) string {
 	case cs.LastError != "" && cs.Commits == 0:
 		line = styleWarning.Render("○ pending")
 	case cs.LastError != "":
-		line = styleCritical.Render("○ " + cs.LastError)
+		line = styleCritical.Render("○ " + humanizeError(cs.LastError))
 	case !cs.LastIndexed.IsZero():
 		age := formatRelativeTime(time.Since(cs.LastIndexed))
 		metrics := fmt.Sprintf("%d commits, %d blobs", cs.Commits, cs.Blobs)
@@ -766,15 +766,50 @@ func shortenPath(path string) string {
 	return path
 }
 
+// humanizeError translates raw git/system errors into concise user-friendly messages.
+// Returns the original string if no translation matches.
+func humanizeError(raw string) string {
+	lower := strings.ToLower(raw)
+	switch {
+	case strings.Contains(lower, "resolving timed out") || strings.Contains(lower, "could not resolve host"):
+		return "DNS resolution timed out (network may be offline or DNS is unreachable)"
+	case strings.Contains(lower, "connection timed out") || strings.Contains(lower, "operation timed out"):
+		return "Connection timed out (network may be offline or server is unreachable)"
+	case strings.Contains(lower, "unable to access") && strings.Contains(lower, "timed out"):
+		return "Git sync timed out (network may be offline or server is unreachable)"
+	case strings.Contains(lower, "repository does not exist") || strings.Contains(lower, "repository not found"):
+		// extract the path from "open local repo /path: repository does not exist"
+		if idx := strings.Index(raw, "open local repo "); idx >= 0 {
+			rest := raw[idx+len("open local repo "):]
+			if colonIdx := strings.Index(rest, ":"); colonIdx >= 0 {
+				path := rest[:colonIdx]
+				return fmt.Sprintf("Project path no longer exists: %s (workspace may have moved)", filepath.Base(path))
+			}
+		}
+		return "Repository path no longer exists (workspace may have moved)"
+	case strings.Contains(lower, "no such host"):
+		return "Server unreachable (DNS lookup failed)"
+	case strings.Contains(lower, "connection refused"):
+		return "Server unreachable (connection refused)"
+	default:
+		return raw
+	}
+}
+
 // getErrorHint returns actionable hint for common error types.
 func getErrorHint(err string) string {
+	lower := strings.ToLower(err)
 	switch {
-	case strings.Contains(err, "authentication"):
+	case strings.Contains(lower, "authentication"):
 		return "Run: git config credential.helper store"
-	case strings.Contains(err, "permission denied"):
+	case strings.Contains(lower, "permission denied"):
 		return "Check SSH key: ssh -T git@github.com"
-	case strings.Contains(err, "push failed"):
+	case strings.Contains(lower, "push failed"):
 		return "Pull may be needed. Run: ox ledger sync"
+	case strings.Contains(lower, "timed out") || strings.Contains(lower, "no such host") || strings.Contains(lower, "connection refused"):
+		return "Will retry automatically. Check network connectivity if this persists."
+	case strings.Contains(lower, "repository does not exist") || strings.Contains(lower, "no longer exists"):
+		return "The daemon will pick up the new workspace path on next heartbeat."
 	default:
 		return ""
 	}

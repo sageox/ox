@@ -47,7 +47,9 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 	if err := os.MkdirAll(parentDir, 0755); err != nil {
 		return nil, fmt.Errorf("create parent dir %s: %w", parentDir, err)
 	}
-	cloneCmd := exec.CommandContext(ctx, "git", "clone",
+	cloneArgs := append(
+		gitutil.GitHTTPTimeoutFlags(),
+		"clone",
 		"--filter=blob:none",
 		"--depth=1",
 		"--sparse",
@@ -57,6 +59,7 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 		"--quiet",
 		cloneURL, repoPath,
 	)
+	cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)
 	cloneCmd.Dir = parentDir
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
 		sanitized := gitutil.SanitizeOutput(string(output))
@@ -110,7 +113,8 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 	// unshallow so subsequent fetch/pull --rebase work correctly.
 	// --depth=1 creates a shallow clone; fetch --unshallow converts to full depth
 	// but with --filter=blob:none active, only fetches commit/tree objects.
-	if _, err := gitutil.RunGit(ctx, repoPath, "fetch", "--unshallow", "--quiet"); err != nil {
+	unshallowArgs := append(gitutil.GitHTTPTimeoutFlags(), "fetch", "--unshallow", "--quiet")
+	if _, err := gitutil.RunGit(ctx, repoPath, unshallowArgs...); err != nil {
 		// non-fatal: pull --rebase may still work if remote only has 1 commit
 		slog.Debug("unshallow fetch failed (may be single-commit repo)", "path", repoPath, "error", err)
 	}

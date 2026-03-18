@@ -67,6 +67,9 @@ const (
 	cloneSemTimeout = 2 * time.Minute
 )
 
+// gitHTTPTimeoutFlags returns flags for daemon git commands. See gitutil.GitHTTPTimeoutFlags.
+var gitHTTPTimeoutFlags = gitutil.GitHTTPTimeoutFlags
+
 // ErrInvalidRepoPath indicates the repo path failed security validation.
 var ErrInvalidRepoPath = errors.New("invalid repo path: path traversal or unsafe location detected")
 
@@ -1091,7 +1094,9 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	fetchPullErr := func() error {
 		defer s.ledgerMu.Unlock()
 		// git fetch (capture stderr for diagnosable error messages)
-		fetchCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "fetch", "--quiet")
+		fetchArgs := append([]string{"-C", s.config.LedgerPath}, gitHTTPTimeoutFlags()...)
+		fetchArgs = append(fetchArgs, "fetch", "--quiet")
+		fetchCmd := exec.CommandContext(ctx, "git", fetchArgs...)
 		if output, err := fetchCmd.CombinedOutput(); err != nil {
 			detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
 			s.logger.Warn("fetch failed", "error", err, "output", detail)
@@ -1139,7 +1144,9 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		// git pull --rebase --autostash
 		// --autostash: local uncommitted changes (from CLI writes, user edits) must not
 		// block background sync — stash before rebase, pop after
-		pullCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "pull", "--rebase", "--autostash", "--quiet")
+		pullArgs := append([]string{"-C", s.config.LedgerPath}, gitHTTPTimeoutFlags()...)
+		pullArgs = append(pullArgs, "pull", "--rebase", "--autostash", "--quiet")
+		pullCmd := exec.CommandContext(ctx, "git", pullArgs...)
 		if output, err := pullCmd.CombinedOutput(); err != nil {
 			detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
 			s.logger.Warn("pull failed", "error", err, "output", detail)
@@ -1880,7 +1887,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		if progress != nil {
 			_ = progress.WriteStage("cloning", "Cloning repository...")
 		}
-		cloneArgs := []string{"clone", "--quiet", cloneURL, payload.RepoPath}
+		cloneArgs := append(gitHTTPTimeoutFlags(), "clone", "--quiet", cloneURL, payload.RepoPath)
 		cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)
 		// set cmd.Dir so git doesn't fail when daemon CWD has been deleted
 		if parentDir := filepath.Dir(payload.RepoPath); parentDir != "" {
@@ -2446,9 +2453,10 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 		s.logger.Warn("team context remote credential refresh failed", "path", path, "error", err)
 	}
 
-	// git fetch
 	// git fetch (capture stderr for diagnosable error messages)
-	fetchCmd := exec.CommandContext(ctx, "git", "-C", path, "fetch", "--quiet")
+	tcFetchArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
+	tcFetchArgs = append(tcFetchArgs, "fetch", "--quiet")
+	fetchCmd := exec.CommandContext(ctx, "git", tcFetchArgs...)
 	if output, err := fetchCmd.CombinedOutput(); err != nil {
 		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
 		if detail != "" {
@@ -2465,7 +2473,9 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 	// git pull --rebase --autostash (capture stderr for diagnosable error messages)
 	// --autostash: team context repos are collaborative workspaces — users may have
 	// uncommitted local edits (docs/, data/) that must not block background sync
-	pullCmd := exec.CommandContext(ctx, "git", "-C", path, "pull", "--rebase", "--autostash", "--quiet")
+	tcPullArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
+	tcPullArgs = append(tcPullArgs, "pull", "--rebase", "--autostash", "--quiet")
+	pullCmd := exec.CommandContext(ctx, "git", tcPullArgs...)
 	if output, err := pullCmd.CombinedOutput(); err != nil {
 		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
 
