@@ -12,7 +12,7 @@ import (
 
 // MinFetchHeadAge is the minimum age of FETCH_HEAD before we'll fetch again.
 // Prevents redundant fetches if another process fetched recently.
-const MinFetchHeadAge = 2 * time.Minute
+const MinFetchHeadAge = 30 * time.Second
 
 // knownLockFiles are git lock files that indicate a crashed or in-progress git process.
 var knownLockFiles = []string{

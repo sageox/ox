@@ -16,7 +16,7 @@ func TestNew(t *testing.T) {
 		d := New(nil, nil)
 		assert.NotNil(t, d)
 		assert.NotNil(t, d.config)
-		assert.Equal(t, 5*time.Minute, d.config.SyncIntervalRead)
+		assert.Equal(t, 60*time.Second, d.config.SyncIntervalRead)
 	})
 
 	t.Run("with custom config", func(t *testing.T) {
@@ -134,7 +134,7 @@ func TestDefaultConfig_NewFields(t *testing.T) {
 	})
 
 	t.Run("team context sync interval is set", func(t *testing.T) {
-		assert.Equal(t, 1*time.Minute, cfg.TeamContextSyncInterval)
+		assert.Equal(t, 15*time.Second, cfg.TeamContextSyncInterval)
 	})
 }
 

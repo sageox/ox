@@ -50,8 +50,8 @@ import (
 // Sync timing constants - extracted for clarity and testability.
 const (
 	// minTeamContextFetchAge is the minimum age before re-fetching a team context.
-	// Team contexts are shared across repos, so we use a longer interval to reduce redundant fetches.
-	minTeamContextFetchAge = 5 * time.Minute
+	// Team contexts are shared across repos, so we use a shorter interval for fast sync.
+	minTeamContextFetchAge = 15 * time.Second
 
 	// teamDiscoveryInterval is how often we re-fetch the team list from the API,
 	// independent of credential token expiry. This ensures new teams are discovered

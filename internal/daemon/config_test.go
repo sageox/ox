@@ -16,7 +16,7 @@ import (
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	assert.Equal(t, 5*time.Minute, cfg.SyncIntervalRead)
+	assert.Equal(t, 60*time.Second, cfg.SyncIntervalRead)
 	assert.Equal(t, 500*time.Millisecond, cfg.DebounceWindow)
 	assert.True(t, cfg.AutoStart)
 	assert.Empty(t, cfg.LedgerPath)

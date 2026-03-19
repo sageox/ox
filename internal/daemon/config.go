@@ -75,8 +75,8 @@ type Config struct {
 // DefaultConfig returns the default daemon configuration.
 func DefaultConfig() *Config {
 	return &Config{
-		SyncIntervalRead:        5 * time.Minute, // includes anti-entropy checks
-		TeamContextSyncInterval: 1 * time.Minute,
+		SyncIntervalRead:        60 * time.Second, // includes anti-entropy checks
+		TeamContextSyncInterval: 15 * time.Second,
 		DebounceWindow:          500 * time.Millisecond,
 		VersionCheckInterval:    30 * time.Minute, // ETag conditional requests make this cheap
 		GCCheckInterval:         1 * time.Hour,    // check hourly, actual GC cadence is per-workspace
