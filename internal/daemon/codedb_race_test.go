@@ -143,14 +143,23 @@ func TestConcurrentStatsWhileIndexing(t *testing.T) {
 
 	// attempt indexing (will fail because tmpDir is not a git repo, but
 	// that's fine — we're testing Stats() safety during the attempt)
+	indexCtx, indexCancel := context.WithCancel(context.Background())
+	defer indexCancel()
+	var indexWg sync.WaitGroup
+	indexWg.Add(1)
 	go func() {
-		_, _ = mgr.Index(context.Background(), CodeIndexPayload{}, nil)
+		defer indexWg.Done()
+		_, _ = mgr.Index(indexCtx, CodeIndexPayload{}, nil)
 	}()
 
 	// let readers run during the index attempt
 	time.Sleep(200 * time.Millisecond)
 	cancel()
 	readersWg.Wait()
+
+	// cancel indexing and wait for it to finish before temp dir cleanup
+	indexCancel()
+	indexWg.Wait()
 
 	// final stats call should succeed
 	stats := mgr.Stats()
@@ -241,18 +250,18 @@ func TestMultipleManagersCheckFreshness(t *testing.T) {
 
 	// use a cancellable context so background indexing goroutines stop before cleanup
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	const managers = 10
+	mgrs := make([]*CodeDBManager, managers)
 	var wg sync.WaitGroup
 	wg.Add(managers)
 
-	for range managers {
-		go func() {
+	for i := range managers {
+		mgrs[i] = NewCodeDBManager(tmpDir, logger, nil)
+		go func(mgr *CodeDBManager) {
 			defer wg.Done()
-			mgr := NewCodeDBManager(tmpDir, logger, nil)
 			mgr.CheckFreshness(ctx)
-		}()
+		}(mgrs[i])
 	}
 
 	done := make(chan struct{})
@@ -267,10 +276,33 @@ func TestMultipleManagersCheckFreshness(t *testing.T) {
 		t.Fatal("CheckFreshness deadlocked under concurrent calls")
 	}
 
-	// cancel to stop any background indexing before temp dir cleanup
+	// cancel to stop background indexing goroutines spawned by CheckFreshness
 	cancel()
-	// brief pause for goroutines to notice cancellation
-	time.Sleep(50 * time.Millisecond)
+
+	// CheckFreshness fires unjoinable background goroutines (go func() { m.Index(...) }).
+	// Poll each manager's IndexingNow to wait for them to finish, so Bleve
+	// indexes and SQLite connections close before TempDir cleanup.
+	deadline := time.After(10 * time.Second)
+	for {
+		allDone := true
+		for _, mgr := range mgrs {
+			if mgr.Stats().IndexingNow {
+				allDone = false
+				break
+			}
+		}
+		if allDone {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Log("warning: timed out waiting for background indexing to stop")
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	// brief pause for file handles to fully close after indexing stops
+	time.Sleep(200 * time.Millisecond)
 }
 
 // TestConcurrentStatsWithPerRepoData verifies Stats() returns correct per-repo
