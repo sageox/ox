@@ -254,12 +254,6 @@ func AlternateSessionCacheDirs(repoID string) []string {
 	return dirs
 }
 
-// LegacySessionCacheDirs is an alias for AlternateSessionCacheDirs.
-// Deprecated: use AlternateSessionCacheDirs.
-func LegacySessionCacheDirs(repoID string) []string {
-	return AlternateSessionCacheDirs(repoID)
-}
-
 // TempDir returns the base temporary directory for SageOx ephemeral files.
 //
 // CRITICAL: Uses /tmp/<username>/sageox/ to avoid multi-user permission conflicts.
