@@ -488,15 +488,15 @@ func createCommitWithAgent(t *testing.T, env *common.TestEnvironment, agentID, m
 	require.NoError(t, err)
 
 	// Actually commit with the modified message
-	gitCommit := exec.Command("git", "commit", "-F", msgFile)
+	// --no-verify skips prepare-commit-msg hook to avoid double-running ox hooks
+	// (we already ran ox hooks commit-msg manually above)
+	gitCommit := exec.Command("git", "commit", "--no-verify", "-F", msgFile)
 	gitCommit.Dir = env.ProjectDir
 	commitEnv := append([]string{}, env.EnvVars...)
 	commitEnv = setEnvInSlice(commitEnv, "GIT_AUTHOR_NAME", "Test")
 	commitEnv = setEnvInSlice(commitEnv, "GIT_AUTHOR_EMAIL", "test@example.com")
 	commitEnv = setEnvInSlice(commitEnv, "GIT_COMMITTER_NAME", "Test")
 	commitEnv = setEnvInSlice(commitEnv, "GIT_COMMITTER_EMAIL", "test@example.com")
-	// skip prepare-commit-msg hook to avoid double-running ox hooks
-	commitEnv = setEnvInSlice(commitEnv, "GIT_EDITOR", "true")
 	gitCommit.Env = commitEnv
 
 	commitOut, err := gitCommit.CombinedOutput()
