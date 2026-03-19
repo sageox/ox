@@ -479,3 +479,105 @@ func TestUpdateConfigLastSync_PreservesLedgerPath(t *testing.T) {
 	assert.True(t, reloaded.Ledger.HasLastSync(),
 		"last_sync should be set after UpdateConfigLastSync")
 }
+
+func TestExponentialBackoff_Cap(t *testing.T) {
+	t.Parallel()
+	base := time.Minute
+	maxBackoff := 30 * time.Minute
+
+	tests := []struct {
+		failures int
+		want     time.Duration
+	}{
+		{0, base},           // 1m (base)
+		{1, base},           // 1m (1 << 0 = 1)
+		{2, 2 * base},       // 2m (1 << 1 = 2)
+		{3, 4 * base},       // 4m
+		{4, 8 * base},       // 8m
+		{5, 16 * base},      // 16m
+		{6, maxBackoff},     // 32m → capped to 30m
+		{10, maxBackoff},    // capped
+		{100, maxBackoff},   // very high, still capped
+	}
+	for _, tt := range tests {
+		got := exponentialBackoff(tt.failures, base, maxBackoff)
+		if got != tt.want {
+			t.Errorf("exponentialBackoff(%d) = %v, want %v", tt.failures, got, tt.want)
+		}
+	}
+}
+
+func TestWorkspaceRegistry_ShouldSync_BackoffRespected(t *testing.T) {
+	t.Parallel()
+	reg := &WorkspaceRegistry{
+		workspaces: make(map[string]*WorkspaceState),
+	}
+
+	id := "test-ws"
+	reg.workspaces[id] = &WorkspaceState{ID: id}
+
+	// no failures → should sync
+	assert.True(t, reg.ShouldSync(id))
+
+	// record a failure — sets backoff to ~1min in the future
+	reg.RecordSyncFailure(id)
+
+	// immediately after failure → should NOT sync (backoff active)
+	assert.False(t, reg.ShouldSync(id))
+
+	// verify failure count
+	failures, nextAttempt := reg.GetSyncRetryInfo(id)
+	assert.Equal(t, 1, failures)
+	assert.False(t, nextAttempt.IsZero())
+}
+
+func TestWorkspaceRegistry_ClearSyncFailures_ResetsBackoff(t *testing.T) {
+	t.Parallel()
+	reg := &WorkspaceRegistry{
+		workspaces: make(map[string]*WorkspaceState),
+	}
+
+	id := "test-ws"
+	reg.workspaces[id] = &WorkspaceState{ID: id}
+
+	// record multiple failures
+	reg.RecordSyncFailure(id)
+	reg.RecordSyncFailure(id)
+	reg.RecordSyncFailure(id)
+
+	failures, _ := reg.GetSyncRetryInfo(id)
+	assert.Equal(t, 3, failures)
+
+	// clear failures
+	reg.ClearSyncFailures(id)
+
+	failures, nextAttempt := reg.GetSyncRetryInfo(id)
+	assert.Equal(t, 0, failures)
+	assert.True(t, nextAttempt.IsZero())
+
+	// should sync again
+	assert.True(t, reg.ShouldSync(id))
+}
+
+func TestWorkspaceRegistry_ShouldSync_UnknownWorkspace(t *testing.T) {
+	t.Parallel()
+	reg := &WorkspaceRegistry{
+		workspaces: make(map[string]*WorkspaceState),
+	}
+	// unknown workspace → allow sync
+	assert.True(t, reg.ShouldSync("nonexistent"))
+}
+
+func TestWorkspaceRegistry_RecordSyncFailure_CreatesEntry(t *testing.T) {
+	t.Parallel()
+	reg := &WorkspaceRegistry{
+		workspaces: make(map[string]*WorkspaceState),
+	}
+
+	id := "auto-created"
+	reg.RecordSyncFailure(id)
+
+	ws := reg.workspaces[id]
+	assert.NotNil(t, ws)
+	assert.Equal(t, 1, ws.SyncFailures)
+}

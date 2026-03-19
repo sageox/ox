@@ -677,3 +677,136 @@ func TestWithEndpoint(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, baseToken, "baseClient should not see custom endpoint token")
 }
+
+// --- P0: Tests for silent customer breakage scenarios ---
+
+// These use setupTestDir (not t.Parallel) because GetLoggedInEndpoints and
+// GetUserID are package-level functions that use configDirOverride.
+
+func TestGetLoggedInEndpoints_EmptyAccessToken(t *testing.T) {
+	setupTestDir(t)
+
+	// save a token with empty AccessToken — should NOT appear in logged-in endpoints
+	emptyToken := &StoredToken{
+		AccessToken:  "",
+		RefreshToken: "refresh",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+	require.NoError(t, SaveTokenForEndpoint("https://sageox.ai", emptyToken))
+
+	// save a valid token
+	validToken := &StoredToken{
+		AccessToken:  "valid-token",
+		RefreshToken: "refresh",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+	require.NoError(t, SaveTokenForEndpoint("https://staging.sageox.ai", validToken))
+
+	endpoints := GetLoggedInEndpoints()
+	assert.Len(t, endpoints, 1, "only the valid token should be returned")
+	assert.Contains(t, endpoints, "https://staging.sageox.ai")
+}
+
+func TestGetLoggedInEndpoints_MixedValidity(t *testing.T) {
+	setupTestDir(t)
+
+	// expired token
+	expired := &StoredToken{
+		AccessToken: "expired",
+		ExpiresAt:   time.Now().Add(-time.Hour),
+	}
+	require.NoError(t, SaveTokenForEndpoint("https://expired.sageox.ai", expired))
+
+	// valid token
+	valid := &StoredToken{
+		AccessToken: "valid",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}
+	require.NoError(t, SaveTokenForEndpoint("https://valid.sageox.ai", valid))
+
+	endpoints := GetLoggedInEndpoints()
+	assert.Len(t, endpoints, 1)
+	assert.Contains(t, endpoints, "https://valid.sageox.ai")
+}
+
+func TestGetUserID_WithUserInfo(t *testing.T) {
+	setupTestDir(t)
+
+	token := &StoredToken{
+		AccessToken: "tok",
+		ExpiresAt:   time.Now().Add(time.Hour),
+		UserInfo:    UserInfo{UserID: "user-abc"},
+	}
+	require.NoError(t, SaveToken(token))
+
+	uid := GetUserID("")
+	assert.Equal(t, "user-abc", uid)
+}
+
+func TestGetUserID_EmptyUserInfo(t *testing.T) {
+	setupTestDir(t)
+
+	token := &StoredToken{
+		AccessToken: "tok",
+		ExpiresAt:   time.Now().Add(time.Hour),
+		UserInfo:    UserInfo{},
+	}
+	require.NoError(t, SaveToken(token))
+
+	uid := GetUserID("")
+	assert.Equal(t, "", uid, "empty UserInfo should return empty user ID")
+}
+
+func TestGetUserID_NoToken(t *testing.T) {
+	setupTestDir(t)
+	uid := GetUserID("")
+	assert.Equal(t, "", uid, "no token should return empty user ID")
+}
+
+func TestLoadAuthStore_LegacyMigration(t *testing.T) {
+	t.Parallel()
+	client := NewTestClient(t)
+
+	// write legacy single-token format directly to auth.json
+	legacyToken := StoredToken{
+		AccessToken:  "legacy-access",
+		RefreshToken: "legacy-refresh",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		TokenType:    "Bearer",
+	}
+	data, err := json.Marshal(legacyToken)
+	require.NoError(t, err)
+
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0700))
+	require.NoError(t, os.WriteFile(authPath, data, 0600))
+
+	// loadAuthStore should migrate to multi-endpoint format
+	store, err := client.loadAuthStore()
+	require.NoError(t, err)
+	require.NotNil(t, store)
+	require.NotNil(t, store.Tokens)
+	assert.Len(t, store.Tokens, 1, "legacy token should be migrated to single entry")
+
+	// verify the token is accessible
+	for _, token := range store.Tokens {
+		assert.Equal(t, "legacy-access", token.AccessToken)
+		assert.Equal(t, "legacy-refresh", token.RefreshToken)
+	}
+}
+
+func TestLoadAuthStore_TruncatedJSON(t *testing.T) {
+	t.Parallel()
+	client := NewTestClient(t)
+
+	// write truncated JSON (simulating crash during write)
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0700))
+	require.NoError(t, os.WriteFile(authPath, []byte(`{"tokens": {"https://sage`), 0600))
+
+	_, err = client.loadAuthStore()
+	require.Error(t, err, "truncated JSON should return error")
+	assert.Contains(t, err.Error(), "failed to parse auth file")
+}

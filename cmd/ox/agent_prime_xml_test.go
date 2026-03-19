@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/claude"
+	"github.com/sageox/ox/internal/config"
 	"github.com/spf13/cobra"
 )
 
@@ -192,6 +194,282 @@ func TestOutputAgentPrimeXML_UpgradeNotInActions(t *testing.T) {
 		actionsBlock := xml[start:end]
 		if strings.Contains(actionsBlock, "brew upgrade") {
 			t.Error("upgrade hint should not be in <immediate-actions>")
+		}
+	}
+}
+
+func TestOutputAgentPrimeXML_PRAttribution_UsesCorrectField(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	output := agentPrimeOutput{
+		AgentID: "test-agent",
+		Status:  "fresh",
+		Attribution: config.ResolvedAttribution{
+			Commit: "Co-Authored-By: SageOx <ox@sageox.ai>",
+			PR:     "Co-Authored-By: SageOx <ox@sageox.ai>",
+		},
+	}
+
+	if err := outputAgentPrimeXML(cmd, output); err != nil {
+		t.Fatalf("outputAgentPrimeXML() error = %v", err)
+	}
+
+	xml := buf.String()
+
+	// PR line must render the PR field, not the Commit field
+	if !strings.Contains(xml, "PR body (last line): `Co-Authored-By: SageOx <ox@sageox.ai>`") {
+		t.Error("PR attribution line missing or incorrect")
+	}
+
+	// verify both commit and PR lines appear
+	if !strings.Contains(xml, "Commit: `Co-Authored-By: SageOx <ox@sageox.ai>`") {
+		t.Error("commit attribution line missing")
+	}
+}
+
+func TestOutputAgentPrimeXML_PRAttribution_DifferentValues(t *testing.T) {
+	// ensures PR line renders output.Attribution.PR, not output.Attribution.Commit
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	output := agentPrimeOutput{
+		AgentID: "test-agent",
+		Status:  "fresh",
+		Attribution: config.ResolvedAttribution{
+			Commit: "commit-value",
+			PR:     "pr-value",
+		},
+	}
+
+	if err := outputAgentPrimeXML(cmd, output); err != nil {
+		t.Fatalf("outputAgentPrimeXML() error = %v", err)
+	}
+
+	xml := buf.String()
+
+	if !strings.Contains(xml, "PR body (last line): `pr-value`") {
+		t.Errorf("PR line should render PR field value, got:\n%s", xml)
+	}
+	if strings.Contains(xml, "PR body (last line): `commit-value`") {
+		t.Error("PR line is incorrectly rendering the Commit field")
+	}
+}
+
+func TestOutputAgentPrimeXML_FullOutput(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	output := agentPrimeOutput{
+		AgentID: "abc123",
+		Status:  "fresh",
+		Guidance: &agentGuidance{
+			Hint: "scan first",
+			Commands: []intentCommand{
+				{Intent: "check health", Command: "ox doctor"},
+			},
+		},
+		Attribution: config.ResolvedAttribution{
+			Commit: "Co-Authored-By: SageOx <ox@sageox.ai>",
+			PR:     "Co-Authored-By: SageOx <ox@sageox.ai>",
+		},
+		ProjectGuidance: &ProjectGuidance{
+			Source:  "AGENTS.md",
+			Content: "Use Go 1.24+",
+		},
+		TeamInstructions: &TeamInstructions{
+			Content: "Follow team conventions",
+		},
+		TeamContext: &teamContextInfo{
+			TeamID:   "team-1",
+			TeamName: "TestTeam",
+			Coworkers: []claude.Agent{
+				{Name: "go-pro", Description: "Go expert", Model: "opus"},
+			},
+			CoworkerCommands: []claude.Command{
+				{Name: "deploy", Trigger: "/deploy", Description: "Deploy to prod"},
+			},
+			MemoryContent: "Remember to use slog",
+			ReadCommand:   "ox agent team-ctx",
+		},
+		Ledger: &ledgerInfo{Exists: true},
+		Session: &sessionStatus{
+			Recording:  true,
+			Mode:       "auto",
+			SessionURL: "https://sageox.ai/session/123",
+		},
+		NeedsDoctorAgent: true,
+		DoctorHint:       "Run ox doctor",
+		AgentTip:         "Use ox code search",
+	}
+
+	if err := outputAgentPrimeXML(cmd, output); err != nil {
+		t.Fatalf("outputAgentPrimeXML() error = %v", err)
+	}
+
+	xml := buf.String()
+
+	// verify structure
+	required := []string{
+		"<ox-prime>",
+		"</ox-prime>",
+		"<instructions>",
+		"</instructions>",
+		"<commands",
+		"</commands>",
+		"<attribution>",
+		"</attribution>",
+		"<project-guidance",
+		"</project-guidance>",
+		"<team-knowledge>",
+		"</team-knowledge>",
+		"<team-instructions>",
+		"</team-instructions>",
+		"<coworkers>",
+		"</coworkers>",
+		"<team-commands>",
+		"</team-commands>",
+		"<memory>",
+		"</memory>",
+		"<ledger>",
+		"</ledger>",
+		"<session-context",
+		"</session-context>",
+		"<immediate-actions>",
+		"</immediate-actions>",
+	}
+	for _, tag := range required {
+		if !strings.Contains(xml, tag) {
+			t.Errorf("missing required tag: %s", tag)
+		}
+	}
+
+	// verify content rendering
+	if !strings.Contains(xml, "Use Go 1.24+") {
+		t.Error("project guidance content missing")
+	}
+	if !strings.Contains(xml, "Follow team conventions") {
+		t.Error("team instructions content missing")
+	}
+	if !strings.Contains(xml, "go-pro") {
+		t.Error("coworker name missing")
+	}
+	if !strings.Contains(xml, "/deploy") {
+		t.Error("team command trigger missing")
+	}
+	if !strings.Contains(xml, "Remember to use slog") {
+		t.Error("memory content missing")
+	}
+}
+
+func TestOutputAgentPrimeXML_CacheTierOrdering(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	output := agentPrimeOutput{
+		AgentID: "test-agent",
+		Status:  "fresh",
+		Guidance: &agentGuidance{
+			Hint:     "hint",
+			Commands: []intentCommand{{Intent: "a", Command: "b"}},
+		},
+		TeamContext: &teamContextInfo{
+			TeamID:        "team-1",
+			TeamName:      "T",
+			MemoryContent: "memory",
+		},
+		Session: &sessionStatus{
+			Recording:  true,
+			Mode:       "auto",
+			SessionURL: "https://example.com",
+		},
+	}
+
+	if err := outputAgentPrimeXML(cmd, output); err != nil {
+		t.Fatalf("outputAgentPrimeXML() error = %v", err)
+	}
+
+	xml := buf.String()
+
+	// cache tier ordering: static (instructions, commands, attribution)
+	// must come before slow-changing (team-knowledge)
+	// must come before per-session (session-context)
+	instructionsIdx := strings.Index(xml, "<instructions>")
+	commandsIdx := strings.Index(xml, "<commands")
+	attributionIdx := strings.Index(xml, "<attribution>")
+	teamKnowledgeIdx := strings.Index(xml, "<team-knowledge>")
+	sessionIdx := strings.Index(xml, "<session-context")
+
+	if instructionsIdx < 0 || commandsIdx < 0 || attributionIdx < 0 || teamKnowledgeIdx < 0 || sessionIdx < 0 {
+		t.Fatal("missing expected XML blocks")
+	}
+
+	if instructionsIdx > commandsIdx {
+		t.Error("instructions must come before commands")
+	}
+	if commandsIdx > attributionIdx {
+		t.Error("commands must come before attribution")
+	}
+	if attributionIdx > teamKnowledgeIdx {
+		t.Error("attribution (static) must come before team-knowledge (slow-changing)")
+	}
+	if teamKnowledgeIdx > sessionIdx {
+		t.Error("team-knowledge (slow-changing) must come before session-context (per-session)")
+	}
+}
+
+func TestEscapeXML_AllSpecialChars(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"hello", "hello"},
+		{"<script>", "&lt;script&gt;"},
+		{"a & b", "a &amp; b"},
+		{`key="value"`, "key=&quot;value&quot;"},
+		{"it's", "it&apos;s"},
+		{`<a href="x">&</a>`, `&lt;a href=&quot;x&quot;&gt;&amp;&lt;/a&gt;`},
+	}
+	for _, tt := range tests {
+		got := escapeXML(tt.input)
+		if got != tt.want {
+			t.Errorf("escapeXML(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestOutputAgentPrimeXML_MinimalOutput(t *testing.T) {
+	// minimal output: no team context, no session, no guidance
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	output := agentPrimeOutput{
+		AgentID: "min-agent",
+		Status:  "fresh",
+	}
+
+	if err := outputAgentPrimeXML(cmd, output); err != nil {
+		t.Fatalf("outputAgentPrimeXML() error = %v", err)
+	}
+
+	xml := buf.String()
+
+	// must always have wrapper + instructions + attribution + session-context
+	for _, tag := range []string{"<ox-prime>", "<instructions>", "<attribution>", "<session-context"} {
+		if !strings.Contains(xml, tag) {
+			t.Errorf("minimal output missing %s", tag)
+		}
+	}
+
+	// must NOT have optional blocks
+	for _, tag := range []string{"<team-knowledge>", "<commands", "<ledger>", "<immediate-actions>"} {
+		if strings.Contains(xml, tag) {
+			t.Errorf("minimal output should not have %s", tag)
 		}
 	}
 }

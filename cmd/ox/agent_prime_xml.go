@@ -100,7 +100,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 		sb.WriteString(fmt.Sprintf("\nCommit: `%s`\n", output.Attribution.Commit))
 	}
 	if output.Attribution.PR != "" {
-		sb.WriteString(fmt.Sprintf("PR body (last line): `%s`\n", output.Attribution.Commit))
+		sb.WriteString(fmt.Sprintf("PR body (last line): `%s`\n", output.Attribution.PR))
 	}
 	sb.WriteString("</attribution>\n")
 

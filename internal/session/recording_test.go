@@ -1644,3 +1644,56 @@ func TestCleanupGhostSessionsInDir_DoubleCleanupIsIdempotent(t *testing.T) {
 	r2 := CleanupGhostSessionsInDir(sessionsDir)
 	assert.Equal(t, 0, r2.Removed, "second cleanup should find nothing — idempotent")
 }
+
+// --- P0: Recording state corruption resilience ---
+
+func TestLoadRecordingState_TruncatedJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionsDir := filepath.Join(tmpDir, "sessions")
+	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxCrash")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// write truncated JSON simulating crash during write
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessionPath, recordingFile),
+		[]byte(`{"agent_id":"Ox`), 0600))
+
+	state, err := LoadRecordingState(tmpDir)
+	// partial JSON should either return an error or return nil (skip invalid file)
+	// either is acceptable — it must NOT return a partial state or panic
+	if err != nil {
+		assert.Contains(t, err.Error(), "parse", "error should mention parsing")
+	}
+	if state != nil {
+		// if implementation skips invalid files, that's fine too
+		assert.NotEmpty(t, state.AgentID, "if state returned, it should be fully populated")
+	}
+}
+
+func TestSaveRecordingState_Atomicity(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxAtomic")
+
+	state := &RecordingState{
+		AgentID:     "OxAtomic",
+		StartedAt:   time.Now(),
+		SessionPath: sessionPath,
+		ParentPID:   os.Getpid(),
+	}
+
+	require.NoError(t, SaveRecordingState(tmpDir, state))
+
+	// verify no temp files left behind
+	entries, err := os.ReadDir(sessionPath)
+	require.NoError(t, err)
+	for _, e := range entries {
+		assert.False(t, strings.HasSuffix(e.Name(), ".tmp"),
+			"temp file should not remain after successful save: %s", e.Name())
+	}
+
+	// verify the state is readable
+	loaded, err := LoadRecordingStateForAgent(tmpDir, "OxAtomic")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, "OxAtomic", loaded.AgentID)
+}

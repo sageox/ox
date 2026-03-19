@@ -231,6 +231,84 @@ func TestResolveSessionRecording_EnvVarDisabledOverridesAutoConfig(t *testing.T)
 	assert.Equal(t, SessionRecordingSourceEnv, resolved.Source)
 }
 
+func TestResolveSessionRecording_UserOverridesProject(t *testing.T) {
+	tmpDir := t.TempDir()
+	userConfigDir := t.TempDir()
+
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", userConfigDir)
+	t.Setenv("OX_SESSION_RECORDING", "")
+
+	// project config says auto
+	sageoxDir := filepath.Join(tmpDir, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sageoxDir, "config.json"),
+		[]byte(`{"config_version": "2", "session_recording": "auto"}`),
+		0644,
+	))
+
+	// user config says disabled — should win over project
+	sageoxUserDir := filepath.Join(userConfigDir, "sageox")
+	require.NoError(t, os.MkdirAll(sageoxUserDir, 0755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sageoxUserDir, "config.yaml"),
+		[]byte("sessions:\n  mode: disabled\n"),
+		0644,
+	))
+
+	resolved := ResolveSessionRecording(tmpDir)
+	// NormalizeSessionRecording maps "disabled" → "disabled"
+	// but sessions.GetMode() returns "disabled" for mode: disabled
+	// The function checks if mode != "" && mode != "none"
+	// "disabled" is not "" and not "none", so it enters the user branch
+	// NormalizeSessionRecording("disabled") → "disabled"
+	assert.Equal(t, SessionRecordingDisabled, resolved.Mode)
+	assert.Equal(t, SessionRecordingSourceUser, resolved.Source)
+}
+
+func TestResolveSessionRecording_DefaultIsManual(t *testing.T) {
+	tmpDir := t.TempDir()
+	userConfigDir := t.TempDir()
+
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", userConfigDir)
+	t.Setenv("OX_SESSION_RECORDING", "")
+
+	// no project config, no user config → should default to manual
+	resolved := ResolveSessionRecording(tmpDir)
+	assert.Equal(t, SessionRecordingManual, resolved.Mode)
+	assert.Equal(t, SessionRecordingSourceDefault, resolved.Source)
+}
+
+func TestNormalizeSessionRecording_LegacyNone(t *testing.T) {
+	assert.Equal(t, SessionRecordingDisabled, NormalizeSessionRecording("none"))
+}
+
+func TestResolvedSessionRecording_IsAuto(t *testing.T) {
+	assert.True(t, (&ResolvedSessionRecording{Mode: SessionRecordingAuto}).IsAuto())
+	assert.False(t, (&ResolvedSessionRecording{Mode: SessionRecordingManual}).IsAuto())
+}
+
+func TestResolvedSessionRecording_IsManual(t *testing.T) {
+	assert.True(t, (&ResolvedSessionRecording{Mode: SessionRecordingManual}).IsManual())
+	assert.False(t, (&ResolvedSessionRecording{Mode: SessionRecordingAuto}).IsManual())
+}
+
+func TestIsValidSessionPublishingMode(t *testing.T) {
+	assert.True(t, IsValidSessionPublishingMode("auto"))
+	assert.True(t, IsValidSessionPublishingMode("manual"))
+	assert.True(t, IsValidSessionPublishingMode(""))
+	assert.False(t, IsValidSessionPublishingMode("invalid"))
+}
+
+func TestNormalizeSessionPublishing(t *testing.T) {
+	assert.Equal(t, SessionPublishingAuto, NormalizeSessionPublishing("auto"))
+	assert.Equal(t, SessionPublishingManual, NormalizeSessionPublishing("manual"))
+	assert.Equal(t, SessionPublishingAuto, NormalizeSessionPublishing(""))
+	assert.Equal(t, SessionPublishingAuto, NormalizeSessionPublishing("bogus"))
+}
+
 func boolPtr(b bool) *bool {
 	return &b
 }
