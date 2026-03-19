@@ -1659,18 +1659,16 @@ func TestLoadRecordingState_TruncatedJSON(t *testing.T) {
 		[]byte(`{"agent_id":"Ox`), 0600))
 
 	state, err := LoadRecordingState(tmpDir)
-	// partial JSON should either return an error or return nil (skip invalid file)
-	// either is acceptable — it must NOT return a partial state or panic
+	// truncated JSON must never produce a partial state
 	if err != nil {
 		assert.Contains(t, err.Error(), "parse", "error should mention parsing")
+		assert.Nil(t, state, "state must be nil when parse fails")
+		return
 	}
-	if state != nil {
-		// if implementation skips invalid files, that's fine too
-		assert.NotEmpty(t, state.AgentID, "if state returned, it should be fully populated")
-	}
+	assert.Nil(t, state, "truncated JSON must not produce a partial state")
 }
 
-func TestSaveRecordingState_Atomicity(t *testing.T) {
+func TestSaveRecordingState_PersistsAndLeavesNoArtifacts(t *testing.T) {
 	tmpDir := t.TempDir()
 	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxAtomic")
 
@@ -1683,7 +1681,7 @@ func TestSaveRecordingState_Atomicity(t *testing.T) {
 
 	require.NoError(t, SaveRecordingState(tmpDir, state))
 
-	// verify no temp files left behind
+	// verify only the recording file exists — no temp artifacts
 	entries, err := os.ReadDir(sessionPath)
 	require.NoError(t, err)
 	for _, e := range entries {
@@ -1691,11 +1689,12 @@ func TestSaveRecordingState_Atomicity(t *testing.T) {
 			"temp file should not remain after successful save: %s", e.Name())
 	}
 
-	// verify the state is readable
+	// verify the state round-trips correctly
 	loaded, err := LoadRecordingStateForAgent(tmpDir, "OxAtomic")
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 	assert.Equal(t, "OxAtomic", loaded.AgentID)
+	assert.Equal(t, state.SessionPath, loaded.SessionPath)
 }
 
 // TestCrossEnvRecordingStateRoundTrip verifies that a recording state written

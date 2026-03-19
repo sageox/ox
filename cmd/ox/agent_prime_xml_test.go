@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -9,6 +10,12 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/spf13/cobra"
 )
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
+}
 
 func TestOutputAgentPrimeXML_UserNotices(t *testing.T) {
 	tests := []struct {
@@ -471,6 +478,19 @@ func TestOutputAgentPrimeXML_MinimalOutput(t *testing.T) {
 		if strings.Contains(xml, tag) {
 			t.Errorf("minimal output should not have %s", tag)
 		}
+	}
+}
+
+func TestOutputAgentPrimeXML_WriteError(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.SetOut(failingWriter{})
+
+	err := outputAgentPrimeXML(cmd, agentPrimeOutput{
+		AgentID: "min-agent",
+		Status:  "fresh",
+	})
+	if err == nil {
+		t.Fatal("expected write error, got nil")
 	}
 }
 
