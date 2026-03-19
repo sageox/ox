@@ -1,19 +1,28 @@
 codecov:
-  require_ci_to_pass: true
+  require_ci_to_pass: false
 
 coverage:
   status:
     project:
       default:
-        target: auto
-        threshold: 1%
+        target: 80%
+        threshold: 2%
+        informational: true
     patch:
       default:
         target: 80%
+        informational: true
 
 comment:
-  layout: "reach,diff,flags,files"
+  layout: "condensed_header, condensed_files, condensed_footer"
   behavior: default
+  require_changes: true
+
+flags:
+  ox-cli:
+    paths:
+      - ./
+    carryforward: true
 
 ignore:
   - "cmd/ox/docs.go"

@@ -2,7 +2,7 @@ name: Coverage
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # daily at 6am UTC
+    - cron: '0 11 * * *'  # daily at 3am Pacific / 11am UTC
   workflow_dispatch: {}   # allow manual trigger
 
 permissions:
@@ -16,7 +16,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: 'go.mod'
 
       - name: Configure git identity for tests
         run: |
@@ -31,5 +31,6 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           files: coverage.out
+          flags: ox-cli
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
