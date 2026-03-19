@@ -215,6 +215,7 @@ func handleAfterTool(ctx *HookContext) error {
 	}
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil {
+		slog.Debug("hook: afterTool no recording state", "agentID", agentID, "err", err)
 		return nil // not recording for this agent, silent noop
 	}
 
@@ -229,15 +230,16 @@ func handleAfterTool(ctx *HookContext) error {
 
 	if state.SessionFile == "" {
 		// discover session file on first hook call (Claude Code JSONL may not exist at prime time)
-		if sf, findErr := adapter.FindSessionFile(agentID, state.StartedAt); findErr == nil && sf != "" {
-			state.SessionFile = sf
-			_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
-				s.SessionFile = sf
-			})
-			slog.Debug("hook: discovered session file", "file", sf)
-		} else {
+		sf, findErr := adapter.FindSessionFile(agentID, state.StartedAt)
+		if findErr != nil || sf == "" {
+			slog.Debug("hook: session file not found", "agentID", agentID, "err", findErr)
 			return nil // session file not available yet
 		}
+		state.SessionFile = sf
+		_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+			s.SessionFile = sf
+		})
+		slog.Debug("hook: discovered session file", "file", sf)
 	}
 
 	entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, state.SourceOffset)

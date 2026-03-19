@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/sageox/ox/internal/endpoint"
@@ -39,6 +40,19 @@ func clearXDGEnv() {
 	os.Unsetenv("XDG_CACHE_HOME")
 	os.Unsetenv("XDG_STATE_HOME")
 	os.Unsetenv("XDG_RUNTIME_DIR")
+}
+
+// resetHomeDir resets the cached home directory for testing.
+// Must be called in tests that override HOME to ensure getHomeDir() picks up the new value.
+func resetHomeDir(t *testing.T) {
+	t.Helper()
+	old := homeDir
+	homeDirOnce = sync.Once{}
+	homeDir = ""
+	t.Cleanup(func() {
+		homeDirOnce = sync.Once{}
+		homeDir = old
+	})
 }
 
 // setLegacyMode enables legacy mode (non-XDG paths)
@@ -829,4 +843,95 @@ func TestEndpointSlug(t *testing.T) {
 			t.Errorf("EndpointSlug(%q) = %q, want myendpoint", testPath, slug)
 		}
 	})
+}
+
+// TestAlternateSessionCacheDirsCoverAllLocations verifies that the union of
+// SessionCacheDir + AlternateSessionCacheDirs always covers all known cache
+// locations regardless of XDG_CACHE_HOME setting.
+func TestAlternateSessionCacheDirsCoverAllLocations(t *testing.T) {
+	repoID := "repo-test-123"
+
+	tests := []struct {
+		name           string
+		xdgCacheHome   string // empty means unset
+		expectedInUnion []string // path suffixes that must appear in the union
+	}{
+		{
+			name:         "XDG_CACHE_HOME unset — default is ~/.cache",
+			xdgCacheHome: "",
+			expectedInUnion: []string{
+				filepath.Join(".cache", "sageox", "sessions", repoID),
+				filepath.Join("Library", "Caches", "sageox", "sessions", repoID),
+			},
+		},
+		{
+			name:         "XDG_CACHE_HOME set to macOS native",
+			xdgCacheHome: "LIBRARY_CACHES", // placeholder, resolved below
+			expectedInUnion: []string{
+				filepath.Join("Library", "Caches", "sageox", "sessions", repoID),
+				filepath.Join(".cache", "sageox", "sessions", repoID),
+			},
+		},
+		{
+			name:         "XDG_CACHE_HOME set to custom path",
+			xdgCacheHome: "CUSTOM", // placeholder, resolved below
+			expectedInUnion: []string{
+				filepath.Join("custom-cache", "sageox", "sessions", repoID),
+				filepath.Join(".cache", "sageox", "sessions", repoID),
+				filepath.Join("Library", "Caches", "sageox", "sessions", repoID),
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpHome := t.TempDir()
+			t.Setenv("HOME", tmpHome)
+			resetHomeDir(t) // reset sync.Once cache so getHomeDir() picks up new HOME
+
+			// create all candidate directories on disk so AlternateSessionCacheDirs finds them
+			for _, suffix := range []string{
+				filepath.Join(".cache", "sageox", "sessions", repoID),
+				filepath.Join("Library", "Caches", "sageox", "sessions", repoID),
+			} {
+				if err := os.MkdirAll(filepath.Join(tmpHome, suffix), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// resolve XDG_CACHE_HOME
+			switch tc.xdgCacheHome {
+			case "":
+				t.Setenv("XDG_CACHE_HOME", "")
+			case "LIBRARY_CACHES":
+				t.Setenv("XDG_CACHE_HOME", filepath.Join(tmpHome, "Library", "Caches"))
+			case "CUSTOM":
+				customCache := filepath.Join(tmpHome, "custom-cache")
+				if err := os.MkdirAll(filepath.Join(customCache, "sageox", "sessions", repoID), 0755); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("XDG_CACHE_HOME", customCache)
+			}
+
+			// collect union: current + alternates
+			current := SessionCacheDir(repoID)
+			alternates := AlternateSessionCacheDirs(repoID)
+			union := append([]string{current}, alternates...)
+
+			// verify all expected paths appear
+			for _, suffix := range tc.expectedInUnion {
+				expected := filepath.Join(tmpHome, suffix)
+				found := false
+				for _, p := range union {
+					if p == expected {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("expected %s in union, got %v", expected, union)
+				}
+			}
+		})
+	}
 }

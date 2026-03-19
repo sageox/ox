@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/agentx"
+	"github.com/sageox/ox/internal/paths"
 )
 
 var (
@@ -55,6 +56,7 @@ type RecordingState struct {
 	ParentPID      int    `json:"parent_pid,omitempty"`      // parent agent process ID for liveness detection
 	SourceOffset   int64  `json:"source_offset,omitempty"`   // byte offset in source file for incremental reading
 	Origin         string `json:"origin,omitempty"`          // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
+	CacheDir       string `json:"cache_dir,omitempty"`       // cache directory when recording was created (diagnostic breadcrumb)
 }
 
 // Duration returns how long the recording has been running.
@@ -221,6 +223,13 @@ func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, e
 	}
 	for _, s := range states {
 		if s.AgentID == agentID {
+			if s.CacheDir != "" && s.CacheDir != paths.CacheDir() {
+				slog.Debug("recording found in different cache dir",
+					"agent_id", agentID,
+					"recording_cache_dir", s.CacheDir,
+					"current_cache_dir", paths.CacheDir(),
+				)
+			}
 			return s, nil
 		}
 	}
@@ -342,19 +351,37 @@ func ConsumeExplicitStop(projectRoot, agentID string) bool {
 }
 
 // sessionsSearchPaths returns the sessions directory paths to search
-// (both project-local and XDG cache).
+// (project-local, current XDG cache, and legacy/alternate cache dirs).
+// Includes alternate cache locations because processes with different
+// XDG_CACHE_HOME values (e.g., Conductor GUI vs terminal shell) may
+// create recording states in different directories.
 func sessionsSearchPaths(projectRoot string) []string {
-	paths := []string{
+	searchPaths := []string{
 		filepath.Join(projectRoot, "sessions"),
 	}
 	repoID := getRepoIDFromProject(projectRoot)
 	if repoID != "" {
+		// ledger cache — canonical write location, environment-independent.
+		// Only include when project has an explicit endpoint configured
+		// (avoids using default endpoint for test projects or uninitialized repos).
+		ep := getProjectEndpoint(projectRoot)
+		if ep != "" {
+			ledgerBase := paths.LedgerSessionCacheBase(repoID, ep)
+			if ledgerBase != "" {
+				searchPaths = append(searchPaths, filepath.Join(ledgerBase, "sessions"))
+			}
+		}
+		// XDG cache — current process's resolved path
 		contextPath := GetContextPath(repoID)
 		if contextPath != "" {
-			paths = append(paths, filepath.Join(contextPath, "sessions"))
+			searchPaths = append(searchPaths, filepath.Join(contextPath, "sessions"))
+		}
+		// alternate XDG cache dirs — other processes may have used different paths
+		for _, altDir := range paths.AlternateSessionCacheDirs(repoID) {
+			searchPaths = append(searchPaths, filepath.Join(altDir, "sessions"))
 		}
 	}
-	return paths
+	return searchPaths
 }
 
 // GetRecordingDuration returns how long the current recording has been running.
@@ -592,18 +619,29 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 	// generate session name
 	sessionName := GenerateSessionName(opts.AgentID, username)
 
-	// determine sessions base path
+	// determine sessions base path — prefer ledger cache (environment-independent),
+	// fall back to explicit RepoContextPath, then XDG cache.
+	// Only use ledger cache when the project has an explicit endpoint configured
+	// (not the global default) — this ensures test projects and uninitialized
+	// repos fall through to XDG cache.
 	var sessionsBasePath string
-	if opts.RepoContextPath != "" {
-		sessionsBasePath = filepath.Join(opts.RepoContextPath, "sessions")
-	} else {
-		// fallback to XDG cache location
-		repoID := getRepoIDFromProject(projectRoot)
-		if repoID != "" {
-			contextPath := GetContextPath(repoID)
-			if contextPath != "" {
-				sessionsBasePath = filepath.Join(contextPath, "sessions")
+	repoID := getRepoIDFromProject(projectRoot)
+	if repoID != "" {
+		ep := getProjectEndpoint(projectRoot)
+		if ep != "" {
+			ledgerBase := paths.LedgerSessionCacheBase(repoID, ep)
+			if ledgerBase != "" {
+				sessionsBasePath = filepath.Join(ledgerBase, "sessions")
 			}
+		}
+	}
+	if sessionsBasePath == "" && opts.RepoContextPath != "" {
+		sessionsBasePath = filepath.Join(opts.RepoContextPath, "sessions")
+	}
+	if sessionsBasePath == "" && repoID != "" {
+		contextPath := GetContextPath(repoID)
+		if contextPath != "" {
+			sessionsBasePath = filepath.Join(contextPath, "sessions")
 		}
 	}
 
@@ -663,6 +701,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		Model:             opts.Model,
 		ParentPID:         opts.ParentPID,
 		Origin:            origin,
+		CacheDir:          paths.CacheDir(),
 	}
 
 	// always capture parent PID for liveness detection and ghost cleanup

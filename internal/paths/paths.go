@@ -143,6 +143,18 @@ func CodeDBSharedDir(repoID, endpointURL string) string {
 	return filepath.Join(LedgersDataDir(repoID, endpointURL), ".sageox", "cache", "codedb")
 }
 
+// LedgerSessionCacheBase returns the base cache directory inside a repo's ledger.
+// Session recording states are stored under <base>/sessions/<session-name>/.
+// This is the canonical, environment-independent cache location — unlike XDG cache dirs
+// which vary depending on XDG_CACHE_HOME inheritance (GUI apps vs terminal shells).
+// Format: ~/.local/share/sageox/<endpoint>/ledgers/<repoID>/.sageox/cache/
+func LedgerSessionCacheBase(repoID, endpointURL string) string {
+	if repoID == "" || endpointURL == "" {
+		return ""
+	}
+	return filepath.Join(LedgersDataDir(repoID, endpointURL), ".sageox", "cache")
+}
+
 // CodeDBDataDir returns the legacy per-worktree CodeDB directory.
 // Deprecated: Use CodeDBSharedDir for new code. This is kept for migration detection.
 func CodeDBDataDir(projectRoot string) string {
@@ -204,12 +216,14 @@ func SessionCacheDir(repoID string) string {
 	return filepath.Join(base, repoID)
 }
 
-// LegacySessionCacheDirs returns additional session cache directories from older
-// ox versions that used different cache paths. On macOS, older versions used
-// ~/Library/Caches/sageox/sessions/ (native cache) before the switch to XDG
-// (~/.cache/sageox/sessions/). Returns only directories that exist on disk.
-// The repoID parameter scopes to a specific repo; empty returns all legacy bases.
-func LegacySessionCacheDirs(repoID string) []string {
+// AlternateSessionCacheDirs returns session cache directories that differ from
+// the current process's resolved SessionCacheDir. Different processes may resolve
+// CacheDir differently depending on their environment (e.g., GUI apps don't
+// inherit shell XDG_CACHE_HOME), so sessions can exist in any of these locations.
+// Anti-entropy, recording state lookup, and session listing must scan all of them.
+// Returns only directories that exist on disk. The repoID parameter scopes to a
+// specific repo; empty returns all alternate bases.
+func AlternateSessionCacheDirs(repoID string) []string {
 	home := getHomeDir()
 	if home == "" {
 		return nil
@@ -217,9 +231,11 @@ func LegacySessionCacheDirs(repoID string) []string {
 
 	current := SessionCacheDir(repoID)
 
-	// macOS native cache: ~/Library/Caches/sageox/sessions/
+	// all known cache roots where sessions may exist — different processes
+	// resolve CacheDir differently based on XDG_CACHE_HOME inheritance
 	candidates := []string{
-		filepath.Join(home, "Library", "Caches", "sageox", "sessions"),
+		filepath.Join(home, "Library", "Caches", "sageox", "sessions"), // macOS native
+		filepath.Join(home, ".cache", "sageox", "sessions"),            // XDG default
 	}
 
 	var dirs []string
@@ -229,7 +245,7 @@ func LegacySessionCacheDirs(repoID string) []string {
 			path = filepath.Join(base, repoID)
 		}
 		if path == current {
-			continue // skip if it's the same as the current XDG path
+			continue // already included by the caller
 		}
 		if info, err := os.Stat(path); err == nil && info.IsDir() {
 			dirs = append(dirs, path)
