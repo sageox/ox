@@ -507,9 +507,17 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// detect parent agent early: if SAGEOX_AGENT_ID is already set, this is a subagent
+	// and the existing value identifies the parent (orchestrator inherits env vars).
+	// Must happen before startSessionRecording so parent info is recorded in session state.
+	parentAgentID := ""
+	if existing := os.Getenv("SAGEOX_AGENT_ID"); existing != "" && existing != agentID {
+		parentAgentID = existing
+	}
+
 	// attempt to start session recording if enabled (local, no auth needed)
 	phaseStart = time.Now()
-	sessionStat := startSessionRecording(projectRoot, agentID, agentType)
+	sessionStat := startSessionRecording(projectRoot, agentID, agentType, parentAgentID)
 	timing["session_start"] = time.Since(phaseStart).Milliseconds()
 
 	// check if user is authenticated — degraded mode if not (recording continues locally)
@@ -606,13 +614,6 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// detect parent agent: if SAGEOX_AGENT_ID is already set, this is a subagent
-	// and the existing value identifies the parent (orchestrator inherits env vars)
-	parentAgentID := ""
-	if existing := os.Getenv("SAGEOX_AGENT_ID"); existing != "" && existing != agentID {
-		parentAgentID = existing
-	}
-
 	if inst == nil {
 		// fresh prime (or re-prime where instance wasn't found): create new
 		serverSessionID := auth.NewServerSessionID()
@@ -686,9 +687,18 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// populate session URL if recording
+	// for subagents: use parent session URL so PRs/commits link to the main session
 	if output.Session != nil && output.Session.Recording {
 		if projCfg, cfgErr := config.LoadProjectConfig(projectRoot); cfgErr == nil {
-			state, _ := session.LoadRecordingStateForAgent(projectRoot, agentID)
+			lookupAgentID := agentID
+			if parentAgentID != "" {
+				lookupAgentID = parentAgentID
+			}
+			state, _ := session.LoadRecordingStateForAgent(projectRoot, lookupAgentID)
+			if state == nil && parentAgentID != "" {
+				// parent session not found; fall back to own session
+				state, _ = session.LoadRecordingStateForAgent(projectRoot, agentID)
+			}
 			if state != nil {
 				sessionName := session.GetSessionName(state.SessionPath)
 				output.Session.SessionURL = buildSessionURL(projCfg, sessionName)
@@ -1094,7 +1104,7 @@ func repoSlugFromRemoteOrDir(projectRoot string) string {
 // startSessionRecording attempts to start session recording if enabled.
 // Returns the session status for inclusion in prime output.
 // Errors are logged but not fatal - session recording is optional.
-func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatus {
+func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string) *sessionStatus {
 	// resolve session mode from config hierarchy
 	resolved := config.ResolveSessionRecording(projectRoot)
 
@@ -1154,6 +1164,14 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 		Username:      getSessionUsername(),
 		WorkspacePath: projectRoot,
 		Branch:        repotools.GetCurrentBranch(projectRoot),
+	}
+
+	// propagate parent agent info so the recording state knows this is a subagent
+	if parentAgentID != "" {
+		opts.ParentAgentID = parentAgentID
+		if parentState, _ := session.LoadRecordingStateForAgent(projectRoot, parentAgentID); parentState != nil {
+			opts.ParentSessionPath = parentState.SessionPath
+		}
 	}
 
 	state, err := session.StartRecording(projectRoot, opts)

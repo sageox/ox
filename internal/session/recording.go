@@ -236,6 +236,37 @@ func LoadRecordingStateForAgent(projectRoot, agentID string) (*RecordingState, e
 	return nil, nil
 }
 
+// LoadRecordingStateForWorkspace finds the recording whose WorkspacePath
+// matches the given workspace. Returns nil, nil if no match.
+// Use this for human (non-agent) commits where SAGEOX_AGENT_ID is not set —
+// it avoids picking a random session from a different worktree.
+// Resolves symlinks before comparing to handle macOS /tmp→/private/tmp
+// and git worktree symlink differences.
+func LoadRecordingStateForWorkspace(projectRoot, workspace string) (*RecordingState, error) {
+	if workspace == "" {
+		return nil, fmt.Errorf("%w: workspace", ErrEmptyPath)
+	}
+	// resolve symlinks for the lookup key (macOS: /tmp → /private/tmp)
+	resolvedWorkspace := workspace
+	if r, err := filepath.EvalSymlinks(workspace); err == nil {
+		resolvedWorkspace = r
+	}
+	states, err := LoadAllRecordingStates(projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range states {
+		candidate := s.WorkspacePath
+		if r, err := filepath.EvalSymlinks(candidate); err == nil {
+			candidate = r
+		}
+		if candidate == resolvedWorkspace {
+			return s, nil
+		}
+	}
+	return nil, nil
+}
+
 // IsRecordingForAgent checks if a specific agent has an active recording.
 func IsRecordingForAgent(projectRoot, agentID string) bool {
 	state, _ := LoadRecordingStateForAgent(projectRoot, agentID)

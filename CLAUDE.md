@@ -475,13 +475,24 @@ RIGHT: Update tests to use CreateInitializedProject(t) helper
 - `config.CreateInitializedProjectWithConfig(t, cfg)` - with project config
 - `config.RequireSageoxDir(t, path)` - add `.sageox/` to existing dir
 
+### Testing Philosophy: E2E Reality Over Unit Isolation
+
+**A feature is not done until it works in a real Claude Code session.** Unit tests verify logic; integration tests verify reality. Both are required, but E2E is the release gate.
+
+- **Unit tests** (`make test`): Fast feedback on logic correctness. Good for pure functions, state machines, data transforms.
+- **Integration tests** (`make test-integration`): Real ox CLI binary, real hooks, real session recording. Required for any feature touching the agent pipeline (hooks, prime, sessions, commit trailers).
+- **E2E with real Claude** (`make test-integration` with `claude` CLI): The ultimate test. If it doesn't work with a real Claude Code session, it's not shipped.
+
+**No test theater.** Each test must answer: "What real-world failure does this prevent?" Tests that pass when the feature is broken are worse than no tests.
+
 ### Bug Fix Regression Tests
 
-Every bug fix MUST include a regression test unless existing tests already cover the failure mode. No test theater — each test must answer: "What bug does this prevent from recurring?"
+Every bug fix MUST include a regression test unless existing tests already cover the failure mode.
 
 - Reproduce exact conditions that caused the bug; test must fail without fix, pass with it
 - Test observable behavior, not implementation details
 - Cover edge cases discovered during investigation
+- **Integration-level regression tests** belong in `tests/integration/agents/claude/` and exercise the real ox CLI binary, not mocked functions
 
 ### Doctor as Last Line of Defense
 

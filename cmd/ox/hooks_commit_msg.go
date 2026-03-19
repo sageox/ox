@@ -91,8 +91,22 @@ func runHooksCommitMsg(cmd *cobra.Command, args []string) error {
 
 	// session trailer (only when actively recording)
 	if attr.Session != "" {
-		// first-found variant: git hook has no agent ID context
-		state, loadErr := session.LoadRecordingState(projectRoot)
+		var state *session.RecordingState
+		var loadErr error
+		if agentID := os.Getenv("SAGEOX_AGENT_ID"); agentID != "" {
+			// agent context: use agent-specific lookup to avoid picking another concurrent agent's session
+			state, loadErr = session.LoadRecordingStateForAgent(projectRoot, agentID)
+			// subagent: prefer parent session so commits/PRs link to the main session
+			if state != nil && state.ParentAgentID != "" {
+				if parentState, _ := session.LoadRecordingStateForAgent(projectRoot, state.ParentAgentID); parentState != nil {
+					state = parentState
+				}
+			}
+		} else {
+			// non-agent commits (human git commit): match by workspace path
+			// to avoid picking a random session from a different worktree
+			state, loadErr = session.LoadRecordingStateForWorkspace(projectRoot, projectRoot)
+		}
 		if loadErr == nil && state != nil {
 			sessionName := session.GetSessionName(state.SessionPath)
 			sessionURL := buildSessionURL(cfg, sessionName)
