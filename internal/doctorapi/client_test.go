@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,6 +115,8 @@ func TestGetContext_Timeout(t *testing.T) {
 
 	_, err := client.GetContext(context.Background())
 	require.Error(t, err)
+	assert.True(t, os.IsTimeout(err) || strings.Contains(err.Error(), "deadline exceeded") || strings.Contains(err.Error(), "Client.Timeout"),
+		"expected timeout error, got: %v", err)
 }
 
 func TestGetContext_NoAuthFunc(t *testing.T) {

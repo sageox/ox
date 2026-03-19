@@ -296,8 +296,7 @@ func TestMultipleManagersCheckFreshness(t *testing.T) {
 		}
 		select {
 		case <-deadline:
-			t.Log("warning: timed out waiting for background indexing to stop")
-			return
+			t.Fatal("timed out waiting for background indexing to stop")
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
