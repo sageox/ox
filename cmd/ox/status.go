@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,6 +60,8 @@ type statusAuthJSON struct {
 	User          string     `json:"user,omitempty"`
 	Email         string     `json:"email,omitempty"`
 	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	GitPATValid   *bool      `json:"git_pat_valid,omitempty"`
+	GitPATReason  string     `json:"git_pat_reason,omitempty"`
 }
 
 type statusConfigJSON struct {
@@ -1663,6 +1666,20 @@ func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, 
 		output.Auth.User = token.UserInfo.Name
 		output.Auth.Email = token.UserInfo.Email
 		output.Auth.ExpiresAt = &token.ExpiresAt
+
+		// PAT liveness for JSON output
+		creds, credErr := gitserver.LoadCredentialsForEndpoint(endpointSlug)
+		if credErr == nil && creds != nil && creds.Token != "" && !creds.IsExpired() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			liveness := gitserver.ValidatePATLiveness(ctx, creds.ServerURL, creds.Token)
+			cancel()
+			if !liveness.Skipped {
+				output.Auth.GitPATValid = &liveness.Valid
+				if !liveness.Valid {
+					output.Auth.GitPATReason = liveness.Reason
+				}
+			}
+		}
 	}
 
 	// config section
@@ -1844,6 +1861,29 @@ func renderAuthStatus(authFile string) string {
 			b.WriteString(statusMutedStyle.Render(epToken.ExpiresAt.Format("2006-01-02 15:04:05 MST")))
 			if i == 0 {
 				b.WriteString(statusMutedStyle.Render(" (" + authFile + ")"))
+			}
+			b.WriteString("\n")
+
+			// PAT liveness — probe git server to verify token is accepted
+			b.WriteString(statusLabelStyle.Render("Git PAT"))
+			creds, credErr := gitserver.LoadCredentialsForEndpoint(ep)
+			if credErr != nil || creds == nil || creds.Token == "" {
+				b.WriteString(statusMutedStyle.Render("no git credentials"))
+			} else if creds.IsExpired() {
+				b.WriteString(statusErrorStyle.Render("✗ expired"))
+			} else {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				liveness := gitserver.ValidatePATLiveness(ctx, creds.ServerURL, creds.Token)
+				cancel()
+				switch {
+				case liveness.Valid:
+					b.WriteString(statusSuccessStyle.Render("✓ valid"))
+				case liveness.Skipped:
+					b.WriteString(statusMutedStyle.Render("? " + liveness.Reason))
+				default:
+					b.WriteString(statusErrorStyle.Render("✗ " + liveness.Reason))
+					b.WriteString(statusMutedStyle.Render(" — run `ox login`"))
+				}
 			}
 			b.WriteString("\n")
 		}
