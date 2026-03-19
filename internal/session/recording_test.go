@@ -1644,3 +1644,66 @@ func TestCleanupGhostSessionsInDir_DoubleCleanupIsIdempotent(t *testing.T) {
 	r2 := CleanupGhostSessionsInDir(sessionsDir)
 	assert.Equal(t, 0, r2.Removed, "second cleanup should find nothing — idempotent")
 }
+
+// TestCrossEnvRecordingStateRoundTrip verifies that a recording state written
+// with one XDG_CACHE_HOME can be found by a process with a different XDG_CACHE_HOME.
+// This is the exact scenario that caused the split-path bug: Conductor GUI (no
+// XDG_CACHE_HOME) creates recording state in ~/.cache/..., but terminal hooks
+// (XDG_CACHE_HOME=~/Library/Caches) couldn't find it.
+//
+// Uses the real home directory since paths.getHomeDir() is cached via sync.Once
+// and cannot be overridden from outside the paths package.
+func TestCrossEnvRecordingStateRoundTrip(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS-specific cache path test")
+	}
+
+	// use a unique repoID to avoid collisions with real data
+	repoID := "repo-crossenv-test-ephemeral"
+	agentID := "OxCrossEnv1"
+
+	home, err := os.UserHomeDir()
+	require.NoError(t, err)
+
+	// create a project root with .sageox/config.json
+	projectRoot := t.TempDir()
+	sageoxDir := filepath.Join(projectRoot, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+	configJSON := `{"repo_id":"` + repoID + `"}`
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(configJSON), 0600))
+
+	// place recording state in ~/.cache/sageox/sessions/<repoID>/sessions/<name>/
+	// this simulates Conductor (no XDG_CACHE_HOME → defaults to ~/.cache)
+	cacheSessionsDir := filepath.Join(home, ".cache", "sageox", "sessions", repoID, "sessions")
+	sessionName := "2026-03-18T16-00-user-" + agentID
+	sessionPath := filepath.Join(cacheSessionsDir, sessionName)
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+	t.Cleanup(func() {
+		// clean up the unique repoID dir under both cache roots
+		os.RemoveAll(filepath.Join(home, ".cache", "sageox", "sessions", repoID))
+		os.RemoveAll(filepath.Join(home, "Library", "Caches", "sageox", "sessions", repoID))
+	})
+
+	state := &RecordingState{
+		AgentID:     agentID,
+		StartedAt:   time.Now().UTC(),
+		AdapterName: "claude-code",
+		SessionPath: sessionPath,
+		CacheDir:    filepath.Join(home, ".cache", "sageox"),
+	}
+	data, marshalErr := json.MarshalIndent(state, "", "  ")
+	require.NoError(t, marshalErr)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, ".recording.json"), data, 0600))
+
+	// simulate terminal shell environment (XDG_CACHE_HOME=~/Library/Caches)
+	// — SessionCacheDir will now resolve to ~/Library/Caches/sageox/sessions/<repoID>
+	// — but the recording state lives in ~/.cache/sageox/sessions/<repoID>/sessions/
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "Library", "Caches"))
+
+	found, loadErr := LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, loadErr)
+	require.NotNil(t, found, "recording state should be found via alternate cache dir scan")
+	assert.Equal(t, agentID, found.AgentID)
+	assert.Equal(t, filepath.Join(home, ".cache", "sageox"), found.CacheDir,
+		"CacheDir should reflect the original creating process's cache dir")
+}

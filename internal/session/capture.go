@@ -166,6 +166,19 @@ func getRepoIDFromProject(projectRoot string) string {
 	return config.GetRepoID(projectRoot)
 }
 
+// getProjectEndpoint returns the endpoint from a project's .sageox/config.json.
+// Returns empty string if the project has no explicit endpoint configured.
+// Unlike endpoint.GetForProject, does NOT fall back to the default endpoint —
+// this is intentional: ledger cache paths should only be used when the project
+// has a real endpoint, not the global default.
+func getProjectEndpoint(projectRoot string) string {
+	cfg, err := config.LoadProjectConfig(projectRoot)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return cfg.Endpoint
+}
+
 // CreateCapturedHistoryMeta creates metadata for captured history with given parameters.
 func CreateCapturedHistoryMeta(agentID, agentType, source, title string) *HistoryMeta {
 	meta := NewHistoryMeta(agentID, source)

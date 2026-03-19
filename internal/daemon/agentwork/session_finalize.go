@@ -134,11 +134,11 @@ func (h *SessionFinalizeHandler) Cleanup(ledgerPath string) {
 			h.logger.Info("ghost cleanup (cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
 		}
 
-		// also clean legacy cache paths (e.g. ~/Library/Caches/sageox on macOS)
-		for _, legacyDir := range paths.LegacySessionCacheDirs(repoID) {
-			legacySessionsDir := filepath.Join(legacyDir, "sessions")
-			if ghostResult := session.CleanupGhostSessionsInDir(legacySessionsDir); ghostResult.Removed > 0 {
-				h.logger.Info("ghost cleanup (legacy cache): removed abandoned recordings", "dir", legacyDir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
+		// also clean alternate cache paths (different XDG_CACHE_HOME resolution)
+		for _, altDir := range paths.AlternateSessionCacheDirs(repoID) {
+			altSessionsDir := filepath.Join(altDir, "sessions")
+			if ghostResult := session.CleanupGhostSessionsInDir(altSessionsDir); ghostResult.Removed > 0 {
+				h.logger.Info("ghost cleanup (alternate cache): removed abandoned recordings", "dir", altDir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
 			}
 		}
 	}
@@ -187,23 +187,23 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 			}
 		}
 
-		// also scan legacy cache paths (e.g. ~/Library/Caches/sageox on macOS)
-		for _, legacyDir := range paths.LegacySessionCacheDirs(repoID) {
-			legacySessionsDir := filepath.Join(legacyDir, "sessions")
-			if legacySessionsDir == ledgerSessionsDir {
+		// also scan alternate cache paths (different XDG_CACHE_HOME resolution)
+		for _, altDir := range paths.AlternateSessionCacheDirs(repoID) {
+			altSessionsDir := filepath.Join(altDir, "sessions")
+			if altSessionsDir == ledgerSessionsDir {
 				continue
 			}
-			if ghostResult := session.CleanupGhostSessionsInDir(legacySessionsDir); ghostResult.Removed > 0 {
-				h.logger.Info("ghost cleanup (legacy cache): removed abandoned recordings", "dir", legacyDir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
+			if ghostResult := session.CleanupGhostSessionsInDir(altSessionsDir); ghostResult.Removed > 0 {
+				h.logger.Info("ghost cleanup (alternate cache): removed abandoned recordings", "dir", altDir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
 			}
 
-			legacyItems, legacyErr := h.detectInDir(legacySessionsDir, ledgerPath)
-			if legacyErr == nil {
+			altItems, altErr := h.detectInDir(altSessionsDir, ledgerPath)
+			if altErr == nil {
 				seen := make(map[string]bool)
 				for _, item := range items {
 					seen[item.DedupKey] = true
 				}
-				for _, item := range legacyItems {
+				for _, item := range altItems {
 					if !seen[item.DedupKey] {
 						items = append(items, item)
 					}
