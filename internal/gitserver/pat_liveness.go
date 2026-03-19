@@ -19,9 +19,13 @@ type PATLivenessResult struct {
 }
 
 // ValidatePATLiveness probes the git server with the stored PAT to verify it
-// actually authenticates. Uses an HTTP HEAD request against the GitLab API
+// actually authenticates. Uses an HTTP GET request against the GitLab API
 // rather than git ls-remote, since we may not have a repo URL handy and we
 // want to avoid git subprocess overhead.
+//
+// NOTE: Currently GitLab-specific (PRIVATE-TOKEN header, /api/v4/user endpoint).
+// SageOx uses GitLab for all git hosting. If multi-provider support is needed,
+// this should detect the provider and adapt the probe strategy.
 //
 // Timeout should be kept short (2-3s) so callers (doctor, status) stay responsive.
 func ValidatePATLiveness(ctx context.Context, serverURL, token string) PATLivenessResult {
