@@ -93,8 +93,13 @@ func TestLoginProceedsWhenTokenRefreshFails(t *testing.T) {
 
 	// Suppress stdout from login flow (device code URL, etc.)
 	oldStdout := os.Stdout
-	os.Stdout, _ = os.Open(os.DevNull)
-	defer func() { os.Stdout = oldStdout }()
+	devNull, openErr := os.Open(os.DevNull)
+	require.NoError(t, openErr)
+	os.Stdout = devNull
+	t.Cleanup(func() {
+		os.Stdout = oldStdout
+		_ = devNull.Close()
+	})
 
 	// Run the login flow — this should NOT return the refresh error.
 	// Use a short-lived context so the device flow poll times out quickly.
