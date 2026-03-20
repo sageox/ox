@@ -253,9 +253,12 @@ func selectLoginEndpoint() (string, error) {
 // runLoginFlow executes the login flow for a specific endpoint
 func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 	// check if already authenticated for this endpoint
+	// If token refresh fails, treat as unauthenticated and proceed with login
+	// (the user is explicitly trying to log in, so a refresh failure shouldn't block them)
 	authenticated, err := auth.IsAuthenticatedForEndpoint(currentEndpoint)
 	if err != nil {
-		return fmt.Errorf("failed to check authentication status: %w", err)
+		slog.Debug("auth check failed, proceeding with login", "error", err)
+		authenticated = false
 	}
 
 	if authenticated {
