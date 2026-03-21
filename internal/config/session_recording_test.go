@@ -49,8 +49,8 @@ func TestResolvedSessionRecording_ShouldRecord(t *testing.T) {
 	}
 }
 
-func TestResolveSessionRecording_DefaultsToAuto(t *testing.T) {
-	// with no config, should default to manual (opt-in recording)
+func TestResolveSessionRecording_NoProjectConfig_DefaultsToManual(t *testing.T) {
+	// no .sageox/ at all — not an ox-initialized repo, default to manual
 	tmpDir := t.TempDir()
 	userConfigDir := t.TempDir()
 
@@ -89,7 +89,7 @@ func TestResolveSessionRecording_ReadsFromProjectConfig(t *testing.T) {
 	assert.Equal(t, SessionRecordingSourceRepo, resolved.Source)
 }
 
-func TestResolveSessionRecording_EmptyProjectConfig_FallsThrough(t *testing.T) {
+func TestResolveSessionRecording_EmptyProjectConfig_DefaultsToAuto(t *testing.T) {
 	tmpDir := t.TempDir()
 	userConfigDir := t.TempDir()
 
@@ -108,9 +108,9 @@ func TestResolveSessionRecording_EmptyProjectConfig_FallsThrough(t *testing.T) {
 
 	resolved := ResolveSessionRecording(tmpDir)
 
-	// should fall through to default since project config has no session_recording
-	assert.Equal(t, SessionRecordingManual, resolved.Mode)
-	assert.Equal(t, SessionRecordingSourceDefault, resolved.Source)
+	// ox-initialized repo with no explicit setting defaults to auto
+	assert.Equal(t, SessionRecordingAuto, resolved.Mode)
+	assert.Equal(t, SessionRecordingSourceRepo, resolved.Source)
 }
 
 func TestGetSessionRecording(t *testing.T) {
@@ -275,7 +275,7 @@ func TestResolveSessionRecording_DefaultIsManual(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", userConfigDir)
 	t.Setenv("OX_SESSION_RECORDING", "")
 
-	// no project config, no user config → should default to manual
+	// no .sageox/ project config, no user config → should default to manual
 	resolved := ResolveSessionRecording(tmpDir)
 	assert.Equal(t, SessionRecordingManual, resolved.Mode)
 	assert.Equal(t, SessionRecordingSourceDefault, resolved.Source)

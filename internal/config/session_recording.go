@@ -126,7 +126,7 @@ func ResolveSessionRecording(projectRoot string) *ResolvedSessionRecording {
 	}
 
 	// 2. check project config (.sageox/config.json)
-	if projectRoot != "" {
+	if projectRoot != "" && IsInitialized(projectRoot) {
 		projectCfg, err := LoadProjectConfig(projectRoot)
 		if err == nil && projectCfg != nil {
 			if projectCfg.SessionRecording != "" {
@@ -134,6 +134,12 @@ func ResolveSessionRecording(projectRoot string) *ResolvedSessionRecording {
 					Mode:   NormalizeSessionRecording(projectCfg.SessionRecording),
 					Source: SessionRecordingSourceRepo,
 				}
+			}
+			// ox-initialized repo with no explicit session_recording —
+			// default to auto so initialized repos record by default
+			return &ResolvedSessionRecording{
+				Mode:   SessionRecordingAuto,
+				Source: SessionRecordingSourceRepo,
 			}
 		}
 	}
