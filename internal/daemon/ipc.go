@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/daemon/agentwork"
+	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
 
 // maxIPCMessageSize limits the maximum size of an IPC message to prevent DoS.
@@ -47,6 +48,7 @@ const (
 	MsgTypeCodeIndex       = "code_index"       // index local code with progress
 	MsgTypeCodeStatus      = "code_status"      // get code index status/stats
 	MsgTypeNotifications   = "notifications"    // query pending team context change notifications
+	MsgTypeWhispers        = "whispers"         // query whisper entries for an agent
 	MsgTypeSessionFinalize = "session_finalize" // one-way, trigger async session upload+finalization
 )
 
@@ -363,6 +365,18 @@ type NotificationsResponse struct {
 	Stale bool          `json:"stale"`
 }
 
+// WhispersPayload is the payload for whisper queries.
+type WhispersPayload struct {
+	AgentID   string   `json:"agent_id"`
+	Attention string   `json:"attention,omitempty"` // "all", "normal", "focused" (default: "normal")
+	Topics    []string `json:"topics,omitempty"`    // nil = all topics
+}
+
+// WhispersResponse is the response for whisper queries.
+type WhispersResponse struct {
+	Entries []whisperstore.WhisperEntry `json:"entries"`
+}
+
 // DoctorResponse is the response for the doctor IPC message.
 type DoctorResponse struct {
 	AntiEntropyTriggered     bool     `json:"anti_entropy_triggered"`
@@ -508,6 +522,7 @@ type Server struct {
 	onCodeIndex        func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) // index local code
 	onCodeStatus       func() *CodeDBStats                                                                // get code index stats
 	onNotifications    func(agentID string) ([]ChangeEntry, bool)                                         // get pending notifications
+	onWhispers         func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
 
 	startTime time.Time
 }
@@ -548,6 +563,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeCodeIndex, handleCodeIndex)
 	router.Register(MsgTypeCodeStatus, handleCodeStatus)
 	router.Register(MsgTypeNotifications, handleNotifications)
+	router.Register(MsgTypeWhispers, handleWhispers)
 
 	return router
 }
@@ -943,6 +959,47 @@ func handleNotifications(s *Server, msg Message, _ net.Conn) HandlerResult {
 	return HandlerResult{Response: marshalResponse(resp)}
 }
 
+func handleWhispers(s *Server, msg Message, _ net.Conn) HandlerResult {
+	s.mu.Lock()
+	handler := s.onWhispers
+	s.mu.Unlock()
+
+	if handler == nil {
+		resp := WhispersResponse{Entries: []whisperstore.WhisperEntry{}}
+		return HandlerResult{Response: marshalResponse(resp)}
+	}
+
+	var payload WhispersPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		return HandlerResult{
+			Response: &Response{Success: false, Error: fmt.Sprintf("invalid payload: %v", err)},
+		}
+	}
+
+	if payload.AgentID == "" {
+		return HandlerResult{
+			Response: &Response{Success: false, Error: "agent_id required"},
+		}
+	}
+
+	attention := whisperstore.Attention(payload.Attention)
+	if attention == "" {
+		attention = whisperstore.AttentionNormal
+	}
+
+	entries, err := handler(payload.AgentID, attention, payload.Topics)
+	if err != nil {
+		return HandlerResult{
+			Response: &Response{Success: false, Error: fmt.Sprintf("get whispers: %v", err)},
+		}
+	}
+	if entries == nil {
+		entries = []whisperstore.WhisperEntry{}
+	}
+	resp := WhispersResponse{Entries: entries}
+	return HandlerResult{Response: marshalResponse(resp)}
+}
+
 // SetHandlers sets the message handlers.
 func (s *Server) SetHandlers(onSync func() error, onStop func(), onStatus func() *StatusData) {
 	s.mu.Lock()
@@ -1078,6 +1135,13 @@ func (s *Server) SetNotificationsHandler(cb func(agentID string) ([]ChangeEntry,
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onNotifications = cb
+}
+
+// SetWhispersHandler sets the handler for whisper queries.
+func (s *Server) SetWhispersHandler(cb func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onWhispers = cb
 }
 
 // Start starts the IPC server.
@@ -1495,6 +1559,31 @@ func (c *Client) Notifications(agentID string) (*NotificationsResponse, error) {
 	var result NotificationsResponse
 	if err := json.Unmarshal(resp.Data, &result); err != nil {
 		return nil, fmt.Errorf("unmarshal notifications: %w", err)
+	}
+	return &result, nil
+}
+
+// Whispers queries whisper entries for an agent from the daemon.
+// Returns entries since the agent last checked, filtered by attention and topics.
+func (c *Client) Whispers(agentID string, attention string, topics []string) (*WhispersResponse, error) {
+	payload, _ := json.Marshal(WhispersPayload{
+		AgentID:   agentID,
+		Attention: attention,
+		Topics:    topics,
+	})
+	resp, err := c.sendMessage(Message{
+		Type:    MsgTypeWhispers,
+		Payload: payload,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, errors.New(resp.Error)
+	}
+	var result WhispersResponse
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal whispers: %w", err)
 	}
 	return &result, nil
 }

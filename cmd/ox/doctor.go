@@ -713,6 +713,16 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		}
 	}
 
+	// Category 5c: Local State (ephemeral caches)
+	progress.show("Local State")
+	localStateChecks := []checkResult{
+		checkWhisperDBIntegrity(opts.shouldFix(CheckSlugWhisperDB)),
+	}
+	categories = append(categories, checkCategory{
+		name:   "Local State",
+		checks: localStateChecks,
+	})
+
 	// Category 6: Auth Security
 	authSecurityChecks := []checkResult{checkAuthFilePermissions(opts.shouldFix(CheckSlugAuthPermissions))}
 	categories = append(categories, checkCategory{

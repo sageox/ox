@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/session"
+	whisperstore "github.com/sageox/ox/internal/whisper/store"
 	"github.com/spf13/cobra"
 )
 
@@ -221,6 +222,9 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	if userCfg, _ := config.LoadUserConfig(); userCfg != nil && userCfg.Notifications.AreNotificationsEnabled() {
 		emitTeamContextNotifications(agentID)
 	}
+
+	// check for pending whispers (non-blocking, ~50ms max)
+	emitWhispers(agentID)
 
 	subcommand := args[0]
 
@@ -592,6 +596,52 @@ func emitTeamContextNotifications(agentID string) {
 	fmt.Fprintln(os.Stderr, "NOTICE: Team context updated. Re-read only if relevant to current work:")
 	for _, f := range notifs.Files {
 		fmt.Fprintf(os.Stderr, "  %s\n", f.Path)
+	}
+}
+
+// emitWhispers checks daemon for pending whisper entries.
+// Non-blocking: if daemon is unavailable, silently returns.
+func emitWhispers(agentID string) {
+	client := daemon.NewClient() // 50ms timeout
+	resp, err := client.Whispers(agentID, "normal", nil)
+	if err != nil || resp == nil {
+		return
+	}
+	if len(resp.Entries) == 0 {
+		return
+	}
+
+	// group whispers by importance
+	var critical, normal, ambient []string
+	for _, e := range resp.Entries {
+		line := fmt.Sprintf("[%s] %s", e.Topic, e.Content)
+		switch e.Importance {
+		case whisperstore.ImportanceCritical:
+			critical = append(critical, line)
+		case whisperstore.ImportanceNormal:
+			normal = append(normal, line)
+		default:
+			ambient = append(ambient, line)
+		}
+	}
+
+	if len(critical) > 0 {
+		fmt.Fprintln(os.Stderr, "CRITICAL WHISPERS:")
+		for _, line := range critical {
+			fmt.Fprintf(os.Stderr, "  %s\n", line)
+		}
+	}
+	if len(normal) > 0 {
+		fmt.Fprintln(os.Stderr, "WHISPERS:")
+		for _, line := range normal {
+			fmt.Fprintf(os.Stderr, "  %s\n", line)
+		}
+	}
+	if len(ambient) > 0 {
+		fmt.Fprintln(os.Stderr, "AMBIENT:")
+		for _, line := range ambient {
+			fmt.Fprintf(os.Stderr, "  %s\n", line)
+		}
 	}
 }
 

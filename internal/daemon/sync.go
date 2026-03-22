@@ -37,6 +37,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/endpoint"
@@ -45,6 +46,7 @@ import (
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/version"
+	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
 
 // Sync timing constants - extracted for clarity and testability.
@@ -317,6 +319,9 @@ type SyncScheduler struct {
 
 	// notification store for team context change tracking
 	notifications *NotificationStore
+
+	// whisper registry for trigger whispers on sync events
+	whisperRegistry *WhisperRegistry
 }
 
 // syncError tracks a sync error with timestamp.
@@ -428,6 +433,13 @@ func (s *SyncScheduler) SetNotificationStore(store *NotificationStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.notifications = store
+}
+
+// SetWhisperRegistry sets the whisper registry for trigger whispers on sync events.
+func (s *SyncScheduler) SetWhisperRegistry(r *WhisperRegistry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.whisperRegistry = r
 }
 
 // captureHEAD returns the current HEAD SHA for a git repo.
@@ -2148,6 +2160,23 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 				s.notifications.RecordChanges(changedFiles, r.ws.TeamID, r.ws.TeamName)
 				s.logger.Debug("team context changes detected",
 					"team", r.ws.TeamName, "count", len(changedFiles))
+
+				// also emit trigger whispers for each changed file
+				if s.whisperRegistry != nil {
+					for _, cf := range changedFiles {
+						id, _ := uuid.NewV7()
+						s.whisperRegistry.Add("ledger", whisperstore.WhisperEntry{
+							ID:         id.String(),
+							Scope:      "ledger",
+							Type:       whisperstore.WhisperTrigger,
+							Source:     "team-context",
+							Topic:      "team-context",
+							Content:    fmt.Sprintf("Team context updated: %s", cf),
+							Importance: whisperstore.ImportanceNormal,
+							CreatedAt:  time.Now(),
+						})
+					}
+				}
 			}
 		}
 		s.logger.Debug("team context synced", "team", r.ws.TeamName, "duration", r.duration)

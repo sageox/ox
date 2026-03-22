@@ -143,6 +143,26 @@ func CodeDBSharedDir(repoID, endpointURL string) string {
 	return filepath.Join(LedgersDataDir(repoID, endpointURL), ".sageox", "cache", "codedb")
 }
 
+// WhisperDBDir returns the directory for the whisper SQLite database.
+// Stored inside the ledger's local cache, shared across all worktrees for the same repo.
+// Format: ~/.local/share/sageox/<endpoint>/ledgers/<repoID>/.sageox/cache/whisper/
+func WhisperDBDir(repoID, endpointURL string) string {
+	if repoID == "" || endpointURL == "" {
+		return ""
+	}
+	return filepath.Join(LedgersDataDir(repoID, endpointURL), ".sageox", "cache", "whisper")
+}
+
+// TeamWhisperDBDir returns the directory for a team's whisper SQLite database.
+// Shared across daemons on the same machine that pull the same team context.
+// Format: ~/.local/share/sageox/<endpoint>/teams/<teamID>/.sageox/cache/whisper/
+func TeamWhisperDBDir(teamID, endpointURL string) string {
+	if teamID == "" || endpointURL == "" {
+		return ""
+	}
+	return filepath.Join(TeamContextDir(teamID, endpointURL), ".sageox", "cache", "whisper")
+}
+
 // LedgerSessionCacheBase returns the base cache directory inside a repo's ledger.
 // Session recording states are stored under <base>/sessions/<session-name>/.
 // This is the canonical, environment-independent cache location — unlike XDG cache dirs

@@ -369,9 +369,10 @@ func InitForEndpoint(endpointURL string, remoteURL string) (*Ledger, error) {
 }
 
 // CloneWithSparseCheckout clones a remote repo with sparse checkout enabled.
-// Only .sync/, sessions/, audit/, and recent data/github/ directories are checked out.
-// The assets/ directory and older GitHub data are excluded to save space.
-// Exported for use by the daemon's GC reclone (fresh clone with sparse checkout).
+// Only .sync/, sessions/, audit/, recent data/github/, and recent data/murmurs/
+// directories are checked out. The assets/ directory and older data are excluded
+// to save space. Exported for use by the daemon's GC reclone (fresh clone with
+// sparse checkout).
 func CloneWithSparseCheckout(path, remoteURL string) error {
 	// remove existing directory if empty
 	entries, _ := os.ReadDir(path)
@@ -399,8 +400,9 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 }
 
 // ConfigureSparseCheckout sets up sparse checkout for the ledger.
-// Includes: .sync/, sessions/, audit/, and a sliding window of recent GitHub data
-// Excludes: assets/ (large files), older GitHub data outside the window
+// Includes: .sync/, sessions/, audit/, a sliding window of recent GitHub data,
+// and a rolling window of recent murmur data (hourly granularity).
+// Excludes: assets/ (large files), older data outside the windows.
 //
 // Called during initial clone (CloneWithSparseCheckout) and by EnableSparseCheckout.
 // Future: daemon GC reclone will also call this to reconfigure the sliding window
@@ -426,6 +428,11 @@ func ConfigureSparseCheckout(path string) error {
 	// add sliding window of recent GitHub data (last N days, default 30)
 	// keeps local disk usage small; older data lives in git history
 	dirs = append(dirs, ComputeGitHubDataPaths(DefaultGitHubDataWindowDays)...)
+
+	// add rolling window of recent murmur data (last N hours, default 12)
+	// hourly granularity keeps the checkout tight while ensuring the daemon
+	// can read murmur files after git pull
+	dirs = append(dirs, ComputeMurmurDataPaths(DefaultMurmurWindowHours)...)
 
 	// set directories to include (excludes everything else like assets/)
 	args := append([]string{"-C", path, "sparse-checkout", "set"}, dirs...)

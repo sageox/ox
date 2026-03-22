@@ -18,7 +18,9 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/version"
+	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
 
 // Version returns the daemon version including build timestamp.
@@ -147,16 +149,17 @@ type Daemon struct {
 	wg     sync.WaitGroup
 
 	// components
-	server        *Server
-	scheduler     *SyncScheduler
-	watcher       *Watcher
-	heartbeat     *HeartbeatHandler
-	telemetry     *TelemetryCollector
-	friction      *FrictionCollector
-	issues        *IssueTracker
-	codedb        *CodeDBManager
-	agentWorker   *agentwork.Manager
-	notifications *NotificationStore
+	server          *Server
+	scheduler       *SyncScheduler
+	watcher         *Watcher
+	heartbeat       *HeartbeatHandler
+	telemetry       *TelemetryCollector
+	friction        *FrictionCollector
+	issues          *IssueTracker
+	codedb          *CodeDBManager
+	agentWorker     *agentwork.Manager
+	notifications   *NotificationStore
+	whisperRegistry *WhisperRegistry
 
 	// state
 	mu               sync.Mutex
@@ -284,6 +287,21 @@ func (d *Daemon) Start() error {
 	// initialize notification store for team context change tracking
 	d.notifications = NewNotificationStore(200)
 
+	// initialize whisper store for persistent agent signal delivery
+	repoID := config.GetRepoID(d.config.ProjectRoot)
+	if repoID != "" && projectEndpoint != "" {
+		whisperDBPath := filepath.Join(paths.WhisperDBDir(repoID, projectEndpoint), "whisper.db")
+		ledgerWhisperStore, err := whisperstore.Open(whisperDBPath)
+		if err != nil {
+			d.logger.Warn("failed to open whisper store", "error", err)
+		} else {
+			d.whisperRegistry = NewWhisperRegistry(ledgerWhisperStore, d.logger)
+			// startup maintenance: prune old entries and enforce size limit
+			d.whisperRegistry.Prune(24 * time.Hour)
+			d.whisperRegistry.EnforceMaxSize(10 * 1024 * 1024) // 10MB
+		}
+	}
+
 	// start heartbeat handler
 	d.heartbeat = NewHeartbeatHandler(d.logger)
 	d.heartbeat.SetActivityCallback(d.recordActivity)
@@ -379,6 +397,11 @@ func (d *Daemon) Start() error {
 
 	// wire notification store so scheduler can record team context changes
 	d.scheduler.SetNotificationStore(d.notifications)
+
+	// wire whisper registry so scheduler can emit trigger whispers
+	if d.whisperRegistry != nil {
+		d.scheduler.SetWhisperRegistry(d.whisperRegistry)
+	}
 
 	// wire code index manager into scheduler for periodic freshness checks
 	if d.codedb != nil {
@@ -637,6 +660,13 @@ func (d *Daemon) Start() error {
 		return d.notifications.GetNotifications(agentID)
 	})
 
+	// set whisper handler for agent whisper queries
+	if d.whisperRegistry != nil {
+		d.server.SetWhispersHandler(func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error) {
+			return d.whisperRegistry.GetWhispers(agentID, attention, topics)
+		})
+	}
+
 	setupDuration := time.Since(startSetup)
 
 	// start telemetry background sender
@@ -658,6 +688,14 @@ func (d *Daemon) Start() error {
 		defer d.wg.Done()
 		d.scheduler.Start(d.ctx)
 	}()
+
+	// start whisper scheduler (periodic sources + prune tick)
+	if d.whisperRegistry != nil {
+		ws := NewWhisperScheduler(d.whisperRegistry, d.logger)
+		ws.RegisterSource(NewActivitySummarySource(d.heartbeat, d.scheduler))
+		ws.Start(d.ctx, &d.wg)
+		ws.RunPrune(d.ctx, &d.wg, 1*time.Hour)
+	}
 
 	// start file watcher if ledger path is set
 	if d.config.LedgerPath != "" {
@@ -889,6 +927,13 @@ func (d *Daemon) shutdown() error {
 	// stop friction collector and flush pending events
 	if d.friction != nil {
 		d.friction.Stop()
+	}
+
+	// close whisper registry (flush SQLite WAL before exit)
+	if d.whisperRegistry != nil {
+		if err := d.whisperRegistry.Close(); err != nil {
+			d.logger.Warn("failed to close whisper registry", "error", err)
+		}
 	}
 
 	// cancel context to stop all goroutines
