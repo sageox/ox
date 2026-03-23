@@ -70,41 +70,9 @@ func GetDoctorCheck(slug string) *DoctorCheck {
 	return DoctorCheckRegistry[slug]
 }
 
-// GetDoctorChecksByCategory returns all checks in a given category.
-func GetDoctorChecksByCategory(category string) []*DoctorCheck {
-	var checks []*DoctorCheck
-	for _, check := range DoctorCheckRegistry {
-		if check.Category == category {
-			checks = append(checks, check)
-		}
-	}
-	return checks
-}
-
-// GetDoctorChecksByFixLevel returns all checks with a given fix level.
-func GetDoctorChecksByFixLevel(level FixLevel) []*DoctorCheck {
-	var checks []*DoctorCheck
-	for _, check := range DoctorCheckRegistry {
-		if check.FixLevel == level {
-			checks = append(checks, check)
-		}
-	}
-	return checks
-}
-
 // IsAutoFixable returns true if the check can be fixed automatically without --fix.
 func (d *DoctorCheck) IsAutoFixable() bool {
 	return d.FixLevel == FixLevelAuto
-}
-
-// RequiresConfirmation returns true if the check requires user confirmation to fix.
-func (d *DoctorCheck) RequiresConfirmation() bool {
-	return d.FixLevel == FixLevelConfirm
-}
-
-// HasFix returns true if the check has any kind of fix available.
-func (d *DoctorCheck) HasFix() bool {
-	return d.FixLevel != FixLevelCheckOnly
 }
 
 // Check slug constants for programmatic reference.

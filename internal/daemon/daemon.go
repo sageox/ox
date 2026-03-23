@@ -241,8 +241,6 @@ func (d *Daemon) Start() error {
 
 	d.logger.Info("daemon starting", "ledger", d.config.LedgerPath, "version", Version())
 
-	startSetup := time.Now()
-
 	// write PID file (informational only)
 	if err := d.writePidFile(); err != nil {
 		d.logger.Warn("failed to write pid file", "error", err)
@@ -263,467 +261,14 @@ func (d *Daemon) Start() error {
 	// workspace ID is cached and PID file is written.
 	StabilizeCWD()
 
-	// start IPC server
-	d.server = NewServer(d.logger)
+	// start IPC server — daemonServiceImpl is a thin shim over *Daemon that
+	// implements DaemonService; components (scheduler, heartbeat, etc.) are
+	// initialized below, so all methods guard against nil receivers.
+	d.server = NewServerWithService(d.logger, &daemonServiceImpl{d})
 
-	// load project endpoint early - needed by friction collector and credential loading
-	var projectEndpoint string
-	if projectCfg, err := config.LoadProjectConfig(d.config.ProjectRoot); err == nil && projectCfg != nil {
-		projectEndpoint = projectCfg.GetEndpoint()
-	}
+	setupDuration := d.initComponents()
 
-	// start telemetry collector
-	d.telemetry = NewTelemetryCollector(d.logger)
-	d.startTime = time.Now()
-
-	// start friction collector for UX analytics
-	// uses project endpoint so events go to the correct API (e.g., test.sageox.ai)
-	d.friction = NewFrictionCollector(d.logger, projectEndpoint)
-
-	// initialize issue tracker for health check system
-	d.issues = NewIssueTracker()
-
-	// initialize whisper store for persistent agent signal delivery
-	if config.FeatureWhisperEnabled() {
-		repoID := config.GetRepoID(d.config.ProjectRoot)
-		if repoID != "" && projectEndpoint != "" {
-			whisperDBPath := filepath.Join(paths.WhisperDBDir(repoID, projectEndpoint), "whisper.db")
-			ledgerWhisperStore, err := whisperstore.Open(whisperDBPath)
-			if err != nil {
-				d.logger.Warn("failed to open whisper store", "error", err)
-			} else {
-				d.whisperRegistry = NewWhisperRegistry(ledgerWhisperStore, d.logger)
-				// startup maintenance: prune old entries and enforce size limit
-				d.whisperRegistry.Prune(24 * time.Hour)
-				d.whisperRegistry.EnforceMaxSize(10 * 1024 * 1024) // 10MB
-			}
-		}
-	}
-
-	// start heartbeat handler
-	d.heartbeat = NewHeartbeatHandler(d.logger)
-	d.heartbeat.SetActivityCallback(d.recordActivity)
-	d.heartbeat.SetTeamNeededCallback(func(teamID string) {
-		// TODO: implement lazy team loading via clone queue
-		d.logger.Debug("team context needed", "team_id", teamID)
-	})
-	d.heartbeat.SetVersionMismatchCallback(func(cliVersion, daemonVersion string) {
-		d.logger.Info("restarting due to version mismatch",
-			"cli_version", cliVersion,
-			"daemon_version", daemonVersion,
-		)
-		d.mu.Lock()
-		d.restartRequested = true
-		d.mu.Unlock()
-		go d.Stop()
-	})
-	d.server.SetHeartbeatHandler(d.heartbeat.Handle)
-
-	// pre-populate credentials from credential store (if available)
-	// heartbeats will refresh these, but this handles cold-start
-	if creds, err := gitserver.LoadCredentialsForEndpoint(projectEndpoint); err == nil && creds != nil {
-		hbCreds := &HeartbeatCreds{
-			Token:     creds.Token,
-			ServerURL: creds.ServerURL,
-			ExpiresAt: creds.ExpiresAt,
-		}
-		// also load auth token (JWT) for REST API calls (friction, repos, etc.)
-		if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil {
-			hbCreds.AuthToken = token.AccessToken
-		}
-		d.heartbeat.SetInitialCredentials(hbCreds)
-	}
-
-	// start sync scheduler
-	d.scheduler = NewSyncScheduler(d.config, d.logger)
-
-	// initialize code index manager (if project root is set)
-	if d.config.ProjectRoot != "" {
-		d.codedb = NewCodeDBManager(d.config.ProjectRoot, d.logger, d.telemetry)
-		// keep codedb project root fresh when workspace path changes
-		// (Conductor creates new workspace dirs, deleting old ones)
-		d.heartbeat.SetCallerPathCallback(func(path string) {
-			d.codedb.UpdateProjectRoot(path)
-		})
-	}
-
-	// initialize agent work manager (if ledger path is set)
-	if d.config.LedgerPath != "" {
-		agentWorkSignal := make(chan struct{}, 1)
-		runner := agentwork.NewClaudeRunner(d.logger)
-		configLoader := func() *config.AgentWorkerConfig {
-			cfg, err := config.LoadUserConfig()
-			if err != nil {
-				d.logger.Debug("failed to load user config for agent worker", "error", err)
-				return (&config.AgentWorkerConfig{}).WithDefaults()
-			}
-			awCfg := cfg.GetAgentWorkerConfig()
-			if awCfg == nil {
-				return (&config.AgentWorkerConfig{}).WithDefaults()
-			}
-			return awCfg
-		}
-		d.agentWorker = agentwork.NewManager(runner, d.logger, configLoader, agentWorkSignal, d.config.LedgerPath)
-		sfh := agentwork.NewSessionFinalizeHandler(d.logger)
-		sfh.SetPIDLookup(d.heartbeat.GetAgentPID)
-		sfh.SetLedgerMu(d.scheduler.LedgerMu())
-		// wire quality thresholds from user config
-		awCfg := configLoader()
-		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
-		d.agentWorker.RegisterHandler(sfh)
-		d.agentWorker.SetOnComplete(func(result agentwork.WorkResult) {
-			status := "success"
-			if !result.Success {
-				status = "failed"
-			}
-			d.logger.Info("agent work complete",
-				"type", result.Item.Type,
-				"status", status,
-				"duration", result.Duration,
-			)
-		})
-
-		// pass agent work signal channel to sync scheduler
-		d.scheduler.SetAgentWorkSignal(agentWorkSignal)
-	}
-
-	// wire auth token getter so scheduler and friction can authenticate API calls
-	d.scheduler.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
-	d.friction.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
-
-	// wire issue tracker so scheduler can report issues needing LLM reasoning
-	d.scheduler.SetIssueTracker(d.issues)
-
-
-	// wire whisper registry so scheduler can emit trigger whispers
-	if d.whisperRegistry != nil {
-		d.scheduler.SetWhisperRegistry(d.whisperRegistry)
-	}
-
-	// create murmur relay for converting murmur files to whisper entries
-	if d.whisperRegistry != nil {
-		murmurRelay := NewMurmurRelay(d.whisperRegistry, d.logger)
-		d.scheduler.SetMurmurRelay(murmurRelay)
-	}
-
-	// wire code index manager into scheduler for periodic freshness checks
-	if d.codedb != nil {
-		d.scheduler.SetCodeDBManager(d.codedb)
-	}
-
-	// initialize GitHub sync manager for automatic PR/issue fetching
-	if d.config.ProjectRoot != "" {
-		githubSync := NewGitHubSyncManager(d.config.ProjectRoot, d.scheduler.LedgerMu(), d.logger)
-		githubSync.SetIssueTracker(d.issues)
-		if d.codedb != nil {
-			githubSync.SetCodeDBManager(d.codedb)
-		}
-		d.scheduler.SetGitHubSyncManager(githubSync)
-	}
-
-	// set telemetry callback on scheduler for sync:complete events
-	d.scheduler.SetTelemetryCallback(func(syncType, operation, status string, duration time.Duration) {
-		if d.telemetry != nil {
-			d.telemetry.RecordSyncComplete(syncType, operation, status, duration, 0)
-		}
-	})
-
-	// set up IPC handlers
-	d.server.SetHandlers(
-		func() error { return d.scheduler.Sync() },
-		func() { d.Stop() },
-		func() *StatusData {
-			lastErr, lastErrTime := d.scheduler.LastError()
-			lastErrTimeStr := ""
-			if !lastErrTime.IsZero() {
-				lastErrTimeStr = lastErrTime.Format(time.RFC3339)
-			}
-			stats := d.scheduler.SyncStats()
-			// prefer most recent caller path from heartbeats (stays fresh across clones)
-			// fall back to config.ProjectRoot (the clone that started the daemon)
-			workspacePath := d.config.ProjectRoot
-			if d.heartbeat != nil {
-				if callerPath := d.heartbeat.LastCallerPath(); callerPath != "" {
-					workspacePath = callerPath
-				}
-			}
-
-			// get activity summary from heartbeat handler
-			var activitySummary *ActivitySummary
-			if d.heartbeat != nil {
-				summary := d.heartbeat.GetActivitySummary()
-				activitySummary = &summary
-			}
-
-			// get authenticated user from heartbeat handler
-			var authUser *AuthenticatedUser
-			if d.heartbeat != nil {
-				authUser = d.heartbeat.GetAuthenticatedUser()
-			}
-
-			// get connected callers (clones/worktrees)
-			var callers []CallerInfo
-			if d.heartbeat != nil {
-				callers = d.heartbeat.GetCallers()
-			}
-
-			// get issues from issue tracker
-			var issues []DaemonIssue
-			needsHelp := false
-			if d.issues != nil {
-				issues = d.issues.GetIssues()
-				needsHelp = d.issues.NeedsHelp()
-			}
-
-			// get code index stats
-			var codeDBStats *CodeDBStats
-			if d.codedb != nil {
-				stats := d.codedb.Stats()
-				codeDBStats = &stats
-			}
-
-			// get agent work status
-			var agentWorkStatus *agentwork.AgentWorkStatus
-			if d.agentWorker != nil {
-				s := d.agentWorker.Status()
-				agentWorkStatus = &s
-			}
-
-			// get all workspaces being synced (ledger + team contexts)
-			// keyed by type for flexibility with future workspace types
-			workspaces := make(map[string][]WorkspaceSyncStatus)
-			projectTeamID := ""
-			if registry := d.scheduler.WorkspaceRegistry(); registry != nil {
-				projectTeamID = registry.ProjectTeamID()
-				for _, ws := range registry.GetAllWorkspaces() {
-					wsType := string(ws.Type)
-					// normalize type to match API convention (team_context -> team-context)
-					if wsType == "team_context" {
-						wsType = "team-context"
-					}
-					workspaces[wsType] = append(workspaces[wsType], WorkspaceSyncStatus{
-						ID:             ws.ID,
-						Type:           wsType,
-						Path:           ws.Path,
-						CloneURL:       ws.CloneURL,
-						Exists:         ws.Exists,
-						TeamID:         ws.TeamID,
-						TeamName:       ws.TeamName,
-						TeamSlug:       ws.TeamSlug,
-						LastSync:       ws.ConfigLastSync,
-						LastErr:        ws.LastErr,
-						Syncing:        ws.SyncInProgress,
-						LastGCTime:     ws.LastGCTime,
-						GCIntervalDays: ws.GCIntervalDays,
-					})
-				}
-			}
-
-			return &StatusData{
-				Running:            true,
-				Pid:                os.Getpid(),
-				Version:            Version(),
-				Uptime:             time.Since(d.startTime),
-				WorkspacePath:      workspacePath,
-				LedgerPath:         d.config.LedgerPath,
-				LastSync:           d.scheduler.LastSync(),
-				SyncIntervalRead:   d.config.SyncIntervalRead,
-				RecentErrorCount:   d.scheduler.RecentErrorCount(),
-				LastError:          lastErr,
-				LastErrorTime:      lastErrTimeStr,
-				TotalSyncs:         stats.TotalSyncs,
-				SyncsLastHour:      stats.SyncsLastHour,
-				AvgSyncTime:        stats.AvgDuration,
-				Workspaces:         workspaces,
-				ProjectTeamID:      projectTeamID,
-				TeamContexts:       d.scheduler.TeamContextStatus(),
-				InactivityTimeout:  d.config.InactivityTimeout,
-				TimeSinceActivity:  d.timeSinceLastActivity(),
-				Activity:           activitySummary,
-				AuthenticatedUser:  authUser,
-				NeedsHelp:          needsHelp,
-				Issues:             issues,
-				StartupDurationMs:  d.startupDurationMs.Load(),
-				ThrottleDurationMs: d.throttleDurationMs.Load(),
-				CodeDB:             codeDBStats,
-				AgentWork:          agentWorkStatus,
-				Callers:            callers,
-			}
-		},
-	)
-
-	// set sync handler with progress support (supersedes legacy handler in SetHandlers)
-	d.server.SetSyncHandler(func(progress *ProgressWriter) error {
-		return d.scheduler.SyncWithProgress(progress)
-	})
-
-	// set team sync handler for on-demand team context sync
-	d.server.SetTeamSyncHandler(func(progress *ProgressWriter) error {
-		return d.scheduler.TeamSync(progress)
-	})
-
-	// set sync history handler
-	d.server.SetSyncHistoryHandler(func() []SyncEvent {
-		return d.scheduler.SyncHistory()
-	})
-
-	// set doctor handler for health checks (triggered by ox doctor, etc.)
-	d.server.SetDoctorHandler(func() *DoctorResponse {
-		// trigger anti-entropy (self-healing for missing repos)
-		d.scheduler.TriggerAntiEntropy()
-		resp := &DoctorResponse{
-			AntiEntropyTriggered: true,
-		}
-		// trigger session finalization detection (bypasses hourly cooldown)
-		if d.agentWorker != nil {
-			queued := d.agentWorker.ForceDetect()
-			resp.SessionFinalizeTriggered = true
-			resp.SessionFinalizeQueued = queued
-		}
-		return resp
-	})
-
-	// set trigger_gc handler for forced GC reclone (triggered by ox doctor --gc)
-	d.server.SetTriggerGCHandler(func() *TriggerGCResponse {
-		return d.scheduler.TriggerGC(d.ctx)
-	})
-
-	// set checkout handler for ledger/team context clones
-	d.server.SetCheckoutHandler(func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error) {
-		return d.scheduler.Checkout(payload, progress)
-	})
-
-	// set code index handler for indexing via IPC
-	if d.codedb != nil {
-		d.server.SetCodeIndexHandler(func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) {
-			result, err := d.codedb.Index(d.ctx, payload, progress)
-			if d.telemetry != nil && result != nil {
-				status := "success"
-				if err != nil {
-					status = "error"
-				}
-				d.telemetry.RecordCodeIndexComplete(result, status)
-			}
-			return result, err
-		})
-		d.server.SetCodeStatusHandler(func() *CodeDBStats {
-			stats := d.codedb.Stats()
-			return &stats
-		})
-	}
-
-	// set telemetry handler for CLI events
-	d.server.SetTelemetryHandler(func(payload json.RawMessage) {
-		var p TelemetryPayload
-		if err := json.Unmarshal(payload, &p); err == nil {
-			d.telemetry.RecordFromIPC(p.Event, p.Props)
-		}
-	})
-
-	// set friction handler for UX analytics
-	d.server.SetFrictionHandler(func(payload FrictionPayload) {
-		d.friction.RecordFromIPC(payload)
-	})
-
-	// set session finalize handler for async session upload+finalization
-	d.server.SetSessionFinalizeHandler(func(payload SessionFinalizeIPCPayload) {
-		if d.agentWorker == nil {
-			d.logger.Warn("session_finalize received but agent worker not initialized")
-			return
-		}
-		d.logger.Info("session_finalize received, enqueueing",
-			"session", payload.SessionName,
-			"ledger", payload.LedgerPath,
-		)
-		d.agentWorker.Enqueue(&agentwork.WorkItem{
-			Type:     "session-finalize",
-			Priority: 1, // high priority (vs 10 for doctor-detected)
-			DedupKey: "session-finalize:" + payload.SessionName,
-			Payload: &agentwork.SessionFinalizePayload{
-				SessionDir: filepath.Join(payload.LedgerPath, "sessions", payload.SessionName),
-				RawPath:    filepath.Join(payload.LedgerPath, "sessions", payload.SessionName, "raw.jsonl"),
-				Missing:    []string{"summary.md", "summary.json", "session.html", "session.md"},
-				LedgerPath: payload.LedgerPath,
-			},
-		})
-	})
-
-	// set sessions handler for agent session tracking (deprecated)
-	d.server.SetSessionsHandler(func() []AgentSession {
-		return d.getAgentSessions()
-	})
-
-	// set instances handler for agent instance tracking
-	d.server.SetInstancesHandler(func() []InstanceInfo {
-		return d.getAgentInstances()
-	})
-
-	// set whisper handler for agent whisper queries
-	if d.whisperRegistry != nil {
-		d.server.SetWhispersHandler(func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error) {
-			return d.whisperRegistry.GetWhispers(agentID, attention, topics)
-		})
-	}
-
-	setupDuration := time.Since(startSetup)
-
-	// start telemetry background sender
-	d.telemetry.Start()
-
-	// start friction background sender
-	d.friction.Start()
-	d.telemetry.RecordDaemonStartup()
-
-	d.wg.Add(1)
-	go func() {
-		defer d.wg.Done()
-		if err := d.server.Start(d.ctx); err != nil && !errors.Is(err, context.Canceled) {
-			d.logger.Error("server error", "error", err)
-		}
-	}()
-	d.wg.Add(1)
-	go func() {
-		defer d.wg.Done()
-		d.scheduler.Start(d.ctx)
-	}()
-
-	// start whisper scheduler (periodic sources + prune tick)
-	if d.whisperRegistry != nil {
-		ws := NewWhisperScheduler(d.whisperRegistry, d.logger)
-		ws.RegisterSource(NewActivitySummarySource(d.heartbeat, d.scheduler))
-		ws.Start(d.ctx, &d.wg)
-		ws.RunPrune(d.ctx, &d.wg, 1*time.Hour)
-	}
-
-	// start file watcher if ledger path is set
-	if d.config.LedgerPath != "" {
-		d.watcher = NewWatcher(d.config.LedgerPath, d.config.DebounceWindow, d.logger)
-		d.wg.Add(1)
-		go func() {
-			defer d.wg.Done()
-			d.watcher.Start(d.ctx, func() {
-				d.recordActivity() // file changes = activity
-				d.scheduler.TriggerSync()
-			})
-		}()
-	}
-
-	// start agent work manager (if initialized)
-	if d.agentWorker != nil {
-		d.wg.Add(1)
-		go func() {
-			defer d.wg.Done()
-			d.agentWorker.Start(d.ctx)
-		}()
-	}
-
-	// check code index freshness on startup (non-blocking)
-	if d.codedb != nil {
-		go d.codedb.CheckFreshness(d.ctx)
-	}
-
-	// set activity callback on server (IPC requests = activity)
-	d.server.SetActivityCallback(d.recordActivity)
+	d.startWorkers()
 
 	// record startup timing
 	totalDuration := time.Since(startTotal)
@@ -1028,4 +573,452 @@ func IsStarting() bool {
 	}
 	// on Unix, FindProcess always succeeds; use Signal(0) to check liveness
 	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// initComponents creates and wires all daemon subsystems. Returns setup duration.
+func (d *Daemon) initComponents() time.Duration {
+	startSetup := time.Now()
+
+	// load project endpoint early - needed by friction collector and credential loading
+	var projectEndpoint string
+	if projectCfg, err := config.LoadProjectConfig(d.config.ProjectRoot); err == nil && projectCfg != nil {
+		projectEndpoint = projectCfg.GetEndpoint()
+	}
+
+	// telemetry + friction collectors
+	d.telemetry = NewTelemetryCollector(d.logger)
+	d.startTime = time.Now()
+	d.friction = NewFrictionCollector(d.logger, projectEndpoint)
+
+	// health check + notification infrastructure
+	d.issues = NewIssueTracker()
+
+	// whisper store for persistent agent signal delivery
+	if config.FeatureWhisperEnabled() {
+		repoID := config.GetRepoID(d.config.ProjectRoot)
+		if repoID != "" && projectEndpoint != "" {
+			whisperDBPath := filepath.Join(paths.WhisperDBDir(repoID, projectEndpoint), "whisper.db")
+			ledgerWhisperStore, err := whisperstore.Open(whisperDBPath)
+			if err != nil {
+				d.logger.Warn("failed to open whisper store", "error", err)
+			} else {
+				d.whisperRegistry = NewWhisperRegistry(ledgerWhisperStore, d.logger)
+				d.whisperRegistry.Prune(24 * time.Hour)
+				d.whisperRegistry.EnforceMaxSize(10 * 1024 * 1024) // 10MB
+			}
+		}
+	}
+
+	// heartbeat handler
+	d.heartbeat = NewHeartbeatHandler(d.logger)
+	d.heartbeat.SetActivityCallback(d.recordActivity)
+	d.heartbeat.SetTeamNeededCallback(func(teamID string) {
+		d.logger.Debug("team context needed", "team_id", teamID)
+	})
+	d.heartbeat.SetVersionMismatchCallback(func(cliVersion, daemonVersion string) {
+		d.logger.Info("restarting due to version mismatch",
+			"cli_version", cliVersion,
+			"daemon_version", daemonVersion,
+		)
+		d.mu.Lock()
+		d.restartRequested = true
+		d.mu.Unlock()
+		go d.Stop()
+	})
+	// pre-populate credentials from credential store (cold-start)
+	if creds, err := gitserver.LoadCredentialsForEndpoint(projectEndpoint); err == nil && creds != nil {
+		hbCreds := &HeartbeatCreds{
+			Token:     creds.Token,
+			ServerURL: creds.ServerURL,
+			ExpiresAt: creds.ExpiresAt,
+		}
+		if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil {
+			hbCreds.AuthToken = token.AccessToken
+		}
+		d.heartbeat.SetInitialCredentials(hbCreds)
+	}
+
+	// sync scheduler
+	d.scheduler = NewSyncScheduler(d.config, d.logger)
+
+	// code index manager
+	if d.config.ProjectRoot != "" {
+		d.codedb = NewCodeDBManager(d.config.ProjectRoot, d.logger, d.telemetry)
+		d.heartbeat.SetCallerPathCallback(func(path string) {
+			d.codedb.UpdateProjectRoot(path)
+		})
+	}
+
+	// agent work manager
+	if d.config.LedgerPath != "" {
+		agentWorkSignal := make(chan struct{}, 1)
+		runner := agentwork.NewClaudeRunner(d.logger)
+		configLoader := func() *config.AgentWorkerConfig {
+			cfg, err := config.LoadUserConfig()
+			if err != nil {
+				d.logger.Debug("failed to load user config for agent worker", "error", err)
+				return (&config.AgentWorkerConfig{}).WithDefaults()
+			}
+			awCfg := cfg.GetAgentWorkerConfig()
+			if awCfg == nil {
+				return (&config.AgentWorkerConfig{}).WithDefaults()
+			}
+			return awCfg
+		}
+		d.agentWorker = agentwork.NewManager(runner, d.logger, configLoader, agentWorkSignal, d.config.LedgerPath)
+		sfh := agentwork.NewSessionFinalizeHandler(d.logger)
+		sfh.SetPIDLookup(d.heartbeat.GetAgentPID)
+		sfh.SetLedgerMu(d.scheduler.LedgerMu())
+		awCfg := configLoader()
+		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
+		d.agentWorker.RegisterHandler(sfh)
+		d.agentWorker.SetOnComplete(func(result agentwork.WorkResult) {
+			status := "success"
+			if !result.Success {
+				status = "failed"
+			}
+			d.logger.Info("agent work complete",
+				"type", result.Item.Type,
+				"status", status,
+				"duration", result.Duration,
+			)
+		})
+		d.scheduler.SetAgentWorkSignal(agentWorkSignal)
+	}
+
+	// wire cross-component dependencies
+	d.scheduler.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
+	d.friction.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
+	d.scheduler.SetIssueTracker(d.issues)
+	if d.whisperRegistry != nil {
+		d.scheduler.SetWhisperRegistry(d.whisperRegistry)
+		murmurRelay := NewMurmurRelay(d.whisperRegistry, d.logger)
+		d.scheduler.SetMurmurRelay(murmurRelay)
+	}
+	if d.codedb != nil {
+		d.scheduler.SetCodeDBManager(d.codedb)
+	}
+	if d.config.ProjectRoot != "" {
+		githubSync := NewGitHubSyncManager(d.config.ProjectRoot, d.scheduler.LedgerMu(), d.logger)
+		githubSync.SetIssueTracker(d.issues)
+		if d.codedb != nil {
+			githubSync.SetCodeDBManager(d.codedb)
+		}
+		d.scheduler.SetGitHubSyncManager(githubSync)
+	}
+	d.scheduler.SetTelemetryCallback(func(syncType, operation, status string, duration time.Duration) {
+		if d.telemetry != nil {
+			d.telemetry.RecordSyncComplete(syncType, operation, status, duration, 0)
+		}
+	})
+
+	return time.Since(startSetup)
+}
+
+// startWorkers launches all background goroutines (IPC server, scheduler,
+// whisper, watcher, agent work, code index freshness).
+func (d *Daemon) startWorkers() {
+	d.telemetry.Start()
+	d.friction.Start()
+	d.telemetry.RecordDaemonStartup()
+
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		if err := d.server.Start(d.ctx); err != nil && !errors.Is(err, context.Canceled) {
+			d.logger.Error("server error", "error", err)
+		}
+	}()
+	d.wg.Add(1)
+	go func() {
+		defer d.wg.Done()
+		d.scheduler.Start(d.ctx)
+	}()
+
+	if d.whisperRegistry != nil {
+		ws := NewWhisperScheduler(d.whisperRegistry, d.logger)
+		ws.RegisterSource(NewActivitySummarySource(d.heartbeat, d.scheduler))
+		ws.Start(d.ctx, &d.wg)
+		ws.RunPrune(d.ctx, &d.wg, 1*time.Hour)
+	}
+
+	if d.config.LedgerPath != "" {
+		d.watcher = NewWatcher(d.config.LedgerPath, d.config.DebounceWindow, d.logger)
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.watcher.Start(d.ctx, func() {
+				d.recordActivity()
+				d.scheduler.TriggerSync()
+			})
+		}()
+	}
+
+	if d.agentWorker != nil {
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			d.agentWorker.Start(d.ctx)
+		}()
+	}
+
+	if d.codedb != nil {
+		go d.codedb.CheckFreshness(d.ctx)
+	}
+}
+
+// daemonServiceImpl implements DaemonService on top of *Daemon.
+// All methods guard against nil component fields because the server is created
+// before components finish initializing — connections only arrive after Start()
+// completes, so nil guards are defensive rather than reachable in practice.
+type daemonServiceImpl struct{ d *Daemon }
+
+func (s *daemonServiceImpl) Sync() error {
+	return s.d.scheduler.Sync()
+}
+
+func (s *daemonServiceImpl) SyncWithProgress(progress *ProgressWriter) error {
+	return s.d.scheduler.SyncWithProgress(progress)
+}
+
+func (s *daemonServiceImpl) TeamSync(progress *ProgressWriter) error {
+	return s.d.scheduler.TeamSync(progress)
+}
+
+func (s *daemonServiceImpl) SyncHistory() []SyncEvent {
+	return s.d.scheduler.SyncHistory()
+}
+
+func (s *daemonServiceImpl) Status() *StatusData {
+	lastErr, lastErrTime := s.d.scheduler.LastError()
+	lastErrTimeStr := ""
+	if !lastErrTime.IsZero() {
+		lastErrTimeStr = lastErrTime.Format(time.RFC3339)
+	}
+	stats := s.d.scheduler.SyncStats()
+
+	// prefer most recent caller path from heartbeats (stays fresh across clones)
+	// fall back to config.ProjectRoot (the clone that started the daemon)
+	workspacePath := s.d.config.ProjectRoot
+	if s.d.heartbeat != nil {
+		if callerPath := s.d.heartbeat.LastCallerPath(); callerPath != "" {
+			workspacePath = callerPath
+		}
+	}
+
+	var activitySummary *ActivitySummary
+	if s.d.heartbeat != nil {
+		summary := s.d.heartbeat.GetActivitySummary()
+		activitySummary = &summary
+	}
+
+	var authUser *AuthenticatedUser
+	if s.d.heartbeat != nil {
+		authUser = s.d.heartbeat.GetAuthenticatedUser()
+	}
+
+	var callers []CallerInfo
+	if s.d.heartbeat != nil {
+		callers = s.d.heartbeat.GetCallers()
+	}
+
+	var issues []DaemonIssue
+	needsHelp := false
+	if s.d.issues != nil {
+		issues = s.d.issues.GetIssues()
+		needsHelp = s.d.issues.NeedsHelp()
+	}
+
+	var codeDBStats *CodeDBStats
+	if s.d.codedb != nil {
+		st := s.d.codedb.Stats()
+		codeDBStats = &st
+	}
+
+	var agentWorkStatus *agentwork.AgentWorkStatus
+	if s.d.agentWorker != nil {
+		st := s.d.agentWorker.Status()
+		agentWorkStatus = &st
+	}
+
+	// collect all workspaces being synced, keyed by type
+	workspaces := make(map[string][]WorkspaceSyncStatus)
+	projectTeamID := ""
+	if registry := s.d.scheduler.WorkspaceRegistry(); registry != nil {
+		projectTeamID = registry.ProjectTeamID()
+		for _, ws := range registry.GetAllWorkspaces() {
+			wsType := string(ws.Type)
+			// normalize type to match API convention (team_context -> team-context)
+			if wsType == "team_context" {
+				wsType = "team-context"
+			}
+			workspaces[wsType] = append(workspaces[wsType], WorkspaceSyncStatus{
+				ID:             ws.ID,
+				Type:           wsType,
+				Path:           ws.Path,
+				CloneURL:       ws.CloneURL,
+				Exists:         ws.Exists,
+				TeamID:         ws.TeamID,
+				TeamName:       ws.TeamName,
+				TeamSlug:       ws.TeamSlug,
+				LastSync:       ws.ConfigLastSync,
+				LastErr:        ws.LastErr,
+				Syncing:        ws.SyncInProgress,
+				LastGCTime:     ws.LastGCTime,
+				GCIntervalDays: ws.GCIntervalDays,
+			})
+		}
+	}
+
+	return &StatusData{
+		Running:            true,
+		Pid:                os.Getpid(),
+		Version:            Version(),
+		Uptime:             time.Since(s.d.startTime),
+		WorkspacePath:      workspacePath,
+		LedgerPath:         s.d.config.LedgerPath,
+		LastSync:           s.d.scheduler.LastSync(),
+		SyncIntervalRead:   s.d.config.SyncIntervalRead,
+		RecentErrorCount:   s.d.scheduler.RecentErrorCount(),
+		LastError:          lastErr,
+		LastErrorTime:      lastErrTimeStr,
+		TotalSyncs:         stats.TotalSyncs,
+		SyncsLastHour:      stats.SyncsLastHour,
+		AvgSyncTime:        stats.AvgDuration,
+		Workspaces:         workspaces,
+		ProjectTeamID:      projectTeamID,
+		TeamContexts:       s.d.scheduler.TeamContextStatus(),
+		InactivityTimeout:  s.d.config.InactivityTimeout,
+		TimeSinceActivity:  s.d.timeSinceLastActivity(),
+		Activity:           activitySummary,
+		AuthenticatedUser:  authUser,
+		NeedsHelp:          needsHelp,
+		Issues:             issues,
+		StartupDurationMs:  s.d.startupDurationMs.Load(),
+		ThrottleDurationMs: s.d.throttleDurationMs.Load(),
+		CodeDB:             codeDBStats,
+		AgentWork:          agentWorkStatus,
+		Callers:            callers,
+	}
+}
+
+func (s *daemonServiceImpl) GetErrors() []StoredError {
+	// error store not yet wired; returns nil (handler sends empty array)
+	return nil
+}
+
+func (s *daemonServiceImpl) Sessions() []AgentSession {
+	return s.d.getAgentSessions()
+}
+
+func (s *daemonServiceImpl) Instances() []InstanceInfo {
+	return s.d.getAgentInstances()
+}
+
+func (s *daemonServiceImpl) Whispers(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error) {
+	if s.d.whisperRegistry == nil {
+		return nil, nil
+	}
+	return s.d.whisperRegistry.GetWhispers(agentID, attention, topics)
+}
+
+func (s *daemonServiceImpl) CodeStatus() *CodeDBStats {
+	if s.d.codedb == nil {
+		return nil
+	}
+	st := s.d.codedb.Stats()
+	return &st
+}
+
+func (s *daemonServiceImpl) Stop() {
+	s.d.Stop() //nolint:errcheck
+}
+
+func (s *daemonServiceImpl) Checkout(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error) {
+	return s.d.scheduler.Checkout(payload, progress)
+}
+
+func (s *daemonServiceImpl) MarkErrors(ids []string) {
+	// error store not yet wired; no-op
+	_ = ids
+}
+
+func (s *daemonServiceImpl) TriggerGC() *TriggerGCResponse {
+	return s.d.scheduler.TriggerGC(s.d.ctx)
+}
+
+func (s *daemonServiceImpl) CodeIndex(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) {
+	if s.d.codedb == nil {
+		return nil, nil
+	}
+	result, err := s.d.codedb.Index(s.d.ctx, payload, progress)
+	if s.d.telemetry != nil && result != nil {
+		status := "success"
+		if err != nil {
+			status = "error"
+		}
+		s.d.telemetry.RecordCodeIndexComplete(result, status)
+	}
+	return result, err
+}
+
+func (s *daemonServiceImpl) Doctor() *DoctorResponse {
+	// trigger anti-entropy (self-healing for missing repos)
+	s.d.scheduler.TriggerAntiEntropy()
+	resp := &DoctorResponse{AntiEntropyTriggered: true}
+	// trigger session finalization detection (bypasses hourly cooldown)
+	if s.d.agentWorker != nil {
+		queued := s.d.agentWorker.ForceDetect()
+		resp.SessionFinalizeTriggered = true
+		resp.SessionFinalizeQueued = queued
+	}
+	return resp
+}
+
+func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
+	if s.d.agentWorker == nil {
+		s.d.logger.Warn("session_finalize received but agent worker not initialized")
+		return
+	}
+	s.d.logger.Info("session_finalize received, enqueueing",
+		"session", payload.SessionName,
+		"ledger", payload.LedgerPath,
+	)
+	s.d.agentWorker.Enqueue(&agentwork.WorkItem{
+		Type:     "session-finalize",
+		Priority: 1, // high priority (vs 10 for doctor-detected)
+		DedupKey: "session-finalize:" + payload.SessionName,
+		Payload: &agentwork.SessionFinalizePayload{
+			SessionDir: filepath.Join(payload.LedgerPath, "sessions", payload.SessionName),
+			RawPath:    filepath.Join(payload.LedgerPath, "sessions", payload.SessionName, "raw.jsonl"),
+			Missing:    []string{"summary.md", "summary.json", "session.html", "session.md"},
+			LedgerPath: payload.LedgerPath,
+		},
+	})
+}
+
+func (s *daemonServiceImpl) Activity() {
+	s.d.recordActivity()
+}
+
+func (s *daemonServiceImpl) Heartbeat(callerID string, payload json.RawMessage) {
+	if s.d.heartbeat != nil {
+		s.d.heartbeat.Handle(callerID, payload)
+	}
+}
+
+func (s *daemonServiceImpl) Telemetry(payload json.RawMessage) {
+	if s.d.telemetry == nil {
+		return
+	}
+	var p TelemetryPayload
+	if err := json.Unmarshal(payload, &p); err == nil {
+		s.d.telemetry.RecordFromIPC(p.Event, p.Props)
+	}
+}
+
+func (s *daemonServiceImpl) Friction(payload FrictionPayload) {
+	if s.d.friction != nil {
+		s.d.friction.RecordFromIPC(payload)
+	}
 }

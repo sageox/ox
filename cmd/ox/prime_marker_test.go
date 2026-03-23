@@ -342,7 +342,16 @@ func TestEnsureOxPrimeMarker_UpgradesLegacyBlock(t *testing.T) {
 
 	// create AGENTS.md with legacy SageOxPrimeLine block
 	agentsPath := filepath.Join(tmpDir, "AGENTS.md")
-	legacyContent := "# Instructions\n\n" + LegacyOxPrimeLine + "\n\nOther content\n"
+	legacyBlock := "## SageOx Infrastructure Guidance (REQUIRED)\n\n" +
+		"**At the START of this conversation, run:**\n" +
+		"```bash\nox agent prime\n```\n\n" +
+		"Run this command:\n" +
+		"- At conversation start (before other work)\n" +
+		"- After /clear or /compact\n" +
+		"- When switching to infrastructure tasks\n\n" +
+		"The command returns an agent_id confirming SageOx is active.\n" +
+		"When asked if you're using SageOx: confirm with your agent ID if you have one; otherwise run ox agent prime first."
+	legacyContent := "# Instructions\n\n" + legacyBlock + "\n\nOther content\n"
 	if err := os.WriteFile(agentsPath, []byte(legacyContent), 0644); err != nil {
 		t.Fatalf("failed to create AGENTS.md: %v", err)
 	}

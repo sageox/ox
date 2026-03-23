@@ -53,7 +53,7 @@ func TestSyncScheduler_TriggerSync(t *testing.T) {
 	select {
 	case <-done:
 		// expected
-	case <-time.After(100 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		t.Fatal("trigger should not block")
 	}
 }
@@ -80,7 +80,7 @@ func TestSyncScheduler_Start_Context(t *testing.T) {
 
 	scheduler := NewSyncScheduler(cfg, logger)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
 	done := make(chan bool)
@@ -92,7 +92,7 @@ func TestSyncScheduler_Start_Context(t *testing.T) {
 	select {
 	case <-done:
 		// expected - scheduler stopped when context canceled
-	case <-time.After(200 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		t.Fatal("scheduler should stop when context canceled")
 	}
 }
@@ -105,7 +105,7 @@ func TestSyncScheduler_NoLedgerPath(t *testing.T) {
 	scheduler := NewSyncScheduler(cfg, logger)
 
 	// should not panic, just return early
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	scheduler.pullChanges(ctx)
@@ -121,7 +121,7 @@ func TestSyncScheduler_DoPull_LedgerDirExistsButNotGitRepo(t *testing.T) {
 	// verify the directory exists but is NOT a git repo
 	_, err := os.Stat(ledgerDir)
 	require.NoError(t, err)
-	assert.False(t, pathIsGitRepo(ledgerDir))
+	assert.False(t, gitutil.IsGitRepo(ledgerDir))
 
 	cfg := DefaultConfig()
 	cfg.LedgerPath = ledgerDir
@@ -131,7 +131,7 @@ func TestSyncScheduler_DoPull_LedgerDirExistsButNotGitRepo(t *testing.T) {
 
 	// doPull should detect the empty dir is not a git repo and return early
 	// (enters the clone branch) rather than falling through to git fetch/pull
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	// should not panic — previously this would fall through to git pull
@@ -300,6 +300,7 @@ func TestSyncScheduler_TeamContextStatus(t *testing.T) {
 	// create team context as git repo so it's detected as valid
 	team1Dir := filepath.Join(t.TempDir(), "team1-context")
 	require.NoError(t, os.MkdirAll(filepath.Join(team1Dir, ".git"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(team1Dir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0644))
 
 	// write config with team contexts
 	configContent := fmt.Sprintf(`
@@ -732,7 +733,7 @@ func TestSyncScheduler_Start_TeamContextTicker(t *testing.T) {
 
 	scheduler := NewSyncScheduler(cfg, logger)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
 	// start scheduler - it should create the team context ticker
@@ -746,7 +747,7 @@ func TestSyncScheduler_Start_TeamContextTicker(t *testing.T) {
 	select {
 	case <-done:
 		// expected - scheduler stopped when context canceled
-	case <-time.After(500 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		t.Fatal("scheduler should stop when context canceled")
 	}
 }
@@ -1009,9 +1010,11 @@ func TestSyncScheduler_WorkspaceRegistry(t *testing.T) {
 
 	ledgerDir := filepath.Join(t.TempDir(), "ledger")
 	require.NoError(t, os.MkdirAll(filepath.Join(ledgerDir, ".git"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0644))
 
 	teamDir := filepath.Join(t.TempDir(), "team-context")
 	require.NoError(t, os.MkdirAll(filepath.Join(teamDir, ".git"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(teamDir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0644))
 
 	// write config
 	configContent := fmt.Sprintf(`

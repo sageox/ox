@@ -12,6 +12,7 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -222,7 +223,7 @@ func (r *WorkspaceRegistry) rebuildFromConfigLocked(cfg *config.LocalConfig) {
 		existing.Path = cfg.Ledger.Path
 		existing.Endpoint = r.endpoint
 		existing.ConfigLastSync = cfg.Ledger.LastSync
-		existing.Exists = pathIsGitRepo(cfg.Ledger.Path)
+		existing.Exists = gitutil.IsGitRepo(cfg.Ledger.Path)
 
 		// backfill: if repo exists but was never marked as synced, set it now
 		// (fixes repos cloned before UpdateConfigLastSync was added to the pull path)
@@ -245,7 +246,7 @@ func (r *WorkspaceRegistry) rebuildFromConfigLocked(cfg *config.LocalConfig) {
 		// this happens when the ledger URL was fetched via InitializeLedger()
 		// but config.local.toml doesn't have the ledger entry yet
 		seen[r.ledger.ID] = true
-		r.ledger.Exists = pathIsGitRepo(r.ledger.Path)
+		r.ledger.Exists = gitutil.IsGitRepo(r.ledger.Path)
 		slog.Debug("workspace registry: preserving API-initialized ledger",
 			"path", r.ledger.Path,
 			"clone_url", r.ledger.CloneURL,
@@ -278,7 +279,7 @@ func (r *WorkspaceRegistry) rebuildFromConfigLocked(cfg *config.LocalConfig) {
 		existing.Path = tc.Path
 		existing.Endpoint = r.endpoint
 		existing.ConfigLastSync = tc.LastSync
-		existing.Exists = tc.Path != "" && pathIsGitRepo(tc.Path)
+		existing.Exists = tc.Path != "" && gitutil.IsGitRepo(tc.Path)
 
 		// populate clone URL from credentials (match by team ID or name)
 		if creds != nil {
@@ -337,7 +338,7 @@ func (r *WorkspaceRegistry) rebuildFromConfigLocked(cfg *config.LocalConfig) {
 			// use centralized path: ~/.sageox/data/<endpoint>/teams/<team_id>/
 			existing.Path = paths.TeamContextDir(teamID, r.endpoint)
 			existing.CloneURL = repo.URL
-			existing.Exists = pathIsGitRepo(existing.Path)
+			existing.Exists = gitutil.IsGitRepo(existing.Path)
 
 			slog.Debug("workspace registry: team context added",
 				"team_id", existing.TeamID,
@@ -357,18 +358,6 @@ func (r *WorkspaceRegistry) rebuildFromConfigLocked(cfg *config.LocalConfig) {
 			delete(r.workspaces, id)
 		}
 	}
-}
-
-// pathIsGitRepo checks if a path exists on disk AND is a valid git repository.
-// For workspaces, "exists" means "is a valid git repo" not just "directory exists".
-// This is critical for self-healing: a directory without .git should be recloned.
-func pathIsGitRepo(path string) bool {
-	if path == "" {
-		return false
-	}
-	gitDir := filepath.Join(path, ".git")
-	_, err := os.Stat(gitDir)
-	return err == nil
 }
 
 // InvalidateConfigCache forces the next LoadFromConfig to reload from disk.
@@ -558,7 +547,7 @@ func (r *WorkspaceRegistry) RefreshExists() {
 	defer r.mu.Unlock()
 
 	for _, ws := range r.workspaces {
-		ws.Exists = pathIsGitRepo(ws.Path)
+		ws.Exists = gitutil.IsGitRepo(ws.Path)
 	}
 }
 
@@ -727,7 +716,7 @@ func (r *WorkspaceRegistry) InitializeLedger(cloneURL, projectRoot string) {
 		// fix empty path if it was somehow unset (ensures config.local.toml gets correct path)
 		if r.ledger.Path == "" {
 			r.ledger.Path = ledgerPath
-			r.ledger.Exists = pathIsGitRepo(ledgerPath)
+			r.ledger.Exists = gitutil.IsGitRepo(ledgerPath)
 		}
 		return
 	}
@@ -739,7 +728,7 @@ func (r *WorkspaceRegistry) InitializeLedger(cloneURL, projectRoot string) {
 		Path:     ledgerPath,
 		CloneURL: cloneURL,
 		Endpoint: r.endpoint,
-		Exists:   pathIsGitRepo(ledgerPath),
+		Exists:   gitutil.IsGitRepo(ledgerPath),
 	}
 	r.workspaces[id] = r.ledger
 }
@@ -916,7 +905,7 @@ func (r *WorkspaceRegistry) RegisterTeamContextsFromAPI(teamContexts []api.RepoD
 			Path:     paths.TeamContextDir(tc.TeamID, r.endpoint),
 			CloneURL: tc.RepoURL,
 		}
-		ws.Exists = pathIsGitRepo(ws.Path)
+		ws.Exists = gitutil.IsGitRepo(ws.Path)
 		r.workspaces[id] = ws
 	}
 }

@@ -69,7 +69,7 @@ func checkAgentsIntegrationWithFix(fix bool) checkResult {
 	files := []string{"AGENTS.md", "CLAUDE.md", ".copilot-instructions.md"}
 
 	// legacy fallback: check for old multi-line block or "ox agent prime" patterns
-	legacyPatterns := []string{LegacyOxPrimeLine, "ox agent prime", "ox prime"}
+	legacyPatterns := []string{"## SageOx Infrastructure Guidance (REQUIRED)", "ox agent prime", "ox prime"}
 	for _, file := range files {
 		filePath := filepath.Join(gitRoot, file)
 		if content, err := os.ReadFile(filePath); err == nil {

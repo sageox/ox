@@ -355,55 +355,6 @@ func TestProjectConfig_OrgTeamProject_Omitempty(t *testing.T) {
 	assert.True(t, exists, "expected update_frequency_hours to be present")
 }
 
-// TestLoadProjectConfig_MigratesLegacyEndpointFields tests that old configs with
-// api_base_url and web_base_url are migrated to the new endpoint field.
-// TODO: Remove after 2026-01-31 when legacy field support is removed
-func TestLoadProjectConfig_MigratesLegacyEndpointFields(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	RequireSageoxDir(t, tmpDir)
-
-	// write config with legacy api_base_url field (no endpoint field)
-	legacyConfig := map[string]any{
-		"config_version":         "2",
-		"api_base_url":           "https://legacy.example.com",
-		"web_base_url":           "https://web.example.com",
-		"update_frequency_hours": 24,
-	}
-	data, err := json.MarshalIndent(legacyConfig, "", "  ")
-	require.NoError(t, err, "failed to marshal legacy config")
-	configPath := filepath.Join(tmpDir, sageoxDir, projectConfigFilename)
-	require.NoError(t, os.WriteFile(configPath, data, 0600), "failed to write legacy config")
-
-	// load config - should trigger migration
-	cfg, err := LoadProjectConfig(tmpDir)
-	require.NoError(t, err, "failed to load config")
-
-	// verify endpoint was migrated from api_base_url
-	assert.Equal(t, "https://legacy.example.com", cfg.Endpoint, "expected Endpoint to be migrated from api_base_url")
-
-	// verify legacy fields were cleared
-	assert.Empty(t, cfg.APIBaseURL, "expected APIBaseURL to be cleared after migration")
-	assert.Empty(t, cfg.WebBaseURL, "expected WebBaseURL to be cleared after migration")
-
-	// verify the file was updated with migrated values
-	reloadedData, err := os.ReadFile(configPath)
-	require.NoError(t, err, "failed to read migrated config")
-
-	var reloadedJSON map[string]any
-	require.NoError(t, json.Unmarshal(reloadedData, &reloadedJSON), "failed to unmarshal migrated config")
-
-	// new endpoint field should be present
-	endpoint, ok := reloadedJSON["endpoint"].(string)
-	assert.True(t, ok && endpoint == "https://legacy.example.com", "expected endpoint field in saved config")
-
-	// legacy fields should be absent (omitempty)
-	_, exists := reloadedJSON["api_base_url"]
-	assert.False(t, exists, "expected api_base_url to be omitted after migration")
-	_, exists = reloadedJSON["web_base_url"]
-	assert.False(t, exists, "expected web_base_url to be omitted after migration")
-}
 
 // TestSaveProjectConfig_NormalizesEndpoint tests that saving a config with a
 // prefixed endpoint normalizes it before writing to disk.
@@ -483,62 +434,6 @@ func TestSaveAndLoadProjectConfig_EndpointRoundTrip(t *testing.T) {
 	assert.Equal(t, "https://sageox.ai", loaded2.Endpoint, "endpoint should be stable after round-trip")
 }
 
-// TestLoadProjectConfig_MigratesLegacyWithPrefixedAPIBaseURL tests that legacy migration
-// normalizes the endpoint when migrating from api_base_url.
-func TestLoadProjectConfig_MigratesLegacyWithPrefixedAPIBaseURL(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	RequireSageoxDir(t, tmpDir)
-
-	// write config with prefixed legacy api_base_url
-	legacyConfig := map[string]any{
-		"config_version":         CurrentConfigVersion,
-		"api_base_url":           "https://api.staging.sageox.ai",
-		"web_base_url":           "https://web.staging.sageox.ai",
-		"update_frequency_hours": 24,
-	}
-	data, err := json.MarshalIndent(legacyConfig, "", "  ")
-	require.NoError(t, err, "failed to marshal legacy config")
-	configPath := filepath.Join(tmpDir, sageoxDir, projectConfigFilename)
-	require.NoError(t, os.WriteFile(configPath, data, 0600), "failed to write legacy config")
-
-	// load should migrate and normalize
-	cfg, err := LoadProjectConfig(tmpDir)
-	require.NoError(t, err, "failed to load config")
-
-	assert.Equal(t, "https://staging.sageox.ai", cfg.Endpoint,
-		"migrated endpoint should have api. prefix stripped")
-	assert.Empty(t, cfg.APIBaseURL, "legacy field should be cleared")
-}
-
-// TestLoadProjectConfig_NoMigrationWhenEndpointSet tests that migration doesn't
-// happen when the new endpoint field is already set.
-func TestLoadProjectConfig_NoMigrationWhenEndpointSet(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-
-	RequireSageoxDir(t, tmpDir)
-
-	// write config with both endpoint and legacy fields (endpoint takes precedence)
-	configWithBoth := map[string]any{
-		"config_version":         "2",
-		"endpoint":               "https://new.example.com",
-		"api_base_url":           "https://old.example.com", // should be ignored
-		"update_frequency_hours": 24,
-	}
-	data, err := json.MarshalIndent(configWithBoth, "", "  ")
-	require.NoError(t, err, "failed to marshal config")
-	configPath := filepath.Join(tmpDir, sageoxDir, projectConfigFilename)
-	require.NoError(t, os.WriteFile(configPath, data, 0600), "failed to write config")
-
-	// load config - should NOT trigger migration since endpoint is set
-	cfg, err := LoadProjectConfig(tmpDir)
-	require.NoError(t, err, "failed to load config")
-
-	// endpoint should be the new value, not migrated from api_base_url
-	assert.Equal(t, "https://new.example.com", cfg.Endpoint, "expected Endpoint to be preserved")
-}
 
 func TestFindProjectRoot_OxProjectRootEnv(t *testing.T) {
 	t.Run("overrides cwd discovery", func(t *testing.T) {

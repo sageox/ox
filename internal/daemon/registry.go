@@ -77,6 +77,14 @@ func (r *Registry) Save() error {
 }
 
 // Register adds or updates a daemon entry.
+//
+// Known race: there is a TOCTOU window between the in-memory map update
+// (protected by r.mu) and the disk write (protected by the package-level
+// registryMu). Two daemon processes calling Register simultaneously could
+// each read a stale on-disk snapshot, causing one entry to be lost.
+// This is acceptable because the registry is best-effort: a lost entry
+// re-registers on the next heartbeat, and adding flock-based file locking
+// would introduce disproportionate complexity for this failure mode.
 func (r *Registry) Register(info DaemonInfo) error {
 	r.mu.Lock()
 	r.Daemons[info.WorkspaceID] = info

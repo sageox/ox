@@ -517,16 +517,6 @@ type RepoMarkerData struct {
 	RepoID   string `json:"repo_id"`
 	RepoSalt string `json:"repo_salt"`
 	Endpoint string `json:"endpoint"`
-	// TODO: Remove after 2026-01-31 - legacy field support
-	APIEndpoint string `json:"api_endpoint"` // deprecated: use Endpoint
-}
-
-// GetEndpoint returns the endpoint, preferring new field over legacy
-func (m *RepoMarkerData) GetEndpoint() string {
-	if m.Endpoint != "" {
-		return m.Endpoint
-	}
-	return m.APIEndpoint
 }
 
 // ReadFirstRepoMarker reads the first .repo_* marker file found in the sageox directory.

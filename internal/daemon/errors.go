@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -84,14 +85,18 @@ func (e *ErrorStore) Add(err StoredError) {
 				err.Timestamp = existing.Timestamp
 			}
 			e.errors[i] = err
-			_ = e.saveUnlocked()
+			if saveErr := e.saveUnlocked(); saveErr != nil {
+				slog.Debug("error store save failed", "err", saveErr)
+			}
 			return
 		}
 	}
 
 	// add new error
 	e.errors = append(e.errors, err)
-	_ = e.saveUnlocked()
+	if saveErr := e.saveUnlocked(); saveErr != nil {
+		slog.Debug("error store save failed", "err", saveErr)
+	}
 }
 
 // GetUnviewed returns all errors that haven't been viewed.
@@ -141,7 +146,9 @@ func (e *ErrorStore) MarkViewed(id string) {
 	for i := range e.errors {
 		if e.errors[i].ID == id {
 			e.errors[i].Viewed = true
-			_ = e.saveUnlocked()
+			if saveErr := e.saveUnlocked(); saveErr != nil {
+				slog.Debug("error store save failed", "err", saveErr)
+			}
 			return
 		}
 	}
@@ -161,7 +168,9 @@ func (e *ErrorStore) MarkAllViewed() {
 		}
 	}
 	if changed {
-		_ = e.saveUnlocked()
+		if saveErr := e.saveUnlocked(); saveErr != nil {
+			slog.Debug("error store save failed", "err", saveErr)
+		}
 	}
 }
 
@@ -181,7 +190,9 @@ func (e *ErrorStore) Cleanup(maxAge time.Duration) {
 
 	if len(remaining) != len(e.errors) {
 		e.errors = remaining
-		_ = e.saveUnlocked()
+		if saveErr := e.saveUnlocked(); saveErr != nil {
+			slog.Debug("error store save failed", "err", saveErr)
+		}
 	}
 }
 
@@ -192,7 +203,9 @@ func (e *ErrorStore) Clear() {
 	defer e.mu.Unlock()
 
 	e.errors = e.errors[:0]
-	_ = e.saveUnlocked()
+	if saveErr := e.saveUnlocked(); saveErr != nil {
+		slog.Debug("error store save failed", "err", saveErr)
+	}
 }
 
 // Count returns the total number of errors.

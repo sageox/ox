@@ -479,45 +479,306 @@ func (r *MessageRouter) Handle(s *Server, msg Message, conn net.Conn) (HandlerRe
 	return handler(s, msg, conn), true
 }
 
+// DaemonService is the interface the IPC server calls for all daemon operations.
+// Grouping methods by concern makes it easy to see what each new IPC message needs.
+type DaemonService interface {
+	// sync operations
+	Sync() error
+	SyncWithProgress(progress *ProgressWriter) error
+	TeamSync(progress *ProgressWriter) error
+	SyncHistory() []SyncEvent
+
+	// status / query operations
+	Status() *StatusData
+	GetErrors() []StoredError
+	Sessions() []AgentSession // deprecated: use Instances
+	Instances() []InstanceInfo
+	Whispers(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
+	CodeStatus() *CodeDBStats
+
+	// mutation operations
+	Stop()
+	Checkout(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error)
+	MarkErrors(ids []string)
+	TriggerGC() *TriggerGCResponse
+	CodeIndex(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)
+	Doctor() *DoctorResponse
+	SessionFinalize(payload SessionFinalizeIPCPayload)
+
+	// fire-and-forget operations
+	Activity()
+	Heartbeat(callerID string, payload json.RawMessage)
+	Telemetry(payload json.RawMessage)
+	Friction(payload FrictionPayload)
+}
+
+// CallbackService implements DaemonService using individual callback functions.
+// It lets callers wire handlers incrementally via Set*Handler methods,
+// which is useful in tests and during staged daemon startup.
+type CallbackService struct {
+	mu sync.Mutex
+
+	onSync             func() error
+	onSyncWithProgress func(progress *ProgressWriter) error
+	onTeamSync         func(progress *ProgressWriter) error
+	onStop             func()
+	onStatus           func() *StatusData
+	onActivity         func()
+	onHeartbeat        func(callerID string, payload json.RawMessage)
+	onCheckout         func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error)
+	onTelemetry        func(payload json.RawMessage)
+	onFriction         func(payload FrictionPayload)
+	onSessionFinalize  func(payload SessionFinalizeIPCPayload)
+	onGetErrors        func() []StoredError
+	onMarkErrors       func(ids []string)
+	onSessions         func() []AgentSession
+	onInstances        func() []InstanceInfo
+	onSyncHistory      func() []SyncEvent
+	onDoctor           func() *DoctorResponse
+	onTriggerGC        func() *TriggerGCResponse
+	onCodeIndex        func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)
+	onCodeStatus       func() *CodeDBStats
+	onWhispers         func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
+}
+
+func (c *CallbackService) Sync() error {
+	c.mu.Lock()
+	fn := c.onSync
+	c.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (c *CallbackService) SyncWithProgress(progress *ProgressWriter) error {
+	c.mu.Lock()
+	fn := c.onSyncWithProgress
+	c.mu.Unlock()
+	if fn != nil {
+		return fn(progress)
+	}
+	return nil
+}
+
+func (c *CallbackService) TeamSync(progress *ProgressWriter) error {
+	c.mu.Lock()
+	fn := c.onTeamSync
+	c.mu.Unlock()
+	if fn != nil {
+		return fn(progress)
+	}
+	return nil
+}
+
+func (c *CallbackService) SyncHistory() []SyncEvent {
+	c.mu.Lock()
+	fn := c.onSyncHistory
+	c.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (c *CallbackService) Status() *StatusData {
+	c.mu.Lock()
+	fn := c.onStatus
+	c.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (c *CallbackService) GetErrors() []StoredError {
+	c.mu.Lock()
+	fn := c.onGetErrors
+	c.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (c *CallbackService) Sessions() []AgentSession {
+	c.mu.Lock()
+	fn := c.onSessions
+	c.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (c *CallbackService) Instances() []InstanceInfo {
+	c.mu.Lock()
+	fn := c.onInstances
+	c.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (c *CallbackService) Whispers(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error) {
+	c.mu.Lock()
+	fn := c.onWhispers
+	c.mu.Unlock()
+	if fn != nil {
+		return fn(agentID, attention, topics)
+	}
+	return nil, nil
+}
+
+func (c *CallbackService) CodeStatus() *CodeDBStats {
+	c.mu.Lock()
+	fn := c.onCodeStatus
+	c.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (c *CallbackService) Stop() {
+	c.mu.Lock()
+	fn := c.onStop
+	c.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+func (c *CallbackService) Checkout(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error) {
+	c.mu.Lock()
+	fn := c.onCheckout
+	c.mu.Unlock()
+	if fn != nil {
+		return fn(payload, progress)
+	}
+	return nil, nil
+}
+
+func (c *CallbackService) MarkErrors(ids []string) {
+	c.mu.Lock()
+	fn := c.onMarkErrors
+	c.mu.Unlock()
+	if fn != nil {
+		fn(ids)
+	}
+}
+
+func (c *CallbackService) TriggerGC() *TriggerGCResponse {
+	c.mu.Lock()
+	fn := c.onTriggerGC
+	c.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (c *CallbackService) CodeIndex(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) {
+	c.mu.Lock()
+	fn := c.onCodeIndex
+	c.mu.Unlock()
+	if fn != nil {
+		return fn(payload, progress)
+	}
+	return nil, nil
+}
+
+func (c *CallbackService) Doctor() *DoctorResponse {
+	c.mu.Lock()
+	fn := c.onDoctor
+	c.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (c *CallbackService) SessionFinalize(payload SessionFinalizeIPCPayload) {
+	c.mu.Lock()
+	fn := c.onSessionFinalize
+	c.mu.Unlock()
+	if fn != nil {
+		fn(payload)
+	}
+}
+
+func (c *CallbackService) Activity() {
+	c.mu.Lock()
+	fn := c.onActivity
+	c.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
+func (c *CallbackService) Heartbeat(callerID string, payload json.RawMessage) {
+	c.mu.Lock()
+	fn := c.onHeartbeat
+	c.mu.Unlock()
+	if fn != nil {
+		fn(callerID, payload)
+	}
+}
+
+func (c *CallbackService) Telemetry(payload json.RawMessage) {
+	c.mu.Lock()
+	fn := c.onTelemetry
+	c.mu.Unlock()
+	if fn != nil {
+		fn(payload)
+	}
+}
+
+func (c *CallbackService) Friction(payload FrictionPayload) {
+	c.mu.Lock()
+	fn := c.onFriction
+	c.mu.Unlock()
+	if fn != nil {
+		fn(payload)
+	}
+}
+
 // Server handles IPC requests from clients.
 type Server struct {
-	logger   *slog.Logger
+	logger  *slog.Logger
+	svc     *CallbackService // mutable callback adapter; non-nil when created via NewServer
+	service DaemonService    // active service; set to svc by default, overridable via NewServerWithService
 	listener net.Listener
 	router   *MessageRouter
 	mu       sync.Mutex
 	connWg   sync.WaitGroup // tracks active connection handler goroutines
-	connSem  chan struct{}  // semaphore for connection limit
-
-	// callbacks for handling messages
-	onSync             func() error                                                                       // simple sync (backward compat)
-	onSyncWithProgress func(progress *ProgressWriter) error                                               // sync with progress
-	onTeamSync         func(progress *ProgressWriter) error                                               // team context sync with progress
-	onStop             func()                                                                             //
-	onStatus           func() *StatusData                                                                 //
-	onActivity         func()                                                                             // called on any IPC activity
-	onHeartbeat        func(callerID string, payload json.RawMessage)                                     //
-	onCheckout         func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error)   //
-	onTelemetry        func(payload json.RawMessage)                                                      // fire-and-forget telemetry
-	onFriction         func(payload FrictionPayload)                                                      // fire-and-forget friction event
-	onSessionFinalize  func(payload SessionFinalizeIPCPayload)                                            // fire-and-forget session finalize
-	onGetErrors        func() []StoredError                                                               // get unviewed errors
-	onMarkErrors       func(ids []string)                                                                 // mark errors as viewed
-	onSessions         func() []AgentSession                                                              // get active agent sessions (deprecated)
-	onInstances        func() []InstanceInfo                                                              // get active agent instances
-	onSyncHistory      func() []SyncEvent                                                                 // get sync history
-	onDoctor           func() *DoctorResponse                                                             // trigger health checks
-	onTriggerGC        func() *TriggerGCResponse                                                          // force GC reclone
-	onCodeIndex        func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) // index local code
-	onCodeStatus       func() *CodeDBStats                                                                // get code index stats
-	onWhispers         func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
+	connSem  chan struct{}   // semaphore for connection limit
 
 	startTime time.Time
 }
 
-// NewServer creates a new IPC server.
+// NewServer creates a new IPC server with a mutable CallbackService.
+// Handlers are wired incrementally via Set*Handler methods.
 func NewServer(logger *slog.Logger) *Server {
+	svc := &CallbackService{}
 	s := &Server{
 		logger:    logger,
+		svc:       svc,
+		service:   svc,
+		startTime: time.Now(),
+		connSem:   make(chan struct{}, maxConcurrentConnections),
+	}
+	s.router = s.buildRouter()
+	return s
+}
+
+// NewServerWithService creates an IPC server backed by an explicit DaemonService.
+// Use this when all operations are available upfront (e.g., in daemon.go).
+func NewServerWithService(logger *slog.Logger, service DaemonService) *Server {
+	s := &Server{
+		logger:    logger,
+		service:   service,
 		startTime: time.Now(),
 		connSem:   make(chan struct{}, maxConcurrentConnections),
 	}
@@ -554,542 +815,170 @@ func (s *Server) buildRouter() *MessageRouter {
 	return router
 }
 
-// Handler implementations
-
-// marshalResponse creates a success response with marshaled data.
-// If marshaling fails, returns an error response instead of Success: true with nil data.
-func marshalResponse(v any) *Response {
-	data, err := json.Marshal(v)
-	if err != nil {
-		// this should never happen for our well-typed structs, but handle defensively
-		return &Response{Success: false, Error: fmt.Sprintf("marshal error: %v", err)}
-	}
-	return &Response{Success: true, Data: data}
-}
-
-func handlePing(_ *Server, _ Message, _ net.Conn) HandlerResult {
-	return HandlerResult{
-		Response: &Response{Success: true, Data: json.RawMessage(`"pong"`)},
-	}
-}
-
-func handleVersion(_ *Server, _ Message, _ net.Conn) HandlerResult {
-	return HandlerResult{
-		Response: &Response{Success: true, Data: json.RawMessage(`"1.0.0"`)},
-	}
-}
-
-func handleStatus(s *Server, _ Message, _ net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onStatus
-	s.mu.Unlock()
-
-	if handler != nil {
-		status := handler()
-		return HandlerResult{Response: marshalResponse(status)}
-	}
-	return HandlerResult{
-		Response: &Response{Success: true, Data: json.RawMessage(`{}`)},
-	}
-}
-
-func handleSyncHistory(s *Server, _ Message, _ net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onSyncHistory
-	s.mu.Unlock()
-
-	if handler != nil {
-		history := handler()
-		return HandlerResult{Response: marshalResponse(history)}
-	}
-	return HandlerResult{
-		Response: &Response{Success: true, Data: json.RawMessage(`[]`)},
-	}
-}
-
-func handleSync(s *Server, _ Message, conn net.Conn) HandlerResult {
-	s.mu.Lock()
-	progressHandler := s.onSyncWithProgress
-	legacyHandler := s.onSync
-	s.mu.Unlock()
-
-	var resp Response
-	if progressHandler != nil {
-		pw := &ProgressWriter{conn: conn}
-		if err := progressHandler(pw); err != nil {
-			resp = Response{Success: false, Error: err.Error()}
-		} else {
-			resp = Response{Success: true}
-		}
-	} else if legacyHandler != nil {
-		if err := legacyHandler(); err != nil {
-			resp = Response{Success: false, Error: err.Error()}
-		} else {
-			resp = Response{Success: true}
-		}
-	} else {
-		resp = Response{Success: false, Error: "sync handler not set"}
-	}
-
-	return HandlerResult{Response: &resp}
-}
-
-func handleTeamSync(s *Server, _ Message, conn net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onTeamSync
-	s.mu.Unlock()
-
-	var resp Response
-	if handler != nil {
-		pw := &ProgressWriter{conn: conn}
-		if err := handler(pw); err != nil {
-			resp = Response{Success: false, Error: err.Error()}
-		} else {
-			resp = Response{Success: true}
-		}
-	} else {
-		resp = Response{Success: false, Error: "team sync handler not set"}
-	}
-
-	return HandlerResult{Response: &resp}
-}
-
-func handleStop(s *Server, _ Message, conn net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onStop
-	s.mu.Unlock()
-
-	// send response before stopping
-	resp := Response{Success: true}
-	s.sendResponse(conn, resp)
-
-	if handler != nil {
-		handler()
-	}
-
-	return HandlerResult{SkipDefault: true}
-}
-
-// handleHeartbeat processes CLI heartbeat messages (fire-and-forget).
-//
-// Credential handling note: Heartbeat payloads may include credentials as an optimization
-// for early refresh, but this is NOT a critical path. The daemon has its own credential
-// management via refreshCredentialsIfNeeded() which uses gitserver.LoadCredentialsForEndpoint()
-// and auth.GetTokenForEndpoint() to load fresh credentials from disk or refresh via API.
-// If heartbeat credentials are lost (network issue, daemon busy), the daemon will refresh
-// credentials normally on the next sync operation.
-func handleHeartbeat(s *Server, msg Message, _ net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onHeartbeat
-	s.mu.Unlock()
-
-	if handler != nil {
-		handler(msg.CallerID, msg.Payload)
-	}
-
-	// fire-and-forget: no response needed, credential loss is acceptable
-	return HandlerResult{SkipDefault: true}
-}
-
-func handleTelemetry(s *Server, msg Message, _ net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onTelemetry
-	s.mu.Unlock()
-
-	if handler != nil {
-		handler(msg.Payload)
-	}
-
-	// fire-and-forget: no response
-	return HandlerResult{SkipDefault: true}
-}
-
-func handleFriction(s *Server, msg Message, _ net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onFriction
-	s.mu.Unlock()
-
-	if handler != nil {
-		var payload FrictionPayload
-		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-			s.logger.Debug("failed to parse friction payload", "error", err)
-		} else {
-			handler(payload)
-		}
-	}
-
-	// fire-and-forget: no response
-	return HandlerResult{SkipDefault: true}
-}
-
-func handleSessionFinalize(s *Server, msg Message, _ net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onSessionFinalize
-	s.mu.Unlock()
-
-	if handler != nil {
-		var payload SessionFinalizeIPCPayload
-		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-			s.logger.Debug("failed to parse session_finalize payload", "error", err)
-		} else if payload.SessionName == "" || payload.LedgerPath == "" {
-			s.logger.Debug("session_finalize payload missing required fields", "session_name", payload.SessionName, "ledger_path", payload.LedgerPath)
-		} else {
-			handler(payload)
-		}
-	}
-
-	// fire-and-forget: no response
-	return HandlerResult{SkipDefault: true}
-}
-
-func handleGetErrors(s *Server, _ Message, _ net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onGetErrors
-	s.mu.Unlock()
-
-	if handler != nil {
-		errs := handler()
-		return HandlerResult{Response: marshalResponse(errs)}
-	}
-	return HandlerResult{
-		Response: &Response{Success: true, Data: json.RawMessage(`[]`)},
-	}
-}
-
-func handleMarkErrors(s *Server, msg Message, _ net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onMarkErrors
-	s.mu.Unlock()
-
-	if handler != nil {
-		var payload MarkErrorsPayload
-		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-			return HandlerResult{
-				Response: &Response{Success: false, Error: fmt.Sprintf("invalid payload: %v", err)},
-			}
-		}
-		handler(payload.IDs)
-		return HandlerResult{
-			Response: &Response{Success: true},
-		}
-	}
-	return HandlerResult{
-		Response: &Response{Success: false, Error: "mark errors handler not set"},
-	}
-}
-
-func handleCheckout(s *Server, msg Message, conn net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onCheckout
-	s.mu.Unlock()
-
-	if handler == nil {
-		return HandlerResult{
-			Response: &Response{Success: false, Error: "checkout handler not set"},
-		}
-	}
-
-	var payload CheckoutPayload
-	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-		return HandlerResult{
-			Response: &Response{Success: false, Error: fmt.Sprintf("invalid checkout payload: %v", err)},
-		}
-	}
-
-	pw := &ProgressWriter{conn: conn}
-	result, err := handler(payload, pw)
-	if err != nil {
-		return HandlerResult{
-			Response: &Response{Success: false, Error: err.Error()},
-		}
-	}
-
-	return HandlerResult{Response: marshalResponse(result)}
-}
-
-func handleSessions(s *Server, _ Message, _ net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onSessions
-	s.mu.Unlock()
-
-	if handler != nil {
-		sessions := handler()
-		resp := SessionsResponse{Sessions: sessions}
-		return HandlerResult{Response: marshalResponse(resp)}
-	}
-	return HandlerResult{
-		Response: &Response{Success: true, Data: json.RawMessage(`{"sessions":[]}`)},
-	}
-}
-
-func handleInstances(s *Server, _ Message, _ net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onInstances
-	s.mu.Unlock()
-
-	if handler != nil {
-		instances := handler()
-		resp := InstancesResponse{Instances: instances}
-		return HandlerResult{Response: marshalResponse(resp)}
-	}
-	return HandlerResult{
-		Response: &Response{Success: true, Data: json.RawMessage(`{"instances":[]}`)},
-	}
-}
-
-func handleDoctor(s *Server, _ Message, _ net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onDoctor
-	s.mu.Unlock()
-
-	var resp *DoctorResponse
-	if handler != nil {
-		resp = handler()
-	}
-	if resp == nil {
-		resp = &DoctorResponse{}
-	}
-
-	return HandlerResult{Response: marshalResponse(resp)}
-}
-
-func handleTriggerGC(s *Server, _ Message, _ net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onTriggerGC
-	s.mu.Unlock()
-
-	var resp *TriggerGCResponse
-	if handler != nil {
-		resp = handler()
-	}
-	if resp == nil {
-		resp = &TriggerGCResponse{}
-	}
-
-	return HandlerResult{Response: marshalResponse(resp)}
-}
-
-func handleCodeIndex(s *Server, msg Message, conn net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onCodeIndex
-	s.mu.Unlock()
-
-	if handler == nil {
-		return HandlerResult{
-			Response: &Response{Success: false, Error: "code index handler not set"},
-		}
-	}
-
-	var payload CodeIndexPayload
-	if len(msg.Payload) > 0 {
-		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-			return HandlerResult{
-				Response: &Response{Success: false, Error: fmt.Sprintf("invalid code_index payload: %v", err)},
-			}
-		}
-	}
-
-	pw := &ProgressWriter{conn: conn}
-	result, err := handler(payload, pw)
-	if err != nil {
-		return HandlerResult{
-			Response: &Response{Success: false, Error: err.Error()},
-		}
-	}
-
-	return HandlerResult{Response: marshalResponse(result)}
-}
-
-func handleCodeStatus(s *Server, _ Message, _ net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onCodeStatus
-	s.mu.Unlock()
-
-	if handler != nil {
-		stats := handler()
-		return HandlerResult{Response: marshalResponse(stats)}
-	}
-	return HandlerResult{
-		Response: &Response{Success: true, Data: json.RawMessage(`{}`)},
-	}
-}
-
-func handleWhispers(s *Server, msg Message, _ net.Conn) HandlerResult {
-	s.mu.Lock()
-	handler := s.onWhispers
-	s.mu.Unlock()
-
-	if handler == nil {
-		resp := WhispersResponse{Entries: []whisperstore.WhisperEntry{}}
-		return HandlerResult{Response: marshalResponse(resp)}
-	}
-
-	var payload WhispersPayload
-	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-		return HandlerResult{
-			Response: &Response{Success: false, Error: fmt.Sprintf("invalid payload: %v", err)},
-		}
-	}
-
-	if payload.AgentID == "" {
-		return HandlerResult{
-			Response: &Response{Success: false, Error: "agent_id required"},
-		}
-	}
-
-	attention := whisperstore.Attention(payload.Attention)
-	if attention == "" {
-		attention = whisperstore.AttentionNormal
-	}
-
-	entries, err := handler(payload.AgentID, attention, payload.Topics)
-	if err != nil {
-		return HandlerResult{
-			Response: &Response{Success: false, Error: fmt.Sprintf("get whispers: %v", err)},
-		}
-	}
-	if entries == nil {
-		entries = []whisperstore.WhisperEntry{}
-	}
-	resp := WhispersResponse{Entries: entries}
-	return HandlerResult{Response: marshalResponse(resp)}
-}
-
-// SetHandlers sets the message handlers.
+// SetHandlers sets the core sync/stop/status handlers on the CallbackService.
+// Panics if the server was created via NewServerWithService (no mutable adapter).
 func (s *Server) SetHandlers(onSync func() error, onStop func(), onStatus func() *StatusData) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onSync = onSync
-	s.onStop = onStop
-	s.onStatus = onStatus
+	svc := s.mustCallbackService("SetHandlers")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onSync = onSync
+	svc.onStop = onStop
+	svc.onStatus = onStatus
 }
 
 // SetSyncHandler sets the sync handler with progress support.
 // This supersedes the onSync callback set in SetHandlers.
 func (s *Server) SetSyncHandler(cb func(progress *ProgressWriter) error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onSyncWithProgress = cb
+	svc := s.mustCallbackService("SetSyncHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onSyncWithProgress = cb
 }
 
 // SetTeamSyncHandler sets the team context sync handler with progress support.
 func (s *Server) SetTeamSyncHandler(cb func(progress *ProgressWriter) error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onTeamSync = cb
+	svc := s.mustCallbackService("SetTeamSyncHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onTeamSync = cb
 }
 
 // SetActivityCallback sets the callback for activity tracking.
 func (s *Server) SetActivityCallback(cb func()) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onActivity = cb
+	svc := s.mustCallbackService("SetActivityCallback")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onActivity = cb
 }
 
 // SetHeartbeatHandler sets the handler for heartbeat messages.
 // callerID identifies which clone/worktree sent the heartbeat (path-based hash).
 func (s *Server) SetHeartbeatHandler(cb func(callerID string, payload json.RawMessage)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onHeartbeat = cb
+	svc := s.mustCallbackService("SetHeartbeatHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onHeartbeat = cb
 }
 
 // SetCheckoutHandler sets the handler for checkout requests.
 // The handler receives a ProgressWriter to send progress updates during long operations.
 func (s *Server) SetCheckoutHandler(cb func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onCheckout = cb
+	svc := s.mustCallbackService("SetCheckoutHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onCheckout = cb
 }
 
 // SetTelemetryHandler sets the handler for telemetry messages.
 // Telemetry is fire-and-forget - no response is sent.
 func (s *Server) SetTelemetryHandler(cb func(payload json.RawMessage)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onTelemetry = cb
+	svc := s.mustCallbackService("SetTelemetryHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onTelemetry = cb
 }
 
 // SetFrictionHandler sets the handler for friction messages.
 // Friction events are fire-and-forget - no response is sent.
 func (s *Server) SetFrictionHandler(cb func(payload FrictionPayload)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onFriction = cb
+	svc := s.mustCallbackService("SetFrictionHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onFriction = cb
 }
 
 // SetSessionFinalizeHandler sets the handler for session finalize messages.
 // Session finalize events are fire-and-forget - no response is sent.
 func (s *Server) SetSessionFinalizeHandler(fn func(payload SessionFinalizeIPCPayload)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onSessionFinalize = fn
+	svc := s.mustCallbackService("SetSessionFinalizeHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onSessionFinalize = fn
 }
 
 // SetErrorsHandler sets the handler for retrieving unviewed errors.
 func (s *Server) SetErrorsHandler(onGet func() []StoredError, onMark func(ids []string)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onGetErrors = onGet
-	s.onMarkErrors = onMark
+	svc := s.mustCallbackService("SetErrorsHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onGetErrors = onGet
+	svc.onMarkErrors = onMark
 }
 
 // SetSessionsHandler sets the handler for retrieving active agent sessions.
 // Deprecated: Use SetInstancesHandler instead.
 func (s *Server) SetSessionsHandler(cb func() []AgentSession) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onSessions = cb
+	svc := s.mustCallbackService("SetSessionsHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onSessions = cb
 }
 
 // SetInstancesHandler sets the handler for retrieving active agent instances.
 func (s *Server) SetInstancesHandler(cb func() []InstanceInfo) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onInstances = cb
+	svc := s.mustCallbackService("SetInstancesHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onInstances = cb
 }
 
 // SetSyncHistoryHandler sets the sync history handler.
 func (s *Server) SetSyncHistoryHandler(handler func() []SyncEvent) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onSyncHistory = handler
+	svc := s.mustCallbackService("SetSyncHistoryHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onSyncHistory = handler
 }
 
 // SetDoctorHandler sets the doctor (health check) handler.
 func (s *Server) SetDoctorHandler(handler func() *DoctorResponse) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onDoctor = handler
+	svc := s.mustCallbackService("SetDoctorHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onDoctor = handler
 }
 
 // SetTriggerGCHandler sets the handler for forced GC reclone.
 func (s *Server) SetTriggerGCHandler(handler func() *TriggerGCResponse) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onTriggerGC = handler
+	svc := s.mustCallbackService("SetTriggerGCHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onTriggerGC = handler
 }
 
 // SetCodeIndexHandler sets the handler for code indexing requests.
 // The handler receives a ProgressWriter to send progress updates during indexing.
 func (s *Server) SetCodeIndexHandler(cb func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onCodeIndex = cb
+	svc := s.mustCallbackService("SetCodeIndexHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onCodeIndex = cb
 }
 
 // SetCodeStatusHandler sets the handler for code index status requests.
 func (s *Server) SetCodeStatusHandler(cb func() *CodeDBStats) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onCodeStatus = cb
+	svc := s.mustCallbackService("SetCodeStatusHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onCodeStatus = cb
 }
+
 
 // SetWhispersHandler sets the handler for whisper queries.
 func (s *Server) SetWhispersHandler(cb func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.onWhispers = cb
+	svc := s.mustCallbackService("SetWhispersHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onWhispers = cb
+}
+
+// mustCallbackService returns the mutable callback adapter.
+// Panics if the server was created with NewServerWithService (adapters can't be mixed).
+func (s *Server) mustCallbackService(method string) *CallbackService {
+	if s.svc == nil {
+		panic("daemon: " + method + " called on a server created with NewServerWithService; use the DaemonService interface instead")
+	}
+	return s.svc
 }
 
 // Start starts the IPC server.
@@ -1199,12 +1088,7 @@ func (s *Server) handleConnection(_ context.Context, conn net.Conn) {
 	}
 
 	// record activity on any IPC message
-	s.mu.Lock()
-	activityCb := s.onActivity
-	s.mu.Unlock()
-	if activityCb != nil {
-		activityCb()
-	}
+	s.service.Activity()
 
 	// route message to handler
 	result, _ := s.router.Handle(s, msg, conn)

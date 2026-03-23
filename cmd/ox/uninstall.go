@@ -105,7 +105,7 @@ func runUninstall() error {
 	// this must happen before we delete the .sageox directory
 	markerData, _ := api.ReadFirstRepoMarker(sageoxDir)
 	if markerData != nil {
-		slog.Debug("uninstall marker", "repo_id", markerData.RepoID, "endpoint", markerData.GetEndpoint())
+		slog.Debug("uninstall marker", "repo_id", markerData.RepoID, "endpoint", markerData.Endpoint)
 	}
 
 	// get configured endpoints
@@ -244,7 +244,7 @@ func notifyCloudUninstall(marker *api.RepoMarkerData) {
 		return
 	}
 
-	ep := marker.GetEndpoint()
+	ep := marker.Endpoint
 	if ep == "" {
 		slog.Debug("uninstall cloud notification", "skipped", "no endpoint in marker")
 		return

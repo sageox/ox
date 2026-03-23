@@ -54,43 +54,17 @@ func TestDoctorCheck_Methods(t *testing.T) {
 	assert.Equal(t, "fixed", result.message)
 }
 
-// TestDoctorCheck_FixLevelHelpers verifies fix level helper methods
-func TestDoctorCheck_FixLevelHelpers(t *testing.T) {
+// TestDoctorCheck_IsAutoFixable verifies IsAutoFixable method
+func TestDoctorCheck_IsAutoFixable(t *testing.T) {
 	tests := []struct {
-		name                string
-		level               FixLevel
-		wantAutoFixable     bool
-		wantRequiresConfirm bool
-		wantHasFix          bool
+		name            string
+		level           FixLevel
+		wantAutoFixable bool
 	}{
-		{
-			name:                "check-only",
-			level:               FixLevelCheckOnly,
-			wantAutoFixable:     false,
-			wantRequiresConfirm: false,
-			wantHasFix:          false,
-		},
-		{
-			name:                "auto",
-			level:               FixLevelAuto,
-			wantAutoFixable:     true,
-			wantRequiresConfirm: false,
-			wantHasFix:          true,
-		},
-		{
-			name:                "suggested",
-			level:               FixLevelSuggested,
-			wantAutoFixable:     false,
-			wantRequiresConfirm: false,
-			wantHasFix:          true,
-		},
-		{
-			name:                "confirm",
-			level:               FixLevelConfirm,
-			wantAutoFixable:     false,
-			wantRequiresConfirm: true,
-			wantHasFix:          true,
-		},
+		{"check-only", FixLevelCheckOnly, false},
+		{"auto", FixLevelAuto, true},
+		{"suggested", FixLevelSuggested, false},
+		{"confirm", FixLevelConfirm, false},
 	}
 
 	for _, tt := range tests {
@@ -104,8 +78,6 @@ func TestDoctorCheck_FixLevelHelpers(t *testing.T) {
 			}
 
 			assert.Equal(t, tt.wantAutoFixable, check.IsAutoFixable(), "IsAutoFixable mismatch")
-			assert.Equal(t, tt.wantRequiresConfirm, check.RequiresConfirmation(), "RequiresConfirmation mismatch")
-			assert.Equal(t, tt.wantHasFix, check.HasFix(), "HasFix mismatch")
 		})
 	}
 }
@@ -128,33 +100,6 @@ func TestDoctorCheckRegistry_Registration(t *testing.T) {
 	assert.Equal(t, FixLevelAuto, gitignoreCheck.FixLevel)
 }
 
-// TestDoctorCheckRegistry_GetByCategory verifies category filtering
-func TestDoctorCheckRegistry_GetByCategory(t *testing.T) {
-	authChecks := GetDoctorChecksByCategory("Authentication")
-	require.NotEmpty(t, authChecks, "should have Authentication checks")
-
-	for _, check := range authChecks {
-		assert.Equal(t, "Authentication", check.Category)
-	}
-}
-
-// TestDoctorCheckRegistry_GetByFixLevel verifies fix level filtering
-func TestDoctorCheckRegistry_GetByFixLevel(t *testing.T) {
-	autoChecks := GetDoctorChecksByFixLevel(FixLevelAuto)
-	require.NotEmpty(t, autoChecks, "should have auto-fix checks")
-
-	for _, check := range autoChecks {
-		assert.Equal(t, FixLevelAuto, check.FixLevel)
-	}
-
-	confirmChecks := GetDoctorChecksByFixLevel(FixLevelConfirm)
-	require.NotEmpty(t, confirmChecks, "should have confirm checks")
-
-	for _, check := range confirmChecks {
-		assert.Equal(t, FixLevelConfirm, check.FixLevel)
-	}
-}
-
 // TestCheckSlugConstants_Unique verifies all slug constants are unique
 func TestCheckSlugConstants_Unique(t *testing.T) {
 	slugs := []string{
@@ -165,9 +110,7 @@ func TestCheckSlugConstants_Unique(t *testing.T) {
 		CheckSlugSageoxGitignore,
 		CheckSlugReadme,
 		CheckSlugRepoMarker,
-		CheckSlugLedgerPath,
 		CheckSlugLedgerRemote,
-		CheckSlugTeamContextPath,
 		CheckSlugTeamSymlink,
 		CheckSlugLegacyStructure,
 		CheckSlugGitConfig,
@@ -310,16 +253,16 @@ func TestGetAvailableSlugs(t *testing.T) {
 	}
 
 	// verify known slugs are present
-	foundLedgerPath := false
 	foundAuthStatus := false
+	foundGitRepoPaths := false
 	for _, slug := range slugs {
-		if slug == CheckSlugLedgerPath {
-			foundLedgerPath = true
-		}
 		if slug == CheckSlugAuthStatus {
 			foundAuthStatus = true
 		}
+		if slug == CheckSlugGitRepoPaths {
+			foundGitRepoPaths = true
+		}
 	}
-	assert.True(t, foundLedgerPath, "should contain ledger-path slug")
 	assert.True(t, foundAuthStatus, "should contain auth-status slug")
+	assert.True(t, foundGitRepoPaths, "should contain git-repo-paths slug")
 }

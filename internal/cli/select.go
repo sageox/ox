@@ -51,18 +51,12 @@ func DiscoverEndpoints(sageoxDir string) ([]EndpointInfo, error) {
 			RepoID   string `json:"repo_id"`
 			Endpoint string `json:"endpoint"`
 			InitAt   string `json:"init_at"`
-			// legacy field support
-			APIEndpoint string `json:"api_endpoint"`
 		}
 		if err := json.Unmarshal(data, &marker); err != nil {
 			continue
 		}
 
-		// prefer endpoint over legacy api_endpoint
 		ep := marker.Endpoint
-		if ep == "" {
-			ep = marker.APIEndpoint
-		}
 		if ep == "" {
 			continue
 		}

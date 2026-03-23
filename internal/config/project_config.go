@@ -38,8 +38,7 @@ func init() {
 
 // repoMarkerEndpoint is a minimal struct to read just the endpoint from marker files
 type repoMarkerEndpoint struct {
-	Endpoint    string `json:"endpoint,omitempty"`
-	APIEndpoint string `json:"api_endpoint,omitempty"` // legacy field
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
 // getEndpointFromMarker reads the endpoint from .sageox/.repo_* marker files.
@@ -66,12 +65,8 @@ func getEndpointFromMarker(projectRoot string) string {
 			if err := json.Unmarshal(data, &marker); err != nil {
 				continue
 			}
-			// Prefer new field, fall back to legacy
 			if marker.Endpoint != "" {
 				return marker.Endpoint
-			}
-			if marker.APIEndpoint != "" {
-				return marker.APIEndpoint
 			}
 		}
 	}
@@ -95,11 +90,6 @@ type ProjectConfig struct {
 	TeamID           string   `json:"team_id,omitempty"`            // team ID from server response
 	TeamName         string   `json:"team_name,omitempty"`          // team display name from server response
 	Endpoint         string   `json:"endpoint,omitempty"`           // SageOx endpoint URL (matches SAGEOX_ENDPOINT env var)
-
-	// Legacy fields - kept for backward compatibility with old config files
-	// TODO: Remove after 2026-01-31 - legacy field support
-	APIBaseURL string `json:"api_base_url,omitempty"` // deprecated: use Endpoint
-	WebBaseURL string `json:"web_base_url,omitempty"` // deprecated: use Endpoint
 
 	UpdateFrequencyHours     int          `json:"update_frequency_hours"`
 	LastUpdateCheckUTC       *string      `json:"last_update_check_utc,omitempty"`
@@ -224,19 +214,6 @@ func LoadProjectConfig(gitRoot string) (*ProjectConfig, error) {
 
 	// apply defaults for missing fields
 	applyDefaults(&cfg)
-
-	// migrate legacy fields to new Endpoint field
-	// TODO: Remove after 2026-01-31 - legacy field migration
-	if cfg.Endpoint == "" && cfg.APIBaseURL != "" {
-		cfg.Endpoint = endpoint.NormalizeEndpoint(cfg.APIBaseURL)
-		cfg.APIBaseURL = "" // clear legacy field
-		cfg.WebBaseURL = "" // clear legacy field
-		// save migrated config
-		if err := SaveProjectConfig(gitRoot, &cfg); err != nil {
-			// log but don't fail - config still works
-			fmt.Fprintf(os.Stderr, "warning: could not save migrated config: %v\n", err)
-		}
-	}
 
 	// normalize endpoint defensively (handles configs saved by older versions)
 	cfg.Endpoint = endpoint.NormalizeEndpoint(cfg.Endpoint)

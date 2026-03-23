@@ -326,16 +326,6 @@ func checkRepoMarker() checkResult {
 type repoMarkerData struct {
 	RepoID   string `json:"repo_id"`
 	Endpoint string `json:"endpoint"`
-	// TODO: Remove after 2026-01-31 - legacy field support
-	APIEndpoint string `json:"api_endpoint"` // deprecated: use Endpoint
-}
-
-// GetEndpoint returns the endpoint from the marker, preferring new field over legacy
-func (m *repoMarkerData) GetEndpoint() string {
-	if m.Endpoint != "" {
-		return m.Endpoint
-	}
-	return m.APIEndpoint // fallback to legacy field
 }
 
 // repoMarkerFullData extends repoMarkerData with optional init metadata fields
@@ -343,18 +333,9 @@ func (m *repoMarkerData) GetEndpoint() string {
 type repoMarkerFullData struct {
 	RepoID      string `json:"repo_id"`
 	Endpoint    string `json:"endpoint"`
-	APIEndpoint string `json:"api_endpoint,omitempty"`
 	InitAt      string `json:"init_at,omitempty"`
 	InitByEmail string `json:"init_by_email,omitempty"`
 	InitByName  string `json:"init_by_name,omitempty"`
-}
-
-// GetEndpoint returns the endpoint, preferring new field over legacy
-func (m *repoMarkerFullData) GetEndpoint() string {
-	if m.Endpoint != "" {
-		return m.Endpoint
-	}
-	return m.APIEndpoint
 }
 
 // checkMultipleEndpoints detects if there are multiple .repo_* files from different endpoints.
@@ -401,7 +382,7 @@ func checkMultipleEndpoints() checkResult {
 			continue // skip files we can't parse
 		}
 
-		ep := marker.GetEndpoint()
+		ep := marker.Endpoint
 		if ep == "" {
 			ep = "(unknown)"
 		}
@@ -1169,7 +1150,7 @@ func checkEndpointNormalization(fix bool) checkResult {
 					continue
 				}
 
-				storedEP := marker.GetEndpoint()
+				storedEP := marker.Endpoint
 				if storedEP == "" {
 					continue
 				}
@@ -1189,15 +1170,6 @@ func checkEndpointNormalization(fix bool) checkResult {
 
 					normalizedJSON, _ := json.Marshal(normalized)
 					fullMarker["endpoint"] = normalizedJSON
-
-					// also normalize the legacy api_endpoint field if present and prefixed
-					if marker.APIEndpoint != "" {
-						apiNormalized := endpoint.NormalizeEndpoint(marker.APIEndpoint)
-						if apiNormalized != marker.APIEndpoint {
-							apiJSON, _ := json.Marshal(apiNormalized)
-							fullMarker["api_endpoint"] = apiJSON
-						}
-					}
 
 					updatedData, marshalErr := json.MarshalIndent(fullMarker, "", "  ")
 					if marshalErr != nil {
@@ -1331,7 +1303,7 @@ func checkDuplicateRepoMarkers(fix bool) checkResult {
 			continue
 		}
 
-		ep := m.GetEndpoint()
+		ep := m.Endpoint
 		if ep == "" {
 			ep = "(unknown)"
 		}

@@ -147,12 +147,12 @@ func TestServer_SetHandlers(t *testing.T) {
 		func() *StatusData { return nil },
 	)
 
-	// verify handlers are set
-	s.mu.Lock()
-	assert.NotNil(t, s.onSync)
-	assert.NotNil(t, s.onStop)
-	assert.NotNil(t, s.onStatus)
-	s.mu.Unlock()
+	// verify handlers are set on the callback service
+	s.svc.mu.Lock()
+	assert.NotNil(t, s.svc.onSync)
+	assert.NotNil(t, s.svc.onStop)
+	assert.NotNil(t, s.svc.onStatus)
+	s.svc.mu.Unlock()
 }
 
 func TestNewClient(t *testing.T) {
@@ -529,9 +529,9 @@ func TestServer_SetCheckoutHandler(t *testing.T) {
 		return &CheckoutResult{Path: payload.RepoPath, Cloned: true}, nil
 	})
 
-	s.mu.Lock()
-	assert.NotNil(t, s.onCheckout)
-	s.mu.Unlock()
+	s.svc.mu.Lock()
+	assert.NotNil(t, s.svc.onCheckout)
+	s.svc.mu.Unlock()
 }
 
 // Integration test: Checkout with progress streaming
@@ -699,9 +699,9 @@ func TestServer_SetSyncHandler(t *testing.T) {
 		return nil
 	})
 
-	s.mu.Lock()
-	assert.NotNil(t, s.onSyncWithProgress)
-	s.mu.Unlock()
+	s.svc.mu.Lock()
+	assert.NotNil(t, s.svc.onSyncWithProgress)
+	s.svc.mu.Unlock()
 }
 
 // Integration test: Sync with progress streaming
@@ -862,9 +862,9 @@ func TestServer_SetTeamSyncHandler(t *testing.T) {
 		return nil
 	})
 
-	s.mu.Lock()
-	assert.NotNil(t, s.onTeamSync)
-	s.mu.Unlock()
+	s.svc.mu.Lock()
+	assert.NotNil(t, s.svc.onTeamSync)
+	s.svc.mu.Unlock()
 }
 
 // Integration test: Team sync with progress streaming

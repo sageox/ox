@@ -223,19 +223,6 @@ func init() {
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
-		Slug:        CheckSlugLedgerPath,
-		Name:        "Ledger path",
-		Category:    "Git Repository Health",
-		FixLevel:    FixLevelSuggested,
-		Description: "Validates ledger path exists and is a git repository",
-		Run: func(fix bool) checkResult {
-			// ledger path validation is part of checkGitRepoPaths
-			// this is a placeholder for direct ledger path checks
-			return SkippedCheck("Ledger path", "validated by git repo paths check", "")
-		},
-	})
-
-	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugLedgerPathMismatch,
 		Name:        "Ledger path config",
 		Category:    "Git Repository Health",
@@ -260,18 +247,6 @@ func init() {
 				return SkippedCheck("Ledger remote URL", "config error", "")
 			}
 			return checkLedgerRemoteURL(localCfg)
-		},
-	})
-
-	RegisterDoctorCheck(&DoctorCheck{
-		Slug:        CheckSlugTeamContextPath,
-		Name:        "Team context path",
-		Category:    "Git Repository Health",
-		FixLevel:    FixLevelSuggested,
-		Description: "Validates team context paths exist and are valid",
-		Run: func(fix bool) checkResult {
-			// team context path validation is part of checkGitRepoPaths
-			return SkippedCheck("Team context path", "validated by git repo paths check", "")
 		},
 	})
 

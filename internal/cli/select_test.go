@@ -64,29 +64,6 @@ func TestDiscoverEndpoints(t *testing.T) {
 			wantEps: []string{"https://sageox.ai", "https://enterprise.example.com"},
 		},
 		{
-			name: "legacy api_endpoint field",
-			markers: map[string]map[string]string{
-				".repo_abc123": {
-					"repo_id":      "repo_abc123",
-					"api_endpoint": "https://legacy.sageox.ai",
-				},
-			},
-			want:    1,
-			wantEps: []string{"https://legacy.sageox.ai"},
-		},
-		{
-			name: "endpoint takes precedence over api_endpoint",
-			markers: map[string]map[string]string{
-				".repo_abc123": {
-					"repo_id":      "repo_abc123",
-					"endpoint":     "https://new.sageox.ai",
-					"api_endpoint": "https://legacy.sageox.ai",
-				},
-			},
-			want:    1,
-			wantEps: []string{"https://new.sageox.ai"},
-		},
-		{
 			name: "trailing slashes normalized",
 			markers: map[string]map[string]string{
 				".repo_abc123": {

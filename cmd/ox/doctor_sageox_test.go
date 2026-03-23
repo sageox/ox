@@ -2178,7 +2178,7 @@ func TestCheckEndpointNormalization_FixesMarkerPrefix(t *testing.T) {
 	}
 }
 
-func TestCheckEndpointNormalization_FixesMarkerLegacyApiEndpoint(t *testing.T) {
+func TestCheckEndpointNormalization_FixesMarkerPrefixedEndpoint(t *testing.T) {
 	gitRoot, cleanup := setupTempGitRepo(t)
 	defer cleanup()
 
@@ -2187,11 +2187,10 @@ func TestCheckEndpointNormalization_FixesMarkerLegacyApiEndpoint(t *testing.T) {
 
 	requireSageoxDir(t, gitRoot)
 
-	// create marker with prefixed endpoint in both fields
+	// create marker with prefixed endpoint
 	markerData := map[string]string{
-		"repo_id":      "repo_abc123",
-		"endpoint":     "https://api.sageox.ai",
-		"api_endpoint": "https://api.sageox.ai",
+		"repo_id":  "repo_abc123",
+		"endpoint": "https://api.sageox.ai",
 	}
 	markerJSON, _ := json.MarshalIndent(markerData, "", "  ")
 	markerPath := filepath.Join(gitRoot, ".sageox", ".repo_abc123")
@@ -2205,7 +2204,7 @@ func TestCheckEndpointNormalization_FixesMarkerLegacyApiEndpoint(t *testing.T) {
 		t.Errorf("expected passed=true after fix, got: %+v", result)
 	}
 
-	// verify both fields were normalized
+	// verify endpoint was normalized
 	reloadedData, err := os.ReadFile(markerPath)
 	if err != nil {
 		t.Fatalf("failed to read marker: %v", err)
@@ -2216,9 +2215,6 @@ func TestCheckEndpointNormalization_FixesMarkerLegacyApiEndpoint(t *testing.T) {
 	}
 	if reloaded["endpoint"] != "https://sageox.ai" {
 		t.Errorf("marker endpoint not normalized: %v", reloaded["endpoint"])
-	}
-	if reloaded["api_endpoint"] != "https://sageox.ai" {
-		t.Errorf("marker api_endpoint not normalized: %v", reloaded["api_endpoint"])
 	}
 }
 

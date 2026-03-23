@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/ledger"
@@ -310,7 +311,7 @@ func getGitRepoStatus(repoPath string, lastSync time.Time, hasLastSync bool) git
 	status.Exists = true
 
 	// check if it's a git repo
-	if !isGitRepo(repoPath) {
+	if !gitutil.IsGitRepo(repoPath) {
 		status.Error = "not a git repo"
 		return status
 	}
@@ -473,14 +474,6 @@ func extractGitHost(cloneURL string) string {
 	return cloneURL
 }
 
-// isGitRepo checks if the given path is inside a git repository.
-// Uses git command to properly handle worktrees and bare repos
-// (checking for .git directory fails when .git is a file pointing elsewhere).
-func isGitRepo(path string) bool {
-	cmd := exec.Command("git", "-C", path, "rev-parse", "--is-inside-work-tree")
-	err := cmd.Run()
-	return err == nil
-}
 
 // getLedgerRemoteURL fetches the ledger git URL from the cloud API.
 // Returns empty string if not available or on error.

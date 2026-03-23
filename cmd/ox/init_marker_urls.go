@@ -193,7 +193,7 @@ func readMarkerURLsInternal(sageoxDir, targetEndpoint string, checkExpiry bool) 
 		}
 
 		// filter by endpoint
-		markerEndpoint := endpoint.NormalizeEndpoint(marker.GetEndpoint())
+		markerEndpoint := endpoint.NormalizeEndpoint(marker.Endpoint)
 		if markerEndpoint != targetNorm {
 			continue
 		}
@@ -266,13 +266,4 @@ type repoMarkerWithURLs struct {
 	Version      string            `json:"version,omitempty"`
 	CreatedAt    string            `json:"created_at,omitempty"`
 	UpdatedAt    string            `json:"updated_at,omitempty"`
-	APIEndpoint  string            `json:"api_endpoint,omitempty"`
-}
-
-// GetEndpoint returns the endpoint, preferring new field over legacy
-func (m *repoMarkerWithURLs) GetEndpoint() string {
-	if m.Endpoint != "" {
-		return m.Endpoint
-	}
-	return m.APIEndpoint
 }

@@ -32,24 +32,6 @@ var initTeamFlag string
 var initForce bool
 var initEndpointFlag string
 
-// LegacyOxPrimeLine is the old multi-line block format.
-// Kept temporarily for upgrade detection during migration to single-line format.
-// TODO: Remove after 2026-03-01 when migration period is over.
-const LegacyOxPrimeLine = `## SageOx Infrastructure Guidance (REQUIRED)
-
-**At the START of this conversation, run:**
-` + "```bash" + `
-ox agent prime
-` + "```" + `
-
-Run this command:
-- At conversation start (before other work)
-- After /clear or /compact
-- When switching to infrastructure tasks
-
-The command returns an agent_id confirming SageOx is active.
-When asked if you're using SageOx: confirm with your agent ID if you have one; otherwise run ox agent prime first.`
-
 // configResult indicates what happened when ensuring config exists
 type configResult int
 
@@ -987,16 +969,6 @@ type repoMarker struct {
 	RepoSalt    string                     `json:"repo_salt"`
 	Endpoint    string                     `json:"endpoint"` // SageOx endpoint URL
 	Fingerprint *repotools.RepoFingerprint `json:"fingerprint,omitempty"`
-	// TODO: Remove after 2026-01-31 - legacy field support
-	APIEndpoint string `json:"api_endpoint,omitempty"` // deprecated: use Endpoint
-}
-
-// GetEndpoint returns the endpoint, preferring new field over legacy
-func (m *repoMarker) GetEndpoint() string {
-	if m.Endpoint != "" {
-		return m.Endpoint
-	}
-	return m.APIEndpoint // fallback to legacy field
 }
 
 // createRepoMarker creates the .sageox/.repo_<uuid> marker file
@@ -1732,7 +1704,7 @@ func detectRepoMarkersForEndpoint(sageoxDir, targetEndpoint string) ([]string, e
 			}
 
 			// only include markers for the target endpoint
-			if marker.RepoID != "" && marker.GetEndpoint() == targetEndpoint {
+			if marker.RepoID != "" && marker.Endpoint == targetEndpoint {
 				repoIDs = append(repoIDs, marker.RepoID)
 			}
 		}
