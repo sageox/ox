@@ -1,22 +1,19 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 
-	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
-	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
 
 var sessionResummaryBatchCmd = &cobra.Command{
 	Use:    "resummary-batch [session-name...]",
-	Short:  "Re-summarize sessions via the SageOx API",
-	Long:   "Download raw.jsonl from LFS, call the summarize API, and push new summary.json to ledger.",
+	Short:  "Re-summarize sessions locally via daemon",
+	Long:   "Hydrate raw.jsonl from LFS if needed, then signal the daemon to re-summarize and push artifacts.",
 	Hidden: true,
 	Args:   cobra.MinimumNArgs(1),
 	RunE:   runSessionResummaryBatch,
@@ -104,7 +101,7 @@ func runSessionResummaryBatch(cmd *cobra.Command, args []string) error {
 	}
 
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
-	ep := endpoint.GetForProject(projectRoot)
+	var queued int
 
 	for _, sessionName := range args {
 		sessionPath := filepath.Join(sessionsDir, sessionName)
@@ -113,81 +110,43 @@ func runSessionResummaryBatch(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
-		if err := resummarySession(projectRoot, ledgerPath, sessionPath, sessionName, ep); err != nil {
+		if err := resummarySession(projectRoot, ledgerPath, sessionPath, sessionName); err != nil {
 			fmt.Fprintf(os.Stderr, "failed %s: %v\n", sessionName, err)
 			continue
 		}
 
-		fmt.Printf("re-summarized %s\n", sessionName)
+		fmt.Printf("queued %s for re-summarization\n", sessionName)
+		queued++
+	}
+
+	if queued > 0 {
+		fmt.Printf("\n%d session(s) queued. The daemon will process them in the background.\n", queued)
 	}
 
 	return nil
 }
 
-func resummarySession(projectRoot, ledgerPath, sessionPath, sessionName, ep string) error {
-	// read meta.json for agent info and file OIDs
-	meta, err := lfs.ReadSessionMeta(sessionPath)
-	if err != nil {
-		return fmt.Errorf("read meta.json: %w", err)
+func resummarySession(projectRoot, ledgerPath, sessionPath, sessionName string) error {
+	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
+	if _, err := os.Stat(rawPath); os.IsNotExist(err) {
+		return fmt.Errorf("missing %s", ledgerFileRaw)
 	}
 
-	// ensure raw.jsonl is local (not just a pointer)
-	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
+	// hydrate raw.jsonl from LFS if needed so daemon can read it
 	if lfs.IsPointerFile(rawPath) {
+		meta, err := lfs.ReadSessionMeta(sessionPath)
+		if err != nil {
+			return fmt.Errorf("read meta.json: %w", err)
+		}
 		slog.Info("downloading raw.jsonl from LFS", "session", sessionName)
 		if err := downloadFileFromLFS(projectRoot, sessionPath, meta, ledgerFileRaw); err != nil {
 			return fmt.Errorf("download raw.jsonl: %w", err)
 		}
-		// restore pointer on any exit path to avoid leaving large content in ledger
-		if ref, ok := meta.Files[ledgerFileRaw]; ok {
-			defer func() {
-				_ = lfs.WritePointerFile(rawPath, ref)
-			}()
-		}
 	}
 
-	// read raw.jsonl
-	stored, err := session.ReadSessionFromPath(rawPath)
-	if err != nil {
-		return fmt.Errorf("read raw.jsonl: %w", err)
-	}
-
-	if len(stored.Entries) == 0 {
-		return fmt.Errorf("empty session")
-	}
-
-	// convert map entries to session.Entry for the summarize API
-	entries := convertStoredMapEntries(stored.Entries)
-
-	// call the server-side summarize API
-	slog.Info("calling summarize API", "session", sessionName, "entries", len(entries))
-	result, err := session.Summarize(entries, meta.AgentID, meta.AgentType, meta.Model, ep)
-	if err != nil {
-		return fmt.Errorf("summarize API: %w", err)
-	}
-
-	// write summary.json
-	summaryData, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal summary: %w", err)
-	}
-
-	summaryPath := filepath.Join(sessionPath, "summary.json")
-	if err := os.WriteFile(summaryPath, summaryData, 0644); err != nil {
-		return fmt.Errorf("write summary.json: %w", err)
-	}
-
-	// update meta.json title
-	if result.Title != "" {
-		if err := lfs.UpdateMetaSummary(sessionPath, result.Title); err != nil {
-			slog.Warn("failed to update meta.json title", "session", sessionName, "err", err)
-		}
-	}
-
-	// commit and push summary.json (git-tracked, not LFS)
-	pushResult := pushSummaryToLedger(summaryPath, sessionPath)
-	if !pushResult.Success {
-		return fmt.Errorf("push summary: %s", pushResult.Error)
+	// signal daemon to finalize (reuses existing anti-entropy pipeline)
+	if err := signalDaemonSessionFinalize(sessionName, ledgerPath, "", projectRoot); err != nil {
+		return fmt.Errorf("daemon not reachable (is it running?): %w", err)
 	}
 
 	return nil
