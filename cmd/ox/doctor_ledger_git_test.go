@@ -86,8 +86,8 @@ func TestFixLedgerBranchDiverged_NonGitHubConflictFails(t *testing.T) {
 
 	assert.False(t, result.passed,
 		"doctor should fail on non-github conflict")
-	assert.Contains(t, result.message, "rebase failed",
-		"failure message should mention rebase")
+	assert.Contains(t, result.message, "reconcile failed",
+		"failure message should mention reconcile failure")
 
 	// repo should be clean (rebase aborted)
 	assert.False(t, isRebaseInProgressCheck(t, machineB),
