@@ -45,7 +45,7 @@ func setupBareAndClone(t *testing.T) (string, string) {
 	bareDir := filepath.Join(t.TempDir(), "bare.git")
 	cloneDir := filepath.Join(t.TempDir(), "clone")
 
-	gitCmd(t, t.TempDir(), "init", "--bare", bareDir)
+	gitCmd(t, t.TempDir(), "init", "--bare", "--initial-branch=main", bareDir)
 
 	// create a temporary clone to push initial commit
 	tmpClone := filepath.Join(t.TempDir(), "tmp-clone")
