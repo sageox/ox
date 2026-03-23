@@ -245,3 +245,26 @@ func TestFilterForSummarization_PreservesOrder(t *testing.T) {
 	assert.Equal(t, "Write", result[2].ToolName)
 	assert.Equal(t, "third", result[3].Content)
 }
+
+func TestFilterForSummarization_CoworkerFieldsDropped(t *testing.T) {
+	// CoworkerName/CoworkerModel exist on SessionEntry but not on pkg Entry.
+	// The round-trip through entriesToPkg/pkgToEntries intentionally drops them
+	// since the LLM summarizer doesn't need coworker attribution.
+	entries := []Entry{
+		{
+			Type:          EntryTypeSystem,
+			Content:       "Loaded coworker: code-reviewer",
+			CoworkerName:  "code-reviewer",
+			CoworkerModel: "sonnet",
+		},
+		{
+			Type:    EntryTypeUser,
+			Content: "Review this PR",
+		},
+	}
+
+	result := FilterForSummarization(entries)
+	assert.Len(t, result, 2)
+	assert.Empty(t, result[0].CoworkerName, "CoworkerName intentionally dropped in summarization round-trip")
+	assert.Empty(t, result[0].CoworkerModel, "CoworkerModel intentionally dropped in summarization round-trip")
+}

@@ -159,6 +159,16 @@ func TestIsNoiseCommand(t *testing.T) {
 		{"git commit -m 'fix'", false},
 		{"npm install", false},
 		{"go test ./...", false},
+		// leading whitespace handled by TrimSpace
+		{"  ls -la", true},
+		{"\tpwd", true},
+		// similar prefixes that should NOT match
+		{"lsof -i :8080", false},
+		{"catalog build", false},
+		{"headless-chrome run", false},
+		// empty input
+		{"", false},
+		{"   ", false},
 	}
 
 	for _, tt := range tests {
@@ -166,4 +176,84 @@ func TestIsNoiseCommand(t *testing.T) {
 			assert.Equal(t, tt.want, IsNoiseCommand(tt.cmd))
 		})
 	}
+}
+
+func TestHasToolError(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry Entry
+		want  bool
+	}{
+		{
+			name:  "error in ToolOutput",
+			entry: Entry{Type: EntryTypeTool, ToolOutput: "Error: file not found"},
+			want:  true,
+		},
+		{
+			name:  "error in Content when ToolOutput empty",
+			entry: Entry{Type: EntryTypeTool, Content: "fatal: bad config"},
+			want:  true,
+		},
+		{
+			name:  "ToolOutput takes precedence over Content",
+			entry: Entry{Type: EntryTypeTool, ToolOutput: "success", Content: "Error: something"},
+			want:  false,
+		},
+		{
+			name:  "both empty",
+			entry: Entry{Type: EntryTypeTool},
+			want:  false,
+		},
+		{
+			name:  "clean ToolOutput",
+			entry: Entry{Type: EntryTypeTool, ToolOutput: "file contents here"},
+			want:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, hasToolError(tt.entry))
+		})
+	}
+}
+
+func TestDetectError(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"error prefix", "Error: file not found", true},
+		{"fatal prefix", "fatal: not a git repository", true},
+		{"panic prefix", "panic: runtime error", true},
+		{"exception keyword", "NullPointerException at line 42", true},
+		{"failed keyword", "Build failed with 3 errors", true},
+		{"exit code non-zero", "Process exited with exit code 1", true},
+		{"exit code 127", "exit code 127", true},
+		{"empty string", "", false},
+		{"normal output", "PASS\nok  github.com/example 0.5s", false},
+		{"exit code 0", "exit code 0", false},
+		{"exit code 0 with surrounding text", "Command completed, exit code 0, output saved", false},
+		// "exit code" without a number triggers error (no "exit code 0" match)
+		{"exit code bare", "exit code", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, detectError(tt.content), "content: %q", tt.content)
+		})
+	}
+}
+
+func TestFilterForSummarization_CaseSensitiveToolNames(t *testing.T) {
+	// readOnlyTools has "read" and "Read" but not "READ"
+	entries := []Entry{
+		{Type: EntryTypeTool, ToolName: "READ", ToolOutput: "contents"},
+		{Type: EntryTypeTool, ToolName: "read", ToolOutput: "contents"},
+		{Type: EntryTypeTool, ToolName: "Read", ToolOutput: "contents"},
+	}
+	result := FilterForSummarization(entries)
+	assert.Len(t, result, 1)
+	assert.Equal(t, "READ", result[0].ToolName)
 }
