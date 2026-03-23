@@ -125,21 +125,6 @@ When disabled, sessions stay local until you manually sync them.`,
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
-		Key:         "notifications",
-		Description: "Team context change notifications",
-		LongDescription: `Controls whether AI coworkers receive notifications when team context
-changes are detected by the daemon after git pull.
-
-When enabled, every 'ox agent <id> <command>' call checks for updated
-team context files and emits a notice to stderr listing changed paths.
-
-When disabled (default), notifications are silently skipped.`,
-		Category:    "Notifications",
-		ValidValues: []string{"on", "off"},
-		Default:     "off",
-		Levels:      []ConfigLevel{ConfigLevelUser},
-	},
-	{
 		Key:         "view_format",
 		Description: "Default session view format",
 		LongDescription: `Controls the default output format for 'ox session view'.
@@ -267,15 +252,6 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			}
 		}
 
-	case "notifications":
-		if userCfg != nil && userCfg.Notifications != nil && userCfg.Notifications.Enabled != nil {
-			if *userCfg.Notifications.Enabled {
-				cv.UserVal = "on"
-			} else {
-				cv.UserVal = "off"
-			}
-		}
-
 	case "view_format":
 		if userCfg != nil && userCfg.ViewFormat != "" {
 			cv.UserVal = userCfg.ViewFormat
@@ -388,13 +364,6 @@ func setUserConfig(key, value string) error {
 		}
 		enabled := value == "on"
 		cfg.ContextGit.AutoPush = &enabled
-
-	case "notifications":
-		if cfg.Notifications == nil {
-			cfg.Notifications = &config.NotificationsConfig{}
-		}
-		enabled := value == "on"
-		cfg.Notifications.Enabled = &enabled
 
 	case "view_format":
 		cfg.ViewFormat = value

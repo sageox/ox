@@ -294,7 +294,7 @@ func ListGitHubDataFiles(ledgerPath string, dataType string) ([]string, error) {
 // ComputeGitHubDataPaths returns sparse checkout patterns for the last N days
 // of GitHub data. Used by ConfigureSparseCheckout() to include recent data.
 func ComputeGitHubDataPaths(days int) []string {
-	now := time.Now()
+	now := time.Now().UTC()
 	seen := make(map[string]bool)
 	var paths []string
 

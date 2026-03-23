@@ -158,7 +158,6 @@ type Daemon struct {
 	issues          *IssueTracker
 	codedb          *CodeDBManager
 	agentWorker     *agentwork.Manager
-	notifications   *NotificationStore
 	whisperRegistry *WhisperRegistry
 
 	// state
@@ -284,9 +283,6 @@ func (d *Daemon) Start() error {
 	// initialize issue tracker for health check system
 	d.issues = NewIssueTracker()
 
-	// initialize notification store for team context change tracking
-	d.notifications = NewNotificationStore(200)
-
 	// initialize whisper store for persistent agent signal delivery
 	if config.FeatureWhisperEnabled() {
 		repoID := config.GetRepoID(d.config.ProjectRoot)
@@ -398,8 +394,6 @@ func (d *Daemon) Start() error {
 	// wire issue tracker so scheduler can report issues needing LLM reasoning
 	d.scheduler.SetIssueTracker(d.issues)
 
-	// wire notification store so scheduler can record team context changes
-	d.scheduler.SetNotificationStore(d.notifications)
 
 	// wire whisper registry so scheduler can emit trigger whispers
 	if d.whisperRegistry != nil {
@@ -662,11 +656,6 @@ func (d *Daemon) Start() error {
 	// set instances handler for agent instance tracking
 	d.server.SetInstancesHandler(func() []InstanceInfo {
 		return d.getAgentInstances()
-	})
-
-	// set notifications handler for team context change queries
-	d.server.SetNotificationsHandler(func(agentID string) ([]ChangeEntry, bool) {
-		return d.notifications.GetNotifications(agentID)
 	})
 
 	// set whisper handler for agent whisper queries

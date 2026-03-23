@@ -93,6 +93,7 @@ func TestMurmurEmptyContent(t *testing.T) {
 }
 
 func TestMurmurJSONInputParsing(t *testing.T) {
+	t.Chdir(t.TempDir())
 	t.Setenv("FEATURE_WHISPER", "true")
 	t.Run("valid JSON with content passes parsing", func(t *testing.T) {
 		cmd := *murmurCmd

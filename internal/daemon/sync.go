@@ -318,9 +318,6 @@ type SyncScheduler struct {
 	// agent work signal channel — notified after successful ledger pull
 	agentWorkSignal chan<- struct{}
 
-	// notification store for team context change tracking
-	notifications *NotificationStore
-
 	// whisper registry for trigger whispers on sync events
 	whisperRegistry *WhisperRegistry
 
@@ -430,13 +427,6 @@ func (s *SyncScheduler) SetAgentWorkSignal(ch chan<- struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.agentWorkSignal = ch
-}
-
-// SetNotificationStore sets the notification store for team context change tracking.
-func (s *SyncScheduler) SetNotificationStore(store *NotificationStore) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.notifications = store
 }
 
 // SetWhisperRegistry sets the whisper registry for trigger whispers on sync events.
@@ -2233,30 +2223,24 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		s.metrics.RecordTeamSync()
 		s.recordActivity()
 
-		// detect changed files for notification system.
+		// emit trigger whispers for team context file changes
 		// Primary team only for now — avoids noise from secondary team contexts.
-		// TODO: expand to all teams when multi-team notification UX is designed.
-		if s.notifications != nil && r.ws.TeamID == s.workspaceRegistry.ProjectTeamID() {
+		if s.whisperRegistry != nil && r.ws.TeamID == s.workspaceRegistry.ProjectTeamID() {
 			if changedFiles := s.detectChangedFiles(r.ws.Path, r.prePullSHA); len(changedFiles) > 0 {
-				s.notifications.RecordChanges(changedFiles, r.ws.TeamID, r.ws.TeamName)
 				s.logger.Debug("team context changes detected",
 					"team", r.ws.TeamName, "count", len(changedFiles))
-
-				// also emit trigger whispers for each changed file
-				if s.whisperRegistry != nil {
-					for _, cf := range changedFiles {
-						id, _ := uuid.NewV7()
-						s.whisperRegistry.Add("ledger", whisperstore.WhisperEntry{
-							ID:         id.String(),
-							Scope:      "ledger",
-							Type:       whisperstore.WhisperTrigger,
-							Source:     "team-context",
-							Topic:      "team-context",
-							Content:    fmt.Sprintf("Team context updated: %s", cf),
-							Importance: whisperstore.ImportanceNormal,
-							CreatedAt:  time.Now(),
-						})
-					}
+				for _, cf := range changedFiles {
+					id, _ := uuid.NewV7()
+					s.whisperRegistry.Add("ledger", whisperstore.WhisperEntry{
+						ID:         id.String(),
+						Scope:      "ledger",
+						Type:       whisperstore.WhisperTrigger,
+						Source:     "team-context",
+						Topic:      "team-context",
+						Content:    fmt.Sprintf("Team context updated: %s", cf),
+						Importance: whisperstore.ImportanceNormal,
+						CreatedAt:  time.Now(),
+					})
 				}
 			}
 		}

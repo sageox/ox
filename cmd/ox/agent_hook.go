@@ -213,6 +213,9 @@ func handleAfterTool(ctx *HookContext) error {
 		slog.Debug("hook: afterTool skipped, no agent ID available")
 		return nil
 	}
+	// emit pending whispers to agent (non-blocking, ~50ms max)
+	emitWhispers(agentID)
+
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil {
 		slog.Debug("hook: afterTool no recording state", "agentID", agentID, "err", err)

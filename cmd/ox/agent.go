@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -215,12 +216,6 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	// fire-and-forget heartbeat with agent ID (non-blocking)
 	if gitRoot := findGitRoot(); gitRoot != "" {
 		Heartbeat(gitRoot, nil, agentID)
-	}
-
-	// check for team context change notifications (non-blocking, ~50ms max)
-	// controlled by user config: `ox config set notifications on` (default: off)
-	if userCfg, _ := config.LoadUserConfig(); userCfg != nil && userCfg.Notifications.AreNotificationsEnabled() {
-		emitTeamContextNotifications(agentID)
 	}
 
 	// check for pending whispers (non-blocking, ~50ms max)
@@ -574,31 +569,6 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// emitTeamContextNotifications checks daemon for pending team context changes.
-// Non-blocking: if daemon is unavailable, silently returns.
-// Called on every ox agent <id> <command> invocation via runWithAgentID().
-func emitTeamContextNotifications(agentID string) {
-	client := daemon.NewClient() // 50ms timeout
-	notifs, err := client.Notifications(agentID)
-	if err != nil || notifs == nil {
-		return
-	}
-
-	if len(notifs.Files) == 0 && !notifs.Stale {
-		return
-	}
-
-	if notifs.Stale {
-		fmt.Fprintln(os.Stderr, "NOTICE: Team context changed significantly. Re-read via `ox agent team-ctx` if relevant to current work.")
-		return
-	}
-
-	fmt.Fprintln(os.Stderr, "NOTICE: Team context updated. Re-read only if relevant to current work:")
-	for _, f := range notifs.Files {
-		fmt.Fprintf(os.Stderr, "  %s\n", f.Path)
-	}
-}
-
 // emitWhispers checks daemon for pending whisper entries.
 // Non-blocking: if daemon is unavailable, silently returns.
 func emitWhispers(agentID string) {
@@ -611,38 +581,25 @@ func emitWhispers(agentID string) {
 		return
 	}
 
-	// group whispers by importance
-	var critical, normal, ambient []string
-	for _, e := range resp.Entries {
-		line := fmt.Sprintf("[%s] %s", e.Topic, e.Content)
-		switch e.Importance {
-		case whisperstore.ImportanceCritical:
-			critical = append(critical, line)
-		case whisperstore.ImportanceNormal:
-			normal = append(normal, line)
-		default:
-			ambient = append(ambient, line)
-		}
+	formatWhispers(os.Stdout, resp.Entries)
+}
+
+// formatWhispers writes whisper entries to w as structured XML.
+// Output goes to stdout so coding agents read it in their context window.
+// Returns true if any whispers were written.
+func formatWhispers(w io.Writer, entries []whisperstore.WhisperEntry) bool {
+	if len(entries) == 0 {
+		return false
 	}
 
-	if len(critical) > 0 {
-		fmt.Fprintln(os.Stderr, "CRITICAL WHISPERS:")
-		for _, line := range critical {
-			fmt.Fprintf(os.Stderr, "  %s\n", line)
-		}
+	fmt.Fprintln(w, "<new-context>")
+	for _, e := range entries {
+		fmt.Fprintf(w, "<entry importance=%q topic=%q source=%q>%s</entry>\n",
+			string(e.Importance), e.Topic, e.Source, e.Content)
 	}
-	if len(normal) > 0 {
-		fmt.Fprintln(os.Stderr, "WHISPERS:")
-		for _, line := range normal {
-			fmt.Fprintf(os.Stderr, "  %s\n", line)
-		}
-	}
-	if len(ambient) > 0 {
-		fmt.Fprintln(os.Stderr, "AMBIENT:")
-		for _, line := range ambient {
-			fmt.Fprintf(os.Stderr, "  %s\n", line)
-		}
-	}
+	fmt.Fprintln(w, "</new-context>")
+
+	return true
 }
 
 // emitDaemonIssueWarnings checks for daemon issues and emits warnings to stderr.
