@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -68,6 +69,9 @@ type SessionFinalizeHandler struct {
 	logger *slog.Logger
 	// skipGit disables git add/commit/push in tests
 	skipGit bool
+	// ledgerMu guards concurrent git operations on the ledger repo.
+	// Shared with SyncScheduler to prevent index.lock races.
+	ledgerMu *sync.Mutex
 	// pidLookup returns the parent PID for a given agent ID from daemon in-memory state.
 	// Used as fallback when .recording.json predates the ParentPID field (rollout compat).
 	// Returns 0 if unknown.
@@ -99,6 +103,11 @@ func (h *SessionFinalizeHandler) SetQualityThresholds(upload, discard float64) {
 // This enables PID-based liveness detection for recordings that predate the ParentPID field.
 func (h *SessionFinalizeHandler) SetPIDLookup(fn func(agentID string) int) {
 	h.pidLookup = fn
+}
+
+// SetLedgerMu sets the shared ledger mutex for git operation serialization.
+func (h *SessionFinalizeHandler) SetLedgerMu(mu *sync.Mutex) {
+	h.ledgerMu = mu
 }
 
 // NewSessionFinalizeHandlerForTest creates a handler with git operations disabled.
@@ -470,6 +479,12 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		return
 	}
 
+	// serialize with daemon's ledger git ops (sync, murmur push, github sync)
+	if h.ledgerMu != nil {
+		h.ledgerMu.Lock()
+		defer h.ledgerMu.Unlock()
+	}
+
 	ledgerPath := payload.LedgerPath
 	sessionName := filepath.Base(payload.SessionDir)
 
@@ -493,15 +508,13 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		return
 	}
 
-	// repair missing LFS objects before push (lost during GC reclone)
-	if repaired, repairErr := gitutil.RepairMissingLFSObjects(context.Background(), ledgerPath); repairErr != nil {
-		h.logger.Warn("lfs repair failed", "err", repairErr)
-	} else if repaired > 0 {
-		h.logger.Info("repaired missing LFS pointers before push", "count", repaired)
-	}
-
-	// git push (best-effort)
-	if err := h.runGit(ledgerPath, "push"); err != nil {
+	// push with retry (best-effort — failures are non-fatal)
+	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
+		AutoResolvePrefixes: []string{"data/github/"},
+		AllowForceOnLFS:     true,
+		RepairLFS:           true,
+		Logger:              h.logger,
+	}); err != nil {
 		h.logger.Warn("git push failed (non-fatal)", "err", err)
 	}
 }

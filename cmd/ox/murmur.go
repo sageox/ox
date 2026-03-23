@@ -62,6 +62,10 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a SageOx project: %w", err)
 	}
 
+	if !config.FeatureWhisperEnabled() {
+		return fmt.Errorf("whisper feature not enabled — set FEATURE_WHISPER=true to use murmurs")
+	}
+
 	// parse input: positional arg or stdin
 	var rawContent string
 	if len(args) > 0 {
@@ -114,6 +118,16 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 	agentID, _ := cmd.Flags().GetString("agent-id")
 	if agentID == "" {
 		agentID = os.Getenv("SAGEOX_AGENT_ID")
+	}
+
+	// rate limit: max 1 murmur per 5 seconds per agent
+	const minMurmurInterval = 5 * time.Second
+	if agentID != "" {
+		lastMurmur := ledger.MostRecentMurmurTime(targetDir, agentID)
+		if !lastMurmur.IsZero() && time.Since(lastMurmur) < minMurmurInterval {
+			return fmt.Errorf("rate limited: max 1 murmur per %s per agent (last: %s ago)",
+				minMurmurInterval, time.Since(lastMurmur).Truncate(time.Millisecond))
+		}
 	}
 
 	// generate UUIDv7
@@ -183,7 +197,8 @@ func commitMurmur(repoDir, relPath, content string) error {
 
 	// --sparse: repos use sparse-checkout; without this flag
 	// git refuses to stage files outside the sparse definition
-	if _, err := gitutil.RunGit(ctx, repoDir, "add", "--sparse", relPath); err != nil {
+	// stage all pending murmurs (not just this one) to batch rapid sequential writes
+	if _, err := gitutil.RunGit(ctx, repoDir, "add", "--sparse", "data/murmurs/"); err != nil {
 		return fmt.Errorf("git add: %w", err)
 	}
 

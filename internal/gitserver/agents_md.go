@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/version"
 )
@@ -144,9 +145,18 @@ func commitAndPushAgentsMD(ctx context.Context, repoPath string) error {
 		return err
 	}
 
-	// push — no --force: team context history must never be rewritten
-	pushCmd := exec.CommandContext(ctx, "git", "-C", repoPath, "push", "--quiet")
-	if err := pushCmd.Run(); err != nil {
+	// push with retry — team context history must never be rewritten
+	ep := endpoint.Get()
+	if err := gitutil.PushWithRetry(ctx, repoPath, gitutil.PushOpts{
+		PrePush: func(repoPath string) error {
+			if ep != "" {
+				if err := RefreshRemoteCredentials(repoPath, ep); err != nil {
+					return fmt.Errorf("credential refresh: %w", err)
+				}
+			}
+			return nil
+		},
+	}); err != nil {
 		return fmt.Errorf("push: %w", err)
 	}
 

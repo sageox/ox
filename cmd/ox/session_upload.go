@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
@@ -16,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
 )
 
@@ -323,127 +323,27 @@ func resolveLedgerPath() (string, error) {
 	return path, nil
 }
 
+// ledgerAutoResolvePrefixes aliases the canonical list from internal/ledger
+// for use by the CLI push path.
+var ledgerAutoResolvePrefixes = ledger.AutoResolvePrefixes
+
 // pushLedger pushes ledger changes to remote with conflict retry.
-// NEVER uses --force. Ledger and team context history must not be rewritten.
-// Conflicts are resolved via pull --rebase, never by overwriting remote history.
-// Retries on transient failures (network, rejection). Fails fast on permanent errors
-// (auth, config) to avoid wasting time on retries that will never succeed.
-// Uses context for timeout control (60s per git operation).
-// ledgerAutoResolvePrefixes lists path prefixes in the ledger where
-// accept-theirs conflict resolution is safe. These directories contain data
-// derived from external sources (GitHub API) that will be re-fetched on the
-// next sync cycle — last-write-wins is correct.
-var ledgerAutoResolvePrefixes = []string{
-	"data/github/",
-}
-
+// Delegates to gitutil.PushWithRetry with ledger-appropriate options:
+// LFS repair, force-with-lease on LFS rejection, auto-resolve for data/github/.
 func pushLedger(ctx context.Context, ledgerPath string) error {
-	// pre-flight: check for lock files and broken rebase state
-	if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
-		return fmt.Errorf("ledger blocked: %w", err)
-	}
-
-	// pre-flight: strip lfs.repositoryformatversion if set by git-lfs
-	// (causes HTTP 403 on push when filter.lfs.required=true is global)
-	gitutil.StripLFSConfig(ledgerPath)
-
-	// pre-flight: repair missing LFS objects that would block push
-	// (lost during GC reclone or interrupted uploads)
-	if repaired, err := gitutil.RepairMissingLFSObjects(ctx, ledgerPath); err != nil {
-		slog.Warn("lfs repair failed", "error", err)
-	} else if repaired > 0 {
-		slog.Info("repaired missing LFS pointers before push", "count", repaired)
-	}
-
-	// ensure remote has current credentials before pushing
+	// resolve endpoint once, before entering the push loop
 	ep := endpoint.GetForProject(findGitRoot())
-	if ep != "" {
-		if err := gitserver.RefreshRemoteCredentials(ledgerPath, ep); err != nil {
-			slog.Debug("remote credential refresh skipped before push", "error", err)
-		}
-	}
-
-	const maxRetries = 3
-	const opTimeout = 60 * time.Second
-
-	// Errors that indicate a permanent failure — retrying won't help.
-	permanentPatterns := []string{
-		"Permission denied",
-		"could not read Username",
-		"Authentication failed",
-		"invalid credentials",
-		"repository not found",
-	}
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		attemptCtx, cancel := context.WithTimeout(ctx, opTimeout)
-		// no --force: conflicts resolved via pull --rebase, never by overwriting remote history
-		outStr, err := gitutil.RunGit(attemptCtx, ledgerPath, "push", "--quiet")
-		cancel()
-		if err == nil {
-			return nil // success
-		}
-
-		// fail fast on permanent errors
-		for _, pattern := range permanentPatterns {
-			if strings.Contains(outStr, pattern) {
-				return fmt.Errorf("git push failed (not retryable): %s", outStr)
-			}
-		}
-
-		// server rejected due to missing LFS objects in history — force push
-		// is safe for ledger repos (append-only session data, not code)
-		if gitutil.IsLFSPushError(outStr) {
-			slog.Info("server rejected push due to missing LFS objects, force pushing")
-			forceCtx, forceCancel := context.WithTimeout(ctx, opTimeout)
-			forceOut, forceErr := gitutil.RunGit(forceCtx, ledgerPath, "push", "--force-with-lease", "--quiet")
-			forceCancel()
-			if forceErr == nil {
-				return nil
-			}
-			slog.Warn("force push also failed", "output", forceOut)
-			return fmt.Errorf("git push failed (LFS missing, force push failed): %s", forceOut)
-		}
-
-		if attempt == maxRetries {
-			return fmt.Errorf("git push failed after %d attempts: %s", maxRetries, outStr)
-		}
-
-		slog.Info("push failed, retrying", "attempt", attempt, "output", outStr)
-
-		// pull --rebase to handle non-fast-forward (most common retry case)
-		if strings.Contains(outStr, "non-fast-forward") || strings.Contains(outStr, "rejected") {
-			// check rebase state before pulling
-			if gitutil.IsRebaseInProgress(ledgerPath) {
-				abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-				_, _ = gitutil.RunGit(abortCtx, ledgerPath, "rebase", "--abort")
-				abortCancel()
-			}
-
-			pullCtx, pullCancel := context.WithTimeout(ctx, opTimeout)
-			pullOut, pullErr := gitutil.RunGit(pullCtx, ledgerPath, "pull", "--rebase", "--autostash", "--quiet")
-			pullCancel()
-			if pullErr != nil {
-				// try accept-theirs for data/github/ conflicts (last-write-wins is safe
-				// since the next sync re-fetches from the API anyway)
-				resolveCtx, resolveCancel := context.WithTimeout(ctx, opTimeout)
-				resolveErr := gitutil.ResolveRebaseAcceptTheirs(resolveCtx, ledgerPath, ledgerAutoResolvePrefixes)
-				resolveCancel()
-				if resolveErr != nil {
-					// can't auto-resolve — abort rebase to avoid leaving repo broken
-					slog.Debug("rebase auto-resolve failed", "error", resolveErr)
-					abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-					_, _ = gitutil.RunGit(abortCtx, ledgerPath, "rebase", "--abort")
-					abortCancel()
-					return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
+	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
+		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
+		AllowForceOnLFS:     true,
+		RepairLFS:           true,
+		PrePush: func(repoPath string) error {
+			if ep != "" {
+				if err := gitserver.RefreshRemoteCredentials(repoPath, ep); err != nil {
+					return fmt.Errorf("credential refresh: %w", err)
 				}
-				slog.Info("auto-resolved rebase conflicts", "strategy", "accept-theirs")
 			}
-		}
-
-		// backoff before retry
-		time.Sleep(time.Duration(attempt) * time.Second)
-	}
-
-	return nil // unreachable
+			return nil
+		},
+	})
 }

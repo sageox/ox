@@ -30,6 +30,14 @@ import (
 	"github.com/sageox/ox/internal/repotools"
 )
 
+// AutoResolvePrefixes lists path prefixes in the ledger where accept-theirs
+// conflict resolution is safe during rebase. These directories contain data
+// derived from external sources (e.g., GitHub API) that will be re-fetched
+// on the next sync cycle — last-write-wins is correct.
+var AutoResolvePrefixes = []string{
+	"data/github/",
+}
+
 // ErrNotProvisioned indicates the ledger has not been provisioned by cloud and cloned.
 var ErrNotProvisioned = errors.New("ledger not provisioned")
 

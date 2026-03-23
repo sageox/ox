@@ -608,6 +608,46 @@ func TestConfigureSparseCheckout_MurmurDoesNotBreakExisting(t *testing.T) {
 	}
 }
 
+func TestMostRecentMurmurTime(t *testing.T) {
+	tmpDir := t.TempDir()
+	now := time.Now().UTC()
+	hourDir := filepath.Join(tmpDir, "data", "murmurs", now.Format("2006-01-02"), fmt.Sprintf("%02d", now.Hour()))
+	if err := os.MkdirAll(hourDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// write a murmur file
+	m := MurmurFile{
+		ID:        "test-1",
+		Timestamp: now.Add(-2 * time.Second),
+		AgentID:   "agent-1",
+		Topic:     "test",
+		Content:   "hello",
+	}
+	data, _ := json.Marshal(m)
+	if err := os.WriteFile(filepath.Join(hourDir, "test-1.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// should find the murmur
+	got := MostRecentMurmurTime(tmpDir, "agent-1")
+	if got.IsZero() {
+		t.Fatal("expected non-zero time")
+	}
+
+	// different agent should not find it
+	got2 := MostRecentMurmurTime(tmpDir, "agent-2")
+	if !got2.IsZero() {
+		t.Fatal("expected zero time for different agent")
+	}
+
+	// empty dir should return zero
+	got3 := MostRecentMurmurTime(t.TempDir(), "agent-1")
+	if !got3.IsZero() {
+		t.Fatal("expected zero time for empty dir")
+	}
+}
+
 func TestDefaultMurmurWindowHours(t *testing.T) {
 	if DefaultMurmurWindowHours != 12 {
 		t.Errorf("DefaultMurmurWindowHours = %d, want 12", DefaultMurmurWindowHours)

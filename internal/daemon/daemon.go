@@ -288,17 +288,19 @@ func (d *Daemon) Start() error {
 	d.notifications = NewNotificationStore(200)
 
 	// initialize whisper store for persistent agent signal delivery
-	repoID := config.GetRepoID(d.config.ProjectRoot)
-	if repoID != "" && projectEndpoint != "" {
-		whisperDBPath := filepath.Join(paths.WhisperDBDir(repoID, projectEndpoint), "whisper.db")
-		ledgerWhisperStore, err := whisperstore.Open(whisperDBPath)
-		if err != nil {
-			d.logger.Warn("failed to open whisper store", "error", err)
-		} else {
-			d.whisperRegistry = NewWhisperRegistry(ledgerWhisperStore, d.logger)
-			// startup maintenance: prune old entries and enforce size limit
-			d.whisperRegistry.Prune(24 * time.Hour)
-			d.whisperRegistry.EnforceMaxSize(10 * 1024 * 1024) // 10MB
+	if config.FeatureWhisperEnabled() {
+		repoID := config.GetRepoID(d.config.ProjectRoot)
+		if repoID != "" && projectEndpoint != "" {
+			whisperDBPath := filepath.Join(paths.WhisperDBDir(repoID, projectEndpoint), "whisper.db")
+			ledgerWhisperStore, err := whisperstore.Open(whisperDBPath)
+			if err != nil {
+				d.logger.Warn("failed to open whisper store", "error", err)
+			} else {
+				d.whisperRegistry = NewWhisperRegistry(ledgerWhisperStore, d.logger)
+				// startup maintenance: prune old entries and enforce size limit
+				d.whisperRegistry.Prune(24 * time.Hour)
+				d.whisperRegistry.EnforceMaxSize(10 * 1024 * 1024) // 10MB
+			}
 		}
 	}
 
@@ -368,6 +370,7 @@ func (d *Daemon) Start() error {
 		d.agentWorker = agentwork.NewManager(runner, d.logger, configLoader, agentWorkSignal, d.config.LedgerPath)
 		sfh := agentwork.NewSessionFinalizeHandler(d.logger)
 		sfh.SetPIDLookup(d.heartbeat.GetAgentPID)
+		sfh.SetLedgerMu(d.scheduler.LedgerMu())
 		// wire quality thresholds from user config
 		awCfg := configLoader()
 		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
@@ -401,6 +404,12 @@ func (d *Daemon) Start() error {
 	// wire whisper registry so scheduler can emit trigger whispers
 	if d.whisperRegistry != nil {
 		d.scheduler.SetWhisperRegistry(d.whisperRegistry)
+	}
+
+	// create murmur relay for converting murmur files to whisper entries
+	if d.whisperRegistry != nil {
+		murmurRelay := NewMurmurRelay(d.whisperRegistry, d.logger)
+		d.scheduler.SetMurmurRelay(murmurRelay)
 	}
 
 	// wire code index manager into scheduler for periodic freshness checks

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -271,87 +270,18 @@ func (m *GitHubSyncManager) handleError(err error) {
 // pushLedger pushes the ledger with retry and conflict resolution.
 // This is the daemon's version — uses shared ledgerMu (already held by caller).
 func (m *GitHubSyncManager) pushLedger(ctx context.Context, ledgerPath string) error {
-	if err := gitutil.IsSafeForGitOps(ledgerPath); err != nil {
-		return fmt.Errorf("ledger blocked: %w", err)
-	}
-
-	gitutil.StripLFSConfig(ledgerPath)
-
-	// repair missing LFS objects that would block push
-	if repaired, err := gitutil.RepairMissingLFSObjects(ctx, ledgerPath); err != nil {
-		m.logger.Warn("lfs repair failed", "error", err)
-	} else if repaired > 0 {
-		m.logger.Info("repaired missing LFS pointers before push", "count", repaired)
-	}
-
-	// refresh credentials
-	ep := endpoint.GetForProject(m.projectRoot)
-	if ep != "" {
-		if err := gitserver.RefreshRemoteCredentials(ledgerPath, ep); err != nil {
-			m.logger.Debug("remote credential refresh skipped", "error", err)
-		}
-	}
-
-	const maxRetries = 3
-	const opTimeout = 60 * time.Second
-
-	permanentPatterns := []string{
-		"Permission denied",
-		"could not read Username",
-		"Authentication failed",
-		"invalid credentials",
-		"repository not found",
-	}
-
-	autoResolvePrefixes := []string{"data/github/"}
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		attemptCtx, cancel := context.WithTimeout(ctx, opTimeout)
-		outStr, err := gitutil.RunGit(attemptCtx, ledgerPath, "push", "--quiet")
-		cancel()
-		if err == nil {
-			return nil
-		}
-
-		for _, pattern := range permanentPatterns {
-			if strings.Contains(outStr, pattern) {
-				return fmt.Errorf("git push failed (not retryable): %s", outStr)
-			}
-		}
-
-		if attempt == maxRetries {
-			return fmt.Errorf("git push failed after %d attempts: %s", maxRetries, outStr)
-		}
-
-		m.logger.Info("push failed, retrying", "attempt", attempt, "output", outStr)
-
-		if strings.Contains(outStr, "non-fast-forward") || strings.Contains(outStr, "rejected") {
-			if gitutil.IsRebaseInProgress(ledgerPath) {
-				abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-				_, _ = gitutil.RunGit(abortCtx, ledgerPath, "rebase", "--abort")
-				abortCancel()
-			}
-
-			pullCtx, pullCancel := context.WithTimeout(ctx, opTimeout)
-			pullOut, pullErr := gitutil.RunGit(pullCtx, ledgerPath, "pull", "--rebase", "--autostash", "--quiet")
-			pullCancel()
-			if pullErr != nil {
-				resolveCtx, resolveCancel := context.WithTimeout(ctx, opTimeout)
-				resolveErr := gitutil.ResolveRebaseAcceptTheirs(resolveCtx, ledgerPath, autoResolvePrefixes)
-				resolveCancel()
-				if resolveErr != nil {
-					m.logger.Debug("rebase auto-resolve failed", "error", resolveErr)
-					abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-					_, _ = gitutil.RunGit(abortCtx, ledgerPath, "rebase", "--abort")
-					abortCancel()
-					return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
+	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
+		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
+		RepairLFS:           true,
+		Logger:              m.logger,
+		PrePush: func(repoPath string) error {
+			ep := endpoint.GetForProject(m.projectRoot)
+			if ep != "" {
+				if err := gitserver.RefreshRemoteCredentials(repoPath, ep); err != nil {
+					return fmt.Errorf("credential refresh: %w", err)
 				}
-				m.logger.Info("auto-resolved rebase conflicts", "strategy", "accept-theirs")
 			}
-		}
-
-		time.Sleep(time.Duration(attempt) * time.Second)
-	}
-
-	return nil
+			return nil
+		},
+	})
 }

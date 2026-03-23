@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/ledger"
 )
 
 func init() {
@@ -88,11 +91,13 @@ func fixSessionUncommitted(ledgerPath string, count int) checkResult {
 			fmt.Sprintf("git commit error: %s", errStr))
 	}
 
-	// no --force: ledger history must never be rewritten
-	if out, err := exec.Command("git", "-C", ledgerPath, "push").CombinedOutput(); err != nil {
+	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
+		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
+		RepairLFS:           true,
+	}); err != nil {
 		return WarningCheck(name,
 			fmt.Sprintf("committed %d file(s) but push failed", count),
-			fmt.Sprintf("git push error: %s", strings.TrimSpace(string(out))))
+			fmt.Sprintf("push error: %s", err))
 	}
 
 	return PassedCheck(name, fmt.Sprintf("committed and pushed %d session file(s)", count))

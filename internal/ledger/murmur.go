@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -85,6 +86,37 @@ func WriteMurmur(baseDir string, m MurmurFile) (string, error) {
 	}
 
 	return relPath, nil
+}
+
+// MostRecentMurmurTime returns the timestamp of the most recent murmur file
+// from the given agent in the current hour partition. Returns zero time if none found.
+func MostRecentMurmurTime(baseDir, agentID string) time.Time {
+	now := time.Now().UTC()
+	dir := filepath.Join(baseDir, "data", "murmurs", now.Format("2006-01-02"), fmt.Sprintf("%02d", now.Hour()))
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return time.Time{}
+	}
+
+	var latest time.Time
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var m MurmurFile
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		if m.AgentID == agentID && m.Timestamp.After(latest) {
+			latest = m.Timestamp
+		}
+	}
+	return latest
 }
 
 // ReadMurmursInWindow reads all murmur files within the given time window.

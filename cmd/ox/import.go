@@ -550,73 +550,18 @@ func commitAndPushDocImport(tcPath, ep, docID, metaPath, srcPointerPath, textPoi
 
 // pushTeamContext pushes team context changes to remote with conflict retry.
 // Takes endpoint explicitly since team context path lacks .sageox/ for discovery.
-// Same retry semantics as pushLedger: 3 attempts, pull --rebase on rejection.
+// No auto-resolve — team context conflicts require manual resolution.
 func pushTeamContext(ctx context.Context, tcPath, ep string) error {
-	if err := gitutil.IsSafeForGitOps(tcPath); err != nil {
-		return fmt.Errorf("team context blocked: %w", err)
-	}
-
-	gitutil.StripLFSConfig(tcPath)
-
-	if ep != "" {
-		if err := gitserver.RefreshRemoteCredentials(tcPath, ep); err != nil {
-			slog.Debug("remote credential refresh skipped before push", "error", err)
-		}
-	}
-
-	const maxRetries = 3
-	const opTimeout = 60 * time.Second
-
-	permanentPatterns := []string{
-		"Permission denied",
-		"could not read Username",
-		"Authentication failed",
-		"invalid credentials",
-		"repository not found",
-	}
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		attemptCtx, cancel := context.WithTimeout(ctx, opTimeout)
-		outStr, err := gitutil.RunGit(attemptCtx, tcPath, "push", "--quiet")
-		cancel()
-		if err == nil {
+	return gitutil.PushWithRetry(ctx, tcPath, gitutil.PushOpts{
+		PrePush: func(repoPath string) error {
+			if ep != "" {
+				if err := gitserver.RefreshRemoteCredentials(repoPath, ep); err != nil {
+					return fmt.Errorf("credential refresh: %w", err)
+				}
+			}
 			return nil
-		}
-
-		for _, pattern := range permanentPatterns {
-			if strings.Contains(outStr, pattern) {
-				return fmt.Errorf("git push failed (not retryable): %s", outStr)
-			}
-		}
-
-		if attempt == maxRetries {
-			return fmt.Errorf("git push failed after %d attempts: %s", maxRetries, outStr)
-		}
-
-		slog.Info("push failed, retrying", "attempt", attempt, "output", outStr)
-
-		if strings.Contains(outStr, "non-fast-forward") || strings.Contains(outStr, "rejected") {
-			if gitutil.IsRebaseInProgress(tcPath) {
-				abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-				_, _ = gitutil.RunGit(abortCtx, tcPath, "rebase", "--abort")
-				abortCancel()
-			}
-
-			pullCtx, pullCancel := context.WithTimeout(ctx, opTimeout)
-			pullOut, pullErr := gitutil.RunGit(pullCtx, tcPath, "pull", "--rebase", "--autostash", "--quiet")
-			pullCancel()
-			if pullErr != nil {
-				abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-				_, _ = gitutil.RunGit(abortCtx, tcPath, "rebase", "--abort")
-				abortCancel()
-				return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
-			}
-		}
-
-		time.Sleep(time.Duration(attempt) * time.Second)
-	}
-
-	return nil
+		},
+	})
 }
 
 // slugify converts a string to a filesystem-safe directory name.

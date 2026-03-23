@@ -11,6 +11,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	session "github.com/sageox/ox/internal/session"
 )
@@ -1216,52 +1217,28 @@ func (c *SessionPushCheck) Run(ctx context.Context) CheckResult {
 		}
 	}
 
-	// attempt to push with retries
-	const maxRetries = 3
-	var lastErr error
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if err := c.pushToRemote(ledgerPath); err != nil {
-			lastErr = err
-			// classify by stderr content embedded before the colon in the wrapped error
-			errStr := err.Error()
-			isAuthErr := strings.Contains(errStr, "Permission denied") ||
-				strings.Contains(errStr, "authentication failed") ||
-				strings.Contains(errStr, "could not read Username") ||
-				strings.Contains(errStr, "HTTP 401") ||
-				strings.Contains(errStr, "fatal: 401")
-			if isAuthErr {
-				return CheckResult{
-					Name:    c.Name(),
-					Status:  StatusFail,
-					Message: "push failed (auth error)",
-					Fix:     "Check git credentials - run `ox login` to refresh",
-				}
+	// push with retry (PushWithRetry handles retries, backoff, and conflict resolution)
+	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
+		AutoResolvePrefixes: []string{"data/github/"},
+		AllowForceOnLFS:     true,
+		RepairLFS:           true,
+	}); err != nil {
+		errStr := err.Error()
+		// classify error for actionable fix messages
+		if strings.Contains(errStr, "Permission denied") ||
+			strings.Contains(errStr, "Authentication failed") ||
+			strings.Contains(errStr, "could not read Username") {
+			return CheckResult{
+				Name:    c.Name(),
+				Status:  StatusFail,
+				Message: "push failed (auth error)",
+				Fix:     "Check git credentials - run `ox login` to refresh",
 			}
-			// 403 = server rejected — could be permissions or stale token, don't retry
-			isForbidden := strings.Contains(errStr, "HTTP 403") ||
-				strings.Contains(errStr, "fatal: 403")
-			if isForbidden {
-				return CheckResult{
-					Name:    c.Name(),
-					Status:  StatusFail,
-					Message: "push rejected (HTTP 403)",
-					Fix:     "Server rejected push - check remote permissions or run `ox login` to refresh token",
-				}
-			}
-			// backoff before retry
-			if attempt < maxRetries {
-				time.Sleep(time.Duration(attempt) * time.Second)
-			}
-			continue
 		}
-		lastErr = nil
-		break
-	}
-	if lastErr != nil {
 		return CheckResult{
 			Name:    c.Name(),
 			Status:  StatusFail,
-			Message: fmt.Sprintf("push failed after %d retries", maxRetries),
+			Message: "push failed after retries",
 			Fix:     fmt.Sprintf("Run `git -C %s push` to retry manually", ledgerPath),
 		}
 	}
@@ -1333,15 +1310,6 @@ func (c *SessionPushCheck) countCommitsAhead(ledgerPath string) int {
 	return count
 }
 
-// pushToRemote pushes the ledger to remote.
-func (c *SessionPushCheck) pushToRemote(ledgerPath string) error {
-	cmd := exec.Command("git", "-C", ledgerPath, "push")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s: %w", strings.TrimSpace(string(output)), err)
-	}
-	return nil
-}
 
 // ledgerPathFromProject derives the ledger path from a project root.
 // Returns empty string if project config cannot be loaded or has no repo ID.

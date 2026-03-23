@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -168,11 +171,12 @@ func deleteSessionFromLedger(ledgerPath, sessionName, sessionDir string) error {
 		return fmt.Errorf("git commit: %s: %w", string(out), err)
 	}
 
-	// push — no --force: ledger history must never be rewritten
-	gitPush := exec.Command("git", "push")
-	gitPush.Dir = ledgerPath
-	if out, err := gitPush.CombinedOutput(); err != nil {
-		return fmt.Errorf("git push: %s: %w", string(out), err)
+	// push with retry — no --force: ledger history must never be rewritten
+	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
+		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
+		RepairLFS:           true,
+	}); err != nil {
+		return fmt.Errorf("git push: %w", err)
 	}
 
 	return nil

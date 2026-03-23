@@ -45,6 +45,7 @@ import (
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/manifest"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/version"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -322,6 +323,9 @@ type SyncScheduler struct {
 
 	// whisper registry for trigger whispers on sync events
 	whisperRegistry *WhisperRegistry
+
+	// murmur relay for converting murmur files to whisper entries
+	murmurRelay *MurmurRelay
 }
 
 // syncError tracks a sync error with timestamp.
@@ -440,6 +444,13 @@ func (s *SyncScheduler) SetWhisperRegistry(r *WhisperRegistry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.whisperRegistry = r
+}
+
+// SetMurmurRelay sets the murmur relay for converting murmur files to whisper entries.
+func (s *SyncScheduler) SetMurmurRelay(r *MurmurRelay) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.murmurRelay = r
 }
 
 // captureHEAD returns the current HEAD SHA for a git repo.
@@ -772,9 +783,13 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 
 		case <-readTicker.C:
 			s.pullChanges(ctx)
+			readTicker.Reset(jitteredDuration(s.config.SyncIntervalRead, 0.10))
 
 		case <-teamContextChan:
 			s.pullTeamContexts(ctx)
+			if teamContextTicker != nil {
+				teamContextTicker.Reset(jitteredDuration(s.config.TeamContextSyncInterval, 0.10))
+			}
 
 		case <-heartbeatTicker.C:
 			s.writeHeartbeats()
@@ -1227,8 +1242,45 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		}
 	}
 
+	// relay murmurs from ledger after pull
+	if s.murmurRelay != nil {
+		if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" {
+			s.murmurRelay.RelayFromPath(l.Path, "ledger")
+		}
+	}
+
+	// push any unpushed murmur commits (batched by sync cycle)
+	if s.whisperRegistry != nil {
+		if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
+			s.pushMurmurCommits(ctx, l.Path)
+		}
+	}
+
 	s.logger.Debug("pull complete", "duration", duration)
 	return nil
+}
+
+// pushMurmurCommits pushes any local murmur commits to the ledger remote.
+// Called during the ledger sync cycle for natural batching (~60s).
+// Non-fatal: failures are logged but don't block the sync cycle.
+func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string) {
+	// check for unpushed murmur commits
+	out, err := gitutil.RunGit(ctx, ledgerPath, "log", "--oneline", "origin/main..HEAD", "--", "data/murmurs/")
+	if err != nil || strings.TrimSpace(out) == "" {
+		return
+	}
+
+	s.logger.Debug("pushing unpushed murmur commits", "path", ledgerPath)
+
+	s.ledgerMu.Lock()
+	defer s.ledgerMu.Unlock()
+
+	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
+		AutoResolvePrefixes: []string{"data/murmurs/"},
+		Logger:              s.logger,
+	}); err != nil {
+		s.logger.Warn("murmur push failed (non-fatal)", "error", err)
+	}
 }
 
 // detectForcePush checks if local and remote have diverged (force push scenario).
@@ -2146,6 +2198,23 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			s.logger.Warn("failed to update config last sync", "team", r.ws.TeamName, "error", err)
 		}
 		s.recordSyncState(ctx, r.ws.Path)
+
+		// open team whisper store and relay murmurs after successful sync
+		if s.whisperRegistry != nil && s.murmurRelay != nil {
+			ep := s.workspaceRegistry.GetEndpoint()
+			teamWhisperDir := paths.TeamWhisperDBDir(r.ws.TeamID, ep)
+			if teamWhisperDir != "" {
+				dbPath := filepath.Join(teamWhisperDir, "whisper.db")
+				teamStore, err := whisperstore.Open(dbPath)
+				if err != nil {
+					s.logger.Warn("failed to open team whisper store", "team", r.ws.TeamName, "error", err)
+				} else {
+					s.whisperRegistry.AddTeamStore(r.ws.TeamID, teamStore)
+					s.murmurRelay.RelayFromPath(r.ws.Path, "team")
+				}
+			}
+		}
+
 		syncedCount++
 
 		s.recordSync("team_context", r.ws.ID, r.duration, 0)
@@ -3046,6 +3115,11 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 // gcPushUnpushedCommits pushes any local commits not yet on the remote.
 // Returns nil if there are no unpushed commits or if push succeeds.
 // Returns an error if unpushed commits exist and push fails.
+//
+// NOTE: This intentionally does NOT use gitutil.PushWithRetry. The GC push
+// injects credentials directly into the remote URL and uses "push origin HEAD",
+// which is fundamentally different from PushWithRetry's "push --quiet" approach.
+// The credential injection + URL restore pattern is GC-specific (reclone context).
 func (s *SyncScheduler) gcPushUnpushedCommits(ctx context.Context, ws WorkspaceState) error {
 	// count unpushed commits against the upstream tracking branch
 	countOutput, err := gitutil.RunGit(ctx, ws.Path, "rev-list", "--count", "@{upstream}..HEAD")

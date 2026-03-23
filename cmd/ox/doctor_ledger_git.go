@@ -268,19 +268,15 @@ func checkLedgerBranchStatus(fix bool) checkResult {
 }
 
 // fixLedgerBranchAhead pushes local ledger commits to remote.
-// Falls back to pull --rebase + push if the remote has diverged (stale tracking info).
 func fixLedgerBranchAhead(ledgerPath string, aheadCount int) checkResult {
-	pushCmd := exec.Command("git", "-C", ledgerPath, "push")
-	output, err := pushCmd.CombinedOutput()
-	if err != nil {
-		errStr := strings.TrimSpace(string(output))
-		// if push rejected because remote has new commits, try pull --rebase then push
-		if strings.Contains(errStr, "rejected") || strings.Contains(errStr, "fetch first") || strings.Contains(errStr, "non-fast-forward") {
-			return fixLedgerBranchDiverged(ledgerPath, aheadCount, 0)
-		}
+	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
+		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
+		AllowForceOnLFS:     true,
+		RepairLFS:           true,
+	}); err != nil {
 		return FailedCheck("Ledger branch status",
 			"push failed",
-			fmt.Sprintf("git push error: %s", errStr))
+			fmt.Sprintf("push error: %s", err))
 	}
 	return PassedCheck("Ledger branch status",
 		fmt.Sprintf("pushed %d commit(s)", aheadCount))
@@ -313,36 +309,16 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 
 // fixLedgerBranchDiverged reconciles a diverged ledger by rebasing then pushing.
 func fixLedgerBranchDiverged(ledgerPath string, aheadCount, behindCount int) checkResult {
-	// pull --rebase first to linearize history
-	// --autostash: uncommitted local changes must not block the pull
-	pullCmd := exec.Command("git", "-C", ledgerPath, "pull", "--rebase", "--autostash")
-	pullOutput, err := pullCmd.CombinedOutput()
-	if err != nil {
-		errStr := strings.TrimSpace(string(pullOutput))
-		// try accept-theirs for data/github/ conflicts
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		resolveErr := gitutil.ResolveRebaseAcceptTheirs(ctx, ledgerPath, ledgerAutoResolvePrefixes)
-		cancel()
-		if resolveErr != nil {
-			slog.Debug("rebase auto-resolve failed in reconcile", "error", resolveErr)
-			_ = exec.Command("git", "-C", ledgerPath, "rebase", "--abort").Run()
-			return FailedCheck("Ledger branch status",
-				"rebase failed during reconcile (aborted)",
-				fmt.Sprintf("Conflict during rebase (aborted to restore clean state): %s", errStr))
-		}
-		slog.Info("auto-resolved rebase conflicts during reconcile", "strategy", "accept-theirs")
-	}
-
-	// then push
-	pushCmd := exec.Command("git", "-C", ledgerPath, "push")
-	pushOutput, err := pushCmd.CombinedOutput()
-	if err != nil {
-		errStr := strings.TrimSpace(string(pushOutput))
+	// PushWithRetry handles pull --rebase + auto-resolve + push in one call
+	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
+		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
+		AllowForceOnLFS:     true,
+		RepairLFS:           true,
+	}); err != nil {
 		return FailedCheck("Ledger branch status",
-			"push failed after rebase",
-			fmt.Sprintf("git push error: %s", errStr))
+			"reconcile failed",
+			fmt.Sprintf("push error: %s", err))
 	}
-
 	return PassedCheck("Ledger branch status",
 		fmt.Sprintf("reconciled: rebased %d + pushed %d commit(s)", behindCount, aheadCount))
 }
