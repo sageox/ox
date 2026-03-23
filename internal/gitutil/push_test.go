@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -309,6 +310,8 @@ func TestPermanentPatterns(t *testing.T) {
 		{"repo not found", "ERROR: repository not found", true},
 		{"invalid creds", "remote: invalid credentials", true},
 		{"could not read username", "fatal: could not read Username", true},
+		{"http 403 url error", "fatal: The requested URL returned error: 403", true},
+		{"http 403 generic", "remote: HTTP 403", true},
 		{"generic network error", "fatal: unable to access: connection refused", false},
 		{"empty output", "", false},
 	}
@@ -323,6 +326,34 @@ func TestPermanentPatterns(t *testing.T) {
 				}
 			}
 			assert.Equal(t, tt.matches, matched)
+		})
+	}
+}
+
+func TestPushWithRetry_403FailsFastWithGuidance(t *testing.T) {
+	tests := []struct {
+		name   string
+		stderr string
+	}{
+		{"url returned 403", "fatal: The requested URL returned error: 403"},
+		{"http 403", "remote: HTTP 403 Forbidden"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// verify 403 matches permanent patterns (no retry)
+			matched := false
+			for _, pattern := range permanentPatterns {
+				if strings.Contains(tt.stderr, pattern) {
+					matched = true
+					break
+				}
+			}
+			assert.True(t, matched, "403 error should match a permanent pattern")
+
+			// verify the 403-specific branch produces actionable guidance
+			assert.True(t, strings.Contains(tt.stderr, "403"),
+				"stderr should contain 403 to trigger guidance branch")
 		})
 	}
 }

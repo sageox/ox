@@ -88,14 +88,28 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 func finalizeIncrementalSession(projectRoot string, state *session.RecordingState, rawPath string, adapter adapters.Adapter, result *agentSessionResult) (*agentSessionResult, error) {
 	// final drain: read any remaining entries since last hook
 	if reader, ok := adapter.(adapters.IncrementalReader); ok && state.SessionFile != "" {
-		entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, state.SourceOffset)
+		// use StartOffset as minimum read position to skip pre-session content
+		readOffset := state.SourceOffset
+		if state.StartOffset > 0 && readOffset < state.StartOffset {
+			readOffset = state.StartOffset
+		}
+
+		// diagnostic: log source file state for debugging truncation issues
+		if fi, statErr := os.Stat(state.SessionFile); statErr == nil {
+			slog.Info("finalize: final drain", "source", state.SessionFile, "file_size", fi.Size(), "read_offset", readOffset, "start_offset", state.StartOffset)
+		}
+
+		entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, readOffset)
 		if readErr != nil {
 			slog.Debug("finalize: incremental read failed", "error", readErr)
 		} else if len(entries) > 0 {
+			slog.Info("finalize: drain result", "entries_read", len(entries), "new_offset", newOffset)
+
+			// filter entries by timestamp — strict After() to prevent boundary leaks
 			if !state.StartedAt.IsZero() {
 				filtered := make([]adapters.RawEntry, 0, len(entries))
 				for _, e := range entries {
-					if !e.Timestamp.Before(state.StartedAt) {
+					if e.Timestamp.After(state.StartedAt) {
 						filtered = append(filtered, e)
 					}
 				}

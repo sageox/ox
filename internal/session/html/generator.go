@@ -318,6 +318,20 @@ func convertToTemplateData(t *session.StoredSession) *TemplateData {
 
 // cssRootVars generates the :root CSS variables from theme constants.
 func cssRootVars() string {
+	lightVars := `
+    --color-primary: ` + theme.HexLightPrimary + `;
+    --color-secondary: ` + theme.HexLightSecondary + `;
+    --color-accent: ` + theme.HexLightAccent + `;
+    --color-text: ` + theme.HexLightText + `;
+    --color-text-dim: ` + theme.HexLightTextDim + `;
+    --color-bg-dark: ` + theme.HexLightBgLight + `;
+    --color-bg-card: #FFFFFF;
+    --color-border: #D0D0D0;
+    --color-error: ` + theme.HexLightError + `;
+    --color-info: ` + theme.HexLightInfo + `;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,0.1);
+    --shadow-md: 0 4px 6px rgba(0,0,0,0.15);`
+
 	return `:root {
   --color-primary: ` + theme.HexPrimary + `;
   --color-secondary: ` + theme.HexSecondary + `;
@@ -344,34 +358,10 @@ func cssRootVars() string {
   color-scheme: dark light;
 }
 @media (prefers-color-scheme: light) {
-  :root {
-    --color-primary: ` + theme.HexLightPrimary + `;
-    --color-secondary: ` + theme.HexLightSecondary + `;
-    --color-accent: ` + theme.HexLightAccent + `;
-    --color-text: ` + theme.HexLightText + `;
-    --color-text-dim: ` + theme.HexLightTextDim + `;
-    --color-bg-dark: ` + theme.HexLightBgLight + `;
-    --color-bg-card: #FFFFFF;
-    --color-border: #D0D0D0;
-    --color-error: ` + theme.HexLightError + `;
-    --color-info: ` + theme.HexLightInfo + `;
-    --shadow-sm: 0 1px 2px rgba(0,0,0,0.1);
-    --shadow-md: 0 4px 6px rgba(0,0,0,0.15);
+  :root {` + lightVars + `
   }
 }
-body.light-theme {
-  --color-primary: ` + theme.HexLightPrimary + `;
-  --color-secondary: ` + theme.HexLightSecondary + `;
-  --color-accent: ` + theme.HexLightAccent + `;
-  --color-text: ` + theme.HexLightText + `;
-  --color-text-dim: ` + theme.HexLightTextDim + `;
-  --color-bg-dark: ` + theme.HexLightBgLight + `;
-  --color-bg-card: #FFFFFF;
-  --color-border: #D0D0D0;
-  --color-error: ` + theme.HexLightError + `;
-  --color-info: ` + theme.HexLightInfo + `;
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.1);
-  --shadow-md: 0 4px 6px rgba(0,0,0,0.15);
+body.light-theme {` + lightVars + `
 }
 `
 }

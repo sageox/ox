@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -220,7 +221,8 @@ func TestHandleAfterTool_AllEntriesFilteredByTimestamp(t *testing.T) {
 	assert.Equal(t, 0, nonHeaderCount, "no entries should be written when all are filtered by timestamp")
 }
 
-// P1 #8: timestamp boundary — entry exactly equal to StartedAt should be included
+// timestamp boundary — entry exactly equal to StartedAt should be EXCLUDED
+// (strict After filter prevents pre-session content from leaking at the boundary)
 func TestHandleAfterTool_TimestampBoundary(t *testing.T) {
 	projectRoot, agentID, sourceFile := setupHandleAfterToolTest(t)
 
@@ -256,8 +258,223 @@ func TestHandleAfterTool_TimestampBoundary(t *testing.T) {
 		}
 	}
 
-	// entry at exact StartedAt should be INCLUDED (!Before means "equal or after")
-	assert.GreaterOrEqual(t, len(entries), 1, "entry at exact StartedAt should be included")
+	// entry at exact StartedAt should be EXCLUDED (strict After prevents boundary leaks)
+	assert.Equal(t, 0, len(entries), "entry at exact StartedAt should be excluded to prevent pre-session content leak")
+}
+
+// --- Sub-bug 2a: pre-session content leak ---
+
+// TestHandleAfterTool_PreStartContentLeak_ByOffset verifies that entries
+// existing in the source file BEFORE recording started are excluded using
+// StartOffset (byte offset at recording start). This is the primary fix
+// for pre-session content leaking into raw.jsonl.
+//
+// Scenario: Claude Code reuses a JSONL file across sessions. The file already
+// has entries from a prior conversation when ox starts recording. Without
+// StartOffset, those pre-existing entries leak into the new session's raw.jsonl.
+func TestHandleAfterTool_PreStartContentLeak_ByOffset(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := t.TempDir()
+
+	sageoxDir := filepath.Join(projectRoot, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+	cfg := `{"config_version":"2","repo_id":"test-repo-leak"}`
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
+
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("HOME", cacheDir)
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+
+	// create source JSONL with pre-existing content (from a prior session)
+	// use a timestamp AFTER what will be StartedAt to ensure offset-based
+	// filtering is what catches this, not timestamp-based filtering
+	sourceDir := t.TempDir()
+	sourceFile := filepath.Join(sourceDir, "session.jsonl")
+
+	// these entries have future timestamps but exist in the file BEFORE recording starts
+	futureTs := time.Now().Add(1 * time.Hour)
+	preContent := `{"type":"user","timestamp":"` + futureTs.Format(time.RFC3339Nano) + `","message":{"role":"user","content":"Old session message"}}` + "\n"
+	preContent += `{"type":"assistant","timestamp":"` + futureTs.Add(time.Second).Format(time.RFC3339Nano) + `","message":{"role":"assistant","content":[{"type":"text","text":"Old response"}]}}` + "\n"
+	require.NoError(t, os.WriteFile(sourceFile, []byte(preContent), 0644))
+
+	// record file size BEFORE recording starts — this is StartOffset
+	preInfo, err := os.Stat(sourceFile)
+	require.NoError(t, err)
+	startOffset := preInfo.Size()
+
+	agentID := "OxLeak1"
+	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+		AgentID:     agentID,
+		AdapterName: "claude-code",
+		Username:    "testuser",
+	})
+	require.NoError(t, err)
+
+	// set SessionFile and StartOffset in recording state
+	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
+		s.SessionFile = sourceFile
+		s.StartOffset = startOffset
+	}))
+
+	require.NoError(t, writeRawHeader(projectRoot, state))
+
+	// now append new session content AFTER start
+	newTime := time.Now().Add(1 * time.Second)
+	appendClaudeEntries(t, sourceFile, newTime,
+		`{"type":"user","timestamp":"`+newTime.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"New session message"}}`,
+	)
+
+	ctx := &HookContext{
+		Phase:       phaseAfterTool,
+		ProjectRoot: projectRoot,
+		Marker:      &SessionMarker{AgentID: agentID},
+	}
+	require.NoError(t, handleAfterTool(ctx))
+
+	state, err = session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	lines := readJSONLFile(t, rawPath)
+
+	var entries []map[string]any
+	for _, line := range lines {
+		if line["type"] != "header" {
+			entries = append(entries, line)
+		}
+	}
+
+	// pre-existing entries must NOT appear
+	for _, entry := range entries {
+		content, _ := entry["content"].(string)
+		assert.NotEqual(t, "Old session message", content,
+			"pre-session content must not leak into raw.jsonl")
+		assert.NotEqual(t, "Old response", content,
+			"pre-session content must not leak into raw.jsonl")
+	}
+
+	// new session entry must be present
+	require.Len(t, entries, 1, "only the new session entry should be captured")
+	assert.Equal(t, "New session message", entries[0]["content"])
+}
+
+// TestHandleAfterTool_LegacyTimestampFilter verifies that for legacy recording
+// states (StartOffset=0), the timestamp filter uses strict After() to exclude
+// entries at exactly the start time.
+func TestHandleAfterTool_LegacyTimestampFilter(t *testing.T) {
+	projectRoot, agentID, sourceFile := setupHandleAfterToolTest(t)
+
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+
+	// verify this is a legacy state (StartOffset=0)
+	assert.Equal(t, int64(0), state.StartOffset,
+		"test setup: recording should have zero StartOffset (legacy)")
+
+	// write entry with timestamp exactly at StartedAt
+	exactStart := state.StartedAt
+	appendClaudeEntries(t, sourceFile, exactStart,
+		`{"type":"user","timestamp":"`+exactStart.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"Exact boundary message"}}`,
+	)
+
+	ctx := &HookContext{
+		Phase:       phaseAfterTool,
+		ProjectRoot: projectRoot,
+		Marker:      &SessionMarker{AgentID: agentID},
+	}
+	require.NoError(t, handleAfterTool(ctx))
+
+	state, err = session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	lines := readJSONLFile(t, rawPath)
+
+	var entries []map[string]any
+	for _, line := range lines {
+		if line["type"] != "header" {
+			entries = append(entries, line)
+		}
+	}
+
+	// with legacy states (StartOffset=0), exact-boundary entries should be EXCLUDED
+	// to prevent pre-session content from leaking in
+	for _, entry := range entries {
+		content, _ := entry["content"].(string)
+		assert.NotEqual(t, "Exact boundary message", content,
+			"exact-boundary entry must be excluded for legacy states (StartOffset=0)")
+	}
+}
+
+// --- Sub-bug 2b: truncation at ExitPlanMode ---
+
+// TestFinalizeIncrementalSession_CapturesAllEntries verifies that the final
+// drain in finalizeIncrementalSession captures entries appended after the last
+// incremental hook drain (simulating post-plan implementation content).
+func TestFinalizeIncrementalSession_CapturesAllEntries(t *testing.T) {
+	projectRoot, agentID, sourceFile := setupHandleAfterToolTest(t)
+
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+
+	// phase 1: incremental drain via handleAfterTool
+	after1 := state.StartedAt.Add(1 * time.Second)
+	appendClaudeEntries(t, sourceFile, after1,
+		`{"type":"user","timestamp":"`+after1.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"Plan mode question"}}`,
+		`{"type":"assistant","timestamp":"`+after1.Add(time.Second).Format(time.RFC3339Nano)+`","message":{"role":"assistant","content":[{"type":"text","text":"Here is the plan."}]}}`,
+	)
+
+	ctx := &HookContext{
+		Phase:       phaseAfterTool,
+		ProjectRoot: projectRoot,
+		Marker:      &SessionMarker{AgentID: agentID},
+	}
+	require.NoError(t, handleAfterTool(ctx))
+
+	// phase 2: more entries appended AFTER the last drain (post-plan implementation)
+	after2 := state.StartedAt.Add(5 * time.Second)
+	appendClaudeEntries(t, sourceFile, after2,
+		`{"type":"user","timestamp":"`+after2.Format(time.RFC3339Nano)+`","message":{"role":"user","content":"Now implement it"}}`,
+		`{"type":"assistant","timestamp":"`+after2.Add(time.Second).Format(time.RFC3339Nano)+`","message":{"role":"assistant","content":[{"type":"text","text":"Implementing now."}]}}`,
+	)
+
+	// reload state (offset was updated by first drain)
+	state, err = session.LoadRecordingStateForAgent(projectRoot, agentID)
+	require.NoError(t, err)
+
+	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+	adapter, adapterErr := adapters.GetAdapter(state.AdapterName)
+	require.NoError(t, adapterErr)
+
+	result := &agentSessionResult{}
+	_, err = finalizeIncrementalSession(projectRoot, state, rawPath, adapter, result)
+	require.NoError(t, err)
+
+	// read final raw.jsonl and verify ALL entries present
+	lines := readJSONLFile(t, rawPath)
+
+	var entries []map[string]any
+	for _, line := range lines {
+		if line["type"] != "header" {
+			entries = append(entries, line)
+		}
+	}
+
+	// should have 4 entries: plan question + plan answer + implement question + implement answer
+	require.GreaterOrEqual(t, len(entries), 4,
+		"final drain must capture post-plan entries; got %d entries", len(entries))
+
+	// verify the post-plan entries are present
+	contents := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if c, ok := e["content"].(string); ok {
+			contents = append(contents, c)
+		}
+	}
+	assert.Contains(t, contents, "Now implement it",
+		"post-plan user message must be captured")
+	assert.Contains(t, contents, "Implementing now.",
+		"post-plan assistant response must be captured")
 }
 
 func TestHandleAfterTool_NonIncrementalAdapterNoops(t *testing.T) {

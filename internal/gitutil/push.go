@@ -66,6 +66,8 @@ var permanentPatterns = []string{
 	"Authentication failed",
 	"invalid credentials",
 	"repository not found",
+	"The requested URL returned error: 403",
+	"HTTP 403",
 }
 
 // PushWithRetry pushes a git repo to its remote with pre-flight checks,
@@ -118,6 +120,9 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 		// fail fast on permanent errors
 		for _, pattern := range permanentPatterns {
 			if strings.Contains(outStr, pattern) {
+				if strings.Contains(outStr, "403") {
+					return fmt.Errorf("git push failed: access denied (HTTP 403). Try 'ox login' to refresh credentials, or verify you have push access to this repository: %s", outStr)
+				}
 				return fmt.Errorf("git push failed (not retryable): %s", outStr)
 			}
 		}

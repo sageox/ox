@@ -242,7 +242,33 @@ func handleAfterTool(ctx *HookContext) error {
 		slog.Debug("hook: discovered session file", "file", sf)
 	}
 
-	entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, state.SourceOffset)
+	// staleness check: if the source file disappeared or shrank (e.g., Claude Code
+	// created a new file after compaction), try to rediscover it
+	if fi, statErr := os.Stat(state.SessionFile); statErr != nil || fi.Size() < state.SourceOffset {
+		if statErr != nil {
+			slog.Info("hook: session file missing, attempting rediscovery", "file", state.SessionFile)
+		} else {
+			slog.Info("hook: session file shrank, attempting rediscovery", "file", state.SessionFile, "size", fi.Size(), "offset", state.SourceOffset)
+		}
+		sf, findErr := adapter.FindSessionFile(agentID, state.StartedAt)
+		if findErr == nil && sf != "" && sf != state.SessionFile {
+			slog.Info("hook: rediscovered session file", "old", state.SessionFile, "new", sf)
+			state.SessionFile = sf
+			_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+				s.SessionFile = sf
+				s.SourceOffset = 0 // reset offset for new file
+			})
+			state.SourceOffset = 0
+		}
+	}
+
+	// use StartOffset as minimum read position to skip pre-session content
+	readOffset := state.SourceOffset
+	if state.StartOffset > 0 && readOffset < state.StartOffset {
+		readOffset = state.StartOffset
+	}
+
+	entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, readOffset)
 	if readErr != nil {
 		slog.Debug("hook: incremental read failed", "error", readErr)
 		return nil // non-fatal, will catch up at stop
@@ -252,11 +278,12 @@ func handleAfterTool(ctx *HookContext) error {
 		return nil
 	}
 
-	// filter entries after session start time
+	// filter entries by timestamp — strict After() to prevent boundary leaks
+	// for legacy states (StartOffset=0) where offset-based filtering isn't available
 	if !state.StartedAt.IsZero() {
 		filtered := make([]adapters.RawEntry, 0, len(entries))
 		for _, e := range entries {
-			if !e.Timestamp.Before(state.StartedAt) {
+			if e.Timestamp.After(state.StartedAt) {
 				filtered = append(filtered, e)
 			}
 		}
