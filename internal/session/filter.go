@@ -1,8 +1,6 @@
 package session
 
-import (
-	"strings"
-)
+import ss "github.com/sageox/ox/pkg/sessionsummary"
 
 // SessionFilterMode represents the level of session recording.
 // Values: "none", "all"
@@ -27,22 +25,8 @@ func (m SessionFilterMode) ShouldRecord() bool {
 	return m != SessionFilterModeNone && m != ""
 }
 
-// noise commands that are always filtered out (unless they fail)
-var noiseCommands = []string{
-	"ls", "pwd", "cd", "clear",
-	"cat", "head", "tail", "less", "more",
-	"echo", "printf",
-	"which", "whereis", "type",
-	"env", "export",
-}
-
 // IsNoiseCommand checks if a command is noise (low-value unless it fails).
+// Delegates to pkg/sessionsummary.
 func IsNoiseCommand(cmd string) bool {
-	cmdLower := strings.ToLower(strings.TrimSpace(cmd))
-	for _, pattern := range noiseCommands {
-		if strings.HasPrefix(cmdLower, pattern+" ") || cmdLower == pattern {
-			return true
-		}
-	}
-	return false
+	return ss.IsNoiseCommand(cmd)
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/useragent"
+	ss "github.com/sageox/ox/pkg/sessionsummary"
 )
 
 const (
@@ -21,189 +22,24 @@ const (
 )
 
 // SummaryPromptGuidelines contains the shared guidelines for session summarization.
-// Used by both the resummary command and should match the server-side prompt.
-const SummaryPromptGuidelines = `## Output Format
+// Delegates to pkg/sessionsummary for the canonical prompt.
+const SummaryPromptGuidelines = ss.SummaryPromptGuidelines
 
-Create a JSON object with this structure:
-
-{
-  "title": "Short descriptive title (5-10 words)",
-  "summary": "One paragraph executive summary describing what was accomplished",
-  "key_actions": [
-    "Action 1 that was taken",
-    "Action 2 that was taken"
-  ],
-  "outcome": "success|partial|failed",
-  "topics_found": ["topic1", "topic2"],
-  "diagrams": ["mermaid diagram code if any were created"],
-  "chapter_titles": ["Problem Discussion", "Root Cause Analysis", "Implementation", "Testing & Verification"],
-  "aha_moments": [
-    {
-      "seq": 7,
-      "role": "user|assistant",
-      "type": "question|insight|decision|breakthrough|synthesis",
-      "highlight": "The exact quote or key text from this moment",
-      "why": "Brief explanation of why this was a pivotal moment"
-    }
-  ],
-  "sageox_insights": [
-    {
-      "seq": 12,
-      "topic": "react-patterns",
-      "insight": "What SageOx guidance was applied",
-      "impact": "The outcome or value it provided"
-    }
-  ],
-  "quality_score": 0.75,
-  "score_reason": "New feature with architectural decision and test coverage"
-}
-
-## Chapter Titles Guidelines
-
-Generate 3-8 short chapter titles (2-4 words each) that narrate the session's progression.
-Each title corresponds to a conversation phase (roughly one per user turn or topic shift).
-Good titles read like a story outline: "Problem Discovery", "Root Cause Analysis", "Design Decision", "Implementation", "Testing".
-Keep titles concise and action-oriented. Omit if the session is too short for meaningful chapters.
-
-## Aha Moments Guidelines
-
-Identify **3-5 pivotal moments** where collaborative intelligence emerged.
-Less is better - only capture truly impactful moments.
-
-**IMPORTANT**: Human questions and insights are often MORE valuable than AI insights.
-When a human asks a thoughtful question that redirects the conversation toward a better outcome,
-that's a key moment. Prioritize capturing human contributions when they're insightful.
-
-Types of moments:
-- **question**: A question (often from human) that unlocked a better direction
-- **insight**: A realization that changed the approach
-- **decision**: A key architectural or design decision
-- **breakthrough**: Solving a blocking problem
-- **synthesis**: Combining ideas into something better
-
-The seq field should match the message sequence number. The role is "user" or "assistant".
-
-## SageOx Insights Guidelines
-
-Identify moments where **SageOx guidance** provided unique value. Look for explicit attributions:
-- "Based on SageOx domain guidance..."
-- "SageOx's team pattern suggests..."
-- "Following SageOx best practices for..."
-- "SageOx guidance on [topic] indicates..."
-
-For each insight, capture:
-- **seq**: Message number where the insight was applied
-- **topic**: Domain area (e.g., "react-patterns", "api-design", "testing")
-- **insight**: What guidance was applied
-- **impact**: The value it provided (avoided mistakes, saved time, better architecture)
-
-Only include moments where SageOx guidance demonstrably improved the outcome.
-If no SageOx attributions are present in the session, leave sageox_insights empty.
-
-## Quality Score Guidelines
-
-Rate the session's value to the team on a 0.0-1.0 scale. This determines whether the session
-is shared with the team (uploaded to ledger) or kept locally/discarded.
-
-**Score high (0.7-1.0):**
-- Architectural decisions or design rationale documented
-- Bugs found with root cause analysis
-- Reusable patterns or approaches discovered
-- Knowledge that would save a future coworker time
-
-**Score medium (0.3-0.7):**
-- Routine feature implementation with some decisions
-- Bug fixes without broader insights
-- Configuration or setup with team-relevant details
-
-**Score low (0.0-0.3):**
-- Routine maintenance (version bumps, formatting, rebasing)
-- Abandoned sessions (started, backed out, no real work)
-- Boilerplate-only (just ran prime, asked one question, left)
-- Repetitive work already captured in a prior session
-
-The score_reason should be a single sentence explaining the rating.
-`
-
-// SummarizeRequest contains the session data to summarize.
-type SummarizeRequest struct {
-	AgentID   string           `json:"agent_id"`
-	AgentType string           `json:"agent_type"`
-	Model     string           `json:"model,omitempty"`
-	Entries   []SummarizeEntry `json:"entries"`
-}
-
-// SummarizeEntry is a simplified entry for summarization.
-type SummarizeEntry struct {
-	Type      string `json:"type"`
-	Content   string `json:"content"`
-	ToolName  string `json:"tool_name,omitempty"`
-	Timestamp string `json:"timestamp,omitempty"`
-}
-
-// AhaMoment captures a pivotal point in the conversation where key insight emerged.
-// These moments document collaborative intelligence - the interplay between
-// human intuition/direction and AI exploration/synthesis.
-type AhaMoment struct {
-	Seq       int    `json:"seq"`       // message sequence number for navigation
-	Role      string `json:"role"`      // user, assistant, or system
-	Type      string `json:"type"`      // question, insight, decision, breakthrough, synthesis
-	Highlight string `json:"highlight"` // the key text/quote from this moment
-	Why       string `json:"why"`       // brief explanation of why this was important
-}
-
-// SageoxInsight captures moments where SageOx guidance provided unique value.
-// These are explicitly attributed in the conversation using phrases like
-// "Based on SageOx guidance..." and document the product's contribution.
-type SageoxInsight struct {
-	Seq     int    `json:"seq"`     // message sequence number for navigation
-	Topic   string `json:"topic"`   // domain/topic area (e.g., "react-patterns", "api-design")
-	Insight string `json:"insight"` // what guidance was applied
-	Impact  string `json:"impact"`  // the outcome or value it provided
-}
-
-// ChapterSummary is a structured chapter for summary.json.
-// Computed from the raw JSONL by the grouping algorithm, enriched with
-// LLM-generated titles when available. Any tool can consume these
-// without re-implementing the grouping logic.
-type ChapterSummary struct {
-	ID         int            `json:"id"`                    // 1-based chapter number
-	Title      string         `json:"title"`                 // LLM or heuristic title
-	StartSeq   int            `json:"start_seq"`             // first message seq in this chapter
-	EndSeq     int            `json:"end_seq"`               // last message seq in this chapter
-	ToolCounts map[string]int `json:"tool_counts,omitempty"` // aggregated tool usage {"Read": 5, "Edit": 3}
-	TotalTools int            `json:"total_tools"`           // total tool calls in chapter
-	HasEdits   bool           `json:"has_edits"`             // true if chapter contains file modifications
-}
-
-// FileSummary records a file modified during the session.
-// Extracted from Edit/Write tool calls in the raw JSONL.
-type FileSummary struct {
-	Path    string `json:"path"`              // shortened file path
-	Added   int    `json:"added"`             // lines added
-	Removed int    `json:"removed,omitempty"` // lines removed
-}
-
-// SummarizeResponse contains the LLM-generated summary plus computed metadata.
-// The LLM produces: title, summary, key_actions, outcome, topics_found,
-// chapter_titles, aha_moments, sageox_insights.
-// The CLI computes and appends: chapters, files_changed.
-type SummarizeResponse struct {
-	Title          string           `json:"title"`                     // short descriptive title for the session
-	Summary        string           `json:"summary"`                   // one paragraph executive summary
-	KeyActions     []string         `json:"key_actions"`               // bullet points of key actions taken
-	Outcome        string           `json:"outcome"`                   // success/partial/failed
-	TopicsFound    []string         `json:"topics_found"`              // topics detected during session
-	FinalPlan      string           `json:"final_plan,omitempty"`      // final plan/architecture from session
-	Diagrams       []string         `json:"diagrams,omitempty"`        // extracted mermaid diagrams
-	ChapterTitles  []string         `json:"chapter_titles,omitempty"`  // LLM-generated narrative chapter titles
-	Chapters       []ChapterSummary `json:"chapters,omitempty"`        // structured chapter data (computed from JSONL)
-	FilesChanged   []FileSummary    `json:"files_changed,omitempty"`   // files modified during session (computed from JSONL)
-	AhaMoments     []AhaMoment      `json:"aha_moments,omitempty"`     // pivotal moments of collaborative intelligence
-	SageoxInsights []SageoxInsight  `json:"sageox_insights,omitempty"` // moments where SageOx guidance provided value
-	QualityScore   float64          `json:"quality_score"`             // 0.0-1.0 session value for team sharing
-	ScoreReason    string           `json:"score_reason,omitempty"`    // brief explanation of the quality score
-}
+// Type aliases — all consumers continue using session.SummarizeResponse etc.
+type (
+	SummarizeResponse = ss.SummarizeResponse
+	SummarizeRequest  = ss.SummarizeRequest
+	SummarizeEntry    = ss.SummarizeEntry
+	AhaMoment         = ss.AhaMoment
+	SageoxInsight     = ss.SageoxInsight
+	ChapterSummary    = ss.ChapterSummary
+	FileSummary       = ss.FileSummary
+	AgentSummary      = ss.AgentSummary
+	Decision          = ss.Decision
+	ActionItem        = ss.ActionItem
+	OpenQuestion      = ss.OpenQuestion
+	TechnicalContext  = ss.TechnicalContext
+)
 
 // Summarize calls the SageOx API to generate an LLM summary of a session.
 // If endpointURL is non-empty, uses that endpoint for auth and API calls;
@@ -266,274 +102,57 @@ func Summarize(entries []Entry, agentID, agentType, model, endpointURL string) (
 }
 
 // buildSummarizeRequest converts entries to the API request format.
-// Filters out low-value exploratory tool calls to reduce noise for the LLM.
+// Delegates filtering and construction to pkg/sessionsummary.
 func buildSummarizeRequest(entries []Entry, agentID, agentType, model string) *SummarizeRequest {
-	filtered := FilterForSummarization(entries)
-
-	req := &SummarizeRequest{
-		AgentID:   agentID,
-		AgentType: agentType,
-		Model:     model,
-		Entries:   make([]SummarizeEntry, 0, len(filtered)),
-	}
-
-	for _, e := range filtered {
-		se := SummarizeEntry{
-			Type:     string(e.Type),
-			Content:  e.Content,
-			ToolName: e.ToolName,
-		}
-		if !e.Timestamp.IsZero() {
-			se.Timestamp = e.Timestamp.Format(time.RFC3339)
-		}
-		req.Entries = append(req.Entries, se)
-	}
-
-	return req
+	return ss.BuildSummarizeRequest(entriesToPkg(entries), agentID, agentType, model)
 }
 
-// readOnlyTools are tools that only read/search without modifying state.
-// Successful calls to these are low-value noise for summarization.
-var readOnlyTools = map[string]bool{
-	"read":      true,
-	"Read":      true,
-	"glob":      true,
-	"Glob":      true,
-	"grep":      true,
-	"Grep":      true,
-	"WebFetch":  true,
-	"WebSearch": true,
-	"webfetch":  true,
-	"websearch": true,
-}
-
-// FilterForSummarization removes low-value tool entries from session data
-// before sending to the LLM summarizer. Keeps raw.jsonl complete for
-// auditability while reducing noise in the summarization input.
-//
-// Filtered out (when successful):
-//   - Read-only tools: Read, Glob, Grep, WebFetch, WebSearch
-//   - Bash commands that are noise: ls, pwd, cat, head, tail, etc.
-//
-// Always kept:
-//   - All user and assistant messages (the human-AI dialog)
-//   - System messages
-//   - Write/Edit tool calls (actual changes)
-//   - Failed tool calls (important for understanding debugging)
-//   - Bash commands that modify state
+// FilterForSummarization removes low-value tool entries from session data.
+// Delegates to pkg/sessionsummary.
 func FilterForSummarization(entries []Entry) []Entry {
-	if len(entries) == 0 {
-		return entries
-	}
-
-	filtered := make([]Entry, 0, len(entries))
-	for _, e := range entries {
-		if e.Type != EntryTypeTool {
-			filtered = append(filtered, e)
-			continue
-		}
-
-		// keep tool entries that errored (useful for understanding debugging)
-		if hasToolError(e) {
-			filtered = append(filtered, e)
-			continue
-		}
-
-		// filter read-only tools
-		if readOnlyTools[e.ToolName] {
-			continue
-		}
-
-		// filter noise bash/Bash commands
-		toolLower := strings.ToLower(e.ToolName)
-		if toolLower == "bash" || toolLower == "execute" {
-			if IsNoiseCommand(e.ToolInput) {
-				continue
-			}
-		}
-
-		filtered = append(filtered, e)
-	}
-
-	return filtered
-}
-
-// hasToolError checks if a tool entry indicates a failure.
-func hasToolError(e Entry) bool {
-	output := e.ToolOutput
-	if output == "" {
-		output = e.Content
-	}
-	if output == "" {
-		return false
-	}
-	return detectError(output)
-}
-
-// detectError checks content for error indicators.
-func detectError(content string) bool {
-	contentLower := strings.ToLower(content)
-	for _, pattern := range []string{
-		"error:", "failed", "fatal:", "panic:", "exception",
-	} {
-		if strings.Contains(contentLower, pattern) {
-			return true
-		}
-	}
-	if strings.Contains(contentLower, "exit code") && !strings.Contains(contentLower, "exit code 0") {
-		return true
-	}
-	return false
+	return pkgToEntries(ss.FilterForSummarization(entriesToPkg(entries)))
 }
 
 // BuildSummaryPrompt builds a prompt for the calling agent to generate a session summary.
-// The agent receives this prompt in the JSON output and produces the summary itself,
-// avoiding a server-side API call.
-// If ledgerSessionDir is non-empty, a step is added instructing the agent to push the
-// summary to the ledger via `ox session push-summary`.
+// Delegates to pkg/sessionsummary.
 func BuildSummaryPrompt(entries []Entry, rawPath, ledgerSessionDir string) string {
-	var sb strings.Builder
-
-	sb.WriteString("# Summarize Session\n\n")
-	sb.WriteString("Analyze the following session and generate a summary JSON object.\n\n")
-
-	// shared guidelines
-	sb.WriteString(SummaryPromptGuidelines)
-	sb.WriteString("\n")
-
-	// reference the raw session file on disk instead of embedding all entries
-	// (the agent already has the session in its context window)
-	sb.WriteString("## Session to Analyze\n\n")
-	fmt.Fprintf(&sb, "Read the session recording at: `%s`\n\n", rawPath)
-	fmt.Fprintf(&sb, "The file is JSONL format with %d entries. Each line is a JSON object with `type`, `content`, and optional `tool_name` fields.\n", len(entries))
-	sb.WriteString("Focus on user/assistant dialog and write/edit tool calls. Skip read/glob/grep tool entries — they are exploratory noise.\n\n")
-
-	sb.WriteString("## Instructions\n\n")
-	sb.WriteString("1. Read the session recording file at the path above\n")
-	sb.WriteString("2. Identify the main goal and what was accomplished\n")
-	sb.WriteString("3. Find the pivotal aha moments (questions, insights, decisions)\n")
-	sb.WriteString("4. Generate the JSON with all required fields from the Output Format above\n")
-	sb.WriteString("5. Save the summary JSON to a temporary file (e.g., `/tmp/ox-summary.json` or `.ox-summary.json` in the workspace root)\n")
-
-	// if ledger session dir is available, add push instruction
-	if ledgerSessionDir != "" {
-		fmt.Fprintf(&sb, "6. Push summary to ledger by running: `ox session push-summary --file <path-to-summary-file> --session-dir %s`\n", ledgerSessionDir)
-		sb.WriteString("   Replace `<path-to-summary-file>` with the actual path where you saved the summary in step 5\n")
-	}
-
-	return sb.String()
+	return ss.BuildSummaryPrompt(entriesToPkg(entries), rawPath, ledgerSessionDir)
 }
-
-// localSummaryTopicMaxLen is the max runes to keep from the first user message
-// when extracting a topic hint for the local summary.
-const localSummaryTopicMaxLen = 120
 
 // LocalSummary generates a simple local summary without API call.
-// Used as fallback when API is unavailable.
-// Extracts the first substantive user message as a topic hint so the summary
-// conveys what the session was about, not just stats.
+// Delegates to pkg/sessionsummary.
 func LocalSummary(entries []Entry) string {
-	if len(entries) == 0 {
-		return "Empty session"
-	}
-
-	// count message types and find first substantive user message
-	var userCount, assistantCount, toolCount int
-	var tools []string
-	toolSet := make(map[string]bool)
-	var firstUserMsg string
-
-	for _, e := range entries {
-		switch e.Type {
-		case EntryTypeUser:
-			userCount++
-			if firstUserMsg == "" {
-				msg := strings.TrimSpace(e.Content)
-				// skip skill invocations (e.g. "/ox-session-start") as topic hints
-				if len(msg) > 0 && !isSkillInvocation(msg) {
-					firstUserMsg = msg
-				}
-			}
-		case EntryTypeAssistant:
-			assistantCount++
-		case EntryTypeTool:
-			toolCount++
-			if e.ToolName != "" && !toolSet[e.ToolName] {
-				toolSet[e.ToolName] = true
-				tools = append(tools, e.ToolName)
-			}
-		}
-	}
-
-	var sb strings.Builder
-
-	// lead with topic hint from first user message
-	if firstUserMsg != "" {
-		topic := extractTopicHint(firstUserMsg)
-		if topic != "" {
-			sb.WriteString(topic)
-			sb.WriteString("\n\n")
-		}
-	}
-
-	// stats line
-	var parts []string
-	parts = append(parts, fmt.Sprintf("%d user messages, %d assistant responses", userCount, assistantCount))
-	if toolCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d tool calls", toolCount))
-	}
-	if len(tools) > 0 {
-		if len(tools) > 5 {
-			parts = append(parts, fmt.Sprintf("Tools: %s, and %d more", strings.Join(tools[:5], ", "), len(tools)-5))
-		} else {
-			parts = append(parts, fmt.Sprintf("Tools: %s", strings.Join(tools, ", ")))
-		}
-	}
-	sb.WriteString(strings.Join(parts, ". "))
-
-	return sb.String()
+	return ss.LocalSummary(entriesToPkg(entries))
 }
 
-// extractTopicHint takes the first user message and returns a concise topic line.
-// Strips markdown headers, takes only the first line/sentence, and truncates.
-func extractTopicHint(msg string) string {
-	// take first non-empty line
-	var line string
-	for _, l := range strings.Split(msg, "\n") {
-		l = strings.TrimSpace(l)
-		// skip markdown headers and empty lines
-		if l == "" || strings.HasPrefix(l, "#") {
-			continue
+// entriesToPkg converts internal SessionEntry slice to pkg Entry slice.
+func entriesToPkg(entries []Entry) []ss.Entry {
+	out := make([]ss.Entry, len(entries))
+	for i, e := range entries {
+		out[i] = ss.Entry{
+			Timestamp:  e.Timestamp,
+			Type:       string(e.Type),
+			Content:    e.Content,
+			ToolName:   e.ToolName,
+			ToolInput:  e.ToolInput,
+			ToolOutput: e.ToolOutput,
 		}
-		line = l
-		break
 	}
-	if line == "" {
-		return ""
-	}
-
-	// truncate to max runes, preserving word boundaries
-	runes := []rune(line)
-	if len(runes) > localSummaryTopicMaxLen {
-		// find last space before limit
-		truncAt := localSummaryTopicMaxLen
-		for i := localSummaryTopicMaxLen; i > localSummaryTopicMaxLen/2; i-- {
-			if runes[i] == ' ' {
-				truncAt = i
-				break
-			}
-		}
-		line = string(runes[:truncAt]) + "\u2026"
-	}
-
-	return line
+	return out
 }
 
-// isSkillInvocation returns true if the message looks like a slash-command
-// skill invocation (e.g. "/ox-session-start", "/commit"). These are not
-// meaningful topic hints for session summaries.
-func isSkillInvocation(msg string) bool {
-	first := strings.SplitN(msg, "\n", 2)[0]
-	first = strings.TrimSpace(first)
-	return strings.HasPrefix(first, "/")
+// pkgToEntries converts pkg Entry slice back to internal SessionEntry slice.
+func pkgToEntries(entries []ss.Entry) []Entry {
+	out := make([]Entry, len(entries))
+	for i, e := range entries {
+		out[i] = Entry{
+			Timestamp:  e.Timestamp,
+			Type:       SessionEntryType(e.Type),
+			Content:    e.Content,
+			ToolName:   e.ToolName,
+			ToolInput:  e.ToolInput,
+			ToolOutput: e.ToolOutput,
+		}
+	}
+	return out
 }
