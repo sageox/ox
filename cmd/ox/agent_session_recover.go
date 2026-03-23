@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 
 	"github.com/sageox/ox/internal/agentinstance"
-	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
@@ -204,12 +203,9 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 				slog.Warn("LFS upload failed during recovery", "error", uploadErr)
 				_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			} else {
-				recoverEndpoint := endpoint.GetForProject(projectRoot)
-				username := getAuthenticatedUsername(recoverEndpoint)
-				meta := lfs.NewSessionMeta(sessionName, username, state.AgentID, state.AdapterName, state.StartedAt).
+				username := getAuthenticatedUsername(endpoint.GetForProject(projectRoot))
+				meta := sessionMetaBase(sessionName, username, state.AgentID, state.AdapterName, state.StartedAt, projectRoot).
 					EntryCount(entryCount).
-					UserID(auth.GetUserID(recoverEndpoint)).
-					RepoID(getRepoIDOrDefault(projectRoot)).
 					StopReason(session.StopReasonRecovered).
 					WithFiles(fileRefs).
 					Build()

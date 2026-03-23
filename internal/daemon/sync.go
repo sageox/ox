@@ -1275,9 +1275,16 @@ func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string
 	s.ledgerMu.Lock()
 	defer s.ledgerMu.Unlock()
 
+	ep := s.workspaceRegistry.GetEndpoint()
 	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: []string{"data/murmurs/"},
 		Logger:              s.logger,
+		PrePush: func(repoPath string) error {
+			if ep != "" {
+				return gitserver.RefreshRemoteCredentials(repoPath, ep)
+			}
+			return nil
+		},
 	}); err != nil {
 		s.logger.Warn("murmur push failed (non-fatal)", "error", err)
 	}
@@ -2199,20 +2206,25 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		}
 		s.recordSyncState(ctx, r.ws.Path)
 
-		// open team whisper store and relay murmurs after successful sync
+		// open team whisper store (once per team) and relay murmurs after successful sync
 		if s.whisperRegistry != nil && s.murmurRelay != nil {
-			ep := s.workspaceRegistry.GetEndpoint()
-			teamWhisperDir := paths.TeamWhisperDBDir(r.ws.TeamID, ep)
-			if teamWhisperDir != "" {
-				dbPath := filepath.Join(teamWhisperDir, "whisper.db")
-				teamStore, err := whisperstore.Open(dbPath)
-				if err != nil {
-					s.logger.Warn("failed to open team whisper store", "team", r.ws.TeamName, "error", err)
-				} else {
-					s.whisperRegistry.AddTeamStore(r.ws.TeamID, teamStore)
-					s.murmurRelay.RelayFromPath(r.ws.Path, "team")
+			if !s.whisperRegistry.HasTeamStore(r.ws.TeamID) {
+				ep := s.workspaceRegistry.GetEndpoint()
+				teamWhisperDir := paths.TeamWhisperDBDir(r.ws.TeamID, ep)
+				if teamWhisperDir != "" {
+					dbPath := filepath.Join(teamWhisperDir, "whisper.db")
+					if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err == nil {
+						teamStore, err := whisperstore.Open(dbPath)
+						if err != nil {
+							s.logger.Warn("failed to open team whisper store", "team", r.ws.TeamName, "error", err)
+						} else {
+							s.whisperRegistry.AddTeamStore(r.ws.TeamID, teamStore)
+						}
+					}
 				}
 			}
+			// always relay murmurs (even if store was already registered)
+			s.murmurRelay.RelayFromPath(r.ws.Path, "team")
 		}
 
 		syncedCount++

@@ -10,9 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 )
@@ -305,12 +303,9 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 	}
 
 	// build and write meta.json
-	retryEndpoint := endpoint.GetForProject(projectRoot)
-	meta := lfs.NewSessionMeta(orphan.SessionName, orphan.Meta.Username, orphan.Meta.AgentID, orphan.Meta.AgentType, orphan.Meta.CreatedAt).
+	meta := sessionMetaBase(orphan.SessionName, orphan.Meta.Username, orphan.Meta.AgentID, orphan.Meta.AgentType, orphan.Meta.CreatedAt, projectRoot).
 		Model(orphan.Meta.Model).
 		EntryCount(orphan.EntryCount).
-		UserID(auth.GetUserID(retryEndpoint)).
-		RepoID(orphan.Meta.RepoID).
 		StopReason(session.StopReasonRecovered).
 		WithFiles(fileRefs).
 		Build()

@@ -104,6 +104,25 @@ func TestWhisperRegistryRemoveCursor(t *testing.T) {
 	}
 }
 
+func TestWhisperRegistryHasTeamStore(t *testing.T) {
+	registry := NewWhisperRegistry(nil, nil)
+
+	if registry.HasTeamStore("team-1") {
+		t.Error("expected HasTeamStore to return false for unregistered team")
+	}
+
+	// nil store is accepted by AddTeamStore — sufficient for map lookup testing
+	registry.AddTeamStore("team-1", nil)
+
+	if !registry.HasTeamStore("team-1") {
+		t.Error("expected HasTeamStore to return true after AddTeamStore")
+	}
+
+	if registry.HasTeamStore("team-2") {
+		t.Error("expected HasTeamStore to return false for different team")
+	}
+}
+
 func TestWhisperRegistryUnknownScope(t *testing.T) {
 	ledger := openTestStore(t)
 	r := NewWhisperRegistry(ledger, nil)

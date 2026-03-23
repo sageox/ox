@@ -42,6 +42,14 @@ func (r *WhisperRegistry) AddTeamStore(teamID string, store *whisperstore.Store)
 	r.teamStores[teamID] = store
 }
 
+// HasTeamStore returns true if a team whisper store is already registered.
+func (r *WhisperRegistry) HasTeamStore(teamID string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	_, ok := r.teamStores[teamID]
+	return ok
+}
+
 // Add routes entries to the correct store based on scope.
 func (r *WhisperRegistry) Add(scope string, entries ...whisperstore.WhisperEntry) error {
 	if len(entries) == 0 {
