@@ -209,13 +209,35 @@ func discussionContentHash(dirPath string) string {
 	return contentHash(parts...)
 }
 
+// categorizeAnnotations groups annotations into fact categories aligned with
+// DiscussionFactsPrompt output (decisions, learnings, open_questions, action_items).
+func categorizeAnnotations(af *discussion.AnnotationsFile) (decisions, learnings, actionItems, openQuestions []string) {
+	if af == nil {
+		return
+	}
+	for _, a := range af.Annotations {
+		switch a.Type {
+		case discussion.AnnotationDecision:
+			decisions = append(decisions, a.Content)
+		case discussion.AnnotationActionItem:
+			actionItems = append(actionItems, a.Content)
+		case discussion.AnnotationDisagreement, discussion.AnnotationOpenQuestion:
+			openQuestions = append(openQuestions, a.Content)
+		case discussion.AnnotationInsight, discussion.AnnotationLearning:
+			learnings = append(learnings, a.Content)
+		}
+	}
+	return
+}
+
 // extractFactsFromSummaryJSON generates fact output directly from server-generated
 // structured data (summary.json + annotations.json), skipping the LLM entirely.
-// Pure data transformation -- no network calls.
+// Pure data transformation — no network calls.
 //
-// When AgentSummary exists in summary.json, its pre-categorized facts are used as the
-// primary source (aligned with DiscussionFactsPrompt categories). Annotations supplement.
-// Falls back to chapter-based extraction when AgentSummary is nil.
+// When AgentSummary exists in summary.json, its pre-categorized facts are used
+// directly (the server pipeline already incorporates annotations when building
+// AgentSummary, so annotations are NOT re-appended to avoid duplicates).
+// Falls back to annotation + chapter-based extraction when AgentSummary is nil.
 func extractFactsFromSummaryJSON(d discussionInput) (string, error) {
 	summary, err := discussion.LoadSummary(d.SummaryJSONDir)
 	if err != nil {
@@ -225,55 +247,30 @@ func extractFactsFromSummaryJSON(d discussionInput) (string, error) {
 		return "", fmt.Errorf("summary.json is empty or has no chapters")
 	}
 
-	// annotations are optional -- some discussions won't have them yet
-	annotations, err := discussion.LoadAnnotations(d.SummaryJSONDir)
-	if err != nil {
-		slog.Debug("annotations.json not loadable, proceeding without", "dir", d.DirName, "error", err)
-	}
-
 	var decisions, learnings, actionItems, openQuestions, keyContext []string
 
 	if summary.AgentSummary != nil {
 		// primary path: use pre-categorized facts from server pipeline
+		// server already incorporates annotations into AgentSummary, so we
+		// don't re-append annotations here to avoid duplicates
 		decisions = append(decisions, summary.AgentSummary.Decisions...)
 		learnings = append(learnings, summary.AgentSummary.Learnings...)
 		openQuestions = append(openQuestions, summary.AgentSummary.OpenQuestions...)
 		actionItems = append(actionItems, summary.AgentSummary.ActionItems...)
 		keyContext = append(keyContext, summary.AgentSummary.KeyContext...)
-
-		// supplement with annotations (may contain items not in AgentSummary)
-		if annotations != nil {
-			for _, a := range annotations.Annotations {
-				switch a.Type {
-				case discussion.AnnotationDecision:
-					decisions = append(decisions, a.Content)
-				case discussion.AnnotationActionItem:
-					actionItems = append(actionItems, a.Content)
-				case discussion.AnnotationDisagreement, discussion.AnnotationOpenQuestion:
-					openQuestions = append(openQuestions, a.Content)
-				case discussion.AnnotationInsight, discussion.AnnotationLearning:
-					learnings = append(learnings, a.Content)
-				}
-			}
-		}
 	} else {
 		// fallback: extract from annotations and chapters when no AgentSummary
-		if annotations != nil {
-			for _, a := range annotations.Annotations {
-				switch a.Type {
-				case discussion.AnnotationDecision:
-					decisions = append(decisions, a.Content)
-				case discussion.AnnotationActionItem:
-					actionItems = append(actionItems, a.Content)
-				case discussion.AnnotationDisagreement, discussion.AnnotationOpenQuestion:
-					openQuestions = append(openQuestions, a.Content)
-				case discussion.AnnotationInsight, discussion.AnnotationLearning:
-					learnings = append(learnings, a.Content)
-				}
-			}
+		annotations, err := discussion.LoadAnnotations(d.SummaryJSONDir)
+		if err != nil {
+			slog.Debug("annotations.json not loadable, proceeding without", "dir", d.DirName, "error", err)
 		}
+		ad, al, aa, ao := categorizeAnnotations(annotations)
+		decisions = append(decisions, ad...)
+		learnings = append(learnings, al...)
+		actionItems = append(actionItems, aa...)
+		openQuestions = append(openQuestions, ao...)
 
-		// collect learnings and context from high-importance chapters
+		// collect learnings from high-importance chapters
 		for _, ch := range summary.Chapters {
 			if ch.Importance <= 0.5 {
 				continue
@@ -286,16 +283,18 @@ func extractFactsFromSummaryJSON(d discussionInput) (string, error) {
 		}
 	}
 
-	// always include key context from high-importance chapters
-	for _, ch := range summary.Chapters {
-		if ch.Importance <= 0.5 {
-			continue
-		}
-		if ch.Summary != "" {
-			keyContext = append(keyContext, ch.Summary)
-		}
-		if ch.HasVisual && len(ch.VisualTypes) > 0 {
-			keyContext = append(keyContext, fmt.Sprintf("%s includes %s", ch.Title, strings.Join(ch.VisualTypes, ", ")))
+	// append chapter-based key context only when AgentSummary didn't provide any
+	if len(keyContext) == 0 {
+		for _, ch := range summary.Chapters {
+			if ch.Importance <= 0.5 {
+				continue
+			}
+			if ch.Summary != "" {
+				keyContext = append(keyContext, ch.Summary)
+			}
+			if ch.HasVisual && len(ch.VisualTypes) > 0 {
+				keyContext = append(keyContext, fmt.Sprintf("%s includes %s", ch.Title, strings.Join(ch.VisualTypes, ", ")))
+			}
 		}
 	}
 
