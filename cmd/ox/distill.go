@@ -660,10 +660,17 @@ func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend age
 	return nil
 }
 
-// extractSingleDiscussionFacts generates facts for one discussion via LLM.
-// Returns JSONL with a _meta header line followed by the LLM-produced fact lines.
+// extractSingleDiscussionFacts generates facts for one discussion.
+// When server-generated summary.json exists, extracts facts directly from
+// structured data without an LLM call. Falls back to LLM via JSONL output.
 func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, d discussionInput, guidelines string) (string, error) {
-	prompt := agentcli.DiscussionFactsPrompt(d.Title, d.Summary, d.Transcript, guidelines)
+	// if server-generated summary.json exists, extract facts directly without LLM
+	if d.SummaryJSONDir != "" {
+		slog.Info("extracting facts from summary.json", "dir", d.DirName)
+		return extractFactsFromSummaryJSON(d)
+	}
+
+	prompt := agentcli.DiscussionFactsPrompt(d.Title, d.Summary, d.Transcript, guidelines, d.Annotations)
 	logPrompt(cmd, "discussion-facts: "+d.Title, prompt)
 	output, err := backend.Run(ctx, prompt)
 	if err != nil {

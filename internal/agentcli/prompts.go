@@ -85,7 +85,8 @@ func DailyPrompt(observations []string, date, guidelines string, factPaths ...st
 // DiscussionFactsPrompt builds a prompt for extracting structured facts from a discussion.
 // The LLM extracts decisions, learnings, open questions, action items, and key context
 // as JSONL output (one JSON object per line).
-func DiscussionFactsPrompt(title, summary, transcript, guidelines string) string {
+// When annotations is non-empty, server-extracted annotations are included as ground truth.
+func DiscussionFactsPrompt(title, summary, transcript, guidelines, annotations string) string {
 	var sb strings.Builder
 
 	sb.WriteString(systemPrompt)
@@ -112,6 +113,14 @@ func DiscussionFactsPrompt(title, summary, transcript, guidelines string) string
 	if summary != "" {
 		sb.WriteString("### Summary\n\n")
 		sb.WriteString(summary)
+		sb.WriteString("\n\n")
+	}
+
+	if annotations != "" {
+		sb.WriteString("### Server Annotations\n\n")
+		sb.WriteString("The following structured annotations were pre-extracted from the recording. ")
+		sb.WriteString("Use these as ground truth and supplement with additional facts from the transcript.\n\n")
+		sb.WriteString(annotations)
 		sb.WriteString("\n\n")
 	}
 

@@ -37,13 +37,15 @@ type QueryResponse struct {
 
 // QueryResult is a single search result.
 type QueryResult struct {
-	Score      float64 `json:"score"`
-	Text       string  `json:"text"`
-	DocType    string  `json:"doc_type"`
-	FilePath   string  `json:"file_path"`
-	SourceType string  `json:"source_type"`
-	SourceID   string  `json:"source_id"`
-	CreatedAt  string  `json:"created_at,omitempty"`
+	Score       float64  `json:"score"`
+	Text        string   `json:"text"`
+	DocType     string   `json:"doc_type"`
+	FilePath    string   `json:"file_path"`
+	SourceType  string   `json:"source_type"`
+	SourceID    string   `json:"source_id"`
+	CreatedAt   string   `json:"created_at,omitempty"`
+	HasVisual   bool     `json:"has_visual,omitempty"`   // true if discussion has keyframe visual content
+	VisualTypes []string `json:"visual_types,omitempty"` // content types (e.g. "diagram", "code") when has_visual is true
 }
 
 // QueryLatency tracks latency of sub-operations.

@@ -11,7 +11,7 @@ var fallbackIncludes = []string{
 	"memory/",
 	"docs/",
 	"coworkers/",
-	"discussions/",
+	"discussions/", // all discussion artifacts synced by cloud pipeline
 	"agent-context/",
 }
 

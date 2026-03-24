@@ -141,7 +141,7 @@ func TestDailyPromptWithoutFacts(t *testing.T) {
 }
 
 func TestDiscussionFactsPrompt(t *testing.T) {
-	prompt := DiscussionFactsPrompt("Arch Review", "We discussed architecture", "Speaker 1: Let's review\nSpeaker 2: Sounds good", "")
+	prompt := DiscussionFactsPrompt("Arch Review", "We discussed architecture", "Speaker 1: Let's review\nSpeaker 2: Sounds good", "", "")
 
 	if !strings.Contains(prompt, "Arch Review") {
 		t.Error("prompt should contain the discussion title")
@@ -170,7 +170,7 @@ func TestDiscussionFactsPrompt(t *testing.T) {
 }
 
 func TestDiscussionFactsPromptEmptySummary(t *testing.T) {
-	prompt := DiscussionFactsPrompt("Title", "", "transcript text", "")
+	prompt := DiscussionFactsPrompt("Title", "", "transcript text", "", "")
 
 	if strings.Contains(prompt, "### Summary") {
 		t.Error("prompt should not contain Summary section when empty")
@@ -181,7 +181,7 @@ func TestDiscussionFactsPromptEmptySummary(t *testing.T) {
 }
 
 func TestDiscussionFactsPromptEmptyTranscript(t *testing.T) {
-	prompt := DiscussionFactsPrompt("Title", "summary text", "", "")
+	prompt := DiscussionFactsPrompt("Title", "summary text", "", "", "")
 
 	if !strings.Contains(prompt, "summary text") {
 		t.Error("prompt should contain summary")
@@ -192,13 +192,49 @@ func TestDiscussionFactsPromptEmptyTranscript(t *testing.T) {
 }
 
 func TestDiscussionFactsPromptWithGuidelines(t *testing.T) {
-	prompt := DiscussionFactsPrompt("Title", "summary", "transcript", "Focus on security decisions")
+	prompt := DiscussionFactsPrompt("Title", "summary", "transcript", "Focus on security decisions", "")
 
 	if !strings.Contains(prompt, "<team-guidelines>") {
 		t.Error("prompt should contain guidelines header")
 	}
 	if !strings.Contains(prompt, "security decisions") {
 		t.Error("prompt should contain guideline content")
+	}
+}
+
+func TestDiscussionFactsPromptWithAnnotations(t *testing.T) {
+	annotations := "- [decision] Use rotating session tokens\n- [action-item] Migrate auth by end of sprint"
+	prompt := DiscussionFactsPrompt("Security Review", "Reviewed auth approach", "Speaker 1: We need tokens", "", annotations)
+
+	if !strings.Contains(prompt, "### Server Annotations") {
+		t.Error("prompt should contain Server Annotations section")
+	}
+	if !strings.Contains(prompt, "Use rotating session tokens") {
+		t.Error("prompt should contain annotation content")
+	}
+	if !strings.Contains(prompt, "Migrate auth by end of sprint") {
+		t.Error("prompt should contain all annotations")
+	}
+	if !strings.Contains(prompt, "ground truth") {
+		t.Error("prompt should instruct LLM to treat annotations as ground truth")
+	}
+
+	// annotations should appear before transcript
+	annotationsIdx := strings.Index(prompt, "### Server Annotations")
+	transcriptIdx := strings.Index(prompt, "### Transcript")
+	if annotationsIdx >= transcriptIdx {
+		t.Error("annotations section should appear before transcript section")
+	}
+}
+
+func TestDiscussionFactsPromptWithoutAnnotations(t *testing.T) {
+	prompt := DiscussionFactsPrompt("Title", "summary", "transcript", "", "")
+
+	if strings.Contains(prompt, "### Server Annotations") {
+		t.Error("prompt should not contain Server Annotations section when empty")
+	}
+	if strings.Contains(prompt, "ground truth") {
+		t.Error("prompt should not mention ground truth when no annotations")
 	}
 }
 

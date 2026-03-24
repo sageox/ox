@@ -12,6 +12,7 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/pkg/discussion"
 	"github.com/spf13/cobra"
 )
 
@@ -117,8 +118,8 @@ func resolveTeamContext(projectRoot, query string) *config.TeamContext {
 	return nil
 }
 
-// listRecentDiscussions scans the discussions/ directory and outputs
-// the 15 most recent files (by name, which are date-prefixed).
+// listRecentDiscussions scans discussion directories and outputs the most
+// recent with title and visual content tags.
 // Returns true if any discussions were found.
 func listRecentDiscussions(out io.Writer, discussionsDir string) bool {
 	entries, err := os.ReadDir(discussionsDir)
@@ -126,49 +127,64 @@ func listRecentDiscussions(out io.Writer, discussionsDir string) bool {
 		return false
 	}
 
-	// collect all files recursively from discussions/
-	var files []string
+	var discussions []DiscussionIndexEntry
 	for _, entry := range entries {
-		if entry.IsDir() {
-			// scan subdirectory for files
-			subDir := filepath.Join(discussionsDir, entry.Name())
-			subEntries, err := os.ReadDir(subDir)
-			if err != nil {
-				continue
-			}
-			for _, sub := range subEntries {
-				if !sub.IsDir() {
-					files = append(files, filepath.Join(subDir, sub.Name()))
-				}
-			}
-		} else {
-			files = append(files, filepath.Join(discussionsDir, entry.Name()))
+		if !entry.IsDir() {
+			continue
 		}
+		dirPath := filepath.Join(discussionsDir, entry.Name())
+
+		de := DiscussionIndexEntry{
+			DirName: entry.Name(),
+		}
+
+		// read title from metadata.json
+		if meta, err := loadDiscussionMetadata(dirPath); err == nil {
+			de.Title = meta.Title
+		}
+
+		// detect visual content from keyframes.json
+		if kf, err := discussion.LoadKeyframes(dirPath); err == nil && kf != nil {
+			de.VisualTypes = discussion.AllVisualTypes(kf)
+		}
+
+		discussions = append(discussions, de)
 	}
 
-	if len(files) == 0 {
+	if len(discussions) == 0 {
 		return false
 	}
 
-	// sort reverse-alphabetically (date-prefixed names = newest first)
-	sort.Sort(sort.Reverse(sort.StringSlice(files)))
+	// sort reverse-alphabetically by dir name (date-prefixed = newest first)
+	sort.Slice(discussions, func(i, j int) bool {
+		return discussions[i].DirName > discussions[j].DirName
+	})
 
 	limit := recentDiscussionLimit
-	if len(files) < limit {
-		limit = len(files)
+	if len(discussions) < limit {
+		limit = len(discussions)
 	}
 
 	fmt.Fprintln(out, "## Recent Discussions")
 	fmt.Fprintln(out)
-	fmt.Fprintf(out, "Read these files for full discussion details (%d most recent):\n", limit)
+	fmt.Fprintf(out, "Recent discussions (%d shown, read files in each dir for detail):\n", limit)
 	fmt.Fprintln(out)
-	for _, f := range files[:limit] {
-		fmt.Fprintf(out, "- %s\n", f)
+	for _, d := range discussions[:limit] {
+		label := d.DirName
+		if d.Title != "" {
+			label = d.Title
+		}
+		dirPath := filepath.Join(discussionsDir, d.DirName)
+		if len(d.VisualTypes) > 0 {
+			fmt.Fprintf(out, "- %s [%s] — %s\n", label, strings.Join(d.VisualTypes, ", "), dirPath)
+		} else {
+			fmt.Fprintf(out, "- %s — %s\n", label, dirPath)
+		}
 	}
 
-	if len(files) > limit {
+	if len(discussions) > limit {
 		fmt.Fprintln(out)
-		fmt.Fprintf(out, "For older discussions, list files in: %s\n", discussionsDir)
+		fmt.Fprintf(out, "For older discussions, list dirs in: %s\n", discussionsDir)
 	}
 	fmt.Fprintln(out)
 
