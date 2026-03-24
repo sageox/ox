@@ -123,17 +123,17 @@ func TestBuildProbeURL(t *testing.T) {
 		{
 			name:      "https URL",
 			serverURL: "https://git.sageox.ai",
-			want:      "https://git.sageox.ai/api/v4/user",
+			want:      "https://git.sageox.ai/api/v4/personal_access_tokens/self",
 		},
 		{
 			name:      "http URL with port",
 			serverURL: "http://localhost:3000",
-			want:      "http://localhost:3000/api/v4/user",
+			want:      "http://localhost:3000/api/v4/personal_access_tokens/self",
 		},
 		{
 			name:      "URL with existing path stripped",
 			serverURL: "https://git.sageox.ai/some/path",
-			want:      "https://git.sageox.ai/api/v4/user",
+			want:      "https://git.sageox.ai/api/v4/personal_access_tokens/self",
 		},
 	}
 

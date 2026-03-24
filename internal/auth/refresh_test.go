@@ -586,6 +586,71 @@ func TestTokenRefreshError_Unwrap(t *testing.T) {
 	assert.Nil(t, unwrapped2)
 }
 
+func TestRefreshToken_SessionTokenFallback(t *testing.T) {
+	t.Parallel()
+
+	// mock server that accepts session_token as refresh_token
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case TokenEndpoint:
+			require.NoError(t, r.ParseForm())
+			assert.Equal(t, "refresh_token", r.Form.Get("grant_type"))
+			// should receive the session_token value as refresh_token
+			assert.Equal(t, "test-session-token", r.Form.Get("refresh_token"))
+
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "refreshed-opaque",
+				"session_token": "new-session-token",
+				"token_type":    "Bearer",
+				"expires_in":    3600,
+			})
+		case "/api/v1/cli/auth/token":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token": "refreshed-jwt",
+				"token_type":   "Bearer",
+				"expires_in":   900,
+			})
+		default:
+			t.Errorf("unexpected endpoint: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mockServer.Close()
+
+	client := NewAuthClientWithDir(t.TempDir()).WithEndpoint(mockServer.URL)
+
+	// expired token with empty RefreshToken but valid SessionToken
+	expiredToken := createTestToken(-1 * time.Hour)
+	expiredToken.RefreshToken = ""
+	expiredToken.SessionToken = "test-session-token"
+	require.NoError(t, client.SaveToken(expiredToken))
+
+	token, err := client.EnsureValidToken(300)
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	assert.Equal(t, "refreshed-jwt", token.AccessToken)
+	assert.Equal(t, "new-session-token", token.SessionToken)
+}
+
+func TestRefreshToken_NoRefreshOrSessionToken(t *testing.T) {
+	t.Parallel()
+
+	client := NewAuthClientWithDir(t.TempDir())
+
+	// expired token with neither RefreshToken nor SessionToken
+	expiredToken := createTestToken(-1 * time.Hour)
+	expiredToken.RefreshToken = ""
+	expiredToken.SessionToken = ""
+	require.NoError(t, client.SaveToken(expiredToken))
+
+	token, err := client.EnsureValidToken(300)
+	require.Error(t, err)
+	assert.Nil(t, token)
+	assert.Contains(t, err.Error(), "no refresh token available")
+}
+
 func TestEnsureValidToken_ZeroBuffer(t *testing.T) {
 	t.Parallel()
 

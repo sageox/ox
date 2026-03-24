@@ -219,6 +219,7 @@ func Login(ctx context.Context, deviceCode *DeviceCodeResponse, statusCallback f
 			storedToken := &StoredToken{
 				AccessToken:  accessToken,
 				RefreshToken: refreshToken,
+				SessionToken: token.SessionToken, // preserve for refresh fallback
 				ExpiresAt:    time.Now().Add(time.Duration(expiresIn) * time.Second),
 				TokenType:    token.TokenType,
 				Scope:        token.Scope,
@@ -561,6 +562,7 @@ func (c *AuthClient) Login(ctx context.Context, deviceCode *DeviceCodeResponse, 
 			storedToken := &StoredToken{
 				AccessToken:  accessToken,
 				RefreshToken: refreshToken,
+				SessionToken: token.SessionToken, // preserve for refresh fallback
 				ExpiresAt:    time.Now().Add(time.Duration(expiresIn) * time.Second),
 				TokenType:    token.TokenType,
 				Scope:        token.Scope,

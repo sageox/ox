@@ -29,7 +29,7 @@ func TestBuildStatusJSON_WithRepoDetail(t *testing.T) {
 	}
 
 	output := buildStatusJSON(
-		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
+		false, nil, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 		localCfg, "", repoDetail, nil,
 		nil, nil,
@@ -52,7 +52,7 @@ func TestBuildStatusJSON_WithoutRepoDetail(t *testing.T) {
 	}
 
 	output := buildStatusJSON(
-		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
+		false, nil, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 		localCfg, "", nil, nil,
 		nil, nil,
@@ -79,7 +79,7 @@ func TestBuildStatusJSON_ViewerAccess(t *testing.T) {
 	}
 
 	output := buildStatusJSON(
-		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
+		false, nil, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 		localCfg, "", repoDetail, nil,
 		nil, nil,
@@ -102,7 +102,7 @@ func TestBuildStatusJSON_NoLedgerConfig(t *testing.T) {
 	}
 
 	output := buildStatusJSON(
-		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
+		false, nil, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 		localCfg, "", repoDetail, nil,
 		nil, nil,
@@ -116,7 +116,7 @@ func TestBuildStatusJSON_NilLocalConfig(t *testing.T) {
 	t.Parallel()
 
 	output := buildStatusJSON(
-		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
+		false, nil, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 		nil, "", nil, nil,
 		nil, nil,
@@ -141,7 +141,7 @@ func TestBuildStatusJSON_LedgerPathNotExists(t *testing.T) {
 	}
 
 	output := buildStatusJSON(
-		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
+		false, nil, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 		localCfg, "", repoDetail, nil,
 		nil, nil,
@@ -170,7 +170,7 @@ func TestBuildStatusJSON_AuthenticatedWithToken(t *testing.T) {
 	}
 
 	output := buildStatusJSON(
-		true, token, "test.sageox.ai", "/tmp/auth.json", true,
+		true, nil, token, "test.sageox.ai", "/tmp/auth.json", true,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", true,
 		nil, "", nil, nil,
 		nil, nil,
@@ -187,7 +187,7 @@ func TestBuildStatusJSON_ProjectInitialized(t *testing.T) {
 	t.Parallel()
 
 	output := buildStatusJSON(
-		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
+		false, nil, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", true,
 		nil, "", nil, nil,
 		nil, nil,
@@ -202,7 +202,7 @@ func TestBuildStatusJSON_ProjectNotInitialized(t *testing.T) {
 	t.Parallel()
 
 	output := buildStatusJSON(
-		false, nil, "test.sageox.ai", "/tmp/auth.json", false,
+		false, nil, nil, "test.sageox.ai", "/tmp/auth.json", false,
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 		nil, "", nil, nil,
 		nil, nil,
@@ -257,7 +257,7 @@ func TestBuildStatusJSON_VisibilityAccessLevelCombinations(t *testing.T) {
 			}
 
 			output := buildStatusJSON(
-				false, nil, "test.sageox.ai", "/tmp/auth.json", false,
+				false, nil, nil, "test.sageox.ai", "/tmp/auth.json", false,
 				"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 				localCfg, "", repoDetail, nil,
 				nil, nil,

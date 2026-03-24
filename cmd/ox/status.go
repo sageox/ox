@@ -63,6 +63,7 @@ type statusAuthJSON struct {
 	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
 	GitPATValid   *bool      `json:"git_pat_valid,omitempty"`
 	GitPATReason  string     `json:"git_pat_reason,omitempty"`
+	Error         string     `json:"error,omitempty"`
 }
 
 type statusConfigJSON struct {
@@ -1457,9 +1458,12 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		currentEndpoint := endpoint.GetForProject(gitRoot)
 		endpointSlug := endpoint.NormalizeSlug(currentEndpoint)
 
+		var authErr error
 		authenticated, err := auth.IsAuthenticatedForEndpoint(currentEndpoint)
 		if err != nil {
-			return fmt.Errorf("failed to check authentication status: %w", err)
+			// don't bail — show what we can without auth
+			authErr = err
+			authenticated = false
 		}
 
 		// get auth token if authenticated
@@ -1467,7 +1471,8 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		if authenticated {
 			token, err = auth.GetTokenForEndpoint(currentEndpoint)
 			if err != nil {
-				return fmt.Errorf("failed to get token: %w", err)
+				authErr = err
+				authenticated = false
 			}
 
 			// ensure git credentials are valid (auto-refresh if needed)
@@ -1568,7 +1573,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 
 		// JSON output mode
 		if statusJSONFlag {
-			output := buildStatusJSON(authenticated, token, endpointSlug, authFile, authFileExists,
+			output := buildStatusJSON(authenticated, authErr, token, endpointSlug, authFile, authFileExists,
 				userConfigDir, cwd, sageoxDir, projectInitialized, localCfg, gitRoot, repoDetail, codeStats,
 				daemonStatus, client)
 			jsonBytes, err := json.MarshalIndent(output, "", "  ")
@@ -1582,7 +1587,9 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		// Human-readable output mode
 		// Authentication Status - always show, includes endpoint
 		fmt.Print(renderAuthStatus(authFile))
-		if len(auth.GetLoggedInEndpoints()) == 0 {
+		if authErr != nil {
+			fmt.Printf("  %s %s\n", statusWarningStyle.Render("⚠ token refresh failed:"), statusMutedStyle.Render("run `ox login` to re-authenticate"))
+		} else if len(auth.GetLoggedInEndpoints()) == 0 {
 			// use contextual action hint matching help's visual style
 			cli.PrintActionHint("ox login", "Authenticate with "+cli.Wordmark(), 1)
 		}
@@ -1643,7 +1650,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 // buildStatusJSON constructs the JSON output structure for ox status --json.
 // daemonStatus and daemonClient are pre-fetched from the daemon to avoid a second ping
 // that could race with the first (one succeeds, the other times out = contradictory output).
-func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, authFile string, authFileExists bool,
+func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken, endpointSlug, authFile string, authFileExists bool,
 	userConfigDir, cwd, sageoxDir string, projectInitialized bool, localCfg *config.LocalConfig, gitRoot string,
 	repoDetail *api.RepoDetailResponse, codeStats *daemon.CodeDBStats,
 	daemonStatus *daemon.StatusData, daemonClient *daemon.Client) statusJSONOutput {
@@ -1654,6 +1661,9 @@ func buildStatusJSON(authenticated bool, token *auth.StoredToken, endpointSlug, 
 	output.Auth = &statusAuthJSON{
 		Authenticated: authenticated,
 		Endpoint:      endpointSlug,
+	}
+	if authErr != nil {
+		output.Auth.Error = authErr.Error()
 	}
 	if authenticated && token != nil {
 		output.Auth.User = token.UserInfo.Name

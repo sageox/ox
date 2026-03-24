@@ -23,10 +23,20 @@ type UserInfo struct {
 type StoredToken struct {
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
+	SessionToken string    `json:"session_token,omitempty"` // Better Auth fallback for refresh_token
 	ExpiresAt    time.Time `json:"expires_at"`
 	TokenType    string    `json:"token_type"`
 	Scope        string    `json:"scope"`
 	UserInfo     UserInfo  `json:"user_info"`
+}
+
+// EffectiveRefreshToken returns the refresh token, falling back to session_token
+// if refresh_token is empty (Better Auth compatibility).
+func (t *StoredToken) EffectiveRefreshToken() string {
+	if t.RefreshToken != "" {
+		return t.RefreshToken
+	}
+	return t.SessionToken
 }
 
 // AuthStore holds tokens for multiple API endpoints

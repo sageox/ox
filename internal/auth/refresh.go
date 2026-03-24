@@ -159,11 +159,19 @@ func refreshTokenForEndpoint(token *StoredToken, ep string) (*StoredToken, error
 	baseURL := ep
 	tokenURL := baseURL + TokenEndpoint
 
+	// use refresh_token with session_token fallback (Better Auth compatibility)
+	rt := token.EffectiveRefreshToken()
+	if rt == "" {
+		return nil, &TokenRefreshError{
+			Message: "no refresh token available, re-authentication required",
+		}
+	}
+
 	// prepare form data for token refresh
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")
 	data.Set("client_id", ClientID)
-	data.Set("refresh_token", token.RefreshToken)
+	data.Set("refresh_token", rt)
 
 	// create request
 	req, err := useragent.NewRequest(context.Background(), "POST", tokenURL, strings.NewReader(data.Encode()))
@@ -254,6 +262,12 @@ func refreshTokenForEndpoint(token *StoredToken, ep string) (*StoredToken, error
 		refreshToken = rt
 	}
 
+	// preserve session_token from response, falling back to stored value
+	sessionToken := token.SessionToken
+	if responseData.SessionToken != "" {
+		sessionToken = responseData.SessionToken
+	}
+
 	// extract optional fields with defaults
 	tokenType := "Bearer"
 	if responseData.TokenType != "" {
@@ -296,6 +310,7 @@ func refreshTokenForEndpoint(token *StoredToken, ep string) (*StoredToken, error
 	newToken := &StoredToken{
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
+		SessionToken: sessionToken,
 		ExpiresAt:    expiresAt,
 		TokenType:    tokenType,
 		Scope:        scope,
@@ -365,11 +380,19 @@ func (c *AuthClient) refreshToken(token *StoredToken) (*StoredToken, error) {
 	baseURL := c.Endpoint()
 	tokenURL := baseURL + TokenEndpoint
 
+	// use refresh_token with session_token fallback (Better Auth compatibility)
+	rt := token.EffectiveRefreshToken()
+	if rt == "" {
+		return nil, &TokenRefreshError{
+			Message: "no refresh token available, re-authentication required",
+		}
+	}
+
 	// prepare form data for token refresh
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")
 	data.Set("client_id", ClientID)
-	data.Set("refresh_token", token.RefreshToken)
+	data.Set("refresh_token", rt)
 
 	// create request
 	req, err := useragent.NewRequest(context.Background(), "POST", tokenURL, strings.NewReader(data.Encode()))
@@ -460,6 +483,12 @@ func (c *AuthClient) refreshToken(token *StoredToken) (*StoredToken, error) {
 		refreshTokenStr = rt
 	}
 
+	// preserve session_token from response, falling back to stored value
+	sessionTokenStr := token.SessionToken
+	if responseData.SessionToken != "" {
+		sessionTokenStr = responseData.SessionToken
+	}
+
 	// extract optional fields with defaults
 	tokenType := "Bearer"
 	if responseData.TokenType != "" {
@@ -502,6 +531,7 @@ func (c *AuthClient) refreshToken(token *StoredToken) (*StoredToken, error) {
 	newToken := &StoredToken{
 		AccessToken:  accessToken,
 		RefreshToken: refreshTokenStr,
+		SessionToken: sessionTokenStr,
 		ExpiresAt:    expiresAt,
 		TokenType:    tokenType,
 		Scope:        scope,
