@@ -667,7 +667,11 @@ func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backe
 	// if server-generated summary.json exists, extract facts directly without LLM
 	if d.SummaryJSONDir != "" {
 		slog.Info("extracting facts from summary.json", "dir", d.DirName)
-		return extractFactsFromSummaryJSON(d)
+		result, err := extractFactsFromSummaryJSON(d)
+		if err == nil {
+			return result, nil
+		}
+		slog.Warn("summary.json extraction failed, falling back to LLM", "dir", d.DirName, "err", err)
 	}
 
 	prompt := agentcli.DiscussionFactsPrompt(d.Title, d.Summary, d.Transcript, guidelines, d.Annotations)

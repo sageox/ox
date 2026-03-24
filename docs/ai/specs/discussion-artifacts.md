@@ -7,7 +7,7 @@ Recorded discussions (audio and video) produce artifacts that AI coworkers consu
 
 ## Discussion Directory Layout
 
-```
+```text
 discussions/2026-03-20-1423-person/
   metadata.json         # recording identity (always present)
   summary.md            # human-written prose summary (always present)
@@ -29,8 +29,9 @@ Audio recordings produce the same artifacts minus `keyframes.json`.
 
 **Contains:**
 - Chapters with semantic titles, importance scores (0-1), topic tags
-- `has_visual` / `visual_types` flags signaling visual content exists
-- `AgentSummary` — pre-categorized facts (decisions, learnings, action_items, open_questions, key_context)
+- `has_keyframes` / `has_annotations` flags signaling deeper layers exist
+- Top-level categorized facts (decisions, learnings, action_items, open_questions, requirements)
+- Technical context, constraints, non-goals
 
 **When to read it:** L1 — agent has identified a relevant discussion and needs to decide which segment matters.
 
@@ -43,10 +44,10 @@ Audio recordings produce the same artifacts minus `keyframes.json`.
 **Granularity:** Moment-level (specific VTT cue ranges of seconds)
 
 **Contains:**
-- Annotations with type classification (decision, action-item, disagreement, insight, learning, open-question)
-- VTT timestamp anchors (`cue_start`, `cue_end`) for verbatim transcript lookup
+- Annotations with type classification (decision, action-item, disagreement, insight, learning, question, tangent, consensus)
+- VTT cue range anchors (`cue_range: [start, end]`) for verbatim transcript lookup
 - `chapter_id` linking back to summary.json chapters
-- `keyframes` linking to keyframes.json entries by s3_key
+- `importance` scoring and `speakers` attribution
 
 **When to read it:** L2 — agent needs specific evidence, provenance, or the keyframe that was on screen during a decision.
 
@@ -58,26 +59,26 @@ The same fact (e.g., "use rotating tokens") may appear in both files:
 
 | In summary.json | In annotations.json |
 |---|---|
-| `agent_summary.decisions: ["use rotating tokens"]` | `{type: "decision", content: "use rotating tokens", cue_start: 462.5}` |
-| Categorized, no timestamp | Same content + temporal anchor + keyframe links |
+| `decisions: [{description: "use rotating tokens"}]` | `{type: "decision", content: "use rotating tokens", cue_range: [42, 45]}` |
+| Categorized, no timestamp | Same content + temporal anchor + speaker attribution |
 
 This is by design. summary.json provides the "what" for filtering. annotations.json provides the "where" for evidence.
 
 ## Consumption Rules
 
-### When AgentSummary Exists
+### When Categorized Facts Exist
 
-Use `AgentSummary` as the authoritative source. Do NOT also merge annotations — the server already incorporates annotations when building `AgentSummary`. Merging both produces duplicates.
+Use top-level categorized facts (decisions, learnings, etc.) as the authoritative source. Do NOT also merge annotations — the server already incorporates annotations when building categorized facts. Merging both produces duplicates.
 
+```text
+HasCategorizedFacts()?
+  YES → use top-level categories directly, skip annotations
+  NO  → fall back to LLM extraction from transcript
 ```
-AgentSummary present?
-  YES → use its categories directly, skip annotations
-  NO  → fall back to annotations + chapter-based extraction
-```
 
-### Chapter-Based Key Context
+### Key Context Derivation
 
-When `AgentSummary.KeyContext` is non-empty, do not append chapter summaries to key context — the server already curated what matters. Only derive key context from chapters when `AgentSummary` is absent or its `KeyContext` is empty.
+Key context is derived from `TechnicalContext.Notes` + `Constraints` + `NonGoals` + high-importance chapter summaries. There is no explicit `KeyContext` field — it is assembled at extraction time.
 
 ### Importance Threshold
 
@@ -85,7 +86,7 @@ Chapters with `importance <= 0.5` are excluded from fact extraction. Only chapte
 
 ## Progressive Disclosure Layers
 
-```
+```text
 Layer  Artifact                       Tokens/discussion  When loaded
 -----  -----------------------------  -----------------  ----------------
 L0     DISCUSSIONS.md / distilled     20-40              Always (100%)
@@ -105,7 +106,7 @@ Agents decide at each layer whether to go deeper. Most discussions stop at L0 or
 | Extraction with timestamp anchor | `annotations.json` |
 | Visual frame with description | `keyframes.json` |
 | Human-written prose | `summary.md` (not server-generated) |
-| New fact category | Add to `AgentSummary` struct AND `DiscussionFactsPrompt` categories |
+| New fact category | Add to `DiscussionSummary` struct AND `DiscussionFactsPrompt` categories |
 | New annotation type | Add constant to `pkg/discussion/types.go`, update `categorizeAnnotations()` in `distill_discussions.go` |
 
 ## Code Locations
