@@ -446,12 +446,12 @@ func TestFormatDailyMemoryWithDiscussions(t *testing.T) {
 
 func TestCategorizeAnnotations(t *testing.T) {
 	tests := []struct {
-		name            string
-		annotations     []annotationJSON
-		wantDecisions   int
-		wantLearnings   int
-		wantActions     int
-		wantOpenQs      int
+		name          string
+		annotations   []annotationJSON
+		wantDecisions int
+		wantLearnings int
+		wantActions   int
+		wantOpenQs    int
 	}{
 		{
 			name:        "nil input",
@@ -465,12 +465,13 @@ func TestCategorizeAnnotations(t *testing.T) {
 				{Type: "disagreement", Content: "team split on caching"},
 				{Type: "insight", Content: "latency is the bottleneck"},
 				{Type: "learning", Content: "redis works well here"},
-				{Type: "open-question", Content: "what about failover?"},
+				{Type: "question", Content: "what about failover?"},
+				{Type: "consensus", Content: "agreed on postgres"},
 			},
-			wantDecisions: 1,
+			wantDecisions: 2, // decision + consensus
 			wantLearnings: 2, // insight + learning
 			wantActions:   1,
-			wantOpenQs:    2, // disagreement + open-question
+			wantOpenQs:    2, // disagreement + question
 		},
 		{
 			name: "unknown types ignored",
@@ -517,25 +518,33 @@ type annotationJSON struct {
 }
 
 func TestExtractFactsFromSummaryJSON(t *testing.T) {
-	t.Run("agent summary present — uses categories directly", func(t *testing.T) {
+	// helper to build a valid v2 summary base
+	v2Base := func() map[string]any {
+		return map[string]any{
+			"schema_version": 2,
+			"recording_id":   "rec-test",
+			"title":          "Test",
+			"human_summary":  "summary",
+		}
+	}
+
+	t.Run("categorized facts present — uses .Text() directly", func(t *testing.T) {
 		dir := t.TempDir()
-		writeSummaryJSON(t, dir, map[string]any{
-			"chapters": []map[string]any{
-				{"id": "ch-1", "title": "Auth design", "summary": "Token rotation", "importance": 0.9},
-			},
-			"agent_summary": map[string]any{
-				"decisions":      []string{"use rotating tokens"},
-				"learnings":      []string{"redis handles TTL well"},
-				"action_items":   []string{"migrate by friday"},
-				"open_questions": []string{"failover strategy?"},
-				"key_context":    []string{"compliance requirement"},
-			},
-		})
+		s := v2Base()
+		s["chapters"] = []map[string]any{
+			{"id": "ch-1", "title": "Auth design", "summary": "Token rotation", "importance": 0.9, "time_range": []float64{0, 60}, "cue_range": []int{0, 10}},
+		}
+		s["decisions"] = []map[string]any{{"description": "use rotating tokens"}}
+		s["learnings"] = []map[string]any{{"description": "redis handles TTL well"}}
+		s["action_items"] = []map[string]any{{"description": "migrate by friday"}}
+		s["open_questions"] = []map[string]any{{"question": "failover strategy?"}}
+		s["constraints"] = []string{"compliance requirement"}
+		writeSummaryJSON(t, dir, s)
 
 		d := discussionInput{
-			DirName:       "2026-03-20-1423-person",
-			Title:         "Auth Review",
-			CreatedAt:     time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
+			DirName:        "2026-03-20-1423-person",
+			Title:          "Auth Review",
+			CreatedAt:      time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
 			SummaryJSONDir: dir,
 		}
 
@@ -544,120 +553,70 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// should contain AgentSummary content
 		assertContains(t, output, "use rotating tokens")
 		assertContains(t, output, "redis handles TTL well")
 		assertContains(t, output, "migrate by friday")
 		assertContains(t, output, "failover strategy?")
 		assertContains(t, output, "compliance requirement")
-
-		// should NOT contain chapter summary in key context (AgentSummary already has key_context)
-		if strings.Count(output, "Token rotation") > 0 {
-			// AgentSummary.KeyContext is "compliance requirement", not chapter summaries
-			// chapter-based key context should be skipped when AgentSummary provides it
-		}
 	})
 
-	t.Run("agent summary nil — falls back to annotations + chapters", func(t *testing.T) {
+	t.Run("wrong schema version — returns error for LLM fallback", func(t *testing.T) {
 		dir := t.TempDir()
 		writeSummaryJSON(t, dir, map[string]any{
-			"chapters": []map[string]any{
-				{"id": "ch-1", "title": "Problem space", "summary": "Current auth is broken", "importance": 0.7},
-				{"id": "ch-2", "title": "Solution", "summary": "Use token rotation", "importance": 0.9,
-					"has_visual": true, "visual_types": []string{"diagram"}},
-			},
-		})
-		writeAnnotationsJSON(t, dir, []map[string]any{
-			{"type": "decision", "content": "adopt token rotation"},
-			{"type": "action-item", "content": "Person A: write migration"},
-			{"type": "insight", "content": "latency matters more than throughput"},
+			"schema_version": 1,
+			"recording_id":   "rec-test",
+			"title":          "Old",
+			"human_summary":  "summary",
+			"chapters":       []map[string]any{},
 		})
 
 		d := discussionInput{
-			DirName:       "2026-03-20-1423-person",
-			Title:         "Auth Review",
-			CreatedAt:     time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
-			SummaryJSONDir: dir,
-		}
-
-		output, err := extractFactsFromSummaryJSON(d)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		// annotations
-		assertContains(t, output, "adopt token rotation")
-		assertContains(t, output, "Person A: write migration")
-		assertContains(t, output, "## Learnings")
-		assertContains(t, output, "latency matters more than throughput")
-
-		// chapter-based learnings (high-importance chapters)
-		assertContains(t, output, "Problem space — Current auth is broken")
-		assertContains(t, output, "Solution — Use token rotation")
-
-		// chapter-based key context (no AgentSummary → chapters fill in)
-		assertContains(t, output, "Current auth is broken")
-		assertContains(t, output, "Solution includes diagram")
-	})
-
-	t.Run("no agent summary, no annotations, chapters only", func(t *testing.T) {
-		dir := t.TempDir()
-		writeSummaryJSON(t, dir, map[string]any{
-			"chapters": []map[string]any{
-				{"id": "ch-1", "title": "Review", "summary": "Talked about performance", "importance": 0.8},
-			},
-		})
-
-		d := discussionInput{
-			DirName:       "2026-03-20-1423-person",
-			Title:         "Perf Review",
-			CreatedAt:     time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
-			SummaryJSONDir: dir,
-		}
-
-		output, err := extractFactsFromSummaryJSON(d)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-
-		assertContains(t, output, "## Learnings")
-		assertContains(t, output, "Review — Talked about performance")
-	})
-
-	t.Run("empty summary.json — returns error", func(t *testing.T) {
-		dir := t.TempDir()
-		writeSummaryJSON(t, dir, map[string]any{
-			"chapters": []map[string]any{},
-		})
-
-		d := discussionInput{
-			DirName:       "2026-03-20-1423-person",
-			Title:         "Empty",
-			CreatedAt:     time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
+			DirName:        "2026-03-20-1423-person",
+			Title:          "Old Schema",
+			CreatedAt:      time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
 			SummaryJSONDir: dir,
 		}
 
 		_, err := extractFactsFromSummaryJSON(d)
 		if err == nil {
-			t.Fatal("expected error for empty summary.json")
+			t.Fatal("expected error for unsupported schema version")
+		}
+		assertContains(t, err.Error(), "unsupported schema version")
+	})
+
+	t.Run("missing summary.json — returns error", func(t *testing.T) {
+		dir := t.TempDir()
+
+		d := discussionInput{
+			DirName:        "2026-03-20-1423-person",
+			Title:          "Missing",
+			CreatedAt:      time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
+			SummaryJSONDir: dir,
+		}
+
+		_, err := extractFactsFromSummaryJSON(d)
+		if err == nil {
+			t.Fatal("expected error for missing summary.json")
 		}
 	})
 
-	t.Run("agent summary with key context — skips chapter-based context", func(t *testing.T) {
+	t.Run("key context from constraints + non-goals + chapter summaries", func(t *testing.T) {
 		dir := t.TempDir()
-		writeSummaryJSON(t, dir, map[string]any{
-			"chapters": []map[string]any{
-				{"id": "ch-1", "title": "Design", "summary": "Chapter context noise", "importance": 0.9},
-			},
-			"agent_summary": map[string]any{
-				"key_context": []string{"the real context from server"},
-			},
-		})
+		s := v2Base()
+		s["chapters"] = []map[string]any{
+			{"id": "ch-1", "title": "Design", "summary": "Important context from chapter", "importance": 0.9, "time_range": []float64{0, 60}, "cue_range": []int{0, 10}},
+			{"id": "ch-2", "title": "Trivial", "summary": "Low importance", "importance": 0.3, "time_range": []float64{60, 120}, "cue_range": []int{10, 20}},
+		}
+		s["decisions"] = []map[string]any{{"description": "use postgres"}}
+		s["constraints"] = []string{"must be HIPAA compliant"}
+		s["non_goals"] = []string{"mobile support"}
+		s["technical_context"] = map[string]any{"notes": []string{"team prefers Go"}}
+		writeSummaryJSON(t, dir, s)
 
 		d := discussionInput{
-			DirName:       "2026-03-20-1423-person",
-			Title:         "Context Test",
-			CreatedAt:     time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
+			DirName:        "2026-03-20-1423-person",
+			Title:          "Context Test",
+			CreatedAt:      time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
 			SummaryJSONDir: dir,
 		}
 
@@ -666,33 +625,33 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		assertContains(t, output, "the real context from server")
+		assertContains(t, output, "team prefers Go")
+		assertContains(t, output, "must be HIPAA compliant")
+		assertContains(t, output, "mobile support")
+		assertContains(t, output, "Important context from chapter")
 
-		// chapter summary should NOT appear in key context when AgentSummary provides it
-		if strings.Contains(output, "Chapter context noise") {
-			t.Error("chapter-based context should be skipped when AgentSummary.KeyContext is present")
+		// low-importance chapter should be excluded
+		if strings.Contains(output, "Low importance") {
+			t.Error("low-importance chapter should be excluded from key context")
 		}
 	})
 
-	t.Run("agent summary does NOT re-append annotations", func(t *testing.T) {
+	t.Run("categorized facts do NOT re-append annotations", func(t *testing.T) {
 		dir := t.TempDir()
-		writeSummaryJSON(t, dir, map[string]any{
-			"chapters": []map[string]any{
-				{"id": "ch-1", "title": "Design", "importance": 0.5},
-			},
-			"agent_summary": map[string]any{
-				"decisions": []string{"use postgres"},
-			},
-		})
-		// annotations has the same decision — should NOT be appended
+		s := v2Base()
+		s["chapters"] = []map[string]any{
+			{"id": "ch-1", "title": "Design", "importance": 0.5, "summary": "", "time_range": []float64{0, 60}, "cue_range": []int{0, 10}},
+		}
+		s["decisions"] = []map[string]any{{"description": "use postgres"}}
+		writeSummaryJSON(t, dir, s)
 		writeAnnotationsJSON(t, dir, []map[string]any{
 			{"type": "decision", "content": "use postgres"},
 		})
 
 		d := discussionInput{
-			DirName:       "2026-03-20-1423-person",
-			Title:         "Dedup Test",
-			CreatedAt:     time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
+			DirName:        "2026-03-20-1423-person",
+			Title:          "Dedup Test",
+			CreatedAt:      time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
 			SummaryJSONDir: dir,
 		}
 
@@ -701,25 +660,26 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		// "use postgres" should appear exactly once (from AgentSummary only)
+		// "use postgres" should appear exactly once (from categorized facts only)
 		if strings.Count(output, "use postgres") != 1 {
 			t.Errorf("expected 'use postgres' exactly once, got %d occurrences", strings.Count(output, "use postgres"))
 		}
 	})
 
-	t.Run("low-importance chapters excluded from learnings", func(t *testing.T) {
+	t.Run("low-importance chapters excluded from key context", func(t *testing.T) {
 		dir := t.TempDir()
-		writeSummaryJSON(t, dir, map[string]any{
-			"chapters": []map[string]any{
-				{"id": "ch-1", "title": "Important", "summary": "Key insight", "importance": 0.8},
-				{"id": "ch-2", "title": "Trivial", "summary": "Smalltalk", "importance": 0.3},
-			},
-		})
+		s := v2Base()
+		s["chapters"] = []map[string]any{
+			{"id": "ch-1", "title": "Important", "summary": "Key insight", "importance": 0.8, "time_range": []float64{0, 60}, "cue_range": []int{0, 10}},
+			{"id": "ch-2", "title": "Trivial", "summary": "Smalltalk", "importance": 0.3, "time_range": []float64{60, 120}, "cue_range": []int{10, 20}},
+		}
+		s["decisions"] = []map[string]any{{"description": "a decision"}}
+		writeSummaryJSON(t, dir, s)
 
 		d := discussionInput{
-			DirName:       "2026-03-20-1423-person",
-			Title:         "Importance Test",
-			CreatedAt:     time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
+			DirName:        "2026-03-20-1423-person",
+			Title:          "Importance Test",
+			CreatedAt:      time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
 			SummaryJSONDir: dir,
 		}
 
@@ -728,7 +688,7 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
-		assertContains(t, output, "Important — Key insight")
+		assertContains(t, output, "Key insight")
 		if strings.Contains(output, "Smalltalk") {
 			t.Error("low-importance chapter should be excluded")
 		}

@@ -19,6 +19,11 @@ import (
 // maxTranscriptChars caps transcript text sent to LLM to avoid excessive tokens.
 const maxTranscriptChars = 30000
 
+// highImportanceThreshold is the minimum importance score for a chapter to be
+// included in learnings and key context output. Chapters at or below this score
+// are considered low-signal and excluded from fact extraction.
+const highImportanceThreshold = 0.5
+
 // discussionInput holds parsed data for a single discussion directory.
 type discussionInput struct {
 	DirName        string // directory name (e.g., "2026-03-10-1423-ryan")
@@ -217,11 +222,11 @@ func categorizeAnnotations(af *discussion.AnnotationsFile) (decisions, learnings
 	}
 	for _, a := range af.Annotations {
 		switch a.Type {
-		case discussion.AnnotationDecision:
+		case discussion.AnnotationDecision, discussion.AnnotationConsensus:
 			decisions = append(decisions, a.Content)
 		case discussion.AnnotationActionItem:
 			actionItems = append(actionItems, a.Content)
-		case discussion.AnnotationDisagreement, discussion.AnnotationOpenQuestion:
+		case discussion.AnnotationDisagreement, discussion.AnnotationQuestion:
 			openQuestions = append(openQuestions, a.Content)
 		case discussion.AnnotationInsight, discussion.AnnotationLearning:
 			learnings = append(learnings, a.Content)
@@ -231,112 +236,66 @@ func categorizeAnnotations(af *discussion.AnnotationsFile) (decisions, learnings
 }
 
 // extractFactsFromSummaryJSON generates fact output directly from server-generated
-// structured data (summary.json + annotations.json), skipping the LLM entirely.
+// structured data (summary.json), skipping the LLM entirely.
 // Pure data transformation — no network calls.
 //
-// Two paths depending on what the server produced:
-//
-//  1. AgentSummary present → use its pre-categorized facts directly.
-//     Annotations are NOT re-appended because the server already incorporates
-//     them when building AgentSummary (see pkg/discussion types.go package doc).
-//     Chapter-based key context is also skipped when AgentSummary.KeyContext
-//     is non-empty, to avoid noise from chapter summaries duplicating curated facts.
-//
-//  2. AgentSummary nil → fall back to annotations + chapter-based extraction.
-//     Annotations provide decisions/learnings/action items. High-importance
-//     chapters (>0.5) contribute learnings and key context.
+// Reads flat top-level fields and calls .Text() on rich structs. Rejects
+// unexpected schema versions to avoid silent misparse. Key context is derived
+// from TechnicalContext.Notes + Constraints + NonGoals + high-importance chapters.
 func extractFactsFromSummaryJSON(d discussionInput) (string, error) {
 	summary, err := discussion.LoadSummary(d.SummaryJSONDir)
 	if err != nil {
 		return "", fmt.Errorf("load summary.json: %w", err)
 	}
-	if summary == nil || (len(summary.Chapters) == 0 && summary.AgentSummary == nil) {
-		return "", fmt.Errorf("summary.json is empty or has no chapters")
+	if summary == nil {
+		return "", fmt.Errorf("summary.json not found")
+	}
+	if summary.SchemaVersion != 2 {
+		slog.Warn("unexpected schema version, falling back to LLM", "version", summary.SchemaVersion)
+		return "", fmt.Errorf("unsupported schema version: %d", summary.SchemaVersion)
 	}
 
-	var decisions, learnings, actionItems, openQuestions, keyContext []string
-
-	if summary.AgentSummary != nil {
-		// primary path: use pre-categorized facts from server pipeline
-		// server already incorporates annotations into AgentSummary, so we
-		// don't re-append annotations here to avoid duplicates
-		decisions = append(decisions, summary.AgentSummary.Decisions...)
-		learnings = append(learnings, summary.AgentSummary.Learnings...)
-		openQuestions = append(openQuestions, summary.AgentSummary.OpenQuestions...)
-		actionItems = append(actionItems, summary.AgentSummary.ActionItems...)
-		keyContext = append(keyContext, summary.AgentSummary.KeyContext...)
-	} else {
-		// fallback: extract from annotations and chapters when no AgentSummary
-		annotations, err := discussion.LoadAnnotations(d.SummaryJSONDir)
-		if err != nil {
-			slog.Debug("annotations.json not loadable, proceeding without", "dir", d.DirName, "error", err)
-		}
-		ad, al, aa, ao := categorizeAnnotations(annotations)
-		decisions = append(decisions, ad...)
-		learnings = append(learnings, al...)
-		actionItems = append(actionItems, aa...)
-		openQuestions = append(openQuestions, ao...)
-
-		// collect learnings from high-importance chapters
-		for _, ch := range summary.Chapters {
-			if ch.Importance <= 0.5 {
-				continue
-			}
-			entry := ch.Title
-			if ch.Summary != "" {
-				entry += " — " + ch.Summary
-			}
-			learnings = append(learnings, entry)
-		}
-	}
-
-	// append chapter-based key context only when AgentSummary didn't provide any
-	if len(keyContext) == 0 {
-		for _, ch := range summary.Chapters {
-			if ch.Importance <= 0.5 {
-				continue
-			}
-			if ch.Summary != "" {
-				keyContext = append(keyContext, ch.Summary)
-			}
-			if ch.HasVisual && len(ch.VisualTypes) > 0 {
-				keyContext = append(keyContext, fmt.Sprintf("%s includes %s", ch.Title, strings.Join(ch.VisualTypes, ", ")))
-			}
-		}
-	}
-
-	// build markdown output, skipping empty categories
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "# Facts: %s\n", d.Title)
 
-	if len(decisions) > 0 {
+	if len(summary.Decisions) > 0 {
 		sb.WriteString("\n## Decisions\n")
-		for _, item := range decisions {
-			fmt.Fprintf(&sb, "- %s\n", item)
+		for _, item := range summary.Decisions {
+			fmt.Fprintf(&sb, "- %s\n", item.Text())
 		}
 	}
 
-	if len(learnings) > 0 {
+	if len(summary.Learnings) > 0 {
 		sb.WriteString("\n## Learnings\n")
-		for _, item := range learnings {
-			fmt.Fprintf(&sb, "- %s\n", item)
+		for _, item := range summary.Learnings {
+			fmt.Fprintf(&sb, "- %s\n", item.Text())
 		}
 	}
 
-	if len(actionItems) > 0 {
+	if len(summary.ActionItems) > 0 {
 		sb.WriteString("\n## Action Items\n")
-		for _, item := range actionItems {
-			fmt.Fprintf(&sb, "- %s\n", item)
+		for _, item := range summary.ActionItems {
+			fmt.Fprintf(&sb, "- %s\n", item.Text())
 		}
 	}
 
-	if len(openQuestions) > 0 {
+	if len(summary.OpenQuestions) > 0 {
 		sb.WriteString("\n## Open Questions\n")
-		for _, item := range openQuestions {
-			fmt.Fprintf(&sb, "- %s\n", item)
+		for _, item := range summary.OpenQuestions {
+			fmt.Fprintf(&sb, "- %s\n", item.Text())
 		}
 	}
 
+	// key context from TechnicalContext, Constraints, NonGoals, high-importance chapters
+	var keyContext []string
+	keyContext = append(keyContext, summary.TechnicalContext.Notes...)
+	keyContext = append(keyContext, summary.Constraints...)
+	keyContext = append(keyContext, summary.NonGoals...)
+	for _, ch := range summary.Chapters {
+		if ch.Importance > highImportanceThreshold && ch.Summary != "" {
+			keyContext = append(keyContext, ch.Summary)
+		}
+	}
 	if len(keyContext) > 0 {
 		sb.WriteString("\n## Key Context\n")
 		for _, item := range keyContext {

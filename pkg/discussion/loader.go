@@ -27,7 +27,7 @@ func LoadSummary(dirPath string) (*DiscussionSummary, error) {
 
 // LoadKeyframes reads and parses keyframes.json from a discussion directory.
 // Returns nil if the file doesn't exist.
-func LoadKeyframes(dirPath string) (*KeyframeManifest, error) {
+func LoadKeyframes(dirPath string) (*KeyframesManifest, error) {
 	data, err := os.ReadFile(filepath.Join(dirPath, "keyframes.json"))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -35,7 +35,7 @@ func LoadKeyframes(dirPath string) (*KeyframeManifest, error) {
 		}
 		return nil, fmt.Errorf("read keyframes.json: %w", err)
 	}
-	var m KeyframeManifest
+	var m KeyframesManifest
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("parse keyframes.json: %w", err)
 	}
@@ -61,7 +61,7 @@ func LoadAnnotations(dirPath string) (*AnnotationsFile, error) {
 
 // VisualTypes returns the sorted unique set of content types from keyframes linked to the given chapter.
 // Returns nil if no visual keyframes exist for this chapter.
-func VisualTypes(keyframes *KeyframeManifest, chapterID string) []string {
+func VisualTypes(keyframes *KeyframesManifest, chapterID string) []string {
 	if keyframes == nil {
 		return nil
 	}
@@ -84,7 +84,7 @@ func VisualTypes(keyframes *KeyframeManifest, chapterID string) []string {
 
 // AllVisualTypes returns the sorted unique set of content types across all keyframes.
 // Returns nil if the manifest is nil or contains no visual content.
-func AllVisualTypes(keyframes *KeyframeManifest) []string {
+func AllVisualTypes(keyframes *KeyframesManifest) []string {
 	if keyframes == nil {
 		return nil
 	}

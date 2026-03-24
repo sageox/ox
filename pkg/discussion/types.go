@@ -18,36 +18,19 @@
 // # summary.json vs annotations.json
 //
 // These two files serve different purposes in the progressive disclosure model.
-// Understanding the distinction is critical for extending or consuming them.
 //
 // summary.json is the STRUCTURAL SKELETON — it answers "what was discussed,
 // in what order, and how important was each segment?"
 //   - Chapter-level granularity (segments of minutes)
 //   - Contains synthesized summaries, importance rankings, topic tags
-//   - AgentSummary provides pre-categorized facts (decisions, learnings, etc.)
+//   - Top-level categorized facts (decisions, learnings, etc.)
 //   - Primary use: L1 progressive disclosure — agents decide which chapter to drill into
-//   - Think of it as: the table of contents with ratings
 //
 // annotations.json is ANCHORED EVIDENCE — it answers "where exactly did this
-// decision/disagreement/insight occur, and what was on screen?"
-//   - Moment-level granularity (specific cue ranges of seconds)
-//   - Contains verbatim-adjacent extractions with VTT timestamps and keyframe links
-//   - Primary use: L2 progressive disclosure — agents need specific evidence or provenance
-//   - Think of it as: margin notes with page numbers
-//
-// The same fact (e.g., "use rotating tokens") may appear in BOTH files. This is
-// by design: summary.json has it for filtering/categorization (no timestamp needed),
-// annotations.json has it for provenance (with the exact cue range). When consuming
-// both, prefer AgentSummary as the authoritative categorized source and treat
-// annotations as supplementary evidence. Do NOT merge both into fact output —
-// the server pipeline already incorporates annotations when building AgentSummary.
-//
-// # Placement Guide for New Content
-//
-//   - Synthesis, ranking, or classification → summary.json (Chapter or AgentSummary)
-//   - Extraction with a timestamp anchor → annotations.json
-//   - Visual frame with description → keyframes.json
-//   - Human-written prose → summary.md (not this package)
+// decision/disagreement/insight occur?"
+//   - Moment-level granularity (specific cue ranges)
+//   - Contains verbatim-adjacent extractions with VTT timestamps
+//   - Primary use: L2 progressive disclosure — agents need specific evidence
 //
 // # Progressive Disclosure Layers
 //
@@ -58,51 +41,122 @@
 //	L4  VTT cue range                             — need verbatim (<200 tokens/range)
 package discussion
 
-// DiscussionSummary represents summary.json — the structural skeleton of a discussion.
-// Chapters provide semantic sections with importance scoring for progressive disclosure (L1).
-// AgentSummary provides pre-categorized facts when the server pipeline has produced them.
+// DiscussionSummary represents a server-generated summary.json.
+// Facts are FLAT at the top level — there is no agent_summary wrapper.
+// Source of truth: packages/transcript-go/schema.go in the monorepo.
 type DiscussionSummary struct {
-	Chapters     []Chapter     `json:"chapters"`
-	AgentSummary *AgentSummary `json:"agent_summary,omitempty"`
+	SchemaVersion    int              `json:"schema_version"`
+	RecordingID      string           `json:"recording_id"`
+	Title            string           `json:"title"`
+	HumanSummary     string           `json:"human_summary"`
+	RecordedAt       string           `json:"recorded_at,omitempty"`
+	DurationSeconds  float64          `json:"duration_seconds,omitempty"`
+	Decisions        []Decision       `json:"decisions,omitempty"`
+	ActionItems      []ActionItem     `json:"action_items,omitempty"`
+	Requirements     []Requirement    `json:"requirements,omitempty"`
+	OpenQuestions    []OpenQuestion   `json:"open_questions,omitempty"`
+	Learnings        []Learning       `json:"learnings,omitempty"`
+	TechnicalContext TechnicalContext `json:"technical_context,omitempty"`
+	Constraints      []string         `json:"constraints,omitempty"`
+	NonGoals         []string         `json:"non_goals,omitempty"`
+	Topics           []string         `json:"topics,omitempty"`
+	Chapters         []Chapter        `json:"chapters,omitempty"`
+	HasAnnotations   bool             `json:"has_annotations,omitempty"`
+	HasKeyframes     bool             `json:"has_keyframes"`
 }
 
-// AgentSummary contains pre-categorized facts derived by the server summarization pipeline.
-// Categories align with the ox distill pipeline's DiscussionFactsPrompt output.
-//
-// When AgentSummary is present, the ox CLI uses it directly and skips the LLM —
-// no token cost, no latency, deterministic output. The server already incorporates
-// annotations.json content when building this, so consumers should NOT re-merge
-// annotations to avoid duplicates.
-type AgentSummary struct {
-	Decisions     []string `json:"decisions,omitempty"`
-	Learnings     []string `json:"learnings,omitempty"`
-	OpenQuestions []string `json:"open_questions,omitempty"`
-	ActionItems   []string `json:"action_items,omitempty"`
-	KeyContext    []string `json:"key_context,omitempty"`
+// HasCategorizedFacts returns true when the server pipeline has populated at least
+// one top-level fact category. When true, consumers should use these directly and
+// skip LLM extraction.
+func (s *DiscussionSummary) HasCategorizedFacts() bool {
+	return len(s.Decisions) > 0 ||
+		len(s.Learnings) > 0 ||
+		len(s.OpenQuestions) > 0 ||
+		len(s.ActionItems) > 0 ||
+		len(s.Requirements) > 0
+}
+
+// Decision records a decision made during the discussion.
+type Decision struct {
+	Description string `json:"description"`
+	Owner       string `json:"owner,omitempty"`
+	Context     string `json:"context,omitempty"`
+}
+
+// Text returns a one-line representation for the LLM-bypass fast path.
+func (d Decision) Text() string { return d.Description }
+
+// Requirement records a requirement identified during the discussion.
+type Requirement struct {
+	Description string `json:"description"`
+	Priority    string `json:"priority,omitempty"`
+	Source      string `json:"source,omitempty"`
+}
+
+// Text returns a one-line representation for the LLM-bypass fast path.
+func (r Requirement) Text() string { return r.Description }
+
+// ActionItem records a task identified during the discussion.
+type ActionItem struct {
+	Description string `json:"description"`
+	Assignee    string `json:"assignee,omitempty"`
+	DueDate     string `json:"due_date,omitempty"`
+}
+
+// Text returns a one-line representation for the LLM-bypass fast path.
+func (a ActionItem) Text() string { return a.Description }
+
+// OpenQuestion records an unresolved question from the discussion.
+type OpenQuestion struct {
+	Question string `json:"question"`
+	Context  string `json:"context,omitempty"`
+}
+
+// Text returns a one-line representation for the LLM-bypass fast path.
+func (q OpenQuestion) Text() string { return q.Question }
+
+// Learning records something the team learned during the discussion.
+type Learning struct {
+	Description string `json:"description"`
+	Source      string `json:"source,omitempty"`
+}
+
+// Text returns a one-line representation for the LLM-bypass fast path.
+func (l Learning) Text() string { return l.Description }
+
+// TechnicalContext captures the technical landscape discussed.
+// Notes holds free-form context that doesn't fit the three sub-categories.
+type TechnicalContext struct {
+	Technologies []string `json:"technologies,omitempty"`
+	Architecture []string `json:"architecture,omitempty"`
+	Integrations []string `json:"integrations,omitempty"`
+	Notes        []string `json:"notes,omitempty"`
 }
 
 // Chapter is a semantic section of a discussion with importance scoring.
 // Different from sessionsummary.ChapterSummary which tracks coding session tool usage.
 //
-// Agents use Importance to decide whether to drill deeper: chapters above 0.5 are
-// considered significant. HasVisual signals that keyframes.json has frames linked
-// to this chapter — the agent can check descriptions without loading images.
+// Agents use Importance to decide whether to drill deeper: chapters above the
+// high-importance threshold are considered significant.
 type Chapter struct {
-	ID          string   `json:"id"`                    // e.g. "ch-1", "ch-2"
-	Title       string   `json:"title"`                 // semantic title
-	Summary     string   `json:"summary,omitempty"`     // brief chapter summary
-	StartTime   float64  `json:"start_time"`            // seconds from start
-	EndTime     float64  `json:"end_time"`              // seconds from start
-	Importance  float64  `json:"importance"`             // 0.0-1.0; >0.5 is significant
-	Topics      []string `json:"topics,omitempty"`       // topic tags
-	HasVisual   bool     `json:"has_visual,omitempty"`   // true if chapter has keyframes
-	VisualTypes []string `json:"visual_types,omitempty"` // e.g. ["diagram", "code"]
+	ID         string     `json:"id"`               // e.g. "ch-1", "ch-2"
+	Title      string     `json:"title"`            // semantic title
+	Summary    string     `json:"summary"`          // brief chapter summary
+	CueRange   [2]int     `json:"cue_range"`        // [start, end] VTT cue indices
+	TimeRange  [2]float64 `json:"time_range"`       // [start, end] seconds from start
+	Importance float64    `json:"importance"`       // 0.0-1.0; >0.5 is significant
+	Topics     []string   `json:"topics,omitempty"` // topic tags
 }
 
-// KeyframeManifest represents keyframes.json — video-only, absent for audio recordings.
+// KeyframesManifest represents keyframes.json — video-only, absent for audio recordings.
 // Lets agents decide whether to load actual images based on text descriptions (L2).
-type KeyframeManifest struct {
-	Keyframes []Keyframe `json:"keyframes"`
+type KeyframesManifest struct {
+	RecordingID      string     `json:"recording_id"`
+	SourceURL        string     `json:"source_url,omitempty"`
+	Duration         float64    `json:"duration"`
+	KeyframeCount    int        `json:"keyframe_count"`
+	TotalBeforeDedup int        `json:"total_before_dedup"`
+	Keyframes        []Keyframe `json:"keyframes"`
 }
 
 // Keyframe is a single extracted video frame with semantic metadata.
@@ -111,35 +165,34 @@ type KeyframeManifest struct {
 type Keyframe struct {
 	S3Key            string  `json:"s3_key"`
 	TimestampSeconds float64 `json:"timestamp_seconds"`
-	ExtractionMethod string  `json:"extraction_method"`            // e.g. "scene-change", "periodic"
+	ExtractionMethod string  `json:"extraction_method"` // e.g. "scene-change", "periodic"
 	SceneChangeScore float64 `json:"scene_change_score,omitempty"`
-	TranscriptCue    string  `json:"transcript_cue,omitempty"`     // nearby transcript text
-	ChapterID        string  `json:"chapter_id,omitempty"`         // links to Chapter.ID
-	Description      string  `json:"description,omitempty"`        // one-line text summary of what's visible
-	ContentType      string  `json:"content_type,omitempty"`       // "diagram", "code", "terminal", "slide", "ui", "other"
+	TranscriptCue    string  `json:"transcript_cue,omitempty"` // nearby transcript text
+	ChapterID        string  `json:"chapter_id,omitempty"`     // links to Chapter.ID
+	ContentType      string  `json:"content_type,omitempty"`   // "diagram", "code", "terminal", "slide", "ui", "other"
+	Description      string  `json:"description,omitempty"`    // one-line text summary of what's visible
 }
 
 // AnnotationsFile represents annotations.json — timestamped evidence from the discussion.
-// Each annotation is anchored to a chapter and optionally to a VTT cue range, providing
+// Each annotation is anchored to a chapter and a VTT cue range, providing
 // provenance for decisions, disagreements, and action items.
-//
-// Annotations may overlap with AgentSummary content — both might contain "use rotating
-// tokens." This is by design: AgentSummary is for categorization, annotations are for
-// provenance (the exact moment and keyframe where it was said).
 type AnnotationsFile struct {
-	Annotations []Annotation `json:"annotations"`
+	SchemaVersion int          `json:"schema_version"`
+	RecordingID   string       `json:"recording_id"`
+	GeneratedAt   string       `json:"generated_at"`
+	Annotations   []Annotation `json:"annotations"`
 }
 
 // Annotation is a structured extraction anchored to a specific moment in the discussion.
-// ChapterID links to the relevant Chapter. CueStart/CueEnd mark the VTT timestamp range
-// for verbatim lookup (L4). Keyframes lists related visual frames by s3_key.
+// ChapterID links to the relevant Chapter. CueRange marks the VTT cue indices
+// for verbatim lookup (L4).
 type Annotation struct {
-	Type      string   `json:"type"`                 // see Annotation* constants
-	Content   string   `json:"content"`              // the annotation text
-	ChapterID string   `json:"chapter_id,omitempty"` // links to Chapter.ID
-	CueStart  float64  `json:"cue_start,omitempty"`  // VTT timestamp start (seconds)
-	CueEnd    float64  `json:"cue_end,omitempty"`    // VTT timestamp end (seconds)
-	Keyframes []string `json:"keyframes,omitempty"`  // s3_keys of related keyframes
+	Type       string   `json:"type"`                 // see Annotation* constants
+	Content    string   `json:"content"`              // the annotation text
+	ChapterID  string   `json:"chapter_id,omitempty"` // links to Chapter.ID
+	CueRange   [2]int   `json:"cue_range"`            // [start, end] VTT cue indices
+	Importance float64  `json:"importance,omitempty"` // 0.0-1.0
+	Speakers   []string `json:"speakers,omitempty"`   // who spoke
 }
 
 // ContentTypes for Keyframe.ContentType filtering.
@@ -152,12 +205,14 @@ const (
 	ContentTypeOther    = "other"
 )
 
-// AnnotationTypes for Annotation.Type filtering.
+// AnnotationTypes for Annotation.Type filtering (kebab-case per AGENTS.md convention).
 const (
 	AnnotationDecision     = "decision"
 	AnnotationActionItem   = "action-item"
 	AnnotationDisagreement = "disagreement"
+	AnnotationQuestion     = "question"
 	AnnotationInsight      = "insight"
-	AnnotationLearning     = "learning"      // bridges server annotation → distill "learnings" category
-	AnnotationOpenQuestion = "open-question"  // bridges server annotation → distill "open_questions" category
+	AnnotationLearning     = "learning"
+	AnnotationTangent      = "tangent"
+	AnnotationConsensus    = "consensus"
 )

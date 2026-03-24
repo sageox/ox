@@ -21,8 +21,8 @@ func TestLoadSummary(t *testing.T) {
 			setup: func(t *testing.T, dir string) {
 				writeFile(t, dir, "summary.json", `{
 					"chapters": [
-						{"id": "ch-1", "title": "Intro", "start_time": 0, "end_time": 60, "importance": 0.8},
-						{"id": "ch-2", "title": "Details", "start_time": 60, "end_time": 120, "importance": 0.6}
+						{"id": "ch-1", "title": "Intro", "time_range": [0, 60], "importance": 0.8},
+						{"id": "ch-2", "title": "Details", "time_range": [60, 120], "importance": 0.6}
 					]
 				}`)
 			},
@@ -80,63 +80,64 @@ func TestLoadSummary(t *testing.T) {
 	}
 }
 
-func TestLoadSummaryWithAgentSummary(t *testing.T) {
+func TestLoadSummaryWithCategorizedFacts(t *testing.T) {
 	tests := []struct {
-		name           string
-		json           string
-		wantAgent      bool
-		wantDecisions  int
-		wantLearnings  int
-		wantQuestions  int
-		wantActions    int
-		wantKeyContext int
+		name          string
+		json          string
+		wantFacts     bool
+		wantDecisions int
+		wantLearnings int
+		wantQuestions int
+		wantActions   int
 	}{
 		{
-			name: "full agent summary",
+			name: "full categorized facts",
 			json: `{
-				"chapters": [],
-				"agent_summary": {
-					"decisions": ["use postgres", "deploy weekly"],
-					"learnings": ["caching helps"],
-					"open_questions": ["scale strategy?"],
-					"action_items": ["write tests"],
-					"key_context": ["team prefers Go"]
-				}
+				"schema_version": 2,
+				"recording_id": "rec-1",
+				"title": "Test",
+				"human_summary": "summary",
+				"decisions": [{"description": "use postgres"}, {"description": "deploy weekly"}],
+				"learnings": [{"description": "caching helps"}],
+				"open_questions": [{"question": "scale strategy?"}],
+				"action_items": [{"description": "write tests"}],
+				"constraints": ["team prefers Go"]
 			}`,
-			wantAgent:      true,
-			wantDecisions:  2,
-			wantLearnings:  1,
-			wantQuestions:  1,
-			wantActions:    1,
-			wantKeyContext: 1,
+			wantFacts:     true,
+			wantDecisions: 2,
+			wantLearnings: 1,
+			wantQuestions: 1,
+			wantActions:   1,
 		},
 		{
-			name:      "no agent summary field",
-			json:      `{"chapters": []}`,
-			wantAgent: false,
+			name:      "no categorized facts",
+			json:      `{"schema_version": 2, "recording_id": "rec-1", "title": "T", "human_summary": "s"}`,
+			wantFacts: false,
 		},
 		{
-			name: "agent summary with empty arrays",
+			name: "empty arrays",
 			json: `{
-				"chapters": [],
-				"agent_summary": {
-					"decisions": [],
-					"learnings": []
-				}
+				"schema_version": 2,
+				"recording_id": "rec-1",
+				"title": "T",
+				"human_summary": "s",
+				"decisions": [],
+				"learnings": []
 			}`,
-			wantAgent:     true,
+			wantFacts:     false,
 			wantDecisions: 0,
 			wantLearnings: 0,
 		},
 		{
-			name: "agent summary with partial fields",
+			name: "partial fields",
 			json: `{
-				"chapters": [],
-				"agent_summary": {
-					"decisions": ["only decisions here"]
-				}
+				"schema_version": 2,
+				"recording_id": "rec-1",
+				"title": "T",
+				"human_summary": "s",
+				"decisions": [{"description": "only decisions here"}]
 			}`,
-			wantAgent:     true,
+			wantFacts:     true,
 			wantDecisions: 1,
 		},
 	}
@@ -154,21 +155,21 @@ func TestLoadSummaryWithAgentSummary(t *testing.T) {
 				t.Fatal("expected non-nil result")
 			}
 
-			if !tt.wantAgent {
-				if got.AgentSummary != nil {
-					t.Fatalf("expected nil AgentSummary, got %+v", got.AgentSummary)
+			if !tt.wantFacts {
+				if got.HasCategorizedFacts() {
+					t.Fatalf("expected no categorized facts, got decisions=%d learnings=%d",
+						len(got.Decisions), len(got.Learnings))
 				}
 				return
 			}
 
-			if got.AgentSummary == nil {
-				t.Fatal("expected non-nil AgentSummary")
+			if !got.HasCategorizedFacts() {
+				t.Fatal("expected categorized facts to be present")
 			}
-			assertLen(t, "decisions", len(got.AgentSummary.Decisions), tt.wantDecisions)
-			assertLen(t, "learnings", len(got.AgentSummary.Learnings), tt.wantLearnings)
-			assertLen(t, "open_questions", len(got.AgentSummary.OpenQuestions), tt.wantQuestions)
-			assertLen(t, "action_items", len(got.AgentSummary.ActionItems), tt.wantActions)
-			assertLen(t, "key_context", len(got.AgentSummary.KeyContext), tt.wantKeyContext)
+			assertLen(t, "decisions", len(got.Decisions), tt.wantDecisions)
+			assertLen(t, "learnings", len(got.Learnings), tt.wantLearnings)
+			assertLen(t, "open_questions", len(got.OpenQuestions), tt.wantQuestions)
+			assertLen(t, "action_items", len(got.ActionItems), tt.wantActions)
 		})
 	}
 }
@@ -320,12 +321,12 @@ func TestLoadAnnotations(t *testing.T) {
 func TestAllVisualTypes(t *testing.T) {
 	tests := []struct {
 		name string
-		mf   *discussion.KeyframeManifest
+		mf   *discussion.KeyframesManifest
 		want []string
 	}{
 		{
 			name: "deduplicates and sorts",
-			mf: &discussion.KeyframeManifest{
+			mf: &discussion.KeyframesManifest{
 				Keyframes: []discussion.Keyframe{
 					{S3Key: "a.png", ContentType: "diagram"},
 					{S3Key: "b.png", ContentType: "code"},
@@ -342,12 +343,12 @@ func TestAllVisualTypes(t *testing.T) {
 		},
 		{
 			name: "empty keyframes",
-			mf:   &discussion.KeyframeManifest{Keyframes: []discussion.Keyframe{}},
+			mf:   &discussion.KeyframesManifest{Keyframes: []discussion.Keyframe{}},
 			want: nil,
 		},
 		{
 			name: "keyframes with no content_type",
-			mf: &discussion.KeyframeManifest{
+			mf: &discussion.KeyframesManifest{
 				Keyframes: []discussion.Keyframe{
 					{S3Key: "a.png", ContentType: ""},
 					{S3Key: "b.png"},
@@ -357,7 +358,7 @@ func TestAllVisualTypes(t *testing.T) {
 		},
 		{
 			name: "single type",
-			mf: &discussion.KeyframeManifest{
+			mf: &discussion.KeyframesManifest{
 				Keyframes: []discussion.Keyframe{
 					{S3Key: "a.png", ContentType: "slide"},
 				},
@@ -377,13 +378,13 @@ func TestAllVisualTypes(t *testing.T) {
 func TestVisualTypes(t *testing.T) {
 	tests := []struct {
 		name      string
-		mf        *discussion.KeyframeManifest
+		mf        *discussion.KeyframesManifest
 		chapterID string
 		want      []string
 	}{
 		{
 			name: "filters by chapter and sorts",
-			mf: &discussion.KeyframeManifest{
+			mf: &discussion.KeyframesManifest{
 				Keyframes: []discussion.Keyframe{
 					{S3Key: "a.png", ChapterID: "ch-1", ContentType: "diagram"},
 					{S3Key: "b.png", ChapterID: "ch-2", ContentType: "code"},
@@ -396,7 +397,7 @@ func TestVisualTypes(t *testing.T) {
 		},
 		{
 			name: "no matches for chapter",
-			mf: &discussion.KeyframeManifest{
+			mf: &discussion.KeyframesManifest{
 				Keyframes: []discussion.Keyframe{
 					{S3Key: "a.png", ChapterID: "ch-1", ContentType: "diagram"},
 				},
@@ -412,7 +413,7 @@ func TestVisualTypes(t *testing.T) {
 		},
 		{
 			name: "skips keyframes with empty content_type",
-			mf: &discussion.KeyframeManifest{
+			mf: &discussion.KeyframesManifest{
 				Keyframes: []discussion.Keyframe{
 					{S3Key: "a.png", ChapterID: "ch-1", ContentType: ""},
 					{S3Key: "b.png", ChapterID: "ch-1", ContentType: "code"},
@@ -423,7 +424,7 @@ func TestVisualTypes(t *testing.T) {
 		},
 		{
 			name:      "empty manifest",
-			mf:        &discussion.KeyframeManifest{},
+			mf:        &discussion.KeyframesManifest{},
 			chapterID: "ch-1",
 			want:      nil,
 		},
@@ -448,13 +449,39 @@ func TestAnnotationTypeConstants(t *testing.T) {
 		{"disagreement", discussion.AnnotationDisagreement, "disagreement"},
 		{"insight", discussion.AnnotationInsight, "insight"},
 		{"learning", discussion.AnnotationLearning, "learning"},
-		{"open-question", discussion.AnnotationOpenQuestion, "open-question"},
+		{"question", discussion.AnnotationQuestion, "question"},
+		{"tangent", discussion.AnnotationTangent, "tangent"},
+		{"consensus", discussion.AnnotationConsensus, "consensus"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if tt.constant != tt.want {
 				t.Errorf("got %q, want %q", tt.constant, tt.want)
+			}
+		})
+	}
+}
+
+func TestRichStructTextMethods(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{"decision basic", discussion.Decision{Description: "use postgres"}.Text(), "use postgres"},
+		{"decision with owner", discussion.Decision{Description: "use postgres", Owner: "Person A"}.Text(), "use postgres"},
+		{"action basic", discussion.ActionItem{Description: "write tests"}.Text(), "write tests"},
+		{"action with assignee", discussion.ActionItem{Description: "write tests", Assignee: "Person A"}.Text(), "write tests"},
+		{"question basic", discussion.OpenQuestion{Question: "scale strategy?"}.Text(), "scale strategy?"},
+		{"learning basic", discussion.Learning{Description: "caching helps"}.Text(), "caching helps"},
+		{"requirement basic", discussion.Requirement{Description: "must support SSO"}.Text(), "must support SSO"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.text != tt.want {
+				t.Errorf("got %q, want %q", tt.text, tt.want)
 			}
 		})
 	}
