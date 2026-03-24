@@ -47,7 +47,11 @@ func (t *TokenResponse) effectiveRefreshToken() string {
 	if t.RefreshToken != "" {
 		return t.RefreshToken
 	}
-	return t.SessionToken
+	if t.SessionToken != "" {
+		slog.Warn("server returned session_token instead of refresh_token, using as fallback")
+		return t.SessionToken
+	}
+	return ""
 }
 
 // ErrorResponse represents an error response from the API
