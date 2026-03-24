@@ -234,10 +234,17 @@ func categorizeAnnotations(af *discussion.AnnotationsFile) (decisions, learnings
 // structured data (summary.json + annotations.json), skipping the LLM entirely.
 // Pure data transformation — no network calls.
 //
-// When AgentSummary exists in summary.json, its pre-categorized facts are used
-// directly (the server pipeline already incorporates annotations when building
-// AgentSummary, so annotations are NOT re-appended to avoid duplicates).
-// Falls back to annotation + chapter-based extraction when AgentSummary is nil.
+// Two paths depending on what the server produced:
+//
+//  1. AgentSummary present → use its pre-categorized facts directly.
+//     Annotations are NOT re-appended because the server already incorporates
+//     them when building AgentSummary (see pkg/discussion types.go package doc).
+//     Chapter-based key context is also skipped when AgentSummary.KeyContext
+//     is non-empty, to avoid noise from chapter summaries duplicating curated facts.
+//
+//  2. AgentSummary nil → fall back to annotations + chapter-based extraction.
+//     Annotations provide decisions/learnings/action items. High-importance
+//     chapters (>0.5) contribute learnings and key context.
 func extractFactsFromSummaryJSON(d discussionInput) (string, error) {
 	summary, err := discussion.LoadSummary(d.SummaryJSONDir)
 	if err != nil {
