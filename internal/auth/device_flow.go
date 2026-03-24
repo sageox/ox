@@ -29,13 +29,25 @@ type DeviceCodeResponse struct {
 	Interval                int    `json:"interval"`
 }
 
-// TokenResponse represents the response from the token endpoint
+// TokenResponse represents the response from the token endpoint.
+// SessionToken is a Better Auth fallback — if the server returns session_token
+// instead of refresh_token, we use it as the refresh token.
 type TokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
+	SessionToken string `json:"session_token"`
 	TokenType    string `json:"token_type"`
 	ExpiresIn    int    `json:"expires_in"`
 	Scope        string `json:"scope"`
+}
+
+// effectiveRefreshToken returns the refresh token, falling back to session_token
+// if refresh_token is empty (Better Auth compatibility).
+func (t *TokenResponse) effectiveRefreshToken() string {
+	if t.RefreshToken != "" {
+		return t.RefreshToken
+	}
+	return t.SessionToken
 }
 
 // ErrorResponse represents an error response from the API
@@ -162,9 +174,12 @@ func Login(ctx context.Context, deviceCode *DeviceCodeResponse, statusCallback f
 			}
 
 			// log token response details for troubleshooting (visible with -v)
+			refreshToken := token.effectiveRefreshToken()
 			slog.Debug("device flow token response",
 				"has_access_token", token.AccessToken != "",
 				"has_refresh_token", token.RefreshToken != "",
+				"has_session_token", token.SessionToken != "",
+				"using_session_token_as_refresh", token.RefreshToken == "" && token.SessionToken != "",
 				"expires_in", token.ExpiresIn,
 				"token_type", token.TokenType,
 				"scope", token.Scope)
@@ -199,7 +214,7 @@ func Login(ctx context.Context, deviceCode *DeviceCodeResponse, statusCallback f
 			// save JWT token
 			storedToken := &StoredToken{
 				AccessToken:  accessToken,
-				RefreshToken: token.RefreshToken,
+				RefreshToken: refreshToken,
 				ExpiresAt:    time.Now().Add(time.Duration(expiresIn) * time.Second),
 				TokenType:    token.TokenType,
 				Scope:        token.Scope,
@@ -501,9 +516,12 @@ func (c *AuthClient) Login(ctx context.Context, deviceCode *DeviceCodeResponse, 
 			}
 
 			// log token response details for troubleshooting (visible with -v)
+			refreshToken := token.effectiveRefreshToken()
 			slog.Debug("device flow token response",
 				"has_access_token", token.AccessToken != "",
 				"has_refresh_token", token.RefreshToken != "",
+				"has_session_token", token.SessionToken != "",
+				"using_session_token_as_refresh", token.RefreshToken == "" && token.SessionToken != "",
 				"expires_in", token.ExpiresIn,
 				"token_type", token.TokenType,
 				"scope", token.Scope)
@@ -538,7 +556,7 @@ func (c *AuthClient) Login(ctx context.Context, deviceCode *DeviceCodeResponse, 
 			// save JWT token using client's storage
 			storedToken := &StoredToken{
 				AccessToken:  accessToken,
-				RefreshToken: token.RefreshToken,
+				RefreshToken: refreshToken,
 				ExpiresAt:    time.Now().Add(time.Duration(expiresIn) * time.Second),
 				TokenType:    token.TokenType,
 				Scope:        token.Scope,

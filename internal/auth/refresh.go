@@ -27,13 +27,23 @@ type tokenErrorResponse struct {
 	ErrorDescription string `json:"error_description"`
 }
 
-// tokenResponse represents the OAuth2 token endpoint response format
+// tokenResponse represents the OAuth2 token endpoint response format.
+// SessionToken is a Better Auth fallback for refresh_token.
 type tokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
+	SessionToken string `json:"session_token"`
 	ExpiresIn    int    `json:"expires_in"`
 	TokenType    string `json:"token_type"`
 	Scope        string `json:"scope"`
+}
+
+// effectiveRefreshToken returns the refresh token, falling back to session_token.
+func (t *tokenResponse) effectiveRefreshToken() string {
+	if t.RefreshToken != "" {
+		return t.RefreshToken
+	}
+	return t.SessionToken
 }
 
 // TokenRefreshError represents an error that occurred during token refresh
@@ -234,10 +244,10 @@ func refreshTokenForEndpoint(token *StoredToken, ep string) (*StoredToken, error
 		}
 	}
 
-	// refresh_token may be rotated or stay the same
+	// refresh_token may be rotated or stay the same; fall back to session_token
 	refreshToken := token.RefreshToken
-	if responseData.RefreshToken != "" {
-		refreshToken = responseData.RefreshToken
+	if rt := responseData.effectiveRefreshToken(); rt != "" {
+		refreshToken = rt
 	}
 
 	// extract optional fields with defaults
@@ -440,10 +450,10 @@ func (c *AuthClient) refreshToken(token *StoredToken) (*StoredToken, error) {
 		}
 	}
 
-	// refresh_token may be rotated or stay the same
+	// refresh_token may be rotated or stay the same; fall back to session_token
 	refreshTokenStr := token.RefreshToken
-	if responseData.RefreshToken != "" {
-		refreshTokenStr = responseData.RefreshToken
+	if rt := responseData.effectiveRefreshToken(); rt != "" {
+		refreshTokenStr = rt
 	}
 
 	// extract optional fields with defaults
