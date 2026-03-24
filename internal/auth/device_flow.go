@@ -161,6 +161,14 @@ func Login(ctx context.Context, deviceCode *DeviceCodeResponse, statusCallback f
 				return err
 			}
 
+			// log token response details for troubleshooting (visible with -v)
+			slog.Debug("device flow token response",
+				"has_access_token", token.AccessToken != "",
+				"has_refresh_token", token.RefreshToken != "",
+				"expires_in", token.ExpiresIn,
+				"token_type", token.TokenType,
+				"scope", token.Scope)
+
 			// exchange opaque token for JWT
 			jwtToken, err := exchangeForJWT(client, apiURL, token.AccessToken)
 			if err != nil {
@@ -203,6 +211,12 @@ func Login(ctx context.Context, deviceCode *DeviceCodeResponse, statusCallback f
 			}
 
 			statusCallback("Successfully authenticated")
+
+			if storedToken.RefreshToken == "" {
+				statusCallback("Warning: server did not provide a refresh token. " +
+					"You will need to run 'ox login' again when this token expires.")
+			}
+
 			return nil
 		}
 	}
@@ -486,6 +500,14 @@ func (c *AuthClient) Login(ctx context.Context, deviceCode *DeviceCodeResponse, 
 				return err
 			}
 
+			// log token response details for troubleshooting (visible with -v)
+			slog.Debug("device flow token response",
+				"has_access_token", token.AccessToken != "",
+				"has_refresh_token", token.RefreshToken != "",
+				"expires_in", token.ExpiresIn,
+				"token_type", token.TokenType,
+				"scope", token.Scope)
+
 			// exchange opaque token for JWT
 			jwtToken, err := exchangeForJWT(httpClient, apiURL, token.AccessToken)
 			if err != nil {
@@ -528,6 +550,12 @@ func (c *AuthClient) Login(ctx context.Context, deviceCode *DeviceCodeResponse, 
 			}
 
 			statusCallback("Successfully authenticated")
+
+			if storedToken.RefreshToken == "" {
+				statusCallback("Warning: server did not provide a refresh token. " +
+					"You will need to run 'ox login' again when this token expires.")
+			}
+
 			return nil
 		}
 	}

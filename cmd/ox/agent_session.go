@@ -992,8 +992,16 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			} else {
 				// LFS upload failed - set marker so doctor can retry
 				_ = doctor.SetNeedsDoctorAgent(projectRoot)
-				fmt.Fprintf(os.Stderr, "warning: LFS upload failed (session saved locally): %v\n", uploadErr)
-				result.UploadWarning = "Session saved locally but ledger upload failed. Run 'ox doctor' to retry."
+				errMsg := uploadErr.Error()
+				if isAuthRelatedError(errMsg) {
+					fmt.Fprintf(os.Stderr, "warning: session upload failed — credentials expired or revoked\n")
+					fmt.Fprintf(os.Stderr, "  session saved locally, run: ox login && ox doctor\n")
+					result.UploadWarning = "Session saved locally. Credentials expired — run 'ox login' then 'ox doctor' to retry upload."
+				} else {
+					fmt.Fprintf(os.Stderr, "warning: LFS upload failed (session saved locally): %v\n", uploadErr)
+					fmt.Fprintf(os.Stderr, "  troubleshoot: ox status, ox doctor, ox daemon logs\n")
+					result.UploadWarning = "Session saved locally but ledger upload failed. Run 'ox doctor' to retry."
+				}
 			}
 			result.LedgerSessionDir = "" // clear since upload didn't succeed
 		} else {
@@ -1054,6 +1062,30 @@ func filterEntriesAfterStart(entries []adapters.RawEntry, startedAt time.Time) [
 
 // uploadSessionToLedger copies content files from cache to ledger, uploads to LFS,
 // writes meta.json, and commits+pushes. This is phase 2 of the two-phase design:
+// isAuthRelatedError checks if an error message indicates an auth/credential problem.
+// Used to surface targeted "run ox login" guidance instead of a generic error dump.
+func isAuthRelatedError(msg string) bool {
+	authPatterns := []string{
+		"authentication required",
+		"credentials expired",
+		"no git credentials",
+		"empty token",
+		"run 'ox login'",
+		"auth token",
+		"HTTP 401",
+		"HTTP 403",
+		"credential",
+		"PAT rejected",
+	}
+	lower := strings.ToLower(msg)
+	for _, p := range authPatterns {
+		if strings.Contains(lower, strings.ToLower(p)) {
+			return true
+		}
+	}
+	return false
+}
+
 // content files are uploaded to LFS blob storage first, then meta.json (containing
 // LFS OIDs) is committed to git. Content files themselves are .gitignore'd in the
 // ledger repo -- only meta.json is tracked by git. Other machines fetch content via LFS.

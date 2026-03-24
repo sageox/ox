@@ -155,12 +155,12 @@ func uploadSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, 
 }
 
 // getLFSClient creates an LFS client using project credentials.
-// Derives the LFS batch URL from the ledger's git repo URL.
+// Derives the LFS batch URL from the ledger's local git remote, avoiding any
+// dependency on the OAuth API token. Only the Git PAT is needed for LFS auth.
 func getLFSClient(projectRoot string) (*lfs.Client, error) {
-	// get endpoint for this project
 	ep := endpoint.GetForProject(projectRoot)
 
-	// load git credentials for this endpoint
+	// load git credentials (PAT) for LFS HTTP Basic auth
 	creds, err := gitserver.LoadCredentialsForEndpoint(ep)
 	if err != nil {
 		return nil, fmt.Errorf("load credentials: %w", err)
@@ -172,30 +172,21 @@ func getLFSClient(projectRoot string) (*lfs.Client, error) {
 		return nil, fmt.Errorf("git credentials have empty token")
 	}
 
-	// get ledger repo URL from API
-	repoID := config.GetRepoID(projectRoot)
-	if repoID == "" {
-		return nil, fmt.Errorf("no repo_id in project config")
-	}
-
-	token, err := auth.GetTokenForEndpoint(ep)
+	// derive LFS repo URL from the ledger's local git remote (no API call needed)
+	ledgerPath, err := resolveLedgerPath()
 	if err != nil {
-		return nil, fmt.Errorf("get auth token: %w", err)
-	}
-	if token == nil || token.AccessToken == "" {
-		return nil, fmt.Errorf("no auth token (run 'ox login' first)")
+		return nil, fmt.Errorf("resolve ledger: %w", err)
 	}
 
-	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
-	status, err := client.GetLedgerStatus(repoID)
+	repoURL, err := gitserver.GetBareRemoteURL(ledgerPath)
 	if err != nil {
-		return nil, fmt.Errorf("get ledger status: %w", err)
+		return nil, fmt.Errorf("get ledger remote URL: %w", err)
 	}
-	if status == nil || status.RepoURL == "" {
-		return nil, fmt.Errorf("ledger not ready or no repo URL")
+	if repoURL == "" {
+		return nil, fmt.Errorf("ledger has no remote URL configured")
 	}
 
-	return lfs.NewClient(status.RepoURL, creds.Username, creds.Token), nil
+	return lfs.NewClient(repoURL, creds.Username, creds.Token), nil
 }
 
 // ensureSessionsGitignore ensures the sessions/.gitignore exists in the ledger.

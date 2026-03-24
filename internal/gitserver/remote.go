@@ -119,6 +119,17 @@ func extractPATFromRemote(repoPath string) (pat string, remoteURL string, err er
 	return password, remoteURL, nil
 }
 
+// GetBareRemoteURL returns the origin remote URL with credentials stripped.
+// Useful when you need the repo URL for API derivation (e.g., LFS batch endpoint)
+// without embedding the PAT.
+func GetBareRemoteURL(repoPath string) (string, error) {
+	_, remoteURL, err := extractPATFromRemote(repoPath)
+	if err != nil {
+		return "", err
+	}
+	return SanitizeRemoteURL(remoteURL), nil
+}
+
 // SanitizeRemoteURL removes credentials from a URL for safe display.
 // Returns the original string for SSH URLs or unparseable URLs.
 func SanitizeRemoteURL(rawURL string) string {

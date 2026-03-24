@@ -16,8 +16,8 @@ func TestCheckSlugGitPATLiveness_Registered(t *testing.T) {
 	check := GetDoctorCheck(CheckSlugGitPATLiveness)
 	require.NotNil(t, check, "git-pat-liveness check should be registered")
 	assert.Equal(t, "Authentication", check.Category)
-	assert.Equal(t, FixLevelCheckOnly, check.FixLevel)
-	assert.Equal(t, FixLevelCheckOnly, check.FixLevel, "PAT liveness has no automated fix")
+	assert.Equal(t, FixLevelAuto, check.FixLevel)
+	assert.Equal(t, FixLevelAuto, check.FixLevel, "PAT liveness auto-repairs via credential sync")
 }
 
 func TestValidatePATLiveness_ValidToken(t *testing.T) {
