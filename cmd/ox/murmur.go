@@ -62,8 +62,8 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a SageOx project: %w", err)
 	}
 
-	if !config.FeatureWhisperEnabled() {
-		return fmt.Errorf("whisper feature not enabled — set FEATURE_WHISPER=true to use murmurs")
+	if !config.FeatureMurmurEnabled() {
+		return fmt.Errorf("murmur feature not enabled — set FEATURE_MURMUR=true to use murmurs")
 	}
 
 	// parse input: positional arg or stdin

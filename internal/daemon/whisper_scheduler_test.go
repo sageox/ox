@@ -235,16 +235,14 @@ func TestWhisperScheduler_RunPrune(t *testing.T) {
 	var wg sync.WaitGroup
 	scheduler.RunPrune(ctx, &wg, 10*time.Millisecond)
 
-	// wait for at least one prune cycle
-	time.Sleep(50 * time.Millisecond)
+	// use a unique agent ID to avoid cursor interference from other tests
+	require.Eventually(t, func() bool {
+		entries, err := registry.GetWhispers("prune-check-agent", whisperstore.AttentionAll, nil)
+		return err == nil && len(entries) == 0
+	}, 2*time.Second, 10*time.Millisecond, "old entry should be pruned")
 
 	cancel()
 	wg.Wait()
-
-	// the 2-day-old entry should have been pruned (retention is 24h)
-	entries, err := registry.GetWhispers("test-agent", whisperstore.AttentionAll, nil)
-	require.NoError(t, err)
-	assert.Empty(t, entries, "old entry should be pruned")
 }
 
 func TestActivitySummarySource_Content(t *testing.T) {

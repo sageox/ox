@@ -61,7 +61,7 @@ func TestMurmurValidImportanceLevels(t *testing.T) {
 }
 
 func TestMurmurMissingContent(t *testing.T) {
-	t.Setenv("FEATURE_WHISPER", "true")
+	t.Setenv("FEATURE_MURMUR", "true")
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -77,7 +77,7 @@ func TestMurmurMissingContent(t *testing.T) {
 }
 
 func TestMurmurEmptyContent(t *testing.T) {
-	t.Setenv("FEATURE_WHISPER", "true")
+	t.Setenv("FEATURE_MURMUR", "true")
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -93,8 +93,9 @@ func TestMurmurEmptyContent(t *testing.T) {
 }
 
 func TestMurmurJSONInputParsing(t *testing.T) {
+	t.Setenv("FEATURE_MURMUR", "true")
 	t.Chdir(t.TempDir())
-	t.Setenv("FEATURE_WHISPER", "true")
+
 	t.Run("valid JSON with content passes parsing", func(t *testing.T) {
 		cmd := *murmurCmd
 		var buf bytes.Buffer
@@ -147,7 +148,7 @@ func TestMurmurJSONInputParsing(t *testing.T) {
 }
 
 func TestMurmurInvalidImportanceReturnsError(t *testing.T) {
-	t.Setenv("FEATURE_WHISPER", "true")
+	t.Setenv("FEATURE_MURMUR", "true")
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -165,7 +166,7 @@ func TestMurmurInvalidImportanceReturnsError(t *testing.T) {
 }
 
 func TestMurmurInvalidScopeReturnsError(t *testing.T) {
-	t.Setenv("FEATURE_WHISPER", "true")
+	t.Setenv("FEATURE_MURMUR", "true")
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -185,7 +186,7 @@ func TestMurmurInvalidScopeReturnsError(t *testing.T) {
 }
 
 func TestMurmurContentTooLarge(t *testing.T) {
-	t.Setenv("FEATURE_WHISPER", "true")
+	t.Setenv("FEATURE_MURMUR", "true")
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
@@ -206,7 +207,7 @@ func TestMurmurContentTooLarge(t *testing.T) {
 }
 
 func TestMurmurJSONOverridesDefaults(t *testing.T) {
-	t.Setenv("FEATURE_WHISPER", "true")
+	t.Setenv("FEATURE_MURMUR", "true")
 	cmd := *murmurCmd
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)

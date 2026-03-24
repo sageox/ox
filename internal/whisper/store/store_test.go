@@ -527,8 +527,9 @@ func TestEnforceMaxSize(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get after enforce: %v", err)
 	}
-	// all or some entries pruned
-	_ = got
+	if len(got) >= 200 {
+		t.Error("expected enforcement to reduce entry count")
+	}
 }
 
 func TestImportanceOrdering(t *testing.T) {
@@ -627,4 +628,3 @@ func TestMultiDaemonTeamDB(t *testing.T) {
 		t.Errorf("s2 expected 2, got %d", len(got2))
 	}
 }
-

@@ -195,7 +195,7 @@ func (s *Store) Add(entries ...WhisperEntry) error {
 		_, err := stmt.Exec(
 			e.ID, e.Scope, string(e.Type), e.Source, e.Topic,
 			e.Content, string(e.Importance),
-			e.CreatedAt.Format(time.RFC3339Nano),
+			e.CreatedAt.UTC().Format(time.RFC3339Nano),
 			nilIfEmpty(e.AgentID), nilIfEmpty(e.PrincipalID),
 			nilIfEmpty(e.PrincipalType), nilIfEmpty(e.TeamID),
 			metadataJSON,
@@ -212,7 +212,7 @@ func (s *Store) Add(entries ...WhisperEntry) error {
 // Updates the agent's cursor so subsequent calls only return new entries.
 // On first call for an unknown agent, returns all current entries.
 func (s *Store) GetWhispers(agentID string, attention Attention, topics []string) ([]WhisperEntry, error) {
-	now := time.Now()
+	now := time.Now().UTC()
 
 	// read current cursor
 	var cursor time.Time
@@ -229,7 +229,7 @@ func (s *Store) GetWhispers(agentID string, attention Attention, topics []string
 	query := `SELECT id, scope, type, source, topic, content, importance, created_at,
 		agent_id, principal_id, principal_type, team_id, metadata
 		FROM whispers WHERE created_at > ?`
-	args := []any{cursor.Format(time.RFC3339Nano)}
+	args := []any{cursor.UTC().Format(time.RFC3339Nano)}
 
 	// attention filter
 	allowedImportance := importanceForAttention(attention)
@@ -269,12 +269,12 @@ func (s *Store) GetWhispers(agentID string, attention Attention, topics []string
 	for rows.Next() {
 		var e WhisperEntry
 		var createdStr string
-		var agentID, principalID, principalType, teamID, metadataJSON sql.NullString
+		var entryAgentID, principalID, principalType, teamID, metadataJSON sql.NullString
 		var typ, imp string
 
 		if err := rows.Scan(
 			&e.ID, &e.Scope, &typ, &e.Source, &e.Topic, &e.Content, &imp, &createdStr,
-			&agentID, &principalID, &principalType, &teamID, &metadataJSON,
+			&entryAgentID, &principalID, &principalType, &teamID, &metadataJSON,
 		); err != nil {
 			return nil, fmt.Errorf("scan whisper: %w", err)
 		}
@@ -282,7 +282,7 @@ func (s *Store) GetWhispers(agentID string, attention Attention, topics []string
 		e.Type = WhisperType(typ)
 		e.Importance = Importance(imp)
 		e.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)
-		e.AgentID = agentID.String
+		e.AgentID = entryAgentID.String
 		e.PrincipalID = principalID.String
 		e.PrincipalType = principalType.String
 		e.TeamID = teamID.String

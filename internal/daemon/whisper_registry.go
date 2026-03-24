@@ -202,7 +202,8 @@ func (r *WhisperRegistry) Close() error {
 }
 
 // storeForScope returns the store that handles the given scope.
-// For "team", returns the ledger store as fallback (relayed records are co-located).
+// For "team", returns the ledger store (relayed records are co-located).
+// Returns nil for unknown scopes — callers handle nil gracefully.
 func (r *WhisperRegistry) storeForScope(scope string) *whisperstore.Store {
 	switch scope {
 	case "ledger":
@@ -211,6 +212,6 @@ func (r *WhisperRegistry) storeForScope(scope string) *whisperstore.Store {
 		// team relay tracking goes to ledger store (single writer)
 		return r.ledgerStore
 	default:
-		return r.ledgerStore
+		return nil
 	}
 }

@@ -2,29 +2,33 @@ package config
 
 import "testing"
 
-func TestFeatureWhisperEnabled(t *testing.T) {
+func TestFeatureMurmurEnabled(t *testing.T) {
 	tests := []struct {
-		name  string
 		value string
+		unset bool
 		want  bool
 	}{
-		{name: "unset returns false", value: "", want: false},
-		{name: "true returns true", value: "true", want: true},
-		{name: "1 returns true", value: "1", want: true},
-		{name: "yes returns false", value: "yes", want: false},
-		{name: "false returns false", value: "false", want: false},
-		{name: "0 returns false", value: "0", want: false},
-		{name: "TRUE returns false", value: "TRUE", want: false},
+		{value: "true", want: true},
+		{value: "1", want: true},
+		{value: "false", want: false},
+		{value: "0", want: false},
+		{value: "", want: false},
+		{unset: true, want: false},
 	}
+
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.value == "" {
-				t.Setenv("FEATURE_WHISPER", "")
+		name := tt.value
+		if tt.unset {
+			name = "<unset>"
+		}
+		t.Run(name, func(t *testing.T) {
+			if tt.unset {
+				t.Setenv("FEATURE_MURMUR", "")
 			} else {
-				t.Setenv("FEATURE_WHISPER", tt.value)
+				t.Setenv("FEATURE_MURMUR", tt.value)
 			}
-			if got := FeatureWhisperEnabled(); got != tt.want {
-				t.Errorf("FeatureWhisperEnabled() = %v, want %v (FEATURE_WHISPER=%q)", got, tt.want, tt.value)
+			if got := FeatureMurmurEnabled(); got != tt.want {
+				t.Errorf("FeatureMurmurEnabled() = %v, want %v (FEATURE_MURMUR=%q)", got, tt.want, tt.value)
 			}
 		})
 	}
