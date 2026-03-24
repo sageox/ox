@@ -9,12 +9,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/telemetry"
 	"github.com/spf13/cobra"
 )
 
@@ -70,6 +73,15 @@ func runSessionPushSummary(cmd *cobra.Command, args []string) error {
 
 // pushSummaryToLedger validates inputs, copies the summary file, and commits+pushes.
 func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
+	pushStart := time.Now()
+
+	// capture meta.json mtime before we modify it — represents when session stop
+	// finished uploading initial artifacts. Used to compute stop-to-visible latency.
+	var stopUploadedAt time.Time
+	if info, err := os.Stat(filepath.Join(sessionDir, "meta.json")); err == nil {
+		stopUploadedAt = info.ModTime()
+	}
+
 	// read summary data from file or stdin
 	var data []byte
 	var err error
@@ -246,6 +258,22 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 
 	// clear .needs-summary marker in cache if we can find it
 	clearNeedsSummaryMarkerForSession(sessionName)
+
+	// emit stop-to-visible telemetry: total time from session stop upload to summary push
+	if cliCtx != nil && cliCtx.TelemetryClient != nil {
+		meta := map[string]string{
+			"push_ms":       strconv.FormatInt(time.Since(pushStart).Milliseconds(), 10),
+			"quality_score": strconv.FormatFloat(summaryParsed.QualityScore, 'f', 2, 64),
+		}
+		if !stopUploadedAt.IsZero() {
+			meta["stop_to_visible_ms"] = strconv.FormatInt(time.Since(stopUploadedAt).Milliseconds(), 10)
+		}
+		cliCtx.TelemetryClient.TrackAsync(telemetry.Event{
+			Type:     telemetry.EventSessionPushSummary,
+			Success:  true,
+			Metadata: meta,
+		})
+	}
 
 	return &pushSummaryOutput{
 		Success:      true,

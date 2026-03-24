@@ -51,6 +51,9 @@ const (
 	// daemon events (sent directly from CLI when daemon unavailable)
 	EventDaemonStartFailure = "daemon:start_failure" // daemon failed to start
 
+	// session latency events
+	EventSessionPushSummary = "session_push_summary" // summary pushed to ledger (stop-to-visible latency)
+
 	// coworker events
 	EventCoworkerLoad = "coworker_load" // coworker/subagent loaded into context
 )

@@ -682,6 +682,12 @@ func (d *Daemon) initComponents() time.Duration {
 				"status", status,
 				"duration", result.Duration,
 			)
+			if d.telemetry != nil && result.Item.Type == "session-finalize" {
+				d.telemetry.Record("session:finalize", map[string]any{
+					"status":      status,
+					"duration_ms": result.Duration.Milliseconds(),
+				})
+			}
 		})
 		d.scheduler.SetAgentWorkSignal(agentWorkSignal)
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	sessionhtml "github.com/sageox/ox/internal/session/html"
+	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 )
@@ -486,6 +488,26 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	}
 	// finalize timing
 	timing["total_ms"] = time.Since(stopStart).Milliseconds()
+
+	// emit session stop latency telemetry
+	if cliCtx != nil && cliCtx.TelemetryClient != nil {
+		uploadSuccess := processResult != nil && processResult.UploadWarning == ""
+		meta := map[string]string{
+			"process_ms": strconv.FormatInt(timing["process_ms"], 10),
+			"upload_ms":  strconv.FormatInt(timing["upload_ms"], 10),
+			"total_ms":   strconv.FormatInt(timing["total_ms"], 10),
+		}
+		if processResult != nil {
+			meta["entry_count"] = strconv.Itoa(processResult.EntryCount)
+		}
+		cliCtx.TelemetryClient.TrackAsync(telemetry.Event{
+			Type:     telemetry.EventSessionEnd,
+			AgentID:  inst.AgentID,
+			Duration: timing["total_ms"],
+			Success:  uploadSuccess,
+			Metadata: meta,
+		})
+	}
 
 	// output format selection (priority: review > text > json default)
 	if cfg.Review {
