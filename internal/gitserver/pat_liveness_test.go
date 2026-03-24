@@ -2,8 +2,8 @@ package gitserver
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
+	"net/url"
+	"os"
 	"testing"
 	"time"
 
@@ -11,141 +11,153 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestValidatePATLiveness(t *testing.T) {
-	tests := []struct {
-		name       string
-		handler    http.HandlerFunc
-		serverURL  string
-		token      string
-		wantValid  bool
-		wantSkip   bool
-		wantReason string
-	}{
-		{
-			name: "valid PAT returns 200",
-			handler: func(w http.ResponseWriter, r *http.Request) {
-				assert.Equal(t, r.Header.Get("PRIVATE-TOKEN"), "good-token")
-				w.WriteHeader(http.StatusOK)
-			},
-			token:     "good-token",
-			wantValid: true,
-		},
-		{
-			name: "revoked PAT returns 401",
-			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusUnauthorized)
-			},
-			token:      "bad-token",
-			wantValid:  false,
-			wantReason: "PAT rejected by server (revoked or invalid)",
-		},
-		{
-			name: "forbidden PAT returns 403",
-			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusForbidden)
-			},
-			token:      "forbidden-token",
-			wantValid:  false,
-			wantReason: "PAT rejected by server (revoked or invalid)",
-		},
-		{
-			name:      "empty token skips",
-			handler:   nil,
-			token:     "",
-			wantSkip:  true,
-			wantReason: "no credentials",
-		},
-		{
-			name:       "empty server URL skips",
-			handler:    nil,
-			serverURL:  "",
-			token:      "some-token",
-			wantSkip:   true,
-			wantReason: "no credentials",
-		},
-		{
-			name: "unexpected status skips",
-			handler: func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusServiceUnavailable)
-			},
-			token:    "some-token",
-			wantSkip: true,
-		},
-	}
+func TestValidatePATLiveness_NilCreds(t *testing.T) {
+	result := ValidatePATLiveness(context.Background(), nil)
+	assert.True(t, result.Skipped)
+	assert.Contains(t, result.Reason, "no credentials")
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var serverURL string
-			if tt.handler != nil {
-				srv := httptest.NewServer(tt.handler)
-				defer srv.Close()
-				serverURL = srv.URL
-			} else if tt.serverURL != "" {
-				serverURL = tt.serverURL
-			}
+func TestValidatePATLiveness_EmptyToken(t *testing.T) {
+	creds := &GitCredentials{Token: ""}
+	result := ValidatePATLiveness(context.Background(), creds)
+	assert.True(t, result.Skipped)
+	assert.Contains(t, result.Reason, "no credentials")
+}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			result := ValidatePATLiveness(ctx, serverURL, tt.token)
-
-			assert.Equal(t, tt.wantValid, result.Valid, "Valid mismatch")
-			assert.Equal(t, tt.wantSkip, result.Skipped, "Skipped mismatch")
-			if tt.wantReason != "" {
-				require.Contains(t, result.Reason, tt.wantReason)
-			}
-		})
-	}
+func TestValidatePATLiveness_NoRepos(t *testing.T) {
+	creds := &GitCredentials{Token: "some-token"}
+	result := ValidatePATLiveness(context.Background(), creds)
+	assert.True(t, result.Skipped)
+	assert.Contains(t, result.Reason, "no repo URL")
 }
 
 func TestValidatePATLiveness_Timeout(t *testing.T) {
-	// server that never responds
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(10 * time.Second)
-	}))
-	defer srv.Close()
+	// unreachable host — context timeout should cause skip
+	creds := &GitCredentials{
+		Token: "some-token",
+		Repos: map[string]RepoEntry{
+			"test": {URL: "https://192.0.2.1:1/test/repo.git"},
+		},
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	result := ValidatePATLiveness(ctx, srv.URL, "some-token")
+	result := ValidatePATLiveness(ctx, creds)
 	assert.True(t, result.Skipped, "should skip on timeout")
 	assert.Contains(t, result.Reason, "network unreachable")
 }
 
-func TestBuildProbeURL(t *testing.T) {
+func TestPickProbeRepoURL(t *testing.T) {
 	tests := []struct {
-		name      string
-		serverURL string
-		want      string
-		wantErr   bool
+		name  string
+		creds *GitCredentials
+		want  string
 	}{
 		{
-			name:      "https URL",
-			serverURL: "https://git.sageox.ai",
-			want:      "https://git.sageox.ai/api/v4/personal_access_tokens/self",
+			name:  "nil repos",
+			creds: &GitCredentials{},
+			want:  "",
 		},
 		{
-			name:      "http URL with port",
-			serverURL: "http://localhost:3000",
-			want:      "http://localhost:3000/api/v4/personal_access_tokens/self",
+			name: "empty repos map",
+			creds: &GitCredentials{
+				Repos: map[string]RepoEntry{},
+			},
+			want: "",
 		},
 		{
-			name:      "URL with existing path stripped",
-			serverURL: "https://git.sageox.ai/some/path",
-			want:      "https://git.sageox.ai/api/v4/personal_access_tokens/self",
+			name: "picks first available URL",
+			creds: &GitCredentials{
+				Repos: map[string]RepoEntry{
+					"team1": {URL: "https://git.sageox.ai/team1/repo.git"},
+				},
+			},
+			want: "https://git.sageox.ai/team1/repo.git",
+		},
+		{
+			name: "skips empty URLs",
+			creds: &GitCredentials{
+				Repos: map[string]RepoEntry{
+					"empty": {URL: ""},
+					"valid": {URL: "https://git.sageox.ai/valid/repo.git"},
+				},
+			},
+			want: "https://git.sageox.ai/valid/repo.git",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := buildProbeURL(tt.serverURL)
+			got := pickProbeRepoURL(tt.creds)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestBuildProbeURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		repoURL string
+		want    string
+		wantErr bool
+	}{
+		{
+			name:    "https URL gets oauth2 user",
+			repoURL: "https://git.sageox.ai/team/repo.git",
+			want:    "https://oauth2@git.sageox.ai/team/repo.git",
+		},
+		{
+			name:    "http URL with port",
+			repoURL: "http://localhost:3000/team/repo.git",
+			want:    "http://oauth2@localhost:3000/team/repo.git",
+		},
+		{
+			name:    "bare URL gets https scheme",
+			repoURL: "git.sageox.ai/team/repo.git",
+			want:    "https://oauth2@git.sageox.ai/team/repo.git",
+		},
+		{
+			name:    "invalid URL",
+			repoURL: "://not-a-url",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := buildProbeURL(tt.repoURL)
 			if tt.wantErr {
 				require.Error(t, err)
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tt.want, got)
+
+			gotURL, _ := url.Parse(got)
+			wantURL, _ := url.Parse(tt.want)
+			assert.Equal(t, wantURL.Scheme, gotURL.Scheme)
+			assert.Equal(t, wantURL.Host, gotURL.Host)
+			assert.Equal(t, wantURL.Path, gotURL.Path)
+			assert.Equal(t, wantURL.User.Username(), gotURL.User.Username())
+			// no password — token is via GIT_ASKPASS
+			_, hasPass := gotURL.User.Password()
+			assert.False(t, hasPass, "token should not be in URL")
 		})
 	}
+}
+
+func TestWriteAskpassScript(t *testing.T) {
+	path, err := writeAskpassScript("test-token-123")
+	require.NoError(t, err)
+	defer os.Remove(path)
+
+	// verify file exists and is executable
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.NotZero(t, info.Mode()&0100, "script should be executable")
+
+	// verify content echoes the token
+	content, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "test-token-123")
 }

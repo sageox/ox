@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -20,54 +18,38 @@ func TestCheckSlugGitPATLiveness_Registered(t *testing.T) {
 	assert.Equal(t, FixLevelAuto, check.FixLevel, "PAT liveness auto-repairs via credential sync")
 }
 
-func TestValidatePATLiveness_ValidToken(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("PRIVATE-TOKEN") == "valid-pat" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer srv.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	result := gitserver.ValidatePATLiveness(ctx, srv.URL, "valid-pat")
-	assert.True(t, result.Valid)
-	assert.False(t, result.Skipped)
-	assert.Empty(t, result.Reason)
-}
-
-func TestValidatePATLiveness_RevokedToken(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer srv.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	result := gitserver.ValidatePATLiveness(ctx, srv.URL, "revoked-pat")
-	assert.False(t, result.Valid)
-	assert.False(t, result.Skipped)
-	assert.Contains(t, result.Reason, "rejected")
-}
-
 func TestValidatePATLiveness_NoCredentials(t *testing.T) {
 	ctx := context.Background()
 
-	result := gitserver.ValidatePATLiveness(ctx, "", "")
+	result := gitserver.ValidatePATLiveness(ctx, nil)
 	assert.True(t, result.Skipped)
 	assert.Contains(t, result.Reason, "no credentials")
 }
 
+func TestValidatePATLiveness_NoRepos(t *testing.T) {
+	ctx := context.Background()
+
+	creds := &gitserver.GitCredentials{
+		Token:     "some-token",
+		ServerURL: "https://git.sageox.ai",
+	}
+	result := gitserver.ValidatePATLiveness(ctx, creds)
+	assert.True(t, result.Skipped)
+	assert.Contains(t, result.Reason, "no repo URL")
+}
+
 func TestValidatePATLiveness_NetworkError(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	// unreachable server
-	result := gitserver.ValidatePATLiveness(ctx, "http://192.0.2.1:1", "some-token")
+	creds := &gitserver.GitCredentials{
+		Token:     "some-token",
+		ServerURL: "https://192.0.2.1:1",
+		Repos: map[string]gitserver.RepoEntry{
+			"test": {URL: "https://192.0.2.1:1/test/repo.git"},
+		},
+	}
+	result := gitserver.ValidatePATLiveness(ctx, creds)
 	assert.True(t, result.Skipped)
 	assert.Contains(t, result.Reason, "network unreachable")
 }

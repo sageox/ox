@@ -127,10 +127,10 @@ func TestComputeMurmurDataPaths(t *testing.T) {
 }
 
 func TestComputeMurmurDataPaths_DateBoundaryCrossing(t *testing.T) {
-	// We can't control time.Now() directly, but we can verify that a 24-hour
-	// window always produces paths spanning at least 2 calendar dates (unless
-	// it's exactly midnight, in which case exactly at the boundary).
-	paths := ComputeMurmurDataPaths(24)
+	// Use a 25-hour window to guarantee spanning at least 2 calendar dates
+	// regardless of what time the test runs (24h can land within a single
+	// date if it runs near midnight UTC).
+	paths := ComputeMurmurDataPaths(25)
 
 	dates := make(map[string]bool)
 	for _, p := range paths {
@@ -141,8 +141,7 @@ func TestComputeMurmurDataPaths_DateBoundaryCrossing(t *testing.T) {
 		}
 	}
 
-	// a 24-hour window must span at least 2 calendar dates
-	// (unless we're exactly at 23:00 UTC, we get today + yesterday)
+	// a 25-hour window must always span at least 2 calendar dates
 	if len(dates) < 2 {
 		t.Errorf("24-hour window should span at least 2 dates, got %d: %v", len(dates), dates)
 	}

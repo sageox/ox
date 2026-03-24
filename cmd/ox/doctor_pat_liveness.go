@@ -58,9 +58,19 @@ func checkGitPATLiveness(fix bool) checkResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	result := gitserver.ValidatePATLiveness(ctx, creds.ServerURL, creds.Token)
+	result := gitserver.ValidatePATLiveness(ctx, creds)
 
 	if result.Skipped {
+		// "no repo URL available" means credentials exist but have no repos —
+		// refreshing credentials may populate the repos list and fix this
+		if fix && result.Reason == "no repo URL available" {
+			repaired := attemptPATAutoRepair(projectEndpoint)
+			if repaired {
+				return PassedCheck(name, "auto-repaired: refreshed credentials with repo URLs")
+			}
+			return FailedCheck(name, result.Reason,
+				"auto-repair failed; run `ox login` to re-authenticate")
+		}
 		return SkippedCheck(name, result.Reason, "")
 	}
 
