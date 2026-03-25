@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/agentinstance"
-	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/pkg/discussion"
 	"github.com/spf13/cobra"
@@ -81,41 +80,13 @@ func runAgentTeamCtx(cmd *cobra.Command, args []string) error {
 }
 
 // resolveTeamContext finds a team context by slug, team ID, or name.
-// Resolution order: exact slug match -> exact team ID match -> case-insensitive name match.
+// Uses the unified team discovery which merges daemon, local config, and filesystem sources.
 func resolveTeamContext(projectRoot, query string) *config.TeamContext {
-	allTeams := config.FindAllTeamContexts(projectRoot)
-	if len(allTeams) == 0 {
+	t := resolveTeamByQuery(projectRoot, query)
+	if t == nil {
 		return nil
 	}
-
-	queryLower := strings.ToLower(strings.TrimSpace(query))
-
-	// pass 1: exact slug match
-	for i, tc := range allTeams {
-		slug := tc.Slug
-		if slug == "" {
-			slug = api.DeriveSlug(tc.TeamName)
-		}
-		if slug == queryLower {
-			return &allTeams[i]
-		}
-	}
-
-	// pass 2: exact team ID match
-	for i, tc := range allTeams {
-		if tc.TeamID == query {
-			return &allTeams[i]
-		}
-	}
-
-	// pass 3: case-insensitive name match
-	for i, tc := range allTeams {
-		if strings.EqualFold(tc.TeamName, query) {
-			return &allTeams[i]
-		}
-	}
-
-	return nil
+	return t.toConfigTeamContext()
 }
 
 // listRecentDiscussions scans discussion directories and outputs the most

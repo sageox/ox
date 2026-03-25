@@ -17,7 +17,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: 'go.mod'
 
       - name: Configure git identity for tests
         run: |
@@ -37,7 +37,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version-file: 'go.mod'
 
       - uses: golangci/golangci-lint-action@v7
         with:

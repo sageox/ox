@@ -15,7 +15,7 @@ import (
 
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
-	"github.com/sageox/ox/internal/manifest"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
@@ -593,7 +593,7 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 
 	// push with retry (best-effort — failures are non-fatal)
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
-		AutoResolvePrefixes: manifest.AutoResolvePaths(manifest.DefaultResolveRules),
+		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		AllowForceOnLFS:     true,
 		RepairLFS:           true,
 		Logger:              h.logger,

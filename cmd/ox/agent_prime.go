@@ -17,7 +17,6 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/agentinstance"
-	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/claude"
 	"github.com/sageox/ox/internal/cli"
@@ -1001,6 +1000,12 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 	cmds = append(cmds, intentCommand{
 		Intent:  "sync status, up to date, synchronized, stale",
 		Command: "ox status",
+	})
+
+	// team listing — always available on initialized project
+	cmds = append(cmds, intentCommand{
+		Intent:  "list teams, show my teams, what teams do I belong to",
+		Command: "ox teams",
 	})
 
 	// session history — only when ledger is provisioned
@@ -2065,20 +2070,8 @@ func emitTeamMemorySection(cmd *cobra.Command, tc *teamContextInfo) {
 // discoverOtherTeamContexts returns lightweight entries for non-primary team contexts.
 // Returns nil when the user only belongs to one team.
 func discoverOtherTeamContexts(projectRoot string, primaryTeamID string) *otherTeams {
-	allTeams := config.FindAllTeamContexts(projectRoot)
-	if len(allTeams) == 0 {
-		return nil
-	}
-
-	// filter out primary team
-	var others []config.TeamContext
-	for _, tc := range allTeams {
-		if tc.TeamID == primaryTeamID {
-			continue
-		}
-		others = append(others, tc)
-	}
-	if len(others) == 0 {
+	teams := discoverAllTeams(projectRoot)
+	if len(teams) == 0 {
 		return nil
 	}
 
@@ -2090,35 +2083,30 @@ func discoverOtherTeamContexts(projectRoot string, primaryTeamID string) *otherT
 	root := paths.TeamsDataDir(ep)
 
 	var entries []otherTeamEntry
-	for _, tc := range others {
-		slug := tc.Slug
-		if slug == "" {
-			slug = api.DeriveSlug(tc.TeamName)
-		}
-		if slug == "" {
-			slug = tc.TeamID
+	for _, t := range teams {
+		if t.Primary {
+			continue
 		}
 
 		// compute content age from git log
-		age := teamContextAge(tc.Path)
+		age := teamContextAge(t.Path)
 
 		// extract dir relative to root
-		dir := tc.TeamID
-		if rel, err := filepath.Rel(root, tc.Path); err == nil {
+		dir := t.TeamID
+		if rel, err := filepath.Rel(root, t.Path); err == nil {
 			dir = rel
 		}
 
-		name := tc.TeamName
-		if name == "" {
-			name = tc.TeamID
-		}
-
 		entries = append(entries, otherTeamEntry{
-			Slug: slug,
-			Name: name,
+			Slug: t.Slug,
+			Name: t.Name,
 			Dir:  dir,
 			Age:  age,
 		})
+	}
+
+	if len(entries) == 0 {
+		return nil
 	}
 
 	// sort by content freshness (entries with age come first, newest first)

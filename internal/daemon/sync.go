@@ -983,7 +983,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	}
 
 	if progress != nil {
-		_ = progress.WriteStage("pulling", "Pulling changes...")
+		_ = progress.WriteStage("complete", "Pull complete")
 	}
 	s.logger.Debug("pull complete", "duration", duration)
 	return nil

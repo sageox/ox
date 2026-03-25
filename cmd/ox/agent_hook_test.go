@@ -90,12 +90,13 @@ func setupHandleAfterToolTest(t *testing.T) (projectRoot string, agentID string,
 
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
 	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
-	cfg := `{"config_version":"2","repo_id":"test-repo-hook"}`
+	cfg := `{"config_version":"2","repo_id":"test-repo-hook","endpoint":"http://test.sageox.local","session_publishing":"manual"}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
 
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("HOME", cacheDir)
 	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("XDG_DATA_HOME", cacheDir)
 
 	agentID = "OxHook1"
 	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
@@ -278,12 +279,13 @@ func TestHandleAfterTool_PreStartContentLeak_ByOffset(t *testing.T) {
 
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
 	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
-	cfg := `{"config_version":"2","repo_id":"test-repo-leak"}`
+	cfg := `{"config_version":"2","repo_id":"test-repo-leak","endpoint":"http://test.sageox.local","session_publishing":"manual"}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
 
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("HOME", cacheDir)
 	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("XDG_DATA_HOME", cacheDir)
 
 	// create source JSONL with pre-existing content (from a prior session)
 	// use a timestamp AFTER what will be StartedAt to ensure offset-based
@@ -484,11 +486,12 @@ func TestHandleAfterTool_NonIncrementalAdapterNoops(t *testing.T) {
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
 	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"),
-		[]byte(`{"config_version":"2","repo_id":"test-noninc"}`), 0644))
+		[]byte(`{"config_version":"2","repo_id":"test-noninc","endpoint":"http://test.sageox.local","session_publishing":"manual"}`), 0644))
 
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("HOME", cacheDir)
 	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("XDG_DATA_HOME", cacheDir)
 
 	agentID := "OxNoInc"
 	_, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
@@ -571,12 +574,13 @@ func TestAfterTool_FindsRecordingFromSessionStart(t *testing.T) {
 	// initialize project
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
 	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
-	cfg := `{"config_version":"2","repo_id":"test-repo-pathcheck"}`
+	cfg := `{"config_version":"2","repo_id":"test-repo-pathcheck","endpoint":"http://test.sageox.local","session_publishing":"manual"}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
 
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("HOME", cacheDir)
 	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("XDG_DATA_HOME", cacheDir)
 
 	agentID := "OxPath1"
 
@@ -608,12 +612,13 @@ func TestGhostCleanup_DoesNotEatFreshRecordingWithAlivePID(t *testing.T) {
 
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
 	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
-	cfg := `{"config_version":"2","repo_id":"test-repo-ghost"}`
+	cfg := `{"config_version":"2","repo_id":"test-repo-ghost","endpoint":"http://test.sageox.local","session_publishing":"manual"}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
 
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("HOME", cacheDir)
 	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("XDG_DATA_HOME", cacheDir)
 
 	// create a recording with alive PID but NO raw.jsonl data (fresh session)
 	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
@@ -644,12 +649,13 @@ func TestGhostCleanup_RemovesFreshRecordingWithDeadPID(t *testing.T) {
 
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
 	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
-	cfg := `{"config_version":"2","repo_id":"test-repo-deadpid"}`
+	cfg := `{"config_version":"2","repo_id":"test-repo-deadpid","endpoint":"http://test.sageox.local","session_publishing":"manual"}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
 
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("HOME", cacheDir)
 	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("XDG_DATA_HOME", cacheDir)
 
 	// create a recording with a dead PID (simulates the pre-fix hook subprocess PID)
 	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
@@ -683,12 +689,13 @@ func TestStartRecording_IdempotentWhenAlreadyRecording(t *testing.T) {
 
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
 	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
-	cfg := `{"config_version":"2","repo_id":"test-repo-idemp"}`
+	cfg := `{"config_version":"2","repo_id":"test-repo-idemp","endpoint":"http://test.sageox.local","session_publishing":"manual"}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
 
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("HOME", cacheDir)
 	t.Setenv("XDG_CACHE_HOME", cacheDir)
+	t.Setenv("XDG_DATA_HOME", cacheDir)
 
 	agentID := "OxIdem"
 	opts := session.StartRecordingOptions{
