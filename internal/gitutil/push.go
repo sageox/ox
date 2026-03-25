@@ -127,28 +127,16 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 			}
 		}
 
-		// server rejected due to missing LFS objects — force push is safe
-		// for append-only repos (ledgers) where history is never rewritten
-		if opts.AllowForceOnLFS && IsLFSPushError(outStr) {
-			log.Info("server rejected push due to missing LFS objects, force pushing")
-			forceCtx, forceCancel := context.WithTimeout(ctx, opTimeout)
-			forceOut, forceErr := RunGit(forceCtx, repoPath, "push", "--force-with-lease", "--quiet")
-			forceCancel()
-			if forceErr == nil {
-				return nil
+		// rebase first — non-fast-forward is the most common retry case and
+		// must be checked before LFS since push output can contain both
+		// "non-fast-forward" and credential noise like "failed to store: -25300"
+		isNonFF := strings.Contains(outStr, "non-fast-forward") || strings.Contains(outStr, "rejected")
+
+		if isNonFF {
+			log.Info("push failed (non-fast-forward), rebasing", "attempt", attempt, "output", outStr)
+			if attempt == maxRetries {
+				return fmt.Errorf("git push failed after %d attempts: %s", maxRetries, outStr)
 			}
-			log.Warn("force push also failed", "output", forceOut)
-			return fmt.Errorf("git push failed (LFS missing, force push failed): %s", forceOut)
-		}
-
-		if attempt == maxRetries {
-			return fmt.Errorf("git push failed after %d attempts: %s", maxRetries, outStr)
-		}
-
-		log.Info("push failed, retrying", "attempt", attempt, "output", outStr)
-
-		// pull --rebase to handle non-fast-forward (most common retry case)
-		if strings.Contains(outStr, "non-fast-forward") || strings.Contains(outStr, "rejected") {
 			if IsRebaseInProgress(repoPath) {
 				abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
 				_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
@@ -179,6 +167,23 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 					return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
 				}
 			}
+		} else if opts.AllowForceOnLFS && IsLFSPushError(outStr) {
+			// server rejected due to missing LFS objects — force push is safe
+			// for append-only repos (ledgers) where history is never rewritten
+			log.Info("server rejected push due to missing LFS objects, force pushing")
+			forceCtx, forceCancel := context.WithTimeout(ctx, opTimeout)
+			forceOut, forceErr := RunGit(forceCtx, repoPath, "push", "--force-with-lease", "--quiet")
+			forceCancel()
+			if forceErr == nil {
+				return nil
+			}
+			log.Warn("force push also failed", "output", forceOut)
+			return fmt.Errorf("git push failed (LFS missing, force push failed): %s", forceOut)
+		} else {
+			if attempt == maxRetries {
+				return fmt.Errorf("git push failed after %d attempts: %s", maxRetries, outStr)
+			}
+			log.Info("push failed, retrying", "attempt", attempt, "output", outStr)
 		}
 
 		// linear backoff before retry

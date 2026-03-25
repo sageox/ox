@@ -37,6 +37,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/ledger"
 )
 
 // Sync timing constants - extracted for clarity and testability.
@@ -975,22 +976,12 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 			s.recordRemoteChange(s.config.LedgerPath, info.ModTime().UTC())
 		}
 
-		// detect force push (diverged branches)
+		// detect diverged branches (local and remote both have new commits).
+		// this is normal when CLI commits sessions locally while cloud pushes
+		// github sync data. rebase handles it — log for visibility but proceed.
 		if s.detectForcePush(ctx) {
-			s.logger.Warn("force push detected on ledger, skipping pull")
+			s.logger.Info("ledger branches diverged, rebasing to reconcile")
 			s.metrics.RecordForcePush()
-			if progress != nil {
-				_ = progress.WriteStage("skipped", "Force push detected, skipping pull")
-			}
-			if s.issues != nil {
-				s.issues.SetIssue(DaemonIssue{
-					Type:     IssueTypeDiverged,
-					Repo:     "ledger",
-					Severity: SeverityError,
-					Summary:  "Ledger has diverged from remote (force push detected). Run 'ox doctor --fix' to re-clone.",
-				})
-			}
-			return errors.New("ledger diverged from remote (force push detected)")
 		}
 
 		if progress != nil {
@@ -1006,33 +997,59 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		if output, err := pullCmd.CombinedOutput(); err != nil {
 			detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
 			s.logger.Warn("pull failed", "error", err, "output", detail)
-			if detail != "" {
-				s.recordError(fmt.Sprintf("pull failed: %s (%v)", detail, err))
-			} else {
-				s.recordError(fmt.Sprintf("pull failed: %v", err))
-			}
-			s.metrics.RecordPullFailure()
-			s.workspaceRegistry.RecordSyncFailure("ledger")
-			s.recordSyncStateFailure(s.config.LedgerPath)
 
-			// check if it's a merge conflict
-			statusCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "status", "--porcelain")
-			if statusOutput, _ := statusCmd.Output(); strings.Contains(string(statusOutput), "UU") {
-				s.metrics.RecordConflict()
-				if s.issues != nil {
-					s.issues.SetIssue(DaemonIssue{
-						Type:            IssueTypeMergeConflict,
-						Severity:        SeverityError,
-						Repo:            "ledger",
-						Summary:         "Ledger has merge conflicts. Run 'ox doctor --fix' to re-clone.",
-						RequiresConfirm: true,
-					})
+			// try auto-resolving conflicts in safe paths (data/github/ etc.)
+			// before giving up — these are idempotent, last-write-wins data
+			resolved := false
+			if gitutil.IsRebaseInProgress(s.config.LedgerPath) {
+				resolveErr := gitutil.ResolveRebaseAcceptTheirs(ctx, s.config.LedgerPath, ledger.AutoResolvePrefixes)
+				if resolveErr == nil {
+					s.logger.Info("auto-resolved rebase conflicts in ledger", "strategy", "accept-theirs")
+					resolved = true
+				} else {
+					s.logger.Warn("auto-resolve failed, aborting rebase", "error", resolveErr)
+					abortCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "rebase", "--abort")
+					_ = abortCmd.Run()
 				}
 			}
-			if detail != "" {
-				return fmt.Errorf("ledger pull failed: %s (%w)", detail, err)
+
+			if !resolved {
+				if detail != "" {
+					s.recordError(fmt.Sprintf("pull failed: %s (%v)", detail, err))
+				} else {
+					s.recordError(fmt.Sprintf("pull failed: %v", err))
+				}
+				s.metrics.RecordPullFailure()
+				s.workspaceRegistry.RecordSyncFailure("ledger")
+				s.recordSyncStateFailure(s.config.LedgerPath)
+
+				// check if it's a merge conflict or unresolvable divergence
+				statusCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "status", "--porcelain")
+				if statusOutput, _ := statusCmd.Output(); strings.Contains(string(statusOutput), "UU") {
+					s.metrics.RecordConflict()
+					if s.issues != nil {
+						s.issues.SetIssue(DaemonIssue{
+							Type:            IssueTypeMergeConflict,
+							Severity:        SeverityError,
+							Repo:            "ledger",
+							Summary:         "Ledger has merge conflicts. Run 'ox doctor --fix' to resolve.",
+							RequiresConfirm: true,
+						})
+					}
+				} else if s.issues != nil {
+					// diverged and rebase failed but not a merge conflict — set diverged issue
+					s.issues.SetIssue(DaemonIssue{
+						Type:     IssueTypeDiverged,
+						Repo:     "ledger",
+						Severity: SeverityError,
+						Summary:  "Ledger has diverged from remote and rebase failed. Run 'ox doctor --fix' to resolve.",
+					})
+				}
+				if detail != "" {
+					return fmt.Errorf("ledger pull failed: %s (%w)", detail, err)
+				}
+				return fmt.Errorf("ledger pull failed: %w", err)
 			}
-			return fmt.Errorf("ledger pull failed: %w", err)
 		}
 		return nil
 	}()
@@ -1041,11 +1058,12 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		return fetchPullErr
 	}
 
-	// sync succeeded - clear failure backoff, merge conflict, and sync backoff issues
+	// sync succeeded - clear all failure-related issues
 	s.workspaceRegistry.ClearSyncFailures("ledger")
 	if s.issues != nil {
 		s.issues.ClearIssue(IssueTypeMergeConflict, "ledger")
 		s.issues.ClearIssue(IssueTypeSyncBackoff, "ledger")
+		s.issues.ClearIssue(IssueTypeDiverged, "ledger")
 	}
 
 	duration := time.Since(startTime)
