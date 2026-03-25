@@ -134,6 +134,7 @@ main() {
     run_test "ox agent prime" "smoke-test-prime.sh" || true
     run_test "ox session list" "smoke-test-sessions.sh" || true
     run_test "Clone without ox" "smoke-test-clone-no-ox.sh" || true
+    run_test "ox import (video)" "smoke-test-import.sh" || true
     # skip checkout test for now - requires team setup
     # run_test "ox team context add" "smoke-test-checkout.sh" || true
 
