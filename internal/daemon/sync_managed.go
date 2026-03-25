@@ -1,0 +1,270 @@
+package daemon
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/manifest"
+)
+
+// ManagedRepoPullOpts configures how pullManagedRepo behaves for a given repo.
+// Both ledger and team context repos use this — behavioral differences are
+// expressed through these options, not through separate code paths.
+type ManagedRepoPullOpts struct {
+	// RepoPath is the local filesystem path to the git repo.
+	RepoPath string
+
+	// RepoName identifies the repo in issues and logs (e.g., "ledger", "team-context-foo").
+	RepoName string
+
+	// ProjectRoot is the user's project root, used to resolve the endpoint
+	// for credential refresh.
+	ProjectRoot string
+
+	// SyncInterval is the base sync interval. Used to compute FETCH_HEAD
+	// dedup threshold (SyncInterval / 2).
+	SyncInterval time.Duration
+
+	// MinFetchAge overrides the minimum FETCH_HEAD age for dedup.
+	// Zero means use gitutil.MinFetchHeadAge.
+	MinFetchAge time.Duration
+
+	// ValidateIntegrity runs isValidGitRepo before pulling. If false (or repo
+	// is corrupt), returns a CorruptRepo result so the caller can handle reclone.
+	ValidateIntegrity bool
+
+	// DetectDivergence runs rev-list divergence check after fetch, before pull.
+	// Purely informational — pull --rebase handles it either way.
+	DetectDivergence bool
+
+	// ResolveRules maps path prefixes to conflict resolution modes.
+	// Empty means no auto-resolve — conflicts become errors.
+	// Most specific prefix wins: `resolve none data/proprietary/` overrides
+	// `resolve auto data/` for files under data/proprietary/.
+	ResolveRules []manifest.ResolveRule
+
+	// Logger for structured logging. Required.
+	Logger *slog.Logger
+}
+
+// ManagedRepoPullResult describes what happened during pullManagedRepo.
+type ManagedRepoPullResult struct {
+	// Skipped is true if the pull was skipped (repo up-to-date, in rebase, locked, etc).
+	Skipped bool
+
+	// SkipReason explains why the pull was skipped.
+	SkipReason string
+
+	// CorruptRepo is true if ValidateIntegrity detected a corrupt repo.
+	// The caller should handle reclone.
+	CorruptRepo bool
+
+	// Diverged is true if branches were diverged before the pull.
+	Diverged bool
+
+	// AutoResolved is true if rebase conflicts were auto-resolved.
+	AutoResolved bool
+
+	// FetchHeadTime is the FETCH_HEAD mtime after fetch (zero if not fetched).
+	FetchHeadTime time.Time
+
+	// Error from fetch or pull. Nil on success or skip.
+	Err error
+
+	// Issue to report (nil if none). The caller decides how to persist it.
+	Issue *DaemonIssue
+}
+
+// pullManagedRepo executes the shared pull pipeline for any daemon-managed git repo.
+//
+// Pipeline stages:
+//  1. Rebase-in-progress check
+//  2. Lock file check
+//  3. ls-remote dedup (skip if HEAD unchanged)
+//  4. FETCH_HEAD mtime dedup (secondary)
+//  5. Credential refresh
+//  6. git fetch
+//  7. Divergence detection (optional)
+//  8. git pull --rebase --autostash
+//  9. Conflict handling (auto-resolve or report)
+//
+// Callers wrap this with repo-specific concerns: auto-clone, backoff, mutex,
+// metrics, post-pull signals.
+func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPullOpts) ManagedRepoPullResult {
+	logger := opts.Logger
+	if logger == nil {
+		logger = s.logger
+	}
+	path := opts.RepoPath
+	repoName := opts.RepoName
+
+	// --- Pre-flight checks ---
+
+	// Integrity validation (catches partial/corrupt clones)
+	if opts.ValidateIntegrity && !isValidGitRepo(path) {
+		return ManagedRepoPullResult{CorruptRepo: true}
+	}
+
+	// Rebase-in-progress: skip — will resolve on its own or needs manual fix
+	if gitutil.IsRebaseInProgress(path) {
+		logger.Debug("repo in rebase state, skipping pull", "path", path)
+		return ManagedRepoPullResult{Skipped: true, SkipReason: "rebase in progress"}
+	}
+
+	// Lock files: skip and report issue
+	gitDir := filepath.Join(path, ".git")
+	if locks := gitutil.HasLockFiles(gitDir); len(locks) > 0 {
+		logger.Warn("git lock files detected, skipping pull",
+			"path", path, "locks", strings.Join(locks, ", "))
+		return ManagedRepoPullResult{
+			Skipped:    true,
+			SkipReason: "lock files present",
+			Issue: &DaemonIssue{
+				Type:     IssueTypeGitLock,
+				Severity: SeverityWarning,
+				Repo:     repoName,
+				Summary: fmt.Sprintf("Stale lock files blocking sync: %s. If no git commands are running, remove with: rm %s/{%s}",
+					strings.Join(locks, ", "),
+					gitDir,
+					strings.Join(locks, ",")),
+			},
+		}
+	}
+
+	// --- Dedup checks ---
+
+	// ls-remote SHA check: cheapest way to skip when nothing changed
+	if s.remoteRefCheck(ctx, path) {
+		return ManagedRepoPullResult{Skipped: true, SkipReason: "remote unchanged"}
+	}
+
+	// FETCH_HEAD mtime dedup (secondary: cross-daemon coordination)
+	if age, ok := gitutil.FetchHeadAge(path); ok {
+		minAge := opts.MinFetchAge
+		if minAge == 0 {
+			minAge = gitutil.MinFetchHeadAge
+		}
+		threshold := max(opts.SyncInterval/2, minAge)
+		if age < threshold {
+			logger.Debug("repo recently fetched, skipping", "path", path, "age", age)
+			return ManagedRepoPullResult{Skipped: true, SkipReason: "recently fetched"}
+		}
+	}
+
+	// --- Fetch ---
+
+	// Refresh remote URL if credentials changed
+	projectEndpoint := endpoint.GetForProject(opts.ProjectRoot)
+	if err := gitserver.RefreshRemoteCredentials(path, projectEndpoint); err != nil {
+		logger.Warn("remote credential refresh failed", "path", path, "error", err)
+	}
+
+	// git fetch
+	fetchArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
+	fetchArgs = append(fetchArgs, "fetch", "--quiet")
+	fetchCmd := exec.CommandContext(ctx, "git", fetchArgs...)
+	if output, err := fetchCmd.CombinedOutput(); err != nil {
+		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
+		errMsg := "fetch failed"
+		if detail != "" {
+			errMsg = fmt.Sprintf("fetch failed: %s", detail)
+		}
+		return ManagedRepoPullResult{Err: fmt.Errorf("%s: %w", errMsg, err)}
+	}
+
+	// Track FETCH_HEAD mtime
+	var fetchHeadTime time.Time
+	if info, err := os.Stat(filepath.Join(path, ".git", "FETCH_HEAD")); err == nil {
+		fetchHeadTime = info.ModTime().UTC()
+		s.recordRemoteChange(path, fetchHeadTime)
+	}
+
+	// --- Divergence detection ---
+	result := ManagedRepoPullResult{FetchHeadTime: fetchHeadTime}
+
+	if opts.DetectDivergence {
+		if detectDivergedBranchesAt(ctx, path) {
+			logger.Info("branches diverged, rebasing to reconcile", "repo", repoName)
+			result.Diverged = true
+		}
+	}
+
+	// --- Pull ---
+
+	pullArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
+	pullArgs = append(pullArgs, "pull", "--rebase", "--autostash", "--quiet")
+	pullCmd := exec.CommandContext(ctx, "git", pullArgs...)
+	if output, err := pullCmd.CombinedOutput(); err != nil {
+		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
+		logger.Warn("pull failed", "error", err, "output", detail, "repo", repoName)
+
+		// Try auto-resolving conflicts in safe paths before giving up
+		autoPaths := manifest.AutoResolvePaths(opts.ResolveRules)
+		denyPaths := manifest.AutoResolveDenyPaths(opts.ResolveRules)
+		if len(autoPaths) > 0 && gitutil.IsRebaseInProgress(path) {
+			resolveErr := gitutil.ResolveRebaseAcceptTheirs(ctx, path, autoPaths, denyPaths)
+			if resolveErr == nil {
+				logger.Info("auto-resolved rebase conflicts", "repo", repoName, "strategy", "accept-theirs")
+				result.AutoResolved = true
+				return result
+			}
+			logger.Warn("auto-resolve failed, aborting rebase", "repo", repoName, "error", resolveErr)
+			abortCmd := exec.CommandContext(ctx, "git", "-C", path, "rebase", "--abort")
+			_ = abortCmd.Run()
+		}
+
+		// Check if it's a merge conflict
+		statusCmd := exec.CommandContext(ctx, "git", "-C", path, "status", "--porcelain")
+		if statusOutput, _ := statusCmd.Output(); strings.Contains(string(statusOutput), "UU") {
+			result.Issue = &DaemonIssue{
+				Type:            IssueTypeMergeConflict,
+				Severity:        SeverityError,
+				Repo:            repoName,
+				Summary:         fmt.Sprintf("%s has merge conflicts. Run 'ox doctor --fix' to resolve.", repoName),
+				RequiresConfirm: true,
+			}
+		} else if result.Diverged {
+			// Diverged and rebase failed but not a merge conflict
+			result.Issue = &DaemonIssue{
+				Type:     IssueTypeDiverged,
+				Repo:     repoName,
+				Severity: SeverityError,
+				Summary:  fmt.Sprintf("%s has diverged from remote and rebase failed. Run 'ox doctor --fix' to resolve.", repoName),
+			}
+		}
+
+		errMsg := "pull failed"
+		if detail != "" {
+			errMsg = fmt.Sprintf("pull failed: %s", detail)
+		}
+		result.Err = fmt.Errorf("%s: %w", errMsg, err)
+		return result
+	}
+
+	return result
+}
+
+// detectDivergedBranchesAt checks if local and remote branches have both
+// progressed independently at the given repo path.
+func detectDivergedBranchesAt(ctx context.Context, repoPath string) bool {
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+		"rev-list", "--left-right", "--count", "origin/main...HEAD")
+	output, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	parts := strings.Fields(string(output))
+	if len(parts) != 2 {
+		return false
+	}
+	return parts[0] != "0" && parts[1] != "0"
+}

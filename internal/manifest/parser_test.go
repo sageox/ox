@@ -175,10 +175,14 @@ gc_interval_days 14`,
 }
 
 func TestParseFile(t *testing.T) {
-	t.Run("missing file returns fallback", func(t *testing.T) {
+	t.Run("missing file returns fallback with resolve rules", func(t *testing.T) {
 		cfg := ParseFile("/nonexistent/path/sync.manifest")
 		fb := FallbackConfig()
 		assertStringSliceMatch(t, "includes", cfg.Includes, fb.Includes)
+		if len(cfg.ResolveRules) == 0 {
+			t.Error("fallback config should include default resolve rules")
+		}
+		assertResolveRulesMatch(t, cfg.ResolveRules, DefaultResolveRules)
 	})
 
 	t.Run("valid file parsed", func(t *testing.T) {
@@ -349,4 +353,24 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+func assertResolveRulesMatch(t *testing.T, got, want []ResolveRule) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("resolve rules: got %d items %v, want %d items %v", len(got), got, len(want), want)
+		return
+	}
+	for _, w := range want {
+		found := false
+		for _, g := range got {
+			if g.Mode == w.Mode && g.Path == w.Path {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("resolve rules: missing %v in %v", w, got)
+		}
+	}
 }

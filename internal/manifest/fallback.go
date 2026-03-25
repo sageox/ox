@@ -22,11 +22,15 @@ func FallbackConfig() *ManifestConfig {
 	includes := make([]string, len(fallbackIncludes))
 	copy(includes, fallbackIncludes)
 
+	rules := make([]ResolveRule, len(DefaultResolveRules))
+	copy(rules, DefaultResolveRules)
+
 	return &ManifestConfig{
-		Version:         SupportedVersion,
-		Includes:        includes,
-		Denies:          nil,
+		Version:      SupportedVersion,
+		Includes:     includes,
+		Denies:       nil,
 		SyncIntervalMin: DefaultSyncIntervalMin,
 		GCIntervalDays:  DefaultGCIntervalDays,
+		ResolveRules: rules,
 	}
 }

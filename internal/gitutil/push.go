@@ -15,6 +15,11 @@ type PushOpts struct {
 	// Empty means no auto-resolve — rebase failures abort immediately.
 	AutoResolvePrefixes []string
 
+	// AutoResolveDenyPrefixes lists path prefixes excluded from auto-resolution.
+	// These carve out exceptions from AutoResolvePrefixes using most-specific-wins
+	// semantics — e.g., deny "data/proprietary/" while allowing "data/".
+	AutoResolveDenyPrefixes []string
+
 	// AllowForceOnLFS enables --force-with-lease when the server rejects
 	// due to missing LFS objects. Only safe for append-only repos (ledgers).
 	AllowForceOnLFS bool
@@ -149,7 +154,7 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 			if pullErr != nil {
 				if len(opts.AutoResolvePrefixes) > 0 {
 					resolveCtx, resolveCancel := context.WithTimeout(ctx, opTimeout)
-					resolveErr := ResolveRebaseAcceptTheirs(resolveCtx, repoPath, opts.AutoResolvePrefixes)
+					resolveErr := ResolveRebaseAcceptTheirs(resolveCtx, repoPath, opts.AutoResolvePrefixes, opts.AutoResolveDenyPrefixes)
 					resolveCancel()
 					if resolveErr != nil {
 						log.Debug("rebase auto-resolve failed", "error", resolveErr)

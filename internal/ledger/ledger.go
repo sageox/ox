@@ -27,16 +27,19 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/repotools"
 )
 
-// AutoResolvePrefixes lists path prefixes in the ledger where accept-theirs
-// conflict resolution is safe during rebase. These directories contain data
-// derived from external sources (e.g., GitHub API) that will be re-fetched
-// on the next sync cycle — last-write-wins is correct.
-var AutoResolvePrefixes = []string{
-	"data/github/",
-}
+// DefaultResolveRules is the canonical set of resolve rules for the ledger.
+// Delegates to manifest defaults so the set is configurable via
+// .sageox/sync.manifest without a code change. CLI callers (session upload,
+// doctor) use this; the daemon reads from the manifest directly when available.
+var DefaultResolveRules = manifest.DefaultResolveRules
+
+// AutoResolvePrefixes extracts auto-resolve paths from the default rules.
+// Convenience for callers that need a flat []string (e.g., PushOpts).
+var AutoResolvePrefixes = manifest.AutoResolvePaths(manifest.DefaultResolveRules)
 
 // ErrNotProvisioned indicates the ledger has not been provisioned by cloud and cloned.
 var ErrNotProvisioned = errors.New("ledger not provisioned")

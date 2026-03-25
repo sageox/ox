@@ -34,7 +34,6 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/auth"
-	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
@@ -824,8 +823,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		return nil // can't pull from repo that isn't cloned yet
 	}
 
-	// validate the repo is functional (not just .git dir exists)
-	// catches partial/corrupt clones from interrupted git clone operations
+	// corruption check: move aside for re-clone on next cycle
 	if !isValidGitRepo(s.config.LedgerPath) {
 		backupPath := fmt.Sprintf("%s.bak.%d", s.config.LedgerPath, time.Now().Unix())
 		s.logger.Warn("ledger repo corrupt, moving aside for re-clone",
@@ -834,38 +832,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 			s.logger.Error("failed to move corrupt ledger aside", "error", err)
 			return fmt.Errorf("corrupt ledger at %s but rename failed: %w", s.config.LedgerPath, err)
 		}
-		// trigger re-clone on next cycle
 		return nil
-	}
-
-	// skip if repo stuck in broken rebase state
-	if gitutil.IsRebaseInProgress(s.config.LedgerPath) {
-		s.logger.Debug("repo in rebase state, skipping pull", "path", s.config.LedgerPath)
-		return nil
-	}
-
-	// check for stale lock files from crashed git processes
-	gitDir := filepath.Join(s.config.LedgerPath, ".git")
-	if locks := gitutil.HasLockFiles(gitDir); len(locks) > 0 {
-		s.logger.Warn("git lock files detected, skipping pull",
-			"path", s.config.LedgerPath,
-			"locks", strings.Join(locks, ", "))
-		if s.issues != nil {
-			s.issues.SetIssue(DaemonIssue{
-				Type:     IssueTypeGitLock,
-				Severity: SeverityWarning,
-				Repo:     "ledger",
-				Summary: fmt.Sprintf("Stale lock files blocking sync: %s. If no git commands are running, remove with: rm %s/{%s}",
-					strings.Join(locks, ", "),
-					gitDir,
-					strings.Join(locks, ",")),
-			})
-		}
-		return nil
-	}
-	// clear lock issue if previously set but now resolved
-	if s.issues != nil {
-		s.issues.ClearIssue(IssueTypeGitLock, "ledger")
 	}
 
 	// sync backoff — skip if recent sync failures triggered backoff
@@ -873,11 +840,11 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		return nil
 	}
 
+	// pull-in-progress mutex (ledger-specific: only one ledger pull at a time)
 	s.mu.Lock()
 	if s.pullInProgress {
 		s.mu.Unlock()
 		if progress != nil {
-			// on-demand sync: tell the user a sync is already running
 			_ = progress.WriteStage("skipped", "Pull already in progress")
 		}
 		return nil
@@ -893,169 +860,82 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		s.mu.Unlock()
 	}()
 
-	// ls-remote SHA check — skip if remote HEAD matches local (nothing new to pull).
-	// Cheaper than git fetch: only hits /info/refs, no upload-pack negotiation.
-	if s.remoteRefCheck(ctx, s.config.LedgerPath) {
-		// remote matches local — clear any previous failure state
-		s.workspaceRegistry.ClearSyncFailures("ledger")
-
-		// update lastSync: we successfully verified the ledger is current
-		s.mu.Lock()
-		s.lastSync = time.Now()
-		s.mu.Unlock()
-
-		// persist sync timestamp so "ox status" shows when we last checked,
-		// not when content last changed
-		if err := s.workspaceRegistry.UpdateConfigLastSync("ledger"); err != nil {
-			s.logger.Warn("failed to update ledger config last sync", "error", err)
-		}
-		s.recordSyncState(ctx, s.config.LedgerPath)
-
-		if progress != nil {
-			_ = progress.WriteStage("skipped", "Remote unchanged, skipping pull")
-		}
-		return nil
-	}
-
-	// FETCH_HEAD mtime dedup (secondary: cross-daemon coordination, crash loop protection).
-	// Kept as fallback for when ls-remote can't run (credential issues, etc).
-	if age, ok := gitutil.FetchHeadAge(s.config.LedgerPath); ok {
-		threshold := max(s.config.SyncIntervalRead/2, gitutil.MinFetchHeadAge)
-		if age < threshold {
-			s.logger.Debug("ledger recently fetched, skipping", "age", age)
-			// persist sync timestamp — another daemon recently fetched, ledger is current
-			if err := s.workspaceRegistry.UpdateConfigLastSync("ledger"); err != nil {
-				s.logger.Warn("failed to update ledger config last sync", "error", err)
-			}
-			s.recordSyncState(ctx, s.config.LedgerPath)
-			if progress != nil {
-				_ = progress.WriteStage("skipped", "Recently fetched, skipping pull")
-			}
-			return nil
-		}
-	}
-
 	if progress != nil {
 		_ = progress.WriteStage("fetching", "Fetching from remote...")
 	}
 	s.logger.Debug("pulling changes")
 
-	// refresh remote URL if credentials changed (e.g., user switch via ox login)
-	projectEndpoint := endpoint.GetForProject(s.config.ProjectRoot)
-	if err := gitserver.RefreshRemoteCredentials(s.config.LedgerPath, projectEndpoint); err != nil {
-		s.logger.Warn("ledger remote credential refresh failed", "error", err)
-	}
-
-	// acquire ledger mutex to prevent concurrent git operations with GitHub sync push.
+	// acquire ledger mutex to prevent concurrent git operations with GitHub sync push
 	s.ledgerMu.Lock()
-	fetchPullErr := func() error {
+	result := func() ManagedRepoPullResult {
 		defer s.ledgerMu.Unlock()
-		// git fetch (capture stderr for diagnosable error messages)
-		fetchArgs := append([]string{"-C", s.config.LedgerPath}, gitHTTPTimeoutFlags()...)
-		fetchArgs = append(fetchArgs, "fetch", "--quiet")
-		fetchCmd := exec.CommandContext(ctx, "git", fetchArgs...)
-		if output, err := fetchCmd.CombinedOutput(); err != nil {
-			detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
-			s.logger.Warn("fetch failed", "error", err, "output", detail)
-			if detail != "" {
-				s.recordError(fmt.Sprintf("fetch failed: %s (%v)", detail, err))
-			} else {
-				s.recordError(fmt.Sprintf("fetch failed: %v", err))
-			}
-			s.metrics.RecordPullFailure()
-			s.workspaceRegistry.RecordSyncFailure("ledger")
-			s.recordSyncStateFailure(s.config.LedgerPath)
-			if detail != "" {
-				return fmt.Errorf("ledger fetch failed: %s (%w)", detail, err)
-			}
-			return fmt.Errorf("ledger fetch failed: %w", err)
+		// ledger repos don't have a sync.manifest — use the manifest defaults
+		// (data/) which cover all idempotent import paths (github, linear, murmurs).
+		return s.pullManagedRepo(ctx, ManagedRepoPullOpts{
+			RepoPath:            s.config.LedgerPath,
+			RepoName:            "ledger",
+			ProjectRoot:         s.config.ProjectRoot,
+			SyncInterval:        s.config.SyncIntervalRead,
+			DetectDivergence:    true,
+			ResolveRules:        ledger.DefaultResolveRules,
+			Logger:              s.logger,
+		})
+	}()
+
+	// handle skip results
+	if result.Skipped {
+		// lock file skip: report the issue
+		if result.Issue != nil && s.issues != nil {
+			s.issues.SetIssue(*result.Issue)
+		} else if s.issues != nil {
+			// clear lock issue if previously set but now resolved
+			s.issues.ClearIssue(IssueTypeGitLock, "ledger")
 		}
 
-		// track FETCH_HEAD mtime to record when remote had new content
-		if info, err := os.Stat(filepath.Join(s.config.LedgerPath, ".git", "FETCH_HEAD")); err == nil {
-			s.recordRemoteChange(s.config.LedgerPath, info.ModTime().UTC())
-		}
-
-		// detect diverged branches (local and remote both have new commits).
-		// this is normal when CLI commits sessions locally while cloud pushes
-		// github sync data. rebase handles it — log for visibility but proceed.
-		if s.detectDivergedBranches(ctx) {
-			s.logger.Info("ledger branches diverged, rebasing to reconcile")
-			s.metrics.RecordDivergence()
+		// remote-unchanged or recently-fetched: update sync timestamps
+		if result.SkipReason == "remote unchanged" || result.SkipReason == "recently fetched" {
+			s.workspaceRegistry.ClearSyncFailures("ledger")
+			s.mu.Lock()
+			s.lastSync = time.Now()
+			s.mu.Unlock()
+			if err := s.workspaceRegistry.UpdateConfigLastSync("ledger"); err != nil {
+				s.logger.Warn("failed to update ledger config last sync", "error", err)
+			}
+			s.recordSyncState(ctx, s.config.LedgerPath)
 		}
 
 		if progress != nil {
-			_ = progress.WriteStage("pulling", "Pulling changes...")
-		}
-
-		// git pull --rebase --autostash
-		// --autostash: local uncommitted changes (from CLI writes, user edits) must not
-		// block background sync — stash before rebase, pop after
-		pullArgs := append([]string{"-C", s.config.LedgerPath}, gitHTTPTimeoutFlags()...)
-		pullArgs = append(pullArgs, "pull", "--rebase", "--autostash", "--quiet")
-		pullCmd := exec.CommandContext(ctx, "git", pullArgs...)
-		if output, err := pullCmd.CombinedOutput(); err != nil {
-			detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
-			s.logger.Warn("pull failed", "error", err, "output", detail)
-
-			// try auto-resolving conflicts in safe paths (data/github/ etc.)
-			// before giving up — these are idempotent, last-write-wins data
-			resolved := false
-			if gitutil.IsRebaseInProgress(s.config.LedgerPath) {
-				resolveErr := gitutil.ResolveRebaseAcceptTheirs(ctx, s.config.LedgerPath, ledger.AutoResolvePrefixes)
-				if resolveErr == nil {
-					s.logger.Info("auto-resolved rebase conflicts in ledger", "strategy", "accept-theirs")
-					resolved = true
-				} else {
-					s.logger.Warn("auto-resolve failed, aborting rebase", "error", resolveErr)
-					abortCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "rebase", "--abort")
-					_ = abortCmd.Run()
-				}
-			}
-
-			if !resolved {
-				if detail != "" {
-					s.recordError(fmt.Sprintf("pull failed: %s (%v)", detail, err))
-				} else {
-					s.recordError(fmt.Sprintf("pull failed: %v", err))
-				}
-				s.metrics.RecordPullFailure()
-				s.workspaceRegistry.RecordSyncFailure("ledger")
-				s.recordSyncStateFailure(s.config.LedgerPath)
-
-				// check if it's a merge conflict or unresolvable divergence
-				statusCmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath, "status", "--porcelain")
-				if statusOutput, _ := statusCmd.Output(); strings.Contains(string(statusOutput), "UU") {
-					s.metrics.RecordConflict()
-					if s.issues != nil {
-						s.issues.SetIssue(DaemonIssue{
-							Type:            IssueTypeMergeConflict,
-							Severity:        SeverityError,
-							Repo:            "ledger",
-							Summary:         "Ledger has merge conflicts. Run 'ox doctor --fix' to resolve.",
-							RequiresConfirm: true,
-						})
-					}
-				} else if s.issues != nil {
-					// diverged and rebase failed but not a merge conflict — set diverged issue
-					s.issues.SetIssue(DaemonIssue{
-						Type:     IssueTypeDiverged,
-						Repo:     "ledger",
-						Severity: SeverityError,
-						Summary:  "Ledger has diverged from remote and rebase failed. Run 'ox doctor --fix' to resolve.",
-					})
-				}
-				if detail != "" {
-					return fmt.Errorf("ledger pull failed: %s (%w)", detail, err)
-				}
-				return fmt.Errorf("ledger pull failed: %w", err)
-			}
+			_ = progress.WriteStage("skipped", result.SkipReason)
 		}
 		return nil
-	}()
+	}
 
-	if fetchPullErr != nil {
-		return fetchPullErr
+	// handle errors
+	if result.Err != nil {
+		s.recordError(result.Err.Error())
+		s.metrics.RecordPullFailure()
+		s.workspaceRegistry.RecordSyncFailure("ledger")
+		s.recordSyncStateFailure(s.config.LedgerPath)
+
+		if result.Issue != nil {
+			if result.Issue.Type == IssueTypeMergeConflict {
+				s.metrics.RecordConflict()
+			}
+			if s.issues != nil {
+				s.issues.SetIssue(*result.Issue)
+			}
+		}
+		return fmt.Errorf("ledger %w", result.Err)
+	}
+
+	// handle divergence metric
+	if result.Diverged {
+		s.metrics.RecordDivergence()
+	}
+
+	// clear lock issue now that we've pulled successfully
+	if s.issues != nil {
+		s.issues.ClearIssue(IssueTypeGitLock, "ledger")
 	}
 
 	// sync succeeded - clear all failure-related issues
@@ -1069,13 +949,12 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	duration := time.Since(startTime)
 	s.recordSync("pull", "ledger", duration, 0)
 	s.metrics.RecordPullSuccess(duration)
-	s.recordActivity() // mark as activity
+	s.recordActivity()
 
 	s.mu.Lock()
 	s.lastSync = time.Now()
 	s.mu.Unlock()
 
-	// persist sync timestamp so status shows "synced" after daemon restart
 	if err := s.workspaceRegistry.UpdateConfigLastSync("ledger"); err != nil {
 		s.logger.Warn("failed to update ledger config last sync", "error", err)
 	}
@@ -1103,6 +982,9 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		}
 	}
 
+	if progress != nil {
+		_ = progress.WriteStage("pulling", "Pulling changes...")
+	}
 	s.logger.Debug("pull complete", "duration", duration)
 	return nil
 }
@@ -1124,7 +1006,7 @@ func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string
 
 	ep := s.workspaceRegistry.GetEndpoint()
 	if err := gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
-		AutoResolvePrefixes: []string{"data/murmurs/"},
+		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              s.logger,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
@@ -1139,25 +1021,7 @@ func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string
 
 // detectDivergedBranches checks if local and remote have both progressed independently.
 func (s *SyncScheduler) detectDivergedBranches(ctx context.Context) bool {
-	// check if local and remote branches have both progressed independently
-	cmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath,
-		"rev-list", "--left-right", "--count", "origin/main...HEAD")
-	output, err := cmd.Output()
-	if err != nil {
-		return false
-	}
-
-	// output format: "ahead\tbehind"
-	// if both > 0, branches have diverged
-	parts := strings.Fields(string(output))
-	if len(parts) != 2 {
-		return false
-	}
-
-	behind := parts[0] != "0"
-	ahead := parts[1] != "0"
-
-	return behind && ahead // diverged = both ahead AND behind
+	return detectDivergedBranchesAt(ctx, s.config.LedgerPath)
 }
 
 // syncAll performs a full sync (pull-only — CLI handles push via LFS pipeline).

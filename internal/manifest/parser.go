@@ -27,6 +27,8 @@ func Parse(r io.Reader) (*ManifestConfig, error) {
 	// track include/deny sets for last-one-wins semantics
 	includeSet := make(map[string]bool)
 	denySet := make(map[string]bool)
+	var resolveRules []ResolveRule // explicit `resolve <mode> <path>` directives
+	hasResolve := false           // tracks whether any resolve directive was specified
 	versionSeen := false
 
 	scanner := bufio.NewScanner(r)
@@ -100,6 +102,24 @@ func Parse(r io.Reader) (*ManifestConfig, error) {
 			}
 			cfg.GCIntervalDays = n
 
+		case "resolve":
+			// resolve <mode> <path>
+			if len(parts) < 3 {
+				slog.Warn("manifest: resolve directive requires mode and path", "line", lineNum)
+				continue
+			}
+			mode := ResolveMode(parts[1])
+			rpath := parts[2]
+			if mode != ResolveModeAuto && mode != ResolveModeNone {
+				slog.Warn("manifest: unknown resolve mode, skipping", "line", lineNum, "mode", mode)
+				continue
+			}
+			if err := validatePath(rpath, lineNum); err != nil {
+				continue
+			}
+			resolveRules = append(resolveRules, ResolveRule{Mode: mode, Path: rpath})
+			hasResolve = true
+
 		default:
 			slog.Warn("manifest: unknown directive, skipping", "line", lineNum, "directive", directive)
 		}
@@ -118,6 +138,17 @@ func Parse(r io.Reader) (*ManifestConfig, error) {
 	}
 	for path := range denySet {
 		cfg.Denies = append(cfg.Denies, path)
+	}
+
+	// resolve rules: use explicit directives if present, otherwise fall
+	// back to DefaultResolveRules so existing manifests don't need
+	// updating to get safe conflict resolution.
+	if hasResolve {
+		cfg.ResolveRules = ValidateResolveRules(resolveRules)
+	} else {
+		rules := make([]ResolveRule, len(DefaultResolveRules))
+		copy(rules, DefaultResolveRules)
+		cfg.ResolveRules = rules
 	}
 
 	return cfg, nil

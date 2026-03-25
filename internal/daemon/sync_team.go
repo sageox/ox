@@ -4,14 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/manifest"
@@ -292,118 +289,76 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 // agent definitions, etc.). When changes are detected, a notification marker is written
 // so that CLI commands can "whisper" updates to agents.
 func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error {
-	// skip if repo stuck in broken rebase state
-	if gitutil.IsRebaseInProgress(path) {
-		s.logger.Debug("repo in rebase state, skipping pull", "path", path)
-		return nil
+	repoName := filepath.Base(path)
+
+	// compute FETCH_HEAD min age from manifest if available
+	minFetchAge := minTeamContextFetchAge
+	if intervalMin := s.workspaceRegistry.GetSyncIntervalMin(path); intervalMin > 0 {
+		minFetchAge = time.Duration(intervalMin) * time.Minute
 	}
 
-	// check for stale lock files from crashed git processes
-	gitDir := filepath.Join(path, ".git")
-	if locks := gitutil.HasLockFiles(gitDir); len(locks) > 0 {
-		repoName := filepath.Base(path)
-		s.logger.Warn("git lock files detected, skipping pull",
-			"path", path,
-			"locks", strings.Join(locks, ", "))
-		if s.issues != nil {
-			s.issues.SetIssue(DaemonIssue{
-				Type:     IssueTypeGitLock,
-				Severity: SeverityWarning,
-				Repo:     repoName,
-				Summary: fmt.Sprintf("Stale lock files blocking sync: %s. If no git commands are running, remove with: rm %s/{%s}",
-					strings.Join(locks, ", "),
-					gitDir,
-					strings.Join(locks, ",")),
-			})
+	// read manifest before pull to get auto-resolve prefixes. The manifest
+	// is already on disk from the previous clone/pull. If missing, ParseFile
+	// returns FallbackConfig which includes DefaultResolveRules.
+	manifestPath := filepath.Join(path, ".sageox", "sync.manifest")
+	mCfg := manifest.ParseFile(manifestPath)
+
+	result := s.pullManagedRepo(ctx, ManagedRepoPullOpts{
+		RepoPath:            path,
+		RepoName:            repoName,
+		ProjectRoot:         s.config.ProjectRoot,
+		SyncInterval:        s.config.TeamContextSyncInterval,
+		MinFetchAge:         minFetchAge,
+		ValidateIntegrity:   true,
+		DetectDivergence:    true,
+		ResolveRules:        mCfg.ResolveRules,
+		Logger:              s.logger,
+	})
+
+	// corrupt repo: move aside so background clone picks it up next cycle
+	if result.CorruptRepo {
+		backupPath := fmt.Sprintf("%s.bak.%d", path, time.Now().Unix())
+		s.logger.Warn("team context repo corrupt, moving aside for re-clone",
+			"path", path, "backup", backupPath)
+		if err := os.Rename(path, backupPath); err != nil {
+			s.logger.Error("failed to move corrupt team context aside", "error", err)
+			return fmt.Errorf("corrupt team context at %s but rename failed: %w", path, err)
 		}
 		return nil
 	}
-	// clear lock issue if previously set but now resolved
+
+	// handle skip
+	if result.Skipped {
+		if result.Issue != nil && s.issues != nil {
+			s.issues.SetIssue(*result.Issue)
+		} else if s.issues != nil {
+			s.issues.ClearIssue(IssueTypeGitLock, repoName)
+		}
+		return nil
+	}
+
+	// handle errors
+	if result.Err != nil {
+		if result.Issue != nil {
+			if result.Issue.Type == IssueTypeMergeConflict {
+				s.metrics.RecordConflict()
+			}
+			if s.issues != nil {
+				s.issues.SetIssue(*result.Issue)
+			}
+		}
+		return result.Err
+	}
+
+	// clear lock issue on success
 	if s.issues != nil {
-		repoName := filepath.Base(path)
 		s.issues.ClearIssue(IssueTypeGitLock, repoName)
 	}
 
-	// ls-remote SHA check — skip if remote HEAD matches local (nothing new to pull).
-	// Cheaper than git fetch: only hits /info/refs, no upload-pack negotiation.
-	if s.remoteRefCheck(ctx, path) {
-		return nil
-	}
-
-	// FETCH_HEAD mtime dedup (secondary: multi-daemon dedup on shared team context paths).
-	// Kept as fallback for when ls-remote can't run (credential issues, etc).
-	if age, ok := gitutil.FetchHeadAge(path); ok {
-		// use manifest-derived interval if available, otherwise fall back to default
-		minFetchAge := minTeamContextFetchAge
-		if intervalMin := s.workspaceRegistry.GetSyncIntervalMin(path); intervalMin > 0 {
-			minFetchAge = time.Duration(intervalMin) * time.Minute
-		}
-		threshold := max(s.config.TeamContextSyncInterval/2, minFetchAge)
-		if age < threshold {
-			s.logger.Debug("team context recently fetched, skipping", "path", path, "age", age)
-			return nil
-		}
-	}
-
-	// refresh remote URL if credentials changed (e.g., user switch via ox login)
-	teamEndpoint := endpoint.GetForProject(s.config.ProjectRoot)
-	if err := gitserver.RefreshRemoteCredentials(path, teamEndpoint); err != nil {
-		s.logger.Warn("team context remote credential refresh failed", "path", path, "error", err)
-	}
-
-	// git fetch (capture stderr for diagnosable error messages)
-	tcFetchArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
-	tcFetchArgs = append(tcFetchArgs, "fetch", "--quiet")
-	fetchCmd := exec.CommandContext(ctx, "git", tcFetchArgs...)
-	if output, err := fetchCmd.CombinedOutput(); err != nil {
-		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
-		if detail != "" {
-			return fmt.Errorf("fetch failed: %s (%w)", detail, err)
-		}
-		return fmt.Errorf("fetch failed: %w", err)
-	}
-
-	// track FETCH_HEAD mtime for team context repos
-	if info, err := os.Stat(filepath.Join(path, ".git", "FETCH_HEAD")); err == nil {
-		s.recordRemoteChange(path, info.ModTime())
-	}
-
-	// git pull --rebase --autostash (capture stderr for diagnosable error messages)
-	// --autostash: team context repos are collaborative workspaces — users may have
-	// uncommitted local edits (docs/, data/) that must not block background sync
-	tcPullArgs := append([]string{"-C", path}, gitHTTPTimeoutFlags()...)
-	tcPullArgs = append(tcPullArgs, "pull", "--rebase", "--autostash", "--quiet")
-	pullCmd := exec.CommandContext(ctx, "git", tcPullArgs...)
-	if output, err := pullCmd.CombinedOutput(); err != nil {
-		detail := gitutil.SanitizeOutput(strings.TrimSpace(string(output)))
-
-		// check if it's a merge conflict
-		statusCmd := exec.CommandContext(ctx, "git", "-C", path, "status", "--porcelain")
-		if statusOutput, _ := statusCmd.Output(); strings.Contains(string(statusOutput), "UU") {
-			s.metrics.RecordConflict()
-
-			// report merge conflict issue — daemon does not write; next pull will skip via rebase-state check
-			if s.issues != nil {
-				repoName := filepath.Base(path)
-				s.issues.SetIssue(DaemonIssue{
-					Type:            IssueTypeMergeConflict,
-					Severity:        SeverityError,
-					Repo:            repoName,
-					Summary:         fmt.Sprintf("Team context %s has merge conflicts. Run 'ox doctor --fix' to resolve.", repoName),
-					RequiresConfirm: true, // merge resolution needs human approval
-				})
-			}
-		}
-		if detail != "" {
-			return fmt.Errorf("pull failed: %s (%w)", detail, err)
-		}
-		return fmt.Errorf("pull failed: %w", err)
-	}
-
-	// sync succeeded - clear any previous merge conflict issue for this repo
+	// sync succeeded - clear merge conflict and diverged issues
 	if s.issues != nil {
-		repoName := filepath.Base(path)
 		s.issues.ClearIssue(IssueTypeMergeConflict, repoName)
+		s.issues.ClearIssue(IssueTypeDiverged, repoName)
 	}
 
 	return nil

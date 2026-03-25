@@ -1219,7 +1219,7 @@ func (c *SessionPushCheck) Run(ctx context.Context) CheckResult {
 
 	// push with retry (PushWithRetry handles retries, backoff, and conflict resolution)
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
-		AutoResolvePrefixes: []string{"data/github/"},
+		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		AllowForceOnLFS:     true,
 		RepairLFS:           true,
 	}); err != nil {
