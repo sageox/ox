@@ -13,7 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -69,6 +71,10 @@ type SessionFinalizeHandler struct {
 	logger *slog.Logger
 	// skipGit disables git add/commit/push in tests
 	skipGit bool
+	// skipLFS disables LFS upload in tests
+	skipLFS bool
+	// projectRoot is the workspace root for endpoint/credential resolution
+	projectRoot string
 	// ledgerMu guards concurrent git operations on the ledger repo.
 	// Shared with SyncScheduler to prevent index.lock races.
 	ledgerMu *sync.Mutex
@@ -110,11 +116,18 @@ func (h *SessionFinalizeHandler) SetLedgerMu(mu *sync.Mutex) {
 	h.ledgerMu = mu
 }
 
-// NewSessionFinalizeHandlerForTest creates a handler with git operations disabled.
-// Use in tests that don't have a real git repository.
+// SetProjectRoot sets the workspace root for endpoint/credential resolution.
+// Required for LFS upload during session finalization.
+func (h *SessionFinalizeHandler) SetProjectRoot(root string) {
+	h.projectRoot = root
+}
+
+// NewSessionFinalizeHandlerForTest creates a handler with git and LFS operations disabled.
+// Use in tests that don't have a real git repository or LFS server.
 func NewSessionFinalizeHandlerForTest(logger *slog.Logger) *SessionFinalizeHandler {
 	h := NewSessionFinalizeHandler(logger)
 	h.skipGit = true
+	h.skipLFS = true
 	return h
 }
 
@@ -373,10 +386,9 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 // If this architecture is rejected, the alternative is an IPC endpoint that
 // delegates writes back to the CLI.
 //
-// When triggered via async session upload (SAGEOX_ASYNC_SESSION_UPLOAD=1),
-// content files are committed as regular files (not LFS pointers). This is
-// acceptable for the initial rollout; LFS upload will be added to this handler
-// as a follow-up to avoid committing large blobs to git.
+// Content files are uploaded to LFS (when projectRoot is set) before git commit.
+// LFS upload is best-effort: on failure, content is committed as regular git
+// blobs as a fallback to avoid losing the session.
 func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult) error {
 	payload, err := extractPayload(item)
 	if err != nil {
@@ -463,6 +475,15 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		return nil
 	}
 
+	// write meta.json and attempt LFS upload before git commit
+	h.writeMetaAndUploadLFS(payload, stored, summaryResp)
+
+	// ensure sessions/.gitignore before commit
+	sessionsDir := filepath.Dir(payload.SessionDir)
+	if err := lfs.EnsureSessionsGitignore(sessionsDir); err != nil {
+		h.logger.Warn("gitignore setup failed", "err", err)
+	}
+
 	h.gitCommitAndPush(payload)
 	h.logger.Info("session recovered via anti-entropy",
 		"session", sessionName,
@@ -470,6 +491,66 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		"artifacts_generated", len(requiredArtifacts),
 	)
 	return nil
+}
+
+// writeMetaAndUploadLFS writes meta.json and attempts LFS upload for a finalized session.
+// LFS upload is best-effort: on failure, content files remain as regular blobs.
+func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizePayload, stored *session.StoredSession, summaryResp *session.SummarizeResponse) {
+	sessionName := filepath.Base(payload.SessionDir)
+
+	// extract identity from raw.jsonl header
+	var agentID, agentType, username string
+	var createdAt time.Time
+	if stored.Meta != nil {
+		agentID = stored.Meta.AgentID
+		agentType = stored.Meta.AgentType
+		username = stored.Meta.Username
+		createdAt = stored.Meta.CreatedAt
+	}
+	if agentID == "" {
+		// parse from session name: YYYY-MM-DDTHH-MM-username-AgentID
+		parts := strings.Split(sessionName, "-")
+		if len(parts) >= 2 {
+			agentID = parts[len(parts)-1]
+		}
+	}
+
+	meta := lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).
+		Title(summaryResp.Title).
+		Summary(summaryResp.Summary).
+		EntryCount(len(stored.Entries)).
+		StopReason(session.StopReasonRecovered).
+		Build()
+
+	// write meta.json (without LFS refs initially)
+	if err := lfs.WriteSessionMeta(payload.SessionDir, meta); err != nil {
+		h.logger.Warn("meta.json write failed", "session", sessionName, "err", err)
+		return
+	}
+
+	// attempt LFS upload (best-effort)
+	if h.skipLFS || h.projectRoot == "" {
+		return
+	}
+
+	ep := endpoint.GetForProject(h.projectRoot)
+	client, err := lfs.NewClientFromLedger(payload.LedgerPath, ep)
+	if err != nil {
+		h.logger.Warn("LFS client creation failed, committing raw content as fallback", "session", sessionName, "err", err)
+		return
+	}
+
+	fileRefs, err := lfs.UploadSessionFiles(client, payload.SessionDir, h.logger)
+	if err != nil {
+		h.logger.Warn("LFS upload failed, committing raw content as fallback", "session", sessionName, "err", err)
+		return
+	}
+
+	// update meta.json with LFS file references (triggers pointer file creation)
+	meta.Files = fileRefs
+	if err := lfs.WriteSessionMeta(payload.SessionDir, meta); err != nil {
+		h.logger.Warn("meta.json update with LFS refs failed", "session", sessionName, "err", err)
+	}
 }
 
 // gitCommitAndPush stages, commits, and pushes the finalized session.

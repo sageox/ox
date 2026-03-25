@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -1595,5 +1596,244 @@ func TestSetQualityThresholds(t *testing.T) {
 	}
 	if handler.qualityDiscardThreshold != 0.2 {
 		t.Errorf("expected discard threshold 0.2, got %f", handler.qualityDiscardThreshold)
+	}
+}
+
+func TestProcessResult_WritesMetaJSON(t *testing.T) {
+	handler := NewSessionFinalizeHandlerForTest(slog.Default())
+
+	sessionName := "2026-01-10T09-30-testuser-OxMETA"
+	ledgerPath := createTestSession(t, sessionName, nil)
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+
+	item := &WorkItem{
+		ID:   "test-meta",
+		Type: sessionFinalizeType,
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    rawPath,
+			Missing:    requiredArtifacts,
+			LedgerPath: ledgerPath,
+		},
+	}
+
+	summaryJSON := map[string]any{
+		"title":         "Meta Test Session",
+		"summary":       "Testing meta.json generation",
+		"key_actions":   []string{"tested meta"},
+		"outcome":       "success",
+		"topics_found":  []string{"testing"},
+		"quality_score": 0.8,
+		"score_reason":  "Test session",
+	}
+	jsonBytes, _ := json.MarshalIndent(summaryJSON, "", "  ")
+
+	result := &RunResult{
+		Output:   string(jsonBytes),
+		Duration: 5 * time.Second,
+	}
+
+	if err := handler.ProcessResult(item, result); err != nil {
+		t.Fatalf("ProcessResult failed: %v", err)
+	}
+
+	// verify meta.json was written
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	if err != nil {
+		t.Fatalf("meta.json not found after ProcessResult: %v", err)
+	}
+
+	if meta.SessionName != sessionName {
+		t.Errorf("session_name mismatch: got %q, want %q", meta.SessionName, sessionName)
+	}
+	if meta.StopReason != session.StopReasonRecovered {
+		t.Errorf("stop_reason mismatch: got %q, want %q", meta.StopReason, session.StopReasonRecovered)
+	}
+	if meta.Title != "Meta Test Session" {
+		t.Errorf("title mismatch: got %q, want %q", meta.Title, "Meta Test Session")
+	}
+	if meta.Summary != "Testing meta.json generation" {
+		t.Errorf("summary mismatch: got %q", meta.Summary)
+	}
+	if meta.EntryCount != 2 { // 2 entries in createTestSession raw.jsonl
+		t.Errorf("entry_count mismatch: got %d, want 2", meta.EntryCount)
+	}
+}
+
+func TestProcessResult_MetaJSON_NoLFS_EmptyFiles(t *testing.T) {
+	handler := NewSessionFinalizeHandlerForTest(slog.Default())
+
+	sessionName := "2026-01-10T10-00-testuser-OxNOLF"
+	ledgerPath := createTestSession(t, sessionName, nil)
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+
+	item := &WorkItem{
+		ID:   "test-nolfs",
+		Type: sessionFinalizeType,
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    rawPath,
+			Missing:    requiredArtifacts,
+			LedgerPath: ledgerPath,
+		},
+	}
+
+	result := &RunResult{
+		Output: `{"title":"No LFS","summary":"Testing without LFS","key_actions":["test"],"outcome":"success","topics_found":[],"quality_score":0.8,"score_reason":"Test"}`,
+	}
+
+	if err := handler.ProcessResult(item, result); err != nil {
+		t.Fatalf("ProcessResult failed: %v", err)
+	}
+
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	if err != nil {
+		t.Fatalf("meta.json not found: %v", err)
+	}
+
+	// with skipLFS=true, files map should be empty
+	if len(meta.Files) != 0 {
+		t.Errorf("expected empty files map when LFS is skipped, got %d entries", len(meta.Files))
+	}
+}
+
+func TestProcessResult_ExtractsMetadataFromHeader(t *testing.T) {
+	handler := NewSessionFinalizeHandlerForTest(slog.Default())
+
+	sessionName := "2026-01-10T10-30-alice-OxHDR1"
+	ledgerPath := t.TempDir()
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// raw.jsonl with metadata header containing agent info
+	rawContent := `{"metadata":{"agent_id":"OxHDR1","agent_type":"claude-code","created_at":"2026-01-10T10:30:00Z","username":"alice@example.com"},"type":"header"}
+{"type":"user","content":"test","seq":1}
+{"type":"assistant","content":"done","seq":2}
+`
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	if err := os.WriteFile(rawPath, []byte(rawContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	item := &WorkItem{
+		ID:   "test-header",
+		Type: sessionFinalizeType,
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    rawPath,
+			Missing:    requiredArtifacts,
+			LedgerPath: ledgerPath,
+		},
+	}
+
+	result := &RunResult{
+		Output: `{"title":"Header Test","summary":"Testing header extraction","key_actions":["test"],"outcome":"success","topics_found":[],"quality_score":0.8,"score_reason":"Test"}`,
+	}
+
+	if err := handler.ProcessResult(item, result); err != nil {
+		t.Fatalf("ProcessResult failed: %v", err)
+	}
+
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	if err != nil {
+		t.Fatalf("meta.json not found: %v", err)
+	}
+
+	if meta.AgentID != "OxHDR1" {
+		t.Errorf("agent_id mismatch: got %q, want %q", meta.AgentID, "OxHDR1")
+	}
+	if meta.AgentType != "claude-code" {
+		t.Errorf("agent_type mismatch: got %q, want %q", meta.AgentType, "claude-code")
+	}
+	if meta.Username != "alice@example.com" {
+		t.Errorf("username mismatch: got %q, want %q", meta.Username, "alice@example.com")
+	}
+}
+
+func TestCtrlC_FullFinalizationPipeline_WritesMetaJSON(t *testing.T) {
+	// strengthened version of TestCtrlC_FullFinalizationPipeline
+	// that also verifies meta.json is written with correct fields
+	handler := NewSessionFinalizeHandlerForTest(slog.Default())
+
+	ledgerPath := t.TempDir()
+	sessionName := "2026-01-10T11-00-testuser-OxMETA"
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	rawContent := `{"metadata":{"agent_id":"OxMETA","agent_type":"claude-code","created_at":"2026-01-10T11:00:00Z"},"type":"header"}
+{"type":"user","content":"implement feature X","seq":0}
+{"type":"assistant","content":"done implementing","seq":1}
+`
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	if err := os.WriteFile(rawPath, []byte(rawContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// stale recording marker
+	recState := map[string]any{
+		"started_at": time.Now().Add(-26 * time.Hour).Format(time.RFC3339),
+		"agent_id":   "OxMETA",
+	}
+	recData, _ := json.Marshal(recState)
+	if err := os.WriteFile(filepath.Join(sessionDir, recordingMarker), recData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// step 1: detect
+	items, err := handler.Detect(ledgerPath)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 stale session, got %d", len(items))
+	}
+
+	// step 2: build prompt
+	item := items[0]
+	if _, err := handler.BuildPrompt(item); err != nil {
+		t.Fatalf("BuildPrompt: %v", err)
+	}
+
+	// step 3: process result
+	result := &RunResult{
+		Output: `{"title":"Feature X Implementation","summary":"Implemented feature X","key_actions":["implemented feature"],"outcome":"success","topics_found":["feature"],"quality_score":0.9,"score_reason":"Full feature implementation"}`,
+	}
+	if err := handler.ProcessResult(item, result); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	// step 4: verify artifacts + meta.json
+	for _, artifact := range requiredArtifacts {
+		path := filepath.Join(sessionDir, artifact)
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Errorf("missing artifact: %s", artifact)
+		}
+	}
+
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	if err != nil {
+		t.Fatalf("meta.json not found after full pipeline: %v", err)
+	}
+
+	if meta.SessionName != sessionName {
+		t.Errorf("session_name: got %q, want %q", meta.SessionName, sessionName)
+	}
+	if meta.StopReason != session.StopReasonRecovered {
+		t.Errorf("stop_reason: got %q, want %q", meta.StopReason, session.StopReasonRecovered)
+	}
+	if meta.Title != "Feature X Implementation" {
+		t.Errorf("title: got %q, want %q", meta.Title, "Feature X Implementation")
+	}
+	if meta.EntryCount != 2 {
+		t.Errorf("entry_count: got %d, want 2", meta.EntryCount)
+	}
+	if meta.AgentID != "OxMETA" {
+		t.Errorf("agent_id: got %q, want %q", meta.AgentID, "OxMETA")
 	}
 }

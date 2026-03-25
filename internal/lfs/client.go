@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/useragent"
 )
 
@@ -149,4 +150,30 @@ func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchRespons
 	}
 
 	return &batchResp, nil
+}
+
+// NewClientFromLedger creates an LFS client using the ledger's git remote URL
+// and credentials loaded for the given endpoint. This is a convenience constructor
+// for callers that already have the ledger path (e.g., daemon session finalization).
+func NewClientFromLedger(ledgerPath, endpointURL string) (*Client, error) {
+	creds, err := gitserver.LoadCredentialsForEndpoint(endpointURL)
+	if err != nil {
+		return nil, fmt.Errorf("load credentials: %w", err)
+	}
+	if creds == nil {
+		return nil, fmt.Errorf("no git credentials found (run 'ox login' first)")
+	}
+	if creds.Token == "" {
+		return nil, fmt.Errorf("git credentials have empty token")
+	}
+
+	repoURL, err := gitserver.GetBareRemoteURL(ledgerPath)
+	if err != nil {
+		return nil, fmt.Errorf("get ledger remote URL: %w", err)
+	}
+	if repoURL == "" {
+		return nil, fmt.Errorf("ledger has no remote URL configured")
+	}
+
+	return NewClient(repoURL, creds.Username, creds.Token), nil
 }

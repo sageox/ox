@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,6 +63,42 @@ func UploadObject(action *Action, content []byte) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("upload returned HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// VerifyObject confirms a blob was received by the server by POSTing to the
+// verify action href per the Git LFS batch API spec. The server responds 200
+// if the object exists with matching OID and size.
+func VerifyObject(action *Action, oid string, size int64) error {
+	if action == nil || action.Href == "" {
+		return nil // no verify action = server doesn't require verification
+	}
+
+	body := fmt.Sprintf(`{"oid":"%s","size":%d}`, oid, size)
+
+	req, err := http.NewRequest("POST", action.Href, strings.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("create verify request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/vnd.git-lfs+json")
+	req.Header.Set("User-Agent", useragent.String())
+
+	for k, v := range action.Header {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := lfsHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("verify request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("verify returned HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	return nil
@@ -157,6 +194,9 @@ func UploadAll(resp *BatchResponse, files map[string][]byte, maxConcurrent int) 
 			defer func() { <-sem }() // release semaphore
 
 			err := UploadObject(obj.Actions.Upload, content)
+			if err == nil && obj.Actions.Verify != nil {
+				err = VerifyObject(obj.Actions.Verify, obj.OID, obj.Size)
+			}
 
 			mu.Lock()
 			results = append(results, UploadResult{OID: obj.OID, Error: err})

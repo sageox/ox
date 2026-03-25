@@ -669,6 +669,7 @@ func (d *Daemon) initComponents() time.Duration {
 		sfh := agentwork.NewSessionFinalizeHandler(d.logger)
 		sfh.SetPIDLookup(d.heartbeat.GetAgentPID)
 		sfh.SetLedgerMu(d.scheduler.LedgerMu())
+		sfh.SetProjectRoot(d.config.ProjectRoot)
 		awCfg := configLoader()
 		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
 		d.agentWorker.RegisterHandler(sfh)
