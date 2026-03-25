@@ -145,9 +145,11 @@ func HasMissingLFSObjects(ctx context.Context, repoPath string) bool {
 
 // IsLFSPushError returns true if the error output indicates a push failure
 // caused by missing LFS objects (either local pre-push hook or server-side).
+// "failed to store" alone is NOT sufficient — macOS Keychain errors like
+// "failed to store: -25300" (errSecItemNotFound) would false-positive.
 func IsLFSPushError(output string) bool {
 	return strings.Contains(output, "LFS objects are missing") ||
 		strings.Contains(output, "missing or corrupt local objects") ||
-		strings.Contains(output, "failed to store") ||
-		(strings.Contains(output, "LFS upload") && strings.Contains(output, "missing"))
+		(strings.Contains(output, "LFS upload") && strings.Contains(output, "missing")) ||
+		(strings.Contains(output, "LFS") && strings.Contains(output, "failed to store"))
 }

@@ -366,12 +366,14 @@ func TestIsLFSPushError(t *testing.T) {
 	}{
 		{"LFS objects missing", "remote: LFS objects are missing", true},
 		{"missing or corrupt", "error: missing or corrupt local objects", true},
-		{"failed to store", "error: failed to store blob", true},
+		{"LFS failed to store", "LFS: error: failed to store blob", true},
 		{"LFS upload missing combo", "LFS upload failed: missing objects", true},
 		{"normal push error", "fatal: unable to access: connection refused", false},
 		{"non-fast-forward", "rejected: non-fast-forward", false},
 		{"empty string", "", false},
 		{"partial LFS no missing", "LFS upload completed", false},
+		{"macOS keychain error", "fatal: failed to store: -25300", false},
+		{"credential store error", "error: failed to store credentials", false},
 	}
 
 	for _, tt := range tests {
