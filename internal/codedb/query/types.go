@@ -9,10 +9,10 @@ import (
 // ActivityResult contains assembled GitHub activity grouped by cluster type.
 // Use MarshalEventClusters() to produce the flat JSON array for the extractor.
 type ActivityResult struct {
-	PRClusters       []PRCluster       `json:"-"`
-	StandaloneIssues []StandaloneIssue `json:"-"`
+	PRClusters        []PRCluster        `json:"-"`
+	StandaloneIssues  []StandaloneIssue  `json:"-"`
 	StandaloneCommits []StandaloneCommit `json:"-"`
-	Metadata         ActivityMetadata   `json:"-"`
+	Metadata          ActivityMetadata   `json:"-"`
 }
 
 // ActivityMetadata records the query parameters and result counts.
@@ -26,18 +26,18 @@ type ActivityMetadata struct {
 
 // PRCluster represents a pull request with its associated comments and commits.
 type PRCluster struct {
-	Number             int            `json:"number"`
-	Title              string         `json:"title"`
-	Description        string         `json:"description"`
-	Author             string         `json:"author"`
-	Status             string         `json:"status"`
-	MergedAt           *string        `json:"merged_at,omitempty"`
-	UpdatedAt          *string        `json:"-"` // internal: for per-day bucketing
-	URL                string         `json:"url"`
-	Labels             []string       `json:"labels,omitempty"`
-	Commits            []CommitEntry  `json:"commits"`
-	Reviews            []ReviewGroup  `json:"reviews"`
-	DiscussionComments []Comment      `json:"discussion_comments"`
+	Number             int           `json:"number"`
+	Title              string        `json:"title"`
+	Description        string        `json:"description"`
+	Author             string        `json:"author"`
+	Status             string        `json:"status"`
+	MergedAt           *string       `json:"merged_at,omitempty"`
+	UpdatedAt          *string       `json:"-"` // internal: for per-day bucketing
+	URL                string        `json:"url"`
+	Labels             []string      `json:"labels,omitempty"`
+	Commits            []CommitEntry `json:"commits"`
+	Reviews            []ReviewGroup `json:"reviews"`
+	DiscussionComments []Comment     `json:"discussion_comments"`
 }
 
 // ReviewGroup groups review comments by reviewer.

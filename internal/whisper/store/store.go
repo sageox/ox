@@ -53,7 +53,7 @@ const (
 // WhisperEntry is a single whisper destined for agent delivery.
 type WhisperEntry struct {
 	ID            string            `json:"id"`
-	Scope         string            `json:"scope"`                    // "ledger" or "team"
+	Scope         string            `json:"scope"` // "ledger" or "team"
 	Type          WhisperType       `json:"type"`
 	Source        string            `json:"source"`
 	Topic         string            `json:"topic"`

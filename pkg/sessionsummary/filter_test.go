@@ -11,8 +11,8 @@ func TestFilterForSummarization(t *testing.T) {
 		name      string
 		entries   []Entry
 		wantCount int
-		wantTypes []string   // expected types of remaining entries
-		wantTools []string   // expected tool names of remaining tool entries
+		wantTypes []string // expected types of remaining entries
+		wantTools []string // expected tool names of remaining tool entries
 	}{
 		{
 			name:      "empty entries",

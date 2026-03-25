@@ -396,4 +396,3 @@ func TestDetectExistingRepoMarkers_SortOrder(t *testing.T) {
 		assert.Equal(t, id, detected[i], "position %d mismatch", i)
 	}
 }
-

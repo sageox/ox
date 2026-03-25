@@ -746,14 +746,14 @@ func (c *CallbackService) Friction(payload FrictionPayload) {
 
 // Server handles IPC requests from clients.
 type Server struct {
-	logger  *slog.Logger
-	svc     *CallbackService // mutable callback adapter; non-nil when created via NewServer
-	service DaemonService    // active service; set to svc by default, overridable via NewServerWithService
+	logger   *slog.Logger
+	svc      *CallbackService // mutable callback adapter; non-nil when created via NewServer
+	service  DaemonService    // active service; set to svc by default, overridable via NewServerWithService
 	listener net.Listener
 	router   *MessageRouter
 	mu       sync.Mutex
 	connWg   sync.WaitGroup // tracks active connection handler goroutines
-	connSem  chan struct{}   // semaphore for connection limit
+	connSem  chan struct{}  // semaphore for connection limit
 
 	startTime time.Time
 }
@@ -962,7 +962,6 @@ func (s *Server) SetCodeStatusHandler(cb func() *CodeDBStats) {
 	defer svc.mu.Unlock()
 	svc.onCodeStatus = cb
 }
-
 
 // SetWhispersHandler sets the handler for whisper queries.
 func (s *Server) SetWhispersHandler(cb func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)) {

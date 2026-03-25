@@ -81,7 +81,7 @@ func DefaultConfig() *Config {
 		VersionCheckInterval:    30 * time.Minute, // ETag conditional requests make this cheap
 		GCCheckInterval:         1 * time.Hour,    // check hourly, actual GC cadence is per-workspace
 		DistillInterval:         6 * time.Hour,    // distill memory every 6 hours
-		GitHubSyncInterval:     15 * time.Minute, // sync PRs/issues every 15 minutes
+		GitHubSyncInterval:      15 * time.Minute, // sync PRs/issues every 15 minutes
 		InactivityTimeout:       1 * time.Hour,    // exit after 1 hour of inactivity
 		AutoStart:               true,
 		LedgerPath:              "", // resolved at runtime

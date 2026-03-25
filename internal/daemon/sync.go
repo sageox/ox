@@ -107,7 +107,7 @@ type SyncScheduler struct {
 	triggerChan chan struct{}
 
 	// worker pool for bounded clone concurrency
-	cloneSem      chan struct{}   // semaphore limiting concurrent clones
+	cloneSem      chan struct{}  // semaphore limiting concurrent clones
 	cloneInFlight sync.Map       // tracks workspace IDs with clone in progress (dedup)
 	cloneWg       sync.WaitGroup // tracks in-flight background clone goroutines
 
@@ -146,7 +146,6 @@ type SyncScheduler struct {
 
 	// agent work signal channel — notified after successful ledger pull
 	agentWorkSignal chan<- struct{}
-
 
 	// whisper registry for trigger whispers on sync events
 	whisperRegistry *WhisperRegistry

@@ -294,10 +294,10 @@ var codeStatusCmd = &cobra.Command{
 		// query DB directly for counts (daemon stats may lag)
 		var totalCommits, totalBlobs, totalSymbols, totalComments, totalPRs, totalIssues int
 		type repoRow struct {
-			name      string
-			path      string
-			commits   int
-			blobs     int
+			name       string
+			path       string
+			commits    int
+			blobs      int
 			lastCommit int64 // unix timestamp of most recent commit
 		}
 		var repos []repoRow

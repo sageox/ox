@@ -290,8 +290,6 @@ func handleCodeStatus(s *Server, _ Message, _ net.Conn) HandlerResult {
 	}
 }
 
-
-
 func handleWhispers(s *Server, msg Message, _ net.Conn) HandlerResult {
 	var payload WhispersPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {

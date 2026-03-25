@@ -18,9 +18,9 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
-	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/tips"
@@ -474,7 +474,6 @@ func extractGitHost(cloneURL string) string {
 	}
 	return cloneURL
 }
-
 
 // getLedgerRemoteURL fetches the ledger git URL from the cloud API.
 // Returns empty string if not available or on error.

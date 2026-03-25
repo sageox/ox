@@ -852,8 +852,8 @@ func TestAlternateSessionCacheDirsCoverAllLocations(t *testing.T) {
 	repoID := "repo-test-123"
 
 	tests := []struct {
-		name           string
-		xdgCacheHome   string // empty means unset
+		name            string
+		xdgCacheHome    string   // empty means unset
 		expectedInUnion []string // path suffixes that must appear in the union
 	}{
 		{

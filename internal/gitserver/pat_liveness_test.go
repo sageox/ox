@@ -49,10 +49,10 @@ func TestValidatePATLiveness(t *testing.T) {
 			wantReason: "PAT rejected by server (revoked or invalid)",
 		},
 		{
-			name:      "empty token skips",
-			handler:   nil,
-			token:     "",
-			wantSkip:  true,
+			name:       "empty token skips",
+			handler:    nil,
+			token:      "",
+			wantSkip:   true,
 			wantReason: "no credentials",
 		},
 		{

@@ -44,12 +44,12 @@ func init() {
 
 // pushSummaryOutput is the JSON output format for push-summary.
 type pushSummaryOutput struct {
-	Success      bool   `json:"success"`
-	Type         string `json:"type"`
-	SummaryPath  string `json:"summary_path,omitempty"`
-	Message      string `json:"message,omitempty"`
-	Error        string `json:"error,omitempty"`
-	Disposition  string `json:"disposition,omitempty"`   // "upload", "local_only", "discard"
+	Success      bool    `json:"success"`
+	Type         string  `json:"type"`
+	SummaryPath  string  `json:"summary_path,omitempty"`
+	Message      string  `json:"message,omitempty"`
+	Error        string  `json:"error,omitempty"`
+	Disposition  string  `json:"disposition,omitempty"`   // "upload", "local_only", "discard"
 	QualityScore float64 `json:"quality_score,omitempty"` // 0.0-1.0 from LLM
 }
 

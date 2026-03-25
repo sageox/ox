@@ -627,4 +627,3 @@ func TestMultiDaemonTeamDB(t *testing.T) {
 		t.Errorf("s2 expected 2, got %d", len(got2))
 	}
 }
-

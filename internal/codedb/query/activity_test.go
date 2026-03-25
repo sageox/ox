@@ -146,7 +146,7 @@ func TestQueryPRs_FieldMapping(t *testing.T) {
 
 	pr := result.PRClusters[0]
 	assert.Equal(t, "PR body text", pr.Description) // body → Description
-	assert.Equal(t, "merged", pr.Status)             // state → Status
+	assert.Equal(t, "merged", pr.Status)            // state → Status
 	assert.NotNil(t, pr.MergedAt)
 	assert.Equal(t, "2026-03-15T14:30:00Z", *pr.MergedAt)
 

@@ -54,8 +54,6 @@ type observation struct {
 	Content string `json:"content"`
 }
 
-
-
 func runMemoryPut(cmd *cobra.Command, args []string) error {
 	projectRoot, err := findProjectRoot()
 	if err != nil {

@@ -445,4 +445,3 @@ func formatSessionDuration(d time.Duration) string {
 	}
 	return fmt.Sprintf("%dh%dm", hours, mins)
 }
-

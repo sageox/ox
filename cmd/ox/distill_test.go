@@ -535,7 +535,7 @@ func TestISOWeekRange(t *testing.T) {
 		{
 			year:      2026,
 			week:      10,
-			wantStart: time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC),  // Monday
+			wantStart: time.Date(2026, 3, 2, 0, 0, 0, 0, time.UTC),    // Monday
 			wantEnd:   time.Date(2026, 3, 8, 23, 59, 59, 0, time.UTC), // Sunday
 		},
 		{

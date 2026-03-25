@@ -271,25 +271,25 @@ func TestRenderInsightsHuman_WithData(t *testing.T) {
 
 func TestGenerateHints(t *testing.T) {
 	tests := []struct {
-		name         string
-		setupExtra   string // additional SQL to run
-		openPRs      []insightPR
-		openIssues   []insightIssue
-		wantNil      bool
-		wantPR       bool
-		wantIssue    bool
+		name       string
+		setupExtra string // additional SQL to run
+		openPRs    []insightPR
+		openIssues []insightIssue
+		wantNil    bool
+		wantPR     bool
+		wantIssue  bool
 	}{
 		{
-			name:    "no github data at all",
+			name:       "no github data at all",
 			setupExtra: "DELETE FROM pull_requests; DELETE FROM issues",
-			wantNil: true,
+			wantNil:    true,
 		},
 		{
-			name:    "open PRs and issues present",
-			openPRs: []insightPR{{Number: 1}},
+			name:       "open PRs and issues present",
+			openPRs:    []insightPR{{Number: 1}},
 			openIssues: []insightIssue{{Number: 1}},
-			wantPR:  true,
-			wantIssue: true,
+			wantPR:     true,
+			wantIssue:  true,
 		},
 		{
 			name:       "only closed/merged PRs in DB, no open",
