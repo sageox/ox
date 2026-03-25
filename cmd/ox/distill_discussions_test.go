@@ -538,7 +538,14 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 		s["learnings"] = []map[string]any{{"description": "redis handles TTL well"}}
 		s["action_items"] = []map[string]any{{"description": "migrate by friday"}}
 		s["open_questions"] = []map[string]any{{"question": "failover strategy?"}}
+		s["requirements"] = []map[string]any{{"description": "must support SAML SSO"}}
 		s["constraints"] = []string{"compliance requirement"}
+		s["technical_context"] = map[string]any{
+			"technologies": []string{"Redis 7.x"},
+			"architecture": []string{"token service is stateless"},
+			"integrations": []string{"Okta SAML provider"},
+			"notes":        []string{"latency budget is 50ms"},
+		}
 		writeSummaryJSON(t, dir, s)
 
 		d := discussionInput{
@@ -557,7 +564,12 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 		assertContains(t, output, "redis handles TTL well")
 		assertContains(t, output, "migrate by friday")
 		assertContains(t, output, "failover strategy?")
+		assertContains(t, output, "must support SAML SSO")
 		assertContains(t, output, "compliance requirement")
+		assertContains(t, output, "Redis 7.x")
+		assertContains(t, output, "token service is stateless")
+		assertContains(t, output, "Okta SAML provider")
+		assertContains(t, output, "latency budget is 50ms")
 	})
 
 	t.Run("wrong schema version — returns error for LLM fallback", func(t *testing.T) {

@@ -286,8 +286,18 @@ func extractFactsFromSummaryJSON(d discussionInput) (string, error) {
 		}
 	}
 
+	if len(summary.Requirements) > 0 {
+		sb.WriteString("\n## Requirements\n")
+		for _, item := range summary.Requirements {
+			fmt.Fprintf(&sb, "- %s\n", item.Text())
+		}
+	}
+
 	// key context from TechnicalContext, Constraints, NonGoals, high-importance chapters
 	var keyContext []string
+	keyContext = append(keyContext, summary.TechnicalContext.Technologies...)
+	keyContext = append(keyContext, summary.TechnicalContext.Architecture...)
+	keyContext = append(keyContext, summary.TechnicalContext.Integrations...)
 	keyContext = append(keyContext, summary.TechnicalContext.Notes...)
 	keyContext = append(keyContext, summary.Constraints...)
 	keyContext = append(keyContext, summary.NonGoals...)
