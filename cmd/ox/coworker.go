@@ -166,14 +166,11 @@ func init() {
 func resolveCoworkerTeam(cmd *cobra.Command, projectRoot string) (*config.TeamContext, error) {
 	teamFlag, _ := cmd.Flags().GetString("team")
 	if teamFlag != "" {
-		// search local config first, then all known teams (global teams directory)
-		allTeams := config.FindAllTeamContexts(projectRoot)
-		for i, tc := range allTeams {
-			if tc.TeamID == teamFlag {
-				return &allTeams[i], nil
-			}
+		t := resolveTeamByQuery(projectRoot, teamFlag)
+		if t == nil {
+			return nil, fmt.Errorf("team %q not found; check ox teams for available teams", teamFlag)
 		}
-		return nil, fmt.Errorf("team %q not found; check ox status for available teams", teamFlag)
+		return t.toConfigTeamContext(), nil
 	}
 	tc := config.FindRepoTeamContext(projectRoot)
 	if tc == nil {

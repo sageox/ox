@@ -8,10 +8,7 @@ import (
 
 	lipgloss "charm.land/lipgloss/v2"
 
-	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/cli"
-	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/spf13/cobra"
@@ -90,26 +87,28 @@ func runTeams(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// identify primary team for this repo
+	teams := discoverAllTeams(projectRoot)
 	var primaryTeamID string
-	projectCfg, err := config.LoadProjectConfig(projectRoot)
-	if err == nil && projectCfg != nil {
-		primaryTeamID = projectCfg.TeamID
+	for _, t := range teams {
+		if t.Primary {
+			primaryTeamID = t.TeamID
+			break
+		}
 	}
 
-	entries := discoverTeams(projectRoot, primaryTeamID, projectCfg)
-	if len(entries) == 0 {
+	if len(teams) == 0 {
 		if jsonMode {
 			return json.NewEncoder(out).Encode(teamsOutput{
-				PrimaryTeam: primaryTeamID,
-				Teams:       []teamEntry{},
-				Guidance:    "No teams found. Run 'ox login' then 'ox init' to set up.",
+				Teams:    []teamEntry{},
+				Guidance: "No teams found. Run 'ox login' then 'ox init' to set up.",
 			})
 		}
 		fmt.Fprintln(out, "No teams found.")
 		fmt.Fprintln(out, "Run 'ox login' then 'ox init' to set up.")
 		return nil
 	}
+
+	entries := enrichedTeamsToEntries(teams)
 
 	if jsonMode {
 		output := teamsOutput{
@@ -213,129 +212,22 @@ func runTeams(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// discoverTeams builds the team list, preferring daemon status (has names/slugs)
-// and falling back to filesystem scan via FindAllTeamContexts.
-func discoverTeams(projectRoot, primaryTeamID string, projectCfg *config.ProjectConfig) []teamEntry {
-	// try daemon first — it has team names, slugs, and accurate sync times
-	if entries := teamsFromDaemon(primaryTeamID, projectCfg); len(entries) > 0 {
-		return entries
-	}
-
-	// fallback: filesystem scan (no names for most teams)
-	return teamsFromFilesystem(projectRoot, primaryTeamID, projectCfg)
-}
-
-// teamsFromDaemon queries the running daemon for team context workspaces.
-func teamsFromDaemon(primaryTeamID string, projectCfg *config.ProjectConfig) []teamEntry {
-	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
-	status, err := client.Status()
-	if err != nil || status == nil {
-		return nil
-	}
-
-	tcWorkspaces, ok := status.Workspaces["team-context"]
-	if !ok || len(tcWorkspaces) == 0 {
-		return nil
-	}
-
-	var primary, others []teamEntry
-	for _, ws := range tcWorkspaces {
-		teamID := ws.TeamID
-		if teamID == "" {
-			teamID = ws.ID
-		}
-
-		name := ws.TeamName
-		if name == "" && teamID == primaryTeamID && projectCfg != nil {
-			name = projectCfg.TeamName
-		}
-		if name == "" {
-			name = teamID
-		}
-
-		slug := ws.TeamSlug
-		if slug == "" {
-			slug = api.DeriveSlug(name)
-		}
-		if slug == "" {
-			slug = teamID
-		}
-
+// enrichedTeamsToEntries converts enrichedTeam slice to teamEntry slice for JSON/display.
+func enrichedTeamsToEntries(teams []enrichedTeam) []teamEntry {
+	entries := make([]teamEntry, 0, len(teams))
+	for _, t := range teams {
 		sync := "unknown"
-		if !ws.LastSync.IsZero() {
-			sync = formatAge(time.Since(ws.LastSync))
+		if !t.LastSync.IsZero() {
+			sync = formatAge(time.Since(t.LastSync))
 		}
-
-		entry := teamEntry{
-			TeamID:   teamID,
-			Name:     name,
-			Slug:     slug,
-			Primary:  teamID == primaryTeamID,
+		entries = append(entries, teamEntry{
+			TeamID:   t.TeamID,
+			Name:     t.Name,
+			Slug:     t.Slug,
+			Primary:  t.Primary,
 			LastSync: sync,
-			Path:     ws.Path,
-		}
-
-		if entry.Primary {
-			primary = append(primary, entry)
-		} else {
-			others = append(others, entry)
-		}
+			Path:     t.Path,
+		})
 	}
-
-	return append(primary, others...)
-}
-
-// teamsFromFilesystem uses FindAllTeamContexts (filesystem scan fallback).
-func teamsFromFilesystem(projectRoot, primaryTeamID string, projectCfg *config.ProjectConfig) []teamEntry {
-	allTeams := config.FindAllTeamContexts(projectRoot)
-	if len(allTeams) == 0 {
-		return nil
-	}
-
-	var primary, others []teamEntry
-	for _, tc := range allTeams {
-		teamName := tc.TeamName
-		if teamName == "" && tc.TeamID == primaryTeamID && projectCfg != nil {
-			teamName = projectCfg.TeamName
-		}
-
-		slug := tc.Slug
-		if slug == "" {
-			slug = api.DeriveSlug(teamName)
-		}
-		if slug == "" {
-			slug = tc.TeamID
-		}
-
-		name := teamName
-		if name == "" {
-			name = tc.TeamID
-		}
-
-		sync := teamContextAge(tc.Path)
-		if sync == "" {
-			if tc.HasLastSync() {
-				sync = formatAge(time.Since(tc.LastSync))
-			} else {
-				sync = "unknown"
-			}
-		}
-
-		entry := teamEntry{
-			TeamID:   tc.TeamID,
-			Name:     name,
-			Slug:     slug,
-			Primary:  tc.TeamID == primaryTeamID,
-			LastSync: sync,
-			Path:     tc.Path,
-		}
-
-		if entry.Primary {
-			primary = append(primary, entry)
-		} else {
-			others = append(others, entry)
-		}
-	}
-
-	return append(primary, others...)
+	return entries
 }
