@@ -14,7 +14,7 @@ type SyncMetrics struct {
 	pullSuccessCount   atomic.Int64
 	pullFailureCount   atomic.Int64
 	conflictCount      atomic.Int64
-	forcePushCount     atomic.Int64
+	divergenceCount    atomic.Int64
 	teamSyncCount      atomic.Int64
 	teamSyncErrorCount atomic.Int64
 
@@ -59,9 +59,9 @@ func (m *SyncMetrics) RecordConflict() {
 	m.lastConflict.Store(time.Now().UnixNano())
 }
 
-// RecordForcePush records a force push detection.
-func (m *SyncMetrics) RecordForcePush() {
-	m.forcePushCount.Add(1)
+// RecordDivergence records a branch divergence detection.
+func (m *SyncMetrics) RecordDivergence() {
+	m.divergenceCount.Add(1)
 }
 
 // RecordTeamSync records a successful team context sync.
@@ -79,7 +79,7 @@ type SyncMetricsSnapshot struct {
 	PullSuccessCount   int64         `json:"pull_success_count"`
 	PullFailureCount   int64         `json:"pull_failure_count"`
 	ConflictCount      int64         `json:"conflict_count"`
-	ForcePushCount     int64         `json:"force_push_count"`
+	DivergenceCount    int64         `json:"divergence_count"`
 	TeamSyncCount      int64         `json:"team_sync_count"`
 	TeamSyncErrorCount int64         `json:"team_sync_error_count"`
 	LastPullSuccess    time.Time     `json:"last_pull_success,omitempty"`
@@ -96,7 +96,7 @@ func (m *SyncMetrics) Snapshot() SyncMetricsSnapshot {
 		PullSuccessCount:   m.pullSuccessCount.Load(),
 		PullFailureCount:   m.pullFailureCount.Load(),
 		ConflictCount:      m.conflictCount.Load(),
-		ForcePushCount:     m.forcePushCount.Load(),
+		DivergenceCount:    m.divergenceCount.Load(),
 		TeamSyncCount:      m.teamSyncCount.Load(),
 		TeamSyncErrorCount: m.teamSyncErrorCount.Load(),
 		LastPullSuccess:    timeFromNano(m.lastPullSuccess.Load()),

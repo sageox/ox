@@ -389,7 +389,7 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 					Type:            IssueTypeMergeConflict,
 					Severity:        SeverityError,
 					Repo:            repoName,
-					Summary:         fmt.Sprintf("Team context %s has merge conflicts. Run 'ox doctor --fix' to re-clone.", repoName),
+					Summary:         fmt.Sprintf("Team context %s has merge conflicts. Run 'ox doctor --fix' to resolve.", repoName),
 					RequiresConfirm: true, // merge resolution needs human approval
 				})
 			}

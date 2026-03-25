@@ -47,6 +47,26 @@ func TestSanitizeOutput(t *testing.T) {
 			input:    "https://user:password@host.com/repo.git",
 			expected: "https://user:password@host.com/repo.git",
 		},
+		{
+			name:     "keychain noise only",
+			input:    "fatal: failed to store: -25300\n",
+			expected: "",
+		},
+		{
+			name:     "keychain noise mixed with real errors",
+			input:    "fatal: failed to store: -25300\nfatal: repository not found\n",
+			expected: "fatal: repository not found",
+		},
+		{
+			name:     "keychain noise surrounded by real output",
+			input:    "Enumerating objects: 5, done.\nfatal: failed to store: -25300\nWriting objects: 100%\n",
+			expected: "Enumerating objects: 5, done.\nWriting objects: 100%",
+		},
+		{
+			name:     "credential and keychain noise both cleaned",
+			input:    "fatal: failed to store: -25300\nhttps://oauth2:glpat-xxxx@gitlab.com/org/repo.git\n",
+			expected: "https://oauth2:***@gitlab.com/org/repo.git",
+		},
 	}
 
 	for _, tt := range tests {

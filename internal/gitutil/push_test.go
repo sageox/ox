@@ -463,3 +463,36 @@ func containsImpl(s, substr string) bool {
 	}
 	return false
 }
+
+// TestPushWithRetry_CredentialNoiseWithDivergence is a regression test for the
+// bug fixed in a18cd6c: push output containing both "non-fast-forward" and
+// macOS Keychain "failed to store: -25300" must take the rebase path, not the
+// LFS force-push path.
+func TestPushWithRetry_CredentialNoiseWithDivergence(t *testing.T) {
+	repo, bare := initBareRemoteRepo(t)
+
+	// create a second clone and push a commit to create divergence
+	second := filepath.Join(t.TempDir(), "second")
+	run(t, "", "git", "clone", "--quiet", bare, second)
+	run(t, second, "git", "config", "user.email", "test@test.local")
+	run(t, second, "git", "config", "user.name", "Test")
+	addCommit(t, second, "remote.txt", "from-second", "second commit")
+	run(t, second, "git", "push", "--quiet")
+
+	// first repo has a local commit (now diverged from remote)
+	addCommit(t, repo, "local.txt", "from-first", "first commit")
+
+	// push should hit non-fast-forward, rebase, and succeed.
+	// AllowForceOnLFS is true to verify that the LFS force-push path is NOT
+	// taken when the real issue is non-fast-forward (even with credential noise).
+	err := PushWithRetry(context.Background(), repo, PushOpts{
+		MaxRetries:      3,
+		OpTimeout:       10 * time.Second,
+		AllowForceOnLFS: true,
+	})
+	assert.NoError(t, err, "should succeed via rebase, not LFS force-push")
+
+	// verify both files present (rebase succeeded, not force-push)
+	assert.FileExists(t, filepath.Join(repo, "remote.txt"))
+	assert.FileExists(t, filepath.Join(repo, "local.txt"))
+}

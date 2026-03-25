@@ -308,7 +308,39 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 }
 
 // fixLedgerBranchDiverged reconciles a diverged ledger by rebasing then pushing.
+// The daemon proactively rebases diverged branches, so by the time a user runs
+// ox doctor --fix the divergence may already be resolved. Re-check before
+// attempting the heavier PushWithRetry path.
 func fixLedgerBranchDiverged(ledgerPath string, aheadCount, behindCount int) checkResult {
+	// re-fetch so we compare against the latest remote state
+	fetchCmd := exec.Command("git", "-C", ledgerPath, "fetch", "--quiet")
+	if err := fetchCmd.Run(); err != nil {
+		slog.Debug("fetch before diverged re-check failed", "error", err)
+	}
+
+	// re-check ahead/behind — daemon may have already reconciled
+	revCmd := exec.Command("git", "-C", ledgerPath, "rev-list", "--left-right", "--count", "origin/main...HEAD")
+	if revOut, err := revCmd.Output(); err == nil {
+		parts := strings.Fields(strings.TrimSpace(string(revOut)))
+		if len(parts) == 2 {
+			behind, ahead := 0, 0
+			fmt.Sscanf(parts[0], "%d", &behind)
+			fmt.Sscanf(parts[1], "%d", &ahead)
+
+			switch {
+			case ahead == 0 && behind == 0:
+				return PassedCheck("Ledger branch status", "already reconciled (synced by daemon)")
+			case ahead > 0 && behind == 0:
+				return fixLedgerBranchAhead(ledgerPath, ahead)
+			case ahead == 0 && behind > 0:
+				return fixLedgerBranchBehind(ledgerPath, behind)
+			}
+			// still diverged — update counts and fall through
+			aheadCount = ahead
+			behindCount = behind
+		}
+	}
+
 	// PushWithRetry handles pull --rebase + auto-resolve + push in one call
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledgerAutoResolvePrefixes,

@@ -259,7 +259,7 @@ func TestSyncScheduler_SyncWithProgress_PropagatesPullError(t *testing.T) {
 
 	err := scheduler.SyncWithProgress(nil)
 	assert.Error(t, err, "SyncWithProgress must propagate git pull failures")
-	// could be "pull failed" or "diverged" depending on detectForcePush
+	// could be "pull failed" or "diverged" depending on detectDivergedBranches
 	assert.Contains(t, err.Error(), "ledger")
 }
 

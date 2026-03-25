@@ -733,7 +733,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			// hint for missing repo
 			if !status.Exists {
 				b.WriteString(statusLabelStyle.Render(""))
-				b.WriteString(statusMutedStyle.Render("Run 'ox doctor --fix' to re-clone"))
+				b.WriteString(statusMutedStyle.Render("Run 'ox doctor --fix' to restore"))
 				b.WriteString("\n")
 			}
 		}

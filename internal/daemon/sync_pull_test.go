@@ -97,7 +97,7 @@ func pushFromSeparateClone(t *testing.T, bareDir, filename, content string) {
 	gitCmd(t, tmpClone, "push", "origin", "HEAD")
 }
 
-func TestDetectForcePush_NormalPush(t *testing.T) {
+func TestDetectDivergedBranches_NormalPush(t *testing.T) {
 	bareDir, cloneDir := setupBareAndClone(t)
 
 	// push a normal commit from a separate clone
@@ -107,11 +107,11 @@ func TestDetectForcePush_NormalPush(t *testing.T) {
 	gitCmd(t, cloneDir, "fetch", "origin")
 
 	s := newPullTestScheduler(t, cloneDir)
-	assert.False(t, s.detectForcePush(context.Background()),
+	assert.False(t, s.detectDivergedBranches(context.Background()),
 		"normal fast-forward should not be detected as force push")
 }
 
-func TestDetectForcePush_ForcePush(t *testing.T) {
+func TestDetectDivergedBranches_Diverged(t *testing.T) {
 	bareDir, cloneDir := setupBareAndClone(t)
 
 	// make a local commit
@@ -133,11 +133,11 @@ func TestDetectForcePush_ForcePush(t *testing.T) {
 	gitCmd(t, cloneDir, "fetch", "origin")
 
 	s := newPullTestScheduler(t, cloneDir)
-	assert.True(t, s.detectForcePush(context.Background()),
+	assert.True(t, s.detectDivergedBranches(context.Background()),
 		"diverged branches should be detected as force push")
 }
 
-func TestDetectForcePush_NoRemote(t *testing.T) {
+func TestDetectDivergedBranches_NoRemote(t *testing.T) {
 	dir := t.TempDir()
 	gitCmd(t, dir, "init")
 	gitCmd(t, dir, "config", "user.name", "test")
@@ -147,7 +147,7 @@ func TestDetectForcePush_NoRemote(t *testing.T) {
 	gitCmd(t, dir, "commit", "-m", "init")
 
 	s := newPullTestScheduler(t, dir)
-	assert.False(t, s.detectForcePush(context.Background()),
+	assert.False(t, s.detectDivergedBranches(context.Background()),
 		"repo with no remote should return false gracefully")
 }
 
@@ -215,6 +215,65 @@ func TestDoPull_RebaseInProgress_Skips(t *testing.T) {
 
 	err := s.doPull(context.Background(), nil, false)
 	assert.NoError(t, err, "doPull should skip silently when rebase is in progress")
+}
+
+func TestDoPull_DivergedLedger_RebasesSuccessfully(t *testing.T) {
+	bareDir, cloneDir := setupBareAndClone(t)
+
+	// create a local commit (simulates CLI session upload)
+	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "local-session.txt"), []byte("session data"), 0o644))
+	gitCmd(t, cloneDir, "add", "local-session.txt")
+	gitCmd(t, cloneDir, "commit", "-m", "local session")
+
+	// push a different file from a separate clone (simulates cloud/github sync)
+	pushFromSeparateClone(t, bareDir, "remote-data.txt", "github sync data")
+
+	s := newPullTestScheduler(t, cloneDir)
+
+	err := s.doPull(context.Background(), nil, true)
+	assert.NoError(t, err, "doPull should succeed by rebasing diverged branches")
+
+	// verify both files exist (rebase landed both)
+	assert.FileExists(t, filepath.Join(cloneDir, "local-session.txt"))
+	assert.FileExists(t, filepath.Join(cloneDir, "remote-data.txt"))
+
+	// verify no diverged or merge conflict issue was set
+	for _, issue := range s.issues.GetIssues() {
+		assert.NotEqual(t, IssueTypeDiverged, issue.Type,
+			"no diverged issue should be set after successful rebase")
+		assert.NotEqual(t, IssueTypeMergeConflict, issue.Type,
+			"no merge conflict issue should be set after clean rebase")
+	}
+}
+
+func TestDoPull_DivergedLedger_ConflictInSafePath_AutoResolves(t *testing.T) {
+	bareDir, cloneDir := setupBareAndClone(t)
+
+	// local commit: modify a file under data/github/ (safe auto-resolve path)
+	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, "data", "github"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "data", "github", "prs.json"), []byte(`{"local":true}`), 0o644))
+	gitCmd(t, cloneDir, "add", "data/github/prs.json")
+	gitCmd(t, cloneDir, "commit", "-m", "local github data")
+
+	// push conflicting change from separate clone
+	tmpClone := filepath.Join(t.TempDir(), "conflict-clone")
+	gitCmd(t, t.TempDir(), "clone", bareDir, tmpClone)
+	gitCmd(t, tmpClone, "config", "user.name", "test")
+	gitCmd(t, tmpClone, "config", "user.email", "test@test.com")
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpClone, "data", "github"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "data", "github", "prs.json"), []byte(`{"remote":true}`), 0o644))
+	gitCmd(t, tmpClone, "add", "data/github/prs.json")
+	gitCmd(t, tmpClone, "commit", "-m", "remote github data")
+	gitCmd(t, tmpClone, "push", "origin", "HEAD")
+
+	s := newPullTestScheduler(t, cloneDir)
+
+	err := s.doPull(context.Background(), nil, true)
+	assert.NoError(t, err, "doPull should auto-resolve conflict in data/github/")
+
+	// verify no issues set
+	issues := s.issues.GetIssues()
+	assert.Empty(t, issues, "no issues should remain after auto-resolve")
 }
 
 func TestDoPull_SuccessfulPull(t *testing.T) {

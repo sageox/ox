@@ -979,9 +979,9 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		// detect diverged branches (local and remote both have new commits).
 		// this is normal when CLI commits sessions locally while cloud pushes
 		// github sync data. rebase handles it — log for visibility but proceed.
-		if s.detectForcePush(ctx) {
+		if s.detectDivergedBranches(ctx) {
 			s.logger.Info("ledger branches diverged, rebasing to reconcile")
-			s.metrics.RecordForcePush()
+			s.metrics.RecordDivergence()
 		}
 
 		if progress != nil {
@@ -1137,9 +1137,9 @@ func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string
 	}
 }
 
-// detectForcePush checks if local and remote have diverged (force push scenario).
-func (s *SyncScheduler) detectForcePush(ctx context.Context) bool {
-	// check if branches have diverged
+// detectDivergedBranches checks if local and remote have both progressed independently.
+func (s *SyncScheduler) detectDivergedBranches(ctx context.Context) bool {
+	// check if local and remote branches have both progressed independently
 	cmd := exec.CommandContext(ctx, "git", "-C", s.config.LedgerPath,
 		"rev-list", "--left-right", "--count", "origin/main...HEAD")
 	output, err := cmd.Output()
