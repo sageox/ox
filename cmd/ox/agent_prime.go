@@ -1003,6 +1003,12 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 		Command: "ox status",
 	})
 
+	// team listing — always available on initialized project
+	cmds = append(cmds, intentCommand{
+		Intent:  "list teams, show my teams, what teams do I belong to",
+		Command: "ox teams",
+	})
+
 	// session history — only when ledger is provisioned
 	if ledger != nil && ledger.Exists {
 		cmds = append(cmds, intentCommand{

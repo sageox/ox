@@ -235,7 +235,8 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 			}
 			sb.WriteString(fmt.Sprintf("| %s | %s |\n", t.Slug, age))
 		}
-		sb.WriteString("\nRead: `ox agent team-ctx <slug>`\n")
+		sb.WriteString("\nList all: `ox teams`\n")
+		sb.WriteString("Read: `ox agent team-ctx <slug>`\n")
 		sb.WriteString("</other-teams>\n")
 	}
 
