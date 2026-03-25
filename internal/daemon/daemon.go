@@ -594,18 +594,16 @@ func (d *Daemon) initComponents() time.Duration {
 	d.issues = NewIssueTracker()
 
 	// whisper store for persistent agent signal delivery
-	if config.FeatureWhisperEnabled() {
-		repoID := config.GetRepoID(d.config.ProjectRoot)
-		if repoID != "" && projectEndpoint != "" {
-			whisperDBPath := filepath.Join(paths.WhisperDBDir(repoID, projectEndpoint), "whisper.db")
-			ledgerWhisperStore, err := whisperstore.Open(whisperDBPath)
-			if err != nil {
-				d.logger.Warn("failed to open whisper store", "error", err)
-			} else {
-				d.whisperRegistry = NewWhisperRegistry(ledgerWhisperStore, d.logger)
-				d.whisperRegistry.Prune(24 * time.Hour)
-				d.whisperRegistry.EnforceMaxSize(10 * 1024 * 1024) // 10MB
-			}
+	repoID := config.GetRepoID(d.config.ProjectRoot)
+	if repoID != "" && projectEndpoint != "" {
+		whisperDBPath := filepath.Join(paths.WhisperDBDir(repoID, projectEndpoint), "whisper.db")
+		ledgerWhisperStore, err := whisperstore.Open(whisperDBPath)
+		if err != nil {
+			d.logger.Warn("failed to open whisper store", "error", err)
+		} else {
+			d.whisperRegistry = NewWhisperRegistry(ledgerWhisperStore, d.logger)
+			d.whisperRegistry.Prune(24 * time.Hour)
+			d.whisperRegistry.EnforceMaxSize(10 * 1024 * 1024) // 10MB
 		}
 	}
 
@@ -669,6 +667,7 @@ func (d *Daemon) initComponents() time.Duration {
 		sfh := agentwork.NewSessionFinalizeHandler(d.logger)
 		sfh.SetPIDLookup(d.heartbeat.GetAgentPID)
 		sfh.SetLedgerMu(d.scheduler.LedgerMu())
+		sfh.SetProjectRoot(d.config.ProjectRoot)
 		awCfg := configLoader()
 		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
 		d.agentWorker.RegisterHandler(sfh)
@@ -698,8 +697,10 @@ func (d *Daemon) initComponents() time.Duration {
 	d.scheduler.SetIssueTracker(d.issues)
 	if d.whisperRegistry != nil {
 		d.scheduler.SetWhisperRegistry(d.whisperRegistry)
-		murmurRelay := NewMurmurRelay(d.whisperRegistry, d.logger)
-		d.scheduler.SetMurmurRelay(murmurRelay)
+		if config.FeatureMurmurEnabled() {
+			murmurRelay := NewMurmurRelay(d.whisperRegistry, d.logger)
+			d.scheduler.SetMurmurRelay(murmurRelay)
+		}
 	}
 	if d.codedb != nil {
 		d.scheduler.SetCodeDBManager(d.codedb)

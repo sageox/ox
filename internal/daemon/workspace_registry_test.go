@@ -489,15 +489,15 @@ func TestExponentialBackoff_Cap(t *testing.T) {
 		failures int
 		want     time.Duration
 	}{
-		{0, base},           // 1m (base)
-		{1, base},           // 1m (1 << 0 = 1)
-		{2, 2 * base},       // 2m (1 << 1 = 2)
-		{3, 4 * base},       // 4m
-		{4, 8 * base},       // 8m
-		{5, 16 * base},      // 16m
-		{6, maxBackoff},     // 32m → capped to 30m
-		{10, maxBackoff},    // capped
-		{100, maxBackoff},   // very high, still capped
+		{0, base},         // 1m (base)
+		{1, base},         // 1m (1 << 0 = 1)
+		{2, 2 * base},     // 2m (1 << 1 = 2)
+		{3, 4 * base},     // 4m
+		{4, 8 * base},     // 8m
+		{5, 16 * base},    // 16m
+		{6, maxBackoff},   // 32m → capped to 30m
+		{10, maxBackoff},  // capped
+		{100, maxBackoff}, // very high, still capped
 	}
 	for _, tt := range tests {
 		got := exponentialBackoff(tt.failures, base, maxBackoff)

@@ -358,6 +358,96 @@ func TestPushWithRetry_403FailsFastWithGuidance(t *testing.T) {
 	}
 }
 
+func TestIsLFSPushError(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{"LFS objects missing", "remote: LFS objects are missing", true},
+		{"missing or corrupt", "error: missing or corrupt local objects", true},
+		{"failed to store", "error: failed to store blob", true},
+		{"LFS upload missing combo", "LFS upload failed: missing objects", true},
+		{"normal push error", "fatal: unable to access: connection refused", false},
+		{"non-fast-forward", "rejected: non-fast-forward", false},
+		{"empty string", "", false},
+		{"partial LFS no missing", "LFS upload completed", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsLFSPushError(tt.output)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestPushWithRetry_AutoResolveConflicts(t *testing.T) {
+	repo, bare := initBareRemoteRepo(t)
+
+	// create a second clone
+	second := filepath.Join(t.TempDir(), "second")
+	run(t, "", "git", "clone", "--quiet", bare, second)
+	run(t, second, "git", "config", "user.email", "test@test.local")
+	run(t, second, "git", "config", "user.name", "Test")
+
+	// both clones modify the same file under data/github/ prefix
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "data", "github"), 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(second, "data", "github"), 0755))
+
+	// second clone pushes first
+	require.NoError(t, os.WriteFile(filepath.Join(second, "data", "github", "prs.json"),
+		[]byte(`{"count":1}`), 0644))
+	run(t, second, "git", "add", "data/github/prs.json")
+	run(t, second, "git", "commit", "-m", "second: add prs.json", "--no-verify", "--quiet")
+	run(t, second, "git", "push", "--quiet")
+
+	// first clone has a conflicting change to the same file
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "data", "github", "prs.json"),
+		[]byte(`{"count":2}`), 0644))
+	run(t, repo, "git", "add", "data/github/prs.json")
+	run(t, repo, "git", "commit", "-m", "first: add prs.json", "--no-verify", "--quiet")
+
+	// push with auto-resolve for data/github/ prefix
+	err := PushWithRetry(context.Background(), repo, PushOpts{
+		MaxRetries:          3,
+		OpTimeout:           10 * time.Second,
+		AutoResolvePrefixes: []string{"data/github/"},
+	})
+	assert.NoError(t, err, "should auto-resolve conflict in data/github/ path")
+
+	// verify file exists in repo (content is accept-theirs: "count":1 from remote)
+	assert.FileExists(t, filepath.Join(repo, "data", "github", "prs.json"))
+}
+
+func TestPushWithRetry_RebaseInProgressAborted(t *testing.T) {
+	repo, bare := initBareRemoteRepo(t)
+
+	// create divergence
+	second := filepath.Join(t.TempDir(), "second")
+	run(t, "", "git", "clone", "--quiet", bare, second)
+	run(t, second, "git", "config", "user.email", "test@test.local")
+	run(t, second, "git", "config", "user.name", "Test")
+	addCommit(t, second, "remote.txt", "remote", "remote commit")
+	run(t, second, "git", "push", "--quiet")
+
+	// local commit
+	addCommit(t, repo, "local.txt", "local", "local commit")
+
+	// simulate a broken rebase state — pre-flight IsSafeForGitOps should detect this
+	rebaseMergeDir := filepath.Join(repo, ".git", "rebase-merge")
+	require.NoError(t, os.MkdirAll(rebaseMergeDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(rebaseMergeDir, "head-name"), []byte("refs/heads/main"), 0644))
+
+	// PushWithRetry should reject with a clear error (pre-flight guard)
+	err := PushWithRetry(context.Background(), repo, PushOpts{
+		MaxRetries: 3,
+		OpTimeout:  10 * time.Second,
+	})
+	assert.Error(t, err, "should fail when rebase is already in progress")
+	assert.Contains(t, err.Error(), "broken rebase state")
+}
+
 // contains mirrors strings.Contains for test clarity.
 func contains(s, substr string) bool {
 	return len(substr) > 0 && len(s) >= len(substr) && containsImpl(s, substr)

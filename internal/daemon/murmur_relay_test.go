@@ -92,6 +92,40 @@ func TestMurmurRelaySelfAuthoredFiltered(t *testing.T) {
 	}
 }
 
+func TestMurmurRelayEmptyAgentIDRelayed(t *testing.T) {
+	relay, registry, _ := newTestRelay(t)
+	baseDir := t.TempDir()
+
+	now := time.Now().UTC()
+	writeMurmurAt(t, baseDir, ledger.MurmurFile{
+		ID:         "murmur-no-agent",
+		Timestamp:  now,
+		AgentID:    "", // empty AgentID bypasses self-filter
+		Topic:      "announcement",
+		Importance: "normal",
+		Content:    "system-level murmur with no agent",
+	})
+
+	// even with local agent IDs set, empty AgentID murmurs should be relayed
+	relay.SetLocalAgentIDs([]string{"local-agent-1", "local-agent-2"})
+
+	count := relay.RelayFromPath(baseDir, "ledger")
+	if count != 1 {
+		t.Fatalf("expected 1 relayed (empty AgentID bypasses self-filter), got %d", count)
+	}
+
+	entries, err := registry.GetWhispers("test-agent", whisperstore.AttentionAll, nil)
+	if err != nil {
+		t.Fatalf("get whispers: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 whisper entry, got %d", len(entries))
+	}
+	if entries[0].AgentID != "" {
+		t.Errorf("expected empty AgentID, got %s", entries[0].AgentID)
+	}
+}
+
 func TestMurmurRelayDedupAcrossCalls(t *testing.T) {
 	relay, _, _ := newTestRelay(t)
 	baseDir := t.TempDir()

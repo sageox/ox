@@ -2,9 +2,11 @@ package auth
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -809,4 +811,115 @@ func TestLoadAuthStore_TruncatedJSON(t *testing.T) {
 	_, err = client.loadAuthStore()
 	require.Error(t, err, "truncated JSON should return error")
 	assert.Contains(t, err.Error(), "failed to parse auth file")
+}
+
+// --- Concurrent write tests ---
+// These verify that concurrent SaveTokenForEndpoint calls don't corrupt the auth store.
+// The underlying implementation uses fileutil.AtomicWriteJSON (write-tmp + rename),
+// so concurrent writers should not produce truncated/malformed JSON.
+
+func TestConcurrentSaveToken_NoCorruption(t *testing.T) {
+	t.Parallel()
+
+	client := NewTestClient(t)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			ep := fmt.Sprintf("https://endpoint-%d.example.com", idx)
+			token := &StoredToken{
+				AccessToken:  fmt.Sprintf("token-%d", idx),
+				RefreshToken: "refresh",
+				ExpiresAt:    time.Now().Add(time.Hour),
+			}
+			_ = client.SaveTokenForEndpoint(ep, token)
+		}(i)
+	}
+	wg.Wait()
+
+	// the file should still be valid JSON — verify by loading
+	store, err := client.loadAuthStore()
+	require.NoError(t, err, "auth store should be valid JSON after concurrent writes")
+	require.NotNil(t, store)
+	require.NotNil(t, store.Tokens)
+
+	// verify the raw file is valid JSON
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
+	data, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+	assert.True(t, json.Valid(data), "auth file should be valid JSON after concurrent writes")
+}
+
+func TestConcurrentSaveAndGetToken_NoCorruption(t *testing.T) {
+	t.Parallel()
+
+	client := NewTestClient(t)
+
+	// seed with an initial token
+	initialToken := &StoredToken{
+		AccessToken:  "initial",
+		RefreshToken: "refresh",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+	require.NoError(t, client.SaveTokenForEndpoint("https://sageox.ai", initialToken))
+
+	var wg sync.WaitGroup
+	// concurrent readers + writers
+	for i := 0; i < 10; i++ {
+		wg.Add(2)
+		go func(idx int) {
+			defer wg.Done()
+			token := &StoredToken{
+				AccessToken:  fmt.Sprintf("writer-%d", idx),
+				RefreshToken: "refresh",
+				ExpiresAt:    time.Now().Add(time.Hour),
+			}
+			_ = client.SaveTokenForEndpoint("https://sageox.ai", token)
+		}(i)
+		go func() {
+			defer wg.Done()
+			// readers should never get an error (file may not exist briefly during rename)
+			tok, err := client.GetTokenForEndpoint("https://sageox.ai")
+			if err == nil && tok != nil {
+				assert.NotEmpty(t, tok.AccessToken)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// final state should be consistent
+	store, err := client.loadAuthStore()
+	require.NoError(t, err)
+	require.NotNil(t, store.Tokens["https://sageox.ai"])
+}
+
+func TestConcurrentSaveToken_SameEndpoint(t *testing.T) {
+	t.Parallel()
+
+	client := NewTestClient(t)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			token := &StoredToken{
+				AccessToken:  fmt.Sprintf("token-%d", idx),
+				RefreshToken: "refresh",
+				ExpiresAt:    time.Now().Add(time.Duration(idx) * time.Minute),
+			}
+			_ = client.SaveTokenForEndpoint("https://sageox.ai", token)
+		}(i)
+	}
+	wg.Wait()
+
+	// exactly one token should remain at the endpoint
+	store, err := client.loadAuthStore()
+	require.NoError(t, err)
+	token := store.Tokens["https://sageox.ai"]
+	require.NotNil(t, token, "token should exist after concurrent writes to same endpoint")
+	assert.Contains(t, token.AccessToken, "token-", "should be one of the written tokens")
 }

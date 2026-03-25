@@ -12,27 +12,27 @@ import (
 //
 // Lifecycle:
 //
-//	                 ┌──────────┐
-//	                 │ recording│
-//	                 └────┬─────┘
-//	           ┌──────────┼──────────┐
-//	           ▼          ▼          ▼
-//	      ┌────────┐ ┌────────┐ ┌────────┐
-//	      │ paused │ │ ghost  │ │ orphan │
-//	      └───┬────┘ └───┬────┘ └───┬────┘
-//	          │       (cleanup)  (finalize)
-//	          ▼                      │
-//	      ┌────────┐                 │
-//	      │ local  │◄────────────────┘
-//	      └───┬────┘
-//	          ▼
-//	      ┌──────────┐
-//	      │ uploaded  │
-//	      └──────────┘
+//	           ┌──────────┐
+//	           │ recording│
+//	           └────┬─────┘
+//	     ┌──────────┼──────────┐
+//	     ▼          ▼          ▼
+//	┌────────┐ ┌────────┐ ┌────────┐
+//	│ paused │ │ ghost  │ │ orphan │
+//	└───┬────┘ └───┬────┘ └───┬────┘
+//	    │       (cleanup)  (finalize)
+//	    ▼                      │
+//	┌────────┐                 │
+//	│ local  │◄────────────────┘
+//	└───┬────┘
+//	    ▼
+//	┌──────────┐
+//	│ uploaded  │
+//	└──────────┘
 //
-//	      ┌──────────┐
-//	      │ canceled  │  (terminal — data discarded)
-//	      └──────────┘
+//	┌──────────┐
+//	│ canceled  │  (terminal — data discarded)
+//	└──────────┘
 type SessionStatus string
 
 const (
@@ -42,7 +42,7 @@ const (
 	StatusOrphan    SessionStatus = "orphan"    // parent dead, has data — needs recovery/finalization
 	StatusLocal     SessionStatus = "local"     // exists locally, not uploaded (may have been recovered from orphan)
 	StatusUploaded  SessionStatus = "uploaded"  // committed to ledger
-	StatusCanceled SessionStatus = "canceled" // user explicitly discarded session (terminal — data deleted)
+	StatusCanceled  SessionStatus = "canceled"  // user explicitly discarded session (terminal — data deleted)
 )
 
 // ghostHeuristicAge is the minimum age before a session with no PID is labeled ghost.
@@ -52,7 +52,7 @@ const ghostHeuristicAge = 5 * time.Minute
 // StopReason constants for how a session ended.
 const (
 	StopReasonStopped   = "stopped"   // user explicitly stopped via /ox-session-stop
-	StopReasonCanceled = "canceled" // user explicitly canceled via /ox-session-abort
+	StopReasonCanceled  = "canceled"  // user explicitly canceled via /ox-session-abort
 	StopReasonRecovered = "recovered" // recovered from orphan by daemon anti-entropy
 )
 
@@ -169,4 +169,3 @@ func RawJSONLHasData(sessionPath string) bool {
 	}
 	return info.Size() > 0
 }
-

@@ -258,7 +258,7 @@ type agentGuidance struct {
 
 // UserNotice is a notice that agents must relay to the user (upgrade, restart, support).
 type UserNotice struct {
-	Type    string `json:"type"`    // "upgrade", "restart", "support"
+	Type    string `json:"type"` // "upgrade", "restart", "support"
 	Message string `json:"message"`
 }
 

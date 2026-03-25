@@ -274,4 +274,3 @@ func TestIndexGitHubData_BackwardCompatOldJSON(t *testing.T) {
 		t.Errorf("expected 0 commits from old JSON, got %d", count)
 	}
 }
-

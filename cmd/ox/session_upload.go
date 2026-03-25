@@ -57,101 +57,19 @@ func checkUploadAccess(projectRoot string) error {
 }
 
 // uploadSessionLFS uploads session content files to LFS blob storage
-// and returns the file→OID manifest for inclusion in meta.json.
-//
-// Flow:
-//  1. Read all content files from session dir
-//  2. Compute SHA256 OIDs + sizes
-//  3. Call LFS batch API to get upload actions
-//  4. Upload all blobs in parallel
-//  5. Return filename→FileRef map for meta.json
+// and returns the file->FileRef manifest for inclusion in meta.json.
+// Delegates to lfs.UploadSessionFiles after CLI-specific access checks.
 func uploadSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, error) {
 	if err := checkUploadAccess(projectRoot); err != nil {
 		return nil, err
 	}
 
-	// content file patterns to upload (everything except meta.json)
-	contentFiles := []string{
-		ledgerFileRaw,
-		ledgerFileSummaryMD,
-		ledgerFileSessionMD,
-		ledgerFileHTML,
-		ledgerFilePlan,
-	}
-
-	// read all content files that exist
-	files := make(map[string][]byte)         // filename -> content
-	fileRefs := make(map[string]lfs.FileRef) // filename -> ref
-	var batchObjects []lfs.BatchObject
-
-	for _, name := range contentFiles {
-		filePath := filepath.Join(sessionPath, name)
-
-		// if file is already an LFS pointer, extract its ref directly —
-		// don't re-upload the pointer text as content
-		if lfs.IsPointerFile(filePath) {
-			ref, err := lfs.ReadPointerFile(filePath)
-			if err != nil {
-				return nil, fmt.Errorf("read pointer %s: %w", name, err)
-			}
-			fileRefs[name] = ref
-			continue
-		}
-
-		content, err := os.ReadFile(filePath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue // skip files that don't exist
-			}
-			return nil, fmt.Errorf("read %s: %w", name, err)
-		}
-
-		ref := lfs.NewFileRef(content)
-		fileRefs[name] = ref
-		files[ref.BareOID()] = content
-		batchObjects = append(batchObjects, lfs.BatchObject{
-			OID:  ref.BareOID(),
-			Size: ref.Size,
-		})
-	}
-
-	if len(batchObjects) == 0 {
-		return fileRefs, nil // nothing to upload
-	}
-
-	slog.Info("uploading session to LFS", "path", sessionPath, "files", len(batchObjects))
-
-	// get LFS client
 	client, err := getLFSClient(projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("create LFS client: %w", err)
 	}
 
-	// request upload URLs from LFS batch API
-	resp, err := client.BatchUpload(batchObjects)
-	if err != nil {
-		slog.Info("LFS batch API failed", "error", err, "path", sessionPath, "files", len(batchObjects))
-		return nil, fmt.Errorf("LFS batch upload: %w", err)
-	}
-
-	// upload blobs in parallel (up to 4 concurrent)
-	results := lfs.UploadAll(resp, files, 4)
-
-	// collect all errors so devs can see everything that failed
-	var uploadErrors []string
-	for _, r := range results {
-		if r.Error != nil {
-			slog.Info("LFS blob upload failed", "oid", r.OID, "error", r.Error)
-			uploadErrors = append(uploadErrors, fmt.Sprintf("OID %s: %s", r.OID, r.Error))
-		}
-	}
-	if len(uploadErrors) > 0 {
-		return nil, fmt.Errorf("LFS upload failed (%d/%d files):\n  %s",
-			len(uploadErrors), len(results), strings.Join(uploadErrors, "\n  "))
-	}
-
-	slog.Info("LFS upload complete", "path", sessionPath, "files", len(fileRefs))
-	return fileRefs, nil
+	return lfs.UploadSessionFiles(client, sessionPath, slog.Default())
 }
 
 // getLFSClient creates an LFS client using project credentials.
@@ -189,23 +107,9 @@ func getLFSClient(projectRoot string) (*lfs.Client, error) {
 	return lfs.NewClient(repoURL, creds.Username, creds.Token), nil
 }
 
-// ensureSessionsGitignore ensures the sessions/.gitignore exists in the ledger.
-// LFS pointer files and meta.json are committed to git; pointer files (~130 bytes)
-// reference uploaded LFS objects by OID to prevent garbage collection.
-// Overwrites legacy .gitignore that excluded content file extensions.
+// ensureSessionsGitignore delegates to lfs.EnsureSessionsGitignore.
 func ensureSessionsGitignore(sessionsDir string) error {
-	gitignorePath := filepath.Join(sessionsDir, ".gitignore")
-
-	newContent := "# LFS pointer files and meta.json are committed to git.\n" +
-		"# Content is stored in LFS; pointer files (~130 bytes) reference\n" +
-		"# uploaded objects by OID to prevent garbage collection.\n"
-
-	existing, _ := os.ReadFile(gitignorePath)
-	if string(existing) == newContent {
-		return nil // already up to date
-	}
-
-	return os.WriteFile(gitignorePath, []byte(newContent), 0644)
+	return lfs.EnsureSessionsGitignore(sessionsDir)
 }
 
 // commitAndPushLedger commits meta.json and .gitignore, then pushes to remote.

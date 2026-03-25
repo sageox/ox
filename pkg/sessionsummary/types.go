@@ -44,13 +44,13 @@ type SummarizeResponse struct {
 	AgentSummary *AgentSummary `json:"agent_summary,omitempty"`
 
 	// Session content
-	TopicsFound   []string         `json:"topics_found"`              // topics detected during session
-	FinalPlan     string           `json:"final_plan,omitempty"`      // final plan/architecture from session
-	Diagrams      []string         `json:"diagrams,omitempty"`        // extracted mermaid diagrams
-	ChapterTitles []string         `json:"chapter_titles,omitempty"`  // LLM-generated narrative chapter titles
-	Chapters      []ChapterSummary `json:"chapters,omitempty"`        // structured chapter data (computed from JSONL)
-	FilesChanged  []FileSummary    `json:"files_changed,omitempty"`   // files modified during session (computed from JSONL)
-	AhaMoments    []AhaMoment      `json:"aha_moments,omitempty"`     // pivotal moments of collaborative intelligence
+	TopicsFound    []string         `json:"topics_found"`              // topics detected during session
+	FinalPlan      string           `json:"final_plan,omitempty"`      // final plan/architecture from session
+	Diagrams       []string         `json:"diagrams,omitempty"`        // extracted mermaid diagrams
+	ChapterTitles  []string         `json:"chapter_titles,omitempty"`  // LLM-generated narrative chapter titles
+	Chapters       []ChapterSummary `json:"chapters,omitempty"`        // structured chapter data (computed from JSONL)
+	FilesChanged   []FileSummary    `json:"files_changed,omitempty"`   // files modified during session (computed from JSONL)
+	AhaMoments     []AhaMoment      `json:"aha_moments,omitempty"`     // pivotal moments of collaborative intelligence
 	SageoxInsights []SageoxInsight  `json:"sageox_insights,omitempty"` // moments where SageOx guidance provided value
 
 	// Quality gate

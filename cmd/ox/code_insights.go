@@ -83,6 +83,10 @@ var codeInsightsCmd = &cobra.Command{
 			return fmt.Errorf("no code index found — run 'ox code index' first")
 		}
 
+		if isCodeDBIndexing() {
+			return fmt.Errorf("code index is currently being built — insights unavailable until indexing completes. Run 'ox code status' to check progress")
+		}
+
 		db, err := codedb.Open(dataDir)
 		if err != nil {
 			return fmt.Errorf("open codedb: %w", err)

@@ -355,7 +355,6 @@ func TestProjectConfig_OrgTeamProject_Omitempty(t *testing.T) {
 	assert.True(t, exists, "expected update_frequency_hours to be present")
 }
 
-
 // TestSaveProjectConfig_NormalizesEndpoint tests that saving a config with a
 // prefixed endpoint normalizes it before writing to disk.
 func TestSaveProjectConfig_NormalizesEndpoint(t *testing.T) {
@@ -433,7 +432,6 @@ func TestSaveAndLoadProjectConfig_EndpointRoundTrip(t *testing.T) {
 	require.NoError(t, err, "second load failed")
 	assert.Equal(t, "https://sageox.ai", loaded2.Endpoint, "endpoint should be stable after round-trip")
 }
-
 
 func TestFindProjectRoot_OxProjectRootEnv(t *testing.T) {
 	t.Run("overrides cwd discovery", func(t *testing.T) {

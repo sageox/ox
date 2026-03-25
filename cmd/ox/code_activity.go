@@ -54,6 +54,10 @@ func runCodeActivity(cmd *cobra.Command, _ []string) error {
 	}
 	until := time.Now().UTC()
 
+	if isCodeDBIndexing() {
+		return fmt.Errorf("code index is currently being built — activity queries unavailable until indexing completes. Run 'ox code status' to check progress")
+	}
+
 	db, err := codedb.Open(dataDir)
 	if err != nil {
 		return fmt.Errorf("open codedb: %w", err)

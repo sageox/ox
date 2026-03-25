@@ -169,8 +169,8 @@ func TestHasSubstantiveEntries(t *testing.T) {
 	}{
 		{"empty file", "", false},
 		{"header only", `{"metadata":{"agent_id":"Ox1"}}` + "\n", false},
-		{"header plus entry", `{"metadata":{}}`+"\n"+`{"type":"user"}`+"\n", true},
-		{"multi-turn", `{"metadata":{}}`+"\n"+`{"type":"user"}`+"\n"+`{"type":"assistant"}`+"\n", true},
+		{"header plus entry", `{"metadata":{}}` + "\n" + `{"type":"user"}` + "\n", true},
+		{"multi-turn", `{"metadata":{}}` + "\n" + `{"type":"user"}` + "\n" + `{"type":"assistant"}` + "\n", true},
 		{"nonexistent", "", false}, // special case
 	}
 
@@ -195,8 +195,8 @@ func TestCountSubstantiveEntries(t *testing.T) {
 	}{
 		{"empty file", "", 0},
 		{"header only", `{"metadata":{}}` + "\n", 0},
-		{"header plus one", `{"metadata":{}}`+"\n"+`{"type":"user"}`+"\n", 1},
-		{"header plus three", `{"metadata":{}}`+"\n"+`{"type":"user"}`+"\n"+`{"type":"assistant"}`+"\n"+`{"entry_count":2}`+"\n", 3},
+		{"header plus one", `{"metadata":{}}` + "\n" + `{"type":"user"}` + "\n", 1},
+		{"header plus three", `{"metadata":{}}` + "\n" + `{"type":"user"}` + "\n" + `{"type":"assistant"}` + "\n" + `{"entry_count":2}` + "\n", 3},
 		{"nonexistent", "", 0},
 	}
 

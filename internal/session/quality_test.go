@@ -4,11 +4,11 @@ import "testing"
 
 func TestEvaluateQuality(t *testing.T) {
 	tests := []struct {
-		name      string
-		score     float64
-		upload    float64
-		discard   float64
-		want      QualityDisposition
+		name    string
+		score   float64
+		upload  float64
+		discard float64
+		want    QualityDisposition
 	}{
 		{"zero score defaults to upload", 0.0, 0.3, 0.1, QualityUpload},
 		{"negative score defaults to upload", -1.0, 0.3, 0.1, QualityUpload},

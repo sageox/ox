@@ -964,7 +964,6 @@ func TestHeartbeatHandler_CallerEviction(t *testing.T) {
 	}
 }
 
-
 func TestReadHeartbeatsFromPath_DirectoryPath(t *testing.T) {
 	dirPath := t.TempDir()
 	_, err := readHeartbeatsFromPath(dirPath)

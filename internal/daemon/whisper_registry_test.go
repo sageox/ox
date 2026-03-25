@@ -137,3 +137,24 @@ func TestWhisperRegistryUnknownScope(t *testing.T) {
 		t.Fatal("expected error for unknown scope")
 	}
 }
+
+func TestWhisperRegistryUnknownScopeRelayHandling(t *testing.T) {
+	ledger := openTestStore(t)
+	r := NewWhisperRegistry(ledger, nil)
+	defer r.Close()
+
+	// IsRelayed should return false for an unknown scope (nil store)
+	relayed, err := r.IsRelayed("murmur-unknown", "bogus-scope")
+	if err != nil {
+		t.Fatalf("IsRelayed with unknown scope should not error, got: %v", err)
+	}
+	if relayed {
+		t.Error("IsRelayed should return false for unknown scope")
+	}
+
+	// MarkRelayed should return nil for an unknown scope (nil store)
+	err = r.MarkRelayed("murmur-unknown", "bogus-scope")
+	if err != nil {
+		t.Fatalf("MarkRelayed with unknown scope should not error, got: %v", err)
+	}
+}

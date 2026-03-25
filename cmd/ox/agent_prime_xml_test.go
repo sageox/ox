@@ -19,13 +19,13 @@ func (failingWriter) Write([]byte) (int, error) {
 
 func TestOutputAgentPrimeXML_UserNotices(t *testing.T) {
 	tests := []struct {
-		name                   string
-		userNotices            []UserNotice
-		wantUserNoticesBlock   bool
-		wantNoticeTypes        []string
-		wantNoticeMessages     []string
-		wantNotInActions       []string // strings that should NOT appear in <immediate-actions>
-		wantInActions          []string // strings that should appear in <immediate-actions>
+		name                 string
+		userNotices          []UserNotice
+		wantUserNoticesBlock bool
+		wantNoticeTypes      []string
+		wantNoticeMessages   []string
+		wantNotInActions     []string // strings that should NOT appear in <immediate-actions>
+		wantInActions        []string // strings that should appear in <immediate-actions>
 	}{
 		{
 			name:                 "no notices omits user-notices block",
@@ -493,4 +493,3 @@ func TestOutputAgentPrimeXML_WriteError(t *testing.T) {
 		t.Fatal("expected write error, got nil")
 	}
 }
-

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/xml"
 	"fmt"
 	"io"
 	"os"
@@ -571,6 +572,8 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 
 // emitWhispers checks daemon for pending whisper entries.
 // Non-blocking: if daemon is unavailable, silently returns.
+// Uses AttentionNormal — agents receive critical + normal whispers,
+// but not ambient ones, to avoid flooding agent context.
 func emitWhispers(agentID string) {
 	client := daemon.NewClient() // 50ms timeout
 	resp, err := client.Whispers(agentID, "normal", nil)
@@ -594,8 +597,10 @@ func formatWhispers(w io.Writer, entries []whisperstore.WhisperEntry) bool {
 
 	fmt.Fprintln(w, "<new-context>")
 	for _, e := range entries {
-		fmt.Fprintf(w, "<entry importance=%q topic=%q source=%q>%s</entry>\n",
-			string(e.Importance), e.Topic, e.Source, e.Content)
+		fmt.Fprintf(w, "<entry importance=%q topic=%q source=%q>",
+			string(e.Importance), e.Topic, e.Source)
+		xml.EscapeText(w, []byte(e.Content))
+		fmt.Fprint(w, "</entry>\n")
 	}
 	fmt.Fprintln(w, "</new-context>")
 

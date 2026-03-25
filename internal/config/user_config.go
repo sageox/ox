@@ -269,16 +269,16 @@ func (c *AgentWorkerConfig) WithDefaults() *AgentWorkerConfig {
 
 // UserConfig holds user-level configuration from config.yaml
 type UserConfig struct {
-	DisplayName       string               `yaml:"display_name,omitempty"`
-	TipsEnabled       *bool                `yaml:"tips_enabled,omitempty"`
-	TelemetryEnabled  *bool                `yaml:"telemetry_enabled,omitempty"`
-	SessionTermsShown *bool                `yaml:"session_terms_shown,omitempty"`
-	Attribution       *Attribution         `yaml:"attribution,omitempty"`
-	Badge             *BadgeConfig         `yaml:"badge,omitempty"`
-	ContextGit        *ContextGitConfig    `yaml:"context_git,omitempty"`
-	Sessions          *SessionsConfig      `yaml:"sessions,omitempty"`
-	AgentWorker       *AgentWorkerConfig   `yaml:"agent_worker,omitempty"`
-	ViewFormat        string               `yaml:"view_format,omitempty"` // "web", "text", "json" (default: "web")
+	DisplayName       string             `yaml:"display_name,omitempty"`
+	TipsEnabled       *bool              `yaml:"tips_enabled,omitempty"`
+	TelemetryEnabled  *bool              `yaml:"telemetry_enabled,omitempty"`
+	SessionTermsShown *bool              `yaml:"session_terms_shown,omitempty"`
+	Attribution       *Attribution       `yaml:"attribution,omitempty"`
+	Badge             *BadgeConfig       `yaml:"badge,omitempty"`
+	ContextGit        *ContextGitConfig  `yaml:"context_git,omitempty"`
+	Sessions          *SessionsConfig    `yaml:"sessions,omitempty"`
+	AgentWorker       *AgentWorkerConfig `yaml:"agent_worker,omitempty"`
+	ViewFormat        string             `yaml:"view_format,omitempty"` // "web", "text", "json" (default: "web")
 }
 
 // BadgeConfig tracks badge suggestion state across all projects.

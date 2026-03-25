@@ -527,4 +527,3 @@ func TestGC_ValidateLedgerGCClone_MissingSessions(t *testing.T) {
 
 	assert.False(t, s.validateLedgerGCClone(dir))
 }
-

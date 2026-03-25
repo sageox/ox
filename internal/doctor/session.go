@@ -1310,7 +1310,6 @@ func (c *SessionPushCheck) countCommitsAhead(ledgerPath string) int {
 	return count
 }
 
-
 // ledgerPathFromProject derives the ledger path from a project root.
 // Returns empty string if project config cannot be loaded or has no repo ID.
 func ledgerPathFromProject(gitRoot string) string {

@@ -32,6 +32,17 @@ func resolveCodeDBDir(root string) string {
 	return paths.CodeDBDataDir(root)
 }
 
+// isCodeDBIndexing checks whether the daemon is actively indexing.
+// Bleve's BoltDB backend holds an exclusive file lock during writes,
+// so codedb.Open from the CLI would block until indexing finishes.
+//
+// Exposed as a variable so tests can override it.
+var isCodeDBIndexing = func() bool {
+	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	cs, err := client.CodeStatus()
+	return err == nil && cs.IndexingNow
+}
+
 var codeCmd = &cobra.Command{
 	Use:   "code",
 	Short: "Search code in this repo",
@@ -58,6 +69,10 @@ var codeSearchCmd = &cobra.Command{
 
 		query := strings.Join(args, " ")
 		dataDir := resolveCodeDBDir(root)
+
+		if isCodeDBIndexing() {
+			return fmt.Errorf("code index is currently being built — search is unavailable until indexing completes. Run 'ox code status' to check progress")
+		}
 
 		db, err := codedb.Open(dataDir)
 		if err != nil {
@@ -245,6 +260,10 @@ var codeSQLCmd = &cobra.Command{
 
 		dataDir := resolveCodeDBDir(root)
 
+		if isCodeDBIndexing() {
+			return fmt.Errorf("code index is currently being built — SQL queries unavailable until indexing completes")
+		}
+
 		db, err := codedb.Open(dataDir)
 		if err != nil {
 			return fmt.Errorf("open codedb: %w", err)
@@ -291,18 +310,22 @@ var codeStatusCmd = &cobra.Command{
 			syncInterval = ds.SyncIntervalRead
 		}
 
-		// query DB directly for counts (daemon stats may lag)
+		// query DB directly for counts (daemon stats may lag).
+		// Skip the direct open when the daemon reports indexing in progress —
+		// Bleve's BoltDB backend holds an exclusive file lock during writes,
+		// so codedb.Open would block until indexing finishes.
 		var totalCommits, totalBlobs, totalSymbols, totalComments, totalPRs, totalIssues int
 		type repoRow struct {
-			name      string
-			path      string
-			commits   int
-			blobs     int
+			name       string
+			path       string
+			commits    int
+			blobs      int
 			lastCommit int64 // unix timestamp of most recent commit
 		}
 		var repos []repoRow
 
-		if indexExists {
+		daemonIndexing := codeStats != nil && codeStats.IndexingNow
+		if indexExists && !daemonIndexing {
 			db, err := codedb.Open(dataDir)
 			if err == nil {
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM commits").Scan(&totalCommits)
@@ -331,6 +354,17 @@ var codeStatusCmd = &cobra.Command{
 					rows.Close()
 				}
 				db.Close()
+			}
+		} else if daemonIndexing {
+			// use daemon's cached stats from the last completed index run
+			totalCommits = codeStats.Commits
+			totalBlobs = codeStats.Blobs
+			totalSymbols = codeStats.Symbols
+			totalComments = codeStats.Comments
+			totalPRs = codeStats.PRs
+			totalIssues = codeStats.Issues
+			for _, r := range codeStats.Repos {
+				repos = append(repos, repoRow{name: r.Name, path: r.Path, commits: r.Commits, blobs: r.Blobs})
 			}
 		}
 
