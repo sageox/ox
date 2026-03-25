@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -341,4 +342,74 @@ func TestShortenPathViaSymlink(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestStatusJSONOutput_OmitsEmptyFields(t *testing.T) {
+	t.Parallel()
+
+	// minimal output — optional fields should be omitted
+	output := statusJSONOutput{
+		Auth:    &statusAuthJSON{Authenticated: false, Endpoint: "test.sageox.ai"},
+		Config:  &statusConfigJSON{UserConfigDir: "/tmp"},
+		Project: &statusProjectJSON{Initialized: false},
+		Ledger:  &statusLedgerJSON{Configured: false},
+	}
+
+	data, err := json.Marshal(output)
+	require.NoError(t, err)
+
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &raw))
+
+	// omitempty fields should not appear
+	_, hasTeamContexts := raw["team_contexts"]
+	assert.False(t, hasTeamContexts, "empty team_contexts should be omitted")
+	_, hasAICoworkers := raw["ai_coworkers"]
+	assert.False(t, hasAICoworkers, "empty ai_coworkers should be omitted")
+	_, hasDaemon := raw["daemon"]
+	assert.False(t, hasDaemon, "nil daemon should be omitted")
+	_, hasVersion := raw["version"]
+	assert.False(t, hasVersion, "nil version should be omitted")
+
+	// required fields should always appear
+	_, hasAuth := raw["auth"]
+	assert.True(t, hasAuth, "auth should always be present")
+	_, hasConfig := raw["config"]
+	assert.True(t, hasConfig, "config should always be present")
+	_, hasProject := raw["project"]
+	assert.True(t, hasProject, "project should always be present")
+	_, hasLedger := raw["ledger"]
+	assert.True(t, hasLedger, "ledger should always be present")
+}
+
+func TestStatusJSONOutput_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	expires := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	output := statusJSONOutput{
+		Auth: &statusAuthJSON{
+			Authenticated: true,
+			Endpoint:      "sageox.ai",
+			User:          "Person A",
+			Email:         "person@example.com",
+			ExpiresAt:     &expires,
+		},
+		Config:  &statusConfigJSON{UserConfigDir: "/home/user/.config/sageox", AuthFile: "/home/user/.config/sageox/auth.json", AuthFileExists: true},
+		Project: &statusProjectJSON{Initialized: true, Directory: "/project", ConfigPath: "/project/.sageox"},
+		Ledger:  &statusLedgerJSON{Configured: true, Path: "/data/ledger", Exists: true, Branch: "main", Visibility: "private", AccessLevel: "member"},
+		Daemon:  &statusDaemonJSON{Running: true},
+		Version: &statusVersionJSON{Current: "0.17.0", Latest: "0.18.0", UpdateAvailable: true},
+	}
+
+	data, err := json.MarshalIndent(output, "", "  ")
+	require.NoError(t, err)
+
+	var decoded statusJSONOutput
+	require.NoError(t, json.Unmarshal(data, &decoded))
+
+	assert.Equal(t, output.Auth.Authenticated, decoded.Auth.Authenticated)
+	assert.Equal(t, output.Auth.User, decoded.Auth.User)
+	assert.Equal(t, output.Ledger.Visibility, decoded.Ledger.Visibility)
+	assert.Equal(t, output.Version.UpdateAvailable, decoded.Version.UpdateAvailable)
+	assert.Equal(t, output.Version.Latest, decoded.Version.Latest)
 }

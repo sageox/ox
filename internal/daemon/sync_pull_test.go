@@ -19,7 +19,7 @@ func gitCmd(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(os.Environ(), // safe: git subprocess in temp dir, not ox CLI
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_AUTHOR_NAME=test",
 		"GIT_AUTHOR_EMAIL=test@test.com",
@@ -173,6 +173,48 @@ func TestDoPull_StaleLockFile(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "should record IssueTypeGitLock")
+}
+
+func TestDoPull_CorruptRepo_RenamedAside(t *testing.T) {
+	_, cloneDir := setupBareAndClone(t)
+
+	// corrupt the repo by emptying .git/HEAD
+	headPath := filepath.Join(cloneDir, ".git", "HEAD")
+	require.NoError(t, os.WriteFile(headPath, []byte(""), 0o644))
+
+	s := newPullTestScheduler(t, cloneDir)
+
+	err := s.doPull(context.Background(), nil, true)
+	assert.NoError(t, err, "doPull should return nil for corrupt repo (triggers re-clone)")
+
+	// original path should no longer be a valid git repo (renamed aside)
+	_, statErr := os.Stat(filepath.Join(cloneDir, ".git", "HEAD"))
+	assert.True(t, os.IsNotExist(statErr), "original repo should be renamed aside")
+
+	// verify .bak.* path exists
+	parent := filepath.Dir(cloneDir)
+	entries, _ := os.ReadDir(parent)
+	found := false
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), filepath.Base(cloneDir)+".bak.") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "backup directory should exist after corrupt repo detection")
+}
+
+func TestDoPull_RebaseInProgress_Skips(t *testing.T) {
+	_, cloneDir := setupBareAndClone(t)
+
+	// simulate broken rebase state
+	rebaseMergeDir := filepath.Join(cloneDir, ".git", "rebase-merge")
+	require.NoError(t, os.MkdirAll(rebaseMergeDir, 0o755))
+
+	s := newPullTestScheduler(t, cloneDir)
+
+	err := s.doPull(context.Background(), nil, false)
+	assert.NoError(t, err, "doPull should skip silently when rebase is in progress")
 }
 
 func TestDoPull_SuccessfulPull(t *testing.T) {
