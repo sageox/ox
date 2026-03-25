@@ -27,7 +27,7 @@ func setupIncrementalTest(t *testing.T) string {
 
 	sageoxDir := filepath.Join(projectRoot, ".sageox")
 	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
-	cfg := `{"config_version":"2","repo_id":"test-repo-incremental"}`
+	cfg := `{"config_version":"2","repo_id":"test-repo-incremental","endpoint":"http://test.sageox.local"}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(cfg), 0644))
 
 	t.Setenv("OX_XDG_ENABLE", "1")
