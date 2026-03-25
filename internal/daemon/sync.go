@@ -910,6 +910,10 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		return nil
 	}
 
+	if progress != nil {
+		_ = progress.WriteStage("pulling", "Pulling changes...")
+	}
+
 	// handle errors
 	if result.Err != nil {
 		s.recordError(result.Err.Error())
