@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/session/html"
+	"github.com/sageox/ox/pkg/sessionsummary"
 )
 
 const (
@@ -355,8 +356,8 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 	// cache for ProcessResult to avoid re-reading
 	payload.storedSession = stored
 
-	entries := convertStoredEntries(stored.Entries)
-	prompt := session.BuildSummaryPrompt(entries, payload.RawPath, payload.SessionDir)
+	entries := sessionsummary.EntriesFromRaw(stored.Entries)
+	prompt := sessionsummary.BuildSummaryPrompt(entries, payload.RawPath, payload.SessionDir)
 
 	return RunRequest{
 		Prompt:  prompt,
@@ -387,7 +388,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 
 	// parse LLM output into SummarizeResponse
 	var summaryResp *session.SummarizeResponse
-	parsed, parseErr := parseSummaryJSON(llmOutput)
+	parsed, parseErr := sessionsummary.ParseSummaryJSON(llmOutput)
 	if parseErr != nil {
 		h.logger.Warn("could not parse summary JSON from LLM output, using raw text", "err", parseErr)
 		// fall back to raw LLM output as summary text; default to upload (benefit of the doubt)
@@ -631,69 +632,20 @@ func missingArtifacts(sessionDir string) []string {
 
 // convertStoredEntries converts []map[string]any from StoredSession to []session.Entry.
 func convertStoredEntries(stored []map[string]any) []session.Entry {
-	entries := make([]session.Entry, 0, len(stored))
-	for _, m := range stored {
-		e := session.Entry{}
-		if t, ok := m["type"].(string); ok {
-			e.Type = session.EntryType(t)
+	// delegate to shared conversion, then map sessionsummary.Entry → session.Entry
+	ssEntries := sessionsummary.EntriesFromRaw(stored)
+	entries := make([]session.Entry, len(ssEntries))
+	for i, e := range ssEntries {
+		entries[i] = session.Entry{
+			Timestamp:  e.Timestamp,
+			Type:       session.EntryType(e.Type),
+			Content:    e.Content,
+			ToolName:   e.ToolName,
+			ToolInput:  e.ToolInput,
+			ToolOutput: e.ToolOutput,
 		}
-		if c, ok := m["content"].(string); ok {
-			e.Content = c
-		}
-		if tn, ok := m["tool_name"].(string); ok {
-			e.ToolName = tn
-		}
-		if ti, ok := m["tool_input"].(string); ok {
-			e.ToolInput = ti
-		}
-		if ts, ok := m["timestamp"].(string); ok {
-			if t, err := time.Parse(time.RFC3339Nano, ts); err == nil {
-				e.Timestamp = t
-			} else if t, err := time.Parse(time.RFC3339, ts); err == nil {
-				e.Timestamp = t
-			}
-		}
-		entries = append(entries, e)
 	}
 	return entries
-}
-
-// parseSummaryJSON attempts to extract a SummarizeResponse from the LLM output.
-// The output may contain the JSON embedded in markdown code fences or as raw JSON.
-func parseSummaryJSON(output string) (*session.SummarizeResponse, error) {
-	// try raw JSON first
-	var resp session.SummarizeResponse
-	if err := json.Unmarshal([]byte(strings.TrimSpace(output)), &resp); err == nil && resp.Title != "" {
-		return &resp, nil
-	}
-
-	// try extracting from ```json ... ``` fences
-	if idx := strings.Index(output, "```json"); idx >= 0 {
-		start := idx + len("```json")
-		if end := strings.Index(output[start:], "```"); end >= 0 {
-			jsonStr := strings.TrimSpace(output[start : start+end])
-			if err := json.Unmarshal([]byte(jsonStr), &resp); err == nil && resp.Title != "" {
-				return &resp, nil
-			}
-		}
-	}
-
-	// try extracting from generic ``` ... ``` fences
-	if idx := strings.Index(output, "```"); idx >= 0 {
-		start := idx + len("```")
-		// skip to newline if present (e.g., ```\n{...}\n```)
-		if nlIdx := strings.Index(output[start:], "\n"); nlIdx >= 0 {
-			start += nlIdx + 1
-		}
-		if end := strings.Index(output[start:], "```"); end >= 0 {
-			jsonStr := strings.TrimSpace(output[start : start+end])
-			if err := json.Unmarshal([]byte(jsonStr), &resp); err == nil && resp.Title != "" {
-				return &resp, nil
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("no valid summary JSON found in LLM output")
 }
 
 // invalidLeakedTypes are internal Claude Code types that should never appear

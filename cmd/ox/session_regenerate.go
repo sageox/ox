@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	sessionhtml "github.com/sageox/ox/internal/session/html"
+	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/spf13/cobra"
 )
 
@@ -35,18 +36,24 @@ will be handled by the /api/v1/git/lfs/purge cloud API endpoint.
 
 The session name supports partial matching (e.g. agent ID suffix).
 
+With --summary, re-generates summary.json using the current prompt template
+by invoking Claude. Requires the claude CLI to be installed. Single-session
+only (ledgers can contain 10,000+ sessions; each requires an LLM invocation).
+
 Examples:
   ox session regenerate OxK3ZN                          # regenerate HTML
   ox session regenerate --all                           # regenerate all HTML
   ox session regenerate OxK3ZN --redact                 # re-redact session
   ox session regenerate --redact --all                  # re-redact all sessions
-  ox session regenerate OxK3ZN --redact --dry-run       # preview redaction`,
+  ox session regenerate OxK3ZN --redact --dry-run       # preview redaction
+  ox session regenerate OxK3ZN --summary                # re-summarize with current prompt`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runSessionRegenerate,
 }
 
 func init() {
 	sessionRegenerateCmd.Flags().Bool("redact", false, "re-apply current REDACT.md rules to session data")
+	sessionRegenerateCmd.Flags().Bool("summary", false, "re-generate summary.json using current prompt template (requires claude CLI)")
 	sessionRegenerateCmd.Flags().Bool("all", false, "regenerate all sessions")
 	sessionRegenerateCmd.Flags().Bool("dry-run", false, "preview what would change without modifying anything (--redact only)")
 	sessionRegenerateCmd.Flags().Bool("force", false, "skip confirmation prompts")
@@ -54,11 +61,26 @@ func init() {
 
 func runSessionRegenerate(cmd *cobra.Command, args []string) error {
 	redact, _ := cmd.Flags().GetBool("redact")
+	summary, _ := cmd.Flags().GetBool("summary")
 	regenAll, _ := cmd.Flags().GetBool("all")
 	force, _ := cmd.Flags().GetBool("force")
 
+	if summary && redact {
+		return fmt.Errorf("--summary and --redact cannot be used together")
+	}
+
 	if redact {
 		return runSessionRegenerateRedact(cmd, args)
+	}
+
+	if summary {
+		// Single-session only: ledgers can contain 10,000+ sessions (more for
+		// large monorepos). Each summary requires an LLM invocation (~60s + API
+		// cost), making batch regeneration prohibitively expensive.
+		if len(args) == 0 {
+			return fmt.Errorf("specify a session name\nRun 'ox session list' to see available sessions")
+		}
+		return regenerateSingleSessionSummary(args[0])
 	}
 
 	// default mode: HTML-only regeneration
@@ -209,6 +231,109 @@ func syncRegeneratedSession(projectRoot, sessionPath, sessionName string) error 
 		return fmt.Errorf("commit and push: %w", err)
 	}
 
+	return nil
+}
+
+// --- Summary regeneration (--summary) ---
+
+// regenerateSingleSessionSummary re-generates summary.json for a session by
+// invoking Claude with the current summary prompt template. The raw.jsonl is
+// read (downloaded from LFS if needed), a prompt is built using the shared
+// template, and Claude produces a new summary. Downstream artifacts
+// (summary.md, session.html, session.md) are regenerated from the result.
+func regenerateSingleSessionSummary(nameArg string) error {
+	projectRoot, err := requireProjectRoot()
+	if err != nil {
+		return err
+	}
+
+	ledgerPath, err := resolveLedgerPath()
+	if err != nil {
+		return err
+	}
+
+	sessionsDir := filepath.Join(ledgerPath, "sessions")
+	sessionName, err := resolveSessionInDir(sessionsDir, nameArg)
+	if err != nil {
+		return err
+	}
+
+	sessionPath := filepath.Join(sessionsDir, sessionName)
+	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
+
+	// ensure raw.jsonl is available locally (download from LFS if stub)
+	if _, statErr := os.Stat(rawPath); statErr != nil {
+		meta, metaErr := lfs.ReadSessionMeta(sessionPath)
+		if metaErr != nil {
+			return fmt.Errorf("read meta.json for %s: %w", sessionName, metaErr)
+		}
+		if dlErr := downloadFileFromLFS(projectRoot, sessionPath, meta, ledgerFileRaw); dlErr != nil {
+			return fmt.Errorf("download %s for %s: %w", ledgerFileRaw, sessionName, dlErr)
+		}
+	}
+
+	rawSession, err := session.ReadSessionFromPath(rawPath)
+	if err != nil {
+		return fmt.Errorf("read raw.jsonl: %w", err)
+	}
+
+	if len(rawSession.Entries) == 0 {
+		return fmt.Errorf("session %s has no entries", sessionName)
+	}
+
+	// build summary prompt using shared template
+	entries := sessionsummary.EntriesFromRaw(rawSession.Entries)
+	prompt := sessionsummary.BuildSummaryPrompt(entries, rawPath, "")
+
+	cli.PrintInfo(fmt.Sprintf("Generating summary for %s...", sessionName))
+
+	resultText, err := sessionsummary.InvokeClaude(context.Background(), prompt, sessionPath)
+	if err != nil {
+		return fmt.Errorf("claude invocation: %w", err)
+	}
+
+	summaryResp, err := sessionsummary.ParseSummaryJSON(resultText)
+	if err != nil {
+		return fmt.Errorf("parse summary from claude output: %w", err)
+	}
+
+	// write summary.json atomically
+	summaryData, err := json.MarshalIndent(summaryResp, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal summary: %w", err)
+	}
+
+	summaryPath := filepath.Join(sessionPath, "summary.json")
+	tmpPath := summaryPath + ".tmp"
+	if err := os.WriteFile(tmpPath, summaryData, 0644); err != nil {
+		return fmt.Errorf("write summary: %w", err)
+	}
+	if err := os.Rename(tmpPath, summaryPath); err != nil {
+		return fmt.Errorf("rename summary: %w", err)
+	}
+
+	// update meta.json title from new summary
+	if summaryResp.Title != "" {
+		if err := lfs.UpdateMetaSummary(sessionPath, summaryResp.Title); err != nil {
+			slog.Debug("update meta.json summary", "error", err)
+		}
+	}
+
+	// regenerate downstream artifacts (summary.md, session.html, session.md)
+	if err := regenerateArtifacts(sessionPath, rawSession); err != nil {
+		slog.Warn("artifact regeneration partially failed", "session", sessionName, "error", err)
+	}
+
+	// upload to LFS and push to ledger
+	if _, lfsErr := uploadSessionLFS(projectRoot, sessionPath); lfsErr != nil {
+		slog.Warn("LFS upload skipped", "session", sessionName, "error", lfsErr)
+	}
+
+	if err := commitAndPushLedger(ledgerPath, sessionName); err != nil {
+		slog.Warn("ledger push skipped", "error", err)
+	}
+
+	cli.PrintSuccess(fmt.Sprintf("Regenerated summary for %s (quality: %.2f)", sessionName, summaryResp.QualityScore))
 	return nil
 }
 
