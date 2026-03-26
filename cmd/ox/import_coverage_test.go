@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestDetectContentType_EmptyContent(t *testing.T) {
@@ -117,6 +120,177 @@ func TestFindExistingDocByOID_NonexistentBaseDir(t *testing.T) {
 	if found {
 		t.Error("expected found=false for nonexistent directory")
 	}
+}
+
+func TestDetectContentType_AllExtensions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		filename string
+		want     string
+	}{
+		{"doc.pdf", "application/pdf"},
+		{"doc.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+		{"doc.md", "text/markdown"},
+		{"doc.markdown", "text/markdown"},
+		{"doc.txt", "text/plain"},
+		{"doc.html", "text/html"},
+		{"doc.htm", "text/html"},
+		{"doc.json", "application/json"},
+		{"doc.yaml", "application/x-yaml"},
+		{"doc.yml", "application/x-yaml"},
+		{"doc.csv", "text/csv"},
+		{"doc.png", "image/png"},
+		{"doc.jpg", "image/jpeg"},
+		{"doc.jpeg", "image/jpeg"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.filename, func(t *testing.T) {
+			t.Parallel()
+			got := detectContentType(tt.filename, []byte("dummy content"))
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestDetectContentType_LargeContent(t *testing.T) {
+	t.Parallel()
+
+	// content > 512 bytes should be sniffed using only first 512 bytes
+	content := make([]byte, 1024)
+	for i := range content {
+		content[i] = 'A'
+	}
+	got := detectContentType("file.unknown", content)
+	assert.NotEmpty(t, got, "should detect content type via sniffing")
+}
+
+func TestSlugify_MoreCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"simple", "Hello World", "hello-world"},
+		{"uppercase", "HELLO", "hello"},
+		{"leading trailing spaces", "  hello  ", "hello"},
+		{"leading trailing hyphens after transform", "---hello---", "hello"},
+		{"mixed case with numbers", "My Doc 2024", "my-doc-2024"},
+		{"accented chars", "Caf\u00e9 Mocha", "caf\u00e9-mocha"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := slugify(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestInferTitle_MoreCases(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"simple file", "document.pdf", "document"},
+		{"with dashes", "my-document.pdf", "my document"},
+		{"with underscores", "my_document.txt", "my document"},
+		{"multiple extensions", "file.test.go", "file.test"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := inferTitle(tt.path)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestFindExistingDocByOID_FindsMatch(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	docDir := filepath.Join(dir, "my-doc")
+	assert.NoError(t, os.MkdirAll(docDir, 0o755))
+
+	meta := map[string]string{"source_oid": "sha256:abc123"}
+	data, _ := json.Marshal(meta)
+	assert.NoError(t, os.WriteFile(filepath.Join(docDir, "metadata.json"), data, 0o644))
+
+	docID, found := findExistingDocByOID(dir, "sha256:abc123")
+	assert.True(t, found)
+	assert.Equal(t, "my-doc", docID)
+}
+
+func TestFindExistingDocByOID_NoMatch(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	docDir := filepath.Join(dir, "my-doc")
+	assert.NoError(t, os.MkdirAll(docDir, 0o755))
+
+	meta := map[string]string{"source_oid": "sha256:different"}
+	data, _ := json.Marshal(meta)
+	assert.NoError(t, os.WriteFile(filepath.Join(docDir, "metadata.json"), data, 0o644))
+
+	_, found := findExistingDocByOID(dir, "sha256:abc123")
+	assert.False(t, found)
+}
+
+func TestFindExistingDocByOID_EmptyDir(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	_, found := findExistingDocByOID(dir, "sha256:abc123")
+	assert.False(t, found)
+}
+
+func TestFindExistingDocByOID_InvalidMetadataJSON(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	docDir := filepath.Join(dir, "bad-doc")
+	assert.NoError(t, os.MkdirAll(docDir, 0o755))
+	assert.NoError(t, os.WriteFile(filepath.Join(docDir, "metadata.json"), []byte("not json"), 0o644))
+
+	_, found := findExistingDocByOID(dir, "sha256:abc123")
+	assert.False(t, found)
+}
+
+func TestEnsureMetadataGitattributes_CreatesNew(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	err := ensureMetadataGitattributes(dir)
+	assert.NoError(t, err)
+
+	content, err := os.ReadFile(filepath.Join(dir, ".gitattributes"))
+	assert.NoError(t, err)
+	assert.Contains(t, string(content), "data/**/metadata.json !filter !diff !merge text")
+}
+
+func TestEnsureMetadataGitattributes_AlreadyPresent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	existing := "data/**/metadata.json !filter !diff !merge text\n"
+	assert.NoError(t, os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte(existing), 0o644))
+
+	err := ensureMetadataGitattributes(dir)
+	assert.NoError(t, err)
+
+	// content should be unchanged (idempotent)
+	content, err := os.ReadFile(filepath.Join(dir, ".gitattributes"))
+	assert.NoError(t, err)
+	assert.Equal(t, existing, string(content))
 }
 
 func TestEnsureMetadataGitattributes_ExistingContentPreserved(t *testing.T) {

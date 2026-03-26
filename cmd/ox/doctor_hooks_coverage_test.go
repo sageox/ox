@@ -217,10 +217,7 @@ func TestValidateHookCommand_EdgeCases(t *testing.T) {
 				t.Errorf("invalid count=%d, want %d", len(invalids), tt.wantInvalidCnt)
 			}
 			// verify suggestions map is non-nil even when valid
-			if suggestions == nil && tt.wantValid {
-				// ValidateHookCommand returns nil suggestions when no ox commands found
-				// and non-nil suggestions map otherwise
-			}
+			_ = suggestions // used for validation above
 		})
 	}
 }

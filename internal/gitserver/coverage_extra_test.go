@@ -362,7 +362,7 @@ func TestGetCredentialsFilePath_DefaultPath(t *testing.T) {
 
 func TestCloneFromURLWithEndpoint_EmptyURL(t *testing.T) {
 	t.Parallel()
-	assert.ErrorIs(t, CloneFromURLWithEndpoint(nil, "", "/tmp/test", "https://sageox.ai", nil), ErrEmptyURL)
+	assert.ErrorIs(t, CloneFromURLWithEndpoint(context.TODO(), "", "/tmp/test", "https://sageox.ai", nil), ErrEmptyURL)
 }
 
 func TestCloneFromURLWithEndpoint_NoCreds(t *testing.T) {
@@ -372,7 +372,7 @@ func TestCloneFromURLWithEndpoint_NoCreds(t *testing.T) {
 	prevForce := TestSetForceFileStorage(true)
 	defer TestSetForceFileStorage(prevForce)
 
-	err := CloneFromURLWithEndpoint(nil, "https://git.example.com/repo.git", "/tmp/test", "https://no-creds.sageox.ai", nil)
+	err := CloneFromURLWithEndpoint(context.TODO(), "https://git.example.com/repo.git", "/tmp/test", "https://no-creds.sageox.ai", nil)
 	assert.ErrorIs(t, err, ErrNoCredentials)
 }
 
