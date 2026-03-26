@@ -249,7 +249,7 @@ func (s *Store) GetWhispers(agentID string, attention Attention, topics []string
 			placeholders[i] = "?"
 			args = append(args, t)
 		}
-		query += " AND topic IN (" + strings.Join(placeholders, ",") + ")"
+		query += " AND topic IN (" + strings.Join(placeholders, ",") + ")" //nolint:gosec // G202 - placeholders are "?" literals, not user input
 	}
 
 	// order: critical first, then normal, then ambient; within each, by time

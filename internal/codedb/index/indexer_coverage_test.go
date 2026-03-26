@@ -26,7 +26,7 @@ func TestGitStatusDirtyFiles(t *testing.T) {
 			t.Helper()
 			cmd := exec.Command("git", args...)
 			cmd.Dir = dir
-			cmd.Env = append(os.Environ(),
+			cmd.Env = append(os.Environ(), // safe: git subprocess needs parent env for PATH
 				"GIT_AUTHOR_NAME=test",
 				"GIT_AUTHOR_EMAIL=test@test.com",
 				"GIT_COMMITTER_NAME=test",
@@ -116,7 +116,7 @@ func TestGitStatusDirtyFiles(t *testing.T) {
 		cancel()
 		_, err := gitStatusDirtyFiles(ctx, dir)
 		if err == nil {
-			t.Error("expected error with cancelled context")
+			t.Error("expected error with canceled context")
 		}
 	})
 }
@@ -649,7 +649,7 @@ func TestIndexLocalRepo_ContextCancellation(t *testing.T) {
 	cancel()
 
 	err := IndexLocalRepo(ctx, s, dir, IndexOptions{})
-	// should error due to cancelled context (may fail at various stages)
+	// should error due to canceled context (may fail at various stages)
 	if err == nil {
 		// timing-dependent; not failing is also acceptable
 		return
@@ -832,7 +832,7 @@ func TestBuildDirtyIndex_RemovesStaleOnClean(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: git subprocess needs parent env for PATH
 			"GIT_AUTHOR_NAME=test",
 			"GIT_AUTHOR_EMAIL=test@test.com",
 			"GIT_COMMITTER_NAME=test",
@@ -1011,7 +1011,7 @@ func TestResolveDefaultBranch_FallbackToBranchNames(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: git subprocess needs parent env for PATH
 			"GIT_AUTHOR_NAME=test",
 			"GIT_AUTHOR_EMAIL=test@test.com",
 			"GIT_COMMITTER_NAME=test",

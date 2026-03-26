@@ -848,7 +848,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 					}
 					// clone in background goroutine - don't block sync loop
 					s.cloneWg.Add(1)
-					go s.cloneInBackground(ledger.CloneURL, ledger.Path, "ledger", ledger.ID)
+					go s.cloneInBackground(ledger.CloneURL, ledger.Path, "ledger", ledger.ID) //nolint:gosec // G118 - intentionally uses background context; goroutine outlives request scope
 				}
 			}
 		}

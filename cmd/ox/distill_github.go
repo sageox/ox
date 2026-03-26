@@ -279,7 +279,7 @@ func buildGitHubExtractorPrompt(clustersJSON, interval string) string {
 	var sb strings.Builder
 	sb.WriteString(githubExtractorSystemPrompt)
 	sb.WriteString("\n\n---\n\n")
-	sb.WriteString(fmt.Sprintf("Here is a batch of GitHub event clusters from the last %s. ", interval))
+	fmt.Fprintf(&sb, "Here is a batch of GitHub event clusters from the last %s. ", interval)
 	sb.WriteString("Each cluster contains pre-assembled related objects with their full comment histories.\n\n")
 	sb.WriteString("Analyze each cluster and extract raw facts for any meaningful events. Remember:\n")
 	sb.WriteString("- One fact per meaningful event, not one fact per GitHub object\n")

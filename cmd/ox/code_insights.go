@@ -407,9 +407,9 @@ func renderInsightsHuman(out insightsOutput, days int) string {
 		b.WriteString(statusHeaderStyle.Render("Hotspots"))
 		b.WriteString("\n")
 		for _, h := range out.Hotspots {
-			b.WriteString(fmt.Sprintf("  %s  %s\n",
+			fmt.Fprintf(&b, "  %s  %s\n",
 				statusWarningStyle.Render(fmt.Sprintf("%d changes", h.Changes)),
-				statusValueStyle.Render(h.Path)))
+				statusValueStyle.Render(h.Path))
 			if len(h.RecentCommits) > 0 {
 				msgs := h.RecentCommits
 				if len(msgs) > 3 {
@@ -423,8 +423,8 @@ func renderInsightsHuman(out insightsOutput, days int) string {
 					}
 					short = append(short, m)
 				}
-				b.WriteString(fmt.Sprintf("              %s\n",
-					statusMutedStyle.Render(strings.Join(short, ", "))))
+				fmt.Fprintf(&b, "              %s\n",
+					statusMutedStyle.Render(strings.Join(short, ", ")))
 			}
 		}
 	}
@@ -440,10 +440,10 @@ func renderInsightsHuman(out insightsOutput, days int) string {
 			if c.WorkspaceCount >= 3 {
 				style = statusWarningStyle
 			}
-			b.WriteString(fmt.Sprintf("  %s  %s  %s\n",
+			fmt.Fprintf(&b, "  %s  %s  %s\n",
 				style.Render(wsLabel),
 				statusValueStyle.Render(c.Path),
-				statusMutedStyle.Render("("+strings.Join(c.Workspaces, ", ")+")")))
+				statusMutedStyle.Render("("+strings.Join(c.Workspaces, ", ")+")"))
 		}
 	}
 
@@ -457,11 +457,11 @@ func renderInsightsHuman(out insightsOutput, days int) string {
 			if len(msg) > 60 {
 				msg = msg[:57] + "..."
 			}
-			b.WriteString(fmt.Sprintf("  %s  %s  %s  %s\n",
+			fmt.Fprintf(&b, "  %s  %s  %s  %s\n",
 				statusMutedStyle.Render(c.Hash),
 				statusHighlightStyle.Render(c.Author),
 				statusValueStyle.Render(msg),
-				statusMutedStyle.Render("("+c.Age+")")))
+				statusMutedStyle.Render("("+c.Age+")"))
 		}
 	}
 
@@ -475,10 +475,10 @@ func renderInsightsHuman(out insightsOutput, days int) string {
 			if len(title) > 60 {
 				title = title[:57] + "..."
 			}
-			b.WriteString(fmt.Sprintf("  %s  %s  %s\n",
+			fmt.Fprintf(&b, "  %s  %s  %s\n",
 				statusHighlightStyle.Render(fmt.Sprintf("#%d", p.Number)),
 				statusValueStyle.Render(title),
-				statusMutedStyle.Render("("+p.Author+")")))
+				statusMutedStyle.Render("("+p.Author+")"))
 		}
 	}
 
@@ -496,11 +496,11 @@ func renderInsightsHuman(out insightsOutput, days int) string {
 			if len(i.Labels) > 0 {
 				labelStr = "  " + statusMutedStyle.Render("["+strings.Join(i.Labels, ", ")+"]")
 			}
-			b.WriteString(fmt.Sprintf("  %s  %s  %s%s\n",
+			fmt.Fprintf(&b, "  %s  %s  %s%s\n",
 				statusHighlightStyle.Render(fmt.Sprintf("#%d", i.Number)),
 				statusValueStyle.Render(title),
 				statusMutedStyle.Render("("+i.Author+")"),
-				labelStr))
+				labelStr)
 		}
 	}
 

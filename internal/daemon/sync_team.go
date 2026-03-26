@@ -121,7 +121,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 					_ = progress.WriteStage("cloning", fmt.Sprintf("Cloning team %s in background...", ws.TeamName))
 				}
 				s.cloneWg.Add(1)
-				go s.cloneInBackground(ws.CloneURL, ws.Path, "team-context", ws.ID)
+				go s.cloneInBackground(ws.CloneURL, ws.Path, "team-context", ws.ID) //nolint:gosec // G118 - intentionally uses background context; goroutine outlives request scope
 				cloningCount++
 			} else {
 				s.workspaceRegistry.SetWorkspaceError(ws.ID, "path does not exist and no clone URL available")

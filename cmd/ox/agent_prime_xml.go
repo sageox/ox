@@ -78,13 +78,13 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 	if output.Guidance != nil && len(output.Guidance.Commands) > 0 {
 		sb.WriteString("\n<commands")
 		if output.Guidance.Hint != "" {
-			sb.WriteString(fmt.Sprintf(" hint=%q", output.Guidance.Hint))
+			fmt.Fprintf(&sb, " hint=%q", output.Guidance.Hint)
 		}
 		sb.WriteString(">\n")
 		sb.WriteString("| Intent | Command |\n")
 		sb.WriteString("|--------|---------|\n")
 		for _, ic := range output.Guidance.Commands {
-			sb.WriteString(fmt.Sprintf("| %s | `%s` |\n", ic.Intent, ic.Command))
+			fmt.Fprintf(&sb, "| %s | `%s` |\n", ic.Intent, ic.Command)
 		}
 		sb.WriteString("</commands>\n")
 	}
@@ -97,16 +97,16 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 	sb.WriteString("\nPlan footer (required for team-guided plans):\n")
 	sb.WriteString("> Guided by SageOx\n")
 	if output.Attribution.Commit != "" {
-		sb.WriteString(fmt.Sprintf("\nCommit: `%s`\n", output.Attribution.Commit))
+		fmt.Fprintf(&sb, "\nCommit: `%s`\n", output.Attribution.Commit)
 	}
 	if output.Attribution.PR != "" {
-		sb.WriteString(fmt.Sprintf("PR body (last line): `%s`\n", output.Attribution.PR))
+		fmt.Fprintf(&sb, "PR body (last line): `%s`\n", output.Attribution.PR)
 	}
 	sb.WriteString("</attribution>\n")
 
 	// project guidance: AGENTS.md from the project root
 	if output.ProjectGuidance != nil && !output.ProjectGuidance.Skipped && output.ProjectGuidance.Content != "" {
-		sb.WriteString(fmt.Sprintf("\n<project-guidance source=%q>\n", output.ProjectGuidance.Source))
+		fmt.Fprintf(&sb, "\n<project-guidance source=%q>\n", output.ProjectGuidance.Source)
 		sb.WriteString(output.ProjectGuidance.Content)
 		if !strings.HasSuffix(output.ProjectGuidance.Content, "\n") {
 			sb.WriteString("\n")
@@ -158,7 +158,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 				if model == "" {
 					model = "inherit"
 				}
-				sb.WriteString(fmt.Sprintf("| %s | %s | %s |\n", cw.Name, desc, model))
+				fmt.Fprintf(&sb, "| %s | %s | %s |\n", cw.Name, desc, model)
 			}
 			sb.WriteString("\nLoad: `ox coworker load <name>`\n")
 			sb.WriteString("</coworkers>\n")
@@ -174,7 +174,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 				if desc == "" {
 					desc = "(no description)"
 				}
-				sb.WriteString(fmt.Sprintf("| %s | %s | %s |\n", tcmd.Name, tcmd.Trigger, desc))
+				fmt.Fprintf(&sb, "| %s | %s | %s |\n", tcmd.Name, tcmd.Trigger, desc)
 			}
 			sb.WriteString("</team-commands>\n")
 		}
@@ -193,10 +193,10 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 				if when == "" {
 					when = title
 				}
-				sb.WriteString(fmt.Sprintf("| %s | %s |\n", doc.Name, when))
+				fmt.Fprintf(&sb, "| %s | %s |\n", doc.Name, when)
 			}
 			if output.TeamContext.ReadCommand != "" {
-				sb.WriteString(fmt.Sprintf("\nRead: `%s`\n", output.TeamContext.ReadCommand))
+				fmt.Fprintf(&sb, "\nRead: `%s`\n", output.TeamContext.ReadCommand)
 			}
 			sb.WriteString("</docs>\n")
 		}
@@ -233,7 +233,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 			if age == "" {
 				age = "unknown"
 			}
-			sb.WriteString(fmt.Sprintf("| %s | %s |\n", t.Slug, age))
+			fmt.Fprintf(&sb, "| %s | %s |\n", t.Slug, age)
 		}
 		sb.WriteString("\nList all: `ox teams`\n")
 		sb.WriteString("Read: `ox agent team-ctx <slug>`\n")
@@ -250,16 +250,16 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 
 	// session context: binds all per-session dynamic values
 	sb.WriteString("\n<session-context")
-	sb.WriteString(fmt.Sprintf(" agent_id=%q", output.AgentID))
-	sb.WriteString(fmt.Sprintf(" status=%q", output.Status))
+	fmt.Fprintf(&sb, " agent_id=%q", output.AgentID)
+	fmt.Fprintf(&sb, " status=%q", output.Status)
 	if output.TeamContext != nil {
 		teamName := output.TeamContext.TeamName
 		if teamName == "" {
 			teamName = output.TeamContext.TeamID
 		}
-		sb.WriteString(fmt.Sprintf(" team=%q", teamName))
+		fmt.Fprintf(&sb, " team=%q", teamName)
 		if output.TeamContext.Stale {
-			sb.WriteString(fmt.Sprintf(" team_stale=%q", output.TeamContext.StaleSince))
+			fmt.Fprintf(&sb, " team_stale=%q", output.TeamContext.StaleSince)
 		} else {
 			sb.WriteString(" team_synced=\"true\"")
 		}
@@ -268,10 +268,10 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 		if output.Session.Recording {
 			sb.WriteString(" recording=\"true\"")
 			if output.Session.Mode != "" {
-				sb.WriteString(fmt.Sprintf(" mode=%q", output.Session.Mode))
+				fmt.Fprintf(&sb, " mode=%q", output.Session.Mode)
 			}
 			if output.Session.SessionURL != "" {
-				sb.WriteString(fmt.Sprintf(" url=%q", output.Session.SessionURL))
+				fmt.Fprintf(&sb, " url=%q", output.Session.SessionURL)
 			}
 		}
 	}
@@ -296,11 +296,11 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 	if len(output.UserNotices) > 0 {
 		sb.WriteString("\n<user-notices hint=\"Show each notice to the user\">\n")
 		for _, n := range output.UserNotices {
-			sb.WriteString(fmt.Sprintf(
+			fmt.Fprintf(&sb,
 				"<notice type=\"%s\">%s</notice>\n",
 				escapeXML(n.Type),
 				escapeXML(n.Message),
-			))
+			)
 		}
 		sb.WriteString("</user-notices>\n")
 	}
@@ -331,14 +331,14 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 
 	// capture-prior: instructions for capturing planning history (session-specific)
 	if output.CapturePrior != nil {
-		sb.WriteString(fmt.Sprintf("\n<capture-prior agent_id=%q>\n", output.AgentID))
+		fmt.Fprintf(&sb, "\n<capture-prior agent_id=%q>\n", output.AgentID)
 		sb.WriteString(output.CapturePrior.Description)
 		sb.WriteString("\n")
 		for _, instr := range output.CapturePrior.Instructions {
-			sb.WriteString(fmt.Sprintf("- %s\n", instr))
+			fmt.Fprintf(&sb, "- %s\n", instr)
 		}
 		if output.CapturePrior.Example != "" {
-			sb.WriteString(fmt.Sprintf("\nExample:\n%s\n", output.CapturePrior.Example))
+			fmt.Fprintf(&sb, "\nExample:\n%s\n", output.CapturePrior.Example)
 		}
 		sb.WriteString("</capture-prior>\n")
 	}

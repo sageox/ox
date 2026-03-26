@@ -406,7 +406,7 @@ func findExistingDocByOID(docsBaseDir, oid string) (string, bool) {
 		if err != nil || d.IsDir() || d.Name() != "metadata.json" {
 			return nil
 		}
-		data, readErr := os.ReadFile(path)
+		data, readErr := os.ReadFile(path) //nolint:gosec // G122 - path comes from controlled walkDir within validated import directory
 		if readErr != nil {
 			return nil
 		}

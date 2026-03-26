@@ -354,10 +354,10 @@ func checkGCBlockedByUntracked(fix bool) checkResult {
 
 	// build detail message showing the blocking files and what to do
 	var detail strings.Builder
-	detail.WriteString(fmt.Sprintf("Teams with dirty checkouts: %s\n", strings.Join(dirtyTeams, ", ")))
+	fmt.Fprintf(&detail, "Teams with dirty checkouts: %s\n", strings.Join(dirtyTeams, ", "))
 	detail.WriteString("        Blocking files:\n")
 	for _, f := range allFiles {
-		detail.WriteString(fmt.Sprintf("          %s\n", f))
+		fmt.Fprintf(&detail, "          %s\n", f)
 	}
 
 	if hasSageoxFiles && !hasOtherFiles && !hasObservationFiles {

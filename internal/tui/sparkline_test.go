@@ -40,8 +40,7 @@ func TestRenderSparkline_EventOutsideWindow(t *testing.T) {
 	now := time.Now()
 	// event is 5 hours ago, window is 4 hours
 	result := RenderSparkline([]time.Time{now.Add(-5 * time.Hour)}, 4, 4*time.Hour)
-	runes := []rune(result)
-	for _, r := range runes {
+	for _, r := range result {
 		if r != SparklineChars[0] && r != '|' {
 			t.Errorf("event outside window should produce all-low sparkline, got char %c", r)
 		}
@@ -51,8 +50,7 @@ func TestRenderSparkline_EventOutsideWindow(t *testing.T) {
 func TestRenderSparkline_FutureEvent(t *testing.T) {
 	now := time.Now()
 	result := RenderSparkline([]time.Time{now.Add(time.Hour)}, 4, time.Hour)
-	runes := []rune(result)
-	for _, r := range runes {
+	for _, r := range result {
 		if r != SparklineChars[0] && r != '|' {
 			t.Errorf("future event (negative age) should be excluded, got char %c", r)
 		}
@@ -61,17 +59,14 @@ func TestRenderSparkline_FutureEvent(t *testing.T) {
 
 func TestRenderSparkline_HourSeparators(t *testing.T) {
 	// with 48 buckets and 4-hour window, separators at every 12 buckets
-	result := RenderSparkline(nil, SparklineBuckets, SparklineWindow)
-	if !strings.Contains(result, "|") {
-		// empty sparkline is all dashes, no separators
-		// but with timestamps, separators should appear
-	}
+	// empty sparkline has no separators (all dashes); verify with timestamps below
+	_ = RenderSparkline(nil, SparklineBuckets, SparklineWindow)
 	now := time.Now()
 	ts := make([]time.Time, 0, 48)
 	for i := range 48 {
 		ts = append(ts, now.Add(-time.Duration(i)*5*time.Minute))
 	}
-	result = RenderSparkline(ts, SparklineBuckets, SparklineWindow)
+	result := RenderSparkline(ts, SparklineBuckets, SparklineWindow)
 	separatorCount := strings.Count(result, "|")
 	if separatorCount != 3 {
 		t.Errorf("expected 3 hour separators in 4-hour sparkline, got %d", separatorCount)
