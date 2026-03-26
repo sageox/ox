@@ -1,0 +1,117 @@
+package status
+
+import "time"
+
+// JSONOutput is the JSON output structure for ox status --json.
+type JSONOutput struct {
+	Auth         *AuthJSON         `json:"auth"`
+	Config       *ConfigJSON       `json:"config"`
+	Project      *ProjectJSON      `json:"project"`
+	Ledger       *LedgerJSON       `json:"ledger"`
+	TeamContexts []TeamContextJSON `json:"team_contexts,omitempty"`
+	AICoworkers  []AICoworkerJSON  `json:"ai_coworkers,omitempty"`
+	Daemon       *DaemonJSON       `json:"daemon,omitempty"`
+	Version      *VersionJSON      `json:"version,omitempty"`
+}
+
+// AICoworkerJSON represents an AI coworker in JSON output.
+type AICoworkerJSON struct {
+	AgentID       string `json:"agent_id"`
+	ContextTokens int64  `json:"context_tokens"`
+	CommandCount  int    `json:"command_count"`
+	Status        string `json:"status"`
+	Age           string `json:"age"`
+}
+
+// VersionJSON represents version info in JSON output.
+type VersionJSON struct {
+	Current         string `json:"current"`
+	Latest          string `json:"latest,omitempty"`
+	UpdateAvailable bool   `json:"update_available"`
+}
+
+// AuthJSON represents authentication info in JSON output.
+type AuthJSON struct {
+	Authenticated bool       `json:"authenticated"`
+	Endpoint      string     `json:"endpoint"`
+	User          string     `json:"user,omitempty"`
+	Email         string     `json:"email,omitempty"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	GitPATValid   *bool      `json:"git_pat_valid,omitempty"`
+	GitPATReason  string     `json:"git_pat_reason,omitempty"`
+	Error         string     `json:"error,omitempty"`
+}
+
+// ConfigJSON represents configuration info in JSON output.
+type ConfigJSON struct {
+	UserConfigDir  string `json:"user_config_dir"`
+	AuthFile       string `json:"auth_file"`
+	AuthFileExists bool   `json:"auth_file_exists"`
+}
+
+// ProjectJSON represents project info in JSON output.
+type ProjectJSON struct {
+	Initialized bool           `json:"initialized"`
+	Directory   string         `json:"directory"`
+	ConfigPath  string         `json:"config_path,omitempty"`
+	CodeIndex   *CodeIndexJSON `json:"code_index,omitempty"`
+}
+
+// CodeIndexJSON represents code index info in JSON output.
+type CodeIndexJSON struct {
+	Indexed     bool       `json:"indexed"`
+	LastIndexed *time.Time `json:"last_indexed,omitempty"`
+	IndexingNow bool       `json:"indexing_now"`
+	Commits     int        `json:"commits,omitempty"`
+	Blobs       int        `json:"blobs,omitempty"`
+	Symbols     int        `json:"symbols,omitempty"`
+	Error       string     `json:"error,omitempty"`
+}
+
+// LedgerJSON represents ledger info in JSON output.
+type LedgerJSON struct {
+	Configured  bool   `json:"configured"`
+	Path        string `json:"path,omitempty"`
+	Exists      bool   `json:"exists"`
+	Branch      string `json:"branch,omitempty"`
+	Status      string `json:"status,omitempty"`
+	Error       string `json:"error,omitempty"`
+	Visibility  string `json:"visibility,omitempty"`
+	AccessLevel string `json:"access_level,omitempty"`
+}
+
+// TeamContextJSON represents team context info in JSON output.
+type TeamContextJSON struct {
+	TeamID   string     `json:"team_id"`
+	TeamName string     `json:"team_name,omitempty"`
+	Path     string     `json:"path"`
+	Exists   bool       `json:"exists"`
+	Branch   string     `json:"branch,omitempty"`
+	Status   string     `json:"status,omitempty"`
+	Error    string     `json:"error,omitempty"`
+	LastSync *time.Time `json:"last_sync,omitempty"`
+	Stale    bool       `json:"stale,omitempty"`
+}
+
+// DaemonJSON represents daemon info in JSON output.
+type DaemonJSON struct {
+	Running       bool   `json:"running"`
+	Pid           int    `json:"pid,omitempty"`
+	UptimeSeconds int64  `json:"uptime_seconds,omitempty"`
+	TotalSyncs    int    `json:"total_syncs,omitempty"`
+	SyncsLastHour int    `json:"syncs_last_hour,omitempty"`
+	LastError     string `json:"last_error,omitempty"`
+}
+
+// GitRepoStatus holds information about a git repository's status.
+type GitRepoStatus struct {
+	Path             string
+	Exists           bool
+	Branch           string
+	UncommittedCount int
+	IsSynced         bool
+	HasLastSync      bool
+	LastSync         time.Time
+	BehindCount      int
+	Error            string
+}

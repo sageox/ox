@@ -22,7 +22,9 @@ type CheckResult struct {
 
 // Check defines the interface for all doctor checks.
 // Each check implements its own diagnostic logic.
+// The fix parameter indicates whether the check should attempt repairs.
 type Check interface {
 	Name() string
-	Run(ctx context.Context) CheckResult
+	Category() string
+	Run(ctx context.Context, fix bool) CheckResult
 }

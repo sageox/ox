@@ -15,7 +15,7 @@ func TestDaemonRunningCheck_Name(t *testing.T) {
 
 func TestDaemonRunningCheck_Run_NotRunning(t *testing.T) {
 	check := NewDaemonRunningCheck()
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 
 	// when daemon is not running, expect skip status
 	assert.Equal(t, StatusSkip, result.Status)
@@ -29,7 +29,7 @@ func TestDaemonResponsiveCheck_Name(t *testing.T) {
 
 func TestDaemonResponsiveCheck_Run_NotRunning(t *testing.T) {
 	check := NewDaemonResponsiveCheck()
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 
 	// when daemon is not running, expect skip (empty message)
 	assert.Equal(t, StatusSkip, result.Status)
@@ -42,7 +42,7 @@ func TestDaemonSyncStatusCheck_Name(t *testing.T) {
 
 func TestDaemonSyncStatusCheck_Run_NotRunning(t *testing.T) {
 	check := NewDaemonSyncStatusCheck()
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 
 	// when daemon is not running, expect skip
 	assert.Equal(t, StatusSkip, result.Status)
@@ -55,7 +55,7 @@ func TestDaemonUptimeCheck_Name(t *testing.T) {
 
 func TestDaemonUptimeCheck_Run_NotRunning(t *testing.T) {
 	check := NewDaemonUptimeCheck()
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 
 	// when daemon is not running, expect skip
 	assert.Equal(t, StatusSkip, result.Status)
@@ -68,7 +68,7 @@ func TestDaemonSyncErrorsCheck_Name(t *testing.T) {
 
 func TestDaemonSyncErrorsCheck_Run_NotRunning(t *testing.T) {
 	check := NewDaemonSyncErrorsCheck()
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 
 	// when daemon is not running, expect skip
 	assert.Equal(t, StatusSkip, result.Status)
@@ -81,13 +81,13 @@ func TestDaemonHeartbeatCheck_Name(t *testing.T) {
 
 func TestDaemonHeartbeatCheck_EmptyIdentifier(t *testing.T) {
 	check := NewDaemonHeartbeatCheck("workspace", "", "test-repo", "sageox.ai")
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusSkip, result.Status)
 }
 
 func TestDaemonHeartbeatCheck_EmptyEndpoint(t *testing.T) {
 	check := NewDaemonHeartbeatCheck("workspace", "repo_123", "test-repo", "")
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusSkip, result.Status)
 }
 

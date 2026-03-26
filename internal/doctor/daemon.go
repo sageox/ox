@@ -27,8 +27,13 @@ func (c *DaemonRunningCheck) Name() string {
 	return "daemon running"
 }
 
+// Category returns the check category.
+func (c *DaemonRunningCheck) Category() string {
+	return "Daemon"
+}
+
 // Run executes the daemon running check.
-func (c *DaemonRunningCheck) Run(ctx context.Context) CheckResult {
+func (c *DaemonRunningCheck) Run(_ context.Context, _ bool) CheckResult {
 	if daemon.IsRunning() {
 		return CheckResult{
 			Name:    c.Name(),
@@ -58,8 +63,13 @@ func (c *DaemonResponsiveCheck) Name() string {
 	return "daemon responsive"
 }
 
+// Category returns the check category.
+func (c *DaemonResponsiveCheck) Category() string {
+	return "Daemon"
+}
+
 // Run executes the daemon responsive check.
-func (c *DaemonResponsiveCheck) Run(ctx context.Context) CheckResult {
+func (c *DaemonResponsiveCheck) Run(_ context.Context, _ bool) CheckResult {
 	if err := daemon.IsHealthy(); err != nil {
 		// Distinguish between "not running" and "not responding"
 		if !daemon.IsRunning() {
@@ -96,8 +106,13 @@ func (c *DaemonSyncStatusCheck) Name() string {
 	return "last sync"
 }
 
+// Category returns the check category.
+func (c *DaemonSyncStatusCheck) Category() string {
+	return "Daemon"
+}
+
 // Run executes the daemon sync status check.
-func (c *DaemonSyncStatusCheck) Run(ctx context.Context) CheckResult {
+func (c *DaemonSyncStatusCheck) Run(_ context.Context, _ bool) CheckResult {
 	if !daemon.IsRunning() {
 		return CheckResult{
 			Name:   c.Name(),
@@ -167,8 +182,13 @@ func (c *DaemonUptimeCheck) Name() string {
 	return "uptime"
 }
 
+// Category returns the check category.
+func (c *DaemonUptimeCheck) Category() string {
+	return "Daemon"
+}
+
 // Run executes the daemon uptime check.
-func (c *DaemonUptimeCheck) Run(ctx context.Context) CheckResult {
+func (c *DaemonUptimeCheck) Run(_ context.Context, _ bool) CheckResult {
 	if !daemon.IsRunning() {
 		return CheckResult{
 			Name:   c.Name(),
@@ -205,8 +225,13 @@ func (c *DaemonSyncErrorsCheck) Name() string {
 	return "sync errors"
 }
 
+// Category returns the check category.
+func (c *DaemonSyncErrorsCheck) Category() string {
+	return "Daemon"
+}
+
 // Run executes the sync errors check.
-func (c *DaemonSyncErrorsCheck) Run(ctx context.Context) CheckResult {
+func (c *DaemonSyncErrorsCheck) Run(_ context.Context, _ bool) CheckResult {
 	if !daemon.IsRunning() {
 		return CheckResult{
 			Name:   c.Name(),
@@ -258,8 +283,13 @@ func (c *DaemonDirtyTeamContextCheck) Name() string {
 	return "team context clean"
 }
 
+// Category returns the check category.
+func (c *DaemonDirtyTeamContextCheck) Category() string {
+	return "Daemon"
+}
+
 // Run checks daemon issues for dirty_workspace entries.
-func (c *DaemonDirtyTeamContextCheck) Run(ctx context.Context) CheckResult {
+func (c *DaemonDirtyTeamContextCheck) Run(_ context.Context, _ bool) CheckResult {
 	if !daemon.IsRunning() {
 		return CheckResult{
 			Name:   c.Name(),
@@ -330,8 +360,13 @@ func (c *DaemonHeartbeatCheck) Name() string {
 	return fmt.Sprintf("heartbeat (%s)", c.DisplayName)
 }
 
+// Category returns the check category.
+func (c *DaemonHeartbeatCheck) Category() string {
+	return "Daemon"
+}
+
 // Run executes the heartbeat check.
-func (c *DaemonHeartbeatCheck) Run(ctx context.Context) CheckResult {
+func (c *DaemonHeartbeatCheck) Run(_ context.Context, _ bool) CheckResult {
 	if c.Identifier == "" || c.Endpoint == "" {
 		return CheckResult{
 			Name:   c.Name(),

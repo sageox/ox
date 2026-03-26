@@ -20,10 +20,10 @@ func (r *Runner) Register(c Check) {
 }
 
 // RunAll executes all registered checks and returns their results.
-func (r *Runner) RunAll(ctx context.Context) []CheckResult {
+func (r *Runner) RunAll(ctx context.Context, fix bool) []CheckResult {
 	results := make([]CheckResult, 0, len(r.checks))
 	for _, c := range r.checks {
-		results = append(results, c.Run(ctx))
+		results = append(results, c.Run(ctx, fix))
 	}
 	return results
 }

@@ -55,7 +55,7 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 
 	// run checks and convert to checkResult format
 	for _, check := range checks {
-		result := check.Run(ctx)
+		result := check.Run(ctx, false)
 
 		// skip empty results (StatusSkip with no message)
 		if result.Status == doctor.StatusSkip && result.Message == "" {
@@ -78,7 +78,7 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 	if healthStatus != nil {
 		sessionPushCheck.SetHealthStatus(healthStatus)
 	}
-	pushResult := sessionPushCheck.Run(ctx)
+	pushResult := sessionPushCheck.Run(ctx, opts.shouldFix(CheckSlugSessionPush))
 	// only include if not skipped without message
 	if pushResult.Status != doctor.StatusSkip || pushResult.Message != "" {
 		results = append(results, convertDoctorResult(pushResult))

@@ -70,10 +70,27 @@ var ErrInvalidRepoPath = errors.New("invalid repo path: path traversal or unsafe
 // exponential backoff — the slots will free up when in-progress clones finish.
 var ErrCloneSemaphoreTimeout = errors.New("clone semaphore timeout")
 
+// SyncOption configures optional SyncScheduler dependencies.
+type SyncOption func(*SyncScheduler)
+
+// WithGitRunner overrides the default git command runner.
+func WithGitRunner(g gitutil.GitRunner) SyncOption {
+	return func(s *SyncScheduler) { s.git = g }
+}
+
+// WithCredentialProvider overrides the default credential loader.
+func WithCredentialProvider(c CredentialProvider) SyncOption {
+	return func(s *SyncScheduler) { s.creds = c }
+}
+
 // SyncScheduler manages periodic sync operations.
 type SyncScheduler struct {
 	config *Config
 	logger *slog.Logger
+
+	// injectable dependencies (nil = production defaults, set in constructor)
+	git   gitutil.GitRunner
+	creds CredentialProvider
 
 	// state
 	mu       sync.Mutex
@@ -181,11 +198,12 @@ type TeamContextSyncStatus struct {
 }
 
 // NewSyncScheduler creates a new sync scheduler.
-func NewSyncScheduler(cfg *Config, logger *slog.Logger) *SyncScheduler {
+// Optional SyncOption values override default dependencies for testing.
+func NewSyncScheduler(cfg *Config, logger *slog.Logger, opts ...SyncOption) *SyncScheduler {
 	// get repo name for workspace registry
 	repoName := filepath.Base(cfg.ProjectRoot)
 
-	return &SyncScheduler{
+	s := &SyncScheduler{
 		config:              cfg,
 		logger:              logger,
 		triggerChan:         make(chan struct{}, 1), // buffered to prevent blocking on trigger
@@ -197,6 +215,20 @@ func NewSyncScheduler(cfg *Config, logger *slog.Logger) *SyncScheduler {
 		workspaceRegistry:   NewWorkspaceRegistry(cfg.ProjectRoot, repoName),
 		versionCache:        NewVersionCache(logger),
 	}
+
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	// production defaults for nil dependencies
+	if s.git == nil {
+		s.git = gitutil.DefaultRunner()
+	}
+	if s.creds == nil {
+		s.creds = &realCredentialProvider{}
+	}
+
+	return s
 }
 
 // SetActivityCallback sets the callback for activity tracking.
@@ -998,7 +1030,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 // Non-fatal: failures are logged but don't block the sync cycle.
 func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string) {
 	// check for unpushed murmur commits
-	out, err := gitutil.RunGit(ctx, ledgerPath, "log", "--oneline", "origin/main..HEAD", "--", "data/murmurs/")
+	out, err := s.git.RunGit(ctx, ledgerPath, "log", "--oneline", "origin/main..HEAD", "--", "data/murmurs/")
 	if err != nil || strings.TrimSpace(out) == "" {
 		return
 	}
@@ -1302,7 +1334,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	cloneURL := payload.CloneURL
 	endpointURL := s.workspaceRegistry.GetEndpoint()
 	s.logger.Info("checkout: loading credentials", "endpoint", endpointURL, "clone_url", payload.CloneURL)
-	if creds, err := gitserver.LoadCredentialsForEndpoint(endpointURL); err == nil && creds != nil && creds.Token != "" {
+	if creds, err := s.creds.LoadCredentialsForEndpoint(endpointURL); err == nil && creds != nil && creds.Token != "" {
 		s.logger.Info("checkout: injecting git credentials", "token_len", len(creds.Token), "endpoint", endpointURL)
 		cloneURL = injectGitCredentials(payload.CloneURL, "oauth2", creds.Token)
 	} else if err != nil {

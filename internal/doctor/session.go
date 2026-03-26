@@ -52,8 +52,14 @@ func (c *SessionCheck) Name() string {
 	return "Session Health"
 }
 
+// Category returns the check category.
+func (c *SessionCheck) Category() string {
+	return "Sessions"
+}
+
+
 // Run executes all session health checks.
-func (c *SessionCheck) Run(ctx context.Context) CheckResult {
+func (c *SessionCheck) Run(_ context.Context, _ bool) CheckResult {
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
 
 	// aggregate all sub-checks into a single result
@@ -110,8 +116,14 @@ func (c *SessionStorageCheck) Name() string {
 	return "session storage writable"
 }
 
+// Category returns the check category.
+func (c *SessionStorageCheck) Category() string {
+	return "Sessions"
+}
+
+
 // Run executes the storage check.
-func (c *SessionStorageCheck) Run(ctx context.Context) CheckResult {
+func (c *SessionStorageCheck) Run(_ context.Context, _ bool) CheckResult {
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
 	shortPath := session.ShortenPath(status.StoragePath)
 
@@ -160,8 +172,14 @@ func (c *SessionRepoCheck) Name() string {
 	return "ledger cloned"
 }
 
+// Category returns the check category.
+func (c *SessionRepoCheck) Category() string {
+	return "Sessions"
+}
+
+
 // Run executes the repo check.
-func (c *SessionRepoCheck) Run(ctx context.Context) CheckResult {
+func (c *SessionRepoCheck) Run(_ context.Context, _ bool) CheckResult {
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
 
 	if status.RepoCloned {
@@ -218,8 +236,14 @@ func (c *SessionRecordingCheck) Name() string {
 	return "recording"
 }
 
+// Category returns the check category.
+func (c *SessionRecordingCheck) Category() string {
+	return "Sessions"
+}
+
+
 // Run executes the recording check.
-func (c *SessionRecordingCheck) Run(ctx context.Context) CheckResult {
+func (c *SessionRecordingCheck) Run(_ context.Context, _ bool) CheckResult {
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
 
 	if !status.IsRecordingActive || status.Recording == nil {
@@ -264,8 +288,14 @@ func (c *SessionPendingCheck) Name() string {
 	return "pending sessions"
 }
 
+// Category returns the check category.
+func (c *SessionPendingCheck) Category() string {
+	return "Sessions"
+}
+
+
 // Run executes the pending check.
-func (c *SessionPendingCheck) Run(ctx context.Context) CheckResult {
+func (c *SessionPendingCheck) Run(_ context.Context, _ bool) CheckResult {
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
 
 	// only show this check if repo is cloned
@@ -312,8 +342,14 @@ func (c *SessionStaleCheck) Name() string {
 	return "stale recording"
 }
 
+// Category returns the check category.
+func (c *SessionStaleCheck) Category() string {
+	return "Sessions"
+}
+
+
 // Run executes the stale recording check.
-func (c *SessionStaleCheck) Run(ctx context.Context) CheckResult {
+func (c *SessionStaleCheck) Run(_ context.Context, _ bool) CheckResult {
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
 
 	// only relevant if there's an active recording
@@ -375,8 +411,14 @@ func (c *SessionSyncCheck) Name() string {
 	return "synced with remote"
 }
 
+// Category returns the check category.
+func (c *SessionSyncCheck) Category() string {
+	return "Sessions"
+}
+
+
 // Run executes the sync check.
-func (c *SessionSyncCheck) Run(ctx context.Context) CheckResult {
+func (c *SessionSyncCheck) Run(_ context.Context, _ bool) CheckResult {
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
 
 	// only show this check if repo is cloned
@@ -427,8 +469,14 @@ func (c *SessionModeCheck) Name() string {
 	return "session recording"
 }
 
+// Category returns the check category.
+func (c *SessionModeCheck) Category() string {
+	return "Sessions"
+}
+
+
 // Run executes the session recording check.
-func (c *SessionModeCheck) Run(ctx context.Context) CheckResult {
+func (c *SessionModeCheck) Run(_ context.Context, _ bool) CheckResult {
 	resolved := config.ResolveSessionRecording(c.gitRoot)
 
 	// format source for display
@@ -475,8 +523,14 @@ func (c *SessionLedgerCheck) Name() string {
 	return "ledger for sessions"
 }
 
+// Category returns the check category.
+func (c *SessionLedgerCheck) Category() string {
+	return "Sessions"
+}
+
+
 // Run executes the ledger check.
-func (c *SessionLedgerCheck) Run(ctx context.Context) CheckResult {
+func (c *SessionLedgerCheck) Run(_ context.Context, _ bool) CheckResult {
 	resolved := config.ResolveSessionRecording(c.gitRoot)
 
 	// skip if session recording is disabled
@@ -541,8 +595,14 @@ func (c *SessionOrphanedCheck) Name() string {
 	return "orphaned recordings"
 }
 
+// Category returns the check category.
+func (c *SessionOrphanedCheck) Category() string {
+	return "Sessions"
+}
+
+
 // Run executes the orphaned recording check.
-func (c *SessionOrphanedCheck) Run(ctx context.Context) CheckResult {
+func (c *SessionOrphanedCheck) Run(_ context.Context, _ bool) CheckResult {
 	// phase 1: instant ghost cleanup using PID liveness (no time threshold)
 	ghostResult := session.CleanupGhostSessions(c.gitRoot)
 
@@ -653,8 +713,14 @@ func (c *SessionStopIncompleteCheck) Name() string {
 	return "incomplete stop"
 }
 
+// Category returns the check category.
+func (c *SessionStopIncompleteCheck) Category() string {
+	return "Sessions"
+}
+
+
 // Run detects recordings with StopIncomplete=true.
-func (c *SessionStopIncompleteCheck) Run(ctx context.Context) CheckResult {
+func (c *SessionStopIncompleteCheck) Run(_ context.Context, _ bool) CheckResult {
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
 
 	if !status.IsStopIncomplete {
@@ -697,6 +763,12 @@ func (c *SessionIncompleteCheck) Name() string {
 	return "incomplete sessions"
 }
 
+// Category returns the check category.
+func (c *SessionIncompleteCheck) Category() string {
+	return "Sessions"
+}
+
+
 // IncompleteSessionIssue describes what's missing for a session file.
 type IncompleteSessionIssue struct {
 	Path           string
@@ -707,7 +779,7 @@ type IncompleteSessionIssue struct {
 }
 
 // Run executes the incomplete session check.
-func (c *SessionIncompleteCheck) Run(ctx context.Context) CheckResult {
+func (c *SessionIncompleteCheck) Run(_ context.Context, _ bool) CheckResult {
 	// get ledger path using same pattern as SessionStorageCheck
 	ledgerPath := c.getLedgerPath()
 	if ledgerPath == "" {
@@ -972,9 +1044,15 @@ func (c *SessionAutoStageCheck) Name() string {
 	return "session files staged"
 }
 
+// Category returns the check category.
+func (c *SessionAutoStageCheck) Category() string {
+	return "Sessions"
+}
+
+
 // Run executes the auto-stage check.
 // This check automatically stages unstaged session files in the ledger's sessions/ directory.
-func (c *SessionAutoStageCheck) Run(ctx context.Context) CheckResult {
+func (c *SessionAutoStageCheck) Run(_ context.Context, _ bool) CheckResult {
 	// get ledger path
 	ledgerPath := c.getLedgerPath()
 	if ledgerPath == "" {
@@ -1177,8 +1255,14 @@ func (c *SessionPushCheck) Name() string {
 	return "session push"
 }
 
+// Category returns the check category.
+func (c *SessionPushCheck) Category() string {
+	return "Sessions"
+}
+
+
 // Run executes the session push check.
-func (c *SessionPushCheck) Run(ctx context.Context) CheckResult {
+func (c *SessionPushCheck) Run(_ context.Context, _ bool) CheckResult {
 	// get ledger path
 	ledgerPath := c.getLedgerPath()
 	if ledgerPath == "" {

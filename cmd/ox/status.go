@@ -23,103 +23,24 @@ import (
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/status"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/tui"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
 
-// statusJSONOutput is the JSON output structure for ox status --json
-type statusJSONOutput struct {
-	Auth         *statusAuthJSON         `json:"auth"`
-	Config       *statusConfigJSON       `json:"config"`
-	Project      *statusProjectJSON      `json:"project"`
-	Ledger       *statusLedgerJSON       `json:"ledger"`
-	TeamContexts []statusTeamContextJSON `json:"team_contexts,omitempty"`
-	AICoworkers  []statusAICoworkerJSON  `json:"ai_coworkers,omitempty"`
-	Daemon       *statusDaemonJSON       `json:"daemon,omitempty"`
-	Version      *statusVersionJSON      `json:"version,omitempty"`
-}
-
-type statusAICoworkerJSON struct {
-	AgentID       string `json:"agent_id"`
-	ContextTokens int64  `json:"context_tokens"`
-	CommandCount  int    `json:"command_count"`
-	Status        string `json:"status"`
-	Age           string `json:"age"`
-}
-
-type statusVersionJSON struct {
-	Current         string `json:"current"`
-	Latest          string `json:"latest,omitempty"`
-	UpdateAvailable bool   `json:"update_available"`
-}
-
-type statusAuthJSON struct {
-	Authenticated bool       `json:"authenticated"`
-	Endpoint      string     `json:"endpoint"`
-	User          string     `json:"user,omitempty"`
-	Email         string     `json:"email,omitempty"`
-	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
-	GitPATValid   *bool      `json:"git_pat_valid,omitempty"`
-	GitPATReason  string     `json:"git_pat_reason,omitempty"`
-	Error         string     `json:"error,omitempty"`
-}
-
-type statusConfigJSON struct {
-	UserConfigDir  string `json:"user_config_dir"`
-	AuthFile       string `json:"auth_file"`
-	AuthFileExists bool   `json:"auth_file_exists"`
-}
-
-type statusProjectJSON struct {
-	Initialized bool                 `json:"initialized"`
-	Directory   string               `json:"directory"`
-	ConfigPath  string               `json:"config_path,omitempty"`
-	CodeIndex   *statusCodeIndexJSON `json:"code_index,omitempty"`
-}
-
-type statusCodeIndexJSON struct {
-	Indexed     bool       `json:"indexed"`
-	LastIndexed *time.Time `json:"last_indexed,omitempty"`
-	IndexingNow bool       `json:"indexing_now"`
-	Commits     int        `json:"commits,omitempty"`
-	Blobs       int        `json:"blobs,omitempty"`
-	Symbols     int        `json:"symbols,omitempty"`
-	Error       string     `json:"error,omitempty"`
-}
-
-type statusLedgerJSON struct {
-	Configured  bool   `json:"configured"`
-	Path        string `json:"path,omitempty"`
-	Exists      bool   `json:"exists"`
-	Branch      string `json:"branch,omitempty"`
-	Status      string `json:"status,omitempty"`
-	Error       string `json:"error,omitempty"`
-	Visibility  string `json:"visibility,omitempty"`
-	AccessLevel string `json:"access_level,omitempty"`
-}
-
-type statusTeamContextJSON struct {
-	TeamID   string     `json:"team_id"`
-	TeamName string     `json:"team_name,omitempty"`
-	Path     string     `json:"path"`
-	Exists   bool       `json:"exists"`
-	Branch   string     `json:"branch,omitempty"`
-	Status   string     `json:"status,omitempty"`
-	Error    string     `json:"error,omitempty"`
-	LastSync *time.Time `json:"last_sync,omitempty"`
-	Stale    bool       `json:"stale,omitempty"`
-}
-
-type statusDaemonJSON struct {
-	Running       bool   `json:"running"`
-	Pid           int    `json:"pid,omitempty"`
-	UptimeSeconds int64  `json:"uptime_seconds,omitempty"`
-	TotalSyncs    int    `json:"total_syncs,omitempty"`
-	SyncsLastHour int    `json:"syncs_last_hour,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
-}
+// type aliases for status JSON types (defined in internal/status)
+type statusJSONOutput = status.JSONOutput
+type statusAICoworkerJSON = status.AICoworkerJSON
+type statusVersionJSON = status.VersionJSON
+type statusAuthJSON = status.AuthJSON
+type statusConfigJSON = status.ConfigJSON
+type statusProjectJSON = status.ProjectJSON
+type statusCodeIndexJSON = status.CodeIndexJSON
+type statusLedgerJSON = status.LedgerJSON
+type statusTeamContextJSON = status.TeamContextJSON
+type statusDaemonJSON = status.DaemonJSON
 
 var statusJSONFlag bool
 
@@ -170,41 +91,8 @@ var (
 				Foreground(cli.ColorPrivate)
 )
 
-// inferSemantic auto-detects value semantic type from context
-func inferSemantic(label, value string) string {
-	valueLower := strings.ToLower(value)
-	labelLower := strings.ToLower(label)
-
-	// success indicators
-	if valueLower == "logged in" || valueLower == "yes" ||
-		valueLower == "initialized" || valueLower == "enabled" ||
-		valueLower == "true" {
-		return "success"
-	}
-
-	// error/negative indicators
-	if valueLower == "not logged in" || valueLower == "no" ||
-		valueLower == "not initialized" || valueLower == "none" ||
-		valueLower == "disabled" || valueLower == "false" {
-		return "error"
-	}
-
-	// highlight important user identity data in gold
-	if labelLower == "user" || labelLower == "email" {
-		return "highlight"
-	}
-
-	// muted for technical details (IDs, paths, directories)
-	if strings.Contains(labelLower, "id") ||
-		strings.Contains(labelLower, "path") ||
-		strings.Contains(labelLower, "directory") ||
-		strings.Contains(labelLower, "file") ||
-		strings.Contains(labelLower, "expires") {
-		return "muted"
-	}
-
-	return "default"
-}
+// inferSemantic delegates to status.InferSemantic.
+var inferSemantic = status.InferSemantic
 
 // formatValue applies semantic styling to a value
 func formatValue(value string, semantic string) string {
@@ -281,18 +169,8 @@ func renderTable(header string, rows [][]string) string {
 	return b.String()
 }
 
-// gitRepoStatus holds information about a git repository's status
-type gitRepoStatus struct {
-	Path             string
-	Exists           bool
-	Branch           string
-	UncommittedCount int
-	IsSynced         bool
-	HasLastSync      bool
-	LastSync         time.Time
-	BehindCount      int
-	Error            string
-}
+// type alias for git repo status (defined in internal/status)
+type gitRepoStatus = status.GitRepoStatus
 
 // getGitRepoStatus checks the status of a git repository at the given path.
 // Returns status info including branch, uncommitted changes, and sync state.
@@ -347,82 +225,14 @@ func getGitRepoStatus(repoPath string, lastSync time.Time, hasLastSync bool) git
 	return status
 }
 
-// formatGitRepoStatus formats the git repo status for display
-func formatGitRepoStatus(status gitRepoStatus) (string, string) {
-	if !status.Exists {
-		return "not found", "error"
-	}
+// formatGitRepoStatus delegates to status.FormatGitRepoStatus.
+var formatGitRepoStatus = status.FormatGitRepoStatus
 
-	if status.Error != "" {
-		return status.Error, "error"
-	}
+// formatTimeAgo delegates to status.FormatTimeAgo.
+var formatTimeAgo = status.FormatTimeAgo
 
-	var parts []string
-
-	if status.UncommittedCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d uncommitted", status.UncommittedCount))
-	} else {
-		parts = append(parts, "synced")
-	}
-
-	result := strings.Join(parts, ", ")
-
-	if status.HasLastSync {
-		result += fmt.Sprintf(" (%s)", formatTimeAgo(status.LastSync))
-	}
-
-	if status.UncommittedCount > 0 {
-		return result, "warning"
-	}
-	return result, "success"
-}
-
-// formatTimeAgo formats a time as a human-readable relative time
-func formatTimeAgo(t time.Time) string {
-	now := time.Now()
-	diff := now.Sub(t)
-
-	switch {
-	case diff < time.Minute:
-		return "just now"
-	case diff < time.Hour:
-		mins := int(diff.Minutes())
-		if mins == 1 {
-			return "1 minute ago"
-		}
-		return fmt.Sprintf("%d minutes ago", mins)
-	case diff < 24*time.Hour:
-		hours := int(diff.Hours())
-		if hours == 1 {
-			return "1 hour ago"
-		}
-		return fmt.Sprintf("%d hours ago", hours)
-	case diff < 7*24*time.Hour:
-		days := int(diff.Hours() / 24)
-		if days == 1 {
-			return "1 day ago"
-		}
-		return fmt.Sprintf("%d days ago", days)
-	default:
-		weeks := int(diff.Hours() / 24 / 7)
-		if weeks == 1 {
-			return "1 week ago"
-		}
-		return fmt.Sprintf("%d weeks ago", weeks)
-	}
-}
-
-// formatEndpointDisplay returns a shorter display name for an endpoint URL.
-// e.g., "https://api.test.sageox.ai" -> "api.test.sageox.ai"
-func formatEndpointDisplay(endpointURL string) string {
-	if endpointURL == "" {
-		return "(default)"
-	}
-	// strip protocol prefix for cleaner display
-	endpointURL = strings.TrimPrefix(endpointURL, "https://")
-	endpointURL = strings.TrimPrefix(endpointURL, "http://")
-	return endpointURL
-}
+// formatEndpointDisplay delegates to status.FormatEndpointDisplay.
+var formatEndpointDisplay = status.FormatEndpointDisplay
 
 // getGitRemoteURL returns the origin remote URL for a git repo.
 // Returns empty string on error or if remote doesn't exist.
@@ -438,42 +248,8 @@ func getGitRemoteURL(repoPath string) string {
 	return strings.TrimSpace(string(output))
 }
 
-// extractGitHost extracts the hostname from a git clone URL.
-// Handles both HTTPS (https://git.example.com/...) and SSH (git@git.example.com:...) URLs.
-// Returns empty string if parsing fails.
-func extractGitHost(cloneURL string) string {
-	if cloneURL == "" {
-		return ""
-	}
-
-	// handle SSH URLs (git@host:path)
-	if strings.Contains(cloneURL, "@") && !strings.Contains(cloneURL, "://") {
-		// git@git.example.com:user/repo.git -> git.example.com
-		parts := strings.SplitN(cloneURL, "@", 2)
-		if len(parts) == 2 {
-			hostPart := strings.SplitN(parts[1], ":", 2)
-			if len(hostPart) >= 1 {
-				return hostPart[0]
-			}
-		}
-		return ""
-	}
-
-	// handle HTTPS URLs
-	cloneURL = strings.TrimPrefix(cloneURL, "https://")
-	cloneURL = strings.TrimPrefix(cloneURL, "http://")
-
-	// remove credentials if present (oauth2:token@host)
-	if idx := strings.Index(cloneURL, "@"); idx != -1 {
-		cloneURL = cloneURL[idx+1:]
-	}
-
-	// extract host (before first /)
-	if idx := strings.Index(cloneURL, "/"); idx != -1 {
-		return cloneURL[:idx]
-	}
-	return cloneURL
-}
+// extractGitHost delegates to status.ExtractGitHost.
+var extractGitHost = status.ExtractGitHost
 
 // getLedgerRemoteURL fetches the ledger git URL from the cloud API.
 // Returns empty string if not available or on error.
@@ -1413,35 +1189,14 @@ func renderAICoworkersSection(client *daemon.Client) string {
 	return b.String()
 }
 
-// estimateTokens estimates token count from byte count (~4 bytes per token for English/code)
-func estimateTokens(bytes int64) int {
-	return int(bytes / 4)
-}
+// estimateTokens delegates to status.EstimateTokens.
+var estimateTokens = status.EstimateTokens
 
-// formatTokenCount formats a token count in human-readable form (e.g., "3.1K", "1.2M")
-func formatTokenCount(tokens int) string {
-	if tokens < 1000 {
-		return fmt.Sprintf("%d", tokens)
-	}
-	if tokens < 1_000_000 {
-		return fmt.Sprintf("%.1fK", float64(tokens)/1000)
-	}
-	return fmt.Sprintf("%.1fM", float64(tokens)/1_000_000)
-}
+// formatTokenCount delegates to status.FormatTokenCount.
+var formatTokenCount = status.FormatTokenCount
 
-// formatDurationShort formats a duration in a short human-readable form
-func formatDurationShort(d time.Duration) string {
-	if d < time.Second {
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	}
-	if d < time.Minute {
-		return fmt.Sprintf("%.1fs", d.Seconds())
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("%.1fm", d.Minutes())
-	}
-	return fmt.Sprintf("%.1fh", d.Hours())
-}
+// formatDurationShort delegates to status.FormatDurationShort.
+var formatDurationShort = status.FormatDurationShort
 
 var statusCmd = &cobra.Command{
 	Use:   "status",

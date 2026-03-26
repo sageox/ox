@@ -9,15 +9,23 @@ import (
 
 // mockCheck implements Check for testing.
 type mockCheck struct {
-	name   string
-	result CheckResult
+	name     string
+	category string
+	result   CheckResult
 }
 
 func (m *mockCheck) Name() string {
 	return m.name
 }
 
-func (m *mockCheck) Run(ctx context.Context) CheckResult {
+func (m *mockCheck) Category() string {
+	if m.category != "" {
+		return m.category
+	}
+	return "test"
+}
+
+func (m *mockCheck) Run(_ context.Context, _ bool) CheckResult {
 	return m.result
 }
 
@@ -74,7 +82,8 @@ func TestCheckResult(t *testing.T) {
 
 func TestCheckInterface(t *testing.T) {
 	check := &mockCheck{
-		name: "mock check",
+		name:     "mock check",
+		category: "test",
 		result: CheckResult{
 			Name:    "mock check",
 			Status:  StatusPass,
@@ -83,9 +92,10 @@ func TestCheckInterface(t *testing.T) {
 	}
 
 	assert.Equal(t, "mock check", check.Name())
+	assert.Equal(t, "test", check.Category())
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	assert.Equal(t, StatusPass, result.Status)
 	assert.Equal(t, "passed", result.Message)

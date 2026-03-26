@@ -27,6 +27,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	sessionhtml "github.com/sageox/ox/internal/session/html"
+	"github.com/sageox/ox/internal/session/pipeline"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
@@ -60,14 +61,14 @@ Troubleshooting: If 'session already active' error, run session stop first. If a
 // sessionStopGuidance is behavioral guidance returned in the session stop JSON output.
 const sessionStopGuidance = `Session stopped and saved. Check the summary_prompt field — if present, follow its instructions to generate and push a rich summary. If summary generation fails, the session data is safe; run 'ox agent <id> doctor' to recover.`
 
-// ledger artifact filenames — single source of truth used by both
-// uploadSessionToLedger (write) and the post-prune path rewrite (read-back).
+// ledger artifact filenames — aliases for backward compat within package main.
+// Canonical definitions live in internal/session/pipeline.
 const (
-	ledgerFileRaw       = "raw.jsonl"
-	ledgerFileHTML      = "session.html"
-	ledgerFileSummaryMD = "summary.md"
-	ledgerFileSessionMD = "session.md"
-	ledgerFilePlan      = "plan.md" // may contain multiple plans as separate Markdown sections
+	ledgerFileRaw       = pipeline.LedgerFileRaw
+	ledgerFileHTML      = pipeline.LedgerFileHTML
+	ledgerFileSummaryMD = pipeline.LedgerFileSummaryMD
+	ledgerFileSessionMD = pipeline.LedgerFileSessionMD
+	ledgerFilePlan      = pipeline.LedgerFilePlan
 )
 
 // genericFormatHint shows the expected JSONL format for generic adapter session files.
@@ -75,22 +76,8 @@ const genericFormatHint = `{"type":"user","content":"Fix the login bug","timesta
 {"type":"assistant","content":"I'll investigate the auth flow...","timestamp":"2026-03-05T19:32:05Z"}
 {"type":"tool","content":"PASS","tool_name":"bash","tool_input":"go test ./...","timestamp":"2026-03-05T19:32:10Z"}`
 
-// sessionStartOutput is the JSON output format for session start.
-type sessionStartOutput struct {
-	Success  bool   `json:"success"`
-	Type     string `json:"type"`
-	AgentID  string `json:"agent_id"`
-	Title    string `json:"title,omitempty"`
-	Adapter  string `json:"adapter"`
-	Started  string `json:"started"`
-	Hint     string `json:"hint,omitempty"`     // suggests how to end recording
-	Notice   string `json:"notice,omitempty"`   // one-time notice the agent MUST show to the user
-	Guidance string `json:"guidance,omitempty"` // behavioral guidance for the agent during the session
-	// Generic adapter fields (omitted for deep adapters)
-	SessionFile string   `json:"session_file,omitempty"`
-	FormatHint  string   `json:"format_hint,omitempty"`
-	NextActions []string `json:"next_actions,omitempty"`
-}
+// sessionStartOutput aliases pipeline.StartOutput for backward compat within package main.
+type sessionStartOutput = pipeline.StartOutput
 
 // runAgentSessionStart starts recording a session for the agent.
 // Usage: ox agent <id> session start [--title "..."]
@@ -307,10 +294,8 @@ func printSessionStartText(agentID, adapterName, title, notice string, startedAt
 	fmt.Printf("  Run %s to end recording\n", cli.StyleCommand.Render("/ox-session-stop"))
 }
 
-// isGenericAdapter returns true if the adapter name indicates the generic adapter.
-func isGenericAdapter(adapterName string) bool {
-	return adapterName == "generic"
-}
+// isGenericAdapter delegates to pipeline.IsGenericAdapter.
+var isGenericAdapter = pipeline.IsGenericAdapter
 
 // isManualSessionAgent returns true for agent types that require explicit
 // adapter selection instead of generic/deep autodetection.
@@ -651,31 +636,8 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 	return nil
 }
 
-// sessionStopOutput is the JSON output format for session stop.
-type sessionStopOutput struct {
-	Success          bool             `json:"success"`
-	Type             string           `json:"type"`
-	AgentID          string           `json:"agent_id"`
-	Title            string           `json:"title,omitempty"`
-	Duration         string           `json:"duration"`
-	RawPath          string           `json:"raw_path,omitempty"`
-	HTMLPath         string           `json:"html_path,omitempty"`
-	SummaryMDPath    string           `json:"summary_md_path,omitempty"`
-	SessionMDPath    string           `json:"session_md_path,omitempty"`
-	PlanPath         string           `json:"plan_path,omitempty"`
-	EntryCount       int              `json:"entry_count,omitempty"`
-	SecretsRedacted  int              `json:"secrets_redacted,omitempty"`
-	Summary          string           `json:"summary,omitempty"`
-	SummaryPrompt    string           `json:"summary_prompt,omitempty"`
-	Model            string           `json:"model,omitempty"`
-	AgentVersion     string           `json:"agent_version,omitempty"`
-	LedgerSessionDir string           `json:"ledger_session_dir,omitempty"` // path to session dir in ledger
-	UploadWarning    string           `json:"upload_warning,omitempty"`     // set when ledger upload failed
-	DataWarnings     []string         `json:"data_warnings,omitempty"`      // data quality warnings from validation
-	Guidance         string           `json:"guidance,omitempty"`           // behavioral guidance for the agent
-	TotalMs          int64            `json:"total_ms,omitempty"`           // wall clock for entire session stop
-	Timing           map[string]int64 `json:"timing,omitempty"`             // per-phase breakdown (ms)
-}
+// sessionStopOutput aliases pipeline.StopOutput for backward compat within package main.
+type sessionStopOutput = pipeline.StopOutput
 
 // parseTitle extracts --title value from args
 func parseTitle(args []string) string {
@@ -690,25 +652,8 @@ func parseTitle(args []string) string {
 	return ""
 }
 
-// agentSessionResult contains outcomes from session processing
-type agentSessionResult struct {
-	RawPath          string
-	HTMLPath         string
-	SummaryMDPath    string
-	SessionMDPath    string
-	EntryCount       int
-	SecretsRedacted  int
-	AgentVersion     string
-	Model            string
-	Summary          string   // local summary text
-	SummaryPrompt    string   // prompt for calling agent to generate full summary
-	PlanPath         string   // path to plan.md (empty if no plan captured)
-	SessionName      string   // ledger session folder name (e.g. 2026-02-06T14-32-ryan-Ox7f3a)
-	LedgerSessionDir string   // full path to session dir in ledger (empty if upload failed)
-	UploadWarning    string   // non-empty when ledger upload failed (explains recovery)
-	DataWarnings     []string // data quality warnings from validation (reported to agent)
-	UploadMs         int64    // time spent on LFS upload + git push (ms)
-}
+// agentSessionResult aliases pipeline.Result for backward compat within package main.
+type agentSessionResult = pipeline.Result
 
 // processAgentSession reads, redacts secrets, and saves the session.
 // Processes the agent session data into stored artifacts (raw, events, HTML, markdown).
@@ -1038,28 +983,9 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 
 			// rewrite cache paths → ledger equivalents so JSON output and
 			// summary_prompt reference files that actually exist.
-			// raw.jsonl is guaranteed present (upload fails if copy fails);
-			// secondary artifacts are best-effort so we verify existence.
+			pipeline.RewriteLedgerPaths(pipeline.OSFileSystem{}, result)
+
 			if result.LedgerSessionDir != "" {
-				// raw is always present after successful upload
-				result.RawPath = filepath.Join(result.LedgerSessionDir, ledgerFileRaw)
-
-				rewriteIfExists := func(field *string, name string) {
-					if *field == "" {
-						return
-					}
-					p := filepath.Join(result.LedgerSessionDir, name)
-					if _, err := os.Stat(p); err == nil {
-						*field = p
-					} else {
-						*field = "" // didn't make it to ledger
-					}
-				}
-				rewriteIfExists(&result.HTMLPath, ledgerFileHTML)
-				rewriteIfExists(&result.SummaryMDPath, ledgerFileSummaryMD)
-				rewriteIfExists(&result.SessionMDPath, ledgerFileSessionMD)
-				rewriteIfExists(&result.PlanPath, ledgerFilePlan)
-
 				// rebuild summary prompt with ledger path; entries unchanged since redaction
 				result.SummaryPrompt = session.BuildSummaryPrompt(entries, result.RawPath, result.LedgerSessionDir)
 			}
@@ -1069,44 +995,13 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	return result, nil
 }
 
-// filterEntriesAfterStart removes entries with timestamps before the session
-// recording start time. Entries with zero timestamps are preserved (defensive:
-// don't drop entries just because they lack timestamps).
-func filterEntriesAfterStart(entries []adapters.RawEntry, startedAt time.Time) []adapters.RawEntry {
-	filtered := make([]adapters.RawEntry, 0, len(entries))
-	for _, entry := range entries {
-		if entry.Timestamp.IsZero() || !entry.Timestamp.Before(startedAt) {
-			filtered = append(filtered, entry)
-		}
-	}
-	return filtered
-}
+// filterEntriesAfterStart delegates to pipeline.FilterEntriesAfterStart.
+var filterEntriesAfterStart = pipeline.FilterEntriesAfterStart
 
 // uploadSessionToLedger copies content files from cache to ledger, uploads to LFS,
 // writes meta.json, and commits+pushes. This is phase 2 of the two-phase design:
-// isAuthRelatedError checks if an error message indicates an auth/credential problem.
-// Used to surface targeted "run ox login" guidance instead of a generic error dump.
-func isAuthRelatedError(msg string) bool {
-	authPatterns := []string{
-		"authentication required",
-		"credentials expired",
-		"no git credentials",
-		"empty token",
-		"run 'ox login'",
-		"auth token",
-		"HTTP 401",
-		"HTTP 403",
-		"credential",
-		"PAT rejected",
-	}
-	lower := strings.ToLower(msg)
-	for _, p := range authPatterns {
-		if strings.Contains(lower, strings.ToLower(p)) {
-			return true
-		}
-	}
-	return false
-}
+// isAuthRelatedError delegates to pipeline.IsAuthRelatedError.
+var isAuthRelatedError = pipeline.IsAuthRelatedError
 
 // content files are uploaded to LFS blob storage first, then meta.json (containing
 // LFS OIDs) is committed to git. Content files themselves are .gitignore'd in the
@@ -1114,54 +1009,16 @@ func isAuthRelatedError(msg string) bool {
 // If this fails, the session data is safe in the local cache and doctor can retry.
 // ledgerPath and sessionName are pre-computed by the caller.
 func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string) error {
-	// guard: never upload a session with zero substantive entries
+	// copy raw.jsonl + secondary artifacts to ledger dir
+	if err := pipeline.CopySessionToLedger(pipeline.OSFileSystem{}, result, ledgerPath, sessionName); err != nil {
+		return err
+	}
 	if result.EntryCount == 0 {
-		slog.Info("skipping upload: zero entries", "session", sessionName)
-		return nil
+		return nil // CopySessionToLedger already skipped
 	}
 
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
-	if err := os.MkdirAll(sessionDir, 0755); err != nil {
-		return fmt.Errorf("create session dir: %w", err)
-	}
-
-	// raw.jsonl is the critical source of truth -- copy and verify it first.
-	// All other artifacts (events, HTML, summary, markdown) can be regenerated
-	// from raw.jsonl, so their copy failures are non-fatal.
-	if result.RawPath != "" {
-		dstPath := filepath.Join(sessionDir, ledgerFileRaw)
-		data, err := os.ReadFile(result.RawPath)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", ledgerFileRaw, err)
-		}
-		if err := os.WriteFile(dstPath, data, 0644); err != nil {
-			return fmt.Errorf("copy %s to ledger: %w", ledgerFileRaw, err)
-		}
-	}
-
-	// copy secondary artifacts (best-effort -- failures logged but don't abort upload)
-	secondaryFiles := map[string]string{
-		ledgerFileHTML:      result.HTMLPath,
-		ledgerFileSummaryMD: result.SummaryMDPath,
-		ledgerFileSessionMD: result.SessionMDPath,
-		ledgerFilePlan:      result.PlanPath,
-	}
-	for name, srcPath := range secondaryFiles {
-		if srcPath == "" {
-			continue
-		}
-		dstPath := filepath.Join(sessionDir, name)
-		data, err := os.ReadFile(srcPath)
-		if err != nil {
-			slog.Warn("skip secondary artifact", "file", name, "error", err)
-			continue
-		}
-		if err := os.WriteFile(dstPath, data, 0644); err != nil {
-			slog.Warn("skip secondary artifact", "file", name, "error", err)
-			continue
-		}
-	}
 
 	// write meta.json first (before LFS upload) to preserve session metadata even if LFS fails
 	projectEndpoint := endpoint.GetForProject(projectRoot)
@@ -1207,55 +1064,9 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	return nil
 }
 
-// copySessionCacheToLedger copies raw.jsonl and secondary artifacts from the local
-// cache to the ledger session directory. This is a fast, local-only operation that
-// makes the session data available for the daemon to upload+finalize asynchronously.
+// copySessionCacheToLedger delegates to pipeline.CopySessionToLedger with the real filesystem.
 func copySessionCacheToLedger(result *agentSessionResult, ledgerPath, sessionName string) error {
-	// guard: never copy a session with zero substantive entries
-	if result.EntryCount == 0 {
-		slog.Info("skipping async copy: zero entries", "session", sessionName)
-		return nil
-	}
-
-	sessionsDir := filepath.Join(ledgerPath, "sessions")
-	sessionDir := filepath.Join(sessionsDir, sessionName)
-	if err := os.MkdirAll(sessionDir, 0755); err != nil {
-		return fmt.Errorf("create session dir: %w", err)
-	}
-
-	// raw.jsonl is critical — must succeed
-	if result.RawPath != "" {
-		data, err := os.ReadFile(result.RawPath)
-		if err != nil {
-			return fmt.Errorf("read raw.jsonl: %w", err)
-		}
-		if err := os.WriteFile(filepath.Join(sessionDir, ledgerFileRaw), data, 0644); err != nil {
-			return fmt.Errorf("copy raw.jsonl: %w", err)
-		}
-	}
-
-	// secondary artifacts — best-effort
-	secondaryFiles := map[string]string{
-		ledgerFileHTML:      result.HTMLPath,
-		ledgerFileSummaryMD: result.SummaryMDPath,
-		ledgerFileSessionMD: result.SessionMDPath,
-		ledgerFilePlan:      result.PlanPath,
-	}
-	for name, srcPath := range secondaryFiles {
-		if srcPath == "" {
-			continue
-		}
-		data, err := os.ReadFile(srcPath)
-		if err != nil {
-			slog.Debug("skip secondary artifact in async copy", "file", name, "error", err)
-			continue
-		}
-		if err := os.WriteFile(filepath.Join(sessionDir, name), data, 0644); err != nil {
-			slog.Debug("skip secondary artifact in async copy", "file", name, "error", err)
-		}
-	}
-
-	return nil
+	return pipeline.CopySessionToLedger(pipeline.OSFileSystem{}, result, ledgerPath, sessionName)
 }
 
 // signalDaemonSessionFinalize sends a fire-and-forget IPC message to the daemon
@@ -1273,13 +1084,8 @@ func signalDaemonSessionFinalize(sessionName, ledgerPath, cachePath, projectRoot
 
 // Note: getAuthenticatedUsername is defined in session_helpers.go
 
-// sessionRemindOutput is the JSON output format for session remind.
-type sessionRemindOutput struct {
-	Success bool   `json:"success"`
-	Type    string `json:"type"`
-	AgentID string `json:"agent_id"`
-	Message string `json:"message"`
-}
+// sessionRemindOutput aliases pipeline.RemindOutput for backward compat within package main.
+type sessionRemindOutput = pipeline.RemindOutput
 
 // runAgentSessionRemind emits reminder info for the agent.
 // Usage: ox agent <id> session remind
@@ -1352,19 +1158,8 @@ func runAgentSessionRemind(inst *agentinstance.Instance) error {
 	return nil
 }
 
-// sessionSummarizeOutput is the JSON output format for session summarize.
-type sessionSummarizeOutput struct {
-	Success       bool     `json:"success"`
-	Type          string   `json:"type"`
-	AgentID       string   `json:"agent_id"`
-	Summary       string   `json:"summary"`
-	KeyActions    []string `json:"key_actions,omitempty"`
-	Outcome       string   `json:"outcome,omitempty"`
-	TopicsFound   []string `json:"topics_found,omitempty"`
-	EntryCount    int      `json:"entry_count"`
-	FilePath      string   `json:"file_path,omitempty"`
-	SummaryPrompt string   `json:"summary_prompt,omitempty"`
-}
+// sessionSummarizeOutput aliases pipeline.SummarizeOutput for backward compat within package main.
+type sessionSummarizeOutput = pipeline.SummarizeOutput
 
 // runAgentSessionSummarize generates a summary of the session.
 // Usage: ox agent <id> session summarize [--file <path>]
@@ -1538,15 +1333,8 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 	return nil
 }
 
-// sessionHTMLOutput is the JSON output format for session html.
-type sessionHTMLOutput struct {
-	Success   bool   `json:"success"`
-	Type      string `json:"type"`
-	AgentID   string `json:"agent_id"`
-	Generated bool   `json:"generated"`
-	HTMLPath  string `json:"html_path"`
-	Message   string `json:"message"`
-}
+// sessionHTMLOutput aliases pipeline.HTMLOutput for backward compat within package main.
+type sessionHTMLOutput = pipeline.HTMLOutput
 
 // runAgentSessionHTML generates or displays info about HTML session viewer.
 // Usage: ox agent <id> session html [--file <path>]

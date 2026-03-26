@@ -5,27 +5,20 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+
+	claude "github.com/sageox/ox/internal/hooks/claude"
 
 	"github.com/sageox/ox/internal/constants"
 )
 
-// ClaudeHook represents a single hook configuration
-type ClaudeHook struct {
-	Command string `json:"command"`
-	Type    string `json:"type"`
-}
+// ClaudeHook is an alias for the extracted type.
+type ClaudeHook = claude.Hook
 
-// ClaudeHookEntry represents an entry in the hooks array
-type ClaudeHookEntry struct {
-	Hooks   []ClaudeHook `json:"hooks"`
-	Matcher string       `json:"matcher"`
-}
+// ClaudeHookEntry is an alias for the extracted type.
+type ClaudeHookEntry = claude.HookEntry
 
-// ClaudeSettings represents the structure of ~/.claude/settings.json
-type ClaudeSettings struct {
-	Hooks map[string][]ClaudeHookEntry `json:"hooks,omitempty"`
-}
+// ClaudeSettings is an alias for the extracted type.
+type ClaudeSettings = claude.Settings
 
 // readSettingsFileRaw reads a settings file preserving all top-level keys.
 // Returns typed hooks and a raw map of everything else, preventing data loss
@@ -42,30 +35,12 @@ func readSettingsFileRaw(path string) (*ClaudeSettings, map[string]json.RawMessa
 		return nil, nil, fmt.Errorf("failed to read settings file: %w", err)
 	}
 
-	if len(data) == 0 {
-		return &ClaudeSettings{
-			Hooks: make(map[string][]ClaudeHookEntry),
-		}, make(map[string]json.RawMessage), nil
-	}
-
-	// parse all top-level keys as raw JSON
-	var rawMap map[string]json.RawMessage
-	if err := json.Unmarshal(data, &rawMap); err != nil {
+	settings, rawMap, err := claude.ParseSettingsRaw(data)
+	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse settings file: %w", err)
 	}
 
-	// extract hooks into typed struct
-	var settings ClaudeSettings
-	if hooksRaw, ok := rawMap["hooks"]; ok {
-		if err := json.Unmarshal(hooksRaw, &settings.Hooks); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse hooks: %w", err)
-		}
-	}
-	if settings.Hooks == nil {
-		settings.Hooks = make(map[string][]ClaudeHookEntry)
-	}
-
-	return &settings, rawMap, nil
+	return settings, rawMap, nil
 }
 
 // writeSettingsFileRaw writes settings back, merging typed hooks into the raw map
@@ -77,24 +52,9 @@ func writeSettingsFileRaw(path string, settings *ClaudeSettings, rawMap map[stri
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
-	// marshal hooks back into raw map
-	if rawMap == nil {
-		rawMap = make(map[string]json.RawMessage)
-	}
-
-	if len(settings.Hooks) > 0 {
-		hooksJSON, err := json.Marshal(settings.Hooks)
-		if err != nil {
-			return fmt.Errorf("failed to marshal hooks: %w", err)
-		}
-		rawMap["hooks"] = hooksJSON
-	} else {
-		delete(rawMap, "hooks")
-	}
-
-	data, err := json.MarshalIndent(rawMap, "", "  ")
+	data, err := claude.MarshalSettings(settings, rawMap)
 	if err != nil {
-		return fmt.Errorf("failed to marshal settings: %w", err)
+		return err
 	}
 
 	if err := os.WriteFile(path, data, perm); err != nil {
@@ -178,50 +138,17 @@ func writeClaudeSettings(settings *ClaudeSettings) error {
 	return nil
 }
 
-func hasOxPrimeHook(entry ClaudeHookEntry) bool {
-	for _, hook := range entry.Hooks {
-		if hook.Type == hookType && isOxPrimeCommand(hook.Command) {
-			return true
-		}
-	}
-	return false
-}
+// delegates to extracted pure functions
+func hasOxPrimeHook(entry ClaudeHookEntry) bool    { return claude.HasOxPrimeHook(entry) }
+func hasAnyOxHook(entry ClaudeHookEntry) bool       { return claude.HasAnyOxHook(entry) }
+func isOxPrimeCommand(cmd string) bool              { return claude.IsOxPrimeCommand(cmd) }
+func isOxHookCommand(cmd string) bool               { return claude.IsOxHookCommand(cmd) }
+func isAnyOxCommand(cmd string) bool                { return claude.IsAnyOxCommand(cmd) }
+func removeOxPrimeHook(entry *ClaudeHookEntry)      { claude.RemoveOxPrimeHook(entry) }
+func removeAnyOxHook(entry *ClaudeHookEntry)        { claude.RemoveAnyOxHook(entry) }
 
-// hasAnyOxHook checks if an entry contains any ox hook command (prime or lifecycle).
-func hasAnyOxHook(entry ClaudeHookEntry) bool {
-	for _, hook := range entry.Hooks {
-		if hook.Type == hookType && isAnyOxCommand(hook.Command) {
-			return true
-		}
-	}
-	return false
-}
-
-// isOxPrimeCommand checks if a command is any variant of ox agent prime.
-// Recognizes both legacy commands (without AGENT_ENV) and new commands (with AGENT_ENV prefix).
-func isOxPrimeCommand(cmd string) bool {
-	return cmd == oxPrimeCommand || cmd == oxPrimeLegacy || strings.Contains(cmd, "ox agent prime")
-}
-
-// isOxHookCommand checks if a command is any variant of ox agent hook.
-func isOxHookCommand(cmd string) bool {
-	return strings.Contains(cmd, "ox agent hook")
-}
-
-// isAnyOxCommand checks if a command is any ox hook command (prime or lifecycle hook).
-func isAnyOxCommand(cmd string) bool {
-	return isOxPrimeCommand(cmd) || isOxHookCommand(cmd)
-}
-
-func removeOxPrimeHook(entry *ClaudeHookEntry) {
-	filtered := make([]ClaudeHook, 0)
-	for _, hook := range entry.Hooks {
-		// remove both legacy and new format
-		if !isOxPrimeCommand(hook.Command) || hook.Type != hookType {
-			filtered = append(filtered, hook)
-		}
-	}
-	entry.Hooks = filtered
+func mergeHookEntries(existing, new []ClaudeHookEntry) []ClaudeHookEntry {
+	return claude.MergeHookEntries(existing, new)
 }
 
 func uninstallClaudeHooks() error {
@@ -265,17 +192,6 @@ func uninstallClaudeHooks() error {
 	}
 
 	return writeClaudeSettings(settings)
-}
-
-// removeAnyOxHook removes all ox commands (prime and lifecycle) from an entry.
-func removeAnyOxHook(entry *ClaudeHookEntry) {
-	filtered := make([]ClaudeHook, 0)
-	for _, hook := range entry.Hooks {
-		if !isAnyOxCommand(hook.Command) || hook.Type != hookType {
-			filtered = append(filtered, hook)
-		}
-	}
-	entry.Hooks = filtered
 }
 
 func listClaudeHooks() (map[string]bool, error) {
@@ -405,77 +321,16 @@ func InstallProjectClaudeHooks(gitRoot string) error {
 	return nil
 }
 
-// mergeHookEntries merges new hook entries with existing ones.
-// Preserves existing non-ox hooks while updating/adding ox hooks.
-// Strips both old (ox agent prime) and new (ox agent hook) commands during merge.
-func mergeHookEntries(existing, new []ClaudeHookEntry) []ClaudeHookEntry {
-	// build map of new entries by matcher
-	newByMatcher := make(map[string]ClaudeHookEntry)
-	for _, entry := range new {
-		newByMatcher[entry.Matcher] = entry
-	}
-
-	// track which matchers we've handled
-	handled := make(map[string]bool)
-
-	// process existing entries: update ox hooks, preserve others
-	result := make([]ClaudeHookEntry, 0, len(existing)+len(new))
-	for _, entry := range existing {
-		if newEntry, hasNew := newByMatcher[entry.Matcher]; hasNew {
-			// matcher exists in new - merge hooks
-			mergedHooks := make([]ClaudeHook, 0)
-			// add non-ox hooks from existing (strip both old and new ox commands)
-			for _, hook := range entry.Hooks {
-				if !isAnyOxCommand(hook.Command) {
-					mergedHooks = append(mergedHooks, hook)
-				}
-			}
-			// add ox hooks from new
-			mergedHooks = append(mergedHooks, newEntry.Hooks...)
-			result = append(result, ClaudeHookEntry{
-				Matcher: entry.Matcher,
-				Hooks:   mergedHooks,
-			})
-			handled[entry.Matcher] = true
-		} else {
-			// check if this is an old ox-only entry with a specific matcher
-			// (e.g., old "startup", "resume", "clear", "compact" matchers)
-			// If it only contains ox commands, skip it entirely (superseded by new format)
-			hasNonOx := false
-			for _, hook := range entry.Hooks {
-				if !isAnyOxCommand(hook.Command) {
-					hasNonOx = true
-					break
-				}
-			}
-			if hasNonOx {
-				result = append(result, entry)
-			}
-			// else: pure ox entry with old matcher — drop it (superseded)
-		}
-	}
-
-	// add new entries that weren't handled
-	for _, entry := range new {
-		if !handled[entry.Matcher] {
-			result = append(result, entry)
-		}
-	}
-
-	return result
-}
-
 // HasProjectClaudeHooks checks if ox hooks are in .claude/settings.json (shared).
 // Falls back to settings.local.json during migration period.
-// Returns true only if BOTH SessionStart AND PreCompact have at least one ox hook.
+// Returns true only if ALL lifecycle events have at least one ox hook.
 func HasProjectClaudeHooks(gitRoot string) bool {
 	settings, err := readProjectClaudeSettings(gitRoot)
 	if err != nil {
 		return false
 	}
 
-	// check all lifecycle events, not just SessionStart/PreCompact,
-	// to detect stale hook installations missing newer events like PostToolUse
+	// check all lifecycle events to detect stale hook installations
 	for _, eventName := range claudeLifecycleEvents {
 		found := false
 		for _, entry := range settings.Hooks[eventName] {

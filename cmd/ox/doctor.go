@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,7 +16,9 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
+	"github.com/sageox/ox/internal/doctor/checks"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/ui"
 	"github.com/spf13/cobra"
@@ -480,6 +483,7 @@ func (p *doctorProgress) clear() {
 
 func runDoctorChecks(opts doctorOptions) []checkCategory {
 	var categories []checkCategory
+	ctx := context.Background()
 
 	progress := newDoctorProgress(opts.verbose)
 	defer progress.clear()
@@ -503,8 +507,10 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 
 	// Category 1: Project Structure
 	progress.show("Project Structure")
+	git := gitutil.DefaultRunner()
+	sageoxDirCheck := checks.NewSageoxDirectoryCheck(git)
 	projectChecks := []checkResult{
-		checkSageoxDirectory(),
+		convertDoctorResult(sageoxDirCheck.Run(ctx, false)),
 		checkSageoxGitignore(opts.shouldFix(CheckSlugSageoxGitignore)),
 	}
 	// only show legacy check if legacy files actually exist
@@ -598,10 +604,11 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 
 	// Category 4: Git Status (SageOx-specific git tracking)
 	progress.show("Git Status")
+	gitignoreCheck := checks.NewGitignoreCheck(git, nil)
 	gitStatusChecks := []checkResult{
 		checkGitStatus(),
 		checkSageoxFilesTracked(opts.shouldFix(CheckSlugGitignore)),
-		checkGitignore(opts.shouldFix(CheckSlugGitignore)),
+		convertDoctorResult(gitignoreCheck.Run(ctx, opts.shouldFix(CheckSlugGitignore))),
 		checkGitattributes(opts.shouldFix(CheckSlugGitattributes)),
 	}
 	// only show sageox remote check if .sageox is its own git repo
@@ -733,8 +740,9 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 	// Category 7: Ecosystem Tools
 	// SageOx is multiplayer - no offline mode checks needed
 	progress.show("Ecosystem")
+	oxPathCheck := checks.NewOxInPathCheck(nil)
 	ecosystemChecks := []checkResult{
-		checkOxInPath(),
+		convertDoctorResult(oxPathCheck.Run(ctx, false)),
 	}
 	categories = append(categories, checkCategory{
 		name:   "Ecosystem",

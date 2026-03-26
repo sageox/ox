@@ -479,7 +479,7 @@ func init() {
 			// This check runs automatically (FixLevelAuto) - always performs the fix
 			gitRoot := findGitRoot()
 			check := doctor.NewSessionAutoStageCheck(gitRoot)
-			result := check.Run(context.Background())
+			result := check.Run(context.Background(), fix)
 			return convertDoctorResult(result)
 		},
 	})
@@ -493,7 +493,7 @@ func init() {
 		Run: func(fix bool) checkResult {
 			gitRoot := findGitRoot()
 			check := doctor.NewSessionPushCheck(gitRoot, fix)
-			result := check.Run(context.Background())
+			result := check.Run(context.Background(), fix)
 			return convertDoctorResult(result)
 		},
 	})

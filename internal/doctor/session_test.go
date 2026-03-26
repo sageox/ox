@@ -24,7 +24,7 @@ func TestSessionStorageCheck(t *testing.T) {
 	assert.Equal(t, "session storage writable", check.Name())
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	// storage should be writable in test environment
 	assert.True(t, result.Status == StatusPass || result.Status == StatusFail, "unexpected status: %v", result.Status)
@@ -40,7 +40,7 @@ func TestSessionRepoCheck(t *testing.T) {
 	assert.Equal(t, "ledger cloned", check.Name())
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	// with sibling ledger pattern, result depends on whether the sibling ledger
 	// for the current cwd's git repo exists. Any valid status is acceptable.
@@ -58,7 +58,7 @@ func TestSessionRecordingCheck(t *testing.T) {
 	assert.Equal(t, "recording", check.Name())
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	// no recording should be active in test environment
 	assert.Equal(t, StatusSkip, result.Status)
@@ -74,7 +74,7 @@ func TestSessionPendingCheck(t *testing.T) {
 	assert.Equal(t, "pending sessions", check.Name())
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	// with sibling ledger pattern, result depends on whether the sibling ledger
 	// for the current cwd's git repo exists. Various statuses are acceptable.
@@ -92,7 +92,7 @@ func TestSessionSyncCheck(t *testing.T) {
 	assert.Equal(t, "synced with remote", check.Name())
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	// when gitRoot has no project config, checkLedgerHealth falls back to
 	// ledger.DefaultPath() (CWD-based). The result depends on the environment:
@@ -113,7 +113,7 @@ func TestSessionCheck(t *testing.T) {
 	assert.Equal(t, "Session Health", check.Name())
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	// should return a result (pass or warn)
 	assert.True(t, result.Status == StatusPass || result.Status == StatusWarn, "unexpected status: %v", result.Status)
@@ -130,7 +130,7 @@ func TestSessionStopIncompleteCheck_NoRecording(t *testing.T) {
 	check := NewSessionStopIncompleteCheck(tmpDir)
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	// no recording active → skip
 	assert.Equal(t, StatusSkip, result.Status)
@@ -149,7 +149,7 @@ func TestSessionStopIncompleteCheck_WithCachedStatus(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	assert.Equal(t, StatusWarn, result.Status)
 	assert.Contains(t, result.Message, "empty file")
@@ -170,7 +170,7 @@ func TestSessionStopIncompleteCheck_ActiveButNotIncomplete(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	assert.Equal(t, StatusSkip, result.Status)
 }
@@ -188,7 +188,7 @@ func TestSessionRecordingCheck_GenericAdapterInfo(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	assert.Equal(t, StatusPass, result.Status)
 	assert.Contains(t, result.Message, "adapter: generic")
@@ -208,7 +208,7 @@ func TestSessionRecordingCheck_ClaudeCodeNoAdapterSuffix(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	assert.Equal(t, StatusPass, result.Status)
 	assert.NotContains(t, result.Message, "adapter:")
@@ -228,7 +228,7 @@ func TestSessionIncompleteCheck_NoLedger(t *testing.T) {
 	check := NewSessionIncompleteCheck(gitRoot)
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	// should skip if ledger doesn't exist
 	assert.Equal(t, StatusSkip, result.Status)
@@ -546,7 +546,7 @@ func TestSessionIncompleteCheck_RunResult(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	assert.Equal(t, StatusWarn, result.Status)
 	assert.Contains(t, result.Message, "incomplete")
@@ -561,7 +561,7 @@ type testSessionIncompleteCheck struct {
 	testLedgerPath string
 }
 
-func (c *testSessionIncompleteCheck) Run(ctx context.Context) CheckResult {
+func (c *testSessionIncompleteCheck) Run(ctx context.Context, _ bool) CheckResult {
 	// find incomplete sessions using test ledger path
 	issues := c.findIncompleteSessionsInLedger(c.testLedgerPath)
 	if len(issues) == 0 {
@@ -634,7 +634,7 @@ func TestSessionAutoStageCheck_NoLedger(t *testing.T) {
 	check := NewSessionAutoStageCheck(gitRoot)
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	// should skip if ledger doesn't exist
 	assert.Equal(t, StatusSkip, result.Status)
@@ -660,7 +660,7 @@ func TestSessionAutoStageCheck_NoUnstagedFiles(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	// should pass with "all staged"
 	assert.Equal(t, StatusPass, result.Status)
@@ -703,7 +703,7 @@ func TestSessionAutoStageCheck_StagesUntrackedFiles(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	result := check.Run(ctx)
+	result := check.Run(ctx, false)
 
 	// should pass and report staging files
 	assert.Equal(t, StatusPass, result.Status)
@@ -751,7 +751,7 @@ type testSessionAutoStageCheck struct {
 	testLedgerPath string
 }
 
-func (c *testSessionAutoStageCheck) Run(ctx context.Context) CheckResult {
+func (c *testSessionAutoStageCheck) Run(ctx context.Context, _ bool) CheckResult {
 	// check if ledger exists
 	gitDir := filepath.Join(c.testLedgerPath, ".git")
 	if _, err := os.Stat(gitDir); os.IsNotExist(err) {

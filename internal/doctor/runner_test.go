@@ -81,7 +81,7 @@ func TestRunnerRunAll(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	results := runner.RunAll(ctx)
+	results := runner.RunAll(ctx, false)
 
 	require.Len(t, results, 4)
 
@@ -99,7 +99,7 @@ func TestRunnerEmptyChecks(t *testing.T) {
 	runner := NewRunner()
 
 	ctx := context.Background()
-	results := runner.RunAll(ctx)
+	results := runner.RunAll(ctx, false)
 
 	assert.Empty(t, results)
 }

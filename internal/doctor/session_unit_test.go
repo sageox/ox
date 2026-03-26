@@ -99,7 +99,7 @@ func TestSessionCheck_AllHealthy(t *testing.T) {
 		SyncedWithRemote: true,
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusPass, result.Status)
 	assert.Equal(t, "all checks passed", result.Message)
 }
@@ -112,7 +112,7 @@ func TestSessionCheck_StorageNotWritable(t *testing.T) {
 		SyncedWithRemote: true,
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusWarn, result.Status)
 	assert.Contains(t, result.Message, "issues found")
 }
@@ -126,7 +126,7 @@ func TestSessionCheck_RepoNotClonedNotProvisioned(t *testing.T) {
 	})
 
 	// "ledger not provisioned" is excluded from issues
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusPass, result.Status)
 }
 
@@ -138,7 +138,7 @@ func TestSessionCheck_RepoNotClonedOtherError(t *testing.T) {
 		RepoError:       "clone failed",
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusWarn, result.Status)
 }
 
@@ -151,7 +151,7 @@ func TestSessionCheck_PendingSessions(t *testing.T) {
 		SyncedWithRemote: true,
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusWarn, result.Status)
 	assert.Contains(t, result.Message, "issues found")
 }
@@ -166,7 +166,7 @@ func TestSessionCheck_NotSyncedWithRemote(t *testing.T) {
 		SyncStatus:       "ahead by 2",
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusWarn, result.Status)
 }
 
@@ -181,7 +181,7 @@ func TestSessionCheck_NotSyncedButNoRemote(t *testing.T) {
 	})
 
 	// "no remote configured" is excluded from sync issues
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusPass, result.Status)
 }
 
@@ -194,7 +194,7 @@ func TestSessionStorageCheck_Writable(t *testing.T) {
 		StoragePath:     "/home/user/.local/share/sageox/ledger",
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusPass, result.Status)
 }
 
@@ -206,7 +206,7 @@ func TestSessionStorageCheck_NotWritableWithError(t *testing.T) {
 		StoragePath:     "/some/path",
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusFail, result.Status)
 	assert.Equal(t, "not writable", result.Message)
 	assert.Contains(t, result.Fix, "permission denied")
@@ -220,7 +220,7 @@ func TestSessionStorageCheck_NotWritableNoError(t *testing.T) {
 		StoragePath:     "/some/path",
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusWarn, result.Status)
 	assert.Equal(t, "unknown", result.Message)
 }
@@ -233,7 +233,7 @@ func TestSessionRepoCheck_Cloned(t *testing.T) {
 		RepoCloned: true,
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusPass, result.Status)
 	assert.Equal(t, "yes", result.Message)
 }
@@ -245,7 +245,7 @@ func TestSessionRepoCheck_NotProvisioned(t *testing.T) {
 		RepoError:  "ledger not provisioned",
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusSkip, result.Status)
 	assert.Equal(t, "not provisioned", result.Message)
 	assert.Contains(t, result.Fix, "ox login")
@@ -258,7 +258,7 @@ func TestSessionRepoCheck_ErrorCloning(t *testing.T) {
 		RepoError:  "authentication failed",
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusFail, result.Status)
 	assert.Equal(t, "error", result.Message)
 	assert.Equal(t, "authentication failed", result.Fix)
@@ -271,7 +271,7 @@ func TestSessionRepoCheck_NotFoundNoError(t *testing.T) {
 		RepoError:  "",
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusWarn, result.Status)
 	assert.Equal(t, "not found", result.Message)
 	assert.Contains(t, result.Fix, "ox doctor --fix")
@@ -285,7 +285,7 @@ func TestSessionRecordingCheck_NoRecording(t *testing.T) {
 		IsRecordingActive: false,
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusSkip, result.Status)
 }
 
@@ -296,7 +296,7 @@ func TestSessionRecordingCheck_NilRecording(t *testing.T) {
 		Recording:         nil,
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusSkip, result.Status)
 }
 
@@ -311,7 +311,7 @@ func TestSessionRecordingCheck_DefaultAdapter(t *testing.T) {
 		},
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusPass, result.Status)
 	assert.Contains(t, result.Message, "OxTest")
 	assert.NotContains(t, result.Message, "adapter:")
@@ -325,7 +325,7 @@ func TestSessionPendingCheck_RepoNotCloned(t *testing.T) {
 		RepoCloned: false,
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusSkip, result.Status)
 }
 
@@ -336,7 +336,7 @@ func TestSessionPendingCheck_NoPending(t *testing.T) {
 		PendingCount: 0,
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusPass, result.Status)
 	assert.Equal(t, "none", result.Message)
 }
@@ -348,7 +348,7 @@ func TestSessionPendingCheck_HasPending(t *testing.T) {
 		PendingCount: 5,
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusWarn, result.Status)
 	assert.Contains(t, result.Message, "5 pending commit")
 	assert.Contains(t, result.Fix, "ox session commit")
@@ -362,7 +362,7 @@ func TestSessionStaleCheck_NotRecording(t *testing.T) {
 		IsRecordingActive: false,
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusSkip, result.Status)
 }
 
@@ -373,7 +373,7 @@ func TestSessionStaleCheck_RecordingNotStale(t *testing.T) {
 		IsStaleRecording:  false,
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusSkip, result.Status)
 }
 
@@ -388,7 +388,7 @@ func TestSessionStaleCheck_StaleHours(t *testing.T) {
 		},
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusWarn, result.Status)
 	assert.Contains(t, result.Message, "18 hours")
 	assert.Contains(t, result.Message, "OxStale1")
@@ -406,7 +406,7 @@ func TestSessionStaleCheck_StaleDays(t *testing.T) {
 		},
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusWarn, result.Status)
 	assert.Contains(t, result.Message, "3 days")
 	assert.Contains(t, result.Message, "OxStale2")
@@ -421,7 +421,7 @@ func TestSessionStaleCheck_NilRecording(t *testing.T) {
 		Recording:         nil,
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusWarn, result.Status)
 	assert.Contains(t, result.Message, "unknown")
 }
@@ -434,7 +434,7 @@ func TestSessionSyncCheck_RepoNotCloned(t *testing.T) {
 		RepoCloned: false,
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusSkip, result.Status)
 }
 
@@ -446,7 +446,7 @@ func TestSessionSyncCheck_NoRemote(t *testing.T) {
 		SyncStatus:       "no remote configured",
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusSkip, result.Status)
 	assert.Equal(t, "no remote", result.Message)
 	assert.Contains(t, result.Fix, "Configure remote")
@@ -460,7 +460,7 @@ func TestSessionSyncCheck_Synced(t *testing.T) {
 		SyncStatus:       "up to date",
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusPass, result.Status)
 	assert.Equal(t, "up to date", result.Message)
 }
@@ -473,7 +473,7 @@ func TestSessionSyncCheck_NotSynced(t *testing.T) {
 		SyncStatus:       "ahead by 3",
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusWarn, result.Status)
 	assert.Equal(t, "ahead by 3", result.Message)
 	assert.Contains(t, result.Fix, "ox sync")
@@ -488,7 +488,7 @@ func TestSessionStopIncompleteCheck_NilRecording(t *testing.T) {
 		Recording:        nil,
 	})
 
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusWarn, result.Status)
 	assert.Contains(t, result.Message, "unknown")
 }
@@ -508,7 +508,7 @@ func TestSessionOrphanedCheck_NoStaleNoGhost(t *testing.T) {
 
 	// ghost cleanup runs on real filesystem so we can't fully isolate it,
 	// but with no stale recordings the test validates the path
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	// either skip (no orphans) or pass (ghost cleaned)
 	assert.Contains(t, []Status{StatusSkip, StatusPass}, result.Status)
 }
@@ -522,7 +522,7 @@ func TestSessionPushCheck_Name(t *testing.T) {
 
 func TestSessionPushCheck_EmptyGitRoot(t *testing.T) {
 	check := NewSessionPushCheck("", false)
-	result := check.Run(context.Background())
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusSkip, result.Status)
 }
 
