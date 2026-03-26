@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -108,7 +109,7 @@ func TestDaemonDirtyTeamContextCheck_Name(t *testing.T) {
 
 func TestDaemonHeartbeatCheck_UnknownType(t *testing.T) {
 	check := NewDaemonHeartbeatCheck("bogus_type", "some_id", "test", "sageox.ai")
-	result := check.Run(nil, false)
+	result := check.Run(context.Background(), false)
 
 	assert.Equal(t, StatusSkip, result.Status)
 	assert.Equal(t, "unknown type", result.Message)
@@ -117,7 +118,7 @@ func TestDaemonHeartbeatCheck_UnknownType(t *testing.T) {
 func TestDaemonHeartbeatCheck_InvalidWorkspaceIdentifier(t *testing.T) {
 	// workspace type requires composite ID with underscore
 	check := NewDaemonHeartbeatCheck("workspace", "nounderscore", "test", "sageox.ai")
-	result := check.Run(nil, false)
+	result := check.Run(context.Background(), false)
 
 	assert.Equal(t, StatusSkip, result.Status)
 	assert.Equal(t, "invalid identifier format", result.Message)
@@ -125,7 +126,7 @@ func TestDaemonHeartbeatCheck_InvalidWorkspaceIdentifier(t *testing.T) {
 
 func TestDaemonHeartbeatCheck_InvalidLedgerIdentifier(t *testing.T) {
 	check := NewDaemonHeartbeatCheck("ledger", "nounderscore", "test", "sageox.ai")
-	result := check.Run(nil, false)
+	result := check.Run(context.Background(), false)
 
 	assert.Equal(t, StatusSkip, result.Status)
 	assert.Equal(t, "invalid identifier format", result.Message)
@@ -152,6 +153,6 @@ func TestDaemonHeartbeatCheck_NameFormat(t *testing.T) {
 func TestDaemonHeartbeatCheck_BothEmptySkip(t *testing.T) {
 	// both empty identifier and endpoint should skip
 	check := NewDaemonHeartbeatCheck("workspace", "", "", "")
-	result := check.Run(nil, false)
+	result := check.Run(context.Background(), false)
 	assert.Equal(t, StatusSkip, result.Status)
 }

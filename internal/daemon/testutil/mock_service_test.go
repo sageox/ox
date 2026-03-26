@@ -8,6 +8,7 @@ import (
 
 	"github.com/sageox/ox/internal/daemon"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMockServiceNew(t *testing.T) {
@@ -307,8 +308,7 @@ func TestMockServiceOverrides(t *testing.T) {
 
 // TestMockServiceInterfaceSatisfaction verifies the compile-time assertion works at runtime too.
 func TestMockServiceInterfaceSatisfaction(t *testing.T) {
-	var svc daemon.DaemonService = NewMockService()
-	if svc == nil {
-		t.Fatal("MockService does not satisfy DaemonService")
-	}
+	svc := NewMockService()
+	require.NotNil(t, svc)
+	// compile-time assertion is in mock_service.go: var _ daemon.DaemonService = (*MockService)(nil)
 }
