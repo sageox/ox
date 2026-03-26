@@ -12,6 +12,7 @@ import (
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/status"
 	"github.com/spf13/cobra"
 )
 
@@ -245,7 +246,7 @@ func queryRecentCommits(s *store.Store, days, limit int) ([]insightCommit, error
 			continue
 		}
 		c.Timestamp = ts
-		c.Age = formatTimeAgo(time.Unix(ts, 0))
+		c.Age = status.FormatTimeAgo(time.Unix(ts, 0))
 		c.Files = splitAndTrim(files, ",")
 		// short hash for display
 		if len(c.Hash) > 7 {

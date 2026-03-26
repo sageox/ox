@@ -267,7 +267,7 @@ func buildSessionStartOutput(agentID, adapterName, sessionFile, title, notice st
 		Notice:   notice,
 		Guidance: sessionStartGuidance,
 	}
-	if isGenericAdapter(adapterName) {
+	if pipeline.IsGenericAdapter(adapterName) {
 		output.SessionFile = sessionFile
 		output.FormatHint = genericFormatHint
 		output.NextActions = []string{
@@ -294,8 +294,6 @@ func printSessionStartText(agentID, adapterName, title, notice string, startedAt
 	fmt.Printf("  Run %s to end recording\n", cli.StyleCommand.Render("/ox-session-stop"))
 }
 
-// isGenericAdapter delegates to pipeline.IsGenericAdapter.
-var isGenericAdapter = pipeline.IsGenericAdapter
 
 // isManualSessionAgent returns true for agent types that require explicit
 // adapter selection instead of generic/deep autodetection.
@@ -385,7 +383,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	if state == nil {
 		return fmt.Errorf("not currently recording\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
 	}
-	if isGenericAdapter(state.AdapterName) && state.SessionFile != "" {
+	if pipeline.IsGenericAdapter(state.AdapterName) && state.SessionFile != "" {
 		info, statErr := os.Stat(state.SessionFile)
 		if statErr != nil || info.Size() == 0 {
 			// mark recording as incomplete (allows restart without "already recording" error)
@@ -459,7 +457,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// clean up the drop file after successful processing.
 	// it contains pre-redaction content that should not be committed to the ledger.
-	if isGenericAdapter(state.AdapterName) && state.SessionFile != "" {
+	if pipeline.IsGenericAdapter(state.AdapterName) && state.SessionFile != "" {
 		_ = os.Remove(state.SessionFile) // best-effort
 	}
 
@@ -714,7 +712,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// the adapter reads ALL entries from the JSONL file, but we only want
 	// entries created after ox session start was called.
 	if !state.StartedAt.IsZero() {
-		rawEntries = filterEntriesAfterStart(rawEntries, state.StartedAt)
+		rawEntries = pipeline.FilterEntriesAfterStart(rawEntries, state.StartedAt)
 	}
 
 	if len(rawEntries) == 0 {
@@ -960,7 +958,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 				// LFS upload failed - set marker so doctor can retry
 				_ = doctor.SetNeedsDoctorAgent(projectRoot)
 				errMsg := uploadErr.Error()
-				if isAuthRelatedError(errMsg) {
+				if pipeline.IsAuthRelatedError(errMsg) {
 					fmt.Fprintf(os.Stderr, "warning: session upload failed — credentials expired or revoked\n")
 					fmt.Fprintf(os.Stderr, "  session saved locally, run: ox login && ox doctor\n")
 					result.UploadWarning = "Session saved locally. Credentials expired — run 'ox login' then 'ox doctor' to retry upload."
@@ -995,13 +993,8 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	return result, nil
 }
 
-// filterEntriesAfterStart delegates to pipeline.FilterEntriesAfterStart.
-var filterEntriesAfterStart = pipeline.FilterEntriesAfterStart
-
 // uploadSessionToLedger copies content files from cache to ledger, uploads to LFS,
 // writes meta.json, and commits+pushes. This is phase 2 of the two-phase design:
-// isAuthRelatedError delegates to pipeline.IsAuthRelatedError.
-var isAuthRelatedError = pipeline.IsAuthRelatedError
 
 // content files are uploaded to LFS blob storage first, then meta.json (containing
 // LFS OIDs) is committed to git. Content files themselves are .gitignore'd in the
@@ -1231,7 +1224,7 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 			}
 			// filter out entries from before session recording started
 			if !state.StartedAt.IsZero() {
-				rawEntries = filterEntriesAfterStart(rawEntries, state.StartedAt)
+				rawEntries = pipeline.FilterEntriesAfterStart(rawEntries, state.StartedAt)
 			}
 			entries = convertRawEntries(rawEntries)
 			entryCount = len(entries)

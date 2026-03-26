@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/pipeline"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -121,7 +122,7 @@ func TestIsAuthRelatedError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.msg, func(t *testing.T) {
-			got := isAuthRelatedError(tt.msg)
+			got := pipeline.IsAuthRelatedError(tt.msg)
 			assert.Equal(t, tt.want, got)
 		})
 	}

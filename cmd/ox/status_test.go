@@ -11,6 +11,7 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/status"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -459,7 +460,7 @@ func TestInferSemantic(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := inferSemantic(tt.label, tt.value)
+			got := status.InferSemantic(tt.label, tt.value)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -656,7 +657,7 @@ func TestFormatGitRepoStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			text, semantic := formatGitRepoStatus(tt.status)
+			text, semantic := status.FormatGitRepoStatus(tt.status)
 			assert.Contains(t, text, tt.wantText)
 			assert.Equal(t, tt.wantSemantic, semantic)
 		})
@@ -686,7 +687,7 @@ func TestFormatTimeAgo(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := formatTimeAgo(tt.t)
+			got := status.FormatTimeAgo(tt.t)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -711,7 +712,7 @@ func TestFormatEndpointDisplay(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := formatEndpointDisplay(tt.url)
+			got := status.FormatEndpointDisplay(tt.url)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -738,7 +739,7 @@ func TestExtractGitHost(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := extractGitHost(tt.url)
+			got := status.ExtractGitHost(tt.url)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -765,7 +766,7 @@ func TestFormatDurationShort(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := formatDurationShort(tt.duration)
+			got := status.FormatDurationShort(tt.duration)
 			assert.Equal(t, tt.want, got)
 		})
 	}

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/status"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
@@ -105,7 +106,7 @@ func Heartbeat(repoPath string, teamIDs []string, agentID string) {
 //
 // TODO: fold into a unified post-command heartbeat (see consolidation note above).
 func sendContextHeartbeat(agentID string, bytes int64, commandName string) {
-	tokens := estimateTokens(bytes)
+	tokens := status.EstimateTokens(bytes)
 	if tokens <= 0 {
 		return
 	}

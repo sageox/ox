@@ -104,3 +104,89 @@ func TestMockRepoService_Endpoint(t *testing.T) {
 
 	assert.Equal(t, "https://test.sageox.ai", m.Endpoint())
 }
+
+// TestMockRepoService_AsRepoService demonstrates the consumer pattern: create a
+// MockRepoService, override methods, and interact through the RepoService interface.
+func TestMockRepoService_AsRepoService(t *testing.T) {
+	mock := &MockRepoService{
+		RegisterRepoFunc: func(req *RepoInitRequest) (*RepoInitResponse, error) {
+			return &RepoInitResponse{RepoID: req.RepoID, TeamID: "team-1"}, nil
+		},
+		EndpointFunc: func() string { return "https://test.sageox.ai" },
+	}
+
+	var svc RepoService = mock
+
+	resp, err := svc.RegisterRepo(&RepoInitRequest{RepoID: "repo-1"})
+	require.NoError(t, err)
+	assert.Equal(t, "repo-1", resp.RepoID)
+	assert.Equal(t, "team-1", resp.TeamID)
+	assert.Equal(t, "https://test.sageox.ai", svc.Endpoint())
+}
+
+// TestMockRepoService_ErrorInjection demonstrates injecting errors through the
+// RepoService interface for testing error handling paths.
+func TestMockRepoService_ErrorInjection(t *testing.T) {
+	mock := &MockRepoService{
+		RegisterRepoFunc: func(_ *RepoInitRequest) (*RepoInitResponse, error) {
+			return nil, fmt.Errorf("server unavailable")
+		},
+		GetDoctorIssuesFunc: func(_ string) (*DoctorResponse, error) {
+			return nil, fmt.Errorf("unauthorized")
+		},
+	}
+
+	var svc RepoService = mock
+
+	resp, err := svc.RegisterRepo(&RepoInitRequest{RepoID: "repo-1"})
+	assert.Nil(t, resp)
+	assert.EqualError(t, err, "server unavailable")
+
+	doc, err := svc.GetDoctorIssues("repo-1")
+	assert.Nil(t, doc)
+	assert.EqualError(t, err, "unauthorized")
+}
+
+// TestMockRepoService_MergeWorkflow demonstrates a multi-step consumer that uses
+// several RepoService methods together, as real merge logic would.
+func TestMockRepoService_MergeWorkflow(t *testing.T) {
+	mock := &MockRepoService{
+		EndpointFunc: func() string { return "https://test.sageox.ai" },
+		MergeRepoFunc: func(repoID string, markers map[string]json.RawMessage) (*MergeRepoResponse, *RedirectInfo, error) {
+			return &MergeRepoResponse{
+				Canonical: "repo-winner",
+				Merged:    []string{repoID},
+			}, &RedirectInfo{
+				Repo: &RedirectMapping{From: repoID, To: "repo-winner"},
+			}, nil
+		},
+		NotifyImportFunc: func(teamID string, metadata any) error {
+			require.Equal(t, "team-1", teamID)
+			return nil
+		},
+	}
+
+	var svc RepoService = mock
+
+	// step 1: merge
+	mergeResp, redirect, err := svc.MergeRepo("repo-old", map[string]json.RawMessage{
+		"config.json": json.RawMessage(`{"version":1}`),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "repo-winner", mergeResp.Canonical)
+	assert.Contains(t, mergeResp.Merged, "repo-old")
+	require.NotNil(t, redirect.Repo)
+	assert.Equal(t, "repo-winner", redirect.Repo.To)
+
+	// step 2: notify import on the winning repo's team
+	err = svc.NotifyImport("team-1", map[string]string{"source": "merge"})
+	require.NoError(t, err)
+}
+
+// TestRepoClient_SatisfiesRepoService documents the compile-time assertion
+// that RepoClient implements the RepoService interface.
+func TestRepoClient_SatisfiesRepoService(t *testing.T) {
+	// mirrors the compile-time assertion in service.go:
+	//   var _ RepoService = (*RepoClient)(nil)
+	var _ RepoService = (*RepoClient)(nil)
+}

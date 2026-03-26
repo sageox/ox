@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/status"
 	"github.com/sageox/ox/internal/session"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 	"github.com/spf13/cobra"
@@ -514,11 +515,11 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 		tokens := fmt.Sprintf("%8s", "-")
 		cmds := fmt.Sprintf("%5s", "-")
 		if m.Tokens > 0 {
-			tokens = fmt.Sprintf("%8s", "~"+formatTokenCount(int(m.Tokens)))
+			tokens = fmt.Sprintf("%8s", "~"+status.FormatTokenCount(int(m.Tokens)))
 			cmds = fmt.Sprintf("%5d", m.CommandCount)
 		}
 
-		uptime := fmt.Sprintf("%7s", formatDurationShort(time.Since(m.CreatedAt)))
+		uptime := fmt.Sprintf("%7s", status.FormatDurationShort(time.Since(m.CreatedAt)))
 
 		rec := dim.Render(fmt.Sprintf("%-3s", "-"))
 		if m.Recording {

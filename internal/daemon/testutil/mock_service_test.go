@@ -312,3 +312,101 @@ func TestMockServiceInterfaceSatisfaction(t *testing.T) {
 	require.NotNil(t, svc)
 	// compile-time assertion is in mock_service.go: var _ daemon.DaemonService = (*MockService)(nil)
 }
+
+// TestMockService_AsStatusProvider demonstrates the consumer pattern: create a
+// MockService, override specific methods, and interact through DaemonService.
+func TestMockService_AsStatusProvider(t *testing.T) {
+	mock := NewMockService()
+	mock.StatusFunc = func() *daemon.StatusData {
+		return &daemon.StatusData{
+			Running:    true,
+			Pid:        42,
+			Version:    "v1.2.3",
+			LedgerPath: "/tmp/test-ledger",
+		}
+	}
+
+	// use through the interface, not the concrete type
+	var svc daemon.DaemonService = mock
+	status := svc.Status()
+	require.NotNil(t, status)
+	require.True(t, status.Running)
+	require.Equal(t, 42, status.Pid)
+	require.Equal(t, "v1.2.3", status.Version)
+	require.Equal(t, "/tmp/test-ledger", status.LedgerPath)
+}
+
+// TestMockService_AsSyncOrchestrator demonstrates using MockService through the
+// interface for sync operations, with error injection.
+func TestMockService_AsSyncOrchestrator(t *testing.T) {
+	syncCalls := 0
+	mock := NewMockService()
+	mock.SyncFunc = func() error {
+		syncCalls++
+		if syncCalls == 1 {
+			return errors.New("transient network error")
+		}
+		return nil
+	}
+
+	var svc daemon.DaemonService = mock
+
+	// first call fails
+	err := svc.Sync()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "transient network error")
+
+	// retry succeeds
+	err = svc.Sync()
+	require.NoError(t, err)
+	require.Equal(t, 2, syncCalls)
+}
+
+// TestMockService_FireAndForgetSafety verifies that fire-and-forget methods
+// (Activity, Heartbeat, Telemetry, Friction) are safe to call through the
+// interface with nil function fields -- they must not panic.
+func TestMockService_FireAndForgetSafety(t *testing.T) {
+	var svc daemon.DaemonService = NewMockService()
+
+	// none of these should panic on a zero-value mock
+	require.NotPanics(t, func() { svc.Activity() })
+	require.NotPanics(t, func() { svc.Heartbeat("caller-1", json.RawMessage(`{"ping":true}`)) })
+	require.NotPanics(t, func() { svc.Telemetry(json.RawMessage(`{"event":"test"}`)) })
+	require.NotPanics(t, func() {
+		svc.Friction(daemon.FrictionPayload{Kind: "unknown-command", Command: "ox foo"})
+	})
+}
+
+// TestMockService_MultiMethodConsumer demonstrates a consumer that uses several
+// DaemonService methods together, as real callers would.
+func TestMockService_MultiMethodConsumer(t *testing.T) {
+	mock := NewMockService()
+
+	mock.StatusFunc = func() *daemon.StatusData {
+		return &daemon.StatusData{Running: true, Pid: 100, Version: "test"}
+	}
+	mock.GetErrorsFunc = func() []daemon.StoredError {
+		return []daemon.StoredError{
+			{ID: "e-1", Message: "clone failed"},
+			{ID: "e-2", Message: "push timeout"},
+		}
+	}
+	mock.MarkErrorsFunc = func(ids []string) {
+		require.Equal(t, []string{"e-1", "e-2"}, ids)
+	}
+
+	var svc daemon.DaemonService = mock
+
+	// simulate: check status, retrieve errors, acknowledge them
+	status := svc.Status()
+	require.True(t, status.Running)
+
+	errs := svc.GetErrors()
+	require.Len(t, errs, 2)
+
+	ids := make([]string, len(errs))
+	for i, e := range errs {
+		ids[i] = e.ID
+	}
+	svc.MarkErrors(ids) // assertion inside the func
+}

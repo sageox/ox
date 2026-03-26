@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/status"
 	"github.com/spf13/cobra"
 )
 
@@ -453,7 +454,7 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString(statusLabelStyle.Render(""))
 			b.WriteString(statusMutedStyle.Render(codeStats.LastError))
 		case codeStats != nil && !codeStats.LastIndexed.IsZero():
-			b.WriteString(statusSuccessStyle.Render("✓ indexed (" + formatTimeAgo(codeStats.LastIndexed) + ")"))
+			b.WriteString(statusSuccessStyle.Render("✓ indexed (" + status.FormatTimeAgo(codeStats.LastIndexed) + ")"))
 		default:
 			b.WriteString(statusSuccessStyle.Render("✓ indexed"))
 		}
@@ -591,7 +592,7 @@ var codeStatusCmd = &cobra.Command{
 
 				// show last commit age if available
 				if r.lastCommit > 0 {
-					age := formatTimeAgo(time.Unix(r.lastCommit, 0))
+					age := status.FormatTimeAgo(time.Unix(r.lastCommit, 0))
 					b.WriteString(statusMutedStyle.Render("  " + age))
 				}
 				b.WriteString("\n")

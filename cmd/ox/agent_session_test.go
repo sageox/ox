@@ -9,6 +9,7 @@ import (
 
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/session/pipeline"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -74,7 +75,7 @@ func TestIsGenericAdapter(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := isGenericAdapter(tt.adapterName)
+			got := pipeline.IsGenericAdapter(tt.adapterName)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -460,7 +461,7 @@ func TestFilterEntriesAfterStart(t *testing.T) {
 			{Timestamp: startedAt.Add(2 * time.Minute), Role: "assistant", Content: "well after"},
 		}
 
-		filtered := filterEntriesAfterStart(entries, startedAt)
+		filtered := pipeline.FilterEntriesAfterStart(entries, startedAt)
 		require.Len(t, filtered, 2)
 		assert.Equal(t, "after start", filtered[0].Content)
 		assert.Equal(t, "well after", filtered[1].Content)
@@ -471,7 +472,7 @@ func TestFilterEntriesAfterStart(t *testing.T) {
 			{Timestamp: startedAt, Role: "user", Content: "exactly at start"},
 		}
 
-		filtered := filterEntriesAfterStart(entries, startedAt)
+		filtered := pipeline.FilterEntriesAfterStart(entries, startedAt)
 		require.Len(t, filtered, 1)
 		assert.Equal(t, "exactly at start", filtered[0].Content)
 	})
@@ -483,7 +484,7 @@ func TestFilterEntriesAfterStart(t *testing.T) {
 			{Timestamp: startedAt.Add(1 * time.Minute), Role: "user", Content: "after start"},
 		}
 
-		filtered := filterEntriesAfterStart(entries, startedAt)
+		filtered := pipeline.FilterEntriesAfterStart(entries, startedAt)
 		require.Len(t, filtered, 2)
 		assert.Equal(t, "no timestamp", filtered[0].Content)
 		assert.Equal(t, "after start", filtered[1].Content)
@@ -495,12 +496,12 @@ func TestFilterEntriesAfterStart(t *testing.T) {
 			{Timestamp: startedAt.Add(-1 * time.Second), Role: "assistant", Content: "also old"},
 		}
 
-		filtered := filterEntriesAfterStart(entries, startedAt)
+		filtered := pipeline.FilterEntriesAfterStart(entries, startedAt)
 		assert.Empty(t, filtered)
 	})
 
 	t.Run("handles empty input", func(t *testing.T) {
-		filtered := filterEntriesAfterStart(nil, startedAt)
+		filtered := pipeline.FilterEntriesAfterStart(nil, startedAt)
 		assert.Empty(t, filtered)
 	})
 }
