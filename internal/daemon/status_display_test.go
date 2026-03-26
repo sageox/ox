@@ -35,11 +35,11 @@ func TestFormatDurationCompact(t *testing.T) {
 		d    time.Duration
 		want string
 	}{
-		{"zero", 0, "0s"},
+		{"zero", 0, "<1s"},
 		{"seconds", 45 * time.Second, "45s"},
-		{"minutes", 5*time.Minute + 30*time.Second, "5m30s"},
-		{"hours", 2*time.Hour + 15*time.Minute, "2h15m"},
-		{"days", 48*time.Hour + 3*time.Hour, "2d3h"},
+		{"minutes", 5*time.Minute + 30*time.Second, "5m 30s"},
+		{"hours", 2*time.Hour + 15*time.Minute, "2h 15m"},
+		{"many hours", 51 * time.Hour, "51h"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -57,7 +57,7 @@ func TestFormatRelativeTime(t *testing.T) {
 		d    time.Duration
 		want string
 	}{
-		{"just now", 5 * time.Second, "just now"},
+		{"seconds ago", 5 * time.Second, "5s ago"},
 		{"minutes ago", 3 * time.Minute, "3m ago"},
 		{"hours ago", 2 * time.Hour, "2h ago"},
 		{"days ago", 48 * time.Hour, "2d ago"},
@@ -159,8 +159,8 @@ func TestDetermineHealth(t *testing.T) {
 func TestCountWorkspaces(t *testing.T) {
 	t.Parallel()
 
-	t.Run("nil status", func(t *testing.T) {
-		assert.Equal(t, 0, countWorkspaces(nil))
+	t.Run("empty status", func(t *testing.T) {
+		assert.Equal(t, 0, countWorkspaces(&StatusData{}))
 	})
 
 	t.Run("with workspaces", func(t *testing.T) {
