@@ -2,9 +2,236 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestFormatNotRunning_InProject(t *testing.T) {
+	t.Parallel()
+	got := FormatNotRunning(true)
+	assert.Contains(t, got, "Not running")
+	assert.Contains(t, got, "ox daemon start")
+}
+
+func TestFormatNotRunning_OutsideProject(t *testing.T) {
+	t.Parallel()
+	got := FormatNotRunning(false)
+	assert.Contains(t, got, "Not running")
+	assert.Contains(t, got, "ox init")
+}
+
+func TestFormatStarting(t *testing.T) {
+	t.Parallel()
+	got := FormatStarting()
+	assert.NotEmpty(t, got)
+	assert.Contains(t, got, "Starting")
+}
+
+func TestFormatDurationCompact(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"zero", 0, "0s"},
+		{"seconds", 45 * time.Second, "45s"},
+		{"minutes", 5*time.Minute + 30*time.Second, "5m30s"},
+		{"hours", 2*time.Hour + 15*time.Minute, "2h15m"},
+		{"days", 48*time.Hour + 3*time.Hour, "2d3h"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatDurationCompact(tt.d)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestFormatRelativeTime(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"just now", 5 * time.Second, "just now"},
+		{"minutes ago", 3 * time.Minute, "3m ago"},
+		{"hours ago", 2 * time.Hour, "2h ago"},
+		{"days ago", 48 * time.Hour, "2d ago"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatRelativeTime(tt.d)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestShortenPath_StatusDisplay(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{"short path", "/tmp/project"},
+		{"home path", "/Users/user/Documents/Code/project"},
+		{"empty", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := shortenPath(tt.input)
+			// should not panic and should return something
+			_ = got
+		})
+	}
+}
+
+func TestFormatKV(t *testing.T) {
+	t.Parallel()
+	got := formatKV("PID", "12345")
+	assert.Contains(t, got, "PID")
+	assert.Contains(t, got, "12345")
+}
+
+func TestSemverOnly(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"v0.15.0", "0.15.0"},
+		{"0.15.0", "0.15.0"},
+		{"v1.2.3-beta", "1.2.3-beta"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
+			got := semverOnly(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestFormatVersionMatch(t *testing.T) {
+	t.Parallel()
+
+	t.Run("matching versions", func(t *testing.T) {
+		got := formatVersionMatch("0.15.0", "0.15.0")
+		assert.NotEmpty(t, got)
+	})
+
+	t.Run("mismatched versions", func(t *testing.T) {
+		got := formatVersionMatch("0.15.0", "0.14.0")
+		assert.NotEmpty(t, got)
+	})
+
+	t.Run("empty daemon version", func(t *testing.T) {
+		got := formatVersionMatch("", "0.15.0")
+		assert.NotEmpty(t, got)
+	})
+}
+
+func TestDetermineHealth(t *testing.T) {
+	t.Parallel()
+
+	t.Run("healthy status", func(t *testing.T) {
+		got := determineHealth(&StatusData{
+			Running: true,
+		})
+		assert.Equal(t, HealthHealthy, got)
+	})
+
+	t.Run("status with errors", func(t *testing.T) {
+		got := determineHealth(&StatusData{
+			Running:          true,
+			RecentErrorCount: 5,
+		})
+		// should be warning or critical depending on threshold
+		assert.NotEqual(t, HealthHealthy, got)
+	})
+}
+
+func TestCountWorkspaces(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil status", func(t *testing.T) {
+		assert.Equal(t, 0, countWorkspaces(nil))
+	})
+
+	t.Run("with workspaces", func(t *testing.T) {
+		status := &StatusData{
+			Workspaces: map[string][]WorkspaceSyncStatus{
+				"ledger":       {{ID: "ws-1"}},
+				"team-context": {{ID: "ws-2"}, {ID: "ws-3"}},
+			},
+		}
+		assert.Equal(t, 3, countWorkspaces(status))
+	})
+}
+
+func TestFormatDaemonList_Empty(t *testing.T) {
+	t.Parallel()
+	got := FormatDaemonList(nil)
+	assert.Contains(t, got, "No")
+}
+
+func TestFormatDaemonList_WithDaemons(t *testing.T) {
+	t.Parallel()
+	daemons := []DaemonInfo{
+		{PID: 1234, SocketPath: "/tmp/daemon.sock"},
+		{PID: 5678, SocketPath: "/tmp/daemon2.sock"},
+	}
+	got := FormatDaemonList(daemons)
+	assert.Contains(t, got, "1234")
+	assert.Contains(t, got, "5678")
+}
+
+func TestStripANSI(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no ansi", "hello world", "hello world"},
+		{"with ansi", "\033[31mred\033[0m", "red"},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := stripANSI(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestFormatWSStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		ws   WorkspaceSyncStatus
+	}{
+		{"synced", WorkspaceSyncStatus{ID: "ws-1", Exists: true}},
+		{"error", WorkspaceSyncStatus{ID: "ws-err", LastErr: "fail"}},
+		{"not exists", WorkspaceSyncStatus{ID: "ws-missing", Exists: false}},
+		{"empty", WorkspaceSyncStatus{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatWSStatus(tt.ws)
+			assert.NotEmpty(t, got)
+		})
+	}
+}
 
 func TestHumanizeError(t *testing.T) {
 	t.Parallel()
