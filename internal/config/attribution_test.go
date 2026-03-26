@@ -336,6 +336,29 @@ func TestStringPtr(t *testing.T) {
 	assert.Equal(t, s, *ptr, "StringPtr value")
 }
 
+func TestGetPlan(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "", (*Attribution)(nil).GetPlan())
+	assert.Equal(t, "", (&Attribution{}).GetPlan())
+	assert.Equal(t, "my plan", (&Attribution{Plan: StringPtr("my plan")}).GetPlan())
+	assert.Equal(t, "", (&Attribution{Plan: StringPtr("")}).GetPlan())
+}
+
+func TestIsPlanSet(t *testing.T) {
+	t.Parallel()
+	assert.False(t, (*Attribution)(nil).IsPlanSet())
+	assert.False(t, (&Attribution{}).IsPlanSet())
+	assert.True(t, (&Attribution{Plan: StringPtr("")}).IsPlanSet())
+	assert.True(t, (&Attribution{Plan: StringPtr("x")}).IsPlanSet())
+}
+
+func TestDefaultPlanFooterAttribution(t *testing.T) {
+	t.Parallel()
+	footer := DefaultPlanFooterAttribution()
+	assert.NotEmpty(t, footer)
+	assert.Contains(t, footer, "SageOx")
+}
+
 // TestCommitAttributionFormat ensures the commit attribution uses the exact
 // "Co-Authored-By: " format required by GitHub for contributor recognition.
 // GitHub will NOT recognize other formats like "Guided-by:" or "Authored-by:".
