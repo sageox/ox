@@ -2,23 +2,89 @@ package whatsup
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
 
-// Enrich populates computed presentation fields: headline, guidance, time_ago.
+// Enrich populates computed presentation fields: actions, headline, guidance, time_ago.
 func (d *ActivityData) Enrich() {
 	now := time.Now()
 
-	// Compute time_ago for each session
 	for i := range d.Authors {
 		for j := range d.Authors[i].Sessions {
 			d.Authors[i].Sessions[j].TimeAgo = relativeTime(d.Authors[i].Sessions[j].Time, now)
 		}
 	}
 
+	d.Actions = buildActions(d)
 	d.Headline = headline(d)
 	d.Guidance = guidance(d)
+}
+
+// buildActions generates concrete recommendations from conflicts and patterns.
+func buildActions(d *ActivityData) []Action {
+	var actions []Action
+
+	// Group conflicts by author pair to produce "coordinate with X" actions
+	// instead of one action per file.
+	type pairInfo struct {
+		files  []string
+		people map[string]bool
+	}
+	pairFiles := make(map[string]*pairInfo)
+
+	for _, c := range d.Conflicts {
+		authors := make([]string, 0, len(c.Authors))
+		for a := range c.Authors {
+			authors = append(authors, a)
+		}
+		sort.Strings(authors)
+
+		// Build a key from the sorted author set
+		key := strings.Join(authors, "|")
+		pi, ok := pairFiles[key]
+		if !ok {
+			pi = &pairInfo{people: make(map[string]bool)}
+			pairFiles[key] = pi
+		}
+		pi.files = append(pi.files, c.FilePath)
+		for _, a := range authors {
+			pi.people[a] = true
+		}
+	}
+
+	for _, pi := range pairFiles {
+		people := make([]string, 0, len(pi.people))
+		for p := range pi.people {
+			people = append(people, p)
+		}
+		sort.Strings(people)
+		sort.Strings(pi.files)
+
+		risk := "medium"
+		if len(people) >= 3 || len(pi.files) >= 3 {
+			risk = "high"
+		}
+
+		actions = append(actions, Action{
+			Text: fmt.Sprintf("Coordinate with %s before touching %s",
+				strings.Join(people, " and "), strings.Join(pi.files, ", ")),
+			Risk:   risk,
+			Files:  pi.files,
+			People: people,
+		})
+	}
+
+	// Sort: high risk first, then by number of files descending
+	sort.Slice(actions, func(i, j int) bool {
+		if actions[i].Risk != actions[j].Risk {
+			return actions[i].Risk == "high"
+		}
+		return len(actions[i].Files) > len(actions[j].Files)
+	})
+
+	return actions
 }
 
 func headline(d *ActivityData) string {
@@ -35,7 +101,7 @@ func headline(d *ActivityData) string {
 			parts = append(parts, fmt.Sprintf("%d file conflicts detected", n))
 		}
 	} else {
-		parts = append(parts, "no file conflicts")
+		parts = append(parts, "all clear — no file conflicts")
 	}
 
 	return strings.Join(parts, ", ") + "."
@@ -48,10 +114,11 @@ func guidance(d *ActivityData) string {
 
 	var lines []string
 
-	lines = append(lines, "Present this as a team activity summary. Lead with the headline.")
+	if len(d.Actions) > 0 {
+		lines = append(lines, "Lead with actionable recommendations from the actions array — what the user should do RIGHT NOW. Then provide the supporting context: headline, conflicts, who's working on what. The user wants to know what to do before they want to know why.")
+	}
 
 	if d.Stats.TotalConflicts > 0 {
-		// Find the hottest conflict (most authors)
 		maxAuthors := 0
 		var hotFile string
 		for _, c := range d.Conflicts {
@@ -66,13 +133,12 @@ func guidance(d *ActivityData) string {
 			noun = "file has"
 		}
 		lines = append(lines, fmt.Sprintf(
-			"Highlight conflicts — %d %s multiple authors editing it. The hottest is %s (%d authors).",
+			"Context: %d %s multiple authors. The hottest is %s (%d authors).",
 			d.Stats.TotalConflicts, noun, hotFile, maxAuthors))
-		lines = append(lines, "For each conflict, show which authors and sessions touched the file. Suggest the user coordinate with those coworkers.")
 	}
 
 	if d.Stats.TotalConflicts == 0 && d.Stats.TotalSessions > 0 {
-		lines = append(lines, "No conflicts — summarize what each person was working on so the user has situational awareness.")
+		lines = append(lines, "All clear — the team is working in parallel with no file overlap. This is a good state. Briefly summarize what each person is working on so the user has situational awareness. Keep the tone positive.")
 	}
 
 	lines = append(lines, "Use time_ago values (not raw timestamps) when referring to sessions. Keep it concise.")

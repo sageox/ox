@@ -1,6 +1,6 @@
 # Makefile for ox CLI tool
 
-.PHONY: help build install clean dev run test test-all test-slow test-integration test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
+.PHONY: help build install clean dev run test test-all test-slow test-integration test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
 
 # Variables
 GO := go
@@ -57,6 +57,10 @@ test-slow: ## Run slow tests (build tag: slow) - includes real Claude sessions
 test-integration: ## Run integration tests (build tag: integration) - full E2E with Claude
 	@echo "Running integration tests (requires claude CLI and ANTHROPIC_API_KEY)..."
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=integration -race -timeout=10m ./...
+
+test-ledger-twin: ## Run whatsup ledger twin tests (generates fake ledger for inspection)
+	@echo "Running ledger twin tests..."
+	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=ledger_twin -v -count=1 -timeout=2m ./tests/ledger_twin/...
 
 test-benchmark: ## Run prime efficiency benchmarks (requires claude CLI) - ~80 min, ~40 API calls
 	@echo "Running prime efficiency benchmarks..."

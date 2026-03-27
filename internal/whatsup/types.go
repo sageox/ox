@@ -41,17 +41,28 @@ type OverlapPair struct {
 	SharedFiles int       `json:"shared_files"`
 }
 
+// Action is a concrete recommendation the user should act on.
+type Action struct {
+	Text   string   `json:"text"`   // what to do
+	Risk   string   `json:"risk"`   // high, medium, low
+	Files  []string `json:"files"`  // affected files
+	People []string `json:"people"` // people to coordinate with
+}
+
 // ActivityData is the full JSON output.
 type ActivityData struct {
-	Headline string          `json:"headline"`
-	Guidance string          `json:"guidance,omitempty"`
-	Since    time.Time       `json:"since"`
-	Until    time.Time       `json:"until"`
-	Repo     string          `json:"repo"`
-	Authors  []AuthorSummary `json:"authors"`
-	Conflicts []FileOverlap  `json:"conflicts"`
-	Overlap  []OverlapPair   `json:"overlap_matrix"`
-	Stats    Stats           `json:"stats"`
+	Actions   []Action        `json:"actions,omitempty"`
+	Headline  string          `json:"headline"`
+	Guidance  string          `json:"guidance,omitempty"`
+	Since     time.Time       `json:"since"`
+	Until     time.Time       `json:"until"`
+	Repo      string          `json:"repo"`
+	Authors   []AuthorSummary `json:"authors"`
+	Conflicts []FileOverlap   `json:"conflicts"`
+	Overlap   []OverlapPair   `json:"overlap_matrix"`
+	Stats     Stats           `json:"stats"`
+	Patterns  []Pattern       `json:"patterns,omitempty"`
+	Velocity  []VelocityPoint `json:"velocity,omitempty"`
 }
 
 // Stats contains summary statistics.
