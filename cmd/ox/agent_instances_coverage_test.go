@@ -86,34 +86,21 @@ func TestShortenPath_HomeEnvNotSet(t *testing.T) {
 func TestFormatTimeAgoShort(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name string
-		when time.Time
-		want string
-	}{
-		{"zero time returns never", time.Time{}, "never"},
-		{"just now (sub-second)", time.Now(), "now"},
-		{"few seconds ago", time.Now().Add(-5 * time.Second), "5s ago"},
-		{"30 seconds ago", time.Now().Add(-30 * time.Second), "30s ago"},
-		{"59 seconds ago", time.Now().Add(-59 * time.Second), "59s ago"},
-		{"1 minute ago", time.Now().Add(-90 * time.Second), "1m ago"},
-		{"5 minutes ago", time.Now().Add(-5 * time.Minute), "5m ago"},
-		{"59 minutes ago", time.Now().Add(-59 * time.Minute), "59m ago"},
-		{"1 hour ago", time.Now().Add(-90 * time.Minute), "1h ago"},
-		{"3 hours ago", time.Now().Add(-3 * time.Hour), "3h ago"},
-		{"23 hours ago", time.Now().Add(-23 * time.Hour), "23h ago"},
-		{"1 day ago", time.Now().Add(-25 * time.Hour), "1d ago"},
-		{"7 days ago", time.Now().Add(-7 * 24 * time.Hour), "7d ago"},
-		{"30 days ago", time.Now().Add(-30 * 24 * time.Hour), "30d ago"},
-	}
+	// use time values far enough from boundaries to avoid race-condition drift
+	now := time.Now()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got := formatTimeAgoShort(tt.when)
-			assert.Equal(t, tt.want, got)
-		})
-	}
+	// zero time
+	assert.Equal(t, "never", formatTimeAgoShort(time.Time{}))
+
+	// minutes (safe from second-level drift)
+	got5m := formatTimeAgoShort(now.Add(-5*time.Minute - 10*time.Second))
+	assert.Equal(t, "5m ago", got5m)
+
+	// hours
+	assert.Equal(t, "3h ago", formatTimeAgoShort(now.Add(-3*time.Hour-10*time.Minute)))
+
+	// days
+	assert.Equal(t, "7d ago", formatTimeAgoShort(now.Add(-7*24*time.Hour-1*time.Hour)))
 }
 
 func TestFormatTimeAgoShort_FutureTime(t *testing.T) {

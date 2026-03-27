@@ -104,9 +104,11 @@ func TestSemverOnly(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"v0.15.0", "0.15.0"},
+		{"v0.15.0", "v0.15.0"},
 		{"0.15.0", "0.15.0"},
-		{"v1.2.3-beta", "1.2.3-beta"},
+		{"v1.2.3-beta", "v1.2.3-beta"},
+		{"v1.2.3+build123", "v1.2.3"},
+		{"0.1.0+abc", "0.1.0"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
