@@ -77,10 +77,12 @@ func detectClusterBridge(sessions []SessionRecord) []Pattern {
 					}
 				}
 				if otherBridges == 0 {
+					files := append(packages[pkgA], packages[pkgB]...)
+					sort.Strings(files)
 					patterns = append(patterns, Pattern{
 						Type:    "cluster_bridge",
 						Authors: []string{author},
-						Files:   append(packages[pkgA], packages[pkgB]...),
+						Files:   files,
 						Detail: fmt.Sprintf("%s is the only developer bridging %s and %s — coordination bottleneck risk",
 							author, pkgA, pkgB),
 						Risk: "medium",

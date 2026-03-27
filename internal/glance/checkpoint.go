@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/sageox/ox/internal/paths"
 )
 
 const checkpointFileName = "checkpoint.json"
@@ -16,11 +18,7 @@ type checkpointData struct {
 }
 
 func checkpointPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		home = "."
-	}
-	return filepath.Join(home, ".config", "sageox", "glance", checkpointFileName)
+	return filepath.Join(paths.ConfigDir(), "glance", checkpointFileName)
 }
 
 func loadCheckpoints() (*checkpointData, error) {
@@ -109,8 +107,8 @@ func ParseTimeFlag(s string) (time.Time, error) {
 		return t, nil
 	}
 
-	// Try as date
-	if t, err := time.Parse("2006-01-02", s); err == nil {
+	// Try as date (use local timezone so --since 2026-03-24 means midnight local, not UTC)
+	if t, err := time.ParseInLocation("2006-01-02", s, time.Local); err == nil {
 		return t, nil
 	}
 

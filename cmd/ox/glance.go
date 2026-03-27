@@ -131,6 +131,10 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 	}
 
 	data.Enrich()
+
+	// Advance checkpoint so next invocation without --since starts from now
+	_ = glance.MarkRead(ledgerPath)
+
 	return outputGlanceJSON(data)
 }
 
