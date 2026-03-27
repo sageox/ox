@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -91,7 +92,9 @@ func WriteSessionArtifacts(sessionDir string, stored *StoredSession, summaryResp
 		htmlGen.EnrichSummary(stored, summaryResp)
 		summaryJSONPath := filepath.Join(sessionDir, "summary.json")
 		if enriched, err := json.MarshalIndent(summaryResp, "", "  "); err == nil {
-			_ = os.WriteFile(summaryJSONPath, enriched, 0644)
+			if writeErr := os.WriteFile(summaryJSONPath, enriched, 0644); writeErr != nil {
+				slog.Debug("write enriched summary.json", "path", summaryJSONPath, "error", writeErr)
+			}
 		}
 	}
 

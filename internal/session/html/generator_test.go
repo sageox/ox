@@ -71,6 +71,21 @@ func TestEnrichSummary_PopulatesFilesChanged(t *testing.T) {
 	assert.NotEmpty(t, summary.Chapters, "EnrichSummary must populate Chapters")
 }
 
+func TestEnrichSummary_HTMLEscapedInputs(t *testing.T) {
+	// Simulate what actually happens: buildMessageView HTML-escapes tool inputs,
+	// so ExtractFilePathFromInput receives escaped JSON. This test verifies the
+	// unescapeHTML fix — without it, json.Unmarshal fails on &quot; entities.
+	escapedInput := `{&quot;file_path&quot;:&quot;/home/user/project/main.go&quot;,&quot;old_string&quot;:&quot;foo&quot;,&quot;new_string&quot;:&quot;bar&quot;}`
+	escapedOutput := "--- a/main.go\n+++ b/main.go\n-foo\n+bar\n"
+
+	path := ExtractFilePathFromInput(escapedInput)
+	assert.Equal(t, "/home/user/project/main.go", path, "must extract file_path from HTML-escaped JSON")
+
+	added, removed := CountDiffLines(escapedOutput)
+	assert.Equal(t, 1, added)
+	assert.Equal(t, 1, removed)
+}
+
 func TestEnrichSummary_NilInputs(t *testing.T) {
 	gen, _ := NewGenerator()
 
