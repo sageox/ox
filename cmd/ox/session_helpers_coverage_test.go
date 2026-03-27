@@ -66,10 +66,10 @@ func TestGetDisplayName_EmptyEndpoint(t *testing.T) {
 	assert.Equal(t, "", got)
 }
 
-// --- email username extraction logic (verified through getAuthenticatedUsername behavior) ---
-// The function extracts the local part before @ from the email.
-// Since we can't easily inject auth tokens, we verify the string logic is sound
-// by testing the pattern used in the function:
+// Tests the email-to-username extraction logic used by getAuthenticatedUsername.
+// The production function couples auth lookup with extraction, so we test the
+// extraction logic in isolation here. A refactor to extract this to a shared
+// helper would enable direct testing of the production code path.
 
 func TestEmailUsernameExtraction(t *testing.T) {
 	t.Parallel()

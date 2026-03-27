@@ -438,13 +438,24 @@ func TestWrapText_IndentedMultilineWrapping(t *testing.T) {
 	result := m.wrapText(text, 20)
 
 	lines := strings.Split(result, "\n")
-	// indented lines should preserve the indent
-	for _, line := range lines {
-		if strings.HasPrefix(line, "  ") {
-			trimmed := strings.TrimLeft(line, " ")
-			assert.True(t, len(line)-len(trimmed) >= 2, "indent should be preserved")
+	assert.Greater(t, len(lines), 2, "wrapping should produce multiple lines")
+
+	// find the boundary between indented paragraph and normal line
+	normalIdx := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "normal") {
+			normalIdx = i
+			break
 		}
 	}
-	// normal line should appear
-	assert.Contains(t, result, "normal")
+	assert.Greater(t, normalIdx, 0, "normal line should appear after indented lines")
+
+	// all lines before "normal" should preserve the two-space indent
+	for i := 0; i < normalIdx; i++ {
+		if lines[i] == "" {
+			continue
+		}
+		assert.True(t, strings.HasPrefix(lines[i], "  "),
+			"line %d should preserve indent: %q", i, lines[i])
+	}
 }

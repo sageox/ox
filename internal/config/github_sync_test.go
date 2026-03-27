@@ -46,7 +46,7 @@ func TestNormalizeGitHubSync(t *testing.T) {
 }
 
 func TestResolveGitHubSync_Default(t *testing.T) {
-	t.Parallel()
+	// no t.Parallel(): reads os.Getenv that sibling tests mutate via t.Setenv
 	// no env var, no project config → default enabled
 	got := ResolveGitHubSync("")
 	assert.Equal(t, GitHubSyncEnabled, got)
@@ -71,7 +71,6 @@ func TestResolveGitHubSyncPRs_MasterDisabled(t *testing.T) {
 }
 
 func TestResolveGitHubSyncPRs_Default(t *testing.T) {
-	t.Parallel()
 	got := ResolveGitHubSyncPRs("")
 	assert.Equal(t, GitHubSyncEnabled, got)
 }
@@ -89,7 +88,6 @@ func TestResolveGitHubSyncIssues_MasterDisabled(t *testing.T) {
 }
 
 func TestResolveGitHubSyncIssues_Default(t *testing.T) {
-	t.Parallel()
 	got := ResolveGitHubSyncIssues("")
 	assert.Equal(t, GitHubSyncEnabled, got)
 }
@@ -101,7 +99,6 @@ func TestResolveGitHubSyncIssues_EnvOverride(t *testing.T) {
 }
 
 func TestResolveGitHubSyncPRs_WithTempProject(t *testing.T) {
-	t.Parallel()
 	// temp dir with no config — defaults to enabled
 	dir := t.TempDir()
 	got := ResolveGitHubSyncPRs(dir)
@@ -109,7 +106,6 @@ func TestResolveGitHubSyncPRs_WithTempProject(t *testing.T) {
 }
 
 func TestResolveGitHubSyncIssues_WithTempProject(t *testing.T) {
-	t.Parallel()
 	dir := t.TempDir()
 	got := ResolveGitHubSyncIssues(dir)
 	assert.Equal(t, GitHubSyncEnabled, got)

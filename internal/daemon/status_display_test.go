@@ -85,8 +85,11 @@ func TestShortenPath_StatusDisplay(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := shortenPath(tt.input)
-			// should not panic and should return something
-			_ = got
+			if tt.input == "" {
+				assert.Empty(t, got)
+			} else {
+				assert.NotEmpty(t, got, "non-empty input should produce non-empty output")
+			}
 		})
 	}
 }
@@ -141,21 +144,40 @@ func TestFormatVersionMatch(t *testing.T) {
 func TestDetermineHealth(t *testing.T) {
 	t.Parallel()
 
-	t.Run("healthy status", func(t *testing.T) {
-		got := determineHealth(&StatusData{
-			Running: true,
-		})
-		assert.Equal(t, HealthHealthy, got)
-	})
+	tests := []struct {
+		name   string
+		status *StatusData
+		want   HealthStatus
+	}{
+		{
+			"healthy - no errors",
+			&StatusData{Running: true},
+			HealthHealthy,
+		},
+		{
+			"warning - some errors",
+			&StatusData{Running: true, RecentErrorCount: 4},
+			HealthWarning,
+		},
+		{
+			"critical - error threshold",
+			&StatusData{Running: true, RecentErrorCount: 5},
+			HealthCritical,
+		},
+		{
+			"critical - above threshold",
+			&StatusData{Running: true, RecentErrorCount: 10},
+			HealthCritical,
+		},
+	}
 
-	t.Run("status with errors", func(t *testing.T) {
-		got := determineHealth(&StatusData{
-			Running:          true,
-			RecentErrorCount: 5,
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := determineHealth(tt.status)
+			assert.Equal(t, tt.want, got)
 		})
-		// should be warning or critical depending on threshold
-		assert.NotEqual(t, HealthHealthy, got)
-	})
+	}
 }
 
 func TestCountWorkspaces(t *testing.T) {

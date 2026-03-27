@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -102,20 +104,25 @@ func TestSetConfigValue_DefaultLevel(t *testing.T) {
 	assert.Contains(t, err.Error(), "cannot be set at default level")
 }
 
-func TestSetConfigValue_RepoLevelWithoutProject(t *testing.T) {
+func TestSetConfigValue_WithoutProject(t *testing.T) {
 	t.Parallel()
 
-	err := SetConfigValue("session_recording", "auto", ConfigLevelRepo, "")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not in a SageOx project")
-}
+	tests := []struct {
+		name  string
+		level ConfigLevel
+	}{
+		{"repo level", ConfigLevelRepo},
+		{"team level", ConfigLevelTeam},
+	}
 
-func TestSetConfigValue_TeamLevelWithoutProject(t *testing.T) {
-	t.Parallel()
-
-	err := SetConfigValue("session_recording", "auto", ConfigLevelTeam, "")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "not in a SageOx project")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := SetConfigValue("session_recording", "auto", tt.level, "")
+			assert.Error(t, err)
+			assert.Contains(t, err.Error(), "not in a SageOx project")
+		})
+	}
 }
 
 func TestResolveConfigValue_UnknownSetting(t *testing.T) {
@@ -181,11 +188,14 @@ func TestConfigLevel_Constants(t *testing.T) {
 func TestSetRepoConfig_UnsupportedKey(t *testing.T) {
 	t.Parallel()
 
-	// create a temp dir with .sageox/config.json
 	dir := t.TempDir()
+	sageoxDir := filepath.Join(dir, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(`{}`), 0o644))
+
 	err := setRepoConfig("telemetry", "on", dir)
-	// should fail because telemetry is not supported at repo level
 	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not supported at repo level")
 }
 
 func TestSetTeamConfig_NoTeamContext(t *testing.T) {
@@ -200,7 +210,7 @@ func TestSetTeamConfig_NoTeamContext(t *testing.T) {
 func TestResolveConfigValue_KnownSettings(t *testing.T) {
 	t.Parallel()
 
-	// resolve with empty project root — should return defaults
+	// resolve with empty project root — resolves from user config or defaults
 	for _, setting := range AllSettings {
 		t.Run(setting.Key, func(t *testing.T) {
 			t.Parallel()
@@ -209,7 +219,8 @@ func TestResolveConfigValue_KnownSettings(t *testing.T) {
 			require.NotNil(t, cv)
 			assert.Equal(t, setting.Key, cv.Key)
 			assert.Equal(t, setting.Default, cv.Default)
-			// with no project root, only user config is loaded
+			assert.NotEmpty(t, cv.Value, "resolved value should not be empty")
+			assert.NotEmpty(t, cv.Source, "source should be set")
 			assert.Empty(t, cv.RepoVal)
 			assert.Empty(t, cv.TeamVal)
 		})
@@ -225,6 +236,8 @@ func TestResolveConfigValue_WithFakeProjectRoot(t *testing.T) {
 	require.NotNil(t, cv)
 	assert.Equal(t, "session_recording", cv.Key)
 	assert.Equal(t, "auto", cv.Default)
+	assert.NotEmpty(t, cv.Value, "resolved value should not be empty")
+	assert.NotEmpty(t, cv.Source, "source should be set")
 }
 
 func TestResolveConfigValue_AllKnownKeys(t *testing.T) {
@@ -238,6 +251,7 @@ func TestResolveConfigValue_AllKnownKeys(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, cv)
 			assert.Equal(t, key, cv.Key)
+			assert.NotEmpty(t, cv.Value, "resolved value should not be empty")
 		})
 	}
 }
