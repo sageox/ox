@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -173,6 +172,7 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 	combined := &ledger.SyncResult{}
 
 	if syncPRs {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Fetching PRs from GitHub (%s/%s)...\n", owner, repo)
 		prResult, prErr := ledger.SyncPRs(cmd.Context(), fetcher, ledgerPath, owner, repo, maxDays, logger)
 		if prErr != nil {
 			return fmt.Errorf("sync PRs: %w", prErr)
@@ -183,6 +183,7 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 	}
 
 	if syncIssues {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Fetching issues from GitHub (%s/%s)...\n", owner, repo)
 		issueResult, issueErr := ledger.SyncIssues(cmd.Context(), fetcher, ledgerPath, owner, repo, maxDays, logger)
 		if issueErr != nil {
 			return fmt.Errorf("sync issues: %w", issueErr)
@@ -205,7 +206,13 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	if err := ledger.CommitAndPushGitHubData(context.Background(), ledgerPath, owner, repo, combined, pushLedger); err != nil {
+	// skip push if nothing was synced (daemon handles catch-up pushes)
+	totalItems := combined.PRTotal + combined.IssueTotal
+	if totalItems == 0 {
+		return nil
+	}
+
+	if err := ledger.CommitAndPushGitHubData(cmd.Context(), ledgerPath, owner, repo, combined, pushLedger); err != nil {
 		return fmt.Errorf("push to ledger: %w", err)
 	}
 
