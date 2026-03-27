@@ -17,7 +17,6 @@ import (
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
-	sessionhtml "github.com/sageox/ox/internal/session/html"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/spf13/cobra"
 )
@@ -157,19 +156,25 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
-	// copy file to <session-dir>/summary.json
+	// preserve computed fields (files_changed, chapters) from existing summary.json
+	// that was enriched by WriteSessionArtifacts during session stop. The LLM-generated
+	// summary doesn't include these fields, and raw.jsonl may be an LFS stub by now,
+	// so we must carry them forward rather than re-computing.
 	summaryDst := filepath.Join(sessionDir, "summary.json")
-	if err := os.WriteFile(summaryDst, data, 0644); err != nil {
+	preserveComputedFields(summaryDst, &summaryParsed)
+
+	// write merged summary to ledger
+	mergedData, mergeErr := json.MarshalIndent(summaryParsed, "", "  ")
+	if mergeErr != nil {
+		mergedData = data // fall back to original LLM summary
+	}
+	if err := os.WriteFile(summaryDst, mergedData, 0644); err != nil {
 		return &pushSummaryOutput{
 			Success: false,
 			Type:    "push_summary",
 			Error:   fmt.Sprintf("write summary.json: %v", err),
 		}
 	}
-
-	// enrich ledger summary.json with computed fields (files_changed, chapters)
-	// before committing, so the pushed version contains the full data
-	enrichLedgerSummary(sessionDir, &summaryParsed)
 
 	// update meta.json summary with the AI-generated title from summary.json
 	metaUpdated := false
@@ -361,35 +366,25 @@ func regenerateLocalCacheHTML(sessionName string, summaryData []byte) {
 	slog.Info("regenerated local cache HTML with rich summary", "path", htmlPath)
 }
 
-// enrichLedgerSummary reads raw.jsonl from the session directory, builds
-// template data, and enriches the summary with files_changed and chapters.
-// The enriched summary is re-written to summary.json in the session directory.
-// Best-effort: failures are logged but don't block the push.
-func enrichLedgerSummary(sessionDir string, summary *session.SummarizeResponse) {
-	rawPath := filepath.Join(sessionDir, ledgerFileRaw)
-	stored, err := session.ReadSessionFromPath(rawPath)
+// preserveComputedFields reads the existing summary.json and carries forward
+// files_changed and chapters into the new summary if the new summary lacks them.
+// These fields were computed by WriteSessionArtifacts during session stop (when
+// raw.jsonl was still in cache). By push-summary time, raw.jsonl may be an LFS
+// stub, so re-computing is not reliable.
+func preserveComputedFields(summaryPath string, newSummary *session.SummarizeResponse) {
+	existingData, err := os.ReadFile(summaryPath)
 	if err != nil {
-		slog.Debug("read session for ledger enrichment", "error", err)
 		return
 	}
-
-	gen, err := sessionhtml.NewGenerator()
-	if err != nil {
-		slog.Debug("create generator for ledger enrichment", "error", err)
+	var existing session.SummarizeResponse
+	if json.Unmarshal(existingData, &existing) != nil {
 		return
 	}
-
-	gen.EnrichSummary(stored, summary)
-
-	enriched, err := json.MarshalIndent(summary, "", "  ")
-	if err != nil {
-		slog.Debug("marshal enriched summary", "error", err)
-		return
+	if len(newSummary.FilesChanged) == 0 && len(existing.FilesChanged) > 0 {
+		newSummary.FilesChanged = existing.FilesChanged
 	}
-
-	summaryPath := filepath.Join(sessionDir, "summary.json")
-	if err := os.WriteFile(summaryPath, enriched, 0644); err != nil {
-		slog.Debug("write enriched ledger summary", "error", err)
+	if len(newSummary.Chapters) == 0 && len(existing.Chapters) > 0 {
+		newSummary.Chapters = existing.Chapters
 	}
 }
 
