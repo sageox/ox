@@ -98,8 +98,8 @@ func hydrateFromLedger(projectRoot, sessionsDir, nameArg string) error {
 
 	for filename, ref := range meta.Files {
 		filePath := filepath.Join(sessionPath, filename)
-		if _, err := os.Stat(filePath); err == nil {
-			continue
+		if _, err := os.Stat(filePath); err == nil && !lfs.IsPointerFile(filePath) {
+			continue // file exists with real content, skip
 		}
 		bareOID := ref.BareOID()
 		batchObjects = append(batchObjects, lfs.BatchObject{
