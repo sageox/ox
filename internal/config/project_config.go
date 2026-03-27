@@ -110,6 +110,16 @@ type ProjectConfig struct {
 	// Empty string defaults to "auto" for backward compatibility.
 	SessionPublishing string `json:"session_publishing,omitempty"`
 
+	// Murmuring controls automatic work-in-progress signals to teammates.
+	// When set to "auto", ox periodically nudges AI coworkers to share what
+	// they're working on, so teammates and other AI coworkers on the same repo
+	// (or team) hear about in-flight work before PRs or commits appear.
+	// Signals propagate via the ledger and are delivered as whispers to active
+	// coworkers.
+	// Values: "off" (disabled), "auto" (periodic nudges to self-report)
+	// Empty string defaults to "off".
+	Murmuring string `json:"murmuring,omitempty"`
+
 	// GitHubSync controls GitHub data extraction to the ledger (master toggle).
 	// Values: "enabled" (default), "disabled"
 	GitHubSync string `json:"github_sync,omitempty"`

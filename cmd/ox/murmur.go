@@ -16,7 +16,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const maxMurmurContentBytes = 4096 // ~1000 tokens — murmurs are short coordination signals
+const maxMurmurContentBytes = 500 // ~125 tokens — murmurs must be concise coordination signals
 
 var murmurCmd = &cobra.Command{
 	Use:   "murmur [content]",

@@ -168,6 +168,7 @@ type HeartbeatHandler struct {
 	onActivity        func()
 	onVersionMismatch func(cliVersion, daemonVersion string) // triggers daemon restart
 	onCallerPath      func(path string)                      // fires when CallerPath changes
+	onAgentHeartbeat  func(agentID string)                   // fires when an agent heartbeat is received
 }
 
 // maxCallers limits the callers map to prevent unbounded growth.
@@ -231,6 +232,14 @@ func (h *HeartbeatHandler) SetVersionMismatchCallback(cb func(cliVersion, daemon
 func (h *HeartbeatHandler) SetCallerPathCallback(cb func(path string)) {
 	h.cbMu.Lock()
 	h.onCallerPath = cb
+	h.cbMu.Unlock()
+}
+
+// SetAgentHeartbeatCallback registers a callback fired when an agent heartbeat arrives.
+// Used by MurmurNudgeTracker to count heartbeats for early nudge logic.
+func (h *HeartbeatHandler) SetAgentHeartbeatCallback(cb func(agentID string)) {
+	h.cbMu.Lock()
+	h.onAgentHeartbeat = cb
 	h.cbMu.Unlock()
 }
 
@@ -423,6 +432,14 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 				h.agentPID[hb.AgentID] = hb.ParentPID
 			}
 			h.metaMu.Unlock()
+		}
+
+		// notify murmur nudge tracker of agent heartbeat
+		h.cbMu.RLock()
+		agentHbCb := h.onAgentHeartbeat
+		h.cbMu.RUnlock()
+		if agentHbCb != nil {
+			agentHbCb(hb.AgentID)
 		}
 	}
 

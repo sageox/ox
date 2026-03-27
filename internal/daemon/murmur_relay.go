@@ -13,6 +13,7 @@ import (
 type MurmurRelay struct {
 	registry      *WhisperRegistry
 	localAgentIDs map[string]bool // agent IDs on this machine (skip self-authored murmurs)
+	nudgeTracker  *MurmurNudgeTracker
 	logger        *slog.Logger
 }
 
@@ -27,6 +28,12 @@ func NewMurmurRelay(registry *WhisperRegistry, logger *slog.Logger) *MurmurRelay
 		localAgentIDs: make(map[string]bool),
 		logger:        logger,
 	}
+}
+
+// SetNudgeTracker sets the nudge tracker so the relay can record when
+// agents publish murmurs, suppressing future nudges.
+func (r *MurmurRelay) SetNudgeTracker(tracker *MurmurNudgeTracker) {
+	r.nudgeTracker = tracker
 }
 
 // SetLocalAgentIDs sets the agent IDs running on this machine.
@@ -89,6 +96,11 @@ func (r *MurmurRelay) RelayFromPath(baseDir, scope string) int {
 
 		if err := r.registry.MarkRelayed(m.ID, scope); err != nil {
 			r.logger.Warn("failed to mark murmur relayed", "murmur_id", m.ID, "err", err)
+		}
+
+		// record murmur for nudge suppression
+		if r.nudgeTracker != nil && m.AgentID != "" {
+			r.nudgeTracker.RecordMurmur(m.AgentID)
 		}
 
 		relayed++

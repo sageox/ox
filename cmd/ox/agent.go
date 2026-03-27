@@ -4,8 +4,10 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -570,6 +572,13 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// murmur whisper budget: keep context lean so murmurs don't crowd out real work.
+const (
+	maxMurmurWhisperTokens   = 1024 // ~4096 bytes — hard cap on total murmur whisper content
+	maxMurmurWhispersPerAgent = 1   // keep only the most recent murmur per authoring agent
+	estimatedBytesPerToken    = 4   // rough byte-to-token ratio for English text
+)
+
 // emitWhispers checks daemon for pending whisper entries.
 // Non-blocking: if daemon is unavailable, silently returns.
 // Uses AttentionNormal — agents receive critical + normal whispers,
@@ -584,7 +593,97 @@ func emitWhispers(agentID string) {
 		return
 	}
 
-	formatWhispers(os.Stdout, resp.Entries)
+	entries := capMurmurWhispers(resp.Entries)
+	if len(entries) == 0 {
+		return
+	}
+
+	formatWhispers(os.Stdout, entries)
+}
+
+// capMurmurWhispers limits murmur-sourced whispers to avoid blowing out agent context.
+//
+// Algorithm:
+//  1. Sort all murmurs by time (newest first) so recent signals win.
+//  2. Cap at maxMurmurWhispersPerAgent per authoring agent — no single agent
+//     dominates the whisper stream.
+//  3. Enforce a total token budget. If the full set fits, include all.
+//     If not, randomly sample from the candidates so that over many tool calls
+//     in a long session, every agent's murmurs eventually get heard.
+//
+// Non-murmur whispers (nudges, activity summaries) pass through unmodified.
+func capMurmurWhispers(entries []whisperstore.WhisperEntry) []whisperstore.WhisperEntry {
+	var nonMurmur []whisperstore.WhisperEntry
+	var allMurmurs []whisperstore.WhisperEntry
+
+	for _, e := range entries {
+		if e.Source != "murmur" {
+			nonMurmur = append(nonMurmur, e)
+		} else {
+			allMurmurs = append(allMurmurs, e)
+		}
+	}
+
+	if len(allMurmurs) == 0 {
+		return nonMurmur
+	}
+
+	// sort newest first
+	sort.Slice(allMurmurs, func(i, j int) bool {
+		return allMurmurs[i].CreatedAt.After(allMurmurs[j].CreatedAt)
+	})
+
+	// cap at N per agent (iterate in time order so newest are kept)
+	agentCount := make(map[string]int)
+	var capped []whisperstore.WhisperEntry
+	for _, e := range allMurmurs {
+		key := e.AgentID
+		if key == "" {
+			key = "_anonymous"
+		}
+		if agentCount[key] >= maxMurmurWhispersPerAgent {
+			continue
+		}
+		agentCount[key]++
+		capped = append(capped, e)
+	}
+
+	// check if everything fits in budget
+	budgetBytes := maxMurmurWhisperTokens * estimatedBytesPerToken
+	totalBytes := 0
+	for _, e := range capped {
+		totalBytes += len(e.Content)
+	}
+
+	if totalBytes <= budgetBytes {
+		return append(nonMurmur, capped...)
+	}
+
+	// budget exceeded — randomly sample to be fair across agents over time.
+	// shuffle then greedily fill budget, always keeping at least one.
+	shuffled := make([]whisperstore.WhisperEntry, len(capped))
+	copy(shuffled, capped)
+	rand.Shuffle(len(shuffled), func(i, j int) {
+		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+	})
+
+	var kept []whisperstore.WhisperEntry
+	usedBytes := 0
+	for _, e := range shuffled {
+		contentBytes := len(e.Content)
+		if usedBytes+contentBytes > budgetBytes && len(kept) > 0 {
+			continue // skip this one, try smaller ones
+		}
+		kept = append(kept, e)
+		usedBytes += contentBytes
+	}
+
+	// re-sort kept by time (newest first) for coherent output
+	sort.Slice(kept, func(i, j int) bool {
+		return kept[i].CreatedAt.After(kept[j].CreatedAt)
+	})
+
+	return append(nonMurmur, kept...)
 }
 
 // formatWhispers writes whisper entries to w as structured XML.

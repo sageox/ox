@@ -62,6 +62,11 @@ type Config struct {
 	// Zero disables automatic GitHub sync.
 	GitHubSyncInterval time.Duration
 
+	// MurmurNudgeInterval is how often to nudge agents to self-report
+	// what they're working on via ox murmur. Minimum 10 minutes.
+	// Zero disables nudging (used when murmuring config is "off").
+	MurmurNudgeInterval time.Duration
+
 	// AutoStart starts daemon on first ox command if true.
 	AutoStart bool
 
@@ -82,6 +87,7 @@ func DefaultConfig() *Config {
 		GCCheckInterval:         1 * time.Hour,    // check hourly, actual GC cadence is per-workspace
 		DistillInterval:         6 * time.Hour,    // distill memory every 6 hours
 		GitHubSyncInterval:      15 * time.Minute, // sync PRs/issues every 15 minutes
+		MurmurNudgeInterval:     15 * time.Minute, // nudge agents to self-report every 15 minutes
 		InactivityTimeout:       1 * time.Hour,    // exit after 1 hour of inactivity
 		AutoStart:               true,
 		LedgerPath:              "", // resolved at runtime
