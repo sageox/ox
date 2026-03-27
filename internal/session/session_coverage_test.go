@@ -1195,7 +1195,7 @@ func TestLoadHistoryFromSession_NoFile(t *testing.T) {
 
 func TestLoadHistoryFromSession_ValidFile(t *testing.T) {
 	dir := t.TempDir()
-	historyContent := `{"_meta":{"schema_version":"1","agent_type":"claude-code","session_id":"test","started_at":"2026-03-15T10:00:00Z"}}
+	historyContent := `{"_meta":{"schema_version":"1","source":"agent_reconstruction","agent_id":"OxTest","agent_type":"claude-code","captured_at":"2026-03-15T10:00:00Z"}}
 {"seq":1,"type":"user","content":"hello","ts":"2026-03-15T10:01:00Z"}
 `
 	os.WriteFile(filepath.Join(dir, "prior-history.jsonl"), []byte(historyContent), 0644)
@@ -1364,7 +1364,9 @@ func TestStore_CheckNeedsDownload_Hydrated(t *testing.T) {
 	sessName := "2026-03-15T10-00-user-OxHyd"
 	sessDir := filepath.Join(store.BasePath(), sessName)
 	os.MkdirAll(sessDir, 0755)
-	os.WriteFile(filepath.Join(sessDir, "meta.json"), []byte(`{"files":{}}`), 0644)
+	// meta.json must list the files that exist, and those files must not be LFS pointers
+	metaJSON := `{"version":"1.0","session_name":"test","files":{"raw.jsonl":{"oid":"sha256:abc","size":8}}}`
+	os.WriteFile(filepath.Join(sessDir, "meta.json"), []byte(metaJSON), 0644)
 	os.WriteFile(filepath.Join(sessDir, "raw.jsonl"), []byte("content\n"), 0644)
 
 	result := store.CheckNeedsDownload(sessName)
