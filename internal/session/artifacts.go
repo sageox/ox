@@ -20,6 +20,9 @@ type ArtifactPaths struct {
 type HTMLGenerator interface {
 	GenerateToFile(stored *StoredSession, outputPath string) error
 	GenerateToFileWithSummary(stored *StoredSession, summary *SummarizeResponse, outputPath string) error
+	// EnrichSummary populates computed fields (FilesChanged, Chapters) on
+	// the summary by building the full template data from raw session entries.
+	EnrichSummary(stored *StoredSession, summary *SummarizeResponse)
 }
 
 // WriteSessionArtifacts generates the standard set of session artifacts from
@@ -82,6 +85,15 @@ func WriteSessionArtifacts(sessionDir string, stored *StoredSession, summaryResp
 		}
 	}
 	paths.HTML = htmlPath
+
+	// --- enrich summary.json with computed fields (files_changed, chapters) ---
+	if summaryResp != nil && stored != nil {
+		htmlGen.EnrichSummary(stored, summaryResp)
+		summaryJSONPath := filepath.Join(sessionDir, "summary.json")
+		if enriched, err := json.MarshalIndent(summaryResp, "", "  "); err == nil {
+			_ = os.WriteFile(summaryJSONPath, enriched, 0644)
+		}
+	}
 
 	// --- session.md ---
 	sessionMDPath := filepath.Join(sessionDir, "session.md")

@@ -139,6 +139,67 @@ func (g *Generator) GenerateToFileWithSummary(t *session.StoredSession, summary 
 	return nil
 }
 
+// EnrichSummary populates computed fields (FilesChanged, Chapters) on the
+// summary by building the full template data from raw session entries. This
+// ensures summary.json contains file change data regardless of how it was
+// generated (session stop, push-summary, or anti-entropy).
+func (g *Generator) EnrichSummary(stored *session.StoredSession, summary *session.SummarizeResponse) {
+	if stored == nil || summary == nil {
+		return
+	}
+	data := buildFullTemplateData(stored, summary)
+	enrichSummaryFromTemplateData(summary, data)
+}
+
+// enrichSummaryFromTemplateData copies computed chapters and files_changed
+// from template data into the summary response.
+func enrichSummaryFromTemplateData(summary *session.SummarizeResponse, data *TemplateData) {
+	// convert chapters
+	summary.Chapters = make([]session.ChapterSummary, 0, len(data.Chapters))
+	for _, ch := range data.Chapters {
+		cs := session.ChapterSummary{
+			ID:    ch.ID,
+			Title: ch.Title,
+		}
+		toolCounts := make(map[string]int)
+		for _, item := range ch.Items {
+			if item.Message != nil {
+				if cs.StartSeq == 0 {
+					cs.StartSeq = item.Message.ID
+				}
+				cs.EndSeq = item.Message.ID
+			}
+			if item.WorkBlock != nil {
+				cs.TotalTools += item.WorkBlock.TotalTools
+				cs.HasEdits = cs.HasEdits || item.WorkBlock.HasEdits
+				for name, count := range item.WorkBlock.ToolCounts {
+					toolCounts[name] += count
+				}
+				for _, wbMsg := range item.WorkBlock.Messages {
+					if cs.StartSeq == 0 {
+						cs.StartSeq = wbMsg.ID
+					}
+					cs.EndSeq = wbMsg.ID
+				}
+			}
+		}
+		if len(toolCounts) > 0 {
+			cs.ToolCounts = toolCounts
+		}
+		summary.Chapters = append(summary.Chapters, cs)
+	}
+
+	// convert files changed
+	summary.FilesChanged = make([]session.FileSummary, 0, len(data.FilesChanged))
+	for _, fc := range data.FilesChanged {
+		summary.FilesChanged = append(summary.FilesChanged, session.FileSummary{
+			Path:    fc.Path,
+			Added:   fc.Added,
+			Removed: fc.Removed,
+		})
+	}
+}
+
 // BuildTemplateData converts a stored session and optional summary into the
 // full template data model. Exported so callers (e.g., session_html.go) can
 // access the enriched data for writing back to summary.json.
@@ -987,9 +1048,13 @@ func ExtractFilePathFromInput(input string) string {
 		return ""
 	}
 
+	// unescape HTML entities — ToolCallView.Input is HTML-escaped for
+	// template rendering, but we need raw JSON for parsing
+	raw := unescapeHTML(input)
+
 	// try to parse as JSON and extract file_path
 	var data map[string]any
-	if json.Unmarshal([]byte(input), &data) == nil {
+	if json.Unmarshal([]byte(raw), &data) == nil {
 		if fp, ok := data["file_path"].(string); ok && fp != "" {
 			return fp
 		}
@@ -1002,6 +1067,16 @@ func ExtractFilePathFromInput(input string) string {
 	return ""
 }
 
+// unescapeHTML reverses escapeHTML for data extraction (e.g., JSON parsing).
+func unescapeHTML(s string) string {
+	s = strings.ReplaceAll(s, "&#39;", "'")
+	s = strings.ReplaceAll(s, "&quot;", "\"")
+	s = strings.ReplaceAll(s, "&gt;", ">")
+	s = strings.ReplaceAll(s, "&lt;", "<")
+	s = strings.ReplaceAll(s, "&amp;", "&")
+	return s
+}
+
 // CountDiffLines counts added and removed lines in a unified diff output.
 // Lines starting with "+" (not "+++") are counted as added.
 // Lines starting with "-" (not "---") are counted as removed.
@@ -1009,6 +1084,9 @@ func CountDiffLines(output string) (added, removed int) {
 	if output == "" {
 		return 0, 0
 	}
+
+	// unescape HTML entities — ToolCallView.Output is HTML-escaped
+	output = unescapeHTML(output)
 
 	for _, line := range strings.Split(output, "\n") {
 		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {

@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
+	sessionhtml "github.com/sageox/ox/internal/session/html"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/spf13/cobra"
 )
@@ -165,6 +166,10 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 			Error:   fmt.Sprintf("write summary.json: %v", err),
 		}
 	}
+
+	// enrich ledger summary.json with computed fields (files_changed, chapters)
+	// before committing, so the pushed version contains the full data
+	enrichLedgerSummary(sessionDir, &summaryParsed)
 
 	// update meta.json summary with the AI-generated title from summary.json
 	metaUpdated := false
@@ -354,6 +359,38 @@ func regenerateLocalCacheHTML(sessionName string, summaryData []byte) {
 	}
 
 	slog.Info("regenerated local cache HTML with rich summary", "path", htmlPath)
+}
+
+// enrichLedgerSummary reads raw.jsonl from the session directory, builds
+// template data, and enriches the summary with files_changed and chapters.
+// The enriched summary is re-written to summary.json in the session directory.
+// Best-effort: failures are logged but don't block the push.
+func enrichLedgerSummary(sessionDir string, summary *session.SummarizeResponse) {
+	rawPath := filepath.Join(sessionDir, ledgerFileRaw)
+	stored, err := session.ReadSessionFromPath(rawPath)
+	if err != nil {
+		slog.Debug("read session for ledger enrichment", "error", err)
+		return
+	}
+
+	gen, err := sessionhtml.NewGenerator()
+	if err != nil {
+		slog.Debug("create generator for ledger enrichment", "error", err)
+		return
+	}
+
+	gen.EnrichSummary(stored, summary)
+
+	enriched, err := json.MarshalIndent(summary, "", "  ")
+	if err != nil {
+		slog.Debug("marshal enriched summary", "error", err)
+		return
+	}
+
+	summaryPath := filepath.Join(sessionDir, "summary.json")
+	if err := os.WriteFile(summaryPath, enriched, 0644); err != nil {
+		slog.Debug("write enriched ledger summary", "error", err)
+	}
 }
 
 // findGitRootFrom walks up from a directory to find the .git root.

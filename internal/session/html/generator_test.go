@@ -16,6 +16,70 @@ func TestNewGenerator(t *testing.T) {
 	require.NotNil(t, gen)
 }
 
+func TestEnrichSummary_PopulatesFilesChanged(t *testing.T) {
+	gen, err := NewGenerator()
+	require.NoError(t, err)
+
+	stored := &session.StoredSession{
+		Meta: &session.StoreMeta{AgentType: "claude-code"},
+		Entries: []map[string]any{
+			{
+				"type":      "user",
+				"content":   "Fix the bug",
+				"timestamp": time.Now().Format(time.RFC3339),
+			},
+			{
+				"type":        "tool",
+				"tool_name":   "Edit",
+				"tool_input":  `{"file_path":"/home/user/project/main.go","old_string":"foo","new_string":"bar"}`,
+				"tool_output": "--- a/main.go\n+++ b/main.go\n-foo\n+bar\n",
+				"timestamp":   time.Now().Format(time.RFC3339),
+			},
+			{
+				"type":        "tool",
+				"tool_name":   "Write",
+				"tool_input":  `{"file_path":"/home/user/project/new_file.go","content":"package main"}`,
+				"tool_output": "+package main\n",
+				"timestamp":   time.Now().Format(time.RFC3339),
+			},
+		},
+	}
+
+	summary := &session.SummarizeResponse{
+		Title:   "Fix bug",
+		Summary: "Fixed a bug",
+	}
+
+	// Before enrichment, files_changed should be empty
+	assert.Empty(t, summary.FilesChanged)
+
+	gen.EnrichSummary(stored, summary)
+
+	// After enrichment, files_changed should be populated
+	assert.NotEmpty(t, summary.FilesChanged, "EnrichSummary must populate FilesChanged")
+	assert.Len(t, summary.FilesChanged, 2, "Should have 2 files changed")
+
+	// Verify file paths are present (shortened)
+	paths := make([]string, len(summary.FilesChanged))
+	for i, fc := range summary.FilesChanged {
+		paths[i] = fc.Path
+	}
+	assert.Contains(t, paths, "project/main.go")
+	assert.Contains(t, paths, "project/new_file.go")
+
+	// Chapters should also be populated
+	assert.NotEmpty(t, summary.Chapters, "EnrichSummary must populate Chapters")
+}
+
+func TestEnrichSummary_NilInputs(t *testing.T) {
+	gen, _ := NewGenerator()
+
+	// Should not panic on nil inputs
+	gen.EnrichSummary(nil, nil)
+	gen.EnrichSummary(&session.StoredSession{}, nil)
+	gen.EnrichSummary(nil, &session.SummarizeResponse{})
+}
+
 func TestGenerate_MinimalSession(t *testing.T) {
 	gen, _ := NewGenerator()
 
