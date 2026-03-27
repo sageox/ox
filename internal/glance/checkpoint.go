@@ -1,4 +1,4 @@
-package whatsup
+package glance
 
 import (
 	"encoding/json"
@@ -20,7 +20,7 @@ func checkpointPath() string {
 	if err != nil {
 		home = "."
 	}
-	return filepath.Join(home, ".config", "sageox", "whatsup", checkpointFileName)
+	return filepath.Join(home, ".config", "sageox", "glance", checkpointFileName)
 }
 
 func loadCheckpoints() (*checkpointData, error) {

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sageox/ox/internal/whatsup"
+	"github.com/sageox/ox/internal/glance"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,7 +16,7 @@ import (
 var manifest *TwinManifest
 
 func TestMain(m *testing.M) {
-	ledgerPath, err := os.MkdirTemp("", "whatsup-ledger-twin-*")
+	ledgerPath, err := os.MkdirTemp("", "glance-ledger-twin-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
 		os.Exit(1)
@@ -41,14 +41,14 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func harvest(t *testing.T, w Window) *whatsup.HarvestResult {
+func harvest(t *testing.T, w Window) *glance.HarvestResult {
 	t.Helper()
-	result, err := whatsup.HarvestSessions(manifest.LedgerPath, w.Since, w.Until, whatsup.HarvestOptions{})
+	result, err := glance.HarvestSessions(manifest.LedgerPath, w.Since, w.Until, glance.HarvestOptions{})
 	require.NoError(t, err)
 	return result
 }
 
-func pairSet(report *whatsup.ConflictReport) map[string]bool {
+func pairSet(report *glance.ConflictReport) map[string]bool {
 	pairs := report.OverlapPairs()
 	set := make(map[string]bool, len(pairs))
 	for _, p := range pairs {
@@ -57,7 +57,7 @@ func pairSet(report *whatsup.ConflictReport) map[string]bool {
 	return set
 }
 
-func conflictFileMap(overlaps []whatsup.FileOverlap) map[string]int {
+func conflictFileMap(overlaps []glance.FileOverlap) map[string]int {
 	m := make(map[string]int, len(overlaps))
 	for _, o := range overlaps {
 		m[o.FilePath] = len(o.Authors)
@@ -82,8 +82,8 @@ func TestHotZone(t *testing.T) {
 	w := windowByName("hot_zone")
 	result := harvest(t, w)
 
-	authors := whatsup.GroupByAuthor(result.Sessions)
-	conflicts := whatsup.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Sessions)
+	conflicts := glance.DetectConflicts(result.Sessions)
 
 	assert.GreaterOrEqual(t, len(result.Sessions), w.MinSessions, "session count")
 	assert.GreaterOrEqual(t, len(authors), w.MinAuthors, "author count")
@@ -104,8 +104,8 @@ func TestParallelStreams(t *testing.T) {
 	w := windowByName("parallel_streams")
 	result := harvest(t, w)
 
-	authors := whatsup.GroupByAuthor(result.Sessions)
-	conflicts := whatsup.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Sessions)
+	conflicts := glance.DetectConflicts(result.Sessions)
 
 	assert.GreaterOrEqual(t, len(result.Sessions), w.MinSessions)
 	assert.GreaterOrEqual(t, len(authors), w.MinAuthors)
@@ -116,8 +116,8 @@ func TestPairConvergence(t *testing.T) {
 	w := windowByName("pair_convergence")
 	result := harvest(t, w)
 
-	authors := whatsup.GroupByAuthor(result.Sessions)
-	conflicts := whatsup.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Sessions)
+	conflicts := glance.DetectConflicts(result.Sessions)
 
 	assert.GreaterOrEqual(t, len(result.Sessions), w.MinSessions)
 	assert.GreaterOrEqual(t, len(authors), w.MinAuthors)
@@ -137,8 +137,8 @@ func TestSprintEndRush(t *testing.T) {
 	w := windowByName("sprint_end_rush")
 	result := harvest(t, w)
 
-	authors := whatsup.GroupByAuthor(result.Sessions)
-	conflicts := whatsup.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Sessions)
+	conflicts := glance.DetectConflicts(result.Sessions)
 
 	assert.GreaterOrEqual(t, len(result.Sessions), w.MinSessions)
 	assert.GreaterOrEqual(t, len(authors), w.MinAuthors, "all 6 devs should appear")
@@ -171,12 +171,12 @@ func TestClusterBridge(t *testing.T) {
 	w := windowByName("cluster_bridge")
 	result := harvest(t, w)
 
-	conflicts := whatsup.DetectConflicts(result.Sessions)
+	conflicts := glance.DetectConflicts(result.Sessions)
 	assert.GreaterOrEqual(t, len(conflicts.Overlaps), w.MinConflicts)
 
 	// carol bridges auth/ and cli/ clusters
-	patterns := whatsup.DetectPatterns(result.Sessions)
-	var bridges []whatsup.Pattern
+	patterns := glance.DetectPatterns(result.Sessions)
+	var bridges []glance.Pattern
 	for _, p := range patterns {
 		if p.Type == "cluster_bridge" && p.Authors[0] == "carol" {
 			bridges = append(bridges, p)
@@ -190,9 +190,9 @@ func TestHotFileDetection(t *testing.T) {
 	w := windowByName("hot_zone")
 	result := harvest(t, w)
 
-	patterns := whatsup.DetectPatterns(result.Sessions)
+	patterns := glance.DetectPatterns(result.Sessions)
 
-	var hotFiles []whatsup.Pattern
+	var hotFiles []glance.Pattern
 	for _, p := range patterns {
 		if p.Type == "hot_file" {
 			hotFiles = append(hotFiles, p)
@@ -213,9 +213,9 @@ func TestSoloSiloDetection(t *testing.T) {
 	w := windowByName("parallel_streams")
 	result := harvest(t, w)
 
-	patterns := whatsup.DetectPatterns(result.Sessions)
+	patterns := glance.DetectPatterns(result.Sessions)
 
-	var silos []whatsup.Pattern
+	var silos []glance.Pattern
 	for _, p := range patterns {
 		if p.Type == "solo_silo" {
 			silos = append(silos, p)
@@ -237,9 +237,9 @@ func TestEscalation(t *testing.T) {
 	r2 := harvest(t, day2)
 	r3 := harvest(t, day3)
 
-	c1 := whatsup.DetectConflicts(r1.Sessions)
-	c2 := whatsup.DetectConflicts(r2.Sessions)
-	c3 := whatsup.DetectConflicts(r3.Sessions)
+	c1 := glance.DetectConflicts(r1.Sessions)
+	c2 := glance.DetectConflicts(r2.Sessions)
+	c3 := glance.DetectConflicts(r3.Sessions)
 
 	assert.GreaterOrEqual(t, len(c1.Overlaps), day1.MinConflicts, "day 1 conflicts")
 	assert.GreaterOrEqual(t, len(c2.Overlaps), day2.MinConflicts, "day 2 conflicts")
@@ -248,10 +248,10 @@ func TestEscalation(t *testing.T) {
 	// Verify escalation via ConflictVelocity
 	allSessions := append(append(r1.Sessions, r2.Sessions...), r3.Sessions...)
 	day := 24 * time.Hour
-	points := whatsup.ConflictVelocity(allSessions, ts(10, 0, 0), ts(13, 0, 0), day, day)
+	points := glance.ConflictVelocity(allSessions, ts(10, 0, 0), ts(13, 0, 0), day, day)
 
 	assert.Len(t, points, 3, "should have 3 daily velocity points")
-	assert.True(t, whatsup.IsEscalating(points, 3),
+	assert.True(t, glance.IsEscalating(points, 3),
 		"conflicts should be escalating: day1=%d day2=%d day3=%d",
 		points[0].Conflicts, points[1].Conflicts, points[2].Conflicts)
 }
@@ -266,9 +266,9 @@ func TestSubagentExcluded(t *testing.T) {
 	result := harvest(t, w)
 	assert.Equal(t, w.MinSessions, len(result.Sessions), "should exclude subagent sessions by default")
 
-	resultWithSub, err := whatsup.HarvestSessions(
+	resultWithSub, err := glance.HarvestSessions(
 		manifest.LedgerPath, w.Since, w.Until,
-		whatsup.HarvestOptions{IncludeSubagents: true},
+		glance.HarvestOptions{IncludeSubagents: true},
 	)
 	require.NoError(t, err)
 	assert.Greater(t, len(resultWithSub.Sessions), len(result.Sessions),
@@ -282,20 +282,20 @@ func TestSubagentExcluded(t *testing.T) {
 func TestFullEnrich(t *testing.T) {
 	allSince := ts(10, 0, 0)
 	allUntil := ts(25, 0, 0)
-	result, err := whatsup.HarvestSessions(manifest.LedgerPath, allSince, allUntil, whatsup.HarvestOptions{})
+	result, err := glance.HarvestSessions(manifest.LedgerPath, allSince, allUntil, glance.HarvestOptions{})
 	require.NoError(t, err)
 
-	authors := whatsup.GroupByAuthor(result.Sessions)
-	conflicts := whatsup.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Sessions)
+	conflicts := glance.DetectConflicts(result.Sessions)
 
-	data := whatsup.ActivityData{
+	data := glance.ActivityData{
 		Since:     allSince,
 		Until:     allUntil,
 		Repo:      "test-project",
 		Authors:   authors,
 		Conflicts: conflicts.Overlaps,
 		Overlap:   conflicts.OverlapPairs(),
-		Stats: whatsup.Stats{
+		Stats: glance.Stats{
 			TotalSessions:  len(result.Sessions),
 			TotalAuthors:   len(authors),
 			TotalConflicts: len(conflicts.Overlaps),
@@ -314,7 +314,7 @@ func TestSameAuthorNoConflict(t *testing.T) {
 	w := windowByName("sprint_end_rush")
 	result := harvest(t, w)
 
-	conflicts := whatsup.DetectConflicts(result.Sessions)
+	conflicts := glance.DetectConflicts(result.Sessions)
 
 	for _, overlap := range conflicts.Overlaps {
 		assert.GreaterOrEqual(t, len(overlap.Authors), 2,
@@ -325,9 +325,9 @@ func TestSameAuthorNoConflict(t *testing.T) {
 func TestMailmapResolution(t *testing.T) {
 	mailmap := map[string]string{"alice": "Alice Johnson"}
 
-	result, err := whatsup.HarvestSessions(
+	result, err := glance.HarvestSessions(
 		manifest.LedgerPath, ts(20, 10, 0), ts(20, 18, 0),
-		whatsup.HarvestOptions{Mailmap: mailmap},
+		glance.HarvestOptions{Mailmap: mailmap},
 	)
 	require.NoError(t, err)
 

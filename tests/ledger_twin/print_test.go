@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sageox/ox/internal/whatsup"
+	"github.com/sageox/ox/internal/glance"
 )
 
 func TestPrintWindow(t *testing.T) {
@@ -19,28 +19,28 @@ func TestPrintWindow(t *testing.T) {
 
 	w := windowByName(windowName)
 
-	result, err := whatsup.HarvestSessions(manifest.LedgerPath, w.Since, w.Until, whatsup.HarvestOptions{})
+	result, err := glance.HarvestSessions(manifest.LedgerPath, w.Since, w.Until, glance.HarvestOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	authors := whatsup.GroupByAuthor(result.Sessions)
-	conflicts := whatsup.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Sessions)
+	conflicts := glance.DetectConflicts(result.Sessions)
 
-	data := whatsup.ActivityData{
+	data := glance.ActivityData{
 		Since:     w.Since,
 		Until:     w.Until,
 		Repo:      "ox",
 		Authors:   authors,
 		Conflicts: conflicts.Overlaps,
 		Overlap:   conflicts.OverlapPairs(),
-		Stats: whatsup.Stats{
+		Stats: glance.Stats{
 			TotalSessions:  len(result.Sessions),
 			TotalAuthors:   len(authors),
 			TotalConflicts: len(conflicts.Overlaps),
 		},
-		Patterns: whatsup.DetectPatterns(result.Sessions),
-		Velocity: whatsup.ConflictVelocity(result.Sessions, w.Since, w.Until, 24*time.Hour, 24*time.Hour),
+		Patterns: glance.DetectPatterns(result.Sessions),
+		Velocity: glance.ConflictVelocity(result.Sessions, w.Since, w.Until, 24*time.Hour, 24*time.Hour),
 	}
 	data.Enrich()
 

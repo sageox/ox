@@ -58,7 +58,7 @@ test-integration: ## Run integration tests (build tag: integration) - full E2E w
 	@echo "Running integration tests (requires claude CLI and ANTHROPIC_API_KEY)..."
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=integration -race -timeout=10m ./...
 
-test-ledger-twin: ## Run whatsup ledger twin tests (generates fake ledger for inspection)
+test-ledger-twin: ## Run glance ledger twin tests (generates fake ledger for inspection)
 	@echo "Running ledger twin tests..."
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=ledger_twin -v -count=1 -timeout=2m ./tests/ledger_twin/...
 

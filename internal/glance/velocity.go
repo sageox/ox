@@ -1,4 +1,4 @@
-package whatsup
+package glance
 
 import (
 	"slices"
