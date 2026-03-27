@@ -271,7 +271,7 @@ func TestEnforceMaxSize_MissingDB(t *testing.T) {
 	require.NoError(t, err)
 	defer s.Close()
 
-	os.Remove(dbPath)
+	require.NoError(t, os.Remove(dbPath))
 	err = s.EnforceMaxSize(1024)
 	assert.NoError(t, err, "should handle missing file gracefully")
 }
@@ -287,8 +287,7 @@ func TestCursorAdvancement_Coverage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, got, 1)
 
-	time.Sleep(10 * time.Millisecond)
-	require.NoError(t, s.Add(makeEntry("ca-batch2", "topic", ImportanceNormal, time.Now())))
+	require.NoError(t, s.Add(makeEntry("ca-batch2", "topic", ImportanceNormal, now.Add(2*time.Second))))
 
 	got, err = s.GetWhispers("cursor-adv-cov", AttentionAll, nil)
 	require.NoError(t, err)
@@ -311,4 +310,49 @@ func TestNilIfEmpty_Coverage(t *testing.T) {
 	assert.Nil(t, nilIfEmpty(""))
 	assert.NotNil(t, nilIfEmpty("test"))
 	assert.Equal(t, "test", *nilIfEmpty("test"))
+}
+
+func TestOpen_InvalidPath(t *testing.T) {
+	t.Parallel()
+	_, err := Open("/dev/null/impossible/whisper.db")
+	assert.Error(t, err)
+}
+
+func TestClose_Idempotent(t *testing.T) {
+	t.Parallel()
+	s := mustOpen(t)
+	assert.NoError(t, s.Close())
+	assert.NoError(t, s.Close())
+	assert.NoError(t, s.Close())
+}
+
+func TestIsRelayed_NotMarked(t *testing.T) {
+	t.Parallel()
+	s := mustOpen(t)
+
+	relayed, err := s.IsRelayed("nonexistent-murmur", "ledger")
+	require.NoError(t, err)
+	assert.False(t, relayed)
+}
+
+func TestCheckIntegrity_AfterOperations(t *testing.T) {
+	t.Parallel()
+	s := mustOpen(t)
+	now := time.Now()
+
+	require.NoError(t, s.Add(makeEntry("integrity-1", "topic", ImportanceNormal, now)))
+	require.NoError(t, s.MarkRelayed("integrity-1", "ledger"))
+	_, err := s.GetWhispers("integrity-agent", AttentionAll, nil)
+	require.NoError(t, err)
+
+	assert.NoError(t, s.CheckIntegrity())
+}
+
+func TestPrune_EmptyStore(t *testing.T) {
+	t.Parallel()
+	s := mustOpen(t)
+
+	result, err := s.Prune(24 * time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), result.WhispersDeleted)
 }

@@ -86,18 +86,14 @@ func TestMdFormatFieldValue(t *testing.T) {
 	}{
 		{"empty", "", ""},
 		{"short", "hello", "hello"},
-		{"multiline", "line1\nline2", "line1\\nline2"},
+		{"multiline", "line1\nline2", "line1\nline2"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := mdFormatFieldValue(tt.input)
-			if tt.input == "" {
-				assert.Empty(t, got)
-			} else {
-				assert.NotEmpty(t, got)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -152,7 +148,7 @@ func TestMdShortenPath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := mdShortenPath(tt.input)
-			assert.NotEmpty(t, got)
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

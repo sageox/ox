@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/session"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestFormatSize_ShowCoverage(t *testing.T) {
@@ -176,12 +178,20 @@ func TestShowRawSession_NoLimit(t *testing.T) {
 	}
 }
 
-func TestPrintSessionEntry_MessageType(t *testing.T) {
-	// test doesn't crash and produces output for message entries
+// captureStdout runs fn while capturing stdout, returning the output.
+func captureStdout(fn func()) string {
 	old := os.Stdout
-	_, w, _ := os.Pipe()
+	r, w, _ := os.Pipe()
 	os.Stdout = w
+	fn()
+	w.Close()
+	os.Stdout = old
+	var buf bytes.Buffer
+	io.Copy(&buf, r)
+	return buf.String()
+}
 
+func TestPrintSessionEntry_MessageType(t *testing.T) {
 	entry := map[string]any{
 		"type":      "message",
 		"timestamp": time.Now().Format(time.RFC3339Nano),
@@ -190,17 +200,11 @@ func TestPrintSessionEntry_MessageType(t *testing.T) {
 			"content": "hello world",
 		},
 	}
-	printSessionEntry(1, entry)
-
-	w.Close()
-	os.Stdout = old
+	output := captureStdout(func() { printSessionEntry(1, entry) })
+	assert.Contains(t, output, "user")
 }
 
 func TestPrintSessionEntry_ToolCallType(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
 	entry := map[string]any{
 		"type": "tool_call",
 		"data": map[string]any{
@@ -208,17 +212,11 @@ func TestPrintSessionEntry_ToolCallType(t *testing.T) {
 			"input":     "/path/to/file",
 		},
 	}
-	printSessionEntry(2, entry)
-
-	w.Close()
-	os.Stdout = old
+	output := captureStdout(func() { printSessionEntry(2, entry) })
+	assert.Contains(t, output, "read_file")
 }
 
 func TestPrintSessionEntry_ToolResultType(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
 	entry := map[string]any{
 		"type": "tool_result",
 		"data": map[string]any{
@@ -227,17 +225,11 @@ func TestPrintSessionEntry_ToolResultType(t *testing.T) {
 			"output":    "file written successfully",
 		},
 	}
-	printSessionEntry(3, entry)
-
-	w.Close()
-	os.Stdout = old
+	output := captureStdout(func() { printSessionEntry(3, entry) })
+	assert.Contains(t, output, "write_file")
 }
 
 func TestPrintSessionEntry_ToolResultFailed(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
 	entry := map[string]any{
 		"type": "tool_result",
 		"data": map[string]any{
@@ -246,27 +238,19 @@ func TestPrintSessionEntry_ToolResultFailed(t *testing.T) {
 			"output":    "permission denied",
 		},
 	}
-	printSessionEntry(4, entry)
-
-	w.Close()
-	os.Stdout = old
+	output := captureStdout(func() { printSessionEntry(4, entry) })
+	assert.Contains(t, output, "write_file")
 }
 
 func TestPrintSessionEntry_UnknownType(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
 	entry := map[string]any{
 		"type": "custom_event",
 		"data": map[string]any{
 			"key": "value",
 		},
 	}
-	printSessionEntry(5, entry)
-
-	w.Close()
-	os.Stdout = old
+	output := captureStdout(func() { printSessionEntry(5, entry) })
+	assert.NotEmpty(t, output)
 }
 
 func TestPrintSessionEntry_EmptyType(t *testing.T) {
@@ -284,42 +268,26 @@ func TestPrintSessionEntry_EmptyType(t *testing.T) {
 }
 
 func TestPrintMessageEntry_LongContent(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
-	// content > 200 chars triggers truncation
-	longContent := ""
-	for i := 0; i < 250; i++ {
-		longContent += "x"
-	}
+	longContent := strings.Repeat("x", 250)
 	entry := map[string]any{
 		"data": map[string]any{
 			"role":    "assistant",
 			"content": longContent,
 		},
 	}
-	printMessageEntry(entry)
-
-	w.Close()
-	os.Stdout = old
+	output := captureStdout(func() { printMessageEntry(entry) })
+	assert.Contains(t, output, "assistant")
 }
 
 func TestPrintMessageEntry_MultilineContent(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
 	entry := map[string]any{
 		"data": map[string]any{
 			"role":    "user",
 			"content": "line1\nline2\nline3\nline4\nline5\nline6\nline7",
 		},
 	}
-	printMessageEntry(entry)
-
-	w.Close()
-	os.Stdout = old
+	output := captureStdout(func() { printMessageEntry(entry) })
+	assert.Contains(t, output, "user")
 }
 
 func TestPrintMessageEntry_NoData(t *testing.T) {
@@ -364,24 +332,15 @@ func TestPrintToolCallEntry_NoData(t *testing.T) {
 }
 
 func TestPrintToolCallEntry_LongInput(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
-	longInput := ""
-	for i := 0; i < 150; i++ {
-		longInput += "y"
-	}
+	longInput := strings.Repeat("y", 150)
 	entry := map[string]any{
 		"data": map[string]any{
 			"tool_name": "bash",
 			"input":     longInput,
 		},
 	}
-	printToolCallEntry(entry)
-
-	w.Close()
-	os.Stdout = old
+	output := captureStdout(func() { printToolCallEntry(entry) })
+	assert.Contains(t, output, "bash")
 }
 
 func TestPrintToolResultEntry_NoData(t *testing.T) {
@@ -397,14 +356,7 @@ func TestPrintToolResultEntry_NoData(t *testing.T) {
 }
 
 func TestPrintToolResultEntry_LongOutput(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
-	longOutput := ""
-	for i := 0; i < 150; i++ {
-		longOutput += "z"
-	}
+	longOutput := strings.Repeat("z", 150)
 	entry := map[string]any{
 		"data": map[string]any{
 			"tool_name": "bash",
@@ -412,10 +364,8 @@ func TestPrintToolResultEntry_LongOutput(t *testing.T) {
 			"output":    longOutput,
 		},
 	}
-	printToolResultEntry(entry)
-
-	w.Close()
-	os.Stdout = old
+	output := captureStdout(func() { printToolResultEntry(entry) })
+	assert.NotEmpty(t, output)
 }
 
 func TestPrintGenericEntry_NoData(t *testing.T) {
@@ -431,30 +381,17 @@ func TestPrintGenericEntry_NoData(t *testing.T) {
 }
 
 func TestPrintGenericEntry_LongJSON(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
-	longVal := ""
-	for i := 0; i < 200; i++ {
-		longVal += "a"
-	}
+	longVal := strings.Repeat("a", 200)
 	entry := map[string]any{
 		"data": map[string]any{
 			"long_key": longVal,
 		},
 	}
-	printGenericEntry(entry)
-
-	w.Close()
-	os.Stdout = old
+	output := captureStdout(func() { printGenericEntry(entry) })
+	assert.NotEmpty(t, output)
 }
 
 func TestShowFormattedSession_MetadataOnly(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
 	now := time.Now()
 	data := &sessionShowData{
 		Info: session.SessionInfo{
@@ -481,21 +418,16 @@ func TestShowFormattedSession_MetadataOnly(t *testing.T) {
 		},
 	}
 
-	err := showFormattedSession(data, true, 0)
-
-	w.Close()
-	os.Stdout = old
+	var err error
+	output := captureStdout(func() { err = showFormattedSession(data, true, 0) })
 
 	if err != nil {
 		t.Fatalf("showFormattedSession returned error: %v", err)
 	}
+	assert.Contains(t, output, "OxABC")
 }
 
 func TestShowFormattedSession_NoEntries(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
 	now := time.Now()
 	data := &sessionShowData{
 		Info: session.SessionInfo{
@@ -508,21 +440,16 @@ func TestShowFormattedSession_NoEntries(t *testing.T) {
 		Entries: nil,
 	}
 
-	err := showFormattedSession(data, false, 0)
-
-	w.Close()
-	os.Stdout = old
+	var err error
+	output := captureStdout(func() { err = showFormattedSession(data, false, 0) })
 
 	if err != nil {
 		t.Fatalf("showFormattedSession returned error: %v", err)
 	}
+	assert.Contains(t, output, "test.jsonl")
 }
 
 func TestShowFormattedSession_WithLimit(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
 	now := time.Now()
 	data := &sessionShowData{
 		Info: session.SessionInfo{
@@ -539,14 +466,13 @@ func TestShowFormattedSession_WithLimit(t *testing.T) {
 		},
 	}
 
-	err := showFormattedSession(data, false, 1)
-
-	w.Close()
-	os.Stdout = old
+	var err error
+	output := captureStdout(func() { err = showFormattedSession(data, false, 1) })
 
 	if err != nil {
 		t.Fatalf("showFormattedSession returned error: %v", err)
 	}
+	assert.NotEmpty(t, output)
 }
 
 func TestViewAsJSON_MetadataOnly(t *testing.T) {
@@ -624,10 +550,6 @@ func TestViewAsJSON_WithEntries(t *testing.T) {
 }
 
 func TestPrintSessionEntry_InvalidTimestamp(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
 	entry := map[string]any{
 		"type":      "message",
 		"timestamp": "not-a-timestamp",
@@ -636,8 +558,6 @@ func TestPrintSessionEntry_InvalidTimestamp(t *testing.T) {
 			"content": "test",
 		},
 	}
-	printSessionEntry(1, entry)
-
-	w.Close()
-	os.Stdout = old
+	output := captureStdout(func() { printSessionEntry(1, entry) })
+	assert.Contains(t, output, "user")
 }
