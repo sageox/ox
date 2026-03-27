@@ -162,6 +162,8 @@ func extractFilesFromRawJSONL(path string) []string {
 			}
 		}
 	}
+	// Note: scanner.Err() intentionally not checked — truncated lines
+	// are acceptable; we extract what we can from partial sessions.
 
 	files := make([]string, 0, len(seen))
 	for f := range seen {
@@ -199,9 +201,15 @@ func normalizePath(p string) string {
 			return p[idx+1:]
 		}
 	}
+	// For root-level known files, return just the basename
 	base := filepath.Base(p)
 	if slices.Contains([]string{"go.mod", "go.sum", "CLAUDE.md", "Makefile", "CHANGELOG.md", ".goreleaser.yml"}, base) {
 		return base
+	}
+	// Preserve parent/file to avoid aliasing (e.g., examples/config.go vs scripts/config.go)
+	dir := filepath.Base(filepath.Dir(p))
+	if dir != "" && dir != "." && dir != "/" {
+		return dir + "/" + base
 	}
 	return base
 }
@@ -263,9 +271,13 @@ func usernameFromMeta(username string) string {
 
 func usernameFromSessionName(sessionName string) string {
 	// Format: YYYY-MM-DDTHH-MM-<username>-<sessionID>
+	// Split by "-": [YYYY, MM, DDTHH, MM, <username parts...>, sessionID]
+	// The datetime prefix consumes 4 parts (indices 0-3).
+	// Username may contain hyphens (e.g., "alice-smith"), so join everything
+	// between the datetime prefix and the final session ID.
 	parts := strings.Split(sessionName, "-")
 	if len(parts) >= 6 {
-		return parts[len(parts)-2]
+		return strings.Join(parts[4:len(parts)-1], "-")
 	}
 	return "unknown"
 }

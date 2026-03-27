@@ -56,8 +56,8 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 		since = glance.GetSince(ledgerPath)
 	}
 
-	// Resolve --until (zero time means "now")
-	var until time.Time
+	// Resolve --until (default to now so JSON serializes a real timestamp)
+	until := time.Now()
 	if untilFlag != "" {
 		until, err = glance.ParseTimeFlag(untilFlag)
 		if err != nil {
@@ -67,6 +67,9 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 
 	// Resolve project root for hydration and mailmap
 	projectRoot, _ := requireProjectRoot()
+
+	// Derive repo name from project root, not cwd
+	repo := glanceRepoName(projectRoot)
 
 	// Load .mailmap for username deduplication
 	var mailmap map[string]string
@@ -98,12 +101,15 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 	}
 
 	if len(result.Sessions) == 0 {
-		// Still output valid JSON with empty data
+		// Output valid JSON with empty arrays (not null) for stable schema
 		return outputGlanceJSON(glance.ActivityData{
-			Since: since,
-			Until: until,
-			Repo:  repoName(),
-			Stats: glance.Stats{SkippedDehydrated: result.SkippedDehydrated},
+			Since:     since,
+			Until:     until,
+			Repo:      repo,
+			Authors:   []glance.AuthorSummary{},
+			Conflicts: []glance.FileOverlap{},
+			Overlap:   []glance.OverlapPair{},
+			Stats:     glance.Stats{SkippedDehydrated: result.SkippedDehydrated},
 		})
 	}
 
@@ -114,10 +120,12 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 	data := glance.ActivityData{
 		Since:     since,
 		Until:     until,
-		Repo:      repoName(),
+		Repo:      repo,
 		Authors:   authors,
 		Conflicts: conflicts.Overlaps,
 		Overlap:   conflicts.OverlapPairs(),
+		Patterns:  glance.DetectPatterns(result.Sessions),
+		Velocity:  glance.ConflictVelocity(result.Sessions, since, until, 24*time.Hour, 24*time.Hour),
 		Stats: glance.Stats{
 			TotalSessions:     len(result.Sessions),
 			TotalAuthors:      len(authors),
@@ -136,8 +144,11 @@ func outputGlanceJSON(data glance.ActivityData) error {
 	return enc.Encode(data)
 }
 
-// repoName returns the basename of the current working directory.
-func repoName() string {
+// glanceRepoName returns the repo name from the project root, falling back to cwd basename.
+func glanceRepoName(projectRoot string) string {
+	if projectRoot != "" {
+		return filepath.Base(projectRoot)
+	}
 	wd, err := os.Getwd()
 	if err != nil {
 		return ""
