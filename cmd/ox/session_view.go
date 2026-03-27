@@ -130,7 +130,7 @@ func runSessionView(cmd *cobra.Command, args []string) error {
 								return fmt.Errorf("session needs download but ledger not available: %w", ledgerErr)
 							}
 							sessionsDir := filepath.Join(ledgerPath, "sessions")
-							if err := hydrateFromLedger(projectRoot, sessionsDir, dl); err != nil {
+							if err := hydrateFromLedger(projectRoot, sessionsDir, dl, false); err != nil {
 								return fmt.Errorf("download failed: %w\n\nTry manually: ox session download %s", err, dl)
 							}
 							// re-read the now-downloaded session

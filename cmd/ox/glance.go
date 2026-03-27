@@ -85,11 +85,7 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 			if projectRoot == "" {
 				return fmt.Errorf("no project root")
 			}
-			// Suppress stdout from hydrateFromLedger to keep JSON output clean
-			origStdout := os.Stdout
-			os.Stdout, _ = os.Open(os.DevNull)
-			err := hydrateFromLedger(projectRoot, sessionsDir, sessionName)
-			os.Stdout = origStdout
+			err := hydrateFromLedger(projectRoot, sessionsDir, sessionName, true)
 			if err != nil {
 				slog.Debug("hydration failed", "session", sessionName, "error", err)
 			}

@@ -35,7 +35,7 @@ Example:
 		}
 
 		sessionsDir := filepath.Join(ledgerPath, "sessions")
-		return hydrateFromLedger(projectRoot, sessionsDir, args[0])
+		return hydrateFromLedger(projectRoot, sessionsDir, args[0], false)
 	},
 }
 
@@ -71,7 +71,8 @@ func resolveSessionInDir(dir, name string) (string, error) {
 }
 
 // hydrateFromLedger downloads content files for a session from the ledger.
-func hydrateFromLedger(projectRoot, sessionsDir, nameArg string) error {
+// When quiet is true, progress messages are suppressed (for JSON output contexts).
+func hydrateFromLedger(projectRoot, sessionsDir, nameArg string, quiet bool) error {
 	sessionName, err := resolveSessionInDir(sessionsDir, nameArg)
 	if err != nil {
 		return err
@@ -88,7 +89,9 @@ func hydrateFromLedger(projectRoot, sessionsDir, nameArg string) error {
 	// check if already local
 	status := lfs.CheckHydrationStatus(sessionPath, meta)
 	if status == lfs.HydrationStatusHydrated {
-		fmt.Printf("Session %s already has local content\n", sessionName)
+		if !quiet {
+			fmt.Printf("Session %s already has local content\n", sessionName)
+		}
 		return nil
 	}
 
@@ -110,7 +113,9 @@ func hydrateFromLedger(projectRoot, sessionsDir, nameArg string) error {
 	}
 
 	if len(batchObjects) == 0 {
-		fmt.Printf("Session %s has no files to download\n", sessionName)
+		if !quiet {
+			fmt.Printf("Session %s has no files to download\n", sessionName)
+		}
 		return nil
 	}
 
@@ -155,11 +160,15 @@ func hydrateFromLedger(projectRoot, sessionsDir, nameArg string) error {
 	}
 
 	if len(errors) > 0 {
-		fmt.Printf("Downloaded %d files for session %s (%d failed)\n", hydratedCount, sessionName, len(errors))
+		if !quiet {
+			fmt.Printf("Downloaded %d files for session %s (%d failed)\n", hydratedCount, sessionName, len(errors))
+		}
 		return fmt.Errorf("download errors:\n  %s", strings.Join(errors, "\n  "))
 	}
 
-	fmt.Printf("Downloaded %d files for session %s\n", hydratedCount, sessionName)
+	if !quiet {
+		fmt.Printf("Downloaded %d files for session %s\n", hydratedCount, sessionName)
+	}
 	return nil
 }
 
