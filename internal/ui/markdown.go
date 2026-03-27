@@ -3,6 +3,7 @@ package ui
 import (
 	"encoding/json"
 	"os"
+	"sync"
 
 	lipgloss "charm.land/lipgloss/v2"
 	"github.com/charmbracelet/glamour/v2"
@@ -301,34 +302,37 @@ var SageOxLightStyleJSON = `{
 	"html_span": {}
 }`
 
-// sageoxDarkStyle is the cached dark style
-var sageoxDarkStyle *ansi.StyleConfig
+var (
+	sageoxDarkStyle      *ansi.StyleConfig
+	sageoxDarkStyleOnce  sync.Once
+	sageoxLightStyle     *ansi.StyleConfig
+	sageoxLightStyleOnce sync.Once
+)
 
-// sageoxLightStyle is the cached light style
-var sageoxLightStyle *ansi.StyleConfig
-
-// GetSageOxDarkStyle returns the SageOx dark theme style configuration
+// GetSageOxDarkStyle returns the SageOx dark theme style configuration.
 func GetSageOxDarkStyle() ansi.StyleConfig {
-	if sageoxDarkStyle == nil {
+	sageoxDarkStyleOnce.Do(func() {
 		var style ansi.StyleConfig
-		if err := json.Unmarshal([]byte(SageOxDarkStyleJSON), &style); err != nil {
-			// fallback to empty style (glamour will use defaults)
-			return ansi.StyleConfig{}
+		if err := json.Unmarshal([]byte(SageOxDarkStyleJSON), &style); err == nil {
+			sageoxDarkStyle = &style
 		}
-		sageoxDarkStyle = &style
+	})
+	if sageoxDarkStyle == nil {
+		return ansi.StyleConfig{}
 	}
 	return *sageoxDarkStyle
 }
 
-// GetSageOxLightStyle returns the SageOx light theme style configuration
+// GetSageOxLightStyle returns the SageOx light theme style configuration.
 func GetSageOxLightStyle() ansi.StyleConfig {
-	if sageoxLightStyle == nil {
+	sageoxLightStyleOnce.Do(func() {
 		var style ansi.StyleConfig
-		if err := json.Unmarshal([]byte(SageOxLightStyleJSON), &style); err != nil {
-			// fallback to empty style (glamour will use defaults)
-			return ansi.StyleConfig{}
+		if err := json.Unmarshal([]byte(SageOxLightStyleJSON), &style); err == nil {
+			sageoxLightStyle = &style
 		}
-		sageoxLightStyle = &style
+	})
+	if sageoxLightStyle == nil {
+		return ansi.StyleConfig{}
 	}
 	return *sageoxLightStyle
 }

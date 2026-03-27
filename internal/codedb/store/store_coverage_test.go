@@ -189,7 +189,7 @@ func TestQueryContext_CancelledContext(t *testing.T) {
 
 	_, err := s.QueryContext(ctx, "SELECT name FROM repos")
 	if err == nil {
-		t.Error("expected error with cancelled context, got nil")
+		t.Error("expected error with canceled context, got nil")
 	}
 }
 
