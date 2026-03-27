@@ -240,10 +240,11 @@ func TestCapMurmurWhispers_MultipleAgents(t *testing.T) {
 
 func TestCapMurmurWhispers_TokenBudget(t *testing.T) {
 	bigContent := strings.Repeat("x", maxMurmurWhisperTokens*estimatedBytesPerToken)
+	now := time.Now()
 
 	entries := []whisperstore.WhisperEntry{
-		{ID: "1", Source: "murmur", AgentID: "OxA", Content: bigContent},
-		{ID: "2", Source: "murmur", AgentID: "OxB", Content: "small murmur"},
+		{ID: "1", Source: "murmur", AgentID: "OxA", Content: bigContent, CreatedAt: now},
+		{ID: "2", Source: "murmur", AgentID: "OxB", Content: "small murmur", CreatedAt: now.Add(-1 * time.Minute)},
 	}
 
 	result := capMurmurWhispers(entries)
@@ -266,7 +267,7 @@ func TestCapMurmurWhispers_AlwaysKeepsAtLeastOne(t *testing.T) {
 	hugeContent := strings.Repeat("y", maxMurmurWhisperTokens*estimatedBytesPerToken*2)
 
 	entries := []whisperstore.WhisperEntry{
-		{ID: "1", Source: "murmur", AgentID: "OxA", Content: hugeContent},
+		{ID: "1", Source: "murmur", AgentID: "OxA", Content: hugeContent, CreatedAt: time.Now()},
 	}
 
 	result := capMurmurWhispers(entries)
@@ -276,11 +277,12 @@ func TestCapMurmurWhispers_AlwaysKeepsAtLeastOne(t *testing.T) {
 }
 
 func TestCapMurmurWhispers_MixedSources(t *testing.T) {
+	now := time.Now()
 	entries := []whisperstore.WhisperEntry{
 		{ID: "nudge", Source: "auto-murmur", Topic: "murmur-nudge", Content: "nudge"},
-		{ID: "m1", Source: "murmur", AgentID: "OxA", Content: "working on X"},
-		{ID: "m2", Source: "murmur", AgentID: "OxA", Content: "still on X"},
-		{ID: "m3", Source: "murmur", AgentID: "OxA", Content: "old murmur"},
+		{ID: "m1", Source: "murmur", AgentID: "OxA", Content: "working on X", CreatedAt: now},
+		{ID: "m2", Source: "murmur", AgentID: "OxA", Content: "still on X", CreatedAt: now.Add(-1 * time.Minute)},
+		{ID: "m3", Source: "murmur", AgentID: "OxA", Content: "old murmur", CreatedAt: now.Add(-2 * time.Minute)},
 		{ID: "activity", Source: "activity-summary", Content: "2 active"},
 	}
 
@@ -311,10 +313,11 @@ func TestCapMurmurWhispers_Empty(t *testing.T) {
 
 func TestCapMurmurWhispers_AnonymousMurmurs(t *testing.T) {
 	// murmurs without agent ID should be grouped together
+	now := time.Now()
 	entries := []whisperstore.WhisperEntry{
-		{ID: "1", Source: "murmur", Content: "anon murmur 1"},
-		{ID: "2", Source: "murmur", Content: "anon murmur 2"},
-		{ID: "3", Source: "murmur", Content: "anon murmur 3"},
+		{ID: "1", Source: "murmur", Content: "anon murmur 1", CreatedAt: now},
+		{ID: "2", Source: "murmur", Content: "anon murmur 2", CreatedAt: now.Add(-1 * time.Minute)},
+		{ID: "3", Source: "murmur", Content: "anon murmur 3", CreatedAt: now.Add(-2 * time.Minute)},
 	}
 
 	result := capMurmurWhispers(entries)
@@ -396,6 +399,36 @@ func TestCapMurmurWhispers_SortsByTimeNewestFirst(t *testing.T) {
 	}
 	if murmurs[2].ID != "old" {
 		t.Errorf("expected oldest last, got %s", murmurs[2].ID)
+	}
+}
+
+func TestCapMurmurWhispers_DropsOlderThan24h(t *testing.T) {
+	now := time.Now()
+	entries := []whisperstore.WhisperEntry{
+		{ID: "recent", Source: "murmur", AgentID: "OxA", Content: "fresh", CreatedAt: now.Add(-1 * time.Hour)},
+		{ID: "stale", Source: "murmur", AgentID: "OxB", Content: "old", CreatedAt: now.Add(-25 * time.Hour)},
+		{ID: "nudge", Source: "auto-murmur", Content: "nudge", CreatedAt: now.Add(-25 * time.Hour)},
+	}
+
+	result := capMurmurWhispers(entries)
+
+	var murmurs, nonMurmurs int
+	for _, e := range result {
+		if e.Source == "murmur" {
+			murmurs++
+			if e.ID == "stale" {
+				t.Error("stale murmur (>24h) should have been dropped")
+			}
+		} else {
+			nonMurmurs++
+		}
+	}
+	if murmurs != 1 {
+		t.Errorf("expected 1 murmur (only recent), got %d", murmurs)
+	}
+	// non-murmur whispers are not subject to the 24h filter
+	if nonMurmurs != 1 {
+		t.Errorf("expected 1 non-murmur (pass through), got %d", nonMurmurs)
 	}
 }
 

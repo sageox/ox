@@ -96,9 +96,9 @@ func TestMurmurListFiltering(t *testing.T) {
 	now := time.Now().UTC()
 
 	murmurs := []ledger.MurmurFile{
-		{SchemaVersion: "1", ID: "m1", Timestamp: now.Add(-5 * time.Minute), AgentID: "OxA", Topic: "lint", Importance: "normal", Content: "fixing lint"},
-		{SchemaVersion: "1", ID: "m2", Timestamp: now.Add(-10 * time.Minute), AgentID: "OxB", Topic: "architecture", Importance: "critical", Content: "redesigning API"},
-		{SchemaVersion: "1", ID: "m3", Timestamp: now.Add(-15 * time.Minute), AgentID: "OxA", Topic: "lint", Importance: "ambient", Content: "more lint fixes"},
+		{SchemaVersion: "1", ID: "m1", Timestamp: now.Add(-1 * time.Minute), AgentID: "OxA", Topic: "lint", Importance: "normal", Content: "fixing lint"},
+		{SchemaVersion: "1", ID: "m2", Timestamp: now.Add(-2 * time.Minute), AgentID: "OxB", Topic: "architecture", Importance: "critical", Content: "redesigning API"},
+		{SchemaVersion: "1", ID: "m3", Timestamp: now.Add(-3 * time.Minute), AgentID: "OxA", Topic: "lint", Importance: "ambient", Content: "more lint fixes"},
 	}
 
 	for _, m := range murmurs {

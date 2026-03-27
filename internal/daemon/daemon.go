@@ -698,13 +698,13 @@ func (d *Daemon) initComponents() time.Duration {
 	d.scheduler.SetIssueTracker(d.issues)
 	if d.whisperRegistry != nil {
 		d.scheduler.SetWhisperRegistry(d.whisperRegistry)
-		murmurRelay := NewMurmurRelay(d.whisperRegistry, d.logger)
 		if config.MurmuringEnabled(d.config.ProjectRoot) {
+			murmurRelay := NewMurmurRelay(d.whisperRegistry, d.logger)
 			d.murmurNudgeTracker = NewMurmurNudgeTracker()
 			murmurRelay.SetNudgeTracker(d.murmurNudgeTracker)
 			d.heartbeat.SetAgentHeartbeatCallback(d.murmurNudgeTracker.RecordHeartbeat)
+			d.scheduler.SetMurmurRelay(murmurRelay)
 		}
-		d.scheduler.SetMurmurRelay(murmurRelay)
 	}
 	if d.codedb != nil {
 		d.scheduler.SetCodeDBManager(d.codedb)

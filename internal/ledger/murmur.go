@@ -12,6 +12,9 @@ import (
 // DefaultMurmurWindowHours is the default rolling sparse checkout window.
 const DefaultMurmurWindowHours = 12
 
+// MaxMurmurWindowHours is the hard cap — murmurs older than 24h are always ignored.
+const MaxMurmurWindowHours = 24
+
 // MurmurFile is the JSON schema for a murmur file stored in the ledger.
 type MurmurFile struct {
 	SchemaVersion string            `json:"schema_version"`           // "1"
@@ -122,8 +125,13 @@ func MostRecentMurmurTime(baseDir, agentID string) time.Time {
 // ReadMurmursInWindow reads all murmur files within the given time window.
 // Skips invalid JSON files without error (best-effort).
 // baseDir is the root of the ledger or team context checkout.
+// windowHours is clamped to MaxMurmurWindowHours (24h) — older murmurs are always ignored.
 func ReadMurmursInWindow(baseDir string, windowHours int) ([]MurmurFile, error) {
+	if windowHours > MaxMurmurWindowHours {
+		windowHours = MaxMurmurWindowHours
+	}
 	now := time.Now().UTC()
+	cutoff := now.Add(-time.Duration(windowHours) * time.Hour)
 	var murmurs []MurmurFile
 
 	for i := 0; i < windowHours; i++ {
@@ -151,6 +159,10 @@ func ReadMurmursInWindow(baseDir string, windowHours int) ([]MurmurFile, error) 
 				continue // skip invalid JSON
 			}
 
+			// enforce hard 24h cap even if the file is within the hourly directory window
+			if m.Timestamp.Before(cutoff) {
+				continue
+			}
 			murmurs = append(murmurs, m)
 		}
 	}

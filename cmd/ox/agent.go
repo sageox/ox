@@ -616,12 +616,15 @@ func capMurmurWhispers(entries []whisperstore.WhisperEntry) []whisperstore.Whisp
 	var nonMurmur []whisperstore.WhisperEntry
 	var allMurmurs []whisperstore.WhisperEntry
 
+	murmurMaxAge := 24 * time.Hour
+	now := time.Now()
 	for _, e := range entries {
 		if e.Source != "murmur" {
 			nonMurmur = append(nonMurmur, e)
-		} else {
+		} else if now.Sub(e.CreatedAt) <= murmurMaxAge {
 			allMurmurs = append(allMurmurs, e)
 		}
+		// silently drop murmurs older than 24h
 	}
 
 	if len(allMurmurs) == 0 {

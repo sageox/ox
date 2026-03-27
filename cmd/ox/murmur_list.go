@@ -98,7 +98,7 @@ func runMurmurList(cmd *cobra.Command, _ []string) error {
 	agentFilter, _ := cmd.Flags().GetString("agent-id")
 	jsonOutput, _ := cmd.Root().PersistentFlags().GetBool("json")
 
-	// parse --since into hours for ReadMurmursInWindow
+	// parse --since into hours for ReadMurmursInWindow (capped at 24h)
 	windowHours := ledger.DefaultMurmurWindowHours // 12h default
 	windowLabel := "12h"
 	if sinceStr != "" {
@@ -110,8 +110,13 @@ func runMurmurList(cmd *cobra.Command, _ []string) error {
 		if hours < 1 {
 			hours = 1 // minimum 1 hour granularity for directory scanning
 		}
+		if hours > ledger.MaxMurmurWindowHours {
+			hours = ledger.MaxMurmurWindowHours
+			windowLabel = "24h"
+		} else {
+			windowLabel = sinceStr
+		}
 		windowHours = hours
-		windowLabel = sinceStr
 	}
 
 	// collect murmurs from ledger and optionally team context
