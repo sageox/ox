@@ -42,7 +42,7 @@ func TestExtractTeamIDFromRepoName_CaseInsensitive(t *testing.T) {
 func TestHasLocalGitChanges_CleanRepo(t *testing.T) {
 	tmp := t.TempDir()
 	cmd := exec.Command("git", "init", tmp)
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null") // safe: isolating git init in temp dir
 	require.NoError(t, cmd.Run())
 
 	// configure git identity in the temp repo
@@ -68,7 +68,7 @@ func TestHasLocalGitChanges_CleanRepo(t *testing.T) {
 func TestHasLocalGitChanges_DirtyRepo(t *testing.T) {
 	tmp := t.TempDir()
 	cmd := exec.Command("git", "init", tmp)
-	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null") // safe: isolating git init in temp dir
 	require.NoError(t, cmd.Run())
 
 	for _, args := range [][]string{
