@@ -290,6 +290,11 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 		sb.WriteString(output.ObservationDirective)
 		sb.WriteString("\n")
 	}
+	// murmur directive — when auto-murmuring is configured, tell the agent to proactively publish WIP
+	if output.MurmurDirective != "" {
+		sb.WriteString(output.MurmurDirective)
+		sb.WriteString("\n")
+	}
 	sb.WriteString("</session-context>\n")
 
 	// user notices: messages that agents must relay to the user (upgrade, restart, support)

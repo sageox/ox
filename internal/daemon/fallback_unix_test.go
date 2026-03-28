@@ -74,7 +74,12 @@ func TestKillStaleDaemon_AliveButReachable(t *testing.T) {
 		t.Skip("skipping daemon IPC test in short mode")
 	}
 
-	tmpDir := t.TempDir()
+	// Use /tmp directly to keep the socket path short — macOS limits Unix socket
+	// paths to 104 chars, and t.TempDir() generates paths under /var/folders/...
+	// which are too long when combined with the daemon socket suffix.
+	tmpDir, err := os.MkdirTemp("/tmp", "oxd-")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
 	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
 
 	// start a child process to act as the "stale daemon"

@@ -380,10 +380,11 @@ func (s *Store) GetWhispersPage(agentID string, before time.Time, limit int) ([]
 		args = append(args, before.UTC().Format(time.RFC3339Nano))
 	}
 	if len(conditions) > 0 {
-		query += ` WHERE ` + strings.Join(conditions, ` AND `)
+		query += ` WHERE ` + strings.Join(conditions, ` AND `) //nolint:gosec // G202 - conditions are hardcoded "?" placeholder strings, not user input
 	}
-	// fetch limit+1 to detect whether more entries exist
-	query += fmt.Sprintf(` ORDER BY created_at DESC LIMIT %d`, limit+1)
+	// fetch limit+1 to detect whether more entries exist; use ? param to avoid string concat
+	query += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit+1)
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {

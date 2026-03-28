@@ -179,6 +179,8 @@ type Output struct {
 	DoctorHint       string `json:"doctor_hint,omitempty"`        // hint for agent to run ox agent doctor
 	// Observation recording directive (behavioral, not just a tool reference)
 	ObservationDirective string `json:"observation_directive,omitempty"` // proactive instruction to record observations via ox memory put
+	// Murmur directive (behavioral — set when murmuring: "auto")
+	MurmurDirective string `json:"murmur_directive,omitempty"` // proactive instruction to publish WIP status via ox murmur
 	// Code search availability
 	CodeSearchTip string `json:"code_search_tip,omitempty"` // guidance on code search availability for this repo
 	// Hook auto-install

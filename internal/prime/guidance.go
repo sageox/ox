@@ -8,12 +8,13 @@ import (
 
 // GuidanceParams holds pre-resolved I/O results needed by BuildGuidance.
 type GuidanceParams struct {
-	AgentID        string
-	RepoSlug       string           // "owner/repo" or directory name
-	TeamCtx        *TeamContextInfo // nil if no team context
-	Ledger         *LedgerInfo      // nil if no ledger
-	CodeDBExists   bool             // true if code search index exists on disk
-	MemoryEnabled  bool             // true if memory feature is enabled
+	AgentID          string
+	RepoSlug         string           // "owner/repo" or directory name
+	TeamCtx          *TeamContextInfo // nil if no team context
+	Ledger           *LedgerInfo      // nil if no ledger
+	CodeDBExists     bool             // true if code search index exists on disk
+	MemoryEnabled    bool             // true if memory feature is enabled
+	MurmuringEnabled bool             // true if murmuring: "auto" is set for this project
 }
 
 // BuildGuidance constructs state-aware command guidance for agent consumption.
@@ -97,6 +98,14 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 		cmds = append(cmds, IntentCommand{
 			Intent:  "list all expert coworker agents and their specialties",
 			Command: "ox coworker list",
+		})
+	}
+
+	// murmur — publish WIP when auto-murmuring is enabled for this repo
+	if p.MurmuringEnabled {
+		cmds = append(cmds, IntentCommand{
+			Intent:  "publish what you're working on to team (murmur enabled): tell teammates your WIP, active files, and architectural changes",
+			Command: `ox murmur --topic=wip "describe: what you're building/fixing, which code areas you're modifying, and any architectural changes"`,
 		})
 	}
 

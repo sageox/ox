@@ -502,6 +502,16 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				"Read GUIDE.md first for what to capture: %s", teamCtx.ObservationGuideHint)
 	}
 
+	// murmur directive — behavioral instruction when auto-murmuring is configured
+	if config.MurmuringEnabled(projectRoot) {
+		output.MurmurDirective = "Murmuring is ENABLED for this repo. Proactively publish your WIP to teammates:\n" +
+			"  • At the START of significant work — before diving in, say what you're about to do\n" +
+			"  • Every 10-15 minutes during active work — brief status update\n" +
+			"  • After architectural decisions — what you decided and why\n" +
+			"Command: ox murmur --topic=wip \"concise description (≤500 bytes — teammates pay token cost to read it)\"\n" +
+			"Don't wait for nudges. Murmur proactively."
+	}
+
 	// build pre-assembled notification for JSON-consuming agents.
 	// this duplicates the logic in outputAgentPrimeText so JSON consumers
 	// don't have to assemble the notification from individual fields.
@@ -716,12 +726,13 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 	_, statErr := os.Stat(codeDBDir)
 
 	return prime.BuildGuidance(prime.GuidanceParams{
-		AgentID:       agentID,
-		RepoSlug:      repoSlug,
-		TeamCtx:       teamCtx,
-		Ledger:        ledgerStatus,
-		CodeDBExists:  statErr == nil,
-		MemoryEnabled: auth.IsMemoryEnabled(),
+		AgentID:          agentID,
+		RepoSlug:         repoSlug,
+		TeamCtx:          teamCtx,
+		Ledger:           ledgerStatus,
+		CodeDBExists:     statErr == nil,
+		MemoryEnabled:    auth.IsMemoryEnabled(),
+		MurmuringEnabled: config.MurmuringEnabled(projectRoot),
 	})
 }
 
