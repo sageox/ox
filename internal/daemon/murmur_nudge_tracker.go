@@ -97,6 +97,27 @@ func (t *MurmurNudgeTracker) ShouldNudge(agentID string, interval time.Duration)
 	return now.Sub(lastMurmur) >= interval
 }
 
+// KnownAgentIDs returns all agent IDs the tracker has seen — either via
+// heartbeat (firstSeen) or via a relayed murmur (lastMurmur). Used by
+// MurmurNudgeSource to generate nudges for ledger-known agents even when
+// the daemon has restarted and lost in-memory heartbeat state.
+func (t *MurmurNudgeTracker) KnownAgentIDs() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	seen := make(map[string]struct{}, len(t.firstSeen)+len(t.lastMurmur))
+	for id := range t.firstSeen {
+		seen[id] = struct{}{}
+	}
+	for id := range t.lastMurmur {
+		seen[id] = struct{}{}
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
 // RecordNudge records that a nudge was sent to the agent.
 func (t *MurmurNudgeTracker) RecordNudge(agentID string) {
 	t.mu.Lock()

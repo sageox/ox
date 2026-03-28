@@ -17,7 +17,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const maxMurmurContentBytes = 500 // ~125 tokens — murmurs must be concise coordination signals
+const maxMurmurContentBytes = 500            // ~125 tokens — murmurs must be concise coordination signals
+const murmurRateInterval  = 5 * time.Second // max 1 murmur per agent per this window
 
 var murmurCmd = &cobra.Command{
 	Use:   "murmur [content]",
@@ -115,13 +116,12 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 		agentID = os.Getenv("SAGEOX_AGENT_ID")
 	}
 
-	// rate limit: max 1 murmur per 5 seconds per agent
-	const minMurmurInterval = 5 * time.Second
+	// rate limit: max 1 murmur per agent per murmurRateInterval
 	if agentID != "" {
 		lastMurmur := ledger.MostRecentMurmurTime(targetDir, agentID)
-		if !lastMurmur.IsZero() && time.Since(lastMurmur) < minMurmurInterval {
+		if !lastMurmur.IsZero() && time.Since(lastMurmur) < murmurRateInterval {
 			return fmt.Errorf("rate limited: max 1 murmur per %s per agent (last: %s ago)",
-				minMurmurInterval, time.Since(lastMurmur).Truncate(time.Millisecond))
+				murmurRateInterval, time.Since(lastMurmur).Truncate(time.Millisecond))
 		}
 	}
 
@@ -156,9 +156,11 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("marshal murmur: %w", err)
 	}
 
-	// murmurs are best-effort — if the daemon isn't running, log and continue
+	// murmurs are best-effort — if the daemon isn't running, warn and continue
 	if err := publishMurmurViaIPC(targetDir, relPath, rawContent, murmurJSON); err != nil {
 		slog.Debug("murmur not delivered", "error", err)
+		fmt.Fprintf(cmd.OutOrStdout(), "Murmur not delivered (daemon unavailable): %s\n", id.String())
+		return nil
 	}
 
 	slog.Info("murmur published", "id", id.String(), "topic", topic, "importance", importance, "scope", scope)

@@ -147,9 +147,23 @@ func resolvePhase(agentType, eventName string) string {
 	return string(phase)
 }
 
+// hookAgentID extracts the agent ID from a HookContext, or "" if unavailable.
+func hookAgentID(ctx *HookContext) string {
+	if ctx.Marker != nil {
+		return ctx.Marker.AgentID
+	}
+	return ""
+}
+
 // dispatchPhase routes to the appropriate handler based on the resolved phase.
 // Only phases listed in activePhaseBehavior reach here (others are fast-path nooped).
 func dispatchPhase(ctx *HookContext) error {
+	// emit heartbeat on every hook so the daemon tracks this agent as active —
+	// required for murmur nudge delivery during long sessions with no explicit ox commands.
+	if agentID := hookAgentID(ctx); agentID != "" {
+		Heartbeat(ctx.ProjectRoot, nil, agentID)
+	}
+
 	switch ctx.Phase {
 	case phaseStart:
 		return handleStart(ctx)
