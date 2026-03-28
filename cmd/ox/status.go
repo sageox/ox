@@ -505,7 +505,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			expectedPath = "(default location)"
 		}
 		b.WriteString(statusLabelStyle.Render("Status"))
-		if isDaemonBootstrapping(daemonStatus) {
+		if daemonStatus.IsBootstrapping() {
 			b.WriteString(statusMutedStyle.Render("⟳ setting up..."))
 		} else {
 			b.WriteString(formatValue("not cloned", "warning"))
@@ -518,7 +518,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString(statusMutedStyle.Render(cloudLedgerURL))
 		b.WriteString("\n")
 		b.WriteString(statusLabelStyle.Render(""))
-		if isDaemonBootstrapping(daemonStatus) {
+		if daemonStatus.IsBootstrapping() {
 			b.WriteString(statusMutedStyle.Render("Initial clone in progress"))
 		} else {
 			b.WriteString(statusMutedStyle.Render("Run 'ox doctor --fix' to clone"))
@@ -713,7 +713,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			}
 		} else {
 			b.WriteString(statusLabelStyle.Render("  Status"))
-			if isDaemonBootstrapping(daemonStatus) {
+			if daemonStatus.IsBootstrapping() {
 				b.WriteString(statusMutedStyle.Render("⟳ setting up..."))
 			} else {
 				b.WriteString(formatValue("not cloned", "warning"))
@@ -723,7 +723,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			b.WriteString(statusMutedStyle.Render(cloudTC.URL))
 			b.WriteString("\n")
 			b.WriteString(statusLabelStyle.Render(""))
-			if isDaemonBootstrapping(daemonStatus) {
+			if daemonStatus.IsBootstrapping() {
 				b.WriteString(statusMutedStyle.Render("Initial clone in progress"))
 			} else {
 				b.WriteString(statusMutedStyle.Render("Run 'ox doctor --fix' to clone"))
@@ -780,7 +780,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			}
 		} else {
 			b.WriteString(statusLabelStyle.Render("  Status"))
-			if isDaemonBootstrapping(daemonStatus) {
+			if daemonStatus.IsBootstrapping() {
 				b.WriteString(statusMutedStyle.Render("⟳ setting up..."))
 			} else {
 				b.WriteString(formatValue("not cloned", "warning"))
@@ -848,34 +848,6 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 // daemonSyncWarningThreshold is the uptime duration after which we expect syncs to have occurred
 const daemonSyncWarningThreshold = time.Minute
 
-// daemonBootstrapThreshold is the grace period for initial daemon startup
-const daemonBootstrapThreshold = 3 * time.Minute
-
-// isDaemonBootstrapping returns true if the daemon is still in its initial startup phase.
-// During bootstrap (running, 0 syncs, uptime < 3min), warnings are softened.
-func isDaemonBootstrapping(status *daemon.StatusData) bool {
-	if status == nil || !status.Running {
-		return false
-	}
-	return status.TotalSyncs == 0 &&
-		status.Uptime < daemonBootstrapThreshold &&
-		daemonHasConfiguredRepos(status)
-}
-
-// daemonHasConfiguredRepos checks if the daemon has repos that should be syncing.
-// Returns true if any workspaces (ledger or team contexts) are configured.
-func daemonHasConfiguredRepos(status *daemon.StatusData) bool {
-	if status == nil {
-		return false
-	}
-	// prefer new Workspaces map, fall back to legacy fields
-	for _, workspaces := range status.Workspaces {
-		if len(workspaces) > 0 {
-			return true
-		}
-	}
-	return status.LedgerPath != "" || len(status.TeamContexts) > 0
-}
 
 // renderDaemonSyncSection renders daemon sync statistics
 func renderDaemonSyncSection(ds *daemon.StatusData, syncHistory []daemon.SyncEvent, localCfg *config.LocalConfig, noProject bool, projectInitialized bool) string {
@@ -898,12 +870,17 @@ func renderDaemonSyncSection(ds *daemon.StatusData, syncHistory []daemon.SyncEve
 	// handle nil status (daemon not connected)
 	if ds == nil {
 		b.WriteString(statusLabelStyle.Render("Status"))
-		if daemon.IsStarting() {
+		switch daemon.GetState() {
+		case daemon.DaemonStateStarting:
 			b.WriteString(statusMutedStyle.Render("◐ starting — process is running but not yet accepting connections"))
-		} else if projectInitialized {
-			b.WriteString(statusMutedStyle.Render("⟳ not started — run 'ox daemon start' or will auto-start on next agentic coding session"))
-		} else {
-			b.WriteString(statusMutedStyle.Render("not running (expected until 'ox init' completed)"))
+		case daemon.DaemonStateStuck:
+			b.WriteString(statusMutedStyle.Render("⚠ stuck — process is running but not accepting connections (restart with 'ox daemon restart')"))
+		default:
+			if projectInitialized {
+				b.WriteString(statusMutedStyle.Render("⟳ not started — run 'ox daemon start' or will auto-start on next agentic coding session"))
+			} else {
+				b.WriteString(statusMutedStyle.Render("not running (expected until 'ox init' completed)"))
+			}
 		}
 		b.WriteString("\n")
 
@@ -939,12 +916,11 @@ func renderDaemonSyncSection(ds *daemon.StatusData, syncHistory []daemon.SyncEve
 	}
 
 	// check for bootstrap vs warning condition
-	hasConfiguredRepos := daemonHasConfiguredRepos(ds)
-	bootstrapping := isDaemonBootstrapping(ds)
+	bootstrapping := ds.IsBootstrapping()
 	isNotSyncing := ds.Running &&
 		ds.Uptime > daemonSyncWarningThreshold &&
 		ds.TotalSyncs == 0 &&
-		hasConfiguredRepos &&
+		ds.HasConfiguredRepos() &&
 		!bootstrapping // don't warn during bootstrap
 
 	// daemon status

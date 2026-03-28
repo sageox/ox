@@ -593,33 +593,73 @@ func superseded() bool {
 	return info.PID != os.Getpid()
 }
 
-// IsRunning checks if a daemon is currently running and responsive.
-// Uses socket-based ping detection. Claude manages the daemon process lifecycle,
-// so flock-based locking is no longer needed.
-func IsRunning() bool {
-	client := NewClientWithTimeout(500 * time.Millisecond)
-	return client.Ping() == nil
-}
+// DaemonState describes the lifecycle state of the daemon process.
+type DaemonState int
 
-// IsStarting checks if a daemon process exists (PID file with live process)
-// but is not yet responding to IPC. This happens during startup throttling
-// or initial setup before the IPC socket is ready.
-func IsStarting() bool {
+const (
+	// DaemonStateStopped: no PID file, dead process, or unreadable PID.
+	DaemonStateStopped DaemonState = iota
+	// DaemonStateStarting: process is alive but IPC not yet ready.
+	// Normal during throttled restarts (up to 2 min) or fast initial startup.
+	DaemonStateStarting
+	// DaemonStateStuck: process alive, IPC unreachable, past the startup window.
+	// PID file is older than startupStuckThreshold — the process likely hung in init.
+	DaemonStateStuck
+	// DaemonStateRunning: IPC socket is up and responding to pings.
+	DaemonStateRunning
+)
+
+// startupStuckThreshold is how long a process can be alive without IPC before
+// it's considered stuck rather than starting. Must exceed the maximum restart
+// throttle delay (2 min) plus a generous startup window.
+const startupStuckThreshold = 3 * time.Minute
+
+// GetState returns the current lifecycle state of the daemon.
+// This is the canonical way to check daemon status — prefer it over
+// the boolean helpers IsRunning/IsStarting, which are thin wrappers.
+func GetState() DaemonState {
+	// IPC ping is the authoritative check for a fully-running daemon.
+	client := NewClientWithTimeout(500 * time.Millisecond)
+	if client.Ping() == nil {
+		return DaemonStateRunning
+	}
+
+	// No IPC response — check whether a process is alive via PID file.
 	data, err := os.ReadFile(PidPath())
 	if err != nil {
-		return false
+		return DaemonStateStopped
 	}
 	var pid int
 	if _, err := fmt.Sscanf(string(data), "%d", &pid); err != nil {
-		return false
+		return DaemonStateStopped
 	}
-	// check if process is alive (signal 0 = no signal, just check existence)
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		return false
+		return DaemonStateStopped
 	}
-	// on Unix, FindProcess always succeeds; use Signal(0) to check liveness
-	return proc.Signal(syscall.Signal(0)) == nil
+	if proc.Signal(syscall.Signal(0)) != nil {
+		return DaemonStateStopped // process is dead
+	}
+
+	// Process is alive but IPC is not ready.
+	// Use PID file mtime to distinguish legitimate startup from stuck.
+	if info, err := os.Stat(PidPath()); err == nil {
+		if time.Since(info.ModTime()) > startupStuckThreshold {
+			return DaemonStateStuck
+		}
+	}
+	return DaemonStateStarting
+}
+
+// IsRunning checks if the daemon is fully running and responsive to IPC.
+func IsRunning() bool { return GetState() == DaemonStateRunning }
+
+// IsStarting checks if a daemon process exists but is not yet responding to IPC.
+// Returns true for both Starting and Stuck states — callers that need to distinguish
+// them should call GetState() directly.
+func IsStarting() bool {
+	s := GetState()
+	return s == DaemonStateStarting || s == DaemonStateStuck
 }
 
 // initComponents creates and wires all daemon subsystems. Returns setup duration.

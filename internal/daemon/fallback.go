@@ -142,22 +142,26 @@ func ensureDaemonInternal() error {
 	}
 
 	// A daemon may be alive but not yet listening on its socket (startup/throttle).
-	// Wait for it rather than killing it.
-	if IsStarting() {
+	// Wait for it rather than killing it. Skip the wait if it's stuck (past the
+	// startup window) — that process needs to be killed and restarted.
+	if state := GetState(); state == DaemonStateStarting {
 		for i := 0; i < 20; i++ {
 			time.Sleep(100 * time.Millisecond)
-			if IsRunning() {
+			switch GetState() {
+			case DaemonStateRunning:
 				return nil
+			case DaemonStateStarting:
+				continue
+			default:
+				// stopped or stuck — fall through to kill+restart
 			}
-			if !IsStarting() {
-				break
-			}
+			break
 		}
 	}
 
 	// Kill any stale daemon for this workspace before starting a new one.
-	// Since IsRunning() returned false and IsStarting() is also false, the old
-	// daemon is unresponsive. IPC stop will likely fail; SIGTERM is the fallback.
+	// Reached when: daemon stopped, daemon stuck (past startup window), or
+	// wait loop expired. IPC stop will likely fail; SIGTERM is the fallback.
 	if err := killStaleDaemon(CurrentWorkspaceID()); err != nil {
 		return fmt.Errorf("failed to stop stale daemon: %w", err)
 	}

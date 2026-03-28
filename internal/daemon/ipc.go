@@ -151,6 +151,33 @@ type StatusData struct {
 	Callers []CallerInfo `json:"callers,omitempty"`
 }
 
+// BootstrapGracePeriod is the window after daemon start during which zero syncs
+// is not considered a problem — the daemon is still performing its first pull.
+const BootstrapGracePeriod = 3 * time.Minute
+
+// HasConfiguredRepos reports whether the daemon has repos it should be syncing.
+func (s *StatusData) HasConfiguredRepos() bool {
+	if s == nil {
+		return false
+	}
+	for _, workspaces := range s.Workspaces {
+		if len(workspaces) > 0 {
+			return true
+		}
+	}
+	return s.LedgerPath != "" || len(s.TeamContexts) > 0
+}
+
+// IsBootstrapping reports true when the daemon just started and hasn't completed
+// its first sync yet. Callers use this to soften warnings during the grace period.
+// Only true when repos are configured — a daemon with nothing to sync is never bootstrapping.
+func (s *StatusData) IsBootstrapping() bool {
+	if s == nil || !s.Running {
+		return false
+	}
+	return s.TotalSyncs == 0 && s.Uptime < BootstrapGracePeriod && s.HasConfiguredRepos()
+}
+
 // ExtendedStatus provides additional status info for diagnostics.
 type ExtendedStatus struct {
 	RecentErrorCount int

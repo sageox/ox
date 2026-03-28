@@ -126,7 +126,8 @@ func TestGetGitRemoteURL_NonexistentPath(t *testing.T) {
 func TestIsDaemonBootstrapping_NilStatus_Coverage(t *testing.T) {
 	t.Parallel()
 
-	if isDaemonBootstrapping(nil) {
+	var status *daemon.StatusData
+	if status.IsBootstrapping() {
 		t.Error("expected false for nil status")
 	}
 }
@@ -135,7 +136,7 @@ func TestIsDaemonBootstrapping_NotRunning_Coverage(t *testing.T) {
 	t.Parallel()
 
 	status := &daemon.StatusData{Running: false}
-	if isDaemonBootstrapping(status) {
+	if status.IsBootstrapping() {
 		t.Error("expected false when not running")
 	}
 }
@@ -148,7 +149,7 @@ func TestIsDaemonBootstrapping_RunningWithSyncs_Coverage(t *testing.T) {
 		TotalSyncs: 5,
 		Uptime:     30 * time.Second,
 	}
-	if isDaemonBootstrapping(status) {
+	if status.IsBootstrapping() {
 		t.Error("expected false when syncs > 0")
 	}
 }
@@ -164,7 +165,7 @@ func TestIsDaemonBootstrapping_RunningLongUptime(t *testing.T) {
 			"ledger": {{Path: "/some/path"}},
 		},
 	}
-	if isDaemonBootstrapping(status) {
+	if status.IsBootstrapping() {
 		t.Error("expected false when uptime exceeds bootstrap threshold")
 	}
 }
@@ -180,7 +181,7 @@ func TestIsDaemonBootstrapping_TrueCase(t *testing.T) {
 			"ledger": {{Path: "/some/path"}},
 		},
 	}
-	if !isDaemonBootstrapping(status) {
+	if !status.IsBootstrapping() {
 		t.Error("expected true during bootstrap period")
 	}
 }
@@ -191,7 +192,7 @@ func TestDaemonHasConfiguredRepos_EmptyWorkspaces_Coverage(t *testing.T) {
 	status := &daemon.StatusData{
 		Workspaces: map[string][]daemon.WorkspaceSyncStatus{},
 	}
-	if daemonHasConfiguredRepos(status) {
+	if status.HasConfiguredRepos() {
 		t.Error("expected false with empty workspaces")
 	}
 }
@@ -202,7 +203,7 @@ func TestDaemonHasConfiguredRepos_LegacyLedgerPath_Coverage(t *testing.T) {
 	status := &daemon.StatusData{
 		LedgerPath: "/some/ledger",
 	}
-	if !daemonHasConfiguredRepos(status) {
+	if !status.HasConfiguredRepos() {
 		t.Error("expected true with legacy LedgerPath")
 	}
 }
@@ -215,7 +216,7 @@ func TestDaemonHasConfiguredRepos_LegacyTeamContexts_Coverage(t *testing.T) {
 			{TeamID: "team-1"},
 		},
 	}
-	if !daemonHasConfiguredRepos(status) {
+	if !status.HasConfiguredRepos() {
 		t.Error("expected true with legacy TeamContexts")
 	}
 }

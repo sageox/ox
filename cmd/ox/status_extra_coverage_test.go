@@ -190,9 +190,9 @@ func TestIsDaemonBootstrapping_ExtraCoverage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := isDaemonBootstrapping(tt.status)
+			got := tt.status.IsBootstrapping()
 			if got != tt.want {
-				t.Errorf("isDaemonBootstrapping() = %v, want %v", got, tt.want)
+				t.Errorf("IsBootstrapping() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -255,9 +255,9 @@ func TestDaemonHasConfiguredRepos_ExtraCoverage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := daemonHasConfiguredRepos(tt.status)
+			got := tt.status.HasConfiguredRepos()
 			if got != tt.want {
-				t.Errorf("daemonHasConfiguredRepos() = %v, want %v", got, tt.want)
+				t.Errorf("HasConfiguredRepos() = %v, want %v", got, tt.want)
 			}
 		})
 	}
