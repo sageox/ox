@@ -31,6 +31,21 @@ func TestDetectContentType(t *testing.T) {
 		{"photo.png", "image/png"},
 		{"photo.jpg", "image/jpeg"},
 		{"photo.jpeg", "image/jpeg"},
+		// audio formats
+		{"recording.m4a", "audio/mp4"},
+		{"recording.mp3", "audio/mpeg"},
+		{"recording.wav", "audio/wav"},
+		{"recording.ogg", "audio/ogg"},
+		{"recording.opus", "audio/opus"},
+		{"recording.flac", "audio/flac"},
+		{"recording.aac", "audio/aac"},
+		{"recording.wma", "audio/x-ms-wma"},
+		{"recording.webm", "audio/webm"},
+		// video formats
+		{"recording.mp4", "video/mp4"},
+		{"recording.mov", "video/quicktime"},
+		{"recording.mkv", "video/x-matroska"},
+		{"recording.avi", "video/x-msvideo"},
 		{"doc.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
 	}
 

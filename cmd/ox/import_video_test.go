@@ -40,10 +40,10 @@ func TestDetectContentType_VideoFormats(t *testing.T) {
 	})
 
 	t.Run("mp4 without valid header", func(t *testing.T) {
-		// without a proper ftyp header, http.DetectContentType sniffs the content;
-		// ASCII text is detected as text/plain, not video/mp4
+		// .mp4 extension now has explicit mapping, so it returns video/mp4
+		// regardless of content bytes
 		got := detectContentType("video.mp4", []byte("not a real video"))
-		assert.NotEqual(t, "video/mp4", got, "plain text should not be detected as video/mp4")
+		assert.Equal(t, "video/mp4", got)
 	})
 
 	t.Run("mov with ftyp header", func(t *testing.T) {
