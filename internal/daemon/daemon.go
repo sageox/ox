@@ -632,6 +632,14 @@ func (d *Daemon) initComponents() time.Duration {
 		projectEndpoint = projectCfg.GetEndpoint()
 	}
 
+	// clean up stale git lock files left by crashed processes before starting sync
+	if d.config.LedgerPath != "" {
+		gitDir := filepath.Join(d.config.LedgerPath, ".git")
+		if removed, _ := gitutil.RemoveStaleLockFiles(gitDir); len(removed) > 0 {
+			d.logger.Info("removed stale git lock files at startup", "path", d.config.LedgerPath, "locks", removed)
+		}
+	}
+
 	// telemetry + friction collectors
 	d.telemetry = NewTelemetryCollector(d.logger)
 	d.startTime = time.Now()

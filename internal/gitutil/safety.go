@@ -35,6 +35,34 @@ func HasLockFiles(gitDir string) []string {
 	return found
 }
 
+// StaleLockAge is how old a git lock file must be before we consider it abandoned.
+// Normal git operations hold locks for milliseconds to a few seconds.
+// 60 seconds is a very conservative threshold — well past any realistic git op.
+const StaleLockAge = 60 * time.Second
+
+// RemoveStaleLockFiles removes git lock files older than StaleLockAge.
+// Safe to call at daemon startup or before pull operations — only removes
+// files that no running git process could still be holding.
+// Returns the names of files removed and any removal errors encountered.
+func RemoveStaleLockFiles(gitDir string) (removed []string, errs []error) {
+	for _, lock := range knownLockFiles {
+		path := filepath.Join(gitDir, lock)
+		info, err := os.Stat(path)
+		if err != nil {
+			continue // doesn't exist
+		}
+		if time.Since(info.ModTime()) < StaleLockAge {
+			continue // recent enough to be from an active process
+		}
+		if err := os.Remove(path); err != nil {
+			errs = append(errs, fmt.Errorf("remove %s: %w", lock, err))
+		} else {
+			removed = append(removed, lock)
+		}
+	}
+	return removed, errs
+}
+
 // IsRebaseInProgress checks whether the repo is stuck in a broken rebase state.
 // Returns true if .git/rebase-merge or .git/rebase-apply exists.
 func IsRebaseInProgress(repoPath string) bool {

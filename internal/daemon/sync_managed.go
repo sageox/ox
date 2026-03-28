@@ -120,23 +120,31 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 		return ManagedRepoPullResult{Skipped: true, SkipReason: "rebase in progress"}
 	}
 
-	// Lock files: skip and report issue
+	// Lock files: auto-remove stale ones, skip and report if still present
 	gitDir := filepath.Join(path, ".git")
 	if locks := gitutil.HasLockFiles(gitDir); len(locks) > 0 {
-		logger.Warn("git lock files detected, skipping pull",
-			"path", path, "locks", strings.Join(locks, ", "))
-		return ManagedRepoPullResult{
-			Skipped:    true,
-			SkipReason: "lock files present",
-			Issue: &DaemonIssue{
-				Type:     IssueTypeGitLock,
-				Severity: SeverityWarning,
-				Repo:     repoName,
-				Summary: fmt.Sprintf("Stale lock files blocking sync: %s. If no git commands are running, remove with: rm %s/{%s}",
-					strings.Join(locks, ", "),
-					gitDir,
-					strings.Join(locks, ",")),
-			},
+		// attempt to remove stale locks before giving up
+		removed, _ := gitutil.RemoveStaleLockFiles(gitDir)
+		if len(removed) > 0 {
+			logger.Info("removed stale git lock files", "path", path, "locks", strings.Join(removed, ", "))
+		}
+		// re-check: if fresh locks remain, a live git process is holding them
+		if remaining := gitutil.HasLockFiles(gitDir); len(remaining) > 0 {
+			logger.Warn("git lock files detected, skipping pull",
+				"path", path, "locks", strings.Join(remaining, ", "))
+			return ManagedRepoPullResult{
+				Skipped:    true,
+				SkipReason: "lock files present",
+				Issue: &DaemonIssue{
+					Type:     IssueTypeGitLock,
+					Severity: SeverityWarning,
+					Repo:     repoName,
+					Summary: fmt.Sprintf("Stale lock files blocking sync: %s. If no git commands are running, remove with: rm %s/{%s}",
+						strings.Join(remaining, ", "),
+						gitDir,
+						strings.Join(remaining, ",")),
+				},
+			}
 		}
 	}
 

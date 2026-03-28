@@ -54,6 +54,52 @@ func TestHasLockFiles(t *testing.T) {
 	})
 }
 
+func TestRemoveStaleLockFiles(t *testing.T) {
+	t.Run("removes old locks", func(t *testing.T) {
+		gitDir := filepath.Join(t.TempDir(), ".git")
+		require.NoError(t, os.MkdirAll(gitDir, 0755))
+
+		lockPath := filepath.Join(gitDir, "index.lock")
+		require.NoError(t, os.WriteFile(lockPath, []byte{}, 0644))
+		// backdate to look old
+		oldTime := time.Now().Add(-(StaleLockAge + time.Second))
+		require.NoError(t, os.Chtimes(lockPath, oldTime, oldTime))
+
+		removed, errs := RemoveStaleLockFiles(gitDir)
+		assert.Empty(t, errs)
+		assert.Equal(t, []string{"index.lock"}, removed)
+		assert.Empty(t, HasLockFiles(gitDir))
+	})
+
+	t.Run("preserves fresh locks", func(t *testing.T) {
+		gitDir := filepath.Join(t.TempDir(), ".git")
+		require.NoError(t, os.MkdirAll(gitDir, 0755))
+
+		require.NoError(t, os.WriteFile(filepath.Join(gitDir, "index.lock"), []byte{}, 0644))
+		// do NOT backdate — file is brand new
+
+		removed, errs := RemoveStaleLockFiles(gitDir)
+		assert.Empty(t, errs)
+		assert.Empty(t, removed)
+		assert.NotEmpty(t, HasLockFiles(gitDir))
+	})
+
+	t.Run("no locks present", func(t *testing.T) {
+		gitDir := filepath.Join(t.TempDir(), ".git")
+		require.NoError(t, os.MkdirAll(gitDir, 0755))
+
+		removed, errs := RemoveStaleLockFiles(gitDir)
+		assert.Empty(t, errs)
+		assert.Empty(t, removed)
+	})
+
+	t.Run("nonexistent directory", func(t *testing.T) {
+		removed, errs := RemoveStaleLockFiles("/nonexistent/.git")
+		assert.Empty(t, errs) // missing files are not errors
+		assert.Empty(t, removed)
+	})
+}
+
 func TestIsRebaseInProgress(t *testing.T) {
 	t.Run("clean repo", func(t *testing.T) {
 		repo := t.TempDir()
