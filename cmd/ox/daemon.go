@@ -135,13 +135,20 @@ var daemonStatusCmd = &cobra.Command{
 		verbose, _ := cmd.Flags().GetBool("verbose")
 
 		if !daemon.IsRunning() {
-			if daemon.IsStarting() {
+			switch daemon.GetState() {
+			case daemon.DaemonStateStarting:
 				if jsonOutput {
 					fmt.Println(`{"running": false, "starting": true}`)
 				} else {
 					fmt.Print(daemon.FormatStarting())
 				}
-			} else {
+			case daemon.DaemonStateStuck:
+				if jsonOutput {
+					fmt.Println(`{"running": false, "stuck": true}`)
+				} else {
+					fmt.Print(daemon.FormatStuck())
+				}
+			default:
 				if jsonOutput {
 					fmt.Println(`{"running": false}`)
 				} else {

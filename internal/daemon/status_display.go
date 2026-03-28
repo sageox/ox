@@ -322,6 +322,22 @@ func FormatStarting() string {
 	return out.String()
 }
 
+// FormatStuck renders the daemon status when the process is alive but has exceeded the
+// startup window without accepting IPC connections — indicating it is hung.
+func FormatStuck() string {
+	var out strings.Builder
+	out.WriteString(styleCritical.Render("⚠ Daemon: Stuck"))
+	out.WriteString("\n\n")
+	out.WriteString(styleMuted.Render("  Process is running but not accepting connections."))
+	out.WriteString("\n")
+	out.WriteString(styleMuted.Render("  The process has been starting for longer than expected."))
+	out.WriteString("\n\n")
+	out.WriteString(styleMuted.Render("  To fix: "))
+	out.WriteString(styleHealthy.Render("ox daemon restart"))
+	out.WriteString("\n")
+	return out.String()
+}
+
 // FormatStatus renders compact daemon status (Tufte-inspired: maximize data-ink ratio).
 // cliVersion is the current CLI version for match comparison.
 func FormatStatus(status *StatusData, cliVersion string) string {

@@ -34,19 +34,34 @@ func (c *DaemonRunningCheck) Category() string {
 
 // Run executes the daemon running check.
 func (c *DaemonRunningCheck) Run(_ context.Context, _ bool) CheckResult {
-	if daemon.IsRunning() {
+	switch daemon.GetState() {
+	case daemon.DaemonStateRunning:
 		return CheckResult{
 			Name:    c.Name(),
 			Status:  StatusPass,
 			Message: "yes",
 		}
-	}
-
-	return CheckResult{
-		Name:    c.Name(),
-		Status:  StatusSkip,
-		Message: "not running",
-		Fix:     "Run `ox daemon start` to enable background sync",
+	case daemon.DaemonStateStarting:
+		return CheckResult{
+			Name:    c.Name(),
+			Status:  StatusSkip,
+			Message: "starting",
+			Fix:     "Daemon is starting up, wait a moment and try again",
+		}
+	case daemon.DaemonStateStuck:
+		return CheckResult{
+			Name:    c.Name(),
+			Status:  StatusFail,
+			Message: "stuck",
+			Fix:     "Daemon process is running but not accepting connections. Run `ox daemon restart`",
+		}
+	default:
+		return CheckResult{
+			Name:    c.Name(),
+			Status:  StatusSkip,
+			Message: "not running",
+			Fix:     "Run `ox daemon start` to enable background sync",
+		}
 	}
 }
 
@@ -70,14 +85,30 @@ func (c *DaemonResponsiveCheck) Category() string {
 
 // Run executes the daemon responsive check.
 func (c *DaemonResponsiveCheck) Run(_ context.Context, _ bool) CheckResult {
-	if err := daemon.IsHealthy(); err != nil {
-		// Distinguish between "not running" and "not responding"
-		if !daemon.IsRunning() {
-			return CheckResult{
-				Name:   c.Name(),
-				Status: StatusSkip,
-			}
+	state := daemon.GetState()
+	switch state {
+	case daemon.DaemonStateStopped:
+		return CheckResult{
+			Name:   c.Name(),
+			Status: StatusSkip,
 		}
+	case daemon.DaemonStateStarting:
+		return CheckResult{
+			Name:    c.Name(),
+			Status:  StatusSkip,
+			Message: "starting",
+		}
+	case daemon.DaemonStateStuck:
+		return CheckResult{
+			Name:    c.Name(),
+			Status:  StatusFail,
+			Message: "not responding (stuck)",
+			Fix:     "Daemon process is alive but not accepting connections. Run `ox daemon restart`",
+		}
+	}
+
+	// DaemonStateRunning — do a live IPC health check
+	if err := daemon.IsHealthy(); err != nil {
 		return CheckResult{
 			Name:    c.Name(),
 			Status:  StatusFail,
