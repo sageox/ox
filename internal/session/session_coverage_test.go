@@ -215,30 +215,6 @@ func TestSummarizeResponseToSummaryView(t *testing.T) {
 	}
 }
 
-func TestWriteSessionArtifacts_NilHTMLGen(t *testing.T) {
-	dir := t.TempDir()
-	_, err := WriteSessionArtifacts(dir, nil, &SummarizeResponse{Summary: "test"}, nil)
-	if err == nil {
-		t.Fatal("expected error for nil html generator")
-	}
-	if got := err.Error(); got != "generate session.html: html generator is nil" {
-		t.Errorf("error = %q, want html generator nil message", got)
-	}
-}
-
-// mockHTMLGen is a minimal HTMLGenerator for testing artifacts
-type mockHTMLGen struct {
-	err error
-}
-
-func (m *mockHTMLGen) GenerateToFile(_ *StoredSession, _ string) error {
-	return m.err
-}
-
-func (m *mockHTMLGen) GenerateToFileWithSummary(_ *StoredSession, _ *SummarizeResponse, _ string) error {
-	return m.err
-}
-
 func TestWriteSessionArtifacts_Success(t *testing.T) {
 	dir := t.TempDir()
 	resp := &SummarizeResponse{
@@ -251,7 +227,7 @@ func TestWriteSessionArtifacts_Success(t *testing.T) {
 		Entries: []map[string]any{},
 	}
 
-	paths, err := WriteSessionArtifacts(dir, stored, resp, &mockHTMLGen{})
+	paths, err := WriteSessionArtifacts(dir, stored, resp)
 	if err != nil {
 		t.Fatalf("WriteSessionArtifacts: %v", err)
 	}
@@ -262,9 +238,6 @@ func TestWriteSessionArtifacts_Success(t *testing.T) {
 	}
 	if paths.SummaryMD == "" {
 		t.Error("SummaryMD path is empty")
-	}
-	if paths.HTML == "" {
-		t.Error("HTML path is empty")
 	}
 	if paths.SessionMD == "" {
 		t.Error("SessionMD path is empty")
@@ -291,7 +264,7 @@ func TestWriteSessionArtifacts_NoSummary(t *testing.T) {
 		Entries: []map[string]any{},
 	}
 
-	paths, err := WriteSessionArtifacts(dir, stored, nil, &mockHTMLGen{})
+	paths, err := WriteSessionArtifacts(dir, stored, nil)
 	if err != nil {
 		t.Fatalf("WriteSessionArtifacts: %v", err)
 	}
@@ -302,10 +275,6 @@ func TestWriteSessionArtifacts_NoSummary(t *testing.T) {
 	}
 	if paths.SummaryMD != "" {
 		t.Error("SummaryMD should be empty with nil summary")
-	}
-	// HTML and session.md should still be generated
-	if paths.HTML == "" {
-		t.Error("HTML path should be set")
 	}
 	if paths.SessionMD == "" {
 		t.Error("SessionMD path should be set")

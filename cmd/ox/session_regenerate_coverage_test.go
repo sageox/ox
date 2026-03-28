@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -9,58 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestRegenerateSessionHTML_CreatesHTMLFile(t *testing.T) {
-	sessionPath := t.TempDir()
-
-	storedSession := &session.StoredSession{
-		Meta: &session.StoreMeta{
-			Version:   "1",
-			AgentType: "claude-code",
-			Username:  "person-a",
-		},
-		Entries: []map[string]any{
-			{"type": "user", "content": "Hello there"},
-			{"type": "assistant", "content": "Hi, how can I help?"},
-		},
-	}
-
-	err := regenerateSessionHTML(storedSession, sessionPath)
-	require.NoError(t, err)
-
-	htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
-	data, err := os.ReadFile(htmlPath)
-	require.NoError(t, err)
-	assert.Contains(t, string(data), "<!DOCTYPE html")
-}
-
-func TestRegenerateSessionHTML_OverwritesExisting(t *testing.T) {
-	sessionPath := t.TempDir()
-	htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
-
-	// write a dummy file first
-	require.NoError(t, os.WriteFile(htmlPath, []byte("<html>old</html>"), 0644))
-
-	storedSession := &session.StoredSession{
-		Meta: &session.StoreMeta{
-			Version:   "1",
-			AgentType: "claude-code",
-		},
-		Entries: []map[string]any{
-			{"type": "user", "content": "test"},
-			{"type": "assistant", "content": "response"},
-		},
-	}
-
-	err := regenerateSessionHTML(storedSession, sessionPath)
-	require.NoError(t, err)
-
-	data, err := os.ReadFile(htmlPath)
-	require.NoError(t, err)
-	// should have the new generated content, not the old dummy
-	assert.NotEqual(t, "<html>old</html>", string(data))
-	assert.Contains(t, string(data), "<!DOCTYPE html")
-}
 
 func TestMapEntriesToTyped_ToolFields(t *testing.T) {
 	t.Parallel()
@@ -117,10 +64,9 @@ func TestRegenerateArtifacts_EmptyEntries(t *testing.T) {
 	err := regenerateArtifacts(sessionPath, rawSession)
 	require.NoError(t, err)
 
-	// HTML should still be created even with empty entries
-	htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
-	_, err = os.Stat(htmlPath)
-	assert.NoError(t, err, "session.html should exist even with empty entries")
+	// session.md should still be created even with empty entries
+	mdPath := filepath.Join(sessionPath, ledgerFileSessionMD)
+	assert.FileExists(t, mdPath, "session.md should exist even with empty entries")
 }
 
 func TestRegenerateArtifacts_NilMeta(t *testing.T) {
@@ -136,7 +82,6 @@ func TestRegenerateArtifacts_NilMeta(t *testing.T) {
 	err := regenerateArtifacts(sessionPath, rawSession)
 	require.NoError(t, err)
 
-	htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
-	_, err = os.Stat(htmlPath)
-	assert.NoError(t, err, "session.html should exist even with nil meta")
+	mdPath := filepath.Join(sessionPath, ledgerFileSessionMD)
+	assert.FileExists(t, mdPath, "session.md should exist even with nil meta")
 }
