@@ -1229,6 +1229,26 @@ func NewClientWithTimeout(timeout time.Duration) *Client {
 	}
 }
 
+// NewClientForCurrentRepo creates an IPC client that uses the registry to find
+// the daemon for the current repo, even if its workspace ID differs from what
+// the current binary computes (e.g., after a workspace ID format change).
+// Use this in status/stop/restart commands where you need to reach the daemon
+// for the project in the current directory regardless of workspace ID drift.
+func NewClientForCurrentRepo() *Client {
+	return &Client{
+		socketPath: resolveSocketPath(),
+		timeout:    50 * time.Millisecond,
+	}
+}
+
+// NewClientForCurrentRepoWithTimeout is like NewClientForCurrentRepo but with a custom timeout.
+func NewClientForCurrentRepoWithTimeout(timeout time.Duration) *Client {
+	return &Client{
+		socketPath: resolveSocketPath(),
+		timeout:    timeout,
+	}
+}
+
 // NewClientWithSocket creates an IPC client for a specific socket path.
 // Used when connecting to daemons for other workspaces.
 func NewClientWithSocket(socketPath string) *Client {

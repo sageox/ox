@@ -614,12 +614,43 @@ const (
 // throttle delay (2 min) plus a generous startup window.
 const startupStuckThreshold = 3 * time.Minute
 
+// resolveSocketPath returns the socket path for the current repo's running daemon.
+// Tries the current workspace socket first; falls back to a registry lookup by
+// repo_id to handle workspace ID drift between binary versions (e.g., when the
+// workspace ID computation changes but an older daemon is still running).
+func resolveSocketPath() string {
+	sock := SocketPath()
+	if _, err := os.Stat(sock); err == nil {
+		return sock // fast path: current workspace socket exists
+	}
+
+	// Socket missing for current workspace ID — check registry for a daemon
+	// registered under the same repo_id with a different workspace ID.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return sock
+	}
+	repoID := config.GetRepoID(cwd)
+	if info := FindDaemonForRepo(repoID); info != nil {
+		if _, err := os.Stat(info.SocketPath); err == nil {
+			slog.Debug("resolved daemon via registry fallback",
+				"computed_workspace", CurrentWorkspaceID(),
+				"registry_workspace", info.WorkspaceID,
+				"repo_id", repoID)
+			return info.SocketPath
+		}
+	}
+	return sock
+}
+
 // GetState returns the current lifecycle state of the daemon.
 // This is the canonical way to check daemon status — prefer it over
 // the boolean helpers IsRunning/IsStarting, which are thin wrappers.
 func GetState() DaemonState {
 	// IPC ping is the authoritative check for a fully-running daemon.
-	client := NewClientWithTimeout(2 * time.Second)
+	// Uses resolveSocketPath to handle workspace ID drift across binary versions.
+	socketPath := resolveSocketPath()
+	client := &Client{socketPath: socketPath, timeout: 2 * time.Second}
 	if client.Ping() == nil {
 		return DaemonStateRunning
 	}
@@ -627,7 +658,7 @@ func GetState() DaemonState {
 	// Ping failed. If the socket file exists, the daemon created its listener
 	// and is running — it's just temporarily unable to respond (busy with GC,
 	// a large sync, etc.). Don't classify as stuck based on a timeout alone.
-	if _, err := os.Stat(SocketPath()); err == nil {
+	if _, err := os.Stat(socketPath); err == nil {
 		return DaemonStateRunning
 	}
 

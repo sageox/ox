@@ -79,7 +79,7 @@ var daemonStopCmd = &cobra.Command{
 			return nil
 		}
 
-		client := daemon.NewClient()
+		client := daemon.NewClientForCurrentRepo()
 		if err := client.Stop(); err != nil {
 			return fmt.Errorf("failed to stop daemon: %w", err)
 		}
@@ -96,7 +96,7 @@ var daemonRestartCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// stop if running
 		if daemon.IsRunning() {
-			client := daemon.NewClient()
+			client := daemon.NewClientForCurrentRepo()
 			if err := client.Stop(); err != nil {
 				return fmt.Errorf("failed to stop daemon: %w", err)
 			}
@@ -160,10 +160,10 @@ var daemonStatusCmd = &cobra.Command{
 
 		// status is human-initiated, use longer timeout than default 50ms IPC;
 		// retry once with even longer timeout if daemon is busy (initial sync, GC)
-		client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+		client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 		status, err := client.Status()
 		if err != nil && isTimeoutErr(err) {
-			client = daemon.NewClientWithTimeout(2 * time.Second)
+			client = daemon.NewClientForCurrentRepoWithTimeout(2 * time.Second)
 			status, err = client.Status()
 		}
 		if err != nil {
