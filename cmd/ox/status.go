@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
@@ -970,6 +971,9 @@ func renderDaemonSyncSection(ds *daemon.StatusData, syncHistory []daemon.SyncEve
 		return b.String()
 	}
 
+	// agent worker status
+	b.WriteString(renderAgentWorkerLine())
+
 	// sync stats - show warning indicator when zero syncs but repos are configured
 	b.WriteString(statusLabelStyle.Render("Total syncs"))
 	if bootstrapping {
@@ -1136,6 +1140,79 @@ func renderDaemonSyncSection(ds *daemon.StatusData, syncHistory []daemon.SyncEve
 	}
 
 	return b.String()
+}
+
+// renderAgentWorkerLine renders the agent worker status as a single labeled line.
+func renderAgentWorkerLine() string {
+	var b strings.Builder
+
+	userCfg, _ := config.LoadUserConfig()
+	raw := ""
+	if userCfg != nil {
+		raw = userCfg.GetAgentWorkerAgent()
+	}
+
+	if raw == "none" {
+		b.WriteString(statusLabelStyle.Render("Summarizer"))
+		b.WriteString(statusMutedStyle.Render("disabled"))
+		b.WriteString("\n")
+		return b.String()
+	}
+
+	resolved := agentwork.ResolveAgent(raw)
+	if resolved == "none" {
+		b.WriteString(statusLabelStyle.Render("Summarizer"))
+		b.WriteString(statusMutedStyle.Render("none (no agent CLI found)"))
+		b.WriteString("\n")
+		return b.String()
+	}
+
+	u := agentwork.CheckAgentUsability(resolved)
+
+	b.WriteString(statusLabelStyle.Render("Summarizer"))
+	if !u.Authenticated {
+		b.WriteString(formatValue(fmt.Sprintf("%s (not authenticated)", resolved), "warning"))
+	} else {
+		source := "auto"
+		if raw != "" {
+			source = "configured"
+		}
+		b.WriteString(statusValueStyle.Render(resolved))
+		b.WriteString(statusMutedStyle.Render(fmt.Sprintf(" (%s)", source)))
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+// buildAgentWorkerJSON creates the agent worker JSON for ox status --json.
+func buildAgentWorkerJSON() *status.AgentWorkerJSON {
+	userCfg, _ := config.LoadUserConfig()
+	raw := ""
+	if userCfg != nil {
+		raw = userCfg.GetAgentWorkerAgent()
+	}
+
+	if raw == "none" {
+		return &status.AgentWorkerJSON{Agent: "none", Source: "disabled"}
+	}
+
+	resolved := agentwork.ResolveAgent(raw)
+	source := "auto"
+	if raw != "" {
+		source = "configured"
+	}
+
+	if resolved == "none" {
+		return &status.AgentWorkerJSON{Agent: "none", Source: source}
+	}
+
+	u := agentwork.CheckAgentUsability(resolved)
+	return &status.AgentWorkerJSON{
+		Agent:         resolved,
+		Source:        source,
+		Authenticated: u.Authenticated,
+		AuthDetail:    u.AuthDetail,
+	}
 }
 
 // renderAICoworkersSection renders a one-line summary of active AI coworkers.
@@ -1521,6 +1598,9 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 			output.Daemon.SyncsLastHour = daemonStatus.SyncsLastHour
 			output.Daemon.LastError = daemonStatus.LastError
 		}
+		// agent worker status
+		output.Daemon.AgentWorker = buildAgentWorkerJSON()
+
 		if daemonClient != nil {
 			// AI coworkers with context stats
 			if instances, err := daemonClient.Instances(); err == nil && len(instances) > 0 {

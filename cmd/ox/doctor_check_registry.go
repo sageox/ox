@@ -497,4 +497,17 @@ func init() {
 			return convertDoctorResult(result)
 		},
 	})
+
+	// ============================================================
+	// Agent Worker checks
+	// ============================================================
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugAgentWorkerBinary,
+		Name:        "agent worker binary",
+		Category:    "Agent Worker",
+		FixLevel:    FixLevelCheckOnly,
+		Description: "Verifies configured agent CLI binary is available in PATH",
+		Run:         func(_ bool) checkResult { return checkAgentWorkerBinary() },
+	})
 }

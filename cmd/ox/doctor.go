@@ -832,14 +832,21 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		})
 	}
 
-	// Category 11: Updates
+	// Category 11: Agent Worker
+	progress.show("Agent Worker")
+	categories = append(categories, checkCategory{
+		name:   "Agent Worker",
+		checks: []checkResult{checkAgentWorkerBinary()},
+	})
+
+	// Category 12: Updates
 	progress.show("Updates")
 	categories = append(categories, checkCategory{
 		name:   "Updates",
 		checks: []checkResult{checkForUpdates()},
 	})
 
-	// Category 12: SageOx Configuration
+	// Category 13: SageOx Configuration
 	// Endpoint consistency check - always run (doesn't require authentication)
 	progress.show("SageOx Configuration")
 	sageoxConfigChecks := []checkResult{
@@ -850,7 +857,7 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		checks: sageoxConfigChecks,
 	})
 
-	// Category 13: SageOx Service
+	// Category 14: SageOx Service
 	// suppress login-dependent SageOx service checks when not logged in
 	progress.show("SageOx Service")
 	if state.isAuthenticated {
@@ -863,7 +870,7 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 			},
 		})
 
-		// Category 14: Cloud Diagnostics (optional - only shows if cloud returns issues)
+		// Category 15: Cloud Diagnostics (optional - only shows if cloud returns issues)
 		// Cloud doctor detects things the local CLI cannot:
 		// - Pending merge conflicts (same repo registered twice)
 		// - Team invites pending acceptance

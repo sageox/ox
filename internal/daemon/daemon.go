@@ -690,7 +690,6 @@ func (d *Daemon) initComponents() time.Duration {
 	// agent work manager
 	if d.config.LedgerPath != "" {
 		agentWorkSignal := make(chan struct{}, 1)
-		runner := agentwork.NewClaudeRunner(d.logger)
 		configLoader := func() *config.AgentWorkerConfig {
 			cfg, err := config.LoadUserConfig()
 			if err != nil {
@@ -703,6 +702,9 @@ func (d *Daemon) initComponents() time.Duration {
 			}
 			return awCfg
 		}
+		initialCfg := configLoader()
+		resolved := agentwork.ResolveAgent(initialCfg.GetAgent())
+		runner := agentwork.NewRunner(resolved, d.logger)
 		d.agentWorker = agentwork.NewManager(runner, d.logger, configLoader, agentWorkSignal, d.config.LedgerPath)
 		sfh := agentwork.NewSessionFinalizeHandler(d.logger)
 		sfh.SetPIDLookup(d.heartbeat.GetAgentPID)

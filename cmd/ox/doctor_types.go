@@ -168,6 +168,9 @@ const (
 	// Distillation checks
 	CheckSlugGuidanceFiles = "guidance-files"
 
+	// Agent Worker checks
+	CheckSlugAgentWorkerBinary = "agent-worker-binary"
+
 	// Code Search checks
 	CheckSlugCodeIndex = "code-index"
 )

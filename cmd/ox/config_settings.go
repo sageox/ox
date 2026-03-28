@@ -158,21 +158,22 @@ Override per-invocation with --html, --text, or --json flags.`,
 	},
 	{
 		Key:         "agent_worker",
-		Description: "Daemon AI coworker spawning",
-		LongDescription: `Controls whether the daemon can spawn AI coworker processes for
-background tasks like session anti-entropy (generating missing
-summaries for orphaned sessions).
+		Description: "Daemon AI coworker for background tasks",
+		LongDescription: `Selects which agent CLI the daemon uses for background tasks like
+session anti-entropy (generating missing summaries for orphaned sessions).
 
-When enabled, the daemon automatically detects incomplete sessions
-and spawns a Claude process to generate summaries, then uploads
-them to the ledger. Rate-limited to 60 invocations/hour, 4 concurrent.
+  auto   — auto-detect from PATH (default). Prefers claude > codex.
+  none   — explicitly disabled. Only lightweight cleanup runs.
+  claude — use Claude Code CLI for background agent work.
+  codex  — use OpenAI Codex CLI for background agent work.
 
-When disabled (default), only lightweight cleanup runs (removing
-ghost sessions with no data). Sessions with recoverable data are
-preserved until this is enabled.`,
+When an agent is available (configured or auto-detected), the daemon
+automatically detects incomplete sessions and spawns the agent to
+generate summaries, then uploads them to the ledger.
+Rate-limited to 60 invocations/hour, 4 concurrent.`,
 		Category:    "Sessions",
-		ValidValues: []string{"on", "off"},
-		Default:     "off",
+		ValidValues: []string{"auto", "none", "claude", "codex"},
+		Default:     "auto",
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 }
@@ -280,11 +281,15 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 		}
 
 	case "agent_worker":
-		if userCfg != nil && userCfg.AgentWorker != nil && userCfg.AgentWorker.Enabled != nil {
-			if *userCfg.AgentWorker.Enabled {
-				cv.UserVal = "on"
-			} else {
-				cv.UserVal = "off"
+		if userCfg != nil && userCfg.AgentWorker != nil {
+			agent := userCfg.AgentWorker.GetAgent()
+			switch agent {
+			case "":
+				// not configured — auto-detect (don't set UserVal, use default)
+			case "none":
+				cv.UserVal = "none"
+			default:
+				cv.UserVal = agent
 			}
 		}
 	}
@@ -391,8 +396,11 @@ func setUserConfig(key, value string) error {
 		cfg.ViewFormat = value
 
 	case "agent_worker":
-		enabled := value == "on"
-		cfg.SetAgentWorkerEnabled(enabled)
+		if value == "auto" {
+			cfg.SetAgentWorkerAgent("") // empty = auto-detect
+		} else {
+			cfg.SetAgentWorkerAgent(value)
+		}
 
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)

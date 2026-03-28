@@ -109,17 +109,20 @@ func (c *SessionsConfig) GetMode() string {
 	return "none"
 }
 
-// AllowedAgentTypes is the set of valid AgentWorkerConfig.AgentType values.
-var AllowedAgentTypes = []string{"claude"}
+// AllowedAgentTypes is the set of valid AgentWorkerConfig.Agent values.
+var AllowedAgentTypes = []string{"none", "claude", "codex"}
 
 // AgentWorkerConfig controls daemon-spawned AI coworker invocations.
 type AgentWorkerConfig struct {
-	// Enabled controls whether the daemon can spawn AI coworker processes.
-	// Default: false
+	// Agent selects which agent CLI the daemon uses for background work.
+	// "none" disables agent spawning, "claude" or "codex" selects that CLI.
+	// Default: "none"
+	Agent string `yaml:"agent,omitempty"`
+
+	// Deprecated: Use Agent instead. Kept for backward compatibility.
 	Enabled *bool `yaml:"enabled,omitempty"`
 
-	// AgentType is the agent CLI to use. Validated against AllowedAgentTypes.
-	// Default: "claude"
+	// Deprecated: Use Agent instead. Kept for backward compatibility.
 	AgentType string `yaml:"agent_type,omitempty"`
 
 	// MaxInvocationsPerHour rate-limits agent spawning per daemon.
@@ -146,20 +149,49 @@ type AgentWorkerConfig struct {
 	QualityDiscardThreshold *float64 `yaml:"quality_discard_threshold,omitempty"`
 }
 
-// IsEnabled returns true if agent worker spawning is enabled (default: false)
-func (c *AgentWorkerConfig) IsEnabled() bool {
-	if c == nil || c.Enabled == nil {
-		return false
+// GetAgent returns the raw configured agent selector.
+// Returns "" when nothing is configured (caller should auto-detect),
+// "none" (explicitly disabled), "claude", or "codex".
+// Handles backward compat: Enabled=true with no Agent field maps to "claude".
+// For a fully resolved value (with auto-detection), use agentwork.ResolveAgent().
+func (c *AgentWorkerConfig) GetAgent() string {
+	if c == nil {
+		return ""
 	}
-	return *c.Enabled
+	// new field takes precedence
+	if c.Agent != "" {
+		return c.Agent
+	}
+	// backward compat: Enabled bool + AgentType string
+	if c.Enabled != nil {
+		if *c.Enabled {
+			if c.AgentType != "" {
+				return c.AgentType
+			}
+			return "claude"
+		}
+		return "none" // explicitly disabled via legacy field
+	}
+	return "" // not configured — auto-detect
 }
 
-// GetAgentType returns the configured agent type (default: "claude")
+// IsEnabled returns true if agent worker spawning is enabled.
+// Returns false for "none" and "" (unconfigured). Callers that want
+// auto-detection should use agentwork.ResolveAgent() instead.
+func (c *AgentWorkerConfig) IsEnabled() bool {
+	agent := c.GetAgent()
+	return agent != "none" && agent != ""
+}
+
+// GetAgentType returns the configured agent type (default: "claude").
+// Returns "claude" for unset or disabled states. For callers that need
+// auto-detection, use agentwork.ResolveAgent() instead.
 func (c *AgentWorkerConfig) GetAgentType() string {
-	if c == nil || c.AgentType == "" {
+	agent := c.GetAgent()
+	if agent == "" || agent == "none" {
 		return "claude"
 	}
-	return c.AgentType
+	return agent
 }
 
 // GetMaxInvocationsPerHour returns the rate limit (default: 60)
@@ -207,14 +239,23 @@ func (c *AgentWorkerConfig) GetQualityDiscardThreshold() float64 {
 }
 
 // Validate checks the config for invalid values.
-// Returns an error if agent_type is not in AllowedAgentTypes or limits are non-positive.
+// Returns an error if agent is not in AllowedAgentTypes or limits are non-positive.
 func (c *AgentWorkerConfig) Validate() error {
 	if c == nil {
 		return nil
 	}
 
-	if c.AgentType != "" && !slices.Contains(AllowedAgentTypes, c.AgentType) {
-		return fmt.Errorf("unknown agent_type %q, allowed: %v", c.AgentType, AllowedAgentTypes)
+	if c.Agent != "" && !slices.Contains(AllowedAgentTypes, c.Agent) {
+		return fmt.Errorf("unknown agent %q, allowed: %v", c.Agent, AllowedAgentTypes)
+	}
+
+	// backward compat: validate legacy AgentType field too
+	if c.Agent == "" && c.AgentType != "" {
+		// legacy field only allowed non-"none" agent types
+		validLegacy := []string{"claude", "codex"}
+		if !slices.Contains(validLegacy, c.AgentType) {
+			return fmt.Errorf("unknown agent_type %q, allowed: %v", c.AgentType, validLegacy)
+		}
 	}
 
 	if c.MaxInvocationsPerHour != nil && *c.MaxInvocationsPerHour < 1 {
@@ -236,13 +277,19 @@ func (c *AgentWorkerConfig) WithDefaults() *AgentWorkerConfig {
 		*out = *c
 	}
 
-	if out.Enabled == nil {
-		f := false
-		out.Enabled = &f
+	// migrate legacy fields to new Agent field (only if legacy fields are set)
+	if out.Agent == "" && out.Enabled != nil {
+		if *out.Enabled {
+			if out.AgentType != "" {
+				out.Agent = out.AgentType
+			} else {
+				out.Agent = "claude"
+			}
+		} else {
+			out.Agent = "none"
+		}
 	}
-	if out.AgentType == "" {
-		out.AgentType = "claude"
-	}
+	// Agent="" with no legacy fields means "auto-detect" — don't override
 	if out.MaxInvocationsPerHour == nil {
 		v := 60
 		out.MaxInvocationsPerHour = &v
@@ -400,12 +447,32 @@ func (c *UserConfig) IsAgentWorkerEnabled() bool {
 	return c.AgentWorker.IsEnabled()
 }
 
-// SetAgentWorkerEnabled sets the agent worker enabled preference.
-func (c *UserConfig) SetAgentWorkerEnabled(enabled bool) {
+// GetAgentWorkerAgent returns the raw configured agent selector.
+// Returns "" (unconfigured/auto-detect), "none", "claude", or "codex".
+func (c *UserConfig) GetAgentWorkerAgent() string {
+	if c.AgentWorker == nil {
+		return ""
+	}
+	return c.AgentWorker.GetAgent()
+}
+
+// SetAgentWorkerAgent sets the agent worker agent selector and clears deprecated fields.
+func (c *UserConfig) SetAgentWorkerAgent(agent string) {
 	if c.AgentWorker == nil {
 		c.AgentWorker = &AgentWorkerConfig{}
 	}
-	c.AgentWorker.Enabled = &enabled
+	c.AgentWorker.Agent = agent
+	c.AgentWorker.Enabled = nil
+	c.AgentWorker.AgentType = ""
+}
+
+// Deprecated: Use SetAgentWorkerAgent instead.
+func (c *UserConfig) SetAgentWorkerEnabled(enabled bool) {
+	if enabled {
+		c.SetAgentWorkerAgent("claude")
+	} else {
+		c.SetAgentWorkerAgent("none")
+	}
 }
 
 // GetViewFormat returns the preferred session view format.

@@ -95,12 +95,21 @@ type TeamContextJSON struct {
 
 // DaemonJSON represents daemon info in JSON output.
 type DaemonJSON struct {
-	Running       bool   `json:"running"`
-	Pid           int    `json:"pid,omitempty"`
-	UptimeSeconds int64  `json:"uptime_seconds,omitempty"`
-	TotalSyncs    int    `json:"total_syncs,omitempty"`
-	SyncsLastHour int    `json:"syncs_last_hour,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
+	Running       bool             `json:"running"`
+	Pid           int              `json:"pid,omitempty"`
+	UptimeSeconds int64            `json:"uptime_seconds,omitempty"`
+	TotalSyncs    int              `json:"total_syncs,omitempty"`
+	SyncsLastHour int              `json:"syncs_last_hour,omitempty"`
+	LastError     string           `json:"last_error,omitempty"`
+	AgentWorker   *AgentWorkerJSON `json:"agent_worker,omitempty"`
+}
+
+// AgentWorkerJSON represents the agent worker status in JSON output.
+type AgentWorkerJSON struct {
+	Agent         string `json:"agent"`         // resolved agent: "claude", "codex", or "none"
+	Source        string `json:"source"`        // "auto", "configured", or "disabled"
+	Authenticated bool   `json:"authenticated"`
+	AuthDetail    string `json:"auth_detail,omitempty"`
 }
 
 // GitRepoStatus holds information about a git repository's status.

@@ -214,14 +214,31 @@ func (m *Manager) Start(ctx context.Context) {
 	}
 }
 
+// isEffectivelyEnabled returns true if the agent worker should run.
+// Resolves auto-detection: unconfigured ("") checks PATH for available agents.
+func isEffectivelyEnabled(cfg *config.AgentWorkerConfig) bool {
+	if cfg == nil {
+		return false
+	}
+	return ResolveAgent(cfg.GetAgent()) != "none"
+}
+
 // isHandlerEnabled checks whether a handler's work type is enabled in config.
+// Uses resolved agent state (auto-detection) rather than raw config.
 func isHandlerEnabled(cfg *config.AgentWorkerConfig, handlerType string) bool {
+	if !isEffectivelyEnabled(cfg) {
+		return false
+	}
 	switch handlerType {
 	case "session-finalize":
-		return cfg.IsSessionFinalizeEnabled()
+		// SessionFinalize defaults to true when agent worker is enabled.
+		// Only disabled if explicitly set to false.
+		if cfg != nil && cfg.SessionFinalize != nil {
+			return *cfg.SessionFinalize
+		}
+		return true
 	default:
-		// unknown handler types default to enabled (gated by master switch)
-		return cfg.IsEnabled()
+		return true
 	}
 }
 
@@ -235,7 +252,7 @@ func (m *Manager) detectAndEnqueue() {
 	m.runSessionCleanup()
 
 	cfg := m.configLoader()
-	if cfg == nil || !cfg.IsEnabled() {
+	if cfg == nil || !isEffectivelyEnabled(cfg) {
 		return
 	}
 
@@ -308,7 +325,7 @@ func (m *Manager) ForceDetect() int {
 	m.runSessionCleanup()
 
 	cfg := m.configLoader()
-	if cfg == nil || !cfg.IsEnabled() {
+	if cfg == nil || !isEffectivelyEnabled(cfg) {
 		return 0
 	}
 
@@ -359,7 +376,7 @@ func (m *Manager) ForceDetect() int {
 // processQueue drains the queue, respecting config, rate limits, and concurrency.
 func (m *Manager) processQueue(ctx context.Context) {
 	cfg := m.configLoader()
-	if cfg == nil || !cfg.IsEnabled() {
+	if cfg == nil || !isEffectivelyEnabled(cfg) {
 		return
 	}
 
@@ -586,10 +603,10 @@ func (m *Manager) recordFailure(item *WorkItem, startedAt time.Time, exitCode in
 // Status returns a point-in-time snapshot of the manager for IPC status responses.
 func (m *Manager) Status() AgentWorkStatus {
 	cfg := m.configLoader()
-	enabled := cfg != nil && cfg.IsEnabled()
-	agentType := "claude"
+	enabled := cfg != nil && isEffectivelyEnabled(cfg)
+	agentType := "none"
 	if cfg != nil {
-		agentType = cfg.GetAgentType()
+		agentType = ResolveAgent(cfg.GetAgent())
 	}
 
 	// read these outside the lock to avoid holding mu during syscalls
