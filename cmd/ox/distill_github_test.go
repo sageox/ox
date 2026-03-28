@@ -247,7 +247,8 @@ func TestExtractGitHubFacts_Integration(t *testing.T) {
 func TestExtractGitHubFacts_DryRun(t *testing.T) {
 	// NOT parallel: mutates package-level distillDryRun
 
-	ts := time.Now().UTC().Add(-1 * time.Hour).Unix()
+	prTime := time.Now().UTC().Add(-1 * time.Hour)
+	ts := prTime.Unix()
 	projectRoot, tcPath := setupExtractGitHubFacts(t, func(s *store.Store) {
 		_, err := s.Exec(`INSERT INTO pull_requests
 			(number, title, body, author, state, labels, created_at, updated_at, merged_at, url)
@@ -278,7 +279,7 @@ func TestExtractGitHubFacts_DryRun(t *testing.T) {
 	// Output should show what would be processed, with per-day date
 	output := buf.String()
 	assert.Contains(t, output, "GitHub activity")
-	expectedDay := time.Unix(ts, 0).UTC().Format("2006-01-02")
+	expectedDay := prTime.Format("2006-01-02")
 	assert.Contains(t, output, expectedDay, "dry-run should show per-day date")
 }
 
