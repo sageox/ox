@@ -278,8 +278,8 @@ func TestExtractGitHubFacts_DryRun(t *testing.T) {
 	// Output should show what would be processed, with per-day date
 	output := buf.String()
 	assert.Contains(t, output, "GitHub activity")
-	today := time.Now().UTC().Format("2006-01-02")
-	assert.Contains(t, output, today, "dry-run should show per-day date")
+	expectedDay := time.Unix(ts, 0).UTC().Format("2006-01-02")
+	assert.Contains(t, output, expectedDay, "dry-run should show per-day date")
 }
 
 func TestExtractGitHubFacts_EmptySkip(t *testing.T) {
