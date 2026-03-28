@@ -619,12 +619,19 @@ const startupStuckThreshold = 3 * time.Minute
 // the boolean helpers IsRunning/IsStarting, which are thin wrappers.
 func GetState() DaemonState {
 	// IPC ping is the authoritative check for a fully-running daemon.
-	client := NewClientWithTimeout(500 * time.Millisecond)
+	client := NewClientWithTimeout(2 * time.Second)
 	if client.Ping() == nil {
 		return DaemonStateRunning
 	}
 
-	// No IPC response — check whether a process is alive via PID file.
+	// Ping failed. If the socket file exists, the daemon created its listener
+	// and is running — it's just temporarily unable to respond (busy with GC,
+	// a large sync, etc.). Don't classify as stuck based on a timeout alone.
+	if _, err := os.Stat(SocketPath()); err == nil {
+		return DaemonStateRunning
+	}
+
+	// No socket — check whether a process is alive via PID file.
 	data, err := os.ReadFile(PidPath())
 	if err != nil {
 		return DaemonStateStopped
@@ -641,7 +648,7 @@ func GetState() DaemonState {
 		return DaemonStateStopped // process is dead
 	}
 
-	// Process is alive but IPC is not ready.
+	// Process is alive but no socket yet (still initializing).
 	// Use PID file mtime to distinguish legitimate startup from stuck.
 	if info, err := os.Stat(PidPath()); err == nil {
 		if time.Since(info.ModTime()) > startupStuckThreshold {

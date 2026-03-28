@@ -36,9 +36,11 @@ func HasLockFiles(gitDir string) []string {
 }
 
 // StaleLockAge is how old a git lock file must be before we consider it abandoned.
-// Normal git operations hold locks for milliseconds to a few seconds.
-// 60 seconds is a very conservative threshold — well past any realistic git op.
-const StaleLockAge = 60 * time.Second
+// Git operations normally hold locks for milliseconds to a few seconds, but a slow
+// git pull --rebase on a large repo over a poor network can hold index.lock for
+// several minutes. 5 minutes is conservative enough to cover legitimate operations
+// while still recovering from crashed processes.
+const StaleLockAge = 5 * time.Minute
 
 // RemoveStaleLockFiles removes git lock files older than StaleLockAge.
 // Safe to call at daemon startup or before pull operations — only removes

@@ -602,8 +602,14 @@ const (
 	estimatedBytesPerToken    = 4   // rough byte-to-token ratio for English text
 )
 
-// runAgentWhisperHistory handles `ox agent <id> whisper --history` — shows all whispers
-// (both pending and already-delivered) without advancing the cursor.
+// runAgentWhisperHistory is a human debugging tool for inspecting what whispers
+// ox has sent (or is about to send) to a given agent session.
+//
+// Agents receive whispers passively via the UserPromptSubmit hook — they never
+// call this. Use it when debugging: "why hasn't my agent seen this whisper yet?"
+//
+// Unlike `ox agent <id> whisper`, this does NOT advance the delivery cursor,
+// so it's safe to run repeatedly without side effects.
 func runAgentWhisperHistory(inst *agentinstance.Instance) error {
 	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
 	resp, err := client.WhisperHistory(inst.AgentID)
@@ -617,7 +623,8 @@ func runAgentWhisperHistory(inst *agentinstance.Instance) error {
 		return nil
 	}
 
-	// separate pending (after cursor) from delivered (before cursor)
+	// The cursor marks the last whisper the agent has consumed via the hook.
+	// Entries created after the cursor are still pending; at or before it are delivered.
 	var pending, delivered []whisperstore.WhisperEntry
 	for _, e := range resp.Entries {
 		if resp.HasCursor && !e.CreatedAt.After(resp.Cursor) {
