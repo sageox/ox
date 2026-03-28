@@ -343,6 +343,82 @@ func (s *Store) MarkRelayed(murmurID, scope string) error {
 	return nil
 }
 
+// GetAllWhispers returns all whisper entries for an agent without advancing the cursor.
+// Used for inspection/debugging — shows both pending and already-delivered whispers.
+// Pass agentID="" to get all whispers across all agents.
+func (s *Store) GetAllWhispers(agentID string) ([]WhisperEntry, error) {
+	query := `SELECT id, scope, type, source, topic, content, importance, created_at,
+		agent_id, principal_id, principal_type, team_id, metadata
+		FROM whispers`
+	var args []any
+	if agentID != "" {
+		query += ` WHERE agent_id = ? OR agent_id IS NULL OR agent_id = ''`
+		args = append(args, agentID)
+	}
+	query += ` ORDER BY created_at DESC`
+
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query all whispers: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []WhisperEntry
+	for rows.Next() {
+		var e WhisperEntry
+		var createdStr string
+		var entryAgentID, principalID, principalType, teamID, metadataJSON sql.NullString
+		var typ, imp string
+
+		if err := rows.Scan(
+			&e.ID, &e.Scope, &typ, &e.Source, &e.Topic, &e.Content, &imp, &createdStr,
+			&entryAgentID, &principalID, &principalType, &teamID, &metadataJSON,
+		); err != nil {
+			return nil, fmt.Errorf("scan whisper: %w", err)
+		}
+
+		e.Type = WhisperType(typ)
+		e.Importance = Importance(imp)
+		e.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)
+		e.AgentID = entryAgentID.String
+		e.PrincipalID = principalID.String
+		e.PrincipalType = principalType.String
+		e.TeamID = teamID.String
+
+		if metadataJSON.Valid && metadataJSON.String != "" {
+			var m map[string]string
+			if json.Unmarshal([]byte(metadataJSON.String), &m) == nil {
+				e.Metadata = m
+			}
+		}
+
+		entries = append(entries, e)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate all whispers: %w", err)
+	}
+
+	if entries == nil {
+		entries = []WhisperEntry{}
+	}
+	return entries, nil
+}
+
+// GetCursor returns the last-seen cursor for an agent (zero time if unknown).
+func (s *Store) GetCursor(agentID string) (time.Time, error) {
+	var cursorStr sql.NullString
+	err := s.db.QueryRow("SELECT last_seen FROM cursors WHERE agent_id = ?", agentID).Scan(&cursorStr)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, fmt.Errorf("read cursor: %w", err)
+	}
+	if cursorStr.Valid {
+		t, _ := time.Parse(time.RFC3339Nano, cursorStr.String)
+		return t, nil
+	}
+	return time.Time{}, nil
+}
+
 // RemoveCursor removes a specific agent's cursor.
 // Called when an agent is cleaned up as stale.
 func (s *Store) RemoveCursor(agentID string) error {

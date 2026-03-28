@@ -123,6 +123,10 @@ func (m *MockService) Whispers(agentID string, attention whisperstore.Attention,
 	return nil, nil
 }
 
+func (m *MockService) WhisperHistory(agentID string) (*daemon.WhisperHistoryResponse, error) {
+	return &daemon.WhisperHistoryResponse{Entries: []whisperstore.WhisperEntry{}}, nil
+}
+
 func (m *MockService) CodeStatus() *daemon.CodeDBStats {
 	if m.CodeStatusFunc != nil {
 		return m.CodeStatusFunc()

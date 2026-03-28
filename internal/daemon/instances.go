@@ -20,12 +20,14 @@ const (
 // Default instance timing thresholds.
 const (
 	// IdleThreshold is how long without heartbeat before instance is "idle".
-	// Agents typically heartbeat every ~5s, so 30s = missed ~6 heartbeats.
-	IdleThreshold = 30 * time.Second
+	// Hook-based heartbeats fire per prompt turn, so gaps of several minutes are
+	// normal during active coding. 5 minutes allows for a few long tool-call turns.
+	IdleThreshold = 5 * time.Minute
 
 	// StaleThreshold is how long without heartbeat before instance is "stale".
-	// Stale instances are candidates for cleanup.
-	StaleThreshold = 5 * time.Minute
+	// PID liveness checks keep known-alive agents visible beyond this threshold,
+	// so 15 minutes is sufficient for agents without a trackable PID.
+	StaleThreshold = 15 * time.Minute
 
 	// MaxAge is the maximum age of an instance before auto-cleanup.
 	// Prevents abandoned instances from accumulating indefinitely.

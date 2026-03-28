@@ -3,15 +3,27 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/sageox/ox/internal/auth"
-	"github.com/sageox/ox/internal/status"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/status"
 	"github.com/sageox/ox/internal/version"
 )
+
+// pendingHeartbeats tracks in-flight heartbeat goroutines.
+// Drained in PersistentPostRunE so short-lived hook processes don't exit
+// before the IPC send completes.
+var pendingHeartbeats sync.WaitGroup
+
+// DrainHeartbeats waits for all in-flight heartbeat goroutines to finish.
+// Called in PersistentPostRunE before process exit.
+func DrainHeartbeats() {
+	pendingHeartbeats.Wait()
+}
 
 // Heartbeat Design: IPC over tmp files
 //
@@ -49,7 +61,9 @@ func resolveAgentMetadata(agentID string) (parentAgentID, agentType string) {
 // and the calling function returns immediately.
 // agentID is optional - pass empty string if no agent session exists.
 func Heartbeat(repoPath string, teamIDs []string, agentID string) {
+	pendingHeartbeats.Add(1)
 	go func() {
+		defer pendingHeartbeats.Done()
 		client := daemon.NewClientWithTimeout(50 * time.Millisecond)
 
 		parentAgentID, agentType := resolveAgentMetadata(agentID)
@@ -110,7 +124,9 @@ func sendContextHeartbeat(agentID string, bytes int64, commandName string) {
 	if tokens <= 0 {
 		return
 	}
+	pendingHeartbeats.Add(1)
 	go func() {
+		defer pendingHeartbeats.Done()
 		client := daemon.NewClientWithTimeout(50 * time.Millisecond)
 		parentAgentID, agentType := resolveAgentMetadata(agentID)
 		payload := daemon.HeartbeatPayload{
@@ -137,7 +153,9 @@ func sendContextHeartbeat(agentID string, bytes int64, commandName string) {
 // Use this when credentials are already available to avoid re-loading.
 // agentID is optional - pass empty string if no agent session exists.
 func HeartbeatWithCreds(repoPath string, teamIDs []string, agentID string, creds *gitserver.GitCredentials) {
+	pendingHeartbeats.Add(1)
 	go func() {
+		defer pendingHeartbeats.Done()
 		client := daemon.NewClientWithTimeout(50 * time.Millisecond)
 
 		parentAgentID, agentType := resolveAgentMetadata(agentID)

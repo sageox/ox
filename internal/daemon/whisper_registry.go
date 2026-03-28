@@ -114,6 +114,50 @@ func (r *WhisperRegistry) GetWhispers(agentID string, attention whisperstore.Att
 	return all, nil
 }
 
+// GetAllWhispers queries ALL stores and merges all whispers without advancing cursors.
+// Used for inspection — shows pending and already-delivered whispers.
+func (r *WhisperRegistry) GetAllWhispers(agentID string) ([]whisperstore.WhisperEntry, error) {
+	var all []whisperstore.WhisperEntry
+
+	if r.ledgerStore != nil {
+		entries, err := r.ledgerStore.GetAllWhispers(agentID)
+		if err != nil {
+			r.logger.Warn("ledger whisper history query failed", "err", err)
+		} else {
+			all = append(all, entries...)
+		}
+	}
+
+	r.mu.RLock()
+	stores := make(map[string]*whisperstore.Store, len(r.teamStores))
+	for k, v := range r.teamStores {
+		stores[k] = v
+	}
+	r.mu.RUnlock()
+
+	for teamID, store := range stores {
+		entries, err := store.GetAllWhispers(agentID)
+		if err != nil {
+			r.logger.Warn("team whisper history query failed", "team_id", teamID, "err", err)
+			continue
+		}
+		all = append(all, entries...)
+	}
+
+	if all == nil {
+		all = []whisperstore.WhisperEntry{}
+	}
+	return all, nil
+}
+
+// GetCursor returns the agent's cursor from the ledger store (earliest cursor wins for display).
+func (r *WhisperRegistry) GetCursor(agentID string) (time.Time, error) {
+	if r.ledgerStore == nil {
+		return time.Time{}, nil
+	}
+	return r.ledgerStore.GetCursor(agentID)
+}
+
 // IsRelayed checks if a murmur has been relayed in the appropriate store.
 func (r *WhisperRegistry) IsRelayed(murmurID, scope string) (bool, error) {
 	store := r.storeForScope(scope)

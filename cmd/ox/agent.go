@@ -106,12 +106,11 @@ Example:
 	RunE:                  runAgentDispatcher,
 }
 
-// agentListCmd lists active agent instances (hidden from help)
+// agentListCmd lists active AI coworker instances.
 var agentListCmd = &cobra.Command{
-	Use:    "list",
-	Short:  "List active agent instances",
-	Hidden: true, // debug only, not in help
-	RunE:   runAgentList,
+	Use:   "list",
+	Short: "List active AI coworkers and their session state",
+	RunE:  runAgentList,
 }
 
 func init() {
@@ -295,6 +294,10 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		}
 		return runAgentDistill(inst, cmd)
 	case "whisper":
+		// `ox agent <id> whisper history` — show all whispers without advancing cursor
+		if len(subargs) > 0 && subargs[0] == "history" {
+			return runAgentWhisperHistory(inst)
+		}
 		return runAgentWhisper(inst)
 	case "hook":
 		return runAgentHook(subargs)
@@ -396,7 +399,7 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(daemonInstances) == 0 && len(diskInstances) == 0 {
-		fmt.Println("No active SageOx enriched agents.")
+		fmt.Println("No active AI coworkers.")
 		fmt.Println("\nRun 'ox agent prime' to start one.")
 		return nil
 	}
@@ -409,6 +412,7 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 		Tokens        int64
 		CommandCount  int
 		LastHeartbeat time.Time
+		LastWhisper   time.Time
 		CreatedAt     time.Time
 		WorkspacePath string
 		ParentAgentID string
@@ -426,6 +430,7 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 			Tokens:        di.CumulativeContextTokens,
 			CommandCount:  di.CommandCount,
 			LastHeartbeat: di.LastHeartbeat,
+			LastWhisper:   di.LastWhisper,
 			WorkspacePath: di.WorkspacePath,
 			Recording:     session.IsRecordingForAgent(projectRoot, di.AgentID),
 		}
@@ -468,7 +473,7 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(merged) == 0 {
-		fmt.Println("No active SageOx enriched agents.")
+		fmt.Println("No active AI coworkers.")
 		fmt.Println("\nRun 'ox agent prime' to start one.")
 		return nil
 	}
@@ -504,14 +509,15 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 		roots = append(roots, m.AgentID)
 	}
 
-	fmt.Printf("Active SageOx enriched agents (%d):\n\n", len(merged))
-	header := fmt.Sprintf("  %s  %s  %s  %s  %s  %s",
+	fmt.Printf("Active AI coworkers (%d):\n\n", len(merged))
+	header := fmt.Sprintf("  %s  %s  %s  %s  %s  %s  %s",
 		dim.Render(fmt.Sprintf("%-8s", "ID")),
 		dim.Render(fmt.Sprintf("%-10s", "Type")),
 		dim.Render(fmt.Sprintf("%8s", "Tokens")),
 		dim.Render(fmt.Sprintf("%5s", "Cmds")),
 		dim.Render(fmt.Sprintf("%7s", "Uptime")),
 		dim.Render(fmt.Sprintf("%-3s", "Rec")),
+		dim.Render(fmt.Sprintf("%-9s", "Whisper")),
 	)
 	if showWorkspace {
 		header += "  " + dim.Render(fmt.Sprintf("%-20s", "Workspace"))
@@ -554,13 +560,19 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 			statusStr = " " + dim.Render("exited")
 		}
 
-		row := fmt.Sprintf("  %s%s  %-10s  %s  %s  %s  %s%s",
+		whisper := fmt.Sprintf("%-9s", "-")
+		if !m.LastWhisper.IsZero() {
+			whisper = fmt.Sprintf("%-9s", formatTimeAgoShort(m.LastWhisper))
+		}
+
+		row := fmt.Sprintf("  %s%s  %-10s  %s  %s  %s  %s  %s%s",
 			idCol, idPad,
 			agentType,
 			dim.Render(tokens),
 			dim.Render(cmds),
 			dim.Render(uptime),
 			rec,
+			dim.Render(whisper),
 			statusStr,
 		)
 		if showWorkspace {
@@ -589,6 +601,64 @@ const (
 	maxMurmurWhispersPerAgent = 1   // keep only the most recent murmur per authoring agent
 	estimatedBytesPerToken    = 4   // rough byte-to-token ratio for English text
 )
+
+// runAgentWhisperHistory handles `ox agent <id> whisper --history` — shows all whispers
+// (both pending and already-delivered) without advancing the cursor.
+func runAgentWhisperHistory(inst *agentinstance.Instance) error {
+	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	resp, err := client.WhisperHistory(inst.AgentID)
+	if err != nil || resp == nil {
+		fmt.Fprintln(os.Stderr, "daemon unavailable — cannot retrieve whisper history")
+		return nil
+	}
+
+	if len(resp.Entries) == 0 {
+		fmt.Fprintln(os.Stdout, "No whispers in store.")
+		return nil
+	}
+
+	// separate pending (after cursor) from delivered (before cursor)
+	var pending, delivered []whisperstore.WhisperEntry
+	for _, e := range resp.Entries {
+		if resp.HasCursor && !e.CreatedAt.After(resp.Cursor) {
+			delivered = append(delivered, e)
+		} else {
+			pending = append(pending, e)
+		}
+	}
+
+	fmt.Fprintf(os.Stdout, "Whisper history for %s (%d total)\n\n", inst.AgentID, len(resp.Entries))
+
+	if len(pending) > 0 {
+		fmt.Fprintf(os.Stdout, "Pending (%d, not yet delivered):\n", len(pending))
+		for _, e := range pending {
+			fmt.Fprintf(os.Stdout, "  [%s] %s (%s) — %s\n",
+				e.Importance, e.Topic, e.Source, e.CreatedAt.Local().Format("Jan 2 15:04:05"))
+			if e.Content != "" {
+				fmt.Fprintf(os.Stdout, "    %s\n", truncateString(e.Content, 120))
+			}
+		}
+		fmt.Fprintln(os.Stdout)
+	}
+
+	if len(delivered) > 0 {
+		fmt.Fprintf(os.Stdout, "Delivered (%d, already sent to agent):\n", len(delivered))
+		for _, e := range delivered {
+			fmt.Fprintf(os.Stdout, "  [%s] %s (%s) — %s\n",
+				e.Importance, e.Topic, e.Source, e.CreatedAt.Local().Format("Jan 2 15:04:05"))
+			if e.Content != "" {
+				fmt.Fprintf(os.Stdout, "    %s\n", truncateString(e.Content, 120))
+			}
+		}
+	}
+
+	if !resp.HasCursor {
+		fmt.Fprintln(os.Stdout, "(cursor not set — all entries are pending)")
+	}
+
+	return nil
+}
+
 
 // runAgentWhisper handles `ox agent <id> whisper` — active pull for pending whispers.
 //

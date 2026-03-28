@@ -422,8 +422,17 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 
 		elapsed := now.Sub(last)
 
-		// skip stale instances (no heartbeat in >5min) — they're dead sessions
-		if elapsed > StaleThreshold {
+		// Instant liveness check: if we know the PID, trust it over heartbeat timing.
+		// A living process is always shown (no stale cutoff). A dead PID is always exited.
+		agentPID := d.heartbeat.GetAgentPID(agentID)
+		pidAlive := false
+		if agentPID > 0 {
+			proc, procErr := os.FindProcess(agentPID)
+			pidAlive = procErr == nil && proc.Signal(syscall.Signal(0)) == nil
+		}
+
+		// skip stale instances with no known-live PID — likely ended session
+		if elapsed > StaleThreshold && !pidAlive {
 			continue
 		}
 
@@ -431,14 +440,12 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 		if elapsed > IdleThreshold {
 			status = StatusIdle
 		}
-
-		// instant liveness check: if PID is known and process is dead, mark as exited
-		agentPID := d.heartbeat.GetAgentPID(agentID)
-		if agentPID > 0 {
-			proc, procErr := os.FindProcess(agentPID)
-			if procErr != nil || proc.Signal(syscall.Signal(0)) != nil {
-				status = StatusExited
-			}
+		// Only mark exited if PID is dead AND the heartbeat is stale.
+		// Hook heartbeats set ParentPID to the short-lived shell subprocess PID, which
+		// dies immediately after the hook. A fresh heartbeat means the agent is still
+		// active even if the most-recently-recorded PID is gone.
+		if agentPID > 0 && !pidAlive && elapsed > IdleThreshold {
+			status = StatusExited
 		}
 
 		ctxStats := d.heartbeat.GetAgentContextStats(agentID)
@@ -453,6 +460,7 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 			ParentAgentID:           d.heartbeat.GetAgentParentID(agentID),
 			AgentType:               d.heartbeat.GetAgentType(agentID),
 			ParentPID:               d.heartbeat.GetAgentPID(agentID),
+			LastWhisper:             d.heartbeat.GetAgentLastWhisper(agentID),
 		})
 	}
 
@@ -972,7 +980,27 @@ func (s *daemonServiceImpl) Whispers(agentID string, attention whisperstore.Atte
 	if s.d.whisperRegistry == nil {
 		return nil, nil
 	}
-	return s.d.whisperRegistry.GetWhispers(agentID, attention, topics)
+	entries, err := s.d.whisperRegistry.GetWhispers(agentID, attention, topics)
+	if err == nil && len(entries) > 0 && agentID != "" && s.d.heartbeat != nil {
+		s.d.heartbeat.RecordWhisperDelivery(agentID)
+	}
+	return entries, err
+}
+
+func (s *daemonServiceImpl) WhisperHistory(agentID string) (*WhisperHistoryResponse, error) {
+	if s.d.whisperRegistry == nil {
+		return &WhisperHistoryResponse{Entries: []whisperstore.WhisperEntry{}}, nil
+	}
+	entries, err := s.d.whisperRegistry.GetAllWhispers(agentID)
+	if err != nil {
+		return nil, err
+	}
+	cursor, _ := s.d.whisperRegistry.GetCursor(agentID)
+	return &WhisperHistoryResponse{
+		Entries:   entries,
+		Cursor:    cursor,
+		HasCursor: !cursor.IsZero(),
+	}, nil
 }
 
 func (s *daemonServiceImpl) CodeStatus() *CodeDBStats {

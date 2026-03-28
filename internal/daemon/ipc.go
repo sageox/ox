@@ -48,6 +48,7 @@ const (
 	MsgTypeCodeIndex       = "code_index"       // index local code with progress
 	MsgTypeCodeStatus      = "code_status"      // get code index status/stats
 	MsgTypeWhispers        = "whispers"         // query whisper entries for an agent
+	MsgTypeWhisperHistory  = "whisper_history"  // query all whispers (pending + delivered) without advancing cursor
 	MsgTypeSessionFinalize = "session_finalize" // one-way, trigger async session upload+finalization
 	MsgTypeMurmur          = "murmur"           // one-way, write+commit a murmur file in ledger/team context
 )
@@ -357,6 +358,10 @@ type InstanceInfo struct {
 	// ParentPID is the parent process ID of the agent.
 	// Enables instant liveness detection without heartbeat timeout.
 	ParentPID int `json:"parent_pid,omitempty"`
+
+	// LastWhisper is when whispers were last delivered to this agent.
+	// Zero if no whispers have been delivered in the current daemon session.
+	LastWhisper time.Time `json:"last_whisper,omitempty"`
 }
 
 // InstancesResponse is the response for the instances IPC message.
@@ -374,6 +379,18 @@ type WhispersPayload struct {
 // WhispersResponse is the response for whisper queries.
 type WhispersResponse struct {
 	Entries []whisperstore.WhisperEntry `json:"entries"`
+}
+
+// WhisperHistoryPayload is the payload for whisper history queries.
+type WhisperHistoryPayload struct {
+	AgentID string `json:"agent_id"` // empty = all agents
+}
+
+// WhisperHistoryResponse returns all whispers with delivery status.
+type WhisperHistoryResponse struct {
+	Entries   []whisperstore.WhisperEntry `json:"entries"`
+	Cursor    time.Time                   `json:"cursor"`    // agent's current cursor (entries before this are "delivered")
+	HasCursor bool                        `json:"has_cursor"` // false if agent has never received whispers
 }
 
 // DoctorResponse is the response for the doctor IPC message.
@@ -505,6 +522,7 @@ type DaemonService interface {
 	Sessions() []AgentSession // deprecated: use Instances
 	Instances() []InstanceInfo
 	Whispers(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
+	WhisperHistory(agentID string) (*WhisperHistoryResponse, error)
 	CodeStatus() *CodeDBStats
 
 	// mutation operations
@@ -552,6 +570,7 @@ type CallbackService struct {
 	onCodeIndex        func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)
 	onCodeStatus       func() *CodeDBStats
 	onWhispers         func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
+	onWhisperHistory   func(agentID string) (*WhisperHistoryResponse, error)
 }
 
 func (c *CallbackService) Sync() error {
@@ -642,6 +661,16 @@ func (c *CallbackService) Whispers(agentID string, attention whisperstore.Attent
 		return fn(agentID, attention, topics)
 	}
 	return nil, nil
+}
+
+func (c *CallbackService) WhisperHistory(agentID string) (*WhisperHistoryResponse, error) {
+	c.mu.Lock()
+	fn := c.onWhisperHistory
+	c.mu.Unlock()
+	if fn != nil {
+		return fn(agentID)
+	}
+	return &WhisperHistoryResponse{Entries: []whisperstore.WhisperEntry{}}, nil
 }
 
 func (c *CallbackService) CodeStatus() *CodeDBStats {
@@ -833,6 +862,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeCodeIndex, handleCodeIndex)
 	router.Register(MsgTypeCodeStatus, handleCodeStatus)
 	router.Register(MsgTypeWhispers, handleWhispers)
+	router.Register(MsgTypeWhisperHistory, handleWhisperHistory)
 	router.Register(MsgTypeMurmur, handleMurmur)
 
 	return router
@@ -1425,6 +1455,27 @@ func (c *Client) Whispers(agentID string, attention string, topics []string) (*W
 	var result WhispersResponse
 	if err := json.Unmarshal(resp.Data, &result); err != nil {
 		return nil, fmt.Errorf("unmarshal whispers: %w", err)
+	}
+	return &result, nil
+}
+
+// WhisperHistory queries all whispers for an agent (pending + delivered) without advancing the cursor.
+// Used for inspection — shows what has been or will be whispered to an agent.
+func (c *Client) WhisperHistory(agentID string) (*WhisperHistoryResponse, error) {
+	payload, _ := json.Marshal(WhisperHistoryPayload{AgentID: agentID})
+	resp, err := c.sendMessage(Message{
+		Type:    MsgTypeWhisperHistory,
+		Payload: payload,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, errors.New(resp.Error)
+	}
+	var result WhisperHistoryResponse
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal whisper history: %w", err)
 	}
 	return &result, nil
 }

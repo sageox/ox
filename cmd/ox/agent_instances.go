@@ -13,30 +13,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// agentInstancesCmd is a hidden alias for "ox agent list", kept for backward compatibility.
 var agentInstancesCmd = &cobra.Command{
-	Use:   "instances",
-	Short: "List active agent instances across all workspaces",
-	Long: `List all active agent instances tracked by ox daemons.
-
-Shows agents that have recently sent heartbeats to any running daemon.
-Instances are considered active if they've sent a heartbeat within 30 seconds.
-
-Example:
-  $ ox agent instances
-  AGENT     WORKSPACE              STATUS   LAST HEARTBEAT
-  Oxa7b3    ~/code/project-a       active   2s ago
-  Oxc2d4    ~/code/project-b       idle     45s ago
-
-  $ ox agent instances --json
-  {"instances":[{"agent_id":"Oxa7b3","workspace_path":"/Users/dev/code/project-a",...}]}`,
-	RunE: runAgentInstances,
+	Use:    "instances",
+	Short:  "List active AI coworker instances (use 'list' instead)",
+	Hidden: true,
+	RunE:   runAgentInstances,
 }
 
-// agentSessionsCmd is deprecated, use agentInstancesCmd instead
+// agentSessionsCmd is deprecated, use agentListCmd instead
 var agentSessionsCmd = &cobra.Command{
 	Use:    "sessions",
-	Short:  "List active agent instances (deprecated: use 'instances')",
-	Hidden: true, // hide from help, redirect to instances
+	Short:  "List active agent instances (deprecated: use 'list')",
+	Hidden: true,
 	RunE:   runAgentInstances,
 }
 
@@ -44,7 +33,7 @@ func init() {
 	agentInstancesCmd.Flags().Bool("json", false, "Output as JSON")
 	agentSessionsCmd.Flags().Bool("json", false, "Output as JSON")
 	agentCmd.AddCommand(agentInstancesCmd)
-	agentCmd.AddCommand(agentSessionsCmd) // keep for backward compat
+	agentCmd.AddCommand(agentSessionsCmd)
 }
 
 func runAgentInstances(cmd *cobra.Command, _ []string) error {
@@ -86,36 +75,45 @@ func outputInstancesJSON(instances []daemon.InstanceInfo, err error) error {
 
 func outputInstancesTable(instances []daemon.InstanceInfo) error {
 	if len(instances) == 0 {
-		fmt.Println("No active agent instances.")
+		fmt.Println("No active AI coworker instances.")
 		fmt.Println()
-		fmt.Println("Agent instances are tracked when agents run 'ox agent prime' and send heartbeats.")
-		fmt.Println("Run 'ox agent prime' in a repository to start a new instance.")
+		fmt.Println("Instances appear when coworkers run 'ox agent prime' and hooks send heartbeats.")
+		fmt.Println("Run 'ox agent prime' in a repository to register this instance.")
 		return nil
 	}
 
 	// header
-	fmt.Printf("%-10s %-40s %-8s %s\n",
-		cli.StyleBold.Render("AGENT"),
+	fmt.Printf("%-10s %-36s %-8s %-18s %s\n",
+		cli.StyleBold.Render("COWORKER"),
 		cli.StyleBold.Render("WORKSPACE"),
 		cli.StyleBold.Render("STATUS"),
-		cli.StyleBold.Render("LAST HEARTBEAT"))
-	fmt.Println(strings.Repeat("-", 80))
+		cli.StyleBold.Render("LAST HEARTBEAT"),
+		cli.StyleBold.Render("LAST WHISPER"))
+	fmt.Println(strings.Repeat("-", 90))
 
 	// rows
 	for _, inst := range instances {
 		workspace := shortenPath(inst.WorkspacePath)
 		lastHB := formatTimeAgoShort(inst.LastHeartbeat)
 
+		var lastWhisper string
+		if inst.LastWhisper.IsZero() {
+			lastWhisper = "-"
+		} else {
+			lastWhisper = formatTimeAgoShort(inst.LastWhisper)
+		}
+
 		statusStyle := cli.StyleSuccess
 		if inst.Status == daemon.StatusIdle {
 			statusStyle = cli.StyleDim
 		}
 
-		fmt.Printf("%-10s %-40s %s %s\n",
+		fmt.Printf("%-10s %-36s %s %-18s %s\n",
 			inst.AgentID,
 			workspace,
 			statusStyle.Render(fmt.Sprintf("%-8s", inst.Status)),
-			cli.StyleDim.Render(lastHB))
+			cli.StyleDim.Render(lastHB),
+			cli.StyleDim.Render(lastWhisper))
 	}
 
 	fmt.Println()
@@ -137,13 +135,11 @@ func shortenPath(path string) string {
 		path = "~" + path[len(home):]
 	}
 
-	// truncate if too long (keep last 38 chars)
-	maxLen := 38
+	// truncate if too long
+	maxLen := 34
 	if len(path) > maxLen {
-		// try to keep meaningful part (project name)
 		parts := strings.Split(path, string(filepath.Separator))
 		if len(parts) > 2 {
-			// keep last two parts
 			path = ".../" + filepath.Join(parts[len(parts)-2], parts[len(parts)-1])
 		}
 		if len(path) > maxLen {

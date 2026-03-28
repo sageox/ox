@@ -76,6 +76,11 @@ var rootCmd = &cobra.Command{
 		return nil
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
+		// drain any in-flight heartbeat goroutines before the process exits.
+		// critical for short-lived hook subprocesses that would otherwise kill
+		// the goroutines before the IPC send completes.
+		DrainHeartbeats()
+
 		// track command completion via telemetry (non-blocking)
 		if cliCtx != nil {
 			cliCtx.TrackCommandCompletion(cmd)

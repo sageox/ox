@@ -334,3 +334,20 @@ func handleWhispers(s *Server, msg Message, _ net.Conn) HandlerResult {
 	resp := WhispersResponse{Entries: entries}
 	return HandlerResult{Response: marshalResponse(resp)}
 }
+
+func handleWhisperHistory(s *Server, msg Message, _ net.Conn) HandlerResult {
+	var payload WhisperHistoryPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		return HandlerResult{
+			Response: &Response{Success: false, Error: fmt.Sprintf("invalid payload: %v", err)},
+		}
+	}
+
+	result, err := s.service.WhisperHistory(payload.AgentID)
+	if err != nil {
+		return HandlerResult{
+			Response: &Response{Success: false, Error: fmt.Sprintf("whisper history: %v", err)},
+		}
+	}
+	return HandlerResult{Response: marshalResponse(result)}
+}
