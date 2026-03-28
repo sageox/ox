@@ -37,14 +37,14 @@ func TestShortenPath(t *testing.T) {
 		},
 		{
 			"path exactly at max length not truncated",
-			// 38 chars max; build a path that's exactly 38
-			strings.Repeat("a", 38),
-			strings.Repeat("a", 38),
+			// 34 chars max; build a path that's exactly 34
+			strings.Repeat("a", 34),
+			strings.Repeat("a", 34),
 		},
 		{
 			"path one over max gets truncated",
-			strings.Repeat("x", 39),
-			"..." + strings.Repeat("x", 35),
+			strings.Repeat("x", 35),
+			"..." + strings.Repeat("x", 31),
 		},
 		{
 			"root path unchanged",
@@ -62,8 +62,8 @@ func TestShortenPath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := shortenPath(tt.path)
-			assert.LessOrEqual(t, len(got), 38,
-				"shortened path should not exceed 38 chars, got %d: %q", len(got), got)
+			assert.LessOrEqual(t, len(got), 34,
+				"shortened path should not exceed 34 chars, got %d: %q", len(got), got)
 
 			// for non-empty, non-dash results, verify basic properties
 			if tt.path != "" {

@@ -22,7 +22,6 @@ import (
 // =============================================================================
 
 func TestOutputAgentDoctorJSON_BasicOutput(t *testing.T) {
-	t.Parallel()
 
 	output := &AgentDoctorOutput{
 		Success: true,
@@ -56,7 +55,6 @@ func TestOutputAgentDoctorJSON_BasicOutput(t *testing.T) {
 }
 
 func TestOutputAgentDoctorJSON_WithIncompleteSessions(t *testing.T) {
-	t.Parallel()
 
 	output := &AgentDoctorOutput{
 		Success: true,
@@ -105,7 +103,6 @@ func TestOutputAgentDoctorJSON_WithIncompleteSessions(t *testing.T) {
 }
 
 func TestOutputAgentDoctorJSON_EmptyOutput(t *testing.T) {
-	t.Parallel()
 
 	output := &AgentDoctorOutput{
 		Success: true,
@@ -136,7 +133,6 @@ func TestOutputAgentDoctorJSON_EmptyOutput(t *testing.T) {
 // =============================================================================
 
 func TestOutputAgentDoctorText_AllGood(t *testing.T) {
-	t.Parallel()
 
 	output := &AgentDoctorOutput{
 		Success: true,
@@ -161,7 +157,6 @@ func TestOutputAgentDoctorText_AllGood(t *testing.T) {
 }
 
 func TestOutputAgentDoctorText_WithIncompleteSessions(t *testing.T) {
-	t.Parallel()
 
 	output := &AgentDoctorOutput{
 		IncompleteSessions: []IncompleteSessionInfo{
@@ -192,7 +187,6 @@ func TestOutputAgentDoctorText_WithIncompleteSessions(t *testing.T) {
 }
 
 func TestOutputAgentDoctorText_CommitAndPushNeeded(t *testing.T) {
-	t.Parallel()
 
 	output := &AgentDoctorOutput{
 		CommitNeeded: true,
@@ -439,7 +433,6 @@ func TestAppendRedactedEntries_InvalidPath(t *testing.T) {
 // =============================================================================
 
 func TestOutputInstancesJSON_EmptyInstances(t *testing.T) {
-	t.Parallel()
 
 	old := os.Stdout
 	r, w, _ := os.Pipe()
@@ -467,7 +460,6 @@ func TestOutputInstancesJSON_EmptyInstances(t *testing.T) {
 }
 
 func TestOutputInstancesJSON_WithInstances(t *testing.T) {
-	t.Parallel()
 
 	instances := []daemon.InstanceInfo{
 		{
@@ -498,7 +490,6 @@ func TestOutputInstancesJSON_WithInstances(t *testing.T) {
 }
 
 func TestOutputInstancesJSON_WithError(t *testing.T) {
-	t.Parallel()
 
 	old := os.Stdout
 	r, w, _ := os.Pipe()
@@ -526,7 +517,6 @@ func TestOutputInstancesJSON_WithError(t *testing.T) {
 // =============================================================================
 
 func TestOutputInstancesTable_EmptyInstances(t *testing.T) {
-	t.Parallel()
 
 	old := os.Stdout
 	r, w, _ := os.Pipe()
@@ -543,11 +533,10 @@ func TestOutputInstancesTable_EmptyInstances(t *testing.T) {
 	buf.ReadFrom(r)
 	got := buf.String()
 
-	assert.Contains(t, got, "No active agent instances")
+	assert.Contains(t, got, "No active AI coworker instances")
 }
 
 func TestOutputInstancesTable_WithInstances(t *testing.T) {
-	t.Parallel()
 
 	instances := []daemon.InstanceInfo{
 		{
@@ -729,7 +718,7 @@ func TestFormatTimeAgoShort_TableDriven(t *testing.T) {
 		contains string
 	}{
 		{"zero time", time.Time{}, "never"},
-		{"just now", now, "now"},
+		{"just now", time.Now(), "now"},
 		{"30 seconds ago", now.Add(-30 * time.Second), "30s ago"},
 		{"5 minutes ago", now.Add(-5 * time.Minute), "5m ago"},
 		{"3 hours ago", now.Add(-3 * time.Hour), "3h ago"},
@@ -738,7 +727,6 @@ func TestFormatTimeAgoShort_TableDriven(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
 			got := formatTimeAgoShort(tt.t)
 			assert.Contains(t, got, tt.contains)
 		})
@@ -773,7 +761,7 @@ func TestShortenPath_LongPath(t *testing.T) {
 	t.Parallel()
 	longPath := "/very/long/path/with/many/segments/that/exceeds/maximum/length/allowed/by/display"
 	got := shortenPath(longPath)
-	assert.LessOrEqual(t, len(got), 42, "shortened path should be under display limit")
+	assert.LessOrEqual(t, len(got), 34, "shortened path should be under display limit")
 }
 
 // =============================================================================

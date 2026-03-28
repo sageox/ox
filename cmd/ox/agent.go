@@ -625,6 +625,8 @@ func runAgentWhisperHistory(inst *agentinstance.Instance) error {
 				fmt.Fprintln(os.Stderr, "daemon unavailable — cannot retrieve whisper history")
 				return nil
 			}
+			// mid-pagination IPC failure — history is incomplete
+			fmt.Fprintln(os.Stderr, "warning: whisper history truncated (IPC error mid-pagination; showing partial results)")
 			break
 		}
 		allEntries = append(allEntries, resp.Entries...)

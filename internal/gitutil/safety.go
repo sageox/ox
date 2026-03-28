@@ -3,6 +3,7 @@
 package gitutil
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -51,7 +52,10 @@ func RemoveStaleLockFiles(gitDir string) (removed []string, errs []error) {
 		path := filepath.Join(gitDir, lock)
 		info, err := os.Stat(path)
 		if err != nil {
-			continue // doesn't exist
+			if !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("stat %s: %w", lock, err))
+			}
+			continue
 		}
 		if time.Since(info.ModTime()) < StaleLockAge {
 			continue // recent enough to be from an active process
