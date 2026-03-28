@@ -824,7 +824,6 @@ func TestFinalizeIncrementalSession_EmptySession(t *testing.T) {
 	// finalize should return cleanly with zero entries and no artifact paths
 	assert.Equal(t, 0, got.EntryCount)
 	assert.Equal(t, rawPath, got.RawPath, "RawPath should still be set even for empty sessions")
-	assert.Empty(t, got.HTMLPath, "no HTML should be generated for empty session")
 	assert.Empty(t, got.SummaryMDPath, "no summary should be generated for empty session")
 	assert.Empty(t, got.SessionMDPath, "no session markdown should be generated for empty session")
 }

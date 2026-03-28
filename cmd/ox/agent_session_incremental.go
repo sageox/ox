@@ -15,7 +15,6 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
-	sessionhtml "github.com/sageox/ox/internal/session/html"
 	"github.com/sageox/ox/internal/version"
 )
 
@@ -84,7 +83,7 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 
 // finalizeIncrementalSession completes a session that was incrementally recorded
 // by hooks. Does a final drain from the source file, then generates events,
-// HTML, and summary artifacts from the already-written raw.jsonl.
+// and summary artifacts from the already-written raw.jsonl.
 func finalizeIncrementalSession(projectRoot string, state *session.RecordingState, rawPath string, adapter adapters.Adapter, result *agentSessionResult) (*agentSessionResult, error) {
 	// final drain: read any remaining entries since last hook
 	if reader, ok := adapter.(adapters.IncrementalReader); ok && state.SessionFile != "" {
@@ -220,13 +219,11 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	_ = session.WriteNeedsSummaryMarker(sessionCacheDir, result.RawPath, result.LedgerSessionDir)
 
 	// generate all session artifacts via shared path
-	htmlGen, _ := sessionhtml.NewGenerator()
-	artifactPaths, artifactErr := session.WriteSessionArtifacts(filepath.Dir(result.RawPath), storedSession, summaryResp, htmlGen)
+	artifactPaths, artifactErr := session.WriteSessionArtifacts(filepath.Dir(result.RawPath), storedSession, summaryResp)
 	if artifactErr != nil {
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		slog.Debug("artifact generation failed", "error", artifactErr)
 	} else {
-		result.HTMLPath = artifactPaths.HTML
 		result.SummaryMDPath = artifactPaths.SummaryMD
 		result.SessionMDPath = artifactPaths.SessionMD
 	}
@@ -272,15 +269,13 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 			}
 			result.LedgerSessionDir = ""
 		} else {
-			if cacheDir := filepath.Dir(result.RawPath); cacheDir != "" && cacheDir != "." {
-				if err := os.RemoveAll(cacheDir); err != nil {
-					slog.Debug("prune session cache", "dir", cacheDir, "error", err)
-				}
-			}
+			// keep cache alive — raw.jsonl in ledger becomes an LFS stub after push,
+			// but push-summary needs to read it. Cache is pruned later by
+			// clearNeedsSummaryMarkerForSession after push-summary completes.
 
 			if result.LedgerSessionDir != "" {
-				result.RawPath = filepath.Join(result.LedgerSessionDir, ledgerFileRaw)
-
+				// rewrite secondary artifact paths to ledger (small git-tracked files, not LFS)
+				// but keep RawPath and SummaryPrompt pointing to cache so agents can read raw.jsonl
 				rewriteIfExists := func(field *string, name string) {
 					if *field == "" {
 						return
@@ -292,12 +287,9 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 						*field = ""
 					}
 				}
-				rewriteIfExists(&result.HTMLPath, ledgerFileHTML)
 				rewriteIfExists(&result.SummaryMDPath, ledgerFileSummaryMD)
 				rewriteIfExists(&result.SessionMDPath, ledgerFileSessionMD)
 				rewriteIfExists(&result.PlanPath, ledgerFilePlan)
-
-				result.SummaryPrompt = session.BuildSummaryPrompt(sessionEntries, result.RawPath, result.LedgerSessionDir)
 			}
 		}
 	}

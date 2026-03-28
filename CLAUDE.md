@@ -668,7 +668,7 @@ These tests (`tests/integration/agents/claude/`) start actual Claude Code proces
 
 Key tests:
 - **Multi-turn recording**: Verifies incremental hook-driven recording produces valid raw.jsonl with correct entries
-- **Ctrl-C anti-entropy**: Starts real Claude, sends SIGINT, verifies the daemon's anti-entropy finalization recovers the interrupted session and generates all 4 artifacts (summary.md, summary.json, session.html, session.md)
+- **Ctrl-C anti-entropy**: Starts real Claude, sends SIGINT, verifies the daemon's anti-entropy finalization recovers the interrupted session and generates all 3 artifacts (summary.md, summary.json, session.md)
 
 **Hard rule: E2E tests MUST use real agent CLI instances.** Never simulate Claude entries, mock agents, or use fake JSONL in `tests/integration/`. Component tests with simulated data belong in `cmd/ox/` under the `slow` build tag.
 

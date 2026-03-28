@@ -65,7 +65,6 @@ Use the session:
   ox agent <agent_id> session start        # Start recording
   ox agent <agent_id> session stop         # Stop and save
   ox agent <agent_id> session summarize    # Generate summary
-  ox agent <agent_id> session html         # Generate HTML viewer
   ox agent <agent_id> session import       # Import prior session (stdin or --file)
   ox agent <agent_id> session capture-prior # Capture prior history (schema-validated)
   ox agent <agent_id> session subagent-complete # Report subagent completion to parent
@@ -253,7 +252,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		case "summarize":
 			return runAgentSessionSummarize(inst, sessionArgs)
 		case "html":
-			return runAgentSessionHTML(inst, sessionArgs)
+			return fmt.Errorf("session html command has been removed; use the web viewer at sageox.ai")
 		case "record":
 			return runAgentSessionRecord(inst, sessionArgs)
 		case "log":

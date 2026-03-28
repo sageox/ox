@@ -58,7 +58,7 @@ Example:
 
 		// verify at least one content file exists
 		if !hasContentFiles(sessionPath) {
-			return fmt.Errorf("no content files found in session %s\nExpected at least one of: raw.jsonl, summary.md, session.md, session.html", sessionName)
+			return fmt.Errorf("no content files found in session %s\nExpected at least one of: raw.jsonl, summary.md, session.md", sessionName)
 		}
 
 		// validate raw.jsonl data quality before uploading
@@ -127,7 +127,6 @@ func hasContentFiles(sessionPath string) bool {
 		ledgerFileRaw,
 		ledgerFileSummaryMD,
 		ledgerFileSessionMD,
-		ledgerFileHTML,
 	}
 	for _, name := range contentFiles {
 		if _, err := os.Stat(filepath.Join(sessionPath, name)); err == nil {

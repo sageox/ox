@@ -20,7 +20,6 @@ import (
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
-	"github.com/sageox/ox/internal/session/html"
 	"github.com/sageox/ox/pkg/sessionsummary"
 )
 
@@ -31,7 +30,6 @@ const (
 	artifactRaw       = "raw.jsonl"
 	artifactSummaryMD = "summary.md"
 	artifactSummJSON  = "summary.json"
-	artifactHTML      = "session.html"
 	artifactSessionMD = "session.md"
 
 	// recordingMarker is the file that indicates a session is still being recorded.
@@ -45,12 +43,9 @@ const (
 )
 
 // requiredArtifacts lists artifacts that should exist alongside raw.jsonl.
-// TODO: session.html will be deprecated in favor of the web viewer at sageox.ai.
-// When removed, drop artifactHTML from this list and remove generateHTML.
 var requiredArtifacts = []string{
 	artifactSummaryMD,
 	artifactSummJSON,
-	artifactHTML,
 	artifactSessionMD,
 }
 
@@ -68,7 +63,7 @@ type SessionFinalizePayload struct {
 
 // SessionFinalizeHandler detects and finalizes incomplete sessions in the ledger.
 // It generates missing artifacts: summary.md (via LLM), summary.json,
-// session.html, and session.md (deterministic exports).
+// and session.md (deterministic exports).
 type SessionFinalizeHandler struct {
 	logger *slog.Logger
 	// skipGit disables git add/commit/push in tests
@@ -444,12 +439,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	}
 
 	// generate all artifacts via shared path
-	htmlGen, htmlErr := html.NewGenerator()
-	var gen session.HTMLGenerator
-	if htmlErr == nil {
-		gen = htmlGen
-	}
-	artifactPaths, artifactErr := session.WriteSessionArtifacts(payload.SessionDir, stored, summaryResp, gen)
+	artifactPaths, artifactErr := session.WriteSessionArtifacts(payload.SessionDir, stored, summaryResp)
 	if artifactErr != nil {
 		h.logger.Warn("artifact generation failed", "err", artifactErr)
 		h.logger.Warn("session recovery incomplete",
@@ -462,7 +452,6 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	h.logger.Info("wrote session artifacts",
 		"summary_md", artifactPaths.SummaryMD,
 		"summary_json", artifactPaths.SummaryJSON,
-		"html", artifactPaths.HTML,
 		"session_md", artifactPaths.SessionMD,
 		"quality_score", summaryResp.QualityScore,
 	)

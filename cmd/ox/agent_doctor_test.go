@@ -34,7 +34,7 @@ func TestCheckSessionCompleteness(t *testing.T) {
 		}
 
 		// create all expected files (including summary.json)
-		files := []string{ledgerFileRaw, ledgerFileHTML, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"}
+		files := []string{ledgerFileRaw, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"}
 		for _, f := range files {
 			if err := os.WriteFile(filepath.Join(sessionDir, f), []byte("test"), 0644); err != nil {
 				t.Fatal(err)
@@ -61,13 +61,12 @@ func TestCheckSessionCompleteness(t *testing.T) {
 		}
 
 		missing := checkSessionCompleteness(sessionDir)
-		if len(missing) != 4 {
-			t.Errorf("expected 4 missing artifacts, got %d: %v", len(missing), missing)
+		if len(missing) != 3 {
+			t.Errorf("expected 3 missing artifacts, got %d: %v", len(missing), missing)
 		}
 
 		// verify expected items are in missing list
 		expectedMissing := map[string]bool{
-			"html":         true,
 			"summary":      true,
 			"session_md":   true,
 			"summary_json": true,
@@ -88,26 +87,18 @@ func TestBuildFinalizeCommands(t *testing.T) {
 
 	t.Run("generates commands for missing artifacts", func(t *testing.T) {
 		t.Parallel()
-		missing := []string{"html", "summary"}
+		missing := []string{"summary"}
 		commands := buildFinalizeCommands("2026-01-15-user-abc123", agentID, missing, sessionPath)
 
-		if len(commands) != 2 {
-			t.Errorf("expected 2 commands, got %d", len(commands))
+		if len(commands) != 1 {
+			t.Errorf("expected 1 command, got %d", len(commands))
 		}
 
-		// verify html command
-		foundHTML := false
 		foundSummary := false
 		for _, cmd := range commands {
-			if strings.Contains(cmd, "ox session export --input") {
-				foundHTML = true
-			}
 			if strings.Contains(cmd, "ox agent OxABCD session summarize --file") {
 				foundSummary = true
 			}
-		}
-		if !foundHTML {
-			t.Error("expected html generation command")
 		}
 		if !foundSummary {
 			t.Error("expected summarize command")
@@ -138,14 +129,14 @@ func TestBuildNextSteps(t *testing.T) {
 			IncompleteSessions: []IncompleteSessionInfo{
 				{
 					SessionID: "test-session",
-					Missing:   []string{"summary", "html"},
+					Missing:   []string{"summary"},
 				},
 			},
 		}
 
 		steps := buildNextSteps(output)
-		if len(steps) != 2 {
-			t.Errorf("expected 2 steps, got %d: %v", len(steps), steps)
+		if len(steps) != 1 {
+			t.Errorf("expected 1 step, got %d: %v", len(steps), steps)
 		}
 	})
 

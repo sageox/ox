@@ -1729,7 +1729,7 @@ waitLoop:
 	}
 
 	// Verify ALL artifacts were generated from the interrupted session
-	expectedArtifacts := []string{"summary.md", "summary.json", "session.html", "session.md"}
+	expectedArtifacts := []string{"summary.md", "summary.json", "session.md"}
 	for _, artifact := range expectedArtifacts {
 		path := filepath.Join(ledgerSessionDir, artifact)
 		info, statErr := os.Stat(path)

@@ -325,7 +325,7 @@ func TestIncrementalE2E_CtrlC_AntiEntropy(t *testing.T) {
 	require.NoError(t, processErr)
 
 	// Verify all artifacts were generated
-	expectedArtifacts := []string{"summary.md", "summary.json", "session.html", "session.md"}
+	expectedArtifacts := []string{"summary.md", "summary.json", "session.md"}
 	for _, artifact := range expectedArtifacts {
 		path := filepath.Join(ledgerSessionDir, artifact)
 		_, statErr := os.Stat(path)

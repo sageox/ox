@@ -13,7 +13,6 @@ func TestLedgerFileConstants(t *testing.T) {
 		expected string
 	}{
 		{"LedgerFileRaw", LedgerFileRaw, "raw.jsonl"},
-		{"LedgerFileHTML", LedgerFileHTML, "session.html"},
 		{"LedgerFileSummaryMD", LedgerFileSummaryMD, "summary.md"},
 		{"LedgerFileSessionMD", LedgerFileSessionMD, "session.md"},
 		{"LedgerFilePlan", LedgerFilePlan, "plan.md"},
@@ -29,7 +28,6 @@ func TestLedgerFileConstants(t *testing.T) {
 
 func TestResultSecondaryArtifacts(t *testing.T) {
 	r := &Result{
-		HTMLPath:      "/tmp/session.html",
 		SummaryMDPath: "/tmp/summary.md",
 		SessionMDPath: "/tmp/session.md",
 		PlanPath:      "/tmp/plan.md",
@@ -37,9 +35,6 @@ func TestResultSecondaryArtifacts(t *testing.T) {
 
 	artifacts := r.SecondaryArtifacts()
 
-	if artifacts[LedgerFileHTML] != "/tmp/session.html" {
-		t.Errorf("HTML: got %q", artifacts[LedgerFileHTML])
-	}
 	if artifacts[LedgerFileSummaryMD] != "/tmp/summary.md" {
 		t.Errorf("SummaryMD: got %q", artifacts[LedgerFileSummaryMD])
 	}

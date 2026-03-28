@@ -293,12 +293,6 @@ func TestProcessResult(t *testing.T) {
 		t.Errorf("summary.json not created: %v", statErr)
 	}
 
-	// verify session.html was created
-	htmlPath := filepath.Join(sessionDir, "session.html")
-	if _, statErr := os.Stat(htmlPath); statErr != nil {
-		t.Errorf("session.html not created: %v", statErr)
-	}
-
 	// verify session.md was created
 	mdPath := filepath.Join(sessionDir, "session.md")
 	if _, statErr := os.Stat(mdPath); statErr != nil {
@@ -337,8 +331,8 @@ func TestProcessResult_UnparsableJSON(t *testing.T) {
 		t.Fatalf("ProcessResult should not fail with unparsable JSON: %v", err)
 	}
 
-	// all 4 artifacts should be written (unified code path always writes all)
-	for _, artifact := range []string{"summary.md", "summary.json", "session.html", "session.md"} {
+	// all 3 artifacts should be written (unified code path always writes all)
+	for _, artifact := range []string{"summary.md", "summary.json", "session.md"} {
 		if _, statErr := os.Stat(filepath.Join(sessionDir, artifact)); statErr != nil {
 			t.Errorf("%s should be created even when JSON parsing fails: %v", artifact, statErr)
 		}
@@ -652,14 +646,6 @@ func TestCtrlC_FullFinalizationPipeline(t *testing.T) {
 		t.Errorf("summary.json title mismatch: got %q", parsed["title"])
 	}
 
-	// Verify session.html contains session content
-	htmlData, err := os.ReadFile(filepath.Join(sessionDir, "session.html"))
-	if err != nil {
-		t.Fatalf("failed to read session.html: %v", err)
-	}
-	if len(htmlData) < 100 {
-		t.Error("session.html seems too small")
-	}
 
 	// Verify session.md contains session content
 	mdData, err := os.ReadFile(filepath.Join(sessionDir, "session.md"))
@@ -1511,7 +1497,7 @@ func TestProcessResult_QualityScoreBelowUpload(t *testing.T) {
 		Payload: &SessionFinalizePayload{
 			SessionDir: sessionDir,
 			RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
-			Missing:    []string{"summary.md", "summary.json", "session.html", "session.md"},
+			Missing:    []string{"summary.md", "summary.json", "session.md"},
 			LedgerPath: ledgerPath,
 		},
 	}
@@ -1551,7 +1537,7 @@ func TestProcessResult_QualityScoreAboveUpload(t *testing.T) {
 		Payload: &SessionFinalizePayload{
 			SessionDir: sessionDir,
 			RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
-			Missing:    []string{"summary.md", "summary.json", "session.html", "session.md"},
+			Missing:    []string{"summary.md", "summary.json", "session.md"},
 			LedgerPath: ledgerPath,
 		},
 	}

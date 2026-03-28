@@ -137,12 +137,6 @@ func runAgentSessionPlanHistory(inst *agentinstance.Instance, args []string) err
 	// generate supplementary files from the raw session
 	stored, readErr := session.ReadSessionFromPath(rawPath)
 	if readErr == nil && stored != nil {
-		// session.html
-		htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
-		if genErr := generateHTML(stored, htmlPath); genErr != nil {
-			slog.Debug("generate session HTML", "error", genErr)
-		}
-
 		// session.md (full session markdown)
 		sessionMDPath := filepath.Join(sessionPath, ledgerFileSessionMD)
 		mdGen := session.NewMarkdownGenerator()

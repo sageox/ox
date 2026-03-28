@@ -458,15 +458,6 @@ func TestRegenerateArtifacts(t *testing.T) {
 
 		err := regenerateArtifacts(sessionPath, rawSession)
 		require.NoError(t, err)
-
-		// session.html should be created
-		htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
-		_, err = os.Stat(htmlPath)
-		assert.NoError(t, err, "session.html should exist")
-		htmlData, err := os.ReadFile(htmlPath)
-		require.NoError(t, err)
-		assert.Contains(t, string(htmlData), "<!DOCTYPE html", "session.html should contain HTML")
-
 		// session.md should be created
 		mdPath := filepath.Join(sessionPath, ledgerFileSessionMD)
 		_, err = os.Stat(mdPath)

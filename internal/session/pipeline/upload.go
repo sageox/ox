@@ -54,9 +54,13 @@ func CopySessionToLedger(fs FileSystem, result *Result, ledgerPath, sessionName 
 	return nil
 }
 
-// RewriteLedgerPaths rewrites cache paths on result to their ledger equivalents.
+// RewriteLedgerPaths rewrites all cache paths on result to their ledger equivalents.
 // Called after a successful upload so JSON output references the canonical location.
 // Uses fs to verify secondary artifacts exist before rewriting.
+//
+// NOTE: This rewrites RawPath to the ledger copy, which becomes an LFS stub
+// after push. Use RewriteSecondaryPaths instead when the caller needs to keep
+// RawPath pointing to the local cache for subsequent processing (e.g., push-summary).
 func RewriteLedgerPaths(fsys FileSystem, result *Result) {
 	if result.LedgerSessionDir == "" {
 		return
@@ -64,6 +68,22 @@ func RewriteLedgerPaths(fsys FileSystem, result *Result) {
 
 	// raw is always present after successful upload
 	result.RawPath = filepath.Join(result.LedgerSessionDir, LedgerFileRaw)
+
+	rewriteSecondary(fsys, result)
+}
+
+// RewriteSecondaryPaths rewrites secondary artifact paths (summary.md, session.md,
+// plan.md) to their ledger equivalents, but keeps RawPath unchanged. This preserves
+// the local cache path for raw.jsonl so agents can read it after upload — the ledger
+// copy becomes an LFS stub after push.
+func RewriteSecondaryPaths(fsys FileSystem, result *Result) {
+	rewriteSecondary(fsys, result)
+}
+
+func rewriteSecondary(fsys FileSystem, result *Result) {
+	if result.LedgerSessionDir == "" {
+		return
+	}
 
 	rewriteIfExists := func(field *string, name string) {
 		if *field == "" {
@@ -76,7 +96,6 @@ func RewriteLedgerPaths(fsys FileSystem, result *Result) {
 			*field = "" // didn't make it to ledger
 		}
 	}
-	rewriteIfExists(&result.HTMLPath, LedgerFileHTML)
 	rewriteIfExists(&result.SummaryMDPath, LedgerFileSummaryMD)
 	rewriteIfExists(&result.SessionMDPath, LedgerFileSessionMD)
 	rewriteIfExists(&result.PlanPath, LedgerFilePlan)

@@ -80,22 +80,20 @@ type mockFileInfo struct {
 	dir  bool
 }
 
-func (m mockFileInfo) Name() string      { return m.name }
-func (m mockFileInfo) Size() int64       { return 0 }
-func (m mockFileInfo) Mode() os.FileMode { return 0644 }
+func (m mockFileInfo) Name() string       { return m.name }
+func (m mockFileInfo) Size() int64        { return 0 }
+func (m mockFileInfo) Mode() os.FileMode  { return 0644 }
 func (m mockFileInfo) ModTime() time.Time { return time.Time{} }
-func (m mockFileInfo) IsDir() bool       { return m.dir }
-func (m mockFileInfo) Sys() any          { return nil }
+func (m mockFileInfo) IsDir() bool        { return m.dir }
+func (m mockFileInfo) Sys() any           { return nil }
 
 func TestCopySessionToLedger(t *testing.T) {
 	mfs := newMockFS()
 	mfs.files["/cache/raw.jsonl"] = []byte(`{"test":"data"}`)
-	mfs.files["/cache/session.html"] = []byte("<html>session</html>")
 	mfs.files["/cache/summary.md"] = []byte("# Summary")
 
 	result := &Result{
 		RawPath:       "/cache/raw.jsonl",
-		HTMLPath:      "/cache/session.html",
 		SummaryMDPath: "/cache/summary.md",
 		EntryCount:    5,
 	}
@@ -114,11 +112,6 @@ func TestCopySessionToLedger(t *testing.T) {
 	}
 
 	// verify secondary artifacts copied
-	htmlDst := filepath.Join("/ledger", "sessions", "session-001", LedgerFileHTML)
-	if _, ok := mfs.files[htmlDst]; !ok {
-		t.Error("session.html not copied to ledger")
-	}
-
 	summaryDst := filepath.Join("/ledger", "sessions", "session-001", LedgerFileSummaryMD)
 	if _, ok := mfs.files[summaryDst]; !ok {
 		t.Error("summary.md not copied to ledger")
@@ -167,11 +160,11 @@ func TestCopySessionToLedgerRawReadFails(t *testing.T) {
 func TestCopySessionToLedgerSecondaryFailsGracefully(t *testing.T) {
 	mfs := newMockFS()
 	mfs.files["/cache/raw.jsonl"] = []byte(`{"data":true}`)
-	// HTML source doesn't exist — should not error
+	// summary source doesn't exist — should not error
 	result := &Result{
-		RawPath:    "/cache/raw.jsonl",
-		HTMLPath:   "/cache/missing.html",
-		EntryCount: 3,
+		RawPath:       "/cache/raw.jsonl",
+		SummaryMDPath: "/cache/missing-summary.md",
+		EntryCount:    3,
 	}
 
 	err := CopySessionToLedger(mfs, result, "/ledger", "session-partial")
@@ -185,10 +178,10 @@ func TestCopySessionToLedgerSecondaryFailsGracefully(t *testing.T) {
 		t.Error("raw.jsonl not copied")
 	}
 
-	// HTML should NOT be there
-	htmlDst := filepath.Join("/ledger", "sessions", "session-partial", LedgerFileHTML)
-	if _, ok := mfs.files[htmlDst]; ok {
-		t.Error("missing HTML should not have been copied")
+	// summary should NOT be there (source didn't exist)
+	summaryDst := filepath.Join("/ledger", "sessions", "session-partial", LedgerFileSummaryMD)
+	if _, ok := mfs.files[summaryDst]; ok {
+		t.Error("missing summary should not have been copied")
 	}
 }
 
@@ -196,13 +189,11 @@ func TestRewriteLedgerPaths(t *testing.T) {
 	mfs := newMockFS()
 	ledgerDir := "/ledger/sessions/session-001"
 	mfs.files[filepath.Join(ledgerDir, LedgerFileRaw)] = []byte("raw")
-	mfs.files[filepath.Join(ledgerDir, LedgerFileHTML)] = []byte("html")
 	mfs.files[filepath.Join(ledgerDir, LedgerFileSummaryMD)] = []byte("summary")
 	// SessionMD intentionally missing
 
 	result := &Result{
 		RawPath:          "/cache/raw.jsonl",
-		HTMLPath:         "/cache/session.html",
 		SummaryMDPath:    "/cache/summary.md",
 		SessionMDPath:    "/cache/session.md",
 		PlanPath:         "",
@@ -213,9 +204,6 @@ func TestRewriteLedgerPaths(t *testing.T) {
 
 	if result.RawPath != filepath.Join(ledgerDir, LedgerFileRaw) {
 		t.Errorf("RawPath: got %q", result.RawPath)
-	}
-	if result.HTMLPath != filepath.Join(ledgerDir, LedgerFileHTML) {
-		t.Errorf("HTMLPath: got %q", result.HTMLPath)
 	}
 	if result.SummaryMDPath != filepath.Join(ledgerDir, LedgerFileSummaryMD) {
 		t.Errorf("SummaryMDPath: got %q", result.SummaryMDPath)

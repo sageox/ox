@@ -3,7 +3,6 @@ package session
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 )
@@ -12,18 +11,7 @@ import (
 type ArtifactPaths struct {
 	SummaryMD   string // summary.md — structured markdown summary
 	SummaryJSON string // summary.json — machine-readable summary
-	HTML        string // session.html — interactive HTML viewer
 	SessionMD   string // session.md — full session transcript in markdown
-}
-
-// HTMLGenerator abstracts HTML generation to avoid import cycles
-// (internal/session cannot import internal/session/html).
-type HTMLGenerator interface {
-	GenerateToFile(stored *StoredSession, outputPath string) error
-	GenerateToFileWithSummary(stored *StoredSession, summary *SummarizeResponse, outputPath string) error
-	// EnrichSummary populates computed fields (FilesChanged, Chapters) on
-	// the summary by building the full template data from raw session entries.
-	EnrichSummary(stored *StoredSession, summary *SummarizeResponse)
 }
 
 // WriteSessionArtifacts generates the standard set of session artifacts from
@@ -31,9 +19,14 @@ type HTMLGenerator interface {
 // anti-entropy finalization call this to ensure identical output.
 //
 // The summaryResp may come from LocalSummary (stats-only) or LLM (rich).
-// Either way, the same 4 files are produced.
-func WriteSessionArtifacts(sessionDir string, stored *StoredSession, summaryResp *SummarizeResponse, htmlGen HTMLGenerator) (*ArtifactPaths, error) {
+// Either way, the same 3 files are produced.
+func WriteSessionArtifacts(sessionDir string, stored *StoredSession, summaryResp *SummarizeResponse) (*ArtifactPaths, error) {
 	paths := &ArtifactPaths{}
+
+	// --- enrich summary.json with computed fields (files_changed, chapters) ---
+	if summaryResp != nil && stored != nil {
+		EnrichSummary(stored, summaryResp)
+	}
 
 	// --- summary.json ---
 	if summaryResp != nil {
@@ -69,33 +62,6 @@ func WriteSessionArtifacts(sessionDir string, stored *StoredSession, summaryResp
 			return nil, fmt.Errorf("write summary.md: %w", err)
 		}
 		paths.SummaryMD = summaryMDPath
-	}
-
-	// --- session.html ---
-	if htmlGen == nil {
-		return nil, fmt.Errorf("generate session.html: html generator is nil")
-	}
-	htmlPath := filepath.Join(sessionDir, "session.html")
-	if summaryResp != nil {
-		if err := htmlGen.GenerateToFileWithSummary(stored, summaryResp, htmlPath); err != nil {
-			return nil, fmt.Errorf("generate session.html: %w", err)
-		}
-	} else {
-		if err := htmlGen.GenerateToFile(stored, htmlPath); err != nil {
-			return nil, fmt.Errorf("generate session.html: %w", err)
-		}
-	}
-	paths.HTML = htmlPath
-
-	// --- enrich summary.json with computed fields (files_changed, chapters) ---
-	if summaryResp != nil && stored != nil {
-		htmlGen.EnrichSummary(stored, summaryResp)
-		summaryJSONPath := filepath.Join(sessionDir, "summary.json")
-		if enriched, err := json.MarshalIndent(summaryResp, "", "  "); err == nil {
-			if writeErr := os.WriteFile(summaryJSONPath, enriched, 0644); writeErr != nil {
-				slog.Debug("write enriched summary.json", "path", summaryJSONPath, "error", writeErr)
-			}
-		}
 	}
 
 	// --- session.md ---

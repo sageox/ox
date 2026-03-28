@@ -463,14 +463,13 @@ func TestBuildFinalizeCommands_EmptyMissing(t *testing.T) {
 }
 
 func TestBuildFinalizeCommands_AllMissing(t *testing.T) {
-	missing := []string{"html", "summary", "session_md", "summary_json"}
+	missing := []string{"summary", "session_md", "summary_json"}
 	commands := buildFinalizeCommands("test-session", "agent-123", missing, "/path/to/session")
 
-	require.Len(t, commands, 4)
-	assert.Contains(t, commands[0], "ox session export")
-	assert.Contains(t, commands[1], "ox agent agent-123 session summarize")
-	assert.Contains(t, commands[2], "ox session export --markdown")
-	assert.Contains(t, commands[3], "summary.json missing")
+	require.Len(t, commands, 3)
+	assert.Contains(t, commands[0], "ox agent agent-123 session summarize")
+	assert.Contains(t, commands[1], "ox session export --markdown")
+	assert.Contains(t, commands[2], "summary.json missing")
 }
 
 func TestBuildFinalizeCommands_UnknownArtifact(t *testing.T) {
@@ -502,7 +501,7 @@ func TestBuildNextSteps_IncompleteSessionsWithMultipleMissing(t *testing.T) {
 		IncompleteSessions: []IncompleteSessionInfo{
 			{
 				SessionID: "session-1",
-				Missing:   []string{"summary", "html", "summary_json"},
+				Missing:   []string{"summary", "summary_json"},
 			},
 		},
 	}
@@ -515,7 +514,6 @@ func TestBuildNextSteps_IncompleteSessionsWithMultipleMissing(t *testing.T) {
 		}
 	}
 	assert.True(t, found["Generate summary for session session-1"])
-	assert.True(t, found["Generate HTML for session session-1"])
 	assert.True(t, found["Generate summary JSON for session session-1"])
 }
 
@@ -620,7 +618,7 @@ func TestCheckSessionCompleteness_NoRawFile(t *testing.T) {
 func TestCheckSessionCompleteness_AllPresent(t *testing.T) {
 	dir := t.TempDir()
 	// create all expected files
-	files := []string{"raw.jsonl", "session.html", "summary.md", "session.md", "summary.json"}
+	files := []string{"raw.jsonl", "summary.md", "session.md", "summary.json"}
 	for _, f := range files {
 		require.NoError(t, writeTestFile(t, dir, f, "content"))
 	}
@@ -636,7 +634,6 @@ func TestCheckSessionCompleteness_SomeMissing(t *testing.T) {
 
 	missing := checkSessionCompleteness(dir)
 	assert.NotEmpty(t, missing)
-	assert.True(t, containsString(missing, "html"))
 	assert.True(t, containsString(missing, "summary"))
 	assert.True(t, containsString(missing, "session_md"))
 	assert.True(t, containsString(missing, "summary_json"))

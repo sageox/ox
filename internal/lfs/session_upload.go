@@ -15,7 +15,6 @@ var ContentFiles = []string{
 	"raw.jsonl",
 	"summary.md",
 	"session.md",
-	"session.html",
 	"plan.md",
 }
 

@@ -11,8 +11,7 @@
 //	└── <session-name>/
 //	    ├── raw.jsonl        # unprocessed session capture
 //	    ├── summary.md       # ai-generated summary
-//	    ├── session.md    # markdown session
-//	    └── session.html  # html session
+//	    └── session.md    # markdown session
 //
 // Session name format: YYYY-MM-DDTHH-MM-<username>-<sessionID>
 // Example: 2026-01-06T14-32-ryan-Ox7f3a
@@ -721,6 +720,11 @@ func (s *Store) ReadRawSession(filename string) (*StoredSession, error) {
 
 // readSessionFile reads and parses a session file.
 func (s *Store) readSessionFile(filePath, sessionType, sessionName string) (*StoredSession, error) {
+	// detect LFS stubs before attempting to parse as JSONL
+	if lfs.IsPointerFile(filePath) {
+		return nil, fmt.Errorf("%w: %s is an LFS stub", ErrSessionNotHydrated, filePath)
+	}
+
 	f, err := os.Open(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("open session file=%s: %w", filePath, err)
@@ -787,11 +791,15 @@ func (s *Store) readSessionFile(filePath, sessionType, sessionName string) (*Sto
 }
 
 // ReadSessionFromPath reads and parses a JSONL session from an arbitrary file path.
-// This is useful for generating HTML from sessions outside the managed store location.
 func ReadSessionFromPath(filePath string) (*StoredSession, error) {
 	absPath, err := filepath.Abs(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("resolve path: %w", err)
+	}
+
+	// detect LFS stubs before attempting to parse as JSONL
+	if lfs.IsPointerFile(absPath) {
+		return nil, fmt.Errorf("%w: %s is an LFS stub", ErrSessionNotHydrated, absPath)
 	}
 
 	f, err := os.Open(absPath)

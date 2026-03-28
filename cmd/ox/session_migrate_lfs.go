@@ -60,7 +60,7 @@ var sessionMigrateLFSCmd = &cobra.Command{
 
 func migrateSessionToLFS(projectRoot, ledgerPath, sessionPath, sessionName string) error {
 	// check if already migrated (all content files are pointers)
-	contentFiles := []string{ledgerFileRaw, ledgerFileSummaryMD, ledgerFileSessionMD, ledgerFileHTML, ledgerFilePlan}
+	contentFiles := []string{ledgerFileRaw, ledgerFileSummaryMD, ledgerFileSessionMD, ledgerFilePlan}
 	allPointers := true
 	hasContent := false
 	for _, name := range contentFiles {

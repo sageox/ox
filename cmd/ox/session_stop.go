@@ -4,12 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
-	sessionhtml "github.com/sageox/ox/internal/session/html"
 	"github.com/sageox/ox/internal/version"
 )
 
@@ -19,7 +17,6 @@ import (
 // processResult contains outcomes from session processing
 type processResult struct {
 	RawPath         string
-	HTMLPath        string
 	EntryCount      int
 	SecretsRedacted int
 	AgentVersion    string
@@ -193,21 +190,6 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 		return nil, fmt.Errorf("failed to close raw session: %w", err)
 	}
 	result.RawPath = rawWriter.FilePath()
-
-	// generate HTML viewer
-	if result.RawPath != "" {
-		htmlGen, err := sessionhtml.NewGenerator()
-		if err == nil {
-			// read back the raw session
-			rawSession, readErr := store.ReadSession(filename)
-			if readErr == nil && rawSession != nil {
-				htmlPath := filepath.Join(filepath.Dir(result.RawPath), ledgerFileHTML)
-				if genErr := htmlGen.GenerateToFile(rawSession, htmlPath); genErr == nil {
-					result.HTMLPath = htmlPath
-				}
-			}
-		}
-	}
 
 	return result, nil
 }

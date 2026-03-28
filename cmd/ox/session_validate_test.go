@@ -177,33 +177,6 @@ func TestValidation_SummaryEmpty(t *testing.T) {
 	assert.Equal(t, "", v.summary())
 }
 
-func TestValidateHTMLConsistency_SmallHTML(t *testing.T) {
-	dir := t.TempDir()
-	rawPath := filepath.Join(dir, "raw.jsonl")
-	htmlPath := filepath.Join(dir, "session.html")
-
-	// write raw.jsonl with many entries
-	var lines []map[string]any
-	lines = append(lines, map[string]any{"type": "header", "version": "1.0"})
-	for i := 0; i < 20; i++ {
-		lines = append(lines, map[string]any{"type": "user", "content": "hello", "timestamp": "2026-01-01T00:00:00Z"})
-	}
-	writeJSONL(t, rawPath, lines)
-
-	// write suspiciously small HTML
-	require.NoError(t, os.WriteFile(htmlPath, []byte("<html>tiny</html>"), 0644))
-
-	v := validateHTMLConsistency(htmlPath, rawPath)
-	assert.True(t, v.hasIssues())
-	assert.Contains(t, v.Warnings[0], "too small")
-}
-
-func TestValidateHTMLConsistency_MissingFiles(t *testing.T) {
-	dir := t.TempDir()
-	// both files missing — should return empty validation
-	v := validateHTMLConsistency(filepath.Join(dir, "session.html"), filepath.Join(dir, "raw.jsonl"))
-	assert.False(t, v.hasIssues())
-}
 
 // writeJSONL writes a slice of maps as JSONL to the given path.
 func writeJSONL(t *testing.T, path string, lines []map[string]any) {

@@ -2,7 +2,7 @@
 //
 // The session upload pipeline processes agent session data through these phases:
 //
-//	Phase 1 (cache): redact secrets -> write raw.jsonl, HTML, markdown
+//	Phase 1 (cache): redact secrets -> write raw.jsonl, markdown
 //	Phase 2 (ledger): copy files -> LFS upload -> write meta.json -> git commit+push
 //
 // This package contains the shared types, constants, and pure functions used across
@@ -13,7 +13,6 @@ package pipeline
 // the upload path (write) and post-prune path rewrite (read-back).
 const (
 	LedgerFileRaw       = "raw.jsonl"
-	LedgerFileHTML      = "session.html"
 	LedgerFileSummaryMD = "summary.md"
 	LedgerFileSessionMD = "session.md"
 	LedgerFilePlan      = "plan.md" // may contain multiple plans as separate Markdown sections
@@ -24,7 +23,6 @@ const (
 // then by uploadSessionToLedger (phase 2).
 type Result struct {
 	RawPath          string
-	HTMLPath         string
 	SummaryMDPath    string
 	SessionMDPath    string
 	EntryCount       int
@@ -66,7 +64,6 @@ type StopOutput struct {
 	Title            string           `json:"title,omitempty"`
 	Duration         string           `json:"duration"`
 	RawPath          string           `json:"raw_path,omitempty"`
-	HTMLPath         string           `json:"html_path,omitempty"`
 	SummaryMDPath    string           `json:"summary_md_path,omitempty"`
 	SessionMDPath    string           `json:"session_md_path,omitempty"`
 	PlanPath         string           `json:"plan_path,omitempty"`
@@ -106,21 +103,10 @@ type SummarizeOutput struct {
 	SummaryPrompt string   `json:"summary_prompt,omitempty"`
 }
 
-// HTMLOutput is the JSON output format for session html.
-type HTMLOutput struct {
-	Success   bool   `json:"success"`
-	Type      string `json:"type"`
-	AgentID   string `json:"agent_id"`
-	Generated bool   `json:"generated"`
-	HTMLPath  string `json:"html_path"`
-	Message   string `json:"message"`
-}
-
 // SecondaryArtifacts returns the mapping of ledger filenames to source paths
 // from a Result. Used by upload and copy logic to iterate over non-critical files.
 func (r *Result) SecondaryArtifacts() map[string]string {
 	return map[string]string{
-		LedgerFileHTML:      r.HTMLPath,
 		LedgerFileSummaryMD: r.SummaryMDPath,
 		LedgerFileSessionMD: r.SessionMDPath,
 		LedgerFilePlan:      r.PlanPath,

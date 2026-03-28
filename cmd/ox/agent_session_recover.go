@@ -116,7 +116,7 @@ func recoverViaNormalStop(inst *agentinstance.Instance, projectRoot string, stat
 }
 
 // recoverFromCache uploads raw.jsonl from cache when the adapter file is gone.
-// raw.jsonl is the source of truth -- all other artifacts (events, HTML, summary)
+// raw.jsonl is the source of truth -- all other artifacts (events, summary)
 // can be regenerated from it. This ensures no session data is lost even when
 // the AI coworker's original session file has been cleaned up.
 //
@@ -189,7 +189,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 
 			// copy other artifacts if they exist in cache
 			cacheDir := filepath.Dir(rawPath)
-			for _, name := range []string{ledgerFileHTML, ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"} {
+			for _, name := range []string{ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"} {
 				src := filepath.Join(cacheDir, name)
 				if srcData, err := os.ReadFile(src); err == nil {
 					dst := filepath.Join(ledgerSessionDir, name)
@@ -242,15 +242,9 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	// clear stale recording state
 	_ = session.ClearRecordingStateForAgent(projectRoot, state.AgentID)
 
-	// all files copied and committed to ledger -- prune local cache
-	if uploaded {
-		cacheDir := filepath.Dir(rawPath)
-		if cacheDir != "" && cacheDir != "." {
-			if err := os.RemoveAll(cacheDir); err != nil {
-				slog.Debug("prune session cache after recovery", "dir", cacheDir, "error", err)
-			}
-		}
-	}
+	// keep cache alive — raw.jsonl in ledger becomes an LFS stub after push,
+	// but push-summary needs to read it. Cache is pruned later by
+	// clearNeedsSummaryMarkerForSession after push-summary completes.
 
 	if !uploaded {
 		ledgerSessionDir = ""

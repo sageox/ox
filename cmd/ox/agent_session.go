@@ -26,7 +26,6 @@ import (
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
-	sessionhtml "github.com/sageox/ox/internal/session/html"
 	"github.com/sageox/ox/internal/session/pipeline"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/useragent"
@@ -65,7 +64,6 @@ const sessionStopGuidance = `Session stopped and saved. Check the summary_prompt
 // Canonical definitions live in internal/session/pipeline.
 const (
 	ledgerFileRaw       = pipeline.LedgerFileRaw
-	ledgerFileHTML      = pipeline.LedgerFileHTML
 	ledgerFileSummaryMD = pipeline.LedgerFileSummaryMD
 	ledgerFileSessionMD = pipeline.LedgerFileSessionMD
 	ledgerFilePlan      = pipeline.LedgerFilePlan
@@ -560,13 +558,10 @@ func outputTextSummary(state *session.RecordingState, duration string, processRe
 		}
 
 		// show generated files with descriptions
-		if processResult.RawPath != "" || processResult.HTMLPath != "" || processResult.SummaryMDPath != "" {
+		if processResult.RawPath != "" || processResult.SummaryMDPath != "" {
 			fmt.Println("\n  Generated files:")
 			if processResult.RawPath != "" {
 				fmt.Printf("    Raw session:     %s\n", processResult.RawPath)
-			}
-			if processResult.HTMLPath != "" {
-				fmt.Printf("    HTML viewer:     %s\n", processResult.HTMLPath)
 			}
 			if processResult.SummaryMDPath != "" {
 				fmt.Printf("    Summary:         %s\n", processResult.SummaryMDPath)
@@ -604,7 +599,6 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 	}
 	if processResult != nil {
 		output.RawPath = processResult.RawPath
-		output.HTMLPath = processResult.HTMLPath
 		output.SummaryMDPath = processResult.SummaryMDPath
 		output.SessionMDPath = processResult.SessionMDPath
 		output.PlanPath = processResult.PlanPath
@@ -654,7 +648,7 @@ func parseTitle(args []string) string {
 type agentSessionResult = pipeline.Result
 
 // processAgentSession reads, redacts secrets, and saves the session.
-// Processes the agent session data into stored artifacts (raw, events, HTML, markdown).
+// Processes the agent session data into stored artifacts (raw, markdown).
 //
 // Architecture: cache -> ledger two-phase design
 //
@@ -662,11 +656,11 @@ type agentSessionResult = pipeline.Result
 // to the ledger git repo and uploaded to LFS (network-dependent, can retry).
 // This ensures session stop never fails due to network issues.
 //
-//	Phase 1 (cache): redact secrets -> write raw.jsonl, HTML, markdown
+//	Phase 1 (cache): redact secrets -> write raw.jsonl, markdown
 //	Phase 2 (ledger): copy files -> LFS upload -> write meta.json -> git commit+push
 //	Cleanup: on phase 2 success, prune the local cache (ledger is source of truth)
 //
-// raw.jsonl is the critical source of truth -- all other artifacts (events, HTML,
+// raw.jsonl is the critical source of truth -- all other artifacts (summary,
 // summary, markdown) can be regenerated from it. If phase 2 fails, doctor's
 // retrySessionUpload() recovers by re-copying from cache to ledger.
 //
@@ -869,23 +863,13 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	if result.RawPath != "" {
 		rawSession, readErr := store.ReadSession(filename)
 		if readErr == nil && rawSession != nil {
-			htmlGen, _ := sessionhtml.NewGenerator()
-			artifactPaths, artifactErr := session.WriteSessionArtifacts(filepath.Dir(result.RawPath), rawSession, summaryResp, htmlGen)
+			artifactPaths, artifactErr := session.WriteSessionArtifacts(filepath.Dir(result.RawPath), rawSession, summaryResp)
 			if artifactErr != nil {
 				_ = doctor.SetNeedsDoctorAgent(projectRoot)
 				slog.Debug("artifact generation failed", "error", artifactErr)
 			} else {
-				result.HTMLPath = artifactPaths.HTML
 				result.SummaryMDPath = artifactPaths.SummaryMD
 				result.SessionMDPath = artifactPaths.SessionMD
-
-				// validate HTML consistency with raw.jsonl
-				if artifactPaths.HTML != "" {
-					if htmlVal := validateHTMLConsistency(artifactPaths.HTML, result.RawPath); htmlVal.hasIssues() {
-						result.DataWarnings = append(result.DataWarnings, htmlVal.Warnings...)
-						result.DataWarnings = append(result.DataWarnings, htmlVal.Errors...)
-					}
-				}
 			}
 		}
 	}
@@ -970,23 +954,13 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 			}
 			result.LedgerSessionDir = "" // clear since upload didn't succeed
 		} else {
-			// ORDERING: prune MUST happen before the path rewrite below.
-			// result.RawPath still points to cache here; after rewrite it points
-			// to ledger. Swapping the order would RemoveAll the ledger directory.
-			if cacheDir := filepath.Dir(result.RawPath); cacheDir != "" && cacheDir != "." {
-				if err := os.RemoveAll(cacheDir); err != nil {
-					slog.Debug("prune session cache", "dir", cacheDir, "error", err)
-				}
-			}
+			// keep cache alive — raw.jsonl in ledger becomes an LFS stub after push,
+			// but push-summary needs to read it. Cache is pruned later by
+			// clearNeedsSummaryMarkerForSession after push-summary completes.
 
-			// rewrite cache paths → ledger equivalents so JSON output and
-			// summary_prompt reference files that actually exist.
-			pipeline.RewriteLedgerPaths(pipeline.OSFileSystem{}, result)
-
-			if result.LedgerSessionDir != "" {
-				// rebuild summary prompt with ledger path; entries unchanged since redaction
-				result.SummaryPrompt = session.BuildSummaryPrompt(entries, result.RawPath, result.LedgerSessionDir)
-			}
+			// rewrite secondary artifact paths (summary.md, session.md) to ledger
+			// but keep RawPath pointing to cache so agents can read raw.jsonl
+			pipeline.RewriteSecondaryPaths(pipeline.OSFileSystem{}, result)
 		}
 	}
 
@@ -1326,119 +1300,7 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 	return nil
 }
 
-// sessionHTMLOutput aliases pipeline.HTMLOutput for backward compat within package main.
-type sessionHTMLOutput = pipeline.HTMLOutput
 
-// runAgentSessionHTML generates or displays info about HTML session viewer.
-// Usage: ox agent <id> session html [--file <path>]
-func runAgentSessionHTML(inst *agentinstance.Instance, args []string) error {
-	projectRoot, err := findProjectRoot()
-	if err != nil {
-		return fmt.Errorf("could not find project root: %w", err)
-	}
-
-	// parse optional --file argument
-	var filePath string
-	for i, arg := range args {
-		if arg == "--file" && i+1 < len(args) {
-			filePath = args[i+1]
-		}
-		if len(arg) > 7 && arg[:7] == "--file=" {
-			filePath = arg[7:]
-		}
-	}
-
-	// determine source and output paths
-	var htmlPath string
-
-	if filePath != "" {
-		htmlPath = filepath.Join(filepath.Dir(filePath), ledgerFileHTML)
-	} else {
-		// find latest session
-		repoID := getRepoIDOrDefault(projectRoot)
-		contextPath := session.GetContextPath(repoID)
-		if contextPath == "" {
-			return fmt.Errorf("no session file specified and no context path found")
-		}
-		store, err := session.NewStore(contextPath)
-		if err != nil {
-			return fmt.Errorf("failed to open session store: %w", err)
-		}
-		latest, err := store.GetLatestRaw()
-		if err != nil {
-			return fmt.Errorf("no sessions found: %w", err)
-		}
-		rawPath := latest.FilePath
-		htmlPath = filepath.Join(filepath.Dir(rawPath), ledgerFileHTML)
-	}
-
-	// check if HTML already exists
-	var generated bool
-	if _, err := os.Stat(htmlPath); err == nil {
-		generated = true
-	}
-
-	var message string
-	if generated {
-		message = "HTML viewer already exists"
-	} else {
-		message = "HTML viewer will be generated on session stop"
-	}
-
-	// output format selection (priority: review > text > json default)
-	if cfg.Review {
-		// security audit mode: human summary + JSON
-		if generated {
-			fmt.Printf("HTML viewer exists: %s\n", htmlPath)
-		} else {
-			fmt.Printf("HTML viewer will be generated when recording stops.\n")
-		}
-		fmt.Println()
-		fmt.Println("--- Machine Output ---")
-		output := sessionHTMLOutput{
-			Success:   true,
-			Type:      "session_html",
-			AgentID:   inst.AgentID,
-			Generated: generated,
-			HTMLPath:  htmlPath,
-			Message:   message,
-		}
-		jsonOut, err := json.MarshalIndent(output, "", "  ")
-		if err != nil {
-			return fmt.Errorf("format HTML JSON: %w", err)
-		}
-		trackContextBytes(int64(len(jsonOut)))
-		fmt.Println(string(jsonOut))
-		return nil
-	}
-
-	if cfg.Text {
-		// human-readable text output
-		if generated {
-			fmt.Printf("HTML viewer exists: %s\n", htmlPath)
-		} else {
-			fmt.Printf("HTML viewer will be generated when recording stops.\n")
-		}
-		return nil
-	}
-
-	// default: JSON output
-	output := sessionHTMLOutput{
-		Success:   true,
-		Type:      "session_html",
-		AgentID:   inst.AgentID,
-		Generated: generated,
-		HTMLPath:  htmlPath,
-		Message:   message,
-	}
-	jsonOut, err := json.MarshalIndent(output, "", "  ")
-	if err != nil {
-		return fmt.Errorf("format HTML JSON: %w", err)
-	}
-	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
-	return nil
-}
 
 // mapRoleToEntryType delegates to session.MapRoleToEntryType.
 func mapRoleToEntryType(role string) session.EntryType {

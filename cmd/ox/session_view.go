@@ -18,12 +18,11 @@ var sessionViewCmd = &cobra.Command{
 	Long: `View a session in your preferred format.
 
 Without arguments, shows the most recent session in the web viewer.
-Default format is configurable via 'ox config set view_format web|html|text|json'.
+Default format is configurable via 'ox config set view_format web|text|json'.
 
 Examples:
   ox session view                         # open in web viewer (default)
   ox session view 2026-01-06T14-32-ryan   # specific session in web viewer
-  ox session view --html                  # view local session in browser (HTML)
   ox session view --text                  # view local session in terminal (markdown)
   ox session view --json                  # view local session as structured JSON
   ox session view --input /path/to/raw.jsonl`,
@@ -32,7 +31,6 @@ Examples:
 
 func init() {
 	sessionCmd.AddCommand(sessionViewCmd)
-	sessionViewCmd.Flags().Bool("html", false, "view local session in browser (HTML)")
 	sessionViewCmd.Flags().Bool("text", false, "view local session in terminal (markdown)")
 	sessionViewCmd.Flags().Bool("json", false, "view local session as structured JSON")
 	sessionViewCmd.Flags().Bool("latest", false, "show most recent session")
@@ -42,7 +40,6 @@ func init() {
 }
 
 func runSessionView(cmd *cobra.Command, args []string) error {
-	htmlFlag, _ := cmd.Flags().GetBool("html")
 	textFlag, _ := cmd.Flags().GetBool("text")
 	jsonFlag, _ := cmd.Flags().GetBool("json")
 	inputPath, _ := cmd.Flags().GetString("input")
@@ -52,10 +49,6 @@ func runSessionView(cmd *cobra.Command, args []string) error {
 	// determine format
 	format := ""
 	flagCount := 0
-	if htmlFlag {
-		format = "html"
-		flagCount++
-	}
 	if textFlag {
 		format = "text"
 		flagCount++
@@ -65,7 +58,7 @@ func runSessionView(cmd *cobra.Command, args []string) error {
 		flagCount++
 	}
 	if flagCount > 1 {
-		return fmt.Errorf("specify only one of --html, --text, or --json")
+		return fmt.Errorf("specify only one of --text or --json")
 	}
 	if format == "" {
 		cfg, err := config.LoadUserConfig()
@@ -177,8 +170,6 @@ func runSessionView(cmd *cobra.Command, args []string) error {
 	switch format {
 	case "web":
 		return viewAsWeb(storedSession.Info.SessionName, projectRoot)
-	case "html":
-		return viewAsHTML(store, storedSession, projectRoot)
 	case "text":
 		return viewAsText(store, storedSession, projectRoot)
 	case "json":

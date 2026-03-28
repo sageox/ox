@@ -169,7 +169,6 @@ func checkSessionCompleteness(sessionPath string) []string {
 	// expected files in a complete session
 	expectedFiles := map[string]string{
 		ledgerFileRaw:       "raw",
-		ledgerFileHTML:      "html",
 		ledgerFileSummaryMD: "summary",
 		ledgerFileSessionMD: "session_md",
 		"summary.json":      "summary_json",
@@ -202,9 +201,6 @@ func buildFinalizeCommands(sessionName, agentID string, missing []string, sessio
 
 	for _, artifact := range missing {
 		switch artifact {
-		case "html":
-			rawPath := filepath.Join(sessionPath, ledgerFileRaw)
-			commands = append(commands, fmt.Sprintf("ox session export --input %s", rawPath))
 		case "summary":
 			rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 			commands = append(commands, fmt.Sprintf("ox agent %s session summarize --file %s", agentID, rawPath))
@@ -316,9 +312,6 @@ func buildNextSteps(output *AgentDoctorOutput) []string {
 		for _, sess := range output.IncompleteSessions {
 			if containsString(sess.Missing, "summary") {
 				steps = append(steps, fmt.Sprintf("Generate summary for session %s", sess.SessionID))
-			}
-			if containsString(sess.Missing, "html") {
-				steps = append(steps, fmt.Sprintf("Generate HTML for session %s", sess.SessionID))
 			}
 			if containsString(sess.Missing, "summary_json") {
 				steps = append(steps, fmt.Sprintf("Generate summary JSON for session %s", sess.SessionID))

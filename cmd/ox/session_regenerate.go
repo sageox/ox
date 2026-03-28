@@ -14,7 +14,6 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
-	sessionhtml "github.com/sageox/ox/internal/session/html"
 	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/spf13/cobra"
 )
@@ -24,13 +23,12 @@ var sessionRegenerateCmd = &cobra.Command{
 	Short: "Regenerate session artifacts or re-redact session data",
 	Long: `Regenerate session artifacts from raw data.
 
-By default, regenerates the session.html file from raw session data.
-Useful when the HTML template has been updated and you want to
-refresh existing sessions with the new design.
+By default, regenerates markdown artifacts (summary.md, session.md)
+from raw session data.
 
 With --redact, re-applies all current REDACT.md rules (team + repo + user
-layers), regenerates all downstream artifacts (session.html,
-session.md, summary.md), and uploads updated content to LFS.
+layers), regenerates all downstream artifacts (session.md, summary.md),
+and uploads updated content to LFS.
 Old LFS blobs become orphaned after regeneration. Server-side blob purge
 will be handled by the /api/v1/git/lfs/purge cloud API endpoint.
 
@@ -41,8 +39,8 @@ by invoking Claude. Requires the claude CLI to be installed. Single-session
 only (ledgers can contain 10,000+ sessions; each requires an LLM invocation).
 
 Examples:
-  ox session regenerate OxK3ZN                          # regenerate HTML
-  ox session regenerate --all                           # regenerate all HTML
+  ox session regenerate OxK3ZN                          # regenerate artifacts
+  ox session regenerate --all                           # regenerate all artifacts
   ox session regenerate OxK3ZN --redact                 # re-redact session
   ox session regenerate --redact --all                  # re-redact all sessions
   ox session regenerate OxK3ZN --redact --dry-run       # preview redaction
@@ -83,26 +81,26 @@ func runSessionRegenerate(cmd *cobra.Command, args []string) error {
 		return regenerateSingleSessionSummary(args[0])
 	}
 
-	// default mode: HTML-only regeneration
+	// default mode: artifact regeneration (markdown)
 	store, projectRoot, err := newSessionStore()
 	if err != nil {
 		return err
 	}
 
 	if regenAll {
-		return regenerateAllSessionsHTML(store, projectRoot, force)
+		return regenerateAllSessionsArtifacts(store, projectRoot, force)
 	}
 
 	if len(args) == 0 {
 		return fmt.Errorf("specify a session name or use --all\nRun 'ox session list' to see available sessions")
 	}
 
-	return regenerateSingleSessionHTML(store, projectRoot, args[0])
+	return regenerateSingleSessionArtifacts(store, projectRoot, args[0])
 }
 
-// --- HTML-only regeneration (default mode) ---
+// --- Artifact regeneration (default mode) ---
 
-func regenerateSingleSessionHTML(store *session.Store, projectRoot, name string) error {
+func regenerateSingleSessionArtifacts(store *session.Store, projectRoot, name string) error {
 	sessionName, err := store.ResolveSessionName(name)
 	if err != nil {
 		return fmt.Errorf("resolve session name: %w", err)
@@ -114,7 +112,7 @@ func regenerateSingleSessionHTML(store *session.Store, projectRoot, name string)
 	}
 
 	sessionPath := store.GetSessionPath(sessionName)
-	if err := regenerateSessionHTML(storedSession, sessionPath); err != nil {
+	if err := regenerateSessionArtifacts(storedSession, sessionPath); err != nil {
 		return err
 	}
 
@@ -122,11 +120,11 @@ func regenerateSingleSessionHTML(store *session.Store, projectRoot, name string)
 		slog.Warn("ledger sync skipped", "session", sessionName, "error", err)
 	}
 
-	cli.PrintSuccess(fmt.Sprintf("Regenerated HTML for %s", sessionName))
+	cli.PrintSuccess(fmt.Sprintf("Regenerated artifacts for %s", sessionName))
 	return nil
 }
 
-func regenerateAllSessionsHTML(store *session.Store, projectRoot string, force bool) error {
+func regenerateAllSessionsArtifacts(store *session.Store, projectRoot string, force bool) error {
 	sessions, err := store.ListAllSessions()
 	if err != nil {
 		return fmt.Errorf("list sessions: %w", err)
@@ -138,7 +136,7 @@ func regenerateAllSessionsHTML(store *session.Store, projectRoot string, force b
 	}
 
 	if !force {
-		if !cli.ConfirmYesNo(fmt.Sprintf("Regenerate HTML for %d session(s)?", len(sessions)), false) {
+		if !cli.ConfirmYesNo(fmt.Sprintf("Regenerate artifacts for %d session(s)?", len(sessions)), false) {
 			fmt.Println("Canceled.")
 			return nil
 		}
@@ -160,7 +158,7 @@ func regenerateAllSessionsHTML(store *session.Store, projectRoot string, force b
 		}
 
 		sessionPath := store.GetSessionPath(sessionName)
-		if regenErr := regenerateSessionHTML(storedSession, sessionPath); regenErr != nil {
+		if regenErr := regenerateSessionArtifacts(storedSession, sessionPath); regenErr != nil {
 			slog.Warn("failed to regenerate session", "session", sessionName, "error", regenErr)
 			skipped++
 			continue
@@ -178,10 +176,6 @@ func regenerateAllSessionsHTML(store *session.Store, projectRoot string, force b
 					continue
 				}
 				sessionPath := store.GetSessionPath(info.SessionName)
-				htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
-				if _, statErr := os.Stat(htmlPath); statErr != nil {
-					continue
-				}
 				if _, lfsErr := uploadSessionLFS(projectRoot, sessionPath); lfsErr != nil {
 					slog.Debug("LFS re-upload skipped", "session", info.SessionName, "error", lfsErr)
 				}
@@ -200,19 +194,13 @@ func regenerateAllSessionsHTML(store *session.Store, projectRoot string, force b
 	return nil
 }
 
-// regenerateSessionHTML deletes any existing session.html and generates a new one.
-func regenerateSessionHTML(storedSession *session.StoredSession, sessionPath string) error {
-	htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
-
-	if err := os.Remove(htmlPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove existing HTML: %w", err)
+// regenerateSessionArtifacts regenerates markdown artifacts for a session.
+func regenerateSessionArtifacts(storedSession *session.StoredSession, sessionPath string) error {
+	if err := regenerateArtifacts(sessionPath, storedSession); err != nil {
+		return fmt.Errorf("regenerate artifacts: %w", err)
 	}
 
-	if err := generateHTML(storedSession, htmlPath); err != nil {
-		return fmt.Errorf("generate HTML: %w", err)
-	}
-
-	slog.Debug("regenerated session HTML", "path", htmlPath)
+	slog.Debug("regenerated session artifacts", "path", sessionPath)
 	return nil
 }
 
@@ -240,7 +228,7 @@ func syncRegeneratedSession(projectRoot, sessionPath, sessionName string) error 
 // invoking Claude with the current summary prompt template. The raw.jsonl is
 // read (downloaded from LFS if needed), a prompt is built using the shared
 // template, and Claude produces a new summary. Downstream artifacts
-// (summary.md, session.html, session.md) are regenerated from the result.
+// (summary.md, session.md) are regenerated from the result.
 func regenerateSingleSessionSummary(nameArg string) error {
 	projectRoot, err := requireProjectRoot()
 	if err != nil {
@@ -319,7 +307,7 @@ func regenerateSingleSessionSummary(nameArg string) error {
 		}
 	}
 
-	// regenerate downstream artifacts (summary.md, session.html, session.md)
+	// regenerate downstream artifacts (summary.md, session.md)
 	if err := regenerateArtifacts(sessionPath, rawSession); err != nil {
 		slog.Warn("artifact regeneration partially failed", "session", sessionName, "error", err)
 	}
@@ -686,21 +674,9 @@ func rewriteRawJSONL(path string, sess *session.StoredSession) error {
 	return os.Rename(tmpPath, path)
 }
 
-// regenerateArtifacts regenerates session.html, session.md, and summary.md
-// from the re-redacted raw session data.
+// regenerateArtifacts regenerates session.md and summary.md from raw session data.
 func regenerateArtifacts(sessionPath string, rawSession *session.StoredSession) error {
 	var errs []string
-
-	// session.html
-	htmlGen, err := sessionhtml.NewGenerator()
-	if err == nil {
-		htmlPath := filepath.Join(sessionPath, ledgerFileHTML)
-		if err := htmlGen.GenerateToFile(rawSession, htmlPath); err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %s", ledgerFileHTML, err))
-		}
-	} else {
-		errs = append(errs, fmt.Sprintf("%s init: %s", ledgerFileHTML, err))
-	}
 
 	// session.md
 	mdGen := session.NewMarkdownGenerator()
@@ -910,7 +886,7 @@ func commitAndPushLedgerBatch(ledgerPath string, sessionNames []string) error {
 			filesToAdd = append(filesToAdd, summaryPath)
 		}
 		// stage LFS pointer files
-		for _, pattern := range []string{"*.jsonl", "*.html", "*.md"} {
+		for _, pattern := range []string{"*.jsonl", "*.md"} {
 			matches, _ := filepath.Glob(filepath.Join(sessionDir, pattern))
 			filesToAdd = append(filesToAdd, matches...)
 		}
