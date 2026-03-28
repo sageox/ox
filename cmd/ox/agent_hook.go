@@ -33,6 +33,21 @@ const (
 
 // activePhaseBehavior tracks which phases currently have behavior.
 // Phases not in this set return immediately (fast-path noop).
+//
+// Whisper delivery findings (tested empirically via TestWhisperDelivery_ChannelExperiment):
+//
+//   Hook event          │ stdout injected into model context?
+//   ────────────────────┼────────────────────────────────────
+//   UserPromptSubmit    │ YES — only reliable channel for Claude Code
+//   PostToolUse         │ NO  — stdout is COMPLETELY DISCARDED by Claude Code
+//   Stop                │ NO  — fires after session ends, model never sees it
+//   SessionStart        │ YES — but only fires once at session start
+//   PreCompact          │ YES — but only fires on /clear or /compact
+//
+// phasePrompt (UserPromptSubmit) is the PRIMARY whisper delivery channel.
+// phaseAfterTool (PostToolUse) is kept as a FALLBACK for non-Claude agents
+// whose PostToolUse stdout may be injected. The cursor-based dedup in
+// WhisperStore prevents double delivery across channels.
 var activePhaseBehavior = map[string]bool{
 	phaseStart:     true,
 	phaseCompact:   true,
@@ -195,12 +210,29 @@ func handleStart(ctx *HookContext) error {
 // handlePrompt handles the user prompt submission phase.
 // Emits pending whispers to stdout — this is the PRIMARY whisper delivery channel.
 //
-// Claude Code injects UserPromptSubmit hook stdout into the model's context
-// before processing the user's prompt. This is the ONLY reliable delivery
-// channel (PostToolUse stdout is discarded by Claude Code).
+// Why UserPromptSubmit and not PostToolUse?
+// Claude Code's hook stdout handling differs by event:
+//   - UserPromptSubmit: stdout IS injected as a <system-reminder> into the model's
+//     context window before the user's prompt is processed. The model sees it.
+//   - PostToolUse: stdout is COMPLETELY DISCARDED. We confirmed this empirically —
+//     content written to PostToolUse stdout never reaches the model, regardless of
+//     XML format used (<new-context>, <system-reminder>, or plain text).
 //
-// This is the "pre-prompt injection" pattern: whisper content arrives in the
-// model's context alongside the user's prompt, ensuring it's seen and acted upon.
+// What did NOT work (tested in TestWhisperDelivery_ChannelExperiment):
+//   1. PostToolUse + <new-context> XML  → discarded by Claude Code, never seen
+//   2. PostToolUse + <system-reminder>  → discarded by Claude Code, never seen
+//   3. PostToolUse + plain text         → discarded by Claude Code, never seen
+//   4. Stop hook stdout                 → fires after session ends, model never sees it
+//
+// What DOES work:
+//   1. UserPromptSubmit + <system-reminder> → injected into model context (this handler)
+//   2. UserPromptSubmit + plain text        → also injected, but <system-reminder>
+//      tags are preferred because Claude treats them as trusted system-level context
+//   3. `ox agent <id> whisper` via Bash     → active pull, model reads command output
+//
+// The cursor mechanism in WhisperStore (per-agentID last_seen timestamp) ensures
+// whispers are delivered exactly once across all channels. If handlePrompt delivers
+// a whisper, the PostToolUse fallback and active pull get 0 entries — no duplication.
 func handlePrompt(ctx *HookContext) error {
 	agentID := ""
 	if ctx.Marker != nil {
@@ -226,10 +258,12 @@ func handleCompact(ctx *HookContext) error {
 // handleAfterTool incrementally drains new entries from the source JSONL
 // into raw.jsonl. Called on PostToolUse and Stop hooks.
 //
-// Also emits whispers as a fallback — the primary delivery channel is
-// handlePrompt (UserPromptSubmit), but this provides belt-and-suspenders
-// coverage for agents whose PostToolUse stdout IS injected into context.
-// The cursor mechanism in the whisper store prevents double delivery.
+// Whisper delivery here is a FALLBACK only. For Claude Code, PostToolUse stdout
+// is discarded — whispers emitted here never reach the model. This call exists
+// for non-Claude agents (Cursor, Windsurf, etc.) whose PostToolUse stdout MAY
+// be injected into context. The cursor-based dedup in WhisperStore ensures that
+// if handlePrompt (UserPromptSubmit) already delivered the whispers, this call
+// returns 0 entries and emits nothing.
 func handleAfterTool(ctx *HookContext) error {
 	agentID := ""
 	if ctx.Marker != nil {

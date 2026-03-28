@@ -100,7 +100,11 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 		})
 	}
 
-	// whisper check — active pull for team whispers during long sessions
+	// whisper check — active pull complement to passive hook delivery.
+	// UserPromptSubmit hook is the primary channel (fires before each prompt),
+	// but this command lets agents check on-demand during long sessions where
+	// new whispers may arrive between prompts. The agent ID is embedded so
+	// the agent can copy-paste the command without needing to look it up.
 	cmds = append(cmds, IntentCommand{
 		Intent:  fmt.Sprintf("check for team whispers, coworker updates, murmurs — run periodically during long sessions: ox agent %s whisper", p.AgentID),
 		Command: fmt.Sprintf("ox agent %s whisper", p.AgentID),
