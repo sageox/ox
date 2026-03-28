@@ -643,6 +643,21 @@ func resolveSocketPath() string {
 	return sock
 }
 
+// pidForSocket looks up the PID registered for a given socket path in the daemon registry.
+// Returns 0 if the socket path is not found in the registry.
+func pidForSocket(socketPath string) int {
+	reg, err := LoadRegistry()
+	if err != nil {
+		return 0
+	}
+	for _, info := range reg.Daemons {
+		if info.SocketPath == socketPath {
+			return info.PID
+		}
+	}
+	return 0
+}
+
 // GetState returns the current lifecycle state of the daemon.
 // This is the canonical way to check daemon status — prefer it over
 // the boolean helpers IsRunning/IsStarting, which are thin wrappers.
@@ -655,11 +670,19 @@ func GetState() DaemonState {
 		return DaemonStateRunning
 	}
 
-	// Ping failed. If the socket file exists, the daemon created its listener
-	// and is running — it's just temporarily unable to respond (busy with GC,
-	// a large sync, etc.). Don't classify as stuck based on a timeout alone.
+	// Ping failed. If the socket file exists AND the owning process is still alive,
+	// the daemon is running but temporarily unable to respond (busy with GC, large sync).
+	// Don't classify as stuck based on a timeout alone.
+	// Cross-check with the registry: a stale socket from an ungraceful exit is NOT running.
 	if _, err := os.Stat(socketPath); err == nil {
-		return DaemonStateRunning
+		if pid := pidForSocket(socketPath); pid > 0 {
+			if proc, pErr := os.FindProcess(pid); pErr == nil && proc.Signal(syscall.Signal(0)) == nil {
+				return DaemonStateRunning
+			}
+		}
+		// Socket file exists but owning process is gone — stale from ungraceful exit.
+		// Remove the socket so callers don't block connecting to a dead listener.
+		_ = os.Remove(socketPath)
 	}
 
 	// No socket — check whether a process is alive via PID file.
@@ -1081,7 +1104,10 @@ func (s *daemonServiceImpl) WhisperHistory(agentID string, before time.Time, lim
 	if err != nil {
 		return nil, err
 	}
-	cursor, _ := s.d.whisperRegistry.GetCursor(agentID)
+	cursor, err := s.d.whisperRegistry.GetCursor(agentID)
+	if err != nil {
+		return nil, fmt.Errorf("get cursor: %w", err)
+	}
 	resp := &WhisperHistoryResponse{
 		Entries:   entries,
 		Cursor:    cursor,

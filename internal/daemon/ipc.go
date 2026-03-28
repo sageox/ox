@@ -1064,6 +1064,14 @@ func (s *Server) SetWhispersHandler(cb func(agentID string, attention whispersto
 	svc.onWhispers = cb
 }
 
+// SetWhisperHistoryHandler sets the handler for whisper history (inspection) queries.
+func (s *Server) SetWhisperHistoryHandler(cb func(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error)) {
+	svc := s.mustCallbackService("SetWhisperHistoryHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onWhisperHistory = cb
+}
+
 // mustCallbackService returns the mutable callback adapter.
 // Panics if the server was created with NewServerWithService (adapters can't be mixed).
 func (s *Server) mustCallbackService(method string) *CallbackService {

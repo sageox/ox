@@ -342,6 +342,12 @@ func handleWhisperHistory(s *Server, msg Message, _ net.Conn) HandlerResult {
 			Response: &Response{Success: false, Error: fmt.Sprintf("invalid payload: %v", err)},
 		}
 	}
+	// agent_id must be non-empty: per-agent cursor tracking is undefined for the all-agents query
+	if payload.AgentID == "" {
+		return HandlerResult{
+			Response: &Response{Success: false, Error: "agent_id is required for whisper history"},
+		}
+	}
 
 	result, err := s.service.WhisperHistory(payload.AgentID, payload.Before, payload.Limit)
 	if err != nil {
