@@ -290,6 +290,19 @@ func handleCodeStatus(s *Server, _ Message, _ net.Conn) HandlerResult {
 	}
 }
 
+func handleMurmur(s *Server, msg Message, _ net.Conn) HandlerResult {
+	var payload MurmurPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		s.logger.Debug("failed to parse murmur payload", "error", err)
+	} else if payload.TargetDir == "" || payload.RelPath == "" {
+		s.logger.Debug("murmur payload missing required fields", "target_dir", payload.TargetDir, "rel_path", payload.RelPath)
+	} else {
+		s.service.PublishMurmur(payload)
+	}
+	// fire-and-forget: no response
+	return HandlerResult{SkipDefault: true}
+}
+
 func handleWhispers(s *Server, msg Message, _ net.Conn) HandlerResult {
 	var payload WhispersPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {

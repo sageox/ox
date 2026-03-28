@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -12,8 +11,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
-	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/spf13/cobra"
 )
@@ -59,12 +58,8 @@ type murmurInput struct {
 }
 
 func runMurmur(cmd *cobra.Command, args []string) error {
-	projectRoot, err := findProjectRoot()
-	if err != nil {
-		return fmt.Errorf("not in a SageOx project: %w", err)
-	}
+	// --- pure input validation (no I/O) ---
 
-	// parse input: positional arg or stdin
 	var rawContent string
 	if len(args) > 0 {
 		rawContent = strings.TrimSpace(args[0])
@@ -73,7 +68,6 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no content provided\nUsage: ox murmur [--topic=...] \"message\"")
 	}
 
-	// detect JSON input vs plain text
 	topic, _ := cmd.Flags().GetString("topic")
 	importance, _ := cmd.Flags().GetString("importance")
 
@@ -86,7 +80,6 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("JSON input must have a 'content' field")
 		}
 		rawContent = input.Content
-		// JSON fields override defaults but flags override JSON
 		if input.Topic != "" && !cmd.Flags().Changed("topic") {
 			topic = input.Topic
 		}
@@ -95,17 +88,21 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// validate importance
 	if !validImportanceLevels[importance] {
 		return fmt.Errorf("invalid importance %q: must be critical, normal, or ambient", importance)
 	}
 
-	// validate content size
 	if len(rawContent) > maxMurmurContentBytes {
 		return fmt.Errorf("content too large (%d bytes, max %d)", len(rawContent), maxMurmurContentBytes)
 	}
 
-	// resolve scope and target directory
+	// --- project I/O ---
+
+	projectRoot, err := findProjectRoot()
+	if err != nil {
+		return fmt.Errorf("not in a SageOx project: %w", err)
+	}
+
 	scope, _ := cmd.Flags().GetString("scope")
 	targetDir, err := resolveMurmurTarget(projectRoot, scope)
 	if err != nil {
@@ -152,15 +149,16 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 		Scope:         scope,
 	}
 
-	// write murmur file
-	relPath, err := ledger.WriteMurmur(targetDir, murmur)
+	// serialize the murmur for IPC — daemon owns all file I/O and git operations
+	relPath := ledger.MurmurFilePath(now, id.String())
+	murmurJSON, err := json.Marshal(murmur)
 	if err != nil {
-		return fmt.Errorf("write murmur: %w", err)
+		return fmt.Errorf("marshal murmur: %w", err)
 	}
 
-	// git add --sparse + commit (no push — daemon syncs)
-	if err := commitMurmur(targetDir, relPath, rawContent); err != nil {
-		return fmt.Errorf("commit murmur: %w", err)
+	// murmurs are best-effort — if the daemon isn't running, log and continue
+	if err := publishMurmurViaIPC(targetDir, relPath, rawContent, murmurJSON); err != nil {
+		slog.Debug("murmur not delivered", "error", err)
 	}
 
 	slog.Info("murmur published", "id", id.String(), "topic", topic, "importance", importance, "scope", scope)
@@ -206,27 +204,19 @@ func resolveMurmurTarget(projectRoot, scope string) (string, error) {
 	}
 }
 
-// commitMurmur stages and commits a murmur file. Does not push.
-func commitMurmur(repoDir, relPath, content string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	// --sparse: repos use sparse-checkout; without this flag
-	// git refuses to stage files outside the sparse definition
-	// stage all pending murmurs (not just this one) to batch rapid sequential writes
-	if _, err := gitutil.RunGit(ctx, repoDir, "add", "--sparse", "data/murmurs/"); err != nil {
-		return fmt.Errorf("git add: %w", err)
+// publishMurmurViaIPC sends the full murmur to the daemon via IPC.
+// The daemon writes the file to disk, git adds, and commits — the CLI does no disk I/O.
+// Returns an error if the daemon is not running or the IPC send fails.
+func publishMurmurViaIPC(targetDir, relPath, content string, murmurJSON []byte) error {
+	client := daemon.TryConnect()
+	if client == nil {
+		return fmt.Errorf("daemon not running")
 	}
-
-	summary := content
-	if len(summary) > 50 {
-		summary = summary[:50] + "..."
-	}
-	commitMsg := fmt.Sprintf("murmur: %s", summary)
-
-	if _, err := gitutil.RunGit(ctx, repoDir, "commit", "-m", commitMsg); err != nil {
-		return fmt.Errorf("git commit: %w", err)
-	}
-
-	return nil
+	return client.Murmur(daemon.MurmurPayload{
+		TargetDir:  targetDir,
+		RelPath:    relPath,
+		Content:    content,
+		MurmurJSON: murmurJSON,
+	})
 }
+

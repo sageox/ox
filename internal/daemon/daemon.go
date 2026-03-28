@@ -18,6 +18,8 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/version"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
@@ -1072,4 +1074,36 @@ func (s *daemonServiceImpl) Friction(payload FrictionPayload) {
 	if s.d.friction != nil {
 		s.d.friction.RecordFromIPC(payload)
 	}
+}
+
+// PublishMurmur writes the murmur file to disk and commits it asynchronously.
+// The CLI passes the full MurmurFile JSON so no temp file is needed on the CLI side.
+// Runs in a goroutine so the IPC handler returns immediately.
+func (s *daemonServiceImpl) PublishMurmur(payload MurmurPayload) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// write the murmur file to disk (daemon owns all I/O)
+		if err := ledger.WriteMurmurRaw(payload.TargetDir, payload.RelPath, payload.MurmurJSON); err != nil {
+			s.d.logger.Warn("murmur write failed", "error", err, "rel_path", payload.RelPath)
+			return
+		}
+
+		if _, err := gitutil.RunGit(ctx, payload.TargetDir, "add", "--sparse", "data/murmurs/"); err != nil {
+			s.d.logger.Warn("murmur git add failed", "error", err, "target_dir", payload.TargetDir)
+			return
+		}
+
+		summary := payload.Content
+		if len(summary) > 50 {
+			summary = summary[:50] + "..."
+		}
+		if _, err := gitutil.RunGit(ctx, payload.TargetDir, "commit", "-m", fmt.Sprintf("murmur: %s", summary)); err != nil {
+			s.d.logger.Warn("murmur git commit failed", "error", err, "target_dir", payload.TargetDir)
+			return
+		}
+
+		s.d.logger.Debug("murmur written and committed", "rel_path", payload.RelPath)
+	}()
 }

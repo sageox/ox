@@ -49,6 +49,7 @@ const (
 	MsgTypeCodeStatus      = "code_status"      // get code index status/stats
 	MsgTypeWhispers        = "whispers"         // query whisper entries for an agent
 	MsgTypeSessionFinalize = "session_finalize" // one-way, trigger async session upload+finalization
+	MsgTypeMurmur          = "murmur"           // one-way, write+commit a murmur file in ledger/team context
 )
 
 // Protocol Design Decision: NDJSON (Newline-Delimited JSON)
@@ -278,6 +279,16 @@ type SessionFinalizeIPCPayload struct {
 	LedgerPath  string `json:"ledger_path"`  // ledger repo root
 	CachePath   string `json:"cache_path"`   // local cache session dir (source files)
 	ProjectRoot string `json:"project_root"` // for endpoint/auth resolution
+}
+
+// MurmurPayload carries all data the daemon needs to write and commit a murmur.
+// The CLI passes the full MurmurFile JSON so the daemon owns all disk I/O —
+// no temp file is written by the CLI when the daemon is available.
+type MurmurPayload struct {
+	TargetDir  string `json:"target_dir"`  // ledger or team context repo path
+	Content    string `json:"content"`     // murmur content (for commit message summary)
+	RelPath    string `json:"rel_path"`    // relative path to write within TargetDir
+	MurmurJSON []byte `json:"murmur_json"` // serialized ledger.MurmurFile to write at RelPath
 }
 
 // MarkErrorsPayload is the payload for marking errors as viewed.
@@ -510,6 +521,7 @@ type DaemonService interface {
 	Heartbeat(callerID string, payload json.RawMessage)
 	Telemetry(payload json.RawMessage)
 	Friction(payload FrictionPayload)
+	PublishMurmur(payload MurmurPayload)
 }
 
 // CallbackService implements DaemonService using individual callback functions.
@@ -529,6 +541,7 @@ type CallbackService struct {
 	onTelemetry        func(payload json.RawMessage)
 	onFriction         func(payload FrictionPayload)
 	onSessionFinalize  func(payload SessionFinalizeIPCPayload)
+	onPublishMurmur    func(payload MurmurPayload)
 	onGetErrors        func() []StoredError
 	onMarkErrors       func(ids []string)
 	onSessions         func() []AgentSession
@@ -744,6 +757,15 @@ func (c *CallbackService) Friction(payload FrictionPayload) {
 	}
 }
 
+func (c *CallbackService) PublishMurmur(payload MurmurPayload) {
+	c.mu.Lock()
+	fn := c.onPublishMurmur
+	c.mu.Unlock()
+	if fn != nil {
+		fn(payload)
+	}
+}
+
 // Server handles IPC requests from clients.
 type Server struct {
 	logger   *slog.Logger
@@ -811,6 +833,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeCodeIndex, handleCodeIndex)
 	router.Register(MsgTypeCodeStatus, handleCodeStatus)
 	router.Register(MsgTypeWhispers, handleWhispers)
+	router.Register(MsgTypeMurmur, handleMurmur)
 
 	return router
 }
@@ -894,6 +917,15 @@ func (s *Server) SetSessionFinalizeHandler(fn func(payload SessionFinalizeIPCPay
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 	svc.onSessionFinalize = fn
+}
+
+// SetMurmurHandler sets the handler for murmur write+commit messages.
+// Murmur events are fire-and-forget - no response is sent.
+func (s *Server) SetMurmurHandler(fn func(payload MurmurPayload)) {
+	svc := s.mustCallbackService("SetMurmurHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onPublishMurmur = fn
 }
 
 // SetErrorsHandler sets the handler for retrieving unviewed errors.
@@ -1737,6 +1769,19 @@ func (c *Client) SessionFinalize(payload SessionFinalizeIPCPayload) error {
 	// fire-and-forget: ignore response
 	return c.SendOneWay(Message{
 		Type:    MsgTypeSessionFinalize,
+		Payload: payloadBytes,
+	})
+}
+
+// Murmur sends a murmur write+commit request to the daemon (fire-and-forget).
+// The daemon writes the murmur file and commits it; the CLI returns immediately.
+func (c *Client) Murmur(payload MurmurPayload) error {
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal murmur payload: %w", err)
+	}
+	return c.SendOneWay(Message{
+		Type:    MsgTypeMurmur,
 		Payload: payloadBytes,
 	})
 }

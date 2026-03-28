@@ -91,6 +91,19 @@ func WriteMurmur(baseDir string, m MurmurFile) (string, error) {
 	return relPath, nil
 }
 
+// WriteMurmurRaw writes pre-serialized murmur JSON to the given relative path within baseDir.
+// Used by the daemon when the CLI delegates file I/O via IPC rather than writing to disk itself.
+func WriteMurmurRaw(baseDir, relPath string, data []byte) error {
+	fullPath := filepath.Join(baseDir, relPath)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+		return fmt.Errorf("create murmur dir: %w", err)
+	}
+	if err := os.WriteFile(fullPath, data, 0o644); err != nil {
+		return fmt.Errorf("write murmur: %w", err)
+	}
+	return nil
+}
+
 // MostRecentMurmurTime returns the timestamp of the most recent murmur file
 // from the given agent in the current hour partition. Returns zero time if none found.
 func MostRecentMurmurTime(baseDir, agentID string) time.Time {
