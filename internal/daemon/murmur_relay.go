@@ -3,6 +3,7 @@ package daemon
 import (
 	"log/slog"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ledger"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -14,18 +15,20 @@ type MurmurRelay struct {
 	registry      *WhisperRegistry
 	localAgentIDs map[string]bool // agent IDs on this machine (skip self-authored murmurs)
 	nudgeTracker  *MurmurNudgeTracker
+	projectRoot   string // re-checked on every relay to pick up config changes
 	logger        *slog.Logger
 }
 
 // NewMurmurRelay creates a relay that scans murmur files and converts them
 // to whisper entries in the registry.
-func NewMurmurRelay(registry *WhisperRegistry, logger *slog.Logger) *MurmurRelay {
+func NewMurmurRelay(registry *WhisperRegistry, projectRoot string, logger *slog.Logger) *MurmurRelay {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &MurmurRelay{
 		registry:      registry,
 		localAgentIDs: make(map[string]bool),
+		projectRoot:   projectRoot,
 		logger:        logger,
 	}
 }
@@ -51,6 +54,9 @@ func (r *MurmurRelay) SetLocalAgentIDs(ids []string) {
 // scope must be "ledger" or "team".
 // Returns the number of murmurs successfully relayed.
 func (r *MurmurRelay) RelayFromPath(baseDir, scope string) int {
+	if !config.MurmuringEnabled(r.projectRoot) {
+		return 0
+	}
 	murmurs, err := ledger.ReadMurmursInWindow(baseDir, ledger.DefaultMurmurWindowHours)
 	if err != nil {
 		r.logger.Warn("failed to read murmurs", "dir", baseDir, "scope", scope, "err", err)

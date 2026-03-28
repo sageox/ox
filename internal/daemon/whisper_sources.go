@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sageox/ox/internal/config"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
 
@@ -17,21 +18,23 @@ const murmurNudgeContent = `ACTION REQUIRED: Tell your teammates what you're wor
 // to self-report what they're working on via ox murmur. Produces a whisper
 // entry for each agent that hasn't murmured within the configured interval.
 type MurmurNudgeSource struct {
-	tracker   *MurmurNudgeTracker
-	heartbeat *HeartbeatHandler
-	interval  time.Duration
+	tracker     *MurmurNudgeTracker
+	heartbeat   *HeartbeatHandler
+	interval    time.Duration
+	projectRoot string // re-checked on every tick to pick up config changes
 }
 
 // NewMurmurNudgeSource creates a source that nudges agents to self-report.
-func NewMurmurNudgeSource(tracker *MurmurNudgeTracker, heartbeat *HeartbeatHandler, interval time.Duration) *MurmurNudgeSource {
+func NewMurmurNudgeSource(tracker *MurmurNudgeTracker, heartbeat *HeartbeatHandler, interval time.Duration, projectRoot string) *MurmurNudgeSource {
 	// enforce minimum 10 minutes
 	if interval < 10*time.Minute {
 		interval = 10 * time.Minute
 	}
 	return &MurmurNudgeSource{
-		tracker:   tracker,
-		heartbeat: heartbeat,
-		interval:  interval,
+		tracker:     tracker,
+		heartbeat:   heartbeat,
+		interval:    interval,
+		projectRoot: projectRoot,
 	}
 }
 
@@ -44,6 +47,9 @@ func (s *MurmurNudgeSource) Interval() time.Duration { return 1 * time.Minute }
 
 func (s *MurmurNudgeSource) Produce(_ context.Context) []whisperstore.WhisperEntry {
 	if s.heartbeat == nil || s.tracker == nil {
+		return nil
+	}
+	if !config.MurmuringEnabled(s.projectRoot) {
 		return nil
 	}
 

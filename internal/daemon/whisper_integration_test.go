@@ -287,7 +287,7 @@ func TestWhisperPipeline_TeamScope(t *testing.T) {
 	registry.AddTeamStore("team-1", teamStore)
 	t.Cleanup(func() { registry.Close() })
 
-	relay := NewMurmurRelay(registry, nil)
+	relay := NewMurmurRelay(registry, initMurmuringProject(t), nil)
 
 	now := time.Now().UTC()
 

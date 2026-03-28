@@ -20,18 +20,18 @@ func sendHeartbeat(t *testing.T, hb *HeartbeatHandler, payload HeartbeatPayload)
 }
 
 func TestMurmurNudgeSource_Name(t *testing.T) {
-	src := NewMurmurNudgeSource(NewMurmurNudgeTracker(), NewHeartbeatHandler(slog.Default()), 15*time.Minute)
+	src := NewMurmurNudgeSource(NewMurmurNudgeTracker(), NewHeartbeatHandler(slog.Default()), 15*time.Minute, "")
 	assert.Equal(t, "murmur-nudge", src.Name())
 }
 
 func TestMurmurNudgeSource_Interval(t *testing.T) {
-	src := NewMurmurNudgeSource(NewMurmurNudgeTracker(), NewHeartbeatHandler(slog.Default()), 15*time.Minute)
+	src := NewMurmurNudgeSource(NewMurmurNudgeTracker(), NewHeartbeatHandler(slog.Default()), 15*time.Minute, "")
 	assert.Equal(t, 1*time.Minute, src.Interval())
 }
 
 func TestMurmurNudgeSource_MinimumInterval(t *testing.T) {
 	// interval below 10 minutes should be clamped
-	src := NewMurmurNudgeSource(NewMurmurNudgeTracker(), NewHeartbeatHandler(slog.Default()), 5*time.Minute)
+	src := NewMurmurNudgeSource(NewMurmurNudgeTracker(), NewHeartbeatHandler(slog.Default()), 5*time.Minute, "")
 	assert.Equal(t, 10*time.Minute, src.interval)
 }
 
@@ -42,18 +42,20 @@ func TestMurmurNudgeSource_NilDeps(t *testing.T) {
 }
 
 func TestMurmurNudgeSource_NoActiveAgents(t *testing.T) {
+	projectRoot := initMurmuringProject(t)
 	tracker := NewMurmurNudgeTracker()
 	hb := NewHeartbeatHandler(slog.Default())
-	src := NewMurmurNudgeSource(tracker, hb, 15*time.Minute)
+	src := NewMurmurNudgeSource(tracker, hb, 15*time.Minute, projectRoot)
 
 	entries := src.Produce(context.Background())
 	assert.Empty(t, entries)
 }
 
 func TestMurmurNudgeSource_ProducesNudge(t *testing.T) {
+	projectRoot := initMurmuringProject(t)
 	tracker := NewMurmurNudgeTracker()
 	hb := NewHeartbeatHandler(slog.Default())
-	src := NewMurmurNudgeSource(tracker, hb, 15*time.Minute)
+	src := NewMurmurNudgeSource(tracker, hb, 15*time.Minute, projectRoot)
 
 	sendHeartbeat(t, hb, HeartbeatPayload{
 		AgentID:   "OxTest1",
@@ -78,9 +80,10 @@ func TestMurmurNudgeSource_ProducesNudge(t *testing.T) {
 }
 
 func TestMurmurNudgeSource_SkipsAfterMurmur(t *testing.T) {
+	projectRoot := initMurmuringProject(t)
 	tracker := NewMurmurNudgeTracker()
 	hb := NewHeartbeatHandler(slog.Default())
-	src := NewMurmurNudgeSource(tracker, hb, 15*time.Minute)
+	src := NewMurmurNudgeSource(tracker, hb, 15*time.Minute, projectRoot)
 
 	sendHeartbeat(t, hb, HeartbeatPayload{
 		AgentID:   "OxTest2",
@@ -101,9 +104,10 @@ func TestMurmurNudgeSource_SkipsAfterMurmur(t *testing.T) {
 }
 
 func TestMurmurNudgeSource_NudgeCooldown(t *testing.T) {
+	projectRoot := initMurmuringProject(t)
 	tracker := NewMurmurNudgeTracker()
 	hb := NewHeartbeatHandler(slog.Default())
-	src := NewMurmurNudgeSource(tracker, hb, 15*time.Minute)
+	src := NewMurmurNudgeSource(tracker, hb, 15*time.Minute, projectRoot)
 
 	sendHeartbeat(t, hb, HeartbeatPayload{
 		AgentID:   "OxTest3",

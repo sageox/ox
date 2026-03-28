@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,22 @@ import (
 	"github.com/sageox/ox/internal/ledger"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
+
+// initMurmuringProject creates a temp dir with .sageox/config.json that has murmuring: "auto".
+func initMurmuringProject(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	sageoxDir := filepath.Join(dir, ".sageox")
+	if err := os.MkdirAll(sageoxDir, 0o755); err != nil {
+		t.Fatalf("mkdir .sageox: %v", err)
+	}
+	cfg := map[string]string{"murmuring": "auto"}
+	data, _ := json.Marshal(cfg)
+	if err := os.WriteFile(filepath.Join(sageoxDir, "config.json"), data, 0o644); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+	return dir
+}
 
 // writeMurmurAt writes a murmur file into the correct hourly partition directory.
 func writeMurmurAt(t *testing.T, baseDir string, m ledger.MurmurFile) {
@@ -21,9 +38,10 @@ func writeMurmurAt(t *testing.T, baseDir string, m ledger.MurmurFile) {
 
 func newTestRelay(t *testing.T) (*MurmurRelay, *WhisperRegistry, *whisperstore.Store) {
 	t.Helper()
+	projectRoot := initMurmuringProject(t)
 	store := openTestStore(t)
 	registry := NewWhisperRegistry(store, nil)
-	relay := NewMurmurRelay(registry, nil)
+	relay := NewMurmurRelay(registry, projectRoot, nil)
 	t.Cleanup(func() { registry.Close() })
 	return relay, registry, store
 }
@@ -152,6 +170,7 @@ func TestMurmurRelayDedupAcrossCalls(t *testing.T) {
 }
 
 func TestMurmurRelayRestartResilience(t *testing.T) {
+	projectRoot := initMurmuringProject(t)
 	dbPath := filepath.Join(t.TempDir(), "whisper.db")
 	baseDir := t.TempDir()
 
@@ -172,7 +191,7 @@ func TestMurmurRelayRestartResilience(t *testing.T) {
 			t.Fatalf("open store: %v", err)
 		}
 		registry := NewWhisperRegistry(store, nil)
-		relay := NewMurmurRelay(registry, nil)
+		relay := NewMurmurRelay(registry, projectRoot, nil)
 
 		count := relay.RelayFromPath(baseDir, "ledger")
 		if count != 1 {
@@ -189,7 +208,7 @@ func TestMurmurRelayRestartResilience(t *testing.T) {
 			t.Fatalf("reopen store: %v", err)
 		}
 		registry := NewWhisperRegistry(store, nil)
-		relay := NewMurmurRelay(registry, nil)
+		relay := NewMurmurRelay(registry, projectRoot, nil)
 
 		count := relay.RelayFromPath(baseDir, "ledger")
 		if count != 0 {
@@ -387,5 +406,28 @@ func TestMurmurRelayContentAndMetadataPreserved(t *testing.T) {
 	}
 	if e.Metadata["severity"] != "high" {
 		t.Errorf("metadata severity mismatch: %s", e.Metadata["severity"])
+	}
+}
+
+func TestMurmurRelayDisabledConfig(t *testing.T) {
+	// relay with no project root (murmuring defaults to manual/off)
+	store := openTestStore(t)
+	registry := NewWhisperRegistry(store, nil)
+	relay := NewMurmurRelay(registry, "", nil)
+	t.Cleanup(func() { registry.Close() })
+
+	baseDir := t.TempDir()
+	writeMurmurAt(t, baseDir, ledger.MurmurFile{
+		ID:         "murmur-should-skip",
+		Timestamp:  time.Now().UTC(),
+		AgentID:    "remote-agent",
+		Topic:      "test",
+		Importance: "normal",
+		Content:    "this should not be relayed",
+	})
+
+	count := relay.RelayFromPath(baseDir, "ledger")
+	if count != 0 {
+		t.Fatalf("expected 0 relayed when murmuring disabled, got %d", count)
 	}
 }
