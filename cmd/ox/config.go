@@ -25,6 +25,7 @@ Available settings:
   github_sync              enabled | disabled
   github_sync_prs          enabled | disabled
   github_sync_issues       enabled | disabled
+  murmuring                off | auto
   telemetry                on | off
   tips                     on | off
   context_git.auto_commit  on | off

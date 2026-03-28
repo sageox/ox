@@ -7,5 +7,6 @@
   "team_id": "team_jihjpfkt8b",
   "team_name": "SageOx",
   "endpoint": "https://sageox.ai",
-  "update_frequency_hours": 24
+  "update_frequency_hours": 24,
+  "murmuring": "auto"
 }

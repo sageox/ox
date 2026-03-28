@@ -132,6 +132,7 @@ type configModel struct {
 	height       int
 	quitting     bool
 	saved        bool
+	saveErr      string
 }
 
 type keyMap struct {
@@ -202,8 +203,9 @@ func (m configModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		// Clear saved indicator on any key press
+		// Clear saved/error indicators on any key press
 		m.saved = false
+		m.saveErr = ""
 
 		if m.editing {
 			return m.handleEditMode(msg)
@@ -267,11 +269,14 @@ func (m configModel) handleEditMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Enter):
 		if len(item.setting.ValidValues) > 0 {
 			newValue := item.setting.ValidValues[m.editCursor]
-			err := SetConfigValue(item.setting.Key, newValue, ConfigLevelUser, m.projectRoot)
-			if err == nil {
+			err := SetConfigValue(item.setting.Key, newValue, item.setting.Levels[0], m.projectRoot)
+			if err != nil {
+				m.saveErr = err.Error()
+			} else {
 				cv, _ := ResolveConfigValue(item.setting.Key, m.projectRoot)
 				m.items[itemIdx].value = cv
 				m.saved = true
+				m.saveErr = ""
 			}
 		}
 		m.editing = false
@@ -320,7 +325,10 @@ func (m configModel) mainView(width int) string {
 
 	// Help line
 	help := "↑/↓ navigate • enter edit • q quit"
-	if m.saved {
+	if m.saveErr != "" {
+		errStyle := lipgloss.NewStyle().Foreground(cli.ColorError).Bold(true)
+		help = errStyle.Render("✗ "+m.saveErr) + "  " + help
+	} else if m.saved {
 		help = successStyle.Render("✓ saved") + "  " + help
 	}
 
@@ -596,7 +604,11 @@ func (m configModel) editView(width int) string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(detailMutedStyle.Render("Sets user-level override (highest priority)"))
+	levelLabel := "user-level override (highest priority)"
+	if len(item.setting.Levels) > 0 && item.setting.Levels[0] != ConfigLevelUser {
+		levelLabel = string(item.setting.Levels[0]) + "-level setting"
+	}
+	b.WriteString(detailMutedStyle.Render("Sets " + levelLabel))
 	b.WriteString("\n\n")
 	b.WriteString(helpStyle.Render("↑/↓ select • enter save • esc cancel"))
 
