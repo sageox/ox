@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/spf13/cobra"
@@ -60,10 +62,6 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
 		return fmt.Errorf("not in a SageOx project: %w", err)
-	}
-
-	if !config.FeatureMurmurEnabled() {
-		return fmt.Errorf("murmur feature not enabled — set FEATURE_MURMUR=true to use murmurs")
 	}
 
 	// parse input: positional arg or stdin
@@ -138,11 +136,16 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 
 	now := time.Now().UTC()
 
+	// resolve principal (human user the agent works for)
+	principalID := resolvePrincipalID(projectRoot)
+
 	murmur := ledger.MurmurFile{
 		SchemaVersion: "1",
 		ID:            id.String(),
 		Timestamp:     now,
 		AgentID:       agentID,
+		PrincipalID:   principalID,
+		PrincipalType: "human",
 		Topic:         topic,
 		Importance:    importance,
 		Content:       rawContent,
@@ -163,6 +166,19 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 	slog.Info("murmur published", "id", id.String(), "topic", topic, "importance", importance, "scope", scope)
 	fmt.Fprintf(cmd.OutOrStdout(), "Murmur published: %s\n", id.String())
 	return nil
+}
+
+// resolvePrincipalID returns the human user identity for the murmur.
+// Tries SageOx auth (email/name), falls back to OS username.
+func resolvePrincipalID(projectRoot string) string {
+	ep := endpoint.GetForProject(projectRoot)
+	if username := auth.GetUsername(ep); username != "" {
+		return username
+	}
+	if u := os.Getenv("USER"); u != "" {
+		return u
+	}
+	return ""
 }
 
 // resolveMurmurTarget returns the git repo path where the murmur file should be written.

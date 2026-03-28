@@ -34,13 +34,13 @@ func TestWhisperDelivery_MurmurReachesAgent(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	t.Setenv("FEATURE_MURMUR", "true")
+
 
 	agent := getClaudeConfig()
 	common.SkipIfAgentUnavailable(t, agent)
 
 	env := common.SetupTestEnvironment(t)
-	env.EnvVars = append(env.EnvVars, "FEATURE_MURMUR=true")
+
 
 	// Seed a murmur file in the ledger dir so the daemon can relay it.
 	// The ledger dir is created by SetupTestEnvironment at:
@@ -126,10 +126,10 @@ func TestWhisperDelivery_MurmurRelayPipeline(t *testing.T) {
 		t.Skip("skipping integration test in short mode")
 	}
 
-	t.Setenv("FEATURE_MURMUR", "true")
+
 
 	env := common.SetupTestEnvironment(t)
-	env.EnvVars = append(env.EnvVars, "FEATURE_MURMUR=true")
+
 
 	ledgerDir := filepath.Join(env.RootDir, "data", "sageox", "sageox.ai", "ledgers", "repo_test-integration-001")
 

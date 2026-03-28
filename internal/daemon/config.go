@@ -64,7 +64,7 @@ type Config struct {
 
 	// MurmurNudgeInterval is how often to nudge agents to self-report
 	// what they're working on via ox murmur. Minimum 10 minutes.
-	// Zero disables nudging (used when murmuring config is "off").
+	// Zero disables nudging (used when murmuring config is "manual").
 	MurmurNudgeInterval time.Duration
 
 	// AutoStart starts daemon on first ox command if true.

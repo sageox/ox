@@ -76,13 +76,14 @@ type murmurListOutput struct {
 
 // murmurListEntry is a single murmur in JSON output.
 type murmurListEntry struct {
-	ID         string `json:"id"`
-	Timestamp  string `json:"timestamp"`
-	AgentID    string `json:"agent_id,omitempty"`
-	Topic      string `json:"topic"`
-	Importance string `json:"importance"`
-	Content    string `json:"content"`
-	Scope      string `json:"scope,omitempty"`
+	ID          string `json:"id"`
+	Timestamp   string `json:"timestamp"`
+	AgentID     string `json:"agent_id,omitempty"`
+	PrincipalID string `json:"principal_id,omitempty"`
+	Topic       string `json:"topic"`
+	Importance  string `json:"importance"`
+	Content     string `json:"content"`
+	Scope       string `json:"scope,omitempty"`
 }
 
 func runMurmurList(cmd *cobra.Command, _ []string) error {
@@ -194,13 +195,14 @@ func runMurmurList(cmd *cobra.Command, _ []string) error {
 		entries := make([]murmurListEntry, 0, len(allMurmurs))
 		for _, m := range allMurmurs {
 			entries = append(entries, murmurListEntry{
-				ID:         m.ID,
-				Timestamp:  m.Timestamp.Format(time.RFC3339),
-				AgentID:    m.AgentID,
-				Topic:      m.Topic,
-				Importance: m.Importance,
-				Content:    m.Content,
-				Scope:      m.Scope,
+				ID:          m.ID,
+				Timestamp:   m.Timestamp.Format(time.RFC3339),
+				AgentID:     m.AgentID,
+				PrincipalID: m.PrincipalID,
+				Topic:       m.Topic,
+				Importance:  m.Importance,
+				Content:     m.Content,
+				Scope:       m.Scope,
 			})
 		}
 		return outputJSON(murmurListOutput{
@@ -217,7 +219,7 @@ func runMurmurList(cmd *cobra.Command, _ []string) error {
 		fmt.Println(murmurDimStyle.Render("  No murmurs found in the last " + windowLabel + "."))
 		fmt.Println()
 		cli.PrintHint("Murmurs are short-lived coordination signals from AI coworkers.")
-		cli.PrintHint("Publish one with: ox murmur --topic=work-in-progress \"what you're doing\"")
+		cli.PrintHint("Publish one with: ox murmur --topic=wip \"what you're doing\"")
 		return nil
 	}
 
@@ -242,13 +244,13 @@ func runMurmurList(cmd *cobra.Command, _ []string) error {
 }
 
 func printMurmurTableHeader() {
-	timeCol := fmt.Sprintf("%-18s", "TIME")
-	agentCol := fmt.Sprintf("%-12s", "COWORKER")
-	topicCol := fmt.Sprintf("%-20s", "TOPIC")
-	impCol := fmt.Sprintf("%-10s", "LEVEL")
+	timeCol := fmt.Sprintf("%-14s", "TIME")
+	userCol := fmt.Sprintf("%-12s", "USER")
+	agentCol := fmt.Sprintf("%-10s", "COWORKER")
+	topicCol := fmt.Sprintf("%-18s", "TOPIC")
 	contentCol := "CONTENT"
 
-	header := murmurHeaderStyle.Render(timeCol + agentCol + topicCol + impCol + contentCol)
+	header := murmurHeaderStyle.Render(timeCol + userCol + agentCol + topicCol + contentCol)
 	fmt.Println("  " + header)
 	fmt.Println("  " + cli.StyleDim.Render(strings.Repeat("-", 120)))
 }
@@ -268,47 +270,49 @@ func printMurmurRow(m ledger.MurmurFile) {
 		timeStr = m.Timestamp.Local().Format("Jan 02 15:04")
 	}
 
+	// user: extract short name from principal ID (email → local part)
+	userStr := m.PrincipalID
+	if userStr == "" {
+		userStr = "-"
+	}
+	if idx := strings.IndexByte(userStr, '@'); idx > 0 {
+		userStr = userStr[:idx]
+	}
+	if len(userStr) > 10 {
+		userStr = userStr[:10]
+	}
+
 	// agent: truncate if needed
 	agentStr := m.AgentID
 	if agentStr == "" {
 		agentStr = "-"
 	}
-	if len(agentStr) > 10 {
-		agentStr = agentStr[:10]
+	if len(agentStr) > 8 {
+		agentStr = agentStr[:8]
 	}
 
 	// topic
 	topicStr := m.Topic
-	if len(topicStr) > 18 {
-		topicStr = topicStr[:15] + "..."
+	if len(topicStr) > 16 {
+		topicStr = topicStr[:13] + "..."
 	}
 
-	// content: first line, truncated
+	// content: first line, no hard truncation — let terminal wrap
 	content := m.Content
 	if idx := strings.IndexByte(content, '\n'); idx >= 0 {
 		content = content[:idx]
 	}
-	maxContent := 60
-	if len(content) > maxContent {
-		content = content[:maxContent-3] + "..."
-	}
 
-	timeCol := fmt.Sprintf("%-18s", timeStr)
-	agentCol := fmt.Sprintf("%-12s", agentStr)
-	topicCol := fmt.Sprintf("%-20s", topicStr)
-	impCol := fmt.Sprintf("%-10s", m.Importance)
+	timeCol := fmt.Sprintf("%-14s", timeStr)
+	userCol := fmt.Sprintf("%-12s", userStr)
+	agentCol := fmt.Sprintf("%-10s", agentStr)
+	topicCol := fmt.Sprintf("%-18s", topicStr)
 
 	row := murmurTimeStyle.Render(timeCol) +
+		murmurDimStyle.Render(userCol) +
 		murmurAgentStyle.Render(agentCol) +
-		murmurTopicStyle.Render(topicCol)
-
-	if m.Importance == "critical" {
-		row += murmurCriticalStyle.Render(impCol)
-	} else {
-		row += murmurDimStyle.Render(impCol)
-	}
-
-	row += murmurContentStyle.Render(content)
+		murmurTopicStyle.Render(topicCol) +
+		murmurContentStyle.Render(content)
 
 	fmt.Println("  " + row)
 }

@@ -104,26 +104,9 @@ func NewSessionFooter(startedAt time.Time, entryCount int) *SessionFooter {
 }
 
 // getOxUsername returns the authenticated SageOx username.
-// If ep is non-empty, looks up the token for that specific endpoint.
-// Falls back to the default endpoint token when ep is empty.
-// Returns empty string if not authenticated or on error.
+// Delegates to auth.GetUsername for the shared implementation.
 func getOxUsername(ep string) string {
-	var token *auth.StoredToken
-	var err error
-	if ep != "" {
-		token, err = auth.GetTokenForEndpoint(ep)
-	} else {
-		token, err = auth.GetToken()
-	}
-	if err != nil || token == nil {
-		return ""
-	}
-
-	// prefer email as username, fall back to name
-	if token.UserInfo.Email != "" {
-		return token.UserInfo.Email
-	}
-	return token.UserInfo.Name
+	return auth.GetUsername(ep)
 }
 
 // Close finalizes the metadata with end time.

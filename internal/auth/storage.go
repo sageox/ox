@@ -203,6 +203,25 @@ func GetUserID(ep string) string {
 	return token.UserInfo.UserID
 }
 
+// GetUsername returns the authenticated user's display name for a given endpoint.
+// Prefers email, falls back to name, then empty string.
+func GetUsername(ep string) string {
+	var token *StoredToken
+	var err error
+	if ep != "" {
+		token, err = GetTokenForEndpoint(ep)
+	} else {
+		token, err = GetToken()
+	}
+	if err != nil || token == nil {
+		return ""
+	}
+	if token.UserInfo.Email != "" {
+		return token.UserInfo.Email
+	}
+	return token.UserInfo.Name
+}
+
 // SaveToken saves the authentication token for the current API endpoint
 func SaveToken(token *StoredToken) error {
 	return SaveTokenForEndpoint(endpoint.Get(), token)

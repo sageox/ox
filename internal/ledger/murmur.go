@@ -122,6 +122,21 @@ func MostRecentMurmurTime(baseDir, agentID string) time.Time {
 	return latest
 }
 
+// FindMurmur locates a murmur file by ID within the last 24 hours.
+// Returns the relative path of the file, or an error if not found.
+func FindMurmur(baseDir, murmurID string) (string, error) {
+	now := time.Now().UTC()
+	for i := 0; i < MaxMurmurWindowHours; i++ {
+		t := now.Add(-time.Duration(i) * time.Hour)
+		relPath := MurmurFilePath(t, murmurID)
+		fullPath := filepath.Join(baseDir, relPath)
+		if _, err := os.Stat(fullPath); err == nil {
+			return relPath, nil
+		}
+	}
+	return "", fmt.Errorf("murmur %s not found in the last %d hours", murmurID, MaxMurmurWindowHours)
+}
+
 // ReadMurmursInWindow reads all murmur files within the given time window.
 // Skips invalid JSON files without error (best-effort).
 // baseDir is the root of the ledger or team context checkout.

@@ -62,20 +62,18 @@ conventions and knowledge that apply to ALL repos your team owns.`,
 	{
 		Key:         "murmuring",
 		Description: "Auto work-in-progress signals",
-		LongDescription: `Controls automatic work-in-progress signals to teammates.
+		LongDescription: `Controls work-in-progress signals to teammates.
 
-When enabled, ox periodically nudges AI coworkers to share what they're
-working on, so teammates hear about in-flight work before PRs or commits
-appear. Signals propagate via the ledger and are delivered as whispers
-to active coworkers.
+Murmurs are short coordination signals that let teammates know what
+AI coworkers are working on before PRs or commits appear. Signals
+propagate via the ledger and are delivered as whispers to active
+coworkers.
 
-  off  - No nudges, no auto-murmurs (default)
-  auto - Daemon nudges agents to murmur periodically (~15 min)
-
-Manual 'ox murmur' is always available regardless of this setting.`,
+  manual - Murmurs via 'ox murmur' only (default)
+  auto   - Daemon also nudges agents to murmur periodically (~15 min)`,
 		Category:    "Collaboration",
-		ValidValues: []string{"off", "auto"},
-		Default:     "off",
+		ValidValues: []string{"manual", "auto"},
+		Default:     "manual",
 		Levels:      []ConfigLevel{ConfigLevelRepo},
 	},
 	{

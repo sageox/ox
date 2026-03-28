@@ -8,48 +8,48 @@ import (
 
 // Murmuring mode constants.
 const (
-	MurmuringOff  = "off"
-	MurmuringAuto = "auto"
+	MurmuringManual = "manual"
+	MurmuringAuto   = "auto"
 )
 
 // ValidMurmuringModes lists all valid values for the murmuring config field.
-var ValidMurmuringModes = []string{MurmuringOff, MurmuringAuto}
+var ValidMurmuringModes = []string{MurmuringManual, MurmuringAuto}
 
 // IsValidMurmuringMode returns true if the mode is a recognized murmuring value.
 func IsValidMurmuringMode(mode string) bool {
 	switch mode {
-	case MurmuringOff, MurmuringAuto, "":
+	case MurmuringManual, MurmuringAuto, "":
 		return true
 	}
 	return false
 }
 
 // NormalizeMurmuring returns the canonical murmuring mode.
-// Empty string and unrecognized values default to "off".
+// Empty string and unrecognized values default to "manual".
 func NormalizeMurmuring(mode string) string {
 	switch mode {
 	case MurmuringAuto:
 		return MurmuringAuto
 	default:
-		return MurmuringOff
+		return MurmuringManual
 	}
 }
 
 // ResolveMurmuring determines the effective murmuring mode for a project.
-// Reads from project config; defaults to "off".
+// Reads from project config; defaults to "manual".
 func ResolveMurmuring(projectRoot string) string {
 	if projectRoot == "" {
-		return MurmuringOff
+		return MurmuringManual
 	}
 	cfg, err := LoadProjectConfig(projectRoot)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			slog.Debug("failed to load project config for murmuring", "error", err)
 		}
-		return MurmuringOff
+		return MurmuringManual
 	}
 	if cfg == nil {
-		return MurmuringOff
+		return MurmuringManual
 	}
 	return NormalizeMurmuring(cfg.Murmuring)
 }
