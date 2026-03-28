@@ -24,11 +24,11 @@ func TestFormatWhispers_XMLStructure(t *testing.T) {
 	output := buf.String()
 
 	// verify XML wrapper
-	if !strings.Contains(output, "<new-context>") {
-		t.Error("missing <new-context> opening tag")
+	if !strings.Contains(output, "<system-reminder>") {
+		t.Error("missing <system-reminder> opening tag")
 	}
-	if !strings.Contains(output, "</new-context>") {
-		t.Error("missing </new-context> closing tag")
+	if !strings.Contains(output, "</system-reminder>") {
+		t.Error("missing </system-reminder> closing tag")
 	}
 
 	// verify each entry is an <entry> element with attributes
@@ -138,11 +138,11 @@ func TestFormatWhispers_MixedTypesAndImportances(t *testing.T) {
 	}
 
 	// verify XML wrapper present
-	if !strings.Contains(output, "<new-context>") {
-		t.Error("missing <new-context> tag")
+	if !strings.Contains(output, "<system-reminder>") {
+		t.Error("missing <system-reminder> tag")
 	}
-	if !strings.Contains(output, "</new-context>") {
-		t.Error("missing </new-context> tag")
+	if !strings.Contains(output, "</system-reminder>") {
+		t.Error("missing </system-reminder> tag")
 	}
 }
 

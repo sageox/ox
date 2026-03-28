@@ -100,6 +100,12 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 		})
 	}
 
+	// whisper check — active pull for team whispers during long sessions
+	cmds = append(cmds, IntentCommand{
+		Intent:  fmt.Sprintf("check for team whispers, coworker updates, murmurs — run periodically during long sessions: ox agent %s whisper", p.AgentID),
+		Command: fmt.Sprintf("ox agent %s whisper", p.AgentID),
+	})
+
 	// semantic search — when primed context isn't enough, query for depth
 	if p.TeamCtx != nil || (p.Ledger != nil && p.Ledger.Exists) {
 		teamLabel := "team"

@@ -51,11 +51,11 @@ func TestActivePhaseBehavior(t *testing.T) {
 	assert.True(t, activePhaseBehavior[phaseCompact])
 	assert.True(t, activePhaseBehavior[phaseAfterTool])
 	assert.True(t, activePhaseBehavior[phaseStop])
+	assert.True(t, activePhaseBehavior[phasePrompt])
 
 	// noop phases
 	assert.False(t, activePhaseBehavior[phaseEnd])
 	assert.False(t, activePhaseBehavior[phaseBeforeTool])
-	assert.False(t, activePhaseBehavior[phasePrompt])
 }
 
 func TestDispatchPhase_NoopPhases(t *testing.T) {
@@ -65,7 +65,7 @@ func TestDispatchPhase_NoopPhases(t *testing.T) {
 	}
 
 	// noop phases should return nil
-	for _, phase := range []string{phaseEnd, phaseBeforeTool, phasePrompt} {
+	for _, phase := range []string{phaseEnd, phaseBeforeTool} {
 		ctx.Phase = phase
 		err := dispatchPhase(ctx)
 		assert.NoError(t, err, "phase %s should be noop", phase)

@@ -38,6 +38,7 @@ var activePhaseBehavior = map[string]bool{
 	phaseCompact:   true,
 	phaseAfterTool: true,
 	phaseStop:      true,
+	phasePrompt:    true,
 }
 
 // HookContext carries everything a phase handler needs.
@@ -139,6 +140,8 @@ func dispatchPhase(ctx *HookContext) error {
 		return handleStart(ctx)
 	case phaseCompact:
 		return handleCompact(ctx)
+	case phasePrompt:
+		return handlePrompt(ctx)
 	case phaseAfterTool:
 		return handleAfterTool(ctx)
 	case phaseStop:
@@ -189,6 +192,27 @@ func handleStart(ctx *HookContext) error {
 	return nil
 }
 
+// handlePrompt handles the user prompt submission phase.
+// Emits pending whispers to stdout — this is the PRIMARY whisper delivery channel.
+//
+// Claude Code injects UserPromptSubmit hook stdout into the model's context
+// before processing the user's prompt. This is the ONLY reliable delivery
+// channel (PostToolUse stdout is discarded by Claude Code).
+//
+// This is the "pre-prompt injection" pattern: whisper content arrives in the
+// model's context alongside the user's prompt, ensuring it's seen and acted upon.
+func handlePrompt(ctx *HookContext) error {
+	agentID := ""
+	if ctx.Marker != nil {
+		agentID = ctx.Marker.AgentID
+	}
+	if agentID == "" {
+		return nil
+	}
+	emitWhispers(agentID)
+	return nil
+}
+
 // handleCompact handles the compact phase.
 // Always force re-prime to ensure context survives compaction.
 func handleCompact(ctx *HookContext) error {
@@ -201,6 +225,11 @@ func handleCompact(ctx *HookContext) error {
 
 // handleAfterTool incrementally drains new entries from the source JSONL
 // into raw.jsonl. Called on PostToolUse and Stop hooks.
+//
+// Also emits whispers as a fallback — the primary delivery channel is
+// handlePrompt (UserPromptSubmit), but this provides belt-and-suspenders
+// coverage for agents whose PostToolUse stdout IS injected into context.
+// The cursor mechanism in the whisper store prevents double delivery.
 func handleAfterTool(ctx *HookContext) error {
 	agentID := ""
 	if ctx.Marker != nil {
@@ -213,7 +242,7 @@ func handleAfterTool(ctx *HookContext) error {
 		slog.Debug("hook: afterTool skipped, no agent ID available")
 		return nil
 	}
-	// emit pending whispers to agent (non-blocking, ~50ms max)
+	// emit pending whispers (fallback — primary delivery is handlePrompt)
 	emitWhispers(agentID)
 
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)

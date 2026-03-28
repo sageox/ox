@@ -605,6 +605,7 @@ func (d *Daemon) initComponents() time.Duration {
 			d.whisperRegistry = NewWhisperRegistry(ledgerWhisperStore, d.logger)
 			d.whisperRegistry.Prune(24 * time.Hour)
 			d.whisperRegistry.EnforceMaxSize(10 * 1024 * 1024) // 10MB
+			d.logger.Info("whisper registry initialized", "path", whisperDBPath)
 		}
 	}
 

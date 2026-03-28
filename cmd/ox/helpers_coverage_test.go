@@ -663,9 +663,9 @@ func TestActivePhaseBehavior_KnownPhases(t *testing.T) {
 	assert.True(t, activePhaseBehavior[phaseCompact])
 	assert.True(t, activePhaseBehavior[phaseAfterTool])
 	assert.True(t, activePhaseBehavior[phaseStop])
+	assert.True(t, activePhaseBehavior[phasePrompt])
 
 	// phases without behavior
-	assert.False(t, activePhaseBehavior[phasePrompt])
 	assert.False(t, activePhaseBehavior[phaseBeforeTool])
 	assert.False(t, activePhaseBehavior[phaseEnd])
 }

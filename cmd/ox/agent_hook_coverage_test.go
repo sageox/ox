@@ -73,7 +73,7 @@ func TestDispatchPhase_UnknownPhase(t *testing.T) {
 func TestActivePhaseBehavior_Coverage(t *testing.T) {
 	t.Parallel()
 	// verify the known active phases are registered
-	expectedActive := []string{phaseStart, phaseCompact, phaseAfterTool, phaseStop}
+	expectedActive := []string{phaseStart, phaseCompact, phaseAfterTool, phaseStop, phasePrompt}
 	for _, phase := range expectedActive {
 		if !activePhaseBehavior[phase] {
 			t.Errorf("expected phase %q to be active", phase)
@@ -81,7 +81,7 @@ func TestActivePhaseBehavior_Coverage(t *testing.T) {
 	}
 
 	// verify some phases are NOT active
-	expectedInactive := []string{phaseEnd, phaseBeforeTool, phasePrompt}
+	expectedInactive := []string{phaseEnd, phaseBeforeTool}
 	for _, phase := range expectedInactive {
 		if activePhaseBehavior[phase] {
 			t.Errorf("expected phase %q to be inactive", phase)

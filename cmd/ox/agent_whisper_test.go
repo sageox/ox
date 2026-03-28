@@ -72,8 +72,8 @@ type xmlEntry struct {
 	Content    string `xml:",chardata"`
 }
 
-type xmlNewContext struct {
-	XMLName xml.Name   `xml:"new-context"`
+type xmlSystemReminder struct {
+	XMLName xml.Name   `xml:"system-reminder"`
 	Entries []xmlEntry `xml:"entry"`
 }
 
@@ -93,7 +93,7 @@ func TestFormatWhispers_XMLRoundTrip(t *testing.T) {
 	}
 
 	// parse the XML back
-	var parsed xmlNewContext
+	var parsed xmlSystemReminder
 	if err := xml.Unmarshal(buf.Bytes(), &parsed); err != nil {
 		t.Fatalf("failed to parse XML output: %v\nraw output:\n%s", err, buf.String())
 	}
@@ -153,7 +153,7 @@ func TestFormatWhispers_SpecialCharacters(t *testing.T) {
 	}
 
 	// XML round-trip: parse back and verify content survives escaping
-	var parsed xmlNewContext
+	var parsed xmlSystemReminder
 	if err := xml.Unmarshal(buf.Bytes(), &parsed); err != nil {
 		t.Fatalf("failed to parse XML output: %v\nraw output:\n%s", err, buf.String())
 	}
@@ -462,11 +462,11 @@ func TestFormatWhispers_LargeContent(t *testing.T) {
 	}
 
 	// verify XML wrapper still present around large content
-	if !strings.Contains(output, "<new-context>") {
-		t.Error("missing <new-context> opening tag")
+	if !strings.Contains(output, "<system-reminder>") {
+		t.Error("missing <system-reminder> opening tag")
 	}
-	if !strings.Contains(output, "</new-context>") {
-		t.Error("missing </new-context> closing tag")
+	if !strings.Contains(output, "</system-reminder>") {
+		t.Error("missing </system-reminder> closing tag")
 	}
 	if !strings.Contains(output, `topic="large-murmur"`) {
 		t.Error("missing topic attribute")
