@@ -1,5 +1,11 @@
 package config
 
+import (
+	"errors"
+	"log/slog"
+	"os"
+)
+
 // Murmuring mode constants.
 const (
 	MurmuringOff  = "off"
@@ -36,7 +42,13 @@ func ResolveMurmuring(projectRoot string) string {
 		return MurmuringOff
 	}
 	cfg, err := LoadProjectConfig(projectRoot)
-	if err != nil || cfg == nil {
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Debug("failed to load project config for murmuring", "error", err)
+		}
+		return MurmuringOff
+	}
+	if cfg == nil {
 		return MurmuringOff
 	}
 	return NormalizeMurmuring(cfg.Murmuring)

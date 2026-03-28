@@ -751,6 +751,22 @@ func (d *Daemon) startWorkers() {
 		ws.RegisterSource(NewActivitySummarySource(d.heartbeat, d.scheduler))
 		if d.murmurNudgeTracker != nil && d.config.MurmurNudgeInterval > 0 {
 			ws.RegisterSource(NewMurmurNudgeSource(d.murmurNudgeTracker, d.heartbeat, d.config.MurmurNudgeInterval))
+			// periodic cleanup of stale agent entries in the nudge tracker
+			tracker := d.murmurNudgeTracker
+			d.wg.Add(1)
+			go func() {
+				defer d.wg.Done()
+				ticker := time.NewTicker(1 * time.Hour)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-d.ctx.Done():
+						return
+					case <-ticker.C:
+						tracker.Cleanup(2 * time.Hour)
+					}
+				}
+			}()
 		}
 		ws.Start(d.ctx, &d.wg)
 		ws.RunPrune(d.ctx, &d.wg, 1*time.Hour)
