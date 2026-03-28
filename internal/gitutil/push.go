@@ -20,10 +20,6 @@ type PushOpts struct {
 	// semantics — e.g., deny "data/proprietary/" while allowing "data/".
 	AutoResolveDenyPrefixes []string
 
-	// AllowForceOnLFS enables --force-with-lease when the server rejects
-	// due to missing LFS objects. Only safe for append-only repos (ledgers).
-	AllowForceOnLFS bool
-
 	// RepairLFS runs RepairMissingLFSObjects before pushing.
 	RepairLFS bool
 
@@ -77,6 +73,10 @@ var permanentPatterns = []string{
 
 // PushWithRetry pushes a git repo to its remote with pre-flight checks,
 // retry, conflict resolution, and backoff.
+//
+// SAFETY: Force push (--force, --force-with-lease) is banned. All push
+// conflicts are resolved via pull --rebase. Our git remotes reject force
+// pushes server-side, so any force push attempt would fail anyway.
 //
 // Pre-flight: lock/rebase safety, LFS config cleanup, optional LFS repair,
 // optional credential refresh.
@@ -172,18 +172,6 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 					return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
 				}
 			}
-		} else if opts.AllowForceOnLFS && IsLFSPushError(outStr) {
-			// server rejected due to missing LFS objects — force push is safe
-			// for append-only repos (ledgers) where history is never rewritten
-			log.Info("server rejected push due to missing LFS objects, force pushing")
-			forceCtx, forceCancel := context.WithTimeout(ctx, opTimeout)
-			forceOut, forceErr := RunGit(forceCtx, repoPath, "push", "--force-with-lease", "--quiet")
-			forceCancel()
-			if forceErr == nil {
-				return nil
-			}
-			log.Warn("force push also failed", "output", forceOut)
-			return fmt.Errorf("git push failed (LFS missing, force push failed): %s", forceOut)
 		} else {
 			if attempt == maxRetries {
 				return fmt.Errorf("git push failed after %d attempts: %s", maxRetries, outStr)

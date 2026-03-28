@@ -21,7 +21,7 @@ import (
 //  2. Replaces each orphaned pointer with empty content
 //  3. Commits the fix
 //  4. Sets lfs.allowincompletepush=true so the local pre-push hook doesn't block
-//     (the server may still reject — caller should retry with force push if needed)
+//     (the server may still reject — caller should retry via rebase)
 //
 // Returns the number of repaired files and any error. Safe to call on repos
 // without LFS — returns (0, nil) immediately.

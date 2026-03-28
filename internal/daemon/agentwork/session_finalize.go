@@ -594,7 +594,6 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	// push with retry (best-effort — failures are non-fatal)
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
-		AllowForceOnLFS:     true,
 		RepairLFS:           true,
 		Logger:              h.logger,
 	}); err != nil {

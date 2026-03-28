@@ -271,7 +271,6 @@ func checkLedgerBranchStatus(fix bool) checkResult {
 func fixLedgerBranchAhead(ledgerPath string, aheadCount int) checkResult {
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
-		AllowForceOnLFS:     true,
 		RepairLFS:           true,
 	}); err != nil {
 		return FailedCheck("Ledger branch status",
@@ -344,7 +343,6 @@ func fixLedgerBranchDiverged(ledgerPath string, aheadCount, behindCount int) che
 	// PushWithRetry handles pull --rebase + auto-resolve + push in one call
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
-		AllowForceOnLFS:     true,
 		RepairLFS:           true,
 	}); err != nil {
 		return FailedCheck("Ledger branch status",

@@ -1304,7 +1304,6 @@ func (c *SessionPushCheck) Run(_ context.Context, _ bool) CheckResult {
 	// push with retry (PushWithRetry handles retries, backoff, and conflict resolution)
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
-		AllowForceOnLFS:     true,
 		RepairLFS:           true,
 	}); err != nil {
 		errStr := err.Error()

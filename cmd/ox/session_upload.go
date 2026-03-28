@@ -224,13 +224,12 @@ var ledgerAutoResolvePrefixes = ledger.AutoResolvePrefixes
 
 // pushLedger pushes ledger changes to remote with conflict retry.
 // Delegates to gitutil.PushWithRetry with ledger-appropriate options:
-// LFS repair, force-with-lease on LFS rejection, auto-resolve for data/github/.
+// LFS repair, rebase on conflict, auto-resolve for data/github/.
 func pushLedger(ctx context.Context, ledgerPath string) error {
 	// resolve endpoint once, before entering the push loop
 	ep := endpoint.GetForProject(findGitRoot())
 	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
-		AllowForceOnLFS:     true,
 		RepairLFS:           true,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
