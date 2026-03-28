@@ -147,12 +147,14 @@ func resolvePhase(agentType, eventName string) string {
 	return string(phase)
 }
 
-// hookAgentID extracts the agent ID from a HookContext, or "" if unavailable.
+// hookAgentID returns the agent ID for heartbeat purposes.
+// Priority: session marker (set by prime) > SAGEOX_AGENT_ID env fallback.
+// Returns "" if neither source has an ID — heartbeat is skipped in that case.
 func hookAgentID(ctx *HookContext) string {
-	if ctx.Marker != nil {
+	if ctx.Marker != nil && ctx.Marker.AgentID != "" {
 		return ctx.Marker.AgentID
 	}
-	return ""
+	return os.Getenv("SAGEOX_AGENT_ID")
 }
 
 // dispatchPhase routes to the appropriate handler based on the resolved phase.
