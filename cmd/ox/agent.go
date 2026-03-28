@@ -612,13 +612,31 @@ const (
 // so it's safe to run repeatedly without side effects.
 func runAgentWhisperHistory(inst *agentinstance.Instance) error {
 	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
-	resp, err := client.WhisperHistory(inst.AgentID)
-	if err != nil || resp == nil {
-		fmt.Fprintln(os.Stderr, "daemon unavailable — cannot retrieve whisper history")
-		return nil
+
+	// collect all pages; break if no more entries or no pagination
+	var allEntries []whisperstore.WhisperEntry
+	var hasCursor bool
+	var cursor time.Time
+	before := time.Time{}
+	for {
+		resp, err := client.WhisperHistory(inst.AgentID, before, 0)
+		if err != nil || resp == nil {
+			if len(allEntries) == 0 {
+				fmt.Fprintln(os.Stderr, "daemon unavailable — cannot retrieve whisper history")
+				return nil
+			}
+			break
+		}
+		allEntries = append(allEntries, resp.Entries...)
+		hasCursor = resp.HasCursor
+		cursor = resp.Cursor
+		if !resp.HasMore {
+			break
+		}
+		before = resp.NextCursor
 	}
 
-	if len(resp.Entries) == 0 {
+	if len(allEntries) == 0 {
 		fmt.Fprintln(os.Stdout, "No whispers in store.")
 		return nil
 	}
@@ -626,15 +644,15 @@ func runAgentWhisperHistory(inst *agentinstance.Instance) error {
 	// The cursor marks the last whisper the agent has consumed via the hook.
 	// Entries created after the cursor are still pending; at or before it are delivered.
 	var pending, delivered []whisperstore.WhisperEntry
-	for _, e := range resp.Entries {
-		if resp.HasCursor && !e.CreatedAt.After(resp.Cursor) {
+	for _, e := range allEntries {
+		if hasCursor && !e.CreatedAt.After(cursor) {
 			delivered = append(delivered, e)
 		} else {
 			pending = append(pending, e)
 		}
 	}
 
-	fmt.Fprintf(os.Stdout, "Whisper history for %s (%d total)\n\n", inst.AgentID, len(resp.Entries))
+	fmt.Fprintf(os.Stdout, "Whisper history for %s (%d total)\n\n", inst.AgentID, len(allEntries))
 
 	if len(pending) > 0 {
 		fmt.Fprintf(os.Stdout, "Pending (%d, not yet delivered):\n", len(pending))
@@ -659,7 +677,7 @@ func runAgentWhisperHistory(inst *agentinstance.Instance) error {
 		}
 	}
 
-	if !resp.HasCursor {
+	if !hasCursor {
 		fmt.Fprintln(os.Stdout, "(cursor not set — all entries are pending)")
 	}
 

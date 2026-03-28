@@ -410,14 +410,18 @@ type WhispersResponse struct {
 
 // WhisperHistoryPayload is the payload for whisper history queries.
 type WhisperHistoryPayload struct {
-	AgentID string `json:"agent_id"` // empty = all agents
+	AgentID string    `json:"agent_id"`        // empty = all agents
+	Before  time.Time `json:"before,omitempty"` // cursor: only return entries older than this
+	Limit   int       `json:"limit,omitempty"`  // max entries per page; 0 = default (50), max 200
 }
 
-// WhisperHistoryResponse returns all whispers with delivery status.
+// WhisperHistoryResponse returns a page of whispers with delivery status.
 type WhisperHistoryResponse struct {
-	Entries   []whisperstore.WhisperEntry `json:"entries"`
-	Cursor    time.Time                   `json:"cursor"`    // agent's current cursor (entries before this are "delivered")
-	HasCursor bool                        `json:"has_cursor"` // false if agent has never received whispers
+	Entries    []whisperstore.WhisperEntry `json:"entries"`
+	Cursor     time.Time                   `json:"cursor"`              // agent's delivery cursor (entries at/before this are "delivered")
+	HasCursor  bool                        `json:"has_cursor"`           // false if agent has never received whispers
+	HasMore    bool                        `json:"has_more,omitempty"`   // true if more entries exist beyond this page
+	NextCursor time.Time                   `json:"next_cursor,omitempty"` // pass as Before in next request to get the next page
 }
 
 // DoctorResponse is the response for the doctor IPC message.
@@ -549,7 +553,7 @@ type DaemonService interface {
 	Sessions() []AgentSession // deprecated: use Instances
 	Instances() []InstanceInfo
 	Whispers(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
-	WhisperHistory(agentID string) (*WhisperHistoryResponse, error)
+	WhisperHistory(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error)
 	CodeStatus() *CodeDBStats
 
 	// mutation operations
@@ -597,7 +601,7 @@ type CallbackService struct {
 	onCodeIndex        func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)
 	onCodeStatus       func() *CodeDBStats
 	onWhispers         func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
-	onWhisperHistory   func(agentID string) (*WhisperHistoryResponse, error)
+	onWhisperHistory   func(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error)
 }
 
 func (c *CallbackService) Sync() error {
@@ -690,12 +694,12 @@ func (c *CallbackService) Whispers(agentID string, attention whisperstore.Attent
 	return nil, nil
 }
 
-func (c *CallbackService) WhisperHistory(agentID string) (*WhisperHistoryResponse, error) {
+func (c *CallbackService) WhisperHistory(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error) {
 	c.mu.Lock()
 	fn := c.onWhisperHistory
 	c.mu.Unlock()
 	if fn != nil {
-		return fn(agentID)
+		return fn(agentID, before, limit)
 	}
 	return &WhisperHistoryResponse{Entries: []whisperstore.WhisperEntry{}}, nil
 }
@@ -1506,10 +1510,12 @@ func (c *Client) Whispers(agentID string, attention string, topics []string) (*W
 	return &result, nil
 }
 
-// WhisperHistory queries all whispers for an agent (pending + delivered) without advancing the cursor.
+// WhisperHistory queries a page of whispers for an agent without advancing the cursor.
 // Used for inspection — shows what has been or will be whispered to an agent.
-func (c *Client) WhisperHistory(agentID string) (*WhisperHistoryResponse, error) {
-	payload, _ := json.Marshal(WhisperHistoryPayload{AgentID: agentID})
+// Pass before=zero and limit=0 to get the first page (most recent 50 entries).
+// Use resp.NextCursor as before in subsequent calls when resp.HasMore is true.
+func (c *Client) WhisperHistory(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error) {
+	payload, _ := json.Marshal(WhisperHistoryPayload{AgentID: agentID, Before: before, Limit: limit})
 	resp, err := c.sendMessage(Message{
 		Type:    MsgTypeWhisperHistory,
 		Payload: payload,

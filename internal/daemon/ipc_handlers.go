@@ -343,7 +343,7 @@ func handleWhisperHistory(s *Server, msg Message, _ net.Conn) HandlerResult {
 		}
 	}
 
-	result, err := s.service.WhisperHistory(payload.AgentID)
+	result, err := s.service.WhisperHistory(payload.AgentID, payload.Before, payload.Limit)
 	if err != nil {
 		return HandlerResult{
 			Response: &Response{Success: false, Error: fmt.Sprintf("whisper history: %v", err)},

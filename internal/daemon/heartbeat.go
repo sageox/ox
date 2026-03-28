@@ -654,6 +654,14 @@ func (h *HeartbeatHandler) CleanupStaleAgents(activeIDs []string) {
 		}
 	}
 	h.metaMu.Unlock()
+
+	h.whisperMu.Lock()
+	for id := range h.agentLastWhisper {
+		if _, ok := active[id]; !ok {
+			delete(h.agentLastWhisper, id)
+		}
+	}
+	h.whisperMu.Unlock()
 }
 
 // ActivitySummary returns a summary of all activity for status display.

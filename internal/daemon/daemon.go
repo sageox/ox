@@ -1073,20 +1073,26 @@ func (s *daemonServiceImpl) Whispers(agentID string, attention whisperstore.Atte
 	return entries, err
 }
 
-func (s *daemonServiceImpl) WhisperHistory(agentID string) (*WhisperHistoryResponse, error) {
+func (s *daemonServiceImpl) WhisperHistory(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error) {
 	if s.d.whisperRegistry == nil {
 		return &WhisperHistoryResponse{Entries: []whisperstore.WhisperEntry{}}, nil
 	}
-	entries, err := s.d.whisperRegistry.GetAllWhispers(agentID)
+	entries, hasMore, err := s.d.whisperRegistry.GetWhispersPage(agentID, before, limit)
 	if err != nil {
 		return nil, err
 	}
 	cursor, _ := s.d.whisperRegistry.GetCursor(agentID)
-	return &WhisperHistoryResponse{
+	resp := &WhisperHistoryResponse{
 		Entries:   entries,
 		Cursor:    cursor,
 		HasCursor: !cursor.IsZero(),
-	}, nil
+		HasMore:   hasMore,
+	}
+	if hasMore && len(entries) > 0 {
+		// oldest entry in this page is the cursor for the next page
+		resp.NextCursor = entries[len(entries)-1].CreatedAt
+	}
+	return resp, nil
 }
 
 func (s *daemonServiceImpl) CodeStatus() *CodeDBStats {

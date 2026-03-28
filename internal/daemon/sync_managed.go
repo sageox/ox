@@ -139,7 +139,7 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 					Type:     IssueTypeGitLock,
 					Severity: SeverityWarning,
 					Repo:     repoName,
-					Summary: fmt.Sprintf("Stale lock files blocking sync: %s. If no git commands are running, remove with: rm %s/{%s}",
+					Summary: fmt.Sprintf("Lock files blocking sync: %s. If no git commands are running, remove with: rm %s/{%s}",
 						strings.Join(remaining, ", "),
 						gitDir,
 						strings.Join(remaining, ",")),

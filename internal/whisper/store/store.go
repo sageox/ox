@@ -347,19 +347,47 @@ func (s *Store) MarkRelayed(murmurID, scope string) error {
 // Used for inspection/debugging — shows both pending and already-delivered whispers.
 // Pass agentID="" to get all whispers across all agents.
 func (s *Store) GetAllWhispers(agentID string) ([]WhisperEntry, error) {
+	entries, _, err := s.GetWhispersPage(agentID, time.Time{}, 0)
+	return entries, err
+}
+
+// GetWhispersPage returns a page of whisper entries ordered by created_at DESC.
+// before: if non-zero, only returns entries with created_at strictly before this time (cursor).
+// limit: max entries to return; 0 uses the default (50); capped at 200.
+// Returns (entries, hasMore, error). hasMore is true if more entries exist beyond this page.
+func (s *Store) GetWhispersPage(agentID string, before time.Time, limit int) ([]WhisperEntry, bool, error) {
+	const defaultLimit = 50
+	const maxLimit = 200
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+
 	query := `SELECT id, scope, type, source, topic, content, importance, created_at,
 		agent_id, principal_id, principal_type, team_id, metadata
 		FROM whispers`
 	var args []any
+	var conditions []string
+
 	if agentID != "" {
-		query += ` WHERE agent_id = ? OR agent_id IS NULL OR agent_id = ''`
+		conditions = append(conditions, `(agent_id = ? OR agent_id IS NULL OR agent_id = '')`)
 		args = append(args, agentID)
 	}
-	query += ` ORDER BY created_at DESC`
+	if !before.IsZero() {
+		conditions = append(conditions, `created_at < ?`)
+		args = append(args, before.UTC().Format(time.RFC3339Nano))
+	}
+	if len(conditions) > 0 {
+		query += ` WHERE ` + strings.Join(conditions, ` AND `)
+	}
+	// fetch limit+1 to detect whether more entries exist
+	query += fmt.Sprintf(` ORDER BY created_at DESC LIMIT %d`, limit+1)
 
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query all whispers: %w", err)
+		return nil, false, fmt.Errorf("query whispers page: %w", err)
 	}
 	defer rows.Close()
 
@@ -374,7 +402,7 @@ func (s *Store) GetAllWhispers(agentID string) ([]WhisperEntry, error) {
 			&e.ID, &e.Scope, &typ, &e.Source, &e.Topic, &e.Content, &imp, &createdStr,
 			&entryAgentID, &principalID, &principalType, &teamID, &metadataJSON,
 		); err != nil {
-			return nil, fmt.Errorf("scan whisper: %w", err)
+			return nil, false, fmt.Errorf("scan whisper: %w", err)
 		}
 
 		e.Type = WhisperType(typ)
@@ -396,13 +424,17 @@ func (s *Store) GetAllWhispers(agentID string) ([]WhisperEntry, error) {
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate all whispers: %w", err)
+		return nil, false, fmt.Errorf("iterate whispers page: %w", err)
 	}
 
+	hasMore := len(entries) > limit
+	if hasMore {
+		entries = entries[:limit]
+	}
 	if entries == nil {
 		entries = []WhisperEntry{}
 	}
-	return entries, nil
+	return entries, hasMore, nil
 }
 
 // GetCursor returns the last-seen cursor for an agent (zero time if unknown).
