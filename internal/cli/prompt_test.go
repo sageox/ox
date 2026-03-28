@@ -77,9 +77,22 @@ func TestSelectModel_Update_Selection(t *testing.T) {
 	assert.NotNil(t, cmd, "enter should return quit command")
 }
 
-// NOTE: The source code checks for " " in the switch case, but bubbletea v2's
-// KeyPressMsg.String() returns "space" for the space key, making that branch
-// unreachable. This is a latent bug in the source (likely from v1 migration).
+func TestSelectModel_Update_Space_Selects(t *testing.T) {
+	t.Parallel()
+	m := selectModel{
+		title:   "Choose:",
+		options: []string{"a", "b", "c"},
+		cursor:  1,
+	}
+
+	result, cmd := m.Update(keyPress(tea.KeySpace, 0, "space"))
+	rm := result.(selectModel)
+
+	assert.True(t, rm.done)
+	assert.False(t, rm.canceled)
+	assert.Equal(t, 1, rm.selected)
+	assert.NotNil(t, cmd)
+}
 
 func TestSelectModel_Update_Cancel(t *testing.T) {
 	t.Parallel()
@@ -131,8 +144,8 @@ func TestSelectOne_EmptyOptions(t *testing.T) {
 	t.Parallel()
 
 	idx, err := SelectOne("Title", []string{}, 0)
-	assert.NoError(t, err)
-	assert.Equal(t, -1, idx, "empty options should return -1")
+	assert.Error(t, err, "empty options should return an error")
+	assert.Equal(t, -1, idx)
 }
 
 func TestSelectOneValue_EmptyOptions(t *testing.T) {

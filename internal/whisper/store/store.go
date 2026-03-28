@@ -346,9 +346,25 @@ func (s *Store) MarkRelayed(murmurID, scope string) error {
 // GetAllWhispers returns all whisper entries for an agent without advancing the cursor.
 // Used for inspection/debugging — shows both pending and already-delivered whispers.
 // Pass agentID="" to get all whispers across all agents.
+// Iterates pages until all entries are collected.
 func (s *Store) GetAllWhispers(agentID string) ([]WhisperEntry, error) {
-	entries, _, err := s.GetWhispersPage(agentID, time.Time{}, 0)
-	return entries, err
+	var all []WhisperEntry
+	var cursor time.Time
+	for {
+		page, hasMore, err := s.GetWhispersPage(agentID, cursor, 200)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if !hasMore || len(page) == 0 {
+			break
+		}
+		cursor = page[len(page)-1].CreatedAt
+	}
+	if all == nil {
+		all = []WhisperEntry{}
+	}
+	return all, nil
 }
 
 // GetWhispersPage returns a page of whisper entries ordered by created_at DESC.

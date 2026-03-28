@@ -287,12 +287,12 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 	}
 	// observation directive
 	if output.ObservationDirective != "" {
-		sb.WriteString(output.ObservationDirective)
+		sb.WriteString(escapeXML(output.ObservationDirective))
 		sb.WriteString("\n")
 	}
 	// murmur directive — when auto-murmuring is configured, tell the agent to proactively publish WIP
 	if output.MurmurDirective != "" {
-		sb.WriteString(output.MurmurDirective)
+		sb.WriteString(escapeXML(output.MurmurDirective))
 		sb.WriteString("\n")
 	}
 	sb.WriteString("</session-context>\n")

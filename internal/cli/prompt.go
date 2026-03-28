@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -40,7 +41,7 @@ func (m selectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.canceled = true
 			m.done = true
 			return m, tea.Quit
-		case "enter", " ":
+		case "enter", " ", "space":
 			m.selected = m.cursor
 			m.done = true
 			return m, tea.Quit
@@ -92,7 +93,7 @@ func (m selectModel) View() tea.View {
 // Falls back to numbered prompt when stdin is not a TTY or in non-interactive mode.
 func SelectOne(title string, options []string, defaultIdx int) (int, error) {
 	if len(options) == 0 {
-		return -1, nil
+		return -1, errors.New("no options to select from")
 	}
 
 	cursor := 0

@@ -88,6 +88,24 @@ func TestBuildGuidance(t *testing.T) {
 			},
 			noCommands: []string{"ox memory put"},
 		},
+		{
+			name: "murmuring enabled — murmur command included",
+			params: GuidanceParams{
+				AgentID:          "test-7",
+				RepoSlug:         "org/repo",
+				MurmuringEnabled: true,
+			},
+			wantCommands: []string{"ox murmur"},
+		},
+		{
+			name: "murmuring disabled — no murmur command",
+			params: GuidanceParams{
+				AgentID:          "test-8",
+				RepoSlug:         "org/repo",
+				MurmuringEnabled: false,
+			},
+			noCommands: []string{"ox murmur"},
+		},
 	}
 
 	for _, tt := range tests {

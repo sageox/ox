@@ -124,7 +124,10 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 	gitDir := filepath.Join(path, ".git")
 	if locks := gitutil.HasLockFiles(gitDir); len(locks) > 0 {
 		// attempt to remove stale locks before giving up
-		removed, _ := gitutil.RemoveStaleLockFiles(gitDir)
+		removed, lockErrs := gitutil.RemoveStaleLockFiles(gitDir)
+		for _, err := range lockErrs {
+			logger.Warn("failed to remove stale git lock file", "path", path, "error", err)
+		}
 		if len(removed) > 0 {
 			logger.Info("removed stale git lock files", "path", path, "locks", strings.Join(removed, ", "))
 		}

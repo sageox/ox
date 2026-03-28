@@ -676,13 +676,16 @@ func GetState() DaemonState {
 	// Cross-check with the registry: a stale socket from an ungraceful exit is NOT running.
 	if _, err := os.Stat(socketPath); err == nil {
 		if pid := pidForSocket(socketPath); pid > 0 {
-			if proc, pErr := os.FindProcess(pid); pErr == nil && proc.Signal(syscall.Signal(0)) == nil {
-				return DaemonStateRunning
+			if proc, pErr := os.FindProcess(pid); pErr == nil {
+				if proc.Signal(syscall.Signal(0)) == nil {
+					return DaemonStateRunning
+				}
+				// Registry positively identified a dead owner — safe to remove stale socket.
+				_ = os.Remove(socketPath)
 			}
 		}
-		// Socket file exists but owning process is gone — stale from ungraceful exit.
-		// Remove the socket so callers don't block connecting to a dead listener.
-		_ = os.Remove(socketPath)
+		// pid == 0 means registry entry missing or unreadable — don't remove the socket
+		// since we can't confirm the owner is gone; treat as unknown state.
 	}
 
 	// No socket — check whether a process is alive via PID file.
