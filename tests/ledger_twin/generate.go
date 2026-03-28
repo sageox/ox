@@ -27,6 +27,10 @@ func GenerateTwinLedger(basePath string, manifest *TwinManifest) error {
 	if err := generateMurmurs(basePath, manifest.Murmurs); err != nil {
 		return fmt.Errorf("generate murmurs: %w", err)
 	}
+
+	if err := generateCarts(basePath, manifest.Carts); err != nil {
+		return fmt.Errorf("generate carts: %w", err)
+	}
 	return nil
 }
 
@@ -175,6 +179,40 @@ func writeRecording(dir, folderName string, spec SessionSpec) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, ".recording.json"), data, 0644)
+}
+
+func generateCarts(basePath string, specs []CartSpec) error {
+	cartsDir := filepath.Join(basePath, "carts")
+	if err := os.MkdirAll(cartsDir, 0755); err != nil {
+		return fmt.Errorf("create carts dir: %w", err)
+	}
+
+	for _, spec := range specs {
+		data := map[string]any{
+			"id":         spec.ID,
+			"title":      spec.Title,
+			"description": spec.Description,
+			"status":     spec.Status,
+			"priority":   spec.Priority,
+			"issue_type": spec.IssueType,
+			"assignee":   spec.Assignee,
+			"creator":    spec.Creator,
+			"source":     "cli",
+			"created_at": spec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+		}
+		if spec.ClosedAt != nil {
+			data["closed_at"] = spec.ClosedAt.UTC().Format("2006-01-02T15:04:05Z")
+		}
+
+		jsonData, err := json.MarshalIndent(data, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal cart %s: %w", spec.ID, err)
+		}
+		if err := os.WriteFile(filepath.Join(cartsDir, spec.ID+".json"), jsonData, 0644); err != nil {
+			return fmt.Errorf("write cart %s: %w", spec.ID, err)
+		}
+	}
+	return nil
 }
 
 func generateMurmurs(basePath string, specs []MurmurSpec) error {

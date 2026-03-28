@@ -64,11 +64,28 @@ type Window struct {
 	ExpectedMurmurImportance string // at least one murmur must have this importance
 }
 
-// TwinManifest holds everything: generated sessions + murmurs + validation windows.
+// CartSpec defines one cart to generate on disk.
+// Cart IDs embed the session ID for trivial correlation:
+//   cart-Ox1001 → session 2026-03-20T10-00-alice-Ox1001 → murmur Mx1001
+type CartSpec struct {
+	ID          string
+	Title       string
+	Description string
+	Status      string // open, in_progress, closed
+	Priority    int
+	IssueType   string // task, feature, bug, epic, chore
+	Assignee    string
+	Creator     string
+	CreatedAt   time.Time
+	ClosedAt    *time.Time
+}
+
+// TwinManifest holds everything: generated sessions + murmurs + carts + validation windows.
 type TwinManifest struct {
 	LedgerPath string
 	Sessions   []SessionSpec
 	Murmurs    []MurmurSpec
+	Carts      []CartSpec
 	Windows    []Window
 }
 
@@ -124,6 +141,44 @@ func sess(dev Dev, t time.Time, id, title string, files ...FileTouch) SessionSpe
 // murmur builds a MurmurSpec with sensible defaults (topic=wip, scope=ledger).
 func murmur(dev Dev, t time.Time, id, content string) MurmurSpec {
 	return MurmurSpec{Dev: dev, Timestamp: t, ID: id, Topic: "wip", Importance: "normal", Content: content, Scope: "ledger"}
+}
+
+// cart builds a CartSpec. ID is "cart-<sessionID>" for trivial correlation.
+// Created 5 minutes before session start. Default type=task, priority=2.
+func cart(dev Dev, t time.Time, sessionID, title, status string) CartSpec {
+	c := CartSpec{
+		ID:        "cart-" + sessionID,
+		Title:     title,
+		Status:    status,
+		Priority:  2,
+		IssueType: "task",
+		Assignee:  dev.Username,
+		Creator:   dev.Username,
+		CreatedAt: t.Add(-5 * time.Minute),
+	}
+	if status == "closed" {
+		closed := t.Add(30 * time.Minute)
+		c.ClosedAt = &closed
+	}
+	return c
+}
+
+// withCartType overrides the issue type on a CartSpec.
+func withCartType(c CartSpec, issueType string) CartSpec {
+	c.IssueType = issueType
+	return c
+}
+
+// withCartPriority overrides the priority on a CartSpec.
+func withCartPriority(c CartSpec, priority int) CartSpec {
+	c.Priority = priority
+	return c
+}
+
+// withCartDesc adds a description to a CartSpec.
+func withCartDesc(c CartSpec, desc string) CartSpec {
+	c.Description = desc
+	return c
 }
 
 // withImportance overrides the importance on a MurmurSpec.
@@ -813,6 +868,169 @@ func BuildManifest() *TwinManifest {
 		// bob's machine: afternoon backoff work
 		fileChangeMurmur(ts(12, 14, 50), "MfA007b", "Ox3c4d", "bob", "feature/sync-rewrite",
 			modified("internal/sync/pull.go"), modified("internal/sync/resolve.go")),
+	)
+
+	// ═══════════════════════════════════════════════════════════════
+	// Carts: planned work items created before sessions start.
+	// Cart IDs embed session IDs for trivial correlation:
+	//   cart-Ox1001 ↔ session Ox1001 ↔ murmur Mx1001
+	// ═══════════════════════════════════════════════════════════════
+
+	// Window 1 carts (Hot Zone, March 20): all completed
+	m.Carts = append(m.Carts,
+		withCartDesc(cart(alice, ts(20, 10, 0), "Ox1001", "Refactor root command structure", "closed"),
+			"Extract subcommand registration into table-driven pattern"),
+		withCartDesc(cart(bob, ts(20, 10, 30), "Ox1002", "Add API flag to root command", "closed"),
+			"Add --api-endpoint global flag with validation"),
+		withCartDesc(withCartType(cart(dave, ts(20, 11, 0), "Ox1003", "CLI formatting overhaul", "closed"), "feature"),
+			"Replace ad-hoc fmt.Printf with structured formatters"),
+		withCartDesc(cart(alice, ts(20, 14, 0), "Ox1004", "Auth middleware extraction", "closed"),
+			"Pull auth middleware into standalone package"),
+		withCartDesc(cart(bob, ts(20, 15, 0), "Ox1005", "API route cleanup", "closed"),
+			"Consolidate duplicate route definitions"),
+	)
+
+	// Window 2 carts (Parallel Streams, March 21): all completed
+	m.Carts = append(m.Carts,
+		withCartDesc(withCartType(cart(alice, ts(21, 9, 0), "Ox2001", "Auth login flow rewrite", "closed"), "feature"),
+			"Replace cookie-based login with device code flow"),
+		withCartDesc(cart(bob, ts(21, 9, 30), "Ox2002", "API handler tests", "closed"),
+			"Table-driven tests for all API handler error paths"),
+		withCartDesc(withCartType(cart(carol, ts(21, 10, 0), "Ox2003", "Daemon watcher improvements", "closed"), "bug"),
+			"Switch from polling to fsnotify, fix sync pull race"),
+	)
+
+	// Window 3 carts (Pair Convergence, March 22): all completed
+	m.Carts = append(m.Carts,
+		withCartDesc(cart(alice, ts(22, 10, 0), "Ox3001", "Auth middleware rate limiting", "closed"),
+			"Add per-user rate limiting using token bucket"),
+		withCartDesc(cart(bob, ts(22, 10, 30), "Ox3002", "Auth middleware logging", "closed"),
+			"Instrument with structured request/response logging"),
+		withCartDesc(cart(carol, ts(22, 11, 0), "Ox3003", "Status command daemon integration", "closed"),
+			"Wire daemon health endpoint into ox status"),
+		withCartDesc(cart(dave, ts(22, 11, 30), "Ox3004", "Status command rendering", "closed"),
+			"Add color-coded status indicators and table layout"),
+		withCartDesc(cart(eve, ts(22, 12, 0), "Ox3005", "Auth integration tests", "closed"),
+			"End-to-end auth flow test with mock OAuth server"),
+	)
+
+	// Window 4 carts (Sprint End Rush, March 23): all completed
+	m.Carts = append(m.Carts,
+		withCartDesc(cart(frank, ts(23, 8, 0), "Ox4001", "Getting started guide rewrite", "closed"),
+			"Rewrite for new ox init flow with screenshots"),
+		withCartDesc(cart(bob, ts(23, 8, 30), "Ox4002", "API docs and getting started updates", "closed"),
+			"Update API examples and migrate v1 to v2 schema"),
+		withCartDesc(withCartPriority(cart(alice, ts(23, 9, 0), "Ox4003", "Session token rotation", "closed"), 1),
+			"Automatic token rotation 5min before expiry"),
+		withCartDesc(cart(carol, ts(23, 9, 30), "Ox4004", "Daemon graceful shutdown", "closed"),
+			"SIGTERM handler that drains in-flight syncs"),
+		withCartDesc(withCartType(cart(dave, ts(23, 10, 0), "Ox4005", "CLI progress bars", "closed"), "feature"),
+			"Animated progress bars for sync operations"),
+		withCartDesc(cart(eve, ts(23, 10, 30), "Ox4006", "Config test coverage", "closed"),
+			"92% coverage including XDG fallback and env overrides"),
+		withCartDesc(cart(frank, ts(23, 11, 0), "Ox4007", "Config validation docs", "closed"),
+			"Document all config keys with schema validation"),
+		withCartDesc(withCartPriority(cart(alice, ts(23, 12, 0), "Ox4008", "Auth error handling", "closed"), 1),
+			"Typed AuthError wrapping for better CLI messages"),
+		withCartDesc(cart(carol, ts(23, 14, 0), "Ox4009", "Sync retry logic", "closed"),
+			"Exponential backoff with jitter for failed git pulls"),
+		withCartDesc(cart(eve, ts(23, 14, 30), "Ox4010", "Daemon test harness", "closed"),
+			"Test harness for daemon lifecycle with mock FS events"),
+		withCartDesc(cart(frank, ts(23, 15, 0), "Ox4011", "FAQ documentation", "closed"),
+			"FAQ covering common setup issues"),
+		withCartDesc(withCartPriority(cart(alice, ts(23, 16, 0), "Ox4012", "Session store optimization", "closed"), 1),
+			"In-memory index for session lookups"),
+		withCartDesc(cart(bob, ts(23, 16, 0), "Ox4013", "API v2 migration", "closed"),
+			"Migrate remaining v1 callers to v2 API"),
+		withCartDesc(cart(dave, ts(23, 17, 0), "Ox4014", "CLI help text polish", "closed"),
+			"Rewrite help text with examples and contextual hints"),
+		withCartDesc(cart(eve, ts(23, 18, 0), "Ox4015", "Integration test cleanup", "closed"),
+			"Deduplicate test fixtures, add cleanup hooks"),
+		withCartDesc(withCartType(cart(dave, ts(23, 13, 0), "Ox4016", "CLI color theme support", "closed"), "feature"),
+			"Light/dark/auto theme detection and NO_COLOR support"),
+	)
+
+	// Window 5 carts (Active Recording, March 24): 1 closed, 2 in_progress
+	m.Carts = append(m.Carts,
+		withCartDesc(withCartType(cart(alice, ts(24, 14, 0), "Ox5001", "Token expiry investigation", "closed"), "bug"),
+			"Debug token expiry race between refresh goroutine and request handler"),
+		withCartDesc(cart(bob, ts(24, 14, 30), "Ox5002", "API rate limiter", "in_progress"),
+			"Implement sliding window rate limiter for API v2 endpoints"),
+		withCartDesc(cart(carol, ts(24, 15, 0), "Ox5003", "Daemon metrics collection", "in_progress"),
+			"Add prometheus-style metrics to daemon sync loop"),
+	)
+
+	// Window 6 carts (Cluster Bridge, March 17): all completed
+	m.Carts = append(m.Carts,
+		withCartDesc(cart(alice, ts(17, 9, 0), "Ox8001", "Auth token refresh", "closed"),
+			"Background token refresh with mutex-protected expiry check"),
+		withCartDesc(cart(bob, ts(17, 10, 0), "Ox8002", "Auth session validation", "closed"),
+			"Session validation middleware checking token signature and expiry"),
+		withCartDesc(withCartType(cart(dave, ts(17, 9, 30), "Ox8003", "CLI output formatting", "closed"), "feature"),
+			"Unified JSON and table output behind Renderer interface"),
+		withCartDesc(cart(eve, ts(17, 10, 30), "Ox8004", "CLI test helpers", "closed"),
+			"Golden-file test helpers for CLI output and snapshot testing"),
+		withCartDesc(withCartPriority(cart(carol, ts(17, 11, 0), "Ox8005", "Auth-to-CLI status bridge", "closed"), 1),
+			"Connect auth state to CLI status via daemon bridge"),
+	)
+
+	// Window 7 carts (Escalation, March 10-12)
+	// Day 1: calm
+	m.Carts = append(m.Carts,
+		withCartDesc(cart(alice, ts(10, 9, 0), "OxA001", "Sync pull refactor", "closed"),
+			"Split monolithic pull into fetch/merge/apply stages"),
+		withCartDesc(withCartType(cart(carol, ts(10, 10, 0), "OxA002", "Sync pull error handling", "closed"), "bug"),
+			"Context-aware error wrapping for transient vs permanent failures"),
+		withCartDesc(cart(bob, ts(10, 11, 0), "OxA003", "API endpoint tests", "closed"),
+			"Integration tests for all REST endpoints"),
+		withCartDesc(cart(dave, ts(10, 14, 0), "OxA004", "CLI version command", "closed"),
+			"Add ox version --json and build metadata output"),
+	)
+	// Day 2: growing
+	m.Carts = append(m.Carts,
+		withCartDesc(withCartPriority(cart(alice, ts(11, 9, 0), "OxA005", "Sync merge conflict resolution", "closed"), 1),
+			"3-way merge resolver using manifest-based rules"),
+		withCartDesc(cart(carol, ts(11, 9, 30), "OxA006", "Sync pull retry logic", "closed"),
+			"Retry with conflict detection and auto-resolve"),
+		withCartDesc(cart(bob, ts(11, 10, 0), "OxA007", "Sync API integration", "closed"),
+			"Wire sync merge into API for remote trigger"),
+		withCartDesc(cart(dave, ts(11, 11, 0), "OxA008", "Sync CLI commands", "closed"),
+			"Add ox sync --force and --dry-run flags"),
+		withCartDesc(cart(eve, ts(11, 14, 0), "OxA009", "Sync test fixtures", "closed"),
+			"Pre-built conflict scenarios for merge testing"),
+		withCartDesc(cart(frank, ts(11, 15, 0), "OxA010", "Sync documentation", "closed"),
+			"Architecture docs with Mermaid diagrams"),
+	)
+	// Day 3: everyone converges
+	m.Carts = append(m.Carts,
+		withCartDesc(withCartType(withCartPriority(cart(alice, ts(12, 9, 0), "OxA011", "Sync core rewrite", "closed"), 0), "epic"),
+			"Replace ad-hoc sync with state-machine-driven pipeline"),
+		withCartDesc(cart(bob, ts(12, 9, 15), "OxA012", "Sync API v2", "closed"),
+			"Streaming progress updates via SSE"),
+		withCartDesc(cart(carol, ts(12, 9, 30), "OxA013", "Sync daemon integration", "closed"),
+			"Connect new sync pipeline to daemon scheduler"),
+		withCartDesc(cart(dave, ts(12, 10, 0), "OxA014", "Sync CLI overhaul", "closed"),
+			"Show real-time state machine transitions"),
+		withCartDesc(cart(eve, ts(12, 10, 30), "OxA015", "Sync test suite", "closed"),
+			"Full integration test for all state transitions"),
+		withCartDesc(cart(frank, ts(12, 11, 0), "OxA016", "Sync docs update", "closed"),
+			"Update docs for state machine architecture"),
+		withCartDesc(cart(alice, ts(12, 14, 0), "OxA017", "Sync state machine", "closed"),
+			"Add conflict-detected and manual-review states"),
+		withCartDesc(cart(bob, ts(12, 14, 30), "OxA018", "Sync retry backoff", "closed"),
+			"Exponential backoff in pull retry with resolve fallback"),
+		withCartDesc(cart(carol, ts(12, 15, 0), "OxA019", "Sync manifest", "closed"),
+			"Manifest-driven merge rules for auto-resolve"),
+		withCartDesc(withCartType(cart(dave, ts(12, 16, 0), "OxA020", "Sync progress reporting", "closed"), "feature"),
+			"State machine emits progress events for CLI rendering"),
+	)
+
+	// Subagent carts (March 19): only the main session gets a cart
+	m.Carts = append(m.Carts,
+		withCartDesc(cart(alice, ts(19, 10, 0), "OxS001", "Auth refactor planning", "closed"),
+			"Plan auth handler refactor, identify extract-method candidates"),
+		withCartDesc(cart(bob, ts(19, 11, 0), "OxS004", "API handler update", "closed"),
+			"Fix nil pointer in API handler for missing auth token"),
 	)
 
 	// ═══════════════════════════════════════════════════════════════
