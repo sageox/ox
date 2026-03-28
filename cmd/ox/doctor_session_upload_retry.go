@@ -283,7 +283,7 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 	}
 
 	// copy secondary artifacts (best-effort — skip missing files, don't abort on failure)
-	secondaryFiles := []string{ledgerFileSummaryMD, ledgerFileSessionMD, "summary.json"}
+	secondaryFiles := []string{ledgerFileSummaryMD, ledgerFileSessionMD, ledgerFilePlan, "summary.json"}
 	for _, name := range secondaryFiles {
 		src := filepath.Join(orphan.CachePath, name)
 		dst := filepath.Join(sessionDir, name)

@@ -158,7 +158,7 @@ func TestBuildNextSteps_AllFlags(t *testing.T) {
 		IncompleteSessions: []IncompleteSessionInfo{
 			{
 				SessionID: "s1",
-				Missing:   []string{"summary", "html", "summary_json"},
+				Missing:   []string{"summary", "summary_json"},
 			},
 			{
 				SessionID: "s2",
@@ -171,8 +171,8 @@ func TestBuildNextSteps_AllFlags(t *testing.T) {
 
 	steps := buildNextSteps(output)
 
-	// should have: 3 from s1 + 1 from s2 + commit + push = 6
-	assert.Len(t, steps, 6)
+	// should have: 2 from s1 + 1 from s2 + commit + push = 5
+	assert.Len(t, steps, 5)
 
 	// verify ordering: incomplete sessions first, then git ops
 	lastSessionIdx := -1

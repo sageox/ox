@@ -34,7 +34,7 @@ func viewAsWeb(sessionName string, projectRoot string) error {
 	}
 	metaPath := filepath.Join(ledgerPath, "sessions", sessionName, "meta.json")
 	if _, err := os.Stat(metaPath); os.IsNotExist(err) {
-		return fmt.Errorf("session %q has not been pushed to the ledger yet\n\nRun 'ox session stop' to finalize", sessionName)
+		return fmt.Errorf("session %q has not been pushed to the ledger yet\n\nRun 'ox session upload %s' to push existing content, or 'ox agent <id> session stop' if recording is still active", sessionName, sessionName)
 	}
 
 	url := buildSessionURL(cfg, sessionName)

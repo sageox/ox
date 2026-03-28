@@ -237,6 +237,7 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	if output, err := commitCmd.CombinedOutput(); err != nil {
 		outStr := string(output)
 		if strings.Contains(outStr, "nothing to commit") {
+			clearNeedsSummaryMarkerForSession(sessionName)
 			return &pushSummaryOutput{
 				Success:      true,
 				Type:         "push_summary",

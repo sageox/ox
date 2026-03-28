@@ -134,6 +134,17 @@ func buildEnrichMessages(stored *StoredSession) []EnrichMessage {
 	messages := make([]EnrichMessage, 0, len(stored.Entries))
 	for i, entry := range stored.Entries {
 		msg := buildEnrichMessage(i+1, entry, userLabel, agentLabel)
+
+		// merge tool_result into the preceding tool_call instead of creating a duplicate
+		entryType, _ := entry["type"].(string)
+		if entryType == "tool_result" && msg.ToolCall != nil && len(messages) > 0 {
+			prev := &messages[len(messages)-1]
+			if prev.ToolCall != nil && prev.ToolCall.Name == msg.ToolCall.Name && prev.ToolCall.Output == "" {
+				prev.ToolCall.Output = msg.ToolCall.Output
+				continue
+			}
+		}
+
 		messages = append(messages, msg)
 	}
 	return messages

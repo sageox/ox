@@ -285,6 +285,9 @@ func regenerateSingleSessionSummary(nameArg string) error {
 		return fmt.Errorf("parse summary from claude output: %w", err)
 	}
 
+	// enrich with computed fields (files_changed, chapters) before writing
+	session.EnrichSummary(rawSession, summaryResp)
+
 	// write summary.json atomically
 	summaryData, err := json.MarshalIndent(summaryResp, "", "  ")
 	if err != nil {
