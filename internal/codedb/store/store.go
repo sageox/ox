@@ -72,7 +72,7 @@ func Open(root string) (*Store, error) {
 	// integrity check before schema creation
 	if err := checkSQLiteIntegrity(db); err != nil {
 		db.Close()
-		slog.Warn("sqlite corruption detected, removing database", "path", dbPath, "err", err)
+		slog.Error("sqlite corruption detected, removing database", "path", dbPath, "err", err)
 		removeSQLiteFiles(dbPath)
 		return nil, fmt.Errorf("sqlite integrity check failed: %w", ErrCorrupt)
 	}
@@ -221,7 +221,7 @@ func removeSQLiteFiles(dbPath string) {
 }
 
 func openOrCreateBleveIndex(path string) (bleve.Index, error) {
-	idx, err := bleve.Open(path)
+	idx, err := safeOpenBleve(path)
 	if err == nil {
 		return idx, nil
 	}
@@ -231,12 +231,26 @@ func openOrCreateBleveIndex(path string) (bleve.Index, error) {
 	}
 
 	// any other error indicates corruption; nuke and recreate
-	slog.Warn("bleve index corrupt, recreating", "path", path, "err", err)
+	slog.Error("bleve index corrupt, recreating", "path", path, "err", err)
 	if removeErr := os.RemoveAll(path); removeErr != nil {
 		return nil, fmt.Errorf("remove corrupt bleve index %s: %w", path, removeErr)
 	}
 	mapping := bleve.NewIndexMapping()
 	return bleve.New(path, mapping)
+}
+
+// safeOpenBleve wraps bleve.Open with panic recovery.
+// bbolt panics on certain corruption types (e.g., invalid page type)
+// instead of returning an error.
+func safeOpenBleve(path string) (idx bleve.Index, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("bleve.Open panicked (corrupt index)", "path", path, "panic", r)
+			idx = nil
+			err = fmt.Errorf("bleve.Open panic: %v", r)
+		}
+	}()
+	return bleve.Open(path)
 }
 
 // --- SQL convenience methods ---

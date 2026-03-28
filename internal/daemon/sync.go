@@ -901,6 +901,14 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	s.ledgerMu.Lock()
 	result := func() ManagedRepoPullResult {
 		defer s.ledgerMu.Unlock()
+
+		// refresh sparse checkout so the rolling murmur window stays current.
+		// Without this, hourly directories computed at clone time go stale and
+		// new murmur files pulled from remote are not materialized on disk.
+		if err := ledger.ConfigureSparseCheckout(s.config.LedgerPath); err != nil {
+			s.logger.Warn("failed to refresh ledger sparse checkout", "error", err)
+		}
+
 		// ledger repos don't have a sync.manifest — use the manifest defaults
 		// (data/) which cover all idempotent import paths (github, linear, murmurs).
 		return s.pullManagedRepo(ctx, ManagedRepoPullOpts{

@@ -186,7 +186,7 @@ func NewHeartbeatHandler(logger *slog.Logger) *HeartbeatHandler {
 		maxRepos      = 100 // max unique repos to track
 		maxTeams      = 50  // max unique teams to track
 		maxWorkspaces = 50  // max unique workspaces to track
-		maxAgents     = 50  // max unique agent sessions to track
+		maxAgents     = 500 // max unique agent sessions to track
 	)
 
 	return &HeartbeatHandler{

@@ -584,7 +584,8 @@ const (
 // Uses AttentionNormal — agents receive critical + normal whispers,
 // but not ambient ones, to avoid flooding agent context.
 func emitWhispers(agentID string) {
-	client := daemon.NewClient() // 50ms timeout
+	// best-effort delivery — 10ms is plenty for localhost Unix socket IPC
+	client := daemon.NewClientWithTimeout(10 * time.Millisecond)
 	resp, err := client.Whispers(agentID, "normal", nil)
 	if err != nil || resp == nil {
 		return
