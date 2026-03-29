@@ -37,7 +37,9 @@ func BenchmarkIndexMonoRepo(b *testing.B) {
 		err = IndexLocalRepo(context.Background(), s, repoPath, IndexOptions{})
 
 		b.StopTimer()
-		s.Close()
+		if closeErr := s.Close(); closeErr != nil {
+			b.Fatal(closeErr)
+		}
 		if err != nil {
 			b.Fatal(err)
 		}

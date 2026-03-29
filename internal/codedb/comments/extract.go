@@ -103,6 +103,7 @@ func Extract(source, language string) []Comment {
 				text := strings.TrimSpace(commentBuf.String())
 				if text != "" {
 					kind := classifyComment(fam, "line", text)
+					text = normalizeDocText(fam, "line", kind, text)
 					comments = append(comments, Comment{
 						Text:    text,
 						Kind:    kind,
@@ -237,6 +238,7 @@ func Extract(source, language string) []Comment {
 		text := strings.TrimSpace(commentBuf.String())
 		if text != "" {
 			kind := classifyComment(fam, "line", text)
+			text = normalizeDocText(fam, "line", kind, text)
 			comments = append(comments, Comment{
 				Text:    text,
 				Kind:    kind,
@@ -284,4 +286,21 @@ func classifyComment(fam *Family, baseKind, text string) string {
 		return "doc"
 	}
 	return baseKind
+}
+
+// normalizeDocText strips the redundant doc delimiter from doc-comment text.
+// For /// comments, the LinePrefix "//" is already stripped, leaving "/ text";
+// this removes the extra leading "/" and any following whitespace.
+// For ## comments, similarly strips the extra "#".
+func normalizeDocText(fam *Family, baseKind, kind, text string) string {
+	if kind != "doc" {
+		return text
+	}
+	if baseKind == "line" && fam.LinePrefix == "//" && len(text) > 0 && text[0] == '/' {
+		return strings.TrimSpace(text[1:])
+	}
+	if baseKind == "line" && fam.LinePrefix == "#" && len(text) > 0 && text[0] == '#' {
+		return strings.TrimSpace(text[1:])
+	}
+	return text
 }

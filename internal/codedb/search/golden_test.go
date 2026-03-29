@@ -128,6 +128,7 @@ func TestGoldenParseQuery(t *testing.T) {
 		{"or_multiword", "error handling OR panic recovery"},
 		// Quoted phrases
 		{"quoted_phrase", `lang:rust "foo bar"`},
+		{"message_quoted", `type:commit message:"fix bug"`},
 		// Edge cases
 		{"unknown_filter_as_term", "http://example.com foo"},
 		{"combined_repo_rev", "repo:myrepo@develop foo"},
@@ -141,6 +142,23 @@ func TestGoldenParseQuery(t *testing.T) {
 				t.Fatalf("ParseQuery(%q): %v", tc.input, err)
 			}
 			writeOrCompareGolden(t, "parse", tc.name, got)
+		})
+	}
+
+	// Error cases: queries that must return a parse error.
+	errorCases := []struct {
+		name  string
+		input string
+	}{
+		{"invalid_type", "type:unknown_type foo"},
+		{"invalid_count", "count:abc foo"},
+	}
+	for _, tc := range errorCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseQuery(tc.input)
+			if err == nil {
+				t.Fatalf("ParseQuery(%q): expected error, got nil", tc.input)
+			}
 		})
 	}
 }
@@ -186,6 +204,7 @@ func TestGoldenTranslate(t *testing.T) {
 		{"commit_author_only", "type:commit author:person-a"},
 		{"commit_with_author", "type:commit author:person-a refactor"},
 		{"commit_with_message", "type:commit message:fix"},
+		{"commit_with_quoted_message", `type:commit message:"fix bug"`},
 		{"commit_with_neg_message", "type:commit -message:WIP author:person-a"},
 		{"commit_with_dates", "type:commit before:2026-01-01 after:2025-06-01 refactor"},
 		{"commit_with_or", "type:commit fix OR refactor"},

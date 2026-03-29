@@ -169,9 +169,9 @@ func buildRepoWithFileChanges(b *testing.B, commits int) string {
 			fname := fmt.Sprintf("file%d.go", f)
 			// 50-line file: enough for generateDiffText to produce real output.
 			var sb strings.Builder
-			sb.WriteString(fmt.Sprintf("package main // commit %d\n", i))
+			fmt.Fprintf(&sb, "package main // commit %d\n", i)
 			for line := 0; line < 50; line++ {
-				sb.WriteString(fmt.Sprintf("func F%d_%d() { return %d }\n", f, line, i*line))
+				fmt.Fprintf(&sb, "func F%d_%d() { return %d }\n", f, line, i*line)
 			}
 			require.NoError(b, os.WriteFile(filepath.Join(dir, fname), []byte(sb.String()), 0o644))
 			_, err := wt.Add(fname)

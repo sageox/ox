@@ -48,7 +48,7 @@ func TestExtractCFamily(t *testing.T) {
 			lang:   "rust",
 			source: "/// doc line\n",
 			want: []Comment{
-				{Text: "/ doc line", Kind: "doc", Line: 1, EndLine: 1, Col: 1, EndCol: 13},
+				{Text: "doc line", Kind: "doc", Line: 1, EndLine: 1, Col: 1, EndCol: 13},
 			},
 		},
 		{
@@ -98,7 +98,7 @@ func TestExtractHashFamily(t *testing.T) {
 			lang:   "python",
 			source: "## Module docs\n",
 			want: []Comment{
-				{Text: "# Module docs", Kind: "doc", Line: 1, EndLine: 1, Col: 1, EndCol: 15},
+				{Text: "Module docs", Kind: "doc", Line: 1, EndLine: 1, Col: 1, EndCol: 15},
 			},
 		},
 		{

@@ -480,7 +480,15 @@ func BuildDirtyIndex(ctx context.Context, localPath, dirtyPath string, opts Inde
 	}
 
 	// write manifest so GCDirtyIndexes can reverse the hash back to the path
-	_ = os.WriteFile(dirtyPath+".manifest", []byte(localPath), 0o644)
+	absPath, err := filepath.Abs(localPath)
+	if err != nil {
+		_ = os.RemoveAll(dirtyPath)
+		return 0, fmt.Errorf("abs dirty worktree path: %w", err)
+	}
+	if err := os.WriteFile(dirtyPath+".manifest", []byte(absPath), 0o644); err != nil {
+		_ = os.RemoveAll(dirtyPath)
+		return 0, fmt.Errorf("write dirty manifest: %w", err)
+	}
 
 	if opts.Progress != nil {
 		opts.Progress(fmt.Sprintf("indexed %d dirty files", indexed))
@@ -515,8 +523,11 @@ func GCDirtyIndexes(codedbDir string) (int, error) {
 
 		raw, err := os.ReadFile(manifestPath)
 		if err != nil {
-			// no manifest — written by an older build; leave it alone
-			continue
+			if os.IsNotExist(err) {
+				// no manifest — written by an older build; leave it alone
+				continue
+			}
+			return 0, fmt.Errorf("read dirty manifest %s: %w", manifestPath, err)
 		}
 		worktreePath := string(raw)
 		if _, statErr := os.Stat(worktreePath); os.IsNotExist(statErr) {

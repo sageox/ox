@@ -17,20 +17,34 @@ func tokenize(input string) []string {
 		ch := runes[i]
 		switch ch {
 		case '"':
-			if current.Len() > 0 {
-				tokens = append(tokens, current.String())
-				current.Reset()
-			}
-			i++
-			var quoted strings.Builder
-			for i < len(runes) && runes[i] != '"' {
-				quoted.WriteRune(runes[i])
+			cur := current.String()
+			if len(cur) > 0 && cur[len(cur)-1] == ':' {
+				// key:"quoted value" — consume the quoted content as the filter value
+				// so `message:"fix bug"` tokenizes as one token `message:fix bug`
 				i++
+				for i < len(runes) && runes[i] != '"' {
+					current.WriteRune(runes[i])
+					i++
+				}
+				if i < len(runes) {
+					i++ // skip closing quote
+				}
+			} else {
+				if current.Len() > 0 {
+					tokens = append(tokens, cur)
+					current.Reset()
+				}
+				i++
+				var quoted strings.Builder
+				for i < len(runes) && runes[i] != '"' {
+					quoted.WriteRune(runes[i])
+					i++
+				}
+				if i < len(runes) {
+					i++ // skip closing quote
+				}
+				tokens = append(tokens, `"`+quoted.String()+`"`)
 			}
-			if i < len(runes) {
-				i++ // skip closing quote
-			}
-			tokens = append(tokens, `"`+quoted.String()+`"`)
 		case ' ', '\t':
 			if current.Len() > 0 {
 				tokens = append(tokens, current.String())

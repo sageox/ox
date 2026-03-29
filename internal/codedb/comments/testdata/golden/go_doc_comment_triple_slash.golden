@@ -8,7 +8,7 @@
     "EndCol": 36
   },
   {
-    "Text": "/ EnhancedDoc is a doc comment.",
+    "Text": "EnhancedDoc is a doc comment.",
     "Kind": "doc",
     "Line": 3,
     "EndLine": 3,
