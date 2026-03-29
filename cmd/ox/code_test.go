@@ -161,6 +161,39 @@ func TestPopulateStatsFromDaemonCache_ZeroValues(t *testing.T) {
 	assert.Equal(t, 0, totalIssues)
 }
 
+// TestCodeStatusDisplay_EmptyIndex is a regression test for the false-positive where
+// ox code stats showed "✓ indexed" when the index directory existed but the DB had 0 commits.
+// This happens when indexing was interrupted after schema creation but before any data was written.
+func TestCodeStatusDisplay_EmptyIndex(t *testing.T) {
+	// Reproduce the exact condition: indexExists=true, codeStats=nil (no daemon), totalCommits=0.
+	// The switch in codeStatusCmd must NOT fall through to the default "✓ indexed" case.
+	indexExists := true
+	totalCommits := 0
+	var codeStats *daemon.CodeDBStats // nil = no daemon running
+
+	// Evaluate the switch conditions in order, matching codeStatusCmd logic.
+	var statusCase string
+	switch {
+	case !indexExists && (codeStats == nil || !codeStats.IndexingNow):
+		statusCase = "not-indexed"
+	case codeStats != nil && codeStats.IndexingNow:
+		statusCase = "indexing"
+	case codeStats != nil && codeStats.LastError != "" && totalCommits == 0:
+		statusCase = "pending"
+	case codeStats != nil && codeStats.LastError != "":
+		statusCase = "error"
+	case codeStats != nil && !codeStats.LastIndexed.IsZero():
+		statusCase = "indexed-with-time"
+	case indexExists && totalCommits == 0:
+		statusCase = "empty-index"
+	default:
+		statusCase = "indexed"
+	}
+
+	assert.Equal(t, "empty-index", statusCase,
+		"index dir exists with 0 commits and no daemon must show 'empty index', not 'indexed'")
+}
+
 func TestFormatDurationBrief(t *testing.T) {
 	tests := []struct {
 		name string

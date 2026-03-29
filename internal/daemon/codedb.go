@@ -365,6 +365,15 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 	isInitial := false
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 		isInitial = true
+	} else {
+		// dir exists but check if it was never successfully indexed
+		// (e.g. a prior run created the schema then crashed before writing commits)
+		m.mu.Lock()
+		emptyDB := m.stats.Commits == 0 && !m.stats.IndexExists
+		m.mu.Unlock()
+		if emptyDB {
+			isInitial = true
+		}
 	}
 
 	// run background index (initial build or incremental refresh)

@@ -455,6 +455,14 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString(statusMutedStyle.Render(codeStats.LastError))
 		case codeStats != nil && !codeStats.LastIndexed.IsZero():
 			b.WriteString(statusSuccessStyle.Render("✓ indexed (" + status.FormatTimeAgo(codeStats.LastIndexed) + ")"))
+		case indexExists && totalCommits == 0:
+			// index dir and schema exist but no data — prior indexing was interrupted or failed
+			b.WriteString(statusWarningStyle.Render("⚠ empty index"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("Run "))
+			b.WriteString(statusHighlightStyle.Render("ox code index"))
+			b.WriteString(statusMutedStyle.Render(" to populate it"))
 		default:
 			b.WriteString(statusSuccessStyle.Render("✓ indexed"))
 		}
