@@ -119,7 +119,30 @@ const metaFilename = "meta.json"
 // When meta.Files is populated, also replaces content files with LFS pointer
 // files (standard git-lfs naming). Pointer write failures are non-fatal —
 // session data is safe in LFS + meta.json regardless.
+//
+// Callers that need to push content files to git BEFORE replacing them with
+// pointer stubs should use WriteSessionMetaOnly followed by WritePointerFiles
+// after a successful push.
 func WriteSessionMeta(sessionPath string, meta *SessionMeta) error {
+	if err := WriteSessionMetaOnly(sessionPath, meta); err != nil {
+		return err
+	}
+
+	// replace content files with LFS pointer files for GC protection
+	if len(meta.Files) > 0 {
+		if _, err := WritePointerFiles(sessionPath, meta.Files); err != nil {
+			slog.Warn("LFS pointer file write failed", "error", err, "path", sessionPath)
+		}
+	}
+
+	return nil
+}
+
+// WriteSessionMetaOnly writes meta.json without replacing content files with
+// LFS pointer stubs. Use this when content files must remain intact until a
+// successful git push — call WritePointerFiles separately after the push so that
+// push failure never leaves a session with pointer stubs but no remote copy.
+func WriteSessionMetaOnly(sessionPath string, meta *SessionMeta) error {
 	if meta == nil {
 		return fmt.Errorf("nil session meta")
 	}
@@ -139,13 +162,6 @@ func WriteSessionMeta(sessionPath string, meta *SessionMeta) error {
 	if err := os.Rename(tmpPath, metaPath); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename session meta: %w", err)
-	}
-
-	// replace content files with LFS pointer files for GC protection
-	if len(meta.Files) > 0 {
-		if _, err := WritePointerFiles(sessionPath, meta.Files); err != nil {
-			slog.Warn("LFS pointer file write failed", "error", err, "path", sessionPath)
-		}
 	}
 
 	return nil

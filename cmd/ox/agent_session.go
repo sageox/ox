@@ -1010,9 +1010,11 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		return fmt.Errorf("LFS upload: %w", err)
 	}
 
-	// update meta.json with LFS file references
+	// update meta.json with LFS file references; use WriteSessionMetaOnly so
+	// content files remain intact on disk until after the push — this prevents
+	// data loss if the push fails (pointer stubs + no remote = unrecoverable)
 	meta.Files = fileRefs
-	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
+	if err := lfs.WriteSessionMetaOnly(sessionDir, meta); err != nil {
 		return fmt.Errorf("update meta.json with LFS refs: %w", err)
 	}
 
@@ -1026,6 +1028,13 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		// set marker - session saved locally but not synced to remote
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("commit and push: %w", err)
+	}
+
+	// push succeeded — now safe to replace content files with LFS pointer stubs
+	if len(meta.Files) > 0 {
+		if _, err := lfs.WritePointerFiles(sessionDir, meta.Files); err != nil {
+			slog.Warn("LFS pointer file write failed after push", "error", err, "session", sessionName)
+		}
 	}
 
 	return nil

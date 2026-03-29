@@ -302,14 +302,15 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 		return fmt.Errorf("LFS upload: %w", err)
 	}
 
-	// build and write meta.json
+	// build and write meta.json; use WriteSessionMetaOnly so content files
+	// remain intact until after the push (pointer stubs + no remote = unrecoverable)
 	meta := sessionMetaBase(orphan.SessionName, orphan.Meta.Username, orphan.Meta.AgentID, orphan.Meta.AgentType, orphan.Meta.CreatedAt, projectRoot).
 		Model(orphan.Meta.Model).
 		EntryCount(orphan.EntryCount).
 		StopReason(session.StopReasonRecovered).
 		WithFiles(fileRefs).
 		Build()
-	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
+	if err := lfs.WriteSessionMetaOnly(sessionDir, meta); err != nil {
 		return fmt.Errorf("write meta.json: %w", err)
 	}
 
@@ -328,6 +329,13 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 	// commit and push (meta.json + optional summary.json)
 	if err := commitAndPushLedgerWithExtras(ledgerPath, orphan.SessionName, hasSummary); err != nil {
 		return fmt.Errorf("commit and push: %w", err)
+	}
+
+	// push succeeded — now safe to replace content files with LFS pointer stubs
+	if len(meta.Files) > 0 {
+		if _, err := lfs.WritePointerFiles(sessionDir, meta.Files); err != nil {
+			slog.Warn("LFS pointer file write failed after push", "error", err, "session", orphan.SessionName)
+		}
 	}
 
 	return nil

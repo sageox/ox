@@ -174,24 +174,46 @@ func isSessionInLedger(sessionName string) bool {
 	return statErr == nil && info.IsDir()
 }
 
-// resolveSessionForAbort finds a session by name in the local cache.
+// resolveSessionForAbort finds a session by name across all known session locations.
 // Supports partial name resolution (e.g., agent ID suffix like "OxKMZN").
 // Returns the resolved session name and full path to the session folder.
+//
+// Searches the same three locations as 'ox session list':
+//  1. XDG cache (active/recent recordings)
+//  2. Ledger sessions directory (uploaded sessions)
+//  3. Ledger cache (in-progress sessions before upload)
 func resolveSessionForAbort(projectRoot, nameArg string) (string, string, error) {
-	repoID := getRepoIDOrDefault(projectRoot)
-	contextPath := session.GetContextPath(repoID)
+	// build list of stores to search, in priority order
+	var stores []*session.Store
 
-	if contextPath != "" {
-		store, err := session.NewStore(contextPath)
-		if err == nil {
-			resolved, resolveErr := store.ResolveSessionName(nameArg)
-			if resolveErr != nil {
-				return "", "", resolveErr // ambiguous match
-			}
-			sessionPath := store.GetSessionPath(resolved)
-			if info, statErr := os.Stat(sessionPath); statErr == nil && info.IsDir() {
-				return resolved, sessionPath, nil
-			}
+	// 1. XDG cache (primary location for active recordings)
+	repoID := getRepoIDOrDefault(projectRoot)
+	if contextPath := session.GetContextPath(repoID); contextPath != "" {
+		if s, err := session.NewStore(contextPath); err == nil {
+			stores = append(stores, s)
+		}
+	}
+
+	// 2. Ledger sessions + 3. Ledger cache
+	if ledgerPath, err := resolveLedgerPath(); err == nil {
+		if s, err := session.NewStore(ledgerPath); err == nil {
+			stores = append(stores, s)
+		}
+		ledgerCachePath := filepath.Join(ledgerPath, ".sageox", "cache")
+		if s, err := session.NewStore(ledgerCachePath); err == nil {
+			stores = append(stores, s)
+		}
+	}
+
+	for _, s := range stores {
+		resolved, resolveErr := s.ResolveSessionName(nameArg)
+		if resolveErr != nil {
+			// ambiguous match: surface the error immediately
+			return "", "", resolveErr
+		}
+		sessionPath := s.GetSessionPath(resolved)
+		if info, statErr := os.Stat(sessionPath); statErr == nil && info.IsDir() {
+			return resolved, sessionPath, nil
 		}
 	}
 

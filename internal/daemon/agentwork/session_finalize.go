@@ -466,8 +466,9 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		return nil
 	}
 
-	// write meta.json and attempt LFS upload before git commit
-	h.writeMetaAndUploadLFS(payload, stored, summaryResp)
+	// write meta.json and attempt LFS upload before git commit; returns file refs
+	// so we can write pointer files only after a successful push
+	fileRefs := h.writeMetaAndUploadLFS(payload, stored, summaryResp)
 
 	// ensure sessions/.gitignore before commit
 	sessionsDir := filepath.Dir(payload.SessionDir)
@@ -476,6 +477,13 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	}
 
 	h.gitCommitAndPush(payload)
+
+	// push succeeded — now safe to replace content files with LFS pointer stubs
+	if len(fileRefs) > 0 {
+		if _, err := lfs.WritePointerFiles(payload.SessionDir, fileRefs); err != nil {
+			h.logger.Warn("LFS pointer file write failed after push", "session", filepath.Base(payload.SessionDir), "err", err)
+		}
+	}
 	h.logger.Info("session recovered via anti-entropy",
 		"session", sessionName,
 		"quality_score", summaryResp.QualityScore,
@@ -486,7 +494,8 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 
 // writeMetaAndUploadLFS writes meta.json and attempts LFS upload for a finalized session.
 // LFS upload is best-effort: on failure, content files remain as regular blobs.
-func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizePayload, stored *session.StoredSession, summaryResp *session.SummarizeResponse) {
+// Returns the LFS file refs so the caller can write pointer files after a successful push.
+func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizePayload, stored *session.StoredSession, summaryResp *session.SummarizeResponse) map[string]lfs.FileRef {
 	sessionName := filepath.Base(payload.SessionDir)
 
 	// extract identity from raw.jsonl header
@@ -514,34 +523,38 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		Build()
 
 	// write meta.json (without LFS refs initially)
-	if err := lfs.WriteSessionMeta(payload.SessionDir, meta); err != nil {
+	if err := lfs.WriteSessionMetaOnly(payload.SessionDir, meta); err != nil {
 		h.logger.Warn("meta.json write failed", "session", sessionName, "err", err)
-		return
+		return nil
 	}
 
 	// attempt LFS upload (best-effort)
 	if h.skipLFS || h.projectRoot == "" {
-		return
+		return nil
 	}
 
 	ep := endpoint.GetForProject(h.projectRoot)
 	client, err := lfs.NewClientFromLedger(payload.LedgerPath, ep)
 	if err != nil {
 		h.logger.Warn("LFS client creation failed, committing raw content as fallback", "session", sessionName, "err", err)
-		return
+		return nil
 	}
 
 	fileRefs, err := lfs.UploadSessionFiles(client, payload.SessionDir, h.logger)
 	if err != nil {
 		h.logger.Warn("LFS upload failed, committing raw content as fallback", "session", sessionName, "err", err)
-		return
+		return nil
 	}
 
-	// update meta.json with LFS file references (triggers pointer file creation)
+	// update meta.json with LFS file references; use WriteSessionMetaOnly so content
+	// files remain intact until after the push (caller writes pointer files post-push)
 	meta.Files = fileRefs
-	if err := lfs.WriteSessionMeta(payload.SessionDir, meta); err != nil {
+	if err := lfs.WriteSessionMetaOnly(payload.SessionDir, meta); err != nil {
 		h.logger.Warn("meta.json update with LFS refs failed", "session", sessionName, "err", err)
+		return nil
 	}
+
+	return fileRefs
 }
 
 // gitCommitAndPush stages, commits, and pushes the finalized session.

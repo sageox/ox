@@ -587,7 +587,12 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		if err := WriteSessionMarker(marker); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to write session marker: %v\n", err)
 		}
+	}
 
+	// always write SAGEOX_AGENT_ID to the env file so /clear in Claude Code
+	// picks up the new agent ID rather than inheriting a stale one from the
+	// previous session (CLAUDE_ENV_FILE persists across /clear)
+	{
 		envVars := map[string]string{
 			"SAGEOX_AGENT_ID":   agentID,
 			"SAGEOX_SESSION_ID": inst.ServerSessionID,
