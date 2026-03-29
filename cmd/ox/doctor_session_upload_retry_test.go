@@ -615,15 +615,13 @@ func TestRetrySessionUpload_CopiesFromCache(t *testing.T) {
 			"error should be from LFS upload phase, not from file copy")
 	}
 
-	// verify raw.jsonl was copied to ledger session dir
+	// raw.jsonl MUST exist in the ledger session dir — the copy happens before LFS upload
 	ledgerRawPath := filepath.Join(clonePath, "sessions", orphan.SessionName, ledgerFileRaw)
-	if _, statErr := os.Stat(ledgerRawPath); statErr == nil {
-		// file was copied — verify content matches cache
-		ledgerRaw, readErr := os.ReadFile(ledgerRawPath)
-		require.NoError(t, readErr)
-		assert.Equal(t, rawContent, string(ledgerRaw),
-			"ledger raw.jsonl should match cache content")
-	}
+	require.FileExists(t, ledgerRawPath, "raw.jsonl must be copied to ledger before LFS upload")
+	ledgerRaw, readErr := os.ReadFile(ledgerRawPath)
+	require.NoError(t, readErr)
+	require.Equal(t, rawContent, string(ledgerRaw),
+		"ledger raw.jsonl should match cache content")
 
 	// verify cache content is still intact regardless of retry outcome
 	cacheRaw, readErr := os.ReadFile(filepath.Join(cacheSessionDir, ledgerFileRaw))

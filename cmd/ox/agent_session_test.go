@@ -503,148 +503,70 @@ func TestFilterEntriesAfterStart(t *testing.T) {
 }
 
 func TestGenericAdapterDropFile_Created(t *testing.T) {
-	// when adapter is "generic" and sessionFile is empty, a drop file should be
-	// created so the agent can write conversation data into it
-	tmpDir := t.TempDir()
-	sessionPath := filepath.Join(tmpDir, "sessions", "test-session")
-
-	// simulate the logic from agent_session.go:179-200
-	adapterName := "generic"
-	sessionFile := "" // triggers drop file creation
-
-	if sessionFile == "" && adapterName == "generic" {
-		require.NoError(t, os.MkdirAll(sessionPath, 0755))
-		dropFile := filepath.Join(sessionPath, "input.jsonl")
-		require.NoError(t, os.WriteFile(dropFile, []byte{}, 0600))
-		sessionFile = dropFile
-	}
-
-	// drop file should exist and be empty
-	info, err := os.Stat(sessionFile)
-	require.NoError(t, err)
-	assert.Equal(t, int64(0), info.Size(), "drop file should be empty initially")
-	assert.Equal(t, "input.jsonl", filepath.Base(sessionFile))
+	// when adapter is "generic" and sessionFile is empty, production code
+	// should decide a drop file is needed
+	assert.True(t, needsGenericDropFile("", "generic"),
+		"needsGenericDropFile should return true for generic adapter with no session file")
 }
 
 func TestGenericAdapterDropFile_NotCreatedForNonGeneric(t *testing.T) {
-	// when adapter is "claude-code", the generic drop file logic should not run
-	tmpDir := t.TempDir()
-	sessionPath := filepath.Join(tmpDir, "sessions", "test-session")
-
-	adapterName := "claude-code"
-	sessionFile := ""
-
-	if sessionFile == "" && adapterName == "generic" {
-		require.NoError(t, os.MkdirAll(sessionPath, 0755))
-		dropFile := filepath.Join(sessionPath, "input.jsonl")
-		require.NoError(t, os.WriteFile(dropFile, []byte{}, 0600))
-		sessionFile = dropFile
-	}
-
-	// session directory should not have been created
-	_, err := os.Stat(sessionPath)
-	assert.True(t, os.IsNotExist(err), "session dir should not exist for non-generic adapter")
-	assert.Empty(t, sessionFile, "sessionFile should remain empty for non-generic adapter")
+	// non-generic adapters should not trigger drop file creation
+	assert.False(t, needsGenericDropFile("", "claude-code"),
+		"needsGenericDropFile should return false for claude-code adapter")
+	assert.False(t, needsGenericDropFile("", "codex"),
+		"needsGenericDropFile should return false for codex adapter")
+	// when a session file already exists, even generic should not need a drop file
+	assert.False(t, needsGenericDropFile("/some/existing/file.jsonl", "generic"),
+		"needsGenericDropFile should return false when session file already provided")
 }
 
 func TestSessionStop_EmptyDropFile_MarksIncomplete(t *testing.T) {
-	// when a generic adapter session has an empty (or missing) drop file,
-	// session stop should mark the recording state as incomplete
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-	t.Setenv("XDG_CACHE_HOME", "")
-
-	projectDir := t.TempDir()
-	sageoxDir := filepath.Join(projectDir, ".sageox")
-	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
-
-	sessionsDir := filepath.Join(projectDir, "sessions")
-	sessionName := "2026-03-29T10-00-testuser-OxIncomplete"
-	sessionPath := filepath.Join(sessionsDir, sessionName)
-	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+	// when a generic adapter session has an empty drop file,
+	// isGenericDropFileEmpty should return true (triggering incomplete marking)
+	sessionPath := t.TempDir()
 
 	// create empty drop file (0 bytes)
 	dropFile := filepath.Join(sessionPath, "input.jsonl")
 	require.NoError(t, os.WriteFile(dropFile, []byte{}, 0600))
 
-	agentID := "OxIncomplete"
-
-	// save initial recording state
-	recordingState := &session.RecordingState{
-		AgentID:     agentID,
-		StartedAt:   time.Now(),
-		SessionPath: sessionPath,
-		SessionFile: dropFile,
+	state := &session.RecordingState{
 		AdapterName: "generic",
-	}
-	require.NoError(t, session.SaveRecordingState(projectDir, recordingState))
-
-	// simulate the incomplete detection from agent_session.go:384-389
-	state, err := session.LoadRecordingState(projectDir)
-	require.NoError(t, err)
-	require.NotNil(t, state)
-
-	if pipeline.IsGenericAdapter(state.AdapterName) && state.SessionFile != "" {
-		info, statErr := os.Stat(state.SessionFile)
-		if statErr != nil || info.Size() == 0 {
-			err := session.UpdateRecordingStateForAgent(projectDir, agentID, func(s *session.RecordingState) {
-				s.StopIncomplete = true
-			})
-			require.NoError(t, err)
-		}
+		SessionFile: dropFile,
 	}
 
-	// verify the state was marked incomplete
-	updatedState, err := session.LoadRecordingStateForAgent(projectDir, agentID)
-	require.NoError(t, err)
-	require.NotNil(t, updatedState)
-	assert.True(t, updatedState.StopIncomplete,
-		"recording state should be marked incomplete when drop file is empty")
+	assert.True(t, isGenericDropFileEmpty(state),
+		"isGenericDropFileEmpty should return true when drop file is empty")
+
+	// also verify missing file triggers incomplete
+	stateMissing := &session.RecordingState{
+		AdapterName: "generic",
+		SessionFile: filepath.Join(sessionPath, "nonexistent.jsonl"),
+	}
+	assert.True(t, isGenericDropFileEmpty(stateMissing),
+		"isGenericDropFileEmpty should return true when drop file is missing")
 }
 
 func TestSessionStop_NonEmptyDropFile_NotIncomplete(t *testing.T) {
 	// a non-empty drop file should NOT trigger the incomplete path
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-	t.Setenv("XDG_CACHE_HOME", "")
+	sessionPath := t.TempDir()
 
-	projectDir := t.TempDir()
-	sageoxDir := filepath.Join(projectDir, ".sageox")
-	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
-
-	sessionsDir := filepath.Join(projectDir, "sessions")
-	sessionName := "2026-03-29T10-00-testuser-OxComplete"
-	sessionPath := filepath.Join(sessionsDir, sessionName)
-	require.NoError(t, os.MkdirAll(sessionPath, 0755))
-
-	// create drop file with content
 	dropFile := filepath.Join(sessionPath, "input.jsonl")
 	content := `{"type":"user","content":"Hello"}` + "\n"
 	require.NoError(t, os.WriteFile(dropFile, []byte(content), 0600))
 
-	agentID := "OxComplete"
-
-	recordingState := &session.RecordingState{
-		AgentID:     agentID,
-		StartedAt:   time.Now(),
-		SessionPath: sessionPath,
-		SessionFile: dropFile,
+	state := &session.RecordingState{
 		AdapterName: "generic",
-	}
-	require.NoError(t, session.SaveRecordingState(projectDir, recordingState))
-
-	state, err := session.LoadRecordingState(projectDir)
-	require.NoError(t, err)
-	require.NotNil(t, state)
-
-	markedIncomplete := false
-	if pipeline.IsGenericAdapter(state.AdapterName) && state.SessionFile != "" {
-		info, statErr := os.Stat(state.SessionFile)
-		if statErr != nil || info.Size() == 0 {
-			markedIncomplete = true
-		}
+		SessionFile: dropFile,
 	}
 
-	assert.False(t, markedIncomplete,
-		"non-empty drop file should not trigger incomplete path")
+	assert.False(t, isGenericDropFileEmpty(state),
+		"isGenericDropFileEmpty should return false when drop file has content")
+
+	// non-generic adapter should also return false regardless of file state
+	stateNonGeneric := &session.RecordingState{
+		AdapterName: "claude-code",
+		SessionFile: dropFile,
+	}
+	assert.False(t, isGenericDropFileEmpty(stateNonGeneric),
+		"isGenericDropFileEmpty should return false for non-generic adapters")
 }

@@ -89,8 +89,8 @@ func TestSessionStore_ResolveSessionName_NotFound(t *testing.T) {
 	store, err := session.NewStore(baseDir)
 	require.NoError(t, err)
 
-	// ResolveSessionName returns the input unchanged when no match is found
-	// (caller gets a "not found" error when trying to use the path)
+	// ResolveSessionName returns the input unchanged when no match is found;
+	// the resolved name simply won't correspond to an existing directory
 	resolved, err := store.ResolveSessionName("nonexistent")
 	require.NoError(t, err, "no match returns input as-is, not an error")
 	assert.Equal(t, "nonexistent", resolved, "unmatched name should be returned unchanged")
