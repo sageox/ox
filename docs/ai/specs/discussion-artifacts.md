@@ -119,7 +119,7 @@ The server populates enrichment fields across two processing stages:
 
 **During keyframe extraction** (import-video pipeline, before summarization):
 - **`transcript_cue`**: Correlated from WebVTT during frame extraction. Speaker-prefixed text from the nearest VTT cue. Empty if no transcript available at extraction time.
-- **`content_type`**: Vision model classification via `AnalyzeKeyframesWithVision()`. Values: `wireframe`, `live-ui`, `diagram`, `code`, `slide`, `terminal`, `transition`. Non-fatal — empty if vision analysis fails or is skipped.
+- **`content_type`**: Vision model classification via `AnalyzeKeyframesWithVision()`. Values: `wireframe`, `live-ui`, `diagram`, `code`, `slide`, `terminal`, `ui`, `transition`, `other`. Non-fatal — empty if vision analysis fails or is skipped.
 - **`description`**: Vision model one-line summary of visible content. Same non-fatal behavior as `content_type`.
 
 Model: `ModelForVision()` from `packages/llm-go` (Sonnet 4 via Bedrock). Batches of 6 frames.

@@ -85,7 +85,7 @@ func VisualTypes(keyframes *KeyframesManifest, chapterID string) []string {
 // KeyframesForChapter returns keyframes linked to the given chapter, sorted by timestamp.
 // Returns nil if the manifest is nil or no keyframes match.
 func KeyframesForChapter(keyframes *KeyframesManifest, chapterID string) []Keyframe {
-	if keyframes == nil {
+	if keyframes == nil || chapterID == "" {
 		return nil
 	}
 	var result []Keyframe

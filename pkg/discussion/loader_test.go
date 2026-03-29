@@ -505,14 +505,24 @@ func TestKeyframesForChapter(t *testing.T) {
 			wantLen:   1,
 			wantOrder: []float64{20},
 		},
+		{
+			name: "empty chapterID returns nil",
+			mf: &discussion.KeyframesManifest{
+				Keyframes: []discussion.Keyframe{
+					{S3Key: "a.png", ChapterID: "", TimestampSeconds: 10},
+					{S3Key: "b.png", ChapterID: "ch-1", TimestampSeconds: 20},
+				},
+			},
+			chapterID: "",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := discussion.KeyframesForChapter(tt.mf, tt.chapterID)
 			if tt.wantLen == 0 {
-				if len(got) != 0 {
-					t.Errorf("got %d keyframes, want 0", len(got))
+				if got != nil {
+					t.Errorf("got %v, want nil", got)
 				}
 				return
 			}

@@ -306,9 +306,15 @@ else
                         typed_kf=$(jq '[.keyframes[] | select(.content_type != null and .content_type != "")] | length' "$DISC_DIR/keyframes.json")
                         desc_kf=$(jq '[.keyframes[] | select(.description != null and .description != "")] | length' "$DISC_DIR/keyframes.json")
                         if [[ $typed_kf -gt 0 ]]; then
-                            echo "  keyframes: $typed_kf/$kf_array_len have content_type, $desc_kf have description ✓"
+                            echo "  keyframes: $typed_kf/$kf_array_len have content_type ✓"
                         else
                             echo "  warn: no keyframes have content_type (vision analysis may have been skipped)"
+                        fi
+
+                        if [[ $desc_kf -gt 0 ]]; then
+                            echo "  keyframes: $desc_kf/$kf_array_len have description ✓"
+                        else
+                            echo "  warn: no keyframes have description (vision analysis may have been skipped)"
                         fi
 
                         # enrichment: chapter_id (requires post-summary step, not yet implemented)
