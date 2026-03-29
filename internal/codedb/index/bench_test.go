@@ -129,7 +129,7 @@ func BenchmarkGenerateDiffText(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		result := generateDiffText(repo, fname, oldOID, newOID, true, true)
+		result := generateDiffText(repo, fname, oldOID, newOID, true, true, "", "")
 		if result == "" {
 			b.Fatal("empty diff")
 		}
