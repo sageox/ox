@@ -3,12 +3,15 @@
 package ledger_twin
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/glance"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -34,6 +37,7 @@ func TestMain(m *testing.M) {
 	fmt.Fprintf(os.Stderr, "\n╔══════════════════════════════════════════════════════════════╗\n")
 	fmt.Fprintf(os.Stderr, "║  LEDGER TWIN: %s\n", ledgerPath)
 	fmt.Fprintf(os.Stderr, "║  Sessions:    %d\n", len(manifest.Sessions))
+	fmt.Fprintf(os.Stderr, "║  Murmurs:     %d\n", len(manifest.Murmurs))
 	fmt.Fprintf(os.Stderr, "║  Windows:     %d\n", len(manifest.Windows))
 	fmt.Fprintf(os.Stderr, "║  Inspect:     ls %s/sessions/\n", ledgerPath)
 	fmt.Fprintf(os.Stderr, "╚══════════════════════════════════════════════════════════════╝\n\n")
@@ -353,4 +357,122 @@ func TestWindowIsolation(t *testing.T) {
 				"session %s should not be after window until", s.Name)
 		}
 	}
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Murmur tests
+// ═══════════════════════════════════════════════════════════════
+
+// readMurmursInRange reads murmur files between since and until.
+// Cannot use ledger.ReadMurmursInWindow because it uses time.Now().
+func readMurmursInRange(baseDir string, since, until time.Time) ([]ledger.MurmurFile, error) {
+	var murmurs []ledger.MurmurFile
+	current := since.Truncate(time.Hour)
+	end := until
+	if end.IsZero() {
+		end = since.Add(24 * time.Hour)
+	}
+	for !current.After(end) {
+		dir := filepath.Join(baseDir, ledger.MurmurDateHourDir(current))
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			current = current.Add(time.Hour)
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				continue
+			}
+			var m ledger.MurmurFile
+			if json.Unmarshal(data, &m) != nil {
+				continue
+			}
+			if !m.Timestamp.Before(since) && (until.IsZero() || !m.Timestamp.After(until)) {
+				murmurs = append(murmurs, m)
+			}
+		}
+		current = current.Add(time.Hour)
+	}
+	return murmurs, nil
+}
+
+func TestMurmurGeneration(t *testing.T) {
+	for _, w := range manifest.Windows {
+		if w.MinMurmurs == 0 && len(w.ExpectedTopics) == 0 {
+			continue
+		}
+		t.Run(w.Name, func(t *testing.T) {
+			murmurs, err := readMurmursInRange(manifest.LedgerPath, w.Since, w.Until)
+			require.NoError(t, err)
+
+			assert.GreaterOrEqual(t, len(murmurs), w.MinMurmurs, "murmur count")
+
+			topicSet := make(map[string]bool)
+			for _, m := range murmurs {
+				topicSet[m.Topic] = true
+			}
+			for _, topic := range w.ExpectedTopics {
+				assert.True(t, topicSet[topic], "expected topic %q", topic)
+			}
+
+			if w.ExpectedMurmurImportance != "" {
+				found := false
+				for _, m := range murmurs {
+					if m.Importance == w.ExpectedMurmurImportance {
+						found = true
+						break
+					}
+				}
+				assert.True(t, found, "expected at least one %s murmur", w.ExpectedMurmurImportance)
+			}
+		})
+	}
+}
+
+func TestMurmurEscalationDensity(t *testing.T) {
+	d1, err := readMurmursInRange(manifest.LedgerPath, ts(10, 0, 0), ts(10, 23, 59))
+	require.NoError(t, err)
+	d2, err := readMurmursInRange(manifest.LedgerPath, ts(11, 0, 0), ts(11, 23, 59))
+	require.NoError(t, err)
+	d3, err := readMurmursInRange(manifest.LedgerPath, ts(12, 0, 0), ts(12, 23, 59))
+	require.NoError(t, err)
+
+	assert.Less(t, len(d1), len(d2), "day2 murmurs (%d) > day1 (%d)", len(d2), len(d1))
+	assert.Less(t, len(d2), len(d3), "day3 murmurs (%d) > day2 (%d)", len(d3), len(d2))
+}
+
+func TestMurmurAgentIDs(t *testing.T) {
+	allMurmurs, err := readMurmursInRange(manifest.LedgerPath, ts(10, 0, 0), ts(25, 0, 0))
+	require.NoError(t, err)
+	require.NotEmpty(t, allMurmurs)
+
+	knownAgents := map[string]bool{
+		alice.AgentID: true, bob.AgentID: true, carol.AgentID: true,
+		dave.AgentID: true, eve.AgentID: true, frank.AgentID: true,
+	}
+	for _, m := range allMurmurs {
+		assert.True(t, knownAgents[m.AgentID], "unknown agent ID: %s", m.AgentID)
+		assert.Equal(t, "claude-code", m.AgentType)
+		assert.Equal(t, "1", m.SchemaVersion)
+	}
+}
+
+func TestHotZoneMurmurs(t *testing.T) {
+	murmurs, err := readMurmursInRange(manifest.LedgerPath, ts(20, 10, 0), ts(20, 18, 0))
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, len(murmurs), 5)
+
+	// Verify murmur authors match session authors in this window
+	authorSet := make(map[string]bool)
+	for _, m := range murmurs {
+		authorSet[m.PrincipalID] = true
+	}
+	assert.True(t, authorSet["alice"], "alice should have murmurs in hot zone")
+	assert.True(t, authorSet["bob"], "bob should have murmurs in hot zone")
+	assert.True(t, authorSet["dave"], "dave should have murmurs in hot zone")
 }

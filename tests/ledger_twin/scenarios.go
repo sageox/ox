@@ -30,6 +30,18 @@ type SessionSpec struct {
 	ParentPID  int  // parent PID for subagent sessions
 }
 
+// MurmurSpec defines one murmur to generate on disk.
+type MurmurSpec struct {
+	Dev        Dev
+	Timestamp  time.Time
+	ID         string // deterministic, e.g. "Mx1001"
+	Topic      string
+	Importance string // critical, normal, ambient
+	Content    string
+	Scope      string            // ledger or team (default: ledger)
+	Metadata   map[string]string // optional structured context
+}
+
 // Window defines a time range with expected assertions.
 type Window struct {
 	Name              string
@@ -41,12 +53,17 @@ type Window struct {
 	MaxConflicts      int // -1 = no upper bound
 	ExpectedPairs     []string
 	ExpectedRecording int
+	// Murmur assertions
+	MinMurmurs               int
+	ExpectedTopics           []string
+	ExpectedMurmurImportance string // at least one murmur must have this importance
 }
 
-// TwinManifest holds everything: generated sessions + validation windows.
+// TwinManifest holds everything: generated sessions + murmurs + validation windows.
 type TwinManifest struct {
 	LedgerPath string
 	Sessions   []SessionSpec
+	Murmurs    []MurmurSpec
 	Windows    []Window
 }
 
@@ -97,6 +114,23 @@ func sess(dev Dev, t time.Time, id, title string, files ...FileTouch) SessionSpe
 		resolved[i] = FileTouch{AbsPath: fp(dev.Username, f.AbsPath), ToolName: f.ToolName}
 	}
 	return SessionSpec{Dev: dev, Timestamp: t, SessionID: id, Title: title, Files: resolved}
+}
+
+// murmur builds a MurmurSpec with sensible defaults (topic=wip, scope=ledger).
+func murmur(dev Dev, t time.Time, id, content string) MurmurSpec {
+	return MurmurSpec{Dev: dev, Timestamp: t, ID: id, Topic: "wip", Importance: "normal", Content: content, Scope: "ledger"}
+}
+
+// withImportance overrides the importance on a MurmurSpec.
+func withImportance(m MurmurSpec, importance string) MurmurSpec {
+	m.Importance = importance
+	return m
+}
+
+// withTopic overrides the topic on a MurmurSpec.
+func withTopic(m MurmurSpec, topic string) MurmurSpec {
+	m.Topic = topic
+	return m
 }
 
 // withSummary adds a one-liner summary to a SessionSpec.
@@ -373,6 +407,137 @@ func BuildManifest() *TwinManifest {
 	)
 
 	// ═══════════════════════════════════════════════════════════════
+	// Murmurs: WIP status updates from AI coworkers
+	// Dense, technical one-liners describing current work.
+	// ═══════════════════════════════════════════════════════════════
+
+	// Hot Zone murmurs (March 20): devs announcing overlapping work
+	m.Murmurs = append(m.Murmurs,
+		murmur(alice, ts(20, 10, 5), "Mx1001",
+			"Extracting subcommand registration into table-driven pattern in root.go, also touching output.go helpers"),
+		murmur(bob, ts(20, 10, 35), "Mx1002",
+			"Adding --api-endpoint global flag to root command with validation, plumbing through auth handler"),
+		murmur(dave, ts(20, 11, 5), "Mx1003",
+			"CLI formatting overhaul: replacing fmt.Printf with structured formatters in output.go"),
+		murmur(alice, ts(20, 14, 5), "Mx1004",
+			"Auth middleware extraction in progress, pulling into standalone package with session store DI"),
+		murmur(bob, ts(20, 15, 5), "Mx1005",
+			"Consolidating duplicate route definitions, wiring API routes into root command init"),
+	)
+
+	// Parallel Streams murmurs (March 21): quiet, ambient — no overlap
+	m.Murmurs = append(m.Murmurs,
+		withImportance(murmur(alice, ts(21, 9, 5), "Mx2001",
+			"Deep in auth login rewrite: replacing cookie-based with device code flow, adding token refresh on 401"), "ambient"),
+		withImportance(murmur(bob, ts(21, 9, 35), "Mx2002",
+			"Table-driven tests for all API handler error paths and rate-limit middleware"), "ambient"),
+		withImportance(murmur(carol, ts(21, 10, 5), "Mx2003",
+			"Switching daemon file watcher from polling to fsnotify, fixing sync pull race"), "ambient"),
+	)
+
+	// Pair Convergence murmurs (March 22): two pairs coordinating
+	m.Murmurs = append(m.Murmurs,
+		murmur(alice, ts(22, 10, 5), "Mx3001",
+			"Adding per-user rate limiting to auth middleware using token bucket algorithm"),
+		murmur(bob, ts(22, 10, 35), "Mx3002",
+			"Instrumenting auth middleware with structured request/response logging via slog"),
+		murmur(carol, ts(22, 11, 5), "Mx3003",
+			"Wiring daemon health endpoint into ox status output with connection retry"),
+		murmur(dave, ts(22, 11, 35), "Mx3004",
+			"Adding color-coded status indicators and table layout for ox status"),
+	)
+
+	// Sprint End Rush murmurs (March 23): high density, everyone posting
+	m.Murmurs = append(m.Murmurs,
+		murmur(frank, ts(23, 8, 5), "Mx4001",
+			"Rewrote getting started guide for new ox init flow with screenshots"),
+		murmur(bob, ts(23, 8, 35), "Mx4002",
+			"Updated API examples in getting-started and migrating v1 endpoints to v2 schema"),
+		murmur(alice, ts(23, 9, 5), "Mx4003",
+			"Implementing automatic token rotation 5min before expiry with background refresh"),
+		murmur(carol, ts(23, 9, 35), "Mx4004",
+			"Added SIGTERM handler that drains in-flight syncs before daemon exit"),
+		murmur(dave, ts(23, 10, 5), "Mx4005",
+			"Adding animated progress bars for sync operations using bubbletea"),
+		withImportance(murmur(eve, ts(23, 10, 35), "Mx4006",
+			"Config tests at 92% coverage including XDG fallback paths and env overrides"), "ambient"),
+		murmur(alice, ts(23, 12, 5), "Mx4007",
+			"Replaced generic error returns with typed AuthError wrapping for better CLI messages"),
+		murmur(bob, ts(23, 16, 5), "Mx4008",
+			"Migrated remaining v1 callers to v2 API, added deprecation warnings on v1 routes"),
+	)
+
+	// Active Recording murmurs (March 24): in-progress session updates
+	m.Murmurs = append(m.Murmurs,
+		murmur(alice, ts(24, 14, 5), "Mx5001",
+			"Debugging token expiry race where refresh goroutine and request handler both read expiry field"),
+		withImportance(murmur(bob, ts(24, 14, 35), "Mx5002",
+			"Implementing sliding window rate limiter for API v2 endpoints, still recording"), "ambient"),
+		withImportance(murmur(carol, ts(24, 15, 5), "Mx5003",
+			"Adding prometheus-style metrics to daemon sync loop and IPC handlers, in progress"), "ambient"),
+	)
+
+	// Cluster Bridge murmurs (March 17): carol bridges two clusters
+	m.Murmurs = append(m.Murmurs,
+		murmur(alice, ts(17, 9, 5), "Mx8001",
+			"Implementing background token refresh with mutex-protected expiry check"),
+		murmur(bob, ts(17, 10, 5), "Mx8002",
+			"Session validation middleware: checking token signature and expiry on every request"),
+		murmur(dave, ts(17, 9, 35), "Mx8003",
+			"Unified JSON and table output modes behind a single Renderer interface"),
+		withImportance(murmur(eve, ts(17, 10, 35), "Mx8004",
+			"Building golden-file test helpers for CLI output and snapshot testing"), "ambient"),
+		murmur(carol, ts(17, 11, 5), "Mx8005",
+			"Connecting auth state to CLI status display via daemon bridge — bridging auth/ and cli/ packages"),
+	)
+
+	// Escalation Day 1 murmurs (March 10): low density, calm
+	m.Murmurs = append(m.Murmurs,
+		withImportance(murmur(alice, ts(10, 9, 5), "MxA001",
+			"Splitting monolithic sync pull into fetch/merge/apply stages"), "ambient"),
+		withImportance(murmur(carol, ts(10, 10, 5), "MxA002",
+			"Adding context-aware error wrapping to pull for transient vs permanent failure distinction"), "ambient"),
+	)
+
+	// Escalation Day 2 murmurs (March 11): medium density
+	m.Murmurs = append(m.Murmurs,
+		murmur(alice, ts(11, 9, 5), "MxA003",
+			"Built 3-way merge resolver for session conflicts using manifest-based rules"),
+		murmur(carol, ts(11, 9, 35), "MxA004",
+			"Sync retry with conflict detection: auto-resolve trivial, flag others for manual review"),
+		murmur(bob, ts(11, 10, 5), "MxA005",
+			"Wiring sync merge into API layer so remote clients can trigger merge via REST"),
+		murmur(dave, ts(11, 11, 5), "MxA006",
+			"Adding ox sync --force and --dry-run flags with pull integration"),
+	)
+
+	// Escalation Day 3 murmurs (March 12): high density, critical signals
+	m.Murmurs = append(m.Murmurs,
+		withImportance(murmur(alice, ts(12, 9, 5), "MxA007",
+			"Major sync rewrite: replacing ad-hoc sync with state-machine-driven pipeline"), "critical"),
+		withImportance(murmur(bob, ts(12, 9, 20), "MxA008",
+			"Sync API v2 streaming migration, SSE progress updates"), "critical"),
+		murmur(carol, ts(12, 9, 35), "MxA009",
+			"Connecting new sync pipeline to daemon scheduler with configurable intervals"),
+		murmur(dave, ts(12, 10, 5), "MxA010",
+			"Rebuilt ox sync command to show real-time state machine transitions"),
+		murmur(eve, ts(12, 10, 35), "MxA011",
+			"Full integration test suite for sync pipeline covering all state transitions"),
+		murmur(frank, ts(12, 11, 5), "MxA012",
+			"Updated sync docs to reflect state machine architecture and new resolve rules"),
+		murmur(alice, ts(12, 14, 5), "MxA013",
+			"Added conflict-detected and manual-review states to sync state machine"),
+		murmur(bob, ts(12, 14, 35), "MxA014",
+			"Wired exponential backoff into pull retry path with resolve fallback"),
+	)
+
+	// Subagent Excluded murmurs (March 19): only from main session
+	m.Murmurs = append(m.Murmurs,
+		murmur(alice, ts(19, 10, 5), "MxS001",
+			"Planned auth handler refactor: identified 4 extract-method candidates"),
+	)
+
+	// ═══════════════════════════════════════════════════════════════
 	// Windows (assertion targets)
 	// ═══════════════════════════════════════════════════════════════
 	m.Windows = []Window{
@@ -385,6 +550,8 @@ func BuildManifest() *TwinManifest {
 			MinConflicts:  3,
 			MaxConflicts:  -1,
 			ExpectedPairs: []string{"alice|bob", "alice|dave", "bob|dave"},
+			MinMurmurs:    5,
+			ExpectedTopics: []string{"wip"},
 		},
 		{
 			Name:         "parallel_streams",
@@ -394,6 +561,9 @@ func BuildManifest() *TwinManifest {
 			MinAuthors:   3,
 			MinConflicts: 0,
 			MaxConflicts: 0,
+			MinMurmurs:   3,
+			ExpectedTopics:           []string{"wip"},
+			ExpectedMurmurImportance: "ambient",
 		},
 		{
 			Name:          "pair_convergence",
@@ -404,6 +574,8 @@ func BuildManifest() *TwinManifest {
 			MinConflicts:  2,
 			MaxConflicts:  2,
 			ExpectedPairs: []string{"alice|bob", "carol|dave"},
+			MinMurmurs:    4,
+			ExpectedTopics: []string{"wip"},
 		},
 		{
 			Name:         "sprint_end_rush",
@@ -413,6 +585,8 @@ func BuildManifest() *TwinManifest {
 			MinAuthors:   6,
 			MinConflicts: 1,
 			MaxConflicts: -1,
+			MinMurmurs:   8,
+			ExpectedTopics: []string{"wip"},
 		},
 		{
 			Name:              "active_recording",
@@ -423,6 +597,8 @@ func BuildManifest() *TwinManifest {
 			MinConflicts:      0,
 			MaxConflicts:      -1,
 			ExpectedRecording: 2,
+			MinMurmurs:        3,
+			ExpectedTopics:    []string{"wip"},
 		},
 		{
 			Name:         "cluster_bridge",
@@ -432,6 +608,8 @@ func BuildManifest() *TwinManifest {
 			MinAuthors:   5,
 			MinConflicts: 2,
 			MaxConflicts: -1,
+			MinMurmurs:   5,
+			ExpectedTopics: []string{"wip"},
 		},
 		{
 			Name:         "escalation_day1",
@@ -441,6 +619,9 @@ func BuildManifest() *TwinManifest {
 			MinAuthors:   4,
 			MinConflicts: 1,
 			MaxConflicts: 1,
+			MinMurmurs:   2,
+			ExpectedTopics:           []string{"wip"},
+			ExpectedMurmurImportance: "ambient",
 		},
 		{
 			Name:         "escalation_day2",
@@ -450,6 +631,8 @@ func BuildManifest() *TwinManifest {
 			MinAuthors:   6,
 			MinConflicts: 3,
 			MaxConflicts: -1,
+			MinMurmurs:   4,
+			ExpectedTopics: []string{"wip"},
 		},
 		{
 			Name:         "escalation_day3",
@@ -459,6 +642,9 @@ func BuildManifest() *TwinManifest {
 			MinAuthors:   6,
 			MinConflicts: 4,
 			MaxConflicts: -1,
+			MinMurmurs:   8,
+			ExpectedTopics:           []string{"wip"},
+			ExpectedMurmurImportance: "critical",
 		},
 		{
 			Name:         "subagent_excluded",
@@ -468,6 +654,8 @@ func BuildManifest() *TwinManifest {
 			MinAuthors:   2,
 			MinConflicts: 0,
 			MaxConflicts: 0,
+			MinMurmurs:   1,
+			ExpectedTopics: []string{"wip"},
 		},
 	}
 

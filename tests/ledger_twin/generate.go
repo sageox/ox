@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/sageox/ox/internal/ledger"
 )
 
 // GenerateTwinLedger writes a complete fake ledger to basePath.
@@ -20,6 +22,10 @@ func GenerateTwinLedger(basePath string, manifest *TwinManifest) error {
 		if err := writeSession(sessionsDir, spec); err != nil {
 			return fmt.Errorf("write session %s: %w", spec.SessionID, err)
 		}
+	}
+
+	if err := generateMurmurs(basePath, manifest.Murmurs); err != nil {
+		return fmt.Errorf("generate murmurs: %w", err)
 	}
 	return nil
 }
@@ -169,4 +175,31 @@ func writeRecording(dir, folderName string, spec SessionSpec) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, ".recording.json"), data, 0644)
+}
+
+func generateMurmurs(basePath string, specs []MurmurSpec) error {
+	for _, spec := range specs {
+		scope := spec.Scope
+		if scope == "" {
+			scope = "ledger"
+		}
+		m := ledger.MurmurFile{
+			SchemaVersion: "1",
+			ID:            spec.ID,
+			Timestamp:     spec.Timestamp,
+			AgentID:       spec.Dev.AgentID,
+			AgentType:     "claude-code",
+			PrincipalID:   spec.Dev.Username,
+			PrincipalType: "human",
+			Topic:         spec.Topic,
+			Importance:    spec.Importance,
+			Content:       spec.Content,
+			Scope:         scope,
+			Metadata:      spec.Metadata,
+		}
+		if _, err := ledger.WriteMurmur(basePath, m); err != nil {
+			return fmt.Errorf("write murmur %s: %w", spec.ID, err)
+		}
+	}
+	return nil
 }
