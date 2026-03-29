@@ -1602,9 +1602,10 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 		// Batch update parent IDs
 		for j, sym := range syms {
 			if sym.ParentIdx >= 0 && sym.ParentIdx < len(symDBIDs) {
-				_, err := tx.Exec("UPDATE symbols SET parent_id = ? WHERE id = ?",
-					symDBIDs[sym.ParentIdx], symDBIDs[j])
-				if err != nil {
+				if err := txq.UpdateSymbolParent(ctx, codedbsqlc.UpdateSymbolParentParams{
+					ParentID: sql.NullInt64{Int64: symDBIDs[sym.ParentIdx], Valid: true},
+					ID:       symDBIDs[j],
+				}); err != nil {
 					return stats, fmt.Errorf("update symbol parent: %w", err)
 				}
 			}
