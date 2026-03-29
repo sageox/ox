@@ -532,6 +532,112 @@ func TestPushLedger_RebaseConflict_LocalCommitPreserved(t *testing.T) {
 		"local file content must be preserved after failed rebase")
 }
 
+func TestPushFailure_CacheContentPreserved(t *testing.T) {
+	_, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+
+	sessionName := "2026-01-01T00-00-testuser-OxCach"
+	sessionDir := writeSessionFiles(t, clonePath, sessionName)
+
+	// write real content files (raw.jsonl with actual JSONL, not just meta.json)
+	rawContent := `{"metadata":{"agent_id":"OxCach","agent_type":"claude-code","username":"test@example.com"},"type":"header"}
+{"type":"user","content":"implement feature X","seq":1}
+{"type":"assistant","content":"I will implement feature X by modifying the following files...","seq":2}
+{"entry_count":2,"type":"footer"}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(rawContent), 0644))
+
+	summaryContent := "# Session Summary\n\nImplemented feature X with comprehensive tests."
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.md"), []byte(summaryContent), 0644))
+
+	// create cache directory simulating XDG cache with copies of content files
+	cacheDir := t.TempDir()
+	cacheSessionDir := filepath.Join(cacheDir, "sessions", sessionName)
+	require.NoError(t, os.MkdirAll(cacheSessionDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheSessionDir, "raw.jsonl"), []byte(rawContent), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheSessionDir, "summary.md"), []byte(summaryContent), 0644))
+
+	// replace ledger content files with LFS pointer stubs (simulating WriteSessionMeta)
+	pointerContent := "version https://git-lfs.github.com/spec/v1\noid sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\nsize 1024\n"
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(pointerContent), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.md"), []byte(pointerContent), 0644))
+
+	// break the remote URL so push fails
+	runGit(t, clonePath, "remote", "set-url", "origin", "/nonexistent/broken/repo.git")
+
+	// commitAndPushLedger should fail due to broken remote
+	err := commitAndPushLedger(clonePath, sessionName)
+	assert.Error(t, err, "push should fail with broken remote")
+
+	// critical invariant: cache dir content files are still full content (NOT pointer stubs)
+	cacheRaw, readErr := os.ReadFile(filepath.Join(cacheSessionDir, "raw.jsonl"))
+	require.NoError(t, readErr)
+	assert.Equal(t, rawContent, string(cacheRaw),
+		"cache raw.jsonl must preserve original content after push failure")
+	assert.NotContains(t, string(cacheRaw), "version https://git-lfs.github.com/spec/v1",
+		"cache raw.jsonl must NOT be a pointer stub")
+
+	cacheSummary, readErr := os.ReadFile(filepath.Join(cacheSessionDir, "summary.md"))
+	require.NoError(t, readErr)
+	assert.Equal(t, summaryContent, string(cacheSummary),
+		"cache summary.md must preserve original content after push failure")
+
+	// ledger dir content files are pointer stubs (expected after WriteSessionMeta)
+	ledgerRaw, readErr := os.ReadFile(filepath.Join(sessionDir, "raw.jsonl"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(ledgerRaw), "version https://git-lfs.github.com/spec/v1",
+		"ledger raw.jsonl should be a pointer stub")
+}
+
+func TestPushFailure_PointerFilesOnDisk(t *testing.T) {
+	_, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+
+	sessionName := "2026-01-01T00-00-testuser-OxPtrD"
+	sessionDir := writeSessionFiles(t, clonePath, sessionName)
+
+	// write real content to cache (simulating XDG cache safety net)
+	rawContent := `{"metadata":{"agent_id":"OxPtrD","agent_type":"claude-code"},"type":"header"}
+{"type":"user","content":"test content for pointer verification","seq":1}
+{"type":"assistant","content":"response with enough content to exceed pointer stub size easily - this line is intentionally long to ensure the file is well over 130 bytes which is the typical size of an LFS pointer stub file","seq":2}
+{"entry_count":2,"type":"footer"}
+`
+	cacheDir := t.TempDir()
+	cacheSessionDir := filepath.Join(cacheDir, "sessions", sessionName)
+	require.NoError(t, os.MkdirAll(cacheSessionDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheSessionDir, "raw.jsonl"), []byte(rawContent), 0644))
+
+	// replace ledger files with pointer stubs
+	pointerRaw := "version https://git-lfs.github.com/spec/v1\noid sha256:abc123def456\nsize 2048\n"
+	pointerSummary := "version https://git-lfs.github.com/spec/v1\noid sha256:789abc012def\nsize 512\n"
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(pointerRaw), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.md"), []byte(pointerSummary), 0644))
+
+	// break remote so push fails
+	runGit(t, clonePath, "remote", "set-url", "origin", "/nonexistent/broken/repo.git")
+
+	err := commitAndPushLedger(clonePath, sessionName)
+	assert.Error(t, err, "push should fail with broken remote")
+
+	// verify ledger session dir has pointer stubs
+	for _, name := range []string{"raw.jsonl", "summary.md"} {
+		data, readErr := os.ReadFile(filepath.Join(sessionDir, name))
+		require.NoError(t, readErr, "should be able to read %s from ledger", name)
+		assert.True(t, strings.HasPrefix(string(data), "version https://git-lfs.github.com/spec/v1"),
+			"ledger %s should be an LFS pointer stub", name)
+		assert.Less(t, len(data), 200,
+			"ledger %s pointer stub should be small (~130 bytes)", name)
+	}
+
+	// verify cache dir has full content (NOT pointer stubs)
+	cacheRaw, readErr := os.ReadFile(filepath.Join(cacheSessionDir, "raw.jsonl"))
+	require.NoError(t, readErr)
+	assert.Greater(t, len(cacheRaw), 130,
+		"cache raw.jsonl must be full content (> 130 bytes), not a pointer stub")
+	assert.False(t, strings.HasPrefix(string(cacheRaw), "version https://git-lfs"),
+		"cache raw.jsonl must NOT start with LFS pointer prefix")
+}
+
 func TestCommitAndPushLedger_EmptySessionDir(t *testing.T) {
 	_, clonePath := createBareAndClone(t)
 	isolatePushEnv(t, clonePath)
