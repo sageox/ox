@@ -82,6 +82,24 @@ func VisualTypes(keyframes *KeyframesManifest, chapterID string) []string {
 	return types
 }
 
+// KeyframesForChapter returns keyframes linked to the given chapter, sorted by timestamp.
+// Returns nil if the manifest is nil or no keyframes match.
+func KeyframesForChapter(keyframes *KeyframesManifest, chapterID string) []Keyframe {
+	if keyframes == nil {
+		return nil
+	}
+	var result []Keyframe
+	for _, kf := range keyframes.Keyframes {
+		if kf.ChapterID == chapterID {
+			result = append(result, kf)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].TimestampSeconds < result[j].TimestampSeconds
+	})
+	return result
+}
+
 // AllVisualTypes returns the sorted unique set of content types across all keyframes.
 // Returns nil if the manifest is nil or contains no visual content.
 func AllVisualTypes(keyframes *KeyframesManifest) []string {

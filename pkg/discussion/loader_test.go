@@ -438,6 +438,96 @@ func TestVisualTypes(t *testing.T) {
 	}
 }
 
+func TestKeyframesForChapter(t *testing.T) {
+	tests := []struct {
+		name      string
+		mf        *discussion.KeyframesManifest
+		chapterID string
+		wantLen   int
+		wantOrder []float64 // expected timestamp order
+	}{
+		{
+			name:      "nil manifest",
+			mf:        nil,
+			chapterID: "ch-1",
+		},
+		{
+			name:      "empty manifest",
+			mf:        &discussion.KeyframesManifest{},
+			chapterID: "ch-1",
+		},
+		{
+			name: "no matching chapter",
+			mf: &discussion.KeyframesManifest{
+				Keyframes: []discussion.Keyframe{
+					{S3Key: "a.png", ChapterID: "ch-1", TimestampSeconds: 10},
+				},
+			},
+			chapterID: "ch-99",
+		},
+		{
+			name: "single chapter multiple keyframes sorted by timestamp",
+			mf: &discussion.KeyframesManifest{
+				Keyframes: []discussion.Keyframe{
+					{S3Key: "c.png", ChapterID: "ch-1", TimestampSeconds: 30},
+					{S3Key: "a.png", ChapterID: "ch-1", TimestampSeconds: 10},
+					{S3Key: "b.png", ChapterID: "ch-1", TimestampSeconds: 20},
+				},
+			},
+			chapterID: "ch-1",
+			wantLen:   3,
+			wantOrder: []float64{10, 20, 30},
+		},
+		{
+			name: "mixed chapters returns only matching",
+			mf: &discussion.KeyframesManifest{
+				Keyframes: []discussion.Keyframe{
+					{S3Key: "a.png", ChapterID: "ch-1", TimestampSeconds: 10},
+					{S3Key: "b.png", ChapterID: "ch-2", TimestampSeconds: 60},
+					{S3Key: "c.png", ChapterID: "ch-1", TimestampSeconds: 30},
+					{S3Key: "d.png", ChapterID: "ch-2", TimestampSeconds: 90},
+				},
+			},
+			chapterID: "ch-2",
+			wantLen:   2,
+			wantOrder: []float64{60, 90},
+		},
+		{
+			name: "keyframes without chapter_id excluded",
+			mf: &discussion.KeyframesManifest{
+				Keyframes: []discussion.Keyframe{
+					{S3Key: "a.png", ChapterID: "", TimestampSeconds: 10},
+					{S3Key: "b.png", ChapterID: "ch-1", TimestampSeconds: 20},
+					{S3Key: "c.png", TimestampSeconds: 30},
+				},
+			},
+			chapterID: "ch-1",
+			wantLen:   1,
+			wantOrder: []float64{20},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := discussion.KeyframesForChapter(tt.mf, tt.chapterID)
+			if tt.wantLen == 0 {
+				if len(got) != 0 {
+					t.Errorf("got %d keyframes, want 0", len(got))
+				}
+				return
+			}
+			if len(got) != tt.wantLen {
+				t.Fatalf("got %d keyframes, want %d", len(got), tt.wantLen)
+			}
+			for i, wantTS := range tt.wantOrder {
+				if got[i].TimestampSeconds != wantTS {
+					t.Errorf("index %d: got timestamp %v, want %v", i, got[i].TimestampSeconds, wantTS)
+				}
+			}
+		})
+	}
+}
+
 func TestAnnotationTypeConstants(t *testing.T) {
 	tests := []struct {
 		name     string

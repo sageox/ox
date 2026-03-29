@@ -293,6 +293,31 @@ else
                             exit 1
                         fi
                         echo "  keyframes: all have s3_key + timestamp_seconds ✓"
+
+                        # enrichment: transcript_cue (populated during extraction)
+                        cue_kf=$(jq '[.keyframes[] | select(.transcript_cue != null and .transcript_cue != "")] | length' "$DISC_DIR/keyframes.json")
+                        if [[ $cue_kf -gt 0 ]]; then
+                            echo "  keyframes: $cue_kf/$kf_array_len have transcript_cue ✓"
+                        else
+                            echo "  warn: no keyframes have transcript_cue"
+                        fi
+
+                        # enrichment: content_type + description (populated by vision analysis, non-fatal)
+                        typed_kf=$(jq '[.keyframes[] | select(.content_type != null and .content_type != "")] | length' "$DISC_DIR/keyframes.json")
+                        desc_kf=$(jq '[.keyframes[] | select(.description != null and .description != "")] | length' "$DISC_DIR/keyframes.json")
+                        if [[ $typed_kf -gt 0 ]]; then
+                            echo "  keyframes: $typed_kf/$kf_array_len have content_type, $desc_kf have description ✓"
+                        else
+                            echo "  warn: no keyframes have content_type (vision analysis may have been skipped)"
+                        fi
+
+                        # enrichment: chapter_id (requires post-summary step, not yet implemented)
+                        ch_kf=$(jq '[.keyframes[] | select(.chapter_id != null and .chapter_id != "")] | length' "$DISC_DIR/keyframes.json")
+                        if [[ $ch_kf -gt 0 ]]; then
+                            echo "  keyframes: $ch_kf/$kf_array_len have chapter_id ✓"
+                        else
+                            echo "  warn: no keyframes have chapter_id (post-summary enrichment not deployed yet)"
+                        fi
                     else
                         echo "error: keyframes.json has keyframe_count=$kf_count, array_len=$kf_array_len"
                         exit 1

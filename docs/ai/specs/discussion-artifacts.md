@@ -109,6 +109,52 @@ Agents decide at each layer whether to go deeper. Most discussions stop at L0 or
 | New fact category | Add to `DiscussionSummary` struct AND `DiscussionFactsPrompt` categories |
 | New annotation type | Add constant to `pkg/discussion/types.go`, update `categorizeAnnotations()` in `distill_discussions.go` |
 
+## Keyframe Enrichment
+
+Four semantic fields on each `Keyframe` in `keyframes.json` enable AI coworkers to understand visual content without fetching images.
+
+### Server Pipeline (sageox-mono)
+
+The server populates enrichment fields across two processing stages:
+
+**During keyframe extraction** (import-video pipeline, before summarization):
+- **`transcript_cue`**: Correlated from WebVTT during frame extraction. Speaker-prefixed text from the nearest VTT cue. Empty if no transcript available at extraction time.
+- **`content_type`**: Vision model classification via `AnalyzeKeyframesWithVision()`. Values: `wireframe`, `live-ui`, `diagram`, `code`, `slide`, `terminal`, `transition`. Non-fatal — empty if vision analysis fails or is skipped.
+- **`description`**: Vision model one-line summary of visible content. Same non-fatal behavior as `content_type`.
+
+Model: `ModelForVision()` from `packages/llm-go` (Sonnet 4 via Bedrock). Batches of 6 frames.
+
+**Not yet populated** (requires post-summarization step):
+- **`chapter_id`**: Links keyframe to a `Chapter.ID` from `summary.json`. Cannot be populated at keyframe commit time because chapters are generated later by the summarization workflow. Requires a post-summary enrichment step that correlates `timestamp_seconds` against chapter `time_range`.
+
+### Content Type Values
+
+Server vision model produces these values (defined in `pkg/discussion/types.go`):
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `ContentTypeDiagram` | `diagram` | Architecture, flow, or data diagrams |
+| `ContentTypeCode` | `code` | Source code or configuration |
+| `ContentTypeTerminal` | `terminal` | CLI output, shell sessions |
+| `ContentTypeSlide` | `slide` | Presentation slides |
+| `ContentTypeUI` | `ui` | Generic UI (catch-all) |
+| `ContentTypeWireframe` | `wireframe` | UI mockups, design prototypes |
+| `ContentTypeLiveUI` | `live-ui` | Live application screenshots |
+| `ContentTypeTransition` | `transition` | Loading screens, blank states (low value) |
+| `ContentTypeOther` | `other` | Unclassified |
+
+### CLI Helpers
+
+| Function | Purpose |
+|----------|---------|
+| `KeyframesForChapter(manifest, chapterID)` | Filter keyframes by chapter, sorted by timestamp |
+| `VisualTypes(manifest, chapterID)` | Unique content types for a chapter |
+| `AllVisualTypes(manifest)` | Unique content types across all keyframes |
+
+### Backward Compatibility
+
+All four enrichment fields are `omitempty`. CLI consumers gate on non-empty values (e.g., `kf.Description != ""`) so pre-enrichment manifests work without changes.
+
 ## Code Locations
 
 | Component | File |

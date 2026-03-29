@@ -196,13 +196,17 @@ type Annotation struct {
 }
 
 // ContentTypes for Keyframe.ContentType filtering.
+// Server vision model (sageox-mono analyze_keyframes_vision.go) produces these values.
 const (
-	ContentTypeDiagram  = "diagram"
-	ContentTypeCode     = "code"
-	ContentTypeTerminal = "terminal"
-	ContentTypeSlide    = "slide"
-	ContentTypeUI       = "ui"
-	ContentTypeOther    = "other"
+	ContentTypeDiagram    = "diagram"
+	ContentTypeCode       = "code"
+	ContentTypeTerminal   = "terminal"
+	ContentTypeSlide      = "slide"
+	ContentTypeUI         = "ui"
+	ContentTypeWireframe  = "wireframe"
+	ContentTypeLiveUI     = "live-ui"
+	ContentTypeTransition = "transition"
+	ContentTypeOther      = "other"
 )
 
 // AnnotationTypes for Annotation.Type filtering (kebab-case per AGENTS.md convention).
