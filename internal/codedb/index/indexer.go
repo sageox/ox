@@ -24,6 +24,7 @@ import (
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/utils/merkletrie"
 
 	"github.com/sageox/ox/internal/codedb/comments"
 	"github.com/sageox/ox/internal/codedb/language"
@@ -75,6 +76,11 @@ type refInfo struct {
 }
 
 const bleveBatchSize = 500
+
+// checkpointEvery is the number of commits between SQL+Bleve checkpoint flushes.
+// Each checkpoint commits the current transaction and starts a new one, making
+// recently-indexed commits searchable without waiting for the full index run.
+const checkpointEvery = 500
 
 // defaultSkipDirs is the default set of directories to skip when indexing a working tree.
 // Override via IndexOptions.SkipDirs.
@@ -146,6 +152,29 @@ func (st *indexState) flushDiffBatch(force bool) error {
 	return nil
 }
 
+// checkpointFlush commits the current SQL transaction and flushes Bleve batches,
+// then starts a fresh transaction. This makes indexed data searchable mid-run
+// without waiting for the entire commit history to be processed.
+// The caller's deferred st.tx.Rollback() will correctly target the new transaction
+// if anything fails after this point.
+func (st *indexState) checkpointFlush(ctx context.Context) error {
+	if err := st.flushCodeBatch(true); err != nil {
+		return fmt.Errorf("checkpoint: flush code batch: %w", err)
+	}
+	if err := st.flushDiffBatch(true); err != nil {
+		return fmt.Errorf("checkpoint: flush diff batch: %w", err)
+	}
+	if err := st.tx.Commit(); err != nil {
+		return fmt.Errorf("checkpoint: commit: %w", err)
+	}
+	newTx, err := st.store.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("checkpoint: begin new tx: %w", err)
+	}
+	st.tx = newTx
+	return nil
+}
+
 // IndexRepo indexes a git repository into the store.
 func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOptions) error {
 	report := func(msg string) {
@@ -203,7 +232,6 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback()
 
 	st := &indexState{
 		tx:             tx,
@@ -220,6 +248,9 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 		commitIDCache:  make(map[string]int64),
 		report:         report,
 	}
+	// defer on st.tx (not the original tx pointer) so checkpointFlush's
+	// new transactions are also rolled back on failure.
+	defer func() { st.tx.Rollback() }()
 
 	// 6. Check if default branch tip has changed
 	existingRefs, err := loadExistingRefs(s, repoID)
@@ -245,7 +276,7 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	// Bleve is unchanged. If Bleve flush fails after SQL commit,
 	// a re-index will re-populate Bleve from the committed SQL data.
 	t3 := time.Now()
-	if err := tx.Commit(); err != nil {
+	if err := st.tx.Commit(); err != nil {
 		return fmt.Errorf("commit transaction: %w", err)
 	}
 	if err := st.flushCodeBatch(true); err != nil {
@@ -317,7 +348,6 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback()
 
 	st := &indexState{
 		tx:             tx,
@@ -334,6 +364,9 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 		commitIDCache:  make(map[string]int64),
 		report:         report,
 	}
+	// defer on st.tx (not the original tx pointer) so checkpointFlush's
+	// new transactions are also rolled back on failure.
+	defer func() { st.tx.Rollback() }()
 
 	// 6. Check if default branch tip has changed
 	existingRefs, err := loadExistingRefs(s, repoID)
@@ -356,7 +389,7 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 
 	// 9. Commit SQL transaction first, then flush Bleve batches.
 	t3 := time.Now()
-	if err := tx.Commit(); err != nil {
+	if err := st.tx.Commit(); err != nil {
 		return fmt.Errorf("commit transaction: %w", err)
 	}
 	if err := st.flushCodeBatch(true); err != nil {
@@ -774,12 +807,19 @@ func (st *indexState) processRef(ctx context.Context, ri refInfo, refIdx, totalR
 			maxDepth, ri.name))
 	}
 
-	for _, cd := range newCommits {
+	for i, cd := range newCommits {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := st.indexCommit(cd); err != nil {
+		if err := st.indexCommit(ctx, cd); err != nil {
 			return err
+		}
+		// Checkpoint every N commits so the index is searchable mid-run.
+		if i > 0 && i%checkpointEvery == 0 {
+			st.report(fmt.Sprintf("Checkpoint: %d/%d commits indexed and searchable", i, len(newCommits)))
+			if err := st.checkpointFlush(ctx); err != nil {
+				return fmt.Errorf("checkpoint flush at commit %d: %w", i, err)
+			}
 		}
 	}
 
@@ -793,7 +833,7 @@ func (st *indexState) processRef(ctx context.Context, ri refInfo, refIdx, totalR
 }
 
 // indexCommit inserts a single commit and its diffs into the database and Bleve.
-func (st *indexState) indexCommit(cd commitData) error {
+func (st *indexState) indexCommit(ctx context.Context, cd commitData) error {
 	oidHex := cd.oid.String()
 
 	result, err := st.tx.Exec(
@@ -827,29 +867,55 @@ func (st *indexState) indexCommit(cd commitData) error {
 		return err
 	}
 
-	childEntries, err := st.getTree(cd.treeHash)
+	// Use DiffTree for O(changed_files) tree reads instead of O(all_files)×2.
+	// DiffTree uses merkle-trie hash comparison: only descends into subtrees
+	// whose hash changed, identical to git diff-tree semantics.
+	childTree, err := st.repo.TreeObject(cd.treeHash)
 	if err != nil {
-		return fmt.Errorf("get tree entries: %w", err)
+		return fmt.Errorf("get child tree: %w", err)
 	}
 
-	parentEntries := make(map[string]plumbing.Hash)
+	var parentTree *object.Tree
 	if len(cd.parentIDs) > 0 {
 		parentCommit, pErr := st.repo.CommitObject(cd.parentIDs[0])
 		if pErr == nil {
-			if pe, peErr := st.getTree(parentCommit.TreeHash); peErr == nil {
-				parentEntries = pe
-			}
+			parentTree, _ = st.repo.TreeObject(parentCommit.TreeHash)
 		}
 	}
 
-	// Index changed and new files
-	if err := st.indexChangedFiles(commitDBID, childEntries, parentEntries); err != nil {
-		return err
+	changes, err := object.DiffTreeContext(ctx, parentTree, childTree)
+	if err != nil {
+		return fmt.Errorf("diff tree: %w", err)
 	}
 
-	// Index deleted files
-	if err := st.indexDeletedFiles(commitDBID, childEntries, parentEntries); err != nil {
-		return err
+	for _, change := range changes {
+		action, aErr := change.Action()
+		if aErr != nil {
+			continue
+		}
+		switch action {
+		case merkletrie.Insert:
+			if !change.To.TreeEntry.Mode.IsFile() {
+				continue // skip submodules and directories
+			}
+			if err := st.indexChangeEntry(commitDBID, change.To.Name, change.To.TreeEntry.Hash, plumbing.ZeroHash, false); err != nil {
+				return err
+			}
+		case merkletrie.Modify:
+			if !change.To.TreeEntry.Mode.IsFile() {
+				continue // skip submodules and directories
+			}
+			if err := st.indexChangeEntry(commitDBID, change.To.Name, change.To.TreeEntry.Hash, change.From.TreeEntry.Hash, true); err != nil {
+				return err
+			}
+		case merkletrie.Delete:
+			if !change.From.TreeEntry.Mode.IsFile() {
+				continue // skip submodules and directories
+			}
+			if err := st.indexDeletionEntry(commitDBID, change.From.Name, change.From.TreeEntry.Hash); err != nil {
+				return err
+			}
+		}
 	}
 
 	st.knownCommits[oidHex] = true
@@ -934,6 +1000,46 @@ func (st *indexState) indexDeletedFiles(commitDBID int64, childEntries, parentEn
 		}
 	}
 	return nil
+}
+
+// indexChangeEntry processes one added or modified file from a DiffTree change.
+// hasOld=false for insertions (initial commit or new file); hasOld=true for modifications.
+func (st *indexState) indexChangeEntry(commitDBID int64, path string, newOID, oldOID plumbing.Hash, hasOld bool) error {
+	newBlobDBID, newText, indexed, err := st.ensureBlob(newOID, path)
+	if err != nil {
+		return err
+	}
+	if indexed {
+		st.newBlobs++
+	}
+
+	var oldBlobDBID sql.NullInt64
+	var oldText string
+	if hasOld {
+		id, text, idx, err := st.ensureBlob(oldOID, path)
+		if err != nil {
+			return err
+		}
+		if idx {
+			st.newBlobs++
+		}
+		oldBlobDBID = sql.NullInt64{Int64: id, Valid: true}
+		oldText = text
+	}
+
+	return st.insertDiff(commitDBID, path, oldBlobDBID, newBlobDBID, oldOID, newOID, hasOld, true, oldText, newText)
+}
+
+// indexDeletionEntry processes one deleted file from a DiffTree change.
+func (st *indexState) indexDeletionEntry(commitDBID int64, path string, oldOID plumbing.Hash) error {
+	oldBlobDBID, oldText, indexed, err := st.ensureBlob(oldOID, path)
+	if err != nil {
+		return err
+	}
+	if indexed {
+		st.newBlobs++
+	}
+	return st.insertDiff(commitDBID, path, sql.NullInt64{Int64: oldBlobDBID, Valid: true}, 0, oldOID, plumbing.ZeroHash, true, false, oldText, "")
 }
 
 // insertDiff inserts a diff record and indexes the diff text in Bleve.

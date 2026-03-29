@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-git/go-git/v6/plumbing/object"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,6 +71,37 @@ func TestPlainOpenTolerant_NonRepoPath(t *testing.T) {
 	repo, err := plainOpenTolerant(dir)
 	assert.Error(t, err)
 	assert.Nil(t, repo)
+}
+
+// TestPlainOpenTolerant_KeepDescriptors verifies that plainOpenTolerant uses
+// KeepDescriptors for better performance. The repo must be readable (HEAD,
+// tree, and blob objects all accessible) via the KeepDescriptors path.
+func TestPlainOpenTolerant_KeepDescriptors(t *testing.T) {
+	t.Parallel()
+	dir, _ := initGitRepo(t, 3) // 3 commits → packfile after gc
+
+	repo, err := plainOpenTolerant(dir)
+	require.NoError(t, err)
+	require.NotNil(t, repo)
+
+	// Verify HEAD is resolvable
+	head, err := repo.Head()
+	require.NoError(t, err, "HEAD must be resolvable via KeepDescriptors path")
+	require.False(t, head.Hash().IsZero())
+
+	// Verify commit object is readable
+	commit, err := repo.CommitObject(head.Hash())
+	require.NoError(t, err, "commit object must be readable via KeepDescriptors path")
+
+	// Verify tree and blob objects are readable — this exercises the packfile path
+	tree, err := repo.TreeObject(commit.TreeHash)
+	require.NoError(t, err, "tree object must be readable")
+
+	err = tree.Files().ForEach(func(f *object.File) error {
+		_, rErr := f.Contents()
+		return rErr
+	})
+	require.NoError(t, err, "blob contents must be readable via KeepDescriptors path")
 }
 
 // TestPlainOpenTolerant_WorktreeWithExtensions verifies that linked worktrees

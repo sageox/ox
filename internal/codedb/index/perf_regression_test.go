@@ -463,6 +463,199 @@ func TestIndexLocalRepo_DoubleIndexPreservesExactCounts(t *testing.T) {
 	}
 }
 
+// ── DiffTree correctness ───────────────────────────────────────────────────
+//
+// DiffTreeContext replaces O(all_files)×2 getTree walks with O(changed_files)
+// merkle-trie comparison. These tests verify that the semantic output is
+// identical: same file adds, modifies, and deletes recorded in diffs table.
+
+func TestDiffTree_InitialCommitAllFilesIndexed(t *testing.T) {
+	t.Parallel()
+	// Initial commit has no parent → DiffTree treats all files as inserts.
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	run("init", "-b", "main")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.go"), []byte("package main\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "b.go"), []byte("package main\n// b\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "c.go"), []byte("package main\n// c\n"), 0o644))
+	run("add", "a.go", "b.go", "c.go")
+	run("commit", "-m", "initial commit")
+
+	s := openTestStore(t)
+	require.NoError(t, IndexLocalRepo(context.Background(), s, dir, IndexOptions{}))
+
+	// All 3 files should appear in diffs with no old_blob_id (pure inserts)
+	var totalDiffs, insertsWithNoOld int
+	require.NoError(t, s.QueryRow("SELECT COUNT(*) FROM diffs").Scan(&totalDiffs))
+	require.NoError(t, s.QueryRow("SELECT COUNT(*) FROM diffs WHERE old_blob_id IS NULL AND new_blob_id IS NOT NULL").Scan(&insertsWithNoOld))
+
+	if totalDiffs != 3 {
+		t.Errorf("expected 3 diffs for initial commit with 3 files, got %d", totalDiffs)
+	}
+	if insertsWithNoOld != 3 {
+		t.Errorf("expected 3 insert diffs (no old_blob_id), got %d", insertsWithNoOld)
+	}
+}
+
+func TestDiffTree_ModifyAndDeleteTracked(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	run("init", "-b", "main")
+
+	// Commit 1: add foo.go and bar.go
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "foo.go"), []byte("package main\n// v1\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "bar.go"), []byte("package main\n// bar\n"), 0o644))
+	run("add", "foo.go", "bar.go")
+	run("commit", "-m", "commit 1")
+
+	// Commit 2: modify foo.go, delete bar.go
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "foo.go"), []byte("package main\n// v2\n"), 0o644))
+	run("add", "foo.go")
+	run("rm", "bar.go")
+	run("commit", "-m", "commit 2")
+
+	s := openTestStore(t)
+	require.NoError(t, IndexLocalRepo(context.Background(), s, dir, IndexOptions{}))
+
+	// Find commit 2's DB ID (message may have trailing newline)
+	var c2ID int64
+	require.NoError(t, s.QueryRow("SELECT id FROM commits WHERE message LIKE 'commit 2%'").Scan(&c2ID))
+
+	// foo.go: should be a modify (has both old_blob_id and new_blob_id)
+	var fooModified int
+	require.NoError(t, s.QueryRow(
+		"SELECT COUNT(*) FROM diffs WHERE commit_id = ? AND path = 'foo.go' AND old_blob_id IS NOT NULL AND new_blob_id IS NOT NULL",
+		c2ID,
+	).Scan(&fooModified))
+	if fooModified != 1 {
+		t.Errorf("expected foo.go to be modified (both old+new blob) in commit 2, got %d", fooModified)
+	}
+
+	// bar.go: should be a delete (has old_blob_id, NULL new_blob_id)
+	var barDeleted int
+	require.NoError(t, s.QueryRow(
+		"SELECT COUNT(*) FROM diffs WHERE commit_id = ? AND path = 'bar.go' AND old_blob_id IS NOT NULL AND new_blob_id IS NULL",
+		c2ID,
+	).Scan(&barDeleted))
+	if barDeleted != 1 {
+		t.Errorf("expected bar.go to be deleted (old blob, no new blob) in commit 2, got %d", barDeleted)
+	}
+}
+
+func TestDiffTree_UnchangedFilesNotDuplicated(t *testing.T) {
+	t.Parallel()
+	// When only one file changes, DiffTree should produce exactly 1 diff for
+	// that commit — not 2 (the unchanged file must be skipped).
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	run("init", "-b", "main")
+
+	// Commit 1: add a.go and b.go
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.go"), []byte("package main\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "b.go"), []byte("package main\n// b\n"), 0o644))
+	run("add", "a.go", "b.go")
+	run("commit", "-m", "commit 1")
+
+	// Commit 2: modify only a.go; b.go unchanged
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.go"), []byte("package main\n// modified\n"), 0o644))
+	run("add", "a.go")
+	run("commit", "-m", "commit 2")
+
+	s := openTestStore(t)
+	require.NoError(t, IndexLocalRepo(context.Background(), s, dir, IndexOptions{}))
+
+	var c2ID int64
+	require.NoError(t, s.QueryRow("SELECT id FROM commits WHERE message LIKE 'commit 2%'").Scan(&c2ID))
+
+	var diffsForC2 int
+	require.NoError(t, s.QueryRow("SELECT COUNT(*) FROM diffs WHERE commit_id = ?", c2ID).Scan(&diffsForC2))
+	if diffsForC2 != 1 {
+		t.Errorf("commit 2 should have exactly 1 diff (only a.go changed), got %d", diffsForC2)
+	}
+}
+
+// ── checkpoint flushing correctness ───────────────────────────────────────
+//
+// checkpointFlush commits SQL every checkpointEvery commits, making the index
+// incrementally searchable. These tests verify commits survive checkpoints
+// and that double-indexing after checkpoints is still idempotent.
+
+func TestCheckpointFlush_DataAccessibleAfterRun(t *testing.T) {
+	t.Parallel()
+	// Use more than checkpointEvery commits to force at least one checkpoint.
+	numCommits := checkpointEvery + 100
+	dir, _ := initGitRepo(t, numCommits)
+	s := openTestStore(t)
+
+	require.NoError(t, IndexLocalRepo(context.Background(), s, dir, IndexOptions{}))
+
+	var count int
+	require.NoError(t, s.QueryRow("SELECT COUNT(*) FROM commits").Scan(&count))
+	if count != numCommits {
+		t.Errorf("expected %d commits after checkpoint run, got %d", numCommits, count)
+	}
+}
+
+func TestCheckpointFlush_IdempotentAfterCheckpoints(t *testing.T) {
+	t.Parallel()
+	// Re-indexing after a checkpoint run must produce the same counts.
+	numCommits := checkpointEvery + 50
+	dir, _ := initGitRepo(t, numCommits)
+	s := openTestStore(t)
+
+	require.NoError(t, IndexLocalRepo(context.Background(), s, dir, IndexOptions{}))
+
+	var commits1, diffs1 int
+	require.NoError(t, s.QueryRow("SELECT COUNT(*) FROM commits").Scan(&commits1))
+	require.NoError(t, s.QueryRow("SELECT COUNT(*) FROM diffs").Scan(&diffs1))
+
+	// Re-index: all INSERTs hit OR IGNORE → counts must stay identical
+	require.NoError(t, IndexLocalRepo(context.Background(), s, dir, IndexOptions{}))
+
+	var commits2, diffs2 int
+	require.NoError(t, s.QueryRow("SELECT COUNT(*) FROM commits").Scan(&commits2))
+	require.NoError(t, s.QueryRow("SELECT COUNT(*) FROM diffs").Scan(&diffs2))
+
+	if commits2 != commits1 {
+		t.Errorf("re-index after checkpoint changed commit count: %d → %d", commits1, commits2)
+	}
+	if diffs2 != diffs1 {
+		t.Errorf("re-index after checkpoint changed diff count: %d → %d", diffs1, diffs2)
+	}
+}
+
 // ── helper ─────────────────────────────────────────────────────────────────
 
 // writeBlobToRepo stores content as a loose blob in the repo and returns its hash.

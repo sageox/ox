@@ -13,6 +13,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.1
 	github.com/fatih/color v1.18.0
 	github.com/fsnotify/fsnotify v1.7.0
+	github.com/go-git/go-billy/v6 v6.0.0-20260226131633-45bd0956d66f
 	github.com/go-git/go-git/v6 v6.0.0-20260313081548-799bb393a8ed
 	github.com/gofrs/flock v0.13.0
 	github.com/google/uuid v1.6.0
@@ -26,7 +27,6 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/stretchr/testify v1.11.1
-	github.com/yuin/goldmark v1.7.8
 	github.com/zalando/go-keyring v0.2.6
 	golang.org/x/sys v0.41.0
 	golang.org/x/term v0.40.0
@@ -86,7 +86,6 @@ require (
 	github.com/gin-contrib/sse v0.1.0 // indirect
 	github.com/gin-gonic/gin v1.10.0 // indirect
 	github.com/go-git/gcfg/v2 v2.0.2 // indirect
-	github.com/go-git/go-billy/v6 v6.0.0-20260226131633-45bd0956d66f // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/go-playground/validator/v10 v10.20.0 // indirect
@@ -122,6 +121,7 @@ require (
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.2.12 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	github.com/yuin/goldmark v1.7.8 // indirect
 	github.com/yuin/goldmark-emoji v1.0.5 // indirect
 	go.etcd.io/bbolt v1.4.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
