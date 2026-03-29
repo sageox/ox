@@ -10,6 +10,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/session"
 )
 
 func TestFindOrphanedSessions(t *testing.T) {
@@ -562,5 +565,92 @@ func TestValidateRawJSONLHeader(t *testing.T) {
 				assert.Contains(t, err.Error(), tt.wantErr)
 			}
 		})
+	}
+}
+
+// TestRetrySessionUpload_ZeroEntryGuard verifies that retrySessionUpload is a no-op
+// when EntryCount is zero, returning nil without touching the ledger.
+// This guards against uploading empty sessions that have no substantive content.
+func TestRetrySessionUpload_ZeroEntryGuard(t *testing.T) {
+	tmpDir := t.TempDir()
+	cacheDir := filepath.Join(tmpDir, "cache")
+	ledgerDir := filepath.Join(tmpDir, "ledger")
+	require.NoError(t, os.MkdirAll(cacheDir, 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(ledgerDir, "sessions"), 0755))
+
+	sessionName := "2026-01-15T14-00-testuser-Ox0ENT"
+	cacheSession := filepath.Join(cacheDir, sessionName)
+	require.NoError(t, os.MkdirAll(cacheSession, 0755))
+	writeTestRawJSONL(t, filepath.Join(cacheSession, ledgerFileRaw))
+
+	orphan := orphanedSession{
+		SessionName: sessionName,
+		CachePath:   cacheSession,
+		Meta: &session.StoreMeta{
+			AgentID:   "Ox0ENT",
+			AgentType: "claude-code",
+		},
+		EntryCount: 0, // zero entries — must be skipped
+	}
+
+	err := retrySessionUpload("", ledgerDir, orphan)
+	assert.NoError(t, err, "zero-entry session should return nil without error")
+
+	// ledger session dir must not be created (no work done)
+	ledgerSessionDir := filepath.Join(ledgerDir, "sessions", sessionName)
+	_, statErr := os.Stat(ledgerSessionDir)
+	assert.True(t, os.IsNotExist(statErr),
+		"ledger session dir must not be created for a zero-entry session")
+}
+
+// TestRetrySessionUpload_ContentFilesNotPointers_OnLFSFailure is a regression test for
+// bug #291 in the doctor retry path. It verifies that when LFS upload fails (no
+// credentials with empty projectRoot), raw.jsonl copied to the ledger session dir is
+// NOT replaced with an LFS pointer stub.
+//
+// The bug was: WriteSessionMeta (with fileRefs) was called before git push, replacing
+// content files with pointer stubs. If push then failed, the content was lost.
+// The fix: WriteSessionMetaOnly is used before push; WritePointerFiles runs only after
+// a successful push. When LFS fails, retrySessionUpload returns an error before any
+// write step that would corrupt content.
+func TestRetrySessionUpload_ContentFilesNotPointers_OnLFSFailure(t *testing.T) {
+	tmpDir := t.TempDir()
+	cacheDir := filepath.Join(tmpDir, "cache")
+	ledgerDir := filepath.Join(tmpDir, "ledger")
+	require.NoError(t, os.MkdirAll(cacheDir, 0755))
+	require.NoError(t, os.MkdirAll(filepath.Join(ledgerDir, "sessions"), 0755))
+
+	sessionName := "2026-01-15T15-00-testuser-OxLFSF"
+	cacheSession := filepath.Join(cacheDir, sessionName)
+	require.NoError(t, os.MkdirAll(cacheSession, 0755))
+
+	rawPath := filepath.Join(cacheSession, ledgerFileRaw)
+	writeTestRawJSONLWithEntries(t, rawPath, 3)
+
+	orphan := orphanedSession{
+		SessionName: sessionName,
+		CachePath:   cacheSession,
+		Meta: &session.StoreMeta{
+			AgentID:   "OxLFSF",
+			AgentType: "claude-code",
+		},
+		EntryCount: 3,
+	}
+
+	// empty projectRoot with no git repo → retrySessionUpload will fail somewhere in the
+	// upload/commit pipeline (LFS, credentials, or git — depending on environment)
+	err := retrySessionUpload("", ledgerDir, orphan)
+	require.Error(t, err, "expected upload error with no project or git repo")
+
+	// CRITICAL (bug #291 regression): raw.jsonl copied to the ledger session dir must
+	// NOT be replaced with an LFS pointer stub at any point before a successful push.
+	// If retrySessionUpload failed after copying raw.jsonl but before the push, the
+	// content file must remain as real bytes — not a tiny pointer.
+	// Before the fix, WriteSessionMeta (with fileRefs) was called before commitAndPush,
+	// so a push failure would leave only pointer stubs with no remote blob backing.
+	ledgerRawPath := filepath.Join(ledgerDir, "sessions", sessionName, ledgerFileRaw)
+	if _, statErr := os.Stat(ledgerRawPath); statErr == nil {
+		assert.False(t, lfs.IsPointerFile(ledgerRawPath),
+			"raw.jsonl copied to ledger must remain real content after a failed upload (bug #291 regression)")
 	}
 }

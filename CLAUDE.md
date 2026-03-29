@@ -485,6 +485,8 @@ RIGHT: Update tests to use CreateInitializedProject(t) helper
 
 **No test theater.** Each test must answer: "What real-world failure does this prevent?" Tests that pass when the feature is broken are worse than no tests.
 
+**Failure-mode tests are required, not optional.** Happy-path tests alone are insufficient. For every new function or bug fix, explicitly test: (1) side-effecting functions with the side effect skipped (e.g. push fails — content files must not be destroyed); (2) search functions with the target in each possible location independently; (3) multi-step pipelines where step N fails — step N-1 output must survive intact.
+
 **Coverage target: 85%+ for internal packages.** New code should ship with tests. PRs that reduce coverage below 85% need justification. Check with `go test ./internal/... -coverprofile=coverage.out && go tool cover -func=coverage.out | grep total`.
 
 ### Bug Fix Regression Tests

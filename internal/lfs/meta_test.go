@@ -408,3 +408,100 @@ func TestFileRef_BareOID(t *testing.T) {
 		assert.Equal(t, tt.expected, ref.BareOID(), "BareOID for %q", tt.oid)
 	}
 }
+
+func TestWriteSessionMetaOnly_DoesNotReplaceContentFiles(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	rawContent := []byte(`{"type":"header"}`)
+	summaryContent := []byte("# Summary")
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), rawContent, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.md"), summaryContent, 0644))
+
+	meta := &SessionMeta{
+		Version:     "1.0",
+		SessionName: "test",
+		Username:    "test@example.com",
+		AgentID:     "OxTest",
+		AgentType:   "claude-code",
+		CreatedAt:   time.Now(),
+		Files: map[string]FileRef{
+			"raw.jsonl":  {OID: "sha256:abc123", Size: int64(len(rawContent))},
+			"summary.md": {OID: "sha256:def456", Size: int64(len(summaryContent))},
+		},
+	}
+
+	err := WriteSessionMetaOnly(sessionDir, meta)
+	require.NoError(t, err)
+
+	// content files must remain intact — WriteSessionMetaOnly never writes pointer stubs
+	assert.False(t, IsPointerFile(filepath.Join(sessionDir, "raw.jsonl")),
+		"raw.jsonl should remain a content file after WriteSessionMetaOnly")
+	assert.False(t, IsPointerFile(filepath.Join(sessionDir, "summary.md")),
+		"summary.md should remain a content file after WriteSessionMetaOnly")
+
+	got, err := os.ReadFile(filepath.Join(sessionDir, "raw.jsonl"))
+	require.NoError(t, err)
+	assert.Equal(t, rawContent, got, "raw.jsonl content must be unchanged")
+
+	// meta.json should be written with correct OIDs
+	readMeta, err := ReadSessionMeta(sessionDir)
+	require.NoError(t, err)
+	assert.Equal(t, "sha256:abc123", readMeta.Files["raw.jsonl"].OID)
+	assert.Equal(t, "sha256:def456", readMeta.Files["summary.md"].OID)
+}
+
+func TestWriteSessionMetaOnly_Nil(t *testing.T) {
+	err := WriteSessionMetaOnly(t.TempDir(), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nil session meta")
+}
+
+// TestWriteSessionMeta_WritesPointers_WriteSessionMetaOnlyDoesNot is the key
+// regression test for #291: WriteSessionMeta replaces content with pointer stubs
+// while WriteSessionMetaOnly deliberately does not, keeping files intact for push.
+func TestWriteSessionMeta_WritesPointers_WriteSessionMetaOnlyDoesNot(t *testing.T) {
+	rawContent := []byte(`{"type":"header"}`)
+	summaryContent := []byte("# Summary")
+
+	files := map[string]FileRef{
+		"raw.jsonl":  {OID: "sha256:abc123", Size: int64(len(rawContent))},
+		"summary.md": {OID: "sha256:def456", Size: int64(len(summaryContent))},
+	}
+	meta := &SessionMeta{
+		Version:   "1.0",
+		AgentID:   "OxTest",
+		AgentType: "claude-code",
+		CreatedAt: time.Now(),
+		Files:     files,
+	}
+
+	t.Run("WriteSessionMetaOnly preserves content files", func(t *testing.T) {
+		sessionDir := filepath.Join(t.TempDir(), "session")
+		require.NoError(t, os.MkdirAll(sessionDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), rawContent, 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.md"), summaryContent, 0644))
+
+		require.NoError(t, WriteSessionMetaOnly(sessionDir, meta))
+
+		assert.False(t, IsPointerFile(filepath.Join(sessionDir, "raw.jsonl")),
+			"raw.jsonl must remain content after WriteSessionMetaOnly")
+		assert.False(t, IsPointerFile(filepath.Join(sessionDir, "summary.md")),
+			"summary.md must remain content after WriteSessionMetaOnly")
+	})
+
+	t.Run("WriteSessionMeta replaces content with pointers", func(t *testing.T) {
+		sessionDir := filepath.Join(t.TempDir(), "session")
+		require.NoError(t, os.MkdirAll(sessionDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), rawContent, 0644))
+		require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.md"), summaryContent, 0644))
+
+		require.NoError(t, WriteSessionMeta(sessionDir, meta))
+
+		assert.True(t, IsPointerFile(filepath.Join(sessionDir, "raw.jsonl")),
+			"raw.jsonl must become a pointer stub after WriteSessionMeta")
+		assert.True(t, IsPointerFile(filepath.Join(sessionDir, "summary.md")),
+			"summary.md must become a pointer stub after WriteSessionMeta")
+	})
+}

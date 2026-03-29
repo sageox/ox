@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -402,4 +403,132 @@ func TestAbortByName_RequiresForce(t *testing.T) {
 	// session should still exist
 	_, err = os.Stat(sessionPath)
 	assert.NoError(t, err, "session should not be removed without --force")
+}
+
+// setupLedgerProject creates a project with a real git repo (so findGitRoot works)
+// and a fake ledger directory registered in config.local.toml.
+// Returns projectRoot and ledgerPath.
+func setupLedgerProject(t *testing.T) (string, string) {
+	t.Helper()
+	skipIntegration(t)
+
+	projectRoot := t.TempDir()
+	ledgerPath := t.TempDir()
+
+	// init a git repo so findGitRoot() returns projectRoot
+	initCmd := exec.Command("git", "init")
+	initCmd.Dir = projectRoot
+	require.NoError(t, initCmd.Run(), "git init failed")
+
+	// create .sageox with config.json so the project is initialized
+	sageoxDir := filepath.Join(projectRoot, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sageoxDir, "config.json"),
+		[]byte(`{"config_version":"2","repo_id":"test-repo-id"}`),
+		0644,
+	))
+
+	// register ledger in config.local.toml
+	localCfg := &config.LocalConfig{
+		Ledger: &config.LedgerConfig{Path: ledgerPath},
+	}
+	require.NoError(t, config.SaveLocalConfig(projectRoot, localCfg))
+
+	// set up XDG env so session.GetContextPath works
+	cacheDir := t.TempDir()
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("HOME", cacheDir)
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+
+	return projectRoot, ledgerPath
+}
+
+// makeLedgerOrphanSession creates a non-recording session in ledgerPath/sessions/<name>/.
+func makeLedgerOrphanSession(t *testing.T, ledgerPath, agentID string) (string, string) {
+	t.Helper()
+	sessionName := fmt.Sprintf("2026-03-20T10-00-testuser-%s", agentID)
+	sessionPath := filepath.Join(ledgerPath, "sessions", sessionName)
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessionPath, "raw.jsonl"),
+		[]byte("{\"type\":\"header\"}\n{\"type\":\"message\",\"seq\":0}\n"),
+		0644,
+	))
+	return sessionName, sessionPath
+}
+
+// makeLedgerCacheOrphanSession creates a non-recording session in ledgerPath/.sageox/cache/sessions/<name>/.
+func makeLedgerCacheOrphanSession(t *testing.T, ledgerPath, agentID string) (string, string) {
+	t.Helper()
+	sessionName := fmt.Sprintf("2026-03-20T10-00-testuser-%s", agentID)
+	sessionPath := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessionPath, "raw.jsonl"),
+		[]byte("{\"type\":\"header\"}\n{\"type\":\"message\",\"seq\":0}\n"),
+		0644,
+	))
+	return sessionName, sessionPath
+}
+
+func TestResolveSessionForAbort_LedgerSessions(t *testing.T) {
+	cfg = &config.Config{}
+	projectRoot, ledgerPath := setupLedgerProject(t)
+
+	origDir, _ := os.Getwd()
+	require.NoError(t, os.Chdir(projectRoot))
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	sessionName, sessionPath := makeLedgerOrphanSession(t, ledgerPath, "OxLdgr")
+
+	resolved, resolvedPath, err := resolveSessionForAbort(projectRoot, sessionName)
+	require.NoError(t, err, "should find session in ledger sessions/")
+	assert.Equal(t, sessionName, resolved)
+	assert.Equal(t, sessionPath, resolvedPath)
+}
+
+func TestResolveSessionForAbort_LedgerCache(t *testing.T) {
+	cfg = &config.Config{}
+	projectRoot, ledgerPath := setupLedgerProject(t)
+
+	origDir, _ := os.Getwd()
+	require.NoError(t, os.Chdir(projectRoot))
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	sessionName, sessionPath := makeLedgerCacheOrphanSession(t, ledgerPath, "OxCche")
+
+	resolved, resolvedPath, err := resolveSessionForAbort(projectRoot, sessionName)
+	require.NoError(t, err, "should find session in ledger .sageox/cache/sessions/")
+	assert.Equal(t, sessionName, resolved)
+	assert.Equal(t, sessionPath, resolvedPath)
+}
+
+func TestResolveSessionForAbort_XDGCacheStillWorks(t *testing.T) {
+	cfg = &config.Config{}
+	projectRoot := setupSessionTestProject(t)
+
+	origDir, _ := os.Getwd()
+	require.NoError(t, os.Chdir(projectRoot))
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	sessionName, sessionPath := makeOrphanSession(t, projectRoot, "OxXdgc")
+
+	resolved, resolvedPath, err := resolveSessionForAbort(projectRoot, sessionName)
+	require.NoError(t, err, "should still find sessions in XDG cache")
+	assert.Equal(t, sessionName, resolved)
+	assert.Equal(t, sessionPath, resolvedPath)
+}
+
+func TestResolveSessionForAbort_NotFound(t *testing.T) {
+	cfg = &config.Config{}
+	projectRoot := setupSessionTestProject(t)
+
+	origDir, _ := os.Getwd()
+	require.NoError(t, os.Chdir(projectRoot))
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	_, _, err := resolveSessionForAbort(projectRoot, "nonexistent-session-xyz")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "session not found")
 }

@@ -1824,3 +1824,153 @@ func TestCtrlC_FullFinalizationPipeline_WritesMetaJSON(t *testing.T) {
 		t.Errorf("agent_id: got %q, want %q", meta.AgentID, "OxMETA")
 	}
 }
+
+// TestProcessResult_ContentFilesNotPointers_AfterFinalization is a regression test for
+// bug #291: WriteSessionMeta (with fileRefs) was called before git push, replacing
+// content files with LFS pointer stubs. If push then failed, the content was lost.
+//
+// This test verifies the end-to-end contract: after ProcessResult with LFS disabled
+// (skipLFS=true), content files are never replaced with LFS pointer stubs.
+// The test would fail if the pipeline called WriteSessionMeta (with fileRefs)
+// instead of WriteSessionMetaOnly followed by a post-push WritePointerFiles.
+func TestProcessResult_ContentFilesNotPointers_AfterFinalization(t *testing.T) {
+	handler := NewSessionFinalizeHandlerForTest(slog.Default()) // skipGit=true, skipLFS=true
+
+	sessionName := "2026-01-15T12-00-testuser-OxPTR1"
+	ledgerPath := createTestSession(t, sessionName, nil)
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+
+	// record the original content so we can compare after ProcessResult
+	originalContent, err := os.ReadFile(rawPath)
+	if err != nil {
+		t.Fatalf("read raw.jsonl: %v", err)
+	}
+
+	item := &WorkItem{
+		ID:   "test-ptr-regression",
+		Type: sessionFinalizeType,
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    rawPath,
+			Missing:    requiredArtifacts,
+			LedgerPath: ledgerPath,
+		},
+	}
+
+	result := &RunResult{
+		Output: `{"title":"Pointer Regression Test","summary":"Verifying no pointer replacement","key_actions":["verified"],"outcome":"success","topics_found":[],"quality_score":0.8,"score_reason":"Test"}`,
+	}
+
+	if err := handler.ProcessResult(item, result); err != nil {
+		t.Fatalf("ProcessResult failed: %v", err)
+	}
+
+	// CRITICAL: raw.jsonl must not be replaced with an LFS pointer stub.
+	// Before the fix, WriteSessionMeta(meta_with_files) was called before push,
+	// which would have replaced raw.jsonl with a tiny pointer file.
+	if lfs.IsPointerFile(rawPath) {
+		t.Error("raw.jsonl was replaced with an LFS pointer stub (bug #291 regression)")
+	}
+
+	// content must be unchanged — not a truncated pointer
+	afterContent, err := os.ReadFile(rawPath)
+	if err != nil {
+		t.Fatalf("read raw.jsonl after ProcessResult: %v", err)
+	}
+	if string(afterContent) != string(originalContent) {
+		t.Errorf("raw.jsonl content changed unexpectedly after ProcessResult\nbefore: %q\nafter:  %q",
+			originalContent, afterContent)
+	}
+
+	// meta.json must be written with empty Files (no LFS refs with skipLFS=true)
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	if err != nil {
+		t.Fatalf("meta.json not found after ProcessResult: %v", err)
+	}
+	if len(meta.Files) != 0 {
+		t.Errorf("meta.Files must be empty when LFS is skipped, got %d entries", len(meta.Files))
+	}
+}
+
+// TestWriteMetaAndUploadLFS_ContentFilesIntactAndMetaWritten is a regression test for
+// bug #291 at the writeMetaAndUploadLFS layer. It verifies that when LFS is skipped
+// (projectRoot=""), the function uses WriteSessionMetaOnly — writing meta.json without
+// replacing content files with pointer stubs.
+//
+// The test would fail if writeMetaAndUploadLFS called WriteSessionMeta (which also
+// writes pointer files) and somehow acquired non-empty fileRefs.
+func TestWriteMetaAndUploadLFS_ContentFilesIntactAndMetaWritten(t *testing.T) {
+	handler := NewSessionFinalizeHandler(slog.Default())
+	handler.skipGit = true
+	// skipLFS=false but projectRoot="" — LFS block is skipped at the early-return guard
+
+	sessionName := "2026-01-15T13-00-testuser-OxPTR2"
+	ledgerPath := t.TempDir()
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	if err := os.MkdirAll(sessionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	rawContent := `{"metadata":{"agent_id":"OxPTR2","agent_type":"claude-code","created_at":"2026-01-15T13:00:00Z"},"type":"header"}
+{"type":"user","content":"hello","seq":1}
+{"type":"assistant","content":"world","seq":2}
+`
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	if err := os.WriteFile(rawPath, []byte(rawContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stored := &session.StoredSession{
+		Entries: []map[string]any{{"type": "user"}, {"type": "assistant"}},
+	}
+	summaryResp := &session.SummarizeResponse{
+		Title:   "Pointer Regression",
+		Summary: "No LFS pointer replacement",
+	}
+	payload := &SessionFinalizePayload{
+		SessionDir: sessionDir,
+		LedgerPath: ledgerPath,
+	}
+
+	// projectRoot="" → LFS early-return path: WriteSessionMetaOnly is called,
+	// LFS upload is skipped, function returns nil fileRefs
+	fileRefs := handler.writeMetaAndUploadLFS(payload, stored, summaryResp)
+
+	if fileRefs != nil {
+		t.Errorf("expected nil fileRefs with empty projectRoot, got %d refs", len(fileRefs))
+	}
+
+	// CRITICAL: raw.jsonl must remain as real content, not a pointer stub
+	if lfs.IsPointerFile(rawPath) {
+		t.Error("raw.jsonl was replaced with LFS pointer stub (bug #291 regression in writeMetaAndUploadLFS)")
+	}
+	afterContent, err := os.ReadFile(rawPath)
+	if err != nil {
+		t.Fatalf("read raw.jsonl: %v", err)
+	}
+	if string(afterContent) != rawContent {
+		t.Errorf("raw.jsonl content changed: got %q", afterContent)
+	}
+
+	// meta.json must be written (WriteSessionMetaOnly was called)
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	if err != nil {
+		t.Fatalf("meta.json not found after writeMetaAndUploadLFS: %v", err)
+	}
+	if meta.SessionName != sessionName {
+		t.Errorf("session_name: got %q, want %q", meta.SessionName, sessionName)
+	}
+	if meta.Title != "Pointer Regression" {
+		t.Errorf("title: got %q, want %q", meta.Title, "Pointer Regression")
+	}
+	// no LFS refs → Files must be empty
+	if len(meta.Files) != 0 {
+		t.Errorf("meta.Files must be empty, got %d entries", len(meta.Files))
+	}
+
+	// no stale .tmp file should remain (atomic write contract)
+	if _, err := os.Stat(filepath.Join(sessionDir, "meta.json.tmp")); err == nil {
+		t.Error("stale meta.json.tmp found — atomic write did not clean up")
+	}
+}

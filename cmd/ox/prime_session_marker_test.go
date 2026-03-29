@@ -223,3 +223,70 @@ func TestWriteToAgentEnvFile(t *testing.T) {
 		assert.Contains(t, string(content), `export SAGEOX_AGENT_ID="OxEnv1"`)
 	})
 }
+
+// TestWriteToAgentEnvFile_WritesAgentIDWithoutSessionID is the regression test for
+// #258: env file must be written even when SAGEOX_SESSION_ID is empty (no hook stdin,
+// no session ID). The agent ID must always reach the env file so /clear in Claude
+// Code inherits the correct agent ID.
+func TestWriteToAgentEnvFile_WritesAgentIDWithoutSessionID(t *testing.T) {
+	tmpDir := t.TempDir()
+	envFile := filepath.Join(tmpDir, "env")
+
+	origEnv := os.Getenv("CLAUDE_ENV_FILE")
+	os.Setenv("CLAUDE_ENV_FILE", envFile)
+	t.Cleanup(func() {
+		if origEnv != "" {
+			os.Setenv("CLAUDE_ENV_FILE", origEnv)
+		} else {
+			os.Unsetenv("CLAUDE_ENV_FILE")
+		}
+	})
+
+	// simulate what the fixed prime code does: write both vars unconditionally,
+	// even when session ID is empty (no hook context)
+	err := WriteToAgentEnvFile(map[string]string{
+		"SAGEOX_AGENT_ID":   "OxTest",
+		"SAGEOX_SESSION_ID": "", // empty — no session from hook stdin
+	})
+	require.NoError(t, err)
+
+	content, err := os.ReadFile(envFile)
+	require.NoError(t, err)
+	// agent ID must always be written regardless of empty session ID
+	assert.Contains(t, string(content), `export SAGEOX_AGENT_ID="OxTest"`,
+		"SAGEOX_AGENT_ID must be written to env file even when session ID is empty")
+}
+
+// TestWriteToAgentEnvFile_Idempotent verifies that multiple writes append entries
+// and that the last write wins for any given key on read. This covers the /clear
+// scenario where prime runs again after a session reset.
+func TestWriteToAgentEnvFile_Idempotent(t *testing.T) {
+	tmpDir := t.TempDir()
+	envFile := filepath.Join(tmpDir, "env")
+
+	origEnv := os.Getenv("CLAUDE_ENV_FILE")
+	os.Setenv("CLAUDE_ENV_FILE", envFile)
+	t.Cleanup(func() {
+		if origEnv != "" {
+			os.Setenv("CLAUDE_ENV_FILE", origEnv)
+		} else {
+			os.Unsetenv("CLAUDE_ENV_FILE")
+		}
+	})
+
+	// first prime call
+	require.NoError(t, WriteToAgentEnvFile(map[string]string{
+		"SAGEOX_AGENT_ID": "OxFirst",
+	}))
+
+	// second prime call (after /clear) with a different agent ID
+	require.NoError(t, WriteToAgentEnvFile(map[string]string{
+		"SAGEOX_AGENT_ID": "OxSecond",
+	}))
+
+	content, err := os.ReadFile(envFile)
+	require.NoError(t, err)
+	// both writes must be present; shell sources the file so last wins
+	assert.Contains(t, string(content), `export SAGEOX_AGENT_ID="OxFirst"`)
+	assert.Contains(t, string(content), `export SAGEOX_AGENT_ID="OxSecond"`)
+}
