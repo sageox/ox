@@ -69,7 +69,7 @@ func checkForUpdates() checkResult {
 			passed:  true,
 			warning: true,
 			message: fmt.Sprintf("v%s → v%s available", currentVersion, latestVersion),
-			detail:  "Run 'brew upgrade sageox' or visit https://github.com/sageox/ox/releases",
+			detail:  "Run 'ox upgrade' to update",
 		}
 	}
 

@@ -33,10 +33,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/version"
+	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
 
 // Sync timing constants - extracted for clarity and testability.
@@ -753,10 +756,75 @@ func (s *SyncScheduler) pullChanges(ctx context.Context) {
 
 // checkLatestVersion fetches the latest GitHub release using ETag conditional requests.
 // Called periodically by the sync scheduler to keep the version cache warm.
+// If a newer version is detected, injects a broadcast whisper so all active agents are notified.
 func (s *SyncScheduler) checkLatestVersion(ctx context.Context) {
 	if err := s.versionCache.CheckAndUpdate(ctx); err != nil {
 		s.logger.Warn("version check failed", "error", err)
+		return
 	}
+
+	// check if the cached version is newer than what we're running
+	data := s.versionCache.Data()
+	if data == nil {
+		return
+	}
+
+	latest := strings.TrimPrefix(data.LatestVersion, "v")
+	current := strings.TrimPrefix(version.Version, "v")
+	if latest == "" || latest == current {
+		return
+	}
+
+	// simple semver comparison: is latest newer than current?
+	if !isNewerSemver(latest, current) {
+		return
+	}
+
+	// inject a broadcast whisper (agent_id="" = all agents receive it)
+	s.mu.Lock()
+	registry := s.whisperRegistry
+	s.mu.Unlock()
+
+	if registry == nil {
+		return
+	}
+
+	id, err := uuid.NewV7()
+	if err != nil {
+		return
+	}
+
+	_ = registry.Add("ledger", whisperstore.WhisperEntry{
+		ID:         id.String(),
+		Scope:      "ledger",
+		Type:       whisperstore.WhisperStructural,
+		Source:     "version-check",
+		Topic:      "upgrade",
+		Content:    fmt.Sprintf("ox v%s → v%s available. Run `ox upgrade` to update.", current, latest),
+		Importance: whisperstore.ImportanceNormal,
+		CreatedAt:  time.Now(),
+		AgentID:    "", // broadcast to all agents
+	})
+
+	s.logger.Info("upgrade whisper injected", "current", current, "latest", latest)
+}
+
+// isNewerSemver returns true if a is newer than b (simple dot-separated numeric comparison).
+func isNewerSemver(a, b string) bool {
+	aParts := strings.Split(a, ".")
+	bParts := strings.Split(b, ".")
+	for i := 0; i < len(aParts) && i < len(bParts); i++ {
+		var aNum, bNum int
+		_, _ = fmt.Sscanf(aParts[i], "%d", &aNum)
+		_, _ = fmt.Sscanf(bParts[i], "%d", &bNum)
+		if aNum > bNum {
+			return true
+		}
+		if aNum < bNum {
+			return false
+		}
+	}
+	return len(aParts) > len(bParts)
 }
 
 // shouldSyncOrBypass checks if a sync should proceed given backoff state.

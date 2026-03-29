@@ -558,7 +558,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		output.UpdateAvailable = true
 		output.LatestVersion = vResult.LatestVersion
 		output.UpdateHint = fmt.Sprintf(
-			"v%s -> v%s available. Run 'brew upgrade sageox' or visit https://github.com/sageox/ox/releases",
+			"v%s -> v%s available. Run 'ox upgrade' to update.",
 			vResult.CurrentVersion, vResult.LatestVersion,
 		)
 		output.UserNotices = append(output.UserNotices, UserNotice{
