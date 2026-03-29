@@ -2,7 +2,6 @@ package index
 
 import (
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -104,20 +103,6 @@ func TestPtrIntToNullInt64(t *testing.T) {
 	}
 }
 
-func TestToNullInt64(t *testing.T) {
-	t.Parallel()
-
-	got := toNullInt64(0)
-	if !got.Valid || got.Int64 != 0 {
-		t.Errorf("expected valid 0, got valid=%v int64=%d", got.Valid, got.Int64)
-	}
-
-	got = toNullInt64(123)
-	_ = sql.NullInt64{} // ensure import is used
-	if !got.Valid || got.Int64 != 123 {
-		t.Errorf("expected valid 123, got valid=%v int64=%d", got.Valid, got.Int64)
-	}
-}
 
 func TestDirtyIndexPath_Structure(t *testing.T) {
 	t.Parallel()

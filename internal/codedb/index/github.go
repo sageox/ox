@@ -191,7 +191,7 @@ func indexPRFile(ctx context.Context, s *store.Store, path string) (int64, error
 		return 0, fmt.Errorf("check existing PR %d: %w", pr.Number, err)
 	}
 
-	// insert PR
+	// JSON-encode labels to handle commas in label names
 	labelsJSON, _ := json.Marshal(pr.Labels)
 	res, err := q.InsertPullRequest(ctx, codedbsqlc.InsertPullRequestParams{
 		Number:      int64(pr.Number),
@@ -283,7 +283,7 @@ func indexIssueFile(ctx context.Context, s *store.Store, path string) (int64, er
 		return 0, fmt.Errorf("check existing issue %d: %w", issue.Number, err)
 	}
 
-	// insert issue
+	// JSON-encode labels to handle commas in label names
 	labelsJSON, _ := json.Marshal(issue.Labels)
 	res, err := q.InsertIssue(ctx, codedbsqlc.InsertIssueParams{
 		Number:     int64(issue.Number),
@@ -327,10 +327,6 @@ func toNullString(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
-}
-
-func toNullInt64(n int) sql.NullInt64 {
-	return sql.NullInt64{Int64: int64(n), Valid: true}
 }
 
 func ptrIntToNullInt64(p *int) sql.NullInt64 {
