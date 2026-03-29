@@ -144,7 +144,7 @@ func TestUpsertRepo(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			id, err := upsertRepo(s, tt.repoName, tt.path)
+			id, err := upsertRepo(context.Background(), s, tt.repoName, tt.path)
 			if err != nil {
 				t.Fatalf("upsertRepo: %v", err)
 			}
@@ -155,11 +155,11 @@ func TestUpsertRepo(t *testing.T) {
 	}
 
 	t.Run("upsert updates path", func(t *testing.T) {
-		id1, err := upsertRepo(s, "update-repo", "/old/path")
+		id1, err := upsertRepo(context.Background(), s, "update-repo", "/old/path")
 		if err != nil {
 			t.Fatalf("first upsert: %v", err)
 		}
-		id2, err := upsertRepo(s, "update-repo", "/new/path")
+		id2, err := upsertRepo(context.Background(), s, "update-repo", "/new/path")
 		if err != nil {
 			t.Fatalf("second upsert: %v", err)
 		}
@@ -183,13 +183,13 @@ func TestLoadKnownCommits(t *testing.T) {
 	}
 	s := openTestStore(t)
 
-	repoID, err := upsertRepo(s, "commits-repo", "/repo")
+	repoID, err := upsertRepo(context.Background(), s, "commits-repo", "/repo")
 	if err != nil {
 		t.Fatalf("upsertRepo: %v", err)
 	}
 
 	t.Run("empty repo has no known commits", func(t *testing.T) {
-		known, err := loadKnownCommits(s, repoID)
+		known, err := loadKnownCommits(context.Background(), s, repoID)
 		if err != nil {
 			t.Fatalf("loadKnownCommits: %v", err)
 		}
@@ -209,7 +209,7 @@ func TestLoadKnownCommits(t *testing.T) {
 				t.Fatalf("insert commit: %v", err)
 			}
 		}
-		known, err := loadKnownCommits(s, repoID)
+		known, err := loadKnownCommits(context.Background(), s, repoID)
 		if err != nil {
 			t.Fatalf("loadKnownCommits: %v", err)
 		}
@@ -231,13 +231,13 @@ func TestLoadExistingRefs(t *testing.T) {
 	}
 	s := openTestStore(t)
 
-	repoID, err := upsertRepo(s, "refs-repo", "/repo")
+	repoID, err := upsertRepo(context.Background(), s, "refs-repo", "/repo")
 	if err != nil {
 		t.Fatalf("upsertRepo: %v", err)
 	}
 
 	t.Run("no refs initially", func(t *testing.T) {
-		refs, err := loadExistingRefs(s, repoID)
+		refs, err := loadExistingRefs(context.Background(), s, repoID)
 		if err != nil {
 			t.Fatalf("loadExistingRefs: %v", err)
 		}
@@ -268,7 +268,7 @@ func TestLoadExistingRefs(t *testing.T) {
 			t.Fatalf("insert ref: %v", err)
 		}
 
-		refs, err := loadExistingRefs(s, repoID)
+		refs, err := loadExistingRefs(context.Background(), s, repoID)
 		if err != nil {
 			t.Fatalf("loadExistingRefs: %v", err)
 		}

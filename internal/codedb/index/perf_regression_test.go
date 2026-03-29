@@ -119,7 +119,7 @@ func TestEnsureBlob_ContentForNewBlob(t *testing.T) {
 
 	s := openTestStore(t)
 	// upsertRepo to get a valid repoID.
-	repoID, err := upsertRepo(s, "test-repo", dir)
+	repoID, err := upsertRepo(context.Background(), s, "test-repo", dir)
 	require.NoError(t, err)
 
 	tx, err := s.BeginTx(context.Background(), nil)
@@ -162,7 +162,7 @@ func TestEnsureBlob_NoContentOnCacheHit(t *testing.T) {
 	require.NoError(t, err)
 
 	s := openTestStore(t)
-	repoID, err := upsertRepo(s, "test-repo-2", dir)
+	repoID, err := upsertRepo(context.Background(), s, "test-repo-2", dir)
 	require.NoError(t, err)
 
 	tx, err := s.BeginTx(context.Background(), nil)

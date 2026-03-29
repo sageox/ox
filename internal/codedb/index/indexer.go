@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -205,13 +206,13 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	if err != nil {
 		return fmt.Errorf("derive repo name from URL: %w", err)
 	}
-	repoID, err := upsertRepo(s, repoName, repoPath)
+	repoID, err := upsertRepo(ctx, s, repoName, repoPath)
 	if err != nil {
 		return fmt.Errorf("upsert repo record: %w", err)
 	}
 
 	// 3. Load known commits
-	knownCommits, err := loadKnownCommits(s, repoID)
+	knownCommits, err := loadKnownCommits(ctx, s, repoID)
 	if err != nil {
 		return fmt.Errorf("load known commits: %w", err)
 	}
@@ -255,7 +256,7 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	defer func() { st.tx.Rollback() }()
 
 	// 6. Check if default branch tip has changed
-	existingRefs, err := loadExistingRefs(s, repoID)
+	existingRefs, err := loadExistingRefs(ctx, s, repoID)
 	if err != nil {
 		return fmt.Errorf("load existing refs: %w", err)
 	}
@@ -316,13 +317,13 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 
 	// 2. Upsert repo record — use the local path as both name and path
 	repoName := filepath.Base(localPath)
-	repoID, err := upsertRepo(s, repoName, localPath)
+	repoID, err := upsertRepo(ctx, s, repoName, localPath)
 	if err != nil {
 		return fmt.Errorf("upsert repo record: %w", err)
 	}
 
 	// 3. Load known commits
-	knownCommits, err := loadKnownCommits(s, repoID)
+	knownCommits, err := loadKnownCommits(ctx, s, repoID)
 	if err != nil {
 		return fmt.Errorf("load known commits: %w", err)
 	}
@@ -371,7 +372,7 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 	defer func() { st.tx.Rollback() }()
 
 	// 6. Check if default branch tip has changed
-	existingRefs, err := loadExistingRefs(s, repoID)
+	existingRefs, err := loadExistingRefs(ctx, s, repoID)
 	if err != nil {
 		return fmt.Errorf("load existing refs: %w", err)
 	}
@@ -585,8 +586,7 @@ func gitStatusDirtyFiles(ctx context.Context, repoPath string) ([]string, error)
 }
 
 // upsertRepo inserts or updates a repo record and returns its ID.
-func upsertRepo(s *store.Store, name, path string) (int64, error) {
-	ctx := context.Background()
+func upsertRepo(ctx context.Context, s *store.Store, name, path string) (int64, error) {
 	q := s.Queries()
 	if err := q.UpsertRepo(ctx, codedbsqlc.UpsertRepoParams{Name: name, Path: path}); err != nil {
 		return 0, fmt.Errorf("upsert repo: %w", err)
@@ -599,8 +599,8 @@ func upsertRepo(s *store.Store, name, path string) (int64, error) {
 }
 
 // loadKnownCommits returns a set of commit hashes already indexed for a repo.
-func loadKnownCommits(s *store.Store, repoID int64) (map[string]bool, error) {
-	hashes, err := s.Queries().ListCommitHashesByRepo(context.Background(), repoID)
+func loadKnownCommits(ctx context.Context, s *store.Store, repoID int64) (map[string]bool, error) {
+	hashes, err := s.Queries().ListCommitHashesByRepo(ctx, repoID)
 	if err != nil {
 		return nil, fmt.Errorf("query known commits: %w", err)
 	}
@@ -612,8 +612,8 @@ func loadKnownCommits(s *store.Store, repoID int64) (map[string]bool, error) {
 }
 
 // loadExistingRefs returns a map of ref name -> tip commit hash for a repo.
-func loadExistingRefs(s *store.Store, repoID int64) (map[string]string, error) {
-	rows, err := s.Queries().ListRefsByRepo(context.Background(), repoID)
+func loadExistingRefs(ctx context.Context, s *store.Store, repoID int64) (map[string]string, error) {
+	rows, err := s.Queries().ListRefsByRepo(ctx, repoID)
 	if err != nil {
 		return nil, fmt.Errorf("load existing refs: %w", err)
 	}
@@ -923,8 +923,12 @@ func (st *indexState) insertParentLinks(commitDBID int64, parentIDs []plumbing.H
 			var err error
 			parentDBID, err = q.GetCommitIDByHash(ctx, parentHex)
 			if err != nil {
-				continue // parent not yet in DB; skip link
+				if errors.Is(err, sql.ErrNoRows) {
+					continue // parent not yet in DB; skip link
+				}
+				return fmt.Errorf("get parent commit id %s: %w", parentHex, err)
 			}
+			st.commitIDCache[parentHex] = parentDBID
 		}
 		if err := q.InsertCommitParent(ctx, codedbsqlc.InsertCommitParentParams{
 			CommitID: commitDBID,
@@ -1062,7 +1066,7 @@ func (st *indexState) insertDiff(commitDBID int64, path string, oldBlobDBID sql.
 		Path:     path,
 	})
 	if err != nil {
-		return nil // non-fatal: skip Bleve indexing for this diff
+		return fmt.Errorf("get diff id: %w", err)
 	}
 
 	diffText := generateDiffText(st.repo, path, oldOID, newOID, hasOld, hasNew, oldText, newText)
@@ -1423,8 +1427,8 @@ sendLoop:
 }
 
 // openReposFromDB queries repo paths from the store and opens them.
-func openReposFromDB(s *store.Store) ([]*git.Repository, error) {
-	paths, err := s.Queries().ListRepoPaths(context.Background())
+func openReposFromDB(ctx context.Context, s *store.Store) ([]*git.Repository, error) {
+	paths, err := s.Queries().ListRepoPaths(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("query repo paths: %w", err)
 	}
@@ -1508,7 +1512,7 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 	}
 	report(fmt.Sprintf("Found %d unparsed blobs with supported languages.", len(blobs)))
 
-	repos, err := openReposFromDB(s)
+	repos, err := openReposFromDB(ctx, s)
 	if err != nil {
 		return stats, fmt.Errorf("open repos for symbol parsing: %w", err)
 	}
@@ -1732,7 +1736,7 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 	}
 	report(fmt.Sprintf("Parsing comments from %d blobs...", len(blobs)))
 
-	repos, err := openReposFromDB(s)
+	repos, err := openReposFromDB(ctx, s)
 	if err != nil {
 		return stats, fmt.Errorf("open repos for comment parsing: %w", err)
 	}
