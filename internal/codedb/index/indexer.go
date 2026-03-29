@@ -105,6 +105,7 @@ type indexState struct {
 	diffBatchN     int
 	knownCommits   map[string]bool
 	treeCache      map[plumbing.Hash]map[string]plumbing.Hash
+	treeOrder      []plumbing.Hash // FIFO insertion order for per-entry eviction
 	treeCacheLimit int
 	blobIDCache    map[string]int64 // content_hash -> blob DB ID; avoids repeated SQL lookups
 	commitIDCache  map[string]int64 // commit hash -> commit DB ID; used in insertParentLinks
@@ -213,6 +214,7 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 		diffBatch:      s.DiffIndex.NewBatch(),
 		knownCommits:   knownCommits,
 		treeCache:      make(map[plumbing.Hash]map[string]plumbing.Hash),
+		treeOrder:      make([]plumbing.Hash, 0, treeCacheLimit),
 		treeCacheLimit: treeCacheLimit,
 		blobIDCache:    make(map[string]int64),
 		commitIDCache:  make(map[string]int64),
@@ -326,6 +328,7 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 		diffBatch:      s.DiffIndex.NewBatch(),
 		knownCommits:   knownCommits,
 		treeCache:      make(map[plumbing.Hash]map[string]plumbing.Hash),
+		treeOrder:      make([]plumbing.Hash, 0, treeCacheLimit),
 		treeCacheLimit: treeCacheLimit,
 		blobIDCache:    make(map[string]int64),
 		commitIDCache:  make(map[string]int64),
@@ -781,13 +784,7 @@ func (st *indexState) indexCommit(cd commitData) error {
 		return err
 	}
 
-	// Evict tree cache periodically to bound memory usage.
-	// Memory per entry ≈ numFiles × 76 bytes. Configurable via IndexOptions.TreeCacheLimit.
-	if len(st.treeCache) >= st.treeCacheLimit {
-		st.treeCache = make(map[plumbing.Hash]map[string]plumbing.Hash)
-	}
-
-	childEntries, err := getTreeEntries(st.repo, cd.treeHash, st.treeCache)
+	childEntries, err := st.getTree(cd.treeHash)
 	if err != nil {
 		return fmt.Errorf("get tree entries: %w", err)
 	}
@@ -796,7 +793,7 @@ func (st *indexState) indexCommit(cd commitData) error {
 	if len(cd.parentIDs) > 0 {
 		parentCommit, pErr := st.repo.CommitObject(cd.parentIDs[0])
 		if pErr == nil {
-			if pe, peErr := getTreeEntries(st.repo, parentCommit.TreeHash, st.treeCache); peErr == nil {
+			if pe, peErr := st.getTree(parentCommit.TreeHash); peErr == nil {
 				parentEntries = pe
 			}
 		}
@@ -953,7 +950,7 @@ func (st *indexState) buildTipFileRevs(ri refInfo) error {
 	var tipEntries map[string]plumbing.Hash
 	tipCommit, tErr := st.repo.CommitObject(ri.tipOID)
 	if tErr == nil {
-		tipEntries, _ = getTreeEntries(st.repo, tipCommit.TreeHash, st.treeCache)
+		tipEntries, _ = st.getTree(tipCommit.TreeHash)
 	}
 	if tipEntries == nil {
 		tipEntries = make(map[string]plumbing.Hash)
@@ -983,6 +980,33 @@ func (st *indexState) buildTipFileRevs(ri refInfo) error {
 	}
 
 	return nil
+}
+
+// getTree wraps getTreeEntries with FIFO cache eviction. Instead of wiping the
+// entire cache when full (which evicts recently-needed parent trees), it removes
+// only the oldest entry, preserving sequential access locality.
+// Memory bound: treeCacheLimit × (numFiles × 76 bytes per entry).
+func (st *indexState) getTree(hash plumbing.Hash) (map[string]plumbing.Hash, error) {
+	_, alreadyCached := st.treeCache[hash]
+	if !alreadyCached && len(st.treeCache) >= st.treeCacheLimit {
+		// Evict the oldest (first-inserted) entry.
+		for len(st.treeOrder) > 0 {
+			oldest := st.treeOrder[0]
+			st.treeOrder = st.treeOrder[1:]
+			if _, stillPresent := st.treeCache[oldest]; stillPresent {
+				delete(st.treeCache, oldest)
+				break
+			}
+		}
+	}
+	entries, err := getTreeEntries(st.repo, hash, st.treeCache)
+	if err != nil {
+		return nil, err
+	}
+	if !alreadyCached {
+		st.treeOrder = append(st.treeOrder, hash)
+	}
+	return entries, nil
 }
 
 // getTreeEntries returns a map of filepath -> blob hash for all blobs in a tree.

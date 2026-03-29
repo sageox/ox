@@ -136,6 +136,103 @@ func BenchmarkGenerateDiffText(b *testing.B) {
 	}
 }
 
+// ── full pipeline benchmark ───────────────────────────────────────────────────
+
+// buildRepoWithFileChanges creates a git repo where each commit modifies
+// an existing file (not just adds new ones), producing meaningful diffs.
+func buildRepoWithFileChanges(b *testing.B, commits int) string {
+	b.Helper()
+	dir := b.TempDir()
+
+	repo, err := git.PlainInit(dir, false)
+	require.NoError(b, err)
+
+	wt, err := repo.Worktree()
+	require.NoError(b, err)
+	sig := &object.Signature{Name: "bench", Email: "b@b.com", When: time.Now()}
+
+	// Create 5 files in the first commit.
+	const numFiles = 5
+	for f := 0; f < numFiles; f++ {
+		fname := fmt.Sprintf("file%d.go", f)
+		content := fmt.Sprintf("package main\nfunc F%d() { return %d }\n", f, 0)
+		require.NoError(b, os.WriteFile(filepath.Join(dir, fname), []byte(content), 0o644))
+		_, err := wt.Add(fname)
+		require.NoError(b, err)
+	}
+	_, err = wt.Commit("initial commit", &git.CommitOptions{Author: sig})
+	require.NoError(b, err)
+
+	// Each subsequent commit modifies all files (maximum diff surface).
+	for i := 1; i < commits; i++ {
+		for f := 0; f < numFiles; f++ {
+			fname := fmt.Sprintf("file%d.go", f)
+			// 50-line file: enough for generateDiffText to produce real output.
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("package main // commit %d\n", i))
+			for line := 0; line < 50; line++ {
+				sb.WriteString(fmt.Sprintf("func F%d_%d() { return %d }\n", f, line, i*line))
+			}
+			require.NoError(b, os.WriteFile(filepath.Join(dir, fname), []byte(sb.String()), 0o644))
+			_, err := wt.Add(fname)
+			require.NoError(b, err)
+		}
+		_, err = wt.Commit(fmt.Sprintf("commit %d", i), &git.CommitOptions{Author: sig})
+		require.NoError(b, err)
+	}
+	return dir
+}
+
+// BenchmarkIndexLocalRepo_50Commits measures the full indexing pipeline:
+// walkNewCommits, getTreeEntries, ensureBlob (SQL+Bleve), generateDiffText,
+// insertDiff, insertParentLinks, buildTipFileRevs, and transaction commit.
+//
+// Run as:
+//
+//	go test -bench=BenchmarkIndexLocalRepo -benchmem -count=3 ./internal/codedb/index/
+//
+// Compare before/after by running on the main branch first (go test -bench=...
+// 2>&1 | tee /tmp/before.txt) then on ryan/optimization.
+func BenchmarkIndexLocalRepo_50Commits(b *testing.B) {
+	repoDir := buildRepoWithFileChanges(b, 50)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		s, err := store.Open(b.TempDir())
+		require.NoError(b, err)
+		b.StartTimer()
+
+		err = IndexLocalRepo(context.Background(), s, repoDir, IndexOptions{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		s.Close()
+		b.StartTimer()
+	}
+}
+
+// BenchmarkIndexLocalRepo_200Commits measures pipeline scaling at 200 commits.
+// Each commit modifies 5 files of 50 lines = 250 diffs, 250 blob writes per run.
+func BenchmarkIndexLocalRepo_200Commits(b *testing.B) {
+	repoDir := buildRepoWithFileChanges(b, 200)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		b.StopTimer()
+		s, err := store.Open(b.TempDir())
+		require.NoError(b, err)
+		b.StartTimer()
+
+		err = IndexLocalRepo(context.Background(), s, repoDir, IndexOptions{})
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		s.Close()
+		b.StartTimer()
+	}
+}
+
 // ── ensureBlob SQL benchmark ──────────────────────────────────────────────────
 
 // openBenchStore opens a store and registers cleanup.
