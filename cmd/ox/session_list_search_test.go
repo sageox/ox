@@ -101,108 +101,68 @@ func TestSessionStore_ResolveSessionName_NotFound(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "unresolved session path should not exist")
 }
 
-// TestSessionListLocations_AllThreeSources validates that sessions from all 3
-// storage locations (XDG cache, ledger/sessions, ledger/.sageox/cache/sessions)
-// are discoverable using the same Store API that runSessionList uses.
-func TestSessionListLocations_AllThreeSources(t *testing.T) {
+// TestSessionStore_DiscoversSessions verifies the Store contract:
+// NewStore(baseDir) discovers all sessions under baseDir/sessions/<name>/.
+// This is the foundation that runSessionList relies on for all 3 locations.
+func TestSessionStore_DiscoversSessions(t *testing.T) {
 	t.Parallel()
+	baseDir := t.TempDir()
 
-	// simulate the 3 locations as separate directories
-	xdgCacheDir := t.TempDir()
-	ledgerDir := t.TempDir()
-	ledgerCacheDir := t.TempDir()
-
-	// place a unique session in each location
-	createSessionInDir(t, xdgCacheDir, "2026-01-01T00-00-testuser-OxXDG1")
-	createSessionInDir(t, ledgerDir, "2026-01-02T00-00-testuser-OxLDG1")
-	createSessionInDir(t, ledgerCacheDir, "2026-01-03T00-00-testuser-OxCAC1")
-
-	// create stores for each location (mirrors runSessionList logic)
-	xdgStore, err := session.NewStore(xdgCacheDir)
-	require.NoError(t, err)
-	ledgerStore, err := session.NewStore(ledgerDir)
-	require.NoError(t, err)
-	cacheStore, err := session.NewStore(ledgerCacheDir)
-	require.NoError(t, err)
-
-	// collect sessions from all stores (same dedup logic as runSessionList)
-	allSessions, err := xdgStore.ListAllSessions()
-	require.NoError(t, err)
-
-	existing := make(map[string]bool)
-	for _, s := range allSessions {
-		existing[s.SessionName] = true
+	names := []string{
+		"2026-01-01T00-00-alice-OxAAA1",
+		"2026-01-02T00-00-bob-OxBBB2",
+		"2026-01-03T00-00-carol-OxCCC3",
+	}
+	for _, name := range names {
+		createSessionInDir(t, baseDir, name)
 	}
 
-	ledgerSessions, err := ledgerStore.ListAllSessions()
+	store, err := session.NewStore(baseDir)
 	require.NoError(t, err)
-	for _, ls := range ledgerSessions {
-		if !existing[ls.SessionName] {
-			existing[ls.SessionName] = true
-			allSessions = append(allSessions, ls)
-		}
-	}
 
-	cacheSessions, err := cacheStore.ListAllSessions()
+	sessions, err := store.ListAllSessions()
 	require.NoError(t, err)
-	for _, cs := range cacheSessions {
-		if !existing[cs.SessionName] {
-			existing[cs.SessionName] = true
-			allSessions = append(allSessions, cs)
-		}
-	}
+	require.Len(t, sessions, len(names), "store must discover all sessions in base dir")
 
-	require.Len(t, allSessions, 3, "should find sessions from all 3 locations")
-
-	var names []string
-	for _, s := range allSessions {
-		names = append(names, s.SessionName)
+	found := make(map[string]bool)
+	for _, s := range sessions {
+		found[s.SessionName] = true
 	}
-	sort.Strings(names)
-	assert.Equal(t, []string{
-		"2026-01-01T00-00-testuser-OxXDG1",
-		"2026-01-02T00-00-testuser-OxLDG1",
-		"2026-01-03T00-00-testuser-OxCAC1",
-	}, names)
+	for _, name := range names {
+		assert.True(t, found[name], "session %s must be discoverable", name)
+	}
 }
 
-// TestSessionListLocations_DeduplicatesAcrossStores verifies that when the same
-// session name exists in multiple store locations, it appears exactly once after
-// deduplication (matching runSessionList behavior).
-func TestSessionListLocations_DeduplicatesAcrossStores(t *testing.T) {
+// TestSessionStore_ConsistentNameAcrossLocations verifies that SessionInfo.SessionName
+// is identical regardless of which base directory the store was created from.
+// This invariant is what makes deduplication in runSessionList correct:
+// runSessionList uses SessionName as the map key to deduplicate sessions found
+// across XDG cache, ledger, and ledger cache directories.
+func TestSessionStore_ConsistentNameAcrossLocations(t *testing.T) {
 	t.Parallel()
 
+	sessionName := "2026-01-15T10-00-testuser-OxSame"
+
+	// same session in two different base dirs (simulating XDG cache vs ledger)
 	dir1 := t.TempDir()
 	dir2 := t.TempDir()
-
-	// same session name in both locations
-	duplicateName := "2026-01-01T00-00-testuser-OxDUP1"
-	createSessionInDir(t, dir1, duplicateName)
-	createSessionInDir(t, dir2, duplicateName)
+	createSessionInDir(t, dir1, sessionName)
+	createSessionInDir(t, dir2, sessionName)
 
 	store1, err := session.NewStore(dir1)
 	require.NoError(t, err)
 	store2, err := session.NewStore(dir2)
 	require.NoError(t, err)
 
-	// collect with dedup (same pattern as runSessionList)
-	sessions, err := store1.ListAllSessions()
+	sessions1, err := store1.ListAllSessions()
+	require.NoError(t, err)
+	sessions2, err := store2.ListAllSessions()
 	require.NoError(t, err)
 
-	existing := make(map[string]bool)
-	for _, s := range sessions {
-		existing[s.SessionName] = true
-	}
+	require.Len(t, sessions1, 1)
+	require.Len(t, sessions2, 1)
 
-	store2Sessions, err := store2.ListAllSessions()
-	require.NoError(t, err)
-	for _, s := range store2Sessions {
-		if !existing[s.SessionName] {
-			existing[s.SessionName] = true
-			sessions = append(sessions, s)
-		}
-	}
-
-	require.Len(t, sessions, 1, "duplicate session name should appear exactly once")
-	assert.Equal(t, duplicateName, sessions[0].SessionName)
+	assert.Equal(t, sessions1[0].SessionName, sessions2[0].SessionName,
+		"SessionName must be identical across stores for dedup to work -- "+
+			"runSessionList uses SessionName as the dedup key")
 }

@@ -8,12 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/sageox/ox/internal/lfs"
-	"github.com/sageox/ox/internal/session"
 )
 
 func TestFindOrphanedSessions(t *testing.T) {
