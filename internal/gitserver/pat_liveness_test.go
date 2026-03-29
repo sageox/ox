@@ -208,6 +208,45 @@ exit 0
 	assert.True(t, result.Valid, "should succeed when credential helper is suppressed; got reason: %s", result.Reason)
 }
 
+func TestClearCredentialHelperEntry(t *testing.T) {
+	t.Run("no-op on invalid URL", func(t *testing.T) {
+		// should not panic or error
+		ClearCredentialHelperEntry("")
+		ClearCredentialHelperEntry("://not-a-url")
+	})
+
+	t.Run("runs git credential reject for valid URL", func(t *testing.T) {
+		// inject a fake git that records whether it was called with "credential reject"
+		called := false
+		fakeGit, err := os.CreateTemp("", "fake-git-cred-*")
+		require.NoError(t, err)
+		defer os.Remove(fakeGit.Name())
+
+		recordFile := t.TempDir() + "/called"
+		_, err = fakeGit.WriteString("#!/bin/sh\n" +
+			"if [ \"$1\" = 'credential' ] && [ \"$2\" = 'reject' ]; then\n" +
+			"  touch " + recordFile + "\n" +
+			"fi\n" +
+			"exit 0\n")
+		require.NoError(t, err)
+		fakeGit.Close()
+		require.NoError(t, os.Chmod(fakeGit.Name(), 0700))
+
+		fakeDir := t.TempDir()
+		require.NoError(t, os.Symlink(fakeGit.Name(), fakeDir+"/git"))
+		t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+
+		ClearCredentialHelperEntry("https://git.sageox.ai")
+
+		if _, err := os.Stat(recordFile); os.IsNotExist(err) {
+			called = false
+		} else {
+			called = true
+		}
+		assert.True(t, called, "expected git credential reject to be called")
+	})
+}
+
 func TestWriteAskpassScript(t *testing.T) {
 	path, err := writeAskpassScript("test-token-123")
 	require.NoError(t, err)

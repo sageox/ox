@@ -110,6 +110,12 @@ func attemptPATAutoRepair(ep string) bool {
 		return false
 	}
 
+	// clear any stale credential helper entry (osxkeychain, libsecret, wincred)
+	// that could preempt the fresh token in future git operations
+	if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err == nil && creds != nil && creds.ServerURL != "" {
+		gitserver.ClearCredentialHelperEntry(creds.ServerURL)
+	}
+
 	// update PAT in existing remote URLs
 	refreshExistingRemotes(ep)
 

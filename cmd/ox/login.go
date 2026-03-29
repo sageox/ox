@@ -482,9 +482,16 @@ func fetchGitCredentialsWithRetry(client *api.RepoClient) error {
 	return lastErr
 }
 
-// refreshExistingRemotes updates PATs in all known ledger/team-context remote URLs.
+// refreshExistingRemotes updates PATs in all known ledger/team-context remote URLs
+// and evicts any stale credential helper entry for the git server.
 // Called after login to ensure existing repos use the new credentials.
 func refreshExistingRemotes(ep string) {
+	// evict stale osxkeychain/libsecret/wincred entries for the git server so
+	// they don't silently override the fresh token in future git operations
+	if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err == nil && creds != nil && creds.ServerURL != "" {
+		gitserver.ClearCredentialHelperEntry(creds.ServerURL)
+	}
+
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
 		return
