@@ -146,6 +146,68 @@ func TestBuildProbeURL(t *testing.T) {
 	}
 }
 
+// TestValidatePATLiveness_CredentialHelperSuppressed verifies that the liveness
+// probe ignores system credential helpers (osxkeychain, libsecret, wincred, etc.)
+// and uses only the token from GitCredentials via GIT_ASKPASS.
+//
+// The bug scenario: a user has a stale credential for git.sageox.ai stored in
+// their OS keychain from a previous install. git's credential helper returns
+// those stale creds before GIT_ASKPASS is ever consulted, causing a 401 and
+// a false "PAT rejected" error even though the stored token is valid.
+//
+// The fix: set GIT_CONFIG_COUNT env vars to override credential.helper to
+// empty for the subprocess, bypassing all helpers so only GIT_ASKPASS is used.
+//
+// Testing approach: inject a fake "git" binary (via a wrapper script) that
+// simulates the helper-interference failure — it exits 128 with "401 Unauthorized"
+// UNLESS GIT_CONFIG_COUNT is set suppressing the helper, in which case it
+// exits 0 (success). This makes the test fail on the old code and pass on the fix.
+func TestValidatePATLiveness_CredentialHelperSuppressed(t *testing.T) {
+	// write a fake "git" script that simulates credential helper interference:
+	// if GIT_CONFIG_COUNT is NOT set, the "helper" has overridden credentials
+	// and the server returns 401; if it IS set, the helper was suppressed and
+	// GIT_ASKPASS provided the right token, so the probe succeeds (0 refs, but exit 0)
+	fakeGit, err := os.CreateTemp("", "fake-git-*")
+	require.NoError(t, err)
+	defer os.Remove(fakeGit.Name())
+
+	_, err = fakeGit.WriteString(`#!/bin/sh
+if [ -z "$GIT_CONFIG_COUNT" ]; then
+  # credential helper was not suppressed — simulate 401 from stale keychain creds
+  echo "fatal: unable to access 'https://git.sageox.ai/...': The requested URL returned error: 401" >&2
+  exit 128
+fi
+# credential helper suppressed — GIT_ASKPASS provided our token, probe succeeds
+exit 0
+`)
+	require.NoError(t, err)
+	fakeGit.Close()
+	require.NoError(t, os.Chmod(fakeGit.Name(), 0700))
+
+	// put our fake git first in PATH
+	fakeDir := t.TempDir()
+	fakePath := fakeDir + "/git"
+	require.NoError(t, os.Symlink(fakeGit.Name(), fakePath))
+	t.Setenv("PATH", fakeDir+":"+os.Getenv("PATH"))
+
+	creds := &GitCredentials{
+		Token: "valid-token",
+		Repos: map[string]RepoEntry{
+			"team": {URL: "https://git.sageox.ai/team/repo.git"},
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	result := ValidatePATLiveness(ctx, creds)
+
+	// with GIT_CONFIG_COUNT suppression: fake git exits 0 → Valid=true
+	// without it: fake git exits 128 with 401 → Valid=false (the bug)
+	assert.False(t, result.Skipped, "should not be skipped")
+	assert.True(t, result.Valid, "should succeed when credential helper is suppressed; got reason: %s", result.Reason)
+}
+
 func TestWriteAskpassScript(t *testing.T) {
 	path, err := writeAskpassScript("test-token-123")
 	require.NoError(t, err)

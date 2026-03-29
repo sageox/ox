@@ -64,10 +64,15 @@ func ValidatePATLiveness(ctx context.Context, creds *GitCredentials) PATLiveness
 	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", probeURL)
 	// ensure the process is killed promptly when context expires
 	cmd.WaitDelay = 100 * time.Millisecond
-	// use GIT_ASKPASS for credentials, suppress interactive prompts
+	// use GIT_ASKPASS for credentials, suppress interactive prompts and
+	// system credential helpers (e.g. osxkeychain) so they can't override
+	// the fresh token we're testing with
 	cmd.Env = append(cmd.Environ(),
 		"GIT_ASKPASS="+askpass,
 		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=credential.helper",
+		"GIT_CONFIG_VALUE_0=", // disable credential helper for this probe
 	)
 
 	output, err := cmd.CombinedOutput()
