@@ -263,6 +263,37 @@ func (r *WhisperRegistry) EnforceMaxSize(maxBytes int64) {
 	}
 }
 
+// LedgerStore returns the underlying ledger whisper store.
+// Used by DB maintenance to run pruning directly on the store.
+func (r *WhisperRegistry) LedgerStore() *whisperstore.Store {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.ledgerStore
+}
+
+// ReopenLedgerStore closes the current ledger store and opens a new one at dbPath.
+// Called after GC reclone swaps the ledger directory — the old sql.DB handle is stale
+// because the underlying inode was deleted during the rename-swap.
+func (r *WhisperRegistry) ReopenLedgerStore(dbPath string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.ledgerStore != nil {
+		r.ledgerStore.Close()
+		r.ledgerStore = nil
+	}
+
+	store, err := whisperstore.Open(dbPath)
+	if err != nil {
+		r.logger.Error("failed to reopen ledger whisper store", "path", dbPath, "error", err)
+		return err
+	}
+
+	r.ledgerStore = store
+	r.logger.Info("ledger whisper store reopened after GC", "path", dbPath)
+	return nil
+}
+
 // Close closes all stores.
 func (r *WhisperRegistry) Close() error {
 	var firstErr error

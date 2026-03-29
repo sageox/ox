@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -70,10 +71,15 @@ type WhisperEntry struct {
 // Store wraps a SQLite database for whisper state.
 // All write access goes through the daemon (single writer).
 // Multiple readers (CLI via IPC) are safe via WAL mode.
+//
+// Self-healing: if the underlying DB file disappears (e.g., GC reclone
+// deletes the inode), operations detect the missing file and transparently
+// recreate the database. Callers never see persistent CANTOPEN errors.
 type Store struct {
-	db        *sql.DB
-	dbPath    string
-	closeOnce sync.Once
+	db     atomic.Pointer[sql.DB]
+	dbPath string
+	mu     sync.Mutex // protects db during self-heal reopen and close
+	closed bool
 }
 
 // Open opens (or creates) a whisper store at the given path.
@@ -118,7 +124,9 @@ func Open(dbPath string) (*Store, error) {
 		}
 	}
 
-	return &Store{db: db, dbPath: dbPath}, nil
+	st := &Store{dbPath: dbPath}
+	st.db.Store(db)
+	return st, nil
 }
 
 func openSQLite(dbPath string) (*sql.DB, error) {
@@ -155,24 +163,92 @@ func removeSQLiteFiles(dbPath string) {
 
 // Close closes the store. Safe to call multiple times.
 func (s *Store) Close() error {
-	var firstErr error
-	s.closeOnce.Do(func() {
-		if s.db != nil {
-			firstErr = s.db.Close()
-		}
-	})
-	return firstErr
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if db := s.db.Load(); db != nil {
+		return db.Close()
+	}
+	return nil
+}
+
+// selfHeal checks if the DB file still exists and reopens if missing.
+// Called after an operation error to recover from deleted-file scenarios
+// (e.g., GC reclone swapping the directory). Returns true if healed.
+// Caller must NOT hold s.mu.
+//
+// The old handle is only closed AFTER the new handle is stored, so concurrent
+// readers via s.db.Load() never see a nil pointer. If recreation fails, the
+// old (stale) handle is preserved — callers get errors rather than panics.
+func (s *Store) selfHeal() bool {
+	// fast path: file still exists, not a CANTOPEN issue
+	if _, err := os.Stat(s.dbPath); err == nil {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return false
+	}
+
+	// double-check under lock
+	if _, err := os.Stat(s.dbPath); err == nil {
+		return false
+	}
+
+	slog.Warn("whisper db file missing, self-healing", "path", s.dbPath)
+
+	// recreate directory and DB
+	if err := os.MkdirAll(filepath.Dir(s.dbPath), 0o700); err != nil {
+		slog.Error("whisper self-heal: failed to create dir", "path", s.dbPath, "error", err)
+		return false
+	}
+
+	removeSQLiteFiles(s.dbPath)
+	newDB, err := openSQLite(s.dbPath)
+	if err != nil {
+		slog.Error("whisper self-heal: failed to reopen", "path", s.dbPath, "error", err)
+		return false
+	}
+
+	if err := CreateSchema(newDB); err != nil {
+		newDB.Close()
+		slog.Error("whisper self-heal: schema creation failed", "path", s.dbPath, "error", err)
+		return false
+	}
+
+	// atomic swap: store new handle before closing old, so concurrent
+	// readers via Load() never see nil
+	oldDB := s.db.Load()
+	s.db.Store(newDB)
+	if oldDB != nil {
+		oldDB.Close()
+	}
+
+	slog.Info("whisper db self-healed", "path", s.dbPath)
+	return true
 }
 
 // Add inserts whisper entries. Duplicate IDs are silently ignored (upsert).
+// Self-heals if the DB file was deleted (e.g., by GC reclone).
 func (s *Store) Add(entries ...WhisperEntry) error {
 	if len(entries) == 0 {
 		return nil
 	}
 
-	tx, err := s.db.Begin()
+	tx, err := s.db.Load().Begin()
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		if s.selfHeal() {
+			tx, err = s.db.Load().Begin()
+		}
+		if err != nil {
+			return fmt.Errorf("begin tx: %w", err)
+		}
 	}
 	defer tx.Rollback()
 
@@ -211,15 +287,24 @@ func (s *Store) Add(entries ...WhisperEntry) error {
 // GetWhispers returns whisper entries for an agent, filtered by attention and topics.
 // Updates the agent's cursor so subsequent calls only return new entries.
 // On first call for an unknown agent, returns all current entries.
+// Self-heals if the DB file was deleted (e.g., by GC reclone).
 func (s *Store) GetWhispers(agentID string, attention Attention, topics []string) ([]WhisperEntry, error) {
 	now := time.Now().UTC()
 
 	// read current cursor
 	var cursor time.Time
 	var cursorStr sql.NullString
-	err := s.db.QueryRow("SELECT last_seen FROM cursors WHERE agent_id = ?", agentID).Scan(&cursorStr)
+	err := s.db.Load().QueryRow("SELECT last_seen FROM cursors WHERE agent_id = ?", agentID).Scan(&cursorStr)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("read cursor: %w", err)
+		if s.selfHeal() {
+			// retry after heal — cursor resets to zero (one noisy cycle, then normal)
+			err = s.db.Load().QueryRow("SELECT last_seen FROM cursors WHERE agent_id = ?", agentID).Scan(&cursorStr)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("read cursor: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("read cursor: %w", err)
+		}
 	}
 	if cursorStr.Valid {
 		cursor, _ = time.Parse(time.RFC3339Nano, cursorStr.String)
@@ -259,7 +344,7 @@ func (s *Store) GetWhispers(agentID string, attention Attention, topics []string
 		WHEN 'ambient' THEN 2
 		ELSE 3 END, created_at`
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.db.Load().Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query whispers: %w", err)
 	}
@@ -303,7 +388,7 @@ func (s *Store) GetWhispers(agentID string, attention Attention, topics []string
 
 	// update cursor
 	nowStr := now.Format(time.RFC3339Nano)
-	_, err = s.db.Exec(
+	_, err = s.db.Load().Exec(
 		`INSERT INTO cursors (agent_id, last_seen, updated_at) VALUES (?, ?, ?)
 		 ON CONFLICT(agent_id) DO UPDATE SET last_seen = excluded.last_seen, updated_at = excluded.updated_at`,
 		agentID, nowStr, nowStr,
@@ -321,7 +406,7 @@ func (s *Store) GetWhispers(agentID string, attention Attention, topics []string
 // IsRelayed checks if a murmur has already been relayed into the store.
 func (s *Store) IsRelayed(murmurID, scope string) (bool, error) {
 	var count int
-	err := s.db.QueryRow(
+	err := s.db.Load().QueryRow(
 		"SELECT COUNT(*) FROM relayed_murmurs WHERE murmur_id = ? AND scope = ?",
 		murmurID, scope,
 	).Scan(&count)
@@ -333,7 +418,7 @@ func (s *Store) IsRelayed(murmurID, scope string) (bool, error) {
 
 // MarkRelayed records that a murmur has been relayed into the store.
 func (s *Store) MarkRelayed(murmurID, scope string) error {
-	_, err := s.db.Exec(
+	_, err := s.db.Load().Exec(
 		"INSERT OR IGNORE INTO relayed_murmurs (murmur_id, scope, relayed_at) VALUES (?, ?, ?)",
 		murmurID, scope, time.Now().Format(time.RFC3339Nano),
 	)
@@ -402,9 +487,14 @@ func (s *Store) GetWhispersPage(agentID string, before time.Time, limit int) ([]
 	query += ` ORDER BY created_at DESC LIMIT ?`
 	args = append(args, limit+1)
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.db.Load().Query(query, args...)
 	if err != nil {
-		return nil, false, fmt.Errorf("query whispers page: %w", err)
+		if s.selfHeal() {
+			rows, err = s.db.Load().Query(query, args...)
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("query whispers page: %w", err)
+		}
 	}
 	defer rows.Close()
 
@@ -457,7 +547,7 @@ func (s *Store) GetWhispersPage(agentID string, before time.Time, limit int) ([]
 // GetCursor returns the last-seen cursor for an agent (zero time if unknown).
 func (s *Store) GetCursor(agentID string) (time.Time, error) {
 	var cursorStr sql.NullString
-	err := s.db.QueryRow("SELECT last_seen FROM cursors WHERE agent_id = ?", agentID).Scan(&cursorStr)
+	err := s.db.Load().QueryRow("SELECT last_seen FROM cursors WHERE agent_id = ?", agentID).Scan(&cursorStr)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return time.Time{}, fmt.Errorf("read cursor: %w", err)
 	}
@@ -471,7 +561,7 @@ func (s *Store) GetCursor(agentID string) (time.Time, error) {
 // RemoveCursor removes a specific agent's cursor.
 // Called when an agent is cleaned up as stale.
 func (s *Store) RemoveCursor(agentID string) error {
-	_, err := s.db.Exec("DELETE FROM cursors WHERE agent_id = ?", agentID)
+	_, err := s.db.Load().Exec("DELETE FROM cursors WHERE agent_id = ?", agentID)
 	if err != nil {
 		return fmt.Errorf("remove cursor: %w", err)
 	}
@@ -488,27 +578,33 @@ type PruneResult struct {
 
 // Prune removes entries older than the given retention duration.
 // Also prunes stale cursors (not updated in 7 days) and old relayed records.
+// Self-heals if the DB file was deleted.
 func (s *Store) Prune(retention time.Duration) (PruneResult, error) {
 	var result PruneResult
 	cutoff := time.Now().Add(-retention).Format(time.RFC3339Nano)
 	cursorCutoff := time.Now().Add(-7 * 24 * time.Hour).Format(time.RFC3339Nano)
 
 	// delete old whispers
-	res, err := s.db.Exec("DELETE FROM whispers WHERE created_at < ?", cutoff)
+	res, err := s.db.Load().Exec("DELETE FROM whispers WHERE created_at < ?", cutoff)
 	if err != nil {
-		return result, fmt.Errorf("prune whispers: %w", err)
+		if s.selfHeal() {
+			res, err = s.db.Load().Exec("DELETE FROM whispers WHERE created_at < ?", cutoff)
+		}
+		if err != nil {
+			return result, fmt.Errorf("prune whispers: %w", err)
+		}
 	}
 	result.WhispersDeleted, _ = res.RowsAffected()
 
 	// delete old relayed records
-	res, err = s.db.Exec("DELETE FROM relayed_murmurs WHERE relayed_at < ?", cutoff)
+	res, err = s.db.Load().Exec("DELETE FROM relayed_murmurs WHERE relayed_at < ?", cutoff)
 	if err != nil {
 		return result, fmt.Errorf("prune relayed: %w", err)
 	}
 	result.RelayedDeleted, _ = res.RowsAffected()
 
 	// delete stale cursors
-	res, err = s.db.Exec("DELETE FROM cursors WHERE updated_at < ?", cursorCutoff)
+	res, err = s.db.Load().Exec("DELETE FROM cursors WHERE updated_at < ?", cursorCutoff)
 	if err != nil {
 		return result, fmt.Errorf("prune cursors: %w", err)
 	}
@@ -517,7 +613,7 @@ func (s *Store) Prune(retention time.Duration) (PruneResult, error) {
 	// vacuum if enough was deleted
 	totalDeleted := result.WhispersDeleted + result.RelayedDeleted + result.CursorsDeleted
 	if totalDeleted > 100 {
-		if _, err := s.db.Exec("VACUUM"); err != nil {
+		if _, err := s.db.Load().Exec("VACUUM"); err != nil {
 			slog.Warn("whisper db vacuum failed", "err", err)
 		} else {
 			result.Vacuumed = true
@@ -545,13 +641,13 @@ func (s *Store) EnforceMaxSize(maxBytes int64) error {
 
 	// keep only last 6 hours
 	cutoff := time.Now().Add(-6 * time.Hour).Format(time.RFC3339Nano)
-	if _, err := s.db.Exec("DELETE FROM whispers WHERE created_at < ?", cutoff); err != nil {
+	if _, err := s.db.Load().Exec("DELETE FROM whispers WHERE created_at < ?", cutoff); err != nil {
 		return fmt.Errorf("aggressive prune whispers: %w", err)
 	}
-	if _, err := s.db.Exec("DELETE FROM relayed_murmurs WHERE relayed_at < ?", cutoff); err != nil {
+	if _, err := s.db.Load().Exec("DELETE FROM relayed_murmurs WHERE relayed_at < ?", cutoff); err != nil {
 		return fmt.Errorf("aggressive prune relayed: %w", err)
 	}
-	if _, err := s.db.Exec("VACUUM"); err != nil {
+	if _, err := s.db.Load().Exec("VACUUM"); err != nil {
 		return fmt.Errorf("vacuum after aggressive prune: %w", err)
 	}
 
@@ -562,13 +658,13 @@ func (s *Store) EnforceMaxSize(maxBytes int64) error {
 	}
 	if info.Size() > maxBytes {
 		slog.Warn("whisper db still over limit after prune, nuclear cleanup", "size", info.Size())
-		if _, err := s.db.Exec("DELETE FROM whispers"); err != nil {
+		if _, err := s.db.Load().Exec("DELETE FROM whispers"); err != nil {
 			return fmt.Errorf("nuclear prune whispers: %w", err)
 		}
-		if _, err := s.db.Exec("DELETE FROM relayed_murmurs"); err != nil {
+		if _, err := s.db.Load().Exec("DELETE FROM relayed_murmurs"); err != nil {
 			return fmt.Errorf("nuclear prune relayed: %w", err)
 		}
-		if _, err := s.db.Exec("VACUUM"); err != nil {
+		if _, err := s.db.Load().Exec("VACUUM"); err != nil {
 			return fmt.Errorf("vacuum after nuclear prune: %w", err)
 		}
 	}
@@ -579,7 +675,7 @@ func (s *Store) EnforceMaxSize(maxBytes int64) error {
 // CheckIntegrity validates that the whisper DB is healthy.
 // Returns nil if OK, an error describing the problem otherwise.
 func (s *Store) CheckIntegrity() error {
-	return checkIntegrity(s.db)
+	return checkIntegrity(s.db.Load())
 }
 
 // DBPath returns the path to the SQLite database file.

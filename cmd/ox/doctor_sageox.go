@@ -690,8 +690,8 @@ func checkCloudDoctor() []checkResult {
 		// show warning that extended checks are unavailable
 		return []checkResult{
 			WarningCheck("Cloud doctor", "skipped",
-				"Could not reach SageOx cloud for extended health checks. This is normal\n"+
-					"        if you're offline or the service is temporarily unavailable. No action needed."),
+				"Could not reach SageOx cloud — this is normal when offline.\n"+
+					"        Extended health checks are skipped. No action needed."),
 		}
 	}
 

@@ -138,6 +138,60 @@ func TestWhisperRegistryUnknownScope(t *testing.T) {
 	}
 }
 
+func TestWhisperRegistryReopenLedgerStore(t *testing.T) {
+	ledger := openTestStore(t)
+	r := NewWhisperRegistry(ledger, nil)
+	defer r.Close()
+
+	// add a whisper to the original store
+	err := r.Add("ledger", whisperstore.WhisperEntry{
+		ID:         "before-reopen",
+		Scope:      "ledger",
+		Type:       whisperstore.WhisperTimeBased,
+		Source:     "test",
+		Topic:      "test",
+		Content:    "original",
+		Importance: whisperstore.ImportanceNormal,
+		CreatedAt:  time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("add before reopen: %v", err)
+	}
+
+	// reopen to a new DB path (simulates GC reclone)
+	newDBPath := filepath.Join(t.TempDir(), "whisper-new.db")
+	if err := r.ReopenLedgerStore(newDBPath); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+
+	// add a whisper to the new store
+	err = r.Add("ledger", whisperstore.WhisperEntry{
+		ID:         "after-reopen",
+		Scope:      "ledger",
+		Type:       whisperstore.WhisperTimeBased,
+		Source:     "test",
+		Topic:      "test",
+		Content:    "new",
+		Importance: whisperstore.ImportanceNormal,
+		CreatedAt:  time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("add after reopen: %v", err)
+	}
+
+	// verify new store works — should only have the post-reopen entry
+	entries, _, err := r.GetWhispersPage("", time.Time{}, 50)
+	if err != nil {
+		t.Fatalf("get whispers: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry in new store, got %d", len(entries))
+	}
+	if entries[0].ID != "after-reopen" {
+		t.Errorf("expected after-reopen entry, got %s", entries[0].ID)
+	}
+}
+
 func TestWhisperRegistryUnknownScopeRelayHandling(t *testing.T) {
 	ledger := openTestStore(t)
 	r := NewWhisperRegistry(ledger, nil)

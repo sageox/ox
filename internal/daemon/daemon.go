@@ -162,6 +162,7 @@ type Daemon struct {
 	agentWorker     *agentwork.Manager
 	whisperRegistry    *WhisperRegistry
 	murmurNudgeTracker *MurmurNudgeTracker
+	dbMaintenance      *DBMaintenanceScheduler
 
 	// state
 	mu               sync.Mutex
@@ -914,8 +915,18 @@ func (d *Daemon) startWorkers() {
 			ws.RegisterSource(NewMurmurNudgeSource(d.murmurNudgeTracker, d.heartbeat, d.config.MurmurNudgeInterval, d.config.ProjectRoot))
 		}
 		ws.Start(d.ctx, &d.wg)
-		ws.RunPrune(d.ctx, &d.wg, 1*time.Hour)
 	}
+
+	// unified DB maintenance: prune, vacuum, integrity check for all SQLite databases
+	d.dbMaintenance = NewDBMaintenanceScheduler(d.logger)
+	if d.whisperRegistry != nil {
+		d.dbMaintenance.Register(NewWhisperDBMaintainer(
+			"whisper", d.whisperRegistry, 24*time.Hour, 10*1024*1024))
+	}
+	if d.codedb != nil {
+		d.dbMaintenance.Register(NewCodeDBMaintainer("codedb", d.codedb))
+	}
+	d.dbMaintenance.Start(d.ctx, &d.wg, 1*time.Hour)
 
 	if d.config.LedgerPath != "" {
 		d.watcher = NewWatcher(d.config.LedgerPath, d.config.DebounceWindow, d.logger)

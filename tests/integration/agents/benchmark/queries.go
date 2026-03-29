@@ -194,6 +194,7 @@ func DefaultQueries() []BenchmarkQuery {
 				"What do I put in commit messages when SageOx influenced my work?",
 				"Are there attribution requirements for commits in this project?",
 				"What footer should I add to plans that were guided by SageOx?",
+				"Does this project require any special commit attribution when ox provides context?",
 			},
 			Validate: func(call ToolCall) bool {
 				input := strings.ToLower(call.Input)
@@ -223,6 +224,7 @@ func DefaultQueries() []BenchmarkQuery {
 				"Are there any Claude agents configured for this project I should know about?",
 				"Show me what AI coworkers or subagents this team has set up.",
 				"Can I delegate work to a subagent? What's available?",
+				"How do I find out which expert AI coworkers are configured for this team?",
 			},
 			Validate: func(call ToolCall) bool {
 				input := strings.ToLower(call.Input)

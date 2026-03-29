@@ -13,10 +13,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/manifest"
+	"github.com/sageox/ox/internal/paths"
 )
 
 // gcResult indicates the outcome of a blue-green GC attempt.
@@ -133,6 +135,12 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 					case gcSuccess:
 						s.issues.ClearIssue(IssueTypeDirtyWorkspace, "ledger")
 					}
+				}
+
+				// reopen whisper store after ledger GC — the old sql.DB handle
+				// points to a deleted inode after the rename-swap
+				if result == gcSuccess {
+					s.reopenWhisperStoreAfterGC()
 				}
 			}
 		}
@@ -732,6 +740,31 @@ func gcRestoreCache(cacheBackupDir, dstRepo string) error {
 		return fmt.Errorf("create .sageox dir: %w", err)
 	}
 	return copyDir(cacheBackupDir, dstCache)
+}
+
+// reopenWhisperStoreAfterGC reopens the ledger whisper store after a
+// successful GC reclone. The rename-swap invalidates the old sql.DB handle
+// because the underlying inode is deleted — even though cache files are
+// preserved and copied back, the daemon's open file descriptor is stale.
+func (s *SyncScheduler) reopenWhisperStoreAfterGC() {
+	s.mu.Lock()
+	registry := s.whisperRegistry
+	s.mu.Unlock()
+
+	if registry == nil {
+		return
+	}
+
+	ep := s.workspaceRegistry.GetEndpoint()
+	repoID := config.GetRepoID(s.config.ProjectRoot)
+	if ep == "" || repoID == "" {
+		return
+	}
+
+	dbPath := filepath.Join(paths.WhisperDBDir(repoID, ep), "whisper.db")
+	if err := registry.ReopenLedgerStore(dbPath); err != nil {
+		s.logger.Error("gc: failed to reopen whisper store after ledger reclone", "error", err)
+	}
 }
 
 // copyFile copies src to dst, preserving file mode.

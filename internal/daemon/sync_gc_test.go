@@ -61,6 +61,9 @@ func gcTestScheduler(t *testing.T) *SyncScheduler {
 // --- Phase tests ---
 
 func TestGC_CaptureDiff(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -92,6 +95,9 @@ func TestGC_CaptureDiff(t *testing.T) {
 }
 
 func TestGC_CaptureUntracked(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -129,6 +135,9 @@ func TestGC_CaptureUntracked(t *testing.T) {
 }
 
 func TestGC_RestoreDiff(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -161,6 +170,9 @@ func TestGC_RestoreDiff(t *testing.T) {
 }
 
 func TestGC_RestoreUntracked(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -191,6 +203,9 @@ func TestGC_RestoreUntracked(t *testing.T) {
 }
 
 func TestGC_PreserveRestoreCache(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	repoDir := t.TempDir()
 	cacheDir := filepath.Join(repoDir, ".sageox", "cache", "codedb")
 	require.NoError(t, os.MkdirAll(cacheDir, 0755))
@@ -256,6 +271,9 @@ func TestGC_AcquireReleaseLock(t *testing.T) {
 // --- Lifecycle tests ---
 
 func TestGC_FullCycle_TeamContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -316,6 +334,9 @@ func TestGC_FullCycle_TeamContext(t *testing.T) {
 }
 
 func TestGC_FullCycle_Ledger(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -391,6 +412,9 @@ func TestGC_FullCycle_Ledger(t *testing.T) {
 }
 
 func TestGC_SkipsWhenLocked(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	lockPath := filepath.Join(t.TempDir(), "repo.gc-lock")
 
 	// hold the lock
@@ -407,6 +431,9 @@ func TestGC_SkipsWhenLocked(t *testing.T) {
 // --- Failure tests ---
 
 func TestGC_CloneFailure_Rollback(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}

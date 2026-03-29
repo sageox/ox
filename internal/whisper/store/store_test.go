@@ -255,7 +255,7 @@ func TestPrune(t *testing.T) {
 	)
 	s.MarkRelayed("relay-old", "ledger")
 	// manually backdate the relayed entry
-	s.db.Exec("UPDATE relayed_murmurs SET relayed_at = ? WHERE murmur_id = ?",
+	s.db.Load().Exec("UPDATE relayed_murmurs SET relayed_at = ? WHERE murmur_id = ?",
 		old.Format(time.RFC3339Nano), "relay-old")
 
 	result, err := s.Prune(24 * time.Hour)
@@ -588,6 +588,98 @@ func TestMetadataJSON(t *testing.T) {
 	}
 	if got[0].Metadata != nil {
 		t.Errorf("expected nil metadata, got %v", got[0].Metadata)
+	}
+}
+
+// TestSelfHealAfterFileDelete verifies that the store auto-recovers when the
+// underlying DB file is deleted while the store is open (simulates GC reclone
+// destroying the inode). This is the root cause of the 2-day silent whisper
+// failure where SQLITE_CANTOPEN (error 14) was misleadingly reported as "out
+// of memory".
+func TestSelfHealAfterFileDelete(t *testing.T) {
+	dir := t.TempDir()
+	dbDir := filepath.Join(dir, "whisper")
+	dbPath := filepath.Join(dbDir, "whisper.db")
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	// add an entry — should work
+	now := time.Now()
+	if err := s.Add(makeEntry("before-delete", "lint", ImportanceNormal, now)); err != nil {
+		t.Fatalf("add before delete: %v", err)
+	}
+
+	// close the old handle first, then delete everything and reopen with
+	// a fresh store pointing at the same path — simulates what happens
+	// after GC reclone replaces the directory
+	s.db.Load().Close()
+	os.RemoveAll(dbDir) // remove entire directory
+
+	// the store's db handle is now stale — next operation should self-heal
+	if err := s.Add(makeEntry("after-delete", "lint", ImportanceNormal, now.Add(time.Second))); err != nil {
+		t.Fatalf("add after delete should self-heal: %v", err)
+	}
+
+	// verify the new DB is functional — only has the post-heal entry
+	got, err := s.GetWhispers("agent-1", AttentionAll, nil)
+	if err != nil {
+		t.Fatalf("get after heal: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 entry after heal, got %d", len(got))
+	}
+	if got[0].ID != "after-delete" {
+		t.Errorf("expected after-delete, got %s", got[0].ID)
+	}
+}
+
+// TestSelfHealGetWhispers verifies self-healing on the read path.
+func TestSelfHealGetWhispers(t *testing.T) {
+	dir := t.TempDir()
+	dbDir := filepath.Join(dir, "whisper")
+	dbPath := filepath.Join(dbDir, "whisper.db")
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	// close handle and nuke directory to simulate stale handle after GC
+	s.db.Load().Close()
+	os.RemoveAll(dbDir)
+
+	// GetWhispers should self-heal and return empty (not error)
+	got, err := s.GetWhispers("agent-1", AttentionAll, nil)
+	if err != nil {
+		t.Fatalf("get after delete should self-heal: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 entries after heal, got %d", len(got))
+	}
+}
+
+// TestSelfHealPrune verifies self-healing on the prune path.
+func TestSelfHealPrune(t *testing.T) {
+	dir := t.TempDir()
+	dbDir := filepath.Join(dir, "whisper")
+	dbPath := filepath.Join(dbDir, "whisper.db")
+	s, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	// close handle and nuke directory to simulate stale handle after GC
+	s.db.Load().Close()
+	os.RemoveAll(dbDir)
+
+	// Prune should self-heal and succeed
+	_, err = s.Prune(24 * time.Hour)
+	if err != nil {
+		t.Fatalf("prune after delete should self-heal: %v", err)
 	}
 }
 

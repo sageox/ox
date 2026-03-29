@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 
@@ -136,7 +137,16 @@ func checkWhisperDBIntegrity(fix bool) checkResult {
 		}
 	}
 
-	// all DBs missing — healthy state, daemon creates on next start
+	// all DBs missing — if daemon is running this likely means the GC reclone
+	// destroyed the directory and the daemon holds a stale handle
+	if checked == 0 && missing > 0 && fix && daemon.IsRunning() {
+		for _, t := range targets {
+			if err := os.MkdirAll(t.dir, 0o700); err != nil {
+				slog.Warn("failed to create whisper DB dir", "dir", t.dir, "error", err)
+			}
+		}
+		return PassedCheck(name, "recreated whisper DB directory (daemon will rebuild)")
+	}
 	if checked == 0 {
 		return PassedCheck(name, "no whisper DBs present (created on demand)")
 	}

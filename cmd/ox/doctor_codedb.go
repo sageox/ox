@@ -13,7 +13,7 @@ func init() {
 		Slug:        CheckSlugCodeIndex,
 		Name:        "Code index",
 		Category:    "Code Search",
-		FixLevel:    FixLevelSuggested,
+		FixLevel:    FixLevelAuto,
 		Description: "Validates CodeDB index integrity (SQLite + Bleve)",
 		Run:         checkCodeIndex,
 	})
@@ -37,7 +37,7 @@ func checkCodeIndex(fix bool) checkResult {
 			_ = os.RemoveAll(dataDir)
 			return PassedCheck("Code index", "corrupt index removed, run 'ox code index' to rebuild")
 		}
-		return FailedCheck("Code index", "failed to open index", "run 'ox doctor --fix' to remove and rebuild")
+		return FailedCheck("Code index", "failed to open index", "run 'ox doctor' to remove and rebuild")
 	}
 	defer db.Close()
 
@@ -47,7 +47,7 @@ func checkCodeIndex(fix bool) checkResult {
 			_ = os.RemoveAll(dataDir)
 			return PassedCheck("Code index", "corrupt index removed, run 'ox code index' to rebuild")
 		}
-		return FailedCheck("Code index", "index corruption detected", "run 'ox doctor --fix' to remove and rebuild")
+		return FailedCheck("Code index", "index corruption detected", "run 'ox doctor' to remove and rebuild")
 	}
 
 	return PassedCheck("Code index", "healthy")

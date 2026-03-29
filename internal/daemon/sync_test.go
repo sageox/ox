@@ -493,6 +493,14 @@ func TestSyncScheduler_PullTeamContext_FetchHeadDeduplication(t *testing.T) {
 		t.Skip("git not available")
 	}
 
+	// isolate from real credentials
+	prevConfigDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+	prevForceFile := gitserver.TestSetForceFileStorage(true)
+	t.Cleanup(func() {
+		gitserver.TestSetConfigDirOverride(prevConfigDir)
+		gitserver.TestSetForceFileStorage(prevForceFile)
+	})
+
 	// create temp git repo for team context
 	teamDir := t.TempDir()
 	setupGitRepo(t, teamDir)
@@ -579,9 +587,10 @@ path = %q
 
 	scheduler := NewSyncScheduler(cfg, logger)
 
-	// prevent refreshCredentialsIfNeeded from calling real API
+	// prevent refreshCredentialsIfNeeded and discoverTeams from calling real API
 	scheduler.mu.Lock()
 	scheduler.lastCredentialRefresh = time.Now()
+	scheduler.lastTeamDiscovery = time.Now()
 	scheduler.mu.Unlock()
 
 	// manually touch FETCH_HEAD to be old so the sync isn't skipped
@@ -653,9 +662,10 @@ path = %q
 
 	scheduler := NewSyncScheduler(cfg, logger)
 
-	// prevent refreshCredentialsIfNeeded from calling real API
+	// prevent refreshCredentialsIfNeeded and discoverTeams from calling real API
 	scheduler.mu.Lock()
 	scheduler.lastCredentialRefresh = time.Now()
+	scheduler.lastTeamDiscovery = time.Now()
 	scheduler.mu.Unlock()
 
 	// make FETCH_HEAD old for both repos
