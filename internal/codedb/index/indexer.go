@@ -107,6 +107,7 @@ type indexState struct {
 	treeCache      map[plumbing.Hash]map[string]plumbing.Hash
 	treeCacheLimit int
 	blobIDCache    map[string]int64 // content_hash -> blob DB ID; avoids repeated SQL lookups
+	commitIDCache  map[string]int64 // commit hash -> commit DB ID; used in insertParentLinks
 	newCommits     int
 	newBlobs       int
 	report         func(string)
@@ -214,6 +215,7 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 		treeCache:      make(map[plumbing.Hash]map[string]plumbing.Hash),
 		treeCacheLimit: treeCacheLimit,
 		blobIDCache:    make(map[string]int64),
+		commitIDCache:  make(map[string]int64),
 		report:         report,
 	}
 
@@ -326,6 +328,7 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 		treeCache:      make(map[plumbing.Hash]map[string]plumbing.Hash),
 		treeCacheLimit: treeCacheLimit,
 		blobIDCache:    make(map[string]int64),
+		commitIDCache:  make(map[string]int64),
 		report:         report,
 	}
 
@@ -766,6 +769,7 @@ func (st *indexState) indexCommit(cd commitData) error {
 			return fmt.Errorf("get commit id: %w", err)
 		}
 	}
+	st.commitIDCache[oidHex] = commitDBID
 
 	st.newCommits++
 	if st.newCommits%500 == 0 {
@@ -815,13 +819,18 @@ func (st *indexState) indexCommit(cd commitData) error {
 // insertParentLinks records commit parent relationships.
 func (st *indexState) insertParentLinks(commitDBID int64, parentIDs []plumbing.Hash) error {
 	for _, parentOID := range parentIDs {
-		var parentDBID int64
-		err := st.tx.QueryRow("SELECT id FROM commits WHERE hash = ?", parentOID.String()).Scan(&parentDBID)
-		if err == nil {
-			if _, err := st.tx.Exec("INSERT OR IGNORE INTO commit_parents (commit_id, parent_id) VALUES (?, ?)",
-				commitDBID, parentDBID); err != nil {
-				return fmt.Errorf("insert commit parent: %w", err)
+		parentHex := parentOID.String()
+		// Use cache to avoid a SELECT per parent; cache is populated by indexCommit.
+		parentDBID, ok := st.commitIDCache[parentHex]
+		if !ok {
+			// Parent was indexed in a previous run — look up from DB.
+			if err := st.tx.QueryRow("SELECT id FROM commits WHERE hash = ?", parentHex).Scan(&parentDBID); err != nil {
+				continue // parent not yet in DB; skip link
 			}
+		}
+		if _, err := st.tx.Exec("INSERT OR IGNORE INTO commit_parents (commit_id, parent_id) VALUES (?, ?)",
+			commitDBID, parentDBID); err != nil {
+			return fmt.Errorf("insert commit parent: %w", err)
 		}
 	}
 	return nil
