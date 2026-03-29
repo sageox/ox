@@ -105,10 +105,8 @@ type indexState struct {
 	diffBatchN     int
 	knownCommits   map[string]bool
 	treeCache      map[plumbing.Hash]map[string]plumbing.Hash
-	treeOrder      []plumbing.Hash // FIFO insertion order for per-entry eviction
 	treeCacheLimit int
 	blobIDCache    map[string]int64 // content_hash -> blob DB ID; avoids repeated SQL lookups
-	commitIDCache  map[string]int64 // commit hash -> commit DB ID; used in insertParentLinks
 	newCommits     int
 	newBlobs       int
 	report         func(string)
@@ -214,10 +212,8 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 		diffBatch:      s.DiffIndex.NewBatch(),
 		knownCommits:   knownCommits,
 		treeCache:      make(map[plumbing.Hash]map[string]plumbing.Hash),
-		treeOrder:      make([]plumbing.Hash, 0, treeCacheLimit),
 		treeCacheLimit: treeCacheLimit,
 		blobIDCache:    make(map[string]int64),
-		commitIDCache:  make(map[string]int64),
 		report:         report,
 	}
 
@@ -328,10 +324,8 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 		diffBatch:      s.DiffIndex.NewBatch(),
 		knownCommits:   knownCommits,
 		treeCache:      make(map[plumbing.Hash]map[string]plumbing.Hash),
-		treeOrder:      make([]plumbing.Hash, 0, treeCacheLimit),
 		treeCacheLimit: treeCacheLimit,
 		blobIDCache:    make(map[string]int64),
-		commitIDCache:  make(map[string]int64),
 		report:         report,
 	}
 
@@ -445,54 +439,11 @@ func BuildDirtyIndex(ctx context.Context, localPath, dirtyPath string, opts Inde
 		return 0, fmt.Errorf("swap dirty index: %w", err)
 	}
 
-	// write manifest so GCDirtyIndexes can reverse the hash back to the path
-	_ = os.WriteFile(dirtyPath+".manifest", []byte(localPath), 0o644)
-
 	if opts.Progress != nil {
 		opts.Progress(fmt.Sprintf("indexed %d dirty files", indexed))
 	}
 
 	return indexed, nil
-}
-
-// GCDirtyIndexes removes dirty overlay directories whose worktrees no longer exist.
-// Each overlay is paired with a "<dir>.manifest" file written by BuildDirtyIndex that
-// records the original worktree path. Overlays without a manifest (written by an older
-// build) are left alone to avoid removing indexes whose provenance is unknown.
-//
-// Returns the number of overlays removed.
-func GCDirtyIndexes(codedbDir string) (int, error) {
-	dirtyDir := filepath.Join(codedbDir, "bleve", "dirty")
-	entries, err := os.ReadDir(dirtyDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("read dirty index dir: %w", err)
-	}
-
-	removed := 0
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		dirPath := filepath.Join(dirtyDir, e.Name())
-		manifestPath := dirPath + ".manifest"
-
-		raw, err := os.ReadFile(manifestPath)
-		if err != nil {
-			// no manifest — written by an older build; leave it alone
-			continue
-		}
-		worktreePath := string(raw)
-		if _, statErr := os.Stat(worktreePath); os.IsNotExist(statErr) {
-			// worktree is gone — remove overlay + manifest
-			_ = os.RemoveAll(dirPath)
-			_ = os.Remove(manifestPath)
-			removed++
-		}
-	}
-	return removed, nil
 }
 
 // gitStatusDirtyFiles returns relative paths of dirty files using git status -z.
@@ -796,7 +747,7 @@ func (st *indexState) processRef(ctx context.Context, ri refInfo, refIdx, totalR
 func (st *indexState) indexCommit(cd commitData) error {
 	oidHex := cd.oid.String()
 
-	result, err := st.tx.Exec(
+	_, err := st.tx.Exec(
 		`INSERT OR IGNORE INTO commits (repo_id, hash, author, message, timestamp)
 		 VALUES (?, ?, ?, ?, ?)`,
 		st.repoID, oidHex, cd.author, cd.message, cd.timestamp,
@@ -805,17 +756,11 @@ func (st *indexState) indexCommit(cd commitData) error {
 		return fmt.Errorf("insert commit: %w", err)
 	}
 
-	// Use LastInsertId to skip a SELECT; each commit hash is processed once per run.
-	// Fall back to SELECT only when RowsAffected==0 (commit already existed).
 	var commitDBID int64
-	if n, _ := result.RowsAffected(); n > 0 {
-		commitDBID, _ = result.LastInsertId()
-	} else {
-		if err = st.tx.QueryRow("SELECT id FROM commits WHERE hash = ?", oidHex).Scan(&commitDBID); err != nil {
-			return fmt.Errorf("get commit id: %w", err)
-		}
+	err = st.tx.QueryRow("SELECT id FROM commits WHERE hash = ?", oidHex).Scan(&commitDBID)
+	if err != nil {
+		return fmt.Errorf("get commit id: %w", err)
 	}
-	st.commitIDCache[oidHex] = commitDBID
 
 	st.newCommits++
 	if st.newCommits%500 == 0 {
@@ -827,7 +772,13 @@ func (st *indexState) indexCommit(cd commitData) error {
 		return err
 	}
 
-	childEntries, err := st.getTree(cd.treeHash)
+	// Evict tree cache periodically to bound memory usage.
+	// Memory per entry ≈ numFiles × 76 bytes. Configurable via IndexOptions.TreeCacheLimit.
+	if len(st.treeCache) >= st.treeCacheLimit {
+		st.treeCache = make(map[plumbing.Hash]map[string]plumbing.Hash)
+	}
+
+	childEntries, err := getTreeEntries(st.repo, cd.treeHash, st.treeCache)
 	if err != nil {
 		return fmt.Errorf("get tree entries: %w", err)
 	}
@@ -836,7 +787,7 @@ func (st *indexState) indexCommit(cd commitData) error {
 	if len(cd.parentIDs) > 0 {
 		parentCommit, pErr := st.repo.CommitObject(cd.parentIDs[0])
 		if pErr == nil {
-			if pe, peErr := st.getTree(parentCommit.TreeHash); peErr == nil {
+			if pe, peErr := getTreeEntries(st.repo, parentCommit.TreeHash, st.treeCache); peErr == nil {
 				parentEntries = pe
 			}
 		}
@@ -859,18 +810,13 @@ func (st *indexState) indexCommit(cd commitData) error {
 // insertParentLinks records commit parent relationships.
 func (st *indexState) insertParentLinks(commitDBID int64, parentIDs []plumbing.Hash) error {
 	for _, parentOID := range parentIDs {
-		parentHex := parentOID.String()
-		// Use cache to avoid a SELECT per parent; cache is populated by indexCommit.
-		parentDBID, ok := st.commitIDCache[parentHex]
-		if !ok {
-			// Parent was indexed in a previous run — look up from DB.
-			if err := st.tx.QueryRow("SELECT id FROM commits WHERE hash = ?", parentHex).Scan(&parentDBID); err != nil {
-				continue // parent not yet in DB; skip link
+		var parentDBID int64
+		err := st.tx.QueryRow("SELECT id FROM commits WHERE hash = ?", parentOID.String()).Scan(&parentDBID)
+		if err == nil {
+			if _, err := st.tx.Exec("INSERT OR IGNORE INTO commit_parents (commit_id, parent_id) VALUES (?, ?)",
+				commitDBID, parentDBID); err != nil {
+				return fmt.Errorf("insert commit parent: %w", err)
 			}
-		}
-		if _, err := st.tx.Exec("INSERT OR IGNORE INTO commit_parents (commit_id, parent_id) VALUES (?, ?)",
-			commitDBID, parentDBID); err != nil {
-			return fmt.Errorf("insert commit parent: %w", err)
 		}
 	}
 	return nil
@@ -884,9 +830,7 @@ func (st *indexState) indexChangedFiles(commitDBID int64, childEntries, parentEn
 			continue // unchanged
 		}
 
-		// ensureBlob returns the content it read for Bleve; reuse it in generateDiffText
-		// to avoid reading the same git object twice per changed file.
-		newBlobDBID, newText, indexed, err := st.ensureBlob(childBlobOID, path)
+		newBlobDBID, indexed, err := st.ensureBlob(childBlobOID, path)
 		if err != nil {
 			return err
 		}
@@ -895,20 +839,18 @@ func (st *indexState) indexChangedFiles(commitDBID int64, childEntries, parentEn
 		}
 
 		var oldBlobDBID sql.NullInt64
-		var oldText string
 		if existsInParent {
-			id, text, idx, err := st.ensureBlob(parentBlobOID, path)
+			id, indexed, err := st.ensureBlob(parentBlobOID, path)
 			if err != nil {
 				return err
 			}
-			if idx {
+			if indexed {
 				st.newBlobs++
 			}
 			oldBlobDBID = sql.NullInt64{Int64: id, Valid: true}
-			oldText = text
 		}
 
-		if err := st.insertDiff(commitDBID, path, oldBlobDBID, newBlobDBID, parentBlobOID, childBlobOID, existsInParent, true, oldText, newText); err != nil {
+		if err := st.insertDiff(commitDBID, path, oldBlobDBID, newBlobDBID, parentBlobOID, childBlobOID, existsInParent, true); err != nil {
 			return err
 		}
 	}
@@ -921,7 +863,7 @@ func (st *indexState) indexDeletedFiles(commitDBID int64, childEntries, parentEn
 		if _, exists := childEntries[path]; exists {
 			continue
 		}
-		oldBlobDBID, oldText, indexed, err := st.ensureBlob(parentBlobOID, path)
+		oldBlobDBID, indexed, err := st.ensureBlob(parentBlobOID, path)
 		if err != nil {
 			return err
 		}
@@ -929,7 +871,8 @@ func (st *indexState) indexDeletedFiles(commitDBID int64, childEntries, parentEn
 			st.newBlobs++
 		}
 
-		if err := st.insertDiff(commitDBID, path, sql.NullInt64{Int64: oldBlobDBID, Valid: true}, 0, parentBlobOID, plumbing.ZeroHash, true, false, oldText, ""); err != nil {
+		nullBlob := sql.NullInt64{}
+		if err := st.insertDiff(commitDBID, path, sql.NullInt64{Int64: oldBlobDBID, Valid: true}, nullBlob.Int64, parentBlobOID, plumbing.ZeroHash, true, false); err != nil {
 			return err
 		}
 	}
@@ -937,15 +880,13 @@ func (st *indexState) indexDeletedFiles(commitDBID int64, childEntries, parentEn
 }
 
 // insertDiff inserts a diff record and indexes the diff text in Bleve.
-// oldText/newText are pre-read blob contents from ensureBlob; when non-empty they
-// avoid a second git object read inside generateDiffText.
-func (st *indexState) insertDiff(commitDBID int64, path string, oldBlobDBID sql.NullInt64, newBlobDBID int64, oldOID, newOID plumbing.Hash, hasOld, hasNew bool, oldText, newText string) error {
+func (st *indexState) insertDiff(commitDBID int64, path string, oldBlobDBID sql.NullInt64, newBlobDBID int64, oldOID, newOID plumbing.Hash, hasOld, hasNew bool) error {
 	var newBlobPtr interface{}
 	if hasNew {
 		newBlobPtr = newBlobDBID
 	}
 
-	result, err := st.tx.Exec(
+	_, err := st.tx.Exec(
 		`INSERT OR IGNORE INTO diffs (commit_id, path, old_blob_id, new_blob_id)
 		 VALUES (?, ?, ?, ?)`,
 		commitDBID, path, oldBlobDBID, newBlobPtr,
@@ -954,19 +895,14 @@ func (st *indexState) insertDiff(commitDBID int64, path string, oldBlobDBID sql.
 		return fmt.Errorf("insert diff: %w", err)
 	}
 
-	// Use LastInsertId to skip a SELECT; each (commit_id, path) is processed once,
-	// so RowsAffected should always be 1. Fall back to SELECT on the rare conflict.
 	var diffDBID int64
-	if n, _ := result.RowsAffected(); n > 0 {
-		diffDBID, _ = result.LastInsertId()
-	} else {
-		if err = st.tx.QueryRow("SELECT id FROM diffs WHERE commit_id = ? AND path = ?",
-			commitDBID, path).Scan(&diffDBID); err != nil {
-			return nil // non-fatal: skip Bleve indexing for this diff
-		}
+	err = st.tx.QueryRow("SELECT id FROM diffs WHERE commit_id = ? AND path = ?",
+		commitDBID, path).Scan(&diffDBID)
+	if err != nil {
+		return nil // non-fatal: skip Bleve indexing for this diff
 	}
 
-	diffText := generateDiffText(st.repo, path, oldOID, newOID, hasOld, hasNew, oldText, newText)
+	diffText := generateDiffText(st.repo, path, oldOID, newOID, hasOld, hasNew)
 	if diffText != "" {
 		st.diffBatch.Index("diff_"+strconv.FormatInt(diffDBID, 10), BleveDiffDoc{Content: diffText})
 		st.diffBatchN++
@@ -993,14 +929,14 @@ func (st *indexState) buildTipFileRevs(ri refInfo) error {
 	var tipEntries map[string]plumbing.Hash
 	tipCommit, tErr := st.repo.CommitObject(ri.tipOID)
 	if tErr == nil {
-		tipEntries, _ = st.getTree(tipCommit.TreeHash)
+		tipEntries, _ = getTreeEntries(st.repo, tipCommit.TreeHash, st.treeCache)
 	}
 	if tipEntries == nil {
 		tipEntries = make(map[string]plumbing.Hash)
 	}
 
 	for path, blobOID := range tipEntries {
-		blobDBID, _, indexed, err := st.ensureBlob(blobOID, path)
+		blobDBID, indexed, err := st.ensureBlob(blobOID, path)
 		if err != nil {
 			continue
 		}
@@ -1023,33 +959,6 @@ func (st *indexState) buildTipFileRevs(ri refInfo) error {
 	}
 
 	return nil
-}
-
-// getTree wraps getTreeEntries with FIFO cache eviction. Instead of wiping the
-// entire cache when full (which evicts recently-needed parent trees), it removes
-// only the oldest entry, preserving sequential access locality.
-// Memory bound: treeCacheLimit × (numFiles × 76 bytes per entry).
-func (st *indexState) getTree(hash plumbing.Hash) (map[string]plumbing.Hash, error) {
-	_, alreadyCached := st.treeCache[hash]
-	if !alreadyCached && len(st.treeCache) >= st.treeCacheLimit {
-		// Evict the oldest (first-inserted) entry.
-		for len(st.treeOrder) > 0 {
-			oldest := st.treeOrder[0]
-			st.treeOrder = st.treeOrder[1:]
-			if _, stillPresent := st.treeCache[oldest]; stillPresent {
-				delete(st.treeCache, oldest)
-				break
-			}
-		}
-	}
-	entries, err := getTreeEntries(st.repo, hash, st.treeCache)
-	if err != nil {
-		return nil, err
-	}
-	if !alreadyCached {
-		st.treeOrder = append(st.treeOrder, hash)
-	}
-	return entries, nil
 }
 
 // getTreeEntries returns a map of filepath -> blob hash for all blobs in a tree.
@@ -1079,15 +988,13 @@ func getTreeEntries(repo *git.Repository, treeHash plumbing.Hash, cache map[plum
 // ensureBlob inserts a blob record if not already present and indexes its content
 // in Bleve only for newly inserted blobs. Uses an in-memory cache to avoid
 // repeated SQL lookups for the same content_hash within a single indexing run.
-// Returns (blobDBID, blobText, indexedInBleve, error).
-// blobText is the decoded UTF-8 content when the blob was read for Bleve indexing;
-// callers can reuse it to avoid a second git object read (e.g. in generateDiffText).
-func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, string, bool, error) {
+// Returns (blobDBID, indexedInBleve, error).
+func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, bool, error) {
 	contentHash := blobOID.String()
 
 	// fast path: check in-memory cache first (avoids SQL roundtrip)
 	if cachedID, ok := st.blobIDCache[contentHash]; ok {
-		return cachedID, "", false, nil
+		return cachedID, false, nil
 	}
 
 	// check SQL
@@ -1095,7 +1002,7 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, str
 	err := st.tx.QueryRow("SELECT id FROM blobs WHERE content_hash = ?", contentHash).Scan(&blobDBID)
 	if err == nil {
 		st.blobIDCache[contentHash] = blobDBID
-		return blobDBID, "", false, nil
+		return blobDBID, false, nil
 	}
 
 	// new blob — insert and index in Bleve
@@ -1105,27 +1012,21 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, str
 		langPtr = &lang
 	}
 
-	result, err := st.tx.Exec(
+	_, err = st.tx.Exec(
 		"INSERT OR IGNORE INTO blobs (content_hash, language) VALUES (?, ?)",
 		contentHash, langPtr,
 	)
 	if err != nil {
-		return 0, "", false, fmt.Errorf("insert blob: %w", err)
+		return 0, false, fmt.Errorf("insert blob: %w", err)
 	}
 
-	// Use LastInsertId to skip a SELECT when the INSERT succeeded (the common case).
-	// Fall back to SELECT only when RowsAffected==0 (concurrent duplicate; rare).
-	if n, _ := result.RowsAffected(); n > 0 {
-		blobDBID, _ = result.LastInsertId()
-	} else {
-		if err = st.tx.QueryRow("SELECT id FROM blobs WHERE content_hash = ?", contentHash).Scan(&blobDBID); err != nil {
-			return 0, "", false, fmt.Errorf("get blob id: %w", err)
-		}
+	err = st.tx.QueryRow("SELECT id FROM blobs WHERE content_hash = ?", contentHash).Scan(&blobDBID)
+	if err != nil {
+		return 0, false, fmt.Errorf("get blob id: %w", err)
 	}
 
 	st.blobIDCache[contentHash] = blobDBID
 
-	var blobText string
 	indexed := false
 	blobObj, bErr := st.repo.BlobObject(blobOID)
 	if bErr == nil {
@@ -1134,73 +1035,52 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, str
 			content, readErr := io.ReadAll(reader)
 			reader.Close()
 			if readErr == nil && utf8.Valid(content) && len(content) > 0 {
-				blobText = string(content)
-				st.codeBatch.Index("blob_"+strconv.FormatInt(blobDBID, 10), BleveCodeDoc{Content: blobText})
+				st.codeBatch.Index("blob_"+strconv.FormatInt(blobDBID, 10), BleveCodeDoc{Content: string(content)})
 				st.codeBatchN++
 				indexed = true
 				if err := st.flushCodeBatch(false); err != nil {
-					return 0, "", false, err
+					return 0, false, err
 				}
 			}
 		}
 	}
 
-	return blobDBID, blobText, indexed, nil
+	return blobDBID, indexed, nil
 }
 
 // generateDiffText creates simple diff text for full-text search indexing.
 // Each side is truncated to 100 lines to keep the index manageable.
-// oldText/newText are pre-read blob contents from ensureBlob; when non-empty they
-// avoid a redundant git object read (saves one BlobObject+ReadAll per side).
-func generateDiffText(repo *git.Repository, path string, oldOID, newOID plumbing.Hash, hasOld, hasNew bool, oldText, newText string) string {
+func generateDiffText(repo *git.Repository, path string, oldOID, newOID plumbing.Hash, hasOld, hasNew bool) string {
 	const maxLines = 100
 
 	var b strings.Builder
-	b.WriteString("--- a/")
-	b.WriteString(path)
-	b.WriteByte('\n')
-	b.WriteString("+++ b/")
-	b.WriteString(path)
-	b.WriteByte('\n')
+	fmt.Fprintf(&b, "--- a/%s\n+++ b/%s\n", path, path)
 
 	if hasOld && oldOID != (plumbing.Hash{}) {
-		if oldText == "" {
-			oldText = readBlobText(repo, oldOID)
-		}
-		if oldText != "" {
-			writePrefixedLines(&b, oldText, '-', maxLines)
+		if text := readBlobText(repo, oldOID); text != "" {
+			lines := strings.SplitN(text, "\n", maxLines+1)
+			for i, line := range lines {
+				if i >= maxLines {
+					break
+				}
+				fmt.Fprintf(&b, "-%s\n", line)
+			}
 		}
 	}
 
 	if hasNew && newOID != (plumbing.Hash{}) {
-		if newText == "" {
-			newText = readBlobText(repo, newOID)
-		}
-		if newText != "" {
-			writePrefixedLines(&b, newText, '+', maxLines)
+		if text := readBlobText(repo, newOID); text != "" {
+			lines := strings.SplitN(text, "\n", maxLines+1)
+			for i, line := range lines {
+				if i >= maxLines {
+					break
+				}
+				fmt.Fprintf(&b, "+%s\n", line)
+			}
 		}
 	}
 
 	return b.String()
-}
-
-// writePrefixedLines writes up to maxLines lines from text into b, each prefixed with prefix.
-// Replaces strings.SplitN (allocates []string) + fmt.Fprintf per line (allocs per call):
-// before: 317 allocs/op, ~130-184µs; after: 114 allocs/op, ~93-106µs (-64% allocs, -30% time).
-func writePrefixedLines(b *strings.Builder, text string, prefix byte, maxLines int) {
-	for remaining := maxLines; remaining > 0 && text != ""; remaining-- {
-		var line string
-		if idx := strings.IndexByte(text, '\n'); idx >= 0 {
-			line = text[:idx]
-			text = text[idx+1:]
-		} else {
-			line = text
-			text = ""
-		}
-		b.WriteByte(prefix)
-		b.WriteString(line)
-		b.WriteByte('\n')
-	}
 }
 
 // readBlobText reads a blob's content as a string, returning "" if unreadable or binary.
