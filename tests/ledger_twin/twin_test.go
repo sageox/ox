@@ -365,35 +365,44 @@ func TestWindowIsolation(t *testing.T) {
 
 // readMurmursInRange reads murmur files between since and until.
 // Cannot use ledger.ReadMurmursInWindow because it uses time.Now().
+// Surfaces I/O and unmarshal errors so broken fixtures fail loudly.
 func readMurmursInRange(baseDir string, since, until time.Time) ([]ledger.MurmurFile, error) {
 	var murmurs []ledger.MurmurFile
 	current := since.Truncate(time.Hour)
 	end := until
 	if end.IsZero() {
-		end = since.Add(24 * time.Hour)
+		end = time.Now().UTC()
 	}
 	for !current.After(end) {
 		dir := filepath.Join(baseDir, ledger.MurmurDateHourDir(current))
 		entries, err := os.ReadDir(dir)
 		if err != nil {
-			current = current.Add(time.Hour)
-			continue
+			if os.IsNotExist(err) {
+				current = current.Add(time.Hour)
+				continue
+			}
+			return nil, fmt.Errorf("read murmur dir %s: %w", dir, err)
 		}
 		for _, e := range entries {
 			if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 				continue
 			}
-			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			path := filepath.Join(dir, e.Name())
+			data, err := os.ReadFile(path)
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("read murmur file %s: %w", path, err)
 			}
 			var m ledger.MurmurFile
-			if json.Unmarshal(data, &m) != nil {
+			if err := json.Unmarshal(data, &m); err != nil {
+				return nil, fmt.Errorf("unmarshal murmur %s: %w", path, err)
+			}
+			if m.Timestamp.Before(since) {
 				continue
 			}
-			if !m.Timestamp.Before(since) && (until.IsZero() || !m.Timestamp.After(until)) {
-				murmurs = append(murmurs, m)
+			if !until.IsZero() && m.Timestamp.After(until) {
+				continue
 			}
+			murmurs = append(murmurs, m)
 		}
 		current = current.Add(time.Hour)
 	}
@@ -450,12 +459,16 @@ func TestMurmurAgentIDs(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, allMurmurs)
 
-	knownAgents := map[string]bool{
-		alice.AgentID: true, bob.AgentID: true, carol.AgentID: true,
-		dave.AgentID: true, eve.AgentID: true, frank.AgentID: true,
+	expectedByID := make(map[string]MurmurSpec, len(manifest.Murmurs))
+	for _, spec := range manifest.Murmurs {
+		expectedByID[spec.ID] = spec
 	}
 	for _, m := range allMurmurs {
-		assert.True(t, knownAgents[m.AgentID], "unknown agent ID: %s", m.AgentID)
+		spec, ok := expectedByID[m.ID]
+		require.True(t, ok, "unexpected murmur %s", m.ID)
+		assert.Equal(t, spec.Dev.AgentID, m.AgentID, "murmur %s agent ID", m.ID)
+		assert.Equal(t, spec.Dev.Username, m.PrincipalID, "murmur %s principal ID", m.ID)
+		assert.Equal(t, "human", m.PrincipalType, "murmur %s principal type", m.ID)
 		assert.Equal(t, "claude-code", m.AgentType)
 		assert.Equal(t, "1", m.SchemaVersion)
 	}
