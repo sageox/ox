@@ -1,0 +1,10 @@
+[
+  {
+    "Text": "comment at end of file with no newline",
+    "Kind": "line",
+    "Line": 1,
+    "EndLine": 1,
+    "Col": 1,
+    "EndCol": 42
+  }
+]

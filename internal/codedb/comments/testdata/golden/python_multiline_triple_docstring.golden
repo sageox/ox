@@ -1,0 +1,10 @@
+[
+  {
+    "Text": "trailing comment",
+    "Kind": "line",
+    "Line": 7,
+    "EndLine": 7,
+    "Col": 1,
+    "EndCol": 19
+  }
+]

@@ -1,0 +1,10 @@
+[
+  {
+    "Text": "Привет мир — Unicode comment",
+    "Kind": "line",
+    "Line": 1,
+    "EndLine": 1,
+    "Col": 1,
+    "EndCol": 32
+  }
+]

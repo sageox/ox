@@ -1,0 +1,13 @@
+{
+  "Strategy": 0,
+  "BleveQuery": "streaming",
+  "BleveIndex": "diff",
+  "SQL": "SELECT substr(c.hash, 1, 10) AS hash,\n       substr(c.message, 1, 80) AS message,\n       d.path, round(ds.score, 2) AS score\nFROM diff_search(?1) ds\nJOIN diffs d ON d.id = ds.diff_id\nJOIN commits c ON c.id = d.commit_id\nWHERE 1=1\n  AND c.timestamp \u003c CAST(strftime('%s', ?2) AS INTEGER)\nORDER BY ds.score DESC\nLIMIT 20",
+  "SQLParams": [
+    "streaming",
+    "2026-01-01"
+  ],
+  "SearchType": 1,
+  "Limit": 20,
+  "IsRegex": false
+}

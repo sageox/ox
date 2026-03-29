@@ -1,0 +1,7 @@
+{
+  "SQL": "SELECT p.number, p.title, p.author, p.state, p.url\nFROM pull_requests p\nLEFT JOIN pr_comments pc ON pc.pr_id = p.id\nWHERE 1=1\n  AND p.state = ?1\nGROUP BY p.id\nORDER BY p.updated_at DESC\nLIMIT 20",
+  "Params": [
+    "closed"
+  ],
+  "SearchType": 5
+}

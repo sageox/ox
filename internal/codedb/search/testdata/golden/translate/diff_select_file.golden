@@ -1,0 +1,7 @@
+{
+  "SQL": "SELECT DISTINCT d.path\nFROM diff_search(?1) ds\nJOIN diffs d ON d.id = ds.diff_id\nJOIN commits c ON c.id = d.commit_id\nWHERE 1=1\nORDER BY d.path\nLIMIT 20",
+  "Params": [
+    "streaming"
+  ],
+  "SearchType": 1
+}

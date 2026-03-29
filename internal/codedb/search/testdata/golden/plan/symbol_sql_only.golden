@@ -1,0 +1,14 @@
+{
+  "Strategy": 1,
+  "BleveQuery": "",
+  "BleveIndex": "",
+  "SQL": "SELECT fr.path, s.name, s.kind, s.line\nFROM symbols s\nJOIN blobs b ON b.id = s.blob_id\nJOIN file_revs fr ON fr.blob_id = b.id\nJOIN refs r ON r.commit_id = fr.commit_id\nWHERE 1=1\n  AND s.name LIKE ?1\n  AND r.name IN (?2, ?3)\nORDER BY fr.path, s.line\nLIMIT 20",
+  "SQLParams": [
+    "%SFrame%",
+    "refs/heads/main",
+    "refs/heads/master"
+  ],
+  "SearchType": 3,
+  "Limit": 20,
+  "IsRegex": false
+}

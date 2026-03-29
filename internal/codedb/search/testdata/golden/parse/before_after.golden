@@ -1,0 +1,31 @@
+{
+  "SearchTerms": [
+    "refactor"
+  ],
+  "Type": 2,
+  "IsRegex": false,
+  "Filters": {
+    "Repo": "",
+    "NegRepo": "",
+    "File": "",
+    "NegFile": "",
+    "Lang": "",
+    "NegLang": "",
+    "Rev": "",
+    "Count": 0,
+    "Case": false,
+    "Author": "",
+    "NegAuthor": "",
+    "Before": "2026-01-01",
+    "After": "2025-06-01",
+    "Message": "",
+    "NegMessage": "",
+    "Select": 0,
+    "SelectKind": "",
+    "Calls": "",
+    "CalledBy": "",
+    "Returns": "",
+    "CommentKind": "",
+    "State": ""
+  }
+}

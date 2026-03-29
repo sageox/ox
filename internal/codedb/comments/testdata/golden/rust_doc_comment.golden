@@ -1,0 +1,10 @@
+[
+  {
+    "Text": "/ Documentation comment",
+    "Kind": "doc",
+    "Line": 1,
+    "EndLine": 1,
+    "Col": 1,
+    "EndCol": 26
+  }
+]

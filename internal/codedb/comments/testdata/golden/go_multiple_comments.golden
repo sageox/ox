@@ -1,0 +1,26 @@
+[
+  {
+    "Text": "first comment",
+    "Kind": "line",
+    "Line": 1,
+    "EndLine": 1,
+    "Col": 1,
+    "EndCol": 17
+  },
+  {
+    "Text": "second comment",
+    "Kind": "line",
+    "Line": 2,
+    "EndLine": 2,
+    "Col": 1,
+    "EndCol": 18
+  },
+  {
+    "Text": "third comment",
+    "Kind": "line",
+    "Line": 3,
+    "EndLine": 3,
+    "Col": 1,
+    "EndCol": 17
+  }
+]

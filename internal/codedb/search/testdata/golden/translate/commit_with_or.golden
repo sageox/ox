@@ -1,0 +1,8 @@
+{
+  "SQL": "SELECT substr(c.hash, 1, 10) AS hash, c.author,\n       substr(c.message, 1, 80) AS message\nFROM commits c\nWHERE 1=1\n  AND (c.message LIKE ?1 OR c.message LIKE ?2)\nORDER BY c.timestamp DESC\nLIMIT 20",
+  "Params": [
+    "%fix%",
+    "%refactor%"
+  ],
+  "SearchType": 2
+}

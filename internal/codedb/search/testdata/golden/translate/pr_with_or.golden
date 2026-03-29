@@ -1,0 +1,8 @@
+{
+  "SQL": "SELECT p.number, p.title, p.author, p.state, p.url\nFROM pull_requests p\nLEFT JOIN pr_comments pc ON pc.pr_id = p.id\nWHERE 1=1\n  AND ((p.title LIKE ?1 OR p.body LIKE ?1 OR pc.body LIKE ?1) OR (p.title LIKE ?2 OR p.body LIKE ?2 OR pc.body LIKE ?2))\nGROUP BY p.id\nORDER BY p.updated_at DESC\nLIMIT 20",
+  "Params": [
+    "%auth%",
+    "%migration%"
+  ],
+  "SearchType": 5
+}

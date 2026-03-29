@@ -1,0 +1,8 @@
+{
+  "SQL": "SELECT substr(c.hash, 1, 10) AS hash,\n       substr(c.message, 1, 80) AS message,\n       d.path, round(ds.score, 2) AS score\nFROM diff_search(?1) ds\nJOIN diffs d ON d.id = ds.diff_id\nJOIN commits c ON c.id = d.commit_id\nWHERE 1=1\n  AND lower(d.path) GLOB ?2\nORDER BY ds.score DESC\nLIMIT 20",
+  "Params": [
+    "streaming",
+    "*.rs"
+  ],
+  "SearchType": 1
+}

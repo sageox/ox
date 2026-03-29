@@ -1054,33 +1054,44 @@ func generateDiffText(repo *git.Repository, path string, oldOID, newOID plumbing
 	const maxLines = 100
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "--- a/%s\n+++ b/%s\n", path, path)
+	b.WriteString("--- a/")
+	b.WriteString(path)
+	b.WriteByte('\n')
+	b.WriteString("+++ b/")
+	b.WriteString(path)
+	b.WriteByte('\n')
 
 	if hasOld && oldOID != (plumbing.Hash{}) {
 		if text := readBlobText(repo, oldOID); text != "" {
-			lines := strings.SplitN(text, "\n", maxLines+1)
-			for i, line := range lines {
-				if i >= maxLines {
-					break
-				}
-				fmt.Fprintf(&b, "-%s\n", line)
-			}
+			writePrefixedLines(&b, text, '-', maxLines)
 		}
 	}
 
 	if hasNew && newOID != (plumbing.Hash{}) {
 		if text := readBlobText(repo, newOID); text != "" {
-			lines := strings.SplitN(text, "\n", maxLines+1)
-			for i, line := range lines {
-				if i >= maxLines {
-					break
-				}
-				fmt.Fprintf(&b, "+%s\n", line)
-			}
+			writePrefixedLines(&b, text, '+', maxLines)
 		}
 	}
 
 	return b.String()
+}
+
+// writePrefixedLines writes up to maxLines lines from text into b, each prefixed with prefix.
+// Avoids strings.SplitN (allocates a slice) and fmt.Fprintf (allocates per call).
+func writePrefixedLines(b *strings.Builder, text string, prefix byte, maxLines int) {
+	for remaining := maxLines; remaining > 0 && text != ""; remaining-- {
+		var line string
+		if idx := strings.IndexByte(text, '\n'); idx >= 0 {
+			line = text[:idx]
+			text = text[idx+1:]
+		} else {
+			line = text
+			text = ""
+		}
+		b.WriteByte(prefix)
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
 }
 
 // readBlobText reads a blob's content as a string, returning "" if unreadable or binary.

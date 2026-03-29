@@ -1,0 +1,10 @@
+[
+  {
+    "Text": "final comment",
+    "Kind": "line",
+    "Line": 2,
+    "EndLine": 2,
+    "Col": 1,
+    "EndCol": 17
+  }
+]

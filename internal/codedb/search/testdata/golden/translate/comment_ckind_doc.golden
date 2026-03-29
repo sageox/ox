@@ -1,0 +1,9 @@
+{
+  "SQL": "SELECT fr.path, cm.text AS snippet, cm.kind, cm.line, b.language\nFROM comments cm\nJOIN blobs b ON b.id = cm.blob_id\nJOIN file_revs fr ON fr.blob_id = b.id\nJOIN refs r ON r.commit_id = fr.commit_id\nWHERE 1=1\n  AND cm.kind = ?1\n  AND r.name IN (?2, ?3)\nORDER BY fr.path, cm.line\nLIMIT 20",
+  "Params": [
+    "doc",
+    "refs/heads/main",
+    "refs/heads/master"
+  ],
+  "SearchType": 4
+}

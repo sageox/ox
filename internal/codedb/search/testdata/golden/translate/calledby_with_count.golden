@@ -1,0 +1,9 @@
+{
+  "SQL": "SELECT DISTINCT fr.path, sr.ref_name AS name, sr.kind, sr.line\nFROM symbols s\nJOIN symbol_refs sr ON sr.symbol_id = s.id AND sr.blob_id = s.blob_id\nJOIN blobs b ON b.id = sr.blob_id\nJOIN file_revs fr ON fr.blob_id = b.id\nJOIN refs r ON r.commit_id = fr.commit_id\nWHERE 1=1\n  AND s.name LIKE ?1\n  AND s.kind = 'function'\n  AND r.name IN (?2, ?3)\nORDER BY sr.line\nLIMIT 10",
+  "Params": [
+    "%groupby%",
+    "refs/heads/main",
+    "refs/heads/master"
+  ],
+  "SearchType": 3
+}

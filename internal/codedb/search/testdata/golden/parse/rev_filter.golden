@@ -1,0 +1,31 @@
+{
+  "SearchTerms": [
+    "foo"
+  ],
+  "Type": 0,
+  "IsRegex": false,
+  "Filters": {
+    "Repo": "",
+    "NegRepo": "",
+    "File": "",
+    "NegFile": "",
+    "Lang": "",
+    "NegLang": "",
+    "Rev": "develop",
+    "Count": 0,
+    "Case": false,
+    "Author": "",
+    "NegAuthor": "",
+    "Before": "",
+    "After": "",
+    "Message": "",
+    "NegMessage": "",
+    "Select": 0,
+    "SelectKind": "",
+    "Calls": "",
+    "CalledBy": "",
+    "Returns": "",
+    "CommentKind": "",
+    "State": ""
+  }
+}

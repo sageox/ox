@@ -1,0 +1,31 @@
+{
+  "SearchTerms": [
+    "foo"
+  ],
+  "Type": 0,
+  "IsRegex": false,
+  "Filters": {
+    "Repo": "main",
+    "NegRepo": "",
+    "File": "*.go",
+    "NegFile": "",
+    "Lang": "go",
+    "NegLang": "",
+    "Rev": "main",
+    "Count": 5,
+    "Case": true,
+    "Author": "",
+    "NegAuthor": "",
+    "Before": "",
+    "After": "",
+    "Message": "",
+    "NegMessage": "",
+    "Select": 0,
+    "SelectKind": "",
+    "Calls": "",
+    "CalledBy": "",
+    "Returns": "",
+    "CommentKind": "",
+    "State": ""
+  }
+}

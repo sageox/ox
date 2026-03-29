@@ -1,0 +1,10 @@
+{
+  "SQL": "SELECT fr.path, cs.score, cs.snippet\nFROM code_search(?1) cs\nJOIN blobs b ON b.id = cs.blob_id\nJOIN file_revs fr ON fr.blob_id = b.id\nJOIN refs r ON r.commit_id = fr.commit_id\nWHERE 1=1\n  AND b.language != ?2\n  AND r.name IN (?3, ?4)\nGROUP BY fr.path\nORDER BY cs.score DESC\nLIMIT 20",
+  "Params": [
+    "foo",
+    "python",
+    "refs/heads/main",
+    "refs/heads/master"
+  ],
+  "SearchType": 0
+}

@@ -1,0 +1,31 @@
+{
+  "SearchTerms": [
+    "SFrame"
+  ],
+  "Type": 0,
+  "IsRegex": false,
+  "Filters": {
+    "Repo": "",
+    "NegRepo": "",
+    "File": "",
+    "NegFile": "",
+    "Lang": "",
+    "NegLang": "",
+    "Rev": "",
+    "Count": 0,
+    "Case": true,
+    "Author": "",
+    "NegAuthor": "",
+    "Before": "",
+    "After": "",
+    "Message": "",
+    "NegMessage": "",
+    "Select": 0,
+    "SelectKind": "",
+    "Calls": "",
+    "CalledBy": "",
+    "Returns": "",
+    "CommentKind": "",
+    "State": ""
+  }
+}

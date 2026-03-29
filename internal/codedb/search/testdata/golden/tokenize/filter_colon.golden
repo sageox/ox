@@ -1,0 +1,5 @@
+[
+  "repo:SFrame",
+  "file:*.rs",
+  "fn"
+]

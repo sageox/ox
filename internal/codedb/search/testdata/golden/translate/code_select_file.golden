@@ -1,0 +1,9 @@
+{
+  "SQL": "SELECT DISTINCT fr.path\nFROM code_search(?1) cs\nJOIN blobs b ON b.id = cs.blob_id\nJOIN file_revs fr ON fr.blob_id = b.id\nJOIN refs r ON r.commit_id = fr.commit_id\nWHERE 1=1\n  AND r.name IN (?2, ?3)\nORDER BY fr.path\nLIMIT 20",
+  "Params": [
+    "foo",
+    "refs/heads/main",
+    "refs/heads/master"
+  ],
+  "SearchType": 0
+}

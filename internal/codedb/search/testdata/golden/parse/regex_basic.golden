@@ -1,0 +1,31 @@
+{
+  "SearchTerms": [
+    "err\\d+"
+  ],
+  "Type": 0,
+  "IsRegex": true,
+  "Filters": {
+    "Repo": "",
+    "NegRepo": "",
+    "File": "",
+    "NegFile": "",
+    "Lang": "",
+    "NegLang": "",
+    "Rev": "",
+    "Count": 0,
+    "Case": false,
+    "Author": "",
+    "NegAuthor": "",
+    "Before": "",
+    "After": "",
+    "Message": "",
+    "NegMessage": "",
+    "Select": 0,
+    "SelectKind": "",
+    "Calls": "",
+    "CalledBy": "",
+    "Returns": "",
+    "CommentKind": "",
+    "State": ""
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "SQL": "SELECT i.number, i.title, i.author, i.state, i.url\nFROM issues i\nLEFT JOIN issue_comments ic ON ic.issue_id = i.id\nWHERE 1=1\n  AND (i.title LIKE ?1 OR i.body LIKE ?1 OR ic.body LIKE ?1)\n  AND i.author = ?2\nGROUP BY i.id\nORDER BY i.updated_at DESC\nLIMIT 20",
+  "Params": [
+    "%bug%",
+    "person-b"
+  ],
+  "SearchType": 6
+}

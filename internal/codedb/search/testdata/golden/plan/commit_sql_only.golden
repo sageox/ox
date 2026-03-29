@@ -1,0 +1,12 @@
+{
+  "Strategy": 1,
+  "BleveQuery": "",
+  "BleveIndex": "",
+  "SQL": "SELECT substr(c.hash, 1, 10) AS hash, c.author,\n       substr(c.message, 1, 80) AS message\nFROM commits c\nWHERE 1=1\n  AND c.message LIKE ?1\nORDER BY c.timestamp DESC\nLIMIT 20",
+  "SQLParams": [
+    "%refactor%"
+  ],
+  "SearchType": 2,
+  "Limit": 20,
+  "IsRegex": false
+}

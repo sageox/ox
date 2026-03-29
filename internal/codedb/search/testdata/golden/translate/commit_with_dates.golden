@@ -1,0 +1,9 @@
+{
+  "SQL": "SELECT substr(c.hash, 1, 10) AS hash, c.author,\n       substr(c.message, 1, 80) AS message\nFROM commits c\nWHERE 1=1\n  AND c.message LIKE ?1\n  AND c.timestamp \u003c CAST(strftime('%s', ?2) AS INTEGER)\n  AND c.timestamp \u003e CAST(strftime('%s', ?3) AS INTEGER)\nORDER BY c.timestamp DESC\nLIMIT 20",
+  "Params": [
+    "%refactor%",
+    "2026-01-01",
+    "2025-06-01"
+  ],
+  "SearchType": 2
+}

@@ -1,0 +1,5 @@
+[
+  "lang:rust",
+  "\"foo bar\"",
+  "baz"
+]

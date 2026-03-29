@@ -1,0 +1,29 @@
+{
+  "SearchTerms": null,
+  "Type": 2,
+  "IsRegex": false,
+  "Filters": {
+    "Repo": "",
+    "NegRepo": "",
+    "File": "",
+    "NegFile": "",
+    "Lang": "",
+    "NegLang": "",
+    "Rev": "",
+    "Count": 0,
+    "Case": false,
+    "Author": "",
+    "NegAuthor": "",
+    "Before": "",
+    "After": "",
+    "Message": "fix",
+    "NegMessage": "",
+    "Select": 0,
+    "SelectKind": "",
+    "Calls": "",
+    "CalledBy": "",
+    "Returns": "",
+    "CommentKind": "",
+    "State": ""
+  }
+}

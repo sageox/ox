@@ -1,0 +1,10 @@
+[
+  {
+    "Text": "A Rust comment",
+    "Kind": "line",
+    "Line": 1,
+    "EndLine": 1,
+    "Col": 1,
+    "EndCol": 18
+  }
+]

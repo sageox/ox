@@ -1,0 +1,18 @@
+[
+  {
+    "Text": "!/bin/bash",
+    "Kind": "line",
+    "Line": 1,
+    "EndLine": 1,
+    "Col": 1,
+    "EndCol": 12
+  },
+  {
+    "Text": "Shell comment",
+    "Kind": "line",
+    "Line": 2,
+    "EndLine": 2,
+    "Col": 1,
+    "EndCol": 16
+  }
+]

@@ -1,0 +1,26 @@
+[
+  {
+    "Text": "Package comment",
+    "Kind": "line",
+    "Line": 3,
+    "EndLine": 3,
+    "Col": 1,
+    "EndCol": 19
+  },
+  {
+    "Text": "main runs the program.",
+    "Kind": "line",
+    "Line": 6,
+    "EndLine": 6,
+    "Col": 1,
+    "EndCol": 26
+  },
+  {
+    "Text": "Print greeting",
+    "Kind": "line",
+    "Line": 8,
+    "EndLine": 8,
+    "Col": 2,
+    "EndCol": 19
+  }
+]
