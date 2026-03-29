@@ -80,7 +80,8 @@ const bleveBatchSize = 500
 // checkpointEvery is the number of commits between SQL+Bleve checkpoint flushes.
 // Each checkpoint commits the current transaction and starts a new one, making
 // recently-indexed commits searchable without waiting for the full index run.
-const checkpointEvery = 500
+// At 50 commits, first results become searchable within seconds of indexing starting.
+const checkpointEvery = 50
 
 // defaultSkipDirs is the default set of directories to skip when indexing a working tree.
 // Override via IndexOptions.SkipDirs.
