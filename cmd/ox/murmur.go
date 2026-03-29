@@ -169,10 +169,15 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 }
 
 // resolvePrincipalID returns the human user identity for the murmur.
-// Tries SageOx auth (email/name), falls back to OS username.
+// Tries SageOx auth (email → local part, or name), falls back to OS username.
+// Always returns a short username, never a full email address.
 func resolvePrincipalID(projectRoot string) string {
 	ep := endpoint.GetForProject(projectRoot)
 	if username := auth.GetUsername(ep); username != "" {
+		// extract local part from email addresses for consistent short usernames
+		if idx := strings.IndexByte(username, '@'); idx > 0 {
+			return username[:idx]
+		}
 		return username
 	}
 	if u := os.Getenv("USER"); u != "" {

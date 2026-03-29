@@ -28,13 +28,13 @@ func IsValidMurmuringMode(mode string) bool {
 }
 
 // NormalizeMurmuring returns the canonical murmuring mode.
-// Empty string and unrecognized values default to "manual".
+// Empty string and unrecognized values default to "auto".
 func NormalizeMurmuring(mode string) string {
 	switch mode {
-	case MurmuringAuto:
-		return MurmuringAuto
-	default:
+	case MurmuringManual:
 		return MurmuringManual
+	default:
+		return MurmuringAuto
 	}
 }
 
@@ -52,11 +52,11 @@ var murmuringCacheEntry struct {
 const murmuringCacheMaxAge = 5 * time.Second
 
 // ResolveMurmuring determines the effective murmuring mode for a project.
-// Reads from project config; defaults to "manual".
+// Reads from project config; defaults to "auto".
 // Uses mtime-based caching to avoid repeated os.Stat + ReadFile + json.Unmarshal.
 func ResolveMurmuring(projectRoot string) string {
 	if projectRoot == "" {
-		return MurmuringManual
+		return MurmuringAuto
 	}
 
 	murmuringCacheEntry.mu.Lock()
@@ -73,15 +73,15 @@ func ResolveMurmuring(projectRoot string) string {
 	configPath := filepath.Join(projectRoot, sageoxDir, projectConfigFilename)
 	info, err := os.Stat(configPath)
 	if err != nil {
-		// file doesn't exist or is inaccessible — cache "manual" with zero mtime
+		// file doesn't exist or is inaccessible — cache "auto" with zero mtime
 		if !errors.Is(err, os.ErrNotExist) {
 			slog.Debug("failed to stat project config for murmuring", "error", err)
 		}
 		murmuringCacheEntry.projectRoot = projectRoot
-		murmuringCacheEntry.mode = MurmuringManual
+		murmuringCacheEntry.mode = MurmuringAuto
 		murmuringCacheEntry.mtime = time.Time{}
 		murmuringCacheEntry.checkedAt = now
-		return MurmuringManual
+		return MurmuringAuto
 	}
 
 	// mtime unchanged — return cached mode
@@ -98,13 +98,13 @@ func ResolveMurmuring(projectRoot string) string {
 			slog.Debug("failed to load project config for murmuring", "error", err)
 		}
 		murmuringCacheEntry.projectRoot = projectRoot
-		murmuringCacheEntry.mode = MurmuringManual
+		murmuringCacheEntry.mode = MurmuringAuto
 		murmuringCacheEntry.mtime = info.ModTime()
 		murmuringCacheEntry.checkedAt = now
-		return MurmuringManual
+		return MurmuringAuto
 	}
 
-	mode := MurmuringManual
+	mode := MurmuringAuto
 	if cfg != nil {
 		mode = NormalizeMurmuring(cfg.Murmuring)
 	}

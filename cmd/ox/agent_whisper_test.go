@@ -299,6 +299,89 @@ func TestCapMurmurWhispers_MixedSources(t *testing.T) {
 	}
 }
 
+func TestDeduplicateBySourceTopic(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+
+	t.Run("collapses identical nudges to one", func(t *testing.T) {
+		entries := make([]whisperstore.WhisperEntry, 20)
+		for i := range entries {
+			entries[i] = whisperstore.WhisperEntry{
+				ID:        fmt.Sprintf("nudge-%d", i),
+				Source:    "auto-murmur",
+				Topic:     "murmur-nudge",
+				Content:   "ACTION REQUIRED: Tell your teammates...",
+				CreatedAt: now.Add(-time.Duration(i) * time.Minute),
+			}
+		}
+		result := deduplicateBySourceTopic(entries)
+		if len(result) != 1 {
+			t.Errorf("expected 1 deduplicated nudge, got %d", len(result))
+		}
+		if result[0].ID != "nudge-0" {
+			t.Errorf("expected newest nudge (nudge-0), got %s", result[0].ID)
+		}
+	})
+
+	t.Run("preserves distinct source-topic pairs", func(t *testing.T) {
+		entries := []whisperstore.WhisperEntry{
+			{ID: "1", Source: "auto-murmur", Topic: "murmur-nudge", CreatedAt: now},
+			{ID: "2", Source: "activity-summary", Topic: "activity", CreatedAt: now},
+			{ID: "3", Source: "auto-murmur", Topic: "other-topic", CreatedAt: now},
+		}
+		result := deduplicateBySourceTopic(entries)
+		if len(result) != 3 {
+			t.Errorf("expected 3 distinct entries, got %d", len(result))
+		}
+	})
+
+	t.Run("empty and single entry", func(t *testing.T) {
+		if len(deduplicateBySourceTopic(nil)) != 0 {
+			t.Error("nil should return empty")
+		}
+		single := []whisperstore.WhisperEntry{{ID: "1", Source: "x", Topic: "y"}}
+		if len(deduplicateBySourceTopic(single)) != 1 {
+			t.Error("single entry should pass through")
+		}
+	})
+}
+
+func TestCapMurmurWhispers_DeduplicatesNudges(t *testing.T) {
+	now := time.Now()
+	// simulate 20 accumulated nudges (the flooding scenario)
+	var entries []whisperstore.WhisperEntry
+	for i := 0; i < 20; i++ {
+		entries = append(entries, whisperstore.WhisperEntry{
+			ID:        fmt.Sprintf("nudge-%d", i),
+			Source:    "auto-murmur",
+			Topic:     "murmur-nudge",
+			Content:   "ACTION REQUIRED: Tell your teammates...",
+			CreatedAt: now.Add(-time.Duration(i) * time.Minute),
+		})
+	}
+	// add a real murmur to verify it's unaffected
+	entries = append(entries, whisperstore.WhisperEntry{
+		ID: "murmur-1", Source: "murmur", AgentID: "OxA", Content: "working on auth", CreatedAt: now,
+	})
+
+	result := capMurmurWhispers(entries)
+
+	var nudges, murmurs int
+	for _, e := range result {
+		if e.Source == "auto-murmur" {
+			nudges++
+		} else if e.Source == "murmur" {
+			murmurs++
+		}
+	}
+	if nudges != 1 {
+		t.Errorf("expected 1 deduplicated nudge, got %d", nudges)
+	}
+	if murmurs != 1 {
+		t.Errorf("expected 1 murmur, got %d", murmurs)
+	}
+}
+
 func TestCapMurmurWhispers_Empty(t *testing.T) {
 	result := capMurmurWhispers(nil)
 	if len(result) != 0 {

@@ -759,28 +759,32 @@ func emitWhispers(agentID string) {
 // capMurmurWhispers limits murmur-sourced whispers to avoid blowing out agent context.
 //
 // Algorithm:
-//  1. Sort all murmurs by time (newest first) so recent signals win.
-//  2. Cap at maxMurmurWhispersPerAgent per authoring agent — no single agent
+//  1. Deduplicate non-murmur whispers by (source, topic) — keep only the most
+//     recent entry per key. Prevents nudge flooding when multiple identical
+//     nudges accumulate between deliveries (e.g., after daemon restart).
+//  2. Sort all murmurs by time (newest first) so recent signals win.
+//  3. Cap at maxMurmurWhispersPerAgent per authoring agent — no single agent
 //     dominates the whisper stream.
-//  3. Enforce a total token budget. If the full set fits, include all.
+//  4. Enforce a total token budget. If the full set fits, include all.
 //     If not, randomly sample from the candidates so that over many tool calls
 //     in a long session, every agent's murmurs eventually get heard.
-//
-// Non-murmur whispers (nudges, activity summaries) pass through unmodified.
 func capMurmurWhispers(entries []whisperstore.WhisperEntry) []whisperstore.WhisperEntry {
-	var nonMurmur []whisperstore.WhisperEntry
+	var rawNonMurmur []whisperstore.WhisperEntry
 	var allMurmurs []whisperstore.WhisperEntry
 
 	murmurMaxAge := 24 * time.Hour
 	now := time.Now()
 	for _, e := range entries {
 		if e.Source != "murmur" {
-			nonMurmur = append(nonMurmur, e)
+			rawNonMurmur = append(rawNonMurmur, e)
 		} else if now.Sub(e.CreatedAt) <= murmurMaxAge {
 			allMurmurs = append(allMurmurs, e)
 		}
 		// silently drop murmurs older than 24h
 	}
+
+	// deduplicate non-murmur entries by (source, topic) — keep newest per key
+	nonMurmur := deduplicateBySourceTopic(rawNonMurmur)
 
 	if len(allMurmurs) == 0 {
 		return nonMurmur
@@ -842,6 +846,27 @@ func capMurmurWhispers(entries []whisperstore.WhisperEntry) []whisperstore.Whisp
 	})
 
 	return append(nonMurmur, kept...)
+}
+
+// deduplicateBySourceTopic keeps only the most recent entry per (source, topic) key.
+// Prevents flooding when identical whispers (e.g., murmur nudges) accumulate
+// between deliveries — only the latest instance of each signal type is delivered.
+func deduplicateBySourceTopic(entries []whisperstore.WhisperEntry) []whisperstore.WhisperEntry {
+	if len(entries) <= 1 {
+		return entries
+	}
+	best := make(map[string]whisperstore.WhisperEntry)
+	for _, e := range entries {
+		key := e.Source + "\x00" + e.Topic
+		if existing, ok := best[key]; !ok || e.CreatedAt.After(existing.CreatedAt) {
+			best[key] = e
+		}
+	}
+	result := make([]whisperstore.WhisperEntry, 0, len(best))
+	for _, e := range best {
+		result = append(result, e)
+	}
+	return result
 }
 
 // formatWhispers writes whisper entries to w as structured XML.

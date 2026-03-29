@@ -69,11 +69,11 @@ AI coworkers are working on before PRs or commits appear. Signals
 propagate via the ledger and are delivered as whispers to active
 coworkers.
 
-  manual - Murmurs via 'ox murmur' only (default)
-  auto   - Daemon also nudges agents to murmur periodically (~15 min)`,
+  manual - Murmurs via 'ox murmur' only
+  auto   - Daemon also nudges agents to murmur periodically (~15 min) (default)`,
 		Category:    "Collaboration",
 		ValidValues: []string{"manual", "auto"},
-		Default:     "manual",
+		Default:     "auto",
 		Levels:      []ConfigLevel{ConfigLevelRepo},
 	},
 	{

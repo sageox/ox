@@ -35,8 +35,8 @@ func TestNormalizeMurmuring(t *testing.T) {
 	}{
 		{MurmuringManual, MurmuringManual},
 		{MurmuringAuto, MurmuringAuto},
-		{"", MurmuringManual},
-		{"invalid", MurmuringManual},
+		{"", MurmuringAuto},
+		{"invalid", MurmuringAuto},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
@@ -48,15 +48,15 @@ func TestNormalizeMurmuring(t *testing.T) {
 
 func TestResolveMurmuring_Default(t *testing.T) {
 	got := ResolveMurmuring("")
-	assert.Equal(t, MurmuringManual, got)
+	assert.Equal(t, MurmuringAuto, got)
 }
 
 func TestResolveMurmuring_NoConfig(t *testing.T) {
 	dir := t.TempDir()
 	got := ResolveMurmuring(dir)
-	assert.Equal(t, MurmuringManual, got)
+	assert.Equal(t, MurmuringAuto, got)
 }
 
 func TestMurmuringEnabled_Default(t *testing.T) {
-	assert.False(t, MurmuringEnabled(""))
+	assert.True(t, MurmuringEnabled(""))
 }
