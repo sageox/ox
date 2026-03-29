@@ -368,9 +368,10 @@ func TestCapMurmurWhispers_DeduplicatesNudges(t *testing.T) {
 
 	var nudges, murmurs int
 	for _, e := range result {
-		if e.Source == "auto-murmur" {
+		switch e.Source {
+		case "auto-murmur":
 			nudges++
-		} else if e.Source == "murmur" {
+		case "murmur":
 			murmurs++
 		}
 	}

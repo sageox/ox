@@ -75,9 +75,9 @@ func TestParentLinks_IncrementalRun(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: git subprocess needs full env for PATH/SSH
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai", a36bcc7 (fix: address lint warnings in test files)
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
@@ -329,9 +329,9 @@ func TestIndexLocalRepo_BlobDedup(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: git subprocess needs full env for PATH/SSH
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai", a36bcc7 (fix: address lint warnings in test files)
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
@@ -477,9 +477,9 @@ func TestDiffTree_InitialCommitAllFilesIndexed(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: git subprocess needs full env for PATH/SSH
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai", a36bcc7 (fix: address lint warnings in test files)
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
@@ -515,9 +515,9 @@ func TestDiffTree_ModifyAndDeleteTracked(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: git subprocess needs full env for PATH/SSH
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai", a36bcc7 (fix: address lint warnings in test files)
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
@@ -573,9 +573,9 @@ func TestDiffTree_UnchangedFilesNotDuplicated(t *testing.T) {
 		t.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: git subprocess needs full env for PATH/SSH
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai", a36bcc7 (fix: address lint warnings in test files)
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
