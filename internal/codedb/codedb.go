@@ -70,6 +70,12 @@ func (db *DB) DetachDirtyOverlay() {
 	db.store.DetachDirtyOverlay()
 }
 
+// GCDirtyIndexes removes stale dirty overlay directories for worktrees that no
+// longer exist on disk. Returns the number of overlays removed.
+func (db *DB) GCDirtyIndexes() (int, error) {
+	return index.GCDirtyIndexes(db.store.Root)
+}
+
 // ParseSymbols extracts symbols from all unparsed blobs with supported languages.
 func (db *DB) ParseSymbols(ctx context.Context, progress func(string)) (index.ParseStats, error) {
 	return index.ParseSymbols(ctx, db.store, index.ProgressFunc(progress))

@@ -385,7 +385,28 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 		if m.telemetry != nil && result != nil {
 			m.telemetry.RecordCodeIndexComplete(result, "success")
 		}
+
+		// GC stale dirty overlays for worktrees that no longer exist.
+		// Run after indexing so the new overlay (if any) is in place before we inspect.
+		m.gcDirtyIndexes(dataDir)
 	}()
+}
+
+// gcDirtyIndexes removes stale dirty overlay directories and logs the result.
+func (m *CodeDBManager) gcDirtyIndexes(dataDir string) {
+	db, err := codedb.Open(dataDir)
+	if err != nil {
+		return
+	}
+	defer db.Close()
+	removed, err := db.GCDirtyIndexes()
+	if err != nil {
+		m.logger.Warn("codedb dirty index GC failed", "error", err)
+		return
+	}
+	if removed > 0 {
+		m.logger.Info("codedb dirty index GC: removed stale overlays", "count", removed)
+	}
 }
 
 // Stats returns current index statistics.

@@ -445,11 +445,54 @@ func BuildDirtyIndex(ctx context.Context, localPath, dirtyPath string, opts Inde
 		return 0, fmt.Errorf("swap dirty index: %w", err)
 	}
 
+	// write manifest so GCDirtyIndexes can reverse the hash back to the path
+	_ = os.WriteFile(dirtyPath+".manifest", []byte(localPath), 0o644)
+
 	if opts.Progress != nil {
 		opts.Progress(fmt.Sprintf("indexed %d dirty files", indexed))
 	}
 
 	return indexed, nil
+}
+
+// GCDirtyIndexes removes dirty overlay directories whose worktrees no longer exist.
+// Each overlay is paired with a "<dir>.manifest" file written by BuildDirtyIndex that
+// records the original worktree path. Overlays without a manifest (written by an older
+// build) are left alone to avoid removing indexes whose provenance is unknown.
+//
+// Returns the number of overlays removed.
+func GCDirtyIndexes(codedbDir string) (int, error) {
+	dirtyDir := filepath.Join(codedbDir, "bleve", "dirty")
+	entries, err := os.ReadDir(dirtyDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read dirty index dir: %w", err)
+	}
+
+	removed := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dirPath := filepath.Join(dirtyDir, e.Name())
+		manifestPath := dirPath + ".manifest"
+
+		raw, err := os.ReadFile(manifestPath)
+		if err != nil {
+			// no manifest — written by an older build; leave it alone
+			continue
+		}
+		worktreePath := string(raw)
+		if _, statErr := os.Stat(worktreePath); os.IsNotExist(statErr) {
+			// worktree is gone — remove overlay + manifest
+			_ = os.RemoveAll(dirPath)
+			_ = os.Remove(manifestPath)
+			removed++
+		}
+	}
+	return removed, nil
 }
 
 // gitStatusDirtyFiles returns relative paths of dirty files using git status -z.
