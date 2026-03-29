@@ -95,7 +95,7 @@ func runUpgrade(cmd *cobra.Command, _ []string) error {
 		return outputUpgradeResult(cmd, result, jsonOutput)
 	case installBinary:
 		result.Status = "manual"
-		result.Message = fmt.Sprintf("Download the latest release or run:\n  curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash")
+		result.Message = "Download the latest release or run:\n  curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash"
 		return outputUpgradeResult(cmd, result, jsonOutput)
 	}
 
