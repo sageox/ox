@@ -11,27 +11,37 @@ import (
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
 
+const (
+	// earlyNudgeDelay is how long to wait before the first nudge for a new agent.
+	earlyNudgeDelay = 1 * time.Minute
+	// earlyNudgeHeartbeats is the heartbeat count threshold for early nudge.
+	earlyNudgeHeartbeats = 2
+)
+
 // murmurNudgeContent is the whisper content that nudges agents to self-report.
 const murmurNudgeContent = `ACTION REQUIRED: Tell your teammates what you're working on right now. Run this command immediately. Be extremely concise — other agents pay a context token cost to read your murmur. One or two sentences max, 500 bytes limit. Run: ox murmur --topic=wip "describe: what you're building/fixing, which code areas you're modifying, and any architectural changes"`
 
 // MurmurNudgeSource periodically checks if active agents should be nudged
 // to self-report what they're working on via ox murmur. Produces a whisper
 // entry for each agent that hasn't murmured within the configured interval.
+//
+// Uses the whisper store as source of truth for nudge/murmur history,
+// so state survives daemon restarts without needing in-memory tracking.
 type MurmurNudgeSource struct {
-	tracker     *MurmurNudgeTracker
+	store       *whisperstore.Store
 	heartbeat   *HeartbeatHandler
 	interval    time.Duration
 	projectRoot string // re-checked on every tick to pick up config changes
 }
 
 // NewMurmurNudgeSource creates a source that nudges agents to self-report.
-func NewMurmurNudgeSource(tracker *MurmurNudgeTracker, heartbeat *HeartbeatHandler, interval time.Duration, projectRoot string) *MurmurNudgeSource {
+func NewMurmurNudgeSource(store *whisperstore.Store, heartbeat *HeartbeatHandler, interval time.Duration, projectRoot string) *MurmurNudgeSource {
 	// enforce minimum 10 minutes
 	if interval < 10*time.Minute {
 		interval = 10 * time.Minute
 	}
 	return &MurmurNudgeSource{
-		tracker:     tracker,
+		store:       store,
 		heartbeat:   heartbeat,
 		interval:    interval,
 		projectRoot: projectRoot,
@@ -46,7 +56,7 @@ func (s *MurmurNudgeSource) Name() string { return "murmur-nudge" }
 func (s *MurmurNudgeSource) Interval() time.Duration { return 1 * time.Minute }
 
 func (s *MurmurNudgeSource) Produce(_ context.Context) []whisperstore.WhisperEntry {
-	if s.heartbeat == nil || s.tracker == nil {
+	if s.heartbeat == nil || s.store == nil {
 		return nil
 	}
 	if !config.MurmuringEnabled(s.projectRoot) {
@@ -58,6 +68,7 @@ func (s *MurmurNudgeSource) Produce(_ context.Context) []whisperstore.WhisperEnt
 		return nil
 	}
 
+	now := time.Now()
 	var entries []whisperstore.WhisperEntry
 	for _, agent := range summary.Agents {
 		agentID := agent.Key
@@ -65,7 +76,7 @@ func (s *MurmurNudgeSource) Produce(_ context.Context) []whisperstore.WhisperEnt
 			continue
 		}
 
-		if !s.tracker.ShouldNudge(agentID, s.interval) {
+		if !s.shouldNudge(agentID, agent, now) {
 			continue
 		}
 
@@ -82,14 +93,61 @@ func (s *MurmurNudgeSource) Produce(_ context.Context) []whisperstore.WhisperEnt
 			Topic:      "murmur-nudge",
 			Content:    murmurNudgeContent,
 			Importance: whisperstore.ImportanceNormal,
-			CreatedAt:  time.Now(),
+			CreatedAt:  now,
 			AgentID:    agentID,
 		})
-
-		s.tracker.RecordNudge(agentID)
 	}
 
 	return entries
+}
+
+// shouldNudge checks the whisper store to decide if an agent needs nudging.
+// Replaces the in-memory MurmurNudgeTracker — state survives daemon restarts.
+func (s *MurmurNudgeSource) shouldNudge(agentID string, agent ActivityEntry, now time.Time) bool {
+	// don't nudge until agent has been active for earlyNudgeDelay or has
+	// enough heartbeats — prevents nudging agents that just started
+	firstSeen := time.Time{}
+	if len(agent.Timestamps) > 0 {
+		firstSeen = agent.Timestamps[0] // oldest entry in ring buffer
+	}
+	if firstSeen.IsZero() {
+		return false
+	}
+
+	earlyReady := now.Sub(firstSeen) >= earlyNudgeDelay || agent.Count >= earlyNudgeHeartbeats
+
+	// check when we last nudged this agent (from store)
+	lastNudge, err := s.store.LatestWhisperTime("auto-murmur", "murmur-nudge", agentID)
+	if err != nil {
+		return false // store error — skip this tick
+	}
+
+	// check when this agent last murmured (relayed murmurs are stored with source="murmur")
+	lastMurmur, err := s.store.LatestWhisperTime("murmur", "", agentID)
+	if err != nil {
+		return false
+	}
+
+	hasMurmured := !lastMurmur.IsZero()
+
+	// don't re-nudge too soon after last nudge
+	if !lastNudge.IsZero() {
+		cooldown := s.interval
+		if !hasMurmured {
+			cooldown = earlyNudgeDelay
+		}
+		if now.Sub(lastNudge) < cooldown {
+			return false
+		}
+	}
+
+	if !hasMurmured {
+		// never murmured — use early nudge logic
+		return earlyReady
+	}
+
+	// has murmured before — nudge after interval since last murmur
+	return now.Sub(lastMurmur) >= s.interval
 }
 
 // ActivitySummarySource produces periodic activity whispers.

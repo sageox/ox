@@ -23,6 +23,7 @@ CREATE INDEX IF NOT EXISTS idx_whispers_created ON whispers(created_at);
 CREATE INDEX IF NOT EXISTS idx_whispers_scope ON whispers(scope, created_at);
 CREATE INDEX IF NOT EXISTS idx_whispers_importance ON whispers(importance, created_at);
 CREATE INDEX IF NOT EXISTS idx_whispers_topic ON whispers(topic, created_at);
+CREATE INDEX IF NOT EXISTS idx_whispers_source_topic ON whispers(source, topic, agent_id, created_at);
 
 CREATE TABLE IF NOT EXISTS cursors (
     agent_id    TEXT PRIMARY KEY,

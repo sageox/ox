@@ -241,7 +241,6 @@ func (h *HeartbeatHandler) SetCallerPathCallback(cb func(path string)) {
 }
 
 // SetAgentHeartbeatCallback registers a callback fired when an agent heartbeat arrives.
-// Used by MurmurNudgeTracker to count heartbeats for early nudge logic.
 func (h *HeartbeatHandler) SetAgentHeartbeatCallback(cb func(agentID string)) {
 	h.cbMu.Lock()
 	h.onAgentHeartbeat = cb

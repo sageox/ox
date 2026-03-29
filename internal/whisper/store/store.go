@@ -452,6 +452,40 @@ func (s *Store) GetAllWhispers(agentID string) ([]WhisperEntry, error) {
 	return all, nil
 }
 
+// LatestWhisperTime returns the most recent created_at for matching whispers.
+// source is required. topic and agentID are optional filters (empty = any).
+// Returns zero time if no matching whisper exists.
+func (s *Store) LatestWhisperTime(source, topic, agentID string) (time.Time, error) {
+	db := s.db.Load()
+	if db == nil {
+		return time.Time{}, nil
+	}
+
+	query := `SELECT MAX(created_at) FROM whispers WHERE source = ?`
+	args := []interface{}{source}
+	if topic != "" {
+		query += ` AND topic = ?`
+		args = append(args, topic)
+	}
+	if agentID != "" {
+		query += ` AND agent_id = ?`
+		args = append(args, agentID)
+	}
+
+	var maxTS sql.NullString
+	if err := db.QueryRow(query, args...).Scan(&maxTS); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return time.Time{}, nil
+		}
+		return time.Time{}, err
+	}
+	if !maxTS.Valid || maxTS.String == "" {
+		return time.Time{}, nil
+	}
+	t, _ := time.Parse(time.RFC3339Nano, maxTS.String)
+	return t, nil
+}
+
 // GetWhispersPage returns a page of whisper entries ordered by created_at DESC.
 // before: if non-zero, only returns entries with created_at strictly before this time (cursor).
 // limit: max entries to return; 0 uses the default (50); capped at 200.

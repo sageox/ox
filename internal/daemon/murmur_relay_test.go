@@ -409,11 +409,27 @@ func TestMurmurRelayContentAndMetadataPreserved(t *testing.T) {
 	}
 }
 
+func initManualMurmuringProject(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	sageoxDir := filepath.Join(dir, ".sageox")
+	if err := os.MkdirAll(sageoxDir, 0o755); err != nil {
+		t.Fatalf("mkdir .sageox: %v", err)
+	}
+	cfg := map[string]string{"murmuring": "manual"}
+	data, _ := json.Marshal(cfg)
+	if err := os.WriteFile(filepath.Join(sageoxDir, "config.json"), data, 0o644); err != nil {
+		t.Fatalf("write config.json: %v", err)
+	}
+	return dir
+}
+
 func TestMurmurRelayDisabledConfig(t *testing.T) {
-	// relay with no project root (murmuring defaults to manual/off)
+	// relay with explicit "manual" murmuring config
+	projectRoot := initManualMurmuringProject(t)
 	store := openTestStore(t)
 	registry := NewWhisperRegistry(store, nil)
-	relay := NewMurmurRelay(registry, "", nil)
+	relay := NewMurmurRelay(registry, projectRoot, nil)
 	t.Cleanup(func() { registry.Close() })
 
 	baseDir := t.TempDir()
