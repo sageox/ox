@@ -24,9 +24,9 @@ func initTestRepo(t *testing.T) string {
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), // safe: git CLI in temp dir needs inherited PATH
 			"GIT_AUTHOR_NAME=test",
-			"GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_AUTHOR_EMAIL=test@sageox.ai",
 			"GIT_COMMITTER_NAME=test",
-			"GIT_COMMITTER_EMAIL=test@test.com",
+			"GIT_COMMITTER_EMAIL=test@sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)

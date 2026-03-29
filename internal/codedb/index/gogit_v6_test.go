@@ -105,8 +105,8 @@ func TestV6_TreeFilesReturnsFullPaths(t *testing.T) {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), // safe: git in temp dir, not ox subprocess
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=t@t.com",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=t@t.com")
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai")
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
 	}
@@ -185,8 +185,8 @@ func TestV6_CloneOrFetchUpdatesOnRefetch(t *testing.T) {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = srcDir
 		cmd.Env = append(os.Environ(), // safe: git in temp dir, not ox subprocess
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=t@t.com",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=t@t.com")
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai")
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
 	}
@@ -222,8 +222,8 @@ func TestV6_GetTreeEntriesWithSubdirs(t *testing.T) {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), // safe: git in temp dir, not ox subprocess
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=t@t.com",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=t@t.com")
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai")
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
 	}

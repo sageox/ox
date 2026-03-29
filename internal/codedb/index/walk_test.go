@@ -28,7 +28,7 @@ func TestWalkNewCommitsBFSOrder(t *testing.T) {
 		t.Fatalf("worktree: %v", err)
 	}
 
-	sig := &object.Signature{Name: "test", Email: "t@t.com", When: time.Now()}
+	sig := &object.Signature{Name: "test", Email: "test@sageox.ai", When: time.Now()}
 
 	// commit 1 on default branch
 	if err := os.WriteFile(filepath.Join(tmp, "a.txt"), []byte("a"), 0o644); err != nil {
@@ -121,7 +121,7 @@ func TestWalkNewCommitsSkipsKnown(t *testing.T) {
 		t.Fatalf("worktree: %v", err)
 	}
 
-	sig := &object.Signature{Name: "test", Email: "t@t.com", When: time.Now()}
+	sig := &object.Signature{Name: "test", Email: "test@sageox.ai", When: time.Now()}
 
 	if err := os.WriteFile(filepath.Join(tmp, "a.txt"), []byte("a"), 0o644); err != nil {
 		t.Fatal(err)
@@ -171,7 +171,7 @@ func TestWalkNewCommitsMaxDepth(t *testing.T) {
 		t.Fatalf("worktree: %v", err)
 	}
 
-	sig := &object.Signature{Name: "test", Email: "t@t.com", When: time.Now()}
+	sig := &object.Signature{Name: "test", Email: "test@sageox.ai", When: time.Now()}
 
 	var lastHash plumbing.Hash
 	for i := 0; i < 5; i++ {

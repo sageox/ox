@@ -28,9 +28,9 @@ func TestGitStatusDirtyFiles(t *testing.T) {
 			cmd.Dir = dir
 			cmd.Env = append(os.Environ(), // safe: git subprocess needs parent env for PATH
 				"GIT_AUTHOR_NAME=test",
-				"GIT_AUTHOR_EMAIL=test@test.com",
+				"GIT_AUTHOR_EMAIL=test@sageox.ai",
 				"GIT_COMMITTER_NAME=test",
-				"GIT_COMMITTER_EMAIL=test@test.com",
+				"GIT_COMMITTER_EMAIL=test@sageox.ai",
 			)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
@@ -834,9 +834,9 @@ func TestBuildDirtyIndex_RemovesStaleOnClean(t *testing.T) {
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), // safe: git subprocess needs parent env for PATH
 			"GIT_AUTHOR_NAME=test",
-			"GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_AUTHOR_EMAIL=test@sageox.ai",
 			"GIT_COMMITTER_NAME=test",
-			"GIT_COMMITTER_EMAIL=test@test.com",
+			"GIT_COMMITTER_EMAIL=test@sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -1013,9 +1013,9 @@ func TestResolveDefaultBranch_FallbackToBranchNames(t *testing.T) {
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), // safe: git subprocess needs parent env for PATH
 			"GIT_AUTHOR_NAME=test",
-			"GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_AUTHOR_EMAIL=test@sageox.ai",
 			"GIT_COMMITTER_NAME=test",
-			"GIT_COMMITTER_EMAIL=test@test.com",
+			"GIT_COMMITTER_EMAIL=test@sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		if err != nil {

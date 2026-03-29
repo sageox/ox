@@ -76,8 +76,8 @@ func TestParentLinks_IncrementalRun(t *testing.T) {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
@@ -226,7 +226,7 @@ func TestGenerateDiffText_PreReadMatchesFallback(t *testing.T) {
 
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
-	sig := &object.Signature{Name: "t", Email: "t@t.com", When: time.Now()}
+	sig := &object.Signature{Name: "t", Email: "test@sageox.ai", When: time.Now()}
 
 	content1 := strings.Repeat("line of code\n", 50)
 	content2 := strings.Repeat("modified line\n", 50)
@@ -287,7 +287,7 @@ func TestGenerateDiffText_PartialPreRead(t *testing.T) {
 
 	wt, err := repo.Worktree()
 	require.NoError(t, err)
-	sig := &object.Signature{Name: "t", Email: "t@t.com", When: time.Now()}
+	sig := &object.Signature{Name: "t", Email: "test@sageox.ai", When: time.Now()}
 
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "g.go"), []byte("package g\n"), 0o644))
 	_, err = wt.Add("g.go")
@@ -330,8 +330,8 @@ func TestIndexLocalRepo_BlobDedup(t *testing.T) {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
@@ -478,8 +478,8 @@ func TestDiffTree_InitialCommitAllFilesIndexed(t *testing.T) {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
@@ -516,8 +516,8 @@ func TestDiffTree_ModifyAndDeleteTracked(t *testing.T) {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
@@ -574,8 +574,8 @@ func TestDiffTree_UnchangedFilesNotDuplicated(t *testing.T) {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
