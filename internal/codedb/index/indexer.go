@@ -747,7 +747,7 @@ func (st *indexState) processRef(ctx context.Context, ri refInfo, refIdx, totalR
 func (st *indexState) indexCommit(cd commitData) error {
 	oidHex := cd.oid.String()
 
-	_, err := st.tx.Exec(
+	result, err := st.tx.Exec(
 		`INSERT OR IGNORE INTO commits (repo_id, hash, author, message, timestamp)
 		 VALUES (?, ?, ?, ?, ?)`,
 		st.repoID, oidHex, cd.author, cd.message, cd.timestamp,
@@ -756,10 +756,15 @@ func (st *indexState) indexCommit(cd commitData) error {
 		return fmt.Errorf("insert commit: %w", err)
 	}
 
+	// Use LastInsertId to skip a SELECT; each commit hash is processed once per run.
+	// Fall back to SELECT only when RowsAffected==0 (commit already existed).
 	var commitDBID int64
-	err = st.tx.QueryRow("SELECT id FROM commits WHERE hash = ?", oidHex).Scan(&commitDBID)
-	if err != nil {
-		return fmt.Errorf("get commit id: %w", err)
+	if n, _ := result.RowsAffected(); n > 0 {
+		commitDBID, _ = result.LastInsertId()
+	} else {
+		if err = st.tx.QueryRow("SELECT id FROM commits WHERE hash = ?", oidHex).Scan(&commitDBID); err != nil {
+			return fmt.Errorf("get commit id: %w", err)
+		}
 	}
 
 	st.newCommits++
