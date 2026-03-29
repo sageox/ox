@@ -12,8 +12,8 @@ func (d *ActivityData) Enrich() {
 	now := time.Now()
 
 	for i := range d.Authors {
-		for j := range d.Authors[i].Sessions {
-			d.Authors[i].Sessions[j].TimeAgo = relativeTime(d.Authors[i].Sessions[j].Time, now)
+		for j := range d.Authors[i].Murmurs {
+			d.Authors[i].Murmurs[j].TimeAgo = relativeTime(d.Authors[i].Murmurs[j].Time, now)
 		}
 	}
 
@@ -68,7 +68,7 @@ func buildActions(d *ActivityData) []Action {
 		}
 
 		actions = append(actions, Action{
-			Text: fmt.Sprintf("Coordinate with %s before touching %s",
+			Text: fmt.Sprintf("Collision risk: %s are both working on %s — coordinate now",
 				strings.Join(people, " and "), strings.Join(pi.files, ", ")),
 			Risk:   risk,
 			Files:  pi.files,
@@ -88,34 +88,34 @@ func buildActions(d *ActivityData) []Action {
 }
 
 func headline(d *ActivityData) string {
-	if d.Stats.TotalSessions == 0 {
-		return "No sessions found in this time window."
+	if d.Stats.TotalMurmurs == 0 {
+		return "No murmurs found in this time window."
 	}
 
-	parts := []string{fmt.Sprintf("%d sessions by %d people", d.Stats.TotalSessions, d.Stats.TotalAuthors)}
+	parts := []string{fmt.Sprintf("%d murmurs from %d coworkers", d.Stats.TotalMurmurs, d.Stats.TotalAuthors)}
 
 	if n := d.Stats.TotalConflicts; n > 0 {
 		if n == 1 {
-			parts = append(parts, "1 file conflict detected")
+			parts = append(parts, "1 potential collision detected")
 		} else {
-			parts = append(parts, fmt.Sprintf("%d file conflicts detected", n))
+			parts = append(parts, fmt.Sprintf("%d potential collisions detected", n))
 		}
 	} else {
-		parts = append(parts, "all clear — no file conflicts")
+		parts = append(parts, "all clear — no collision risk")
 	}
 
 	return strings.Join(parts, ", ") + "."
 }
 
 func guidance(d *ActivityData) string {
-	if d.Stats.TotalConflicts == 0 && d.Stats.TotalSessions == 0 {
+	if d.Stats.TotalConflicts == 0 && d.Stats.TotalMurmurs == 0 {
 		return ""
 	}
 
 	var lines []string
 
 	if len(d.Actions) > 0 {
-		lines = append(lines, "Lead with actionable recommendations from the actions array — what the user should do RIGHT NOW. Then provide the supporting context: headline, conflicts, who's working on what. The user wants to know what to do before they want to know why.")
+		lines = append(lines, "Lead with pre-crime alerts from the actions array — warn about collisions BEFORE they happen, based on what coworkers say they're working on right now. Then provide the supporting context: headline, collisions, who's working on what.")
 	}
 
 	if d.Stats.TotalConflicts > 0 {
@@ -133,15 +133,15 @@ func guidance(d *ActivityData) string {
 			noun = "file has"
 		}
 		lines = append(lines, fmt.Sprintf(
-			"Context: %d %s multiple authors. The hottest is %s (%d authors).",
+			"Context: %d %s multiple coworkers working on them. The hottest is %s (%d coworkers).",
 			d.Stats.TotalConflicts, noun, hotFile, maxAuthors))
 	}
 
-	if d.Stats.TotalConflicts == 0 && d.Stats.TotalSessions > 0 {
-		lines = append(lines, "All clear — the team is working in parallel with no file overlap. This is a good state. Briefly summarize what each person is working on so the user has situational awareness. Keep the tone positive.")
+	if d.Stats.TotalConflicts == 0 && d.Stats.TotalMurmurs > 0 {
+		lines = append(lines, "All clear — the team is working in parallel with no file overlap. This is a good state. Briefly summarize what each coworker is working on so the user has situational awareness. Keep the tone positive.")
 	}
 
-	lines = append(lines, "Use time_ago values (not raw timestamps) when referring to sessions. Keep it concise.")
+	lines = append(lines, "Use time_ago values (not raw timestamps) when referring to murmurs. Keep it concise.")
 
 	return strings.Join(lines, " ")
 }

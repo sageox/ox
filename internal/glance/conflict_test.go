@@ -6,11 +6,11 @@ import (
 )
 
 func TestDetectConflicts_NoOverlap(t *testing.T) {
-	sessions := []SessionRecord{
-		{Name: "s1", User: "alice", Files: []string{"a.go", "b.go"}},
-		{Name: "s2", User: "bob", Files: []string{"c.go", "d.go"}},
+	murmurs := []MurmurRecord{
+		{ID: "s1", User: "alice", Files: []string{"a.go", "b.go"}},
+		{ID: "s2", User: "bob", Files: []string{"c.go", "d.go"}},
 	}
-	report := DetectConflicts(sessions)
+	report := DetectConflicts(murmurs)
 	if len(report.Overlaps) != 0 {
 		t.Errorf("expected 0 overlaps, got %d", len(report.Overlaps))
 	}
@@ -20,11 +20,11 @@ func TestDetectConflicts_NoOverlap(t *testing.T) {
 }
 
 func TestDetectConflicts_SingleOverlap(t *testing.T) {
-	sessions := []SessionRecord{
-		{Name: "s1", User: "alice", Files: []string{"shared.go", "a.go"}},
-		{Name: "s2", User: "bob", Files: []string{"shared.go", "b.go"}},
+	murmurs := []MurmurRecord{
+		{ID: "s1", User: "alice", Files: []string{"shared.go", "a.go"}},
+		{ID: "s2", User: "bob", Files: []string{"shared.go", "b.go"}},
 	}
-	report := DetectConflicts(sessions)
+	report := DetectConflicts(murmurs)
 	if len(report.Overlaps) != 1 {
 		t.Fatalf("expected 1 overlap, got %d", len(report.Overlaps))
 	}
@@ -37,12 +37,12 @@ func TestDetectConflicts_SingleOverlap(t *testing.T) {
 }
 
 func TestDetectConflicts_MultipleAuthors(t *testing.T) {
-	sessions := []SessionRecord{
-		{Name: "s1", User: "alice", Files: []string{"hot.go"}},
-		{Name: "s2", User: "bob", Files: []string{"hot.go"}},
-		{Name: "s3", User: "charlie", Files: []string{"hot.go"}},
+	murmurs := []MurmurRecord{
+		{ID: "s1", User: "alice", Files: []string{"hot.go"}},
+		{ID: "s2", User: "bob", Files: []string{"hot.go"}},
+		{ID: "s3", User: "charlie", Files: []string{"hot.go"}},
 	}
-	report := DetectConflicts(sessions)
+	report := DetectConflicts(murmurs)
 	if len(report.Overlaps) != 1 {
 		t.Fatalf("expected 1 overlap, got %d", len(report.Overlaps))
 	}
@@ -57,23 +57,23 @@ func TestDetectConflicts_MultipleAuthors(t *testing.T) {
 }
 
 func TestDetectConflicts_SameAuthorNoConflict(t *testing.T) {
-	sessions := []SessionRecord{
-		{Name: "s1", User: "alice", Files: []string{"a.go"}},
-		{Name: "s2", User: "alice", Files: []string{"a.go"}},
+	murmurs := []MurmurRecord{
+		{ID: "s1", User: "alice", Files: []string{"a.go"}},
+		{ID: "s2", User: "alice", Files: []string{"a.go"}},
 	}
-	report := DetectConflicts(sessions)
+	report := DetectConflicts(murmurs)
 	if len(report.Overlaps) != 0 {
 		t.Errorf("same author touching same file should not be a conflict, got %d overlaps", len(report.Overlaps))
 	}
 }
 
 func TestDetectConflicts_SortedByHotness(t *testing.T) {
-	sessions := []SessionRecord{
-		{Name: "s1", User: "alice", Files: []string{"cool.go", "hot.go"}},
-		{Name: "s2", User: "bob", Files: []string{"cool.go", "hot.go"}},
-		{Name: "s3", User: "charlie", Files: []string{"hot.go"}},
+	murmurs := []MurmurRecord{
+		{ID: "s1", User: "alice", Files: []string{"cool.go", "hot.go"}},
+		{ID: "s2", User: "bob", Files: []string{"cool.go", "hot.go"}},
+		{ID: "s3", User: "charlie", Files: []string{"hot.go"}},
 	}
-	report := DetectConflicts(sessions)
+	report := DetectConflicts(murmurs)
 	if len(report.Overlaps) != 2 {
 		t.Fatalf("expected 2 overlaps, got %d", len(report.Overlaps))
 	}
@@ -84,23 +84,23 @@ func TestDetectConflicts_SortedByHotness(t *testing.T) {
 }
 
 func TestDetectConflicts_EmptyFiles(t *testing.T) {
-	sessions := []SessionRecord{
-		{Name: "s1", User: "alice", Files: nil},
-		{Name: "s2", User: "bob", Files: []string{}},
+	murmurs := []MurmurRecord{
+		{ID: "s1", User: "alice", Files: nil},
+		{ID: "s2", User: "bob", Files: []string{}},
 	}
-	report := DetectConflicts(sessions)
+	report := DetectConflicts(murmurs)
 	if len(report.Overlaps) != 0 {
 		t.Errorf("expected 0 overlaps, got %d", len(report.Overlaps))
 	}
 }
 
 func TestOverlapPairs_Sorted(t *testing.T) {
-	sessions := []SessionRecord{
-		{Name: "s1", User: "alice", Files: []string{"a.go", "b.go", "c.go"}},
-		{Name: "s2", User: "bob", Files: []string{"a.go"}},
-		{Name: "s3", User: "charlie", Files: []string{"a.go", "b.go", "c.go"}},
+	murmurs := []MurmurRecord{
+		{ID: "s1", User: "alice", Files: []string{"a.go", "b.go", "c.go"}},
+		{ID: "s2", User: "bob", Files: []string{"a.go"}},
+		{ID: "s3", User: "charlie", Files: []string{"a.go", "b.go", "c.go"}},
 	}
-	report := DetectConflicts(sessions)
+	report := DetectConflicts(murmurs)
 	pairs := report.OverlapPairs()
 	// alice|charlie should have most shared files (3), then alice|bob (1), bob|charlie (1)
 	if len(pairs) < 1 {
@@ -113,12 +113,12 @@ func TestOverlapPairs_Sorted(t *testing.T) {
 
 func TestGroupByAuthor(t *testing.T) {
 	now := time.Now()
-	sessions := []SessionRecord{
-		{Name: "s1", User: "alice", Time: now, Files: []string{"a.go"}},
-		{Name: "s2", User: "bob", Time: now.Add(-time.Hour), Files: []string{"b.go", "c.go"}},
-		{Name: "s3", User: "alice", Time: now.Add(-2 * time.Hour), Files: []string{"d.go"}},
+	murmurs := []MurmurRecord{
+		{ID: "s1", User: "alice", Time: now, Files: []string{"a.go"}},
+		{ID: "s2", User: "bob", Time: now.Add(-time.Hour), Files: []string{"b.go", "c.go"}},
+		{ID: "s3", User: "alice", Time: now.Add(-2 * time.Hour), Files: []string{"d.go"}},
 	}
-	authors := GroupByAuthor(sessions)
+	authors := GroupByAuthor(murmurs)
 	if len(authors) != 2 {
 		t.Fatalf("expected 2 authors, got %d", len(authors))
 	}
@@ -126,8 +126,8 @@ func TestGroupByAuthor(t *testing.T) {
 	if authors[0].Name != "alice" {
 		t.Errorf("expected alice first, got %s", authors[0].Name)
 	}
-	if authors[0].SessionCount != 2 {
-		t.Errorf("expected 2 sessions for alice, got %d", authors[0].SessionCount)
+	if authors[0].MurmurCount != 2 {
+		t.Errorf("expected 2 murmurs for alice, got %d", authors[0].MurmurCount)
 	}
 	if authors[0].FilesTouched != 2 {
 		t.Errorf("expected 2 files touched for alice, got %d", authors[0].FilesTouched)

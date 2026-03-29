@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -15,8 +14,8 @@ import (
 var glanceCmd = &cobra.Command{
 	Use:   "glance",
 	Short: "See what your team's AI coworkers are working on",
-	Long: `Shows recent AI coworker sessions across your team and detects
-file-level conflicts where multiple people are touching the same files.
+	Long: `Shows recent AI coworker murmurs across your team and detects
+potential file-level collisions where multiple people are working on the same files.
 
 Output is JSON, designed for AI coworker consumption.
 
@@ -32,7 +31,6 @@ func init() {
 	rootCmd.AddCommand(glanceCmd)
 	glanceCmd.Flags().String("since", "", "start of time window (3d, 7d, 24h, 1w, ISO date)")
 	glanceCmd.Flags().String("until", "", "end of time window (same formats as --since; default: now)")
-	glanceCmd.Flags().Bool("include-subagents", false, "include subagent sessions")
 }
 
 func runGlance(cmd *cobra.Command, _ []string) error {
@@ -43,7 +41,6 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 
 	sinceFlag, _ := cmd.Flags().GetString("since")
 	untilFlag, _ := cmd.Flags().GetString("until")
-	includeSubagents, _ := cmd.Flags().GetBool("include-subagents")
 
 	// Resolve --since
 	var since time.Time
@@ -65,38 +62,17 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	// Resolve project root for hydration and mailmap
+	// Derive repo name from project root
 	projectRoot, _ := requireProjectRoot()
-
-	// Derive repo name from project root, not cwd
 	repo := glanceRepoName(projectRoot)
 
-	// Load .mailmap for username deduplication
-	var mailmap map[string]string
-	if projectRoot != "" {
-		mailmap = glance.LoadMailmap(filepath.Join(projectRoot, ".mailmap"))
-	}
-
-	// Harvest sessions from ledger, hydrating dehydrated ones on the fly
-	result, err := glance.HarvestSessions(ledgerPath, since, until, glance.HarvestOptions{
-		IncludeSubagents: includeSubagents,
-		Mailmap:          mailmap,
-		HydrateFunc: func(sessionsDir, sessionName string) error {
-			if projectRoot == "" {
-				return fmt.Errorf("no project root")
-			}
-			err := hydrateFromLedger(projectRoot, sessionsDir, sessionName, true)
-			if err != nil {
-				slog.Debug("hydration failed", "session", sessionName, "error", err)
-			}
-			return err
-		},
-	})
+	// Harvest murmurs from ledger
+	result, err := glance.HarvestMurmurs(ledgerPath, since, until)
 	if err != nil {
-		return fmt.Errorf("harvesting sessions: %w", err)
+		return fmt.Errorf("harvesting murmurs: %w", err)
 	}
 
-	if len(result.Sessions) == 0 {
+	if len(result.Murmurs) == 0 {
 		// Output valid JSON with empty arrays (not null) for stable schema
 		return outputGlanceJSON(glance.ActivityData{
 			Since:     since,
@@ -105,13 +81,12 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 			Authors:   []glance.AuthorSummary{},
 			Conflicts: []glance.FileOverlap{},
 			Overlap:   []glance.OverlapPair{},
-			Stats:     glance.Stats{SkippedDehydrated: result.SkippedDehydrated},
 		})
 	}
 
 	// Analyze
-	authors := glance.GroupByAuthor(result.Sessions)
-	conflicts := glance.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Murmurs)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 
 	data := glance.ActivityData{
 		Since:     since,
@@ -120,13 +95,12 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 		Authors:   authors,
 		Conflicts: conflicts.Overlaps,
 		Overlap:   conflicts.OverlapPairs(),
-		Patterns:  glance.DetectPatterns(result.Sessions),
-		Velocity:  glance.ConflictVelocity(result.Sessions, since, until, 24*time.Hour, 24*time.Hour),
+		Patterns:  glance.DetectPatterns(result.Murmurs),
+		Velocity:  glance.ConflictVelocity(result.Murmurs, since, until, 24*time.Hour, 24*time.Hour),
 		Stats: glance.Stats{
-			TotalSessions:     len(result.Sessions),
-			TotalAuthors:      len(authors),
-			TotalConflicts:    len(conflicts.Overlaps),
-			SkippedDehydrated: result.SkippedDehydrated,
+			TotalMurmurs:   len(result.Murmurs),
+			TotalAuthors:   len(authors),
+			TotalConflicts: len(conflicts.Overlaps),
 		},
 	}
 

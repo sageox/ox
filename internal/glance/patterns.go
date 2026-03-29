@@ -15,9 +15,9 @@ type Pattern struct {
 	Risk    string   `json:"risk"`    // low, medium, high
 }
 
-// DetectPatterns identifies collaboration patterns from session data.
-// Uses only fields available in real sessions: file paths, usernames, timestamps.
-func DetectPatterns(sessions []SessionRecord) []Pattern {
+// DetectPatterns identifies collaboration patterns from murmur data.
+// Uses file paths and usernames from murmur metadata.
+func DetectPatterns(sessions []MurmurRecord) []Pattern {
 	var patterns []Pattern
 	patterns = append(patterns, detectClusterBridge(sessions)...)
 	patterns = append(patterns, detectHotFiles(sessions)...)
@@ -27,7 +27,7 @@ func DetectPatterns(sessions []SessionRecord) []Pattern {
 
 // detectClusterBridge finds authors who are the sole connection between two
 // otherwise disjoint package groups.
-func detectClusterBridge(sessions []SessionRecord) []Pattern {
+func detectClusterBridge(sessions []MurmurRecord) []Pattern {
 	authorFiles := make(map[string]map[string]bool)
 	for _, s := range sessions {
 		if authorFiles[s.User] == nil {
@@ -95,7 +95,7 @@ func detectClusterBridge(sessions []SessionRecord) []Pattern {
 }
 
 // detectHotFiles finds files touched by 3+ authors — high-contention areas.
-func detectHotFiles(sessions []SessionRecord) []Pattern {
+func detectHotFiles(sessions []MurmurRecord) []Pattern {
 	fileAuthors := make(map[string]map[string]bool)
 	for _, s := range sessions {
 		for _, f := range s.Files {
@@ -135,7 +135,7 @@ func detectHotFiles(sessions []SessionRecord) []Pattern {
 
 // detectSoloSilos finds authors who work entirely in isolation —
 // no file overlap with any other author in the window.
-func detectSoloSilos(sessions []SessionRecord) []Pattern {
+func detectSoloSilos(sessions []MurmurRecord) []Pattern {
 	authorFiles := make(map[string]map[string]bool)
 	for _, s := range sessions {
 		if authorFiles[s.User] == nil {

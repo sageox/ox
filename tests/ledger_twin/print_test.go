@@ -19,13 +19,13 @@ func TestPrintWindow(t *testing.T) {
 
 	w := windowByName(windowName)
 
-	result, err := glance.HarvestSessions(manifest.LedgerPath, w.Since, w.Until, glance.HarvestOptions{})
+	result, err := glance.HarvestMurmurs(manifest.LedgerPath, w.Since, w.Until)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	authors := glance.GroupByAuthor(result.Sessions)
-	conflicts := glance.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Murmurs)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 
 	data := glance.ActivityData{
 		Since:     w.Since,
@@ -35,12 +35,12 @@ func TestPrintWindow(t *testing.T) {
 		Conflicts: conflicts.Overlaps,
 		Overlap:   conflicts.OverlapPairs(),
 		Stats: glance.Stats{
-			TotalSessions:  len(result.Sessions),
+			TotalMurmurs:   len(result.Murmurs),
 			TotalAuthors:   len(authors),
 			TotalConflicts: len(conflicts.Overlaps),
 		},
-		Patterns: glance.DetectPatterns(result.Sessions),
-		Velocity: glance.ConflictVelocity(result.Sessions, w.Since, w.Until, 24*time.Hour, 24*time.Hour),
+		Patterns: glance.DetectPatterns(result.Murmurs),
+		Velocity: glance.ConflictVelocity(result.Murmurs, w.Since, w.Until, 24*time.Hour, 24*time.Hour),
 	}
 	data.Enrich()
 

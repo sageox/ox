@@ -6,9 +6,9 @@ import (
 	"strings"
 )
 
-// DetectConflicts builds a file-level overlap report from sessions.
+// DetectConflicts builds a file-level overlap report from murmurs.
 // A conflict is any file touched by 2+ distinct authors.
-func DetectConflicts(sessions []SessionRecord) *ConflictReport {
+func DetectConflicts(sessions []MurmurRecord) *ConflictReport {
 	// Build inverted index: filepath → map[author][]sessionName
 	index := make(map[string]map[string][]string)
 	allFiles := make(map[string]bool)
@@ -19,7 +19,7 @@ func DetectConflicts(sessions []SessionRecord) *ConflictReport {
 			if index[f] == nil {
 				index[f] = make(map[string][]string)
 			}
-			index[f][s.User] = append(index[f][s.User], s.Name)
+			index[f][s.User] = append(index[f][s.User], s.ID)
 		}
 	}
 

@@ -60,6 +60,7 @@ func init() {
 	murmurCmd.Flags().String("importance", "normal", "importance level: critical, normal, ambient")
 	murmurCmd.Flags().String("scope", "ledger", "scope: ledger (this repo) or team (all repos)")
 	murmurCmd.Flags().String("agent-id", "", "agent ID (falls back to SAGEOX_AGENT_ID env)")
+	murmurCmd.Flags().String("files", "", "comma-separated repo-relative file paths being modified")
 
 	murmurPauseCmd.Flags().String("agent-id", "", "agent ID (falls back to SAGEOX_AGENT_ID env)")
 	murmurResumeCmd.Flags().String("agent-id", "", "agent ID (falls back to SAGEOX_AGENT_ID env)")
@@ -76,6 +77,7 @@ type murmurInput struct {
 	Content    string `json:"content"`
 	Topic      string `json:"topic,omitempty"`
 	Importance string `json:"importance,omitempty"`
+	Files      string `json:"files,omitempty"` // comma-separated repo-relative paths
 }
 
 func runMurmur(cmd *cobra.Command, args []string) error {
@@ -92,8 +94,8 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 	topic, _ := cmd.Flags().GetString("topic")
 	importance, _ := cmd.Flags().GetString("importance")
 
+	var input murmurInput
 	if strings.HasPrefix(rawContent, "{") {
-		var input murmurInput
 		if err := json.Unmarshal([]byte(rawContent), &input); err != nil {
 			return fmt.Errorf("invalid JSON input: %w", err)
 		}
@@ -107,6 +109,11 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 		if input.Importance != "" && !cmd.Flags().Changed("importance") {
 			importance = input.Importance
 		}
+	}
+
+	files, _ := cmd.Flags().GetString("files")
+	if input.Files != "" && !cmd.Flags().Changed("files") {
+		files = input.Files
 	}
 
 	if !validImportanceLevels[importance] {
@@ -167,6 +174,9 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 		Importance:    importance,
 		Content:       rawContent,
 		Scope:         scope,
+	}
+	if files != "" {
+		murmur.Metadata = map[string]string{"files": files}
 	}
 
 	// serialize the murmur for IPC — daemon owns all file I/O and git operations

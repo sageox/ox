@@ -10,7 +10,7 @@ import (
 func TestDetectClusterBridge(t *testing.T) {
 	now := time.Now()
 
-	sessions := []SessionRecord{
+	murmurs := []MurmurRecord{
 		// Auth cluster: alice and bob
 		{User: "alice", Time: now, Files: []string{"internal/auth/handler.go", "internal/auth/token.go"}},
 		{User: "bob", Time: now, Files: []string{"internal/auth/session.go"}},
@@ -21,7 +21,7 @@ func TestDetectClusterBridge(t *testing.T) {
 		{User: "carol", Time: now, Files: []string{"internal/auth/token.go", "internal/cli/output.go", "internal/daemon/bridge.go"}},
 	}
 
-	patterns := DetectPatterns(sessions)
+	patterns := DetectPatterns(murmurs)
 
 	var bridges []Pattern
 	for _, p := range patterns {
@@ -43,14 +43,14 @@ func TestDetectClusterBridge(t *testing.T) {
 func TestDetectHotFiles(t *testing.T) {
 	now := time.Now()
 
-	sessions := []SessionRecord{
+	murmurs := []MurmurRecord{
 		{User: "alice", Time: now, Files: []string{"internal/sync/pull.go", "internal/auth/token.go"}},
 		{User: "bob", Time: now, Files: []string{"internal/sync/pull.go"}},
 		{User: "carol", Time: now, Files: []string{"internal/sync/pull.go", "internal/daemon/watcher.go"}},
 		{User: "dave", Time: now, Files: []string{"internal/cli/output.go"}},
 	}
 
-	patterns := DetectPatterns(sessions)
+	patterns := DetectPatterns(murmurs)
 
 	var hotFiles []Pattern
 	for _, p := range patterns {
@@ -68,12 +68,12 @@ func TestDetectHotFiles(t *testing.T) {
 func TestDetectHotFiles_TwoAuthorsNotHot(t *testing.T) {
 	now := time.Now()
 
-	sessions := []SessionRecord{
+	murmurs := []MurmurRecord{
 		{User: "alice", Time: now, Files: []string{"internal/auth/token.go"}},
 		{User: "bob", Time: now, Files: []string{"internal/auth/token.go"}},
 	}
 
-	patterns := DetectPatterns(sessions)
+	patterns := DetectPatterns(murmurs)
 
 	for _, p := range patterns {
 		assert.NotEqual(t, "hot_file", p.Type, "2 authors should not trigger hot_file")
@@ -83,7 +83,7 @@ func TestDetectHotFiles_TwoAuthorsNotHot(t *testing.T) {
 func TestDetectSoloSilos(t *testing.T) {
 	now := time.Now()
 
-	sessions := []SessionRecord{
+	murmurs := []MurmurRecord{
 		// alice and bob share a file
 		{User: "alice", Time: now, Files: []string{"internal/auth/token.go"}},
 		{User: "bob", Time: now, Files: []string{"internal/auth/token.go"}},
@@ -91,7 +91,7 @@ func TestDetectSoloSilos(t *testing.T) {
 		{User: "eve", Time: now, Files: []string{"tests/unit/foo_test.go", "tests/unit/bar_test.go"}},
 	}
 
-	patterns := DetectPatterns(sessions)
+	patterns := DetectPatterns(murmurs)
 
 	var silos []Pattern
 	for _, p := range patterns {
@@ -108,12 +108,12 @@ func TestDetectSoloSilos(t *testing.T) {
 func TestDetectSoloSilos_NoSiloWhenOverlapping(t *testing.T) {
 	now := time.Now()
 
-	sessions := []SessionRecord{
+	murmurs := []MurmurRecord{
 		{User: "alice", Time: now, Files: []string{"internal/auth/token.go"}},
 		{User: "bob", Time: now, Files: []string{"internal/auth/token.go"}},
 	}
 
-	patterns := DetectPatterns(sessions)
+	patterns := DetectPatterns(murmurs)
 
 	for _, p := range patterns {
 		assert.NotEqual(t, "solo_silo", p.Type, "overlapping authors should not be silos")

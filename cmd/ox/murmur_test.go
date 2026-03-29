@@ -410,3 +410,70 @@ func TestMurmurAgentIDFromEnv(t *testing.T) {
 		t.Error("agent-id should not be marked Changed when using default")
 	}
 }
+
+func TestMurmurFilesFlag(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	cmd := *murmurCmd
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	_ = cmd.Flags().Set("files", "cmd/ox/root.go,internal/cli/output.go")
+
+	err := cmd.RunE(&cmd, []string{"Refactoring root command"})
+	// Will fail downstream (no ledger), but must pass files input validation
+	if err == nil {
+		t.Fatal("expected downstream error (no ledger)")
+	}
+	if strings.Contains(err.Error(), "invalid JSON") || strings.Contains(err.Error(), "content") {
+		t.Errorf("should have passed input validation, got: %v", err)
+	}
+}
+
+func TestMurmurFilesFromJSON(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	cmd := *murmurCmd
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	input := `{"content": "Refactoring root command", "files": "cmd/ox/root.go,internal/cli/output.go"}`
+	err := cmd.RunE(&cmd, []string{input})
+	if err == nil {
+		t.Fatal("expected downstream error (no ledger)")
+	}
+	// Must not fail at JSON parsing
+	if strings.Contains(err.Error(), "invalid JSON") || strings.Contains(err.Error(), "must have a 'content' field") {
+		t.Errorf("unexpected parse error: %v", err)
+	}
+}
+
+func TestMurmurExplicitFilesFlagBeatsJSON(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	cmd := *murmurCmd
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+
+	// Explicitly set --files flag
+	if err := cmd.Flags().Set("files", "cmd/ox/glance.go"); err != nil {
+		t.Fatalf("set files flag: %v", err)
+	}
+	if !cmd.Flags().Changed("files") {
+		t.Fatal("flag should be marked Changed after Set()")
+	}
+
+	// JSON says different files — should be ignored because flag was explicitly set
+	input := `{"content": "Refactoring root command", "files": "cmd/ox/root.go"}`
+	err := cmd.RunE(&cmd, []string{input})
+	if err == nil {
+		t.Fatal("expected downstream error (no ledger)")
+	}
+	// Must not fail at JSON parsing
+	if strings.Contains(err.Error(), "invalid JSON") || strings.Contains(err.Error(), "must have a 'content' field") {
+		t.Errorf("unexpected parse error with explicit flag: %v", err)
+	}
+}

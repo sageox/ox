@@ -2,30 +2,31 @@ package glance
 
 import "time"
 
-// SessionRecord represents a single AI coworker session with its changed files.
-type SessionRecord struct {
-	Name      string    `json:"name"`
-	User      string    `json:"user"`
-	Title     string    `json:"title"`
-	Summary   string    `json:"summary,omitempty"`
-	Time      time.Time `json:"time"`
-	TimeAgo   string    `json:"time_ago,omitempty"`
-	Files     []string  `json:"files"`
-	Recording bool      `json:"recording,omitempty"`
+// MurmurRecord represents a single murmur with its associated file paths.
+// Replaces SessionRecord as the unit of work for pre-crime detection.
+type MurmurRecord struct {
+	ID         string    `json:"id"`
+	User       string    `json:"user"`       // PrincipalID
+	AgentID    string    `json:"agent_id"`
+	Time       time.Time `json:"time"`
+	TimeAgo    string    `json:"time_ago,omitempty"`
+	Content    string    `json:"content"`
+	Files      []string  `json:"files"`      // from Metadata["files"]
+	Importance string    `json:"importance"`
 }
 
-// AuthorSummary groups sessions by author.
+// AuthorSummary groups murmurs by author.
 type AuthorSummary struct {
-	Name         string          `json:"name"`
-	SessionCount int             `json:"session_count"`
-	FilesTouched int             `json:"files_touched"`
-	Sessions     []SessionRecord `json:"sessions"`
+	Name         string         `json:"name"`
+	MurmurCount  int            `json:"murmur_count"`
+	FilesTouched int            `json:"files_touched"`
+	Murmurs      []MurmurRecord `json:"murmurs"`
 }
 
 // FileOverlap represents a file touched by multiple authors.
 type FileOverlap struct {
 	FilePath string              `json:"file"`
-	Authors  map[string][]string `json:"authors"` // author → []session names
+	Authors  map[string][]string `json:"authors"` // author → []murmur IDs
 }
 
 // ConflictReport is the internal result of conflict detection.
@@ -67,8 +68,7 @@ type ActivityData struct {
 
 // Stats contains summary statistics.
 type Stats struct {
-	TotalSessions     int `json:"total_sessions"`
-	TotalAuthors      int `json:"total_authors"`
-	TotalConflicts    int `json:"total_conflicts"`
-	SkippedDehydrated int `json:"skipped_dehydrated"`
+	TotalMurmurs   int `json:"total_murmurs"`
+	TotalAuthors   int `json:"total_authors"`
+	TotalConflicts int `json:"total_conflicts"`
 }

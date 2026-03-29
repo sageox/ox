@@ -2,7 +2,10 @@
 
 package ledger_twin
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Dev represents a simulated team member.
 type Dev struct {
@@ -130,6 +133,15 @@ func withImportance(m MurmurSpec, importance string) MurmurSpec {
 // withTopic overrides the topic on a MurmurSpec.
 func withTopic(m MurmurSpec, topic string) MurmurSpec {
 	m.Topic = topic
+	return m
+}
+
+// withFiles adds repo-relative file paths to murmur Metadata["files"].
+func withFiles(m MurmurSpec, files ...string) MurmurSpec {
+	if m.Metadata == nil {
+		m.Metadata = make(map[string]string)
+	}
+	m.Metadata["files"] = strings.Join(files, ",")
 	return m
 }
 
@@ -412,129 +424,182 @@ func BuildManifest() *TwinManifest {
 	// ═══════════════════════════════════════════════════════════════
 
 	// Hot Zone murmurs (March 20): devs announcing overlapping work
+	// Files mirror session files — alice Ox1001, bob Ox1002, dave Ox1003, alice Ox1004, bob Ox1005
 	m.Murmurs = append(m.Murmurs,
-		murmur(alice, ts(20, 10, 5), "Mx1001",
+		withFiles(murmur(alice, ts(20, 10, 5), "Mx1001",
 			"Extracting subcommand registration into table-driven pattern in root.go, also touching output.go helpers"),
-		murmur(bob, ts(20, 10, 35), "Mx1002",
+			"cmd/ox/root.go", "internal/cli/output.go", "internal/auth/handler.go"),
+		withFiles(murmur(bob, ts(20, 10, 35), "Mx1002",
 			"Adding --api-endpoint global flag to root command with validation, plumbing through auth handler"),
-		murmur(dave, ts(20, 11, 5), "Mx1003",
+			"cmd/ox/root.go", "internal/cli/output.go", "internal/auth/handler.go"),
+		withFiles(murmur(dave, ts(20, 11, 5), "Mx1003",
 			"CLI formatting overhaul: replacing fmt.Printf with structured formatters in output.go"),
-		murmur(alice, ts(20, 14, 5), "Mx1004",
+			"cmd/ox/root.go", "internal/cli/output.go", "internal/cli/format.go"),
+		withFiles(murmur(alice, ts(20, 14, 5), "Mx1004",
 			"Auth middleware extraction in progress, pulling into standalone package with session store DI"),
-		murmur(bob, ts(20, 15, 5), "Mx1005",
+			"internal/auth/middleware.go", "internal/session/store.go"),
+		withFiles(murmur(bob, ts(20, 15, 5), "Mx1005",
 			"Consolidating duplicate route definitions, wiring API routes into root command init"),
+			"internal/api/routes.go", "cmd/ox/root.go"),
 	)
 
 	// Parallel Streams murmurs (March 21): quiet, ambient — no overlap
+	// Files mirror sessions — alice Ox2001, bob Ox2002, carol Ox2003
 	m.Murmurs = append(m.Murmurs,
-		withImportance(murmur(alice, ts(21, 9, 5), "Mx2001",
+		withFiles(withImportance(murmur(alice, ts(21, 9, 5), "Mx2001",
 			"Deep in auth login rewrite: replacing cookie-based with device code flow, adding token refresh on 401"), "ambient"),
-		withImportance(murmur(bob, ts(21, 9, 35), "Mx2002",
+			"internal/auth/login.go", "internal/auth/token.go"),
+		withFiles(withImportance(murmur(bob, ts(21, 9, 35), "Mx2002",
 			"Table-driven tests for all API handler error paths and rate-limit middleware"), "ambient"),
-		withImportance(murmur(carol, ts(21, 10, 5), "Mx2003",
+			"internal/api/handler.go", "internal/api/middleware.go"),
+		withFiles(withImportance(murmur(carol, ts(21, 10, 5), "Mx2003",
 			"Switching daemon file watcher from polling to fsnotify, fixing sync pull race"), "ambient"),
+			"internal/daemon/watcher.go", "internal/sync/pull.go"),
 	)
 
 	// Pair Convergence murmurs (March 22): two pairs coordinating
+	// Files mirror sessions — alice Ox3001, bob Ox3002, carol Ox3003, dave Ox3004
 	m.Murmurs = append(m.Murmurs,
-		murmur(alice, ts(22, 10, 5), "Mx3001",
+		withFiles(murmur(alice, ts(22, 10, 5), "Mx3001",
 			"Adding per-user rate limiting to auth middleware using token bucket algorithm"),
-		murmur(bob, ts(22, 10, 35), "Mx3002",
+			"internal/auth/middleware.go", "internal/auth/token.go"),
+		withFiles(murmur(bob, ts(22, 10, 35), "Mx3002",
 			"Instrumenting auth middleware with structured request/response logging via slog"),
-		murmur(carol, ts(22, 11, 5), "Mx3003",
+			"internal/auth/middleware.go", "internal/api/client.go"),
+		withFiles(murmur(carol, ts(22, 11, 5), "Mx3003",
 			"Wiring daemon health endpoint into ox status output with connection retry"),
-		murmur(dave, ts(22, 11, 35), "Mx3004",
+			"cmd/ox/status.go", "internal/daemon/health.go"),
+		withFiles(murmur(dave, ts(22, 11, 35), "Mx3004",
 			"Adding color-coded status indicators and table layout for ox status"),
+			"cmd/ox/status.go", "internal/cli/render.go"),
 	)
 
 	// Sprint End Rush murmurs (March 23): high density, everyone posting
+	// Files mirror sessions — frank Ox4001, bob Ox4002, alice Ox4003, carol Ox4004, dave Ox4005, eve Ox4006, alice Ox4008, bob Ox4013
 	m.Murmurs = append(m.Murmurs,
-		murmur(frank, ts(23, 8, 5), "Mx4001",
+		withFiles(murmur(frank, ts(23, 8, 5), "Mx4001",
 			"Rewrote getting started guide for new ox init flow with screenshots"),
-		murmur(bob, ts(23, 8, 35), "Mx4002",
+			"docs/getting-started.md", "docs/installation.md"),
+		withFiles(murmur(bob, ts(23, 8, 35), "Mx4002",
 			"Updated API examples in getting-started and migrating v1 endpoints to v2 schema"),
-		murmur(alice, ts(23, 9, 5), "Mx4003",
+			"docs/getting-started.md", "internal/api/v2.go"),
+		withFiles(murmur(alice, ts(23, 9, 5), "Mx4003",
 			"Implementing automatic token rotation 5min before expiry with background refresh"),
-		murmur(carol, ts(23, 9, 35), "Mx4004",
+			"internal/auth/token.go", "internal/session/refresh.go"),
+		withFiles(murmur(carol, ts(23, 9, 35), "Mx4004",
 			"Added SIGTERM handler that drains in-flight syncs before daemon exit"),
-		murmur(dave, ts(23, 10, 5), "Mx4005",
+			"internal/daemon/lifecycle.go", "internal/daemon/signal.go"),
+		withFiles(murmur(dave, ts(23, 10, 5), "Mx4005",
 			"Adding animated progress bars for sync operations using bubbletea"),
-		withImportance(murmur(eve, ts(23, 10, 35), "Mx4006",
+			"internal/cli/progress.go", "cmd/ox/sync.go"),
+		withFiles(withImportance(murmur(eve, ts(23, 10, 35), "Mx4006",
 			"Config tests at 92% coverage including XDG fallback paths and env overrides"), "ambient"),
-		murmur(alice, ts(23, 12, 5), "Mx4007",
+			"tests/unit/config_test.go", "internal/config/loader.go"),
+		withFiles(murmur(alice, ts(23, 12, 5), "Mx4007",
 			"Replaced generic error returns with typed AuthError wrapping for better CLI messages"),
-		murmur(bob, ts(23, 16, 5), "Mx4008",
+			"internal/auth/errors.go", "internal/auth/handler.go"),
+		withFiles(murmur(bob, ts(23, 16, 5), "Mx4008",
 			"Migrated remaining v1 callers to v2 API, added deprecation warnings on v1 routes"),
+			"internal/api/v2.go", "internal/api/migration.go"),
 	)
 
 	// Active Recording murmurs (March 24): in-progress session updates
+	// Files mirror sessions — alice Ox5001, bob Ox5002, carol Ox5003
 	m.Murmurs = append(m.Murmurs,
-		murmur(alice, ts(24, 14, 5), "Mx5001",
+		withFiles(murmur(alice, ts(24, 14, 5), "Mx5001",
 			"Debugging token expiry race where refresh goroutine and request handler both read expiry field"),
-		withImportance(murmur(bob, ts(24, 14, 35), "Mx5002",
+			"internal/auth/token.go"),
+		withFiles(withImportance(murmur(bob, ts(24, 14, 35), "Mx5002",
 			"Implementing sliding window rate limiter for API v2 endpoints, still recording"), "ambient"),
-		withImportance(murmur(carol, ts(24, 15, 5), "Mx5003",
+			"internal/api/ratelimit.go"),
+		withFiles(withImportance(murmur(carol, ts(24, 15, 5), "Mx5003",
 			"Adding prometheus-style metrics to daemon sync loop and IPC handlers, in progress"), "ambient"),
+			"internal/daemon/metrics.go"),
 	)
 
 	// Cluster Bridge murmurs (March 17): carol bridges two clusters
+	// Files mirror sessions — alice Ox8001, bob Ox8002, dave Ox8003, eve Ox8004, carol Ox8005
 	m.Murmurs = append(m.Murmurs,
-		murmur(alice, ts(17, 9, 5), "Mx8001",
+		withFiles(murmur(alice, ts(17, 9, 5), "Mx8001",
 			"Implementing background token refresh with mutex-protected expiry check"),
-		murmur(bob, ts(17, 10, 5), "Mx8002",
+			"internal/auth/token.go", "internal/auth/refresh.go"),
+		withFiles(murmur(bob, ts(17, 10, 5), "Mx8002",
 			"Session validation middleware: checking token signature and expiry on every request"),
-		murmur(dave, ts(17, 9, 35), "Mx8003",
+			"internal/auth/session.go", "internal/auth/token.go"),
+		withFiles(murmur(dave, ts(17, 9, 35), "Mx8003",
 			"Unified JSON and table output modes behind a single Renderer interface"),
-		withImportance(murmur(eve, ts(17, 10, 35), "Mx8004",
+			"internal/cli/output.go", "internal/cli/format.go"),
+		withFiles(withImportance(murmur(eve, ts(17, 10, 35), "Mx8004",
 			"Building golden-file test helpers for CLI output and snapshot testing"), "ambient"),
-		murmur(carol, ts(17, 11, 5), "Mx8005",
+			"internal/cli/output.go", "tests/unit/cli_test.go"),
+		withFiles(murmur(carol, ts(17, 11, 5), "Mx8005",
 			"Connecting auth state to CLI status display via daemon bridge — bridging auth/ and cli/ packages"),
+			"internal/auth/token.go", "internal/cli/output.go", "internal/daemon/bridge.go"),
 	)
 
 	// Escalation Day 1 murmurs (March 10): low density, calm
+	// Files mirror sessions — alice OxA001, carol OxA002
 	m.Murmurs = append(m.Murmurs,
-		withImportance(murmur(alice, ts(10, 9, 5), "MxA001",
+		withFiles(withImportance(murmur(alice, ts(10, 9, 5), "MxA001",
 			"Splitting monolithic sync pull into fetch/merge/apply stages"), "ambient"),
-		withImportance(murmur(carol, ts(10, 10, 5), "MxA002",
+			"internal/sync/pull.go", "internal/sync/merge.go"),
+		withFiles(withImportance(murmur(carol, ts(10, 10, 5), "MxA002",
 			"Adding context-aware error wrapping to pull for transient vs permanent failure distinction"), "ambient"),
+			"internal/sync/pull.go"),
 	)
 
 	// Escalation Day 2 murmurs (March 11): medium density
+	// Files mirror sessions — alice OxA005, carol OxA006, bob OxA007, dave OxA008
 	m.Murmurs = append(m.Murmurs,
-		murmur(alice, ts(11, 9, 5), "MxA003",
+		withFiles(murmur(alice, ts(11, 9, 5), "MxA003",
 			"Built 3-way merge resolver for session conflicts using manifest-based rules"),
-		murmur(carol, ts(11, 9, 35), "MxA004",
+			"internal/sync/pull.go", "internal/sync/merge.go", "internal/sync/resolve.go"),
+		withFiles(murmur(carol, ts(11, 9, 35), "MxA004",
 			"Sync retry with conflict detection: auto-resolve trivial, flag others for manual review"),
-		murmur(bob, ts(11, 10, 5), "MxA005",
+			"internal/sync/pull.go", "internal/sync/resolve.go"),
+		withFiles(murmur(bob, ts(11, 10, 5), "MxA005",
 			"Wiring sync merge into API layer so remote clients can trigger merge via REST"),
-		murmur(dave, ts(11, 11, 5), "MxA006",
+			"internal/sync/merge.go", "internal/api/sync.go"),
+		withFiles(murmur(dave, ts(11, 11, 5), "MxA006",
 			"Adding ox sync --force and --dry-run flags with pull integration"),
+			"cmd/ox/sync.go", "internal/sync/pull.go"),
 	)
 
 	// Escalation Day 3 murmurs (March 12): high density, critical signals
+	// Files mirror sessions — alice OxA011, bob OxA012, carol OxA013, dave OxA014, eve OxA015, frank OxA016, alice OxA017, bob OxA018
 	m.Murmurs = append(m.Murmurs,
-		withImportance(murmur(alice, ts(12, 9, 5), "MxA007",
+		withFiles(withImportance(murmur(alice, ts(12, 9, 5), "MxA007",
 			"Major sync rewrite: replacing ad-hoc sync with state-machine-driven pipeline"), "critical"),
-		withImportance(murmur(bob, ts(12, 9, 20), "MxA008",
+			"internal/sync/pull.go", "internal/sync/merge.go", "internal/sync/resolve.go", "internal/sync/state.go"),
+		withFiles(withImportance(murmur(bob, ts(12, 9, 20), "MxA008",
 			"Sync API v2 streaming migration, SSE progress updates"), "critical"),
-		murmur(carol, ts(12, 9, 35), "MxA009",
+			"internal/sync/pull.go", "internal/api/sync.go", "internal/sync/state.go"),
+		withFiles(murmur(carol, ts(12, 9, 35), "MxA009",
 			"Connecting new sync pipeline to daemon scheduler with configurable intervals"),
-		murmur(dave, ts(12, 10, 5), "MxA010",
+			"internal/sync/pull.go", "internal/sync/merge.go", "internal/daemon/sync.go"),
+		withFiles(murmur(dave, ts(12, 10, 5), "MxA010",
 			"Rebuilt ox sync command to show real-time state machine transitions"),
-		murmur(eve, ts(12, 10, 35), "MxA011",
+			"cmd/ox/sync.go", "internal/sync/state.go", "internal/cli/sync.go"),
+		withFiles(murmur(eve, ts(12, 10, 35), "MxA011",
 			"Full integration test suite for sync pipeline covering all state transitions"),
-		murmur(frank, ts(12, 11, 5), "MxA012",
+			"internal/sync/pull.go", "internal/sync/merge.go", "tests/integration/sync_test.go"),
+		withFiles(murmur(frank, ts(12, 11, 5), "MxA012",
 			"Updated sync docs to reflect state machine architecture and new resolve rules"),
-		murmur(alice, ts(12, 14, 5), "MxA013",
+			"docs/sync.md", "internal/sync/resolve.go"),
+		withFiles(murmur(alice, ts(12, 14, 5), "MxA013",
 			"Added conflict-detected and manual-review states to sync state machine"),
-		murmur(bob, ts(12, 14, 35), "MxA014",
+			"internal/sync/state.go", "internal/sync/resolve.go"),
+		withFiles(murmur(bob, ts(12, 14, 35), "MxA014",
 			"Wired exponential backoff into pull retry path with resolve fallback"),
+			"internal/sync/pull.go", "internal/sync/resolve.go"),
 	)
 
 	// Subagent Excluded murmurs (March 19): only from main session
+	// Files mirror session — alice OxS001
 	m.Murmurs = append(m.Murmurs,
-		murmur(alice, ts(19, 10, 5), "MxS001",
+		withFiles(murmur(alice, ts(19, 10, 5), "MxS001",
 			"Planned auth handler refactor: identified 4 extract-method candidates"),
+			"internal/auth/handler.go"),
 	)
 
 	// ═══════════════════════════════════════════════════════════════
@@ -570,7 +635,7 @@ func BuildManifest() *TwinManifest {
 			Since:         ts(22, 10, 0),
 			Until:         ts(22, 16, 0),
 			MinSessions:   5,
-			MinAuthors:    5,
+			MinAuthors:    4,
 			MinConflicts:  2,
 			MaxConflicts:  2,
 			ExpectedPairs: []string{"alice|bob", "carol|dave"},

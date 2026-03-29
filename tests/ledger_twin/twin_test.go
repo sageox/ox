@@ -45,9 +45,9 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func harvest(t *testing.T, w Window) *glance.HarvestResult {
+func harvestMurmurs(t *testing.T, w Window) *glance.HarvestResult {
 	t.Helper()
-	result, err := glance.HarvestSessions(manifest.LedgerPath, w.Since, w.Until, glance.HarvestOptions{})
+	result, err := glance.HarvestMurmurs(manifest.LedgerPath, w.Since, w.Until)
 	require.NoError(t, err)
 	return result
 }
@@ -79,17 +79,17 @@ func windowByName(name string) Window {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Conflict detection tests
+// Pre-crime detection tests (murmur-based)
 // ═══════════════════════════════════════════════════════════════
 
-func TestHotZone(t *testing.T) {
+func TestPreCrimePositive_HotZone(t *testing.T) {
 	w := windowByName("hot_zone")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	authors := glance.GroupByAuthor(result.Sessions)
-	conflicts := glance.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Murmurs)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 
-	assert.GreaterOrEqual(t, len(result.Sessions), w.MinSessions, "session count")
+	assert.GreaterOrEqual(t, len(result.Murmurs), w.MinMurmurs, "murmur count")
 	assert.GreaterOrEqual(t, len(authors), w.MinAuthors, "author count")
 	assert.GreaterOrEqual(t, len(conflicts.Overlaps), w.MinConflicts, "conflict count")
 
@@ -104,28 +104,28 @@ func TestHotZone(t *testing.T) {
 	}
 }
 
-func TestParallelStreams(t *testing.T) {
+func TestPreCrimeNegative_ParallelStreams(t *testing.T) {
 	w := windowByName("parallel_streams")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	authors := glance.GroupByAuthor(result.Sessions)
-	conflicts := glance.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Murmurs)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 
-	assert.GreaterOrEqual(t, len(result.Sessions), w.MinSessions)
+	assert.GreaterOrEqual(t, len(result.Murmurs), w.MinMurmurs)
 	assert.GreaterOrEqual(t, len(authors), w.MinAuthors)
-	assert.Equal(t, 0, len(conflicts.Overlaps), "parallel streams should have zero conflicts")
+	assert.Equal(t, 0, len(conflicts.Overlaps), "parallel streams should have zero collisions")
 }
 
-func TestPairConvergence(t *testing.T) {
+func TestPreCrime_PairConvergence(t *testing.T) {
 	w := windowByName("pair_convergence")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	authors := glance.GroupByAuthor(result.Sessions)
-	conflicts := glance.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Murmurs)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 
-	assert.GreaterOrEqual(t, len(result.Sessions), w.MinSessions)
+	assert.GreaterOrEqual(t, len(result.Murmurs), w.MinMurmurs)
 	assert.GreaterOrEqual(t, len(authors), w.MinAuthors)
-	assert.Equal(t, 2, len(conflicts.Overlaps), "should have exactly 2 conflicts")
+	assert.Equal(t, 2, len(conflicts.Overlaps), "should detect exactly 2 collisions")
 
 	fm := conflictFileMap(conflicts.Overlaps)
 	assert.Equal(t, 2, fm["internal/auth/middleware.go"], "middleware.go: alice+bob")
@@ -137,14 +137,14 @@ func TestPairConvergence(t *testing.T) {
 	}
 }
 
-func TestSprintEndRush(t *testing.T) {
+func TestPreCrime_SprintEndRush(t *testing.T) {
 	w := windowByName("sprint_end_rush")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	authors := glance.GroupByAuthor(result.Sessions)
-	conflicts := glance.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Murmurs)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 
-	assert.GreaterOrEqual(t, len(result.Sessions), w.MinSessions)
+	assert.GreaterOrEqual(t, len(result.Murmurs), w.MinMurmurs)
 	assert.GreaterOrEqual(t, len(authors), w.MinAuthors, "all 6 devs should appear")
 	assert.GreaterOrEqual(t, len(conflicts.Overlaps), w.MinConflicts)
 
@@ -152,34 +152,19 @@ func TestSprintEndRush(t *testing.T) {
 	assert.GreaterOrEqual(t, fm["docs/getting-started.md"], 2, "getting-started.md: frank+bob")
 }
 
-func TestActiveRecording(t *testing.T) {
-	w := windowByName("active_recording")
-	result := harvest(t, w)
-
-	assert.GreaterOrEqual(t, len(result.Sessions), w.MinSessions)
-
-	recordingCount := 0
-	for _, s := range result.Sessions {
-		if s.Recording {
-			recordingCount++
-		}
-	}
-	assert.Equal(t, w.ExpectedRecording, recordingCount, "recording sessions")
-}
-
 // ═══════════════════════════════════════════════════════════════
-// Pattern detection tests
+// Pattern detection tests (murmur-based)
 // ═══════════════════════════════════════════════════════════════
 
 func TestClusterBridge(t *testing.T) {
 	w := windowByName("cluster_bridge")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	conflicts := glance.DetectConflicts(result.Sessions)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 	assert.GreaterOrEqual(t, len(conflicts.Overlaps), w.MinConflicts)
 
 	// carol bridges auth/ and cli/ clusters
-	patterns := glance.DetectPatterns(result.Sessions)
+	patterns := glance.DetectPatterns(result.Murmurs)
 	var bridges []glance.Pattern
 	for _, p := range patterns {
 		if p.Type == "cluster_bridge" && p.Authors[0] == "carol" {
@@ -190,11 +175,10 @@ func TestClusterBridge(t *testing.T) {
 }
 
 func TestHotFileDetection(t *testing.T) {
-	// In the hot zone, root.go and output.go are touched by 3 authors each
 	w := windowByName("hot_zone")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	patterns := glance.DetectPatterns(result.Sessions)
+	patterns := glance.DetectPatterns(result.Murmurs)
 
 	var hotFiles []glance.Pattern
 	for _, p := range patterns {
@@ -213,11 +197,10 @@ func TestHotFileDetection(t *testing.T) {
 }
 
 func TestSoloSiloDetection(t *testing.T) {
-	// In parallel streams, each dev works in isolation
 	w := windowByName("parallel_streams")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	patterns := glance.DetectPatterns(result.Sessions)
+	patterns := glance.DetectPatterns(result.Murmurs)
 
 	var silos []glance.Pattern
 	for _, p := range patterns {
@@ -229,54 +212,35 @@ func TestSoloSiloDetection(t *testing.T) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Escalation / velocity tests
+// Escalation / velocity tests (murmur-based)
 // ═══════════════════════════════════════════════════════════════
 
-func TestEscalation(t *testing.T) {
+func TestPreCrimeEscalation(t *testing.T) {
 	day1 := windowByName("escalation_day1")
 	day2 := windowByName("escalation_day2")
 	day3 := windowByName("escalation_day3")
 
-	r1 := harvest(t, day1)
-	r2 := harvest(t, day2)
-	r3 := harvest(t, day3)
+	r1 := harvestMurmurs(t, day1)
+	r2 := harvestMurmurs(t, day2)
+	r3 := harvestMurmurs(t, day3)
 
-	c1 := glance.DetectConflicts(r1.Sessions)
-	c2 := glance.DetectConflicts(r2.Sessions)
-	c3 := glance.DetectConflicts(r3.Sessions)
+	c1 := glance.DetectConflicts(r1.Murmurs)
+	c2 := glance.DetectConflicts(r2.Murmurs)
+	c3 := glance.DetectConflicts(r3.Murmurs)
 
 	assert.GreaterOrEqual(t, len(c1.Overlaps), day1.MinConflicts, "day 1 conflicts")
 	assert.GreaterOrEqual(t, len(c2.Overlaps), day2.MinConflicts, "day 2 conflicts")
 	assert.GreaterOrEqual(t, len(c3.Overlaps), day3.MinConflicts, "day 3 conflicts")
 
 	// Verify escalation via ConflictVelocity
-	allSessions := append(append(r1.Sessions, r2.Sessions...), r3.Sessions...)
+	allMurmurs := append(append(r1.Murmurs, r2.Murmurs...), r3.Murmurs...)
 	day := 24 * time.Hour
-	points := glance.ConflictVelocity(allSessions, ts(10, 0, 0), ts(13, 0, 0), day, day)
+	points := glance.ConflictVelocity(allMurmurs, ts(10, 0, 0), ts(13, 0, 0), day, day)
 
 	assert.Len(t, points, 3, "should have 3 daily velocity points")
 	assert.True(t, glance.IsEscalating(points, 3),
-		"conflicts should be escalating: day1=%d day2=%d day3=%d",
+		"collisions should be escalating: day1=%d day2=%d day3=%d",
 		points[0].Conflicts, points[1].Conflicts, points[2].Conflicts)
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Subagent filtering test
-// ═══════════════════════════════════════════════════════════════
-
-func TestSubagentExcluded(t *testing.T) {
-	w := windowByName("subagent_excluded")
-
-	result := harvest(t, w)
-	assert.Equal(t, w.MinSessions, len(result.Sessions), "should exclude subagent sessions by default")
-
-	resultWithSub, err := glance.HarvestSessions(
-		manifest.LedgerPath, w.Since, w.Until,
-		glance.HarvestOptions{IncludeSubagents: true},
-	)
-	require.NoError(t, err)
-	assert.Greater(t, len(resultWithSub.Sessions), len(result.Sessions),
-		"including subagents should return more sessions")
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -286,11 +250,11 @@ func TestSubagentExcluded(t *testing.T) {
 func TestFullEnrich(t *testing.T) {
 	allSince := ts(10, 0, 0)
 	allUntil := ts(25, 0, 0)
-	result, err := glance.HarvestSessions(manifest.LedgerPath, allSince, allUntil, glance.HarvestOptions{})
+	result, err := glance.HarvestMurmurs(manifest.LedgerPath, allSince, allUntil)
 	require.NoError(t, err)
 
-	authors := glance.GroupByAuthor(result.Sessions)
-	conflicts := glance.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Murmurs)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 
 	data := glance.ActivityData{
 		Since:     allSince,
@@ -300,7 +264,7 @@ func TestFullEnrich(t *testing.T) {
 		Conflicts: conflicts.Overlaps,
 		Overlap:   conflicts.OverlapPairs(),
 		Stats: glance.Stats{
-			TotalSessions:  len(result.Sessions),
+			TotalMurmurs:   len(result.Murmurs),
 			TotalAuthors:   len(authors),
 			TotalConflicts: len(conflicts.Overlaps),
 		},
@@ -309,16 +273,16 @@ func TestFullEnrich(t *testing.T) {
 
 	assert.NotEmpty(t, data.Headline)
 	assert.NotEmpty(t, data.Guidance)
-	assert.Contains(t, data.Headline, "sessions by")
-	assert.Contains(t, data.Headline, "conflict")
+	assert.Contains(t, data.Headline, "murmurs from")
+	assert.Contains(t, data.Headline, "collision")
 	assert.Equal(t, 6, data.Stats.TotalAuthors, "all 6 devs across all windows")
 }
 
 func TestSameAuthorNoConflict(t *testing.T) {
 	w := windowByName("sprint_end_rush")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	conflicts := glance.DetectConflicts(result.Sessions)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 
 	for _, overlap := range conflicts.Overlaps {
 		assert.GreaterOrEqual(t, len(overlap.Authors), 2,
@@ -326,41 +290,22 @@ func TestSameAuthorNoConflict(t *testing.T) {
 	}
 }
 
-func TestMailmapResolution(t *testing.T) {
-	mailmap := map[string]string{"alice": "Alice Johnson"}
-
-	result, err := glance.HarvestSessions(
-		manifest.LedgerPath, ts(20, 10, 0), ts(20, 18, 0),
-		glance.HarvestOptions{Mailmap: mailmap},
-	)
-	require.NoError(t, err)
-
-	foundAlice := false
-	for _, s := range result.Sessions {
-		if s.User == "Alice Johnson" {
-			foundAlice = true
-		}
-		assert.NotEqual(t, "alice", s.User, "raw 'alice' should be remapped")
-	}
-	assert.True(t, foundAlice, "should find sessions attributed to 'Alice Johnson'")
-}
-
 func TestWindowIsolation(t *testing.T) {
-	w2 := windowByName("parallel_streams")
-	result := harvest(t, w2)
+	w := windowByName("parallel_streams")
+	result := harvestMurmurs(t, w)
 
-	for _, s := range result.Sessions {
-		assert.False(t, s.Time.Before(w2.Since),
-			"session %s should not be before window since", s.Name)
-		if !w2.Until.IsZero() {
-			assert.False(t, s.Time.After(w2.Until),
-				"session %s should not be after window until", s.Name)
+	for _, m := range result.Murmurs {
+		assert.False(t, m.Time.Before(w.Since),
+			"murmur %s should not be before window since", m.ID)
+		if !w.Until.IsZero() {
+			assert.False(t, m.Time.After(w.Until),
+				"murmur %s should not be after window until", m.ID)
 		}
 	}
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Murmur tests
+// Low-level murmur file tests
 // ═══════════════════════════════════════════════════════════════
 
 // readMurmursInRange reads murmur files between since and until.
@@ -480,7 +425,6 @@ func TestHotZoneMurmurs(t *testing.T) {
 
 	assert.GreaterOrEqual(t, len(murmurs), 5)
 
-	// Verify murmur authors match session authors in this window
 	authorSet := make(map[string]bool)
 	for _, m := range murmurs {
 		authorSet[m.PrincipalID] = true
