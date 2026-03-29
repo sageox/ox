@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/blevesearch/bleve/v2"
+	"github.com/sageox/ox/internal/codedb/sqlc"
 	_ "modernc.org/sqlite"
 )
 
@@ -28,6 +29,7 @@ var ErrCorrupt = fmt.Errorf("codedb index is corrupt")
 // results from both tiers via Bleve IndexAlias.
 type Store struct {
 	db           *sql.DB
+	queries      *codedbsqlc.Queries
 	CodeIndex    bleve.Index
 	DiffIndex    bleve.Index
 	CommentIndex bleve.Index
@@ -105,6 +107,7 @@ func Open(root string) (*Store, error) {
 
 	s := &Store{
 		db:           db,
+		queries:      codedbsqlc.New(db),
 		CodeIndex:    codeIndex,
 		DiffIndex:    diffIndex,
 		CommentIndex: commentIndex,
@@ -283,4 +286,14 @@ func (s *Store) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, erro
 // Begin starts a new transaction.
 func (s *Store) Begin() (*sql.Tx, error) {
 	return s.db.Begin()
+}
+
+// Queries returns the sqlc-generated typed queries bound to the store's DB.
+func (s *Store) Queries() *codedbsqlc.Queries {
+	return s.queries
+}
+
+// QueriesFromTx returns sqlc-generated typed queries bound to a transaction.
+func QueriesFromTx(tx *sql.Tx) *codedbsqlc.Queries {
+	return codedbsqlc.New(tx)
 }

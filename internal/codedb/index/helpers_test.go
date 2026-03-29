@@ -2,6 +2,7 @@ package index
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -9,74 +10,113 @@ import (
 	"time"
 )
 
-func TestTimeToUnix(t *testing.T) {
+func TestTimeToNullInt64(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: git operations")
 	}
 
 	tests := []struct {
-		name     string
-		input    time.Time
-		wantNil  bool
-		wantUnix int64
+		name      string
+		input     time.Time
+		wantValid bool
+		wantUnix  int64
 	}{
-		{"zero time returns nil", time.Time{}, true, 0},
-		{"epoch returns 0", time.Unix(0, 0), false, 0},
-		{"specific time", time.Date(2025, 1, 15, 12, 0, 0, 0, time.UTC), false, 1736942400},
-		{"negative unix time", time.Date(1969, 1, 1, 0, 0, 0, 0, time.UTC), false, -31536000},
+		{"zero time returns invalid", time.Time{}, false, 0},
+		{"epoch returns 0", time.Unix(0, 0), true, 0},
+		{"specific time", time.Date(2025, 1, 15, 12, 0, 0, 0, time.UTC), true, 1736942400},
+		{"negative unix time", time.Date(1969, 1, 1, 0, 0, 0, 0, time.UTC), true, -31536000},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := timeToUnix(tt.input)
-			if tt.wantNil {
-				if got != nil {
-					t.Errorf("expected nil, got %d", *got)
-				}
+			got := timeToNullInt64(tt.input)
+			if got.Valid != tt.wantValid {
+				t.Errorf("valid = %v, want %v", got.Valid, tt.wantValid)
 				return
 			}
-			if got == nil {
-				t.Fatal("expected non-nil")
-			}
-			if *got != tt.wantUnix {
-				t.Errorf("timeToUnix = %d, want %d", *got, tt.wantUnix)
+			if got.Valid && got.Int64 != tt.wantUnix {
+				t.Errorf("timeToNullInt64 = %d, want %d", got.Int64, tt.wantUnix)
 			}
 		})
 	}
 }
 
-func TestTimeToUnixPtr(t *testing.T) {
+func TestTimePtrToNullInt64(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: git operations")
 	}
 
-	t.Run("nil pointer returns nil", func(t *testing.T) {
-		got := timeToUnixPtr(nil)
-		if got != nil {
-			t.Errorf("expected nil, got %d", *got)
+	t.Run("nil pointer returns invalid", func(t *testing.T) {
+		got := timePtrToNullInt64(nil)
+		if got.Valid {
+			t.Errorf("expected invalid, got %d", got.Int64)
 		}
 	})
 
-	t.Run("zero time pointer returns nil", func(t *testing.T) {
+	t.Run("zero time pointer returns invalid", func(t *testing.T) {
 		zero := time.Time{}
-		got := timeToUnixPtr(&zero)
-		if got != nil {
-			t.Errorf("expected nil for zero time, got %d", *got)
+		got := timePtrToNullInt64(&zero)
+		if got.Valid {
+			t.Errorf("expected invalid for zero time, got %d", got.Int64)
 		}
 	})
 
 	t.Run("valid time pointer", func(t *testing.T) {
 		ts := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
-		got := timeToUnixPtr(&ts)
-		if got == nil {
-			t.Fatal("expected non-nil")
+		got := timePtrToNullInt64(&ts)
+		if !got.Valid {
+			t.Fatal("expected valid")
 		}
-		if *got != ts.Unix() {
-			t.Errorf("got %d, want %d", *got, ts.Unix())
+		if got.Int64 != ts.Unix() {
+			t.Errorf("got %d, want %d", got.Int64, ts.Unix())
 		}
 	})
+}
+
+func TestToNullString(t *testing.T) {
+	t.Parallel()
+
+	got := toNullString("")
+	if got.Valid {
+		t.Error("empty string should be invalid")
+	}
+
+	got = toNullString("hello")
+	if !got.Valid || got.String != "hello" {
+		t.Errorf("expected valid 'hello', got valid=%v string=%q", got.Valid, got.String)
+	}
+}
+
+func TestPtrIntToNullInt64(t *testing.T) {
+	t.Parallel()
+
+	got := ptrIntToNullInt64(nil)
+	if got.Valid {
+		t.Error("nil should be invalid")
+	}
+
+	n := 42
+	got = ptrIntToNullInt64(&n)
+	if !got.Valid || got.Int64 != 42 {
+		t.Errorf("expected valid 42, got valid=%v int64=%d", got.Valid, got.Int64)
+	}
+}
+
+func TestToNullInt64(t *testing.T) {
+	t.Parallel()
+
+	got := toNullInt64(0)
+	if !got.Valid || got.Int64 != 0 {
+		t.Errorf("expected valid 0, got valid=%v int64=%d", got.Valid, got.Int64)
+	}
+
+	got = toNullInt64(123)
+	_ = sql.NullInt64{} // ensure import is used
+	if !got.Valid || got.Int64 != 123 {
+		t.Errorf("expected valid 123, got valid=%v int64=%d", got.Valid, got.Int64)
+	}
 }
 
 func TestDirtyIndexPath_Structure(t *testing.T) {
@@ -266,9 +306,9 @@ func TestDefaultBranchFallbacks(t *testing.T) {
 
 	// should include common default branch refs
 	expected := map[string]bool{
-		"refs/heads/main":           false,
-		"refs/heads/master":         false,
-		"refs/remotes/origin/main":  false,
+		"refs/heads/main":            false,
+		"refs/heads/master":          false,
+		"refs/remotes/origin/main":   false,
 		"refs/remotes/origin/master": false,
 	}
 

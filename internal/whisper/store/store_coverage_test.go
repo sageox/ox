@@ -305,11 +305,11 @@ func TestGetWhispers_EmptyStore(t *testing.T) {
 	assert.Len(t, got, 0)
 }
 
-func TestNilIfEmpty_Coverage(t *testing.T) {
+func TestToNullString_Coverage(t *testing.T) {
 	t.Parallel()
-	assert.Nil(t, nilIfEmpty(""))
-	assert.NotNil(t, nilIfEmpty("test"))
-	assert.Equal(t, "test", *nilIfEmpty("test"))
+	assert.False(t, toNullString("").Valid)
+	assert.True(t, toNullString("test").Valid)
+	assert.Equal(t, "test", toNullString("test").String)
 }
 
 func TestOpen_InvalidPath(t *testing.T) {

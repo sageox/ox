@@ -939,14 +939,15 @@ func TestFileMtimePersistence(t *testing.T) {
 		t.Skip("short: git indexing")
 	}
 	s := openTestStore(t)
+	ctx := context.Background()
 
 	// save mtime
-	if err := saveFileMtime(s, "/path/to/file.json", 1234567890); err != nil {
+	if err := saveFileMtime(ctx, s, "/path/to/file.json", 1234567890); err != nil {
 		t.Fatalf("saveFileMtime: %v", err)
 	}
 
 	// load and verify
-	mtimes, err := loadFileMtimes(s)
+	mtimes, err := loadFileMtimes(ctx, s)
 	if err != nil {
 		t.Fatalf("loadFileMtimes: %v", err)
 	}
@@ -955,10 +956,10 @@ func TestFileMtimePersistence(t *testing.T) {
 	}
 
 	// overwrite mtime
-	if err := saveFileMtime(s, "/path/to/file.json", 9999999999); err != nil {
+	if err := saveFileMtime(ctx, s, "/path/to/file.json", 9999999999); err != nil {
 		t.Fatalf("saveFileMtime overwrite: %v", err)
 	}
-	mtimes, err = loadFileMtimes(s)
+	mtimes, err = loadFileMtimes(ctx, s)
 	if err != nil {
 		t.Fatalf("loadFileMtimes after overwrite: %v", err)
 	}

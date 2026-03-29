@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
 	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/ledger"
 )
@@ -43,7 +44,7 @@ func IndexGitHubData(ctx context.Context, s *store.Store, ledgerPath string, pro
 	stats := &GitHubIndexStats{}
 
 	// load known mtimes for skip check
-	knownMtimes, err := loadFileMtimes(s)
+	knownMtimes, err := loadFileMtimes(ctx, s)
 	if err != nil {
 		slog.Warn("failed to load github file mtimes, will reindex all", "error", err)
 		knownMtimes = make(map[string]int64)
@@ -67,12 +68,12 @@ func IndexGitHubData(ctx context.Context, s *store.Store, ledgerPath string, pro
 		if changedPR == 1 && progress != nil {
 			progress("Indexing changed PR files from ledger...")
 		}
-		mtime, indexErr := indexPRFile(s, path)
+		mtime, indexErr := indexPRFile(ctx, s, path)
 		if indexErr != nil {
 			slog.Warn("index PR file failed, skipping", "path", path, "error", indexErr)
 			continue
 		}
-		if err := saveFileMtime(s, path, mtime); err != nil {
+		if err := saveFileMtime(ctx, s, path, mtime); err != nil {
 			slog.Warn("save PR file mtime failed", "path", path, "error", err)
 		}
 		stats.PRsIndexed++
@@ -96,12 +97,12 @@ func IndexGitHubData(ctx context.Context, s *store.Store, ledgerPath string, pro
 		if changedIssue == 1 && progress != nil {
 			progress("Indexing changed issue files from ledger...")
 		}
-		mtime, indexErr := indexIssueFile(s, path)
+		mtime, indexErr := indexIssueFile(ctx, s, path)
 		if indexErr != nil {
 			slog.Warn("index issue file failed, skipping", "path", path, "error", indexErr)
 			continue
 		}
-		if err := saveFileMtime(s, path, mtime); err != nil {
+		if err := saveFileMtime(ctx, s, path, mtime); err != nil {
 			slog.Warn("save issue file mtime failed", "path", path, "error", err)
 		}
 		stats.IssuesIndexed++
@@ -118,7 +119,7 @@ func IndexGitHubData(ctx context.Context, s *store.Store, ledgerPath string, pro
 func fileUnchanged(path string, knownMtimes map[string]int64) bool {
 	info, err := os.Stat(path)
 	if err != nil {
-		return false // can't stat → treat as changed
+		return false // can't stat -> treat as changed
 	}
 	stored, ok := knownMtimes[path]
 	if !ok {
@@ -128,36 +129,28 @@ func fileUnchanged(path string, knownMtimes map[string]int64) bool {
 }
 
 // loadFileMtimes reads all stored mtimes into a map for O(1) lookup.
-func loadFileMtimes(s *store.Store) (map[string]int64, error) {
-	rows, err := s.Query("SELECT source_path, mtime_unix FROM github_file_mtimes")
+func loadFileMtimes(ctx context.Context, s *store.Store) (map[string]int64, error) {
+	items, err := s.Queries().ListFileMtimes(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	m := make(map[string]int64)
-	for rows.Next() {
-		var path string
-		var mtime int64
-		if err := rows.Scan(&path, &mtime); err != nil {
-			continue
-		}
-		m[path] = mtime
+	m := make(map[string]int64, len(items))
+	for _, item := range items {
+		m[item.SourcePath] = item.MtimeUnix
 	}
-	return m, rows.Err()
+	return m, nil
 }
 
 // saveFileMtime records a file's mtime after successful indexing.
-func saveFileMtime(s *store.Store, path string, mtimeNano int64) error {
-	_, err := s.Exec(
-		"INSERT OR REPLACE INTO github_file_mtimes (source_path, mtime_unix) VALUES (?, ?)",
-		path, mtimeNano,
-	)
-	return err
+func saveFileMtime(ctx context.Context, s *store.Store, path string, mtimeNano int64) error {
+	return s.Queries().UpsertFileMtime(ctx, codedbsqlc.UpsertFileMtimeParams{
+		SourcePath: path,
+		MtimeUnix:  mtimeNano,
+	})
 }
 
 // indexPRFile indexes a single PR JSON file. Returns the file's mtime (UnixNano) on success.
-func indexPRFile(s *store.Store, path string) (int64, error) {
+func indexPRFile(ctx context.Context, s *store.Store, path string) (int64, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return 0, fmt.Errorf("stat %s: %w", path, err)
@@ -180,34 +173,41 @@ func indexPRFile(s *store.Store, path string) (int64, error) {
 	}
 	defer tx.Rollback()
 
+	q := codedbsqlc.New(tx)
+
 	// delete existing record + comments + commits (upsert via delete-insert)
-	var existingID int64
-	err = tx.QueryRow("SELECT id FROM pull_requests WHERE number = ?", pr.Number).Scan(&existingID)
+	existingID, err := q.GetPRIDByNumber(ctx, int64(pr.Number))
 	if err == nil {
-		// record exists — delete child rows first, then the PR
-		if _, err := tx.Exec("DELETE FROM pr_comments WHERE pr_id = ?", existingID); err != nil {
+		if err := q.DeletePRCommentsByPR(ctx, existingID); err != nil {
 			return 0, fmt.Errorf("delete pr comments: %w", err)
 		}
-		if _, err := tx.Exec("DELETE FROM pr_commits WHERE pr_id = ?", existingID); err != nil {
+		if err := q.DeletePRCommitsByPR(ctx, existingID); err != nil {
 			return 0, fmt.Errorf("delete pr commits: %w", err)
 		}
-		if _, err := tx.Exec("DELETE FROM pull_requests WHERE id = ?", existingID); err != nil {
+		if err := q.DeletePullRequest(ctx, existingID); err != nil {
 			return 0, fmt.Errorf("delete pr: %w", err)
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("check existing PR %d: %w", pr.Number, err)
 	}
 
-	// insert PR — JSON-encode labels to handle commas in label names
+	// insert PR
 	labelsJSON, _ := json.Marshal(pr.Labels)
-	labels := string(labelsJSON)
-	res, err := tx.Exec(`INSERT INTO pull_requests
-		(number, title, body, author, state, labels, created_at, merged_at, closed_at, updated_at, merge_commit, url, source_path)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pr.Number, pr.Title, pr.Body, pr.Author, pr.State, labels,
-		timeToUnix(pr.CreatedAt), timeToUnixPtr(pr.MergedAt), timeToUnixPtr(pr.ClosedAt),
-		timeToUnix(pr.UpdatedAt), pr.MergeCommit, pr.URL, path,
-	)
+	res, err := q.InsertPullRequest(ctx, codedbsqlc.InsertPullRequestParams{
+		Number:      int64(pr.Number),
+		Title:       pr.Title,
+		Body:        toNullString(pr.Body),
+		Author:      toNullString(pr.Author),
+		State:       pr.State,
+		Labels:      toNullString(string(labelsJSON)),
+		CreatedAt:   timeToNullInt64(pr.CreatedAt),
+		MergedAt:    timePtrToNullInt64(pr.MergedAt),
+		ClosedAt:    timePtrToNullInt64(pr.ClosedAt),
+		UpdatedAt:   timeToNullInt64(pr.UpdatedAt),
+		MergeCommit: toNullString(pr.MergeCommit),
+		Url:         toNullString(pr.URL),
+		SourcePath:  toNullString(path),
+	})
 	if err != nil {
 		return 0, fmt.Errorf("insert PR %d: %w", pr.Number, err)
 	}
@@ -219,21 +219,24 @@ func indexPRFile(s *store.Store, path string) (int64, error) {
 
 	// insert comments
 	for _, c := range pr.Comments {
-		_, err := tx.Exec(`INSERT INTO pr_comments (pr_id, author, body, path, line, created_at)
-			VALUES (?, ?, ?, ?, ?, ?)`,
-			prID, c.Author, c.Body, c.Path, c.Line, timeToUnix(c.CreatedAt),
-		)
-		if err != nil {
+		if err := q.InsertPRComment(ctx, codedbsqlc.InsertPRCommentParams{
+			PrID:      prID,
+			Author:    toNullString(c.Author),
+			Body:      toNullString(c.Body),
+			Path:      toNullString(c.Path),
+			Line:      ptrIntToNullInt64(c.Line),
+			CreatedAt: timeToNullInt64(c.CreatedAt),
+		}); err != nil {
 			return 0, fmt.Errorf("insert PR %d comment: %w", pr.Number, err)
 		}
 	}
 
-	// insert commits (join table: pr_id + sha only; metadata lives in ledger JSON)
+	// insert commits
 	for _, c := range pr.Commits {
-		_, err := tx.Exec(`INSERT INTO pr_commits (pr_id, sha) VALUES (?, ?)`,
-			prID, c.SHA,
-		)
-		if err != nil {
+		if err := q.InsertPRCommit(ctx, codedbsqlc.InsertPRCommitParams{
+			PrID: prID,
+			Sha:  c.SHA,
+		}); err != nil {
 			return 0, fmt.Errorf("insert PR %d commit: %w", pr.Number, err)
 		}
 	}
@@ -242,7 +245,7 @@ func indexPRFile(s *store.Store, path string) (int64, error) {
 }
 
 // indexIssueFile indexes a single issue JSON file. Returns the file's mtime (UnixNano) on success.
-func indexIssueFile(s *store.Store, path string) (int64, error) {
+func indexIssueFile(ctx context.Context, s *store.Store, path string) (int64, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return 0, fmt.Errorf("stat %s: %w", path, err)
@@ -265,30 +268,36 @@ func indexIssueFile(s *store.Store, path string) (int64, error) {
 	}
 	defer tx.Rollback()
 
+	q := codedbsqlc.New(tx)
+
 	// delete existing record + comments (upsert via delete-insert)
-	var existingID int64
-	err = tx.QueryRow("SELECT id FROM issues WHERE number = ?", issue.Number).Scan(&existingID)
+	existingID, err := q.GetIssueIDByNumber(ctx, int64(issue.Number))
 	if err == nil {
-		if _, err := tx.Exec("DELETE FROM issue_comments WHERE issue_id = ?", existingID); err != nil {
+		if err := q.DeleteIssueCommentsByIssue(ctx, existingID); err != nil {
 			return 0, fmt.Errorf("delete issue comments: %w", err)
 		}
-		if _, err := tx.Exec("DELETE FROM issues WHERE id = ?", existingID); err != nil {
+		if err := q.DeleteIssue(ctx, existingID); err != nil {
 			return 0, fmt.Errorf("delete issue: %w", err)
 		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("check existing issue %d: %w", issue.Number, err)
 	}
 
-	// insert issue — JSON-encode labels to handle commas in label names
+	// insert issue
 	labelsJSON, _ := json.Marshal(issue.Labels)
-	labels := string(labelsJSON)
-	res, err := tx.Exec(`INSERT INTO issues
-		(number, title, body, author, state, labels, created_at, closed_at, updated_at, url, source_path)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		issue.Number, issue.Title, issue.Body, issue.Author, issue.State, labels,
-		timeToUnix(issue.CreatedAt), timeToUnixPtr(issue.ClosedAt),
-		timeToUnix(issue.UpdatedAt), issue.URL, path,
-	)
+	res, err := q.InsertIssue(ctx, codedbsqlc.InsertIssueParams{
+		Number:     int64(issue.Number),
+		Title:      issue.Title,
+		Body:       toNullString(issue.Body),
+		Author:     toNullString(issue.Author),
+		State:      issue.State,
+		Labels:     toNullString(string(labelsJSON)),
+		CreatedAt:  timeToNullInt64(issue.CreatedAt),
+		ClosedAt:   timePtrToNullInt64(issue.ClosedAt),
+		UpdatedAt:  timeToNullInt64(issue.UpdatedAt),
+		Url:        toNullString(issue.URL),
+		SourcePath: toNullString(path),
+	})
 	if err != nil {
 		return 0, fmt.Errorf("insert issue %d: %w", issue.Number, err)
 	}
@@ -300,11 +309,12 @@ func indexIssueFile(s *store.Store, path string) (int64, error) {
 
 	// insert comments
 	for _, c := range issue.Comments {
-		_, err := tx.Exec(`INSERT INTO issue_comments (issue_id, author, body, created_at)
-			VALUES (?, ?, ?, ?)`,
-			issueID, c.Author, c.Body, timeToUnix(c.CreatedAt),
-		)
-		if err != nil {
+		if err := q.InsertIssueComment(ctx, codedbsqlc.InsertIssueCommentParams{
+			IssueID:   issueID,
+			Author:    toNullString(c.Author),
+			Body:      toNullString(c.Body),
+			CreatedAt: timeToNullInt64(c.CreatedAt),
+		}); err != nil {
 			return 0, fmt.Errorf("insert issue %d comment: %w", issue.Number, err)
 		}
 	}
@@ -312,17 +322,34 @@ func indexIssueFile(s *store.Store, path string) (int64, error) {
 	return mtimeNano, tx.Commit()
 }
 
-func timeToUnix(t time.Time) *int64 {
-	if t.IsZero() {
-		return nil
+func toNullString(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
 	}
-	v := t.Unix()
-	return &v
+	return sql.NullString{String: s, Valid: true}
 }
 
-func timeToUnixPtr(t *time.Time) *int64 {
-	if t == nil {
-		return nil
+func toNullInt64(n int) sql.NullInt64 {
+	return sql.NullInt64{Int64: int64(n), Valid: true}
+}
+
+func ptrIntToNullInt64(p *int) sql.NullInt64 {
+	if p == nil {
+		return sql.NullInt64{}
 	}
-	return timeToUnix(*t)
+	return sql.NullInt64{Int64: int64(*p), Valid: true}
+}
+
+func timeToNullInt64(t time.Time) sql.NullInt64 {
+	if t.IsZero() {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: t.Unix(), Valid: true}
+}
+
+func timePtrToNullInt64(t *time.Time) sql.NullInt64 {
+	if t == nil {
+		return sql.NullInt64{}
+	}
+	return timeToNullInt64(*t)
 }

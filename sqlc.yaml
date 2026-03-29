@@ -1,0 +1,20 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    queries: "internal/whisper/store/sqlc/queries.sql"
+    schema: "internal/whisper/store/sqlc/schema.sql"
+    gen:
+      go:
+        package: "whisperdb"
+        out: "internal/whisper/store/sqlc"
+        emit_json_tags: true
+        emit_empty_slices: true
+  - engine: "sqlite"
+    queries: "internal/codedb/sqlc/queries/"
+    schema: "internal/codedb/sqlc/schema.sql"
+    gen:
+      go:
+        package: "codedbsqlc"
+        out: "internal/codedb/sqlc"
+        emit_json_tags: true
+        emit_empty_slices: true

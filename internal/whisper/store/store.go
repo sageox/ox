@@ -9,6 +9,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	whisperdb "github.com/sageox/ox/internal/whisper/store/sqlc"
 	_ "modernc.org/sqlite"
 )
 
@@ -80,6 +82,11 @@ type Store struct {
 	dbPath string
 	mu     sync.Mutex // protects db during self-heal reopen and close
 	closed bool
+}
+
+// queries returns sqlc-generated typed queries bound to the current db.
+func (s *Store) queries() *whisperdb.Queries {
+	return whisperdb.New(s.db.Load())
 }
 
 // Open opens (or creates) a whisper store at the given path.
@@ -252,31 +259,30 @@ func (s *Store) Add(entries ...WhisperEntry) error {
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO whispers
-		(id, scope, type, source, topic, content, importance, created_at,
-		 agent_id, principal_id, principal_type, team_id, metadata)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return fmt.Errorf("prepare insert: %w", err)
-	}
-	defer stmt.Close()
+	ctx := context.Background()
+	txq := whisperdb.New(tx)
 
 	for _, e := range entries {
-		var metadataJSON *string
+		var metaStr sql.NullString
 		if len(e.Metadata) > 0 {
 			b, _ := json.Marshal(e.Metadata)
-			s := string(b)
-			metadataJSON = &s
+			metaStr = sql.NullString{String: string(b), Valid: true}
 		}
-		_, err := stmt.Exec(
-			e.ID, e.Scope, string(e.Type), e.Source, e.Topic,
-			e.Content, string(e.Importance),
-			e.CreatedAt.UTC().Format(time.RFC3339Nano),
-			nilIfEmpty(e.AgentID), nilIfEmpty(e.PrincipalID),
-			nilIfEmpty(e.PrincipalType), nilIfEmpty(e.TeamID),
-			metadataJSON,
-		)
-		if err != nil {
+		if err := txq.InsertWhisper(ctx, whisperdb.InsertWhisperParams{
+			ID:            e.ID,
+			Scope:         e.Scope,
+			Type:          string(e.Type),
+			Source:        e.Source,
+			Topic:         e.Topic,
+			Content:       e.Content,
+			Importance:    string(e.Importance),
+			CreatedAt:     e.CreatedAt.UTC().Format(time.RFC3339Nano),
+			AgentID:       toNullString(e.AgentID),
+			PrincipalID:   toNullString(e.PrincipalID),
+			PrincipalType: toNullString(e.PrincipalType),
+			TeamID:        toNullString(e.TeamID),
+			Metadata:      metaStr,
+		}); err != nil {
 			return fmt.Errorf("insert whisper %s: %w", e.ID, err)
 		}
 	}
@@ -292,13 +298,13 @@ func (s *Store) GetWhispers(agentID string, attention Attention, topics []string
 	now := time.Now().UTC()
 
 	// read current cursor
+	ctx := context.Background()
 	var cursor time.Time
-	var cursorStr sql.NullString
-	err := s.db.Load().QueryRow("SELECT last_seen FROM cursors WHERE agent_id = ?", agentID).Scan(&cursorStr)
+	cursorStr, err := s.queries().GetCursor(ctx, agentID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		if s.selfHeal() {
 			// retry after heal — cursor resets to zero (one noisy cycle, then normal)
-			err = s.db.Load().QueryRow("SELECT last_seen FROM cursors WHERE agent_id = ?", agentID).Scan(&cursorStr)
+			cursorStr, err = s.queries().GetCursor(ctx, agentID)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return nil, fmt.Errorf("read cursor: %w", err)
 			}
@@ -306,8 +312,8 @@ func (s *Store) GetWhispers(agentID string, attention Attention, topics []string
 			return nil, fmt.Errorf("read cursor: %w", err)
 		}
 	}
-	if cursorStr.Valid {
-		cursor, _ = time.Parse(time.RFC3339Nano, cursorStr.String)
+	if err == nil && cursorStr != "" {
+		cursor, _ = time.Parse(time.RFC3339Nano, cursorStr)
 	}
 
 	// build query with filters
@@ -388,11 +394,11 @@ func (s *Store) GetWhispers(agentID string, attention Attention, topics []string
 
 	// update cursor
 	nowStr := now.Format(time.RFC3339Nano)
-	_, err = s.db.Load().Exec(
-		`INSERT INTO cursors (agent_id, last_seen, updated_at) VALUES (?, ?, ?)
-		 ON CONFLICT(agent_id) DO UPDATE SET last_seen = excluded.last_seen, updated_at = excluded.updated_at`,
-		agentID, nowStr, nowStr,
-	)
+	err = s.queries().UpsertCursor(ctx, whisperdb.UpsertCursorParams{
+		AgentID:   agentID,
+		LastSeen:  nowStr,
+		UpdatedAt: nowStr,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("update cursor: %w", err)
 	}
@@ -405,11 +411,10 @@ func (s *Store) GetWhispers(agentID string, attention Attention, topics []string
 
 // IsRelayed checks if a murmur has already been relayed into the store.
 func (s *Store) IsRelayed(murmurID, scope string) (bool, error) {
-	var count int
-	err := s.db.Load().QueryRow(
-		"SELECT COUNT(*) FROM relayed_murmurs WHERE murmur_id = ? AND scope = ?",
-		murmurID, scope,
-	).Scan(&count)
+	count, err := s.queries().IsRelayed(context.Background(), whisperdb.IsRelayedParams{
+		MurmurID: murmurID,
+		Scope:    scope,
+	})
 	if err != nil {
 		return false, fmt.Errorf("check relayed: %w", err)
 	}
@@ -418,10 +423,11 @@ func (s *Store) IsRelayed(murmurID, scope string) (bool, error) {
 
 // MarkRelayed records that a murmur has been relayed into the store.
 func (s *Store) MarkRelayed(murmurID, scope string) error {
-	_, err := s.db.Load().Exec(
-		"INSERT OR IGNORE INTO relayed_murmurs (murmur_id, scope, relayed_at) VALUES (?, ?, ?)",
-		murmurID, scope, time.Now().Format(time.RFC3339Nano),
-	)
+	err := s.queries().MarkRelayed(context.Background(), whisperdb.MarkRelayedParams{
+		MurmurID:  murmurID,
+		Scope:     scope,
+		RelayedAt: time.Now().Format(time.RFC3339Nano),
+	})
 	if err != nil {
 		return fmt.Errorf("mark relayed: %w", err)
 	}
@@ -580,13 +586,15 @@ func (s *Store) GetWhispersPage(agentID string, before time.Time, limit int) ([]
 
 // GetCursor returns the last-seen cursor for an agent (zero time if unknown).
 func (s *Store) GetCursor(agentID string) (time.Time, error) {
-	var cursorStr sql.NullString
-	err := s.db.Load().QueryRow("SELECT last_seen FROM cursors WHERE agent_id = ?", agentID).Scan(&cursorStr)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	cursorStr, err := s.queries().GetCursor(context.Background(), agentID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return time.Time{}, nil
+		}
 		return time.Time{}, fmt.Errorf("read cursor: %w", err)
 	}
-	if cursorStr.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, cursorStr.String)
+	if cursorStr != "" {
+		t, _ := time.Parse(time.RFC3339Nano, cursorStr)
 		return t, nil
 	}
 	return time.Time{}, nil
@@ -595,8 +603,7 @@ func (s *Store) GetCursor(agentID string) (time.Time, error) {
 // RemoveCursor removes a specific agent's cursor.
 // Called when an agent is cleaned up as stale.
 func (s *Store) RemoveCursor(agentID string) error {
-	_, err := s.db.Load().Exec("DELETE FROM cursors WHERE agent_id = ?", agentID)
-	if err != nil {
+	if err := s.queries().RemoveCursor(context.Background(), agentID); err != nil {
 		return fmt.Errorf("remove cursor: %w", err)
 	}
 	return nil
@@ -615,14 +622,17 @@ type PruneResult struct {
 // Self-heals if the DB file was deleted.
 func (s *Store) Prune(retention time.Duration) (PruneResult, error) {
 	var result PruneResult
+	ctx := context.Background()
+	q := s.queries()
 	cutoff := time.Now().Add(-retention).Format(time.RFC3339Nano)
 	cursorCutoff := time.Now().Add(-7 * 24 * time.Hour).Format(time.RFC3339Nano)
 
 	// delete old whispers
-	res, err := s.db.Load().Exec("DELETE FROM whispers WHERE created_at < ?", cutoff)
+	res, err := q.PruneWhispers(ctx, cutoff)
 	if err != nil {
 		if s.selfHeal() {
-			res, err = s.db.Load().Exec("DELETE FROM whispers WHERE created_at < ?", cutoff)
+			q = s.queries() // rebind after heal
+			res, err = q.PruneWhispers(ctx, cutoff)
 		}
 		if err != nil {
 			return result, fmt.Errorf("prune whispers: %w", err)
@@ -631,14 +641,14 @@ func (s *Store) Prune(retention time.Duration) (PruneResult, error) {
 	result.WhispersDeleted, _ = res.RowsAffected()
 
 	// delete old relayed records
-	res, err = s.db.Load().Exec("DELETE FROM relayed_murmurs WHERE relayed_at < ?", cutoff)
+	res, err = q.PruneRelayed(ctx, cutoff)
 	if err != nil {
 		return result, fmt.Errorf("prune relayed: %w", err)
 	}
 	result.RelayedDeleted, _ = res.RowsAffected()
 
 	// delete stale cursors
-	res, err = s.db.Load().Exec("DELETE FROM cursors WHERE updated_at < ?", cursorCutoff)
+	res, err = q.PruneCursors(ctx, cursorCutoff)
 	if err != nil {
 		return result, fmt.Errorf("prune cursors: %w", err)
 	}
@@ -673,12 +683,15 @@ func (s *Store) EnforceMaxSize(maxBytes int64) error {
 
 	slog.Warn("whisper db over size limit, aggressive prune", "size", info.Size(), "limit", maxBytes)
 
+	ctx := context.Background()
+	q := s.queries()
+
 	// keep only last 6 hours
 	cutoff := time.Now().Add(-6 * time.Hour).Format(time.RFC3339Nano)
-	if _, err := s.db.Load().Exec("DELETE FROM whispers WHERE created_at < ?", cutoff); err != nil {
+	if _, err := q.PruneWhispers(ctx, cutoff); err != nil {
 		return fmt.Errorf("aggressive prune whispers: %w", err)
 	}
-	if _, err := s.db.Load().Exec("DELETE FROM relayed_murmurs WHERE relayed_at < ?", cutoff); err != nil {
+	if _, err := q.PruneRelayed(ctx, cutoff); err != nil {
 		return fmt.Errorf("aggressive prune relayed: %w", err)
 	}
 	if _, err := s.db.Load().Exec("VACUUM"); err != nil {
@@ -692,10 +705,10 @@ func (s *Store) EnforceMaxSize(maxBytes int64) error {
 	}
 	if info.Size() > maxBytes {
 		slog.Warn("whisper db still over limit after prune, nuclear cleanup", "size", info.Size())
-		if _, err := s.db.Load().Exec("DELETE FROM whispers"); err != nil {
+		if err := q.DeleteAllWhispers(ctx); err != nil {
 			return fmt.Errorf("nuclear prune whispers: %w", err)
 		}
-		if _, err := s.db.Load().Exec("DELETE FROM relayed_murmurs"); err != nil {
+		if err := q.DeleteAllRelayed(ctx); err != nil {
 			return fmt.Errorf("nuclear prune relayed: %w", err)
 		}
 		if _, err := s.db.Load().Exec("VACUUM"); err != nil {
@@ -732,9 +745,9 @@ func importanceForAttention(attention Attention) []Importance {
 	}
 }
 
-func nilIfEmpty(s string) *string {
+func toNullString(s string) sql.NullString {
 	if s == "" {
-		return nil
+		return sql.NullString{}
 	}
-	return &s
+	return sql.NullString{String: s, Valid: true}
 }
