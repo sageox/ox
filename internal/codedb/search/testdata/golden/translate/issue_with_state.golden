@@ -1,5 +1,5 @@
 {
-  "SQL": "SELECT i.number, i.title, i.author, i.state, i.url\nFROM issues i\nLEFT JOIN issue_comments ic ON ic.issue_id = i.id\nWHERE 1=1\n  AND i.state = ?1\nGROUP BY i.id\nORDER BY i.updated_at DESC\nLIMIT 20",
+  "SQL": "SELECT i.number, i.title, i.author, i.state, i.url\nFROM issues i\nWHERE 1=1\n  AND i.state = ?1\nORDER BY i.updated_at DESC\nLIMIT 20",
   "Params": [
     "closed"
   ],

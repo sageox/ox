@@ -5,8 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"errors"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -534,8 +534,12 @@ func GCDirtyIndexes(codedbDir string) (int, error) {
 		worktreePath := string(raw)
 		if _, statErr := os.Stat(worktreePath); os.IsNotExist(statErr) {
 			// worktree is gone — remove overlay + manifest
-			_ = os.RemoveAll(dirPath)
-			_ = os.Remove(manifestPath)
+			if err := os.RemoveAll(dirPath); err != nil {
+				return removed, fmt.Errorf("remove dirty overlay %s: %w", dirPath, err)
+			}
+			if err := os.Remove(manifestPath); err != nil && !os.IsNotExist(err) {
+				return removed, fmt.Errorf("remove dirty manifest %s: %w", manifestPath, err)
+			}
 			removed++
 		}
 	}

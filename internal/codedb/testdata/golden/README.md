@@ -42,7 +42,7 @@ change — it must be intentional.
 
 ## Location
 
-```
+```text
 internal/codedb/search/testdata/golden/
   tokenize/     14 files — tokenize() output
   parse/        48 files — ParseQuery() struct output

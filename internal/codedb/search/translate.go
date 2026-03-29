@@ -580,9 +580,15 @@ func translatePR(query *ParsedQuery) (*TranslatedQuery, error) {
 
 	limit := resolveLimit(f.Count)
 
+	var joinClause, groupClause string
+	if !query.HasEmptyPattern() {
+		joinClause = "\nLEFT JOIN pr_comments pc ON pc.pr_id = p.id"
+		groupClause = "\nGROUP BY p.id"
+	}
+
 	sql := fmt.Sprintf(
-		"SELECT p.number, p.title, p.author, p.state, p.url\nFROM pull_requests p\nLEFT JOIN pr_comments pc ON pc.pr_id = p.id\nWHERE 1=1%s\nGROUP BY p.id\nORDER BY p.updated_at DESC\nLIMIT %d",
-		conditionsSQL(conditions), limit)
+		"SELECT p.number, p.title, p.author, p.state, p.url\nFROM pull_requests p%s\nWHERE 1=1%s%s\nORDER BY p.updated_at DESC\nLIMIT %d",
+		joinClause, conditionsSQL(conditions), groupClause, limit)
 
 	return &TranslatedQuery{
 		SQL:        sql,
@@ -636,9 +642,15 @@ func translateIssue(query *ParsedQuery) (*TranslatedQuery, error) {
 
 	limit := resolveLimit(f.Count)
 
+	var joinClause, groupClause string
+	if !query.HasEmptyPattern() {
+		joinClause = "\nLEFT JOIN issue_comments ic ON ic.issue_id = i.id"
+		groupClause = "\nGROUP BY i.id"
+	}
+
 	sql := fmt.Sprintf(
-		"SELECT i.number, i.title, i.author, i.state, i.url\nFROM issues i\nLEFT JOIN issue_comments ic ON ic.issue_id = i.id\nWHERE 1=1%s\nGROUP BY i.id\nORDER BY i.updated_at DESC\nLIMIT %d",
-		conditionsSQL(conditions), limit)
+		"SELECT i.number, i.title, i.author, i.state, i.url\nFROM issues i%s\nWHERE 1=1%s%s\nORDER BY i.updated_at DESC\nLIMIT %d",
+		joinClause, conditionsSQL(conditions), groupClause, limit)
 
 	return &TranslatedQuery{
 		SQL:        sql,

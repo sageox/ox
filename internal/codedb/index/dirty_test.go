@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -154,120 +155,120 @@ func TestBuildDirtyIndex_WritesManifest(t *testing.T) {
 	assert.Equal(t, dir, string(raw), "manifest must contain the worktree path verbatim")
 }
 
-// TestGCDirtyIndexes_EmptyDir verifies GC returns 0 when the dirty dir is absent.
-func TestGCDirtyIndexes_EmptyDir(t *testing.T) {
+func TestGCDirtyIndexes(t *testing.T) {
 	t.Parallel()
-	codedbDir := t.TempDir()
-	removed, err := GCDirtyIndexes(codedbDir)
-	require.NoError(t, err)
-	assert.Equal(t, 0, removed)
-}
 
-// TestGCDirtyIndexes_KeepsLiveOverlay verifies GC does NOT remove an overlay
-// whose worktree still exists on disk.
-func TestGCDirtyIndexes_KeepsLiveOverlay(t *testing.T) {
-	t.Parallel()
-	dir, _ := initGitRepo(t, 1)
-	dataDir := t.TempDir()
-
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "live.go"), []byte("package main\nfunc Live() {}\n"), 0o644))
-
-	dirtyPath := DirtyIndexPath(dataDir, dir)
-	_, err := BuildDirtyIndex(context.Background(), dir, dirtyPath, IndexOptions{})
-	require.NoError(t, err)
-
-	removed, err := GCDirtyIndexes(dataDir)
-	require.NoError(t, err)
-	assert.Equal(t, 0, removed, "live worktree overlay must not be removed")
-
-	_, err = os.Stat(dirtyPath)
-	require.NoError(t, err, "dirty index dir must still exist")
-}
-
-// TestGCDirtyIndexes_RemovesStaleOverlay verifies GC removes an overlay once
-// its worktree directory is deleted.
-func TestGCDirtyIndexes_RemovesStaleOverlay(t *testing.T) {
-	t.Parallel()
-	dir, _ := initGitRepo(t, 1)
-	dataDir := t.TempDir()
-
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "stale.go"), []byte("package main\nfunc Stale() {}\n"), 0o644))
-
-	dirtyPath := DirtyIndexPath(dataDir, dir)
-	_, err := BuildDirtyIndex(context.Background(), dir, dirtyPath, IndexOptions{})
-	require.NoError(t, err)
-
-	// overlay + manifest should exist now
-	require.DirExists(t, dirtyPath)
-	require.FileExists(t, dirtyPath+".manifest")
-
-	// delete the worktree
-	require.NoError(t, os.RemoveAll(dir))
-
-	removed, err := GCDirtyIndexes(dataDir)
-	require.NoError(t, err)
-	assert.Equal(t, 1, removed, "stale overlay must be counted as removed")
-
-	_, err = os.Stat(dirtyPath)
-	assert.True(t, os.IsNotExist(err), "dirty index dir must be deleted")
-	_, err = os.Stat(dirtyPath + ".manifest")
-	assert.True(t, os.IsNotExist(err), "manifest must be deleted along with the overlay")
-}
-
-// TestGCDirtyIndexes_IgnoresNoManifest verifies GC leaves overlays alone when
-// no manifest is present (written by an older binary that predates this feature).
-func TestGCDirtyIndexes_IgnoresNoManifest(t *testing.T) {
-	t.Parallel()
-	codedbDir := t.TempDir()
-	dirtyDir := filepath.Join(codedbDir, "bleve", "dirty")
-	require.NoError(t, os.MkdirAll(dirtyDir, 0o755))
-
-	// create a dir that looks like a dirty overlay but has no manifest
-	orphanDir := filepath.Join(dirtyDir, "aabbccdd11223344")
-	require.NoError(t, os.MkdirAll(orphanDir, 0o755))
-
-	removed, err := GCDirtyIndexes(codedbDir)
-	require.NoError(t, err)
-	assert.Equal(t, 0, removed, "overlay without manifest must not be touched")
-	require.DirExists(t, orphanDir, "orphan dir must survive")
-}
-
-// TestGCDirtyIndexes_MixedStaleAndLive verifies GC removes only stale overlays
-// when live and stale overlays coexist in the same codedb.
-func TestGCDirtyIndexes_MixedStaleAndLive(t *testing.T) {
-	t.Parallel()
-	dataDir := t.TempDir()
-
-	// build two live overlays
-	liveDir1, _ := initGitRepo(t, 1)
-	liveDir2, _ := initGitRepo(t, 1)
-	// build two overlays for worktrees we will delete
-	staleDir1, _ := initGitRepo(t, 1)
-	staleDir2, _ := initGitRepo(t, 1)
-
-	for _, dir := range []string{liveDir1, liveDir2, staleDir1, staleDir2} {
-		d := dir // capture loop var
-		require.NoError(t, os.WriteFile(filepath.Join(d, "f.go"), []byte("package p\nfunc F() {}\n"), 0o644))
-		dp := DirtyIndexPath(dataDir, d)
-		_, err := BuildDirtyIndex(context.Background(), d, dp, IndexOptions{})
-		require.NoError(t, err)
+	tests := []struct {
+		name        string
+		setup       func(t *testing.T, codedbDir string)
+		wantRemoved int
+		wantErr     bool
+		verify      func(t *testing.T, codedbDir string)
+	}{
+		{
+			name:        "empty_dir",
+			setup:       func(t *testing.T, codedbDir string) {},
+			wantRemoved: 0,
+		},
+		{
+			name: "keeps_live_overlay",
+			setup: func(t *testing.T, codedbDir string) {
+				dir, _ := initGitRepo(t, 1)
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "live.go"), []byte("package main\nfunc Live() {}\n"), 0o644))
+				dp := DirtyIndexPath(codedbDir, dir)
+				_, err := BuildDirtyIndex(context.Background(), dir, dp, IndexOptions{})
+				require.NoError(t, err)
+			},
+			wantRemoved: 0,
+		},
+		{
+			name: "removes_stale_overlay",
+			setup: func(t *testing.T, codedbDir string) {
+				dir, _ := initGitRepo(t, 1)
+				require.NoError(t, os.WriteFile(filepath.Join(dir, "stale.go"), []byte("package main\nfunc Stale() {}\n"), 0o644))
+				dp := DirtyIndexPath(codedbDir, dir)
+				_, err := BuildDirtyIndex(context.Background(), dir, dp, IndexOptions{})
+				require.NoError(t, err)
+				require.DirExists(t, dp)
+				require.FileExists(t, dp+".manifest")
+				require.NoError(t, os.RemoveAll(dir))
+			},
+			wantRemoved: 1,
+			verify: func(t *testing.T, codedbDir string) {
+				// all overlay dirs and manifests under dirty/ should be gone
+				dirtyDir := filepath.Join(codedbDir, "bleve", "dirty")
+				entries, err := os.ReadDir(dirtyDir)
+				require.NoError(t, err)
+				for _, e := range entries {
+					if e.IsDir() {
+						t.Errorf("stale overlay dir still exists: %s", e.Name())
+					}
+				}
+			},
+		},
+		{
+			name: "ignores_no_manifest",
+			setup: func(t *testing.T, codedbDir string) {
+				dirtyDir := filepath.Join(codedbDir, "bleve", "dirty")
+				require.NoError(t, os.MkdirAll(dirtyDir, 0o755))
+				orphanDir := filepath.Join(dirtyDir, "aabbccdd11223344")
+				require.NoError(t, os.MkdirAll(orphanDir, 0o755))
+			},
+			wantRemoved: 0,
+			verify: func(t *testing.T, codedbDir string) {
+				orphanDir := filepath.Join(codedbDir, "bleve", "dirty", "aabbccdd11223344")
+				require.DirExists(t, orphanDir, "orphan dir must survive")
+			},
+		},
+		{
+			name: "mixed_stale_and_live",
+			setup: func(t *testing.T, codedbDir string) {
+				liveDir, _ := initGitRepo(t, 1)
+				staleDir1, _ := initGitRepo(t, 1)
+				staleDir2, _ := initGitRepo(t, 1)
+				for _, dir := range []string{liveDir, staleDir1, staleDir2} {
+					require.NoError(t, os.WriteFile(filepath.Join(dir, "f.go"), []byte("package p\nfunc F() {}\n"), 0o644))
+					dp := DirtyIndexPath(codedbDir, dir)
+					_, err := BuildDirtyIndex(context.Background(), dir, dp, IndexOptions{})
+					require.NoError(t, err)
+				}
+				require.NoError(t, os.RemoveAll(staleDir1))
+				require.NoError(t, os.RemoveAll(staleDir2))
+			},
+			wantRemoved: 2,
+		},
+		{
+			name: "unreadable_dirty_dir",
+			setup: func(t *testing.T, codedbDir string) {
+				if runtime.GOOS == "windows" {
+					t.Skip("chmod not effective on Windows")
+				}
+				dirtyDir := filepath.Join(codedbDir, "bleve", "dirty")
+				require.NoError(t, os.MkdirAll(dirtyDir, 0o755))
+				require.NoError(t, os.Chmod(dirtyDir, 0o000))
+				t.Cleanup(func() { _ = os.Chmod(dirtyDir, 0o755) })
+			},
+			wantRemoved: 0,
+			wantErr:     true,
+		},
 	}
 
-	// delete the two stale worktrees
-	require.NoError(t, os.RemoveAll(staleDir1))
-	require.NoError(t, os.RemoveAll(staleDir2))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			codedbDir := t.TempDir()
+			tc.setup(t, codedbDir)
 
-	removed, err := GCDirtyIndexes(dataDir)
-	require.NoError(t, err)
-	assert.Equal(t, 2, removed, "exactly the two stale overlays must be removed")
-
-	// live overlays must survive
-	assert.DirExists(t, DirtyIndexPath(dataDir, liveDir1))
-	assert.DirExists(t, DirtyIndexPath(dataDir, liveDir2))
-
-	// stale overlays must be gone
-	_, err1 := os.Stat(DirtyIndexPath(dataDir, staleDir1))
-	assert.True(t, os.IsNotExist(err1))
-	_, err2 := os.Stat(DirtyIndexPath(dataDir, staleDir2))
-	assert.True(t, os.IsNotExist(err2))
+			got, err := GCDirtyIndexes(codedbDir)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantRemoved, got)
+			if tc.verify != nil {
+				tc.verify(t, codedbDir)
+			}
+		})
+	}
 }
