@@ -11,6 +11,9 @@ import (
 
 func TestTimeToUnix(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 
 	tests := []struct {
 		name     string
@@ -45,6 +48,9 @@ func TestTimeToUnix(t *testing.T) {
 
 func TestTimeToUnixPtr(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 
 	t.Run("nil pointer returns nil", func(t *testing.T) {
 		got := timeToUnixPtr(nil)
@@ -75,6 +81,9 @@ func TestTimeToUnixPtr(t *testing.T) {
 
 func TestDirtyIndexPath_Structure(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 
 	codedbDir := "/data/codedb"
 	worktreePath := "/home/user/project"
@@ -99,6 +108,9 @@ func TestDirtyIndexPath_Structure(t *testing.T) {
 
 func TestDirtyIndexPath_DifferentInputs(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 
 	// same codedb dir, different worktrees should produce different paths
 	p1 := DirtyIndexPath("/data", "/project-a")
@@ -117,6 +129,9 @@ func TestDirtyIndexPath_DifferentInputs(t *testing.T) {
 
 func TestFileUnchanged(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 
 	tmp := t.TempDir()
 	testFile := filepath.Join(tmp, "test.json")
@@ -174,6 +189,9 @@ func TestFileUnchanged(t *testing.T) {
 
 func TestResolveGitDir_InvalidGitFile(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 
 	// .git is a file but doesn't contain "gitdir: ..." prefix
 	tmp := t.TempDir()
@@ -193,6 +211,9 @@ func TestResolveGitDir_InvalidGitFile(t *testing.T) {
 
 func TestResolveGitDir_GitFilePointsToMissing(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 
 	tmp := t.TempDir()
 	dotGit := filepath.Join(tmp, ".git")
@@ -213,6 +234,9 @@ func TestResolveGitDir_GitFilePointsToMissing(t *testing.T) {
 
 func TestDefaultSkipDirs(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 
 	expected := []string{".git", "node_modules", ".sageox", "vendor"}
 	for _, dir := range expected {
@@ -232,6 +256,9 @@ func TestDefaultSkipDirs(t *testing.T) {
 
 func TestDefaultBranchFallbacks(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 
 	if len(defaultBranchFallbacks) == 0 {
 		t.Fatal("defaultBranchFallbacks should not be empty")

@@ -130,12 +130,29 @@ pkg/
 - **Never use `t.Setenv()` with `t.Parallel()`** - use dependency injection instead
 - **Slow tests (>500ms) must skip in short mode** - `if testing.Short() { t.Skip(...) }`
 
-### Commands
+### Test Tiers
+
+| Tier | Command | When | What |
+|------|---------|------|------|
+| **fast** | `make test` | Every commit | Unit tests <500ms. No git clone, no network. |
+| **full** | `make test-all` | Pre-PR (`make test-preflight`) | All unit tests including expensive ones (git clone, SQLite concurrent, LFS). |
+| **slow** | `make test-slow` | Pre-PR | Tests requiring real ox binary (build tag: `slow`). No Claude needed. |
+| **integration** | `make test-integration` | Release gate | E2E with real Claude sessions (build tag: `integration`). |
+
 ```bash
-make test           # Fast tests (skips slow tests >500ms)
-make test-all       # Full suite including slow tests
-make test-slow      # Only slow tests
-make coverage       # With coverage report
+make test             # Fast tests — coding feedback loop (<30s)
+make test-preflight   # Pre-PR gate: lint + full + slow (~3-5min)
+make test-all         # All unit tests without build tags
+make test-slow        # Real ox binary tests (build tag: slow)
+make test-integration # Real Claude sessions (build tag: integration)
+make coverage         # Fast tests with coverage report
+```
+
+**Adding new tests:** If a test takes >500ms (git clone, network, polling timeouts), add:
+```go
+if testing.Short() {
+    t.Skip("short: <reason>")
+}
 ```
 
 See [testing-implementation.md](testing-implementation.md) for detailed patterns including `AuthClient` for test parallelization.

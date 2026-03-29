@@ -9,6 +9,9 @@ import (
 
 func TestOpenAndClose(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	tmp := t.TempDir()
 
 	db, err := Open(tmp)
@@ -35,6 +38,9 @@ func TestOpenAndClose(t *testing.T) {
 }
 
 func TestOpenInvalidPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	if os.Getuid() == 0 {
 		t.Skip("skipping permission test when running as root")
 	}
@@ -56,6 +62,9 @@ func TestOpenInvalidPath(t *testing.T) {
 
 func TestRawSQL(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	tmp := t.TempDir()
 
 	db, err := Open(tmp)
@@ -95,6 +104,9 @@ func TestRawSQL(t *testing.T) {
 
 func TestRawSQL_NullValues(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	tmp := t.TempDir()
 
 	db, err := Open(tmp)
@@ -137,6 +149,9 @@ func TestRawSQL_NullValues(t *testing.T) {
 
 func TestRawSQL_EmptyResult(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	tmp := t.TempDir()
 
 	db, err := Open(tmp)
@@ -159,6 +174,9 @@ func TestRawSQL_EmptyResult(t *testing.T) {
 
 func TestRawSQL_InvalidQuery(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	tmp := t.TempDir()
 
 	db, err := Open(tmp)
@@ -175,6 +193,9 @@ func TestRawSQL_InvalidQuery(t *testing.T) {
 
 func TestSearch_InvalidQuery(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	tmp := t.TempDir()
 
 	db, err := Open(tmp)
@@ -190,6 +211,9 @@ func TestSearch_InvalidQuery(t *testing.T) {
 
 func TestTranslateQuery(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	tmp := t.TempDir()
 
 	db, err := Open(tmp)
@@ -210,6 +234,9 @@ func TestTranslateQuery(t *testing.T) {
 
 func TestOpenReopen(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	tmp := t.TempDir()
 
 	// open, write data, close

@@ -61,6 +61,9 @@ func setupClonedLedger(t *testing.T) (string, string, *SyncScheduler) {
 }
 
 func TestBlueGreenGC_Ledger_Success(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -97,6 +100,9 @@ func TestBlueGreenGC_Ledger_Success(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_PreservesCacheDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -135,6 +141,9 @@ func TestBlueGreenGC_Ledger_PreservesCacheDir(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_PreservesUncommittedChanges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -168,6 +177,9 @@ func TestBlueGreenGC_Ledger_PreservesUncommittedChanges(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_PreservesUntrackedFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -198,6 +210,9 @@ func TestBlueGreenGC_Ledger_PreservesUntrackedFiles(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_PushesUnpushedCommits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -241,6 +256,9 @@ func TestBlueGreenGC_Ledger_PushesUnpushedCommits(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_SkipsWhenPushFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -273,6 +291,9 @@ func TestBlueGreenGC_Ledger_SkipsWhenPushFails(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_CloneFailsKeepsOld(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -306,6 +327,9 @@ func TestBlueGreenGC_Ledger_CloneFailsKeepsOld(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_ValidationFailsKeepsOld(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -353,6 +377,9 @@ func TestBlueGreenGC_Ledger_ValidationFailsKeepsOld(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_CacheWithNestedSubdirs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -399,6 +426,9 @@ func TestBlueGreenGC_Ledger_CacheWithNestedSubdirs(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_AllPreservationMechanisms(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -470,6 +500,9 @@ func TestBlueGreenGC_Ledger_AllPreservationMechanisms(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_NoCacheDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -500,6 +533,9 @@ func TestBlueGreenGC_Ledger_NoCacheDir(t *testing.T) {
 }
 
 func TestValidateLedgerGCClone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	dir := t.TempDir()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	s := &SyncScheduler{logger: logger}
@@ -526,6 +562,9 @@ func TestValidateLedgerGCClone(t *testing.T) {
 // behavior than team context's two-phase clone.
 
 func TestBlueGreenGC_Ledger_PreservesStagedChanges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -560,6 +599,9 @@ func TestBlueGreenGC_Ledger_PreservesStagedChanges(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_PreservesMixedStagedAndUnstaged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -596,6 +638,9 @@ func TestBlueGreenGC_Ledger_PreservesMixedStagedAndUnstaged(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_PreservesUntrackedInSubdirs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -630,6 +675,9 @@ func TestBlueGreenGC_Ledger_PreservesUntrackedInSubdirs(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_PreservesBinaryUntrackedFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -665,6 +713,9 @@ func TestBlueGreenGC_Ledger_PreservesBinaryUntrackedFile(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_StagedDeletePreserved(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -696,6 +747,9 @@ func TestBlueGreenGC_Ledger_StagedDeletePreserved(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_DiffConflictPreservesDiffFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -742,6 +796,9 @@ func TestBlueGreenGC_Ledger_DiffConflictPreservesDiffFile(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_CleanTreeStillWorks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -783,6 +840,9 @@ func TestBlueGreenGC_Ledger_CleanTreeStillWorks(t *testing.T) {
 // and the scheduling interval check in checkAndRunGC.
 
 func TestGcRestoreCache_FailureRetainsBackup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	// unit test: gcRestoreCache fails when destination is unwritable,
 	// and the backup dir is NOT removed by the caller on error.
 	backupDir := filepath.Join(t.TempDir(), "cache-backup")
@@ -805,6 +865,9 @@ func TestGcRestoreCache_FailureRetainsBackup(t *testing.T) {
 }
 
 func TestGcPreserveCache_NoCacheReturnsNil(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	// unit test: gcPreserveCache returns nil when no cache exists
 	srcRepo := t.TempDir()
 	backupDir := filepath.Join(t.TempDir(), "backup")
@@ -815,6 +878,9 @@ func TestGcPreserveCache_NoCacheReturnsNil(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_MutexReleasedAfterSuccess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -844,6 +910,9 @@ func TestBlueGreenGC_Ledger_MutexReleasedAfterSuccess(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_MutexReleasedOnCloneFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -875,6 +944,9 @@ func TestBlueGreenGC_Ledger_MutexReleasedOnCloneFailure(t *testing.T) {
 }
 
 func TestBlueGreenGC_Ledger_FullCloneUpgrade(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}

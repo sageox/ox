@@ -19,6 +19,9 @@ import (
 // workaround in plainOpenTolerant is needed again.
 func TestV6_PlainOpenAcceptsKnownExtensions(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 
 	tests := []struct {
 		name      string
@@ -58,6 +61,9 @@ func TestV6_PlainOpenAcceptsKnownExtensions(t *testing.T) {
 // divergence introduced by the v5→v6 upgrade.
 func TestV6_BlobHashConsistency(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	dir, _ := initGitRepo(t, 1)
 
 	// get blob hash from git CLI
@@ -98,6 +104,9 @@ func TestV6_BlobHashConsistency(t *testing.T) {
 // If this behavior changed in v6, diff detection would silently break.
 func TestV6_TreeFilesReturnsFullPaths(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	dir := t.TempDir()
 
 	run := func(args ...string) {
@@ -155,6 +164,9 @@ func TestV6_TreeFilesReturnsFullPaths(t *testing.T) {
 // repo where HEAD can be resolved — the entire IndexRepo path depends on this.
 func TestV6_CloneBareAndResolveHead(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	srcDir, tipHash := initGitRepo(t, 3)
 	bareDir := filepath.Join(t.TempDir(), "bare.git")
 
@@ -172,6 +184,9 @@ func TestV6_CloneBareAndResolveHead(t *testing.T) {
 // errors (_ = fetch(repo)), so a broken fetch would be invisible.
 func TestV6_CloneOrFetchUpdatesOnRefetch(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	srcDir, _ := initGitRepo(t, 2)
 	bareDir := filepath.Join(t.TempDir(), "bare.git")
 
@@ -215,6 +230,9 @@ func TestV6_CloneOrFetchUpdatesOnRefetch(t *testing.T) {
 // paths for files in subdirectories when called through the indexing pipeline.
 func TestV6_GetTreeEntriesWithSubdirs(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	dir := t.TempDir()
 
 	run := func(args ...string) {
@@ -265,6 +283,9 @@ func TestV6_GetTreeEntriesWithSubdirs(t *testing.T) {
 // at getTreeEntries to reject zero hashes.
 func TestV6_HashZeroValueComparison(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 
 	var zero plumbing.Hash
 	assert.True(t, zero == (plumbing.Hash{}), "zero-value Hash must equal Hash{}")

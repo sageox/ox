@@ -22,6 +22,9 @@ import (
 // does NOT remove lock files (a running git process may own them); instead it
 // skips the pull and sets an IssueTypeGitLock issue so ox doctor can surface it.
 func TestDoPull_StaleLockFileDetection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -65,6 +68,9 @@ func TestDoPull_StaleLockFileDetection(t *testing.T) {
 // TestDoPull_LockFileClearedAfterResolution verifies that the git lock issue
 // is cleared on the next successful doPull after the lock file is removed.
 func TestDoPull_LockFileClearedAfterResolution(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -104,6 +110,9 @@ func TestDoPull_LockFileClearedAfterResolution(t *testing.T) {
 
 // TestDoPull_MultipleLockFiles verifies that all known lock file types are detected.
 func TestDoPull_MultipleLockFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -142,6 +151,9 @@ func TestDoPull_MultipleLockFiles(t *testing.T) {
 // is not a valid git repo (e.g., .git/HEAD is corrupted or .git is missing),
 // the Checkout path moves it to a .bak directory and attempts a fresh clone.
 func TestCheckout_CorruptRepoSelfHealing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	parentDir := t.TempDir()
 	repoDir := filepath.Join(parentDir, "corrupt-repo")
 	require.NoError(t, os.MkdirAll(repoDir, 0755))
@@ -182,6 +194,9 @@ func TestCheckout_CorruptRepoSelfHealing(t *testing.T) {
 // is corrupted (making the repo fail isValidGitRepo) and self-heals by moving
 // the corrupt directory aside so a re-clone can happen on the next cycle.
 func TestDoPull_CorruptGitHeadDetection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -232,6 +247,9 @@ func TestDoPull_CorruptGitHeadDetection(t *testing.T) {
 // (e.g., remote unreachable), the scheduler records a sync failure and applies
 // exponential backoff so the next pull is skipped.
 func TestDoPull_FetchFailureRecordsBackoff(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -284,6 +302,9 @@ func TestDoPull_FetchFailureRecordsBackoff(t *testing.T) {
 // This covers the scenario where the daemon is shutting down and context is
 // canceled before or during a pull attempt.
 func TestDoPull_AlreadyCanceledContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -333,6 +354,9 @@ func TestDoPull_AlreadyCanceledContext(t *testing.T) {
 // causes doPull to fail fast when the remote is unreachable (connection refused).
 // Uses 127.0.0.1:1 which immediately refuses connections rather than hanging.
 func TestDoPull_ContextCancellationDuringFetch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -505,6 +529,9 @@ func TestIsClonePermanentError_Classification(t *testing.T) {
 // TestHasLockFiles_Unit verifies the lock file detection function works
 // correctly for all known lock file types.
 func TestHasLockFiles_Unit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	gitDir := filepath.Join(t.TempDir(), ".git")
 	require.NoError(t, os.MkdirAll(gitDir, 0755))
 
@@ -539,6 +566,9 @@ func TestHasLockFiles_NonexistentDir(t *testing.T) {
 // TestPullTeamContext_StaleLockFileDetection verifies that pullTeamContext also
 // detects lock files and reports issues, matching the doPull behavior.
 func TestPullTeamContext_StaleLockFileDetection(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -581,6 +611,9 @@ func TestClonePermanentBackoffIsShorter(t *testing.T) {
 // exists but is not a git repo (no .git directory), doPull returns nil and
 // does NOT attempt git fetch/pull on it.
 func TestDoPull_NonGitDirEntersClonePath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	tmpDir := t.TempDir()
 	ledgerDir := filepath.Join(tmpDir, "ledger")
 	require.NoError(t, os.MkdirAll(ledgerDir, 0755))
@@ -602,6 +635,9 @@ func TestDoPull_NonGitDirEntersClonePath(t *testing.T) {
 // TestDoPull_RebaseStateSkips verifies that doPull skips when the repo is
 // in a broken rebase state (rebase-merge or rebase-apply directory exists).
 func TestDoPull_RebaseStateSkips(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -631,6 +667,9 @@ func TestDoPull_RebaseStateSkips(t *testing.T) {
 // The directory passes pathIsGitRepo (.git exists) but fails isValidGitRepo
 // (git rev-parse --git-dir fails), triggering the self-healing path.
 func TestDoPull_PartialGitDirTriggersReclone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -679,6 +718,9 @@ func TestDoPull_PartialGitDirTriggersReclone(t *testing.T) {
 // all clone semaphore slots are occupied and the timeout expires, rather than
 // blocking indefinitely.
 func TestCheckout_SemaphoreTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	cfg := DefaultConfig()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	scheduler := NewSyncScheduler(cfg, logger)

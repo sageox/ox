@@ -37,6 +37,9 @@ func openStore(t *testing.T) *Store {
 
 func TestOpenCreatesStructure(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 	s, err := Open(tmp)
 	if err != nil {
@@ -73,6 +76,9 @@ func TestOpenCreatesStructure(t *testing.T) {
 
 func TestOpenIdempotent(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 
 	s1, err := Open(tmp)
@@ -102,6 +108,9 @@ func TestOpenIdempotent(t *testing.T) {
 
 func TestOpenCorruptSQLite(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 
 	// write garbage to metadata.db before first Open
@@ -130,6 +139,9 @@ func TestOpenCorruptSQLite(t *testing.T) {
 
 func TestOpenCorruptBleve(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 
 	// first open to create structure
@@ -163,6 +175,9 @@ func TestOpenCorruptBleve(t *testing.T) {
 
 func TestOpenMissingBleveDir(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 
 	s1, err := Open(tmp)
@@ -189,6 +204,9 @@ func TestOpenMissingBleveDir(t *testing.T) {
 }
 
 func TestOpenPermissionDenied(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	if runtime.GOOS == "windows" {
 		t.Skip("permission test not reliable on Windows")
 	}
@@ -214,6 +232,9 @@ func TestOpenPermissionDenied(t *testing.T) {
 
 func TestCheckIntegrity_Healthy(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	if err := s.CheckIntegrity(); err != nil {
@@ -223,6 +244,9 @@ func TestCheckIntegrity_Healthy(t *testing.T) {
 
 func TestCheckIntegrity_CorruptDB(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 
 	// write garbage to metadata.db, then open a *new* connection against it.
@@ -259,6 +283,9 @@ func TestCheckIntegrity_CorruptDB(t *testing.T) {
 
 func TestCloseIdempotent(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 
 	s, err := Open(tmp)
@@ -278,6 +305,9 @@ func TestCloseIdempotent(t *testing.T) {
 
 func TestReposDir(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 
 	s, err := Open(tmp)
@@ -304,6 +334,9 @@ func TestReposDir(t *testing.T) {
 
 func TestConcurrentOpen(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 
 	// pre-create the store so concurrent opens don't race on schema creation
@@ -347,6 +380,9 @@ func TestConcurrentOpen(t *testing.T) {
 
 func TestSchemaCreation(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	for _, table := range expectedTables {
@@ -366,6 +402,9 @@ func TestSchemaCreation(t *testing.T) {
 
 func TestSchemaIndexes(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	expectedIndexes := []string{
@@ -397,6 +436,9 @@ func TestSchemaIndexes(t *testing.T) {
 
 func TestSQLConvenienceMethods(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	// Exec + QueryRow
@@ -453,6 +495,9 @@ func TestSQLConvenienceMethods(t *testing.T) {
 
 func TestOpenCorruptBleveDiffIndex(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 
 	s1, err := Open(tmp)
@@ -483,6 +528,9 @@ func TestOpenCorruptBleveDiffIndex(t *testing.T) {
 
 func TestOpenNonexistentRoot(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 	nested := filepath.Join(tmp, "a", "b", "c")
 
@@ -500,6 +548,9 @@ func TestOpenNonexistentRoot(t *testing.T) {
 
 func TestForeignKeysEnabled(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	// inserting a commit with a nonexistent repo_id should fail if foreign keys are on

@@ -67,6 +67,9 @@ func run(t *testing.T, dir string, name string, args ...string) {
 }
 
 func TestPushWithRetry_SuccessFirstAttempt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	repo, _ := initBareRemoteRepo(t)
 	addCommit(t, repo, "a.txt", "hello", "add a")
 
@@ -78,6 +81,9 @@ func TestPushWithRetry_SuccessFirstAttempt(t *testing.T) {
 }
 
 func TestPushWithRetry_NothingToPush(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	repo, _ := initBareRemoteRepo(t)
 
 	// nothing new to push — push is a no-op (git push with up-to-date returns 0)
@@ -89,6 +95,9 @@ func TestPushWithRetry_NothingToPush(t *testing.T) {
 }
 
 func TestPushWithRetry_RepoBlockedByLockFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	repo, _ := initBareRemoteRepo(t)
 	addCommit(t, repo, "a.txt", "hello", "add a")
 
@@ -106,6 +115,9 @@ func TestPushWithRetry_RepoBlockedByLockFile(t *testing.T) {
 }
 
 func TestPushWithRetry_PrePushCalledOnce(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	repo, _ := initBareRemoteRepo(t)
 	addCommit(t, repo, "a.txt", "hello", "add a")
 
@@ -123,6 +135,9 @@ func TestPushWithRetry_PrePushCalledOnce(t *testing.T) {
 }
 
 func TestPushWithRetry_PrePushErrorDoesNotPreventPush(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	repo, _ := initBareRemoteRepo(t)
 	addCommit(t, repo, "a.txt", "hello", "add a")
 
@@ -138,6 +153,9 @@ func TestPushWithRetry_PrePushErrorDoesNotPreventPush(t *testing.T) {
 }
 
 func TestPushWithRetry_NonFastForwardTriggersRebase(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	repo, bare := initBareRemoteRepo(t)
 
 	// create a second clone, push a commit from it to create divergence
@@ -164,6 +182,9 @@ func TestPushWithRetry_NonFastForwardTriggersRebase(t *testing.T) {
 }
 
 func TestPushWithRetry_MaxRetriesExhausted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -192,6 +213,9 @@ func TestPushWithRetry_MaxRetriesExhausted(t *testing.T) {
 }
 
 func TestPushWithRetry_PermanentErrorShortCircuits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	repo, _ := initBareRemoteRepo(t)
 	addCommit(t, repo, "a.txt", "hello", "add a")
 
@@ -216,6 +240,9 @@ func TestPushWithRetry_PermanentErrorShortCircuits(t *testing.T) {
 }
 
 func TestPushWithRetry_ContextCancellationExitsPromptly(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
@@ -275,6 +302,9 @@ func TestPushWithRetry_DefaultOpts(t *testing.T) {
 }
 
 func TestPushWithRetry_SuccessOnSecondAttempt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	repo, bare := initBareRemoteRepo(t)
 
 	// create divergence: push from a second clone
@@ -331,6 +361,9 @@ func TestPermanentPatterns(t *testing.T) {
 }
 
 func TestPushWithRetry_403FailsFastWithGuidance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	tests := []struct {
 		name   string
 		stderr string
@@ -385,6 +418,9 @@ func TestIsLFSPushError(t *testing.T) {
 }
 
 func TestPushWithRetry_AutoResolveConflicts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	repo, bare := initBareRemoteRepo(t)
 
 	// create a second clone
@@ -423,6 +459,9 @@ func TestPushWithRetry_AutoResolveConflicts(t *testing.T) {
 }
 
 func TestPushWithRetry_RebaseInProgressAborted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	repo, bare := initBareRemoteRepo(t)
 
 	// create divergence
@@ -468,6 +507,9 @@ func containsImpl(s, substr string) bool {
 // bug fixed in a18cd6c: push output containing both "non-fast-forward" and
 // macOS Keychain "failed to store: -25300" must take the rebase path.
 func TestPushWithRetry_CredentialNoiseWithDivergence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	repo, bare := initBareRemoteRepo(t)
 
 	// create a second clone and push a commit to create divergence
@@ -498,6 +540,9 @@ func TestPushWithRetry_CredentialNoiseWithDivergence(t *testing.T) {
 // Previously, AllowForceOnLFS would attempt --force-with-lease on LFS errors;
 // that path was removed because our remotes reject force pushes server-side.
 func TestPushWithRetry_LFSErrorRetriesWithoutForcePush(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
 	repo := t.TempDir()
 	run(t, "", "git", "init", "--quiet", repo)
 	run(t, repo, "git", "config", "user.email", "test@test.local")

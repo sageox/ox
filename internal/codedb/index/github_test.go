@@ -13,6 +13,9 @@ import (
 
 func TestIndexGitHubData_PRWithCommits(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 
 	// set up CodeDB store
 	storeDir := t.TempDir()
@@ -108,6 +111,9 @@ func TestIndexGitHubData_PRWithCommits(t *testing.T) {
 
 func TestIndexGitHubData_PRWithoutCommits(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 
 	storeDir := t.TempDir()
 	s, err := store.Open(storeDir)
@@ -154,6 +160,9 @@ func TestIndexGitHubData_PRWithoutCommits(t *testing.T) {
 
 func TestIndexGitHubData_UpsertReplacesCommits(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 
 	storeDir := t.TempDir()
 	s, err := store.Open(storeDir)
@@ -221,6 +230,9 @@ func TestIndexGitHubData_UpsertReplacesCommits(t *testing.T) {
 
 func TestIndexGitHubData_BackwardCompatOldJSON(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 
 	storeDir := t.TempDir()
 	s, err := store.Open(storeDir)

@@ -19,6 +19,9 @@ size 12345
 `
 
 func TestRepairMissingLFSObjects_NoLFS(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git LFS operations")
+	}
 	// repo without .gitattributes — should return immediately
 	dir := t.TempDir()
 	initBareishRepo(t, dir)
@@ -29,6 +32,9 @@ func TestRepairMissingLFSObjects_NoLFS(t *testing.T) {
 }
 
 func TestRepairMissingLFSObjects_NoMissing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git LFS operations")
+	}
 	if _, err := exec.LookPath("git-lfs"); err != nil {
 		t.Skip("git-lfs not installed")
 	}
@@ -49,6 +55,9 @@ func TestRepairMissingLFSObjects_NoMissing(t *testing.T) {
 }
 
 func TestRepairMissingLFSObjects_RepairsMissing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git LFS operations")
+	}
 	if _, err := exec.LookPath("git-lfs"); err != nil {
 		t.Skip("git-lfs not installed")
 	}
@@ -93,6 +102,9 @@ func TestRepairMissingLFSObjects_RepairsMissing(t *testing.T) {
 // This is the exact failure mode from production: GC reclone loses LFS objects,
 // subsequent pushes fail with "LFS objects are missing".
 func TestRepairMissingLFSObjects_PushSucceedsAfterRepair(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git LFS operations")
+	}
 	if _, err := exec.LookPath("git-lfs"); err != nil {
 		t.Skip("git-lfs not installed")
 	}
@@ -174,6 +186,9 @@ func TestRepairMissingLFSObjects_PushSucceedsAfterRepair(t *testing.T) {
 }
 
 func TestRepairMissingLFSObjects_SkipsNonPointerFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git LFS operations")
+	}
 	// file that isn't an LFS pointer shouldn't be touched
 	dir := t.TempDir()
 	initBareishRepo(t, dir)

@@ -56,6 +56,9 @@ func buildAndAttachDirty(t *testing.T, db *DB, repoDir string) int {
 
 func TestSearch_DirtyFileAppearsInResults(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	repoDir := initTestRepo(t)
 	dataDir := filepath.Join(t.TempDir(), "codedb")
 	require.NoError(t, os.MkdirAll(dataDir, 0o755))
@@ -82,6 +85,9 @@ func TestSearch_DirtyFileAppearsInResults(t *testing.T) {
 
 func TestSearch_DirtyOnlyResult(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	repoDir := initTestRepo(t)
 	dataDir := filepath.Join(t.TempDir(), "codedb")
 	require.NoError(t, os.MkdirAll(dataDir, 0o755))
@@ -106,6 +112,9 @@ func TestSearch_DirtyOnlyResult(t *testing.T) {
 
 func TestSearch_CommittedResultsWithoutOverlay(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	repoDir := initTestRepo(t)
 	dataDir := filepath.Join(t.TempDir(), "codedb")
 	require.NoError(t, os.MkdirAll(dataDir, 0o755))
@@ -124,6 +133,9 @@ func TestSearch_CommittedResultsWithoutOverlay(t *testing.T) {
 
 func TestSearch_DetachRemovesDirtyResults(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	repoDir := initTestRepo(t)
 	dataDir := filepath.Join(t.TempDir(), "codedb")
 	require.NoError(t, os.MkdirAll(dataDir, 0o755))
@@ -155,6 +167,9 @@ func TestSearch_DetachRemovesDirtyResults(t *testing.T) {
 
 func TestSearch_DirtyResultHasCorrectLanguage(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	repoDir := initTestRepo(t)
 	dataDir := filepath.Join(t.TempDir(), "codedb")
 	require.NoError(t, os.MkdirAll(dataDir, 0o755))

@@ -90,6 +90,9 @@ func newTestScheduler(projectDir string) *SyncScheduler {
 // --- Test 1: New team context appears in credentials ---
 
 func TestTeamContextDiscovery_NewTeamAppears(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -148,6 +151,9 @@ func TestTeamContextDiscovery_NewTeamAppears(t *testing.T) {
 // --- Test 2: Team context removed from credentials ---
 
 func TestTeamContextDiscovery_RemovedFromCredentials(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -213,6 +219,9 @@ func TestTeamContextDiscovery_RemovedFromCredentials(t *testing.T) {
 // --- Test 3: Credentials file corrupted or missing ---
 
 func TestTeamContextDiscovery_CredentialsCorrupted(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	credDir := isolateCredentialsWithDir(t)
 	projectDir := setupProjectWithConfig(t, "# empty config\n")
 
@@ -234,6 +243,9 @@ func TestTeamContextDiscovery_CredentialsCorrupted(t *testing.T) {
 }
 
 func TestTeamContextDiscovery_CredentialsMissing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	isolateCredentials(t) // points to empty temp dir, no credentials file
 	projectDir := setupProjectWithConfig(t, "# empty config\n")
 
@@ -251,6 +263,9 @@ func TestTeamContextDiscovery_CredentialsMissing(t *testing.T) {
 // --- Test 4: Empty credentials (repos list is empty) ---
 
 func TestTeamContextDiscovery_EmptyRepos(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	credDir := isolateCredentialsWithDir(t)
 	projectDir := setupProjectWithConfig(t, "# empty config\n")
 
@@ -277,6 +292,9 @@ func TestTeamContextDiscovery_EmptyRepos(t *testing.T) {
 // --- Test 5: Multiple team contexts, one fails ---
 
 func TestTeamContextDiscovery_MultipleTeamsOneFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -367,6 +385,9 @@ path = %q
 // --- Test: Credentials with non-team-context repos are ignored ---
 
 func TestTeamContextDiscovery_IgnoresNonTeamContextRepos(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	credDir := isolateCredentialsWithDir(t)
 	projectDir := setupProjectWithConfig(t, "# empty config\n")
 
@@ -397,6 +418,9 @@ func TestTeamContextDiscovery_IgnoresNonTeamContextRepos(t *testing.T) {
 // --- Test: Config-based team contexts enriched with clone URLs from credentials ---
 
 func TestTeamContextDiscovery_ConfigEnrichedByCredentials(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -470,6 +494,9 @@ func TestReposEqual(t *testing.T) {
 // --- Test: discoverTeams respects dedup interval ---
 
 func TestDiscoverTeams_RespectsDedup(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	isolateCredentials(t)
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
@@ -500,6 +527,9 @@ func TestDiscoverTeams_RespectsDedup(t *testing.T) {
 // --- Test: discoverTeams skips when no credentials ---
 
 func TestDiscoverTeams_SkipsWithNoCredentials(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	isolateCredentials(t)
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
@@ -515,6 +545,9 @@ func TestDiscoverTeams_SkipsWithNoCredentials(t *testing.T) {
 // --- Test: applySparseCheckout reads manifest and applies sparse-checkout ---
 
 func TestApplySparseCheckout_AppliesManifestPaths(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -563,6 +596,9 @@ sync_interval_minutes 10
 }
 
 func TestApplySparseCheckout_FallsBackWithoutManifest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -588,6 +624,9 @@ func TestApplySparseCheckout_FallsBackWithoutManifest(t *testing.T) {
 // etc., which caused: fatal: 'AGENTS.md' is not a directory.
 // Fix: use --no-cone mode to support both files and directories.
 func TestApplySparseCheckout_FallbackWithFilePatterns(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -691,6 +730,9 @@ func setupTeamContextBareRepo(t *testing.T, manifestContent string, extraFiles m
 }
 
 func TestTwoPhaseClone_Success(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -734,6 +776,9 @@ sync_interval_minutes 10
 }
 
 func TestTwoPhaseClone_NoManifest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -763,6 +808,9 @@ func TestTwoPhaseClone_NoManifest(t *testing.T) {
 }
 
 func TestTwoPhaseClone_DeniedPathsExcluded(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -800,6 +848,9 @@ deny assets/
 }
 
 func TestTwoPhaseClone_IncompleteCloneDetected(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	// verify that Checkout() detects incomplete two-phase clones
 	// (.git exists but .sageox/ missing) and moves them aside
 	projectDir := setupProjectWithConfig(t, "")
@@ -835,6 +886,9 @@ func TestTwoPhaseClone_IncompleteCloneDetected(t *testing.T) {
 }
 
 func TestTwoPhaseClone_IncompleteCloneRecovery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -865,6 +919,9 @@ include SOUL.md
 }
 
 func TestTwoPhaseClone_SubsequentPullWorks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -912,6 +969,9 @@ include memory/
 }
 
 func TestValidateTeamContextClone_MissingCoreFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	// create a dir with only .sageox but no core files
 	repoDir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(repoDir, ".sageox"), 0755))
@@ -925,6 +985,9 @@ func TestValidateTeamContextClone_MissingCoreFiles(t *testing.T) {
 }
 
 func TestSetSyncIntervalMin_StoresAndRetrieves(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
 
@@ -967,6 +1030,9 @@ func setupClonedTeamContext(t *testing.T, manifestContent string, extraFiles map
 }
 
 func TestBlueGreenGC_Success(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1014,6 +1080,9 @@ func TestBlueGreenGC_Success(t *testing.T) {
 }
 
 func TestBlueGreenGC_PreservesUncommittedTrackedChanges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1052,6 +1121,9 @@ func TestBlueGreenGC_PreservesUncommittedTrackedChanges(t *testing.T) {
 }
 
 func TestBlueGreenGC_CloneFailsKeepsOld(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1080,6 +1152,9 @@ func TestBlueGreenGC_CloneFailsKeepsOld(t *testing.T) {
 }
 
 func TestBlueGreenGC_NotDueYet(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
 
@@ -1102,6 +1177,9 @@ func TestBlueGreenGC_NotDueYet(t *testing.T) {
 }
 
 func TestBlueGreenGC_CleansUpLeftoverNewDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1132,6 +1210,9 @@ func TestBlueGreenGC_CleansUpLeftoverNewDir(t *testing.T) {
 }
 
 func TestValidateGCClone_PassesWithCoreFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
 
@@ -1144,6 +1225,9 @@ func TestValidateGCClone_PassesWithCoreFiles(t *testing.T) {
 }
 
 func TestValidateGCClone_FailsWithoutGitDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
 
@@ -1155,6 +1239,9 @@ func TestValidateGCClone_FailsWithoutGitDir(t *testing.T) {
 }
 
 func TestValidateGCClone_FailsWithoutCoreFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
 
@@ -1168,6 +1255,9 @@ func TestValidateGCClone_FailsWithoutCoreFiles(t *testing.T) {
 // --- Edge case tests: old-style full clones and corruption ---
 
 func TestBlueGreenGC_OldStyleFullClone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1240,6 +1330,9 @@ func TestBlueGreenGC_OldStyleFullClone(t *testing.T) {
 }
 
 func TestBlueGreenGC_OldStyleFullClone_PreservesContent(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1297,6 +1390,9 @@ func TestBlueGreenGC_OldStyleFullClone_PreservesContent(t *testing.T) {
 }
 
 func TestBlueGreenGC_RepoWithStaleLockFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1327,6 +1423,9 @@ func TestBlueGreenGC_RepoWithStaleLockFile(t *testing.T) {
 }
 
 func TestBlueGreenGC_RepoInRebaseState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1358,6 +1457,9 @@ func TestBlueGreenGC_RepoInRebaseState(t *testing.T) {
 }
 
 func TestBlueGreenGC_CorruptGitDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1389,6 +1491,9 @@ func TestBlueGreenGC_CorruptGitDir(t *testing.T) {
 }
 
 func TestBlueGreenGC_MissingGitDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
 
@@ -1417,6 +1522,9 @@ func TestBlueGreenGC_MissingGitDir(t *testing.T) {
 }
 
 func TestBlueGreenGC_WorkspacePathDoesNotExist(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
 
@@ -1439,6 +1547,9 @@ func TestBlueGreenGC_WorkspacePathDoesNotExist(t *testing.T) {
 }
 
 func TestBlueGreenGC_PreExistingOldDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1477,6 +1588,9 @@ func TestBlueGreenGC_PreExistingOldDir(t *testing.T) {
 }
 
 func TestValidateGCClone_FailsWithDeniedPaths(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
 
@@ -1498,6 +1612,9 @@ func TestValidateGCClone_FailsWithDeniedPaths(t *testing.T) {
 }
 
 func TestValidateGCClone_FailsWithoutSageoxDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
 
@@ -1511,6 +1628,9 @@ func TestValidateGCClone_FailsWithoutSageoxDir(t *testing.T) {
 }
 
 func TestValidateGCClone_PassesWithDeniesNotMaterialized(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
 
@@ -1528,6 +1648,9 @@ func TestValidateGCClone_PassesWithDeniesNotMaterialized(t *testing.T) {
 }
 
 func TestBlueGreenGC_ConcurrentSkipped(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
 
@@ -1555,6 +1678,9 @@ func TestBlueGreenGC_ConcurrentSkipped(t *testing.T) {
 }
 
 func TestBlueGreenGC_SkipsCloneInFlight(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1593,6 +1719,9 @@ func TestBlueGreenGC_SkipsCloneInFlight(t *testing.T) {
 }
 
 func TestBlueGreenGC_UpdatesManifestConfig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1637,6 +1766,9 @@ func TestBlueGreenGC_UpdatesManifestConfig(t *testing.T) {
 }
 
 func TestBlueGreenGC_ValidationFailsKeepsOld(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1696,6 +1828,9 @@ func TestBlueGreenGC_ValidationFailsKeepsOld(t *testing.T) {
 }
 
 func TestBlueGreenGC_EmptyWorkspacePath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
 
@@ -1713,6 +1848,9 @@ func TestBlueGreenGC_EmptyWorkspacePath(t *testing.T) {
 }
 
 func TestBlueGreenGC_LeftoverNewRemovalFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1755,6 +1893,9 @@ func TestBlueGreenGC_LeftoverNewRemovalFails(t *testing.T) {
 // --- Dirty-tree preservation regression tests ---
 
 func TestBlueGreenGC_PreservesStagedChanges(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1785,6 +1926,9 @@ func TestBlueGreenGC_PreservesStagedChanges(t *testing.T) {
 }
 
 func TestBlueGreenGC_PreservesMixedStagedAndUnstaged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1817,6 +1961,9 @@ func TestBlueGreenGC_PreservesMixedStagedAndUnstaged(t *testing.T) {
 }
 
 func TestBlueGreenGC_PreservesUntrackedFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1846,6 +1993,9 @@ func TestBlueGreenGC_PreservesUntrackedFiles(t *testing.T) {
 }
 
 func TestBlueGreenGC_PreservesUntrackedInSubdirs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1877,6 +2027,9 @@ func TestBlueGreenGC_PreservesUntrackedInSubdirs(t *testing.T) {
 }
 
 func TestBlueGreenGC_PushesUnpushedCommitsBeforeReclone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1923,6 +2076,9 @@ func TestBlueGreenGC_PushesUnpushedCommitsBeforeReclone(t *testing.T) {
 }
 
 func TestBlueGreenGC_SkipsWhenPushFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -1959,6 +2115,9 @@ func TestBlueGreenGC_SkipsWhenPushFails(t *testing.T) {
 }
 
 func TestBlueGreenGC_DiffApplyConflictPreservesDiffFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -2004,6 +2163,9 @@ func TestBlueGreenGC_DiffApplyConflictPreservesDiffFile(t *testing.T) {
 }
 
 func TestBlueGreenGC_PreservesBinaryUntrackedFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -2036,6 +2198,9 @@ func TestBlueGreenGC_PreservesBinaryUntrackedFile(t *testing.T) {
 }
 
 func TestBlueGreenGC_StagedDeletePreserved(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -2063,6 +2228,9 @@ func TestBlueGreenGC_StagedDeletePreserved(t *testing.T) {
 }
 
 func TestBlueGreenGC_CleanTreeStillWorks(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}

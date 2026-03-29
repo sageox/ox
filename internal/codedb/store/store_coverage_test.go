@@ -12,6 +12,9 @@ import (
 
 func TestAttachDirtyOverlay(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	// initially, CombinedCodeIndex is the same as CodeIndex
@@ -47,6 +50,9 @@ func TestAttachDirtyOverlay(t *testing.T) {
 
 func TestAttachDirtyOverlay_ReplacesPrevious(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	// attach first overlay and add data
@@ -76,6 +82,9 @@ func TestAttachDirtyOverlay_ReplacesPrevious(t *testing.T) {
 
 func TestAttachDirtyIndex_NonexistentPath(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	err := s.AttachDirtyIndex("/nonexistent/path/to/dirty/index")
@@ -91,6 +100,9 @@ func TestAttachDirtyIndex_NonexistentPath(t *testing.T) {
 
 func TestAttachDirtyIndex_ValidPath(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	// create a real bleve index on disk to attach
@@ -124,6 +136,9 @@ func TestAttachDirtyIndex_ValidPath(t *testing.T) {
 
 func TestDetachDirtyOverlay_NoOverlay(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	// detach without attach should be safe
@@ -136,6 +151,9 @@ func TestDetachDirtyOverlay_NoOverlay(t *testing.T) {
 
 func TestDetachDirtyOverlay_WithOverlay(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	if err := s.AttachDirtyOverlay(); err != nil {
@@ -154,6 +172,9 @@ func TestDetachDirtyOverlay_WithOverlay(t *testing.T) {
 
 func TestQueryContext(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	// insert test data
@@ -182,6 +203,9 @@ func TestQueryContext(t *testing.T) {
 
 func TestQueryContext_CancelledContext(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -195,6 +219,9 @@ func TestQueryContext_CancelledContext(t *testing.T) {
 
 func TestBeginTx(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	ctx := context.Background()
@@ -221,6 +248,9 @@ func TestBeginTx(t *testing.T) {
 
 func TestBeginTx_Rollback(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	ctx := context.Background()
@@ -249,6 +279,9 @@ func TestBeginTx_Rollback(t *testing.T) {
 
 func TestOpenCorruptCommentIndex(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 
 	// first open to create structure
@@ -281,6 +314,9 @@ func TestOpenCorruptCommentIndex(t *testing.T) {
 
 func TestCheckIntegrity_WithDirtyOverlay(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	if err := s.AttachDirtyOverlay(); err != nil {
@@ -295,6 +331,9 @@ func TestCheckIntegrity_WithDirtyOverlay(t *testing.T) {
 
 func TestCloseWithDirtyOverlay(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 
 	s, err := Open(tmp)
@@ -319,6 +358,9 @@ func TestCloseWithDirtyOverlay(t *testing.T) {
 
 func TestSchemaCommentTable(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	// verify the comments table exists (added by migration)
@@ -333,6 +375,9 @@ func TestSchemaCommentTable(t *testing.T) {
 
 func TestSchemaGitHubTables(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	s := openStore(t)
 
 	githubTables := []string{"pull_requests", "pr_comments", "issues", "issue_comments", "github_file_mtimes", "pr_commits"}
@@ -352,6 +397,9 @@ func TestSchemaGitHubTables(t *testing.T) {
 
 func TestCreateSchema_FreshDB(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "fresh.db")
 
@@ -392,6 +440,9 @@ func TestCreateSchema_FreshDB(t *testing.T) {
 
 func TestCreateSchema_Idempotent(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "idem.db")
 

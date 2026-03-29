@@ -93,6 +93,9 @@ func mustCompleteWithin(t *testing.T, timeout time.Duration, msg string, fn func
 // daemon without getting stuck. This is a regression test for the bug where a second
 // clone wouldn't link the team context repo until the daemon was restarted.
 func TestMultiClone_TeamContextLinking(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -131,6 +134,9 @@ func TestMultiClone_TeamContextLinking(t *testing.T) {
 // simultaneously on the same git repo directory. Verifies no deadlock, no panic,
 // and no corrupted git state from concurrent fetch+pull.
 func TestMultiClone_ConcurrentPullSameDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -178,6 +184,9 @@ func TestMultiClone_ConcurrentPullSameDir(t *testing.T) {
 // deadlock or corrupt each other. One clone should succeed; the other should
 // either succeed or gracefully detect "already exists".
 func TestMultiClone_ConcurrentCloneAttempt(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -258,6 +267,9 @@ path = %q
 // rapid syncs on the same team context — simulating two terminal sessions
 // in different clones repeatedly triggering sync.
 func TestMultiClone_RapidAlternatingSync(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -292,6 +304,9 @@ func TestMultiClone_RapidAlternatingSync(t *testing.T) {
 // slots are occupied, pullTeamContexts still completes for an already-cloned
 // team context (because pull uses pullInProgress, not cloneSem).
 func TestMultiClone_SemaphoreExhaustion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -330,6 +345,9 @@ func TestMultiClone_SemaphoreExhaustion(t *testing.T) {
 // context once it becomes available. Specifically tests that backoff state
 // on one scheduler doesn't permanently prevent syncing.
 func TestMultiClone_CloneBackoffRecovery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -416,6 +434,9 @@ path = %q
 // calls from multiple schedulers simultaneously. Exercises mutex, semaphore,
 // and registry contention under load. Run with -race to detect data races.
 func TestMultiClone_StressConcurrency(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
@@ -500,6 +521,9 @@ path = %q
 // concurrent operations. If one scheduler is pulling while another calls
 // Checkout, the .sageox check shouldn't cause a valid clone to be renamed aside.
 func TestMultiClone_CheckoutTOCTOU(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}

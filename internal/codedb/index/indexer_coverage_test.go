@@ -17,6 +17,9 @@ import (
 
 func TestGitStatusDirtyFiles(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 
 	// helper to init a git repo with one committed file
 	setupRepo := func(t *testing.T) string {
@@ -125,6 +128,9 @@ func TestGitStatusDirtyFiles(t *testing.T) {
 
 func TestUpsertRepo(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	s := openTestStore(t)
 
 	tests := []struct {
@@ -172,6 +178,9 @@ func TestUpsertRepo(t *testing.T) {
 
 func TestLoadKnownCommits(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	s := openTestStore(t)
 
 	repoID, err := upsertRepo(s, "commits-repo", "/repo")
@@ -217,6 +226,9 @@ func TestLoadKnownCommits(t *testing.T) {
 
 func TestLoadExistingRefs(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	s := openTestStore(t)
 
 	repoID, err := upsertRepo(s, "refs-repo", "/repo")
@@ -273,6 +285,9 @@ func TestLoadExistingRefs(t *testing.T) {
 
 func TestIndexGitHubData_EmptyLedgerPath(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	s := openTestStore(t)
 	stats, err := IndexGitHubData(context.Background(), s, "", nil)
 	if err != nil {
@@ -286,6 +301,9 @@ func TestIndexGitHubData_EmptyLedgerPath(t *testing.T) {
 
 func TestIndexGitHubData_IssueIndexing(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	s := openTestStore(t)
 
 	ledgerPath := t.TempDir()
@@ -346,6 +364,9 @@ func TestIndexGitHubData_IssueIndexing(t *testing.T) {
 
 func TestIndexGitHubData_IssueUpsert(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	s := openTestStore(t)
 
 	ledgerPath := t.TempDir()
@@ -411,6 +432,9 @@ func TestIndexGitHubData_IssueUpsert(t *testing.T) {
 
 func TestIndexGitHubData_IncrementalSkip(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	s := openTestStore(t)
 
 	ledgerPath := t.TempDir()
@@ -444,6 +468,9 @@ func TestIndexGitHubData_IncrementalSkip(t *testing.T) {
 
 func TestIndexGitHubData_ContextCancellation(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	s := openTestStore(t)
 
 	ledgerPath := t.TempDir()
@@ -480,6 +507,9 @@ func TestIndexGitHubData_ContextCancellation(t *testing.T) {
 
 func TestIndexGitHubData_ProgressCallback(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	s := openTestStore(t)
 
 	ledgerPath := t.TempDir()
@@ -508,6 +538,9 @@ func TestIndexGitHubData_ProgressCallback(t *testing.T) {
 
 func TestIndexGitHubData_InvalidJSON(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	s := openTestStore(t)
 
 	ledgerPath := t.TempDir()
@@ -533,6 +566,9 @@ func TestIndexGitHubData_InvalidJSON(t *testing.T) {
 
 func TestIndexGitHubData_MixedPRsAndIssues(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	s := openTestStore(t)
 
 	ledgerPath := t.TempDir()
@@ -578,6 +614,9 @@ func TestIndexGitHubData_MixedPRsAndIssues(t *testing.T) {
 
 func TestIndexLocalRepo_Idempotent(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 3)
 	s := openTestStore(t)
 
@@ -601,6 +640,9 @@ func TestIndexLocalRepo_Idempotent(t *testing.T) {
 
 func TestIndexLocalRepo_WithProgress(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 2)
 	s := openTestStore(t)
 
@@ -622,6 +664,9 @@ func TestIndexLocalRepo_WithProgress(t *testing.T) {
 
 func TestIndexLocalRepo_WithMaxHistoryDepth(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 10)
 	s := openTestStore(t)
 
@@ -642,6 +687,9 @@ func TestIndexLocalRepo_WithMaxHistoryDepth(t *testing.T) {
 
 func TestIndexLocalRepo_ContextCancellation(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 5)
 	s := openTestStore(t)
 
@@ -658,6 +706,9 @@ func TestIndexLocalRepo_ContextCancellation(t *testing.T) {
 
 func TestIndexLocalRepo_CommitsHaveBlobs(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 3)
 	s := openTestStore(t)
 
@@ -685,6 +736,9 @@ func TestIndexLocalRepo_CommitsHaveBlobs(t *testing.T) {
 
 func TestIndexLocalRepo_FileRevsPopulated(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 2)
 	s := openTestStore(t)
 
@@ -703,6 +757,9 @@ func TestIndexLocalRepo_FileRevsPopulated(t *testing.T) {
 
 func TestIndexLocalRepo_RefsRecorded(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 2)
 	s := openTestStore(t)
 
@@ -723,6 +780,9 @@ func TestIndexLocalRepo_RefsRecorded(t *testing.T) {
 
 func TestBuildDirtyIndex_SkipsNonCodeFiles(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 1)
 
 	// add a non-code file (no language detection match)
@@ -742,6 +802,9 @@ func TestBuildDirtyIndex_SkipsNonCodeFiles(t *testing.T) {
 
 func TestBuildDirtyIndex_SkipsBinaryFiles(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 1)
 
 	// write binary content with a code extension
@@ -762,6 +825,9 @@ func TestBuildDirtyIndex_SkipsBinaryFiles(t *testing.T) {
 
 func TestBuildDirtyIndex_SkipsEmptyFiles(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 1)
 
 	if err := os.WriteFile(filepath.Join(dir, "empty.go"), []byte{}, 0o644); err != nil {
@@ -780,6 +846,9 @@ func TestBuildDirtyIndex_SkipsEmptyFiles(t *testing.T) {
 
 func TestBuildDirtyIndex_AtomicSwap(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 1)
 
 	// add dirty go file
@@ -811,6 +880,9 @@ func TestBuildDirtyIndex_AtomicSwap(t *testing.T) {
 
 func TestBuildDirtyIndex_RemovesStaleOnClean(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 1)
 
 	dirtyPath := filepath.Join(t.TempDir(), "dirty_index")
@@ -863,6 +935,9 @@ func TestBuildDirtyIndex_RemovesStaleOnClean(t *testing.T) {
 
 func TestFileMtimePersistence(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	s := openTestStore(t)
 
 	// save mtime
@@ -896,6 +971,9 @@ func TestFileMtimePersistence(t *testing.T) {
 
 func TestParseSymbols_NoSupportedLanguages(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	s := openTestStore(t)
 
 	stats, err := ParseSymbols(context.Background(), s, nil)
@@ -910,6 +988,9 @@ func TestParseSymbols_NoSupportedLanguages(t *testing.T) {
 
 func TestParseComments_NoUnparsedBlobs(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	s := openTestStore(t)
 
 	var messages []string
@@ -926,6 +1007,9 @@ func TestParseComments_NoUnparsedBlobs(t *testing.T) {
 
 func TestParseComments_WithIndexedRepo(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 3)
 	s := openTestStore(t)
 
@@ -955,6 +1039,9 @@ func TestParseComments_WithIndexedRepo(t *testing.T) {
 
 func TestParseComments_Idempotent(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 2)
 	s := openTestStore(t)
 
@@ -983,6 +1070,9 @@ func TestParseComments_Idempotent(t *testing.T) {
 
 func TestResolveDefaultBranch_WithHead(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, tipHash := initGitRepo(t, 2)
 
 	repo, err := plainOpenTolerant(dir)
@@ -1004,6 +1094,9 @@ func TestResolveDefaultBranch_WithHead(t *testing.T) {
 
 func TestResolveDefaultBranch_FallbackToBranchNames(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 
 	// create a bare repo (HEAD may not resolve in the same way)
 	dir := t.TempDir()
@@ -1060,6 +1153,9 @@ func TestResolveDefaultBranch_FallbackToBranchNames(t *testing.T) {
 
 func TestIndexLocalRepo_CustomTreeCacheLimit(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 5)
 	s := openTestStore(t)
 

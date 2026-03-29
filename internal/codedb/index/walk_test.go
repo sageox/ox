@@ -16,6 +16,9 @@ import (
 // oldest-first (topological) order: every parent appears before its children.
 // This is a regression test for BFS ordering with branching history.
 func TestWalkNewCommitsBFSOrder(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	tmp := t.TempDir()
 
 	repo, err := git.PlainInit(tmp, false)
@@ -109,6 +112,9 @@ func TestWalkNewCommitsBFSOrder(t *testing.T) {
 
 // TestWalkNewCommitsSkipsKnown verifies that already-known commits are excluded.
 func TestWalkNewCommitsSkipsKnown(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	tmp := t.TempDir()
 
 	repo, err := git.PlainInit(tmp, false)
@@ -159,6 +165,9 @@ func TestWalkNewCommitsSkipsKnown(t *testing.T) {
 
 // TestWalkNewCommitsMaxDepth verifies the depth limit is respected.
 func TestWalkNewCommitsMaxDepth(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	tmp := t.TempDir()
 
 	repo, err := git.PlainInit(tmp, false)

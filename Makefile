@@ -1,6 +1,6 @@
 # Makefile for ox CLI tool
 
-.PHONY: help build install clean dev run test test-all test-slow test-integration test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
+.PHONY: help build install clean dev run test test-all test-slow test-integration test-preflight test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
 
 # Variables
 GO := go
@@ -40,23 +40,37 @@ run: build ## Build and run ox
 	@./bin/$(BINARY_NAME)
 
 # Testing (uses gotestsum for human-readable colorized output)
+#
+# Test Tiers:
+#   fast  (make test)             — Unit tests <500ms. No git clone, no network. Runs on every commit.
+#   full  (make test-all)         — All unit tests including expensive ones (git clone, SQLite concurrent, LFS).
+#   slow  (make test-slow)        — Tests requiring real ox binary (build tag: slow). No Claude needed.
+#   integration (make test-integration) — E2E with real Claude sessions (build tag: integration). Release gate.
+#
+# Recommended usage:
+#   Coding:    make test           — Fast feedback (<30s target)
+#   Pre-PR:    make test-preflight — Full + slow + lint (~3-5min)
+#   Release:   make test-all test-slow test-integration
+#
 GOTESTSUM := $(shell which gotestsum 2>/dev/null || echo "go run gotest.tools/gotestsum@latest")
 
-test: ## Run tests with race detection (skips slow tests >500ms)
-	@echo "Running tests (skipping slow tests)..."
+test: ## Run fast tests — unit tests <500ms, race detection (every commit)
+	@echo "Running fast tests (skipping >500ms)..."
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -short -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
 
-test-all: ## Run all tests including slow tests (timeouts, delays)
-	@echo "Running all tests including slow tests..."
+test-all: ## Run all unit tests including expensive ones (git clone, SQLite, LFS)
+	@echo "Running all tests including expensive tests..."
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
 
-test-slow: ## Run slow tests (build tag: slow) - includes real Claude sessions
-	@echo "Running slow tests (requires claude CLI and ANTHROPIC_API_KEY)..."
+test-slow: ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed
+	@echo "Running slow tests (requires built ox binary)..."
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=slow -race -timeout=5m ./...
 
-test-integration: ## Run integration tests (build tag: integration) - full E2E with Claude
+test-integration: ## Run integration tests (build tag: integration) — E2E with real Claude sessions
 	@echo "Running integration tests (requires claude CLI and ANTHROPIC_API_KEY)..."
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=integration -race -timeout=10m ./...
+
+test-preflight: lint test-all test-slow ## Pre-PR quality gate: lint + all unit tests + slow tests
 
 test-ledger-twin: ## Run glance ledger twin tests (generates fake ledger for inspection)
 	@echo "Running ledger twin tests..."

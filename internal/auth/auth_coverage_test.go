@@ -18,6 +18,9 @@ import (
 
 func TestMakeRequest_ServerError500(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -35,6 +38,9 @@ func TestMakeRequest_ServerError500(t *testing.T) {
 
 func TestMakeRequest_ServerError503(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -48,6 +54,9 @@ func TestMakeRequest_ServerError503(t *testing.T) {
 
 func TestMakeRequest_404Response(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -67,6 +76,9 @@ func TestMakeRequest_404Response(t *testing.T) {
 
 func TestAuthClient_AuthenticatedRequest_ExpiredToken_RefreshSuccess(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	// mock API server
 	mockAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +132,9 @@ func TestAuthClient_AuthenticatedRequest_ExpiredToken_RefreshSuccess(t *testing.
 
 func TestAuthClient_AuthenticatedRequest_WithBody(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	var receivedBody map[string]interface{}
 
@@ -149,6 +164,9 @@ func TestAuthClient_AuthenticatedRequest_WithBody(t *testing.T) {
 
 func TestRefreshTokenForEndpoint_500Error(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -177,6 +195,9 @@ func TestRefreshTokenForEndpoint_500Error(t *testing.T) {
 
 func TestRefreshTokenForEndpoint_InvalidJSON(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -200,6 +221,9 @@ func TestRefreshTokenForEndpoint_InvalidJSON(t *testing.T) {
 
 func TestRefreshTokenForEndpoint_MissingAccessToken(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -226,6 +250,9 @@ func TestRefreshTokenForEndpoint_MissingAccessToken(t *testing.T) {
 
 func TestRefreshTokenForEndpoint_SessionTokenFallback(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -268,6 +295,9 @@ func TestRefreshTokenForEndpoint_SessionTokenFallback(t *testing.T) {
 // --- loadAuthStore: edge cases ---
 
 func TestLoadAuthStore_CorruptJSON(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 	setupTestDir(t)
 
 	authPath, err := GetAuthFilePath()
@@ -282,6 +312,9 @@ func TestLoadAuthStore_CorruptJSON(t *testing.T) {
 }
 
 func TestLoadAuthStore_EmptyFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 	setupTestDir(t)
 
 	authPath, err := GetAuthFilePath()
@@ -296,6 +329,9 @@ func TestLoadAuthStore_EmptyFile(t *testing.T) {
 }
 
 func TestLoadAuthStore_NonexistentFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 	setupTestDir(t)
 
 	store, err := loadAuthStore()
@@ -308,6 +344,9 @@ func TestLoadAuthStore_NonexistentFile(t *testing.T) {
 // --- saveAuthStore: round-trip ---
 
 func TestSaveAndLoadAuthStore_RoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 	setupTestDir(t)
 
 	token := &StoredToken{
@@ -331,6 +370,9 @@ func TestSaveAndLoadAuthStore_RoundTrip(t *testing.T) {
 // --- RequireAuth: authenticated path with expired token ---
 
 func TestRequireAuth_AuthRequired_ExpiredToken(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 	t.Setenv("FEATURE_AUTH", "true")
 	setupTestDir(t)
 
@@ -351,6 +393,9 @@ func TestRequireAuth_AuthRequired_ExpiredToken(t *testing.T) {
 
 func TestStoredToken_IsExpired(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	tests := []struct {
 		name          string
@@ -397,6 +442,9 @@ func TestStoredToken_IsExpired(t *testing.T) {
 
 func TestAuthClient_MultiEndpoint(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	tmpDir := t.TempDir()
 
@@ -424,6 +472,9 @@ func TestAuthClient_MultiEndpoint(t *testing.T) {
 // --- Package-level refreshTokenForEndpoint: exercises the global code path ---
 
 func TestPackageLevel_RefreshTokenForEndpoint_Success(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 	setupTestDir(t)
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -462,6 +513,9 @@ func TestPackageLevel_RefreshTokenForEndpoint_Success(t *testing.T) {
 }
 
 func TestPackageLevel_RefreshTokenForEndpoint_NoRefreshToken(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 	setupTestDir(t)
 
 	token := &StoredToken{
@@ -476,6 +530,9 @@ func TestPackageLevel_RefreshTokenForEndpoint_NoRefreshToken(t *testing.T) {
 }
 
 func TestPackageLevel_RefreshTokenForEndpoint_ServerError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 	setupTestDir(t)
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -500,6 +557,9 @@ func TestPackageLevel_RefreshTokenForEndpoint_ServerError(t *testing.T) {
 }
 
 func TestPackageLevel_RefreshTokenForEndpoint_NetworkError(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 	setupTestDir(t)
 
 	token := &StoredToken{
@@ -514,6 +574,9 @@ func TestPackageLevel_RefreshTokenForEndpoint_NetworkError(t *testing.T) {
 }
 
 func TestPackageLevel_RefreshTokenForEndpoint_MissingAccessToken(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 	setupTestDir(t)
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -537,6 +600,9 @@ func TestPackageLevel_RefreshTokenForEndpoint_MissingAccessToken(t *testing.T) {
 }
 
 func TestPackageLevel_RefreshTokenForEndpoint_JWTExchangeFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 	setupTestDir(t)
 
 	requestCount := 0
@@ -575,6 +641,9 @@ func TestPackageLevel_RefreshTokenForEndpoint_JWTExchangeFails(t *testing.T) {
 
 func TestAuthClient_RemoveToken_OnlyAffectsOwnEndpoint(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	tmpDir := t.TempDir()
 
@@ -602,6 +671,9 @@ func TestAuthClient_RemoveToken_OnlyAffectsOwnEndpoint(t *testing.T) {
 
 func TestMakeRequest_ContextDeadlineExceeded(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	// server that takes too long
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -624,6 +696,9 @@ func TestMakeRequest_ContextDeadlineExceeded(t *testing.T) {
 // --- EnsureValidTokenForEndpoint: additional edge cases ---
 
 func TestEnsureValidTokenForEndpoint_FreshTokenNoBigBuffer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 	setupTestDir(t)
 
 	ep := "https://fresh-ep.example.com"
@@ -645,6 +720,9 @@ func TestEnsureValidTokenForEndpoint_FreshTokenNoBigBuffer(t *testing.T) {
 
 func TestAuthClient_EnsureValidTokenForEndpoint_Valid(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	client := NewTestClient(t)
 
@@ -664,6 +742,9 @@ func TestAuthClient_EnsureValidTokenForEndpoint_Valid(t *testing.T) {
 
 func TestAuthClient_EnsureValidTokenForEndpoint_NoToken(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP timeouts")
+	}
 
 	client := NewTestClient(t)
 

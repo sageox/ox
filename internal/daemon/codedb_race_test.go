@@ -47,6 +47,9 @@ func seedCodeDB(t *testing.T, dataDir string) {
 // no SQLite errors should occur.
 func TestConcurrentIndexAttempts(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: concurrent indexing")
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
@@ -109,6 +112,9 @@ func TestConcurrentIndexAttempts(t *testing.T) {
 // concurrently while indexing is in progress without races or panics.
 func TestConcurrentStatsWhileIndexing(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: concurrent indexing")
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	tmpDir := t.TempDir()
@@ -171,6 +177,9 @@ func TestConcurrentStatsWhileIndexing(t *testing.T) {
 // connections (as real CLI processes would) hitting the same SQLite file.
 func TestConcurrentSearchWhileIndexing(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: concurrent indexing")
+	}
 
 	dataDir := t.TempDir()
 	seedCodeDB(t, dataDir)
@@ -244,6 +253,9 @@ func TestConcurrentSearchWhileIndexing(t *testing.T) {
 // goroutine to create the initial index.
 func TestMultipleManagersCheckFreshness(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: concurrent indexing")
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	tmpDir := t.TempDir()
@@ -308,6 +320,9 @@ func TestMultipleManagersCheckFreshness(t *testing.T) {
 // breakdowns even under concurrent access from multiple callers.
 func TestConcurrentStatsWithPerRepoData(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: concurrent indexing")
+	}
 
 	dataDir := t.TempDir()
 	seedCodeDB(t, dataDir)
@@ -369,6 +384,9 @@ func TestConcurrentStatsWithPerRepoData(t *testing.T) {
 // running "ox code search" at the same time.
 func TestConcurrentOpenAndSearch(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: concurrent indexing")
+	}
 
 	dataDir := t.TempDir()
 	seedCodeDB(t, dataDir)

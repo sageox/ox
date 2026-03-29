@@ -28,6 +28,9 @@ func buildAndAttachDirty(t *testing.T, s *store.Store, repoDir string) int {
 
 func TestBuildDirtyIndex_ModifiedFile(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 2)
 	dataDir := filepath.Join(t.TempDir(), "codedb")
 	require.NoError(t, os.MkdirAll(dataDir, 0o755))
@@ -47,6 +50,9 @@ func TestBuildDirtyIndex_ModifiedFile(t *testing.T) {
 
 func TestBuildDirtyIndex_NewFile(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 1)
 	dataDir := filepath.Join(t.TempDir(), "codedb")
 	require.NoError(t, os.MkdirAll(dataDir, 0o755))
@@ -66,6 +72,9 @@ func TestBuildDirtyIndex_NewFile(t *testing.T) {
 
 func TestBuildDirtyIndex_CleanWorktree(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 3)
 	dataDir := filepath.Join(t.TempDir(), "codedb")
 	require.NoError(t, os.MkdirAll(dataDir, 0o755))
@@ -88,6 +97,9 @@ func TestBuildDirtyIndex_CleanWorktree(t *testing.T) {
 
 func TestBuildDirtyIndex_MultipleFiles(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	dir, _ := initGitRepo(t, 1)
 	dataDir := filepath.Join(t.TempDir(), "codedb")
 	require.NoError(t, os.MkdirAll(dataDir, 0o755))
@@ -111,6 +123,9 @@ func TestBuildDirtyIndex_MultipleFiles(t *testing.T) {
 
 func TestDirtyIndexPath_Deterministic(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
 	p1 := DirtyIndexPath("/data/codedb", "/home/user/project")
 	p2 := DirtyIndexPath("/data/codedb", "/home/user/project")
 	assert.Equal(t, p1, p2, "same inputs should produce same path")

@@ -125,6 +125,9 @@ func columnExists(t *testing.T, db *sql.DB, table, column string) bool {
 
 func TestMigrateAddTypeInfo_FromOlderSchema(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
 	db, _ := createOldSchemaDB(t)
 	defer db.Close()
 
@@ -156,6 +159,9 @@ func TestMigrateAddTypeInfo_FromOlderSchema(t *testing.T) {
 
 func TestMigrateAddTypeInfo_Idempotent(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
 	db, _ := createOldSchemaDB(t)
 	defer db.Close()
 
@@ -169,6 +175,9 @@ func TestMigrateAddTypeInfo_Idempotent(t *testing.T) {
 
 func TestMigrateAddComments_FromOlderSchema(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
 	db, _ := createOldSchemaDB(t)
 	defer db.Close()
 
@@ -200,6 +209,9 @@ func TestMigrateAddComments_FromOlderSchema(t *testing.T) {
 
 func TestMigrateAddComments_Idempotent(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
 	db, _ := createOldSchemaDB(t)
 	defer db.Close()
 
@@ -222,6 +234,9 @@ func TestMigrateAddComments_Idempotent(t *testing.T) {
 
 func TestMigrateAddGitHubTables_FromOlderSchema(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
 	db, _ := createOldSchemaDB(t)
 	defer db.Close()
 
@@ -254,6 +269,9 @@ func TestMigrateAddGitHubTables_FromOlderSchema(t *testing.T) {
 
 func TestMigrateAddGitHubTables_Idempotent(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
 	db, _ := createOldSchemaDB(t)
 	defer db.Close()
 
@@ -275,6 +293,9 @@ func TestMigrateAddGitHubTables_Idempotent(t *testing.T) {
 
 func TestMigrateAddPRCommits_FromOlderSchema(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
 	db, _ := createOldSchemaDB(t)
 	defer db.Close()
 
@@ -321,6 +342,9 @@ func TestMigrateAddPRCommits_FromOlderSchema(t *testing.T) {
 
 func TestMigrateAddPRCommits_Idempotent(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
 	db, _ := createOldSchemaDB(t)
 	defer db.Close()
 
@@ -349,6 +373,9 @@ func TestMigrateAddPRCommits_Idempotent(t *testing.T) {
 
 func TestCreateSchema_AllMigrations(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
 	db, _ := createOldSchemaDB(t)
 	defer db.Close()
 
@@ -385,6 +412,9 @@ func TestCreateSchema_AllMigrations(t *testing.T) {
 
 func TestOpenExistingDB_TriggersAllMigrations(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
 	tmp := t.TempDir()
 	dbPath := filepath.Join(tmp, "metadata.db")
 

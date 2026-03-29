@@ -76,6 +76,9 @@ func createLinkedWorktree(t *testing.T, mainRepoDir, branchName string) string {
 
 func TestResolveGitDir_NormalRepo(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git worktree operations")
+	}
 	dir, _ := initGitRepo(t, 1)
 
 	path, isWorktree := resolveGitDir(dir)
@@ -85,6 +88,9 @@ func TestResolveGitDir_NormalRepo(t *testing.T) {
 
 func TestResolveGitDir_LinkedWorktree(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git worktree operations")
+	}
 	mainDir, _ := initGitRepo(t, 1)
 
 	worktreeDir := createLinkedWorktree(t, mainDir, "feature-branch")
@@ -100,6 +106,9 @@ func TestResolveGitDir_LinkedWorktree(t *testing.T) {
 
 func TestResolveGitDir_NoGit(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git worktree operations")
+	}
 	dir := t.TempDir()
 
 	path, isWorktree := resolveGitDir(dir)
@@ -109,6 +118,9 @@ func TestResolveGitDir_NoGit(t *testing.T) {
 
 func TestResolveDefaultBranchGit(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git worktree operations")
+	}
 	dir, tipHash := initGitRepo(t, 3)
 
 	ref, err := resolveDefaultBranchGit(dir)
@@ -119,6 +131,9 @@ func TestResolveDefaultBranchGit(t *testing.T) {
 
 func TestResolveDefaultBranchGit_Worktree(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git worktree operations")
+	}
 	mainDir, _ := initGitRepo(t, 3)
 	worktreeDir := createLinkedWorktree(t, mainDir, "wt-branch")
 
@@ -149,6 +164,9 @@ func TestResolveDefaultBranchGit_Worktree(t *testing.T) {
 
 func TestResolveDefaultBranchWithPath_NormalRepo(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git worktree operations")
+	}
 	dir, tipHash := initGitRepo(t, 2)
 
 	repo, err := git.PlainOpen(dir)
@@ -162,6 +180,9 @@ func TestResolveDefaultBranchWithPath_NormalRepo(t *testing.T) {
 
 func TestResolveDefaultBranchWithPath_WorktreeFallback(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git worktree operations")
+	}
 	mainDir, _ := initGitRepo(t, 2)
 	worktreeDir := createLinkedWorktree(t, mainDir, "fallback-branch")
 
@@ -183,6 +204,9 @@ func TestResolveDefaultBranchWithPath_WorktreeFallback(t *testing.T) {
 
 func TestIndexLocalRepo_LinkedWorktree(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git worktree operations")
+	}
 	mainDir, _ := initGitRepo(t, 5)
 	worktreeDir := createLinkedWorktree(t, mainDir, "index-branch")
 
@@ -238,6 +262,9 @@ func TestIndexLocalRepo_LinkedWorktree(t *testing.T) {
 
 func TestIndexLocalRepo_NormalRepo(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git worktree operations")
+	}
 	dir, _ := initGitRepo(t, 3)
 
 	dataDir := filepath.Join(t.TempDir(), "codedb")

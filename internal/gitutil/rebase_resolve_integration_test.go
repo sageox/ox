@@ -93,6 +93,9 @@ func setupDivergentRepos(t *testing.T, filename, oursContent, theirsContent stri
 }
 
 func TestResolveRebaseAcceptTheirs_SafePathResolves(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git rebase operations")
+	}
 	_, repo := setupDivergentRepos(t, "data/github/prs.json", `{"local":true}`, `{"remote":true}`)
 
 	err := ResolveRebaseAcceptTheirs(context.Background(), repo, []string{"data/github/"})
@@ -111,6 +114,9 @@ func TestResolveRebaseAcceptTheirs_SafePathResolves(t *testing.T) {
 }
 
 func TestResolveRebaseAcceptTheirs_UnsafePathRejects(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git rebase operations")
+	}
 	_, repo := setupDivergentRepos(t, "sessions/important.jsonl", "local data", "remote data")
 
 	err := ResolveRebaseAcceptTheirs(context.Background(), repo, []string{"data/github/"})
@@ -123,6 +129,9 @@ func TestResolveRebaseAcceptTheirs_UnsafePathRejects(t *testing.T) {
 }
 
 func TestResolveRebaseAcceptTheirs_MixedSafeAndUnsafe(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git rebase operations")
+	}
 	// create a repo with two conflicting files: one safe, one unsafe
 	bareDir := filepath.Join(t.TempDir(), "bare.git")
 	oursClone := filepath.Join(t.TempDir(), "ours")
@@ -182,6 +191,9 @@ func TestResolveRebaseAcceptTheirs_MixedSafeAndUnsafe(t *testing.T) {
 }
 
 func TestResolveRebaseAcceptTheirs_NoConflicts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git rebase operations")
+	}
 	// call on a repo that is NOT in a rebase state
 	dir := t.TempDir()
 	gitInRepo(t, dir, "init", "--initial-branch=main")
@@ -197,6 +209,9 @@ func TestResolveRebaseAcceptTheirs_NoConflicts(t *testing.T) {
 }
 
 func TestResolveRebaseAcceptTheirs_MultipleSafeFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git rebase operations")
+	}
 	// two safe-path files conflict, both should be resolved
 	bareDir := filepath.Join(t.TempDir(), "bare.git")
 	oursClone := filepath.Join(t.TempDir(), "ours")
@@ -253,6 +268,9 @@ func TestResolveRebaseAcceptTheirs_MultipleSafeFiles(t *testing.T) {
 }
 
 func TestResolveRebaseAcceptTheirs_EmptyPrefixes(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git rebase operations")
+	}
 	_, repo := setupDivergentRepos(t, "data/github/prs.json", `{"local":true}`, `{"remote":true}`)
 
 	// empty prefixes = nothing is safe
@@ -264,6 +282,9 @@ func TestResolveRebaseAcceptTheirs_EmptyPrefixes(t *testing.T) {
 }
 
 func TestResolveRebaseAcceptTheirs_DenyPrefixBlocksResolution(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git rebase operations")
+	}
 	// conflict in data/proprietary/ which is denied even though data/ is allowed
 	_, repo := setupDivergentRepos(t, "data/proprietary/secrets.json", `{"local":true}`, `{"remote":true}`)
 
@@ -275,6 +296,9 @@ func TestResolveRebaseAcceptTheirs_DenyPrefixBlocksResolution(t *testing.T) {
 }
 
 func TestResolveRebaseAcceptTheirs_DenyPrefixAllowsSiblingPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git rebase operations")
+	}
 	// conflict in data/github/ should resolve even when data/proprietary/ is denied
 	_, repo := setupDivergentRepos(t, "data/github/prs.json", `{"local":true}`, `{"remote":true}`)
 
@@ -285,6 +309,9 @@ func TestResolveRebaseAcceptTheirs_DenyPrefixAllowsSiblingPath(t *testing.T) {
 }
 
 func TestResolveRebaseAcceptTheirs_ThreeLevelNesting(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git rebase operations")
+	}
 	// data/ = auto, data/proprietary/ = none, data/proprietary/public/ = auto
 	// conflict in public subdir should resolve
 	_, repo := setupDivergentRepos(t, "data/proprietary/public/readme.md", "local", "remote")

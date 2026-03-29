@@ -98,6 +98,9 @@ func pushFromSeparateClone(t *testing.T, bareDir, filename, content string) {
 }
 
 func TestDetectDivergedBranches_NormalPush(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	bareDir, cloneDir := setupBareAndClone(t)
 
 	// push a normal commit from a separate clone
@@ -112,6 +115,9 @@ func TestDetectDivergedBranches_NormalPush(t *testing.T) {
 }
 
 func TestDetectDivergedBranches_Diverged(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	bareDir, cloneDir := setupBareAndClone(t)
 
 	// make a local commit
@@ -138,6 +144,9 @@ func TestDetectDivergedBranches_Diverged(t *testing.T) {
 }
 
 func TestDetectDivergedBranches_NoRemote(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	dir := t.TempDir()
 	gitCmd(t, dir, "init")
 	gitCmd(t, dir, "config", "user.name", "test")
@@ -152,6 +161,9 @@ func TestDetectDivergedBranches_NoRemote(t *testing.T) {
 }
 
 func TestDoPull_StaleLockFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	_, cloneDir := setupBareAndClone(t)
 
 	// create a stale lock file
@@ -176,6 +188,9 @@ func TestDoPull_StaleLockFile(t *testing.T) {
 }
 
 func TestDoPull_CorruptRepo_RenamedAside(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	_, cloneDir := setupBareAndClone(t)
 
 	// corrupt the repo by emptying .git/HEAD
@@ -205,6 +220,9 @@ func TestDoPull_CorruptRepo_RenamedAside(t *testing.T) {
 }
 
 func TestDoPull_RebaseInProgress_Skips(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	_, cloneDir := setupBareAndClone(t)
 
 	// simulate broken rebase state
@@ -218,6 +236,9 @@ func TestDoPull_RebaseInProgress_Skips(t *testing.T) {
 }
 
 func TestDoPull_DivergedLedger_RebasesSuccessfully(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	bareDir, cloneDir := setupBareAndClone(t)
 
 	// create a local commit (simulates CLI session upload)
@@ -247,6 +268,9 @@ func TestDoPull_DivergedLedger_RebasesSuccessfully(t *testing.T) {
 }
 
 func TestDoPull_DivergedLedger_ConflictInSafePath_AutoResolves(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	bareDir, cloneDir := setupBareAndClone(t)
 
 	// local commit: modify a file under data/github/ (safe auto-resolve path)
@@ -277,6 +301,9 @@ func TestDoPull_DivergedLedger_ConflictInSafePath_AutoResolves(t *testing.T) {
 }
 
 func TestDoPull_ConflictInUnsafePath_ReportsIssueAndAborts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	bareDir, cloneDir := setupBareAndClone(t)
 
 	// local commit: modify SOUL.md (not under any safe auto-resolve prefix)
@@ -320,6 +347,9 @@ func TestDoPull_ConflictInUnsafePath_ReportsIssueAndAborts(t *testing.T) {
 }
 
 func TestDoPull_DivergedWithMixedConflicts_AbortsRebase(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	bareDir, cloneDir := setupBareAndClone(t)
 
 	// local commit: modify both a safe and unsafe file
@@ -353,6 +383,9 @@ func TestDoPull_DivergedWithMixedConflicts_AbortsRebase(t *testing.T) {
 }
 
 func TestPullTeamContext_DivergedBranches_RebasesSuccessfully(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	bareDir, cloneDir := setupBareAndClone(t)
 
 	// local commit (simulates daemon EnsureCheckoutGitignore or user edit)
@@ -380,6 +413,9 @@ func TestPullTeamContext_DivergedBranches_RebasesSuccessfully(t *testing.T) {
 }
 
 func TestPullTeamContext_ConflictReportsIssue(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	bareDir, cloneDir := setupBareAndClone(t)
 
 	// local commit: edit SOUL.md
@@ -418,6 +454,9 @@ func TestPullTeamContext_ConflictReportsIssue(t *testing.T) {
 }
 
 func TestDoPull_SuccessfulPull(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	bareDir, cloneDir := setupBareAndClone(t)
 
 	// push a change from a separate clone

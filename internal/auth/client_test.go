@@ -16,6 +16,9 @@ import (
 
 func TestAuthenticatedRequest_NoToken(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	client := NewAuthClientWithDir(t.TempDir())
 
@@ -32,6 +35,9 @@ func TestAuthenticatedRequest_NoToken(t *testing.T) {
 
 func TestAuthenticatedRequest_Success(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	// create mock API server that expects Bearer token
 	var receivedAuthHeader string
@@ -82,6 +88,9 @@ func TestAuthenticatedRequest_Success(t *testing.T) {
 
 func TestAuthenticatedRequest_401Retry(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	// track request count
 	requestCount := 0
@@ -177,6 +186,9 @@ func TestAuthenticatedRequest_401Retry(t *testing.T) {
 
 func TestAuthenticatedRequest_401RefreshFails(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	// mock refresh server that returns error
 	mockRefresh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -208,6 +220,9 @@ func TestAuthenticatedRequest_401RefreshFails(t *testing.T) {
 
 func TestAPIResponse_Ok(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	tests := []struct {
 		name       string
@@ -243,6 +258,9 @@ func TestAPIResponse_Ok(t *testing.T) {
 
 func TestMakeRequest_JSON(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	var receivedContentType string
 	var receivedBody string
@@ -288,6 +306,9 @@ func TestMakeRequest_JSON(t *testing.T) {
 
 func TestMakeRequest_NoData(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	var receivedContentType string
 	var hasBody bool
@@ -315,6 +336,9 @@ func TestMakeRequest_NoData(t *testing.T) {
 
 func TestMakeRequest_UserAgent(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	var receivedUserAgent string
 
@@ -338,6 +362,9 @@ func TestMakeRequest_UserAgent(t *testing.T) {
 
 func TestMakeRequest_ResponseParsing(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	tests := []struct {
 		name        string
@@ -409,6 +436,9 @@ func TestMakeRequest_ResponseParsing(t *testing.T) {
 
 func TestMakeRequest_HTTPMethods(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	methods := []string{"GET", "POST", "PUT", "DELETE", "PATCH"}
 
@@ -434,6 +464,9 @@ func TestMakeRequest_HTTPMethods(t *testing.T) {
 
 func TestMakeRequest_NetworkError(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	// use invalid URL to trigger network error
 	_, err := makeRequest(context.Background(), "GET", "http://invalid-host-does-not-exist:99999/test", "test-token", nil)
@@ -449,6 +482,9 @@ func TestMakeRequest_NetworkError(t *testing.T) {
 
 func TestMakeRequest_InvalidJSON(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	// data that cannot be marshaled to JSON
 	invalidData := make(chan int) // channels cannot be marshaled to JSON
@@ -461,6 +497,9 @@ func TestMakeRequest_InvalidJSON(t *testing.T) {
 
 func TestAuthenticatedRequest_ProactiveRefresh(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	var apiCallCount int
 
@@ -509,6 +548,9 @@ func TestAuthenticatedRequest_ProactiveRefresh(t *testing.T) {
 
 func TestAuthenticationError_Error(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	err := &AuthenticationError{
 		Message: "test authentication error",
@@ -520,6 +562,9 @@ func TestAuthenticationError_Error(t *testing.T) {
 
 func TestAPIError_Error(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	err := &APIError{
 		StatusCode: 404,
@@ -532,6 +577,9 @@ func TestAPIError_Error(t *testing.T) {
 
 func TestMakeRequest_HeadersPreserved(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: HTTP request timeouts")
+	}
 
 	var headers http.Header
 

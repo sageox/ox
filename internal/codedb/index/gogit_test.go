@@ -19,6 +19,9 @@ func replaceFormatVersion(content, version string) string {
 
 func TestPlainOpenTolerant_NormalRepo(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	dir, _ := initGitRepo(t, 1)
 
 	repo, err := plainOpenTolerant(dir)
@@ -31,6 +34,9 @@ func TestPlainOpenTolerant_NormalRepo(t *testing.T) {
 // extensions natively (objectformat, worktreeconfig).
 func TestPlainOpenTolerant_RepoWithExtensions(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	dir, _ := initGitRepo(t, 1)
 
 	gitConfig := filepath.Join(dir, ".git", "config")
@@ -49,6 +55,9 @@ func TestPlainOpenTolerant_RepoWithExtensions(t *testing.T) {
 
 func TestPlainOpenTolerant_FormatV1WithUnknownExtension(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	dir, _ := initGitRepo(t, 1)
 
 	gitConfig := filepath.Join(dir, ".git", "config")
@@ -66,6 +75,9 @@ func TestPlainOpenTolerant_FormatV1WithUnknownExtension(t *testing.T) {
 
 func TestPlainOpenTolerant_NonRepoPath(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	dir := t.TempDir()
 
 	repo, err := plainOpenTolerant(dir)
@@ -109,6 +121,9 @@ func TestPlainOpenTolerant_KeepDescriptors(t *testing.T) {
 // pointing to the main repo, so extensions are read from the main repo's config.
 func TestPlainOpenTolerant_WorktreeWithExtensions(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
 	mainDir, _ := initGitRepo(t, 1)
 
 	worktreeDir := createLinkedWorktree(t, mainDir, "ext-test")

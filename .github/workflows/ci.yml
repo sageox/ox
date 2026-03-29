@@ -27,8 +27,13 @@ jobs:
       - name: Build
         run: go build -v ./...
 
-      - name: Test
+      - name: Fast tests
+        if: github.event_name == 'push'
         run: go test -short -race ./...
+
+      - name: Full tests (PR gate)
+        if: github.event_name == 'pull_request'
+        run: go test -race -p 8 -parallel 32 ./...
 
   lint:
     runs-on: ubuntu-latest

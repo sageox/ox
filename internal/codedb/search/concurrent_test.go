@@ -17,6 +17,9 @@ import (
 // should never block each other.
 func TestConcurrentSearchSameStore(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: concurrent indexing")
+	}
 
 	s := openTestStore(t)
 	seedTestData(t, s)
@@ -84,6 +87,9 @@ func TestConcurrentSearchSameStore(t *testing.T) {
 // new data (e.g., during incremental re-index).
 func TestConcurrentSearchAndWrite(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: concurrent indexing")
+	}
 
 	s := openTestStore(t)
 	seedTestData(t, s)
@@ -158,6 +164,9 @@ func TestConcurrentSearchAndWrite(t *testing.T) {
 // the result correctness, not just absence of crashes.
 func TestConcurrentSearchDifferentQueries(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: concurrent indexing")
+	}
 
 	s := openTestStore(t)
 	seedTestData(t, s)
@@ -235,6 +244,9 @@ func TestConcurrentSearchDifferentQueries(t *testing.T) {
 // searches handle context cancellation gracefully without panics or leaks.
 func TestConcurrentSearchWithContextCancellation(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: concurrent indexing")
+	}
 
 	s := openTestStore(t)
 	seedTestData(t, s)

@@ -22,6 +22,9 @@ func newDiscoveryTestScheduler(t *testing.T) *SyncScheduler {
 }
 
 func TestRefreshCredentials_DedupWithinWindow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	s := newDiscoveryTestScheduler(t)
 
 	// first call sets the timestamp
@@ -43,6 +46,9 @@ func TestRefreshCredentials_DedupWithinWindow(t *testing.T) {
 }
 
 func TestRefreshCredentials_AllowsAfterWindow(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	s := newDiscoveryTestScheduler(t)
 
 	// set timestamp to 6 minutes ago (beyond 5min dedup window)
@@ -62,6 +68,9 @@ func TestRefreshCredentials_AllowsAfterWindow(t *testing.T) {
 }
 
 func TestRefreshCredentials_ConcurrentCalls(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	s := newDiscoveryTestScheduler(t)
 
 	var wg sync.WaitGroup

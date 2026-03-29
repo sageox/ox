@@ -3,6 +3,9 @@ package index
 import "testing"
 
 func TestRepoDirFromURL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	tests := []struct {
 		url  string
 		want string
@@ -24,6 +27,9 @@ func TestRepoDirFromURL(t *testing.T) {
 }
 
 func TestRepoDirFromURLInvalid(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	_, err := RepoDirFromURL("https://")
 	if err == nil {
 		t.Error("expected error for invalid URL")
@@ -31,6 +37,9 @@ func TestRepoDirFromURLInvalid(t *testing.T) {
 }
 
 func TestRepoNameFromURL(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 	tests := []struct {
 		name    string
 		url     string

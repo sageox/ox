@@ -4,6 +4,9 @@ import "testing"
 
 func TestNormalizeRepoURL(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 
 	tests := []struct {
 		name    string
@@ -47,6 +50,9 @@ func TestNormalizeRepoURL(t *testing.T) {
 
 func TestRepoDirFromURL_Schemes(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 
 	tests := []struct {
 		name string
@@ -73,6 +79,9 @@ func TestRepoDirFromURL_Schemes(t *testing.T) {
 
 func TestRepoDirFromURL_ErrorCases(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
 
 	errCases := []string{
 		"https://",

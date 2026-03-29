@@ -479,9 +479,18 @@ RIGHT: Update tests to use CreateInitializedProject(t) helper
 
 **A feature is not done until it works in a real Claude Code session.** Unit tests verify logic; integration tests verify reality. Both are required, but E2E is the release gate.
 
-- **Unit tests** (`make test`): Fast feedback on logic correctness. Good for pure functions, state machines, data transforms.
-- **Integration tests** (`make test-integration`): Real ox CLI binary, real hooks, real session recording. Required for any feature touching the agent pipeline (hooks, prime, sessions, commit trailers).
-- **E2E with real Claude** (`make test-integration` with `claude` CLI): The ultimate test. If it doesn't work with a real Claude Code session, it's not shipped.
+- **Fast tests** (`make test`): Unit tests <500ms. No git clone, no network. Every commit. Target: <30s.
+- **Full tests** (`make test-all`): All unit tests including expensive ones (git clone, SQLite concurrent, LFS repair). Run before PRs.
+- **Slow tests** (`make test-slow`): Tests requiring real ox binary (build tag: `slow`). No Claude needed.
+- **Integration tests** (`make test-integration`): Real Claude sessions, real hooks, real session recording. Release gate.
+- **Pre-PR gate** (`make test-preflight`): lint + full + slow. Run before creating PRs (~3-5min).
+
+**Slow test guard:** Any test >500ms must skip in short mode:
+```go
+if testing.Short() {
+    t.Skip("short: <reason — git clone, polling timeout, etc.>")
+}
+```
 
 **No test theater.** Each test must answer: "What real-world failure does this prevent?" Tests that pass when the feature is broken are worse than no tests.
 
@@ -658,10 +667,12 @@ This data is essential for learning what's working, what's broken, and where age
 
 ### Release Gate: E2E Integration Tests with Real Claude Code
 
-**Before ANY release**, the E2E integration tests that launch real Claude Code instances MUST pass:
+**Before ANY release**, ALL test tiers MUST pass:
 
 ```bash
-make test-integration  # build tag: integration, requires claude CLI + ANTHROPIC_API_KEY
+make test-all          # all unit tests including expensive ones
+make test-slow         # tests requiring real ox binary
+make test-integration  # E2E with real Claude (requires claude CLI + ANTHROPIC_API_KEY)
 ```
 
 These tests (`tests/integration/agents/claude/`) start actual Claude Code processes, exercise real hooks, send real SIGINT signals, and verify the full session recording and anti-entropy pipelines. They are the final quality gate — do not ship if they fail.

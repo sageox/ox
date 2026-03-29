@@ -15,6 +15,9 @@ import (
 
 func TestRequestDeviceCode_Success(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// create mock server that returns valid device code response
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -58,6 +61,9 @@ func TestRequestDeviceCode_Success(t *testing.T) {
 
 func TestRequestDeviceCode_Error(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// create mock server that returns error
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -83,6 +89,9 @@ func TestRequestDeviceCode_Error(t *testing.T) {
 
 func TestRequestDeviceCode_InvalidJSON(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// create mock server that returns invalid JSON
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -101,6 +110,9 @@ func TestRequestDeviceCode_InvalidJSON(t *testing.T) {
 
 func TestLogin_Success(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	callCount := 0
 	// create mock server that:
@@ -204,6 +216,9 @@ func TestLogin_Success(t *testing.T) {
 
 func TestLogin_Timeout(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// create mock server that always returns authorization_pending
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -242,6 +257,9 @@ func TestLogin_Timeout(t *testing.T) {
 
 func TestLogin_AccessDenied(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// create mock server that returns access_denied
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -383,6 +401,9 @@ func TestLogin_SlowDown(t *testing.T) {
 
 func TestLogin_ContextCancellation(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// create mock server that always returns authorization_pending
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -427,6 +448,9 @@ func TestLogin_ContextCancellation(t *testing.T) {
 
 func TestLogin_ExpiredToken(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// create mock server that returns expired_token
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -463,6 +487,9 @@ func TestLogin_ExpiredToken(t *testing.T) {
 
 func TestLogin_UserInfoError(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// create mock server where token succeeds but userinfo fails
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -528,6 +555,9 @@ func TestLogin_UserInfoError(t *testing.T) {
 
 func TestPollToken_Success(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// create mock server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -559,6 +589,9 @@ func TestPollToken_Success(t *testing.T) {
 
 func TestPollToken_AuthorizationPending(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// create mock server that returns authorization_pending
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -582,6 +615,9 @@ func TestPollToken_AuthorizationPending(t *testing.T) {
 
 func TestFetchUserInfo_Success(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// create mock server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -612,6 +648,9 @@ func TestFetchUserInfo_Success(t *testing.T) {
 
 func TestFetchUserInfo_Unauthorized(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// create mock server that returns 401
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -631,6 +670,9 @@ func TestFetchUserInfo_Unauthorized(t *testing.T) {
 
 func TestExchangeForJWT_ResponseFormats(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	tests := []struct {
 		name        string
@@ -693,6 +735,9 @@ func TestExchangeForJWT_ResponseFormats(t *testing.T) {
 
 func TestExchangeForJWT_RefreshTokenField(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// verify JWTExchangeResponse captures refresh_token from server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -715,6 +760,9 @@ func TestExchangeForJWT_RefreshTokenField(t *testing.T) {
 
 func TestLogin_JWTExchangeRefreshTokenFallback(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// Regression test: when device flow returns no refresh_token,
 	// but JWT exchange does, the stored token should use the JWT exchange one.
@@ -778,6 +826,9 @@ func TestLogin_JWTExchangeRefreshTokenFallback(t *testing.T) {
 
 func TestLogin_JWTExchangeRefreshTokenFallback_WithSessionToken(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: device flow polling")
+	}
 
 	// Edge case: device flow returns session_token (no refresh_token),
 	// JWT exchange returns refresh_token — JWT refresh_token should be preferred.
