@@ -13,7 +13,7 @@ import (
 const sigTERM = syscall.SIGTERM
 
 // signalProcess sends a signal to the given PID.
-// Used by killStaleDaemon to check liveness (signal 0) and terminate (SIGTERM).
+// Used by KillStaleDaemon to check liveness (signal 0) and terminate (SIGTERM).
 func signalProcess(pid int, sig syscall.Signal) error {
 	return syscall.Kill(pid, sig)
 }

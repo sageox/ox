@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// --- killStaleDaemon tests ---
+// --- KillStaleDaemon tests ---
 
 // setupIsolatedRegistry creates an isolated XDG environment and writes a registry
 // with the given entries. Returns the tmp dir.
@@ -40,7 +40,7 @@ func TestKillStaleDaemon_NoRegistryEntry(t *testing.T) {
 	setupIsolatedRegistry(t, map[string]DaemonInfo{})
 
 	// should be a no-op, no panics
-	killStaleDaemon("nonexistent")
+	KillStaleDaemon("nonexistent")
 }
 
 func TestKillStaleDaemon_DeadProcess(t *testing.T) {
@@ -57,7 +57,7 @@ func TestKillStaleDaemon_DeadProcess(t *testing.T) {
 	pidPath := filepath.Join(tmpDir, "sageox", "daemon", "daemon-"+wsID+".pid")
 	require.NoError(t, os.WriteFile(pidPath, []byte("999999999\n"), 0600))
 
-	killStaleDaemon(wsID)
+	KillStaleDaemon(wsID)
 
 	// registry entry should be cleaned up
 	reg, err := LoadRegistry()
@@ -145,7 +145,7 @@ func TestKillStaleDaemon_AliveButReachable(t *testing.T) {
 	regPath := filepath.Join(tmpDir, "sageox", "daemon", "registry.json")
 	require.NoError(t, os.WriteFile(regPath, data, 0600))
 
-	killStaleDaemon(wsID)
+	KillStaleDaemon(wsID)
 
 	// IPC stop should have been called (graceful path)
 	select {
@@ -222,7 +222,7 @@ func TestKillStaleDaemon_StopAckedPidAlive(t *testing.T) {
 	require.NoError(t, os.WriteFile(
 		filepath.Join(tmpDir, "sageox", "daemon", "registry.json"), data, 0600))
 
-	err = killStaleDaemon(wsID)
+	err = KillStaleDaemon(wsID)
 	require.NoError(t, err, "should succeed via SIGTERM escalation")
 
 	// child should be dead — SIGTERM escalation should have killed it
@@ -278,7 +278,7 @@ func TestKillStaleDaemon_AliveButUnreachable(t *testing.T) {
 	data, _ := json.MarshalIndent(reg, "", "  ")
 	require.NoError(t, os.WriteFile(filepath.Join(regDir, "registry.json"), data, 0600))
 
-	killStaleDaemon(wsID)
+	KillStaleDaemon(wsID)
 
 	// child should exit after SIGTERM — wait for reaper goroutine
 	select {

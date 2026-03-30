@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"time"
 
 	"github.com/sageox/ox/internal/daemon"
 )
@@ -53,26 +52,15 @@ func checkDaemonDeduplication(fix bool) checkResult {
 		).WithFixInfo(CheckSlugDaemonDedup, FixLevelConfirm)
 	}
 
-	// stop each duplicate via IPC with longer timeout, wait for exit, then unregister
-	reg, _ := daemon.LoadRegistry()
+	// use the full IPC→wait→SIGTERM cleanup flow for each duplicate
 	var stopped, failed int
 	for _, d := range dupes {
-		client := daemon.NewClientWithSocketAndTimeout(d.SocketPath, 2*time.Second)
-		if err := client.Stop(); err != nil {
+		if err := daemon.KillStaleDaemon(d.WorkspaceID); err != nil {
 			slog.Debug("failed to stop duplicate daemon", "workspace_id", d.WorkspaceID, "pid", d.PID, "error", err)
 			failed++
 			continue
 		}
-		// wait for the process to actually exit before unregistering
-		if !daemon.WaitForProcessExit(d.PID, 5*time.Second) {
-			slog.Debug("duplicate daemon did not exit in time", "workspace_id", d.WorkspaceID, "pid", d.PID)
-			failed++
-			continue
-		}
 		stopped++
-		if reg != nil {
-			_ = reg.Unregister(d.WorkspaceID)
-		}
 	}
 
 	if failed > 0 {

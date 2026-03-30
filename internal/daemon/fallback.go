@@ -163,7 +163,7 @@ func ensureDaemonInternal() error {
 	// Kill any stale daemon for this workspace before starting a new one.
 	// Reached when: daemon stopped, daemon stuck (past startup window), or
 	// wait loop expired. IPC stop will likely fail; SIGTERM is the fallback.
-	if err := killStaleDaemon(CurrentWorkspaceID()); err != nil {
+	if err := KillStaleDaemon(CurrentWorkspaceID()); err != nil {
 		return fmt.Errorf("failed to stop stale daemon: %w", err)
 	}
 
@@ -220,11 +220,13 @@ func ensureDaemonInternal() error {
 	return fmt.Errorf("daemon started but not responding")
 }
 
-// killStaleDaemon kills any existing daemon for the given workspace before starting a new one.
+// KillStaleDaemon kills any existing daemon for the given workspace before starting a new one.
 // Escalation: IPC stop (graceful) → SIGTERM (forceful) → error.
 // Returns nil if the stale daemon was successfully stopped or none existed.
 // Returns an error if the stale daemon could not be stopped (caller should not start a new one).
-func killStaleDaemon(workspaceID string) error {
+// KillStaleDaemon stops a daemon by workspace ID using the full cleanup flow:
+// IPC stop → wait → SIGTERM (with PID-reuse guard) → wait → cleanup registry/files.
+func KillStaleDaemon(workspaceID string) error {
 	reg, err := LoadRegistry()
 	if err != nil {
 		slog.Debug("failed to load registry for stale daemon check", "error", err)
@@ -302,7 +304,7 @@ func WaitForProcessExit(pid int, timeout time.Duration) bool {
 // KillStaleDaemonForCurrentWorkspace is the public entry point for pre-start kill.
 // Called by `ox daemon start` CLI command.
 func KillStaleDaemonForCurrentWorkspace() error {
-	return killStaleDaemon(CurrentWorkspaceID())
+	return KillStaleDaemon(CurrentWorkspaceID())
 }
 
 // buildDaemonArgs constructs command-line arguments for starting a daemon subprocess.
