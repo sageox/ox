@@ -180,8 +180,8 @@ func ResolveMurmuring(projectRoot string) string {
 // Returns the normalized mode if set, or fallback otherwise.
 func resolveUserMurmuring(fallback string) string {
 	userCfg, _ := LoadUserConfig()
-	if userCfg != nil && userCfg.Murmuring != "" {
-		return NormalizeMurmuring(userCfg.Murmuring)
+	if userCfg != nil && userCfg.GetMurmuring() != "" {
+		return NormalizeMurmuring(userCfg.GetMurmuring())
 	}
 	return fallback
 }

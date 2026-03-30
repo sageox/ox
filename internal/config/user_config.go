@@ -327,6 +327,7 @@ type UserConfig struct {
 	AgentWorker       *AgentWorkerConfig `yaml:"agent_worker,omitempty"`
 	ViewFormat        string             `yaml:"view_format,omitempty"`     // "web", "text", "json" (default: "web")
 	Murmuring         string             `yaml:"murmur_send,omitempty"`     // "auto", "manual"
+	LegacyMurmuring   string             `yaml:"murmuring,omitempty"`       // deprecated: read old key on upgrade
 	MurmurReceive     string             `yaml:"murmur_receive,omitempty"`  // "on", "off"
 }
 
@@ -487,13 +488,18 @@ func (c *UserConfig) GetViewFormat() string {
 }
 
 // GetMurmuring returns the user's configured murmuring mode, or "" if not set.
+// Falls back to the legacy "murmuring" key for upgrade compatibility.
 func (c *UserConfig) GetMurmuring() string {
-	return c.Murmuring
+	if c.Murmuring != "" {
+		return c.Murmuring
+	}
+	return c.LegacyMurmuring
 }
 
-// SetMurmuring sets the user's murmuring mode preference.
+// SetMurmuring sets the user's murmuring mode preference and clears the legacy key.
 func (c *UserConfig) SetMurmuring(mode string) {
 	c.Murmuring = mode
+	c.LegacyMurmuring = ""
 }
 
 // GetMurmurReceive returns the user's configured murmur receive mode, or "" if not set.

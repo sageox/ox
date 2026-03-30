@@ -251,19 +251,19 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 		}
 
 	case "murmur_send":
-		if userCfg != nil && userCfg.Murmuring != "" {
-			cv.UserVal = userCfg.Murmuring
+		if userCfg != nil && userCfg.GetMurmuring() != "" {
+			cv.UserVal = config.NormalizeMurmuring(userCfg.GetMurmuring())
 		}
 		if repoCfg != nil && repoCfg.Murmuring != "" {
-			cv.RepoVal = repoCfg.Murmuring
+			cv.RepoVal = config.NormalizeMurmuring(repoCfg.Murmuring)
 		}
 
 	case "murmur_receive":
 		if userCfg != nil && userCfg.MurmurReceive != "" {
-			cv.UserVal = userCfg.MurmurReceive
+			cv.UserVal = config.NormalizeMurmurReceive(userCfg.MurmurReceive)
 		}
 		if repoCfg != nil && repoCfg.MurmurReceive != "" {
-			cv.RepoVal = repoCfg.MurmurReceive
+			cv.RepoVal = config.NormalizeMurmurReceive(repoCfg.MurmurReceive)
 		}
 
 	case "telemetry":

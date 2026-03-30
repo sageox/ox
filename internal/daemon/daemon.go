@@ -892,6 +892,18 @@ func (d *Daemon) startWorkers() {
 	d.friction.Start()
 	d.telemetry.RecordDaemonStartup()
 
+	// initialize whisper sources before IPC server starts, so pause/resume
+	// handlers can safely read d.murmurNudgeSource without a data race
+	if d.whisperRegistry != nil {
+		ws := NewWhisperScheduler(d.whisperRegistry, d.logger)
+		ws.RegisterSource(NewActivitySummarySource(d.heartbeat, d.scheduler))
+		if d.config.MurmurNudgeInterval > 0 {
+			d.murmurNudgeSource = NewMurmurNudgeSource(d.whisperRegistry.LedgerStore(), d.heartbeat, d.config.MurmurNudgeInterval, d.config.ProjectRoot)
+			ws.RegisterSource(d.murmurNudgeSource)
+		}
+		ws.Start(d.ctx, &d.wg)
+	}
+
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
@@ -904,16 +916,6 @@ func (d *Daemon) startWorkers() {
 		defer d.wg.Done()
 		d.scheduler.Start(d.ctx)
 	}()
-
-	if d.whisperRegistry != nil {
-		ws := NewWhisperScheduler(d.whisperRegistry, d.logger)
-		ws.RegisterSource(NewActivitySummarySource(d.heartbeat, d.scheduler))
-		if d.config.MurmurNudgeInterval > 0 {
-			d.murmurNudgeSource = NewMurmurNudgeSource(d.whisperRegistry.LedgerStore(), d.heartbeat, d.config.MurmurNudgeInterval, d.config.ProjectRoot)
-			ws.RegisterSource(d.murmurNudgeSource)
-		}
-		ws.Start(d.ctx, &d.wg)
-	}
 
 	// unified DB maintenance: prune, vacuum, integrity check for all SQLite databases
 	d.dbMaintenance = NewDBMaintenanceScheduler(d.logger)

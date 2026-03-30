@@ -360,3 +360,26 @@ func TestMurmurReceiveEnabled_RespectsUserConfig(t *testing.T) {
 
 	assert.False(t, MurmurReceiveEnabled(projectDir), "user=off should override repo=on")
 }
+
+// TestResolveMurmuring_LegacyYAMLKey verifies that user configs with the
+// old "murmuring:" key are still read correctly after the rename to "murmur_send:".
+func TestResolveMurmuring_LegacyYAMLKey(t *testing.T) {
+	userCfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	// legacy key: "murmuring" (not "murmur_send")
+	require.NoError(t, os.WriteFile(userCfgPath, []byte("murmuring: manual\n"), 0644))
+	t.Setenv("OX_USER_CONFIG", userCfgPath)
+
+	got := ResolveMurmuring("")
+	assert.Equal(t, MurmuringManual, got, "legacy murmuring: key should still be read")
+}
+
+// TestSetMurmuring_ClearsLegacyKey verifies that SetMurmuring clears the
+// legacy key so re-saved configs use the new key only.
+func TestSetMurmuring_ClearsLegacyKey(t *testing.T) {
+	cfg := &UserConfig{LegacyMurmuring: "manual"}
+	assert.Equal(t, "manual", cfg.GetMurmuring(), "should read legacy key")
+
+	cfg.SetMurmuring("auto")
+	assert.Equal(t, "auto", cfg.GetMurmuring())
+	assert.Empty(t, cfg.LegacyMurmuring, "SetMurmuring should clear legacy key")
+}
