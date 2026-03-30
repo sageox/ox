@@ -45,6 +45,32 @@ func TestUpdateProjectRoot_IgnoresEmptyPath(t *testing.T) {
 	assert.Equal(t, "/original", got)
 }
 
+// TestUpdateProjectRoot_NoSwitchWhenCurrentExists is the regression test for the
+// "worktree oscillation" bug: two simultaneously active sessions (e.g., main
+// worktree + Conductor worktree) caused the daemon to flip projectRoot on every
+// heartbeat, triggering a full dirty-index rebuild (~79ms) and occasionally a
+// full git re-index (~10s) on every 60s scheduler tick.
+// The fix: only switch if the current path no longer exists on disk.
+func TestUpdateProjectRoot_NoSwitchWhenCurrentExists(t *testing.T) {
+	t.Parallel()
+
+	// both worktrees exist simultaneously
+	mainWorktree := t.TempDir()
+	conductorWorktree := t.TempDir()
+
+	mgr := NewCodeDBManager(mainWorktree, codedbTestLogger(), nil)
+
+	// simulate heartbeat from a simultaneously active Conductor workspace
+	mgr.UpdateProjectRoot(conductorWorktree)
+
+	mgr.mu.Lock()
+	got := mgr.projectRoot
+	mgr.mu.Unlock()
+
+	// must NOT switch — mainWorktree still exists
+	assert.Equal(t, mainWorktree, got, "should not switch while current path still exists")
+}
+
 func TestUpdateProjectRoot_IgnoresSamePath(t *testing.T) {
 	t.Parallel()
 	mgr := NewCodeDBManager("/same/path", codedbTestLogger(), nil)
@@ -496,6 +522,9 @@ func TestUpdateProjectRoot_Symlink(t *testing.T) {
 	require.NoError(t, os.Symlink(realDir, linkDir))
 
 	mgr := NewCodeDBManager(realDir, codedbTestLogger(), nil)
+
+	// simulate Conductor deleting the old workspace — only then should we switch
+	require.NoError(t, os.RemoveAll(realDir))
 
 	// update to symlink path — should accept it (let git resolve the real path)
 	mgr.UpdateProjectRoot(linkDir)

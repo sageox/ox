@@ -607,6 +607,15 @@ func (m *CodeDBManager) UpdateProjectRoot(path string) {
 	if path == "" || path == m.projectRoot {
 		return
 	}
+	// Only switch if the current project root no longer exists on disk.
+	// This handles the Conductor pattern (old workspace deleted, new one created)
+	// while preventing oscillation when multiple sessions share the same daemon
+	// (e.g., one session in the main worktree, one in a Conductor worktree,
+	// both alive simultaneously — without this guard, their heartbeats cause
+	// the root to flip every 60s, triggering repeated full re-indexes).
+	if _, err := os.Stat(m.projectRoot); err == nil {
+		return
+	}
 	old := m.projectRoot
 	m.projectRoot = path
 	m.logger.Info("codedb project root updated", "old", old, "new", path)
