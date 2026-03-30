@@ -40,17 +40,17 @@ func NormalizeMurmuring(mode string) string {
 
 // MurmurReceive mode constants.
 const (
-	MurmurReceiveOff  = "off"
-	MurmurReceiveAuto = "auto"
+	MurmurReceiveOff = "off"
+	MurmurReceiveOn  = "on"
 )
 
 // ValidMurmurReceiveModes lists all valid values for the murmur_receive config field.
-var ValidMurmurReceiveModes = []string{MurmurReceiveOff, MurmurReceiveAuto}
+var ValidMurmurReceiveModes = []string{MurmurReceiveOff, MurmurReceiveOn}
 
 // IsValidMurmurReceiveMode returns true if the mode is a recognized murmur_receive value.
 func IsValidMurmurReceiveMode(mode string) bool {
 	switch mode {
-	case MurmurReceiveOff, MurmurReceiveAuto, "":
+	case MurmurReceiveOff, MurmurReceiveOn, "":
 		return true
 	}
 	return false
@@ -63,7 +63,7 @@ func NormalizeMurmurReceive(mode string) string {
 	case MurmurReceiveOff:
 		return MurmurReceiveOff
 	default:
-		return MurmurReceiveAuto
+		return MurmurReceiveOn
 	}
 }
 
@@ -206,10 +206,10 @@ func ResolveMurmurReceive(projectRoot string) string {
 			return NormalizeMurmurReceive(cfg.MurmurReceive)
 		}
 	}
-	return MurmurReceiveAuto
+	return MurmurReceiveOn
 }
 
 // MurmurReceiveEnabled returns true if murmur reception is active.
 func MurmurReceiveEnabled(projectRoot string) bool {
-	return ResolveMurmurReceive(projectRoot) == MurmurReceiveAuto
+	return ResolveMurmurReceive(projectRoot) == MurmurReceiveOn
 }

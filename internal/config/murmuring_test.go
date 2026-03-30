@@ -56,10 +56,10 @@ func TestIsValidMurmurReceiveMode(t *testing.T) {
 		valid bool
 	}{
 		{MurmurReceiveOff, true},
-		{MurmurReceiveAuto, true},
+		{MurmurReceiveOn, true},
 		{"", true},
 		{"invalid", false},
-		{"on", false},
+		{"auto", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.mode, func(t *testing.T) {
@@ -76,9 +76,9 @@ func TestNormalizeMurmurReceive(t *testing.T) {
 		want  string
 	}{
 		{MurmurReceiveOff, MurmurReceiveOff},
-		{MurmurReceiveAuto, MurmurReceiveAuto},
-		{"", MurmurReceiveAuto},
-		{"invalid", MurmurReceiveAuto},
+		{MurmurReceiveOn, MurmurReceiveOn},
+		{"", MurmurReceiveOn},
+		{"invalid", MurmurReceiveOn},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
@@ -143,18 +143,18 @@ func TestResolveMurmurReceive_Default(t *testing.T) {
 	t.Setenv("OX_USER_CONFIG", userCfgPath)
 
 	got := ResolveMurmurReceive("")
-	assert.Equal(t, MurmurReceiveAuto, got)
+	assert.Equal(t, MurmurReceiveOn, got)
 }
 
 func TestResolveMurmurReceive_UserOverride(t *testing.T) {
-	// user=off, repo=auto → off
+	// user=off, repo=on → off
 	userDir := t.TempDir()
 	userCfgPath := filepath.Join(userDir, "config.yaml")
 	require.NoError(t, os.WriteFile(userCfgPath, []byte("murmur_receive: \"off\"\n"), 0644))
 	t.Setenv("OX_USER_CONFIG", userCfgPath)
 
 	projectDir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
-		MurmurReceive: "auto",
+		MurmurReceive: "on",
 	})
 
 	got := ResolveMurmurReceive(projectDir)
@@ -281,16 +281,16 @@ func TestResolveMurmurReceive_FullResolutionChain(t *testing.T) {
 		want    string
 	}{
 		{
-			name:    "user=off repo=auto → user wins",
+			name:    "user=off repo=on → user wins",
 			userCfg: "murmur_receive: \"off\"\n",
-			repoCfg: "auto",
+			repoCfg: "on",
 			want:    MurmurReceiveOff,
 		},
 		{
-			name:    "user=auto repo=off → user wins",
-			userCfg: "murmur_receive: auto\n",
+			name:    "user=on repo=off → user wins",
+			userCfg: "murmur_receive: \"on\"\n",
 			repoCfg: "off",
-			want:    MurmurReceiveAuto,
+			want:    MurmurReceiveOn,
 		},
 		{
 			name:    "user unset repo=off → repo wins",
@@ -302,7 +302,7 @@ func TestResolveMurmurReceive_FullResolutionChain(t *testing.T) {
 			name:    "both unset → default auto",
 			userCfg: "",
 			repoCfg: "",
-			want:    MurmurReceiveAuto,
+			want:    MurmurReceiveOn,
 		},
 		{
 			name:    "user=off repo unset → user wins",
@@ -355,8 +355,8 @@ func TestMurmurReceiveEnabled_RespectsUserConfig(t *testing.T) {
 	t.Setenv("OX_USER_CONFIG", userCfgPath)
 
 	projectDir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
-		MurmurReceive: "auto",
+		MurmurReceive: "on",
 	})
 
-	assert.False(t, MurmurReceiveEnabled(projectDir), "user=off should override repo=auto")
+	assert.False(t, MurmurReceiveEnabled(projectDir), "user=off should override repo=on")
 }

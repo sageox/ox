@@ -327,7 +327,7 @@ type UserConfig struct {
 	AgentWorker       *AgentWorkerConfig `yaml:"agent_worker,omitempty"`
 	ViewFormat        string             `yaml:"view_format,omitempty"`     // "web", "text", "json" (default: "web")
 	Murmuring         string             `yaml:"murmur_send,omitempty"`     // "auto", "manual"
-	MurmurReceive     string             `yaml:"murmur_receive,omitempty"`  // "auto", "off"
+	MurmurReceive     string             `yaml:"murmur_receive,omitempty"`  // "on", "off"
 }
 
 // BadgeConfig tracks badge suggestion state across all projects.

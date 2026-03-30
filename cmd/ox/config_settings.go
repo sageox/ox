@@ -82,14 +82,14 @@ coworkers.
 		LongDescription: `Controls whether work-in-progress signals from other coworkers
 appear in your whisper stream.
 
-  auto - Receive murmurs as whispers (default)
-  off  - Suppress murmur whispers (other coworkers still receive them)
+  on  - Receive murmurs as whispers (default)
+  off - Suppress murmur whispers (other coworkers still receive them)
 
 This is a personal preference — it only affects YOUR whisper
 delivery, not whether murmurs are relayed for others.`,
 		Category:    "Collaboration",
-		ValidValues: []string{"auto", "off"},
-		Default:     "auto",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
 	},
 	{
