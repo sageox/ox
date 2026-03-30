@@ -990,3 +990,178 @@ func TestBlueGreenGC_Ledger_FullCloneUpgrade(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "true", strings.TrimSpace(string(sparseOut)), "sparse checkout should be enabled after GC reclone")
 }
+
+// --- Sparse checkout reconfiguration tests (sync pull path) ---
+// These test the path exercised every ~60s by the sync scheduler:
+// doPull → ledger.ConfigureSparseCheckout → pullManagedRepo.
+// Before PR #359, ConfigureSparseCheckout ran "init --cone" on every call,
+// which destroyed untracked files outside the cone.
+
+// TestSparseCheckoutReconfigure_PreservesLocalFiles verifies that repeated
+// ConfigureSparseCheckout calls (simulating the sync scheduler's 60s refresh)
+// do not destroy local files in a real sparse-checkout clone.
+func TestSparseCheckoutReconfigure_PreservesLocalFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	_, ledgerDir, _ := setupClonedLedger(t)
+
+	// create local files across all known cache categories
+	localFiles := map[string]string{
+		// codedb SQLite + nested bleve indexes
+		".sageox/cache/codedb/index.db":               "sqlite-data",
+		".sageox/cache/codedb/bleve/store/segment.vx": "bleve-segment",
+		".sageox/cache/codedb/bleve/index_meta.json":  "bleve-meta",
+		// whisper cache
+		".sageox/cache/whisper/whisper.db": "whisper-data",
+		// github sync state
+		".sageox/cache/github_sync/state.json": "sync-state",
+		// telemetry queue + health metadata
+		".sageox/cache/telemetry.jsonl": "event-data",
+		".sageox/cache/health.json":    "health-data",
+		// sync state
+		".sageox/cache/sync-state.json": `{"last":"now"}`,
+	}
+
+	for relPath, content := range localFiles {
+		absPath := filepath.Join(ledgerDir, relPath)
+		require.NoError(t, os.MkdirAll(filepath.Dir(absPath), 0755))
+		require.NoError(t, os.WriteFile(absPath, []byte(content), 0644))
+	}
+
+	// simulate 5 sync scheduler cycles
+	for i := 0; i < 5; i++ {
+		require.NoError(t, ledger.ConfigureSparseCheckout(ledgerDir),
+			"ConfigureSparseCheckout call %d failed", i+1)
+	}
+
+	// every file must survive
+	for relPath, expectedContent := range localFiles {
+		absPath := filepath.Join(ledgerDir, relPath)
+		content, err := os.ReadFile(absPath)
+		require.NoError(t, err, "file %q destroyed by sparse checkout reconfiguration", relPath)
+		assert.Equal(t, expectedContent, string(content), "content mismatch for %s", relPath)
+	}
+}
+
+// TestSparseCheckoutReconfigure_PreservesUntrackedSessionFiles verifies that
+// untracked session files (pending commit by the CLI) survive sparse checkout
+// reconfiguration during sync pulls.
+func TestSparseCheckoutReconfigure_PreservesUntrackedSessionFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	_, ledgerDir, _ := setupClonedLedger(t)
+
+	// create untracked session data (simulates CLI session upload in progress)
+	sessionFiles := map[string]string{
+		"sessions/abc-123/raw.jsonl":    `{"seq":1,"type":"user"}`,
+		"sessions/abc-123/summary.md":   "# Session Summary",
+		"sessions/abc-123/summary.json": `{"title":"test"}`,
+	}
+
+	for relPath, content := range sessionFiles {
+		absPath := filepath.Join(ledgerDir, relPath)
+		require.NoError(t, os.MkdirAll(filepath.Dir(absPath), 0755))
+		require.NoError(t, os.WriteFile(absPath, []byte(content), 0644))
+	}
+
+	// reconfigure sparse checkout (as the sync scheduler would)
+	require.NoError(t, ledger.ConfigureSparseCheckout(ledgerDir))
+
+	// session files must survive
+	for relPath, expectedContent := range sessionFiles {
+		absPath := filepath.Join(ledgerDir, relPath)
+		content, err := os.ReadFile(absPath)
+		require.NoError(t, err, "session file %q destroyed by sparse checkout reconfiguration", relPath)
+		assert.Equal(t, expectedContent, string(content), "content mismatch for %s", relPath)
+	}
+}
+
+// TestSparseCheckoutReconfigure_IdempotentSparseSet verifies that the sparse
+// checkout list is identical across multiple reconfiguration calls in a real
+// sparse-checkout clone (not just git init).
+func TestSparseCheckoutReconfigure_IdempotentSparseSet(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	_, ledgerDir, _ := setupClonedLedger(t)
+
+	getSparseList := func() string {
+		out, err := exec.Command("git", "-C", ledgerDir, "sparse-checkout", "list").Output()
+		require.NoError(t, err)
+		return string(out)
+	}
+
+	first := getSparseList()
+
+	// reconfigure twice more
+	require.NoError(t, ledger.ConfigureSparseCheckout(ledgerDir))
+	second := getSparseList()
+
+	require.NoError(t, ledger.ConfigureSparseCheckout(ledgerDir))
+	third := getSparseList()
+
+	assert.Equal(t, first, second, "sparse-checkout list changed after first reconfigure")
+	assert.Equal(t, first, third, "sparse-checkout list changed after second reconfigure")
+}
+
+// TestSparseCheckoutReconfigure_PreservesStagedFilesOutsideCone verifies that
+// staged files in directories outside the computed sparse set survive the sync
+// scheduler's ConfigureSparseCheckout call. This tests the real scenario: CLI
+// stages files via "git add --sparse" in a non-standard data directory, then
+// the daemon's 60s sync reconfigures sparse checkout before the CLI commits.
+func TestSparseCheckoutReconfigure_PreservesStagedFilesOutsideCone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	_, ledgerDir, _ := setupClonedLedger(t)
+	gitConfig(t, ledgerDir)
+
+	// stage files in a directory that is NOT in the sparse cone
+	// (e.g., data/linear/ or data/custom/ — not data/github/<recent> or data/murmurs/<recent>)
+	customDir := filepath.Join(ledgerDir, "data", "custom")
+	require.NoError(t, os.MkdirAll(customDir, 0755))
+
+	stagedFiles := map[string]string{
+		"data/custom/import.csv":    "col1,col2\na,b\n",
+		"data/custom/metadata.json": `{"source":"linear"}`,
+	}
+	for relPath, content := range stagedFiles {
+		absPath := filepath.Join(ledgerDir, relPath)
+		require.NoError(t, os.WriteFile(absPath, []byte(content), 0644))
+		require.NoError(t, exec.Command("git", "-C", ledgerDir, "add", "--sparse", relPath).Run(),
+			"git add --sparse %s", relPath)
+	}
+
+	// verify files are staged
+	statusOut, _ := exec.Command("git", "-C", ledgerDir, "status", "--porcelain").CombinedOutput()
+	require.Contains(t, string(statusOut), "data/custom/import.csv", "file should be staged before reconfigure")
+
+	// reconfigure sparse checkout (simulates daemon's 60s sync)
+	require.NoError(t, ledger.ConfigureSparseCheckout(ledgerDir))
+
+	// all staged files must survive on disk
+	for relPath, expectedContent := range stagedFiles {
+		absPath := filepath.Join(ledgerDir, relPath)
+		content, err := os.ReadFile(absPath)
+		require.NoError(t, err, "staged file %q destroyed by sparse checkout reconfiguration", relPath)
+		assert.Equal(t, expectedContent, string(content), "content mismatch for %s", relPath)
+	}
+}

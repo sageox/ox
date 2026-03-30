@@ -454,6 +454,13 @@ func ConfigureSparseCheckout(path string) error {
 	// can read murmur files after git pull
 	dirs = append(dirs, ComputeMurmurDataPaths(DefaultMurmurWindowHours)...)
 
+	// protect staged/dirty files: "sparse-checkout set" removes tracked files
+	// outside the cone from the working tree. If the CLI has staged files in a
+	// directory not in our computed set (e.g. data/linear/, data/custom/), those
+	// files would be deleted from disk before the CLI commits+pushes.
+	// Detect such directories and include them in the cone.
+	dirs = append(dirs, dirtyDirsOutsideCone(path, dirs)...)
+
 	// set directories to include (excludes everything else like assets/)
 	args := append([]string{"-C", path, "sparse-checkout", "set"}, dirs...)
 	setCmd := exec.Command("git", args...)
@@ -468,6 +475,49 @@ func ConfigureSparseCheckout(path string) error {
 	}
 
 	return nil
+}
+
+// dirtyDirsOutsideCone returns top-level directories that contain staged or
+// modified tracked files but are not already in the cone dirs list.
+// This prevents "sparse-checkout set" from deleting files the CLI has staged
+// but not yet committed+pushed.
+func dirtyDirsOutsideCone(repoPath string, coneDirs []string) []string {
+	// get staged + unstaged changed files
+	cmd := exec.Command("git", "-C", repoPath, "status", "--porcelain", "-z")
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return nil
+	}
+
+	coneSet := make(map[string]bool, len(coneDirs))
+	for _, d := range coneDirs {
+		coneSet[d] = true
+	}
+
+	seen := make(map[string]bool)
+	var extra []string
+
+	// --porcelain -z: entries separated by NUL, format "XY path\0" or "XY path\0origpath\0" for renames
+	entries := strings.Split(string(out), "\x00")
+	for _, entry := range entries {
+		if len(entry) < 4 {
+			continue
+		}
+		filePath := entry[3:] // skip "XY " status prefix
+		if filePath == "" {
+			continue
+		}
+		// extract top-level directory (cone mode operates on top-level dirs)
+		topDir := filePath
+		if idx := strings.IndexByte(filePath, '/'); idx > 0 {
+			topDir = filePath[:idx]
+		}
+		if !coneSet[topDir] && !seen[topDir] {
+			seen[topDir] = true
+			extra = append(extra, topDir)
+		}
+	}
+	return extra
 }
 
 // EnableSparseCheckout enables sparse checkout on an existing ledger.
