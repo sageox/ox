@@ -2,12 +2,14 @@ package effects
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/dashboard/domain"
 	"github.com/sageox/ox/internal/ledger"
@@ -47,18 +49,29 @@ func (c *cliClient) GetDaemonStatus() (*daemon.StatusData, error) {
 }
 
 // ListSessions reads recent sessions from the ledger path reported by the
-// daemon. Returns nil, nil when no ledger path is available so the TUI
-// renders an empty state rather than an error.
+// daemon. Falls back to resolving the ledger path directly from project config
+// when the daemon is offline or hasn't reported a ledger path yet. Returns
+// nil, nil when no ledger path is available so the TUI renders an empty state.
 func (c *cliClient) ListSessions() ([]session.SessionInfo, error) {
 	c.mu.Lock()
 	status := c.cachedStatus
 	c.mu.Unlock()
 
-	if status == nil || status.LedgerPath == "" {
+	ledgerPath := ""
+	if status != nil {
+		ledgerPath = status.LedgerPath
+	}
+
+	// daemon didn't supply a ledger path — resolve it directly from project config
+	if ledgerPath == "" {
+		ledgerPath = projectLedgerPath()
+	}
+
+	if ledgerPath == "" {
 		return nil, nil
 	}
 
-	store, err := session.NewStore(status.LedgerPath)
+	store, err := session.NewStore(ledgerPath)
 	if err != nil {
 		return nil, nil
 	}
@@ -67,6 +80,26 @@ func (c *cliClient) ListSessions() ([]session.SessionInfo, error) {
 		return nil, nil
 	}
 	return sessions, nil
+}
+
+// projectLedgerPath resolves the ledger path from the current project's
+// config without requiring a running daemon. Returns empty string if the git
+// root cannot be found or the project is not initialized.
+func projectLedgerPath() string {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return ""
+	}
+	ctx, err := config.LoadProjectContext(root)
+	if err != nil {
+		return ""
+	}
+	return ctx.DefaultLedgerPath()
 }
 
 // ListMurmurs scans team context workspace paths for murmur files within the
@@ -143,27 +176,55 @@ func (c *cliClient) ListTeamDiscussions() ([]domain.TeamDiscussion, error) {
 }
 
 // teamContextPaths returns the filesystem paths for all team-context workspaces
-// that exist on disk, derived from the cached daemon status.
+// that exist on disk. Prefers paths reported by the daemon; falls back to
+// scanning the team context directories from project config when the daemon is
+// offline or hasn't populated its workspace list yet.
 func (c *cliClient) teamContextPaths() []string {
 	c.mu.Lock()
 	status := c.cachedStatus
 	c.mu.Unlock()
 
-	if status == nil {
-		return nil
-	}
-	var paths []string
-	for wsType, wsList := range status.Workspaces {
-		if wsType != "team-context" {
-			continue
-		}
-		for _, ws := range wsList {
-			if ws.Exists && ws.Path != "" {
-				paths = append(paths, ws.Path)
+	// prefer daemon-reported paths when available
+	if status != nil {
+		var tcPaths []string
+		for wsType, wsList := range status.Workspaces {
+			if wsType != "team-context" {
+				continue
+			}
+			for _, ws := range wsList {
+				if ws.Exists && ws.Path != "" {
+					tcPaths = append(tcPaths, ws.Path)
+				}
 			}
 		}
+		if len(tcPaths) > 0 {
+			return tcPaths
+		}
 	}
-	return paths
+
+	// daemon offline or hasn't populated workspace list — discover via project config
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return nil
+	}
+
+	teamContexts := config.FindAllTeamContexts(root)
+	if len(teamContexts) == 0 {
+		return nil
+	}
+
+	var tcPaths []string
+	for _, tc := range teamContexts {
+		if tc.Path != "" {
+			tcPaths = append(tcPaths, tc.Path)
+		}
+	}
+	return tcPaths
 }
 
 // readPreview reads up to n bytes from path and returns them as a trimmed string.

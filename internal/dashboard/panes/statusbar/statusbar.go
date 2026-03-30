@@ -52,35 +52,54 @@ func (p *Pane) View(ctx panes.Context) string {
 
 	health := ctx.Store.Health()
 	navNodes := ctx.Store.Nav()
+	daemonStatus := ctx.Store.GetDaemonStatus()
 
 	var parts []string
 
-	// Daemon status derived from the computed health level.
+	// Daemon status line: vary message based on health and why it's unhealthy.
 	switch health {
+	case domain.HealthUnknown:
+		// Daemon status nil or still loading — show a dim loading hint.
+		parts = append(parts, theme.StatusDim.Render("Loading…"))
+	case domain.HealthError:
+		// Distinguish between "daemon not running" and "daemon up but has errors".
+		if daemonStatus == nil || !daemonStatus.Running {
+			parts = append(parts, theme.StatusError.Render("daemon offline  ·  run: ox daemon start"))
+		} else {
+			// Count issues so we can surface the number inline.
+			issueCount := 0
+			for _, node := range navNodes {
+				if node.Kind == domain.NavNodeIssue {
+					issueCount++
+				}
+			}
+			label := fmt.Sprintf("⚠ %d issue", issueCount)
+			if issueCount != 1 {
+				label += "s"
+			}
+			parts = append(parts, theme.StatusError.Render(label))
+		}
 	case domain.HealthOK:
 		parts = append(parts, theme.StatusHealthy.Render("Daemon ✓"))
 	case domain.HealthWarn:
 		parts = append(parts, theme.StatusWarning.Render("Daemon ⚠"))
-	case domain.HealthError:
-		parts = append(parts, theme.StatusError.Render("Daemon ✗"))
-	default: // HealthUnknown — initial state before first data fetch
-		parts = append(parts, theme.StatusDim.Render("Daemon …"))
 	}
 
-	// Count daemon-flagged issues surfaced as nav nodes so we reuse the same
-	// filtering logic that already exists in the nav builder.
-	issueCount := 0
-	for _, node := range navNodes {
-		if node.Kind == domain.NavNodeIssue {
-			issueCount++
+	// Count daemon-flagged issues when health is not already showing them inline.
+	if health != domain.HealthError {
+		issueCount := 0
+		for _, node := range navNodes {
+			if node.Kind == domain.NavNodeIssue {
+				issueCount++
+			}
 		}
-	}
-	if issueCount > 0 {
-		label := fmt.Sprintf("⚠ %d issue", issueCount)
-		if issueCount > 1 {
-			label += "s"
+		if issueCount > 0 {
+			label := fmt.Sprintf("⚠ %d issue", issueCount)
+			if issueCount > 1 {
+				label += "s"
+			}
+			parts = append(parts, theme.StatusWarning.Render(label))
 		}
-		parts = append(parts, theme.StatusWarning.Render(label))
 	}
 
 	// Show a spinner-style indicator while the initial data load is in flight.
