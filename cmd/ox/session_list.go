@@ -452,13 +452,24 @@ func formatSessionDuration(d time.Duration) string {
 func mergeSessionSources(primary, additional []session.SessionInfo) []session.SessionInfo {
 	existing := make(map[string]bool, len(primary))
 	result := make([]session.SessionInfo, 0, len(primary)+len(additional))
+	// dedup key: SessionName when available, fall back to FilePath or Filename
+	// to avoid collapsing distinct legacy sessions with empty SessionName
+	keyFor := func(s session.SessionInfo) string {
+		if s.SessionName != "" {
+			return s.SessionName
+		}
+		if s.FilePath != "" {
+			return s.FilePath
+		}
+		return s.Filename
+	}
 	for _, s := range primary {
-		existing[s.SessionName] = true
+		existing[keyFor(s)] = true
 		result = append(result, s)
 	}
 	for _, s := range additional {
-		if !existing[s.SessionName] {
-			existing[s.SessionName] = true
+		if !existing[keyFor(s)] {
+			existing[keyFor(s)] = true
 			result = append(result, s)
 		}
 	}

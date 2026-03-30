@@ -86,7 +86,7 @@ func TestSyncScheduler_LastSync(t *testing.T) {
 
 	// doPull → ls-remote detects "remote unchanged" → updates lastSync
 	ctx := context.Background()
-	scheduler.doPull(ctx, nil, false)
+	require.NoError(t, scheduler.doPull(ctx, nil, false))
 
 	assert.False(t, scheduler.LastSync().IsZero(), "lastSync should be set after doPull")
 }
@@ -198,7 +198,7 @@ func TestSyncScheduler_PullInProgress(t *testing.T) {
 	scheduler.pullInProgress = false
 	scheduler.mu.Unlock()
 
-	scheduler.doPull(ctx, nil, false) // should succeed
+	require.NoError(t, scheduler.doPull(ctx, nil, false)) // should succeed
 	assert.False(t, scheduler.LastSync().IsZero(), "lastSync should be set after real pull")
 }
 func TestSyncScheduler_PerOperationFlags_Independent(t *testing.T) {

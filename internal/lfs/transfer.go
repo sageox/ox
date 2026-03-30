@@ -145,13 +145,15 @@ func DownloadObject(action *Action) ([]byte, error) {
 }
 
 // DownloadAndVerifyObject downloads a blob and verifies its SHA256 matches the expected OID.
+// Accepts both bare hex and canonical "sha256:<hex>" OID formats.
 func DownloadAndVerifyObject(action *Action, expectedOID string) ([]byte, error) {
 	data, err := DownloadObject(action)
 	if err != nil {
 		return nil, err
 	}
 	actualOID := ComputeOID(data)
-	if actualOID != expectedOID {
+	expectedHex := strings.TrimPrefix(expectedOID, "sha256:")
+	if actualOID != expectedHex {
 		return nil, fmt.Errorf("OID mismatch: expected %s, got %s", expectedOID, actualOID)
 	}
 	return data, nil

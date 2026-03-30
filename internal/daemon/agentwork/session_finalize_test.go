@@ -225,12 +225,12 @@ func TestBuildPrompt(t *testing.T) {
 	if req.WorkDir != ledgerPath {
 		t.Errorf("expected WorkDir=%q, got %q", ledgerPath, req.WorkDir)
 	}
-	// prompt must reference the raw file path and request summary artifacts
-	if !strings.Contains(req.Prompt, "raw.jsonl") {
-		t.Error("prompt should reference raw.jsonl")
+	// prompt must reference the concrete raw file path and push-summary instruction
+	if !strings.Contains(req.Prompt, rawPath) {
+		t.Errorf("prompt should contain raw path %q", rawPath)
 	}
-	if !strings.Contains(req.Prompt, "summary") {
-		t.Error("prompt should mention summary artifact")
+	if !strings.Contains(req.Prompt, "push-summary") {
+		t.Error("prompt should contain push-summary instruction")
 	}
 }
 
@@ -349,10 +349,11 @@ func createTestSessionInGitRepo(t *testing.T, sessionName string) (string, strin
 
 	ledgerPath := t.TempDir()
 
-	// init git repo
+	// init git repo with isolated config to avoid host git settings (gpgsign, hooksPath, etc.)
 	require.NoError(t, exec.Command("git", "init", "--initial-branch=main", ledgerPath).Run())
 	require.NoError(t, exec.Command("git", "-C", ledgerPath, "config", "user.email", "test@test.com").Run())
 	require.NoError(t, exec.Command("git", "-C", ledgerPath, "config", "user.name", "Test").Run())
+	require.NoError(t, exec.Command("git", "-C", ledgerPath, "config", "commit.gpgsign", "false").Run())
 
 	// create sessions dir and raw.jsonl
 	sessionsDir := filepath.Join(ledgerPath, "sessions", sessionName)

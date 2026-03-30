@@ -44,7 +44,12 @@ func TestCheckHealth_StorageNotWritable(t *testing.T) {
 }
 
 func TestCheckHealth_RepoNotCloned(t *testing.T) {
-	// use a temp dir with .sageox/ but no ledger to avoid CWD fallback
+	// isolate HOME/XDG_DATA_HOME so ledger resolution can't find a real ledger
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
+
+	// use a temp dir with .sageox/ but no ledger
 	tmpDir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0755))
 	// write a minimal config so ledgerPathFromProject returns a non-existent path
@@ -54,10 +59,7 @@ func TestCheckHealth_RepoNotCloned(t *testing.T) {
 	status := CheckHealth(tmpDir)
 
 	// the ledger for "nonexistent-repo" won't exist → RepoCloned should be false
-	if status.RepoCloned {
-		// if it somehow resolves, the test is not meaningful — skip
-		t.Skip("ledger path resolved unexpectedly; test environment has matching ledger")
-	}
+	assert.False(t, status.RepoCloned, "RepoCloned should be false when ledger doesn't exist")
 	assert.NotEmpty(t, status.RepoError, "should have a repo error when ledger doesn't exist")
 }
 

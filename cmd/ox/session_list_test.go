@@ -47,6 +47,18 @@ func TestMergeSessionSources(t *testing.T) {
 		assert.Equal(t, now.Add(-1*time.Hour).Unix(), result[0].CreatedAt.Unix())
 	})
 
+	t.Run("legacy empty-name dedup by filepath", func(t *testing.T) {
+		primary := []session.SessionInfo{
+			{SessionName: "", FilePath: "/a/raw.jsonl", CreatedAt: now.Add(-1 * time.Hour)},
+			{SessionName: "", FilePath: "/b/raw.jsonl", CreatedAt: now.Add(-2 * time.Hour)},
+		}
+		additional := []session.SessionInfo{
+			{SessionName: "", FilePath: "/a/raw.jsonl", CreatedAt: now.Add(-3 * time.Hour)},
+		}
+		result := mergeSessionSources(primary, additional)
+		require.Len(t, result, 2, "distinct legacy sessions should not be collapsed")
+	})
+
 	t.Run("disjoint merge sorted", func(t *testing.T) {
 		primary := []session.SessionInfo{mkSession("old", 5*time.Hour)}
 		additional := []session.SessionInfo{mkSession("new", 1*time.Hour), mkSession("mid", 3*time.Hour)}

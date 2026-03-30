@@ -87,16 +87,24 @@ func TestDownloadObject_NilAction(t *testing.T) {
 
 func TestDownloadAndVerifyObject_OIDMatch(t *testing.T) {
 	content := []byte("verified content")
-	expectedOID := ComputeOID(content)
+	bareOID := ComputeOID(content)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write(content)
 	}))
 	defer server.Close()
 
-	data, err := DownloadAndVerifyObject(&Action{Href: server.URL}, expectedOID)
-	require.NoError(t, err)
-	assert.Equal(t, content, data)
+	t.Run("bare hex OID", func(t *testing.T) {
+		data, err := DownloadAndVerifyObject(&Action{Href: server.URL}, bareOID)
+		require.NoError(t, err)
+		assert.Equal(t, content, data)
+	})
+
+	t.Run("canonical sha256: OID", func(t *testing.T) {
+		data, err := DownloadAndVerifyObject(&Action{Href: server.URL}, "sha256:"+bareOID)
+		require.NoError(t, err)
+		assert.Equal(t, content, data)
+	})
 }
 
 func TestDownloadAndVerifyObject_OIDMismatch(t *testing.T) {
@@ -108,9 +116,17 @@ func TestDownloadAndVerifyObject_OIDMismatch(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := DownloadAndVerifyObject(&Action{Href: server.URL}, wrongOID)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "OID mismatch")
+	t.Run("bare hex mismatch", func(t *testing.T) {
+		_, err := DownloadAndVerifyObject(&Action{Href: server.URL}, wrongOID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "OID mismatch")
+	})
+
+	t.Run("canonical sha256: mismatch", func(t *testing.T) {
+		_, err := DownloadAndVerifyObject(&Action{Href: server.URL}, "sha256:"+wrongOID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "OID mismatch")
+	})
 }
 
 func TestUploadAll(t *testing.T) {
