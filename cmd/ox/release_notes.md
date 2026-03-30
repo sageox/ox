@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-03-29
+
+### Added
+
+**Murmur & whisper — team communication for AI coworkers**
+- AI coworkers can now publish work-in-progress updates to teammates via `ox murmur`
+- Whisper delivery via `UserPromptSubmit` hook and active pull keeps coworkers in sync
+- User-level config for pause/resume control, nudge tracking, and whisper budgets
+- Daemon handles file writes and commits via IPC, keeping the CLI stateless
+- `ox murmur list` shows recent murmurs; `ox murmur status` shows delivery state
+
+**Pure-Go tree-sitter symbol extraction**
+- Code search now extracts symbols (functions, classes, types) using a pure-Go tree-sitter implementation
+- No CGo dependency — works everywhere ox builds
+
+**New commands**
+- `ox upgrade` — self-update with daemon whisper broadcast to notify active coworkers
+- `ox teams` — discover and list your teams from the CLI
+- `ox glance` — session-based team activity feed with file contention detection
+
+**Import improvements**
+- Audio and video MIME type detection for `ox import`
+- URL-based video import with progress tracking and `ox import list`
+
+**Distillation pipeline**
+- Per-stage guidance files with progressive disclosure
+- Unified JSONL fact schema across all fact sources
+- GitHub activity assembled into event clusters for alignment feed
+- Session summary facts extracted into the distill pipeline
+
+**Infrastructure**
+- sqlc typed SQL for whisper and codedb stores
+- Self-healing rebase pipeline with manifest-driven conflict resolution rules
+- PAT liveness validation in `ox doctor` and `ox status`
+- DB maintenance scheduler and whisper resilience in daemon
+- Session `--summary` flag for `ox session regenerate`
+
+### Changed
+
+- faster code search indexing
+- Agent selector replaces boolean config: choose `auto`, `none`, `claude`, or `codex`
+- Default sync intervals adjusted: 60s ledger, 15s team context
+- Resummary uses local daemon instead of server-side API
+- Notifications consolidated into whisper pipeline with stdout XML delivery
+- Shared `PushWithRetry` primitive and `pkg/sessionsummary` for cross-repo use
+- Structural cleanup: god files split, IPC service interface extracted, legacy code removed
+- Visual progressive disclosure for video discussions
+- Keyframe content types aligned with server vision pipeline
+- Codecov Test Analytics added to scheduled coverage workflow
+
+### Fixed
+
+- **Session recording reliability**: pre-start leak, cross-env cache path split, decoupled from auth, token refresh, `files_changed` populated in summary.json, concurrent agent URL disambiguation, `StartOffset` capture on session start
+- **Auth resilience**: capture `refresh_token` from JWT exchange, handle missing refresh tokens, auto-repair revoked PATs, login no longer blocks on token refresh failure
+- **CodeDB stability**: prevent CLI hang when daemon is indexing, detect and report empty index, fast fail when worktree disappears
+- **Data safety**: LFS data loss prevention on push failure, dead force-push code path removed
+- Doctor handles push 403 errors and local remote credential injection
+- Endpoint normalizer prepends `https://` to bare hostnames
+- GitHub sync rebuilds state from disk to prevent cold-start hang; PR commits preserved on replay
+- System credential helpers suppressed during PAT liveness probe
+- Stale daemons killed before starting new ones to prevent orphan accumulation
+- Session abort search and stale agent ID resolution
+- Default to auto-record for ox-initialized repos
+- Friction telemetry re-queues events on flush failure (frictionax v0.1.2)
+
+[0.6.0]: https://github.com/sageox/ox/releases/tag/v0.6.0
+
 ## [0.5.1] - 2026-03-16
 
 ### Added
