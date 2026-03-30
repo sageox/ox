@@ -243,7 +243,7 @@ func openOrCreateBleveIndex(path string) (bleve.Index, error) {
 		return nil, fmt.Errorf("bleve index appears to be in use (lock contention): %w", err)
 	}
 
-	// bolt file absent — likely genuinely corrupt or partially initialised; nuke and recreate
+	// bolt file absent — likely genuinely corrupt or partially initialized; nuke and recreate
 	slog.Error("bleve index corrupt, recreating", "path", path, "err", err)
 	if removeErr := os.RemoveAll(path); removeErr != nil {
 		return nil, fmt.Errorf("remove corrupt bleve index %s: %w", path, removeErr)
