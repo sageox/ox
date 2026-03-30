@@ -239,4 +239,3 @@ func readPreview(path string, n int) string {
 	read, _ := f.Read(buf)
 	return strings.TrimSpace(string(buf[:read]))
 }
-
