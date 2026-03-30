@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -374,34 +375,67 @@ func TestIndex_DeletedProjectRoot_FailsFast(t *testing.T) {
 // --- CheckFreshness race prevention ---
 
 // TestCheckFreshness_NoDoubleGoroutine verifies that rapid successive calls to
-// CheckFreshness never spin up more than one indexing goroutine.
+// CheckFreshness never spin up more than one indexing goroutine concurrently.
 // Before the fix, m.indexing was not set until inside Index(), leaving a window
 // where multiple goroutines would launch and race to claim the flag.
+//
+// The test injects a hook that blocks doIndex until explicitly released, making
+// it deterministic: the goroutine is provably still running when we check the flag
+// and measure concurrency.
 func TestCheckFreshness_NoDoubleGoroutine(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
 
-	// fire 10 rapid CheckFreshness calls — only one goroutine should ever run
+	var concurrent atomic.Int64
+	var maxConcurrent atomic.Int64
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+
+	// hook blocks doIndex so the goroutine stays live while we inspect m.indexing
+	mgr.testHook = func() {
+		n := concurrent.Add(1)
+		for {
+			old := maxConcurrent.Load()
+			if n <= old || maxConcurrent.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		select {
+		case started <- struct{}{}: // signal that a goroutine has entered doIndex
+		default:
+		}
+		<-release // block until test releases
+		concurrent.Add(-1)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// fire 10 rapid CheckFreshness calls — only one goroutine should launch
 	const calls = 10
 	for i := 0; i < calls; i++ {
 		mgr.CheckFreshness(ctx)
 	}
 
-	// m.indexing must be true immediately after the first call (flag claimed before goroutine)
+	// wait for the goroutine to enter doIndex (deterministic: hook signals started)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("goroutine did not start within 5s")
+	}
+
+	// while the goroutine is blocked: flag must be held and concurrency must be 1
 	mgr.mu.Lock()
-	flagAfterCalls := mgr.indexing
+	flagWhileBlocked := mgr.indexing
 	mgr.mu.Unlock()
-	assert.True(t, flagAfterCalls, "indexing flag should be claimed synchronously by first CheckFreshness call")
+	assert.True(t, flagWhileBlocked, "indexing flag must be held while goroutine is running")
+	assert.Equal(t, int64(1), maxConcurrent.Load(), "at most one goroutine should be in doIndex at once")
 
-	// cancel context to stop the running goroutine quickly
-	cancel()
+	// release the blocked goroutine and wait for the flag to clear
+	close(release)
 
-	// wait for the goroutine to finish and release the flag
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		mgr.mu.Lock()
@@ -417,6 +451,7 @@ func TestCheckFreshness_NoDoubleGoroutine(t *testing.T) {
 	stillIndexing := mgr.indexing
 	mgr.mu.Unlock()
 	assert.False(t, stillIndexing, "indexing flag must be released after goroutine exits")
+	assert.Equal(t, int64(1), maxConcurrent.Load(), "exactly one goroutine ran doIndex in total")
 }
 
 // TestCheckFreshness_FlagReleasedOnFailure verifies that the m.indexing flag is

@@ -38,6 +38,10 @@ type CodeDBManager struct {
 	lastErr   error
 	stats     CodeDBStats // cached after each index run; read by Stats() without opening DB
 	dataDir   string      // cached data dir; resolved once on first use
+
+	// testHook is called at the start of doIndex; nil in production.
+	// Tests use it to synchronize with or measure the indexing goroutine.
+	testHook func()
 }
 
 // CodeDBStats tracks index statistics.
@@ -178,6 +182,10 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 // doIndex executes the full indexing pipeline. Callers must already own the
 // m.indexing flag (i.e. have set it to true under m.mu before calling).
 func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, pw *ProgressWriter) (*CodeIndexResult, error) {
+	if m.testHook != nil {
+		m.testHook()
+	}
+
 	m.mu.Lock()
 	projectRoot := m.projectRoot // snapshot under lock to avoid races with UpdateProjectRoot
 	m.mu.Unlock()
