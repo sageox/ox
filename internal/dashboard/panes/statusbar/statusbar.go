@@ -28,8 +28,8 @@ type Pane struct {
 // New returns an initialized status bar Pane.
 func New() *Pane { return &Pane{} }
 
-func (p *Pane) ID() panes.PaneID              { return panes.PaneStatusBar }
-func (p *Pane) SetSize(r panes.Rect)          { p.rect = r }
+func (p *Pane) ID() panes.PaneID                                            { return panes.PaneStatusBar }
+func (p *Pane) SetSize(r panes.Rect)                                        { p.rect = r }
 func (p *Pane) Update(msg tea.Msg, ctx panes.Context) (panes.Pane, tea.Cmd) { return p, nil }
 
 // View renders the status bar as a single full-width line. If a StatusMessage
@@ -99,6 +99,16 @@ func (p *Pane) View(ctx panes.Context) string {
 				label += "s"
 			}
 			parts = append(parts, theme.StatusWarning.Render(label))
+		}
+	}
+
+	// Auth expiry warning — shown prominently when a token is about to expire.
+	if daemonStatus != nil {
+		for _, issue := range daemonStatus.Issues {
+			if issue.Type == "auth_expiring" || issue.Type == "auth_expired" {
+				parts = append(parts, theme.StatusWarning.Render("⚠ auth expiring · run: ox login"))
+				break
+			}
 		}
 	}
 
