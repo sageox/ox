@@ -553,7 +553,7 @@ func TestPushFailure_LedgerCommitPreserved(t *testing.T) {
 
 	// verify the committed tree contains the session files
 	files := runGit(t, clonePath, "diff", "--name-only", "HEAD~1", "HEAD")
-	assert.Contains(t, files, filepath.Join("sessions", sessionName, "meta.json"),
+	assert.Contains(t, files, "sessions/"+sessionName+"/meta.json",
 		"meta.json should be in the committed diff")
 }
 

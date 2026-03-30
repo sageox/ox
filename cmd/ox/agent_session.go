@@ -1831,5 +1831,8 @@ func isGenericDropFileEmpty(state *session.RecordingState) bool {
 		return false
 	}
 	info, err := os.Stat(state.SessionFile)
-	return err != nil || info.Size() == 0
+	if err != nil {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	return info.Size() == 0
 }
