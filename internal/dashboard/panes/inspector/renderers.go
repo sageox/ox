@@ -3,6 +3,8 @@ package inspector
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 
 	"github.com/sageox/ox/internal/dashboard/domain"
 	"github.com/sageox/ox/internal/dashboard/theme"
+	"github.com/sageox/ox/internal/ui"
 )
 
 // row renders a label: value line in the inspector style.
@@ -20,6 +23,8 @@ func row(label, value string) string {
 }
 
 // RenderSession renders a session.SessionInfo in the inspector pane.
+// When a summary.md path is available on the SessionInfo, it renders the full
+// markdown content using glamour for a richer review experience.
 func RenderSession(target domain.InspectorTarget, width int) string {
 	if target.Session == nil {
 		return theme.InspectorDimStyle.Render("no session data")
@@ -37,6 +42,10 @@ func RenderSession(target domain.InspectorTarget, width int) string {
 		lines = append(lines, row("Agent", sess.AgentID))
 	}
 	lines = append(lines, row("Created", humanTime(sess.CreatedAt)))
+	if !sess.ModTime.IsZero() && !sess.CreatedAt.IsZero() && sess.ModTime.After(sess.CreatedAt) {
+		dur := sess.ModTime.Sub(sess.CreatedAt).Round(time.Second)
+		lines = append(lines, row("Duration", fmt.Sprintf("%s", dur)))
+	}
 	if sess.EntryCount > 0 {
 		lines = append(lines, row("Entries", fmt.Sprintf("%d", sess.EntryCount)))
 	}
@@ -47,7 +56,18 @@ func RenderSession(target domain.InspectorTarget, width int) string {
 		lines = append(lines, row("Ended", sess.StopReason))
 	}
 
-	if sess.Summary != "" {
+	// Render summary.md content using glamour when available.
+	// summary.md lives at <session-dir>/summary.md; FilePath is the raw.jsonl path.
+	// Falls back to the plain Summary field when no markdown is present.
+	summaryMD := loadSessionSummaryMD(sess.FilePath)
+	if summaryMD != "" {
+		lines = append(lines, "")
+		lines = append(lines, theme.InspectorTitleStyle.Render("Summary"))
+		rendered := ui.RenderMarkdown(summaryMD)
+		// Trim trailing whitespace that glamour sometimes appends.
+		rendered = strings.TrimRight(rendered, "\n")
+		lines = append(lines, rendered)
+	} else if sess.Summary != "" {
 		lines = append(lines, "")
 		lines = append(lines, theme.InspectorTitleStyle.Render("Summary"))
 		for _, line := range wrapText(sess.Summary, width-2) {
@@ -95,45 +115,279 @@ func RenderWorkspace(target domain.InspectorTarget, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-// RenderIssue renders a DaemonIssue in the inspector pane.
+// RenderIssue renders a DaemonIssue in the inspector pane with severity badge.
 func RenderIssue(target domain.InspectorTarget, width int) string {
 	if target.Issue == nil {
 		return theme.InspectorDimStyle.Render("no issue data")
 	}
 	issue := target.Issue
 
-	severityStyle := theme.InspectorValueStyle
+	var severityStyle lipgloss.Style
 	switch issue.Severity {
-	case "critical", "error":
+	case "critical":
+		severityStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#FF5555"))
+	case "error":
 		severityStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555"))
 	case "warning":
 		severityStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB86C"))
+	default:
+		severityStyle = theme.InspectorValueStyle
 	}
+
+	badge := severityStyle.Render("[" + strings.ToUpper(issue.Severity) + "]")
 
 	var lines []string
 	lines = append(lines, theme.InspectorTitleStyle.Render("Issue"))
 	lines = append(lines, "")
+	lines = append(lines, theme.InspectorLabelStyle.Render("Severity")+" "+badge)
 	lines = append(lines, row("Type", issue.Type))
-	lines = append(lines,
-		theme.InspectorLabelStyle.Render("Severity")+" "+severityStyle.Render(issue.Severity),
-	)
 	lines = append(lines, row("Since", humanTime(issue.Since)))
 	if issue.Repo != "" {
 		lines = append(lines, row("Repo", issue.Repo))
 	}
 	if issue.RequiresConfirm {
-		lines = append(lines, row("Auth", "human confirmation required"))
+		lines = append(lines, row("Confirm", "human confirmation required"))
 	}
 
 	if issue.Summary != "" {
 		lines = append(lines, "")
+		lines = append(lines, theme.InspectorTitleStyle.Render("Details"))
 		lines = append(lines, wrapText(issue.Summary, width-2)...)
+	}
+
+	if issue.RequiresConfirm {
+		lines = append(lines, "")
+		lines = append(lines, theme.InspectorHintStyle.Render("[enter] resolve  [r] refresh"))
 	}
 
 	return strings.Join(lines, "\n")
 }
 
-// RenderMurmur renders a MurmurEntry in the inspector pane.
+// RenderAuth renders authentication status and token expiry information.
+func RenderAuth(target domain.InspectorTarget, width int) string {
+	status := target.Auth
+
+	var lines []string
+	lines = append(lines, theme.InspectorTitleStyle.Render("Authentication"))
+	lines = append(lines, "")
+
+	if status == nil || !status.Running {
+		lines = append(lines, theme.InspectorDimStyle.Render("daemon offline — auth status unavailable"))
+		lines = append(lines, "")
+		lines = append(lines, theme.InspectorHintStyle.Render("[r] ox login"))
+		return strings.Join(lines, "\n")
+	}
+
+	if status.AuthenticatedUser != nil {
+		lines = append(lines, row("Email", status.AuthenticatedUser.Email))
+		if status.AuthenticatedUser.ID != "" {
+			lines = append(lines, row("User ID", status.AuthenticatedUser.ID))
+		}
+	} else {
+		lines = append(lines, theme.InspectorDimStyle.Render("not authenticated"))
+		lines = append(lines, "")
+		lines = append(lines, theme.InspectorHintStyle.Render("[r] run: ox login"))
+		return strings.Join(lines, "\n")
+	}
+
+	// Show auth-related issues (expiry warnings).
+	var authIssues []string
+	for _, issue := range status.Issues {
+		if issue.Type == "auth_expiring" || issue.Type == "auth_expired" {
+			authIssues = append(authIssues, issue.Summary)
+		}
+	}
+	if len(authIssues) > 0 {
+		lines = append(lines, "")
+		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB86C"))
+		lines = append(lines, warnStyle.Render("⚠ Token expiry warning"))
+		for _, msg := range authIssues {
+			for _, line := range wrapText(msg, width-2) {
+				lines = append(lines, theme.InspectorDimStyle.Render(line))
+			}
+		}
+		lines = append(lines, "")
+		lines = append(lines, theme.InspectorHintStyle.Render("[r] run: ox login to refresh"))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// RenderCodeDB renders code index statistics in a stats grid.
+func RenderCodeDB(target domain.InspectorTarget, width int) string {
+	cdb := target.CodeDB
+	if cdb == nil {
+		return theme.InspectorDimStyle.Render("code index not available")
+	}
+
+	var lines []string
+	title := "Code Index"
+	if cdb.IndexingNow {
+		title = "⟳ Code Index  (indexing…)"
+	}
+	lines = append(lines, theme.InspectorTitleStyle.Render(title))
+	lines = append(lines, "")
+
+	if !cdb.LastIndexed.IsZero() {
+		age := time.Since(cdb.LastIndexed)
+		ageStr := humanAge(age)
+		stalenessIndicator := ""
+		switch {
+		case age > 24*time.Hour:
+			stalenessIndicator = " (stale)"
+		case age > 6*time.Hour:
+			stalenessIndicator = " (aging)"
+		}
+		lines = append(lines, row("Indexed", ageStr+stalenessIndicator))
+	}
+	if cdb.LastError != "" {
+		errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555"))
+		lines = append(lines, theme.InspectorLabelStyle.Render("Error")+" "+errStyle.Render(cdb.LastError))
+	}
+	lines = append(lines, "")
+
+	// Stats grid — 2-column layout.
+	lines = append(lines, theme.InspectorTitleStyle.Render("Counts"))
+	lines = append(lines, row("Commits", fmt.Sprintf("%d", cdb.Commits)))
+	lines = append(lines, row("Blobs", fmt.Sprintf("%d", cdb.Blobs)))
+	lines = append(lines, row("Symbols", fmt.Sprintf("%d", cdb.Symbols)))
+	lines = append(lines, row("Comments", fmt.Sprintf("%d", cdb.Comments)))
+	lines = append(lines, row("PRs", fmt.Sprintf("%d", cdb.PRs)))
+	lines = append(lines, row("Issues", fmt.Sprintf("%d", cdb.Issues)))
+
+	// Per-repo breakdown when multiple repos are indexed.
+	if len(cdb.Repos) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, theme.InspectorTitleStyle.Render("Repos"))
+		for _, r := range cdb.Repos {
+			name := r.Name
+			if name == "" {
+				name = shortenPath(r.Path, width-20)
+			}
+			detail := fmt.Sprintf("%s  commits:%d  blobs:%d", name, r.Commits, r.Blobs)
+			for _, line := range wrapText(detail, width-2) {
+				lines = append(lines, theme.InspectorDimStyle.Render(line))
+			}
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// RenderSyncHealth renders daemon sync health with per-workspace timing.
+func RenderSyncHealth(target domain.InspectorTarget, width int) string {
+	status := target.SyncHealth
+	if status == nil || !status.Running {
+		return theme.InspectorDimStyle.Render("daemon offline — sync status unavailable")
+	}
+
+	var lines []string
+	lines = append(lines, theme.InspectorTitleStyle.Render("Sync Health"))
+	lines = append(lines, "")
+
+	// Global daemon sync stats.
+	lines = append(lines, row("Total syncs", fmt.Sprintf("%d", status.TotalSyncs)))
+	lines = append(lines, row("Last hour", fmt.Sprintf("%d", status.SyncsLastHour)))
+	if status.AvgSyncTime > 0 {
+		lines = append(lines, row("Avg sync", status.AvgSyncTime.Round(time.Millisecond).String()))
+	}
+
+	// Per-workspace breakdown.
+	if len(status.Workspaces) > 0 {
+		lines = append(lines, "")
+		lines = append(lines, theme.InspectorTitleStyle.Render("Workspaces"))
+
+		for wsType, wsList := range status.Workspaces {
+			for _, ws := range wsList {
+				label := ws.TeamName
+				if label == "" {
+					label = ws.ID
+				}
+				lines = append(lines, "")
+				lines = append(lines, theme.InspectorTitleStyle.Render(label+" ("+wsType+")"))
+				if !ws.LastSync.IsZero() {
+					age := time.Since(ws.LastSync)
+					ageStyle := syncAgeStyle(age)
+					lines = append(lines,
+						theme.InspectorLabelStyle.Render("Last sync")+" "+ageStyle.Render(humanAge(age)),
+					)
+				} else {
+					lines = append(lines, row("Last sync", "never"))
+				}
+				if ws.Syncing {
+					lines = append(lines, row("", "⟳ syncing now…"))
+				}
+				if ws.LastErr != "" {
+					errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555"))
+					lines = append(lines,
+						theme.InspectorLabelStyle.Render("Error")+" "+errStyle.Render(ws.LastErr),
+					)
+				}
+				if !ws.LastGCTime.IsZero() {
+					gcDays := ws.GCIntervalDays
+					if gcDays == 0 {
+						gcDays = 7 // default
+					}
+					lines = append(lines, row("Last GC", humanTime(ws.LastGCTime)))
+					lines = append(lines, row("GC cadence", fmt.Sprintf("every %d days", gcDays)))
+				}
+			}
+		}
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+// RenderSOUL renders a SOUL.md document using glamour markdown.
+func RenderSOUL(target domain.InspectorTarget, width int) string {
+	soul := target.SOUL
+	if soul == nil || soul.Content == "" {
+		return theme.InspectorDimStyle.Render("SOUL.md not found for this team")
+	}
+
+	var lines []string
+	title := "SOUL · " + soul.TeamName
+	if soul.TeamName == "" {
+		title = "SOUL.md"
+	}
+	lines = append(lines, theme.InspectorTitleStyle.Render(title))
+	lines = append(lines, "")
+
+	rendered := ui.RenderMarkdown(soul.Content)
+	rendered = strings.TrimRight(rendered, "\n")
+	lines = append(lines, rendered)
+
+	return strings.Join(lines, "\n")
+}
+
+// syncAgeStyle returns a colored style based on how long ago the last sync occurred.
+func syncAgeStyle(age time.Duration) lipgloss.Style {
+	switch {
+	case age < 10*time.Minute:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#5faf5f")) // green
+	case age < time.Hour:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB86C")) // yellow
+	default:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555")) // red
+	}
+}
+
+// humanAge formats a duration as a short human-readable string.
+func humanAge(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
+
+// RenderMurmur renders a MurmurEntry in the inspector pane with full content
+// (no truncation), author info, and related-session navigation hint.
 func RenderMurmur(target domain.InspectorTarget, width int) string {
 	if target.Murmur == nil {
 		return theme.InspectorDimStyle.Render("no murmur data")
@@ -147,6 +401,14 @@ func RenderMurmur(target domain.InspectorTarget, width int) string {
 	if m.Author != "" {
 		lines = append(lines, row("From", m.Author))
 	}
+	if m.AgentID != "" && m.AgentID != m.Author {
+		// Show last 12 chars of AgentID to give enough context without overwhelming.
+		displayID := m.AgentID
+		if len(displayID) > 12 {
+			displayID = "…" + displayID[len(displayID)-12:]
+		}
+		lines = append(lines, row("Agent", displayID))
+	}
 	if m.Topic != "" {
 		lines = append(lines, row("Topic", m.Topic))
 	}
@@ -154,9 +416,15 @@ func RenderMurmur(target domain.InspectorTarget, width int) string {
 
 	if m.Content != "" {
 		lines = append(lines, "")
-		lines = append(lines, wrapText(m.Content, width-2)...)
+		lines = append(lines, theme.InspectorTitleStyle.Render("Content"))
+		// Full content — no truncation. Word-wrap to pane width.
+		for _, line := range wrapText(m.Content, width-2) {
+			lines = append(lines, line)
+		}
 	}
 
+	lines = append(lines, "")
+	lines = append(lines, theme.InspectorHintStyle.Render("[o] open session on sageox.ai"))
 	return strings.Join(lines, "\n")
 }
 
@@ -213,6 +481,23 @@ func shortenPath(path string, max int) string {
 		return path
 	}
 	return "…" + path[len(path)-max+1:]
+}
+
+// loadSessionSummaryMD reads summary.md from the session directory.
+// The session directory contains the session files (raw.jsonl, summary.md, etc.).
+// filePath is the path to raw.jsonl or another session file; its parent is the session dir.
+// Returns empty string when summary.md is not available or cannot be read.
+func loadSessionSummaryMD(filePath string) string {
+	if filePath == "" {
+		return ""
+	}
+	dir := filepath.Dir(filePath)
+	summaryPath := filepath.Join(dir, "summary.md")
+	data, err := os.ReadFile(summaryPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
 }
 
 // wrapText breaks s into lines of at most width columns, splitting on word boundaries.

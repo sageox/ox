@@ -47,6 +47,16 @@ type ReadOnlyStore interface {
 
 	// ActiveMurmurTeams returns the count of unique team slugs from murmurs in the last 30 min.
 	ActiveMurmurTeams() int
+
+	// MurmurFilter returns the active topic filter for the murmur feed.
+	// Empty string means all topics are shown.
+	MurmurFilter() domain.MurmurTopicFilter
+
+	// MurmurSearch returns the active inline search query for murmur content.
+	MurmurSearch() string
+
+	// MurmurSearchActive reports whether the inline search field is open.
+	MurmurSearchActive() bool
 }
 
 // Ensure *Store satisfies the pane-facing interface at compile time.
