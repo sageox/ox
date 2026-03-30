@@ -662,19 +662,19 @@ func TestConfigureSparseCheckout_PreservesAllLocalFileCategories(t *testing.T) {
 	// create files across every known local-only category
 	localFiles := map[string]string{
 		// codedb SQLite + bleve indexes (nested)
-		".sageox/cache/codedb/index.db":                     "sqlite-data",
-		".sageox/cache/codedb/bleve/store/segment.vx":       "bleve-segment",
-		".sageox/cache/codedb/bleve/index_meta.json":        "bleve-meta",
+		".sageox/cache/codedb/index.db":               "sqlite-data",
+		".sageox/cache/codedb/bleve/store/segment.vx": "bleve-segment",
+		".sageox/cache/codedb/bleve/index_meta.json":  "bleve-meta",
 		// whisper cache
-		".sageox/cache/whisper/whisper.db":                   "whisper-data",
+		".sageox/cache/whisper/whisper.db": "whisper-data",
 		// github sync state
-		".sageox/cache/github_sync/state.json":               "sync-state",
+		".sageox/cache/github_sync/state.json": "sync-state",
 		// telemetry queue
-		".sageox/cache/telemetry.jsonl":                      "event-data",
+		".sageox/cache/telemetry.jsonl": "event-data",
 		// health metadata
-		".sageox/cache/health.json":                          "health-data",
+		".sageox/cache/health.json": "health-data",
 		// arbitrary user file outside .sageox (simulates pending commit)
-		"user-notes.txt":                                     "user-data",
+		"user-notes.txt": "user-data",
 	}
 
 	for relPath, content := range localFiles {
@@ -1174,6 +1174,94 @@ func TestConfigureSparseCheckout_PreservesRenamedFilesOutsideCone(t *testing.T) 
 	}
 	if string(content) != origContent {
 		t.Errorf("content changed: got %q, want %q", string(content), origContent)
+	}
+}
+
+// Regression test: ConfigureSparseCheckout must not wipe .sageox/cache/codedb/
+// when .sageox was not previously in the sparse-checkout cone.
+//
+// Production failure sequence that motivated this test:
+//  1. Ledger cloned with sparse-checkout cone not including .sageox/
+//  2. Daemon starts, creates .sageox/cache/codedb/bleve/code/store/root.bolt
+//  3. File watcher fires, triggers pullChanges → ConfigureSparseCheckout
+//  4. "git sparse-checkout set" without .sageox in cone deletes entire .sageox/ dir
+//  5. Bleve segment write fails: open .../store/000000000002.zap: no such file or directory
+//  6. Index fails, stats never update, CheckFreshness retries → infinite loop
+//
+// The fix (adding .sageox to the cone in ConfigureSparseCheckout) ensures step 4
+// never deletes the cache. This test would have caught the regression before it shipped.
+func TestConfigureSparseCheckout_PreservesBleveCacheWhenSageoxNotPreviouslyInCone(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+
+	if err := exec.Command("git", "init", tempDir).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+
+	// Set up sparse-checkout WITHOUT .sageox — simulates a ledger cloned before
+	// the .sageox cone fix, where the daemon has been running for a while.
+	if err := exec.Command("git", "-C", tempDir, "sparse-checkout", "init", "--cone").Run(); err != nil {
+		t.Fatalf("sparse-checkout init: %v", err)
+	}
+	if err := exec.Command("git", "-C", tempDir, "sparse-checkout", "set", ".sync", "sessions", "audit").Run(); err != nil {
+		t.Fatalf("sparse-checkout set without .sageox: %v", err)
+	}
+
+	// Simulate the bleve store that codedb creates mid-index: the bolt file
+	// exists and segment files are being written. This is the exact structure
+	// that was getting wiped.
+	storeDir := filepath.Join(tempDir, ".sageox", "cache", "codedb", "bleve", "code", "store")
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		t.Fatalf("create bleve store dir: %v", err)
+	}
+	boltFile := filepath.Join(storeDir, "root.bolt")
+	if err := os.WriteFile(boltFile, []byte("fake-bolt"), 0o644); err != nil {
+		t.Fatalf("write root.bolt: %v", err)
+	}
+	zapFile := filepath.Join(storeDir, "000000000001.zap")
+	if err := os.WriteFile(zapFile, []byte("fake-segment"), 0o644); err != nil {
+		t.Fatalf("write .zap segment: %v", err)
+	}
+
+	// ConfigureSparseCheckout adds .sageox to the cone — this must not delete the store.
+	if err := ConfigureSparseCheckout(tempDir); err != nil {
+		t.Fatalf("ConfigureSparseCheckout: %v", err)
+	}
+
+	for _, path := range []string{boltFile, zapFile, storeDir} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("bleve store path must survive ConfigureSparseCheckout when .sageox was not previously in cone: %s: %v", path, err)
+		}
+	}
+}
+
+// Regression test: ConfigureSparseCheckout must preserve the bleve store even
+// when called repeatedly from the 60s sync scheduler while indexing is active.
+// Each call runs "git sparse-checkout set" — the cache must survive all of them.
+func TestConfigureSparseCheckout_RepeatedCallsPreserveBleveStore(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+
+	if err := exec.Command("git", "init", tempDir).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+
+	storeDir := filepath.Join(tempDir, ".sageox", "cache", "codedb", "bleve", "code", "store")
+	if err := os.MkdirAll(storeDir, 0o755); err != nil {
+		t.Fatalf("create bleve store dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(storeDir, "root.bolt"), []byte("bolt"), 0o644); err != nil {
+		t.Fatalf("write root.bolt: %v", err)
+	}
+
+	// Call 10 times — matches the scheduler calling pullChanges every ~60s over ~10 minutes.
+	for i := range 10 {
+		if err := ConfigureSparseCheckout(tempDir); err != nil {
+			t.Fatalf("ConfigureSparseCheckout call %d: %v", i+1, err)
+		}
+		if _, err := os.Stat(storeDir); err != nil {
+			t.Fatalf("bleve store deleted on ConfigureSparseCheckout call %d: %v", i+1, err)
+		}
 	}
 }
 
