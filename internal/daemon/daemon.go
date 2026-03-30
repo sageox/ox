@@ -161,6 +161,7 @@ type Daemon struct {
 	codedb          *CodeDBManager
 	agentWorker     *agentwork.Manager
 	whisperRegistry    *WhisperRegistry
+	murmurNudgeSource  *MurmurNudgeSource
 	dbMaintenance      *DBMaintenanceScheduler
 
 	// state
@@ -891,6 +892,18 @@ func (d *Daemon) startWorkers() {
 	d.friction.Start()
 	d.telemetry.RecordDaemonStartup()
 
+	// initialize whisper sources before IPC server starts, so pause/resume
+	// handlers can safely read d.murmurNudgeSource without a data race
+	if d.whisperRegistry != nil {
+		ws := NewWhisperScheduler(d.whisperRegistry, d.logger)
+		ws.RegisterSource(NewActivitySummarySource(d.heartbeat, d.scheduler))
+		if d.config.MurmurNudgeInterval > 0 {
+			d.murmurNudgeSource = NewMurmurNudgeSource(d.whisperRegistry.LedgerStore(), d.heartbeat, d.config.MurmurNudgeInterval, d.config.ProjectRoot)
+			ws.RegisterSource(d.murmurNudgeSource)
+		}
+		ws.Start(d.ctx, &d.wg)
+	}
+
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
@@ -903,15 +916,6 @@ func (d *Daemon) startWorkers() {
 		defer d.wg.Done()
 		d.scheduler.Start(d.ctx)
 	}()
-
-	if d.whisperRegistry != nil {
-		ws := NewWhisperScheduler(d.whisperRegistry, d.logger)
-		ws.RegisterSource(NewActivitySummarySource(d.heartbeat, d.scheduler))
-		if d.config.MurmurNudgeInterval > 0 {
-			ws.RegisterSource(NewMurmurNudgeSource(d.whisperRegistry.LedgerStore(), d.heartbeat, d.config.MurmurNudgeInterval, d.config.ProjectRoot))
-		}
-		ws.Start(d.ctx, &d.wg)
-	}
 
 	// unified DB maintenance: prune, vacuum, integrity check for all SQLite databases
 	d.dbMaintenance = NewDBMaintenanceScheduler(d.logger)
@@ -1264,4 +1268,18 @@ func (s *daemonServiceImpl) PublishMurmur(payload MurmurPayload) {
 
 		s.d.logger.Debug("murmur written and committed", "rel_path", payload.RelPath)
 	}()
+}
+
+func (s *daemonServiceImpl) PauseMurmuring(agentID string) {
+	if s.d.murmurNudgeSource != nil {
+		s.d.murmurNudgeSource.PauseAgent(agentID)
+		s.d.logger.Debug("murmur nudging paused", "agent_id", agentID)
+	}
+}
+
+func (s *daemonServiceImpl) ResumeMurmuring(agentID string) {
+	if s.d.murmurNudgeSource != nil {
+		s.d.murmurNudgeSource.ResumeAgent(agentID)
+		s.d.logger.Debug("murmur nudging resumed", "agent_id", agentID)
+	}
 }

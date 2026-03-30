@@ -233,10 +233,13 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 	if _, statErr := os.Stat(planSrcPath); statErr == nil {
 		cacheDir := filepath.Dir(result.RawPath)
 		planDstPath := filepath.Join(cacheDir, ledgerFilePlan)
-		if data, readErr := os.ReadFile(planSrcPath); readErr == nil {
-			if writeErr := os.WriteFile(planDstPath, data, 0644); writeErr == nil {
-				result.PlanPath = planDstPath
-			}
+		data, readErr := os.ReadFile(planSrcPath)
+		if readErr != nil {
+			slog.Warn("plan.md read failed", "path", planSrcPath, "error", readErr)
+		} else if writeErr := os.WriteFile(planDstPath, data, 0644); writeErr != nil {
+			slog.Warn("plan.md copy failed", "dst", planDstPath, "error", writeErr)
+		} else {
+			result.PlanPath = planDstPath
 		}
 	}
 

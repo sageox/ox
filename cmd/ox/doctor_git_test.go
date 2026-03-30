@@ -109,22 +109,26 @@ func TestGetSageoxFilesToCommit_PatternFiles(t *testing.T) {
 
 	files := GetSageoxFilesToCommit()
 
-	// should include all json and md files
-	if len(files) < len(testFiles) {
-		t.Errorf("expected at least %d files, got %d: %v", len(testFiles), len(files), files)
+	// exact count: custom.json and info.json match *.json, notes.md matches *.md
+	expectedPaths := make(map[string]bool)
+	for _, f := range testFiles {
+		expectedPaths[filepath.Join(".sageox", f)] = false
 	}
 
-	for _, expectedFile := range testFiles {
-		expectedPath := filepath.Join(".sageox", expectedFile)
-		found := false
-		for _, f := range files {
-			if f == expectedPath {
-				found = true
-				break
-			}
+	if len(files) != len(expectedPaths) {
+		t.Fatalf("expected exactly %d files, got %d: %v", len(expectedPaths), len(files), files)
+	}
+
+	for _, f := range files {
+		if _, ok := expectedPaths[f]; !ok {
+			t.Errorf("unexpected file in result: %s", f)
+		} else {
+			expectedPaths[f] = true
 		}
+	}
+	for path, found := range expectedPaths {
 		if !found {
-			t.Errorf("expected file %s not found in result: %v", expectedPath, files)
+			t.Errorf("expected file %s not found in result: %v", path, files)
 		}
 	}
 }

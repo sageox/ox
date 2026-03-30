@@ -51,6 +51,8 @@ const (
 	MsgTypeWhisperHistory  = "whisper_history"  // query all whispers (pending + delivered) without advancing cursor
 	MsgTypeSessionFinalize = "session_finalize" // one-way, trigger async session upload+finalization
 	MsgTypeMurmur          = "murmur"           // one-way, write+commit a murmur file in ledger/team context
+	MsgTypeMurmurPause     = "murmur_pause"     // one-way, pause murmur nudging for an agent
+	MsgTypeMurmurResume    = "murmur_resume"     // one-way, resume murmur nudging for an agent
 )
 
 // Protocol Design Decision: NDJSON (Newline-Delimited JSON)
@@ -319,6 +321,11 @@ type MurmurPayload struct {
 	MurmurJSON []byte `json:"murmur_json"` // serialized ledger.MurmurFile to write at RelPath
 }
 
+// MurmurPausePayload carries the agent ID for pause/resume murmur nudging.
+type MurmurPausePayload struct {
+	AgentID string `json:"agent_id"`
+}
+
 // MarkErrorsPayload is the payload for marking errors as viewed.
 type MarkErrorsPayload struct {
 	// IDs to mark as viewed. If empty, marks all errors as viewed.
@@ -571,6 +578,8 @@ type DaemonService interface {
 	Telemetry(payload json.RawMessage)
 	Friction(payload FrictionPayload)
 	PublishMurmur(payload MurmurPayload)
+	PauseMurmuring(agentID string)
+	ResumeMurmuring(agentID string)
 }
 
 // CallbackService implements DaemonService using individual callback functions.
@@ -591,6 +600,8 @@ type CallbackService struct {
 	onFriction         func(payload FrictionPayload)
 	onSessionFinalize  func(payload SessionFinalizeIPCPayload)
 	onPublishMurmur    func(payload MurmurPayload)
+	onPauseMurmuring   func(agentID string)
+	onResumeMurmuring  func(agentID string)
 	onGetErrors        func() []StoredError
 	onMarkErrors       func(ids []string)
 	onSessions         func() []AgentSession
@@ -826,6 +837,24 @@ func (c *CallbackService) PublishMurmur(payload MurmurPayload) {
 	}
 }
 
+func (c *CallbackService) PauseMurmuring(agentID string) {
+	c.mu.Lock()
+	fn := c.onPauseMurmuring
+	c.mu.Unlock()
+	if fn != nil {
+		fn(agentID)
+	}
+}
+
+func (c *CallbackService) ResumeMurmuring(agentID string) {
+	c.mu.Lock()
+	fn := c.onResumeMurmuring
+	c.mu.Unlock()
+	if fn != nil {
+		fn(agentID)
+	}
+}
+
 // Server handles IPC requests from clients.
 type Server struct {
 	logger   *slog.Logger
@@ -895,6 +924,8 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeWhispers, handleWhispers)
 	router.Register(MsgTypeWhisperHistory, handleWhisperHistory)
 	router.Register(MsgTypeMurmur, handleMurmur)
+	router.Register(MsgTypeMurmurPause, handleMurmurPause)
+	router.Register(MsgTypeMurmurResume, handleMurmurResume)
 
 	return router
 }
@@ -987,6 +1018,24 @@ func (s *Server) SetMurmurHandler(fn func(payload MurmurPayload)) {
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 	svc.onPublishMurmur = fn
+}
+
+// SetPauseMurmuringHandler sets the handler for pausing murmur nudging.
+// Murmur pause events are fire-and-forget - no response is sent.
+func (s *Server) SetPauseMurmuringHandler(fn func(agentID string)) {
+	svc := s.mustCallbackService("SetPauseMurmuringHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onPauseMurmuring = fn
+}
+
+// SetResumeMurmuringHandler sets the handler for resuming murmur nudging.
+// Murmur resume events are fire-and-forget - no response is sent.
+func (s *Server) SetResumeMurmuringHandler(fn func(agentID string)) {
+	svc := s.mustCallbackService("SetResumeMurmuringHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onResumeMurmuring = fn
 }
 
 // SetErrorsHandler sets the handler for retrieving unviewed errors.
@@ -1898,6 +1947,30 @@ func (c *Client) Murmur(payload MurmurPayload) error {
 	}
 	return c.SendOneWay(Message{
 		Type:    MsgTypeMurmur,
+		Payload: payloadBytes,
+	})
+}
+
+// MurmurPause sends a fire-and-forget request to pause murmur nudging for an agent.
+func (c *Client) MurmurPause(agentID string) error {
+	payloadBytes, err := json.Marshal(MurmurPausePayload{AgentID: agentID})
+	if err != nil {
+		return fmt.Errorf("marshal murmur_pause payload: %w", err)
+	}
+	return c.SendOneWay(Message{
+		Type:    MsgTypeMurmurPause,
+		Payload: payloadBytes,
+	})
+}
+
+// MurmurResume sends a fire-and-forget request to resume murmur nudging for an agent.
+func (c *Client) MurmurResume(agentID string) error {
+	payloadBytes, err := json.Marshal(MurmurPausePayload{AgentID: agentID})
+	if err != nil {
+		return fmt.Errorf("marshal murmur_resume payload: %w", err)
+	}
+	return c.SendOneWay(Message{
+		Type:    MsgTypeMurmurResume,
 		Payload: payloadBytes,
 	})
 }

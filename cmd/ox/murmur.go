@@ -41,11 +41,31 @@ var validImportanceLevels = map[string]bool{
 	"ambient":  true,
 }
 
+var murmurPauseCmd = &cobra.Command{
+	Use:   "pause",
+	Short: "Pause murmur nudging for this session",
+	Long:  `Pauses automatic murmur nudges for the current agent session. Other agents' murmurs are still relayed; only nudge generation is suppressed.`,
+	RunE:  runMurmurPause,
+}
+
+var murmurResumeCmd = &cobra.Command{
+	Use:   "resume",
+	Short: "Resume murmur nudging for this session",
+	Long:  `Resumes automatic murmur nudges for the current agent session after a previous pause.`,
+	RunE:  runMurmurResume,
+}
+
 func init() {
 	murmurCmd.Flags().String("topic", "general", "topic slug for filtering (e.g., lint, architecture, conflict)")
 	murmurCmd.Flags().String("importance", "normal", "importance level: critical, normal, ambient")
 	murmurCmd.Flags().String("scope", "ledger", "scope: ledger (this repo) or team (all repos)")
 	murmurCmd.Flags().String("agent-id", "", "agent ID (falls back to SAGEOX_AGENT_ID env)")
+
+	murmurPauseCmd.Flags().String("agent-id", "", "agent ID (falls back to SAGEOX_AGENT_ID env)")
+	murmurResumeCmd.Flags().String("agent-id", "", "agent ID (falls back to SAGEOX_AGENT_ID env)")
+
+	murmurCmd.AddCommand(murmurPauseCmd)
+	murmurCmd.AddCommand(murmurResumeCmd)
 
 	murmurCmd.GroupID = "agent-interface"
 	rootCmd.AddCommand(murmurCmd)
@@ -209,6 +229,44 @@ func resolveMurmurTarget(projectRoot, scope string) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid scope %q: must be ledger or team", scope)
 	}
+}
+
+func runMurmurPause(cmd *cobra.Command, _ []string) error {
+	agentID, _ := cmd.Flags().GetString("agent-id")
+	if agentID == "" {
+		agentID = os.Getenv("SAGEOX_AGENT_ID")
+	}
+	if agentID == "" {
+		return fmt.Errorf("--agent-id or SAGEOX_AGENT_ID required")
+	}
+
+	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	if err := client.MurmurPause(agentID); err != nil {
+		// daemon not running — nothing to pause, treat as success
+		slog.Debug("murmur pause not delivered", "agent_id", agentID, "error", err)
+	}
+
+	fmt.Fprintf(cmd.ErrOrStderr(), "Murmuring paused for this session (%s). Run 'ox murmur resume' to re-enable.\n", agentID)
+	return nil
+}
+
+func runMurmurResume(cmd *cobra.Command, _ []string) error {
+	agentID, _ := cmd.Flags().GetString("agent-id")
+	if agentID == "" {
+		agentID = os.Getenv("SAGEOX_AGENT_ID")
+	}
+	if agentID == "" {
+		return fmt.Errorf("--agent-id or SAGEOX_AGENT_ID required")
+	}
+
+	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	if err := client.MurmurResume(agentID); err != nil {
+		// daemon not running — nothing to resume, treat as success
+		slog.Debug("murmur resume not delivered", "agent_id", agentID, "error", err)
+	}
+
+	fmt.Fprintf(cmd.ErrOrStderr(), "Murmuring resumed for this session (%s).\n", agentID)
+	return nil
 }
 
 // publishMurmurViaIPC sends the full murmur to the daemon via IPC.

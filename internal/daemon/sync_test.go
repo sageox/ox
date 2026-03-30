@@ -59,19 +59,36 @@ func TestSyncScheduler_TriggerSync(t *testing.T) {
 }
 
 func TestSyncScheduler_LastSync(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// set up a real bare repo + clone so doPull exercises production code
+	bareDir := filepath.Join(t.TempDir(), "bare")
+	workDir := filepath.Join(t.TempDir(), "work")
+	require.NoError(t, exec.Command("git", "init", "--bare", "--initial-branch=main", bareDir).Run())
+	require.NoError(t, exec.Command("git", "clone", bareDir, workDir).Run())
+	gitConfig(t, workDir)
+	// seed an initial commit so ls-remote has a ref
+	require.NoError(t, exec.Command("git", "-C", workDir, "commit", "--allow-empty", "-m", "init").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "push", "origin", "main").Run())
+
 	cfg := DefaultConfig()
-	scheduler := NewSyncScheduler(cfg, nil)
+	cfg.LedgerPath = workDir
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	scheduler := NewSyncScheduler(cfg, logger)
 
 	// initially zero
 	assert.True(t, scheduler.LastSync().IsZero())
 
-	// update directly
-	scheduler.mu.Lock()
-	now := time.Now()
-	scheduler.lastSync = now
-	scheduler.mu.Unlock()
+	// doPull → ls-remote detects "remote unchanged" → updates lastSync
+	ctx := context.Background()
+	require.NoError(t, scheduler.doPull(ctx, nil, false))
 
-	assert.Equal(t, now, scheduler.LastSync())
+	assert.False(t, scheduler.LastSync().IsZero(), "lastSync should be set after doPull")
 }
 func TestSyncScheduler_Start_Context(t *testing.T) {
 	cfg := DefaultConfig()
@@ -140,25 +157,49 @@ func TestSyncScheduler_DoPull_LedgerDirExistsButNotGitRepo(t *testing.T) {
 }
 
 func TestSyncScheduler_PullInProgress(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.LedgerPath = "/tmp/test"
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
 
+	// set up a real bare repo + clone so first doPull actually does work
+	bareDir := filepath.Join(t.TempDir(), "bare")
+	workDir := filepath.Join(t.TempDir(), "work")
+	require.NoError(t, exec.Command("git", "init", "--bare", "--initial-branch=main", bareDir).Run())
+	require.NoError(t, exec.Command("git", "clone", bareDir, workDir).Run())
+	gitConfig(t, workDir)
+	require.NoError(t, exec.Command("git", "-C", workDir, "commit", "--allow-empty", "-m", "init").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "push", "origin", "main").Run())
+
+	cfg := DefaultConfig()
+	cfg.LedgerPath = workDir
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	scheduler := NewSyncScheduler(cfg, logger)
 
-	// mark pull as in progress
+	// use the production concurrency guard: doPull(ctx, nil, false) sets
+	// pullInProgress=true on entry, false on exit. If we set it ourselves
+	// beforehand, doPull returns early without doing anything.
 	scheduler.mu.Lock()
 	scheduler.pullInProgress = true
 	scheduler.mu.Unlock()
 
-	// should return early
 	ctx := context.Background()
-	scheduler.pullChanges(ctx)
+	scheduler.doPull(ctx, nil, false) // should return immediately (guard active)
 
-	// should still be in progress (not reset by early return)
+	// still marked in-progress since doPull bailed before the defer that clears it
 	scheduler.mu.Lock()
-	assert.True(t, scheduler.pullInProgress)
+	assert.True(t, scheduler.pullInProgress, "pull should still be in-progress after early return")
 	scheduler.mu.Unlock()
+
+	// now clear and run for real to verify the guard doesn't permanently block
+	scheduler.mu.Lock()
+	scheduler.pullInProgress = false
+	scheduler.mu.Unlock()
+
+	require.NoError(t, scheduler.doPull(ctx, nil, false)) // should succeed
+	assert.False(t, scheduler.LastSync().IsZero(), "lastSync should be set after real pull")
 }
 func TestSyncScheduler_PerOperationFlags_Independent(t *testing.T) {
 	cfg := DefaultConfig()

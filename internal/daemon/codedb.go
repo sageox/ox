@@ -143,6 +143,10 @@ func (m *CodeDBManager) SetLedgerPath(path string) {
 	m.ledgerPath = path
 }
 
+// maxIndexDuration caps how long a single indexing run may take before being
+// canceled. 21h+ runaway burns were observed when a worktree was deleted mid-index.
+const maxIndexDuration = 2 * time.Hour
+
 // Index runs indexing with progress reporting. Only one indexing operation runs at a time.
 // If indexing is already in progress, returns an error immediately.
 //
@@ -162,6 +166,18 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 	m.indexing = true
 	projectRoot := m.projectRoot // snapshot under lock to avoid races with UpdateProjectRoot
 	m.mu.Unlock()
+
+	// Fail fast if the worktree no longer exists (e.g. Conductor deleted it).
+	// go-git can still open the gitdir and iterate all of history indefinitely
+	// even after the worktree directory is removed.
+	if payload.URL == "" {
+		if _, err := os.Stat(projectRoot); os.IsNotExist(err) {
+			m.mu.Lock()
+			m.indexing = false
+			m.mu.Unlock()
+			return nil, fmt.Errorf("project root no longer exists, skipping index: %s", projectRoot)
+		}
+	}
 
 	defer func() {
 		m.mu.Lock()
@@ -383,7 +399,11 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 		} else {
 			m.logger.Info("codedb freshness check starting")
 		}
-		result, err := m.Index(ctx, CodeIndexPayload{}, nil)
+		// Cap indexing time — without a deadline, a deleted worktree can cause
+		// go-git to iterate git history indefinitely (observed: 21+ hours).
+		indexCtx, cancel := context.WithTimeout(ctx, maxIndexDuration)
+		defer cancel()
+		result, err := m.Index(indexCtx, CodeIndexPayload{}, nil)
 		if err != nil {
 			if isInitial {
 				m.logger.Warn("codedb initial index failed", "error", err)
@@ -523,6 +543,11 @@ func queryStatsFromDB(db *codedb.DB, dataDir string) CodeDBStats {
 // UpdateProjectRoot updates the project root path used for indexing.
 // Called when a heartbeat arrives from a different workspace (e.g., Conductor
 // creates a new workspace after deleting the old one).
+//
+// dataDir is intentionally NOT reset here: all worktrees of the same repo share
+// the same dataDir (keyed by repo ID + endpoint). Resetting it on every heartbeat
+// from a different worktree causes repeated config re-resolution on repos with
+// many active Conductor workspaces, producing log spam and unnecessary I/O.
 func (m *CodeDBManager) UpdateProjectRoot(path string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -531,7 +556,6 @@ func (m *CodeDBManager) UpdateProjectRoot(path string) {
 	}
 	old := m.projectRoot
 	m.projectRoot = path
-	m.dataDir = "" // force re-resolve under the new root
 	m.logger.Info("codedb project root updated", "old", old, "new", path)
 }
 

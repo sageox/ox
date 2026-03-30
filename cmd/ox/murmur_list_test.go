@@ -81,8 +81,9 @@ func TestMurmurListJSONOutput(t *testing.T) {
 		}
 	}
 
-	// verify the files are readable
-	read, err := ledger.ReadMurmursInWindow(tmpDir, 1)
+	// use windowHours=2 to handle hour-boundary flakiness (e.g., test runs at HH:02,
+	// -5min murmur lands in previous hour's directory partition)
+	read, err := ledger.ReadMurmursInWindow(tmpDir, 2)
 	if err != nil {
 		t.Fatalf("read murmurs: %v", err)
 	}
@@ -107,8 +108,11 @@ func TestMurmurListFiltering(t *testing.T) {
 		}
 	}
 
-	// read all
-	all, _ := ledger.ReadMurmursInWindow(tmpDir, 1)
+	// use windowHours=2 to handle hour-boundary flakiness
+	all, err := ledger.ReadMurmursInWindow(tmpDir, 2)
+	if err != nil {
+		t.Fatalf("ReadMurmursInWindow failed: %v", err)
+	}
 	if len(all) != 3 {
 		t.Fatalf("expected 3 murmurs, got %d", len(all))
 	}

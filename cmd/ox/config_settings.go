@@ -60,7 +60,7 @@ conventions and knowledge that apply to ALL repos your team owns.`,
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo, ConfigLevelTeam},
 	},
 	{
-		Key:         "murmuring",
+		Key:         "murmur_send",
 		Description: "Auto work-in-progress signals",
 		LongDescription: `Controls work-in-progress signals to teammates.
 
@@ -74,7 +74,23 @@ coworkers.
 		Category:    "Collaboration",
 		ValidValues: []string{"manual", "auto"},
 		Default:     "auto",
-		Levels:      []ConfigLevel{ConfigLevelRepo},
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
+	},
+	{
+		Key:         "murmur_receive",
+		Description: "Receive murmurs from other coworkers",
+		LongDescription: `Controls whether work-in-progress signals from other coworkers
+appear in your whisper stream.
+
+  on  - Receive murmurs as whispers (default)
+  off - Suppress murmur whispers (other coworkers still receive them)
+
+This is a personal preference — it only affects YOUR whisper
+delivery, not whether murmurs are relayed for others.`,
+		Category:    "Collaboration",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
 	},
 	{
 		Key:         "telemetry",
@@ -234,9 +250,20 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.TeamVal = config.NormalizeSessionRecording(teamCfg.SessionRecording)
 		}
 
-	case "murmuring":
-		if repoCfg != nil && repoCfg.Murmuring != "" {
-			cv.RepoVal = repoCfg.Murmuring
+	case "murmur_send":
+		if userCfg != nil && userCfg.GetMurmuring() != "" {
+			cv.UserVal = config.NormalizeMurmuring(userCfg.GetMurmuring())
+		}
+		if repoCfg != nil && repoCfg.GetMurmuring() != "" {
+			cv.RepoVal = config.NormalizeMurmuring(repoCfg.GetMurmuring())
+		}
+
+	case "murmur_receive":
+		if userCfg != nil && userCfg.MurmurReceive != "" {
+			cv.UserVal = config.NormalizeMurmurReceive(userCfg.MurmurReceive)
+		}
+		if repoCfg != nil && repoCfg.MurmurReceive != "" {
+			cv.RepoVal = config.NormalizeMurmurReceive(repoCfg.MurmurReceive)
 		}
 
 	case "telemetry":
@@ -395,6 +422,12 @@ func setUserConfig(key, value string) error {
 	case "view_format":
 		cfg.ViewFormat = value
 
+	case "murmur_send":
+		cfg.SetMurmuring(value)
+
+	case "murmur_receive":
+		cfg.SetMurmurReceive(value)
+
 	case "agent_worker":
 		if value == "auto" {
 			cfg.SetAgentWorkerAgent("") // empty = auto-detect
@@ -423,8 +456,11 @@ func setRepoConfig(key, value, projectRoot string) error {
 	case "session_recording":
 		cfg.SessionRecording = value
 
-	case "murmuring":
-		cfg.Murmuring = value
+	case "murmur_send":
+		cfg.SetMurmuring(value)
+
+	case "murmur_receive":
+		cfg.MurmurReceive = value
 
 	default:
 		return fmt.Errorf("setting %s not supported at repo level", key)

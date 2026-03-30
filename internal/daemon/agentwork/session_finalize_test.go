@@ -15,6 +15,8 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/pkg/sessionsummary"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // createTestSession creates a session directory with raw.jsonl and optional artifacts.
@@ -223,9 +225,12 @@ func TestBuildPrompt(t *testing.T) {
 	if req.WorkDir != ledgerPath {
 		t.Errorf("expected WorkDir=%q, got %q", ledgerPath, req.WorkDir)
 	}
-	// prompt should reference the raw file
-	if len(req.Prompt) < 50 {
-		t.Errorf("prompt seems too short: %d chars", len(req.Prompt))
+	// prompt must reference the concrete raw file path and push-summary instruction
+	if !strings.Contains(req.Prompt, rawPath) {
+		t.Errorf("prompt should contain raw path %q", rawPath)
+	}
+	if !strings.Contains(req.Prompt, "push-summary") {
+		t.Error("prompt should contain push-summary instruction")
 	}
 }
 
@@ -274,30 +279,19 @@ func TestProcessResult(t *testing.T) {
 
 	// verify summary.md was written (structured markdown, not raw LLM output)
 	summaryMDPath := filepath.Join(sessionDir, "summary.md")
-	if _, statErr := os.Stat(summaryMDPath); statErr != nil {
-		t.Errorf("summary.md not created: %v", statErr)
-	} else {
-		content, _ := os.ReadFile(summaryMDPath)
-		mdStr := string(content)
-		if !strings.Contains(mdStr, "# Session Summary") {
-			t.Error("summary.md should contain structured markdown header")
-		}
-		if !strings.Contains(mdStr, "A test session.") {
-			t.Errorf("summary.md should contain the summary text from LLM output, got:\n%s", mdStr)
-		}
-	}
+	require.FileExists(t, summaryMDPath, "summary.md must be created")
+	summaryContent, err := os.ReadFile(summaryMDPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(summaryContent), "# Session Summary", "summary.md should contain structured markdown header")
+	assert.Contains(t, string(summaryContent), "A test session.", "summary.md should contain the summary text from LLM output")
 
 	// verify summary.json was written
 	summaryJSONPath := filepath.Join(sessionDir, "summary.json")
-	if _, statErr := os.Stat(summaryJSONPath); statErr != nil {
-		t.Errorf("summary.json not created: %v", statErr)
-	}
+	require.FileExists(t, summaryJSONPath, "summary.json must be created")
 
 	// verify session.md was created
 	mdPath := filepath.Join(sessionDir, "session.md")
-	if _, statErr := os.Stat(mdPath); statErr != nil {
-		t.Errorf("session.md not created: %v", statErr)
-	}
+	require.FileExists(t, mdPath, "session.md must be created")
 }
 
 func TestProcessResult_UnparsableJSON(t *testing.T) {
@@ -343,6 +337,85 @@ func TestProcessResult_UnparsableJSON(t *testing.T) {
 	if !strings.Contains(string(data), "This session was about testing things") {
 		t.Error("summary.json fallback should contain the raw LLM output as summary text")
 	}
+}
+
+// createTestSessionInGitRepo creates a session inside a real git repo.
+// Returns (ledgerPath, sessionDir).
+func createTestSessionInGitRepo(t *testing.T, sessionName string) (string, string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	ledgerPath := t.TempDir()
+
+	// init git repo with isolated config to avoid host git settings (gpgsign, hooksPath, etc.)
+	require.NoError(t, exec.Command("git", "init", "--initial-branch=main", ledgerPath).Run())
+	require.NoError(t, exec.Command("git", "-C", ledgerPath, "config", "user.email", "test@test.com").Run())
+	require.NoError(t, exec.Command("git", "-C", ledgerPath, "config", "user.name", "Test").Run())
+	require.NoError(t, exec.Command("git", "-C", ledgerPath, "config", "commit.gpgsign", "false").Run())
+
+	// create sessions dir and raw.jsonl
+	sessionsDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	require.NoError(t, os.MkdirAll(sessionsDir, 0755))
+
+	rawContent := `{"_meta":{"schema_version":"1","agent_type":"claude-code"}}
+{"type":"user","content":"hello","seq":1}
+{"type":"assistant","content":"hi there","seq":2}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(sessionsDir, "raw.jsonl"), []byte(rawContent), 0644))
+
+	// initial commit
+	require.NoError(t, exec.Command("git", "-C", ledgerPath, "add", "-A").Run())
+	require.NoError(t, exec.Command("git", "-C", ledgerPath, "commit", "-m", "init").Run())
+
+	return ledgerPath, sessionsDir
+}
+
+func TestProcessResult_WithRealGitRepo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+
+	sessionName := "2026-01-06T14-32-testuser-OxGIT"
+	ledgerPath, sessionDir := createTestSessionInGitRepo(t, sessionName)
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+
+	handler := NewSessionFinalizeHandler(slog.Default())
+	// skipGit=false — exercises the real git commit path
+
+	llmOutput := `{"title":"Git Test","summary":"Testing git commit path.","key_actions":["tested git"],"outcome":"success","topics_found":["git"]}`
+
+	item := &WorkItem{
+		ID:   "test-git",
+		Type: sessionFinalizeType,
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    rawPath,
+			Missing:    requiredArtifacts,
+			LedgerPath: ledgerPath,
+		},
+	}
+
+	result := &RunResult{
+		Output:   llmOutput,
+		Duration: 2 * time.Second,
+		ExitCode: 0,
+	}
+
+	err := handler.ProcessResult(item, result)
+	require.NoError(t, err, "ProcessResult with real git should succeed")
+
+	// verify artifacts exist
+	require.FileExists(t, filepath.Join(sessionDir, "summary.md"))
+	require.FileExists(t, filepath.Join(sessionDir, "summary.json"))
+	require.FileExists(t, filepath.Join(sessionDir, "session.md"))
+
+	// verify git commit was made — should have >1 commit now
+	out, gitErr := exec.Command("git", "-C", ledgerPath, "log", "--oneline").CombinedOutput()
+	require.NoError(t, gitErr)
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	assert.GreaterOrEqual(t, len(lines), 2, "should have at least 2 commits (init + finalize)")
 }
 
 func TestParseSummaryJSON(t *testing.T) {

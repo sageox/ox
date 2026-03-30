@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestUploadSessionFiles_Basic(t *testing.T) {
@@ -296,6 +298,77 @@ func TestUploadSessionFiles_UploadFailure(t *testing.T) {
 	_, err := UploadSessionFiles(client, sessionDir, nil)
 	if err == nil {
 		t.Fatal("expected error from failed upload, got nil")
+	}
+}
+
+func TestUploadSessionFiles_PartialFailure(t *testing.T) {
+	// two files: raw.jsonl upload succeeds, summary.md upload fails with 500
+	sessionDir := t.TempDir()
+	rawContent := []byte(`{"_meta":{"schema_version":"1"}}` + "\n" + `{"type":"user","content":"hello","seq":1}` + "\n")
+	summaryContent := []byte("# Summary\nTest session summary")
+
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), rawContent, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.md"), summaryContent, 0644))
+
+	summaryOID := ComputeOID(summaryContent)
+
+	var mu sync.Mutex
+	uploaded := make(map[string]bool)
+
+	var serverURL string
+	batchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/info/lfs/objects/batch" {
+			var req struct {
+				Objects []BatchObject `json:"objects"`
+			}
+			json.NewDecoder(r.Body).Decode(&req)
+
+			resp := BatchResponse{Transfer: "basic"}
+			for _, obj := range req.Objects {
+				resp.Objects = append(resp.Objects, BatchResponseObject{
+					OID:  obj.OID,
+					Size: obj.Size,
+					Actions: &Actions{
+						Upload: &Action{
+							Href: serverURL + "/upload/" + obj.OID,
+						},
+					},
+				})
+			}
+			w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
+
+		if r.Method == "PUT" {
+			oid := filepath.Base(r.URL.Path)
+			// reject summary.md upload, accept raw.jsonl
+			if oid == summaryOID {
+				http.Error(w, "internal server error", 500)
+				return
+			}
+			mu.Lock()
+			uploaded[oid] = true
+			mu.Unlock()
+			w.WriteHeader(200)
+			return
+		}
+
+		http.Error(w, "not found", 404)
+	}))
+	defer batchServer.Close()
+	serverURL = batchServer.URL
+
+	client := NewClient(batchServer.URL, "testuser", "testtoken")
+
+	fileRefs, err := UploadSessionFiles(client, sessionDir, nil)
+
+	// must return an error when any file fails
+	require.Error(t, err, "expected error from partial upload failure")
+
+	// no refs returned on failure — caller cannot use partial state
+	if fileRefs != nil {
+		t.Errorf("expected nil fileRefs on failure, got %v", fileRefs)
 	}
 }
 

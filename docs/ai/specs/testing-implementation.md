@@ -334,3 +334,62 @@ Use build tags to control which tests run:
 - Display formatting tests (manually verify)
 - Simple getters/setters
 - Tests that duplicate Go stdlib guarantees
+
+## Test Intent vs Implementation
+
+Tests encode **what should happen**, not **what the code does today**.
+
+### The Litmus Test
+
+For every test, ask: "If someone introduced a bug in the production code, would this test catch it?"
+
+If the answer is "no, because the test reimplements the same logic," the test is theater.
+
+### Anti-Patterns
+
+| Anti-Pattern | Why It Fails | Fix |
+|-------------|-------------|-----|
+| Copy production gate into test | If gate removed from production, test still passes | Call production function, assert the outcome |
+| Assert function doesn't touch unrelated dir | Trivially true for any function | Test the actual failure recovery path |
+| Reimplement dedup/search logic in test | Production logic can break independently | Test the invariant the logic depends on |
+| Wrap assertion in `if stat == nil` | Test passes vacuously when stat fails | Use unconditional `require.FileExists` |
+| Test with `skipLFS=true` for "LFS failure" | Tests the skip path, not failure path | Use a scenario that triggers actual failure |
+
+### Correct Patterns
+
+```go
+// WRONG: copies production gate
+agentSessionID := ""
+if agentSessionID != "" {
+    WriteSessionMarker(...)  // never executes — tests nothing
+}
+
+// RIGHT: tests the function's own defense
+err := WriteSessionMarker(&SessionMarker{AgentSessionID: ""})
+require.Error(t, err, "must reject empty session ID")
+```
+
+```go
+// WRONG: conditional assertion
+if _, err := os.Stat(path); err == nil {
+    assert.Equal(t, expected, actual)  // skipped if file missing
+}
+
+// RIGHT: unconditional assertion
+require.FileExists(t, path, "file must exist after operation")
+data, _ := os.ReadFile(path)
+assert.Equal(t, expected, string(data))
+```
+
+```go
+// WRONG: reimplements production dedup
+existing := make(map[string]bool)
+for _, s := range store1Sessions { existing[s.Name] = true }
+for _, s := range store2Sessions {
+    if !existing[s.Name] { ... }  // copies runSessionList logic
+}
+
+// RIGHT: tests the invariant dedup depends on
+assert.Equal(t, sessions1[0].SessionName, sessions2[0].SessionName,
+    "SessionName must be identical across stores for dedup to work")
+```

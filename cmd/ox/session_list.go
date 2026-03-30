@@ -151,24 +151,13 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 				ledgerSessions, _ = ledgerStore.ListSessions()
 			}
 
-			// build lookup of existing session names (reused for cache dedup below)
-			existing := make(map[string]bool)
-			for _, s := range sessions {
-				existing[s.SessionName] = true
-			}
-
+			// mark ledger sessions as uploaded using merge key
 			for _, ls := range ledgerSessions {
-				uploadedSessions[ls.SessionName] = true
-				if !existing[ls.SessionName] {
-					existing[ls.SessionName] = true
-					sessions = append(sessions, ls)
-				}
+				uploadedSessions[sessionMergeKey(ls)] = true
 			}
 
-			// re-sort by date (newest first)
-			sort.Slice(sessions, func(i, j int) bool {
-				return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
-			})
+			// merge local sessions with ledger sessions (local wins on duplicates)
+			sessions = mergeSessionSources(sessions, ledgerSessions)
 
 			// scan ledger cache for in-progress or unuploaded sessions
 			// recordings are initially written to {ledger}/.sageox/cache/sessions/ before upload
@@ -182,18 +171,8 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 					cacheSessions, _ = cacheStore.ListSessions()
 				}
 
-				for _, cs := range cacheSessions {
-					if !existing[cs.SessionName] {
-						existing[cs.SessionName] = true
-						sessions = append(sessions, cs)
-					}
-				}
-
-				if len(cacheSessions) > 0 {
-					sort.Slice(sessions, func(i, j int) bool {
-						return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
-					})
-				}
+				// merge cache sessions (lowest priority)
+				sessions = mergeSessionSources(sessions, cacheSessions)
 			}
 		} else {
 			slog.Debug("skipping ledger sessions", "err", storeErr)
@@ -250,7 +229,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 		}
 		entries := make([]sessionListEntry, 0, len(sessions))
 		for _, t := range sessions {
-			uploaded := uploadedSessions[t.SessionName]
+			uploaded := uploadedSessions[sessionMergeKey(t)]
 			status := string(session.ClassifySession(t, uploaded))
 			user := t.Username
 			if user == "" {
@@ -285,7 +264,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 
 	// print each session
 	for _, t := range sessions {
-		uploaded := uploadedSessions[t.SessionName]
+		uploaded := uploadedSessions[sessionMergeKey(t)]
 		printSessionRow(t, uploaded, localUser)
 	}
 
@@ -444,4 +423,39 @@ func formatSessionDuration(d time.Duration) string {
 		return fmt.Sprintf("%dh", hours)
 	}
 	return fmt.Sprintf("%dh%dm", hours, mins)
+}
+
+// sessionMergeKey returns the dedup key for a session.
+// Uses SessionName when available, falls back to FilePath or Filename
+// to avoid collapsing distinct legacy sessions with empty SessionName.
+func sessionMergeKey(s session.SessionInfo) string {
+	if s.SessionName != "" {
+		return s.SessionName
+	}
+	if s.FilePath != "" {
+		return s.FilePath
+	}
+	return s.Filename
+}
+
+// mergeSessionSources deduplicates sessions by merge key.
+// Primary sessions take precedence over additional sessions.
+// Returns merged sessions sorted newest-first by CreatedAt.
+func mergeSessionSources(primary, additional []session.SessionInfo) []session.SessionInfo {
+	existing := make(map[string]bool, len(primary))
+	result := make([]session.SessionInfo, 0, len(primary)+len(additional))
+	for _, s := range primary {
+		existing[sessionMergeKey(s)] = true
+		result = append(result, s)
+	}
+	for _, s := range additional {
+		if k := sessionMergeKey(s); !existing[k] {
+			existing[k] = true
+			result = append(result, s)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
+	return result
 }

@@ -335,6 +335,32 @@ func handleWhispers(s *Server, msg Message, _ net.Conn) HandlerResult {
 	return HandlerResult{Response: marshalResponse(resp)}
 }
 
+func handleMurmurPause(s *Server, msg Message, _ net.Conn) HandlerResult {
+	var payload MurmurPausePayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		s.logger.Debug("failed to parse murmur_pause payload", "error", err)
+	} else if payload.AgentID == "" {
+		s.logger.Debug("murmur_pause payload missing agent_id")
+	} else {
+		s.service.PauseMurmuring(payload.AgentID)
+	}
+	// fire-and-forget: no response
+	return HandlerResult{SkipDefault: true}
+}
+
+func handleMurmurResume(s *Server, msg Message, _ net.Conn) HandlerResult {
+	var payload MurmurPausePayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		s.logger.Debug("failed to parse murmur_resume payload", "error", err)
+	} else if payload.AgentID == "" {
+		s.logger.Debug("murmur_resume payload missing agent_id")
+	} else {
+		s.service.ResumeMurmuring(payload.AgentID)
+	}
+	// fire-and-forget: no response
+	return HandlerResult{SkipDefault: true}
+}
+
 func handleWhisperHistory(s *Server, msg Message, _ net.Conn) HandlerResult {
 	var payload WhisperHistoryPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {

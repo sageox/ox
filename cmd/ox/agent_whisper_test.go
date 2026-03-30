@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -69,12 +71,20 @@ type xmlEntry struct {
 	Importance string `xml:"importance,attr"`
 	Topic      string `xml:"topic,attr"`
 	Source     string `xml:"source,attr"`
+	Agent      string `xml:"agent,attr,omitempty"`
 	Content    string `xml:",chardata"`
 }
 
+type xmlMurmurTopic struct {
+	Topic   string `xml:"topic,attr"`
+	Content string `xml:",chardata"`
+}
+
 type xmlSystemReminder struct {
-	XMLName xml.Name   `xml:"system-reminder"`
-	Entries []xmlEntry `xml:"entry"`
+	XMLName       xml.Name         `xml:"system-reminder"`
+	MurmurContext string           `xml:"murmur-context,omitempty"`
+	MurmurTopics  []xmlMurmurTopic `xml:"murmur-topic"`
+	Entries       []xmlEntry       `xml:"entry"`
 }
 
 func TestFormatWhispers_XMLRoundTrip(t *testing.T) {
@@ -555,4 +565,251 @@ func TestFormatWhispers_LargeContent(t *testing.T) {
 	if !strings.Contains(output, `topic="large-murmur"`) {
 		t.Error("missing topic attribute")
 	}
+}
+
+func TestFilterMurmurReceive(t *testing.T) {
+	t.Parallel()
+
+	entries := []whisperstore.WhisperEntry{
+		{ID: "1", Source: "murmur", Content: "coworker signal"},
+		{ID: "2", Source: "auto-murmur", Content: "nudge to self"},
+		{ID: "3", Source: "activity-summary", Content: "activity"},
+	}
+
+	t.Run("pass through when enabled", func(t *testing.T) {
+		// empty projectRoot => MurmurReceiveEnabled returns true (default auto)
+		result := filterMurmurReceive(entries, "")
+		if len(result) != 3 {
+			t.Errorf("expected all 3 entries when receive enabled, got %d", len(result))
+		}
+	})
+
+	t.Run("strips murmur when disabled", func(t *testing.T) {
+		dir := createMurmurReceiveOffProject(t)
+		result := filterMurmurReceive(entries, dir)
+
+		if len(result) != 2 {
+			t.Fatalf("expected 2 entries (murmur stripped), got %d", len(result))
+		}
+		for _, e := range result {
+			if e.Source == "murmur" {
+				t.Error("murmur entry should have been filtered out")
+			}
+		}
+	})
+
+	t.Run("preserves auto-murmur when disabled", func(t *testing.T) {
+		dir := createMurmurReceiveOffProject(t)
+		result := filterMurmurReceive(entries, dir)
+
+		found := false
+		for _, e := range result {
+			if e.Source == "auto-murmur" {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("auto-murmur (nudge) entry should be preserved when receive is off")
+		}
+	})
+
+	t.Run("preserves non-murmur when disabled", func(t *testing.T) {
+		dir := createMurmurReceiveOffProject(t)
+		result := filterMurmurReceive(entries, dir)
+
+		found := false
+		for _, e := range result {
+			if e.Source == "activity-summary" {
+				found = true
+			}
+		}
+		if !found {
+			t.Error("non-murmur entry should be preserved when receive is off")
+		}
+	})
+
+	t.Run("nil entries returns nil", func(t *testing.T) {
+		dir := createMurmurReceiveOffProject(t)
+		result := filterMurmurReceive(nil, dir)
+		if result != nil {
+			t.Errorf("expected nil for nil input, got %v", result)
+		}
+	})
+}
+
+// createMurmurReceiveOffProject creates a temp project with murmur_receive=off config.
+func createMurmurReceiveOffProject(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	sageoxDir := filepath.Join(dir, ".sageox")
+	if err := os.MkdirAll(sageoxDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(sageoxDir, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"murmur_receive":"off"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestMurmurTopicHint(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		topic string
+		want  bool // true if non-empty hint expected
+	}{
+		{"wip", true},
+		{"conflict", true},
+		{"architecture", true},
+		{"lint", true},
+		{"ci", true},
+		{"unknown-topic", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.topic, func(t *testing.T) {
+			hint := murmurTopicHint(tt.topic)
+			if tt.want && hint == "" {
+				t.Errorf("expected non-empty hint for topic %q", tt.topic)
+			}
+			if !tt.want && hint != "" {
+				t.Errorf("expected empty hint for topic %q, got %q", tt.topic, hint)
+			}
+		})
+	}
+}
+
+func TestFormatWhispers_MurmurFraming(t *testing.T) {
+	t.Parallel()
+
+	t.Run("murmur context appears with murmurs", func(t *testing.T) {
+		entries := []whisperstore.WhisperEntry{
+			{ID: "1", Source: "murmur", Topic: "wip", Content: "working on auth", Importance: whisperstore.ImportanceNormal, AgentID: "OxA7b3"},
+		}
+		var buf bytes.Buffer
+		formatWhispers(&buf, entries)
+		output := buf.String()
+
+		if !strings.Contains(output, "<murmur-context>") {
+			t.Error("expected <murmur-context> tag when murmurs present")
+		}
+		if !strings.Contains(output, "NOT tasks or requests") {
+			t.Error("expected murmur context framing text")
+		}
+	})
+
+	t.Run("murmur context absent without murmurs", func(t *testing.T) {
+		entries := []whisperstore.WhisperEntry{
+			{ID: "1", Source: "auto-murmur", Topic: "nudge", Content: "nudge content", Importance: whisperstore.ImportanceNormal},
+			{ID: "2", Source: "activity-summary", Topic: "activity", Content: "active", Importance: whisperstore.ImportanceNormal},
+		}
+		var buf bytes.Buffer
+		formatWhispers(&buf, entries)
+		output := buf.String()
+
+		if strings.Contains(output, "<murmur-context>") {
+			t.Error("murmur-context should not appear without murmur entries")
+		}
+		if strings.Contains(output, "<murmur-topic") {
+			t.Error("murmur-topic should not appear without murmur entries")
+		}
+	})
+
+	t.Run("murmur topic hints for known topics", func(t *testing.T) {
+		entries := []whisperstore.WhisperEntry{
+			{ID: "1", Source: "murmur", Topic: "wip", Content: "building feature X", Importance: whisperstore.ImportanceNormal, AgentID: "OxA1"},
+			{ID: "2", Source: "murmur", Topic: "conflict", Content: "touching auth module", Importance: whisperstore.ImportanceNormal, AgentID: "OxB2"},
+		}
+		var buf bytes.Buffer
+		formatWhispers(&buf, entries)
+		output := buf.String()
+
+		if !strings.Contains(output, `<murmur-topic topic="wip">`) {
+			t.Error("expected murmur-topic for wip")
+		}
+		if !strings.Contains(output, `<murmur-topic topic="conflict">`) {
+			t.Error("expected murmur-topic for conflict")
+		}
+	})
+
+	t.Run("no murmur topic hint for unknown topics", func(t *testing.T) {
+		entries := []whisperstore.WhisperEntry{
+			{ID: "1", Source: "murmur", Topic: "random-unknown", Content: "stuff", Importance: whisperstore.ImportanceNormal},
+		}
+		var buf bytes.Buffer
+		formatWhispers(&buf, entries)
+		output := buf.String()
+
+		if !strings.Contains(output, "<murmur-context>") {
+			t.Error("expected murmur-context even for unknown topic")
+		}
+		if strings.Contains(output, "<murmur-topic") {
+			t.Error("murmur-topic should not appear for unknown topics")
+		}
+	})
+
+	t.Run("agent attribute on murmur entries", func(t *testing.T) {
+		entries := []whisperstore.WhisperEntry{
+			{ID: "1", Source: "murmur", Topic: "wip", Content: "working", Importance: whisperstore.ImportanceNormal, AgentID: "OxA7b3"},
+			{ID: "2", Source: "activity-summary", Topic: "activity", Content: "active", Importance: whisperstore.ImportanceNormal, AgentID: "OxB1c2"},
+		}
+		var buf bytes.Buffer
+		formatWhispers(&buf, entries)
+		output := buf.String()
+
+		if !strings.Contains(output, `agent="OxA7b3"`) {
+			t.Error("expected agent attribute on murmur entry")
+		}
+		// non-murmur entries should NOT get agent attribute
+		if strings.Contains(output, `agent="OxB1c2"`) {
+			t.Error("non-murmur entries should not have agent attribute")
+		}
+	})
+
+	t.Run("no agent attribute when agent ID empty", func(t *testing.T) {
+		entries := []whisperstore.WhisperEntry{
+			{ID: "1", Source: "murmur", Topic: "wip", Content: "anon murmur", Importance: whisperstore.ImportanceNormal},
+		}
+		var buf bytes.Buffer
+		formatWhispers(&buf, entries)
+		output := buf.String()
+
+		if strings.Contains(output, `agent=`) {
+			t.Error("should not emit agent attribute when AgentID is empty")
+		}
+	})
+
+	t.Run("XML round-trip with murmur framing", func(t *testing.T) {
+		entries := []whisperstore.WhisperEntry{
+			{ID: "1", Source: "murmur", Topic: "wip", Content: "building auth", Importance: whisperstore.ImportanceNormal, AgentID: "OxA7b3"},
+			{ID: "2", Source: "auto-murmur", Topic: "nudge", Content: "nudge", Importance: whisperstore.ImportanceNormal},
+		}
+		var buf bytes.Buffer
+		formatWhispers(&buf, entries)
+
+		var parsed xmlSystemReminder
+		if err := xml.Unmarshal(buf.Bytes(), &parsed); err != nil {
+			t.Fatalf("failed to parse XML: %v\nraw:\n%s", err, buf.String())
+		}
+
+		if parsed.MurmurContext == "" {
+			t.Error("expected non-empty murmur-context")
+		}
+		if len(parsed.MurmurTopics) != 1 {
+			t.Errorf("expected 1 murmur-topic, got %d", len(parsed.MurmurTopics))
+		} else if parsed.MurmurTopics[0].Topic != "wip" {
+			t.Errorf("expected murmur-topic for wip, got %q", parsed.MurmurTopics[0].Topic)
+		}
+		if len(parsed.Entries) != 2 {
+			t.Fatalf("expected 2 entries, got %d", len(parsed.Entries))
+		}
+		if parsed.Entries[0].Agent != "OxA7b3" {
+			t.Errorf("expected agent OxA7b3 on murmur entry, got %q", parsed.Entries[0].Agent)
+		}
+		if parsed.Entries[1].Agent != "" {
+			t.Errorf("expected no agent on non-murmur entry, got %q", parsed.Entries[1].Agent)
+		}
+	})
 }

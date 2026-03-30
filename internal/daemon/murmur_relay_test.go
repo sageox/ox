@@ -19,7 +19,7 @@ func initMurmuringProject(t *testing.T) string {
 	if err := os.MkdirAll(sageoxDir, 0o755); err != nil {
 		t.Fatalf("mkdir .sageox: %v", err)
 	}
-	cfg := map[string]string{"murmuring": "auto"}
+	cfg := map[string]string{"murmur_send": "auto"}
 	data, _ := json.Marshal(cfg)
 	if err := os.WriteFile(filepath.Join(sageoxDir, "config.json"), data, 0o644); err != nil {
 		t.Fatalf("write config.json: %v", err)
@@ -416,7 +416,7 @@ func initManualMurmuringProject(t *testing.T) string {
 	if err := os.MkdirAll(sageoxDir, 0o755); err != nil {
 		t.Fatalf("mkdir .sageox: %v", err)
 	}
-	cfg := map[string]string{"murmuring": "manual"}
+	cfg := map[string]string{"murmur_send": "manual"}
 	data, _ := json.Marshal(cfg)
 	if err := os.WriteFile(filepath.Join(sageoxDir, "config.json"), data, 0o644); err != nil {
 		t.Fatalf("write config.json: %v", err)
@@ -424,8 +424,9 @@ func initManualMurmuringProject(t *testing.T) string {
 	return dir
 }
 
-func TestMurmurRelayDisabledConfig(t *testing.T) {
-	// relay with explicit "manual" murmuring config
+func TestMurmurRelayAlwaysProcesses(t *testing.T) {
+	// relay should process murmurs regardless of murmuring config — the nudge
+	// source (not the relay) is responsible for gating on config/pause state
 	projectRoot := initManualMurmuringProject(t)
 	store := openTestStore(t)
 	registry := NewWhisperRegistry(store, nil)
@@ -434,16 +435,16 @@ func TestMurmurRelayDisabledConfig(t *testing.T) {
 
 	baseDir := t.TempDir()
 	writeMurmurAt(t, baseDir, ledger.MurmurFile{
-		ID:         "murmur-should-skip",
+		ID:         "murmur-always-relay",
 		Timestamp:  time.Now().UTC(),
 		AgentID:    "remote-agent",
 		Topic:      "test",
 		Importance: "normal",
-		Content:    "this should not be relayed",
+		Content:    "this should be relayed even with manual config",
 	})
 
 	count := relay.RelayFromPath(baseDir, "ledger")
-	if count != 0 {
-		t.Fatalf("expected 0 relayed when murmuring disabled, got %d", count)
+	if count != 1 {
+		t.Fatalf("expected 1 relayed (relay is ungated), got %d", count)
 	}
 }

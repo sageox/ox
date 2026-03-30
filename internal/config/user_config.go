@@ -325,7 +325,10 @@ type UserConfig struct {
 	ContextGit        *ContextGitConfig  `yaml:"context_git,omitempty"`
 	Sessions          *SessionsConfig    `yaml:"sessions,omitempty"`
 	AgentWorker       *AgentWorkerConfig `yaml:"agent_worker,omitempty"`
-	ViewFormat        string             `yaml:"view_format,omitempty"` // "web", "text", "json" (default: "web")
+	ViewFormat        string             `yaml:"view_format,omitempty"`     // "web", "text", "json" (default: "web")
+	Murmuring         string             `yaml:"murmur_send,omitempty"`     // "auto", "manual"
+	LegacyMurmuring   string             `yaml:"murmuring,omitempty"`       // deprecated: read old key on upgrade
+	MurmurReceive     string             `yaml:"murmur_receive,omitempty"`  // "on", "off"
 }
 
 // BadgeConfig tracks badge suggestion state across all projects.
@@ -482,6 +485,31 @@ func (c *UserConfig) GetViewFormat() string {
 		return "web"
 	}
 	return c.ViewFormat
+}
+
+// GetMurmuring returns the user's configured murmuring mode, or "" if not set.
+// Falls back to the legacy "murmuring" key for upgrade compatibility.
+func (c *UserConfig) GetMurmuring() string {
+	if c.Murmuring != "" {
+		return c.Murmuring
+	}
+	return c.LegacyMurmuring
+}
+
+// SetMurmuring sets the user's murmuring mode preference and clears the legacy key.
+func (c *UserConfig) SetMurmuring(mode string) {
+	c.Murmuring = mode
+	c.LegacyMurmuring = ""
+}
+
+// GetMurmurReceive returns the user's configured murmur receive mode, or "" if not set.
+func (c *UserConfig) GetMurmurReceive() string {
+	return c.MurmurReceive
+}
+
+// SetMurmurReceive sets the user's murmur receive preference.
+func (c *UserConfig) SetMurmurReceive(mode string) {
+	c.MurmurReceive = mode
 }
 
 // LoadUserConfig loads user configuration using standard path discovery.

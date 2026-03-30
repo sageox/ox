@@ -167,6 +167,10 @@ func isExpectedEmptyRepoIssue(category string, check checkResult) bool {
 	if strings.Contains(check.message, "agent CLI") || strings.Contains(check.name, "agent worker") {
 		return true
 	}
+	// ox binary not in PATH in CI/test environments
+	if strings.Contains(check.name, "ox in PATH") && strings.Contains(check.message, "not found") {
+		return true
+	}
 	return false
 }
 

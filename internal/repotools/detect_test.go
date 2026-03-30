@@ -128,24 +128,25 @@ func TestRequireVCS_TableDriven(t *testing.T) {
 	}
 }
 
-// TestDetectVCS_InGitRepo tests VCS detection when in a git repository
+// TestDetectVCS_InGitRepo tests VCS detection inside a real git repo
 func TestDetectVCS_InGitRepo(t *testing.T) {
-	// only run if git is installed
 	if !IsInstalled(VCSGit) {
-		t.Skip("git is not installed, skipping test")
+		t.Skip("git is not installed")
 	}
 
-	// try to detect VCS in current directory (which should be a git repo based on gitStatus)
-	// this test may need to be in the repo root
+	// create a real git repo so the test isn't environment-dependent
+	tmpDir := t.TempDir()
+	cmd := exec.Command("git", "init", tmpDir)
+	require.NoError(t, cmd.Run(), "git init should succeed")
+
+	origDir, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(tmpDir))
+	t.Cleanup(func() { os.Chdir(origDir) })
+
 	vcs, err := DetectVCS()
-
-	// if we're in a git repo, should succeed
-	if err == nil {
-		assert.Equal(t, VCSGit, vcs, "DetectVCS() should return VCSGit")
-	} else {
-		// we might not be in a git repo during testing, which is acceptable
-		t.Logf("not in a git repository during test: %v", err)
-	}
+	require.NoError(t, err, "DetectVCS should succeed inside a git repo")
+	assert.Equal(t, VCSGit, vcs, "DetectVCS() should return VCSGit")
 }
 
 // TestDetectVCS_OutsideRepo tests VCS detection outside a repository

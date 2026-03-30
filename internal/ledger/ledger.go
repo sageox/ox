@@ -423,10 +423,19 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 // clone/sparse/pull plumbing but different implementations. See team context's
 // ComputeSparseSet() and manifest-driven approach vs this static list + sliding window.
 func ConfigureSparseCheckout(path string) error {
-	// init sparse checkout in cone mode
-	initCmd := exec.Command("git", "-C", path, "sparse-checkout", "init", "--cone")
-	if output, err := initCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("sparse-checkout init: %w: %s", err, output)
+	// Only run sparse-checkout init on repos that don't have it yet.
+	// Re-running "init --cone" is destructive: it reapplies the cone rules,
+	// which deletes untracked files in directories outside the cone (e.g.
+	// .sageox/cache/codedb/) before "sparse-checkout set" can protect them.
+	// This function is called every ~60s by the sync scheduler to refresh
+	// the rolling murmur/github data window — "sparse-checkout set" alone
+	// is sufficient for that.
+	checkCmd := exec.Command("git", "-C", path, "config", "--type=bool", "--get", "core.sparseCheckout")
+	if out, err := checkCmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "true" {
+		initCmd := exec.Command("git", "-C", path, "sparse-checkout", "init", "--cone")
+		if output, err := initCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("sparse-checkout init: %w: %s", err, output)
+		}
 	}
 
 	// base directories always included

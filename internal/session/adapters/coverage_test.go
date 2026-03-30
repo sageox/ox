@@ -424,6 +424,31 @@ func TestExtractAssistantContent_EdgeCases(t *testing.T) {
 		require.Len(t, entries, 1)
 		assert.Equal(t, "valid", entries[0].Content)
 	})
+
+	t.Run("only tool_use blocks no text", func(t *testing.T) {
+		adapter := &ClaudeCodeAdapter{}
+		entry := &claudeCodeEntry{
+			Type: "assistant",
+			Message: &claudeCodeMessage{
+				Content: []interface{}{
+					map[string]interface{}{
+						"type": "tool_use",
+						"name": "Read",
+						"id":   "tool_001",
+					},
+					map[string]interface{}{
+						"type": "tool_use",
+						"name": "Write",
+						"id":   "tool_002",
+					},
+				},
+			},
+		}
+		entries := adapter.extractAssistantContent(entry)
+		require.Len(t, entries, 2, "both tool_use blocks should produce entries")
+		assert.Equal(t, "Read", entries[0].ToolName)
+		assert.Equal(t, "Write", entries[1].ToolName)
+	})
 }
 
 // --- Codex parseLine edge cases ---

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -345,6 +346,29 @@ func TestCodeDBManager_ResolveSharedDataDir_MissingProjectRoot(t *testing.T) {
 	mgr := NewCodeDBManager("/does/not/exist", codedbTestLogger(), nil)
 	dir := mgr.resolveSharedDataDir()
 	assert.NotEmpty(t, dir, "should return a fallback path even with missing project root")
+}
+
+// --- Index fails fast on deleted worktree ---
+
+func TestIndex_DeletedProjectRoot_FailsFast(t *testing.T) {
+	t.Parallel()
+
+	// create then immediately delete a directory to simulate a Conductor worktree removal
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+	require.NoError(t, os.RemoveAll(dir))
+
+	ctx := context.Background()
+	_, err := mgr.Index(ctx, CodeIndexPayload{}, nil)
+
+	require.Error(t, err, "Index must fail when projectRoot no longer exists")
+	assert.Contains(t, err.Error(), "no longer exists")
+
+	// indexing flag must be cleared even on this error path
+	mgr.mu.Lock()
+	still := mgr.indexing
+	mgr.mu.Unlock()
+	assert.False(t, still, "indexing flag must be cleared after early exit")
 }
 
 // --- Symlink edge case ---

@@ -117,7 +117,11 @@ func endpointFromRemoteURL(remoteURL string) string {
 	if host == "" {
 		return ""
 	}
-	return "https://" + host
+	scheme := parsed.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	return scheme + "://" + host
 }
 
 // extractPATFromRemote reads the origin remote URL and extracts any embedded PAT.

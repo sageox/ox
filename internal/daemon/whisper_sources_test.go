@@ -169,6 +169,57 @@ func TestMurmurNudgeSource_SurvivesDaemonRestart(t *testing.T) {
 	assert.Empty(t, entries, "restarted source should see prior nudge in store")
 }
 
+func TestMurmurNudgeSource_PauseResumeAgent(t *testing.T) {
+	store := openTestWhisperStore(t)
+	hb := NewHeartbeatHandler(slog.Default())
+	src := NewMurmurNudgeSource(store, hb, 15*time.Minute, "")
+
+	assert.False(t, src.IsAgentPaused("OxPause1"), "agent should not be paused initially")
+
+	src.PauseAgent("OxPause1")
+	assert.True(t, src.IsAgentPaused("OxPause1"), "agent should be paused after PauseAgent")
+	assert.False(t, src.IsAgentPaused("OxOther"), "unrelated agent should not be paused")
+
+	src.ResumeAgent("OxPause1")
+	assert.False(t, src.IsAgentPaused("OxPause1"), "agent should not be paused after ResumeAgent")
+}
+
+func TestMurmurNudgeSource_PausedAgentSkipsNudge(t *testing.T) {
+	projectRoot := initMurmuringProject(t)
+	store := openTestWhisperStore(t)
+	hb := NewHeartbeatHandler(slog.Default())
+	src := NewMurmurNudgeSource(store, hb, 15*time.Minute, projectRoot)
+
+	// send enough heartbeats to trigger early nudge
+	sendHeartbeat(t, hb, HeartbeatPayload{AgentID: "OxPaused", Timestamp: time.Now()})
+	sendHeartbeat(t, hb, HeartbeatPayload{AgentID: "OxPaused", Timestamp: time.Now()})
+
+	// verify nudge would fire normally
+	entries := src.Produce(context.Background())
+	require.Len(t, entries, 1, "should produce nudge before pause")
+
+	// store the nudge so cooldown state is set
+	err := store.Add(entries[0])
+	require.NoError(t, err)
+
+	// pause the agent
+	src.PauseAgent("OxPaused")
+
+	// send a second agent that is NOT paused, to confirm selective pausing
+	sendHeartbeat(t, hb, HeartbeatPayload{AgentID: "OxActive", Timestamp: time.Now()})
+	sendHeartbeat(t, hb, HeartbeatPayload{AgentID: "OxActive", Timestamp: time.Now()})
+
+	entries = src.Produce(context.Background())
+	// should only see OxActive nudge, not OxPaused
+	for _, e := range entries {
+		assert.NotEqual(t, "OxPaused", e.AgentID, "paused agent should not receive nudge")
+	}
+
+	// resume the agent — nudge should be possible again (after cooldown)
+	src.ResumeAgent("OxPaused")
+	assert.False(t, src.IsAgentPaused("OxPaused"))
+}
+
 func TestHeartbeatHandler_AgentHeartbeatCallback(t *testing.T) {
 	hb := NewHeartbeatHandler(slog.Default())
 

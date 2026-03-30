@@ -229,10 +229,14 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 	// resolve endpoint once, before entering the push loop.
 	// only refresh credentials when we have a real project root —
 	// GetForProject("") falls back to Default, which would inject
-	// production credentials into a local file:// remote URL
+	// production credentials into a local file:// remote URL.
+	// findGitRoot() is CWD-dependent — if the caller isn't in a git repo
+	// (e.g., doctor retry from a different dir), this silently returns "".
 	var ep string
 	if root := findGitRoot(); root != "" {
 		ep = endpoint.GetForProject(root)
+	} else {
+		slog.Warn("pushLedger: no git root found, credential refresh will be skipped")
 	}
 	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledgerAutoResolvePrefixes,

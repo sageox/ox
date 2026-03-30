@@ -496,6 +496,14 @@ if testing.Short() {
 
 **Failure-mode tests are required, not optional.** Happy-path tests alone are insufficient. For every new function or bug fix, explicitly test: (1) side-effecting functions with the side effect skipped (e.g. push fails — content files must not be destroyed); (2) search functions with the target in each possible location independently; (3) multi-step pipelines where step N fails — step N-1 output must survive intact.
 
+**Test intent, not implementation.** Tests must verify expected outcomes and intents, not confirm what the code does today. A test that merely confirms current behavior is tautological — it passes by definition and catches nothing. Write the assertion first based on the requirement ("cache must survive push failure"), then build the scenario around it. If a test would pass even with broken code, it's not testing anything real.
+
+Common anti-patterns:
+- Copying production gates into test bodies (`if x != "" { ... }` — if the gate is removed from production, the test still passes)
+- Testing that a function doesn't touch unrelated directories (trivially true for any function)
+- Reimplementing production logic (dedup loops, search algorithms) in the test instead of calling the production code
+- Wrapping critical assertions in conditionals (`if stat == nil { assert... }` — test passes vacuously when the condition fails)
+
 **Coverage target: 85%+ for internal packages.** New code should ship with tests. PRs that reduce coverage below 85% need justification. Check with `go test ./internal/... -coverprofile=coverage.out && go tool cover -func=coverage.out | grep total`.
 
 ### Bug Fix Regression Tests

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1112,11 +1113,19 @@ func TestBuildSummaryPrompt(t *testing.T) {
 
 	prompt := BuildSummaryPrompt(entries, "/tmp/raw.jsonl", "/ledger/session-1")
 	if prompt == "" {
-		t.Error("BuildSummaryPrompt returned empty string")
+		t.Fatal("BuildSummaryPrompt returned empty string")
 	}
-	// the prompt should reference the raw path or session context
-	if len(prompt) < 50 {
-		t.Errorf("prompt seems too short: %d chars", len(prompt))
+	// prompt must include the raw path so the LLM knows where to read
+	if !strings.Contains(prompt, "/tmp/raw.jsonl") {
+		t.Error("prompt should contain the raw file path")
+	}
+	// prompt should mention the entry count
+	if !strings.Contains(prompt, "2 entries") {
+		t.Error("prompt should include entry count")
+	}
+	// prompt should reference the ledger session dir for push-summary
+	if !strings.Contains(prompt, "/ledger/session-1") {
+		t.Error("prompt should reference ledger session dir")
 	}
 }
 

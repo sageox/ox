@@ -118,7 +118,14 @@ type ProjectConfig struct {
 	// coworkers.
 	// Values: "off" (disabled), "auto" (periodic nudges to self-report)
 	// Empty string defaults to "off".
-	Murmuring string `json:"murmuring,omitempty"`
+	Murmuring       string `json:"murmur_send,omitempty"`
+	LegacyMurmuring string `json:"murmuring,omitempty"` // deprecated: read old key on upgrade
+
+	// MurmurReceive controls whether murmurs from other coworkers appear in
+	// this project's whisper stream.
+	// Values: "on" (receive murmurs as whispers), "off" (suppress murmur whispers)
+	// Empty string defaults to "on".
+	MurmurReceive string `json:"murmur_receive,omitempty"`
 
 	// GitHubSync controls GitHub data extraction to the ledger (master toggle).
 	// Values: "enabled" (default), "disabled"
@@ -185,6 +192,20 @@ func (c *ProjectConfig) GetEndpoint() string {
 // GitCredentials returns the git credentials scoped to this project's endpoint.
 func (c *ProjectConfig) GitCredentials() (*gitserver.GitCredentials, error) {
 	return gitserver.LoadCredentialsForEndpoint(c.GetEndpoint())
+}
+
+// GetMurmuring returns the murmur_send value, falling back to the legacy "murmuring" key.
+func (c *ProjectConfig) GetMurmuring() string {
+	if c.Murmuring != "" {
+		return c.Murmuring
+	}
+	return c.LegacyMurmuring
+}
+
+// SetMurmuring sets murmur_send and clears the legacy key.
+func (c *ProjectConfig) SetMurmuring(value string) {
+	c.Murmuring = value
+	c.LegacyMurmuring = ""
 }
 
 // GetDefaultProjectConfig returns a ProjectConfig with default values

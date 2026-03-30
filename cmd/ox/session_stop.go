@@ -37,7 +37,8 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 		return nil, fmt.Errorf("adapter not found: %w", err)
 	}
 
-	// read session metadata (agent version, model)
+	// read session metadata (agent version, model) — error is non-fatal:
+	// metadata may not be available for all adapter types or session formats
 	sessionMeta, _ := adapter.ReadMetadata(state.SessionFile)
 	if sessionMeta != nil {
 		result.AgentVersion = sessionMeta.AgentVersion

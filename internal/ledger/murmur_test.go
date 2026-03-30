@@ -599,11 +599,46 @@ func TestConfigureSparseCheckout_MurmurDoesNotBreakExisting(t *testing.T) {
 		t.Errorf("expected %d GitHub data paths, got %d (murmur integration may have broken GitHub paths)", DefaultGitHubDataWindowDays, githubCount)
 	}
 
-	// total should be base dirs + GitHub + murmur
+	// total should be base dirs (.sync, sessions, audit) + GitHub + murmur
 	expectedTotal := 3 + DefaultGitHubDataWindowDays + DefaultMurmurWindowHours
 	if len(lines) != expectedTotal {
 		t.Errorf("expected %d total sparse checkout entries (3 base + %d GitHub + %d murmur), got %d",
 			expectedTotal, DefaultGitHubDataWindowDays, DefaultMurmurWindowHours, len(lines))
+	}
+}
+
+// Regression test: repeated ConfigureSparseCheckout must not delete untracked
+// files under .sageox/cache/. Before the fix, "sparse-checkout init --cone"
+// ran on every call and wiped the codedb directory.
+func TestConfigureSparseCheckout_IdempotentPreservesSageoxCache(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+
+	if err := exec.Command("git", "init", tempDir).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+
+	// First call: initializes sparse checkout
+	if err := ConfigureSparseCheckout(tempDir); err != nil {
+		t.Fatalf("first ConfigureSparseCheckout: %v", err)
+	}
+
+	// Create a sentinel file simulating the codedb cache
+	sentinel := filepath.Join(tempDir, ".sageox", "cache", "codedb", "sentinel.db")
+	if err := os.MkdirAll(filepath.Dir(sentinel), 0o755); err != nil {
+		t.Fatalf("mkdir sentinel dir: %v", err)
+	}
+	if err := os.WriteFile(sentinel, []byte("ok"), 0o644); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+
+	// Second call: must NOT destroy the sentinel
+	if err := ConfigureSparseCheckout(tempDir); err != nil {
+		t.Fatalf("second ConfigureSparseCheckout: %v", err)
+	}
+
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("sentinel under .sageox/cache/codedb/ must survive repeated ConfigureSparseCheckout: %v", err)
 	}
 }
 
