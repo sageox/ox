@@ -159,6 +159,14 @@ func isExpectedEmptyRepoIssue(category string, check checkResult) bool {
 	if strings.Contains(check.name, "AGENT_ENV") {
 		return true
 	}
+	// Credential helper not configured in CI
+	if strings.Contains(check.message, "credential helper") {
+		return true
+	}
+	// Agent worker binary not installed in test environment
+	if strings.Contains(check.message, "agent CLI") || strings.Contains(check.name, "agent worker") {
+		return true
+	}
 	return false
 }
 
@@ -375,6 +383,14 @@ func filterTestEnvironmentIssues(issues []string) []string {
 		// it was hiding a real bug where init didn't properly re-stage files.
 		// skip git hooks — fresh installs don't have hooks until `ox integrate install`
 		if strings.Contains(issue, "hook not installed") {
+			continue
+		}
+		// skip credential helper warning — CI runners typically have no helper configured
+		if strings.Contains(issue, "credential helper") {
+			continue
+		}
+		// skip agent worker binary — not installed in test environment
+		if strings.Contains(issue, "agent worker") || strings.Contains(issue, "agent CLI") {
 			continue
 		}
 		filtered = append(filtered, issue)
