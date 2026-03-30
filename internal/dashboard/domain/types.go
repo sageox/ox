@@ -20,10 +20,6 @@ const (
 	TargetIssue                              // a DaemonIssue flagged by the daemon
 	TargetMurmur                             // a WIP broadcast from an AI coworker
 	TargetTeamDiscussion                     // a recorded team discussion document
-	TargetAuth                               // authentication status and token info
-	TargetCodeDB                             // code index (codedb) statistics
-	TargetSyncHealth                         // daemon sync health overview
-	TargetSOUL                               // SOUL.md team identity document
 )
 
 // InspectorTarget is a tagged union of the entities the inspector pane can display.
@@ -35,18 +31,6 @@ type InspectorTarget struct {
 	Issue      *daemon.DaemonIssue
 	Murmur     *MurmurEntry
 	Discussion *TeamDiscussion
-	Auth       *daemon.StatusData  // full status, auth fields used by renderer
-	CodeDB     *daemon.CodeDBStats // code index statistics
-	SyncHealth *daemon.StatusData  // full status, workspaces used by renderer
-	SOUL       *SOULDocument       // SOUL.md content for a team context
-}
-
-// SOULDocument holds the raw markdown content of a team's SOUL.md file.
-type SOULDocument struct {
-	TeamName string
-	TeamSlug string
-	Path     string
-	Content  string
 }
 
 // MurmurEntry is a WIP broadcast emitted by an AI coworker during an active session.
@@ -78,10 +62,6 @@ const (
 	NavNodeCodeIndex                     // codedb index status
 	NavNodeMurmur                        // a murmur broadcast
 	NavNodeDiscussion                    // a team discussion document
-	NavNodeHint                          // non-interactive hint shown when a section is empty
-	NavNodeAuth                          // authentication status node
-	NavNodeSyncHealth                    // sync health summary node
-	NavNodeSOUL                          // SOUL.md team identity node
 )
 
 // NavNode represents a single row in the left-hand navigation tree pane.
@@ -93,27 +73,6 @@ type NavNode struct {
 	Expandable bool             // whether the node has children that can be toggled
 	Expanded   bool             // current expansion state
 	Target     *InspectorTarget // non-nil when selecting this node should update the inspector
-}
-
-// MurmurTopicFilter controls which murmur topics are shown in the timeline/nav.
-// Empty string means "all topics".
-type MurmurTopicFilter string
-
-const (
-	MurmurFilterAll      MurmurTopicFilter = ""
-	MurmurFilterWIP      MurmurTopicFilter = "wip"
-	MurmurFilterBlocked  MurmurTopicFilter = "blocked"
-	MurmurFilterDecision MurmurTopicFilter = "decision"
-	MurmurFilterReview   MurmurTopicFilter = "review"
-)
-
-// AllMurmurFilters is the ordered list used to cycle through filter tabs.
-var AllMurmurFilters = []MurmurTopicFilter{
-	MurmurFilterAll,
-	MurmurFilterWIP,
-	MurmurFilterBlocked,
-	MurmurFilterDecision,
-	MurmurFilterReview,
 }
 
 // TimelineEntryKind categorises a row in the timeline pane.

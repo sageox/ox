@@ -3,7 +3,6 @@
 package state
 
 import (
-	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/dashboard/domain"
 )
 
@@ -37,26 +36,6 @@ type ReadOnlyStore interface {
 	// Loading reports whether the dashboard is still waiting for the initial
 	// data fetch to complete. Panes may render a placeholder while true.
 	Loading() bool
-
-	// GetDaemonStatus returns the raw daemon status, or nil when unavailable.
-	// Panes that need to distinguish "daemon offline" from "no data yet" use this.
-	GetDaemonStatus() *daemon.StatusData
-
-	// ActiveMurmurCoworkers returns the count of unique AgentIDs with murmurs in the last 30 min.
-	ActiveMurmurCoworkers() int
-
-	// ActiveMurmurTeams returns the count of unique team slugs from murmurs in the last 30 min.
-	ActiveMurmurTeams() int
-
-	// MurmurFilter returns the active topic filter for the murmur feed.
-	// Empty string means all topics are shown.
-	MurmurFilter() domain.MurmurTopicFilter
-
-	// MurmurSearch returns the active inline search query for murmur content.
-	MurmurSearch() string
-
-	// MurmurSearchActive reports whether the inline search field is open.
-	MurmurSearchActive() bool
 }
 
 // Ensure *Store satisfies the pane-facing interface at compile time.

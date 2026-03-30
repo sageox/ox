@@ -96,27 +96,3 @@ func MoveTimelineCursor(s Store, delta, max int) Store {
 	}
 	return s
 }
-
-// SetMurmurFilter returns a new Store with the murmur topic filter applied.
-// Resets the timeline cursor to zero so the feed starts from the top.
-func SetMurmurFilter(s Store, filter domain.MurmurTopicFilter) Store {
-	s.MurmurTopic = filter
-	s.TimelineCursorPos = 0
-	return s
-}
-
-// SetMurmurSearch returns a new Store with the inline murmur search query updated.
-func SetMurmurSearch(s Store, query string) Store {
-	s.MurmurQuery = query
-	s.TimelineCursorPos = 0
-	return s
-}
-
-// SetMurmurSearchActive returns a new Store with the search input open/closed.
-func SetMurmurSearchActive(s Store, active bool) Store {
-	s.MurmurQueryOpen = active
-	if !active {
-		s.MurmurQuery = "" // clear query on close
-	}
-	return s
-}

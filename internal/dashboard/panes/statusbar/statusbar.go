@@ -28,8 +28,8 @@ type Pane struct {
 // New returns an initialized status bar Pane.
 func New() *Pane { return &Pane{} }
 
-func (p *Pane) ID() panes.PaneID                                            { return panes.PaneStatusBar }
-func (p *Pane) SetSize(r panes.Rect)                                        { p.rect = r }
+func (p *Pane) ID() panes.PaneID              { return panes.PaneStatusBar }
+func (p *Pane) SetSize(r panes.Rect)          { p.rect = r }
 func (p *Pane) Update(msg tea.Msg, ctx panes.Context) (panes.Pane, tea.Cmd) { return p, nil }
 
 // View renders the status bar as a single full-width line. If a StatusMessage
@@ -52,64 +52,35 @@ func (p *Pane) View(ctx panes.Context) string {
 
 	health := ctx.Store.Health()
 	navNodes := ctx.Store.Nav()
-	daemonStatus := ctx.Store.GetDaemonStatus()
 
 	var parts []string
 
-	// Daemon status line: vary message based on health and why it's unhealthy.
+	// Daemon status derived from the computed health level.
 	switch health {
-	case domain.HealthUnknown:
-		// Daemon status nil or still loading — show a dim loading hint.
-		parts = append(parts, theme.StatusDim.Render("Loading…"))
-	case domain.HealthError:
-		// Distinguish between "daemon not running" and "daemon up but has errors".
-		if daemonStatus == nil || !daemonStatus.Running {
-			parts = append(parts, theme.StatusError.Render("daemon offline  ·  run: ox daemon start"))
-		} else {
-			// Count issues so we can surface the number inline.
-			issueCount := 0
-			for _, node := range navNodes {
-				if node.Kind == domain.NavNodeIssue {
-					issueCount++
-				}
-			}
-			label := fmt.Sprintf("⚠ %d issue", issueCount)
-			if issueCount != 1 {
-				label += "s"
-			}
-			parts = append(parts, theme.StatusError.Render(label))
-		}
 	case domain.HealthOK:
 		parts = append(parts, theme.StatusHealthy.Render("Daemon ✓"))
 	case domain.HealthWarn:
 		parts = append(parts, theme.StatusWarning.Render("Daemon ⚠"))
+	case domain.HealthError:
+		parts = append(parts, theme.StatusError.Render("Daemon ✗"))
+	default: // HealthUnknown — initial state before first data fetch
+		parts = append(parts, theme.StatusDim.Render("Daemon …"))
 	}
 
-	// Count daemon-flagged issues when health is not already showing them inline.
-	if health != domain.HealthError {
-		issueCount := 0
-		for _, node := range navNodes {
-			if node.Kind == domain.NavNodeIssue {
-				issueCount++
-			}
-		}
-		if issueCount > 0 {
-			label := fmt.Sprintf("⚠ %d issue", issueCount)
-			if issueCount > 1 {
-				label += "s"
-			}
-			parts = append(parts, theme.StatusWarning.Render(label))
+	// Count daemon-flagged issues surfaced as nav nodes so we reuse the same
+	// filtering logic that already exists in the nav builder.
+	issueCount := 0
+	for _, node := range navNodes {
+		if node.Kind == domain.NavNodeIssue {
+			issueCount++
 		}
 	}
-
-	// Auth expiry warning — shown prominently when a token is about to expire.
-	if daemonStatus != nil {
-		for _, issue := range daemonStatus.Issues {
-			if issue.Type == "auth_expiring" || issue.Type == "auth_expired" {
-				parts = append(parts, theme.StatusWarning.Render("⚠ auth expiring · run: ox login"))
-				break
-			}
+	if issueCount > 0 {
+		label := fmt.Sprintf("⚠ %d issue", issueCount)
+		if issueCount > 1 {
+			label += "s"
 		}
+		parts = append(parts, theme.StatusWarning.Render(label))
 	}
 
 	// Show a spinner-style indicator while the initial data load is in flight.

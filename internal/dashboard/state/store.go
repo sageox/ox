@@ -17,9 +17,9 @@ import (
 // Store holds the current dashboard snapshot. It is a value type; callers
 // receive a new copy from each mutation function rather than mutating in place.
 type Store struct {
-	DaemonStatus   *daemon.StatusData
-	DaemonErr      error
-	DaemonLoadedAt time.Time
+	DaemonStatus     *daemon.StatusData
+	DaemonErr        error
+	DaemonLoadedAt   time.Time
 
 	Sessions         []session.SessionInfo
 	SessionsErr      error
@@ -46,17 +46,6 @@ type Store struct {
 	// Generation is incremented on every data refresh cycle so stale async
 	// responses can be detected and dropped.
 	Generation int
-
-	// MurmurTopic restricts the timeline/nav to a specific murmur topic.
-	// Empty string means all topics are shown.
-	MurmurTopic domain.MurmurTopicFilter
-
-	// MurmurQuery holds the current inline search query for murmur content.
-	// Empty string means no active search.
-	MurmurQuery string
-
-	// MurmurQueryOpen tracks whether the inline search input is currently open.
-	MurmurQueryOpen bool
 }
 
 // Accessor helpers used by selectors and tests. These keep direct field access
@@ -66,18 +55,3 @@ func (s *Store) GetDaemonStatus() *daemon.StatusData     { return s.DaemonStatus
 func (s *Store) GetSessions() []session.SessionInfo      { return s.Sessions }
 func (s *Store) GetMurmurs() []domain.MurmurEntry        { return s.Murmurs }
 func (s *Store) GetDiscussions() []domain.TeamDiscussion { return s.Discussions }
-
-// ActiveMurmurCoworkers implements ReadOnlyStore.
-func (s *Store) ActiveMurmurCoworkers() int { return ActiveMurmurCoworkers(s) }
-
-// ActiveMurmurTeams implements ReadOnlyStore.
-func (s *Store) ActiveMurmurTeams() int { return ActiveMurmurTeams(s) }
-
-// MurmurFilter implements ReadOnlyStore.
-func (s *Store) MurmurFilter() domain.MurmurTopicFilter { return s.MurmurTopic }
-
-// MurmurSearch implements ReadOnlyStore.
-func (s *Store) MurmurSearch() string { return s.MurmurQuery }
-
-// MurmurSearchActive implements ReadOnlyStore.
-func (s *Store) MurmurSearchActive() bool { return s.MurmurQueryOpen }

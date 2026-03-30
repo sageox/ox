@@ -182,15 +182,6 @@ func (m Model) reduceEffects(msg tea.Msg) (Model, tea.Cmd) {
 	case TimelineCursorDownMsg:
 		entries := (&m.store).Timeline()
 		m.store = state.MoveTimelineCursor(m.store, +1, len(entries))
-
-	case MurmurFilterMsg:
-		m.store = state.SetMurmurFilter(m.store, msg.Filter)
-	case MurmurSearchOpenMsg:
-		m.store = state.SetMurmurSearchActive(m.store, true)
-	case MurmurSearchCloseMsg:
-		m.store = state.SetMurmurSearchActive(m.store, false)
-	case MurmurSearchQueryMsg:
-		m.store = state.SetMurmurSearch(m.store, msg.Query)
 	}
 
 	return m, nil

@@ -76,3 +76,4 @@ func (m Model) renderHeader() string {
 
 	return leftPart + strings.Repeat(" ", pad) + hint
 }
+

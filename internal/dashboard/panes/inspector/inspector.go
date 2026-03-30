@@ -55,14 +55,6 @@ func (p *Pane) View(ctx panes.Context) string {
 		content = RenderMurmur(target, innerW)
 	case domain.TargetTeamDiscussion:
 		content = RenderDiscussion(target, innerW)
-	case domain.TargetAuth:
-		content = RenderAuth(target, innerW)
-	case domain.TargetCodeDB:
-		content = RenderCodeDB(target, innerW)
-	case domain.TargetSyncHealth:
-		content = RenderSyncHealth(target, innerW)
-	case domain.TargetSOUL:
-		content = RenderSOUL(target, innerW)
 	default:
 		content = RenderDefault(innerW)
 	}

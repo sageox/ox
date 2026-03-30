@@ -1,7 +1,6 @@
 package timeline
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
@@ -15,57 +14,6 @@ import (
 	"github.com/sageox/ox/internal/dashboard/theme"
 	"github.com/sageox/ox/internal/tui"
 )
-
-// filterTabLabel returns the display string for a murmur topic filter tab.
-func filterTabLabel(f domain.MurmurTopicFilter) string {
-	switch f {
-	case domain.MurmurFilterAll:
-		return "All"
-	case domain.MurmurFilterWIP:
-		return "WIP"
-	case domain.MurmurFilterBlocked:
-		return "Blocked"
-	case domain.MurmurFilterDecision:
-		return "Decisions"
-	case domain.MurmurFilterReview:
-		return "Reviews"
-	default:
-		return string(f)
-	}
-}
-
-// renderFilterBar renders the topic filter tab row and optional search line.
-func renderFilterBar(ctx panes.Context, innerW int) string {
-	active := ctx.Store.MurmurFilter()
-	searchActive := ctx.Store.MurmurSearchActive()
-	searchQuery := ctx.Store.MurmurSearch()
-
-	// Build tab row: [1]All  [2]WIP  [3]Blocked  [4]Decisions  [5]Reviews
-	var tabs []string
-	for i, f := range domain.AllMurmurFilters {
-		numKey := fmt.Sprintf("[%d]", i+1)
-		label := filterTabLabel(f)
-		var tab string
-		if f == active {
-			tab = theme.NavSelectedStyle.Render(numKey + label)
-		} else {
-			tab = theme.NavDimStyle.Render(numKey) + label
-		}
-		tabs = append(tabs, tab)
-	}
-	tabRow := strings.Join(tabs, "  ")
-
-	if searchActive {
-		searchLine := theme.NavSectionStyle.Render("/") + " " + searchQuery + "█"
-		return tabRow + "\n" + searchLine
-	}
-	if searchQuery != "" {
-		// Search closed but query still active — show dimmed query.
-		searchLine := theme.NavDimStyle.Render("/ "+searchQuery+"  ") + theme.InspectorHintStyle.Render("[/] search  [esc] clear")
-		return tabRow + "\n" + searchLine
-	}
-	return tabRow
-}
 
 // compile-time interface check
 var _ panes.Pane = (*Pane)(nil)
@@ -95,30 +43,6 @@ func (p *Pane) Update(msg tea.Msg, ctx panes.Context) (panes.Pane, tea.Cmd) {
 
 	switch m := msg.(type) {
 	case tea.KeyMsg:
-		// When search is active, most keys feed the search query.
-		if ctx.Store.MurmurSearchActive() {
-			switch m.String() {
-			case "esc":
-				return p, func() tea.Msg { return app.MurmurSearchCloseMsg{} }
-			case "enter":
-				return p, func() tea.Msg { return app.MurmurSearchCloseMsg{} }
-			case "backspace":
-				q := ctx.Store.MurmurSearch()
-				if len(q) > 0 {
-					q = q[:len(q)-1]
-				}
-				return p, func() tea.Msg { return app.MurmurSearchQueryMsg{Query: q} }
-			default:
-				// Only accept single printable characters (not ctrl sequences).
-				s := m.String()
-				if len([]rune(s)) == 1 && s != " " {
-					q := ctx.Store.MurmurSearch() + s
-					return p, func() tea.Msg { return app.MurmurSearchQueryMsg{Query: q} }
-				}
-			}
-			return p, nil
-		}
-
 		switch {
 		case key.Matches(m, p.keys.Up):
 			p.adjustScroll(ctx)
@@ -133,18 +57,6 @@ func (p *Pane) Update(msg tea.Msg, ctx panes.Context) (panes.Pane, tea.Cmd) {
 				target := entries[cursor].Target
 				return p, func() tea.Msg { return app.SelectionChangedMsg{Target: target} }
 			}
-		case m.String() == "/":
-			return p, func() tea.Msg { return app.MurmurSearchOpenMsg{} }
-		case m.String() == "1":
-			return p, func() tea.Msg { return app.MurmurFilterMsg{Filter: domain.MurmurFilterAll} }
-		case m.String() == "2":
-			return p, func() tea.Msg { return app.MurmurFilterMsg{Filter: domain.MurmurFilterWIP} }
-		case m.String() == "3":
-			return p, func() tea.Msg { return app.MurmurFilterMsg{Filter: domain.MurmurFilterBlocked} }
-		case m.String() == "4":
-			return p, func() tea.Msg { return app.MurmurFilterMsg{Filter: domain.MurmurFilterDecision} }
-		case m.String() == "5":
-			return p, func() tea.Msg { return app.MurmurFilterMsg{Filter: domain.MurmurFilterReview} }
 		}
 	case app.TimelineCursorUpMsg, app.TimelineCursorDownMsg:
 		// Cursor already moved by the root model; sync scroll to the new position.
@@ -164,28 +76,10 @@ func (p *Pane) View(ctx panes.Context) string {
 	innerW := w - 2
 	innerH := h - 2
 
-	title := theme.PaneTitle("◉ Team Pulse", ctx.Focused)
+	title := theme.PaneTitle("⟳ Activity", ctx.Focused)
 
 	var sb strings.Builder
 	sb.WriteString(title)
-	sb.WriteString("\n")
-
-	// Team Pulse sub-header: counts of active coworkers and teams from murmurs in the last 30 min.
-	coworkers := ctx.Store.ActiveMurmurCoworkers()
-	teams := ctx.Store.ActiveMurmurTeams()
-	pulseDetail := theme.TeamPulseMetaStyle.Render(
-		fmt.Sprintf("  %d coworker%s  ·  %d team%s",
-			coworkers, pluralS(coworkers),
-			teams, pluralS(teams),
-		),
-	)
-	sb.WriteString(pulseDetail)
-	sb.WriteString("\n")
-
-	// Filter tabs: All | WIP | Blocked | Decisions | Reviews, plus inline search line.
-	filterBar := renderFilterBar(ctx, innerW)
-	filterLines := strings.Count(filterBar, "\n") + 1
-	sb.WriteString(filterBar)
 	sb.WriteString("\n")
 
 	// Sparkline header — summarises activity density over the last 4 hours.
@@ -232,32 +126,29 @@ func (p *Pane) View(ctx panes.Context) string {
 
 		for i, e := range grpEntries {
 			globalIdx := startIdx + i
+			icon := EntryIcon(e.Kind)
 			relT := RelativeTime(e.Timestamp)
 
-			var line string
-			if e.Kind == domain.TimelineMurmur {
-				line = renderMurmurRow(e, relT, innerW)
-			} else {
-				icon := EntryIcon(e.Kind)
-				// Truncate summary so the line fits: icon(1) + space(1) + summary + space(2) + relT
-				overhead := len(icon) + 1 + 2 + len(relT)
-				maxSummary := innerW - overhead
-				if maxSummary < 0 {
-					maxSummary = 0
-				}
-				summary := e.Summary
-				if len(summary) > maxSummary {
-					summary = summary[:maxSummary]
-				}
-				line = icon + " " + summary + "  " + relT
+			// Truncate summary so the line fits in innerW: icon(1) + space(1) + summary + space(2) + relT
+			overhead := len(icon) + 1 + 2 + len(relT)
+			maxSummary := innerW - overhead
+			if maxSummary < 0 {
+				maxSummary = 0
+			}
+			summary := e.Summary
+			if len(summary) > maxSummary {
+				summary = summary[:maxSummary]
 			}
 
+			line := icon + " " + summary + "  " + relT
+
 			var s lipgloss.Style
-			if globalIdx == cursor {
+			switch {
+			case globalIdx == cursor:
 				s = theme.TimelineSelectedStyle
-			} else if e.Kind == domain.TimelineMurmur {
-				s = murmurAgeStyle(e.Timestamp)
-			} else {
+			case e.Kind == domain.TimelineMurmur:
+				s = theme.TimelineMurmurStyle
+			default:
 				s = entryStyle
 			}
 			rows = append(rows, row{s.Width(innerW).Render(line)})
@@ -268,9 +159,8 @@ func (p *Pane) View(ctx panes.Context) string {
 	appendGroup("RECENT", theme.TimelineRecentLabel, theme.TimelineEntryActive, grouped.Recent, len(grouped.Now))
 	appendGroup("EARLIER", theme.TimelineEarlierLabel, theme.TimelineEntryMuted, grouped.Earlier, len(grouped.Now)+len(grouped.Recent))
 
-	// title(1) + pulse-detail(1) + filter-bar(filterLines) + sparkline(1) = chrome rows.
-	chromeRows := 3 + filterLines
-	visibleRows := innerH - chromeRows
+	// title(1) + sparkline(1) = 2 chrome rows consumed above the scroll area.
+	visibleRows := innerH - 2
 	if visibleRows < 0 {
 		visibleRows = 0
 	}
@@ -304,101 +194,11 @@ func (p *Pane) View(ctx panes.Context) string {
 	return borderStyle.Width(innerW).Height(innerH).Render(sb.String())
 }
 
-// renderMurmurRow builds the display line for a murmur timeline entry.
-// Format: ◈ [topic-badge] agent-short  content-preview  ·team?  relT
-func renderMurmurRow(e domain.TimelineEntry, relT string, innerW int) string {
-	icon := EntryIcon(e.Kind)
-
-	// Parse topic and content from the pre-formatted Summary "[topic] content".
-	topic, content := parseMurmurSummary(e.Summary)
-
-	badge := topicBadge(topic)
-	// Agent short: last 4 chars of Actor, dimmed.
-	agentShort := e.Actor
-	if len(agentShort) > 4 {
-		agentShort = agentShort[len(agentShort)-4:]
-	}
-	agentPart := theme.NavDimStyle.Render(agentShort)
-
-	suffix := "  " + relT
-	// icon(1) + space(1) + badge + space(1) + agentShort(4) + space(2) + content + suffix
-	overhead := 1 + 1 + len(badge) + 1 + 4 + len(suffix)
-	maxContent := innerW - overhead
-	if maxContent < 0 {
-		maxContent = 0
-	}
-	if len(content) > maxContent {
-		content = content[:maxContent]
-	}
-
-	return icon + " " + badge + " " + agentPart + "  " + content + suffix
-}
-
-// parseMurmurSummary extracts topic and content from the "[topic] content" format
-// stored in TimelineEntry.Summary for murmur entries.
-func parseMurmurSummary(summary string) (topic, content string) {
-	if len(summary) > 0 && summary[0] == '[' {
-		end := strings.IndexByte(summary, ']')
-		if end > 0 {
-			topic = summary[1:end]
-			content = strings.TrimSpace(summary[end+1:])
-			return topic, content
-		}
-	}
-	return "", summary
-}
-
-// topicBadge returns a styled "[topic]" badge for known topic values.
-func topicBadge(topic string) string {
-	badge := "[" + topic + "]"
-	switch strings.ToLower(topic) {
-	case "wip":
-		return theme.TopicBadgeWIP.Render(badge)
-	case "blocked":
-		return theme.TopicBadgeBlocked.Render(badge)
-	case "decision":
-		return theme.TopicBadgeDecision.Render(badge)
-	case "review":
-		return theme.TopicBadgeReview.Render(badge)
-	default:
-		return theme.TopicBadgeDefault.Render(badge)
-	}
-}
-
-// murmurAgeStyle returns a progressively dimmer style for older murmurs:
-// < 5 min → hot (bright), 5-15 min → warm, > 15 min → cool (dim).
-func murmurAgeStyle(t time.Time) lipgloss.Style {
-	age := time.Since(t)
-	switch {
-	case age < 5*time.Minute:
-		return theme.MurmurHotStyle
-	case age < 15*time.Minute:
-		return theme.MurmurWarmStyle
-	default:
-		return theme.MurmurCoolStyle
-	}
-}
-
-// pluralS returns "s" when n != 1 for simple English pluralisation.
-func pluralS(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
-}
-
 // adjustScroll keeps the cursor row within the visible viewport.
-// Chrome: border(2) + title(1) + pulse-detail(1) + filter-bar(1 or 2) + sparkline(1) = 6–7 rows.
-// Use 7 as a safe upper bound (filter bar with search line open).
+// Chrome: border(2) + title(1) + sparkline(1) = 4 rows.
 func (p *Pane) adjustScroll(ctx panes.Context) {
 	cursor := ctx.Store.TimelineCursor()
-	// Filter bar is 2 lines when search is active, 1 otherwise.
-	filterLines := 1
-	if ctx.Store.MurmurSearchActive() || ctx.Store.MurmurSearch() != "" {
-		filterLines = 2
-	}
-	chrome := 4 + filterLines // border(2) + title(1) + pulse(1) + filter + sparkline(1)
-	visibleRows := p.rect.Height - chrome
+	visibleRows := p.rect.Height - 4
 	if visibleRows < 1 {
 		return
 	}

@@ -7,24 +7,6 @@ package app
 
 import "github.com/sageox/ox/internal/dashboard/domain"
 
-// ── Murmur filter messages ────────────────────────────────────────────────────
-
-// MurmurFilterMsg sets the active murmur topic filter.
-type MurmurFilterMsg struct {
-	Filter domain.MurmurTopicFilter
-}
-
-// MurmurSearchOpenMsg opens the inline murmur search input.
-type MurmurSearchOpenMsg struct{}
-
-// MurmurSearchCloseMsg closes the inline murmur search input and clears the query.
-type MurmurSearchCloseMsg struct{}
-
-// MurmurSearchQueryMsg updates the inline murmur search query.
-type MurmurSearchQueryMsg struct {
-	Query string
-}
-
 // ── Intent messages (user-initiated actions) ─────────────────────────────────
 // These are dispatched by key handlers and translated into state changes by the
 // root model's Update function.
