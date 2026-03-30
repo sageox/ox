@@ -553,7 +553,7 @@ func extractTeamIDFromRepoName(name string) string {
 func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 	// Try daemon first (preferred path - centralized credential handling)
 	if daemon.IsRunning() {
-		client := daemon.NewClientWithTimeout(60 * time.Second)
+		client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
 		payload := daemon.CheckoutPayload{
 			RepoPath: targetPath,
 			CloneURL: cloneURL,

@@ -445,7 +445,7 @@ func (c *Client) SendToDaemon(eventType string, props map[string]any) {
 // Uses very short timeout since this is best-effort.
 func (c *Client) sendToDaemonAsync(eventType string, props map[string]any) {
 	// very short timeout - we don't want to block
-	client := daemon.NewClientWithTimeout(50 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(50 * time.Millisecond)
 
 	payload := daemon.TelemetryPayload{
 		Event: eventType,

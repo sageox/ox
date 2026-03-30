@@ -1339,7 +1339,7 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		if gitRoot != "" {
 			// use longer timeout for status queries — the status handler collects data
 			// from multiple subsystems and can exceed 50ms under sync load
-			client = daemon.NewClientWithTimeout(500 * time.Millisecond)
+			client = daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 			if client.Ping() == nil {
 				if ds, err := client.Status(); err == nil {
 					daemonStatus = ds

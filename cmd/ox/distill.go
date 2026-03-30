@@ -429,7 +429,7 @@ func syncBeforeDistill() error {
 
 	// sync ledger
 	if err := cli.WithSpinnerNoResult("Syncing ledger...", func() error {
-		client := daemon.NewClientWithTimeout(30 * time.Second)
+		client := daemon.NewClientForCurrentRepoWithTimeout(30 * time.Second)
 		return client.SyncWithProgress(func(stage string, percent *int, message string) {
 			// progress handled by spinner
 		})
@@ -439,7 +439,7 @@ func syncBeforeDistill() error {
 
 	// sync team contexts
 	if err := cli.WithSpinnerNoResult("Syncing team contexts...", func() error {
-		client := daemon.NewClientWithTimeout(60 * time.Second)
+		client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
 		return client.TeamSyncWithProgress(func(stage string, percent *int, message string) {
 			// progress handled by spinner
 		})
@@ -449,7 +449,7 @@ func syncBeforeDistill() error {
 
 	// update code index
 	if err := cli.WithSpinnerNoResult("Updating code index...", func() error {
-		client := daemon.NewClientWithTimeout(60 * time.Second)
+		client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
 		_, err := client.CodeIndex(daemon.CodeIndexPayload{}, func(stage string, percent *int, message string) {
 			// progress handled by spinner
 		})

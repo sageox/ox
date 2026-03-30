@@ -288,7 +288,7 @@ func checkDaemonInstanceStale(_ bool) checkResult {
 	}
 
 	// connect to daemon and get status
-	client := daemon.NewClient()
+	client := daemon.NewClientForCurrentRepo()
 	status, err := client.Status()
 	if err != nil {
 		return SkippedCheck("Daemon agent instances",

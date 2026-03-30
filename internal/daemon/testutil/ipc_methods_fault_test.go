@@ -40,7 +40,7 @@ func TestStatus_Healthy(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	client := daemon.NewClientWithTimeout(testTimeout)
+	client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 	status, err := client.Status()
 
 	assert.NoError(t, err)
@@ -61,7 +61,7 @@ func TestStatus_AllCriticalFaults(t *testing.T) {
 			d.Start()
 			defer d.Stop()
 
-			client := daemon.NewClientWithTimeout(testTimeout)
+			client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 			status, err := client.Status()
 
 			assert.Error(t, err, "Status() should fail with fault: %s", tt.name)
@@ -81,7 +81,7 @@ func TestSessions_Healthy(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	client := daemon.NewClientWithTimeout(testTimeout)
+	client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 	sessions, err := client.Sessions()
 
 	assert.NoError(t, err)
@@ -101,7 +101,7 @@ func TestSessions_AllCriticalFaults(t *testing.T) {
 			d.Start()
 			defer d.Stop()
 
-			client := daemon.NewClientWithTimeout(testTimeout)
+			client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 			_, err := client.Sessions()
 
 			assert.Error(t, err, "Sessions() should fail with fault: %s", tt.name)
@@ -120,7 +120,7 @@ func TestInstances_Healthy(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	client := daemon.NewClientWithTimeout(testTimeout)
+	client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 	instances, err := client.Instances()
 
 	assert.NoError(t, err)
@@ -140,7 +140,7 @@ func TestInstances_AllCriticalFaults(t *testing.T) {
 			d.Start()
 			defer d.Stop()
 
-			client := daemon.NewClientWithTimeout(testTimeout)
+			client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 			_, err := client.Instances()
 
 			assert.Error(t, err, "Instances() should fail with fault: %s", tt.name)
@@ -159,7 +159,7 @@ func TestSyncHistory_Healthy(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	client := daemon.NewClientWithTimeout(testTimeout)
+	client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 	history, err := client.SyncHistory()
 
 	assert.NoError(t, err)
@@ -179,7 +179,7 @@ func TestSyncHistory_AllCriticalFaults(t *testing.T) {
 			d.Start()
 			defer d.Stop()
 
-			client := daemon.NewClientWithTimeout(testTimeout)
+			client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 			_, err := client.SyncHistory()
 
 			assert.Error(t, err, "SyncHistory() should fail with fault: %s", tt.name)
@@ -198,7 +198,7 @@ func TestDoctor_Healthy(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	client := daemon.NewClientWithTimeout(testTimeout)
+	client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 	resp, err := client.Doctor()
 
 	assert.NoError(t, err)
@@ -218,7 +218,7 @@ func TestDoctor_AllCriticalFaults(t *testing.T) {
 			d.Start()
 			defer d.Stop()
 
-			client := daemon.NewClientWithTimeout(testTimeout)
+			client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 			_, err := client.Doctor()
 
 			assert.Error(t, err, "Doctor() should fail with fault: %s", tt.name)
@@ -237,7 +237,7 @@ func TestRequestSync_Healthy(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	client := daemon.NewClientWithTimeout(testTimeout)
+	client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 	err := client.RequestSync()
 
 	assert.NoError(t, err)
@@ -256,7 +256,7 @@ func TestRequestSync_AllCriticalFaults(t *testing.T) {
 			d.Start()
 			defer d.Stop()
 
-			client := daemon.NewClientWithTimeout(testTimeout)
+			client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 			err := client.RequestSync()
 
 			assert.Error(t, err, "RequestSync() should fail with fault: %s", tt.name)
@@ -275,7 +275,7 @@ func TestSyncWithProgress_Healthy(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	client := daemon.NewClientWithTimeout(1 * time.Second)
+	client := daemon.NewClientForCurrentRepoWithTimeout(1 * time.Second)
 	err := client.SyncWithProgress(nil)
 
 	assert.NoError(t, err)
@@ -294,7 +294,7 @@ func TestSyncWithProgress_AllCriticalFaults(t *testing.T) {
 			d.Start()
 			defer d.Stop()
 
-			client := daemon.NewClientWithTimeout(testTimeout)
+			client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 			err := client.SyncWithProgress(nil)
 
 			assert.Error(t, err, "SyncWithProgress() should fail with fault: %s", tt.name)
@@ -313,7 +313,7 @@ func TestTeamSyncWithProgress_Healthy(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	client := daemon.NewClientWithTimeout(1 * time.Second)
+	client := daemon.NewClientForCurrentRepoWithTimeout(1 * time.Second)
 	err := client.TeamSyncWithProgress(nil)
 
 	assert.NoError(t, err)
@@ -332,7 +332,7 @@ func TestTeamSyncWithProgress_AllCriticalFaults(t *testing.T) {
 			d.Start()
 			defer d.Stop()
 
-			client := daemon.NewClientWithTimeout(testTimeout)
+			client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 			err := client.TeamSyncWithProgress(nil)
 
 			assert.Error(t, err, "TeamSyncWithProgress() should fail with fault: %s", tt.name)
@@ -351,7 +351,7 @@ func TestStop_Healthy(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	client := daemon.NewClientWithTimeout(testTimeout)
+	client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 	err := client.Stop()
 
 	assert.NoError(t, err)
@@ -370,7 +370,7 @@ func TestStop_AllCriticalFaults(t *testing.T) {
 			d.Start()
 			defer d.Stop()
 
-			client := daemon.NewClientWithTimeout(testTimeout)
+			client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 			err := client.Stop()
 
 			assert.Error(t, err, "Stop() should fail with fault: %s", tt.name)
@@ -389,7 +389,7 @@ func TestGetUnviewedErrors_Healthy(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	client := daemon.NewClientWithTimeout(testTimeout)
+	client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 	errors, err := client.GetUnviewedErrors()
 
 	assert.NoError(t, err)
@@ -409,7 +409,7 @@ func TestGetUnviewedErrors_AllCriticalFaults(t *testing.T) {
 			d.Start()
 			defer d.Stop()
 
-			client := daemon.NewClientWithTimeout(testTimeout)
+			client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 			_, err := client.GetUnviewedErrors()
 
 			assert.Error(t, err, "GetUnviewedErrors() should fail with fault: %s", tt.name)
@@ -428,7 +428,7 @@ func TestMarkErrorsViewed_Healthy(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	client := daemon.NewClientWithTimeout(testTimeout)
+	client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 	err := client.MarkErrorsViewed([]string{"error-1", "error-2"})
 
 	assert.NoError(t, err)
@@ -447,7 +447,7 @@ func TestMarkErrorsViewed_AllCriticalFaults(t *testing.T) {
 			d.Start()
 			defer d.Stop()
 
-			client := daemon.NewClientWithTimeout(testTimeout)
+			client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 			err := client.MarkErrorsViewed([]string{"error-1"})
 
 			assert.Error(t, err, "MarkErrorsViewed() should fail with fault: %s", tt.name)
@@ -467,7 +467,7 @@ func TestCheckout_Healthy(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	client := daemon.NewClientWithTimeout(5 * time.Second)
+	client := daemon.NewClientForCurrentRepoWithTimeout(5 * time.Second)
 	result, err := client.Checkout(daemon.CheckoutPayload{
 		CloneURL: "https://example.com/repo.git",
 		RepoPath: "/tmp/test-checkout",
@@ -492,7 +492,7 @@ func TestCheckout_AllCriticalFaults(t *testing.T) {
 			d.Start()
 			defer d.Stop()
 
-			client := daemon.NewClientWithTimeout(testTimeout)
+			client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 			_, err := client.Checkout(daemon.CheckoutPayload{
 				CloneURL: "https://example.com/repo.git",
 				RepoPath: "/tmp/test-checkout",
@@ -517,7 +517,7 @@ func TestCheckout_ProgressCallbackWithFault(t *testing.T) {
 	defer d.Stop()
 
 	progressCalled := false
-	client := daemon.NewClientWithTimeout(testTimeout)
+	client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 	_, err := client.Checkout(daemon.CheckoutPayload{
 		CloneURL: "https://example.com/repo.git",
 		RepoPath: "/tmp/test-checkout",
@@ -577,7 +577,7 @@ func TestAllIPCMethods_AllCriticalFaults(t *testing.T) {
 				d.Start()
 				defer d.Stop()
 
-				client := daemon.NewClientWithTimeout(testTimeout)
+				client := daemon.NewClientForCurrentRepoWithTimeout(testTimeout)
 				err := method.call(client)
 
 				assert.Error(t, err, "%s should fail with fault %s", method.name, fault.name)

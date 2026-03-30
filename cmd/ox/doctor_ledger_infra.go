@@ -88,7 +88,7 @@ func checkCodeDBConsistency(fix bool) checkResult {
 	dataDir := resolveCodeDBDir(projectRoot)
 
 	// try daemon first for LastIndexed info
-	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	cs, daemonErr := client.CodeStatus()
 
 	indexDirExists := false

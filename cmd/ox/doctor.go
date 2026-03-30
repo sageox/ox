@@ -164,7 +164,7 @@ common issues, or --fix-slug to target specific checks.`,
 		// runs in background goroutine to not block CLI
 		if daemon.IsRunning() {
 			go func() {
-				client := daemon.NewClient()
+				client := daemon.NewClientForCurrentRepo()
 				_, _ = client.Doctor()
 			}()
 		}
@@ -331,7 +331,7 @@ func runForceSessionUploads(cmd *cobra.Command) error {
 	if err := daemon.EnsureDaemon(); err != nil {
 		return fmt.Errorf("daemon required for session finalization: %w", err)
 	}
-	client := daemon.NewClient()
+	client := daemon.NewClientForCurrentRepo()
 	resp, err := cli.WithSpinner("Scanning for incomplete sessions...", func() (*daemon.DoctorResponse, error) {
 		return client.Doctor()
 	})
@@ -360,7 +360,7 @@ func runGC(cmd *cobra.Command) error {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
-	client := daemon.NewClient()
+	client := daemon.NewClientForCurrentRepo()
 
 	resp, err := cli.WithSpinner("Running garbage collection...", func() (*daemon.TriggerGCResponse, error) {
 		return client.TriggerGC()
@@ -410,7 +410,7 @@ func detectDoctorState() doctorState {
 
 	var isBootstrapping bool
 	if daemonRunning {
-		client := daemon.NewClient()
+		client := daemon.NewClientForCurrentRepo()
 		if status, err := client.Status(); err == nil {
 			isBootstrapping = status.TotalSyncs == 0 &&
 				status.Uptime < 3*time.Minute

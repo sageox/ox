@@ -54,7 +54,7 @@ var indexCodeCmd = &cobra.Command{
 			fmt.Fprintf(cmd.ErrOrStderr(), "Indexing local repo...\n")
 		}
 
-		client := daemon.NewClientWithTimeout(5 * time.Minute)
+		client := daemon.NewClientForCurrentRepoWithTimeout(5 * time.Minute)
 		result, err := client.CodeIndex(payload, func(stage string, percent *int, message string) {
 			if message != "" {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", message)

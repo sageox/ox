@@ -182,13 +182,13 @@ func syncViaDaemon(_ context.Context, jsonOutput bool, result *SyncResult) error
 	var err error
 	if !jsonOutput {
 		err = cli.WithSpinnerNoResult("Syncing via daemon...", func() error {
-			client := daemon.NewClientWithTimeout(30 * time.Second)
+			client := daemon.NewClientForCurrentRepoWithTimeout(30 * time.Second)
 			return client.SyncWithProgress(func(stage string, percent *int, message string) {
 				// progress updates are shown by spinner
 			})
 		})
 	} else {
-		client := daemon.NewClientWithTimeout(30 * time.Second)
+		client := daemon.NewClientForCurrentRepoWithTimeout(30 * time.Second)
 		err = client.SyncWithProgress(nil)
 	}
 
@@ -217,11 +217,11 @@ func syncTeamContext(_ context.Context, teamID string, jsonOutput bool, result *
 	var syncErr error
 	if !jsonOutput {
 		syncErr = cli.WithSpinnerNoResult(fmt.Sprintf("Syncing team %s via daemon...", teamID), func() error {
-			client := daemon.NewClientWithTimeout(60 * time.Second)
+			client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
 			return client.TeamSyncWithProgress(nil)
 		})
 	} else {
-		client := daemon.NewClientWithTimeout(60 * time.Second)
+		client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
 		syncErr = client.TeamSyncWithProgress(nil)
 	}
 
@@ -248,13 +248,13 @@ func syncAllTeamContexts(_ context.Context, jsonOutput bool, _ *SyncResult) erro
 	var err error
 	if !jsonOutput {
 		err = cli.WithSpinnerNoResult("Syncing team contexts via daemon...", func() error {
-			client := daemon.NewClientWithTimeout(60 * time.Second)
+			client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
 			return client.TeamSyncWithProgress(func(stage string, percent *int, message string) {
 				// progress updates handled by daemon
 			})
 		})
 	} else {
-		client := daemon.NewClientWithTimeout(60 * time.Second)
+		client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
 		err = client.TeamSyncWithProgress(nil)
 	}
 

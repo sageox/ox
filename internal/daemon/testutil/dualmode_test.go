@@ -18,7 +18,7 @@ func TestMockDaemon_Basic(t *testing.T) {
 	mock := env.StartMock()
 
 	t.Run("ping responds successfully", func(t *testing.T) {
-		client := daemon.NewClient()
+		client := daemon.NewClientForCurrentRepo()
 		err := client.Ping()
 		assert.NoError(t, err)
 	})
@@ -31,7 +31,7 @@ func TestMockDaemon_Basic(t *testing.T) {
 			LedgerPath: "/test/ledger",
 		}
 
-		client := daemon.NewClient()
+		client := daemon.NewClientForCurrentRepo()
 		status, err := client.Status()
 		require.NoError(t, err)
 		assert.True(t, status.Running)
@@ -41,7 +41,7 @@ func TestMockDaemon_Basic(t *testing.T) {
 	})
 
 	t.Run("sync returns success by default", func(t *testing.T) {
-		client := daemon.NewClient()
+		client := daemon.NewClientForCurrentRepo()
 		err := client.RequestSync()
 		assert.NoError(t, err)
 	})
@@ -49,7 +49,7 @@ func TestMockDaemon_Basic(t *testing.T) {
 	t.Run("sync returns configured error", func(t *testing.T) {
 		mock.SyncError = errors.New("sync failed")
 
-		client := daemon.NewClient()
+		client := daemon.NewClientForCurrentRepo()
 		err := client.RequestSync()
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "sync failed")
@@ -67,7 +67,7 @@ func TestMockDaemon_CallTracking(t *testing.T) {
 	t.Run("records all calls", func(t *testing.T) {
 		mock.ResetCalls()
 
-		client := daemon.NewClient()
+		client := daemon.NewClientForCurrentRepo()
 		_ = client.Ping()
 		_ = client.Ping()
 		_, _ = client.Status()
@@ -84,7 +84,7 @@ func TestMockDaemon_CallTracking(t *testing.T) {
 	t.Run("counts calls by type", func(t *testing.T) {
 		mock.ResetCalls()
 
-		client := daemon.NewClient()
+		client := daemon.NewClientForCurrentRepo()
 		_ = client.Ping()
 		_ = client.Ping()
 		_ = client.Ping()
@@ -96,7 +96,7 @@ func TestMockDaemon_CallTracking(t *testing.T) {
 	})
 
 	t.Run("reset clears calls", func(t *testing.T) {
-		client := daemon.NewClient()
+		client := daemon.NewClientForCurrentRepo()
 		_ = client.Ping()
 		assert.Greater(t, len(mock.GetCalls()), 0)
 
@@ -120,14 +120,14 @@ func TestMockDaemon_Fluent(t *testing.T) {
 	t.Cleanup(mock.Stop)
 
 	t.Run("status configured via fluent api", func(t *testing.T) {
-		client := daemon.NewClient()
+		client := daemon.NewClientForCurrentRepo()
 		status, err := client.Status()
 		require.NoError(t, err)
 		assert.Equal(t, "fluent-test", status.Version)
 	})
 
 	t.Run("sync error configured via fluent api", func(t *testing.T) {
-		client := daemon.NewClient()
+		client := daemon.NewClientForCurrentRepo()
 		err := client.RequestSync()
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "fluent error")
@@ -246,7 +246,7 @@ func TestStartTestDaemon_VerifyStartStop(t *testing.T) {
 
 	// verify we can communicate with it
 	// use longer timeout for test daemon which may be slower than production
-	client := daemon.NewClientWithTimeout(5 * time.Second)
+	client := daemon.NewClientForCurrentRepoWithTimeout(5 * time.Second)
 	err = client.Ping()
 	require.NoError(t, err, "should connect to daemon")
 
@@ -289,7 +289,7 @@ func ExampleMockDaemon() {
 	// mock.SyncError = errors.New("test error")
 	//
 	// make assertions:
-	// client := daemon.NewClient()
+	// client := daemon.NewClientForCurrentRepo()
 	// err := client.Ping()
 	// assert.NoError(t, err)
 	// assert.Equal(t, 1, mock.CallCount(daemon.MsgTypePing))
@@ -302,7 +302,7 @@ func TestOxFaultDaemon_Basic(t *testing.T) {
 	t.Run("healthy daemon responds to ping", func(t *testing.T) {
 		_ = env.StartFault(OxFaultConfig{})
 
-		client := daemon.NewClient()
+		client := daemon.NewClientForCurrentRepo()
 		err := client.Ping()
 		assert.NoError(t, err)
 	})
@@ -319,7 +319,7 @@ func TestOxFaultDaemon_ConfiguredResponses(t *testing.T) {
 		},
 	})
 
-	client := daemon.NewClient()
+	client := daemon.NewClientForCurrentRepo()
 	status, err := client.Status()
 	require.NoError(t, err)
 	assert.Equal(t, 99999, status.Pid)
@@ -340,7 +340,7 @@ func TestOxFaultDaemon_WithFault(t *testing.T) {
 		})
 		_ = d
 
-		client := daemon.NewClientWithTimeout(100 * time.Millisecond)
+		client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
 		err := client.Ping()
 		assert.Error(t, err)
 	})

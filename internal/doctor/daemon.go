@@ -151,7 +151,7 @@ func (c *DaemonSyncStatusCheck) Run(_ context.Context, _ bool) CheckResult {
 		}
 	}
 
-	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	status, err := client.Status()
 	if err != nil {
 		return CheckResult{
@@ -227,7 +227,7 @@ func (c *DaemonUptimeCheck) Run(_ context.Context, _ bool) CheckResult {
 		}
 	}
 
-	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	status, err := client.Status()
 	if err != nil {
 		return CheckResult{
@@ -270,7 +270,7 @@ func (c *DaemonSyncErrorsCheck) Run(_ context.Context, _ bool) CheckResult {
 		}
 	}
 
-	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	status, err := client.Status()
 	if err != nil {
 		return CheckResult{
@@ -328,7 +328,7 @@ func (c *DaemonDirtyTeamContextCheck) Run(_ context.Context, _ bool) CheckResult
 		}
 	}
 
-	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	status, err := client.Status()
 	if err != nil {
 		return CheckResult{
@@ -450,7 +450,7 @@ func (c *DaemonHeartbeatCheck) Run(_ context.Context, _ bool) CheckResult {
 	if err != nil || entry == nil {
 		if daemon.IsRunning() {
 			// grace period: daemon just started
-			client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+			client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 			if dStatus, dErr := client.Status(); dErr == nil && dStatus.Uptime < DaemonBootstrapGrace {
 				return CheckResult{
 					Name:    c.Name(),

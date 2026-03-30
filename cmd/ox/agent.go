@@ -611,7 +611,7 @@ const (
 // Unlike `ox agent <id> whisper`, this does NOT advance the delivery cursor,
 // so it's safe to run repeatedly without side effects.
 func runAgentWhisperHistory(inst *agentinstance.Instance) error {
-	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 
 	// collect all pages; break if no more entries or no pagination
 	var allEntries []whisperstore.WhisperEntry
@@ -702,7 +702,7 @@ func runAgentWhisperHistory(inst *agentinstance.Instance) error {
 // Uses the same WhisperStore cursor as hook delivery — if the hook already
 // delivered pending whispers, this returns nothing. No double delivery.
 func runAgentWhisper(inst *agentinstance.Instance) error {
-	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	resp, err := client.Whispers(inst.AgentID, "normal", nil)
 	if err != nil {
 		// daemon unavailable — no whispers to report
@@ -743,7 +743,7 @@ func runAgentWhisper(inst *agentinstance.Instance) error {
 // hot path of every hook invocation and must not add perceptible latency.
 func emitWhispers(agentID string) {
 	// best-effort delivery — 100ms allows for daemon startup/load
-	client := daemon.NewClientWithTimeout(100 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
 	resp, err := client.Whispers(agentID, "normal", nil)
 	if err != nil {
 		return

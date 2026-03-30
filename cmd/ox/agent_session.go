@@ -1059,7 +1059,7 @@ func copySessionCacheToLedger(result *agentSessionResult, ledgerPath, sessionNam
 // to upload and finalize a session asynchronously. Returns an error if the daemon
 // is unreachable or the IPC message fails (caller should flag for doctor).
 func signalDaemonSessionFinalize(sessionName, ledgerPath, cachePath, projectRoot string) error {
-	client := daemon.NewClientWithTimeout(100 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
 	return client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
 		SessionName: sessionName,
 		LedgerPath:  ledgerPath,

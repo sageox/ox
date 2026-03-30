@@ -1272,8 +1272,11 @@ type Client struct {
 	timeout    time.Duration
 }
 
-// NewClient creates a new IPC client.
-func NewClient() *Client {
+// newDirectClient creates an IPC client using the direct socket path (no registry fallback).
+// Only for use within the daemon package (daemon-to-self IPC, liveness checks).
+// CLI code must use NewClientForCurrentRepo() or NewClientForCurrentRepoWithTimeout()
+// which fall back to the daemon registry when workspace IDs drift.
+func newDirectClient() *Client {
 	return &Client{
 		socketPath: SocketPath(),
 		// Localhost Unix socket IPC is <5ms in practice.
@@ -1282,8 +1285,9 @@ func NewClient() *Client {
 	}
 }
 
-// NewClientWithTimeout creates an IPC client with custom timeout.
-func NewClientWithTimeout(timeout time.Duration) *Client {
+// newDirectClientWithTimeout creates an IPC client with custom timeout (no registry fallback).
+// Same restriction as newDirectClient: daemon-package-internal only.
+func newDirectClientWithTimeout(timeout time.Duration) *Client {
 	return &Client{
 		socketPath: SocketPath(),
 		timeout:    timeout,
@@ -1424,7 +1428,7 @@ func (c *Client) Ping() error {
 // Returns nil if healthy, error describing the failure mode otherwise.
 //
 // Uses a 100ms timeout - plenty for localhost IPC. If you need custom
-// timeouts, use NewClientWithTimeout(t).Ping() directly.
+// timeouts, use NewClientForCurrentRepoWithTimeout(t).Ping() directly.
 func IsHealthy() error {
 	client := NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
 	if err := client.Ping(); err != nil {
@@ -1978,7 +1982,7 @@ func (c *Client) MurmurResume(agentID string) error {
 // TryConnectForCheckout attempts to connect for checkout operations.
 // Uses a long timeout since clones can take time.
 func TryConnectForCheckout() *Client {
-	client := NewClientWithTimeout(60 * time.Second)
+	client := NewClientForCurrentRepoWithTimeout(60 * time.Second)
 	if err := client.Ping(); err != nil {
 		return nil
 	}
@@ -1988,7 +1992,7 @@ func TryConnectForCheckout() *Client {
 // TryConnect attempts to connect to the daemon.
 // Returns the client if connected, nil otherwise.
 func TryConnect() *Client {
-	client := NewClient()
+	client := NewClientForCurrentRepo()
 	if err := client.Ping(); err != nil {
 		return nil
 	}
@@ -1998,7 +2002,7 @@ func TryConnect() *Client {
 // TryConnectForSync attempts to connect for sync operations.
 // Uses a longer timeout since syncs can take time.
 func TryConnectForSync() *Client {
-	client := NewClientWithTimeout(30 * time.Second)
+	client := NewClientForCurrentRepoWithTimeout(30 * time.Second)
 	if err := client.Ping(); err != nil {
 		return nil
 	}

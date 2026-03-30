@@ -87,7 +87,7 @@ func TestFaultDaemon_Fast_MultipleResponses(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	client := daemon.NewClientWithTimeout(100 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
 	err := client.Ping()
 	assert.NoError(t, err, "first response should be valid")
 
@@ -166,7 +166,7 @@ func TestFaultDaemon_Fast_ResponseTooLarge(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	client := daemon.NewClientWithTimeout(5 * time.Second)
+	client := daemon.NewClientForCurrentRepoWithTimeout(5 * time.Second)
 	err := client.Ping()
 	assert.Error(t, err, "should reject response larger than 1MB limit")
 }
@@ -353,7 +353,7 @@ func TestFaultDaemon_Slow_SlowAccept(t *testing.T) {
 	err := daemon.IsHealthy()
 	assert.Error(t, err, "100ms timeout should fail when accept is delayed 500ms")
 
-	client := daemon.NewClientWithTimeout(2 * time.Second)
+	client := daemon.NewClientForCurrentRepoWithTimeout(2 * time.Second)
 	err = client.Ping()
 	assert.NoError(t, err, "2s timeout should succeed")
 }
@@ -432,7 +432,7 @@ func TestClientPing_AllFaults(t *testing.T) {
 			d.Start()
 			defer d.Stop()
 
-			client := daemon.NewClientWithTimeout(100 * time.Millisecond)
+			client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
 			err := client.Ping()
 
 			if tt.expectError {

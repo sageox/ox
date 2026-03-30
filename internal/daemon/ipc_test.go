@@ -155,16 +155,16 @@ func TestServer_SetHandlers(t *testing.T) {
 	s.svc.mu.Unlock()
 }
 
-func TestNewClient(t *testing.T) {
-	c := NewClient()
+func TestNewDirectClient(t *testing.T) {
+	c := newDirectClient()
 
 	assert.NotNil(t, c)
 	assert.Equal(t, SocketPath(), c.socketPath)
 	assert.Equal(t, 50*time.Millisecond, c.timeout) // fast timeout for localhost
 }
 
-func TestNewClientWithTimeout(t *testing.T) {
-	c := NewClientWithTimeout(10 * time.Second)
+func TestNewDirectClientWithTimeout(t *testing.T) {
+	c := newDirectClientWithTimeout(10 * time.Second)
 
 	assert.NotNil(t, c)
 	assert.Equal(t, SocketPath(), c.socketPath)
@@ -176,7 +176,7 @@ func TestClient_Connect_DaemonNotRunning(t *testing.T) {
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
 
-	c := NewClient()
+	c := newDirectClient()
 	conn, err := c.Connect()
 
 	assert.Error(t, err)
@@ -329,14 +329,14 @@ func TestServerClient_Integration(t *testing.T) {
 
 	// test ping
 	t.Run("ping", func(t *testing.T) {
-		client := NewClient()
+		client := newDirectClient()
 		err := client.Ping()
 		assert.NoError(t, err)
 	})
 
 	// test status
 	t.Run("status", func(t *testing.T) {
-		client := NewClient()
+		client := newDirectClient()
 		status, err := client.Status()
 		require.NoError(t, err)
 		assert.True(t, status.Running)
@@ -345,7 +345,7 @@ func TestServerClient_Integration(t *testing.T) {
 
 	// test sync
 	t.Run("sync", func(t *testing.T) {
-		client := NewClient()
+		client := newDirectClient()
 		err := client.RequestSync()
 		assert.NoError(t, err)
 		assert.Equal(t, 1, syncCount)
@@ -353,7 +353,7 @@ func TestServerClient_Integration(t *testing.T) {
 
 	// test stop
 	t.Run("stop", func(t *testing.T) {
-		client := NewClient()
+		client := newDirectClient()
 		err := client.Stop()
 		assert.NoError(t, err)
 	})
@@ -429,7 +429,7 @@ func TestServerClient_ConcurrentRequests(t *testing.T) {
 
 	for i := 0; i < numRequests; i++ {
 		go func() {
-			client := NewClient()
+			client := newDirectClient()
 			results <- client.Ping()
 		}()
 	}
@@ -1066,7 +1066,7 @@ func TestServer_GracefulShutdown_WaitsForInflightConnections(t *testing.T) {
 
 	// start a slow sync request
 	go func() {
-		client := NewClientWithTimeout(5 * time.Second)
+		client := newDirectClientWithTimeout(5 * time.Second)
 		_ = client.SyncWithProgress(nil)
 	}()
 
@@ -1122,7 +1122,7 @@ func TestServer_ConcurrentConnections_RaceDetector(t *testing.T) {
 	for i := 0; i < numClients; i++ {
 		go func() {
 			defer func() { done <- struct{}{} }()
-			client := NewClient()
+			client := newDirectClient()
 			// mix of operations that access different server handlers
 			_ = client.Ping()
 			_, _ = client.Status()

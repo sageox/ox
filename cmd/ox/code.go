@@ -39,7 +39,7 @@ func resolveCodeDBDir(root string) string {
 //
 // Exposed as a variable so tests can override it.
 var isCodeDBIndexing = func() bool {
-	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	cs, err := client.CodeStatus()
 	return err == nil && cs.IndexingNow
 }
@@ -303,7 +303,7 @@ var codeStatusCmd = &cobra.Command{
 		// get daemon stats for freshness and next-check info
 		var codeStats *daemon.CodeDBStats
 		var syncInterval time.Duration
-		client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+		client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 		if cs, err := client.CodeStatus(); err == nil {
 			codeStats = cs
 		}

@@ -240,7 +240,7 @@ func runMurmurPause(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("--agent-id or SAGEOX_AGENT_ID required")
 	}
 
-	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	if err := client.MurmurPause(agentID); err != nil {
 		// daemon not running — nothing to pause, treat as success
 		slog.Debug("murmur pause not delivered", "agent_id", agentID, "error", err)
@@ -259,7 +259,7 @@ func runMurmurResume(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("--agent-id or SAGEOX_AGENT_ID required")
 	}
 
-	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	if err := client.MurmurResume(agentID); err != nil {
 		// daemon not running — nothing to resume, treat as success
 		slog.Debug("murmur resume not delivered", "agent_id", agentID, "error", err)

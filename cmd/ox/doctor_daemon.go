@@ -191,7 +191,7 @@ func checkDaemonVersion(fix bool) checkResult {
 		}
 	}
 
-	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	status, err := client.Status()
 	if err != nil {
 		return checkResult{

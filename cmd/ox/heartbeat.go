@@ -64,7 +64,7 @@ func Heartbeat(repoPath string, teamIDs []string, agentID string) {
 	pendingHeartbeats.Add(1)
 	go func() {
 		defer pendingHeartbeats.Done()
-		client := daemon.NewClientWithTimeout(50 * time.Millisecond)
+		client := daemon.NewClientForCurrentRepoWithTimeout(50 * time.Millisecond)
 
 		parentAgentID, agentType := resolveAgentMetadata(agentID)
 		payload := daemon.HeartbeatPayload{
@@ -127,7 +127,7 @@ func sendContextHeartbeat(agentID string, bytes int64, commandName string) {
 	pendingHeartbeats.Add(1)
 	go func() {
 		defer pendingHeartbeats.Done()
-		client := daemon.NewClientWithTimeout(50 * time.Millisecond)
+		client := daemon.NewClientForCurrentRepoWithTimeout(50 * time.Millisecond)
 		parentAgentID, agentType := resolveAgentMetadata(agentID)
 		payload := daemon.HeartbeatPayload{
 			AgentID:       agentID,
@@ -156,7 +156,7 @@ func HeartbeatWithCreds(repoPath string, teamIDs []string, agentID string, creds
 	pendingHeartbeats.Add(1)
 	go func() {
 		defer pendingHeartbeats.Done()
-		client := daemon.NewClientWithTimeout(50 * time.Millisecond)
+		client := daemon.NewClientForCurrentRepoWithTimeout(50 * time.Millisecond)
 
 		parentAgentID, agentType := resolveAgentMetadata(agentID)
 		payload := daemon.HeartbeatPayload{

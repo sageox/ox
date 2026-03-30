@@ -32,7 +32,7 @@ func TryConnectOrDirectForCheckout() *Client {
 // On transient failures, retries up to maxRetries times with exponential backoff.
 // initialDelay is the delay before the first retry.
 func TryConnectWithRetry(maxRetries int, initialDelay time.Duration) *Client {
-	client := NewClient()
+	client := NewClientForCurrentRepo()
 
 	// first attempt
 	if err := client.Ping(); err == nil {
@@ -57,7 +57,7 @@ func TryConnectWithRetry(maxRetries int, initialDelay time.Duration) *Client {
 
 // TryConnectForSyncWithRetry is like TryConnectWithRetry but uses longer timeouts for sync operations.
 func TryConnectForSyncWithRetry(maxRetries int, initialDelay time.Duration) *Client {
-	client := NewClientWithTimeout(30 * time.Second)
+	client := NewClientForCurrentRepoWithTimeout(30 * time.Second)
 
 	// first attempt
 	if err := client.Ping(); err == nil {
@@ -81,7 +81,7 @@ func TryConnectForSyncWithRetry(maxRetries int, initialDelay time.Duration) *Cli
 
 // TryConnectForCheckoutWithRetry is like TryConnectWithRetry but uses longer timeouts for checkout operations.
 func TryConnectForCheckoutWithRetry(maxRetries int, initialDelay time.Duration) *Client {
-	client := NewClientWithTimeout(60 * time.Second)
+	client := NewClientForCurrentRepoWithTimeout(60 * time.Second)
 
 	// first attempt
 	if err := client.Ping(); err == nil {
@@ -193,6 +193,12 @@ func ensureDaemonInternal() error {
 	cmd := exec.Command(exe, buildDaemonArgs(resolveRepoName())...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	// set CWD to project root so daemon computes correct repo-based workspace ID
+	// from .sageox/config.json (without this, subdirectory CWDs cause fallback
+	// to path-based hashing, creating duplicate daemons per clone/worktree)
+	if root := findProjectRootForDaemon(); root != "" {
+		cmd.Dir = root
+	}
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
@@ -315,6 +321,26 @@ func resolveRepoName() string {
 		return ""
 	}
 	return repotools.GetRepoName(cwd)
+}
+
+// findProjectRootForDaemon walks up from cwd to find .sageox/config.json.
+// Returns the project root, or cwd as fallback if no .sageox/ found.
+func findProjectRootForDaemon() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	dir := cwd
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".sageox", "config.json")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return cwd
+		}
+		dir = parent
+	}
 }
 
 // stopLegacyDaemon stops a daemon running under the old path-based workspace ID.

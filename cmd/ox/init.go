@@ -787,7 +787,7 @@ func runInit() error {
 		// start daemon and trigger sync (clone team contexts and ledger)
 		// per IPC architecture: init starts daemon if not running
 		if daemon.IsRunning() {
-			client := daemon.NewClient()
+			client := daemon.NewClientForCurrentRepo()
 			if err := client.RequestSync(); err != nil {
 				slog.Debug("failed to request sync from running daemon", "error", err)
 			} else {
@@ -809,7 +809,7 @@ func runInit() error {
 					}
 				}
 				if healthy {
-					client := daemon.NewClient()
+					client := daemon.NewClientForCurrentRepo()
 					if err := client.RequestSync(); err != nil {
 						slog.Debug("failed to request sync after daemon start", "error", err)
 					} else {

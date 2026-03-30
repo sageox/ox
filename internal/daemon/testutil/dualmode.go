@@ -547,5 +547,5 @@ func WaitForDaemon(t *testing.T, timeout time.Duration) error {
 // NewTestClient creates a daemon client with test-appropriate timeout.
 // Uses 500ms (vs 50ms production default) for test stability under load.
 func NewTestClient() *daemon.Client {
-	return daemon.NewClientWithTimeout(500 * time.Millisecond)
+	return daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 }

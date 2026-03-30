@@ -106,7 +106,7 @@ func sendFrictionEventTo(event *friction.FrictionEvent, socketPath string) {
 	if socketPath != "" {
 		client = daemon.NewClientWithSocket(socketPath)
 	} else {
-		client = daemon.NewClientWithTimeout(5 * time.Millisecond)
+		client = daemon.NewClientForCurrentRepoWithTimeout(5 * time.Millisecond)
 	}
 
 	payload := daemon.FrictionPayload{

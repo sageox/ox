@@ -285,7 +285,7 @@ var daemonKillCmd = &cobra.Command{
 				return nil
 			}
 
-			client := daemon.NewClient()
+			client := daemon.NewClientForCurrentRepo()
 			if err := client.Stop(); err != nil {
 				return fmt.Errorf("failed to stop daemon: %w", err)
 			}
@@ -408,6 +408,12 @@ func startDaemonBackground(ledgerPath string) error {
 	cmd := exec.Command(exe, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	// set CWD to git root so daemon computes correct repo-based workspace ID
+	// from .sageox/config.json (without this, subdirectory CWDs cause fallback
+	// to path-based hashing, creating duplicate daemons per clone/worktree)
+	if gitRoot := findGitRoot(); gitRoot != "" {
+		cmd.Dir = gitRoot
+	}
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()

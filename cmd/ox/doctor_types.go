@@ -118,6 +118,7 @@ const (
 	CheckSlugDaemonRunning = "daemon-running"
 	CheckSlugDaemonSocket  = "daemon-socket"
 	CheckSlugDaemonVersion = "daemon-version"
+	CheckSlugDaemonDedup   = "daemon-dedup"
 
 	// Integration checks
 	CheckSlugClaudeCodeHooks     = "claude-code-hooks"

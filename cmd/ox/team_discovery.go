@@ -112,7 +112,7 @@ func resolveTeamByQuery(projectRoot, query string) *enrichedTeam {
 
 // teamsFromDaemonStatus queries the running daemon for team context workspaces.
 func teamsFromDaemonStatus() []enrichedTeam {
-	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	status, err := client.Status()
 	if err != nil || status == nil {
 		return nil
