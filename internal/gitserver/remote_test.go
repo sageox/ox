@@ -410,7 +410,7 @@ func TestEndpointFromRemoteURL(t *testing.T) {
 		{"staging with git prefix", "https://oauth2:TOKEN@git.test.sageox.ai/repo.git", "https://test.sageox.ai"},
 		{"no git prefix", "https://oauth2:TOKEN@sageox.ai/repo.git", "https://sageox.ai"},
 		{"bare HTTPS", "https://git.sageox.ai/repo.git", "https://sageox.ai"},
-		{"localhost", "http://localhost:3000/repo.git", "https://localhost"},
+		{"localhost", "http://localhost:3000/repo.git", "http://localhost"},
 		{"empty", "", ""},
 		{"file URL", "file:///tmp/repo.git", ""},
 	}
