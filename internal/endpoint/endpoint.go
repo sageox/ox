@@ -121,10 +121,10 @@ func GetForProject(projectRoot string) string {
 	// warn when falling through to Default with no project root —
 	// callers probably should use Get() instead, or guard against empty root
 	if projectRoot == "" {
-		pc, file, line, _ := runtime.Caller(1)
+		pc, _, _, _ := runtime.Caller(1)
 		caller := runtime.FuncForPC(pc).Name()
 		slog.Debug("GetForProject called with empty projectRoot, falling back to Default",
-			"caller", caller, "file", file, "line", line)
+			"caller", caller)
 	}
 
 	return Default

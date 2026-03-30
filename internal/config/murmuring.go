@@ -163,7 +163,7 @@ func ResolveMurmuring(projectRoot string) string {
 				slog.Debug("failed to load project config for murmuring", "error", loadErr)
 			}
 		} else if cfg != nil {
-			mode = NormalizeMurmuring(cfg.Murmuring)
+			mode = NormalizeMurmuring(cfg.GetMurmuring())
 		}
 	}
 
@@ -193,7 +193,7 @@ func MurmuringEnabled(projectRoot string) bool {
 }
 
 // ResolveMurmurReceive determines the effective murmur receive mode.
-// Priority: User config > Project config > Default ("auto").
+// Priority: User config > Project config > Default ("on").
 // No caching — called infrequently at whisper delivery time.
 func ResolveMurmurReceive(projectRoot string) string {
 	userCfg, _ := LoadUserConfig()

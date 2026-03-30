@@ -299,7 +299,7 @@ func TestResolveMurmurReceive_FullResolutionChain(t *testing.T) {
 			want:    MurmurReceiveOff,
 		},
 		{
-			name:    "both unset → default auto",
+			name:    "both unset → default on",
 			userCfg: "",
 			repoCfg: "",
 			want:    MurmurReceiveOn,
@@ -382,4 +382,28 @@ func TestSetMurmuring_ClearsLegacyKey(t *testing.T) {
 	cfg.SetMurmuring("auto")
 	assert.Equal(t, "auto", cfg.GetMurmuring())
 	assert.Empty(t, cfg.LegacyMurmuring, "SetMurmuring should clear legacy key")
+}
+
+// TestProjectConfig_LegacyMurmuringKey verifies that project configs with the
+// old "murmuring" JSON key are still read correctly after rename to "murmur_send".
+func TestProjectConfig_LegacyMurmuringKey(t *testing.T) {
+	projectDir := t.TempDir()
+	sageoxDir := filepath.Join(projectDir, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+
+	// write config with legacy key
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sageoxDir, "config.json"),
+		[]byte(`{"murmuring":"manual"}`),
+		0644,
+	))
+
+	cfg, err := LoadProjectConfig(projectDir)
+	require.NoError(t, err)
+	assert.Equal(t, "manual", cfg.GetMurmuring(), "legacy murmuring key should be read")
+
+	// SetMurmuring should clear legacy
+	cfg.SetMurmuring("auto")
+	assert.Equal(t, "auto", cfg.GetMurmuring())
+	assert.Empty(t, cfg.LegacyMurmuring)
 }

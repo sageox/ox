@@ -78,7 +78,11 @@ func Extract(source, language string) ([]Symbol, []Ref) {
 
 	initLangs()
 
-	le, ok := langCache[strings.ToLower(language)]
+	language = strings.ToLower(language)
+	if language == "c++" {
+		language = "cpp"
+	}
+	le, ok := langCache[language]
 	if !ok {
 		return nil, nil
 	}
@@ -175,7 +179,8 @@ func assignParents(syms []Symbol) {
 			stack = stack[:len(stack)-1]
 		}
 
-		if len(stack) > 0 {
+		// only assign parent if the stack top fully contains this symbol
+		if len(stack) > 0 && stack[len(stack)-1].endByte >= sym.endByte {
 			sym.ParentIdx = stack[len(stack)-1].idx
 		}
 

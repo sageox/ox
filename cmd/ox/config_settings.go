@@ -254,8 +254,8 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 		if userCfg != nil && userCfg.GetMurmuring() != "" {
 			cv.UserVal = config.NormalizeMurmuring(userCfg.GetMurmuring())
 		}
-		if repoCfg != nil && repoCfg.Murmuring != "" {
-			cv.RepoVal = config.NormalizeMurmuring(repoCfg.Murmuring)
+		if repoCfg != nil && repoCfg.GetMurmuring() != "" {
+			cv.RepoVal = config.NormalizeMurmuring(repoCfg.GetMurmuring())
 		}
 
 	case "murmur_receive":
@@ -457,7 +457,7 @@ func setRepoConfig(key, value, projectRoot string) error {
 		cfg.SessionRecording = value
 
 	case "murmur_send":
-		cfg.Murmuring = value
+		cfg.SetMurmuring(value)
 
 	case "murmur_receive":
 		cfg.MurmurReceive = value

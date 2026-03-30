@@ -304,6 +304,9 @@ func TestConcurrentSessionUploads_Parallel(t *testing.T) {
 }
 
 func TestPushLedger_EmptyGitRoot_NoPanic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
 	barePath, clonePath := createBareAndClone(t)
 
 	// capture original remote URL before pushLedger runs
