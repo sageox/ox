@@ -426,6 +426,17 @@ var codeStatusCmd = &cobra.Command{
 		// human-readable output — Tufte-inspired, matching ox status
 		var b strings.Builder
 
+		// check for daemon-reported codedb cache wipe
+		if ds, issueErr := client.Status(); issueErr == nil && ds.NeedsHelp {
+			for _, issue := range ds.Issues {
+				if issue.Type == daemon.IssueTypeCodeDBCacheWiped {
+					b.WriteString(statusWarningStyle.Render("⚠ codedb cache was wiped — run 'ox code index' to rebuild"))
+					b.WriteString("\n\n")
+					break
+				}
+			}
+		}
+
 		b.WriteString(statusHeaderStyle.Render("Code Index"))
 		b.WriteString("\n")
 		b.WriteString(statusMutedStyle.Render("──────────"))

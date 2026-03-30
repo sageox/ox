@@ -462,6 +462,12 @@ func ConfigureSparseCheckout(path string) error {
 	// Detect such directories and include them in the cone.
 	dirs = append(dirs, dirtyDirsOutsideCone(path, dirs)...)
 
+	// runtime guard: .sageox MUST be in the sparse-checkout set.
+	// without it, git sparse-checkout set deletes .sageox/cache/ (codedb, etc.)
+	if err := validateSparseCheckoutDirs(dirs); err != nil {
+		return err
+	}
+
 	// set directories to include (excludes everything else like assets/)
 	args := append([]string{"-C", path, "sparse-checkout", "set"}, dirs...)
 	setCmd := exec.Command("git", args...)
@@ -476,6 +482,18 @@ func ConfigureSparseCheckout(path string) error {
 	}
 
 	return nil
+}
+
+// validateSparseCheckoutDirs returns an error if required directories are missing
+// from the sparse-checkout set. Defense-in-depth: if .sageox is ever dropped from
+// dirs, git sparse-checkout set would silently delete .sageox/cache/ (codedb, etc.).
+func validateSparseCheckoutDirs(dirs []string) error {
+	for _, d := range dirs {
+		if d == ".sageox" {
+			return nil
+		}
+	}
+	return fmt.Errorf("BUG: .sageox missing from sparse-checkout dirs; refusing to run git sparse-checkout set")
 }
 
 // dirtyDirsOutsideCone returns top-level directories that contain staged or

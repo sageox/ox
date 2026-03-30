@@ -172,5 +172,9 @@ const (
 	CheckSlugAgentWorkerBinary = "agent-worker-binary"
 
 	// Code Search checks
-	CheckSlugCodeIndex = "code-index"
+	CheckSlugCodeIndex          = "code-index"
+	CheckSlugCodeDBConsistency  = "codedb-consistency"
+
+	// Ledger Infrastructure checks
+	CheckSlugLedgerSparseCheckout = "ledger-sparse-checkout"
 )

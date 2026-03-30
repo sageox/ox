@@ -466,6 +466,28 @@ func init() {
 	})
 
 	// ============================================================
+	// Ledger Infrastructure checks
+	// ============================================================
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugLedgerSparseCheckout,
+		Name:        "Ledger sparse checkout",
+		Category:    "Ledger Git Health",
+		FixLevel:    FixLevelAuto,
+		Description: "Ensures ledger sparse-checkout cone includes .sageox",
+		Run:         checkLedgerSparseCheckout,
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugCodeDBConsistency,
+		Name:        "CodeDB consistency",
+		Category:    "Code Search",
+		FixLevel:    FixLevelCheckOnly,
+		Description: "Detects codedb index missing after successful build",
+		Run:         checkCodeDBConsistency,
+	})
+
+	// ============================================================
 	// Session checks
 	// ============================================================
 

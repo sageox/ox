@@ -513,3 +513,48 @@ func TestGetStatus_DeletedLedger(t *testing.T) {
 	assert.False(t, status.Exists)
 	assert.NotEmpty(t, status.Error)
 }
+
+func TestValidateSparseCheckoutDirs(t *testing.T) {
+	tests := []struct {
+		name    string
+		dirs    []string
+		wantErr bool
+	}{
+		{
+			name:    "valid with sageox first",
+			dirs:    []string{".sageox", "sessions", "audit"},
+			wantErr: false,
+		},
+		{
+			name:    "valid with sageox middle",
+			dirs:    []string{"sessions", ".sageox", "audit"},
+			wantErr: false,
+		},
+		{
+			name:    "missing sageox",
+			dirs:    []string{"sessions", "audit", ".sync"},
+			wantErr: true,
+		},
+		{
+			name:    "empty dirs",
+			dirs:    []string{},
+			wantErr: true,
+		},
+		{
+			name:    "nil dirs",
+			dirs:    nil,
+			wantErr: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateSparseCheckoutDirs(tt.dirs)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), ".sageox missing")
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}

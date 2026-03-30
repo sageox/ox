@@ -745,6 +745,17 @@ func (d *Daemon) initComponents() time.Duration {
 		}
 	}
 
+	// ensure ledger sparse-checkout cone is correct before any sync or indexing.
+	// without this, a corrupt cone from a previous session causes every sync cycle
+	// to wipe .sageox/cache/ via ConfigureSparseCheckout's rolling-window refresh.
+	if d.config.LedgerPath != "" && pathIsGitRepo(d.config.LedgerPath) {
+		if err := ledger.ConfigureSparseCheckout(d.config.LedgerPath); err != nil {
+			d.logger.Warn("failed to set ledger sparse-checkout at startup", "error", err)
+		} else {
+			d.logger.Info("ledger sparse-checkout verified at startup")
+		}
+	}
+
 	// telemetry + friction collectors
 	d.telemetry = NewTelemetryCollector(d.logger)
 	d.startTime = time.Now()
@@ -866,6 +877,7 @@ func (d *Daemon) initComponents() time.Duration {
 		d.scheduler.SetMurmurRelay(murmurRelay)
 	}
 	if d.codedb != nil {
+		d.codedb.SetIssueTracker(d.issues)
 		d.scheduler.SetCodeDBManager(d.codedb)
 	}
 	if d.config.ProjectRoot != "" {

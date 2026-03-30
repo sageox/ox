@@ -48,7 +48,7 @@ func TestDoPull_StaleLockFileDetection(t *testing.T) {
 	scheduler.SetIssueTracker(issues)
 
 	ctx := context.Background()
-	err := scheduler.doPull(ctx, nil, false)
+	err := scheduler.doPull(ctx, nil, false, true)
 
 	// doPull returns nil (skips gracefully) rather than erroring
 	assert.NoError(t, err, "doPull should skip gracefully when lock files exist")
@@ -94,12 +94,12 @@ func TestDoPull_LockFileClearedAfterResolution(t *testing.T) {
 	// first: create lock file, trigger doPull to set the issue
 	lockPath := filepath.Join(ledgerDir, ".git", "index.lock")
 	require.NoError(t, os.WriteFile(lockPath, []byte("stale"), 0644))
-	_ = scheduler.doPull(ctx, nil, false)
+	_ = scheduler.doPull(ctx, nil, false, true)
 	require.Len(t, issues.GetIssues(), 1, "issue should be set")
 
 	// now remove the lock file and run doPull again
 	require.NoError(t, os.Remove(lockPath))
-	_ = scheduler.doPull(ctx, nil, false)
+	_ = scheduler.doPull(ctx, nil, false, true)
 
 	// the git lock issue should be cleared
 	for _, issue := range issues.GetIssues() {
@@ -137,7 +137,7 @@ func TestDoPull_MultipleLockFiles(t *testing.T) {
 	issues := NewIssueTracker()
 	scheduler.SetIssueTracker(issues)
 
-	_ = scheduler.doPull(context.Background(), nil, false)
+	_ = scheduler.doPull(context.Background(), nil, false, true)
 
 	allIssues := issues.GetIssues()
 	require.Len(t, allIssues, 1)
@@ -231,7 +231,7 @@ func TestDoPull_CorruptGitHeadDetection(t *testing.T) {
 	ctx := context.Background()
 
 	// doPull should detect the corrupt repo via isValidGitRepo and move it aside
-	err := scheduler.doPull(ctx, nil, true)
+	err := scheduler.doPull(ctx, nil, true, true)
 	assert.NoError(t, err, "doPull should return nil after moving corrupt repo aside")
 
 	// verify the original directory was moved to .bak
@@ -275,7 +275,7 @@ func TestDoPull_FetchFailureRecordsBackoff(t *testing.T) {
 	ctx := context.Background()
 
 	// first pull should fail
-	err := scheduler.doPull(ctx, nil, false)
+	err := scheduler.doPull(ctx, nil, false, true)
 	assert.Error(t, err, "first pull should fail on unreachable remote")
 	assert.Contains(t, err.Error(), "ledger fetch failed")
 
@@ -289,7 +289,7 @@ func TestDoPull_FetchFailureRecordsBackoff(t *testing.T) {
 	assert.Equal(t, int64(1), snapshot.PullFailureCount)
 
 	// second pull should be skipped by backoff (returns nil, not error)
-	err = scheduler.doPull(ctx, nil, false)
+	err = scheduler.doPull(ctx, nil, false, true)
 	assert.NoError(t, err, "second pull should be skipped by backoff")
 
 	// failure count should NOT increase (pull was skipped, not attempted)
@@ -328,7 +328,7 @@ func TestDoPull_AlreadyCanceledContext(t *testing.T) {
 	// doPull with already-canceled context should return quickly
 	done := make(chan error, 1)
 	go func() {
-		done <- scheduler.doPull(ctx, nil, true)
+		done <- scheduler.doPull(ctx, nil, true, true)
 	}()
 
 	select {
@@ -386,7 +386,7 @@ func TestDoPull_ContextCancellationDuringFetch(t *testing.T) {
 	// doPull should complete (fail on fetch) within timeout
 	done := make(chan error, 1)
 	go func() {
-		done <- scheduler.doPull(ctx, nil, true)
+		done <- scheduler.doPull(ctx, nil, true, true)
 	}()
 
 	select {
@@ -628,7 +628,7 @@ func TestDoPull_NonGitDirEntersClonePath(t *testing.T) {
 	scheduler := NewSyncScheduler(cfg, logger)
 
 	// should return nil (enters clone branch, finds no clone URL, returns)
-	err := scheduler.doPull(context.Background(), nil, false)
+	err := scheduler.doPull(context.Background(), nil, false, true)
 	assert.NoError(t, err, "doPull should return nil for non-git directory")
 }
 
@@ -658,7 +658,7 @@ func TestDoPull_RebaseStateSkips(t *testing.T) {
 
 	scheduler := NewSyncScheduler(cfg, logger)
 
-	err := scheduler.doPull(context.Background(), nil, false)
+	err := scheduler.doPull(context.Background(), nil, false, true)
 	assert.NoError(t, err, "doPull should skip gracefully when in rebase state")
 }
 
@@ -697,7 +697,7 @@ func TestDoPull_PartialGitDirTriggersReclone(t *testing.T) {
 	scheduler := NewSyncScheduler(cfg, logger)
 	ctx := context.Background()
 
-	err := scheduler.doPull(ctx, nil, false)
+	err := scheduler.doPull(ctx, nil, false, true)
 	assert.NoError(t, err, "doPull should return nil after self-healing corrupt repo")
 
 	// original directory should be gone (renamed to .bak)

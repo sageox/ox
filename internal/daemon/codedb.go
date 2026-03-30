@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -42,6 +43,8 @@ type CodeDBManager struct {
 	// testHook is called at the start of doIndex; nil in production.
 	// Tests use it to synchronize with or measure the indexing goroutine.
 	testHook func()
+
+	issues *IssueTracker // emits structured issues for ox status / ox doctor
 }
 
 // CodeDBStats tracks index statistics.
@@ -147,6 +150,14 @@ func (m *CodeDBManager) SetLedgerPath(path string) {
 	m.ledgerPath = path
 }
 
+// SetIssueTracker wires the daemon's issue tracker so doIndex can emit
+// structured issues when the cache directory is missing.
+func (m *CodeDBManager) SetIssueTracker(tracker *IssueTracker) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.issues = tracker
+}
+
 // maxIndexDuration caps how long a single indexing run may take before being
 // canceled. 21h+ runaway burns were observed when a worktree was deleted mid-index.
 const maxIndexDuration = 2 * time.Hour
@@ -195,7 +206,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	// even after the worktree directory is removed.
 	if payload.URL == "" {
 		if _, err := os.Stat(projectRoot); os.IsNotExist(err) {
-			return nil, fmt.Errorf("project root no longer exists, skipping index: %s", projectRoot)
+			return nil, fmt.Errorf("project root no longer exists, skipping index %s: %w", projectRoot, err)
 		}
 	}
 
@@ -436,11 +447,22 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 		// deadlock (it also tries to claim the flag).
 		result, err := m.doIndex(indexCtx, CodeIndexPayload{}, nil)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) && m.issues != nil {
+				m.issues.SetIssue(DaemonIssue{
+					Type:     IssueTypeCodeDBCacheWiped,
+					Severity: SeverityWarning,
+					Repo:     "codedb",
+					Summary:  "codedb cache directory missing; sparse-checkout may have wiped .sageox/cache/",
+				})
+			}
 			if isInitial {
 				m.logger.Warn("codedb initial index failed", "error", err)
 			} else {
 				m.logger.Debug("codedb freshness check failed", "error", err)
 			}
+		}
+		if err == nil && m.issues != nil {
+			m.issues.ClearIssue(IssueTypeCodeDBCacheWiped, "codedb")
 		}
 		if m.telemetry != nil && result != nil {
 			m.telemetry.RecordCodeIndexComplete(result, "success")

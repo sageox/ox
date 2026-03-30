@@ -665,8 +665,10 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			}
 
 		case <-s.triggerChan:
-			// triggered by file watcher, do full sync
-			s.syncAll(ctx)
+			// watcher-triggered sync: skip sparse-checkout refresh to avoid
+			// feedback loop where .sageox/cache/ writes trigger sync which
+			// runs ConfigureSparseCheckout which could wipe cache
+			s.syncFromWatcher(ctx)
 		}
 	}
 }
@@ -742,7 +744,7 @@ func (s *SyncScheduler) pullChanges(ctx context.Context) {
 	// the scheduler for minutes (the caller ctx has no deadline)
 	pullCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	_ = s.doPull(pullCtx, nil, false)
+	_ = s.doPull(pullCtx, nil, false, true)
 
 	// check code index freshness (non-blocking)
 	if s.codedb != nil {
@@ -883,7 +885,7 @@ func isValidGitRepo(path string) bool {
 //     is required for clean linear history on shared ledger repos
 //   - lock file safety: if a git process crashes, its .git/index.lock is released
 //     by the OS; an in-process crash may leave stale locks in the same process
-func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, forceSync bool) error {
+func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, forceSync bool, refreshSparse bool) error {
 	if s.config.LedgerPath == "" {
 		return nil
 	}
@@ -973,8 +975,10 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		// refresh sparse checkout so the rolling murmur window stays current.
 		// Without this, hourly directories computed at clone time go stale and
 		// new murmur files pulled from remote are not materialized on disk.
-		if err := ledger.ConfigureSparseCheckout(s.config.LedgerPath); err != nil {
-			s.logger.Warn("failed to refresh ledger sparse checkout", "error", err)
+		if refreshSparse {
+			if err := ledger.ConfigureSparseCheckout(s.config.LedgerPath); err != nil {
+				s.logger.Warn("failed to refresh ledger sparse checkout", "error", err)
+			}
 		}
 
 		// ledger repos don't have a sync.manifest — use the manifest defaults
@@ -1141,6 +1145,24 @@ func (s *SyncScheduler) syncAll(ctx context.Context) {
 	s.pullChanges(ctx)
 }
 
+// syncFromWatcher handles watcher-triggered sync without sparse-checkout refresh.
+// The file watcher fires on .sageox/cache/ writes (codedb indexing), and running
+// ConfigureSparseCheckout on that path creates a feedback loop that can wipe the
+// cache mid-index. The watcher only needs to pull remote changes, not reconfigure
+// the sparse-checkout cone.
+func (s *SyncScheduler) syncFromWatcher(ctx context.Context) {
+	s.triggerMissingClones()
+	pullCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	_ = s.doPull(pullCtx, nil, false, false)
+	if s.codedb != nil {
+		if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
+			s.codedb.SetLedgerPath(l.Path)
+		}
+		s.codedb.CheckFreshness(ctx)
+	}
+}
+
 // Sync performs an immediate full sync. Used for manual requests via IPC.
 func (s *SyncScheduler) Sync() error {
 	return s.SyncWithProgress(nil)
@@ -1162,7 +1184,7 @@ func (s *SyncScheduler) doSyncAll(ctx context.Context, progress *ProgressWriter)
 	// refresh credentials if expired or near expiry
 	s.refreshCredentialsIfNeeded()
 
-	return s.doPull(ctx, progress, true)
+	return s.doPull(ctx, progress, true, true)
 }
 
 // isValidRepoPath validates that a repo path is safe to use.

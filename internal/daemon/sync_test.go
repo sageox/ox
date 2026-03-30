@@ -86,7 +86,7 @@ func TestSyncScheduler_LastSync(t *testing.T) {
 
 	// doPull → ls-remote detects "remote unchanged" → updates lastSync
 	ctx := context.Background()
-	require.NoError(t, scheduler.doPull(ctx, nil, false))
+	require.NoError(t, scheduler.doPull(ctx, nil, false, true))
 
 	assert.False(t, scheduler.LastSync().IsZero(), "lastSync should be set after doPull")
 }
@@ -153,7 +153,7 @@ func TestSyncScheduler_DoPull_LedgerDirExistsButNotGitRepo(t *testing.T) {
 
 	// should not panic — previously this would fall through to git pull
 	// on an empty directory since it only checked os.IsNotExist
-	scheduler.doPull(ctx, nil, false)
+	scheduler.doPull(ctx, nil, false, true)
 }
 
 func TestSyncScheduler_PullInProgress(t *testing.T) {
@@ -178,7 +178,7 @@ func TestSyncScheduler_PullInProgress(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	scheduler := NewSyncScheduler(cfg, logger)
 
-	// use the production concurrency guard: doPull(ctx, nil, false) sets
+	// use the production concurrency guard: doPull(ctx, nil, false, true) sets
 	// pullInProgress=true on entry, false on exit. If we set it ourselves
 	// beforehand, doPull returns early without doing anything.
 	scheduler.mu.Lock()
@@ -186,7 +186,7 @@ func TestSyncScheduler_PullInProgress(t *testing.T) {
 	scheduler.mu.Unlock()
 
 	ctx := context.Background()
-	scheduler.doPull(ctx, nil, false) // should return immediately (guard active)
+	scheduler.doPull(ctx, nil, false, true) // should return immediately (guard active)
 
 	// still marked in-progress since doPull bailed before the defer that clears it
 	scheduler.mu.Lock()
@@ -198,7 +198,7 @@ func TestSyncScheduler_PullInProgress(t *testing.T) {
 	scheduler.pullInProgress = false
 	scheduler.mu.Unlock()
 
-	require.NoError(t, scheduler.doPull(ctx, nil, false)) // should succeed
+	require.NoError(t, scheduler.doPull(ctx, nil, false, true)) // should succeed
 	assert.False(t, scheduler.LastSync().IsZero(), "lastSync should be set after real pull")
 }
 func TestSyncScheduler_PerOperationFlags_Independent(t *testing.T) {
@@ -1734,11 +1734,11 @@ func TestDoPull_SkipsWhenRemoteUnchanged(t *testing.T) {
 	ctx := context.Background()
 
 	// first pull should succeed (fetches, finds nothing new or syncs)
-	err := scheduler.doPull(ctx, nil, false)
+	err := scheduler.doPull(ctx, nil, false, true)
 	assert.NoError(t, err)
 
 	// second pull should be skipped by ls-remote check (remote unchanged)
-	err = scheduler.doPull(ctx, nil, false)
+	err = scheduler.doPull(ctx, nil, false, true)
 	assert.NoError(t, err) // no error — just skipped
 }
 
@@ -1768,7 +1768,7 @@ func TestSyncBackoff_LedgerFetchFailure(t *testing.T) {
 	ctx := context.Background()
 
 	// first attempt: should fail (fetch fails on bogus remote)
-	err := scheduler.doPull(ctx, nil, false)
+	err := scheduler.doPull(ctx, nil, false, true)
 	assert.Error(t, err, "first pull should fail")
 
 	// verify backoff was recorded
@@ -1778,7 +1778,7 @@ func TestSyncBackoff_LedgerFetchFailure(t *testing.T) {
 	assert.True(t, nextRetry.After(time.Now()), "next retry should be in the future")
 
 	// second attempt: should be skipped due to backoff (no error, just skipped)
-	err = scheduler.doPull(ctx, nil, false)
+	err = scheduler.doPull(ctx, nil, false, true)
 	assert.NoError(t, err, "second pull should be skipped by backoff (returns nil)")
 }
 
@@ -1805,7 +1805,7 @@ func TestSyncBackoff_ClearsOnSuccess(t *testing.T) {
 
 	// use forceSync=true to bypass backoff (simulates on-demand sync clearing backoff)
 	ctx := context.Background()
-	err := scheduler.doPull(ctx, nil, true)
+	err := scheduler.doPull(ctx, nil, true, true)
 	assert.NoError(t, err)
 
 	// verify doPull's success path cleared the failure state

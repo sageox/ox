@@ -172,7 +172,7 @@ func TestDoPull_StaleLockFile(t *testing.T) {
 
 	s := newPullTestScheduler(t, cloneDir)
 
-	err := s.doPull(context.Background(), nil, false)
+	err := s.doPull(context.Background(), nil, false, true)
 	assert.NoError(t, err, "doPull should skip gracefully when lock file exists")
 
 	// verify issue was recorded
@@ -199,7 +199,7 @@ func TestDoPull_CorruptRepo_RenamedAside(t *testing.T) {
 
 	s := newPullTestScheduler(t, cloneDir)
 
-	err := s.doPull(context.Background(), nil, true)
+	err := s.doPull(context.Background(), nil, true, true)
 	assert.NoError(t, err, "doPull should return nil for corrupt repo (triggers re-clone)")
 
 	// original path should no longer be a valid git repo (renamed aside)
@@ -231,7 +231,7 @@ func TestDoPull_RebaseInProgress_Skips(t *testing.T) {
 
 	s := newPullTestScheduler(t, cloneDir)
 
-	err := s.doPull(context.Background(), nil, false)
+	err := s.doPull(context.Background(), nil, false, true)
 	assert.NoError(t, err, "doPull should skip silently when rebase is in progress")
 }
 
@@ -251,7 +251,7 @@ func TestDoPull_DivergedLedger_RebasesSuccessfully(t *testing.T) {
 
 	s := newPullTestScheduler(t, cloneDir)
 
-	err := s.doPull(context.Background(), nil, true)
+	err := s.doPull(context.Background(), nil, true, true)
 	assert.NoError(t, err, "doPull should succeed by rebasing diverged branches")
 
 	// verify both files exist (rebase landed both)
@@ -292,7 +292,7 @@ func TestDoPull_DivergedLedger_ConflictInSafePath_AutoResolves(t *testing.T) {
 
 	s := newPullTestScheduler(t, cloneDir)
 
-	err := s.doPull(context.Background(), nil, true)
+	err := s.doPull(context.Background(), nil, true, true)
 	assert.NoError(t, err, "doPull should auto-resolve conflict in data/github/")
 
 	// verify no issues set
@@ -323,7 +323,7 @@ func TestDoPull_ConflictInUnsafePath_ReportsIssueAndAborts(t *testing.T) {
 
 	s := newPullTestScheduler(t, cloneDir)
 
-	err := s.doPull(context.Background(), nil, true)
+	err := s.doPull(context.Background(), nil, true, true)
 	assert.Error(t, err, "doPull should fail when conflict is in unsafe path")
 
 	// rebase should have been aborted (not left in progress)
@@ -373,7 +373,7 @@ func TestDoPull_DivergedWithMixedConflicts_AbortsRebase(t *testing.T) {
 
 	s := newPullTestScheduler(t, cloneDir)
 
-	err := s.doPull(context.Background(), nil, true)
+	err := s.doPull(context.Background(), nil, true, true)
 	assert.Error(t, err, "doPull should fail when mixed safe/unsafe conflicts exist")
 
 	// rebase must be aborted
@@ -464,7 +464,7 @@ func TestDoPull_SuccessfulPull(t *testing.T) {
 
 	s := newPullTestScheduler(t, cloneDir)
 
-	err := s.doPull(context.Background(), nil, true)
+	err := s.doPull(context.Background(), nil, true, true)
 	assert.NoError(t, err)
 
 	// verify the file was pulled
