@@ -144,7 +144,7 @@ func (m *CodeDBManager) SetLedgerPath(path string) {
 }
 
 // maxIndexDuration caps how long a single indexing run may take before being
-// cancelled. 21h+ runaway burns were observed when a worktree was deleted mid-index.
+// canceled. 21h+ runaway burns were observed when a worktree was deleted mid-index.
 const maxIndexDuration = 2 * time.Hour
 
 // Index runs indexing with progress reporting. Only one indexing operation runs at a time.
