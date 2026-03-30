@@ -56,15 +56,15 @@ func NewModel(client effects.Client, panelist []panes.Pane, helpFactory func() o
 	store = state.SetLoading(store)
 
 	return Model{
-		width:  80,
-		height: 24,
-		layout: ComputeLayout(80, 24),
-		store:  store,
-		panes:        panelist,
-		focus:        FocusTimeline, // open on the murmur feed so users see team pulse immediately
-		client:       client,
-		keys:         DefaultGlobalKeys(),
-		helpFactory:  helpFactory,
+		width:       80,
+		height:      24,
+		layout:      ComputeLayout(80, 24),
+		store:       store,
+		panes:       panelist,
+		focus:       FocusTimeline, // open on the murmur feed so users see team pulse immediately
+		client:      client,
+		keys:        DefaultGlobalKeys(),
+		helpFactory: helpFactory,
 	}
 }
 
@@ -101,4 +101,3 @@ func (m Model) statusBarCtx() panes.Context {
 		Height:  m.layout.StatusBar.Height,
 	}
 }
-

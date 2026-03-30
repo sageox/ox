@@ -176,7 +176,7 @@ var (
 
 	// StatusSeparator renders the dividers between status bar segments.
 	StatusSeparator = lipgloss.NewStyle().
-				Foreground(cli.ColorDim)
+			Foreground(cli.ColorDim)
 )
 
 // PaneTitle renders a styled pane title. When focused the title uses the primary
