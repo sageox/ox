@@ -62,6 +62,7 @@ const (
 	NavNodeCodeIndex                     // codedb index status
 	NavNodeMurmur                        // a murmur broadcast
 	NavNodeDiscussion                    // a team discussion document
+	NavNodeHint                          // non-interactive hint shown when a section is empty
 )
 
 // NavNode represents a single row in the left-hand navigation tree pane.

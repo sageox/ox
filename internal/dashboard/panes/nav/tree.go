@@ -52,6 +52,20 @@ func KindIcon(kind domain.NavNodeKind) string {
 func RenderNode(node domain.NavNode, selected bool, width int) string {
 	prefix := Indent(node.Depth)
 
+	// Hint nodes are non-interactive empty-state labels — always rendered dim,
+	// never highlighted even when the cursor happens to land on them.
+	if node.Kind == domain.NavNodeHint {
+		row := prefix + "— " + node.Label
+		if width > 0 && len(row) > width {
+			row = row[:width-1] + "…"
+		}
+		s := theme.NavDimStyle
+		if width > 0 {
+			s = s.Width(width)
+		}
+		return s.Render(row)
+	}
+
 	var label string
 	if node.Kind == domain.NavNodeSection {
 		label = ExpandIcon(node) + strings.ToUpper(node.Label)

@@ -15,6 +15,8 @@ import (
 func BuildNav(s *Store) []domain.NavNode {
 	var nodes []domain.NavNode
 
+	daemonOffline := s.DaemonStatus == nil || !s.DaemonStatus.Running
+
 	// Sessions section.
 	nodes = append(nodes, domain.NavNode{
 		ID:         "section-sessions",
@@ -41,6 +43,18 @@ func BuildNav(s *Store) []domain.NavNode {
 			},
 		})
 	}
+	if len(s.Sessions) == 0 {
+		hint := "no sessions yet"
+		if daemonOffline {
+			hint = "daemon offline — sessions unavailable"
+		}
+		nodes = append(nodes, domain.NavNode{
+			ID:    "hint-sessions",
+			Kind:  domain.NavNodeHint,
+			Label: hint,
+			Depth: 1,
+		})
+	}
 
 	// Workspaces section — populated from daemon status when available.
 	nodes = append(nodes, domain.NavNode{
@@ -51,6 +65,7 @@ func BuildNav(s *Store) []domain.NavNode {
 		Expandable: true,
 		Expanded:   true,
 	})
+	wsCount := 0
 	if s.DaemonStatus != nil {
 		for _, wsList := range s.DaemonStatus.Workspaces {
 			for i := range wsList {
@@ -70,8 +85,17 @@ func BuildNav(s *Store) []domain.NavNode {
 						Workspace: &wsCopy,
 					},
 				})
+				wsCount++
 			}
 		}
+	}
+	if wsCount == 0 {
+		nodes = append(nodes, domain.NavNode{
+			ID:    "hint-workspaces",
+			Kind:  domain.NavNodeHint,
+			Label: "no workspaces synced",
+			Depth: 1,
+		})
 	}
 
 	// Murmurs section.
@@ -96,14 +120,44 @@ func BuildNav(s *Store) []domain.NavNode {
 			},
 		})
 	}
+	if len(s.Murmurs) == 0 {
+		nodes = append(nodes, domain.NavNode{
+			ID:    "hint-murmurs",
+			Kind:  domain.NavNodeHint,
+			Label: "no recent murmurs",
+			Depth: 1,
+		})
+	}
 
 	return nodes
 }
 
 // ActivityEntries derives the timeline entry list from raw store data.
-// Entries are ordered newest first.
+// Murmur entries appear first (sorted newest-first among themselves), followed
+// by session and workspace sync events (also newest-first). This ordering puts
+// the live "team pulse" at the top of the feed.
 func ActivityEntries(s *Store) []domain.TimelineEntry {
-	var entries []domain.TimelineEntry
+	var murmurEntries []domain.TimelineEntry
+	var otherEntries []domain.TimelineEntry
+
+	// Murmur entries — lead the feed so the live team pulse is always visible.
+	for i := range s.Murmurs {
+		m := s.Murmurs[i]
+		murmurEntries = append(murmurEntries, domain.TimelineEntry{
+			ID:        fmt.Sprintf("murmur-%s-%s", m.AgentID, m.Topic),
+			Kind:      domain.TimelineMurmur,
+			Actor:     m.Author,
+			Summary:   fmt.Sprintf("[%s] %s", m.Topic, m.Content),
+			Timestamp: m.Timestamp,
+			Target: &domain.InspectorTarget{
+				Kind:   domain.TargetMurmur,
+				Murmur: &s.Murmurs[i],
+			},
+		})
+	}
+	sort.Slice(murmurEntries, func(i, j int) bool {
+		return murmurEntries[i].Timestamp.After(murmurEntries[j].Timestamp)
+	})
 
 	// Session entries.
 	for i := range s.Sessions {
@@ -116,7 +170,7 @@ func ActivityEntries(s *Store) []domain.TimelineEntry {
 		if summary == "" {
 			summary = sess.Filename
 		}
-		entries = append(entries, domain.TimelineEntry{
+		otherEntries = append(otherEntries, domain.TimelineEntry{
 			ID:      "session-" + sess.Filename,
 			Kind:    domain.TimelineSession,
 			Actor:   label,
@@ -148,7 +202,7 @@ func ActivityEntries(s *Store) []domain.TimelineEntry {
 					detail += " (" + ws.LastErr + ")"
 				}
 				wsCopy := ws
-				entries = append(entries, domain.TimelineEntry{
+				otherEntries = append(otherEntries, domain.TimelineEntry{
 					ID:        "ws-" + ws.ID,
 					Kind:      domain.TimelineSync,
 					Actor:     label,
@@ -163,26 +217,56 @@ func ActivityEntries(s *Store) []domain.TimelineEntry {
 		}
 	}
 
-	// Murmur entries.
-	for i := range s.Murmurs {
-		m := s.Murmurs[i]
-		entries = append(entries, domain.TimelineEntry{
-			ID:        fmt.Sprintf("murmur-%s-%s", m.AgentID, m.Topic),
-			Kind:      domain.TimelineMurmur,
-			Actor:     m.Author,
-			Summary:   fmt.Sprintf("[%s] %s", m.Topic, m.Content),
-			Timestamp: m.Timestamp,
-			Target: &domain.InspectorTarget{
-				Kind:   domain.TargetMurmur,
-				Murmur: &s.Murmurs[i],
-			},
-		})
-	}
-
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].Timestamp.After(entries[j].Timestamp)
+	sort.Slice(otherEntries, func(i, j int) bool {
+		return otherEntries[i].Timestamp.After(otherEntries[j].Timestamp)
 	})
-	return entries
+
+	return append(murmurEntries, otherEntries...)
+}
+
+// ActiveMurmurCoworkers returns the count of unique AgentIDs that have posted a
+// murmur within the last 30 minutes. Used by the Team Pulse header.
+func ActiveMurmurCoworkers(s *Store) int {
+	cutoff := time.Now().Add(-30 * time.Minute)
+	seen := make(map[string]struct{})
+	for _, m := range s.Murmurs {
+		if m.Timestamp.After(cutoff) {
+			seen[m.AgentID] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+// ActiveMurmurTeams returns the count of unique team slugs represented by
+// murmurs in the last 30 minutes. Team slug is derived from the murmur Author
+// field (format: "team-slug/agent-id" or just author name). Falls back to
+// counting unique authors when no slash is present.
+func ActiveMurmurTeams(s *Store) int {
+	cutoff := time.Now().Add(-30 * time.Minute)
+	seen := make(map[string]struct{})
+	for _, m := range s.Murmurs {
+		if !m.Timestamp.After(cutoff) {
+			continue
+		}
+		// Use AgentID prefix up to "/" as the team identifier when available;
+		// fall back to Author so the count is always non-zero for active murmurs.
+		slug := m.Author
+		if idx := indexByte(m.AgentID, '/'); idx >= 0 {
+			slug = m.AgentID[:idx]
+		}
+		seen[slug] = struct{}{}
+	}
+	return len(seen)
+}
+
+// indexByte returns the index of the first occurrence of b in s, or -1.
+func indexByte(s string, b byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
 }
 
 // AllActivityTimestamps returns merged activity timestamps from the daemon's
