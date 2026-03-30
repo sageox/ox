@@ -497,17 +497,10 @@ func dirtyDirsOutsideCone(repoPath string, coneDirs []string) []string {
 	seen := make(map[string]bool)
 	var extra []string
 
-	// --porcelain -z: entries separated by NUL, format "XY path\0" or "XY path\0origpath\0" for renames
-	entries := strings.Split(string(out), "\x00")
-	for _, entry := range entries {
-		if len(entry) < 4 {
-			continue
-		}
-		filePath := entry[3:] // skip "XY " status prefix
+	addTopDir := func(filePath string) {
 		if filePath == "" {
-			continue
+			return
 		}
-		// extract top-level directory (cone mode operates on top-level dirs)
 		topDir := filePath
 		if idx := strings.IndexByte(filePath, '/'); idx > 0 {
 			topDir = filePath[:idx]
@@ -515,6 +508,30 @@ func dirtyDirsOutsideCone(repoPath string, coneDirs []string) []string {
 		if !coneSet[topDir] && !seen[topDir] {
 			seen[topDir] = true
 			extra = append(extra, topDir)
+		}
+	}
+
+	// --porcelain -z: entries separated by NUL.
+	// Normal entries: "XY path\0"
+	// Rename/copy:    "XY new_path\0orig_path\0" (orig_path is a bare token)
+	entries := strings.Split(string(out), "\x00")
+	expectBarePath := false
+	for _, entry := range entries {
+		if expectBarePath {
+			// bare orig_path from a rename/copy entry — no status prefix
+			expectBarePath = false
+			addTopDir(entry)
+			continue
+		}
+		if len(entry) < 4 {
+			continue
+		}
+		statusX := entry[0]
+		filePath := entry[3:] // skip "XY " status prefix
+		addTopDir(filePath)
+		// rename (R) and copy (C) entries emit a second bare path
+		if statusX == 'R' || statusX == 'C' {
+			expectBarePath = true
 		}
 	}
 	return extra

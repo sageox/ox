@@ -908,6 +908,83 @@ func TestConfigureSparseCheckout_PreservesModifiedFilesOutsideWindow(t *testing.
 	}
 }
 
+// Regression test: renamed files produce two NUL-separated tokens in
+// "git status --porcelain -z" output. The second token (orig path) is a bare
+// path without the "XY " status prefix. dirtyDirsOutsideCone must handle both
+// tokens correctly, protecting both source and destination directories.
+func TestConfigureSparseCheckout_PreservesRenamedFilesOutsideCone(t *testing.T) {
+	t.Parallel()
+	tempDir := t.TempDir()
+
+	if err := exec.Command("git", "init", "-b", "main", tempDir).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	exec.Command("git", "-C", tempDir, "config", "user.email", "test@test.com").Run()
+	exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run()
+
+	// initialize sparse checkout
+	if err := ConfigureSparseCheckout(tempDir); err != nil {
+		t.Fatalf("first ConfigureSparseCheckout: %v", err)
+	}
+
+	// create and commit a file in a directory outside the default cone
+	origDir := filepath.Join(tempDir, "imports", "batch1")
+	if err := os.MkdirAll(origDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	origFile := filepath.Join(origDir, "data.csv")
+	origContent := "id,value\n1,hello\n"
+	if err := os.WriteFile(origFile, []byte(origContent), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// need sessions dir so sparse-checkout set has something in the cone
+	sessDir := filepath.Join(tempDir, "sessions")
+	os.MkdirAll(sessDir, 0o755)
+	os.WriteFile(filepath.Join(sessDir, ".gitkeep"), []byte(""), 0o644)
+
+	exec.Command("git", "-C", tempDir, "add", "--sparse", ".").Run()
+	exec.Command("git", "-C", tempDir, "commit", "-m", "init with imports").Run()
+
+	// rename the file to a different outside-cone directory via git mv
+	destDir := filepath.Join(tempDir, "archive", "batch1")
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		t.Fatalf("mkdir dest: %v", err)
+	}
+	destFile := filepath.Join(destDir, "data.csv")
+	mvCmd := exec.Command("git", "-C", tempDir, "mv", "imports/batch1/data.csv", "archive/batch1/data.csv")
+	if mvOut, err := mvCmd.CombinedOutput(); err != nil {
+		// if git mv fails (e.g. sparse-checkout restrictions), simulate
+		// the rename manually: remove from index + add new path
+		os.Rename(origFile, destFile)
+		exec.Command("git", "-C", tempDir, "rm", "--cached", "imports/batch1/data.csv").Run()
+		if err := exec.Command("git", "-C", tempDir, "add", "--sparse", "archive/batch1/data.csv").Run(); err != nil {
+			t.Fatalf("manual rename staging failed: %v (git mv output: %s)", err, mvOut)
+		}
+	}
+
+	// verify rename is staged
+	statusOut, _ := exec.Command("git", "-C", tempDir, "status", "--porcelain", "-z").CombinedOutput()
+	statusStr := string(statusOut)
+	if !strings.Contains(statusStr, "archive/batch1/data.csv") {
+		t.Fatalf("rename not detected in git status: %s", statusStr)
+	}
+
+	// reconfigure sparse checkout — must protect both source and dest dirs
+	if err := ConfigureSparseCheckout(tempDir); err != nil {
+		t.Fatalf("ConfigureSparseCheckout after rename: %v", err)
+	}
+
+	// the renamed file must survive on disk at its new location
+	content, err := os.ReadFile(destFile)
+	if err != nil {
+		t.Fatalf("renamed file destroyed by ConfigureSparseCheckout: %v", err)
+	}
+	if string(content) != origContent {
+		t.Errorf("content changed: got %q, want %q", string(content), origContent)
+	}
+}
+
 func TestMostRecentMurmurTime(t *testing.T) {
 	tmpDir := t.TempDir()
 	now := time.Now().UTC()
