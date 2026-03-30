@@ -91,6 +91,17 @@ func TestCloneWithSparseCheckout_SessionsDirCheckedOut(t *testing.T) {
 		"sessions/ must be checked out for session recording to work")
 }
 
+func TestCloneWithSparseCheckout_EmptyURL_ReturnsError(t *testing.T) {
+	// real-world failure prevented: passing empty URL to git clone produces a
+	// confusing git error; validate early with a clear message
+	t.Parallel()
+
+	dest := filepath.Join(t.TempDir(), "clone")
+	err := CloneWithSparseCheckout(dest, "")
+	assert.Error(t, err, "empty URL must return error")
+	assert.Contains(t, err.Error(), "empty")
+}
+
 func TestCloneWithSparseCheckout_InvalidURL_ReturnsError(t *testing.T) {
 	// real-world failure prevented: if daemon tries to clone with a stale or
 	// corrupt URL, must get a clear error, not a panic or partial clone

@@ -716,8 +716,9 @@ func (r *WorkspaceRegistry) InitializeLedger(cloneURL, projectRoot string) {
 		// fix empty path if it was somehow unset (ensures config.local.toml gets correct path)
 		if r.ledger.Path == "" {
 			r.ledger.Path = ledgerPath
-			r.ledger.Exists = gitutil.IsGitRepo(ledgerPath)
 		}
+		// always re-verify Exists — the directory may have been deleted since last init
+		r.ledger.Exists = gitutil.IsGitRepo(r.ledger.Path)
 		return
 	}
 

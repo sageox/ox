@@ -758,6 +758,8 @@ func (s *SyncScheduler) reopenWhisperStoreAfterGC() {
 	ep := s.workspaceRegistry.GetEndpoint()
 	repoID := config.GetRepoID(s.config.ProjectRoot)
 	if ep == "" || repoID == "" {
+		s.logger.Warn("gc: cannot reopen whisper store, endpoint or repoID not yet loaded",
+			"endpoint", ep, "repoID", repoID)
 		return
 	}
 

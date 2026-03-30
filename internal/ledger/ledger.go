@@ -385,6 +385,10 @@ func InitForEndpoint(endpointURL string, remoteURL string) (*Ledger, error) {
 // to save space. Exported for use by the daemon's GC reclone (fresh clone with
 // sparse checkout).
 func CloneWithSparseCheckout(path, remoteURL string) error {
+	if remoteURL == "" {
+		return fmt.Errorf("git clone: remote URL is empty")
+	}
+
 	// remove existing directory if empty
 	entries, _ := os.ReadDir(path)
 	if len(entries) == 0 {

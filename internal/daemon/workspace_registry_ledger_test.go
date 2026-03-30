@@ -117,6 +117,31 @@ func TestInitializeLedger_PreservesExistingPath(t *testing.T) {
 		"re-init must not overwrite existing non-empty path")
 }
 
+func TestInitializeLedger_ReVerifiesExists(t *testing.T) {
+	// real-world failure prevented: if the ledger directory is deleted between
+	// daemon restarts, re-calling InitializeLedger would keep stale Exists=true
+	// because it only checked Exists when path was empty. Now it always re-verifies.
+	t.Parallel()
+
+	reg := NewWorkspaceRegistry(t.TempDir(), "test-repo")
+	reg.repoID = "repo-reverify"
+	reg.endpoint = "test.sageox.ai"
+
+	reg.ledger = &WorkspaceState{
+		ID:       "ledger",
+		Type:     WorkspaceTypeLedger,
+		CloneURL: "https://git.example.com/old.git",
+		Path:     "/nonexistent/deleted/ledger",
+		Exists:   true, // stale — directory was deleted
+	}
+	reg.workspaces["ledger"] = reg.ledger
+
+	reg.InitializeLedger("https://git.example.com/new.git", "/project")
+
+	assert.False(t, reg.GetLedger().Exists,
+		"re-init must re-verify Exists; stale Exists=true causes daemon to pull into missing dir")
+}
+
 func TestGetLedger_NilBeforeInit(t *testing.T) {
 	// real-world failure prevented: callers assuming GetLedger always returns
 	// non-nil would panic on first daemon startup before ledger provisioning
