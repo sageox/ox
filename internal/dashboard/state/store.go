@@ -55,3 +55,9 @@ func (s *Store) GetDaemonStatus() *daemon.StatusData     { return s.DaemonStatus
 func (s *Store) GetSessions() []session.SessionInfo      { return s.Sessions }
 func (s *Store) GetMurmurs() []domain.MurmurEntry        { return s.Murmurs }
 func (s *Store) GetDiscussions() []domain.TeamDiscussion { return s.Discussions }
+
+// ActiveMurmurCoworkers implements ReadOnlyStore.
+func (s *Store) ActiveMurmurCoworkers() int { return ActiveMurmurCoworkers(s) }
+
+// ActiveMurmurTeams implements ReadOnlyStore.
+func (s *Store) ActiveMurmurTeams() int { return ActiveMurmurTeams(s) }

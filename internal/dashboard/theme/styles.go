@@ -84,6 +84,47 @@ var (
 	TimelineSelectedStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(cli.ColorSecondary)
+
+	// TeamPulseHeaderStyle renders the "◉ Team Pulse · N coworkers · M teams" banner.
+	TeamPulseHeaderStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(cli.ColorPrimary)
+
+	// TeamPulseMetaStyle renders the coworker/team counts in the pulse banner.
+	TeamPulseMetaStyle = lipgloss.NewStyle().
+				Foreground(cli.ColorDim)
+
+	// MurmurHotStyle renders murmurs that arrived in the last 5 minutes — full brightness.
+	MurmurHotStyle = lipgloss.NewStyle().
+			Foreground(cli.ColorSecondary)
+
+	// MurmurWarmStyle renders murmurs between 5 and 15 minutes old.
+	MurmurWarmStyle = lipgloss.NewStyle().
+			Foreground(cli.ColorInfo)
+
+	// MurmurCoolStyle renders murmurs older than 15 minutes — progressively dimmed.
+	MurmurCoolStyle = lipgloss.NewStyle().
+			Foreground(cli.ColorDim)
+
+	// TopicBadgeWIP renders the [wip] topic badge in dim green.
+	TopicBadgeWIP = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#5faf5f"))
+
+	// TopicBadgeBlocked renders the [blocked] topic badge in yellow.
+	TopicBadgeBlocked = lipgloss.NewStyle().
+				Foreground(cli.ColorWarning)
+
+	// TopicBadgeDecision renders the [decision] topic badge in cyan.
+	TopicBadgeDecision = lipgloss.NewStyle().
+				Foreground(cli.ColorInfo)
+
+	// TopicBadgeReview renders the [review] topic badge in blue/primary.
+	TopicBadgeReview = lipgloss.NewStyle().
+				Foreground(cli.ColorPrimary)
+
+	// TopicBadgeDefault renders unrecognised topic badges.
+	TopicBadgeDefault = lipgloss.NewStyle().
+				Foreground(cli.ColorDim)
 )
 
 // Inspector pane styles (TokenInspector*).

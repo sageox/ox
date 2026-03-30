@@ -61,7 +61,7 @@ func NewModel(client effects.Client, panelist []panes.Pane, helpFactory func() o
 		layout: ComputeLayout(80, 24),
 		store:  store,
 		panes:        panelist,
-		focus:        FocusNav,
+		focus:        FocusTimeline, // open on the murmur feed so users see team pulse immediately
 		client:       client,
 		keys:         DefaultGlobalKeys(),
 		helpFactory:  helpFactory,

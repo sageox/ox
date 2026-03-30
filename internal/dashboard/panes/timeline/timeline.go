@@ -1,6 +1,7 @@
 package timeline
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -76,10 +77,22 @@ func (p *Pane) View(ctx panes.Context) string {
 	innerW := w - 2
 	innerH := h - 2
 
-	title := theme.PaneTitle("⟳ Activity", ctx.Focused)
+	title := theme.PaneTitle("◉ Team Pulse", ctx.Focused)
 
 	var sb strings.Builder
 	sb.WriteString(title)
+	sb.WriteString("\n")
+
+	// Team Pulse sub-header: counts of active coworkers and teams from murmurs in the last 30 min.
+	coworkers := ctx.Store.ActiveMurmurCoworkers()
+	teams := ctx.Store.ActiveMurmurTeams()
+	pulseDetail := theme.TeamPulseMetaStyle.Render(
+		fmt.Sprintf("  %d coworker%s  ·  %d team%s",
+			coworkers, pluralS(coworkers),
+			teams, pluralS(teams),
+		),
+	)
+	sb.WriteString(pulseDetail)
 	sb.WriteString("\n")
 
 	// Sparkline header — summarises activity density over the last 4 hours.
@@ -126,29 +139,32 @@ func (p *Pane) View(ctx panes.Context) string {
 
 		for i, e := range grpEntries {
 			globalIdx := startIdx + i
-			icon := EntryIcon(e.Kind)
 			relT := RelativeTime(e.Timestamp)
 
-			// Truncate summary so the line fits in innerW: icon(1) + space(1) + summary + space(2) + relT
-			overhead := len(icon) + 1 + 2 + len(relT)
-			maxSummary := innerW - overhead
-			if maxSummary < 0 {
-				maxSummary = 0
+			var line string
+			if e.Kind == domain.TimelineMurmur {
+				line = renderMurmurRow(e, relT, innerW)
+			} else {
+				icon := EntryIcon(e.Kind)
+				// Truncate summary so the line fits: icon(1) + space(1) + summary + space(2) + relT
+				overhead := len(icon) + 1 + 2 + len(relT)
+				maxSummary := innerW - overhead
+				if maxSummary < 0 {
+					maxSummary = 0
+				}
+				summary := e.Summary
+				if len(summary) > maxSummary {
+					summary = summary[:maxSummary]
+				}
+				line = icon + " " + summary + "  " + relT
 			}
-			summary := e.Summary
-			if len(summary) > maxSummary {
-				summary = summary[:maxSummary]
-			}
-
-			line := icon + " " + summary + "  " + relT
 
 			var s lipgloss.Style
-			switch {
-			case globalIdx == cursor:
+			if globalIdx == cursor {
 				s = theme.TimelineSelectedStyle
-			case e.Kind == domain.TimelineMurmur:
-				s = theme.TimelineMurmurStyle
-			default:
+			} else if e.Kind == domain.TimelineMurmur {
+				s = murmurAgeStyle(e.Timestamp)
+			} else {
 				s = entryStyle
 			}
 			rows = append(rows, row{s.Width(innerW).Render(line)})
@@ -159,8 +175,8 @@ func (p *Pane) View(ctx panes.Context) string {
 	appendGroup("RECENT", theme.TimelineRecentLabel, theme.TimelineEntryActive, grouped.Recent, len(grouped.Now))
 	appendGroup("EARLIER", theme.TimelineEarlierLabel, theme.TimelineEntryMuted, grouped.Earlier, len(grouped.Now)+len(grouped.Recent))
 
-	// title(1) + sparkline(1) = 2 chrome rows consumed above the scroll area.
-	visibleRows := innerH - 2
+	// title(1) + pulse-detail(1) + sparkline(1) = 3 chrome rows consumed above the scroll area.
+	visibleRows := innerH - 3
 	if visibleRows < 0 {
 		visibleRows = 0
 	}
@@ -194,11 +210,94 @@ func (p *Pane) View(ctx panes.Context) string {
 	return borderStyle.Width(innerW).Height(innerH).Render(sb.String())
 }
 
+// renderMurmurRow builds the display line for a murmur timeline entry.
+// Format: ◈ [topic-badge] agent-short  content-preview  ·team?  relT
+func renderMurmurRow(e domain.TimelineEntry, relT string, innerW int) string {
+	icon := EntryIcon(e.Kind)
+
+	// Parse topic and content from the pre-formatted Summary "[topic] content".
+	topic, content := parseMurmurSummary(e.Summary)
+
+	badge := topicBadge(topic)
+	// Agent short: last 4 chars of Actor, dimmed.
+	agentShort := e.Actor
+	if len(agentShort) > 4 {
+		agentShort = agentShort[len(agentShort)-4:]
+	}
+	agentPart := theme.NavDimStyle.Render(agentShort)
+
+	suffix := "  " + relT
+	// icon(1) + space(1) + badge + space(1) + agentShort(4) + space(2) + content + suffix
+	overhead := 1 + 1 + len(badge) + 1 + 4 + len(suffix)
+	maxContent := innerW - overhead
+	if maxContent < 0 {
+		maxContent = 0
+	}
+	if len(content) > maxContent {
+		content = content[:maxContent]
+	}
+
+	return icon + " " + badge + " " + agentPart + "  " + content + suffix
+}
+
+// parseMurmurSummary extracts topic and content from the "[topic] content" format
+// stored in TimelineEntry.Summary for murmur entries.
+func parseMurmurSummary(summary string) (topic, content string) {
+	if len(summary) > 0 && summary[0] == '[' {
+		end := strings.IndexByte(summary, ']')
+		if end > 0 {
+			topic = summary[1:end]
+			content = strings.TrimSpace(summary[end+1:])
+			return topic, content
+		}
+	}
+	return "", summary
+}
+
+// topicBadge returns a styled "[topic]" badge for known topic values.
+func topicBadge(topic string) string {
+	badge := "[" + topic + "]"
+	switch strings.ToLower(topic) {
+	case "wip":
+		return theme.TopicBadgeWIP.Render(badge)
+	case "blocked":
+		return theme.TopicBadgeBlocked.Render(badge)
+	case "decision":
+		return theme.TopicBadgeDecision.Render(badge)
+	case "review":
+		return theme.TopicBadgeReview.Render(badge)
+	default:
+		return theme.TopicBadgeDefault.Render(badge)
+	}
+}
+
+// murmurAgeStyle returns a progressively dimmer style for older murmurs:
+// < 5 min → hot (bright), 5-15 min → warm, > 15 min → cool (dim).
+func murmurAgeStyle(t time.Time) lipgloss.Style {
+	age := time.Since(t)
+	switch {
+	case age < 5*time.Minute:
+		return theme.MurmurHotStyle
+	case age < 15*time.Minute:
+		return theme.MurmurWarmStyle
+	default:
+		return theme.MurmurCoolStyle
+	}
+}
+
+// pluralS returns "s" when n != 1 for simple English pluralisation.
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
 // adjustScroll keeps the cursor row within the visible viewport.
-// Chrome: border(2) + title(1) + sparkline(1) = 4 rows.
+// Chrome: border(2) + title(1) + pulse-detail(1) + sparkline(1) = 5 rows.
 func (p *Pane) adjustScroll(ctx panes.Context) {
 	cursor := ctx.Store.TimelineCursor()
-	visibleRows := p.rect.Height - 4
+	visibleRows := p.rect.Height - 5
 	if visibleRows < 1 {
 		return
 	}
