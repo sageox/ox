@@ -8,11 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFindOrphanedSessions(t *testing.T) {
@@ -522,6 +521,113 @@ func TestReadCacheSessionMeta_EmptyFile(t *testing.T) {
 	_, _, err := readCacheSessionMeta(rawPath)
 	assert.Error(t, err, "empty file should fail")
 	assert.Contains(t, err.Error(), "empty file")
+}
+
+func TestRetrySessionUpload_SkipsZeroEntries(t *testing.T) {
+	orphan := orphanedSession{
+		SessionName: "2026-01-20T10-00-testuser-OxZero",
+		CachePath:   t.TempDir(),
+		Meta:        nil,
+		EntryCount:  0,
+	}
+
+	// create bare+clone for ledger (retrySessionUpload needs a valid ledger)
+	_, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+
+	err := retrySessionUpload(clonePath, clonePath, orphan)
+	assert.NoError(t, err, "zero-entry session should return nil (skip silently)")
+
+	// no session dir should be created in the ledger
+	sessionDir := filepath.Join(clonePath, "sessions", orphan.SessionName)
+	_, statErr := os.Stat(sessionDir)
+	assert.True(t, os.IsNotExist(statErr),
+		"no session directory should be created for zero-entry sessions")
+}
+
+func TestRetrySessionUpload_SkipsCorruptRawJSONL(t *testing.T) {
+	tmpDir := t.TempDir()
+	cacheSessionDir := filepath.Join(tmpDir, "cache-session")
+	require.NoError(t, os.MkdirAll(cacheSessionDir, 0755))
+
+	// write corrupt raw.jsonl (not valid JSONL header)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(cacheSessionDir, ledgerFileRaw),
+		[]byte("this is not valid json at all\ngarbage\n"),
+		0644,
+	))
+
+	orphan := orphanedSession{
+		SessionName: "2026-01-20T10-00-testuser-OxCorr",
+		CachePath:   cacheSessionDir,
+		Meta:        nil,
+		EntryCount:  5,
+	}
+
+	_, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+
+	err := retrySessionUpload(clonePath, clonePath, orphan)
+	require.Error(t, err, "corrupt raw.jsonl should cause retrySessionUpload to fail")
+	assert.Contains(t, err.Error(), "validation failed",
+		"error should indicate validation failure")
+}
+
+func TestRetrySessionUpload_CopiesFromCache(t *testing.T) {
+	tmpDir := t.TempDir()
+	cacheSessionDir := filepath.Join(tmpDir, "cache-session")
+	require.NoError(t, os.MkdirAll(cacheSessionDir, 0755))
+
+	// write valid raw.jsonl with proper header
+	rawContent := `{"metadata":{"agent_id":"OxCopy","agent_type":"claude-code","username":"test@example.com","created_at":"2026-01-20T10:00:00Z"},"type":"header"}
+{"type":"user","content":"hello","seq":1}
+{"type":"assistant","content":"hi","seq":2}
+{"entry_count":2,"type":"footer"}
+`
+	require.NoError(t, os.WriteFile(
+		filepath.Join(cacheSessionDir, ledgerFileRaw),
+		[]byte(rawContent),
+		0644,
+	))
+
+	orphan := orphanedSession{
+		SessionName: "2026-01-20T10-00-testuser-OxCopy",
+		CachePath:   cacheSessionDir,
+		Meta: &session.StoreMeta{
+			AgentID:   "OxCopy",
+			AgentType: "claude-code",
+			Username:  "test@example.com",
+		},
+		EntryCount: 2,
+	}
+
+	_, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+
+	// retrySessionUpload will fail on LFS upload (no LFS server), but the
+	// critical thing is that it copies raw.jsonl from cache to ledger first.
+	err := retrySessionUpload(clonePath, clonePath, orphan)
+	// expect error since LFS upload will fail (no LFS server configured)
+	// but the copy should have happened before the failure
+	if err != nil {
+		// verify the error is from LFS upload, not from the copy
+		assert.Contains(t, err.Error(), "LFS upload",
+			"error should be from LFS upload phase, not from file copy")
+	}
+
+	// raw.jsonl MUST exist in the ledger session dir — the copy happens before LFS upload
+	ledgerRawPath := filepath.Join(clonePath, "sessions", orphan.SessionName, ledgerFileRaw)
+	require.FileExists(t, ledgerRawPath, "raw.jsonl must be copied to ledger before LFS upload")
+	ledgerRaw, readErr := os.ReadFile(ledgerRawPath)
+	require.NoError(t, readErr)
+	require.Equal(t, rawContent, string(ledgerRaw),
+		"ledger raw.jsonl should match cache content")
+
+	// verify cache content is still intact regardless of retry outcome
+	cacheRaw, readErr := os.ReadFile(filepath.Join(cacheSessionDir, ledgerFileRaw))
+	require.NoError(t, readErr)
+	assert.Equal(t, rawContent, string(cacheRaw),
+		"cache raw.jsonl must be preserved after retry attempt")
 }
 
 func TestValidateRawJSONLHeader(t *testing.T) {

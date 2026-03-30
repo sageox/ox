@@ -129,6 +129,7 @@ pkg/
 - **Use `t.Parallel()` for test speed** - see [testing-implementation.md](testing-implementation.md)
 - **Never use `t.Setenv()` with `t.Parallel()`** - use dependency injection instead
 - **Slow tests (>500ms) must skip in short mode** - `if testing.Short() { t.Skip(...) }`
+- **Test intent, not implementation** — see [testing-implementation.md](testing-implementation.md) for anti-patterns and correct patterns
 
 ### Test Tiers
 

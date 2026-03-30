@@ -532,6 +532,58 @@ func TestPushLedger_RebaseConflict_LocalCommitPreserved(t *testing.T) {
 		"local file content must be preserved after failed rebase")
 }
 
+func TestPushFailure_LedgerCommitPreserved(t *testing.T) {
+	_, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+
+	sessionName := "2026-01-01T00-00-testuser-OxComP"
+	writeSessionFiles(t, clonePath, sessionName)
+
+	// break remote so push fails but commit succeeds
+	runGit(t, clonePath, "remote", "set-url", "origin", "/nonexistent/broken/repo.git")
+
+	err := commitAndPushLedger(clonePath, sessionName)
+	require.Error(t, err, "push should fail with broken remote")
+
+	// the local git commit must survive the failed push so a future push can
+	// succeed without re-committing
+	log := runGit(t, clonePath, "log", "--oneline")
+	assert.Contains(t, log, sessionName,
+		"local commit must be preserved after push failure")
+
+	// verify the committed tree contains the session files
+	files := runGit(t, clonePath, "diff", "--name-only", "HEAD~1", "HEAD")
+	assert.Contains(t, files, "sessions/"+sessionName+"/meta.json",
+		"meta.json should be in the committed diff")
+}
+
+func TestPushFailure_RetrySucceedsAfterRemoteFix(t *testing.T) {
+	barePath, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+
+	sessionName := "2026-01-01T00-00-testuser-OxRFix"
+	writeSessionFiles(t, clonePath, sessionName)
+
+	// break remote so initial push fails
+	runGit(t, clonePath, "remote", "set-url", "origin", "/nonexistent/broken/repo.git")
+
+	err := commitAndPushLedger(clonePath, sessionName)
+	require.Error(t, err, "first push should fail with broken remote")
+
+	// fix the remote back to the real bare repo
+	runGit(t, clonePath, "remote", "set-url", "origin", barePath)
+
+	// retry push — the commit already exists locally, so just push
+	err = pushLedger(context.Background(), clonePath)
+	require.NoError(t, err, "retry push should succeed after remote is fixed")
+
+	// verify the session reached the remote
+	verifyClone := cloneBare(t, barePath)
+	metaPath := filepath.Join(verifyClone, "sessions", sessionName, "meta.json")
+	_, statErr := os.Stat(metaPath)
+	assert.NoError(t, statErr, "session meta.json should exist on remote after retry")
+}
+
 func TestCommitAndPushLedger_EmptySessionDir(t *testing.T) {
 	_, clonePath := createBareAndClone(t)
 	isolatePushEnv(t, clonePath)

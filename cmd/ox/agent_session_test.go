@@ -501,3 +501,72 @@ func TestFilterEntriesAfterStart(t *testing.T) {
 		assert.Empty(t, filtered)
 	})
 }
+
+func TestGenericAdapterDropFile_Created(t *testing.T) {
+	// when adapter is "generic" and sessionFile is empty, production code
+	// should decide a drop file is needed
+	assert.True(t, needsGenericDropFile("", "generic"),
+		"needsGenericDropFile should return true for generic adapter with no session file")
+}
+
+func TestGenericAdapterDropFile_NotCreatedForNonGeneric(t *testing.T) {
+	// non-generic adapters should not trigger drop file creation
+	assert.False(t, needsGenericDropFile("", "claude-code"),
+		"needsGenericDropFile should return false for claude-code adapter")
+	assert.False(t, needsGenericDropFile("", "codex"),
+		"needsGenericDropFile should return false for codex adapter")
+	// when a session file already exists, even generic should not need a drop file
+	assert.False(t, needsGenericDropFile("/some/existing/file.jsonl", "generic"),
+		"needsGenericDropFile should return false when session file already provided")
+}
+
+func TestSessionStop_EmptyDropFile_MarksIncomplete(t *testing.T) {
+	// when a generic adapter session has an empty drop file,
+	// isGenericDropFileEmpty should return true (triggering incomplete marking)
+	sessionPath := t.TempDir()
+
+	// create empty drop file (0 bytes)
+	dropFile := filepath.Join(sessionPath, "input.jsonl")
+	require.NoError(t, os.WriteFile(dropFile, []byte{}, 0600))
+
+	state := &session.RecordingState{
+		AdapterName: "generic",
+		SessionFile: dropFile,
+	}
+
+	assert.True(t, isGenericDropFileEmpty(state),
+		"isGenericDropFileEmpty should return true when drop file is empty")
+
+	// also verify missing file triggers incomplete
+	stateMissing := &session.RecordingState{
+		AdapterName: "generic",
+		SessionFile: filepath.Join(sessionPath, "nonexistent.jsonl"),
+	}
+	assert.True(t, isGenericDropFileEmpty(stateMissing),
+		"isGenericDropFileEmpty should return true when drop file is missing")
+}
+
+func TestSessionStop_NonEmptyDropFile_NotIncomplete(t *testing.T) {
+	// a non-empty drop file should NOT trigger the incomplete path
+	sessionPath := t.TempDir()
+
+	dropFile := filepath.Join(sessionPath, "input.jsonl")
+	content := `{"type":"user","content":"Hello"}` + "\n"
+	require.NoError(t, os.WriteFile(dropFile, []byte(content), 0600))
+
+	state := &session.RecordingState{
+		AdapterName: "generic",
+		SessionFile: dropFile,
+	}
+
+	assert.False(t, isGenericDropFileEmpty(state),
+		"isGenericDropFileEmpty should return false when drop file has content")
+
+	// non-generic adapter should also return false regardless of file state
+	stateNonGeneric := &session.RecordingState{
+		AdapterName: "claude-code",
+		SessionFile: dropFile,
+	}
+	assert.False(t, isGenericDropFileEmpty(stateNonGeneric),
+		"isGenericDropFileEmpty should return false for non-generic adapters")
+}
