@@ -429,16 +429,24 @@ func TestSessionStore(t *testing.T) {
 }
 
 func TestSessionEntryTypes(t *testing.T) {
-	t.Run("entry types are valid", func(t *testing.T) {
+	t.Run("entry types have expected string values", func(t *testing.T) {
+		assert.Equal(t, session.EntryType("user"), session.EntryTypeUser)
+		assert.Equal(t, session.EntryType("assistant"), session.EntryTypeAssistant)
+		assert.Equal(t, session.EntryType("system"), session.EntryTypeSystem)
+		assert.Equal(t, session.EntryType("tool"), session.EntryTypeTool)
+	})
+
+	t.Run("entry types are distinct", func(t *testing.T) {
 		types := []session.EntryType{
 			session.EntryTypeUser,
 			session.EntryTypeAssistant,
 			session.EntryTypeSystem,
 			session.EntryTypeTool,
 		}
-
-		for _, entryType := range types {
-			assert.NotEmpty(t, string(entryType))
+		seen := make(map[session.EntryType]bool)
+		for _, et := range types {
+			require.False(t, seen[et], "duplicate entry type: %s", et)
+			seen[et] = true
 		}
 	})
 }

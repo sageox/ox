@@ -86,22 +86,23 @@ func TestHookExecution(t *testing.T) {
 		if !hookInfo.SessionStartHookFired {
 			// known: Claude Code bug #10373 discards hook output for new sessions
 			// https://github.com/anthropics/claude-code/issues/10373
-			t.Log("SessionStart hook did not fire (known: Claude Code bug #10373 discards hook output for new sessions)")
+			t.Skip("SessionStart hook did not fire (known: Claude Code bug #10373)")
 		}
 	})
 
 	t.Run("ox_prime_in_hook", func(t *testing.T) {
 		if !hookInfo.OxPrimeInHookOutput {
-			t.Log("ox agent prime output not in hook (known: Claude Code bug #10373); Claude discovers ox via CLAUDE.md/AGENTS.md fallback")
+			// Claude discovers ox via CLAUDE.md/AGENTS.md fallback
+			t.Skip("ox agent prime output not in hook (known: Claude Code bug #10373)")
 		}
 	})
 
 	t.Run("agent_id_received", func(t *testing.T) {
 		if hookInfo.AgentID == "" {
-			t.Log("no agent ID in hook output (known: Claude Code bug #10373 discards hook output for new sessions)")
-		} else {
-			t.Logf("Agent ID from hook: %s", hookInfo.AgentID)
+			// known: Claude Code bug #10373 discards hook output for new sessions
+			t.Skip("no agent ID in hook output (known: Claude Code bug #10373)")
 		}
+		t.Logf("agent ID from hook: %s", hookInfo.AgentID)
 	})
 
 	t.Logf("Hook execution test completed in %v", result.Duration)

@@ -432,11 +432,8 @@ func TestSessionIDFallbackFromEnvVar(t *testing.T) {
 		// no hook input → agentSessionID would be empty
 		// fallback reads agent.SessionID(env) → gets env var value
 		// this is the logic from agent_prime.go after the fallback wiring
-		agentSessionID := "" // simulate: no hook stdin
-		if agentSessionID == "" {
-			// simulate: agent.SessionID(env) returned the env var
-			agentSessionID = envSessionID
-		}
+		// fallback: agent.SessionID(env) returns the env var when no hook stdin
+		agentSessionID := envSessionID
 
 		// create marker as prime would
 		marker := &SessionMarker{

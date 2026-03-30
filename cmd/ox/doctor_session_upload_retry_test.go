@@ -135,9 +135,7 @@ func TestReadCacheSessionMeta(t *testing.T) {
 
 	t.Run("missing file", func(t *testing.T) {
 		_, _, err := readCacheSessionMeta("/nonexistent/raw.jsonl")
-		if err == nil {
-			t.Error("expected error for missing file")
-		}
+		require.Error(t, err, "expected error for missing file")
 	})
 
 	t.Run("corrupt header", func(t *testing.T) {
@@ -146,9 +144,7 @@ func TestReadCacheSessionMeta(t *testing.T) {
 		os.WriteFile(rawPath, []byte("not json\n"), 0644)
 
 		_, _, err := readCacheSessionMeta(rawPath)
-		if err == nil {
-			t.Error("expected error for corrupt header")
-		}
+		require.Error(t, err, "expected error for corrupt header")
 	})
 
 	t.Run("header only no footer", func(t *testing.T) {
@@ -172,6 +168,12 @@ func TestReadCacheSessionMeta(t *testing.T) {
 // scanCacheDirForOrphans is a test-friendly version of the core scanning logic
 // extracted from findOrphanedSessions, without the config/path resolution.
 // This MUST stay in sync with findOrphanedSessions — especially StopIncomplete handling.
+//
+// Known divergences from production findOrphanedSessions:
+// - Production uses session.RecordingState struct instead of anonymous struct
+// - Production has stale recording detection (time-based threshold)
+// - Production cleans up .lock files
+// These divergences are intentional to keep the test helper simple.
 func scanCacheDirForOrphans(cacheSessionsDir, ledgerPath string) []orphanedSession {
 	entries, err := os.ReadDir(cacheSessionsDir)
 	if err != nil {
@@ -754,9 +756,27 @@ func TestRetrySessionUpload_ContentFilesNotPointers_OnLFSFailure(t *testing.T) {
 	// content file must remain as real bytes — not a tiny pointer.
 	// Before the fix, WriteSessionMeta (with fileRefs) was called before commitAndPush,
 	// so a push failure would leave only pointer stubs with no remote blob backing.
-	ledgerRawPath := filepath.Join(ledgerDir, "sessions", sessionName, ledgerFileRaw)
-	require.FileExists(t, ledgerRawPath,
-		"raw.jsonl must be copied to ledger session dir even when upload fails")
-	assert.False(t, lfs.IsPointerFile(ledgerRawPath),
-		"raw.jsonl copied to ledger must remain real content after a failed upload (bug #291 regression)")
+	// check ALL content files in the ledger session dir survive as real content
+	ledgerSessionDir := filepath.Join(ledgerDir, "sessions", sessionName)
+	contentFiles := []string{ledgerFileRaw}
+	// check for any additional files that were copied
+	if entries, err := os.ReadDir(ledgerSessionDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				contentFiles = append(contentFiles, e.Name())
+			}
+		}
+	}
+	// deduplicate
+	seen := make(map[string]bool)
+	for _, f := range contentFiles {
+		if seen[f] {
+			continue
+		}
+		seen[f] = true
+		fPath := filepath.Join(ledgerSessionDir, f)
+		require.FileExists(t, fPath, "%s should exist in ledger after failure", f)
+		assert.False(t, lfs.IsPointerFile(fPath),
+			"%s must remain real content after a failed upload (bug #291 regression)", f)
+	}
 }

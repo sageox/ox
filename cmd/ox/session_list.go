@@ -445,3 +445,25 @@ func formatSessionDuration(d time.Duration) string {
 	}
 	return fmt.Sprintf("%dh%dm", hours, mins)
 }
+
+// mergeSessionSources deduplicates sessions by SessionName.
+// Primary sessions take precedence over additional sessions.
+// Returns merged sessions sorted newest-first by CreatedAt.
+func mergeSessionSources(primary, additional []session.SessionInfo) []session.SessionInfo {
+	existing := make(map[string]bool, len(primary))
+	result := make([]session.SessionInfo, 0, len(primary)+len(additional))
+	for _, s := range primary {
+		existing[s.SessionName] = true
+		result = append(result, s)
+	}
+	for _, s := range additional {
+		if !existing[s.SessionName] {
+			existing[s.SessionName] = true
+			result = append(result, s)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].CreatedAt.After(result[j].CreatedAt)
+	})
+	return result
+}

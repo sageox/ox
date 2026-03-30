@@ -76,9 +76,15 @@ func TestDetermineLayers_MultipleWeeks(t *testing.T) {
 		LastMonthly: now.Add(-24 * time.Hour).Format(time.RFC3339),
 	}
 	plan := determineLayers(state, "", now)
-	if len(plan.Weeks) < 2 {
-		t.Errorf("expected at least 2 weeks for 3-week gap, got %d", len(plan.Weeks))
+	require.GreaterOrEqual(t, len(plan.Weeks), 2, "expected at least 2 weeks for 3-week gap")
+	// verify actual ISO week values: Feb 19 is W08, now Mar 12 is W11
+	// completed weeks between: W09, W10 (W08 is lastWeekly, W11 is current/incomplete)
+	weekNums := make([]int, len(plan.Weeks))
+	for i, w := range plan.Weeks {
+		weekNums[i] = w.Week
 	}
+	require.Contains(t, weekNums, 9, "should contain W09")
+	require.Contains(t, weekNums, 10, "should contain W10")
 }
 
 func TestDetermineLayers_MultipleMonths(t *testing.T) {
@@ -89,9 +95,9 @@ func TestDetermineLayers_MultipleMonths(t *testing.T) {
 		LastMonthly: time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
 	}
 	plan := determineLayers(state, "", now)
-	if len(plan.Months) < 2 {
-		t.Errorf("expected at least 2 months, got %d: %v", len(plan.Months), plan.Months)
-	}
+	require.GreaterOrEqual(t, len(plan.Months), 2, "expected at least 2 months")
+	require.Contains(t, plan.Months, "2026-01", "should contain January 2026")
+	require.Contains(t, plan.Months, "2026-02", "should contain February 2026")
 }
 
 func TestDetermineLayers_ExplicitLayer(t *testing.T) {
@@ -220,8 +226,9 @@ func TestReadRecentMemoryFiles(t *testing.T) {
 	if len(contents) != 2 {
 		t.Errorf("expected 2 files, got %d", len(contents))
 	}
-	// most recent first
-	if len(names) > 0 && names[0] != "2026-03-11.md" {
+	// most recent first — guard against empty slice hiding a real bug
+	require.NotEmpty(t, names, "names should not be empty after reading 2 files")
+	if names[0] != "2026-03-11.md" {
 		t.Errorf("expected most recent first, got %s", names[0])
 	}
 }

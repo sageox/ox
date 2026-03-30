@@ -85,6 +85,34 @@ func TestDownloadObject_NilAction(t *testing.T) {
 	assert.Contains(t, err.Error(), "no download action")
 }
 
+func TestDownloadAndVerifyObject_OIDMatch(t *testing.T) {
+	content := []byte("verified content")
+	expectedOID := ComputeOID(content)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(content)
+	}))
+	defer server.Close()
+
+	data, err := DownloadAndVerifyObject(&Action{Href: server.URL}, expectedOID)
+	require.NoError(t, err)
+	assert.Equal(t, content, data)
+}
+
+func TestDownloadAndVerifyObject_OIDMismatch(t *testing.T) {
+	content := []byte("actual content")
+	wrongOID := ComputeOID([]byte("different content"))
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(content)
+	}))
+	defer server.Close()
+
+	_, err := DownloadAndVerifyObject(&Action{Href: server.URL}, wrongOID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "OID mismatch")
+}
+
 func TestUploadAll(t *testing.T) {
 	oid := ComputeOID([]byte("test data"))
 	content := []byte("test data")

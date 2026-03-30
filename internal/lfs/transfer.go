@@ -144,6 +144,19 @@ func DownloadObject(action *Action) ([]byte, error) {
 	return data, nil
 }
 
+// DownloadAndVerifyObject downloads a blob and verifies its SHA256 matches the expected OID.
+func DownloadAndVerifyObject(action *Action, expectedOID string) ([]byte, error) {
+	data, err := DownloadObject(action)
+	if err != nil {
+		return nil, err
+	}
+	actualOID := ComputeOID(data)
+	if actualOID != expectedOID {
+		return nil, fmt.Errorf("OID mismatch: expected %s, got %s", expectedOID, actualOID)
+	}
+	return data, nil
+}
+
 // UploadAll uploads multiple blobs in parallel.
 // files maps OID -> content. Uses objects from the batch response to find upload actions.
 func UploadAll(resp *BatchResponse, files map[string][]byte, maxConcurrent int) []UploadResult {

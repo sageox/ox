@@ -44,15 +44,21 @@ func TestCheckHealth_StorageNotWritable(t *testing.T) {
 }
 
 func TestCheckHealth_RepoNotCloned(t *testing.T) {
-	// CheckHealth uses ledger.DefaultPath() based on cwd git root
-	// since tests run from ox repo, this finds the sibling ledger pattern
-	// the result depends on whether that ledger exists
-	status := CheckHealth("")
+	// use a temp dir with .sageox/ but no ledger to avoid CWD fallback
+	tmpDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0755))
+	// write a minimal config so ledgerPathFromProject returns a non-existent path
+	configData := []byte(`{"repo_id":"nonexistent-repo","endpoint":"https://test.sageox.ai"}`)
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), configData, 0644))
 
-	// either RepoCloned is true (ledger exists) or false with error
-	if !status.RepoCloned {
-		assert.Equal(t, "ledger not provisioned", status.RepoError)
+	status := CheckHealth(tmpDir)
+
+	// the ledger for "nonexistent-repo" won't exist → RepoCloned should be false
+	if status.RepoCloned {
+		// if it somehow resolves, the test is not meaningful — skip
+		t.Skip("ledger path resolved unexpectedly; test environment has matching ledger")
 	}
+	assert.NotEmpty(t, status.RepoError, "should have a repo error when ledger doesn't exist")
 }
 
 func TestCheckHealth_RepoCloned(t *testing.T) {

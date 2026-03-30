@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/internal/gitserver"
 )
 
 func TestHeartbeatHandler_Handle(t *testing.T) {
@@ -961,6 +963,71 @@ func TestHeartbeatHandler_CallerEviction(t *testing.T) {
 		if c.ID == "oldest-caller" {
 			t.Fatal("expected oldest-caller to be evicted")
 		}
+	}
+}
+
+func TestHeartbeatHandler_CredentialPersistenceRoundTrip(t *testing.T) {
+	// round-trip: Save → Load → SetInitialCredentials → HasValidCredentials
+	// mirrors the daemon.go:787-796 cold-start pattern
+	tmpDir := t.TempDir()
+	prev := gitserver.TestSetConfigDirOverride(tmpDir)
+	prevForce := gitserver.TestSetForceFileStorage(true)
+	t.Cleanup(func() {
+		gitserver.TestSetConfigDirOverride(prev)
+		gitserver.TestSetForceFileStorage(prevForce)
+	})
+
+	testEndpoint := "https://test.sageox.ai"
+	expiresAt := time.Now().Add(24 * time.Hour).Truncate(time.Second) // truncate for JSON
+
+	// step 1: save credentials to disk (CLI does this)
+	savedCreds := gitserver.GitCredentials{
+		Token:     "glpat-test-token-abc123",
+		ServerURL: "https://git.test.sageox.ai",
+		ExpiresAt: expiresAt,
+	}
+	err := gitserver.SaveCredentialsForEndpoint(testEndpoint, savedCreds)
+	if err != nil {
+		t.Fatalf("SaveCredentialsForEndpoint: %v", err)
+	}
+
+	// step 2: load credentials from disk (daemon cold-start does this)
+	loaded, err := gitserver.LoadCredentialsForEndpoint(testEndpoint)
+	if err != nil {
+		t.Fatalf("LoadCredentialsForEndpoint: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("loaded credentials should not be nil")
+	}
+
+	// step 3: convert to HeartbeatCreds (same as daemon.go:788-792)
+	hbCreds := &HeartbeatCreds{
+		Token:     loaded.Token,
+		ServerURL: loaded.ServerURL,
+		ExpiresAt: loaded.ExpiresAt,
+	}
+
+	// step 4: set on a fresh handler
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := NewHeartbeatHandler(logger)
+	handler.SetInitialCredentials(hbCreds)
+
+	// step 5: verify
+	if !handler.HasValidCredentials() {
+		t.Error("handler should have valid credentials after round-trip")
+	}
+	retrieved, _ := handler.GetCredentials()
+	if retrieved == nil {
+		t.Fatal("GetCredentials should return non-nil after SetInitialCredentials")
+	}
+	if retrieved.Token != savedCreds.Token {
+		t.Errorf("token mismatch: got %q, want %q", retrieved.Token, savedCreds.Token)
+	}
+	if retrieved.ServerURL != savedCreds.ServerURL {
+		t.Errorf("serverURL mismatch: got %q, want %q", retrieved.ServerURL, savedCreds.ServerURL)
+	}
+	if !retrieved.ExpiresAt.Equal(expiresAt) {
+		t.Errorf("expiresAt mismatch: got %v, want %v", retrieved.ExpiresAt, expiresAt)
 	}
 }
 
