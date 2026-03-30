@@ -30,7 +30,7 @@ func gitExec(t *testing.T, dir string, args ...string) {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(os.Environ(), // safe: git subprocess needs parent env for git config; isolated via cmd.Dir=tmpdir
 		"GIT_AUTHOR_NAME=test",
 		"GIT_AUTHOR_EMAIL=test@sageox.ai",
 		"GIT_COMMITTER_NAME=test",
