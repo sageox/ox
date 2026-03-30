@@ -290,3 +290,46 @@ func TestSessionStatusOutput_NotRecording_JSONFormat(t *testing.T) {
 	assert.NotContains(t, jsonStr, `"title"`, "omitempty should exclude empty title")
 	assert.NotContains(t, jsonStr, `"duration_seconds"`, "omitempty should exclude zero duration")
 }
+
+// TestStartRecording_StartOffsetPropagated verifies that StartOffset passed in
+// StartRecordingOptions is stored in the recording state. This is the mechanism
+// that prevents pre-session content from leaking into raw.jsonl (ox-a9y regression).
+func TestStartRecording_StartOffsetPropagated(t *testing.T) {
+	projectRoot := setupSessionTestProject(t)
+
+	sourceFile := filepath.Join(t.TempDir(), "session.jsonl")
+	preContent := `{"type":"user","content":"pre-session message"}` + "\n"
+	require.NoError(t, os.WriteFile(sourceFile, []byte(preContent), 0644))
+
+	fi, err := os.Stat(sourceFile)
+	require.NoError(t, err)
+	wantOffset := fi.Size()
+
+	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+		AgentID:     "OxOffset1",
+		AdapterName: "claude-code",
+		SessionFile: sourceFile,
+		StartOffset: wantOffset,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, wantOffset, state.StartOffset,
+		"StartOffset must be persisted from opts so hooks skip pre-session file content")
+	assert.Greater(t, state.StartOffset, int64(0),
+		"StartOffset must be non-zero when session file has pre-existing content")
+}
+
+// TestStartRecording_StartOffsetZeroWhenNoSessionFile verifies that StartOffset
+// stays 0 when no session file is provided (generic adapters, new empty files).
+func TestStartRecording_StartOffsetZeroWhenNoSessionFile(t *testing.T) {
+	projectRoot := setupSessionTestProject(t)
+
+	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+		AgentID:     "OxOffset2",
+		AdapterName: "generic",
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, int64(0), state.StartOffset,
+		"StartOffset must be 0 when no session file exists yet (nothing to skip)")
+}

@@ -269,10 +269,8 @@ func checkLedgerBranchStatus(fix bool) checkResult {
 
 // fixLedgerBranchAhead pushes local ledger commits to remote.
 func fixLedgerBranchAhead(ledgerPath string, aheadCount int) checkResult {
-	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
-		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
-		RepairLFS:           true,
-	}); err != nil {
+	// pushLedger refreshes credentials before pushing (same as session upload path)
+	if err := pushLedger(context.Background(), ledgerPath); err != nil {
 		return FailedCheck("Ledger branch status",
 			"push failed",
 			fmt.Sprintf("push error: %s", err))
@@ -340,11 +338,8 @@ func fixLedgerBranchDiverged(ledgerPath string, aheadCount, behindCount int) che
 		}
 	}
 
-	// PushWithRetry handles pull --rebase + auto-resolve + push in one call
-	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
-		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
-		RepairLFS:           true,
-	}); err != nil {
+	// pushLedger handles pull --rebase + auto-resolve + push with credential refresh
+	if err := pushLedger(context.Background(), ledgerPath); err != nil {
 		return FailedCheck("Ledger branch status",
 			"reconcile failed",
 			fmt.Sprintf("push error: %s", err))

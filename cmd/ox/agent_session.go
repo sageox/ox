@@ -201,6 +201,15 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	useragent.SetAgentType(adapterName)
 
+	// capture file size before recording starts — entries before this offset are pre-session
+	// (e.g., buffered messages from before /ox-session-start was called)
+	var startOffset int64
+	if sessionFile != "" {
+		if fi, err := os.Stat(sessionFile); err == nil {
+			startOffset = fi.Size()
+		}
+	}
+
 	// start recording with agent ID from session
 	opts := session.StartRecordingOptions{
 		AgentID:       inst.AgentID,
@@ -212,6 +221,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		WorkspacePath: projectRoot,
 		Branch:        repotools.GetCurrentBranch(projectRoot),
 		ParentPID:     os.Getppid(), // use current parent, not stale prime-time PID (fixes Conductor orphan detection)
+		StartOffset:   startOffset,
 	}
 
 	state, err := session.StartRecording(projectRoot, opts)

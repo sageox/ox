@@ -73,12 +73,14 @@ func RefreshRemoteCredentials(repoPath, endpointURL string) error {
 		return nil
 	}
 
-	// verify the remote host matches the credential server (multi-endpoint safety)
+	// verify the remote host matches the credential server (multi-endpoint safety).
+	// Also skip local paths (file://, plain /path) — they have no hostname so
+	// credentials for a real server must never be injected into them.
 	if creds.ServerURL != "" {
 		remoteHost := extractHost(remoteURL)
 		credHost := extractHost(creds.ServerURL)
-		if remoteHost != "" && credHost != "" && remoteHost != credHost {
-			return nil // different server, not our repo to update
+		if credHost != "" && remoteHost != credHost {
+			return nil // different server (or local path vs real server) — don't update
 		}
 	}
 

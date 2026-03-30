@@ -604,10 +604,11 @@ type StartRecordingOptions struct {
 	ParentSessionPath string // path to parent's session folder (optional)
 	ParentAgentID     string // parent's agent ID (optional)
 
-	AgentType string // original agent type for metadata (e.g., "codex", "amp")
-	Model     string // LLM model for generic adapters
-	ParentPID int    // parent agent process ID for liveness detection
-	Origin    string // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
+	AgentType   string // original agent type for metadata (e.g., "codex", "amp")
+	Model       string // LLM model for generic adapters
+	ParentPID   int    // parent agent process ID for liveness detection
+	Origin      string // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
+	StartOffset int64  // byte offset of SessionFile at recording start; entries before this are pre-session
 }
 
 // StartRecording begins a new recording session.
@@ -734,6 +735,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		ParentPID:         opts.ParentPID,
 		Origin:            origin,
 		CacheDir:          paths.CacheDir(),
+		StartOffset:       opts.StartOffset,
 	}
 
 	// always capture parent PID for liveness detection and ghost cleanup

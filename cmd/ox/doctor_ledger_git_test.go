@@ -158,6 +158,35 @@ func TestFixLedgerBranchAhead_FallsThroughToDivergedFix(t *testing.T) {
 	assert.Len(t, matches, 1, "PR #950 should exist on remote")
 }
 
+// TestFixLedgerBranchAhead_UsesPushLedger verifies that fixLedgerBranchAhead
+// uses pushLedger (which includes PrePush credential refresh) rather than calling
+// PushWithRetry directly (ox-az9 regression).
+//
+// Previously fixLedgerBranchAhead called gitutil.PushWithRetry without a PrePush
+// hook, so a stale PAT in the remote URL was never refreshed, causing HTTP 403 on
+// real server pushes. Now it calls pushLedger which runs RefreshRemoteCredentials
+// before each attempt. Test repos use file:// URLs so the credential refresh
+// no-ops, but the push succeeds — verifying the code path is correct.
+func TestFixLedgerBranchAhead_UsesPushLedger(t *testing.T) {
+	barePath, machineB := createBareAndClone(t)
+
+	prB := makePR(1001, "push-ledger regression test", "user1", "open")
+	writeGitHubPRFile(t, machineB, prB)
+	commitGitHubData(t, machineB, "github: test that fixLedgerBranchAhead uses pushLedger")
+
+	result := fixLedgerBranchAhead(machineB, 1)
+
+	assert.True(t, result.passed,
+		"fixLedgerBranchAhead must succeed: %s — %s", result.message, result.detail)
+	assert.Contains(t, result.message, "pushed",
+		"success message must indicate push completed")
+
+	verifyClone := cloneBare(t, barePath)
+	pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", "1001.json")
+	matches, _ := filepath.Glob(pattern)
+	assert.Len(t, matches, 1, "PR #1001 must be visible on remote after push")
+}
+
 func TestStripURLCredentials(t *testing.T) {
 	tests := []struct {
 		name     string
