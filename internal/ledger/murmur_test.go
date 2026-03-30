@@ -908,7 +908,132 @@ func TestConfigureSparseCheckout_PreservesModifiedFilesOutsideWindow(t *testing.
 	}
 }
 
-// Regression test: renamed files produce two NUL-separated tokens in
+// Unit tests for parseDirtyDirsFromPorcelain — validates parsing of
+// "git status --porcelain -z" output without needing a real git repo.
+func TestParseDirtyDirsFromPorcelain(t *testing.T) {
+	t.Parallel()
+
+	// helper: join tokens with NUL to simulate porcelain -z output
+	nul := "\x00"
+
+	tests := []struct {
+		name     string
+		output   string
+		coneDirs []string
+		want     []string
+	}{
+		{
+			name:   "empty output",
+			output: "",
+			want:   nil,
+		},
+		{
+			name:     "single modified file",
+			output:   " M data/custom/file.csv" + nul,
+			coneDirs: []string{"sessions"},
+			want:     []string{"data"},
+		},
+		{
+			name:     "modified file already in cone",
+			output:   " M sessions/abc/raw.jsonl" + nul,
+			coneDirs: []string{"sessions"},
+			want:     nil,
+		},
+		{
+			name:     "staged new file",
+			output:   "A  data/linear/import.csv" + nul,
+			coneDirs: []string{"sessions", ".sageox"},
+			want:     []string{"data"},
+		},
+		{
+			name:     "multiple files in different dirs",
+			output:   " M data/custom/a.csv" + nul + "A  imports/b.json" + nul,
+			coneDirs: []string{"sessions"},
+			want:     []string{"data", "imports"},
+		},
+		{
+			name:     "deduplicates same top-level dir",
+			output:   " M data/custom/a.csv" + nul + " M data/linear/b.csv" + nul,
+			coneDirs: []string{"sessions"},
+			want:     []string{"data"},
+		},
+		{
+			name: "rename entry: both new and orig dirs detected",
+			// "R  archive/batch1/data.csv\0imports/batch1/data.csv\0"
+			output:   "R  archive/batch1/data.csv" + nul + "imports/batch1/data.csv" + nul,
+			coneDirs: []string{"sessions"},
+			want:     []string{"archive", "imports"},
+		},
+		{
+			name: "rename where dest is in cone, orig is not",
+			// dest (sessions/) already in cone, but orig (imports/) is not
+			output:   "R  sessions/renamed.csv" + nul + "imports/original.csv" + nul,
+			coneDirs: []string{"sessions"},
+			want:     []string{"imports"},
+		},
+		{
+			name: "rename where orig is in cone, dest is not",
+			output:   "R  archive/moved.csv" + nul + "sessions/original.csv" + nul,
+			coneDirs: []string{"sessions"},
+			want:     []string{"archive"},
+		},
+		{
+			name: "copy entry: both paths detected",
+			output:   "C  backup/data.csv" + nul + "data/custom/data.csv" + nul,
+			coneDirs: []string{"sessions"},
+			want:     []string{"backup", "data"},
+		},
+		{
+			name: "rename followed by normal entry",
+			output:   "R  archive/f.csv" + nul + "imports/f.csv" + nul + " M data/other.json" + nul,
+			coneDirs: []string{"sessions"},
+			want:     []string{"archive", "imports", "data"},
+		},
+		{
+			name: "multiple renames",
+			output: "R  dest1/a.csv" + nul + "src1/a.csv" + nul +
+				"R  dest2/b.csv" + nul + "src2/b.csv" + nul,
+			coneDirs: []string{"sessions"},
+			want:     []string{"dest1", "src1", "dest2", "src2"},
+		},
+		{
+			name:     "root-level file (no slash)",
+			output:   " M README.md" + nul,
+			coneDirs: []string{"sessions"},
+			want:     []string{"README.md"},
+		},
+		{
+			name: "rename with short orig path",
+			// orig path "ab" is only 2 chars — must still be parsed as bare path
+			output:   "R  archive/f.csv" + nul + "ab" + nul,
+			coneDirs: []string{"sessions"},
+			want:     []string{"archive", "ab"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseDirtyDirsFromPorcelain([]byte(tt.output), tt.coneDirs)
+			if len(tt.want) == 0 {
+				if len(got) != 0 {
+					t.Errorf("want nil/empty, got %v", got)
+				}
+				return
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("want %v, got %v", tt.want, got)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Errorf("index %d: want %q, got %q", i, tt.want[i], got[i])
+				}
+			}
+		})
+	}
+}
+
+// Integration test: renamed files produce two NUL-separated tokens in
 // "git status --porcelain -z" output. The second token (orig path) is a bare
 // path without the "XY " status prefix. dirtyDirsOutsideCone must handle both
 // tokens correctly, protecting both source and destination directories.

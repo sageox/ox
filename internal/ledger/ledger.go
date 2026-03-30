@@ -482,13 +482,21 @@ func ConfigureSparseCheckout(path string) error {
 // This prevents "sparse-checkout set" from deleting files the CLI has staged
 // but not yet committed+pushed.
 func dirtyDirsOutsideCone(repoPath string, coneDirs []string) []string {
-	// get staged + unstaged changed files
 	cmd := exec.Command("git", "-C", repoPath, "status", "--porcelain", "-z")
 	out, err := cmd.Output()
 	if err != nil || len(out) == 0 {
 		return nil
 	}
+	return parseDirtyDirsFromPorcelain(out, coneDirs)
+}
 
+// parseDirtyDirsFromPorcelain extracts top-level directories from NUL-delimited
+// "git status --porcelain -z" output that are not already in coneDirs.
+//
+// Porcelain -z format:
+//   - Normal entries:  "XY path\0"
+//   - Rename/copy:     "XY new_path\0orig_path\0" (orig_path is a bare token)
+func parseDirtyDirsFromPorcelain(porcelainOutput []byte, coneDirs []string) []string {
 	coneSet := make(map[string]bool, len(coneDirs))
 	for _, d := range coneDirs {
 		coneSet[d] = true
@@ -511,14 +519,10 @@ func dirtyDirsOutsideCone(repoPath string, coneDirs []string) []string {
 		}
 	}
 
-	// --porcelain -z: entries separated by NUL.
-	// Normal entries: "XY path\0"
-	// Rename/copy:    "XY new_path\0orig_path\0" (orig_path is a bare token)
-	entries := strings.Split(string(out), "\x00")
+	entries := strings.Split(string(porcelainOutput), "\x00")
 	expectBarePath := false
 	for _, entry := range entries {
 		if expectBarePath {
-			// bare orig_path from a rename/copy entry — no status prefix
 			expectBarePath = false
 			addTopDir(entry)
 			continue
