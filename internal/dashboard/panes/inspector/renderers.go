@@ -44,7 +44,7 @@ func RenderSession(target domain.InspectorTarget, width int) string {
 	lines = append(lines, row("Created", humanTime(sess.CreatedAt)))
 	if !sess.ModTime.IsZero() && !sess.CreatedAt.IsZero() && sess.ModTime.After(sess.CreatedAt) {
 		dur := sess.ModTime.Sub(sess.CreatedAt).Round(time.Second)
-		lines = append(lines, row("Duration", fmt.Sprintf("%s", dur)))
+		lines = append(lines, row("Duration", dur.String()))
 	}
 	if sess.EntryCount > 0 {
 		lines = append(lines, row("Entries", fmt.Sprintf("%d", sess.EntryCount)))
@@ -418,9 +418,7 @@ func RenderMurmur(target domain.InspectorTarget, width int) string {
 		lines = append(lines, "")
 		lines = append(lines, theme.InspectorTitleStyle.Render("Content"))
 		// Full content — no truncation. Word-wrap to pane width.
-		for _, line := range wrapText(m.Content, width-2) {
-			lines = append(lines, line)
-		}
+		lines = append(lines, wrapText(m.Content, width-2)...)
 	}
 
 	lines = append(lines, "")
