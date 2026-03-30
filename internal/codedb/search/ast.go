@@ -67,6 +67,7 @@ type Filters struct {
 	Calls       string
 	CalledBy    string
 	Returns     string
+	Depth       int // for multi-hop calls:/calledby: (default 1, max 10)
 	CommentKind string
 	State       string
 }

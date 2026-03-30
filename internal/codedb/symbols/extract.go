@@ -3,6 +3,7 @@ package symbols
 import (
 	"sort"
 	"strings"
+	"sync"
 
 	gotreesitter "github.com/odvcencio/gotreesitter"
 	"github.com/odvcencio/gotreesitter/grammars"
@@ -29,6 +30,45 @@ var supportedLangs = []string{
 	"go", "python", "javascript", "typescript", "tsx", "rust", "c", "cpp",
 }
 
+// langCache holds pre-resolved language entries and taggers.
+// Populated once via initLangs to avoid data races in
+// grammars.DetectLanguage (upstream resolveHighlightInheritance is not thread-safe).
+type langEntry struct {
+	entry     grammars.LangEntry
+	tagsQuery string
+	lang      *gotreesitter.Language
+}
+
+var (
+	langInitOnce sync.Once
+	langCache    map[string]*langEntry // keyed by lowercase language name
+)
+
+func initLangs() {
+	langInitOnce.Do(func() {
+		langCache = make(map[string]*langEntry, len(langToExt))
+		for lang, fakeFile := range langToExt {
+			entry := grammars.DetectLanguage(fakeFile)
+			if entry == nil {
+				continue
+			}
+			tq := grammars.ResolveTagsQuery(*entry)
+			if tq == "" {
+				continue
+			}
+			l := entry.Language()
+			if l == nil {
+				continue
+			}
+			langCache[lang] = &langEntry{
+				entry:     *entry,
+				tagsQuery: tq,
+				lang:      l,
+			}
+		}
+	})
+}
+
 // Extract parses source code in the given language and returns symbol
 // definitions and references using tree-sitter tags queries.
 func Extract(source, language string) ([]Symbol, []Ref) {
@@ -36,27 +76,14 @@ func Extract(source, language string) ([]Symbol, []Ref) {
 		return nil, nil
 	}
 
-	fakeFile, ok := langToExt[strings.ToLower(language)]
+	initLangs()
+
+	le, ok := langCache[strings.ToLower(language)]
 	if !ok {
 		return nil, nil
 	}
 
-	entry := grammars.DetectLanguage(fakeFile)
-	if entry == nil {
-		return nil, nil
-	}
-
-	tagsQuery := grammars.ResolveTagsQuery(*entry)
-	if tagsQuery == "" {
-		return nil, nil
-	}
-
-	lang := entry.Language()
-	if lang == nil {
-		return nil, nil
-	}
-
-	tagger, err := gotreesitter.NewTagger(lang, tagsQuery)
+	tagger, err := gotreesitter.NewTagger(le.lang, le.tagsQuery)
 	if err != nil {
 		return nil, nil
 	}
@@ -101,7 +128,7 @@ func Extract(source, language string) ([]Symbol, []Ref) {
 
 	assignParents(syms)
 	assignContainingSymbols(syms, refs, refStartBytes)
-	extractTypeInfo(lang, language, []byte(source), syms)
+	extractTypeInfo(le.lang, language, []byte(source), syms)
 
 	return syms, refs
 }
@@ -158,6 +185,8 @@ func assignParents(syms []Symbol) {
 
 // assignContainingSymbols finds the innermost symbol containing each ref
 // (smallest byte span that encloses the ref's start byte).
+// O(n*m) scan chosen for clarity; sufficient for typical file sizes.
+// An interval tree could replace this if profiling shows it's a bottleneck.
 func assignContainingSymbols(syms []Symbol, refs []Ref, refStartBytes []uint32) {
 	if len(refs) == 0 || len(syms) == 0 {
 		return

@@ -180,6 +180,12 @@ func ParseQuery(input string) (*ParsedQuery, error) {
 				filters.CalledBy = value
 			case !negated && key == "returns":
 				filters.Returns = value
+			case !negated && key == "depth":
+				d, dErr := strconv.Atoi(value)
+				if dErr != nil || d < 1 || d > 10 {
+					return nil, fmt.Errorf("depth: must be an integer 1-10, got '%s'", value)
+				}
+				filters.Depth = d
 			case !negated && (key == "ckind" || key == "comment-kind"):
 				filters.CommentKind = value
 			case !negated && key == "state":

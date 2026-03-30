@@ -304,7 +304,10 @@ func TestConcurrentSessionUploads_Parallel(t *testing.T) {
 }
 
 func TestPushLedger_EmptyGitRoot_NoPanic(t *testing.T) {
-	_, clonePath := createBareAndClone(t)
+	barePath, clonePath := createBareAndClone(t)
+
+	// capture original remote URL before pushLedger runs
+	originalRemote := strings.TrimSpace(runGit(t, clonePath, "remote", "get-url", "origin"))
 
 	// cd to a non-git dir so findGitRoot() returns ""
 	nonGitDir := t.TempDir()
@@ -315,11 +318,23 @@ func TestPushLedger_EmptyGitRoot_NoPanic(t *testing.T) {
 	runGit(t, clonePath, "add", filepath.Join(clonePath, "sessions"))
 	runGit(t, clonePath, "commit", "--no-verify", "-m", "session: "+sessionName)
 
-	// when findGitRoot() returns "", endpoint.GetForProject("") returns ""
-	// RefreshRemoteCredentials now early-returns nil for empty endpoints,
-	// preserving the remote URL. The push still fails (no valid credentials).
-	err := pushLedger(context.Background(), clonePath)
-	assert.Error(t, err, "push should fail when git root is empty (no credentials available)")
+	// when findGitRoot() is empty, pushLedger must skip credential refresh
+	// entirely — not fall back to the Default endpoint which would corrupt
+	// the remote URL by injecting oauth2 credentials into a file:// URL
+	assert.NotPanics(t, func() {
+		_ = pushLedger(context.Background(), clonePath)
+	})
+
+	// verify remote URL was not corrupted by credential injection
+	afterRemote := strings.TrimSpace(runGit(t, clonePath, "remote", "get-url", "origin"))
+	assert.Equal(t, originalRemote, afterRemote,
+		"remote URL must not be modified when git root is empty")
+
+	// verify push still succeeded (no credential injection needed for file:// remotes)
+	verifyClone := cloneBare(t, barePath)
+	metaPath := filepath.Join(verifyClone, "sessions", sessionName, "meta.json")
+	_, err := os.Stat(metaPath)
+	assert.NoError(t, err, "session should be pushed to remote despite empty git root")
 }
 
 func TestEnsureSessionsGitignore(t *testing.T) {

@@ -2,8 +2,10 @@
 package endpoint
 
 import (
+	"log/slog"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 )
 
@@ -114,6 +116,15 @@ func GetForProject(projectRoot string) string {
 		if ep := ProjectEndpointGetter(projectRoot); ep != "" {
 			return NormalizeEndpoint(ep)
 		}
+	}
+
+	// warn when falling through to Default with no project root —
+	// callers probably should use Get() instead, or guard against empty root
+	if projectRoot == "" {
+		pc, file, line, _ := runtime.Caller(1)
+		caller := runtime.FuncForPC(pc).Name()
+		slog.Debug("GetForProject called with empty projectRoot, falling back to Default",
+			"caller", caller, "file", file, "line", line)
 	}
 
 	return Default

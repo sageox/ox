@@ -1,6 +1,8 @@
 package symbols
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -360,5 +362,118 @@ func TestAssignContainingSymbols(t *testing.T) {
 	// ref at byte 200 is outside all symbols
 	if refs[2].ContainingSymIdx != -1 {
 		t.Errorf("ref c ContainingSymIdx = %d, want -1", refs[2].ContainingSymIdx)
+	}
+}
+
+func TestExtract_Go_ReturnType(t *testing.T) {
+	t.Parallel()
+	src := `package main
+
+func add(a, b int) int {
+	return a + b
+}
+`
+	syms, _ := Extract(src, "go")
+	for _, s := range syms {
+		if s.Name == "add" {
+			if !strings.Contains(s.ReturnType, "int") {
+				t.Errorf("add ReturnType = %q, want contains 'int'", s.ReturnType)
+			}
+			return
+		}
+	}
+	t.Fatal("did not find add function")
+}
+
+func TestExtract_Rust_ReturnType(t *testing.T) {
+	t.Parallel()
+	src := `struct Config { name: String }
+
+fn create() -> Config {
+    Config { name: String::new() }
+}
+`
+	syms, _ := Extract(src, "rust")
+	for _, s := range syms {
+		if s.Name == "create" {
+			if !strings.Contains(s.ReturnType, "Config") {
+				t.Errorf("create ReturnType = %q, want contains 'Config'", s.ReturnType)
+			}
+			return
+		}
+	}
+	t.Fatal("did not find create function")
+}
+
+func TestExtract_TypeScript_ReturnType(t *testing.T) {
+	t.Parallel()
+	src := `function greet(name: string): string {
+    return name;
+}
+`
+	syms, _ := Extract(src, "typescript")
+	for _, s := range syms {
+		if s.Name == "greet" {
+			if !strings.Contains(s.ReturnType, "string") {
+				t.Errorf("greet ReturnType = %q, want contains 'string'", s.ReturnType)
+			}
+			return
+		}
+	}
+	t.Fatal("did not find greet function")
+}
+
+func TestExtract_C_ReturnType(t *testing.T) {
+	t.Parallel()
+	src := `int add(int a, int b) {
+    return a + b;
+}
+`
+	syms, _ := Extract(src, "c")
+	for _, s := range syms {
+		if s.Name == "add" {
+			if !strings.Contains(s.ReturnType, "int") {
+				t.Errorf("add ReturnType = %q, want contains 'int'", s.ReturnType)
+			}
+			return
+		}
+	}
+	t.Fatal("did not find add function")
+}
+
+func TestExtract_LargeFile(t *testing.T) {
+	t.Parallel()
+	var b strings.Builder
+	b.WriteString("package main\n\n")
+	for i := 0; i < 500; i++ {
+		fmt.Fprintf(&b, "func f%d() {}\n", i)
+	}
+	syms, _ := Extract(b.String(), "go")
+	if len(syms) < 500 {
+		t.Errorf("expected >= 500 symbols from large file, got %d", len(syms))
+	}
+}
+
+func TestExtract_MalformedSource(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		src  string
+		lang string
+	}{
+		{"unclosed_brace", "package main\nfunc main() {", "go"},
+		{"truncated_function", "package main\nfunc ma", "go"},
+		{"random_garbage", "asd;flkj @#$ }{[]", "go"},
+		{"empty_class", "class {", "javascript"},
+		{"partial_struct", "struct Foo {", "rust"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// must not panic — result can be nil or non-nil
+			syms, refs := Extract(tc.src, tc.lang)
+			_ = syms
+			_ = refs
+		})
 	}
 }

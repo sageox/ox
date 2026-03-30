@@ -23,6 +23,7 @@
     "Calls": "groupby",
     "CalledBy": "",
     "Returns": "",
+    "Depth": 0,
     "CommentKind": "",
     "State": ""
   }

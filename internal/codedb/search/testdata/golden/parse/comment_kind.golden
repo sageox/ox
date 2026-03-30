@@ -23,6 +23,7 @@
     "Calls": "",
     "CalledBy": "",
     "Returns": "",
+    "Depth": 0,
     "CommentKind": "doc",
     "State": ""
   }

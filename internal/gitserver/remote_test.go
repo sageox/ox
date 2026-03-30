@@ -218,18 +218,89 @@ func TestRefreshRemoteCredentials_ExpiredCredentials(t *testing.T) {
 	assert.NotContains(t, string(output), "new-but-expired-token")
 }
 
-// regression test for ox-1tjo: empty endpoint corrupts remote URL
-func TestRefreshRemoteCredentials_EmptyEndpoint(t *testing.T) {
-	dir := setupGitRepoWithRemote(t, "https://oauth2:some-token@git.sageox.ai/team/ledger.git")
+// empty endpoint derives endpoint from remote URL host, then loads credentials
+func TestRefreshRemoteCredentials_EmptyEndpoint_DerivesFromRemote(t *testing.T) {
+	// use example.invalid so no real credentials can match
+	dir := setupGitRepoWithRemote(t, "https://oauth2:some-token@git.example.invalid/team/ledger.git")
+
+	// set up empty credential dir — no credentials for example.invalid
+	credDir := t.TempDir()
+	prev := TestSetConfigDirOverride(credDir)
+	prevForce := TestSetForceFileStorage(true)
+	t.Cleanup(func() {
+		TestSetConfigDirOverride(prev)
+		TestSetForceFileStorage(prevForce)
+	})
+
+	// empty endpoint → derives "https://example.invalid" from remote
+	// no credentials stored → error (PAT exists but can't refresh)
+	err := RefreshRemoteCredentials(dir, "")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no credentials stored")
+
+	// remote URL must remain unchanged despite error
+	cmd := exec.Command("git", "-C", dir, "remote", "get-url", "origin")
+	output, err := cmd.Output()
+	require.NoError(t, err)
+	assert.Contains(t, string(output), "some-token")
+}
+
+// empty endpoint with matching credentials refreshes successfully
+func TestRefreshRemoteCredentials_EmptyEndpoint_WithCredentials(t *testing.T) {
+	oldToken := "old-token-abc"
+	newToken := "new-token-xyz"
+	dir := setupGitRepoWithRemote(t, "https://oauth2:"+oldToken+"@git.sageox.ai/team/ledger.git")
+
+	// derived endpoint: git.sageox.ai → sageox.ai
+	setupTestCredentials(t, "https://sageox.ai", newToken, "https://git.sageox.ai")
 
 	err := RefreshRemoteCredentials(dir, "")
 	require.NoError(t, err)
 
-	// remote URL must remain unchanged
 	cmd := exec.Command("git", "-C", dir, "remote", "get-url", "origin")
 	output, err := cmd.Output()
 	require.NoError(t, err)
-	assert.Equal(t, "https://oauth2:some-token@git.sageox.ai/team/ledger.git\n", string(output))
+	assert.Contains(t, string(output), newToken)
+	assert.NotContains(t, string(output), oldToken)
+}
+
+// local file:// remotes must never have credentials injected
+func TestRefreshRemoteCredentials_LocalRemote_NoOp(t *testing.T) {
+	base := t.TempDir()
+	bareDir := filepath.Join(base, "bare.git")
+	cmd := exec.Command("git", "init", "--bare", bareDir)
+	require.NoError(t, cmd.Run())
+
+	dir := setupGitRepoWithRemote(t, "file://"+bareDir)
+	setupTestCredentials(t, "https://sageox.ai", "some-token", "https://git.sageox.ai")
+
+	err := RefreshRemoteCredentials(dir, "https://sageox.ai")
+	require.NoError(t, err)
+
+	// remote URL must remain file:// — never corrupted with credentials
+	out := exec.Command("git", "-C", dir, "remote", "get-url", "origin")
+	output, err := out.Output()
+	require.NoError(t, err)
+	assert.Equal(t, "file://"+bareDir+"\n", string(output))
+}
+
+// bare local path remotes must never have credentials injected
+func TestRefreshRemoteCredentials_BarePathRemote_NoOp(t *testing.T) {
+	base := t.TempDir()
+	bareDir := filepath.Join(base, "bare.git")
+	cmd := exec.Command("git", "init", "--bare", bareDir)
+	require.NoError(t, cmd.Run())
+
+	dir := setupGitRepoWithRemote(t, bareDir)
+	setupTestCredentials(t, "https://sageox.ai", "some-token", "https://git.sageox.ai")
+
+	err := RefreshRemoteCredentials(dir, "https://sageox.ai")
+	require.NoError(t, err)
+
+	out := exec.Command("git", "-C", dir, "remote", "get-url", "origin")
+	output, err := out.Output()
+	require.NoError(t, err)
+	assert.Equal(t, bareDir+"\n", string(output))
 }
 
 func TestStripRemoteCredentials_OauthURL(t *testing.T) {
@@ -325,6 +396,28 @@ func TestSanitizeRemoteURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, SanitizeRemoteURL(tt.input))
+		})
+	}
+}
+
+func TestEndpointFromRemoteURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		remoteURL string
+		want      string
+	}{
+		{"git prefix stripped", "https://oauth2:TOKEN@git.sageox.ai/repo.git", "https://sageox.ai"},
+		{"staging with git prefix", "https://oauth2:TOKEN@git.test.sageox.ai/repo.git", "https://test.sageox.ai"},
+		{"no git prefix", "https://oauth2:TOKEN@sageox.ai/repo.git", "https://sageox.ai"},
+		{"bare HTTPS", "https://git.sageox.ai/repo.git", "https://sageox.ai"},
+		{"localhost", "http://localhost:3000/repo.git", "https://localhost"},
+		{"empty", "", ""},
+		{"file URL", "file:///tmp/repo.git", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, endpointFromRemoteURL(tt.remoteURL))
 		})
 	}
 }

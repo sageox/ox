@@ -142,13 +142,20 @@ func TestSupportedLanguages_ReturnsLanguages(t *testing.T) {
 		t.Fatal("SupportedLanguages returned empty slice")
 	}
 	expected := map[string]bool{"go": true, "python": true, "javascript": true, "typescript": true, "tsx": true, "rust": true, "c": true, "cpp": true}
+	actual := map[string]bool{}
 	for _, l := range langs {
 		if !expected[l] {
 			t.Errorf("unexpected language %q in SupportedLanguages", l)
 		}
+		actual[l] = true
 	}
-	if len(langs) != len(expected) {
-		t.Errorf("SupportedLanguages returned %d languages, want %d", len(langs), len(expected))
+	if len(actual) != len(langs) {
+		t.Errorf("SupportedLanguages contains duplicates: %d unique vs %d total", len(actual), len(langs))
+	}
+	for want := range expected {
+		if !actual[want] {
+			t.Errorf("missing expected language %q", want)
+		}
 	}
 }
 

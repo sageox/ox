@@ -974,37 +974,46 @@ func TestTranslateCodeSelectRepo(t *testing.T) {
 
 // --- translate.go: callers/callees regex error ---
 
-func TestTranslateCallersRegexError(t *testing.T) {
+func TestTranslateCallersRegex(t *testing.T) {
 	q := &ParsedQuery{
 		IsRegex: true,
-		Filters: Filters{Calls: "foo"},
+		Filters: Filters{Calls: "handle.*"},
 	}
-	_, err := Translate(q)
-	if err == nil {
-		t.Fatal("expected error for regex calls search")
+	tq, err := Translate(q)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !containsStr(tq.SQL, "REGEXP") {
+		t.Errorf("expected REGEXP in callers SQL: %s", tq.SQL)
 	}
 }
 
-func TestTranslateCalleesRegexError(t *testing.T) {
+func TestTranslateCalleesRegex(t *testing.T) {
 	q := &ParsedQuery{
 		IsRegex: true,
-		Filters: Filters{CalledBy: "foo"},
+		Filters: Filters{CalledBy: "main.*"},
 	}
-	_, err := Translate(q)
-	if err == nil {
-		t.Fatal("expected error for regex calledby search")
+	tq, err := Translate(q)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !containsStr(tq.SQL, "REGEXP") {
+		t.Errorf("expected REGEXP in callees SQL: %s", tq.SQL)
 	}
 }
 
-func TestTranslateCommitRegexError(t *testing.T) {
+func TestTranslateCommitRegex(t *testing.T) {
 	q := &ParsedQuery{
-		SearchTerms: []string{"foo"},
+		SearchTerms: []string{"fix.*auth"},
 		Type:        SearchTypeCommit,
 		IsRegex:     true,
 	}
-	_, err := Translate(q)
-	if err == nil {
-		t.Fatal("expected error for regex commit search")
+	tq, err := Translate(q)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !containsStr(tq.SQL, "REGEXP") {
+		t.Errorf("expected REGEXP in commit SQL: %s", tq.SQL)
 	}
 }
 

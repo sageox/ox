@@ -372,14 +372,134 @@ func TestTranslateDiffRegex(t *testing.T) {
 	}
 }
 
-func TestTranslateSymbolRegexError(t *testing.T) {
-	q := mustParse(t, "type:symbol /foo.*/")
-	_, err := Translate(q)
-	if err == nil {
-		t.Fatal("expected error")
+// ── Complex Regex Translation ──────────────────────────────────────────────────
+
+func TestTranslateRegex_CodeSearch(t *testing.T) {
+	cases := []struct {
+		name    string
+		query   string
+		wantSQL string
+		wantPat string
+	}{
+		{"simple_regex", `/err\d+/`, "code_search(?1, 'regex')", `err\d+`},
+		{"patterntype_regexp", `patterntype:regexp func\s+Test`, "code_search(?1, 'regex')", `func\s+Test`},
+		{"regex_with_lang", `lang:go /^func\s/`, "code_search(?1, 'regex')", `^func\s`},
+		{"regex_with_file", `file:*.go /TODO.*/`, "code_search(?1, 'regex')", `TODO.*`},
+		{"diff_regex", `type:diff /fix.*auth/`, "diff_search(?1, 'regex')", `fix.*auth`},
 	}
-	if !strings.Contains(err.Error(), "only supported for code and diff") {
-		t.Errorf("unexpected error: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tq := mustTranslate(t, tc.query)
+			if !strings.Contains(tq.SQL, tc.wantSQL) {
+				t.Errorf("SQL missing %q:\n%s", tc.wantSQL, tq.SQL)
+			}
+			if !hasParamContaining(tq.Params, tc.wantPat) {
+				t.Errorf("params missing %q: %v", tc.wantPat, tq.Params)
+			}
+		})
+	}
+}
+
+func TestTranslateRegex_SymbolSearch(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"caret_prefix", "type:symbol /^Get/"},
+		{"backslash_w", `type:symbol /\w+Handler/`},
+		{"alternation", "type:symbol /Create|Update|Delete/"},
+		{"case_insensitive", "type:symbol /(?i)config/"},
+		{"quantifier", "type:symbol /Test.{0,5}Handler/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tq := mustTranslate(t, tc.query)
+			if !strings.Contains(tq.SQL, "REGEXP") {
+				t.Errorf("expected REGEXP in SQL:\n%s", tq.SQL)
+			}
+			if !strings.Contains(tq.SQL, "s.name") {
+				t.Errorf("expected s.name column in SQL:\n%s", tq.SQL)
+			}
+		})
+	}
+}
+
+func TestTranslateRegex_CommitSearch(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{"fix_pattern", "type:commit /fix.*auth/"},
+		{"issue_ref", `type:commit /\#\d+/`},
+		{"conventional", "type:commit /^(feat|fix|chore):/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tq := mustTranslate(t, tc.query)
+			if !strings.Contains(tq.SQL, "REGEXP") {
+				t.Errorf("expected REGEXP in SQL:\n%s", tq.SQL)
+			}
+			if !strings.Contains(tq.SQL, "c.message") {
+				t.Errorf("expected c.message column:\n%s", tq.SQL)
+			}
+		})
+	}
+}
+
+func TestTranslateRegex_CallersCallees(t *testing.T) {
+	// callers with regex via IsRegex flag (set programmatically)
+	q := &ParsedQuery{
+		IsRegex: true,
+		Filters: Filters{Calls: `handle\w+`},
+	}
+	tq, err := Translate(q)
+	if err != nil {
+		t.Fatalf("callers regex: %v", err)
+	}
+	if !strings.Contains(tq.SQL, "REGEXP") {
+		t.Errorf("callers: expected REGEXP:\n%s", tq.SQL)
+	}
+
+	// callees with regex
+	q2 := &ParsedQuery{
+		IsRegex: true,
+		Filters: Filters{CalledBy: `main\w*`},
+	}
+	tq2, err := Translate(q2)
+	if err != nil {
+		t.Fatalf("callees regex: %v", err)
+	}
+	if !strings.Contains(tq2.SQL, "REGEXP") {
+		t.Errorf("callees: expected REGEXP:\n%s", tq2.SQL)
+	}
+}
+
+func TestTranslateRegex_NonRegexDoesNotUseREGEXP(t *testing.T) {
+	// verify that non-regex queries never produce REGEXP
+	queries := []string{
+		"type:symbol GetUser",
+		"type:commit fix auth",
+		"calls:handleRequest",
+		"calledby:main",
+	}
+	for _, q := range queries {
+		t.Run(q, func(t *testing.T) {
+			tq := mustTranslate(t, q)
+			if strings.Contains(tq.SQL, "REGEXP") {
+				t.Errorf("non-regex query should not contain REGEXP:\n%s", tq.SQL)
+			}
+		})
+	}
+}
+
+func TestTranslateSymbolRegex(t *testing.T) {
+	q := mustParse(t, "type:symbol /foo.*/")
+	tq, err := Translate(q)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(tq.SQL, "REGEXP") {
+		t.Errorf("expected REGEXP in symbol regex SQL: %s", tq.SQL)
 	}
 }
 
@@ -763,5 +883,60 @@ func TestTranslateIssueWithDates(t *testing.T) {
 	}
 	if !strings.Contains(tq.SQL, "strftime") {
 		t.Errorf("sql missing strftime for date conversion: %s", tq.SQL)
+	}
+}
+
+func TestTranslateCallersDepth(t *testing.T) {
+	tq := mustTranslate(t, "calls:handleRequest depth:3")
+	if !strings.Contains(tq.SQL, "WITH RECURSIVE") {
+		t.Errorf("expected recursive CTE for depth>1: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "call_chain") {
+		t.Errorf("expected call_chain CTE: %s", tq.SQL)
+	}
+	if !hasParamContaining(tq.Params, "3") {
+		t.Errorf("expected depth param 3: %v", tq.Params)
+	}
+}
+
+func TestTranslateCalleesDepth(t *testing.T) {
+	tq := mustTranslate(t, "calledby:main depth:2")
+	if !strings.Contains(tq.SQL, "WITH RECURSIVE") {
+		t.Errorf("expected recursive CTE for depth>1: %s", tq.SQL)
+	}
+	if !hasParamContaining(tq.Params, "2") {
+		t.Errorf("expected depth param 2: %v", tq.Params)
+	}
+}
+
+func TestTranslateCallersDefaultDepth(t *testing.T) {
+	tq := mustTranslate(t, "calls:foo")
+	if strings.Contains(tq.SQL, "WITH RECURSIVE") {
+		t.Errorf("should NOT use recursive CTE when no depth specified: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "symbol_refs") {
+		t.Errorf("expected symbol_refs in single-hop query: %s", tq.SQL)
+	}
+}
+
+func TestParseQuery_DepthValidation(t *testing.T) {
+	_, err := ParseQuery("calls:foo depth:0")
+	if err == nil {
+		t.Error("expected error for depth:0")
+	}
+	_, err = ParseQuery("calls:foo depth:11")
+	if err == nil {
+		t.Error("expected error for depth:11")
+	}
+	_, err = ParseQuery("calls:foo depth:abc")
+	if err == nil {
+		t.Error("expected error for depth:abc")
+	}
+	q, err := ParseQuery("calls:foo depth:5")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if q.Filters.Depth != 5 {
+		t.Errorf("Depth = %d, want 5", q.Filters.Depth)
 	}
 }

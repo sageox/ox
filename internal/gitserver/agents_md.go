@@ -146,13 +146,13 @@ func commitAndPushAgentsMD(ctx context.Context, repoPath string) error {
 	}
 
 	// push with retry — team context history must never be rewritten
-	ep := endpoint.Get()
 	if err := gitutil.PushWithRetry(ctx, repoPath, gitutil.PushOpts{
 		PrePush: func(repoPath string) error {
-			if ep != "" {
-				if err := RefreshRemoteCredentials(repoPath, ep); err != nil {
-					return fmt.Errorf("credential refresh: %w", err)
-				}
+			// derive endpoint from the remote URL itself rather than
+			// using endpoint.Get() which falls back to Default and could
+			// inject production credentials into local remotes
+			if err := RefreshRemoteCredentials(repoPath, ""); err != nil {
+				return fmt.Errorf("credential refresh: %w", err)
 			}
 			return nil
 		},

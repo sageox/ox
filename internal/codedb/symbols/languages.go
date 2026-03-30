@@ -113,6 +113,7 @@ func extractReturnTypeArrow(node *gotreesitter.Node, lang *gotreesitter.Language
 		}
 		childType := child.Type(lang)
 		childText := string(source[child.StartByte():child.EndByte()])
+		// some grammars expose "->" as a node type, others only as raw text
 		if childType == "->" || childText == "->" {
 			// capture the next named node
 			for j := i + 1; j < node.ChildCount(); j++ {

@@ -226,6 +226,19 @@ func isSSHURL(repoURL string) bool {
 	return strings.Contains(repoURL, "@") && !strings.Contains(repoURL, "://")
 }
 
+// isLocalRemote returns true for file:// URLs or bare filesystem paths.
+// These are local git remotes that never need credential injection.
+func isLocalRemote(repoURL string) bool {
+	if strings.HasPrefix(repoURL, "file://") {
+		return true
+	}
+	// bare path: starts with / and has no :// scheme
+	if strings.HasPrefix(repoURL, "/") && !strings.Contains(repoURL, "://") {
+		return true
+	}
+	return false
+}
+
 // BuildAuthURL embeds credentials into the git URL for authentication.
 // Uses the PAT token with oauth2 username for GitLab-style auth.
 // SSH URLs are returned unchanged since they use SSH key auth.

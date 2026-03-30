@@ -226,8 +226,14 @@ var ledgerAutoResolvePrefixes = ledger.AutoResolvePrefixes
 // Delegates to gitutil.PushWithRetry with ledger-appropriate options:
 // LFS repair, rebase on conflict, auto-resolve for data/github/.
 func pushLedger(ctx context.Context, ledgerPath string) error {
-	// resolve endpoint once, before entering the push loop
-	ep := endpoint.GetForProject(findGitRoot())
+	// resolve endpoint once, before entering the push loop.
+	// only refresh credentials when we have a real project root —
+	// GetForProject("") falls back to Default, which would inject
+	// production credentials into a local file:// remote URL
+	var ep string
+	if root := findGitRoot(); root != "" {
+		ep = endpoint.GetForProject(root)
+	}
 	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
 		RepairLFS:           true,

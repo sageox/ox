@@ -14,14 +14,13 @@ import (
 //   - Bare HTTPS URL (no PAT): inserts credentials if host matches credential store
 //   - Current PAT: no-op
 //
-// No-op for SSH URLs or non-oauth2 usernames (deploy tokens).
+// No-op for SSH URLs, local remotes, or non-oauth2 usernames (deploy tokens).
 // Returns nil on success or no-op. Returns an error if credentials are unavailable
 // or the git command fails — callers should log and continue, not abort.
+//
+// endpointURL is used as a hint for credential lookup. If empty, the endpoint
+// is derived from the remote URL's host (e.g., git.sageox.ai → sageox.ai).
 func RefreshRemoteCredentials(repoPath, endpointURL string) error {
-	if endpointURL == "" {
-		return nil // no endpoint, nothing to refresh
-	}
-
 	pat, remoteURL, err := extractPATFromRemote(repoPath)
 	if err != nil {
 		return err
@@ -32,13 +31,28 @@ func RefreshRemoteCredentials(repoPath, endpointURL string) error {
 		return nil
 	}
 
+	// local remotes (file:// or absolute paths) — credential injection
+	// would corrupt the URL and is never needed
+	if isLocalRemote(remoteURL) {
+		return nil
+	}
+
 	// check if URL has non-oauth2 userinfo (deploy tokens, etc.) — don't touch
 	if pat == "" && hasNonOauth2Userinfo(remoteURL) {
 		return nil
 	}
 
+	// derive endpoint from remote URL host when no explicit endpoint provided
+	ep := endpointURL
+	if ep == "" {
+		ep = endpointFromRemoteURL(remoteURL)
+		if ep == "" {
+			return nil // can't determine endpoint, nothing to refresh
+		}
+	}
+
 	// load current credentials from store
-	creds, err := LoadCredentialsForEndpoint(endpointURL)
+	creds, err := LoadCredentialsForEndpoint(ep)
 	if err != nil {
 		return fmt.Errorf("load credentials: %w", err)
 	}
@@ -46,12 +60,12 @@ func RefreshRemoteCredentials(repoPath, endpointURL string) error {
 		if pat == "" {
 			return nil // bare URL, no credentials to insert
 		}
-		return fmt.Errorf("no credentials stored for endpoint %s", endpointURL)
+		return fmt.Errorf("no credentials stored for endpoint %s", ep)
 	}
 
 	// don't update remote with expired credentials — they'll fail auth anyway
 	if !creds.ExpiresAt.IsZero() && creds.ExpiresAt.Before(time.Now()) {
-		return fmt.Errorf("credentials expired for endpoint %s", endpointURL)
+		return fmt.Errorf("credentials expired for endpoint %s", ep)
 	}
 
 	// already current
@@ -83,6 +97,25 @@ func RefreshRemoteCredentials(repoPath, endpointURL string) error {
 	}
 
 	return nil
+}
+
+// endpointFromRemoteURL extracts the SageOx endpoint from a git remote URL.
+// Strips the git. prefix and scheme to produce an endpoint URL that matches
+// the credential store's slug format.
+// e.g., https://oauth2:TOKEN@git.sageox.ai/repo.git → https://sageox.ai
+// e.g., https://git.test.sageox.ai/repo.git → https://test.sageox.ai
+func endpointFromRemoteURL(remoteURL string) string {
+	parsed, err := url.Parse(remoteURL)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	host := strings.ToLower(parsed.Hostname())
+	// strip git. prefix to get the base endpoint domain
+	host = strings.TrimPrefix(host, "git.")
+	if host == "" {
+		return ""
+	}
+	return "https://" + host
 }
 
 // extractPATFromRemote reads the origin remote URL and extracts any embedded PAT.

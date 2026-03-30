@@ -20,6 +20,30 @@ func (p *paramCollector) add(value string) string {
 	return fmt.Sprintf("?%d", len(p.params))
 }
 
+// regexMatchClause generates a SQL clause using REGEXP for regex matching.
+func regexMatchClause(column, pattern string, p *paramCollector) string {
+	ph := p.add(pattern)
+	return fmt.Sprintf("%s REGEXP %s", column, ph)
+}
+
+// orRegexMatchClause generates REGEXP clauses joined with OR for multiple groups.
+func orRegexMatchClause(column string, groups []string, p *paramCollector) string {
+	var clauses []string
+	for _, g := range groups {
+		if g == "" {
+			continue
+		}
+		clauses = append(clauses, regexMatchClause(column, g, p))
+	}
+	if len(clauses) == 0 {
+		return "1=1"
+	}
+	if len(clauses) == 1 {
+		return clauses[0]
+	}
+	return "(" + strings.Join(clauses, " OR ") + ")"
+}
+
 // patternMatchClause generates a SQL clause matching column against pattern.
 func patternMatchClause(column, pattern string, p *paramCollector) string {
 	hasWild := strings.ContainsAny(pattern, "*?")
@@ -320,18 +344,19 @@ func translateDiff(query *ParsedQuery) (*TranslatedQuery, error) {
 }
 
 func translateCommit(query *ParsedQuery) (*TranslatedQuery, error) {
-	if query.IsRegex {
-		return nil, fmt.Errorf("regex patterns are only supported for code and diff search")
-	}
-
 	f := query.Filters
 	p := newParamCollector(f.Case)
 	var conditions []string
 	var joins []string
 
 	if !query.HasEmptyPattern() {
-		clause := orMatchClause("c.message", query.SearchTerms, p)
-		conditions = append(conditions, "AND "+clause)
+		if query.IsRegex {
+			clause := orRegexMatchClause("c.message", query.SearchTerms, p)
+			conditions = append(conditions, "AND "+clause)
+		} else {
+			clause := orMatchClause("c.message", query.SearchTerms, p)
+			conditions = append(conditions, "AND "+clause)
+		}
 	}
 	if f.Message != "" {
 		clause := patternMatchClause("c.message", f.Message, p)
@@ -368,10 +393,6 @@ func translateCommit(query *ParsedQuery) (*TranslatedQuery, error) {
 }
 
 func translateSymbol(query *ParsedQuery) (*TranslatedQuery, error) {
-	if query.IsRegex {
-		return nil, fmt.Errorf("regex patterns are only supported for code and diff search")
-	}
-
 	f := query.Filters
 	p := newParamCollector(f.Case)
 	joins := []string{
@@ -382,8 +403,13 @@ func translateSymbol(query *ParsedQuery) (*TranslatedQuery, error) {
 	var conditions []string
 
 	if !query.HasEmptyPattern() {
-		clause := orMatchClause("s.name", query.SearchTerms, p)
-		conditions = append(conditions, "AND "+clause)
+		if query.IsRegex {
+			clause := orRegexMatchClause("s.name", query.SearchTerms, p)
+			conditions = append(conditions, "AND "+clause)
+		} else {
+			clause := orMatchClause("s.name", query.SearchTerms, p)
+			conditions = append(conditions, "AND "+clause)
+		}
 	}
 	addRepoFilter(p, &joins, &conditions, f.Repo, f.NegRepo, "r.repo_id")
 	addFileFilter(p, &conditions, f.File, f.NegFile, "fr.path")
@@ -461,12 +487,14 @@ func translateComment(query *ParsedQuery) (*TranslatedQuery, error) {
 }
 
 func translateCallers(query *ParsedQuery) (*TranslatedQuery, error) {
-	if query.IsRegex {
-		return nil, fmt.Errorf("regex patterns are only supported for code and diff search")
-	}
-
 	f := query.Filters
 	p := newParamCollector(f.Case)
+
+	// multi-hop recursive CTE when depth > 1
+	if f.Depth > 1 {
+		return translateCallersRecursive(query, p)
+	}
+
 	joins := []string{
 		"JOIN symbols s ON s.id = sr.symbol_id",
 		"JOIN blobs b ON b.id = sr.blob_id",
@@ -475,7 +503,12 @@ func translateCallers(query *ParsedQuery) (*TranslatedQuery, error) {
 	}
 	var conditions []string
 
-	clause := patternMatchClause("sr.ref_name", f.Calls, p)
+	var clause string
+	if query.IsRegex {
+		clause = regexMatchClause("sr.ref_name", f.Calls, p)
+	} else {
+		clause = patternMatchClause("sr.ref_name", f.Calls, p)
+	}
 	conditions = append(conditions, "AND "+clause)
 	conditions = append(conditions, "AND sr.kind = 'call'")
 	conditions = append(conditions, "AND s.kind = 'function'")
@@ -498,13 +531,54 @@ func translateCallers(query *ParsedQuery) (*TranslatedQuery, error) {
 	}, nil
 }
 
-func translateCallees(query *ParsedQuery) (*TranslatedQuery, error) {
-	if query.IsRegex {
-		return nil, fmt.Errorf("regex patterns are only supported for code and diff search")
-	}
+func translateCallersRecursive(query *ParsedQuery, p *paramCollector) (*TranslatedQuery, error) {
+	f := query.Filters
+	targetParam := p.add(f.Calls)
+	depthParam := p.add(fmt.Sprintf("%d", f.Depth))
 
+	var revConditions []string
+	addRevFilter(p, &revConditions, f.Rev)
+	revSQL := conditionsSQL(revConditions)
+
+	limit := resolveLimit(f.Count)
+
+	sql := fmt.Sprintf(`WITH RECURSIVE call_chain(name, depth, blob_id, symbol_id) AS (
+  SELECT s.name, 1, sr.blob_id, s.id
+  FROM symbol_refs sr
+  JOIN symbols s ON s.id = sr.symbol_id
+  WHERE sr.ref_name LIKE '%%' || %s || '%%' AND sr.kind = 'call' AND s.kind = 'function'
+  UNION
+  SELECT s2.name, cc.depth + 1, sr2.blob_id, s2.id
+  FROM call_chain cc
+  JOIN symbol_refs sr2 ON sr2.ref_name = cc.name AND sr2.kind = 'call'
+  JOIN symbols s2 ON s2.id = sr2.symbol_id AND s2.kind = 'function'
+  WHERE cc.depth < %s
+)
+SELECT DISTINCT fr.path, cc.name, 'function' AS kind, cc.depth
+FROM call_chain cc
+JOIN blobs b ON b.id = cc.blob_id
+JOIN file_revs fr ON fr.blob_id = b.id
+JOIN refs r ON r.commit_id = fr.commit_id
+WHERE 1=1%s
+ORDER BY cc.depth, fr.path
+LIMIT %d`, targetParam, depthParam, revSQL, limit)
+
+	return &TranslatedQuery{
+		SQL:        sql,
+		Params:     p.params,
+		SearchType: SearchTypeSymbol,
+	}, nil
+}
+
+func translateCallees(query *ParsedQuery) (*TranslatedQuery, error) {
 	f := query.Filters
 	p := newParamCollector(f.Case)
+
+	// multi-hop recursive CTE when depth > 1
+	if f.Depth > 1 {
+		return translateCalleesRecursive(query, p)
+	}
+
 	joins := []string{
 		"JOIN symbol_refs sr ON sr.symbol_id = s.id AND sr.blob_id = s.blob_id",
 		"JOIN blobs b ON b.id = sr.blob_id",
@@ -513,7 +587,12 @@ func translateCallees(query *ParsedQuery) (*TranslatedQuery, error) {
 	}
 	var conditions []string
 
-	clause := patternMatchClause("s.name", f.CalledBy, p)
+	var clause string
+	if query.IsRegex {
+		clause = regexMatchClause("s.name", f.CalledBy, p)
+	} else {
+		clause = patternMatchClause("s.name", f.CalledBy, p)
+	}
 	conditions = append(conditions, "AND "+clause)
 	conditions = append(conditions, "AND s.kind = 'function'")
 
@@ -527,6 +606,45 @@ func translateCallees(query *ParsedQuery) (*TranslatedQuery, error) {
 	sql := fmt.Sprintf(
 		"SELECT DISTINCT fr.path, sr.ref_name AS name, sr.kind, sr.line\nFROM symbols s\n%s\nWHERE 1=1%s\nORDER BY sr.line\nLIMIT %d",
 		strings.Join(joins, "\n"), conditionsSQL(conditions), limit)
+
+	return &TranslatedQuery{
+		SQL:        sql,
+		Params:     p.params,
+		SearchType: SearchTypeSymbol,
+	}, nil
+}
+
+func translateCalleesRecursive(query *ParsedQuery, p *paramCollector) (*TranslatedQuery, error) {
+	f := query.Filters
+	targetParam := p.add(f.CalledBy)
+	depthParam := p.add(fmt.Sprintf("%d", f.Depth))
+
+	var revConditions []string
+	addRevFilter(p, &revConditions, f.Rev)
+	revSQL := conditionsSQL(revConditions)
+
+	limit := resolveLimit(f.Count)
+
+	sql := fmt.Sprintf(`WITH RECURSIVE call_chain(name, depth, blob_id) AS (
+  SELECT sr.ref_name, 1, sr.blob_id
+  FROM symbols s
+  JOIN symbol_refs sr ON sr.symbol_id = s.id AND sr.blob_id = s.blob_id
+  WHERE s.name LIKE '%%' || %s || '%%' AND s.kind = 'function'
+  UNION
+  SELECT sr2.ref_name, cc.depth + 1, sr2.blob_id
+  FROM call_chain cc
+  JOIN symbols s2 ON s2.name = cc.name AND s2.kind = 'function'
+  JOIN symbol_refs sr2 ON sr2.symbol_id = s2.id AND sr2.blob_id = s2.blob_id
+  WHERE cc.depth < %s
+)
+SELECT DISTINCT fr.path, cc.name, 'call' AS kind, cc.depth
+FROM call_chain cc
+JOIN blobs b ON b.id = cc.blob_id
+JOIN file_revs fr ON fr.blob_id = b.id
+JOIN refs r ON r.commit_id = fr.commit_id
+WHERE 1=1%s
+ORDER BY cc.depth, fr.path
+LIMIT %d`, targetParam, depthParam, revSQL, limit)
 
 	return &TranslatedQuery{
 		SQL:        sql,

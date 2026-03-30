@@ -412,6 +412,113 @@ func TestParseTypeIssueWithFilters(t *testing.T) {
 	}
 }
 
+// ── Complex Regex Parsing ──────────────────────────────────────────────────────
+
+func TestParseRegex_EscapedCharacters(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		pattern string
+	}{
+		{"backslash_d", `/err\d+/`, `err\d+`},
+		{"backslash_w", `/fn\s+\w+/`, `fn\s+\w+`},
+		{"backslash_n", `/line1\nline2/`, `line1\nline2`},
+		{"dot_star", `/foo.*bar/`, `foo.*bar`},
+		{"caret_dollar", `/^func\s/`, `^func\s`},
+		{"character_class", `/[A-Z][a-z]+/`, `[A-Z][a-z]+`},
+		{"negated_class", `/[^0-9]+/`, `[^0-9]+`},
+		{"alternation", `/error|warn|fatal/`, `error|warn|fatal`},
+		{"quantifiers", `/a{2,5}b?c+/`, `a{2,5}b?c+`},
+		{"groups", `/(func|method)\s+(\w+)/`, `(func|method)\s+(\w+)`},
+		{"lookahead_syntax", `/foo(?=bar)/`, `foo(?=bar)`},
+		{"non_greedy", `/.*?end/`, `.*?end`},
+		{"unicode_class", `/\p{L}+/`, `\p{L}+`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q, err := ParseQuery(tc.input)
+			if err != nil {
+				t.Fatalf("ParseQuery(%q): %v", tc.input, err)
+			}
+			if !q.IsRegex {
+				t.Error("expected IsRegex")
+			}
+			if q.SearchPattern() != tc.pattern {
+				t.Errorf("pattern = %q, want %q", q.SearchPattern(), tc.pattern)
+			}
+		})
+	}
+}
+
+func TestParseRegex_WithAllSearchTypes(t *testing.T) {
+	types := []struct {
+		prefix     string
+		searchType SearchType
+	}{
+		{"type:code", SearchTypeCode},
+		{"type:symbol", SearchTypeSymbol},
+		{"type:commit", SearchTypeCommit},
+		{"type:diff", SearchTypeDiff},
+	}
+	for _, tc := range types {
+		t.Run(tc.prefix, func(t *testing.T) {
+			q, err := ParseQuery(tc.prefix + ` /test\d+/`)
+			if err != nil {
+				t.Fatalf("ParseQuery: %v", err)
+			}
+			if !q.IsRegex {
+				t.Error("expected IsRegex")
+			}
+			if q.Type != tc.searchType {
+				t.Errorf("type = %v, want %v", q.Type, tc.searchType)
+			}
+			if q.SearchPattern() != `test\d+` {
+				t.Errorf("pattern = %q", q.SearchPattern())
+			}
+		})
+	}
+}
+
+func TestParseRegex_PatterntypeWithFilters(t *testing.T) {
+	q, err := ParseQuery(`patterntype:regexp lang:go file:*.go func\s+Test`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !q.IsRegex {
+		t.Error("expected IsRegex from patterntype:regexp")
+	}
+	if q.Filters.Lang != "go" {
+		t.Errorf("lang = %q", q.Filters.Lang)
+	}
+	if q.Filters.File != "*.go" {
+		t.Errorf("file = %q", q.Filters.File)
+	}
+	if q.SearchPattern() != `func\s+Test` {
+		t.Errorf("pattern = %q", q.SearchPattern())
+	}
+}
+
+func TestParseRegex_SlashInMiddleNotRegex(t *testing.T) {
+	// path/to/file should NOT be parsed as regex
+	q, err := ParseQuery("path/to/file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.IsRegex {
+		t.Error("path/to/file should NOT be parsed as regex")
+	}
+}
+
+func TestParseRegex_SingleSlashNotRegex(t *testing.T) {
+	q, err := ParseQuery("/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q.IsRegex {
+		t.Error("single slash should not be regex")
+	}
+}
+
 func TestParseUnknownTypeErrorIncludesPRIssue(t *testing.T) {
 	_, err := ParseQuery("type:bogus foo")
 	if err == nil {
