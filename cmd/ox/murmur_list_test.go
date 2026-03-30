@@ -109,7 +109,10 @@ func TestMurmurListFiltering(t *testing.T) {
 	}
 
 	// use windowHours=2 to handle hour-boundary flakiness
-	all, _ := ledger.ReadMurmursInWindow(tmpDir, 2)
+	all, err := ledger.ReadMurmursInWindow(tmpDir, 2)
+	if err != nil {
+		t.Fatalf("ReadMurmursInWindow failed: %v", err)
+	}
 	if len(all) != 3 {
 		t.Fatalf("expected 3 murmurs, got %d", len(all))
 	}
