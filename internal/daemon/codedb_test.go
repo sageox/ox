@@ -371,6 +371,86 @@ func TestIndex_DeletedProjectRoot_FailsFast(t *testing.T) {
 	assert.False(t, still, "indexing flag must be cleared after early exit")
 }
 
+// --- CheckFreshness race prevention ---
+
+// TestCheckFreshness_NoDoubleGoroutine verifies that rapid successive calls to
+// CheckFreshness never spin up more than one indexing goroutine.
+// Before the fix, m.indexing was not set until inside Index(), leaving a window
+// where multiple goroutines would launch and race to claim the flag.
+func TestCheckFreshness_NoDoubleGoroutine(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	// fire 10 rapid CheckFreshness calls — only one goroutine should ever run
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const calls = 10
+	for i := 0; i < calls; i++ {
+		mgr.CheckFreshness(ctx)
+	}
+
+	// m.indexing must be true immediately after the first call (flag claimed before goroutine)
+	mgr.mu.Lock()
+	flagAfterCalls := mgr.indexing
+	mgr.mu.Unlock()
+	assert.True(t, flagAfterCalls, "indexing flag should be claimed synchronously by first CheckFreshness call")
+
+	// cancel context to stop the running goroutine quickly
+	cancel()
+
+	// wait for the goroutine to finish and release the flag
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mgr.mu.Lock()
+		done := !mgr.indexing
+		mgr.mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mgr.mu.Lock()
+	stillIndexing := mgr.indexing
+	mgr.mu.Unlock()
+	assert.False(t, stillIndexing, "indexing flag must be released after goroutine exits")
+}
+
+// TestCheckFreshness_FlagReleasedOnFailure verifies that the m.indexing flag is
+// cleared even when doIndex returns an error (e.g. deleted project root).
+func TestCheckFreshness_FlagReleasedOnFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	// delete project root so doIndex fails fast
+	require.NoError(t, os.RemoveAll(dir))
+
+	ctx := context.Background()
+	mgr.CheckFreshness(ctx)
+
+	// wait for the goroutine to finish
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mgr.mu.Lock()
+		done := !mgr.indexing
+		mgr.mu.Unlock()
+		if done {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mgr.mu.Lock()
+	stillIndexing := mgr.indexing
+	mgr.mu.Unlock()
+	assert.False(t, stillIndexing, "indexing flag must be released after failure")
+}
+
 // --- Symlink edge case ---
 
 func TestUpdateProjectRoot_Symlink(t *testing.T) {

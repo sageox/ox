@@ -233,7 +233,17 @@ func openOrCreateBleveIndex(path string) (bleve.Index, error) {
 		return bleve.New(path, mapping)
 	}
 
-	// any other error indicates corruption; nuke and recreate
+	// Before treating as corruption, check if the bbolt file exists.
+	// If it does, the error is likely a lock-timeout (another goroutine or process
+	// has the index open with bbolt's exclusive flock). Nuking in that case destroys
+	// an index that is actively being written — the correct action is to return an
+	// error and let the caller retry later.
+	boltPath := filepath.Join(path, "store", "root.bolt")
+	if _, statErr := os.Stat(boltPath); statErr == nil {
+		return nil, fmt.Errorf("bleve index appears to be in use (lock contention): %w", err)
+	}
+
+	// bolt file absent — likely genuinely corrupt or partially initialised; nuke and recreate
 	slog.Error("bleve index corrupt, recreating", "path", path, "err", err)
 	if removeErr := os.RemoveAll(path); removeErr != nil {
 		return nil, fmt.Errorf("remove corrupt bleve index %s: %w", path, removeErr)
