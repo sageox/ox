@@ -176,7 +176,7 @@ func TestIncrementalRecording_PostToolUse(t *testing.T) {
 			}
 		}
 		if !toolEntryFound {
-			t.Log("no tool entries with tool_name found (tool metadata may not be captured in incremental path)")
+			t.Error("no tool entries with tool_name found — tool metadata not captured in incremental path")
 		}
 	})
 }
@@ -321,8 +321,7 @@ func TestIncrementalRecording_CompactHook(t *testing.T) {
 	t.Run("compact_reprime_succeeded", func(t *testing.T) {
 		// The compact hook should re-prime (output contains agent_id or prime data)
 		if !strings.Contains(hookResult, "agent_id") && !strings.Contains(hookResult, agentID) {
-			t.Log("compact hook output doesn't contain agent_id — may not have re-primed")
-			t.Log("this is acceptable if the hook returned silently (recording state preserved)")
+			t.Errorf("compact hook output doesn't contain agent_id — re-prime may have failed\noutput: %.200s", hookResult)
 		}
 	})
 
@@ -1042,8 +1041,11 @@ FILE B (ox raw.jsonl):
 		t.Logf("judge notes: %s", verdict.Notes)
 	}
 
-	if verdict.Verdict == "fail" {
+	switch verdict.Verdict {
+	case "fail":
 		t.Errorf("recording fidelity too low: %d%% coverage (need >= 80%%)", verdict.CoveragePct)
+	case "unknown":
+		t.Skip("LLM judge returned unknown verdict — could not parse judge output; manual review needed")
 	}
 }
 
@@ -1480,7 +1482,7 @@ func TestSlashCommand_SessionAbort(t *testing.T) {
 		// After abort, recording state should be gone
 		recordingsAfter := findFilesRecursive(env.RootDir, ".recording.json")
 		if len(recordingsAfter) >= len(recordingsBefore) && len(recordingsBefore) > 0 {
-			t.Log("recording state not fully cleared after abort (may be due to multiple agents)")
+			t.Errorf("recording state not fully cleared after abort: %d before, %d after", len(recordingsBefore), len(recordingsAfter))
 		}
 	})
 

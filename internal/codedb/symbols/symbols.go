@@ -1,8 +1,5 @@
 // Package symbols extracts symbol definitions and references from source code
-// using tree-sitter for accurate AST-based parsing.
-//
-// When built with CGO enabled, full tree-sitter extraction is available.
-// When CGO is disabled, Extract returns nil and SupportedLanguages returns nil.
+// using tree-sitter via gotreesitter (pure Go, no CGO required).
 package symbols
 
 // Symbol represents a symbol definition extracted from source code.

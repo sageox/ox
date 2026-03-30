@@ -649,8 +649,8 @@ func TestRetrySessionUpload_ContentFilesNotPointers_OnLFSFailure(t *testing.T) {
 	// Before the fix, WriteSessionMeta (with fileRefs) was called before commitAndPush,
 	// so a push failure would leave only pointer stubs with no remote blob backing.
 	ledgerRawPath := filepath.Join(ledgerDir, "sessions", sessionName, ledgerFileRaw)
-	if _, statErr := os.Stat(ledgerRawPath); statErr == nil {
-		assert.False(t, lfs.IsPointerFile(ledgerRawPath),
-			"raw.jsonl copied to ledger must remain real content after a failed upload (bug #291 regression)")
-	}
+	require.FileExists(t, ledgerRawPath,
+		"raw.jsonl must be copied to ledger session dir even when upload fails")
+	assert.False(t, lfs.IsPointerFile(ledgerRawPath),
+		"raw.jsonl copied to ledger must remain real content after a failed upload (bug #291 regression)")
 }

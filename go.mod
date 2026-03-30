@@ -19,6 +19,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/mattn/go-isatty v0.0.20
+	github.com/odvcencio/gotreesitter v0.12.1
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pelletier/go-toml/v2 v2.2.2
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c

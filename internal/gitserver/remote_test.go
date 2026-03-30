@@ -218,6 +218,20 @@ func TestRefreshRemoteCredentials_ExpiredCredentials(t *testing.T) {
 	assert.NotContains(t, string(output), "new-but-expired-token")
 }
 
+// regression test for ox-1tjo: empty endpoint corrupts remote URL
+func TestRefreshRemoteCredentials_EmptyEndpoint(t *testing.T) {
+	dir := setupGitRepoWithRemote(t, "https://oauth2:some-token@git.sageox.ai/team/ledger.git")
+
+	err := RefreshRemoteCredentials(dir, "")
+	require.NoError(t, err)
+
+	// remote URL must remain unchanged
+	cmd := exec.Command("git", "-C", dir, "remote", "get-url", "origin")
+	output, err := cmd.Output()
+	require.NoError(t, err)
+	assert.Equal(t, "https://oauth2:some-token@git.sageox.ai/team/ledger.git\n", string(output))
+}
+
 func TestStripRemoteCredentials_OauthURL(t *testing.T) {
 	dir := setupGitRepoWithRemote(t, "https://oauth2:secret-token@git.sageox.ai/team/ledger.git")
 

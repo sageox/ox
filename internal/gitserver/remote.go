@@ -18,6 +18,10 @@ import (
 // Returns nil on success or no-op. Returns an error if credentials are unavailable
 // or the git command fails — callers should log and continue, not abort.
 func RefreshRemoteCredentials(repoPath, endpointURL string) error {
+	if endpointURL == "" {
+		return nil // no endpoint, nothing to refresh
+	}
+
 	pat, remoteURL, err := extractPATFromRemote(repoPath)
 	if err != nil {
 		return err

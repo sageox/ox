@@ -98,11 +98,7 @@ func commitCount(t *testing.T, dir string) int {
 // and doesn't rewrite the local file:// remote URL.
 func isolatePushEnv(t *testing.T, clonePath string) {
 	t.Helper()
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
-	require.NoError(t, os.Chdir(clonePath))
-
+	t.Chdir(clonePath)
 	t.Setenv("SAGEOX_ENDPOINT", "https://test-only-no-creds.invalid")
 }
 
@@ -305,6 +301,25 @@ func TestConcurrentSessionUploads_Parallel(t *testing.T) {
 	cmd := exec.Command("git", "-C", barePath, "fsck", "--no-dangling")
 	out, err := cmd.CombinedOutput()
 	assert.NoError(t, err, "git fsck should pass (no corruption): %s", string(out))
+}
+
+func TestPushLedger_EmptyGitRoot_NoPanic(t *testing.T) {
+	_, clonePath := createBareAndClone(t)
+
+	// cd to a non-git dir so findGitRoot() returns ""
+	nonGitDir := t.TempDir()
+	t.Chdir(nonGitDir)
+
+	sessionName := "2026-01-01T00-00-testuser-OxEmpty"
+	writeSessionFiles(t, clonePath, sessionName)
+	runGit(t, clonePath, "add", filepath.Join(clonePath, "sessions"))
+	runGit(t, clonePath, "commit", "--no-verify", "-m", "session: "+sessionName)
+
+	// when findGitRoot() returns "", endpoint.GetForProject("") returns ""
+	// RefreshRemoteCredentials now early-returns nil for empty endpoints,
+	// preserving the remote URL. The push still fails (no valid credentials).
+	err := pushLedger(context.Background(), clonePath)
+	assert.Error(t, err, "push should fail when git root is empty (no credentials available)")
 }
 
 func TestEnsureSessionsGitignore(t *testing.T) {

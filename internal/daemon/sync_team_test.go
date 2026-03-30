@@ -851,8 +851,18 @@ func TestTwoPhaseClone_IncompleteCloneDetected(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git clone operations")
 	}
-	// verify that Checkout() detects incomplete two-phase clones
-	// (.git exists but .sageox/ missing) and moves them aside
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	isolateCredentials(t)
+
+	manifest := `version 1
+include .sageox/
+include SOUL.md
+`
+	bareDir := setupTeamContextBareRepo(t, manifest, nil)
+	cloneURL := "file://" + bareDir
+
 	projectDir := setupProjectWithConfig(t, "")
 	scheduler := newTestScheduler(projectDir)
 
@@ -861,28 +871,18 @@ func TestTwoPhaseClone_IncompleteCloneDetected(t *testing.T) {
 	// simulate an incomplete two-phase clone: .git exists but no .sageox/
 	require.NoError(t, os.MkdirAll(filepath.Join(targetDir, ".git"), 0755))
 
-	// for a ledger repo, .git existing means AlreadyExists=true
-	result := &CheckoutResult{Path: targetDir}
-	info, _ := os.Stat(targetDir)
-	require.NotNil(t, info)
-	gitDir := filepath.Join(targetDir, ".git")
-	_, gitErr := os.Stat(gitDir)
-	require.NoError(t, gitErr, ".git should exist")
+	// twoPhaseClone fails because target already exists (incomplete)
+	ctx := context.Background()
+	_, err := scheduler.twoPhaseClone(ctx, cloneURL, targetDir, nil)
+	require.Error(t, err, "twoPhaseClone should fail on incomplete clone dir")
 
-	// for team-context, .git without .sageox is incomplete
-	sageoxDir := filepath.Join(targetDir, ".sageox")
-	_, sageoxErr := os.Stat(sageoxDir)
-	assert.True(t, os.IsNotExist(sageoxErr), ".sageox should not exist")
-
-	// verify backup logic works: rename the incomplete dir
-	backupPath := fmt.Sprintf("%s.bak.test", targetDir)
-	require.NoError(t, os.Rename(targetDir, backupPath))
-
-	// backup should exist, original should not
-	assert.NoDirExists(t, targetDir)
-	assert.DirExists(t, backupPath)
-	_ = result
-	_ = scheduler
+	// caller must remove the incomplete dir and retry — verify recovery path
+	require.NoError(t, os.RemoveAll(targetDir))
+	mCfg, err := scheduler.twoPhaseClone(ctx, cloneURL, targetDir, nil)
+	require.NoError(t, err, "twoPhaseClone should succeed after removing incomplete clone")
+	require.NotNil(t, mCfg)
+	assert.DirExists(t, filepath.Join(targetDir, ".sageox"))
+	assert.FileExists(t, filepath.Join(targetDir, "SOUL.md"))
 }
 
 func TestTwoPhaseClone_IncompleteCloneRecovery(t *testing.T) {

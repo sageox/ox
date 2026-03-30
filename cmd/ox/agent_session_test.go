@@ -272,13 +272,9 @@ func TestRecordingState(t *testing.T) {
 	})
 }
 
-func TestConvertRawEntries(t *testing.T) {
-	t.Run("converts raw entries to session entries", func(t *testing.T) {
-		// this tests the adapter conversion
-		// the actual implementation depends on adapters.RawEntry structure
-		// which is tested in the adapters package
-	})
-}
+// TestConvertRawEntries removed — was an empty test body with comment
+// "tested in adapters package". Actual coverage exists in
+// internal/session/adapters/ (convert_test.go).
 
 func TestReadEntriesFromFile(t *testing.T) {
 	t.Run("reads valid JSONL file from sessions directory", func(t *testing.T) {

@@ -83,29 +83,22 @@ func TestHookExecution(t *testing.T) {
 	hookInfo := analyzeHookExecution(result.RawOutput)
 
 	t.Run("hook_fired", func(t *testing.T) {
-		// KNOWN ISSUE: SessionStart hook fires but output may be discarded
-		// See: https://github.com/anthropics/claude-code/issues/10373
 		if !hookInfo.SessionStartHookFired {
-			// Don't fail - this is a known Claude Code bug for new sessions
-			t.Log("SessionStart hook did not fire (expected for new sessions due to Claude Code bug #10373)")
-		} else {
-			t.Log("SessionStart hook fired successfully")
+			// known: Claude Code bug #10373 discards hook output for new sessions
+			// https://github.com/anthropics/claude-code/issues/10373
+			t.Log("SessionStart hook did not fire (known: Claude Code bug #10373 discards hook output for new sessions)")
 		}
 	})
 
 	t.Run("ox_prime_in_hook", func(t *testing.T) {
 		if !hookInfo.OxPrimeInHookOutput {
-			// Don't fail - this is expected due to the hook output bug
-			t.Log("ox agent prime output not in hook (expected due to Claude Code bug #10373)")
-			t.Log("Claude should discover ox via CLAUDE.md/AGENTS.md fallback")
-		} else {
-			t.Log("ox agent prime output received via hook")
+			t.Log("ox agent prime output not in hook (known: Claude Code bug #10373); Claude discovers ox via CLAUDE.md/AGENTS.md fallback")
 		}
 	})
 
 	t.Run("agent_id_received", func(t *testing.T) {
 		if hookInfo.AgentID == "" {
-			t.Log("No agent ID in hook output (expected due to bug #10373)")
+			t.Log("no agent ID in hook output (known: Claude Code bug #10373 discards hook output for new sessions)")
 		} else {
 			t.Logf("Agent ID from hook: %s", hookInfo.AgentID)
 		}
@@ -218,7 +211,9 @@ IMPORTANT:
 	})
 
 	t.Run("has_agent_id", func(t *testing.T) {
-		if response.OxKnowledge.HasAgentID {
+		if !response.OxKnowledge.HasAgentID {
+			t.Error("Claude should have an agent ID after ox agent prime")
+		} else {
 			t.Logf("Claude has agent ID: %s", response.OxKnowledge.AgentID)
 		}
 	})
