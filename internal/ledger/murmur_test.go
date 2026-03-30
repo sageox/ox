@@ -803,8 +803,12 @@ func TestConfigureSparseCheckout_PreservesStagedFilesOutsideCone(t *testing.T) {
 		t.Fatalf("git init: %v", err)
 	}
 	// configure git user for commits in test dir
-	exec.Command("git", "-C", tempDir, "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run()
+	if err := exec.Command("git", "-C", tempDir, "config", "user.email", "test@test.com").Run(); err != nil {
+		t.Fatalf("git config user.email: %v", err)
+	}
+	if err := exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run(); err != nil {
+		t.Fatalf("git config user.name: %v", err)
+	}
 
 	// first call: initialize sparse checkout + create initial commit so HEAD exists
 	if err := ConfigureSparseCheckout(tempDir); err != nil {
@@ -819,8 +823,12 @@ func TestConfigureSparseCheckout_PreservesStagedFilesOutsideCone(t *testing.T) {
 	if err := os.WriteFile(readmePath, []byte("init"), 0o644); err != nil {
 		t.Fatalf("write README: %v", err)
 	}
-	exec.Command("git", "-C", tempDir, "add", "--sparse", "sessions/README").Run()
-	exec.Command("git", "-C", tempDir, "commit", "-m", "init").Run()
+	if err := exec.Command("git", "-C", tempDir, "add", "--sparse", "sessions/README").Run(); err != nil {
+		t.Fatalf("git add sessions/README: %v", err)
+	}
+	if err := exec.Command("git", "-C", tempDir, "commit", "-m", "init").Run(); err != nil {
+		t.Fatalf("git commit init: %v", err)
+	}
 
 	// simulate CLI staging files in a directory NOT in the cone
 	// (e.g., "data/linear/", "data/custom/", or any non-standard import path)
@@ -865,12 +873,20 @@ func TestConfigureSparseCheckout_PreservesModifiedFilesOutsideWindow(t *testing.
 	if err := exec.Command("git", "init", "-b", "main", tempDir).Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
-	exec.Command("git", "-C", tempDir, "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run()
+	if err := exec.Command("git", "-C", tempDir, "config", "user.email", "test@test.com").Run(); err != nil {
+		t.Fatalf("git config user.email: %v", err)
+	}
+	if err := exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run(); err != nil {
+		t.Fatalf("git config user.name: %v", err)
+	}
 
 	// initialize sparse checkout with a wide cone that includes old data
-	exec.Command("git", "-C", tempDir, "sparse-checkout", "init", "--cone").Run()
-	exec.Command("git", "-C", tempDir, "sparse-checkout", "set", "sessions", "data/github/2025/01/01").Run()
+	if err := exec.Command("git", "-C", tempDir, "sparse-checkout", "init", "--cone").Run(); err != nil {
+		t.Fatalf("sparse-checkout init: %v", err)
+	}
+	if err := exec.Command("git", "-C", tempDir, "sparse-checkout", "set", "sessions", "data/github/2025/01/01").Run(); err != nil {
+		t.Fatalf("sparse-checkout set: %v", err)
+	}
 
 	// create and commit a file in old data path
 	oldDataDir := filepath.Join(tempDir, "data", "github", "2025", "01", "01")
@@ -882,10 +898,18 @@ func TestConfigureSparseCheckout_PreservesModifiedFilesOutsideWindow(t *testing.
 		t.Fatalf("write: %v", err)
 	}
 	sessDir := filepath.Join(tempDir, "sessions")
-	os.MkdirAll(sessDir, 0o755)
-	os.WriteFile(filepath.Join(sessDir, ".gitkeep"), []byte(""), 0o644)
-	exec.Command("git", "-C", tempDir, "add", "--sparse", ".").Run()
-	exec.Command("git", "-C", tempDir, "commit", "-m", "init with old data").Run()
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, ".gitkeep"), []byte(""), 0o644); err != nil {
+		t.Fatalf("write .gitkeep: %v", err)
+	}
+	if err := exec.Command("git", "-C", tempDir, "add", "--sparse", ".").Run(); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if err := exec.Command("git", "-C", tempDir, "commit", "-m", "init with old data").Run(); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
 
 	// modify the old data file (simulates user editing committed data)
 	modifiedContent := "modified-by-user"
@@ -1009,6 +1033,33 @@ func TestParseDirtyDirsFromPorcelain(t *testing.T) {
 			coneDirs: []string{"sessions"},
 			want:     []string{"archive", "ab"},
 		},
+		{
+			name: "deep cone entry covers dirty file",
+			// dirty file at data/github/2026/03/30/prs.json is already covered
+			// by cone entry "data/github/2026/03/30/" — should NOT add bare "data"
+			output:   " M data/github/2026/03/30/prs.json" + nul,
+			coneDirs: []string{"sessions", "data/github/2026/03/30/"},
+			want:     nil,
+		},
+		{
+			name: "deep cone entry with trailing slash covers file",
+			output:   " M data/murmurs/2026/03/30/12/whisper.json" + nul,
+			coneDirs: []string{"sessions", "data/murmurs/2026/03/30/12/"},
+			want:     nil,
+		},
+		{
+			name: "deep cone covers one file but not another",
+			// first file covered by deep cone, second is not
+			output:   " M data/github/2026/03/30/prs.json" + nul + " M data/custom/report.csv" + nul,
+			coneDirs: []string{"sessions", "data/github/2026/03/30/"},
+			want:     []string{"data"},
+		},
+		{
+			name: "shallow cone entry covers deep dirty file",
+			output:   " M data/github/2025/01/01/old.json" + nul,
+			coneDirs: []string{"sessions", "data"},
+			want:     nil,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1044,8 +1095,12 @@ func TestConfigureSparseCheckout_PreservesRenamedFilesOutsideCone(t *testing.T) 
 	if err := exec.Command("git", "init", "-b", "main", tempDir).Run(); err != nil {
 		t.Fatalf("git init: %v", err)
 	}
-	exec.Command("git", "-C", tempDir, "config", "user.email", "test@test.com").Run()
-	exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run()
+	if err := exec.Command("git", "-C", tempDir, "config", "user.email", "test@test.com").Run(); err != nil {
+		t.Fatalf("git config user.email: %v", err)
+	}
+	if err := exec.Command("git", "-C", tempDir, "config", "user.name", "Test").Run(); err != nil {
+		t.Fatalf("git config user.name: %v", err)
+	}
 
 	// initialize sparse checkout
 	if err := ConfigureSparseCheckout(tempDir); err != nil {
@@ -1065,11 +1120,19 @@ func TestConfigureSparseCheckout_PreservesRenamedFilesOutsideCone(t *testing.T) 
 
 	// need sessions dir so sparse-checkout set has something in the cone
 	sessDir := filepath.Join(tempDir, "sessions")
-	os.MkdirAll(sessDir, 0o755)
-	os.WriteFile(filepath.Join(sessDir, ".gitkeep"), []byte(""), 0o644)
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, ".gitkeep"), []byte(""), 0o644); err != nil {
+		t.Fatalf("write .gitkeep: %v", err)
+	}
 
-	exec.Command("git", "-C", tempDir, "add", "--sparse", ".").Run()
-	exec.Command("git", "-C", tempDir, "commit", "-m", "init with imports").Run()
+	if err := exec.Command("git", "-C", tempDir, "add", "--sparse", ".").Run(); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if err := exec.Command("git", "-C", tempDir, "commit", "-m", "init with imports").Run(); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
 
 	// rename the file to a different outside-cone directory via git mv
 	destDir := filepath.Join(tempDir, "archive", "batch1")
@@ -1081,10 +1144,14 @@ func TestConfigureSparseCheckout_PreservesRenamedFilesOutsideCone(t *testing.T) 
 	if mvOut, err := mvCmd.CombinedOutput(); err != nil {
 		// if git mv fails (e.g. sparse-checkout restrictions), simulate
 		// the rename manually: remove from index + add new path
-		os.Rename(origFile, destFile)
-		exec.Command("git", "-C", tempDir, "rm", "--cached", "imports/batch1/data.csv").Run()
+		if err := os.Rename(origFile, destFile); err != nil {
+			t.Fatalf("rename file: %v", err)
+		}
+		if err := exec.Command("git", "-C", tempDir, "rm", "--sparse", "--cached", "imports/batch1/data.csv").Run(); err != nil {
+			t.Fatalf("git rm --cached: %v (git mv output: %s)", err, mvOut)
+		}
 		if err := exec.Command("git", "-C", tempDir, "add", "--sparse", "archive/batch1/data.csv").Run(); err != nil {
-			t.Fatalf("manual rename staging failed: %v (git mv output: %s)", err, mvOut)
+			t.Fatalf("git add --sparse after rename: %v (git mv output: %s)", err, mvOut)
 		}
 	}
 

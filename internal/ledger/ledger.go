@@ -497,23 +497,40 @@ func dirtyDirsOutsideCone(repoPath string, coneDirs []string) []string {
 //   - Normal entries:  "XY path\0"
 //   - Rename/copy:     "XY new_path\0orig_path\0" (orig_path is a bare token)
 func parseDirtyDirsFromPorcelain(porcelainOutput []byte, coneDirs []string) []string {
+	// normalize cone dirs by stripping trailing slashes so prefix matching
+	// works against path components (e.g. "data/github/2026/03/30/" → "data/github/2026/03/30")
 	coneSet := make(map[string]bool, len(coneDirs))
 	for _, d := range coneDirs {
-		coneSet[d] = true
+		coneSet[strings.TrimRight(d, "/")] = true
 	}
 
 	seen := make(map[string]bool)
 	var extra []string
 
-	addTopDir := func(filePath string) {
+	addIfUncovered := func(filePath string) {
 		if filePath == "" {
 			return
 		}
+		// check if any path prefix is already covered by a cone entry
+		// e.g. for "data/github/2026/03/30/prs.json", check:
+		//   "data", "data/github", "data/github/2026", ... "data/github/2026/03/30"
+		for i := 0; i < len(filePath); i++ {
+			if filePath[i] == '/' {
+				if coneSet[filePath[:i]] {
+					return
+				}
+			}
+		}
+		// check the full path for root-level files or exact matches
+		if coneSet[filePath] {
+			return
+		}
+		// not covered — add the first path segment (top-level dir)
 		topDir := filePath
 		if idx := strings.IndexByte(filePath, '/'); idx > 0 {
 			topDir = filePath[:idx]
 		}
-		if !coneSet[topDir] && !seen[topDir] {
+		if !seen[topDir] {
 			seen[topDir] = true
 			extra = append(extra, topDir)
 		}
@@ -524,7 +541,7 @@ func parseDirtyDirsFromPorcelain(porcelainOutput []byte, coneDirs []string) []st
 	for _, entry := range entries {
 		if expectBarePath {
 			expectBarePath = false
-			addTopDir(entry)
+			addIfUncovered(entry)
 			continue
 		}
 		if len(entry) < 4 {
@@ -532,7 +549,7 @@ func parseDirtyDirsFromPorcelain(porcelainOutput []byte, coneDirs []string) []st
 		}
 		statusX := entry[0]
 		filePath := entry[3:] // skip "XY " status prefix
-		addTopDir(filePath)
+		addIfUncovered(filePath)
 		// rename (R) and copy (C) entries emit a second bare path
 		if statusX == 'R' || statusX == 'C' {
 			expectBarePath = true
