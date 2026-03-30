@@ -469,7 +469,7 @@ func init() {
 		Slug:        CheckSlugDaemonDedup,
 		Name:        "Daemon deduplication",
 		Category:    "Daemon",
-		FixLevel:    FixLevelAuto,
+		FixLevel:    FixLevelConfirm,
 		Description: "Detects and stops duplicate daemon processes for the same repo",
 		Run:         checkDaemonDeduplication,
 	})

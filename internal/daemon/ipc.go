@@ -1323,6 +1323,15 @@ func NewClientWithSocket(socketPath string) *Client {
 	}
 }
 
+// NewClientWithSocketAndTimeout creates an IPC client for a specific socket path with custom timeout.
+// Use longer timeouts for stop operations where the daemon may be busy.
+func NewClientWithSocketAndTimeout(socketPath string, timeout time.Duration) *Client {
+	return &Client{
+		socketPath: socketPath,
+		timeout:    timeout,
+	}
+}
+
 // Connect attempts to connect to the daemon.
 // Returns error if daemon is not running.
 func (c *Client) Connect() (net.Conn, error) {

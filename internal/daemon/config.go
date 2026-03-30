@@ -137,6 +137,11 @@ func RepoBasedWorkspaceID(projectRoot string) string {
 // The result is cached on first call so the daemon continues to use the
 // correct workspace ID even if its CWD is later deleted (e.g. macOS
 // tmpdir cleanup while the daemon is running long-term).
+//
+// Note: This uses raw os.Getwd() for the direct socket path. Subdirectory
+// normalization happens in resolveSocketPath() (registry fallback) and
+// findProjectRootForDaemon() (daemon startup CWD), not here, because the
+// sync.Once caching makes it unsafe to depend on walk-up discovery in tests.
 func CurrentWorkspaceID() string {
 	cachedWorkspaceIDOnce.Do(func() {
 		cwd, err := os.Getwd()

@@ -60,6 +60,9 @@ func TestFormatIndexTiming(t *testing.T) {
 }
 
 func TestIsCodeDBIndexing_DefaultReturnsFalseWithoutDaemon(t *testing.T) {
+	// isolate from real daemon: prevent config.FindProjectRoot walk-up
+	t.Chdir(t.TempDir())
+
 	// With no daemon running, isCodeDBIndexing should return false
 	// (IPC fails → err != nil → false). This is the default in test environments.
 	assert.False(t, isCodeDBIndexing())

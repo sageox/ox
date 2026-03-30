@@ -203,6 +203,8 @@ func TestCheckDaemonInstanceStale(t *testing.T) {
 	// this test verifies the function behavior when daemon is not running
 	// (it should skip gracefully)
 	t.Run("daemon not running", func(t *testing.T) {
+		// isolate from real daemon: prevent config.FindProjectRoot walk-up
+		t.Chdir(t.TempDir())
 		result := checkDaemonInstanceStale(false)
 		// should skip when daemon is not running
 		assert.True(t, result.skipped, "expected skipped when daemon not running")

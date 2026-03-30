@@ -6,6 +6,10 @@ import (
 )
 
 func TestTryConnectWithRetry_NoDaemon(t *testing.T) {
+	// isolate from real daemon registry by running from a temp dir
+	// (prevents config.FindProjectRoot from walking up to a real .sageox/)
+	t.Chdir(t.TempDir())
+
 	// with no daemon running, should return nil after retries
 	// use short delay to speed up test
 	start := time.Now()
@@ -23,6 +27,8 @@ func TestTryConnectWithRetry_NoDaemon(t *testing.T) {
 }
 
 func TestShouldUseDaemon_NoDaemonRunning(t *testing.T) {
+	t.Chdir(t.TempDir())
+
 	// when no daemon running, should return false
 	if got := ShouldUseDaemon(); got != false {
 		t.Errorf("ShouldUseDaemon() with no daemon should return false, got %v", got)
@@ -30,6 +36,8 @@ func TestShouldUseDaemon_NoDaemonRunning(t *testing.T) {
 }
 
 func TestTryConnectOrDirect_NoDaemon(t *testing.T) {
+	t.Chdir(t.TempDir())
+
 	// when no daemon running, should return nil
 	client := TryConnectOrDirect()
 	if client != nil {
@@ -38,6 +46,8 @@ func TestTryConnectOrDirect_NoDaemon(t *testing.T) {
 }
 
 func TestTryConnectOrDirectForSync_NoDaemon(t *testing.T) {
+	t.Chdir(t.TempDir())
+
 	// when no daemon running, should return nil
 	client := TryConnectOrDirectForSync()
 	if client != nil {
@@ -46,6 +56,8 @@ func TestTryConnectOrDirectForSync_NoDaemon(t *testing.T) {
 }
 
 func TestTryConnectOrDirectForCheckout_NoDaemon(t *testing.T) {
+	t.Chdir(t.TempDir())
+
 	// when no daemon running, should return nil
 	client := TryConnectOrDirectForCheckout()
 	if client != nil {

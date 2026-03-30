@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/repotools"
 )
 
@@ -252,7 +253,7 @@ func killStaleDaemon(workspaceID string) error {
 		if err := client.Stop(); err != nil {
 			slog.Warn("IPC stop failed, falling back to SIGTERM", "workspace_id", workspaceID, "pid", info.PID, "error", err)
 		}
-		if waitForProcessExit(info.PID, 5*time.Second) {
+		if WaitForProcessExit(info.PID, 5*time.Second) {
 			_ = reg.Unregister(workspaceID)
 			_ = os.Remove(PidPathForWorkspace(workspaceID))
 			_ = os.Remove(info.SocketPath)
@@ -276,7 +277,7 @@ func killStaleDaemon(workspaceID string) error {
 		slog.Warn("failed to SIGTERM stale daemon", "workspace_id", workspaceID, "pid", info.PID, "error", err)
 	}
 
-	if waitForProcessExit(info.PID, 2*time.Second) {
+	if WaitForProcessExit(info.PID, 2*time.Second) {
 		_ = reg.Unregister(workspaceID)
 		_ = os.Remove(PidPathForWorkspace(workspaceID))
 		_ = os.Remove(info.SocketPath)
@@ -285,9 +286,9 @@ func killStaleDaemon(workspaceID string) error {
 	return fmt.Errorf("stale daemon %d did not exit after SIGTERM", info.PID)
 }
 
-// waitForProcessExit polls signal 0 until the process exits or timeout is reached.
-// Returns true if the process exited, false if it's still alive at timeout.
-func waitForProcessExit(pid int, timeout time.Duration) bool {
+// WaitForProcessExit polls signal 0 until the process exits or timeout is reached.
+// Returns true if the process exited, false if it's still alive after timeout.
+func WaitForProcessExit(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := signalProcess(pid, 0); err != nil {
@@ -323,24 +324,17 @@ func resolveRepoName() string {
 	return repotools.GetRepoName(cwd)
 }
 
-// findProjectRootForDaemon walks up from cwd to find .sageox/config.json.
-// Returns the project root, or cwd as fallback if no .sageox/ found.
+// findProjectRootForDaemon returns the project root for setting daemon CWD.
+// Uses canonical config.FindProjectRoot; falls back to os.Getwd if no .sageox/ found.
 func findProjectRootForDaemon() string {
+	if root := config.FindProjectRoot(); root != "" {
+		return root
+	}
 	cwd, err := os.Getwd()
 	if err != nil {
 		return ""
 	}
-	dir := cwd
-	for {
-		if _, err := os.Stat(filepath.Join(dir, ".sageox", "config.json")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return cwd
-		}
-		dir = parent
-	}
+	return cwd
 }
 
 // stopLegacyDaemon stops a daemon running under the old path-based workspace ID.

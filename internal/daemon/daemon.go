@@ -627,11 +627,12 @@ func resolveSocketPath() string {
 
 	// Socket missing for current workspace ID — check registry for a daemon
 	// registered under the same repo_id with a different workspace ID.
-	cwd, err := os.Getwd()
-	if err != nil {
+	// Use config.FindProjectRoot() so subdirectory invocations find the config.
+	dir := config.FindProjectRoot()
+	if dir == "" {
 		return sock
 	}
-	repoID := config.GetRepoID(cwd)
+	repoID := config.GetRepoID(dir)
 	if info := FindDaemonForRepo(repoID); info != nil {
 		if _, err := os.Stat(info.SocketPath); err == nil {
 			slog.Debug("resolved daemon via registry fallback",

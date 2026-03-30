@@ -14,6 +14,9 @@ func TestDaemonRunningCheck_Name(t *testing.T) {
 }
 
 func TestDaemonRunningCheck_Run_NotRunning(t *testing.T) {
+	// isolate from real daemon: prevent config.FindProjectRoot walk-up
+	t.Chdir(t.TempDir())
+
 	check := NewDaemonRunningCheck()
 	result := check.Run(context.Background(), false)
 
@@ -28,6 +31,8 @@ func TestDaemonResponsiveCheck_Name(t *testing.T) {
 }
 
 func TestDaemonResponsiveCheck_Run_NotRunning(t *testing.T) {
+	t.Chdir(t.TempDir())
+
 	check := NewDaemonResponsiveCheck()
 	result := check.Run(context.Background(), false)
 
@@ -41,6 +46,8 @@ func TestDaemonSyncStatusCheck_Name(t *testing.T) {
 }
 
 func TestDaemonSyncStatusCheck_Run_NotRunning(t *testing.T) {
+	t.Chdir(t.TempDir())
+
 	check := NewDaemonSyncStatusCheck()
 	result := check.Run(context.Background(), false)
 
@@ -54,6 +61,8 @@ func TestDaemonUptimeCheck_Name(t *testing.T) {
 }
 
 func TestDaemonUptimeCheck_Run_NotRunning(t *testing.T) {
+	t.Chdir(t.TempDir())
+
 	check := NewDaemonUptimeCheck()
 	result := check.Run(context.Background(), false)
 
@@ -67,6 +76,8 @@ func TestDaemonSyncErrorsCheck_Name(t *testing.T) {
 }
 
 func TestDaemonSyncErrorsCheck_Run_NotRunning(t *testing.T) {
+	t.Chdir(t.TempDir())
+
 	check := NewDaemonSyncErrorsCheck()
 	result := check.Run(context.Background(), false)
 
