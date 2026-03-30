@@ -128,6 +128,7 @@ type configModel struct {
 	cursor       int // index into displayOrder, not items
 	editing      bool
 	editCursor   int
+	editLevel    ConfigLevel // which scope we're editing (cycles with tab)
 	width        int
 	height       int
 	quitting     bool
@@ -141,6 +142,7 @@ type keyMap struct {
 	Quit  key.Binding
 	Up    key.Binding
 	Down  key.Binding
+	Tab   key.Binding
 }
 
 var keys = keyMap{
@@ -149,6 +151,7 @@ var keys = keyMap{
 	Quit:  key.NewBinding(key.WithKeys("q", "ctrl+c")),
 	Up:    key.NewBinding(key.WithKeys("up", "k")),
 	Down:  key.NewBinding(key.WithKeys("down", "j")),
+	Tab:   key.NewBinding(key.WithKeys("tab")),
 }
 
 func newConfigModel(projectRoot string) (*configModel, error) {
@@ -219,10 +222,19 @@ func (m configModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Enter):
 			m.editing = true
 			item := m.items[m.displayOrder[m.cursor]]
-			m.editCursor = 0
+			// initialize scope to first level that has a value, or Levels[0]
+			m.editLevel = item.setting.Levels[0]
+			for _, lvl := range item.setting.Levels {
+				val := m.valueAtLevel(item, lvl)
+				if val != "" {
+					m.editLevel = lvl
+					break
+				}
+			}
+			m.editCursor = m.editOptionOffset(item) // skip "(unset)" if present
 			for i, v := range item.setting.ValidValues {
 				if v == item.value.Value {
-					m.editCursor = i
+					m.editCursor = i + m.editOptionOffset(item)
 					break
 				}
 			}
@@ -248,10 +260,25 @@ func (m configModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m configModel) handleEditMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	itemIdx := m.displayOrder[m.cursor]
 	item := m.items[itemIdx]
+	totalOptions := len(item.setting.ValidValues) + m.editOptionOffset(item)
 
 	switch {
 	case key.Matches(msg, keys.Esc):
 		m.editing = false
+		return m, nil
+
+	case key.Matches(msg, keys.Tab):
+		// cycle through available scopes
+		if len(item.setting.Levels) > 1 {
+			for i, lvl := range item.setting.Levels {
+				if lvl == m.editLevel {
+					m.editLevel = item.setting.Levels[(i+1)%len(item.setting.Levels)]
+					break
+				}
+			}
+			// reset cursor — option count may change (unset availability)
+			m.editCursor = m.editOptionOffset(item)
+		}
 		return m, nil
 
 	case key.Matches(msg, keys.Up):
@@ -261,15 +288,27 @@ func (m configModel) handleEditMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case key.Matches(msg, keys.Down):
-		if m.editCursor < len(item.setting.ValidValues)-1 {
+		if m.editCursor < totalOptions-1 {
 			m.editCursor++
 		}
 		return m, nil
 
 	case key.Matches(msg, keys.Enter):
-		if len(item.setting.ValidValues) > 0 {
-			newValue := item.setting.ValidValues[m.editCursor]
-			err := SetConfigValue(item.setting.Key, newValue, item.setting.Levels[0], m.projectRoot)
+		offset := m.editOptionOffset(item)
+		if m.editCursor < offset {
+			// "(unset)" selected
+			err := UnsetConfigValue(item.setting.Key, m.editLevel, m.projectRoot)
+			if err != nil {
+				m.saveErr = err.Error()
+			} else {
+				cv, _ := ResolveConfigValue(item.setting.Key, m.projectRoot)
+				m.items[itemIdx].value = cv
+				m.saved = true
+				m.saveErr = ""
+			}
+		} else if len(item.setting.ValidValues) > 0 {
+			newValue := item.setting.ValidValues[m.editCursor-offset]
+			err := SetConfigValue(item.setting.Key, newValue, m.editLevel, m.projectRoot)
 			if err != nil {
 				m.saveErr = err.Error()
 			} else {
@@ -284,6 +323,28 @@ func (m configModel) handleEditMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// valueAtLevel returns the value set at a specific level for an item.
+func (m configModel) valueAtLevel(item configItem, level ConfigLevel) string {
+	switch level {
+	case ConfigLevelUser:
+		return item.value.UserVal
+	case ConfigLevelRepo:
+		return item.value.RepoVal
+	case ConfigLevelTeam:
+		return item.value.TeamVal
+	default:
+		return ""
+	}
+}
+
+// editOptionOffset returns 1 if "(unset)" should be shown (value exists at editLevel), 0 otherwise.
+func (m configModel) editOptionOffset(item configItem) int {
+	if m.valueAtLevel(item, m.editLevel) != "" {
+		return 1
+	}
+	return 0
 }
 
 func (m configModel) View() tea.View {
@@ -568,16 +629,56 @@ func (m configModel) editView(width int) string {
 		b.WriteString("\n\n")
 	}
 
+	// Scope selector (only for multi-level settings)
+	if len(item.setting.Levels) > 1 {
+		b.WriteString(chainHeaderStyle.Render("Scope:"))
+		b.WriteString("  ")
+		for i, lvl := range item.setting.Levels {
+			if i > 0 {
+				b.WriteString(detailMutedStyle.Render("  "))
+			}
+			label := string(lvl)
+			if lvl == m.editLevel {
+				b.WriteString(radioSelectedStyle.Render("[" + label + "]"))
+			} else {
+				b.WriteString(detailMutedStyle.Render(" " + label + " "))
+			}
+		}
+		b.WriteString("\n\n")
+	}
+
 	// Value selection
 	b.WriteString(chainHeaderStyle.Render("Select value:"))
 	b.WriteString("\n")
 
 	// Get descriptions for each value from LongDescription
 	valueDescs := m.parseValueDescriptions(item.setting.LongDescription, item.setting.ValidValues)
+	offset := m.editOptionOffset(item)
+	optionIdx := 0
 
-	for i, val := range item.setting.ValidValues {
+	// "(unset)" option — only when a value is set at the current scope
+	if offset > 0 {
 		var radio, valText string
-		if i == m.editCursor {
+		if m.editCursor == optionIdx {
+			radio = radioSelectedStyle.Render("●")
+			valText = radioSelectedStyle.Render("(unset)")
+		} else {
+			radio = radioUnselectedStyle.Render("○")
+			valText = detailMutedStyle.Render("(unset)")
+		}
+		// show what happens when unset
+		fallback := m.fallbackPreview(item)
+		fmt.Fprintf(&b, "  %s %s\n", radio, valText)
+		if fallback != "" {
+			b.WriteString(optionDescStyle.Render("  " + fallback))
+			b.WriteString("\n")
+		}
+		optionIdx++
+	}
+
+	for _, val := range item.setting.ValidValues {
+		var radio, valText string
+		if optionIdx == m.editCursor {
 			radio = radioSelectedStyle.Render("●")
 			valText = radioSelectedStyle.Render(val)
 		} else {
@@ -585,9 +686,10 @@ func (m configModel) editView(width int) string {
 			valText = detailMutedStyle.Render(val)
 		}
 
-		// Current indicator
+		// Current indicator — show if this is the value at the selected scope
 		indicator := ""
-		if val == item.value.Value {
+		scopeVal := m.valueAtLevel(item, m.editLevel)
+		if val == scopeVal {
 			indicator = detailMutedStyle.Render(" (current)")
 		}
 
@@ -601,16 +703,26 @@ func (m configModel) editView(width int) string {
 		if desc != "" {
 			b.WriteString(desc + "\n")
 		}
+		optionIdx++
 	}
 
 	b.WriteString("\n")
-	levelLabel := "user-level override (highest priority)"
-	if len(item.setting.Levels) > 0 && item.setting.Levels[0] != ConfigLevelUser {
-		levelLabel = string(item.setting.Levels[0]) + "-level setting"
+	levelLabel := string(m.editLevel) + "-level"
+	if m.editLevel == ConfigLevelUser {
+		levelLabel += " override (highest priority)"
+	} else if m.editLevel == ConfigLevelRepo {
+		levelLabel += " setting"
+	} else if m.editLevel == ConfigLevelTeam {
+		levelLabel += " default"
 	}
 	b.WriteString(detailMutedStyle.Render("Sets " + levelLabel))
 	b.WriteString("\n\n")
-	b.WriteString(helpStyle.Render("↑/↓ select • enter save • esc cancel"))
+
+	helpText := "↑/↓ select • enter save • esc cancel"
+	if len(item.setting.Levels) > 1 {
+		helpText = "↑/↓ select • tab scope • enter save • esc cancel"
+	}
+	b.WriteString(helpStyle.Render(helpText))
 
 	// Wrap in frame
 	frame := frameStyle.Width(width - 2).Render(b.String())
@@ -625,6 +737,27 @@ func (m configModel) editView(width int) string {
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+// fallbackPreview returns a description of what happens when unsetting at the current scope.
+func (m configModel) fallbackPreview(item configItem) string {
+	// find what the next level down would provide
+	levels := item.setting.Levels
+	pastCurrent := false
+	for _, lvl := range levels {
+		if lvl == m.editLevel {
+			pastCurrent = true
+			continue
+		}
+		if !pastCurrent {
+			continue
+		}
+		val := m.valueAtLevel(item, lvl)
+		if val != "" {
+			return fmt.Sprintf("falls back to %s (%s)", val, lvl)
+		}
+	}
+	return fmt.Sprintf("falls back to %s (default)", item.value.Default)
 }
 
 func (m configModel) parseValueDescriptions(longDesc string, validValues []string) map[string]string {

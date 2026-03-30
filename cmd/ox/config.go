@@ -19,6 +19,8 @@ Commands:
   ox config set <key> <value>          Set at user level (default)
   ox config set <key> <value> --repo   Set at repo level
   ox config set <key> <value> --team   Set at team level
+  ox config unset <key>                Clear override at user level
+  ox config unset <key> --repo         Clear override at repo level
 
 Available settings:
   session_recording        disabled | manual | auto
@@ -45,6 +47,7 @@ Priority: user > repo > team > default`,
 func init() {
 	configCmd.AddCommand(configGetCmd)
 	configCmd.AddCommand(configSetCmd)
+	configCmd.AddCommand(configUnsetCmd)
 	configCmd.AddCommand(configListCmd)
 	rootCmd.AddCommand(configCmd)
 }

@@ -315,7 +315,7 @@ var codeStatusCmd = &cobra.Command{
 		// Skip the direct open when the daemon reports indexing in progress —
 		// Bleve's BoltDB backend holds an exclusive file lock during writes,
 		// so codedb.Open would block until indexing finishes.
-		var totalCommits, totalBlobs, totalSymbols, totalComments, totalPRs, totalIssues int
+		var totalCommits, totalBlobs, totalSymbols, totalPRs, totalIssues int
 		type repoRow struct {
 			name       string
 			path       string
@@ -332,7 +332,6 @@ var codeStatusCmd = &cobra.Command{
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM commits").Scan(&totalCommits)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM blobs").Scan(&totalBlobs)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM symbols").Scan(&totalSymbols)
-				_ = db.Store().QueryRow("SELECT COUNT(*) FROM comments").Scan(&totalComments)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM pull_requests").Scan(&totalPRs)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM issues").Scan(&totalIssues)
 
@@ -361,7 +360,6 @@ var codeStatusCmd = &cobra.Command{
 			totalCommits = codeStats.Commits
 			totalBlobs = codeStats.Blobs
 			totalSymbols = codeStats.Symbols
-			totalComments = codeStats.Comments
 			totalPRs = codeStats.PRs
 			totalIssues = codeStats.Issues
 			for _, r := range codeStats.Repos {
@@ -381,9 +379,9 @@ var codeStatusCmd = &cobra.Command{
 				Commits     int             `json:"commits"`
 				Blobs       int             `json:"blobs"`
 				Symbols     int             `json:"symbols"`
-				Comments    int             `json:"comments"`
 				PRs         int             `json:"prs"`
 				Issues      int             `json:"issues"`
+				DiskBytes   int64           `json:"disk_bytes"`
 				Repos       []jsonRepoStats `json:"repos"`
 				DataDir     string          `json:"data_dir"`
 				IndexExists bool            `json:"index_exists"`
@@ -395,9 +393,9 @@ var codeStatusCmd = &cobra.Command{
 				Commits:     totalCommits,
 				Blobs:       totalBlobs,
 				Symbols:     totalSymbols,
-				Comments:    totalComments,
 				PRs:         totalPRs,
 				Issues:      totalIssues,
+				DiskBytes:   dirSize(dataDir),
 				DataDir:     dataDir,
 				IndexExists: indexExists,
 			}
@@ -486,6 +484,13 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString("\n")
 		}
 
+		// disk usage
+		if indexExists {
+			b.WriteString(statusLabelStyle.Render("Disk"))
+			b.WriteString(statusValueStyle.Render(humanSize(dirSize(dataDir))))
+			b.WriteString("\n")
+		}
+
 		b.WriteString("\n")
 
 		// git history section
@@ -502,13 +507,6 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString(statusLabelStyle.Render("Symbols"))
 			if totalSymbols > 0 {
 				b.WriteString(statusHighlightStyle.Render(formatComma(totalSymbols)))
-			} else {
-				b.WriteString(statusWarningStyle.Render("0"))
-			}
-			b.WriteString("\n")
-			b.WriteString(statusLabelStyle.Render("Comments"))
-			if totalComments > 0 {
-				b.WriteString(statusHighlightStyle.Render(formatComma(totalComments)))
 			} else {
 				b.WriteString(statusWarningStyle.Render("0"))
 			}
