@@ -325,7 +325,9 @@ type UserConfig struct {
 	ContextGit        *ContextGitConfig  `yaml:"context_git,omitempty"`
 	Sessions          *SessionsConfig    `yaml:"sessions,omitempty"`
 	AgentWorker       *AgentWorkerConfig `yaml:"agent_worker,omitempty"`
-	ViewFormat        string             `yaml:"view_format,omitempty"` // "web", "text", "json" (default: "web")
+	ViewFormat        string             `yaml:"view_format,omitempty"`     // "web", "text", "json" (default: "web")
+	Murmuring         string             `yaml:"murmur_send,omitempty"`     // "auto", "manual"
+	MurmurReceive     string             `yaml:"murmur_receive,omitempty"`  // "auto", "off"
 }
 
 // BadgeConfig tracks badge suggestion state across all projects.
@@ -482,6 +484,26 @@ func (c *UserConfig) GetViewFormat() string {
 		return "web"
 	}
 	return c.ViewFormat
+}
+
+// GetMurmuring returns the user's configured murmuring mode, or "" if not set.
+func (c *UserConfig) GetMurmuring() string {
+	return c.Murmuring
+}
+
+// SetMurmuring sets the user's murmuring mode preference.
+func (c *UserConfig) SetMurmuring(mode string) {
+	c.Murmuring = mode
+}
+
+// GetMurmurReceive returns the user's configured murmur receive mode, or "" if not set.
+func (c *UserConfig) GetMurmurReceive() string {
+	return c.MurmurReceive
+}
+
+// SetMurmurReceive sets the user's murmur receive preference.
+func (c *UserConfig) SetMurmurReceive(mode string) {
+	c.MurmurReceive = mode
 }
 
 // LoadUserConfig loads user configuration using standard path discovery.

@@ -118,7 +118,13 @@ type ProjectConfig struct {
 	// coworkers.
 	// Values: "off" (disabled), "auto" (periodic nudges to self-report)
 	// Empty string defaults to "off".
-	Murmuring string `json:"murmuring,omitempty"`
+	Murmuring string `json:"murmur_send,omitempty"`
+
+	// MurmurReceive controls whether murmurs from other coworkers appear in
+	// this project's whisper stream.
+	// Values: "auto" (receive murmurs as whispers), "off" (suppress murmur whispers)
+	// Empty string defaults to "auto".
+	MurmurReceive string `json:"murmur_receive,omitempty"`
 
 	// GitHubSync controls GitHub data extraction to the ledger (master toggle).
 	// Values: "enabled" (default), "disabled"

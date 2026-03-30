@@ -46,7 +46,9 @@ type MockService struct {
 	HeartbeatFunc func(callerID string, payload json.RawMessage)
 	TelemetryFunc func(payload json.RawMessage)
 	FrictionFunc       func(payload daemon.FrictionPayload)
-	PublishMurmurFunc  func(payload daemon.MurmurPayload)
+	PublishMurmurFunc     func(payload daemon.MurmurPayload)
+	PauseMurmuringFunc    func(agentID string)
+	ResumeMurmuringFunc   func(agentID string)
 }
 
 // NewMockService creates a MockService with sensible defaults: healthy status, no errors,
@@ -208,5 +210,17 @@ func (m *MockService) Friction(payload daemon.FrictionPayload) {
 func (m *MockService) PublishMurmur(payload daemon.MurmurPayload) {
 	if m.PublishMurmurFunc != nil {
 		m.PublishMurmurFunc(payload)
+	}
+}
+
+func (m *MockService) PauseMurmuring(agentID string) {
+	if m.PauseMurmuringFunc != nil {
+		m.PauseMurmuringFunc(agentID)
+	}
+}
+
+func (m *MockService) ResumeMurmuring(agentID string) {
+	if m.ResumeMurmuringFunc != nil {
+		m.ResumeMurmuringFunc(agentID)
 	}
 }

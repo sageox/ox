@@ -161,6 +161,7 @@ type Daemon struct {
 	codedb          *CodeDBManager
 	agentWorker     *agentwork.Manager
 	whisperRegistry    *WhisperRegistry
+	murmurNudgeSource  *MurmurNudgeSource
 	dbMaintenance      *DBMaintenanceScheduler
 
 	// state
@@ -908,7 +909,8 @@ func (d *Daemon) startWorkers() {
 		ws := NewWhisperScheduler(d.whisperRegistry, d.logger)
 		ws.RegisterSource(NewActivitySummarySource(d.heartbeat, d.scheduler))
 		if d.config.MurmurNudgeInterval > 0 {
-			ws.RegisterSource(NewMurmurNudgeSource(d.whisperRegistry.LedgerStore(), d.heartbeat, d.config.MurmurNudgeInterval, d.config.ProjectRoot))
+			d.murmurNudgeSource = NewMurmurNudgeSource(d.whisperRegistry.LedgerStore(), d.heartbeat, d.config.MurmurNudgeInterval, d.config.ProjectRoot)
+			ws.RegisterSource(d.murmurNudgeSource)
 		}
 		ws.Start(d.ctx, &d.wg)
 	}
@@ -1264,4 +1266,18 @@ func (s *daemonServiceImpl) PublishMurmur(payload MurmurPayload) {
 
 		s.d.logger.Debug("murmur written and committed", "rel_path", payload.RelPath)
 	}()
+}
+
+func (s *daemonServiceImpl) PauseMurmuring(agentID string) {
+	if s.d.murmurNudgeSource != nil {
+		s.d.murmurNudgeSource.PauseAgent(agentID)
+		s.d.logger.Debug("murmur nudging paused", "agent_id", agentID)
+	}
+}
+
+func (s *daemonServiceImpl) ResumeMurmuring(agentID string) {
+	if s.d.murmurNudgeSource != nil {
+		s.d.murmurNudgeSource.ResumeAgent(agentID)
+		s.d.logger.Debug("murmur nudging resumed", "agent_id", agentID)
+	}
 }

@@ -4,7 +4,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ledger"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -49,9 +48,8 @@ func (r *MurmurRelay) SetLocalAgentIDs(ids []string) {
 // scope must be "ledger" or "team".
 // Returns the number of murmurs successfully relayed.
 func (r *MurmurRelay) RelayFromPath(baseDir, scope string) int {
-	if !config.MurmuringEnabled(r.projectRoot) {
-		return 0
-	}
+	// relay always converts murmur files to whisper entries — the nudge source
+	// (not the relay) is responsible for gating on murmuring config/pause state
 
 	// incremental scan: only look back to lastRelayAt instead of the full 12h window
 	windowHours := ledger.DefaultMurmurWindowHours

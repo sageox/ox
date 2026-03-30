@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,10 +29,11 @@ const murmurNudgeContent = `ACTION REQUIRED: Tell your teammates what you're wor
 // Uses the whisper store as source of truth for nudge/murmur history,
 // so state survives daemon restarts without needing in-memory tracking.
 type MurmurNudgeSource struct {
-	store       *whisperstore.Store
-	heartbeat   *HeartbeatHandler
-	interval    time.Duration
-	projectRoot string // re-checked on every tick to pick up config changes
+	store        *whisperstore.Store
+	heartbeat    *HeartbeatHandler
+	interval     time.Duration
+	projectRoot  string // re-checked on every tick to pick up config changes
+	pausedAgents sync.Map // agentID → struct{}: agents with murmuring paused
 }
 
 // NewMurmurNudgeSource creates a source that nudges agents to self-report.
@@ -46,6 +48,36 @@ func NewMurmurNudgeSource(store *whisperstore.Store, heartbeat *HeartbeatHandler
 		interval:    interval,
 		projectRoot: projectRoot,
 	}
+}
+
+// PauseAgent pauses murmur nudging for the given agent.
+func (s *MurmurNudgeSource) PauseAgent(agentID string) {
+	s.pausedAgents.Store(agentID, struct{}{})
+}
+
+// ResumeAgent resumes murmur nudging for the given agent.
+func (s *MurmurNudgeSource) ResumeAgent(agentID string) {
+	s.pausedAgents.Delete(agentID)
+}
+
+// IsAgentPaused returns true if the agent has murmuring paused.
+func (s *MurmurNudgeSource) IsAgentPaused(agentID string) bool {
+	_, ok := s.pausedAgents.Load(agentID)
+	return ok
+}
+
+// cleanupPausedAgents removes pause state for agents no longer in the active set.
+func (s *MurmurNudgeSource) cleanupPausedAgents(activeAgents []ActivityEntry) {
+	active := make(map[string]struct{}, len(activeAgents))
+	for _, a := range activeAgents {
+		active[a.Key] = struct{}{}
+	}
+	s.pausedAgents.Range(func(key, _ any) bool {
+		if _, ok := active[key.(string)]; !ok {
+			s.pausedAgents.Delete(key)
+		}
+		return true
+	})
 }
 
 func (s *MurmurNudgeSource) Name() string { return "murmur-nudge" }
@@ -67,6 +99,9 @@ func (s *MurmurNudgeSource) Produce(_ context.Context) []whisperstore.WhisperEnt
 	if len(summary.Agents) == 0 {
 		return nil
 	}
+
+	// purge paused state for agents no longer active (prevents unbounded growth)
+	s.cleanupPausedAgents(summary.Agents)
 
 	now := time.Now()
 	var entries []whisperstore.WhisperEntry
@@ -104,6 +139,11 @@ func (s *MurmurNudgeSource) Produce(_ context.Context) []whisperstore.WhisperEnt
 // shouldNudge checks the whisper store to decide if an agent needs nudging.
 // Replaces the in-memory MurmurNudgeTracker — state survives daemon restarts.
 func (s *MurmurNudgeSource) shouldNudge(agentID string, agent ActivityEntry, now time.Time) bool {
+	// paused agents never receive nudges
+	if s.IsAgentPaused(agentID) {
+		return false
+	}
+
 	// don't nudge until agent has been active for earlyNudgeDelay or has
 	// enough heartbeats — prevents nudging agents that just started
 	firstSeen := time.Time{}
