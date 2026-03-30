@@ -179,6 +179,69 @@ func runConfigSet(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+var configUnsetCmd = &cobra.Command{
+	Use:   "unset <setting>",
+	Short: "Clear a config setting at a specific level",
+	Long: `Clear a config override, falling back to the next level in the chain.
+
+Priority: user > repo > team > default.
+Clearing a user-level override lets the repo or team value take effect.
+
+Examples:
+  ox config unset session_recording           # clears user override
+  ox config unset session_recording --repo    # clears repo override
+  ox config unset murmur_send --user          # clears user override`,
+	Args: cobra.ExactArgs(1),
+	RunE: runConfigUnset,
+}
+
+func init() {
+	configUnsetCmd.Flags().Bool("user", false, "Clear at user level (default)")
+	configUnsetCmd.Flags().Bool("repo", false, "Clear at repo level")
+	configUnsetCmd.Flags().Bool("team", false, "Clear at team level")
+}
+
+func runConfigUnset(cmd *cobra.Command, args []string) error {
+	key := args[0]
+
+	userLevel, _ := cmd.Flags().GetBool("user")
+	repoLevel, _ := cmd.Flags().GetBool("repo")
+	teamLevel, _ := cmd.Flags().GetBool("team")
+
+	level := ConfigLevelUser
+	if repoLevel {
+		level = ConfigLevelRepo
+	} else if teamLevel {
+		level = ConfigLevelTeam
+	} else if userLevel {
+		level = ConfigLevelUser
+	}
+
+	projectRoot, _ := findProjectRoot()
+
+	if err := UnsetConfigValue(key, level, projectRoot); err != nil {
+		return err
+	}
+
+	// show what the effective value is now
+	cv, _ := ResolveConfigValue(key, projectRoot)
+	effectiveInfo := ""
+	if cv != nil {
+		effectiveInfo = fmt.Sprintf(" (now: %s %s %s)",
+			cli.StyleSuccess.Render(cv.Value),
+			cli.StyleDim.Render("←"),
+			cli.StyleDim.Render(string(cv.Source)))
+	}
+
+	fmt.Printf("%s Cleared %s at %s level%s\n",
+		cli.StyleSuccess.Render("✓"),
+		key,
+		level,
+		effectiveInfo)
+
+	return nil
+}
+
 var configListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all config settings",
