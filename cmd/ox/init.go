@@ -210,7 +210,7 @@ func checkRemoteSageoxExists(gitRoot string) (found bool, stale bool, err error)
 		}
 	}
 
-	// tier 2: use git ls-remote to check if local refs are stale
+	// offline-safe: ls-remote fails for local-only repos; caller treats error as "not found, continue"
 	cmd := exec.Command("git", "-C", gitRoot, "ls-remote", "--heads", "origin")
 	out, err := cmd.Output()
 	if err != nil {
@@ -305,7 +305,7 @@ func runInit() error {
 		return cli.ErrSilent
 	}
 
-	// add remote URL hashes to fingerprint
+	// offline-safe: remote hashes are optional; registration works for local-only repos
 	if hashErr := fingerprint.WithRemoteHashes(); hashErr != nil {
 		cli.PrintWarning(fmt.Sprintf("Could not add remote hashes: %v", hashErr))
 	}

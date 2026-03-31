@@ -1536,6 +1536,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 //
 // This is cheaper than git fetch because ls-remote only hits /info/refs (1 HTTP
 // round-trip) without git-upload-pack negotiation or packfile transfer.
+// offline-safe: returns false on any error, causing fallback to normal fetch+pull path
 func (s *SyncScheduler) remoteRefCheck(ctx context.Context, repoPath string) bool {
 	lsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

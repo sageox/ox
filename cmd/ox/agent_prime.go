@@ -744,6 +744,7 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 // repoSlugFromRemoteOrDir extracts "owner/repo" from git remote origin URL,
 // falling back to the directory name if the remote is unavailable.
 // Examples: "sageox/ox", "my-project"
+// offline-safe: falls back to directory name for local-only repos
 func repoSlugFromRemoteOrDir(projectRoot string) string {
 	cmd := exec.Command("git", "remote", "get-url", "origin")
 	cmd.Dir = projectRoot

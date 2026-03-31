@@ -224,6 +224,7 @@ func getGitRepoStatus(repoPath string, lastSync time.Time, hasLastSync bool) git
 
 // getGitRemoteURL returns the origin remote URL for a git repo.
 // Returns empty string on error or if remote doesn't exist.
+// offline-safe: returns "" for local-only repos
 func getGitRemoteURL(repoPath string) string {
 	if repoPath == "" {
 		return ""

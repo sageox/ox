@@ -73,6 +73,7 @@ func isNumeric(s string) bool {
 // an attacker with server access cannot precompute hashes for known repo URLs
 // like "github.com/company/secret-project" to identify which repos are registered.
 // Each repo's salt is unique, so the same URL produces different hashes for different repos.
+// offline-safe: returns empty slice when urls is empty (local-only repos)
 func HashRemoteURLs(salt string, urls []string) []string {
 	var hashes []string
 	for _, url := range urls {

@@ -208,6 +208,7 @@ func ResolveWithConfig(cfg *Config) (*ResolvedIdentities, error) {
 //
 // Privacy: We explicitly do NOT probe providers that aren't in the remote list.
 // This means we never make unnecessary API calls or leak credential presence.
+// offline-safe: returns nil for local-only repos; identity resolution falls back to git config
 func detectProvidersFromRemotes() ([]ProviderType, []string) {
 	urls, err := repotools.GetRemoteURLs()
 	if err != nil {

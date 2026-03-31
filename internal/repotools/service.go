@@ -86,6 +86,7 @@ func GetInitialCommitHash() (string, error) {
 }
 
 // GetRemoteURLs returns all configured git remote URLs for the current directory.
+// offline-safe: returns empty slice for local-only repos (no remotes configured)
 func GetRemoteURLs() ([]string, error) {
 	return GetRemoteURLsForDir("")
 }
@@ -129,6 +130,7 @@ func GetRemoteURLsForDir(dir string) ([]string, error) {
 
 // getOriginURL returns the normalized URL for the "origin" remote in the given directory.
 // Returns empty string if origin doesn't exist or git fails.
+// offline-safe: returns "" for local-only repos
 func getOriginURL(dir string) string {
 	var cmd *exec.Cmd
 	if dir != "" {
@@ -152,6 +154,7 @@ func getOriginURL(dir string) string {
 // (e.g. git@github.com:sageox/ox.git → "sageox/ox").
 // Falls back to the git root directory name if no remote is available.
 // Uses gitRoot to query remotes (via git -C), not the current working directory.
+// offline-safe: falls back to directory basename when no remotes available
 func GetRepoName(gitRoot string) string {
 	// prefer origin remote explicitly to avoid non-determinism with multiple remotes
 	if normalized := getOriginURL(gitRoot); normalized != "" {

@@ -214,6 +214,7 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 }
 
 // detectGitHubRemote finds the GitHub owner/repo from git remotes.
+// offline-safe: returns error for non-GitHub/local-only repos; caller handles gracefully
 func detectGitHubRemote() (owner, repo string, err error) {
 	urls, err := repotools.GetRemoteURLs()
 	if err != nil {

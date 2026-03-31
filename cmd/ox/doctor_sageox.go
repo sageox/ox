@@ -589,7 +589,7 @@ func registerRepoWithSageOx(gitRoot string, cfg *config.ProjectConfig) (string, 
 	// get repo_salt from initial commit hash
 	repoSalt, _ := repotools.GetInitialCommitHash()
 
-	// get and hash remote URLs
+	// offline-safe: remote URL hashing is best-effort; registration works without remotes
 	remoteURLs, _ := repotools.GetRemoteURLs()
 	var repoRemoteHashes []string
 	if repoSalt != "" && len(remoteURLs) > 0 {

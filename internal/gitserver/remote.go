@@ -17,6 +17,7 @@ import (
 // No-op for SSH URLs, local remotes, or non-oauth2 usernames (deploy tokens).
 // Returns nil on success or no-op. Returns an error if credentials are unavailable
 // or the git command fails — callers should log and continue, not abort.
+// offline-safe: returns error when no origin exists; callers handle gracefully
 //
 // endpointURL is used as a hint for credential lookup. If empty, the endpoint
 // is derived from the remote URL's host (e.g., git.sageox.ai → sageox.ai).
@@ -165,6 +166,7 @@ func extractPATFromRemote(repoPath string) (pat string, remoteURL string, err er
 // GetBareRemoteURL returns the origin remote URL with credentials stripped.
 // Useful when you need the repo URL for API derivation (e.g., LFS batch endpoint)
 // without embedding the PAT.
+// offline-safe: returns error for repos with no origin remote; callers must handle
 func GetBareRemoteURL(repoPath string) (string, error) {
 	_, remoteURL, err := extractPATFromRemote(repoPath)
 	if err != nil {

@@ -219,6 +219,7 @@ func (m *GitHubSyncManager) resolveRemote() (string, string, error) {
 	}
 	m.mu.Unlock()
 
+	// offline-safe: returns error for local-only repos; GitHub sync skips entirely
 	urls, err := repotools.GetRemoteURLsForDir(m.projectRoot)
 	if err != nil {
 		return "", "", fmt.Errorf("get git remotes: %w", err)

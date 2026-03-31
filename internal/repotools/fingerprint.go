@@ -142,6 +142,7 @@ func ComputeFingerprint() (*RepoFingerprint, error) {
 // WithRemoteHashes adds salted remote URL hashes to the fingerprint.
 // Call this after ComputeFingerprint() to include remote URL identity.
 // The hashes are salted with FirstCommit to prevent enumeration.
+// offline-safe: remote hashes are optional; fingerprint is valid without them
 func (f *RepoFingerprint) WithRemoteHashes() error {
 	if f == nil || f.FirstCommit == "" {
 		return fmt.Errorf("fingerprint has no first commit for salting")

@@ -30,6 +30,12 @@ func checkGitAuth() checkResult {
 		return SkippedCheck("Git auth", "not in git repo", "")
 	}
 
+	// offline-safe: auth checks are irrelevant for local-only repos with no remotes
+	urls, _ := repotools.GetRemoteURLs()
+	if len(urls) == 0 {
+		return SkippedCheck("Git auth", "no remotes configured (local-only repo)", "")
+	}
+
 	// check if credential helper is configured
 	credHelper := getGitConfigValue("credential.helper")
 	if credHelper != "" {
@@ -81,6 +87,7 @@ func checkSSHAuth() bool {
 
 // checkGitConnectivity verifies network connectivity to git remotes.
 // Pings the configured origin remote to check reachability.
+// offline-safe: skipped when no origin remote exists (local-only project repo)
 func checkGitConnectivity() checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
@@ -216,8 +223,9 @@ func checkGitRemotes() checkResult {
 	}
 
 	if len(urls) == 0 {
+		// offline-safe: local-only repos have no remotes; this is a valid configuration
 		return InfoCheck("Git remotes", "no remotes configured",
-			"Add a remote with `git remote add origin <url>`")
+			"Local-only repo (no remote configured)")
 	}
 
 	// check for origin specifically

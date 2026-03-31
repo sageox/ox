@@ -33,6 +33,7 @@ type PATLivenessResult struct {
 //
 // Requires at least one repo URL in credentials to probe against.
 // Timeout should be kept short (3s) so callers (doctor, status) stay responsive.
+// offline-safe: returns Skipped when no credentials or repo URLs available
 func ValidatePATLiveness(ctx context.Context, creds *GitCredentials) PATLivenessResult {
 	if creds == nil || creds.Token == "" {
 		return PATLivenessResult{Skipped: true, Reason: "no credentials"}

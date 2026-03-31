@@ -413,8 +413,8 @@ func TestCheckGitRemotes_NoRemotes(t *testing.T) {
 	if !result.warning {
 		t.Error("expected warning when no remotes configured")
 	}
-	if !strings.Contains(result.detail, "git remote add origin") {
-		t.Error("expected detail to suggest adding remote")
+	if !strings.Contains(result.detail, "Local-only repo") {
+		t.Error("expected detail to indicate local-only repo")
 	}
 }
 
