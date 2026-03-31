@@ -4,21 +4,23 @@ import "charm.land/bubbles/v2/key"
 
 // GlobalKeyMap defines keybindings that are active regardless of which pane has focus.
 type GlobalKeyMap struct {
-	FocusNext key.Binding
-	FocusPrev key.Binding
-	Refresh   key.Binding
-	Help      key.Binding
-	Quit      key.Binding
+	FocusNext   key.Binding
+	FocusPrev   key.Binding
+	Refresh     key.Binding
+	Help        key.Binding
+	Quit        key.Binding
+	OpenBrowser key.Binding // opens the selected session/workspace in the browser
 }
 
 // DefaultGlobalKeys returns the standard global keybindings for the dashboard.
 func DefaultGlobalKeys() GlobalKeyMap {
 	return GlobalKeyMap{
-		FocusNext: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next pane")),
-		FocusPrev: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "prev pane")),
-		Refresh:   key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
-		Help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		FocusNext:   key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next pane")),
+		FocusPrev:   key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "prev pane")),
+		Refresh:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		Help:        key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		OpenBrowser: key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in browser")),
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 
 	lipgloss "charm.land/lipgloss/v2"
 
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/dashboard/domain"
 	"github.com/sageox/ox/internal/dashboard/theme"
 	"github.com/sageox/ox/internal/ui"
@@ -448,10 +449,69 @@ func RenderDiscussion(target domain.InspectorTarget, width int) string {
 	return strings.Join(lines, "\n")
 }
 
-// RenderDefault renders the "nothing selected" hint shown when no target is active.
-func RenderDefault(width int) string {
-	_ = width // reserved for future centering
-	return theme.InspectorHintStyle.Render("← select an item in the navigator")
+// RenderDefault renders a dashboard health summary when nothing is selected.
+// Shows daemon status, auth status, active coworkers, top issue, and key hints
+// so the pane is immediately informative on first open.
+func RenderDefault(status *daemon.StatusData, activeCoworkers int, width int) string {
+	var lines []string
+	lines = append(lines, theme.InspectorTitleStyle.Render("ox dashboard"))
+	lines = append(lines, "")
+
+	if status == nil || !status.Running {
+		lines = append(lines, theme.InspectorDimStyle.Render("⬡ daemon offline"))
+		lines = append(lines, "")
+		lines = append(lines, theme.InspectorHintStyle.Render("Run: ox daemon start"))
+	} else {
+		daemonLine := "✓ daemon running"
+		if status.Version != "" {
+			daemonLine += "  v" + status.Version
+		}
+		lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("#5faf5f")).Render(daemonLine))
+
+		if status.AuthenticatedUser != nil {
+			lines = append(lines, row("Signed in as", status.AuthenticatedUser.Email))
+		} else {
+			lines = append(lines, theme.InspectorDimStyle.Render("⚠ not authenticated — run: ox login"))
+		}
+
+		if activeCoworkers > 0 {
+			lines = append(lines, row("Active AI coworkers", fmt.Sprintf("%d", activeCoworkers)))
+		}
+
+		if len(status.Issues) > 0 {
+			lines = append(lines, "")
+			lines = append(lines, theme.InspectorTitleStyle.Render("Issues"))
+			shown := status.Issues
+			if len(shown) > 3 {
+				shown = shown[:3]
+			}
+			for _, issue := range shown {
+				sev := issue.Severity
+				var issStyle lipgloss.Style
+				switch sev {
+				case "critical", "error":
+					issStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555"))
+				case "warning":
+					issStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB86C"))
+				default:
+					issStyle = theme.InspectorDimStyle
+				}
+				lines = append(lines, issStyle.Render("["+strings.ToUpper(sev)+"]")+" "+theme.InspectorDimStyle.Render(issue.Type))
+			}
+		}
+	}
+
+	lines = append(lines, "")
+	lines = append(lines, theme.InspectorTitleStyle.Render("Keys"))
+	lines = append(lines, theme.InspectorHintStyle.Render("tab/shift+tab  focus pane"))
+	lines = append(lines, theme.InspectorHintStyle.Render("j/k ↑/↓        navigate"))
+	lines = append(lines, theme.InspectorHintStyle.Render("enter          select / inspect"))
+	lines = append(lines, theme.InspectorHintStyle.Render("o              open in browser"))
+	lines = append(lines, theme.InspectorHintStyle.Render("r              refresh data"))
+	lines = append(lines, theme.InspectorHintStyle.Render("?              help overlay"))
+	lines = append(lines, theme.InspectorHintStyle.Render("q              quit"))
+
+	return strings.Join(lines, "\n")
 }
 
 // --- helpers ---

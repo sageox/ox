@@ -78,3 +78,9 @@ type HideHelpMsg struct{}
 type SelectionChangedMsg struct {
 	Target *domain.InspectorTarget
 }
+
+// OpenBrowserMsg requests that the given URL be opened in the system browser.
+// Handled by the root model as a fire-and-forget side effect.
+type OpenBrowserMsg struct {
+	URL string
+}

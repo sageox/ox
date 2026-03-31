@@ -31,6 +31,21 @@ type Store struct {
 	Discussions    []domain.TeamDiscussion
 	DiscussionsErr error
 
+	Instances    []daemon.InstanceInfo
+	InstancesErr error
+
+	StoredErrors    []daemon.StoredError
+	StoredErrorsErr error
+
+	TeamContexts    []domain.TeamContextEntry
+	TeamContextsErr error
+
+	CodeIndexStats    *daemon.CodeDBStats
+	CodeIndexStatsErr error
+
+	WhisperHistory    []domain.WhisperHistoryEntry
+	WhisperHistoryErr error
+
 	Selected *domain.InspectorTarget
 
 	// nav and timeline cursor positions — owned by the root model, not panes.
@@ -66,6 +81,21 @@ func (s *Store) GetDaemonStatus() *daemon.StatusData     { return s.DaemonStatus
 func (s *Store) GetSessions() []session.SessionInfo      { return s.Sessions }
 func (s *Store) GetMurmurs() []domain.MurmurEntry        { return s.Murmurs }
 func (s *Store) GetDiscussions() []domain.TeamDiscussion { return s.Discussions }
+
+// GetInstances returns the current AI coworker instance list.
+func (s *Store) GetInstances() []daemon.InstanceInfo { return s.Instances }
+
+// GetStoredErrors returns the current unviewed stored error list.
+func (s *Store) GetStoredErrors() []daemon.StoredError { return s.StoredErrors }
+
+// GetTeamContexts returns the current team context metadata list.
+func (s *Store) GetTeamContexts() []domain.TeamContextEntry { return s.TeamContexts }
+
+// GetCodeIndexStats returns the current code index statistics, or nil if unavailable.
+func (s *Store) GetCodeIndexStats() *daemon.CodeDBStats { return s.CodeIndexStats }
+
+// GetWhisperHistory returns the current whisper history entries.
+func (s *Store) GetWhisperHistory() []domain.WhisperHistoryEntry { return s.WhisperHistory }
 
 // ActiveMurmurCoworkers implements ReadOnlyStore.
 func (s *Store) ActiveMurmurCoworkers() int { return ActiveMurmurCoworkers(s) }

@@ -36,6 +36,41 @@ type TeamDiscussionsLoadedMsg struct {
 	Err         error
 }
 
+// InstancesLoadedMsg is sent when the active AI coworker instance list fetch completes.
+type InstancesLoadedMsg struct {
+	Instances []daemon.InstanceInfo
+	Gen       int
+	Err       error
+}
+
+// StoredErrorsLoadedMsg is sent when the stored error list fetch completes.
+type StoredErrorsLoadedMsg struct {
+	Errors []daemon.StoredError
+	Gen    int
+	Err    error
+}
+
+// TeamContextsLoadedMsg is sent when the team context metadata fetch completes.
+type TeamContextsLoadedMsg struct {
+	TeamContexts []domain.TeamContextEntry
+	Gen          int
+	Err          error
+}
+
+// CodeIndexStatsLoadedMsg is sent when the code index statistics fetch completes.
+type CodeIndexStatsLoadedMsg struct {
+	Stats *daemon.CodeDBStats
+	Gen   int
+	Err   error
+}
+
+// WhisperHistoryLoadedMsg is sent when the whisper history fetch completes.
+type WhisperHistoryLoadedMsg struct {
+	Entries []domain.WhisperHistoryEntry
+	Gen     int
+	Err     error
+}
+
 // RefreshTickMsg is sent by the background refresh timer.
 // It signals the root model to start a new data-fetch cycle.
 type RefreshTickMsg struct {

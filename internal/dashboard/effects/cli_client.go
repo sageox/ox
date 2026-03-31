@@ -1,6 +1,8 @@
 package effects
 
 import (
+	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,8 +14,10 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/dashboard/domain"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/session"
+	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
 
 // cliClient is the production Client backed by the live daemon IPC and the
@@ -175,6 +179,119 @@ func (c *cliClient) ListTeamDiscussions() ([]domain.TeamDiscussion, error) {
 	return discussions, nil
 }
 
+// ListInstances fetches active AI coworker instances from the daemon.
+// Returns nil, nil when the daemon is offline.
+func (c *cliClient) ListInstances() ([]daemon.InstanceInfo, error) {
+	cl := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
+	if err := cl.Ping(); err != nil {
+		return nil, nil
+	}
+	instances, err := cl.Instances()
+	if err != nil {
+		return nil, nil
+	}
+	return instances, nil
+}
+
+// ListStoredErrors fetches unviewed stored errors from the daemon.
+// Returns nil, nil when the daemon is offline.
+func (c *cliClient) ListStoredErrors() ([]daemon.StoredError, error) {
+	cl := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
+	if err := cl.Ping(); err != nil {
+		return nil, nil
+	}
+	errs, err := cl.GetUnviewedErrors()
+	if err != nil {
+		return nil, nil
+	}
+	return errs, nil
+}
+
+// ListTeamContexts reads metadata about all synced team context workspaces
+// directly from disk (daemon-independent). Returns nil, nil when no paths found.
+func (c *cliClient) ListTeamContexts() ([]domain.TeamContextEntry, error) {
+	paths := c.teamContextPaths()
+	if len(paths) == 0 {
+		return nil, nil
+	}
+
+	var entries []domain.TeamContextEntry
+	for _, base := range paths {
+		entry := domain.TeamContextEntry{
+			Path:     base,
+			TeamSlug: filepath.Base(base),
+			TeamName: filepath.Base(base),
+		}
+
+		// try to read SOUL.md for preview
+		if data, err := os.ReadFile(filepath.Join(base, "SOUL.md")); err == nil {
+			preview := strings.TrimSpace(string(data))
+			if len(preview) > 300 {
+				preview = preview[:300]
+			}
+			entry.SOULPreview = preview
+		}
+
+		// count .md files in memory/
+		if memEntries, err := os.ReadDir(filepath.Join(base, "memory")); err == nil {
+			for _, e := range memEntries {
+				if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+					entry.MemoryCount++
+				}
+			}
+		}
+
+		// count .md files in docs/
+		if docsEntries, err := os.ReadDir(filepath.Join(base, "docs")); err == nil {
+			for _, e := range docsEntries {
+				if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+					entry.DocsCount++
+				}
+			}
+		}
+
+		entries = append(entries, entry)
+	}
+	return entries, nil
+}
+
+// LoadCodeIndexStats returns code index statistics.
+// Prefers cached daemon-reported stats; falls back to a lightweight disk check
+// of the ledger cache codedb directory when the daemon is offline.
+func (c *cliClient) LoadCodeIndexStats() (*daemon.CodeDBStats, error) {
+	c.mu.Lock()
+	status := c.cachedStatus
+	c.mu.Unlock()
+
+	if status != nil && status.CodeDB != nil {
+		return status.CodeDB, nil
+	}
+
+	// daemon offline — check ledger cache for codedb directory
+	ledgerPath := ""
+	if status != nil {
+		ledgerPath = status.LedgerPath
+	}
+	if ledgerPath == "" {
+		ledgerPath = projectLedgerPath()
+	}
+	if ledgerPath == "" {
+		return &daemon.CodeDBStats{IndexExists: false}, nil
+	}
+
+	codedbDir := filepath.Join(ledgerPath, ".sageox", "cache", "codedb")
+	info, err := os.Stat(codedbDir)
+	if err != nil {
+		return &daemon.CodeDBStats{IndexExists: false, DataDir: codedbDir}, nil
+	}
+
+	return &daemon.CodeDBStats{
+		IndexExists: true,
+		LastIndexed: info.ModTime(),
+		DataDir:     codedbDir,
+	}, nil
+}
+
 // teamContextPaths returns the filesystem paths for all team-context workspaces
 // that exist on disk. Prefers paths reported by the daemon; falls back to
 // scanning the team context directories from project config when the daemon is
@@ -225,6 +342,88 @@ func (c *cliClient) teamContextPaths() []string {
 		}
 	}
 	return tcPaths
+}
+
+// ListWhisperHistory fetches recent whispers from the daemon's WhisperHistory endpoint.
+// Uses an empty agentID to request recent whispers across all agents visible to this
+// project, capped at 50 entries. Returns nil, nil when the daemon is offline.
+func (c *cliClient) ListWhisperHistory() ([]domain.WhisperHistoryEntry, error) {
+	cl := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
+	if err := cl.Ping(); err != nil {
+		return nil, nil
+	}
+	resp, err := cl.WhisperHistory("", time.Now(), 50)
+	if err != nil || resp == nil {
+		return nil, nil
+	}
+	entries := make([]domain.WhisperHistoryEntry, 0, len(resp.Entries))
+	for _, e := range resp.Entries {
+		delivered := resp.HasCursor && !e.CreatedAt.After(resp.Cursor)
+		entries = append(entries, domain.WhisperHistoryEntry{
+			AgentID:   e.AgentID,
+			Topic:     e.Topic,
+			Content:   e.Content,
+			Source:    whisperSourceLabel(e),
+			CreatedAt: e.CreatedAt,
+			Delivered: delivered,
+		})
+	}
+	return entries, nil
+}
+
+// whisperSourceLabel returns a short human-readable label for the whisper source.
+func whisperSourceLabel(e whisperstore.WhisperEntry) string {
+	if e.Source != "" {
+		return e.Source
+	}
+	return string(e.Type)
+}
+
+// BuildSessionURL constructs the canonical web URL for viewing a session.
+// Returns empty string when required config (endpoint, repo_id) is missing.
+func (c *cliClient) BuildSessionURL(sessionName string) string {
+	if sessionName == "" {
+		return ""
+	}
+	c.mu.Lock()
+	status := c.cachedStatus
+	c.mu.Unlock()
+
+	// prefer the endpoint from the daemon's status
+	ledgerPath := ""
+	if status != nil {
+		ledgerPath = status.LedgerPath
+	}
+	if ledgerPath == "" {
+		ledgerPath = projectLedgerPath()
+	}
+	if ledgerPath == "" {
+		return ""
+	}
+
+	gitRoot := ""
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	out, err := cmd.Output()
+	if err == nil {
+		gitRoot = strings.TrimSpace(string(out))
+	}
+	if gitRoot == "" {
+		return ""
+	}
+
+	cfg, err := config.LoadProjectConfig(gitRoot)
+	if err != nil || cfg == nil || cfg.RepoID == "" {
+		return ""
+	}
+	ep := endpoint.NormalizeEndpoint(cfg.GetEndpoint())
+	if ep == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/repo/%s/sessions/%s/view",
+		ep,
+		url.PathEscape(cfg.RepoID),
+		url.PathEscape(sessionName),
+	)
 }
 
 // readPreview reads up to n bytes from path and returns them as a trimmed string.

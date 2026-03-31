@@ -6,7 +6,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/dashboard/domain"
 )
 
@@ -131,6 +133,108 @@ func BuildNav(s *Store) []domain.NavNode {
 		})
 	}
 
+	// Team Discussions section — memory/*.md files from team context paths.
+	nodes = append(nodes, domain.NavNode{
+		ID:         "section-discussions",
+		Kind:       domain.NavNodeSection,
+		Label:      "Team Discussions",
+		Depth:      0,
+		Expandable: true,
+		Expanded:   true,
+	})
+	for i := range s.Discussions {
+		d := s.Discussions[i]
+		nodes = append(nodes, domain.NavNode{
+			ID:    "discussion-" + d.Path,
+			Kind:  domain.NavNodeDiscussion,
+			Label: d.Title,
+			Depth: 1,
+			Target: &domain.InspectorTarget{
+				Kind:       domain.TargetTeamDiscussion,
+				Discussion: &s.Discussions[i],
+			},
+		})
+	}
+	if len(s.Discussions) == 0 {
+		nodes = append(nodes, domain.NavNode{
+			ID:    "hint-discussions",
+			Kind:  domain.NavNodeHint,
+			Label: "no discussions — record a team meeting",
+			Depth: 1,
+		})
+	}
+
+	// AI Coworkers section — active AI coworker instances from the daemon.
+	nodes = append(nodes, domain.NavNode{
+		ID:         "section-ai-coworkers",
+		Kind:       domain.NavNodeSection,
+		Label:      "AI Coworkers",
+		Depth:      0,
+		Expandable: true,
+		Expanded:   true,
+	})
+	// Build parent → children map for tree rendering.
+	parentMap := make(map[string][]int)
+	for i, inst := range s.Instances {
+		parentMap[inst.ParentAgentID] = append(parentMap[inst.ParentAgentID], i)
+	}
+	for _, idx := range parentMap[""] {
+		inst := s.Instances[idx]
+		instCopy := inst
+		label := inst.AgentID
+		if inst.AgentType != "" {
+			label = inst.AgentType + " · " + inst.AgentID
+		}
+		icon := "●"
+		if inst.Status == "idle" {
+			icon = "◌"
+		}
+		nodes = append(nodes, domain.NavNode{
+			ID:    "ai-coworker-" + inst.AgentID,
+			Kind:  domain.NavNodeAICoworker,
+			Label: icon + " " + label,
+			Depth: 1,
+			Target: &domain.InspectorTarget{
+				Kind:     domain.TargetInstance,
+				Instance: &instCopy,
+			},
+		})
+		for _, childIdx := range parentMap[inst.AgentID] {
+			child := s.Instances[childIdx]
+			childCopy := child
+			childLabel := child.AgentID
+			if child.AgentType != "" {
+				childLabel = child.AgentType + " · " + child.AgentID
+			}
+			childIcon := "●"
+			if child.Status == "idle" {
+				childIcon = "◌"
+			}
+			nodes = append(nodes, domain.NavNode{
+				ID:    "ai-coworker-" + child.AgentID,
+				Kind:  domain.NavNodeAICoworker,
+				Label: childIcon + " " + childLabel,
+				Depth: 2,
+				Target: &domain.InspectorTarget{
+					Kind:     domain.TargetInstance,
+					Instance: &childCopy,
+				},
+			})
+		}
+	}
+	if len(s.Instances) == 0 {
+		hint := "no active AI coworkers"
+		if daemonOffline {
+			hint = "daemon offline — coworkers unavailable"
+		}
+		nodes = append(nodes, domain.NavNode{
+			ID:    "hint-ai-coworkers",
+			Kind:  domain.NavNodeHint,
+			Label: hint,
+			Depth: 1,
+		})
+	}
+
 	// Issues section — populated from daemon status when available.
 	nodes = append(nodes, domain.NavNode{
 		ID:         "section-issues",
@@ -222,14 +326,78 @@ func BuildNav(s *Store) []domain.NavNode {
 		}
 	}
 
+	// Daemon section — operational visibility: agent work queue, callers, errors.
+	if s.DaemonStatus != nil && s.DaemonStatus.Running {
+		nodes = append(nodes, domain.NavNode{
+			ID:         "section-daemon",
+			Kind:       domain.NavNodeSection,
+			Label:      "Daemon",
+			Depth:      0,
+			Expandable: true,
+			Expanded:   true,
+		})
+
+		// Agent Work sub-node.
+		if s.DaemonStatus.AgentWork != nil {
+			aw := s.DaemonStatus.AgentWork
+			awLabel := fmt.Sprintf("Agent Work · queue:%d active:%d", aw.QueueDepth, len(aw.Active))
+			nodes = append(nodes, domain.NavNode{
+				ID:    "daemon-agentwork",
+				Kind:  domain.NavNodeAgentWork,
+				Label: awLabel,
+				Depth: 1,
+				Target: &domain.InspectorTarget{
+					Kind:      domain.TargetAgentWork,
+					AgentWork: s.DaemonStatus.AgentWork,
+				},
+			})
+		}
+
+		// Callers sub-node.
+		if len(s.DaemonStatus.Callers) > 0 {
+			callersCopy := make([]daemon.CallerInfo, len(s.DaemonStatus.Callers))
+			copy(callersCopy, s.DaemonStatus.Callers)
+			nodes = append(nodes, domain.NavNode{
+				ID:    "daemon-callers",
+				Kind:  domain.NavNodeCallers,
+				Label: fmt.Sprintf("Callers · %d connected", len(s.DaemonStatus.Callers)),
+				Depth: 1,
+				Target: &domain.InspectorTarget{
+					Kind:    domain.TargetCallers,
+					Callers: callersCopy,
+				},
+			})
+		}
+
+		// Stored Errors sub-node.
+		errorLabel := "Errors"
+		if len(s.StoredErrors) > 0 {
+			errorLabel = fmt.Sprintf("Errors · %d unviewed", len(s.StoredErrors))
+		} else if s.DaemonStatus.UnviewedErrorCount > 0 {
+			errorLabel = fmt.Sprintf("Errors · %d unviewed", s.DaemonStatus.UnviewedErrorCount)
+		}
+		nodes = append(nodes, domain.NavNode{
+			ID:    "daemon-errors",
+			Kind:  domain.NavNodeDaemonErrors,
+			Label: errorLabel,
+			Depth: 1,
+			Target: &domain.InspectorTarget{
+				Kind:         domain.TargetDaemonErrors,
+				StoredErrors: s.StoredErrors,
+			},
+		})
+	}
+
 	// Code Index section — single node showing codedb stats.
-	if s.DaemonStatus != nil && s.DaemonStatus.CodeDB != nil {
-		cdb := s.DaemonStatus.CodeDB
+	// Shows daemon-reported stats when available; falls back to disk-loaded stats.
+	if cdb := codeIndexStats(s); cdb != nil {
 		indexLabel := "Code Index"
 		if cdb.IndexingNow {
 			indexLabel = "⟳ Code Index"
 		} else if cdb.LastError != "" {
 			indexLabel = "✗ Code Index"
+		} else if !cdb.IndexExists {
+			indexLabel = "○ Code Index"
 		}
 		nodes = append(nodes, domain.NavNode{
 			ID:    "node-codeindex",
@@ -302,6 +470,129 @@ func BuildNav(s *Store) []domain.NavNode {
 		}
 	}
 
+	// Team Feed section — combined murmurs + discussions sorted newest-first.
+	// Provides a single scannable view of live WIP signals and shared knowledge.
+	{
+		type feedItem struct {
+			label     string
+			timestamp time.Time
+			target    domain.InspectorTarget
+		}
+		var items []feedItem
+		for i := range s.Murmurs {
+			m := s.Murmurs[i]
+			items = append(items, feedItem{
+				label:     fmt.Sprintf("[%s] %s", m.Topic, truncate(m.Content, 40)),
+				timestamp: m.Timestamp,
+				target:    domain.InspectorTarget{Kind: domain.TargetMurmur, Murmur: &s.Murmurs[i]},
+			})
+		}
+		for i := range s.Discussions {
+			d := s.Discussions[i]
+			items = append(items, feedItem{
+				label:     d.Title,
+				timestamp: d.ModTime,
+				target:    domain.InspectorTarget{Kind: domain.TargetTeamDiscussion, Discussion: &s.Discussions[i]},
+			})
+		}
+		sort.Slice(items, func(i, j int) bool {
+			return items[i].timestamp.After(items[j].timestamp)
+		})
+		if len(items) > 20 {
+			items = items[:20]
+		}
+
+		if len(items) > 0 {
+			nodes = append(nodes, domain.NavNode{
+				ID:         "section-team-feed",
+				Kind:       domain.NavNodeSection,
+				Label:      "Team Feed",
+				Depth:      0,
+				Expandable: true,
+				Expanded:   true,
+			})
+			for i := range items {
+				item := items[i]
+				itemCopy := item.target
+				nodes = append(nodes, domain.NavNode{
+					ID:    fmt.Sprintf("feed-%d-%d", i, item.timestamp.Unix()),
+					Kind:  domain.NavNodeTeamFeedSection,
+					Label: item.label,
+					Depth: 1,
+					Target: &itemCopy,
+				})
+			}
+		}
+	}
+
+	// Whisper history section — recent whispers delivered to AI coworkers.
+	if len(s.WhisperHistory) > 0 {
+		nodes = append(nodes, domain.NavNode{
+			ID:         "section-whispers",
+			Kind:       domain.NavNodeSection,
+			Label:      "Whispers",
+			Depth:      0,
+			Expandable: true,
+			Expanded:   true,
+		})
+		// Show at most 10 most recent whispers in the nav.
+		shown := s.WhisperHistory
+		if len(shown) > 10 {
+			shown = shown[:10]
+		}
+		for i := range shown {
+			w := shown[i]
+			icon := "◦"
+			if w.Delivered {
+				icon = "✓"
+			}
+			label := fmt.Sprintf("%s %s", icon, truncate(w.Content, 45))
+			wCopy := []domain.WhisperHistoryEntry{w}
+			nodes = append(nodes, domain.NavNode{
+				ID:    fmt.Sprintf("whisper-%d", i),
+				Kind:  domain.NavNodeWhisper,
+				Label: label,
+				Depth: 1,
+				Target: &domain.InspectorTarget{
+					Kind:           domain.TargetWhisperHistory,
+					WhisperHistory: wCopy,
+				},
+			})
+		}
+	}
+
+	// Team Knowledge section — browse team contexts (SOUL, memory, docs).
+	if len(s.TeamContexts) > 0 {
+		nodes = append(nodes, domain.NavNode{
+			ID:         "section-team-knowledge",
+			Kind:       domain.NavNodeSection,
+			Label:      "Team Knowledge",
+			Depth:      0,
+			Expandable: true,
+			Expanded:   true,
+		})
+		for i := range s.TeamContexts {
+			tc := s.TeamContexts[i]
+			label := tc.TeamName
+			if tc.TeamName == "" {
+				label = tc.TeamSlug
+			}
+			if tc.MemoryCount > 0 || tc.DocsCount > 0 {
+				label = fmt.Sprintf("%s  mem:%d docs:%d", label, tc.MemoryCount, tc.DocsCount)
+			}
+			nodes = append(nodes, domain.NavNode{
+				ID:    "team-ctx-" + tc.TeamSlug,
+				Kind:  domain.NavNodeTeamContext,
+				Label: label,
+				Depth: 1,
+				Target: &domain.InspectorTarget{
+					Kind:        domain.TargetTeamContext,
+					TeamContext: &s.TeamContexts[i],
+				},
+			})
+		}
+	}
+
 	return nodes
 }
 
@@ -316,6 +607,15 @@ func hasAuthIssue(s *Store) bool {
 		}
 	}
 	return false
+}
+
+// codeIndexStats returns the best available code index stats.
+// Prefers daemon-reported stats; falls back to disk-loaded stats when daemon offline.
+func codeIndexStats(s *Store) *daemon.CodeDBStats {
+	if s.DaemonStatus != nil && s.DaemonStatus.CodeDB != nil {
+		return s.DaemonStatus.CodeDB
+	}
+	return s.CodeIndexStats
 }
 
 // syncAgeLabel returns a short human-readable age string colored by freshness.
@@ -443,6 +743,27 @@ func ActivityEntries(s *Store) []domain.TimelineEntry {
 		}
 	}
 
+	// Whisper history entries.
+	for i := range s.WhisperHistory {
+		w := s.WhisperHistory[i]
+		icon := "◦"
+		if w.Delivered {
+			icon = "✓"
+		}
+		wCopy := []domain.WhisperHistoryEntry{w}
+		otherEntries = append(otherEntries, domain.TimelineEntry{
+			ID:      fmt.Sprintf("whisper-%d", i),
+			Kind:    domain.TimelineAgent,
+			Actor:   w.AgentID,
+			Summary: fmt.Sprintf("%s [whisper] %s", icon, truncate(w.Content, 60)),
+			Timestamp: w.CreatedAt,
+			Target: &domain.InspectorTarget{
+				Kind:           domain.TargetWhisperHistory,
+				WhisperHistory: wCopy,
+			},
+		})
+	}
+
 	sort.Slice(otherEntries, func(i, j int) bool {
 		return otherEntries[i].Timestamp.After(otherEntries[j].Timestamp)
 	})
@@ -493,6 +814,15 @@ func indexByte(s string, b byte) int {
 		}
 	}
 	return -1
+}
+
+// truncate clips s to at most n runes, appending "…" when trimmed.
+func truncate(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	runes := []rune(s)
+	return string(runes[:n-1]) + "…"
 }
 
 // AllActivityTimestamps returns merged activity timestamps from the daemon's

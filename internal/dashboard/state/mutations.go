@@ -45,6 +45,41 @@ func ApplyDiscussions(s Store, discussions []domain.TeamDiscussion, err error) S
 	return s
 }
 
+// ApplyInstances returns a new Store with the AI coworker instance list applied.
+func ApplyInstances(s Store, instances []daemon.InstanceInfo, err error) Store {
+	s.Instances = instances
+	s.InstancesErr = err
+	return s
+}
+
+// ApplyStoredErrors returns a new Store with the stored error list applied.
+func ApplyStoredErrors(s Store, errors []daemon.StoredError, err error) Store {
+	s.StoredErrors = errors
+	s.StoredErrorsErr = err
+	return s
+}
+
+// ApplyTeamContexts returns a new Store with the team context metadata applied.
+func ApplyTeamContexts(s Store, contexts []domain.TeamContextEntry, err error) Store {
+	s.TeamContexts = contexts
+	s.TeamContextsErr = err
+	return s
+}
+
+// ApplyCodeIndexStats returns a new Store with the code index statistics applied.
+func ApplyCodeIndexStats(s Store, stats *daemon.CodeDBStats, err error) Store {
+	s.CodeIndexStats = stats
+	s.CodeIndexStatsErr = err
+	return s
+}
+
+// ApplyWhisperHistory returns a new Store with the whisper history applied.
+func ApplyWhisperHistory(s Store, entries []domain.WhisperHistoryEntry, err error) Store {
+	s.WhisperHistory = entries
+	s.WhisperHistoryErr = err
+	return s
+}
+
 // ApplySelection returns a new Store with the inspector target updated.
 // Pass nil to clear the selection.
 func ApplySelection(s Store, target *domain.InspectorTarget) Store {

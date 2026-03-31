@@ -37,3 +37,48 @@ func LoadTeamDiscussionsCmd(c Client, gen int) tea.Cmd {
 		return TeamDiscussionsLoadedMsg{Discussions: discussions, Gen: gen, Err: err}
 	}
 }
+
+// LoadInstancesCmd returns a tea.Cmd that fetches active AI coworker instances
+// asynchronously and wraps the result in InstancesLoadedMsg.
+func LoadInstancesCmd(c Client, gen int) tea.Cmd {
+	return func() tea.Msg {
+		instances, err := c.ListInstances()
+		return InstancesLoadedMsg{Instances: instances, Gen: gen, Err: err}
+	}
+}
+
+// LoadStoredErrorsCmd returns a tea.Cmd that fetches unviewed stored errors
+// asynchronously and wraps the result in StoredErrorsLoadedMsg.
+func LoadStoredErrorsCmd(c Client, gen int) tea.Cmd {
+	return func() tea.Msg {
+		errors, err := c.ListStoredErrors()
+		return StoredErrorsLoadedMsg{Errors: errors, Gen: gen, Err: err}
+	}
+}
+
+// LoadTeamContextsCmd returns a tea.Cmd that fetches team context metadata
+// asynchronously and wraps the result in TeamContextsLoadedMsg.
+func LoadTeamContextsCmd(c Client, gen int) tea.Cmd {
+	return func() tea.Msg {
+		contexts, err := c.ListTeamContexts()
+		return TeamContextsLoadedMsg{TeamContexts: contexts, Gen: gen, Err: err}
+	}
+}
+
+// LoadCodeIndexStatsCmd returns a tea.Cmd that fetches code index statistics
+// asynchronously and wraps the result in CodeIndexStatsLoadedMsg.
+func LoadCodeIndexStatsCmd(c Client, gen int) tea.Cmd {
+	return func() tea.Msg {
+		stats, err := c.LoadCodeIndexStats()
+		return CodeIndexStatsLoadedMsg{Stats: stats, Gen: gen, Err: err}
+	}
+}
+
+// LoadWhisperHistoryCmd returns a tea.Cmd that fetches recent whisper history
+// asynchronously and wraps the result in WhisperHistoryLoadedMsg.
+func LoadWhisperHistoryCmd(c Client, gen int) tea.Cmd {
+	return func() tea.Msg {
+		entries, err := c.ListWhisperHistory()
+		return WhisperHistoryLoadedMsg{Entries: entries, Gen: gen, Err: err}
+	}
+}

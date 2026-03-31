@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -24,6 +25,12 @@ const (
 	TargetCodeDB                             // code index (codedb) statistics
 	TargetSyncHealth                         // daemon sync health overview
 	TargetSOUL                               // SOUL.md team identity document
+	TargetInstance                           // a daemon.InstanceInfo
+	TargetDaemonErrors                       // []daemon.StoredError
+	TargetAgentWork                          // *agentwork.AgentWorkStatus
+	TargetCallers                            // []daemon.CallerInfo
+	TargetTeamContext                        // *domain.TeamContextEntry
+	TargetWhisperHistory                     // []WhisperHistoryEntry
 )
 
 // InspectorTarget is a tagged union of the entities the inspector pane can display.
@@ -35,10 +42,38 @@ type InspectorTarget struct {
 	Issue      *daemon.DaemonIssue
 	Murmur     *MurmurEntry
 	Discussion *TeamDiscussion
-	Auth       *daemon.StatusData  // full status, auth fields used by renderer
-	CodeDB     *daemon.CodeDBStats // code index statistics
-	SyncHealth *daemon.StatusData  // full status, workspaces used by renderer
-	SOUL       *SOULDocument       // SOUL.md content for a team context
+	Auth           *daemon.StatusData         // full status, auth fields used by renderer
+	CodeDB         *daemon.CodeDBStats        // code index statistics
+	SyncHealth     *daemon.StatusData         // full status, workspaces used by renderer
+	SOUL           *SOULDocument              // SOUL.md content for a team context
+	Instance       *daemon.InstanceInfo       // for TargetInstance
+	StoredErrors   []daemon.StoredError       // for TargetDaemonErrors
+	AgentWork      *agentwork.AgentWorkStatus // for TargetAgentWork
+	Callers        []daemon.CallerInfo        // for TargetCallers
+	TeamContext    *TeamContextEntry          // for TargetTeamContext
+	WhisperHistory []WhisperHistoryEntry      // for TargetWhisperHistory
+}
+
+// WhisperHistoryEntry is a single whisper delivered to an AI coworker.
+// Populated from the daemon's WhisperHistory IPC endpoint.
+type WhisperHistoryEntry struct {
+	AgentID   string
+	Topic     string
+	Content   string
+	Source    string    // source of the whisper (e.g. "murmur-nudge", "activity-summary")
+	CreatedAt time.Time
+	Delivered bool // true when the agent has read past this entry's cursor
+}
+
+// TeamContextEntry holds metadata about one synced team context workspace.
+// Loaded daemon-independently by reading the filesystem directly.
+type TeamContextEntry struct {
+	TeamName    string
+	TeamSlug    string
+	Path        string
+	SOULPreview string // first ~300 bytes of SOUL.md
+	MemoryCount int    // number of .md files in memory/
+	DocsCount   int    // number of .md files in docs/
 }
 
 // SOULDocument holds the raw markdown content of a team's SOUL.md file.
@@ -82,6 +117,14 @@ const (
 	NavNodeAuth                          // authentication status node
 	NavNodeSyncHealth                    // sync health summary node
 	NavNodeSOUL                          // SOUL.md team identity node
+	NavNodeAICoworker                    // active AI coworker instance node
+	NavNodeDaemon                        // daemon health section header
+	NavNodeDaemonErrors                  // stored errors sub-node
+	NavNodeAgentWork                     // agent work queue sub-node
+	NavNodeCallers                       // connected callers sub-node
+	NavNodeTeamContext                   // team context entry node
+	NavNodeWhisper                       // a whisper history node
+	NavNodeTeamFeedSection               // combined murmurs + discussions feed section
 )
 
 // NavNode represents a single row in the left-hand navigation tree pane.

@@ -4,6 +4,8 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/dashboard/domain"
 	"github.com/sageox/ox/internal/dashboard/effects"
 	"github.com/sageox/ox/internal/dashboard/panes"
 	"github.com/sageox/ox/internal/dashboard/state"
@@ -81,6 +83,11 @@ func (m Model) reduceGlobal(msg tea.Msg) (Model, tea.Cmd) {
 			if m.helpFactory != nil {
 				m.overlays.Push(m.helpFactory())
 			}
+		case key.Matches(msg, m.keys.OpenBrowser):
+			target := m.store.Inspector()
+			if url := sessionBrowserURL(m.client, target); url != "" {
+				return m, openBrowserCmd(url)
+			}
 		}
 
 	case QuitMsg:
@@ -154,6 +161,41 @@ func (m Model) reduceEffects(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		m.store = state.ApplyDiscussions(m.store, msg.Discussions, msg.Err)
+
+	case effects.InstancesLoadedMsg:
+		if msg.Gen != m.effectGen {
+			return m, nil
+		}
+		m.store = state.ApplyInstances(m.store, msg.Instances, msg.Err)
+
+	case effects.StoredErrorsLoadedMsg:
+		if msg.Gen != m.effectGen {
+			return m, nil
+		}
+		m.store = state.ApplyStoredErrors(m.store, msg.Errors, msg.Err)
+
+	case effects.TeamContextsLoadedMsg:
+		if msg.Gen != m.effectGen {
+			return m, nil
+		}
+		m.store = state.ApplyTeamContexts(m.store, msg.TeamContexts, msg.Err)
+
+	case effects.CodeIndexStatsLoadedMsg:
+		if msg.Gen != m.effectGen {
+			return m, nil
+		}
+		m.store = state.ApplyCodeIndexStats(m.store, msg.Stats, msg.Err)
+
+	case effects.WhisperHistoryLoadedMsg:
+		if msg.Gen != m.effectGen {
+			return m, nil
+		}
+		m.store = state.ApplyWhisperHistory(m.store, msg.Entries, msg.Err)
+
+	case OpenBrowserMsg:
+		if msg.URL != "" {
+			_ = cli.OpenInBrowser(msg.URL)
+		}
 
 	case effects.RefreshTickMsg:
 		if msg.Gen != m.effectGen {
@@ -234,6 +276,30 @@ func (m Model) reduceAllPanes(msg tea.Msg) (Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// sessionBrowserURL returns the web URL for the given inspector target, or empty
+// string when the target has no associated URL (e.g. issues, sync health).
+func sessionBrowserURL(client effects.Client, target domain.InspectorTarget) string {
+	switch target.Kind {
+	case domain.TargetSession:
+		if target.Session == nil {
+			return ""
+		}
+		name := target.Session.SessionName
+		if name == "" {
+			name = target.Session.Filename
+		}
+		return client.BuildSessionURL(name)
+	}
+	return ""
+}
+
+// openBrowserCmd returns a tea.Cmd that sends an OpenBrowserMsg.
+// The actual browser open is handled synchronously in reduceEffects so the
+// tea.Cmd goroutine doesn't block the event loop.
+func openBrowserCmd(url string) tea.Cmd {
+	return func() tea.Msg { return OpenBrowserMsg{URL: url} }
 }
 
 // recomputePaneSizes calls SetSize on every pane after the layout is updated.

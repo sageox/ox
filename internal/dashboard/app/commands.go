@@ -14,6 +14,11 @@ func LoadAllCmd(client effects.Client, gen int) tea.Cmd {
 		effects.LoadSessionsCmd(client, gen),
 		effects.LoadMurmursCmd(client, gen),
 		effects.LoadTeamDiscussionsCmd(client, gen),
+		effects.LoadInstancesCmd(client, gen),
+		effects.LoadStoredErrorsCmd(client, gen),
+		effects.LoadTeamContextsCmd(client, gen),
+		effects.LoadCodeIndexStatsCmd(client, gen),
+		effects.LoadWhisperHistoryCmd(client, gen),
 	)
 }
 
