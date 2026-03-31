@@ -498,6 +498,39 @@ if testing.Short() {
 
 **Test intent, not implementation.** Tests must verify expected outcomes and intents, not confirm what the code does today. A test that merely confirms current behavior is tautological — it passes by definition and catches nothing. Write the assertion first based on the requirement ("cache must survive push failure"), then build the scenario around it. If a test would pass even with broken code, it's not testing anything real.
 
+**Organize tests by behavioral domain, not by function.** Group tests by *what system behavior* they validate — lifecycle, guards, concurrency, stats — not by which function they call. Name each test after the failure it prevents, and include a one-line comment stating what breaks without this test. This turns the test file into a specification of the system's failure modes.
+
+```go
+// GOOD: organized by domain, documents the failure
+// --- A. Baseline lifecycle ---
+// TestBuildBaseline_FlagReleasedOnFailure verifies the baseline flag is always
+// released, even when indexing fails.
+// Failure prevented: transient failure permanently wedges baseline indexing.
+
+// BAD: organized by function name, no failure context
+// TestBuildBaseline_1
+// TestBuildBaseline_2
+```
+
+**Test independent lifecycles independently.** When a system has multiple subsystems with separate lifecycles (e.g., baseline index vs worktree index), prove they don't interfere. Specifically: (1) one running must not block the other from starting, (2) one failing must not corrupt the other's state, (3) one's disappearance must not affect the other's availability.
+
+**Concurrency is a first-class test axis.** For any code with goroutines or shared mutex state, explicitly test: (1) concurrent operations don't deadlock, (2) flags are released under all exit paths (success, failure, cancellation, panic), (3) readers during writes see consistent data (no panics, no partial state). Use test hooks to control goroutine timing rather than `time.Sleep`:
+
+```go
+// GOOD: deterministic control via hook
+release := make(chan struct{})
+mgr.testHook = func() { <-release }
+go mgr.BuildBaseline(ctx, path)
+// ... assert state while blocked ...
+close(release)
+
+// BAD: hoping timing works out
+go mgr.BuildBaseline(ctx, path)
+time.Sleep(100 * time.Millisecond) // fragile, flaky in CI
+```
+
+**Test graceful defaults before initialization.** Verify that Stats(), Status(), and similar read-only methods return clean zero-values before the subsystem has ever run. This prevents NPEs and garbage values in fresh installs or first-boot scenarios.
+
 Common anti-patterns:
 - Copying production gates into test bodies (`if x != "" { ... }` — if the gate is removed from production, the test still passes)
 - Testing that a function doesn't touch unrelated directories (trivially true for any function)
