@@ -352,10 +352,14 @@ func runDaemonForeground(ledgerPath string) error {
 	cfg.LedgerPath = ledgerPath
 	cfg.ProjectRoot = findGitRoot() // required for team context syncing
 
-	// use INFO level logging to stderr (which gets redirected to log file)
+	// default to INFO; OX_LOG_LEVEL=debug enables verbose output
+	logLevel := slog.LevelInfo
+	if os.Getenv("OX_LOG_LEVEL") == "debug" {
+		logLevel = slog.LevelDebug
+	}
 	// include PID so multi-daemon scenarios and auto-restarts can be distinguished
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: logLevel,
 	})).With("pid", os.Getpid())
 
 	d := daemon.New(cfg, logger)
