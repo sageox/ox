@@ -39,6 +39,9 @@ type SessionEntry struct {
 	// ToolOutput is the output from the tool (for tool entries)
 	ToolOutput string `json:"tool_output,omitempty"`
 
+	// IsError indicates the tool call failed (for tool entries)
+	IsError bool `json:"is_error,omitempty"`
+
 	// CoworkerName identifies the coworker or subagent that contributed to this entry.
 	// This includes both team coworkers (loaded via ox coworker load) and built-in
 	// Claude Code subagents (invoked via Task tool, e.g., code-reviewer, debugger).

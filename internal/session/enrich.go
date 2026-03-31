@@ -22,9 +22,10 @@ type EnrichMessage struct {
 
 // EnrichToolCall holds tool invocation details for enrichment.
 type EnrichToolCall struct {
-	Name   string
-	Input  string
-	Output string
+	Name    string
+	Input   string
+	Output  string
+	IsError bool
 }
 
 // EnrichChapterView groups conversation turns into a narrative section.
@@ -43,11 +44,12 @@ type EnrichChapterItem struct {
 
 // EnrichWorkBlock groups consecutive tool/system calls.
 type EnrichWorkBlock struct {
-	Messages   []EnrichMessage
-	ToolCounts map[string]int
-	Summary    string
-	TotalTools int
-	HasEdits   bool
+	Messages    []EnrichMessage
+	ToolCounts  map[string]int
+	Summary     string
+	TotalTools  int
+	TotalErrors int
+	HasEdits    bool
 }
 
 // EnrichFileChange represents a file modified during the session.
@@ -99,6 +101,7 @@ func EnrichSummary(stored *StoredSession, summary *SummarizeResponse) {
 			}
 			if item.WorkBlock != nil {
 				cs.TotalTools += item.WorkBlock.TotalTools
+				cs.TotalErrors += item.WorkBlock.TotalErrors
 				cs.HasEdits = cs.HasEdits || item.WorkBlock.HasEdits
 				for name, count := range item.WorkBlock.ToolCounts {
 					toolCounts[name] += count
@@ -187,11 +190,13 @@ func buildEnrichMessage(id int, entry map[string]any, userLabel, agentLabel stri
 		toolName, _ := entry["tool_name"].(string)
 		toolInput, _ := entry["tool_input"].(string)
 		toolOutput, _ := entry["tool_output"].(string)
+		isError, _ := entry["is_error"].(bool)
 		if toolName != "" {
 			msg.ToolCall = &EnrichToolCall{
-				Name:   toolName,
-				Input:  stripANSI(toolInput),
-				Output: stripANSI(toolOutput),
+				Name:    toolName,
+				Input:   stripANSI(toolInput),
+				Output:  stripANSI(toolOutput),
+				IsError: isError,
 			}
 		}
 	}
@@ -344,6 +349,9 @@ func enrichBuildWorkBlock(messages []EnrichMessage) EnrichWorkBlock {
 		if msg.ToolCall != nil && msg.ToolCall.Name != "" {
 			wb.ToolCounts[msg.ToolCall.Name]++
 			wb.TotalTools++
+			if msg.ToolCall.IsError {
+				wb.TotalErrors++
+			}
 
 			nameLower := strings.ToLower(msg.ToolCall.Name)
 			if nameLower == "edit" || nameLower == "write" || nameLower == "multiedit" {
@@ -425,6 +433,7 @@ func enrichMergeShortAssistantBlocks(items []EnrichChapterItem) []EnrichChapterI
 						prevWB.ToolCounts[name] += count
 					}
 					prevWB.TotalTools += nextWB.TotalTools
+					prevWB.TotalErrors += nextWB.TotalErrors
 					prevWB.HasEdits = prevWB.HasEdits || nextWB.HasEdits
 					prevWB.Summary = enrichFormatWorkBlockSummary(prevWB)
 					i++

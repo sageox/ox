@@ -529,6 +529,56 @@ func TestAppendRedactedEntries_OmitsEmptyToolFields(t *testing.T) {
 	assert.NotContains(t, string(data), "tool_name")
 	assert.NotContains(t, string(data), "tool_input")
 	assert.NotContains(t, string(data), "tool_output")
+	assert.NotContains(t, string(data), "is_error")
+}
+
+func TestAppendRedactedEntries_WritesIsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	rawPath := filepath.Join(tmpDir, "raw.jsonl")
+
+	entries := []session.Entry{
+		{
+			Type:       session.EntryTypeTool,
+			ToolName:   "Bash",
+			ToolInput:  `{"command":"make build"}`,
+			ToolOutput: "exit code 1: compilation failed",
+			IsError:    true,
+			Timestamp:  time.Now(),
+		},
+	}
+
+	require.NoError(t, appendRedactedEntries(rawPath, entries))
+
+	data, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(data, &parsed))
+
+	assert.Equal(t, "Bash", parsed["tool_name"])
+	assert.Equal(t, "exit code 1: compilation failed", parsed["tool_output"])
+	assert.Equal(t, true, parsed["is_error"])
+}
+
+func TestAppendRedactedEntries_OmitsIsErrorWhenFalse(t *testing.T) {
+	tmpDir := t.TempDir()
+	rawPath := filepath.Join(tmpDir, "raw.jsonl")
+
+	entries := []session.Entry{
+		{
+			Type:      session.EntryTypeTool,
+			ToolName:  "Read",
+			ToolInput: "/path/to/file",
+			Timestamp: time.Now(),
+		},
+	}
+
+	require.NoError(t, appendRedactedEntries(rawPath, entries))
+
+	data, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(data), "is_error")
 }
 
 func TestAppendRedactedEntries_MultipleEntriesAppend(t *testing.T) {

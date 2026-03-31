@@ -23,10 +23,12 @@ func ConvertRawEntries(rawEntries []adapters.RawEntry) []Entry {
 	entries := make([]Entry, 0, len(rawEntries))
 	for _, raw := range rawEntries {
 		entry := Entry{
-			Timestamp: raw.Timestamp,
-			Content:   raw.Content,
-			ToolName:  raw.ToolName,
-			ToolInput: raw.ToolInput,
+			Timestamp:  raw.Timestamp,
+			Content:    raw.Content,
+			ToolName:   raw.ToolName,
+			ToolInput:  raw.ToolInput,
+			ToolOutput: raw.ToolOutput,
+			IsError:    raw.IsError,
 		}
 		entry.Type = MapRoleToEntryType(raw.Role)
 		entries = append(entries, entry)

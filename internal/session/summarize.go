@@ -53,6 +53,7 @@ func entriesToPkg(entries []Entry) []ss.Entry {
 			ToolName:   e.ToolName,
 			ToolInput:  e.ToolInput,
 			ToolOutput: e.ToolOutput,
+			IsError:    e.IsError,
 		}
 	}
 	return out
@@ -69,6 +70,7 @@ func pkgToEntries(entries []ss.Entry) []Entry {
 			ToolName:   e.ToolName,
 			ToolInput:  e.ToolInput,
 			ToolOutput: e.ToolOutput,
+			IsError:    e.IsError,
 		}
 	}
 	return out

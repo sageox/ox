@@ -76,4 +76,37 @@ func TestConvertRawEntries(t *testing.T) {
 		assert.Equal(t, "Bash", result[2].ToolName)
 		assert.Equal(t, "ls -la", result[2].ToolInput)
 	})
+
+	t.Run("preserves tool error fields", func(t *testing.T) {
+		now := time.Now().Truncate(time.Second)
+		rawEntries := []adapters.RawEntry{
+			{
+				Timestamp:  now,
+				Role:       "tool",
+				ToolName:   "Bash",
+				ToolInput:  `{"command":"make build"}`,
+				ToolOutput: "exit code 1: compilation failed",
+				IsError:    true,
+			},
+			{
+				Timestamp: now.Add(time.Second),
+				Role:      "tool",
+				ToolName:  "Read",
+				ToolInput: "/path/to/file.go",
+			},
+		}
+
+		result := ConvertRawEntries(rawEntries)
+		require.Len(t, result, 2)
+
+		// error tool entry preserves output and error flag
+		assert.Equal(t, "Bash", result[0].ToolName)
+		assert.Equal(t, "exit code 1: compilation failed", result[0].ToolOutput)
+		assert.True(t, result[0].IsError)
+
+		// non-error tool entry has no output or error
+		assert.Equal(t, "Read", result[1].ToolName)
+		assert.Empty(t, result[1].ToolOutput)
+		assert.False(t, result[1].IsError)
+	})
 }

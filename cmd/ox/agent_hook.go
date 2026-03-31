@@ -384,6 +384,21 @@ func handleAfterTool(ctx *HookContext) error {
 	redactor, _ := session.NewRedactorWithCustomRules(ctx.ProjectRoot)
 
 	sessionEntries := session.ConvertRawEntries(entries)
+
+	// enrich the last tool entry with error data from hook stdin.
+	// hook stdin provides real-time error info that isn't in the JSONL file.
+	if ctx.Input != nil && ctx.Input.ToolError != "" {
+		for i := len(sessionEntries) - 1; i >= 0; i-- {
+			if sessionEntries[i].Type == session.EntryTypeTool {
+				sessionEntries[i].IsError = true
+				if sessionEntries[i].ToolOutput == "" {
+					sessionEntries[i].ToolOutput = ctx.Input.ToolError
+				}
+				break
+			}
+		}
+	}
+
 	redactor.RedactEntries(sessionEntries)
 
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
@@ -441,6 +456,9 @@ func appendRedactedEntries(rawPath string, entries []session.Entry) error {
 		}
 		if entry.ToolOutput != "" {
 			data["tool_output"] = entry.ToolOutput
+		}
+		if entry.IsError {
+			data["is_error"] = true
 		}
 		if err := encoder.Encode(data); err != nil {
 			return fmt.Errorf("encode entry: %w", err)

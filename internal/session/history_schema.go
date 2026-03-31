@@ -110,6 +110,9 @@ type HistoryEntry struct {
 	// ToolOutput is the output from the tool (for tool entries)
 	ToolOutput string `json:"tool_output,omitempty"`
 
+	// IsError indicates the tool call failed (for tool entries)
+	IsError bool `json:"is_error,omitempty"`
+
 	// Summary is a brief summary of this entry (optional)
 	Summary string `json:"summary,omitempty"`
 
@@ -331,6 +334,7 @@ func (e *HistoryEntry) ToSessionEntry() SessionEntry {
 		ToolName:   e.ToolName,
 		ToolInput:  e.ToolInput,
 		ToolOutput: e.ToolOutput,
+		IsError:    e.IsError,
 	}
 }
 
@@ -345,6 +349,7 @@ func HistoryEntryFromSessionEntry(e SessionEntry, seq int, source string) Histor
 		ToolName:   e.ToolName,
 		ToolInput:  e.ToolInput,
 		ToolOutput: e.ToolOutput,
+		IsError:    e.IsError,
 	}
 }
 

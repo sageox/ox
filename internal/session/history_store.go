@@ -174,6 +174,9 @@ func MergeHistoryWithRecording(sessionPath string, history *CapturedHistory) err
 		if he.ToolOutput != "" {
 			entry["tool_output"] = he.ToolOutput
 		}
+		if he.IsError {
+			entry["is_error"] = true
+		}
 		mergedEntries = append(mergedEntries, entry)
 	}
 

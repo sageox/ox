@@ -20,6 +20,7 @@ type Entry struct {
 	ToolName   string    `json:"tool_name,omitempty"`
 	ToolInput  string    `json:"tool_input,omitempty"`
 	ToolOutput string    `json:"tool_output,omitempty"`
+	IsError    bool      `json:"is_error,omitempty"`
 }
 
 // SummarizeResponse contains the LLM-generated summary plus computed metadata.
@@ -127,8 +128,9 @@ type ChapterSummary struct {
 	StartSeq   int            `json:"start_seq"`             // first message seq in this chapter
 	EndSeq     int            `json:"end_seq"`               // last message seq in this chapter
 	ToolCounts map[string]int `json:"tool_counts,omitempty"` // aggregated tool usage {"Read": 5, "Edit": 3}
-	TotalTools int            `json:"total_tools"`           // total tool calls in chapter
-	HasEdits   bool           `json:"has_edits"`             // true if chapter contains file modifications
+	TotalTools  int            `json:"total_tools"`            // total tool calls in chapter
+	TotalErrors int            `json:"total_errors,omitempty"` // tool calls that failed
+	HasEdits    bool           `json:"has_edits"`              // true if chapter contains file modifications
 }
 
 // FileSummary records a file modified during the session.

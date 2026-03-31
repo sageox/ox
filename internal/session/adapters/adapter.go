@@ -41,6 +41,13 @@ type RawEntry struct {
 	// ToolInput is the input provided to the tool (only for role="tool")
 	ToolInput string
 
+	// ToolOutput is the output from the tool (only for role="tool").
+	// Only populated for error results to keep recordings lean.
+	ToolOutput string
+
+	// IsError indicates the tool call failed (only for role="tool")
+	IsError bool
+
 	// Raw contains the original data for debugging and auditing
 	Raw json.RawMessage
 }
