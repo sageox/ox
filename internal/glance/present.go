@@ -92,7 +92,8 @@ func headline(d *ActivityData) string {
 		return "No murmurs found in this time window."
 	}
 
-	parts := []string{fmt.Sprintf("%d murmurs from %d coworkers", d.Stats.TotalMurmurs, d.Stats.TotalAuthors)}
+	parts := []string{fmt.Sprintf("%d signals from %d coworkers (%d WIP, %d file-changes)",
+		d.Stats.TotalMurmurs, d.Stats.TotalAuthors, d.Stats.WIPCount, d.Stats.FileChangeCount)}
 
 	if n := d.Stats.TotalConflicts; n > 0 {
 		if n == 1 {
@@ -115,7 +116,7 @@ func guidance(d *ActivityData) string {
 	var lines []string
 
 	if len(d.Actions) > 0 {
-		lines = append(lines, "Lead with pre-crime alerts from the actions array — warn about collisions BEFORE they happen, based on what coworkers say they're working on right now. Then provide the supporting context: headline, collisions, who's working on what.")
+		lines = append(lines, "Lead with pre-crime alerts from the actions array — warn about collisions BEFORE they happen. Collision data comes from file-change murmurs (daemon filesystem observations). WIP murmurs explain intent. Use both: file-changes for conflicts, WIP for context on what each coworker is doing.")
 	}
 
 	if d.Stats.TotalConflicts > 0 {

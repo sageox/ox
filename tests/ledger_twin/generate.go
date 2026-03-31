@@ -188,7 +188,6 @@ func generateMurmurs(basePath string, specs []MurmurSpec) error {
 			ID:            spec.ID,
 			Timestamp:     spec.Timestamp,
 			AgentID:       spec.Dev.AgentID,
-			AgentType:     "claude-code",
 			PrincipalID:   spec.Dev.Username,
 			PrincipalType: "human",
 			Topic:         spec.Topic,

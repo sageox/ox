@@ -88,6 +88,16 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 	authors := glance.GroupByAuthor(result.Murmurs)
 	conflicts := glance.DetectConflicts(result.Murmurs)
 
+	var wipCount, fcCount int
+	for _, m := range result.Murmurs {
+		switch m.Topic {
+		case "wip":
+			wipCount++
+		case "file-changes":
+			fcCount++
+		}
+	}
+
 	data := glance.ActivityData{
 		Since:     since,
 		Until:     until,
@@ -98,9 +108,11 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 		Patterns:  glance.DetectPatterns(result.Murmurs),
 		Velocity:  glance.ConflictVelocity(result.Murmurs, since, until, 24*time.Hour, 24*time.Hour),
 		Stats: glance.Stats{
-			TotalMurmurs:   len(result.Murmurs),
-			TotalAuthors:   len(authors),
-			TotalConflicts: len(conflicts.Overlaps),
+			TotalMurmurs:    len(result.Murmurs),
+			TotalAuthors:    len(authors),
+			TotalConflicts:  len(conflicts.Overlaps),
+			WIPCount:        wipCount,
+			FileChangeCount: fcCount,
 		},
 	}
 

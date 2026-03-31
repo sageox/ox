@@ -24,7 +24,7 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
 		os.Exit(1)
 	}
-	// Intentionally NOT cleaning up — leave for human inspection.
+	defer os.RemoveAll(ledgerPath)
 
 	manifest = BuildManifest()
 	manifest.LedgerPath = ledgerPath
@@ -39,7 +39,6 @@ func TestMain(m *testing.M) {
 	fmt.Fprintf(os.Stderr, "║  Sessions:    %d\n", len(manifest.Sessions))
 	fmt.Fprintf(os.Stderr, "║  Murmurs:     %d\n", len(manifest.Murmurs))
 	fmt.Fprintf(os.Stderr, "║  Windows:     %d\n", len(manifest.Windows))
-	fmt.Fprintf(os.Stderr, "║  Inspect:     ls %s/sessions/\n", ledgerPath)
 	fmt.Fprintf(os.Stderr, "╚══════════════════════════════════════════════════════════════╝\n\n")
 
 	os.Exit(m.Run())
@@ -256,6 +255,16 @@ func TestFullEnrich(t *testing.T) {
 	authors := glance.GroupByAuthor(result.Murmurs)
 	conflicts := glance.DetectConflicts(result.Murmurs)
 
+	var wipCount, fcCount int
+	for _, m := range result.Murmurs {
+		switch m.Topic {
+		case "wip":
+			wipCount++
+		case "file-changes":
+			fcCount++
+		}
+	}
+
 	data := glance.ActivityData{
 		Since:     allSince,
 		Until:     allUntil,
@@ -264,17 +273,21 @@ func TestFullEnrich(t *testing.T) {
 		Conflicts: conflicts.Overlaps,
 		Overlap:   conflicts.OverlapPairs(),
 		Stats: glance.Stats{
-			TotalMurmurs:   len(result.Murmurs),
-			TotalAuthors:   len(authors),
-			TotalConflicts: len(conflicts.Overlaps),
+			TotalMurmurs:    len(result.Murmurs),
+			TotalAuthors:    len(authors),
+			TotalConflicts:  len(conflicts.Overlaps),
+			WIPCount:        wipCount,
+			FileChangeCount: fcCount,
 		},
 	}
 	data.Enrich()
 
 	assert.NotEmpty(t, data.Headline)
 	assert.NotEmpty(t, data.Guidance)
-	assert.Contains(t, data.Headline, "murmurs from")
+	assert.Contains(t, data.Headline, "signals from")
 	assert.Contains(t, data.Headline, "collision")
+	assert.Greater(t, wipCount, 0, "should have WIP murmurs")
+	assert.Greater(t, fcCount, 0, "should have file-change murmurs")
 	assert.Equal(t, 6, data.Stats.TotalAuthors, "all 6 devs across all windows")
 }
 
@@ -414,7 +427,7 @@ func TestMurmurAgentIDs(t *testing.T) {
 		assert.Equal(t, spec.Dev.AgentID, m.AgentID, "murmur %s agent ID", m.ID)
 		assert.Equal(t, spec.Dev.Username, m.PrincipalID, "murmur %s principal ID", m.ID)
 		assert.Equal(t, "human", m.PrincipalType, "murmur %s principal type", m.ID)
-		assert.Equal(t, "claude-code", m.AgentType)
+		assert.Empty(t, m.AgentType, "agent_type should be omitted (matches production)")
 		assert.Equal(t, "1", m.SchemaVersion)
 	}
 }

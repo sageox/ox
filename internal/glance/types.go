@@ -4,14 +4,19 @@ import "time"
 
 // MurmurRecord represents a single murmur with its associated file paths.
 // Replaces SessionRecord as the unit of work for pre-crime detection.
+// Two flavors exist:
+//   - topic="wip": AI coworker intent signal, free-text content, no Files
+//   - topic="file-changes": daemon filesystem observation, structured content, has Files+Branch+Worktree
 type MurmurRecord struct {
 	ID         string    `json:"id"`
 	User       string    `json:"user"`       // PrincipalID
 	AgentID    string    `json:"agent_id"`
+	Topic      string    `json:"topic"`
 	Time       time.Time `json:"time"`
 	TimeAgo    string    `json:"time_ago,omitempty"`
 	Content    string    `json:"content"`
-	Files      []string  `json:"files"`      // from Metadata["files"]
+	Files      []string  `json:"files,omitempty"` // from Metadata["files"] (file-changes only)
+	Branch     string    `json:"branch,omitempty"` // from Metadata["branch"] (file-changes only)
 	Importance string    `json:"importance"`
 }
 
@@ -20,6 +25,7 @@ type AuthorSummary struct {
 	Name         string         `json:"name"`
 	MurmurCount  int            `json:"murmur_count"`
 	FilesTouched int            `json:"files_touched"`
+	WIPStatus    string         `json:"wip_status,omitempty"` // latest WIP murmur content
 	Murmurs      []MurmurRecord `json:"murmurs"`
 }
 
@@ -68,7 +74,9 @@ type ActivityData struct {
 
 // Stats contains summary statistics.
 type Stats struct {
-	TotalMurmurs   int `json:"total_murmurs"`
-	TotalAuthors   int `json:"total_authors"`
-	TotalConflicts int `json:"total_conflicts"`
+	TotalMurmurs    int `json:"total_murmurs"`
+	TotalAuthors    int `json:"total_authors"`
+	TotalConflicts  int `json:"total_conflicts"`
+	WIPCount        int `json:"wip_count"`
+	FileChangeCount int `json:"file_change_count"`
 }

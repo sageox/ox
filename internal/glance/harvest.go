@@ -60,9 +60,11 @@ func HarvestMurmurs(ledgerPath string, since, until time.Time) (*HarvestResult, 
 				ID:         m.ID,
 				User:       m.PrincipalID,
 				AgentID:    m.AgentID,
+				Topic:      m.Topic,
 				Time:       m.Timestamp,
 				Content:    m.Content,
 				Files:      extractFilesFromMetadata(m.Metadata),
+				Branch:     m.Metadata["branch"],
 				Importance: m.Importance,
 			})
 		}
@@ -76,17 +78,31 @@ func HarvestMurmurs(ledgerPath string, since, until time.Time) (*HarvestResult, 
 }
 
 // GroupByAuthor groups murmurs by author, sorted by most recent activity.
+// WIPStatus is set to the latest WIP murmur's content for each author.
+// FilesTouched counts unique files from file-change murmurs only.
 func GroupByAuthor(murmurs []MurmurRecord) []AuthorSummary {
 	byAuthor := make(map[string]*AuthorSummary)
+	authorFiles := make(map[string]map[string]bool) // dedup files per author
+	latestWIP := make(map[string]time.Time)
 	for _, m := range murmurs {
 		a, ok := byAuthor[m.User]
 		if !ok {
 			a = &AuthorSummary{Name: m.User}
 			byAuthor[m.User] = a
+			authorFiles[m.User] = make(map[string]bool)
 		}
 		a.Murmurs = append(a.Murmurs, m)
 		a.MurmurCount++
-		a.FilesTouched += len(m.Files)
+		for _, f := range m.Files {
+			authorFiles[m.User][f] = true
+		}
+		if m.Topic == "wip" && m.Time.After(latestWIP[m.User]) {
+			a.WIPStatus = m.Content
+			latestWIP[m.User] = m.Time
+		}
+	}
+	for user, a := range byAuthor {
+		a.FilesTouched = len(authorFiles[user])
 	}
 
 	authors := make([]AuthorSummary, 0, len(byAuthor))
