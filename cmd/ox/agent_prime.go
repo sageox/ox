@@ -28,6 +28,7 @@ import (
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/prime"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/teamdocs"
@@ -281,7 +282,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 					AgentID:        agentID,
 					AgentSessionID: agentSessionID,
 					PrimedAt:       time.Now(),
-					ParentPID:      os.Getppid(),
+					ParentPID:      proc.FindAgentAncestorPID(),
 				}
 				if writeErr := WriteSessionMarker(marker); writeErr != nil {
 					slog.Warn("failed to write session marker in degraded mode", "error", writeErr)
@@ -374,7 +375,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			AgentType:       agentType,
 			AgentVer:        agentVer,
 			Model:           model,
-			ParentPID:       os.Getppid(),
+			ParentPID:       proc.FindAgentAncestorPID(),
 			ParentAgentID:   parentAgentID,
 			PrimeCallCount:  1,
 		}
@@ -582,7 +583,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			SessionID:      inst.ServerSessionID,
 			AgentSessionID: agentSessionID,
 			PrimedAt:       time.Now(),
-			ParentPID:      os.Getppid(),
+			ParentPID:      proc.FindAgentAncestorPID(),
 		}
 		if err := WriteSessionMarker(marker); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to write session marker: %v\n", err)
@@ -808,10 +809,12 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 	timestamp := time.Now().Format("2006-01-02-150405")
 	outputFile := filepath.Join(projectRoot, ".sageox", "sessions", fmt.Sprintf("%s-%s.md", timestamp, agentID))
 
-	// start recording with filter mode
-	// prefer OX_PARENT_PID (set by hook) — it's the long-lived agent process.
-	// os.Getppid() here would be the transient hook process which exits immediately.
-	parentPID := os.Getppid()
+	// Determine the long-lived agent PID for liveness detection.
+	// Hooks run inside a transient bash shell, so os.Getppid() returns the shell
+	// PID which dies immediately after the hook. OX_PARENT_PID is set by the hook
+	// to proc.FindAgentAncestorPID(), which walks the tree to find the agent process.
+	// If OX_PARENT_PID is missing (direct invocation), walk the tree ourselves.
+	parentPID := proc.FindAgentAncestorPID()
 	if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
 		if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
 			parentPID = parsed

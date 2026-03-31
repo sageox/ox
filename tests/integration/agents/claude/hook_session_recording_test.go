@@ -26,13 +26,12 @@ import (
 // creates a .recording.json with a ParentPID that is actually alive.
 //
 // This is a regression test for a bug where:
-//   - The hook spawns `ox agent prime` as a subprocess
-//   - Prime captured os.Getppid() = the transient hook process PID
-//   - The hook process exits immediately after
+//   - The hook runs inside a transient bash shell spawned by the agent
+//   - os.Getppid() in any hook subprocess returns the bash PID, which dies immediately
 //   - The session appears as orphan/ghost because the tracked PID is dead
 //
-// The fix passes OX_PARENT_PID from the hook (its own parent = the agent) down
-// to prime, so the recorded ParentPID is the long-lived agent process.
+// The fix uses proc.FindAgentAncestorPID() to walk the process tree and find the
+// long-lived agent process (e.g., claude), rather than relying on os.Getppid().
 func TestHookSessionStart_RecordingState(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")

@@ -520,9 +520,13 @@ func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
 			continue
 		}
 
-		// parent is dead — check if there's any real data
-		if RawJSONLHasData(state.SessionPath) {
-			// has raw.jsonl with content — this is an orphan, not a ghost.
+		// parent is dead — check if there's any real data beyond the header line.
+		// Use HasSubstantiveEntries (2+ lines) rather than RawJSONLHasData (size > 0)
+		// because writeRawHeader always writes a 1-line metadata header at session start.
+		// A header-only file has no recoverable session content and should be cleaned up.
+		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+		if HasSubstantiveEntries(rawPath) {
+			// has session entries — this is an orphan, not a ghost.
 			// don't delete: it has recoverable data.
 			continue
 		}
