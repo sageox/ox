@@ -46,6 +46,13 @@ type CodeDBManager struct {
 	testHook func()
 
 	issues *IssueTracker // emits structured issues for ox status / ox doctor
+
+	// baseline index state (separate lifecycle from worktree indexing)
+	baselineIndexing bool
+	baselineStats    CodeDBStats
+	baselineDataDir  string // cached baseline dir; resolved once on first use
+	// baselineTestHook is called at the start of BuildBaseline; nil in production.
+	baselineTestHook func()
 }
 
 // CodeDBStats tracks index statistics.
@@ -62,6 +69,11 @@ type CodeDBStats struct {
 	LastError   string      `json:"last_error,omitempty"`
 	DataDir     string      `json:"data_dir"`
 	IndexExists bool        `json:"index_exists"`
+
+	// baseline index fields (ledger main branch, worktree-independent)
+	BaselineExists      bool `json:"baseline_exists"`
+	BaselineCommits     int  `json:"baseline_commits"`
+	BaselineIndexingNow bool `json:"baseline_indexing_now"`
 }
 
 // RepoStats tracks per-repo statistics within the index.
@@ -170,6 +182,114 @@ func (m *CodeDBManager) SetIssueTracker(tracker *IssueTracker) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.issues = tracker
+}
+
+// resolveBaselineDataDir returns the baseline CodeDB directory from project config.
+// Returns empty string if project config is unavailable.
+// Result is cached after first resolution.
+func (m *CodeDBManager) resolveBaselineDataDir() string {
+	m.mu.Lock()
+	if m.baselineDataDir != "" {
+		dir := m.baselineDataDir
+		m.mu.Unlock()
+		return dir
+	}
+	projectRoot := m.projectRoot
+	m.mu.Unlock()
+
+	ctx, err := config.LoadProjectContext(projectRoot)
+	if err != nil {
+		return ""
+	}
+	dir := paths.CodeDBBaselineDir(ctx.RepoID(), ctx.Endpoint())
+	if dir == "" {
+		return ""
+	}
+	m.mu.Lock()
+	m.baselineDataDir = dir
+	m.mu.Unlock()
+	return dir
+}
+
+// BuildBaseline builds or refreshes the baseline index from the ledger's main branch.
+// This is independent of the worktree index — baseline provides committed content search
+// even when no worktree is active.
+// Non-blocking: if a baseline build is already in progress, returns immediately.
+func (m *CodeDBManager) BuildBaseline(ctx context.Context, ledgerPath string) {
+	if ledgerPath == "" {
+		return
+	}
+
+	m.mu.Lock()
+	if m.baselineIndexing {
+		m.mu.Unlock()
+		return
+	}
+	m.baselineIndexing = true
+	m.mu.Unlock()
+
+	defer func() {
+		m.mu.Lock()
+		m.baselineIndexing = false
+		m.mu.Unlock()
+	}()
+
+	if m.baselineTestHook != nil {
+		m.baselineTestHook()
+	}
+
+	baselineDir := m.resolveBaselineDataDir()
+	if baselineDir == "" {
+		m.logger.Debug("codedb baseline: no baseline dir available")
+		return
+	}
+
+	if _, err := os.Stat(ledgerPath); os.IsNotExist(err) {
+		m.logger.Debug("codedb baseline: ledger path gone", "path", ledgerPath)
+		return
+	}
+
+	if err := os.MkdirAll(baselineDir, 0o755); err != nil {
+		m.logger.Warn("codedb baseline: create dir failed", "error", err)
+		return
+	}
+
+	indexCtx, cancel := context.WithTimeout(ctx, maxIndexDuration)
+	defer cancel()
+
+	start := time.Now()
+	m.logger.Info("codedb baseline build started", "ledger", ledgerPath, "dir", baselineDir)
+
+	db, err := codedb.Open(baselineDir)
+	if err != nil {
+		m.logger.Warn("codedb baseline: open failed", "error", err)
+		return
+	}
+	defer db.Close()
+
+	opts := index.IndexOptions{}
+
+	if err := db.IndexLocalRepo(indexCtx, ledgerPath, opts); err != nil {
+		m.logger.Warn("codedb baseline: index failed", "error", err)
+		return
+	}
+
+	if _, err := db.ParseSymbols(indexCtx, nil); err != nil {
+		m.logger.Warn("codedb baseline: parse symbols failed", "error", err)
+		// non-fatal: committed content is already indexed
+	}
+
+	if _, err := db.ParseComments(indexCtx, nil); err != nil {
+		m.logger.Warn("codedb baseline: parse comments failed", "error", err)
+		// non-fatal
+	}
+
+	cached := queryStatsFromDB(db, baselineDir)
+	m.mu.Lock()
+	m.baselineStats = cached
+	m.mu.Unlock()
+
+	m.logger.Info("codedb baseline build complete", "duration", time.Since(start).Round(time.Millisecond), "commits", cached.Commits, "symbols", cached.Symbols)
 }
 
 // maxIndexDuration caps how long a single indexing run may take before being
@@ -356,6 +476,15 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 			m.logger.Debug("dirty index built", "files", dirtyCount)
 		}
 		dirtyDuration = time.Since(dirtyStart)
+
+		// also write dirty overlay to baseline dir so CLI search finds it
+		if baseDir := m.resolveBaselineDataDir(); baseDir != "" && baseDir != dataDir {
+			baseDB, bErr := codedb.Open(baseDir)
+			if bErr == nil {
+				baseDB.BuildDirtyIndex(ctx, projectRoot, opts)
+				baseDB.Close()
+			}
+		}
 	}
 	totalDuration := time.Since(totalStart)
 
@@ -435,6 +564,18 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 	}
 	m.indexing = true
 	m.mu.Unlock()
+
+	// guard: skip dirty rebuild when worktree is gone (baseline is unaffected)
+	m.mu.Lock()
+	projectRoot := m.projectRoot
+	m.mu.Unlock()
+	if _, err := os.Stat(projectRoot); os.IsNotExist(err) {
+		m.logger.Debug("codedb skipping freshness check, worktree gone", "path", projectRoot)
+		m.mu.Lock()
+		m.indexing = false
+		m.mu.Unlock()
+		return
+	}
 
 	dataDir := m.resolveSharedDataDir()
 	isInitial := false
@@ -526,9 +667,18 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 	lastIndex := m.lastIndex
 	lastErr := m.lastErr
 	cached := m.stats
+	baselineIndexing := m.baselineIndexing
+	baselineStats := m.baselineStats
 	m.mu.Unlock()
 
 	dataDir := m.resolveSharedDataDir()
+
+	// merge baseline fields into result
+	mergeBaseline := func(s *CodeDBStats) {
+		s.BaselineIndexingNow = baselineIndexing
+		s.BaselineExists = baselineStats.IndexExists
+		s.BaselineCommits = baselineStats.Commits
+	}
 
 	// if we have cached stats, return them with live metadata
 	if cached.IndexExists {
@@ -539,6 +689,7 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 		if lastErr != nil {
 			cached.LastError = lastErr.Error()
 		}
+		mergeBaseline(&cached)
 		return cached
 	}
 
@@ -557,6 +708,7 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 		if _, err := os.Stat(dataDir); err == nil {
 			result.IndexExists = true
 		}
+		mergeBaseline(&result)
 		return result
 	}
 
@@ -581,6 +733,7 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 		}
 	}
 
+	mergeBaseline(&result)
 	return result
 }
 

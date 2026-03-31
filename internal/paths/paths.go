@@ -175,6 +175,18 @@ func LedgerSessionCacheBase(repoID, endpointURL string) string {
 	return filepath.Join(LedgersDataDir(repoID, endpointURL), ".sageox", "cache")
 }
 
+// CodeDBBaselineDir returns the directory for the baseline CodeDB index (ledger main branch).
+// The baseline index is stable and independent of any worktree — it provides search
+// results even when no worktree is active.
+// Format: ~/.local/share/sageox/<endpoint>/ledgers/<repoID>/.sageox/cache/codedb/baseline/
+func CodeDBBaselineDir(repoID, endpointURL string) string {
+	shared := CodeDBSharedDir(repoID, endpointURL)
+	if shared == "" {
+		return ""
+	}
+	return filepath.Join(shared, "baseline")
+}
+
 // CodeDBDataDir returns the legacy per-worktree CodeDB directory.
 // Deprecated: Use CodeDBSharedDir for new code. This is kept for migration detection.
 func CodeDBDataDir(projectRoot string) string {

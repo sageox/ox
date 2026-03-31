@@ -172,6 +172,9 @@ type SyncScheduler struct {
 
 	// murmur relay for converting murmur files to whisper entries
 	murmurRelay *MurmurRelay
+
+	// tracks last ledger HEAD sha to detect changes and trigger baseline rebuilds
+	lastBaselineSha string
 }
 
 // syncError tracks a sync error with timestamp.
@@ -594,6 +597,15 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		defer distillTicker.Stop()
 	}
 
+	// baseline check ticker — checks if codedb baseline needs rebuild
+	var baselineTicker *time.Ticker
+	var baselineChan <-chan time.Time
+	if s.config.BaselineCheckInterval > 0 && s.config.ProjectRoot != "" && s.codedb != nil {
+		baselineTicker = time.NewTicker(s.config.BaselineCheckInterval)
+		baselineChan = baselineTicker.C
+		defer baselineTicker.Stop()
+	}
+
 	// github sync ticker — fetches PRs/issues from GitHub API
 	var githubSyncTicker *time.Ticker
 	var githubSyncChan <-chan time.Time
@@ -663,6 +675,9 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 					s.githubSync.CheckAndSync(ctx, l.Path)
 				}
 			}
+
+		case <-baselineChan:
+			s.triggerBaselineRebuild(ctx)
 
 		case <-s.triggerChan:
 			// watcher-triggered sync: skip sparse-checkout refresh to avoid
@@ -1161,6 +1176,56 @@ func (s *SyncScheduler) syncFromWatcher(ctx context.Context) {
 		}
 		s.codedb.CheckFreshness(ctx)
 	}
+}
+
+// triggerBaselineRebuild checks if content sources (ledger, team contexts) have
+// changed since the last baseline build and fires a background rebuild if so.
+// Runs on its own tick (BaselineCheckInterval), independent of ledger pull cadence.
+func (s *SyncScheduler) triggerBaselineRebuild(ctx context.Context) {
+	if s.codedb == nil {
+		return
+	}
+	ledger := s.workspaceRegistry.GetLedger()
+	if ledger == nil || ledger.Path == "" || !ledger.Exists {
+		return
+	}
+
+	// build composite fingerprint from all content sources
+	fingerprint := s.contentSourceFingerprint(ctx, ledger.Path)
+	if fingerprint == "" || fingerprint == s.lastBaselineSha {
+		return
+	}
+
+	oldFingerprint := s.lastBaselineSha
+	s.lastBaselineSha = fingerprint
+	s.logger.Info("codedb baseline rebuild triggered", "old_fingerprint", oldFingerprint, "new_fingerprint", fingerprint)
+	go s.codedb.BuildBaseline(ctx, ledger.Path)
+}
+
+// contentSourceFingerprint returns a composite hash of HEAD shas from all content
+// sources: ledger + team contexts. Any change in any source triggers a rebuild.
+func (s *SyncScheduler) contentSourceFingerprint(ctx context.Context, ledgerPath string) string {
+	// start with ledger HEAD
+	out, err := exec.CommandContext(ctx, "git", "-C", ledgerPath, "rev-parse", "HEAD").Output()
+	if err != nil {
+		s.logger.Debug("codedb baseline: failed to get ledger HEAD", "error", err)
+		return ""
+	}
+	parts := []string{strings.TrimSpace(string(out))}
+
+	// append team context HEADs (sorted by path for determinism)
+	for _, tc := range s.workspaceRegistry.GetTeamContexts() {
+		if tc.Path == "" || !tc.Exists {
+			continue
+		}
+		tcOut, tcErr := exec.CommandContext(ctx, "git", "-C", tc.Path, "rev-parse", "HEAD").Output()
+		if tcErr != nil {
+			continue // skip unavailable team contexts
+		}
+		parts = append(parts, strings.TrimSpace(string(tcOut)))
+	}
+
+	return strings.Join(parts, ":")
 }
 
 // Sync performs an immediate full sync. Used for manual requests via IPC.

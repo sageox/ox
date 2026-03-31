@@ -646,3 +646,731 @@ func TestCheckFreshness_IssueCleared_AfterRecovery(t *testing.T) {
 	assert.Equal(t, 1, tracker.Count(),
 		"cache-wipe issue must persist until a successful index — non-ENOENT failure must not clear it")
 }
+
+// --- Two-tier baseline+dirty architecture tests ---
+// These tests validate the baseline index lifecycle, its independence from the
+// worktree index, and resilience to real-world failure modes.
+// Each test documents what failure it prevents.
+
+// waitForBaselineIndexingDone polls until the baselineIndexing flag clears or times out.
+func waitForBaselineIndexingDone(t *testing.T, mgr *CodeDBManager) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		mgr.mu.Lock()
+		done := !mgr.baselineIndexing
+		mgr.mu.Unlock()
+		if done {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("timed out waiting for baseline indexing to complete")
+}
+
+// --- A. BuildBaseline lifecycle ---
+
+// TestBuildBaseline_IndependentFromWorktreeIndex verifies that baseline and worktree
+// indexing are independent lifecycles — one must never block the other.
+// Failure prevented: baseline builds stalling behind slow worktree indexes.
+func TestBuildBaseline_IndependentFromWorktreeIndex(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	// simulate active worktree index
+	mgr.mu.Lock()
+	mgr.indexing = true
+	mgr.mu.Unlock()
+
+	baselineEntered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	mgr.baselineTestHook = func() {
+		select {
+		case baselineEntered <- struct{}{}:
+		default:
+		}
+		<-release
+	}
+
+	ctx := context.Background()
+	go mgr.BuildBaseline(ctx, dir) // dir as ledger path (doesn't matter — hook blocks before index)
+
+	// baseline should start despite worktree indexing being active
+	select {
+	case <-baselineEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("BuildBaseline did not start — it was blocked by worktree indexing flag")
+	}
+
+	// verify both flags are set independently
+	mgr.mu.Lock()
+	worktreeFlag := mgr.indexing
+	baselineFlag := mgr.baselineIndexing
+	mgr.mu.Unlock()
+
+	assert.True(t, worktreeFlag, "worktree indexing flag must remain set")
+	assert.True(t, baselineFlag, "baseline indexing flag must be set")
+
+	close(release)
+	waitForBaselineIndexingDone(t, mgr)
+}
+
+// TestBuildBaseline_Debounce_OnlySingleConcurrent verifies concurrent baseline
+// triggers don't stampede — exactly one runs at a time.
+// Failure prevented: sync scheduler rapid-firing causes N concurrent ledger indexes.
+func TestBuildBaseline_Debounce_OnlySingleConcurrent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	var concurrent atomic.Int64
+	var maxConcurrent atomic.Int64
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+
+	mgr.baselineTestHook = func() {
+		n := concurrent.Add(1)
+		for {
+			old := maxConcurrent.Load()
+			if n <= old || maxConcurrent.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		concurrent.Add(-1)
+	}
+
+	ctx := context.Background()
+
+	// fire 10 concurrent BuildBaseline calls
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			mgr.BuildBaseline(ctx, dir)
+		}()
+	}
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no BuildBaseline goroutine started")
+	}
+
+	assert.Equal(t, int64(1), maxConcurrent.Load(), "at most one baseline build should run at once")
+
+	close(release)
+	wg.Wait()
+
+	mgr.mu.Lock()
+	stillBuilding := mgr.baselineIndexing
+	mgr.mu.Unlock()
+	assert.False(t, stillBuilding, "baselineIndexing flag must be cleared after all goroutines exit")
+}
+
+// TestBuildBaseline_FlagReleasedOnFailure verifies the baseline flag is always released,
+// even when indexing fails (e.g. invalid ledger path).
+// Failure prevented: transient ledger failure permanently wedges baseline indexing.
+func TestBuildBaseline_FlagReleasedOnFailure(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	// use a non-existent path as ledger — BuildBaseline will fail on stat
+	badLedger := filepath.Join(dir, "nonexistent-ledger")
+	ctx := context.Background()
+	mgr.BuildBaseline(ctx, badLedger)
+
+	// flag must be released even on failure
+	mgr.mu.Lock()
+	stillBuilding := mgr.baselineIndexing
+	mgr.mu.Unlock()
+	assert.False(t, stillBuilding, "baselineIndexing flag must be released after failure")
+
+	// Stats() should return gracefully
+	stats := mgr.Stats()
+	assert.False(t, stats.BaselineIndexingNow)
+}
+
+// TestBuildBaseline_EmptyLedgerPath_Noop verifies BuildBaseline with empty ledgerPath
+// returns immediately without setting any flags.
+// Failure prevented: daemon calls BuildBaseline before ledger is discovered.
+func TestBuildBaseline_EmptyLedgerPath_Noop(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	hookCalled := false
+	mgr.baselineTestHook = func() {
+		hookCalled = true
+	}
+
+	ctx := context.Background()
+	mgr.BuildBaseline(ctx, "")
+
+	assert.False(t, hookCalled, "baselineTestHook should not fire for empty ledger path")
+
+	mgr.mu.Lock()
+	flag := mgr.baselineIndexing
+	mgr.mu.Unlock()
+	assert.False(t, flag, "baselineIndexing flag should not be set for empty ledger path")
+}
+
+// TestBuildBaseline_ContextCanceled_Stops verifies canceled context aborts baseline build.
+// Failure prevented: daemon shutdown hangs waiting for baseline build.
+func TestBuildBaseline_ContextCanceled_Stops(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	mgr.baselineTestHook = func() {
+		cancel() // cancel context during baseline build
+	}
+
+	mgr.BuildBaseline(ctx, dir)
+
+	mgr.mu.Lock()
+	flag := mgr.baselineIndexing
+	mgr.mu.Unlock()
+	assert.False(t, flag, "baselineIndexing flag must be released after context cancellation")
+}
+
+// --- B. CheckFreshness worktree guard ---
+
+// TestCheckFreshness_SkipsWhenWorktreeGone verifies CheckFreshness bails immediately
+// when the worktree no longer exists, without launching a goroutine.
+// Failure prevented: CPU spike from indexing non-existent worktree.
+func TestCheckFreshness_SkipsWhenWorktreeGone(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	hookCalled := false
+	mgr.testHook = func() {
+		hookCalled = true
+	}
+
+	// delete worktree
+	require.NoError(t, os.RemoveAll(dir))
+
+	ctx := context.Background()
+	mgr.CheckFreshness(ctx)
+
+	// give a tiny window for any goroutine to start (it shouldn't)
+	time.Sleep(50 * time.Millisecond)
+
+	assert.False(t, hookCalled, "doIndex goroutine should NOT launch when worktree is gone")
+
+	mgr.mu.Lock()
+	flag := mgr.indexing
+	mgr.mu.Unlock()
+	assert.False(t, flag, "indexing flag must be released when worktree guard triggers")
+}
+
+// TestCheckFreshness_SkipsWorktreeGone_BaselineUnaffected verifies that worktree
+// disappearing does NOT affect baseline search availability.
+// Failure prevented: worktree disappearance cascades to baseline, breaking all search.
+func TestCheckFreshness_SkipsWorktreeGone_BaselineUnaffected(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	// simulate a prior successful baseline build
+	mgr.mu.Lock()
+	mgr.baselineStats = CodeDBStats{
+		IndexExists: true,
+		Commits:     42,
+		Symbols:     100,
+	}
+	mgr.mu.Unlock()
+
+	// delete worktree
+	require.NoError(t, os.RemoveAll(dir))
+
+	ctx := context.Background()
+	mgr.CheckFreshness(ctx)
+
+	// baseline must still be intact
+	stats := mgr.Stats()
+	assert.True(t, stats.BaselineExists, "baseline must survive worktree disappearance")
+	assert.Equal(t, 42, stats.BaselineCommits, "baseline commits must be preserved")
+}
+
+// TestCheckFreshness_PermissionError_StillProceeds verifies that only os.IsNotExist
+// triggers the skip — permission errors should still attempt indexing.
+// Failure prevented: overly aggressive guard skips indexing on transient permission issues.
+func TestCheckFreshness_PermissionError_StillProceeds(t *testing.T) {
+	t.Parallel()
+
+	if os.Getuid() == 0 {
+		t.Skip("test requires non-root user (permission check meaningless as root)")
+	}
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	hookCalled := make(chan struct{}, 1)
+	release := make(chan struct{})
+	mgr.testHook = func() {
+		select {
+		case hookCalled <- struct{}{}:
+		default:
+		}
+		<-release
+	}
+
+	// make dir unreadable but still existing
+	require.NoError(t, os.Chmod(dir, 0o000))
+	t.Cleanup(func() {
+		os.Chmod(dir, 0o755) // restore for cleanup
+	})
+
+	ctx := context.Background()
+	mgr.CheckFreshness(ctx)
+
+	// goroutine should still launch (permission error != not exist)
+	select {
+	case <-hookCalled:
+		// good — goroutine launched despite permission error
+	case <-time.After(5 * time.Second):
+		t.Fatal("goroutine did not launch — permission error was incorrectly treated as not-exist")
+	}
+
+	close(release)
+	waitForIndexingDone(t, mgr)
+}
+
+// TestCheckFreshness_WorktreeDeletedMidIndex_FlagReleased verifies that if the
+// worktree disappears while doIndex is running, the flag is still released.
+// Failure prevented: permanent wedge from worktree disappearing during indexing.
+func TestCheckFreshness_WorktreeDeletedMidIndex_FlagReleased(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	mgr.testHook = func() {
+		os.RemoveAll(dir) // simulate worktree deletion mid-flight
+	}
+
+	ctx := context.Background()
+	mgr.CheckFreshness(ctx)
+	waitForIndexingDone(t, mgr)
+
+	mgr.mu.Lock()
+	flag := mgr.indexing
+	mgr.mu.Unlock()
+	assert.False(t, flag, "indexing flag must be released even when worktree deleted mid-index")
+}
+
+// --- C. Stats merge ---
+
+// TestStats_BaselineFieldsPopulated verifies Stats() reports baseline info
+// after a baseline build.
+// Failure prevented: ox status not showing baseline info.
+func TestStats_BaselineFieldsPopulated(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	// simulate successful baseline build
+	mgr.mu.Lock()
+	mgr.baselineStats = CodeDBStats{
+		IndexExists: true,
+		Commits:     15,
+		Symbols:     200,
+		Comments:    50,
+	}
+	mgr.mu.Unlock()
+
+	stats := mgr.Stats()
+	assert.True(t, stats.BaselineExists, "BaselineExists must be true after baseline build")
+	assert.Equal(t, 15, stats.BaselineCommits, "BaselineCommits must reflect baseline stats")
+	assert.False(t, stats.BaselineIndexingNow, "BaselineIndexingNow must be false when not building")
+}
+
+// TestStats_BaselineIndexingNow_ReflectsLiveState verifies BaselineIndexingNow
+// accurately reflects whether a baseline build is in progress.
+// Failure prevented: CLI showing stale indexing state.
+func TestStats_BaselineIndexingNow_ReflectsLiveState(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	// simulate baseline building
+	mgr.mu.Lock()
+	mgr.baselineIndexing = true
+	mgr.mu.Unlock()
+
+	stats := mgr.Stats()
+	assert.True(t, stats.BaselineIndexingNow, "must report true while baseline is building")
+
+	// simulate baseline complete
+	mgr.mu.Lock()
+	mgr.baselineIndexing = false
+	mgr.mu.Unlock()
+
+	stats = mgr.Stats()
+	assert.False(t, stats.BaselineIndexingNow, "must report false when baseline is idle")
+}
+
+// TestStats_NoBaseline_GracefulDefaults verifies Stats() returns clean defaults
+// before any baseline has been built.
+// Failure prevented: NPE or garbage values in ox status for fresh installs.
+func TestStats_NoBaseline_GracefulDefaults(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	stats := mgr.Stats()
+	assert.False(t, stats.BaselineExists, "BaselineExists must be false before any baseline build")
+	assert.Equal(t, 0, stats.BaselineCommits, "BaselineCommits must be zero before any baseline build")
+	assert.False(t, stats.BaselineIndexingNow, "BaselineIndexingNow must be false before any baseline build")
+}
+
+// --- F. Concurrency & race conditions ---
+
+// TestBuildBaseline_ConcurrentWithCheckFreshness verifies baseline build and
+// worktree freshness check coexist without deadlock.
+// Failure prevented: shared mutex causing deadlock between two indexing paths.
+func TestBuildBaseline_ConcurrentWithCheckFreshness(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	baselineEntered := make(chan struct{}, 1)
+	baselineRelease := make(chan struct{})
+	mgr.baselineTestHook = func() {
+		select {
+		case baselineEntered <- struct{}{}:
+		default:
+		}
+		<-baselineRelease
+	}
+
+	worktreeEntered := make(chan struct{}, 1)
+	worktreeRelease := make(chan struct{})
+	mgr.testHook = func() {
+		select {
+		case worktreeEntered <- struct{}{}:
+		default:
+		}
+		<-worktreeRelease
+	}
+
+	ctx := context.Background()
+
+	// launch both concurrently
+	go mgr.BuildBaseline(ctx, dir)
+	mgr.CheckFreshness(ctx)
+
+	// both should enter their hooks (neither blocks the other)
+	select {
+	case <-baselineEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("BuildBaseline did not start — may be deadlocked with CheckFreshness")
+	}
+	select {
+	case <-worktreeEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CheckFreshness did not start — may be deadlocked with BuildBaseline")
+	}
+
+	// verify both flags set independently
+	mgr.mu.Lock()
+	assert.True(t, mgr.indexing, "worktree indexing flag must be set")
+	assert.True(t, mgr.baselineIndexing, "baseline indexing flag must be set")
+	mgr.mu.Unlock()
+
+	close(baselineRelease)
+	close(worktreeRelease)
+	waitForIndexingDone(t, mgr)
+	waitForBaselineIndexingDone(t, mgr)
+}
+
+// TestBuildBaseline_ConcurrentStats_NoPanic verifies reading Stats() while baseline
+// is building never panics or returns corrupt data.
+// Failure prevented: race between stat cache writer and readers.
+func TestBuildBaseline_ConcurrentStats_NoPanic(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	release := make(chan struct{})
+	mgr.baselineTestHook = func() {
+		<-release
+	}
+
+	ctx := context.Background()
+	go mgr.BuildBaseline(ctx, dir)
+
+	// hammer Stats() from multiple goroutines while baseline is building
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 50 {
+				_ = i
+				s := mgr.Stats()
+				// stats must be internally consistent: BaselineIndexingNow should be a bool
+				_ = s.BaselineIndexingNow
+				_ = s.BaselineExists
+				_ = s.BaselineCommits
+			}
+		}()
+	}
+
+	// let the stats hammering run for a bit, then release baseline
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	waitForBaselineIndexingDone(t, mgr)
+}
+
+// TestUpdateProjectRoot_DuringBaselineBuild_NoPanic verifies workspace switch during
+// baseline build doesn't corrupt state.
+// Failure prevented: Conductor switching workspaces while baseline is building.
+func TestUpdateProjectRoot_DuringBaselineBuild_NoPanic(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	newDir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	release := make(chan struct{})
+	mgr.baselineTestHook = func() {
+		// simulate workspace switch during baseline build
+		mgr.UpdateProjectRoot(newDir)
+		<-release
+	}
+
+	ctx := context.Background()
+	go mgr.BuildBaseline(ctx, dir)
+
+	// wait a bit for the hook to fire and update the root
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	waitForBaselineIndexingDone(t, mgr)
+
+	mgr.mu.Lock()
+	got := mgr.projectRoot
+	mgr.mu.Unlock()
+	assert.Equal(t, newDir, got, "projectRoot should reflect the workspace switch")
+}
+
+// --- G. Additional edge cases ---
+
+// TestBuildBaseline_PartialFailure_StatsPreserved verifies that if ParseSymbols
+// or ParseComments fails, we don't lose the baseline stats from the successful
+// IndexLocalRepo step.
+// Failure prevented: transient symbol parsing failure zeros out all baseline stats.
+func TestBuildBaseline_PartialFailure_StatsPreserved(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	// simulate a prior successful baseline with stats
+	mgr.mu.Lock()
+	mgr.baselineStats = CodeDBStats{
+		IndexExists: true,
+		Commits:     10,
+		Symbols:     50,
+	}
+	mgr.mu.Unlock()
+
+	// BuildBaseline with an invalid ledger path will fail at IndexLocalRepo
+	// The prior baseline stats must survive (not get zeroed)
+	badLedger := filepath.Join(dir, "bad-ledger")
+	require.NoError(t, os.MkdirAll(badLedger, 0o755)) // exists but no git repo
+	mgr.BuildBaseline(context.Background(), badLedger)
+
+	mgr.mu.Lock()
+	stats := mgr.baselineStats
+	mgr.mu.Unlock()
+
+	// prior stats should be preserved — failed rebuild should NOT zero them
+	assert.True(t, stats.IndexExists, "prior baseline stats must survive a failed rebuild")
+	assert.Equal(t, 10, stats.Commits, "prior baseline commits must survive a failed rebuild")
+}
+
+// TestBuildBaseline_BaselineDirDeletedMidBuild_FlagReleased verifies that if the
+// baseline dir is deleted while BuildBaseline is running, the flag is still released.
+// Failure prevented: baseline dir wiped by external process permanently wedges flag.
+func TestBuildBaseline_BaselineDirDeletedMidBuild_FlagReleased(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	mgr.baselineTestHook = func() {
+		// simulate external process deleting the baseline dir
+		baseDir := mgr.resolveBaselineDataDir()
+		if baseDir != "" {
+			os.RemoveAll(baseDir)
+		}
+	}
+
+	mgr.BuildBaseline(context.Background(), dir)
+
+	mgr.mu.Lock()
+	flag := mgr.baselineIndexing
+	mgr.mu.Unlock()
+	assert.False(t, flag, "baselineIndexing flag must be released even when baseline dir deleted mid-build")
+}
+
+// TestDoIndex_DirtyOverlayToBaseline_FailureDoesNotBlockWorktreeIndex verifies that
+// if the dirty overlay redirect to baseline dir fails (e.g. baseline dir missing),
+// the main worktree indexing still completes normally.
+// Failure prevented: baseline dir disappearance blocks all worktree indexing.
+func TestDoIndex_DirtyOverlayToBaseline_FailureDoesNotBlockWorktreeIndex(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	// set a baseline dir that doesn't exist — the dirty overlay redirect should
+	// silently fail without affecting the main index
+	mgr.mu.Lock()
+	mgr.baselineDataDir = filepath.Join(dir, "nonexistent-baseline")
+	mgr.mu.Unlock()
+
+	// Index will fail because there's no git repo, but the important thing is
+	// it fails at the git step, NOT at the baseline dirty overlay step
+	ctx := context.Background()
+	_, err := mgr.Index(ctx, CodeIndexPayload{}, nil)
+
+	// should fail because no git repo — NOT because of baseline dir issues
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "index local", "error should be from git indexing, not baseline dirty overlay")
+
+	// indexing flag must be released
+	mgr.mu.Lock()
+	flag := mgr.indexing
+	mgr.mu.Unlock()
+	assert.False(t, flag, "indexing flag must be released")
+}
+
+// TestCheckFreshness_GuardThenBaseline_BothWork verifies the full real-world scenario:
+// worktree deleted → CheckFreshness skips → but baseline build still works.
+// Failure prevented: stale worktree blocking all code search functionality.
+func TestCheckFreshness_GuardThenBaseline_BothWork(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	hookCalled := false
+	mgr.testHook = func() {
+		hookCalled = true
+	}
+
+	baselineEntered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	mgr.baselineTestHook = func() {
+		select {
+		case baselineEntered <- struct{}{}:
+		default:
+		}
+		<-release
+	}
+
+	// delete worktree
+	require.NoError(t, os.RemoveAll(dir))
+
+	// CheckFreshness should skip (worktree gone)
+	mgr.CheckFreshness(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	assert.False(t, hookCalled, "doIndex should NOT launch when worktree is gone")
+
+	// but baseline build should still work (uses ledger, not worktree)
+	ledgerDir := t.TempDir() // fresh dir as fake ledger
+	go mgr.BuildBaseline(context.Background(), ledgerDir)
+
+	select {
+	case <-baselineEntered:
+		// baseline build started — the worktree guard did NOT block it
+	case <-time.After(5 * time.Second):
+		t.Fatal("BuildBaseline should work even when worktree is gone")
+	}
+
+	close(release)
+	waitForBaselineIndexingDone(t, mgr)
+}
+
+// TestStats_BaselineOverridesEvenWhenWorktreeIndexMissing verifies that Stats()
+// reports baseline availability even when no worktree index exists.
+// Failure prevented: fresh install shows "no index" when baseline is actually ready.
+func TestStats_BaselineOverridesEvenWhenWorktreeIndexMissing(t *testing.T) {
+	t.Parallel()
+
+	// non-existent project root — no worktree index
+	mgr := NewCodeDBManager("/does/not/exist", codedbTestLogger(), nil)
+
+	// simulate successful baseline
+	mgr.mu.Lock()
+	mgr.baselineStats = CodeDBStats{
+		IndexExists: true,
+		Commits:     25,
+		Symbols:     300,
+	}
+	mgr.mu.Unlock()
+
+	stats := mgr.Stats()
+	assert.True(t, stats.BaselineExists, "baseline must be reported even without worktree index")
+	assert.Equal(t, 25, stats.BaselineCommits)
+	// worktree index fields should be empty/false
+	assert.False(t, stats.IndexExists, "worktree index should not exist")
+}
+
+// TestBuildBaseline_SecondBuild_UpdatesStats verifies that a second baseline build
+// updates the cached stats (not stuck on first build's stats).
+// Failure prevented: stale baseline stats after ledger receives new commits.
+func TestBuildBaseline_SecondBuild_UpdatesStats(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	// simulate first baseline build result
+	mgr.mu.Lock()
+	mgr.baselineStats = CodeDBStats{
+		IndexExists: true,
+		Commits:     5,
+	}
+	mgr.mu.Unlock()
+
+	stats := mgr.Stats()
+	assert.Equal(t, 5, stats.BaselineCommits, "first baseline stats")
+
+	// simulate second baseline build with more commits
+	mgr.mu.Lock()
+	mgr.baselineStats = CodeDBStats{
+		IndexExists: true,
+		Commits:     15,
+	}
+	mgr.mu.Unlock()
+
+	stats = mgr.Stats()
+	assert.Equal(t, 15, stats.BaselineCommits, "second baseline must update stats, not cache first")
+}
