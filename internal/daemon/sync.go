@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1192,14 +1193,22 @@ func (s *SyncScheduler) triggerBaselineRebuild(ctx context.Context) {
 
 	// build composite fingerprint from all content sources
 	fingerprint := s.contentSourceFingerprint(ctx, ledger.Path)
+	s.mu.Lock()
 	if fingerprint == "" || fingerprint == s.lastBaselineSha {
+		s.mu.Unlock()
 		return
 	}
-
 	oldFingerprint := s.lastBaselineSha
-	s.lastBaselineSha = fingerprint
+	s.mu.Unlock()
+
 	s.logger.Info("codedb baseline rebuild triggered", "old_fingerprint", oldFingerprint, "new_fingerprint", fingerprint)
-	go s.codedb.BuildBaseline(ctx, ledger.Path)
+	go func(fp, ledgerPath string) {
+		s.codedb.BuildBaseline(ctx, ledgerPath)
+		// only advance fingerprint after successful build so failed builds retry
+		s.mu.Lock()
+		s.lastBaselineSha = fp
+		s.mu.Unlock()
+	}(fingerprint, ledger.Path)
 }
 
 // contentSourceFingerprint returns a composite hash of HEAD shas from all content
@@ -1211,10 +1220,14 @@ func (s *SyncScheduler) contentSourceFingerprint(ctx context.Context, ledgerPath
 		s.logger.Debug("codedb baseline: failed to get ledger HEAD", "error", err)
 		return ""
 	}
-	parts := []string{strings.TrimSpace(string(out))}
+	parts := []string{"ledger=" + strings.TrimSpace(string(out))}
 
-	// append team context HEADs (sorted by path for determinism)
-	for _, tc := range s.workspaceRegistry.GetTeamContexts() {
+	// append team context HEADs sorted by path for deterministic fingerprint
+	teamContexts := s.workspaceRegistry.GetTeamContexts()
+	sort.Slice(teamContexts, func(i, j int) bool {
+		return teamContexts[i].Path < teamContexts[j].Path
+	})
+	for _, tc := range teamContexts {
 		if tc.Path == "" || !tc.Exists {
 			continue
 		}
@@ -1222,7 +1235,7 @@ func (s *SyncScheduler) contentSourceFingerprint(ctx context.Context, ledgerPath
 		if tcErr != nil {
 			continue // skip unavailable team contexts
 		}
-		parts = append(parts, strings.TrimSpace(string(tcOut)))
+		parts = append(parts, tc.Path+"="+strings.TrimSpace(string(tcOut)))
 	}
 
 	return strings.Join(parts, ":")

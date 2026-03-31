@@ -1158,8 +1158,15 @@ func TestUpdateProjectRoot_DuringBaselineBuild_NoPanic(t *testing.T) {
 	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
 
 	release := make(chan struct{})
+	entered := make(chan struct{}, 1)
 	mgr.baselineTestHook = func() {
-		// simulate workspace switch during baseline build
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		// simulate Conductor deleting old workspace then switching
+		// UpdateProjectRoot only switches when the old root is gone
+		_ = os.RemoveAll(dir)
 		mgr.UpdateProjectRoot(newDir)
 		<-release
 	}
@@ -1167,8 +1174,11 @@ func TestUpdateProjectRoot_DuringBaselineBuild_NoPanic(t *testing.T) {
 	ctx := context.Background()
 	go mgr.BuildBaseline(ctx, dir)
 
-	// wait a bit for the hook to fire and update the root
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("baselineTestHook did not run")
+	}
 	close(release)
 	waitForBaselineIndexingDone(t, mgr)
 
@@ -1247,6 +1257,10 @@ func TestDoIndex_DirtyOverlayToBaseline_FailureDoesNotBlockWorktreeIndex(t *test
 	t.Parallel()
 
 	dir := t.TempDir()
+	// create .git so the ledger-not-cloned guard in doIndex passes
+	// (resolveSharedDataDir falls back to <dir>/.sageox/cache/codedb, which
+	// triggers ledgerRootForDataDir → checks <dir>/.git)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git"), 0o755))
 	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
 
 	// set a baseline dir that doesn't exist — the dirty overlay redirect should
@@ -1255,12 +1269,12 @@ func TestDoIndex_DirtyOverlayToBaseline_FailureDoesNotBlockWorktreeIndex(t *test
 	mgr.baselineDataDir = filepath.Join(dir, "nonexistent-baseline")
 	mgr.mu.Unlock()
 
-	// Index will fail because there's no git repo, but the important thing is
+	// Index will fail because there's no valid git repo, but the important thing is
 	// it fails at the git step, NOT at the baseline dirty overlay step
 	ctx := context.Background()
 	_, err := mgr.Index(ctx, CodeIndexPayload{}, nil)
 
-	// should fail because no git repo — NOT because of baseline dir issues
+	// should fail because no valid git repo — NOT because of baseline dir issues
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "index local", "error should be from git indexing, not baseline dirty overlay")
 

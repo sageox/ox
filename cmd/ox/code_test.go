@@ -65,7 +65,8 @@ func TestIsCodeDBIndexing_DefaultReturnsFalseWithoutDaemon(t *testing.T) {
 
 	// With no daemon running, isCodeDBIndexing should return false
 	// (IPC fails → err != nil → false). This is the default in test environments.
-	assert.False(t, isCodeDBIndexing())
+	assert.False(t, isCodeDBIndexing(false))
+	assert.False(t, isCodeDBIndexing(true))
 }
 
 func TestIsCodeDBIndexing_Override(t *testing.T) {
@@ -74,16 +75,16 @@ func TestIsCodeDBIndexing_Override(t *testing.T) {
 
 	tests := []struct {
 		name string
-		stub func() bool
+		stub func(bool) bool
 		want bool
 	}{
-		{"indexing in progress", func() bool { return true }, true},
-		{"not indexing", func() bool { return false }, false},
+		{"indexing in progress", func(bool) bool { return true }, true},
+		{"not indexing", func(bool) bool { return false }, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			isCodeDBIndexing = tt.stub
-			assert.Equal(t, tt.want, isCodeDBIndexing())
+			assert.Equal(t, tt.want, isCodeDBIndexing(false))
 		})
 	}
 }

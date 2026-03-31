@@ -5,7 +5,9 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -73,20 +75,35 @@ func TestTriggerBaselineRebuild_ShaChanged(t *testing.T) {
 	s.triggerBaselineRebuild(ctx)
 	select {
 	case <-baselineCalls:
-		// good — baseline fired
-	default:
-		// BuildBaseline runs in a goroutine, give it a moment
-		// but the hook fires synchronously at the start of BuildBaseline
+	case <-time.After(5 * time.Second):
+		t.Fatal("baseline build was not triggered")
 	}
-	assert.NotEmpty(t, s.lastBaselineSha, "lastBaselineSha should be set after first trigger")
+	// lastBaselineSha is set asynchronously after BuildBaseline returns
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.lastBaselineSha != ""
+	}, 5*time.Second, 10*time.Millisecond, "lastBaselineSha should be set after first trigger")
+
+	s.mu.Lock()
 	firstSha := s.lastBaselineSha
+	s.mu.Unlock()
 
 	// add a new commit — sha changes
 	addCommit(t, ledgerDir, "second commit")
 
 	// second call — different sha, should trigger rebuild
 	s.triggerBaselineRebuild(ctx)
-	assert.NotEqual(t, firstSha, s.lastBaselineSha, "lastBaselineSha should update when HEAD changes")
+	select {
+	case <-baselineCalls:
+	case <-time.After(5 * time.Second):
+		t.Fatal("second baseline build was not triggered")
+	}
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.lastBaselineSha != firstSha
+	}, 5*time.Second, 10*time.Millisecond, "lastBaselineSha should update when HEAD changes")
 }
 
 // TestTriggerBaselineRebuild_SameSha_NoRebuild verifies that identical SHA doesn't
@@ -125,13 +142,24 @@ func TestTriggerBaselineRebuild_SameSha_NoRebuild(t *testing.T) {
 
 	// first call — triggers build (initial sha)
 	s.triggerBaselineRebuild(ctx)
-	// BuildBaseline runs in a goroutine, but since we don't add commits
-	// the second call should not trigger because sha is identical
+	// wait for async sha update
+	require.Eventually(t, func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.lastBaselineSha != ""
+	}, 5*time.Second, 10*time.Millisecond)
+
+	s.mu.Lock()
 	firstSha := s.lastBaselineSha
+	s.mu.Unlock()
 
 	// second call — same sha, should NOT trigger
 	s.triggerBaselineRebuild(ctx)
+	// give a moment for any (unexpected) goroutine to fire
+	time.Sleep(50 * time.Millisecond)
+	s.mu.Lock()
 	assert.Equal(t, firstSha, s.lastBaselineSha, "sha should not change without new commits")
+	s.mu.Unlock()
 }
 
 // TestTriggerBaselineRebuild_NoLedger_Noop verifies that when no ledger is registered,
@@ -274,8 +302,9 @@ func TestContentSourceFingerprint_IncludesTeamContexts(t *testing.T) {
 
 	fp1 := s.contentSourceFingerprint(ctx, ledgerDir)
 	require.NotEmpty(t, fp1)
-	// fingerprint should contain a colon separator (ledger:teamctx)
-	assert.Contains(t, fp1, ":", "fingerprint should contain both ledger and team context shas")
+	// fingerprint should contain path=sha entries for both ledger and team context
+	assert.True(t, strings.HasPrefix(fp1, "ledger="), "fingerprint should start with ledger=")
+	assert.Contains(t, fp1, tcDir+"=", "fingerprint should contain team context path")
 
 	// add a commit to team context only (ledger stays the same)
 	addCommit(t, tcDir, "team discussion")
@@ -304,8 +333,8 @@ func TestContentSourceFingerprint_LedgerOnly_NoTeamContexts(t *testing.T) {
 	ctx := context.Background()
 	fp := s.contentSourceFingerprint(ctx, ledgerDir)
 
-	// with no team contexts, fingerprint is just the ledger sha
-	assert.Equal(t, sha, fp, "fingerprint with no team contexts should be just the ledger HEAD sha")
+	// with no team contexts, fingerprint is "ledger=sha"
+	assert.Equal(t, "ledger="+sha, fp, "fingerprint with no team contexts should be ledger=sha")
 }
 
 // TestContentSourceFingerprint_InvalidLedger_ReturnsEmpty verifies that an invalid
@@ -352,6 +381,6 @@ func TestContentSourceFingerprint_SkipsUnavailableTeamContext(t *testing.T) {
 	ctx := context.Background()
 	fp := s.contentSourceFingerprint(ctx, ledgerDir)
 
-	// should still get a valid fingerprint (just ledger sha, broken tc skipped)
-	assert.Equal(t, sha, fp, "broken team context should be skipped, not fail the fingerprint")
+	// should still get a valid fingerprint (just ledger=sha, broken tc skipped)
+	assert.Equal(t, "ledger="+sha, fp, "broken team context should be skipped, not fail the fingerprint")
 }

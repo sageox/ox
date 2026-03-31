@@ -84,7 +84,7 @@ var codeInsightsCmd = &cobra.Command{
 			return fmt.Errorf("no code index found — run 'ox code index' first")
 		}
 
-		if isCodeDBIndexing() {
+		if isCodeDBIndexing(false) {
 			return fmt.Errorf("code index is currently being built — insights unavailable until indexing completes. Run 'ox code status' to check progress")
 		}
 

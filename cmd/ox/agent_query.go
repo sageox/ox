@@ -287,7 +287,7 @@ func queryCodeDB(qa *queryArgs, projectRoot string) ([]search.Result, error) {
 		return nil, nil // no index yet, return empty
 	}
 
-	if isCodeDBIndexing() {
+	if isCodeDBIndexing(false) {
 		slog.Debug("codedb indexing in progress, skipping code search")
 		return nil, nil // return empty rather than blocking
 	}
