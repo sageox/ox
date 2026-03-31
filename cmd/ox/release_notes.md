@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - 2026-03-29
+## [0.6.0] - 2026-03-30
 
 ### Added
 
@@ -38,13 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Infrastructure**
 - sqlc typed SQL for whisper and codedb stores
 - Self-healing rebase pipeline with manifest-driven conflict resolution rules
+- Self-healing for codedb infrastructure failures (daemon auto-recovers corrupted indexes)
 - PAT liveness validation in `ox doctor` and `ox status`
 - DB maintenance scheduler and whisper resilience in daemon
 - Session `--summary` flag for `ox session regenerate`
 
 ### Changed
 
-- faster code search indexing
+- 5.5x faster code search indexing; symbol index build time reduced by 90%
 - Agent selector replaces boolean config: choose `auto`, `none`, `claude`, or `codex`
 - Default sync intervals adjusted: 60s ledger, 15s team context
 - Resummary uses local daemon instead of server-side API
@@ -57,11 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Session recording reliability**: pre-start leak, cross-env cache path split, decoupled from auth, token refresh, `files_changed` populated in summary.json, concurrent agent URL disambiguation, `StartOffset` capture on session start
+- **Session recording reliability**: pre-start leak, cross-env cache path split, decoupled from auth, token refresh, `files_changed` populated in summary.json, concurrent agent URL disambiguation, `StartOffset` capture on session start, stop marker no longer leaks into user repository, process tree walk captures correct agent PID instead of transient bash PID
 - **Auth resilience**: capture `refresh_token` from JWT exchange, handle missing refresh tokens, auto-repair revoked PATs, login no longer blocks on token refresh failure
-- **CodeDB stability**: prevent CLI hang when daemon is indexing, detect and report empty index, fast fail when worktree disappears
+- **CodeDB stability**: prevent CLI hang when daemon is indexing, detect and report empty index, fast fail when worktree disappears, prevent projectRoot oscillation across worktrees, break perpetual indexing loop from freshness race and bleve lock timeout, skip indexing when ledger not yet cloned
+- **Ledger sparse-checkout**: sparse-checkout init no longer wipes codedb cache on sync, `.sageox` added to sparse-checkout cone, staged files protected from `sparse-checkout set`
 - **Data safety**: LFS data loss prevention on push failure, dead force-push code path removed
-- Doctor handles push 403 errors and local remote credential injection
+- Doctor handles push 403 errors, local remote credential injection, and uses `version.Full()` for daemon version comparison
+- Daemon uses registry-aware IPC client everywhere; CWD inheritance bug fixed
+- Daemon log entries now include PID and project path in sync warnings
 - Endpoint normalizer prepends `https://` to bare hostnames
 - GitHub sync rebuilds state from disk to prevent cold-start hang; PR commits preserved on replay
 - System credential helpers suppressed during PAT liveness probe
