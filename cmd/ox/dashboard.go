@@ -19,10 +19,10 @@ var dashboardCmd = &cobra.Command{
 	Long:  "Launch a full-screen TUI dashboard showing team context, session activity, sync health, and daemon status.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if agentx.IsAgentContext() {
-			return fmt.Errorf("ox dashboard cannot run inside an agent session\nRun in an interactive terminal instead.")
+			return fmt.Errorf("ox dashboard cannot run inside an agent session — run in an interactive terminal instead")
 		}
 		if !cli.IsInteractive() {
-			return fmt.Errorf("ox dashboard requires an interactive terminal\nRemove --no-interactive or run in a TTY.")
+			return fmt.Errorf("ox dashboard requires an interactive terminal — remove --no-interactive or run in a TTY")
 		}
 		return dashboard.Run(dashboard.DefaultDeps())
 	},

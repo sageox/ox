@@ -70,7 +70,7 @@ func renderFilterBar(ctx panes.Context, innerW int) string {
 // compile-time interface check
 var _ panes.Pane = (*Pane)(nil)
 
-// Pane implements the centre activity-feed timeline panel.
+// Pane implements the center activity-feed timeline panel.
 type Pane struct {
 	rect      panes.Rect
 	keys      app.PaneKeyMap
@@ -188,7 +188,7 @@ func (p *Pane) View(ctx panes.Context) string {
 	sb.WriteString(filterBar)
 	sb.WriteString("\n")
 
-	// Sparkline header — summarises activity density over the last 4 hours.
+	// Sparkline header — summarizes activity density over the last 4 hours.
 	entries := ctx.Store.Timeline()
 	timestamps := make([]time.Time, len(entries))
 	for i, e := range entries {

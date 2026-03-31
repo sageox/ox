@@ -48,6 +48,22 @@ func KindIcon(kind domain.NavNodeKind) string {
 		return "⟲ "
 	case domain.NavNodeSOUL:
 		return "✦ "
+	case domain.NavNodeAICoworker:
+		return "● "
+	case domain.NavNodeDaemon:
+		return "◉ "
+	case domain.NavNodeDaemonErrors:
+		return "⚠ "
+	case domain.NavNodeAgentWork:
+		return "◎ "
+	case domain.NavNodeCallers:
+		return "⬡ "
+	case domain.NavNodeTeamContext:
+		return "◇ "
+	case domain.NavNodeWhisper:
+		return "↘ "
+	case domain.NavNodeTeamFeedSection:
+		return "◈ "
 	default:
 		return ""
 	}

@@ -21,7 +21,7 @@ type PaneID int
 
 const (
 	PaneNav       PaneID = iota // left-hand navigation tree
-	PaneTimeline                // centre timeline feed
+	PaneTimeline                // center timeline feed
 	PaneInspector               // right-hand detail inspector
 	PaneStatusBar               // bottom status bar
 )

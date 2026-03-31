@@ -10,6 +10,7 @@ type GlobalKeyMap struct {
 	Help        key.Binding
 	Quit        key.Binding
 	OpenBrowser key.Binding // opens the selected session/workspace in the browser
+	Palette     key.Binding // ctrl+k → command palette
 }
 
 // DefaultGlobalKeys returns the standard global keybindings for the dashboard.
@@ -21,6 +22,7 @@ func DefaultGlobalKeys() GlobalKeyMap {
 		Help:        key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 		OpenBrowser: key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in browser")),
+		Palette:     key.NewBinding(key.WithKeys("ctrl+k"), key.WithHelp("^K", "search")),
 	}
 }
 

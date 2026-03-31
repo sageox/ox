@@ -66,7 +66,7 @@ func (m Model) renderHeader() string {
 	}
 	dim := theme.HeaderDimStyle.Render(syncInfo)
 
-	hint := theme.HeaderDimStyle.Render("[?] help  [q] quit")
+	hint := theme.HeaderDimStyle.Render("⌃K search  ·  [?] help  ·  [q] quit")
 
 	leftPart := brand + dim
 	pad := m.layout.Header.Width - lipgloss.Width(leftPart) - lipgloss.Width(hint)

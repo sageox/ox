@@ -5,7 +5,7 @@ type FocusTarget int
 
 const (
 	FocusNav       FocusTarget = iota // left navigation tree
-	FocusTimeline                     // centre timeline list
+	FocusTimeline                     // center timeline list
 	FocusInspector                    // right inspector detail
 	focusCount                        // sentinel — number of focusable panes
 )

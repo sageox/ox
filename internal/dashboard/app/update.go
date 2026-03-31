@@ -7,6 +7,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/dashboard/domain"
 	"github.com/sageox/ox/internal/dashboard/effects"
+	"github.com/sageox/ox/internal/dashboard/overlays/palette"
 	"github.com/sageox/ox/internal/dashboard/panes"
 	"github.com/sageox/ox/internal/dashboard/state"
 )
@@ -88,6 +89,8 @@ func (m Model) reduceGlobal(msg tea.Msg) (Model, tea.Cmd) {
 			if url := sessionBrowserURL(m.client, target); url != "" {
 				return m, openBrowserCmd(url)
 			}
+		case key.Matches(msg, m.keys.Palette):
+			m.overlays.Push(palette.New(buildPaletteItems(m.store.Nav())))
 		}
 
 	case QuitMsg:
@@ -99,6 +102,11 @@ func (m Model) reduceGlobal(msg tea.Msg) (Model, tea.Cmd) {
 		m.focus = PrevFocus(m.focus)
 	case FocusPaneMsg:
 		m.focus = msg.Target
+
+	case ShowHelpMsg:
+		if m.helpFactory != nil {
+			m.overlays.Push(m.helpFactory())
+		}
 
 	case RefreshMsg:
 		m.store = state.IncrementGeneration(m.store)
@@ -300,6 +308,42 @@ func sessionBrowserURL(client effects.Client, target domain.InspectorTarget) str
 // tea.Cmd goroutine doesn't block the event loop.
 func openBrowserCmd(url string) tea.Cmd {
 	return func() tea.Msg { return OpenBrowserMsg{URL: url} }
+}
+
+// buildPaletteItems converts nav nodes into palette items with pre-built commands.
+// Commands are constructed here (in the app layer) to avoid an import cycle
+// between overlays/palette and app.
+func buildPaletteItems(nodes []domain.NavNode) []palette.Item {
+	var items []palette.Item
+	for _, n := range nodes {
+		if n.Target == nil || n.Kind == domain.NavNodeSection || n.Kind == domain.NavNodeHint {
+			continue
+		}
+		target := n.Target // capture for closure
+		items = append(items, palette.Item{
+			Icon:  palette.KindIcon(n.Kind),
+			Label: n.Label,
+			Sub:   palette.KindSection(n.Kind),
+			Cmd: tea.Batch(
+				func() tea.Msg { return SelectionChangedMsg{Target: target} },
+				func() tea.Msg { return FocusPaneMsg{Target: FocusInspector} },
+			),
+		})
+	}
+	// Common action items.
+	items = append(items, palette.Item{
+		Icon:  "⟳",
+		Label: "Refresh all data",
+		Sub:   "action",
+		Cmd:   func() tea.Msg { return RefreshMsg{} },
+	})
+	items = append(items, palette.Item{
+		Icon:  "?",
+		Label: "Show help",
+		Sub:   "action",
+		Cmd:   func() tea.Msg { return ShowHelpMsg{} },
+	})
+	return items
 }
 
 // recomputePaneSizes calls SetSize on every pane after the layout is updated.

@@ -1,4 +1,4 @@
-// Package timeline implements the centre activity feed pane for the dashboard TUI.
+// Package timeline implements the center activity feed pane for the dashboard TUI.
 package timeline
 
 import (

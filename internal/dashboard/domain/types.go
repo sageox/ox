@@ -1,5 +1,5 @@
 // Package domain defines the core value types the dashboard operates on.
-// These types are intentionally thin — no behaviour, no I/O — so every layer
+// These types are intentionally thin — no behavior, no I/O — so every layer
 // of the TUI can import them without creating dependency cycles.
 package domain
 
@@ -159,7 +159,7 @@ var AllMurmurFilters = []MurmurTopicFilter{
 	MurmurFilterReview,
 }
 
-// TimelineEntryKind categorises a row in the timeline pane.
+// TimelineEntryKind categorizes a row in the timeline pane.
 type TimelineEntryKind int
 
 const (
@@ -170,7 +170,7 @@ const (
 	TimelineIssue                            // a daemon issue first seen / resolved
 )
 
-// TimelineEntry is a single row in the centre timeline pane, ordered by timestamp descending.
+// TimelineEntry is a single row in the center timeline pane, ordered by timestamp descending.
 type TimelineEntry struct {
 	ID        string
 	Kind      TimelineEntryKind

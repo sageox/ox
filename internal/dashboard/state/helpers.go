@@ -25,7 +25,7 @@ func BuildNav(s *Store) []domain.NavNode {
 	nodes = append(nodes, domain.NavNode{
 		ID:         "section-sessions",
 		Kind:       domain.NavNodeSection,
-		Label:      "Sessions",
+		Label:      fmt.Sprintf("Sessions (%d)", len(s.Sessions)),
 		Depth:      0,
 		Expandable: true,
 		Expanded:   true,
@@ -48,7 +48,7 @@ func BuildNav(s *Store) []domain.NavNode {
 		})
 	}
 	if len(s.Sessions) == 0 {
-		hint := "no sessions yet"
+		hint := "start a session to see recordings here"
 		if daemonOffline {
 			hint = "daemon offline — sessions unavailable"
 		}
@@ -61,15 +61,21 @@ func BuildNav(s *Store) []domain.NavNode {
 	}
 
 	// Workspaces section — populated from daemon status when available.
+	// Count first so the section header can display the total.
+	wsCount := 0
+	if s.DaemonStatus != nil {
+		for _, wsList := range s.DaemonStatus.Workspaces {
+			wsCount += len(wsList)
+		}
+	}
 	nodes = append(nodes, domain.NavNode{
 		ID:         "section-workspaces",
 		Kind:       domain.NavNodeSection,
-		Label:      "Workspaces",
+		Label:      fmt.Sprintf("Workspaces (%d)", wsCount),
 		Depth:      0,
 		Expandable: true,
 		Expanded:   true,
 	})
-	wsCount := 0
 	if s.DaemonStatus != nil {
 		for _, wsList := range s.DaemonStatus.Workspaces {
 			for i := range wsList {
@@ -89,7 +95,6 @@ func BuildNav(s *Store) []domain.NavNode {
 						Workspace: &wsCopy,
 					},
 				})
-				wsCount++
 			}
 		}
 	}
@@ -97,7 +102,7 @@ func BuildNav(s *Store) []domain.NavNode {
 		nodes = append(nodes, domain.NavNode{
 			ID:    "hint-workspaces",
 			Kind:  domain.NavNodeHint,
-			Label: "no workspaces synced",
+			Label: "run ox init in a repo to sync ledgers",
 			Depth: 1,
 		})
 	}
@@ -106,7 +111,7 @@ func BuildNav(s *Store) []domain.NavNode {
 	nodes = append(nodes, domain.NavNode{
 		ID:         "section-murmurs",
 		Kind:       domain.NavNodeSection,
-		Label:      "Murmurs",
+		Label:      fmt.Sprintf("Murmurs (%d)", len(s.Murmurs)),
 		Depth:      0,
 		Expandable: true,
 		Expanded:   true,
@@ -128,7 +133,7 @@ func BuildNav(s *Store) []domain.NavNode {
 		nodes = append(nodes, domain.NavNode{
 			ID:    "hint-murmurs",
 			Kind:  domain.NavNodeHint,
-			Label: "no recent murmurs",
+			Label: "murmurs appear here when AI coworkers share WIP",
 			Depth: 1,
 		})
 	}
@@ -137,7 +142,7 @@ func BuildNav(s *Store) []domain.NavNode {
 	nodes = append(nodes, domain.NavNode{
 		ID:         "section-discussions",
 		Kind:       domain.NavNodeSection,
-		Label:      "Team Discussions",
+		Label:      fmt.Sprintf("Team Discussions (%d)", len(s.Discussions)),
 		Depth:      0,
 		Expandable: true,
 		Expanded:   true,
@@ -168,7 +173,7 @@ func BuildNav(s *Store) []domain.NavNode {
 	nodes = append(nodes, domain.NavNode{
 		ID:         "section-ai-coworkers",
 		Kind:       domain.NavNodeSection,
-		Label:      "AI Coworkers",
+		Label:      fmt.Sprintf("AI Coworkers (%d)", len(s.Instances)),
 		Depth:      0,
 		Expandable: true,
 		Expanded:   true,
@@ -223,7 +228,7 @@ func BuildNav(s *Store) []domain.NavNode {
 		}
 	}
 	if len(s.Instances) == 0 {
-		hint := "no active AI coworkers"
+		hint := "no active coworkers right now"
 		if daemonOffline {
 			hint = "daemon offline — coworkers unavailable"
 		}
@@ -236,15 +241,19 @@ func BuildNav(s *Store) []domain.NavNode {
 	}
 
 	// Issues section — populated from daemon status when available.
+	// Count first so the section header can display the total.
+	issueCount := 0
+	if s.DaemonStatus != nil {
+		issueCount = len(s.DaemonStatus.Issues)
+	}
 	nodes = append(nodes, domain.NavNode{
 		ID:         "section-issues",
 		Kind:       domain.NavNodeSection,
-		Label:      "Issues",
+		Label:      fmt.Sprintf("Issues (%d)", issueCount),
 		Depth:      0,
 		Expandable: true,
 		Expanded:   true,
 	})
-	issueCount := 0
 	if s.DaemonStatus != nil {
 		for i := range s.DaemonStatus.Issues {
 			issue := &s.DaemonStatus.Issues[i]
@@ -263,11 +272,10 @@ func BuildNav(s *Store) []domain.NavNode {
 					Issue: issue,
 				},
 			})
-			issueCount++
 		}
 	}
 	if issueCount == 0 {
-		hint := "no issues"
+		hint := "✓ no issues detected"
 		if daemonOffline {
 			hint = "daemon offline"
 		}
