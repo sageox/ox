@@ -257,6 +257,56 @@ func TestBuildFileChangeMetadata(t *testing.T) {
 	assert.Equal(t, "src/a.go,src/b.go", meta["files"])
 }
 
+// --- D. Agent ID resolution ---
+
+type mockAgentResolver struct{ ids []string }
+
+func (m *mockAgentResolver) ActiveAgentIDs() []string { return m.ids }
+
+func TestResolveAgentID_NilResolver(t *testing.T) {
+	p := NewFileChangeMurmurPublisher(
+		NewChangeAccumulator(50*time.Millisecond), &mockMurmurPublisher{},
+		"/tmp/ledger", "/tmp/project", slogDiscard(),
+	)
+	assert.Equal(t, "daemon", p.resolveAgentID())
+}
+
+func TestResolveAgentID_NoActiveAgents(t *testing.T) {
+	p := NewFileChangeMurmurPublisher(
+		NewChangeAccumulator(50*time.Millisecond), &mockMurmurPublisher{},
+		"/tmp/ledger", "/tmp/project", slogDiscard(),
+	)
+	p.SetAgentResolver(&mockAgentResolver{ids: nil})
+	assert.Equal(t, "daemon", p.resolveAgentID())
+}
+
+func TestResolveAgentID_SingleAgent(t *testing.T) {
+	p := NewFileChangeMurmurPublisher(
+		NewChangeAccumulator(50*time.Millisecond), &mockMurmurPublisher{},
+		"/tmp/ledger", "/tmp/project", slogDiscard(),
+	)
+	p.SetAgentResolver(&mockAgentResolver{ids: []string{"Ox76PV"}})
+	assert.Equal(t, "Ox76PV", p.resolveAgentID())
+}
+
+func TestResolveAgentID_TwoAgents(t *testing.T) {
+	p := NewFileChangeMurmurPublisher(
+		NewChangeAccumulator(50*time.Millisecond), &mockMurmurPublisher{},
+		"/tmp/ledger", "/tmp/project", slogDiscard(),
+	)
+	p.SetAgentResolver(&mockAgentResolver{ids: []string{"Ox76PV", "OxAB12"}})
+	assert.Equal(t, "Ox76PV,OxAB12", p.resolveAgentID())
+}
+
+func TestResolveAgentID_ThreeOrMoreAgents(t *testing.T) {
+	p := NewFileChangeMurmurPublisher(
+		NewChangeAccumulator(50*time.Millisecond), &mockMurmurPublisher{},
+		"/tmp/ledger", "/tmp/project", slogDiscard(),
+	)
+	p.SetAgentResolver(&mockAgentResolver{ids: []string{"Ox76PV", "OxAB12", "OxCD34"}})
+	assert.Equal(t, "Ox76PV,OxAB12,...", p.resolveAgentID())
+}
+
 func TestCollapseType(t *testing.T) {
 	assert.Equal(t, ChangeType(""), collapseType(ChangeCreated, ChangeDeleted))
 	assert.Equal(t, ChangeCreated, collapseType(ChangeCreated, ChangeModified))

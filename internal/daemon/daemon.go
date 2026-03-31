@@ -401,6 +401,41 @@ func (d *Daemon) getAgentSessions() []AgentSession {
 	return sessions
 }
 
+// heartbeatAgentResolver adapts HeartbeatHandler to ActiveAgentResolver
+// for use by the file-change murmur publisher.
+type heartbeatAgentResolver struct {
+	heartbeat *HeartbeatHandler
+}
+
+func (r *heartbeatAgentResolver) ActiveAgentIDs() []string {
+	if r.heartbeat == nil {
+		return nil
+	}
+	tracker := r.heartbeat.GetAgentActivity()
+	keys := tracker.Keys()
+	now := time.Now()
+	var active []string
+	for _, id := range keys {
+		last := tracker.Last(id)
+		elapsed := now.Sub(last)
+		if elapsed > StaleThreshold {
+			continue
+		}
+		// Check PID liveness — a dead PID with a stale-ish heartbeat means exited.
+		pid := r.heartbeat.GetAgentPID(id)
+		if pid > 0 {
+			proc, err := os.FindProcess(pid)
+			if err != nil || proc.Signal(syscall.Signal(0)) != nil {
+				if elapsed > IdleThreshold {
+					continue
+				}
+			}
+		}
+		active = append(active, id)
+	}
+	return active
+}
+
 // getAgentInstances returns active agent instances from the heartbeat handler.
 // Converts the activity tracker data into InstanceInfo structs.
 func (d *Daemon) getAgentInstances() []InstanceInfo {
@@ -930,6 +965,7 @@ func (d *Daemon) startWorkers() {
 				d.config.LedgerPath, d.config.ProjectRoot,
 				d.logger,
 			)
+			murmurPub.SetAgentResolver(&heartbeatAgentResolver{heartbeat: d.heartbeat})
 			d.wg.Add(2)
 			go func() {
 				defer d.wg.Done()

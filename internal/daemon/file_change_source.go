@@ -24,6 +24,11 @@ type MurmurPublisher interface {
 	PublishMurmur(payload MurmurPayload)
 }
 
+// ActiveAgentResolver returns IDs of active AI coworker instances.
+type ActiveAgentResolver interface {
+	ActiveAgentIDs() []string
+}
+
 const (
 	// drainInterval is how often we pull settled changes from the accumulator.
 	drainInterval = 5 * time.Second
@@ -46,6 +51,7 @@ type FileChangeMurmurPublisher struct {
 	logger         *slog.Logger
 	remoteURL      string // cached origin remote URL
 	murmurInterval time.Duration
+	agentResolver  ActiveAgentResolver // optional; nil falls back to "daemon"
 
 	mu        sync.Mutex
 	pending   map[string]*FileChange // path → latest change, collapsed
@@ -72,6 +78,30 @@ func NewFileChangeMurmurPublisher(
 		murmurInterval: defaultMurmurInterval,
 		pending:        make(map[string]*FileChange),
 		startTime:      time.Now(),
+	}
+}
+
+// SetAgentResolver sets the resolver used to look up active AI coworker IDs.
+func (p *FileChangeMurmurPublisher) SetAgentResolver(r ActiveAgentResolver) {
+	p.agentResolver = r
+}
+
+// resolveAgentID returns a compact agent ID string for murmur attribution.
+// Falls back to "daemon" when no resolver is set or no agents are active.
+func (p *FileChangeMurmurPublisher) resolveAgentID() string {
+	if p.agentResolver == nil {
+		return "daemon"
+	}
+	ids := p.agentResolver.ActiveAgentIDs()
+	switch len(ids) {
+	case 0:
+		return "daemon"
+	case 1:
+		return ids[0]
+	case 2:
+		return ids[0] + "," + ids[1]
+	default:
+		return ids[0] + "," + ids[1] + ",..."
 	}
 }
 
@@ -187,7 +217,7 @@ func (p *FileChangeMurmurPublisher) publish() {
 		SchemaVersion: "1",
 		ID:            id.String(),
 		Timestamp:     now.UTC(),
-		AgentID:       "daemon",
+		AgentID:       p.resolveAgentID(),
 		PrincipalID:   resolvePrincipal(p.projectRoot),
 		PrincipalType: "human",
 		Topic:         "file-changes",
