@@ -1580,6 +1580,34 @@ func TestCleanupGhostSessionsInDir_PreservesOrphanWithData(t *testing.T) {
 	assert.NoError(t, err, "orphan recording marker should be preserved")
 }
 
+func TestCleanupGhostSessionsInDir_RemovesHeaderOnlyRawJSONL(t *testing.T) {
+	// Regression test: writeRawHeader always writes a 1-line metadata header to raw.jsonl
+	// at session start. A header-only file (size > 0, but 1 line) has no real session
+	// content and should be treated as a ghost, not an orphan.
+	sessionsDir := filepath.Join(t.TempDir(), "sessions")
+	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxHead")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	state := &RecordingState{
+		AgentID:     "OxHead",
+		StartedAt:   time.Now().Add(-10 * time.Minute),
+		SessionPath: sessionPath,
+		ParentPID:   99999999,
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
+
+	// write ONLY the header line (what writeRawHeader produces)
+	headerOnly := `{"schema_version":"1","agent_id":"OxHead","started_at":"2026-01-01T00:00:00Z"}` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"), []byte(headerOnly), 0600))
+
+	result := CleanupGhostSessionsInDir(sessionsDir)
+	assert.Equal(t, 1, result.Removed, "header-only raw.jsonl is a ghost, not an orphan — should be cleaned")
+
+	_, err := os.Stat(filepath.Join(sessionPath, recordingFile))
+	assert.True(t, os.IsNotExist(err), "ghost recording marker should be removed")
+}
+
 func TestCleanupGhostSessionsInDir_SkipsLiveProcess(t *testing.T) {
 	sessionsDir := filepath.Join(t.TempDir(), "sessions")
 	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxLive")

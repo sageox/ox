@@ -11,6 +11,7 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 )
@@ -399,13 +400,16 @@ func handleAfterTool(ctx *HookContext) error {
 		return nil // non-fatal
 	}
 
-	currentPPID := os.Getppid()
 	_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
 		s.SourceOffset = newOffset
 		s.EntryCount += len(sessionEntries)
-		// update PID if it changed (fixes Conductor where prime runs in a short-lived wrapper)
-		if currentPPID > 0 && s.ParentPID != currentPPID {
-			s.ParentPID = currentPPID
+		// Refresh parent_pid only if the stored PID is dead — each hook call runs in a
+		// new transient shell, so blindly overwriting with os.Getppid() would store a dead
+		// PID. FindAgentAncestorPID walks the tree to find the long-lived agent process.
+		if !proc.IsAlive(s.ParentPID) {
+			if agentPID := proc.FindAgentAncestorPID(); agentPID > 0 {
+				s.ParentPID = agentPID
+			}
 		}
 	})
 
@@ -461,10 +465,10 @@ func runPrimeForHook(agentID string, ctx *HookContext) error {
 
 	cmd := exec.Command(oxPath, args...)
 	cmd.Env = append(os.Environ(),
-		// Pass the agent's parent PID (Claude Code process) to prime so session
-		// recording captures the long-lived agent PID, not the transient hook PID.
-		// The hook's parent is the agent; prime's parent is the hook (transient).
-		fmt.Sprintf("OX_PARENT_PID=%d", os.Getppid()),
+		// Pass the long-lived agent PID (e.g., claude) to prime for session recording.
+		// Hooks run inside a transient bash shell, so os.Getppid() returns the shell PID
+		// which dies immediately. FindAgentAncestorPID walks the tree to find the agent.
+		fmt.Sprintf("OX_PARENT_PID=%d", proc.FindAgentAncestorPID()),
 	)
 	// pass original raw bytes to preserve unknown fields (not re-serialized)
 	if ctx.Input != nil && len(ctx.Input.RawBytes) > 0 {

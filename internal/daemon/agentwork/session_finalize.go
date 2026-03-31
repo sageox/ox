@@ -136,16 +136,24 @@ func (h *SessionFinalizeHandler) Type() string { return sessionFinalizeType }
 // of agent_worker.enabled. Does NOT clear .recording.json markers on sessions
 // that have recoverable data — that's Detect()'s job when LLM processing follows.
 //
-// Cleans both the ledger sessions dir and the session cache dir (where ox session
-// list reads from). The cache dir is derived from the repoID in the ledger path.
+// Scans three locations where sessions can live:
+//   - ledgerPath/.sageox/cache/sessions/ — primary ledger cache (StartRecording writes here)
+//   - ledgerPath/sessions/ — git-tracked sessions (after finalization/upload)
+//   - XDG cache paths — legacy and alternate cache locations
 func (h *SessionFinalizeHandler) Cleanup(ledgerPath string) {
-	// clean ledger sessions
+	// clean primary ledger cache (where StartRecording writes sessions)
+	ledgerCacheSessionsDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions")
+	if ghostResult := session.CleanupGhostSessionsInDir(ledgerCacheSessionsDir); ghostResult.Removed > 0 {
+		h.logger.Info("ghost cleanup (ledger cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
+	}
+
+	// clean git-tracked ledger sessions (uploaded/finalized sessions)
 	ledgerSessionsDir := filepath.Join(ledgerPath, "sessions")
 	if ghostResult := session.CleanupGhostSessionsInDir(ledgerSessionsDir); ghostResult.Removed > 0 {
 		h.logger.Info("ghost cleanup (ledger): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
 	}
 
-	// clean session cache (where ox session list reads from)
+	// clean XDG/legacy cache paths (different XDG_CACHE_HOME resolution or older ox versions)
 	repoID := filepath.Base(ledgerPath)
 	if repoID != "" && repoID != "." {
 		cacheSessionsDir := filepath.Join(paths.SessionCacheDir(repoID), "sessions")
@@ -153,7 +161,6 @@ func (h *SessionFinalizeHandler) Cleanup(ledgerPath string) {
 			h.logger.Info("ghost cleanup (cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
 		}
 
-		// also clean alternate cache paths (different XDG_CACHE_HOME resolution)
 		for _, altDir := range paths.AlternateSessionCacheDirs(repoID) {
 			altSessionsDir := filepath.Join(altDir, "sessions")
 			if ghostResult := session.CleanupGhostSessionsInDir(altSessionsDir); ghostResult.Removed > 0 {
@@ -163,70 +170,64 @@ func (h *SessionFinalizeHandler) Cleanup(ledgerPath string) {
 	}
 }
 
-// Detect scans both the ledger and session cache for sessions missing artifacts.
-// The cache dir is where sessions are initially recorded; the ledger is where they
-// are pushed after finalization. Both must be scanned to catch orphans.
+// Detect scans all locations where sessions can live for sessions missing artifacts.
+// Sessions are initially written to ledgerPath/.sageox/cache/sessions/ (primary),
+// and moved to ledgerPath/sessions/ after finalization/upload. XDG cache paths
+// are also scanned for sessions written by older ox versions or different environments.
 func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) {
-	ledgerSessionsDir := filepath.Join(ledgerPath, "sessions")
+	// deduplicate across all scan dirs (prefer earlier-found copy)
+	seen := make(map[string]bool)
+	var items []*WorkItem
 
-	// ghost cleanup also runs via Cleanup() on every doctor cycle regardless of
-	// agent_worker.enabled. Run it here too for callers that invoke Detect() directly
-	// (e.g. ForceDetect, tests).
-	if ghostResult := session.CleanupGhostSessionsInDir(ledgerSessionsDir); ghostResult.Removed > 0 {
-		h.logger.Info("ghost cleanup: removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
-	}
-
-	// scan ledger sessions dir
-	items, err := h.detectInDir(ledgerSessionsDir, ledgerPath)
-	if err != nil {
-		return nil, err
-	}
-
-	// also scan session cache dir (where sessions are initially recorded)
-	repoID := filepath.Base(ledgerPath)
-	if repoID != "" && repoID != "." {
-		cacheSessionsDir := filepath.Join(paths.SessionCacheDir(repoID), "sessions")
-		if cacheSessionsDir != ledgerSessionsDir {
-			if ghostResult := session.CleanupGhostSessionsInDir(cacheSessionsDir); ghostResult.Removed > 0 {
-				h.logger.Info("ghost cleanup (cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
-			}
-
-			cacheItems, cacheErr := h.detectInDir(cacheSessionsDir, ledgerPath)
-			if cacheErr == nil {
-				// deduplicate by session name (prefer ledger copy)
-				seen := make(map[string]bool)
-				for _, item := range items {
-					seen[item.DedupKey] = true
-				}
-				for _, item := range cacheItems {
-					if !seen[item.DedupKey] {
-						items = append(items, item)
-					}
-				}
+	mergeItems := func(newItems []*WorkItem) {
+		for _, item := range newItems {
+			if !seen[item.DedupKey] {
+				seen[item.DedupKey] = true
+				items = append(items, item)
 			}
 		}
+	}
 
-		// also scan alternate cache paths (different XDG_CACHE_HOME resolution)
-		for _, altDir := range paths.AlternateSessionCacheDirs(repoID) {
-			altSessionsDir := filepath.Join(altDir, "sessions")
-			if altSessionsDir == ledgerSessionsDir {
+	// 1. primary ledger cache — where StartRecording writes sessions
+	ledgerCacheSessionsDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions")
+	if ghostResult := session.CleanupGhostSessionsInDir(ledgerCacheSessionsDir); ghostResult.Removed > 0 {
+		h.logger.Info("ghost cleanup (ledger cache): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
+	}
+	if cacheItems, err := h.detectInDir(ledgerCacheSessionsDir, ledgerPath); err == nil {
+		mergeItems(cacheItems)
+	}
+
+	// 2. git-tracked ledger sessions — uploaded/finalized sessions
+	ledgerSessionsDir := filepath.Join(ledgerPath, "sessions")
+	if ghostResult := session.CleanupGhostSessionsInDir(ledgerSessionsDir); ghostResult.Removed > 0 {
+		h.logger.Info("ghost cleanup (ledger): removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
+	}
+	if ledgerItems, err := h.detectInDir(ledgerSessionsDir, ledgerPath); err == nil {
+		mergeItems(ledgerItems)
+	}
+
+	// 3. XDG/legacy cache paths — older ox versions or different XDG_CACHE_HOME environments
+	repoID := filepath.Base(ledgerPath)
+	if repoID != "" && repoID != "." {
+		xdgDirs := append(
+			[]string{filepath.Join(paths.SessionCacheDir(repoID), "sessions")},
+			func() []string {
+				var out []string
+				for _, d := range paths.AlternateSessionCacheDirs(repoID) {
+					out = append(out, filepath.Join(d, "sessions"))
+				}
+				return out
+			}()...,
+		)
+		for _, dir := range xdgDirs {
+			if dir == ledgerCacheSessionsDir || dir == ledgerSessionsDir {
 				continue
 			}
-			if ghostResult := session.CleanupGhostSessionsInDir(altSessionsDir); ghostResult.Removed > 0 {
-				h.logger.Info("ghost cleanup (alternate cache): removed abandoned recordings", "dir", altDir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
+			if ghostResult := session.CleanupGhostSessionsInDir(dir); ghostResult.Removed > 0 {
+				h.logger.Info("ghost cleanup (xdg cache): removed abandoned recordings", "dir", dir, "count", ghostResult.Removed, "sessions", ghostResult.Names)
 			}
-
-			altItems, altErr := h.detectInDir(altSessionsDir, ledgerPath)
-			if altErr == nil {
-				seen := make(map[string]bool)
-				for _, item := range items {
-					seen[item.DedupKey] = true
-				}
-				for _, item := range altItems {
-					if !seen[item.DedupKey] {
-						items = append(items, item)
-					}
-				}
+			if xdgItems, err := h.detectInDir(dir, ledgerPath); err == nil {
+				mergeItems(xdgItems)
 			}
 		}
 	}

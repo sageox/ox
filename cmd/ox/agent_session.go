@@ -23,6 +23,7 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -220,7 +221,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		Username:      getSessionUsername(),
 		WorkspacePath: projectRoot,
 		Branch:        repotools.GetCurrentBranch(projectRoot),
-		ParentPID:     os.Getppid(), // use current parent, not stale prime-time PID (fixes Conductor orphan detection)
+		ParentPID:     proc.FindAgentAncestorPID(),
 		StartOffset:   startOffset,
 	}
 
