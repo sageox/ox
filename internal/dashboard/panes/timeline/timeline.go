@@ -202,8 +202,48 @@ func (p *Pane) View(ctx panes.Context) string {
 		sparkBuckets = 1
 	}
 	spark := tui.RenderSparkline(timestamps, sparkBuckets, tui.SparklineWindow)
-	sb.WriteString(theme.TimelineDivider.Render(spark))
+	sb.WriteString(theme.SparklineActiveStyle.Render(spark))
 	sb.WriteString("\n")
+
+	// Build per-agent murmur timestamps for mini sparklines in each row.
+	agentMurmurTS := make(map[string][]time.Time)
+	for _, e := range entries {
+		if e.Kind == domain.TimelineMurmur && e.Actor != "" {
+			agentMurmurTS[e.Actor] = append(agentMurmurTS[e.Actor], e.Timestamp)
+		}
+	}
+
+	// Per-agent activity sparklines from heartbeat data (top 3 most recently active agents).
+	var agentSparkSection strings.Builder
+	agentSparkLines := 0
+	if status := ctx.Store.GetDaemonStatus(); status != nil && status.Activity != nil {
+		agents := status.Activity.Agents
+		shown := agents
+		if len(shown) > 3 {
+			shown = shown[:3]
+		}
+		for _, agent := range shown {
+			agentShort := agent.Key
+			if len(agentShort) > 5 {
+				agentShort = agentShort[len(agentShort)-5:]
+			}
+			agentSpark := tui.RenderSparkline(agent.Timestamps, 24, 2*time.Hour)
+			age := time.Since(agent.Last)
+			var sparkStyle lipgloss.Style
+			switch {
+			case age < 5*time.Minute:
+				sparkStyle = theme.MurmurHotStyle
+			case age < 30*time.Minute:
+				sparkStyle = theme.MurmurWarmStyle
+			default:
+				sparkStyle = theme.MurmurCoolStyle
+			}
+			agentLabel := theme.NavDimStyle.Render(agentShort)
+			agentSparkSection.WriteString(agentLabel + " " + sparkStyle.Render(agentSpark) + "\n")
+			agentSparkLines++
+		}
+	}
+	sb.WriteString(agentSparkSection.String())
 
 	// Group entries by recency and build a flat list of rendered rows for scrolling.
 	grouped := GroupEntries(entries)
@@ -222,13 +262,13 @@ func (p *Pane) View(ctx panes.Context) string {
 		if len(grpEntries) == 0 {
 			return
 		}
-		// Section divider: "── LABEL ─────────────"
-		dashCount := innerW - len(label) - 4
+		// Section divider: " LABEL ·············"
+		dashCount := innerW - len(label) - 3
 		if dashCount < 0 {
 			dashCount = 0
 		}
-		divider := "── " + label + " " + strings.Repeat("─", dashCount)
-		rows = append(rows, row{labelStyle.Render(divider)})
+		divider := " " + label + " " + strings.Repeat("·", dashCount)
+		rows = append(rows, row{labelStyle.Width(innerW).Render(divider)})
 
 		for i, e := range grpEntries {
 			globalIdx := startIdx + i
@@ -236,7 +276,7 @@ func (p *Pane) View(ctx panes.Context) string {
 
 			var line string
 			if e.Kind == domain.TimelineMurmur {
-				line = renderMurmurRow(e, relT, innerW)
+				line = renderMurmurRow(e, relT, innerW, agentMurmurTS[e.Actor])
 			} else {
 				icon := EntryIcon(e.Kind)
 				// Truncate summary so the line fits: icon(1) + space(1) + summary + space(2) + relT
@@ -268,8 +308,8 @@ func (p *Pane) View(ctx panes.Context) string {
 	appendGroup("RECENT", theme.TimelineRecentLabel, theme.TimelineEntryActive, grouped.Recent, len(grouped.Now))
 	appendGroup("EARLIER", theme.TimelineEarlierLabel, theme.TimelineEntryMuted, grouped.Earlier, len(grouped.Now)+len(grouped.Recent))
 
-	// title(1) + pulse-detail(1) + filter-bar(filterLines) + sparkline(1) = chrome rows.
-	chromeRows := 3 + filterLines
+	// title(1) + pulse-detail(1) + filter-bar(filterLines) + sparkline(1) + agent-sparks(agentSparkLines) = chrome rows.
+	chromeRows := 3 + filterLines + agentSparkLines
 	visibleRows := innerH - chromeRows
 	if visibleRows < 0 {
 		visibleRows = 0
@@ -305,8 +345,8 @@ func (p *Pane) View(ctx panes.Context) string {
 }
 
 // renderMurmurRow builds the display line for a murmur timeline entry.
-// Format: ◈ [topic-badge] agent-short  content-preview  ·team?  relT
-func renderMurmurRow(e domain.TimelineEntry, relT string, innerW int) string {
+// Format: ◈ [topic-badge] agent-short sparkline content-preview relT
+func renderMurmurRow(e domain.TimelineEntry, relT string, innerW int, agentTS []time.Time) string {
 	icon := EntryIcon(e.Kind)
 
 	// Parse topic and content from the pre-formatted Summary "[topic] content".
@@ -320,9 +360,13 @@ func renderMurmurRow(e domain.TimelineEntry, relT string, innerW int) string {
 	}
 	agentPart := theme.NavDimStyle.Render(agentShort)
 
+	// Mini sparkline: 8 buckets over 1h window shows per-agent activity density.
+	miniSpark := tui.RenderSparkline(agentTS, 8, time.Hour)
+	miniSparkStyled := murmurAgeStyle(e.Timestamp).Render(miniSpark)
+
 	suffix := "  " + relT
-	// icon(1) + space(1) + badge + space(1) + agentShort(4) + space(2) + content + suffix
-	overhead := 1 + 1 + len(badge) + 1 + 4 + len(suffix)
+	// icon(1) + space(1) + badge + space(1) + agentShort(4) + space(1) + miniSpark(8) + space(1) + content + suffix
+	overhead := 1 + 1 + len(badge) + 1 + 4 + 1 + 10 + len(suffix)
 	maxContent := innerW - overhead
 	if maxContent < 0 {
 		maxContent = 0
@@ -331,7 +375,7 @@ func renderMurmurRow(e domain.TimelineEntry, relT string, innerW int) string {
 		content = content[:maxContent]
 	}
 
-	return icon + " " + badge + " " + agentPart + "  " + content + suffix
+	return icon + " " + badge + " " + agentPart + " " + miniSparkStyled + " " + content + suffix
 }
 
 // parseMurmurSummary extracts topic and content from the "[topic] content" format

@@ -6,10 +6,10 @@ import (
 	"github.com/sageox/ox/internal/cli"
 )
 
-// Pane chrome — borders differ by focus state (TokenBorderFocused / TokenBorderUnfocused).
+// Pane chrome — focused pane uses a double border to stand out clearly.
 var (
 	PaneBorderFocused = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
+				Border(lipgloss.DoubleBorder()).
 				BorderForeground(cli.ColorPrimary)
 
 	PaneBorderUnfocused = lipgloss.NewStyle().
@@ -17,173 +17,164 @@ var (
 				BorderForeground(cli.ColorDim)
 )
 
-// Header row styles (TokenHeader).
+// Header row styles.
 var (
-	// HeaderStyle is the primary pane title — bold so it reads at a glance.
 	HeaderStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(cli.ColorPrimary)
 
-	// HeaderDimStyle is used for secondary / subtitle text alongside the header.
 	HeaderDimStyle = lipgloss.NewStyle().
 			Foreground(cli.ColorDim)
 )
 
-// Navigation tree styles (TokenNavSection / TokenNavSelected / TokenNavLeaf).
+// Navigation tree styles.
 var (
-	// NavSectionStyle renders collapsible section headings.
 	NavSectionStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(cli.ColorPrimary)
+			Foreground(cli.ColorSecondary)
 
-	// NavSelectedStyle marks the cursor row — copper gold draws the eye.
 	NavSelectedStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(cli.ColorSecondary)
+				Foreground(lipgloss.Color("#1A1D1C")).
+				Background(cli.ColorPrimary)
 
-	// NavItemStyle is the default style for all non-selected leaf nodes.
-	NavItemStyle = lipgloss.NewStyle()
+	NavItemStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#C8D0C8"))
 
-	// NavDimStyle de-emphasises metadata or disabled nodes.
 	NavDimStyle = lipgloss.NewStyle().
 			Foreground(cli.ColorDim)
 )
 
-// Timeline pane styles (TokenTimeline*).
+// Timeline pane styles.
 var (
-	// TimelineNowLabel highlights events that happened in the last few minutes.
 	TimelineNowLabel = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(cli.ColorSuccess)
+				Foreground(lipgloss.Color("#5fef8f"))
 
-	// TimelineRecentLabel for events within the last hour or so.
 	TimelineRecentLabel = lipgloss.NewStyle().
+				Bold(true).
 				Foreground(cli.ColorPrimary)
 
-	// TimelineEarlierLabel for older entries that need less visual weight.
 	TimelineEarlierLabel = lipgloss.NewStyle().
 				Foreground(cli.ColorDim)
 
-	// TimelineDivider is the separator between time buckets.
 	TimelineDivider = lipgloss.NewStyle().
-			Foreground(cli.ColorDim)
+			Foreground(cli.ColorSecondary)
 
-	// TimelineEntryActive is used for entries that belong to live / in-progress events.
-	TimelineEntryActive = lipgloss.NewStyle()
+	TimelineEntryActive = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#C8D0C8"))
 
-	// TimelineEntryMuted de-emphasises background or completed events.
 	TimelineEntryMuted = lipgloss.NewStyle().
 				Foreground(cli.ColorDim)
 
-	// TimelineMurmurStyle renders murmur (WIP broadcast) entries in copper gold
-	// to distinguish AI coworker activity from sync and session events.
 	TimelineMurmurStyle = lipgloss.NewStyle().
 				Foreground(cli.ColorSecondary)
 
-	// TimelineSelectedStyle marks the cursor row in the timeline.
 	TimelineSelectedStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(cli.ColorSecondary)
+				Foreground(lipgloss.Color("#1A1D1C")).
+				Background(cli.ColorSecondary)
 
-	// TeamPulseHeaderStyle renders the "◉ Team Pulse · N coworkers · M teams" banner.
 	TeamPulseHeaderStyle = lipgloss.NewStyle().
 				Bold(true).
 				Foreground(cli.ColorPrimary)
 
-	// TeamPulseMetaStyle renders the coworker/team counts in the pulse banner.
 	TeamPulseMetaStyle = lipgloss.NewStyle().
-				Foreground(cli.ColorDim)
+				Foreground(lipgloss.Color("#C8D0C8"))
 
-	// MurmurHotStyle renders murmurs that arrived in the last 5 minutes — full brightness.
 	MurmurHotStyle = lipgloss.NewStyle().
+			Bold(true).
 			Foreground(cli.ColorSecondary)
 
-	// MurmurWarmStyle renders murmurs between 5 and 15 minutes old.
 	MurmurWarmStyle = lipgloss.NewStyle().
 			Foreground(cli.ColorInfo)
 
-	// MurmurCoolStyle renders murmurs older than 15 minutes — progressively dimmed.
 	MurmurCoolStyle = lipgloss.NewStyle().
 			Foreground(cli.ColorDim)
 
-	// TopicBadgeWIP renders the [wip] topic badge in dim green.
+	// Topic badge styles with background color "pill" look.
 	TopicBadgeWIP = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#5faf5f"))
+			Background(lipgloss.Color("#2d4a1e")).
+			Foreground(lipgloss.Color("#a8d08a")).
+			Padding(0, 1)
 
-	// TopicBadgeBlocked renders the [blocked] topic badge in yellow.
 	TopicBadgeBlocked = lipgloss.NewStyle().
-				Foreground(cli.ColorWarning)
+				Background(lipgloss.Color("#4a2010")).
+				Foreground(lipgloss.Color("#f09070")).
+				Padding(0, 1)
 
-	// TopicBadgeDecision renders the [decision] topic badge in cyan.
 	TopicBadgeDecision = lipgloss.NewStyle().
-				Foreground(cli.ColorInfo)
+				Background(lipgloss.Color("#1a3050")).
+				Foreground(lipgloss.Color("#7fc0f0")).
+				Padding(0, 1)
 
-	// TopicBadgeReview renders the [review] topic badge in blue/primary.
 	TopicBadgeReview = lipgloss.NewStyle().
-				Foreground(cli.ColorPrimary)
+				Background(lipgloss.Color("#302050")).
+				Foreground(lipgloss.Color("#c090f0")).
+				Padding(0, 1)
 
-	// TopicBadgeDefault renders unrecognised topic badges.
 	TopicBadgeDefault = lipgloss.NewStyle().
-				Foreground(cli.ColorDim)
+				Background(lipgloss.Color("#2a2e2a")).
+				Foreground(cli.ColorDim).
+				Padding(0, 1)
+
+	// SparklineActiveStyle is used for sparklines representing recent/live activity.
+	SparklineActiveStyle = lipgloss.NewStyle().Foreground(cli.ColorSecondary)
+
+	// SparklineDimStyle is used for sparklines with little or no activity.
+	SparklineDimStyle = lipgloss.NewStyle().Foreground(cli.ColorDim)
 )
 
-// Inspector pane styles (TokenInspector*).
+// Inspector pane styles.
 var (
-	// InspectorTitleStyle renders the entity name at the top of the inspector.
 	InspectorTitleStyle = lipgloss.NewStyle().
 				Bold(true).
-				Foreground(cli.ColorPrimary)
+				Foreground(cli.ColorSecondary)
 
-	// InspectorLabelStyle renders field labels. Fixed width aligns the value column.
 	InspectorLabelStyle = lipgloss.NewStyle().
-				Foreground(cli.ColorSecondary).
+				Foreground(cli.ColorPrimary).
 				Width(12)
 
-	// InspectorValueStyle renders field values — normal weight for readability.
-	InspectorValueStyle = lipgloss.NewStyle()
+	InspectorValueStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#C8D0C8"))
 
-	// InspectorDimStyle is for supplementary detail that shouldn't compete with values.
 	InspectorDimStyle = lipgloss.NewStyle().
 				Foreground(cli.ColorDim)
 
-	// InspectorHintStyle surfaces keyboard hints and contextual tips.
 	InspectorHintStyle = lipgloss.NewStyle().
-				Foreground(cli.ColorDim).
+				Foreground(lipgloss.Color("#5a6066")).
 				Italic(true)
 )
 
 // Status bar styles.
 var (
-	// StatusBarBase provides consistent horizontal padding across the full-width bar.
 	StatusBarBase = lipgloss.NewStyle().
 			Padding(0, 1)
 
-	// StatusHealthy renders HealthOK indicators.
 	StatusHealthy = lipgloss.NewStyle().
-			Foreground(cli.ColorSuccess)
+			Bold(true).
+			Foreground(lipgloss.Color("#5fef8f"))
 
-	// StatusWarning renders HealthWarn indicators.
 	StatusWarning = lipgloss.NewStyle().
+			Bold(true).
 			Foreground(cli.ColorWarning)
 
-	// StatusError renders HealthError indicators.
 	StatusError = lipgloss.NewStyle().
+			Bold(true).
 			Foreground(cli.ColorError)
 
-	// StatusDim de-emphasises secondary status bar segments.
 	StatusDim = lipgloss.NewStyle().
 			Foreground(cli.ColorDim)
 
-	// StatusSeparator renders the dividers between status bar segments.
 	StatusSeparator = lipgloss.NewStyle().
-			Foreground(cli.ColorDim)
+			Foreground(lipgloss.Color("#3a3f3c"))
 )
 
-// PaneTitle renders a styled pane title. When focused the title uses the primary
-// color; when unfocused it is dimmed so the active pane stands out clearly.
+// PaneTitle renders a styled pane title. When focused the title uses the secondary
+// (warm amber) color; when unfocused it is dimmed so the active pane stands out.
 func PaneTitle(title string, focused bool) string {
 	if focused {
-		return HeaderStyle.Render(title)
+		return lipgloss.NewStyle().Bold(true).Foreground(cli.ColorSecondary).Render(title)
 	}
 	return HeaderDimStyle.Render(title)
 }

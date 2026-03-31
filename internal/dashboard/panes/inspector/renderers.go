@@ -272,6 +272,26 @@ func RenderCodeDB(target domain.InspectorTarget, width int) string {
 		}
 	}
 
+	// Disk usage from DataDir.
+	if cdb.DataDir != "" {
+		var storageLines []string
+		if fi, err := os.Stat(filepath.Join(cdb.DataDir, "metadata.db")); err == nil {
+			storageLines = append(storageLines, row("SQLite", formatBytes(fi.Size())))
+		}
+		bleveDir := filepath.Join(cdb.DataDir, "bleve")
+		for _, idx := range []string{"code", "diff", "comment"} {
+			sz := dirSize(filepath.Join(bleveDir, idx))
+			if sz > 0 {
+				storageLines = append(storageLines, row("Bleve/"+idx, formatBytes(sz)))
+			}
+		}
+		if len(storageLines) > 0 {
+			lines = append(lines, "")
+			lines = append(lines, theme.InspectorTitleStyle.Render("Storage"))
+			lines = append(lines, storageLines...)
+		}
+	}
+
 	return strings.Join(lines, "\n")
 }
 
@@ -556,6 +576,35 @@ func loadSessionSummaryMD(filePath string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// formatBytes returns a human-readable byte size string.
+func formatBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1f GB", float64(n)/float64(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MB", float64(n)/float64(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%d KB", n>>10)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// dirSize returns the total size of all files under path (non-recursive errors silently skipped).
+func dirSize(path string) int64 {
+	var total int64
+	_ = filepath.Walk(path, func(_ string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !fi.IsDir() {
+			total += fi.Size()
+		}
+		return nil
+	})
+	return total
 }
 
 // wrapText breaks s into lines of at most width columns, splitting on word boundaries.

@@ -1,5 +1,5 @@
 // Package statusbar implements the single-line status bar shown at the bottom
-// of the dashboard TUI. It summarises overall health, active issue count, and
+// of the dashboard TUI. It summarizes overall health, active issue count, and
 // transient status messages without consuming more than one terminal row.
 package statusbar
 
@@ -18,6 +18,23 @@ import (
 // compile-time interface check
 var _ panes.Pane = (*Pane)(nil)
 
+func countIssueNodes(nodes []domain.NavNode) int {
+	n := 0
+	for _, node := range nodes {
+		if node.Kind == domain.NavNodeIssue {
+			n++
+		}
+	}
+	return n
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
 // Pane implements the bottom status bar — a single-line health summary.
 // It intentionally holds no state beyond its allocated rect because all
 // meaningful state lives in the read-only store supplied via Context.
@@ -33,95 +50,86 @@ func (p *Pane) SetSize(r panes.Rect)                                        { p.
 func (p *Pane) Update(msg tea.Msg, ctx panes.Context) (panes.Pane, tea.Cmd) { return p, nil }
 
 // View renders the status bar as a single full-width line. If a StatusMessage
-// override is set it takes the entire bar; otherwise segments are assembled
-// from health level, issue count, and loading state.
+// override is set it takes the entire bar; otherwise a left/right layout shows
+// health + issues on the left and coworker count + key hints on the right.
 func (p *Pane) View(ctx panes.Context) string {
 	w := ctx.Width
 	if w < 1 {
 		w = 80
 	}
 
-	// An explicit override message takes the full bar width — useful for
-	// ephemeral notifications (e.g. "Syncing…", "Session saved").
+	bg := lipgloss.Color("#111518")
+	barStyle := lipgloss.NewStyle().Width(w).Background(bg)
+	padStyle := lipgloss.NewStyle().Padding(0, 1).Background(bg)
+
+	// An explicit override message takes the full bar width.
 	if msg := ctx.Store.StatusMessage(); msg != "" {
-		return lipgloss.NewStyle().
-			Width(w).
-			Background(lipgloss.Color("#111518")).
-			Render(theme.StatusBarBase.Render(theme.StatusDim.Render(msg)))
+		return barStyle.Render(padStyle.Render(theme.StatusDim.Render(msg)))
 	}
 
 	health := ctx.Store.Health()
 	navNodes := ctx.Store.Nav()
 	daemonStatus := ctx.Store.GetDaemonStatus()
 
-	var parts []string
+	// ── Left segment: daemon health + issues ──────────────────────────────
+	var leftParts []string
 
-	// Daemon status line: vary message based on health and why it's unhealthy.
 	switch health {
 	case domain.HealthUnknown:
-		// Daemon status nil or still loading — show a dim loading hint.
-		parts = append(parts, theme.StatusDim.Render("Loading…"))
+		leftParts = append(leftParts, theme.StatusDim.Render("● loading…"))
 	case domain.HealthError:
-		// Distinguish between "daemon not running" and "daemon up but has errors".
 		if daemonStatus == nil || !daemonStatus.Running {
-			parts = append(parts, theme.StatusError.Render("daemon offline  ·  run: ox daemon start"))
+			leftParts = append(leftParts, theme.StatusError.Render("⬡ daemon offline"))
+			leftParts = append(leftParts, theme.StatusDim.Render("ox daemon start"))
 		} else {
-			// Count issues so we can surface the number inline.
-			issueCount := 0
-			for _, node := range navNodes {
-				if node.Kind == domain.NavNodeIssue {
-					issueCount++
-				}
-			}
-			label := fmt.Sprintf("⚠ %d issue", issueCount)
-			if issueCount != 1 {
-				label += "s"
-			}
-			parts = append(parts, theme.StatusError.Render(label))
+			issueCount := countIssueNodes(navNodes)
+			leftParts = append(leftParts, theme.StatusError.Render(fmt.Sprintf("⚠ %d issue%s", issueCount, pluralS(issueCount))))
 		}
 	case domain.HealthOK:
-		parts = append(parts, theme.StatusHealthy.Render("Daemon ✓"))
+		leftParts = append(leftParts, theme.StatusHealthy.Render("● online"))
 	case domain.HealthWarn:
-		parts = append(parts, theme.StatusWarning.Render("Daemon ⚠"))
+		leftParts = append(leftParts, theme.StatusWarning.Render("◐ warning"))
 	}
 
-	// Count daemon-flagged issues when health is not already showing them inline.
 	if health != domain.HealthError {
-		issueCount := 0
-		for _, node := range navNodes {
-			if node.Kind == domain.NavNodeIssue {
-				issueCount++
-			}
-		}
-		if issueCount > 0 {
-			label := fmt.Sprintf("⚠ %d issue", issueCount)
-			if issueCount > 1 {
-				label += "s"
-			}
-			parts = append(parts, theme.StatusWarning.Render(label))
+		if n := countIssueNodes(navNodes); n > 0 {
+			leftParts = append(leftParts, theme.StatusWarning.Render(fmt.Sprintf("⚠ %d issue%s", n, pluralS(n))))
 		}
 	}
 
-	// Auth expiry warning — shown prominently when a token is about to expire.
 	if daemonStatus != nil {
 		for _, issue := range daemonStatus.Issues {
 			if issue.Type == "auth_expiring" || issue.Type == "auth_expired" {
-				parts = append(parts, theme.StatusWarning.Render("⚠ auth expiring · run: ox login"))
+				leftParts = append(leftParts, theme.StatusWarning.Render("⚠ auth expiring"))
 				break
 			}
 		}
 	}
 
-	// Show a spinner-style indicator while the initial data load is in flight.
-	if ctx.Store.Loading() {
-		parts = append(parts, theme.StatusDim.Render("loading…"))
+	sep := theme.StatusSeparator.Render("  ·  ")
+	left := strings.Join(leftParts, sep)
+
+	// ── Right segment: coworker count + key hints ──────────────────────────
+	var rightParts []string
+
+	if coworkers := ctx.Store.ActiveMurmurCoworkers(); coworkers > 0 {
+		rightParts = append(rightParts, theme.StatusHealthy.Render(fmt.Sprintf("◈ %d active", coworkers)))
 	}
+	rightParts = append(rightParts, theme.StatusDim.Render("tab · j/k · ? help · q quit"))
 
-	sep := theme.StatusSeparator.Render(" · ")
-	line := strings.Join(parts, sep)
+	right := strings.Join(rightParts, sep)
 
-	return lipgloss.NewStyle().
-		Width(w).
-		Background(lipgloss.Color("#111518")).
-		Render(theme.StatusBarBase.Render(line))
+	// Assemble left + padding + right, right-aligned within the bar width.
+	leftRendered := left
+	rightRendered := right
+	// Pad left text to push right segment flush to the right edge.
+	leftLen := lipgloss.Width(leftRendered)
+	rightLen := lipgloss.Width(rightRendered)
+	padding := w - leftLen - rightLen - 2 // -2 for left/right pad
+	if padding < 1 {
+		padding = 1
+	}
+	line := " " + leftRendered + strings.Repeat(" ", padding) + rightRendered + " "
+
+	return barStyle.Render(line)
 }
