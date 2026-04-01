@@ -320,7 +320,7 @@ func TestDeduplicateBySourceTopic(t *testing.T) {
 				ID:        fmt.Sprintf("nudge-%d", i),
 				Source:    "auto-murmur",
 				Topic:     "murmur-nudge",
-				Content:   "ACTION REQUIRED: Tell your teammates...",
+				Content:   "Run now: ox murmur...",
 				CreatedAt: now.Add(-time.Duration(i) * time.Minute),
 			}
 		}

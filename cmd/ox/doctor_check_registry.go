@@ -319,7 +319,7 @@ func init() {
 		Slug:        CheckSlugSharedHookValues,
 		Name:        "Shared hook values",
 		Category:    "Integration",
-		FixLevel:    FixLevelSuggested,
+		FixLevel:    FixLevelAuto,
 		Description: "Validates ox hook commands in .claude/settings.json match current expected values",
 		Run: func(fix bool) checkResult {
 			return checkSharedHookValues(fix)
@@ -330,7 +330,7 @@ func init() {
 		Slug:        CheckSlugStaleLocalHooks,
 		Name:        "Stale local hooks",
 		Category:    "Integration",
-		FixLevel:    FixLevelSuggested,
+		FixLevel:    FixLevelAuto,
 		Description: "Detects ox hooks in settings.local.json that should be in settings.json",
 		Run: func(fix bool) checkResult {
 			return checkStaleLocalHooks(fix)

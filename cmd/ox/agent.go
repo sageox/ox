@@ -224,6 +224,10 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		Heartbeat(gitRoot, nil, agentID)
 	}
 
+	// Mid-turn whisper delivery: when agents run ox agent <id> <cmd> via
+	// Bash tool, stdout is returned to the model. This supplements the
+	// primary UserPromptSubmit channel during long single-turn tasks.
+	//
 	// Third whisper delivery path: emits whispers to stdout on every
 	// `ox agent <id> <cmd>` invocation. When the agent runs any ox command
 	// (session log, query, whisper, etc.), pending whispers piggyback on the

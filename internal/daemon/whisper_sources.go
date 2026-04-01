@@ -20,7 +20,7 @@ const (
 )
 
 // murmurNudgeContent is the whisper content that nudges agents to self-report.
-const murmurNudgeContent = `ACTION REQUIRED: Tell your teammates what you're working on right now. Run this command immediately. Be extremely concise — other agents pay a context token cost to read your murmur. One or two sentences max, 500 bytes limit. Run: ox murmur --topic=wip "describe: what you're building/fixing, which code areas you're modifying, and any architectural changes"`
+const murmurNudgeContent = `Run now: ox murmur --topic=wip "<1-2 sentences: what you're building, which files>"`
 
 // MurmurNudgeSource periodically checks if active agents should be nudged
 // to self-report what they're working on via ox murmur. Produces a whisper

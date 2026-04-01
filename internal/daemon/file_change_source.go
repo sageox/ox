@@ -243,9 +243,11 @@ func (p *FileChangeMurmurPublisher) publish() {
 
 	p.lastEmit = now
 	p.logger.Debug("file change murmur published",
+		"topic", "file-changes",
+		"file_count", len(changes),
+		"importance", importance,
 		"repo", p.remoteURL,
 		"branch", branch,
-		"file_count", len(changes),
 		"files", fileList(changes),
 	)
 }

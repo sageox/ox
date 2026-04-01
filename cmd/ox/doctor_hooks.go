@@ -13,7 +13,7 @@ func init() {
 		Slug:        CheckSlugHookCompleteness,
 		Name:        "Hook completeness",
 		Category:    "Integration",
-		FixLevel:    FixLevelSuggested,
+		FixLevel:    FixLevelAuto,
 		Description: "Verifies project hooks have ox prime for all required events",
 		Run: func(fix bool) checkResult {
 			return checkProjectHookCompleteness(fix)
@@ -473,7 +473,7 @@ func checkSharedHookValues(fix bool) checkResult {
 
 	return FailedCheck("Shared hook values",
 		fmt.Sprintf("%d stale hook(s)", len(stale)),
-		strings.Join(stale, ", ")+"\n       Run `ox doctor --fix` to update")
+		strings.Join(stale, ", ")+"\n       Run `ox doctor` to update")
 }
 
 // checkStaleLocalHooks detects ox hooks still present in settings.local.json
@@ -497,7 +497,7 @@ func checkStaleLocalHooks(fix bool) checkResult {
 
 	return WarningCheck("Stale local hooks",
 		"ox hooks found in settings.local.json",
-		"ox hooks should be in settings.json (shared). Run `ox doctor --fix` to migrate.")
+		"ox hooks should be in settings.json (shared). Run `ox doctor` to migrate.")
 }
 
 // checkProjectHookCompleteness verifies that project-level hooks have ox prime
@@ -546,5 +546,5 @@ func checkProjectHookCompleteness(fix bool) checkResult {
 
 	return FailedCheck("Hook completeness",
 		fmt.Sprintf("missing hooks for: %s", strings.Join(missing, ", ")),
-		"Run `ox doctor --fix` to repair")
+		"Run `ox doctor` to repair")
 }

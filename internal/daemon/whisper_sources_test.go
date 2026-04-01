@@ -84,8 +84,8 @@ func TestMurmurNudgeSource_ProducesNudge(t *testing.T) {
 	assert.Equal(t, "ledger", e.Scope)
 	assert.Equal(t, "murmur-nudge", e.Topic)
 	assert.Equal(t, "auto-murmur", e.Source)
-	assert.Contains(t, e.Content, "ACTION REQUIRED")
 	assert.Contains(t, e.Content, "ox murmur")
+	assert.Contains(t, e.Content, "--topic=wip")
 	assert.Equal(t, "OxTest1", e.AgentID)
 	assert.NotEmpty(t, e.ID)
 }

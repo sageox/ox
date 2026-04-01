@@ -395,6 +395,21 @@ func TestWhisperDelivery_ChannelExperiment(t *testing.T) {
         ],
         "matcher": ""
       }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '<system-reminder>MARKER_PRETOOL_SYSREM_theta1</system-reminder>'"
+          },
+          {
+            "type": "command",
+            "command": "echo 'MARKER_PRETOOL_PLAIN_iota2'"
+          }
+        ],
+        "matcher": ""
+      }
     ]
   }
 }`
@@ -402,7 +417,7 @@ func TestWhisperDelivery_ChannelExperiment(t *testing.T) {
 	if err := os.WriteFile(settingsPath, []byte(experimentSettings), 0644); err != nil {
 		t.Fatalf("write experiment settings: %v", err)
 	}
-	t.Log("installed experiment hooks with 6 distinct markers")
+	t.Log("installed experiment hooks with 8 distinct markers")
 
 	// Prompt: ask Claude to report EXACTLY what markers it can see.
 	// Using a tool-triggering prompt so PostToolUse fires.
@@ -426,6 +441,8 @@ func TestWhisperDelivery_ChannelExperiment(t *testing.T) {
 		"MARKER_USERPROMPT_SYSREM_delta4":   "UserPromptSubmit + <system-reminder>",
 		"MARKER_USERPROMPT_PLAIN_epsilon5":   "UserPromptSubmit + plain text",
 		"MARKER_STOP_SYSREM_zeta6":          "Stop + <system-reminder>",
+		"MARKER_PRETOOL_SYSREM_theta1":      "PreToolUse + <system-reminder>",
+		"MARKER_PRETOOL_PLAIN_iota2":        "PreToolUse + plain text",
 	}
 
 	output := result.RawOutput
