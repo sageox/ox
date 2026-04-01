@@ -263,10 +263,6 @@ func TestCodexHookInstall_WritesValidHooksJSON(t *testing.T) {
 	assert.Contains(t, string(data), "ox agent hook SessionStart",
 		"must contain ox agent hook for SessionStart")
 
-	// verify bd prime command is present
-	assert.Contains(t, string(data), "bd prime",
-		"must contain bd prime hook")
-
 	t.Logf("hooks.json is valid with %d SessionStart entries", len(sessionStart))
 }
 

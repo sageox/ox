@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
-
 	toml "github.com/pelletier/go-toml/v2"
 	"github.com/sageox/ox/internal/constants"
 	"github.com/sageox/ox/internal/ui"
@@ -29,9 +27,6 @@ type CodexHookEntry struct {
 type CodexHooksConfig struct {
 	Hooks map[string][]CodexHookEntry `json:"hooks,omitempty"`
 }
-
-// bdPrimeCommandCodex is the beads context injection command for Codex hooks.
-const bdPrimeCommandCodex = "if command -v bd >/dev/null 2>&1; then bd prime 2>&1 || true; fi"
 
 // codexLifecycleEvents lists the Codex events that get ox agent hook handlers.
 var codexLifecycleEvents = []string{
@@ -250,12 +245,7 @@ func isOxCodexHook(cmd string) bool {
 	return isOxPrimeCommand(cmd) || isOxHookCommand(cmd)
 }
 
-// isBdPrimeHook checks if a hook command is a bd prime command.
-func isBdPrimeHook(cmd string) bool {
-	return strings.Contains(cmd, "bd prime")
-}
-
-// installCodexHooks installs ox lifecycle hooks and bd prime hooks to Codex hooks.json,
+// installCodexHooks installs ox lifecycle hooks to Codex hooks.json
 // and enables the codex_hooks feature flag in .codex/config.toml.
 func installCodexHooks(user bool) error {
 	path, err := getCodexHooksPath(user)
@@ -298,12 +288,11 @@ func installCodexHooks(user bool) error {
 	return nil
 }
 
-// mergeCodexHookEntries ensures ox and bd prime hooks are present without duplicating.
+// mergeCodexHookEntries ensures ox hooks are present without duplicating.
 func mergeCodexHookEntries(existing []CodexHookEntry, oxCmd string, event string) []CodexHookEntry {
 	hasOx := false
-	hasBd := false
 
-	// scan existing entries for ox and bd hooks
+	// scan existing entries for ox hooks
 	for i, entry := range existing {
 		for j, hook := range entry.Hooks {
 			if isOxCodexHook(hook.Command) {
@@ -315,24 +304,7 @@ func mergeCodexHookEntries(existing []CodexHookEntry, oxCmd string, event string
 				}
 				hasOx = true
 			}
-			if isBdPrimeHook(hook.Command) {
-				hasBd = true
-			}
 		}
-	}
-
-	// add bd prime hook if not present
-	if !hasBd {
-		existing = append(existing, CodexHookEntry{
-			Matcher: emptyMatcher,
-			Hooks: []CodexHook{
-				{
-					Type:          hookType,
-					Command:       bdPrimeCommandCodex,
-					StatusMessage: "Loading beads context",
-				},
-			},
-		})
 	}
 
 	// add ox hook if not present
@@ -353,7 +325,7 @@ func mergeCodexHookEntries(existing []CodexHookEntry, oxCmd string, event string
 }
 
 // uninstallCodexHooks removes ox hooks from Codex hooks.json and the codex_hooks
-// feature flag from config.toml, preserving bd and other hooks/config.
+// feature flag from config.toml, preserving other hooks/config.
 func uninstallCodexHooks(user bool) error {
 	path, err := getCodexHooksPath(user)
 	if err != nil {

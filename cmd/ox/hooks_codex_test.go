@@ -32,14 +32,10 @@ func TestInstallCodexHooks_CreatesFile(t *testing.T) {
 	entries := config.Hooks["SessionStart"]
 	require.NotEmpty(t, entries, "expected SessionStart hooks")
 
-	// should have both bd prime and ox hooks
-	var foundBd, foundOx bool
+	// should have ox hooks
+	var foundOx bool
 	for _, entry := range entries {
 		for _, hook := range entry.Hooks {
-			if strings.Contains(hook.Command, "bd prime") {
-				foundBd = true
-				assert.Equal(t, "Loading beads context", hook.StatusMessage)
-			}
 			if strings.Contains(hook.Command, "ox agent hook") {
 				foundOx = true
 				assert.Equal(t, "Loading SageOx context", hook.StatusMessage)
@@ -47,7 +43,6 @@ func TestInstallCodexHooks_CreatesFile(t *testing.T) {
 			assert.Equal(t, "command", hook.Type)
 		}
 	}
-	assert.True(t, foundBd, "expected bd prime hook")
 	assert.True(t, foundOx, "expected ox hook")
 }
 
@@ -74,19 +69,14 @@ func TestInstallCodexHooks_Idempotent(t *testing.T) {
 
 	// count ox hooks — should be exactly 1
 	oxCount := 0
-	bdCount := 0
 	for _, entry := range entries {
 		for _, hook := range entry.Hooks {
 			if strings.Contains(hook.Command, "ox agent hook") {
 				oxCount++
 			}
-			if strings.Contains(hook.Command, "bd prime") {
-				bdCount++
-			}
 		}
 	}
 	assert.Equal(t, 1, oxCount, "expected exactly 1 ox hook after double install")
-	assert.Equal(t, 1, bdCount, "expected exactly 1 bd hook after double install")
 }
 
 func TestInstallCodexHooks_PreservesExistingHooks(t *testing.T) {
@@ -124,7 +114,6 @@ func TestInstallCodexHooks_PreservesExistingHooks(t *testing.T) {
 
 	assert.Contains(t, string(data), "custom-hook", "existing hook must survive install")
 	assert.Contains(t, string(data), "ox agent hook", "ox hook must be added")
-	assert.Contains(t, string(data), "bd prime", "bd hook must be added")
 }
 
 func TestInstallCodexHooks_PreservesNonHookKeys(t *testing.T) {
@@ -152,7 +141,7 @@ func TestInstallCodexHooks_PreservesNonHookKeys(t *testing.T) {
 	assert.Contains(t, string(data), "someValue", "non-hook values must survive")
 }
 
-func TestInstallCodexHooks_PreservesBdHooks(t *testing.T) {
+func TestUninstallCodexHooks_RemovesOxOnly(t *testing.T) {
 	tmpDir := t.TempDir()
 	codexDir := filepath.Join(tmpDir, ".codex")
 	require.NoError(t, os.MkdirAll(codexDir, 0755))
@@ -160,7 +149,7 @@ func TestInstallCodexHooks_PreservesBdHooks(t *testing.T) {
 	restoreCwd := changeToDir(t, tmpDir)
 	defer restoreCwd()
 
-	// pre-populate with bd prime hook (simulate bd having installed first)
+	// pre-populate with a custom user hook + ox hooks
 	existing := `{
   "hooks": {
     "SessionStart": [
@@ -169,8 +158,7 @@ func TestInstallCodexHooks_PreservesBdHooks(t *testing.T) {
         "hooks": [
           {
             "type": "command",
-            "command": "if command -v bd >/dev/null 2>&1; then bd prime 2>&1 || true; fi",
-            "statusMessage": "Loading beads context"
+            "command": "echo custom-hook"
           }
         ]
       }
@@ -180,48 +168,17 @@ func TestInstallCodexHooks_PreservesBdHooks(t *testing.T) {
 	hooksPath := filepath.Join(codexDir, "hooks.json")
 	require.NoError(t, os.WriteFile(hooksPath, []byte(existing), 0644))
 
-	// install ox hooks
-	require.NoError(t, installCodexHooks(false))
-
-	data, err := os.ReadFile(hooksPath)
-	require.NoError(t, err)
-
-	assert.Contains(t, string(data), "bd prime", "bd prime hook must survive ox install")
-
-	// count bd hooks — should still be exactly 1
-	var config CodexHooksConfig
-	require.NoError(t, json.Unmarshal(data, &config))
-	bdCount := 0
-	for _, entry := range config.Hooks["SessionStart"] {
-		for _, hook := range entry.Hooks {
-			if strings.Contains(hook.Command, "bd prime") {
-				bdCount++
-			}
-		}
-	}
-	assert.Equal(t, 1, bdCount, "expected exactly 1 bd hook after ox install")
-}
-
-func TestUninstallCodexHooks_RemovesOxOnly(t *testing.T) {
-	tmpDir := t.TempDir()
-	codexDir := filepath.Join(tmpDir, ".codex")
-	require.NoError(t, os.MkdirAll(codexDir, 0755))
-
-	restoreCwd := changeToDir(t, tmpDir)
-	defer restoreCwd()
-
-	// install both hooks
+	// install ox hooks alongside existing
 	require.NoError(t, installCodexHooks(false))
 
 	// uninstall ox hooks
 	require.NoError(t, uninstallCodexHooks(false))
 
-	hooksPath := filepath.Join(codexDir, "hooks.json")
 	data, err := os.ReadFile(hooksPath)
 	require.NoError(t, err)
 
 	assert.NotContains(t, string(data), "ox agent hook", "ox hook must be removed")
-	assert.Contains(t, string(data), "bd prime", "bd hook must survive uninstall")
+	assert.Contains(t, string(data), "custom-hook", "user hooks must survive uninstall")
 }
 
 func TestUninstallCodexHooks_NoFile(t *testing.T) {
@@ -245,7 +202,7 @@ func TestUninstallCodexHooks_RemovesFileWhenEmpty(t *testing.T) {
 	restoreCwd := changeToDir(t, tmpDir)
 	defer restoreCwd()
 
-	// write only ox hooks (no bd)
+	// write only ox hooks
 	hooksPath := filepath.Join(codexDir, "hooks.json")
 	onlyOx := `{
   "hooks": {
@@ -326,7 +283,6 @@ func TestCodexHook_StatusMessage(t *testing.T) {
 	// verify statusMessage fields are present in JSON
 	assert.Contains(t, string(data), "statusMessage")
 	assert.Contains(t, string(data), "Loading SageOx context")
-	assert.Contains(t, string(data), "Loading beads context")
 }
 
 func TestCodexAgent_SupportsHooks(t *testing.T) {
@@ -386,7 +342,7 @@ func TestUninstallCodexHooks_RemovesConfigTomlFlag(t *testing.T) {
 	restoreCwd := changeToDir(t, tmpDir)
 	defer restoreCwd()
 
-	// install then uninstall — write only ox hooks (no bd) so file gets fully cleaned
+	// install then uninstall — write only ox hooks so file gets fully cleaned
 	hooksPath := filepath.Join(codexDir, "hooks.json")
 	onlyOx := `{
   "hooks": {
