@@ -1353,6 +1353,84 @@ func TestStore_CheckNeedsDownload_Hydrated(t *testing.T) {
 	}
 }
 
+// --- store.go: cache-aware hydration ---
+
+func TestStore_IsSessionHydrated_ContentInCache(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	sessName := "2026-03-15T10-00-user-OxCached"
+	sessDir := filepath.Join(store.BasePath(), sessName)
+	os.MkdirAll(sessDir, 0755)
+
+	// meta.json in session dir
+	metaJSON := `{"version":"1.0","session_name":"test","files":{"raw.jsonl":{"oid":"sha256:abc","size":8}}}`
+	os.WriteFile(filepath.Join(sessDir, "meta.json"), []byte(metaJSON), 0644)
+
+	// real content in cache (not in session dir)
+	cacheDir := filepath.Join(dir, ".sageox", "cache", "sessions", sessName)
+	os.MkdirAll(cacheDir, 0755)
+	os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte("content\n"), 0644)
+
+	if !store.IsSessionHydrated(sessName) {
+		t.Error("IsSessionHydrated should return true when content is in cache")
+	}
+}
+
+func TestStore_CheckNeedsDownload_HydratedInCache(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	sessName := "2026-03-15T10-00-user-OxCacheDL"
+	sessDir := filepath.Join(store.BasePath(), sessName)
+	os.MkdirAll(sessDir, 0755)
+
+	metaJSON := `{"version":"1.0","session_name":"test","files":{"raw.jsonl":{"oid":"sha256:abc","size":8}}}`
+	os.WriteFile(filepath.Join(sessDir, "meta.json"), []byte(metaJSON), 0644)
+
+	// content only in cache
+	cacheDir := filepath.Join(dir, ".sageox", "cache", "sessions", sessName)
+	os.MkdirAll(cacheDir, 0755)
+	os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte("content\n"), 0644)
+
+	result := store.CheckNeedsDownload(sessName)
+	if result != "" {
+		t.Errorf("CheckNeedsDownload = %q, want empty for cache-hydrated session", result)
+	}
+}
+
+func TestStore_ReadSession_FromCache(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewStore(dir)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+
+	sessName := "2026-03-15T10-00-user-OxReadCache"
+	sessDir := filepath.Join(store.BasePath(), sessName)
+	os.MkdirAll(sessDir, 0755)
+
+	// no raw.jsonl in session dir, only in cache
+	cacheDir := filepath.Join(dir, ".sageox", "cache", "sessions", sessName)
+	os.MkdirAll(cacheDir, 0755)
+	rawContent := `{"type":"user","content":"hello"}` + "\n"
+	os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte(rawContent), 0644)
+
+	st, err := store.ReadSession(sessName)
+	if err != nil {
+		t.Fatalf("ReadSession from cache: %v", err)
+	}
+	if len(st.Entries) != 1 {
+		t.Errorf("expected 1 entry, got %d", len(st.Entries))
+	}
+}
+
 // --- store.go: ReadLFSSessionMeta ---
 
 func TestStore_ReadLFSSessionMeta_NoMeta(t *testing.T) {

@@ -392,6 +392,119 @@ func TestCheckHydrationStatus_MixedPointerAndContent(t *testing.T) {
 		"mix of pointer and content should be partial")
 }
 
+// --- CheckHydrationStatusWithCache ---
+
+func TestCheckHydrationStatusWithCache_AllInCache(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "sessions", "test-session")
+	cacheDir := filepath.Join(dir, ".sageox", "cache", "sessions", "test-session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+	require.NoError(t, os.MkdirAll(cacheDir, 0755))
+
+	// pointer files in session dir
+	require.NoError(t, WritePointerFile(
+		filepath.Join(sessionDir, "raw.jsonl"),
+		FileRef{OID: "sha256:abc", Size: 100},
+	))
+	require.NoError(t, WritePointerFile(
+		filepath.Join(sessionDir, "summary.md"),
+		FileRef{OID: "sha256:def", Size: 200},
+	))
+
+	// real content in cache
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte("real content here"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "summary.md"), []byte("# Real summary content"), 0644))
+
+	meta := &SessionMeta{
+		Files: map[string]FileRef{
+			"raw.jsonl":  {OID: "sha256:abc", Size: 100},
+			"summary.md": {OID: "sha256:def", Size: 200},
+		},
+	}
+
+	status := CheckHydrationStatusWithCache(sessionDir, cacheDir, meta)
+	assert.Equal(t, HydrationStatusHydrated, status,
+		"files in cache should count as hydrated")
+}
+
+func TestCheckHydrationStatusWithCache_MixedLocations(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "sessions", "test-session")
+	cacheDir := filepath.Join(dir, ".sageox", "cache", "sessions", "test-session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+	require.NoError(t, os.MkdirAll(cacheDir, 0755))
+
+	// real content in session dir (legacy hydration)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte("real content here"), 0644))
+	// real content in cache
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "summary.md"), []byte("# Cached summary"), 0644))
+
+	meta := &SessionMeta{
+		Files: map[string]FileRef{
+			"raw.jsonl":  {OID: "sha256:abc", Size: 100},
+			"summary.md": {OID: "sha256:def", Size: 200},
+		},
+	}
+
+	status := CheckHydrationStatusWithCache(sessionDir, cacheDir, meta)
+	assert.Equal(t, HydrationStatusHydrated, status,
+		"mix of in-place and cached content should be hydrated")
+}
+
+func TestCheckHydrationStatusWithCache_PartialCacheOnly(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "sessions", "test-session")
+	cacheDir := filepath.Join(dir, ".sageox", "cache", "sessions", "test-session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+	require.NoError(t, os.MkdirAll(cacheDir, 0755))
+
+	// pointer in session dir, nothing else
+	require.NoError(t, WritePointerFile(
+		filepath.Join(sessionDir, "raw.jsonl"),
+		FileRef{OID: "sha256:abc", Size: 100},
+	))
+	// only summary in cache, raw.jsonl missing from cache too
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, "summary.md"), []byte("# Cached summary"), 0644))
+
+	meta := &SessionMeta{
+		Files: map[string]FileRef{
+			"raw.jsonl":  {OID: "sha256:abc", Size: 100},
+			"summary.md": {OID: "sha256:def", Size: 200},
+		},
+	}
+
+	status := CheckHydrationStatusWithCache(sessionDir, cacheDir, meta)
+	assert.Equal(t, HydrationStatusPartial, status,
+		"one file in cache, one missing should be partial")
+}
+
+func TestCheckHydrationStatusWithCache_EmptyCache(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "sessions", "test-session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	require.NoError(t, WritePointerFile(
+		filepath.Join(sessionDir, "raw.jsonl"),
+		FileRef{OID: "sha256:abc", Size: 100},
+	))
+
+	meta := &SessionMeta{
+		Files: map[string]FileRef{
+			"raw.jsonl": {OID: "sha256:abc", Size: 100},
+		},
+	}
+
+	// cache path doesn't exist
+	status := CheckHydrationStatusWithCache(sessionDir, filepath.Join(dir, "nonexistent"), meta)
+	assert.Equal(t, HydrationStatusDehydrated, status,
+		"pointer in session dir with no cache should be dehydrated")
+}
+
+func TestCheckHydrationStatusWithCache_NilMeta(t *testing.T) {
+	status := CheckHydrationStatusWithCache(t.TempDir(), t.TempDir(), nil)
+	assert.Equal(t, HydrationStatusDehydrated, status)
+}
+
 func TestFileRef_BareOID(t *testing.T) {
 	tests := []struct {
 		oid      string

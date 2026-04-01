@@ -218,6 +218,44 @@ func CheckHydrationStatus(sessionPath string, meta *SessionMeta) HydrationStatus
 	}
 }
 
+// CheckHydrationStatusWithCache checks hydration across the primary session path
+// and a cache path. A file counts as hydrated if it exists as real content (not a
+// pointer) in the primary path OR exists in the cache path (cache never has pointers).
+func CheckHydrationStatusWithCache(sessionPath, cachePath string, meta *SessionMeta) HydrationStatus {
+	if meta == nil || len(meta.Files) == 0 {
+		return HydrationStatusDehydrated
+	}
+
+	hydrated := 0
+	total := len(meta.Files)
+
+	for filename := range meta.Files {
+		// check primary path
+		filePath := filepath.Join(sessionPath, filename)
+		if info, err := os.Stat(filePath); err == nil && info.Size() > 0 && !IsPointerFile(filePath) {
+			hydrated++
+			continue
+		}
+		// check cache path
+		if cachePath != "" {
+			cacheFilePath := filepath.Join(cachePath, filename)
+			if _, err := os.Stat(cacheFilePath); err == nil {
+				hydrated++
+				continue
+			}
+		}
+	}
+
+	switch hydrated {
+	case 0:
+		return HydrationStatusDehydrated
+	case total:
+		return HydrationStatusHydrated
+	default:
+		return HydrationStatusPartial
+	}
+}
+
 // NewFileRef creates a FileRef from content bytes.
 func NewFileRef(content []byte) FileRef {
 	return FileRef{
