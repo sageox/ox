@@ -229,8 +229,11 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 				return result
 			}
 			logger.Warn("auto-resolve failed, aborting rebase", "repo", repoName, "error", resolveErr)
-			abortCmd := exec.CommandContext(ctx, "git", "-C", path, "rebase", "--abort")
-			if abortErr := abortCmd.Run(); abortErr != nil {
+			// use a fresh context for abort — the parent ctx may be canceled
+			abortCtx, abortCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, abortErr := gitutil.RunGit(abortCtx, path, "rebase", "--abort")
+			abortCancel()
+			if abortErr != nil {
 				logger.Error("rebase abort failed, repo stuck in rebase state", "repo", repoName, "error", abortErr)
 				result.Issue = &DaemonIssue{
 					Type:            IssueTypeRebaseStuck,
@@ -242,23 +245,26 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 			}
 		}
 
-		// Check if it's a merge conflict
-		statusCmd := exec.CommandContext(ctx, "git", "-C", path, "status", "--porcelain")
-		if statusOutput, _ := statusCmd.Output(); strings.Contains(string(statusOutput), "UU") {
-			result.Issue = &DaemonIssue{
-				Type:            IssueTypeMergeConflict,
-				Severity:        SeverityError,
-				Repo:            repoName,
-				Summary:         fmt.Sprintf("%s has merge conflicts. Run 'ox doctor --fix' to resolve.", repoName),
-				RequiresConfirm: true,
-			}
-		} else if result.Diverged {
-			// Diverged and rebase failed but not a merge conflict
-			result.Issue = &DaemonIssue{
-				Type:     IssueTypeDiverged,
-				Repo:     repoName,
-				Severity: SeverityError,
-				Summary:  fmt.Sprintf("%s has diverged from remote and rebase failed. Run 'ox doctor --fix' to resolve.", repoName),
+		// only classify further if no higher-priority issue (rebase stuck) was already set
+		if result.Issue == nil {
+			// Check if it's a merge conflict
+			statusCmd := exec.CommandContext(ctx, "git", "-C", path, "status", "--porcelain")
+			if statusOutput, _ := statusCmd.Output(); strings.Contains(string(statusOutput), "UU") {
+				result.Issue = &DaemonIssue{
+					Type:            IssueTypeMergeConflict,
+					Severity:        SeverityError,
+					Repo:            repoName,
+					Summary:         fmt.Sprintf("%s has merge conflicts. Run 'ox doctor --fix' to resolve.", repoName),
+					RequiresConfirm: true,
+				}
+			} else if result.Diverged {
+				// Diverged and rebase failed but not a merge conflict
+				result.Issue = &DaemonIssue{
+					Type:     IssueTypeDiverged,
+					Repo:     repoName,
+					Severity: SeverityError,
+					Summary:  fmt.Sprintf("%s has diverged from remote and rebase failed. Run 'ox doctor --fix' to resolve.", repoName),
+				}
 			}
 		}
 

@@ -149,12 +149,10 @@ func TestShallow_PartialFilter_WithDepth(t *testing.T) {
 
 	require.FileExists(t, filepath.Join(cloneDir, "docs/readme.md"))
 
-	// unshallow
+	// unshallow — must succeed for a shallow clone with >1 commit
 	cmd = exec.Command("git", "-C", cloneDir, "fetch", "--unshallow")
 	out, err = cmd.CombinedOutput()
-	// may succeed or may say "complete" — either is fine
-	_ = err
-	_ = out
+	require.NoError(t, err, "fetch --unshallow should succeed on a multi-commit shallow clone: %s", string(out))
 
 	// after unshallow, on-demand blob fetch should still work
 	cmd = exec.Command("git", "-C", cloneDir, "show", "HEAD:src/main.go")

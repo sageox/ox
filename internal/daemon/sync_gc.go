@@ -583,8 +583,8 @@ func (s *SyncScheduler) gcCaptureDiff(ctx context.Context, repoPath, diffFile st
 
 	if written > maxGCDiffSize {
 		_ = os.Remove(diffFile)
-		s.logger.Warn("gc: diff too large, skipping capture", "path", repoPath, "size", written, "max", maxGCDiffSize)
-		return false, nil
+		s.logger.Warn("gc: diff too large, cannot preserve changes", "path", repoPath, "size", written, "max", maxGCDiffSize)
+		return false, fmt.Errorf("diff too large (%d bytes, max %d) — cannot safely preserve uncommitted changes", written, maxGCDiffSize)
 	}
 
 	s.logger.Info("gc: captured uncommitted changes", "path", repoPath, "diff_size", written)
@@ -616,13 +616,18 @@ func (s *SyncScheduler) gcCaptureUntracked(ctx context.Context, repoPath, destDi
 			continue
 		}
 
-		// guard against path traversal (e.g., "../../.ssh/authorized_keys")
-		if strings.Contains(relPath, "..") {
-			absResolved := filepath.Join(repoPath, relPath)
-			if resolved, err := filepath.Abs(absResolved); err != nil || !strings.HasPrefix(resolved, repoPath) {
-				s.logger.Warn("gc: skipping untracked file with path traversal", "path", relPath)
-				continue
-			}
+		// guard against path traversal and symlink escape
+		absResolved, err := filepath.Abs(filepath.Join(repoPath, relPath))
+		if err != nil {
+			s.logger.Warn("gc: skipping untracked file, cannot resolve path", "path", relPath, "error", err)
+			continue
+		}
+		absRepo, _ := filepath.Abs(repoPath)
+		// use filepath.Rel for separator-aware containment (prevents /tmp/repo-evil matching /tmp/repo)
+		rel, err := filepath.Rel(absRepo, absResolved)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			s.logger.Warn("gc: skipping untracked file outside repo boundary", "path", relPath)
+			continue
 		}
 
 		srcPath := filepath.Join(repoPath, relPath)

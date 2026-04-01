@@ -121,6 +121,11 @@ func TestLFS_PointerFileOverwritesNormalFile(t *testing.T) {
 	out, err = cmd.CombinedOutput()
 	require.NoError(t, err, "git add .gitattributes failed: %s", string(out))
 
+	// re-add the txt file so git renormalizes it through the new LFS filter
+	cmd = exec.Command("git", "-C", cloneDir, "add", "--renormalize", "docs/notes.txt")
+	out, err = cmd.CombinedOutput()
+	require.NoError(t, err, "git add --renormalize failed: %s", string(out))
+
 	cmd = exec.Command("git", "-C", cloneDir, "commit", "-m", "retroactively track txt via LFS")
 	out, err = cmd.CombinedOutput()
 	require.NoError(t, err, "git commit failed: %s", string(out))

@@ -137,8 +137,10 @@ func TestPushWithRetry_ConcurrentPushers_SameFile_AutoResolve(t *testing.T) {
 	content, err := os.ReadFile(filepath.Join(verify, "data/shared.json"))
 	require.NoError(t, err)
 	contentStr := string(content)
-	validContent := strings.Contains(contentStr, "clone1") || strings.Contains(contentStr, "clone2")
-	require.True(t, validContent, "file should contain one of the two versions, got: %s", contentStr)
+	// must be exactly one version — conflict markers or mixed content means broken auto-resolve
+	assert.False(t, strings.Contains(contentStr, "<<<<<<<"), "file must not contain conflict markers")
+	validContent := contentStr == `{"source":"clone1"}`+"\n" || contentStr == `{"source":"clone2"}`+"\n"
+	require.True(t, validContent, "file should contain exactly one version (last writer wins), got: %s", contentStr)
 }
 
 // --- C. No auto-resolve → second push fails ---

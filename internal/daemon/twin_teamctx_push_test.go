@@ -105,8 +105,11 @@ func TestTeamCtxPush_DataAutoResolve_Succeeds(t *testing.T) {
 	g.cloneRepo(t, cloneURL, verify)
 	content, err := os.ReadFile(filepath.Join(verify, "data/github/issues.json"))
 	require.NoError(t, err)
-	validContent := strings.Contains(string(content), "clone1") || strings.Contains(string(content), "clone2")
-	assert.True(t, validContent, "file should contain one of the two versions, got: %s", string(content))
+	contentStr := string(content)
+	// must be exactly one version — conflict markers or mixed content means broken auto-resolve
+	assert.False(t, strings.Contains(contentStr, "<<<<<<<"), "file must not contain conflict markers")
+	validContent := contentStr == `{"source":"clone1"}`+"\n" || contentStr == `{"source":"clone2"}`+"\n"
+	assert.True(t, validContent, "file should contain exactly one version (last writer wins), got: %s", contentStr)
 }
 
 // --- C. Push after pull --rebase leaves clean state ---

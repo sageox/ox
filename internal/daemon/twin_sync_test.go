@@ -101,6 +101,7 @@ func TestSync_NonFastForward_RebasesCleanly(t *testing.T) {
 
 	result := s.pullManagedRepo(context.Background(), opts)
 	assert.NoError(t, result.Err, "rebase pull should succeed without conflicts")
+	assert.False(t, result.Skipped, "pull should not be skipped — divergence requires actual rebase")
 
 	// verify both files exist
 	content, err := os.ReadFile(filepath.Join(cloneDir, "local-file.txt"))
@@ -148,6 +149,7 @@ func TestSync_PullWithUncommittedChanges_Autostash(t *testing.T) {
 
 	result := s.pullManagedRepo(context.Background(), opts)
 	assert.NoError(t, result.Err, "pull with uncommitted changes should succeed via autostash")
+	assert.False(t, result.Skipped, "pull should not be skipped — new remote content requires actual pull")
 
 	// verify uncommitted change preserved
 	content, err := os.ReadFile(filepath.Join(cloneDir, "README.md"))

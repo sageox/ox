@@ -54,6 +54,9 @@ func dockerAvailable() bool {
 
 func requireDocker(t *testing.T) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("short: skipping Docker-backed tests")
+	}
 	if os.Getenv("OX_SKIP_DOCKER") != "" {
 		t.Skip("short: OX_SKIP_DOCKER set")
 	}
