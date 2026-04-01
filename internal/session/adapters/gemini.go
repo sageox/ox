@@ -193,13 +193,17 @@ func (a *GeminiAdapter) ReadFromOffset(path string, offset int64) ([]RawEntry, i
 // Watch monitors a Gemini session file for new entries using fsnotify.
 // Since Gemini rewrites the entire file on each turn, we re-read the
 // full JSON and emit only entries beyond our last-seen count.
+// Watches the parent directory to survive atomic file replacements (temp + rename).
 func (a *GeminiAdapter) Watch(ctx context.Context, sessionPath string) (<-chan RawEntry, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
 
-	if err := watcher.Add(sessionPath); err != nil {
+	// watch parent directory to survive atomic file replacements
+	parentDir := filepath.Dir(sessionPath)
+	targetName := filepath.Base(sessionPath)
+	if err := watcher.Add(parentDir); err != nil {
 		watcher.Close()
 		return nil, err
 	}
@@ -233,7 +237,11 @@ func (a *GeminiAdapter) Watch(ctx context.Context, sessionPath string) (<-chan R
 				if !ok {
 					return
 				}
-				if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
+				// filter to our target file only
+				if filepath.Base(event.Name) != targetName {
+					continue
+				}
+				if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename) != 0 {
 					if !pendingRead {
 						debounceTimer.Reset(debounceDelay)
 						pendingRead = true
@@ -317,17 +325,20 @@ func (a *GeminiAdapter) parseMessage(msg *geminiMessage) []RawEntry {
 			})
 		}
 		if part.FunctionResponse != nil {
-			// function responses are tool outputs; only capture errors
+			entry := RawEntry{
+				Role:     "tool",
+				ToolName: part.FunctionResponse.Name,
+			}
 			if part.FunctionResponse.Response != nil {
 				if errMsg, ok := part.FunctionResponse.Response["error"]; ok {
-					entries = append(entries, RawEntry{
-						Role:       "tool",
-						ToolName:   part.FunctionResponse.Name,
-						ToolOutput: fmt.Sprintf("%v", errMsg),
-						IsError:    true,
-					})
+					entry.ToolOutput = fmt.Sprintf("%v", errMsg)
+					entry.IsError = true
+				} else {
+					outputJSON, _ := json.Marshal(part.FunctionResponse.Response)
+					entry.ToolOutput = string(outputJSON)
 				}
 			}
+			entries = append(entries, entry)
 		}
 	}
 

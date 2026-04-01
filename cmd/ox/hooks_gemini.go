@@ -155,7 +155,7 @@ func hasGeminiHooks(user bool) bool {
 
 	for _, event := range geminiLifecycleEvents {
 		hook, exists := settings.Hooks[event]
-		if !exists || !isOxGeminiHook(hook.Command) {
+		if !exists || hook.Command != oxHookCommandForGeminiEvent(event) {
 			return false
 		}
 	}

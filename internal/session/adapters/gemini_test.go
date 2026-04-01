@@ -62,13 +62,19 @@ func TestGeminiAdapter_Read_WithToolCalls(t *testing.T) {
 	a := &GeminiAdapter{}
 	entries, err := a.Read(path)
 	require.NoError(t, err)
-	require.Len(t, entries, 3)
+	require.Len(t, entries, 4)
 
 	assert.Equal(t, "user", entries[0].Role)
 	assert.Equal(t, "assistant", entries[1].Role)
+	// function call entry
 	assert.Equal(t, "tool", entries[2].Role)
 	assert.Equal(t, "readFile", entries[2].ToolName)
 	assert.Contains(t, entries[2].ToolInput, "main.go")
+	// function response entry (successful output now captured)
+	assert.Equal(t, "tool", entries[3].Role)
+	assert.Equal(t, "readFile", entries[3].ToolName)
+	assert.False(t, entries[3].IsError)
+	assert.Contains(t, entries[3].ToolOutput, "package main")
 }
 
 func TestGeminiAdapter_Read_ToolError(t *testing.T) {

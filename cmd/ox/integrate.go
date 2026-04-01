@@ -104,22 +104,28 @@ The integration ensures that 'ox agent prime' runs when an AI coding session sta
 
 var integrateInstallCmd = &cobra.Command{
 	Use:   "install",
-	Short: "Install SageOx integration to Claude Code",
-	Long: `Install hooks for Claude Code.
+	Short: "Install SageOx integration for AI coworkers",
+	Long: `Install SageOx hooks for AI coworkers.
 
-Adds hooks to ~/.claude/settings.json for SessionStart and PreCompact events.
+Default: Claude Code (adds hooks to ~/.claude/settings.json).
 Use --user to add guidance to ~/.claude/CLAUDE.md for ALL projects.
 
-Other agents (Codex, Gemini, code_puppy) can be installed with their respective flags.`,
+Other agents can be installed with their respective flags:
+  --gemini    Gemini CLI hooks
+  --codex     Codex CLI hooks
+  --amp       Amp CLI integration (AGENTS.md marker)
+  --opencode  OpenCode plugin
+  --codepuppy code_puppy plugin`,
 	RunE: runIntegrateInstall,
 }
 
 var integrateUninstallCmd = &cobra.Command{
 	Use:   "uninstall",
-	Short: "Uninstall SageOx integration from Claude Code",
-	Long: `Remove SageOx integration from Claude Code.
+	Short: "Uninstall SageOx integration from AI coworkers",
+	Long: `Remove SageOx integration from AI coworkers.
 
-Removes hooks from ~/.claude/settings.json.`,
+Default: Claude Code (removes hooks from ~/.claude/settings.json).
+Use agent-specific flags to uninstall from other agents.`,
 	RunE: runIntegrateUninstall,
 }
 
@@ -155,7 +161,10 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 
 	// Amp CLI installation
 	if integrateAmpFlag {
-		if err := installAmpHooks(integrateUserFlag); err != nil {
+		if integrateUserFlag {
+			return fmt.Errorf("Amp CLI does not support user-level integration")
+		}
+		if err := installAmpHooks(false); err != nil {
 			return fmt.Errorf("installing Amp CLI integration: %w", err)
 		}
 
@@ -289,15 +298,14 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 
 	// Amp CLI uninstallation
 	if integrateAmpFlag {
-		if err := uninstallAmpHooks(integrateUserFlag); err != nil {
+		if integrateUserFlag {
+			return fmt.Errorf("Amp CLI does not support user-level integration")
+		}
+		if err := uninstallAmpHooks(false); err != nil {
 			return fmt.Errorf("uninstalling Amp CLI integration: %w", err)
 		}
 
-		location := "project"
-		if integrateUserFlag {
-			location = "user"
-		}
-		fmt.Printf("✓ Amp CLI %s-level integration uninstalled\n", location)
+		fmt.Printf("✓ Amp CLI project-level integration uninstalled\n")
 
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)

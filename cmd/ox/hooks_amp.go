@@ -28,6 +28,20 @@ var ampPrimeBlock = ampPrimeMarkerStart + "\n" +
 	"This provides architectural decisions, coding conventions, and session history from your team.\n" +
 	ampPrimeMarkerEnd
 
+// resolveAgentsMDPath returns the path to AGENTS.md at the git root.
+// Falls back to cwd if not in a git repo.
+func resolveAgentsMDPath() (string, error) {
+	root := findGitRoot()
+	if root == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("failed to get working directory: %w", err)
+		}
+		root = cwd
+	}
+	return filepath.Join(root, agentsMDFileName), nil
+}
+
 // hasAmpHooks checks if the Amp CLI ox prime marker exists.
 // user=true always returns false (no user-level AGENTS.md for Amp).
 // user=false checks the project-level AGENTS.md for the marker.
@@ -36,12 +50,12 @@ func hasAmpHooks(user bool) bool {
 		return false
 	}
 
-	cwd, err := os.Getwd()
+	agentsPath, err := resolveAgentsMDPath()
 	if err != nil {
 		return false
 	}
 
-	content, err := os.ReadFile(filepath.Join(cwd, agentsMDFileName))
+	content, err := os.ReadFile(agentsPath)
 	if err != nil {
 		return false
 	}
@@ -58,12 +72,10 @@ func installAmpHooks(user bool) error {
 		return nil
 	}
 
-	cwd, err := os.Getwd()
+	agentsPath, err := resolveAgentsMDPath()
 	if err != nil {
-		return fmt.Errorf("failed to get working directory: %w", err)
+		return err
 	}
-
-	agentsPath := filepath.Join(cwd, agentsMDFileName)
 
 	// read existing content if file exists
 	existing, err := os.ReadFile(agentsPath)
@@ -104,12 +116,10 @@ func uninstallAmpHooks(user bool) error {
 		return nil
 	}
 
-	cwd, err := os.Getwd()
+	agentsPath, err := resolveAgentsMDPath()
 	if err != nil {
-		return fmt.Errorf("failed to get working directory: %w", err)
+		return err
 	}
-
-	agentsPath := filepath.Join(cwd, agentsMDFileName)
 
 	data, err := os.ReadFile(agentsPath)
 	if err != nil {

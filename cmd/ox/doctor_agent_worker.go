@@ -7,6 +7,14 @@ import (
 	"github.com/sageox/ox/internal/daemon/agentwork"
 )
 
+// authHintForAgent returns the appropriate authentication hint for an agent CLI.
+func authHintForAgent(agent string) string {
+	if agent == "gemini" {
+		return "Set GEMINI_API_KEY or GOOGLE_API_KEY to enable automatic session finalization"
+	}
+	return fmt.Sprintf("Run '%s login' to enable automatic session finalization", agent)
+}
+
 // checkAgentWorkerBinary validates that the effective agent CLI is installed and authenticated.
 // Resolves auto-detection: if unconfigured, reports what would be auto-detected.
 func checkAgentWorkerBinary() checkResult {
@@ -31,10 +39,7 @@ func checkAgentWorkerBinary() checkResult {
 		for _, agent := range []string{"claude", "codex", "gemini"} {
 			u := agentwork.CheckAgentUsability(agent)
 			if u.Installed && !u.Authenticated {
-				hint := fmt.Sprintf("Run '%s login' to enable automatic session finalization", agent)
-				if agent == "gemini" {
-					hint = "Set GEMINI_API_KEY or GOOGLE_API_KEY to enable automatic session finalization"
-				}
+				hint := authHintForAgent(agent)
 				return WarningCheck("agent worker binary",
 					fmt.Sprintf("%s installed but not authenticated", agent),
 					hint)
@@ -55,7 +60,7 @@ func checkAgentWorkerBinary() checkResult {
 	if !u.Authenticated {
 		return WarningCheck("agent worker binary",
 			fmt.Sprintf("%s not authenticated", resolved),
-			fmt.Sprintf("Run '%s login' — the daemon can't use %s without authentication", resolved, resolved))
+			fmt.Sprintf("%s — the daemon can't use %s without authentication", authHintForAgent(resolved), resolved))
 	}
 
 	source := "configured"

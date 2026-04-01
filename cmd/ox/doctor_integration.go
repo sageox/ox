@@ -454,5 +454,5 @@ func detectAmp() bool {
 
 // checkAmpHooks checks if Amp CLI integration is properly installed
 func checkAmpHooks(fix bool) checkResult {
-	return checkAgentHooks(&AmpAgent{}, "Amp CLI", fix)
+	return checkAgentHooks(&AmpAgent{}, "Amp", fix)
 }

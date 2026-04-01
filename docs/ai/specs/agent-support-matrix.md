@@ -132,4 +132,4 @@ No per-agent configuration is required in `.sageox/config.json` — that file is
 
 ### Future: Pluggable Agent Architecture
 
-See [GitHub issue: pluggable agent adapter architecture](https://github.com/sageox/ox/issues) for research on whether agent support should be externally pluggable vs compiled-in. Current agent count is 6; as more AI coding agents emerge, the maintenance cost of compiled-in adapters may warrant a plugin registry pattern.
+See [GitHub issue #394: pluggable agent adapter architecture](https://github.com/sageox/ox/issues/394) for research on whether agent support should be externally pluggable vs compiled-in. Current agent count is 6; as more AI coding agents emerge, the maintenance cost of compiled-in adapters may warrant a plugin registry pattern.
