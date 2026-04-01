@@ -34,11 +34,9 @@ import (
 // Lazy init (sync.Once) ensures non-twin slow tests (e.g., whisper) don't pay
 // the container startup cost.
 var (
-	sharedGitea     *giteaFixture
-	giteaOnce       sync.Once
-	giteaInitErr    error
-	giteaCleanupMu  sync.Mutex
-	giteaCleanupReg bool
+	sharedGitea  *giteaFixture
+	giteaOnce    sync.Once
+	giteaInitErr error
 )
 
 // giteaHostPort is fixed so ROOT_URL matches the external access URL.
@@ -94,17 +92,8 @@ func getSharedGitea(t *testing.T) *giteaFixture {
 		t.Skip("Gitea digital twin not available")
 	}
 
-	// register cleanup exactly once
-	giteaCleanupMu.Lock()
-	if !giteaCleanupReg {
-		giteaCleanupReg = true
-		t.Cleanup(func() {
-			if sharedGitea != nil {
-				_ = sharedGitea.container.Terminate(context.Background())
-			}
-		})
-	}
-	giteaCleanupMu.Unlock()
+	// cleanup is handled automatically by testcontainers' Ryuk sidecar
+	// when the test process exits — no t.Cleanup needed for the shared container.
 
 	return sharedGitea
 }
@@ -278,7 +267,9 @@ func (g *giteaFixture) pushFromTempClone(t *testing.T, cloneURL, filename, conte
 
 	gitConfig(t, cloneDir)
 
-	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, filename), []byte(content), 0o644))
+	filePath := filepath.Join(cloneDir, filename)
+	require.NoError(t, os.MkdirAll(filepath.Dir(filePath), 0o755))
+	require.NoError(t, os.WriteFile(filePath, []byte(content), 0o644))
 
 	cmd = exec.Command("git", "-C", cloneDir, "add", filename)
 	out, err = cmd.CombinedOutput()
@@ -291,6 +282,32 @@ func (g *giteaFixture) pushFromTempClone(t *testing.T, cloneURL, filename, conte
 	cmd = exec.Command("git", "-C", cloneDir, "push")
 	out, err = cmd.CombinedOutput()
 	require.NoError(t, err, "git push failed: %s", string(out))
+}
+
+// createPrivateRepo creates a private Gitea repo (requires auth for all operations).
+func (g *giteaFixture) createPrivateRepo(t *testing.T, name string) string {
+	t.Helper()
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"name":           name,
+		"auto_init":      true,
+		"default_branch": "main",
+		"private":        true,
+	})
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
+		g.httpURL+"/api/v1/user/repos", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "token "+g.adminToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	return fmt.Sprintf("http://%s:%s@localhost:%s/%s/%s.git",
+		g.adminUser, g.adminPass, giteaHostPort, g.adminUser, name)
 }
 
 func (g *giteaFixture) lfsClient(t *testing.T, repoName string) *lfs.Client {

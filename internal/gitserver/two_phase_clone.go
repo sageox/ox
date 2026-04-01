@@ -87,7 +87,11 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 		sparsePaths = []string{".sageox/"}
 	}
 
-	// ensure .sageox/ is always in the sparse set
+	// ensure .sageox/ is always in the sparse set.
+	// MUST be appended (not prepended) because ComputeSparseSet returns
+	// patterns like ["/*", "!/*/", ...] where !/*/  excludes all root dirs.
+	// In --no-cone mode (gitignore semantics), later patterns override earlier
+	// ones, so .sageox/ must come AFTER !/*/ to re-include it.
 	hasSageox := false
 	for _, p := range sparsePaths {
 		if p == ".sageox/" || p == ".sageox" {
@@ -96,7 +100,7 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 		}
 	}
 	if !hasSageox {
-		sparsePaths = append([]string{".sageox/"}, sparsePaths...)
+		sparsePaths = append(sparsePaths, ".sageox/")
 	}
 
 	args := append([]string{"sparse-checkout", "set", "--no-cone"}, sparsePaths...)
