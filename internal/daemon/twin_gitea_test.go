@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,35 +27,27 @@ import (
 )
 
 // Digital twin: a disposable Gitea container that emulates the real git+LFS
-// remote. One container is shared across all slow tests via TestMain (started
-// once, torn down when the binary exits). Each test creates its own repo for
-// isolation — they share the server, not data.
-var sharedGitea *giteaFixture
+// remote. One container is lazily started on first use and shared across all
+// twin tests. Each test creates its own repo for isolation — they share the
+// server, not data.
+//
+// Lazy init (sync.Once) ensures non-twin slow tests (e.g., whisper) don't pay
+// the container startup cost.
+var (
+	sharedGitea     *giteaFixture
+	giteaOnce       sync.Once
+	giteaInitErr    error
+	giteaCleanupMu  sync.Mutex
+	giteaCleanupReg bool
+)
 
 // giteaHostPort is fixed so ROOT_URL matches the external access URL.
 // Gitea LFS batch responses embed ROOT_URL in action hrefs; a random
 // mapped port would cause LFS uploads to hit the wrong address.
+//
+// WARNING: Parallel test runs on the same machine will fail if this port
+// is already in use. Set OX_SKIP_DOCKER=1 to skip these tests.
 const giteaHostPort = "13719"
-
-func TestMain(m *testing.M) {
-	// skip container setup entirely when Docker is unavailable or disabled
-	if os.Getenv("OX_SKIP_DOCKER") != "" || !dockerAvailable() {
-		os.Exit(m.Run())
-	}
-
-	g, err := createGiteaFixture()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to start Gitea digital twin: %v\n", err)
-		// run tests anyway — they'll skip via getSharedGitea
-		os.Exit(m.Run())
-	}
-	sharedGitea = g
-
-	code := m.Run()
-
-	_ = g.container.Terminate(context.Background())
-	os.Exit(code)
-}
 
 func dockerAvailable() bool {
 	_, err := exec.LookPath("docker")
@@ -70,13 +64,48 @@ func requireDocker(t *testing.T) {
 	}
 }
 
-// getSharedGitea returns the Gitea digital twin, skipping the test if unavailable.
+// getSharedGitea returns the Gitea digital twin, starting it on first call.
+// Skips the test if Docker is unavailable or container startup fails.
 func getSharedGitea(t *testing.T) *giteaFixture {
 	t.Helper()
 	requireDocker(t)
+
+	giteaOnce.Do(func() {
+		// fast-fail if port is already in use
+		ln, err := net.Listen("tcp", "127.0.0.1:"+giteaHostPort)
+		if err != nil {
+			giteaInitErr = fmt.Errorf("port %s already in use (parallel test run?): %w", giteaHostPort, err)
+			return
+		}
+		ln.Close()
+
+		g, err := createGiteaFixture()
+		if err != nil {
+			giteaInitErr = fmt.Errorf("start Gitea digital twin: %w", err)
+			return
+		}
+		sharedGitea = g
+	})
+
+	if giteaInitErr != nil {
+		t.Skipf("Gitea digital twin not available: %v", giteaInitErr)
+	}
 	if sharedGitea == nil {
 		t.Skip("Gitea digital twin not available")
 	}
+
+	// register cleanup exactly once
+	giteaCleanupMu.Lock()
+	if !giteaCleanupReg {
+		giteaCleanupReg = true
+		t.Cleanup(func() {
+			if sharedGitea != nil {
+				_ = sharedGitea.container.Terminate(context.Background())
+			}
+		})
+	}
+	giteaCleanupMu.Unlock()
+
 	return sharedGitea
 }
 
