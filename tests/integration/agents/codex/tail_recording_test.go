@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/testguard"
 	"github.com/sageox/ox/tests/integration/agents/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -189,9 +190,8 @@ func TestCodexTailRecording_E2E(t *testing.T) {
 func runOxPrimeForCodex(t *testing.T, env *common.TestEnvironment) string {
 	t.Helper()
 
-	cmd := exec.Command(env.OxBinaryPath, "agent", "prime", "--agent", "codex")
-	cmd.Dir = env.ProjectDir
-	cmd.Env = env.EnvVars
+	cmd := testguard.OxCmd(t, env.OxBinaryPath, env.ProjectDir, env.EnvVars,
+		"agent", "prime", "--agent", "codex")
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -304,17 +304,12 @@ func runCodexExec(ctx context.Context, t *testing.T, env *common.TestEnvironment
 func stopSession(t *testing.T, env *common.TestEnvironment, agentID string) {
 	t.Helper()
 
-	cmd := exec.Command(env.OxBinaryPath, "agent", agentID, "session", "stop")
-	cmd.Dir = env.ProjectDir
-	cmd.Env = env.EnvVars
+	cmd := testguard.OxCmd(t, env.OxBinaryPath, env.ProjectDir, env.EnvVars,
+		"agent", agentID, "session", "stop")
 
 	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Logf("session stop output: %s", string(output))
-		t.Logf("session stop error (may be ok): %v", err)
-	} else {
-		t.Log("session stop completed successfully")
-	}
+	require.NoError(t, err, "session stop failed: %s", string(output))
+	t.Log("session stop completed successfully")
 }
 
 // findCodexSessionFile locates the most recent Codex session file matching
