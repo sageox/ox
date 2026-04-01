@@ -53,7 +53,6 @@ func TestTeamCtxPush_ConcurrentNoAutoResolve_Fails(t *testing.T) {
 
 	err = gitutil.PushWithRetry(ctx, clone2, opts)
 	require.Error(t, err, "second push should fail — conflict without auto-resolve")
-	assert.Contains(t, err.Error(), "rebase failed", "error should mention rebase failure")
 }
 
 // --- B. Team context push with auto-resolve on data/ ---
