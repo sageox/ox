@@ -28,16 +28,20 @@ func checkAgentWorkerBinary() checkResult {
 	// unconfigured and nothing usable auto-detected
 	if resolved == "none" {
 		// check if anything is installed but not authenticated
-		for _, agent := range []string{"claude", "codex"} {
+		for _, agent := range []string{"claude", "codex", "gemini"} {
 			u := agentwork.CheckAgentUsability(agent)
 			if u.Installed && !u.Authenticated {
+				hint := fmt.Sprintf("Run '%s login' to enable automatic session finalization", agent)
+				if agent == "gemini" {
+					hint = "Set GEMINI_API_KEY or GOOGLE_API_KEY to enable automatic session finalization"
+				}
 				return WarningCheck("agent worker binary",
 					fmt.Sprintf("%s installed but not authenticated", agent),
-					fmt.Sprintf("Run '%s login' to enable automatic session finalization", agent))
+					hint)
 			}
 		}
 		return InfoCheck("agent worker binary", "no agent CLI found",
-			"Install claude or codex to enable automatic session finalization")
+			"Install claude, codex, or gemini to enable automatic session finalization")
 	}
 
 	// verify usability of the resolved agent

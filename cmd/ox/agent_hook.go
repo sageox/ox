@@ -125,14 +125,32 @@ func runAgentHook(args []string) error {
 	return dispatchPhase(ctx)
 }
 
+// localEventPhases supplements agentx registry with phase mappings for agents
+// not yet defined in agentx (pending module release).
+var localEventPhases = map[string]map[agentx.HookEvent]agentx.Phase{
+	"gemini": {
+		"SessionStart": agentx.PhaseStart,
+		"BeforeAgent":  agentx.PhasePrompt,
+		"AfterTool":    agentx.PhaseAfterTool,
+		"SessionEnd":   agentx.PhaseEnd,
+	},
+}
+
 // resolvePhase maps an agent's native event name to a canonical lifecycle phase.
-// Uses agentx registry to discover event mappings from each agent's definition.
+// Uses agentx registry to discover event mappings from each agent's definition,
+// with local fallbacks for agents not yet in agentx.
 // Returns empty string for unknown events.
 func resolvePhase(agentType, eventName string) string {
 	eventPhases := agentx.BuildEventPhaseMap()
 
 	agentMap, ok := eventPhases[agentType]
 	if !ok {
+		// check local fallback mappings
+		if localMap, ok := localEventPhases[agentType]; ok {
+			if phase, ok := localMap[agentx.HookEvent(eventName)]; ok {
+				return string(phase)
+			}
+		}
 		// unknown agent type — try all maps as fallback
 		for _, m := range eventPhases {
 			if phase, ok := m[agentx.HookEvent(eventName)]; ok {
@@ -183,15 +201,20 @@ func dispatchPhase(ctx *HookContext) error {
 	}
 }
 
-// emitStartupBanner writes a systemMessage JSON line to stdout for Claude Code
-// to display as a visible banner at session start. Other agents skip this
-// since they don't understand the systemMessage protocol.
+// emitStartupBanner writes a systemMessage JSON line to stdout for agents
+// that support the systemMessage protocol (Claude Code, Gemini CLI).
 func emitStartupBanner(ctx *HookContext) {
-	if ctx.AgentType != "claude-code" {
+	switch ctx.AgentType {
+	case "claude-code", "gemini":
+		// these agents inject hook stdout into model context
+	default:
 		return
 	}
 	recording := config.ResolveSessionRecording(ctx.ProjectRoot)
 	canonicalType := agentx.ResolveAgentENV(ctx.AgentType)
+	if canonicalType == agentx.AgentTypeUnknown {
+		canonicalType = agentx.AgentType(ctx.AgentType)
+	}
 	name := agentDisplayName(canonicalType)
 	msg := fmt.Sprintf("%s is being enhanced by team context from SageOx.", name)
 	if recording.IsAuto() {

@@ -49,7 +49,7 @@ func TestGetAgent_CaseInsensitive(t *testing.T) {
 func TestAgentRegistry_AllRegistered(t *testing.T) {
 	t.Parallel()
 
-	expectedNames := []string{"Claude", "OpenCode", "Gemini", "Codex", "CodePuppy"}
+	expectedNames := []string{"Claude", "OpenCode", "Gemini", "Codex", "CodePuppy", "Amp"}
 	assert.Len(t, AgentRegistry, len(expectedNames))
 
 	for _, name := range expectedNames {

@@ -27,6 +27,9 @@ const (
 
 	// OxPrimeCommandGemini is the command for Gemini CLI hooks.
 	OxPrimeCommandGemini = "if command -v ox >/dev/null 2>&1; then AGENT_ENV=gemini ox agent prime 2>&1 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi"
+
+	// OxPrimeCommandAmp is the command for Amp CLI hooks.
+	OxPrimeCommandAmp = "if command -v ox >/dev/null 2>&1; then AGENT_ENV=amp ox agent prime 2>&1 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi"
 )
 
 // OxHookCommand templates for lifecycle hook installation.
@@ -39,4 +42,8 @@ const (
 	// OxHookCommandCodexTemplate is the template for Codex CLI lifecycle hooks.
 	// The %s placeholder is replaced with the native event name (e.g., SessionStart).
 	OxHookCommandCodexTemplate = "if command -v ox >/dev/null 2>&1; then AGENT_ENV=codex ox agent hook %s 2>&1 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi"
+
+	// OxHookCommandGeminiTemplate is the template for Gemini CLI lifecycle hooks.
+	// The %s placeholder is replaced with the native event name (e.g., SessionStart, BeforeAgent).
+	OxHookCommandGeminiTemplate = "if command -v ox >/dev/null 2>&1; then AGENT_ENV=gemini ox agent hook %s 2>&1 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi"
 )

@@ -166,9 +166,17 @@ func userContextFilePath(agentType agentx.AgentType, contextFile string) (string
 }
 
 // agentDisplayName returns a human-friendly name for an agent type.
+// localDisplayNames supplements agentx registry for agents not yet in agentx.
+var localDisplayNames = map[agentx.AgentType]string{
+	"gemini": "Gemini CLI",
+}
+
 func agentDisplayName(agentType agentx.AgentType) string {
 	if agent, ok := agentx.DefaultRegistry.Get(agentType); ok {
 		return agent.Name()
+	}
+	if name, ok := localDisplayNames[agentType]; ok {
+		return name
 	}
 	return string(agentType)
 }

@@ -25,6 +25,8 @@ func CheckAgentUsability(agent string) AgentUsability {
 		return checkClaudeUsability()
 	case "codex":
 		return checkCodexUsability()
+	case "gemini":
+		return checkGeminiUsability()
 	default:
 		return AgentUsability{}
 	}
@@ -114,5 +116,25 @@ func checkCodexUsability() AgentUsability {
 	}
 
 	result.AuthDetail = "not logged in"
+	return result
+}
+
+// checkGeminiUsability checks if gemini CLI is installed and has valid auth.
+// Checks: GEMINI_API_KEY or GOOGLE_API_KEY env var, then CLI in PATH.
+func checkGeminiUsability() AgentUsability {
+	result := AgentUsability{}
+
+	if _, err := exec.LookPath("gemini"); err != nil {
+		return result
+	}
+	result.Installed = true
+
+	if os.Getenv("GEMINI_API_KEY") != "" || os.Getenv("GOOGLE_API_KEY") != "" {
+		result.Authenticated = true
+		result.AuthDetail = "API key"
+		return result
+	}
+
+	result.AuthDetail = "no API key"
 	return result
 }

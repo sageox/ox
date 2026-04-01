@@ -141,6 +141,9 @@ var adapterAliases = map[string]string{
 	// deep adapter display names
 	"claude code": "claude-code",
 	"claude":      "claude-code",
+	"gemini":      "gemini",
+	"gemini-cli":  "gemini",
+	"gemini cli":  "gemini",
 
 	// generic adapter fallbacks (remove alias when deep adapter is added)
 	"codex":    "codex",

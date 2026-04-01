@@ -589,6 +589,9 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 	if detectCodePuppy() {
 		integrationChecks = append(integrationChecks, checkCodePuppyHooks(opts.shouldFix(CheckSlugCodePuppyHooks)))
 	}
+	if detectAmp() {
+		integrationChecks = append(integrationChecks, checkAmpHooks(opts.shouldFix(CheckSlugAmpHooks)))
+	}
 	// git commit hooks (prepare-commit-msg for trailers)
 	integrationChecks = append(integrationChecks, checkGitCommitHooks(opts.shouldFix(CheckSlugGitCommitHooks)))
 	categories = append(categories, checkCategory{
