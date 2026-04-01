@@ -16,6 +16,7 @@ func TestLedgerFileConstants(t *testing.T) {
 		{"LedgerFileSummaryMD", LedgerFileSummaryMD, "summary.md"},
 		{"LedgerFileSessionMD", LedgerFileSessionMD, "session.md"},
 		{"LedgerFilePlan", LedgerFilePlan, "plan.md"},
+		{"LedgerFileContextTrace", LedgerFileContextTrace, "context-trace.jsonl"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -28,9 +29,10 @@ func TestLedgerFileConstants(t *testing.T) {
 
 func TestResultSecondaryArtifacts(t *testing.T) {
 	r := &Result{
-		SummaryMDPath: "/tmp/summary.md",
-		SessionMDPath: "/tmp/session.md",
-		PlanPath:      "/tmp/plan.md",
+		SummaryMDPath:    "/tmp/summary.md",
+		SessionMDPath:    "/tmp/session.md",
+		PlanPath:         "/tmp/plan.md",
+		ContextTracePath: "/tmp/context-trace.jsonl",
 	}
 
 	artifacts := r.SecondaryArtifacts()
@@ -43,6 +45,9 @@ func TestResultSecondaryArtifacts(t *testing.T) {
 	}
 	if artifacts[LedgerFilePlan] != "/tmp/plan.md" {
 		t.Errorf("Plan: got %q", artifacts[LedgerFilePlan])
+	}
+	if artifacts[LedgerFileContextTrace] != "/tmp/context-trace.jsonl" {
+		t.Errorf("ContextTrace: got %q", artifacts[LedgerFileContextTrace])
 	}
 }
 
@@ -144,5 +149,49 @@ func TestRemindOutputJSONTags(t *testing.T) {
 
 	if m["message"] != "recording active" {
 		t.Errorf("expected message, got %v", m["message"])
+	}
+}
+
+func TestStopOutputContextTraceJSONTag(t *testing.T) {
+	out := StopOutput{
+		Success:          true,
+		Type:             "session_stop",
+		AgentID:          "agent-ct",
+		Duration:         "3m",
+		ContextTracePath: "/ledger/sessions/s1/context-trace.jsonl",
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+
+	if m["context_trace_path"] != "/ledger/sessions/s1/context-trace.jsonl" {
+		t.Errorf("context_trace_path: got %v", m["context_trace_path"])
+	}
+}
+
+func TestStopOutputContextTraceOmitEmpty(t *testing.T) {
+	out := StopOutput{
+		Success: true,
+		Type:    "session_stop",
+		AgentID: "agent-ct",
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok := m["context_trace_path"]; ok {
+		t.Error("context_trace_path should be omitted when empty")
 	}
 }

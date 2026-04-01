@@ -16,6 +16,7 @@ var ContentFiles = []string{
 	"summary.md",
 	"session.md",
 	"plan.md",
+	"context-trace.jsonl",
 }
 
 // UploadSessionFiles uploads session content files to LFS and returns

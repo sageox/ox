@@ -15,7 +15,8 @@ const (
 	LedgerFileRaw       = "raw.jsonl"
 	LedgerFileSummaryMD = "summary.md"
 	LedgerFileSessionMD = "session.md"
-	LedgerFilePlan      = "plan.md" // may contain multiple plans as separate Markdown sections
+	LedgerFilePlan         = "plan.md"          // may contain multiple plans as separate Markdown sections
+	LedgerFileContextTrace = "context-trace.jsonl" // context influence trace (what context was provided and what influenced decisions)
 )
 
 // Result contains outcomes from session processing.
@@ -32,6 +33,7 @@ type Result struct {
 	Summary          string   // local summary text
 	SummaryPrompt    string   // prompt for calling agent to generate full summary
 	PlanPath         string   // path to plan.md (empty if no plan captured)
+	ContextTracePath string   // path to context-trace.jsonl (empty if no context trace captured)
 	SessionName      string   // ledger session folder name (e.g. 2026-02-06T14-32-ryan-Ox7f3a)
 	LedgerSessionDir string   // full path to session dir in ledger (empty if upload failed)
 	UploadWarning    string   // non-empty when ledger upload failed (explains recovery)
@@ -67,6 +69,7 @@ type StopOutput struct {
 	SummaryMDPath    string           `json:"summary_md_path,omitempty"`
 	SessionMDPath    string           `json:"session_md_path,omitempty"`
 	PlanPath         string           `json:"plan_path,omitempty"`
+	ContextTracePath string           `json:"context_trace_path,omitempty"`
 	EntryCount       int              `json:"entry_count,omitempty"`
 	SecretsRedacted  int              `json:"secrets_redacted,omitempty"`
 	Summary          string           `json:"summary,omitempty"`
@@ -107,8 +110,9 @@ type SummarizeOutput struct {
 // from a Result. Used by upload and copy logic to iterate over non-critical files.
 func (r *Result) SecondaryArtifacts() map[string]string {
 	return map[string]string{
-		LedgerFileSummaryMD: r.SummaryMDPath,
-		LedgerFileSessionMD: r.SessionMDPath,
-		LedgerFilePlan:      r.PlanPath,
+		LedgerFileSummaryMD:    r.SummaryMDPath,
+		LedgerFileSessionMD:    r.SessionMDPath,
+		LedgerFilePlan:         r.PlanPath,
+		LedgerFileContextTrace: r.ContextTracePath,
 	}
 }

@@ -99,4 +99,5 @@ func rewriteSecondary(fsys FileSystem, result *Result) {
 	rewriteIfExists(&result.SummaryMDPath, LedgerFileSummaryMD)
 	rewriteIfExists(&result.SessionMDPath, LedgerFileSessionMD)
 	rewriteIfExists(&result.PlanPath, LedgerFilePlan)
+	rewriteIfExists(&result.ContextTracePath, LedgerFileContextTrace)
 }

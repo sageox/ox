@@ -218,6 +218,80 @@ func TestRewriteLedgerPaths(t *testing.T) {
 	}
 }
 
+func TestCopySessionToLedgerIncludesContextTrace(t *testing.T) {
+	mfs := newMockFS()
+	mfs.files["/cache/raw.jsonl"] = []byte(`{"test":"data"}`)
+	mfs.files["/cache/context-trace.jsonl"] = []byte(`{"type":"provided","ts":"2026-03-31T10:00:00Z","source":"team-context"}`)
+
+	result := &Result{
+		RawPath:          "/cache/raw.jsonl",
+		ContextTracePath: "/cache/context-trace.jsonl",
+		EntryCount:       5,
+	}
+
+	err := CopySessionToLedger(mfs, result, "/ledger", "session-ct")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// verify context-trace.jsonl copied as secondary artifact
+	ctDst := filepath.Join("/ledger", "sessions", "session-ct", LedgerFileContextTrace)
+	if _, ok := mfs.files[ctDst]; !ok {
+		t.Error("context-trace.jsonl not copied to ledger")
+	}
+}
+
+func TestCopySessionToLedgerContextTraceMissingGraceful(t *testing.T) {
+	mfs := newMockFS()
+	mfs.files["/cache/raw.jsonl"] = []byte(`{"test":"data"}`)
+
+	result := &Result{
+		RawPath:          "/cache/raw.jsonl",
+		ContextTracePath: "/cache/missing-context-trace.jsonl",
+		EntryCount:       3,
+	}
+
+	err := CopySessionToLedger(mfs, result, "/ledger", "session-ct-missing")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// raw should be copied
+	rawDst := filepath.Join("/ledger", "sessions", "session-ct-missing", LedgerFileRaw)
+	if _, ok := mfs.files[rawDst]; !ok {
+		t.Error("raw.jsonl not copied")
+	}
+
+	// context-trace should NOT be there (source didn't exist)
+	ctDst := filepath.Join("/ledger", "sessions", "session-ct-missing", LedgerFileContextTrace)
+	if _, ok := mfs.files[ctDst]; ok {
+		t.Error("missing context-trace should not have been copied")
+	}
+}
+
+func TestRewriteSecondaryPathsIncludesContextTrace(t *testing.T) {
+	mfs := newMockFS()
+	ledgerDir := "/ledger/sessions/session-ct"
+	mfs.files[filepath.Join(ledgerDir, LedgerFileContextTrace)] = []byte("trace")
+
+	result := &Result{
+		RawPath:          "/cache/raw.jsonl",
+		ContextTracePath: "/cache/context-trace.jsonl",
+		LedgerSessionDir: ledgerDir,
+	}
+
+	RewriteSecondaryPaths(mfs, result)
+
+	// RawPath should be unchanged (RewriteSecondaryPaths preserves it)
+	if result.RawPath != "/cache/raw.jsonl" {
+		t.Errorf("RawPath changed: %q", result.RawPath)
+	}
+	// ContextTracePath should be rewritten to ledger
+	if result.ContextTracePath != filepath.Join(ledgerDir, LedgerFileContextTrace) {
+		t.Errorf("ContextTracePath: got %q", result.ContextTracePath)
+	}
+}
+
 func TestRewriteLedgerPathsNoLedgerDir(t *testing.T) {
 	mfs := newMockFS()
 	result := &Result{

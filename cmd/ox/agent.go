@@ -248,7 +248,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		return runAgentDoctor(inst)
 	case "session":
 		if len(subargs) == 0 {
-			return fmt.Errorf("session requires a subcommand\nUsage: ox agent %s session <start|stop|abort|delete|log|remind|summarize|html|record|plan|import|capture-prior|subagent-complete|subagent-list|recover>", inst.AgentID)
+			return fmt.Errorf("session requires a subcommand\nUsage: ox agent %s session <start|stop|abort|delete|log|remind|summarize|record|plan|context-trace|import|capture-prior|subagent-complete|subagent-list|recover>", inst.AgentID)
 		}
 		sessionCmd := subargs[0]
 		sessionArgs := subargs[1:]
@@ -269,6 +269,8 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 			return runAgentSessionLog(inst, sessionArgs)
 		case "plan":
 			return runAgentSessionPlan(inst)
+		case "context-trace":
+			return runAgentSessionContextTrace(inst, sessionArgs)
 		case "import":
 			return runAgentSessionPlanHistory(inst, sessionArgs)
 		case "capture-prior":
@@ -284,7 +286,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		case "delete":
 			return runAgentSessionDelete(inst, cmd, sessionArgs)
 		default:
-			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, delete, log, remind, summarize, html, record, plan, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
+			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, delete, log, remind, summarize, record, plan, context-trace, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
 		}
 	case "query":
 		return runAgentQuery(inst, subargs)

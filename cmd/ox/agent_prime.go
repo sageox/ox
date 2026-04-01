@@ -456,6 +456,13 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// emit provided context-trace events (best-effort, never blocks prime)
+	if sessionStat != nil && sessionStat.Recording {
+		if recordingState, stateErr := session.LoadRecordingStateForAgent(projectRoot, agentID); stateErr == nil && recordingState != nil {
+			emitProvidedContextTrace(recordingState.SessionPath, teamCtx, teamInstructions)
+		}
+	}
+
 	// always-present disambiguation of knowledge sources
 	// quote command names in prose for scannability
 	output.Important = "SageOx has two SEPARATE knowledge sources. " +
