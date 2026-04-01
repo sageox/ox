@@ -6,8 +6,8 @@ import (
 	"sync"
 
 	lipgloss "charm.land/lipgloss/v2"
-	"github.com/charmbracelet/glamour/v2"
-	"github.com/charmbracelet/glamour/v2/ansi"
+	"charm.land/glamour/v2"
+	"charm.land/glamour/v2/ansi"
 
 	"github.com/sageox/ox/internal/theme"
 )
