@@ -58,6 +58,9 @@ type RecordingState struct {
 	StartOffset    int64  `json:"start_offset,omitempty"`    // source file byte offset when recording started (entries before this are pre-session)
 	Origin         string `json:"origin,omitempty"`          // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
 	CacheDir       string `json:"cache_dir,omitempty"`       // cache directory when recording was created (diagnostic breadcrumb)
+
+	WatchMode string     `json:"watch_mode,omitempty"` // how entries are captured: "hook" (CLI-driven) or "tail" (daemon-driven)
+	StoppedAt *time.Time `json:"stopped_at,omitempty"` // set by ox session stop to signal daemon to finalize
 }
 
 // Duration returns how long the recording has been running.
@@ -658,6 +661,7 @@ type StartRecordingOptions struct {
 	ParentPID   int    // parent agent process ID for liveness detection
 	Origin      string // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
 	StartOffset int64  // byte offset of SessionFile at recording start; entries before this are pre-session
+	WatchMode   string // "hook" or "tail" — how entries are captured
 }
 
 // StartRecording begins a new recording session.
@@ -785,6 +789,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		Origin:            origin,
 		CacheDir:          paths.CacheDir(),
 		StartOffset:       opts.StartOffset,
+		WatchMode:         opts.WatchMode,
 	}
 
 	// always capture parent PID for liveness detection and ghost cleanup

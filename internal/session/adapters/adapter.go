@@ -48,6 +48,9 @@ type RawEntry struct {
 	// IsError indicates the tool call failed (only for role="tool")
 	IsError bool
 
+	// CallID correlates function_call with function_call_output (adapter-specific)
+	CallID string
+
 	// Raw contains the original data for debugging and auditing
 	Raw json.RawMessage
 }

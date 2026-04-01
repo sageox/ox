@@ -11,8 +11,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/fsnotify/fsnotify"
 )
 
 // userContentClass indicates how a user message should be classified.
@@ -318,134 +316,19 @@ func (a *ClaudeCodeAdapter) Read(sessionPath string) ([]RawEntry, error) {
 // It uses debouncing to avoid reading partial writes when multiple
 // file system events fire rapidly during a single write operation.
 func (a *ClaudeCodeAdapter) Watch(ctx context.Context, sessionPath string) (<-chan RawEntry, error) {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create file watcher: %w", err)
+	var offset int64
+	if info, err := os.Stat(sessionPath); err == nil {
+		offset = info.Size()
 	}
-
-	if err := watcher.Add(sessionPath); err != nil {
-		watcher.Close()
-		return nil, fmt.Errorf("failed to watch session file: %w", err)
-	}
-
-	ch := make(chan RawEntry, 100)
-
-	go func() {
-		defer close(ch)
-		defer watcher.Close()
-
-		// track file position
-		var offset int64 = 0
-
-		// get initial file size
-		info, err := os.Stat(sessionPath)
-		if err == nil {
-			offset = info.Size()
-		}
-
-		// debounce timer to coalesce rapid write events
-		debounceTimer := time.NewTimer(0)
-		if !debounceTimer.Stop() {
-			<-debounceTimer.C
-		}
-		pendingRead := false
-
-		for {
-			select {
-			case <-ctx.Done():
-				debounceTimer.Stop()
-				return
-
-			case <-debounceTimer.C:
-				// debounce period elapsed, perform the read
-				if pendingRead {
-					entries, newOffset, err := a.readFromOffset(sessionPath, offset)
-					if err == nil {
-						offset = newOffset
-						for _, entry := range entries {
-							select {
-							case ch <- entry:
-							case <-ctx.Done():
-								return
-							}
-						}
-					}
-					pendingRead = false
-				}
-
-			case event, ok := <-watcher.Events:
-				if !ok {
-					debounceTimer.Stop()
-					return
-				}
-				if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
-					// reset timer on each event, only fire after debounce period
-					pendingRead = true
-					if !debounceTimer.Stop() {
-						// drain timer channel if it already fired
-						select {
-						case <-debounceTimer.C:
-						default:
-						}
-					}
-					debounceTimer.Reset(debounceDelay)
-				}
-
-			case _, ok := <-watcher.Errors:
-				if !ok {
-					debounceTimer.Stop()
-					return
-				}
-			}
-		}
-	}()
-
-	return ch, nil
+	tw := NewTailWatcher(sessionPath, offset, a.parseLine)
+	return tw.Watch(ctx)
 }
 
 // ReadFromOffset reads new entries starting at the given byte offset.
 // Returns the entries and the new offset position.
 func (a *ClaudeCodeAdapter) ReadFromOffset(path string, offset int64) ([]RawEntry, int64, error) {
-	return a.readFromOffset(path, offset)
-}
-
-// readFromOffset reads new entries from a file starting at the given byte offset
-func (a *ClaudeCodeAdapter) readFromOffset(path string, offset int64) ([]RawEntry, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, offset, err
-	}
-	defer f.Close()
-
-	if _, err := f.Seek(offset, 0); err != nil {
-		return nil, offset, err
-	}
-
-	var entries []RawEntry
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-
-		parsed, err := a.parseLine(line)
-		if err != nil {
-			continue
-		}
-		entries = append(entries, parsed...)
-	}
-
-	// get new offset
-	newOffset, err := f.Seek(0, 1) // current position
-	if err != nil {
-		newOffset = offset
-	}
-
-	return entries, newOffset, nil
+	tw := NewTailWatcher(path, offset, a.parseLine)
+	return tw.ReadFromOffset(offset)
 }
 
 // parseLine converts a JSONL line into one or more RawEntries.

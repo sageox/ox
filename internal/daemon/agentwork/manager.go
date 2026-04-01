@@ -103,6 +103,9 @@ type Manager struct {
 	// ledger path for handler detection
 	ledgerPath string
 
+	// optional session watcher for tail-mode recordings (hookless agents)
+	sessionWatcher *SessionWatcherManager
+
 	// signals
 	syncSignal    <-chan struct{}
 	processSignal chan struct{}
@@ -301,19 +304,36 @@ func (m *Manager) detectAndEnqueue() {
 	}
 }
 
+// SetSessionWatcher sets an optional SessionWatcherManager for periodic detection
+// and cleanup of tail-mode session watchers. Called during daemon startup.
+func (m *Manager) SetSessionWatcher(sw *SessionWatcherManager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sessionWatcher = sw
+}
+
 // runSessionCleanup runs lightweight filesystem cleanup for the session-finalize
 // handler regardless of agent_worker.enabled. Only removes ghost sessions (dead PID
 // + no data). Does NOT clear .recording.json markers on sessions with recoverable
 // data — those markers are preserved until full Detect() + LLM processing can run.
+//
+// Also runs session watcher detect/cleanup for tail-mode recordings.
 func (m *Manager) runSessionCleanup() {
 	m.mu.Lock()
 	h, ok := m.handlers[sessionFinalizeType]
+	sw := m.sessionWatcher
 	m.mu.Unlock()
-	if !ok {
-		return
+
+	if ok {
+		if sfh, ok := h.(*SessionFinalizeHandler); ok {
+			sfh.Cleanup(m.ledgerPath)
+		}
 	}
-	if sfh, ok := h.(*SessionFinalizeHandler); ok {
-		sfh.Cleanup(m.ledgerPath)
+
+	// tail-mode watcher anti-entropy: restart orphaned watchers, stop finished ones
+	if sw != nil {
+		sw.DetectAndRestart(m.ledgerPath)
+		sw.Cleanup()
 	}
 }
 

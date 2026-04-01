@@ -423,6 +423,20 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		return nil
 	}
 
+	// for tail-mode sessions: tell the daemon to stop tailing before we process
+	if state.WatchMode == "tail" {
+		if client := daemon.TryConnect(); client != nil {
+			ledgerPath := ""
+			if state.SessionPath != "" {
+				ledgerPath = filepath.Dir(filepath.Dir(state.SessionPath))
+			}
+			_ = client.SessionWatchStop(daemon.SessionWatchStopPayload{
+				SessionName: filepath.Base(state.SessionPath),
+				LedgerPath:  ledgerPath,
+			})
+		}
+	}
+
 	// mark explicit stop so /clear hook doesn't silently auto-restart the session
 	_ = session.MarkExplicitStop(projectRoot, inst.AgentID)
 

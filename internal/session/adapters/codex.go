@@ -10,8 +10,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/fsnotify/fsnotify"
 )
 
 // CodexAdapter reads OpenAI Codex CLI session files stored as JSONL
@@ -27,8 +25,8 @@ import (
 //   - type=message, role=user: user prompt (content[].input_text.text)
 //   - type=message, role=assistant: AI response (content[].output_text.text)
 //   - type=message, role=developer: system instructions — skipped
-//   - type=function_call: tool invocation (name, arguments)
-//   - type=function_call_output: tool result — skipped (captured via function_call)
+//   - type=function_call: tool invocation (name, arguments, call_id)
+//   - type=function_call_output: tool result (errors only — success output skipped for lean recordings)
 //   - type=reasoning: encrypted model reasoning — skipped
 //
 // Plans are embedded in the session as assistant messages, not separate files.
@@ -280,122 +278,23 @@ func (a *CodexAdapter) Read(sessionPath string) ([]RawEntry, error) {
 		return nil, fmt.Errorf("error reading session file: %w", err)
 	}
 
-	return entries, nil
+	return mergeToolEntries(entries), nil
 }
 
 // Watch monitors a Codex session file for new entries using fsnotify with debouncing.
 func (a *CodexAdapter) Watch(ctx context.Context, sessionPath string) (<-chan RawEntry, error) {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create file watcher: %w", err)
+	var offset int64
+	if info, err := os.Stat(sessionPath); err == nil {
+		offset = info.Size()
 	}
-
-	if err := watcher.Add(sessionPath); err != nil {
-		watcher.Close()
-		return nil, fmt.Errorf("failed to watch session file: %w", err)
-	}
-
-	ch := make(chan RawEntry, 100)
-
-	go func() {
-		defer close(ch)
-		defer watcher.Close()
-
-		var offset int64
-		if info, err := os.Stat(sessionPath); err == nil {
-			offset = info.Size()
-		}
-
-		debounceTimer := time.NewTimer(0)
-		if !debounceTimer.Stop() {
-			<-debounceTimer.C
-		}
-		pendingRead := false
-
-		for {
-			select {
-			case <-ctx.Done():
-				debounceTimer.Stop()
-				return
-
-			case <-debounceTimer.C:
-				if pendingRead {
-					entries, newOffset, err := a.readFromOffset(sessionPath, offset)
-					if err == nil {
-						offset = newOffset
-						for _, entry := range entries {
-							select {
-							case ch <- entry:
-							case <-ctx.Done():
-								return
-							}
-						}
-					}
-					pendingRead = false
-				}
-
-			case event, ok := <-watcher.Events:
-				if !ok {
-					debounceTimer.Stop()
-					return
-				}
-				if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
-					pendingRead = true
-					if !debounceTimer.Stop() {
-						select {
-						case <-debounceTimer.C:
-						default:
-						}
-					}
-					debounceTimer.Reset(debounceDelay)
-				}
-
-			case _, ok := <-watcher.Errors:
-				if !ok {
-					debounceTimer.Stop()
-					return
-				}
-			}
-		}
-	}()
-
-	return ch, nil
+	tw := NewTailWatcher(sessionPath, offset, a.parseLine).WithBatchTransform(mergeToolEntries)
+	return tw.Watch(ctx)
 }
 
-// readFromOffset reads new entries from a session file starting at the given byte offset.
-func (a *CodexAdapter) readFromOffset(path string, offset int64) ([]RawEntry, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, offset, err
-	}
-	defer f.Close()
-
-	if _, err := f.Seek(offset, 0); err != nil {
-		return nil, offset, err
-	}
-
-	var entries []RawEntry
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		parsed, err := a.parseLine(line)
-		if err != nil {
-			continue
-		}
-		entries = append(entries, parsed...)
-	}
-
-	newOffset, err := f.Seek(0, 1)
-	if err != nil {
-		newOffset = offset
-	}
-	return entries, newOffset, nil
+// ReadFromOffset reads new entries starting at the given byte offset.
+func (a *CodexAdapter) ReadFromOffset(path string, offset int64) ([]RawEntry, int64, error) {
+	tw := NewTailWatcher(path, offset, a.parseLine).WithBatchTransform(mergeToolEntries)
+	return tw.ReadFromOffset(offset)
 }
 
 // parseLine converts a Codex JSONL line into zero or more RawEntries.
@@ -425,10 +324,23 @@ func (a *CodexAdapter) parseLine(line []byte) ([]RawEntry, error) {
 			Role:      "tool",
 			ToolName:  p.Name,
 			ToolInput: p.Arguments,
+			CallID:    p.CallID,
 			Raw:       json.RawMessage(line),
 		}}, nil
+	case "function_call_output":
+		if !isCodexToolError(p.Output) {
+			return nil, nil
+		}
+		return []RawEntry{{
+			Timestamp:  ts,
+			Role:       "tool",
+			ToolOutput: p.Output,
+			IsError:    true,
+			CallID:     p.CallID,
+			Raw:        json.RawMessage(line),
+		}}, nil
 	default:
-		// function_call_output, reasoning, web_search_call, etc. — skip
+		// reasoning, web_search_call, etc. — skip
 		return nil, nil
 	}
 }
@@ -501,6 +413,53 @@ func classifyCodexUserContent(blocks []codexContentBlock) (string, bool) {
 	return text, false
 }
 
+// isCodexToolError checks if a function_call_output indicates an error.
+// Codex reports non-zero exit codes as "Process exited with code N" in the output.
+// isCodexToolError returns true only for known error patterns.
+// Unknown patterns default to non-error (conservative: keeps recordings lean).
+func isCodexToolError(output string) bool {
+	if output == "" {
+		return false
+	}
+	if strings.HasPrefix(output, "Process exited with code ") {
+		return output != "Process exited with code 0"
+	}
+	return false
+}
+
+// mergeToolEntries merges consecutive function_call and function_call_output entries
+// that share the same CallID. The first entry carries ToolName+ToolInput, the second
+// carries ToolOutput+IsError. After merging, the output entry is removed.
+//
+// NOTE: Only works for batch reads (Read, ReadFromOffset) where entries are in a slice.
+// In the Watch/tail path, entries arrive one-by-one through a channel and are written
+// to raw.jsonl unmerged. This is acceptable: each entry is independently useful,
+// and merge can be applied at read-time during finalization.
+func mergeToolEntries(entries []RawEntry) []RawEntry {
+	if len(entries) < 2 {
+		return entries
+	}
+	result := make([]RawEntry, 0, len(entries))
+	i := 0
+	for i < len(entries) {
+		e := entries[i]
+		// look for function_call followed by function_call_output with matching CallID
+		if e.Role == "tool" && e.ToolName != "" && e.CallID != "" && i+1 < len(entries) {
+			next := entries[i+1]
+			if next.Role == "tool" && next.ToolOutput != "" && next.CallID == e.CallID {
+				e.ToolOutput = next.ToolOutput
+				e.IsError = next.IsError
+				result = append(result, e)
+				i += 2
+				continue
+			}
+		}
+		result = append(result, e)
+		i++
+	}
+	return result
+}
+
 // parseCodexTimestamp parses RFC3339/RFC3339Nano timestamps from Codex entries.
 func parseCodexTimestamp(s string) time.Time {
 	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
@@ -535,9 +494,11 @@ type codexPayload struct {
 	Role     string              `json:"role"` // "user", "assistant", "developer"
 	Content  []codexContentBlock `json:"content"`
 
-	// function_call fields
+	// function_call / function_call_output fields
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
+	CallID    string `json:"call_id"`
+	Output    string `json:"output"`
 }
 
 // codexContentBlock represents a single content block within a message.

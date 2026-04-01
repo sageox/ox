@@ -39,7 +39,9 @@ type MockService struct {
 	TriggerGCFunc       func() *daemon.TriggerGCResponse
 	CodeIndexFunc       func(payload daemon.CodeIndexPayload, progress *daemon.ProgressWriter) (*daemon.CodeIndexResult, error)
 	DoctorFunc          func() *daemon.DoctorResponse
-	SessionFinalizeFunc func(payload daemon.SessionFinalizeIPCPayload)
+	SessionFinalizeFunc    func(payload daemon.SessionFinalizeIPCPayload)
+	SessionWatchStartFunc  func(payload daemon.SessionWatchStartPayload)
+	SessionWatchStopFunc   func(payload daemon.SessionWatchStopPayload)
 
 	// fire-and-forget operations
 	ActivityFunc  func()
@@ -180,6 +182,18 @@ func (m *MockService) Doctor() *daemon.DoctorResponse {
 func (m *MockService) SessionFinalize(payload daemon.SessionFinalizeIPCPayload) {
 	if m.SessionFinalizeFunc != nil {
 		m.SessionFinalizeFunc(payload)
+	}
+}
+
+func (m *MockService) SessionWatchStart(payload daemon.SessionWatchStartPayload) {
+	if m.SessionWatchStartFunc != nil {
+		m.SessionWatchStartFunc(payload)
+	}
+}
+
+func (m *MockService) SessionWatchStop(payload daemon.SessionWatchStopPayload) {
+	if m.SessionWatchStopFunc != nil {
+		m.SessionWatchStopFunc(payload)
 	}
 }
 

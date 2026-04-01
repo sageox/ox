@@ -99,14 +99,26 @@ func TestConvertRawEntries(t *testing.T) {
 		result := ConvertRawEntries(rawEntries)
 		require.Len(t, result, 2)
 
-		// error tool entry preserves output and error flag
 		assert.Equal(t, "Bash", result[0].ToolName)
 		assert.Equal(t, "exit code 1: compilation failed", result[0].ToolOutput)
 		assert.True(t, result[0].IsError)
 
-		// non-error tool entry has no output or error
 		assert.Equal(t, "Read", result[1].ToolName)
 		assert.Empty(t, result[1].ToolOutput)
 		assert.False(t, result[1].IsError)
+	})
+
+	// Failure prevented: successful tool entries accidentally get ToolOutput set.
+	t.Run("empty ToolOutput preserved as empty", func(t *testing.T) {
+		rawEntries := []adapters.RawEntry{
+			{
+				Role:     "tool",
+				ToolName: "Read",
+			},
+		}
+
+		result := ConvertRawEntries(rawEntries)
+		require.Len(t, result, 1)
+		assert.Empty(t, result[0].ToolOutput)
 	})
 }

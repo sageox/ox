@@ -161,6 +161,7 @@ type Daemon struct {
 	issues            *IssueTracker
 	codedb            *CodeDBManager
 	agentWorker       *agentwork.Manager
+	sessionWatcher    *agentwork.SessionWatcherManager
 	whisperRegistry   *WhisperRegistry
 	murmurNudgeSource *MurmurNudgeSource
 	projectWatcher    *ProjectWatcher
@@ -546,6 +547,11 @@ func (d *Daemon) shutdown() error {
 		}
 	}
 
+	// stop session watchers before canceling context
+	if d.sessionWatcher != nil {
+		d.sessionWatcher.StopAll()
+	}
+
 	// cancel context to stop all goroutines
 	if d.cancel != nil {
 		d.cancel()
@@ -902,6 +908,12 @@ func (d *Daemon) initComponents() time.Duration {
 			}
 		})
 		d.scheduler.SetAgentWorkSignal(agentWorkSignal)
+	}
+
+	// session watcher for tail-mode recordings (hookless agents like Codex)
+	d.sessionWatcher = agentwork.NewSessionWatcherManager(d.logger)
+	if d.agentWorker != nil {
+		d.agentWorker.SetSessionWatcher(d.sessionWatcher)
 	}
 
 	// wire cross-component dependencies
@@ -1262,6 +1274,12 @@ func (s *daemonServiceImpl) Doctor() *DoctorResponse {
 		resp.SessionFinalizeTriggered = true
 		resp.SessionFinalizeQueued = queued
 	}
+	// restart tail-mode watchers for recordings that lost their watcher (daemon restart)
+	// and clean up watchers for sessions that have been stopped or orphaned
+	if s.d.sessionWatcher != nil {
+		s.d.sessionWatcher.DetectAndRestart(s.d.config.LedgerPath)
+		s.d.sessionWatcher.Cleanup()
+	}
 	return resp
 }
 
@@ -1285,6 +1303,28 @@ func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
 			LedgerPath: payload.LedgerPath,
 		},
 	})
+}
+
+func (s *daemonServiceImpl) SessionWatchStart(payload SessionWatchStartPayload) {
+	if s.d.sessionWatcher == nil {
+		s.d.logger.Warn("session_watch_start received but session watcher not initialized")
+		return
+	}
+	if err := s.d.sessionWatcher.StartWatch(
+		payload.SessionName, payload.SessionFile,
+		payload.AdapterName, payload.LedgerPath, payload.CachePath,
+	); err != nil {
+		s.d.logger.Error("failed to start session watcher",
+			"session", payload.SessionName, "error", err)
+	}
+}
+
+func (s *daemonServiceImpl) SessionWatchStop(payload SessionWatchStopPayload) {
+	if s.d.sessionWatcher == nil {
+		s.d.logger.Warn("session_watch_stop received but session watcher not initialized")
+		return
+	}
+	s.d.sessionWatcher.StopWatch(payload.SessionName)
 }
 
 func (s *daemonServiceImpl) Activity() {

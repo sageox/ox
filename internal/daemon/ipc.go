@@ -51,8 +51,10 @@ const (
 	MsgTypeWhisperHistory  = "whisper_history"  // query all whispers (pending + delivered) without advancing cursor
 	MsgTypeSessionFinalize = "session_finalize" // one-way, trigger async session upload+finalization
 	MsgTypeMurmur          = "murmur"           // one-way, write+commit a murmur file in ledger/team context
-	MsgTypeMurmurPause     = "murmur_pause"     // one-way, pause murmur nudging for an agent
-	MsgTypeMurmurResume    = "murmur_resume"     // one-way, resume murmur nudging for an agent
+	MsgTypeMurmurPause        = "murmur_pause"         // one-way, pause murmur nudging for an agent
+	MsgTypeMurmurResume       = "murmur_resume"        // one-way, resume murmur nudging for an agent
+	MsgTypeSessionWatchStart  = "session_watch_start"  // one-way, start tailing a hookless agent session
+	MsgTypeSessionWatchStop   = "session_watch_stop"   // one-way, stop tailing a session
 )
 
 // Protocol Design Decision: NDJSON (Newline-Delimited JSON)
@@ -321,6 +323,22 @@ type MurmurPayload struct {
 	MurmurJSON []byte `json:"murmur_json"` // serialized ledger.MurmurFile to write at RelPath
 }
 
+// SessionWatchStartPayload carries info for the daemon to start tailing
+// a hookless agent's session file and writing entries to raw.jsonl.
+type SessionWatchStartPayload struct {
+	SessionName string `json:"session_name"` // session folder name (e.g. "2026-03-12T11-09-ryan-OxTndR")
+	SessionFile string `json:"session_file"` // path to agent's native session file (e.g. ~/.codex/sessions/...jsonl)
+	AdapterName string `json:"adapter_name"` // "codex", "claude-code", etc.
+	LedgerPath  string `json:"ledger_path"`  // ledger repo root
+	CachePath   string `json:"cache_path"`   // ledger cache session dir (where raw.jsonl lives)
+}
+
+// SessionWatchStopPayload signals the daemon to stop tailing a session.
+type SessionWatchStopPayload struct {
+	SessionName string `json:"session_name"`
+	LedgerPath  string `json:"ledger_path"`
+}
+
 // MurmurPausePayload carries the agent ID for pause/resume murmur nudging.
 type MurmurPausePayload struct {
 	AgentID string `json:"agent_id"`
@@ -571,6 +589,8 @@ type DaemonService interface {
 	CodeIndex(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)
 	Doctor() *DoctorResponse
 	SessionFinalize(payload SessionFinalizeIPCPayload)
+	SessionWatchStart(payload SessionWatchStartPayload)
+	SessionWatchStop(payload SessionWatchStopPayload)
 
 	// fire-and-forget operations
 	Activity()
@@ -598,8 +618,10 @@ type CallbackService struct {
 	onCheckout         func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error)
 	onTelemetry        func(payload json.RawMessage)
 	onFriction         func(payload FrictionPayload)
-	onSessionFinalize  func(payload SessionFinalizeIPCPayload)
-	onPublishMurmur    func(payload MurmurPayload)
+	onSessionFinalize    func(payload SessionFinalizeIPCPayload)
+	onSessionWatchStart  func(payload SessionWatchStartPayload)
+	onSessionWatchStop   func(payload SessionWatchStopPayload)
+	onPublishMurmur      func(payload MurmurPayload)
 	onPauseMurmuring   func(agentID string)
 	onResumeMurmuring  func(agentID string)
 	onGetErrors        func() []StoredError
@@ -792,6 +814,24 @@ func (c *CallbackService) SessionFinalize(payload SessionFinalizeIPCPayload) {
 	}
 }
 
+func (c *CallbackService) SessionWatchStart(payload SessionWatchStartPayload) {
+	c.mu.Lock()
+	fn := c.onSessionWatchStart
+	c.mu.Unlock()
+	if fn != nil {
+		fn(payload)
+	}
+}
+
+func (c *CallbackService) SessionWatchStop(payload SessionWatchStopPayload) {
+	c.mu.Lock()
+	fn := c.onSessionWatchStop
+	c.mu.Unlock()
+	if fn != nil {
+		fn(payload)
+	}
+}
+
 func (c *CallbackService) Activity() {
 	c.mu.Lock()
 	fn := c.onActivity
@@ -926,6 +966,8 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeMurmur, handleMurmur)
 	router.Register(MsgTypeMurmurPause, handleMurmurPause)
 	router.Register(MsgTypeMurmurResume, handleMurmurResume)
+	router.Register(MsgTypeSessionWatchStart, handleSessionWatchStart)
+	router.Register(MsgTypeSessionWatchStop, handleSessionWatchStop)
 
 	return router
 }
@@ -1009,6 +1051,24 @@ func (s *Server) SetSessionFinalizeHandler(fn func(payload SessionFinalizeIPCPay
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 	svc.onSessionFinalize = fn
+}
+
+// SetSessionWatchStartHandler sets the handler for session watch start messages.
+// Session watch start events are fire-and-forget - no response is sent.
+func (s *Server) SetSessionWatchStartHandler(fn func(payload SessionWatchStartPayload)) {
+	svc := s.mustCallbackService("SetSessionWatchStartHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onSessionWatchStart = fn
+}
+
+// SetSessionWatchStopHandler sets the handler for session watch stop messages.
+// Session watch stop events are fire-and-forget - no response is sent.
+func (s *Server) SetSessionWatchStopHandler(fn func(payload SessionWatchStopPayload)) {
+	svc := s.mustCallbackService("SetSessionWatchStopHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onSessionWatchStop = fn
 }
 
 // SetMurmurHandler sets the handler for murmur write+commit messages.
@@ -1947,6 +2007,31 @@ func (c *Client) SessionFinalize(payload SessionFinalizeIPCPayload) error {
 	// fire-and-forget: ignore response
 	return c.SendOneWay(Message{
 		Type:    MsgTypeSessionFinalize,
+		Payload: payloadBytes,
+	})
+}
+
+// SessionWatchStart sends a fire-and-forget request to start tailing a session file.
+// The daemon begins tailing the agent's native session file and writing to raw.jsonl.
+func (c *Client) SessionWatchStart(payload SessionWatchStartPayload) error {
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal session_watch_start payload: %w", err)
+	}
+	return c.SendOneWay(Message{
+		Type:    MsgTypeSessionWatchStart,
+		Payload: payloadBytes,
+	})
+}
+
+// SessionWatchStop sends a fire-and-forget request to stop tailing a session.
+func (c *Client) SessionWatchStop(payload SessionWatchStopPayload) error {
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal session_watch_stop payload: %w", err)
+	}
+	return c.SendOneWay(Message{
+		Type:    MsgTypeSessionWatchStop,
 		Payload: payloadBytes,
 	})
 }

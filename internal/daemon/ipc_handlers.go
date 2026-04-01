@@ -169,6 +169,35 @@ func handleSessionFinalize(s *Server, msg Message, _ net.Conn) HandlerResult {
 	return HandlerResult{SkipDefault: true}
 }
 
+func handleSessionWatchStart(s *Server, msg Message, _ net.Conn) HandlerResult {
+	var payload SessionWatchStartPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		s.logger.Debug("failed to parse session_watch_start payload", "error", err)
+	} else if payload.SessionName == "" || payload.SessionFile == "" || payload.AdapterName == "" {
+		s.logger.Debug("session_watch_start payload missing required fields",
+			"session_name", payload.SessionName,
+			"session_file", payload.SessionFile,
+			"adapter_name", payload.AdapterName)
+	} else {
+		s.service.SessionWatchStart(payload)
+	}
+	// fire-and-forget: no response
+	return HandlerResult{SkipDefault: true}
+}
+
+func handleSessionWatchStop(s *Server, msg Message, _ net.Conn) HandlerResult {
+	var payload SessionWatchStopPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		s.logger.Debug("failed to parse session_watch_stop payload", "error", err)
+	} else if payload.SessionName == "" {
+		s.logger.Debug("session_watch_stop payload missing required fields", "session_name", payload.SessionName)
+	} else {
+		s.service.SessionWatchStop(payload)
+	}
+	// fire-and-forget: no response
+	return HandlerResult{SkipDefault: true}
+}
+
 func handleGetErrors(s *Server, _ Message, _ net.Conn) HandlerResult {
 	errs := s.service.GetErrors()
 	if errs != nil {

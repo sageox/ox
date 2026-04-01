@@ -24,7 +24,7 @@ func TestCodexAdapter_ReadFromOffset(t *testing.T) {
 			codexAssistantMsg("hi there"),
 		})
 
-		entries, newOffset, err := adapter.readFromOffset(path, 0)
+		entries, newOffset, err := adapter.ReadFromOffset(path, 0)
 		require.NoError(t, err)
 		assert.Greater(t, newOffset, int64(0))
 		// session_meta is skipped, user + assistant
@@ -39,7 +39,7 @@ func TestCodexAdapter_ReadFromOffset(t *testing.T) {
 			codexUserMsg("first"),
 		})
 
-		entries1, offset1, err := adapter.readFromOffset(path, 0)
+		entries1, offset1, err := adapter.ReadFromOffset(path, 0)
 		require.NoError(t, err)
 		require.Len(t, entries1, 1)
 		assert.Equal(t, "first", entries1[0].Content)
@@ -52,7 +52,7 @@ func TestCodexAdapter_ReadFromOffset(t *testing.T) {
 		require.NoError(t, enc.Encode(codexFunctionCall("shell", `{"cmd":"ls"}`)))
 		f.Close()
 
-		entries2, offset2, err := adapter.readFromOffset(path, offset1)
+		entries2, offset2, err := adapter.ReadFromOffset(path, offset1)
 		require.NoError(t, err)
 		assert.Greater(t, offset2, offset1)
 		require.Len(t, entries2, 2)
@@ -66,17 +66,17 @@ func TestCodexAdapter_ReadFromOffset(t *testing.T) {
 			codexUserMsg("only message"),
 		})
 
-		_, offset1, err := adapter.readFromOffset(path, 0)
+		_, offset1, err := adapter.ReadFromOffset(path, 0)
 		require.NoError(t, err)
 
-		entries2, offset2, err := adapter.readFromOffset(path, offset1)
+		entries2, offset2, err := adapter.ReadFromOffset(path, offset1)
 		require.NoError(t, err)
 		assert.Empty(t, entries2)
 		assert.Equal(t, offset1, offset2)
 	})
 
 	t.Run("file not found returns error", func(t *testing.T) {
-		_, _, err := adapter.readFromOffset("/nonexistent/file.jsonl", 0)
+		_, _, err := adapter.ReadFromOffset("/nonexistent/file.jsonl", 0)
 		require.Error(t, err)
 	})
 
@@ -88,7 +88,7 @@ func TestCodexAdapter_ReadFromOffset(t *testing.T) {
 		content += string(line) + "\n"
 		require.NoError(t, os.WriteFile(path, []byte(content), 0644))
 
-		entries, _, err := adapter.readFromOffset(path, 0)
+		entries, _, err := adapter.ReadFromOffset(path, 0)
 		require.NoError(t, err)
 		require.Len(t, entries, 1)
 		assert.Equal(t, "valid", entries[0].Content)
