@@ -163,6 +163,9 @@ func DownloadAndVerifyObject(action *Action, expectedOID string) ([]byte, error)
 // DownloadToFile streams a blob directly to dst, hashing incrementally when
 // verify is true. Avoids buffering the entire object in memory.
 func DownloadToFile(action *Action, dst io.Writer, verify bool, expectedOID string) error {
+	if dst == nil {
+		return fmt.Errorf("invalid destination writer")
+	}
 	if action == nil || action.Href == "" {
 		return fmt.Errorf("no download action provided")
 	}
