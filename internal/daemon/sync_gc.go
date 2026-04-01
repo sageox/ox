@@ -538,26 +538,56 @@ func (s *SyncScheduler) gcPushUnpushedCommits(ctx context.Context, ws WorkspaceS
 	return nil
 }
 
+// maxGCDiffSize is the maximum diff size (50 MB) we'll capture during GC.
+// Diffs larger than this are skipped to prevent OOM from a rogue agent
+// committing and then modifying a huge binary.
+const maxGCDiffSize = 50 * 1024 * 1024
+
 // gcCaptureDiff captures all uncommitted tracked changes (staged + unstaged)
 // as a binary-safe patch file. Returns (hasDiff, error).
-// Uses exec.Command directly (not RunGit) to avoid CombinedOutput mixing
-// stderr into the patch data.
+// Streams diff directly to disk (not into memory) to avoid OOM on large diffs.
+// Diffs exceeding maxGCDiffSize are skipped with a warning.
 func (s *SyncScheduler) gcCaptureDiff(ctx context.Context, repoPath, diffFile string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "diff", "--binary", "HEAD")
-	stdout, err := cmd.Output()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return false, fmt.Errorf("git diff HEAD: %w", err)
+		return false, fmt.Errorf("git diff pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return false, fmt.Errorf("git diff start: %w", err)
 	}
 
-	if len(strings.TrimSpace(string(stdout))) == 0 {
+	outFile, err := os.OpenFile(diffFile, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		_ = cmd.Wait()
+		return false, fmt.Errorf("create diff file: %w", err)
+	}
+
+	written, copyErr := io.Copy(outFile, io.LimitReader(stdout, maxGCDiffSize+1))
+	outFile.Close()
+
+	if waitErr := cmd.Wait(); waitErr != nil {
+		_ = os.Remove(diffFile)
+		return false, fmt.Errorf("git diff HEAD: %w", waitErr)
+	}
+
+	if copyErr != nil {
+		_ = os.Remove(diffFile)
+		return false, fmt.Errorf("write diff file: %w", copyErr)
+	}
+
+	if written == 0 {
+		_ = os.Remove(diffFile)
 		return false, nil
 	}
 
-	if err := os.WriteFile(diffFile, stdout, 0600); err != nil {
-		return false, fmt.Errorf("write diff file: %w", err)
+	if written > maxGCDiffSize {
+		_ = os.Remove(diffFile)
+		s.logger.Warn("gc: diff too large, skipping capture", "path", repoPath, "size", written, "max", maxGCDiffSize)
+		return false, nil
 	}
 
-	s.logger.Info("gc: captured uncommitted changes", "path", repoPath, "diff_size", len(stdout))
+	s.logger.Info("gc: captured uncommitted changes", "path", repoPath, "diff_size", written)
 	return true, nil
 }
 
@@ -584,6 +614,15 @@ func (s *SyncScheduler) gcCaptureUntracked(ctx context.Context, repoPath, destDi
 		relPath = strings.TrimSpace(relPath)
 		if relPath == "" {
 			continue
+		}
+
+		// guard against path traversal (e.g., "../../.ssh/authorized_keys")
+		if strings.Contains(relPath, "..") {
+			absResolved := filepath.Join(repoPath, relPath)
+			if resolved, err := filepath.Abs(absResolved); err != nil || !strings.HasPrefix(resolved, repoPath) {
+				s.logger.Warn("gc: skipping untracked file with path traversal", "path", relPath)
+				continue
+			}
 		}
 
 		srcPath := filepath.Join(repoPath, relPath)
@@ -770,10 +809,27 @@ func (s *SyncScheduler) reopenWhisperStoreAfterGC() {
 }
 
 // copyFile copies src to dst, preserving file mode.
+// Uses Lstat to avoid following symlinks — a symlink is recreated as a symlink,
+// never dereferenced. This prevents a rogue symlink (e.g., pointing to /etc/shadow)
+// from exfiltrating host files into the repo during GC backup.
 func copyFile(src, dst string) error {
-	info, err := os.Stat(src)
+	info, err := os.Lstat(src)
 	if err != nil {
 		return err
+	}
+
+	// recreate symlinks as symlinks, never dereference
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(src)
+		if err != nil {
+			return fmt.Errorf("readlink %s: %w", src, err)
+		}
+		return os.Symlink(target, dst)
+	}
+
+	// skip non-regular files (devices, sockets, etc.)
+	if !info.Mode().IsRegular() {
+		return nil
 	}
 
 	in, err := os.Open(src)

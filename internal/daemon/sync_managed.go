@@ -230,7 +230,16 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 			}
 			logger.Warn("auto-resolve failed, aborting rebase", "repo", repoName, "error", resolveErr)
 			abortCmd := exec.CommandContext(ctx, "git", "-C", path, "rebase", "--abort")
-			_ = abortCmd.Run()
+			if abortErr := abortCmd.Run(); abortErr != nil {
+				logger.Error("rebase abort failed, repo stuck in rebase state", "repo", repoName, "error", abortErr)
+				result.Issue = &DaemonIssue{
+					Type:            IssueTypeRebaseStuck,
+					Severity:        SeverityError,
+					Repo:            repoName,
+					Summary:         fmt.Sprintf("%s is stuck in a broken rebase state. Run 'git -C %s rebase --abort' manually or 'ox doctor --fix' to recover.", repoName, path),
+					RequiresConfirm: true,
+				}
+			}
 		}
 
 		// Check if it's a merge conflict
