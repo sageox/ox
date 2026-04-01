@@ -84,19 +84,26 @@ func hydrateFromLedger(projectRoot, sessionsDir, nameArg string, quiet bool) err
 	}
 
 	sessionPath := filepath.Join(sessionsDir, sessionName)
+	slog.Debug("hydrate: resolved session", "session_dir", sessionPath)
 
 	// read meta.json
 	meta, err := lfs.ReadSessionMeta(sessionPath)
 	if err != nil {
 		return fmt.Errorf("cannot download %q: %w\nEnsure the session exists and has been synced from the ledger", sessionName, err)
 	}
+	slog.Debug("hydrate: read meta.json", "file_count", len(meta.Files))
+	for fn, ref := range meta.Files {
+		slog.Debug("hydrate: manifest entry", "file", fn, "oid", ref.OID[:20]+"…", "size", ref.Size)
+	}
 
 	// cache base: <ledger>/.sageox/cache/sessions/<sessionName>/
 	ledgerRoot := filepath.Dir(sessionsDir)
 	cacheBase := filepath.Join(ledgerRoot, ".sageox", "cache", "sessions", sessionName)
+	slog.Debug("hydrate: cache target", "cache_dir", cacheBase)
 
 	// check if already hydrated (in-place or cached)
 	status := lfs.CheckHydrationStatusWithCache(sessionPath, cacheBase, meta)
+	slog.Info("hydrate: checked status", "session", sessionName, "status", status)
 	if status == lfs.HydrationStatusHydrated {
 		if !quiet {
 			fmt.Printf("Session %s already has local content\n", sessionName)
@@ -118,14 +125,24 @@ func hydrateFromLedger(projectRoot, sessionsDir, nameArg string, quiet bool) err
 
 		// skip if cached (size-based validation, same as ox fetch)
 		if isCacheHit(cachePath, ref.Size) {
+			slog.Debug("hydrate: cache hit", "file", filename, "path", cachePath)
 			continue
 		}
 
 		// skip if present in-place as real content (legacy hydration)
 		inPlacePath := filepath.Join(sessionPath, filename)
 		if _, err := os.Stat(inPlacePath); err == nil && !lfs.IsPointerFile(inPlacePath) {
+			slog.Debug("hydrate: in-place content", "file", filename, "path", inPlacePath)
 			continue
 		}
+
+		// log what's at the in-place path
+		if info, statErr := os.Stat(inPlacePath); statErr == nil {
+			slog.Info("hydrate: pointer stub", "file", filename, "path", inPlacePath, "bytes", info.Size())
+		} else {
+			slog.Info("hydrate: missing", "file", filename, "path", inPlacePath)
+		}
+		slog.Info("hydrate: will download", "file", filename, "dest", cachePath)
 
 		bareOID := ref.BareOID()
 		batchObjects = append(batchObjects, lfs.BatchObject{
@@ -146,6 +163,8 @@ func hydrateFromLedger(projectRoot, sessionsDir, nameArg string, quiet bool) err
 		return nil
 	}
 
+	slog.Info("hydrate: batch request", "objects", len(batchObjects))
+
 	// get LFS client
 	client, err := getLFSClient(projectRoot)
 	if err != nil {
@@ -157,6 +176,7 @@ func hydrateFromLedger(projectRoot, sessionsDir, nameArg string, quiet bool) err
 	if err != nil {
 		return hydrateHint(err)
 	}
+	slog.Info("hydrate: batch response", "objects", len(resp.Objects))
 
 	// stream each object to cache with atomic writes
 	var hydratedCount int
@@ -178,12 +198,16 @@ func hydrateFromLedger(projectRoot, sessionsDir, nameArg string, quiet bool) err
 		}
 
 		for _, pf := range files {
+			slog.Info("hydrate: downloading", "file", pf.filename, "dest", pf.cachePath)
 			if err := downloadToCache(obj.Actions.Download, pf.cachePath, pf.bareOID); err != nil {
+				slog.Error("hydrate: download failed", "file", pf.filename, "error", err)
 				errors = append(errors, fmt.Sprintf("%s: %v", pf.filename, err))
 				continue
 			}
+			if info, statErr := os.Stat(pf.cachePath); statErr == nil {
+				slog.Info("hydrate: downloaded", "file", pf.filename, "bytes", info.Size())
+			}
 			hydratedCount++
-			slog.Debug("downloaded file", "session", sessionName, "file", pf.filename, "cache", pf.cachePath)
 		}
 	}
 

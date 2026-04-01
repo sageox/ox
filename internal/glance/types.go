@@ -2,8 +2,20 @@ package glance
 
 import "time"
 
+// SessionRecord represents a session with its associated file paths.
+// Extracted from raw.jsonl tool calls (Edit/Write/MultiEdit) and/or summary.json.
+type SessionRecord struct {
+	Name      string    `json:"name"`
+	User      string    `json:"user"`
+	Time      time.Time `json:"time"`
+	TimeAgo   string    `json:"time_ago,omitempty"`
+	Title     string    `json:"title"`
+	Summary   string    `json:"summary,omitempty"`
+	Files     []string  `json:"files,omitempty"`
+	Recording bool      `json:"recording,omitempty"`
+}
+
 // MurmurRecord represents a single murmur with its associated file paths.
-// Replaces SessionRecord as the unit of work for pre-crime detection.
 // Two flavors exist:
 //   - topic="wip": AI coworker intent signal, free-text content, no Files
 //   - topic="file-changes": daemon filesystem observation, structured content, has Files+Branch+Worktree
@@ -20,13 +32,15 @@ type MurmurRecord struct {
 	Importance string    `json:"importance"`
 }
 
-// AuthorSummary groups murmurs by author.
+// AuthorSummary groups murmurs and sessions by author.
 type AuthorSummary struct {
-	Name         string         `json:"name"`
-	MurmurCount  int            `json:"murmur_count"`
-	FilesTouched int            `json:"files_touched"`
-	WIPStatus    string         `json:"wip_status,omitempty"` // latest WIP murmur content
-	Murmurs      []MurmurRecord `json:"murmurs"`
+	Name         string          `json:"name"`
+	MurmurCount  int             `json:"murmur_count"`
+	SessionCount int             `json:"session_count,omitempty"`
+	FilesTouched int             `json:"files_touched"`
+	WIPStatus    string          `json:"wip_status,omitempty"` // latest WIP murmur content
+	Murmurs      []MurmurRecord  `json:"murmurs"`
+	Sessions     []SessionRecord `json:"sessions,omitempty"`
 }
 
 // FileOverlap represents a file touched by multiple authors.
@@ -75,6 +89,7 @@ type ActivityData struct {
 // Stats contains summary statistics.
 type Stats struct {
 	TotalMurmurs    int `json:"total_murmurs"`
+	TotalSessions   int `json:"total_sessions,omitempty"`
 	TotalAuthors    int `json:"total_authors"`
 	TotalConflicts  int `json:"total_conflicts"`
 	WIPCount        int `json:"wip_count"`

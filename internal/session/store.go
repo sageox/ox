@@ -612,9 +612,9 @@ func (s *Store) GetSessionPath(sessionName string) string {
 	return filepath.Join(s.basePath, sessionName)
 }
 
-// resolveContentFile returns the path to a content file, checking the primary
+// ResolveContentFile returns the path to a content file, checking the primary
 // session directory first, then the cache. Cache files are never LFS pointers.
-func (s *Store) resolveContentFile(sessionName, filename string) string {
+func (s *Store) ResolveContentFile(sessionName, filename string) string {
 	primary := filepath.Join(s.basePath, sessionName, filename)
 	if _, err := os.Stat(primary); err == nil && !lfs.IsPointerFile(primary) {
 		return primary
@@ -641,7 +641,7 @@ func (s *Store) IsSessionHydrated(sessionName string) bool {
 	meta, err := lfs.ReadSessionMeta(sessionPath)
 	if err != nil {
 		// no meta.json — check for raw.jsonl as fallback (legacy or pre-LFS sessions)
-		rawPath := s.resolveContentFile(sessionName, rawFilename)
+		rawPath := s.ResolveContentFile(sessionName, rawFilename)
 		_, rawErr := os.Stat(rawPath)
 		return rawErr == nil
 	}
@@ -724,7 +724,7 @@ func (s *Store) ReadSession(name string) (*StoredSession, error) {
 	sessionName := strings.TrimSuffix(name, jsonlExt)
 
 	// find raw.jsonl in session dir or cache
-	rawPath := s.resolveContentFile(sessionName, rawFilename)
+	rawPath := s.ResolveContentFile(sessionName, rawFilename)
 	if _, err := os.Stat(rawPath); err == nil {
 		return s.readSessionFile(rawPath, "raw", sessionName)
 	}
@@ -734,14 +734,14 @@ func (s *Store) ReadSession(name string) (*StoredSession, error) {
 
 // ReadSessionRaw reads the raw session from a session folder.
 func (s *Store) ReadSessionRaw(sessionName string) (*StoredSession, error) {
-	filePath := s.resolveContentFile(sessionName, rawFilename)
+	filePath := s.ResolveContentFile(sessionName, rawFilename)
 	return s.readSessionFile(filePath, "raw", sessionName)
 }
 
 // ReadRawSession reads the raw session file from a session folder.
 func (s *Store) ReadRawSession(filename string) (*StoredSession, error) {
 	sessionName := strings.TrimSuffix(filename, jsonlExt)
-	filePath := s.resolveContentFile(sessionName, rawFilename)
+	filePath := s.ResolveContentFile(sessionName, rawFilename)
 	return s.readSessionFile(filePath, "raw", sessionName)
 }
 

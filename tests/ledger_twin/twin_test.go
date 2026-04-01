@@ -473,6 +473,129 @@ func extractFiles(metadata map[string]string) []string {
 	return files
 }
 
+// ═══════════════════════════════════════════════════════════════
+// Session harvesting tests (glance reads both murmurs AND sessions)
+// ═══════════════════════════════════════════════════════════════
+
+func harvestSessions(t *testing.T, w Window) *glance.HarvestSessionResult {
+	t.Helper()
+	// Widen the window by 24h in each direction to absorb UTC/local timezone
+	// mismatch: session folder timestamps are parsed as UTC in ListSessionsSince
+	// but window boundaries use time.Local.
+	since := w.Since.Add(-24 * time.Hour)
+	until := w.Until.Add(24 * time.Hour)
+	result, err := glance.HarvestSessions(manifest.LedgerPath, since, until)
+	require.NoError(t, err)
+	return result
+}
+
+func TestSessionHarvest_HotZone(t *testing.T) {
+	w := windowByName("hot_zone")
+	result := harvestSessions(t, w)
+
+	assert.GreaterOrEqual(t, len(result.Sessions), 3,
+		"hot zone should have at least 3 sessions (alice, bob, dave)")
+
+	authorSet := make(map[string]bool)
+	for _, s := range result.Sessions {
+		authorSet[s.User] = true
+	}
+	assert.True(t, authorSet["alice"], "alice should have sessions")
+	assert.True(t, authorSet["bob"], "bob should have sessions")
+	assert.True(t, authorSet["dave"], "dave should have sessions")
+}
+
+func TestSessionHarvest_FilesExtracted(t *testing.T) {
+	w := windowByName("hot_zone")
+	result := harvestSessions(t, w)
+
+	var totalFiles int
+	for _, s := range result.Sessions {
+		totalFiles += len(s.Files)
+	}
+	assert.Greater(t, totalFiles, 0, "sessions should have extracted file paths from raw.jsonl")
+}
+
+func TestSessionConflicts_MergedWithMurmurs(t *testing.T) {
+	// Use hot_zone which has sessions touching overlapping files
+	w := windowByName("hot_zone")
+	murmurResult := harvestMurmurs(t, w)
+	sessionResult := harvestSessions(t, w)
+
+	// Conflicts from murmurs only
+	murmurOnlyConflicts := glance.DetectConflicts(murmurResult.Murmurs)
+
+	// Conflicts from murmurs + sessions
+	sessionRecords := glance.SessionFilesToMurmurRecords(sessionResult.Sessions)
+	allRecords := append(murmurResult.Murmurs, sessionRecords...)
+	mergedConflicts := glance.DetectConflicts(allRecords)
+
+	// Merged should find at least as many conflicts as murmurs alone
+	assert.GreaterOrEqual(t, len(mergedConflicts.Overlaps), len(murmurOnlyConflicts.Overlaps),
+		"session data should add or maintain conflicts")
+
+	// Sessions touch root.go, output.go, handler.go — verify these appear in merged conflicts
+	fm := conflictFileMap(mergedConflicts.Overlaps)
+	assert.GreaterOrEqual(t, fm["cmd/ox/root.go"], 2,
+		"root.go should have conflicts from sessions+murmurs")
+}
+
+func TestGroupByAuthor_MergesSessionsAndMurmurs(t *testing.T) {
+	w := windowByName("hot_zone")
+	murmurResult := harvestMurmurs(t, w)
+	sessionResult := harvestSessions(t, w)
+
+	// Group with both sources
+	authors := glance.GroupByAuthor(murmurResult.Murmurs, sessionResult.Sessions)
+
+	var aliceSummary *glance.AuthorSummary
+	for i := range authors {
+		if authors[i].Name == "alice" {
+			aliceSummary = &authors[i]
+			break
+		}
+	}
+	require.NotNil(t, aliceSummary, "alice should appear in authors")
+	assert.Greater(t, aliceSummary.MurmurCount, 0, "alice should have murmurs")
+	assert.Greater(t, aliceSummary.SessionCount, 0, "alice should have sessions")
+	assert.Greater(t, aliceSummary.FilesTouched, 0, "alice should have files from both sources")
+}
+
+func TestSessionHarvest_ParallelStreams(t *testing.T) {
+	w := windowByName("parallel_streams")
+	result := harvestSessions(t, w)
+
+	assert.GreaterOrEqual(t, len(result.Sessions), 3,
+		"parallel streams should have at least 3 sessions")
+
+	// Filter to only sessions whose names match the parallel_streams window IDs (Ox2xxx)
+	var windowSessions []glance.SessionRecord
+	for _, s := range result.Sessions {
+		if strings.Contains(s.Name, "Ox200") {
+			windowSessions = append(windowSessions, s)
+		}
+	}
+	// These specific sessions touch isolated areas — no conflicts
+	sessionRecords := glance.SessionFilesToMurmurRecords(windowSessions)
+	conflicts := glance.DetectConflicts(sessionRecords)
+	assert.Equal(t, 0, len(conflicts.Overlaps),
+		"parallel streams sessions (Ox2xxx) should have zero file conflicts")
+}
+
+func TestSessionHarvest_PairConvergence(t *testing.T) {
+	w := windowByName("pair_convergence")
+	result := harvestSessions(t, w)
+
+	sessionRecords := glance.SessionFilesToMurmurRecords(result.Sessions)
+	conflicts := glance.DetectConflicts(sessionRecords)
+
+	fm := conflictFileMap(conflicts.Overlaps)
+	assert.GreaterOrEqual(t, fm["internal/auth/middleware.go"], 2,
+		"middleware.go should have alice+bob conflict from sessions")
+	assert.GreaterOrEqual(t, fm["cmd/ox/status.go"], 2,
+		"status.go should have carol+dave conflict from sessions")
+}
+
 func TestHotZoneMurmurs(t *testing.T) {
 	murmurs, err := readMurmursInRange(manifest.LedgerPath, ts(20, 10, 0), ts(20, 18, 0))
 	require.NoError(t, err)

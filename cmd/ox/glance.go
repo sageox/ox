@@ -66,13 +66,18 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 	projectRoot, _ := requireProjectRoot()
 	repo := glanceRepoName(projectRoot)
 
-	// Harvest murmurs from ledger
+	// Harvest murmurs and sessions from ledger
 	result, err := glance.HarvestMurmurs(ledgerPath, since, until)
 	if err != nil {
 		return fmt.Errorf("harvesting murmurs: %w", err)
 	}
 
-	if len(result.Murmurs) == 0 {
+	sessResult, err := glance.HarvestSessions(ledgerPath, since, until)
+	if err != nil {
+		return fmt.Errorf("harvesting sessions: %w", err)
+	}
+
+	if len(result.Murmurs) == 0 && len(sessResult.Sessions) == 0 {
 		// Output valid JSON with empty arrays (not null) for stable schema
 		return outputGlanceJSON(glance.ActivityData{
 			Since:     since,
@@ -84,9 +89,13 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 		})
 	}
 
+	// Merge session file touches into conflict detection alongside murmurs
+	sessionRecords := glance.SessionFilesToMurmurRecords(sessResult.Sessions)
+	allRecords := append(result.Murmurs, sessionRecords...)
+
 	// Analyze
-	authors := glance.GroupByAuthor(result.Murmurs)
-	conflicts := glance.DetectConflicts(result.Murmurs)
+	authors := glance.GroupByAuthor(result.Murmurs, sessResult.Sessions)
+	conflicts := glance.DetectConflicts(allRecords)
 
 	var wipCount, fcCount int
 	for _, m := range result.Murmurs {
@@ -105,10 +114,11 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 		Authors:   authors,
 		Conflicts: conflicts.Overlaps,
 		Overlap:   conflicts.OverlapPairs(),
-		Patterns:  glance.DetectPatterns(result.Murmurs),
-		Velocity:  glance.ConflictVelocity(result.Murmurs, since, until, 24*time.Hour, 24*time.Hour),
+		Patterns:  glance.DetectPatterns(allRecords),
+		Velocity:  glance.ConflictVelocity(allRecords, since, until, 24*time.Hour, 24*time.Hour),
 		Stats: glance.Stats{
 			TotalMurmurs:    len(result.Murmurs),
+			TotalSessions:   len(sessResult.Sessions),
 			TotalAuthors:    len(authors),
 			TotalConflicts:  len(conflicts.Overlaps),
 			WIPCount:        wipCount,
