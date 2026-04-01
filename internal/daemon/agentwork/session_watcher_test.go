@@ -432,3 +432,221 @@ func TestSessionWatcherManager_Cleanup_StopsOrphaned(t *testing.T) {
 		return len(mgr.ActiveSessions()) == 0
 	}, 2*time.Second, 10*time.Millisecond, "orphaned watcher should be removed after cleanup")
 }
+
+// TestSessionWatcherManager_Cleanup_SkipsCorruptRecording verifies that Cleanup
+// skips (does not stop) watchers whose .recording.json contains invalid JSON.
+// Failure prevented: corrupt JSON causes Cleanup to crash or stop valid watchers.
+func TestSessionWatcherManager_Cleanup_SkipsCorruptRecording(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: fsnotify watcher test")
+	}
+
+	mgr := newTestWatcherManager()
+
+	dir := t.TempDir()
+	sessionFile := filepath.Join(dir, "session.jsonl")
+	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
+	require.NoError(t, mgr.StartWatch("s1", sessionFile, "codex", "/ledger", dir))
+
+	// overwrite .recording.json with garbage
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), []byte("{{not json"), 0644))
+
+	mgr.Cleanup()
+
+	// corrupt JSON means unmarshal fails → skip, don't stop
+	assert.Len(t, mgr.ActiveSessions(), 1, "watcher should survive corrupt .recording.json during Cleanup")
+
+	mgr.StopAll()
+}
+
+// --- F. Failure modes and edge cases ---
+
+// TestSessionWatcherManager_StartWatch_RejectsRelativePath verifies that
+// StartWatch rejects a relative session file path.
+// Failure prevented: watcher started with relative path breaks path logic downstream.
+func TestSessionWatcherManager_StartWatch_RejectsRelativePath(t *testing.T) {
+	mgr := newTestWatcherManager()
+
+	err := mgr.StartWatch("s1", "relative/path.jsonl", "codex", "/ledger", "/cache")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "absolute path")
+	assert.Empty(t, mgr.ActiveSessions())
+}
+
+// TestSessionWatcherManager_DetectAndRestart_NonExistentSessionsDir verifies
+// DetectAndRestart returns 0 when the ledger has no sessions directory at all.
+// Failure prevented: daemon panics scanning a ledger that has never recorded a session.
+func TestSessionWatcherManager_DetectAndRestart_NonExistentSessionsDir(t *testing.T) {
+	mgr := newTestWatcherManager()
+	ledgerDir := t.TempDir()
+	// no "sessions" subdirectory created
+
+	started := mgr.DetectAndRestart(ledgerDir)
+	assert.Equal(t, 0, started)
+}
+
+// TestSessionWatcherManager_DetectAndRestart_OffsetBeyondEOF verifies that
+// when the persisted SourceOffset exceeds the actual file size (file was
+// truncated), the watcher starts without crashing.
+// Failure prevented: daemon crash on restart when agent rewrote a shorter session file.
+func TestSessionWatcherManager_DetectAndRestart_OffsetBeyondEOF(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: fsnotify watcher test")
+	}
+
+	mgr := newTestWatcherManager()
+
+	ledgerDir := t.TempDir()
+	sessionsDir := filepath.Join(ledgerDir, "sessions")
+	sessionDir := filepath.Join(sessionsDir, "truncated-session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	// small session file — only a few bytes
+	sessionFile := filepath.Join(t.TempDir(), "small-session.jsonl")
+	smallContent := `{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}}` + "\n"
+	require.NoError(t, os.WriteFile(sessionFile, []byte(smallContent), 0644))
+
+	// persisted offset way beyond actual file size
+	state := session.RecordingState{
+		WatchMode:    "tail",
+		AdapterName:  "codex",
+		SessionFile:  sessionFile,
+		SourceOffset: 99999,
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, ".recording.json"), data, 0644))
+
+	started := mgr.DetectAndRestart(ledgerDir)
+	require.Equal(t, 1, started)
+
+	// watcher should be in the active set despite the offset mismatch
+	require.Eventually(t, func() bool {
+		return len(mgr.ActiveSessions()) == 1
+	}, 2*time.Second, 10*time.Millisecond, "watcher should start despite offset beyond EOF")
+
+	mgr.StopAll()
+}
+
+// TestSessionWatcherManager_CatchUpReadFailure_LiveTailStillStarts verifies
+// that when the catch-up read fails (e.g., file was deleted after offset was
+// persisted), the watcher still starts live tailing.
+// Failure prevented: catch-up failure kills the entire watcher, losing live events.
+func TestSessionWatcherManager_CatchUpReadFailure_LiveTailStillStarts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: fsnotify watcher test")
+	}
+
+	mgr := newTestWatcherManager()
+
+	ledgerDir := t.TempDir()
+	sessionsDir := filepath.Join(ledgerDir, "sessions")
+	sessionDir := filepath.Join(sessionsDir, "catchup-fail-session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	// session file exists (required for Watch to succeed) but is empty, while
+	// SourceOffset > 0 means catch-up read will try to read from a position
+	// that has no data — the ReadFromOffset call will either return an error
+	// or return zero entries, but the watcher should still start
+	sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
+
+	state := session.RecordingState{
+		WatchMode:    "tail",
+		AdapterName:  "codex",
+		SessionFile:  sessionFile,
+		SourceOffset: 5000, // points beyond EOF of empty file
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, ".recording.json"), data, 0644))
+
+	started := mgr.DetectAndRestart(ledgerDir)
+	require.Equal(t, 1, started)
+
+	// the watcher should be active (live tail started despite catch-up failure)
+	require.Eventually(t, func() bool {
+		return len(mgr.ActiveSessions()) == 1
+	}, 2*time.Second, 10*time.Millisecond, "watcher should be active after catch-up failure")
+
+	mgr.StopAll()
+}
+
+// TestSessionWatcherManager_PersistOffset_MissingRecordingJSON verifies that
+// persistOffset silently returns when .recording.json has been deleted.
+// Failure prevented: watcher crashes mid-tail when .recording.json is removed externally.
+func TestSessionWatcherManager_PersistOffset_MissingRecordingJSON(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: fsnotify watcher test")
+	}
+
+	mgr := newTestWatcherManager()
+
+	dir := t.TempDir()
+	sessionFile := filepath.Join(dir, "session.jsonl")
+	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
+
+	// write a valid .recording.json so StartWatch succeeds
+	state := session.RecordingState{WatchMode: "tail", AdapterName: "codex", SessionFile: sessionFile}
+	recData, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), recData, 0644))
+
+	require.NoError(t, mgr.StartWatch("s1", sessionFile, "codex", "/ledger", dir))
+
+	// delete .recording.json while watcher is active
+	require.NoError(t, os.Remove(filepath.Join(dir, ".recording.json")))
+
+	// write to session file to trigger persistOffset internally
+	f, err := os.OpenFile(sessionFile, os.O_WRONLY|os.O_APPEND, 0644)
+	require.NoError(t, err)
+	_, err = f.WriteString(`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"test"}]}}` + "\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	// give the watcher time to process and attempt persistOffset
+	time.Sleep(500 * time.Millisecond)
+
+	// watcher should still be running (persistOffset didn't crash)
+	assert.Len(t, mgr.ActiveSessions(), 1, "watcher must survive missing .recording.json during persistOffset")
+
+	mgr.StopAll()
+}
+
+// TestSessionWatcherManager_PersistOffset_CorruptRecordingJSON verifies that
+// persistOffset silently returns when .recording.json contains invalid JSON.
+// Failure prevented: watcher crashes when .recording.json is corrupted by
+// concurrent write or disk issue.
+func TestSessionWatcherManager_PersistOffset_CorruptRecordingJSON(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: fsnotify watcher test")
+	}
+
+	mgr := newTestWatcherManager()
+
+	dir := t.TempDir()
+	sessionFile := filepath.Join(dir, "session.jsonl")
+	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
+
+	// write a valid .recording.json so StartWatch succeeds
+	state := session.RecordingState{WatchMode: "tail", AdapterName: "codex", SessionFile: sessionFile}
+	recData, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), recData, 0644))
+
+	require.NoError(t, mgr.StartWatch("s1", sessionFile, "codex", "/ledger", dir))
+
+	// corrupt .recording.json while watcher is active
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".recording.json"), []byte("%%%CORRUPT%%%"), 0644))
+
+	// write to session file to trigger persistOffset internally
+	f, err := os.OpenFile(sessionFile, os.O_WRONLY|os.O_APPEND, 0644)
+	require.NoError(t, err)
+	_, err = f.WriteString(`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"test"}]}}` + "\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	// give the watcher time to process and attempt persistOffset
+	time.Sleep(500 * time.Millisecond)
+
+	// watcher should still be running (persistOffset didn't crash)
+	assert.Len(t, mgr.ActiveSessions(), 1, "watcher must survive corrupt .recording.json during persistOffset")
+
+	mgr.StopAll()
+}

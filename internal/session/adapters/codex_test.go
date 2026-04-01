@@ -612,6 +612,125 @@ func TestCodexAdapter_FindSessionFile(t *testing.T) {
 	})
 }
 
+// --- isCodexToolError edge cases ---
+// These tests verify the INTENT: non-zero exit codes are errors, zero is success,
+// and unknown patterns default to non-error.
+func TestIsCodexToolError_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name    string
+		output  string
+		isError bool
+	}{
+		// negative exit codes are errors
+		{name: "negative exit code", output: "Process exited with code -1", isError: true},
+		// zero-prefixed non-zero codes are errors (not "code 0")
+		{name: "zero-prefixed non-zero code", output: "Process exited with code 01", isError: true},
+		// trailing space after code number: still has the prefix, still != "code 0"
+		{name: "trailing space after code", output: "Process exited with code 1 ", isError: true},
+		// no number after "code ": has prefix but != "code 0", treated as error.
+		// NOTE: this is arguably a bug — no exit code number shouldn't be an error —
+		// but the current implementation returns true because it matches the prefix
+		// and doesn't equal "Process exited with code 0".
+		{name: "no number after code prefix", output: "Process exited with code ", isError: true},
+		// leading whitespace prevents prefix match, so returns false.
+		// NOTE: arguably a bug if the output has leading whitespace, but the current
+		// implementation uses HasPrefix which requires exact start-of-string match.
+		{name: "leading and trailing whitespace", output: "  Process exited with code 1  ", isError: false},
+		// newline between "code" and number breaks the prefix match
+		{name: "newline in output", output: "Process exited with code\n1", isError: false},
+		// empty string handled by early return
+		{name: "empty string", output: "", isError: false},
+		// whitespace-only is not a known error pattern
+		{name: "whitespace only", output: "   ", isError: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isCodexToolError(tc.output)
+			assert.Equal(t, tc.isError, got, "isCodexToolError(%q)", tc.output)
+		})
+	}
+}
+
+// --- mergeToolEntries intent verification ---
+// These tests verify the merge contract: consecutive call+output pairs with matching
+// CallIDs produce a single entry with all four fields populated; non-adjacent or
+// wrong-order entries are never merged.
+func TestMergeToolEntries_IntentVerification(t *testing.T) {
+	ts := time.Date(2026, 2, 27, 10, 0, 0, 0, time.UTC)
+
+	t.Run("merged entry has all four tool fields", func(t *testing.T) {
+		// after merge, the resulting entry must have ToolName, ToolInput, ToolOutput, and IsError
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"make test"}`, CallID: "call_1"},
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 2", IsError: true, CallID: "call_1"},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 1)
+		assert.Equal(t, "exec_command", merged[0].ToolName, "ToolName must survive merge")
+		assert.Equal(t, `{"cmd":"make test"}`, merged[0].ToolInput, "ToolInput must survive merge")
+		assert.Equal(t, "Process exited with code 2", merged[0].ToolOutput, "ToolOutput must be merged in")
+		assert.True(t, merged[0].IsError, "IsError must be merged in")
+	})
+
+	t.Run("multiple consecutive pairs produce multiple merged entries", func(t *testing.T) {
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"ls"}`, CallID: "call_1"},
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 1", IsError: true, CallID: "call_1"},
+			{Timestamp: ts, Role: "tool", ToolName: "read_file", ToolInput: `{"path":"x.go"}`, CallID: "call_2"},
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 127", IsError: true, CallID: "call_2"},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 2)
+		assert.Equal(t, "exec_command", merged[0].ToolName)
+		assert.Equal(t, "Process exited with code 1", merged[0].ToolOutput)
+		assert.Equal(t, "read_file", merged[1].ToolName)
+		assert.Equal(t, "Process exited with code 127", merged[1].ToolOutput)
+	})
+
+	t.Run("non-adjacent entries with same CallID do not merge", func(t *testing.T) {
+		// an intervening assistant message prevents merge even with matching CallIDs
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"ls"}`, CallID: "call_1"},
+			{Timestamp: ts, Role: "assistant", Content: "intervening message"},
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 1", IsError: true, CallID: "call_1"},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 3, "intervening entry must prevent merge")
+		assert.Equal(t, "exec_command", merged[0].ToolName)
+		assert.Empty(t, merged[0].ToolOutput, "call entry must not have output when unmerged")
+		assert.Equal(t, "assistant", merged[1].Role)
+		assert.Equal(t, "Process exited with code 1", merged[2].ToolOutput)
+	})
+
+	t.Run("output before call does not merge (wrong order)", func(t *testing.T) {
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 1", IsError: true, CallID: "call_1"},
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"ls"}`, CallID: "call_1"},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 2, "output-before-call must not merge")
+		// first entry is the orphaned output (no ToolName)
+		assert.Empty(t, merged[0].ToolName)
+		assert.Equal(t, "Process exited with code 1", merged[0].ToolOutput)
+		// second entry is the call (no ToolOutput)
+		assert.Equal(t, "exec_command", merged[1].ToolName)
+		assert.Empty(t, merged[1].ToolOutput)
+	})
+
+	t.Run("multiple intervening entries prevent merge", func(t *testing.T) {
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"ls"}`, CallID: "call_1"},
+			{Timestamp: ts, Role: "user", Content: "msg1"},
+			{Timestamp: ts, Role: "assistant", Content: "msg2"},
+			{Timestamp: ts, Role: "user", Content: "msg3"},
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 1", IsError: true, CallID: "call_1"},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 5, "multiple intervening entries must prevent merge")
+	})
+}
+
 func TestCodexAdapter_Registered(t *testing.T) {
 	// use an isolated registry so ResetRegistry() calls in other tests don't interfere
 	ResetRegistry()

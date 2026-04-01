@@ -1,6 +1,9 @@
 package adapters
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -41,12 +44,96 @@ func codexComplianceFixture() adapterTestCase {
 	}
 }
 
+// claudeCodeComplianceFixture creates a temporary Claude Code JSONL session file
+// with representative entries: user message, assistant message with text and tool_use,
+// and a user turn containing a tool_result (which should be skipped).
+func claudeCodeComplianceFixture() adapterTestCase {
+	return adapterTestCase{
+		name:    "claude-code",
+		adapter: &ClaudeCodeAdapter{},
+		writeFile: func(t *testing.T, dir string) string {
+			t.Helper()
+			path := filepath.Join(dir, "session.jsonl")
+			f, err := os.Create(path)
+			require.NoError(t, err)
+			defer f.Close()
+
+			enc := json.NewEncoder(f)
+
+			// user message (simple string content)
+			require.NoError(t, enc.Encode(map[string]any{
+				"type":      "user",
+				"timestamp": "2026-03-15T10:00:00Z",
+				"version":   "1.0.3",
+				"message": map[string]any{
+					"role":    "user",
+					"content": "explain the adapter pattern",
+				},
+			}))
+
+			// assistant message with text + tool_use blocks
+			require.NoError(t, enc.Encode(map[string]any{
+				"type":      "assistant",
+				"timestamp": "2026-03-15T10:00:01Z",
+				"message": map[string]any{
+					"role":  "assistant",
+					"model": "claude-sonnet-4-20250514",
+					"content": []map[string]any{
+						{"type": "text", "text": "Let me read the file first."},
+						{
+							"type":  "tool_use",
+							"id":    "tool_001",
+							"name":  "Read",
+							"input": map[string]any{"file_path": "/src/adapter.go"},
+						},
+					},
+				},
+			}))
+
+			// user message containing tool_result (should be skipped entirely)
+			require.NoError(t, enc.Encode(map[string]any{
+				"type":      "user",
+				"timestamp": "2026-03-15T10:00:02Z",
+				"message": map[string]any{
+					"role": "user",
+					"content": []map[string]any{
+						{
+							"type":       "tool_result",
+							"tool_use_id": "tool_001",
+							"content":    "package adapters\n\ntype Adapter interface{...}",
+						},
+					},
+				},
+			}))
+
+			// assistant follow-up with tool_use that has an error result
+			require.NoError(t, enc.Encode(map[string]any{
+				"type":      "assistant",
+				"timestamp": "2026-03-15T10:00:03Z",
+				"message": map[string]any{
+					"role":  "assistant",
+					"model": "claude-sonnet-4-20250514",
+					"content": []map[string]any{
+						{"type": "text", "text": "The adapter pattern provides a unified interface."},
+					},
+				},
+			}))
+
+			return path
+		},
+		// expected: user + assistant_text + tool_use + assistant_text = 4
+		// the tool_result user turn is skipped (pure tool_result with no text)
+		wantEntries: 4,
+	}
+}
+
 // TestAdapter_Read_ReturnsExpectedEntryCount verifies each adapter's Read()
 // returns the correct number of entries for a representative session.
 // Failure prevented: adapter changes silently drop or duplicate entries.
 func TestAdapter_Read_ReturnsExpectedEntryCount(t *testing.T) {
 	cases := []adapterTestCase{
 		codexComplianceFixture(),
+		claudeCodeComplianceFixture(),
 	}
 
 	for _, tc := range cases {
@@ -70,6 +157,7 @@ func TestAdapter_Read_RolesAreValid(t *testing.T) {
 
 	cases := []adapterTestCase{
 		codexComplianceFixture(),
+		claudeCodeComplianceFixture(),
 	}
 
 	for _, tc := range cases {
@@ -93,6 +181,7 @@ func TestAdapter_Read_RolesAreValid(t *testing.T) {
 func TestAdapter_Read_ToolEntriesHaveName(t *testing.T) {
 	cases := []adapterTestCase{
 		codexComplianceFixture(),
+		claudeCodeComplianceFixture(),
 	}
 
 	for _, tc := range cases {
@@ -116,6 +205,7 @@ func TestAdapter_Read_ToolEntriesHaveName(t *testing.T) {
 func TestAdapter_Read_TimestampsAreSet(t *testing.T) {
 	cases := []adapterTestCase{
 		codexComplianceFixture(),
+		claudeCodeComplianceFixture(),
 	}
 
 	for _, tc := range cases {
