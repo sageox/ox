@@ -94,7 +94,7 @@ func TestCodexLifecycleNotification(t *testing.T) {
 			if tt.wantEmpty {
 				assert.Empty(t, got)
 			} else {
-				assert.Contains(t, got, "Codex uses AGENTS.md directly")
+				assert.Contains(t, got, "hooks via .codex/hooks.json")
 			}
 		})
 	}

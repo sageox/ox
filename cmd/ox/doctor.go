@@ -584,7 +584,7 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		integrationChecks = append(integrationChecks, checkGeminiHooks(opts.shouldFix(CheckSlugGeminiHooks)))
 	}
 	if detectCodex() {
-		integrationChecks = append(integrationChecks, checkCodexIntegration())
+		integrationChecks = append(integrationChecks, checkCodexHooks(opts.shouldFix(CheckSlugCodexHooks)))
 	}
 	if detectCodePuppy() {
 		integrationChecks = append(integrationChecks, checkCodePuppyHooks(opts.shouldFix(CheckSlugCodePuppyHooks)))

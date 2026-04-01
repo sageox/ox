@@ -584,8 +584,8 @@ func TestDetectOtherAIEditors_NoEditors(t *testing.T) {
 	_ = detectOtherAIEditors()
 }
 
-// TestCheckCodexIntegration tests checkCodexIntegration function
-func TestCheckCodexIntegration_ProjectDetected(t *testing.T) {
+// TestCheckCodexIntegration_ProjectWithHooks verifies passed when hooks installed
+func TestCheckCodexIntegration_ProjectWithHooks(t *testing.T) {
 	gitRoot, cleanup := setupTempGitRepo(t)
 	defer cleanup()
 
@@ -597,22 +597,72 @@ func TestCheckCodexIntegration_ProjectDetected(t *testing.T) {
 		t.Fatalf("failed to create .codex: %v", err)
 	}
 
-	result := checkCodexIntegration()
+	// install hooks
+	if err := installCodexHooks(false); err != nil {
+		t.Fatalf("failed to install hooks: %v", err)
+	}
+
+	result := checkCodexHooks(false)
 
 	if !result.passed {
-		t.Errorf("expected passed=true when .codex directory exists, got: %+v", result)
+		t.Errorf("expected passed=true when hooks installed, got: %+v", result)
 	}
-	if !strings.Contains(result.message, "AGENTS.md") {
-		t.Errorf("expected message to mention AGENTS.md, got: %s", result.message)
-	}
-	if !strings.Contains(result.message, "no hooks needed") {
-		t.Errorf("expected message to mention no hooks needed, got: %s", result.message)
-	}
-	if !strings.Contains(result.message, "ox agent <id> session start") {
-		t.Errorf("expected message to mention manual session start, got: %s", result.message)
+	if !strings.Contains(result.message, "installed") {
+		t.Errorf("expected message to mention installed, got: %s", result.message)
 	}
 }
 
+// TestCheckCodexIntegration_ProjectWithoutHooks verifies failed when project detected but no hooks
+func TestCheckCodexIntegration_ProjectWithoutHooks(t *testing.T) {
+	gitRoot, cleanup := setupTempGitRepo(t)
+	defer cleanup()
+
+	restoreCwd := changeToDir(t, gitRoot)
+	defer restoreCwd()
+
+	codexDir := filepath.Join(gitRoot, ".codex")
+	if err := os.MkdirAll(codexDir, 0755); err != nil {
+		t.Fatalf("failed to create .codex: %v", err)
+	}
+
+	result := checkCodexHooks(false)
+
+	if result.passed {
+		t.Error("expected passed=false when .codex exists but no hooks installed")
+	}
+	if !strings.Contains(result.detail, "ox doctor --fix") {
+		t.Errorf("expected detail to suggest ox doctor --fix, got: %s", result.detail)
+	}
+}
+
+// TestCheckCodexIntegration_ProjectWithoutHooks_Fix verifies auto-fix installs hooks
+func TestCheckCodexIntegration_ProjectWithoutHooks_Fix(t *testing.T) {
+	gitRoot, cleanup := setupTempGitRepo(t)
+	defer cleanup()
+
+	restoreCwd := changeToDir(t, gitRoot)
+	defer restoreCwd()
+
+	codexDir := filepath.Join(gitRoot, ".codex")
+	if err := os.MkdirAll(codexDir, 0755); err != nil {
+		t.Fatalf("failed to create .codex: %v", err)
+	}
+
+	result := checkCodexHooks(true)
+
+	if !result.passed {
+		t.Errorf("expected passed=true after auto-fix, got: %+v", result)
+	}
+
+	// verify hooks were actually written
+	hooksPath := filepath.Join(codexDir, "hooks.json")
+	if _, err := os.Stat(hooksPath); os.IsNotExist(err) {
+		t.Error("expected hooks.json to be created by auto-fix")
+	}
+}
+
+// TestCheckCodexIntegration_NotDetected verifies skipped when no project found
+// Failure prevented: doctor falsely reports hooks as installed when no .codex/ exists
 func TestCheckCodexIntegration_NotDetected(t *testing.T) {
 	gitRoot, cleanup := setupTempGitRepo(t)
 	defer cleanup()
@@ -620,16 +670,15 @@ func TestCheckCodexIntegration_NotDetected(t *testing.T) {
 	restoreCwd := changeToDir(t, gitRoot)
 	defer restoreCwd()
 
-	result := checkCodexIntegration()
+	// no .codex/ directory — checkCodexHooks should skip or fail, never pass
+	result := checkCodexHooks(false)
 
+	if result.passed {
+		t.Error("expected not passed when Codex not configured")
+	}
+	// without .codex/ dir, the check must be skipped (no project to check)
 	if !result.skipped {
-		t.Error("expected skipped=true when Codex not detected")
-	}
-	if !strings.Contains(result.detail, "AGENTS.md") {
-		t.Errorf("expected detail to mention AGENTS.md, got: %s", result.detail)
-	}
-	if !strings.Contains(result.detail, "ox agent prime") {
-		t.Errorf("expected detail to mention manual prime flow, got: %s", result.detail)
+		t.Errorf("expected skipped=true when no .codex/ dir exists, got skipped=%v, message=%s", result.skipped, result.message)
 	}
 }
 

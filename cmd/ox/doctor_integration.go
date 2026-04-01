@@ -441,18 +441,7 @@ func detectCodePuppy() bool {
 	return (&CodePuppyAgent{}).Detect()
 }
 
-// checkCodexIntegration checks if Codex is detected (uses AGENTS.md, no hooks needed)
-func checkCodexIntegration() checkResult {
-	agent := &CodexAgent{}
-	projectDetected := agent.DetectProject()
-	manualLifecycle := "Manual lifecycle (optional): run `ox agent prime` at session start, then use `ox agent <id> session start` / `ox agent <id> session stop` for recording."
-
-	if projectDetected {
-		// project has .codex/ - show as integrated via AGENTS.md
-		return PassedCheck("Codex", "uses AGENTS.md (no hooks needed). "+manualLifecycle)
-	}
-
-	// CLI detected but no project config - suggest creating .codex/
-	return SkippedCheck("Codex", "CLI detected, no project config",
-		"Codex reads AGENTS.md directly when .codex/ exists. "+manualLifecycle)
+// checkCodexHooks checks if Codex CLI hooks are properly installed
+func checkCodexHooks(fix bool) checkResult {
+	return checkAgentHooks(&CodexAgent{}, "Codex", fix)
 }

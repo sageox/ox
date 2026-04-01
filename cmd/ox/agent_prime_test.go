@@ -339,11 +339,11 @@ func TestCodexLifecycleNotification(t *testing.T) {
 				if got == "" {
 					t.Fatalf("codexLifecycleNotification(%q) = empty, want non-empty", tt.agentType)
 				}
-				if !strings.Contains(got, "no native hooks") {
-					t.Errorf("expected Codex lifecycle note to mention no hooks, got: %q", got)
+				if !strings.Contains(got, "hooks via .codex/hooks.json") {
+					t.Errorf("expected Codex lifecycle note to mention hooks.json, got: %q", got)
 				}
-				if !strings.Contains(got, "ox agent <id> session start") {
-					t.Errorf("expected Codex lifecycle note to mention manual session start, got: %q", got)
+				if !strings.Contains(got, "ox integrate install --codex") {
+					t.Errorf("expected Codex lifecycle note to mention install command, got: %q", got)
 				}
 			}
 		})

@@ -35,4 +35,8 @@ const (
 	// OxHookCommandClaudeCode is the template for Claude Code lifecycle hooks.
 	// The %s placeholder is replaced with the native event name (e.g., SessionStart).
 	OxHookCommandClaudeCodeTemplate = "if command -v ox >/dev/null 2>&1; then AGENT_ENV=claude-code ox agent hook %s 2>&1 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi"
+
+	// OxHookCommandCodexTemplate is the template for Codex CLI lifecycle hooks.
+	// The %s placeholder is replaced with the native event name (e.g., SessionStart).
+	OxHookCommandCodexTemplate = "if command -v ox >/dev/null 2>&1; then AGENT_ENV=codex ox agent hook %s 2>&1 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi"
 )

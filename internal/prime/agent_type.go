@@ -66,11 +66,11 @@ func GetAgentSupportNotice(agentType string) string {
 	return fmt.Sprintf("SageOx is explicitly designed for use with Claude Code. It is unknown if %s will appropriately interpret and effectively apply team context. You should review plans deeply to ensure %s has produced an insightful plan.", displayName, displayName)
 }
 
-// CodexLifecycleNotification returns Codex-specific workflow guidance for non-hook contexts.
+// CodexLifecycleNotification returns Codex-specific workflow guidance.
 func CodexLifecycleNotification(agentType string) string {
 	if CanonicalAgentType(agentType) != string(agentx.AgentTypeCodex) {
 		return ""
 	}
 
-	return "Codex uses AGENTS.md directly (no native hooks). Re-run `ox agent prime` when starting a new Codex session or after context resets (for example, /clear or compaction). Session recording enhancements for Codex are deferred; manual recording remains available via `ox agent <id> session start` and `ox agent <id> session stop`."
+	return "Codex supports hooks via .codex/hooks.json (enable with `codex features enable codex_hooks`). Run `ox integrate install --codex` to install hooks. Session recording via `ox agent <id> session start` and `ox agent <id> session stop`."
 }

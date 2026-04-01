@@ -36,7 +36,7 @@ type Agent interface {
 	// DetectCLI returns true if the agent's CLI is installed (in PATH)
 	DetectCLI() bool
 
-	// SupportsHooks returns true if this agent supports hooks (false for Codex which uses AGENTS.md)
+	// SupportsHooks returns true if this agent supports native hook installation
 	SupportsHooks() bool
 }
 
@@ -216,7 +216,6 @@ func (g *GeminiAgent) SupportsHooks() bool {
 }
 
 // CodexAgent implements Agent interface for OpenAI Codex CLI
-// Note: Codex reads AGENTS.md directly, no hooks needed
 type CodexAgent struct{}
 
 func (c *CodexAgent) Name() string {
@@ -224,26 +223,19 @@ func (c *CodexAgent) Name() string {
 }
 
 func (c *CodexAgent) Install(user bool) error {
-	// codex doesn't need hooks - it reads AGENTS.md directly
-	return nil
+	return installCodexHooks(user)
 }
 
 func (c *CodexAgent) Uninstall(user bool) error {
-	// codex doesn't have hooks to uninstall
-	return nil
+	return uninstallCodexHooks(user)
 }
 
 func (c *CodexAgent) HasHooks(user bool) bool {
-	// codex reads AGENTS.md directly, so if AGENTS.md has ox prime, it's "installed"
-	// return true if we detect codex is being used (meaning AGENTS.md integration applies)
-	return c.Detect()
+	return hasCodexHooks(user)
 }
 
 func (c *CodexAgent) List() map[string]bool {
-	// codex uses AGENTS.md, not hooks
-	return map[string]bool{
-		"AGENTS.md": c.Detect(),
-	}
+	return listCodexHooks()
 }
 
 func (c *CodexAgent) Detect() bool {
@@ -266,8 +258,7 @@ func (c *CodexAgent) DetectCLI() bool {
 }
 
 func (c *CodexAgent) SupportsHooks() bool {
-	// codex reads AGENTS.md directly, no hooks needed
-	return false
+	return true
 }
 
 // CodePuppyAgent implements Agent interface for code_puppy

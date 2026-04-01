@@ -54,6 +54,12 @@ const (
 	geminiUserPath         = ".gemini"
 	geminiSessionStart     = "SessionStart"
 
+	// codex cli paths and files
+	codexHooksFileName = "hooks.json"
+	codexProjectPath   = ".codex"
+	codexUserPath      = ".codex"
+	codexSessionStart  = "SessionStart"
+
 	// timeouts (milliseconds)
 	defaultHookTimeout = 30000
 
@@ -71,6 +77,7 @@ var (
 	integrateUserFlag      bool
 	integrateOpenCodeFlag  bool
 	integrateGeminiFlag    bool
+	integrateCodexFlag     bool
 	integrateCodePuppyFlag bool
 	integrateAllFlag       bool
 	integrateForceFlag     bool
@@ -84,7 +91,7 @@ var integrateCmd = &cobra.Command{
 Supported agents:
   Claude Code (default)    JSON hooks in ~/.claude/settings.json
 
-Other agents can use 'ox' CLI via AGENTS.md or CLAUDE.md references.
+Other agents (Codex, Gemini, code_puppy) can be installed with their respective flags.
 Run 'ox init' to set up the project with appropriate guidance files.
 
 The integration ensures that 'ox agent prime' runs when an AI coding session starts.`,
@@ -102,7 +109,7 @@ var integrateInstallCmd = &cobra.Command{
 Adds hooks to ~/.claude/settings.json for SessionStart and PreCompact events.
 Use --user to add guidance to ~/.claude/CLAUDE.md for ALL projects.
 
-Other agents can use 'ox' CLI via AGENTS.md or CLAUDE.md references.`,
+Other agents (Codex, Gemini, code_puppy) can be installed with their respective flags.`,
 	RunE: runIntegrateInstall,
 }
 
@@ -139,6 +146,17 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 		fmt.Printf("Installed %s-level plugin:\n", location)
 		fmt.Printf("  - %s/%s/%s\n", path, codePuppyPluginDir, codePuppyPluginFileName)
+
+		userCfg, _ := config.LoadUserConfig()
+		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
+		return nil
+	}
+
+	// Codex CLI installation
+	if integrateCodexFlag {
+		if err := installCodexHooks(integrateUserFlag); err != nil {
+			return fmt.Errorf("installing Codex CLI integration: %w", err)
+		}
 
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
@@ -251,6 +269,23 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 			location = "project"
 		}
 		fmt.Printf("✓ code_puppy %s-level integration uninstalled\n", location)
+
+		userCfg, _ := config.LoadUserConfig()
+		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
+		return nil
+	}
+
+	// Codex CLI uninstallation
+	if integrateCodexFlag {
+		if err := uninstallCodexHooks(integrateUserFlag); err != nil {
+			return fmt.Errorf("uninstalling Codex CLI integration: %w", err)
+		}
+
+		location := "project"
+		if integrateUserFlag {
+			location = "user"
+		}
+		fmt.Printf("✓ Codex CLI %s-level integration uninstalled\n", location)
 
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
@@ -415,6 +450,14 @@ func uninstallAllIntegrations(force bool) error {
 		installed = append(installed, "OpenCode (user plugin)")
 	}
 
+	// check Codex CLI
+	if hasCodexHooks(false) {
+		installed = append(installed, "Codex CLI (project)")
+	}
+	if hasCodexHooks(true) {
+		installed = append(installed, "Codex CLI (user)")
+	}
+
 	// check Gemini CLI
 	if hasGeminiHooks(false) {
 		installed = append(installed, "Gemini CLI (project)")
@@ -466,6 +509,12 @@ func uninstallAllIntegrations(force bool) error {
 	if err := uninstallOpenCodeHooks(true); err != nil {
 		errors = append(errors, fmt.Sprintf("OpenCode (user): %v", err))
 	}
+	if err := uninstallCodexHooks(false); err != nil {
+		errors = append(errors, fmt.Sprintf("Codex CLI (project): %v", err))
+	}
+	if err := uninstallCodexHooks(true); err != nil {
+		errors = append(errors, fmt.Sprintf("Codex CLI (user): %v", err))
+	}
 	if err := uninstallGeminiHooks(false); err != nil {
 		errors = append(errors, fmt.Sprintf("Gemini CLI (project): %v", err))
 	}
@@ -494,23 +543,26 @@ func init() {
 	integrateInstallCmd.Flags().BoolVar(&integrateUserFlag, "user", false, "install to user-level config for all projects")
 
 	// MVP: Hide non-Claude-Code integrations - they still work but aren't shown in help
-	// Other agents can use 'ox' via AGENTS.md/CLAUDE.md references
 	integrateInstallCmd.Flags().BoolVar(&integrateOpenCodeFlag, "opencode", false, "install OpenCode plugin instead of Claude Code hooks")
 	integrateInstallCmd.Flags().BoolVar(&integrateGeminiFlag, "gemini", false, "install Gemini CLI hooks instead of Claude Code hooks")
+	integrateInstallCmd.Flags().BoolVar(&integrateCodexFlag, "codex", false, "install Codex CLI hooks instead of Claude Code hooks")
 	integrateInstallCmd.Flags().BoolVar(&integrateCodePuppyFlag, "codepuppy", false, "install code_puppy plugin instead of Claude Code hooks")
 	_ = integrateInstallCmd.Flags().MarkHidden("opencode")
 	_ = integrateInstallCmd.Flags().MarkHidden("gemini")
+	_ = integrateInstallCmd.Flags().MarkHidden("codex")
 	_ = integrateInstallCmd.Flags().MarkHidden("codepuppy")
 
 	// uninstall flags
 	integrateUninstallCmd.Flags().BoolVar(&integrateUserFlag, "user", false, "uninstall from user-level config")
 	integrateUninstallCmd.Flags().BoolVar(&integrateOpenCodeFlag, "opencode", false, "uninstall OpenCode plugin instead of Claude Code hooks")
 	integrateUninstallCmd.Flags().BoolVar(&integrateGeminiFlag, "gemini", false, "uninstall Gemini CLI hooks instead of Claude Code hooks")
+	integrateUninstallCmd.Flags().BoolVar(&integrateCodexFlag, "codex", false, "uninstall Codex CLI hooks instead of Claude Code hooks")
 	integrateUninstallCmd.Flags().BoolVar(&integrateCodePuppyFlag, "codepuppy", false, "uninstall code_puppy plugin instead of Claude Code hooks")
 	integrateUninstallCmd.Flags().BoolVar(&integrateAllFlag, "all", false, "uninstall from all AI agents")
 	integrateUninstallCmd.Flags().BoolVar(&integrateForceFlag, "force", false, "skip confirmation prompts - use with --all")
 	_ = integrateUninstallCmd.Flags().MarkHidden("opencode")
 	_ = integrateUninstallCmd.Flags().MarkHidden("gemini")
+	_ = integrateUninstallCmd.Flags().MarkHidden("codex")
 	_ = integrateUninstallCmd.Flags().MarkHidden("codepuppy")
 	_ = integrateUninstallCmd.Flags().MarkHidden("all")
 	_ = integrateUninstallCmd.Flags().MarkHidden("force")

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -62,30 +64,36 @@ func TestAgentRegistry_AllRegistered(t *testing.T) {
 	}
 }
 
-func TestCodexAgent_SupportsHooksFalse(t *testing.T) {
+func TestCodexAgent_SupportsHooksTrue(t *testing.T) {
 	t.Parallel()
 
 	codex := &CodexAgent{}
-	assert.False(t, codex.SupportsHooks(), "Codex uses AGENTS.md, not hooks")
+	assert.True(t, codex.SupportsHooks(), "Codex supports hooks via .codex/hooks.json")
 }
 
-func TestCodexAgent_InstallUninstallNoOp(t *testing.T) {
-	t.Parallel()
+func TestCodexAgent_InstallUninstall(t *testing.T) {
+	tmpDir := t.TempDir()
+	codexDir := filepath.Join(tmpDir, ".codex")
+	require.NoError(t, os.MkdirAll(codexDir, 0755))
+
+	restoreCwd := changeToDir(t, tmpDir)
+	defer restoreCwd()
 
 	codex := &CodexAgent{}
 	assert.NoError(t, codex.Install(false))
-	assert.NoError(t, codex.Install(true))
+	assert.True(t, codex.HasHooks(false))
 	assert.NoError(t, codex.Uninstall(false))
-	assert.NoError(t, codex.Uninstall(true))
 }
 
-func TestCodexAgent_ListReturnsAgentsMD(t *testing.T) {
+func TestCodexAgent_ListReturnsProjectUser(t *testing.T) {
 	t.Parallel()
 
 	codex := &CodexAgent{}
 	status := codex.List()
-	_, hasKey := status["AGENTS.md"]
-	assert.True(t, hasKey, "Codex list should report AGENTS.md status")
+	_, hasProject := status["Project"]
+	_, hasUser := status["User"]
+	assert.True(t, hasProject, "Codex list should report Project status")
+	assert.True(t, hasUser, "Codex list should report User status")
 }
 
 func TestAgentNames(t *testing.T) {
@@ -121,7 +129,7 @@ func TestAgentSupportsHooks(t *testing.T) {
 		{"Claude", &ClaudeAgent{}, true},
 		{"OpenCode", &OpenCodeAgent{}, true},
 		{"Gemini", &GeminiAgent{}, true},
-		{"Codex", &CodexAgent{}, false},
+		{"Codex", &CodexAgent{}, true},
 		{"CodePuppy", &CodePuppyAgent{}, true},
 	}
 
