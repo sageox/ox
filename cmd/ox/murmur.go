@@ -80,6 +80,18 @@ type murmurInput struct {
 	Files      string `json:"files,omitempty"` // comma-separated repo-relative paths
 }
 
+// resolveMurmurFiles returns the files value applying flag-beats-JSON precedence.
+// If the --files flag was explicitly set, it wins; otherwise the JSON value is used.
+func resolveMurmurFiles(flagValue string, flagChanged bool, jsonValue string) string {
+	if flagChanged {
+		return flagValue
+	}
+	if jsonValue != "" {
+		return jsonValue
+	}
+	return flagValue
+}
+
 func runMurmur(cmd *cobra.Command, args []string) error {
 	// --- pure input validation (no I/O) ---
 
@@ -111,10 +123,8 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	files, _ := cmd.Flags().GetString("files")
-	if input.Files != "" && !cmd.Flags().Changed("files") {
-		files = input.Files
-	}
+	flagFiles, _ := cmd.Flags().GetString("files")
+	files := resolveMurmurFiles(flagFiles, cmd.Flags().Changed("files"), input.Files)
 
 	if !validImportanceLevels[importance] {
 		return fmt.Errorf("invalid importance %q: must be critical, normal, or ambient", importance)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,8 +25,6 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
 		os.Exit(1)
 	}
-	defer os.RemoveAll(ledgerPath)
-
 	manifest = BuildManifest()
 	manifest.LedgerPath = ledgerPath
 
@@ -41,7 +40,9 @@ func TestMain(m *testing.M) {
 	fmt.Fprintf(os.Stderr, "║  Windows:     %d\n", len(manifest.Windows))
 	fmt.Fprintf(os.Stderr, "╚══════════════════════════════════════════════════════════════╝\n\n")
 
-	os.Exit(m.Run())
+	code := m.Run()
+	os.RemoveAll(ledgerPath)
+	os.Exit(code)
 }
 
 func harvestMurmurs(t *testing.T, w Window) *glance.HarvestResult {
@@ -408,8 +409,32 @@ func TestMurmurEscalationDensity(t *testing.T) {
 	d3, err := readMurmursInRange(manifest.LedgerPath, ts(12, 0, 0), ts(12, 23, 59))
 	require.NoError(t, err)
 
+	// Raw count escalation
 	assert.Less(t, len(d1), len(d2), "day2 murmurs (%d) > day1 (%d)", len(d2), len(d1))
 	assert.Less(t, len(d2), len(d3), "day3 murmurs (%d) > day2 (%d)", len(d3), len(d2))
+
+	// Conflict density escalation via glance pipeline
+	toRecords := func(murmurs []ledger.MurmurFile) []glance.MurmurRecord {
+		var records []glance.MurmurRecord
+		for _, m := range murmurs {
+			records = append(records, glance.MurmurRecord{
+				ID:    m.ID,
+				User:  m.PrincipalID,
+				Topic: m.Topic,
+				Files: extractFiles(m.Metadata),
+			})
+		}
+		return records
+	}
+
+	c1 := glance.DetectConflicts(toRecords(d1))
+	c2 := glance.DetectConflicts(toRecords(d2))
+	c3 := glance.DetectConflicts(toRecords(d3))
+
+	assert.Less(t, len(c1.Overlaps), len(c2.Overlaps),
+		"day2 conflicts (%d) > day1 (%d)", len(c2.Overlaps), len(c1.Overlaps))
+	assert.Less(t, len(c2.Overlaps), len(c3.Overlaps),
+		"day3 conflicts (%d) > day2 (%d)", len(c3.Overlaps), len(c2.Overlaps))
 }
 
 func TestMurmurAgentIDs(t *testing.T) {
@@ -430,6 +455,22 @@ func TestMurmurAgentIDs(t *testing.T) {
 		assert.Empty(t, m.AgentType, "agent_type should be omitted (matches production)")
 		assert.Equal(t, "1", m.SchemaVersion)
 	}
+}
+
+// extractFiles parses Metadata["files"] into a string slice (mirrors glance.extractFilesFromMetadata).
+func extractFiles(metadata map[string]string) []string {
+	raw := metadata["files"]
+	if raw == "" {
+		return nil
+	}
+	var files []string
+	for _, f := range strings.Split(raw, ",") {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			files = append(files, f)
+		}
+	}
+	return files
 }
 
 func TestHotZoneMurmurs(t *testing.T) {

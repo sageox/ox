@@ -411,69 +411,27 @@ func TestMurmurAgentIDFromEnv(t *testing.T) {
 	}
 }
 
-func TestMurmurFilesFlag(t *testing.T) {
-	t.Chdir(t.TempDir())
-
-	cmd := *murmurCmd
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetErr(&buf)
-
-	_ = cmd.Flags().Set("files", "cmd/ox/root.go,internal/cli/output.go")
-
-	err := cmd.RunE(&cmd, []string{"Refactoring root command"})
-	// Will fail downstream (no ledger), but must pass files input validation
-	if err == nil {
-		t.Fatal("expected downstream error (no ledger)")
+func TestResolveMurmurFiles(t *testing.T) {
+	tests := []struct {
+		name        string
+		flagValue   string
+		flagChanged bool
+		jsonValue   string
+		want        string
+	}{
+		{"flag set, no JSON", "cmd/ox/root.go", true, "", "cmd/ox/root.go"},
+		{"no flag, JSON provided", "", false, "cmd/ox/root.go", "cmd/ox/root.go"},
+		{"flag beats JSON", "cmd/ox/glance.go", true, "cmd/ox/root.go", "cmd/ox/glance.go"},
+		{"neither set", "", false, "", ""},
+		{"flag set to same as JSON", "a.go", true, "a.go", "a.go"},
 	}
-	if strings.Contains(err.Error(), "invalid JSON") || strings.Contains(err.Error(), "content") {
-		t.Errorf("should have passed input validation, got: %v", err)
-	}
-}
-
-func TestMurmurFilesFromJSON(t *testing.T) {
-	t.Chdir(t.TempDir())
-
-	cmd := *murmurCmd
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetErr(&buf)
-
-	input := `{"content": "Refactoring root command", "files": "cmd/ox/root.go,internal/cli/output.go"}`
-	err := cmd.RunE(&cmd, []string{input})
-	if err == nil {
-		t.Fatal("expected downstream error (no ledger)")
-	}
-	// Must not fail at JSON parsing
-	if strings.Contains(err.Error(), "invalid JSON") || strings.Contains(err.Error(), "must have a 'content' field") {
-		t.Errorf("unexpected parse error: %v", err)
-	}
-}
-
-func TestMurmurExplicitFilesFlagBeatsJSON(t *testing.T) {
-	t.Chdir(t.TempDir())
-
-	cmd := *murmurCmd
-	var buf bytes.Buffer
-	cmd.SetOut(&buf)
-	cmd.SetErr(&buf)
-
-	// Explicitly set --files flag
-	if err := cmd.Flags().Set("files", "cmd/ox/glance.go"); err != nil {
-		t.Fatalf("set files flag: %v", err)
-	}
-	if !cmd.Flags().Changed("files") {
-		t.Fatal("flag should be marked Changed after Set()")
-	}
-
-	// JSON says different files — should be ignored because flag was explicitly set
-	input := `{"content": "Refactoring root command", "files": "cmd/ox/root.go"}`
-	err := cmd.RunE(&cmd, []string{input})
-	if err == nil {
-		t.Fatal("expected downstream error (no ledger)")
-	}
-	// Must not fail at JSON parsing
-	if strings.Contains(err.Error(), "invalid JSON") || strings.Contains(err.Error(), "must have a 'content' field") {
-		t.Errorf("unexpected parse error with explicit flag: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveMurmurFiles(tt.flagValue, tt.flagChanged, tt.jsonValue)
+			if got != tt.want {
+				t.Errorf("resolveMurmurFiles(%q, %v, %q) = %q, want %q",
+					tt.flagValue, tt.flagChanged, tt.jsonValue, got, tt.want)
+			}
+		})
 	}
 }
