@@ -531,12 +531,12 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		notifParts = append(notifParts, "Team context: "+output.TeamContextStatus)
 	}
 	if output.Session != nil && output.Session.Recording {
-		notifParts = append(notifParts, "Session recording: active")
+		notifParts = append(notifParts, "Session recording: active — discussions may be shared with teammates")
 	} else {
 		notifParts = append(notifParts, "Session recording: available (/ox-session-start)")
 	}
 	if len(notifParts) > 0 {
-		output.UserNotification = "SageOx is active on this repo. " + strings.Join(notifParts, ". ") + "."
+		output.UserNotification = "This session is enhanced by team context via SageOx. " + strings.Join(notifParts, ". ") + "."
 	}
 	if codexNote := codexLifecycleNotification(agentType); codexNote != "" {
 		if output.UserNotification != "" {
