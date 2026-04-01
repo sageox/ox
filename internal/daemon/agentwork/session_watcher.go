@@ -313,7 +313,6 @@ func (m *SessionWatcherManager) runWatcher(
 		return
 	}
 
-	entryCount := 0
 	for entry := range ch {
 		converted := session.ConvertRawEntries([]adapters.RawEntry{entry})
 		for _, e := range converted {
@@ -321,17 +320,22 @@ func (m *SessionWatcherManager) runWatcher(
 				m.logger.Warn("failed to write entry to raw.jsonl",
 					"session", aw.sessionName, "error", encErr)
 			}
-			entryCount++
 		}
 
-		// persist offset after each batch so daemon restart can resume
+		// persist offset after each batch so daemon restart can resume.
+		// We use file size rather than TailWatcher's internal byte offset
+		// because the watcher reads up to EOF on each debounce tick.
+		// File size >= bytes consumed, so worst case we over-estimate
+		// slightly; a catch-up read from the over-estimated offset
+		// returns 0 entries on restart — no data loss or duplication.
 		if fi, statErr := os.Stat(aw.sessionFile); statErr == nil {
-			m.persistOffset(aw, fi.Size(), entryCount)
+			m.persistOffset(aw, fi.Size(), len(converted))
 		}
 	}
 }
 
 // persistOffset updates SourceOffset and EntryCount in .recording.json.
+// Uses atomic write (temp file + rename) to avoid races with CLI writes.
 // Best-effort: errors are logged but don't stop the watcher.
 func (m *SessionWatcherManager) persistOffset(aw *activeWatcher, offset int64, entryDelta int) {
 	recPath := filepath.Join(aw.cachePath, recordingMarker)
@@ -349,8 +353,16 @@ func (m *SessionWatcherManager) persistOffset(aw *activeWatcher, offset int64, e
 	if err != nil {
 		return
 	}
-	if err := os.WriteFile(recPath, updated, 0644); err != nil {
-		m.logger.Debug("failed to persist offset", "session", aw.sessionName, "error", err)
+	// atomic write: write to temp file then rename to avoid partial writes
+	// and reduce the race window with CLI writes to the same file
+	tmpPath := recPath + ".tmp"
+	if err := os.WriteFile(tmpPath, updated, 0600); err != nil {
+		m.logger.Debug("failed to write temp offset file", "session", aw.sessionName, "error", err)
+		return
+	}
+	if err := os.Rename(tmpPath, recPath); err != nil {
+		m.logger.Debug("failed to rename temp offset file", "session", aw.sessionName, "error", err)
+		_ = os.Remove(tmpPath)
 	}
 }
 

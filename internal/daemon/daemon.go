@@ -1310,9 +1310,12 @@ func (s *daemonServiceImpl) SessionWatchStart(payload SessionWatchStartPayload) 
 		s.d.logger.Warn("session_watch_start received but session watcher not initialized")
 		return
 	}
+	// derive paths server-side; never trust client-supplied destinations
+	ledgerPath := s.d.config.LedgerPath
+	cachePath := filepath.Join(ledgerPath, "sessions", payload.SessionName)
 	if err := s.d.sessionWatcher.StartWatch(
 		payload.SessionName, payload.SessionFile,
-		payload.AdapterName, payload.LedgerPath, payload.CachePath,
+		payload.AdapterName, ledgerPath, cachePath,
 	); err != nil {
 		s.d.logger.Error("failed to start session watcher",
 			"session", payload.SessionName, "error", err)

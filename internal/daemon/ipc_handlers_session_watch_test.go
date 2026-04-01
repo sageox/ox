@@ -27,8 +27,6 @@ func TestHandleSessionWatchStart_ValidPayload(t *testing.T) {
 		SessionName: "2026-03-31T10-00-ryan-OxAbc1",
 		SessionFile: "/home/user/.codex/sessions/2026/03/31/session.jsonl",
 		AdapterName: "codex",
-		LedgerPath:  "/ledger/path",
-		CachePath:   "/ledger/path/.sageox/cache/sessions/2026-03-31T10-00-ryan-OxAbc1",
 	}
 
 	var got SessionWatchStartPayload
@@ -119,7 +117,6 @@ func TestHandleSessionWatchStop_ValidPayload(t *testing.T) {
 
 	want := SessionWatchStopPayload{
 		SessionName: "2026-03-31T10-00-ryan-OxAbc1",
-		LedgerPath:  "/ledger/path",
 	}
 
 	var got SessionWatchStopPayload
@@ -163,7 +160,7 @@ func TestHandleSessionWatchStop_MissingSessionName(t *testing.T) {
 		called.Store(true)
 	})
 
-	raw, _ := json.Marshal(SessionWatchStopPayload{LedgerPath: "/p"})
+	raw, _ := json.Marshal(SessionWatchStopPayload{})
 	result := handleSessionWatchStop(s, Message{Payload: raw}, nil)
 
 	assert.False(t, called.Load())
@@ -180,8 +177,6 @@ func TestClient_SessionWatchStart_MarshalPayload(t *testing.T) {
 		SessionName: "test-session",
 		SessionFile: "/path/to/session.jsonl",
 		AdapterName: "codex",
-		LedgerPath:  "/ledger",
-		CachePath:   "/cache",
 	}
 	raw, err := json.Marshal(payload)
 	require.NoError(t, err)
@@ -197,7 +192,6 @@ func TestClient_SessionWatchStop_MarshalPayload(t *testing.T) {
 	t.Parallel()
 	payload := SessionWatchStopPayload{
 		SessionName: "test-session",
-		LedgerPath:  "/ledger",
 	}
 	raw, err := json.Marshal(payload)
 	require.NoError(t, err)
@@ -244,8 +238,6 @@ func TestHandleSessionWatchStart_PathTraversal(t *testing.T) {
 		SessionName: "test-session",
 		SessionFile: "/tmp/../../../etc/passwd",
 		AdapterName: "codex",
-		LedgerPath:  "/ledger",
-		CachePath:   "/cache",
 	}
 
 	raw, _ := json.Marshal(payload)
@@ -277,8 +269,6 @@ func TestHandleSessionWatchStart_RelativeSessionFile(t *testing.T) {
 		SessionName: "test-session",
 		SessionFile: "relative/path.jsonl",
 		AdapterName: "codex",
-		LedgerPath:  "/ledger",
-		CachePath:   "/cache",
 	}
 
 	raw, _ := json.Marshal(payload)
@@ -312,8 +302,6 @@ func TestHandleSessionWatchStart_WhitespaceOnlySessionName(t *testing.T) {
 		SessionName: "   ",
 		SessionFile: "/path/to/session.jsonl",
 		AdapterName: "codex",
-		LedgerPath:  "/ledger",
-		CachePath:   "/cache",
 	}
 
 	raw, _ := json.Marshal(payload)
@@ -344,7 +332,6 @@ func TestHandleSessionWatchStop_WhitespaceOnlySessionName(t *testing.T) {
 
 	raw, _ := json.Marshal(SessionWatchStopPayload{
 		SessionName: "   ",
-		LedgerPath:  "/ledger",
 	})
 	result := handleSessionWatchStop(s, Message{Payload: raw}, nil)
 

@@ -329,14 +329,11 @@ type SessionWatchStartPayload struct {
 	SessionName string `json:"session_name"` // session folder name (e.g. "2026-03-12T11-09-ryan-OxTndR")
 	SessionFile string `json:"session_file"` // path to agent's native session file (e.g. ~/.codex/sessions/...jsonl)
 	AdapterName string `json:"adapter_name"` // "codex", "claude-code", etc.
-	LedgerPath  string `json:"ledger_path"`  // ledger repo root
-	CachePath   string `json:"cache_path"`   // ledger cache session dir (where raw.jsonl lives)
 }
 
 // SessionWatchStopPayload signals the daemon to stop tailing a session.
 type SessionWatchStopPayload struct {
 	SessionName string `json:"session_name"`
-	LedgerPath  string `json:"ledger_path"`
 }
 
 // MurmurPausePayload carries the agent ID for pause/resume murmur nudging.

@@ -879,9 +879,10 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 	}
 
 	// for tail-mode sessions: try to find the agent's session file and tell
-	// the daemon to start tailing it. If the file doesn't exist yet (agent
-	// conversation hasn't started), the daemon's doctor interval will pick it
-	// up later via DetectAndRestart.
+	// the daemon to start tailing it. If TryConnect returns nil (daemon not
+	// yet running), no data is lost: DetectAndRestart reads from
+	// SourceOffset=0, catching up from the beginning of the file once the
+	// daemon starts and discovers the active recording.
 	if state.WatchMode == "tail" {
 		sendSessionWatchStart(state, projectRoot)
 	}
@@ -932,20 +933,10 @@ func sendSessionWatchStart(state *session.RecordingState, projectRoot string) {
 		return
 	}
 
-	// determine ledger path for cache location
-	ledgerPath := ""
-	if state.SessionPath != "" {
-		// session path is inside ledger: .../sessions/<name>/
-		// ledger is 2 levels up from session dir
-		ledgerPath = filepath.Dir(filepath.Dir(state.SessionPath))
-	}
-
 	_ = client.SessionWatchStart(daemon.SessionWatchStartPayload{
 		SessionName: filepath.Base(state.SessionPath),
 		SessionFile: sessionFile,
 		AdapterName: state.AdapterName,
-		LedgerPath:  ledgerPath,
-		CachePath:   state.SessionPath,
 	})
 }
 

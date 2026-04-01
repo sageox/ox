@@ -149,32 +149,47 @@ func (tw *TailWatcher) readRaw(offset int64) ([]RawEntry, int64, error) {
 	}
 	defer f.Close()
 
+	// clamp offset to file size to handle file truncation
+	if fi, err := f.Stat(); err == nil && offset > fi.Size() {
+		offset = fi.Size()
+	}
+
 	if _, err := f.Seek(offset, 0); err != nil {
 		return nil, offset, err
 	}
 
 	var entries []RawEntry
+	consumed := offset
 	scanner := bufio.NewScanner(f)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 10*1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		// advance past this line (+1 for the newline delimiter)
+		consumed += int64(len(line)) + 1
 		if len(line) == 0 {
 			continue
 		}
-		parsed, err := tw.parseLine(line)
-		if err != nil {
-			continue
+		parsed, parseErr := tw.parseLine(line)
+		if parseErr != nil {
+			continue // skip unparseable lines but still advance offset
 		}
 		entries = append(entries, parsed...)
 	}
-
-	newOffset, err := f.Seek(0, 1)
-	if err != nil {
-		newOffset = offset
+	if err := scanner.Err(); err != nil {
+		return entries, consumed, err
 	}
-	return entries, newOffset, nil
+
+	// bufio.Scanner returns partial trailing lines (no final newline), but our
+	// consumed calculation adds +1 for a newline that may not exist. Clamp to
+	// actual file position so partial lines are re-read when complete.
+	pos, seekErr := f.Seek(0, 1)
+	if seekErr == nil && consumed > pos {
+		consumed = pos
+	}
+
+	return entries, consumed, nil
 }
 
 // Offset returns the current read position.

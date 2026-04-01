@@ -378,6 +378,163 @@ func TestSessionWatcherManager_PersistOffset_UpdatesRecordingState(t *testing.T)
 	assert.Equal(t, 8, updated.EntryCount) // 5 + 3
 }
 
+// TestSessionWatcherManager_LiveTail_EntryCountLinear verifies that EntryCount
+// grows linearly (not quadratically) when multiple entries are processed.
+// Failure prevented: cumulative counter passed as delta to persistOffset causes
+// EntryCount to inflate as N*(N+1)/2 instead of N.
+func TestSessionWatcherManager_LiveTail_EntryCountLinear(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: fsnotify watcher test with file I/O timing")
+	}
+
+	mgr := newTestWatcherManager()
+	defer mgr.StopAll()
+
+	dir := t.TempDir()
+	sessionFile := filepath.Join(dir, "session.jsonl")
+	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
+
+	// write initial .recording.json with EntryCount=0
+	state := session.RecordingState{WatchMode: "tail", EntryCount: 0}
+	recData, _ := json.Marshal(state)
+	recPath := filepath.Join(dir, ".recording.json")
+	require.NoError(t, os.WriteFile(recPath, recData, 0644))
+
+	require.NoError(t, mgr.StartWatch("count-test", sessionFile, "codex", "/ledger", dir))
+
+	// let fsnotify watcher register before writing entries
+	time.Sleep(200 * time.Millisecond)
+
+	// write 3 entries sequentially, waiting for each to be processed
+	entries := []string{
+		`{"timestamp":"2026-03-31T10:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"msg 1"}]}}`,
+		`{"timestamp":"2026-03-31T10:01:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"reply 1"}]}}`,
+		`{"timestamp":"2026-03-31T10:02:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"msg 2"}]}}`,
+	}
+
+	for i, entry := range entries {
+		f, err := os.OpenFile(sessionFile, os.O_WRONLY|os.O_APPEND, 0644)
+		require.NoError(t, err)
+		_, err = f.WriteString(entry + "\n")
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+
+		// wait for this entry to be reflected in EntryCount
+		expectedCount := i + 1
+		require.Eventually(t, func() bool {
+			data, err := os.ReadFile(recPath)
+			if err != nil {
+				return false
+			}
+			var s session.RecordingState
+			if err := json.Unmarshal(data, &s); err != nil {
+				return false
+			}
+			return s.EntryCount >= expectedCount
+		}, 5*time.Second, 100*time.Millisecond,
+			"EntryCount should reach %d after entry %d", expectedCount, i+1)
+	}
+
+	// read final state — EntryCount must be exactly 3, not 6 (quadratic)
+	finalData, err := os.ReadFile(recPath)
+	require.NoError(t, err)
+	var finalState session.RecordingState
+	require.NoError(t, json.Unmarshal(finalData, &finalState))
+
+	assert.Equal(t, 3, finalState.EntryCount,
+		"EntryCount must grow linearly (3), not quadratically (6)")
+}
+
+// TestSessionWatcherManager_PersistOffset_AtomicWrite verifies that persistOffset
+// uses atomic write (temp + rename) so concurrent readers never see partial JSON.
+// Failure prevented: CLI reads truncated .recording.json during daemon write.
+func TestSessionWatcherManager_PersistOffset_AtomicWrite(t *testing.T) {
+	mgr := newTestWatcherManager()
+
+	dir := t.TempDir()
+	aw := &activeWatcher{cachePath: dir, sessionName: "atomic-test"}
+	recPath := filepath.Join(dir, ".recording.json")
+
+	state := session.RecordingState{WatchMode: "tail", EntryCount: 0}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(recPath, data, 0644))
+
+	// run many concurrent persistOffset calls — every read of the file
+	// should yield valid JSON (never a partial write)
+	const iterations = 100
+	done := make(chan struct{})
+
+	// writer goroutine
+	go func() {
+		defer close(done)
+		for i := 0; i < iterations; i++ {
+			mgr.persistOffset(aw, int64(i*100), 1)
+		}
+	}()
+
+	// reader goroutine — continuously reads the file and checks valid JSON
+	invalidReads := 0
+	for {
+		select {
+		case <-done:
+			assert.Equal(t, 0, invalidReads,
+				"all reads during concurrent writes must yield valid JSON")
+			return
+		default:
+			raw, err := os.ReadFile(recPath)
+			if err != nil {
+				continue // file might be mid-rename
+			}
+			var s session.RecordingState
+			if err := json.Unmarshal(raw, &s); err != nil {
+				invalidReads++
+			}
+		}
+	}
+}
+
+// TestSessionWatcherManager_PersistOffset_PreservesCLIFields verifies that
+// persistOffset only updates SourceOffset and EntryCount, preserving all
+// other fields written by the CLI (e.g., StoppedAt, SessionFile).
+// Failure prevented: daemon overwrites CLI-set StoppedAt, causing watcher to never stop.
+func TestSessionWatcherManager_PersistOffset_PreservesCLIFields(t *testing.T) {
+	mgr := newTestWatcherManager()
+
+	dir := t.TempDir()
+	aw := &activeWatcher{cachePath: dir}
+	recPath := filepath.Join(dir, ".recording.json")
+
+	// CLI writes .recording.json with StoppedAt and other fields
+	now := time.Now().UTC().Truncate(time.Second)
+	state := session.RecordingState{
+		WatchMode:   "tail",
+		EntryCount:  10,
+		AgentID:     "test-agent",
+		AdapterName: "codex",
+		SessionFile: "/some/session.jsonl",
+		StoppedAt:   &now,
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(recPath, data, 0644))
+
+	// daemon persists offset
+	mgr.persistOffset(aw, 5000, 2)
+
+	// read back — StoppedAt and other CLI fields must survive
+	raw, err := os.ReadFile(recPath)
+	require.NoError(t, err)
+	var updated session.RecordingState
+	require.NoError(t, json.Unmarshal(raw, &updated))
+
+	assert.Equal(t, int64(5000), updated.SourceOffset)
+	assert.Equal(t, 12, updated.EntryCount) // 10 + 2
+	assert.NotNil(t, updated.StoppedAt, "StoppedAt must survive persistOffset")
+	assert.Equal(t, now, *updated.StoppedAt, "StoppedAt value must be preserved")
+	assert.Equal(t, "test-agent", updated.AgentID, "AgentID must be preserved")
+	assert.Equal(t, "codex", updated.AdapterName, "AdapterName must be preserved")
+	assert.Equal(t, "/some/session.jsonl", updated.SessionFile, "SessionFile must be preserved")
+}
+
 // --- E. Cleanup ---
 
 // TestSessionWatcherManager_Cleanup_StopsStopped verifies cleanup stops watchers

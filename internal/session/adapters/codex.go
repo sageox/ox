@@ -282,6 +282,10 @@ func (a *CodexAdapter) Read(sessionPath string) ([]RawEntry, error) {
 }
 
 // Watch monitors a Codex session file for new entries using fsnotify with debouncing.
+// mergeToolEntries is applied per-batch via WithBatchTransform, so function_call and
+// function_call_output arriving in separate batches won't be merged here. This is
+// intentional: unmerged entries in raw.jsonl are independently useful, and cross-batch
+// merge is applied at read-time during finalization.
 func (a *CodexAdapter) Watch(ctx context.Context, sessionPath string) (<-chan RawEntry, error) {
 	var offset int64
 	if info, err := os.Stat(sessionPath); err == nil {
