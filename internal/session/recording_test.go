@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1681,19 +1682,22 @@ func TestSaveRecordingState_PersistsAndLeavesNoArtifacts(t *testing.T) {
 // XDG_CACHE_HOME) creates recording state in ~/.cache/..., but terminal hooks
 // (XDG_CACHE_HOME=~/Library/Caches) couldn't find it.
 //
-// Uses the real home directory since paths.getHomeDir() is cached via sync.Once
-// and cannot be overridden from outside the paths package.
+// Derives the effective home from paths.CacheDir() rather than os.UserHomeDir()
+// because paths.getHomeDir() is cached via sync.Once — other tests that set HOME
+// to temp dirs can cause the cached value to diverge from os.UserHomeDir().
 func TestCrossEnvRecordingStateRoundTrip(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("macOS-specific cache path test")
 	}
 
-	// use a unique repoID to avoid collisions with real data
 	repoID := "repo-crossenv-test-ephemeral"
 	agentID := "OxCrossEnv1"
 
-	home, err := os.UserHomeDir()
-	require.NoError(t, err)
+	// derive the effective home that paths package uses (may differ from
+	// os.UserHomeDir() due to sync.Once caching in getHomeDir())
+	t.Setenv("XDG_CACHE_HOME", "")
+	cacheDir := paths.CacheDir() // <cachedHome>/.cache/sageox
+	effectiveHome := filepath.Dir(filepath.Dir(cacheDir))
 
 	// create a project root with .sageox/config.json
 	projectRoot := t.TempDir()
@@ -1702,16 +1706,15 @@ func TestCrossEnvRecordingStateRoundTrip(t *testing.T) {
 	configJSON := `{"repo_id":"` + repoID + `"}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(configJSON), 0600))
 
-	// place recording state in ~/.cache/sageox/sessions/<repoID>/sessions/<name>/
+	// place recording state in <effectiveHome>/.cache/sageox/sessions/<repoID>/sessions/<name>/
 	// this simulates Conductor (no XDG_CACHE_HOME → defaults to ~/.cache)
-	cacheSessionsDir := filepath.Join(home, ".cache", "sageox", "sessions", repoID, "sessions")
+	cacheSessionsDir := filepath.Join(effectiveHome, ".cache", "sageox", "sessions", repoID, "sessions")
 	sessionName := "2026-03-18T16-00-user-" + agentID
 	sessionPath := filepath.Join(cacheSessionsDir, sessionName)
 	require.NoError(t, os.MkdirAll(sessionPath, 0755))
 	t.Cleanup(func() {
-		// clean up the unique repoID dir under both cache roots
-		os.RemoveAll(filepath.Join(home, ".cache", "sageox", "sessions", repoID))
-		os.RemoveAll(filepath.Join(home, "Library", "Caches", "sageox", "sessions", repoID))
+		os.RemoveAll(filepath.Join(effectiveHome, ".cache", "sageox", "sessions", repoID))
+		os.RemoveAll(filepath.Join(effectiveHome, "Library", "Caches", "sageox", "sessions", repoID))
 	})
 
 	state := &RecordingState{
@@ -1719,7 +1722,7 @@ func TestCrossEnvRecordingStateRoundTrip(t *testing.T) {
 		StartedAt:   time.Now().UTC(),
 		AdapterName: "claude-code",
 		SessionPath: sessionPath,
-		CacheDir:    filepath.Join(home, ".cache", "sageox"),
+		CacheDir:    filepath.Join(effectiveHome, ".cache", "sageox"),
 	}
 	data, marshalErr := json.MarshalIndent(state, "", "  ")
 	require.NoError(t, marshalErr)
@@ -1728,12 +1731,12 @@ func TestCrossEnvRecordingStateRoundTrip(t *testing.T) {
 	// simulate terminal shell environment (XDG_CACHE_HOME=~/Library/Caches)
 	// — SessionCacheDir will now resolve to ~/Library/Caches/sageox/sessions/<repoID>
 	// — but the recording state lives in ~/.cache/sageox/sessions/<repoID>/sessions/
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "Library", "Caches"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(effectiveHome, "Library", "Caches"))
 
 	found, loadErr := LoadRecordingStateForAgent(projectRoot, agentID)
 	require.NoError(t, loadErr)
 	require.NotNil(t, found, "recording state should be found via alternate cache dir scan")
 	assert.Equal(t, agentID, found.AgentID)
-	assert.Equal(t, filepath.Join(home, ".cache", "sageox"), found.CacheDir,
+	assert.Equal(t, filepath.Join(effectiveHome, ".cache", "sageox"), found.CacheDir,
 		"CacheDir should reflect the original creating process's cache dir")
 }
