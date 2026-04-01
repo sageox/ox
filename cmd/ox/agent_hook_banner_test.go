@@ -72,11 +72,12 @@ func TestEmitStartupBanner_ClaudeCodeNoRecording(t *testing.T) {
 	}
 }
 
-// TestEmitStartupBanner_NonClaudeAgent verifies no output for non-Claude agents.
-// Failure prevented: raw JSON leaking into terminals of agents that don't
-// understand the systemMessage protocol.
-func TestEmitStartupBanner_NonClaudeAgent(t *testing.T) {
+// TestEmitStartupBanner_GeminiAgent verifies banner emits for Gemini CLI
+// with the same JSON protocol as Claude Code.
+// Failure prevented: Gemini sessions start without team context or recording disclosure.
+func TestEmitStartupBanner_GeminiAgent(t *testing.T) {
 	projectRoot := initBannerTestProject(t, "auto")
+	t.Setenv("OX_SESSION_RECORDING", "auto")
 
 	ctx := &HookContext{
 		AgentType:   "gemini",
@@ -87,8 +88,36 @@ func TestEmitStartupBanner_NonClaudeAgent(t *testing.T) {
 		emitStartupBanner(ctx)
 	})
 
+	msg := parseBannerSystemMessage(t, output)
+
+	if !strings.Contains(msg, "Gemini CLI") {
+		t.Errorf("expected agent display name 'Gemini CLI' in message, got: %s", msg)
+	}
+	if !strings.Contains(msg, "enhanced by team context from SageOx") {
+		t.Errorf("expected 'enhanced by team context from SageOx' in message, got: %s", msg)
+	}
+	if !strings.Contains(msg, "recorded and shared") {
+		t.Errorf("expected recording notice in message, got: %s", msg)
+	}
+}
+
+// TestEmitStartupBanner_UnsupportedAgent verifies no output for agents that don't
+// understand the systemMessage protocol.
+// Failure prevented: raw JSON leaking into terminals of unsupported agents.
+func TestEmitStartupBanner_UnsupportedAgent(t *testing.T) {
+	projectRoot := initBannerTestProject(t, "auto")
+
+	ctx := &HookContext{
+		AgentType:   "cursor",
+		ProjectRoot: projectRoot,
+	}
+
+	output := captureBannerStdout(t, func() {
+		emitStartupBanner(ctx)
+	})
+
 	if strings.TrimSpace(output) != "" {
-		t.Errorf("expected no output for non-Claude agent, got: %s", output)
+		t.Errorf("expected no output for unsupported agent, got: %s", output)
 	}
 }
 

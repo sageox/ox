@@ -8,43 +8,6 @@ import (
 	"time"
 )
 
-func TestDistillStateV2_LastDailyTime_InvalidFormat(t *testing.T) {
-	t.Parallel()
-
-	state := &distillStateV2{LastDaily: "not-a-timestamp"}
-	got := state.lastDailyTime()
-	if !got.IsZero() {
-		t.Errorf("lastDailyTime() with invalid format = %v, want zero", got)
-	}
-}
-
-func TestDistillStateV2_LastDailyTime_V1Fallback(t *testing.T) {
-	t.Parallel()
-
-	state := &distillStateV2{
-		LastDaily:     "",
-		LastDistilled: "2026-03-15T10:00:00Z",
-	}
-	got := state.lastDailyTime()
-	expected := time.Date(2026, 3, 15, 10, 0, 0, 0, time.UTC)
-	if !got.Equal(expected) {
-		t.Errorf("lastDailyTime() with v1 fallback = %v, want %v", got, expected)
-	}
-}
-
-func TestDistillStateV2_LastDailyTime_V1FallbackInvalid(t *testing.T) {
-	t.Parallel()
-
-	state := &distillStateV2{
-		LastDaily:     "",
-		LastDistilled: "garbage",
-	}
-	got := state.lastDailyTime()
-	if !got.IsZero() {
-		t.Errorf("lastDailyTime() with invalid v1 fallback = %v, want zero", got)
-	}
-}
-
 func TestDistillStateV2_LastWeeklyTime_InvalidFormat(t *testing.T) {
 	t.Parallel()
 
@@ -376,7 +339,7 @@ func TestFormatDailyMemory_AllCombinations(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := formatDailyMemory(tt.date, tt.content, tt.obsCount, tt.factCount)
+			got := formatDailyMemory(tt.date, tt.content, tt.obsCount, tt.factCount, nil)
 			if len(got) == 0 {
 				t.Fatal("formatDailyMemory returned empty string")
 			}

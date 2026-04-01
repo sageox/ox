@@ -369,11 +369,18 @@ func (m *SessionWatcherManager) persistOffset(aw *activeWatcher, offset int64, e
 // resolveAdapter returns the adapter for the given name.
 func resolveAdapter(name string) (adapters.Adapter, error) {
 	switch name {
-	case "codex":
-		return &adapters.CodexAdapter{}, nil
 	case "claude-code":
 		return &adapters.ClaudeCodeAdapter{}, nil
+	case "codex":
+		return &adapters.CodexAdapter{}, nil
+	case "gemini":
+		return &adapters.GeminiAdapter{}, nil
 	default:
-		return nil, fmt.Errorf("unknown adapter: %q", name)
+		// fall back to adapter registry for any other name (generic, etc.)
+		adapter, err := adapters.GetAdapter(name)
+		if err != nil {
+			return nil, fmt.Errorf("unknown adapter: %q", name)
+		}
+		return adapter, nil
 	}
 }

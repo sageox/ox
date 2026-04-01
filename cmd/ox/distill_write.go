@@ -179,6 +179,33 @@ func writeMemoryFile(tcPath, relPath, content string) error {
 	return os.WriteFile(fullPath, []byte(content), 0o644)
 }
 
+// removeMemoryFile deletes a file from the team context and commits the removal.
+func removeMemoryFile(tcPath, relPath, commitMsg string) error {
+	fullPath := filepath.Join(tcPath, relPath)
+	if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove file: %w", err)
+	}
+
+	// git add --sparse stages the deletion
+	addCmd := exec.Command("git", "add", "--sparse", relPath)
+	addCmd.Dir = tcPath
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add (removal): %s: %w", string(out), err)
+	}
+
+	commitCmd := exec.Command("git", "commit", "-m", commitMsg, "--allow-empty-message")
+	commitCmd.Dir = tcPath
+	if out, err := commitCmd.CombinedOutput(); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 &&
+			strings.Contains(string(out), "nothing to commit") {
+			return nil
+		}
+		return fmt.Errorf("git commit: %s: %w", string(out), err)
+	}
+	return nil
+}
+
 // commitMemoryFile stages and commits a memory file in the team context git repo.
 func commitMemoryFile(tcPath, relPath, commitMsg string) error {
 	// git add --sparse (required for sparse checkout repos)

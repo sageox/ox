@@ -302,6 +302,7 @@ type editorConfig struct {
 var knownEditors = []editorConfig{
 	{"OpenCode", []string{".opencode", ".config/opencode"}},
 	{"Gemini CLI", []string{".gemini"}},
+	{"Amp CLI", []string{".amp"}},
 	{"code_puppy", []string{".code_puppy"}},
 	{"Cursor", []string{".cursor", "Library/Application Support/Cursor"}},
 	{"Windsurf", []string{".windsurf", "Library/Application Support/Windsurf"}},
@@ -444,4 +445,14 @@ func detectCodePuppy() bool {
 // checkCodexHooks checks if Codex CLI hooks are properly installed
 func checkCodexHooks(fix bool) checkResult {
 	return checkAgentHooks(&CodexAgent{}, "Codex", fix)
+}
+
+// detectAmp checks if Amp CLI is installed or configured
+func detectAmp() bool {
+	return (&AmpAgent{}).Detect()
+}
+
+// checkAmpHooks checks if Amp CLI integration is properly installed
+func checkAmpHooks(fix bool) checkResult {
+	return checkAgentHooks(&AmpAgent{}, "Amp", fix)
 }

@@ -184,7 +184,7 @@ func TestWriteMemoryFile(t *testing.T) {
 }
 
 func TestFormatDailyMemory(t *testing.T) {
-	content := formatDailyMemory("2026-03-11", "Some distilled content", 5, 0)
+	content := formatDailyMemory("2026-03-11", "Some distilled content", 5, 0, nil)
 	if content == "" {
 		t.Error("expected non-empty content")
 	}
@@ -260,16 +260,10 @@ func TestDistillStateV2Migration(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// load as v2 (with empty tcPath — no memory files to infer from)
+	// v1 state is no longer migrated — just verify we get a fresh v2 state
 	state := loadDistillStateV2(tmp, tmp)
-	if state.TeamID != "team-abc" {
-		t.Errorf("expected team-abc, got %s", state.TeamID)
-	}
-
-	// v1's LastDistilled should be used as fallback for lastDailyTime
-	daily := state.lastDailyTime()
-	if daily.IsZero() {
-		t.Error("lastDailyTime should fall back to v1 LastDistilled")
+	if state.SchemaVersion != "2" {
+		t.Errorf("expected schema version 2, got %s", state.SchemaVersion)
 	}
 }
 
@@ -283,9 +277,8 @@ func TestDistillStateV2SaveLoad(t *testing.T) {
 	state := &distillStateV2{
 		SchemaVersion: "2",
 		TeamID:        "team-xyz",
-		LastDaily:     "2026-03-11T10:00:00Z",
 		LastWeekly:    "2026-03-10T10:00:00Z",
-		DailyCount:    15,
+		LastMonthly:   "2026-02-28T23:59:59Z",
 	}
 
 	if err := saveDistillStateV2(tmp, state); err != nil {
@@ -296,47 +289,19 @@ func TestDistillStateV2SaveLoad(t *testing.T) {
 	if loaded.TeamID != "team-xyz" {
 		t.Errorf("expected team-xyz, got %s", loaded.TeamID)
 	}
-	if loaded.LastDaily != "2026-03-11T10:00:00Z" {
-		t.Errorf("expected LastDaily 2026-03-11T10:00:00Z, got %s", loaded.LastDaily)
-	}
-	if loaded.DailyCount != 15 {
-		t.Errorf("expected DailyCount 15, got %d", loaded.DailyCount)
+	if loaded.LastWeekly != "2026-03-10T10:00:00Z" {
+		t.Errorf("expected LastWeekly 2026-03-10T10:00:00Z, got %s", loaded.LastWeekly)
 	}
 }
 
 func TestDistillStateV2LastTimes(t *testing.T) {
 	t.Run("zero state returns zero times", func(t *testing.T) {
 		state := &distillStateV2{}
-		if !state.lastDailyTime().IsZero() {
-			t.Error("expected zero lastDailyTime for empty state")
-		}
 		if !state.lastWeeklyTime().IsZero() {
 			t.Error("expected zero lastWeeklyTime for empty state")
 		}
 		if !state.lastMonthlyTime().IsZero() {
 			t.Error("expected zero lastMonthlyTime for empty state")
-		}
-	})
-
-	t.Run("lastDaily prefers LastDaily over LastDistilled", func(t *testing.T) {
-		state := &distillStateV2{
-			LastDaily:     "2026-03-11T10:00:00Z",
-			LastDistilled: "2026-03-01T10:00:00Z",
-		}
-		daily := state.lastDailyTime()
-		expected, _ := time.Parse(time.RFC3339, "2026-03-11T10:00:00Z")
-		if !daily.Equal(expected) {
-			t.Errorf("expected %v, got %v", expected, daily)
-		}
-	})
-
-	t.Run("lastDaily falls back to LastDistilled", func(t *testing.T) {
-		state := &distillStateV2{
-			LastDistilled: "2026-03-01T10:00:00Z",
-		}
-		daily := state.lastDailyTime()
-		if daily.IsZero() {
-			t.Error("expected non-zero lastDailyTime from LastDistilled fallback")
 		}
 	})
 }
@@ -814,17 +779,8 @@ func TestLoadState_FallbackToHighWater(t *testing.T) {
 	os.MkdirAll(monthlyDir, 0o755)
 	os.WriteFile(filepath.Join(monthlyDir, "2026-02.md"), []byte("feb"), 0o644)
 
-	// no state file — should infer from existing files
+	// no state file — should infer weekly/monthly from existing files
 	state := loadDistillStateV2(tmp, tcPath)
-
-	daily := state.lastDailyTime()
-	if daily.IsZero() {
-		t.Error("expected non-zero lastDailyTime from high-water inference")
-	}
-	wantDaily := time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC)
-	if !daily.Equal(wantDaily) {
-		t.Errorf("lastDailyTime = %v, want %v", daily, wantDaily)
-	}
 
 	weekly := state.lastWeeklyTime()
 	if weekly.IsZero() {
@@ -834,30 +790,6 @@ func TestLoadState_FallbackToHighWater(t *testing.T) {
 	monthly := state.lastMonthlyTime()
 	if monthly.IsZero() {
 		t.Error("expected non-zero lastMonthlyTime from high-water inference")
-	}
-}
-
-func TestLoadState_MigratesV1(t *testing.T) {
-	tmp := t.TempDir()
-	sageoxDir := filepath.Join(tmp, ".sageox")
-	os.MkdirAll(sageoxDir, 0o755)
-
-	v1State := &distillState{
-		SchemaVersion:    "1",
-		LastDistilled:    "2026-03-10T12:00:00Z",
-		ObservationCount: 10,
-		TeamID:           "team-abc",
-	}
-	saveDistillState(tmp, v1State)
-
-	// v1 migration should NOT also infer from files (v1 data takes precedence)
-	state := loadDistillStateV2(tmp, tmp)
-	if state.TeamID != "team-abc" {
-		t.Errorf("expected team-abc, got %s", state.TeamID)
-	}
-	daily := state.lastDailyTime()
-	if daily.IsZero() {
-		t.Error("v1 LastDistilled should be used as daily fallback")
 	}
 }
 
@@ -902,95 +834,6 @@ func TestParseFactDate(t *testing.T) {
 			}
 		})
 	}
-}
-
-// --- Multi-ledger (per-repo state) tests ---
-
-func TestDistillStateV2_SessionsForRepo(t *testing.T) {
-	t.Parallel()
-	state := &distillStateV2{}
-
-	// first access creates the map
-	m := state.sessionsForRepo("repo-a")
-	require.NotNil(t, m)
-	m["session-1"] = "hash1"
-
-	// same repo returns same map
-	m2 := state.sessionsForRepo("repo-a")
-	assert.Equal(t, "hash1", m2["session-1"])
-
-	// different repo gets independent map
-	m3 := state.sessionsForRepo("repo-b")
-	assert.Empty(t, m3)
-}
-
-func TestDistillStateV2_GitHubFactsTimeForRepo(t *testing.T) {
-	t.Parallel()
-	now := time.Now().UTC()
-	state := &distillStateV2{}
-
-	// no per-repo state, no flat state, no fact files on disk →
-	// falls through to the 7-day default in githubFactsSince
-	tcDir := t.TempDir()
-	since := state.githubFactsTimeForRepo("repo-a", tcDir)
-	expectedDefault := now.AddDate(0, 0, -7)
-	assert.InDelta(t, expectedDefault.Unix(), since.Unix(), 5,
-		"empty state should fall back to ~7 days ago, got %s", since)
-
-	// set per-repo time — should return exactly that
-	state.setGitHubFactsTime("repo-a", now)
-	since = state.githubFactsTimeForRepo("repo-a", tcDir)
-	assert.Equal(t, now.Format(time.RFC3339), since.Format(time.RFC3339))
-
-	// different repo has no per-repo entry → falls back to 7-day default,
-	// NOT to repo-a's timestamp
-	since2 := state.githubFactsTimeForRepo("repo-b", tcDir)
-	assert.InDelta(t, expectedDefault.Unix(), since2.Unix(), 5,
-		"repo-b should get the 7-day default, not repo-a's time; got %s", since2)
-}
-
-func TestDistillStateV2_MigrateToPerRepo(t *testing.T) {
-	t.Parallel()
-
-	state := &distillStateV2{
-		ProcessedSessions: map[string]string{
-			"session-1": "hash-a",
-			"session-2": "hash-b",
-		},
-		LastGitHubFacts: "2026-03-20T10:00:00Z",
-	}
-
-	state.migrateToPerRepo("repo-primary")
-
-	// sessions migrated
-	require.Contains(t, state.RepoSessions, "repo-primary")
-	assert.Equal(t, "hash-a", state.RepoSessions["repo-primary"]["session-1"])
-	assert.Equal(t, "hash-b", state.RepoSessions["repo-primary"]["session-2"])
-
-	// github facts migrated
-	require.Contains(t, state.RepoGitHubFacts, "repo-primary")
-	assert.Equal(t, "2026-03-20T10:00:00Z", state.RepoGitHubFacts["repo-primary"])
-}
-
-func TestDistillStateV2_MigrateToPerRepo_NoOp(t *testing.T) {
-	t.Parallel()
-
-	// already has per-repo state — migration should not overwrite
-	state := &distillStateV2{
-		ProcessedSessions: map[string]string{"old": "data"},
-		RepoSessions: map[string]map[string]string{
-			"repo-a": {"session-x": "hash-x"},
-		},
-		RepoGitHubFacts: map[string]string{
-			"repo-a": "2026-03-25T00:00:00Z",
-		},
-	}
-
-	state.migrateToPerRepo("repo-a")
-
-	// per-repo state should be unchanged
-	assert.Equal(t, "hash-x", state.RepoSessions["repo-a"]["session-x"])
-	assert.Equal(t, "2026-03-25T00:00:00Z", state.RepoGitHubFacts["repo-a"])
 }
 
 func TestResolveDistillRepos_NoEnv(t *testing.T) {

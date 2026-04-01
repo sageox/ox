@@ -230,7 +230,7 @@ func TestFormatDailyMemory_SourceVariants(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := formatDailyMemory("2026-03-25", "Distilled content here.", tt.obsCount, tt.factCount)
+			result := formatDailyMemory("2026-03-25", "Distilled content here.", tt.obsCount, tt.factCount, nil)
 			assert.Contains(t, result, "# Daily Memory")
 			assert.Contains(t, result, "2026-03-25")
 			assert.Contains(t, result, "Distilled content here.")
@@ -309,7 +309,7 @@ func TestGroupObservationsByDay_EdgeCases(t *testing.T) {
 
 func TestScanPendingDiscussions_Pure(t *testing.T) {
 	t.Run("missing directory returns nil", func(t *testing.T) {
-		result, err := scanPendingDiscussions("/nonexistent/path", nil)
+		result, err := scanPendingDiscussions("/nonexistent/path")
 		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
@@ -319,7 +319,7 @@ func TestScanPendingDiscussions_Pure(t *testing.T) {
 		discussionsDir := filepath.Join(tmp, "discussions")
 		require.NoError(t, os.MkdirAll(discussionsDir, 0755))
 
-		result, err := scanPendingDiscussions(tmp, nil)
+		result, err := scanPendingDiscussions(tmp)
 		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
@@ -331,7 +331,7 @@ func TestScanPendingDiscussions_Pure(t *testing.T) {
 		// create a file (not dir) in discussions
 		require.NoError(t, os.WriteFile(filepath.Join(discussionsDir, "notes.txt"), []byte("hi"), 0644))
 
-		result, err := scanPendingDiscussions(tmp, nil)
+		result, err := scanPendingDiscussions(tmp)
 		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
@@ -362,14 +362,10 @@ func TestSaveAndLoadDistillStateV2(t *testing.T) {
 	requireSageoxDir(t, tmp)
 
 	original := &distillStateV2{
-		SchemaVersion:        "2",
-		TeamID:               "team-round-trip",
-		LastDaily:            "2026-03-20T10:00:00Z",
-		LastWeekly:           "2026-03-15T10:00:00Z",
-		LastMonthly:          "2026-02-28T23:59:59Z",
-		DailyCount:           42,
-		LastDailyHash:        "abc123",
-		ProcessedDiscussions: map[string]string{"disc-1": "hash1"},
+		SchemaVersion: "2",
+		TeamID:        "team-round-trip",
+		LastWeekly:    "2026-03-15T10:00:00Z",
+		LastMonthly:   "2026-02-28T23:59:59Z",
 	}
 
 	require.NoError(t, saveDistillStateV2(tmp, original))
@@ -377,12 +373,8 @@ func TestSaveAndLoadDistillStateV2(t *testing.T) {
 	loaded := loadDistillStateV2(tmp, tmp)
 	assert.Equal(t, "2", loaded.SchemaVersion)
 	assert.Equal(t, "team-round-trip", loaded.TeamID)
-	assert.Equal(t, "2026-03-20T10:00:00Z", loaded.LastDaily)
 	assert.Equal(t, "2026-03-15T10:00:00Z", loaded.LastWeekly)
 	assert.Equal(t, "2026-02-28T23:59:59Z", loaded.LastMonthly)
-	assert.Equal(t, 42, loaded.DailyCount)
-	assert.Equal(t, "abc123", loaded.LastDailyHash)
-	assert.Equal(t, map[string]string{"disc-1": "hash1"}, loaded.ProcessedDiscussions)
 }
 
 func TestDetermineLayers_ExplicitMonthly(t *testing.T) {

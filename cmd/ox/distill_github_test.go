@@ -89,29 +89,6 @@ func TestBuildGitHubExtractorPrompt_WithGuidelines(t *testing.T) {
 	assert.Contains(t, prompt, "You are a signal extractor for an alignment feed system")
 }
 
-func TestGitHubFactsSince_Default(t *testing.T) {
-	t.Parallel()
-
-	state := &distillStateV2{}
-	since := githubFactsSince(state, t.TempDir())
-
-	// Should default to ~7 days ago
-	expected := time.Now().UTC().AddDate(0, 0, -7)
-	assert.InDelta(t, expected.Unix(), since.Unix(), 2)
-}
-
-func TestGitHubFactsSince_FromState(t *testing.T) {
-	t.Parallel()
-
-	ts := "2026-03-15T10:00:00Z"
-	state := &distillStateV2{LastGitHubFacts: ts}
-	since := githubFactsSince(state, t.TempDir())
-
-	assert.Equal(t, 2026, since.Year())
-	assert.Equal(t, time.March, since.Month())
-	assert.Equal(t, 15, since.Day())
-}
-
 func TestReadPendingGitHubFacts_EmptyDir(t *testing.T) {
 	t.Parallel()
 
@@ -214,13 +191,12 @@ func TestExtractGitHubFacts_Integration(t *testing.T) {
 		output: `{"headline":"Adopted token bucket rate limiting","summary":"Token bucket at 100 req/min","rationale":"Traffic growth","who":"alice","source_type":"github","source_ref":"https://github.com/org/repo/pull/42","timestamp":"2026-03-20T00:00:00Z"}`,
 	}
 
-	state := &distillStateV2{}
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, "test-repo", codeDBDir, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
 
 	// Verify prompt was sent to backend
@@ -246,15 +222,15 @@ func TestExtractGitHubFacts_Integration(t *testing.T) {
 			assert.Contains(t, contentStr, `"_meta"`)
 			assert.Contains(t, contentStr, `"schema_version":"2"`)
 			assert.Contains(t, contentStr, `"source_type":"github"`)
+			// query_since and source_hash should be present
+			assert.Contains(t, contentStr, `"query_since"`)
+			assert.Contains(t, contentStr, `"source_hash"`)
 			// UUID7 filename should be longer than just "YYYY-MM-DD.jsonl"
 			assert.Greater(t, len(e.Name()), len(expectedDay+".jsonl"))
 			found = true
 		}
 	}
 	assert.True(t, found, "expected UUID7 fact file for %s", expectedDay)
-
-	// Verify state was updated
-	assert.NotEmpty(t, state.RepoGitHubFacts["test-repo"])
 }
 
 func TestExtractGitHubFacts_DryRun(t *testing.T) {
@@ -271,7 +247,6 @@ func TestExtractGitHubFacts_DryRun(t *testing.T) {
 	})
 
 	backend := &mockBackend{}
-	state := &distillStateV2{}
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
 	var buf bytes.Buffer
@@ -281,13 +256,11 @@ func TestExtractGitHubFacts_DryRun(t *testing.T) {
 	distillDryRun = true
 	defer func() { distillDryRun = oldDryRun }()
 
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, "test-repo", codeDBDir, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
 
 	// Backend should NOT have been called
 	assert.Empty(t, backend.promptReceived)
-	// State should NOT have been updated
-	assert.Empty(t, state.RepoGitHubFacts["test-repo"])
 	// Output should show what would be processed, with per-day date
 	output := buf.String()
 	assert.Contains(t, output, "GitHub activity")
@@ -301,19 +274,16 @@ func TestExtractGitHubFacts_EmptySkip(t *testing.T) {
 	_, tcPath, codeDBDir := setupExtractGitHubFacts(t, nil)
 
 	backend := &mockBackend{}
-	state := &distillStateV2{}
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, "test-repo", codeDBDir, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
 
 	// Backend should NOT have been called (no activity)
 	assert.Empty(t, backend.promptReceived)
-	// State should be updated even on empty skip
-	assert.NotEmpty(t, state.RepoGitHubFacts["test-repo"])
 }
 
 // insertPRInCodeDB opens the CodeDB store, inserts a PR, and closes it.
@@ -346,47 +316,36 @@ func TestExtractGitHubFacts_TwoRunStateTracking(t *testing.T) {
 	})
 
 	backend := &mockBackend{output: `{"headline":"first run","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`}
-	state := &distillStateV2{}
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})
 
 	// First run: processes PRs #1-3
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, "test-repo", codeDBDir, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
-	assert.NotEmpty(t, state.RepoGitHubFacts["test-repo"])
 	assert.Contains(t, backend.promptReceived, "<batch>")
 
-	// Verify first run wrote UUID7 fact file(s)
+	// Verify first run wrote UUID7 fact file(s) with source_hash/date prefix in _meta
 	factsDir := filepath.Join(tcPath, "memory", ".github-facts")
 	entries1, err := os.ReadDir(factsDir)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, len(entries1), 1, "first run should produce at least 1 fact file")
 
-	// Record state after first run
-	firstRunState := state.RepoGitHubFacts["test-repo"]
-
-	// Artificially set the state back a bit so the second run has a wider window
-	// This simulates "time passing" between extraction runs
-	adjustedState, _ := time.Parse(time.RFC3339, firstRunState)
-	state.setGitHubFactsTime("test-repo", adjustedState.Add(-5*time.Minute))
-
-	// Insert PR #4 with current timestamp (within the adjusted window)
+	// Insert PR #4 with current timestamp — second run should pick it up
+	// because inferGitHubQueryHighWater reads source_hash/date prefix from first run's files
 	ts4 := time.Now().UTC().Unix()
 	insertPRInCodeDB(t, projectRoot, 4, "New PR", "bob", "open", ts4)
 
-	// Second run: should use adjusted state as window start, capturing PR #4
+	// Second run: should use source_hash/date prefix from first run's fact files as window start
 	backend.promptReceived = ""
 	backend.output = `{"headline":"second run","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`
 	cmd.SetOut(&bytes.Buffer{})
 
-	err = extractGitHubFacts(context.Background(), cmd, backend, tc, state, "test-repo", codeDBDir, "")
+	err = extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
 
-	// The second run should have processed PR #4 (high-water mark works)
+	// The second run should have processed PR #4 (high-water from fact files works)
 	assert.Contains(t, backend.promptReceived, "New PR")
-	// State should still be updated
-	assert.NotEmpty(t, state.RepoGitHubFacts["test-repo"])
 
 	// Both runs should have created separate UUID7 files (no overwrite)
 	entries2, err := os.ReadDir(factsDir)
@@ -407,13 +366,12 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 	})
 
 	backend := &mockBackend{output: `{"headline":"run 1","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`}
-	state := &distillStateV2{}
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})
 
 	// First run
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, "test-repo", codeDBDir, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
 
 	factsDir := filepath.Join(tcPath, "memory", ".github-facts")
@@ -422,16 +380,15 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 	firstRunCount := len(entries1)
 	assert.GreaterOrEqual(t, firstRunCount, 1, "first run should produce fact files")
 
-	// Reset state to simulate same-day re-run with new activity
-	state.setGitHubFactsTime("test-repo", time.Now().UTC().Add(-30*time.Minute))
+	// Insert new activity — second run picks up from source_hash/date prefix in first run's files
 	insertPRInCodeDB(t, projectRoot, 43, "Second PR", "bob", "open", time.Now().UTC().Unix())
 
 	backend.promptReceived = ""
 	backend.output = `{"headline":"run 2","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`
 	cmd.SetOut(&bytes.Buffer{})
 
-	// Second run same day
-	err = extractGitHubFacts(context.Background(), cmd, backend, tc, state, "test-repo", codeDBDir, "")
+	// Second run same day — uses source_hash/date prefix from first run's fact files
+	err = extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
 
 	entries2, err := os.ReadDir(factsDir)
@@ -474,14 +431,13 @@ func TestExtractGitHubFacts_MultiDayCatchup(t *testing.T) {
 
 	tracker := &trackingBackend{output: `{"headline":"facts","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`}
 
-	state := &distillStateV2{}
-	// Set state to before all 3 days
-	state.setGitHubFactsTime("test-repo", time.Now().UTC().AddDate(0, 0, -4))
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})
 
-	err := extractGitHubFacts(context.Background(), cmd, tracker, tc, state, "test-repo", codeDBDir, "")
+	// No existing fact files — inferGitHubQueryHighWater falls back to 7 days ago,
+	// which covers all 3 days of inserted data
+	err := extractGitHubFacts(context.Background(), cmd, tracker, tc, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
 
 	// Verify fact files were created for each day
@@ -536,9 +492,9 @@ func TestExtractGitHubFacts_HighWaterInference(t *testing.T) {
 		filepath.Join(factsDir, threeDaysAgo+"-019526a0-aaaa-7abc-8def-0123456789ab.md"),
 		[]byte(content), 0o644))
 
-	// No LastGitHubFacts in state — should infer from existing files
-	state := &distillStateV2{}
-	since := githubFactsSince(state, tcPath)
+	// inferGitHubQueryHighWater should fall back to filename-based inference
+	// (no .jsonl files with source_hash/date prefix, but .md files have date prefix)
+	since := inferGitHubQueryHighWater(tcPath)
 
 	// High-water should be inferred from the most recent fact file date
 	expectedDate := threeDaysAgo
@@ -787,4 +743,65 @@ func TestReadPendingGitHubFacts_MultiDayCatchup(t *testing.T) {
 		require.Len(t, result[day], 1, "day %s should have exactly 1 fact", day)
 		assert.Contains(t, result[day][0].Content, "Facts for "+day)
 	}
+}
+
+// --- inferGitHubQueryHighWater tests ---
+
+func TestInferGitHubQueryHighWater_WithFiles(t *testing.T) {
+	t.Parallel()
+
+	tcPath := t.TempDir()
+	factsDir := filepath.Join(tcPath, "memory", ".github-facts")
+	require.NoError(t, os.MkdirAll(factsDir, 0o755))
+
+	// Two JSONL files with different date prefixes
+	file1 := `{"_meta":{"schema_version":"2","source_type":"github","recorded_at":"2026-03-18T00:00:00Z"}}
+{"headline":"fact1","source_type":"github","timestamp":"2026-03-18T10:00:00Z"}
+`
+	file2 := `{"_meta":{"schema_version":"2","source_type":"github","recorded_at":"2026-03-20T00:00:00Z"}}
+{"headline":"fact2","source_type":"github","timestamp":"2026-03-20T10:00:00Z"}
+`
+	require.NoError(t, os.WriteFile(
+		filepath.Join(factsDir, "2026-03-18-pr-100.jsonl"),
+		[]byte(file1), 0o644))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(factsDir, "2026-03-20-pr-200.jsonl"),
+		[]byte(file2), 0o644))
+
+	hw := inferGitHubQueryHighWater(tcPath)
+
+	// Should return start-of-day for the latest date prefix in filenames
+	expected, _ := time.Parse("2006-01-02", "2026-03-20")
+	assert.Equal(t, expected, hw, "should return latest date from filenames")
+}
+
+func TestInferGitHubQueryHighWater_NoQueryUntil_FallsBackToFilename(t *testing.T) {
+	t.Parallel()
+
+	tcPath := t.TempDir()
+	factsDir := filepath.Join(tcPath, "memory", ".github-facts")
+	require.NoError(t, os.MkdirAll(factsDir, 0o755))
+
+	// Old-style .md file without source_hash/date prefix — should fall back to filename-based
+	content := "# GitHub Facts: 2026-03-15\n\nOld facts\n"
+	require.NoError(t, os.WriteFile(
+		filepath.Join(factsDir, "2026-03-15-019526a0-aaaa-7abc-8def-0123456789ab.md"),
+		[]byte(content), 0o644))
+
+	hw := inferGitHubQueryHighWater(tcPath)
+
+	// Should fall back to inferGitHubFactsHighWater (filename-based)
+	assert.Equal(t, "2026-03-15", hw.Format("2006-01-02"),
+		"should fall back to filename-based high water when no source_hash/date prefix present")
+}
+
+func TestInferGitHubQueryHighWater_NoFiles_DefaultsTo7DaysAgo(t *testing.T) {
+	t.Parallel()
+
+	tcPath := t.TempDir()
+	hw := inferGitHubQueryHighWater(tcPath)
+
+	expected := time.Now().UTC().AddDate(0, 0, -7)
+	assert.InDelta(t, expected.Unix(), hw.Unix(), 2,
+		"should default to ~7 days ago when no fact files exist")
 }

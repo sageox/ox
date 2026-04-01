@@ -44,9 +44,9 @@ type discussionMetadata struct {
 }
 
 // scanPendingDiscussions reads the discussions/ directory in the team context
-// and returns discussions not yet tracked in state.ProcessedDiscussions.
+// and returns discussions that need (re-)extraction based on source_hash in fact files.
 // Each discussion dir is expected to contain metadata.json, summary.md, and optionally transcript.vtt.
-func scanPendingDiscussions(tcPath string, processed map[string]string) ([]discussionInput, error) {
+func scanPendingDiscussions(tcPath string) ([]discussionInput, error) {
 	discussionsDir := filepath.Join(tcPath, "discussions")
 	entries, err := os.ReadDir(discussionsDir)
 	if err != nil {
@@ -74,26 +74,13 @@ func scanPendingDiscussions(tcPath string, processed map[string]string) ([]discu
 
 		// compute content hash for change detection
 		currentHash := discussionContentHash(dirPath)
-		factFileExists := fileExists(filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".md")) ||
-			fileExists(filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".jsonl"))
 
-		// skip if already processed with same hash and fact file exists
-		if prevHash, ok := processed[dirName]; ok && prevHash == currentHash && factFileExists {
-			continue
-		}
+		// check existing fact files for source_hash match
+		jsonlPath := filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".jsonl")
 
-		// legacy hash migration: older CLI versions hashed only core files
-		// (metadata.json, summary.md, transcript.vtt). If the core hash matches
-		// the stored hash, the discussion content hasn't changed — only the hash
-		// function expanded. Update the stored hash and skip re-processing,
-		// but only if the fact file still exists on disk.
-		if prevHash, ok := processed[dirName]; ok && prevHash == discussionCoreHash(dirPath) && factFileExists {
-			processed[dirName] = currentHash
-			continue
-		}
-
-		// skip if fact file already exists (covers fresh clone / deleted state)
-		if _, ok := processed[dirName]; !ok && factFileExists {
+		// skip if JSONL fact file exists with matching source_hash;
+		// all other cases (missing, legacy .md, stale hash) need extraction
+		if readFactFileSourceHash(jsonlPath) == currentHash && currentHash != "" {
 			continue
 		}
 
@@ -127,6 +114,25 @@ func scanPendingDiscussions(tcPath string, processed map[string]string) ([]discu
 	})
 
 	return pending, nil
+}
+
+// readFactFileSourceHash reads the _meta.source_hash from the first line of a JSONL fact file.
+// Returns empty string if the file doesn't exist, can't be parsed, or has no source_hash.
+func readFactFileSourceHash(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	firstLine, _, _ := strings.Cut(string(data), "\n")
+	firstLine = strings.TrimSpace(firstLine)
+	if firstLine == "" {
+		return ""
+	}
+	var header facts.FileHeader
+	if err := json.Unmarshal([]byte(firstLine), &header); err != nil {
+		return ""
+	}
+	return header.Meta.SourceHash
 }
 
 // loadDiscussionMetadata reads and parses metadata.json from a discussion dir.
@@ -220,19 +226,6 @@ func discussionContentHash(dirPath string) string {
 	return contentHash(parts...)
 }
 
-// discussionCoreHash computes a hash from only the core discussion files
-// (metadata.json, summary.md, transcript.vtt). This matches the hash that
-// older CLI versions stored, enabling migration without spurious re-processing.
-func discussionCoreHash(dirPath string) string {
-	var parts []string
-	for _, name := range coreDiscussionFiles {
-		if data, err := os.ReadFile(filepath.Join(dirPath, name)); err == nil {
-			parts = append(parts, string(data))
-		}
-	}
-	return contentHash(parts...)
-}
-
 // categorizeAnnotations groups annotations into fact categories aligned with
 // DiscussionFactsPrompt output (decisions, learnings, open_questions, action_items).
 func categorizeAnnotations(af *discussion.AnnotationsFile) (decisions, learnings, actionItems, openQuestions []string) {
@@ -254,14 +247,14 @@ func categorizeAnnotations(af *discussion.AnnotationsFile) (decisions, learnings
 	return
 }
 
-// extractFactsFromSummaryJSON generates fact output directly from server-generated
+// extractFactsFromSummaryJSON generates JSONL fact output directly from server-generated
 // structured data (summary.json), skipping the LLM entirely.
 // Pure data transformation — no network calls.
 //
 // Works with both v1 and v2 server summary formats. The top-level fact categories
 // (decisions, learnings, etc.) are identical in both versions. Chapters are only
-// present in v2 and contribute to Key Context when available.
-func extractFactsFromSummaryJSON(d discussionInput) (string, error) {
+// present in v2 and contribute to context facts when available.
+func extractFactsFromSummaryJSON(d discussionInput, sourceHash string) (string, error) {
 	summary, err := discussion.LoadSummary(d.SummaryJSONDir)
 	if err != nil {
 		return "", fmt.Errorf("load summary.json: %w", err)
@@ -273,42 +266,55 @@ func extractFactsFromSummaryJSON(d discussionInput) (string, error) {
 		return "", fmt.Errorf("summary.json has no categorized facts")
 	}
 
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "# Facts: %s\n", d.Title)
+	ts := d.CreatedAt.Format(time.RFC3339)
+	sourceRef := fmt.Sprintf("discussions/%s", d.DirName)
 
-	if len(summary.Decisions) > 0 {
-		sb.WriteString("\n## Decisions\n")
-		for _, item := range summary.Decisions {
-			fmt.Fprintf(&sb, "- %s\n", item.Text())
-		}
+	var parsedFacts []facts.Fact
+
+	for _, item := range summary.Decisions {
+		parsedFacts = append(parsedFacts, facts.Fact{
+			Headline:   item.Text(),
+			SourceType: facts.SourceDiscussion,
+			SourceRef:  sourceRef,
+			Timestamp:  ts,
+			Category:   facts.CategoryDecision,
+		})
 	}
-
-	if len(summary.Learnings) > 0 {
-		sb.WriteString("\n## Learnings\n")
-		for _, item := range summary.Learnings {
-			fmt.Fprintf(&sb, "- %s\n", item.Text())
-		}
+	for _, item := range summary.Learnings {
+		parsedFacts = append(parsedFacts, facts.Fact{
+			Headline:   item.Text(),
+			SourceType: facts.SourceDiscussion,
+			SourceRef:  sourceRef,
+			Timestamp:  ts,
+			Category:   facts.CategoryLearning,
+		})
 	}
-
-	if len(summary.ActionItems) > 0 {
-		sb.WriteString("\n## Action Items\n")
-		for _, item := range summary.ActionItems {
-			fmt.Fprintf(&sb, "- %s\n", item.Text())
-		}
+	for _, item := range summary.ActionItems {
+		parsedFacts = append(parsedFacts, facts.Fact{
+			Headline:   item.Text(),
+			SourceType: facts.SourceDiscussion,
+			SourceRef:  sourceRef,
+			Timestamp:  ts,
+			Category:   facts.CategoryActionItem,
+		})
 	}
-
-	if len(summary.OpenQuestions) > 0 {
-		sb.WriteString("\n## Open Questions\n")
-		for _, item := range summary.OpenQuestions {
-			fmt.Fprintf(&sb, "- %s\n", item.Text())
-		}
+	for _, item := range summary.OpenQuestions {
+		parsedFacts = append(parsedFacts, facts.Fact{
+			Headline:   item.Text(),
+			SourceType: facts.SourceDiscussion,
+			SourceRef:  sourceRef,
+			Timestamp:  ts,
+			Category:   facts.CategoryOpenQuestion,
+		})
 	}
-
-	if len(summary.Requirements) > 0 {
-		sb.WriteString("\n## Requirements\n")
-		for _, item := range summary.Requirements {
-			fmt.Fprintf(&sb, "- %s\n", item.Text())
-		}
+	for _, item := range summary.Requirements {
+		parsedFacts = append(parsedFacts, facts.Fact{
+			Headline:   item.Text(),
+			SourceType: facts.SourceDiscussion,
+			SourceRef:  sourceRef,
+			Timestamp:  ts,
+			Category:   facts.CategoryContext,
+		})
 	}
 
 	// key context from TechnicalContext, Constraints, NonGoals, and (v2 only) high-importance chapters
@@ -326,14 +332,38 @@ func extractFactsFromSummaryJSON(d discussionInput) (string, error) {
 			}
 		}
 	}
-	if len(keyContext) > 0 {
-		sb.WriteString("\n## Key Context\n")
-		for _, item := range keyContext {
-			fmt.Fprintf(&sb, "- %s\n", item)
-		}
+	for _, item := range keyContext {
+		parsedFacts = append(parsedFacts, facts.Fact{
+			Headline:   item,
+			SourceType: facts.SourceDiscussion,
+			SourceRef:  sourceRef,
+			Timestamp:  ts,
+			Category:   facts.CategoryContext,
+		})
 	}
 
-	fmt.Fprintf(&sb, "\n---\n*Extracted from discussion: %s (created %s)*\n", d.DirName, d.CreatedAt.Format("2006-01-02"))
+	header := facts.FileHeader{
+		Meta: facts.FileMeta{
+			SchemaVersion: facts.SchemaVersion,
+			SourceType:    facts.SourceDiscussion,
+			RecordedAt:    ts,
+			SourceHash:    sourceHash,
+		},
+	}
+
+	headerBytes, err := json.Marshal(header)
+	if err != nil {
+		return "", fmt.Errorf("marshal header: %w", err)
+	}
+
+	var sb strings.Builder
+	sb.Write(headerBytes)
+	sb.WriteByte('\n')
+	for _, f := range parsedFacts {
+		line, _ := json.Marshal(f)
+		sb.Write(line)
+		sb.WriteByte('\n')
+	}
 	return sb.String(), nil
 }
 

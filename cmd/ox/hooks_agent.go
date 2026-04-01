@@ -308,6 +308,55 @@ func (c *CodePuppyAgent) SupportsHooks() bool {
 	return true
 }
 
+// AmpAgent implements Agent interface for Amp CLI (Sourcegraph)
+type AmpAgent struct{}
+
+func (a *AmpAgent) Name() string {
+	return "Amp"
+}
+
+func (a *AmpAgent) Install(user bool) error {
+	return installAmpHooks(user)
+}
+
+func (a *AmpAgent) Uninstall(user bool) error {
+	return uninstallAmpHooks(user)
+}
+
+func (a *AmpAgent) HasHooks(user bool) bool {
+	return hasAmpHooks(user)
+}
+
+func (a *AmpAgent) List() map[string]bool {
+	return listAmpHooks()
+}
+
+func (a *AmpAgent) Detect() bool {
+	return a.DetectProject() || a.DetectCLI()
+}
+
+func (a *AmpAgent) DetectProject() bool {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return false
+	}
+	projectDir := filepath.Join(gitRoot, ".amp")
+	if _, err := os.Stat(projectDir); err == nil {
+		return true
+	}
+	// also detect if AGENTS.md already has our marker
+	return hasAmpHooks(false)
+}
+
+func (a *AmpAgent) DetectCLI() bool {
+	_, err := exec.LookPath("amp")
+	return err == nil
+}
+
+func (a *AmpAgent) SupportsHooks() bool {
+	return true
+}
+
 // AgentRegistry holds all registered agents
 var AgentRegistry = []Agent{
 	&ClaudeAgent{},
@@ -315,6 +364,7 @@ var AgentRegistry = []Agent{
 	&GeminiAgent{},
 	&CodexAgent{},
 	&CodePuppyAgent{},
+	&AmpAgent{},
 }
 
 // GetAgent returns the agent by name (case-insensitive)

@@ -46,7 +46,7 @@ type sessionInput struct {
 // ledgerPath is the path to the ledger directory containing sessions/.
 //
 // No LLM calls — pure data transformation from structured summary.json.
-func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *distillStateV2, repoID, ledgerPath string) error {
+func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, repoID, ledgerPath string) error {
 	if ledgerPath == "" {
 		slog.Debug("no ledger path, skipping session fact extraction", "repo", repoID)
 		return nil
@@ -56,9 +56,7 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *dist
 		return nil
 	}
 
-	processed := state.sessionsForRepo(repoID)
-
-	pending, err := scanPendingSessions(ledgerPath, tc.Path, processed)
+	pending, err := scanPendingSessions(ledgerPath, tc.Path)
 	if err != nil {
 		return fmt.Errorf("scan sessions: %w", err)
 	}
@@ -93,12 +91,11 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *dist
 					SchemaVersion: facts.SchemaVersion,
 					SourceType:    facts.SourceSession,
 					RecordedAt:    recordedAt,
+					SourceHash:    s.Hash,
 				},
 			}
 			if err := facts.WriteFacts(filepath.Join(tc.Path, markerFile), markerHeader, nil); err != nil {
 				slog.Warn("failed to write empty session fact marker", "session", s.DirName, "error", err)
-			} else {
-				processed[s.DirName] = s.Hash
 			}
 			continue
 		}
@@ -108,6 +105,7 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *dist
 				SchemaVersion: facts.SchemaVersion,
 				SourceType:    facts.SourceSession,
 				RecordedAt:    recordedAt,
+				SourceHash:    s.Hash,
 			},
 		}
 
@@ -126,8 +124,6 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *dist
 			}
 			continue
 		}
-
-		processed[s.DirName] = s.Hash
 
 		fmt.Fprintf(cmd.OutOrStdout(), "Extracted %d facts from session: %s\n", len(extractedFacts), s.Summary.Title)
 	}
@@ -167,8 +163,10 @@ func readSessionStartedAt(sessionDir string) time.Time {
 }
 
 // scanPendingSessions reads the sessions/ directory in the ledger and returns
-// sessions not yet tracked in state.ProcessedSessions that have a summary.json.
-func scanPendingSessions(ledgerPath, tcPath string, processed map[string]string) ([]sessionInput, error) {
+// sessions that need fact extraction. A session is skipped if its fact file
+// already exists and the embedded source_hash matches the current summary hash.
+// Legacy fact files without source_hash are re-extracted.
+func scanPendingSessions(ledgerPath, tcPath string) ([]sessionInput, error) {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
@@ -200,21 +198,20 @@ func scanPendingSessions(ledgerPath, tcPath string, processed map[string]string)
 			continue // no summary.json, skip
 		}
 
+		// derive the final date before dedup check — started_at may differ from dir name
+		startedAt := readSessionStartedAt(filepath.Join(sessionsDir, dirName))
+		sessionDate := date
+		if !startedAt.IsZero() {
+			sessionDate = startedAt.UTC().Format("2006-01-02")
+		}
+
 		// compute content hash for change detection
 		currentHash := contentHash(string(summaryData))
 
-		// check if fact file already exists in team context
-		factFilePath := filepath.Join(tcPath, "memory", ".session-facts", date, dirName+".jsonl")
-		factFileExists := fileExists(factFilePath)
-
-		// skip if already processed with same hash and fact file exists
-		if prevHash, ok := processed[dirName]; ok && prevHash == currentHash && factFileExists {
-			continue
-		}
-
-		// skip if fact file already exists (covers fresh clone / deleted state)
-		if _, ok := processed[dirName]; !ok && factFileExists {
-			continue
+		// check if fact file already exists with matching source_hash
+		factFilePath := filepath.Join(tcPath, "memory", ".session-facts", sessionDate, dirName+".jsonl")
+		if existingHash := readFactFileSourceHash(factFilePath); existingHash == currentHash {
+			continue // fact file is up to date
 		}
 
 		// parse summary.json
@@ -228,13 +225,6 @@ func scanPendingSessions(ledgerPath, tcPath string, processed map[string]string)
 		if summary.QualityScore > 0 && summary.QualityScore < minSessionQuality {
 			slog.Debug("skip low-quality session", "session", dirName, "score", summary.QualityScore)
 			continue
-		}
-
-		// try to get accurate started_at from raw.jsonl _meta
-		startedAt := readSessionStartedAt(filepath.Join(sessionsDir, dirName))
-		sessionDate := date
-		if !startedAt.IsZero() {
-			sessionDate = startedAt.UTC().Format("2006-01-02")
 		}
 
 		pending = append(pending, sessionInput{

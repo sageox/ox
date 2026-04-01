@@ -79,6 +79,7 @@ var (
 	integrateGeminiFlag    bool
 	integrateCodexFlag     bool
 	integrateCodePuppyFlag bool
+	integrateAmpFlag       bool
 	integrateAllFlag       bool
 	integrateForceFlag     bool
 )
@@ -103,22 +104,28 @@ The integration ensures that 'ox agent prime' runs when an AI coding session sta
 
 var integrateInstallCmd = &cobra.Command{
 	Use:   "install",
-	Short: "Install SageOx integration to Claude Code",
-	Long: `Install hooks for Claude Code.
+	Short: "Install SageOx integration for AI coworkers",
+	Long: `Install SageOx hooks for AI coworkers.
 
-Adds hooks to ~/.claude/settings.json for SessionStart and PreCompact events.
+Default: Claude Code (adds hooks to ~/.claude/settings.json).
 Use --user to add guidance to ~/.claude/CLAUDE.md for ALL projects.
 
-Other agents (Codex, Gemini, code_puppy) can be installed with their respective flags.`,
+Other agents can be installed with their respective flags:
+  --gemini    Gemini CLI hooks
+  --codex     Codex CLI hooks
+  --amp       Amp CLI integration (AGENTS.md marker)
+  --opencode  OpenCode plugin
+  --codepuppy code_puppy plugin`,
 	RunE: runIntegrateInstall,
 }
 
 var integrateUninstallCmd = &cobra.Command{
 	Use:   "uninstall",
-	Short: "Uninstall SageOx integration from Claude Code",
-	Long: `Remove SageOx integration from Claude Code.
+	Short: "Uninstall SageOx integration from AI coworkers",
+	Long: `Remove SageOx integration from AI coworkers.
 
-Removes hooks from ~/.claude/settings.json.`,
+Default: Claude Code (removes hooks from ~/.claude/settings.json).
+Use agent-specific flags to uninstall from other agents.`,
 	RunE: runIntegrateUninstall,
 }
 
@@ -152,6 +159,20 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Amp CLI installation
+	if integrateAmpFlag {
+		if integrateUserFlag {
+			return fmt.Errorf("Amp CLI does not support user-level integration")
+		}
+		if err := installAmpHooks(false); err != nil {
+			return fmt.Errorf("installing Amp CLI integration: %w", err)
+		}
+
+		userCfg, _ := config.LoadUserConfig()
+		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
+		return nil
+	}
+
 	// Codex CLI installation
 	if integrateCodexFlag {
 		if err := installCodexHooks(integrateUserFlag); err != nil {
@@ -178,7 +199,7 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		fmt.Println(ui.PassStyle.Render("✓") + " Gemini CLI integration installed")
 		fmt.Println()
 		fmt.Printf("Installed %s-level hooks:\n", location)
-		fmt.Printf("  - %s/%s (SessionStart)\n", path, geminiSettingsFileName)
+		fmt.Printf("  - %s/%s (SessionStart, BeforeAgent, AfterTool, SessionEnd)\n", path, geminiSettingsFileName)
 
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
@@ -269,6 +290,22 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 			location = "project"
 		}
 		fmt.Printf("✓ code_puppy %s-level integration uninstalled\n", location)
+
+		userCfg, _ := config.LoadUserConfig()
+		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
+		return nil
+	}
+
+	// Amp CLI uninstallation
+	if integrateAmpFlag {
+		if integrateUserFlag {
+			return fmt.Errorf("Amp CLI does not support user-level integration")
+		}
+		if err := uninstallAmpHooks(false); err != nil {
+			return fmt.Errorf("uninstalling Amp CLI integration: %w", err)
+		}
+
+		fmt.Printf("✓ Amp CLI project-level integration uninstalled\n")
 
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
@@ -466,6 +503,11 @@ func uninstallAllIntegrations(force bool) error {
 		installed = append(installed, "Gemini CLI (user)")
 	}
 
+	// check Amp CLI
+	if hasAmpHooks(false) {
+		installed = append(installed, "Amp CLI (project)")
+	}
+
 	// check code_puppy
 	if hasCodePuppyHooks(true) {
 		installed = append(installed, "code_puppy (user plugin)")
@@ -521,6 +563,9 @@ func uninstallAllIntegrations(force bool) error {
 	if err := uninstallGeminiHooks(true); err != nil {
 		errors = append(errors, fmt.Sprintf("Gemini CLI (user): %v", err))
 	}
+	if err := uninstallAmpHooks(false); err != nil {
+		errors = append(errors, fmt.Sprintf("Amp CLI (project): %v", err))
+	}
 	if err := uninstallCodePuppyHooks(true); err != nil {
 		errors = append(errors, fmt.Sprintf("code_puppy (user): %v", err))
 	}
@@ -547,10 +592,12 @@ func init() {
 	integrateInstallCmd.Flags().BoolVar(&integrateGeminiFlag, "gemini", false, "install Gemini CLI hooks instead of Claude Code hooks")
 	integrateInstallCmd.Flags().BoolVar(&integrateCodexFlag, "codex", false, "install Codex CLI hooks instead of Claude Code hooks")
 	integrateInstallCmd.Flags().BoolVar(&integrateCodePuppyFlag, "codepuppy", false, "install code_puppy plugin instead of Claude Code hooks")
+	integrateInstallCmd.Flags().BoolVar(&integrateAmpFlag, "amp", false, "install Amp CLI integration (AGENTS.md marker)")
 	_ = integrateInstallCmd.Flags().MarkHidden("opencode")
 	_ = integrateInstallCmd.Flags().MarkHidden("gemini")
 	_ = integrateInstallCmd.Flags().MarkHidden("codex")
 	_ = integrateInstallCmd.Flags().MarkHidden("codepuppy")
+	_ = integrateInstallCmd.Flags().MarkHidden("amp")
 
 	// uninstall flags
 	integrateUninstallCmd.Flags().BoolVar(&integrateUserFlag, "user", false, "uninstall from user-level config")
@@ -558,12 +605,14 @@ func init() {
 	integrateUninstallCmd.Flags().BoolVar(&integrateGeminiFlag, "gemini", false, "uninstall Gemini CLI hooks instead of Claude Code hooks")
 	integrateUninstallCmd.Flags().BoolVar(&integrateCodexFlag, "codex", false, "uninstall Codex CLI hooks instead of Claude Code hooks")
 	integrateUninstallCmd.Flags().BoolVar(&integrateCodePuppyFlag, "codepuppy", false, "uninstall code_puppy plugin instead of Claude Code hooks")
+	integrateUninstallCmd.Flags().BoolVar(&integrateAmpFlag, "amp", false, "uninstall Amp CLI integration (AGENTS.md marker)")
 	integrateUninstallCmd.Flags().BoolVar(&integrateAllFlag, "all", false, "uninstall from all AI agents")
 	integrateUninstallCmd.Flags().BoolVar(&integrateForceFlag, "force", false, "skip confirmation prompts - use with --all")
 	_ = integrateUninstallCmd.Flags().MarkHidden("opencode")
 	_ = integrateUninstallCmd.Flags().MarkHidden("gemini")
 	_ = integrateUninstallCmd.Flags().MarkHidden("codex")
 	_ = integrateUninstallCmd.Flags().MarkHidden("codepuppy")
+	_ = integrateUninstallCmd.Flags().MarkHidden("amp")
 	_ = integrateUninstallCmd.Flags().MarkHidden("all")
 	_ = integrateUninstallCmd.Flags().MarkHidden("force")
 

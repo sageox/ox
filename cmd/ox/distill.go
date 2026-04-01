@@ -341,10 +341,14 @@ func readWeeklyFilesForMonth(weeklyDir string, year, month int, tz *time.Locatio
 }
 
 var (
-	distillLayer   string
-	distillDryRun  bool
-	distillSync    bool
-	distillVerbose bool
+	distillLayer       string
+	distillDryRun      bool
+	distillSync        bool
+	distillVerbose     bool
+	distillModel       string
+	distillNoPush      bool
+	distillConcurrency int
+	distillAll         bool
 )
 
 var distillCmd = &cobra.Command{
@@ -368,113 +372,23 @@ func init() {
 	distillCmd.Flags().BoolVar(&distillDryRun, "dry-run", false, "show what would be distilled without invoking the AI coworker")
 	distillCmd.Flags().BoolVar(&distillSync, "sync", false, "sync ledger, team context, and code index before distilling")
 	distillCmd.Flags().BoolVar(&distillVerbose, "verbose", false, "log full prompts to stderr")
+	distillCmd.Flags().StringVar(&distillModel, "model", "", "override the AI coworker model (e.g., sonnet, opus)")
+	distillCmd.Flags().BoolVar(&distillNoPush, "no-push", false, "skip pushing team context commits to remote (useful for testing)")
+	distillCmd.Flags().IntVar(&distillConcurrency, "concurrency", 1, "max parallel LLM calls for fact extraction (1-8)")
+	distillCmd.Flags().BoolVar(&distillAll, "all", false, "process all history (default: last 7 days)")
 
 	rootCmd.AddCommand(distillCmd)
 }
 
-// distillStateV2 tracks per-layer distillation timestamps.
+// distillStateV2 tracks weekly/monthly distillation timestamps.
+// Extraction tracking (sessions, discussions, github) is now stateless —
+// handled via source_hash and query_since/query_until in fact file metadata.
+// Daily distill tracking uses sources frontmatter in daily .md files.
 type distillStateV2 struct {
 	SchemaVersion string `json:"schema_version"`
 	TeamID        string `json:"team_id"`
-	LastDaily     string `json:"last_daily,omitempty"`
 	LastWeekly    string `json:"last_weekly,omitempty"`
 	LastMonthly   string `json:"last_monthly,omitempty"`
-	DailyCount    int    `json:"daily_count"`
-	// content hash of last distilled input — skip LLM call if unchanged
-	LastDailyHash   string `json:"last_daily_hash,omitempty"`
-	LastWeeklyHash  string `json:"last_weekly_hash,omitempty"`
-	LastMonthlyHash string `json:"last_monthly_hash,omitempty"`
-	// ProcessedDiscussions tracks which discussion dirs have been processed.
-	// Key: directory name, Value: content hash at time of processing.
-	// Map-based (not timestamp cursor) because discussions arrive out of order via daemon sync.
-	ProcessedDiscussions map[string]string `json:"processed_discussions,omitempty"`
-	// LastGitHubFacts is the RFC3339 timestamp of the last successful GitHub fact extraction.
-	// Used for single-repo mode (v2 compat). Multi-repo uses RepoGitHubFacts.
-	LastGitHubFacts string `json:"last_github_facts,omitempty"`
-	// ProcessedSessions tracks which session dirs have been processed.
-	// Used for single-repo mode (v2 compat). Multi-repo uses RepoSessions.
-	ProcessedSessions map[string]string `json:"processed_sessions,omitempty"`
-
-	// Per-repo fields (v3): keyed by RepoID for multi-ledger support.
-	// When DISTILL_REPOS is set, extraction state is tracked per-repo.
-	RepoSessions    map[string]map[string]string `json:"repo_sessions,omitempty"`
-	RepoGitHubFacts map[string]string            `json:"repo_github_facts,omitempty"`
-
-	// v1 compat fields (read for migration, not written)
-	LastDistilled    string `json:"last_distilled,omitempty"`
-	ObservationCount int    `json:"observation_count,omitempty"`
-}
-
-// sessionsForRepo returns the processed sessions map for a specific repo.
-// Handles migration from flat ProcessedSessions to per-repo RepoSessions.
-func (s *distillStateV2) sessionsForRepo(repoID string) map[string]string {
-	if s.RepoSessions == nil {
-		s.RepoSessions = make(map[string]map[string]string)
-	}
-	if m, ok := s.RepoSessions[repoID]; ok {
-		return m
-	}
-	s.RepoSessions[repoID] = make(map[string]string)
-	return s.RepoSessions[repoID]
-}
-
-// githubFactsTimeForRepo returns the last GitHub extraction timestamp for a repo.
-// Falls back to the flat LastGitHubFacts for single-repo compat.
-func (s *distillStateV2) githubFactsTimeForRepo(repoID, tcPath string) time.Time {
-	if s.RepoGitHubFacts != nil {
-		if ts, ok := s.RepoGitHubFacts[repoID]; ok {
-			if t, err := time.Parse(time.RFC3339, ts); err == nil {
-				return t
-			}
-		}
-	}
-	// fall back to flat field for single-repo compat
-	return githubFactsSince(&distillStateV2{LastGitHubFacts: s.LastGitHubFacts}, tcPath)
-}
-
-// setGitHubFactsTime records the last GitHub extraction timestamp for a repo.
-func (s *distillStateV2) setGitHubFactsTime(repoID string, t time.Time) {
-	if s.RepoGitHubFacts == nil {
-		s.RepoGitHubFacts = make(map[string]string)
-	}
-	s.RepoGitHubFacts[repoID] = t.Format(time.RFC3339)
-}
-
-// migrateToPerRepo migrates flat v2 state into per-repo maps for the given repoID.
-// Called once when transitioning from single-repo to multi-repo mode.
-func (s *distillStateV2) migrateToPerRepo(repoID string) {
-	if len(s.ProcessedSessions) > 0 && len(s.RepoSessions) == 0 {
-		if s.RepoSessions == nil {
-			s.RepoSessions = make(map[string]map[string]string)
-		}
-		copied := make(map[string]string, len(s.ProcessedSessions))
-		for k, v := range s.ProcessedSessions {
-			copied[k] = v
-		}
-		s.RepoSessions[repoID] = copied
-	}
-	if s.LastGitHubFacts != "" && len(s.RepoGitHubFacts) == 0 {
-		if s.RepoGitHubFacts == nil {
-			s.RepoGitHubFacts = make(map[string]string)
-		}
-		s.RepoGitHubFacts[repoID] = s.LastGitHubFacts
-	}
-}
-
-// lastDailyTime returns the effective last daily distill time,
-// falling back to v1's LastDistilled for backward compatibility.
-func (s *distillStateV2) lastDailyTime() time.Time {
-	if s.LastDaily != "" {
-		if t, err := time.Parse(time.RFC3339, s.LastDaily); err == nil {
-			return t
-		}
-	}
-	if s.LastDistilled != "" {
-		if t, err := time.Parse(time.RFC3339, s.LastDistilled); err == nil {
-			return t
-		}
-	}
-	return time.Time{}
 }
 
 func (s *distillStateV2) lastWeeklyTime() time.Time {
@@ -673,7 +587,7 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	// push team context commits to remote when we're done — even if the
 	// pipeline partially fails, earlier stages may have committed facts or
 	// distilled summaries that should be synced.
-	if !distillDryRun {
+	if !distillDryRun && !distillNoPush {
 		ep := endpoint.GetForProject(projectRoot)
 		defer func() {
 			if err := pushTeamContext(context.Background(), tc.Path, ep); err != nil {
@@ -691,10 +605,32 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	// set working directory so relative file paths in prompts resolve correctly
 	if claude, ok := backend.(*agentcli.Claude); ok {
 		claude.WorkDir = tc.Path
+		if distillModel != "" {
+			claude.Model = distillModel
+		}
 	}
 
 	// load distill state (v2 format, backward compat with v1)
 	state := loadDistillStateV2(projectRoot, tc.Path)
+
+	// load or rebuild the distill index (performance cache for file scanning)
+	idx, rebuilt := loadDistillIndex(projectRoot, tc.Path)
+	if rebuilt {
+		fmt.Fprintf(cmd.OutOrStdout(), "Rebuilt distill index from %d facts, %d dailies\n", len(idx.FactMeta), len(idx.DailySources))
+	} else {
+		// check for new files from other machines
+		if n := updateDistillIndex(idx, tc.Path); n > 0 {
+			fmt.Fprintf(cmd.OutOrStdout(), "Updated index: %d new files\n", n)
+		}
+	}
+	// always save index on exit — even partial runs should cache progress
+	if !distillDryRun {
+		defer func() {
+			if err := saveDistillIndex(projectRoot, idx); err != nil {
+				slog.Warn("failed to save distill index", "error", err)
+			}
+		}()
+	}
 
 	// ensure memory directories exist
 	if err := ensureMemoryDirs(tc.Path); err != nil {
@@ -741,29 +677,13 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("resolve distill repos: %w", err)
 	}
 
-	// migrate flat state to per-repo if transitioning to multi-repo.
-	// attribute existing flat state to the CWD project (whose state file we loaded),
-	// not repos[0] which may differ depending on DISTILL_REPOS order.
-	if len(repos) > 0 {
-		migrateRepoID := repos[0].RepoID
-		for _, r := range repos {
-			if r.ProjectRoot == projectRoot {
-				migrateRepoID = r.RepoID
-				break
-			}
-		}
-		state.migrateToPerRepo(migrateRepoID)
-	}
+	// (per-repo state migration removed — extraction is now stateless via file metadata)
 
 	// extract facts from unprocessed discussions before daily distill
 	// (discussions live in team context, not per-ledger — no multi-repo loop needed)
 	if plan.Daily {
-		if err := extractDiscussionFacts(ctx, cmd, backend, tc, state, extractGuidelines); err != nil {
+		if err := extractDiscussionFacts(ctx, cmd, backend, tc, extractGuidelines); err != nil {
 			slog.Warn("discussion fact extraction failed", "error", err)
-		} else if !distillDryRun {
-			if err := saveDistillStateV2(projectRoot, state); err != nil {
-				slog.Warn("failed to save distill state after discussion extraction", "error", err)
-			}
 		}
 	}
 
@@ -775,11 +695,11 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 				fmt.Fprintf(cmd.OutOrStdout(), "Processing repo %s (%s)...\n", repo.RepoID, repo.ProjectRoot)
 			}
 
-			if err := extractSessionFacts(cmd, tc, state, repo.RepoID, repo.LedgerPath); err != nil {
+			if err := extractSessionFacts(cmd, tc, repo.RepoID, repo.LedgerPath); err != nil {
 				slog.Warn("session fact extraction failed", "repo", repoLabel, "error", err)
 			}
 
-			if err := extractGitHubFacts(ctx, cmd, backend, tc, state, repo.RepoID, repo.CodeDBDir, extractGuidelines); err != nil {
+			if err := extractGitHubFacts(ctx, cmd, backend, tc, repo.RepoID, repo.CodeDBDir, extractGuidelines); err != nil {
 				slog.Warn("github fact extraction failed", "repo", repoLabel, "error", err)
 			}
 
@@ -793,7 +713,7 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	}
 
 	if plan.Daily {
-		if err := distillDaily(ctx, cmd, backend, tc, state, projectRoot, now, distillGuidelines, tz); err != nil {
+		if err := distillDaily(ctx, cmd, backend, tc, state, idx, projectRoot, now, distillGuidelines, tz); err != nil {
 			return fmt.Errorf("daily distill: %w", err)
 		}
 	}
@@ -810,7 +730,7 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	// save updated state (skip in dry-run to avoid side effects)
+	// save updated state (skip in dry-run; index is saved via defer)
 	if !distillDryRun {
 		if err := saveDistillStateV2(projectRoot, state); err != nil {
 			slog.Warn("failed to save distill state", "error", err)
@@ -928,12 +848,8 @@ func enumerateMonths(lastTime, now time.Time, tz *time.Location) []string {
 // extractDiscussionFacts scans for unprocessed discussions and writes fact files.
 // Each discussion gets a fact file in memory/.discussion-facts/{dirName}.md.
 // Uses LLM to extract structured facts, or writes stub if in dry-run mode.
-func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, guidelines string) error {
-	if state.ProcessedDiscussions == nil {
-		state.ProcessedDiscussions = make(map[string]string)
-	}
-
-	pending, err := scanPendingDiscussions(tc.Path, state.ProcessedDiscussions)
+func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, guidelines string) error {
+	pending, err := scanPendingDiscussions(tc.Path)
 	if err != nil {
 		return fmt.Errorf("scan discussions: %w", err)
 	}
@@ -956,7 +872,10 @@ func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend age
 	}
 
 	for _, d := range pending {
-		factContent, err := extractSingleDiscussionFacts(ctx, cmd, backend, d, guidelines)
+		// compute source hash before extraction for embedding in the fact file
+		sourceHash := discussionContentHash(filepath.Join(tc.Path, "discussions", d.DirName))
+
+		factContent, err := extractSingleDiscussionFacts(ctx, cmd, backend, d, guidelines, sourceHash)
 		if err != nil {
 			// non-fatal per discussion — log and continue
 			slog.Warn("skip discussion fact extraction", "dir", d.DirName, "error", err)
@@ -973,9 +892,14 @@ func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend age
 			slog.Warn("failed to commit discussion facts", "dir", d.DirName, "error", err)
 		}
 
-		// track as processed with content hash
-		hash := discussionContentHash(filepath.Join(tc.Path, "discussions", d.DirName))
-		state.ProcessedDiscussions[d.DirName] = hash
+		// remove legacy .md fact file to prevent duplicate facts in daily distill
+		oldMdFile := filepath.Join("memory", ".discussion-facts", d.DirName+".md")
+		oldMdPath := filepath.Join(tc.Path, oldMdFile)
+		if _, err := os.Stat(oldMdPath); err == nil {
+			if err := removeMemoryFile(tc.Path, oldMdFile, fmt.Sprintf("memory: remove legacy %s (migrated to .jsonl)", d.DirName+".md")); err != nil {
+				slog.Warn("failed to remove legacy .md fact file", "path", oldMdFile, "error", err)
+			}
+		}
 
 		fmt.Fprintf(cmd.OutOrStdout(), "Extracted facts from discussion: %s\n", d.Title)
 	}
@@ -986,10 +910,11 @@ func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend age
 // extractSingleDiscussionFacts generates facts for one discussion.
 // When server-generated summary.json exists, extracts facts directly from
 // structured data without an LLM call. Falls back to LLM via JSONL output.
-func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, d discussionInput, guidelines string) (string, error) {
+// sourceHash is embedded in the fact file header for stateless change detection.
+func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, d discussionInput, guidelines, sourceHash string) (string, error) {
 	// if server-generated summary.json exists, extract facts directly without LLM
 	if d.SummaryJSONDir != "" {
-		result, err := extractFactsFromSummaryJSON(d)
+		result, err := extractFactsFromSummaryJSON(d, sourceHash)
 		if err == nil {
 			slog.Info("extracted facts from summary.json", "discussion", d.DirName)
 			return result, nil
@@ -1018,6 +943,7 @@ func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backe
 			SchemaVersion: facts.SchemaVersion,
 			SourceType:    facts.SourceDiscussion,
 			RecordedAt:    d.CreatedAt.Format(time.RFC3339),
+			SourceHash:    sourceHash,
 		},
 	}
 
@@ -1037,9 +963,15 @@ func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backe
 	return sb.String(), nil
 }
 
-func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, projectRoot string, now time.Time, guidelines string, tz *time.Location) error {
+func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, idx *distillIndex, projectRoot string, now time.Time, guidelines string, tz *time.Location) error {
 	obsDir := filepath.Join(tc.Path, "memory", ".observations")
-	since := state.lastDailyTime()
+	since := inferDailyHighWater(tc.Path)
+
+	// default to 7 days back unless --all is set
+	if since.IsZero() && !distillAll {
+		since = now.AddDate(0, 0, -7)
+		slog.Info("no prior daily distill found, defaulting to last 7 days (use --all for full history)")
+	}
 
 	observations, _, err := scanPendingObservations(obsDir, since)
 	if err != nil {
@@ -1077,6 +1009,28 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 		factsByDay[day] = append(factsByDay[day], sessionFacts...)
 	}
 
+	// filter out facts already distilled (tracked via index, mirrors sources frontmatter)
+	alreadyDistilled := idx.distilledSources()
+	var skippedFacts int
+	for day, dayFacts := range factsByDay {
+		var newFacts []discussionFactEntry
+		for _, f := range dayFacts {
+			if alreadyDistilled[f.RelPath] {
+				skippedFacts++
+				continue
+			}
+			newFacts = append(newFacts, f)
+		}
+		if len(newFacts) == 0 {
+			delete(factsByDay, day)
+		} else {
+			factsByDay[day] = newFacts
+		}
+	}
+	if skippedFacts > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Skipped %d already-distilled facts\n", skippedFacts)
+	}
+
 	if len(observations) == 0 && len(factsByDay) == 0 {
 		fmt.Fprintln(cmd.OutOrStdout(), "No pending observations or facts for daily distill")
 		return nil
@@ -1111,7 +1065,7 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 		return nil
 	}
 
-	var latestDay string
+
 	for _, day := range days {
 		dayObs := obsByDay[day]
 		dayFacts := factsByDay[day]
@@ -1144,8 +1098,14 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 			return fmt.Errorf("generate daily file ID: %w", err)
 		}
 
+		// collect source paths for frontmatter
+		var sources []string
+		for _, f := range dayFacts {
+			sources = append(sources, f.RelPath)
+		}
+
 		filePath := filepath.Join("memory", "daily", day+"-"+id.String()+".md")
-		content := formatDailyMemory(day, output, len(dayObs), len(dayFacts))
+		content := formatDailyMemory(day, output, len(dayObs), len(dayFacts), sources)
 
 		if err := writeMemoryFile(tc.Path, filePath, content); err != nil {
 			return fmt.Errorf("write daily memory: %w", err)
@@ -1155,16 +1115,13 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 			slog.Warn("failed to commit daily memory", "error", err)
 		}
 
-		state.DailyCount += len(dayObs) + len(dayFacts)
-		latestDay = day
+		// update index with new daily summary
+		idx.addDailySummary(filePath, sources)
+
 		fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", filePath)
 	}
 
-	if latestDay != "" {
-		// Use actual processing time so intra-day re-runs pick up new observations
-		state.LastDaily = now.Format(time.RFC3339)
-		state.LastDailyHash = "" // hash no longer used for per-day bucketing
-	}
+	// (LastDaily no longer tracked — daily high-water inferred from files)
 
 	return nil
 }
@@ -1216,7 +1173,6 @@ func distillWeekly(ctx context.Context, cmd *cobra.Command, backend agentcli.Bac
 	}
 
 	state.LastWeekly = end.Format(time.RFC3339)
-	state.LastWeeklyHash = "" // hash no longer used
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", filePath)
 	return nil
@@ -1267,7 +1223,6 @@ func distillMonthly(ctx context.Context, cmd *cobra.Command, backend agentcli.Ba
 	}
 
 	state.LastMonthly = endOfMonth(t, tz).Format(time.RFC3339)
-	state.LastMonthlyHash = "" // hash no longer used
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", filePath)
 	return nil
@@ -1313,7 +1268,16 @@ func readRecentMemoryFiles(dir string, maxFiles int) ([]string, []string, error)
 	return contents, names, nil
 }
 
-func formatDailyMemory(date, content string, obsCount, factCount int) string {
+func formatDailyMemory(date, content string, obsCount, factCount int, sources []string) string {
+	var sb strings.Builder
+	if len(sources) > 0 {
+		sb.WriteString("---\nsources:\n")
+		for _, s := range sources {
+			fmt.Fprintf(&sb, "  - %s\n", s)
+		}
+		sb.WriteString("---\n")
+	}
+
 	var source string
 	switch {
 	case obsCount > 0 && factCount > 0:
@@ -1323,13 +1287,49 @@ func formatDailyMemory(date, content string, obsCount, factCount int) string {
 	default:
 		source = fmt.Sprintf("%d observations", obsCount)
 	}
-	return fmt.Sprintf("# Daily Memory — %s\n\n%s\n\n---\n*Distilled from %s*\n", date, content, source)
+	fmt.Fprintf(&sb, "# Daily Memory — %s\n\n%s\n\n---\n*Distilled from %s*\n", date, content, source)
+	return sb.String()
 }
 
-// loadDistillStateV2 loads distill state, migrating from v1 if needed.
-// tcPath is used to infer high-water marks from existing files when no state exists.
+// parseDailySources extracts source paths from YAML frontmatter in a daily summary.
+// Expects format:
+//
+//	---
+//	sources:
+//	  - memory/.github-facts/2026-03-30-xxx.jsonl
+//	  - memory/.session-facts/2026-03-30/yyy.jsonl
+//	---
+func parseDailySources(content string) []string {
+	// find frontmatter block between --- delimiters
+	if !strings.HasPrefix(content, "---\n") {
+		return nil
+	}
+	end := strings.Index(content[4:], "\n---")
+	if end < 0 {
+		return nil
+	}
+	frontmatter := content[4 : 4+end]
+
+	var sources []string
+	inSources := false
+	for _, line := range strings.Split(frontmatter, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "sources:" {
+			inSources = true
+			continue
+		}
+		if inSources && strings.HasPrefix(line, "  - ") {
+			sources = append(sources, strings.TrimPrefix(trimmed, "- "))
+		} else if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			inSources = false
+		}
+	}
+	return sources
+}
+
+// loadDistillStateV2 loads distill state for weekly/monthly tracking.
+// Daily and extraction tracking is now stateless (via file metadata).
 func loadDistillStateV2(projectRoot, tcPath string) *distillStateV2 {
-	// try loading v2 state from cache directory
 	v2Path := filepath.Join(projectRoot, ".sageox", "cache", "distill-state-v2.json")
 	if data, err := os.ReadFile(v2Path); err == nil {
 		var loaded distillStateV2
@@ -1338,23 +1338,9 @@ func loadDistillStateV2(projectRoot, tcPath string) *distillStateV2 {
 		}
 	}
 
-	// fall back to v1 state for migration
-	v1State, _ := loadDistillState(projectRoot)
-
+	// no state — infer weekly/monthly from existing files
 	state := &distillStateV2{
 		SchemaVersion: "2",
-	}
-
-	if v1State != nil {
-		state.TeamID = v1State.TeamID
-		state.LastDistilled = v1State.LastDistilled
-		state.ObservationCount = v1State.ObservationCount
-		return state
-	}
-
-	// no state at all — infer from existing memory files to avoid reprocessing
-	if t := inferDailyHighWater(tcPath); !t.IsZero() {
-		state.LastDaily = t.Format(time.RFC3339)
 	}
 	if t := inferWeeklyHighWater(tcPath); !t.IsZero() {
 		state.LastWeekly = t.Format(time.RFC3339)
@@ -1362,7 +1348,6 @@ func loadDistillStateV2(projectRoot, tcPath string) *distillStateV2 {
 	if t := inferMonthlyHighWater(tcPath); !t.IsZero() {
 		state.LastMonthly = t.Format(time.RFC3339)
 	}
-
 	return state
 }
 

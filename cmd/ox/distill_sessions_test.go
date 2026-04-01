@@ -28,6 +28,13 @@ func createSessionDir(t *testing.T, sessionsDir, dirName string, summary *sessio
 	}
 }
 
+// writeSessionFactFileWithHash writes a session fact file with the given source_hash in _meta.
+func writeSessionFactFileWithHash(t *testing.T, tcPath, date, dirName, hash string) {
+	t.Helper()
+	factsDir := filepath.Join(tcPath, "memory", ".session-facts", date)
+	writeFactFileWithHash(t, factsDir, dirName+".jsonl", hash)
+}
+
 func testSummary(title string, score float64) *sessionsummary.SummarizeResponse {
 	return &sessionsummary.SummarizeResponse{
 		Title:        title,
@@ -106,9 +113,9 @@ func TestScanPendingSessions(t *testing.T) {
 		return ledgerPath, tcPath
 	}
 
-	t.Run("no processed — finds all", func(t *testing.T) {
+	t.Run("no fact files — finds all", func(t *testing.T) {
 		ledgerPath, tcPath := setup(t, false)
-		pending, err := scanPendingSessions(ledgerPath, tcPath, nil)
+		pending, err := scanPendingSessions(ledgerPath, tcPath)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -117,67 +124,56 @@ func TestScanPendingSessions(t *testing.T) {
 		}
 	})
 
-	t.Run("one processed with fact file — finds remaining", func(t *testing.T) {
-		ledgerPath, tcPath := setup(t, true)
-		processed := map[string]string{
-			"2026-03-10T14-23-ryan-Ox7f3a": sessionContentHash(ledgerPath, "2026-03-10T14-23-ryan-Ox7f3a"),
-		}
-		pending, err := scanPendingSessions(ledgerPath, tcPath, processed)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		// alice is not in processed map but her fact file exists → skipped
-		if len(pending) != 0 {
-			t.Errorf("got %d pending, want 0 (both have fact files)", len(pending))
-		}
-	})
-
-	t.Run("all processed with fact files — finds none", func(t *testing.T) {
-		ledgerPath, tcPath := setup(t, true)
-		processed := map[string]string{
-			"2026-03-10T14-23-ryan-Ox7f3a": sessionContentHash(ledgerPath, "2026-03-10T14-23-ryan-Ox7f3a"),
-			"2026-03-11T09-00-alice-OxABCD": sessionContentHash(ledgerPath, "2026-03-11T09-00-alice-OxABCD"),
-		}
-		pending, err := scanPendingSessions(ledgerPath, tcPath, processed)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(pending) != 0 {
-			t.Errorf("got %d pending, want 0", len(pending))
-		}
-	})
-
-	t.Run("stale hash + no fact file — re-processes", func(t *testing.T) {
+	t.Run("fact files with matching source_hash — skips all", func(t *testing.T) {
 		ledgerPath, tcPath := setup(t, false)
-		processed := map[string]string{
-			"2026-03-10T14-23-ryan-Ox7f3a": "stale-hash",
+		// Write fact files with matching source_hash for both sessions
+		for _, item := range []struct {
+			date, dirName string
+		}{
+			{"2026-03-10", "2026-03-10T14-23-ryan-Ox7f3a"},
+			{"2026-03-11", "2026-03-11T09-00-alice-OxABCD"},
+		} {
+			hash := sessionContentHash(ledgerPath, item.dirName)
+			writeSessionFactFileWithHash(t, tcPath, item.date, item.dirName, hash)
 		}
-		pending, err := scanPendingSessions(ledgerPath, tcPath, processed)
+		pending, err := scanPendingSessions(ledgerPath, tcPath)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(pending) != 2 {
-			t.Errorf("got %d pending, want 2", len(pending))
+		if len(pending) != 0 {
+			t.Errorf("got %d pending, want 0 (all have matching source_hash)", len(pending))
 		}
 	})
 
-	t.Run("stale hash + fact file exists — re-processes changed session", func(t *testing.T) {
-		ledgerPath, tcPath := setup(t, true)
-		processed := map[string]string{
-			"2026-03-10T14-23-ryan-Ox7f3a": "stale-hash",
-			"2026-03-11T09-00-alice-OxABCD": sessionContentHash(ledgerPath, "2026-03-11T09-00-alice-OxABCD"),
-		}
-		pending, err := scanPendingSessions(ledgerPath, tcPath, processed)
+	t.Run("fact file with stale source_hash — re-extracts", func(t *testing.T) {
+		ledgerPath, tcPath := setup(t, false)
+		// ryan: stale hash → should re-extract
+		writeSessionFactFileWithHash(t, tcPath, "2026-03-10", "2026-03-10T14-23-ryan-Ox7f3a", "stale-hash")
+		// alice: matching hash → skip
+		aliceHash := sessionContentHash(ledgerPath, "2026-03-11T09-00-alice-OxABCD")
+		writeSessionFactFileWithHash(t, tcPath, "2026-03-11", "2026-03-11T09-00-alice-OxABCD", aliceHash)
+
+		pending, err := scanPendingSessions(ledgerPath, tcPath)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		// ryan: stale hash → re-process despite fact file existing
-		// alice: matching hash + fact file → skip
 		if len(pending) != 1 {
 			t.Fatalf("got %d pending, want 1", len(pending))
 		}
 		if pending[0].DirName != "2026-03-10T14-23-ryan-Ox7f3a" {
-			t.Errorf("expected ryan's session to be re-processed, got %s", pending[0].DirName)
+			t.Errorf("expected ryan's session to be re-extracted, got %s", pending[0].DirName)
+		}
+	})
+
+	t.Run("legacy fact file without source_hash — re-extracts", func(t *testing.T) {
+		ledgerPath, tcPath := setup(t, true) // writes fact files without source_hash
+		pending, err := scanPendingSessions(ledgerPath, tcPath)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// Both legacy fact files have no source_hash → both re-extracted
+		if len(pending) != 2 {
+			t.Errorf("got %d pending, want 2 (legacy files without source_hash)", len(pending))
 		}
 	})
 
@@ -192,7 +188,7 @@ func TestScanPendingSessions(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		pending, err := scanPendingSessions(ledgerPath, tcPath, nil)
+		pending, err := scanPendingSessions(ledgerPath, tcPath)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -207,7 +203,7 @@ func TestScanPendingSessions(t *testing.T) {
 		sessionsDir := filepath.Join(ledgerPath, "sessions")
 		createSessionDir(t, sessionsDir, "2026-03-10T14-23-ryan-Ox7f3a", testSummary("Low quality", 0.1))
 
-		pending, err := scanPendingSessions(ledgerPath, tcPath, nil)
+		pending, err := scanPendingSessions(ledgerPath, tcPath)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -222,7 +218,7 @@ func TestScanPendingSessions(t *testing.T) {
 		sessionsDir := filepath.Join(ledgerPath, "sessions")
 		createSessionDir(t, sessionsDir, "2026-03-10T14-23-ryan-Ox7f3a", testSummary("No score", 0))
 
-		pending, err := scanPendingSessions(ledgerPath, tcPath, nil)
+		pending, err := scanPendingSessions(ledgerPath, tcPath)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -237,7 +233,7 @@ func TestScanPendingSessions(t *testing.T) {
 		// create session dir without summary.json
 		os.MkdirAll(filepath.Join(ledgerPath, "sessions", "2026-03-10T14-23-ryan-Ox7f3a"), 0o755)
 
-		pending, err := scanPendingSessions(ledgerPath, tcPath, nil)
+		pending, err := scanPendingSessions(ledgerPath, tcPath)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -249,7 +245,7 @@ func TestScanPendingSessions(t *testing.T) {
 	t.Run("nonexistent sessions dir — returns nil", func(t *testing.T) {
 		ledgerPath := t.TempDir()
 		tcPath := t.TempDir()
-		pending, err := scanPendingSessions(ledgerPath, tcPath, nil)
+		pending, err := scanPendingSessions(ledgerPath, tcPath)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -715,7 +711,7 @@ func TestScanPendingSessionsStartedAt(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		pending, err := scanPendingSessions(ledgerPath, tcPath, nil)
+		pending, err := scanPendingSessions(ledgerPath, tcPath)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -739,7 +735,7 @@ func TestScanPendingSessionsStartedAt(t *testing.T) {
 		dirName := "2026-03-10T14-23-ryan-Ox7f3a"
 		createSessionDir(t, sessionsDir, dirName, testSummary("No raw", 0.8))
 
-		pending, err := scanPendingSessions(ledgerPath, tcPath, nil)
+		pending, err := scanPendingSessions(ledgerPath, tcPath)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -843,7 +839,7 @@ func TestScanPendingSessionsPopulatesHash(t *testing.T) {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	createSessionDir(t, sessionsDir, "2026-03-10T14-23-ryan-Ox7f3a", testSummary("Test", 0.8))
 
-	pending, err := scanPendingSessions(ledgerPath, tcPath, nil)
+	pending, err := scanPendingSessions(ledgerPath, tcPath)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

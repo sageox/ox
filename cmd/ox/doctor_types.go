@@ -126,6 +126,7 @@ const (
 	CheckSlugGeminiHooks         = "gemini-hooks"
 	CheckSlugCodexHooks          = "codex-hooks"
 	CheckSlugCodePuppyHooks      = "code-puppy-hooks"
+	CheckSlugAmpHooks            = "amp-hooks"
 	CheckSlugHookCommands        = "hook-commands"
 	CheckSlugHookCompleteness    = "hook-completeness"
 	CheckSlugSharedHookValues    = "shared-hook-values"

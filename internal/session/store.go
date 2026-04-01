@@ -40,7 +40,8 @@ const (
 // Path structure: {project}_sageox_ledger/sessions/
 // Uses session-folder structure for organized storage of multiple output formats.
 type Store struct {
-	basePath string // full path to sessions directory
+	basePath      string // full path to sessions directory
+	cacheBasePath string // full path to cache sessions directory (<ledger>/.sageox/cache/sessions/)
 }
 
 // NewStore creates a store for the given ledger path.
@@ -64,7 +65,8 @@ func NewStore(repoContextPath string) (*Store, error) {
 	}
 
 	return &Store{
-		basePath: basePath,
+		basePath:      basePath,
+		cacheBasePath: filepath.Join(absPath, ".sageox", "cache", "sessions"),
 	}, nil
 }
 
@@ -387,7 +389,8 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var createdAt time.Time
 		meta, metaErr := lfs.ReadSessionMeta(sessionPath)
 		if metaErr == nil && meta != nil {
-			hydrationStatus = lfs.CheckHydrationStatus(sessionPath, meta)
+			cachePath := filepath.Join(s.cacheBasePath, name)
+			hydrationStatus = lfs.CheckHydrationStatusWithCache(sessionPath, cachePath, meta)
 			username = meta.Username
 			summary = meta.Summary
 			createdAt = meta.CreatedAt
@@ -609,18 +612,41 @@ func (s *Store) GetSessionPath(sessionName string) string {
 	return filepath.Join(s.basePath, sessionName)
 }
 
+// ResolveContentFile returns the path to a content file, checking the primary
+// session directory first, then the cache. Cache files are never LFS pointers.
+func (s *Store) ResolveContentFile(sessionName, filename string) string {
+	primary := filepath.Join(s.basePath, sessionName, filename)
+	if _, err := os.Stat(primary); err == nil && !lfs.IsPointerFile(primary) {
+		return primary
+	}
+	if s.cacheBasePath != "" {
+		cached := filepath.Join(s.cacheBasePath, sessionName, filename)
+		if _, err := os.Stat(cached); err == nil {
+			return cached
+		}
+	}
+	return primary // caller handles missing file
+}
+
+// CacheSessionPath returns the cache path for a session's content files.
+func (s *Store) CacheSessionPath(sessionName string) string {
+	return filepath.Join(s.cacheBasePath, sessionName)
+}
+
 // IsSessionHydrated checks if content files exist locally for a session.
-// Returns true if content files are present (authored locally or hydrated from LFS).
+// Returns true if content files are present in the session directory or cache
+// (authored locally, hydrated in-place, or downloaded to cache).
 func (s *Store) IsSessionHydrated(sessionName string) bool {
 	sessionPath := s.GetSessionPath(sessionName)
 	meta, err := lfs.ReadSessionMeta(sessionPath)
 	if err != nil {
 		// no meta.json — check for raw.jsonl as fallback (legacy or pre-LFS sessions)
-		rawPath := filepath.Join(sessionPath, rawFilename)
+		rawPath := s.ResolveContentFile(sessionName, rawFilename)
 		_, rawErr := os.Stat(rawPath)
 		return rawErr == nil
 	}
-	return lfs.CheckHydrationStatus(sessionPath, meta) == lfs.HydrationStatusHydrated
+	cachePath := filepath.Join(s.cacheBasePath, sessionName)
+	return lfs.CheckHydrationStatusWithCache(sessionPath, cachePath, meta) == lfs.HydrationStatusHydrated
 }
 
 // CheckNeedsDownload returns the session name if the session exists as a stub
@@ -692,14 +718,15 @@ type StoredSession struct {
 }
 
 // ReadSession reads a session by session name or filename.
+// Checks the primary session directory and cache for content files.
 func (s *Store) ReadSession(name string) (*StoredSession, error) {
 	// strip .jsonl if present for compatibility
 	sessionName := strings.TrimSuffix(name, jsonlExt)
 
-	// check session folder for raw.jsonl
-	sessionRawPath := filepath.Join(s.basePath, sessionName, rawFilename)
-	if _, err := os.Stat(sessionRawPath); err == nil {
-		return s.readSessionFile(sessionRawPath, "raw", sessionName)
+	// find raw.jsonl in session dir or cache
+	rawPath := s.ResolveContentFile(sessionName, rawFilename)
+	if _, err := os.Stat(rawPath); err == nil {
+		return s.readSessionFile(rawPath, "raw", sessionName)
 	}
 
 	return nil, fmt.Errorf("%w: name=%s", ErrSessionNotFound, name)
@@ -707,15 +734,15 @@ func (s *Store) ReadSession(name string) (*StoredSession, error) {
 
 // ReadSessionRaw reads the raw session from a session folder.
 func (s *Store) ReadSessionRaw(sessionName string) (*StoredSession, error) {
-	filePath := filepath.Join(s.basePath, sessionName, rawFilename)
+	filePath := s.ResolveContentFile(sessionName, rawFilename)
 	return s.readSessionFile(filePath, "raw", sessionName)
 }
 
 // ReadRawSession reads the raw session file from a session folder.
 func (s *Store) ReadRawSession(filename string) (*StoredSession, error) {
 	sessionName := strings.TrimSuffix(filename, jsonlExt)
-	sessionPath := filepath.Join(s.basePath, sessionName, rawFilename)
-	return s.readSessionFile(sessionPath, "raw", sessionName)
+	filePath := s.ResolveContentFile(sessionName, rawFilename)
+	return s.readSessionFile(filePath, "raw", sessionName)
 }
 
 // readSessionFile reads and parses a session file.

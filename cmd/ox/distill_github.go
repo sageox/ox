@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
+
 	"github.com/sageox/ox/internal/agentcli"
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/query"
@@ -97,7 +100,7 @@ If you are uncertain whether something is meaningful, include it with a note in 
 //
 // repoID identifies the repo for per-repo state tracking.
 // dataDir is the path to the CodeDB data directory.
-func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, repoID, dataDir, guidelines string) error {
+func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, repoID, dataDir, guidelines string) error {
 	if dataDir == "" {
 		slog.Debug("no CodeDB dir, skipping github fact extraction", "repo", repoID)
 		return nil
@@ -113,9 +116,9 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 	}
 	defer db.Close()
 
-	// compute time window from distill state (per-repo)
+	// compute time window from fact file metadata (stateless)
 	now := time.Now().UTC()
-	since := state.githubFactsTimeForRepo(repoID, tc.Path)
+	since := inferGitHubQueryHighWater(tc.Path)
 
 	result, err := query.AssembleActivity(ctx, db.Store(), since, now)
 	if err != nil {
@@ -126,9 +129,6 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 	if result.Metadata.PRCount == 0 && result.Metadata.IssueCount == 0 && result.Metadata.CommitCount == 0 {
 		slog.Debug("no github activity in window, skipping extraction",
 			"since", since.Format(time.RFC3339), "until", now.Format(time.RFC3339))
-		if !distillDryRun {
-			state.setGitHubFactsTime(repoID, now)
-		}
 		return nil
 	}
 
@@ -139,8 +139,43 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 	if distillDryRun {
 		for _, day := range days {
 			bucket := byDay[day]
-			fmt.Fprintf(cmd.OutOrStdout(), "GitHub activity: %d PRs, %d issues, %d commits for extraction (%s)\n",
-				bucket.Metadata.PRCount, bucket.Metadata.IssueCount, bucket.Metadata.CommitCount, day)
+			// count items that already have fact files (skippable)
+			var skippedPRs, skippedIssues, skippedCommits int
+			for _, pr := range bucket.PRClusters {
+				data, _ := json.Marshal(pr)
+				hash := contentHash(string(data))
+				factPath := filepath.Join(tc.Path, "memory", ".github-facts", fmt.Sprintf("%s-pr-%d.jsonl", day, pr.Number))
+				if readFactFileSourceHash(factPath) == hash {
+					skippedPRs++
+				}
+			}
+			for _, issue := range bucket.StandaloneIssues {
+				data, _ := json.Marshal(issue)
+				hash := contentHash(string(data))
+				factPath := filepath.Join(tc.Path, "memory", ".github-facts", fmt.Sprintf("%s-issue-%d.jsonl", day, issue.Number))
+				if readFactFileSourceHash(factPath) == hash {
+					skippedIssues++
+				}
+			}
+			if len(bucket.StandaloneCommits) > 0 {
+				data, _ := json.Marshal(bucket.StandaloneCommits)
+				hash := contentHash(string(data))
+				commitsPath := filepath.Join(tc.Path, "memory", ".github-facts", day+"-commits.jsonl")
+				if readFactFileSourceHash(commitsPath) == hash {
+					skippedCommits = len(bucket.StandaloneCommits)
+				}
+			}
+			newPRs := bucket.Metadata.PRCount - skippedPRs
+			newIssues := bucket.Metadata.IssueCount - skippedIssues
+			newCommits := bucket.Metadata.CommitCount - skippedCommits
+			if newPRs > 0 || newIssues > 0 || newCommits > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "GitHub activity: %d PRs, %d issues, %d commits for extraction (%s)\n",
+					newPRs, newIssues, newCommits, day)
+			}
+			if skippedPRs > 0 || skippedIssues > 0 || skippedCommits > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "  (skipping %d PRs, %d issues, %d commits already extracted)\n",
+					skippedPRs, skippedIssues, skippedCommits)
+			}
 		}
 		return nil
 	}
@@ -150,97 +185,257 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 		return fmt.Errorf("create github-facts dir: %w", err)
 	}
 
+	// collect work items, then fan out with bounded concurrency.
+	// each item writes to its own deterministic file — no shared state.
+	type workItem struct {
+		day      string
+		itemType string // "pr", "issue", "commits"
+		number   int    // PR/issue number, 0 for commits
+		item     any    // PRCluster, StandaloneIssue, or []StandaloneCommit
+	}
+
+	var items []workItem
 	for _, day := range days {
 		bucket := byDay[day]
-
-		// skip days with no meaningful clusters
-		if bucket.Metadata.PRCount == 0 && bucket.Metadata.IssueCount == 0 && bucket.Metadata.CommitCount == 0 {
-			continue
+		for _, pr := range bucket.PRClusters {
+			data, _ := json.Marshal(pr)
+			hash := contentHash(string(data))
+			factPath := filepath.Join(tc.Path, "memory", ".github-facts", fmt.Sprintf("%s-pr-%d.jsonl", day, pr.Number))
+			if readFactFileSourceHash(factPath) == hash {
+				continue
+			}
+			items = append(items, workItem{day, "pr", pr.Number, pr})
 		}
-
-		data, err := bucket.MarshalEventClusters()
-		if err != nil {
-			return fmt.Errorf("marshal event clusters (%s): %w", day, err)
+		for _, issue := range bucket.StandaloneIssues {
+			data, _ := json.Marshal(issue)
+			hash := contentHash(string(data))
+			factPath := filepath.Join(tc.Path, "memory", ".github-facts", fmt.Sprintf("%s-issue-%d.jsonl", day, issue.Number))
+			if readFactFileSourceHash(factPath) == hash {
+				continue
+			}
+			items = append(items, workItem{day, "issue", issue.Number, issue})
 		}
-
-		if len(data) > 100_000 {
-			slog.Warn("github activity batch is large, may exceed LLM context", "day", day, "bytes", len(data))
+		if len(bucket.StandaloneCommits) > 0 {
+			data, _ := json.Marshal(bucket.StandaloneCommits)
+			hash := contentHash(string(data))
+			commitsPath := filepath.Join(tc.Path, "memory", ".github-facts", day+"-commits.jsonl")
+			if readFactFileSourceHash(commitsPath) == hash {
+				continue
+			}
+			items = append(items, workItem{day, "commits", 0, bucket.StandaloneCommits})
 		}
+	}
 
-		interval := "1 day"
-		prompt := buildGitHubExtractorPrompt(string(data), interval, guidelines)
-		logPrompt(cmd, "github-facts:"+day, prompt)
+	if len(items) == 0 {
+		slog.Debug("all github items already extracted")
+		return nil
+	}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "Extracting facts from %d PRs, %d issues, %d commits for %s...\n",
-			bucket.Metadata.PRCount, bucket.Metadata.IssueCount, bucket.Metadata.CommitCount, day)
+	concurrency := distillConcurrency
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > 8 {
+		concurrency = 8
+	}
 
-		output, err := backend.Run(ctx, prompt)
-		if err != nil {
-			return fmt.Errorf("AI coworker (%s): %w", day, err)
-		}
+	if concurrency > 1 {
+		fmt.Fprintf(cmd.OutOrStdout(), "Extracting %d GitHub items with concurrency %d...\n", len(items), concurrency)
+	}
 
-		output = strings.TrimSpace(output)
-		if output == "" || output == "[]" {
-			slog.Debug("github extractor returned no facts", "day", day)
-			continue
-		}
+	var mu sync.Mutex // protects stdout and git operations
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(concurrency)
 
-		// generate UUID7 filename for collision avoidance
-		id, err := uuid.NewV7()
-		if err != nil {
-			return fmt.Errorf("generate fact file ID: %w", err)
-		}
+	for _, wi := range items {
+		wi := wi // capture loop var
+		g.Go(func() error {
+			var err error
+			switch wi.itemType {
+			case "pr", "issue":
+				err = extractSingleGitHubItem(gctx, cmd, &mu, backend, tc.Path, wi.day, wi.itemType, wi.number, wi.item, since, guidelines)
+			case "commits":
+				commits := wi.item.([]query.StandaloneCommit)
+				err = extractGitHubCommitBatch(gctx, cmd, &mu, backend, tc.Path, wi.day, commits, since, guidelines)
+			}
+			if err != nil {
+				slog.Warn("github extraction failed", "day", wi.day, "type", wi.itemType, "number", wi.number, "error", err)
+			}
+			return nil // don't abort other items on failure
+		})
+	}
 
-		factFile := filepath.Join("memory", ".github-facts", day+"-"+id.String()+".jsonl")
+	_ = g.Wait()
+	return nil
+}
 
-		// Parse and validate LLM output as JSONL facts
-		_, parsedFacts, err := facts.ParseFacts([]byte(output))
-		if err != nil {
-			slog.Warn("github extractor returned unparseable output, skipping", "day", day, "error", err)
-			continue
-		}
-		if len(parsedFacts) == 0 {
-			slog.Debug("github extractor returned no valid facts after parsing", "day", day)
-			continue
-		}
+// extractSingleGitHubItem extracts facts from a single PR or issue.
+// Uses a deterministic filename based on day + item type + number for dedup.
+func extractSingleGitHubItem(ctx context.Context, cmd *cobra.Command, mu *sync.Mutex, backend agentcli.Backend, tcPath, day, itemType string, number int, item any, since time.Time, guidelines string) error {
+	// deterministic filename: 2026-03-28-pr-152.jsonl
+	factFile := filepath.Join("memory", ".github-facts", fmt.Sprintf("%s-%s-%d.jsonl", day, itemType, number))
+	fullPath := filepath.Join(tcPath, factFile)
 
+	data, err := json.Marshal(item)
+	if err != nil {
+		return fmt.Errorf("marshal %s #%d: %w", itemType, number, err)
+	}
+
+	prompt := buildGitHubExtractorPrompt(string(data), "1 day", guidelines)
+	logPrompt(cmd, fmt.Sprintf("github-%s:%d", itemType, number), prompt)
+
+	mu.Lock()
+	fmt.Fprintf(cmd.OutOrStdout(), "Extracting facts from %s #%d for %s (%d bytes)...\n",
+		itemType, number, day, len(data))
+	mu.Unlock()
+
+	llmStart := time.Now()
+	output, err := backend.Run(ctx, prompt)
+	elapsed := time.Since(llmStart).Round(time.Millisecond)
+	mu.Lock()
+	fmt.Fprintf(cmd.OutOrStdout(), "  %s #%d took %s\n", itemType, number, elapsed)
+	mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("AI coworker (%s #%d): %w", itemType, number, err)
+	}
+
+	output = strings.TrimSpace(output)
+	sourceHash := contentHash(string(data))
+
+	if output == "" || output == "[]" {
+		// write empty marker (serialize git ops)
+		mu.Lock()
 		header := facts.FileHeader{
 			Meta: facts.FileMeta{
 				SchemaVersion: facts.SchemaVersion,
 				SourceType:    facts.SourceGitHub,
 				RecordedAt:    day + "T00:00:00Z",
+				SourceHash:    sourceHash,
+				QuerySince:    since.Format(time.RFC3339),
 			},
 		}
-
-		if err := facts.WriteFacts(filepath.Join(tc.Path, factFile), header, parsedFacts); err != nil {
-			return fmt.Errorf("write github facts: %w", err)
+		if err := facts.WriteFacts(fullPath, header, nil); err != nil {
+			mu.Unlock()
+			return fmt.Errorf("write empty marker: %w", err)
 		}
-
-		if err := commitMemoryFile(tc.Path, factFile, fmt.Sprintf("memory: extract github facts for %s", day)); err != nil {
-			slog.Warn("failed to commit github facts", "error", err)
+		if err := commitMemoryFile(tcPath, factFile, fmt.Sprintf("memory: no facts from %s #%d on %s", itemType, number, day)); err != nil {
+			slog.Warn("failed to commit empty marker, rolling back", "error", err)
+			os.Remove(fullPath)
 		}
-
-		fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", factFile)
+		mu.Unlock()
+		return nil
 	}
 
-	state.setGitHubFactsTime(repoID, now)
+	_, parsedFacts, err := facts.ParseFacts([]byte(output))
+	if err != nil {
+		slog.Warn("github extractor returned unparseable output", "item", fmt.Sprintf("%s-%d", itemType, number), "error", err)
+		return nil
+	}
+	if len(parsedFacts) == 0 {
+		return nil
+	}
+
+	header := facts.FileHeader{
+		Meta: facts.FileMeta{
+			SchemaVersion: facts.SchemaVersion,
+			SourceType:    facts.SourceGitHub,
+			RecordedAt:    day + "T00:00:00Z",
+			SourceHash:    sourceHash,
+			QuerySince:    since.Format(time.RFC3339),
+		},
+	}
+
+	// serialize file writes and git commits (git isn't concurrent-safe)
+	mu.Lock()
+	defer mu.Unlock()
+
+	if err := facts.WriteFacts(fullPath, header, parsedFacts); err != nil {
+		return fmt.Errorf("write github facts: %w", err)
+	}
+
+	if err := commitMemoryFile(tcPath, factFile, fmt.Sprintf("memory: extract facts from %s #%d on %s", itemType, number, day)); err != nil {
+		slog.Warn("failed to commit github facts, rolling back", "error", err)
+		os.Remove(fullPath)
+		return fmt.Errorf("commit github facts: %w", err)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s (%d facts)\n", factFile, len(parsedFacts))
 	return nil
 }
 
-// githubFactsSince returns the start of the time window for GitHub fact extraction.
-// If no state is available, it infers the high-water mark from existing files.
-func githubFactsSince(state *distillStateV2, tcPath string) time.Time {
-	if state.LastGitHubFacts != "" {
-		if t, err := time.Parse(time.RFC3339, state.LastGitHubFacts); err == nil {
-			return t
+// extractGitHubCommitBatch extracts facts from a batch of standalone commits for a day.
+func extractGitHubCommitBatch(ctx context.Context, cmd *cobra.Command, mu *sync.Mutex, backend agentcli.Backend, tcPath, day string, commits []query.StandaloneCommit, since time.Time, guidelines string) error {
+	factFile := filepath.Join("memory", ".github-facts", day+"-commits.jsonl")
+	fullPath := filepath.Join(tcPath, factFile)
+
+	data, err := json.Marshal(commits)
+	if err != nil {
+		return fmt.Errorf("marshal commits: %w", err)
+	}
+
+	sourceHash := contentHash(string(data))
+
+	prompt := buildGitHubExtractorPrompt(string(data), "1 day", guidelines)
+	logPrompt(cmd, "github-commits:"+day, prompt)
+
+	mu.Lock()
+	fmt.Fprintf(cmd.OutOrStdout(), "Extracting facts from %d standalone commits for %s (%d bytes)...\n", len(commits), day, len(data))
+	mu.Unlock()
+
+	llmStart := time.Now()
+	output, err := backend.Run(ctx, prompt)
+	elapsed := time.Since(llmStart).Round(time.Millisecond)
+	mu.Lock()
+	fmt.Fprintf(cmd.OutOrStdout(), "  commits batch took %s\n", elapsed)
+	mu.Unlock()
+	if err != nil {
+		return fmt.Errorf("AI coworker (commits %s): %w", day, err)
+	}
+
+	output = strings.TrimSpace(output)
+	header := facts.FileHeader{
+		Meta: facts.FileMeta{
+			SchemaVersion: facts.SchemaVersion,
+			SourceType:    facts.SourceGitHub,
+			RecordedAt:    day + "T00:00:00Z",
+			SourceHash:    sourceHash,
+			QuerySince:    since.Format(time.RFC3339),
+		},
+	}
+
+	// serialize file writes and git commits
+	mu.Lock()
+	defer mu.Unlock()
+
+	if output == "" || output == "[]" {
+		if err := facts.WriteFacts(fullPath, header, nil); err != nil {
+			return fmt.Errorf("write empty marker: %w", err)
 		}
+		if err := commitMemoryFile(tcPath, factFile, fmt.Sprintf("memory: no facts from commits on %s", day)); err != nil {
+			slog.Warn("failed to commit empty marker, rolling back", "error", err)
+			os.Remove(fullPath)
+		}
+		return nil
 	}
-	// infer high-water from existing fact files (fresh clone recovery)
-	if hw := inferGitHubFactsHighWater(tcPath); !hw.IsZero() {
-		return hw
+
+	_, parsedFacts, err := facts.ParseFacts([]byte(output))
+	if err != nil {
+		slog.Warn("github extractor returned unparseable output", "day", day, "error", err)
+		return nil
 	}
-	// default: 7 days ago
-	return time.Now().UTC().AddDate(0, 0, -7)
+
+	if err := facts.WriteFacts(fullPath, header, parsedFacts); err != nil {
+		return fmt.Errorf("write github facts: %w", err)
+	}
+
+	if err := commitMemoryFile(tcPath, factFile, fmt.Sprintf("memory: extract facts from %d commits on %s", len(commits), day)); err != nil {
+		slog.Warn("failed to commit github facts, rolling back", "error", err)
+		os.Remove(fullPath)
+		return fmt.Errorf("commit github facts: %w", err)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s (%d facts)\n", factFile, len(parsedFacts))
+	return nil
 }
 
 // inferGitHubFactsHighWater scans memory/.github-facts/ for the latest YYYY-MM-DD
@@ -277,6 +472,17 @@ func inferGitHubFactsHighWater(tcPath string) time.Time {
 		return time.Time{}
 	}
 	return t
+}
+
+// inferGitHubQueryHighWater returns the start of the query window for GitHub extraction.
+// Uses the latest date prefix from existing fact filenames. Falls back to 7 days ago.
+// source_hash in each file handles dedup for items that changed within the same day.
+func inferGitHubQueryHighWater(tcPath string) time.Time {
+	// use filename-based inference (YYYY-MM-DD prefix)
+	if hw := inferGitHubFactsHighWater(tcPath); !hw.IsZero() {
+		return hw
+	}
+	return time.Now().UTC().AddDate(0, 0, -7)
 }
 
 // buildGitHubExtractorPrompt constructs the full prompt for the GitHub fact extractor.

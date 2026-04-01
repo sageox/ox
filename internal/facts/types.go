@@ -23,6 +23,9 @@ type FileMeta struct {
 	SchemaVersion string `json:"schema_version"`
 	SourceType    string `json:"source_type"`
 	RecordedAt    string `json:"recorded_at"`
+	SourceHash    string `json:"source_hash,omitempty"`
+	QuerySince    string `json:"query_since,omitempty"`
+	QueryUntil    string `json:"query_until,omitempty"`
 }
 
 // Source type constants.

@@ -27,6 +27,9 @@ type Claude struct {
 	// WorkDir sets the working directory for the claude process.
 	// When set, relative file paths in prompts resolve from this directory.
 	WorkDir string
+	// Model overrides the default model (e.g., "sonnet" or "claude-sonnet-4-6").
+	// Empty string uses the claude CLI default.
+	Model string
 }
 
 func (c *Claude) Name() string { return "claude" }
@@ -43,7 +46,11 @@ func (c *Claude) Run(ctx context.Context, prompt string) (string, error) {
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(ctx, "claude", "-p", "--output-format", "text", "--tools", "Read")
+	args := []string{"-p", "--output-format", "text", "--tools", "Read"}
+	if c.Model != "" {
+		args = append(args, "--model", c.Model)
+	}
+	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	if c.WorkDir != "" {
 		cmd.Dir = c.WorkDir

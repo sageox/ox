@@ -106,7 +106,7 @@ func TestSessionWatcherManager_StopAll_CleansUp(t *testing.T) {
 // Failure prevented: new adapter added but not registered in resolveAdapter.
 func TestResolveAdapter_KnownAdapters(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"codex", "claude-code"} {
+	for _, name := range []string{"codex", "claude-code", "gemini"} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			adapter, err := resolveAdapter(name)

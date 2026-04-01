@@ -2,8 +2,8 @@ package agentwork
 
 import "log/slog"
 
-// agentPriority defines auto-detection order: claude preferred over codex.
-var agentPriority = []string{"claude", "codex"}
+// agentPriority defines auto-detection order for daemon agent worker.
+var agentPriority = []string{"claude", "codex", "gemini"}
 
 // ResolveAgent resolves the effective agent from a config value.
 // If configured is "" (unconfigured), auto-detects by checking which agent CLIs
@@ -30,6 +30,8 @@ func NewRunner(agentType string, logger *slog.Logger) Runner {
 	switch agentType {
 	case "codex":
 		return NewCodexRunner(logger)
+	case "gemini":
+		return NewGeminiRunner(logger)
 	default:
 		return NewClaudeRunner(logger)
 	}
