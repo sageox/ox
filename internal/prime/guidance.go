@@ -109,14 +109,15 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 		})
 	}
 
-	// whisper check — active pull complement to passive hook delivery.
-	// UserPromptSubmit hook is the primary channel (fires before each prompt),
-	// but this command lets agents check on-demand during long sessions where
-	// new whispers may arrive between prompts. The agent ID is embedded so
-	// the agent can copy-paste the command without needing to look it up.
+	// heartbeat — lightweight mid-turn check-in that delivers pending whispers.
+	// Agents should call this every ~20 tool calls during long single-turn tasks.
+	// The UserPromptSubmit hook is the primary whisper channel (fires on user messages),
+	// but during long tasks the agent may not receive a new prompt for 30+ minutes.
+	// Heartbeat fills this gap: sends a daemon heartbeat and returns pending whispers
+	// via Bash stdout (which IS visible to the model mid-turn).
 	cmds = append(cmds, IntentCommand{
-		Intent:  fmt.Sprintf("check for team whispers, coworker updates, murmurs — run periodically during long sessions: ox agent %s whisper", p.AgentID),
-		Command: fmt.Sprintf("ox agent %s whisper", p.AgentID),
+		Intent:  fmt.Sprintf("stay in sync with team during long tasks — run every ~20 tool calls: ox agent %s heartbeat", p.AgentID),
+		Command: fmt.Sprintf("ox agent %s heartbeat", p.AgentID),
 	})
 
 	// semantic search — when primed context isn't enough, query for depth

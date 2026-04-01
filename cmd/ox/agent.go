@@ -77,6 +77,9 @@ Use the session:
   ox agent <agent_id> session abort         # Discard active session (destructive)
   ox agent <agent_id> session delete <name> # Delete a completed session (destructive)
 
+Stay in sync during long tasks:
+  ox agent <agent_id> heartbeat            # Send heartbeat + receive pending whispers
+
 Check for team whispers:
   ox agent <agent_id> whisper              # Check for pending whispers from coworkers
 
@@ -192,10 +195,11 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 // Used to distinguish `ox agent session start` (missing agent ID)
 // from `ox agent typo` (genuinely unknown command).
 var agentSubcommands = map[string]bool{
-	"doctor":  true,
-	"query":   true,
-	"session": true,
-	"whisper": true,
+	"doctor":    true,
+	"heartbeat": true,
+	"query":     true,
+	"session":   true,
+	"whisper":   true,
 }
 
 func isAgentSubcommand(name string) bool {
@@ -300,6 +304,13 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 			return fmt.Errorf("memory features are not enabled\nSet FEATURE_MEMORY=true to enable")
 		}
 		return runAgentDistill(inst, cmd)
+	case "heartbeat":
+		// lightweight check-in: emitWhispers() already ran above (line 238),
+		// so pending whispers are already on stdout. Just send a heartbeat.
+		if gitRoot := findGitRoot(); gitRoot != "" {
+			Heartbeat(gitRoot, nil, agentID)
+		}
+		return nil
 	case "whisper":
 		// `ox agent <id> whisper history` — show all whispers without advancing cursor
 		if len(subargs) > 0 && subargs[0] == "history" {
@@ -309,7 +320,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	case "hook":
 		return runAgentHook(subargs)
 	default:
-		available := "doctor, hook, query, session, whisper"
+		available := "doctor, heartbeat, hook, query, session, whisper"
 		if auth.IsMemoryEnabled() {
 			available = "distill, " + available
 		}

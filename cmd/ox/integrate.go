@@ -162,7 +162,7 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 	// Amp CLI installation
 	if integrateAmpFlag {
 		if integrateUserFlag {
-			return fmt.Errorf("Amp CLI does not support user-level integration")
+			return fmt.Errorf("amp CLI does not support user-level integration")
 		}
 		if err := installAmpHooks(false); err != nil {
 			return fmt.Errorf("installing Amp CLI integration: %w", err)
@@ -299,7 +299,7 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 	// Amp CLI uninstallation
 	if integrateAmpFlag {
 		if integrateUserFlag {
-			return fmt.Errorf("Amp CLI does not support user-level integration")
+			return fmt.Errorf("amp CLI does not support user-level integration")
 		}
 		if err := uninstallAmpHooks(false); err != nil {
 			return fmt.Errorf("uninstalling Amp CLI integration: %w", err)

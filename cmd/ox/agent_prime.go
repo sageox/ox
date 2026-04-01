@@ -513,14 +513,12 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// murmur directive — behavioral instruction when auto-murmuring is configured
 	if config.MurmuringEnabled(projectRoot) {
-		output.MurmurDirective = "Murmuring is ENABLED for this repo. Proactively publish your WIP to teammates:\n" +
-			"  • At the START of significant work — before diving in, say what you're about to do\n" +
-			"  • Every 10-15 minutes during active work — brief status update\n" +
+		output.MurmurDirective = "Murmuring is ENABLED. Proactively publish WIP to teammates:\n" +
+			"  • At START of significant work — say what you're about to do\n" +
 			"  • After architectural decisions — what you decided and why\n" +
-			"Command: ox murmur --topic=wip \"concise description (≤500 bytes — teammates pay token cost to read it)\"\n" +
-			"Don't wait for nudges. Murmur proactively.\n" +
-			"IMPORTANT: Run your first murmur NOW, before doing anything else. " +
-			"Describe what the user asked you to do and which code areas you expect to touch."
+			"  • Command: ox murmur --topic=wip \"concise description (≤500 bytes)\"\n" +
+			fmt.Sprintf("  • Stay in sync: run `ox agent %s heartbeat` every ~20 tool calls during long tasks\n", agentID) +
+			"Run your first murmur NOW: describe what the user asked and which code areas you expect to touch."
 	}
 
 	// build pre-assembled notification for JSON-consuming agents.
