@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"strings"
@@ -157,6 +158,55 @@ func DownloadAndVerifyObject(action *Action, expectedOID string) ([]byte, error)
 		return nil, fmt.Errorf("OID mismatch: expected %s, got %s", expectedOID, actualOID)
 	}
 	return data, nil
+}
+
+// DownloadToFile streams a blob directly to dst, hashing incrementally when
+// verify is true. Avoids buffering the entire object in memory.
+func DownloadToFile(action *Action, dst io.Writer, verify bool, expectedOID string) error {
+	if action == nil || action.Href == "" {
+		return fmt.Errorf("no download action provided")
+	}
+
+	req, err := http.NewRequest("GET", action.Href, nil)
+	if err != nil {
+		return fmt.Errorf("create download request: %w", err)
+	}
+	req.Header.Set("User-Agent", useragent.String())
+	for k, v := range action.Header {
+		req.Header.Set(k, v)
+	}
+
+	resp, err := lfsHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("download failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("download returned HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var h hash.Hash
+	w := dst
+	if verify {
+		h = sha256.New()
+		w = io.MultiWriter(dst, h)
+	}
+
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return fmt.Errorf("stream download: %w", err)
+	}
+
+	if verify && h != nil {
+		actualOID := hex.EncodeToString(h.Sum(nil))
+		expectedHex := strings.TrimPrefix(expectedOID, "sha256:")
+		if actualOID != expectedHex {
+			return fmt.Errorf("OID mismatch: expected %s, got %s", expectedOID, actualOID)
+		}
+	}
+
+	return nil
 }
 
 // UploadAll uploads multiple blobs in parallel.

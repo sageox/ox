@@ -1137,7 +1137,11 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 			fmt.Fprintln(cmd.OutOrStdout(), "  View a session: ox session view <name> --text")
 			fmt.Fprintln(cmd.OutOrStdout(), "  (without --text, opens in browser — not suitable for agents)")
 			fmt.Fprintln(cmd.OutOrStdout())
-			fmt.Fprintln(cmd.OutOrStdout(), "Do NOT read ledger files directly (LFS stubs). Always use ox session commands.")
+			fmt.Fprintln(cmd.OutOrStdout(), "Use 'ox session list' and 'ox session view' for sessions.")
+			fmt.Fprintln(cmd.OutOrStdout(), "If you encounter a stub file (3-line pointer starting with \"version https://git-lfs\"),")
+			fmt.Fprintln(cmd.OutOrStdout(), "fetch real content: ox fetch <path>  (prints local cache path you can Read)")
+			fmt.Fprintln(cmd.OutOrStdout(), "  ox fetch <path> -o output.jpg   # explicit output path")
+			fmt.Fprintln(cmd.OutOrStdout(), "  ox fetch <path> --stdout | jq . # stream to stdout")
 		} else {
 			fmt.Fprintln(cmd.OutOrStdout(), "Ledger: not provisioned (sessions unavailable until 'ox doctor --fix' or daemon sync)")
 		}
@@ -1706,7 +1710,7 @@ func discoverLedger(teamCtx *teamContextInfo) *ledgerInfo {
 		return &ledgerInfo{Exists: false}
 	}
 
-	hint := "The ledger is a repo-specific archive of prior AI coworker coding sessions. It is NOT team context. Only consult when explicitly asked to review prior sessions. Use 'ox session list' to browse and 'ox session view <name> --text' to view one. Do not read ledger files directly (LFS stubs)." // commands already quoted
+	hint := "The ledger is a repo-specific archive of prior AI coworker coding sessions. It is NOT team context. Only consult when explicitly asked to review prior sessions. Use 'ox session list' to browse and 'ox session view <name> --text' to view one. If you encounter stub files, use 'ox fetch <path>' to get real content."
 
 	return &ledgerInfo{
 		Exists: true,
