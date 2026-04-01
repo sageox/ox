@@ -305,11 +305,9 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		}
 		return runAgentDistill(inst, cmd)
 	case "heartbeat":
-		// lightweight check-in: emitWhispers() already ran above (line 238),
-		// so pending whispers are already on stdout. Just send a heartbeat.
-		if gitRoot := findGitRoot(); gitRoot != "" {
-			Heartbeat(gitRoot, nil, agentID)
-		}
+		// noop: Heartbeat() and emitWhispers() already ran above for all
+		// ox agent <id> <cmd> invocations. This case just needs to exist
+		// so the dispatcher doesn't reject "heartbeat" as unknown.
 		return nil
 	case "whisper":
 		// `ox agent <id> whisper history` — show all whispers without advancing cursor
