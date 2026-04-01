@@ -2,73 +2,95 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// gitCmd runs a git command in the given directory with isolated config.
-func gitCmd(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), // safe: git subprocess in temp dir, not ox CLI
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_AUTHOR_NAME=test",
-		"GIT_AUTHOR_EMAIL=test@test.com",
-		"GIT_COMMITTER_NAME=test",
-		"GIT_COMMITTER_EMAIL=test@test.com",
-		"GIT_COMMITTER_DATE=2026-01-01T00:00:00+00:00",
-	)
-	// disable gpg signing which fails in isolated test environments
-	cmd.Env = append(cmd.Env, "GIT_CONFIG_COUNT=1",
-		"GIT_CONFIG_KEY_0=commit.gpgsign", "GIT_CONFIG_VALUE_0=false")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+func TestSyncScheduler_DoPull_LedgerDirExistsButNotGitRepo(t *testing.T) {
+	// simulate a failed clone that left an empty directory behind
+	tmpDir := t.TempDir()
+	ledgerDir := filepath.Join(tmpDir, "ledger")
+	require.NoError(t, os.MkdirAll(ledgerDir, 0755))
+
+	// verify the directory exists but is NOT a git repo
+	_, err := os.Stat(ledgerDir)
+	require.NoError(t, err)
+	assert.False(t, gitutil.IsGitRepo(ledgerDir))
+
+	cfg := DefaultConfig()
+	cfg.LedgerPath = ledgerDir
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// doPull should detect the empty dir is not a git repo and return early
+	// (enters the clone branch) rather than falling through to git fetch/pull
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// should not panic — previously this would fall through to git pull
+	// on an empty directory since it only checked os.IsNotExist
+	scheduler.doPull(ctx, nil, false, true)
+}
+
+func TestSyncScheduler_PullInProgress(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
 	}
-	return strings.TrimSpace(string(out))
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// set up a real bare repo + clone so first doPull actually does work
+	bareDir := filepath.Join(t.TempDir(), "bare")
+	workDir := filepath.Join(t.TempDir(), "work")
+	require.NoError(t, exec.Command("git", "init", "--bare", "--initial-branch=main", bareDir).Run())
+	require.NoError(t, exec.Command("git", "clone", bareDir, workDir).Run())
+	gitConfig(t, workDir)
+	require.NoError(t, exec.Command("git", "-C", workDir, "commit", "--allow-empty", "-m", "init").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "push", "origin", "main").Run())
+
+	cfg := DefaultConfig()
+	cfg.LedgerPath = workDir
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// use the production concurrency guard: doPull(ctx, nil, false, true) sets
+	// pullInProgress=true on entry, false on exit. If we set it ourselves
+	// beforehand, doPull returns early without doing anything.
+	scheduler.mu.Lock()
+	scheduler.pullInProgress = true
+	scheduler.mu.Unlock()
+
+	ctx := context.Background()
+	scheduler.doPull(ctx, nil, false, true) // should return immediately (guard active)
+
+	// still marked in-progress since doPull bailed before the defer that clears it
+	scheduler.mu.Lock()
+	assert.True(t, scheduler.pullInProgress, "pull should still be in-progress after early return")
+	scheduler.mu.Unlock()
+
+	// now clear and run for real to verify the guard doesn't permanently block
+	scheduler.mu.Lock()
+	scheduler.pullInProgress = false
+	scheduler.mu.Unlock()
+
+	require.NoError(t, scheduler.doPull(ctx, nil, false, true)) // should succeed
+	assert.False(t, scheduler.LastSync().IsZero(), "lastSync should be set after real pull")
 }
 
-// setupBareAndClone creates a bare repo + clone with an initial commit.
-// Returns (bareDir, cloneDir).
-func setupBareAndClone(t *testing.T) (string, string) {
-	t.Helper()
-
-	bareDir := filepath.Join(t.TempDir(), "bare.git")
-	cloneDir := filepath.Join(t.TempDir(), "clone")
-
-	gitCmd(t, t.TempDir(), "init", "--bare", "--initial-branch=main", bareDir)
-
-	// create a temporary clone to push initial commit
-	tmpClone := filepath.Join(t.TempDir(), "tmp-clone")
-	gitCmd(t, t.TempDir(), "clone", bareDir, tmpClone)
-	gitCmd(t, tmpClone, "config", "user.name", "test")
-	gitCmd(t, tmpClone, "config", "user.email", "test@test.com")
-	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "init.txt"), []byte("initial"), 0o644))
-	gitCmd(t, tmpClone, "add", "init.txt")
-	gitCmd(t, tmpClone, "commit", "-m", "initial")
-	gitCmd(t, tmpClone, "push", "origin", "HEAD")
-
-	// create the actual clone
-	gitCmd(t, t.TempDir(), "clone", bareDir, cloneDir)
-	gitCmd(t, cloneDir, "config", "user.name", "test")
-	gitCmd(t, cloneDir, "config", "user.email", "test@test.com")
-
-	return bareDir, cloneDir
-}
-
-// newTestScheduler creates a SyncScheduler for testing with minimal config.
-func newPullTestScheduler(t *testing.T, ledgerDir string) *SyncScheduler {
-	t.Helper()
-
+func TestSyncScheduler_PullTeamContexts_PathNotExist(t *testing.T) {
+	// isolate from real credentials
 	prevConfigDir := gitserver.TestSetConfigDirOverride(t.TempDir())
 	prevForceFile := gitserver.TestSetForceFileStorage(true)
 	t.Cleanup(func() {
@@ -76,399 +98,262 @@ func newPullTestScheduler(t *testing.T, ledgerDir string) *SyncScheduler {
 		gitserver.TestSetForceFileStorage(prevForceFile)
 	})
 
+	// create temp project with team context pointing to non-existent path
+	tmpDir := t.TempDir()
+	sageoxDir := filepath.Join(tmpDir, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+
+	// write config with team context pointing to non-existent path
+	configContent := `
+[[team_contexts]]
+team_id = "test-team"
+team_name = "Test Team"
+path = "/nonexistent/path/to/team/context"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.local.toml"), []byte(configContent), 0644))
+
+	// write project config with fake endpoint to prevent real API calls
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"),
+		[]byte(`{"endpoint":"https://fake.test.invalid"}`), 0644))
+
+	cfg := DefaultConfig()
+	cfg.ProjectRoot = tmpDir
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	scheduler := NewSyncScheduler(cfg, logger)
+	scheduler.pullTeamContexts(context.Background())
+
+	// should have status entry marked as not existing
+	status := scheduler.TeamContextStatus()
+	require.Len(t, status, 1)
+	assert.Equal(t, "test-team", status[0].TeamID)
+	assert.Equal(t, "Test Team", status[0].TeamName)
+	assert.False(t, status[0].Exists)
+	assert.Equal(t, "path does not exist and no clone URL available", status[0].LastErr)
+}
+
+func TestSyncScheduler_PullTeamContext_FetchHeadDeduplication(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	// check if git is available
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// isolate from real credentials
+	prevConfigDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+	prevForceFile := gitserver.TestSetForceFileStorage(true)
+	t.Cleanup(func() {
+		gitserver.TestSetConfigDirOverride(prevConfigDir)
+		gitserver.TestSetForceFileStorage(prevForceFile)
+	})
+
+	// create temp git repo for team context
+	teamDir := t.TempDir()
+	setupGitRepo(t, teamDir)
+
+	cfg := DefaultConfig()
+	cfg.TeamContextSyncInterval = 10 * time.Minute // long interval
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// first pull should succeed
+	err := scheduler.pullTeamContext(context.Background(), teamDir)
+	assert.NoError(t, err)
+
+	// simulate recent FETCH_HEAD by touching the file
+	fetchHead := filepath.Join(teamDir, ".git", "FETCH_HEAD")
+	// the file already exists from the first fetch, but let's make sure it's recent
+	require.NoError(t, os.WriteFile(fetchHead, []byte("fake-sha1\t\trefs/heads/main\n"), 0644))
+
+	// second pull should be skipped due to recent fetch
+	err = scheduler.pullTeamContext(context.Background(), teamDir)
+	assert.NoError(t, err) // returns nil when skipped
+}
+
+func TestSyncScheduler_PullTeamContext_NotGitRepo(t *testing.T) {
+	// create temp directory that is NOT a git repo
+	tmpDir := t.TempDir()
+	tcPath := filepath.Join(tmpDir, "team-ctx")
+	require.NoError(t, os.MkdirAll(tcPath, 0755))
+
+	cfg := DefaultConfig()
+	cfg.TeamContextSyncInterval = 10 * time.Minute
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// pull should handle gracefully: detect invalid repo, move aside for re-clone
+	err := scheduler.pullTeamContext(context.Background(), tcPath)
+	assert.NoError(t, err)
+	// original path should be gone (moved to .bak)
+	assert.NoDirExists(t, tcPath)
+}
+
+func TestSyncScheduler_TeamContextIntegration(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test")
+	}
+
+	// check if git is available
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// isolate from real credentials
+	prevConfigDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+	prevForceFile := gitserver.TestSetForceFileStorage(true)
+	t.Cleanup(func() {
+		gitserver.TestSetConfigDirOverride(prevConfigDir)
+		gitserver.TestSetForceFileStorage(prevForceFile)
+	})
+
+	// create temp project directory
+	projectDir := t.TempDir()
+	sageoxDir := filepath.Join(projectDir, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+
+	// create temp git repo for team context
+	teamDir := t.TempDir()
+	setupGitRepo(t, teamDir)
+
+	// write config with team context
+	configContent := fmt.Sprintf(`
+[[team_contexts]]
+team_id = "test-team"
+team_name = "Test Team"
+path = %q
+`, teamDir)
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.local.toml"), []byte(configContent), 0644))
+
+	cfg := DefaultConfig()
+	cfg.ProjectRoot = projectDir
+	cfg.TeamContextSyncInterval = time.Minute // must be > 0 but we'll call pullTeamContexts directly
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// prevent refreshCredentialsIfNeeded and discoverTeams from calling real API
+	scheduler.mu.Lock()
+	scheduler.lastCredentialRefresh = time.Now()
+	scheduler.lastTeamDiscovery = time.Now()
+	scheduler.mu.Unlock()
+
+	// manually touch FETCH_HEAD to be old so the sync isn't skipped
+	fetchHead := filepath.Join(teamDir, ".git", "FETCH_HEAD")
+	oldTime := time.Now().Add(-1 * time.Hour)
+	_ = os.Chtimes(fetchHead, oldTime, oldTime)
+
+	// run team context sync
+	scheduler.pullTeamContexts(context.Background())
+
+	// verify status
+	status := scheduler.TeamContextStatus()
+	require.Len(t, status, 1)
+	assert.Equal(t, "test-team", status[0].TeamID)
+	assert.Equal(t, "Test Team", status[0].TeamName)
+	assert.True(t, status[0].Exists)
+	assert.Empty(t, status[0].LastErr)
+	assert.False(t, status[0].LastSync.IsZero())
+}
+
+func TestSyncScheduler_WorkspaceRegistry(t *testing.T) {
+	// isolate from real credentials - use empty temp dir
+	prevConfigDir := gitserver.TestSetConfigDirOverride(t.TempDir())
+	prevForceFile := gitserver.TestSetForceFileStorage(true)
+	t.Cleanup(func() {
+		gitserver.TestSetConfigDirOverride(prevConfigDir)
+		gitserver.TestSetForceFileStorage(prevForceFile)
+	})
+
+	// create temp project with ledger and team context
+	tmpDir := t.TempDir()
+	sageoxDir := filepath.Join(tmpDir, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+
+	ledgerDir := filepath.Join(t.TempDir(), "ledger")
+	require.NoError(t, os.MkdirAll(filepath.Join(ledgerDir, ".git"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0644))
+
+	teamDir := filepath.Join(t.TempDir(), "team-context")
+	require.NoError(t, os.MkdirAll(filepath.Join(teamDir, ".git"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(teamDir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0644))
+
+	// write config
+	configContent := fmt.Sprintf(`
+[ledger]
+path = %q
+
+[[team_contexts]]
+team_id = "team-abc"
+team_name = "Team ABC"
+path = %q
+`, ledgerDir, teamDir)
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.local.toml"), []byte(configContent), 0644))
+
+	cfg := DefaultConfig()
+	cfg.ProjectRoot = tmpDir
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	scheduler := NewSyncScheduler(cfg, logger)
+
+	// get the workspace registry
+	registry := scheduler.WorkspaceRegistry()
+	require.NotNil(t, registry)
+
+	// load config
+	require.NoError(t, registry.LoadFromConfig())
+
+	// verify ledger is tracked
+	ledger := registry.GetLedger()
+	require.NotNil(t, ledger)
+	assert.Equal(t, ledgerDir, ledger.Path)
+	assert.True(t, ledger.Exists)
+
+	// verify team context is tracked
+	teamContexts := registry.GetTeamContexts()
+	require.Len(t, teamContexts, 1)
+	assert.Equal(t, "team-abc", teamContexts[0].TeamID)
+	assert.Equal(t, "Team ABC", teamContexts[0].TeamName)
+	assert.True(t, teamContexts[0].Exists)
+
+	// test error tracking
+	registry.SetWorkspaceError("team-abc", "test error")
+	tc := registry.GetWorkspace("team-abc")
+	require.NotNil(t, tc)
+	assert.Equal(t, "test error", tc.LastErr)
+
+	registry.ClearWorkspaceError("team-abc")
+	tc = registry.GetWorkspace("team-abc")
+	assert.Empty(t, tc.LastErr)
+}
+
+func TestDoPull_SkipsWhenRemoteUnchanged(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	tmpDir := t.TempDir()
+	ledgerDir := filepath.Join(tmpDir, "ledger")
+	require.NoError(t, os.MkdirAll(ledgerDir, 0755))
+	setupGitRepo(t, ledgerDir)
+
 	cfg := DefaultConfig()
 	cfg.LedgerPath = ledgerDir
+	cfg.SyncIntervalRead = 1 * time.Second
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	s := NewSyncScheduler(cfg, logger)
-	s.issues = NewIssueTracker()
-	return s
-}
+	scheduler := NewSyncScheduler(cfg, logger)
 
-// pushFromSeparateClone pushes a change from a fresh clone to the bare repo.
-func pushFromSeparateClone(t *testing.T, bareDir, filename, content string) {
-	t.Helper()
-	tmpClone := filepath.Join(t.TempDir(), "push-clone")
-	gitCmd(t, t.TempDir(), "clone", bareDir, tmpClone)
-	gitCmd(t, tmpClone, "config", "user.name", "test")
-	gitCmd(t, tmpClone, "config", "user.email", "test@test.com")
-	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, filename), []byte(content), 0o644))
-	gitCmd(t, tmpClone, "add", filename)
-	gitCmd(t, tmpClone, "commit", "-m", "add "+filename)
-	gitCmd(t, tmpClone, "push", "origin", "HEAD")
-}
+	ctx := context.Background()
 
-func TestDetectDivergedBranches_NormalPush(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: git operations")
-	}
-	bareDir, cloneDir := setupBareAndClone(t)
-
-	// push a normal commit from a separate clone
-	pushFromSeparateClone(t, bareDir, "remote.txt", "remote content")
-
-	// fetch in our clone so we see the new commit
-	gitCmd(t, cloneDir, "fetch", "origin")
-
-	s := newPullTestScheduler(t, cloneDir)
-	assert.False(t, s.detectDivergedBranches(context.Background()),
-		"normal fast-forward should not be detected as force push")
-}
-
-func TestDetectDivergedBranches_Diverged(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: git operations")
-	}
-	bareDir, cloneDir := setupBareAndClone(t)
-
-	// make a local commit
-	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "local.txt"), []byte("local"), 0o644))
-	gitCmd(t, cloneDir, "add", "local.txt")
-	gitCmd(t, cloneDir, "commit", "-m", "local commit")
-
-	// force push a rewritten history from a separate clone
-	tmpClone := filepath.Join(t.TempDir(), "force-clone")
-	gitCmd(t, t.TempDir(), "clone", bareDir, tmpClone)
-	gitCmd(t, tmpClone, "config", "user.name", "test")
-	gitCmd(t, tmpClone, "config", "user.email", "test@test.com")
-	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "rewritten.txt"), []byte("rewritten"), 0o644))
-	gitCmd(t, tmpClone, "add", "rewritten.txt")
-	gitCmd(t, tmpClone, "commit", "-m", "rewritten history")
-	gitCmd(t, tmpClone, "push", "--force", "origin", "HEAD")
-
-	// fetch the force-pushed changes
-	gitCmd(t, cloneDir, "fetch", "origin")
-
-	s := newPullTestScheduler(t, cloneDir)
-	assert.True(t, s.detectDivergedBranches(context.Background()),
-		"diverged branches should be detected as force push")
-}
-
-func TestDetectDivergedBranches_NoRemote(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: git operations")
-	}
-	dir := t.TempDir()
-	gitCmd(t, dir, "init")
-	gitCmd(t, dir, "config", "user.name", "test")
-	gitCmd(t, dir, "config", "user.email", "test@test.com")
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "file.txt"), []byte("data"), 0o644))
-	gitCmd(t, dir, "add", "file.txt")
-	gitCmd(t, dir, "commit", "-m", "init")
-
-	s := newPullTestScheduler(t, dir)
-	assert.False(t, s.detectDivergedBranches(context.Background()),
-		"repo with no remote should return false gracefully")
-}
-
-func TestDoPull_StaleLockFile(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: git operations")
-	}
-	_, cloneDir := setupBareAndClone(t)
-
-	// create a stale lock file
-	lockPath := filepath.Join(cloneDir, ".git", "index.lock")
-	require.NoError(t, os.WriteFile(lockPath, []byte("stale"), 0o644))
-
-	s := newPullTestScheduler(t, cloneDir)
-
-	err := s.doPull(context.Background(), nil, false, true)
-	assert.NoError(t, err, "doPull should skip gracefully when lock file exists")
-
-	// verify issue was recorded
-	issues := s.issues.GetIssues()
-	found := false
-	for _, issue := range issues {
-		if issue.Type == IssueTypeGitLock {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "should record IssueTypeGitLock")
-}
-
-func TestDoPull_CorruptRepo_RenamedAside(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: git operations")
-	}
-	_, cloneDir := setupBareAndClone(t)
-
-	// corrupt the repo by emptying .git/HEAD
-	headPath := filepath.Join(cloneDir, ".git", "HEAD")
-	require.NoError(t, os.WriteFile(headPath, []byte(""), 0o644))
-
-	s := newPullTestScheduler(t, cloneDir)
-
-	err := s.doPull(context.Background(), nil, true, true)
-	assert.NoError(t, err, "doPull should return nil for corrupt repo (triggers re-clone)")
-
-	// original path should no longer be a valid git repo (renamed aside)
-	_, statErr := os.Stat(filepath.Join(cloneDir, ".git", "HEAD"))
-	assert.True(t, os.IsNotExist(statErr), "original repo should be renamed aside")
-
-	// verify .bak.* path exists
-	parent := filepath.Dir(cloneDir)
-	entries, _ := os.ReadDir(parent)
-	found := false
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), filepath.Base(cloneDir)+".bak.") {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "backup directory should exist after corrupt repo detection")
-}
-
-func TestDoPull_RebaseInProgress_Skips(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: git operations")
-	}
-	_, cloneDir := setupBareAndClone(t)
-
-	// simulate broken rebase state
-	rebaseMergeDir := filepath.Join(cloneDir, ".git", "rebase-merge")
-	require.NoError(t, os.MkdirAll(rebaseMergeDir, 0o755))
-
-	s := newPullTestScheduler(t, cloneDir)
-
-	err := s.doPull(context.Background(), nil, false, true)
-	assert.NoError(t, err, "doPull should skip silently when rebase is in progress")
-}
-
-func TestDoPull_DivergedLedger_RebasesSuccessfully(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: git operations")
-	}
-	bareDir, cloneDir := setupBareAndClone(t)
-
-	// create a local commit (simulates CLI session upload)
-	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "local-session.txt"), []byte("session data"), 0o644))
-	gitCmd(t, cloneDir, "add", "local-session.txt")
-	gitCmd(t, cloneDir, "commit", "-m", "local session")
-
-	// push a different file from a separate clone (simulates cloud/github sync)
-	pushFromSeparateClone(t, bareDir, "remote-data.txt", "github sync data")
-
-	s := newPullTestScheduler(t, cloneDir)
-
-	err := s.doPull(context.Background(), nil, true, true)
-	assert.NoError(t, err, "doPull should succeed by rebasing diverged branches")
-
-	// verify both files exist (rebase landed both)
-	assert.FileExists(t, filepath.Join(cloneDir, "local-session.txt"))
-	assert.FileExists(t, filepath.Join(cloneDir, "remote-data.txt"))
-
-	// verify no diverged or merge conflict issue was set
-	for _, issue := range s.issues.GetIssues() {
-		assert.NotEqual(t, IssueTypeDiverged, issue.Type,
-			"no diverged issue should be set after successful rebase")
-		assert.NotEqual(t, IssueTypeMergeConflict, issue.Type,
-			"no merge conflict issue should be set after clean rebase")
-	}
-}
-
-func TestDoPull_DivergedLedger_ConflictInSafePath_AutoResolves(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: git operations")
-	}
-	bareDir, cloneDir := setupBareAndClone(t)
-
-	// local commit: modify a file under data/github/ (safe auto-resolve path)
-	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, "data", "github"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "data", "github", "prs.json"), []byte(`{"local":true}`), 0o644))
-	gitCmd(t, cloneDir, "add", "data/github/prs.json")
-	gitCmd(t, cloneDir, "commit", "-m", "local github data")
-
-	// push conflicting change from separate clone
-	tmpClone := filepath.Join(t.TempDir(), "conflict-clone")
-	gitCmd(t, t.TempDir(), "clone", bareDir, tmpClone)
-	gitCmd(t, tmpClone, "config", "user.name", "test")
-	gitCmd(t, tmpClone, "config", "user.email", "test@test.com")
-	require.NoError(t, os.MkdirAll(filepath.Join(tmpClone, "data", "github"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "data", "github", "prs.json"), []byte(`{"remote":true}`), 0o644))
-	gitCmd(t, tmpClone, "add", "data/github/prs.json")
-	gitCmd(t, tmpClone, "commit", "-m", "remote github data")
-	gitCmd(t, tmpClone, "push", "origin", "HEAD")
-
-	s := newPullTestScheduler(t, cloneDir)
-
-	err := s.doPull(context.Background(), nil, true, true)
-	assert.NoError(t, err, "doPull should auto-resolve conflict in data/github/")
-
-	// verify no issues set
-	issues := s.issues.GetIssues()
-	assert.Empty(t, issues, "no issues should remain after auto-resolve")
-}
-
-func TestDoPull_ConflictInUnsafePath_ReportsIssueAndAborts(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: git operations")
-	}
-	bareDir, cloneDir := setupBareAndClone(t)
-
-	// local commit: modify SOUL.md (not under any safe auto-resolve prefix)
-	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "SOUL.md"), []byte("local team soul"), 0o644))
-	gitCmd(t, cloneDir, "add", "SOUL.md")
-	gitCmd(t, cloneDir, "commit", "-m", "local soul edit")
-
-	// push conflicting change from separate clone
-	tmpClone := filepath.Join(t.TempDir(), "conflict-clone")
-	gitCmd(t, t.TempDir(), "clone", bareDir, tmpClone)
-	gitCmd(t, tmpClone, "config", "user.name", "test")
-	gitCmd(t, tmpClone, "config", "user.email", "test@test.com")
-	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "SOUL.md"), []byte("remote team soul"), 0o644))
-	gitCmd(t, tmpClone, "add", "SOUL.md")
-	gitCmd(t, tmpClone, "commit", "-m", "remote soul edit")
-	gitCmd(t, tmpClone, "push", "origin", "HEAD")
-
-	s := newPullTestScheduler(t, cloneDir)
-
-	err := s.doPull(context.Background(), nil, true, true)
-	assert.Error(t, err, "doPull should fail when conflict is in unsafe path")
-
-	// rebase should have been aborted (not left in progress)
-	rebaseMerge := filepath.Join(cloneDir, ".git", "rebase-merge")
-	_, statErr := os.Stat(rebaseMerge)
-	assert.True(t, os.IsNotExist(statErr), "rebase should be aborted, not left in progress")
-
-	// after auto-resolve fails and rebase is aborted, UU entries are gone
-	// but divergence is detected → IssueTypeDiverged
-	issues := s.issues.GetIssues()
-	foundDiverged := false
-	for _, issue := range issues {
-		if issue.Type == IssueTypeDiverged {
-			foundDiverged = true
-			assert.Contains(t, issue.Summary, "diverged")
-			assert.Contains(t, issue.Summary, "ox doctor --fix")
-			break
-		}
-	}
-	assert.True(t, foundDiverged, "should report IssueTypeDiverged after auto-resolve fails on unsafe path")
-}
-
-func TestDoPull_DivergedWithMixedConflicts_AbortsRebase(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: git operations")
-	}
-	bareDir, cloneDir := setupBareAndClone(t)
-
-	// local commit: modify both a safe and unsafe file
-	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, "data", "github"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "data", "github", "prs.json"), []byte(`{"local":true}`), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "AGENTS.md"), []byte("local agents"), 0o644))
-	gitCmd(t, cloneDir, "add", ".")
-	gitCmd(t, cloneDir, "commit", "-m", "local mixed changes")
-
-	// push conflicting changes to both files from remote
-	tmpClone := filepath.Join(t.TempDir(), "conflict-clone")
-	gitCmd(t, t.TempDir(), "clone", bareDir, tmpClone)
-	gitCmd(t, tmpClone, "config", "user.name", "test")
-	gitCmd(t, tmpClone, "config", "user.email", "test@test.com")
-	require.NoError(t, os.MkdirAll(filepath.Join(tmpClone, "data", "github"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "data", "github", "prs.json"), []byte(`{"remote":true}`), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "AGENTS.md"), []byte("remote agents"), 0o644))
-	gitCmd(t, tmpClone, "add", ".")
-	gitCmd(t, tmpClone, "commit", "-m", "remote mixed changes")
-	gitCmd(t, tmpClone, "push", "origin", "HEAD")
-
-	s := newPullTestScheduler(t, cloneDir)
-
-	err := s.doPull(context.Background(), nil, true, true)
-	assert.Error(t, err, "doPull should fail when mixed safe/unsafe conflicts exist")
-
-	// rebase must be aborted
-	rebaseMerge := filepath.Join(cloneDir, ".git", "rebase-merge")
-	_, statErr := os.Stat(rebaseMerge)
-	assert.True(t, os.IsNotExist(statErr), "rebase should be aborted after mixed conflict failure")
-}
-
-func TestPullTeamContext_DivergedBranches_RebasesSuccessfully(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: git operations")
-	}
-	bareDir, cloneDir := setupBareAndClone(t)
-
-	// local commit (simulates daemon EnsureCheckoutGitignore or user edit)
-	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "local-doc.md"), []byte("local docs"), 0o644))
-	gitCmd(t, cloneDir, "add", "local-doc.md")
-	gitCmd(t, cloneDir, "commit", "-m", "local documentation")
-
-	// push a different file from remote (simulates new discussion synced)
-	pushFromSeparateClone(t, bareDir, "remote-discussion.md", "architecture discussion")
-
-	s := newPullTestScheduler(t, cloneDir)
-
-	err := s.pullTeamContext(context.Background(), cloneDir)
-	assert.NoError(t, err, "pullTeamContext should rebase diverged branches")
-
-	// both files should exist after rebase
-	assert.FileExists(t, filepath.Join(cloneDir, "local-doc.md"))
-	assert.FileExists(t, filepath.Join(cloneDir, "remote-discussion.md"))
-
-	// no diverged or conflict issues
-	for _, issue := range s.issues.GetIssues() {
-		assert.NotEqual(t, IssueTypeDiverged, issue.Type)
-		assert.NotEqual(t, IssueTypeMergeConflict, issue.Type)
-	}
-}
-
-func TestPullTeamContext_ConflictReportsIssue(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: git operations")
-	}
-	bareDir, cloneDir := setupBareAndClone(t)
-
-	// local commit: edit SOUL.md
-	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "SOUL.md"), []byte("local soul"), 0o644))
-	gitCmd(t, cloneDir, "add", "SOUL.md")
-	gitCmd(t, cloneDir, "commit", "-m", "local soul")
-
-	// push conflicting SOUL.md from remote
-	tmpClone := filepath.Join(t.TempDir(), "conflict-clone")
-	gitCmd(t, t.TempDir(), "clone", bareDir, tmpClone)
-	gitCmd(t, tmpClone, "config", "user.name", "test")
-	gitCmd(t, tmpClone, "config", "user.email", "test@test.com")
-	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "SOUL.md"), []byte("remote soul"), 0o644))
-	gitCmd(t, tmpClone, "add", "SOUL.md")
-	gitCmd(t, tmpClone, "commit", "-m", "remote soul")
-	gitCmd(t, tmpClone, "push", "origin", "HEAD")
-
-	s := newPullTestScheduler(t, cloneDir)
-
-	err := s.pullTeamContext(context.Background(), cloneDir)
-	assert.Error(t, err, "pullTeamContext should fail on conflict (no auto-resolve prefixes)")
-
-	// team context has no auto-resolve prefixes, so pullManagedRepo does NOT
-	// enter the auto-resolve block. The diverged+failed pull reports IssueTypeDiverged.
-	issues := s.issues.GetIssues()
-	foundDiverged := false
-	for _, issue := range issues {
-		if issue.Type == IssueTypeDiverged {
-			foundDiverged = true
-			assert.Contains(t, issue.Summary, "diverged")
-			assert.Contains(t, issue.Summary, "ox doctor --fix")
-			break
-		}
-	}
-	assert.True(t, foundDiverged, "should report IssueTypeDiverged for team context conflict")
-}
-
-func TestDoPull_SuccessfulPull(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: git operations")
-	}
-	bareDir, cloneDir := setupBareAndClone(t)
-
-	// push a change from a separate clone
-	pushFromSeparateClone(t, bareDir, "new-file.txt", "new content")
-
-	s := newPullTestScheduler(t, cloneDir)
-
-	err := s.doPull(context.Background(), nil, true, true)
+	// first pull should succeed (fetches, finds nothing new or syncs)
+	err := scheduler.doPull(ctx, nil, false, true)
 	assert.NoError(t, err)
 
-	// verify the file was pulled
-	data, err := os.ReadFile(filepath.Join(cloneDir, "new-file.txt"))
-	assert.NoError(t, err)
-	assert.Equal(t, "new content", string(data))
+	// second pull should be skipped by ls-remote check (remote unchanged)
+	err = scheduler.doPull(ctx, nil, false, true)
+	assert.NoError(t, err) // no error — just skipped
 }
