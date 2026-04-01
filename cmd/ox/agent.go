@@ -17,8 +17,9 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/repotools"
-	"github.com/sageox/ox/internal/status"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/contexttrace"
+	"github.com/sageox/ox/internal/status"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 	"github.com/spf13/cobra"
 )
@@ -725,6 +726,7 @@ func runAgentWhisper(inst *agentinstance.Instance) error {
 	}
 
 	formatWhispers(os.Stdout, entries)
+	traceWhisperDelivery(projectRoot, inst.AgentID, entries)
 	return nil
 }
 
@@ -764,6 +766,37 @@ func emitWhispers(agentID string) {
 	}
 
 	formatWhispers(os.Stdout, entries)
+
+	// best-effort context-trace for whisper delivery observability
+	traceWhisperDelivery(projectRoot, agentID, entries)
+}
+
+// traceWhisperDelivery emits context-trace "provided" events for delivered murmur entries.
+// Best-effort: silently skips if no active recording session or on any error.
+func traceWhisperDelivery(projectRoot, agentID string, entries []whisperstore.WhisperEntry) {
+	if projectRoot == "" || agentID == "" {
+		return
+	}
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	if err != nil || state == nil || state.SessionPath == "" {
+		return
+	}
+	w := contexttrace.NewWriter(state.SessionPath)
+	for _, e := range entries {
+		if e.Source != "murmur" {
+			continue
+		}
+		source := contexttrace.SourceProjectWhisper
+		if e.Scope == "team" {
+			source = contexttrace.SourceTeamWhisper
+		}
+		_ = w.Append(contexttrace.Event{
+			Type:   contexttrace.EventProvided,
+			Source: source,
+			From:   e.AgentID,
+			Topic:  e.Topic,
+		})
+	}
 }
 
 // capMurmurWhispers limits murmur-sourced whispers to avoid blowing out agent context.
@@ -831,23 +864,34 @@ func capMurmurWhispers(entries []whisperstore.WhisperEntry) []whisperstore.Whisp
 		return append(nonMurmur, capped...)
 	}
 
-	// budget exceeded — randomly sample to be fair across agents over time.
-	// shuffle then greedily fill budget, always keeping at least one.
-	shuffled := make([]whisperstore.WhisperEntry, len(capped))
-	copy(shuffled, capped)
-	rand.Shuffle(len(shuffled), func(i, j int) {
-		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
-	})
+	// budget exceeded — critical murmurs always survive, then randomly sample
+	// non-critical to be fair across agents over time.
+	var critical, nonCritical []whisperstore.WhisperEntry
+	for _, e := range capped {
+		if e.Importance == whisperstore.ImportanceCritical {
+			critical = append(critical, e)
+		} else {
+			nonCritical = append(nonCritical, e)
+		}
+	}
 
 	var kept []whisperstore.WhisperEntry
 	usedBytes := 0
-	for _, e := range shuffled {
-		contentBytes := len(e.Content)
-		if usedBytes+contentBytes > budgetBytes && len(kept) > 0 {
-			continue // skip this one, try smaller ones
+	// always include critical entries first
+	for _, e := range critical {
+		kept = append(kept, e)
+		usedBytes += len(e.Content)
+	}
+	// fill remainder with random sample of non-critical
+	rand.Shuffle(len(nonCritical), func(i, j int) {
+		nonCritical[i], nonCritical[j] = nonCritical[j], nonCritical[i]
+	})
+	for _, e := range nonCritical {
+		if usedBytes+len(e.Content) > budgetBytes && len(kept) > 0 {
+			continue
 		}
 		kept = append(kept, e)
-		usedBytes += contentBytes
+		usedBytes += len(e.Content)
 	}
 
 	// re-sort kept by time (newest first) for coherent output
@@ -902,9 +946,9 @@ func murmurTopicHint(topic string) string {
 	case "wip":
 		return "What coworkers are actively building or fixing right now. Use for awareness — avoid duplicating effort or creating merge conflicts."
 	case "conflict":
-		return "Potential conflicts with code areas you may also be touching. Pay close attention and coordinate if your work overlaps."
+		return "Potential conflicts with code you may be touching. If listed files overlap with your active work, pause and reassess before continuing."
 	case "architecture":
-		return "Architectural decisions or changes in progress. Factor these into your own design choices."
+		return "Architectural decisions or API changes in progress. Check if your implementation depends on anything mentioned here."
 	case "lint", "ci":
 		return "Build or lint issues others have encountered. Check if they affect your work too."
 	default:
@@ -952,7 +996,8 @@ func formatWhispers(w io.Writer, entries []whisperstore.WhisperEntry) bool {
 
 	// emit murmur framing when murmur entries are present
 	if hasMurmurs {
-		fmt.Fprintln(w, "<murmur-context>These are work-in-progress signals from other coworkers (human and AI). They are NOT tasks or requests for you.</murmur-context>")
+		fmt.Fprintln(w, `<murmur-context>Signals from coworkers. Most are ambient awareness — note and continue.`)
+		fmt.Fprintln(w, `CRITICAL entries (importance="critical") may affect your current work. If files overlap with yours, pause and reassess your plan before continuing.</murmur-context>`)
 		for _, topic := range murmurTopics {
 			if hint := murmurTopicHint(topic); hint != "" {
 				fmt.Fprintf(w, "<murmur-topic topic=%q>%s</murmur-topic>\n", topic, hint)
@@ -961,13 +1006,14 @@ func formatWhispers(w io.Writer, entries []whisperstore.WhisperEntry) bool {
 	}
 
 	for _, e := range entries {
+		fmt.Fprintf(w, "<entry importance=%q topic=%q source=%q", string(e.Importance), e.Topic, e.Source)
 		if e.Source == "murmur" && e.AgentID != "" {
-			fmt.Fprintf(w, "<entry importance=%q topic=%q source=%q agent=%q>",
-				string(e.Importance), e.Topic, e.Source, e.AgentID)
-		} else {
-			fmt.Fprintf(w, "<entry importance=%q topic=%q source=%q>",
-				string(e.Importance), e.Topic, e.Source)
+			fmt.Fprintf(w, " agent=%q", e.AgentID)
 		}
+		if files, ok := e.Metadata["files"]; ok && files != "" {
+			fmt.Fprintf(w, " files=%q", files)
+		}
+		fmt.Fprint(w, ">")
 		xml.EscapeText(w, []byte(e.Content))
 		fmt.Fprint(w, "</entry>\n")
 	}
