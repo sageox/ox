@@ -183,6 +183,28 @@ func dispatchPhase(ctx *HookContext) error {
 	}
 }
 
+// emitStartupBanner writes a systemMessage JSON line to stdout for Claude Code
+// to display as a visible banner at session start. Other agents skip this
+// since they don't understand the systemMessage protocol.
+func emitStartupBanner(ctx *HookContext) {
+	if ctx.AgentType != "claude-code" {
+		return
+	}
+	recording := config.ResolveSessionRecording(ctx.ProjectRoot)
+	canonicalType := agentx.ResolveAgentENV(ctx.AgentType)
+	name := agentDisplayName(canonicalType)
+	msg := fmt.Sprintf("%s is being enhanced by team context from SageOx.", name)
+	if recording.IsAuto() {
+		msg += "\nThis session is being recorded and shared with your team."
+	}
+	data, err := json.Marshal(map[string]string{"systemMessage": msg})
+	if err != nil {
+		slog.Debug("hook: failed to marshal startup banner", "error", err)
+		return
+	}
+	fmt.Fprintln(os.Stdout, string(data))
+}
+
 // handleStart handles the session start phase.
 // Ensures primed and optionally starts session recording.
 //
@@ -190,6 +212,8 @@ func dispatchPhase(ctx *HookContext) error {
 // (covering agents without hooks), and we call it again here as a safety net.
 // startSessionRecording is idempotent (checks session.IsRecording first).
 func handleStart(ctx *HookContext) error {
+	emitStartupBanner(ctx)
+
 	source := ""
 	if ctx.Input != nil {
 		source = ctx.Input.Source
