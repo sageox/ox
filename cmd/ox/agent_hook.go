@@ -8,14 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
-	"time"
-
-	"github.com/google/uuid"
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/daemon"
-	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -458,9 +452,6 @@ func handleAfterTool(ctx *HookContext) error {
 		}
 	})
 
-	// publish a lightweight WIP murmur based on tool activity (fire-and-forget)
-	maybeAutoMurmur(ctx)
-
 	return nil
 }
 
@@ -532,115 +523,6 @@ func runPrimeForHook(agentID string, ctx *HookContext) error {
 		return fmt.Errorf("hook: prime failed: %w", err)
 	}
 	return nil
-}
-
-// autoMurmurInterval is the minimum time between auto-murmurs to prevent flooding.
-const autoMurmurInterval = 5 * time.Minute
-
-var (
-	autoMurmurLastTime time.Time
-	autoMurmurMu       sync.Mutex
-)
-
-// maybeAutoMurmur publishes a lightweight WIP murmur based on tool activity.
-// Runs fire-and-forget in a goroutine so it never blocks the hook hot path.
-// Debounced to at most once per autoMurmurInterval.
-func maybeAutoMurmur(ctx *HookContext) {
-	agentID := hookAgentID(ctx)
-	if agentID == "" {
-		return
-	}
-	if ctx.Input == nil || ctx.Input.ToolName == "" {
-		return
-	}
-
-	autoMurmurMu.Lock()
-	if time.Since(autoMurmurLastTime) < autoMurmurInterval {
-		autoMurmurMu.Unlock()
-		return
-	}
-	autoMurmurLastTime = time.Now()
-	autoMurmurMu.Unlock()
-
-	toolName := ctx.Input.ToolName
-	files := extractToolInputFilePath(ctx.Input.ToolInput)
-
-	// build terse WIP signal under 200 bytes
-	content := fmt.Sprintf("[auto] tool=%s", toolName)
-	if files != "" {
-		content += fmt.Sprintf(" files=%s", files)
-	}
-	if len(content) > 200 {
-		content = content[:197] + "..."
-	}
-
-	go publishAutoMurmur(ctx.ProjectRoot, agentID, content)
-}
-
-// extractToolInputFilePath pulls a file_path or file from tool input JSON.
-// Returns empty string if not parseable or not present.
-func extractToolInputFilePath(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var fields struct {
-		FilePath string `json:"file_path"`
-		File     string `json:"file"`
-		Command  string `json:"command"`
-	}
-	if err := json.Unmarshal(raw, &fields); err != nil {
-		return ""
-	}
-	if fields.FilePath != "" {
-		return fields.FilePath
-	}
-	if fields.File != "" {
-		return fields.File
-	}
-	return ""
-}
-
-// publishAutoMurmur sends a WIP murmur to the daemon via IPC.
-// Best-effort with a short timeout — failures are silently dropped.
-func publishAutoMurmur(projectRoot, agentID, content string) {
-	ledgerPath := getLedgerPath()
-	if ledgerPath == "" {
-		return
-	}
-
-	id, err := uuid.NewV7()
-	if err != nil {
-		return
-	}
-
-	now := time.Now().UTC()
-	murmur := ledger.MurmurFile{
-		SchemaVersion: "1",
-		ID:            id.String(),
-		Timestamp:     now,
-		AgentID:       agentID,
-		Topic:         "wip",
-		Importance:    "ambient",
-		Content:       content,
-		Scope:         "ledger",
-	}
-
-	relPath := ledger.MurmurFilePath(now, id.String())
-	murmurJSON, err := json.Marshal(murmur)
-	if err != nil {
-		return
-	}
-
-	client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
-	if err := client.Ping(); err != nil {
-		return
-	}
-	_ = client.Murmur(daemon.MurmurPayload{
-		TargetDir:  ledgerPath,
-		RelPath:    relPath,
-		Content:    content,
-		MurmurJSON: murmurJSON,
-	})
 }
 
 // startSessionRecordingIfConfigured attempts to start session recording

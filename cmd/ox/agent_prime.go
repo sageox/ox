@@ -518,7 +518,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			"  • Every 10-15 minutes during active work — brief status update\n" +
 			"  • After architectural decisions — what you decided and why\n" +
 			"Command: ox murmur --topic=wip \"concise description (≤500 bytes — teammates pay token cost to read it)\"\n" +
-			"Don't wait for nudges. Murmur proactively."
+			"Don't wait for nudges. Murmur proactively.\n" +
+			"IMPORTANT: Run your first murmur NOW, before doing anything else. " +
+			"Describe what the user asked you to do and which code areas you expect to touch."
 	}
 
 	// build pre-assembled notification for JSON-consuming agents.
