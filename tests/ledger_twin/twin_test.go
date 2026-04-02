@@ -41,7 +41,11 @@ func TestMain(m *testing.M) {
 	fmt.Fprintf(os.Stderr, "╚══════════════════════════════════════════════════════════════╝\n\n")
 
 	code := m.Run()
-	os.RemoveAll(ledgerPath)
+	if os.Getenv("PRESERVE_TWIN") != "" {
+		fmt.Fprintf(os.Stderr, "\n  PRESERVE_TWIN set — artifacts kept at: %s\n\n", ledgerPath)
+	} else {
+		os.RemoveAll(ledgerPath)
+	}
 	os.Exit(code)
 }
 

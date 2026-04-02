@@ -14,12 +14,26 @@ import (
 // AnalysisOutput is the structured dump for AI consumption.
 // Answers: where are we, what's blocking, what we learned, what's next.
 type AnalysisOutput struct {
-	TimeRange TimeRange       `json:"time_range"`
-	Progress  ProgressSummary `json:"progress"`
-	WorkItems []WorkItem      `json:"work_items"`
-	Blockers  []BlockerInfo   `json:"blockers"`
-	Learnings []Learning      `json:"learnings"`
-	NextSteps []NextStep      `json:"next_steps"`
+	TimeRange     TimeRange                `json:"time_range"`
+	Headline      string                   `json:"headline"`
+	Guidance      string                   `json:"guidance"`
+	Pyramid       PyramidSummary           `json:"pyramid"`
+	Progress      ProgressSummary          `json:"progress"`
+	CartsByStatus map[string][]CartSummary `json:"carts_by_status"`
+	WorkItems     []WorkItem               `json:"work_items"`
+	Blockers      []BlockerInfo            `json:"blockers"`
+	Learnings     []Learning               `json:"learnings"`
+	NextSteps     []NextStep               `json:"next_steps"`
+}
+
+// CartSummary is a compact view of a cart for status-grouped listings.
+type CartSummary struct {
+	ID       string  `json:"id"`
+	Title    string  `json:"title"`
+	Assignee string  `json:"assignee"`
+	Type     string  `json:"type"`
+	Priority int     `json:"priority"`
+	Pyramid  Pyramid `json:"pyramid"`
 }
 
 type TimeRange struct {
@@ -52,8 +66,8 @@ type SessionEvidence struct {
 	KeyActions    []string                      `json:"key_actions,omitempty"`
 	Decisions     []sessionsummary.Decision     `json:"decisions,omitempty"`
 	ActionItems   []sessionsummary.ActionItem   `json:"action_items,omitempty"`
-	OpenQuestions []sessionsummary.OpenQuestion  `json:"open_questions,omitempty"`
-	FilesChanged  []sessionsummary.FileSummary   `json:"files_changed,omitempty"`
+	OpenQuestions []sessionsummary.OpenQuestion `json:"open_questions,omitempty"`
+	FilesChanged  []sessionsummary.FileSummary  `json:"files_changed,omitempty"`
 	AhaMoments    []sessionsummary.AhaMoment    `json:"aha_moments,omitempty"`
 }
 
@@ -82,7 +96,7 @@ type NextStep struct {
 	Task     string `json:"task"`
 	Assignee string `json:"assignee,omitempty"`
 	Priority string `json:"priority,omitempty"`
-	FromCart  string `json:"from_cart"`
+	FromCart string `json:"from_cart"`
 }
 
 // AnalyzeInput holds everything Analyze needs. The caller decides where carts
@@ -134,7 +148,7 @@ func Analyze(input AnalyzeInput) (*AnalysisOutput, error) {
 						Task:     ai.Task,
 						Assignee: ai.Assignee,
 						Priority: ai.Priority,
-						FromCart:  c.ID,
+						FromCart: c.ID,
 					})
 				}
 			}
@@ -188,7 +202,16 @@ func Analyze(input AnalyzeInput) (*AnalysisOutput, error) {
 		}
 	}
 
-	return &AnalysisOutput{
+	// Build grouped cart listing by status with per-cart pyramids
+	sessionByCart := make(map[string]*SessionEvidence, len(workItems))
+	for _, wi := range workItems {
+		if wi.Session != nil {
+			sessionByCart[wi.Cart.ID] = wi.Session
+		}
+	}
+	cartsByStatus := buildCartsByStatusWithPyramids(input.Carts, sessionByCart)
+
+	output := &AnalysisOutput{
 		TimeRange: TimeRange{
 			Since: input.Since.Format(time.RFC3339),
 			Until: input.Until.Format(time.RFC3339),
@@ -201,11 +224,21 @@ func Analyze(input AnalyzeInput) (*AnalysisOutput, error) {
 			SessionCount:   sessionCount,
 			MurmurCount:    murmurCount,
 		},
-		WorkItems: workItems,
-		Blockers:  blockers,
-		Learnings: allLearnings,
-		NextSteps: allNextSteps,
-	}, nil
+		CartsByStatus: cartsByStatus,
+		WorkItems:     workItems,
+		Blockers:      blockers,
+		Learnings:     allLearnings,
+		NextSteps:     allNextSteps,
+	}
+
+	output.Headline = buildAnalysisHeadline(output)
+	output.Guidance = buildAnalysisGuidance(output)
+	output.Pyramid = PyramidSummary{
+		Overall:  buildOverallPyramid(output),
+		ByStatus: buildStatusPyramids(output),
+	}
+
+	return output, nil
 }
 
 // LoadCartsFromDir reads cart JSON files from a directory (e.g. digital twin output).
@@ -364,4 +397,91 @@ func findMurmurEvidence(ledgerPath, murmurKey string, since, until time.Time) []
 		current = current.Add(time.Hour)
 	}
 	return results
+}
+
+// buildCartsByStatusWithPyramids groups carts into a status-keyed map of compact summaries,
+// each with a per-cart pyramid for multi-resolution scanning.
+func buildCartsByStatusWithPyramids(issues []*Issue, sessions map[string]*SessionEvidence) map[string][]CartSummary {
+	grouped := make(map[string][]CartSummary)
+	for _, c := range issues {
+		s := string(c.Status)
+		grouped[s] = append(grouped[s], CartSummary{
+			ID:       c.ID,
+			Title:    c.Title,
+			Assignee: c.Assignee,
+			Type:     string(c.IssueType),
+			Priority: c.Priority,
+			Pyramid:  buildCartPyramid(c, sessions[c.ID]),
+		})
+	}
+	return grouped
+}
+
+// buildAnalysisHeadline produces a one-line summary of progress.
+func buildAnalysisHeadline(o *AnalysisOutput) string {
+	p := o.Progress
+	if p.TotalCarts == 0 {
+		return "No carts found in this time window."
+	}
+
+	closed := p.ByStatus["closed"]
+	inProgress := p.ByStatus["in_progress"]
+	open := p.ByStatus["open"]
+
+	// Count unique assignees
+	assignees := make(map[string]bool)
+	for _, wi := range o.WorkItems {
+		if wi.Cart.Assignee != "" {
+			assignees[wi.Cart.Assignee] = true
+		}
+	}
+
+	parts := []string{fmt.Sprintf("%d/%d carts completed", closed, p.TotalCarts)}
+
+	if inProgress > 0 {
+		parts = append(parts, fmt.Sprintf("%d in progress", inProgress))
+	}
+	if open > 0 {
+		parts = append(parts, fmt.Sprintf("%d open", open))
+	}
+	if len(assignees) > 0 {
+		parts = append(parts, fmt.Sprintf("%d coworkers", len(assignees)))
+	}
+	if len(o.Blockers) > 0 {
+		parts = append(parts, fmt.Sprintf("%d blocked", len(o.Blockers)))
+	}
+
+	return strings.Join(parts, ", ") + "."
+}
+
+// buildAnalysisGuidance produces agent-facing instructions for presenting results.
+func buildAnalysisGuidance(o *AnalysisOutput) string {
+	p := o.Progress
+
+	var lines []string
+
+	// Pyramid scanning instructions
+	lines = append(lines, "Use pyramid summaries for progressive disclosure. Start with pyramid.overall.l4 for the one-line status. Use pyramid.by_status for group-level summaries. Use per-cart pyramids (l2) to scan many carts quickly — only expand to full cart details when the user asks to zoom in.")
+
+	lines = append(lines, "Present the cart listing grouped by status. Lead with in-progress and open carts (the active work), then show completed carts as a summary count with the option to expand.")
+
+	if p.CompletionRate == 1 {
+		lines = append(lines, "All carts are completed. Summarize what was accomplished and highlight any learnings or suggested follow-ups.")
+	} else if p.CompletionRate >= 0.75 {
+		lines = append(lines, fmt.Sprintf("%.0f%% complete. Focus on the remaining in-progress and open carts — what's left to finish.", p.CompletionRate*100))
+	} else {
+		lines = append(lines, fmt.Sprintf("%.0f%% complete. Highlight what's in progress and any blockers preventing progress.", p.CompletionRate*100))
+	}
+
+	if len(o.Blockers) > 0 {
+		lines = append(lines, fmt.Sprintf("%d carts are blocked. Surface these prominently — blocked work is the most actionable signal.", len(o.Blockers)))
+	}
+
+	if len(o.Learnings) > 0 {
+		lines = append(lines, "Include learnings — these are insights from AHA moments in sessions.")
+	}
+
+	lines = append(lines, "Keep the tone factual and concise. Use cart titles as-is — they were written by the team.")
+
+	return strings.Join(lines, " ")
 }

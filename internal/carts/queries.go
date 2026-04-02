@@ -137,11 +137,12 @@ func (s *Store) List(ctx context.Context, filter IssueFilter) ([]*Issue, error) 
 		assignee, creator, source, created_at, updated_at, closed_at
 	FROM issues`
 	if len(where) > 0 {
-		query += " WHERE " + strings.Join(where, " AND ")
+		query += " WHERE " + strings.Join(where, " AND ") // #nosec G202 -- where clauses use ? placeholders
 	}
 	query += " ORDER BY priority ASC, created_at DESC"
 	if filter.Limit > 0 {
-		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
+		query += " LIMIT ?"
+		args = append(args, filter.Limit)
 	}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
