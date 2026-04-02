@@ -140,5 +140,19 @@ release:
     **Manual Install:**
     Download the appropriate binary for your platform below, extract it, and place it in your PATH.
 
+brews:
+  - name: ox
+    repository:
+      owner: sageox
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: "https://sageox.ai"
+    description: "The hivemind for agentic engineering"
+    license: "Apache-2.0"
+    test: |
+      system "#{bin}/ox", "version"
+    install: |
+      bin.install "ox"
+
 announce:
   skip: true
