@@ -355,43 +355,39 @@ func keyringUserForEndpoint(endpointURL string) string {
 }
 
 // LoadCredentialsForEndpoint loads git credentials for a specific endpoint.
-// Tries OS keychain first (with endpoint-specific key), falls back to file storage.
-// Falls back to default credentials if endpoint-specific ones don't exist.
+// Tries filesystem first (fast, no OS prompts), falls back to OS keychain.
 func LoadCredentialsForEndpoint(endpointURL string) (*GitCredentials, error) {
-	// try keychain first with endpoint-specific key
-	if isKeyringAvailable() {
-		keyUser := keyringUserForEndpoint(endpointURL)
-		data, err := keyring.Get(keyringService, keyUser)
-		if err == nil && data != "" {
-			var creds GitCredentials
-			if err := json.Unmarshal([]byte(data), &creds); err == nil {
-				return &creds, nil
-			}
-			// JSON parse failed, fall through to file storage
-		}
-		// keyring not found or error, fall through to file storage
-	}
-
-	// try endpoint-specific file
+	// try endpoint-specific file first (fast, no keychain prompt)
 	credsPath, err := getEndpointCredentialsPath(endpointURL)
 	if err != nil {
 		return nil, err
 	}
 
 	data, err := os.ReadFile(credsPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil // no credentials for this endpoint
+	if err == nil {
+		var creds GitCredentials
+		if err := json.Unmarshal(data, &creds); err != nil {
+			return nil, fmt.Errorf("failed to parse git credentials file: %w", err)
 		}
+		return &creds, nil
+	}
+	if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to read git credentials file: %w", err)
 	}
 
-	var creds GitCredentials
-	if err := json.Unmarshal(data, &creds); err != nil {
-		return nil, fmt.Errorf("failed to parse git credentials file: %w", err)
+	// file not found — fall back to OS keychain
+	if isKeyringAvailable() {
+		keyUser := keyringUserForEndpoint(endpointURL)
+		keyData, err := keyring.Get(keyringService, keyUser)
+		if err == nil && keyData != "" {
+			var creds GitCredentials
+			if err := json.Unmarshal([]byte(keyData), &creds); err == nil {
+				return &creds, nil
+			}
+		}
 	}
 
-	return &creds, nil
+	return nil, nil // no credentials for this endpoint
 }
 
 // SaveCredentialsForEndpoint saves git credentials for a specific endpoint.

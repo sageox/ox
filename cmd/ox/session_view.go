@@ -3,12 +3,15 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/contexttrace"
 	"github.com/spf13/cobra"
 )
 
@@ -25,6 +28,8 @@ Examples:
   ox session view 2026-01-06T14-32-ryan   # specific session in web viewer
   ox session view --text                  # view local session in terminal (markdown)
   ox session view --json                  # view local session as structured JSON
+  ox session view --context                  # show what context the AI coworker had
+  ox session view --context --json            # context trace as structured JSON
   ox session view --input /path/to/raw.jsonl`,
 	RunE: runSessionView,
 }
@@ -35,6 +40,7 @@ func init() {
 	sessionViewCmd.Flags().Bool("json", false, "view local session as structured JSON")
 	sessionViewCmd.Flags().Bool("latest", false, "show most recent session")
 	sessionViewCmd.Flags().StringP("input", "i", "", "input JSONL file path")
+	sessionViewCmd.Flags().Bool("context", false, "show context trace (what context was available and influenced decisions)")
 	sessionViewCmd.Flags().Bool("metadata", false, "show only metadata (no entries)")
 	sessionViewCmd.Flags().Int("limit", 0, "limit number of entries shown (0 = all)")
 }
@@ -42,6 +48,7 @@ func init() {
 func runSessionView(cmd *cobra.Command, args []string) error {
 	textFlag, _ := cmd.Flags().GetBool("text")
 	jsonFlag, _ := cmd.Flags().GetBool("json")
+	contextFlag, _ := cmd.Flags().GetBool("context")
 	inputPath, _ := cmd.Flags().GetString("input")
 	metadataOnly, _ := cmd.Flags().GetBool("metadata")
 	entryLimit, _ := cmd.Flags().GetInt("limit")
@@ -101,10 +108,15 @@ func runSessionView(cmd *cobra.Command, args []string) error {
 			// session name without .jsonl (used for folder-based lookups)
 			sessionName := strings.TrimSuffix(name, ".jsonl")
 
-			if format == "web" {
+			if format == "web" && !contextFlag {
 				// web view only needs the session name to build the URL.
 				// viewAsWeb validates meta.json exists in the ledger.
 				return viewAsWeb(sessionName, projectRoot)
+			}
+
+			// context trace only needs the session name, not full session data
+			if contextFlag {
+				return runContextTrace(store, sessionName, projectRoot, jsonFlag, entryLimit)
 			}
 
 			// local formats: try local cache first, then fall back to ledger
@@ -154,8 +166,18 @@ func runSessionView(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("get latest session: %w", err)
 			}
 
-			if format == "web" {
+			if format == "web" && !contextFlag {
 				return viewAsWeb(latest.SessionName, projectRoot)
+			}
+
+			// context trace only needs the session name, not full session data
+			if contextFlag {
+				// find latest session that actually has a context trace
+				latestName := latestSessionWithContextTrace()
+				if latestName == "" {
+					latestName = latest.SessionName // fallback
+				}
+				return runContextTrace(store, latestName, projectRoot, jsonFlag, entryLimit)
 			}
 
 			st, err := store.ReadSession(latest.Filename)
@@ -177,6 +199,78 @@ func runSessionView(cmd *cobra.Command, args []string) error {
 	default:
 		return fmt.Errorf("unknown view format: %s", format)
 	}
+}
+
+// runContextTrace resolves and renders context-trace events for a session.
+func runContextTrace(store *session.Store, sessionName, projectRoot string, jsonOutput bool, limit int) error {
+	events, err := resolveContextTrace(store, sessionName, projectRoot)
+	if err != nil {
+		return fmt.Errorf("resolve context trace for %s: %w", sessionName, err)
+	}
+	if len(events) == 0 {
+		fmt.Println()
+		printShowField("Session", sessionName)
+		fmt.Println()
+		fmt.Println(cli.StyleDim.Render("  No context trace available for this session."))
+		cli.PrintHint("Context tracing records what team knowledge was provided during ox agent prime.")
+		cli.PrintHint("Sessions recorded before context tracing was added won't have this data.")
+		fmt.Println()
+		return nil
+	}
+	if jsonOutput {
+		return viewContextTraceJSON(events, sessionName, limit)
+	}
+	viewContextTraceText(events, sessionName)
+	return nil
+}
+
+// latestSessionWithContextTrace finds the most recent session that has a
+// context-trace.jsonl, searching across the XDG cache, ledger, and ledger cache.
+// Returns empty string if none found.
+func latestSessionWithContextTrace() string {
+	var best string
+
+	ledgerPath, err := resolveLedgerPath()
+	if err != nil {
+		return best
+	}
+
+	// scan ledger cache (where recordings land before upload)
+	cacheSessionsDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions")
+	best = findLatestWithContextTrace(cacheSessionsDir, best)
+
+	// scan ledger sessions dir (uploaded sessions)
+	ledgerSessionsDir := filepath.Join(ledgerPath, "sessions")
+	best = findLatestWithContextTrace(ledgerSessionsDir, best)
+
+	return best
+}
+
+// findLatestWithContextTrace scans a sessions directory for the most recent
+// session that has a context-trace.jsonl file. Returns the best candidate
+// (compared by name, which is timestamp-sortable).
+func findLatestWithContextTrace(sessionsDir, currentBest string) string {
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		return currentBest
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if name <= currentBest {
+			continue // not newer
+		}
+		tracePath := filepath.Join(sessionsDir, name, contexttrace.FileName)
+		if info, statErr := os.Stat(tracePath); statErr == nil && info.Size() > 0 {
+			if !lfs.IsPointerFile(tracePath) {
+				currentBest = name
+			}
+		}
+	}
+	return currentBest
 }
 
 // tryReadFromLedger attempts to read a full session from the ledger.

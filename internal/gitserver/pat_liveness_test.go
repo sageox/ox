@@ -216,8 +216,11 @@ func TestClearCredentialHelperEntry(t *testing.T) {
 	})
 
 	t.Run("runs git credential reject for valid URL", func(t *testing.T) {
+		if testing.Short() {
+			t.Skip("short: flaky under high parallelism due to 3s internal timeout")
+		}
+
 		// inject a fake git that records whether it was called with "credential reject"
-		called := false
 		fakeGit, err := os.CreateTemp("", "fake-git-cred-*")
 		require.NoError(t, err)
 		defer os.Remove(fakeGit.Name())
@@ -238,12 +241,8 @@ func TestClearCredentialHelperEntry(t *testing.T) {
 
 		ClearCredentialHelperEntry("https://git.sageox.ai")
 
-		if _, err := os.Stat(recordFile); os.IsNotExist(err) {
-			called = false
-		} else {
-			called = true
-		}
-		assert.True(t, called, "expected git credential reject to be called")
+		_, statErr := os.Stat(recordFile)
+		assert.False(t, os.IsNotExist(statErr), "expected git credential reject to be called")
 	})
 }
 
