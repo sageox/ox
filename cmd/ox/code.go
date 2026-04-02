@@ -107,9 +107,10 @@ var codeSearchCmd = &cobra.Command{
 		}
 		defer db.Close()
 
-		// attach daemon-built dirty overlay for uncommitted file search
-		if err := db.AttachDirtyIndex(root); err != nil {
-			slog.Debug("dirty overlay not available, searching committed content only", "err", err)
+		// attach all daemon-built dirty overlays for uncommitted file search
+		// (supports multiple simultaneous worktrees)
+		if n := db.AttachAllDirtyIndexes(); n > 0 {
+			slog.Debug("attached dirty overlays", "count", n)
 		}
 
 		results, err := db.Search(context.Background(), query)

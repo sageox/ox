@@ -210,3 +210,10 @@ func (q *WorkQueue) Len() int {
 	defer q.mu.Unlock()
 	return q.items.Len()
 }
+
+// InProgressCount returns the number of items currently being processed.
+func (q *WorkQueue) InProgressCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.inProgress)
+}

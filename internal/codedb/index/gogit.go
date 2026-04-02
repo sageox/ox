@@ -59,3 +59,20 @@ func plainOpenWithKeepDescriptors(path string) (*git.Repository, error) {
 	})
 	return git.Open(s, wt)
 }
+
+// plainOpenPool opens n independent Repository handles for the same git directory.
+// Each handle has its own packfile reader state, enabling lock-free parallel blob reads.
+func plainOpenPool(repoPath string, n int) ([]*git.Repository, error) {
+	repos := make([]*git.Repository, 0, n)
+	for i := 0; i < n; i++ {
+		r, err := plainOpenTolerant(repoPath)
+		if err != nil {
+			for _, opened := range repos {
+				opened.Close()
+			}
+			return nil, fmt.Errorf("open repo handle %d/%d: %w", i+1, n, err)
+		}
+		repos = append(repos, r)
+	}
+	return repos, nil
+}

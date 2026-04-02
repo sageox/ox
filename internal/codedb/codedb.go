@@ -54,9 +54,26 @@ func (db *DB) BuildDirtyIndex(ctx context.Context, localPath string, opts index.
 
 // AttachDirtyIndex opens the daemon-built on-disk dirty overlay and aliases it
 // with the shared CodeIndex for transparent search.
+// Uses a default key; for multi-worktree support use AttachDirtyIndexByID.
 func (db *DB) AttachDirtyIndex(worktreePath string) error {
 	dirtyPath := index.DirtyIndexPath(db.store.Root, worktreePath)
 	return db.store.AttachDirtyIndex(dirtyPath)
+}
+
+// AttachDirtyIndexByID opens an on-disk dirty overlay by worktree ID and path.
+// Multiple overlays can be attached simultaneously; all are merged at query time.
+func (db *DB) AttachDirtyIndexByID(id, dirtyBlevePath string) error {
+	return db.store.AttachDirtyIndexByID(id, dirtyBlevePath)
+}
+
+// DetachDirtyIndexByID removes a specific dirty overlay by ID.
+func (db *DB) DetachDirtyIndexByID(id string) {
+	db.store.DetachDirtyIndexByID(id)
+}
+
+// DirtyOverlayCount returns the number of currently attached dirty overlays.
+func (db *DB) DirtyOverlayCount() int {
+	return db.store.DirtyOverlayCount()
 }
 
 // AttachDirtyOverlay creates an in-memory Bleve overlay for dirty worktree files.
@@ -65,9 +82,16 @@ func (db *DB) AttachDirtyOverlay() error {
 	return db.store.AttachDirtyOverlay()
 }
 
-// DetachDirtyOverlay closes any attached dirty overlay.
+// DetachDirtyOverlay closes all attached dirty overlays.
 func (db *DB) DetachDirtyOverlay() {
 	db.store.DetachDirtyOverlay()
+}
+
+// AttachAllDirtyIndexes scans the dirty index directory for manifest files and
+// attaches all valid dirty overlays by worktree ID. This gives CLI searches
+// access to all active worktree overlays simultaneously.
+func (db *DB) AttachAllDirtyIndexes() int {
+	return index.AttachAllDirtyIndexes(db.store)
 }
 
 // GCDirtyIndexes removes stale dirty overlay directories for worktrees that no

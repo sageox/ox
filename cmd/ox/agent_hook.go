@@ -8,8 +8,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -36,14 +39,14 @@ const (
 //
 // Whisper delivery findings (tested empirically via TestWhisperDelivery_ChannelExperiment):
 //
-//   Hook event          │ stdout injected into model context?
-//   ────────────────────┼────────────────────────────────────
-//   UserPromptSubmit    │ YES — only reliable channel for Claude Code
-//   PreToolUse          │ NO  — stdout discarded, same as PostToolUse
-//   PostToolUse         │ NO  — stdout is COMPLETELY DISCARDED by Claude Code
-//   Stop                │ NO  — fires after session ends, model never sees it
-//   SessionStart        │ YES — but only fires once at session start
-//   PreCompact          │ YES — but only fires on /clear or /compact
+//	Hook event          │ stdout injected into model context?
+//	────────────────────┼────────────────────────────────────
+//	UserPromptSubmit    │ YES — only reliable channel for Claude Code
+//	PreToolUse          │ NO  — stdout discarded, same as PostToolUse
+//	PostToolUse         │ NO  — stdout is COMPLETELY DISCARDED by Claude Code
+//	Stop                │ NO  — fires after session ends, model never sees it
+//	SessionStart        │ YES — but only fires once at session start
+//	PreCompact          │ YES — but only fires on /clear or /compact
 //
 // phasePrompt (UserPromptSubmit) is the PRIMARY whisper delivery channel.
 // phaseAfterTool (PostToolUse) is kept as a FALLBACK for non-Claude agents
@@ -195,7 +198,7 @@ func dispatchPhase(ctx *HookContext) error {
 	case phaseAfterTool:
 		return handleAfterTool(ctx)
 	case phaseStop:
-		return handleAfterTool(ctx) // same drain logic on stop
+		return handleStop(ctx)
 	default:
 		return nil
 	}
@@ -283,16 +286,16 @@ func handleStart(ctx *HookContext) error {
 //     XML format used (<new-context>, <system-reminder>, or plain text).
 //
 // What did NOT work (tested in TestWhisperDelivery_ChannelExperiment):
-//   1. PostToolUse + <new-context> XML  → discarded by Claude Code, never seen
-//   2. PostToolUse + <system-reminder>  → discarded by Claude Code, never seen
-//   3. PostToolUse + plain text         → discarded by Claude Code, never seen
-//   4. Stop hook stdout                 → fires after session ends, model never sees it
+//  1. PostToolUse + <new-context> XML  → discarded by Claude Code, never seen
+//  2. PostToolUse + <system-reminder>  → discarded by Claude Code, never seen
+//  3. PostToolUse + plain text         → discarded by Claude Code, never seen
+//  4. Stop hook stdout                 → fires after session ends, model never sees it
 //
 // What DOES work:
-//   1. UserPromptSubmit + <system-reminder> → injected into model context (this handler)
-//   2. UserPromptSubmit + plain text        → also injected, but <system-reminder>
-//      tags are preferred because Claude treats them as trusted system-level context
-//   3. `ox agent <id> whisper` via Bash     → active pull, model reads command output
+//  1. UserPromptSubmit + <system-reminder> → injected into model context (this handler)
+//  2. UserPromptSubmit + plain text        → also injected, but <system-reminder>
+//     tags are preferred because Claude treats them as trusted system-level context
+//  3. `ox agent <id> whisper` via Bash     → active pull, model reads command output
 //
 // The cursor mechanism in WhisperStore (per-agentID last_seen timestamp) ensures
 // whispers are delivered exactly once across all channels. If handlePrompt delivers
@@ -476,6 +479,83 @@ func handleAfterTool(ctx *HookContext) error {
 	})
 
 	return nil
+}
+
+// handleStop handles the session stop phase.
+// Drains remaining entries (same as afterTool), then sets StoppedAt in recording
+// state and sends a fire-and-forget IPC message to the daemon to finalize.
+func handleStop(ctx *HookContext) error {
+	// drain entries first (same logic as afterTool)
+	if err := handleAfterTool(ctx); err != nil {
+		slog.Debug("hook: stop drain failed", "error", err)
+		// continue to set StoppedAt even if drain fails
+	}
+
+	agentID := ""
+	if ctx.Marker != nil {
+		agentID = ctx.Marker.AgentID
+	}
+	if agentID == "" {
+		return nil
+	}
+
+	// set StoppedAt in .recording.json to signal daemon
+	now := time.Now()
+	updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+		s.StoppedAt = &now
+	})
+	if updateErr != nil {
+		// graceful no-op if no recording exists
+		slog.Debug("hook: stop could not set StoppedAt", "agent_id", agentID, "error", updateErr)
+	}
+
+	// fire-and-forget IPC to daemon: finalize this agent's session
+	state, loadErr := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
+	if loadErr != nil || state == nil {
+		return nil // no recording to finalize
+	}
+
+	client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
+	ledgerPath := ""
+	if state.SessionPath != "" {
+		// derive ledger path from session path: it's the root of the ledger repo
+		// session paths are like <ledger>/.sageox/cache/sessions/<name> or <ledger>/sessions/<name>
+		ledgerPath = deriveLedgerPath(state.SessionPath)
+	}
+	if ledgerPath == "" {
+		return nil
+	}
+
+	sessionName := filepath.Base(state.SessionPath)
+	ipcErr := client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
+		SessionName: sessionName,
+		LedgerPath:  ledgerPath,
+		CachePath:   state.SessionPath,
+		ProjectRoot: ctx.ProjectRoot,
+	})
+	if ipcErr != nil {
+		slog.Debug("hook: stop finalize IPC failed (daemon may be unreachable)", "error", ipcErr)
+		// not an error — anti-entropy handles it as fallback
+	}
+
+	return nil
+}
+
+// deriveLedgerPath attempts to extract the ledger root from a session path.
+// Session paths follow patterns like:
+//   - <ledger>/.sageox/cache/sessions/<name>
+//   - <ledger>/sessions/<name>
+func deriveLedgerPath(sessionPath string) string {
+	// check for .sageox/cache/sessions pattern
+	if idx := strings.Index(sessionPath, "/.sageox/cache/sessions/"); idx >= 0 {
+		return sessionPath[:idx]
+	}
+	// check for /sessions/ pattern (direct ledger path)
+	dir := filepath.Dir(sessionPath)
+	if filepath.Base(dir) == "sessions" {
+		return filepath.Dir(dir)
+	}
+	return ""
 }
 
 // appendRedactedEntries appends redacted session entries to a raw.jsonl file.

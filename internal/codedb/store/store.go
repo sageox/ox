@@ -37,9 +37,9 @@ type Store struct {
 	Root         string
 	closeOnce    sync.Once
 
-	// dirty overlay for uncommitted worktree files (in-memory Bleve)
-	dirtyCodeIndex    bleve.Index
-	CombinedCodeIndex bleve.Index // alias of CodeIndex + dirtyCodeIndex, or just CodeIndex
+	// dirty overlays for uncommitted worktree files (keyed by worktree ID)
+	dirtyCodeIndexes  map[string]bleve.Index
+	CombinedCodeIndex bleve.Index // alias of CodeIndex + all dirty indexes, or just CodeIndex
 }
 
 // Open opens (or creates) a Store at the given root directory.
@@ -107,12 +107,13 @@ func Open(root string) (*Store, error) {
 	}
 
 	s := &Store{
-		db:           db,
-		queries:      codedbsqlc.New(db),
-		CodeIndex:    codeIndex,
-		DiffIndex:    diffIndex,
-		CommentIndex: commentIndex,
-		Root:         root,
+		db:               db,
+		queries:          codedbsqlc.New(db),
+		CodeIndex:        codeIndex,
+		DiffIndex:        diffIndex,
+		CommentIndex:     commentIndex,
+		Root:             root,
+		dirtyCodeIndexes: make(map[string]bleve.Index),
 	}
 	s.CombinedCodeIndex = s.CodeIndex // default: no overlay
 	return s, nil
@@ -149,37 +150,88 @@ func (s *Store) Close() error {
 // CombinedCodeIndex will transparently search both.
 // Primarily used in tests; production uses AttachDirtyIndex for on-disk overlays.
 func (s *Store) AttachDirtyOverlay() error {
-	s.DetachDirtyOverlay() // close any existing overlay first
+	s.DetachDirtyOverlay() // close any existing overlays first
 	mapping := bleve.NewIndexMapping()
 	dirtyIdx, err := bleve.NewMemOnly(mapping)
 	if err != nil {
 		return fmt.Errorf("create in-memory dirty index: %w", err)
 	}
-	s.dirtyCodeIndex = dirtyIdx
-	s.CombinedCodeIndex = bleve.NewIndexAlias(s.CodeIndex, s.dirtyCodeIndex)
+	s.dirtyCodeIndexes["__test__"] = dirtyIdx
+	s.rebuildCombinedIndex()
 	return nil
 }
 
 // AttachDirtyIndex opens an existing on-disk dirty overlay index (built by the
 // daemon) and aliases it with the shared CodeIndex for transparent search.
+// Uses a default key; for multi-worktree support use AttachDirtyIndexByID.
 func (s *Store) AttachDirtyIndex(dirtyBlevePath string) error {
-	s.DetachDirtyOverlay() // close any existing overlay first
+	return s.AttachDirtyIndexByID("__default__", dirtyBlevePath)
+}
+
+// AttachDirtyIndexByID opens an on-disk dirty overlay and adds it to the overlay map
+// under the given ID. If the ID is already attached, the old overlay is detached first.
+// Rebuilds the combined alias to include all active overlays.
+func (s *Store) AttachDirtyIndexByID(id, dirtyBlevePath string) error {
+	// detach existing overlay for this ID if present
+	if existing, ok := s.dirtyCodeIndexes[id]; ok {
+		existing.Close()
+		delete(s.dirtyCodeIndexes, id)
+	}
 	dirtyIdx, err := bleve.Open(dirtyBlevePath)
 	if err != nil {
-		return fmt.Errorf("open dirty index: %w", err)
+		s.rebuildCombinedIndex() // keep alias consistent
+		return fmt.Errorf("open dirty index %s: %w", id, err)
 	}
-	s.dirtyCodeIndex = dirtyIdx
-	s.CombinedCodeIndex = bleve.NewIndexAlias(s.CodeIndex, s.dirtyCodeIndex)
+	s.dirtyCodeIndexes[id] = dirtyIdx
+	s.rebuildCombinedIndex()
 	return nil
 }
 
-// DetachDirtyOverlay closes any attached dirty overlay and resets CombinedCodeIndex.
+// DetachDirtyIndexByID closes and removes a specific dirty overlay by ID.
+// Rebuilds the combined alias with remaining overlays.
+func (s *Store) DetachDirtyIndexByID(id string) {
+	if idx, ok := s.dirtyCodeIndexes[id]; ok {
+		idx.Close()
+		delete(s.dirtyCodeIndexes, id)
+	}
+	s.rebuildCombinedIndex()
+}
+
+// DetachDirtyOverlay closes all attached dirty overlays and resets CombinedCodeIndex.
 func (s *Store) DetachDirtyOverlay() {
-	if s.dirtyCodeIndex != nil {
-		s.dirtyCodeIndex.Close()
-		s.dirtyCodeIndex = nil
+	for id, idx := range s.dirtyCodeIndexes {
+		idx.Close()
+		delete(s.dirtyCodeIndexes, id)
 	}
 	s.CombinedCodeIndex = s.CodeIndex
+}
+
+// DirtyOverlayCount returns the number of currently attached dirty overlays.
+func (s *Store) DirtyOverlayCount() int {
+	return len(s.dirtyCodeIndexes)
+}
+
+// DirtyCodeIndex returns the first dirty overlay index found, or nil.
+// Used by callers that need direct access to a dirty index (e.g., for indexing docs).
+func (s *Store) DirtyCodeIndex() bleve.Index {
+	for _, idx := range s.dirtyCodeIndexes {
+		return idx
+	}
+	return nil
+}
+
+// rebuildCombinedIndex reconstructs CombinedCodeIndex from CodeIndex + all dirty overlays.
+func (s *Store) rebuildCombinedIndex() {
+	if len(s.dirtyCodeIndexes) == 0 {
+		s.CombinedCodeIndex = s.CodeIndex
+		return
+	}
+	indexes := make([]bleve.Index, 0, 1+len(s.dirtyCodeIndexes))
+	indexes = append(indexes, s.CodeIndex)
+	for _, idx := range s.dirtyCodeIndexes {
+		indexes = append(indexes, idx)
+	}
+	s.CombinedCodeIndex = bleve.NewIndexAlias(indexes...)
 }
 
 // CheckIntegrity validates that the SQLite database and all Bleve indexes

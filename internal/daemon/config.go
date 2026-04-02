@@ -86,6 +86,11 @@ type Config struct {
 	// Zero disables the check.
 	SocketCheckInterval time.Duration
 
+	// PendingWorkGracePeriod is the maximum time the daemon stays alive
+	// solely for pending work after inactivity timeout is reached.
+	// Prevents stuck daemons when finalization hangs.
+	PendingWorkGracePeriod time.Duration
+
 	// AutoStart starts daemon on first ox command if true.
 	AutoStart bool
 
@@ -99,7 +104,7 @@ type Config struct {
 // DefaultConfig returns the default daemon configuration.
 func DefaultConfig() *Config {
 	return &Config{
-		SyncIntervalRead:        60 * time.Second,  // git pull from remote (ledger, team contexts)
+		SyncIntervalRead:        60 * time.Second, // git pull from remote (ledger, team contexts)
 		CodeDBCheckInterval:     15 * time.Minute, // full reindex for new commits; dirty overlay handles file edits via fsnotify
 		TeamContextSyncInterval: 15 * time.Second,
 		DebounceWindow:          500 * time.Millisecond,
@@ -111,6 +116,7 @@ func DefaultConfig() *Config {
 		MurmurNudgeInterval:     15 * time.Minute, // nudge agents to self-report every 15 minutes
 		InactivityTimeout:       1 * time.Hour,    // exit after 1 hour of inactivity
 		SocketCheckInterval:     30 * time.Second, // detect socket takeover by new daemon
+		PendingWorkGracePeriod:  10 * time.Minute, // max time to stay alive for pending finalization
 		AutoStart:               true,
 		LedgerPath:              "", // resolved at runtime
 		ProjectRoot:             "", // resolved at runtime

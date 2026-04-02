@@ -104,24 +104,24 @@ var defaultBranchFallbacks = []string{
 
 // indexState holds mutable state shared across indexing sub-operations.
 type indexState struct {
-	tx             *sql.Tx
-	store          *store.Store
-	repo           *git.Repository
-	repoID         int64
-	codeBatch      *bleve.Batch
-	diffBatch      *bleve.Batch
-	codeBatchN     int
-	diffBatchN     int
+	tx              *sql.Tx
+	store           *store.Store
+	repo            *git.Repository
+	repoID          int64
+	codeBatch       *bleve.Batch
+	diffBatch       *bleve.Batch
+	codeBatchN      int
+	diffBatchN      int
 	diffIndexFailed bool // set on first diff Bleve write failure; skips further diff writes
-	knownCommits   map[string]bool
-	treeCache      map[plumbing.Hash]map[string]plumbing.Hash
-	treeOrder      []plumbing.Hash // FIFO insertion order for per-entry eviction
-	treeCacheLimit int
-	blobIDCache    map[string]int64 // content_hash -> blob DB ID; avoids repeated SQL lookups
-	commitIDCache  map[string]int64 // commit hash -> commit DB ID; used in insertParentLinks
-	newCommits     int
-	newBlobs       int
-	report         func(string)
+	knownCommits    map[string]bool
+	treeCache       map[plumbing.Hash]map[string]plumbing.Hash
+	treeOrder       []plumbing.Hash // FIFO insertion order for per-entry eviction
+	treeCacheLimit  int
+	blobIDCache     map[string]int64 // content_hash -> blob DB ID; avoids repeated SQL lookups
+	commitIDCache   map[string]int64 // commit hash -> commit DB ID; used in insertParentLinks
+	newCommits      int
+	newBlobs        int
+	report          func(string)
 }
 
 // flushCodeBatch commits the code batch if it has reached the threshold.
@@ -553,6 +553,42 @@ func GCDirtyIndexes(codedbDir string) (int, error) {
 		}
 	}
 	return removed, nil
+}
+
+// AttachAllDirtyIndexes scans the dirty index directory for manifest files and
+// attaches all valid dirty overlays by worktree ID. Returns the number of
+// overlays successfully attached. Overlays whose worktrees no longer exist are skipped.
+func AttachAllDirtyIndexes(s *store.Store) int {
+	dirtyDir := filepath.Join(s.Root, "bleve", "dirty")
+	entries, err := os.ReadDir(dirtyDir)
+	if err != nil {
+		return 0
+	}
+
+	attached := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dirPath := filepath.Join(dirtyDir, e.Name())
+		manifestPath := dirPath + ".manifest"
+
+		raw, err := os.ReadFile(manifestPath)
+		if err != nil {
+			continue // no manifest — skip
+		}
+		worktreePath := string(raw)
+		if _, statErr := os.Stat(worktreePath); os.IsNotExist(statErr) {
+			continue // worktree gone — skip
+		}
+
+		if err := s.AttachDirtyIndexByID(e.Name(), dirPath); err != nil {
+			slog.Debug("skip dirty overlay", "id", e.Name(), "err", err)
+			continue
+		}
+		attached++
+	}
+	return attached
 }
 
 // gitStatusDirtyFiles returns relative paths of dirty files using git status -z.
@@ -1383,9 +1419,67 @@ func (rp *repoPool) readBlob(contentHash string) []byte {
 	return nil
 }
 
+// repoPoolParallel opens independent go-git handles per worker for lock-free parallel reads.
+// Each worker gets its own Repository instance for the same .git directory, so no mutex
+// is needed — each handle has its own packfile reader state.
+type repoPoolParallel struct {
+	workerRepos []*git.Repository
+}
+
+// newRepoPoolParallel opens workers independent Repository handles for repoPath.
+func newRepoPoolParallel(repoPath string, workers int) (*repoPoolParallel, error) {
+	repos, err := plainOpenPool(repoPath, workers)
+	if err != nil {
+		return nil, err
+	}
+	return &repoPoolParallel{workerRepos: repos}, nil
+}
+
+// readBlob reads blob content using the worker's dedicated repo handle.
+// No mutex needed since each worker has its own handle.
+// Returns nil if unreadable, binary, or larger than maxPrefetchBlobSize.
+func (rp *repoPoolParallel) readBlob(workerIdx int, contentHash string) []byte {
+	oid := plumbing.NewHash(contentHash)
+	r := rp.workerRepos[workerIdx]
+	blobObj, err := r.BlobObject(oid)
+	if err != nil {
+		return nil
+	}
+	reader, err := blobObj.Reader()
+	if err != nil {
+		return nil
+	}
+	content, err := io.ReadAll(io.LimitReader(reader, maxPrefetchBlobSize+1))
+	reader.Close()
+	if err != nil {
+		return nil
+	}
+	if len(content) > maxPrefetchBlobSize {
+		return nil
+	}
+	if !utf8.Valid(content) {
+		return nil
+	}
+	return content
+}
+
+// Close closes all repo handles in the pool.
+func (rp *repoPoolParallel) Close() error {
+	var firstErr error
+	for _, r := range rp.workerRepos {
+		if err := r.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
 // prefetchBlobContents reads blob content in parallel using a worker pool.
 // Returns a map of content_hash -> content for all successfully read blobs.
-func prefetchBlobContents(ctx context.Context, repos []*git.Repository, hashes []string, report func(string)) map[string][]byte {
+//
+// For single-repo case, opens per-worker repo handles to eliminate mutex contention.
+// Falls back to shared mutex-based pool if parallel open fails or for multi-repo case.
+func prefetchBlobContents(ctx context.Context, repos []*git.Repository, repoPaths []string, hashes []string, report func(string)) map[string][]byte {
 	workers := runtime.GOMAXPROCS(0)
 	if workers > len(hashes) {
 		workers = len(hashes)
@@ -1394,12 +1488,67 @@ func prefetchBlobContents(ctx context.Context, repos []*git.Repository, hashes [
 		workers = 1
 	}
 
+	// single-repo optimization: open per-worker handles for lock-free reads
+	if len(repos) == 1 && len(repoPaths) == 1 {
+		if ppool, err := newRepoPoolParallel(repoPaths[0], workers); err == nil {
+			defer ppool.Close()
+			return prefetchWithParallelPool(ctx, ppool, workers, hashes, report)
+		}
+		slog.Debug("parallel pool open failed, falling back to mutex pool")
+	}
+
+	return prefetchWithMutexPool(ctx, repos, workers, hashes, report)
+}
+
+// prefetchWithParallelPool runs blob prefetch using per-worker repo handles (no mutex).
+func prefetchWithParallelPool(ctx context.Context, ppool *repoPoolParallel, workers int, hashes []string, report func(string)) map[string][]byte {
+	result := make(map[string][]byte, len(hashes))
+	var mu sync.Mutex
+	ch := make(chan string, workers*2)
+	var wg sync.WaitGroup
+	var fetched atomic.Int64
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			for hash := range ch {
+				if ctx.Err() != nil {
+					return
+				}
+				content := ppool.readBlob(idx, hash)
+				if content != nil {
+					mu.Lock()
+					result[hash] = content
+					mu.Unlock()
+				}
+				n := fetched.Add(1)
+				if n%500 == 0 {
+					report(fmt.Sprintf("  prefetching blob content: %d/%d...", n, len(hashes)))
+				}
+			}
+		}(w)
+	}
+
+sendLoop:
+	for _, h := range hashes {
+		select {
+		case <-ctx.Done():
+			break sendLoop
+		case ch <- h:
+		}
+	}
+	close(ch)
+	wg.Wait()
+	return result
+}
+
+// prefetchWithMutexPool runs blob prefetch using the shared mutex-based repo pool.
+func prefetchWithMutexPool(ctx context.Context, repos []*git.Repository, workers int, hashes []string, report func(string)) map[string][]byte {
 	pool := newRepoPool(repos)
 	result := make(map[string][]byte, len(hashes))
 	var mu sync.Mutex
-
 	ch := make(chan string, workers*2)
-
 	var wg sync.WaitGroup
 	var fetched atomic.Int64
 
@@ -1435,20 +1584,21 @@ sendLoop:
 	}
 	close(ch)
 	wg.Wait()
-
 	return result
 }
 
 // openReposFromDB queries repo paths from the store and opens them.
-func openReposFromDB(ctx context.Context, s *store.Store) ([]*git.Repository, error) {
+// Returns both the opened repositories and their filesystem paths.
+func openReposFromDB(ctx context.Context, s *store.Store) ([]*git.Repository, []string, error) {
 	paths, err := s.Queries().ListRepoPaths(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("query repo paths: %w", err)
+		return nil, nil, fmt.Errorf("query repo paths: %w", err)
 	}
 	if len(paths) == 0 {
-		return nil, fmt.Errorf("no repos found in database")
+		return nil, nil, fmt.Errorf("no repos found in database")
 	}
 	var repos []*git.Repository
+	var openedPaths []string
 	for _, p := range paths {
 		r, err := plainOpenTolerant(p)
 		if err != nil {
@@ -1456,11 +1606,12 @@ func openReposFromDB(ctx context.Context, s *store.Store) ([]*git.Repository, er
 			continue
 		}
 		repos = append(repos, r)
+		openedPaths = append(openedPaths, p)
 	}
 	if len(repos) == 0 {
-		return nil, fmt.Errorf("could not open any of %d git repos from database", len(paths))
+		return nil, nil, fmt.Errorf("could not open any of %d git repos from database", len(paths))
 	}
-	return repos, nil
+	return repos, openedPaths, nil
 }
 
 // ParseStats holds statistics from the symbol parsing phase.
@@ -1534,7 +1685,7 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 	}
 	report(fmt.Sprintf("Found %d unparsed blobs with supported languages.", len(blobs)))
 
-	repos, err := openReposFromDB(ctx, s)
+	repos, repoPaths, err := openReposFromDB(ctx, s)
 	if err != nil {
 		return stats, fmt.Errorf("open repos for symbol parsing: %w", err)
 	}
@@ -1544,7 +1695,7 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 	for i, b := range blobs {
 		hashes[i] = b.contentHash
 	}
-	blobCache := prefetchBlobContents(ctx, repos, hashes, report)
+	blobCache := prefetchBlobContents(ctx, repos, repoPaths, hashes, report)
 	report(fmt.Sprintf("  prefetched %d/%d blobs", len(blobCache), len(blobs)))
 
 	tx, err := s.Begin()
@@ -1758,7 +1909,7 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 	}
 	report(fmt.Sprintf("Parsing comments from %d blobs...", len(blobs)))
 
-	repos, err := openReposFromDB(ctx, s)
+	repos, repoPaths, err := openReposFromDB(ctx, s)
 	if err != nil {
 		return stats, fmt.Errorf("open repos for comment parsing: %w", err)
 	}
@@ -1768,7 +1919,7 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 	for i, b := range blobs {
 		hashes[i] = b.contentHash
 	}
-	blobCache := prefetchBlobContents(ctx, repos, hashes, report)
+	blobCache := prefetchBlobContents(ctx, repos, repoPaths, hashes, report)
 	report(fmt.Sprintf("  prefetched %d/%d blobs", len(blobCache), len(blobs)))
 
 	const maxCommentsPerBlob = 1000

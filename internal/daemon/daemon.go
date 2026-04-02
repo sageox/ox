@@ -151,21 +151,22 @@ type Daemon struct {
 	wg     sync.WaitGroup
 
 	// components
-	server            *Server
-	service           *daemonServiceImpl
-	scheduler         *SyncScheduler
-	watcher           *Watcher
-	heartbeat         *HeartbeatHandler
-	telemetry         *TelemetryCollector
-	friction          *FrictionCollector
-	issues            *IssueTracker
-	codedb            *CodeDBManager
-	agentWorker       *agentwork.Manager
-	sessionWatcher    *agentwork.SessionWatcherManager
-	whisperRegistry   *WhisperRegistry
-	murmurNudgeSource *MurmurNudgeSource
-	projectWatcher    *ProjectWatcher
-	dbMaintenance     *DBMaintenanceScheduler
+	server                 *Server
+	service                *daemonServiceImpl
+	scheduler              *SyncScheduler
+	watcher                *Watcher
+	heartbeat              *HeartbeatHandler
+	telemetry              *TelemetryCollector
+	friction               *FrictionCollector
+	issues                 *IssueTracker
+	codedb                 *CodeDBManager
+	agentWorker            *agentwork.Manager
+	sessionFinalizeHandler *agentwork.SessionFinalizeHandler
+	sessionWatcher         *agentwork.SessionWatcherManager
+	whisperRegistry        *WhisperRegistry
+	murmurNudgeSource      *MurmurNudgeSource
+	projectWatcher         *ProjectWatcher
+	dbMaintenance          *DBMaintenanceScheduler
 
 	// state
 	mu               sync.Mutex
@@ -174,6 +175,7 @@ type Daemon struct {
 	wasSuperseded    bool      // set when exiting because another daemon took over
 	startTime        time.Time // daemon start time for uptime tracking
 	lastActivity     time.Time // tracks last activity for inactivity timeout
+	pendingWorkSince time.Time // when pending work was first detected during inactivity (zero = no pending work)
 
 	// startup timing (written once in Start(), read by IPC status handler)
 	startupDurationMs  atomic.Int64
@@ -208,6 +210,64 @@ func (d *Daemon) timeSinceLastActivity() time.Duration {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return time.Since(d.lastActivity)
+}
+
+// checkDeadAgentsAndFinalize scans tracked agents for dead PIDs and immediately
+// enqueues orphaned sessions for finalization. This is the fast path: agent dies
+// → heartbeat check detects (~seconds) → finalization queued → daemon stays alive.
+func (d *Daemon) checkDeadAgentsAndFinalize() {
+	if d.heartbeat == nil || d.agentWorker == nil || d.config.LedgerPath == "" {
+		return
+	}
+
+	tracker := d.heartbeat.GetAgentActivity()
+	keys := tracker.Keys()
+	now := time.Now()
+
+	for _, agentID := range keys {
+		last := tracker.Last(agentID)
+		if now.Sub(last) <= IdleThreshold {
+			continue // recently active, skip
+		}
+
+		pid := d.heartbeat.GetAgentPID(agentID)
+		if pid <= 0 {
+			continue // no PID known
+		}
+
+		proc, err := os.FindProcess(pid)
+		if err != nil || proc.Signal(syscall.Signal(0)) != nil {
+			// PID is dead — check for orphaned sessions
+			d.logger.Info("agent PID dead, checking for orphaned sessions",
+				"agent_id", agentID, "pid", pid,
+			)
+
+			if d.sessionFinalizeHandler == nil {
+				continue
+			}
+
+			items := d.sessionFinalizeHandler.DetectOrphanedForAgent(d.config.LedgerPath, agentID)
+			for _, item := range items {
+				if d.agentWorker.Enqueue(item) {
+					d.logger.Info("enqueued orphaned session for finalization",
+						"agent_id", agentID, "dedup_key", item.DedupKey,
+					)
+				}
+			}
+		}
+	}
+}
+
+// hasPendingWork returns true if there are queued/in-flight finalization items
+// or active session watchers.
+func (d *Daemon) hasPendingWork() bool {
+	if d.agentWorker != nil && d.agentWorker.HasPendingWork() {
+		return true
+	}
+	if d.sessionWatcher != nil && len(d.sessionWatcher.ActiveSessions()) > 0 {
+		return true
+	}
+	return false
 }
 
 // RestartRequested returns true if the daemon stopped due to a version mismatch
@@ -340,6 +400,9 @@ func (d *Daemon) Start() error {
 				return d.shutdown()
 			}
 		case <-inactivityChan:
+			// fast-path: detect dead agent PIDs and immediately enqueue orphaned sessions
+			d.checkDeadAgentsAndFinalize()
+
 			// check if ledger path still exists (handles directory renames/moves)
 			if d.config.LedgerPath != "" {
 				if _, err := os.Stat(d.config.LedgerPath); os.IsNotExist(err) {
@@ -352,9 +415,39 @@ func (d *Daemon) Start() error {
 			uptime := time.Since(d.startTime)
 			minUptime := time.Minute // don't exit before 1 minute of runtime
 			if inactiveDuration >= d.config.InactivityTimeout && uptime >= minUptime {
+				// check for pending work before exiting
+				if d.hasPendingWork() {
+					d.mu.Lock()
+					if d.pendingWorkSince.IsZero() {
+						d.pendingWorkSince = time.Now()
+						d.mu.Unlock()
+						d.logger.Info("inactivity timeout reached but pending work exists, delaying exit",
+							"inactive_duration", inactiveDuration,
+							"grace_period", d.config.PendingWorkGracePeriod,
+						)
+						continue
+					}
+					graceElapsed := time.Since(d.pendingWorkSince)
+					d.mu.Unlock()
+					if graceElapsed < d.config.PendingWorkGracePeriod {
+						d.logger.Debug("pending work grace period active",
+							"elapsed", graceElapsed,
+							"grace_period", d.config.PendingWorkGracePeriod,
+						)
+						continue
+					}
+					d.logger.Warn("pending work grace period exceeded, shutting down anyway",
+						"grace_elapsed", graceElapsed,
+						"grace_period", d.config.PendingWorkGracePeriod,
+					)
+				}
 				d.logger.Info("shutting down due to inactivity", "inactive_duration", inactiveDuration, "timeout", d.config.InactivityTimeout, "uptime", uptime)
 				return d.shutdown()
 			}
+			// reset pending work tracker when not past inactivity timeout
+			d.mu.Lock()
+			d.pendingWorkSince = time.Time{}
+			d.mu.Unlock()
 			d.logger.Debug("inactivity check", "inactive_duration", inactiveDuration, "timeout", d.config.InactivityTimeout)
 		}
 	}
@@ -889,6 +982,7 @@ func (d *Daemon) initComponents() time.Duration {
 		sfh.SetProjectRoot(d.config.ProjectRoot)
 		awCfg := configLoader()
 		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
+		d.sessionFinalizeHandler = sfh
 		d.agentWorker.RegisterHandler(sfh)
 		d.agentWorker.SetOnComplete(func(result agentwork.WorkResult) {
 			status := "success"

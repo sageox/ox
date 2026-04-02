@@ -32,7 +32,7 @@ func TestAttachDirtyOverlay(t *testing.T) {
 	}
 
 	// dirty index should be usable -- index a document
-	if err := s.dirtyCodeIndex.Index("test-doc", map[string]interface{}{"content": "hello world"}); err != nil {
+	if err := s.DirtyCodeIndex().Index("test-doc", map[string]interface{}{"content": "hello world"}); err != nil {
 		t.Fatalf("index into dirty overlay: %v", err)
 	}
 
@@ -59,7 +59,7 @@ func TestAttachDirtyOverlay_ReplacesPrevious(t *testing.T) {
 	if err := s.AttachDirtyOverlay(); err != nil {
 		t.Fatalf("first AttachDirtyOverlay: %v", err)
 	}
-	if err := s.dirtyCodeIndex.Index("doc1", map[string]interface{}{"content": "first overlay data"}); err != nil {
+	if err := s.DirtyCodeIndex().Index("doc1", map[string]interface{}{"content": "first overlay data"}); err != nil {
 		t.Fatalf("index first overlay: %v", err)
 	}
 
@@ -165,7 +165,7 @@ func TestDetachDirtyOverlay_WithOverlay(t *testing.T) {
 	if s.CombinedCodeIndex != s.CodeIndex {
 		t.Error("CombinedCodeIndex should equal CodeIndex after detach")
 	}
-	if s.dirtyCodeIndex != nil {
+	if s.DirtyOverlayCount() != 0 {
 		t.Error("dirtyCodeIndex should be nil after detach")
 	}
 }

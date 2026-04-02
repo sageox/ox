@@ -655,6 +655,11 @@ func (m *Manager) Status() AgentWorkStatus {
 	}
 }
 
+// HasPendingWork returns true if there are queued or in-flight finalization items.
+func (m *Manager) HasPendingWork() bool {
+	return m.queue.Len() > 0 || m.queue.InProgressCount() > 0
+}
+
 // describeWorkReason returns a human-readable reason for why a work item exists.
 func describeWorkReason(item *WorkItem) string {
 	if p, ok := item.Payload.(*SessionFinalizePayload); ok && len(p.Missing) > 0 {
