@@ -346,9 +346,12 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 // DetectOrphanedForAgent scans for recordings belonging to a specific agent
 // and returns work items for immediate finalization. Unlike Detect(), this
 // skips the normal stale-recording threshold and immediately considers any
-// recording for the given agent as orphaned (since the caller already knows
-// the agent's PID is dead).
-func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID string) []*WorkItem {
+// recording for the given agent as orphaned.
+//
+// heartbeatPID is the PID from the heartbeat tracker. The function cross-checks
+// it against the recording's ParentPID to avoid misclassifying live sessions
+// whose heartbeat recorded a short-lived shell PID.
+func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID string, heartbeatPID int) []*WorkItem {
 	if agentID == "" || ledgerPath == "" {
 		return nil
 	}
@@ -387,13 +390,27 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 			}
 
 			var state struct {
-				AgentID string `json:"agent_id"`
+				AgentID   string     `json:"agent_id"`
+				ParentPID int        `json:"parent_pid,omitempty"`
+				StoppedAt *time.Time `json:"stopped_at,omitempty"`
 			}
 			if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
 				continue
 			}
 			if state.AgentID != agentID {
 				continue
+			}
+
+			// cross-check heartbeat PID against recording's ParentPID to avoid
+			// misclassifying live sessions whose heartbeat recorded a short-lived shell PID
+			if state.StoppedAt == nil && state.ParentPID > 0 && state.ParentPID != heartbeatPID {
+				if isPIDAlive(state.ParentPID) {
+					h.logger.Debug("skipping live session (ParentPID alive, heartbeat PID mismatch)",
+						"session", name, "agent_id", agentID,
+						"parent_pid", state.ParentPID, "heartbeat_pid", heartbeatPID,
+					)
+					continue
+				}
 			}
 
 			// check if already fully finalized
@@ -1028,4 +1045,16 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		"source", state.SessionFile,
 	)
 	return true
+}
+
+// isPIDAlive checks if a process with the given PID exists.
+func isPIDAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
 }

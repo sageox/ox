@@ -71,7 +71,7 @@ func TestStopHook_SetsStoppedAtInRecording(t *testing.T) {
 // TestStopHook_NoRecording_NoError verifies that setting StoppedAt on a
 // non-existent recording returns an error (which handleStop logs as debug).
 // Failure prevented: stop hook crashes when session wasn't recorded.
-func TestStopHook_NoRecording_NoError(t *testing.T) {
+func TestStopHook_NoRecording_ReturnsErrNotRecording(t *testing.T) {
 	cacheDir := t.TempDir()
 	projectRoot := t.TempDir()
 
@@ -90,7 +90,8 @@ func TestStopHook_NoRecording_NoError(t *testing.T) {
 		s.StoppedAt = &now
 	})
 	// ErrNotRecording is expected — handleStop logs it as debug and continues
-	assert.Error(t, err, "should return error for non-existent recording")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, session.ErrNotRecording)
 }
 
 // --- B. deriveLedgerPath ---

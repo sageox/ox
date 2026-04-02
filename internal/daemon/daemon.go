@@ -246,7 +246,7 @@ func (d *Daemon) checkDeadAgentsAndFinalize() {
 				continue
 			}
 
-			items := d.sessionFinalizeHandler.DetectOrphanedForAgent(d.config.LedgerPath, agentID)
+			items := d.sessionFinalizeHandler.DetectOrphanedForAgent(d.config.LedgerPath, agentID, pid)
 			for _, item := range items {
 				if d.agentWorker.Enqueue(item) {
 					d.logger.Info("enqueued orphaned session for finalization",
@@ -1392,13 +1392,19 @@ func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
 		"session", payload.SessionName,
 		"ledger", payload.LedgerPath,
 	)
+	// prefer CachePath from the stop hook (actual session location under .sageox/cache/sessions/)
+	// fall back to ledger-derived path for backwards compatibility
+	sessionDir := filepath.Join(payload.LedgerPath, "sessions", payload.SessionName)
+	if payload.CachePath != "" {
+		sessionDir = payload.CachePath
+	}
 	s.d.agentWorker.Enqueue(&agentwork.WorkItem{
 		Type:     "session-finalize",
 		Priority: 1, // high priority (vs 10 for doctor-detected)
 		DedupKey: "session-finalize:" + payload.SessionName,
 		Payload: &agentwork.SessionFinalizePayload{
-			SessionDir: filepath.Join(payload.LedgerPath, "sessions", payload.SessionName),
-			RawPath:    filepath.Join(payload.LedgerPath, "sessions", payload.SessionName, "raw.jsonl"),
+			SessionDir: sessionDir,
+			RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
 			Missing:    []string{"summary.md", "summary.json", "session.html", "session.md"},
 			LedgerPath: payload.LedgerPath,
 		},

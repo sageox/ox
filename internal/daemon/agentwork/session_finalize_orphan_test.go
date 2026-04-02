@@ -41,7 +41,7 @@ func TestDetectOrphanedForAgent_FindsMatchingRecording(t *testing.T) {
 `
 	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(rawContent), 0644))
 
-	items := handler.DetectOrphanedForAgent(ledgerPath, "test-agent")
+	items := handler.DetectOrphanedForAgent(ledgerPath, "test-agent", 99999)
 	require.Len(t, items, 1, "should find one orphaned session for test-agent")
 	assert.Equal(t, sessionFinalizeType, items[0].Type)
 	assert.Contains(t, items[0].DedupKey, "2026-04-01T10-00-user-OxTest")
@@ -79,7 +79,7 @@ func TestDetectOrphanedForAgent_IgnoresOtherAgents(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(sessionDirB, ".recording.json"), recB, 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(sessionDirB, "raw.jsonl"), []byte(rawContent), 0644))
 
-	items := handler.DetectOrphanedForAgent(ledgerPath, "agent-A")
+	items := handler.DetectOrphanedForAgent(ledgerPath, "agent-A", 0)
 	require.Len(t, items, 1, "should only find agent-A's session")
 	assert.Contains(t, items[0].DedupKey, "OxAgentA")
 
@@ -113,7 +113,7 @@ func TestDetectOrphanedForAgent_SkipsAlreadyFinalized(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(sessionDir, name), []byte("done"), 0644))
 	}
 
-	items := handler.DetectOrphanedForAgent(ledgerPath, "done-agent")
+	items := handler.DetectOrphanedForAgent(ledgerPath, "done-agent", 0)
 	assert.Empty(t, items, "should not re-queue already finalized session")
 }
 
@@ -121,14 +121,14 @@ func TestDetectOrphanedForAgent_SkipsAlreadyFinalized(t *testing.T) {
 // Failure prevented: panic or unfiltered scan.
 func TestDetectOrphanedForAgent_EmptyAgentID(t *testing.T) {
 	handler := NewSessionFinalizeHandler(slog.Default())
-	items := handler.DetectOrphanedForAgent(t.TempDir(), "")
+	items := handler.DetectOrphanedForAgent(t.TempDir(), "", 0)
 	assert.Empty(t, items)
 }
 
 // TestDetectOrphanedForAgent_EmptyLedgerPath verifies graceful no-op for empty ledger.
 func TestDetectOrphanedForAgent_EmptyLedgerPath(t *testing.T) {
 	handler := NewSessionFinalizeHandler(slog.Default())
-	items := handler.DetectOrphanedForAgent("", "test-agent")
+	items := handler.DetectOrphanedForAgent("", "test-agent", 0)
 	assert.Empty(t, items)
 }
 
