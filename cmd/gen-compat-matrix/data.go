@@ -107,7 +107,7 @@ func loadData(inputDir string) (*LoadedData, error) {
 		})
 	}
 
-	ld.AgentOrder = sortedAgents(compat.Agents)
+	ld.AgentOrder = sortedAgents(compat.Agents, compat.Support)
 	ld.FeatureOrder = sortedFeatures(compat.FeatureGroups)
 
 	return ld, nil
@@ -161,16 +161,35 @@ func tierRank(tier string) int {
 	}
 }
 
-func sortedAgents(agents map[string]AgentInfo) []string {
+// sortedAgents orders by tier (gold > silver > bronze), then by number of
+// supported features descending (best-supported first within each tier).
+func sortedAgents(agents map[string]AgentInfo, support map[string]string) []string {
 	keys := make([]string, 0, len(agents))
 	for k := range agents {
 		keys = append(keys, k)
 	}
+
+	// count declared support entries per agent
+	supportCount := make(map[string]int, len(keys))
+	for key := range support {
+		for i := len(key) - 1; i >= 0; i-- {
+			if key[i] == '/' {
+				supportCount[key[:i]]++
+				break
+			}
+		}
+	}
+
 	sort.Slice(keys, func(i, j int) bool {
 		ai, aj := agents[keys[i]], agents[keys[j]]
 		ri, rj := tierRank(ai.Tier), tierRank(aj.Tier)
 		if ri != rj {
 			return ri < rj
+		}
+		// within same tier, more supported features first
+		ci, cj := supportCount[keys[i]], supportCount[keys[j]]
+		if ci != cj {
+			return ci > cj
 		}
 		return ai.DisplayName < aj.DisplayName
 	})

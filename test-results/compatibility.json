@@ -8,13 +8,6 @@
       "cli_binary": "claude",
       "install_cmd": "npm install -g @anthropic-ai/claude-code"
     },
-    "codex": {
-      "display_name": "Codex CLI",
-      "tier": "silver",
-      "min_version": "0.1.0",
-      "cli_binary": "codex",
-      "install_cmd": "npm install -g @openai/codex"
-    },
     "gemini": {
       "display_name": "Gemini CLI",
       "tier": "silver",
@@ -22,8 +15,15 @@
       "cli_binary": "gemini",
       "install_cmd": "npm install -g @google/gemini-cli"
     },
+    "codex": {
+      "display_name": "Codex CLI",
+      "tier": "silver",
+      "min_version": "0.1.0",
+      "cli_binary": "codex",
+      "install_cmd": "npm install -g @openai/codex"
+    },
     "amp": {
-      "display_name": "Amp CLI",
+      "display_name": "Amp",
       "tier": "bronze",
       "min_version": "0.1.0",
       "cli_binary": "amp",
@@ -47,20 +47,6 @@
       "tier": "bronze",
       "cli_binary": "codepuppy",
       "install_cmd": "npm install -g codepuppy"
-    },
-    "continue": {
-      "display_name": "Continue",
-      "tier": "bronze",
-      "min_version": "0.8.0",
-      "cli_binary": "continue",
-      "install_cmd": "code --install-extension Continue.continue"
-    },
-    "aider": {
-      "display_name": "Aider",
-      "tier": "bronze",
-      "min_version": "0.50.0",
-      "cli_binary": "aider",
-      "install_cmd": "pip install aider-chat"
     }
   },
   "feature_groups": {
@@ -90,20 +76,17 @@
     "claude-code/github": "supported",
     "claude-code/hooks": "supported",
     "claude-code/anti-entropy": "supported",
-    "codex/prime": "supported",
-    "codex/hooks": "supported",
-    "codex/session-recording": "partial",
     "gemini/prime": "supported",
     "gemini/hooks": "supported",
     "gemini/whispers": "supported",
     "gemini/session-recording": "partial",
+    "codex/prime": "supported",
+    "codex/hooks": "supported",
+    "codex/session-recording": "partial",
     "amp/prime": "supported",
     "pi/prime": "supported",
     "pi/mcp": "supported",
     "opencode/prime": "supported",
-    "code-puppy/prime": "supported",
-    "continue/prime": "partial",
-    "aider/prime": "supported",
-    "aider/hooks": "partial"
+    "code-puppy/prime": "supported"
   }
 }

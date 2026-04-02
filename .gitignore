@@ -84,3 +84,4 @@ test-envs/secrets.yaml
 test-envs/secrets.decrypted.yaml
 *-age-key.txt
 *.age-key
+/gen-compat-matrix

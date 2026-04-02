@@ -113,22 +113,22 @@ func makeCellView(cs CellState) CellView {
 	switch cs.Status {
 	case "pass":
 		if cs.Total > 0 {
-			cv.Label = fmt.Sprintf("✅ %d/%d", cs.Passed, cs.Total)
+			cv.Label = fmt.Sprintf("%d/%d", cs.Passed, cs.Total)
 		} else {
-			cv.Label = "✅"
+			cv.Label = "\u2713" // checkmark
 		}
 	case "warn":
-		cv.Label = fmt.Sprintf("⚠️ %d/%d", cs.Passed, cs.Total)
+		cv.Label = fmt.Sprintf("%d/%d", cs.Passed, cs.Total)
 	case "fail":
-		cv.Label = fmt.Sprintf("❌ %d/%d", cs.Passed, cs.Total)
+		cv.Label = fmt.Sprintf("%d/%d", cs.Passed, cs.Total)
 	case "untested":
-		cv.Label = "⬜"
+		cv.Label = "?"
 	case "planned":
-		cv.Label = "📋"
+		cv.Label = "\u2610" // ballot box
 	case "unsupported":
-		cv.Label = "—"
+		cv.Label = "\u2014" // em dash
 	default: // na
-		cv.Label = "—"
+		cv.Label = "\u2014" // em dash
 	}
 
 	if cs.Total > 0 {
@@ -150,20 +150,7 @@ func writeHTML(w io.Writer, ld *LoadedData) error {
 		return fmt.Errorf("read embedded template: %w", err)
 	}
 
-	funcMap := template.FuncMap{
-		"tierEmoji": func(tier string) string {
-			switch tier {
-			case "gold":
-				return "🥇"
-			case "silver":
-				return "🥈"
-			default:
-				return "🥉"
-			}
-		},
-	}
-
-	tmpl, err := template.New("matrix").Funcs(funcMap).Parse(string(raw))
+	tmpl, err := template.New("matrix").Parse(string(raw))
 	if err != nil {
 		return fmt.Errorf("parse template: %w", err)
 	}
