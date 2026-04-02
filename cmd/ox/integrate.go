@@ -163,7 +163,7 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 	// Pi installation
 	if integratePiFlag {
 		if integrateUserFlag {
-			return fmt.Errorf("Pi does not support user-level integration")
+			return fmt.Errorf("pi does not support user-level integration")
 		}
 		if err := installPiHooks(false); err != nil {
 			return fmt.Errorf("installing Pi integration: %w", err)
@@ -314,7 +314,7 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 	// Pi uninstallation
 	if integratePiFlag {
 		if integrateUserFlag {
-			return fmt.Errorf("Pi does not support user-level integration")
+			return fmt.Errorf("pi does not support user-level integration")
 		}
 		if err := uninstallPiHooks(false); err != nil {
 			return fmt.Errorf("uninstalling Pi integration: %w", err)
