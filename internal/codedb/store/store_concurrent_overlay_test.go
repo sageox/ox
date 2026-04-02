@@ -85,7 +85,8 @@ func guardedSearchLoop(t *testing.T, s *Store, mu *sync.RWMutex, done <-chan str
 			if err != nil {
 				// during detach a closed index may surface an error;
 				// the old IndexAlias reference is stale but shouldn't
-				// panic -- tolerate errors here
+				// panic -- report and continue so callers see failures
+				errCh <- fmt.Errorf("search on stale alias: %w", err)
 				return
 			}
 			completed.Add(1)
@@ -363,7 +364,12 @@ func TestConcurrentAttachDetach_NoRace(t *testing.T) {
 				req := bleve.NewSearchRequest(query)
 				req.Size = 5
 				if cIdx != nil {
-					_, _ = cIdx.Search(req)
+					res, searchErr := cIdx.Search(req)
+					if searchErr != nil {
+						t.Errorf("search after attach %s: %v", id, searchErr)
+					} else if res.Total == 0 {
+						t.Errorf("search after attach %s: expected results, got 0", id)
+					}
 				}
 
 				// brief pause to interleave with other goroutines

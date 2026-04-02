@@ -364,6 +364,21 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 		filepath.Join(ledgerPath, "sessions"),
 	}
 
+	// also scan XDG/legacy cache paths (mirrors Detect())
+	repoID := filepath.Base(ledgerPath)
+	if repoID != "" && repoID != "." {
+		xdgDirs := []string{filepath.Join(paths.SessionCacheDir(repoID), "sessions")}
+		for _, d := range paths.AlternateSessionCacheDirs(repoID) {
+			xdgDirs = append(xdgDirs, filepath.Join(d, "sessions"))
+		}
+		for _, d := range xdgDirs {
+			if d == scanDirs[0] || d == scanDirs[1] {
+				continue // already covered
+			}
+			scanDirs = append(scanDirs, d)
+		}
+	}
+
 	for _, sessionsDir := range scanDirs {
 		entries, err := os.ReadDir(sessionsDir)
 		if err != nil {
@@ -403,13 +418,25 @@ func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID stri
 
 			// cross-check heartbeat PID against recording's ParentPID to avoid
 			// misclassifying live sessions whose heartbeat recorded a short-lived shell PID
-			if state.StoppedAt == nil && state.ParentPID > 0 && state.ParentPID != heartbeatPID {
-				if isPIDAlive(state.ParentPID) {
-					h.logger.Debug("skipping live session (ParentPID alive, heartbeat PID mismatch)",
-						"session", name, "agent_id", agentID,
-						"parent_pid", state.ParentPID, "heartbeat_pid", heartbeatPID,
-					)
-					continue
+			if state.StoppedAt == nil {
+				if state.ParentPID > 0 && state.ParentPID != heartbeatPID {
+					if isPIDAlive(state.ParentPID) {
+						h.logger.Debug("skipping live session (ParentPID alive, heartbeat PID mismatch)",
+							"session", name, "agent_id", agentID,
+							"parent_pid", state.ParentPID, "heartbeat_pid", heartbeatPID,
+						)
+						continue
+					}
+				} else if state.ParentPID == 0 && heartbeatPID > 0 {
+					// rollout compat: old recordings missing parent_pid —
+					// fall back to checking the heartbeat PID itself
+					if isPIDAlive(heartbeatPID) {
+						h.logger.Debug("skipping live session (parent_pid missing, heartbeat PID alive)",
+							"session", name, "agent_id", agentID,
+							"heartbeat_pid", heartbeatPID,
+						)
+						continue
+					}
 				}
 			}
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -1396,7 +1397,15 @@ func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
 	// fall back to ledger-derived path for backwards compatibility
 	sessionDir := filepath.Join(payload.LedgerPath, "sessions", payload.SessionName)
 	if payload.CachePath != "" {
-		sessionDir = payload.CachePath
+		// validate CachePath is under the ledger to prevent path traversal from IPC
+		absCache, cacheErr := filepath.Abs(payload.CachePath)
+		absLedger, ledgerErr := filepath.Abs(payload.LedgerPath)
+		if cacheErr == nil && ledgerErr == nil && strings.HasPrefix(absCache, absLedger+string(filepath.Separator)) {
+			sessionDir = payload.CachePath
+		} else {
+			s.d.logger.Warn("ignoring untrusted CachePath from IPC",
+				"cache_path", payload.CachePath, "ledger", payload.LedgerPath)
+		}
 	}
 	s.d.agentWorker.Enqueue(&agentwork.WorkItem{
 		Type:     "session-finalize",

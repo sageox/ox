@@ -67,8 +67,6 @@ func TestSearch_MultipleWorktrees_AllDirtyFilesSearchable(t *testing.T) {
 		blevePath, id := buildDirtyForWorktree(t, db, wtDir)
 		require.NoError(t, db.AttachDirtyIndexByID(id, blevePath))
 	}
-	t.Cleanup(func() { db.DetachDirtyOverlay() })
-
 	assert.Equal(t, 3, db.DirtyOverlayCount())
 
 	// each token should be searchable
@@ -107,8 +105,6 @@ func TestSearch_MultipleWorktrees_CommittedAndDirtyMerged(t *testing.T) {
 		blevePath, id := buildDirtyForWorktree(t, db, wtDir)
 		require.NoError(t, db.AttachDirtyIndexByID(id, blevePath))
 	}
-	t.Cleanup(func() { db.DetachDirtyOverlay() })
-
 	// committed content still reachable
 	results, err := db.Search(context.Background(), "committed_sentinel_comment")
 	require.NoError(t, err)
