@@ -313,3 +313,68 @@ func TestCollapseType(t *testing.T) {
 	assert.Equal(t, ChangeModified, collapseType(ChangeDeleted, ChangeCreated))
 	assert.Equal(t, ChangeDeleted, collapseType(ChangeModified, ChangeDeleted))
 }
+
+// --- D. File-change noise filtering ---
+
+// TestIsFileChangeNoise verifies infrastructure paths are filtered from murmurs.
+// Failure prevented: ledger writes and temp files pollute file-change murmurs.
+func TestIsFileChangeNoise(t *testing.T) {
+	tests := []struct {
+		path  string
+		noise bool
+	}{
+		// noise: paths outside project root (ledger/team-context)
+		{"../../../.local/share/sageox/sageox.ai/ledgers/repo_abc/.gitignore", true},
+		{"../../../.local/share/sageox/sageox.ai/ledgers/repo_abc/AGENTS.md", true},
+		{"../foo/bar.go", true},
+
+		// noise: atomic-write temp files
+		{"internal/carts/queries.go.tmp.22532.1775148899215", true},
+		{"cmd/ox/main.go.tmp.1234.5678", true},
+
+		// noise: local tool state directories
+		{".sageox/config.local.toml", true},
+		{".sageox/config.json", true},
+		{".beads/.local_version", true},
+		{".beads/dolt/noms/manifest", true},
+		{".claude/settings.json", true},
+		{".codegraph/index.db", true},
+		{".cursor/settings.json", true},
+
+		// not noise: normal project files
+		{"cmd/ox/main.go", false},
+		{"internal/carts/queries.go", false},
+		{"docs/guide.md", false},
+		{"README.md", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got := isFileChangeNoise(tt.path)
+			assert.Equal(t, tt.noise, got, "isFileChangeNoise(%q)", tt.path)
+		})
+	}
+}
+
+// TestMaxMurmurableFiles verifies the constant is reasonable.
+// Failure prevented: accidental change to threshold silently suppresses all murmurs.
+func TestMaxMurmurableFiles(t *testing.T) {
+	assert.True(t, maxMurmurableFiles >= 5, "threshold too low — would suppress most real work")
+	assert.True(t, maxMurmurableFiles <= 50, "threshold too high — bulk noise would leak through")
+}
+
+// TestFilterFileChangeNoise verifies the batch filter removes noise and keeps real changes.
+// Failure prevented: empty murmurs published when all changes are noise.
+func TestFilterFileChangeNoise(t *testing.T) {
+	changes := []FileChange{
+		{Path: "cmd/ox/main.go", ChangeType: ChangeModified},
+		{Path: "../../../.local/share/sageox/ledgers/repo/.gitignore", ChangeType: ChangeCreated},
+		{Path: "internal/foo.go.tmp.123.456", ChangeType: ChangeCreated},
+		{Path: "internal/foo.go", ChangeType: ChangeModified},
+	}
+
+	filtered := filterFileChangeNoise(changes)
+	assert.Equal(t, 2, len(filtered))
+	assert.Equal(t, "cmd/ox/main.go", filtered[0].Path)
+	assert.Equal(t, "internal/foo.go", filtered[1].Path)
+}

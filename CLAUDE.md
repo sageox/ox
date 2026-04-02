@@ -741,8 +741,9 @@ Fix inaccuracies in `cmd/ox/*.go` cobra definitions, not in the generated `.mdx`
 ### After Implementing
 
 1. Run `make lint` and `make test`
-2. Review for over-engineering
-3. Check security implications
+2. **Fix ALL lint and typecheck errors** — including pre-existing ones you didn't introduce. Leave the codebase cleaner than you found it. Never dismiss failures as "pre-existing" or "unrelated".
+3. Review for over-engineering
+4. Check security implications
 
 ## Human and AI Audience Documentation Balance
 

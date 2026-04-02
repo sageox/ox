@@ -23,7 +23,7 @@ func initBenchRepo(b *testing.B, n int) (string, []string) {
 		b.Helper()
 		cmd := exec.Command("git", args...)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
+		cmd.Env = append(os.Environ(), // safe: git subprocess in temp dir, not ox CLI
 			"GIT_AUTHOR_NAME=bench",
 			"GIT_AUTHOR_EMAIL=bench@sageox.ai",
 			"GIT_COMMITTER_NAME=bench",

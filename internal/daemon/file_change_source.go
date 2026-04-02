@@ -38,6 +38,11 @@ const (
 
 	// startupMaxAge caps how far back we report on first murmur after startup.
 	startupMaxAge = 30 * time.Minute
+
+	// maxMurmurableFiles is the ceiling above which a file-change murmur is
+	// suppressed entirely. Bulk changes (branch switches, codegen, large
+	// rebases) produce generic summaries with no actionable signal.
+	maxMurmurableFiles = 20
 )
 
 // FileChangeMurmurPublisher drains the ChangeAccumulator frequently and
@@ -199,6 +204,21 @@ func (p *FileChangeMurmurPublisher) publish() {
 	}
 	p.pending = make(map[string]*FileChange)
 	p.mu.Unlock()
+
+	// filter infrastructure noise before formatting
+	changes = filterFileChangeNoise(changes)
+	if len(changes) == 0 {
+		return
+	}
+
+	// skip murmur when change count is too high to be actionable —
+	// bulk changes (branch switches, codegen, large rebases) produce
+	// "N files across M dirs" which gives no useful signal
+	if len(changes) > maxMurmurableFiles {
+		p.logger.Debug("file change murmur suppressed: too many files",
+			"count", len(changes), "max", maxMurmurableFiles)
+		return
+	}
 
 	now := time.Now()
 	branch := repotools.GetCurrentBranch(p.projectRoot)
@@ -473,4 +493,46 @@ func formatHugeChanges(changes []FileChange) string {
 		dirs[filepath.Dir(c.Path)] = struct{}{}
 	}
 	return fmt.Sprintf("%d files across %d dirs", len(changes), len(dirs))
+}
+
+// filterFileChangeNoise removes infrastructure paths that shouldn't appear
+// in file-change murmurs: paths outside the project root (ledger/team-context
+// writes that filepath.Rel turns into ../../../...) and atomic-write temp files.
+func filterFileChangeNoise(changes []FileChange) []FileChange {
+	filtered := changes[:0]
+	for _, c := range changes {
+		if !isFileChangeNoise(c.Path) {
+			filtered = append(filtered, c)
+		}
+	}
+	return filtered
+}
+
+// localStatePrefixes are directory prefixes containing local tool state
+// that shouldn't appear in file-change murmurs.
+var localStatePrefixes = []string{
+	".sageox/",
+	".beads/",
+	".claude/",
+	".codegraph/",
+	".cursor/",
+}
+
+// isFileChangeNoise returns true if the path is infrastructure noise.
+func isFileChangeNoise(path string) bool {
+	// paths outside project root (ledger/team-context daemon writes)
+	if strings.HasPrefix(path, "../") {
+		return true
+	}
+	// atomic-write temp files (e.g. foo.go.tmp.22532.17751)
+	if strings.Contains(filepath.Base(path), ".tmp.") {
+		return true
+	}
+	// local tool state directories
+	for _, prefix := range localStatePrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }

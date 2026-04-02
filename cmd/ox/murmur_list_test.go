@@ -199,6 +199,30 @@ func TestMurmurListOutputJSON(t *testing.T) {
 	}
 }
 
+// --- Positional topic arg ---
+
+func TestMurmurListPositionalTopicArg(t *testing.T) {
+	// verify the command accepts a positional arg
+	if murmurListCmd.Args == nil {
+		t.Fatal("murmurListCmd.Args should be set (MaximumNArgs(1))")
+	}
+
+	// valid: 0 args
+	if err := murmurListCmd.Args(murmurListCmd, nil); err != nil {
+		t.Errorf("0 args should be valid: %v", err)
+	}
+
+	// valid: 1 arg
+	if err := murmurListCmd.Args(murmurListCmd, []string{"wip"}); err != nil {
+		t.Errorf("1 arg should be valid: %v", err)
+	}
+
+	// invalid: 2 args
+	if err := murmurListCmd.Args(murmurListCmd, []string{"wip", "extra"}); err == nil {
+		t.Error("2 args should be invalid")
+	}
+}
+
 func TestMurmurFileRoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
 	now := time.Now().UTC()

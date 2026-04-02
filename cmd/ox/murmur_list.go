@@ -40,7 +40,7 @@ var (
 )
 
 var murmurListCmd = &cobra.Command{
-	Use:   "list",
+	Use:   "list [topic]",
 	Short: "List recent murmurs from coworkers",
 	Long: `List murmurs published by AI coworkers and teammates on this repo.
 
@@ -49,11 +49,12 @@ Useful for seeing what your team is working on right now.
 
 Examples:
   ox murmur list                    # last 10 murmurs (default 12h window)
+  ox murmur list wip                # filter by topic
   ox murmur list --last=20          # last 20 murmurs
   ox murmur list --since=2h         # murmurs from the last 2 hours
-  ox murmur list --since=30m        # murmurs from the last 30 minutes
-  ox murmur list --topic=conflict   # filter by topic
+  ox murmur list --topic=conflict   # filter by topic (flag form)
   ox murmur list --json             # JSON output for scripting`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runMurmurList,
 }
 
@@ -86,7 +87,7 @@ type murmurListEntry struct {
 	Scope       string `json:"scope,omitempty"`
 }
 
-func runMurmurList(cmd *cobra.Command, _ []string) error {
+func runMurmurList(cmd *cobra.Command, args []string) error {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
 		return fmt.Errorf("not in a SageOx project: %w", err)
@@ -97,6 +98,11 @@ func runMurmurList(cmd *cobra.Command, _ []string) error {
 	topicFilter, _ := cmd.Flags().GetString("topic")
 	scopeFilter, _ := cmd.Flags().GetString("scope")
 	agentFilter, _ := cmd.Flags().GetString("agent-id")
+
+	// positional arg overrides --topic when flag not explicitly set
+	if len(args) > 0 && !cmd.Flags().Changed("topic") {
+		topicFilter = args[0]
+	}
 	jsonOutput, _ := cmd.Root().PersistentFlags().GetBool("json")
 
 	// parse --since into hours for ReadMurmursInWindow (capped at 24h)
