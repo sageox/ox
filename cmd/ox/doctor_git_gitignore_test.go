@@ -460,7 +460,10 @@ func TestCheckGitignore_InlineCommentNotMatched(t *testing.T) {
 	restoreCwd := changeToDir(t, gitRoot)
 	defer restoreCwd()
 
-	// create .gitignore with inline comment
+	// create .gitignore with a line that contains ".sageox" as part of an inline
+	// comment. Git doesn't support inline comments (#), but checkGitignore uses
+	// exact string matching against known patterns (.sageox, .sageox/, etc.),
+	// so "temp/  # .sageox" won't match any of them.
 	gitignorePath := filepath.Join(gitRoot, ".gitignore")
 	content := `*.log
 temp/  # .sageox should not be ignored
@@ -472,9 +475,10 @@ node_modules/
 
 	result := checkGitignore(false)
 
-	// should pass because .sageox in inline comment is not an ignore pattern
+	// passes because the line is "temp/  # .sageox ..." which doesn't match
+	// any of the exact patterns checked (.sageox, .sageox/, /.sageox, /.sageox/)
 	if !result.passed {
-		t.Errorf("expected passed=true when .sageox is only in inline comment, got: %+v", result)
+		t.Errorf("expected passed=true when .sageox appears only inside a non-matching line, got: %+v", result)
 	}
 	if result.message != "not ignored" {
 		t.Errorf("unexpected message: %s", result.message)

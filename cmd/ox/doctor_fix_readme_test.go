@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // TestCheckReadmeFile_FixCreates verifies that when fix=true and README.md is missing,
@@ -98,9 +97,10 @@ func TestCheckReadmeFile_FixEmpty(t *testing.T) {
 	}
 }
 
-// TestCheckReadmeFile_FixStale verifies that when fix=true and README.md has outdated content,
-// the check updates the file to the latest content.
-func TestCheckReadmeFile_FixStale(t *testing.T) {
+// TestCheckReadmeFile_FixOutdatedContent verifies that when fix=true and README.md
+// has outdated content, the check updates the file to the latest content.
+// Failure prevented: stale README.md left behind after template changes.
+func TestCheckReadmeFile_FixOutdatedContent(t *testing.T) {
 	tmpDir := testGitRepo(t)
 	sageoxDir := filepath.Join(tmpDir, ".sageox")
 	if err := os.MkdirAll(sageoxDir, 0755); err != nil {
@@ -112,12 +112,6 @@ func TestCheckReadmeFile_FixStale(t *testing.T) {
 	oldContent := "# Old SageOx README\nThis is outdated content."
 	if err := os.WriteFile(readmePath, []byte(oldContent), 0644); err != nil {
 		t.Fatalf("failed to create README.md: %v", err)
-	}
-
-	// set the modification time to 8 days ago
-	eightDaysAgo := time.Now().Add(-8 * 24 * time.Hour)
-	if err := os.Chtimes(readmePath, eightDaysAgo, eightDaysAgo); err != nil {
-		t.Fatalf("failed to set file modification time: %v", err)
 	}
 
 	originalWd, _ := os.Getwd()

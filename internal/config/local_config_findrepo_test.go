@@ -42,7 +42,7 @@ func TestSaveAndLoadLocalConfig(t *testing.T) {
 	// verify file exists
 	configPath := filepath.Join(tmpDir, sageoxDir, localConfigFilename)
 	_, err := os.Stat(configPath)
-	require.False(t, os.IsNotExist(err), "config file was not created")
+	require.NoError(t, err, "config file was not created")
 
 	// load config
 	loaded, err := LoadLocalConfig(tmpDir)
@@ -79,7 +79,7 @@ func TestLegacyTeamContextPath(t *testing.T) {
 			name:        "standard case",
 			teamID:      "team_abc123",
 			projectRoot: "/home/user/code/my-project",
-			want:        "/home/user/code/sageox_team_team_abc123_context",
+			want:        filepath.FromSlash("/home/user/code/sageox_team_team_abc123_context"),
 		},
 		{
 			name:        "empty team id",
@@ -325,19 +325,19 @@ func TestCreateTeamSymlink(t *testing.T) {
 		require.NoError(t, os.WriteFile(symlinkPath, []byte("not a symlink"), 0644))
 
 		err := CreateTeamSymlink(repoName, projectRoot, teamID, ep)
-		assert.Error(t, err, "should error when path exists and is not a symlink")
+		require.Error(t, err, "should error when path exists and is not a symlink")
 		assert.Contains(t, err.Error(), "not a symlink")
 	})
 
 	t.Run("error on empty project root", func(t *testing.T) {
 		err := CreateTeamSymlink(repoName, "", "team_abc", "https://api.sageox.ai")
-		assert.Error(t, err)
+		require.Error(t, err)
 		assert.Contains(t, err.Error(), "project root cannot be empty")
 	})
 
 	t.Run("error on empty team id", func(t *testing.T) {
 		err := CreateTeamSymlink(repoName, t.TempDir(), "", "https://api.sageox.ai")
-		assert.Error(t, err)
+		require.Error(t, err)
 		assert.Contains(t, err.Error(), "team ID cannot be empty")
 	})
 

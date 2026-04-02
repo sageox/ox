@@ -152,9 +152,13 @@ func TestIndexGitHubData_IssueUpsert(t *testing.T) {
 	}
 
 	var issueID int64
-	s.QueryRow("SELECT id FROM issues WHERE number = 20").Scan(&issueID)
+	if err := s.QueryRow("SELECT id FROM issues WHERE number = 20").Scan(&issueID); err != nil {
+		t.Fatalf("get issue id: %v", err)
+	}
 	var commentCount int
-	s.QueryRow("SELECT COUNT(*) FROM issue_comments WHERE issue_id = ?", issueID).Scan(&commentCount)
+	if err := s.QueryRow("SELECT COUNT(*) FROM issue_comments WHERE issue_id = ?", issueID).Scan(&commentCount); err != nil {
+		t.Fatalf("count comments: %v", err)
+	}
 	if commentCount != 3 {
 		t.Errorf("expected 3 comments after upsert, got %d", commentCount)
 	}

@@ -55,12 +55,21 @@ func TestCheckSageoxFilesTracked_FixForceAdds(t *testing.T) {
 	}
 }
 
-// TestCheckAuthFilePermissions_FixSecures verifies fix=true fixes auth file permissions to 0600
+// TestCheckAuthFilePermissions_FixSecures verifies fix=true fixes auth file permissions to 0600.
+// Failure prevented: auth tokens stored world-readable after write.
 func TestCheckAuthFilePermissions_FixSecures(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	authPath := filepath.Join(tmpDir, "auth.json")
-	if err := os.WriteFile(authPath, []byte(`{"token":"test"}`), 0644); err != nil {
+	// override XDG config so checkAuthFilePermissions finds our test auth file
+	// auth path resolves to $XDG_CONFIG_HOME/sageox/auth.json
+	sageoxDir := filepath.Join(tmpDir, "sageox")
+	if err := os.MkdirAll(sageoxDir, 0755); err != nil {
+		t.Fatalf("failed to create sageox config dir: %v", err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+
+	authPath := filepath.Join(sageoxDir, "auth.json")
+	if err := os.WriteFile(authPath, []byte(`{"tokens":{}}`), 0644); err != nil {
 		t.Fatalf("failed to create auth file: %v", err)
 	}
 
@@ -72,8 +81,9 @@ func TestCheckAuthFilePermissions_FixSecures(t *testing.T) {
 		t.Fatal("test setup error: auth file already has secure permissions")
 	}
 
-	if err := os.Chmod(authPath, 0600); err != nil {
-		t.Fatalf("failed to chmod: %v", err)
+	result := checkAuthFilePermissions(true)
+	if !result.passed {
+		t.Errorf("expected passed=true after fix, got: %+v", result)
 	}
 
 	info, err = os.Stat(authPath)

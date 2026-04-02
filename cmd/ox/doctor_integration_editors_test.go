@@ -469,6 +469,9 @@ func TestCheckGeminiHooks_NotDetected(t *testing.T) {
 	restoreCwd := changeToDir(t, gitRoot)
 	defer restoreCwd()
 
+	// clamp PATH so host-installed gemini CLI doesn't cause false positive
+	t.Setenv("PATH", "/usr/bin:/bin")
+
 	result := checkGeminiHooks(false)
 
 	if !result.skipped {
@@ -485,6 +488,9 @@ func TestCheckCodePuppyHooks_NotDetected(t *testing.T) {
 
 	restoreCwd := changeToDir(t, gitRoot)
 	defer restoreCwd()
+
+	// clamp PATH so host-installed code-puppy CLI doesn't cause false positive
+	t.Setenv("PATH", "/usr/bin:/bin")
 
 	result := checkCodePuppyHooks(false)
 

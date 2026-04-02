@@ -79,8 +79,9 @@ func TestCheckEndpointNormalization_DetectsConfigPrefix(t *testing.T) {
 
 	result := checkEndpointNormalization(false)
 
-	if result.passed && !result.warning {
-		t.Errorf("expected warning when config has prefixed endpoint, got: %+v", result)
+	// prefixed endpoints pass with a warning (not a hard failure)
+	if !result.warning {
+		t.Errorf("expected warning=true for prefixed endpoint, got: %+v", result)
 	}
 	if !strings.Contains(result.detail, "config.json") {
 		t.Errorf("expected detail to mention config.json, got: %s", result.detail)
@@ -145,8 +146,9 @@ func TestCheckEndpointNormalization_DetectsMarkerPrefix(t *testing.T) {
 
 	result := checkEndpointNormalization(false)
 
-	if result.passed && !result.warning {
-		t.Errorf("expected warning for prefixed marker, got: %+v", result)
+	// prefixed marker endpoints pass with a warning (not a hard failure)
+	if !result.warning {
+		t.Errorf("expected warning=true for prefixed marker, got: %+v", result)
 	}
 	if !strings.Contains(result.detail, ".repo_abc123") {
 		t.Errorf("expected detail to mention marker file, got: %s", result.detail)
