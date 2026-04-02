@@ -80,6 +80,7 @@ var (
 	integrateCodexFlag     bool
 	integrateCodePuppyFlag bool
 	integrateAmpFlag       bool
+	integratePiFlag        bool
 	integrateAllFlag       bool
 	integrateForceFlag     bool
 )
@@ -153,6 +154,20 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		fmt.Println()
 		fmt.Printf("Installed %s-level plugin:\n", location)
 		fmt.Printf("  - %s/%s/%s\n", path, codePuppyPluginDir, codePuppyPluginFileName)
+
+		userCfg, _ := config.LoadUserConfig()
+		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
+		return nil
+	}
+
+	// Pi installation
+	if integratePiFlag {
+		if integrateUserFlag {
+			return fmt.Errorf("Pi does not support user-level integration")
+		}
+		if err := installPiHooks(false); err != nil {
+			return fmt.Errorf("installing Pi integration: %w", err)
+		}
 
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
@@ -290,6 +305,22 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 			location = "project"
 		}
 		fmt.Printf("✓ code_puppy %s-level integration uninstalled\n", location)
+
+		userCfg, _ := config.LoadUserConfig()
+		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
+		return nil
+	}
+
+	// Pi uninstallation
+	if integratePiFlag {
+		if integrateUserFlag {
+			return fmt.Errorf("Pi does not support user-level integration")
+		}
+		if err := uninstallPiHooks(false); err != nil {
+			return fmt.Errorf("uninstalling Pi integration: %w", err)
+		}
+
+		fmt.Printf("✓ Pi project-level integration uninstalled\n")
 
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
@@ -508,6 +539,11 @@ func uninstallAllIntegrations(force bool) error {
 		installed = append(installed, "Amp CLI (project)")
 	}
 
+	// check Pi
+	if hasPiHooks(false) {
+		installed = append(installed, "Pi (project)")
+	}
+
 	// check code_puppy
 	if hasCodePuppyHooks(true) {
 		installed = append(installed, "code_puppy (user plugin)")
@@ -566,6 +602,9 @@ func uninstallAllIntegrations(force bool) error {
 	if err := uninstallAmpHooks(false); err != nil {
 		errors = append(errors, fmt.Sprintf("Amp CLI (project): %v", err))
 	}
+	if err := uninstallPiHooks(false); err != nil {
+		errors = append(errors, fmt.Sprintf("Pi (project): %v", err))
+	}
 	if err := uninstallCodePuppyHooks(true); err != nil {
 		errors = append(errors, fmt.Sprintf("code_puppy (user): %v", err))
 	}
@@ -598,6 +637,8 @@ func init() {
 	_ = integrateInstallCmd.Flags().MarkHidden("codex")
 	_ = integrateInstallCmd.Flags().MarkHidden("codepuppy")
 	_ = integrateInstallCmd.Flags().MarkHidden("amp")
+	integrateInstallCmd.Flags().BoolVar(&integratePiFlag, "pi", false, "install Pi integration (AGENTS.md marker)")
+	_ = integrateInstallCmd.Flags().MarkHidden("pi")
 
 	// uninstall flags
 	integrateUninstallCmd.Flags().BoolVar(&integrateUserFlag, "user", false, "uninstall from user-level config")
@@ -613,6 +654,8 @@ func init() {
 	_ = integrateUninstallCmd.Flags().MarkHidden("codex")
 	_ = integrateUninstallCmd.Flags().MarkHidden("codepuppy")
 	_ = integrateUninstallCmd.Flags().MarkHidden("amp")
+	integrateUninstallCmd.Flags().BoolVar(&integratePiFlag, "pi", false, "uninstall Pi integration (AGENTS.md marker)")
+	_ = integrateUninstallCmd.Flags().MarkHidden("pi")
 	_ = integrateUninstallCmd.Flags().MarkHidden("all")
 	_ = integrateUninstallCmd.Flags().MarkHidden("force")
 

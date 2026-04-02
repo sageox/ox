@@ -147,7 +147,9 @@ var adapterAliases = map[string]string{
 
 	// generic adapter fallbacks (remove alias when deep adapter is added)
 	"codex":    "codex",
-	"amp":      "generic",
+	"amp":             "generic",
+	"pi":              "generic",
+	"pi-coding-agent": "generic",
 	"cursor":   "generic",
 	"windsurf": "generic",
 	"copilot":  "generic",

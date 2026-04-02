@@ -30,6 +30,9 @@ const (
 
 	// OxPrimeCommandAmp is the command for Amp CLI hooks.
 	OxPrimeCommandAmp = "if command -v ox >/dev/null 2>&1; then AGENT_ENV=amp ox agent prime 2>&1 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi"
+
+	// OxPrimeCommandPi is the command for Pi hooks.
+	OxPrimeCommandPi = "if command -v ox >/dev/null 2>&1; then AGENT_ENV=pi ox agent prime 2>&1 || true; else echo 'This repo uses SageOx: install https://github.com/sageox/ox for optimized team context.'; fi"
 )
 
 // OxHookCommand templates for lifecycle hook installation.

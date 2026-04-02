@@ -357,6 +357,55 @@ func (a *AmpAgent) SupportsHooks() bool {
 	return true
 }
 
+// PiAgent implements Agent interface for Pi (https://shittycodingagent.ai/)
+type PiAgent struct{}
+
+func (p *PiAgent) Name() string {
+	return "Pi"
+}
+
+func (p *PiAgent) Install(user bool) error {
+	return installPiHooks(user)
+}
+
+func (p *PiAgent) Uninstall(user bool) error {
+	return uninstallPiHooks(user)
+}
+
+func (p *PiAgent) HasHooks(user bool) bool {
+	return hasPiHooks(user)
+}
+
+func (p *PiAgent) List() map[string]bool {
+	return listPiHooks()
+}
+
+func (p *PiAgent) Detect() bool {
+	return p.DetectProject() || p.DetectCLI()
+}
+
+func (p *PiAgent) DetectProject() bool {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return false
+	}
+	projectDir := filepath.Join(gitRoot, ".pi")
+	if _, err := os.Stat(projectDir); err == nil {
+		return true
+	}
+	// also detect if AGENTS.md already has our marker
+	return hasPiHooks(false)
+}
+
+func (p *PiAgent) DetectCLI() bool {
+	_, err := exec.LookPath("pi")
+	return err == nil
+}
+
+func (p *PiAgent) SupportsHooks() bool {
+	return false
+}
+
 // AgentRegistry holds all registered agents
 var AgentRegistry = []Agent{
 	&ClaudeAgent{},
@@ -365,6 +414,7 @@ var AgentRegistry = []Agent{
 	&CodexAgent{},
 	&CodePuppyAgent{},
 	&AmpAgent{},
+	&PiAgent{},
 }
 
 // GetAgent returns the agent by name (case-insensitive)

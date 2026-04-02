@@ -14,6 +14,7 @@ var SupportedAgents = map[string]bool{
 	string(agentx.AgentTypeCodex):      true,
 	"gemini":                           true, // agentx.AgentTypeGemini pending
 	string(agentx.AgentTypeAmp):        true,
+	string(agentx.AgentTypePi):         true,
 }
 
 // CanonicalAgentType normalizes display names and legacy aliases to canonical agent type slugs.
@@ -30,6 +31,8 @@ func CanonicalAgentType(agentType string) string {
 		return "gemini"
 	case "amp", "amp-cli", "amp cli", "sourcegraph":
 		return string(agentx.AgentTypeAmp)
+	case "pi", "pi-coding-agent", "pi agent":
+		return string(agentx.AgentTypePi)
 	}
 
 	// If the input is a display name from registry (e.g., "Cursor"), map to slug.
