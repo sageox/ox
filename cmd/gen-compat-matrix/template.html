@@ -1,0 +1,506 @@
+<!-- Future: deploy to GitHub Pages via .github/workflows/compatibility.yml -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ox Compatibility Matrix</title>
+  <style>
+    /* ── Design tokens ─────────────────────────────────────────────────── */
+    :root {
+      --color-pass:        #16a34a;
+      --color-pass-bg:     #dcfce7;
+      --color-pass-border: #86efac;
+      --color-warn:        #b45309;
+      --color-warn-bg:     #fef9c3;
+      --color-warn-border: #fde047;
+      --color-fail:        #dc2626;
+      --color-fail-bg:     #fee2e2;
+      --color-fail-border: #fca5a5;
+      --color-na:          #6b7280;
+      --color-na-bg:       #f9fafb;
+      --color-untested-bg: #f3f4f6;
+      --color-planned-bg:  #eff6ff;
+      --color-planned:     #1d4ed8;
+
+      --color-gold:   #b45309;
+      --color-silver: #4b5563;
+      --color-bronze: #92400e;
+
+      --color-bg:        #ffffff;
+      --color-surface:   #f9fafb;
+      --color-border:    #e5e7eb;
+      --color-text:      #111827;
+      --color-text-muted:#6b7280;
+      --color-accent:    #4f46e5;
+
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --font-mono: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+      --radius: 8px;
+      --shadow: 0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.06);
+      --shadow-md: 0 4px 6px rgba(0,0,0,.07), 0 2px 4px rgba(0,0,0,.06);
+    }
+
+    /* ── Reset & base ──────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { font-size: 15px; }
+    body {
+      font-family: var(--font);
+      background: var(--color-surface);
+      color: var(--color-text);
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    /* ── Layout ────────────────────────────────────────────────────────── */
+    .page { max-width: 1400px; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+
+    /* ── Header ────────────────────────────────────────────────────────── */
+    .site-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+      padding-bottom: 1.5rem;
+      border-bottom: 1px solid var(--color-border);
+      margin-bottom: 2rem;
+    }
+    .site-header h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      letter-spacing: -.02em;
+      color: var(--color-text);
+    }
+    .site-header h1 span { color: var(--color-accent); }
+    .meta { font-size: .8rem; color: var(--color-text-muted); line-height: 1.8; }
+    .meta strong { color: var(--color-text); font-weight: 600; }
+    .version-badge {
+      display: inline-block;
+      background: var(--color-accent);
+      color: #fff;
+      border-radius: 999px;
+      padding: .15em .6em;
+      font-size: .75rem;
+      font-weight: 600;
+      letter-spacing: .01em;
+      vertical-align: middle;
+      margin-left: .4rem;
+    }
+
+    /* ── Section headings ──────────────────────────────────────────────── */
+    .section-title {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--color-text-muted);
+      text-transform: uppercase;
+      letter-spacing: .06em;
+      margin-bottom: 1rem;
+    }
+
+    /* ── Card wrapper ──────────────────────────────────────────────────── */
+    .card {
+      background: var(--color-bg);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      margin-bottom: 2rem;
+    }
+
+    /* ── Table scaffold ────────────────────────────────────────────────── */
+    .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: .875rem;
+    }
+    thead th {
+      background: var(--color-surface);
+      border-bottom: 2px solid var(--color-border);
+      padding: .75rem 1rem;
+      text-align: left;
+      white-space: nowrap;
+      font-weight: 600;
+      color: var(--color-text-muted);
+      font-size: .78rem;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    thead th:first-child { min-width: 160px; position: sticky; left: 0; z-index: 2; background: var(--color-surface); }
+    tbody td {
+      padding: .65rem 1rem;
+      border-bottom: 1px solid var(--color-border);
+      vertical-align: middle;
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    tbody tr:nth-child(even) td { background: rgba(249,250,251,.6); }
+    tbody tr:hover td { background: #f0f4ff !important; transition: background .12s; }
+    tbody td:first-child {
+      font-weight: 500;
+      color: var(--color-text);
+      position: sticky;
+      left: 0;
+      background: inherit;
+      z-index: 1;
+    }
+
+    /* ── Agent column headers ──────────────────────────────────────────── */
+    .agent-header {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: .3rem;
+      min-width: 100px;
+      cursor: pointer;
+      padding: .5rem;
+      border-radius: 6px;
+      transition: background .15s;
+    }
+    .agent-header:hover { background: #e0e7ff; }
+    .agent-name { font-size: .82rem; font-weight: 700; color: var(--color-text); }
+    .tier-badge {
+      font-size: .7rem;
+      font-weight: 700;
+      padding: .1em .45em;
+      border-radius: 999px;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    .tier-gold   { background: #fef3c7; color: var(--color-gold); border: 1px solid #fde68a; }
+    .tier-silver { background: #f3f4f6; color: var(--color-silver); border: 1px solid #d1d5db; }
+    .tier-bronze { background: #fdf2e9; color: var(--color-bronze); border: 1px solid #f5cba7; }
+    .tier-emoji  { font-size: 1rem; }
+
+    /* column header click hint */
+    .agent-header::after {
+      content: "▾ details";
+      font-size: .65rem;
+      color: var(--color-accent);
+      opacity: 0;
+      transition: opacity .15s;
+    }
+    .agent-header:hover::after { opacity: 1; }
+
+    /* active/expanded header */
+    .agent-header.expanded { background: #e0e7ff; }
+    .agent-header.expanded::after { content: "▴ collapse"; opacity: 1; }
+
+    /* ── Status cells ──────────────────────────────────────────────────── */
+    .cell {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: .3rem;
+      border-radius: 6px;
+      padding: .35rem .55rem;
+      font-size: .8rem;
+      font-weight: 600;
+      white-space: nowrap;
+      cursor: default;
+    }
+    .cell-pass        { background: var(--color-pass-bg); color: var(--color-pass); border: 1px solid var(--color-pass-border); }
+    .cell-warn        { background: var(--color-warn-bg); color: var(--color-warn); border: 1px solid var(--color-warn-border); }
+    .cell-fail        { background: var(--color-fail-bg); color: var(--color-fail); border: 1px solid var(--color-fail-border); }
+    .cell-na          { color: var(--color-na); font-size: 1rem; }
+    .cell-untested    { background: var(--color-untested-bg); color: var(--color-text-muted); border: 1px solid var(--color-border); }
+    .cell-planned     { background: var(--color-planned-bg); color: var(--color-planned); border: 1px solid #bfdbfe; }
+    .cell-unsupported { color: var(--color-na); font-size: 1rem; }
+
+    /* ── Tooltip ───────────────────────────────────────────────────────── */
+    [data-tip] { position: relative; }
+    [data-tip]:hover::before {
+      content: attr(data-tip);
+      position: absolute;
+      bottom: calc(100% + 6px);
+      left: 50%;
+      transform: translateX(-50%);
+      background: #1f2937;
+      color: #fff;
+      font-size: .72rem;
+      font-weight: 400;
+      white-space: pre;
+      padding: .35rem .6rem;
+      border-radius: 5px;
+      box-shadow: var(--shadow-md);
+      pointer-events: none;
+      z-index: 100;
+      line-height: 1.5;
+    }
+    [data-tip]:hover::after {
+      content: "";
+      position: absolute;
+      bottom: calc(100% + 2px);
+      left: 50%;
+      transform: translateX(-50%);
+      border: 4px solid transparent;
+      border-top-color: #1f2937;
+      pointer-events: none;
+      z-index: 100;
+    }
+
+    /* ── Drill-down panel ──────────────────────────────────────────────── */
+    .drilldown {
+      display: none;
+      padding: 1.5rem;
+      background: #fafbff;
+      border-top: 2px solid var(--color-accent);
+      animation: slideDown .18s ease-out;
+    }
+    .drilldown.visible { display: block; }
+    @keyframes slideDown {
+      from { opacity: 0; transform: translateY(-6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .drilldown h3 {
+      font-size: .95rem;
+      font-weight: 700;
+      margin-bottom: 1rem;
+      color: var(--color-accent);
+    }
+    .drilldown table thead th {
+      background: #eef2ff;
+      color: var(--color-accent);
+      font-size: .72rem;
+    }
+    .drilldown table thead th:first-child { background: #eef2ff; }
+    .version-label {
+      font-family: var(--font-mono);
+      font-size: .8rem;
+      font-weight: 600;
+      color: var(--color-text);
+    }
+    .version-meta {
+      font-size: .72rem;
+      color: var(--color-text-muted);
+      display: block;
+    }
+
+    /* ── Legend ────────────────────────────────────────────────────────── */
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .75rem 1.5rem;
+      padding: 1rem 1.25rem;
+      background: var(--color-bg);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius);
+      margin-bottom: 2rem;
+      font-size: .8rem;
+    }
+    .legend-item { display: flex; align-items: center; gap: .4rem; }
+    .legend-swatch {
+      width: 1.5rem;
+      height: 1.3rem;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: .75rem;
+      flex-shrink: 0;
+    }
+
+    /* ── Tier key ──────────────────────────────────────────────────────── */
+    .tier-key {
+      display: flex;
+      flex-wrap: wrap;
+      gap: .5rem 1.5rem;
+      margin-bottom: 2rem;
+      font-size: .82rem;
+      align-items: center;
+      color: var(--color-text-muted);
+    }
+    .tier-key strong { color: var(--color-text); }
+
+    /* ── Footer ────────────────────────────────────────────────────────── */
+    footer {
+      padding-top: 2rem;
+      border-top: 1px solid var(--color-border);
+      text-align: center;
+      font-size: .8rem;
+      color: var(--color-text-muted);
+    }
+    footer a { color: var(--color-accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* ── Responsive ────────────────────────────────────────────────────── */
+    @media (max-width: 768px) {
+      .page { padding: 1rem .75rem 3rem; }
+      .site-header { flex-direction: column; }
+      .site-header h1 { font-size: 1.3rem; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <header class="site-header">
+    <div>
+      <h1><span>ox</span> Compatibility Matrix
+        <span class="version-badge">v{{.OxVersion}}</span>
+      </h1>
+      <p style="margin-top:.4rem;font-size:.85rem;color:var(--color-text-muted);">
+        Which AI coworker integrations work with which features of ox
+      </p>
+    </div>
+    <div class="meta">
+      <strong>Generated</strong> {{.GeneratedAt}}<br>
+      <strong>Test runs</strong> {{.RunCount}}<br>
+      <strong>Agents</strong> {{.AgentCount}}
+    </div>
+  </header>
+
+  <!-- Tier key -->
+  <div class="tier-key">
+    <strong>Tier:</strong>
+    <span><span class="tier-badge tier-gold">🥇 Gold</span> — Full support, tested on every release</span>
+    <span><span class="tier-badge tier-silver">🥈 Silver</span> — Core features supported</span>
+    <span><span class="tier-badge tier-bronze">🥉 Bronze</span> — Best-effort, community tested</span>
+  </div>
+
+  <!-- Legend -->
+  <div class="legend">
+    <div class="legend-item">
+      <div class="legend-swatch cell cell-pass" style="width:auto;padding:.15rem .4rem;">✅</div>
+      <span>All tests pass</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-swatch cell cell-warn" style="width:auto;padding:.15rem .4rem;">⚠️</div>
+      <span>Some failures</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-swatch cell cell-fail" style="width:auto;padding:.15rem .4rem;">❌</div>
+      <span>All failed</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-swatch cell cell-untested" style="width:auto;padding:.15rem .4rem;">⬜</div>
+      <span>Declared, not yet tested</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-swatch cell cell-planned" style="width:auto;padding:.15rem .4rem;">📋</div>
+      <span>Planned</span>
+    </div>
+    <div class="legend-item">
+      <span style="color:var(--color-na);font-size:1.1rem;margin-right:.2rem;">—</span>
+      <span>Not applicable</span>
+    </div>
+  </div>
+
+  <!-- Overview hint -->
+  <p class="section-title">Click an agent column header to see version history</p>
+
+  <!-- Overview matrix card -->
+  <div class="card">
+    <div class="table-scroll">
+      <table id="overview-table">
+        <thead>
+          <tr>
+            <th>Feature</th>
+            {{range .Agents}}
+            <th>
+              <div class="agent-header" id="hdr-{{.Key}}" onclick="toggleDrilldown('{{.Key}}')"
+                   title="{{.Info.DisplayName}} — min version {{.Info.MinVersion}}">
+                <span class="tier-emoji">{{tierEmoji .Info.Tier}}</span>
+                <span class="agent-name">{{.Info.DisplayName}}</span>
+                <span class="tier-badge tier-{{.Info.Tier}}">{{.Info.Tier}}</span>
+              </div>
+            </th>
+            {{end}}
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Features}}
+          <tr>
+            <td>{{.DisplayName}}</td>
+            {{range .Cells}}
+            <td align="center">
+              <div class="cell cell-{{.Status}}" {{if .HasTooltip}}data-tip="{{.Tooltip}}"{{end}}>
+                {{.Label}}
+              </div>
+            </td>
+            {{end}}
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Drill-down panels (one per agent, hidden by default) -->
+  {{range .Agents}}
+  <div class="drilldown" id="dd-{{.Key}}">
+    <h3>{{.Info.DisplayName}} — version history</h3>
+    {{if .VersionRows}}
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Version</th>
+            {{range $.FeatureHeaders}}
+            <th style="text-align:center;">{{.}}</th>
+            {{end}}
+          </tr>
+        </thead>
+        <tbody>
+          {{range .VersionRows}}
+          <tr>
+            <td>
+              <span class="version-label">{{.AgentVersion}}</span>
+              <span class="version-meta">{{.TimestampFmt}} · ox {{.OxVersion}}</span>
+            </td>
+            {{range .Cells}}
+            <td align="center">
+              <div class="cell cell-{{.Status}}" {{if .HasTooltip}}data-tip="{{.Tooltip}}"{{end}}>
+                {{.Label}}
+              </div>
+            </td>
+            {{end}}
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+    </div>
+    {{else}}
+    <p style="color:var(--color-text-muted);font-size:.85rem;">No historical test runs available for this agent.</p>
+    {{end}}
+  </div>
+  {{end}}
+
+  <!-- Footer -->
+  <footer>
+    Generated by <a href="https://github.com/sageox/ox">gen-compat-matrix</a> &middot;
+    Part of the <a href="https://sageox.ai">ox</a> project
+  </footer>
+
+</div>
+
+<script>
+  function toggleDrilldown(agentKey) {
+    var panel = document.getElementById('dd-' + agentKey);
+    var hdr   = document.getElementById('hdr-' + agentKey);
+
+    // Close all other open panels.
+    document.querySelectorAll('.drilldown.visible').forEach(function(el) {
+      if (el.id !== 'dd-' + agentKey) {
+        el.classList.remove('visible');
+        var k = el.id.replace('dd-', '');
+        var h = document.getElementById('hdr-' + k);
+        if (h) h.classList.remove('expanded');
+      }
+    });
+
+    var isOpen = panel.classList.contains('visible');
+    panel.classList.toggle('visible', !isOpen);
+    hdr.classList.toggle('expanded', !isOpen);
+
+    if (!isOpen) {
+      // Scroll panel into view with a little breathing room.
+      setTimeout(function() {
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }, 60);
+    }
+  }
+</script>
+</body>
+</html>

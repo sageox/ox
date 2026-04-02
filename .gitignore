@@ -78,3 +78,9 @@ demo/playwright/node_modules/
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# Never commit decrypted secrets or age private keys
+test-envs/secrets.yaml
+test-envs/secrets.decrypted.yaml
+*-age-key.txt
+*.age-key

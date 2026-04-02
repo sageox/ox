@@ -1,0 +1,92 @@
+# Multi-agent compatibility matrix — tests ox against all supported coding agents.
+# DISABLED: Enable by removing .disabled suffix after discussion with Ryan/Ajit.
+# See: .github/workflows/README.md
+name: Compatibility Matrix
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Monday 6am UTC (weekly)
+  workflow_dispatch:
+    inputs:
+      agents:
+        description: 'Comma-separated agents (or "all")'
+        default: 'all'
+      versions:
+        description: 'Versions per agent to test'
+        default: '5'
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - id: m
+        run: |
+          go run ./cmd/gen-compat-matrix resolve \
+            --agents="${{ inputs.agents || 'all' }}" \
+            --versions=${{ inputs.versions || 5 }} \
+            --format=github-actions >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: resolve
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Decrypt test credentials
+        env:
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+        run: |
+          if [ -n "$SOPS_AGE_KEY" ]; then
+            echo "$SOPS_AGE_KEY" > /tmp/age-key.txt
+            echo "SOPS_AGE_KEY_FILE=/tmp/age-key.txt" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build and test ${{ matrix.agent }}@${{ matrix.version }}
+        run: make test-agent AGENT=${{ matrix.agent }} AGENT_VERSION=${{ matrix.version }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: results-${{ matrix.agent }}-${{ matrix.version }}
+          path: test-results/runs/
+
+  report:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: results-*
+          merge-multiple: true
+          path: test-results/runs/
+
+      - name: Generate compatibility matrix
+        run: |
+          go run ./cmd/gen-compat-matrix \
+            --input test-results/ \
+            --html docs/compatibility.html \
+            --gfm >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-matrix
+          path: docs/compatibility.html

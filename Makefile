@@ -261,6 +261,47 @@ beads-setup: ## Bootstrap beads issue tracking (shared Dolt server + JSONL impor
 	@echo ""
 	@echo "Beads setup complete. Run 'bd list --status=open' to see issues."
 
+# Multi-agent compatibility testing (Docker-based clean-room environments)
+SOPS_AGE_KEY_FILE ?= $(HOME)/.config/sageox/test-age-key.txt
+AGENT ?= claude-code
+AGENT_VERSION ?= latest
+VERSIONS ?= 5
+FEATURE ?=
+
+test-env-base: ## Build base Docker image for agent testing
+	docker build -f test-envs/base.Dockerfile -t ox-test-base .
+
+test-env: test-env-base ## Build agent-specific test container (AGENT=claude-code AGENT_VERSION=latest)
+	docker build -f test-envs/$(AGENT).Dockerfile \
+		--build-arg AGENT_VERSION=$(AGENT_VERSION) \
+		--build-arg CACHE_BUST=$$(date +%Y%m%d) \
+		-t ox-test-$(AGENT):$(AGENT_VERSION) .
+
+test-agent: test-env ## Run integration tests in agent container (AGENT=claude-code FEATURE=Prime)
+	docker run --rm \
+		$$([ -f "$(SOPS_AGE_KEY_FILE)" ] && SOPS_AGE_KEY_FILE=$(SOPS_AGE_KEY_FILE) ./test-envs/decrypt-env.sh 2>/dev/null || true) \
+		ox-test-$(AGENT):$(AGENT_VERSION) \
+		-tags integration \
+		$(if $(FEATURE),-run "Test$(FEATURE)_",) \
+		-timeout 10m \
+		./tests/integration/...
+
+test-agent-matrix: ## Test last N versions of an agent (AGENT=claude-code VERSIONS=5)
+	@echo "Fetching last $(VERSIONS) versions for $(AGENT)..."
+	@for v in $$(./test-envs/agent-versions.sh $(AGENT) $(VERSIONS)); do \
+		echo "Testing $(AGENT)@$$v"; \
+		$(MAKE) test-agent AGENT=$(AGENT) AGENT_VERSION=$$v & \
+	done; wait
+	@echo "Results in test-results/runs/"
+
+test-agent-all: ## All agents × last N versions (parallel)
+	@for agent in claude-code codex gemini amp pi opencode code-puppy; do \
+		$(MAKE) test-agent-matrix AGENT=$$agent VERSIONS=$(VERSIONS) & \
+	done; wait
+
+compat-matrix: ## Generate HTML compatibility matrix from committed results
+	go run ./cmd/gen-compat-matrix --input test-results/ --html docs/compatibility.html --gfm -
+
 # Version management
 bump-version: ## Bump version across all files (usage: make bump-version NEW_VERSION=0.10.0)
 	@if [ -z "$(NEW_VERSION)" ]; then \

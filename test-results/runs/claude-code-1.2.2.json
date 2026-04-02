@@ -1,0 +1,16 @@
+{
+  "run_id": "run-claude-002",
+  "timestamp": "2026-03-15T10:00:00Z",
+  "ox_version": "0.9.0",
+  "agent": "claude-code",
+  "agent_version": "1.2.2",
+  "results": [
+    {"feature_group": "context-prime",      "test_count": 5, "passed": 5, "failed": 0, "skipped": 0, "duration_ms": 1310},
+    {"feature_group": "session-recording",  "test_count": 8, "passed": 7, "failed": 1, "skipped": 0, "duration_ms": 3250},
+    {"feature_group": "whispers",           "test_count": 4, "passed": 4, "failed": 0, "skipped": 0, "duration_ms": 910},
+    {"feature_group": "friction-telemetry", "test_count": 6, "passed": 6, "failed": 0, "skipped": 0, "duration_ms": 1490},
+    {"feature_group": "team-context",       "test_count": 7, "passed": 7, "failed": 0, "skipped": 0, "duration_ms": 2200},
+    {"feature_group": "ledger-sync",        "test_count": 5, "passed": 4, "failed": 1, "skipped": 0, "duration_ms": 4500},
+    {"feature_group": "hooks",              "test_count": 3, "passed": 3, "failed": 0, "skipped": 0, "duration_ms": 580}
+  ]
+}

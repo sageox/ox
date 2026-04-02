@@ -1,0 +1,54 @@
+# Git and version control
+.git/
+.gitignore
+
+# Build artifacts and cache
+.beads/
+target/
+dist/
+build/
+*.tmp
+*.log
+
+# Test results and coverage
+test-results/
+coverage.out
+*.test
+*.prof
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Local development files
+.env
+.env.local
+*.local
+
+# Documentation build artifacts
+docs/_site/
+docs/.jekyll-cache/
+
+# Package manager artifacts
+node_modules/
+vendor/
+
+# Temporary directories
+tmp/
+temp/
+
+# SageOx local data (keep build context small)
+.sageox/
+_sageox/
+
+# Docker itself
+Dockerfile*
+.dockerignore
+docker-compose*.yml
