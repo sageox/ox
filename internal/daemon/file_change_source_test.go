@@ -197,10 +197,33 @@ func TestFormatLargeChanges(t *testing.T) {
 	}
 	content := formatLargeChanges(changes)
 	assert.Contains(t, content, "30 files")
-	assert.Contains(t, content, "pkg0/(10)")
+	assert.Contains(t, content, "pkg0/(10M)")
 }
 
-func TestFormatHugeChanges(t *testing.T) {
+// TestFormatLargeChanges_MixedTypes verifies change types are shown per directory.
+// Failure prevented: large refactors show only counts, losing signal about adds vs deletes.
+func TestFormatLargeChanges_MixedTypes(t *testing.T) {
+	changes := []FileChange{
+		{Path: "cmd/ox/new.go", ChangeType: ChangeCreated},
+		{Path: "cmd/ox/old.go", ChangeType: ChangeDeleted},
+		{Path: "cmd/ox/main.go", ChangeType: ChangeModified},
+		{Path: "cmd/ox/root.go", ChangeType: ChangeModified},
+	}
+	// pad to >20 with other dirs
+	for i := range 20 {
+		changes = append(changes, FileChange{
+			Path:       fmt.Sprintf("internal/pkg%d/file.go", i),
+			ChangeType: ChangeModified,
+		})
+	}
+	content := formatLargeChanges(changes)
+	assert.Contains(t, content, "24 files")
+	assert.Contains(t, content, "cmd/ox/(2M,1A,1D)")
+}
+
+// TestFormatLargeChanges_HugeCount routes 200+ files through the same formatter.
+// Failure prevented: huge change sets still produce actionable dir-level summaries.
+func TestFormatLargeChanges_HugeCount(t *testing.T) {
 	var changes []FileChange
 	for i := range 200 {
 		changes = append(changes, FileChange{
@@ -208,8 +231,10 @@ func TestFormatHugeChanges(t *testing.T) {
 			ChangeType: ChangeModified,
 		})
 	}
-	content := formatHugeChanges(changes)
-	assert.Equal(t, "200 files across 10 dirs", content)
+	content := formatLargeChanges(changes)
+	assert.Contains(t, content, "200 files")
+	assert.Contains(t, content, "20M")     // each dir has 20 modified
+	assert.Contains(t, content, "+5 dirs") // top 5 shown, 5 remaining
 }
 
 func TestFormatFileChangeMurmur_IncludesBranchAndWorktree(t *testing.T) {
@@ -354,13 +379,6 @@ func TestIsFileChangeNoise(t *testing.T) {
 			assert.Equal(t, tt.noise, got, "isFileChangeNoise(%q)", tt.path)
 		})
 	}
-}
-
-// TestMaxMurmurableFiles verifies the constant is reasonable.
-// Failure prevented: accidental change to threshold silently suppresses all murmurs.
-func TestMaxMurmurableFiles(t *testing.T) {
-	assert.True(t, maxMurmurableFiles >= 5, "threshold too low — would suppress most real work")
-	assert.True(t, maxMurmurableFiles <= 50, "threshold too high — bulk noise would leak through")
 }
 
 // TestFilterFileChangeNoise verifies the batch filter removes noise and keeps real changes.
