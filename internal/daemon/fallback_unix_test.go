@@ -167,8 +167,12 @@ func TestKillStaleDaemon_StopAckedPidAlive(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
 
-	// start a child process whose cmdline contains "ox" and "daemon"
-	child := exec.Command("bash", "-c", "exec -a 'ox daemon start --foreground' sleep 300")
+	// start a child process whose /proc/<pid>/cmdline contains "ox" and "daemon".
+	// exec -a sets argv[0] but Linux /proc/cmdline shows the actual binary path,
+	// so we create a script whose filename satisfies isOxDaemonProcess.
+	fakeOxDaemon := filepath.Join(tmpDir, "ox-daemon-fake")
+	require.NoError(t, os.WriteFile(fakeOxDaemon, []byte("#!/bin/sh\ntrap 'exit 0' TERM\nwhile true; do sleep 1; done\n"), 0755))
+	child := exec.Command(fakeOxDaemon)
 	require.NoError(t, child.Start())
 	childPID := child.Process.Pid
 	childDone := make(chan struct{})
@@ -245,9 +249,12 @@ func TestKillStaleDaemon_AliveButUnreachable(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
 
-	// start a child process whose cmdline contains "ox" and "daemon"
-	// so isOxDaemonProcess returns true
-	child := exec.Command("bash", "-c", "exec -a 'ox daemon start --foreground' sleep 300")
+	// start a child process whose /proc/<pid>/cmdline contains "ox" and "daemon".
+	// exec -a sets argv[0] but Linux /proc/cmdline shows the actual binary path,
+	// so we create a script whose filename satisfies isOxDaemonProcess.
+	fakeOxDaemon := filepath.Join(tmpDir, "ox-daemon-fake")
+	require.NoError(t, os.WriteFile(fakeOxDaemon, []byte("#!/bin/sh\ntrap 'exit 0' TERM\nwhile true; do sleep 1; done\n"), 0755))
+	child := exec.Command(fakeOxDaemon)
 	require.NoError(t, child.Start())
 	childPID := child.Process.Pid
 	// reap child in background so it doesn't become zombie after SIGTERM
