@@ -152,11 +152,13 @@ func TestFaultDaemon_Fast_ConnectionCount(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	assert.Equal(t, int64(0), d.ConnectionCount())
+	// baseline accounts for the probe connection from AwaitUnixSocket in Start()
+	time.Sleep(10 * time.Millisecond)
+	baseline := d.ConnectionCount()
 	_ = daemon.IsHealthy()
-	assert.Equal(t, int64(1), d.ConnectionCount())
+	assert.Equal(t, baseline+1, d.ConnectionCount())
 	_ = daemon.IsHealthy()
-	assert.Equal(t, int64(2), d.ConnectionCount())
+	assert.Equal(t, baseline+2, d.ConnectionCount())
 }
 
 func TestFaultDaemon_Fast_ResponseTooLarge(t *testing.T) {

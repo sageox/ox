@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/sageox/ox/internal/daemon"
 )
 
@@ -144,37 +146,19 @@ func StartTestDaemon(t *testing.T, tmpDir string) (cleanup func()) {
 	}()
 
 	// wait for daemon to be fully ready (both lock acquired AND IPC server listening)
-	var ready bool
-	var lastErr error
-startupLoop:
-	for i := 0; i < 50; i++ { // 5 seconds max
-		time.Sleep(100 * time.Millisecond)
-
+	require.Eventually(t, func() bool {
 		// check for early failure
 		select {
 		case err := <-errChan:
-			lastErr = err
-			break startupLoop
+			require.NoError(t, err, "daemon failed to start")
+			return false
 		default:
 		}
 
 		// check if we can actually connect (not just lock acquired)
-		client := daemon.TryConnect()
-		if client != nil {
-			ready = true
-			break
-		}
-	}
-
-	if lastErr != nil {
-		cancel()
-		t.Fatalf("daemon failed to start: %v", lastErr)
-	}
-
-	if !ready {
-		cancel()
-		t.Fatalf("daemon failed to start within timeout (socket: %s)", daemon.SocketPath())
-	}
+		return daemon.TryConnect() != nil
+	}, 5*time.Second, 10*time.Millisecond,
+		"daemon failed to start within timeout (socket: %s)", daemon.SocketPath())
 
 	return func() {
 		cancel()
@@ -274,7 +258,7 @@ func (m *MockDaemon) Start(t *testing.T) {
 	}()
 
 	// wait for listener to be ready
-	time.Sleep(50 * time.Millisecond)
+	AwaitUnixSocket(t, daemon.SocketPath())
 }
 
 // Stop stops the mock daemon.
@@ -533,13 +517,10 @@ func WaitForDaemon(t *testing.T, timeout time.Duration) error {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if daemon.IsRunning() {
-			client := daemon.TryConnect()
-			if client != nil {
-				return nil
-			}
+		if daemon.IsRunning() && daemon.TryConnect() != nil {
+			return nil
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 	}
 	return fmt.Errorf("daemon not available within %v", timeout)
 }

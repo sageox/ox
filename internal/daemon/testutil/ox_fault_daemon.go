@@ -94,7 +94,7 @@ func (d *OxFaultDaemon) Start() {
 		d.t.Fatalf("failed to start ox fault daemon: %v", err)
 	}
 	// wait for socket to be ready
-	time.Sleep(50 * time.Millisecond)
+	AwaitUnixSocket(d.t, d.SocketPath())
 }
 
 // SetOxConfig updates the ox-specific configuration.

@@ -95,6 +95,20 @@ func sendRequest(socketPath string, reqType string, timeout time.Duration) (*sim
 	return &resp, nil
 }
 
+// awaitSocket polls until a unix socket accepts connections.
+func awaitSocket(t *testing.T, socketPath string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		conn, err := net.Dial("unix", socketPath)
+		if err != nil {
+			return false
+		}
+		conn.Close()
+		return true
+	}, 5*time.Second, 5*time.Millisecond,
+		"unix socket never became ready: %s", socketPath)
+}
+
 // =============================================================================
 // FAST TESTS
 // =============================================================================
@@ -105,7 +119,7 @@ func TestFaultDaemon_Healthy(t *testing.T) {
 	defer d.Stop()
 
 	// wait for socket
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	resp, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 	require.NoError(t, err)
@@ -118,7 +132,7 @@ func TestFaultDaemon_CloseImmediately(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	_, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 	assert.Error(t, err)
@@ -129,7 +143,7 @@ func TestFaultDaemon_CloseAfterRead(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	_, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 	assert.Error(t, err)
@@ -140,7 +154,7 @@ func TestFaultDaemon_CorruptResponse(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	_, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 	assert.Error(t, err, "should fail to parse corrupt response")
@@ -151,7 +165,7 @@ func TestFaultDaemon_PanicInHandler(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	_, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 	assert.Error(t, err)
@@ -162,7 +176,7 @@ func TestFaultDaemon_MultipleResponses(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	// first response should be valid
 	resp, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
@@ -180,7 +194,7 @@ func TestFaultDaemon_InvalidJSON(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	_, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 	assert.Error(t, err)
@@ -191,7 +205,7 @@ func TestFaultDaemon_EmbeddedNewlines(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	resp, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 	require.NoError(t, err, "JSON with escaped newlines should work")
@@ -203,7 +217,7 @@ func TestFaultDaemon_RefuseAfterAccept(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	_, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 	assert.Error(t, err)
@@ -214,13 +228,15 @@ func TestFaultDaemon_ConnectionCount(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
-	assert.Equal(t, int64(0), d.ConnectionCount())
+	// let awaitSocket probe connection be fully counted before reading baseline
+	time.Sleep(10 * time.Millisecond)
+	baseline := d.ConnectionCount()
 	_, _ = sendRequest(socketPath, "ping", 100*time.Millisecond)
-	assert.Equal(t, int64(1), d.ConnectionCount())
+	assert.Equal(t, baseline+1, d.ConnectionCount())
 	_, _ = sendRequest(socketPath, "ping", 100*time.Millisecond)
-	assert.Equal(t, int64(2), d.ConnectionCount())
+	assert.Equal(t, baseline+2, d.ConnectionCount())
 }
 
 func TestFaultDaemon_CallTracking(t *testing.T) {
@@ -228,7 +244,7 @@ func TestFaultDaemon_CallTracking(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	assert.Len(t, d.GetCalls(), 0)
 
@@ -261,7 +277,7 @@ func TestFaultDaemon_FaultMatcher(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	// ping should work (fault doesn't apply)
 	resp, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
@@ -278,7 +294,7 @@ func TestFaultDaemon_SetFault(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	// healthy first
 	resp, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
@@ -330,7 +346,7 @@ func TestFaultDaemon_HangOnAccept(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	_, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 	assert.Error(t, err)
@@ -345,7 +361,7 @@ func TestFaultDaemon_HangBeforeResponse(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	_, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 	assert.Error(t, err)
@@ -363,7 +379,7 @@ func TestFaultDaemon_SlowResponse_UnderTimeout(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	resp, err := sendRequest(socketPath, "ping", 200*time.Millisecond)
 	require.NoError(t, err)
@@ -382,7 +398,7 @@ func TestFaultDaemon_SlowResponse_OverTimeout(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	_, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 	assert.Error(t, err)
@@ -397,7 +413,7 @@ func TestFaultDaemon_PartialResponse(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	_, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 	assert.Error(t, err)
@@ -412,7 +428,7 @@ func TestFaultDaemon_ResponseWithoutNewline(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	_, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 	assert.Error(t, err)
@@ -427,7 +443,7 @@ func TestFaultDaemon_ChunkedResponse(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	resp, err := sendRequest(socketPath, "ping", 500*time.Millisecond)
 	require.NoError(t, err, "chunked response should be handled by bufio")
@@ -446,6 +462,8 @@ func TestFaultDaemon_FlakyConnection(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
+	// use fixed sleep instead of awaitSocket: DropEveryN uses connCount,
+	// and awaitSocket's probe connection would shift the drop pattern
 	time.Sleep(50 * time.Millisecond)
 
 	resp, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
@@ -469,7 +487,7 @@ func TestFaultDaemon_WriteHalfThenHang(t *testing.T) {
 	require.NoError(t, d.Start())
 	defer d.Stop()
 
-	time.Sleep(50 * time.Millisecond)
+	awaitSocket(t, socketPath)
 
 	_, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 	assert.Error(t, err)
@@ -514,7 +532,7 @@ func TestAllFaults(t *testing.T) {
 			require.NoError(t, d.Start())
 			defer d.Stop()
 
-			time.Sleep(50 * time.Millisecond)
+			awaitSocket(t, socketPath)
 
 			_, err := sendRequest(socketPath, "ping", 100*time.Millisecond)
 
