@@ -1,4 +1,4 @@
-# ADR-007: Shared Package Structure for NDJSON, Protocol Types, and Progress
+# ADR-014: Shared Package Structure for NDJSON, Protocol Types, and Progress
 
 - **Status:** Proposed
 - **Date:** 2026-04-02

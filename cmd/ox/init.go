@@ -13,6 +13,8 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/constants"
@@ -1649,6 +1651,29 @@ func installAgentHooks(gitRoot string, quiet bool) []string {
 				}
 				installedHooks = append(installedHooks, ".opencode/plugin/ox-prime.ts")
 			}
+		}
+	}
+
+	// discover external adapter binaries and install hooks for agents beyond
+	// Claude Code / OpenCode (e.g., gemini, codex). only adapters that declare
+	// the hook_installer capability are asked — session-only adapters are skipped.
+	externalAdapters := adapters.DiscoverExternalAdapters()
+	for _, ea := range externalAdapters {
+		if !ea.HasCapability(adapterprotocol.CapHookInstaller) {
+			continue
+		}
+		result, err := ea.InstallHooks(gitRoot, "project")
+		if err != nil {
+			if !quiet {
+				cli.PrintWarning(fmt.Sprintf("Could not install %s hooks: %v", ea.Name(), err))
+			}
+			continue
+		}
+		if result.Installed {
+			if !quiet {
+				cli.PrintSuccess(fmt.Sprintf("Installed %s hooks", ea.Name()))
+			}
+			installedHooks = append(installedHooks, result.FilesWritten...)
 		}
 	}
 

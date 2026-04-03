@@ -495,7 +495,7 @@ func runOxHook(t *testing.T, oxBin string, env e2eEnv, agentID, event, sessionID
 }
 
 // createClaudeSourceFile creates a fake Claude Code JSONL file at the path
-// the ClaudeCodeAdapter.FindSessionFile would look for it.
+// the claude-code adapter's FindSessionFile would look for it.
 func createClaudeSourceFile(t *testing.T, env e2eEnv) string {
 	t.Helper()
 	return createClaudeSourceFileNamed(t, env, "session.jsonl")

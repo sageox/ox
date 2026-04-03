@@ -53,6 +53,11 @@ type AdapterStatus struct {
 }
 
 // AdapterProcess tracks a single long-lived adapter serve-mode process.
+//
+// Lock order: AdapterSupervisor.mu before AdapterProcess.mu when both needed.
+// Violating this order risks deadlock between concurrent request dispatch
+// (which holds supervisor lock while selecting a process) and process restart
+// (which holds process lock while updating supervisor state).
 type AdapterProcess struct {
 	adapterType  string
 	binaryPath   string
@@ -198,7 +203,10 @@ func (s *AdapterSupervisor) sendRequestLocked(ctx context.Context, proc *Adapter
 		return nil, fmt.Errorf("%w: write failed: %w", ErrAdapterCrashed, err)
 	}
 
-	// read response; respects context cancellation via a goroutine
+	// Read response; respects context cancellation via a goroutine.
+	// Known leak: if the context is canceled, this goroutine blocks on Scan()
+	// until the adapter process exits (closing stdout). This is bounded — at most
+	// one leaked goroutine per canceled request, all cleared on adapter restart.
 	type scanResult struct {
 		ok  bool
 		err error
@@ -735,26 +743,4 @@ func (r *stderrRingBuffer) Lines() []string {
 	}
 
 	return result
-}
-
-// limitedWriter captures up to max bytes, discarding the rest.
-// Used for adapter stderr to avoid unbounded memory from noisy processes.
-type limitedWriter struct {
-	buf []byte
-	max int
-}
-
-func (w *limitedWriter) Write(p []byte) (int, error) {
-	remaining := w.max - len(w.buf)
-	if remaining > 0 {
-		if len(p) > remaining {
-			p = p[:remaining]
-		}
-		w.buf = append(w.buf, p...)
-	}
-	return len(p), nil // always report success to avoid breaking the subprocess
-}
-
-func (w *limitedWriter) String() string {
-	return string(w.buf)
 }

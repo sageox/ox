@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
+	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
 // regex patterns for stripping system-injected tags from user content
@@ -317,6 +318,12 @@ func findStartOffset(path string, sinceTime time.Time) int64 {
 
 // --- line parsing ---
 
+// parseTS converts a raw timestamp string to time.Time for use with entry constructors.
+func parseTS(s string) time.Time {
+	t, _ := time.Parse(time.RFC3339Nano, s)
+	return t
+}
+
 func parseLine(line []byte) ([]adapterprotocol.RawEntry, error) {
 	var raw claudeCodeEntry
 	if err := json.Unmarshal(line, &raw); err != nil {
@@ -341,10 +348,7 @@ func parseLine(line []byte) ([]adapterprotocol.RawEntry, error) {
 }
 
 func parseUserEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
-	entry := adapterprotocol.RawEntry{}
-	if raw.Timestamp != "" {
-		entry.Timestamp = raw.Timestamp
-	}
+	ts := parseTS(raw.Timestamp)
 
 	if raw.IsMeta {
 		content := extractRawUserText(raw)
@@ -352,9 +356,7 @@ func parseUserEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
 		if cleaned == "" {
 			cleaned = content
 		}
-		entry.Role = "system"
-		entry.Content = cleaned
-		return []adapterprotocol.RawEntry{entry}, nil
+		return []adapterprotocol.RawEntry{adapterruntime.SystemEntry(ts, cleaned)}, nil
 	}
 
 	content, class := classifyUserContent(raw)
@@ -362,12 +364,10 @@ func parseUserEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
 	case userContentSkip:
 		return nil, nil
 	case userContentSystem:
-		entry.Role = "system"
+		return []adapterprotocol.RawEntry{adapterruntime.SystemEntry(ts, content)}, nil
 	default:
-		entry.Role = "user"
+		return []adapterprotocol.RawEntry{adapterruntime.UserEntry(ts, content)}, nil
 	}
-	entry.Content = content
-	return []adapterprotocol.RawEntry{entry}, nil
 }
 
 func parseAssistantEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
@@ -381,6 +381,7 @@ func parseAssistantEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, erro
 		return nil, nil
 	}
 
+	ts := parseTS(raw.Timestamp)
 	for _, item := range content {
 		block, ok := item.(map[string]interface{})
 		if !ok {
@@ -392,22 +393,13 @@ func parseAssistantEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, erro
 		case "text":
 			text, _ := block["text"].(string)
 			if text != "" {
-				entries = append(entries, adapterprotocol.RawEntry{
-					Timestamp: raw.Timestamp,
-					Role:      "assistant",
-					Content:   text,
-				})
+				entries = append(entries, adapterruntime.AssistantEntry(ts, text))
 			}
 		case "tool_use":
 			toolName, _ := block["name"].(string)
 			input := block["input"]
 			inputJSON, _ := json.Marshal(input)
-			entries = append(entries, adapterprotocol.RawEntry{
-				Timestamp: raw.Timestamp,
-				Role:      "tool",
-				ToolName:  toolName,
-				ToolInput: string(inputJSON),
-			})
+			entries = append(entries, adapterruntime.ToolUseEntry(ts, toolName, string(inputJSON)))
 		}
 	}
 

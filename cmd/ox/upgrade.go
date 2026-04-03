@@ -151,11 +151,26 @@ func upgradeViaHomebrew(quiet bool) error {
 	return cmd.Run()
 }
 
+// adapterPackages are the go install targets for bundled adapter binaries.
+// these must be upgraded alongside ox to keep protocol versions in sync.
+var adapterPackages = []string{
+	"github.com/sageox/ox/cmd/ox-adapter-claude-code",
+	"github.com/sageox/ox/cmd/ox-adapter-gemini",
+	"github.com/sageox/ox/cmd/ox-adapter-codex",
+	"github.com/sageox/ox/cmd/ox-adapter-amp",
+	"github.com/sageox/ox/cmd/ox-adapter-opencode",
+}
+
 func upgradeViaGoInstall(quiet bool) error {
-	if !quiet {
-		fmt.Printf("%s go install github.com/sageox/ox/cmd/ox@latest\n", cli.StyleDim.Render("Running:"))
+	// install ox and all bundled adapters in one invocation
+	args := []string{"install", "github.com/sageox/ox/cmd/ox@latest"}
+	for _, pkg := range adapterPackages {
+		args = append(args, pkg+"@latest")
 	}
-	cmd := exec.Command("go", "install", "github.com/sageox/ox/cmd/ox@latest")
+	if !quiet {
+		fmt.Printf("%s go %s\n", cli.StyleDim.Render("Running:"), strings.Join(args, " "))
+	}
+	cmd := exec.Command("go", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

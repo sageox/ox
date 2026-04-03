@@ -10,6 +10,10 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+// debounceDelay is the time to wait after the last write event before reading
+// the file. This prevents reading partial writes when multiple events fire rapidly.
+const debounceDelay = 100 * time.Millisecond
+
 // ParseLineFunc converts a raw JSONL line into zero or more RawEntries.
 // Each adapter provides its own implementation.
 type ParseLineFunc func([]byte) ([]RawEntry, error)

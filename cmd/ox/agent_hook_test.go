@@ -85,6 +85,9 @@ func TestRunAgentHook_NoArgs(t *testing.T) {
 func setupHandleAfterToolTest(t *testing.T) (projectRoot string, agentID string, sourceFile string) {
 	t.Helper()
 
+	adapters.Register(&testClaudeCodeAdapter{})
+	t.Cleanup(func() { adapters.Unregister("claude-code") })
+
 	cacheDir := t.TempDir()
 	projectRoot = t.TempDir()
 
@@ -274,6 +277,9 @@ func TestHandleAfterTool_TimestampBoundary(t *testing.T) {
 // has entries from a prior conversation when ox starts recording. Without
 // StartOffset, those pre-existing entries leak into the new session's raw.jsonl.
 func TestHandleAfterTool_PreStartContentLeak_ByOffset(t *testing.T) {
+	adapters.Register(&testClaudeCodeAdapter{})
+	t.Cleanup(func() { adapters.Unregister("claude-code") })
+
 	cacheDir := t.TempDir()
 	projectRoot := t.TempDir()
 

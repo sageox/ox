@@ -186,6 +186,80 @@ func TestAdapterDirs_IncludesEnvPath(t *testing.T) {
 	}
 }
 
+// --- fallthrough discovery tests ---
+
+// TestDetectAdapter_FallsThrough verifies DetectAdapter discovers external
+// adapters when no registered adapter matches.
+// Failure prevented: external-only adapters invisible to session detection.
+func TestDetectAdapter_FallsThrough(t *testing.T) {
+	ResetRegistry()
+	defer ResetRegistry()
+
+	// create an external adapter that detects
+	dir := t.TempDir()
+	script := `#!/bin/sh
+case "$1" in
+  info) echo '{"protocol_version":1,"name":"ext-detect","display_name":"Ext","version":"0.1.0","type":"session","capabilities":["session_reader"]}' ;;
+  detect) echo '{"detected":true,"reason":"test"}' ;;
+esac`
+	if err := os.WriteFile(filepath.Join(dir, "ox-adapter-ext-detect"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OX_ADAPTER_PATH", dir)
+
+	adapter, err := DetectAdapter()
+	if err != nil {
+		t.Fatalf("DetectAdapter: %v", err)
+	}
+	if adapter.Name() != "ext-detect" {
+		t.Errorf("Name = %q, want ext-detect", adapter.Name())
+	}
+}
+
+// TestGetAdapter_FallsThrough verifies GetAdapter discovers external
+// adapters when the name isn't in the registry.
+// Failure prevented: `ox session stop --adapter=gemini` fails when gemini
+// is only available as an external adapter binary.
+func TestGetAdapter_FallsThrough(t *testing.T) {
+	ResetRegistry()
+	defer ResetRegistry()
+
+	dir := t.TempDir()
+	script := `#!/bin/sh
+echo '{"protocol_version":1,"name":"ext-get","display_name":"Ext","version":"0.1.0","type":"session","capabilities":["session_reader"]}'`
+	if err := os.WriteFile(filepath.Join(dir, "ox-adapter-ext-get"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OX_ADAPTER_PATH", dir)
+
+	adapter, err := GetAdapter("ext-get")
+	if err != nil {
+		t.Fatalf("GetAdapter: %v", err)
+	}
+	if adapter.Name() != "ext-get" {
+		t.Errorf("Name = %q, want ext-get", adapter.Name())
+	}
+}
+
+// TestGetAdapter_NoFallthroughWhenRegistered verifies GetAdapter returns
+// registered adapters without triggering external discovery.
+func TestGetAdapter_NoFallthroughWhenRegistered(t *testing.T) {
+	ResetRegistry()
+	defer ResetRegistry()
+
+	Register(&discoveryMockAdapter{name: "already-here"})
+	// set adapter path to empty dir to verify no discovery happens
+	t.Setenv("OX_ADAPTER_PATH", t.TempDir())
+
+	adapter, err := GetAdapter("already-here")
+	if err != nil {
+		t.Fatalf("GetAdapter: %v", err)
+	}
+	if adapter.Name() != "already-here" {
+		t.Errorf("Name = %q, want already-here", adapter.Name())
+	}
+}
+
 // discoveryMockAdapter is a minimal Adapter for testing registry priority.
 // Named differently from mockAdapter in adapter_test.go to avoid redeclaration.
 type discoveryMockAdapter struct {

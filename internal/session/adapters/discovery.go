@@ -131,13 +131,19 @@ func DiscoverExternalAdapters() []*ExternalAdapter {
 // RegisterExternalAdapters discovers and registers external adapters.
 // External adapters with the same name as a built-in adapter take priority:
 // the built-in is unregistered and the external adapter replaces it.
+// This allows users to override built-in parsing logic by dropping a newer
+// adapter binary into a controlled directory (see ADR-006 for allowed paths).
+//
+// Safe to call multiple times — rediscovery is idempotent since the same
+// binary produces the same adapter name.
 func RegisterExternalAdapters() error {
 	adapters := DiscoverExternalAdapters()
 
 	for _, ea := range adapters {
 		name := ea.Name()
 
-		// check if a built-in adapter with the same name exists
+		// external takes priority over built-in: the external binary is presumably
+		// a newer or more capable version of the same adapter.
 		registryMu.Lock()
 		if _, exists := registry[name]; exists {
 			slog.Info("external adapter supersedes built-in",

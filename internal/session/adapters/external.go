@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/ndjson"
 )
@@ -178,10 +179,89 @@ func (ea *ExternalAdapter) ReadMetadata(sessionPath string) (*SessionMetadata, e
 	}, nil
 }
 
-// Watch is not supported for external adapters in one-shot mode.
-// The daemon uses serve-mode push events instead.
-func (ea *ExternalAdapter) Watch(_ context.Context, _ string) (<-chan RawEntry, error) {
-	return nil, ErrWatchNotSupported
+// Watch monitors a session file for new entries using fsnotify and ReadFromOffset.
+// On each file change (debounced), calls ReadFromOffset to get new entries parsed
+// by the external adapter binary.
+func (ea *ExternalAdapter) Watch(ctx context.Context, sessionPath string) (<-chan RawEntry, error) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := watcher.Add(sessionPath); err != nil {
+		watcher.Close()
+		return nil, err
+	}
+
+	// start at current file size so we only emit new entries
+	var offset int64
+	if fi, err := os.Stat(sessionPath); err == nil {
+		offset = fi.Size()
+	}
+
+	ch := make(chan RawEntry, 100)
+
+	go func() {
+		defer close(ch)
+		defer watcher.Close()
+
+		const debounceDelay = 100 * time.Millisecond
+		debounceTimer := time.NewTimer(0)
+		if !debounceTimer.Stop() {
+			<-debounceTimer.C
+		}
+		pendingRead := false
+
+		for {
+			select {
+			case <-ctx.Done():
+				debounceTimer.Stop()
+				return
+
+			case <-debounceTimer.C:
+				if pendingRead {
+					entries, newOffset, err := ea.ReadFromOffset(sessionPath, offset)
+					if err == nil && len(entries) > 0 {
+						offset = newOffset
+						for _, entry := range entries {
+							select {
+							case ch <- entry:
+							case <-ctx.Done():
+								return
+							}
+						}
+					} else if err == nil {
+						offset = newOffset
+					}
+					pendingRead = false
+				}
+
+			case event, ok := <-watcher.Events:
+				if !ok {
+					debounceTimer.Stop()
+					return
+				}
+				if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
+					pendingRead = true
+					if !debounceTimer.Stop() {
+						select {
+						case <-debounceTimer.C:
+						default:
+						}
+					}
+					debounceTimer.Reset(debounceDelay)
+				}
+
+			case _, ok := <-watcher.Errors:
+				if !ok {
+					debounceTimer.Stop()
+					return
+				}
+			}
+		}
+	}()
+
+	return ch, nil
 }
 
 // ReadFromOffset implements IncrementalReader via one-shot subprocess call.
@@ -241,6 +321,21 @@ func (ea *ExternalAdapter) InstallHooks(repoRoot, scope string) (*adapterprotoco
 	}
 
 	var result adapterprotocol.InstallHooksResponse
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+	}
+
+	return &result, nil
+}
+
+// UninstallHooks calls the adapter's uninstall-hooks subcommand.
+func (ea *ExternalAdapter) UninstallHooks(repoRoot, scope string) (*adapterprotocol.UninstallHooksResponse, error) {
+	out, err := ea.execOneShot("uninstall-hooks", "--repo-root", repoRoot, "--scope", scope)
+	if err != nil {
+		return nil, err
+	}
+
+	var result adapterprotocol.UninstallHooksResponse
 	if err := json.Unmarshal(out, &result); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
 	}
@@ -441,7 +536,8 @@ func (ea *ExternalAdapter) nextSeqLocked() int {
 }
 
 // hasCapability checks if the adapter declares a specific capability.
-func (ea *ExternalAdapter) hasCapability(cap string) bool {
+// HasCapability returns true if the adapter reports the given capability.
+func (ea *ExternalAdapter) HasCapability(cap string) bool {
 	if ea.info == nil {
 		return false
 	}

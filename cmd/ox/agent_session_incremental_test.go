@@ -802,6 +802,9 @@ func TestRawJSONLHasEntries_MissingFile(t *testing.T) {
 }
 
 func TestFinalizeIncrementalSession_EmptySession(t *testing.T) {
+	adapters.Register(&testClaudeCodeAdapter{})
+	t.Cleanup(func() { adapters.Unregister("claude-code") })
+
 	projectRoot := setupIncrementalTest(t)
 	state := startTestRecording(t, projectRoot, "OxEmpty", "claude-code")
 

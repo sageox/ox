@@ -2,15 +2,16 @@ package agentwork
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 )
 
 func TestConvertStoredEntries(t *testing.T) {
@@ -35,7 +36,88 @@ func TestConvertStoredEntries(t *testing.T) {
 	}
 }
 
+// mockReadAdapter is a test adapter that reads simple JSONL files
+// with {"role":"...", "content":"...", "timestamp":"..."} lines.
+type mockReadAdapter struct{}
+
+func (m *mockReadAdapter) Name() string  { return "test-mock" }
+func (m *mockReadAdapter) Detect() bool  { return false }
+func (m *mockReadAdapter) FindSessionFile(_ string, _ time.Time) (string, error) {
+	return "", adapters.ErrSessionNotFound
+}
+func (m *mockReadAdapter) ReadMetadata(_ string) (*adapters.SessionMetadata, error) {
+	return nil, nil
+}
+func (m *mockReadAdapter) Watch(_ context.Context, _ string) (<-chan adapters.RawEntry, error) {
+	return nil, adapters.ErrWatchNotSupported
+}
+
+func (m *mockReadAdapter) Read(sessionPath string) ([]adapters.RawEntry, error) {
+	f, err := os.Open(sessionPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var entries []adapters.RawEntry
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var raw struct {
+			Role      string `json:"role"`
+			Content   string `json:"content"`
+			Timestamp string `json:"timestamp"`
+		}
+		if err := json.Unmarshal(line, &raw); err != nil {
+			continue
+		}
+		ts, _ := time.Parse(time.RFC3339, raw.Timestamp)
+		entries = append(entries, adapters.RawEntry{
+			Role:      raw.Role,
+			Content:   raw.Content,
+			Timestamp: ts,
+		})
+	}
+	return entries, scanner.Err()
+}
+
+// writeSimpleJSONL creates a simple JSONL source file with entries at the
+// given timestamps. Each timestamp gets a user+assistant pair.
+func writeSimpleJSONL(t *testing.T, path string, timestamps []time.Time) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	enc := json.NewEncoder(f)
+	for i, ts := range timestamps {
+		if err := enc.Encode(map[string]any{
+			"role":      "user",
+			"content":   "question " + string(rune('a'+i)),
+			"timestamp": ts.Format(time.RFC3339),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := enc.Encode(map[string]any{
+			"role":      "assistant",
+			"content":   "answer " + string(rune('a'+i)),
+			"timestamp": ts.Add(2 * time.Second).Format(time.RFC3339),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestRecoverRawFromSessionFile(t *testing.T) {
+	// register a mock adapter for test recovery
+	adapters.Register(&mockReadAdapter{})
+	t.Cleanup(func() { adapters.Unregister("test-mock") })
+
 	logger := slog.Default()
 
 	t.Run("recovers_from_valid_session_file", func(t *testing.T) {
@@ -46,14 +128,14 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 		// create source JSONL file
 		sourceFile := filepath.Join(t.TempDir(), "session.jsonl")
 		startedAt := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
-		writeClaudeCodeJSONL(t, sourceFile, []time.Time{
+		writeSimpleJSONL(t, sourceFile, []time.Time{
 			startedAt.Add(1 * time.Minute),
 			startedAt.Add(5 * time.Minute),
 		})
 
 		writeRecordingState(t, recPath, session.RecordingState{
 			AgentID:     "OxRCVR",
-			AdapterName: "claude-code",
+			AdapterName: "test-mock",
 			SessionFile: sourceFile,
 			StartedAt:   startedAt,
 		})
@@ -103,7 +185,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 
 		writeRecordingState(t, recPath, session.RecordingState{
 			AgentID:     "OxEMPT",
-			AdapterName: "claude-code",
+			AdapterName: "test-mock",
 			SessionFile: sourceFile,
 			StartedAt:   time.Now().Add(-2 * time.Hour),
 		})
@@ -120,7 +202,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 
 		writeRecordingState(t, recPath, session.RecordingState{
 			AgentID:     "OxMISS",
-			AdapterName: "claude-code",
+			AdapterName: "test-mock",
 			SessionFile: "/nonexistent/path/session.jsonl",
 			StartedAt:   time.Now().Add(-2 * time.Hour),
 		})
@@ -137,7 +219,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 
 		writeRecordingState(t, recPath, session.RecordingState{
 			AgentID:     "OxNOSF",
-			AdapterName: "claude-code",
+			AdapterName: "test-mock",
 			StartedAt:   time.Now().Add(-2 * time.Hour),
 		})
 
@@ -166,7 +248,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 		rawPath := filepath.Join(sessionDir, artifactRaw)
 
 		sourceFile := filepath.Join(t.TempDir(), "session.jsonl")
-		writeClaudeCodeJSONL(t, sourceFile, []time.Time{time.Now()})
+		writeSimpleJSONL(t, sourceFile, []time.Time{time.Now()})
 
 		writeRecordingState(t, recPath, session.RecordingState{
 			AgentID:     "OxUNKN",
@@ -187,7 +269,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 
 		sourceFile := filepath.Join(t.TempDir(), "session.jsonl")
 		startedAt := time.Date(2026, 1, 10, 10, 0, 0, 0, time.UTC)
-		writeClaudeCodeJSONL(t, sourceFile, []time.Time{
+		writeSimpleJSONL(t, sourceFile, []time.Time{
 			startedAt.Add(-10 * time.Minute), // before start — should be filtered
 			startedAt.Add(-5 * time.Minute),  // before start — should be filtered
 			startedAt.Add(1 * time.Minute),   // after start — should be kept
@@ -196,7 +278,7 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 
 		writeRecordingState(t, recPath, session.RecordingState{
 			AgentID:     "OxFLTR",
-			AdapterName: "claude-code",
+			AdapterName: "test-mock",
 			SessionFile: sourceFile,
 			StartedAt:   startedAt,
 		})
@@ -220,14 +302,14 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 
 		sourceFile := filepath.Join(t.TempDir(), "session.jsonl")
 		startedAt := time.Date(2026, 1, 10, 12, 0, 0, 0, time.UTC)
-		writeClaudeCodeJSONL(t, sourceFile, []time.Time{
+		writeSimpleJSONL(t, sourceFile, []time.Time{
 			startedAt.Add(-10 * time.Minute), // all before start
 			startedAt.Add(-5 * time.Minute),
 		})
 
 		writeRecordingState(t, recPath, session.RecordingState{
 			AgentID:     "OxNOAF",
-			AdapterName: "claude-code",
+			AdapterName: "test-mock",
 			SessionFile: sourceFile,
 			StartedAt:   startedAt,
 		})
@@ -236,48 +318,6 @@ func TestRecoverRawFromSessionFile(t *testing.T) {
 			t.Error("expected recovery to fail when all entries are before start time")
 		}
 	})
-}
-
-// writeClaudeCodeJSONL creates a Claude Code JSONL source file with entries at
-// the given timestamps. Each timestamp gets a user+assistant pair.
-func writeClaudeCodeJSONL(t *testing.T, path string, timestamps []time.Time) {
-	t.Helper()
-	f, err := os.Create(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-
-	enc := json.NewEncoder(f)
-	for i, ts := range timestamps {
-		// user message
-		user := map[string]any{
-			"type":      "user",
-			"timestamp": ts.Format(time.RFC3339),
-			"message": map[string]any{
-				"role":    "user",
-				"content": "question " + strings.Repeat("x", i),
-			},
-		}
-		if err := enc.Encode(user); err != nil {
-			t.Fatal(err)
-		}
-
-		// assistant message
-		assistant := map[string]any{
-			"type":      "assistant",
-			"timestamp": ts.Add(2 * time.Second).Format(time.RFC3339),
-			"message": map[string]any{
-				"role": "assistant",
-				"content": []map[string]any{
-					{"type": "text", "text": "answer " + strings.Repeat("y", i)},
-				},
-			},
-		}
-		if err := enc.Encode(assistant); err != nil {
-			t.Fatal(err)
-		}
-	}
 }
 
 // writeRecordingState writes a .recording.json with the given state fields.

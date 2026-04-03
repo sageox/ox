@@ -35,6 +35,16 @@ const (
 	CapSubagentController  = "subagent_controller"
 )
 
+// --- Entry roles ---
+
+// Role constants for RawEntry.Role field.
+const (
+	RoleUser      = "user"
+	RoleAssistant = "assistant"
+	RoleSystem    = "system"
+	RoleTool      = "tool"
+)
+
 // --- One-shot response types ---
 
 // InfoResponse is returned by the `info` subcommand.

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -70,32 +68,7 @@ func TestCodexAgent_SupportsHooksTrue(t *testing.T) {
 	t.Parallel()
 
 	codex := &CodexAgent{}
-	assert.True(t, codex.SupportsHooks(), "Codex supports hooks via .codex/hooks.json")
-}
-
-func TestCodexAgent_InstallUninstall(t *testing.T) {
-	tmpDir := t.TempDir()
-	codexDir := filepath.Join(tmpDir, ".codex")
-	require.NoError(t, os.MkdirAll(codexDir, 0755))
-
-	restoreCwd := changeToDir(t, tmpDir)
-	defer restoreCwd()
-
-	codex := &CodexAgent{}
-	assert.NoError(t, codex.Install(false))
-	assert.True(t, codex.HasHooks(false))
-	assert.NoError(t, codex.Uninstall(false))
-}
-
-func TestCodexAgent_ListReturnsProjectUser(t *testing.T) {
-	t.Parallel()
-
-	codex := &CodexAgent{}
-	status := codex.List()
-	_, hasProject := status["Project"]
-	_, hasUser := status["User"]
-	assert.True(t, hasProject, "Codex list should report Project status")
-	assert.True(t, hasUser, "Codex list should report User status")
+	assert.True(t, codex.SupportsHooks(), "Codex supports hooks via external adapter")
 }
 
 func TestAgentNames(t *testing.T) {

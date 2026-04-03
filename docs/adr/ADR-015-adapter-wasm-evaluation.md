@@ -1,4 +1,4 @@
-# ADR-008: WASM as Adapter Runtime — Evaluation and Deferral
+# ADR-015: WASM as Adapter Runtime — Evaluation and Deferral
 
 **Status**: Not adopted — deferred pending WASM Component Model maturity in Go toolchain
 **Date**: 2026-04-02

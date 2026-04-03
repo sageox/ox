@@ -1,9 +1,11 @@
 package adapters
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // fakeBinary creates a shell script that echoes canned responses.
@@ -214,7 +216,58 @@ func TestExternalAdapter_Diagnose(t *testing.T) {
 	}
 }
 
-func TestExternalAdapter_Watch_NotSupported(t *testing.T) {
+func TestExternalAdapter_Watch_EmitsNewEntries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: fsnotify watch with adapter subprocess")
+	}
+
+	// adapter binary that supports read-from-offset: returns one entry and advances offset
+	binary := fakeBinary(t, map[string]string{
+		"info":             `{"protocol_version":1,"name":"test","version":"0.1.0","type":"session"}`,
+		"read-from-offset": `{"entries":[{"timestamp":"2024-01-01T00:00:00Z","role":"user","content":"hello"}],"new_offset":100}`,
+	})
+
+	ea, err := NewExternalAdapter(binary)
+	if err != nil {
+		t.Fatalf("NewExternalAdapter: %v", err)
+	}
+
+	// create a session file to watch
+	sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(sessionFile, []byte("initial"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	ch, err := ea.Watch(ctx, sessionFile)
+	if err != nil {
+		t.Fatalf("Watch: %v", err)
+	}
+
+	// trigger a file write to cause fsnotify event
+	time.Sleep(50 * time.Millisecond) // let watcher start
+	if err := os.WriteFile(sessionFile, []byte("initial\nnew data"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case entry, ok := <-ch:
+		if !ok {
+			t.Fatal("channel closed without entry")
+		}
+		if entry.Role != "user" || entry.Content != "hello" {
+			t.Errorf("unexpected entry: role=%q content=%q", entry.Role, entry.Content)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for watch entry")
+	}
+
+	cancel()
+}
+
+func TestExternalAdapter_Watch_InvalidPath(t *testing.T) {
 	binary := fakeBinary(t, map[string]string{
 		"info": `{"protocol_version":1,"name":"test","version":"0.1.0","type":"session"}`,
 	})
@@ -224,8 +277,8 @@ func TestExternalAdapter_Watch_NotSupported(t *testing.T) {
 		t.Fatalf("NewExternalAdapter: %v", err)
 	}
 
-	_, err = ea.Watch(nil, "/any/path")
-	if err != ErrWatchNotSupported {
-		t.Errorf("Watch error = %v, want ErrWatchNotSupported", err)
+	_, err = ea.Watch(context.Background(), "/nonexistent/path/session.jsonl")
+	if err == nil {
+		t.Error("expected error for nonexistent path, got nil")
 	}
 }

@@ -19,6 +19,8 @@ NC='\033[0m' # No Color
 
 REPO="sageox/ox"
 BINARY="ox"
+# bundled adapter binaries shipped alongside ox in the release tarball
+ADAPTER_BINARIES="ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode"
 LAST_INSTALL_PATH=""
 
 log_info() {
@@ -207,17 +209,21 @@ install_from_release() {
         mkdir -p "$install_dir"
     fi
 
-    # Install binary
+    # Install ox binary and bundled adapter binaries
     log_info "Installing to $install_dir..."
-    if [[ -w "$install_dir" ]]; then
-        mv "$BINARY" "$install_dir/"
-    else
-        sudo mv "$BINARY" "$install_dir/"
-    fi
-    chmod +x "$install_dir/$BINARY"
-
-    # Re-sign for macOS to avoid Gatekeeper delays
-    resign_for_macos "$install_dir/$BINARY"
+    for bin in "$BINARY" $ADAPTER_BINARIES; do
+        if [[ ! -f "$bin" ]]; then
+            # adapters may not exist in older releases — skip silently
+            continue
+        fi
+        if [[ -w "$install_dir" ]]; then
+            mv "$bin" "$install_dir/"
+        else
+            sudo mv "$bin" "$install_dir/"
+        fi
+        chmod +x "$install_dir/$bin"
+        resign_for_macos "$install_dir/$bin"
+    done
 
     LAST_INSTALL_PATH="$install_dir/$BINARY"
     log_success "$BINARY installed to $install_dir/$BINARY"
@@ -263,10 +269,16 @@ check_go() {
 
 # Install using go install (fallback)
 install_with_go() {
-    log_info "Installing $BINARY using 'go install'..."
+    log_info "Installing $BINARY and adapters using 'go install'..."
 
-    if go install github.com/$REPO/cmd/ox@latest; then
-        log_success "$BINARY installed successfully via go install"
+    # install ox and all bundled adapters in one go install invocation
+    local packages="github.com/$REPO/cmd/ox@latest"
+    for adapter in $ADAPTER_BINARIES; do
+        packages="$packages github.com/$REPO/cmd/${adapter}@latest"
+    done
+
+    if go install $packages; then
+        log_success "$BINARY and adapters installed via go install"
 
         local gobin
         gobin=$(go env GOBIN 2>/dev/null || true)
@@ -277,8 +289,11 @@ install_with_go() {
         fi
         LAST_INSTALL_PATH="$bin_dir/$BINARY"
 
-        # Re-sign for macOS to avoid Gatekeeper delays
+        # re-sign all binaries for macOS
         resign_for_macos "$bin_dir/$BINARY"
+        for adapter in $ADAPTER_BINARIES; do
+            resign_for_macos "$bin_dir/$adapter"
+        done
 
         # Check if GOPATH/bin (or GOBIN) is in PATH
         if [[ ":$PATH:" != *":$bin_dir:"* ]]; then
@@ -308,9 +323,15 @@ build_from_source() {
 
     if git clone --depth 1 https://github.com/$REPO.git; then
         cd ox
-        log_info "Building binary..."
+        log_info "Building binaries..."
 
-        if go build -o "$BINARY" ./cmd/ox; then
+        # build ox and all bundled adapters
+        local build_targets="./cmd/ox"
+        for adapter in $ADAPTER_BINARIES; do
+            build_targets="$build_targets ./cmd/${adapter}"
+        done
+
+        if go build $build_targets; then
             # Determine install location
             local install_dir
             if [[ -w /usr/local/bin ]]; then
@@ -321,14 +342,17 @@ build_from_source() {
             fi
 
             log_info "Installing to $install_dir..."
-            if [[ -w "$install_dir" ]]; then
-                mv "$BINARY" "$install_dir/"
-            else
-                sudo mv "$BINARY" "$install_dir/"
-            fi
-
-            # Re-sign for macOS to avoid Gatekeeper delays
-            resign_for_macos "$install_dir/$BINARY"
+            for bin in "$BINARY" $ADAPTER_BINARIES; do
+                if [[ ! -f "$bin" ]]; then
+                    continue
+                fi
+                if [[ -w "$install_dir" ]]; then
+                    mv "$bin" "$install_dir/"
+                else
+                    sudo mv "$bin" "$install_dir/"
+                fi
+                resign_for_macos "$install_dir/$bin"
+            done
 
             log_success "$BINARY installed to $install_dir/$BINARY"
             LAST_INSTALL_PATH="$install_dir/$BINARY"

@@ -1,4 +1,4 @@
-# ADR-004: Repository Structure — Separate `ox-adapters` Repo
+# ADR-011: Repository Structure — Separate `ox-adapters` Repo
 
 **Status**: Proposed
 **Date**: 2026-04-02

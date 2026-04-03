@@ -1,6 +1,6 @@
-# ADR-001: External Adapter Binaries
+# ADR-008: External Adapter Binaries
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-04-02
 
 ## Context

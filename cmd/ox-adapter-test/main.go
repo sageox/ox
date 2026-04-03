@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -489,6 +488,3 @@ func addLatency() {
 		}
 	}
 }
-
-// suppress unused import warnings
-var _ = strings.Contains

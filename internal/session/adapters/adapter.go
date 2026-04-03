@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -119,18 +120,36 @@ func Register(adapter Adapter) {
 	registry[name] = adapter
 }
 
-// DetectAdapter finds the appropriate adapter for the current environment
-// Iterates through all registered adapters and returns the first one that detects
-// Returns ErrNoAdapterDetected if no adapter can handle the environment
+// DetectAdapter finds the appropriate adapter for the current environment.
+// First checks registered (built-in) adapters, then falls through to external
+// adapter discovery if no registered adapter matches.
+// Returns ErrNoAdapterDetected if no adapter can handle the environment.
 func DetectAdapter() (Adapter, error) {
+	// fast path: check already-registered adapters (built-ins loaded at init time)
+	registryMu.RLock()
+	for _, adapter := range registry {
+		if adapter.Detect() {
+			registryMu.RUnlock()
+			return adapter, nil
+		}
+	}
+	registryMu.RUnlock()
+
+	// slow path: scan controlled directories (ADR-006) for ox-adapter-* binaries,
+	// call `info` on each, and register them. This covers agents that only have
+	// an external adapter binary (e.g., gemini, codex) with no built-in.
+	if err := RegisterExternalAdapters(); err != nil {
+		slog.Debug("external adapter discovery failed during detect", "error", err)
+	}
+
 	registryMu.RLock()
 	defer registryMu.RUnlock()
-
 	for _, adapter := range registry {
 		if adapter.Detect() {
 			return adapter, nil
 		}
 	}
+
 	return nil, ErrNoAdapterDetected
 }
 
@@ -147,7 +166,8 @@ var adapterAliases = map[string]string{
 
 	// generic adapter fallbacks (remove alias when deep adapter is added)
 	"codex":    "codex",
-	"amp":             "generic",
+	"amp":             "amp",
+	"opencode":        "opencode",
 	"pi":              "generic",
 	"pi-coding-agent": "generic",
 	"cursor":   "generic",
@@ -159,31 +179,47 @@ var adapterAliases = map[string]string{
 	"cline":    "generic",
 	"goose":    "generic",
 	"kiro":     "generic",
-	"opencode": "generic",
 	"droid":    "generic",
 }
 
 // GetAdapter returns a specific adapter by name.
 // Accepts canonical names ("claude-code"), display names ("Claude Code"),
 // and shorthand ("claude"). Case-insensitive for aliases.
+// Falls through to external adapter discovery if not found in registry.
 // Returns ErrAdapterNotFound if no adapter with that name is registered.
 func GetAdapter(name string) (Adapter, error) {
-	registryMu.RLock()
-	defer registryMu.RUnlock()
-
-	// try exact match first
-	if adapter, exists := registry[name]; exists {
-		return adapter, nil
+	if a := lookupAdapter(name); a != nil {
+		return a, nil
 	}
 
-	// try case-insensitive alias lookup
-	if canonical, ok := adapterAliases[strings.ToLower(name)]; ok {
-		if adapter, exists := registry[canonical]; exists {
-			return adapter, nil
-		}
+	// adapter not in registry — try discovering external binaries before failing.
+	// this allows `ox session stop --adapter=gemini` to work even when gemini
+	// is only installed as an external adapter binary, not a built-in.
+	if err := RegisterExternalAdapters(); err != nil {
+		slog.Debug("external adapter discovery failed during get", "error", err)
+	}
+
+	if a := lookupAdapter(name); a != nil {
+		return a, nil
 	}
 
 	return nil, fmt.Errorf("%w: %s", ErrAdapterNotFound, name)
+}
+
+// lookupAdapter searches the registry for an adapter by exact name or alias.
+func lookupAdapter(name string) Adapter {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	if adapter, exists := registry[name]; exists {
+		return adapter
+	}
+	if canonical, ok := adapterAliases[strings.ToLower(name)]; ok {
+		if adapter, exists := registry[canonical]; exists {
+			return adapter
+		}
+	}
+	return nil
 }
 
 // ListAdapters returns the names of all registered adapters
@@ -203,4 +239,12 @@ func ResetRegistry() {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 	registry = make(map[string]Adapter)
+}
+
+// Unregister removes a specific adapter from the registry by name.
+// Prefer this over ResetRegistry() in tests to avoid clearing other adapters.
+func Unregister(name string) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	delete(registry, name)
 }

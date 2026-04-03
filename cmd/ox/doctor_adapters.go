@@ -12,10 +12,17 @@ import (
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
-// checkExternalAdapters discovers external adapters and runs their diagnose
-// subcommand, converting results into doctor checkResults. This runs as a
-// one-shot subprocess per adapter -- no daemon needed.
+// checkExternalAdapters discovers external adapters, registers them into the
+// adapter registry (so they're available for session detection), and runs their
+// diagnose subcommand, converting results into doctor checkResults.
 func checkExternalAdapters(opts doctorOptions) []checkResult {
+	// register first so external adapters are in the registry for session detection
+	// after doctor runs. DiscoverExternalAdapters is called again below because
+	// RegisterExternalAdapters doesn't return the list — it only mutates the registry.
+	if err := adapters.RegisterExternalAdapters(); err != nil {
+		slog.Warn("external adapter registration failed during doctor", "error", err)
+	}
+
 	discovered := adapters.DiscoverExternalAdapters()
 	if len(discovered) == 0 {
 		return nil // no adapters found, silently skip

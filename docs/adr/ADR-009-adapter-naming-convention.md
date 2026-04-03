@@ -1,6 +1,6 @@
-# ADR-002: Naming Convention — `ox-adapter-*`
+# ADR-009: Naming Convention — `ox-adapter-*`
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-04-02
 
 ## Context

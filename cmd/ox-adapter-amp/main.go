@@ -1,8 +1,7 @@
-// ox-adapter-gemini is the external adapter binary for Gemini CLI sessions.
+// ox-adapter-amp is the external adapter binary for Sourcegraph Amp sessions.
 //
-// Gemini writes monolithic JSON session files (not JSONL). The entire file
-// is rewritten on each turn. This adapter re-reads the JSON and uses entry
-// count as the offset (not byte position).
+// Amp stores sessions as JSONL in ~/.amp/sessions/*.jsonl.
+// Hooks are installed via AGENTS.md markers in the project root.
 package main
 
 import (
@@ -11,19 +10,23 @@ import (
 )
 
 const (
-	adapterName    = "gemini"
-	adapterDisplay = "Gemini CLI"
+	adapterName    = "amp"
+	adapterDisplay = "Amp"
 	adapterVersion = "0.1.0"
+	searchDays     = 14
 )
 
 func main() {
 	adapterruntime.Run(adapterruntime.Config{
-		Info:         handleInfo,
-		Detect:       handleDetect,
-		Read:         handleRead,
-		ReadMetadata: handleReadMetadata,
-		Diagnose:     handleDiagnose,
-		Serve:        handleServe,
+		Info:           handleInfo,
+		Detect:         handleDetect,
+		InstallHooks:   handleInstallHooks,
+		CheckHooks:     handleCheckHooks,
+		UninstallHooks: handleUninstallHooks,
+		Read:           handleRead,
+		ReadMetadata:   handleReadMetadata,
+		Diagnose:       handleDiagnose,
+		Serve:          handleServe,
 	})
 }
 
@@ -36,10 +39,11 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		Type:            adapterprotocol.TypeSession,
 		Capabilities: []string{
 			adapterprotocol.CapSessionReader,
+			adapterprotocol.CapHookInstaller,
 			adapterprotocol.CapIncrementalReader,
 			adapterprotocol.CapServeMode,
 		},
-		HookEnvValues: []string{"gemini"},
+		HookEnvValues: []string{"amp"},
 		ServeMode:     true,
 	}, nil
 }

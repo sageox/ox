@@ -8,13 +8,15 @@ import (
 	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
+// sessionState is stored by value (not pointer) in SessionStore to prevent
+// races — sync.Map returns a copy, so mutations require an explicit Set() call.
 type sessionState struct {
 	sessionFile string
 	offset      int64
 }
 
 func handleServe(srv *adapterruntime.Server) {
-	store := adapterruntime.NewSessionStore[*sessionState]()
+	store := adapterruntime.NewSessionStore[sessionState]()
 
 	srv.OnFindSession(func(ctx context.Context, p adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error) {
 		sessionFile, offset, err := findSessionFile(p.RepoRoot, p.AgentID, p.Since, p.AgentSessionID)
@@ -22,7 +24,7 @@ func handleServe(srv *adapterruntime.Server) {
 			return nil, fmt.Errorf("session not found: %w", err)
 		}
 
-		store.Set(p.AgentID, &sessionState{
+		store.Set(p.AgentID, sessionState{
 			sessionFile: sessionFile,
 			offset:      offset,
 		})
@@ -44,7 +46,11 @@ func handleServe(srv *adapterruntime.Server) {
 			return nil, err
 		}
 
-		state.offset = newOffset
+		// write back full value — state is a copy from sync.Map, not a pointer
+		store.Set(p.AgentID, sessionState{
+			sessionFile: state.sessionFile,
+			offset:      newOffset,
+		})
 
 		return &adapterprotocol.ReadFromOffsetResult{
 			Entries:   entries,

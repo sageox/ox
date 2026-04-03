@@ -151,8 +151,8 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	} else {
 		// Deep adapter detection: only for Claude Code or unknown agents.
 		// For known non-Claude agents, skip detection to avoid false positives
-		// (ClaudeCodeAdapter.Detect() returns true if ~/.claude exists, which is
-		// common on machines where multiple agents are installed).
+		// (the claude-code adapter's Detect() returns true if ~/.claude exists,
+		// which is common on machines where multiple agents are installed).
 		if agentType == string(agentx.AgentTypeClaudeCode) || agentType == "" {
 			if adapter, detectErr := adapters.DetectAdapter(); detectErr == nil {
 				adapterName = adapter.Name()

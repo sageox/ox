@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/ui"
+	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/spf13/cobra"
 )
 
@@ -25,12 +26,10 @@ type lintResult struct {
 	HasFooter   bool           `json:"has_footer"`
 }
 
-// validRawEntryTypes are the types the web viewer can display.
-var validRawEntryTypes = map[string]bool{
-	"user":      true,
-	"assistant": true,
-	"system":    true,
-	"tool":      true,
+// strField extracts a string field from a JSON map, returning "" if absent or wrong type.
+func strField(m map[string]any, key string) string {
+	v, _ := m[key].(string)
+	return v
 }
 
 var sessionLintCmd = &cobra.Command{
@@ -162,19 +161,34 @@ func lintRawJSONLFile(path, name string) lintResult {
 		result.EntryCount++
 		result.TypeCounts[entryType]++
 
-		// validate type
-		if !validRawEntryTypes[entryType] {
-			result.Valid = false
-			result.Errors = append(result.Errors,
-				fmt.Sprintf("line %d: invalid type=%q (expected user, assistant, system, or tool)", lineNum, entryType))
-			if len(result.Errors) > 20 {
-				result.Errors = append(result.Errors, "... (truncated, too many errors)")
-				break
+		// validate entry fields using shared protocol validation.
+		// raw.jsonl uses "type" on disk; the protocol uses "role" — map it.
+		timestamp, _ := entry["timestamp"].(string)
+		if timestamp == "" {
+			timestamp, _ = entry["ts"].(string)
+		}
+		re := adapterprotocol.RawEntry{
+			Role:      entryType, // on-disk "type" maps to protocol "role"
+			Timestamp: timestamp,
+			Content:   strField(entry, "content"),
+			ToolName:  strField(entry, "tool_name"),
+			ToolInput: strField(entry, "tool_input"),
+			ToolOutput: strField(entry, "tool_output"),
+		}
+		for _, issue := range re.Check(lineNum) {
+			if issue.IsError {
+				result.Valid = false
+				result.Errors = append(result.Errors, fmt.Sprintf("line %d: %s", lineNum, issue.Message))
+				if len(result.Errors) > 20 {
+					result.Errors = append(result.Errors, "... (truncated, too many errors)")
+					break
+				}
+			} else {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("line %d: %s", lineNum, issue.Message))
 			}
-			continue
 		}
 
-		// validate timestamp
+		// validate timestamp presence (on-disk can use "ts" or "timestamp")
 		if _, hasTS := entry["ts"]; !hasTS {
 			if _, hasTimestamp := entry["timestamp"]; !hasTimestamp {
 				result.Warnings = append(result.Warnings,
@@ -182,7 +196,7 @@ func lintRawJSONLFile(path, name string) lintResult {
 			}
 		}
 
-		// validate seq
+		// validate seq ordering (file-level concern, not per-entry)
 		if seqVal, hasSeq := entry["seq"]; hasSeq {
 			var seq int
 			switch v := seqVal.(type) {
@@ -195,25 +209,6 @@ func lintRawJSONLFile(path, name string) lintResult {
 			}
 			if seq > 0 {
 				lastSeq = seq
-			}
-		}
-
-		// validate content for non-tool entries
-		if entryType == "user" || entryType == "assistant" || entryType == "system" {
-			content, _ := entry["content"].(string)
-			if content == "" {
-				result.Warnings = append(result.Warnings,
-					fmt.Sprintf("line %d: %s entry has empty content", lineNum, entryType))
-			}
-		}
-
-		// validate tool entries
-		if entryType == "tool" {
-			toolName, _ := entry["tool_name"].(string)
-			toolOutput, _ := entry["tool_output"].(string)
-			if toolName == "" && toolOutput == "" {
-				result.Warnings = append(result.Warnings,
-					fmt.Sprintf("line %d: tool entry missing both tool_name and tool_output", lineNum))
 			}
 		}
 

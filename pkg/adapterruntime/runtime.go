@@ -9,6 +9,7 @@
 package adapterruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -40,14 +41,17 @@ type Config struct {
 // serializes the result as compact JSON to stdout, and exits.
 // For --serve, it enters serve mode (blocking).
 func Run(cfg Config) {
-	RunWithArgs(cfg, os.Args[1:], os.Stdin, os.Stdout)
+	if err := RunWithArgs(cfg, os.Args[1:], os.Stdin, os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }
 
 // RunWithArgs is like Run but accepts explicit args and IO for testing.
-func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) {
+// Returns an error instead of calling os.Exit, making it safe for tests and embedding.
+func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: <adapter> <subcommand> [flags]")
-		os.Exit(1)
+		return fmt.Errorf("usage: <adapter> <subcommand> [flags]")
 	}
 
 	cmd := args[0]
@@ -56,7 +60,7 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) {
 
 	switch cmd {
 	case "info":
-		runOneShot(enc, func() (any, error) {
+		return runOneShot(enc, func() (any, error) {
 			if cfg.Info == nil {
 				return nil, fmt.Errorf("info not implemented")
 			}
@@ -64,7 +68,7 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) {
 		})
 
 	case "detect":
-		runOneShot(enc, func() (any, error) {
+		return runOneShot(enc, func() (any, error) {
 			if cfg.Detect == nil {
 				return nil, fmt.Errorf("detect not implemented")
 			}
@@ -73,7 +77,7 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) {
 
 	case "install-hooks":
 		p := parseHookParams(args[1:])
-		runOneShot(enc, func() (any, error) {
+		return runOneShot(enc, func() (any, error) {
 			if cfg.InstallHooks == nil {
 				return nil, fmt.Errorf("install-hooks not implemented")
 			}
@@ -82,7 +86,7 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) {
 
 	case "check-hooks":
 		p := parseHookParams(args[1:])
-		runOneShot(enc, func() (any, error) {
+		return runOneShot(enc, func() (any, error) {
 			if cfg.CheckHooks == nil {
 				return nil, fmt.Errorf("check-hooks not implemented")
 			}
@@ -91,7 +95,7 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) {
 
 	case "uninstall-hooks":
 		p := parseHookParams(args[1:])
-		runOneShot(enc, func() (any, error) {
+		return runOneShot(enc, func() (any, error) {
 			if cfg.UninstallHooks == nil {
 				return nil, fmt.Errorf("uninstall-hooks not implemented")
 			}
@@ -100,7 +104,7 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) {
 
 	case "read":
 		p := parseReadParams(args[1:])
-		runOneShot(enc, func() (any, error) {
+		return runOneShot(enc, func() (any, error) {
 			if cfg.Read == nil {
 				return nil, fmt.Errorf("read not implemented")
 			}
@@ -109,7 +113,7 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) {
 
 	case "read-metadata":
 		p := parseReadParams(args[1:])
-		runOneShot(enc, func() (any, error) {
+		return runOneShot(enc, func() (any, error) {
 			if cfg.ReadMetadata == nil {
 				return nil, fmt.Errorf("read-metadata not implemented")
 			}
@@ -118,7 +122,7 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) {
 
 	case "diagnose":
 		p := parseDiagnoseParams(args[1:])
-		runOneShot(enc, func() (any, error) {
+		return runOneShot(enc, func() (any, error) {
 			if cfg.Diagnose == nil {
 				return nil, fmt.Errorf("diagnose not implemented")
 			}
@@ -127,30 +131,30 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) {
 
 	case "--serve":
 		if cfg.Serve == nil {
-			fmt.Fprintln(os.Stderr, "serve mode not implemented")
-			os.Exit(1)
+			return fmt.Errorf("serve mode not implemented")
 		}
 		srv := NewServer(stdin, stdout)
 		cfg.Serve(srv)
+		return nil
 
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand: %s\n", cmd)
-		os.Exit(1)
+		return fmt.Errorf("unknown subcommand: %s", cmd)
 	}
 }
 
-func runOneShot(enc *json.Encoder, fn func() (any, error)) {
+func runOneShot(enc *json.Encoder, fn func() (any, error)) error {
 	result, err := fn()
 	if err != nil {
 		errResp := map[string]string{"error": err.Error()}
 		if encErr := enc.Encode(errResp); encErr != nil {
-			log.Fatalf("failed to encode error response: %v", encErr)
+			return fmt.Errorf("failed to encode error response: %w", encErr)
 		}
-		os.Exit(1)
+		return err
 	}
 	if err := enc.Encode(result); err != nil {
-		log.Fatalf("failed to encode response: %v", err)
+		return fmt.Errorf("failed to encode response: %w", err)
 	}
+	return nil
 }
 
 func parseHookParams(args []string) adapterprotocol.HookParams {
@@ -309,164 +313,20 @@ func (s *Server) Serve() {
 func (s *Server) dispatch(req adapterprotocol.Request) {
 	switch req.Method {
 	case adapterprotocol.MethodFindSession:
-		var p adapterprotocol.FindSessionParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInvalidParams, Message: err.Error()},
-			})
-			return
-		}
-		if s.findSession == nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeMethodNotFound, Message: "find-session not registered"},
-			})
-			return
-		}
-		result, err := s.findSession(s.ctx, p)
-		if err != nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInternalError, Message: err.Error()},
-			})
-			return
-		}
-		s.writer.WriteResponse(adapterprotocol.Response{ID: req.ID, Result: result})
-
+		dispatchMethod(s, req, s.findSession)
 	case adapterprotocol.MethodReadFromOffset:
-		var p adapterprotocol.ReadFromOffsetParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInvalidParams, Message: err.Error()},
-			})
-			return
-		}
-		if s.readFromOffset == nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeMethodNotFound, Message: "read-from-offset not registered"},
-			})
-			return
-		}
-		result, err := s.readFromOffset(s.ctx, p)
-		if err != nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInternalError, Message: err.Error()},
-			})
-			return
-		}
-		s.writer.WriteResponse(adapterprotocol.Response{ID: req.ID, Result: result})
-
+		dispatchMethod(s, req, s.readFromOffset)
 	case adapterprotocol.MethodEndSession:
-		var p adapterprotocol.EndSessionParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInvalidParams, Message: err.Error()},
-			})
-			return
-		}
-		if s.endSession == nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeMethodNotFound, Message: "end-session not registered"},
-			})
-			return
-		}
-		if err := s.endSession(s.ctx, p); err != nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInternalError, Message: err.Error()},
-			})
-			return
-		}
-		s.writer.WriteResponse(adapterprotocol.Response{ID: req.ID, Result: nil})
-
+		dispatchVoid(s, req, s.endSession)
 	case adapterprotocol.MethodSpawnSubagent:
-		var p adapterprotocol.SpawnSubagentParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInvalidParams, Message: err.Error()},
-			})
-			return
-		}
-		if s.spawnSubagent == nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeMethodNotFound, Message: "spawn-subagent not registered"},
-			})
-			return
-		}
-		result, err := s.spawnSubagent(s.ctx, p)
-		if err != nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInternalError, Message: err.Error()},
-			})
-			return
-		}
-		s.writer.WriteResponse(adapterprotocol.Response{ID: req.ID, Result: result})
-
+		dispatchMethod(s, req, s.spawnSubagent)
 	case adapterprotocol.MethodSubagentStatus:
-		var p adapterprotocol.SubagentStatusParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInvalidParams, Message: err.Error()},
-			})
-			return
-		}
-		if s.subagentStatus == nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeMethodNotFound, Message: "subagent-status not registered"},
-			})
-			return
-		}
-		result, err := s.subagentStatus(s.ctx, p)
-		if err != nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInternalError, Message: err.Error()},
-			})
-			return
-		}
-		s.writer.WriteResponse(adapterprotocol.Response{ID: req.ID, Result: result})
-
+		dispatchMethod(s, req, s.subagentStatus)
 	case adapterprotocol.MethodCancelSubagent:
-		var p adapterprotocol.CancelSubagentParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInvalidParams, Message: err.Error()},
-			})
-			return
-		}
-		if s.cancelSubagent == nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeMethodNotFound, Message: "cancel-subagent not registered"},
-			})
-			return
-		}
-		result, err := s.cancelSubagent(s.ctx, p)
-		if err != nil {
-			s.writer.WriteResponse(adapterprotocol.Response{
-				ID:    req.ID,
-				Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInternalError, Message: err.Error()},
-			})
-			return
-		}
-		s.writer.WriteResponse(adapterprotocol.Response{ID: req.ID, Result: result})
-
+		dispatchMethod(s, req, s.cancelSubagent)
 	case adapterprotocol.MethodShutdown:
 		s.writer.WriteResponse(adapterprotocol.Response{ID: req.ID, Result: nil})
 		s.cancel()
-
 	default:
 		s.writer.WriteResponse(adapterprotocol.Response{
 			ID: req.ID,
@@ -478,25 +338,84 @@ func (s *Server) dispatch(req adapterprotocol.Request) {
 	}
 }
 
+// dispatchMethod handles the common pattern: unmarshal params, check handler,
+// call handler, write result or error response.
+func dispatchMethod[P any, R any](s *Server, req adapterprotocol.Request, handler func(context.Context, P) (*R, error)) {
+	var p P
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		s.writer.WriteResponse(adapterprotocol.Response{
+			ID:    req.ID,
+			Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInvalidParams, Message: err.Error()},
+		})
+		return
+	}
+	if handler == nil {
+		s.writer.WriteResponse(adapterprotocol.Response{
+			ID:    req.ID,
+			Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeMethodNotFound, Message: req.Method + " not registered"},
+		})
+		return
+	}
+	result, err := handler(s.ctx, p)
+	if err != nil {
+		s.writer.WriteResponse(adapterprotocol.Response{
+			ID:    req.ID,
+			Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInternalError, Message: err.Error()},
+		})
+		return
+	}
+	s.writer.WriteResponse(adapterprotocol.Response{ID: req.ID, Result: result})
+}
+
+// dispatchVoid is like dispatchMethod but for handlers that return only an error (no result).
+// needed because Go generics can't express "R = void" — EndSession returns no payload.
+func dispatchVoid[P any](s *Server, req adapterprotocol.Request, handler func(context.Context, P) error) {
+	var p P
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		s.writer.WriteResponse(adapterprotocol.Response{
+			ID:    req.ID,
+			Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInvalidParams, Message: err.Error()},
+		})
+		return
+	}
+	if handler == nil {
+		s.writer.WriteResponse(adapterprotocol.Response{
+			ID:    req.ID,
+			Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeMethodNotFound, Message: req.Method + " not registered"},
+		})
+		return
+	}
+	if err := handler(s.ctx, p); err != nil {
+		s.writer.WriteResponse(adapterprotocol.Response{
+			ID:    req.ID,
+			Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInternalError, Message: err.Error()},
+		})
+		return
+	}
+	s.writer.WriteResponse(adapterprotocol.Response{ID: req.ID, Result: nil})
+}
+
 // --- Writer (thread-safe stdout) ---
 
 // Writer provides thread-safe JSON writing to stdout.
 // Both serve-mode responses and push events share the same pipe.
+// Writes are buffered to a bytes.Buffer and flushed as a single Write call
+// to ensure atomicity on pipes (writes < PIPE_BUF are atomic on POSIX).
 type Writer struct {
-	enc *ndjson.Encoder
-	mu  sync.Mutex
+	w  io.Writer
+	mu sync.Mutex
 }
 
 // NewWriter creates a thread-safe Writer.
 func NewWriter(w io.Writer) *Writer {
-	return &Writer{enc: ndjson.NewEncoder(w)}
+	return &Writer{w: w}
 }
 
 // WriteResponse writes a serve-mode response.
 func (w *Writer) WriteResponse(resp adapterprotocol.Response) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := w.enc.Encode(resp); err != nil {
+	if err := w.writeJSON(resp); err != nil {
 		log.Printf("failed to write response: %v", err)
 	}
 }
@@ -505,9 +424,23 @@ func (w *Writer) WriteResponse(resp adapterprotocol.Response) {
 func (w *Writer) PushEvent(evt adapterprotocol.Event) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if err := w.enc.Encode(evt); err != nil {
+	if err := w.writeJSON(evt); err != nil {
 		log.Printf("failed to write event: %v", err)
 	}
+}
+
+// writeJSON serializes v as a single JSON line and writes it atomically.
+// buffering to bytes.Buffer ensures the pipe sees one Write() call per message,
+// which is atomic for writes < PIPE_BUF (4KB on POSIX). json.Encoder.Encode
+// directly to the pipe could split a message across multiple Write() calls,
+// allowing concurrent goroutines to interleave bytes mid-line.
+func (w *Writer) writeJSON(v any) error {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(v); err != nil {
+		return err
+	}
+	_, err := w.w.Write(buf.Bytes())
+	return err
 }
 
 // --- SessionStore (typed per-session state) ---

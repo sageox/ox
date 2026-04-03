@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -185,12 +186,15 @@ func TestLintRawJSONLFile_SystemEntryEmptyContent(t *testing.T) {
 func TestValidRawEntryTypes_Coverage(t *testing.T) {
 	t.Parallel()
 
-	assert.True(t, validRawEntryTypes["user"])
-	assert.True(t, validRawEntryTypes["assistant"])
-	assert.True(t, validRawEntryTypes["system"])
-	assert.True(t, validRawEntryTypes["tool"])
-	assert.False(t, validRawEntryTypes["header"])
-	assert.False(t, validRawEntryTypes["footer"])
-	assert.False(t, validRawEntryTypes[""])
-	assert.False(t, validRawEntryTypes["unknown"])
+	// valid roles pass validation
+	for _, role := range []string{"user", "assistant", "system", "tool"} {
+		e := adapterprotocol.RawEntry{Role: role, Content: "test"}
+		assert.NoError(t, e.Validate(), "role %q should be valid", role)
+	}
+
+	// invalid roles fail validation
+	for _, role := range []string{"header", "footer", "", "unknown"} {
+		e := adapterprotocol.RawEntry{Role: role, Content: "test"}
+		assert.Error(t, e.Validate(), "role %q should be invalid", role)
+	}
 }

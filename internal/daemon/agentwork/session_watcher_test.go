@@ -1,6 +1,7 @@
 package agentwork
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
@@ -9,9 +10,28 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// testAdapter is a minimal adapter implementation for unit tests.
+type testAdapter struct {
+	name string
+}
+
+func (a *testAdapter) Name() string  { return a.name }
+func (a *testAdapter) Detect() bool  { return false }
+func (a *testAdapter) FindSessionFile(_ string, _ time.Time) (string, error) {
+	return "", adapters.ErrSessionNotFound
+}
+func (a *testAdapter) Read(_ string) ([]adapters.RawEntry, error) { return nil, nil }
+func (a *testAdapter) ReadMetadata(_ string) (*adapters.SessionMetadata, error) {
+	return nil, nil
+}
+func (a *testAdapter) Watch(_ context.Context, _ string) (<-chan adapters.RawEntry, error) {
+	return nil, adapters.ErrWatchNotSupported
+}
 
 func newTestWatcherManager() *SessionWatcherManager {
 	return NewSessionWatcherManager(slog.Default())
@@ -102,10 +122,16 @@ func TestSessionWatcherManager_StopAll_CleansUp(t *testing.T) {
 
 // --- B. Adapter resolution ---
 
-// TestResolveAdapter_KnownAdapters verifies all supported adapters resolve.
-// Failure prevented: new adapter added but not registered in resolveAdapter.
+// TestResolveAdapter_KnownAdapters verifies registered adapters resolve via
+// the adapter registry. Uses mock adapters since built-in adapters were removed
+// in favor of external adapter binaries.
+// Failure prevented: resolveAdapter fails to delegate to adapter registry.
 func TestResolveAdapter_KnownAdapters(t *testing.T) {
-	t.Parallel()
+	for _, name := range []string{"codex", "claude-code", "gemini"} {
+		adapters.Register(&testAdapter{name: name})
+		t.Cleanup(func() { adapters.Unregister(name) })
+	}
+
 	for _, name := range []string{"codex", "claude-code", "gemini"} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

@@ -1,6 +1,6 @@
-# ADR-003: IPC Mechanism — stdin/stdout, NDJSON, Two-Way
+# ADR-010: IPC Mechanism — stdin/stdout, NDJSON, Two-Way
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-04-02
 
 ## Context

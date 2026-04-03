@@ -1,4 +1,4 @@
-# ADR-006: Distribution — Separate Repo, `ox adapter install`, Registry File
+# ADR-013: Distribution — Separate Repo, `ox adapter install`, Registry File
 
 **Status**: Proposed
 **Date**: 2026-04-02

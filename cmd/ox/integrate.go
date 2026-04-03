@@ -24,8 +24,7 @@ const (
 	oxPrimeCommandIdempotent = constants.OxPrimeCommandClaudeCodeIdempotent // Claude Code hooks (idempotent mode)
 	oxPrimeCommandGemini     = constants.OxPrimeCommandGemini               // Gemini CLI hooks
 	oxPrimeLegacy            = constants.OxPrimeCommand                     // legacy command without AGENT_ENV (for detection)
-	oxPrimeUserCommand       = "ox agent prime --user"
-	hookType                 = "command"
+	hookType = "command"
 
 	// claude code hook events
 	claudeSessionStart = "SessionStart"
@@ -40,28 +39,6 @@ const (
 	// claude code paths and files
 	claudeDirName      = ".claude"
 	claudeSettingsFile = "settings.json"
-	// opencode hook events
-	openCodeSessionCreated = "session.created"
-
-	// opencode paths and files
-	openCodePluginFileName = "ox-prime.ts"
-	openCodeProjectPath    = ".opencode/plugin"
-	openCodeUserPath       = ".config/opencode/plugin"
-
-	// gemini cli paths and files
-	geminiSettingsFileName = "settings.json"
-	geminiProjectPath      = ".gemini"
-	geminiUserPath         = ".gemini"
-	geminiSessionStart     = "SessionStart"
-
-	// codex cli paths and files
-	codexHooksFileName = "hooks.json"
-	codexProjectPath   = ".codex"
-	codexUserPath      = ".codex"
-	codexSessionStart  = "SessionStart"
-
-	// timeouts (milliseconds)
-	defaultHookTimeout = 30000
 
 	// matcher patterns
 	emptyMatcher = ""
@@ -206,15 +183,10 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		}
 
 		location := "project"
-		path := geminiProjectPath
 		if integrateUserFlag {
 			location = "user"
-			path = "~/" + geminiUserPath
 		}
-		fmt.Println(ui.PassStyle.Render("✓") + " Gemini CLI integration installed")
-		fmt.Println()
-		fmt.Printf("Installed %s-level hooks:\n", location)
-		fmt.Printf("  - %s/%s (SessionStart, BeforeAgent, AfterTool, SessionEnd)\n", path, geminiSettingsFileName)
+		fmt.Println(ui.PassStyle.Render("✓") + fmt.Sprintf(" Gemini CLI %s-level integration installed", location))
 
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
@@ -228,15 +200,10 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		}
 
 		location := "project"
-		path := openCodeProjectPath
 		if integrateUserFlag {
 			location = "user"
-			path = "~/" + openCodeUserPath
 		}
-		fmt.Println(ui.PassStyle.Render("✓") + " OpenCode integration installed")
-		fmt.Println()
-		fmt.Printf("Installed %s-level plugin:\n", location)
-		fmt.Printf("  - %s/%s\n", path, openCodePluginFileName)
+		fmt.Println(ui.PassStyle.Render("✓") + fmt.Sprintf(" OpenCode %s-level integration installed", location))
 
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)

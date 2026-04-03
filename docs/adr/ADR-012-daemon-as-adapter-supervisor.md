@@ -1,6 +1,6 @@
-# ADR-005: Daemon as Adapter Process Supervisor
+# ADR-012: Daemon as Adapter Process Supervisor
 
-**Status**: Proposed
+**Status**: Accepted
 **Date**: 2026-04-02
 
 ## Context

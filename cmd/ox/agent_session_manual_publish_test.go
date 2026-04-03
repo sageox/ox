@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,6 +40,9 @@ type agentSessionFixture struct {
 }
 
 func TestManualPublishingSessionCapture_Matrix(t *testing.T) {
+	adapters.Register(&testCodexAdapter{})
+	t.Cleanup(func() { adapters.Unregister("codex") })
+
 	fixtures := []agentSessionFixture{
 		{
 			name:                "codex",
