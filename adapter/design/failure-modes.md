@@ -6,8 +6,8 @@ The adapter system introduces many new failure points. Every failure must be han
 
 ## Adapter Binary Failures
 
-### Adapter binary not found on PATH / in adapter dirs
-**When**: Daemon tries to spawn `ox-adapter-kiro --serve` but binary doesn't exist.
+### Adapter binary not found in adapter dirs
+**When**: Daemon tries to spawn `ox-adapter-<name> --serve` but binary doesn't exist.
 **Behavior**: Session falls back to generic adapter (if available) or records nothing. Hook exits cleanly. ox logs a warning once, then stops trying for that session.
 **User-visible**: `ox adapter list` shows agent as undetected. `ox integrate install` prompts to install missing adapter.
 
@@ -33,8 +33,8 @@ The adapter system introduces many new failure points. Every failure must be han
 
 ### Adapter binary hangs and never responds
 **When**: Adapter deadlocks or enters infinite loop inside `--serve`.
-**Behavior**: Daemon applies a per-request timeout (default 5s). On timeout, SIGTERMs the process, marks session degraded, falls back to one-shot.
-**Hook impact**: Hook waits up to 5s, then exits normally. Claude Code is not blocked indefinitely.
+**Behavior**: Daemon applies a per-request timeout (100ms for `fast`-class calls like `read-from-offset`, configurable). On timeout, SIGTERMs the process, marks session degraded, falls back to one-shot.
+**Hook impact**: Hook waits up to the request timeout, then exits normally. Claude Code is not blocked indefinitely.
 
 ### Adapter binary exits mid-session (unexpected)
 **When**: Adapter crashes during a session (OOM, panic, etc.).
@@ -93,7 +93,7 @@ The adapter system introduces many new failure points. Every failure must be han
 
 ### Daemon IPC call times out
 **When**: Daemon is overloaded, taking too long to route the request.
-**Behavior**: Hook applies a 3s IPC timeout (distinct from the 5s per-request adapter timeout). On timeout, hook falls back to one-shot and exits. Recording continues.
+**Behavior**: Hook applies a configurable IPC timeout (default 3s, distinct from the per-request adapter timeout). On timeout, hook falls back to one-shot and exits. Recording continues.
 
 ---
 
@@ -160,7 +160,7 @@ The adapter system introduces many new failure points. Every failure must be han
 **Behavior**: Timestamp filtering (entries must be after session start time) uses the session start timestamp set at `find-session` time, not re-evaluated. Entries are filtered by the adapter's own timestamps, which are consistent within the adapter's process. Unlikely to cause issues in practice.
 
 ### Adapter installed but agent not present
-**When**: User has `ox-adapter-kiro` installed but Kiro is not installed.
+**When**: User has `ox-adapter-<name>` installed but the corresponding agent is not installed.
 **Behavior**: `detect` returns `{"detected": false}`. Adapter is not selected for auto-detection. No error.
 
 ### Two adapters claim the same AGENT_ENV value

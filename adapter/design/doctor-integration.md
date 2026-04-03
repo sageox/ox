@@ -2,7 +2,7 @@
 
 ## The Problem
 
-ox doctor currently has 80+ checks hard-coded across 77 files. Each agent's hook-installation check lives in ox core. As we add 10+ adapters of multiple types, this pattern breaks: ox can't know ahead of time what to check for Kiro's trusted-commands list, or Perforce's credential file, or GitHub's token scopes.
+ox doctor currently has 80+ checks hard-coded across 77 files. Each agent's hook-installation check lives in ox core. As we add 10+ adapters of multiple types, this pattern breaks: ox can't know ahead of time what to check for agent-specific trusted-commands lists, Perforce credential files, or GitHub token scopes.
 
 The adapter must own its own diagnostics — the same way it owns hook installation.
 
@@ -18,42 +18,31 @@ ox-adapter-claude-code diagnose --repo-root /path/to/repo --scope project
 
 ```json
 {
+  "ok": false,
   "issues": [
     {
-      "id": "hooks-not-installed",
+      "slug":     "hooks-not-installed",
       "severity": "error",
-      "category": "integration",
-      "title": "Claude Code hooks not installed",
-      "description": "ox hook commands are missing from .claude/settings.json",
-      "fix": {
-        "level": "suggested",
-        "command": "install-hooks",
-        "args": {"scope": "project"},
-        "description": "Write ox hook commands to .claude/settings.json",
-        "requires_confirmation": false
-      }
+      "title":    "Claude Code hooks not installed",
+      "detail":   "ox hook commands are missing from .claude/settings.json",
+      "fix":      "ox integrate install",
+      "fix_safe": true
     },
     {
-      "id": "hooks-stale-version",
+      "slug":     "hooks-stale-version",
       "severity": "warning",
-      "category": "integration",
-      "title": "Claude Code hook commands are outdated",
-      "description": "Hook format changed in Claude Code v2. Current hooks use the v1 format.",
-      "fix": {
-        "level": "suggested",
-        "command": "install-hooks",
-        "args": {"scope": "project", "force": true},
-        "description": "Rewrite hook commands in .claude/settings.json with current format",
-        "requires_confirmation": false
-      }
+      "title":    "Claude Code hook commands are outdated",
+      "detail":   "Hook format changed in Claude Code v2. Current hooks use the v1 format.",
+      "fix":      "ox integrate install --force",
+      "fix_safe": true
     },
     {
-      "id": "session-dir-large",
+      "slug":     "session-dir-large",
       "severity": "info",
-      "category": "storage",
-      "title": "Claude Code session directory is large",
-      "description": "~/.claude/projects/ is 3.2 GB. Consider pruning old sessions.",
-      "fix": null
+      "title":    "Claude Code session directory is large",
+      "detail":   "~/.claude/projects/ is 3.2 GB. Consider pruning old sessions.",
+      "fix":      null,
+      "fix_safe": false
     }
   ]
 }
@@ -67,14 +56,12 @@ ox-adapter-claude-code diagnose --repo-root /path/to/repo --scope project
 | `warning` | `priority: ""` (Needs Attention) | Degraded but functional |
 | `info` | `priority: "optional"` | Informational, no action required |
 
-### Fix levels (match existing `FixLevel` enum)
+### Issue fields
 
-| Level | ox `FixLevel` | Behavior |
-|-------|---------------|---------|
-| `auto` | `FixLevelAuto` | Fixed without any flag |
-| `suggested` | `FixLevelSuggested` | Fixed with `--fix` flag |
-| `confirm` | `FixLevelConfirm` | Prompts user, fixed with `--fix --yes` |
-| `manual` | `FixLevelCheckOnly` | No automated fix, shows instructions |
+- `slug` — stable identifier used by `ox doctor --fix-slug <slug>` for automated fixing
+- `severity` — `"error"` (blocks recording), `"warning"` (degrades recording), or `"info"` (informational)
+- `fix` — shell command users can run to resolve the issue (or `null` if no automated fix)
+- `fix_safe` — `true` if ox may run `fix` automatically without user confirmation
 
 ---
 
@@ -144,7 +131,7 @@ IPC response: {
     },
     {
       "agent_id": "OxB3c4",
-      "adapter": "kiro",
+      "adapter": "amp",
       "process_pid": null,
       "state": "degraded",
       "restart_count": 3,
@@ -164,35 +151,34 @@ When the user runs `ox doctor --fix` or `ox doctor --fix-slug claude-code:hooks-
 
 ```
 1. doctor collects all issues (diagnose step above)
-2. for each fixable issue where fix.level <= requested level:
-     a. show fix description (from adapter's diagnose response)
-     b. if fix.requires_confirmation: prompt user [Y/n]
+2. for each fixable issue where fix_safe is true (or user passed --fix):
+     a. show fix command (from adapter's diagnose response)
+     b. if not fix_safe: prompt user [Y/n]
         (respects --yes flag for non-interactive)
-     c. call adapter subcommand:
-          ox-adapter-claude-code install-hooks --repo-root /path --scope project
+     c. run the fix command (e.g., `ox integrate install`)
      d. re-run that specific diagnose check to verify fix worked
      e. report success/failure
 ```
 
-The adapter provides both the description text AND the fix subcommand. ox doctor is a pure orchestrator — it never hard-codes what the fix does. That knowledge stays in the adapter.
+The adapter provides both the issue description AND the fix command. ox doctor is a pure orchestrator — it never hard-codes what the fix does. That knowledge stays in the adapter.
 
 ### Verification after fix
 
-After calling a fix subcommand, doctor re-runs `diagnose` scoped to that issue ID to verify the fix worked. If the issue is still present, it reports failure and surfaces the adapter's stderr.
+After running a fix command, doctor re-runs `diagnose` and checks whether the issue's slug is still present. If it is, it reports failure and surfaces the adapter's stderr.
 
 ```go
 func applyAndVerify(adapter ExternalAdapter, issue AdapterIssue, repoRoot string) error {
-    // apply fix
-    err := adapter.RunSubcommand(issue.Fix.Command, issue.Fix.Args)
+    // run the fix command from the diagnose response
+    err := runFixCommand(issue.Fix)
     if err != nil {
         return fmt.Errorf("fix failed: %w", err)
     }
 
-    // verify
+    // verify by re-running diagnose
     remaining, _ := adapter.Diagnose(repoRoot, "project")
     for _, r := range remaining {
-        if r.ID == issue.ID {
-            return fmt.Errorf("fix applied but issue persists: %s", r.Description)
+        if r.Slug == issue.Slug {
+            return fmt.Errorf("fix applied but issue persists: %s", r.Detail)
         }
     }
     return nil
@@ -208,7 +194,7 @@ Adapter issue slugs are prefixed with the adapter name to avoid collisions with 
 ```
 claude-code:hooks-not-installed
 claude-code:hooks-stale-version
-kiro:trusted-commands-missing
+amp:trusted-commands-missing
 github:token-missing
 github:token-insufficient-scope
 git:large-files-untracked
@@ -217,7 +203,7 @@ git:large-files-untracked
 Users can target specific fixes:
 ```bash
 ox doctor --fix-slug claude-code:hooks-not-installed
-ox doctor --fix-slug kiro:trusted-commands-missing --yes
+ox doctor --fix-slug amp:trusted-commands-missing --yes
 ```
 
 ---
@@ -280,10 +266,11 @@ The test adapter can inject controllable issues into doctor's output. This lets 
 func TestDoctorFixFlow(t *testing.T) {
     // configure test adapter to report one fixable issue
     os.Setenv("OX_TEST_DIAGNOSE_ISSUES", `[{
-        "id": "hooks-not-installed",
+        "slug": "hooks-not-installed",
         "severity": "error",
         "title": "Test hooks not installed",
-        "fix": {"level": "suggested", "command": "install-hooks", "args": {}}
+        "fix": "ox integrate install",
+        "fix_safe": true
     }]`)
 
     // configure test adapter to succeed on install-hooks

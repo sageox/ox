@@ -87,9 +87,9 @@ type Request struct {
 }
 
 type Response struct {
-    ID     int             `json:"id"`
-    Result json.RawMessage `json:"result,omitempty"`
-    Error  *RPCError       `json:"error,omitempty"`
+    ID     int       `json:"id"`
+    Result any       `json:"result,omitempty"`
+    Error  *RPCError `json:"error,omitempty"`
 }
 
 type RPCError struct {
@@ -136,14 +136,7 @@ type ReadFromOffsetParams struct {
     Offset      int64  `json:"offset"`
 }
 
-type WatchParams struct {
-    AgentID     string `json:"agent_id"`
-    RepoID      string `json:"repo_id"`
-    SessionFile string `json:"session_file"`
-    Offset      int64  `json:"offset"`
-}
-
-type UnwatchParams struct {
+type EndSessionParams struct {
     AgentID string `json:"agent_id"`
     RepoID  string `json:"repo_id"`
 }

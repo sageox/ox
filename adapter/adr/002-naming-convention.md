@@ -27,7 +27,15 @@ With 10+ adapters anticipated, the longer prefix also prevents PATH namespace co
 The daemon scans for binaries matching `ox-adapter-*` in:
 1. `$OX_ADAPTER_PATH` (dev override, highest priority)
 2. `~/.local/share/ox/adapters/` (user-installed)
-3. All entries on `$PATH` (Homebrew, system installs)
+
+No `$PATH` scan. Executing arbitrary binaries from `$PATH` that happen to match `ox-adapter-*`
+is an RCE vector — a malicious package could drop such a binary in `node_modules/.bin/`.
+Homebrew-installed adapters are handled by symlinking into `~/.local/share/ox/adapters/` at
+formula install time, or via `$OX_ADAPTER_PATH`. See ADR-006.
+
+## Subcommand Naming
+
+ox adapter subcommand names align with sibling tools where equivalent operations exist (e.g., `install`, `link`, `list`, `upgrade`, `remove` mirror conventions used by package managers and other ox subcommands). This makes future interoperability cheaper — shared mental models today, cheaper mechanical compatibility later — without requiring it now.
 
 ## Third-Party Adapters
 

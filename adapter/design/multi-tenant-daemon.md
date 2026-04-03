@@ -34,19 +34,13 @@ Every request the daemon sends to an adapter includes routing context:
 
 `team_id` is optional (present only when the session is associated with a team workspace). Adapters that don't need team isolation can ignore it. Adapters that do (e.g., an indexer that scopes results by team) use it.
 
-### `ProtectedDirs` in `info` becomes per-repo context
-
-Currently `ProtectedDirs` in the `info` response is a static list. In a multi-repo world, protected dirs may differ per repo (e.g., `.kiro` is only relevant in repos where Kiro has been used).
-
-The `info` response remains static — protected dirs declared there are adapter-wide defaults. The daemon applies them relative to each session's `repo_root`. No protocol change needed; the semantics are already relative-path-based.
-
-### Watch events carry `repo_id` for routing
+### Push events carry `repo_id` for routing
 
 ```json
 {"event":"entries","agent_id":"r7f3a2-OxA1b2","repo_id":"a1b2c3d4...","data":{"entries":[...],"new_offset":2048}}
 ```
 
-The daemon routes watch events by `(agent_id, repo_id)`. Events without a matching session registration are dropped with a warning (not an error — adapter may have restarted mid-session).
+The daemon routes push events by `(agent_id, repo_id)`. Events without a matching session registration are dropped with a warning (not an error — adapter may have restarted mid-session).
 
 ### Team isolation: adapters are not the enforcement boundary
 

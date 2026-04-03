@@ -2,18 +2,31 @@
 
 ## Adapter Process Lifecycle
 
-The daemon maintains an `AdapterSupervisor` that manages all active adapter processes. One process per session (not per adapter type).
+The daemon maintains an `AdapterSupervisor` that manages one process per **adapter type**. All
+active sessions of a given type are multiplexed through that single process using `agent_id`.
 
 ```
 daemon
   AdapterSupervisor
-    sessions: map[agentID → AdapterSession]
-      "OxA1b2" → {type: "claude-code", pid: 1234, stdin, stdout, lastOffset: 1024}
-      "OxB3c4" → {type: "claude-code", pid: 1235, stdin, stdout, lastOffset: 512}
-      "OxC5d6" → {type: "kiro",         pid: 1236, stdin, stdout, lastOffset: 0}
+    processes: map[adapterType → AdapterProcess]
+      "claude-code" → {pid: 1234, stdin, stdout,
+                       sessions: {
+                         "r7f3a2-OxA1b2": {sessionFile: "...", lastOffset: 1024},
+                         "r7f3a2-OxB3c4": {sessionFile: "...", lastOffset: 512},
+                       }}
+      "amp"         → {pid: 1236, stdin, stdout,
+                       sessions: {
+                         "r9b1c4-OxC5d6": {sessionFile: "...", lastOffset: 0},
+                       }}
 ```
 
-Multiple sessions of the same adapter type = multiple processes. This keeps state isolated and avoids routing complexity inside adapter binaries.
+Every serve-mode request includes `agent_id` so the adapter maintains per-session state
+internally. The daemon tracks per-session offsets and file paths; the adapter tracks per-session
+file handles.
+
+**On adapter process crash**: all sessions of that type are affected. The daemon respawns the
+process and re-sends `find-session` for every session that was active, restoring from the last
+checkpointed offset for each.
 
 ## IPC Extension
 
@@ -30,6 +43,11 @@ The daemon's existing Unix socket IPC gains two new message types:
 ```
 
 The hook CLI process sends one IPC message, waits for response, exits. The daemon does all the heavy work: routing to the right adapter process, piping JSON-RPC, writing to `raw.jsonl`, updating offset.
+
+**Per-agent request queue**: When multiple hook processes fire concurrently for the same session
+(overlapping tool calls), the daemon queues IPC requests per `agent_id`. The second hook's
+`adapter.read` blocks on the IPC socket until the first completes. This prevents duplicate reads
+and offset corruption. Different `agent_id`s are not blocked by each other.
 
 ## Lazy Startup
 

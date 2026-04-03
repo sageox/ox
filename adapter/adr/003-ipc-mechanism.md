@@ -1,4 +1,4 @@
-# ADR-003: IPC Mechanism — stdin/stdout, NDJSON, One-Way
+# ADR-003: IPC Mechanism — stdin/stdout, NDJSON, Two-Way
 
 **Status**: Proposed
 **Date**: 2026-04-02
@@ -20,6 +20,10 @@ Ruled out:
 - **HTTP over Unix socket**: HTTP overhead, header parsing, socket path lifecycle.
 - **Named pipes**: Two pipes needed for bidirectional. More setup than exec.Cmd.
 
+**Windows forward-compatibility**: stdin/stdout transport was chosen in part because it works on
+Windows without modification. Named pipes, `%APPDATA%` paths, and `.exe` binary extension handling
+are deferred to a Windows implementation phase — the protocol itself makes no Unix-only assumptions.
+
 ### Framing (serve mode): NDJSON
 
 One compact JSON object per line. `bufio.Scanner` reads it. No parser needed. The only rule: JSON must be compact (no literal newlines) — which is the default for `json.Marshal`.
@@ -28,10 +32,11 @@ Ruled out:
 - **LSP headers** (`Content-Length: 87\r\n\r\n{...}`): Extra header parsing complexity. LSP needs it because it handles arbitrary/pretty-printed JSON. We control both sides and can mandate compact.
 - **Length-prefix binary**: Can't test with shell tools.
 
-### Direction: Two-Way (daemon drives; adapter pushes watch events)
+### Direction: Two-Way (daemon drives; adapter pushes events automatically)
 
-The daemon sends requests, the adapter responds. **In addition**, the adapter may push unsolicited
-`watch` events to the daemon while a watch subscription is active.
+The daemon sends requests, the adapter responds. **In addition**, adapters that declare the
+`file_watcher` capability automatically push entry events for any session discovered via
+`find-session` — no explicit subscribe/unsubscribe step.
 
 Two message flows coexist on the same stdout pipe:
 1. **Response messages**: `{"id": N, "result": {...}}` — response to a specific daemon request
@@ -43,15 +48,16 @@ The two flows do not interleave within a single line — NDJSON framing guarante
 **Why two-way**: Real-time recording between hook calls enables instant session indexing — other team
 members' ox instances can receive session entries mid-session rather than waiting until session end.
 Hook-driven recording (pull-only) is bounded by tool-call frequency and introduces per-tool latency.
-Watch-mode (push) can deliver entries the moment the agent writes them to disk.
+Push events deliver entries the moment the agent writes them to disk.
 
-**Watch mode is optional**: Adapters that do not support real-time file watching (e.g., SQLite-backed
+**Push is optional**: Adapters that do not support real-time file watching (e.g., SQLite-backed
 agents where polling is acceptable) simply never send `event` messages. The daemon falls back to
 hook-driven `read-from-offset` polling for those adapters.
 
 Complexity trade-offs accepted:
-- Adapter needs a background goroutine for the fsnotify watch loop
+- Adapter needs a background goroutine for the fsnotify loop
 - Daemon's stdout reader must be async (reads events while also sending requests)
+- All stdout writes must be serialized (mutex or single-writer goroutine)
 - Testing uses a controllable event injector (see design/testing.md)
 
 Requests remain sequential from daemon → adapter (one active request at a time per adapter process).
@@ -65,7 +71,7 @@ Serve mode:
 ```
 Request  (daemon → adapter stdin):  {"id":1,"method":"...","params":{...}}\n
 Response (adapter → daemon stdout): {"id":1,"result":{...}}\n
-Error:                              {"id":1,"error":{"code":-32000,"message":"..."}}\n
+Error:                              {"id":1,"error":{"code":"internal_error","message":"..."}}\n
 ```
 
 IDs allow the daemon to match responses to requests if needed. Requests are sent sequentially (one in-flight at a time per session), so IDs are mainly for debugging.

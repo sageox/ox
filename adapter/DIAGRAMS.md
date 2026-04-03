@@ -47,8 +47,8 @@ graph TB
     subgraph agents["AI Coding Agents"]
         Claude["Claude Code"]
         Gemini["Gemini CLI"]
-        Kiro["Kiro"]
         Amp["Amp"]
+        Cursor["Cursor"]
         Custom["Custom Agent"]
     end
 
@@ -62,23 +62,23 @@ graph TB
     subgraph adapters["External Adapter Binaries"]
         A1["ox-adapter-claude-code"]
         A2["ox-adapter-gemini"]
-        A3["ox-adapter-kiro"]
-        A4["ox-adapter-amp"]
+        A3["ox-adapter-amp"]
+        A4["ox-adapter-cursor"]
         A5["ox-adapter-custom"]
     end
 
     subgraph session_files["Agent Session Files"]
         SF1["~/.claude/**/*.jsonl"]
         SF2["~/.gemini/**/chats/*.json"]
-        SF3["~/.kiro/sessions/*.sqlite"]
-        SF4["~/.amp/sessions/*.jsonl"]
+        SF3["~/.amp/sessions/*.jsonl"]
+        SF4["~/.cursor/sessions/"]
         SF5["custom location"]
     end
 
     Claude -->|hook| CLI
     Gemini -->|hook| CLI
-    Kiro -->|hook| CLI
     Amp -->|hook| CLI
+    Cursor -->|hook| CLI
     Custom -->|hook| CLI
 
     CLI -->|"IPC (Unix socket)"| D
@@ -234,8 +234,7 @@ flowchart TB
         direction TB
         D1["1. $OX_ADAPTER_PATH<br/>(dev override)"]
         D2["2. ~/.local/share/ox/adapters/<br/>(installed)"]
-        D3["3. $PATH<br/>(if explicitly enabled)"]
-        D1 --> D2 --> D3
+        D1 --> D2
     end
 
     Scan --> discovery
@@ -267,9 +266,9 @@ flowchart TB
 graph LR
     subgraph session["Session Adapters (type: session)"]
         direction TB
-        S1["claude-code<br/>capabilities: session_reader,<br/>hook_installer, incremental_reader,<br/>serve_mode, watcher"]
+        S1["claude-code<br/>capabilities: session_reader,<br/>hook_installer, incremental_reader,<br/>serve_mode, file_watcher"]
         S2["gemini<br/>capabilities: session_reader,<br/>hook_installer, incremental_reader,<br/>serve_mode"]
-        S3["kiro<br/>capabilities: session_reader,<br/>hook_installer, incremental_reader"]
+        S3["amp<br/>capabilities: session_reader,<br/>hook_installer, incremental_reader,<br/>serve_mode"]
         S4["codex<br/>capabilities: session_reader,<br/>incremental_reader"]
     end
 
@@ -316,8 +315,8 @@ graph TB
         S1["ox daemon"] -->|"exec: ox-adapter-X --serve"| S2["Adapter Process<br/>(stays alive)"]
         S1 -->|"stdin: NDJSON requests"| S2
         S2 -->|"stdout: NDJSON responses"| S1
-        S2 -->|"stdout: NDJSON events<br/>(watch mode)"| S1
-        S3["Used for: find-session,<br/>read-from-offset, watch,<br/>unwatch, shutdown"]
+        S2 -->|"stdout: NDJSON events<br/>(push)"| S1
+        S3["Used for: find-session,<br/>read-from-offset,<br/>end-session, shutdown"]
     end
 
     subgraph wire["Wire Format (serve mode)"]
@@ -371,7 +370,7 @@ flowchart TB
 
     subgraph auto["Auto-Detection (ox integrate install)"]
         direction TB
-        A1["Scan: which claude,<br/>which gemini, which kiro"]
+        A1["Scan: which claude,<br/>which gemini, which amp"]
         A2["Check: adapter installed?"]
         A3["Prompt: 'Claude Code detected.<br/>Install ox-adapter-claude-code? [Y/n]'"]
         A4["Install missing adapters<br/>(parallel downloads)"]
@@ -417,52 +416,41 @@ gantt
 
 ## 11. Daemon Supervisor: Multi-Agent Concurrent Sessions
 
-Shows how a single daemon manages adapters for multiple agents working in the same repo.
+Shows how one adapter process per type handles multiple concurrent sessions. Two Claude Code
+sessions share a single `ox-adapter-claude-code --serve` process; an Amp session gets its own
+`ox-adapter-amp --serve` process. Sessions are multiplexed by `agent_id`.
 
 ```mermaid
 graph TB
     subgraph agents["Concurrent Agent Sessions (same repo)"]
-        CC1["Claude Code<br/>Agent OxA1b2"]
-        CC2["Claude Code<br/>Agent OxC3d4"]
-        Kiro["Kiro<br/>Agent OxE5f6"]
+        CC1["Claude Code<br/>Agent r7f3a2-OxA1b2"]
+        CC2["Claude Code<br/>Agent r7f3a2-OxC3d4"]
+        AM1["Amp<br/>Agent r7f3a2-OxE5f6"]
     end
 
-    subgraph daemon["ox Daemon (one per repo)"]
+    subgraph daemon["ox Daemon"]
         IPC["IPC Server<br/>(Unix socket)"]
         AS["AdapterSupervisor"]
 
-        subgraph sessions["Active Adapter Sessions"]
-            S1["OxA1b2<br/>pid:1234<br/>offset:4096"]
-            S2["OxC3d4<br/>pid:1235<br/>offset:512"]
-            S3["OxE5f6<br/>pid:1236<br/>offset:0"]
+        subgraph procs["Adapter Processes (one per type)"]
+            P1["ox-adapter-claude-code --serve<br/>pid 1234<br/>sessions: OxA1b2, OxC3d4"]
+            P2["ox-adapter-amp --serve<br/>pid 1236<br/>sessions: OxE5f6"]
         end
-    end
-
-    subgraph processes["Adapter Processes"]
-        P1["ox-adapter-claude-code<br/>--serve (pid 1234)"]
-        P2["ox-adapter-claude-code<br/>--serve (pid 1235)"]
-        P3["ox-adapter-kiro<br/>--serve (pid 1236)"]
     end
 
     CC1 -->|hook| IPC
     CC2 -->|hook| IPC
-    Kiro -->|hook| IPC
+    AM1 -->|hook| IPC
 
     IPC --> AS
-    AS --> S1
-    AS --> S2
-    AS --> S3
+    AS -->|"agent_id=OxA1b2<br/>agent_id=OxC3d4"| P1
+    AS -->|"agent_id=OxE5f6"| P2
 
-    S1 -->|stdin/stdout| P1
-    S2 -->|stdin/stdout| P2
-    S3 -->|stdin/stdout| P3
-
-    P1 -.->|reads| F1["session-OxA1b2.jsonl"]
-    P2 -.->|reads| F2["session-OxC3d4.jsonl"]
-    P3 -.->|reads| F3["kiro-sessions.sqlite"]
+    P1 -.->|reads| F1["~/.claude/.../*.jsonl<br/>(open file handles per agent_id)"]
+    P2 -.->|reads| F2["~/.amp/sessions/*.jsonl"]
 
     style daemon fill:#0f3460,color:#e0e0e0
-    style processes fill:#1a6b3c,color:#e0e0e0
+    style procs fill:#1a6b3c,color:#e0e0e0
 ```
 
 ---

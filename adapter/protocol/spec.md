@@ -8,7 +8,7 @@ All communication between ox/daemon and an adapter binary uses:
 - **Transport**: stdin/stdout pipes (managed by daemon via `exec.Cmd`)
 - **Encoding**: compact JSON (no pretty-printing — newlines are delimiters)
 - **Direction**: two-way — daemon sends requests, adapter responds. Adapter also pushes unsolicited
-  watch events while a `watch` subscription is active.
+  events for any session it has discovered via `find-session`.
 
 Two message types on stdout:
 - **Response**: `{"id": N, ...}` — response to a daemon request (always has `"id"`)
@@ -60,7 +60,7 @@ ox-adapter-claude-code info
   "display_name": "Claude Code",
   "version": "1.2.0",
   "type": "session",
-  "capabilities": ["session_reader", "hook_installer", "incremental_reader", "watcher"],
+  "capabilities": ["session_reader", "hook_installer", "incremental_reader", "file_watcher"],
   "hook_env_values": ["claude-code"],
   "serve_mode": true
 }
@@ -70,10 +70,14 @@ ox-adapter-claude-code info
 - `session_reader` — implements `find-session`, `read`, `read-metadata` (required for all session adapters)
 - `hook_installer` — implements `install-hooks`, `check-hooks`, `uninstall-hooks`
 - `incremental_reader` — implements `read-from-offset` (required for serve mode recording)
-- `watcher` — supports `watch`/`unwatch` serve methods (push events)
+- `file_watcher` — pushes entry events automatically after `find-session` (no explicit subscribe needed)
 - `serve_mode` — supports `--serve` flag
 
 `hook_env_values` — values of `AGENT_ENV` that identify this agent in hook invocations. Used by ox to map hook events to the correct adapter.
+
+**Capability assertion**: ox asserts all required capabilities are present at session registration
+time (after calling `info`), not at runtime. If a required capability is absent, the session is
+rejected with a clear error rather than discovering the gap mid-recording.
 
 ---
 
@@ -112,14 +116,14 @@ ox-adapter-claude-code check-hooks --repo-root /path/to/repo --scope project
 }
 ```
 
-For agents with multiple locations (e.g. kiro with both CLI hooks and IDE hooks):
+For agents with multiple hook locations (e.g. both CLI hooks and IDE configuration):
 ```json
 {
   "installed": true,
   "scope": "project",
   "hook_files": [
-    "/path/to/repo/.kiro/agents/ox.json",
-    "/path/to/repo/.kiro/hooks/ox-stop.kiro.hook"
+    "/path/to/repo/.agent/settings.json",
+    "/path/to/repo/.agent/hooks/ox-stop.hook"
   ]
 }
 ```
@@ -152,8 +156,6 @@ fi
 ```
 
 The adapter handles version-specific differences. If Claude Code v2 changes its hook format, `ox-adapter-claude-code` v1.3.0 handles it — no ox core change.
-
----
 
 ---
 
@@ -205,6 +207,44 @@ ox-adapter-claude-code read-metadata --session-file /path/to/session.jsonl
 
 ---
 
+### `diagnose`
+
+Returns structured health checks for this adapter. Called by `ox doctor` to surface adapter-specific
+issues with actionable fix instructions. Timeout class: `diagnose` (5s).
+
+```bash
+ox-adapter-claude-code diagnose
+```
+
+```json
+{
+  "ok": false,
+  "issues": [
+    {
+      "slug":     "claude-code:hooks-missing",
+      "severity": "warning",
+      "title":    "ox hooks not installed",
+      "detail":   "Claude Code hooks are not configured for this project. Recording is disabled.",
+      "fix":      "ox integrate install",
+      "fix_safe": true
+    }
+  ]
+}
+```
+
+When no issues are found:
+```json
+{"ok": true, "issues": []}
+```
+
+**Issue fields**:
+- `slug` — stable identifier used by `ox doctor --fix-slug <slug>` for automated fixing
+- `severity` — `"error"` (blocks recording) or `"warning"` (degrades recording)
+- `fix` — shell command users can run to resolve the issue
+- `fix_safe` — `true` if ox may run `fix` automatically without user confirmation
+
+---
+
 ## Serve Mode
 
 Entered via `--serve` flag. The daemon spawns and holds this process for the duration of a session.
@@ -233,7 +273,7 @@ stderr:                  logs only
 
 **Response shape** (error):
 ```json
-{"id": 1, "error": {"code": -32000, "message": "session file not found"}}
+{"id": 1, "error": {"code": "internal_error", "message": "session file not found"}}
 ```
 
 Requests are sequential (daemon sends next request only after receiving response). IDs are for debugging/correlation.
@@ -243,8 +283,7 @@ Requests are sequential (daemon sends next request only after receiving response
 ### Serve Mode: Session Multiplexing
 
 Because one adapter process handles all active sessions of its type, every serve-mode request
-includes `agent_id`. The adapter uses `agent_id` to look up per-session state (file handle, offset,
-watch subscriptions).
+includes `agent_id`. The adapter uses `agent_id` to look up per-session state (file handle, offset).
 
 ---
 
@@ -309,49 +348,46 @@ The adapter uses the cached file handle for `agent_id`. No repeated open/seek fr
 
 ---
 
-### serve: `watch`
+### Automatic Push Events (file_watcher capability)
 
-Subscribe to real-time entries for a session. Adapter opens an fsnotify watch on the session file.
-New entries are pushed as events — no request needed per batch.
-
-```json
-{"id":3,"method":"watch","params":{"agent_id":"OxA1b2","session_file":"/path/session.jsonl","offset":1024}}
-```
+Adapters that declare `file_watcher` in their capabilities automatically push new entries for any
+session discovered via `find-session`. No explicit subscribe/unsubscribe step — the adapter opens
+an fsnotify watch on the session file at `find-session` time and pushes events as new entries
+arrive. The adapter stops pushing when it receives `end-session` or `shutdown`.
 
 ```json
-{"id":3,"result":{"watching":true}}
+{"event":"entries","agent_id":"r7f3a2-OxA1b2","data":{"entries":[...],"new_offset":2048}}
+{"event":"entries","agent_id":"r7f3a2-OxA1b2","data":{"entries":[...],"new_offset":3072}}
 ```
 
-After the response, the adapter asynchronously sends event messages as new entries arrive:
-
-```json
-{"event":"entries","agent_id":"OxA1b2","data":{"entries":[...],"new_offset":2048}}
-{"event":"entries","agent_id":"OxA1b2","data":{"entries":[...],"new_offset":3072}}
-```
+**Stdout serialization requirement**: Push events and request responses share the same stdout
+pipe. Adapters MUST serialize all stdout writes — a mutex or single-writer goroutine (channel-based)
+is required. `json.Encoder.Encode()` is not goroutine-safe; concurrent writes from the serve loop
+and a file watcher goroutine will interleave partial JSON lines, producing corrupt NDJSON.
 
 The daemon's stdout reader routes events by `agent_id` to the correct session handler. The daemon
-does not need to send `read-from-offset` for sessions in watch mode.
+does not need to send `read-from-offset` for sessions receiving push events.
 
-**Capability gate**: Only adapters declaring `"watcher"` in their `capabilities` list implement
-`watch`. Adapters without this capability return `method_not_found` — the daemon falls back to
-hook-driven `read-from-offset` polling for that adapter.
+**Adapters without `file_watcher`**: The daemon falls back to hook-driven `read-from-offset`
+polling. No push events are expected from these adapters.
 
 ---
 
-### serve: `unwatch`
+### serve: `end-session`
 
-Stop watch subscription for a session (called before session end, or if daemon switches to poll mode).
+Tells the adapter a specific session has ended. The adapter closes the file handle, stops any
+file watching, and releases all state for that `agent_id`.
 
 ```json
-{"id":4,"method":"unwatch","params":{"agent_id":"OxA1b2"}}
+{"id":4,"method":"end-session","params":{"agent_id":"r7f3a2-OxA1b2"}}
 ```
 
 ```json
 {"id":4,"result":null}
 ```
 
-The adapter closes the fsnotify watch for `agent_id` but keeps the session open (file handle, offset
-state remain). The daemon may send `read-from-offset` again after `unwatch`.
+The adapter may continue serving other sessions. If this was the last active session, the daemon
+may send `shutdown` to reclaim the process (see Process Lifecycle below).
 
 ---
 
@@ -368,6 +404,26 @@ Graceful shutdown. Adapter closes all open resources for all sessions and exits.
 ```
 
 Process exits with code 0.
+
+---
+
+### Process Lifecycle
+
+The daemon spawns `--serve` lazily (on first hook call for a session type) and manages its lifetime:
+
+- **Spawn**: First hook call for a session type triggers spawn + `find-session`
+- **Active**: Process stays alive as long as at least one session of that type is active
+- **Idle shutdown**: When the last session of a type ends (via `end-session`), the daemon sends
+  `shutdown` after a grace period (default: 30s). The grace period avoids rapid spawn/shutdown
+  cycles when sessions start and stop frequently.
+- **Daemon shutdown**: Sends `shutdown` to all adapter processes, waits 5s, SIGTERMs any remaining
+
+### One-Shot Commands While Serve Is Running
+
+One-shot subcommands (`info`, `detect`, `install-hooks`, `check-hooks`, `diagnose`) are always
+invoked as separate short-lived processes, never routed through the `--serve` pipe. Two instances
+of the same adapter binary may run simultaneously — one long-lived serve process and one short-lived
+one-shot. One-shot commands are stateless and do not conflict with the serve process.
 
 ---
 
@@ -453,7 +509,7 @@ mode. The session is not terminated — just slower. `ox doctor` surfaces this a
   ignores unknown capabilities. Best-effort compatibility beats hard version gating.
 
 Example: ox v2 (minimum protocol v2) encounters an adapter speaking protocol v3:
-- ox still uses `find-session`, `read-from-offset`, `watch` — all protocol v2 methods work
+- ox still uses `find-session`, `read-from-offset`, `end-session` — all protocol v2 methods work
 - ox ignores any v3-only capabilities it doesn't know about
 - The adapter degrades to v2 behavior for this ox instance
 

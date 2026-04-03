@@ -20,7 +20,7 @@ Options:
 
 **Against Option A (in ox monorepo)**:
 - 10+ adapters would clutter the ox repo with per-agent quirks
-- Adapter release cadence ≠ ox release cadence. Adapter for Kiro v2 shouldn't require an ox release
+- Adapter release cadence ≠ ox release cadence. A new agent adapter shouldn't require an ox release
 - Contributors to adapter code need ox repo access — creates friction for community
 - `cmd/` with 10+ `ox-adapter-*` directories buries the main binary
 
@@ -39,17 +39,19 @@ Options:
 
 ```
 github.com/sageox/ox                    ← core binary + daemon
-  internal/
-    adapterprotocol/                    ← protocol types (shared via go module)
+  pkg/
+    adapterprotocol/                    ← protocol types (public, importable by external adapters)
       types.go                          ← RawEntry, InfoResponse, request/response
       protocol.go                       ← version constant, validation
+    ndjson/                             ← shared NDJSON scanner/encoder (1MB buffer, Err() checking)
+  internal/
+    progress/                           ← shared progress reporting (daemon IPC + adapter install)
 
 github.com/sageox/ox-adapters           ← all official adapters
   cmd/
     ox-adapter-claude-code/
     ox-adapter-gemini/
     ox-adapter-codex/
-    ox-adapter-kiro/
     ox-adapter-amp/
     ox-adapter-cursor/
     ...
@@ -59,7 +61,9 @@ github.com/sageox/ox-adapters           ← all official adapters
   go.work                               ← Go workspace for multi-module dev
 ```
 
-The `internal/adapterprotocol` package in ox is published as a Go module so adapter authors can import the types. Alternatively, the types are simple enough to just copy — the protocol spec is the contract, not the Go types.
+The `pkg/adapterprotocol` package is public (`pkg/`, not `internal/`) so external adapter authors
+can import it directly: `import "github.com/sageox/ox/pkg/adapterprotocol"`. The protocol spec
+is the canonical contract; the Go types are a convenience. See ADR-007.
 
 ## Third-Party Adapters
 

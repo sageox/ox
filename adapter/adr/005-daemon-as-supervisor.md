@@ -7,7 +7,7 @@
 
 Hooks fire as separate short-lived `ox` process invocations — one per tool call. There is no persistent ox CLI process between hook calls. Yet adapters benefit from staying alive across calls (open file handles, in-memory offset, SQLite connections).
 
-A single daemon serves a single repo/ledger. Within that repo, multiple coding agents of different types may be active simultaneously — e.g., Claude Code and Kiro running in parallel, each with their own session. The daemon must manage adapter processes for all of them concurrently.
+A single daemon serves a single repo/ledger. Within that repo, multiple coding agents of different types may be active simultaneously — e.g., Claude Code and Amp running in parallel, each with their own session. The daemon must manage adapter processes for all of them concurrently.
 
 ## Decision
 
@@ -25,24 +25,24 @@ daemon
   ├── AdapterProcess{type: "claude-code", pid: 1234}
   │     └── ox-adapter-claude-code --serve
   │           handles sessions: OxA1b2, OxB3c4 (multiplexed by agent_id)
-  └── AdapterProcess{type: "kiro", pid: 1236}
-        └── ox-adapter-kiro --serve
+  └── AdapterProcess{type: "amp", pid: 1236}
+        └── ox-adapter-amp --serve
               handles sessions: OxC5d6
 ```
 
 **Key**: one adapter process per *type*, shared across all active sessions of that type. Multiple
 Claude Code sessions route through one `ox-adapter-claude-code --serve` process. Every serve-mode
 request includes `agent_id` so the adapter can maintain per-session state internally (file handles,
-byte offsets, watch subscriptions).
+byte offsets).
 
 **Why per-type rather than per-session**:
 - Fewer processes when multiple sessions of the same agent type are active (common in team environments)
-- SQLite-backed adapters (Kiro) maintain a single DB connection shared across sessions — more efficient
-- Event push (watch mode) is naturally multiplexed: events already carry `agent_id`
+- SQLite-backed adapters maintain a single DB connection shared across sessions — more efficient
+- Push events are naturally multiplexed: events already carry `agent_id`
 - The adapter handles session isolation; the daemon handles routing by type
 
 The adapter is responsible for keeping per-`agent_id` state isolated. A crash in session OxA1b2's
-watch loop must not corrupt OxB3c4's offset. This is a higher implementation bar than per-session
+file watcher must not corrupt OxB3c4's offset. This is a higher implementation bar than per-session
 isolation — adapter authors must handle concurrent sessions.
 
 ## Hook Call Path
@@ -60,6 +60,13 @@ PostToolUse hook fires (Claude Code session OxA1b2)
 ```
 
 Total time: one IPC roundtrip + one pipe write/read. No process spawn on the hot path.
+
+## Environment Isolation
+
+When spawning adapter processes, the daemon strips its own environment and passes only an
+allowlisted set of variables: `HOME`, `PATH`, `XDG_*`, `OX_PROTOCOL_VERSION`, `OX_REPO_ROOT`,
+`OX_REPO_ID`, `OX_TEAM_ID`, and any vars declared in the adapter's `required_env` list (from
+`info`). This prevents daemon-internal secrets from leaking to adapter processes.
 
 ## Crash Recovery
 
@@ -83,9 +90,31 @@ Sequence on first hook call for a new session:
 5. Cache as AdapterSession
 6. Proceed with `read-from-offset`
 
+## Session End
+
+When a session ends, the daemon sends `end-session` to the adapter process. The adapter releases
+all state for that `agent_id` (file handle, watcher, offset). If this was the last active session
+of that type, the daemon sends `shutdown` after a 30-second grace period to avoid rapid
+spawn/shutdown cycles.
+
+## One-Shot Commands While Serve Is Running
+
+One-shot subcommands (`info`, `detect`, `install-hooks`, `check-hooks`, `diagnose`) are always
+invoked as separate short-lived processes, never routed through the `--serve` pipe. Two instances
+of the same adapter binary may run simultaneously — one long-lived serve process and one short-lived
+one-shot.
+
+## Adapter Observability
+
+The daemon captures adapter process stderr (one stream per adapter type, not per session). On
+adapter crash, the last 50 lines of stderr are included in `ox doctor` output. Future CLI
+commands (`ox adapter logs <name> [--follow]`) will stream these logs live for debugging. Adapter
+lifecycle events (spawn, crash, restart, shutdown) are logged to the daemon's own structured log,
+not to a separate file.
+
 ## Daemon Shutdown
 
-On shutdown, daemon sends `{"method":"shutdown"}` to all adapter processes, waits up to 5 seconds, then SIGTERMs any still alive.
+On shutdown, daemon sends `{"id":99,"method":"shutdown"}` to all adapter processes, waits up to 5 seconds, then SIGTERMs any still alive.
 
 ## On Daemon Restart
 

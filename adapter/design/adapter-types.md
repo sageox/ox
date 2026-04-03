@@ -19,7 +19,7 @@ All adapter binaries use the same `ox-adapter-*` discovery prefix. The `type` fi
 
 | Type | Purpose | Examples |
 |------|---------|---------|
-| `session` | Reads coding-agent transcripts, installs hooks | `claude-code`, `gemini`, `kiro`, `codex`, `amp`, `cursor` |
+| `session` | Reads coding-agent transcripts, installs hooks | `claude-code`, `gemini`, `codex`, `amp`, `cursor` |
 | `vcs` | Version control history, blame, diffs, branches | `git`, `perforce`, `svn` |
 | `indexer` | Indexes external content for agent context (issues, PRs, docs) | `github`, `linear`, `jira`, `beads`, `confluence` |
 | `test` | Simulates a session adapter — no real agent behind it | `test-session`, `test-slow`, `test-failure` |
@@ -37,7 +37,7 @@ What they do:
 
 Who owns them: sageox (official), community (third-party)
 
-Bundled: `claude-code`, `gemini`, `codex`, `kiro`
+Bundled: `claude-code`, `gemini`, `codex`
 External: `amp`, `cursor`, `windsurf`, community agents
 
 ---
@@ -200,7 +200,7 @@ test:    test, test-slow, test-crash
 Official but separate release cadence. sageox maintains them:
 
 ```
-session: kiro, amp, cursor, windsurf, opencode, factory-ai
+session: amp, cursor, windsurf, opencode, factory-ai
 indexer: github, linear, beads
 vcs:     perforce (if enterprise demand exists)
 ```

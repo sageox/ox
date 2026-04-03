@@ -5,7 +5,7 @@
 
 ## Context
 
-ox hardcodes all agent adapters inside the ox binary. `internal/session/adapters/` contains `ClaudeCodeAdapter`, `GeminiAdapter`, `CodexAdapter`, and `GenericJSONLAdapter` — all compiled in. Adding Kiro, Amp, Cursor, Windsurf, or any future agent requires:
+ox hardcodes all agent adapters inside the ox binary. `internal/session/adapters/` contains `ClaudeCodeAdapter`, `GeminiAdapter`, `CodexAdapter`, and `GenericJSONLAdapter` — all compiled in. Adding Amp, Cursor, Windsurf, or any future agent requires:
 
 1. A PR to ox source
 2. A new ox release

@@ -51,14 +51,14 @@ official:
         linux_arm64:   {url: "https://...", sha256: "jkl012"}
         windows_amd64: {url: "https://...", sha256: "mno345"}
 
-  - name: kiro
-    display_name: Kiro
-    description: Session reader (SQLite) and hook installer for Kiro
-    detect_commands: [kiro]
+  - name: amp
+    display_name: Amp
+    description: Session reader and hook installer for Amp
+    detect_commands: [amp]
     repo: sageox/ox-adapters
     capabilities: [session_reader, hook_installer, incremental_reader]
     releases:
-      latest: "1.0.0"
+      latest: "0.5.0"
       platforms: {...}
 
 community:
@@ -97,7 +97,7 @@ ox adapter install github.com/username/ox-adapter-myagent
 
 ```
 ox integrate install
-  1. scan PATH for agent binaries: which claude, which gemini, which kiro, ...
+  1. scan PATH for agent binaries: which claude, which gemini, which amp, ...
   2. for each detected agent, check if adapter installed
   3. missing adapter for detected agent:
        → "Claude Code detected. Install ox-adapter-claude-code? [Y/n]"
@@ -108,9 +108,8 @@ ox integrate install
 Detection heuristics per agent (in registry.yaml `detect_commands`):
 - Claude Code: `which claude` or `CLAUDE_CODE_ENTRYPOINT` env var or `~/.claude/` exists
 - Gemini: `which gemini` or `~/.gemini/` exists
-- Kiro: `which kiro` or `~/.kiro/` exists
 - Codex: `which codex` or `~/.codex/` exists
-- Amp: `which amp`
+- Amp: `which amp` or `~/.amp/` exists
 
 ## Local Development Install
 
@@ -182,12 +181,12 @@ OFFICIAL ADAPTERS
   claude-code     ✓            1.2.0      1.2.0      session_reader, hook_installer
   gemini          ✓            1.0.3      1.1.0  ⬆   session_reader, hook_installer
   codex           ✓            0.9.1      0.9.1      session_reader
-  kiro            ✗                       1.0.0      session_reader, hook_installer
-  amp             ✗                       0.5.0      session_reader
+  amp             ✗                       0.5.0      session_reader, hook_installer
+  cursor          ✗                       0.3.0      session_reader
 
 COMMUNITY ADAPTERS (installed)
   myagent         ✓            0.1.0      —          session_reader
 
-Run 'ox adapter install kiro' to install missing adapters.
+Run 'ox adapter install amp' to install missing adapters.
 Run 'ox adapter upgrade gemini' to upgrade (gemini has update available).
 ```

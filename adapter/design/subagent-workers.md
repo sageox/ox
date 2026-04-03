@@ -28,7 +28,7 @@ session management, and cancellations during that time.
 
 The solution: **the adapter spawns the agent as a separate child process** and manages it
 independently. The serve pipe stays responsive. Progress and completion flow back as push events
-— the same mechanism as `watch` mode.
+— the same push event mechanism used for file watching.
 
 ```
 daemon
@@ -38,7 +38,7 @@ daemon
   │         spawn-subagent              │ adapter manages separately:
   │         subagent-status     ←───────┤
   │         cancel-subagent             ├── claude --headless (worker A, pid 4521)
-  │         watch events                ├── claude --headless (worker B, pid 4522)
+  │         push events                 ├── claude --headless (worker B, pid 4522)
   │                                     └── claude --headless (worker C, pid 4523)
   │
   └── [push events from adapter]
@@ -64,7 +64,7 @@ Adapters that support being used as controllers declare it:
     "session_reader",
     "hook_installer",
     "incremental_reader",
-    "watcher",
+    "file_watcher",
     "subagent_controller"
   ],
   "subagent_config": {
@@ -164,7 +164,7 @@ A `subagent.failed` event with `exit_reason: "cancelled"` follows when the proce
 
 ## Push Events for Worker Progress
 
-While a worker runs, the adapter pushes events over the same stdout pipe as watch events.
+While a worker runs, the adapter pushes events over the same stdout pipe as entry events.
 
 ### `subagent.progress`
 
@@ -239,7 +239,7 @@ Worker exited with an error.
 
 Worker sessions are recorded the same way as user-initiated sessions. The worker process writes
 to a session JSONL file; the adapter already knows how to read it. On `spawn-subagent`, the
-adapter opens a watch on the worker's session file and streams entries back as `subagent.progress`
+adapter opens a file watcher on the worker's session file and streams entries back as `subagent.progress`
 events. On completion, `subagent.completed` includes `session_file` — the daemon indexes it as
 a normal session recording.
 
@@ -331,7 +331,7 @@ User session OxA1b2 (claude-code, interactive)
   │
   └── spawns worker w-OxA1b2-0001 (claude-code, headless)
         │
-        ├── adapter watches worker's session file
+        ├── adapter file-watches worker's session file
         ├── streams progress back to OxA1b2 context
         └── on completion: session file indexed, files committed
 ```

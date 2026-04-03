@@ -184,7 +184,7 @@ internal/adapterprotocol/compliance/fixtures/
   claude-code-serve-session.ndjson   ← real daemon↔adapter exchange
   claude-code-one-shot-detect.json   ← real detect response
   gemini-serve-session.ndjson
-  kiro-serve-session.ndjson
+  amp-serve-session.ndjson
 ```
 
 Fixture tests replay recorded interactions and verify the responses match. Used for regression when agent file formats change.
