@@ -436,9 +436,9 @@ func (s *Suite) TestSubagentStatus(t *testing.T) {
 		adapterprotocol.WorkerStatusRunning:     true,
 		adapterprotocol.WorkerStatusCompleted:   true,
 		adapterprotocol.WorkerStatusFailed:      true,
-		adapterprotocol.WorkerStatusCancelled:   true,
+		adapterprotocol.WorkerStatusCanceled:   true,
 		adapterprotocol.WorkerStatusTimedOut:     true,
-		adapterprotocol.WorkerStatusCancelling:  true,
+		adapterprotocol.WorkerStatusCanceling:  true,
 	}
 	if !validStatuses[result.Status] {
 		t.Errorf("status.status = %q, not a valid worker status", result.Status)
@@ -451,7 +451,7 @@ func (s *Suite) TestSubagentStatus(t *testing.T) {
 }
 
 // TestCancelSubagent verifies the adapter can cancel a running worker and
-// that a failed event with exit_reason "cancelled" is emitted.
+// that a failed event with exit_reason "canceled" is emitted.
 func (s *Suite) TestCancelSubagent(t *testing.T) {
 	ss := s.startServe(t)
 
@@ -508,11 +508,11 @@ func (s *Suite) TestCancelSubagent(t *testing.T) {
 	if err := json.Unmarshal(resultBytes, &result); err != nil {
 		t.Fatalf("unmarshal cancel result: %v", err)
 	}
-	if result.Status != adapterprotocol.WorkerStatusCancelling {
-		t.Errorf("cancel result.status = %q, want %q", result.Status, adapterprotocol.WorkerStatusCancelling)
+	if result.Status != adapterprotocol.WorkerStatusCanceling {
+		t.Errorf("cancel result.status = %q, want %q", result.Status, adapterprotocol.WorkerStatusCanceling)
 	}
 
-	// wait for the subagent.failed event with cancelled reason
+	// wait for the subagent.failed event with canceled reason
 	gotCancelledEvent := false
 
 	// check any events we already buffered
@@ -520,7 +520,7 @@ func (s *Suite) TestCancelSubagent(t *testing.T) {
 		var evt adapterprotocol.Event
 		if err := json.Unmarshal(raw, &evt); err == nil && evt.Event == adapterprotocol.EventSubagentFailed {
 			var data adapterprotocol.SubagentFailedData
-			if err := json.Unmarshal(evt.Data, &data); err == nil && data.ExitReason == "cancelled" {
+			if err := json.Unmarshal(evt.Data, &data); err == nil && data.ExitReason == "canceled" {
 				gotCancelledEvent = true
 			}
 		}
@@ -531,7 +531,7 @@ func (s *Suite) TestCancelSubagent(t *testing.T) {
 	for !gotCancelledEvent {
 		raw, err := ss.readWithTimeout(t, 5*time.Second)
 		if err != nil {
-			t.Fatalf("waiting for cancelled event: %v", err)
+			t.Fatalf("waiting for canceled event: %v", err)
 		}
 		var evt adapterprotocol.Event
 		if err := json.Unmarshal(raw, &evt); err == nil && evt.Event == adapterprotocol.EventSubagentFailed {
@@ -540,8 +540,8 @@ func (s *Suite) TestCancelSubagent(t *testing.T) {
 				if data.WorkerID != workerID {
 					t.Errorf("failed event worker_id = %q, want %q", data.WorkerID, workerID)
 				}
-				if data.ExitReason != "cancelled" {
-					t.Errorf("failed event exit_reason = %q, want %q", data.ExitReason, "cancelled")
+				if data.ExitReason != "canceled" {
+					t.Errorf("failed event exit_reason = %q, want %q", data.ExitReason, "canceled")
 				}
 				gotCancelledEvent = true
 			}
@@ -549,7 +549,7 @@ func (s *Suite) TestCancelSubagent(t *testing.T) {
 
 		select {
 		case <-deadline:
-			t.Fatal("timed out waiting for cancelled event")
+			t.Fatal("timed out waiting for canceled event")
 		default:
 		}
 	}

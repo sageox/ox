@@ -189,7 +189,7 @@ func TestSupervisor_SubagentStatusUnknownWorker(t *testing.T) {
 
 // --- F. CancelSubagent checks tracker first ---
 // Verifies that cancel requests are rejected for unknown workers.
-// Failure prevented: cancelling nonexistent workers causing adapter confusion.
+// Failure prevented: canceling nonexistent workers causing adapter confusion.
 
 func TestSupervisor_CancelSubagentUnknownWorker(t *testing.T) {
 	sup := NewAdapterSupervisor(testLogger(), []string{t.TempDir()})
@@ -269,7 +269,7 @@ func TestSupervisor_HandleWorkerEventFailed(t *testing.T) {
 		expectedStatus string
 	}{
 		{name: "error", exitReason: "error", expectedStatus: adapterprotocol.WorkerStatusFailed},
-		{name: "cancelled", exitReason: "cancelled", expectedStatus: adapterprotocol.WorkerStatusCancelled},
+		{name: "canceled", exitReason: "canceled", expectedStatus: adapterprotocol.WorkerStatusCanceled},
 		{name: "timed out", exitReason: "timed_out", expectedStatus: adapterprotocol.WorkerStatusTimedOut},
 	}
 

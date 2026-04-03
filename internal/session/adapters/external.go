@@ -137,7 +137,7 @@ func (ea *ExternalAdapter) FindSessionFile(agentID string, since time.Time) (str
 
 	var result adapterprotocol.FindSessionResult
 	if err := json.Unmarshal(out, &result); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+		return "", fmt.Errorf("%w: %w", ErrInvalidResponse, err)
 	}
 
 	if result.SessionFile == "" {
@@ -155,7 +155,7 @@ func (ea *ExternalAdapter) Read(sessionPath string) ([]RawEntry, error) {
 
 	var result adapterprotocol.ReadResult
 	if err := json.Unmarshal(out, &result); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
 	}
 
 	return protocolToInternal(result.Entries), nil
@@ -170,7 +170,7 @@ func (ea *ExternalAdapter) ReadMetadata(sessionPath string) (*SessionMetadata, e
 
 	var result adapterprotocol.ReadMetadataResult
 	if err := json.Unmarshal(out, &result); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
 	}
 
 	return &SessionMetadata{
@@ -282,7 +282,7 @@ func (ea *ExternalAdapter) ReadFromOffset(path string, offset int64) ([]RawEntry
 
 	var result adapterprotocol.ReadFromOffsetResult
 	if err := json.Unmarshal(out, &result); err != nil {
-		return nil, offset, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+		return nil, offset, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
 	}
 
 	return protocolToInternal(result.Entries), result.NewOffset, nil
@@ -307,7 +307,7 @@ func (ea *ExternalAdapter) Diagnose(repoRoot, scope string) (*adapterprotocol.Di
 
 	var result adapterprotocol.DiagnoseResult
 	if err := json.Unmarshal(out, &result); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
 	}
 
 	return &result, nil
@@ -322,7 +322,7 @@ func (ea *ExternalAdapter) InstallHooks(repoRoot, scope string) (*adapterprotoco
 
 	var result adapterprotocol.InstallHooksResponse
 	if err := json.Unmarshal(out, &result); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
 	}
 
 	return &result, nil
@@ -337,7 +337,7 @@ func (ea *ExternalAdapter) UninstallHooks(repoRoot, scope string) (*adapterproto
 
 	var result adapterprotocol.UninstallHooksResponse
 	if err := json.Unmarshal(out, &result); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
 	}
 
 	return &result, nil
@@ -352,7 +352,7 @@ func (ea *ExternalAdapter) CheckHooks(repoRoot, scope string) (*adapterprotocol.
 
 	var result adapterprotocol.CheckHooksResponse
 	if err := json.Unmarshal(out, &result); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
 	}
 
 	return &result, nil
@@ -368,7 +368,7 @@ func (ea *ExternalAdapter) callInfo() (*adapterprotocol.InfoResponse, error) {
 
 	var info adapterprotocol.InfoResponse
 	if err := json.Unmarshal(out, &info); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidResponse, err)
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
 	}
 
 	return &info, nil

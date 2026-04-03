@@ -257,7 +257,7 @@ func handleServe(srv *adapterruntime.Server) {
 			return nil, fmt.Errorf("spawn failed: OX_TEST_SPAWN_FAIL is set")
 		}
 
-		workerCtx, workerCancel := context.WithCancel(srv.Context())
+		workerCtx, workerCancel := context.WithCancel(srv.Context()) //nolint:gosec // cancel stored in worker struct, called on cancel-subagent
 		w := &testWorker{
 			workerID:  p.WorkerID,
 			agentID:   p.AgentID,
@@ -299,12 +299,12 @@ func handleServe(srv *adapterruntime.Server) {
 			return nil, fmt.Errorf("worker not found: %s", p.WorkerID)
 		}
 
-		w.setStatus(adapterprotocol.WorkerStatusCancelling)
+		w.setStatus(adapterprotocol.WorkerStatusCanceling)
 		w.cancel()
 
 		return &adapterprotocol.CancelSubagentResult{
 			WorkerID: w.workerID,
-			Status:   adapterprotocol.WorkerStatusCancelling,
+			Status:   adapterprotocol.WorkerStatusCanceling,
 		}, nil
 	})
 
@@ -327,7 +327,7 @@ func runTestWorker(ctx context.Context, w *testWorker, writer *adapterruntime.Wr
 	progressDelay := time.Duration(durationMS/2) * time.Millisecond
 	select {
 	case <-ctx.Done():
-		sendWorkerFailed(writer, w, "cancelled")
+		sendWorkerFailed(writer, w, "canceled")
 		return
 	case <-time.After(progressDelay):
 	}
@@ -346,7 +346,7 @@ func runTestWorker(ctx context.Context, w *testWorker, writer *adapterruntime.Wr
 	// wait for the remaining duration
 	select {
 	case <-ctx.Done():
-		sendWorkerFailed(writer, w, "cancelled")
+		sendWorkerFailed(writer, w, "canceled")
 		return
 	case <-time.After(time.Duration(durationMS/2) * time.Millisecond):
 	}
@@ -374,8 +374,8 @@ func runTestWorker(ctx context.Context, w *testWorker, writer *adapterruntime.Wr
 
 func sendWorkerFailed(writer *adapterruntime.Writer, w *testWorker, reason string) {
 	w.setStatus(adapterprotocol.WorkerStatusFailed)
-	if reason == "cancelled" {
-		w.setStatus(adapterprotocol.WorkerStatusCancelled)
+	if reason == "canceled" {
+		w.setStatus(adapterprotocol.WorkerStatusCanceled)
 	}
 	elapsed := int(time.Since(w.startedAt).Seconds())
 	failedData, _ := json.Marshal(adapterprotocol.SubagentFailedData{

@@ -125,8 +125,8 @@ func (s *AdapterSupervisor) CancelSubagent(ctx context.Context, adapterType stri
 		return nil, fmt.Errorf("decode cancel result: %w", err)
 	}
 
-	// update tracker to cancelling
-	s.workers.UpdateStatus(params.WorkerID, adapterprotocol.WorkerStatusCancelling)
+	// update tracker to canceling
+	s.workers.UpdateStatus(params.WorkerID, adapterprotocol.WorkerStatusCanceling)
 
 	s.logger.Info("subagent cancel requested", "worker_id", params.WorkerID, "reason", params.Reason)
 	return &result, nil
@@ -171,8 +171,8 @@ func (s *AdapterSupervisor) HandleWorkerEvent(evt *adapterprotocol.Event) {
 		// map exit_reason to appropriate terminal status
 		status := adapterprotocol.WorkerStatusFailed
 		switch data.ExitReason {
-		case "cancelled":
-			status = adapterprotocol.WorkerStatusCancelled
+		case "canceled":
+			status = adapterprotocol.WorkerStatusCanceled
 		case "timed_out":
 			status = adapterprotocol.WorkerStatusTimedOut
 		}

@@ -306,7 +306,7 @@ func runAdapterInstall(_ *cobra.Command, args []string) error {
 
 	// fetch latest release from GitHub API
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/latest", owner, repo)
-	resp, err := http.Get(apiURL)
+	resp, err := http.Get(apiURL) //nolint:gosec // URL constructed from trusted adapter registry
 	if err != nil {
 		return fmt.Errorf("fetch release info: %w", err)
 	}
@@ -342,7 +342,7 @@ func runAdapterInstall(_ *cobra.Command, args []string) error {
 	slog.Info("downloading adapter", "asset", assetName)
 
 	// download binary
-	dlResp, err := http.Get(downloadURL)
+	dlResp, err := http.Get(downloadURL) //nolint:gosec // URL from GitHub API release response
 	if err != nil {
 		return fmt.Errorf("download binary: %w", err)
 	}

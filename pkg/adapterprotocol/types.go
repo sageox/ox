@@ -226,9 +226,9 @@ const (
 	WorkerStatusRunning    = "running"
 	WorkerStatusCompleted  = "completed"
 	WorkerStatusFailed     = "failed"
-	WorkerStatusCancelled  = "cancelled"
-	WorkerStatusTimedOut   = "timed_out"
-	WorkerStatusCancelling = "cancelling"
+	WorkerStatusCanceled  = "canceled"
+	WorkerStatusTimedOut  = "timed_out"
+	WorkerStatusCanceling = "canceling"
 )
 
 // --- Subagent capability config ---
@@ -287,7 +287,7 @@ type CancelSubagentParams struct {
 // CancelSubagentResult is the result for the cancel-subagent serve method.
 type CancelSubagentResult struct {
 	WorkerID string `json:"worker_id"`
-	Status   string `json:"status"` // "cancelling"
+	Status   string `json:"status"` // "canceling"
 }
 
 // --- Subagent event data types ---
@@ -315,7 +315,7 @@ type SubagentCompletedData struct {
 // SubagentFailedData is the data payload for "subagent.failed" events.
 type SubagentFailedData struct {
 	WorkerID    string `json:"worker_id"`
-	ExitReason  string `json:"exit_reason"` // "error", "cancelled", "timed_out", "adapter_crash"
+	ExitReason  string `json:"exit_reason"` // "error", "canceled", "timed_out", "adapter_crash"
 	ExitCode    int    `json:"exit_code"`
 	DurationSec int    `json:"duration_sec"`
 	Error       string `json:"error,omitempty"`

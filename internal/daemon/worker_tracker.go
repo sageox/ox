@@ -22,7 +22,7 @@ type WorkerState struct {
 	WorkerID    string    `json:"worker_id"`
 	AgentID     string    `json:"agent_id"`     // parent session that spawned this worker
 	AdapterType string    `json:"adapter_type"` // which adapter runs this worker
-	Status      string    `json:"status"`       // starting, running, completed, failed, cancelled, timed_out
+	Status      string    `json:"status"`       // starting, running, completed, failed, canceled, timed_out
 	StartedAt   time.Time `json:"started_at"`
 	Task        string    `json:"task"`
 	Model       string    `json:"model"`

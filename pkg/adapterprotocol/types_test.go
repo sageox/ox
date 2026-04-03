@@ -525,7 +525,7 @@ func TestCancelSubagentParams_ReasonOmittedWhenEmpty(t *testing.T) {
 func TestCancelSubagentResult_RoundTrip(t *testing.T) {
 	want := adapterprotocol.CancelSubagentResult{
 		WorkerID: "w-OxA1b2-0001",
-		Status:   adapterprotocol.WorkerStatusCancelling,
+		Status:   adapterprotocol.WorkerStatusCanceling,
 	}
 
 	data, err := json.Marshal(want)
@@ -673,7 +673,7 @@ func TestSubagentFailedData_RoundTrip(t *testing.T) {
 func TestSubagentFailedData_OptionalFieldsOmitted(t *testing.T) {
 	failed := adapterprotocol.SubagentFailedData{
 		WorkerID:   "w-OxA1b2-0001",
-		ExitReason: "cancelled",
+		ExitReason: "canceled",
 	}
 
 	data, err := json.Marshal(failed)
@@ -739,9 +739,9 @@ func TestWorkerStatusConstants(t *testing.T) {
 		{"WorkerStatusRunning", adapterprotocol.WorkerStatusRunning, "running"},
 		{"WorkerStatusCompleted", adapterprotocol.WorkerStatusCompleted, "completed"},
 		{"WorkerStatusFailed", adapterprotocol.WorkerStatusFailed, "failed"},
-		{"WorkerStatusCancelled", adapterprotocol.WorkerStatusCancelled, "cancelled"},
+		{"WorkerStatusCanceled", adapterprotocol.WorkerStatusCanceled, "canceled"},
 		{"WorkerStatusTimedOut", adapterprotocol.WorkerStatusTimedOut, "timed_out"},
-		{"WorkerStatusCancelling", adapterprotocol.WorkerStatusCancelling, "cancelling"},
+		{"WorkerStatusCanceling", adapterprotocol.WorkerStatusCanceling, "canceling"},
 	}
 	for _, tt := range tests {
 		if tt.got != tt.want {

@@ -436,7 +436,7 @@ func TestServer_CancelSubagent(t *testing.T) {
 		srv.OnCancelSubagent(func(ctx context.Context, p adapterprotocol.CancelSubagentParams) (*adapterprotocol.CancelSubagentResult, error) {
 			return &adapterprotocol.CancelSubagentResult{
 				WorkerID: p.WorkerID,
-				Status:   adapterprotocol.WorkerStatusCancelling,
+				Status:   adapterprotocol.WorkerStatusCanceling,
 			}, nil
 		})
 	})
@@ -456,8 +456,8 @@ func TestServer_CancelSubagent(t *testing.T) {
 	if result.WorkerID != "w-OxA1b2-0001" {
 		t.Errorf("WorkerID = %q, want w-OxA1b2-0001", result.WorkerID)
 	}
-	if result.Status != adapterprotocol.WorkerStatusCancelling {
-		t.Errorf("Status = %q, want %q", result.Status, adapterprotocol.WorkerStatusCancelling)
+	if result.Status != adapterprotocol.WorkerStatusCanceling {
+		t.Errorf("Status = %q, want %q", result.Status, adapterprotocol.WorkerStatusCanceling)
 	}
 }
 

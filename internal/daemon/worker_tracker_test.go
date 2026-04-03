@@ -236,7 +236,7 @@ func TestWorkerTracker_ActiveCount(t *testing.T) {
 	wt.Register(&WorkerState{WorkerID: "w-2", AgentID: "a", Status: "running"})
 	wt.Register(&WorkerState{WorkerID: "w-3", AgentID: "a", Status: "completed"})
 	wt.Register(&WorkerState{WorkerID: "w-4", AgentID: "a", Status: "failed"})
-	wt.Register(&WorkerState{WorkerID: "w-5", AgentID: "a", Status: "cancelled"})
+	wt.Register(&WorkerState{WorkerID: "w-5", AgentID: "a", Status: "canceled"})
 
 	if got := wt.ActiveCount(); got != 2 {
 		t.Errorf("expected 2 active (starting+running), got %d", got)

@@ -137,7 +137,7 @@ Poll the current state of a worker. Used by ox dashboard and `ox agent <id> work
 }}
 ```
 
-Statuses: `starting` | `running` | `completed` | `failed` | `cancelled` | `timed_out`
+Statuses: `starting` | `running` | `completed` | `failed` | `canceled` | `timed_out`
 
 **Timeout class**: `fast`
 
@@ -153,10 +153,10 @@ process, waits up to 10 seconds, then SIGKILL.
 ```
 
 ```json
-{"id":12,"result":{"worker_id":"w-OxA1b2-0001","status":"cancelling"}}
+{"id":12,"result":{"worker_id":"w-OxA1b2-0001","status":"canceling"}}
 ```
 
-A `subagent.failed` event with `exit_reason: "cancelled"` follows when the process exits.
+A `subagent.failed` event with `exit_reason: "canceled"` follows when the process exits.
 
 **Timeout class**: `fast` (acknowledgment only; cancellation is async)
 
@@ -231,7 +231,7 @@ Worker exited with an error.
 }
 ```
 
-`exit_reason`: `error` | `cancelled` | `timed_out` | `adapter_crash`
+`exit_reason`: `error` | `canceled` | `timed_out` | `adapter_crash`
 
 ---
 
