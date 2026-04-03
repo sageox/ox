@@ -4,13 +4,16 @@ import (
 	"fmt"
 
 	"github.com/sageox/agentx"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/dashboard"
 	"github.com/spf13/cobra"
 )
 
 func init() {
-	rootCmd.AddCommand(dashboardCmd)
+	if auth.IsTUIEnabled() {
+		rootCmd.AddCommand(dashboardCmd)
+	}
 }
 
 var dashboardCmd = &cobra.Command{
