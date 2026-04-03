@@ -38,6 +38,7 @@ import (
 	"github.com/sageox/ox/internal/tokens"
 	"github.com/sageox/ox/internal/ui"
 	"github.com/sageox/ox/internal/useragent"
+	whisperstore "github.com/sageox/ox/internal/whisper/store"
 	"github.com/spf13/cobra"
 )
 
@@ -458,10 +459,19 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// emit provided context-trace events (best-effort, never blocks prime)
-	if sessionStat != nil && sessionStat.Recording {
-		if recordingState, stateErr := session.LoadRecordingStateForAgent(projectRoot, agentID); stateErr == nil && recordingState != nil {
-			emitProvidedContextTrace(recordingState.SessionPath, teamCtx, teamInstructions)
+	if teamCtx != nil || teamInstructions != nil {
+		var traceDir string
+		if sessionStat != nil && sessionStat.Recording {
+			if recordingState, stateErr := session.LoadRecordingStateForAgent(projectRoot, agentID); stateErr == nil && recordingState != nil {
+				traceDir = recordingState.SessionPath
+			}
 		}
+		// fallback: write to .sageox/cache/context-trace/ when not recording
+		if traceDir == "" {
+			traceDir = filepath.Join(projectRoot, ".sageox", "cache", "context-trace")
+			_ = os.MkdirAll(traceDir, 0o755)
+		}
+		emitProvidedContextTrace(traceDir, teamCtx, teamInstructions)
 	}
 
 	// always-present disambiguation of knowledge sources
@@ -636,6 +646,24 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	output.Timing = timing
 
 	err = outputAgentPrime(cmd, textMode, reviewMode, output)
+
+	// eagerly create whisper.db if not yet present (daemon may take time to start)
+	if projCfg, cfgErr := config.LoadProjectConfig(projectRoot); cfgErr == nil && projCfg != nil {
+		repoID := projCfg.RepoID
+		ep := endpoint.GetForProject(projectRoot)
+		if repoID != "" && ep != "" {
+			whisperDir := paths.WhisperDBDir(repoID, ep)
+			if whisperDir != "" {
+				whisperDBPath := filepath.Join(whisperDir, "whisper.db")
+				if _, statErr := os.Stat(whisperDBPath); os.IsNotExist(statErr) {
+					_ = os.MkdirAll(whisperDir, 0o755)
+					if ws, wsErr := whisperstore.Open(whisperDBPath); wsErr == nil {
+						ws.Close()
+					}
+				}
+			}
+		}
+	}
 
 	// Start daemon if not already running.
 	// Daemon self-exits via inactivity timeout when heartbeats stop.

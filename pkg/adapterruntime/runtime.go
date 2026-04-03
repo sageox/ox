@@ -33,6 +33,7 @@ type Config struct {
 	Read           func(adapterprotocol.ReadParams) (*adapterprotocol.ReadResult, error)
 	ReadMetadata   func(adapterprotocol.ReadParams) (*adapterprotocol.ReadMetadataResult, error)
 	Diagnose       func(adapterprotocol.DiagnoseParams) (*adapterprotocol.DiagnoseResult, error)
+	FindSession    func(adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error)
 	Serve          func(*Server)
 }
 
@@ -129,6 +130,15 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) e
 			return cfg.Diagnose(p)
 		})
 
+	case "find-session":
+		p := parseFindSessionParams(args[1:])
+		return runOneShot(enc, func() (any, error) {
+			if cfg.FindSession == nil {
+				return nil, fmt.Errorf("find-session not implemented")
+			}
+			return cfg.FindSession(p)
+		})
+
 	case "--serve":
 		if cfg.Serve == nil {
 			return fmt.Errorf("serve mode not implemented")
@@ -192,6 +202,27 @@ func parseDiagnoseParams(args []string) adapterprotocol.DiagnoseParams {
 			i++
 		case "--scope":
 			p.Scope = args[i+1]
+			i++
+		}
+	}
+	return p
+}
+
+func parseFindSessionParams(args []string) adapterprotocol.FindSessionParams {
+	p := adapterprotocol.FindSessionParams{}
+	for i := 0; i < len(args)-1; i++ {
+		switch args[i] {
+		case "--repo-root":
+			p.RepoRoot = args[i+1]
+			i++
+		case "--agent-id":
+			p.AgentID = args[i+1]
+			i++
+		case "--since":
+			p.Since = args[i+1]
+			i++
+		case "--agent-session-id":
+			p.AgentSessionID = args[i+1]
 			i++
 		}
 	}

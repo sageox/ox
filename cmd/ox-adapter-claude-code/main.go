@@ -7,6 +7,8 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
 )
@@ -27,6 +29,7 @@ func main() {
 		Read:           handleRead,
 		ReadMetadata:   handleReadMetadata,
 		Diagnose:       handleDiagnose,
+		FindSession:    handleFindSession,
 		Serve:          handleServe,
 	})
 }
@@ -47,5 +50,16 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		},
 		HookEnvValues: []string{"claude-code"},
 		ServeMode:     true,
+	}, nil
+}
+
+func handleFindSession(p adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error) {
+	sessionFile, offset, err := findSessionFile(p.RepoRoot, p.AgentID, p.Since, p.AgentSessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session not found: %w", err)
+	}
+	return &adapterprotocol.FindSessionResult{
+		SessionFile: sessionFile,
+		Offset:      offset,
 	}, nil
 }

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/codedb"
+	"github.com/sageox/ox/internal/codedb/index"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	gh "github.com/sageox/ox/internal/github"
@@ -39,35 +41,90 @@ var indexCodeCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		full, _ := cmd.Flags().GetBool("full")
 
-		// ensure daemon is running — indexing happens in the daemon
-		if err := daemon.EnsureDaemon(); err != nil {
-			return fmt.Errorf("daemon required for indexing: %w", err)
-		}
-
-		payload := daemon.CodeIndexPayload{Full: full}
-		if len(args) > 0 {
-			payload.URL = args[0]
-			fmt.Fprintf(cmd.ErrOrStderr(), "Indexing %s...\n", args[0])
-		} else if full {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Full reindex of local repo...\n")
-		} else {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Indexing local repo...\n")
-		}
-
-		client := daemon.NewClientForCurrentRepoWithTimeout(5 * time.Minute)
-		result, err := client.CodeIndex(payload, func(stage string, percent *int, message string) {
-			if message != "" {
-				fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", message)
+		// try daemon-based indexing first (preferred: handles concurrency, fsnotify)
+		if err := daemon.EnsureDaemon(); err == nil {
+			payload := daemon.CodeIndexPayload{Full: full}
+			if len(args) > 0 {
+				payload.URL = args[0]
+				fmt.Fprintf(cmd.ErrOrStderr(), "Indexing %s...\n", args[0])
+			} else if full {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Full reindex of local repo...\n")
+			} else {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Indexing local repo...\n")
 			}
-		})
-		if err != nil {
+
+			client := daemon.NewClientForCurrentRepoWithTimeout(5 * time.Minute)
+			result, err := client.CodeIndex(payload, func(stage string, percent *int, message string) {
+				if message != "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", message)
+				}
+			})
+			if err == nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Done. Parsed %d blobs, %d symbols\n",
+					result.BlobsParsed, result.SymbolsExtracted)
+				return nil
+			}
+			slog.Debug("daemon indexing failed, falling back to in-process", "error", err)
+		}
+
+		// fallback: in-process indexing (no daemon needed)
+		return indexCodeInProcess(cmd, args, full)
+	},
+}
+
+// indexCodeInProcess runs code indexing directly in the CLI process when the
+// daemon is unavailable.
+func indexCodeInProcess(cmd *cobra.Command, args []string, full bool) error {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return fmt.Errorf("not in a git repository")
+	}
+
+	dataDir := resolveCodeDBDir(gitRoot)
+
+	if full {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Full reindex (in-process)...\n")
+		if err := os.RemoveAll(dataDir); err != nil {
+			return fmt.Errorf("wipe index for full reindex: %w", err)
+		}
+	} else {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Indexing local repo (in-process)...\n")
+	}
+
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return fmt.Errorf("create codedb dir: %w", err)
+	}
+
+	db, err := codedb.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open codedb: %w", err)
+	}
+	defer db.Close()
+
+	ctx := cmd.Context()
+	opts := index.IndexOptions{}
+
+	if len(args) > 0 {
+		if err := db.IndexRepo(ctx, args[0], opts); err != nil {
 			return fmt.Errorf("index: %w", err)
 		}
+	} else {
+		if err := db.IndexLocalRepo(ctx, gitRoot, opts); err != nil {
+			return fmt.Errorf("index local: %w", err)
+		}
+	}
 
-		fmt.Fprintf(cmd.ErrOrStderr(), "Done. Parsed %d blobs, %d symbols\n",
-			result.BlobsParsed, result.SymbolsExtracted)
-		return nil
-	},
+	stats, err := db.ParseSymbols(ctx, nil)
+	if err != nil {
+		slog.Warn("symbol parsing failed (non-fatal)", "error", err)
+	}
+
+	if _, err := db.ParseComments(ctx, nil); err != nil {
+		slog.Warn("comment parsing failed (non-fatal)", "error", err)
+	}
+
+	fmt.Fprintf(cmd.ErrOrStderr(), "Done (in-process). %d symbols extracted\n", stats.SymbolsExtracted)
+	return nil
 }
 
 var indexGitHubCmd = &cobra.Command{
