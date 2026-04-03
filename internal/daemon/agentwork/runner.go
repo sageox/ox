@@ -18,6 +18,11 @@ type RunRequest struct {
 	Prompt          string
 	WorkDir         string
 	TimeoutOverride time.Duration
+	// SkipLLM bypasses the LLM runner entirely. The manager calls
+	// ProcessResult directly with an empty RunResult. Use this when
+	// the work item has all the information it needs to proceed without
+	// generating a prompt (e.g., upload-only session recovery).
+	SkipLLM bool
 }
 
 // RunResult captures the outcome of an agent invocation.

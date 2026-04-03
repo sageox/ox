@@ -501,42 +501,55 @@ func (m *Manager) executeItem(ctx context.Context, item *WorkItem) {
 	m.active[item.ID] = proc
 	m.mu.Unlock()
 
-	// run the agent
-	result, runErr := m.runner.Run(ctx, req)
-	duration := time.Since(start)
+	var result *RunResult
+	var runErr error
+	var duration time.Duration
 
-	// remove from active map
-	m.mu.Lock()
-	delete(m.active, item.ID)
-	m.mu.Unlock()
+	if req.SkipLLM {
+		// no LLM invocation needed — call ProcessResult directly with empty output
+		result = &RunResult{}
+		duration = time.Since(start)
+		m.mu.Lock()
+		delete(m.active, item.ID)
+		m.mu.Unlock()
+	} else {
+		// run the agent
+		result, runErr = m.runner.Run(ctx, req)
+		duration = time.Since(start)
 
-	if runErr != nil {
-		item.Attempts++
-		item.LastErr = runErr.Error()
+		// remove from active map
+		m.mu.Lock()
+		delete(m.active, item.ID)
+		m.mu.Unlock()
 
-		exitCode := 0
-		if result != nil {
-			exitCode = result.ExitCode
+		if runErr != nil {
+			item.Attempts++
+			item.LastErr = runErr.Error()
+
+			exitCode := 0
+			if result != nil {
+				exitCode = result.ExitCode
+			}
+
+			if item.Attempts < maxRetries {
+				m.logger.Warn("agent run failed, will retry",
+					"type", item.Type,
+					"attempt", item.Attempts,
+					"max_attempts", maxRetries,
+					"error", runErr,
+				)
+				m.queue.Requeue(item)
+			} else {
+				m.logger.Error("agent run failed after max retries",
+					"type", item.Type,
+					"attempts", item.Attempts,
+					"error", runErr,
+				)
+				m.queue.Complete(item.DedupKey)
+				m.recordFailure(item, start, exitCode, runErr.Error())
+			}
+			return
 		}
-
-		if item.Attempts < maxRetries {
-			m.logger.Warn("agent run failed, will retry",
-				"type", item.Type,
-				"attempt", item.Attempts,
-				"max_attempts", maxRetries,
-				"error", runErr,
-			)
-			m.queue.Requeue(item)
-		} else {
-			m.logger.Error("agent run failed after max retries",
-				"type", item.Type,
-				"attempts", item.Attempts,
-				"error", runErr,
-			)
-			m.queue.Complete(item.DedupKey)
-			m.recordFailure(item, start, exitCode, runErr.Error())
-		}
-		return
 	}
 
 	// process result through handler
