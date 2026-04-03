@@ -41,8 +41,10 @@ func TestAccumulator_CreateThenDelete(t *testing.T) {
 	acc.AddEvent("tmp/scratch.txt", fsnotify.Create, false)
 	acc.AddEvent("tmp/scratch.txt", fsnotify.Remove, false)
 
-	// wait for settle, then verify suppression
-	time.Sleep(100 * time.Millisecond)
+	// wait until pending events are fully settled, then verify suppression
+	require.Eventually(t, func() bool {
+		return acc.PendingCount() == 0
+	}, 2*time.Second, 10*time.Millisecond)
 	changes := acc.DrainSettled()
 	assert.Nil(t, changes, "create+delete of same file should be suppressed")
 }
@@ -219,6 +221,9 @@ func TestGitTrackedMatcher_TrackedDirsSorted(t *testing.T) {
 // --- ProjectWatcher tests ---
 
 func TestProjectWatcher_WatchesTrackedDirs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: watcher polling can take up to 2s")
+	}
 	mockWatcher := NewMockFileSystemWatcher()
 	mockFS := NewMockFileSystem()
 
@@ -272,6 +277,9 @@ func TestProjectWatcher_WatchesTrackedDirs(t *testing.T) {
 }
 
 func TestProjectWatcher_UntrackedNotWatched(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: watcher polling can take up to 2s")
+	}
 	mockWatcher := NewMockFileSystemWatcher()
 	mockFS := NewMockFileSystem()
 
@@ -326,6 +334,9 @@ func TestProjectWatcher_UntrackedNotWatched(t *testing.T) {
 }
 
 func TestProjectWatcher_EventsReachAccumulator(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: watcher polling can take up to 2s")
+	}
 	mockWatcher := NewMockFileSystemWatcher()
 	mockFS := NewMockFileSystem()
 
@@ -379,6 +390,9 @@ func TestProjectWatcher_EventsReachAccumulator(t *testing.T) {
 }
 
 func TestProjectWatcher_UntrackedFileEventsFiltered(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: watcher polling can take up to 2s")
+	}
 	mockWatcher := NewMockFileSystemWatcher()
 	mockFS := NewMockFileSystem()
 
@@ -432,6 +446,9 @@ func TestProjectWatcher_UntrackedFileEventsFiltered(t *testing.T) {
 }
 
 func TestProjectWatcher_NewFileCreationPassesThrough(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: watcher polling can take up to 2s")
+	}
 	mockWatcher := NewMockFileSystemWatcher()
 	mockFS := NewMockFileSystem()
 
