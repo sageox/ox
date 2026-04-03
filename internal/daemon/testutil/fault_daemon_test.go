@@ -274,18 +274,21 @@ func TestFaultDaemon_Slow_FlakyConnection(t *testing.T) {
 	}
 	setupFaultTest(t)
 
-	d := NewFlakyDaemon(t, 2)
+	// DropEveryN=3: every 3rd connection is dropped.
+	// AwaitUnixSocket probe in Start() consumes conn #1, so the first
+	// daemon.IsHealthy() call is conn #2, and conn #3 is the drop.
+	d := NewFlakyDaemon(t, 3)
 	d.Start()
 	defer d.Stop()
 
 	err := daemon.IsHealthy()
-	assert.NoError(t, err) // conn #1
+	assert.NoError(t, err) // conn #2
 
 	err = daemon.IsHealthy()
-	assert.Error(t, err) // conn #2 dropped
+	assert.Error(t, err) // conn #3 dropped
 
 	err = daemon.IsHealthy()
-	assert.NoError(t, err) // conn #3
+	assert.NoError(t, err) // conn #4
 }
 
 func TestFaultDaemon_Slow_SwitchFaultMidTest(t *testing.T) {
