@@ -1,0 +1,93 @@
+schema_version: 1
+
+adapters:
+  - name: claude-code
+    display_name: Claude Code
+    description: Reads Claude Code sessions, installs Claude Code hooks
+    type: session
+    bundled: true
+    binary: ox-adapter-claude-code
+    repo: sageox/ox
+    capabilities: [session_reader, hook_installer, incremental_reader, file_watcher, serve_mode]
+    detect_commands: [claude]
+
+  - name: gemini
+    display_name: Gemini CLI
+    description: Reads Gemini CLI sessions, installs Gemini hooks
+    type: session
+    bundled: true
+    binary: ox-adapter-gemini
+    repo: sageox/ox
+    capabilities: [session_reader, hook_installer, incremental_reader, serve_mode]
+    detect_commands: [gemini]
+
+  - name: codex
+    display_name: OpenAI Codex CLI
+    description: Reads Codex CLI sessions, installs Codex hooks
+    type: session
+    bundled: true
+    binary: ox-adapter-codex
+    repo: sageox/ox
+    capabilities: [session_reader, hook_installer, incremental_reader, serve_mode]
+    detect_commands: [codex]
+
+  - name: amp
+    display_name: Amp
+    description: Reads Amp sessions, installs Amp hooks
+    type: session
+    bundled: false
+    binary: ox-adapter-amp
+    repo: sageox/ox-adapters
+    capabilities: [session_reader, hook_installer, incremental_reader]
+    detect_commands: [amp]
+
+  - name: cursor
+    display_name: Cursor
+    description: Reads Cursor sessions
+    type: session
+    bundled: false
+    binary: ox-adapter-cursor
+    repo: sageox/ox-adapters
+    capabilities: [session_reader, incremental_reader]
+    detect_commands: [cursor]
+
+  - name: windsurf
+    display_name: Windsurf
+    description: Reads Windsurf sessions
+    type: session
+    bundled: false
+    binary: ox-adapter-windsurf
+    repo: sageox/ox-adapters
+    capabilities: [session_reader, incremental_reader]
+    detect_commands: [windsurf]
+
+  - name: copilot
+    display_name: GitHub Copilot
+    description: Reads Copilot sessions
+    type: session
+    bundled: false
+    binary: ox-adapter-copilot
+    repo: sageox/ox-adapters
+    capabilities: [session_reader]
+    detect_commands: [github-copilot-cli]
+
+  - name: aider
+    display_name: Aider
+    description: Reads Aider sessions
+    type: session
+    bundled: false
+    binary: ox-adapter-aider
+    repo: sageox/ox-adapters
+    capabilities: [session_reader, hook_installer, incremental_reader]
+    detect_commands: [aider]
+
+  - name: cline
+    display_name: Cline
+    description: Reads Cline sessions
+    type: session
+    bundled: false
+    binary: ox-adapter-cline
+    repo: sageox/ox-adapters
+    capabilities: [session_reader]
+
+community: []

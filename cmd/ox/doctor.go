@@ -282,7 +282,7 @@ common issues, or --fix-slug to target specific checks.`,
 		if len(fixSlugs) > 0 {
 			var invalidSlugs []string
 			for _, slug := range fixSlugs {
-				if GetDoctorCheck(slug) == nil {
+				if GetDoctorCheck(slug) == nil && !isAdapterSlug(slug) {
 					invalidSlugs = append(invalidSlugs, slug)
 				}
 			}
@@ -875,6 +875,17 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		name:   "Agent Worker",
 		checks: []checkResult{checkAgentWorkerBinary()},
 	})
+
+	// Category 11b: External Adapters
+	// Discover external adapters and run their diagnose subcommands.
+	// Independent of daemon -- works as one-shot subprocess per adapter.
+	progress.show("External Adapters")
+	if adapterChecks := checkExternalAdapters(opts); len(adapterChecks) > 0 {
+		categories = append(categories, checkCategory{
+			name:   "External Adapters",
+			checks: adapterChecks,
+		})
+	}
 
 	// Category 12: Updates
 	progress.show("Updates")

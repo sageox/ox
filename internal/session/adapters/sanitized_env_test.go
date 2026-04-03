@@ -1,0 +1,357 @@
+package adapters
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/sageox/ox/pkg/adapterprotocol"
+)
+
+// envMap converts a []string of "KEY=VALUE" pairs into a map for easier assertion.
+func envMap(env []string) map[string]string {
+	m := make(map[string]string, len(env))
+	for _, entry := range env {
+		k, v, _ := strings.Cut(entry, "=")
+		m[k] = v
+	}
+	return m
+}
+
+// envKeys extracts sorted key names from a []string of "KEY=VALUE" pairs.
+func envKeys(env []string) []string {
+	keys := make([]string, 0, len(env))
+	for _, entry := range env {
+		k, _, _ := strings.Cut(entry, "=")
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func TestSanitizedEnv_AllowlistedVarsPassThrough(t *testing.T) {
+	// Failure prevented: basic system vars stripped, adapter binary can't find HOME/PATH/TMPDIR.
+	environ := []string{
+		"HOME=/home/dev",
+		"PATH=/usr/bin:/usr/local/bin",
+		"TMPDIR=/tmp",
+		"ANTHROPIC_API_KEY=sk-secret-key",
+		"SAGEOX_TOKEN=tok-abc123",
+		"SECRET_TOKEN=hunter2",
+	}
+
+	result := SanitizedEnv(environ, nil)
+	m := envMap(result)
+
+	// allowlisted vars must be present
+	for _, key := range []string{"HOME", "PATH", "TMPDIR"} {
+		if _, ok := m[key]; !ok {
+			t.Errorf("expected %s in sanitized env", key)
+		}
+	}
+
+	// secrets must be stripped
+	for _, key := range []string{"ANTHROPIC_API_KEY", "SAGEOX_TOKEN", "SECRET_TOKEN"} {
+		if _, ok := m[key]; ok {
+			t.Errorf("%s must not be in sanitized env", key)
+		}
+	}
+}
+
+func TestSanitizedEnv_XDGPrefixMatching(t *testing.T) {
+	// Failure prevented: XDG config/data dirs stripped, adapter can't find user config paths.
+	environ := []string{
+		"HOME=/home/dev",
+		"XDG_CONFIG_HOME=/home/dev/.config",
+		"XDG_DATA_HOME=/home/dev/.local/share",
+		"XDG_CACHE_HOME=/home/dev/.cache",
+		"XDG_RUNTIME_DIR=/run/user/1000",
+		"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI",
+	}
+
+	result := SanitizedEnv(environ, nil)
+	m := envMap(result)
+
+	for _, key := range []string{"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"} {
+		if _, ok := m[key]; !ok {
+			t.Errorf("expected %s in sanitized env", key)
+		}
+	}
+
+	if _, ok := m["AWS_SECRET_ACCESS_KEY"]; ok {
+		t.Error("AWS_SECRET_ACCESS_KEY must not be in sanitized env")
+	}
+}
+
+func TestSanitizedEnv_OXProtocolVarsAlwaysIncluded(t *testing.T) {
+	// Failure prevented: adapter doesn't receive protocol version or repo context.
+	environ := []string{
+		"HOME=/home/dev",
+		"OX_REPO_ROOT=/src/project",
+		"OX_REPO_ID=repo-abc",
+		"OX_TEAM_ID=team-xyz",
+		"OX_PROTOCOL_VERSION=1",
+	}
+
+	result := SanitizedEnv(environ, nil)
+	m := envMap(result)
+
+	expected := map[string]string{
+		"OX_REPO_ROOT":        "/src/project",
+		"OX_REPO_ID":          "repo-abc",
+		"OX_TEAM_ID":          "team-xyz",
+		"OX_PROTOCOL_VERSION": "1",
+	}
+
+	for k, v := range expected {
+		if got, ok := m[k]; !ok {
+			t.Errorf("expected %s in sanitized env", k)
+		} else if got != v {
+			t.Errorf("%s = %q, want %q", k, got, v)
+		}
+	}
+}
+
+func TestSanitizedEnv_OXProtocolVersionInjectedWhenMissing(t *testing.T) {
+	// Failure prevented: adapter receives no OX_PROTOCOL_VERSION, can't validate protocol compat.
+	environ := []string{
+		"HOME=/home/dev",
+		"OX_REPO_ROOT=/src/project",
+	}
+
+	result := SanitizedEnv(environ, nil)
+	m := envMap(result)
+
+	expected := fmt.Sprintf("%d", adapterprotocol.ProtocolVersion)
+	if got, ok := m["OX_PROTOCOL_VERSION"]; !ok {
+		t.Error("OX_PROTOCOL_VERSION must be injected when not in environ")
+	} else if got != expected {
+		t.Errorf("OX_PROTOCOL_VERSION = %q, want %q", got, expected)
+	}
+}
+
+func TestSanitizedEnv_OXProtocolVersionNotDuplicatedWhenPresent(t *testing.T) {
+	// Failure prevented: duplicate OX_PROTOCOL_VERSION entries confuse subprocess env parsing.
+	environ := []string{
+		"OX_PROTOCOL_VERSION=1",
+	}
+
+	result := SanitizedEnv(environ, nil)
+	count := 0
+	for _, entry := range result {
+		if strings.HasPrefix(entry, "OX_PROTOCOL_VERSION=") {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 OX_PROTOCOL_VERSION entry, got %d", count)
+	}
+}
+
+func TestSanitizedEnv_AdapterRequiredEnvIncluded(t *testing.T) {
+	// Failure prevented: adapter declares it needs GEMINI_API_KEY but doesn't receive it.
+	environ := []string{
+		"HOME=/home/dev",
+		"GEMINI_API_KEY=AIzaSy-fakekey",
+		"OPENAI_API_KEY=sk-should-be-stripped",
+		"ANTHROPIC_API_KEY=sk-also-stripped",
+	}
+
+	requiredEnv := []string{"GEMINI_API_KEY"}
+
+	result := SanitizedEnv(environ, requiredEnv)
+	m := envMap(result)
+
+	if _, ok := m["GEMINI_API_KEY"]; !ok {
+		t.Error("GEMINI_API_KEY declared in required_env must be in sanitized env")
+	}
+
+	// other API keys not in required_env must be stripped
+	for _, key := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY"} {
+		if _, ok := m[key]; ok {
+			t.Errorf("%s must not be in sanitized env (not in required_env)", key)
+		}
+	}
+}
+
+func TestSanitizedEnv_RequiredEnvMissingFromEnviron(t *testing.T) {
+	// Failure prevented: adapter declares required_env but the var isn't set; verify no panic/error.
+	environ := []string{
+		"HOME=/home/dev",
+	}
+
+	requiredEnv := []string{"MISSING_VAR"}
+
+	result := SanitizedEnv(environ, requiredEnv)
+	m := envMap(result)
+
+	// MISSING_VAR isn't in environ, so it shouldn't appear in output
+	if _, ok := m["MISSING_VAR"]; ok {
+		t.Error("MISSING_VAR should not appear when not present in environ")
+	}
+
+	// should still have HOME
+	if _, ok := m["HOME"]; !ok {
+		t.Error("HOME should still be present")
+	}
+}
+
+func TestSanitizedEnv_SecretsStripped(t *testing.T) {
+	// Failure prevented: daemon leaks API keys, tokens, or credentials to adapter subprocesses.
+	secrets := []string{
+		"ANTHROPIC_API_KEY=sk-ant-secret",
+		"SAGEOX_TOKEN=tok-sageox",
+		"SAGEOX_ENDPOINT=https://api.sageox.ai",
+		"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI",
+		"OPENAI_API_KEY=sk-openai",
+		"DATABASE_URL=postgres://user:pass@host/db",
+		"GITHUB_TOKEN=ghp_xxxx",
+		"SSH_AUTH_SOCK=/tmp/ssh-agent.sock",
+		"GPG_TTY=/dev/ttys000",
+	}
+
+	environ := append([]string{"HOME=/home/dev", "PATH=/usr/bin"}, secrets...)
+
+	result := SanitizedEnv(environ, nil)
+	m := envMap(result)
+
+	for _, entry := range secrets {
+		key, _, _ := strings.Cut(entry, "=")
+		if _, ok := m[key]; ok {
+			t.Errorf("secret %s must not be in sanitized env", key)
+		}
+	}
+}
+
+func TestSanitizedEnv_EmptyEnviron(t *testing.T) {
+	// Failure prevented: nil/empty environ causes panic or missing OX_PROTOCOL_VERSION.
+	result := SanitizedEnv(nil, nil)
+	m := envMap(result)
+
+	// OX_PROTOCOL_VERSION must still be injected
+	if _, ok := m["OX_PROTOCOL_VERSION"]; !ok {
+		t.Error("OX_PROTOCOL_VERSION must be present even with empty environ")
+	}
+}
+
+func TestSanitizedEnv_MalformedEntries(t *testing.T) {
+	// Failure prevented: environ entries without '=' cause index-out-of-bounds or leaks.
+	environ := []string{
+		"HOME=/home/dev",
+		"MALFORMED_NO_EQUALS",
+		"=EMPTY_KEY",
+		"PATH=/usr/bin",
+	}
+
+	result := SanitizedEnv(environ, nil)
+	m := envMap(result)
+
+	if _, ok := m["HOME"]; !ok {
+		t.Error("HOME should be present")
+	}
+	if _, ok := m["PATH"]; !ok {
+		t.Error("PATH should be present")
+	}
+
+	// malformed entry (no '=') should be silently skipped
+	for _, entry := range result {
+		if entry == "MALFORMED_NO_EQUALS" {
+			t.Error("malformed entry without '=' should be skipped")
+		}
+	}
+}
+
+func TestSanitizedEnv_ComprehensiveTable(t *testing.T) {
+	// Table-driven test covering all allowlist categories and edge cases.
+	tests := []struct {
+		name        string
+		environ     []string
+		requiredEnv []string
+		wantKeys    []string // must be present
+		rejectKeys  []string // must not be present
+	}{
+		{
+			name:       "only exact allowlist",
+			environ:    []string{"HOME=/h", "PATH=/p", "TMPDIR=/t", "EDITOR=vim"},
+			wantKeys:   []string{"HOME", "PATH", "TMPDIR"},
+			rejectKeys: []string{"EDITOR"},
+		},
+		{
+			name:       "XDG prefix",
+			environ:    []string{"XDG_CONFIG_HOME=/c", "XDGFAKE=no"},
+			wantKeys:   []string{"XDG_CONFIG_HOME"},
+			rejectKeys: []string{"XDGFAKE"}, // no underscore after XDG
+		},
+		{
+			name:       "OX_ prefix passthrough",
+			environ:    []string{"OX_CUSTOM_VAR=val", "OXIDE=no"},
+			wantKeys:   []string{"OX_CUSTOM_VAR"},
+			rejectKeys: []string{"OXIDE"},
+		},
+		{
+			name:        "required_env overrides default strip",
+			environ:     []string{"CUSTOM_KEY=val", "OTHER_KEY=no"},
+			requiredEnv: []string{"CUSTOM_KEY"},
+			wantKeys:    []string{"CUSTOM_KEY"},
+			rejectKeys:  []string{"OTHER_KEY"},
+		},
+		{
+			name:        "multiple required_env",
+			environ:     []string{"KEY_A=a", "KEY_B=b", "KEY_C=c"},
+			requiredEnv: []string{"KEY_A", "KEY_B"},
+			wantKeys:    []string{"KEY_A", "KEY_B"},
+			rejectKeys:  []string{"KEY_C"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := SanitizedEnv(tt.environ, tt.requiredEnv)
+			m := envMap(result)
+
+			for _, key := range tt.wantKeys {
+				if _, ok := m[key]; !ok {
+					t.Errorf("expected %s in sanitized env", key)
+				}
+			}
+			for _, key := range tt.rejectKeys {
+				if _, ok := m[key]; ok {
+					t.Errorf("%s must not be in sanitized env", key)
+				}
+			}
+		})
+	}
+}
+
+func TestIsAllowlisted(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"HOME", true},
+		{"PATH", true},
+		{"TMPDIR", true},
+		{"XDG_CONFIG_HOME", true},
+		{"XDG_DATA_HOME", true},
+		{"OX_REPO_ROOT", true},
+		{"OX_PROTOCOL_VERSION", true},
+		{"OX_TEAM_ID", true},
+		{"ANTHROPIC_API_KEY", false},
+		{"SAGEOX_TOKEN", false},
+		{"EDITOR", false},
+		{"SHELL", false},
+		{"XDGFAKE", false},   // no underscore, not a real XDG var
+		{"OXIDE", false},     // starts with OX but not OX_
+		{"HOME_DIR", false},  // contains HOME but isn't exact match
+		{"PATHINFO", false},  // contains PATH but isn't exact match
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isAllowlisted(tt.name); got != tt.want {
+				t.Errorf("isAllowlisted(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}

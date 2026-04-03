@@ -151,6 +151,9 @@ type StatusData struct {
 	// agent work manager status
 	AgentWork *agentwork.AgentWorkStatus `json:"agent_work,omitempty"`
 
+	// adapter process status (populated when supervisor is wired into daemon)
+	Adapters map[string]AdapterStatus `json:"adapters,omitempty"`
+
 	// connected clones/worktrees that have sent heartbeats
 	Callers []CallerInfo `json:"callers,omitempty"`
 }

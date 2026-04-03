@@ -1,6 +1,6 @@
 # Makefile for ox CLI tool
 
-.PHONY: help build install clean dev run test test-all test-slow test-integration test-preflight test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
+.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-all test-slow test-integration test-preflight test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
 
 # Variables
 GO := go
@@ -12,17 +12,40 @@ GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GOPATH := $(shell go env GOPATH)
 LDFLAGS := -ldflags "-X github.com/sageox/ox/internal/version.Version=$(VERSION) -X github.com/sageox/ox/internal/version.BuildDate=$(BUILD_TIME) -X github.com/sageox/ox/internal/version.GitCommit=$(GIT_COMMIT)"
 
+# Bundled adapters (shipped in release tarballs alongside ox)
+ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex
+
 # Build targets
-build: ## Build the ox binary to bin/ox
+build: build-ox build-adapters ## Build ox and all bundled adapters to bin/
+
+build-ox: ## Build the ox binary to bin/ox
 	@echo "Building $(BINARY_NAME) $(VERSION)..."
 	@mkdir -p bin
 	$(GO) build $(LDFLAGS) -o bin/$(BINARY_NAME) ./cmd/ox
 	@echo "Build complete: bin/$(BINARY_NAME)"
 
-install: ## Install ox to $GOPATH/bin
+build-adapters: ## Build all bundled adapter binaries to bin/
+	@echo "Building adapters..."
+	@mkdir -p bin
+	@for adapter in $(ADAPTERS); do \
+		echo "  Building $$adapter..."; \
+		$(GO) build -o bin/$$adapter ./cmd/$$adapter; \
+	done
+	@echo "Adapters built: $(ADAPTERS)"
+
+install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
+
+install-ox: ## Install ox to $GOPATH/bin
 	@echo "Installing $(BINARY_NAME) to $(GOPATH)/bin..."
 	$(GO) install $(LDFLAGS) ./cmd/ox
 	@echo "Installed $(BINARY_NAME) to $(GOPATH)/bin/$(BINARY_NAME)"
+
+install-adapters: ## Install bundled adapters to $GOPATH/bin
+	@echo "Installing adapters to $(GOPATH)/bin..."
+	@for adapter in $(ADAPTERS); do \
+		$(GO) install ./cmd/$$adapter; \
+		echo "  Installed $$adapter"; \
+	done
 
 clean: ## Remove build artifacts
 	@echo "Cleaning build artifacts..."

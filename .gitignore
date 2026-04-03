@@ -1,6 +1,8 @@
 # binaries
 /bin/
 /ox
+/ox-adapter-*
+!/cmd/ox-adapter-*/
 /dist/
 /tmp/
 

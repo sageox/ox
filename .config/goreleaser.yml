@@ -8,6 +8,9 @@ before:
     - go mod tidy
 
 builds:
+  # --- ox CLI (main binary) ---
+  # Split per platform because signing ldflags differ per env var.
+
   - id: ox-linux-amd64
     main: ./cmd/ox
     binary: ox
@@ -93,6 +96,64 @@ builds:
       - -X 'github.com/sageox/ox/internal/signing.EmbeddedPublicKey={{ .Env.SAGEOX_CLI_PUBLIC_KEY }}'
       - -X 'github.com/sageox/ox/internal/signing.EmbeddedSignatures={{ .Env.SAGEOX_CLI_SIGNATURES }}'
 
+  # --- Bundled adapters ---
+  # Adapters don't need signing ldflags. They define their own version constants.
+  # Note: ox-adapter-test is intentionally excluded (development/testing only).
+
+  - id: ox-adapter-claude-code
+    main: ./cmd/ox-adapter-claude-code
+    binary: ox-adapter-claude-code
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: freebsd
+        goarch: arm64
+    ldflags:
+      - -s -w
+
+  - id: ox-adapter-gemini
+    main: ./cmd/ox-adapter-gemini
+    binary: ox-adapter-gemini
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: freebsd
+        goarch: arm64
+    ldflags:
+      - -s -w
+
+  - id: ox-adapter-codex
+    main: ./cmd/ox-adapter-codex
+    binary: ox-adapter-codex
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: freebsd
+        goarch: arm64
+    ldflags:
+      - -s -w
+
 archives:
   - id: ox-archive
     formats:
@@ -130,6 +191,8 @@ release:
 
     Pre-compiled binaries for Linux, macOS (Intel & Apple Silicon), and FreeBSD.
 
+    Each tarball includes ox and bundled adapters (claude-code, gemini, codex).
+
     ### Installation
 
     **Quick Install (macOS/Linux/FreeBSD):**
@@ -153,6 +216,9 @@ brews:
       system "#{bin}/ox", "version"
     install: |
       bin.install "ox"
+      bin.install "ox-adapter-claude-code"
+      bin.install "ox-adapter-gemini"
+      bin.install "ox-adapter-codex"
 
 announce:
   skip: true
