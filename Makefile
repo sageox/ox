@@ -45,12 +45,12 @@ run: build ## Build and run ox
 #   fast  (make test)             — Unit tests <500ms. No git clone, no network. Runs on every commit.
 #   full  (make test-all)         — All unit tests including expensive ones (git clone, SQLite concurrent, LFS).
 #   slow  (make test-slow)        — Tests requiring real ox binary (build tag: slow). No Claude needed.
-#   integration (make test-integration) — E2E with real Claude sessions (build tag: integration). Release gate.
+#   integration — E2E with real Claude sessions. Lives in sageox/ox-test-harness (private).
 #
 # Recommended usage:
 #   Coding:    make test           — Fast feedback (<30s target)
 #   Pre-PR:    make test-preflight — Full + slow + lint (~3-5min)
-#   Release:   make test-all test-slow test-integration
+#   Release:   make test-all test-slow (+ integration tests from ox-test-harness)
 #
 GOTESTSUM := $(shell which gotestsum 2>/dev/null || echo "go run gotest.tools/gotestsum@latest")
 
@@ -66,14 +66,20 @@ test-slow: ## Run slow tests (build tag: slow) — requires real ox binary, no C
 	@echo "Running slow tests (requires built ox binary)..."
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=slow -race -timeout=5m ./...
 
-test-integration: ## Run integration tests (build tag: integration) — E2E with real Claude sessions
-	@echo "Running integration tests (requires claude CLI and ANTHROPIC_API_KEY)..."
-	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=integration -race -timeout=10m ./...
+test-integration: ## Integration tests live in sageox/ox-test-harness
+	@echo "Coding agent integration tests are in sageox/ox-test-harness."
+	@exit 1
 
 test-preflight: lint test-all test-slow ## Pre-PR quality gate: lint + all unit tests + slow tests
 
-test-ledger-twin: ## Run glance ledger twin tests (generates fake ledger for inspection)
-	@echo "Running ledger twin tests..."
+test-digital-twin: test-team-context-twin test-ledger-twin
+
+test-team-context-twin: ## Digital twin tests (generates fake team context for inspection)
+	@echo "Running team context digital twin tests..."
+	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=team_context_twin -v -count=1 -timeout=2m ./tests/team_context_twin/...
+
+test-ledger-twin: ## Digital twin ledger tests (generates fake ledger for inspection)
+	@echo "Running ledger digital twin tests..."
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=ledger_twin -v -count=1 -timeout=2m ./tests/ledger_twin/...
 
 test-benchmark: ## Run prime efficiency benchmarks (requires claude CLI) - ~80 min, ~40 API calls
@@ -262,45 +268,8 @@ beads-setup: ## Bootstrap beads issue tracking (shared Dolt server + JSONL impor
 	@echo "Beads setup complete. Run 'bd list --status=open' to see issues."
 
 # Multi-agent compatibility testing (Docker-based clean-room environments)
-SOPS_AGE_KEY_FILE ?= $(HOME)/.config/sageox/test-age-key.txt
-AGENT ?= claude-code
-AGENT_VERSION ?= latest
-VERSIONS ?= 5
-FEATURE ?=
-
-test-env-base: ## Build base Docker image for agent testing
-	docker build -f test-envs/base.Dockerfile -t ox-test-base .
-
-test-env: test-env-base ## Build agent-specific test container (AGENT=claude-code AGENT_VERSION=latest)
-	docker build -f test-envs/$(AGENT).Dockerfile \
-		--build-arg AGENT_VERSION=$(AGENT_VERSION) \
-		--build-arg CACHE_BUST=$$(date +%Y%m%d) \
-		-t ox-test-$(AGENT):$(AGENT_VERSION) .
-
-test-agent: test-env ## Run integration tests in agent container (AGENT=claude-code FEATURE=Prime)
-	docker run --rm \
-		$$([ -f "$(SOPS_AGE_KEY_FILE)" ] && SOPS_AGE_KEY_FILE=$(SOPS_AGE_KEY_FILE) ./test-envs/decrypt-env.sh 2>/dev/null || true) \
-		ox-test-$(AGENT):$(AGENT_VERSION) \
-		-tags integration \
-		$(if $(FEATURE),-run "Test$(FEATURE)_",) \
-		-timeout 10m \
-		./tests/integration/...
-
-test-agent-matrix: ## Test last N versions of an agent (AGENT=claude-code VERSIONS=5)
-	@echo "Fetching last $(VERSIONS) versions for $(AGENT)..."
-	@for v in $$(./test-envs/agent-versions.sh $(AGENT) $(VERSIONS)); do \
-		echo "Testing $(AGENT)@$$v"; \
-		$(MAKE) test-agent AGENT=$(AGENT) AGENT_VERSION=$$v & \
-	done; wait
-	@echo "Results in test-results/runs/"
-
-test-agent-all: ## All agents × last N versions (parallel)
-	@for agent in claude-code codex gemini amp pi opencode code-puppy; do \
-		$(MAKE) test-agent-matrix AGENT=$$agent VERSIONS=$(VERSIONS) & \
-	done; wait
-
-compat-matrix: ## Generate HTML compatibility matrix from committed results
-	go run ./cmd/gen-compat-matrix --input test-results/ --html docs/compatibility.html --gfm -
+## Agent integration tests and compatibility matrix live in sageox/ox-test-harness (private).
+## See ~/Code/sageox/ox-test-harness/README.md for setup.
 
 # Version management
 bump-version: ## Bump version across all files (usage: make bump-version NEW_VERSION=0.10.0)

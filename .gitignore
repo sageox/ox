@@ -62,9 +62,6 @@ sessions/
 !/.claude-plugin/
 !/claude-plugin/.claude-plugin/
 
-# Benchmark results (append-only, local to each machine)
-tests/integration/agents/benchmark/results.jsonl
-
 # Claude Code local settings (user-specific)
 .claude/settings.local.json
 demo/credentials.sops.yaml
@@ -79,9 +76,6 @@ demo/playwright/node_modules/
 .dolt/
 *.db
 
-# Never commit decrypted secrets or age private keys
-test-envs/secrets.yaml
-test-envs/secrets.decrypted.yaml
+# Never commit age private keys
 *-age-key.txt
 *.age-key
-/gen-compat-matrix

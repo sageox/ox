@@ -176,14 +176,29 @@ common issues, or --fix-slug to target specific checks.`,
 		}
 		endpointSlug := endpoint.NormalizeSlug(projectEndpoint)
 
-		// check authentication status
-		authenticated, _ := auth.IsAuthenticatedForEndpoint(projectEndpoint)
+		// check authentication status (only gate on auth when auth is required)
+		authenticated := true
+		if auth.IsAuthRequired() {
+			authenticated, _ = auth.IsAuthenticatedForEndpoint(projectEndpoint)
+		}
 
 		// check if project is initialized (only relevant if in a git repo)
 		projectInitialized := gitRoot != "" && config.IsInitialized(gitRoot)
 
 		// short-circuit: not in a git repo
 		if gitRoot == "" {
+			if cfg != nil && cfg.JSON {
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(JSONDoctorOutput{
+					Summary: JSONSummary{Failed: 1, HasFailed: true},
+					Categories: []JSONCategory{{
+						Name: "Setup",
+						Checks: []JSONCheckResult{{
+							Name: "git repository", Status: "failed",
+							Message: "not inside a git repository",
+						}},
+					}},
+				})
+			}
 			w := cmd.OutOrStdout()
 			renderDoctorHeader(w, false)
 
@@ -203,6 +218,25 @@ common issues, or --fix-slug to target specific checks.`,
 
 		// short-circuit with setup guidance if not ready
 		if !authenticated || !projectInitialized {
+			if cfg != nil && cfg.JSON {
+				checks := []JSONCheckResult{}
+				if !authenticated {
+					checks = append(checks, JSONCheckResult{
+						Name: "authentication", Status: "failed",
+						Message: fmt.Sprintf("not logged in — run 'ox login' to authenticate with %s", endpointSlug),
+					})
+				}
+				if !projectInitialized {
+					checks = append(checks, JSONCheckResult{
+						Name: "project initialized", Status: "failed",
+						Message: "not initialized — run 'ox init' to set up this project",
+					})
+				}
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(JSONDoctorOutput{
+					Summary:    JSONSummary{Failed: len(checks), HasFailed: true},
+					Categories: []JSONCategory{{Name: "Setup", Checks: checks}},
+				})
+			}
 			w := cmd.OutOrStdout()
 			renderDoctorHeader(w, false)
 
@@ -300,7 +334,7 @@ common issues, or --fix-slug to target specific checks.`,
 
 		cli.PrintDisclaimer()
 
-		if hasFailed {
+		if hasFailed && (cfg == nil || !cfg.JSON) {
 			return fmt.Errorf("some checks failed")
 		}
 		return nil

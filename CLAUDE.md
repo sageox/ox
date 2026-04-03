@@ -548,7 +548,7 @@ Every bug fix MUST include a regression test unless existing tests already cover
 - Reproduce exact conditions that caused the bug; test must fail without fix, pass with it
 - Test observable behavior, not implementation details
 - Cover edge cases discovered during investigation
-- **Integration-level regression tests** belong in `tests/integration/agents/claude/` and exercise the real ox CLI binary, not mocked functions
+- **Integration-level regression tests** belong in the private `sageox/ox-test-harness` repo and exercise the real ox CLI binary, not mocked functions
 
 ### Doctor as Last Line of Defense
 
@@ -717,16 +717,12 @@ This data is essential for learning what's working, what's broken, and where age
 ```bash
 make test-all          # all unit tests including expensive ones
 make test-slow         # tests requiring real ox binary
-make test-integration  # E2E with real Claude (requires claude CLI + ANTHROPIC_API_KEY)
+make test-integration  # redirects to private sageox/ox-test-harness repo
 ```
 
-These tests (`tests/integration/agents/claude/`) start actual Claude Code processes, exercise real hooks, send real SIGINT signals, and verify the full session recording and anti-entropy pipelines. They are the final quality gate — do not ship if they fail.
+E2E integration tests live in the private `sageox/ox-test-harness` repo. They start actual AI coding agent processes, exercise real hooks, send real SIGINT signals, and verify the full session recording and anti-entropy pipelines. They are the final quality gate — do not ship if they fail.
 
-Key tests:
-- **Multi-turn recording**: Verifies incremental hook-driven recording produces valid raw.jsonl with correct entries
-- **Ctrl-C anti-entropy**: Starts real Claude, sends SIGINT, verifies the daemon's anti-entropy finalization recovers the interrupted session and generates all 3 artifacts (summary.md, summary.json, session.md)
-
-**Hard rule: E2E tests MUST use real agent CLI instances.** Never simulate Claude entries, mock agents, or use fake JSONL in `tests/integration/`. Component tests with simulated data belong in `cmd/ox/` under the `slow` build tag.
+**Hard rule: E2E tests MUST use real agent CLI instances.** Never simulate agent entries, mock agents, or use fake JSONL. Component tests with simulated data belong in `cmd/ox/` under the `slow` build tag.
 
 ### Reference Docs
 

@@ -832,8 +832,13 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 
 	// determine watch mode: hook-driven agents use hooks, hookless agents use daemon tail
 	watchMode := "hook"
-	if agent := GetAgent(agentType); agent != nil && !agent.SupportsHooks() {
-		watchMode = "tail"
+	if agent := GetAgent(agentType); agent != nil {
+		if !agent.SupportsHooks() {
+			watchMode = "tail"
+		} else if !agent.HasHooks(false) && !agent.HasHooks(true) {
+			// agent supports hooks but none are installed — fall back to tail mode
+			watchMode = "tail"
+		}
 	}
 
 	opts := session.StartRecordingOptions{
