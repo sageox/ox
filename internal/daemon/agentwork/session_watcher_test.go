@@ -402,10 +402,13 @@ func TestSessionWatcherManager_LiveTail_EntryCountLinear(t *testing.T) {
 
 	require.NoError(t, mgr.StartWatch("count-test", sessionFile, "codex", "/ledger", dir))
 
-	// let fsnotify watcher register before writing entries
+	// let fsnotify watcher register before writing entries;
+	// ActiveSessions confirms the session is tracked but fsnotify needs
+	// additional time to register the OS-level file watch
 	require.Eventually(t, func() bool {
 		return len(mgr.ActiveSessions()) > 0
 	}, 2*time.Second, 10*time.Millisecond)
+	time.Sleep(200 * time.Millisecond) // fsnotify OS registration
 
 	// write 3 entries sequentially, waiting for each to be processed
 	entries := []string{
