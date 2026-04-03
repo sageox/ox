@@ -119,6 +119,9 @@ func runAgentDistill(inst *agentinstance.Instance, cmd *cobra.Command) error {
 	if err != nil {
 		return fmt.Errorf("authentication required: %w", err)
 	}
+	if token == nil || token.AccessToken == "" {
+		return fmt.Errorf("not authenticated — run 'ox login' first")
+	}
 
 	// build API request
 	apiObs := make([]api.DistillObservation, len(observations))
