@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewStoreForUser(t *testing.T) {
@@ -133,7 +135,9 @@ func TestGetExpired(t *testing.T) {
 
 	// Get triggers background compaction via go s.Prune(); wait for it
 	// to finish so t.TempDir() cleanup doesn't race with it.
-	time.Sleep(200 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return store.Count() == 0
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestList(t *testing.T) {
@@ -769,8 +773,11 @@ func TestListFiltersExpired(t *testing.T) {
 		t.Errorf("expected OxLive, got %q", list[0].AgentID)
 	}
 
-	// background compaction may fire; wait for it
-	time.Sleep(200 * time.Millisecond)
+	// background compaction may fire; wait for it so t.TempDir() cleanup
+	// doesn't race with the Prune goroutine.
+	require.Eventually(t, func() bool {
+		return store.Count() == 1
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestShouldCompact(t *testing.T) {

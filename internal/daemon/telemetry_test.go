@@ -189,10 +189,9 @@ func TestTelemetryCollector_SendEvents_ToServer(t *testing.T) {
 	// manually flush
 	collector.flush()
 
-	// wait for async send
-	time.Sleep(100 * time.Millisecond)
-
-	assert.Equal(t, int32(1), received.Load(), "expected 1 batch sent")
+	require.Eventually(t, func() bool {
+		return received.Load() >= 1
+	}, 2*time.Second, 10*time.Millisecond, "expected 1 batch sent")
 	assert.NotEmpty(t, receivedPayload["clientid"], "expected client ID in payload")
 
 	events, ok := receivedPayload["events"].([]any)
@@ -583,10 +582,11 @@ func TestTelemetryCollector_FlushCooldown_PreventsThunderingHerd(t *testing.T) {
 		collector.Record("test:rapid", map[string]any{"index": i})
 	}
 
-	// allow goroutines to settle
-	time.Sleep(100 * time.Millisecond)
+	// wait for flush goroutines to settle, then verify cooldown prevented thundering herd
+	require.Eventually(t, func() bool {
+		return requestCount.Load() >= 1
+	}, 2*time.Second, 10*time.Millisecond, "expected at least 1 flush request")
 
-	// with cooldown, at most 1 early flush should have fired
 	count := requestCount.Load()
 	if count > 1 {
 		t.Errorf("requestCount = %d, want <= 1 (cooldown should prevent thundering herd)", count)

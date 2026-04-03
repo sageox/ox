@@ -294,24 +294,14 @@ func TestMultipleManagersCheckFreshness(t *testing.T) {
 	// CheckFreshness fires unjoinable background goroutines (go func() { m.Index(...) }).
 	// Poll each manager's IndexingNow to wait for them to finish, so Bleve
 	// indexes and SQLite connections close before TempDir cleanup.
-	deadline := time.After(10 * time.Second)
-	for {
-		allDone := true
+	require.Eventually(t, func() bool {
 		for _, mgr := range mgrs {
 			if mgr.Stats().IndexingNow {
-				allDone = false
-				break
+				return false
 			}
 		}
-		if allDone {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("timed out waiting for background indexing to stop")
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
+		return true
+	}, 10*time.Second, 50*time.Millisecond, "timed out waiting for background indexing to stop")
 	// brief pause for file handles to fully close after indexing stops
 	time.Sleep(200 * time.Millisecond)
 }

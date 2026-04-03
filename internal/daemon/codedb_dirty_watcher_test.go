@@ -326,17 +326,11 @@ func TestRefreshDirtyOverlay_FlagReleasedOnEarlyExit(t *testing.T) {
 	mgr.RefreshDirtyOverlay(ctx)
 
 	// wait for goroutine to run and exit
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		mgr.mu.Lock()
-		done := !mgr.dirtyRefreshing
-		mgr.mu.Unlock()
-		if done {
-			return // success — flag was released
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("dirtyRefreshing flag was not released after early exit (missing dataDir)")
+		defer mgr.mu.Unlock()
+		return !mgr.dirtyRefreshing
+	}, 2*time.Second, 10*time.Millisecond, "dirtyRefreshing flag was not released after early exit (missing dataDir)")
 }
 
 // TestRefreshDirtyOverlay_RunsConcurrentlyWithLedgerIndex verifies that dirty
@@ -407,17 +401,11 @@ func TestRefreshDirtyOverlay_ContextCanceled(t *testing.T) {
 	}
 
 	// key assertion: flag is always released regardless of cancel
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		mgr.mu.Lock()
-		done := !mgr.dirtyRefreshing
-		mgr.mu.Unlock()
-		if done {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("dirtyRefreshing flag not released after context cancellation")
+		defer mgr.mu.Unlock()
+		return !mgr.dirtyRefreshing
+	}, 2*time.Second, 10*time.Millisecond, "dirtyRefreshing flag not released after context cancellation")
 }
 
 // --- C. Deterministic concurrency: verify no double goroutine ---
@@ -478,17 +466,11 @@ func TestRefreshDirtyOverlay_NoDoubleGoroutine(t *testing.T) {
 	close(release)
 
 	// wait for flag to clear
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		mgr.mu.Lock()
-		done := !mgr.dirtyRefreshing
-		mgr.mu.Unlock()
-		if done {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("dirtyRefreshing flag not cleared after goroutine exited")
+		defer mgr.mu.Unlock()
+		return !mgr.dirtyRefreshing
+	}, 5*time.Second, 10*time.Millisecond, "dirtyRefreshing flag not cleared after goroutine exited")
 }
 
 // --- D. End-to-end pipeline: fsnotify → settle → debounce → dirty overlay rebuilt ---
@@ -590,16 +572,11 @@ func TestDirtyPipeline_E2E_FsnotifyToSearchResult(t *testing.T) {
 	}
 
 	// wait for the goroutine to finish (flag release)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		mgr.mu.Lock()
-		done := !mgr.dirtyRefreshing
-		mgr.mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		defer mgr.mu.Unlock()
+		return !mgr.dirtyRefreshing
+	}, 5*time.Second, 10*time.Millisecond, "dirtyRefreshing flag not released after pipeline")
 
 	// verify: open the codedb and search for the dirty-only content
 	db2, err := codedb.Open(dataDir)
@@ -674,16 +651,11 @@ func TestRefreshDirtyOverlay_LedgerDualWrite(t *testing.T) {
 	}
 
 	// wait for goroutine to finish
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		mgr.mu.Lock()
-		done := !mgr.dirtyRefreshing
-		mgr.mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		defer mgr.mu.Unlock()
+		return !mgr.dirtyRefreshing
+	}, 5*time.Second, 10*time.Millisecond, "dirtyRefreshing flag not released after dual write")
 
 	// verify dirty content searchable in BOTH codedb directories
 	for _, dir := range []string{sharedDir, ledgerDir} {
@@ -754,16 +726,11 @@ func TestRefreshDirtyOverlay_LedgerFailureDoesNotBlockShared(t *testing.T) {
 	}
 
 	// wait for goroutine
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		mgr.mu.Lock()
-		done := !mgr.dirtyRefreshing
-		mgr.mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		defer mgr.mu.Unlock()
+		return !mgr.dirtyRefreshing
+	}, 5*time.Second, 10*time.Millisecond, "dirtyRefreshing flag not released after ledger failure")
 
 	// shared dir should still have the dirty overlay despite ledger failure
 	db2, err := codedb.Open(sharedDir)
@@ -822,16 +789,11 @@ func TestRefreshDirtyOverlay_EmitsIssueOnOpenFailure(t *testing.T) {
 	}
 
 	// wait for flag release
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		mgr.mu.Lock()
-		done := !mgr.dirtyRefreshing
-		mgr.mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		defer mgr.mu.Unlock()
+		return !mgr.dirtyRefreshing
+	}, 5*time.Second, 10*time.Millisecond, "dirtyRefreshing flag not released after open failure")
 
 	// verify issue was emitted
 	issues := tracker.GetIssues()
@@ -902,16 +864,11 @@ func TestRefreshDirtyOverlay_ClearsIssueOnSuccess(t *testing.T) {
 	}
 
 	// wait for goroutine
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		mgr.mu.Lock()
-		done := !mgr.dirtyRefreshing
-		mgr.mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		defer mgr.mu.Unlock()
+		return !mgr.dirtyRefreshing
+	}, 5*time.Second, 10*time.Millisecond, "dirtyRefreshing flag not released after successful refresh")
 
 	// verify issue was cleared after successful refresh
 	issues := tracker.GetIssues()
@@ -959,16 +916,10 @@ func TestRefreshDirtyOverlay_NoIssueWithoutTracker(t *testing.T) {
 	}
 
 	// wait for flag release — no panic means success
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		mgr.mu.Lock()
-		done := !mgr.dirtyRefreshing
-		mgr.mu.Unlock()
-		if done {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("dirtyRefreshing flag not released — possible panic in goroutine")
+		defer mgr.mu.Unlock()
+		return !mgr.dirtyRefreshing
+	}, 5*time.Second, 10*time.Millisecond, "dirtyRefreshing flag not released — possible panic in goroutine")
 }
 

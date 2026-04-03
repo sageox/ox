@@ -39,7 +39,7 @@ func TestWatcher_HandleEvent_IgnoreGit(t *testing.T) {
 		Op:   fsnotify.Write,
 	})
 
-	// wait for potential callback
+	// verify callback was NOT called (negative test — wait briefly then confirm)
 	time.Sleep(100 * time.Millisecond)
 	assert.Equal(t, int32(0), called.Load())
 }
@@ -74,8 +74,9 @@ func TestWatcher_HandleEvent_AllowSageox(t *testing.T) {
 		Op:   fsnotify.Write,
 	})
 
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, int32(1), called.Load())
+	require.Eventually(t, func() bool {
+		return called.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestWatcher_HandleEvent_IgnoreChmod(t *testing.T) {
@@ -108,8 +109,9 @@ func TestWatcher_HandleEvent_ProcessWrite(t *testing.T) {
 		Op:   fsnotify.Write,
 	})
 
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, int32(1), called.Load())
+	require.Eventually(t, func() bool {
+		return called.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestWatcher_HandleEvent_ProcessCreate(t *testing.T) {
@@ -125,8 +127,9 @@ func TestWatcher_HandleEvent_ProcessCreate(t *testing.T) {
 		Op:   fsnotify.Create,
 	})
 
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, int32(1), called.Load())
+	require.Eventually(t, func() bool {
+		return called.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestWatcher_HandleEvent_ProcessRemove(t *testing.T) {
@@ -142,8 +145,9 @@ func TestWatcher_HandleEvent_ProcessRemove(t *testing.T) {
 		Op:   fsnotify.Remove,
 	})
 
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, int32(1), called.Load())
+	require.Eventually(t, func() bool {
+		return called.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestWatcher_HandleEvent_ProcessRename(t *testing.T) {
@@ -159,8 +163,9 @@ func TestWatcher_HandleEvent_ProcessRename(t *testing.T) {
 		Op:   fsnotify.Rename,
 	})
 
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, int32(1), called.Load())
+	require.Eventually(t, func() bool {
+		return called.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestWatcher_Debounce(t *testing.T) {
@@ -281,10 +286,9 @@ func TestWatcher_Integration(t *testing.T) {
 	testFile := filepath.Join(tmpDir, "test.txt")
 	require.NoError(t, os.WriteFile(testFile, []byte("hello"), 0644))
 
-	// wait for debounce
-	time.Sleep(200 * time.Millisecond)
-
-	assert.GreaterOrEqual(t, called.Load(), int32(1))
+	require.Eventually(t, func() bool {
+		return called.Load() >= 1
+	}, 2*time.Second, 10*time.Millisecond)
 
 	cancel()
 }
@@ -309,12 +313,16 @@ func TestWatcher_WithMockWatcher_EventProcessing(t *testing.T) {
 
 	go w.Start(ctx, func() { called.Add(1) })
 
-	// give watcher time to start
-	time.Sleep(20 * time.Millisecond)
-
-	// verify path was added
-	paths := mockWatcher.AddedPaths()
-	assert.Contains(t, paths, "/test/path")
+	// wait for watcher to register paths
+	require.Eventually(t, func() bool {
+		paths := mockWatcher.AddedPaths()
+		for _, p := range paths {
+			if p == "/test/path" {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 10*time.Millisecond)
 
 	// send a write event
 	mockWatcher.SendEvent(fsnotify.Event{
@@ -322,10 +330,9 @@ func TestWatcher_WithMockWatcher_EventProcessing(t *testing.T) {
 		Op:   fsnotify.Write,
 	})
 
-	// wait for debounce
-	time.Sleep(100 * time.Millisecond)
-
-	assert.Equal(t, int32(1), called.Load())
+	require.Eventually(t, func() bool {
+		return called.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond)
 
 	cancel()
 }
@@ -409,14 +416,13 @@ func TestWatcher_WithMockWatcher_ErrorChannel(t *testing.T) {
 	called := atomic.Int32{}
 	go w.Start(ctx, func() { called.Add(1) })
 
-	// give watcher time to start
-	time.Sleep(20 * time.Millisecond)
+	// wait for watcher to register paths
+	require.Eventually(t, func() bool {
+		return len(mockWatcher.AddedPaths()) > 0
+	}, 2*time.Second, 10*time.Millisecond)
 
 	// send an error - should be logged but not crash
 	mockWatcher.SendError(errors.New("watch error"))
-
-	// watcher should still be running
-	time.Sleep(50 * time.Millisecond)
 
 	// send an event to confirm watcher still works after error
 	mockWatcher.SendEvent(fsnotify.Event{
@@ -424,8 +430,9 @@ func TestWatcher_WithMockWatcher_ErrorChannel(t *testing.T) {
 		Op:   fsnotify.Write,
 	})
 
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, int32(1), called.Load())
+	require.Eventually(t, func() bool {
+		return called.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond)
 
 	cancel()
 }
@@ -450,8 +457,10 @@ func TestWatcher_WithMockWatcher_ChannelClose(t *testing.T) {
 		done <- true
 	}()
 
-	// give watcher time to start
-	time.Sleep(20 * time.Millisecond)
+	// wait for watcher to register paths
+	require.Eventually(t, func() bool {
+		return len(mockWatcher.AddedPaths()) > 0
+	}, 2*time.Second, 10*time.Millisecond)
 
 	// close events channel - should cause watcher to exit
 	mockWatcher.CloseEvents()
@@ -481,8 +490,10 @@ func TestWatcher_WithMockWatcher_MultipleEvents(t *testing.T) {
 
 	go w.Start(ctx, func() { called.Add(1) })
 
-	// give watcher time to start
-	time.Sleep(20 * time.Millisecond)
+	// wait for watcher to register paths
+	require.Eventually(t, func() bool {
+		return len(mockWatcher.AddedPaths()) > 0
+	}, 2*time.Second, 10*time.Millisecond)
 
 	// send multiple rapid events - should be debounced
 	for i := 0; i < 5; i++ {
@@ -519,8 +530,10 @@ func TestWatcher_WithMockWatcher_FilteredEvents(t *testing.T) {
 
 	go w.Start(ctx, func() { called.Add(1) })
 
-	// give watcher time to start
-	time.Sleep(20 * time.Millisecond)
+	// wait for watcher to register paths
+	require.Eventually(t, func() bool {
+		return len(mockWatcher.AddedPaths()) > 0
+	}, 2*time.Second, 10*time.Millisecond)
 
 	// send events that should be filtered
 	filteredEvents := []fsnotify.Event{
@@ -534,10 +547,8 @@ func TestWatcher_WithMockWatcher_FilteredEvents(t *testing.T) {
 		mockWatcher.SendEvent(event)
 	}
 
-	// wait for potential callbacks
+	// verify none triggered callback (negative test — wait briefly then confirm)
 	time.Sleep(150 * time.Millisecond)
-
-	// none should trigger callback
 	assert.Equal(t, int32(0), called.Load())
 
 	// now send an event that should pass through
@@ -546,8 +557,9 @@ func TestWatcher_WithMockWatcher_FilteredEvents(t *testing.T) {
 		Op:   fsnotify.Write,
 	})
 
-	time.Sleep(100 * time.Millisecond)
-	assert.Equal(t, int32(1), called.Load())
+	require.Eventually(t, func() bool {
+		return called.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond)
 
 	cancel()
 }
@@ -848,8 +860,10 @@ func TestWatcher_ContextCancelCallsStop(t *testing.T) {
 		close(done)
 	}()
 
-	// give watcher time to start
-	time.Sleep(20 * time.Millisecond)
+	// wait for watcher to register paths
+	require.Eventually(t, func() bool {
+		return len(mockWatcher.AddedPaths()) > 0
+	}, 2*time.Second, 10*time.Millisecond)
 
 	// trigger a debounce
 	mockWatcher.SendEvent(fsnotify.Event{

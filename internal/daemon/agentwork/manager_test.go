@@ -223,7 +223,7 @@ func TestManager_RetryOnFailure(t *testing.T) {
 	ctx := context.Background()
 	for i := 0; i < maxRetries+1; i++ {
 		m.processQueue(ctx)
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond) // let goroutine complete and release sem before retry
 	}
 
 	require.Eventually(t, func() bool {
@@ -252,7 +252,7 @@ func TestManager_MaxRetriesExceeded(t *testing.T) {
 	ctx := context.Background()
 	for i := 0; i < maxRetries+2; i++ {
 		m.processQueue(ctx)
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond) // let goroutine complete and release sem before retry
 	}
 
 	require.Eventually(t, func() bool {
@@ -288,7 +288,7 @@ func TestManager_RateLimiting(t *testing.T) {
 	ctx := context.Background()
 	for i := 0; i < 5; i++ {
 		m.processQueue(ctx)
-		time.Sleep(30 * time.Millisecond)
+		time.Sleep(30 * time.Millisecond) // let goroutine complete before next processQueue
 	}
 
 	require.Eventually(t, func() bool {
@@ -334,10 +334,14 @@ func TestManager_ConcurrencyControl(t *testing.T) {
 	ctx := context.Background()
 	for i := 0; i < 4; i++ {
 		m.processQueue(ctx)
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond) // let goroutines acquire sem slots before next call
 	}
 
-	time.Sleep(300 * time.Millisecond)
+	// wait for all 4 items to complete (goroutines with 50ms simulated work)
+	require.Eventually(t, func() bool {
+		s := m.Status()
+		return s.Stats.TotalInvocations >= 4
+	}, 2*time.Second, 10*time.Millisecond)
 
 	assert.LessOrEqual(t, maxConcurrentSeen.Load(), int32(2), "should never exceed configured concurrency")
 }
@@ -436,10 +440,13 @@ func TestManager_RecentCappedAtMax(t *testing.T) {
 		key := fmt.Sprintf("cap-%d", i)
 		m.Enqueue(&WorkItem{Type: "cap-test", Priority: 1, DedupKey: key})
 		m.processQueue(ctx)
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond) // let goroutine complete before next enqueue
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		s := m.Status()
+		return s.Stats.TotalInvocations >= maxRecentEntries+5
+	}, 2*time.Second, 10*time.Millisecond)
 
 	status := m.Status()
 	assert.LessOrEqual(t, len(status.Recent), maxRecentEntries)

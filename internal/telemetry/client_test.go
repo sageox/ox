@@ -118,9 +118,10 @@ func TestClient_FlushSendsEvents(t *testing.T) {
 
 	// flush and wait for send
 	client.Flush()
-	time.Sleep(100 * time.Millisecond)
 
-	assert.Equal(t, int32(1), received.Load(), "expected 1 batch sent")
+	require.Eventually(t, func() bool {
+		return received.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond, "expected 1 batch sent")
 	assert.Len(t, receivedBatch.Events, 2, "expected 2 events in batch")
 }
 
@@ -140,10 +141,9 @@ func TestClient_TrackAsyncSendsImmediately(t *testing.T) {
 
 	client.TrackAsync(Event{Type: EventSessionStart})
 
-	// wait for async send
-	time.Sleep(100 * time.Millisecond)
-
-	assert.Equal(t, int32(1), received.Load(), "expected 1 request")
+	require.Eventually(t, func() bool {
+		return received.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond, "expected 1 request")
 }
 
 func TestClient_NetworkErrorsSilentlyDiscarded(t *testing.T) {
@@ -161,14 +161,13 @@ func TestClient_NetworkErrorsSilentlyDiscarded(t *testing.T) {
 	// should not panic
 	client.Track(Event{Type: EventCommandComplete})
 	client.Flush()
-	time.Sleep(50 * time.Millisecond)
 
 	// queue should be empty (events sent, even if server errored)
-	client.mu.Lock()
-	queueLen := len(client.queue)
-	client.mu.Unlock()
-
-	assert.Equal(t, 0, queueLen, "expected queue to be cleared after flush")
+	require.Eventually(t, func() bool {
+		client.mu.Lock()
+		defer client.mu.Unlock()
+		return len(client.queue) == 0
+	}, 2*time.Second, 10*time.Millisecond, "expected queue to be cleared after flush")
 }
 
 func TestClient_UnreachableServerSilentlyDiscarded(t *testing.T) {
@@ -333,9 +332,8 @@ func TestClient_TrackDaemonStartFailure_RespectsOptOut(t *testing.T) {
 	// should not send when disabled
 	client.TrackDaemonStartFailure("test_error", "test message")
 
-	// wait a bit for any async sends
-	time.Sleep(100 * time.Millisecond)
-
+	// verify no requests are sent (give a reasonable window)
+	time.Sleep(50 * time.Millisecond)
 	assert.Equal(t, int32(0), received.Load(), "expected no requests when telemetry disabled")
 }
 
@@ -365,10 +363,9 @@ func TestClient_TrackDaemonStartFailure_SendsWhenEnabled(t *testing.T) {
 
 	client.TrackDaemonStartFailure("lock_error", "daemon already running")
 
-	// wait for async send
-	time.Sleep(200 * time.Millisecond)
-
-	assert.Equal(t, int32(1), received.Load(), "expected 1 request when telemetry enabled")
+	require.Eventually(t, func() bool {
+		return received.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond, "expected 1 request when telemetry enabled")
 	require.Len(t, receivedBatch.Events, 1, "expected 1 event in batch")
 	assert.Equal(t, "daemon:start_failure", receivedBatch.Events[0].Type)
 	assert.Equal(t, "lock_error", receivedBatch.Events[0].Metadata["error_type"])
@@ -397,17 +394,19 @@ func TestClient_TrackDaemonStartFailure_RateLimiting(t *testing.T) {
 
 	// first call should succeed
 	client.TrackDaemonStartFailure("error1", "first failure")
-	time.Sleep(100 * time.Millisecond)
+
+	require.Eventually(t, func() bool {
+		return received.Load() == 1
+	}, 2*time.Second, 10*time.Millisecond, "expected first request to be sent")
 
 	// second call immediately after should be rate limited
 	client.TrackDaemonStartFailure("error2", "second failure")
-	time.Sleep(100 * time.Millisecond)
 
 	// third call immediately after should also be rate limited
 	client.TrackDaemonStartFailure("error3", "third failure")
-	time.Sleep(100 * time.Millisecond)
 
-	// only first should have been sent
+	// give time for any unexpected sends, then verify still only 1
+	time.Sleep(50 * time.Millisecond)
 	assert.Equal(t, int32(1), received.Load(), "expected only 1 request due to rate limiting")
 }
 

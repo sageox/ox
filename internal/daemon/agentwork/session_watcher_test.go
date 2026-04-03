@@ -403,7 +403,9 @@ func TestSessionWatcherManager_LiveTail_EntryCountLinear(t *testing.T) {
 	require.NoError(t, mgr.StartWatch("count-test", sessionFile, "codex", "/ledger", dir))
 
 	// let fsnotify watcher register before writing entries
-	time.Sleep(200 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return len(mgr.ActiveSessions()) > 0
+	}, 2*time.Second, 10*time.Millisecond)
 
 	// write 3 entries sequentially, waiting for each to be processed
 	entries := []string{
@@ -758,11 +760,10 @@ func TestSessionWatcherManager_PersistOffset_MissingRecordingJSON(t *testing.T) 
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	// give the watcher time to process and attempt persistOffset
-	time.Sleep(500 * time.Millisecond)
-
 	// watcher should still be running (persistOffset didn't crash)
-	assert.Len(t, mgr.ActiveSessions(), 1, "watcher must survive missing .recording.json during persistOffset")
+	require.Eventually(t, func() bool {
+		return len(mgr.ActiveSessions()) == 1
+	}, 2*time.Second, 10*time.Millisecond, "watcher must survive missing .recording.json during persistOffset")
 
 	mgr.StopAll()
 }
@@ -799,11 +800,10 @@ func TestSessionWatcherManager_PersistOffset_CorruptRecordingJSON(t *testing.T) 
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	// give the watcher time to process and attempt persistOffset
-	time.Sleep(500 * time.Millisecond)
-
 	// watcher should still be running (persistOffset didn't crash)
-	assert.Len(t, mgr.ActiveSessions(), 1, "watcher must survive corrupt .recording.json during persistOffset")
+	require.Eventually(t, func() bool {
+		return len(mgr.ActiveSessions()) == 1
+	}, 2*time.Second, 10*time.Millisecond, "watcher must survive corrupt .recording.json during persistOffset")
 
 	mgr.StopAll()
 }

@@ -6,10 +6,12 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
+	"github.com/stretchr/testify/require"
 )
 
 // --- DBMaintenanceScheduler tests ---
@@ -17,12 +19,12 @@ import (
 type mockMaintainer struct {
 	name   string
 	result DBMaintenanceResult
-	called int
+	called atomic.Int32
 }
 
 func (m *mockMaintainer) Name() string { return m.name }
 func (m *mockMaintainer) Maintain(_ context.Context) DBMaintenanceResult {
-	m.called++
+	m.called.Add(1)
 	return m.result
 }
 
@@ -40,11 +42,11 @@ func TestSchedulerRunAll(t *testing.T) {
 	if len(results) != 2 {
 		t.Fatalf("expected 2 results, got %d", len(results))
 	}
-	if m1.called != 1 {
-		t.Errorf("expected db1 called once, got %d", m1.called)
+	if m1.called.Load() != 1 {
+		t.Errorf("expected db1 called once, got %d", m1.called.Load())
 	}
-	if m2.called != 1 {
-		t.Errorf("expected db2 called once, got %d", m2.called)
+	if m2.called.Load() != 1 {
+		t.Errorf("expected db2 called once, got %d", m2.called.Load())
 	}
 	if results[0].Pruned != 5 {
 		t.Errorf("expected db1 pruned=5, got %d", results[0].Pruned)
@@ -88,11 +90,11 @@ func TestSchedulerRunOne(t *testing.T) {
 	if result.Pruned != 3 {
 		t.Errorf("expected pruned=3, got %d", result.Pruned)
 	}
-	if m1.called != 1 {
-		t.Errorf("expected whisper called once, got %d", m1.called)
+	if m1.called.Load() != 1 {
+		t.Errorf("expected whisper called once, got %d", m1.called.Load())
 	}
-	if m2.called != 0 {
-		t.Errorf("expected codedb not called, got %d", m2.called)
+	if m2.called.Load() != 0 {
+		t.Errorf("expected codedb not called, got %d", m2.called.Load())
 	}
 }
 
@@ -137,14 +139,12 @@ func TestSchedulerStartAndStop(t *testing.T) {
 	var wg sync.WaitGroup
 	s.Start(ctx, &wg, 10*time.Millisecond)
 
-	// wait for at least one tick
-	time.Sleep(50 * time.Millisecond)
+	// wait for at least one maintenance call
+	require.Eventually(t, func() bool {
+		return m.called.Load() > 0
+	}, 2*time.Second, 10*time.Millisecond, "expected at least one maintenance call")
 	cancel()
 	wg.Wait()
-
-	if m.called == 0 {
-		t.Error("expected at least one maintenance call")
-	}
 }
 
 func TestSchedulerErrorDoesNotBlockOthers(t *testing.T) {

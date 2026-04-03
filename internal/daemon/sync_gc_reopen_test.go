@@ -101,6 +101,7 @@ func TestReopenWhisperStoreAfterGC_ConcurrentReads(t *testing.T) {
 		}()
 	}
 
+	// brief pause to ensure readers are actively polling before reopen
 	time.Sleep(5 * time.Millisecond)
 
 	// reopen while readers are active

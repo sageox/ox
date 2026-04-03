@@ -44,11 +44,11 @@ func TestPublisher_DrainAccumulatesIntoPending(t *testing.T) {
 
 	acc.AddEvent("src/a.go", fsnotify.Write, false)
 	acc.AddEvent("src/b.go", fsnotify.Create, false)
-	time.Sleep(100 * time.Millisecond) // settle
 
-	p.drain()
-
-	assert.Equal(t, 2, p.PendingCount(), "drain should buffer changes")
+	require.Eventually(t, func() bool {
+		p.drain()
+		return p.PendingCount() == 2
+	}, 2*time.Second, 10*time.Millisecond)
 	assert.Empty(t, pub.Payloads(), "drain alone should not publish")
 }
 
@@ -62,9 +62,12 @@ func TestPublisher_PublishClearsPending(t *testing.T) {
 	p := NewFileChangeMurmurPublisher(acc, pub, "/tmp/ledger", "/tmp/project", slogDiscard())
 
 	acc.AddEvent("src/main.go", fsnotify.Write, false)
-	time.Sleep(100 * time.Millisecond)
 
-	p.drain()
+	require.Eventually(t, func() bool {
+		p.drain()
+		return p.PendingCount() == 1
+	}, 2*time.Second, 10*time.Millisecond)
+
 	p.publish()
 
 	assert.Equal(t, 0, p.PendingCount(), "publish should clear pending")
@@ -95,13 +98,17 @@ func TestPublisher_CollapsesDuplicatePaths(t *testing.T) {
 
 	// first batch
 	acc.AddEvent("src/main.go", fsnotify.Write, false)
-	time.Sleep(100 * time.Millisecond)
-	p.drain()
+	require.Eventually(t, func() bool {
+		p.drain()
+		return p.PendingCount() == 1
+	}, 2*time.Second, 10*time.Millisecond)
 
 	// second batch — same file
 	acc.AddEvent("src/main.go", fsnotify.Write, false)
-	time.Sleep(100 * time.Millisecond)
-	p.drain()
+	require.Eventually(t, func() bool {
+		p.drain()
+		return p.PendingCount() == 1
+	}, 2*time.Second, 10*time.Millisecond)
 
 	assert.Equal(t, 1, p.PendingCount(), "same path should collapse")
 
@@ -118,12 +125,16 @@ func TestPublisher_CreateThenDeleteSuppressed(t *testing.T) {
 	p := NewFileChangeMurmurPublisher(acc, pub, "/tmp/ledger", "/tmp/project", slogDiscard())
 
 	acc.AddEvent("tmp.go", fsnotify.Create, false)
-	time.Sleep(100 * time.Millisecond)
-	p.drain()
+	require.Eventually(t, func() bool {
+		p.drain()
+		return p.PendingCount() == 1
+	}, 2*time.Second, 10*time.Millisecond)
 
 	acc.AddEvent("tmp.go", fsnotify.Remove, false)
-	time.Sleep(100 * time.Millisecond)
-	p.drain()
+	require.Eventually(t, func() bool {
+		p.drain()
+		return p.PendingCount() == 0
+	}, 2*time.Second, 10*time.Millisecond)
 
 	assert.Equal(t, 0, p.PendingCount(), "create+delete should suppress")
 

@@ -5,6 +5,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func codedbTestLogger() *slog.Logger {
@@ -14,17 +16,11 @@ func codedbTestLogger() *slog.Logger {
 // waitForIndexingDone polls until the indexing flag clears or times out.
 func waitForIndexingDone(t *testing.T, mgr *CodeDBManager) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		mgr.mu.Lock()
-		done := !mgr.indexing
-		mgr.mu.Unlock()
-		if done {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("timed out waiting for indexing to complete")
+		defer mgr.mu.Unlock()
+		return !mgr.indexing
+	}, 5*time.Second, 10*time.Millisecond, "timed out waiting for indexing to complete")
 }
 
 // --- Two-tier ledger+dirty architecture tests ---
@@ -35,15 +31,9 @@ func waitForIndexingDone(t *testing.T, mgr *CodeDBManager) {
 // waitForLedgerIndexingDone polls until the ledgerIndexing flag clears or times out.
 func waitForLedgerIndexingDone(t *testing.T, mgr *CodeDBManager) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		mgr.mu.Lock()
-		done := !mgr.ledgerIndexing
-		mgr.mu.Unlock()
-		if done {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("timed out waiting for ledger indexing to complete")
+		defer mgr.mu.Unlock()
+		return !mgr.ledgerIndexing
+	}, 5*time.Second, 10*time.Millisecond, "timed out waiting for ledger indexing to complete")
 }

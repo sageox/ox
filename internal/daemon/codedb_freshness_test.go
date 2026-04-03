@@ -104,21 +104,11 @@ func TestCheckFreshness_NoDoubleGoroutine(t *testing.T) {
 	// release the blocked goroutine and wait for the flag to clear
 	close(release)
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		mgr.mu.Lock()
-		done := !mgr.indexing
-		mgr.mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	mgr.mu.Lock()
-	stillIndexing := mgr.indexing
-	mgr.mu.Unlock()
-	assert.False(t, stillIndexing, "indexing flag must be released after goroutine exits")
+		defer mgr.mu.Unlock()
+		return !mgr.indexing
+	}, 5*time.Second, 10*time.Millisecond, "indexing flag must be released after goroutine exits")
 	assert.Equal(t, int64(1), maxConcurrent.Load(), "exactly one goroutine ran doIndex in total")
 }
 
@@ -137,21 +127,11 @@ func TestCheckFreshness_FlagReleasedOnFailure(t *testing.T) {
 	mgr.CheckFreshness(ctx)
 
 	// wait for the goroutine to finish
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventually(t, func() bool {
 		mgr.mu.Lock()
-		done := !mgr.indexing
-		mgr.mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	mgr.mu.Lock()
-	stillIndexing := mgr.indexing
-	mgr.mu.Unlock()
-	assert.False(t, stillIndexing, "indexing flag must be released after failure")
+		defer mgr.mu.Unlock()
+		return !mgr.indexing
+	}, 5*time.Second, 10*time.Millisecond, "indexing flag must be released after failure")
 }
 
 // --- IssueTracker integration ---
@@ -273,9 +253,9 @@ func TestCheckFreshness_SkipsWhenWorktreeGone(t *testing.T) {
 	mgr.CheckFreshness(ctx)
 
 	// give a tiny window for any goroutine to start (it shouldn't)
-	time.Sleep(50 * time.Millisecond)
-
-	assert.False(t, hookCalled, "doIndex goroutine should NOT launch when worktree is gone")
+	require.Never(t, func() bool {
+		return hookCalled
+	}, 100*time.Millisecond, 10*time.Millisecond, "doIndex goroutine should NOT launch when worktree is gone")
 
 	mgr.mu.Lock()
 	flag := mgr.indexing
@@ -424,8 +404,9 @@ func TestCheckFreshness_GuardThenLedgerIndex_BothWork(t *testing.T) {
 
 	// CheckFreshness should skip (worktree gone)
 	mgr.CheckFreshness(context.Background())
-	time.Sleep(50 * time.Millisecond)
-	assert.False(t, hookCalled, "doIndex should NOT launch when worktree is gone")
+	require.Never(t, func() bool {
+		return hookCalled
+	}, 100*time.Millisecond, 10*time.Millisecond, "doIndex should NOT launch when worktree is gone")
 
 	// but ledger index build should still work (uses ledger, not worktree)
 	ledgerDir := t.TempDir() // fresh dir as fake ledger

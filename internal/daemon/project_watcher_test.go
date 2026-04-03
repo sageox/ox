@@ -24,10 +24,11 @@ func TestAccumulator_CollapseWrites(t *testing.T) {
 	acc.AddEvent("src/config.go", fsnotify.Write, false)
 	acc.AddEvent("src/config.go", fsnotify.Write, false)
 
-	// wait for settle
-	time.Sleep(100 * time.Millisecond)
-
-	changes := acc.DrainSettled()
+	var changes []FileChange
+	require.Eventually(t, func() bool {
+		changes = acc.DrainSettled()
+		return len(changes) == 1
+	}, 2*time.Second, 10*time.Millisecond)
 	require.Len(t, changes, 1)
 	assert.Equal(t, "src/config.go", changes[0].Path)
 	assert.Equal(t, ChangeModified, changes[0].ChangeType)
@@ -40,8 +41,8 @@ func TestAccumulator_CreateThenDelete(t *testing.T) {
 	acc.AddEvent("tmp/scratch.txt", fsnotify.Create, false)
 	acc.AddEvent("tmp/scratch.txt", fsnotify.Remove, false)
 
+	// wait for settle, then verify suppression
 	time.Sleep(100 * time.Millisecond)
-
 	changes := acc.DrainSettled()
 	assert.Nil(t, changes, "create+delete of same file should be suppressed")
 }
@@ -53,10 +54,11 @@ func TestAccumulator_DeleteThenCreate(t *testing.T) {
 	acc.AddEvent("src/config.go", fsnotify.Remove, false)
 	acc.AddEvent("src/config.go", fsnotify.Create, false)
 
-	time.Sleep(100 * time.Millisecond)
-
-	changes := acc.DrainSettled()
-	require.Len(t, changes, 1)
+	var changes []FileChange
+	require.Eventually(t, func() bool {
+		changes = acc.DrainSettled()
+		return len(changes) == 1
+	}, 2*time.Second, 10*time.Millisecond)
 	assert.Equal(t, ChangeModified, changes[0].ChangeType, "delete+create = atomic save = modified")
 }
 
@@ -67,10 +69,11 @@ func TestAccumulator_CreateThenModify(t *testing.T) {
 	acc.AddEvent("src/new.go", fsnotify.Create, false)
 	acc.AddEvent("src/new.go", fsnotify.Write, false)
 
-	time.Sleep(100 * time.Millisecond)
-
-	changes := acc.DrainSettled()
-	require.Len(t, changes, 1)
+	var changes []FileChange
+	require.Eventually(t, func() bool {
+		changes = acc.DrainSettled()
+		return len(changes) == 1
+	}, 2*time.Second, 10*time.Millisecond)
 	assert.Equal(t, ChangeCreated, changes[0].ChangeType, "create+write should stay as created")
 }
 
@@ -85,10 +88,10 @@ func TestAccumulator_SettleTimer(t *testing.T) {
 	assert.Nil(t, changes, "changes should not be available before settle period")
 
 	// wait for settle
-	time.Sleep(150 * time.Millisecond)
-
-	changes = acc.DrainSettled()
-	require.Len(t, changes, 1)
+	require.Eventually(t, func() bool {
+		changes = acc.DrainSettled()
+		return len(changes) == 1
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestAccumulator_DrainClears(t *testing.T) {
@@ -96,10 +99,12 @@ func TestAccumulator_DrainClears(t *testing.T) {
 	defer acc.Stop()
 
 	acc.AddEvent("src/foo.go", fsnotify.Write, false)
-	time.Sleep(100 * time.Millisecond)
 
-	changes := acc.DrainSettled()
-	require.Len(t, changes, 1)
+	var changes []FileChange
+	require.Eventually(t, func() bool {
+		changes = acc.DrainSettled()
+		return len(changes) == 1
+	}, 2*time.Second, 10*time.Millisecond)
 
 	// second drain should return nil
 	changes = acc.DrainSettled()
@@ -114,10 +119,11 @@ func TestAccumulator_MultipleFiles(t *testing.T) {
 	acc.AddEvent("src/b.go", fsnotify.Write, false)
 	acc.AddEvent("src/c.go", fsnotify.Remove, false)
 
-	time.Sleep(100 * time.Millisecond)
-
-	changes := acc.DrainSettled()
-	require.Len(t, changes, 3)
+	var changes []FileChange
+	require.Eventually(t, func() bool {
+		changes = acc.DrainSettled()
+		return len(changes) == 3
+	}, 2*time.Second, 10*time.Millisecond)
 
 	byPath := make(map[string]ChangeType)
 	for _, c := range changes {
@@ -141,10 +147,10 @@ func TestAccumulator_SettleResetsOnNewEvent(t *testing.T) {
 	assert.Nil(t, changes)
 
 	// wait for full settle period from last event
-	time.Sleep(150 * time.Millisecond)
-
-	changes = acc.DrainSettled()
-	require.Len(t, changes, 2)
+	require.Eventually(t, func() bool {
+		changes = acc.DrainSettled()
+		return len(changes) == 2
+	}, 2*time.Second, 10*time.Millisecond)
 }
 
 // --- GitTrackedMatcher tests ---
@@ -251,7 +257,10 @@ func TestProjectWatcher_WatchesTrackedDirs(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		paths := mockWatcher.AddedPaths()
+		return len(paths) >= 3
+	}, 2*time.Second, 10*time.Millisecond)
 
 	paths := mockWatcher.AddedPaths()
 	assert.Contains(t, paths, dir)
@@ -302,7 +311,9 @@ func TestProjectWatcher_UntrackedNotWatched(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return len(mockWatcher.AddedPaths()) >= 2
+	}, 2*time.Second, 10*time.Millisecond)
 
 	paths := mockWatcher.AddedPaths()
 	assert.Contains(t, paths, dir)
@@ -346,18 +357,20 @@ func TestProjectWatcher_EventsReachAccumulator(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return len(mockWatcher.AddedPaths()) > 0
+	}, 2*time.Second, 10*time.Millisecond)
 
 	mockWatcher.SendEvent(fsnotify.Event{
 		Name: filePath,
 		Op:   fsnotify.Write,
 	})
 
-	// wait for settle
-	time.Sleep(100 * time.Millisecond)
-
-	changes := acc.DrainSettled()
-	require.Len(t, changes, 1)
+	var changes []FileChange
+	require.Eventually(t, func() bool {
+		changes = acc.DrainSettled()
+		return len(changes) == 1
+	}, 2*time.Second, 10*time.Millisecond)
 	assert.Equal(t, "main.go", changes[0].Path)
 	assert.Equal(t, ChangeModified, changes[0].ChangeType)
 
@@ -399,16 +412,19 @@ func TestProjectWatcher_UntrackedFileEventsFiltered(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return len(mockWatcher.AddedPaths()) > 0
+	}, 2*time.Second, 10*time.Millisecond)
 
 	// modify both tracked and untracked files
 	mockWatcher.SendEvent(fsnotify.Event{Name: trackedFile, Op: fsnotify.Write})
 	mockWatcher.SendEvent(fsnotify.Event{Name: untrackedFile, Op: fsnotify.Write})
 
-	time.Sleep(100 * time.Millisecond)
-
-	changes := acc.DrainSettled()
-	require.Len(t, changes, 1, "only tracked file should reach accumulator")
+	var changes []FileChange
+	require.Eventually(t, func() bool {
+		changes = acc.DrainSettled()
+		return len(changes) == 1
+	}, 2*time.Second, 10*time.Millisecond)
 	assert.Equal(t, "main.go", changes[0].Path)
 
 	cancel()
@@ -447,15 +463,18 @@ func TestProjectWatcher_NewFileCreationPassesThrough(t *testing.T) {
 		close(done)
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		return len(mockWatcher.AddedPaths()) > 0
+	}, 2*time.Second, 10*time.Millisecond)
 
 	// create event passes through even for untracked files
 	mockWatcher.SendEvent(fsnotify.Event{Name: newFile, Op: fsnotify.Create})
 
-	time.Sleep(100 * time.Millisecond)
-
-	changes := acc.DrainSettled()
-	require.Len(t, changes, 1, "newly created files should pass through")
+	var changes []FileChange
+	require.Eventually(t, func() bool {
+		changes = acc.DrainSettled()
+		return len(changes) == 1
+	}, 2*time.Second, 10*time.Millisecond)
 	assert.Equal(t, "new.go", changes[0].Path)
 	assert.Equal(t, ChangeCreated, changes[0].ChangeType)
 
@@ -537,11 +556,11 @@ func TestChangeAccumulator_OnSettledNotCalledWhenEmpty(t *testing.T) {
 
 	// add and drain before settle
 	acc.AddEvent("src/main.go", fsnotify.Write, false)
-	time.Sleep(100 * time.Millisecond) // wait for settle
 
-	// first settle should have fired
-	first := atomic.LoadInt64(&count)
-	assert.Equal(t, int64(1), first, "first settle should fire callback")
+	// wait for first settle to fire callback
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt64(&count) == 1
+	}, 2*time.Second, 10*time.Millisecond)
 
 	// no new events — next settle timer shouldn't fire the callback
 	time.Sleep(200 * time.Millisecond)
