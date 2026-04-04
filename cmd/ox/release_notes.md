@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.1] - 2026-04-02
 
-_Patch release._
+### Fixed
+- Session push failures no longer cascade-block LFS uploads or destroy cached session data
+- Daemon anti-entropy now correctly recovers fully-finalized and raw-only cache sessions
+- Auth no longer crashes when distilling memory with a nil token
 
 [0.6.1]: https://github.com/sageox/ox/releases/tag/v0.6.1
 
