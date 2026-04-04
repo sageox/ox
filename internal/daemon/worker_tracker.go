@@ -75,6 +75,8 @@ func (wt *WorkerTracker) Register(ws *WorkerState) error {
 }
 
 // UpdateStatus changes the status of a tracked worker.
+// Terminal workers (completed, failed, canceled, timed_out) are automatically
+// removed from the map to prevent unbounded memory growth.
 // No-op if the worker is not found.
 func (wt *WorkerTracker) UpdateStatus(workerID, status string) {
 	wt.mu.Lock()
@@ -88,6 +90,11 @@ func (wt *WorkerTracker) UpdateStatus(workerID, status string) {
 	old := ws.Status
 	ws.Status = status
 	wt.logger.Info("worker status changed", "worker_id", workerID, "from", old, "to", status)
+
+	if isTerminalStatus(status) {
+		delete(wt.workers, workerID)
+		wt.logger.Info("worker reaped", "worker_id", workerID, "status", status)
+	}
 }
 
 // Get returns the worker state for a given ID.
@@ -166,6 +173,11 @@ func (wt *WorkerTracker) ActiveCountByType(adapterType string) int {
 // isActiveStatus returns true for statuses that represent a running worker.
 func isActiveStatus(status string) bool {
 	return status == "starting" || status == "running"
+}
+
+// isTerminalStatus returns true for statuses that represent a finished worker.
+func isTerminalStatus(status string) bool {
+	return status == "completed" || status == "failed" || status == "canceled" || status == "timed_out"
 }
 
 // GenerateWorkerID creates a worker ID scoped to the parent session.

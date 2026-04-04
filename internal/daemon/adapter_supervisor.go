@@ -138,6 +138,19 @@ func (s *AdapterSupervisor) SendRequest(ctx context.Context, adapterType, agentI
 	}
 
 	proc.mu.Lock()
+
+	// check if process crashed since last request — must respawn under a different lock scope
+	if proc.crashed {
+		proc.mu.Unlock()
+		respawned, err := s.handleCrash(adapterType)
+		if err != nil {
+			return nil, err
+		}
+		respawned.mu.Lock()
+		proc = respawned
+	}
+
+	// from here proc is the (possibly respawned) live process, locked
 	defer proc.mu.Unlock()
 
 	// track session and emit lifecycle event for new sessions
@@ -155,30 +168,12 @@ func (s *AdapterSupervisor) SendRequest(ctx context.Context, adapterType, agentI
 		proc.idleTimer = nil
 	}
 
-	// check if process crashed since last request
-	if proc.crashed {
-		proc.mu.Unlock()
-		respawned, err := s.handleCrash(adapterType)
-		if err != nil {
-			return nil, err
-		}
-		respawned.mu.Lock()
-		defer respawned.mu.Unlock()
-		if agentID != "" {
-			if !respawned.sessions[agentID] {
-				respawned.sessions[agentID] = true
-				s.logger.Info("adapter session started", "type", adapterType, "agent_id", agentID)
-			}
-		}
-		respawned.lastActivity = time.Now()
-		return s.sendRequestLocked(ctx, respawned, method, params)
-	}
-
 	return s.sendRequestLocked(ctx, proc, method, params)
 }
 
 // sendRequestLocked sends a request on the process's stdin and reads the response.
-// Caller must hold proc.mu.
+// Caller must hold proc.mu. The read loop skips push events (which have no ID)
+// to correctly handle interleaved event/response messages on the shared stdout pipe.
 func (s *AdapterSupervisor) sendRequestLocked(ctx context.Context, proc *AdapterProcess, method string, params any) (*adapterprotocol.Response, error) {
 	id := int(proc.nextID.Add(1))
 
@@ -203,24 +198,39 @@ func (s *AdapterSupervisor) sendRequestLocked(ctx context.Context, proc *Adapter
 		return nil, fmt.Errorf("%w: write failed: %w", ErrAdapterCrashed, err)
 	}
 
-	// Read response; respects context cancellation via a goroutine.
-	// Known leak: if the context is canceled, this goroutine blocks on Scan()
-	// until the adapter process exits (closing stdout). This is bounded — at most
-	// one leaked goroutine per canceled request, all cleared on adapter restart.
-	type scanResult struct {
-		ok  bool
-		err error
-	}
-	ch := make(chan scanResult, 1)
-	go func() {
-		ok := proc.stdout.Scan()
-		ch <- scanResult{ok: ok, err: proc.stdout.Err()}
-	}()
+	// Read lines until we get a response (has "id" field). Push events (no "id")
+	// are logged and skipped. This prevents interleaved file_watcher events from
+	// being misinterpreted as responses.
+	for {
+		type scanResult struct {
+			ok   bool
+			data []byte
+			err  error
+		}
+		ch := make(chan scanResult, 1)
+		go func() {
+			ok := proc.stdout.Scan()
+			// copy bytes before sending — scanner reuses the buffer
+			var data []byte
+			if ok {
+				src := proc.stdout.Bytes()
+				data = make([]byte, len(src))
+				copy(data, src)
+			}
+			ch <- scanResult{ok: ok, data: data, err: proc.stdout.Err()}
+		}()
 
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case result := <-ch:
+		var result scanResult
+		select {
+		case <-ctx.Done():
+			// Mark process as crashed so the leaked scanner goroutine doesn't
+			// corrupt future requests — the next caller will respawn the process.
+			proc.crashed = true
+			s.logger.Warn("adapter marked for respawn", "type", proc.adapterType, "reason", "context canceled with pending read")
+			return nil, ctx.Err()
+		case result = <-ch:
+		}
+
 		if !result.ok {
 			proc.crashed = true
 			scanErr := result.err
@@ -231,14 +241,30 @@ func (s *AdapterSupervisor) sendRequestLocked(ctx context.Context, proc *Adapter
 			s.logger.Warn("adapter crashed", "type", proc.adapterType, "pid", s.processPID(proc), "respawn_count", proc.respawnCount, "reason", "pipe closed (EOF)")
 			return nil, fmt.Errorf("%w: pipe closed (EOF)", ErrAdapterCrashed)
 		}
-	}
 
-	var resp adapterprotocol.Response
-	if err := ndjson.Decode(proc.stdout.Bytes(), &resp); err != nil {
-		return nil, fmt.Errorf("decode adapter response: %w", err)
-	}
+		// check if this is a push event (has "event" field, no "id") or a response
+		var probe struct {
+			ID    int    `json:"id"`
+			Event string `json:"event"`
+		}
+		if err := json.Unmarshal(result.data, &probe); err != nil {
+			return nil, fmt.Errorf("decode adapter message: %w", err)
+		}
 
-	return &resp, nil
+		if probe.Event != "" {
+			// push event — log and skip, continue reading for the actual response
+			s.logger.Debug("skipping push event from adapter", "type", proc.adapterType, "event", probe.Event)
+			continue
+		}
+
+		// this is a response
+		var resp adapterprotocol.Response
+		if err := ndjson.Decode(result.data, &resp); err != nil {
+			return nil, fmt.Errorf("decode adapter response: %w", err)
+		}
+
+		return &resp, nil
+	}
 }
 
 // EndSession sends an end-session request and removes the agent from tracking.
@@ -421,11 +447,14 @@ func (s *AdapterSupervisor) getOrSpawn(adapterType string) (*AdapterProcess, err
 	proc, exists := s.processes[adapterType]
 	s.mu.RUnlock()
 
-	if exists && !proc.crashed {
-		return proc, nil
-	}
+	if exists {
+		proc.mu.Lock()
+		crashed := proc.crashed
+		proc.mu.Unlock()
 
-	if exists && proc.crashed {
+		if !crashed {
+			return proc, nil
+		}
 		return s.handleCrash(adapterType)
 	}
 
@@ -434,8 +463,13 @@ func (s *AdapterSupervisor) getOrSpawn(adapterType string) (*AdapterProcess, err
 	defer s.mu.Unlock()
 
 	// double-check under write lock (another goroutine may have spawned)
-	if proc, exists := s.processes[adapterType]; exists && !proc.crashed {
-		return proc, nil
+	if proc, exists := s.processes[adapterType]; exists {
+		proc.mu.Lock()
+		c := proc.crashed
+		proc.mu.Unlock()
+		if !c {
+			return proc, nil
+		}
 	}
 
 	return s.spawnAdapterLocked(adapterType)

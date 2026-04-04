@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // +1.9MB to binary; pure-Go SQLite needed because OpenCode stores sessions in SQLite
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"

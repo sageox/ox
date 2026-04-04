@@ -44,6 +44,17 @@ var allowlistedEnvPrefixes = []string{
 	"XDG_",
 }
 
+// denylistedEnvPatterns are substrings that block adapter-declared required_env vars.
+// Prevents adapters from requesting sensitive credentials via self-declared required_env.
+var denylistedEnvPatterns = []string{
+	"SECRET",
+	"TOKEN",
+	"KEY",
+	"PASSWORD",
+	"CREDENTIAL",
+	"PRIVATE",
+}
+
 // ExternalAdapter implements Adapter and IncrementalReader by calling an
 // external adapter binary via subprocess (one-shot) or serve-mode pipe.
 type ExternalAdapter struct {
@@ -117,20 +128,11 @@ func (ea *ExternalAdapter) Detect() bool {
 // FindSessionFile calls find-session via one-shot mode.
 // In production, serve mode is preferred, but one-shot provides a fallback.
 func (ea *ExternalAdapter) FindSessionFile(agentID string, since time.Time) (string, error) {
-	params := adapterprotocol.FindSessionParams{
-		AgentID:  agentID,
-		RepoRoot: os.Getenv("OX_REPO_ROOT"),
-		RepoID:   os.Getenv("OX_REPO_ID"),
-		TeamID:   os.Getenv("OX_TEAM_ID"),
-		Since:    since.UTC().Format(time.RFC3339),
-	}
-
-	paramsBytes, err := json.Marshal(params)
-	if err != nil {
-		return "", fmt.Errorf("marshal params: %w", err)
-	}
-
-	out, err := ea.execOneShot("find-session", "--params", string(paramsBytes))
+	out, err := ea.execOneShot("find-session",
+		"--agent-id", agentID,
+		"--repo-root", os.Getenv("OX_REPO_ROOT"),
+		"--since", since.UTC().Format(time.RFC3339),
+	)
 	if err != nil {
 		return "", err
 	}
@@ -266,16 +268,10 @@ func (ea *ExternalAdapter) Watch(ctx context.Context, sessionPath string) (<-cha
 
 // ReadFromOffset implements IncrementalReader via one-shot subprocess call.
 func (ea *ExternalAdapter) ReadFromOffset(path string, offset int64) ([]RawEntry, int64, error) {
-	params := adapterprotocol.ReadFromOffsetParams{
-		SessionFile: path,
-		Offset:      offset,
-	}
-	paramsBytes, err := json.Marshal(params)
-	if err != nil {
-		return nil, offset, fmt.Errorf("marshal params: %w", err)
-	}
-
-	out, err := ea.execOneShot("read-from-offset", "--params", string(paramsBytes))
+	out, err := ea.execOneShot("read-from-offset",
+		"--session-file", path,
+		"--offset", fmt.Sprintf("%d", offset),
+	)
 	if err != nil {
 		return nil, offset, err
 	}
@@ -286,6 +282,22 @@ func (ea *ExternalAdapter) ReadFromOffset(path string, offset int64) ([]RawEntry
 	}
 
 	return protocolToInternal(result.Entries), result.NewOffset, nil
+}
+
+// ImportSession reads an entire session by its native session ID.
+func (ea *ExternalAdapter) ImportSession(sessionID, repoRoot string) (*adapterprotocol.ImportSessionResult, error) {
+	out, err := ea.execOneShot("import-session",
+		"--session-id", sessionID,
+		"--repo-root", repoRoot,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("import-session: %w", err)
+	}
+	var result adapterprotocol.ImportSessionResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("import-session: unmarshal: %w", err)
+	}
+	return &result, nil
 }
 
 // Info returns the cached adapter info.
@@ -428,9 +440,13 @@ func (ea *ExternalAdapter) buildEnv() []string {
 //
 // All other variables (API keys, tokens, secrets) are stripped.
 func SanitizedEnv(environ []string, requiredEnv []string) []string {
-	// build a set of adapter-declared required env var names for fast lookup
+	// build a set of adapter-declared required env var names, filtering out
+	// names that match sensitive patterns to prevent credential exfiltration
 	required := make(map[string]bool, len(requiredEnv))
 	for _, name := range requiredEnv {
+		if isDenylisted(name) {
+			continue
+		}
 		required[name] = true
 	}
 
@@ -461,6 +477,18 @@ func SanitizedEnv(environ []string, requiredEnv []string) []string {
 	}
 
 	return env
+}
+
+// isDenylisted returns true if the variable name contains a sensitive pattern.
+// Used to prevent adapter-declared required_env from requesting credentials.
+func isDenylisted(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, pattern := range denylistedEnvPatterns {
+		if strings.Contains(upper, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // isAllowlisted returns true if the variable name matches the allowlist.

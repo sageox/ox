@@ -244,12 +244,10 @@ func TestSupervisor_HandleWorkerEventCompleted(t *testing.T) {
 		Data:    data,
 	})
 
-	ws, ok := wt.Get("w-evt-0001")
-	if !ok {
-		t.Fatal("worker should still be in tracker")
-	}
-	if ws.Status != adapterprotocol.WorkerStatusCompleted {
-		t.Errorf("expected status %q, got %q", adapterprotocol.WorkerStatusCompleted, ws.Status)
+	// terminal workers are auto-reaped by WorkerTracker.UpdateStatus
+	_, ok := wt.Get("w-evt-0001")
+	if ok {
+		t.Fatal("terminal worker should be reaped from tracker")
 	}
 
 	logOutput := buf.String()
@@ -300,12 +298,10 @@ func TestSupervisor_HandleWorkerEventFailed(t *testing.T) {
 				Data:    data,
 			})
 
-			ws, ok := wt.Get("w-fail-test")
-			if !ok {
-				t.Fatal("worker should still be in tracker")
-			}
-			if ws.Status != tt.expectedStatus {
-				t.Errorf("expected status %q, got %q", tt.expectedStatus, ws.Status)
+			// terminal workers are auto-reaped by WorkerTracker.UpdateStatus
+			_, ok := wt.Get("w-fail-test")
+			if ok {
+				t.Fatal("terminal worker should be reaped from tracker")
 			}
 		})
 	}

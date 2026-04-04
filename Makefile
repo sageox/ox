@@ -11,9 +11,10 @@ BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 GOPATH := $(shell go env GOPATH)
 LDFLAGS := -ldflags "-X github.com/sageox/ox/internal/version.Version=$(VERSION) -X github.com/sageox/ox/internal/version.BuildDate=$(BUILD_TIME) -X github.com/sageox/ox/internal/version.GitCommit=$(GIT_COMMIT)"
+ADAPTER_LDFLAGS := -ldflags "-s -w"
 
 # Bundled adapters (shipped in release tarballs alongside ox)
-ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode
+ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-aider
 
 # Build targets
 build: build-ox build-adapters ## Build ox and all bundled adapters to bin/
@@ -29,7 +30,7 @@ build-adapters: ## Build all bundled adapter binaries to bin/
 	@mkdir -p bin
 	@for adapter in $(ADAPTERS); do \
 		echo "  Building $$adapter..."; \
-		$(GO) build -o bin/$$adapter ./cmd/$$adapter; \
+		$(GO) build $(ADAPTER_LDFLAGS) -o bin/$$adapter ./cmd/$$adapter; \
 	done
 	@echo "Adapters built: $(ADAPTERS)"
 
@@ -43,7 +44,7 @@ install-ox: ## Install ox to $GOPATH/bin
 install-adapters: ## Install bundled adapters to $GOPATH/bin
 	@echo "Installing adapters to $(GOPATH)/bin..."
 	@for adapter in $(ADAPTERS); do \
-		$(GO) install ./cmd/$$adapter; \
+		$(GO) install $(ADAPTER_LDFLAGS) ./cmd/$$adapter; \
 		echo "  Installed $$adapter"; \
 	done
 

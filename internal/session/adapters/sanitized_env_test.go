@@ -150,28 +150,56 @@ func TestSanitizedEnv_OXProtocolVersionNotDuplicatedWhenPresent(t *testing.T) {
 }
 
 func TestSanitizedEnv_AdapterRequiredEnvIncluded(t *testing.T) {
-	// Failure prevented: adapter declares it needs GEMINI_API_KEY but doesn't receive it.
+	// Failure prevented: adapter declares it needs GEMINI_MODEL but doesn't receive it.
 	environ := []string{
 		"HOME=/home/dev",
-		"GEMINI_API_KEY=AIzaSy-fakekey",
+		"GEMINI_MODEL=gemini-pro",
 		"OPENAI_API_KEY=sk-should-be-stripped",
 		"ANTHROPIC_API_KEY=sk-also-stripped",
 	}
 
-	requiredEnv := []string{"GEMINI_API_KEY"}
+	requiredEnv := []string{"GEMINI_MODEL"}
 
 	result := SanitizedEnv(environ, requiredEnv)
 	m := envMap(result)
 
-	if _, ok := m["GEMINI_API_KEY"]; !ok {
-		t.Error("GEMINI_API_KEY declared in required_env must be in sanitized env")
+	if _, ok := m["GEMINI_MODEL"]; !ok {
+		t.Error("GEMINI_MODEL declared in required_env must be in sanitized env")
 	}
 
-	// other API keys not in required_env must be stripped
-	for _, key := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY"} {
-		if _, ok := m[key]; ok {
-			t.Errorf("%s must not be in sanitized env (not in required_env)", key)
+	// API keys are stripped even if not in required_env
+	for _, v := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY"} {
+		if _, ok := m[v]; ok {
+			t.Errorf("%s must not be in sanitized env (not in required_env)", v)
 		}
+	}
+}
+
+func TestSanitizedEnv_DenylistBlocksSensitiveRequiredEnv(t *testing.T) {
+	// Failure prevented: malicious adapter requests sensitive env vars via required_env.
+	environ := []string{
+		"HOME=/home/dev",
+		"AWS_SECRET_ACCESS_KEY=wJalrX...",
+		"GITHUB_TOKEN=ghp_abc123",
+		"DATABASE_PASSWORD=hunter2",
+		"SAFE_CONFIG_DIR=/etc/myapp",
+	}
+
+	requiredEnv := []string{"AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "DATABASE_PASSWORD", "SAFE_CONFIG_DIR"}
+
+	result := SanitizedEnv(environ, requiredEnv)
+	m := envMap(result)
+
+	// sensitive vars must be blocked despite being in required_env
+	for _, v := range []string{"AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN", "DATABASE_PASSWORD"} {
+		if _, ok := m[v]; ok {
+			t.Errorf("%s must be blocked by deny-list even when in required_env", v)
+		}
+	}
+
+	// non-sensitive required_env must pass through
+	if _, ok := m["SAFE_CONFIG_DIR"]; !ok {
+		t.Error("SAFE_CONFIG_DIR should pass through required_env (not sensitive)")
 	}
 }
 
@@ -291,17 +319,24 @@ func TestSanitizedEnv_ComprehensiveTable(t *testing.T) {
 		},
 		{
 			name:        "required_env overrides default strip",
-			environ:     []string{"CUSTOM_KEY=val", "OTHER_KEY=no"},
-			requiredEnv: []string{"CUSTOM_KEY"},
-			wantKeys:    []string{"CUSTOM_KEY"},
-			rejectKeys:  []string{"OTHER_KEY"},
+			environ:     []string{"CUSTOM_SETTING=val", "OTHER_SETTING=no"},
+			requiredEnv: []string{"CUSTOM_SETTING"},
+			wantKeys:    []string{"CUSTOM_SETTING"},
+			rejectKeys:  []string{"OTHER_SETTING"},
 		},
 		{
 			name:        "multiple required_env",
-			environ:     []string{"KEY_A=a", "KEY_B=b", "KEY_C=c"},
-			requiredEnv: []string{"KEY_A", "KEY_B"},
-			wantKeys:    []string{"KEY_A", "KEY_B"},
-			rejectKeys:  []string{"KEY_C"},
+			environ:     []string{"CONF_A=a", "CONF_B=b", "CONF_C=c"},
+			requiredEnv: []string{"CONF_A", "CONF_B"},
+			wantKeys:    []string{"CONF_A", "CONF_B"},
+			rejectKeys:  []string{"CONF_C"},
+		},
+		{
+			name:        "sensitive required_env blocked by deny-list",
+			environ:     []string{"MY_SECRET=s", "MY_TOKEN=t", "MY_CONFIG=c"},
+			requiredEnv: []string{"MY_SECRET", "MY_TOKEN", "MY_CONFIG"},
+			wantKeys:    []string{"MY_CONFIG"},
+			rejectKeys:  []string{"MY_SECRET", "MY_TOKEN"},
 		},
 	}
 
