@@ -77,7 +77,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 	// code-search: behavioral instruction to prefer ox code search over built-in tools
 	if output.CodeDBAvailable {
 		sb.WriteString("\n<code-search status=\"indexed\">\n")
-		sb.WriteString("This repo has a live code search index. PREFER `ox code search \"<query>\"` over Grep/Glob/ripgrep for:\n")
+		sb.WriteString("This repo has a live code search index. PREFER `ox code search \"&lt;query&gt;\"` over Grep/Glob/ripgrep for:\n")
 		sb.WriteString("- Cross-file symbol search, function lookup, type definitions\n")
 		sb.WriteString("- Git history, diffs, and blame queries\n")
 		sb.WriteString("- Exploratory searches where you don't know the exact file\n")
