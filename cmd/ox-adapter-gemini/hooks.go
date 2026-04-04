@@ -26,11 +26,18 @@ func hookCommand(event string) string {
 }
 
 func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallHooksResponse, error) {
-	settingsPath := resolveSettingsPath(p.RepoRoot, p.Scope)
+	settingsPath, err := resolveSettingsPath(p.RepoRoot, p.Scope)
+	if err != nil {
+		return nil, err
+	}
 
 	settings, err := loadSettings(settingsPath)
 	if err != nil {
-		settings = make(map[string]any)
+		if os.IsNotExist(err) {
+			settings = make(map[string]any)
+		} else {
+			return nil, fmt.Errorf("failed to read settings: %w", err)
+		}
 	}
 
 	hooks, _ := settings["hooks"].(map[string]any)
@@ -62,7 +69,10 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 }
 
 func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooksResponse, error) {
-	settingsPath := resolveSettingsPath(p.RepoRoot, p.Scope)
+	settingsPath, err := resolveSettingsPath(p.RepoRoot, p.Scope)
+	if err != nil {
+		return nil, err
+	}
 
 	settings, err := loadSettings(settingsPath)
 	if err != nil {
@@ -99,7 +109,10 @@ func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooks
 }
 
 func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.UninstallHooksResponse, error) {
-	settingsPath := resolveSettingsPath(p.RepoRoot, p.Scope)
+	settingsPath, err := resolveSettingsPath(p.RepoRoot, p.Scope)
+	if err != nil {
+		return nil, err
+	}
 
 	settings, err := loadSettings(settingsPath)
 	if err != nil {
@@ -140,18 +153,24 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 		}
 	}
 
-	return &adapterprotocol.UninstallHooksResponse{
-		Uninstalled:   true,
-		FilesModified: []string{settingsPath},
-	}, nil
+	resp := &adapterprotocol.UninstallHooksResponse{
+		Uninstalled: true,
+	}
+	if modified {
+		resp.FilesModified = []string{settingsPath}
+	}
+	return resp, nil
 }
 
-func resolveSettingsPath(repoRoot, scope string) string {
+func resolveSettingsPath(repoRoot, scope string) (string, error) {
 	if scope == "user" {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, ".gemini", "settings.json")
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve home directory: %w", err)
+		}
+		return filepath.Join(home, ".gemini", "settings.json"), nil
 	}
-	return filepath.Join(repoRoot, ".gemini", "settings.json")
+	return filepath.Join(repoRoot, ".gemini", "settings.json"), nil
 }
 
 func loadSettings(path string) (map[string]any, error) {
@@ -176,7 +195,7 @@ func writeSettings(path string, settings map[string]any) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0o600)
 }
 
 // removeOxHookFromCommand strips the ox hook portion from a compound hook command.

@@ -52,6 +52,15 @@ func TestParseAmpLine_ToolUse(t *testing.T) {
 	if entry.Role != "tool" {
 		t.Errorf("role = %q, want tool", entry.Role)
 	}
+	if entry.ToolName != "read_file" {
+		t.Errorf("tool_name = %q, want read_file", entry.ToolName)
+	}
+	if entry.ToolInput != "path.go" {
+		t.Errorf("tool_input = %q, want path.go", entry.ToolInput)
+	}
+	if entry.CallID != "call-1" {
+		t.Errorf("call_id = %q, want call-1", entry.CallID)
+	}
 }
 
 // TestParseAmpLine_ToolResultError verifies error tool results are captured.
@@ -61,6 +70,15 @@ func TestParseAmpLine_ToolResultError(t *testing.T) {
 	entry := parseAmpLine(line)
 	if entry == nil {
 		t.Fatal("expected entry, got nil")
+	}
+	if entry.ToolOutput != "file not found" {
+		t.Errorf("tool_output = %q, want 'file not found'", entry.ToolOutput)
+	}
+	if !entry.IsError {
+		t.Error("is_error = false, want true")
+	}
+	if entry.CallID != "call-1" {
+		t.Errorf("call_id = %q, want call-1", entry.CallID)
 	}
 }
 

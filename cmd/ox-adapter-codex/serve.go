@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"log"
 	"os"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
@@ -17,6 +18,20 @@ type codexSessionState struct {
 func handleServe(srv *adapterruntime.Server) {
 	store := adapterruntime.NewSessionStore[*codexSessionState]()
 
+	fw, err := adapterruntime.NewFileWatcher(srv.Writer(), func(file string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
+		entries, newOffset, err := readCodexFromOffset(file, offset)
+		if err != nil {
+			return nil, offset, err
+		}
+		return mergeToolEntries(entries), newOffset, nil
+	})
+	if err != nil {
+		log.Printf("file watcher unavailable: %v", err)
+	}
+	if fw != nil {
+		defer fw.Close()
+	}
+
 	srv.OnFindSession(func(ctx context.Context, p adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error) {
 		sessionFile, err := findCodexSession(p.RepoRoot, p.AgentID, p.Since, p.AgentSessionID)
 		if err != nil {
@@ -29,6 +44,12 @@ func handleServe(srv *adapterruntime.Server) {
 		}
 
 		store.Set(p.AgentID, &codexSessionState{sessionFile: sessionFile, offset: offset})
+
+		if fw != nil {
+			if werr := fw.Watch(p.AgentID, sessionFile, offset); werr != nil {
+				log.Printf("file watcher: failed to watch %s: %v", sessionFile, werr)
+			}
+		}
 
 		return &adapterprotocol.FindSessionResult{SessionFile: sessionFile, Offset: offset}, nil
 	})
@@ -51,6 +72,9 @@ func handleServe(srv *adapterruntime.Server) {
 	})
 
 	srv.OnEndSession(func(ctx context.Context, p adapterprotocol.EndSessionParams) error {
+		if fw != nil {
+			fw.Unwatch(p.AgentID)
+		}
 		store.Delete(p.AgentID)
 		return nil
 	})

@@ -30,6 +30,7 @@ func main() {
 	adapterruntime.Run(adapterruntime.Config{
 		Info:           handleInfo,
 		Detect:         handleDetect,
+		FindSession:    handleFindSession,
 		Read:           handleRead,
 		ReadMetadata:   handleReadMetadata,
 		InstallHooks:   handleInstallHooks,

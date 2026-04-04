@@ -98,10 +98,12 @@ func handleFindSession(p adapterprotocol.FindSessionParams) (*adapterprotocol.Fi
 		args := []any{}
 
 		if p.Since != "" {
-			if t, err := time.Parse(time.RFC3339, p.Since); err == nil {
-				query = "SELECT id FROM sessions WHERE parent_session_id IS NULL AND created_at >= ? ORDER BY created_at DESC LIMIT 1"
-				args = append(args, t.Unix())
+			t, err := time.Parse(time.RFC3339, p.Since)
+			if err != nil {
+				return nil, fmt.Errorf("invalid since %q: %w", p.Since, err)
 			}
+			query = "SELECT id FROM sessions WHERE parent_session_id IS NULL AND created_at >= ? ORDER BY created_at DESC LIMIT 1"
+			args = append(args, t.Unix())
 		}
 
 		err = db.QueryRow(query, args...).Scan(&sessionID)
@@ -116,7 +118,7 @@ func handleFindSession(p adapterprotocol.FindSessionParams) (*adapterprotocol.Fi
 	// for offset-based reading, count current messages as offset
 	var msgCount int64
 	if err := db.QueryRow("SELECT COUNT(*) FROM messages WHERE session_id = ?", sessionID).Scan(&msgCount); err != nil {
-		msgCount = 0
+		return nil, fmt.Errorf("count messages for session %s: %w", sessionID, err)
 	}
 
 	// session file is the DB path + session ID (virtual path for the protocol)
@@ -194,7 +196,7 @@ func handleReadFromOffset(p adapterprotocol.ReadFromOffsetParams) (*adapterproto
 	// new offset = old offset + new entries read
 	var totalMsgs int64
 	if err := db.QueryRow("SELECT COUNT(*) FROM messages WHERE session_id = ?", sessionID).Scan(&totalMsgs); err != nil {
-		totalMsgs = p.Offset + int64(len(entries))
+		return nil, fmt.Errorf("count messages for session %s: %w", sessionID, err)
 	}
 
 	return &adapterprotocol.ReadFromOffsetResult{
@@ -229,7 +231,7 @@ func readMessages(db *sql.DB, sessionID string, offset int64) ([]adapterprotocol
 		var createdAt int64
 
 		if err := rows.Scan(&role, &partsJSON, &model, &createdAt); err != nil {
-			continue
+			return nil, fmt.Errorf("scan message row for session %s: %w", sessionID, err)
 		}
 
 		ts := time.Unix(createdAt, 0).UTC()

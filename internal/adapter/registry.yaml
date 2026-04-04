@@ -18,7 +18,7 @@ adapters:
     bundled: true
     binary: ox-adapter-gemini
     repo: sageox/ox
-    capabilities: [session_reader, hook_installer, incremental_reader, serve_mode]
+    capabilities: [session_reader, hook_installer, incremental_reader, file_watcher, serve_mode]
     detect_commands: [gemini]
 
   - name: codex
@@ -38,7 +38,7 @@ adapters:
     bundled: true
     binary: ox-adapter-amp
     repo: sageox/ox
-    capabilities: [session_reader, hook_installer, incremental_reader, serve_mode]
+    capabilities: [session_reader, hook_installer, incremental_reader, file_watcher, serve_mode]
     detect_commands: [amp]
 
   - name: opencode

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
@@ -18,6 +19,16 @@ type sessionState struct {
 func handleServe(srv *adapterruntime.Server) {
 	store := adapterruntime.NewSessionStore[sessionState]()
 
+	fw, err := adapterruntime.NewFileWatcher(srv.Writer(), func(file string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
+		return readFromOffset(file, offset)
+	})
+	if err != nil {
+		log.Printf("file watcher unavailable: %v", err)
+	}
+	if fw != nil {
+		defer fw.Close()
+	}
+
 	srv.OnFindSession(func(ctx context.Context, p adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error) {
 		sessionFile, offset, err := findSessionFile(p.RepoRoot, p.AgentID, p.Since, p.AgentSessionID)
 		if err != nil {
@@ -28,6 +39,12 @@ func handleServe(srv *adapterruntime.Server) {
 			sessionFile: sessionFile,
 			offset:      offset,
 		})
+
+		if fw != nil {
+			if werr := fw.Watch(p.AgentID, sessionFile, offset); werr != nil {
+				log.Printf("file watcher: failed to watch %s: %v", sessionFile, werr)
+			}
+		}
 
 		return &adapterprotocol.FindSessionResult{
 			SessionFile: sessionFile,
@@ -46,7 +63,6 @@ func handleServe(srv *adapterruntime.Server) {
 			return nil, err
 		}
 
-		// write back full value — state is a copy from sync.Map, not a pointer
 		store.Set(p.AgentID, sessionState{
 			sessionFile: state.sessionFile,
 			offset:      newOffset,
@@ -59,6 +75,9 @@ func handleServe(srv *adapterruntime.Server) {
 	})
 
 	srv.OnEndSession(func(ctx context.Context, p adapterprotocol.EndSessionParams) error {
+		if fw != nil {
+			fw.Unwatch(p.AgentID)
+		}
 		store.Delete(p.AgentID)
 		return nil
 	})

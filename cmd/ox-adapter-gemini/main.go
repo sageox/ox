@@ -44,6 +44,7 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 			adapterprotocol.CapSessionReader,
 			adapterprotocol.CapHookInstaller,
 			adapterprotocol.CapIncrementalReader,
+			adapterprotocol.CapFileWatcher,
 			adapterprotocol.CapServeMode,
 		},
 		HookEnvValues: []string{"gemini"},
