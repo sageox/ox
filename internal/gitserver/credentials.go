@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
@@ -47,6 +48,9 @@ type GitCredentials struct {
 	Repos     map[string]RepoEntry `json:"repos,omitempty"` // indexed by team ID
 }
 
+// testOverrideMu protects configDirOverride and forceFileStorage from concurrent access
+var testOverrideMu sync.RWMutex
+
 // configDirOverride allows tests to override the config directory
 var configDirOverride string
 
@@ -57,6 +61,8 @@ var forceFileStorage bool
 // Returns the previous value so it can be restored.
 // This function should only be called from tests.
 func TestSetConfigDirOverride(dir string) string {
+	testOverrideMu.Lock()
+	defer testOverrideMu.Unlock()
 	prev := configDirOverride
 	configDirOverride = dir
 	return prev
@@ -66,6 +72,8 @@ func TestSetConfigDirOverride(dir string) string {
 // Returns the previous value so it can be restored.
 // This function should only be called from tests.
 func TestSetForceFileStorage(force bool) bool {
+	testOverrideMu.Lock()
+	defer testOverrideMu.Unlock()
 	prev := forceFileStorage
 	forceFileStorage = force
 	return prev
@@ -80,8 +88,11 @@ func getCredentialsFilePath() (string, error) {
 	}
 
 	// allow tests to override config directory
-	if configDirOverride != "" {
-		return filepath.Join(configDirOverride, "sageox", "git-credentials.json"), nil
+	testOverrideMu.RLock()
+	override := configDirOverride
+	testOverrideMu.RUnlock()
+	if override != "" {
+		return filepath.Join(override, "sageox", "git-credentials.json"), nil
 	}
 
 	// use centralized paths package
@@ -96,7 +107,10 @@ func getCredentialsFilePath() (string, error) {
 // Returns false for CI environments, headless servers, or when keyring fails.
 func isKeyringAvailable() bool {
 	// respect test override
-	if forceFileStorage {
+	testOverrideMu.RLock()
+	forceFile := forceFileStorage
+	testOverrideMu.RUnlock()
+	if forceFile {
 		return false
 	}
 
@@ -315,8 +329,11 @@ func getEndpointCredentialsPath(endpointURL string) (string, error) {
 	}
 
 	// allow tests to override config directory
-	if configDirOverride != "" {
-		return filepath.Join(configDirOverride, "sageox", fmt.Sprintf("git-credentials-%s.json", slug)), nil
+	testOverrideMu.RLock()
+	override := configDirOverride
+	testOverrideMu.RUnlock()
+	if override != "" {
+		return filepath.Join(override, "sageox", fmt.Sprintf("git-credentials-%s.json", slug)), nil
 	}
 
 	// use centralized paths package
