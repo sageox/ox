@@ -506,3 +506,126 @@ func TestVerifyObject_NilAction(t *testing.T) {
 		t.Fatalf("expected nil error for nil action, got: %v", err)
 	}
 }
+
+// --- FindPointerStubsWithMissingBlobs ---
+
+// TestFindPointerStubsWithMissingBlobs_AllExist verifies that no files are reported
+// missing when the remote LFS store has all the referenced blobs.
+// Failure prevented: false positives blocking sessions from being uploaded when
+// blobs are actually present.
+func TestFindPointerStubsWithMissingBlobs_AllExist(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Objects []BatchObject `json:"objects"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		resp := BatchResponse{Transfer: "basic"}
+		for _, obj := range req.Objects {
+			// all objects exist — return a download action
+			resp.Objects = append(resp.Objects, BatchResponseObject{
+				OID:  obj.OID,
+				Size: obj.Size,
+				Actions: &Actions{
+					Download: &Action{Href: "https://storage.example.com/" + obj.OID},
+				},
+			})
+		}
+		w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	sessionDir := t.TempDir()
+	content := []byte("real session content for testing")
+	writePointerForContent(t, sessionDir, "raw.jsonl", content)
+
+	client := &Client{batchURL: server.URL + "/info/lfs/objects/batch", httpClient: &http.Client{}}
+	missing := FindPointerStubsWithMissingBlobs(client, sessionDir, nil)
+	if len(missing) != 0 {
+		t.Errorf("expected no missing blobs, got: %v", missing)
+	}
+}
+
+// TestFindPointerStubsWithMissingBlobs_SomeMissing verifies that files whose blobs
+// are absent from the remote LFS store are returned as missing.
+// Failure prevented: committing pointer stubs whose blobs don't exist in GitLab
+// causes pre-receive hook to reject the entire push, blocking ALL sessions.
+func TestFindPointerStubsWithMissingBlobs_SomeMissing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Objects []BatchObject `json:"objects"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		resp := BatchResponse{Transfer: "basic"}
+		for i, obj := range req.Objects {
+			if i == 0 {
+				// first object missing
+				resp.Objects = append(resp.Objects, BatchResponseObject{
+					OID:  obj.OID,
+					Size: obj.Size,
+					Error: &ObjectError{Code: 404, Message: "Object does not exist"},
+				})
+			} else {
+				resp.Objects = append(resp.Objects, BatchResponseObject{
+					OID:  obj.OID,
+					Size: obj.Size,
+					Actions: &Actions{
+						Download: &Action{Href: "https://storage.example.com/" + obj.OID},
+					},
+				})
+			}
+		}
+		w.Header().Set("Content-Type", "application/vnd.git-lfs+json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	sessionDir := t.TempDir()
+	writePointerForContent(t, sessionDir, "raw.jsonl", []byte("raw content"))
+	writePointerForContent(t, sessionDir, "summary.md", []byte("# Summary"))
+
+	client := &Client{batchURL: server.URL + "/info/lfs/objects/batch", httpClient: &http.Client{}}
+	missing := FindPointerStubsWithMissingBlobs(client, sessionDir, nil)
+	if len(missing) != 1 {
+		t.Errorf("expected 1 missing blob, got %d: %v", len(missing), missing)
+	}
+}
+
+// TestFindPointerStubsWithMissingBlobs_NoPointers verifies that sessions with
+// real content files (not pointer stubs) return nil without making any API call.
+func TestFindPointerStubsWithMissingBlobs_NoPointers(t *testing.T) {
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		http.Error(w, "should not be called", 500)
+	}))
+	defer server.Close()
+
+	sessionDir := t.TempDir()
+	// write real content (large enough to not be a pointer stub)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessionDir, "raw.jsonl"),
+		[]byte(`{"metadata":{}}`+"\n"+`{"type":"user","content":"hello","seq":1}`+"\n"),
+		0644,
+	))
+
+	client := &Client{batchURL: server.URL + "/info/lfs/objects/batch", httpClient: &http.Client{}}
+	missing := FindPointerStubsWithMissingBlobs(client, sessionDir, nil)
+	if len(missing) != 0 {
+		t.Errorf("expected no missing blobs for real content, got: %v", missing)
+	}
+	if callCount != 0 {
+		t.Errorf("expected no API calls for non-pointer files, got %d", callCount)
+	}
+}
+
+// writePointerForContent writes an LFS pointer stub to sessionDir/filename,
+// deriving the OID and size from the provided content.
+func writePointerForContent(t *testing.T, sessionDir, filename string, content []byte) {
+	t.Helper()
+	refs := map[string]FileRef{filename: NewFileRef(content)}
+	// write a temporary content file so WritePointerFiles can replace it
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, filename), content, 0644))
+	_, err := WritePointerFiles(sessionDir, refs)
+	require.NoError(t, err)
+}

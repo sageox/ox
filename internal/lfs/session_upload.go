@@ -105,6 +105,71 @@ func UploadSessionFiles(client *Client, sessionPath string, logger *slog.Logger)
 	return fileRefs, nil
 }
 
+// FindPointerStubsWithMissingBlobs checks which content files in sessionPath are
+// LFS pointer stubs whose backing blobs do NOT exist in the remote LFS store.
+// Returns the filenames of files whose blobs are missing. Returns nil if all
+// blobs exist or if no pointer stubs are present.
+//
+// Use this before committing pointer stubs to the ledger — committing stubs with
+// missing remote blobs causes GitLab's pre-receive hook to reject the entire push,
+// blocking all sessions until the bad commits are removed.
+func FindPointerStubsWithMissingBlobs(client *Client, sessionPath string, logger *slog.Logger) []string {
+	type pointerInfo struct {
+		filename string
+		obj      BatchObject
+	}
+	var toCheck []pointerInfo
+
+	for _, name := range ContentFiles {
+		filePath := filepath.Join(sessionPath, name)
+		if !IsPointerFile(filePath) {
+			continue
+		}
+		ref, err := ReadPointerFile(filePath)
+		if err != nil {
+			if logger != nil {
+				logger.Debug("FindPointerStubsWithMissingBlobs: skip unreadable pointer", "file", name, "err", err)
+			}
+			continue
+		}
+		toCheck = append(toCheck, pointerInfo{filename: name, obj: BatchObject{OID: ref.BareOID(), Size: ref.Size}})
+	}
+
+	if len(toCheck) == 0 {
+		return nil // no pointer stubs — nothing to verify
+	}
+
+	objects := make([]BatchObject, len(toCheck))
+	for i, p := range toCheck {
+		objects[i] = p.obj
+	}
+
+	resp, err := client.BatchDownload(objects)
+	if err != nil {
+		// can't verify — optimistically allow the commit rather than blocking
+		if logger != nil {
+			logger.Debug("FindPointerStubsWithMissingBlobs: batch check failed, assuming blobs exist", "err", err)
+		}
+		return nil
+	}
+
+	// build OID → filename map for error reporting
+	oidToFile := make(map[string]string, len(toCheck))
+	for _, p := range toCheck {
+		oidToFile[p.obj.OID] = p.filename
+	}
+
+	var missing []string
+	for _, obj := range resp.Objects {
+		if obj.Error != nil {
+			if name, ok := oidToFile[obj.OID]; ok {
+				missing = append(missing, name)
+			}
+		}
+	}
+	return missing
+}
+
 // EnsureSessionsGitignore ensures the sessions/.gitignore exists in the ledger.
 // LFS pointer files and meta.json are committed to git; pointer files (~130 bytes)
 // reference uploaded LFS objects by OID to prevent garbage collection.

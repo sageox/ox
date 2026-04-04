@@ -350,3 +350,119 @@ func TestProcessResult_RegularFinalize_StagesToLedger(t *testing.T) {
 		t.Error("cache dir should be pruned after finalize+commit")
 	}
 }
+
+// --- F. Cache survival on push failure ---
+
+// TestProcessResult_RegularFinalize_CachePreservedOnPushFail verifies that when
+// git push fails, the original cache dir is NOT deleted.
+// Failure prevented: push failure + cache pruning = irrecoverable data loss. The
+// session would disappear from both cache (gone) and remote (not pushed), with
+// only a local git commit containing the data.
+func TestProcessResult_RegularFinalize_CachePreservedOnPushFail(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	_, clonePath := setupBareAndCloneLedger(t)
+
+	// break the remote so push fails
+	runGitCmd(t, clonePath, "remote", "set-url", "origin", "/nonexistent/broken/remote.git")
+
+	sessionName := "2026-01-15T12-00-testuser-OxPFAIL"
+	cacheDir := filepath.Join(clonePath, ".sageox", "cache", "sessions", sessionName)
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte(testRawContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewSessionFinalizeHandler(slog.Default())
+	handler.skipLFS = true
+	handler.skipGit = false
+	handler.ledgerMu = &sync.Mutex{}
+
+	llmOutput := `{"title":"Test","summary":"A test.","quality_score":0.8,"score_reason":"fine","outcome":"success","key_actions":["did something"]}`
+	item := &WorkItem{
+		ID:   "test-push-fail-cache",
+		Type: sessionFinalizeType,
+		Payload: &SessionFinalizePayload{
+			SessionDir: cacheDir,
+			RawPath:    filepath.Join(cacheDir, "raw.jsonl"),
+			Missing:    requiredArtifacts,
+			LedgerPath: clonePath,
+		},
+	}
+
+	if err := handler.ProcessResult(item, &RunResult{Output: llmOutput}); err != nil {
+		t.Fatalf("ProcessResult returned unexpected error: %v", err)
+	}
+
+	// CRITICAL: cache must survive push failure — it's the only surviving copy
+	if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
+		t.Error("DATALOSS: cache dir removed after push failure — session content irrecoverable")
+	}
+}
+
+// TestProcessResult_UploadOnly_CachePreservedOnPushFail verifies that the upload-only
+// path does not delete the cache when push fails.
+// Failure prevented: same data-loss scenario as above, in the upload-only code path.
+func TestProcessResult_UploadOnly_CachePreservedOnPushFail(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	_, clonePath := setupBareAndCloneLedger(t)
+
+	// break the remote so push fails
+	runGitCmd(t, clonePath, "remote", "set-url", "origin", "/nonexistent/broken/remote.git")
+
+	sessionName := "2026-01-15T13-00-testuser-OxPFAIL2"
+	cacheDir := filepath.Join(clonePath, ".sageox", "cache", "sessions", sessionName)
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "raw.jsonl"), []byte(testRawContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range requiredArtifacts {
+		if err := os.WriteFile(filepath.Join(cacheDir, name), []byte("artifact content"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cacheDir, "meta.json"), []byte(`{"session":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	handler := NewSessionFinalizeHandler(slog.Default())
+	handler.skipLFS = true
+	handler.skipGit = false
+	handler.ledgerMu = &sync.Mutex{}
+
+	item := &WorkItem{
+		ID:   "test-upload-push-fail",
+		Type: sessionFinalizeType,
+		Payload: &SessionFinalizePayload{
+			SessionDir: cacheDir,
+			RawPath:    filepath.Join(cacheDir, "raw.jsonl"),
+			LedgerPath: clonePath,
+			UploadOnly: true,
+		},
+	}
+
+	if err := handler.ProcessResult(item, &RunResult{}); err != nil {
+		t.Fatalf("ProcessResult returned unexpected error: %v", err)
+	}
+
+	// CRITICAL: cache must survive push failure
+	if _, err := os.Stat(cacheDir); os.IsNotExist(err) {
+		t.Error("DATALOSS: upload-only cache removed after push failure — session content irrecoverable")
+	}
+}
+

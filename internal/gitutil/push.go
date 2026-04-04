@@ -69,6 +69,9 @@ var permanentPatterns = []string{
 	"repository not found",
 	"The requested URL returned error: 403",
 	"HTTP 403",
+	// GitLab pre-receive hook rejects pushes when commits reference LFS objects
+	// not in the remote LFS store. Rebasing won't fix missing blobs — fail fast.
+	"LFS objects are missing",
 }
 
 // PushWithRetry pushes a git repo to its remote with pre-flight checks,

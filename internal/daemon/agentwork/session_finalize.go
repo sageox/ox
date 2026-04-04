@@ -682,17 +682,18 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		h.logger.Warn("gitignore setup failed", "err", err)
 	}
 
-	h.gitCommitAndPush(payload)
+	pushed := h.gitCommitAndPush(payload)
 
 	// push succeeded — now safe to replace content files with LFS pointer stubs
-	if len(fileRefs) > 0 {
+	if pushed && len(fileRefs) > 0 {
 		if _, err := lfs.WritePointerFiles(payload.SessionDir, fileRefs); err != nil {
 			h.logger.Warn("LFS pointer file write failed after push", "session", sessionName, "err", err)
 		}
 	}
 
-	// prune cache dir now that session is committed to the ledger
-	if origCacheDir != payload.SessionDir {
+	// prune cache dir only after a successful push — on push failure the cache
+	// is the only surviving copy of the session content
+	if pushed && origCacheDir != payload.SessionDir {
 		if err := os.RemoveAll(origCacheDir); err != nil {
 			h.logger.Debug("prune cache after finalize", "dir", origCacheDir, "err", err)
 		}
@@ -821,6 +822,21 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 	sessionName := filepath.Base(payload.SessionDir)
 	origCacheDir := payload.SessionDir
 
+	// Before staging: if any content files are already LFS pointer stubs, verify
+	// their backing blobs exist in the remote LFS store. Committing pointer stubs
+	// whose blobs are absent from the remote poisons the push queue — GitLab's
+	// pre-receive hook rejects the entire push for all sessions until fixed.
+	if !h.skipLFS && h.projectRoot != "" {
+		ep := endpoint.GetForProject(h.projectRoot)
+		if client, err := lfs.NewClientFromLedger(payload.LedgerPath, ep); err == nil {
+			if missing := lfs.FindPointerStubsWithMissingBlobs(client, payload.SessionDir, h.logger); len(missing) > 0 {
+				h.logger.Warn("upload-only: pointer stubs reference LFS blobs not in remote — session cannot be pushed, skipping",
+					"session", sessionName, "missing_files", missing)
+				return nil // leave cache intact for manual recovery
+			}
+		}
+	}
+
 	// copy all artifacts from cache to ledger/sessions/<name>/
 	if err := h.stageSessionInLedger(payload); err != nil {
 		h.logger.Warn("upload-only: failed to stage session", "session", sessionName, "err", err)
@@ -862,30 +878,32 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 		h.logger.Warn("upload-only: gitignore setup failed", "err", err)
 	}
 
-	h.gitCommitAndPush(payload)
+	pushed := h.gitCommitAndPush(payload)
 
-	if len(fileRefs) > 0 {
-		if _, err := lfs.WritePointerFiles(payload.SessionDir, fileRefs); err != nil {
-			h.logger.Warn("upload-only: LFS pointer write failed after push", "session", sessionName, "err", err)
+	// only write pointer stubs and prune cache after a successful push —
+	// on failure the cache is the only surviving copy of the session content
+	if pushed {
+		if len(fileRefs) > 0 {
+			if _, err := lfs.WritePointerFiles(payload.SessionDir, fileRefs); err != nil {
+				h.logger.Warn("upload-only: LFS pointer write failed after push", "session", sessionName, "err", err)
+			}
 		}
+		if err := os.RemoveAll(origCacheDir); err != nil {
+			h.logger.Debug("upload-only: prune cache", "dir", origCacheDir, "err", err)
+		}
+		h.logger.Info("session uploaded via anti-entropy (upload-only)", "session", sessionName)
 	}
 
-	// prune original cache entry now that session is in the ledger
-	if err := os.RemoveAll(origCacheDir); err != nil {
-		h.logger.Debug("upload-only: prune cache", "dir", origCacheDir, "err", err)
-	}
-
-	h.logger.Info("session uploaded via anti-entropy (upload-only)",
-		"session", sessionName,
-	)
 	return nil
 }
 
 // gitCommitAndPush stages, commits, and pushes the finalized session.
-// Push failures are non-fatal.
-func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayload) {
+// Returns true if the push succeeded, false otherwise.
+// Push failures are non-fatal — callers should gate pointer-file writes and
+// cache pruning on the return value to avoid data loss.
+func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayload) bool {
 	if h.skipGit {
-		return
+		return true // treat skip as success so tests can prune cache
 	}
 
 	// serialize with daemon's ledger git ops (sync, murmur push, github sync)
@@ -901,20 +919,20 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	relDir, err := filepath.Rel(ledgerPath, payload.SessionDir)
 	if err != nil {
 		h.logger.Warn("could not compute relative session path", "err", err)
-		return
+		return false
 	}
 
 	// git add --sparse <session-dir>/
 	if err := h.runGit(ledgerPath, "add", "--sparse", relDir+"/"); err != nil {
 		h.logger.Warn("git add failed", "err", err)
-		return
+		return false
 	}
 
 	// git commit
 	msg := fmt.Sprintf("finalize session %s", sessionName)
 	if err := h.runGit(ledgerPath, "commit", "-m", msg); err != nil {
 		h.logger.Warn("git commit failed", "err", err)
-		return
+		return false
 	}
 
 	// push with retry (best-effort — failures are non-fatal)
@@ -924,7 +942,9 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		Logger:              h.logger,
 	}); err != nil {
 		h.logger.Warn("git push failed (non-fatal)", "err", err)
+		return false
 	}
+	return true
 }
 
 // runGit executes a git command in the ledger directory.
