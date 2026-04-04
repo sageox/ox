@@ -2,9 +2,7 @@
 //
 // OpenCode stores sessions in a SQLite database at ~/.local/share/opencode/opencode.db.
 // Hooks are installed as TypeScript plugins at .opencode/plugin/ox-prime.ts.
-//
-// Session reading from SQLite is not yet implemented (tracked as a future enhancement).
-// This adapter currently provides detection, hook installation, and diagnostics.
+// Session reading queries SQLite directly using modernc.org/sqlite (pure Go, no CGo).
 package main
 
 import (
@@ -32,10 +30,13 @@ func main() {
 	adapterruntime.Run(adapterruntime.Config{
 		Info:           handleInfo,
 		Detect:         handleDetect,
+		Read:           handleRead,
+		ReadMetadata:   handleReadMetadata,
 		InstallHooks:   handleInstallHooks,
 		CheckHooks:     handleCheckHooks,
 		UninstallHooks: handleUninstallHooks,
 		Diagnose:       handleDiagnose,
+		Serve:          handleServe,
 	})
 }
 
@@ -47,9 +48,13 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		Version:         adapterVersion,
 		Type:            adapterprotocol.TypeSession,
 		Capabilities: []string{
+			adapterprotocol.CapSessionReader,
 			adapterprotocol.CapHookInstaller,
+			adapterprotocol.CapIncrementalReader,
+			adapterprotocol.CapServeMode,
 		},
 		HookEnvValues: []string{"opencode"},
+		ServeMode:     true,
 	}, nil
 }
 
@@ -88,6 +93,17 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 			Severity: "warning",
 			Title:    "OpenCode CLI not detected",
 			Detail:   "opencode binary not found in PATH.",
+		})
+	}
+
+	// check for opencode.db
+	dbPath := openCodeDBPath()
+	if dbPath == "" || func() bool { _, err := os.Stat(dbPath); return err != nil }() {
+		issues = append(issues, adapterprotocol.DiagnoseIssue{
+			Slug:     "opencode:no-database",
+			Severity: "info",
+			Title:    "OpenCode database not found",
+			Detail:   "opencode.db not found — session reading unavailable until OpenCode is used.",
 		})
 	}
 

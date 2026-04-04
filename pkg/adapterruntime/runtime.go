@@ -52,7 +52,8 @@ func Run(cfg Config) {
 // Returns an error instead of calling os.Exit, making it safe for tests and embedding.
 func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: <adapter> <subcommand> [flags]")
+		printUsage(cfg, os.Stderr)
+		return nil
 	}
 
 	cmd := args[0]
@@ -150,6 +151,42 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) e
 	default:
 		return fmt.Errorf("unknown subcommand: %s", cmd)
 	}
+}
+
+// printUsage prints a human-friendly message when someone runs the adapter
+// binary directly without arguments.
+func printUsage(cfg Config, w io.Writer) {
+	p := func(format string, args ...any) { _, _ = fmt.Fprintf(w, format, args...) }
+
+	name := "ox-adapter"
+	displayName := ""
+	version := ""
+	protoVersion := 0
+	if cfg.Info != nil {
+		if info, err := cfg.Info(); err == nil {
+			name = "ox-adapter-" + info.Name
+			displayName = info.DisplayName
+			version = info.Version
+			protoVersion = info.ProtocolVersion
+		}
+	}
+
+	header := name
+	if displayName != "" {
+		header = fmt.Sprintf("%s — %s adapter for ox", name, displayName)
+	}
+
+	p("%s\n", header)
+	if version != "" || protoVersion > 0 {
+		p("  adapter %s · protocol v%d\n", version, protoVersion)
+	}
+	p("\nThis is an adapter plugin for ox. It is not meant to be run directly —\n")
+	p("ox discovers and invokes it automatically.\n")
+	p("\nTo get started with ox:\n")
+	p("  brew install sageox/tap/ox\n")
+	p("  ox init\n")
+	p("  ox doctor\n")
+	p("\nLearn more: https://sageox.ai/docs\n")
 }
 
 func runOneShot(enc *json.Encoder, fn func() (any, error)) error {

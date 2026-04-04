@@ -156,11 +156,8 @@ func parseAmpLine(line []byte) *adapterprotocol.RawEntry {
 		return &e
 
 	case "tool_result":
-		if raw.IsError {
-			e := adapterruntime.ToolResultWithID(ts, raw.Content, true, raw.CallID)
-			return &e
-		}
-		return nil
+		e := adapterruntime.ToolResultWithID(ts, raw.Content, raw.IsError, raw.CallID)
+		return &e
 
 	case "system":
 		if raw.Content == "" {
@@ -175,13 +172,21 @@ func parseAmpLine(line []byte) *adapterprotocol.RawEntry {
 
 // --- session discovery ---
 
-func findAmpSession(repoRoot, agentID, since, agentSessionID string) (string, error) {
+func findAmpSession(_, agentID, since, agentSessionID string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
 
 	sessionsDir := filepath.Join(home, ".amp", "sessions")
+
+	// direct lookup by session ID
+	if agentSessionID != "" {
+		direct := filepath.Join(sessionsDir, agentSessionID+".jsonl")
+		if _, err := os.Stat(direct); err == nil {
+			return direct, nil
+		}
+	}
 
 	sinceTime := time.Time{}
 	if since != "" {

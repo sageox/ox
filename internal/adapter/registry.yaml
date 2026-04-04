@@ -43,12 +43,12 @@ adapters:
 
   - name: opencode
     display_name: OpenCode
-    description: Installs OpenCode hooks for ox prime
+    description: Reads OpenCode sessions from SQLite, installs OpenCode hooks
     type: session
     bundled: true
     binary: ox-adapter-opencode
     repo: sageox/ox
-    capabilities: [hook_installer]
+    capabilities: [session_reader, hook_installer, incremental_reader, serve_mode]
     detect_commands: [opencode]
 
   - name: cursor

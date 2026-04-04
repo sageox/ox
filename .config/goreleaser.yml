@@ -154,6 +154,42 @@ builds:
     ldflags:
       - -s -w
 
+  - id: ox-adapter-amp
+    main: ./cmd/ox-adapter-amp
+    binary: ox-adapter-amp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: freebsd
+        goarch: arm64
+    ldflags:
+      - -s -w
+
+  - id: ox-adapter-opencode
+    main: ./cmd/ox-adapter-opencode
+    binary: ox-adapter-opencode
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: freebsd
+        goarch: arm64
+    ldflags:
+      - -s -w
+
 archives:
   - id: ox-archive
     formats:
@@ -191,7 +227,7 @@ release:
 
     Pre-compiled binaries for Linux, macOS (Intel & Apple Silicon), and FreeBSD.
 
-    Each tarball includes ox and bundled adapters (claude-code, gemini, codex).
+    Each tarball includes ox and bundled adapters (claude-code, gemini, codex, amp, opencode).
 
     ### Installation
 
@@ -219,6 +255,8 @@ brews:
       bin.install "ox-adapter-claude-code"
       bin.install "ox-adapter-gemini"
       bin.install "ox-adapter-codex"
+      bin.install "ox-adapter-amp"
+      bin.install "ox-adapter-opencode"
 
 announce:
   skip: true

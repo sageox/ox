@@ -5,6 +5,9 @@
 package main
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
 )
@@ -13,7 +16,6 @@ const (
 	adapterName    = "amp"
 	adapterDisplay = "Amp"
 	adapterVersion = "0.1.0"
-	searchDays     = 14
 )
 
 func main() {
@@ -23,6 +25,7 @@ func main() {
 		InstallHooks:   handleInstallHooks,
 		CheckHooks:     handleCheckHooks,
 		UninstallHooks: handleUninstallHooks,
+		FindSession:    handleFindSession,
 		Read:           handleRead,
 		ReadMetadata:   handleReadMetadata,
 		Diagnose:       handleDiagnose,
@@ -46,4 +49,16 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		HookEnvValues: []string{"amp"},
 		ServeMode:     true,
 	}, nil
+}
+
+func handleFindSession(p adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error) {
+	sessionFile, err := findAmpSession(p.RepoRoot, p.AgentID, p.Since, p.AgentSessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session not found: %w", err)
+	}
+	var offset int64
+	if info, err := os.Stat(sessionFile); err == nil {
+		offset = info.Size()
+	}
+	return &adapterprotocol.FindSessionResult{SessionFile: sessionFile, Offset: offset}, nil
 }

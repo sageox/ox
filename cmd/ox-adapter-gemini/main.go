@@ -6,6 +6,8 @@
 package main
 
 import (
+	"fmt"
+
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
 )
@@ -18,12 +20,16 @@ const (
 
 func main() {
 	adapterruntime.Run(adapterruntime.Config{
-		Info:         handleInfo,
-		Detect:       handleDetect,
-		Read:         handleRead,
-		ReadMetadata: handleReadMetadata,
-		Diagnose:     handleDiagnose,
-		Serve:        handleServe,
+		Info:           handleInfo,
+		Detect:         handleDetect,
+		InstallHooks:   handleInstallHooks,
+		CheckHooks:     handleCheckHooks,
+		UninstallHooks: handleUninstallHooks,
+		FindSession:    handleFindSession,
+		Read:           handleRead,
+		ReadMetadata:   handleReadMetadata,
+		Diagnose:       handleDiagnose,
+		Serve:          handleServe,
 	})
 }
 
@@ -36,10 +42,19 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		Type:            adapterprotocol.TypeSession,
 		Capabilities: []string{
 			adapterprotocol.CapSessionReader,
+			adapterprotocol.CapHookInstaller,
 			adapterprotocol.CapIncrementalReader,
 			adapterprotocol.CapServeMode,
 		},
 		HookEnvValues: []string{"gemini"},
 		ServeMode:     true,
 	}, nil
+}
+
+func handleFindSession(p adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error) {
+	sessionFile, err := findGeminiSession(p.RepoRoot, p.AgentID, p.Since, p.AgentSessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session not found: %w", err)
+	}
+	return &adapterprotocol.FindSessionResult{SessionFile: sessionFile}, nil
 }
