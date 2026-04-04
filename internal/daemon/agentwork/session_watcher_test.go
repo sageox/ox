@@ -1,6 +1,7 @@
 package agentwork
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"log/slog"
@@ -16,6 +17,10 @@ import (
 )
 
 // testAdapter is a minimal adapter implementation for unit tests.
+// It implements Adapter, IncrementalReader, and Watch using TailWatcher,
+// treating each JSONL line as a generic RawEntry. This allows the session
+// watcher manager tests to exercise catch-up reads and live tailing without
+// requiring real external adapter binaries.
 type testAdapter struct {
 	name string
 }
@@ -29,8 +34,55 @@ func (a *testAdapter) Read(_ string) ([]adapters.RawEntry, error) { return nil, 
 func (a *testAdapter) ReadMetadata(_ string) (*adapters.SessionMetadata, error) {
 	return nil, nil
 }
-func (a *testAdapter) Watch(_ context.Context, _ string) (<-chan adapters.RawEntry, error) {
-	return nil, adapters.ErrWatchNotSupported
+
+func (a *testAdapter) Watch(ctx context.Context, path string) (<-chan adapters.RawEntry, error) {
+	tw := adapters.NewTailWatcher(path, 0, testParseLine)
+	return tw.Watch(ctx)
+}
+
+func (a *testAdapter) ReadFromOffset(path string, offset int64) ([]adapters.RawEntry, int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, offset, err
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(offset, 0); err != nil {
+		return nil, offset, err
+	}
+
+	var entries []adapters.RawEntry
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		parsed, _ := testParseLine(line)
+		entries = append(entries, parsed...)
+	}
+
+	fi, _ := f.Stat()
+	return entries, fi.Size(), scanner.Err()
+}
+
+// testParseLine treats each JSONL line as a generic assistant entry.
+func testParseLine(line []byte) ([]adapters.RawEntry, error) {
+	return []adapters.RawEntry{
+		{
+			Role:      "assistant",
+			Content:   string(line),
+			Timestamp: time.Now(),
+		},
+	}, nil
+}
+
+func TestMain(m *testing.M) {
+	// register a test adapter so resolveAdapter("codex") works without
+	// the real ox-adapter-codex binary on PATH
+	adapters.Register(&testAdapter{name: "codex"})
+	os.Exit(m.Run())
 }
 
 func newTestWatcherManager() *SessionWatcherManager {
@@ -127,7 +179,8 @@ func TestSessionWatcherManager_StopAll_CleansUp(t *testing.T) {
 // in favor of external adapter binaries.
 // Failure prevented: resolveAdapter fails to delegate to adapter registry.
 func TestResolveAdapter_KnownAdapters(t *testing.T) {
-	for _, name := range []string{"codex", "claude-code", "gemini"} {
+	// "codex" is registered in TestMain; only register the others
+	for _, name := range []string{"claude-code", "gemini"} {
 		adapters.Register(&testAdapter{name: name})
 		t.Cleanup(func() { adapters.Unregister(name) })
 	}
