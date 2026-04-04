@@ -302,3 +302,64 @@ func createFakeAdapter(t *testing.T, dir, name, version, adapterType string) str
 	}
 	return binaryPath
 }
+
+// fakeAdapterWithHooksScript returns a shell script that handles info, install-hooks,
+// check-hooks, and uninstall-hooks subcommands. configDir is the dot-directory name
+// (e.g., ".codex") where the fake install-hooks writes a hooks.json file.
+func fakeAdapterWithHooksScript(name, version, adapterType, configDir string) string {
+	return fmt.Sprintf(`#!/bin/sh
+case "$1" in
+  info)
+    echo '{"protocol_version":1,"name":"%s","display_name":"%s","version":"%s","type":"%s","capabilities":["session_reader","hook_installer"]}'
+    ;;
+  install-hooks)
+    repo_root=""
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --repo-root) repo_root="$2"; shift 2 ;;
+        --scope) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ -n "$repo_root" ]; then
+      mkdir -p "$repo_root/%s"
+      echo '{"hooks":{}}' > "$repo_root/%s/hooks.json"
+    fi
+    echo '{"installed":true,"files_written":["hooks.json"],"hooks":["PostToolUse","Stop"]}'
+    ;;
+  check-hooks)
+    repo_root=""
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --repo-root) repo_root="$2"; shift 2 ;;
+        --scope) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ -n "$repo_root" ] && [ -f "$repo_root/%s/hooks.json" ]; then
+      echo '{"installed":true,"scope":"project","hook_files":["hooks.json"]}'
+    else
+      echo '{"installed":false,"scope":"project","hook_files":[]}'
+    fi
+    ;;
+  uninstall-hooks)
+    echo '{"uninstalled":true,"files_modified":[]}'
+    ;;
+  *)
+    echo '{}'
+    ;;
+esac`, name, name, version, adapterType, configDir, configDir, configDir)
+}
+
+// createFakeAdapterWithHooks writes a fake adapter script that supports hook operations.
+func createFakeAdapterWithHooks(t *testing.T, dir, name, version, adapterType, configDir string) string {
+	t.Helper()
+	script := fakeAdapterWithHooksScript(name, version, adapterType, configDir)
+	binaryPath := filepath.Join(dir, "ox-adapter-"+name)
+	if err := os.WriteFile(binaryPath, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return binaryPath
+}

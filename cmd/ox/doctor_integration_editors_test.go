@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sageox/ox/internal/session/adapters"
 )
 
 // TestDetectOtherAIEditors tests detectOtherAIEditors function
@@ -232,6 +234,13 @@ func TestCheckCodexIntegration_ProjectWithHooks(t *testing.T) {
 		t.Fatalf("failed to create .codex: %v", err)
 	}
 
+	// set up fake adapter binary so discovery finds it
+	adapterDir := t.TempDir()
+	createFakeAdapterWithHooks(t, adapterDir, "codex", "0.1.0", "session", ".codex")
+	t.Setenv("OX_ADAPTER_PATH", adapterDir)
+	adapters.ResetRegistry()
+	t.Cleanup(func() { adapters.ResetRegistry() })
+
 	// install hooks
 	if err := installCodexHooks(false); err != nil {
 		t.Fatalf("failed to install hooks: %v", err)
@@ -282,6 +291,13 @@ func TestCheckCodexIntegration_ProjectWithoutHooks_Fix(t *testing.T) {
 	if err := os.MkdirAll(codexDir, 0755); err != nil {
 		t.Fatalf("failed to create .codex: %v", err)
 	}
+
+	// set up fake adapter binary so discovery finds it
+	adapterDir := t.TempDir()
+	createFakeAdapterWithHooks(t, adapterDir, "codex", "0.1.0", "session", ".codex")
+	t.Setenv("OX_ADAPTER_PATH", adapterDir)
+	adapters.ResetRegistry()
+	t.Cleanup(func() { adapters.ResetRegistry() })
 
 	result := checkCodexHooks(true)
 
