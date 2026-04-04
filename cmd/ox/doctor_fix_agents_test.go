@@ -97,8 +97,8 @@ func TestCheckOpenCodeHooks_FixInstalls(t *testing.T) {
 	adapterDir := t.TempDir()
 	createFakeAdapterWithHooks(t, adapterDir, "opencode", "0.1.0", "session", ".opencode")
 	t.Setenv("OX_ADAPTER_PATH", adapterDir)
-	adapters.ResetRegistry()
-	t.Cleanup(func() { adapters.ResetRegistry() })
+	adapters.Unregister("opencode") // clear stale entry so discovery re-registers from fake
+	t.Cleanup(func() { adapters.Unregister("opencode") })
 
 	originalWd, _ := os.Getwd()
 	defer os.Chdir(originalWd)
@@ -126,8 +126,8 @@ func TestCheckGeminiHooks_FixInstalls(t *testing.T) {
 	adapterDir := t.TempDir()
 	createFakeAdapterWithHooks(t, adapterDir, "gemini", "0.1.0", "session", ".gemini")
 	t.Setenv("OX_ADAPTER_PATH", adapterDir)
-	adapters.ResetRegistry()
-	t.Cleanup(func() { adapters.ResetRegistry() })
+	adapters.Unregister("gemini") // clear stale entry so discovery re-registers from fake
+	t.Cleanup(func() { adapters.Unregister("gemini") })
 
 	originalWd, _ := os.Getwd()
 	defer os.Chdir(originalWd)

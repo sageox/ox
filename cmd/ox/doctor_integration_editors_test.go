@@ -238,8 +238,8 @@ func TestCheckCodexIntegration_ProjectWithHooks(t *testing.T) {
 	adapterDir := t.TempDir()
 	createFakeAdapterWithHooks(t, adapterDir, "codex", "0.1.0", "session", ".codex")
 	t.Setenv("OX_ADAPTER_PATH", adapterDir)
-	adapters.ResetRegistry()
-	t.Cleanup(func() { adapters.ResetRegistry() })
+	adapters.Unregister("codex") // clear stale entry so discovery re-registers from fake
+	t.Cleanup(func() { adapters.Unregister("codex") })
 
 	// install hooks
 	if err := installCodexHooks(false); err != nil {
@@ -296,8 +296,8 @@ func TestCheckCodexIntegration_ProjectWithoutHooks_Fix(t *testing.T) {
 	adapterDir := t.TempDir()
 	createFakeAdapterWithHooks(t, adapterDir, "codex", "0.1.0", "session", ".codex")
 	t.Setenv("OX_ADAPTER_PATH", adapterDir)
-	adapters.ResetRegistry()
-	t.Cleanup(func() { adapters.ResetRegistry() })
+	adapters.Unregister("codex") // clear stale entry so discovery re-registers from fake
+	t.Cleanup(func() { adapters.Unregister("codex") })
 
 	result := checkCodexHooks(true)
 
