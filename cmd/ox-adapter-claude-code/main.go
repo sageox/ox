@@ -30,6 +30,7 @@ func main() {
 		ReadMetadata:   handleReadMetadata,
 		Diagnose:       handleDiagnose,
 		FindSession:    handleFindSession,
+		ImportSession:  handleImportSession,
 		Serve:          handleServe,
 	})
 }
@@ -47,6 +48,7 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 			adapterprotocol.CapIncrementalReader,
 			adapterprotocol.CapFileWatcher,
 			adapterprotocol.CapServeMode,
+			adapterprotocol.CapSessionImporter,
 		},
 		HookEnvValues: []string{"claude-code"},
 		ServeMode:     true,
@@ -61,5 +63,27 @@ func handleFindSession(p adapterprotocol.FindSessionParams) (*adapterprotocol.Fi
 	return &adapterprotocol.FindSessionResult{
 		SessionFile: sessionFile,
 		Offset:      offset,
+	}, nil
+}
+
+func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotocol.ImportSessionResult, error) {
+	if p.SessionID == "" {
+		return nil, fmt.Errorf("--session-id is required")
+	}
+
+	// use the existing find logic with the session ID as the native identifier
+	path, _, err := findSessionFile(p.RepoRoot, "", "", p.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session %q not found: %w", p.SessionID, err)
+	}
+
+	entries, meta, err := readSessionFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading session: %w", err)
+	}
+
+	return &adapterprotocol.ImportSessionResult{
+		Metadata: meta,
+		Entries:  entries,
 	}, nil
 }

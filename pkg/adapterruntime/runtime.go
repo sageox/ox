@@ -16,6 +16,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"strconv"
 	"sync"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
@@ -34,6 +35,8 @@ type Config struct {
 	ReadMetadata   func(adapterprotocol.ReadParams) (*adapterprotocol.ReadMetadataResult, error)
 	Diagnose       func(adapterprotocol.DiagnoseParams) (*adapterprotocol.DiagnoseResult, error)
 	FindSession    func(adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error)
+	ReadFromOffset func(adapterprotocol.ReadFromOffsetParams) (*adapterprotocol.ReadFromOffsetResult, error)
+	ImportSession  func(adapterprotocol.ImportSessionParams) (*adapterprotocol.ImportSessionResult, error)
 	Serve          func(*Server)
 }
 
@@ -140,6 +143,24 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) e
 			return cfg.FindSession(p)
 		})
 
+	case "read-from-offset":
+		p := parseReadFromOffsetParams(args[1:])
+		return runOneShot(enc, func() (any, error) {
+			if cfg.ReadFromOffset == nil {
+				return nil, fmt.Errorf("read-from-offset not implemented")
+			}
+			return cfg.ReadFromOffset(p)
+		})
+
+	case "import-session":
+		p := parseImportSessionParams(args[1:])
+		return runOneShot(enc, func() (any, error) {
+			if cfg.ImportSession == nil {
+				return nil, fmt.Errorf("import-session not implemented")
+			}
+			return cfg.ImportSession(p)
+		})
+
 	case "--serve":
 		if cfg.Serve == nil {
 			return fmt.Errorf("serve mode not implemented")
@@ -182,6 +203,10 @@ func printUsage(cfg Config, w io.Writer) {
 	}
 	p("\nThis is an adapter plugin for ox. It is not meant to be run directly —\n")
 	p("ox discovers and invokes it automatically.\n")
+	p("\nSubcommands:\n")
+	p("  info, detect, install-hooks, check-hooks, uninstall-hooks,\n")
+	p("  read, read-metadata, diagnose, find-session, read-from-offset,\n")
+	p("  import-session, --serve\n")
 	p("\nTo get started with ox:\n")
 	p("  brew install sageox/tap/ox\n")
 	p("  ox init\n")
@@ -260,6 +285,38 @@ func parseFindSessionParams(args []string) adapterprotocol.FindSessionParams {
 			i++
 		case "--agent-session-id":
 			p.AgentSessionID = args[i+1]
+			i++
+		}
+	}
+	return p
+}
+
+func parseReadFromOffsetParams(args []string) adapterprotocol.ReadFromOffsetParams {
+	p := adapterprotocol.ReadFromOffsetParams{}
+	for i := 0; i < len(args)-1; i++ {
+		switch args[i] {
+		case "--session-file":
+			p.SessionFile = args[i+1]
+			i++
+		case "--offset":
+			if v, err := strconv.ParseInt(args[i+1], 10, 64); err == nil {
+				p.Offset = v
+			}
+			i++
+		}
+	}
+	return p
+}
+
+func parseImportSessionParams(args []string) adapterprotocol.ImportSessionParams {
+	p := adapterprotocol.ImportSessionParams{}
+	for i := 0; i < len(args)-1; i++ {
+		switch args[i] {
+		case "--session-id":
+			p.SessionID = args[i+1]
+			i++
+		case "--repo-root":
+			p.RepoRoot = args[i+1]
 			i++
 		}
 	}

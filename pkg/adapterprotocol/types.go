@@ -31,6 +31,7 @@ const (
 	CapHookInstaller       = "hook_installer"
 	CapIncrementalReader   = "incremental_reader"
 	CapFileWatcher         = "file_watcher"
+	CapSessionImporter     = "session_importer"
 	CapServeMode           = "serve_mode"
 	CapSubagentController  = "subagent_controller"
 )
@@ -352,6 +353,19 @@ type ReadFromOffsetParams struct {
 type ReadFromOffsetResult struct {
 	Entries   []RawEntry `json:"entries"`
 	NewOffset int64      `json:"new_offset"`
+}
+
+// ImportSessionParams are the params for the import-session one-shot command.
+// It reads an entire session by its native agent session identifier.
+type ImportSessionParams struct {
+	SessionID string `json:"session_id"` // native session identifier (agent-specific)
+	RepoRoot  string `json:"repo_root"`  // project root for context
+}
+
+// ImportSessionResult is the result for import-session.
+type ImportSessionResult struct {
+	Metadata *SessionMetadata `json:"metadata,omitempty"`
+	Entries  []RawEntry       `json:"entries"`
 }
 
 // EndSessionParams are the params for end-session.

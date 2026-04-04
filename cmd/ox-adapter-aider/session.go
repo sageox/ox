@@ -171,6 +171,48 @@ func parseAiderMarkdown(scanner *bufio.Scanner) ([]adapterprotocol.RawEntry, err
 	return entries, nil
 }
 
+// --- session import ---
+
+// parseAiderSessionByTimestamp reads the history file and returns only entries
+// from the session that started at the given timestamp string.
+// The timestamp should match the format in "# aider chat started at <ts>" headers
+// (e.g., "2024-01-15 14:30:45"). It is normalized to RFC3339 UTC for comparison
+// against parsed entries.
+func parseAiderSessionByTimestamp(path, sessionTS string) ([]adapterprotocol.RawEntry, error) {
+	// normalize to RFC3339 so it matches the wire format stored in RawEntry.Timestamp
+	normalizedTS := sessionTS
+	if t, err := time.Parse(aiderTimestampLayout, strings.TrimSpace(sessionTS)); err == nil {
+		normalizedTS = t.UTC().Format(time.RFC3339)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	allEntries, err := parseAiderMarkdown(scanner)
+	if err != nil {
+		return nil, err
+	}
+
+	// aider sessions share a timestamp from the "# aider chat started at" header;
+	// filter to entries whose timestamp matches the requested session
+	var matched []adapterprotocol.RawEntry
+	for _, e := range allEntries {
+		if e.Timestamp == normalizedTS {
+			matched = append(matched, e)
+		}
+	}
+	if len(matched) == 0 {
+		return nil, fmt.Errorf("no entries found for session timestamp %q", sessionTS)
+	}
+	return matched, nil
+}
+
 // --- session discovery ---
 
 func findAiderSession(repoRoot, _, since, _ string) (string, error) {

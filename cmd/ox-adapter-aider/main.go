@@ -7,6 +7,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
@@ -28,6 +29,7 @@ func main() {
 		FindSession:    handleFindSession,
 		Read:           handleRead,
 		ReadMetadata:   handleReadMetadata,
+		ImportSession:  handleImportSession,
 		Diagnose:       handleDiagnose,
 		Serve:          handleServe,
 	})
@@ -45,6 +47,7 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 			adapterprotocol.CapHookInstaller,
 			adapterprotocol.CapIncrementalReader,
 			adapterprotocol.CapFileWatcher,
+			adapterprotocol.CapSessionImporter,
 			adapterprotocol.CapServeMode,
 		},
 		HookEnvValues: []string{"aider"},
@@ -62,4 +65,25 @@ func handleFindSession(p adapterprotocol.FindSessionParams) (*adapterprotocol.Fi
 		offset = info.Size()
 	}
 	return &adapterprotocol.FindSessionResult{SessionFile: sessionFile, Offset: offset}, nil
+}
+
+func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotocol.ImportSessionResult, error) {
+	if p.SessionID == "" {
+		return nil, fmt.Errorf("--session-id is required (use the session start timestamp from '# aider chat started at <timestamp>')")
+	}
+
+	repoRoot := p.RepoRoot
+	if repoRoot == "" {
+		repoRoot, _ = os.Getwd()
+	}
+
+	historyFile := filepath.Join(repoRoot, aiderHistoryFile)
+	entries, err := parseAiderSessionByTimestamp(historyFile, p.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("importing aider session: %w", err)
+	}
+
+	return &adapterprotocol.ImportSessionResult{
+		Entries: entries,
+	}, nil
 }

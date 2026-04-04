@@ -26,6 +26,7 @@ func main() {
 		CheckHooks:     handleCheckHooks,
 		UninstallHooks: handleUninstallHooks,
 		FindSession:    handleFindSession,
+		ImportSession:  handleImportSession,
 		Read:           handleRead,
 		ReadMetadata:   handleReadMetadata,
 		Diagnose:       handleDiagnose,
@@ -42,6 +43,7 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		Type:            adapterprotocol.TypeSession,
 		Capabilities: []string{
 			adapterprotocol.CapSessionReader,
+			adapterprotocol.CapSessionImporter,
 			adapterprotocol.CapHookInstaller,
 			adapterprotocol.CapIncrementalReader,
 			adapterprotocol.CapFileWatcher,
@@ -62,4 +64,27 @@ func handleFindSession(p adapterprotocol.FindSessionParams) (*adapterprotocol.Fi
 		offset = info.Size()
 	}
 	return &adapterprotocol.FindSessionResult{SessionFile: sessionFile, Offset: offset}, nil
+}
+
+func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotocol.ImportSessionResult, error) {
+	if p.SessionID == "" {
+		return nil, fmt.Errorf("--session-id is required")
+	}
+
+	path, err := findAmpSession("", "", "", p.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session %q not found: %w", p.SessionID, err)
+	}
+
+	entries, err := readAmpFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading session: %w", err)
+	}
+
+	meta := extractAmpMetadata(path)
+
+	return &adapterprotocol.ImportSessionResult{
+		Metadata: meta,
+		Entries:  entries,
+	}, nil
 }

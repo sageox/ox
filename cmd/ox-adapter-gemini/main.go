@@ -7,6 +7,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
@@ -29,6 +30,7 @@ func main() {
 		Read:           handleRead,
 		ReadMetadata:   handleReadMetadata,
 		Diagnose:       handleDiagnose,
+		ImportSession:  handleImportSession,
 		Serve:          handleServe,
 	})
 }
@@ -46,6 +48,7 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 			adapterprotocol.CapIncrementalReader,
 			adapterprotocol.CapFileWatcher,
 			adapterprotocol.CapServeMode,
+			adapterprotocol.CapSessionImporter,
 		},
 		HookEnvValues: []string{"gemini"},
 		ServeMode:     true,
@@ -58,4 +61,36 @@ func handleFindSession(p adapterprotocol.FindSessionParams) (*adapterprotocol.Fi
 		return nil, fmt.Errorf("session not found: %w", err)
 	}
 	return &adapterprotocol.FindSessionResult{SessionFile: sessionFile}, nil
+}
+
+func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotocol.ImportSessionResult, error) {
+	if p.SessionID == "" {
+		return nil, fmt.Errorf("--session-id is required")
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("cannot determine home directory: %w", err)
+	}
+
+	tmpDir := home + "/.gemini/tmp"
+	path, err := findGeminiBySessionID(tmpDir, p.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session %q not found: %w", p.SessionID, err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading session file: %w", err)
+	}
+
+	entries, meta, err := parseGeminiSession(data)
+	if err != nil {
+		return nil, fmt.Errorf("parsing session: %w", err)
+	}
+
+	return &adapterprotocol.ImportSessionResult{
+		Metadata: meta,
+		Entries:  entries,
+	}, nil
 }

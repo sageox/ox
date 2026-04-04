@@ -8,6 +8,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
@@ -30,6 +31,7 @@ func main() {
 		FindSession:    handleFindSession,
 		Read:           handleRead,
 		ReadMetadata:   handleReadMetadata,
+		ImportSession:  handleImportSession,
 		Diagnose:       handleDiagnose,
 		Serve:          handleServe,
 	})
@@ -48,6 +50,7 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 			adapterprotocol.CapIncrementalReader,
 			adapterprotocol.CapFileWatcher,
 			adapterprotocol.CapServeMode,
+			adapterprotocol.CapSessionImporter,
 		},
 		HookEnvValues: []string{"codex"},
 		ServeMode:     true,
@@ -64,4 +67,33 @@ func handleFindSession(p adapterprotocol.FindSessionParams) (*adapterprotocol.Fi
 		offset = info.Size()
 	}
 	return &adapterprotocol.FindSessionResult{SessionFile: sessionFile, Offset: offset}, nil
+}
+
+func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotocol.ImportSessionResult, error) {
+	if p.SessionID == "" {
+		return nil, fmt.Errorf("--session-id is required")
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	sessionsDir := filepath.Join(home, ".codex", "sessions")
+
+	path, err := findCodexBySessionID(sessionsDir, p.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session %q not found: %w", p.SessionID, err)
+	}
+
+	entries, err := readCodexFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading session: %w", err)
+	}
+
+	meta := extractCodexMetadata(path)
+
+	return &adapterprotocol.ImportSessionResult{
+		Metadata: meta,
+		Entries:  entries,
+	}, nil
 }

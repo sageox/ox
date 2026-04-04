@@ -6,6 +6,7 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,6 +38,7 @@ func main() {
 		CheckHooks:     handleCheckHooks,
 		UninstallHooks: handleUninstallHooks,
 		Diagnose:       handleDiagnose,
+		ImportSession:  handleImportSession,
 		Serve:          handleServe,
 	})
 }
@@ -52,6 +54,7 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 			adapterprotocol.CapSessionReader,
 			adapterprotocol.CapHookInstaller,
 			adapterprotocol.CapIncrementalReader,
+			adapterprotocol.CapSessionImporter,
 			adapterprotocol.CapServeMode,
 		},
 		HookEnvValues: []string{"opencode"},
@@ -82,6 +85,41 @@ func handleDetect() (*adapterprotocol.DetectResponse, error) {
 	}
 
 	return &adapterprotocol.DetectResponse{Detected: false, Reason: ".opencode/ not found and opencode not in PATH"}, nil
+}
+
+func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotocol.ImportSessionResult, error) {
+	if p.SessionID == "" {
+		return nil, fmt.Errorf("--session-id is required")
+	}
+
+	db, err := openDB()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = db.Close() }()
+
+	// verify session exists
+	var id string
+	err = db.QueryRow("SELECT id FROM sessions WHERE id = ? LIMIT 1", p.SessionID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("session %q not found", p.SessionID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("querying session: %w", err)
+	}
+
+	// read all messages from offset 0
+	entries, err := readMessages(db, p.SessionID, 0)
+	if err != nil {
+		return nil, fmt.Errorf("reading session: %w", err)
+	}
+
+	meta, _ := readMetadata(db, p.SessionID)
+
+	return &adapterprotocol.ImportSessionResult{
+		Metadata: meta,
+		Entries:  entries,
+	}, nil
 }
 
 func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.DiagnoseResult, error) {
