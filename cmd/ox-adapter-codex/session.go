@@ -1,4 +1,13 @@
 // session.go — session reading, parsing, discovery, and types for codex adapter.
+//
+// Codex CLI stores sessions as JSONL in ~/.codex/sessions/<session-id>.jsonl.
+// Each line is a JSON object with "type" field: "user", "assistant",
+// "function_call", "function_call_output". Tool entries have "name",
+// "arguments" (JSON string), and "call_id" for correlation. Multiple
+// function_call/function_call_output pairs may appear consecutively and are
+// merged into single tool entries by mergeToolEntries().
+//
+// Format reference: https://github.com/openai/codex
 package main
 
 import (

@@ -51,6 +51,26 @@ adapters:
     capabilities: [session_reader, hook_installer, incremental_reader, serve_mode]
     detect_commands: [opencode]
 
+  - name: pi
+    display_name: Pi
+    description: Reads Pi coding agent sessions, installs Pi hooks
+    type: session
+    bundled: true
+    binary: ox-adapter-pi
+    repo: sageox/ox
+    capabilities: [session_reader, hook_installer, incremental_reader, file_watcher, serve_mode]
+    detect_commands: [pi]
+
+  - name: aider
+    display_name: Aider
+    description: Reads Aider sessions from markdown chat history
+    type: session
+    bundled: true
+    binary: ox-adapter-aider
+    repo: sageox/ox
+    capabilities: [session_reader, hook_installer, incremental_reader, file_watcher, serve_mode]
+    detect_commands: [aider]
+
   - name: cursor
     display_name: Cursor
     description: Reads Cursor sessions
@@ -81,15 +101,6 @@ adapters:
     capabilities: [session_reader]
     detect_commands: [github-copilot-cli]
 
-  - name: aider
-    display_name: Aider
-    description: Reads Aider sessions
-    type: session
-    bundled: false
-    binary: ox-adapter-aider
-    repo: sageox/ox-adapters
-    capabilities: [session_reader, hook_installer, incremental_reader]
-    detect_commands: [aider]
 
   - name: cline
     display_name: Cline

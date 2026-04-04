@@ -1,3 +1,12 @@
+// session.go handles Claude Code session reading, parsing, and discovery.
+//
+// Claude Code stores sessions as JSONL in ~/.claude/projects/<path>/sessions/.
+// Each line is a JSON object with a "type" field: "human" (user), "assistant",
+// "tool_use", "tool_result", or "summary". Timestamps are in the "timestamp"
+// field (ISO 8601). Tool entries use "tool_name", "tool_input", and "call_id"
+// for correlation.
+//
+// Format reference: https://docs.anthropic.com/en/docs/claude-code
 package main
 
 import (

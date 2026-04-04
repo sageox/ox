@@ -1,12 +1,4 @@
-// session.go handles Amp session reading, parsing, discovery, and types.
-//
-// Amp stores sessions as JSONL in ~/.amp/sessions/<session-id>.jsonl. Each line
-// is a JSON object with "type" field: "user", "assistant", "tool_use",
-// "tool_result", "system", or "session_meta". Tool entries use "tool_name",
-// "tool_input", and "call_id" for correlation. Session metadata (model,
-// agent_version) is in a "session_meta" entry.
-//
-// Format reference: https://sourcegraph.com/docs/amp
+// session.go handles session reading, parsing, discovery, and types.
 package main
 
 import (
@@ -30,31 +22,33 @@ type sessionCandidate struct {
 	modTime time.Time
 }
 
-type ampEntry struct {
-	Type         string `json:"type"`
-	Timestamp    string `json:"timestamp"`
-	Content      string `json:"content"`
-	ToolName     string `json:"tool_name,omitempty"`
-	ToolInput    string `json:"tool_input,omitempty"`
-	CallID       string `json:"call_id,omitempty"`
-	IsError      bool   `json:"is_error,omitempty"`
-	Model        string `json:"model,omitempty"`
-	AgentVersion string `json:"agent_version,omitempty"`
+type piEntry struct {
+	Type      string `json:"type"`
+	Timestamp string `json:"timestamp,omitempty"`
+	Content   string `json:"content,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Input     string `json:"input,omitempty"`
+	CallID    string `json:"call_id,omitempty"`
+	IsError   bool   `json:"is_error,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Version   int    `json:"version,omitempty"`
+	ID        string `json:"id,omitempty"`
+	CWD       string `json:"cwd,omitempty"`
 }
 
 // --- session reading ---
 
 func handleRead(p adapterprotocol.ReadParams) (*adapterprotocol.ReadResult, error) {
-	entries, err := readAmpFile(p.SessionFile)
+	entries, err := readPiFile(p.SessionFile)
 	if err != nil {
 		return nil, err
 	}
-	meta := extractAmpMetadata(p.SessionFile)
+	meta := extractPiMetadata(p.SessionFile)
 	return &adapterprotocol.ReadResult{Entries: entries, Metadata: meta}, nil
 }
 
 func handleReadMetadata(p adapterprotocol.ReadParams) (*adapterprotocol.ReadMetadataResult, error) {
-	meta := extractAmpMetadata(p.SessionFile)
+	meta := extractPiMetadata(p.SessionFile)
 	if meta == nil {
 		return &adapterprotocol.ReadMetadataResult{}, nil
 	}
@@ -64,7 +58,7 @@ func handleReadMetadata(p adapterprotocol.ReadParams) (*adapterprotocol.ReadMeta
 	}, nil
 }
 
-func readAmpFile(path string) ([]adapterprotocol.RawEntry, error) {
+func readPiFile(path string) ([]adapterprotocol.RawEntry, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open session file: %w", err)
@@ -81,7 +75,7 @@ func readAmpFile(path string) ([]adapterprotocol.RawEntry, error) {
 		if len(line) == 0 {
 			continue
 		}
-		parsed := parseAmpLine(line)
+		parsed := parsePiLine(line)
 		if parsed != nil {
 			entries = append(entries, *parsed)
 		}
@@ -94,7 +88,7 @@ func readAmpFile(path string) ([]adapterprotocol.RawEntry, error) {
 	return entries, nil
 }
 
-func readAmpFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
+func readPiFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, offset, fmt.Errorf("failed to open session file: %w", err)
@@ -117,7 +111,7 @@ func readAmpFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, i
 		if len(line) == 0 {
 			continue
 		}
-		parsed := parseAmpLine(line)
+		parsed := parsePiLine(line)
 		if parsed != nil {
 			entries = append(entries, *parsed)
 		}
@@ -136,8 +130,8 @@ func parseTS(s string) time.Time {
 	return t
 }
 
-func parseAmpLine(line []byte) *adapterprotocol.RawEntry {
-	var raw ampEntry
+func parsePiLine(line []byte) *adapterprotocol.RawEntry {
+	var raw piEntry
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return nil
 	}
@@ -159,8 +153,8 @@ func parseAmpLine(line []byte) *adapterprotocol.RawEntry {
 		e := adapterruntime.AssistantEntry(ts, raw.Content)
 		return &e
 
-	case "tool_use":
-		e := adapterruntime.ToolUseWithID(ts, raw.ToolName, raw.ToolInput, raw.CallID)
+	case "tool_call":
+		e := adapterruntime.ToolUseWithID(ts, raw.Name, raw.Input, raw.CallID)
 		return &e
 
 	case "tool_result":
@@ -180,19 +174,39 @@ func parseAmpLine(line []byte) *adapterprotocol.RawEntry {
 
 // --- session discovery ---
 
-func findAmpSession(_, agentID, since, agentSessionID string) (string, error) {
+// piSessionsDir returns the base sessions directory for Pi.
+func piSessionsDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
+	return filepath.Join(home, ".pi", "agent", "sessions"), nil
+}
 
-	sessionsDir := filepath.Join(home, ".amp", "sessions")
+// cwdToDirName converts a working directory path to Pi's session directory name.
+// Pi uses -- prefix and replaces / with -- (e.g., /Users/dev/project -> --Users--dev--project).
+func cwdToDirName(cwd string) string {
+	return "--" + strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "--")
+}
+
+func findPiSession(repoRoot, agentID, since, agentSessionID string) (string, error) {
+	baseDir, err := piSessionsDir()
+	if err != nil {
+		return "", err
+	}
 
 	// direct lookup by session ID
 	if agentSessionID != "" {
-		direct := filepath.Join(sessionsDir, agentSessionID+".jsonl")
-		if _, err := os.Stat(direct); err == nil {
-			return direct, nil
+		// search across all subdirectories for this session ID
+		subdirs, _ := os.ReadDir(baseDir)
+		for _, d := range subdirs {
+			if !d.IsDir() {
+				continue
+			}
+			direct := filepath.Join(baseDir, d.Name(), agentSessionID+".jsonl")
+			if _, err := os.Stat(direct); err == nil {
+				return direct, nil
+			}
 		}
 	}
 
@@ -203,31 +217,54 @@ func findAmpSession(_, agentID, since, agentSessionID string) (string, error) {
 		}
 	}
 
-	entries, err := os.ReadDir(sessionsDir)
-	if err != nil {
-		return "", fmt.Errorf("failed to read sessions dir: %w", err)
+	// if repoRoot is provided, look in the specific project subdirectory first
+	var searchDirs []string
+	if repoRoot != "" {
+		projectDir := filepath.Join(baseDir, cwdToDirName(repoRoot))
+		if info, err := os.Stat(projectDir); err == nil && info.IsDir() {
+			searchDirs = append(searchDirs, projectDir)
+		}
+	}
+
+	// fall back to searching all subdirectories
+	if len(searchDirs) == 0 {
+		subdirs, err := os.ReadDir(baseDir)
+		if err != nil {
+			return "", fmt.Errorf("failed to read sessions dir: %w", err)
+		}
+		for _, d := range subdirs {
+			if d.IsDir() {
+				searchDirs = append(searchDirs, filepath.Join(baseDir, d.Name()))
+			}
+		}
 	}
 
 	var candidates []sessionCandidate
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-			continue
-		}
-		info, err := entry.Info()
+	for _, dir := range searchDirs {
+		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
-		if !sinceTime.IsZero() && !info.ModTime().After(sinceTime) {
-			continue
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			if !sinceTime.IsZero() && !info.ModTime().After(sinceTime) {
+				continue
+			}
+			candidates = append(candidates, sessionCandidate{
+				path:    filepath.Join(dir, entry.Name()),
+				modTime: info.ModTime(),
+			})
 		}
-		candidates = append(candidates, sessionCandidate{
-			path:    filepath.Join(sessionsDir, entry.Name()),
-			modTime: info.ModTime(),
-		})
 	}
 
 	if len(candidates) == 0 {
-		return "", fmt.Errorf("no amp sessions found")
+		return "", fmt.Errorf("no pi sessions found")
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
@@ -264,7 +301,7 @@ func sessionContainsText(path, text string) bool {
 	return false
 }
 
-func extractAmpMetadata(path string) *adapterprotocol.SessionMetadata {
+func extractPiMetadata(path string) *adapterprotocol.SessionMetadata {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -277,16 +314,17 @@ func extractAmpMetadata(path string) *adapterprotocol.SessionMetadata {
 	scanner.Buffer(buf, 10*1024*1024)
 
 	for scanner.Scan() {
-		var raw ampEntry
+		var raw piEntry
 		if err := json.Unmarshal(scanner.Bytes(), &raw); err != nil {
 			continue
 		}
-		if raw.Type == "session_meta" {
+		// session header contains version info
+		if raw.Type == "session" {
+			if raw.Version > 0 {
+				meta.AgentVersion = fmt.Sprintf("pi-v%d", raw.Version)
+			}
 			if raw.Model != "" {
 				meta.Model = raw.Model
-			}
-			if raw.AgentVersion != "" {
-				meta.AgentVersion = raw.AgentVersion
 			}
 			break
 		}

@@ -190,6 +190,42 @@ builds:
     ldflags:
       - -s -w
 
+  - id: ox-adapter-pi
+    main: ./cmd/ox-adapter-pi
+    binary: ox-adapter-pi
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: freebsd
+        goarch: arm64
+    ldflags:
+      - -s -w
+
+  - id: ox-adapter-aider
+    main: ./cmd/ox-adapter-aider
+    binary: ox-adapter-aider
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: freebsd
+        goarch: arm64
+    ldflags:
+      - -s -w
+
 archives:
   - id: ox-archive
     formats:
@@ -227,7 +263,7 @@ release:
 
     Pre-compiled binaries for Linux, macOS (Intel & Apple Silicon), and FreeBSD.
 
-    Each tarball includes ox and bundled adapters (claude-code, gemini, codex, amp, opencode).
+    Each tarball includes ox and bundled adapters (claude-code, gemini, codex, amp, opencode, pi, aider).
 
     ### Installation
 
@@ -257,6 +293,8 @@ brews:
       bin.install "ox-adapter-codex"
       bin.install "ox-adapter-amp"
       bin.install "ox-adapter-opencode"
+      bin.install "ox-adapter-pi"
+      bin.install "ox-adapter-aider"
 
 announce:
   skip: true

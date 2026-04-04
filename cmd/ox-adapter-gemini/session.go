@@ -1,4 +1,12 @@
-// session.go handles session reading, parsing, discovery, and types.
+// session.go handles Gemini CLI session reading, parsing, discovery, and types.
+//
+// Gemini CLI stores sessions as JSON (not JSONL) in ~/.gemini/sessions/<id>.json.
+// The entire file is a single JSON array that gets rewritten each turn. Each
+// element has "role" ("user" or "model") and "parts" (array of {text} or
+// {functionCall}/{functionResponse}). Because the file is rewritten, the offset
+// model uses entry count instead of byte offset.
+//
+// Format reference: https://github.com/google-gemini/gemini-cli
 package main
 
 import (

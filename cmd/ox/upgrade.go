@@ -159,6 +159,8 @@ var adapterPackages = []string{
 	"github.com/sageox/ox/cmd/ox-adapter-codex",
 	"github.com/sageox/ox/cmd/ox-adapter-amp",
 	"github.com/sageox/ox/cmd/ox-adapter-opencode",
+	"github.com/sageox/ox/cmd/ox-adapter-pi",
+	"github.com/sageox/ox/cmd/ox-adapter-aider",
 }
 
 func upgradeViaGoInstall(quiet bool) error {
