@@ -270,6 +270,11 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 		// missing raw.jsonl, recovery is attempted from the adapter source file.
 		hasRaw := false
 		if _, statErr := os.Stat(rawPath); statErr == nil {
+			// skip LFS stubs — they can't be finalized and would fail in BuildPrompt
+			if lfs.IsPointerFile(rawPath) {
+				h.logger.Debug("skipping LFS stub session", "session", name, "raw_path", rawPath)
+				continue
+			}
 			hasRaw = true
 		}
 
@@ -321,7 +326,27 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 
 		missing := missingArtifacts(sessionDir)
 		if len(missing) == 0 {
-			// All LLM artifacts present. If this session is in the ledger cache
+			// All artifact files exist on disk. Check whether they are stubs
+			// written by "ox session stop" that need LLM regeneration.
+			if session.HasNeedsSummaryMarker(sessionDir) {
+				h.logger.Info("session has stub artifacts, needs LLM summarization",
+					"session", name,
+				)
+				items = append(items, &WorkItem{
+					Type:     sessionFinalizeType,
+					Priority: sessionFinalizePriority,
+					DedupKey: sessionFinalizeType + ":" + name,
+					Payload: &SessionFinalizePayload{
+						SessionDir: sessionDir,
+						RawPath:    rawPath,
+						Missing:    requiredArtifacts, // regenerate all artifacts
+						LedgerPath: ledgerPath,
+					},
+				})
+				continue
+			}
+
+			// Truly finalized. If this session is in the ledger cache
 			// but not yet in the git-tracked sessions/ dir, it needs to be pushed.
 			if isInLedgerCacheDir(sessionDir, ledgerPath) {
 				ledgerMeta := filepath.Join(ledgerPath, "sessions", name, "meta.json")
@@ -644,6 +669,9 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		)
 		return nil
 	}
+
+	// clear .needs-summary marker now that LLM artifacts have replaced stubs
+	_ = session.ClearNeedsSummaryMarker(payload.SessionDir)
 
 	h.logger.Info("wrote session artifacts",
 		"summary_md", artifactPaths.SummaryMD,

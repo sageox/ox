@@ -813,3 +813,71 @@ func setupRecordingSession(t *testing.T, sessionName string, recState map[string
 
 	return ledgerPath, sessionDir, recPath
 }
+
+// TestDetect_NeedsSummaryMarkerTriggersRefinalization verifies that sessions with
+// all artifact files present but a .needs-summary marker are enqueued for LLM
+// summarization. Without this, stub artifacts written by "ox session stop" would
+// be treated as final and the daemon would never regenerate them with the LLM.
+func TestDetect_NeedsSummaryMarkerTriggersRefinalization(t *testing.T) {
+	handler := NewSessionFinalizeHandler(slog.Default())
+
+	ledgerPath := t.TempDir()
+	sessionsDir := filepath.Join(ledgerPath, "sessions")
+
+	// session with all artifacts AND a .needs-summary marker (stub data from stop)
+	stubSession := "2026-04-01T10-00-testuser-OxSTUB"
+	stubDir := filepath.Join(sessionsDir, stubSession)
+	if err := os.MkdirAll(stubDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	rawContent := "{\"_meta\":{\"schema_version\":\"1\",\"agent_type\":\"claude-code\"}}\n{\"type\":\"user\",\"content\":\"hello\",\"seq\":1}\n{\"type\":\"assistant\",\"content\":\"hi\",\"seq\":2}\n"
+	if err := os.WriteFile(filepath.Join(stubDir, "raw.jsonl"), []byte(rawContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// write all required artifacts (stubs)
+	for _, name := range requiredArtifacts {
+		if err := os.WriteFile(filepath.Join(stubDir, name), []byte("stub"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// write the .needs-summary marker
+	if err := session.WriteNeedsSummaryMarker(stubDir, filepath.Join(stubDir, "raw.jsonl"), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// fully finalized session (all artifacts, NO marker)
+	doneSession := "2026-04-01T11-00-testuser-OxDONE"
+	doneDir := filepath.Join(sessionsDir, doneSession)
+	if err := os.MkdirAll(doneDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(doneDir, "raw.jsonl"), []byte(rawContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range requiredArtifacts {
+		if err := os.WriteFile(filepath.Join(doneDir, name), []byte("done"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	items, err := handler.Detect(ledgerPath)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+
+	// only the stub session (with marker) should be enqueued
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item (stub session needing LLM), got %d", len(items))
+	}
+
+	payload := items[0].Payload.(*SessionFinalizePayload)
+	if filepath.Base(payload.SessionDir) != stubSession {
+		t.Errorf("expected stub session, got %s", filepath.Base(payload.SessionDir))
+	}
+	if payload.UploadOnly {
+		t.Error("stub session should NOT be upload-only, it needs LLM summarization")
+	}
+	if len(payload.Missing) != len(requiredArtifacts) {
+		t.Errorf("expected all artifacts in Missing (for regeneration), got %d: %v", len(payload.Missing), payload.Missing)
+	}
+}

@@ -182,7 +182,8 @@ type Output struct {
 	// Murmur directive (behavioral — set when murmuring: "auto")
 	MurmurDirective string `json:"murmur_directive,omitempty"` // proactive instruction to publish WIP status via ox murmur
 	// Code search availability
-	CodeSearchTip string `json:"code_search_tip,omitempty"` // guidance on code search availability for this repo
+	CodeDBAvailable bool   `json:"code_db_available,omitempty"` // true if code search index exists on disk
+	CodeSearchTip   string `json:"code_search_tip,omitempty"`   // guidance on code search availability for this repo
 	// Hook auto-install
 	HooksInstalled     bool   `json:"hooks_installed,omitempty"`      // true if hooks were newly installed this prime
 	HooksRestartNotice string `json:"hooks_restart_notice,omitempty"` // message for agent to relay to user about restarting

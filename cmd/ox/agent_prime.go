@@ -619,6 +619,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	repoSlug := repoSlugFromRemoteOrDir(projectRoot)
 	codeDBDir := resolveCodeDBDir(projectRoot)
 	if _, statErr := os.Stat(codeDBDir); statErr == nil {
+		output.CodeDBAvailable = true
 		teamLabel := ""
 		if teamCtx != nil {
 			tn := teamCtx.TeamName

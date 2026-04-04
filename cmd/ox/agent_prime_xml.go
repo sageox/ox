@@ -74,6 +74,18 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 	sb.WriteString("These are unrelated — sessions are NOT discussions, and the ledger is NOT team context.\n")
 	sb.WriteString("</instructions>\n")
 
+	// code-search: behavioral instruction to prefer ox code search over built-in tools
+	if output.CodeDBAvailable {
+		sb.WriteString("\n<code-search status=\"indexed\">\n")
+		sb.WriteString("This repo has a live code search index. PREFER `ox code search \"<query>\"` over Grep/Glob/ripgrep for:\n")
+		sb.WriteString("- Cross-file symbol search, function lookup, type definitions\n")
+		sb.WriteString("- Git history, diffs, and blame queries\n")
+		sb.WriteString("- Exploratory searches where you don't know the exact file\n")
+		sb.WriteString("Use `ox code insights` before planning multi-file changes (shows hotspots, contention, open PRs).\n")
+		sb.WriteString("Reserve Grep/Glob for: exact-string matches in a known file, or when ox code search returns no results.\n")
+		sb.WriteString("</code-search>\n")
+	}
+
 	// commands: intent-to-command lookup table
 	if output.Guidance != nil && len(output.Guidance.Commands) > 0 {
 		sb.WriteString("\n<commands")

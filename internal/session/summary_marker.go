@@ -41,6 +41,13 @@ func ClearNeedsSummaryMarker(sessionCacheDir string) error {
 	return nil
 }
 
+// HasNeedsSummaryMarker reports whether a session directory has a .needs-summary marker,
+// indicating that stub artifacts were written at stop time and need LLM regeneration.
+func HasNeedsSummaryMarker(sessionDir string) bool {
+	_, err := os.Stat(filepath.Join(sessionDir, needsSummaryMarker))
+	return err == nil
+}
+
 // FindSessionsNeedingSummary scans the sessions directory under contextPath
 // for cache session directories containing a .needs-summary marker.
 func FindSessionsNeedingSummary(contextPath string) ([]NeedsSummaryInfo, error) {

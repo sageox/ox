@@ -1,6 +1,7 @@
 package agentwork
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -9,6 +10,56 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 )
+
+// TestDetect_SkipsLFSStubSessions verifies that detectInDir skips sessions whose
+// raw.jsonl is an LFS pointer stub instead of real content. Without this check,
+// stub sessions would be enqueued every 5 minutes and immediately fail in BuildPrompt.
+func TestDetect_SkipsLFSStubSessions(t *testing.T) {
+	handler := NewSessionFinalizeHandler(slog.Default())
+
+	ledgerPath := t.TempDir()
+	sessionsDir := filepath.Join(ledgerPath, "sessions")
+
+	// LFS stub session — should be skipped
+	stubDir := filepath.Join(sessionsDir, "2026-03-29T16-58-testuser-OxSTUB")
+	if err := os.MkdirAll(stubDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	lfsPointer := fmt.Sprintf("version https://git-lfs.github.com/spec/v1\noid sha256:%s\nsize 4096\n",
+		"abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890")
+	if err := os.WriteFile(filepath.Join(stubDir, "raw.jsonl"), []byte(lfsPointer), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// real session — should be detected
+	realDir := filepath.Join(sessionsDir, "2026-03-30T10-00-testuser-OxREAL")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	rawContent := "{\"_meta\":{\"schema_version\":\"1\",\"agent_type\":\"claude-code\"}}\n{\"type\":\"user\",\"content\":\"hello\",\"seq\":1}\n{\"type\":\"assistant\",\"content\":\"hi\",\"seq\":2}\n"
+	if err := os.WriteFile(filepath.Join(realDir, "raw.jsonl"), []byte(rawContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// sanity: confirm the stub file is recognized as an LFS pointer
+	if !lfs.IsPointerFile(filepath.Join(stubDir, "raw.jsonl")) {
+		t.Fatal("test setup: stub raw.jsonl not recognized as LFS pointer")
+	}
+
+	items, err := handler.Detect(ledgerPath)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+
+	// only the real session should be returned
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item (real session only), got %d", len(items))
+	}
+	payload := items[0].Payload.(*SessionFinalizePayload)
+	if filepath.Base(payload.SessionDir) != "2026-03-30T10-00-testuser-OxREAL" {
+		t.Errorf("expected real session, got %s", filepath.Base(payload.SessionDir))
+	}
+}
 
 // TestWriteMetaAndUploadLFS_ContentFilesIntactAndMetaWritten is a regression test for
 // bug #291 at the writeMetaAndUploadLFS layer. It verifies that when LFS is skipped
