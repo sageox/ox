@@ -63,6 +63,49 @@ func TestParseSettingsRaw_InvalidHooksJSON(t *testing.T) {
 	assert.Contains(t, err.Error(), "parse hooks")
 }
 
+// TestParseSettingsRaw_LegacyStringHooks verifies that hooks files using the
+// old string-value format ("PostToolUse": "command") are parsed without error.
+// Failure prevented: ox doctor reports parse errors for repos that installed
+// hooks before the array format was adopted.
+func TestParseSettingsRaw_LegacyStringHooks(t *testing.T) {
+	data := []byte(`{
+		"hooks": {
+			"PostToolUse": "ox agent hook PostToolUse",
+			"Stop": "ox agent hook Stop"
+		}
+	}`)
+	settings, _, err := ParseSettingsRaw(data)
+	require.NoError(t, err)
+	require.Len(t, settings.Hooks["PostToolUse"], 1)
+	assert.Equal(t, "ox agent hook PostToolUse", settings.Hooks["PostToolUse"][0].Hooks[0].Command)
+	require.Len(t, settings.Hooks["Stop"], 1)
+	assert.Equal(t, "ox agent hook Stop", settings.Hooks["Stop"][0].Hooks[0].Command)
+}
+
+// TestParseSettingsRaw_MixedHookFormats verifies that files with a mix of old
+// string-format and new array-format hook events parse correctly.
+// Failure prevented: mixed-format settings.json (created by upgrading hook install
+// while retaining manually-added string hooks) silently breaks session recording.
+func TestParseSettingsRaw_MixedHookFormats(t *testing.T) {
+	data := []byte(`{
+		"hooks": {
+			"PostToolUse": "ox agent hook PostToolUse",
+			"SessionStart": [{"matcher": "", "hooks": [{"command": "ox agent hook SessionStart", "type": "command"}]}]
+		}
+	}`)
+	settings, _, err := ParseSettingsRaw(data)
+	require.NoError(t, err)
+
+	// legacy string entry promoted to array
+	require.Len(t, settings.Hooks["PostToolUse"], 1)
+	assert.Equal(t, "ox agent hook PostToolUse", settings.Hooks["PostToolUse"][0].Hooks[0].Command)
+	assert.Equal(t, HookType, settings.Hooks["PostToolUse"][0].Hooks[0].Type)
+
+	// array entry unchanged
+	require.Len(t, settings.Hooks["SessionStart"], 1)
+	assert.Equal(t, "ox agent hook SessionStart", settings.Hooks["SessionStart"][0].Hooks[0].Command)
+}
+
 func TestMarshalSettings_EmptyHooksRemovesKey(t *testing.T) {
 	settings := &Settings{Hooks: map[string][]HookEntry{}}
 	rawMap := map[string]json.RawMessage{

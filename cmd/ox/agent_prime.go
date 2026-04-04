@@ -242,6 +242,24 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		// reuse agent_id from marker (preserves identity across re-primes)
 		agentID = existingMarker.AgentID
 	} else {
+		// fallback: if a hook already started recording for the same agent process,
+		// reuse that recording's agent ID so prime stays idempotent.
+		// This handles the case where CLAUDE.md's BLOCKING instruction triggers
+		// a second prime call after the SessionStart hook already created a session.
+		if currentPID := proc.FindAgentAncestorPID(); currentPID > 0 {
+			if states, loadErr := session.LoadAllRecordingStates(projectRoot); loadErr == nil {
+				for _, s := range states {
+					if s.IsAgentAlive() && s.ParentPID > 0 && s.ParentPID == currentPID {
+						agentID = s.AgentID
+						slog.Debug("prime: reusing agent ID from active recording", "agent_id", agentID, "parent_pid", currentPID)
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if agentID == "" {
 		// collect existing IDs to avoid collision during generation
 		existingInstances, err := store.List()
 		if err != nil {
