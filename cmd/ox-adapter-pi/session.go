@@ -117,6 +117,10 @@ func readPiFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, in
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		return entries, offset, fmt.Errorf("error reading session file: %w", err)
+	}
+
 	newOffset := offset
 	if info, err := f.Stat(); err == nil {
 		newOffset = info.Size()
@@ -197,6 +201,9 @@ func findPiSession(repoRoot, agentID, since, agentSessionID string) (string, err
 
 	// direct lookup by session ID
 	if agentSessionID != "" {
+		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
+			return "", err
+		}
 		// search across all subdirectories for this session ID
 		subdirs, _ := os.ReadDir(baseDir)
 		for _, d := range subdirs {

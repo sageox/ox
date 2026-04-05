@@ -12,6 +12,7 @@ package compliance
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -593,8 +594,11 @@ func (s *Suite) TestSpawnSubagentMethodNotFound(t *testing.T) {
 
 func (s *Suite) execOnce(t *testing.T, subcommand string, args ...string) []byte {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
 	cmdArgs := append([]string{subcommand}, args...)
-	cmd := exec.Command(s.Binary, cmdArgs...)
+	cmd := exec.CommandContext(ctx, s.Binary, cmdArgs...)
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("OX_PROTOCOL_VERSION=%d", adapterprotocol.ProtocolVersion),
 	)

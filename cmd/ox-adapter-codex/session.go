@@ -190,11 +190,9 @@ func parseResponseItem(p *codexPayload, ts string) ([]adapterprotocol.RawEntry, 
 			adapterruntime.ToolUseWithID(parseTS(ts), p.Name, p.Arguments, p.CallID),
 		}, nil
 	case "function_call_output":
-		if !isCodexToolError(p.Output) {
-			return nil, nil
-		}
+		isErr := isCodexToolError(p.Output)
 		return []adapterprotocol.RawEntry{
-			adapterruntime.ToolResultWithID(parseTS(ts), p.Output, true, p.CallID),
+			adapterruntime.ToolResultWithID(parseTS(ts), p.Output, isErr, p.CallID),
 		}, nil
 	}
 
@@ -309,6 +307,9 @@ func findCodexSession(repoRoot, agentID, since, agentSessionID string) (string, 
 
 	// direct lookup: scan recent date dirs for a file whose session_meta.id matches
 	if agentSessionID != "" {
+		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
+			return "", err
+		}
 		if path, err := findCodexBySessionID(sessionsDir, agentSessionID); err == nil {
 			return path, nil
 		}

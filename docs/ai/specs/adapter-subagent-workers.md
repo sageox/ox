@@ -137,7 +137,7 @@ Poll the current state of a worker. Used by ox dashboard and `ox agent <id> work
 }}
 ```
 
-Statuses: `starting` | `running` | `completed` | `failed` | `canceled` | `timed_out`
+Statuses: `starting` | `running` | `completed` | `failed` | `canceled` | `canceling` | `timed_out`
 
 **Timeout class**: `fast`
 

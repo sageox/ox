@@ -49,10 +49,14 @@ func readAiderFile(path string) ([]adapterprotocol.RawEntry, error) {
 	}
 	defer f.Close()
 
-	return parseAiderMarkdown(bufio.NewScanner(f))
+	return parseAiderMarkdown(bufio.NewScanner(f), time.Time{})
 }
 
 func readAiderFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
+	return readAiderFromOffsetWithTS(path, offset, time.Time{})
+}
+
+func readAiderFromOffsetWithTS(path string, offset int64, initialTS time.Time) ([]adapterprotocol.RawEntry, int64, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, offset, fmt.Errorf("failed to open session file: %w", err)
@@ -65,7 +69,7 @@ func readAiderFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry,
 		}
 	}
 
-	entries, err := parseAiderMarkdown(bufio.NewScanner(f))
+	entries, err := parseAiderMarkdown(bufio.NewScanner(f), initialTS)
 	if err != nil {
 		return nil, offset, err
 	}
@@ -80,14 +84,14 @@ func readAiderFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry,
 
 // parseAiderMarkdown parses aider's markdown chat history format.
 // Role transitions flush the accumulated buffer as an entry.
-func parseAiderMarkdown(scanner *bufio.Scanner) ([]adapterprotocol.RawEntry, error) {
+func parseAiderMarkdown(scanner *bufio.Scanner, initialTS time.Time) ([]adapterprotocol.RawEntry, error) {
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 10*1024*1024)
 
 	var entries []adapterprotocol.RawEntry
 	var currentRole string
 	var currentLines []string
-	var sessionTS time.Time
+	sessionTS := initialTS
 
 	flush := func() {
 		if currentRole == "" || len(currentLines) == 0 {
@@ -171,6 +175,39 @@ func parseAiderMarkdown(scanner *bufio.Scanner) ([]adapterprotocol.RawEntry, err
 	return entries, nil
 }
 
+// resolveLatestSessionTS scans the history file up to the given byte offset
+// and returns the timestamp from the last "# aider chat started at" header.
+// This is used by serve mode so incremental reads inherit the correct timestamp.
+func resolveLatestSessionTS(path string, offset int64) time.Time {
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}
+	}
+	defer f.Close()
+
+	var lastTS time.Time
+	scanner := bufio.NewScanner(f)
+	buf := make([]byte, 0, 64*1024)
+	scanner.Buffer(buf, 10*1024*1024)
+
+	var pos int64
+	for scanner.Scan() {
+		line := scanner.Text()
+		lineLen := int64(len(scanner.Bytes())) + 1 // +1 for newline
+		if offset > 0 && pos >= offset {
+			break
+		}
+		if strings.HasPrefix(line, aiderSessionPrefix) {
+			tsStr := strings.TrimPrefix(line, aiderSessionPrefix)
+			if t, err := time.Parse(aiderTimestampLayout, strings.TrimSpace(tsStr)); err == nil {
+				lastTS = t
+			}
+		}
+		pos += lineLen
+	}
+	return lastTS
+}
+
 // --- session import ---
 
 // parseAiderSessionByTimestamp reads the history file and returns only entries
@@ -194,7 +231,7 @@ func parseAiderSessionByTimestamp(path, sessionTS string) ([]adapterprotocol.Raw
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
-	allEntries, err := parseAiderMarkdown(scanner)
+	allEntries, err := parseAiderMarkdown(scanner, time.Time{})
 	if err != nil {
 		return nil, err
 	}

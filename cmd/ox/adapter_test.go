@@ -293,8 +293,12 @@ echo '{"protocol_version":1,"name":"%s","display_name":"%s","version":"%s","type
 }
 
 // createFakeAdapter writes a fake adapter binary script to the given directory.
+// Skips on Windows since these are shell scripts.
 func createFakeAdapter(t *testing.T, dir, name, version, adapterType string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script adapters require unix")
+	}
 	script := fakeAdapterScript(name, version, adapterType)
 	binaryPath := filepath.Join(dir, "ox-adapter-"+name)
 	if err := os.WriteFile(binaryPath, []byte(script), 0755); err != nil {
@@ -354,8 +358,12 @@ esac`, name, name, version, adapterType, configDir, configDir, configDir)
 }
 
 // createFakeAdapterWithHooks writes a fake adapter script that supports hook operations.
+// Skips on Windows since these are shell scripts.
 func createFakeAdapterWithHooks(t *testing.T, dir, name, version, adapterType, configDir string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script adapters require unix")
+	}
 	script := fakeAdapterWithHooksScript(name, version, adapterType, configDir)
 	binaryPath := filepath.Join(dir, "ox-adapter-"+name)
 	if err := os.WriteFile(binaryPath, []byte(script), 0755); err != nil {

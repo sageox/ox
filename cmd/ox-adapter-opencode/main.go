@@ -129,7 +129,7 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 	// check if opencode is installed
 	if _, err := exec.LookPath("opencode"); err != nil {
 		issues = append(issues, adapterprotocol.DiagnoseIssue{
-			Slug:     "opencode:not-installed",
+			Slug:     "not-installed",
 			Severity: "warning",
 			Title:    "OpenCode CLI not detected",
 			Detail:   "opencode binary not found in PATH.",
@@ -140,7 +140,7 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 	dbPath := openCodeDBPath()
 	if dbPath == "" || func() bool { _, err := os.Stat(dbPath); return err != nil }() {
 		issues = append(issues, adapterprotocol.DiagnoseIssue{
-			Slug:     "opencode:no-database",
+			Slug:     "no-database",
 			Severity: "info",
 			Title:    "OpenCode database not found",
 			Detail:   "opencode.db not found — session reading unavailable until OpenCode is used.",
@@ -152,11 +152,11 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 		pluginPath := filepath.Join(p.RepoRoot, openCodeProjectPath, openCodePluginFileName)
 		if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
 			issues = append(issues, adapterprotocol.DiagnoseIssue{
-				Slug:     "opencode:hooks-missing",
+				Slug:     "hooks-missing",
 				Severity: "warning",
 				Title:    "OpenCode hooks not installed",
 				Detail:   fmt.Sprintf("%s not found.", pluginPath),
-				Fix:      "Run: ox-adapter-opencode install-hooks --repo-root " + p.RepoRoot + " --scope project",
+				Fix:      "ox-adapter-opencode install-hooks --repo-root " + p.RepoRoot + " --scope project",
 				FixSafe:  true,
 			})
 		}

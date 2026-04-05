@@ -30,11 +30,14 @@ func geminiReadFromOffset(file string, offset int64) ([]adapterprotocol.RawEntry
 	}
 
 	total := int64(len(allEntries))
+	if offset < 0 {
+		return nil, total, fmt.Errorf("invalid negative offset: %d", offset)
+	}
 	if offset >= total {
 		return nil, total, nil
 	}
 
-	return allEntries[offset:], total, nil
+	return allEntries[int(offset):], total, nil
 }
 
 func handleServe(srv *adapterruntime.Server) {

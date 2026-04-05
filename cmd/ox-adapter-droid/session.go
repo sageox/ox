@@ -190,6 +190,9 @@ func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, i
 
 	// direct lookup via session UUID across all project dirs
 	if agentSessionID != "" {
+		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
+			return "", 0, err
+		}
 		if path, ok := findSessionByUUID(projectsDir, agentSessionID); ok {
 			sinceTime := parseSince(since)
 			offset := findStartOffset(path, sinceTime)

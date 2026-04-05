@@ -213,7 +213,11 @@ func runAdapterFix(fixCmd string, fixSafe, forceYes bool) error {
 	}
 
 	slog.Info("running adapter fix", "command", fixCmd)
-	cmd := exec.Command("sh", "-c", fixCmd)
+	parts := strings.Fields(fixCmd)
+	if len(parts) == 0 {
+		return fmt.Errorf("empty fix command")
+	}
+	cmd := exec.Command(parts[0], parts[1:]...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))

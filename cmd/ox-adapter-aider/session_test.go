@@ -20,7 +20,7 @@ func TestParseAiderMarkdown_UserMessage(t *testing.T) {
 #### How do I add error handling?
 `
 	scanner := bufio.NewScanner(strings.NewReader(content))
-	entries, err := parseAiderMarkdown(scanner)
+	entries, err := parseAiderMarkdown(scanner, time.Time{})
 	if err != nil {
 		t.Fatalf("parseAiderMarkdown: %v", err)
 	}
@@ -50,7 +50,7 @@ func process() error {
 }
 `
 	scanner := bufio.NewScanner(strings.NewReader(content))
-	entries, err := parseAiderMarkdown(scanner)
+	entries, err := parseAiderMarkdown(scanner, time.Time{})
 	if err != nil {
 		t.Fatalf("parseAiderMarkdown: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestParseAiderMarkdown_ToolOutput(t *testing.T) {
 > Tests pass
 `
 	scanner := bufio.NewScanner(strings.NewReader(content))
-	entries, err := parseAiderMarkdown(scanner)
+	entries, err := parseAiderMarkdown(scanner, time.Time{})
 	if err != nil {
 		t.Fatalf("parseAiderMarkdown: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestParseAiderMarkdown_SessionHeaderParsing(t *testing.T) {
 #### First message
 `
 	scanner := bufio.NewScanner(strings.NewReader(content))
-	entries, err := parseAiderMarkdown(scanner)
+	entries, err := parseAiderMarkdown(scanner, time.Time{})
 	if err != nil {
 		t.Fatalf("parseAiderMarkdown: %v", err)
 	}
@@ -139,7 +139,7 @@ Assistant response here
 
 `
 	scanner := bufio.NewScanner(strings.NewReader(content))
-	entries, err := parseAiderMarkdown(scanner)
+	entries, err := parseAiderMarkdown(scanner, time.Time{})
 	if err != nil {
 		t.Fatalf("parseAiderMarkdown: %v", err)
 	}
@@ -170,7 +170,7 @@ Assistant response to both
 Final assistant response
 `
 	scanner := bufio.NewScanner(strings.NewReader(content))
-	entries, err := parseAiderMarkdown(scanner)
+	entries, err := parseAiderMarkdown(scanner, time.Time{})
 	if err != nil {
 		t.Fatalf("parseAiderMarkdown: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestParseAiderMarkdown_EmptyContent(t *testing.T) {
 Non-empty assistant response
 `
 	scanner := bufio.NewScanner(strings.NewReader(content))
-	entries, err := parseAiderMarkdown(scanner)
+	entries, err := parseAiderMarkdown(scanner, time.Time{})
 	if err != nil {
 		t.Fatalf("parseAiderMarkdown: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestParseAiderMarkdown_SkipsOtherHeaders(t *testing.T) {
 Assistant response
 `
 	scanner := bufio.NewScanner(strings.NewReader(content))
-	entries, err := parseAiderMarkdown(scanner)
+	entries, err := parseAiderMarkdown(scanner, time.Time{})
 	if err != nil {
 		t.Fatalf("parseAiderMarkdown: %v", err)
 	}
@@ -276,7 +276,7 @@ func TestParseAiderMarkdown_InvalidTimestamp(t *testing.T) {
 #### User message
 `
 	scanner := bufio.NewScanner(strings.NewReader(content))
-	entries, err := parseAiderMarkdown(scanner)
+	entries, err := parseAiderMarkdown(scanner, time.Time{})
 	if err != nil {
 		t.Fatalf("parseAiderMarkdown: %v", err)
 	}

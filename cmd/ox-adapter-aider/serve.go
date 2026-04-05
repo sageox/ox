@@ -5,6 +5,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"time"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
@@ -13,6 +14,7 @@ import (
 type aiderSessionState struct {
 	sessionFile string
 	offset      int64
+	sessionTS   time.Time
 }
 
 func handleServe(srv *adapterruntime.Server) {
@@ -39,7 +41,10 @@ func handleServe(srv *adapterruntime.Server) {
 			offset = info.Size()
 		}
 
-		store.Set(p.AgentID, aiderSessionState{sessionFile: sessionFile, offset: offset})
+		// resolve the last session timestamp so incremental reads inherit it
+		sessionTS := resolveLatestSessionTS(sessionFile, offset)
+
+		store.Set(p.AgentID, aiderSessionState{sessionFile: sessionFile, offset: offset, sessionTS: sessionTS})
 
 		if fw != nil {
 			if werr := fw.Watch(p.AgentID, sessionFile, offset); werr != nil {
@@ -56,12 +61,12 @@ func handleServe(srv *adapterruntime.Server) {
 			return nil, adapterruntime.ErrSessionNotFound
 		}
 
-		entries, newOffset, err := readAiderFromOffset(state.sessionFile, p.Offset)
+		entries, newOffset, err := readAiderFromOffsetWithTS(state.sessionFile, p.Offset, state.sessionTS)
 		if err != nil {
 			return nil, err
 		}
 
-		store.Set(p.AgentID, aiderSessionState{sessionFile: state.sessionFile, offset: newOffset})
+		store.Set(p.AgentID, aiderSessionState{sessionFile: state.sessionFile, offset: newOffset, sessionTS: state.sessionTS})
 
 		return &adapterprotocol.ReadFromOffsetResult{Entries: entries, NewOffset: newOffset}, nil
 	})

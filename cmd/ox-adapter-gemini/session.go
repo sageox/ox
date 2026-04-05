@@ -63,6 +63,9 @@ func findGeminiSession(repoRoot, agentID, since, agentSessionID string) (string,
 
 	// direct lookup: Gemini files are session-{id}.json under project chats dirs
 	if agentSessionID != "" {
+		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
+			return "", err
+		}
 		if path, err := findGeminiBySessionID(tmpDir, agentSessionID); err == nil {
 			return path, nil
 		}

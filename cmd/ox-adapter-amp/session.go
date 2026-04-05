@@ -123,6 +123,10 @@ func readAmpFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, i
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		return entries, offset, fmt.Errorf("error reading session file: %w", err)
+	}
+
 	newOffset := offset
 	if info, err := f.Stat(); err == nil {
 		newOffset = info.Size()
@@ -190,6 +194,9 @@ func findAmpSession(_, agentID, since, agentSessionID string) (string, error) {
 
 	// direct lookup by session ID
 	if agentSessionID != "" {
+		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
+			return "", err
+		}
 		direct := filepath.Join(sessionsDir, agentSessionID+".jsonl")
 		if _, err := os.Stat(direct); err == nil {
 			return direct, nil
