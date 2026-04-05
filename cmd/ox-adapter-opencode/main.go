@@ -7,6 +7,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -101,7 +102,7 @@ func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotoco
 	// verify session exists
 	var id string
 	err = db.QueryRow("SELECT id FROM sessions WHERE id = ? LIMIT 1", p.SessionID).Scan(&id)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("session %q not found", p.SessionID)
 	}
 	if err != nil {

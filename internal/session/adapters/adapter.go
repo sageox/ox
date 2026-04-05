@@ -179,7 +179,7 @@ var adapterAliases = map[string]string{
 	"cline":    "generic",
 	"goose":    "generic",
 	"kiro":     "generic",
-	"droid":    "generic",
+	"droid":    "droid",
 }
 
 // GetAdapter returns a specific adapter by name.

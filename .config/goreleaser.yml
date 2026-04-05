@@ -226,6 +226,24 @@ builds:
     ldflags:
       - -s -w
 
+  - id: ox-adapter-droid
+    main: ./cmd/ox-adapter-droid
+    binary: ox-adapter-droid
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: freebsd
+        goarch: arm64
+    ldflags:
+      - -s -w
+
 archives:
   - id: ox-archive
     formats:
@@ -263,7 +281,7 @@ release:
 
     Pre-compiled binaries for Linux, macOS (Intel & Apple Silicon), and FreeBSD.
 
-    Each tarball includes ox and bundled adapters (claude-code, gemini, codex, amp, opencode, pi, aider).
+    Each tarball includes ox and bundled adapters (claude-code, gemini, codex, amp, opencode, pi, aider, droid).
 
     ### Installation
 
@@ -295,6 +313,7 @@ brews:
       bin.install "ox-adapter-opencode"
       bin.install "ox-adapter-pi"
       bin.install "ox-adapter-aider"
+      bin.install "ox-adapter-droid"
 
 announce:
   skip: true

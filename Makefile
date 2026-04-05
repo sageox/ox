@@ -14,7 +14,7 @@ LDFLAGS := -ldflags "-X github.com/sageox/ox/internal/version.Version=$(VERSION)
 ADAPTER_LDFLAGS := -ldflags "-s -w"
 
 # Bundled adapters (shipped in release tarballs alongside ox)
-ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-aider
+ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-aider ox-adapter-droid
 
 # Build targets
 build: build-ox build-adapters ## Build ox and all bundled adapters to bin/
