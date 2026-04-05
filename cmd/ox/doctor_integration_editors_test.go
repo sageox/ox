@@ -66,33 +66,6 @@ func TestDetectOtherAIEditors_GeminiCLI(t *testing.T) {
 	}
 }
 
-func TestDetectOtherAIEditors_CodePuppy(t *testing.T) {
-	gitRoot, cleanup := setupTempGitRepo(t)
-	defer cleanup()
-
-	restoreCwd := changeToDir(t, gitRoot)
-	defer restoreCwd()
-
-	codePuppyDir := filepath.Join(gitRoot, ".code_puppy")
-	if err := os.MkdirAll(codePuppyDir, 0755); err != nil {
-		t.Fatalf("failed to create .code_puppy: %v", err)
-	}
-
-	editors := detectOtherAIEditors()
-
-	found := false
-	for _, editor := range editors {
-		if editor == "code_puppy" {
-			found = true
-			break
-		}
-	}
-
-	if !found {
-		t.Errorf("expected code_puppy in detected editors, got: %v", editors)
-	}
-}
-
 func TestDetectOtherAIEditors_Cursor(t *testing.T) {
 	gitRoot, cleanup := setupTempGitRepo(t)
 	defer cleanup()
@@ -181,7 +154,7 @@ func TestDetectOtherAIEditors_MultipleEditors(t *testing.T) {
 	restoreCwd := changeToDir(t, gitRoot)
 	defer restoreCwd()
 
-	editorDirs := []string{".opencode", ".gemini", ".code_puppy"}
+	editorDirs := []string{".opencode", ".gemini"}
 	for _, dir := range editorDirs {
 		fullPath := filepath.Join(gitRoot, dir)
 		if err := os.MkdirAll(fullPath, 0755); err != nil {
@@ -191,11 +164,11 @@ func TestDetectOtherAIEditors_MultipleEditors(t *testing.T) {
 
 	detected := detectOtherAIEditors()
 
-	if len(detected) < 3 {
-		t.Errorf("expected at least 3 editors, got: %v", detected)
+	if len(detected) < 2 {
+		t.Errorf("expected at least 2 editors, got: %v", detected)
 	}
 
-	expectedEditors := []string{"OpenCode", "Gemini CLI", "code_puppy"}
+	expectedEditors := []string{"OpenCode", "Gemini CLI"}
 	for _, expected := range expectedEditors {
 		found := false
 		for _, d := range detected {
@@ -388,7 +361,7 @@ func TestDetectOpenCode_WithProjectConfig(t *testing.T) {
 	}
 }
 
-// additional edge case tests for checkOpenCodeHooks, checkGeminiHooks, checkCodePuppyHooks
+// additional edge case tests for checkOpenCodeHooks, checkGeminiHooks
 
 func TestCheckOpenCodeHooks_ProjectConfigNoHooks(t *testing.T) {
 	gitRoot, cleanup := setupTempGitRepo(t)
@@ -427,28 +400,6 @@ func TestCheckGeminiHooks_ProjectConfigNoHooks(t *testing.T) {
 	}
 
 	result := checkGeminiHooks(false)
-
-	if result.passed {
-		t.Error("expected passed=false when project config exists but hooks not installed")
-	}
-	if !strings.Contains(result.detail, "ox hooks install") {
-		t.Errorf("expected detail to suggest installation, got: %s", result.detail)
-	}
-}
-
-func TestCheckCodePuppyHooks_ProjectConfigNoHooks(t *testing.T) {
-	gitRoot, cleanup := setupTempGitRepo(t)
-	defer cleanup()
-
-	restoreCwd := changeToDir(t, gitRoot)
-	defer restoreCwd()
-
-	codePuppyDir := filepath.Join(gitRoot, ".code_puppy")
-	if err := os.MkdirAll(codePuppyDir, 0755); err != nil {
-		t.Fatalf("failed to create .code_puppy: %v", err)
-	}
-
-	result := checkCodePuppyHooks(false)
 
 	if result.passed {
 		t.Error("expected passed=false when project config exists but hooks not installed")
@@ -498,26 +449,6 @@ func TestCheckGeminiHooks_NotDetected(t *testing.T) {
 	}
 }
 
-func TestCheckCodePuppyHooks_NotDetected(t *testing.T) {
-	gitRoot, cleanup := setupTempGitRepo(t)
-	defer cleanup()
-
-	restoreCwd := changeToDir(t, gitRoot)
-	defer restoreCwd()
-
-	// clamp PATH so host-installed code-puppy CLI doesn't cause false positive
-	t.Setenv("PATH", "/usr/bin:/bin")
-
-	result := checkCodePuppyHooks(false)
-
-	if !result.skipped {
-		t.Error("expected skipped=true when code_puppy not detected")
-	}
-	if !strings.Contains(result.message, "not detected") {
-		t.Errorf("expected message to mention 'not detected', got: %s", result.message)
-	}
-}
-
 // additional edge case tests for detectOtherAIEditors
 
 func TestDetectOtherAIEditors_AllEditors(t *testing.T) {
@@ -528,7 +459,7 @@ func TestDetectOtherAIEditors_AllEditors(t *testing.T) {
 	defer restoreCwd()
 
 	// create all editor directories
-	editorDirs := []string{".opencode", ".gemini", ".code_puppy", ".cursor", ".windsurf", ".vscode"}
+	editorDirs := []string{".opencode", ".gemini", ".cursor", ".windsurf", ".vscode"}
 	for _, dir := range editorDirs {
 		fullPath := filepath.Join(gitRoot, dir)
 		if err := os.MkdirAll(fullPath, 0755); err != nil {
@@ -538,11 +469,11 @@ func TestDetectOtherAIEditors_AllEditors(t *testing.T) {
 
 	detected := detectOtherAIEditors()
 
-	if len(detected) < 6 {
-		t.Errorf("expected at least 6 editors detected, got %d: %v", len(detected), detected)
+	if len(detected) < 5 {
+		t.Errorf("expected at least 5 editors detected, got %d: %v", len(detected), detected)
 	}
 
-	expectedEditors := []string{"OpenCode", "Gemini CLI", "code_puppy", "Cursor", "Windsurf", "VSCode"}
+	expectedEditors := []string{"OpenCode", "Gemini CLI", "Cursor", "Windsurf", "VSCode"}
 	for _, expected := range expectedEditors {
 		found := false
 		for _, d := range detected {

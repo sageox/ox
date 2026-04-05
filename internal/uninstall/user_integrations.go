@@ -74,14 +74,6 @@ func (f *UserIntegrationsFinder) FindAll() ([]UserIntegrationItem, error) {
 		items = append(items, geminiItems...)
 	}
 
-	// find code_puppy plugins in ~/.code_puppy/plugins/
-	codePuppyItems, err := f.findCodePuppyPlugins()
-	if err != nil {
-		slog.Debug("error finding code_puppy plugins", "error", err)
-	} else {
-		items = append(items, codePuppyItems...)
-	}
-
 	// find user-level git hooks in ~/.config/git/hooks/
 	gitHookItems, err := f.findUserGitHooks()
 	if err != nil {
@@ -247,23 +239,6 @@ func (f *UserIntegrationsFinder) findGeminiHooks() ([]UserIntegrationItem, error
 	return nil, nil
 }
 
-// findCodePuppyPlugins finds code_puppy plugins in ~/.code_puppy/plugins/
-func (f *UserIntegrationsFinder) findCodePuppyPlugins() ([]UserIntegrationItem, error) {
-	pluginDir := filepath.Join(f.homeDir, ".code_puppy", "plugins", "ox_prime")
-
-	if _, err := os.Stat(pluginDir); os.IsNotExist(err) {
-		return nil, nil
-	}
-
-	return []UserIntegrationItem{
-		{
-			Path:        pluginDir,
-			Type:        "plugin",
-			Agent:       "code_puppy",
-			Description: "code_puppy plugin (ox_prime/)",
-		},
-	}, nil
-}
 
 // findUserGitHooks finds user-level git hooks containing ox prime
 func (f *UserIntegrationsFinder) findUserGitHooks() ([]UserIntegrationItem, error) {

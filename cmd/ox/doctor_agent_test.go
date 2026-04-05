@@ -27,8 +27,6 @@ var agentEnvVarsToSave = []string{
 	"CODEX_THREAD_ID",
 	"OPENCODE",
 	"OPENCODE_AGENT",
-	"CODE_PUPPY",
-	"CODE_PUPPY_AGENT",
 	"GOOSE",
 	"GOOSE_AGENT",
 	"COPILOT_AGENT",
@@ -115,14 +113,6 @@ func TestCheckAgentEnvValidity(t *testing.T) {
 		result := checkAgentEnvValidity()
 		assert.True(t, result.passed, "expected passed for valid AGENT_ENV=claude")
 		assert.Contains(t, result.message, "canonical: claude")
-	})
-
-	t.Run("valid canonical code puppy slug", func(t *testing.T) {
-		os.Setenv("AGENT_ENV", "code-puppy")
-
-		result := checkAgentEnvValidity()
-		assert.True(t, result.passed, "expected passed for valid AGENT_ENV=code-puppy")
-		assert.Contains(t, result.message, "canonical: code-puppy")
 	})
 
 	t.Run("unknown agent", func(t *testing.T) {

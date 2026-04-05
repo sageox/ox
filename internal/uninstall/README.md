@@ -31,10 +31,7 @@ The system detects and removes SageOx integrations from:
 3. **Gemini CLI**
    - Hooks in `~/.gemini/settings.json`
 
-4. **code_puppy**
-   - Plugin directory at `~/.code_puppy/plugins/ox_prime/`
-
-5. **User Git Hooks**
+4. **User Git Hooks**
    - SageOx hooks in `~/.config/git/hooks/` (XDG-compliant)
 
 ### Usage
@@ -72,7 +69,7 @@ For settings files (Claude, Gemini):
 - Preserves other hooks and user content
 - Removes empty hook event sections after cleanup
 
-For plugin files (OpenCode, code_puppy):
+For plugin files (OpenCode):
 - Removes the entire plugin file/directory
 - Only removes if it matches SageOx plugin signature
 

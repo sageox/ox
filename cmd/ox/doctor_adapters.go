@@ -56,6 +56,12 @@ func checkExternalAdapters(opts doctorOptions) []checkResult {
 		}
 
 		for _, issue := range diagnoseResult.Issues {
+			// not-installed is informational, not a problem — most users only
+			// have one or two agents, so silently skip rather than pollute output.
+			if strings.HasSuffix(issue.Slug, ":not-installed") || issue.Slug == "not-installed" {
+				continue
+			}
+
 			slug := adapterIssueSlug(name, issue.Slug)
 			cr := adapterIssueToCheckResult(name, issue)
 			cr.slug = slug

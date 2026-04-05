@@ -64,8 +64,6 @@ func checkAgentEnvValidity() checkResult {
 		"codex":       "codex",
 		"opencode":    "opencode",
 		"gemini":      "gemini",
-		"codepuppy":   "code-puppy",
-		"code-puppy":  "code-puppy",
 		"droid":       "droid",
 	}
 	agentEnvLower := strings.ToLower(agentEnv)
@@ -76,7 +74,7 @@ func checkAgentEnvValidity() checkResult {
 
 	knownAgents := []string{
 		"claude", "cursor", "windsurf", "cline", "aider",
-		"codex", "opencode", "gemini", "code-puppy", "droid",
+		"codex", "opencode", "gemini", "droid",
 	}
 
 	return WarningCheck("AGENT_ENV",

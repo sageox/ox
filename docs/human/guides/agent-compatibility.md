@@ -70,7 +70,6 @@ OpenCode has 27+ plugin events but ox currently uses only `session.created`.
 - **Amp**: No native hook events for session lifecycle. Context works via AGENTS.md marker only.
 - **OpenCode**: Sessions stored in SQLite, not files. Real-time tail watching requires SQLite adapter (not yet implemented).
 - **Pi**: Extension-based architecture, not shell hooks. MCP works but hook lifecycle events aren't available.
-- **code_puppy**: Single plugin event. Minimal integration surface.
 
 ## Version Requirements
 

@@ -260,54 +260,6 @@ func (c *CodexAgent) DetectCLI() bool {
 func (c *CodexAgent) SupportsHooks() bool {
 	return true
 }
-
-// CodePuppyAgent implements Agent interface for code_puppy
-type CodePuppyAgent struct{}
-
-func (c *CodePuppyAgent) Name() string {
-	return "CodePuppy"
-}
-
-func (c *CodePuppyAgent) Install(user bool) error {
-	return installCodePuppyHooks(user)
-}
-
-func (c *CodePuppyAgent) Uninstall(user bool) error {
-	return uninstallCodePuppyHooks(user)
-}
-
-func (c *CodePuppyAgent) HasHooks(user bool) bool {
-	return hasCodePuppyHooks(user)
-}
-
-func (c *CodePuppyAgent) List() map[string]bool {
-	return listCodePuppyHooks()
-}
-
-func (c *CodePuppyAgent) Detect() bool {
-	return c.DetectProject() || c.DetectCLI()
-}
-
-func (c *CodePuppyAgent) DetectProject() bool {
-	gitRoot := findGitRoot()
-	if gitRoot == "" {
-		return false
-	}
-	// check for .code_puppy directory in project
-	projectDir := filepath.Join(gitRoot, ".code_puppy")
-	_, err := os.Stat(projectDir)
-	return err == nil
-}
-
-func (c *CodePuppyAgent) DetectCLI() bool {
-	_, err := exec.LookPath("code-puppy")
-	return err == nil
-}
-
-func (c *CodePuppyAgent) SupportsHooks() bool {
-	return true
-}
-
 // AmpAgent implements Agent interface for Amp CLI (Sourcegraph)
 type AmpAgent struct{}
 
@@ -412,7 +364,6 @@ var AgentRegistry = []Agent{
 	&OpenCodeAgent{},
 	&GeminiAgent{},
 	&CodexAgent{},
-	&CodePuppyAgent{},
 	&AmpAgent{},
 	&PiAgent{},
 }

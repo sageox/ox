@@ -19,35 +19,35 @@ Agent-specific hooks (`ox integrate install --<agent>`) are *additive* — they 
 
 ## Support Matrix
 
-| Capability | Claude Code | Gemini CLI | Codex CLI | Amp CLI | OpenCode | code_puppy |
-|-----------|:-----------:|:----------:|:---------:|:-------:|:--------:|:----------:|
-| **Bronze: Session Recording** | | | | | | |
-| Session adapter | Full (JSONL TailWatcher) | Full (monolithic JSON) | Full (JSONL TailWatcher) | Partial (generic) | None (SQLite storage) | None |
-| `ox session start/stop` | Yes | Yes | Yes | Yes | Yes | Yes |
-| Real-time tail (daemon) | Yes (fsnotify) | Yes (fsnotify, full re-read) | Yes (fsnotify) | No (cloud-first) | No (needs SQLite adapter) | No |
-| Offset persistence / catch-up | Yes (byte offset) | Yes (entry count) | Yes (byte offset) | N/A | N/A | N/A |
-| **Bronze: Whispers** | | | | | | |
-| Push whispers (stdout injection) | Yes (UserPromptSubmit) | Yes (BeforeAgent) | No | No | Possible (tui.prompt.append) | No |
-| Pull whispers (`ox agent whisper`) | Yes | Yes | Yes | Yes | Yes | Yes |
-| AGENTS.md / CLAUDE.md marker | Yes (universal) | Yes (universal) | Yes (universal) | Yes (universal + Amp-specific block) | Yes (universal; OpenCode reads AGENTS.md natively) | Yes (universal) |
-| **Silver: Hooks** | | | | | | |
-| Native hook/plugin events | 6 (SessionStart, PreCompact, PostToolUse, Stop, SessionEnd, UserPromptSubmit) | 4 (SessionStart, BeforeAgent, AfterTool, SessionEnd) | 2 (SessionStart, SessionEnd) | 2 (tool:pre-execute, tool:post-execute — experimental) | 27+ (session.*, message.*, tool.*, file.*, command.*, permission.*, lsp.*, server.*, tui.*, shell.*, todo.*) | 1 (plugin) |
-| ox-used hook events | 6 | 4 | 2 | 0 (AGENTS.md marker only) | 1 (session.created) | 1 |
-| Phase mapping (agentx) | Full (in agentx) | Local fallback (pending agentx) | Full (in agentx) | N/A | N/A | N/A |
-| Startup banner (JSON stdout) | Yes | Yes | No | No | No | No |
-| Hook install/uninstall | `ox integrate install` | `ox integrate install --gemini` | `ox integrate install --codex` | `ox integrate install --amp` | `ox integrate install --opencode` | `ox integrate install --codepuppy` |
-| `ox doctor` detection + auto-fix | Yes | Yes | Yes | Yes | Yes | Yes |
-| **Silver: Daemon Sub-Agent** | | | | | | |
-| Runner implementation | ClaudeRunner | GeminiRunner | CodexRunner | None | None | None |
-| Headless CLI mode | `claude -p --output-format json` | `gemini -p` | `codex -p` | No confirmed mode | `opencode run --format json` | No |
-| Auto-detection priority | 1st | 3rd | 2nd | N/A | N/A | N/A |
-| Auth check (`CheckAgentUsability`) | ANTHROPIC_API_KEY or OAuth | GEMINI_API_KEY or GOOGLE_API_KEY | OPENAI_API_KEY or `codex login` | N/A | N/A | N/A |
-| Session finalization | Yes | Yes | Yes | No | No | No |
-| `agent_worker.agent` config value | `"claude"` | `"gemini"` | `"codex"` | N/A | N/A | N/A |
-| **Gold: Full Parity** | | | | | | |
-| Anti-entropy (daemon recovery) | Yes | Partial (adapter exists, untested E2E) | Yes | No | No | No |
-| Multi-turn incremental recording | Yes (JSONL append) | Yes (full re-read delta) | Yes (JSONL append) | No | No | No |
-| E2E integration tests | Yes (real Claude) | No (needs GEMINI_API_KEY CI) | No (needs OPENAI_API_KEY CI) | No | No | No |
+| Capability | Claude Code | Gemini CLI | Codex CLI | Amp CLI | OpenCode |
+|-----------|:-----------:|:----------:|:---------:|:-------:|:--------:|
+| **Bronze: Session Recording** | | | | | |
+| Session adapter | Full (JSONL TailWatcher) | Full (monolithic JSON) | Full (JSONL TailWatcher) | Partial (generic) | None (SQLite storage) |
+| `ox session start/stop` | Yes | Yes | Yes | Yes | Yes |
+| Real-time tail (daemon) | Yes (fsnotify) | Yes (fsnotify, full re-read) | Yes (fsnotify) | No (cloud-first) | No (needs SQLite adapter) |
+| Offset persistence / catch-up | Yes (byte offset) | Yes (entry count) | Yes (byte offset) | N/A | N/A |
+| **Bronze: Whispers** | | | | | |
+| Push whispers (stdout injection) | Yes (UserPromptSubmit) | Yes (BeforeAgent) | No | No | Possible (tui.prompt.append) |
+| Pull whispers (`ox agent whisper`) | Yes | Yes | Yes | Yes | Yes |
+| AGENTS.md / CLAUDE.md marker | Yes (universal) | Yes (universal) | Yes (universal) | Yes (universal + Amp-specific block) | Yes (universal; OpenCode reads AGENTS.md natively) |
+| **Silver: Hooks** | | | | | |
+| Native hook/plugin events | 6 (SessionStart, PreCompact, PostToolUse, Stop, SessionEnd, UserPromptSubmit) | 4 (SessionStart, BeforeAgent, AfterTool, SessionEnd) | 2 (SessionStart, SessionEnd) | 2 (tool:pre-execute, tool:post-execute — experimental) | 27+ (session.*, message.*, tool.*, file.*, command.*, permission.*, lsp.*, server.*, tui.*, shell.*, todo.*) |
+| ox-used hook events | 6 | 4 | 2 | 0 (AGENTS.md marker only) | 1 (session.created) |
+| Phase mapping (agentx) | Full (in agentx) | Local fallback (pending agentx) | Full (in agentx) | N/A | N/A |
+| Startup banner (JSON stdout) | Yes | Yes | No | No | No |
+| Hook install/uninstall | `ox integrate install` | `ox integrate install --gemini` | `ox integrate install --codex` | `ox integrate install --amp` |
+| `ox doctor` detection + auto-fix | Yes | Yes | Yes | Yes | Yes |
+| **Silver: Daemon Sub-Agent** | | | | | |
+| Runner implementation | ClaudeRunner | GeminiRunner | CodexRunner | None | None |
+| Headless CLI mode | `claude -p --output-format json` | `gemini -p` | `codex -p` | No confirmed mode | `opencode run --format json` |
+| Auto-detection priority | 1st | 3rd | 2nd | N/A | N/A |
+| Auth check (`CheckAgentUsability`) | ANTHROPIC_API_KEY or OAuth | GEMINI_API_KEY or GOOGLE_API_KEY | OPENAI_API_KEY or `codex login` | N/A | N/A |
+| Session finalization | Yes | Yes | Yes | No | No |
+| `agent_worker.agent` config value | `"claude"` | `"gemini"` | `"codex"` | N/A | N/A |
+| **Gold: Full Parity** | | | | | |
+| Anti-entropy (daemon recovery) | Yes | Partial (adapter exists, untested E2E) | Yes | No | No |
+| Multi-turn incremental recording | Yes (JSONL append) | Yes (full re-read delta) | Yes (JSONL append) | No | No |
+| E2E integration tests | Yes (real Claude) | No (needs GEMINI_API_KEY CI) | No (needs OPENAI_API_KEY CI) | No | No |
 
 ## Overall Tier Status
 
@@ -58,7 +58,6 @@ Agent-specific hooks (`ox integrate install --<agent>`) are *additive* — they 
 | **Codex CLI** | **Silver** | E2E integration tests with real Codex CLI |
 | **Amp CLI** | **Bronze** | No native hooks (only 2 experimental tool events); no headless CLI mode for daemon worker; cloud-first sessions |
 | **OpenCode** | **Bronze** | Session adapter (SQLite-based), expand plugin to use more events (session.compacted, tool.execute.after, message.updated), OpenCodeRunner, checkOpenCodeUsability |
-| **code_puppy** | **Bronze** | No session adapter; single hook event; no daemon runner |
 
 ## OpenCode Upgrade Path to Silver
 
@@ -109,7 +108,6 @@ No per-agent configuration is required in `.sageox/config.json` — that file is
 | Codex CLI | `ox integrate install --codex` | `.codex/hooks.json` | OPENAI_API_KEY or `codex login` |
 | Amp CLI | `ox integrate install --amp` | `AGENTS.md` (additional Amp block) | None (Amp handles its own auth) |
 | OpenCode | `ox integrate install --opencode` | `.opencode/plugin/ox-prime.ts` | None |
-| code_puppy | `ox integrate install --codepuppy` | `.code_puppy/plugins/` | None |
 
 ## Architecture Notes
 
@@ -132,4 +130,4 @@ No per-agent configuration is required in `.sageox/config.json` — that file is
 
 ### Future: Pluggable Agent Architecture
 
-See [GitHub issue #394: pluggable agent adapter architecture](https://github.com/sageox/ox/issues/394) for research on whether agent support should be externally pluggable vs compiled-in. Current agent count is 6; as more AI coding agents emerge, the maintenance cost of compiled-in adapters may warrant a plugin registry pattern.
+See [GitHub issue #394: pluggable agent adapter architecture](https://github.com/sageox/ox/issues/394) for research on whether agent support should be externally pluggable vs compiled-in. Current agent count is 5; as more AI coding agents emerge, the maintenance cost of compiled-in adapters may warrant a plugin registry pattern.

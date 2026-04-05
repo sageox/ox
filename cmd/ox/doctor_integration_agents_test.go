@@ -305,24 +305,6 @@ func TestDetectGemini_WithProjectConfig(t *testing.T) {
 	}
 }
 
-func TestDetectCodePuppy_WithProjectConfig(t *testing.T) {
-	gitRoot, cleanup := setupTempGitRepo(t)
-	defer cleanup()
-
-	restoreCwd := changeToDir(t, gitRoot)
-	defer restoreCwd()
-
-	codePuppyDir := filepath.Join(gitRoot, ".code_puppy")
-	if err := os.MkdirAll(codePuppyDir, 0755); err != nil {
-		t.Fatalf("failed to create .code_puppy: %v", err)
-	}
-
-	detected := detectCodePuppy()
-
-	if !detected {
-		t.Error("expected detectCodePuppy()=true when .code_puppy directory exists")
-	}
-}
 
 // TestCheckAgentsIntegration_LegacyPatterns tests legacy pattern detection
 func TestCheckAgentsIntegration_LegacyOxAgentPrime(t *testing.T) {

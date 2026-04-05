@@ -758,7 +758,6 @@ func removeUserIntegrationsWithConfirmation() error {
 		fmt.Println("  - Claude user config (~/.claude/CLAUDE.md)")
 		fmt.Println("  - OpenCode plugins (~/.config/opencode/plugin/)")
 		fmt.Println("  - Gemini CLI hooks (~/.gemini/settings.json)")
-		fmt.Println("  - code_puppy plugins (~/.code_puppy/plugins/)")
 		fmt.Println("  - User git hooks (~/.config/git/hooks/)")
 		return nil
 	}

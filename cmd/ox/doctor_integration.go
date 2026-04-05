@@ -303,7 +303,6 @@ var knownEditors = []editorConfig{
 	{"OpenCode", []string{".opencode", ".config/opencode"}},
 	{"Gemini CLI", []string{".gemini"}},
 	{"Amp CLI", []string{".amp"}},
-	{"code_puppy", []string{".code_puppy"}},
 	{"Cursor", []string{".cursor", "Library/Application Support/Cursor"}},
 	{"Windsurf", []string{".windsurf", "Library/Application Support/Windsurf"}},
 	{"VSCode", []string{".vscode", "Library/Application Support/Code"}},
@@ -391,11 +390,6 @@ func checkGeminiHooks(fix bool) checkResult {
 	return checkAgentHooks(&GeminiAgent{}, "Gemini CLI", fix)
 }
 
-// checkCodePuppyHooks checks if code_puppy hooks are properly installed
-func checkCodePuppyHooks(fix bool) checkResult {
-	return checkAgentHooks(&CodePuppyAgent{}, "code_puppy", fix)
-}
-
 // detection functions for AI coding tools
 
 // detectClaudeCode checks if Claude Code is installed or configured
@@ -435,11 +429,6 @@ func detectGemini() bool {
 // detectCodex checks if OpenAI Codex CLI is configured in this project
 func detectCodex() bool {
 	return (&CodexAgent{}).Detect()
-}
-
-// detectCodePuppy checks if code_puppy is installed or configured
-func detectCodePuppy() bool {
-	return (&CodePuppyAgent{}).Detect()
 }
 
 // checkCodexHooks checks if Codex CLI hooks are properly installed

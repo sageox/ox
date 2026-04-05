@@ -336,17 +336,8 @@ func checkProjectHookCommands() checkResult {
 		return SkippedCheck("Project hook commands", "no settings.json", "")
 	}
 
-	data, err := os.ReadFile(settingsPath)
+	settings, _, err := readSharedClaudeSettings(gitRoot)
 	if err != nil {
-		return WarningCheck("Project hook commands", "read error", err.Error())
-	}
-
-	if len(data) == 0 {
-		return SkippedCheck("Project hook commands", "empty file", "")
-	}
-
-	var settings ClaudeSettings
-	if err := json.Unmarshal(data, &settings); err != nil {
 		return WarningCheck("Project hook commands", "parse error", err.Error())
 	}
 

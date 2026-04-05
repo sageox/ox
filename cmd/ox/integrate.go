@@ -55,7 +55,6 @@ var (
 	integrateOpenCodeFlag  bool
 	integrateGeminiFlag    bool
 	integrateCodexFlag     bool
-	integrateCodePuppyFlag bool
 	integrateAmpFlag       bool
 	integratePiFlag        bool
 	integrateAllFlag       bool
@@ -70,7 +69,7 @@ var integrateCmd = &cobra.Command{
 Supported agents:
   Claude Code (default)    JSON hooks in ~/.claude/settings.json
 
-Other agents (Codex, Gemini, code_puppy) can be installed with their respective flags.
+Other agents (Codex, Gemini) can be installed with their respective flags.
 Run 'ox init' to set up the project with appropriate guidance files.
 
 The integration ensures that 'ox agent prime' runs when an AI coding session starts.`,
@@ -92,8 +91,7 @@ Other agents can be installed with their respective flags:
   --gemini    Gemini CLI hooks
   --codex     Codex CLI hooks
   --amp       Amp CLI integration (AGENTS.md marker)
-  --opencode  OpenCode plugin
-  --codepuppy code_puppy plugin`,
+  --opencode  OpenCode plugin`,
 	RunE: runIntegrateInstall,
 }
 
@@ -115,28 +113,6 @@ var integrateListCmd = &cobra.Command{
 }
 
 func runIntegrateInstall(cmd *cobra.Command, args []string) error {
-	// code_puppy installation
-	if integrateCodePuppyFlag {
-		if err := installCodePuppyHooks(integrateUserFlag); err != nil {
-			return fmt.Errorf("installing code_puppy integration: %w", err)
-		}
-
-		location := "user"
-		path := "~/" + codePuppyUserPath
-		if !integrateUserFlag {
-			location = "project"
-			path = codePuppyProjectPath + "/plugins"
-		}
-		fmt.Println(ui.PassStyle.Render("✓") + " code_puppy integration installed")
-		fmt.Println()
-		fmt.Printf("Installed %s-level plugin:\n", location)
-		fmt.Printf("  - %s/%s/%s\n", path, codePuppyPluginDir, codePuppyPluginFileName)
-
-		userCfg, _ := config.LoadUserConfig()
-		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
-		return nil
-	}
-
 	// Pi installation
 	if integratePiFlag {
 		if integrateUserFlag {
@@ -258,23 +234,6 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 		if err := uninstallAllIntegrations(integrateForceFlag); err != nil {
 			return fmt.Errorf("uninstalling integrations: %w", err)
 		}
-		return nil
-	}
-
-	// code_puppy uninstallation
-	if integrateCodePuppyFlag {
-		if err := uninstallCodePuppyHooks(integrateUserFlag); err != nil {
-			return fmt.Errorf("uninstalling code_puppy integration: %w", err)
-		}
-
-		location := "user"
-		if !integrateUserFlag {
-			location = "project"
-		}
-		fmt.Printf("✓ code_puppy %s-level integration uninstalled\n", location)
-
-		userCfg, _ := config.LoadUserConfig()
-		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 		return nil
 	}
 
@@ -434,19 +393,6 @@ func runIntegrateList(cmd *cobra.Command, args []string) error {
 	// 		fmt.Printf("  %s %s: not installed\n", ui.FailStyle.Render("✗"), location)
 	// 	}
 	// }
-	//
-	// fmt.Println()
-	//
-	// // code_puppy status
-	// fmt.Println("code_puppy:")
-	// codePuppyStatus := listCodePuppyHooks()
-	// for location, installed := range codePuppyStatus {
-	// 	if installed {
-	// 		fmt.Printf("  %s %s: installed\n", ui.PassStyle.Render("✓"), location)
-	// 	} else {
-	// 		fmt.Printf("  %s %s: not installed\n", ui.FailStyle.Render("✗"), location)
-	// 	}
-	// }
 
 	// git commit hooks status
 	fmt.Println("Git commit hooks:")
@@ -511,11 +457,6 @@ func uninstallAllIntegrations(force bool) error {
 		installed = append(installed, "Pi (project)")
 	}
 
-	// check code_puppy
-	if hasCodePuppyHooks(true) {
-		installed = append(installed, "code_puppy (user plugin)")
-	}
-
 	// check git commit hooks
 	gitRoot := findGitRoot()
 	if gitRoot != "" && HasGitHooks(gitRoot) {
@@ -572,9 +513,6 @@ func uninstallAllIntegrations(force bool) error {
 	if err := uninstallPiHooks(false); err != nil {
 		errors = append(errors, fmt.Sprintf("Pi (project): %v", err))
 	}
-	if err := uninstallCodePuppyHooks(true); err != nil {
-		errors = append(errors, fmt.Sprintf("code_puppy (user): %v", err))
-	}
 	if gitRoot != "" {
 		if err := UninstallGitHooks(gitRoot); err != nil {
 			errors = append(errors, fmt.Sprintf("Git commit hooks: %v", err))
@@ -597,12 +535,10 @@ func init() {
 	integrateInstallCmd.Flags().BoolVar(&integrateOpenCodeFlag, "opencode", false, "install OpenCode plugin instead of Claude Code hooks")
 	integrateInstallCmd.Flags().BoolVar(&integrateGeminiFlag, "gemini", false, "install Gemini CLI hooks instead of Claude Code hooks")
 	integrateInstallCmd.Flags().BoolVar(&integrateCodexFlag, "codex", false, "install Codex CLI hooks instead of Claude Code hooks")
-	integrateInstallCmd.Flags().BoolVar(&integrateCodePuppyFlag, "codepuppy", false, "install code_puppy plugin instead of Claude Code hooks")
 	integrateInstallCmd.Flags().BoolVar(&integrateAmpFlag, "amp", false, "install Amp CLI integration (AGENTS.md marker)")
 	_ = integrateInstallCmd.Flags().MarkHidden("opencode")
 	_ = integrateInstallCmd.Flags().MarkHidden("gemini")
 	_ = integrateInstallCmd.Flags().MarkHidden("codex")
-	_ = integrateInstallCmd.Flags().MarkHidden("codepuppy")
 	_ = integrateInstallCmd.Flags().MarkHidden("amp")
 	integrateInstallCmd.Flags().BoolVar(&integratePiFlag, "pi", false, "install Pi integration (AGENTS.md marker)")
 	_ = integrateInstallCmd.Flags().MarkHidden("pi")
@@ -612,14 +548,12 @@ func init() {
 	integrateUninstallCmd.Flags().BoolVar(&integrateOpenCodeFlag, "opencode", false, "uninstall OpenCode plugin instead of Claude Code hooks")
 	integrateUninstallCmd.Flags().BoolVar(&integrateGeminiFlag, "gemini", false, "uninstall Gemini CLI hooks instead of Claude Code hooks")
 	integrateUninstallCmd.Flags().BoolVar(&integrateCodexFlag, "codex", false, "uninstall Codex CLI hooks instead of Claude Code hooks")
-	integrateUninstallCmd.Flags().BoolVar(&integrateCodePuppyFlag, "codepuppy", false, "uninstall code_puppy plugin instead of Claude Code hooks")
 	integrateUninstallCmd.Flags().BoolVar(&integrateAmpFlag, "amp", false, "uninstall Amp CLI integration (AGENTS.md marker)")
 	integrateUninstallCmd.Flags().BoolVar(&integrateAllFlag, "all", false, "uninstall from all AI agents")
 	integrateUninstallCmd.Flags().BoolVar(&integrateForceFlag, "force", false, "skip confirmation prompts - use with --all")
 	_ = integrateUninstallCmd.Flags().MarkHidden("opencode")
 	_ = integrateUninstallCmd.Flags().MarkHidden("gemini")
 	_ = integrateUninstallCmd.Flags().MarkHidden("codex")
-	_ = integrateUninstallCmd.Flags().MarkHidden("codepuppy")
 	_ = integrateUninstallCmd.Flags().MarkHidden("amp")
 	integrateUninstallCmd.Flags().BoolVar(&integratePiFlag, "pi", false, "uninstall Pi integration (AGENTS.md marker)")
 	_ = integrateUninstallCmd.Flags().MarkHidden("pi")

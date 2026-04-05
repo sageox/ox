@@ -11,49 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestFindCodePuppyPlugins(t *testing.T) {
-	tests := []struct {
-		name      string
-		setup     func(t *testing.T, homeDir string)
-		wantCount int
-		wantAgent string
-		wantType  string
-	}{
-		{
-			name:      "no plugin directory",
-			setup:     func(t *testing.T, homeDir string) {},
-			wantCount: 0,
-		},
-		{
-			name: "plugin directory exists",
-			setup: func(t *testing.T, homeDir string) {
-				pluginDir := filepath.Join(homeDir, ".code_puppy", "plugins", "ox_prime")
-				require.NoError(t, os.MkdirAll(pluginDir, 0755))
-			},
-			wantCount: 1,
-			wantAgent: "code_puppy",
-			wantType:  "plugin",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tmpDir := t.TempDir()
-			finder := &UserIntegrationsFinder{homeDir: tmpDir}
-			tt.setup(t, tmpDir)
-
-			items, err := finder.findCodePuppyPlugins()
-			assert.NoError(t, err)
-			assert.Len(t, items, tt.wantCount)
-
-			if tt.wantCount > 0 {
-				assert.Equal(t, tt.wantAgent, items[0].Agent)
-				assert.Equal(t, tt.wantType, items[0].Type)
-			}
-		})
-	}
-}
-
 func TestFindUserGitHooks(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -557,10 +514,6 @@ func TestFindAll_WithMultipleIntegrations(t *testing.T) {
 	require.NoError(t, os.MkdirAll(pluginDir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(pluginDir, "ox-prime.ts"), []byte("plugin"), 0644))
 
-	// set up code_puppy plugin
-	puppyDir := filepath.Join(tmpDir, ".code_puppy", "plugins", "ox_prime")
-	require.NoError(t, os.MkdirAll(puppyDir, 0755))
-
 	// set up CLAUDE.md with ox prime
 	claudeDir := filepath.Join(tmpDir, ".claude")
 	require.NoError(t, os.MkdirAll(claudeDir, 0755))
@@ -568,7 +521,7 @@ func TestFindAll_WithMultipleIntegrations(t *testing.T) {
 
 	items, err := finder.FindAll()
 	assert.NoError(t, err)
-	assert.GreaterOrEqual(t, len(items), 3, "should find opencode plugin, code_puppy plugin, and CLAUDE.md")
+	assert.GreaterOrEqual(t, len(items), 2, "should find opencode plugin and CLAUDE.md")
 
 	// verify agents found
 	agents := make(map[string]bool)
@@ -576,7 +529,6 @@ func TestFindAll_WithMultipleIntegrations(t *testing.T) {
 		agents[item.Agent] = true
 	}
 	assert.True(t, agents["opencode"])
-	assert.True(t, agents["code_puppy"])
 	assert.True(t, agents["claude"])
 }
 
