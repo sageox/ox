@@ -12,7 +12,7 @@ import (
 var SupportedAgents = map[string]bool{
 	string(agentx.AgentTypeClaudeCode): true,
 	string(agentx.AgentTypeCodex):      true,
-	"gemini":                           true, // agentx.AgentTypeGemini pending
+	string(agentx.AgentTypeGemini):     true,
 	string(agentx.AgentTypeAmp):        true,
 	string(agentx.AgentTypePi):         true,
 }
@@ -28,7 +28,7 @@ func CanonicalAgentType(agentType string) string {
 	case "codex":
 		return string(agentx.AgentTypeCodex)
 	case "gemini", "gemini-cli", "gemini cli":
-		return "gemini"
+		return string(agentx.AgentTypeGemini)
 	case "amp", "amp-cli", "amp cli", "sourcegraph":
 		return string(agentx.AgentTypeAmp)
 	case "pi", "pi-coding-agent", "pi agent":

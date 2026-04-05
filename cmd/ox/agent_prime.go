@@ -185,11 +185,18 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	if agentVer != "" {
 		useragent.SetAgentVersion(agentVer)
 	} else if agentType != "" {
-		// auto-detect agent version as fallback when --agent-ver not provided
+		// auto-detect agent version: try agentx first, then flexible fallback
 		if agent := agentx.CurrentAgent(); agent != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
 			if ver := agent.DetectVersion(ctx, agentx.NewSystemEnvironment()); ver != "" {
+				agentVer = ver
+				useragent.SetAgentVersion(ver)
+			}
+		}
+		// fallback: flexible regex for CLIs with non-standard version output
+		if agentVer == "" {
+			if ver := detectAgentVersionFallback(agentType); ver != "" {
 				agentVer = ver
 				useragent.SetAgentVersion(ver)
 			}
