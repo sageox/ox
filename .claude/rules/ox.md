@@ -1,7 +1,7 @@
 ---
 description: SageOx behavioral guidance for AI coworkers
 ---
-<!-- agentx-hash: 984232bc35af ver: 0.6.2 -->
+<!-- agentx-hash: 674acb043d1a ver: 0.6.2 -->
 # SageOx Rules
 
 This project uses [SageOx](https://sageox.ai) for team context and session recording.
@@ -35,7 +35,7 @@ Use `/ox-session-stop` to end recording.
 
 Publish WIP to teammates so they stay in sync:
 
-```
+```bash
 ox murmur --topic=wip "what you're building, which files you're modifying"
 ```
 

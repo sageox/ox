@@ -101,7 +101,7 @@ Use ` + "`/ox-session-stop`" + ` to end recording.
 
 Publish WIP to teammates so they stay in sync:
 
-` + "```" + `
+` + "```bash" + `
 ox murmur --topic=wip "what you're building, which files you're modifying"
 ` + "```" + `
 
