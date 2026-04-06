@@ -211,6 +211,16 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		}
 	}
 
+	// determine parent PID for liveness detection.
+	// prefer OX_PARENT_PID env (set by prime, stable) over FindAgentAncestorPID()
+	// which can return a transient shell PID if the process tree walk fails.
+	parentPID := proc.FindAgentAncestorPID()
+	if envPID := os.Getenv("OX_PARENT_PID"); envPID != "" {
+		if parsed, parseErr := strconv.Atoi(envPID); parseErr == nil && parsed > 0 {
+			parentPID = parsed
+		}
+	}
+
 	// start recording with agent ID from session
 	opts := session.StartRecordingOptions{
 		AgentID:       inst.AgentID,
@@ -221,7 +231,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		Username:      getSessionUsername(),
 		WorkspacePath: projectRoot,
 		Branch:        repotools.GetCurrentBranch(projectRoot),
-		ParentPID:     proc.FindAgentAncestorPID(),
+		ParentPID:     parentPID,
 		StartOffset:   startOffset,
 		WatchMode:     "hook", // CLI-started sessions use hook mode (CLI hooks drive recording)
 	}
@@ -447,7 +457,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 				slog.Info("session file discovered at stop time", "file", sf, "adapter", state.AdapterName)
 				state.SessionFile = sf
 			} else {
-				slog.Warn("session file not found at stop time", "adapter", state.AdapterName, "error", findErr)
+				slog.Warn("session file not found at stop time", "agent_id", state.AgentID, "adapter", state.AdapterName, "started_at", state.StartedAt.Format(time.RFC3339), "error", findErr)
 			}
 		}
 	}
@@ -464,7 +474,7 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 			return fmt.Errorf("failed to process session: %w\nrecording state preserved; run 'ox agent %s session recover' or retry stop", err, inst.AgentID)
 		}
 	} else {
-		slog.Warn("no session file — session data not uploaded", "agent_id", state.AgentID, "adapter", state.AdapterName)
+		slog.Warn("no session file — session data not uploaded", "agent_id", state.AgentID, "adapter", state.AdapterName, "started_at", state.StartedAt.Format(time.RFC3339), "session_path", state.SessionPath)
 	}
 
 	// capture upload timing from processResult

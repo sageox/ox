@@ -1076,6 +1076,12 @@ func isStaleRecording(recPath string, info os.FileInfo, pidLookup func(string) i
 	if pid > 0 {
 		proc, procErr := os.FindProcess(pid)
 		if procErr != nil || proc.Signal(syscall.Signal(0)) != nil {
+			// grace period: young recordings with dead PIDs may have stored a
+			// transient shell PID. Don't mark stale until grace period expires.
+			if age < session.GhostGracePeriod {
+				logger.Debug("recording process dead but within grace period, skipping", "pid", pid, "age", age)
+				return false, age, "pid_dead_grace_period"
+			}
 			logger.Debug("recording process dead, marking stale", "pid", pid, "age", age)
 			return true, age, "pid_dead"
 		}

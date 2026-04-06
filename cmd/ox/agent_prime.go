@@ -267,6 +267,38 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// fallback: check SAGEOX_AGENT_ID env and sole-active-recording.
+	// Covers: (a) prime called from CLAUDE.md BLOCKING instruction after /clear
+	// (CLAUDE_ENV_FILE persists the var), (b) prime subprocess called from hook
+	// with the env var passed explicitly by runPrimeForHook.
+	if agentID == "" {
+		if states, loadErr := session.LoadAllRecordingStates(projectRoot); loadErr == nil {
+			// try SAGEOX_AGENT_ID first
+			if envID := os.Getenv("SAGEOX_AGENT_ID"); envID != "" {
+				for _, s := range states {
+					if s.AgentID == envID && s.IsAgentAlive() {
+						agentID = envID
+						slog.Debug("prime: reusing agent ID from SAGEOX_AGENT_ID env", "agent_id", agentID)
+						break
+					}
+				}
+			}
+			// last resort: if exactly one active recording exists, reuse it
+			if agentID == "" {
+				var alive []*session.RecordingState
+				for _, s := range states {
+					if s.IsAgentAlive() {
+						alive = append(alive, s)
+					}
+				}
+				if len(alive) == 1 {
+					agentID = alive[0].AgentID
+					slog.Debug("prime: reusing sole active recording agent ID", "agent_id", agentID)
+				}
+			}
+		}
+	}
+
 	if agentID == "" {
 		// collect existing IDs to avoid collision during generation
 		existingInstances, err := store.List()

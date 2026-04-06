@@ -310,16 +310,16 @@ func TestDetect_StaleRecordingWithoutRaw(t *testing.T) {
 }
 
 // TestDetect_DeadPID verifies that a recording with a dead parent PID is
-// detected as stale immediately, regardless of how recent the session is.
+// detected as stale once past the ghost grace period.
 func TestDetect_DeadPID(t *testing.T) {
 	handler := NewSessionFinalizeHandler(slog.Default())
 
 	pid := deadPID(t)
 
-	// started_at is only 1 minute ago — well within the 24h threshold,
-	// but the dead PID should override the time check
+	// started_at must be older than GhostGracePeriod (10min) so the grace
+	// period doesn't shield it — dead PID should trigger stale detection.
 	recState := map[string]any{
-		"started_at": time.Now().Add(-1 * time.Minute).Format(time.RFC3339),
+		"started_at": time.Now().Add(-15 * time.Minute).Format(time.RFC3339),
 		"agent_id":   "OxDEAD",
 		"parent_pid": pid,
 	}
@@ -518,9 +518,9 @@ func TestDetect_PIDLookupFallback(t *testing.T) {
 			return 0
 		})
 
-		// no parent_pid in recording, but recent timestamp
+		// no parent_pid in recording; must be past ghost grace period (10min)
 		recState := map[string]any{
-			"started_at": time.Now().Add(-5 * time.Minute).Format(time.RFC3339),
+			"started_at": time.Now().Add(-15 * time.Minute).Format(time.RFC3339),
 			"agent_id":   "OxLKDY",
 		}
 		ledgerPath, _, recPath := setupRecordingSession(t, "2026-03-13T10-00-testuser-OxLKDY", recState)

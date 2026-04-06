@@ -646,10 +646,12 @@ func TestGhostCleanup_DoesNotEatFreshRecordingWithAlivePID(t *testing.T) {
 	assert.Equal(t, state.SessionPath, loaded.SessionPath)
 }
 
-// TestGhostCleanup_RemovesFreshRecordingWithDeadPID demonstrates the pre-fix behavior:
-// if ParentPID is dead and there's no data, ghost cleanup removes the session.
-// This is the exact scenario that caused sessions to disappear before the OX_PARENT_PID fix.
-func TestGhostCleanup_RemovesFreshRecordingWithDeadPID(t *testing.T) {
+// TestGhostCleanup_ProtectsFreshRecordingWithDeadPID verifies that the ghost
+// grace period prevents fresh recordings from being removed even when their PID
+// is dead. This is the fix for sessions disappearing when FindAgentAncestorPID()
+// returns a transient shell PID.
+// Failure prevented: recording removed within seconds of creation due to dead transient PID.
+func TestGhostCleanup_ProtectsFreshRecordingWithDeadPID(t *testing.T) {
 	cacheDir := t.TempDir()
 	projectRoot := t.TempDir()
 
@@ -663,8 +665,8 @@ func TestGhostCleanup_RemovesFreshRecordingWithDeadPID(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", cacheDir)
 	t.Setenv("XDG_DATA_HOME", cacheDir)
 
-	// create a recording with a dead PID (simulates the pre-fix hook subprocess PID)
-	state, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
+	// create a recording with a dead PID (simulates transient shell PID)
+	_, err := session.StartRecording(projectRoot, session.StartRecordingOptions{
 		AgentID:     "OxDead",
 		AdapterName: "claude-code",
 		Username:    "testuser",
@@ -672,18 +674,14 @@ func TestGhostCleanup_RemovesFreshRecordingWithDeadPID(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// raw.jsonl has only the header (no substantive entries) — ghost cleanup should eat it
+	// ghost cleanup should NOT remove it — recording is within grace period
 	result := session.CleanupGhostSessions(projectRoot)
-	assert.Equal(t, 1, result.Removed, "ghost cleanup should remove dead-PID session with no data")
+	assert.Equal(t, 0, result.Removed, "fresh recording with dead PID should be protected by grace period")
 
-	// recording should be gone
+	// recording should still exist
 	loaded, loadErr := session.LoadRecordingStateForAgent(projectRoot, "OxDead")
 	require.NoError(t, loadErr)
-	assert.Nil(t, loaded, "dead-PID ghost session should be cleaned up")
-
-	// session directory should be cleaned up if empty
-	_, statErr := os.Stat(state.SessionPath)
-	assert.True(t, os.IsNotExist(statErr), "ghost session folder should be removed")
+	assert.NotNil(t, loaded, "fresh recording should survive ghost cleanup")
 }
 
 // TestStartRecording_IdempotentWhenAlreadyRecording verifies that calling

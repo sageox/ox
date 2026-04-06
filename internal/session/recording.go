@@ -479,6 +479,11 @@ func GetRecordingDuration(projectRoot string) time.Duration {
 // sessions can run 12+ hours and raw.jsonl isn't written until session stop.
 const staleEmptyThreshold = 48 * time.Hour
 
+// GhostGracePeriod is the minimum recording age before ghost cleanup will remove it,
+// even with a dead PID. Handles the race where FindAgentAncestorPID() returns
+// a transient shell PID that dies immediately after session start.
+const GhostGracePeriod = 10 * time.Minute
+
 // cleanupStaleEmptyRecordings removes stale recording stubs that have no session
 // content (no raw.jsonl). These accumulate when agents start sessions but exit
 // without calling session stop. Best-effort: errors are logged but not returned.
@@ -565,6 +570,13 @@ func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
 
 		// skip if parent process is alive — still recording
 		if state.IsAgentAlive() {
+			continue
+		}
+
+		// grace period: don't remove young recordings even with dead PIDs.
+		// FindAgentAncestorPID() can return a transient shell PID that dies
+		// immediately; give the recording time to establish before cleanup.
+		if !state.StartedAt.IsZero() && time.Since(state.StartedAt) < GhostGracePeriod {
 			continue
 		}
 

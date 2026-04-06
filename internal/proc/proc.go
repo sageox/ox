@@ -7,6 +7,7 @@
 package proc
 
 import (
+	"log/slog"
 	"os"
 	"strings"
 
@@ -63,6 +64,7 @@ func findAgentAncestorFrom(startPID int, hint string) int {
 		}
 		name := processName(pid)
 		if name != "" && matchesAgent(name, hint, known) {
+			slog.Debug("proc: found agent ancestor", "pid", pid, "name", name, "provenance", "ancestor")
 			return pid
 		}
 		ppid, err := parentPID(pid)
@@ -72,6 +74,7 @@ func findAgentAncestorFrom(startPID int, hint string) int {
 		pid = ppid
 	}
 
+	slog.Debug("proc: no agent ancestor found, using ppid fallback", "pid", fallback, "provenance", "fallback_ppid")
 	return fallback
 }
 
