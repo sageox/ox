@@ -123,34 +123,36 @@ func TestDirtyDebouncer_MinInterval_VerifiesTimingGaps(t *testing.T) {
 	}
 
 	debouncer := NewDirtyOverlayDebouncer(mgr, debouncerTestLogger())
-	debouncer.debounce = 20 * time.Millisecond
-	debouncer.minGap = 200 * time.Millisecond
+	debouncer.debounce = 50 * time.Millisecond
+	debouncer.minGap = 500 * time.Millisecond
 	debouncer.Start(context.Background())
 	defer debouncer.Stop()
 
-	// fire settles continuously for 600ms
-	deadline := time.Now().Add(600 * time.Millisecond)
+	// fire settles continuously for 1.5s
+	deadline := time.Now().Add(1500 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		debouncer.OnSettled()
-		time.Sleep(30 * time.Millisecond)
+		time.Sleep(60 * time.Millisecond)
 	}
 
 	// wait for any pending timer to complete
-	time.Sleep(300 * time.Millisecond)
+	time.Sleep(600 * time.Millisecond)
 
 	mu.Lock()
 	times := make([]time.Time, len(fireTimes))
 	copy(times, fireTimes)
 	mu.Unlock()
 
-	require.GreaterOrEqual(t, len(times), 2, "should fire at least twice over 600ms with 200ms minGap")
+	require.GreaterOrEqual(t, len(times), 2, "should fire at least twice over 1.5s with 500ms minGap")
 	require.LessOrEqual(t, len(times), 5, "should not fire excessively")
 
-	// verify every consecutive pair respects the minimum interval
+	// verify every consecutive pair respects the minimum interval;
+	// allow 50% tolerance because the test hook records time.Now() after
+	// RefreshDirtyOverlay completes, not when lastFire is set internally,
+	// so CI scheduler jitter can compress observed gaps significantly
 	for i := 1; i < len(times); i++ {
 		gap := times[i].Sub(times[i-1])
-		// allow 20% tolerance for scheduler jitter
-		minAllowed := time.Duration(float64(debouncer.minGap) * 0.8)
+		minAllowed := time.Duration(float64(debouncer.minGap) * 0.5)
 		assert.GreaterOrEqual(t, gap, minAllowed,
 			"gap between fire %d and %d was %v, expected >= %v", i-1, i, gap, minAllowed)
 	}
