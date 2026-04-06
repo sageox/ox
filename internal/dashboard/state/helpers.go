@@ -67,6 +67,15 @@ func BuildNav(s *Store) []domain.NavNode {
 			wsCount += len(wsList)
 		}
 	}
+	// Sort workspace map keys for stable iteration order across renders.
+	var wsRepoIDs []string
+	if s.DaemonStatus != nil {
+		wsRepoIDs = make([]string, 0, len(s.DaemonStatus.Workspaces))
+		for id := range s.DaemonStatus.Workspaces {
+			wsRepoIDs = append(wsRepoIDs, id)
+		}
+		sort.Strings(wsRepoIDs)
+	}
 	nodes = append(nodes, domain.NavNode{
 		ID:         "section-workspaces",
 		Kind:       domain.NavNodeSection,
@@ -76,7 +85,8 @@ func BuildNav(s *Store) []domain.NavNode {
 		Expanded:   true,
 	})
 	if s.DaemonStatus != nil {
-		for _, wsList := range s.DaemonStatus.Workspaces {
+		for _, repoID := range wsRepoIDs {
+			wsList := s.DaemonStatus.Workspaces[repoID]
 			for i := range wsList {
 				ws := wsList[i]
 				label := ws.TeamName
@@ -300,7 +310,8 @@ func BuildNav(s *Store) []domain.NavNode {
 			},
 		})
 		// Per-workspace sync health rows.
-		for _, wsList := range s.DaemonStatus.Workspaces {
+		for _, repoID := range wsRepoIDs {
+			wsList := s.DaemonStatus.Workspaces[repoID]
 			for i := range wsList {
 				ws := wsList[i]
 				label := ws.TeamName
@@ -703,7 +714,13 @@ func ActivityEntries(s *Store) []domain.TimelineEntry {
 
 	// Workspace sync entries from daemon status.
 	if s.DaemonStatus != nil {
-		for wsType, wsList := range s.DaemonStatus.Workspaces {
+		activityRepoIDs := make([]string, 0, len(s.DaemonStatus.Workspaces))
+		for id := range s.DaemonStatus.Workspaces {
+			activityRepoIDs = append(activityRepoIDs, id)
+		}
+		sort.Strings(activityRepoIDs)
+		for _, wsType := range activityRepoIDs {
+			wsList := s.DaemonStatus.Workspaces[wsType]
 			for i := range wsList {
 				ws := wsList[i]
 				if ws.LastSync.IsZero() {

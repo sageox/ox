@@ -366,6 +366,8 @@ func renderMurmurRow(e domain.TimelineEntry, relT string, innerW int, agentTS []
 
 	suffix := "  " + relT
 	// icon(1) + space(1) + badge + space(1) + agentShort(4) + space(1) + miniSpark(8) + space(1) + content + suffix
+	// miniSpark visual width is 8 chars; the 10 accounts for spark(8) + surrounding spaces(2).
+	// badge and suffix use len() which is safe here because they contain only ASCII.
 	overhead := 1 + 1 + len(badge) + 1 + 4 + 1 + 10 + len(suffix)
 	maxContent := innerW - overhead
 	if maxContent < 0 {

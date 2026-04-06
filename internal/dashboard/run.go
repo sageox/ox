@@ -17,11 +17,13 @@ func Run(deps Deps) error {
 	helpFactory := func() overlays.Overlay {
 		return help.New(
 			help.GlobalKeyMap{
-				FocusNext: gk.NextSection,
-				FocusPrev: gk.PrevSection,
-				Refresh:   gk.Refresh,
-				Help:      gk.Help,
-				Quit:      gk.Quit,
+				FocusNext:   gk.NextSection,
+				FocusPrev:   gk.PrevSection,
+				Refresh:     gk.Refresh,
+				Help:        gk.Help,
+				Quit:        gk.Quit,
+				Palette:     gk.Palette,
+				OpenBrowser: gk.OpenBrowser,
 			},
 			help.PaneKeyMap{
 				Up:     pk.Up,

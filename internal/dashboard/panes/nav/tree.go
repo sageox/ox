@@ -2,6 +2,7 @@ package nav
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	lipgloss "charm.land/lipgloss/v2"
 
@@ -78,8 +79,8 @@ func RenderNode(node domain.NavNode, selected bool, width int) string {
 	// never highlighted even when the cursor happens to land on them.
 	if node.Kind == domain.NavNodeHint {
 		row := prefix + "— " + node.Label
-		if width > 0 && len(row) > width {
-			row = row[:width-1] + "…"
+		if width > 0 && utf8.RuneCountInString(row) > width {
+			row = string([]rune(row)[:width-1]) + "…"
 		}
 		s := theme.NavDimStyle
 		if width > 0 {
@@ -97,8 +98,8 @@ func RenderNode(node domain.NavNode, selected bool, width int) string {
 
 	row := prefix + label
 	// Truncate long rows to avoid wrapping inside the pane.
-	if width > 0 && len(row) > width {
-		row = row[:width-1] + "…"
+	if width > 0 && utf8.RuneCountInString(row) > width {
+		row = string([]rune(row)[:width-1]) + "…"
 	}
 
 	var s lipgloss.Style

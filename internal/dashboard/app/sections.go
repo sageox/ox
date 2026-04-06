@@ -2,8 +2,10 @@ package app
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sageox/ox/internal/dashboard/state"
 	"github.com/sageox/ox/internal/dashboard/theme"
@@ -175,7 +177,13 @@ func renderSync(store state.ReadOnlyStore, width, height, cursor int) (string, i
 	// flatten workspaces into a stable list
 	var items []string
 
-	for repoID, wsList := range ds.Workspaces {
+	repoIDs := make([]string, 0, len(ds.Workspaces))
+	for id := range ds.Workspaces {
+		repoIDs = append(repoIDs, id)
+	}
+	sort.Strings(repoIDs)
+	for _, repoID := range repoIDs {
+		wsList := ds.Workspaces[repoID]
 		for _, ws := range wsList {
 			indicator := healthIndicator(ws.LastErr == "", ws.LastErr)
 			status := "synced"
@@ -549,18 +557,18 @@ func formatDurationShort(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", m, s)
 }
 
-// truncate shortens s to maxLen, appending "~" if truncated.
+// truncate shortens s to maxLen runes, appending "~" if truncated.
 func truncate(s string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""
 	}
-	if len(s) <= maxLen {
+	if utf8.RuneCountInString(s) <= maxLen {
 		return s
 	}
 	if maxLen < 2 {
-		return s[:maxLen]
+		return string([]rune(s)[:maxLen])
 	}
-	return s[:maxLen-1] + "~"
+	return string([]rune(s)[:maxLen-1]) + "~"
 }
 
 // topicStyle returns a styled topic badge for murmur topics.

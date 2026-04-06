@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	lipgloss "charm.land/lipgloss/v2"
 
@@ -566,6 +567,9 @@ func shortenPath(path string, max int) string {
 // The session directory contains the session files (raw.jsonl, summary.md, etc.).
 // filePath is the path to raw.jsonl or another session file; its parent is the session dir.
 // Returns empty string when summary.md is not available or cannot be read.
+//
+// NOTE: This performs disk I/O, but is acceptable because it only runs on
+// user-initiated inspector opens (selecting a specific session), not per-frame.
 func loadSessionSummaryMD(filePath string) string {
 	if filePath == "" {
 		return ""
@@ -594,6 +598,8 @@ func formatBytes(n int64) string {
 }
 
 // dirSize returns the total size of all files under path (non-recursive errors silently skipped).
+// NOTE: This performs disk I/O, but is acceptable because it only runs on
+// user-initiated inspector opens (e.g. inspecting a CodeDB target), not per-frame.
 func dirSize(path string) int64 {
 	var total int64
 	_ = filepath.Walk(path, func(_ string, fi os.FileInfo, err error) error {
@@ -622,7 +628,7 @@ func wrapText(s string, width int) []string {
 	for _, w := range words {
 		if current == "" {
 			current = w
-		} else if len(current)+1+len(w) <= width {
+		} else if utf8.RuneCountInString(current)+1+utf8.RuneCountInString(w) <= width {
 			current += " " + w
 		} else {
 			lines = append(lines, current)

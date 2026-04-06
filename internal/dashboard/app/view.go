@@ -66,7 +66,7 @@ func (m *Model) render() string {
 		// separator
 		sep := lipgloss.NewStyle().
 			Foreground(cli.ColorDim).
-			Render(strings.Repeat("│\n", mainH))
+			Render(strings.TrimSuffix(strings.Repeat("│\n", mainH), "\n"))
 
 		contentRow = lipgloss.JoinHorizontal(lipgloss.Top, mainStr, sep, inspContent)
 	} else {
@@ -145,7 +145,15 @@ func (m Model) renderStatusBar() string {
 		pad = 0
 	}
 
-	return left + strings.Repeat(" ", pad) + right
+	result := left + strings.Repeat(" ", pad) + right
+	if lipgloss.Width(result) > m.width {
+		runes := []rune(result)
+		for lipgloss.Width(string(runes)) > m.width && len(runes) > 0 {
+			runes = runes[:len(runes)-1]
+		}
+		result = string(runes)
+	}
+	return result
 }
 
 // renderTabBar renders the section tab row.
@@ -166,7 +174,15 @@ func (m Model) renderTabBar() string {
 	if pad < 0 {
 		pad = 0
 	}
-	return row + strings.Repeat(" ", pad)
+	result := row + strings.Repeat(" ", pad)
+	if lipgloss.Width(result) > m.width {
+		runes := []rune(result)
+		for lipgloss.Width(string(runes)) > m.width && len(runes) > 0 {
+			runes = runes[:len(runes)-1]
+		}
+		result = string(runes)
+	}
+	return result
 }
 
 // renderInputBar renders context-sensitive key hints.
@@ -183,5 +199,13 @@ func (m Model) renderInputBar() string {
 	}
 	hints = append(hints, "r refresh", "? help", "q quit")
 
-	return theme.HeaderDimStyle.Render(" " + strings.Join(hints, "  "))
+	result := theme.HeaderDimStyle.Render(" " + strings.Join(hints, "  "))
+	if lipgloss.Width(result) > m.width {
+		runes := []rune(result)
+		for lipgloss.Width(string(runes)) > m.width && len(runes) > 0 {
+			runes = runes[:len(runes)-1]
+		}
+		result = string(runes)
+	}
+	return result
 }

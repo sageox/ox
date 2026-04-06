@@ -147,6 +147,11 @@ func (m Model) reduceGlobal(msg tea.Msg) (Model, tea.Cmd) {
 			m.overlays.Push(palette.New(buildPaletteItems(m.store.Nav())))
 		}
 
+	case ShowHelpMsg:
+		if m.helpFactory != nil {
+			m.overlays.Push(m.helpFactory())
+		}
+
 	case QuitMsg:
 		return m, tea.Quit
 	case RefreshMsg:
@@ -260,6 +265,12 @@ func (m Model) feedTargetAtCursor(cursor int) *domain.InspectorTarget {
 		return &domain.InspectorTarget{
 			Kind:       domain.TargetTeamDiscussion,
 			Discussion: &entry,
+		}
+	case "whisper":
+		entry := whispers[it.idx]
+		return &domain.InspectorTarget{
+			Kind:           domain.TargetWhisperHistory,
+			WhisperHistory: []domain.WhisperHistoryEntry{entry},
 		}
 	}
 	return nil

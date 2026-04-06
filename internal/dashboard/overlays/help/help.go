@@ -14,11 +14,13 @@ import (
 // GlobalKeyMap mirrors app.GlobalKeyMap to avoid a circular import.
 // The fields must remain in sync with app.GlobalKeyMap.
 type GlobalKeyMap struct {
-	FocusNext key.Binding
-	FocusPrev key.Binding
-	Refresh   key.Binding
-	Help      key.Binding
-	Quit      key.Binding
+	FocusNext   key.Binding
+	FocusPrev   key.Binding
+	Refresh     key.Binding
+	Help        key.Binding
+	Quit        key.Binding
+	Palette     key.Binding
+	OpenBrowser key.Binding
 }
 
 // PaneKeyMap mirrors app.PaneKeyMap to avoid a circular import.
@@ -74,8 +76,16 @@ func (o *Overlay) View(width, height int) string {
 				{o.globalKeys.FocusNext.Help().Key, o.globalKeys.FocusNext.Help().Desc},
 				{o.globalKeys.FocusPrev.Help().Key, o.globalKeys.FocusPrev.Help().Desc},
 				{o.globalKeys.Refresh.Help().Key, o.globalKeys.Refresh.Help().Desc},
+				{o.globalKeys.Palette.Help().Key, o.globalKeys.Palette.Help().Desc},
+				{o.globalKeys.OpenBrowser.Help().Key, o.globalKeys.OpenBrowser.Help().Desc},
 				{o.globalKeys.Help.Help().Key, o.globalKeys.Help.Help().Desc},
 				{o.globalKeys.Quit.Help().Key, o.globalKeys.Quit.Help().Desc},
+			},
+		},
+		{
+			"Sections",
+			[]binding{
+				{"1-5", "jump to section"},
 			},
 		},
 		{

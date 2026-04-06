@@ -108,7 +108,7 @@ func SetStatusMessage(s Store, msg string) Store {
 	return s
 }
 
-// MoveNavCursor returns a new Store with the nav cursor clamped to [0, max].
+// MoveNavCursor returns a new Store with the nav cursor clamped to [0, max).
 func MoveNavCursor(s Store, delta, max int) Store {
 	s.NavCursorPos += delta
 	if s.NavCursorPos < 0 {
@@ -117,10 +117,13 @@ func MoveNavCursor(s Store, delta, max int) Store {
 	if max > 0 && s.NavCursorPos >= max {
 		s.NavCursorPos = max - 1
 	}
+	if max == 0 {
+		s.NavCursorPos = 0
+	}
 	return s
 }
 
-// MoveTimelineCursor returns a new Store with the timeline cursor clamped to [0, max].
+// MoveTimelineCursor returns a new Store with the timeline cursor clamped to [0, max).
 func MoveTimelineCursor(s Store, delta, max int) Store {
 	s.TimelineCursorPos += delta
 	if s.TimelineCursorPos < 0 {
@@ -128,6 +131,9 @@ func MoveTimelineCursor(s Store, delta, max int) Store {
 	}
 	if max > 0 && s.TimelineCursorPos >= max {
 		s.TimelineCursorPos = max - 1
+	}
+	if max == 0 {
+		s.TimelineCursorPos = 0
 	}
 	return s
 }

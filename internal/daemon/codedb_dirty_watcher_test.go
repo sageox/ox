@@ -110,6 +110,9 @@ func TestDirtyDebouncer_RapidSettles_OnlyOneRefresh(t *testing.T) {
 // Failure prevented: continuous file changes cause rebuilds every 5s instead of 30s.
 func TestDirtyDebouncer_MinInterval_VerifiesTimingGaps(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: timing-sensitive minGap verification")
+	}
 
 	dir := t.TempDir()
 	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)

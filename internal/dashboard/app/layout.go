@@ -24,6 +24,8 @@ const (
 	inputBarHeight = 1
 	// inspectorMinWidth is the minimum width for the inspector pane.
 	inspectorMinWidth = 30
+	// minSplitWidth is the minimum terminal width to allow split view
+	minSplitWidth = 60
 )
 
 // ComputeLayout calculates geometry for a w×h terminal.
@@ -45,7 +47,7 @@ func ComputeLayout(w, h int, inspectorOpen bool) Layout {
 	contentY := statusBarHeight + tabBarHeight
 
 	var mainW, inspW int
-	if inspectorOpen {
+	if inspectorOpen && w >= minSplitWidth {
 		// inspector gets ~45% of width, minimum inspectorMinWidth
 		inspW = w * 45 / 100
 		if inspW < inspectorMinWidth {
@@ -55,6 +57,11 @@ func ComputeLayout(w, h int, inspectorOpen bool) Layout {
 			inspW = w - 20
 		}
 		mainW = w - inspW - 1 // 1 for separator
+		// fall back to full-width if split would be too cramped
+		if inspW <= 0 || mainW < 20 {
+			mainW = w
+			inspW = 0
+		}
 	} else {
 		mainW = w
 		inspW = 0

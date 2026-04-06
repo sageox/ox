@@ -164,6 +164,9 @@ func (o *Overlay) View(width, height int) string {
 
 			// Truncate label to leave room for icon + sub + spacing.
 			maxLabelRunes := innerW - 2 - 2 - subW - 1 // 2=icon+space, 2=left margin, 1=gap
+			if maxLabelRunes < 1 {
+				maxLabelRunes = 1
+			}
 			label := it.Label
 			if utf8.RuneCountInString(label) > maxLabelRunes && maxLabelRunes > 1 {
 				runes := []rune(label)
