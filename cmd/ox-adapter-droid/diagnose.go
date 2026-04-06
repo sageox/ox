@@ -43,6 +43,34 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 				FixSafe:  true,
 			})
 		}
+
+		// check rules
+		checkResp, err := handleCheckRules(adapterprotocol.RulesParams{
+			RepoRoot: p.RepoRoot,
+			Version:  p.Version,
+		})
+		if err == nil && !checkResp.Installed {
+			if len(checkResp.Missing) > 0 {
+				issues = append(issues, adapterprotocol.DiagnoseIssue{
+					Slug:     "droid:rules-missing",
+					Severity: "warning",
+					Title:    "ox rules not installed for Factory Droid",
+					Detail:   "Missing rule files: " + strings.Join(checkResp.Missing, ", "),
+					Fix:      "ox integrate install",
+					FixSafe:  true,
+				})
+			}
+			if len(checkResp.Stale) > 0 {
+				issues = append(issues, adapterprotocol.DiagnoseIssue{
+					Slug:     "droid:rules-stale",
+					Severity: "info",
+					Title:    "ox rules are outdated for Factory Droid",
+					Detail:   "Stale rule files: " + strings.Join(checkResp.Stale, ", "),
+					Fix:      "ox integrate install",
+					FixSafe:  true,
+				})
+			}
+		}
 	}
 
 	return &adapterprotocol.DiagnoseResult{

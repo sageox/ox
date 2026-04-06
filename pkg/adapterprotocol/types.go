@@ -27,13 +27,14 @@ const (
 // --- Capabilities ---
 
 const (
-	CapSessionReader       = "session_reader"
-	CapHookInstaller       = "hook_installer"
-	CapIncrementalReader   = "incremental_reader"
-	CapFileWatcher         = "file_watcher"
-	CapSessionImporter     = "session_importer"
-	CapServeMode           = "serve_mode"
-	CapSubagentController  = "subagent_controller"
+	CapSessionReader      = "session_reader"
+	CapHookInstaller      = "hook_installer"
+	CapIncrementalReader  = "incremental_reader"
+	CapFileWatcher        = "file_watcher"
+	CapSessionImporter    = "session_importer"
+	CapServeMode          = "serve_mode"
+	CapSubagentController = "subagent_controller"
+	CapRulesInstaller     = "rules_installer"
 )
 
 // --- Entry roles ---
@@ -50,16 +51,16 @@ const (
 
 // InfoResponse is returned by the `info` subcommand.
 type InfoResponse struct {
-	ProtocolVersion int              `json:"protocol_version"`
-	Name            string           `json:"name"`
-	DisplayName     string           `json:"display_name"`
-	Version         string           `json:"version"`
-	Type            string           `json:"type"` // "session", "vcs", "indexer", "test"
-	Capabilities    []string         `json:"capabilities"`
-	HookEnvValues   []string         `json:"hook_env_values,omitempty"`
-	RequiredEnv     []string         `json:"required_env,omitempty"`
-	ServeMode       bool             `json:"serve_mode"`
-	SubagentConfig  *SubagentConfig  `json:"subagent_config,omitempty"`
+	ProtocolVersion int             `json:"protocol_version"`
+	Name            string          `json:"name"`
+	DisplayName     string          `json:"display_name"`
+	Version         string          `json:"version"`
+	Type            string          `json:"type"` // "session", "vcs", "indexer", "test"
+	Capabilities    []string        `json:"capabilities"`
+	HookEnvValues   []string        `json:"hook_env_values,omitempty"`
+	RequiredEnv     []string        `json:"required_env,omitempty"`
+	ServeMode       bool            `json:"serve_mode"`
+	SubagentConfig  *SubagentConfig `json:"subagent_config,omitempty"`
 }
 
 // DetectResponse is returned by the `detect` subcommand.
@@ -94,6 +95,32 @@ type UninstallHooksResponse struct {
 	FilesModified []string `json:"files_modified"`
 }
 
+// RulesParams are passed to install-rules, check-rules, and uninstall-rules.
+type RulesParams struct {
+	RepoRoot string `json:"repo_root"`
+	Version  string `json:"version"` // ox version for stamped content
+}
+
+// InstallRulesResponse is returned by `install-rules`.
+type InstallRulesResponse struct {
+	Installed    bool     `json:"installed"`
+	FilesWritten []string `json:"files_written"`
+}
+
+// CheckRulesResponse is returned by `check-rules`.
+type CheckRulesResponse struct {
+	Installed bool     `json:"installed"`
+	Missing   []string `json:"missing,omitempty"`
+	Stale     []string `json:"stale,omitempty"`
+	RulesDir  string   `json:"rules_dir"`
+}
+
+// UninstallRulesResponse is returned by `uninstall-rules`.
+type UninstallRulesResponse struct {
+	Uninstalled  bool     `json:"uninstalled"`
+	FilesRemoved []string `json:"files_removed"`
+}
+
 // ReadParams are passed to `read` and `read-metadata`.
 type ReadParams struct {
 	SessionFile string `json:"session_file"`
@@ -114,7 +141,8 @@ type ReadMetadataResult struct {
 // DiagnoseParams are passed to `diagnose`.
 type DiagnoseParams struct {
 	RepoRoot string `json:"repo_root"`
-	Scope    string `json:"scope"` // "project" or "user"
+	Scope    string `json:"scope"`   // "project" or "user"
+	Version  string `json:"version"` // ox version for stale-rules detection
 }
 
 // DiagnoseResult is returned by `diagnose`.
@@ -137,8 +165,8 @@ type DiagnoseIssue struct {
 
 // RawEntry represents a single conversation entry from any agent.
 type RawEntry struct {
-	Timestamp  string `json:"timestamp"`             // RFC3339 UTC
-	Role       string `json:"role"`                  // "user" | "assistant" | "system" | "tool"
+	Timestamp  string `json:"timestamp"` // RFC3339 UTC
+	Role       string `json:"role"`      // "user" | "assistant" | "system" | "tool"
 	Content    string `json:"content"`
 	ToolName   string `json:"tool_name,omitempty"`
 	ToolInput  string `json:"tool_input,omitempty"`
@@ -171,7 +199,7 @@ type Response struct {
 
 // RPCError is a structured error in serve-mode responses.
 type RPCError struct {
-	Code    string `json:"code"`    // "method_not_found", "invalid_params", "internal_error"
+	Code    string `json:"code"` // "method_not_found", "invalid_params", "internal_error"
 	Message string `json:"message"`
 }
 
@@ -184,7 +212,7 @@ const (
 
 // Event is an adapter-initiated push message (no request ID).
 type Event struct {
-	Event   string          `json:"event"`    // "entries"
+	Event   string          `json:"event"` // "entries"
 	AgentID string          `json:"agent_id"`
 	Data    json.RawMessage `json:"data"`
 }
@@ -223,10 +251,10 @@ const (
 // --- Subagent worker statuses ---
 
 const (
-	WorkerStatusStarting   = "starting"
-	WorkerStatusRunning    = "running"
-	WorkerStatusCompleted  = "completed"
-	WorkerStatusFailed     = "failed"
+	WorkerStatusStarting  = "starting"
+	WorkerStatusRunning   = "running"
+	WorkerStatusCompleted = "completed"
+	WorkerStatusFailed    = "failed"
 	WorkerStatusCanceled  = "canceled"
 	WorkerStatusTimedOut  = "timed_out"
 	WorkerStatusCanceling = "canceling"

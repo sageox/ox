@@ -201,7 +201,7 @@ func TestExternalAdapter_Diagnose(t *testing.T) {
 		t.Fatalf("NewExternalAdapter: %v", err)
 	}
 
-	result, err := ea.Diagnose("/tmp/repo", "project")
+	result, err := ea.Diagnose("/tmp/repo", "project", "0.8.0")
 	if err != nil {
 		t.Fatalf("Diagnose: %v", err)
 	}

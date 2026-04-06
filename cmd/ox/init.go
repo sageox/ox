@@ -26,6 +26,7 @@ import (
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/ui"
+	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -620,6 +621,9 @@ func runInit() error {
 		tracker.trackCreatedFile(filepath.Join(gitRoot, cmdFile))
 		tracker.trackForceStage(filepath.Join(gitRoot, cmdFile))
 	}
+
+	// rules are installed by external adapters via CapRulesInstaller
+	// (see installAgentHooks → ea.InstallRules)
 
 	// single summary line for the entire integration section
 	if !initQuiet {
@@ -1654,26 +1658,36 @@ func installAgentHooks(gitRoot string, quiet bool) []string {
 		}
 	}
 
-	// discover external adapter binaries and install hooks for agents beyond
-	// Claude Code / OpenCode (e.g., gemini, codex). only adapters that declare
-	// the hook_installer capability are asked — session-only adapters are skipped.
+	// discover external adapter binaries and install hooks + rules for agents
+	// beyond Claude Code / OpenCode (e.g., droid, gemini, codex).
 	externalAdapters := adapters.DiscoverExternalAdapters()
 	for _, ea := range externalAdapters {
-		if !ea.HasCapability(adapterprotocol.CapHookInstaller) {
-			continue
-		}
-		result, err := ea.InstallHooks(gitRoot, "project")
-		if err != nil {
-			if !quiet {
-				cli.PrintWarning(fmt.Sprintf("Could not install %s hooks: %v", ea.Name(), err))
+		if ea.HasCapability(adapterprotocol.CapHookInstaller) {
+			result, err := ea.InstallHooks(gitRoot, "project")
+			if err != nil {
+				if !quiet {
+					cli.PrintWarning(fmt.Sprintf("Could not install %s hooks: %v", ea.Name(), err))
+				}
+			} else if result.Installed {
+				if !quiet {
+					cli.PrintSuccess(fmt.Sprintf("Installed %s hooks", ea.Name()))
+				}
+				installedHooks = append(installedHooks, result.FilesWritten...)
 			}
-			continue
 		}
-		if result.Installed {
-			if !quiet {
-				cli.PrintSuccess(fmt.Sprintf("Installed %s hooks", ea.Name()))
+
+		if ea.HasCapability(adapterprotocol.CapRulesInstaller) {
+			result, err := ea.InstallRules(gitRoot, version.Version)
+			if err != nil {
+				if !quiet {
+					cli.PrintWarning(fmt.Sprintf("Could not install %s rules: %v", ea.Name(), err))
+				}
+			} else if result.Installed {
+				if !quiet {
+					cli.PrintSuccess(fmt.Sprintf("Installed %s rules", ea.Name()))
+				}
+				installedHooks = append(installedHooks, result.FilesWritten...)
 			}
-			installedHooks = append(installedHooks, result.FilesWritten...)
 		}
 	}
 

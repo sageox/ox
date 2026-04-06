@@ -37,6 +37,9 @@ type Config struct {
 	FindSession    func(adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error)
 	ReadFromOffset func(adapterprotocol.ReadFromOffsetParams) (*adapterprotocol.ReadFromOffsetResult, error)
 	ImportSession  func(adapterprotocol.ImportSessionParams) (*adapterprotocol.ImportSessionResult, error)
+	InstallRules   func(adapterprotocol.RulesParams) (*adapterprotocol.InstallRulesResponse, error)
+	CheckRules     func(adapterprotocol.RulesParams) (*adapterprotocol.CheckRulesResponse, error)
+	UninstallRules func(adapterprotocol.RulesParams) (*adapterprotocol.UninstallRulesResponse, error)
 	Serve          func(*Server)
 }
 
@@ -161,6 +164,33 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) e
 			return cfg.ImportSession(p)
 		})
 
+	case "install-rules":
+		p := parseRulesParams(args[1:])
+		return runOneShot(enc, func() (any, error) {
+			if cfg.InstallRules == nil {
+				return nil, fmt.Errorf("install-rules not implemented")
+			}
+			return cfg.InstallRules(p)
+		})
+
+	case "check-rules":
+		p := parseRulesParams(args[1:])
+		return runOneShot(enc, func() (any, error) {
+			if cfg.CheckRules == nil {
+				return nil, fmt.Errorf("check-rules not implemented")
+			}
+			return cfg.CheckRules(p)
+		})
+
+	case "uninstall-rules":
+		p := parseRulesParams(args[1:])
+		return runOneShot(enc, func() (any, error) {
+			if cfg.UninstallRules == nil {
+				return nil, fmt.Errorf("uninstall-rules not implemented")
+			}
+			return cfg.UninstallRules(p)
+		})
+
 	case "--serve":
 		if cfg.Serve == nil {
 			return fmt.Errorf("serve mode not implemented")
@@ -205,6 +235,7 @@ func printUsage(cfg Config, w io.Writer) {
 	p("ox discovers and invokes it automatically.\n")
 	p("\nSubcommands:\n")
 	p("  info, detect, install-hooks, check-hooks, uninstall-hooks,\n")
+	p("  install-rules, check-rules, uninstall-rules,\n")
 	p("  read, read-metadata, diagnose, find-session, read-from-offset,\n")
 	p("  import-session, --serve\n")
 	p("\nTo get started with ox:\n")
@@ -265,6 +296,9 @@ func parseDiagnoseParams(args []string) adapterprotocol.DiagnoseParams {
 		case "--scope":
 			p.Scope = args[i+1]
 			i++
+		case "--version":
+			p.Version = args[i+1]
+			i++
 		}
 	}
 	return p
@@ -302,6 +336,21 @@ func parseReadFromOffsetParams(args []string) adapterprotocol.ReadFromOffsetPara
 			if v, err := strconv.ParseInt(args[i+1], 10, 64); err == nil {
 				p.Offset = v
 			}
+			i++
+		}
+	}
+	return p
+}
+
+func parseRulesParams(args []string) adapterprotocol.RulesParams {
+	p := adapterprotocol.RulesParams{}
+	for i := 0; i < len(args)-1; i++ {
+		switch args[i] {
+		case "--repo-root":
+			p.RepoRoot = args[i+1]
+			i++
+		case "--version":
+			p.Version = args[i+1]
 			i++
 		}
 	}

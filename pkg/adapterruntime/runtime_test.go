@@ -558,6 +558,117 @@ func TestServer_SubagentStatus_InvalidParams(t *testing.T) {
 	}
 }
 
+// --- Rules subcommand dispatch tests ---
+// Failure prevented: install-rules / check-rules / uninstall-rules one-shot
+// CLI dispatch silently drops the response or calls the wrong handler.
+
+func TestRunWithArgs_InstallRules(t *testing.T) {
+	var stdout bytes.Buffer
+	cfg := adapterruntime.Config{
+		InstallRules: func(p adapterprotocol.RulesParams) (*adapterprotocol.InstallRulesResponse, error) {
+			return &adapterprotocol.InstallRulesResponse{
+				Installed:    true,
+				FilesWritten: []string{"ox.md"},
+			}, nil
+		},
+	}
+
+	err := adapterruntime.RunWithArgs(cfg, []string{"install-rules", "--repo-root", "/tmp/test", "--version", "0.8.0"}, nil, &stdout)
+	if err != nil {
+		t.Fatalf("RunWithArgs returned error: %v", err)
+	}
+
+	var resp adapterprotocol.InstallRulesResponse
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Installed {
+		t.Error("expected Installed=true")
+	}
+	if len(resp.FilesWritten) != 1 || resp.FilesWritten[0] != "ox.md" {
+		t.Errorf("FilesWritten = %v, want [ox.md]", resp.FilesWritten)
+	}
+}
+
+func TestRunWithArgs_CheckRules(t *testing.T) {
+	var stdout bytes.Buffer
+	cfg := adapterruntime.Config{
+		CheckRules: func(p adapterprotocol.RulesParams) (*adapterprotocol.CheckRulesResponse, error) {
+			return &adapterprotocol.CheckRulesResponse{
+				Installed: false,
+				Missing:   []string{"ox.md"},
+				RulesDir:  ".claude/rules",
+			}, nil
+		},
+	}
+
+	err := adapterruntime.RunWithArgs(cfg, []string{"check-rules", "--repo-root", "/tmp/test", "--version", "0.8.0"}, nil, &stdout)
+	if err != nil {
+		t.Fatalf("RunWithArgs returned error: %v", err)
+	}
+
+	var resp adapterprotocol.CheckRulesResponse
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Installed {
+		t.Error("expected Installed=false")
+	}
+	if len(resp.Missing) != 1 || resp.Missing[0] != "ox.md" {
+		t.Errorf("Missing = %v, want [ox.md]", resp.Missing)
+	}
+	if resp.RulesDir != ".claude/rules" {
+		t.Errorf("RulesDir = %q, want .claude/rules", resp.RulesDir)
+	}
+}
+
+func TestRunWithArgs_UninstallRules(t *testing.T) {
+	var stdout bytes.Buffer
+	cfg := adapterruntime.Config{
+		UninstallRules: func(p adapterprotocol.RulesParams) (*adapterprotocol.UninstallRulesResponse, error) {
+			return &adapterprotocol.UninstallRulesResponse{
+				Uninstalled:  true,
+				FilesRemoved: []string{"ox.md"},
+			}, nil
+		},
+	}
+
+	err := adapterruntime.RunWithArgs(cfg, []string{"uninstall-rules", "--repo-root", "/tmp/test", "--version", "0.8.0"}, nil, &stdout)
+	if err != nil {
+		t.Fatalf("RunWithArgs returned error: %v", err)
+	}
+
+	var resp adapterprotocol.UninstallRulesResponse
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Uninstalled {
+		t.Error("expected Uninstalled=true")
+	}
+	if len(resp.FilesRemoved) != 1 || resp.FilesRemoved[0] != "ox.md" {
+		t.Errorf("FilesRemoved = %v, want [ox.md]", resp.FilesRemoved)
+	}
+}
+
+func TestRunWithArgs_InstallRules_NotImplemented(t *testing.T) {
+	var stdout bytes.Buffer
+	cfg := adapterruntime.Config{} // no handler registered
+
+	err := adapterruntime.RunWithArgs(cfg, []string{"install-rules", "--repo-root", "/tmp/test", "--version", "0.8.0"}, nil, &stdout)
+	if err == nil {
+		t.Fatal("expected error for unregistered install-rules handler")
+	}
+
+	// verify the error JSON was written to stdout
+	var errResp map[string]string
+	if jsonErr := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &errResp); jsonErr != nil {
+		t.Fatalf("decode error response: %v", jsonErr)
+	}
+	if errResp["error"] == "" {
+		t.Error("expected non-empty error message in JSON response")
+	}
+}
+
 func TestServer_CancelSubagent_InvalidParams(t *testing.T) {
 	// valid JSON but wrong shape (array instead of object)
 	rawLine := fmt.Sprintf(`{"id":32,"method":"%s","params":[1,2,3]}`, adapterprotocol.MethodCancelSubagent)

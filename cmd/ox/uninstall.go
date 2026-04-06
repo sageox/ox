@@ -14,8 +14,10 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/ui"
 	"github.com/sageox/ox/internal/uninstall"
+	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/spf13/cobra"
 )
 
@@ -720,6 +722,21 @@ func cleanupAgentFiles(gitRoot string) error {
 	// remove Claude Code slash commands (.claude/commands/ox*.md)
 	if err := removeClaudeCommands(gitRoot); err != nil {
 		slog.Warn("failed to remove Claude commands", "error", err)
+	}
+
+	// remove rules via external adapters
+	externalAdapters := adapters.DiscoverExternalAdapters()
+	for _, ea := range externalAdapters {
+		if !ea.HasCapability(adapterprotocol.CapRulesInstaller) {
+			continue
+		}
+		if uninstallDryRun {
+			slog.Info("would remove rules", "adapter", ea.Name())
+			continue
+		}
+		if _, err := ea.UninstallRules(gitRoot, ""); err != nil {
+			slog.Warn("failed to remove rules", "adapter", ea.Name(), "error", err)
+		}
 	}
 
 	// TODO: implement cleanup for other agent integrations:

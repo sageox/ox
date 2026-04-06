@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-04-05
+
+### Added
+
+**Agent rules via adapter protocol**
+- External adapters can now install, check, and uninstall modular rule files for their agent (e.g., `.claude/rules/ox.md`, `.factory/rules/ox.md`)
+- New `rules_installer` capability and `install-rules` / `check-rules` / `uninstall-rules` adapter subcommands
+- Claude Code and Droid adapters ship ox behavioral guidance (command reference, session recording, murmuring, attribution) as agent-native rule files
+- `ox init` installs rules via adapters; `ox doctor` detects missing/stale rules via adapter diagnostics; `ox uninstall` removes them
+- Rules content is version-stamped with downgrade guards via agentx `RulesManager`
+
+### Changed
+- Rules management moved from direct agentx calls in the ox CLI to the adapter protocol — each adapter owns how rules are written for its agent
+- `DiagnoseParams` now includes `Version` field so adapters can detect stale rules
+
+[0.6.2]: https://github.com/sageox/ox/releases/tag/v0.6.2
+
 ## [0.6.1] - 2026-04-02
 
 ### Fixed

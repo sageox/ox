@@ -35,6 +35,9 @@ func main() {
 		Read:           handleRead,
 		ReadMetadata:   handleReadMetadata,
 		Diagnose:       handleDiagnose,
+		InstallRules:   handleInstallRules,
+		CheckRules:     handleCheckRules,
+		UninstallRules: handleUninstallRules,
 		FindSession:    handleFindSession,
 		ImportSession:  handleImportSession,
 		Serve:          handleServe,
@@ -51,6 +54,7 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		Capabilities: []string{
 			adapterprotocol.CapSessionReader,
 			adapterprotocol.CapHookInstaller,
+			adapterprotocol.CapRulesInstaller,
 			adapterprotocol.CapIncrementalReader,
 			adapterprotocol.CapFileWatcher,
 			adapterprotocol.CapServeMode,

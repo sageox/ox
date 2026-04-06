@@ -9,6 +9,7 @@ import (
 
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/version"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
@@ -34,7 +35,7 @@ func checkExternalAdapters(opts doctorOptions) []checkResult {
 	for _, ea := range discovered {
 		name := ea.Name()
 
-		diagnoseResult, err := ea.Diagnose(gitRoot, "project")
+		diagnoseResult, err := ea.Diagnose(gitRoot, "project", version.Version)
 		if err != nil {
 			// adapter crashed or timed out -- report as a warning, continue
 			severity := "warning"
@@ -228,7 +229,7 @@ func runAdapterFix(fixCmd string, fixSafe, forceYes bool) error {
 // verifyAdapterFix re-runs diagnose on the adapter and checks whether the
 // issue (identified by its original slug, without adapter prefix) is gone.
 func verifyAdapterFix(ea *adapters.ExternalAdapter, repoRoot, issueSlug string) bool {
-	result, err := ea.Diagnose(repoRoot, "project")
+	result, err := ea.Diagnose(repoRoot, "project", version.Version)
 	if err != nil {
 		return false
 	}

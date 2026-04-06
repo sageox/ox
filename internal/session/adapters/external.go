@@ -311,8 +311,12 @@ func (ea *ExternalAdapter) BinaryPath() string {
 }
 
 // Diagnose calls the adapter's diagnose subcommand.
-func (ea *ExternalAdapter) Diagnose(repoRoot, scope string) (*adapterprotocol.DiagnoseResult, error) {
-	out, err := ea.execOneShot("diagnose", "--repo-root", repoRoot, "--scope", scope)
+func (ea *ExternalAdapter) Diagnose(repoRoot, scope, version string) (*adapterprotocol.DiagnoseResult, error) {
+	args := []string{"--repo-root", repoRoot, "--scope", scope}
+	if version != "" {
+		args = append(args, "--version", version)
+	}
+	out, err := ea.execOneShot("diagnose", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -363,6 +367,51 @@ func (ea *ExternalAdapter) CheckHooks(repoRoot, scope string) (*adapterprotocol.
 	}
 
 	var result adapterprotocol.CheckHooksResponse
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
+	}
+
+	return &result, nil
+}
+
+// InstallRules calls the adapter's install-rules subcommand.
+func (ea *ExternalAdapter) InstallRules(repoRoot, version string) (*adapterprotocol.InstallRulesResponse, error) {
+	out, err := ea.execOneShot("install-rules", "--repo-root", repoRoot, "--version", version)
+	if err != nil {
+		return nil, err
+	}
+
+	var result adapterprotocol.InstallRulesResponse
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
+	}
+
+	return &result, nil
+}
+
+// CheckRules calls the adapter's check-rules subcommand.
+func (ea *ExternalAdapter) CheckRules(repoRoot, version string) (*adapterprotocol.CheckRulesResponse, error) {
+	out, err := ea.execOneShot("check-rules", "--repo-root", repoRoot, "--version", version)
+	if err != nil {
+		return nil, err
+	}
+
+	var result adapterprotocol.CheckRulesResponse
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
+	}
+
+	return &result, nil
+}
+
+// UninstallRules calls the adapter's uninstall-rules subcommand.
+func (ea *ExternalAdapter) UninstallRules(repoRoot, version string) (*adapterprotocol.UninstallRulesResponse, error) {
+	out, err := ea.execOneShot("uninstall-rules", "--repo-root", repoRoot, "--version", version)
+	if err != nil {
+		return nil, err
+	}
+
+	var result adapterprotocol.UninstallRulesResponse
 	if err := json.Unmarshal(out, &result); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
 	}
