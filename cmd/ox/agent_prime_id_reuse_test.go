@@ -245,7 +245,23 @@ func createDeadRecording(t *testing.T, projectRoot, repoID, agentID string) {
 
 	state := &session.RecordingState{
 		AgentID:     agentID,
-		StartedAt:   time.Now().Add(-10 * time.Minute),
+		StartedAt:   time.Now().Add(-15 * time.Minute), // past grace period
+		AdapterName: "claude-code",
+		SessionPath: sessionPath,
+		OutputFile:  filepath.Join(sessionPath, "raw.jsonl"),
+		ParentPID:   999999999, // dead PID
+	}
+	require.NoError(t, session.SaveRecordingState(projectRoot, state))
+}
+
+func createYoungDeadRecording(t *testing.T, projectRoot, repoID, agentID string) {
+	t.Helper()
+	sessionsBase := filepath.Join(session.GetContextPath(repoID), "sessions")
+	sessionPath := filepath.Join(sessionsBase, "2026-04-01T10-00-user-"+agentID)
+
+	state := &session.RecordingState{
+		AgentID:     agentID,
+		StartedAt:   time.Now().Add(-30 * time.Second), // within grace period
 		AdapterName: "claude-code",
 		SessionPath: sessionPath,
 		OutputFile:  filepath.Join(sessionPath, "raw.jsonl"),
