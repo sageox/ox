@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -58,6 +60,9 @@ var rootCmd = &cobra.Command{
 				Heartbeat(gitRoot, nil, "")
 			}
 		}
+
+		// resolve feature flags: daemon cache → disk cache → env vars → defaults
+		initFeatureFlags(cmd)
 
 		// performance profiling setup
 		// creates CPU profile (.prof) and execution trace (.out) files
@@ -455,6 +460,39 @@ func shouldHeartbeat(cmd *cobra.Command) bool {
 	}
 
 	return true
+}
+
+// initFeatureFlags resolves feature flags from daemon cache, disk cache, and env vars.
+// Zero network calls — reads only from local sources at CLI startup.
+func initFeatureFlags(cmd *cobra.Command) {
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	var daemonProvider flags.DaemonProvider
+
+	// try daemon IPC first (fast path: daemon already has settings in memory)
+	if config.IsInitializedInCwd() && daemon.IsRunning() {
+		client := daemon.NewClientForCurrentRepo()
+		if settings, err := client.SettingsGet(); err == nil && settings != nil {
+			daemonProvider.CachedSettings = settings
+		}
+	}
+
+	// fall back to disk cache if daemon didn't have settings
+	if daemonProvider.CachedSettings == nil {
+		if gitRoot := findGitRoot(); gitRoot != "" {
+			ep := endpoint.GetForProject(gitRoot)
+			if ep != "" {
+				if cached, err := flags.LoadCachedSettings(ep); err == nil && cached != nil {
+					daemonProvider.CachedSettings = cached
+				}
+			}
+		}
+	}
+
+	flags.Init(ctx, daemonProvider, flags.EnvProvider{})
 }
 
 // printCommandEntry renders a command with contextual highlighting based on user state

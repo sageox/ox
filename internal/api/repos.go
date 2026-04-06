@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	reposPath      = "/api/v1/cli/repos"
-	repoDetailPath = "/api/v1/cli/repos/%s" // %s = repo_id (SageOx UUID)
-	teamInfoPath   = "/api/v1/teams/%s"     // %s = team_id
+	reposPath       = "/api/v1/cli/repos"
+	repoDetailPath  = "/api/v1/cli/repos/%s" // %s = repo_id (SageOx UUID)
+	teamInfoPath    = "/api/v1/teams/%s"     // %s = team_id
+	cliSettingsPath = "/api/v1/cli/settings"
 )
 
 // RepoInfo represents a single git repository from the server.
@@ -349,4 +350,59 @@ func (c *RepoClient) GetRepoDetail(repoID string) (*RepoDetailResponse, error) {
 	}
 
 	return &detail, nil
+}
+
+// GetCLISettings calls GET /api/v1/cli/settings to fetch server-evaluated feature flags.
+// The server evaluates PostHog feature flags server-side (device_id + user_id) and returns
+// pre-evaluated booleans. Requires authentication. Returns flags.CLISettingsResponse.
+//
+// Called by the daemon on a background interval; the CLI reads the cached result from disk.
+func (c *RepoClient) GetCLISettings() (json.RawMessage, error) {
+	reqURL := strings.TrimSuffix(c.baseURL, "/") + cliSettingsPath
+
+	logger.LogHTTPRequest("GET", reqURL)
+	start := time.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	httpReq, err := useragent.NewRequest(ctx, "GET", reqURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	if c.authToken != "" {
+		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	duration := time.Since(start)
+	if err != nil {
+		logger.LogHTTPError("GET", reqURL, err, duration)
+		return nil, fmt.Errorf("network error: %w", err)
+	}
+	defer resp.Body.Close()
+
+	logger.LogHTTPResponse("GET", reqURL, resp.StatusCode, duration)
+
+	if CheckVersionResponse(resp) {
+		return nil, ErrVersionUnsupported
+	}
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, ErrUnauthorized
+		}
+		errMsg := strings.TrimSpace(string(bodyBytes))
+		if errMsg == "" {
+			return nil, fmt.Errorf("HTTP %d from %s", resp.StatusCode, reqURL)
+		}
+		return nil, fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, reqURL, errMsg)
+	}
+
+	return json.RawMessage(bodyBytes), nil
 }

@@ -70,11 +70,9 @@ func RemoteSettingsToPatch(r *CLISettingsResponse) *Patch {
 }
 
 // DaemonProvider reads a pre-fetched CLISettingsResponse from the daemon IPC
-// cache. It is a stub until ox-ha7r wires in the daemon polling loop and IPC
-// handler. Until then, Patch always returns nil (no opinion).
-//
-// Once ox-ha7r lands, this provider is initialized with the daemon-cached
-// response and passes it to RemoteSettingsToPatch.
+// cache. At CLI startup, initFeatureFlags() queries the daemon via IPC
+// (settings_get) and falls back to disk cache. The daemon polls
+// GET /api/v1/cli/settings on a background interval (CLISettingsMaxAge).
 type DaemonProvider struct {
 	// CachedSettings is populated by the daemon IPC settings_get handler.
 	// Nil means the daemon has not yet fetched remote settings.

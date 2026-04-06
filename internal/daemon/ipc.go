@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/daemon/agentwork"
+	"github.com/sageox/ox/internal/flags"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
 
@@ -55,6 +56,7 @@ const (
 	MsgTypeMurmurResume       = "murmur_resume"        // one-way, resume murmur nudging for an agent
 	MsgTypeSessionWatchStart  = "session_watch_start"  // one-way, start tailing a hookless agent session
 	MsgTypeSessionWatchStop   = "session_watch_stop"   // one-way, stop tailing a session
+	MsgTypeSettingsGet        = "settings_get"         // get cached CLI feature flag settings
 )
 
 // Protocol Design Decision: NDJSON (Newline-Delimited JSON)
@@ -574,6 +576,7 @@ type DaemonService interface {
 
 	// status / query operations
 	Status() *StatusData
+	SettingsGet() *flags.CLISettingsResponse
 	GetErrors() []StoredError
 	Sessions() []AgentSession // deprecated: use Instances
 	Instances() []InstanceInfo
@@ -635,6 +638,7 @@ type CallbackService struct {
 	onCodeStatus       func() *CodeDBStats
 	onWhispers         func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
 	onWhisperHistory   func(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error)
+	onSettingsGet      func() *flags.CLISettingsResponse
 }
 
 func (c *CallbackService) Sync() error {
@@ -740,6 +744,16 @@ func (c *CallbackService) WhisperHistory(agentID string, before time.Time, limit
 func (c *CallbackService) CodeStatus() *CodeDBStats {
 	c.mu.Lock()
 	fn := c.onCodeStatus
+	c.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (c *CallbackService) SettingsGet() *flags.CLISettingsResponse {
+	c.mu.Lock()
+	fn := c.onSettingsGet
 	c.mu.Unlock()
 	if fn != nil {
 		return fn()
@@ -968,6 +982,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeMurmurResume, handleMurmurResume)
 	router.Register(MsgTypeSessionWatchStart, handleSessionWatchStart)
 	router.Register(MsgTypeSessionWatchStop, handleSessionWatchStop)
+	router.Register(MsgTypeSettingsGet, handleSettingsGet)
 
 	return router
 }
@@ -1179,6 +1194,14 @@ func (s *Server) SetWhisperHistoryHandler(cb func(agentID string, before time.Ti
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 	svc.onWhisperHistory = cb
+}
+
+// SetSettingsGetHandler sets the handler for CLI feature flag settings queries.
+func (s *Server) SetSettingsGetHandler(cb func() *flags.CLISettingsResponse) {
+	svc := s.mustCallbackService("SetSettingsGetHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onSettingsGet = cb
 }
 
 // mustCallbackService returns the mutable callback adapter.
@@ -1995,6 +2018,27 @@ func (c *Client) CodeStatus() (*CodeDBStats, error) {
 		return nil, fmt.Errorf("unmarshal code status: %w", err)
 	}
 	return &stats, nil
+}
+
+// SettingsGet returns the daemon's cached CLI feature flag settings.
+// Returns nil with no error if the daemon hasn't fetched settings yet.
+func (c *Client) SettingsGet() (*flags.CLISettingsResponse, error) {
+	resp, err := c.sendMessage(Message{Type: MsgTypeSettingsGet})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, errors.New(resp.Error)
+	}
+	// null response means daemon has no cached settings
+	if string(resp.Data) == "null" {
+		return nil, nil
+	}
+	var settings flags.CLISettingsResponse
+	if err := json.Unmarshal(resp.Data, &settings); err != nil {
+		return nil, fmt.Errorf("unmarshal settings: %w", err)
+	}
+	return &settings, nil
 }
 
 // SessionFinalize sends a fire-and-forget request to finalize a session.

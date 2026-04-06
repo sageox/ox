@@ -390,6 +390,16 @@ func handleMurmurResume(s *Server, msg Message, _ net.Conn) HandlerResult {
 	return HandlerResult{SkipDefault: true}
 }
 
+func handleSettingsGet(s *Server, _ Message, _ net.Conn) HandlerResult {
+	settings := s.service.SettingsGet()
+	if settings != nil {
+		return HandlerResult{Response: marshalResponse(settings)}
+	}
+	return HandlerResult{
+		Response: &Response{Success: true, Data: json.RawMessage(`null`)},
+	}
+}
+
 func handleWhisperHistory(s *Server, msg Message, _ net.Conn) HandlerResult {
 	var payload WhisperHistoryPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {

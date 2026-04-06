@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/flags"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
 
@@ -42,6 +43,9 @@ type MockService struct {
 	SessionFinalizeFunc    func(payload daemon.SessionFinalizeIPCPayload)
 	SessionWatchStartFunc  func(payload daemon.SessionWatchStartPayload)
 	SessionWatchStopFunc   func(payload daemon.SessionWatchStopPayload)
+
+	// settings
+	SettingsGetFunc func() *flags.CLISettingsResponse
 
 	// fire-and-forget operations
 	ActivityFunc  func()
@@ -135,6 +139,13 @@ func (m *MockService) WhisperHistory(agentID string, before time.Time, limit int
 func (m *MockService) CodeStatus() *daemon.CodeDBStats {
 	if m.CodeStatusFunc != nil {
 		return m.CodeStatusFunc()
+	}
+	return nil
+}
+
+func (m *MockService) SettingsGet() *flags.CLISettingsResponse {
+	if m.SettingsGetFunc != nil {
+		return m.SettingsGetFunc()
 	}
 	return nil
 }

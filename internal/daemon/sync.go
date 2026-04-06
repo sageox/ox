@@ -36,6 +36,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
@@ -176,6 +177,9 @@ type SyncScheduler struct {
 
 	// tracks last ledger HEAD sha to detect changes and trigger ledger index rebuilds
 	lastLedgerSha string
+
+	// settings fetcher for CLI feature flag polling
+	settingsFetcher *SettingsFetcher
 }
 
 // syncError tracks a sync error with timestamp.
@@ -309,6 +313,12 @@ func (s *SyncScheduler) SetMurmurRelay(r *MurmurRelay) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.murmurRelay = r
+}
+
+func (s *SyncScheduler) SetSettingsFetcher(f *SettingsFetcher) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settingsFetcher = f
 }
 
 // captureHEAD returns the current HEAD SHA for a git repo.
@@ -634,6 +644,22 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		}()
 	}
 
+	// CLI settings polling — fetch feature flags from cloud API on a background interval.
+	// Uses CLISettingsMaxAge (1h) as the ticker interval; SettingsFetcher deduplicates internally.
+	var settingsTicker *time.Ticker
+	var settingsChan <-chan time.Time
+	if s.settingsFetcher != nil {
+		settingsTicker = time.NewTicker(flags.CLISettingsMaxAge)
+		settingsChan = settingsTicker.C
+		defer settingsTicker.Stop()
+
+		// initial fetch after short delay (let credentials settle from heartbeat)
+		go func() {
+			time.Sleep(3 * time.Second)
+			s.settingsFetcher.Fetch(ctx)
+		}()
+	}
+
 	// write initial heartbeat
 	s.writeHeartbeats()
 
@@ -698,6 +724,11 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 
 		case <-ledgerIndexChan:
 			s.triggerLedgerIndexRebuild(ctx)
+
+		case <-settingsChan:
+			if s.settingsFetcher != nil {
+				go s.settingsFetcher.Fetch(ctx)
+			}
 
 		case <-s.triggerChan:
 			// watcher-triggered sync: skip sparse-checkout refresh to avoid

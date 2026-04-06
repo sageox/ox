@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon/agentwork"
+	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
@@ -168,6 +169,7 @@ type Daemon struct {
 	murmurNudgeSource      *MurmurNudgeSource
 	projectWatcher         *ProjectWatcher
 	dbMaintenance          *DBMaintenanceScheduler
+	settingsFetcher        *SettingsFetcher
 
 	// state
 	mu               sync.Mutex
@@ -1040,6 +1042,13 @@ func (d *Daemon) initComponents() time.Duration {
 		}
 	})
 
+	// settings fetcher — background polling for CLI feature flags from cloud API
+	if projectEndpoint != "" {
+		d.settingsFetcher = NewSettingsFetcher(d.logger, projectEndpoint)
+		d.settingsFetcher.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
+		d.scheduler.SetSettingsFetcher(d.settingsFetcher)
+	}
+
 	return time.Since(startSetup)
 }
 
@@ -1274,6 +1283,13 @@ func (s *daemonServiceImpl) Status() *StatusData {
 		AgentWork:          agentWorkStatus,
 		Callers:            callers,
 	}
+}
+
+func (s *daemonServiceImpl) SettingsGet() *flags.CLISettingsResponse {
+	if s.d.settingsFetcher == nil {
+		return nil
+	}
+	return s.d.settingsFetcher.CachedSettings()
 }
 
 func (s *daemonServiceImpl) GetErrors() []StoredError {
