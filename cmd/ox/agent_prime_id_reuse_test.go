@@ -23,21 +23,10 @@ func TestPrimeReusesAgentID_FromEnvWithActiveRecording(t *testing.T) {
 	agentID := "OxReuse1"
 	createActiveRecording(t, projectRoot, repoID, agentID)
 
-	t.Setenv("SAGEOX_AGENT_ID", agentID)
-
-	// load states and simulate the prime fallback logic
 	states, err := session.LoadAllRecordingStates(projectRoot)
 	require.NoError(t, err)
 
-	var resolved string
-	envID := os.Getenv("SAGEOX_AGENT_ID")
-	for _, s := range states {
-		if s.AgentID == envID && s.IsAgentAlive() {
-			resolved = envID
-			break
-		}
-	}
-
+	resolved := resolveAgentIDFromStates(states, agentID)
 	assert.Equal(t, agentID, resolved, "prime should reuse agent ID from SAGEOX_AGENT_ID when recording is active")
 }
 
@@ -50,20 +39,10 @@ func TestPrimeIgnoresEnv_WhenRecordingDead(t *testing.T) {
 	agentID := "OxDead1"
 	createDeadRecording(t, projectRoot, repoID, agentID)
 
-	t.Setenv("SAGEOX_AGENT_ID", agentID)
-
 	states, err := session.LoadAllRecordingStates(projectRoot)
 	require.NoError(t, err)
 
-	var resolved string
-	envID := os.Getenv("SAGEOX_AGENT_ID")
-	for _, s := range states {
-		if s.AgentID == envID && s.IsAgentAlive() {
-			resolved = envID
-			break
-		}
-	}
-
+	resolved := resolveAgentIDFromStates(states, agentID)
 	assert.Empty(t, resolved, "prime should not reuse agent ID when recording's process is dead")
 }
 
@@ -78,21 +57,11 @@ func TestPrimeFallback_SoleActiveRecording(t *testing.T) {
 	agentID := "OxSole1"
 	createActiveRecording(t, projectRoot, repoID, agentID)
 
-	// no SAGEOX_AGENT_ID set
-	t.Setenv("SAGEOX_AGENT_ID", "")
-
 	states, err := session.LoadAllRecordingStates(projectRoot)
 	require.NoError(t, err)
 
-	var alive []*session.RecordingState
-	for _, s := range states {
-		if s.IsAgentAlive() {
-			alive = append(alive, s)
-		}
-	}
-
-	require.Len(t, alive, 1, "should have exactly one active recording")
-	assert.Equal(t, agentID, alive[0].AgentID, "sole active recording should be reusable")
+	resolved := resolveAgentIDFromStates(states, "")
+	assert.Equal(t, agentID, resolved, "sole active recording should be reused when no env ID available")
 }
 
 // TestPrimeNoFallback_MultipleActiveRecordings verifies that when multiple
@@ -104,19 +73,11 @@ func TestPrimeNoFallback_MultipleActiveRecordings(t *testing.T) {
 	createActiveRecording(t, projectRoot, repoID, "OxMulti1")
 	createActiveRecording(t, projectRoot, repoID, "OxMulti2")
 
-	t.Setenv("SAGEOX_AGENT_ID", "")
-
 	states, err := session.LoadAllRecordingStates(projectRoot)
 	require.NoError(t, err)
 
-	var alive []*session.RecordingState
-	for _, s := range states {
-		if s.IsAgentAlive() {
-			alive = append(alive, s)
-		}
-	}
-
-	assert.Greater(t, len(alive), 1, "multiple active recordings should not trigger sole-recording fallback")
+	resolved := resolveAgentIDFromStates(states, "")
+	assert.Empty(t, resolved, "multiple active recordings should not trigger sole-recording fallback")
 }
 
 // --- C. Session stop on /clear ---
@@ -135,20 +96,13 @@ func TestStopSessionForClear_SetsStoppedAtAndClears(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, state, "recording should exist before clear")
 
-	// simulate what stopSessionForClear does
-	now := time.Now()
-	require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
-		s.StoppedAt = &now
-	}))
-
-	// verify StoppedAt was set
-	state, err = session.LoadRecordingStateForAgent(projectRoot, agentID)
-	require.NoError(t, err)
-	require.NotNil(t, state)
-	require.NotNil(t, state.StoppedAt, "StoppedAt should be set")
-
-	// clear the recording state
-	require.NoError(t, session.ClearRecordingStateForAgent(projectRoot, agentID))
+	ctx := &HookContext{
+		Phase:       phaseStart,
+		AgentType:   "claude-code",
+		ProjectRoot: projectRoot,
+		Marker:      &SessionMarker{AgentID: agentID},
+	}
+	stopSessionForClear(ctx, agentID)
 
 	// verify recording is gone
 	state, err = session.LoadRecordingStateForAgent(projectRoot, agentID)
@@ -165,10 +119,7 @@ func TestRunPrimeForHook_PassesAgentIDInEnv(t *testing.T) {
 	// test the env construction logic directly since running the full subprocess
 	// requires a real ox binary
 	agentID := "OxHook1"
-	env := os.Environ() // safe: testing env construction logic, not spawning ox
-	if agentID != "" {
-		env = append(env, "SAGEOX_AGENT_ID="+agentID)
-	}
+	env := buildPrimeEnv(agentID)
 
 	found := false
 	for _, e := range env {
@@ -183,14 +134,10 @@ func TestRunPrimeForHook_PassesAgentIDInEnv(t *testing.T) {
 // TestRunPrimeForHook_NoAgentID_SkipsEnv verifies that when no agent ID is known,
 // SAGEOX_AGENT_ID is not added to the subprocess environment.
 func TestRunPrimeForHook_NoAgentID_SkipsEnv(t *testing.T) {
-	agentID := ""
 	// unset any existing SAGEOX_AGENT_ID
 	t.Setenv("SAGEOX_AGENT_ID", "")
 
-	env := os.Environ() // safe: testing env construction logic, not spawning ox
-	if agentID != "" {
-		env = append(env, "SAGEOX_AGENT_ID="+agentID)
-	}
+	env := buildPrimeEnv("")
 
 	for _, e := range env {
 		if e == "SAGEOX_AGENT_ID=" {

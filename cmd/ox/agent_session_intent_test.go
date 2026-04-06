@@ -174,14 +174,7 @@ func TestIntent_ClearPreservesAgentIDForPrime(t *testing.T) {
 	states, err := session.LoadAllRecordingStates(projectRoot)
 	require.NoError(t, err)
 
-	envID := os.Getenv("SAGEOX_AGENT_ID")
-	var resolved string
-	for _, s := range states {
-		if s.AgentID == envID && s.IsAgentAlive() {
-			resolved = envID
-			break
-		}
-	}
+	resolved := resolveAgentIDFromStates(states, os.Getenv("SAGEOX_AGENT_ID"))
 	assert.Equal(t, agentID, resolved, "prime must find agent ID via SAGEOX_AGENT_ID after /clear")
 }
 
@@ -293,19 +286,10 @@ func TestIntent_PrimeNeverGeneratesNewIDWhenActiveRecordingExists(t *testing.T) 
 
 	// simulate prime's fallback chain: marker → parent PID → env → sole-active
 	// with only sole-active available (worst case: no marker, no env, no PID match)
-	t.Setenv("SAGEOX_AGENT_ID", "")
-
 	states, err := session.LoadAllRecordingStates(projectRoot)
 	require.NoError(t, err)
 
-	var alive []*session.RecordingState
-	for _, s := range states {
-		if s.IsAgentAlive() {
-			alive = append(alive, s)
-		}
-	}
-
 	// INVARIANT: when exactly one active recording exists, prime must find it
-	require.Len(t, alive, 1)
-	assert.Equal(t, agentID, alive[0].AgentID, "sole active recording must be discoverable by prime")
+	resolved := resolveAgentIDFromStates(states, "")
+	assert.Equal(t, agentID, resolved, "sole active recording must be discoverable by prime")
 }

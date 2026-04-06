@@ -282,8 +282,8 @@ func handleStart(ctx *HookContext) error {
 
 // stopSessionForClear stops the current session recording during /clear or /compact.
 // This finalizes the old session so it gets uploaded, then prime starts a fresh one.
-// Mirrors the stop logic from handleStop but skips IPC finalization (prime will
-// start a new recording immediately, and anti-entropy handles upload).
+// Sets StoppedAt, sends fire-and-forget IPC finalization to the daemon, and clears
+// recording state so prime can start a fresh session.
 func stopSessionForClear(ctx *HookContext, agentID string) {
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil {
@@ -612,17 +612,7 @@ func runPrimeForHook(agentID string, ctx *HookContext) error {
 	slog.Debug("hook: running prime", "agent_id", agentID, "phase", ctx.Phase)
 
 	cmd := exec.Command(oxPath, args...)
-	env := append(os.Environ(),
-		// Pass the long-lived agent PID (e.g., claude) to prime for session recording.
-		// Hooks run inside a transient bash shell, so os.Getppid() returns the shell PID
-		// which dies immediately. FindAgentAncestorPID walks the tree to find the agent.
-		fmt.Sprintf("OX_PARENT_PID=%d", proc.FindAgentAncestorPID()),
-	)
-	// pass known agent ID so prime can reuse it instead of generating a new one
-	// (critical for /clear where marker lookup may fail but recording is still active)
-	if agentID != "" {
-		env = append(env, fmt.Sprintf("SAGEOX_AGENT_ID=%s", agentID))
-	}
+	env := buildPrimeEnv(agentID)
 	cmd.Env = env
 	// pass original raw bytes to preserve unknown fields (not re-serialized)
 	if ctx.Input != nil && len(ctx.Input.RawBytes) > 0 {
@@ -635,6 +625,22 @@ func runPrimeForHook(agentID string, ctx *HookContext) error {
 		return fmt.Errorf("hook: prime failed: %w", err)
 	}
 	return nil
+}
+
+// buildPrimeEnv constructs the environment for the prime subprocess.
+// Passes OX_PARENT_PID for stable PID tracking and SAGEOX_AGENT_ID for
+// agent ID reuse (critical for /clear where marker lookup may fail).
+func buildPrimeEnv(agentID string) []string {
+	env := append(os.Environ(),
+		// Pass the long-lived agent PID (e.g., claude) to prime for session recording.
+		// Hooks run inside a transient bash shell, so os.Getppid() returns the shell PID
+		// which dies immediately. FindAgentAncestorPID walks the tree to find the agent.
+		fmt.Sprintf("OX_PARENT_PID=%d", proc.FindAgentAncestorPID()),
+	)
+	if agentID != "" {
+		env = append(env, fmt.Sprintf("SAGEOX_AGENT_ID=%s", agentID))
+	}
+	return env
 }
 
 // startSessionRecordingIfConfigured attempts to start session recording
