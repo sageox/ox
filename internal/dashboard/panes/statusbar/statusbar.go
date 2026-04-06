@@ -68,7 +68,7 @@ func (p *Pane) View(ctx panes.Context) string {
 	}
 
 	health := ctx.Store.Health()
-	navNodes := ctx.Store.Nav()
+	navNodes := ctx.NavNodes
 	daemonStatus := ctx.Store.GetDaemonStatus()
 
 	// ── Left segment: daemon health + issues ──────────────────────────────

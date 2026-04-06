@@ -6,6 +6,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	lipgloss "charm.land/lipgloss/v2"
 
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/dashboard/theme"
 )
 
@@ -22,8 +23,6 @@ func (m Model) View() tea.View {
 	if !m.overlays.IsEmpty() {
 		overlay := m.overlays.Top()
 		overlayContent := overlay.View(m.width, m.height)
-		// overlay compositing: discard the base frame and show the overlay fullscreen.
-		// a future canvas-based compositor would blend the two layers.
 		_ = content
 		v := tea.NewView(overlayContent)
 		v.AltScreen = true
@@ -35,44 +34,154 @@ func (m Model) View() tea.View {
 	return v
 }
 
-// render builds the full dashboard layout as a string by compositing
-// header, three content panes, and the status bar using lipgloss joins.
-func (m Model) render() string {
-	header := m.renderHeader()
+// render builds the full dashboard layout.
+func (m *Model) render() string {
+	statusBar := m.renderStatusBar()
+	tabBar := m.renderTabBar()
 
-	navStr := m.panes[int(FocusNav)].View(m.paneCtx(FocusNav))
-	timelineStr := m.panes[int(FocusTimeline)].View(m.paneCtx(FocusTimeline))
-	inspStr := m.panes[int(FocusInspector)].View(m.paneCtx(FocusInspector))
+	// render main section content
+	mainW := m.layout.Main.Width
+	mainH := m.layout.Main.Height
+	cursor := m.cursors[m.section]
+	sectionContent, listLen := RenderSection(m.section, &m.store, mainW, mainH, cursor)
+	m.listLens[m.section] = listLen
 
-	contentRow := lipgloss.JoinHorizontal(lipgloss.Top, navStr, timelineStr, inspStr)
+	// clamp to visible height
+	mainLines := strings.Split(sectionContent, "\n")
+	if len(mainLines) > mainH {
+		mainLines = mainLines[:mainH]
+	}
+	// pad to fill height
+	for len(mainLines) < mainH {
+		mainLines = append(mainLines, "")
+	}
+	mainStr := strings.Join(mainLines, "\n")
 
-	// statusbar is always the last pane (index 3); panes.PaneStatusBar == 3
-	statusBar := m.panes[3].View(m.statusBarCtx())
+	var contentRow string
+	if m.inspectorOpen && m.inspectorPane != nil {
+		inspW := m.layout.Inspector.Width
+		inspH := m.layout.Inspector.Height
+		inspContent := m.inspectorPane.View(&m.store, inspW, inspH, m.inspectorScroll)
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, contentRow, statusBar)
+		// separator
+		sep := lipgloss.NewStyle().
+			Foreground(cli.ColorDim).
+			Render(strings.Repeat("│\n", mainH))
+
+		contentRow = lipgloss.JoinHorizontal(lipgloss.Top, mainStr, sep, inspContent)
+	} else {
+		contentRow = mainStr
+	}
+
+	inputBar := m.renderInputBar()
+
+	return lipgloss.JoinVertical(lipgloss.Left, statusBar, tabBar, contentRow, inputBar)
 }
 
-// renderHeader builds the single-row header bar containing the brand name,
-// the authenticated user's email (when available), and key hints.
-func (m Model) renderHeader() string {
-	brand := theme.HeaderStyle.Render(" ox ")
+// renderStatusBar renders the top health indicator row.
+func (m Model) renderStatusBar() string {
+	ds := m.store.DaemonStatus
 
-	// secondary info: show email when the daemon reports an authenticated user
-	syncInfo := ""
-	if m.store.DaemonStatus != nil && m.store.DaemonStatus.AuthenticatedUser != nil {
-		if email := m.store.DaemonStatus.AuthenticatedUser.Email; email != "" {
-			syncInfo = " · " + email
+	brand := theme.HeaderStyle.Render(" ox dashboard ")
+
+	var indicators []string
+
+	// daemon
+	if ds != nil && ds.Running {
+		indicators = append(indicators, theme.StatusHealthy.Render("●")+" daemon")
+	} else {
+		indicators = append(indicators, theme.StatusError.Render("✕")+" daemon")
+	}
+
+	// auth
+	if ds != nil && ds.AuthenticatedUser != nil {
+		indicators = append(indicators, theme.StatusHealthy.Render("●")+" auth")
+	} else {
+		indicators = append(indicators, theme.StatusError.Render("✕")+" auth")
+	}
+
+	// sync
+	syncOK := false
+	if ds != nil {
+		for _, wsList := range ds.Workspaces {
+			for _, ws := range wsList {
+				if ws.LastErr == "" && !ws.LastSync.IsZero() {
+					syncOK = true
+				}
+			}
 		}
 	}
-	dim := theme.HeaderDimStyle.Render(syncInfo)
+	if syncOK {
+		indicators = append(indicators, theme.StatusHealthy.Render("●")+" sync")
+	} else if ds != nil && len(ds.Workspaces) > 0 {
+		indicators = append(indicators, theme.StatusWarning.Render("◐")+" sync")
+	} else {
+		indicators = append(indicators, theme.StatusDim.Render("○")+" sync")
+	}
 
-	hint := theme.HeaderDimStyle.Render("⌃K search  ·  [?] help  ·  [q] quit")
+	// code index
+	codeStats := m.store.CodeIndexStats
+	if codeStats != nil && codeStats.LastError == "" && codeStats.IndexExists {
+		indicators = append(indicators, theme.StatusHealthy.Render("●")+" code")
+	} else if codeStats != nil && codeStats.IndexingNow {
+		indicators = append(indicators, theme.StatusWarning.Render("◐")+" code")
+	} else if codeStats != nil && codeStats.LastError != "" {
+		indicators = append(indicators, theme.StatusError.Render("✕")+" code")
+	} else {
+		indicators = append(indicators, theme.StatusDim.Render("○")+" code")
+	}
 
-	leftPart := brand + dim
-	pad := m.layout.Header.Width - lipgloss.Width(leftPart) - lipgloss.Width(hint)
+	indicatorStr := strings.Join(indicators, "  ")
+	left := brand + "  " + indicatorStr
+
+	// right side: user email if available
+	right := ""
+	if ds != nil && ds.AuthenticatedUser != nil && ds.AuthenticatedUser.Email != "" {
+		right = theme.HeaderDimStyle.Render(ds.AuthenticatedUser.Email + " ")
+	}
+
+	pad := m.width - lipgloss.Width(left) - lipgloss.Width(right)
 	if pad < 0 {
 		pad = 0
 	}
 
-	return leftPart + strings.Repeat(" ", pad) + hint
+	return left + strings.Repeat(" ", pad) + right
+}
+
+// renderTabBar renders the section tab row.
+func (m Model) renderTabBar() string {
+	var tabs []string
+	for i := 0; i < int(sectionCount); i++ {
+		s := Section(i)
+		label := " " + s.Key() + " " + s.Label() + " "
+		if s == m.section {
+			tabs = append(tabs, theme.NavSelectedStyle.Render(label))
+		} else {
+			tabs = append(tabs, theme.NavDimStyle.Render(label))
+		}
+	}
+	row := strings.Join(tabs, " ")
+
+	pad := m.width - lipgloss.Width(row)
+	if pad < 0 {
+		pad = 0
+	}
+	return row + strings.Repeat(" ", pad)
+}
+
+// renderInputBar renders context-sensitive key hints.
+func (m Model) renderInputBar() string {
+	var hints []string
+
+	if m.inspectorOpen {
+		hints = append(hints, "esc close", "j/k scroll")
+	} else {
+		hints = append(hints, "tab section", "1-5 jump")
+		if m.listLens[m.section] > 0 {
+			hints = append(hints, "j/k navigate", "enter inspect")
+		}
+	}
+	hints = append(hints, "r refresh", "? help", "q quit")
+
+	return theme.HeaderDimStyle.Render(" " + strings.Join(hints, "  "))
 }

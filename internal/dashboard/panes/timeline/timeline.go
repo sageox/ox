@@ -104,8 +104,8 @@ func (p *Pane) Update(msg tea.Msg, ctx panes.Context) (panes.Pane, tea.Cmd) {
 				return p, func() tea.Msg { return app.MurmurSearchCloseMsg{} }
 			case "backspace":
 				q := ctx.Store.MurmurSearch()
-				if len(q) > 0 {
-					q = q[:len(q)-1]
+				if runes := []rune(q); len(runes) > 0 {
+					q = string(runes[:len(runes)-1])
 				}
 				return p, func() tea.Msg { return app.MurmurSearchQueryMsg{Query: q} }
 			default:
@@ -127,7 +127,7 @@ func (p *Pane) Update(msg tea.Msg, ctx panes.Context) (panes.Pane, tea.Cmd) {
 			p.adjustScroll(ctx)
 			return p, func() tea.Msg { return app.TimelineCursorDownMsg{} }
 		case key.Matches(m, p.keys.Select):
-			entries := ctx.Store.Timeline()
+			entries := ctx.TimelineEntries
 			cursor := ctx.Store.TimelineCursor()
 			if cursor >= 0 && cursor < len(entries) && entries[cursor].Target != nil {
 				target := entries[cursor].Target
@@ -189,7 +189,7 @@ func (p *Pane) View(ctx panes.Context) string {
 	sb.WriteString("\n")
 
 	// Sparkline header — summarizes activity density over the last 4 hours.
-	entries := ctx.Store.Timeline()
+	entries := ctx.TimelineEntries
 	timestamps := make([]time.Time, len(entries))
 	for i, e := range entries {
 		timestamps[i] = e.Timestamp

@@ -2,7 +2,6 @@ package state
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -439,43 +438,35 @@ func BuildNav(s *Store) []domain.NavNode {
 		Target: authTarget,
 	})
 
-	// SOUL.md nodes — one per team-context workspace that has SOUL.md.
-	if s.DaemonStatus != nil {
-		for _, wsList := range s.DaemonStatus.Workspaces {
-			for _, ws := range wsList {
-				if ws.Type != "team-context" || !ws.Exists || ws.Path == "" {
-					continue
-				}
-				soulPath := ws.Path + "/SOUL.md"
-				content, err := readFileSafe(soulPath)
-				if err != nil || content == "" {
-					continue
-				}
-				teamLabel := ws.TeamName
-				if teamLabel == "" {
-					teamLabel = ws.TeamSlug
-				}
-				if teamLabel == "" {
-					teamLabel = ws.ID
-				}
-				soulDoc := &domain.SOULDocument{
-					TeamName: teamLabel,
-					TeamSlug: ws.TeamSlug,
-					Path:     soulPath,
-					Content:  content,
-				}
-				nodes = append(nodes, domain.NavNode{
-					ID:    "soul-" + ws.ID,
-					Kind:  domain.NavNodeSOUL,
-					Label: "SOUL · " + teamLabel,
-					Depth: 0,
-					Target: &domain.InspectorTarget{
-						Kind: domain.TargetSOUL,
-						SOUL: soulDoc,
-					},
-				})
-			}
+	// SOUL.md nodes — one per team-context that has pre-loaded SOULPreview.
+	// Uses data already fetched by ListTeamContexts to avoid file I/O in render.
+	for _, tc := range s.TeamContexts {
+		if tc.SOULPreview == "" {
+			continue
 		}
+		teamLabel := tc.TeamName
+		if teamLabel == "" {
+			teamLabel = tc.TeamSlug
+		}
+		if teamLabel == "" {
+			teamLabel = tc.Path
+		}
+		soulDoc := &domain.SOULDocument{
+			TeamName: teamLabel,
+			TeamSlug: tc.TeamSlug,
+			Path:     tc.Path + "/SOUL.md",
+			Content:  tc.SOULPreview,
+		}
+		nodes = append(nodes, domain.NavNode{
+			ID:    "soul-" + tc.TeamSlug,
+			Kind:  domain.NavNodeSOUL,
+			Label: "SOUL · " + teamLabel,
+			Depth: 0,
+			Target: &domain.InspectorTarget{
+				Kind: domain.TargetSOUL,
+				SOUL: soulDoc,
+			},
+		})
 	}
 
 	// Team Feed section — combined murmurs + discussions sorted newest-first.
@@ -638,15 +629,6 @@ func syncAgeLabel(age time.Duration) string {
 	default:
 		return fmt.Sprintf("%dd ago", int(age.Hours()/24))
 	}
-}
-
-// readFileSafe reads a file and returns its content, returning empty string on error.
-func readFileSafe(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
 }
 
 // ActivityEntries derives the timeline entry list from raw store data.

@@ -3,80 +3,27 @@ package inspector
 import (
 	"strings"
 
-	"charm.land/bubbles/v2/key"
-	tea "charm.land/bubbletea/v2"
-
-	"github.com/sageox/ox/internal/dashboard/app"
 	"github.com/sageox/ox/internal/dashboard/domain"
-	"github.com/sageox/ox/internal/dashboard/panes"
+	"github.com/sageox/ox/internal/dashboard/state"
 	"github.com/sageox/ox/internal/dashboard/theme"
 )
 
-// Pane implements the right-hand detail inspector panel.
-type Pane struct {
-	rect      panes.Rect
-	scrollTop int
-	keys      app.PaneKeyMap
-	// lastTarget tracks the previously rendered target kind; scrollTop resets on target change.
-	lastTarget domain.InspectorTargetKind
-}
+// Pane implements the slide-in inspector detail panel.
+type Pane struct{}
 
-// compile-time interface check
-var _ panes.Pane = (*Pane)(nil)
+// New creates an inspector Pane.
+func New() *Pane { return &Pane{} }
 
-// New creates an initialized inspector Pane.
-func New() *Pane { return &Pane{keys: app.DefaultPaneKeys()} }
-
-func (p *Pane) ID() panes.PaneID { return panes.PaneInspector }
-
-func (p *Pane) SetSize(r panes.Rect) { p.rect = r }
-
-func (p *Pane) Update(msg tea.Msg, ctx panes.Context) (panes.Pane, tea.Cmd) {
-	// Reset scroll when the inspector target changes.
-	target := ctx.Store.Inspector()
-	if target.Kind != p.lastTarget {
-		p.scrollTop = 0
-		p.lastTarget = target.Kind
-	}
-
-	if !ctx.Focused {
-		return p, nil
-	}
-
-	if m, ok := msg.(tea.KeyMsg); ok {
-		// Reserve one row for the title; compute max scroll from pane height.
-		innerH := p.rect.Height - 2
-		visible := innerH - 1
-		if visible < 1 {
-			visible = 1
-		}
-		switch {
-		case key.Matches(m, p.keys.Down):
-			p.scrollTop++
-		case key.Matches(m, p.keys.Up):
-			if p.scrollTop > 0 {
-				p.scrollTop--
-			}
-		}
-		_ = visible // scroll clamping happens in View
-	}
-
-	return p, nil
-}
-
-func (p *Pane) View(ctx panes.Context) string {
-	w, h := ctx.Width, ctx.Height
-	if w < 2 || h < 2 {
+// View renders the inspector content for the current selection.
+// Implements app.InspectorRenderer.
+func (p *Pane) View(store state.ReadOnlyStore, width, height, scroll int) string {
+	if width < 4 || height < 2 {
 		return ""
 	}
 
-	// Border consumes 1 column on each side and 1 row top and bottom.
-	innerW := w - 2
-	innerH := h - 2
+	innerW := width - 2 // leave some padding
 
-	title := theme.PaneTitle("✦ Inspector", ctx.Focused)
-
-	target := ctx.Store.Inspector()
+	target := store.Inspector()
 	var content string
 	switch target.Kind {
 	case domain.TargetSession:
@@ -110,17 +57,18 @@ func (p *Pane) View(ctx panes.Context) string {
 	case domain.TargetWhisperHistory:
 		content = RenderWhisperHistory(target, innerW)
 	default:
-		content = RenderDefault(ctx.Store.GetDaemonStatus(), ctx.Store.ActiveMurmurCoworkers(), innerW)
+		content = RenderDefault(store.GetDaemonStatus(), store.ActiveMurmurCoworkers(), innerW)
 	}
 
-	// Clip content to the visible scroll window.
+	title := theme.InspectorTitleStyle.Render("✦ Inspector")
+
+	// clip content to visible scroll window
 	contentLines := strings.Split(content, "\n")
-	// Reserve one row for the title line.
-	visible := innerH - 1
+	visible := height - 1 // title takes 1 row
 	if visible < 0 {
 		visible = 0
 	}
-	start := p.scrollTop
+	start := scroll
 	if start > len(contentLines) {
 		start = len(contentLines)
 	}
@@ -130,11 +78,12 @@ func (p *Pane) View(ctx panes.Context) string {
 	}
 	visibleContent := strings.Join(contentLines[start:end], "\n")
 
-	full := title + "\n" + visibleContent
-
-	borderStyle := theme.PaneBorderUnfocused
-	if ctx.Focused {
-		borderStyle = theme.PaneBorderFocused
+	// pad remaining lines
+	rendered := end - start
+	for rendered < visible {
+		visibleContent += "\n"
+		rendered++
 	}
-	return borderStyle.Width(innerW).Height(innerH).Render(full)
+
+	return " " + title + "\n" + visibleContent
 }

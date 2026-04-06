@@ -47,7 +47,7 @@ func (p *Pane) Update(msg tea.Msg, ctx panes.Context) (panes.Pane, tea.Cmd) {
 		case key.Matches(m, p.keys.Down):
 			return p, func() tea.Msg { return app.NavCursorDownMsg{} }
 		case key.Matches(m, p.keys.Select):
-			nodes := ctx.Store.Nav()
+			nodes := ctx.NavNodes
 			cursor := ctx.Store.NavCursor()
 			if cursor >= 0 && cursor < len(nodes) && nodes[cursor].Target != nil {
 				target := nodes[cursor].Target
@@ -80,7 +80,7 @@ func (p *Pane) View(ctx panes.Context) string {
 	sb.WriteString(title)
 	sb.WriteString("\n")
 
-	nodes := ctx.Store.Nav()
+	nodes := ctx.NavNodes
 	cursor := ctx.Store.NavCursor()
 
 	// One row is consumed by the title line.

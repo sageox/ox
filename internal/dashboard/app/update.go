@@ -8,24 +8,21 @@ import (
 	"github.com/sageox/ox/internal/dashboard/domain"
 	"github.com/sageox/ox/internal/dashboard/effects"
 	"github.com/sageox/ox/internal/dashboard/overlays/palette"
-	"github.com/sageox/ox/internal/dashboard/panes"
 	"github.com/sageox/ox/internal/dashboard/state"
 )
 
-// Update implements tea.Model. It runs a 5-stage reducer pipeline so that
-// message precedence is deterministic: global → overlays → effects → focused
-// pane → passive broadcast.
+// Update implements tea.Model.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
 
-	// Stage 1: Global messages (resize, quit, focus cycling, global key bindings).
+	// Stage 1: Global messages (resize, quit, section nav)
 	m, cmd = m.reduceGlobal(msg)
 	if cmd != nil {
 		cmds = append(cmds, cmd)
 	}
 
-	// Stage 2: Overlays consume input first when visible; propagation stops if consumed.
+	// Stage 2: Overlays consume input first
 	if !m.overlays.IsEmpty() {
 		m, cmd = m.reduceOverlays(msg)
 		if cmd != nil {
@@ -33,20 +30,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Stage 3: Async data-load completions update the store.
+	// Stage 3: Async data-load completions
 	m, cmd = m.reduceEffects(msg)
-	if cmd != nil {
-		cmds = append(cmds, cmd)
-	}
-
-	// Stage 4: Focused pane receives the message for interactive handling.
-	m, cmd = m.reduceFocusedPane(msg)
-	if cmd != nil {
-		cmds = append(cmds, cmd)
-	}
-
-	// Stage 5: All panes receive passive-only messages (e.g. resize).
-	m, cmd = m.reduceAllPanes(msg)
 	if cmd != nil {
 		cmds = append(cmds, cmd)
 	}
@@ -54,25 +39,91 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// reduceGlobal handles messages that apply regardless of pane focus: terminal
-// resize, quit, focus cycling, refresh, and help overlay toggling.
+// reduceGlobal handles global messages: resize, quit, section navigation, list navigation.
 func (m Model) reduceGlobal(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 		m.ready = true
-		m.layout = ComputeLayout(m.width, m.height)
-		m = m.recomputePaneSizes()
+		m.layout = ComputeLayout(m.width, m.height, m.inspectorOpen)
 
 	case tea.KeyMsg:
+		// Overlays consume keys exclusively when visible
+		if !m.overlays.IsEmpty() {
+			return m, nil
+		}
+
 		switch {
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
-		case key.Matches(msg, m.keys.FocusNext):
-			m.focus = NextFocus(m.focus)
-		case key.Matches(msg, m.keys.FocusPrev):
-			m.focus = PrevFocus(m.focus)
+
+		// section navigation
+		case key.Matches(msg, m.keys.NextSection):
+			if !m.inspectorOpen {
+				m.section = NextSection(m.section)
+			}
+		case key.Matches(msg, m.keys.PrevSection):
+			if !m.inspectorOpen {
+				m.section = PrevSection(m.section)
+			}
+		case key.Matches(msg, m.keys.Section1):
+			if !m.inspectorOpen {
+				m.section = SectionOverview
+			}
+		case key.Matches(msg, m.keys.Section2):
+			if !m.inspectorOpen {
+				m.section = SectionSync
+			}
+		case key.Matches(msg, m.keys.Section3):
+			if !m.inspectorOpen {
+				m.section = SectionCode
+			}
+		case key.Matches(msg, m.keys.Section4):
+			if !m.inspectorOpen {
+				m.section = SectionSessions
+			}
+		case key.Matches(msg, m.keys.Section5):
+			if !m.inspectorOpen {
+				m.section = SectionFeed
+			}
+
+		// list navigation
+		case key.Matches(msg, m.keys.Up):
+			if m.inspectorOpen {
+				if m.inspectorScroll > 0 {
+					m.inspectorScroll--
+				}
+			} else {
+				if m.cursors[m.section] > 0 {
+					m.cursors[m.section]--
+				}
+			}
+		case key.Matches(msg, m.keys.Down):
+			if m.inspectorOpen {
+				m.inspectorScroll++
+			} else {
+				maxCursor := m.listLens[m.section] - 1
+				if maxCursor < 0 {
+					maxCursor = 0
+				}
+				if m.cursors[m.section] < maxCursor {
+					m.cursors[m.section]++
+				}
+			}
+
+		// inspector toggle
+		case key.Matches(msg, m.keys.CloseInspector):
+			if m.inspectorOpen {
+				m.inspectorOpen = false
+				m.inspectorScroll = 0
+				m.layout = ComputeLayout(m.width, m.height, false)
+			}
+		case key.Matches(msg, m.keys.Select):
+			if !m.inspectorOpen && m.listLens[m.section] > 0 {
+				m = m.openInspectorForCursor()
+			}
+
 		case key.Matches(msg, m.keys.Refresh):
 			m.store = state.IncrementGeneration(m.store)
 			m.effectGen = m.store.Generation
@@ -80,34 +131,24 @@ func (m Model) reduceGlobal(msg tea.Msg) (Model, tea.Cmd) {
 				LoadAllCmd(m.client, m.effectGen),
 				StartRefreshTickCmd(m.effectGen),
 			)
+
 		case key.Matches(msg, m.keys.Help):
 			if m.helpFactory != nil {
 				m.overlays.Push(m.helpFactory())
 			}
+
 		case key.Matches(msg, m.keys.OpenBrowser):
 			target := m.store.Inspector()
 			if url := sessionBrowserURL(m.client, target); url != "" {
 				return m, openBrowserCmd(url)
 			}
+
 		case key.Matches(msg, m.keys.Palette):
 			m.overlays.Push(palette.New(buildPaletteItems(m.store.Nav())))
 		}
 
 	case QuitMsg:
 		return m, tea.Quit
-
-	case FocusNextMsg:
-		m.focus = NextFocus(m.focus)
-	case FocusPrevMsg:
-		m.focus = PrevFocus(m.focus)
-	case FocusPaneMsg:
-		m.focus = msg.Target
-
-	case ShowHelpMsg:
-		if m.helpFactory != nil {
-			m.overlays.Push(m.helpFactory())
-		}
-
 	case RefreshMsg:
 		m.store = state.IncrementGeneration(m.store)
 		m.effectGen = m.store.Generation
@@ -120,9 +161,111 @@ func (m Model) reduceGlobal(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// reduceOverlays forwards the message to the topmost overlay. If the overlay
-// returns nil it signals that it should close and is popped from the stack.
-// Messages not consumed by the overlay continue propagating to later stages.
+// openInspectorForCursor sets the inspector target based on current section + cursor.
+func (m Model) openInspectorForCursor() Model {
+	cursor := m.cursors[m.section]
+	var target *domain.InspectorTarget
+
+	switch m.section {
+	case SectionSync:
+		target = m.syncTargetAtCursor(cursor)
+	case SectionSessions:
+		target = m.sessionTargetAtCursor(cursor)
+	case SectionFeed:
+		target = m.feedTargetAtCursor(cursor)
+	default:
+		return m
+	}
+
+	if target != nil {
+		m.store = state.ApplySelection(m.store, target)
+		m.inspectorOpen = true
+		m.inspectorScroll = 0
+		m.layout = ComputeLayout(m.width, m.height, true)
+	}
+	return m
+}
+
+// syncTargetAtCursor returns the inspector target for a workspace at the given cursor index.
+func (m Model) syncTargetAtCursor(cursor int) *domain.InspectorTarget {
+	ds := m.store.DaemonStatus
+	if ds == nil {
+		return nil
+	}
+	idx := 0
+	for _, wsList := range ds.Workspaces {
+		for i := range wsList {
+			if idx == cursor {
+				ws := wsList[i]
+				return &domain.InspectorTarget{
+					Kind:      domain.TargetWorkspace,
+					Workspace: &ws,
+				}
+			}
+			idx++
+		}
+	}
+	return nil
+}
+
+// sessionTargetAtCursor returns the inspector target for a session at the given cursor index.
+func (m Model) sessionTargetAtCursor(cursor int) *domain.InspectorTarget {
+	sessions := m.store.Sessions
+	if cursor < 0 || cursor >= len(sessions) {
+		return nil
+	}
+	s := sessions[cursor]
+	return &domain.InspectorTarget{
+		Kind:    domain.TargetSession,
+		Session: &s,
+	}
+}
+
+// feedTargetAtCursor returns the inspector target for a feed item at the given cursor index.
+func (m Model) feedTargetAtCursor(cursor int) *domain.InspectorTarget {
+	// build same feed order as renderFeed
+	murmurs := m.store.Murmurs
+	discussions := m.store.Discussions
+	whispers := m.store.WhisperHistory
+
+	type item struct {
+		kind string
+		idx  int
+	}
+	var items []item
+	for i := range murmurs {
+		items = append(items, item{"murmur", i})
+	}
+	for i := range discussions {
+		items = append(items, item{"discussion", i})
+	}
+	for i := range whispers {
+		items = append(items, item{"whisper", i})
+	}
+
+	if cursor < 0 || cursor >= len(items) {
+		return nil
+	}
+
+	it := items[cursor]
+	switch it.kind {
+	case "murmur":
+		entry := murmurs[it.idx]
+		return &domain.InspectorTarget{
+			Kind:   domain.TargetMurmur,
+			Murmur: &entry,
+		}
+	case "discussion":
+		entry := discussions[it.idx]
+		return &domain.InspectorTarget{
+			Kind:       domain.TargetTeamDiscussion,
+			Discussion: &entry,
+		}
+	}
+	return nil
+}
+
+// reduceOverlays forwards the message to the topmost overlay.
 func (m Model) reduceOverlays(msg tea.Msg) (Model, tea.Cmd) {
 	top := m.overlays.Top()
 	if top == nil {
@@ -142,8 +285,7 @@ func (m Model) reduceOverlays(msg tea.Msg) (Model, tea.Cmd) {
 	return m, cmd
 }
 
-// reduceEffects processes async data-load completions and refresh ticks.
-// Stale responses (wrong generation) are silently dropped.
+// reduceEffects processes async data-load completions.
 func (m Model) reduceEffects(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case effects.DaemonStatusLoadedMsg:
@@ -219,20 +361,11 @@ func (m Model) reduceEffects(msg tea.Msg) (Model, tea.Cmd) {
 	case SelectionChangedMsg:
 		m.store = state.ApplySelection(m.store, msg.Target)
 
-	case NavCursorUpMsg:
-		nodes := (&m.store).Nav()
-		m.store = state.MoveNavCursor(m.store, -1, len(nodes))
-	case NavCursorDownMsg:
-		nodes := (&m.store).Nav()
-		m.store = state.MoveNavCursor(m.store, +1, len(nodes))
-
-	case TimelineCursorUpMsg:
-		entries := (&m.store).Timeline()
-		m.store = state.MoveTimelineCursor(m.store, -1, len(entries))
-	case TimelineCursorDownMsg:
-		entries := (&m.store).Timeline()
-		m.store = state.MoveTimelineCursor(m.store, +1, len(entries))
-
+	// keep cursor movement messages for palette compatibility
+	case NavCursorUpMsg, NavCursorDownMsg:
+		// no-op in new architecture
+	case TimelineCursorUpMsg, TimelineCursorDownMsg:
+		// no-op in new architecture
 	case MurmurFilterMsg:
 		m.store = state.SetMurmurFilter(m.store, msg.Filter)
 	case MurmurSearchOpenMsg:
@@ -246,48 +379,7 @@ func (m Model) reduceEffects(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
-// reduceFocusedPane routes the message to whichever pane currently holds
-// keyboard focus. The statusbar (index 3) is passive — it is not a FocusTarget.
-func (m Model) reduceFocusedPane(msg tea.Msg) (Model, tea.Cmd) {
-	idx := int(m.focus)
-	if idx < 0 || idx >= len(m.panes) {
-		return m, nil
-	}
-
-	ctx := m.paneCtx(m.focus)
-	updated, cmd := m.panes[idx].Update(msg, ctx)
-	m.panes[idx] = updated
-
-	return m, cmd
-}
-
-// reduceAllPanes broadcasts passive messages (currently only WindowSizeMsg) to
-// every pane including the status bar. Panes use this to cache their allocated
-// dimensions and pre-render static layout elements.
-func (m Model) reduceAllPanes(msg tea.Msg) (Model, tea.Cmd) {
-	switch msg.(type) {
-	case tea.WindowSizeMsg:
-		var cmds []tea.Cmd
-		for i, p := range m.panes {
-			f := FocusTarget(i)
-			ctx := panes.Context{
-				Store:   &m.store,
-				Focused: m.focus == f,
-			}
-			updated, cmd := p.Update(msg, ctx)
-			m.panes[i] = updated
-			if cmd != nil {
-				cmds = append(cmds, cmd)
-			}
-		}
-		return m, tea.Batch(cmds...)
-	}
-
-	return m, nil
-}
-
-// sessionBrowserURL returns the web URL for the given inspector target, or empty
-// string when the target has no associated URL (e.g. issues, sync health).
+// sessionBrowserURL returns the web URL for the given inspector target.
 func sessionBrowserURL(client effects.Client, target domain.InspectorTarget) string {
 	switch target.Kind {
 	case domain.TargetSession:
@@ -304,33 +396,27 @@ func sessionBrowserURL(client effects.Client, target domain.InspectorTarget) str
 }
 
 // openBrowserCmd returns a tea.Cmd that sends an OpenBrowserMsg.
-// The actual browser open is handled synchronously in reduceEffects so the
-// tea.Cmd goroutine doesn't block the event loop.
 func openBrowserCmd(url string) tea.Cmd {
 	return func() tea.Msg { return OpenBrowserMsg{URL: url} }
 }
 
-// buildPaletteItems converts nav nodes into palette items with pre-built commands.
-// Commands are constructed here (in the app layer) to avoid an import cycle
-// between overlays/palette and app.
+// buildPaletteItems converts store data into palette items.
 func buildPaletteItems(nodes []domain.NavNode) []palette.Item {
 	var items []palette.Item
 	for _, n := range nodes {
 		if n.Target == nil || n.Kind == domain.NavNodeSection || n.Kind == domain.NavNodeHint {
 			continue
 		}
-		target := n.Target // capture for closure
+		target := n.Target
 		items = append(items, palette.Item{
 			Icon:  palette.KindIcon(n.Kind),
 			Label: n.Label,
 			Sub:   palette.KindSection(n.Kind),
-			Cmd: tea.Batch(
-				func() tea.Msg { return SelectionChangedMsg{Target: target} },
-				func() tea.Msg { return FocusPaneMsg{Target: FocusInspector} },
-			),
+			Cmd: func() tea.Msg {
+				return SelectionChangedMsg{Target: target}
+			},
 		})
 	}
-	// Common action items.
 	items = append(items, palette.Item{
 		Icon:  "⟳",
 		Label: "Refresh all data",
@@ -344,24 +430,4 @@ func buildPaletteItems(nodes []domain.NavNode) []palette.Item {
 		Cmd:   func() tea.Msg { return ShowHelpMsg{} },
 	})
 	return items
-}
-
-// recomputePaneSizes calls SetSize on every pane after the layout is updated.
-// This keeps pane-local geometry (border widths, scroll limits) in sync with
-// the terminal dimensions without requiring panes to recompute their own rects.
-func (m Model) recomputePaneSizes() Model {
-	rects := []panes.Rect{
-		{X: m.layout.Nav.X, Y: m.layout.Nav.Y, Width: m.layout.Nav.Width, Height: m.layout.Nav.Height},
-		{X: m.layout.Timeline.X, Y: m.layout.Timeline.Y, Width: m.layout.Timeline.Width, Height: m.layout.Timeline.Height},
-		{X: m.layout.Inspector.X, Y: m.layout.Inspector.Y, Width: m.layout.Inspector.Width, Height: m.layout.Inspector.Height},
-		{X: m.layout.StatusBar.X, Y: m.layout.StatusBar.Y, Width: m.layout.StatusBar.Width, Height: m.layout.StatusBar.Height},
-	}
-
-	for i, r := range rects {
-		if i < len(m.panes) {
-			m.panes[i].SetSize(r)
-		}
-	}
-
-	return m
 }

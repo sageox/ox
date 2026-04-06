@@ -65,10 +65,3 @@ func IsMemoryEnabled() bool {
 	return value == "true" || value == "1" || value == "yes"
 }
 
-// IsTUIEnabled checks if TUI commands (ox dashboard, ox top) are enabled.
-// These are experimental and hidden until the team enables them.
-// Set FEATURE_TUI=true to enable.
-func IsTUIEnabled() bool {
-	value := strings.ToLower(os.Getenv("FEATURE_TUI"))
-	return value == "true" || value == "1" || value == "yes"
-}

@@ -5,6 +5,7 @@ package state
 import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/dashboard/domain"
+	"github.com/sageox/ox/internal/session"
 )
 
 // ReadOnlyStore is the pane-facing view of application state.
@@ -57,6 +58,30 @@ type ReadOnlyStore interface {
 
 	// MurmurSearchActive reports whether the inline search field is open.
 	MurmurSearchActive() bool
+
+	// GetSessions returns the stored session list (newest first).
+	GetSessions() []session.SessionInfo
+
+	// GetMurmurs returns the stored murmur broadcasts.
+	GetMurmurs() []domain.MurmurEntry
+
+	// GetDiscussions returns the stored team discussions.
+	GetDiscussions() []domain.TeamDiscussion
+
+	// GetInstances returns active AI coworker instances.
+	GetInstances() []daemon.InstanceInfo
+
+	// GetStoredErrors returns the daemon error log.
+	GetStoredErrors() []daemon.StoredError
+
+	// GetTeamContexts returns team context metadata entries.
+	GetTeamContexts() []domain.TeamContextEntry
+
+	// GetCodeIndexStats returns code index statistics, or nil when unavailable.
+	GetCodeIndexStats() *daemon.CodeDBStats
+
+	// GetWhisperHistory returns whisper delivery history.
+	GetWhisperHistory() []domain.WhisperHistoryEntry
 }
 
 // Ensure *Store satisfies the pane-facing interface at compile time.

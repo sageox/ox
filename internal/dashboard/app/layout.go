@@ -5,33 +5,30 @@ type Rect struct {
 	X, Y, Width, Height int
 }
 
-// Layout holds the computed geometry for every pane in the dashboard.
-// All values are in terminal cells (columns / rows).
+// Layout holds the computed geometry for the dashboard.
+// Two modes: full-width main area, or split (main + inspector).
 type Layout struct {
-	Header    Rect
-	Nav       Rect
-	Timeline  Rect
-	Inspector Rect
-	StatusBar Rect
+	StatusBar Rect // top health indicator bar
+	TabBar    Rect // section tab row
+	Main      Rect // primary content area
+	Inspector Rect // slide-in detail pane (zero-width when closed)
+	InputBar  Rect // bottom key hints
 }
 
 const (
-	// navWidthFraction is the fraction of total width allocated to the nav pane.
-	navWidthFraction = 0.22
-	// timelineWidthFraction is the fraction allocated to the timeline pane.
-	timelineWidthFraction = 0.42
-	// headerHeight is the height of the top header bar in rows.
-	headerHeight = 1
-	// statusBarHeight is the height of the bottom status bar in rows.
+	// statusBarHeight is the height of the top status/header bar.
 	statusBarHeight = 1
-	// separatorWidth is the width of the vertical divider between panes.
-	separatorWidth = 1
+	// tabBarHeight is the height of the section tab row.
+	tabBarHeight = 1
+	// inputBarHeight is the height of the bottom key hints.
+	inputBarHeight = 1
+	// inspectorMinWidth is the minimum width for the inspector pane.
+	inspectorMinWidth = 30
 )
 
-// ComputeLayout calculates pane geometry for a w×h terminal.
-// Widths are distributed proportionally; the inspector takes whatever remains
-// after nav, timeline, and separators are allocated.
-func ComputeLayout(w, h int) Layout {
+// ComputeLayout calculates geometry for a w×h terminal.
+// When inspectorOpen is true, the main area splits to share width with the inspector.
+func ComputeLayout(w, h int, inspectorOpen bool) Layout {
 	if w < 1 {
 		w = 80
 	}
@@ -39,25 +36,36 @@ func ComputeLayout(w, h int) Layout {
 		h = 24
 	}
 
-	contentH := h - headerHeight - statusBarHeight
+	chrome := statusBarHeight + tabBarHeight + inputBarHeight
+	contentH := h - chrome
 	if contentH < 1 {
 		contentH = 1
 	}
 
-	navW := maxInt(1, int(float64(w)*navWidthFraction))
-	timelineW := maxInt(1, int(float64(w)*timelineWidthFraction))
-	inspW := maxInt(1, w-navW-timelineW-2*separatorWidth)
+	contentY := statusBarHeight + tabBarHeight
 
-	timelineX := navW + separatorWidth
-	inspX := timelineX + timelineW + separatorWidth
-	contentY := headerHeight
+	var mainW, inspW int
+	if inspectorOpen {
+		// inspector gets ~45% of width, minimum inspectorMinWidth
+		inspW = w * 45 / 100
+		if inspW < inspectorMinWidth {
+			inspW = inspectorMinWidth
+		}
+		if inspW > w-20 {
+			inspW = w - 20
+		}
+		mainW = w - inspW - 1 // 1 for separator
+	} else {
+		mainW = w
+		inspW = 0
+	}
 
 	return Layout{
-		Header:    Rect{0, 0, w, headerHeight},
-		Nav:       Rect{0, contentY, navW, contentH},
-		Timeline:  Rect{timelineX, contentY, timelineW, contentH},
-		Inspector: Rect{inspX, contentY, inspW, contentH},
-		StatusBar: Rect{0, h - statusBarHeight, w, statusBarHeight},
+		StatusBar: Rect{0, 0, w, statusBarHeight},
+		TabBar:    Rect{0, statusBarHeight, w, tabBarHeight},
+		Main:      Rect{0, contentY, mainW, contentH},
+		Inspector: Rect{mainW + 1, contentY, inspW, contentH},
+		InputBar:  Rect{0, h - inputBarHeight, w, inputBarHeight},
 	}
 }
 

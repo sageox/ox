@@ -1,6 +1,9 @@
 package panes
 
-import "github.com/sageox/ox/internal/dashboard/state"
+import (
+	"github.com/sageox/ox/internal/dashboard/domain"
+	"github.com/sageox/ox/internal/dashboard/state"
+)
 
 // Context is the read-only snapshot passed to every pane on each Update and
 // View call. It gives panes access to the current application state without
@@ -21,4 +24,12 @@ type Context struct {
 
 	// Height is the current allocated pane height (rows), matching the last SetSize call.
 	Height int
+
+	// NavNodes is the pre-computed nav tree for this render frame.
+	// Computed once per frame by the app model to avoid repeated derivation.
+	NavNodes []domain.NavNode
+
+	// TimelineEntries is the pre-computed timeline for this render frame.
+	// Computed once per frame by the app model to avoid repeated derivation.
+	TimelineEntries []domain.TimelineEntry
 }

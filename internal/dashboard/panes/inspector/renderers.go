@@ -555,10 +555,11 @@ func humanTime(t time.Time) string {
 
 // shortenPath truncates path from the left if it exceeds max columns.
 func shortenPath(path string, max int) string {
-	if max <= 0 || len(path) <= max {
+	runes := []rune(path)
+	if max <= 0 || len(runes) <= max {
 		return path
 	}
-	return "…" + path[len(path)-max+1:]
+	return "…" + string(runes[len(runes)-max+1:])
 }
 
 // loadSessionSummaryMD reads summary.md from the session directory.
