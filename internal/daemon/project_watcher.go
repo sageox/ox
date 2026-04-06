@@ -24,6 +24,22 @@ const (
 	ChangeRenamed  ChangeType = "renamed"
 )
 
+// Short returns a compact label for human-readable murmur content.
+func (ct ChangeType) Short() string {
+	switch ct {
+	case ChangeCreated:
+		return "new"
+	case ChangeModified:
+		return "mod"
+	case ChangeDeleted:
+		return "del"
+	case ChangeRenamed:
+		return "mv"
+	default:
+		return string(ct)
+	}
+}
+
 // FileChange represents a single observed filesystem change.
 type FileChange struct {
 	Path       string // relative to project root

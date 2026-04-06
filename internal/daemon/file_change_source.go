@@ -209,7 +209,7 @@ func (p *FileChangeMurmurPublisher) publish() {
 
 	now := time.Now()
 	branch := repotools.GetCurrentBranch(p.projectRoot)
-	content := formatFileChangeMurmur(changes, branch, p.projectRoot)
+	content := formatFileChangeMurmur(changes, branch)
 	importance := "ambient"
 	if len(changes) > 10 {
 		importance = "normal"
@@ -341,19 +341,13 @@ func buildFileChangeMetadata(changes []FileChange, branch, projectRoot string) m
 }
 
 // formatFileChangeMurmur produces compact, human-scannable change summaries.
-// Files come first (visible in ox murmur list), branch/worktree as compact tag.
+// Files come first (visible in ox murmur list), branch as compact tag.
 // Agents use the JSON metadata for structured data.
-func formatFileChangeMurmur(changes []FileChange, branch, projectRoot string) string {
-	// context tag: [main@myproject]
+func formatFileChangeMurmur(changes []FileChange, branch string) string {
+	// context tag: [main] — worktree name omitted (local-only, noise for teammates)
 	var ctx string
-	worktree := filepath.Base(projectRoot)
-	switch {
-	case branch != "" && worktree != "" && worktree != ".":
-		ctx = fmt.Sprintf("[%s@%s] ", branch, worktree)
-	case branch != "":
+	if branch != "" {
 		ctx = fmt.Sprintf("[%s] ", branch)
-	case worktree != "" && worktree != ".":
-		ctx = fmt.Sprintf("[@%s] ", worktree)
 	}
 
 	count := len(changes)
@@ -368,13 +362,24 @@ func formatFileChangeMurmur(changes []FileChange, branch, projectRoot string) st
 }
 
 // formatSmallChanges lists each file inline (1-5 files).
+// Groups consecutive files with the same change type: "mod a.go, b.go, new c.go"
 func formatSmallChanges(changes []FileChange) string {
+	// sort by type then path so same-type files cluster
 	sort.Slice(changes, func(i, j int) bool {
+		if changes[i].ChangeType != changes[j].ChangeType {
+			return changes[i].ChangeType < changes[j].ChangeType
+		}
 		return changes[i].Path < changes[j].Path
 	})
-	parts := make([]string, len(changes))
-	for i, c := range changes {
-		parts[i] = fmt.Sprintf("%s %s", c.ChangeType, c.Path)
+	var parts []string
+	var curType ChangeType
+	for _, c := range changes {
+		if c.ChangeType != curType {
+			curType = c.ChangeType
+			parts = append(parts, c.ChangeType.Short()+" "+c.Path)
+		} else {
+			parts = append(parts, c.Path)
+		}
 	}
 	return strings.Join(parts, ", ")
 }

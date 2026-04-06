@@ -180,7 +180,31 @@ func TestFormatSmallChanges(t *testing.T) {
 		{Path: "src/config.go", ChangeType: ChangeCreated},
 	}
 	content := formatSmallChanges(changes)
-	assert.Equal(t, "created src/config.go, modified src/main.go", content)
+	assert.Equal(t, "new src/config.go, mod src/main.go", content)
+}
+
+// TestFormatSmallChanges_GroupsSameType verifies consecutive same-type files
+// share one prefix: "mod a.go, b.go" not "mod a.go, mod b.go".
+// Failure prevented: redundant type prefixes waste tokens in murmur output.
+func TestFormatSmallChanges_GroupsSameType(t *testing.T) {
+	changes := []FileChange{
+		{Path: "lib/audio/recorder.cpp", ChangeType: ChangeModified},
+		{Path: "lib/sys/app_flow.cpp", ChangeType: ChangeModified},
+	}
+	content := formatSmallChanges(changes)
+	assert.Equal(t, "mod lib/audio/recorder.cpp, lib/sys/app_flow.cpp", content)
+}
+
+// TestFormatSmallChanges_MixedTypes verifies type prefix reappears when type changes.
+func TestFormatSmallChanges_MixedTypes(t *testing.T) {
+	changes := []FileChange{
+		{Path: "a.go", ChangeType: ChangeCreated},
+		{Path: "b.go", ChangeType: ChangeModified},
+		{Path: "c.go", ChangeType: ChangeModified},
+		{Path: "d.go", ChangeType: ChangeDeleted},
+	}
+	content := formatSmallChanges(changes)
+	assert.Equal(t, "new a.go, del d.go, mod b.go, c.go", content)
 }
 
 func TestFormatMediumChanges(t *testing.T) {
@@ -252,18 +276,17 @@ func TestFormatFileChangeMurmur_IncludesBranchAndWorktree(t *testing.T) {
 	changes := []FileChange{
 		{Path: "src/main.go", ChangeType: ChangeModified},
 	}
-	content := formatFileChangeMurmur(changes, "ajit/feature-branch", "/Users/ajit/src/myproject")
-	assert.Contains(t, content, "[ajit/feature-branch@myproject]")
-	assert.Contains(t, content, "modified src/main.go")
+	content := formatFileChangeMurmur(changes, "ajit/feature-branch")
+	assert.Contains(t, content, "[ajit/feature-branch]")
+	assert.Contains(t, content, "mod src/main.go")
 }
 
 func TestFormatFileChangeMurmur_NoBranch(t *testing.T) {
 	changes := []FileChange{
 		{Path: "README.md", ChangeType: ChangeModified},
 	}
-	content := formatFileChangeMurmur(changes, "", "/Users/ajit/src/myproject")
-	assert.Contains(t, content, "[@myproject]")
-	assert.Contains(t, content, "modified README.md")
+	content := formatFileChangeMurmur(changes, "")
+	assert.Equal(t, "mod README.md", content)
 }
 
 func TestShortenRemoteURL(t *testing.T) {

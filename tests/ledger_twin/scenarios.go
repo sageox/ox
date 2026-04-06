@@ -245,13 +245,40 @@ func fileChangeMurmur(t time.Time, id, agentID, principal, branch string, change
 }
 
 // formatFCContent mimics the daemon's formatFileChangeMurmur output.
+// shortChangeType returns compact labels matching daemon's ChangeType.Short().
+func shortChangeType(ct string) string {
+	switch ct {
+	case "created":
+		return "new"
+	case "modified":
+		return "mod"
+	case "deleted":
+		return "del"
+	case "renamed":
+		return "mv"
+	default:
+		return ct
+	}
+}
+
 func formatFCContent(changes []fcEntry, branch string) string {
-	ctx := fmt.Sprintf("[%s@ox] ", branch)
+	ctx := fmt.Sprintf("[%s] ", branch)
 	if len(changes) <= 5 {
-		sort.Slice(changes, func(i, j int) bool { return changes[i].path < changes[j].path })
-		parts := make([]string, len(changes))
-		for i, c := range changes {
-			parts[i] = fmt.Sprintf("%s %s", c.changeType, c.path)
+		sort.Slice(changes, func(i, j int) bool {
+			if changes[i].changeType != changes[j].changeType {
+				return changes[i].changeType < changes[j].changeType
+			}
+			return changes[i].path < changes[j].path
+		})
+		var parts []string
+		var curType string
+		for _, c := range changes {
+			if c.changeType != curType {
+				curType = c.changeType
+				parts = append(parts, shortChangeType(c.changeType)+" "+c.path)
+			} else {
+				parts = append(parts, c.path)
+			}
 		}
 		return ctx + strings.Join(parts, ", ")
 	}
