@@ -55,7 +55,7 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 					Severity: "warning",
 					Title:    "Amp hooks not installed",
 					Detail:   "AGENTS.md does not contain ox prime marker.",
-					Fix:      "Run: ox-adapter-amp install-hooks --repo-root " + p.RepoRoot + " --scope project",
+					Fix:      "ox-adapter-amp install-hooks --repo-root " + p.RepoRoot + " --scope project",
 					FixSafe:  true,
 				})
 			}

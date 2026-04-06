@@ -54,7 +54,7 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 				Severity: "warning",
 				Title:    "ox hooks not installed for Codex CLI",
 				Detail:   "Codex CLI hooks are not configured for this project.",
-				Fix:      "Run: ox-adapter-codex install-hooks --repo-root " + p.RepoRoot + " --scope project",
+				Fix:      "ox-adapter-codex install-hooks --repo-root " + p.RepoRoot + " --scope project",
 				FixSafe:  true,
 			})
 		}

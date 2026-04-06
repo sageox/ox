@@ -55,7 +55,7 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 					Severity: "warning",
 					Title:    "Pi hooks not installed",
 					Detail:   "AGENTS.md does not contain ox prime marker.",
-					Fix:      "Run: ox-adapter-pi install-hooks --repo-root " + p.RepoRoot + " --scope project",
+					Fix:      "ox-adapter-pi install-hooks --repo-root " + p.RepoRoot + " --scope project",
 					FixSafe:  true,
 				})
 			}

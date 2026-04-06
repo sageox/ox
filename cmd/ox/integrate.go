@@ -4,11 +4,16 @@ import (
 	"fmt"
 	"strings"
 
+	"log/slog"
+
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/constants"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/ui"
+	"github.com/sageox/ox/internal/version"
+	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/spf13/cobra"
 )
 
@@ -213,6 +218,9 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 	fmt.Println()
 	fmt.Println("Installed lifecycle hooks to .claude/settings.json:")
 	fmt.Println("  - SessionStart, PreCompact, PostToolUse, Stop, SessionEnd, UserPromptSubmit")
+
+	// install rules via adapters that support it
+	installAdapterRules(gitRoot)
 
 	// install git commit hooks (prepare-commit-msg for trailers)
 	if err := InstallGitHooks(gitRoot); err != nil {
@@ -525,6 +533,25 @@ func uninstallAllIntegrations(force bool) error {
 
 	fmt.Println(ui.PassStyle.Render("✓") + " All integrations uninstalled")
 	return nil
+}
+
+// installAdapterRules discovers adapters with rules_installer capability and
+// installs their rules into the project.
+func installAdapterRules(gitRoot string) {
+	for _, ea := range adapters.DiscoverExternalAdapters() {
+		if !ea.HasCapability(adapterprotocol.CapRulesInstaller) {
+			continue
+		}
+		resp, err := ea.InstallRules(gitRoot, version.Version)
+		if err != nil {
+			slog.Warn("failed to install rules", "adapter", ea.Name(), "error", err)
+			continue
+		}
+		if resp.Installed && len(resp.FilesWritten) > 0 {
+			fmt.Printf("%s %s rules installed (%s)\n",
+				ui.PassStyle.Render("✓"), ea.Name(), strings.Join(resp.FilesWritten, ", "))
+		}
+	}
 }
 
 func init() {
