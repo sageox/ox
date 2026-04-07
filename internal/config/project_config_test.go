@@ -485,6 +485,80 @@ func TestFindProjectRoot_OxProjectRootEnv(t *testing.T) {
 	})
 }
 
+// --- Symlink resolution ---
+
+// TestFindProjectRoot_ResolvesSymlinks verifies that FindProjectRoot returns the
+// real (resolved) path even when cwd is reached through a symlink.
+// Failure prevented: two callers comparing project roots get different paths for
+// the same directory, causing cache misses or duplicate work.
+func TestFindProjectRoot_ResolvesSymlinks(t *testing.T) {
+	projectDir := CreateInitializedProject(t)
+
+	// resolve temp dir through any OS-level symlinks (macOS /tmp -> /private/tmp)
+	realProjectDir, err := filepath.EvalSymlinks(projectDir)
+	require.NoError(t, err)
+
+	// create a symlink pointing to the project
+	linkParent := t.TempDir()
+	linkPath := filepath.Join(linkParent, "link-to-project")
+	require.NoError(t, os.Symlink(realProjectDir, linkPath))
+
+	originalCwd, _ := os.Getwd()
+	defer os.Chdir(originalCwd)
+	require.NoError(t, os.Chdir(linkPath))
+
+	root := FindProjectRoot()
+	assert.Equal(t, realProjectDir, root, "FindProjectRoot should resolve symlinks to the real path")
+}
+
+// TestFindProjectRoot_SymlinkAndReal_SamePath verifies that FindProjectRoot
+// returns the identical path whether called from the real directory or a symlink.
+// Failure prevented: inconsistent project root depending on how the user entered
+// the directory, breaking path comparisons downstream.
+func TestFindProjectRoot_SymlinkAndReal_SamePath(t *testing.T) {
+	projectDir := CreateInitializedProject(t)
+
+	realProjectDir, err := filepath.EvalSymlinks(projectDir)
+	require.NoError(t, err)
+
+	linkParent := t.TempDir()
+	linkPath := filepath.Join(linkParent, "link-to-project")
+	require.NoError(t, os.Symlink(realProjectDir, linkPath))
+
+	originalCwd, _ := os.Getwd()
+	defer os.Chdir(originalCwd)
+
+	// call from real dir
+	require.NoError(t, os.Chdir(realProjectDir))
+	rootA := FindProjectRoot()
+
+	// call from symlink
+	require.NoError(t, os.Chdir(linkPath))
+	rootB := FindProjectRoot()
+
+	assert.Equal(t, rootA, rootB, "FindProjectRoot must return the same path from real dir and symlink")
+}
+
+// TestResolveProjectRootOverride_ResolvesSymlinks verifies that when
+// OX_PROJECT_ROOT points through a symlink, the returned path is the real path.
+// Failure prevented: env-based override returns symlink path while cwd-based
+// discovery returns real path, causing path mismatch bugs.
+func TestResolveProjectRootOverride_ResolvesSymlinks(t *testing.T) {
+	projectDir := CreateInitializedProjectWithConfig(t, nil)
+
+	realProjectDir, err := filepath.EvalSymlinks(projectDir)
+	require.NoError(t, err)
+
+	linkParent := t.TempDir()
+	linkPath := filepath.Join(linkParent, "link-to-project")
+	require.NoError(t, os.Symlink(realProjectDir, linkPath))
+
+	t.Setenv(EnvProjectRoot, linkPath)
+
+	result := ResolveProjectRootOverride()
+	assert.Equal(t, realProjectDir, result, "ResolveProjectRootOverride should resolve symlinks to the real path")
+}
+
 func TestResolveProjectRootOverride(t *testing.T) {
 	t.Run("returns resolved path for valid initialized project", func(t *testing.T) {
 		projectDir := CreateInitializedProjectWithConfig(t, nil)

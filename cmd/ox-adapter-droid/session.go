@@ -284,8 +284,16 @@ func projectDirMatchesRepo(dirPath, repoRoot string) bool {
 		}
 		path := filepath.Join(dirPath, e.Name())
 		if cwd := readSessionCWD(path); cwd != "" {
-			// normalize trailing slashes for comparison
-			return filepath.Clean(cwd) == filepath.Clean(repoRoot)
+			// normalize trailing slashes and resolve symlinks for comparison
+			cleanCwd := filepath.Clean(cwd)
+			cleanRepo := filepath.Clean(repoRoot)
+			if resolved, err := filepath.EvalSymlinks(cleanCwd); err == nil {
+				cleanCwd = resolved
+			}
+			if resolved, err := filepath.EvalSymlinks(cleanRepo); err == nil {
+				cleanRepo = resolved
+			}
+			return cleanCwd == cleanRepo
 		}
 	}
 	return false

@@ -351,6 +351,9 @@ func resolveInstance(agentID string) (*agentinstance.Instance, error) {
 // OX_PROJECT_ROOT env var overrides discovery when set to a valid initialized project.
 func findProjectRoot() (string, error) {
 	if resolved := config.ResolveProjectRootOverride(); resolved != "" {
+		if evaled, err := filepath.EvalSymlinks(resolved); err == nil {
+			return evaled, nil
+		}
 		return resolved, nil
 	}
 
@@ -363,12 +366,18 @@ func findProjectRoot() (string, error) {
 	for {
 		sageoxDir := filepath.Join(dir, ".sageox")
 		if info, err := os.Stat(sageoxDir); err == nil && info.IsDir() {
+			if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+				return resolved, nil
+			}
 			return dir, nil
 		}
 
 		parent := filepath.Dir(dir)
 		if parent == dir {
 			// reached filesystem root, use cwd
+			if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+				return resolved, nil
+			}
 			return cwd, nil
 		}
 		dir = parent

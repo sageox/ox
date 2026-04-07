@@ -192,6 +192,10 @@ func readFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int6
 }
 
 func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, int64, error) {
+	if resolved, err := filepath.EvalSymlinks(repoRoot); err == nil {
+		repoRoot = resolved
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", 0, fmt.Errorf("cannot determine home directory: %w", err)

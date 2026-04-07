@@ -349,6 +349,9 @@ func ResolveProjectRootOverride() string {
 	if abs, err := filepath.Abs(resolved); err == nil {
 		resolved = abs
 	}
+	if evaled, err := filepath.EvalSymlinks(resolved); err == nil {
+		resolved = evaled
+	}
 	if IsInitialized(resolved) {
 		return resolved
 	}
@@ -375,6 +378,9 @@ func FindProjectRoot() string {
 		// check if .sageox directory exists
 		sageoxPath := filepath.Join(currentDir, sageoxDir)
 		if info, err := os.Stat(sageoxPath); err == nil && info.IsDir() {
+			if evaled, err := filepath.EvalSymlinks(currentDir); err == nil {
+				return evaled
+			}
 			return currentDir
 		}
 

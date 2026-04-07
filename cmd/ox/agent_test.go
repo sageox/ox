@@ -414,6 +414,173 @@ func TestIsAgentSubcommand(t *testing.T) {
 	}
 }
 
+// --- Symlink resolution ---
+
+// TestFindProjectRoot_ResolvesSymlinks verifies that findProjectRoot returns
+// the real (symlink-resolved) path, not the symlinked path.
+// Failure prevented: session file lookups fail when cwd traverses a symlink.
+func TestFindProjectRoot_ResolvesSymlinks(t *testing.T) {
+	realDir := t.TempDir()
+	realDir, err := filepath.EvalSymlinks(realDir) // normalize macOS /tmp -> /private/tmp
+	if err != nil {
+		t.Fatalf("failed to eval symlinks on temp dir: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(realDir, ".sageox"), 0755); err != nil {
+		t.Fatalf("failed to create .sageox: %v", err)
+	}
+
+	linkParent := t.TempDir()
+	linkParent, _ = filepath.EvalSymlinks(linkParent)
+	linkPath := filepath.Join(linkParent, "linked-project")
+	if err := os.Symlink(realDir, linkPath); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	originalCwd, _ := os.Getwd()
+	t.Cleanup(func() { os.Chdir(originalCwd) })
+
+	if err := os.Chdir(linkPath); err != nil {
+		t.Fatalf("failed to chdir to symlink: %v", err)
+	}
+
+	root, err := findProjectRoot()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if root != realDir {
+		t.Errorf("expected resolved real path %s, got %s", realDir, root)
+	}
+}
+
+// TestFindProjectRoot_SymlinkAndReal_ReturnSamePath verifies that navigating
+// via symlink or real path produces the same findProjectRoot result.
+// Failure prevented: same project gets different root paths depending on how user cd'd in.
+func TestFindProjectRoot_SymlinkAndReal_ReturnSamePath(t *testing.T) {
+	realDir := t.TempDir()
+	realDir, _ = filepath.EvalSymlinks(realDir)
+
+	if err := os.MkdirAll(filepath.Join(realDir, ".sageox"), 0755); err != nil {
+		t.Fatalf("failed to create .sageox: %v", err)
+	}
+
+	linkParent := t.TempDir()
+	linkParent, _ = filepath.EvalSymlinks(linkParent)
+	linkPath := filepath.Join(linkParent, "linked-project")
+	if err := os.Symlink(realDir, linkPath); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	originalCwd, _ := os.Getwd()
+	t.Cleanup(func() { os.Chdir(originalCwd) })
+
+	// get root via real path
+	if err := os.Chdir(realDir); err != nil {
+		t.Fatalf("failed to chdir to real dir: %v", err)
+	}
+	rootA, err := findProjectRoot()
+	if err != nil {
+		t.Fatalf("findProjectRoot from real dir: %v", err)
+	}
+
+	// get root via symlink
+	if err := os.Chdir(linkPath); err != nil {
+		t.Fatalf("failed to chdir to symlink: %v", err)
+	}
+	rootB, err := findProjectRoot()
+	if err != nil {
+		t.Fatalf("findProjectRoot from symlink: %v", err)
+	}
+
+	if rootA != rootB {
+		t.Errorf("real path root %s != symlink root %s", rootA, rootB)
+	}
+}
+
+// TestFindProjectRoot_SymlinkInParentDir verifies symlink resolution when the
+// symlink is in a parent directory and cwd is a child of the symlinked tree.
+// Failure prevented: walk-up discovery returns unresolved path when symlink is above cwd.
+func TestFindProjectRoot_SymlinkInParentDir(t *testing.T) {
+	realBase := t.TempDir()
+	realBase, _ = filepath.EvalSymlinks(realBase)
+
+	parentDir := filepath.Join(realBase, "parent")
+	childDir := filepath.Join(parentDir, "child")
+	if err := os.MkdirAll(filepath.Join(parentDir, ".sageox"), 0755); err != nil {
+		t.Fatalf("failed to create .sageox: %v", err)
+	}
+	if err := os.MkdirAll(childDir, 0755); err != nil {
+		t.Fatalf("failed to create child dir: %v", err)
+	}
+
+	linkBase := t.TempDir()
+	linkBase, _ = filepath.EvalSymlinks(linkBase)
+	linkPath := filepath.Join(linkBase, "linked")
+	if err := os.Symlink(parentDir, linkPath); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	originalCwd, _ := os.Getwd()
+	t.Cleanup(func() { os.Chdir(originalCwd) })
+
+	if err := os.Chdir(filepath.Join(linkPath, "child")); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+
+	root, err := findProjectRoot()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if root != parentDir {
+		t.Errorf("expected resolved parent %s, got %s", parentDir, root)
+	}
+}
+
+// TestFindProjectRoot_OverrideEnvResolvesSymlinks verifies that OX_PROJECT_ROOT
+// env var values are symlink-resolved before being returned.
+// Failure prevented: override path contains symlink, causing path mismatches downstream.
+func TestFindProjectRoot_OverrideEnvResolvesSymlinks(t *testing.T) {
+	realDir := t.TempDir()
+	realDir, _ = filepath.EvalSymlinks(realDir)
+
+	// IsInitialized checks for .sageox/config.json
+	sageoxDir := filepath.Join(realDir, ".sageox")
+	if err := os.MkdirAll(sageoxDir, 0755); err != nil {
+		t.Fatalf("failed to create .sageox: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatalf("failed to create config.json: %v", err)
+	}
+
+	linkParent := t.TempDir()
+	linkParent, _ = filepath.EvalSymlinks(linkParent)
+	linkPath := filepath.Join(linkParent, "linked-project")
+	if err := os.Symlink(realDir, linkPath); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	// cwd is somewhere unrelated
+	otherDir := t.TempDir()
+	originalCwd, _ := os.Getwd()
+	t.Cleanup(func() { os.Chdir(originalCwd) })
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+
+	t.Setenv("OX_PROJECT_ROOT", linkPath)
+
+	root, err := findProjectRoot()
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if root != realDir {
+		t.Errorf("expected resolved real path %s, got %s", realDir, root)
+	}
+}
+
 func TestAgentDispatcherEnvVarFallback(t *testing.T) {
 	t.Run("env var with valid agent ID resolves subcommand", func(t *testing.T) {
 		// isAgentSubcommand + valid env var = would attempt runWithAgentID

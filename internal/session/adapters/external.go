@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -125,12 +126,25 @@ func (ea *ExternalAdapter) Detect() bool {
 	return resp.Detected
 }
 
+// resolveRepoRoot returns the symlink-resolved OX_REPO_ROOT, falling back to
+// the raw value if resolution fails (e.g., path doesn't exist).
+func resolveRepoRoot() string {
+	root := os.Getenv("OX_REPO_ROOT")
+	if root == "" {
+		return root
+	}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		return resolved
+	}
+	return root
+}
+
 // FindSessionFile calls find-session via one-shot mode.
 // In production, serve mode is preferred, but one-shot provides a fallback.
 func (ea *ExternalAdapter) FindSessionFile(agentID string, since time.Time) (string, error) {
 	out, err := ea.execOneShot("find-session",
 		"--agent-id", agentID,
-		"--repo-root", os.Getenv("OX_REPO_ROOT"),
+		"--repo-root", resolveRepoRoot(),
 		"--since", since.UTC().Format(time.RFC3339),
 	)
 	if err != nil {
