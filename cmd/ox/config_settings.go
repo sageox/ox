@@ -217,6 +217,49 @@ Rate-limited to 60 invocations/hour, 4 concurrent.`,
 		Default:     "auto",
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
+	// NOTE: attribution.plan and attribution.session are intentionally not exposed
+	// in ox config — they are always-on transparency requirements, not user preferences.
+	{
+		Key:         "attribution.commit",
+		Description: "Git commit trailer for AI coworker attribution",
+		LongDescription: `Controls the git trailer added to commits made with AI coworker assistance.
+
+Any coding agent that touches your code and is deeply involved in the plan
+for execution is as much responsible for the resulting code as the human is.
+Attribution makes this shared responsibility visible in your git history.
+
+  Set to any string to customize the commit trailer.
+  Set to "" (empty) to disable commit attribution entirely.
+  Unset to restore the default.
+
+The default format is recognized by GitHub for contributor profile links.
+
+Default: "Co-Authored-By: SageOx <ox@sageox.ai>"`,
+		Category:    "Attribution",
+		ValidValues: []string{}, // free-text: any string allowed, "" disables
+		Default:     "Co-Authored-By: SageOx <ox@sageox.ai>",
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
+	},
+	{
+		Key:         "attribution.pr",
+		Description: "PR body attribution for AI coworker contribution",
+		LongDescription: `Controls the attribution line added to pull request descriptions.
+
+When team context shapes the code in a PR — architecture decisions,
+conventions, prior session learnings — attribution makes that influence
+visible to reviewers. It signals that this work was informed by more
+than one contributor's knowledge.
+
+  Set to any string to customize the PR attribution.
+  Set to "" (empty) to disable PR attribution entirely.
+  Unset to restore the default.
+
+Default: "Co-Authored-By: [SageOx](https://github.com/SageOx)"`,
+		Category:    "Attribution",
+		ValidValues: []string{}, // free-text: any string allowed, "" disables
+		Default:     "Co-Authored-By: [SageOx](https://github.com/SageOx)",
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
+	},
 }
 
 // GetSetting returns the setting definition for a key.
@@ -350,6 +393,38 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 				cv.UserVal = "none"
 			default:
 				cv.UserVal = agent
+			}
+		}
+
+	case "attribution.commit":
+		if userCfg != nil && userCfg.Attribution != nil && userCfg.Attribution.IsCommitSet() {
+			if v := userCfg.Attribution.GetCommit(); v == "" {
+				cv.UserVal = "(disabled)"
+			} else {
+				cv.UserVal = v
+			}
+		}
+		if repoCfg != nil && repoCfg.Attribution != nil && repoCfg.Attribution.IsCommitSet() {
+			if v := repoCfg.Attribution.GetCommit(); v == "" {
+				cv.RepoVal = "(disabled)"
+			} else {
+				cv.RepoVal = v
+			}
+		}
+
+	case "attribution.pr":
+		if userCfg != nil && userCfg.Attribution != nil && userCfg.Attribution.IsPRSet() {
+			if v := userCfg.Attribution.GetPR(); v == "" {
+				cv.UserVal = "(disabled)"
+			} else {
+				cv.UserVal = v
+			}
+		}
+		if repoCfg != nil && repoCfg.Attribution != nil && repoCfg.Attribution.IsPRSet() {
+			if v := repoCfg.Attribution.GetPR(); v == "" {
+				cv.RepoVal = "(disabled)"
+			} else {
+				cv.RepoVal = v
 			}
 		}
 	}
@@ -503,6 +578,26 @@ func setUserConfig(key, value string) error {
 			cfg.SetAgentWorkerAgent(value)
 		}
 
+	case "attribution.commit":
+		if cfg.Attribution == nil {
+			cfg.Attribution = &config.Attribution{}
+		}
+		if value == "(disabled)" || value == "" {
+			cfg.Attribution.Commit = config.StringPtr("")
+		} else {
+			cfg.Attribution.Commit = config.StringPtr(value)
+		}
+
+	case "attribution.pr":
+		if cfg.Attribution == nil {
+			cfg.Attribution = &config.Attribution{}
+		}
+		if value == "(disabled)" || value == "" {
+			cfg.Attribution.PR = config.StringPtr("")
+		} else {
+			cfg.Attribution.PR = config.StringPtr(value)
+		}
+
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)
 	}
@@ -532,6 +627,26 @@ func setRepoConfig(key, value, projectRoot string) error {
 
 	case "timezone":
 		cfg.Timezone = value
+
+	case "attribution.commit":
+		if cfg.Attribution == nil {
+			cfg.Attribution = &config.Attribution{}
+		}
+		if value == "(disabled)" || value == "" {
+			cfg.Attribution.Commit = config.StringPtr("")
+		} else {
+			cfg.Attribution.Commit = config.StringPtr(value)
+		}
+
+	case "attribution.pr":
+		if cfg.Attribution == nil {
+			cfg.Attribution = &config.Attribution{}
+		}
+		if value == "(disabled)" || value == "" {
+			cfg.Attribution.PR = config.StringPtr("")
+		} else {
+			cfg.Attribution.PR = config.StringPtr(value)
+		}
 
 	default:
 		return fmt.Errorf("setting %s not supported at repo level", key)
@@ -623,6 +738,22 @@ func unsetUserConfig(key string) error {
 	case "agent_worker":
 		cfg.AgentWorker = nil
 
+	case "attribution.commit":
+		if cfg.Attribution != nil {
+			cfg.Attribution.Commit = nil
+			if !cfg.Attribution.IsPlanSet() && !cfg.Attribution.IsPRSet() && !cfg.Attribution.IsSessionSet() {
+				cfg.Attribution = nil
+			}
+		}
+
+	case "attribution.pr":
+		if cfg.Attribution != nil {
+			cfg.Attribution.PR = nil
+			if !cfg.Attribution.IsPlanSet() && !cfg.Attribution.IsCommitSet() && !cfg.Attribution.IsSessionSet() {
+				cfg.Attribution = nil
+			}
+		}
+
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)
 	}
@@ -649,6 +780,22 @@ func unsetRepoConfig(key, projectRoot string) error {
 
 	case "murmur_receive":
 		cfg.MurmurReceive = ""
+
+	case "attribution.commit":
+		if cfg.Attribution != nil {
+			cfg.Attribution.Commit = nil
+			if !cfg.Attribution.IsPlanSet() && !cfg.Attribution.IsPRSet() && !cfg.Attribution.IsSessionSet() {
+				cfg.Attribution = nil
+			}
+		}
+
+	case "attribution.pr":
+		if cfg.Attribution != nil {
+			cfg.Attribution.PR = nil
+			if !cfg.Attribution.IsPlanSet() && !cfg.Attribution.IsCommitSet() && !cfg.Attribution.IsSessionSet() {
+				cfg.Attribution = nil
+			}
+		}
 
 	default:
 		return fmt.Errorf("setting %s not supported at repo level", key)

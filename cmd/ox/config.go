@@ -32,6 +32,8 @@ Available settings:
   tips                     on | off
   context_git.auto_commit  on | off
   context_git.auto_push    on | off
+  attribution.commit       (any text, "" to disable)
+  attribution.pr           (any text, "" to disable)
 
 Priority: user > repo > team > default`,
 	RunE: func(cmd *cobra.Command, args []string) error {

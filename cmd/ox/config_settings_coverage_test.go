@@ -52,6 +52,11 @@ func TestGetSetting_ValidValuesNotEmpty(t *testing.T) {
 	for _, setting := range AllSettings {
 		t.Run(setting.Key, func(t *testing.T) {
 			t.Parallel()
+			// free-text settings (e.g., attribution.commit) accept any string;
+			// skip enumerated-value checks for them
+			if len(setting.ValidValues) == 0 {
+				return
+			}
 			assert.NotEmpty(t, setting.ValidValues,
 				"setting %q should have valid values defined", setting.Key)
 
