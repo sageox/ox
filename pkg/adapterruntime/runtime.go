@@ -37,6 +37,7 @@ type Config struct {
 	FindSession    func(adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error)
 	ReadFromOffset func(adapterprotocol.ReadFromOffsetParams) (*adapterprotocol.ReadFromOffsetResult, error)
 	ImportSession  func(adapterprotocol.ImportSessionParams) (*adapterprotocol.ImportSessionResult, error)
+	CapturePrior   func(adapterprotocol.CapturePriorParams) (*adapterprotocol.CapturePriorResult, error)
 	InstallRules   func(adapterprotocol.RulesParams) (*adapterprotocol.InstallRulesResponse, error)
 	CheckRules     func(adapterprotocol.RulesParams) (*adapterprotocol.CheckRulesResponse, error)
 	UninstallRules func(adapterprotocol.RulesParams) (*adapterprotocol.UninstallRulesResponse, error)
@@ -164,6 +165,15 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) e
 			return cfg.ImportSession(p)
 		})
 
+	case "capture-prior":
+		p := parseCapturePriorParams(args[1:])
+		return runOneShot(enc, func() (any, error) {
+			if cfg.CapturePrior == nil {
+				return nil, fmt.Errorf("capture-prior not implemented")
+			}
+			return cfg.CapturePrior(p)
+		})
+
 	case "install-rules":
 		p := parseRulesParams(args[1:])
 		return runOneShot(enc, func() (any, error) {
@@ -237,7 +247,7 @@ func printUsage(cfg Config, w io.Writer) {
 	p("  info, detect, install-hooks, check-hooks, uninstall-hooks,\n")
 	p("  install-rules, check-rules, uninstall-rules,\n")
 	p("  read, read-metadata, diagnose, find-session, read-from-offset,\n")
-	p("  import-session, --serve\n")
+	p("  import-session, capture-prior, --serve\n")
 	p("\nTo get started with ox:\n")
 	p("  brew install sageox/tap/ox\n")
 	p("  ox init\n")
@@ -366,6 +376,27 @@ func parseImportSessionParams(args []string) adapterprotocol.ImportSessionParams
 			i++
 		case "--repo-root":
 			p.RepoRoot = args[i+1]
+			i++
+		}
+	}
+	return p
+}
+
+func parseCapturePriorParams(args []string) adapterprotocol.CapturePriorParams {
+	p := adapterprotocol.CapturePriorParams{}
+	for i := 0; i < len(args)-1; i++ {
+		switch args[i] {
+		case "--session-id":
+			p.SessionID = args[i+1]
+			i++
+		case "--repo-root":
+			p.RepoRoot = args[i+1]
+			i++
+		case "--agent-id":
+			p.AgentID = args[i+1]
+			i++
+		case "--title":
+			p.Title = args[i+1]
 			i++
 		}
 	}

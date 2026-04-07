@@ -372,15 +372,87 @@ func parseUserEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
 		return []adapterprotocol.RawEntry{adapterruntime.SystemEntry(ts, cleaned)}, nil
 	}
 
+	var entries []adapterprotocol.RawEntry
+
 	content, class := classifyUserContent(raw)
 	switch class {
 	case userContentSkip:
-		return nil, nil
+		// still extract tool_result blocks below
 	case userContentSystem:
-		return []adapterprotocol.RawEntry{adapterruntime.SystemEntry(ts, content)}, nil
+		entries = append(entries, adapterruntime.SystemEntry(ts, content))
 	default:
-		return []adapterprotocol.RawEntry{adapterruntime.UserEntry(ts, content)}, nil
+		entries = append(entries, adapterruntime.UserEntry(ts, content))
 	}
+
+	// extract tool_result blocks from user content arrays
+	entries = append(entries, extractToolResults(raw, ts)...)
+
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	return entries, nil
+}
+
+// extractToolResults extracts tool_result content blocks from a user message.
+// In Claude's format, tool results appear as content blocks in the user turn
+// following an assistant's tool_use.
+func extractToolResults(raw *claudeCodeEntry, ts time.Time) []adapterprotocol.RawEntry {
+	if raw.Message == nil {
+		return nil
+	}
+
+	content, ok := raw.Message.Content.([]interface{})
+	if !ok {
+		return nil
+	}
+
+	var entries []adapterprotocol.RawEntry
+	for _, item := range content {
+		block, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if block["type"] != "tool_result" {
+			continue
+		}
+
+		toolOutput := extractToolResultContent(block)
+		isError, _ := block["is_error"].(bool)
+		callID, _ := block["tool_use_id"].(string)
+		if callID != "" {
+			entries = append(entries, adapterruntime.ToolResultWithID(ts, toolOutput, isError, callID))
+		} else {
+			entries = append(entries, adapterruntime.ToolResultEntry(ts, toolOutput, isError))
+		}
+	}
+	return entries
+}
+
+// extractToolResultContent extracts text from a tool_result content block.
+// The content field can be a string or an array of content blocks.
+func extractToolResultContent(block map[string]interface{}) string {
+	// content can be a direct string
+	if s, ok := block["content"].(string); ok {
+		return s
+	}
+
+	// or an array of content blocks
+	contentArr, ok := block["content"].([]interface{})
+	if !ok {
+		return ""
+	}
+
+	var parts []string
+	for _, item := range contentArr {
+		if sub, ok := item.(map[string]interface{}); ok {
+			if sub["type"] == "text" {
+				if text, ok := sub["text"].(string); ok {
+					parts = append(parts, text)
+				}
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func parseAssistantEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, error) {
@@ -410,9 +482,14 @@ func parseAssistantEntry(raw *claudeCodeEntry) ([]adapterprotocol.RawEntry, erro
 			}
 		case "tool_use":
 			toolName, _ := block["name"].(string)
+			callID, _ := block["id"].(string)
 			input := block["input"]
 			inputJSON, _ := json.Marshal(input)
-			entries = append(entries, adapterruntime.ToolUseEntry(ts, toolName, string(inputJSON)))
+			if callID != "" {
+				entries = append(entries, adapterruntime.ToolUseWithID(ts, toolName, string(inputJSON), callID))
+			} else {
+				entries = append(entries, adapterruntime.ToolUseEntry(ts, toolName, string(inputJSON)))
+			}
 		}
 	}
 

@@ -6,71 +6,149 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
-// runAgentSessionCapturePrior captures prior history from JSONL input.
+// runAgentSessionCapturePrior captures prior history from the active coding agent.
 //
-// Usage: ox agent <id> session capture-prior [--title "..."] [--file <path>]
+// Usage: ox agent <id> session capture-prior [--title "..."] [--file <path>] [--session-id <id>]
 //
-// Reads validated JSONL history from stdin or --file:
+// The command detects the active adapter and delegates to it. Each adapter
+// (Claude Code, Codex, etc.) implements its own session discovery and parsing.
 //
-//	{"_meta":{"schema_version":"1","source":"agent_reconstruction","agent_id":"Oxa7b3",...}}
-//	{"seq":1,"type":"user","content":"<prompt>","ts":"<ISO8601>","source":"planning_history"}
-//	{"seq":2,"type":"assistant","content":"<response>","ts":"<ISO8601>","source":"planning_history"}
-//	...
-//
-// The command:
-//  1. Validates input against the history schema
-//  2. Applies secret redaction
-//  3. Stores in the session ledger
-//  4. Returns JSON with the storage path
+// If no adapter with capture-prior capability is detected, falls back to
+// reading validated JSONL from stdin or --file.
 func runAgentSessionCapturePrior(inst *agentinstance.Instance, args []string) error {
-	// parse optional arguments
 	title := parseTitle(args)
 	filePath := parseCapturePriorFile(args)
+	sessionID := parseSessionID(args)
 
-	// determine input source
-	var reader *bufio.Reader
-	if filePath != "" {
-		f, err := os.Open(filePath)
-		if err != nil {
-			return fmt.Errorf("open file: %w", err)
-		}
-		defer f.Close()
-		reader = bufio.NewReader(f)
-	} else {
-		// check if stdin has data
-		stat, err := os.Stdin.Stat()
-		if err != nil {
-			return fmt.Errorf("check stdin: %w", err)
-		}
-		if (stat.Mode() & os.ModeCharDevice) != 0 {
-			return fmt.Errorf("no input piped to stdin and no --file specified\nUsage: cat history.jsonl | ox agent %s session capture-prior", inst.AgentID)
-		}
-		reader = bufio.NewReader(os.Stdin)
-	}
+	projectRoot := mustFindProjectRoot()
 
-	// capture using the session package
 	opts := session.CaptureOptions{
 		AgentID:         inst.AgentID,
 		Title:           title,
-		MergeWithActive: session.IsRecordingForAgent(mustFindProjectRoot(), inst.AgentID),
+		MergeWithActive: session.IsRecordingForAgent(projectRoot, inst.AgentID),
 	}
 
-	result, err := session.CapturePrior(reader, opts)
+	var result *session.CaptureResult
+	var err error
+
+	// try adapter-based capture first (unless explicit --file was given)
+	if filePath == "" && !isStdinPiped() {
+		result, err = capturePriorViaAdapter(inst, projectRoot, opts, sessionID)
+		if err != nil {
+			return fmt.Errorf("capture-prior failed: %w", err)
+		}
+	} else {
+		// JSONL input path (stdin or --file)
+		var reader *bufio.Reader
+		if filePath != "" {
+			f, openErr := os.Open(filePath)
+			if openErr != nil {
+				return fmt.Errorf("open file: %w", openErr)
+			}
+			defer f.Close()
+			reader = bufio.NewReader(f)
+		} else {
+			reader = bufio.NewReader(os.Stdin)
+		}
+		result, err = session.CapturePrior(reader, opts)
+		if err != nil {
+			return fmt.Errorf("capture-prior failed: %w", err)
+		}
+	}
+
+	return outputCaptureResult(result)
+}
+
+// capturePriorViaAdapter detects the active adapter and delegates capture-prior to it.
+func capturePriorViaAdapter(inst *agentinstance.Instance, projectRoot string, opts session.CaptureOptions, sessionID string) (*session.CaptureResult, error) {
+	// resolve native session ID from agent environment if not provided
+	if sessionID == "" {
+		if agent := agentx.CurrentAgent(); agent != nil && agent.SupportsSession() {
+			sessionID = agent.SessionID(agentx.NewSystemEnvironment())
+		}
+	}
+
+	// discover adapters and find one with capture-prior capability
+	if err := adapters.RegisterExternalAdapters(); err != nil {
+		return nil, fmt.Errorf("adapter discovery: %w", err)
+	}
+
+	ea, err := findCapturePriorAdapter()
 	if err != nil {
-		return fmt.Errorf("capture-prior failed: %w", err)
+		return nil, err
 	}
 
-	// build output
+	// delegate to adapter
+	captureResult, err := ea.CapturePrior(adapterprotocol.CapturePriorParams{
+		SessionID: sessionID,
+		RepoRoot:  projectRoot,
+		AgentID:   inst.AgentID,
+		Title:     opts.Title,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("adapter capture-prior: %w", err)
+	}
+
+	if len(captureResult.Entries) == 0 {
+		return nil, fmt.Errorf("no entries found in session")
+	}
+
+	// convert protocol entries to CapturedHistory and store
+	history := session.ConvertProtocolEntriesToHistory(
+		captureResult.Entries,
+		inst.AgentID,
+		captureResult.AgentType,
+	)
+
+	if opts.Title != "" && history.Meta != nil {
+		history.Meta.SessionTitle = opts.Title
+	}
+
+	return session.CapturePriorFromHistory(history, opts)
+}
+
+// findCapturePriorAdapter discovers an adapter that supports capture-prior.
+// DetectAdapter already handles full discovery (built-in + external binaries).
+func findCapturePriorAdapter() (*adapters.ExternalAdapter, error) {
+	adapter, err := adapters.DetectAdapter()
+	if err != nil {
+		return nil, fmt.Errorf("no adapter detected: %w", err)
+	}
+
+	ea, ok := adapter.(*adapters.ExternalAdapter)
+	if !ok {
+		return nil, fmt.Errorf("detected adapter does not support capture-prior")
+	}
+
+	if !ea.HasCapability(adapterprotocol.CapCapturePrior) {
+		return nil, fmt.Errorf("adapter %q does not support capture-prior", ea.Name())
+	}
+
+	return ea, nil
+}
+
+// isStdinPiped returns true if stdin has piped data.
+func isStdinPiped() bool {
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (stat.Mode() & os.ModeCharDevice) == 0
+}
+
+// outputCaptureResult formats and prints the capture result.
+func outputCaptureResult(result *session.CaptureResult) error {
 	output := session.NewCaptureOutput(result)
 
-	// output format selection (priority: review > text > json default)
 	if cfg.Review {
-		// security audit mode: human summary + JSON
 		if result.Title != "" {
 			cli.PrintSuccess(fmt.Sprintf("Prior history captured: %q", result.Title))
 		} else {
@@ -94,7 +172,6 @@ func runAgentSessionCapturePrior(inst *agentinstance.Instance, args []string) er
 	}
 
 	if cfg.Text {
-		// human-readable text output
 		if result.Title != "" {
 			cli.PrintSuccess(fmt.Sprintf("Prior history captured: %q", result.Title))
 		} else {
@@ -108,13 +185,25 @@ func runAgentSessionCapturePrior(inst *agentinstance.Instance, args []string) er
 		return nil
 	}
 
-	// default: JSON output
 	jsonOut, err := output.ToJSON()
 	if err != nil {
 		return fmt.Errorf("format JSON output: %w", err)
 	}
 	fmt.Println(string(jsonOut))
 	return nil
+}
+
+// parseSessionID extracts --session-id value from args.
+func parseSessionID(args []string) string {
+	for i, arg := range args {
+		if arg == "--session-id" && i+1 < len(args) {
+			return args[i+1]
+		}
+		if len(arg) > 13 && arg[:13] == "--session-id=" {
+			return arg[13:]
+		}
+	}
+	return ""
 }
 
 // parseCapturePriorFile extracts --file value from args.

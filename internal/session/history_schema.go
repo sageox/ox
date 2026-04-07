@@ -250,7 +250,8 @@ func parseAndValidateHistoryEntry(line []byte, lineNum int) (*HistoryEntry, erro
 	if entry.Type == "" {
 		return nil, fmt.Errorf("validate history line=%d: type field is required", lineNum)
 	}
-	if entry.Content == "" {
+	// tool entries use tool_name/tool_input/tool_output instead of content
+	if entry.Content == "" && entry.Type != "tool" {
 		return nil, fmt.Errorf("validate history line=%d: content field is required", lineNum)
 	}
 

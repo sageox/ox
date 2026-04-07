@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
 // --- A. Direct lookup via agent_session_id ---
@@ -341,5 +344,162 @@ func TestClaudeProjectHash_SymlinkEquivalence(t *testing.T) {
 
 	if hash1 != hash2 {
 		t.Errorf("hashes differ:\n  real:    %s -> %s\n  symlink: %s -> %s", resolved1, hash1, resolved2, hash2)
+	}
+}
+
+// --- E. Tool extraction from content blocks ---
+
+// TestParseAssistantEntry_ToolUseWithCallID verifies that tool_use blocks in
+// assistant entries emit ToolUseWithID entries with the correlation ID.
+// Failure prevented: tool call IDs dropped, breaking call/result correlation.
+func TestParseAssistantEntry_ToolUseWithCallID(t *testing.T) {
+	line := []byte(`{"type":"assistant","timestamp":"2026-04-07T10:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"Let me read that file."},{"type":"tool_use","id":"toolu_abc123","name":"Read","input":{"file_path":"/src/main.go"}}]}}`)
+
+	entries, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2", len(entries))
+	}
+
+	// first entry: text
+	if entries[0].Role != adapterprotocol.RoleAssistant {
+		t.Errorf("entry[0].Role = %q, want %q", entries[0].Role, adapterprotocol.RoleAssistant)
+	}
+	if entries[0].Content != "Let me read that file." {
+		t.Errorf("entry[0].Content = %q, want %q", entries[0].Content, "Let me read that file.")
+	}
+
+	// second entry: tool_use with callID
+	if entries[1].Role != adapterprotocol.RoleTool {
+		t.Errorf("entry[1].Role = %q, want %q", entries[1].Role, adapterprotocol.RoleTool)
+	}
+	if entries[1].ToolName != "Read" {
+		t.Errorf("entry[1].ToolName = %q, want %q", entries[1].ToolName, "Read")
+	}
+	if entries[1].CallID != "toolu_abc123" {
+		t.Errorf("entry[1].CallID = %q, want %q", entries[1].CallID, "toolu_abc123")
+	}
+
+	// verify tool input is valid JSON
+	var input map[string]interface{}
+	if err := json.Unmarshal([]byte(entries[1].ToolInput), &input); err != nil {
+		t.Fatalf("entry[1].ToolInput not valid JSON: %v", err)
+	}
+	if input["file_path"] != "/src/main.go" {
+		t.Errorf("tool input file_path = %v, want /src/main.go", input["file_path"])
+	}
+}
+
+// TestParseUserEntry_ToolResultExtracted verifies that tool_result blocks in
+// user entries are emitted as ToolResult entries instead of being silently dropped.
+// Failure prevented: tool results lost from captured sessions (the core bug).
+func TestParseUserEntry_ToolResultExtracted(t *testing.T) {
+	line := []byte(`{"type":"user","timestamp":"2026-04-07T10:00:01Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_abc123","content":"file contents here","is_error":false}]}}`)
+
+	entries, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1 (tool_result)", len(entries))
+	}
+
+	e := entries[0]
+	if e.Role != adapterprotocol.RoleTool {
+		t.Errorf("Role = %q, want %q", e.Role, adapterprotocol.RoleTool)
+	}
+	if e.ToolOutput != "file contents here" {
+		t.Errorf("ToolOutput = %q, want %q", e.ToolOutput, "file contents here")
+	}
+	if e.CallID != "toolu_abc123" {
+		t.Errorf("CallID = %q, want %q", e.CallID, "toolu_abc123")
+	}
+	if e.IsError {
+		t.Error("IsError = true, want false")
+	}
+}
+
+// TestParseUserEntry_MixedTextAndToolResult verifies that user entries with
+// both text and tool_result blocks emit entries for both.
+// Failure prevented: text lost when tool_result is present in same turn.
+func TestParseUserEntry_MixedTextAndToolResult(t *testing.T) {
+	line := []byte(`{"type":"user","timestamp":"2026-04-07T10:00:01Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_xyz","content":"output data","is_error":false},{"type":"text","text":"Now do this next thing"}]}}`)
+
+	entries, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+
+	if len(entries) != 2 {
+		t.Fatalf("got %d entries, want 2 (user text + tool_result)", len(entries))
+	}
+
+	// should have a user text entry and a tool result entry
+	hasUser := false
+	hasTool := false
+	for _, e := range entries {
+		if e.Role == adapterprotocol.RoleUser && e.Content == "Now do this next thing" {
+			hasUser = true
+		}
+		if e.Role == adapterprotocol.RoleTool && e.ToolOutput == "output data" {
+			hasTool = true
+		}
+	}
+	if !hasUser {
+		t.Error("missing user text entry")
+	}
+	if !hasTool {
+		t.Error("missing tool result entry")
+	}
+}
+
+// TestParseUserEntry_ToolResultWithNestedContent verifies that tool_result
+// blocks with nested content arrays (text sub-blocks) are properly extracted.
+// Failure prevented: nested tool result content silently dropped.
+func TestParseUserEntry_ToolResultWithNestedContent(t *testing.T) {
+	line := []byte(`{"type":"user","timestamp":"2026-04-07T10:00:01Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_nested","content":[{"type":"text","text":"line 1"},{"type":"text","text":"line 2"}],"is_error":true}]}}`)
+
+	entries, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+
+	e := entries[0]
+	if e.ToolOutput != "line 1\nline 2" {
+		t.Errorf("ToolOutput = %q, want %q", e.ToolOutput, "line 1\nline 2")
+	}
+	if !e.IsError {
+		t.Error("IsError = false, want true")
+	}
+}
+
+// TestParseAssistantEntry_ToolUseWithoutCallID verifies fallback when
+// tool_use blocks lack an id field.
+// Failure prevented: panic or missing entry when id is absent.
+func TestParseAssistantEntry_ToolUseWithoutCallID(t *testing.T) {
+	line := []byte(`{"type":"assistant","timestamp":"2026-04-07T10:00:00Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}`)
+
+	entries, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+
+	if entries[0].CallID != "" {
+		t.Errorf("CallID = %q, want empty", entries[0].CallID)
+	}
+	if entries[0].ToolName != "Bash" {
+		t.Errorf("ToolName = %q, want %q", entries[0].ToolName, "Bash")
 	}
 }

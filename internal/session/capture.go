@@ -115,6 +115,60 @@ func CapturePrior(reader io.Reader, opts CaptureOptions) (*CaptureResult, error)
 	return result, nil
 }
 
+// CapturePriorFromHistory stores a pre-parsed CapturedHistory through the
+// capture-prior pipeline (redaction + storage). Use this when the history has
+// already been parsed by an adapter (e.g., via import-session) and doesn't
+// need JSONL validation.
+func CapturePriorFromHistory(history *CapturedHistory, opts CaptureOptions) (*CaptureResult, error) {
+	if history == nil || len(history.Entries) == 0 {
+		return nil, fmt.Errorf("capture-prior requires at least one entry")
+	}
+
+	// apply agent ID from options if not in metadata
+	agentID := opts.AgentID
+	if history.Meta != nil && history.Meta.AgentID != "" {
+		agentID = history.Meta.AgentID
+	}
+	if agentID == "" {
+		return nil, fmt.Errorf("agent_id required: provide in metadata or options")
+	}
+
+	// apply title from options if provided
+	if opts.Title != "" && history.Meta != nil {
+		history.Meta.SessionTitle = opts.Title
+	}
+
+	// redact secrets
+	var redactedCount int
+	if !opts.SkipRedaction {
+		redactor := NewRedactor()
+		redactedCount = redactor.RedactCapturedHistory(history)
+	}
+
+	// store the history
+	storagePath, err := StoreCapturedHistory(history, agentID, opts.MergeWithActive)
+	if err != nil {
+		return nil, fmt.Errorf("store history: %w", err)
+	}
+
+	result := &CaptureResult{
+		Path:            storagePath,
+		EntryCount:      len(history.Entries),
+		SecretsRedacted: redactedCount,
+		AgentID:         agentID,
+	}
+
+	if history.Meta != nil {
+		result.TimeRange = history.Meta.TimeRange
+		result.Title = history.Meta.SessionTitle
+	}
+
+	dir := filepath.Dir(storagePath)
+	result.SessionName = filepath.Base(dir)
+
+	return result, nil
+}
+
 // CapturePriorFromFile reads captured history from a file.
 func CapturePriorFromFile(path string, opts CaptureOptions) (*CaptureResult, error) {
 	f, err := os.Open(path)

@@ -35,6 +35,7 @@ const (
 	CapServeMode          = "serve_mode"
 	CapSubagentController = "subagent_controller"
 	CapRulesInstaller     = "rules_installer"
+	CapCapturePrior       = "capture_prior"
 )
 
 // --- Entry roles ---
@@ -394,6 +395,24 @@ type ImportSessionParams struct {
 type ImportSessionResult struct {
 	Metadata *SessionMetadata `json:"metadata,omitempty"`
 	Entries  []RawEntry       `json:"entries"`
+}
+
+// CapturePriorParams are the params for the capture-prior one-shot command.
+// Each adapter implements its own logic to find and parse the most recent
+// (or specified) session from the agent's native storage format.
+type CapturePriorParams struct {
+	SessionID string `json:"session_id,omitempty"` // native session ID (optional; adapter finds most recent if empty)
+	RepoRoot  string `json:"repo_root"`            // project root for session discovery
+	AgentID   string `json:"agent_id"`             // ox agent ID for metadata
+	Title     string `json:"title,omitempty"`       // optional session title
+}
+
+// CapturePriorResult is the result for capture-prior.
+type CapturePriorResult struct {
+	Entries    []RawEntry       `json:"entries"`
+	Metadata   *SessionMetadata `json:"metadata,omitempty"`
+	AgentType  string           `json:"agent_type"`            // adapter name (e.g., "claude-code")
+	SessionID  string           `json:"session_id,omitempty"`  // resolved native session ID
 }
 
 // EndSessionParams are the params for end-session.

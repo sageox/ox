@@ -8,6 +8,8 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
@@ -34,6 +36,7 @@ func main() {
 		UninstallRules: handleUninstallRules,
 		FindSession:    handleFindSession,
 		ImportSession:  handleImportSession,
+		CapturePrior:   handleCapturePrior,
 		Serve:          handleServe,
 	})
 }
@@ -53,6 +56,7 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 			adapterprotocol.CapFileWatcher,
 			adapterprotocol.CapServeMode,
 			adapterprotocol.CapSessionImporter,
+			adapterprotocol.CapCapturePrior,
 		},
 		HookEnvValues: []string{"claude-code"},
 		ServeMode:     true,
@@ -89,5 +93,36 @@ func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotoco
 	return &adapterprotocol.ImportSessionResult{
 		Metadata: meta,
 		Entries:  entries,
+	}, nil
+}
+
+func handleCapturePrior(p adapterprotocol.CapturePriorParams) (*adapterprotocol.CapturePriorResult, error) {
+	// find the session file (direct lookup if session ID provided, else most recent)
+	path, _, err := findSessionFile(p.RepoRoot, "", "", p.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session not found: %w", err)
+	}
+
+	entries, meta, err := readSessionFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading session: %w", err)
+	}
+
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("no entries found in session")
+	}
+
+	// extract session ID from the file path if not provided
+	resolvedID := p.SessionID
+	if resolvedID == "" {
+		base := filepath.Base(path)
+		resolvedID = strings.TrimSuffix(base, ".jsonl")
+	}
+
+	return &adapterprotocol.CapturePriorResult{
+		Entries:   entries,
+		Metadata:  meta,
+		AgentType: adapterName,
+		SessionID: resolvedID,
 	}, nil
 }

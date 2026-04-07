@@ -127,3 +127,29 @@ func TestFormatCapturePriorOutput(t *testing.T) {
 		}
 	})
 }
+
+func TestParseSessionID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no flag", []string{"capture-prior"}, ""},
+		{"separate value", []string{"--session-id", "abc-123"}, "abc-123"},
+		{"equals value", []string{"--session-id=abc-123"}, "abc-123"},
+		{"no value", []string{"--session-id"}, ""},
+		{"empty args", []string{}, ""},
+		{"between other args", []string{"--verbose", "--session-id", "sess-xyz", "--title", "test"}, "sess-xyz"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseSessionID(tt.args)
+			if got != tt.want {
+				t.Errorf("parseSessionID(%v) = %q, want %q", tt.args, got, tt.want)
+			}
+		})
+	}
+}

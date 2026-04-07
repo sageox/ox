@@ -314,6 +314,30 @@ func (ea *ExternalAdapter) ImportSession(sessionID, repoRoot string) (*adapterpr
 	return &result, nil
 }
 
+// CapturePrior delegates session capture to the adapter, which owns the
+// agent-specific session discovery and parsing logic.
+func (ea *ExternalAdapter) CapturePrior(params adapterprotocol.CapturePriorParams) (*adapterprotocol.CapturePriorResult, error) {
+	args := []string{
+		"--repo-root", params.RepoRoot,
+		"--agent-id", params.AgentID,
+	}
+	if params.SessionID != "" {
+		args = append(args, "--session-id", params.SessionID)
+	}
+	if params.Title != "" {
+		args = append(args, "--title", params.Title)
+	}
+	out, err := ea.execOneShot("capture-prior", args...)
+	if err != nil {
+		return nil, fmt.Errorf("capture-prior: %w", err)
+	}
+	var result adapterprotocol.CapturePriorResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("capture-prior: unmarshal: %w", err)
+	}
+	return &result, nil
+}
+
 // Info returns the cached adapter info.
 func (ea *ExternalAdapter) Info() *adapterprotocol.InfoResponse {
 	return ea.info
