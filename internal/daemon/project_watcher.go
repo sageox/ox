@@ -406,6 +406,7 @@ func (pw *ProjectWatcher) Start(ctx context.Context) {
 
 		case <-refreshTicker.C:
 			pw.tracker.Refresh()
+			pw.pruneStaleWatches(watcher)
 		}
 	}
 }
@@ -482,11 +483,15 @@ func (pw *ProjectWatcher) handleEvent(watcher FileSystemWatcher, event fsnotify.
 		}
 	}
 
-	// directory removed — remove from tracked set
+	// directory removed — remove from tracked set and release kqueue/inotify FD
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 		pw.mu.Lock()
+		_, wasWatched := pw.watchedDirs[event.Name]
 		delete(pw.watchedDirs, event.Name)
 		pw.mu.Unlock()
+		if wasWatched {
+			_ = watcher.Remove(event.Name)
+		}
 	}
 
 	// only pass through tracked files (or newly created files that may become tracked)
@@ -495,6 +500,39 @@ func (pw *ProjectWatcher) handleEvent(watcher FileSystemWatcher, event fsnotify.
 	}
 
 	pw.accumulator.AddEvent(relPath, event.Op, isDir)
+}
+
+// pruneStaleWatches removes watches for directories that are no longer
+// git-tracked. Called after each tracker.Refresh() to release kqueue/inotify
+// FDs for directories that were transiently watched (build outputs, temp dirs).
+func (pw *ProjectWatcher) pruneStaleWatches(watcher FileSystemWatcher) {
+	pw.mu.Lock()
+	snapshot := make(map[string]struct{}, len(pw.watchedDirs))
+	for d := range pw.watchedDirs {
+		snapshot[d] = struct{}{}
+	}
+	pw.mu.Unlock()
+
+	var pruned int
+	for absDir := range snapshot {
+		if absDir == pw.projectRoot {
+			continue
+		}
+		relDir, err := filepath.Rel(pw.projectRoot, absDir)
+		if err != nil {
+			continue
+		}
+		if !pw.tracker.IsTrackedDir(relDir) {
+			_ = watcher.Remove(absDir)
+			pw.mu.Lock()
+			delete(pw.watchedDirs, absDir)
+			pw.mu.Unlock()
+			pruned++
+		}
+	}
+	if pruned > 0 {
+		pw.logger.Info("project watcher: pruned stale watches", "count", pruned)
+	}
 }
 
 // WatchedDirCount returns the number of directories being watched.

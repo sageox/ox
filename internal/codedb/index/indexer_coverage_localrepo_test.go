@@ -2,7 +2,12 @@ package index
 
 import (
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
+
+	"github.com/sageox/ox/internal/testguard"
 )
 
 // --- IndexLocalRepo ---
@@ -12,6 +17,7 @@ func TestIndexLocalRepo_Idempotent(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git indexing")
 	}
+	testguard.RequireNoFDLeak(t)
 	dir, _ := initGitRepo(t, 3)
 	s := openTestStore(t)
 
@@ -168,6 +174,56 @@ func TestIndexLocalRepo_RefsRecorded(t *testing.T) {
 	}
 	if refName != "refs/heads/main" {
 		t.Errorf("expected ref refs/heads/main, got %q", refName)
+	}
+}
+
+// --- FD leak regression ---
+
+// TestIndexLocalRepo_NoFDLeak verifies that repeated IndexLocalRepo calls
+// don't leak file descriptors. go-git opens packfiles with KeepDescriptors
+// for performance — without repo.Close(), each call leaks those FDs.
+// Failure prevented: daemon exhausts FD limit after many indexing cycles.
+func TestIndexLocalRepo_NoFDLeak(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git indexing")
+	}
+	testguard.RequireNoFDLeak(t)
+
+	dir, _ := initGitRepo(t, 20)
+
+	// force packfile creation — KeepDescriptors only leaks when packfiles exist
+	gitGC := exec.Command("git", "gc", "--aggressive")
+	gitGC.Dir = dir
+	gitGC.Env = append(os.Environ(), // safe: git CLI in temp dir
+		"GIT_AUTHOR_NAME=test",
+		"GIT_AUTHOR_EMAIL=test@sageox.ai",
+	)
+	if out, err := gitGC.CombinedOutput(); err != nil {
+		t.Fatalf("git gc: %s: %v", out, err)
+	}
+
+	// verify packfile was created
+	packDir := filepath.Join(dir, ".git", "objects", "pack")
+	entries, _ := os.ReadDir(packDir)
+	hasPack := false
+	for _, e := range entries {
+		if filepath.Ext(e.Name()) == ".pack" {
+			hasPack = true
+			break
+		}
+	}
+	if !hasPack {
+		t.Skip("git gc did not create a packfile")
+	}
+
+	s := openTestStore(t)
+
+	// index 10 times — without Close(), this leaked ~2 FDs per call
+	for i := 0; i < 10; i++ {
+		if err := IndexLocalRepo(context.Background(), s, dir, IndexOptions{}); err != nil {
+			t.Fatalf("IndexLocalRepo pass %d: %v", i+1, err)
+		}
 	}
 }
 

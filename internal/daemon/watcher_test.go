@@ -888,3 +888,18 @@ func TestWatcher_ContextCancelCallsStop(t *testing.T) {
 	assert.True(t, w.stopped)
 	w.mu.Unlock()
 }
+
+// --- MockFileSystemWatcher.Remove tests ---
+
+func TestMockFileSystemWatcher_Remove(t *testing.T) {
+	mock := NewMockFileSystemWatcher()
+
+	require.NoError(t, mock.Remove("/path/a"))
+	require.NoError(t, mock.Remove("/path/b"))
+	assert.Equal(t, []string{"/path/a", "/path/b"}, mock.RemovedPaths())
+
+	mock.SetRemoveError(errors.New("not watched"))
+	err := mock.Remove("/path/c")
+	assert.Error(t, err)
+	assert.Equal(t, 3, len(mock.RemovedPaths()), "path still recorded even on error")
+}

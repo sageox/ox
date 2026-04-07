@@ -583,3 +583,185 @@ func TestChangeAccumulator_OnSettledNotCalledWhenEmpty(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	assert.Equal(t, int64(1), atomic.LoadInt64(&count), "callback should not fire with no pending changes")
 }
+
+// --- FD leak regression tests ---
+
+// TestProjectWatcher_RemoveOnDirectoryDelete verifies that deleting a watched
+// directory calls watcher.Remove() to release the kqueue/inotify FD.
+// Without this fix, deleted directory watches leak FDs indefinitely.
+func TestProjectWatcher_RemoveOnDirectoryDelete(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: watcher polling")
+	}
+	mockWatcher := NewMockFileSystemWatcher()
+	mockFS := NewMockFileSystem()
+
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "src")
+	require.NoError(t, os.MkdirAll(srcDir, 0755))
+	mockFS.AddDir(srcDir, nil)
+
+	acc := NewChangeAccumulator(50 * time.Millisecond)
+	defer acc.Stop()
+
+	tracker := &GitTrackedMatcher{
+		projectRoot:  dir,
+		trackedDirs:  map[string]struct{}{"src": {}},
+		trackedFiles: map[string]struct{}{},
+		logger:       slogDiscard(),
+	}
+
+	pw := NewProjectWatcher(
+		dir, slogDiscard(),
+		func() (FileSystemWatcher, error) { return mockWatcher, nil },
+		mockFS, acc, tracker,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		pw.Start(ctx)
+		close(done)
+	}()
+
+	// wait for initial watches
+	require.Eventually(t, func() bool {
+		return len(mockWatcher.AddedPaths()) >= 2
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// simulate directory deletion
+	mockFS.SetStatError(srcDir, os.ErrNotExist)
+	mockWatcher.SendEvent(fsnotify.Event{
+		Name: srcDir,
+		Op:   fsnotify.Remove,
+	})
+
+	// verify Remove() was called
+	require.Eventually(t, func() bool {
+		return len(mockWatcher.RemovedPaths()) >= 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	removed := mockWatcher.RemovedPaths()
+	assert.Contains(t, removed, srcDir, "watcher.Remove must be called for deleted directory")
+	assert.Equal(t, 1, pw.WatchedDirCount(), "only root should remain watched")
+
+	cancel()
+	<-done
+}
+
+// TestProjectWatcher_PruneStaleWatches verifies that directories which are no
+// longer git-tracked are pruned on the next refresh cycle.
+// Without this, non-tracked directories (build/, tmp/) accumulate watches.
+func TestProjectWatcher_PruneStaleWatches(t *testing.T) {
+	mockWatcher := NewMockFileSystemWatcher()
+	mockFS := NewMockFileSystem()
+
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "src")
+	buildDir := filepath.Join(dir, "build")
+	require.NoError(t, os.MkdirAll(srcDir, 0755))
+	require.NoError(t, os.MkdirAll(buildDir, 0755))
+	mockFS.AddDir(srcDir, nil)
+	mockFS.AddDir(buildDir, nil)
+
+	acc := NewChangeAccumulator(50 * time.Millisecond)
+	defer acc.Stop()
+
+	tracker := &GitTrackedMatcher{
+		projectRoot:  dir,
+		trackedDirs:  map[string]struct{}{"src": {}, "build": {}},
+		trackedFiles: map[string]struct{}{},
+		logger:       slogDiscard(),
+	}
+
+	pw := NewProjectWatcher(
+		dir, slogDiscard(),
+		func() (FileSystemWatcher, error) { return mockWatcher, nil },
+		mockFS, acc, tracker,
+	)
+
+	// simulate walkAndWatch to populate watchedDirs
+	pw.walkAndWatch(mockWatcher)
+	require.Equal(t, 3, pw.WatchedDirCount(), "root + src + build")
+
+	// now remove "build" from tracked dirs (simulating git branch switch)
+	tracker.mu.Lock()
+	delete(tracker.trackedDirs, "build")
+	tracker.mu.Unlock()
+
+	// prune
+	pw.pruneStaleWatches(mockWatcher)
+
+	assert.Equal(t, 2, pw.WatchedDirCount(), "root + src should remain")
+	removed := mockWatcher.RemovedPaths()
+	assert.Contains(t, removed, buildDir, "build dir should be pruned")
+}
+
+// TestProjectWatcher_FDStability verifies that Add and Remove counts stay
+// balanced across create+delete cycles — the core FD leak invariant.
+func TestProjectWatcher_FDStability(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: watcher polling")
+	}
+	mockWatcher := NewMockFileSystemWatcher()
+	mockFS := NewMockFileSystem()
+
+	dir := t.TempDir()
+	acc := NewChangeAccumulator(50 * time.Millisecond)
+	defer acc.Stop()
+
+	tracker := &GitTrackedMatcher{
+		projectRoot:  dir,
+		trackedDirs:  map[string]struct{}{},
+		trackedFiles: map[string]struct{}{},
+		logger:       slogDiscard(),
+	}
+
+	pw := NewProjectWatcher(
+		dir, slogDiscard(),
+		func() (FileSystemWatcher, error) { return mockWatcher, nil },
+		mockFS, acc, tracker,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		pw.Start(ctx)
+		close(done)
+	}()
+
+	// wait for root watch
+	require.Eventually(t, func() bool {
+		return len(mockWatcher.AddedPaths()) >= 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	initialAdds := len(mockWatcher.AddedPaths())
+
+	// simulate 10 create+delete directory cycles
+	for i := 0; i < 10; i++ {
+		tmpDir := filepath.Join(dir, "tmp", time.Now().Format("150405.000"))
+		mockFS.AddDir(tmpDir, nil)
+		mockWatcher.SendEvent(fsnotify.Event{Name: tmpDir, Op: fsnotify.Create})
+
+		// wait for add
+		time.Sleep(20 * time.Millisecond)
+
+		// delete
+		mockFS.SetStatError(tmpDir, os.ErrNotExist)
+		mockWatcher.SendEvent(fsnotify.Event{Name: tmpDir, Op: fsnotify.Remove})
+
+		// wait for remove
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// allow events to settle
+	time.Sleep(100 * time.Millisecond)
+
+	adds := len(mockWatcher.AddedPaths()) - initialAdds
+	removes := len(mockWatcher.RemovedPaths())
+	assert.Equal(t, adds, removes,
+		"every Add from a create event must have a matching Remove on delete (adds=%d, removes=%d)", adds, removes)
+
+	cancel()
+	<-done
+}

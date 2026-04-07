@@ -323,6 +323,7 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 	if err != nil {
 		return fmt.Errorf("open local repo %s: %w", localPath, err)
 	}
+	defer repo.Close()
 
 	// 2. Upsert repo record — use the local path as both name and path
 	repoName := filepath.Base(localPath)

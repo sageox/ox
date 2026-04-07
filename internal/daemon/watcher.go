@@ -20,6 +20,9 @@ type FileSystemWatcher interface {
 	// Add adds a path to the watch list.
 	Add(path string) error
 
+	// Remove removes a path from the watch list, releasing its file descriptor.
+	Remove(path string) error
+
 	// Events returns the channel for receiving file system events.
 	Events() <-chan fsnotify.Event
 
@@ -56,6 +59,11 @@ func NewRealFileSystemWatcher() (*RealFileSystemWatcher, error) {
 // Add adds a path to the watch list.
 func (r *RealFileSystemWatcher) Add(path string) error {
 	return r.watcher.Add(path)
+}
+
+// Remove removes a path from the watch list, releasing its file descriptor.
+func (r *RealFileSystemWatcher) Remove(path string) error {
+	return r.watcher.Remove(path)
 }
 
 // Events returns the channel for receiving file system events.
@@ -255,20 +263,23 @@ func (w *Watcher) debounce() {
 // MockFileSystemWatcher implements FileSystemWatcher for testing.
 // It allows tests to inject events and errors without real filesystem operations.
 type MockFileSystemWatcher struct {
-	events     chan fsnotify.Event
-	errors     chan error
-	addedPaths []string
-	addErr     error
-	closeErr   error
-	mu         sync.Mutex
+	events       chan fsnotify.Event
+	errors       chan error
+	addedPaths   []string
+	removedPaths []string
+	addErr       error
+	removeErr    error
+	closeErr     error
+	mu           sync.Mutex
 }
 
 // NewMockFileSystemWatcher creates a new mock watcher for testing.
 func NewMockFileSystemWatcher() *MockFileSystemWatcher {
 	return &MockFileSystemWatcher{
-		events:     make(chan fsnotify.Event, 100),
-		errors:     make(chan error, 10),
-		addedPaths: make([]string, 0),
+		events:       make(chan fsnotify.Event, 100),
+		errors:       make(chan error, 10),
+		addedPaths:   make([]string, 0),
+		removedPaths: make([]string, 0),
 	}
 }
 
@@ -278,6 +289,14 @@ func (m *MockFileSystemWatcher) Add(path string) error {
 	defer m.mu.Unlock()
 	m.addedPaths = append(m.addedPaths, path)
 	return m.addErr
+}
+
+// Remove records the path removal and returns the configured error (if any).
+func (m *MockFileSystemWatcher) Remove(path string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removedPaths = append(m.removedPaths, path)
+	return m.removeErr
 }
 
 // Events returns the events channel.
@@ -329,6 +348,22 @@ func (m *MockFileSystemWatcher) SetAddError(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.addErr = err
+}
+
+// RemovedPaths returns the paths that were removed from the watcher.
+func (m *MockFileSystemWatcher) RemovedPaths() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	paths := make([]string, len(m.removedPaths))
+	copy(paths, m.removedPaths)
+	return paths
+}
+
+// SetRemoveError configures the error to return from Remove().
+func (m *MockFileSystemWatcher) SetRemoveError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removeErr = err
 }
 
 // SetCloseError configures the error to return from Close().
