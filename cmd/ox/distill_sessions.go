@@ -96,6 +96,13 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, repoID, led
 			}
 			if err := facts.WriteFacts(filepath.Join(tc.Path, markerFile), markerHeader, nil); err != nil {
 				slog.Warn("failed to write empty session fact marker", "session", s.DirName, "error", err)
+				continue
+			}
+			if err := commitMemoryFile(tc.Path, markerFile, fmt.Sprintf("memory: mark session %s (no facts)", s.DirName)); err != nil {
+				slog.Warn("failed to commit session fact marker", "session", s.DirName, "error", err)
+				if removeErr := os.Remove(filepath.Join(tc.Path, markerFile)); removeErr != nil && !os.IsNotExist(removeErr) {
+					slog.Warn("failed to clean up uncommitted session fact marker", "session", s.DirName, "error", removeErr)
+				}
 			}
 			continue
 		}
