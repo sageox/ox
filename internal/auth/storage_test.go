@@ -798,6 +798,145 @@ func TestLoadAuthStore_LegacyMigration(t *testing.T) {
 	}
 }
 
+// TestLoadAuthStore_NullTokensField verifies that {"tokens": null} is treated as an
+// empty store and does NOT fall through to legacy migration, which would overwrite
+// auth.json with a zero-value StoredToken and silently wipe all credentials.
+func TestLoadAuthStore_NullTokensField(t *testing.T) {
+	t.Parallel()
+
+	client := NewTestClient(t)
+
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0700))
+	require.NoError(t, os.WriteFile(authPath, []byte(`{"tokens": null}`), 0600))
+
+	store, err := client.loadAuthStore()
+	require.NoError(t, err, `{"tokens": null} is valid JSON and should not error`)
+	require.NotNil(t, store)
+	assert.Empty(t, store.Tokens, "null tokens should yield an empty store, not a migrated zero-value token")
+
+	// the file must not have been overwritten with a zero-value token
+	raw, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+	var onDisk AuthStore
+	require.NoError(t, json.Unmarshal(raw, &onDisk))
+	for ep, tok := range onDisk.Tokens {
+		assert.NotEmpty(t, tok.AccessToken,
+			"disk must not contain a zero-value token for endpoint %s after null-tokens load", ep)
+	}
+}
+
+// TestSaveGetToken_SurvivesNullTokensOnDisk verifies the full observable contract:
+// after auth.json is overwritten externally with {"tokens": null}, GetToken must
+// return nil (no token) and must NOT persist a zero-value token to disk.
+func TestSaveGetToken_SurvivesNullTokensOnDisk(t *testing.T) {
+	t.Parallel()
+
+	client := NewTestClient(t)
+	_ = CreateTestTokenForClient(t, client, time.Hour)
+
+	// simulate external corruption
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(authPath, []byte(`{"tokens": null}`), 0600))
+
+	tok, err := client.GetToken()
+	require.NoError(t, err)
+
+	// correct behavior: nil token (no credentials), never a zero-value token
+	if tok != nil {
+		assert.NotEmpty(t, tok.AccessToken,
+			"GetToken must never return a zero-value token from a null-tokens file")
+	}
+
+	// disk must not have been silently rewritten with a zero-value token
+	raw, readErr := os.ReadFile(authPath)
+	require.NoError(t, readErr)
+	var onDisk AuthStore
+	require.NoError(t, json.Unmarshal(raw, &onDisk))
+	for ep, stored := range onDisk.Tokens {
+		assert.NotEmpty(t, stored.AccessToken,
+			"disk must not contain a zero-value token for endpoint %s", ep)
+	}
+}
+
+// TestLegacyMigration_TokenStoredUnderClientEndpoint verifies that a legacy
+// single-token file is migrated under the client's configured endpoint, not the
+// global default. A client configured for a custom endpoint must be able to read
+// back a migrated legacy token without needing to know the default endpoint.
+func TestLegacyMigration_TokenStoredUnderClientEndpoint(t *testing.T) {
+	t.Parallel()
+
+	customEndpoint := "https://custom.example.com"
+	client := NewTestClient(t).WithEndpoint(customEndpoint)
+
+	// write legacy single-token format (no "tokens" key)
+	legacyToken := StoredToken{
+		AccessToken:  "legacy-access",
+		RefreshToken: "legacy-refresh",
+		ExpiresAt:    time.Now().Add(time.Hour),
+		TokenType:    "Bearer",
+		UserInfo:     UserInfo{UserID: "user-legacy", Email: "legacy@example.com"},
+	}
+	data, err := json.Marshal(legacyToken)
+	require.NoError(t, err)
+
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0700))
+	require.NoError(t, os.WriteFile(authPath, data, 0600))
+
+	// the client must be able to retrieve the token via its configured endpoint
+	tok, err := client.GetToken()
+	require.NoError(t, err)
+	require.NotNil(t, tok, "migrated legacy token must be retrievable via client's endpoint")
+	assert.Equal(t, "legacy-access", tok.AccessToken)
+
+	// the on-disk key must match the client's endpoint, not a global default
+	raw, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+	var onDisk struct {
+		Tokens map[string]json.RawMessage `json:"tokens"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &onDisk))
+	_, found := onDisk.Tokens[customEndpoint]
+	assert.True(t, found,
+		"migrated token should be keyed under %q, got keys: %v",
+		customEndpoint, tokenKeys(onDisk.Tokens))
+}
+
+// TestNormalizeTokenKeys_CollisionSameExpiryIsStable verifies that when two
+// keys normalize to the same endpoint and have identical ExpiresAt, exactly one
+// token survives with a non-empty AccessToken (no panic, no empty slot).
+func TestNormalizeTokenKeys_CollisionSameExpiryIsStable(t *testing.T) {
+	t.Parallel()
+
+	expiry := time.Now().Add(time.Hour)
+	store := &AuthStore{
+		Tokens: map[string]*StoredToken{
+			"https://api.sageox.ai": {AccessToken: "token-a", ExpiresAt: expiry},
+			"https://www.sageox.ai": {AccessToken: "token-b", ExpiresAt: expiry},
+		},
+	}
+
+	normalizeTokenKeys(store)
+
+	assert.Len(t, store.Tokens, 1, "exactly one token should survive a same-expiry collision")
+	surviving := store.Tokens["https://sageox.ai"]
+	require.NotNil(t, surviving, "normalized key must exist after collision")
+	assert.NotEmpty(t, surviving.AccessToken, "surviving token must not be zero-value")
+}
+
+// tokenKeys extracts the keys of a map for use in test failure messages.
+func tokenKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 func TestLoadAuthStore_TruncatedJSON(t *testing.T) {
 	t.Parallel()
 	client := NewTestClient(t)

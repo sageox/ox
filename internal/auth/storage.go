@@ -23,15 +23,30 @@ type UserInfo struct {
 type StoredToken struct {
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
-	SessionToken string    `json:"session_token,omitempty"` // Better Auth fallback for refresh_token
+	// SessionToken is a Better Auth compatibility field. Better Auth servers may issue
+	// a single long-lived session token that serves as BOTH the access token AND the
+	// refresh token — i.e. access_token == refresh_token == session_token is a valid
+	// and intentional state. When the server omits refresh_token but provides
+	// session_token, EffectiveRefreshToken uses session_token so the refresh flow
+	// works correctly. Do NOT treat access_token == refresh_token as a bug.
+	// See PR #299 for the original fix, and refresh.go:effectiveRefreshToken.
+	SessionToken string    `json:"session_token,omitempty"`
 	ExpiresAt    time.Time `json:"expires_at"`
 	TokenType    string    `json:"token_type"`
 	Scope        string    `json:"scope"`
 	UserInfo     UserInfo  `json:"user_info"`
 }
 
-// EffectiveRefreshToken returns the refresh token, falling back to session_token
-// if refresh_token is empty (Better Auth compatibility).
+// EffectiveRefreshToken returns the token to use for refresh grant requests.
+//
+// Better Auth compatibility: some server configurations issue a session_token that
+// acts as a long-lived refresh credential instead of (or in addition to) a standard
+// OAuth2 refresh_token. In these configurations access_token == refresh_token is
+// normal and expected — the opaque session token can legitimately be sent as the
+// refresh_token in a grant_type=refresh_token request.
+//
+// When the session expires server-side the refresh will return 401/authentication_required,
+// which is correct — the user must re-login. This is not a client bug.
 func (t *StoredToken) EffectiveRefreshToken() string {
 	if t.RefreshToken != "" {
 		return t.RefreshToken
@@ -110,21 +125,37 @@ func loadAuthStore() (*AuthStore, error) {
 		return nil, fmt.Errorf("failed to read auth file: %w", err)
 	}
 
-	// try new multi-endpoint format first
-	var store AuthStore
-	if err := json.Unmarshal(data, &store); err == nil && store.Tokens != nil {
+	// Distinguish new multi-endpoint format from legacy single-token format by probing
+	// for the "tokens" key. This is necessary because both formats produce
+	// store.Tokens == nil after a bare json.Unmarshal (legacy has no "tokens" key;
+	// new format may have "tokens": null). We must not fall through to legacy
+	// migration for new-format files — doing so would overwrite the file with an
+	// empty zero-value StoredToken, silently wiping all credentials.
+	var probe struct {
+		Tokens json.RawMessage `json:"tokens"`
+	}
+	if json.Unmarshal(data, &probe) == nil && probe.Tokens != nil {
+		// "tokens" key is present — this is the new multi-endpoint format.
+		// Parse and normalize; treat null/empty tokens map as an empty store.
+		var store AuthStore
+		if err := json.Unmarshal(data, &store); err != nil {
+			return nil, fmt.Errorf("failed to parse auth file: %w", err)
+		}
+		if store.Tokens == nil {
+			store.Tokens = make(map[string]*StoredToken)
+		}
 		normalizeTokenKeys(&store)
 		return &store, nil
 	}
 
-	// migrate from legacy single-token format
+	// No "tokens" key — migrate from legacy single-token format.
 	var legacyToken StoredToken
 	if err := json.Unmarshal(data, &legacyToken); err != nil {
 		return nil, fmt.Errorf("failed to parse auth file: %w", err)
 	}
 
 	// migrate legacy token to new format using default endpoint
-	store = AuthStore{
+	store := AuthStore{
 		Tokens: map[string]*StoredToken{
 			endpoint.Get(): &legacyToken,
 		},
@@ -364,14 +395,24 @@ func (c *AuthClient) loadAuthStore() (*AuthStore, error) {
 		return nil, fmt.Errorf("failed to read auth file: %w", err)
 	}
 
-	// try new multi-endpoint format first
-	var store AuthStore
-	if err := json.Unmarshal(data, &store); err == nil && store.Tokens != nil {
+	// Distinguish new multi-endpoint format from legacy single-token format by probing
+	// for the "tokens" key. See the package-level loadAuthStore for the full rationale.
+	var probe struct {
+		Tokens json.RawMessage `json:"tokens"`
+	}
+	if json.Unmarshal(data, &probe) == nil && probe.Tokens != nil {
+		var store AuthStore
+		if err := json.Unmarshal(data, &store); err != nil {
+			return nil, fmt.Errorf("failed to parse auth file: %w", err)
+		}
+		if store.Tokens == nil {
+			store.Tokens = make(map[string]*StoredToken)
+		}
 		normalizeTokenKeys(&store)
 		return &store, nil
 	}
 
-	// migrate from legacy single-token format
+	// No "tokens" key — migrate from legacy single-token format.
 	var legacyToken StoredToken
 	if err := json.Unmarshal(data, &legacyToken); err != nil {
 		return nil, fmt.Errorf("failed to parse auth file: %w", err)
@@ -382,7 +423,7 @@ func (c *AuthClient) loadAuthStore() (*AuthStore, error) {
 	if ep == "" {
 		ep = endpoint.Get()
 	}
-	store = AuthStore{
+	store := AuthStore{
 		Tokens: map[string]*StoredToken{
 			ep: &legacyToken,
 		},

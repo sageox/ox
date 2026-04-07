@@ -38,13 +38,19 @@ type tokenResponse struct {
 	Scope        string `json:"scope"`
 }
 
-// effectiveRefreshToken returns the refresh token, falling back to session_token.
+// effectiveRefreshToken returns the token to use for subsequent refresh grant requests.
+//
+// Better Auth compatibility: some server configurations return session_token instead
+// of (or in addition to) a standard OAuth2 refresh_token. The session token is a
+// long-lived credential that the server accepts as a refresh_token — i.e. sending it
+// as grant_type=refresh_token is correct behavior, not a workaround.
+// See StoredToken.EffectiveRefreshToken for the stored-credential counterpart.
 func (t *tokenResponse) effectiveRefreshToken() string {
 	if t.RefreshToken != "" {
 		return t.RefreshToken
 	}
 	if t.SessionToken != "" {
-		slog.Warn("server returned session_token instead of refresh_token, using as fallback")
+		slog.Debug("server returned session_token instead of refresh_token (Better Auth mode), using as refresh credential")
 		return t.SessionToken
 	}
 	return ""

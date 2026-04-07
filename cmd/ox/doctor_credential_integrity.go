@@ -25,7 +25,15 @@ func init() {
 }
 
 // checkCredentialIntegrity validates that credential files contain valid JSON.
-// Corrupt files are auto-fixed by removal — the user will re-auth on next use.
+//
+// Scope: STRUCTURAL ONLY. This check tests json.Valid() and nothing else.
+// It intentionally does NOT inspect token expiry, empty access_token, missing
+// fields, or access_token == refresh_token (which is a valid Better Auth state —
+// see StoredToken.EffectiveRefreshToken). Semantic credential issues are handled
+// by the auth refresh flow, not here.
+//
+// Corrupt files (unparseable JSON) are auto-fixed by removal when --fix is passed.
+// The user must re-login after removal.
 func checkCredentialIntegrity(fix bool) checkResult {
 	return checkCredentialIntegrityInDir(paths.ConfigDir(), fix)
 }

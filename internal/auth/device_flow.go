@@ -194,11 +194,15 @@ func Login(ctx context.Context, deviceCode *DeviceCodeResponse, statusCallback f
 				return fmt.Errorf("failed to exchange token for JWT: %w", err)
 			}
 
-			// use JWT as access token, keep original refresh token
+			// Prefer JWT as access token; fall back to the opaque session token when the
+			// JWT exchange endpoint returns an empty access_token. This is a valid Better
+			// Auth configuration where the server does not issue JWTs — the opaque token
+			// is the credential. In this mode access_token == refresh_token is expected
+			// and intentional (see StoredToken.EffectiveRefreshToken). Do NOT treat this
+			// fallback as an error or broken state.
 			accessToken := jwtToken.AccessToken
 			if accessToken == "" {
-				// fallback to original if exchange didn't return a new token
-				slog.Warn("JWT exchange returned empty access_token, falling back to opaque token",
+				slog.Debug("JWT exchange returned empty access_token, using opaque session token (Better Auth mode)",
 					"endpoint", apiURL+"/api/v1/cli/auth/token")
 				accessToken = token.AccessToken
 			}
@@ -543,11 +547,15 @@ func (c *AuthClient) Login(ctx context.Context, deviceCode *DeviceCodeResponse, 
 				return fmt.Errorf("failed to exchange token for JWT: %w", err)
 			}
 
-			// use JWT as access token, keep original refresh token
+			// Prefer JWT as access token; fall back to the opaque session token when the
+			// JWT exchange endpoint returns an empty access_token. This is a valid Better
+			// Auth configuration where the server does not issue JWTs — the opaque token
+			// is the credential. In this mode access_token == refresh_token is expected
+			// and intentional (see StoredToken.EffectiveRefreshToken). Do NOT treat this
+			// fallback as an error or broken state.
 			accessToken := jwtToken.AccessToken
 			if accessToken == "" {
-				// fallback to original if exchange didn't return a new token
-				slog.Warn("JWT exchange returned empty access_token, falling back to opaque token",
+				slog.Debug("JWT exchange returned empty access_token, using opaque session token (Better Auth mode)",
 					"endpoint", apiURL+"/api/v1/cli/auth/token")
 				accessToken = token.AccessToken
 			}
