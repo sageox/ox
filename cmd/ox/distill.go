@@ -39,11 +39,11 @@ func contentHash(inputs ...string) string {
 // Handles both old naming (2026-03-10.md) and new naming (2026-03-10-{uuid7}.md).
 var dailyDateRe = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})`)
 
-// weeklyRe matches YYYY-WXX weekly filenames.
+// weeklyRe matches YYYY-WXX weekly filenames (with optional UUID7 suffix).
 var weeklyRe = regexp.MustCompile(`^(\d{4})-W(\d{2})`)
 
-// monthlyRe matches YYYY-MM monthly filenames.
-var monthlyRe = regexp.MustCompile(`^(\d{4}-\d{2})\.md$`)
+// monthlyRe matches YYYY-MM monthly filenames (with optional UUID7 suffix).
+var monthlyRe = regexp.MustCompile(`^(\d{4}-\d{2})(?:-[0-9a-f-]+)?\.md$`)
 
 // distillPlan describes what layers and periods to distill.
 type distillPlan struct {
@@ -882,7 +882,8 @@ func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend age
 			continue
 		}
 
-		factFile := filepath.Join("memory", ".discussion-facts", d.DirName+".jsonl")
+		uid, _ := uuid.NewV7() // error only if crypto/rand fails — zero UUID collision is acceptable
+		factFile := filepath.Join("memory", ".discussion-facts", d.DirName+"-"+uid.String()+".jsonl")
 		if err := writeMemoryFile(tc.Path, factFile, factContent); err != nil {
 			slog.Warn("failed to write discussion facts", "dir", d.DirName, "error", err)
 			continue
@@ -1160,7 +1161,8 @@ func distillWeekly(ctx context.Context, cmd *cobra.Command, backend agentcli.Bac
 		return fmt.Errorf("AI coworker: %w", err)
 	}
 
-	filePath := filepath.Join("memory", "weekly", weekID+".md")
+	wuid, _ := uuid.NewV7() // error only if crypto/rand fails — zero UUID collision is acceptable
+	filePath := filepath.Join("memory", "weekly", weekID+"-"+wuid.String()+".md")
 	content := fmt.Sprintf("# Weekly Memory — %s\n\n%s\n\n---\n*Synthesized from %d daily summaries (%s)*\n",
 		weekID, output, len(dailySummaries), strings.Join(dailyFiles, ", "))
 
@@ -1210,7 +1212,8 @@ func distillMonthly(ctx context.Context, cmd *cobra.Command, backend agentcli.Ba
 		return fmt.Errorf("AI coworker: %w", err)
 	}
 
-	filePath := filepath.Join("memory", "monthly", month+".md")
+	muid, _ := uuid.NewV7() // error only if crypto/rand fails — zero UUID collision is acceptable
+	filePath := filepath.Join("memory", "monthly", month+"-"+muid.String()+".md")
 	content := fmt.Sprintf("# Monthly Memory — %s\n\n%s\n\n---\n*Synthesized from %d weekly summaries (%s)*\n",
 		month, output, len(weeklySummaries), strings.Join(weeklyFiles, ", "))
 

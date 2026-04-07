@@ -75,12 +75,16 @@ func scanPendingDiscussions(tcPath string) ([]discussionInput, error) {
 		// compute content hash for change detection
 		currentHash := discussionContentHash(dirPath)
 
-		// check existing fact files for source_hash match
-		jsonlPath := filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".jsonl")
+		// check existing fact files for source_hash match (UUID7 glob + legacy fallback)
+		factsDir := filepath.Join(tcPath, "memory", ".discussion-facts")
+		existingHash := findLatestFactFileSourceHash(factsDir, dirName+"-*.jsonl")
+		if existingHash == "" {
+			existingHash = readFactFileSourceHash(filepath.Join(factsDir, dirName+".jsonl"))
+		}
 
-		// skip if JSONL fact file exists with matching source_hash;
+		// skip if fact file exists with matching source_hash;
 		// all other cases (missing, legacy .md, stale hash) need extraction
-		if readFactFileSourceHash(jsonlPath) == currentHash && currentHash != "" {
+		if existingHash == currentHash && currentHash != "" {
 			continue
 		}
 

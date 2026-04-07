@@ -14,7 +14,7 @@ func init() {
 		Slug:        CheckSlugGitHubDataMigration,
 		Name:        "GitHub data migration",
 		Category:    "Ledger Git Health",
-		FixLevel:    FixLevelAuto,
+		FixLevel:    FixLevelConfirm,
 		Description: "Renames legacy GitHub data filenames to content-hash format and repairs corrupted files",
 		Run:         func(fix bool) checkResult { return checkGitHubDataMigration(fix) },
 	})

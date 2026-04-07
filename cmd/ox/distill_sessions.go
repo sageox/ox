@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/facts"
 	"github.com/sageox/ox/pkg/sessionsummary"
@@ -85,7 +86,8 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, repoID, led
 		if len(extractedFacts) == 0 {
 			slog.Debug("no facts extracted from session", "session", s.DirName)
 			// write empty marker so scanPendingSessions skips this session
-			markerFile := filepath.Join("memory", ".session-facts", s.Date, s.DirName+".jsonl")
+			markerUID, _ := uuid.NewV7() // error only if crypto/rand fails — zero UUID collision is acceptable
+			markerFile := filepath.Join("memory", ".session-facts", s.Date, s.DirName+"-"+markerUID.String()+".jsonl")
 			markerHeader := facts.FileHeader{
 				Meta: facts.FileMeta{
 					SchemaVersion: facts.SchemaVersion,
@@ -116,7 +118,8 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, repoID, led
 			},
 		}
 
-		factFile := filepath.Join("memory", ".session-facts", s.Date, s.DirName+".jsonl")
+		uid, _ := uuid.NewV7() // error only if crypto/rand fails — zero UUID collision is acceptable
+		factFile := filepath.Join("memory", ".session-facts", s.Date, s.DirName+"-"+uid.String()+".jsonl")
 		fullPath := filepath.Join(tc.Path, factFile)
 
 		if err := facts.WriteFacts(fullPath, header, extractedFacts); err != nil {
@@ -215,9 +218,13 @@ func scanPendingSessions(ledgerPath, tcPath string) ([]sessionInput, error) {
 		// compute content hash for change detection
 		currentHash := contentHash(string(summaryData))
 
-		// check if fact file already exists with matching source_hash
-		factFilePath := filepath.Join(tcPath, "memory", ".session-facts", sessionDate, dirName+".jsonl")
-		if existingHash := readFactFileSourceHash(factFilePath); existingHash == currentHash {
+		// check if fact file already exists with matching source_hash (UUID7 glob + legacy fallback)
+		sessionFactsDir := filepath.Join(tcPath, "memory", ".session-facts", sessionDate)
+		existingHash := findLatestFactFileSourceHash(sessionFactsDir, dirName+"-*.jsonl")
+		if existingHash == "" {
+			existingHash = readFactFileSourceHash(filepath.Join(sessionFactsDir, dirName+".jsonl"))
+		}
+		if existingHash == currentHash {
 			continue // fact file is up to date
 		}
 
