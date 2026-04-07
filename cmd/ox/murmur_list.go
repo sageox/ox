@@ -1,14 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
 	lipgloss "charm.land/lipgloss/v2"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/spf13/cobra"
 )
@@ -69,10 +73,19 @@ func init() {
 
 // murmurListOutput is the JSON output format.
 type murmurListOutput struct {
-	Murmurs []murmurListEntry `json:"murmurs"`
-	Total   int               `json:"total"`
-	Window  string            `json:"window"`
-	Scope   string            `json:"scope,omitempty"`
+	Murmurs     []murmurListEntry    `json:"murmurs"`
+	Total       int                  `json:"total"`
+	Window      string               `json:"window"`
+	Scope       string               `json:"scope,omitempty"`
+	Diagnostics *murmurListDiagnostic `json:"diagnostics,omitempty"`
+}
+
+// murmurListDiagnostic surfaces sync/auth health when no murmurs are found.
+type murmurListDiagnostic struct {
+	Authenticated bool   `json:"authenticated"`
+	LedgerExists  bool   `json:"ledger_exists"`
+	UnpushedCount int    `json:"unpushed_count"`
+	Hint          string `json:"hint,omitempty"`
 }
 
 // murmurListEntry is a single murmur in JSON output.
@@ -196,6 +209,12 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 		allMurmurs = allMurmurs[:last]
 	}
 
+	// collect diagnostics when empty (check sync/auth health)
+	var diag *murmurListDiagnostic
+	if total == 0 {
+		diag = collectMurmurDiagnostics(projectRoot)
+	}
+
 	// JSON output
 	if jsonOutput {
 		entries := make([]murmurListEntry, 0, len(allMurmurs))
@@ -212,10 +231,11 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 			})
 		}
 		return outputJSON(murmurListOutput{
-			Murmurs: entries,
-			Total:   total,
-			Window:  windowLabel,
-			Scope:   scopeFilter,
+			Murmurs:     entries,
+			Total:       total,
+			Window:      windowLabel,
+			Scope:       scopeFilter,
+			Diagnostics: diag,
 		})
 	}
 
@@ -223,6 +243,9 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 	if len(allMurmurs) == 0 {
 		fmt.Println()
 		fmt.Println(murmurDimStyle.Render("  No murmurs found in the last " + windowLabel + "."))
+		if diag != nil {
+			printMurmurDiagnostics(diag)
+		}
 		fmt.Println()
 		cli.PrintHint("Murmurs are short-lived coordination signals from AI coworkers.")
 		cli.PrintHint("Publish one with: ox murmur --topic=wip \"what you're doing\"")
@@ -338,4 +361,56 @@ func parseDuration(s string) (time.Duration, error) {
 		return time.Duration(days) * 24 * time.Hour, nil
 	}
 	return time.ParseDuration(s)
+}
+
+// collectMurmurDiagnostics checks auth, ledger, and push health to explain
+// why murmurs may be empty. Only called when zero murmurs are found.
+func collectMurmurDiagnostics(projectRoot string) *murmurListDiagnostic {
+	diag := &murmurListDiagnostic{}
+
+	// check auth
+	ep := endpoint.GetForProject(projectRoot)
+	authenticated, _ := auth.IsAuthenticatedForEndpoint(ep)
+	diag.Authenticated = authenticated
+
+	// check ledger
+	ledgerPath := getLedgerPath()
+	diag.LedgerExists = ledgerPath != ""
+
+	// check for unpushed murmur commits
+	if ledgerPath != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		out, err := gitutil.RunGit(ctx, ledgerPath, "log", "--oneline", "origin/main..HEAD", "--", "data/murmurs/")
+		if err == nil && strings.TrimSpace(out) != "" {
+			diag.UnpushedCount = len(strings.Split(strings.TrimSpace(out), "\n"))
+		}
+	}
+
+	// build hint
+	switch {
+	case !diag.Authenticated:
+		diag.Hint = "Not logged in — murmur sync is disabled. Run: ox login"
+	case !diag.LedgerExists:
+		diag.Hint = "No ledger found — run: ox init"
+	case diag.UnpushedCount > 0:
+		diag.Hint = fmt.Sprintf("%d unpushed murmur(s) — sync may be failing. Run: ox doctor", diag.UnpushedCount)
+	}
+
+	// only return diagnostics if there's something to report
+	if diag.Hint == "" {
+		return nil
+	}
+	return diag
+}
+
+// murmurWarnStyle renders inline diagnostic warnings on stdout (not stderr).
+var murmurWarnStyle = lipgloss.NewStyle().Foreground(cli.ColorWarning)
+
+// printMurmurDiagnostics renders diagnostic warnings for the human-readable empty state.
+func printMurmurDiagnostics(diag *murmurListDiagnostic) {
+	if diag == nil || diag.Hint == "" {
+		return
+	}
+	fmt.Printf("\n  %s %s\n", murmurWarnStyle.Render("⚠"), murmurWarnStyle.Render(diag.Hint))
 }
