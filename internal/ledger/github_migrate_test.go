@@ -208,73 +208,7 @@ func TestMigrateLegacyGitHubFiles_Idempotent(t *testing.T) {
 	assert.Equal(t, 0, d2)
 }
 
-// --- C. Data version round-trip ---
-
-// TestReadWriteDataVersion verifies round-trip persistence of version data.
-// Failure prevented: migration version lost across restarts.
-func TestReadWriteDataVersion(t *testing.T) {
-	tmp := t.TempDir()
-
-	// read non-existent — should return version 0
-	v, err := ReadDataVersion(tmp)
-	require.NoError(t, err)
-	assert.Equal(t, 0, v.Version)
-	assert.NotNil(t, v.Migrations)
-
-	// write and read back
-	now := time.Now().UTC().Truncate(time.Second)
-	v.Version = 2
-	v.Migrations["content_hash_filenames"] = now
-	require.NoError(t, WriteDataVersion(tmp, v))
-
-	got, err := ReadDataVersion(tmp)
-	require.NoError(t, err)
-	assert.Equal(t, 2, got.Version)
-	assert.Equal(t, now.Unix(), got.Migrations["content_hash_filenames"].Unix())
-}
-
-// --- D. NeedsMigration ---
-
-// TestNeedsMigration verifies migration detection.
-// Failure prevented: migration skipped when still needed, or re-run unnecessarily.
-func TestNeedsMigration(t *testing.T) {
-	tmp := t.TempDir()
-
-	// no version file — needs migration
-	assert.True(t, NeedsMigration(tmp))
-
-	// version 0 — needs migration
-	v := &DataVersionFile{Version: 0, Migrations: make(map[string]time.Time)}
-	require.NoError(t, WriteDataVersion(tmp, v))
-	assert.True(t, NeedsMigration(tmp))
-
-	// version current — no migration needed
-	v.Version = CurrentDataVersion
-	require.NoError(t, WriteDataVersion(tmp, v))
-	assert.False(t, NeedsMigration(tmp))
-}
-
-// --- E. MarkMigration ---
-
-// TestMarkMigration_BumpsVersionWhenComplete verifies version bumps after all migrations.
-// Failure prevented: version stays at 0 even after all migrations complete.
-func TestMarkMigration_BumpsVersionWhenComplete(t *testing.T) {
-	tmp := t.TempDir()
-
-	require.NoError(t, MarkMigration(tmp, MigrationContentHashFilenames))
-	v, _ := ReadDataVersion(tmp)
-	assert.Equal(t, 0, v.Version, "version should not bump with partial migrations")
-
-	require.NoError(t, MarkMigration(tmp, MigrationUUID7FactFilenames))
-	v, _ = ReadDataVersion(tmp)
-	assert.Equal(t, 0, v.Version, "version should not bump with partial migrations")
-
-	require.NoError(t, MarkMigration(tmp, MigrationDailySummaryRefs))
-	v, _ = ReadDataVersion(tmp)
-	assert.Equal(t, CurrentDataVersion, v.Version, "version should bump when all migrations done")
-}
-
-// --- F. Empty ledger ---
+// --- C. Empty ledger ---
 
 // TestMigrateLegacyGitHubFiles_EmptyLedger verifies migration on empty ledger is a no-op.
 // Failure prevented: migration crashes on fresh/empty ledger.
@@ -294,4 +228,77 @@ func TestRepairConflictMarkerFiles_EmptyLedger(t *testing.T) {
 	count, err := RepairConflictMarkerFiles(tmp, slog.Default())
 	require.NoError(t, err)
 	assert.Equal(t, 0, count)
+}
+
+// --- G. ScanLegacyGitHubFiles ---
+
+// TestScanLegacyGitHubFiles verifies scan reports legacy and corrupted files without modifying them.
+// Failure prevented: doctor --no-fix can't tell users which files need migration.
+func TestScanLegacyGitHubFiles(t *testing.T) {
+	tmp := t.TempDir()
+	now := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	dir := DateDir(tmp, now, "pr")
+	require.NoError(t, os.MkdirAll(dir, 0755))
+
+	// legacy file
+	pr := PRFile{
+		Number: 42, Title: "Legacy", State: "open", Author: "alice",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	data, _ := json.MarshalIndent(&pr, "", "  ")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "42.json"), data, 0644))
+
+	// corrupted file
+	corrupted := `<<<<<<< HEAD
+{"number":99}
+=======
+{"number":99,"title":"conflict"}
+>>>>>>> branch`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "99.json"), []byte(corrupted), 0644))
+
+	// hash-named file (should be skipped)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "1-deadbeef.json"), data, 0644))
+
+	legacy, corrupt, err := ScanLegacyGitHubFiles(tmp)
+	require.NoError(t, err)
+	assert.Len(t, legacy, 1, "should find 1 legacy file")
+	assert.Len(t, corrupt, 1, "should find 1 corrupted file")
+
+	// Verify files were NOT modified
+	_, err = os.Stat(filepath.Join(dir, "42.json"))
+	assert.NoError(t, err, "legacy file should still exist")
+	_, err = os.Stat(filepath.Join(dir, "99.json"))
+	assert.NoError(t, err, "corrupted file should still exist")
+}
+
+// TestScanLegacyGitHubFiles_EmptyLedger verifies scan on empty ledger returns nothing.
+func TestScanLegacyGitHubFiles_EmptyLedger(t *testing.T) {
+	tmp := t.TempDir()
+
+	legacy, corrupt, err := ScanLegacyGitHubFiles(tmp)
+	require.NoError(t, err)
+	assert.Empty(t, legacy)
+	assert.Empty(t, corrupt)
+}
+
+// TestScanLegacyGitHubFiles_RelativePaths verifies paths are relative to ledger root.
+func TestScanLegacyGitHubFiles_RelativePaths(t *testing.T) {
+	tmp := t.TempDir()
+	now := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	dir := DateDir(tmp, now, "pr")
+	require.NoError(t, os.MkdirAll(dir, 0755))
+
+	pr := PRFile{
+		Number: 42, Title: "Legacy", State: "open", Author: "alice",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	data, _ := json.MarshalIndent(&pr, "", "  ")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "42.json"), data, 0644))
+
+	legacy, _, err := ScanLegacyGitHubFiles(tmp)
+	require.NoError(t, err)
+	require.Len(t, legacy, 1)
+	assert.Equal(t, filepath.Join("data", "github", "2026", "04", "01", "pr", "42.json"), legacy[0])
 }

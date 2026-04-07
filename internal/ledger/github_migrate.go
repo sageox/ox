@@ -1,29 +1,12 @@
 package ledger
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
-)
-
-const CurrentDataVersion = 2
-
-// DataVersionFile tracks which data migrations have been applied.
-type DataVersionFile struct {
-	Version    int                  `json:"version"`
-	Migrations map[string]time.Time `json:"migrations"`
-}
-
-// Migration name constants.
-const (
-	MigrationContentHashFilenames = "content_hash_filenames"
-	MigrationUUID7FactFilenames   = "uuid7_fact_filenames"
-	MigrationDailySummaryRefs     = "daily_summary_refs"
 )
 
 // legacyNumberPattern matches old-format filenames: NNN.json (no hash suffix).
@@ -124,90 +107,46 @@ func MigrateLegacyGitHubFiles(ledgerPath string, logger *slog.Logger) (migrated,
 	return migrated, deleted, nil
 }
 
-// dataVersionPath returns the path to the data version file.
-func dataVersionPath(ledgerPath string) string {
-	return filepath.Join(GitHubSyncCacheDir(ledgerPath), "data_version.json")
-}
-
-// ReadDataVersion reads the migration version from the ledger cache.
-// Returns version 0 if the file doesn't exist.
-func ReadDataVersion(ledgerPath string) (*DataVersionFile, error) {
-	path := dataVersionPath(ledgerPath)
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &DataVersionFile{
-				Version:    0,
-				Migrations: make(map[string]time.Time),
-			}, nil
+// ScanLegacyGitHubFiles reports legacy-format and corrupted files without modifying them.
+// Returns lists of files that would be renamed and deleted.
+// Paths are relative to ledgerPath.
+func ScanLegacyGitHubFiles(ledgerPath string) (legacyFiles, corruptedFiles []string, err error) {
+	for _, dataType := range []string{"pr", "issue"} {
+		files, listErr := ListGitHubDataFiles(ledgerPath, dataType)
+		if listErr != nil {
+			return legacyFiles, corruptedFiles, fmt.Errorf("list %s files: %w", dataType, listErr)
 		}
-		return nil, fmt.Errorf("read data version: %w", err)
-	}
 
-	var v DataVersionFile
-	if err := json.Unmarshal(data, &v); err != nil {
-		return nil, fmt.Errorf("unmarshal data version: %w", err)
-	}
-	if v.Migrations == nil {
-		v.Migrations = make(map[string]time.Time)
-	}
-	return &v, nil
-}
+		for _, path := range files {
+			name := filepath.Base(path)
 
-// WriteDataVersion writes the migration version to the ledger cache.
-func WriteDataVersion(ledgerPath string, v *DataVersionFile) error {
-	dir := GitHubSyncCacheDir(ledgerPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("create cache dir: %w", err)
-	}
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				continue
+			}
 
-	data, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal data version: %w", err)
-	}
+			rel, _ := filepath.Rel(ledgerPath, path)
+			if rel == "" {
+				rel = path
+			}
 
-	path := dataVersionPath(ledgerPath)
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("write data version: %w", err)
-	}
-	return nil
-}
+			if strings.Contains(string(data), "<<<<<<<") {
+				corruptedFiles = append(corruptedFiles, rel)
+				continue
+			}
 
-// NeedsMigration returns true if any migrations haven't been applied yet.
-func NeedsMigration(ledgerPath string) bool {
-	v, err := ReadDataVersion(ledgerPath)
-	if err != nil {
-		return true // assume migration needed on read error
-	}
-	return v.Version < CurrentDataVersion
-}
+			if parseHashFilename(name) >= 0 {
+				continue
+			}
 
-// MarkMigration records that a migration was applied and bumps the version
-// if all known migrations are complete.
-func MarkMigration(ledgerPath string, name string) error {
-	v, err := ReadDataVersion(ledgerPath)
-	if err != nil {
-		v = &DataVersionFile{
-			Version:    0,
-			Migrations: make(map[string]time.Time),
+			if !legacyNumberPattern.MatchString(name) {
+				continue
+			}
+
+			legacyFiles = append(legacyFiles, rel)
 		}
 	}
 
-	v.Migrations[name] = time.Now().UTC()
-
-	// bump version when all migrations are applied
-	allMigrations := []string{MigrationContentHashFilenames, MigrationUUID7FactFilenames, MigrationDailySummaryRefs}
-	allDone := true
-	for _, m := range allMigrations {
-		if _, ok := v.Migrations[m]; !ok {
-			allDone = false
-			break
-		}
-	}
-	if allDone {
-		v.Version = CurrentDataVersion
-	}
-
-	return WriteDataVersion(ledgerPath, v)
+	return legacyFiles, corruptedFiles, nil
 }
+

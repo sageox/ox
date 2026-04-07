@@ -1019,6 +1019,9 @@ func checkLedgerGitHealth(networkChecks bool, fixRemote bool, fixGitignore bool,
 		checks = append(checks, teamGitignoreCheck)
 	}
 
+	// check for legacy/corrupted GitHub data files
+	checks = append(checks, checkGitHubDataMigration(networkChecks))
+
 	return checks
 }
 
