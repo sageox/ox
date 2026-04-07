@@ -99,6 +99,16 @@ type SyncResult struct {
 // SyncPRs fetches PRs from GitHub and writes them to the ledger.
 // Uses cursor-based incremental sync to minimize API calls.
 func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo string, maxDays int, logger *slog.Logger) (*SyncResult, error) {
+	// One-time migration of legacy filenames
+	if NeedsMigration(ledgerPath) {
+		migrated, deleted, _ := MigrateLegacyGitHubFiles(ledgerPath, logger)
+		if migrated > 0 || deleted > 0 {
+			logger.Info("migrated legacy github files", "renamed", migrated, "deleted", deleted)
+		}
+		// Mark this migration done (best-effort)
+		_ = MarkMigration(ledgerPath, MigrationContentHashFilenames)
+	}
+
 	state, err := ReadGitHubTypeSyncState(ledgerPath, "pr")
 	if err != nil {
 		return nil, fmt.Errorf("read pr sync state: %w", err)
