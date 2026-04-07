@@ -279,20 +279,49 @@ func TestSetHeaders_WithoutOrchestrator(t *testing.T) {
 	assert.Empty(t, h.Get("X-Orchestrator"))
 }
 
-func TestSetHeaders_SetsTraceparent(t *testing.T) {
-	ResetForTesting()
-	clearEnv(t)
+func TestTraceparent(t *testing.T) {
+	tests := []struct {
+		name string
+		fn   func(t *testing.T)
+	}{
+		{
+			name: "SetHeaders sets valid traceparent",
+			fn: func(t *testing.T) {
+				ResetForTesting()
+				clearEnv(t)
 
-	h := http.Header{}
-	SetHeaders(h)
+				h := http.Header{}
+				SetHeaders(h)
 
-	tp := h.Get("traceparent")
-	assert.NotEmpty(t, tp)
-	assert.Regexp(t, regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-01$`), tp)
-}
+				tp := h.Get("traceparent")
+				assert.NotEmpty(t, tp)
+				assert.Regexp(t, regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-01$`), tp)
+			},
+		},
+		{
+			name: "unique per call",
+			fn: func(t *testing.T) {
+				a := traceparent()
+				b := traceparent()
+				assert.NotEqual(t, a, b)
+			},
+		},
+		{
+			name: "preserves existing traceparent",
+			fn: func(t *testing.T) {
+				ResetForTesting()
+				clearEnv(t)
 
-func TestTraceparent_UniquePerCall(t *testing.T) {
-	a := traceparent()
-	b := traceparent()
-	assert.NotEqual(t, a, b)
+				h := http.Header{}
+				existing := "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
+				h.Set("traceparent", existing)
+				SetHeaders(h)
+
+				assert.Equal(t, existing, h.Get("traceparent"))
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, tt.fn)
+	}
 }

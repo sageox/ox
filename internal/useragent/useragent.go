@@ -157,7 +157,9 @@ func SetHeaders(h http.Header) {
 	if ot := OrchestratorType(); ot != "" {
 		h.Set("X-Orchestrator", ot)
 	}
-	h.Set("traceparent", traceparent())
+	if h.Get("traceparent") == "" {
+		h.Set("traceparent", traceparent())
+	}
 }
 
 // DaemonString returns the User-Agent for daemon requests.
