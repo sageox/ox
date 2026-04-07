@@ -2,6 +2,7 @@ package useragent
 
 import (
 	"net/http"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -276,4 +277,22 @@ func TestSetHeaders_WithoutOrchestrator(t *testing.T) {
 
 	assert.NotEmpty(t, h.Get("User-Agent"))
 	assert.Empty(t, h.Get("X-Orchestrator"))
+}
+
+func TestSetHeaders_SetsTraceparent(t *testing.T) {
+	ResetForTesting()
+	clearEnv(t)
+
+	h := http.Header{}
+	SetHeaders(h)
+
+	tp := h.Get("traceparent")
+	assert.NotEmpty(t, tp)
+	assert.Regexp(t, regexp.MustCompile(`^00-[0-9a-f]{32}-[0-9a-f]{16}-01$`), tp)
+}
+
+func TestTraceparent_UniquePerCall(t *testing.T) {
+	a := traceparent()
+	b := traceparent()
+	assert.NotEqual(t, a, b)
 }

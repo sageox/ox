@@ -2,6 +2,8 @@ package useragent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -139,13 +141,23 @@ func NewRequest(ctx context.Context, method, url string, body io.Reader) (*http.
 	return req, nil
 }
 
-// SetHeaders sets User-Agent and X-Orchestrator headers on the request.
+// traceparent generates a W3C Trace Context traceparent header value.
+// Format: "00-{32 hex trace ID}-{16 hex span ID}-01"
+// See: https://www.w3.org/TR/trace-context/#traceparent-header
+func traceparent() string {
+	var buf [24]byte // 16 (trace ID) + 8 (span ID)
+	_, _ = rand.Read(buf[:])
+	return "00-" + hex.EncodeToString(buf[:16]) + "-" + hex.EncodeToString(buf[16:]) + "-01"
+}
+
+// SetHeaders sets User-Agent, X-Orchestrator, and traceparent headers on the request.
 // Use this for SageOx API requests to include full telemetry context.
 func SetHeaders(h http.Header) {
 	h.Set("User-Agent", String())
 	if ot := OrchestratorType(); ot != "" {
 		h.Set("X-Orchestrator", ot)
 	}
+	h.Set("traceparent", traceparent())
 }
 
 // DaemonString returns the User-Agent for daemon requests.

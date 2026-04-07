@@ -58,21 +58,20 @@ func (s *Store) Maintain(ctx context.Context) MaintenanceResult {
 		result.Duration = time.Since(start)
 		return result
 	}
-	orphanBlobQuery := `SELECT id FROM blobs WHERE id NOT IN (SELECT DISTINCT blob_id FROM file_revs)`
-
 	// prune symbol_refs and symbols for orphan blobs BEFORE deleting blobs
 	// (symbols.blob_id has FK to blobs.id — must delete children first)
+	const deleteOrphanSymbolRefs = `DELETE FROM symbol_refs WHERE blob_id IN (SELECT id FROM blobs WHERE id NOT IN (SELECT DISTINCT blob_id FROM file_revs))`
+	const deleteOrphanSymbols = `DELETE FROM symbols WHERE blob_id IN (SELECT id FROM blobs WHERE id NOT IN (SELECT DISTINCT blob_id FROM file_revs))`
+
 	if ctx.Err() != nil {
 		result.Duration = time.Since(start)
 		return result
 	}
-	if _, err := s.db.ExecContext(ctx,
-		`DELETE FROM symbol_refs WHERE blob_id IN (`+orphanBlobQuery+`)`); err != nil {
+	if _, err := s.db.ExecContext(ctx, deleteOrphanSymbolRefs); err != nil {
 		slog.Warn("codedb maintenance: failed to prune orphan symbol_refs", "error", err)
 	}
 
-	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM symbols WHERE blob_id IN (`+orphanBlobQuery+`)`)
+	res, err := s.db.ExecContext(ctx, deleteOrphanSymbols)
 	if err != nil {
 		slog.Warn("codedb maintenance: failed to prune orphan symbols", "error", err)
 	} else {
