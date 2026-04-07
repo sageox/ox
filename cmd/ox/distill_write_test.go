@@ -18,6 +18,9 @@ import (
 // index so it doesn't accumulate as dirty state across daemon --autostash cycles.
 // Failure prevented: staged-but-uncommitted files blocking git pull --rebase (#445).
 func TestCommitMemoryFile_UnstagesOnCommitFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git repo setup + pre-commit hook")
+	}
 	tmp := t.TempDir()
 	initGitRepo(t, tmp)
 
@@ -59,6 +62,9 @@ func TestCommitMemoryFile_UnstagesOnCommitFailure(t *testing.T) {
 // unstages the deletion when git commit fails.
 // Failure prevented: staged deletions blocking git pull --rebase (#445).
 func TestRemoveMemoryFile_UnstagesOnCommitFailure(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git repo setup + pre-commit hook")
+	}
 	tmp := t.TempDir()
 	initGitRepo(t, tmp)
 
@@ -102,6 +108,9 @@ func TestRemoveMemoryFile_UnstagesOnCommitFailure(t *testing.T) {
 
 // TestCommitMemoryFile_CommitsSuccessfully verifies the normal happy path.
 func TestCommitMemoryFile_CommitsSuccessfully(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git repo setup")
+	}
 	tmp := t.TempDir()
 	initGitRepo(t, tmp)
 
@@ -122,6 +131,9 @@ func TestCommitMemoryFile_CommitsSuccessfully(t *testing.T) {
 
 // TestCommitMemoryFile_NothingToCommit verifies the no-op case.
 func TestCommitMemoryFile_NothingToCommit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git repo setup")
+	}
 	tmp := t.TempDir()
 	initGitRepo(t, tmp)
 
