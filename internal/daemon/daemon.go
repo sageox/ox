@@ -23,6 +23,7 @@ import (
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/version"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -1423,6 +1424,17 @@ func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
 				"cache_path", payload.CachePath, "ledger", payload.LedgerPath)
 		}
 	}
+
+	// defense in depth: reject header-only sessions before enqueueing.
+	// the primary guard is in processAgentSession (CLI), but this prevents any
+	// empty session from reaching the LLM and being committed to the ledger.
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	if !session.HasSubstantiveEntries(rawPath) {
+		s.d.logger.Info("session_finalize skipped: header-only raw.jsonl, nothing to upload",
+			"session", payload.SessionName)
+		return
+	}
+
 	s.d.agentWorker.Enqueue(&agentwork.WorkItem{
 		Type:     "session-finalize",
 		Priority: 1, // high priority (vs 10 for doctor-detected)

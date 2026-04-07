@@ -942,7 +942,11 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		result.UploadWarning = "Session saved locally but ledger upload skipped (no ledger). Run 'ox doctor' to retry."
 	} else if asyncUpload {
 		// async mode: copy files to ledger dir locally, signal daemon to upload+finalize
-		if copyErr := copySessionCacheToLedger(result, ledgerPath, sessionName); copyErr != nil {
+		if result.EntryCount == 0 {
+			// nothing to upload — skip copy and daemon signal entirely.
+			// the 1-line header-only raw.jsonl written at session start is not worth committing.
+			slog.Info("async upload skipped: session has no entries", "session", sessionName)
+		} else if copyErr := copySessionCacheToLedger(result, ledgerPath, sessionName); copyErr != nil {
 			slog.Warn("async copy to ledger failed", "error", copyErr)
 			_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			result.UploadWarning = "Session saved locally but async copy failed. Run 'ox doctor' to retry."
