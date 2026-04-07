@@ -130,8 +130,9 @@ func migrateDistillGuidelines(tcPath string) (bool, error) {
 			return true, nil
 		}
 
-		// unstage so a failed commit doesn't leave dirty index state
-		resetCmd := exec.Command("git", "reset", "HEAD", "--")
+		// unstage both paths (old location + new location) so a failed commit
+		// doesn't leave dirty index state or affect unrelated staged files
+		resetCmd := exec.Command("git", "reset", "HEAD", "--", "DISTILL.md", filepath.Join("memory", "guidance", "DISTILL.md"))
 		resetCmd.Dir = tcPath
 		if resetOut, resetErr := resetCmd.CombinedOutput(); resetErr != nil {
 			slog.Warn("failed to unstage after migration commit failure", "error", fmt.Sprintf("%s: %v", string(resetOut), resetErr))
