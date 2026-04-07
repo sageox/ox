@@ -335,10 +335,10 @@ func TestGenerateWorkerID_Format(t *testing.T) {
 				t.Errorf("expected prefix %q, got %q", expectedPrefix, id)
 			}
 
-			// suffix should be 4 chars
+			// suffix should be 6 chars
 			suffix := id[len(expectedPrefix):]
-			if len(suffix) != 4 {
-				t.Errorf("expected 4-char suffix, got %q (%d chars)", suffix, len(suffix))
+			if len(suffix) != 6 {
+				t.Errorf("expected 6-char suffix, got %q (%d chars)", suffix, len(suffix))
 			}
 		})
 	}

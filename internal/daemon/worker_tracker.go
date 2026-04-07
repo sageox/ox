@@ -181,7 +181,7 @@ func isTerminalStatus(status string) bool {
 }
 
 // GenerateWorkerID creates a worker ID scoped to the parent session.
-// Format: w-<agent_id_prefix>-<4char_random>
+// Format: w-<agent_id_prefix>-<6char_random>
 func GenerateWorkerID(agentID string) string {
 	prefix := agentID
 	if len(prefix) > 8 {
@@ -189,7 +189,7 @@ func GenerateWorkerID(agentID string) string {
 	}
 
 	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
-	suffix := make([]byte, 4)
+	suffix := make([]byte, 6)
 	for i := range suffix {
 		suffix[i] = chars[rand.IntN(len(chars))]
 	}
