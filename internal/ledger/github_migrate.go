@@ -78,6 +78,23 @@ func MigrateLegacyGitHubFiles(ledgerPath string, logger *slog.Logger) (migrated,
 		for _, path := range files {
 			name := filepath.Base(path)
 
+			// Check ALL files for conflict markers first — even hash-named
+			// files can be corrupted by git merge conflicts.
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				logger.Debug("skip unreadable file", "path", path, "error", readErr)
+				continue
+			}
+
+			if strings.Contains(string(data), "<<<<<<<") {
+				logger.Warn("deleting corrupted file with conflict markers", "path", path)
+				if rmErr := os.Remove(path); rmErr != nil {
+					return migrated, deleted, fmt.Errorf("remove corrupted file %s: %w", path, rmErr)
+				}
+				deleted++
+				continue
+			}
+
 			// skip files already in content-hash format
 			if parseHashFilename(name) >= 0 {
 				logger.Debug("skip hash-named file", "path", path)
@@ -87,22 +104,6 @@ func MigrateLegacyGitHubFiles(ledgerPath string, logger *slog.Logger) (migrated,
 			// check for legacy pattern
 			if !legacyNumberPattern.MatchString(name) {
 				logger.Debug("skip non-legacy file", "path", path)
-				continue
-			}
-
-			data, readErr := os.ReadFile(path)
-			if readErr != nil {
-				logger.Debug("skip unreadable file", "path", path, "error", readErr)
-				continue
-			}
-
-			// check for conflict markers
-			if strings.Contains(string(data), "<<<<<<<") {
-				logger.Warn("deleting corrupted legacy file", "path", path)
-				if rmErr := os.Remove(path); rmErr != nil {
-					return migrated, deleted, fmt.Errorf("remove corrupted file %s: %w", path, rmErr)
-				}
-				deleted++
 				continue
 			}
 

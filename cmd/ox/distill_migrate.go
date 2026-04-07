@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -157,11 +158,14 @@ func UpdateDailySummaryRefs(tcPath string, logger *slog.Logger) (int, error) {
 }
 
 // findRenamedFactFile looks for a UUID7-named file in factsDir that matches
-// the legacy filename pattern. Returns the new relative path or empty string.
+// the legacy filename pattern. Returns the new relative path (POSIX forward
+// slashes for frontmatter storage) or empty string.
 func findRenamedFactFile(factsDir, legacyBase, legacyRelPath string) string {
 	// determine the glob pattern from the legacy filename
 	var globPattern string
-	dir := filepath.Dir(legacyRelPath) // e.g., "memory/.github-facts"
+	// Use path.Dir (POSIX) — the returned ref is stored in markdown frontmatter,
+	// so it must use forward slashes regardless of OS.
+	dir := path.Dir(legacyRelPath) // e.g., "memory/.github-facts"
 
 	switch {
 	case legacyPRFactPattern.MatchString(legacyBase):
@@ -177,6 +181,7 @@ func findRenamedFactFile(factsDir, legacyBase, legacyRelPath string) string {
 		return ""
 	}
 
+	// Use filepath.Glob for filesystem operations (OS-native paths)
 	matches, err := filepath.Glob(filepath.Join(factsDir, globPattern))
 	if err != nil || len(matches) == 0 {
 		return ""
@@ -190,5 +195,6 @@ func findRenamedFactFile(factsDir, legacyBase, legacyRelPath string) string {
 		}
 	}
 
-	return filepath.Join(dir, filepath.Base(best))
+	// Use path.Join (POSIX) for the returned ref stored in frontmatter
+	return path.Join(dir, filepath.Base(best))
 }

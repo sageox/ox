@@ -151,6 +151,34 @@ func TestMigrateLegacyGitHubFiles_DeletesCorrupted(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 }
 
+// TestMigrateLegacyGitHubFiles_DeletesCorruptedHashNamed verifies that hash-named
+// files with conflict markers are detected and deleted.
+// Failure prevented: corrupted hash-named files skip the conflict check and persist.
+func TestMigrateLegacyGitHubFiles_DeletesCorruptedHashNamed(t *testing.T) {
+	tmp := t.TempDir()
+	now := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+
+	dir := DateDir(tmp, now, "pr")
+	require.NoError(t, os.MkdirAll(dir, 0755))
+
+	corrupted := `<<<<<<< HEAD
+{"number":99}
+=======
+{"number":99,"title":"conflict"}
+>>>>>>> branch`
+	// Hash-named file (already migrated format) but with conflict markers
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "99-deadbeef.json"), []byte(corrupted), 0644))
+
+	migrated, deleted, err := MigrateLegacyGitHubFiles(tmp, slog.Default())
+	require.NoError(t, err)
+	assert.Equal(t, 0, migrated)
+	assert.Equal(t, 1, deleted)
+
+	// corrupted hash-named file should be gone
+	_, err = os.Stat(filepath.Join(dir, "99-deadbeef.json"))
+	assert.True(t, os.IsNotExist(err))
+}
+
 // TestMigrateLegacyGitHubFiles_Idempotent verifies running migration twice is safe.
 // Failure prevented: migration crashes on second run.
 func TestMigrateLegacyGitHubFiles_Idempotent(t *testing.T) {

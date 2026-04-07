@@ -99,14 +99,21 @@ type SyncResult struct {
 // SyncPRs fetches PRs from GitHub and writes them to the ledger.
 // Uses cursor-based incremental sync to minimize API calls.
 func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo string, maxDays int, logger *slog.Logger) (*SyncResult, error) {
-	// One-time migration of legacy filenames
-	if NeedsMigration(ledgerPath) {
-		migrated, deleted, _ := MigrateLegacyGitHubFiles(ledgerPath, logger)
-		if migrated > 0 || deleted > 0 {
-			logger.Info("migrated legacy github files", "renamed", migrated, "deleted", deleted)
+	// One-time migration of legacy filenames — check phase-specific flag
+	// (not version-wide NeedsMigration) so this doesn't re-scan every sync
+	// when the other two migration phases haven't run yet.
+	if v, err := ReadDataVersion(ledgerPath); err != nil || v.Migrations[MigrationContentHashFilenames].IsZero() {
+		migrated, deleted, migErr := MigrateLegacyGitHubFiles(ledgerPath, logger)
+		if migErr != nil {
+			logger.Warn("legacy github migration failed", "error", migErr)
+		} else {
+			if migrated > 0 || deleted > 0 {
+				logger.Info("migrated legacy github files", "renamed", migrated, "deleted", deleted)
+			}
+			if markErr := MarkMigration(ledgerPath, MigrationContentHashFilenames); markErr != nil {
+				logger.Warn("failed to mark github filename migration", "error", markErr)
+			}
 		}
-		// Mark this migration done (best-effort)
-		_ = MarkMigration(ledgerPath, MigrationContentHashFilenames)
 	}
 
 	state, err := ReadGitHubTypeSyncState(ledgerPath, "pr")

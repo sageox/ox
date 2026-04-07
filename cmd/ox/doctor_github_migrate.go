@@ -58,6 +58,8 @@ func checkGitHubDataMigration(fix bool) checkResult {
 	}
 
 	// Phase 2+3: Migrate fact files in team context
+	factPhaseComplete := true
+	refsPhaseComplete := true
 	gitRoot := findGitRoot()
 	if gitRoot != "" {
 		tcs := config.FindAllTeamContexts(gitRoot)
@@ -68,6 +70,7 @@ func checkGitHubDataMigration(fix bool) checkResult {
 			factsMigrated, factErr := MigrateLegacyFactFiles(tc.Path, logger)
 			if factErr != nil {
 				logger.Warn("fact file migration failed", "tc", tc.Path, "error", factErr)
+				factPhaseComplete = false
 				continue
 			}
 			totalMigrated += factsMigrated
@@ -75,6 +78,7 @@ func checkGitHubDataMigration(fix bool) checkResult {
 			refsUpdated, refErr := UpdateDailySummaryRefs(tc.Path, logger)
 			if refErr != nil {
 				logger.Warn("daily summary ref update failed", "tc", tc.Path, "error", refErr)
+				refsPhaseComplete = false
 			}
 			if refsUpdated > 0 {
 				logger.Info("updated daily summary refs", "tc", tc.Path, "count", refsUpdated)
@@ -82,12 +86,16 @@ func checkGitHubDataMigration(fix bool) checkResult {
 		}
 	}
 
-	// Mark fact-related migrations
-	if markErr := ledger.MarkMigration(ledgerPath, ledger.MigrationUUID7FactFilenames); markErr != nil {
-		logger.Warn("failed to mark uuid7_fact_filenames migration", "error", markErr)
+	// Only mark fact-related migrations if ALL team contexts succeeded
+	if factPhaseComplete {
+		if markErr := ledger.MarkMigration(ledgerPath, ledger.MigrationUUID7FactFilenames); markErr != nil {
+			logger.Warn("failed to mark uuid7_fact_filenames migration", "error", markErr)
+		}
 	}
-	if markErr := ledger.MarkMigration(ledgerPath, ledger.MigrationDailySummaryRefs); markErr != nil {
-		logger.Warn("failed to mark daily_summary_refs migration", "error", markErr)
+	if refsPhaseComplete {
+		if markErr := ledger.MarkMigration(ledgerPath, ledger.MigrationDailySummaryRefs); markErr != nil {
+			logger.Warn("failed to mark daily_summary_refs migration", "error", markErr)
+		}
 	}
 
 	if totalMigrated == 0 && totalDeleted == 0 {
