@@ -7,6 +7,19 @@ import (
 	"github.com/sageox/ox/internal/ledger"
 )
 
+const CheckSlugGitHubDataMigration = "github-data-migration"
+
+func init() {
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugGitHubDataMigration,
+		Name:        "GitHub data migration",
+		Category:    "Ledger Git Health",
+		FixLevel:    FixLevelAuto,
+		Description: "Renames legacy GitHub data filenames to content-hash format and repairs corrupted files",
+		Run:         func(fix bool) checkResult { return checkGitHubDataMigration(fix) },
+	})
+}
+
 // checkGitHubDataMigration checks for legacy-format GitHub data files
 // and migrates them on --fix.
 func checkGitHubDataMigration(fix bool) checkResult {
