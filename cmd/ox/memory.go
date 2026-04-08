@@ -14,6 +14,7 @@ var memoryCmd = &cobra.Command{
 func init() {
 	memoryCmd.AddCommand(memoryPutCmd)
 	memoryCmd.AddCommand(memoryDistillCmd)
+	memoryCmd.AddCommand(memoryImportCmd)
 	if auth.IsMemoryEnabled() {
 		rootCmd.AddCommand(memoryCmd)
 	}

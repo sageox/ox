@@ -143,6 +143,10 @@ type ProjectConfig struct {
 	// Example: "America/New_York", "Europe/London", "Asia/Tokyo"
 	// If empty, falls back to team config, then UTC.
 	Timezone string `json:"timezone,omitempty"`
+
+	// MemoryImport controls AI coworker memory import into the ledger.
+	// Values: "manual" (CLI only, default), "auto" (daemon imports automatically), "disabled"
+	MemoryImport string `json:"memory_import,omitempty"`
 }
 
 // NeedsUpgrade returns true if the config version is older than CurrentConfigVersion
