@@ -188,7 +188,28 @@ func TestFindSessionFile_MtimeBuffer(t *testing.T) {
 		t.Errorf("got %q, want %q", got, withinBuffer)
 	}
 
+	// file mtime is exactly 30 seconds before sinceTime — at the buffer boundary
+	// the buffer subtracts 30s, so mtime == (since - 30s) should pass (>= comparison)
+	os.Remove(withinBuffer)
+	atBoundary := filepath.Join(projectDir, "at-boundary.jsonl")
+	if err := os.WriteFile(atBoundary, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	boundaryMtime := sinceTime.Add(-30 * time.Second)
+	if err := os.Chtimes(atBoundary, boundaryMtime, boundaryMtime); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err = findSessionFile(repoRoot, "", sinceTime.Format(time.RFC3339), "")
+	if err != nil {
+		t.Fatalf("findSessionFile should find file at exact 30s buffer boundary, got error: %v", err)
+	}
+	if got != atBoundary {
+		t.Errorf("got %q, want %q", got, atBoundary)
+	}
+
 	// file mtime is 60 seconds before sinceTime — outside the 30s buffer
+	os.Remove(atBoundary)
 	outsideBuffer := filepath.Join(projectDir, "outside-buffer.jsonl")
 	if err := os.WriteFile(outsideBuffer, content, 0o644); err != nil {
 		t.Fatal(err)
@@ -197,8 +218,6 @@ func TestFindSessionFile_MtimeBuffer(t *testing.T) {
 	if err := os.Chtimes(outsideBuffer, oldMtime, oldMtime); err != nil {
 		t.Fatal(err)
 	}
-	// remove the within-buffer file so only the old one remains
-	os.Remove(withinBuffer)
 
 	_, _, err = findSessionFile(repoRoot, "", sinceTime.Format(time.RFC3339), "")
 	if err == nil {
