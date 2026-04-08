@@ -65,8 +65,9 @@ func TestPushSummaryToLedger_MissingSessionDir(t *testing.T) {
 	// valid JSON file but session dir doesn't exist
 	tmpFile := filepath.Join(t.TempDir(), "summary.json")
 	summaryData := map[string]any{
-		"title":         "Test session",
-		"summary":       "A test",
+		"title":         "Test session for validation",
+		"summary":       "A test session that exercises the missing session directory error path",
+		"outcome":       "success",
 		"quality_score": 0.8,
 	}
 	data, _ := json.Marshal(summaryData)
@@ -82,8 +83,9 @@ func TestPushSummaryToLedger_DiscardLowQuality(t *testing.T) {
 	// summary with quality_score below discard threshold (default 0.1)
 	tmpFile := filepath.Join(t.TempDir(), "summary.json")
 	summaryData := map[string]any{
-		"title":         "Trivial session",
-		"summary":       "Just a greeting",
+		"title":         "Trivial session with a greeting",
+		"summary":       "A trivial session where the user just sent a single greeting message and left",
+		"outcome":       "failed",
 		"quality_score": 0.05,
 		"score_reason":  "single greeting message",
 	}
@@ -103,8 +105,9 @@ func TestPushSummaryToLedger_NoGitRoot(t *testing.T) {
 	// valid JSON, session dir exists, but no .git parent
 	tmpFile := filepath.Join(t.TempDir(), "summary.json")
 	summaryData := map[string]any{
-		"title":         "Test session",
-		"summary":       "A test",
+		"title":         "Test session for git root check",
+		"summary":       "A test session that exercises the no git root error path in the ledger",
+		"outcome":       "success",
 		"quality_score": 0.8,
 	}
 	data, _ := json.Marshal(summaryData)
