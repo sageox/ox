@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/gitserver"
@@ -71,11 +72,14 @@ func checkGitHubDataMigration(fix bool) checkResult {
 	return PassedCheck(name, msg)
 }
 
-// commitGitHubMigration stages and commits migration changes in the ledger.
+// commitGitHubMigration stages and commits only the migration changes in the ledger.
+// Scopes staging to data/github/ to avoid sweeping unrelated dirty files into the commit.
 func commitGitHubMigration(ledgerPath string, migrated, deleted int) error {
 	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
 
-	addCmd := exec.Command("git", "-C", ledgerPath, "add", "--sparse", "-A")
+	// stage only the github data directory — not the entire ledger
+	githubDataDir := filepath.Join("data", "github")
+	addCmd := exec.Command("git", "-C", ledgerPath, "add", "--sparse", "-A", githubDataDir)
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add: %w: %s", err, strings.TrimSpace(string(output)))
 	}
