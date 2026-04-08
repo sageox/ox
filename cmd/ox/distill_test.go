@@ -714,12 +714,12 @@ func TestReadDailyFilesForDateRange(t *testing.T) {
 	}
 }
 
-func TestReadDailyFilesForDateRange_MultiplePerDay(t *testing.T) {
+func TestReadDailyFilesForDateRange_MultiplePerDay_KeepsLatest(t *testing.T) {
 	tmp := t.TempDir()
 	dailyDir := filepath.Join(tmp, "memory", "daily")
 	os.MkdirAll(dailyDir, 0o755)
 
-	// 3 UUID7 files for same day
+	// 3 UUID7 files for same day — dedup keeps latest (lexicographic last)
 	os.WriteFile(filepath.Join(dailyDir, "2026-03-10-aaaa.md"), []byte("a"), 0o644)
 	os.WriteFile(filepath.Join(dailyDir, "2026-03-10-bbbb.md"), []byte("b"), 0o644)
 	os.WriteFile(filepath.Join(dailyDir, "2026-03-10-cccc.md"), []byte("c"), 0o644)
@@ -728,11 +728,14 @@ func TestReadDailyFilesForDateRange_MultiplePerDay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(contents) != 3 {
-		t.Errorf("expected 3 files, got %d", len(contents))
+	if len(contents) != 1 {
+		t.Errorf("expected 1 file (dedup), got %d", len(contents))
 	}
-	if len(names) != 3 {
-		t.Errorf("expected 3 names, got %d", len(names))
+	if len(names) != 1 {
+		t.Errorf("expected 1 name (dedup), got %d", len(names))
+	}
+	if len(names) > 0 && names[0] != "2026-03-10-cccc.md" {
+		t.Errorf("expected latest UUID7 file, got %s", names[0])
 	}
 }
 
@@ -754,6 +757,32 @@ func TestReadWeeklyFilesForMonth(t *testing.T) {
 	}
 	if len(contents) != 2 {
 		t.Errorf("expected 2 weekly files for March (W09 and W10), got %d: %v", len(contents), names)
+	}
+}
+
+func TestReadWeeklyFilesForMonth_MultiplePerWeek_KeepsLatest(t *testing.T) {
+	tmp := t.TempDir()
+	weeklyDir := filepath.Join(tmp, "memory", "weekly")
+	os.MkdirAll(weeklyDir, 0o755)
+
+	// Two UUID7 files for the same week — dedup keeps latest
+	os.WriteFile(filepath.Join(weeklyDir, "2026-W10-aaaa.md"), []byte("older"), 0o644)
+	os.WriteFile(filepath.Join(weeklyDir, "2026-W10-zzzz.md"), []byte("latest"), 0o644)
+	// Different week — should be kept
+	os.WriteFile(filepath.Join(weeklyDir, "2026-W09.md"), []byte("week 9"), 0o644)
+
+	contents, names, err := readWeeklyFilesForMonth(weeklyDir, 2026, 3, nil) // March
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(contents) != 2 {
+		t.Errorf("expected 2 files (W09 + latest W10), got %d: %v", len(contents), names)
+	}
+	// W10 should be the zzzz (latest UUID7) version
+	for i, n := range names {
+		if strings.Contains(n, "W10") && contents[i] != "latest" {
+			t.Errorf("W10 should be 'latest', got %q from %s", contents[i], n)
+		}
 	}
 }
 

@@ -256,16 +256,27 @@ func readDailyFilesForDateRange(dailyDir, startDate, endDate string) ([]string, 
 		}
 	}
 
-	// sort chronologically (then by full filename for stability within same day)
+	// sort by date chronologically, then by filename descending (latest UUID7 first)
 	sort.Slice(matched, func(i, j int) bool {
 		if matched[i].date != matched[j].date {
 			return matched[i].date < matched[j].date
 		}
-		return matched[i].name < matched[j].name
+		return matched[i].name > matched[j].name // latest UUID7 first
 	})
 
-	var contents, names []string
+	// deduplicate by date — keep the first (latest UUID7) per day
+	seenDates := make(map[string]bool)
+	var deduped []dailyFile
 	for _, f := range matched {
+		if seenDates[f.date] {
+			continue
+		}
+		seenDates[f.date] = true
+		deduped = append(deduped, f)
+	}
+
+	var contents, names []string
+	for _, f := range deduped {
 		data, err := os.ReadFile(filepath.Join(dailyDir, f.name))
 		if err != nil {
 			continue
@@ -320,16 +331,31 @@ func readWeeklyFilesForMonth(weeklyDir string, year, month int, tz *time.Locatio
 		}
 	}
 
-	// sort chronologically
+	// sort by week chronologically, then by filename descending (latest UUID7 first)
 	sort.Slice(matched, func(i, j int) bool {
 		if matched[i].year != matched[j].year {
 			return matched[i].year < matched[j].year
 		}
-		return matched[i].week < matched[j].week
+		if matched[i].week != matched[j].week {
+			return matched[i].week < matched[j].week
+		}
+		return matched[i].name > matched[j].name // latest UUID7 first
 	})
 
-	var contents, names []string
+	// deduplicate by (year, week) — keep the first (latest UUID7) per week
+	seen := make(map[[2]int]bool)
+	var deduped []weeklyFile
 	for _, f := range matched {
+		key := [2]int{f.year, f.week}
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		deduped = append(deduped, f)
+	}
+
+	var contents, names []string
+	for _, f := range deduped {
 		data, err := os.ReadFile(filepath.Join(weeklyDir, f.name))
 		if err != nil {
 			continue
@@ -881,6 +907,10 @@ func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend age
 			slog.Warn("skip discussion fact extraction", "dir", d.DirName, "error", err)
 			continue
 		}
+
+		// Remove old fact files for this discussion before writing new version
+		removeOldFactFiles(tc.Path, filepath.Join("memory", ".discussion-facts", d.DirName+"-*.jsonl"))
+		removeOldFactFiles(tc.Path, filepath.Join("memory", ".discussion-facts", d.DirName+".jsonl"))
 
 		uid, _ := uuid.NewV7() // error only if crypto/rand fails — zero UUID collision is acceptable
 		factFile := filepath.Join("memory", ".discussion-facts", d.DirName+"-"+uid.String()+".jsonl")

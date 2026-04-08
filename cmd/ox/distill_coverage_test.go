@@ -228,27 +228,27 @@ func TestInferMonthlyHighWater_PicksLatest(t *testing.T) {
 	}
 }
 
-func TestReadDailyFilesForDateRange_SortingWithinSameDay(t *testing.T) {
+func TestReadDailyFilesForDateRange_DedupKeepsLatestUUID7(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	// create files for same day with different UUID suffixes
-	os.WriteFile(filepath.Join(dir, "2026-03-10-zzz.md"), []byte("second"), 0o644)
-	os.WriteFile(filepath.Join(dir, "2026-03-10-aaa.md"), []byte("first"), 0o644)
+	// create files for same day with different UUID suffixes — dedup keeps latest
+	os.WriteFile(filepath.Join(dir, "2026-03-10-zzz.md"), []byte("latest"), 0o644)
+	os.WriteFile(filepath.Join(dir, "2026-03-10-aaa.md"), []byte("older"), 0o644)
 
 	contents, names, err := readDailyFilesForDateRange(dir, "2026-03-10", "2026-03-10")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(names) != 2 {
-		t.Fatalf("expected 2 files, got %d", len(names))
+	if len(names) != 1 {
+		t.Fatalf("expected 1 file (dedup), got %d", len(names))
 	}
-	// within same day, should be sorted alphabetically by full filename
-	if names[0] != "2026-03-10-aaa.md" {
-		t.Errorf("first file = %q, want 2026-03-10-aaa.md", names[0])
+	// should keep the latest UUID7 (lexicographic last = zzz)
+	if names[0] != "2026-03-10-zzz.md" {
+		t.Errorf("expected latest UUID7 file, got %q", names[0])
 	}
-	if contents[0] != "first" {
-		t.Errorf("first content = %q, want 'first'", contents[0])
+	if contents[0] != "latest" {
+		t.Errorf("expected 'latest' content, got %q", contents[0])
 	}
 }
 

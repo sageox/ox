@@ -330,9 +330,12 @@ func extractSingleGitHubItem(ctx context.Context, cmd *cobra.Command, mu *sync.M
 	output = strings.TrimSpace(output)
 	sourceHash := contentHash(string(data))
 
+	ghItemGlob := filepath.Join("memory", ".github-facts", fmt.Sprintf("%s-*-%s-%d.jsonl", day, itemType, number))
+
 	if output == "" || output == "[]" {
 		// write empty marker (serialize git ops)
 		mu.Lock()
+		removeOldFactFiles(tcPath, ghItemGlob)
 		header := facts.FileHeader{
 			Meta: facts.FileMeta{
 				SchemaVersion: facts.SchemaVersion,
@@ -376,6 +379,8 @@ func extractSingleGitHubItem(ctx context.Context, cmd *cobra.Command, mu *sync.M
 	// serialize file writes and git commits (git isn't concurrent-safe)
 	mu.Lock()
 	defer mu.Unlock()
+
+	removeOldFactFiles(tcPath, ghItemGlob)
 
 	if err := facts.WriteFacts(fullPath, header, parsedFacts); err != nil {
 		return fmt.Errorf("write github facts: %w", err)
@@ -435,6 +440,9 @@ func extractGitHubCommitBatch(ctx context.Context, cmd *cobra.Command, mu *sync.
 	// serialize file writes and git commits
 	mu.Lock()
 	defer mu.Unlock()
+
+	// Remove old fact files for this commit batch before writing new version
+	removeOldFactFiles(tcPath, filepath.Join("memory", ".github-facts", fmt.Sprintf("%s-*-commits.jsonl", day)))
 
 	if output == "" || output == "[]" {
 		if err := facts.WriteFacts(fullPath, header, nil); err != nil {
