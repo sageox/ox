@@ -229,5 +229,5 @@ func checkScoreThresholdRange() checkResult {
 			"Run `ox config set attribution.score_threshold 0.5`")
 	}
 
-	return PassedCheck("Score threshold range", fmt.Sprintf("%.1f", resolved.ScoreThreshold))
+	return PassedCheck("Score threshold range", fmt.Sprintf("%g", resolved.ScoreThreshold))
 }

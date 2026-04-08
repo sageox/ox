@@ -112,7 +112,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 		sb.WriteString("\nSageOx contribution score (required when commit attribution is configured):\n")
 		sb.WriteString("Report: `ox session score --score <0.0-1.0> --reason \"<detailed paragraph>\"`\n")
 		sb.WriteString("Reason must cite specific sources: SOUL.md sections, meeting titles, team-ctx slugs, prior sessions.\n")
-		sb.WriteString("Moderate influence or above (>= 0.5) earns commit attribution.\n")
+		fmt.Fprintf(&sb, "Score >= %.1f earns commit attribution.\n", output.Attribution.ScoreThreshold)
 		sb.WriteString("The commit hook adds the trailer automatically — do NOT add it manually.\n")
 	}
 	if output.Attribution.PR != "" {

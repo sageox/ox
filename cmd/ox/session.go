@@ -16,7 +16,8 @@ collective team knowledge.
 Commands:
   ox session list      List all sessions
   ox session view      View a session (html, text, or json)
-  ox session status    Check recording status`,
+  ox session status    Check recording status
+  ox session score     Report SageOx contribution score`,
 }
 
 func init() {

@@ -257,5 +257,5 @@ func TestCleanupStaleScores_RemovesInactive(t *testing.T) {
 func TestCleanupStaleScores_EmptyDir(t *testing.T) {
 	removed, err := CleanupStaleScores(map[string]bool{})
 	assert.NoError(t, err)
-	assert.GreaterOrEqual(t, removed, 0)
+	assert.Equal(t, 0, removed)
 }

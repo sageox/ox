@@ -26,8 +26,9 @@ func scoresDir() string {
 }
 
 // scorePath returns the path to a specific agent's score file.
+// Uses filepath.Base to prevent path traversal from untrusted input.
 func scorePath(agentID string) string {
-	return filepath.Join(scoresDir(), agentID+".json")
+	return filepath.Join(scoresDir(), filepath.Base(agentID)+".json")
 }
 
 // WriteSageoxScore persists a SageOx contribution score for the given agent.

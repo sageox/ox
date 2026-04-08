@@ -109,11 +109,14 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 		})
 	}
 
-	// sageox contribution score — report how much team context influenced this session
-	cmds = append(cmds, IntentCommand{
-		Intent:  "report SageOx contribution score for this session (required when team context influences work)",
-		Command: `ox session score --score <0.0-1.0> --reason "<explanation>"`,
-	})
+	// sageox contribution score — only shown when team context is available
+	// (no team context = no SageOx influence to score)
+	if p.TeamCtx != nil {
+		cmds = append(cmds, IntentCommand{
+			Intent:  "report SageOx contribution score for this session (required when team context influences work)",
+			Command: `ox session score --score <0.0-1.0> --reason "<explanation>"`,
+		})
+	}
 
 	// heartbeat — lightweight mid-turn check-in that delivers pending whispers.
 	// Agents should call this every ~20 tool calls during long single-turn tasks.
