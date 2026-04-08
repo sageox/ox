@@ -7,6 +7,8 @@ import (
 
 	"github.com/sageox/ox/internal/carts"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
+	ident "github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
 )
@@ -496,22 +498,22 @@ func openCartsStore(cmd *cobra.Command) (*carts.Store, *repotools.GitIdentity, e
 
 	teamDir := projCtx.TeamContextDir(teamID)
 
-	identity, _ := repotools.DetectGitIdentity()
-	if identity == nil {
-		identity = &repotools.GitIdentity{Name: "unknown", Email: "unknown@local"}
-	}
+	// use identity.ResolveAttribution for git commit author (Name + Email).
+	// Name is LOCAL ONLY (not shared in ledger), safe for git author field.
+	attr := ident.ResolveAttribution(endpoint.GetForProject(root), config.GetDisplayName())
+	gitIdent := &repotools.GitIdentity{Name: attr.Name, Email: attr.Email}
 
 	store, err := carts.OpenFromTeamContext(
 		context.Background(),
 		teamDir,
-		identity.Name,
-		identity.Email,
+		attr.Name,
+		attr.Email,
 	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open carts store: %w", err)
 	}
 
-	return store, identity, nil
+	return store, gitIdent, nil
 }
 
 func isJSON(cmd *cobra.Command) bool {

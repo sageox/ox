@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/spf13/cobra"
 )
@@ -170,8 +170,9 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 
 	now := time.Now().UTC()
 
-	// resolve principal (human user the agent works for)
-	principalID := resolvePrincipalID(projectRoot)
+	// resolve principal (human user the agent works for) — uses attribution slug,
+	// not auth-specific identity. Works offline / without OAuth.
+	principalID := identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName())
 
 	murmur := ledger.MurmurFile{
 		SchemaVersion: "1",
@@ -206,24 +207,6 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 	slog.Info("murmur published", "id", id.String(), "topic", topic, "importance", importance, "scope", scope)
 	fmt.Fprintf(cmd.OutOrStdout(), "Murmur published: %s\n", id.String())
 	return nil
-}
-
-// resolvePrincipalID returns the human user identity for the murmur.
-// Tries SageOx auth (email → local part, or name), falls back to OS username.
-// Always returns a short username, never a full email address.
-func resolvePrincipalID(projectRoot string) string {
-	ep := endpoint.GetForProject(projectRoot)
-	if username := auth.GetUsername(ep); username != "" {
-		// extract local part from email addresses for consistent short usernames
-		if idx := strings.IndexByte(username, '@'); idx > 0 {
-			return username[:idx]
-		}
-		return username
-	}
-	if u := os.Getenv("USER"); u != "" {
-		return u
-	}
-	return ""
 }
 
 // resolveMurmurTarget returns the git repo path where the murmur file should be written.

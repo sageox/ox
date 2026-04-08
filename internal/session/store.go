@@ -183,7 +183,7 @@ type StoreMeta struct {
 	AgentType    string    `json:"agent_type,omitempty"`
 	AgentVersion string    `json:"agent_version,omitempty"` // version of the coding agent (e.g., "1.0.3")
 	Model        string    `json:"model,omitempty"`         // LLM model used (e.g., "claude-sonnet-4-20250514")
-	Username     string    `json:"username,omitempty"`
+	Username     string    `json:"username,omitempty"` // privacy-safe display name — via identity.AttributionDisplayName(). NOT an email.
 	RepoID       string    `json:"repo_id,omitempty"`
 	OxVersion    string    `json:"ox_version,omitempty"` // version of ox that created this session
 }

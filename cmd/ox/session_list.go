@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -219,7 +220,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 
 	// get local username for sessions without meta.json
 	listEndpoint := endpoint.GetForProject(projectRoot)
-	localUser := getAuthenticatedUsername(listEndpoint)
+	localUser := identity.AttributionUsername(listEndpoint, config.GetDisplayName())
 
 	// JSON output
 	if jsonOutput {

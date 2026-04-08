@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/version"
@@ -41,7 +42,7 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 		AgentID:   state.AgentID,
 		AgentType: agentTypeForMeta,
 		Model:     state.Model,
-		Username:  getDisplayName(projectEndpoint),
+		Username:  identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
 		RepoID:    repoID,
 		OxVersion: version.Version,
 	}

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/version"
@@ -57,7 +59,8 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 	result.EntryCount = len(rawEntries)
 
 	// get user info for filename
-	username := getSessionUsername()
+	projectEndpointForSlug := endpoint.GetForProject(projectRoot)
+	username := identity.AttributionUsername(projectEndpointForSlug, config.GetDisplayName())
 
 	// get repo ID and create store using helper
 	repoID := getRepoIDOrDefault(projectRoot)
@@ -156,7 +159,7 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 		AgentType:    agentTypeForMeta,
 		AgentVersion: result.AgentVersion,
 		Model:        result.Model,
-		Username:     getDisplayName(projectEndpoint),
+		Username:     identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
 		RepoID:       repoID,
 		OxVersion:    version.Version,
 	}

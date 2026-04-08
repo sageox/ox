@@ -385,6 +385,9 @@ func findProjectRoot() (string, error) {
 }
 
 // getUserSlug returns the current git user's slug for per-user session isolation
+// getUserSlug returns the git user's slug for per-user instance isolation.
+// Do NOT use for attribution — use identity.AttributionUsername() instead.
+// This exists solely for agentinstance.NewStoreForUser() path isolation.
 func getUserSlug() string {
 	identity, err := repotools.DetectGitIdentity()
 	if err != nil || identity == nil {

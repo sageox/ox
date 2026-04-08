@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
@@ -167,7 +169,7 @@ func buildSessionMeta(sessionPath, sessionName, projectRoot string, fileRefs map
 	}
 
 	ep := endpoint.GetForProject(projectRoot)
-	return sessionMetaBase(sessionName, firstNonEmpty(username, getAuthenticatedUsername(ep), "unknown"), agentID, "unknown", ts, projectRoot).
+	return sessionMetaBase(sessionName, firstNonEmpty(username, identity.AttributionUsername(ep, config.GetDisplayName()), "unknown"), agentID, "unknown", ts, projectRoot).
 		EntryCount(entryCount).
 		Summary(summary).
 		WithFiles(fileRefs).

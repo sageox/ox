@@ -657,7 +657,7 @@ type StartRecordingOptions struct {
 	SessionFile      string // source file from adapter (Claude Code JSONL)
 	OutputFile       string // output file being recorded
 	Title            string
-	Username         string // username for session folder name
+	Username         string // attribution slug for paths — via identity.AttributionUsername(). NOT an email.
 	RepoContextPath  string // path to repo context directory (for storing sessions)
 	ReminderInterval int    // defaults to DefaultReminderInterval if 0
 	FilterMode       string // "infra" or "all" - controls event filtering on stop

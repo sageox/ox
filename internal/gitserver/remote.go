@@ -8,8 +8,10 @@ import (
 	"time"
 )
 
-// RefreshRemoteCredentials updates a repo's git remote URL with the current PAT
-// from the credential store. Handles three cases:
+// RefreshRemoteCredentials updates a repo's git remote URL with the current PAT.
+// PAT-only — no OAuth dependency. The PAT comes from the credential store
+// (git-credentials.json or OS keychain), not from the OAuth token.
+// Handles three cases:
 //   - Stale PAT: replaces with current credentials
 //   - Bare HTTPS URL (no PAT): inserts credentials if host matches credential store
 //   - Current PAT: no-op

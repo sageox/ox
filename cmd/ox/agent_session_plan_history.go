@@ -13,7 +13,9 @@ import (
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/version"
 )
@@ -106,10 +108,7 @@ func runAgentSessionPlanHistory(inst *agentinstance.Instance, args []string) err
 
 	planHistoryRoot, _ := findProjectRoot()
 	planHistoryEndpoint := endpoint.GetForProject(planHistoryRoot)
-	username := getAuthenticatedUsername(planHistoryEndpoint)
-	if username == "" {
-		username = "anonymous"
-	}
+	username := identity.AttributionUsername(planHistoryEndpoint, config.GetDisplayName())
 
 	sessionName := session.GenerateSessionName(inst.AgentID, username)
 	sessionPath := filepath.Join(store.BasePath(), sessionName)

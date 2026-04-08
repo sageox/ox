@@ -64,8 +64,12 @@ func findSessionByFilename(store *session.Store, filename string) (*session.Stor
 	return t, nil
 }
 
-// getAuthenticatedUsername returns the authenticated user's username (local part of email) or empty string.
-// ep is the normalized endpoint to look up the token for.
+// getAuthenticatedUsername returns the authenticated user's email local part, or "".
+// This is an AUTH QUERY — returns "" when not logged in. That is correct.
+//
+// Do NOT use for attribution — use identity.AttributionUsername() instead.
+// This function is only for cases where you need to know if a user is
+// authenticated (e.g., filtering, access checks).
 func getAuthenticatedUsername(ep string) string {
 	token, err := auth.GetTokenForEndpoint(ep)
 	if err != nil || token == nil {
@@ -78,9 +82,9 @@ func getAuthenticatedUsername(ep string) string {
 	return email
 }
 
-// getDisplayName returns a privacy-aware display name from auth info + user config.
-// Falls back to empty string if not authenticated.
-// ep is the normalized endpoint to look up the token for.
+// getDisplayName is superseded by identity.AttributionDisplayName().
+// Kept temporarily for test compatibility — callers should migrate.
+// DEPRECATED: Use identity.AttributionDisplayName(ep, config.GetDisplayName()) instead.
 func getDisplayName(ep string) string {
 	token, err := auth.GetTokenForEndpoint(ep)
 	if err != nil || token == nil {

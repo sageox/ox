@@ -1,3 +1,11 @@
+// session_upload.go handles uploading session artifacts to the ledger.
+//
+// AUTH MODEL: Upload uses Git PAT only (no OAuth required).
+//   - LFS upload: PAT via HTTP Basic auth (getLFSClient)
+//   - git push: PAT embedded in remote URL (RefreshRemoteCredentials)
+//   - checkUploadAccess: OAuth-based, fail-open, kept for viewer detection only
+//
+// See docs/ai/specs/session-auth-model.md for the full auth model.
 package main
 
 import (
@@ -58,12 +66,10 @@ func checkUploadAccess(projectRoot string) error {
 
 // uploadSessionLFS uploads session content files to LFS blob storage
 // and returns the file->FileRef manifest for inclusion in meta.json.
-// Delegates to lfs.UploadSessionFiles after CLI-specific access checks.
+//
+// No OAuth needed — LFS upload uses the Git PAT (HTTP Basic auth).
+// Access control is enforced at push time by the PAT, not by a pre-check.
 func uploadSessionLFS(projectRoot, sessionPath string) (map[string]lfs.FileRef, error) {
-	if err := checkUploadAccess(projectRoot); err != nil {
-		return nil, err
-	}
-
 	client, err := getLFSClient(projectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("create LFS client: %w", err)

@@ -9,8 +9,10 @@ import (
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 )
@@ -169,7 +171,8 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 	// resolve ledger path for upload
 	ledgerPath, ledgerErr := resolveLedgerPath()
 
-	sessionName := session.GenerateSessionName(state.AgentID, getSessionUsername())
+	recoverEp := endpoint.GetForProject(projectRoot)
+	sessionName := session.GenerateSessionName(state.AgentID, identity.AttributionUsername(recoverEp, config.GetDisplayName()))
 	var ledgerSessionDir string
 	var uploaded bool
 
@@ -203,7 +206,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 				slog.Warn("LFS upload failed during recovery", "error", uploadErr)
 				_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			} else {
-				username := getAuthenticatedUsername(endpoint.GetForProject(projectRoot))
+				username := identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName())
 				meta := sessionMetaBase(sessionName, username, state.AgentID, state.AdapterName, state.StartedAt, projectRoot).
 					EntryCount(entryCount).
 					StopReason(session.StopReasonRecovered).

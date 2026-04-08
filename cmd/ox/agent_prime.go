@@ -25,6 +25,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/prime"
@@ -939,7 +940,7 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 		OutputFile:    outputFile,
 		FilterMode:    resolved.Mode,
 		ParentPID:     parentPID,
-		Username:      getSessionUsername(),
+		Username:      identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName()),
 		WorkspacePath: projectRoot,
 		Branch:        repotools.GetCurrentBranch(projectRoot),
 		WatchMode:     watchMode,

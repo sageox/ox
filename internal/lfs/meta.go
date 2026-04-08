@@ -16,7 +16,7 @@ import (
 type SessionMeta struct {
 	Version     string             `json:"version"` // "1.0"
 	SessionName string             `json:"session_name"`
-	Username    string             `json:"username"` // email of author
+	Username    string             `json:"username"` // privacy-safe display name — via identity.AttributionDisplayName(). Shared in ledger. NOT an email.
 	UserID      string             `json:"user_id,omitempty"`
 	AgentID     string             `json:"agent_id"`
 	AgentType   string             `json:"agent_type"` // "claude-code", "cursor", etc.

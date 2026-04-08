@@ -9,7 +9,8 @@ import (
 // The actual start command is under ox agent <id> session start.
 
 // getSessionUsername returns a username for session filenames.
-// Prefers git user, falls back to system user.
+// DEPRECATED: Use identity.AttributionUsername(ep, config.GetDisplayName()) instead.
+// Kept for test compatibility only.
 func getSessionUsername() string {
 	// try git user first
 	slug := getUserSlug()

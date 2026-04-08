@@ -13,9 +13,11 @@ import (
 // before we proactively refresh them (1 hour)
 const credentialRefreshThreshold = 1 * time.Hour
 
-// refreshCredentialsIfNeeded checks if git credentials are expired, near expiry,
-// or for a different endpoint, and refreshes them from the cloud API if needed.
-// This is lazy refresh - called before sync operations that need valid credentials.
+// refreshCredentialsIfNeeded checks if the Git PAT is expired or near expiry,
+// and refreshes from the cloud API if needed. This is LAZY — exits early when
+// the PAT has >1h remaining. Only uses OAuth to obtain a fresh PAT; the PAT
+// itself is what git/LFS operations use (HTTP Basic auth, not OAuth bearer).
+// See docs/ai/specs/session-auth-model.md for the credential model.
 func (s *SyncScheduler) refreshCredentialsIfNeeded() {
 	// dedup: stamp-then-release to prevent TOCTOU race where concurrent callers
 	// both observe a stale timestamp and both proceed to hit the API.

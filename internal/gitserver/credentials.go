@@ -38,7 +38,12 @@ func (r RepoEntry) StableID() string {
 	return r.TeamID
 }
 
-// GitCredentials holds git server authentication credentials and repo URLs.
+// GitCredentials holds the Git PAT and repo URLs for git/LFS operations.
+// This is SEPARATE from OAuth (auth.json). The PAT is used for:
+//   - LFS blob upload (HTTP Basic auth)
+//   - git push/pull (embedded in remote URL as oauth2:<token>)
+//
+// The PAT is refreshed lazily by the daemon when near expiry.
 // Repos contains team-context repos indexed by team ID. Ledger URLs are NOT stored here.
 type GitCredentials struct {
 	Token     string               `json:"token"`

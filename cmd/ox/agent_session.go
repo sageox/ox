@@ -16,12 +16,12 @@ import (
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
-	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
@@ -94,18 +94,10 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		return fmt.Errorf("SageOx not initialized in this project\nRun 'ox init' first to set up session recording")
 	}
 
-	// require authentication — sessions need a user identity for the ledger
-	if authenticated, _ := auth.IsAuthenticated(); !authenticated {
-		return fmt.Errorf("not logged in to SageOx\nRun 'ox login' first to authenticate")
-	}
-
-	// check write access before recording — fail fast if user is a viewer
-	if err := checkUploadAccess(projectRoot); err != nil {
-		if errors.Is(err, api.ErrReadOnly) {
-			return fmt.Errorf("you have read-only access to this repo — sessions cannot be uploaded to the ledger\nTo upload sessions, request team membership from an admin")
-		}
-		// non-ErrReadOnly errors fall through (fail-open)
-	}
+	// NOTE: No OAuth gate here. Session recording only needs a Git PAT for upload
+	// (LFS + git push). OAuth is used for identity enrichment but is not required.
+	// The PAT is what actually enforces access control at push time.
+	// See docs/ai/specs/session-auth-model.md for the full auth model.
 
 	// ensure prime has run — team context and agent identity are critical for sessions.
 	// detection: check session marker (written by prime on success).
@@ -178,7 +170,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 	// For generic adapters, create the drop file for the agent to write to.
 	// Must happen BEFORE StartRecording because it validates SessionFile exists.
 	if needsGenericDropFile(sessionFile, adapterName) {
-		username := getSessionUsername()
+		username := identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName())
 		sessionName := session.GenerateSessionName(inst.AgentID, username)
 
 		repoID := getRepoIDOrDefault(projectRoot)
@@ -228,7 +220,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		AgentType:     agentTypeName,
 		SessionFile:   sessionFile,
 		Title:         title,
-		Username:      getSessionUsername(),
+		Username:      identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName()),
 		WorkspacePath: projectRoot,
 		Branch:        repotools.GetCurrentBranch(projectRoot),
 		ParentPID:     parentPID,
@@ -827,7 +819,7 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		AgentType:    agentTypeForMeta,
 		AgentVersion: result.AgentVersion,
 		Model:        result.Model,
-		Username:     getDisplayName(projectEndpoint),
+		Username:     identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
 		RepoID:       repoID,
 		OxVersion:    version.Version,
 	}
@@ -1025,7 +1017,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 
 	// write meta.json first (before LFS upload) to preserve session metadata even if LFS fails
 	projectEndpoint := endpoint.GetForProject(projectRoot)
-	username := getAuthenticatedUsername(projectEndpoint)
+	username := identity.AttributionUsername(projectEndpoint, config.GetDisplayName())
 	meta := sessionMetaBase(sessionName, username, state.AgentID, state.AdapterName, state.StartedAt, projectRoot).
 		Model(result.Model).
 		Title(state.Title).
@@ -1569,10 +1561,7 @@ func runAgentSessionPlan(inst *agentinstance.Instance) error {
 
 		planProjectRoot, _ := findProjectRoot()
 		planEndpoint := endpoint.GetForProject(planProjectRoot)
-		username := getAuthenticatedUsername(planEndpoint)
-		if username == "" {
-			username = "anonymous"
-		}
+		username := identity.AttributionUsername(planEndpoint, config.GetDisplayName())
 
 		sessionName := session.GenerateSessionName(inst.AgentID, username)
 		sessionID = sessionName

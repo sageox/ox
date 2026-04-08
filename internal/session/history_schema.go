@@ -68,7 +68,7 @@ type HistoryMeta struct {
 	// SessionTitle is a human-readable title for this session
 	SessionTitle string `json:"session_title,omitempty"`
 
-	// Username is the authenticated user who created this session
+	// Username is the attribution slug — via identity.AttributionUsername(). NOT an email.
 	Username string `json:"username,omitempty"`
 
 	// MessageCount is the total number of entries captured
