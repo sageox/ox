@@ -13,26 +13,44 @@ GOPATH := $(shell go env GOPATH)
 LDFLAGS := -ldflags "-X github.com/sageox/ox/internal/version.Version=$(VERSION) -X github.com/sageox/ox/internal/version.BuildDate=$(BUILD_TIME) -X github.com/sageox/ox/internal/version.GitCommit=$(GIT_COMMIT)"
 ADAPTER_LDFLAGS := -ldflags "-s -w"
 
+# ── Agent-Friendly Output ──────────────────────────────────────────────
+# Quiet by default. AI coding agents are the primary callers of
+# test/lint/build targets. They parse exit codes — verbose progress
+# wastes context window tokens. Humans: V=1 make <target>.
+#
+# V=0 (default): suppress echo lines, use failure-only test format,
+#                hide skip summaries and empty packages.
+# V=1 (verbose): full echo output, per-package test format, timing.
+#
+# Convention: Automake silent rules, Linux kernel V=, K8s KUBE_VERBOSE.
+# ────────────────────────────────────────────────────────────────────────
+V ?= 0
+say = $(if $(filter 1,$(V)),@echo $(1),@:)
+GOTESTSUM_FMT = $(if $(filter 1,$(V)),pkgname,pkgname-and-test-fails)
+GOTESTSUM_LEAN = $(if $(filter 1,$(V)),,--hide-summary skipped --format-hide-empty-pkg)
+TIME_CMD = $(if $(filter 1,$(V)),time,)
+
 # Bundled adapters (shipped in release tarballs alongside ox)
 ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-aider ox-adapter-droid
 
 # Build targets
+# Targets below are agent-friendly by default (quiet). V=1 for verbose.
 build: build-ox build-adapters ## Build ox and all bundled adapters to bin/
 
 build-ox: ## Build the ox binary to bin/ox
-	@echo "Building $(BINARY_NAME) $(VERSION)..."
+	$(call say,"Building $(BINARY_NAME) $(VERSION)...")
 	@mkdir -p bin
-	$(GO) build $(LDFLAGS) -o bin/$(BINARY_NAME) ./cmd/ox
-	@echo "Build complete: bin/$(BINARY_NAME)"
+	@$(GO) build $(LDFLAGS) -o bin/$(BINARY_NAME) ./cmd/ox
+	$(call say,"Build complete: bin/$(BINARY_NAME)")
 
 build-adapters: ## Build all bundled adapter binaries to bin/
-	@echo "Building adapters..."
+	$(call say,"Building adapters...")
 	@mkdir -p bin
 	@for adapter in $(ADAPTERS); do \
-		echo "  Building $$adapter..."; \
+		$(if $(filter 1,$(V)),echo "  Building $$adapter...";,) \
 		$(GO) build $(ADAPTER_LDFLAGS) -o bin/$$adapter ./cmd/$$adapter; \
 	done
-	@echo "Adapters built: $(ADAPTERS)"
+	$(call say,"Adapters built: $(ADAPTERS)")
 
 install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
 
@@ -76,19 +94,22 @@ run: build ## Build and run ox
 #   Pre-PR:    make test-preflight — Full + slow + lint (~3-5min)
 #   Release:   make test-all test-slow (+ integration tests from ox-test-harness)
 #
+# Output: quiet by default (agent-friendly). V=1 for verbose.
+#
 GOTESTSUM := $(shell which gotestsum 2>/dev/null || echo "go run gotest.tools/gotestsum@latest")
 
+# Targets below are agent-friendly by default (quiet). V=1 for verbose.
 test: ## Run fast tests — unit tests <500ms, race detection (every commit)
-	@echo "Running fast tests (skipping >500ms)..."
-	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -short -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
+	$(call say,"Running fast tests (skipping >500ms)...")
+	@$(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -short -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
 
 test-all: ## Run all unit tests including expensive ones (git clone, SQLite, LFS)
-	@echo "Running all tests including expensive tests..."
-	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
+	$(call say,"Running all tests including expensive tests...")
+	@$(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
 
 test-slow: ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed
-	@echo "Running slow tests (requires built ox binary)..."
-	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=slow -race -timeout=5m ./...
+	$(call say,"Running slow tests (requires built ox binary)...")
+	@$(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -tags=slow -race -timeout=5m ./...
 
 test-integration: ## Integration tests live in sageox/ox-test-harness
 	@echo "Coding agent integration tests are in sageox/ox-test-harness."
@@ -111,8 +132,8 @@ test-benchmark: ## Run prime efficiency benchmarks (requires claude CLI) - ~80 m
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=integration -run TestPrimeEfficiency -timeout=90m ./tests/integration/agents/benchmark/...
 
 test-sequential: ## Run tests sequentially (for debugging race conditions)
-	@echo "Running tests sequentially..."
-	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -race -p 1 -parallel 1 -coverprofile=coverage.out -covermode=atomic ./...
+	$(call say,"Running tests sequentially...")
+	@$(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -race -p 1 -parallel 1 -coverprofile=coverage.out -covermode=atomic ./...
 
 test-profile: ## Visualize test execution timeline (requires vgt)
 	@echo "Profiling test execution..."
@@ -189,12 +210,13 @@ smoke-test: build ## Run smoke tests against SageOx cloud (requires SAGEOX_CI_PA
 	@./scripts/smoketest/smoke-test.sh
 
 # Code quality
+# Targets below are agent-friendly by default (quiet). V=1 for verbose.
 lint: lint-test-env ## Run golangci-lint
 	@which golangci-lint > /dev/null || (echo "golangci-lint not found. Install from https://golangci-lint.run/usage/install/" && exit 1)
-	golangci-lint run -c .config/golangci.yml ./...
+	@golangci-lint run -c .config/golangci.yml ./...
 
 lint-test-env: ## Check that test files use testguard instead of os.Environ()
-	@echo "Checking for os.Environ() in test files..."
+	$(call say,"Checking for os.Environ() in test files...")
 	@if grep -rn 'os\.Environ()' --include='*_test.go' . | grep -v '// safe:' | grep -v 'internal/testguard/' > /dev/null 2>&1; then \
 		echo "ERROR: os.Environ() found in test files without '// safe:' annotation:"; \
 		grep -rn 'os\.Environ()' --include='*_test.go' . | grep -v '// safe:' | grep -v 'internal/testguard/'; \
@@ -202,14 +224,14 @@ lint-test-env: ## Check that test files use testguard instead of os.Environ()
 		echo "Use testguard.RunOx() for ox subprocesses, or add '// safe: <reason>' comment."; \
 		exit 1; \
 	fi
-	@echo "OK: no unguarded os.Environ() in test files"
+	$(call say,"OK: no unguarded os.Environ() in test files")
 
 format: ## Format code with gofmt and goimports
-	@echo "Formatting code..."
+	$(call say,"Formatting code...")
 	@which goimports > /dev/null || (echo "goimports not found. Install with: go install golang.org/x/tools/cmd/goimports@latest" && exit 1)
 	@gofmt -s -w .
 	@goimports -w .
-	@echo "Format complete"
+	$(call say,"Format complete")
 
 # Git hooks
 install-hooks: ## Install git pre-commit hooks

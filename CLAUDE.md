@@ -485,6 +485,8 @@ RIGHT: Update tests to use CreateInitializedProject(t) helper
 - **Integration tests** (`make test-integration`): Real Claude sessions, real hooks, real session recording. Release gate.
 - **Pre-PR gate** (`make test-preflight`): lint + full + slow. Run before creating PRs (~3-5min).
 
+**Output:** Makefile is quiet by default (agent-friendly). Use `V=1 make test` for verbose output.
+
 **Slow test guard:** Any test >500ms must skip in short mode:
 ```go
 if testing.Short() {
