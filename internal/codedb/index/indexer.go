@@ -207,6 +207,7 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	if err != nil {
 		return fmt.Errorf("clone/fetch %s: %w", url, err)
 	}
+	defer repo.Close()
 	report(fmt.Sprintf("  clone/fetch: %s", time.Since(t0).Round(time.Millisecond)))
 
 	// 2. Upsert repo record
@@ -1690,6 +1691,11 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 	if err != nil {
 		return stats, fmt.Errorf("open repos for symbol parsing: %w", err)
 	}
+	defer func() {
+		for _, r := range repos {
+			r.Close()
+		}
+	}()
 
 	// Prefetch all blob content in parallel
 	hashes := make([]string, len(blobs))
@@ -1914,6 +1920,11 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 	if err != nil {
 		return stats, fmt.Errorf("open repos for comment parsing: %w", err)
 	}
+	defer func() {
+		for _, r := range repos {
+			r.Close()
+		}
+	}()
 
 	// Prefetch all blob content in parallel
 	hashes := make([]string, len(blobs))
