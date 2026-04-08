@@ -206,8 +206,8 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 				slog.Warn("LFS upload failed during recovery", "error", uploadErr)
 				_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			} else {
-				username := identity.AttributionUsername(endpoint.GetForProject(projectRoot), config.GetDisplayName())
-				meta := sessionMetaBase(sessionName, username, state.AgentID, state.AdapterName, state.StartedAt, projectRoot).
+				displayName := identity.AttributionDisplayName(endpoint.GetForProject(projectRoot), config.GetDisplayName())
+				meta := sessionMetaBase(sessionName, displayName, state.AgentID, state.AdapterName, state.StartedAt, projectRoot).
 					EntryCount(entryCount).
 					StopReason(session.StopReasonRecovered).
 					WithFiles(fileRefs).

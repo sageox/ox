@@ -169,7 +169,7 @@ func buildSessionMeta(sessionPath, sessionName, projectRoot string, fileRefs map
 	}
 
 	ep := endpoint.GetForProject(projectRoot)
-	return sessionMetaBase(sessionName, firstNonEmpty(username, identity.AttributionUsername(ep, config.GetDisplayName()), "unknown"), agentID, "unknown", ts, projectRoot).
+	return sessionMetaBase(sessionName, firstNonEmpty(username, identity.AttributionDisplayName(ep, config.GetDisplayName()), "unknown"), agentID, "unknown", ts, projectRoot).
 		EntryCount(entryCount).
 		Summary(summary).
 		WithFiles(fileRefs).

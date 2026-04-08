@@ -44,12 +44,12 @@ func TestResolveAttribution_NoAuth_FieldGuarantees(t *testing.T) {
 }
 
 func TestResolveAttribution_NoAuth_NoGit_FallsBackToOS(t *testing.T) {
-	// with USER env set and no OAuth, should use OS username
+	// force "no git" by removing git from PATH so DetectGitIdentity fails
+	t.Setenv("PATH", t.TempDir()) // empty dir — no git binary
 	t.Setenv("USER", "testosuser")
 	attr := ResolveAttribution("https://nonexistent.example.com", "")
 
-	// username comes from git slug if available, otherwise OS
-	assert.NotEmpty(t, attr.Username)
+	assert.Equal(t, "testosuser", attr.Username, "should fall back to OS username when git unavailable")
 	assert.Equal(t, attr.Username, strings.ToLower(attr.Username))
 }
 

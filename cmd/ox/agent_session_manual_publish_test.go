@@ -110,7 +110,8 @@ func runManualPublishingSessionCaptureTest(t *testing.T, fixture agentSessionFix
 		require.NoError(t, config.SaveProjectConfig(projectRoot, cfg))
 	})
 
-	// session start requires authentication.
+	// save auth token for identity enrichment (no longer required for session start,
+	// but still used for best-effort attribution via identity.ResolveAttribution)
 	require.NoError(t, auth.SaveToken(&auth.StoredToken{
 		AccessToken: "test-access-token",
 		TokenType:   "Bearer",

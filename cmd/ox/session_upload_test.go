@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
@@ -193,4 +194,59 @@ func TestCheckUploadAccess_DetailEndpoint404FallsThrough(t *testing.T) {
 
 	err := checkUploadAccess(tmpDir)
 	assert.NoError(t, err, "should fail-open when detail returns 404 and ledger status is not read-only")
+}
+
+// TestSessionStart_NoOAuthGate_RegressionTest verifies that runAgentSessionStart
+// does NOT require OAuth authentication. This is the core fix — sessions were
+// failing because the old auth.IsAuthenticated() gate blocked recording when
+// OAuth expired, even though upload only needs a Git PAT.
+//
+// Failure prevented: session recording silently blocked by expired OAuth token.
+func TestSessionStart_NoOAuthGate_RegressionTest(t *testing.T) {
+	// cannot use t.Parallel() — uses t.Setenv and os.Chdir
+
+	// set up a minimal initialized project with NO auth token saved
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	tmpDir := createInitializedProjectWithConfig(t, &config.ProjectConfig{
+		RepoID:    "test-no-oauth-gate",
+		Endpoint:  "https://no-auth.example.com",
+		ProjectID: "test-project",
+	})
+
+	origCwd, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.Chdir(origCwd) })
+	require.NoError(t, os.Chdir(tmpDir))
+
+	oldGlobalCfg := cfg
+	cfg = &config.Config{}
+	t.Cleanup(func() { cfg = oldGlobalCfg })
+
+	// deliberately do NOT save any auth token — simulates expired/missing OAuth
+
+	// verify auth is indeed missing
+	authenticated, _ := auth.IsAuthenticated()
+	require.False(t, authenticated, "precondition: must have no valid auth token")
+
+	inst := &agentinstance.Instance{
+		AgentID:   "OxTestNoAuth",
+		AgentType: "claude-code",
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+	}
+
+	err = runAgentSessionStart(inst, nil)
+
+	// the function should NOT fail with "not logged in to SageOx" — that was the old gate.
+	// it may fail for other reasons (no adapter, no session file, etc.) but NOT for auth.
+	if err != nil {
+		assert.NotContains(t, err.Error(), "not logged in",
+			"session start must not require OAuth — the old auth gate should be removed")
+		assert.NotContains(t, err.Error(), "ox login",
+			"session start must not prompt for ox login")
+	}
 }
