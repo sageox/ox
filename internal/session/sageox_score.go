@@ -84,6 +84,9 @@ func ReadSageoxScore(agentID string) (*ScoreFile, error) {
 	if err := json.Unmarshal(data, &sf); err != nil {
 		return nil, fmt.Errorf("unmarshal score file: %w", err)
 	}
+	if sf.Score < 0 || sf.Score > 1 {
+		return nil, fmt.Errorf("invalid score in score file: %f", sf.Score)
+	}
 
 	return &sf, nil
 }

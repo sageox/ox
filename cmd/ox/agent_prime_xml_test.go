@@ -234,7 +234,7 @@ func TestOutputAgentPrimeXML_PRAttribution_UsesCorrectField(t *testing.T) {
 	}
 
 	// PR attribution line must render the PR field value
-	if !strings.Contains(xml, "add as last line of PR body: `Co-Authored-By: SageOx <ox@sageox.ai>`") {
+	if !strings.Contains(xml, "add as last line of PR body: `Co-Authored-By: SageOx &lt;ox@sageox.ai&gt;`") {
 		t.Error("PR attribution line missing or incorrect")
 	}
 

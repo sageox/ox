@@ -97,6 +97,26 @@ func TestSageoxScore_ReadEmptyAgentID(t *testing.T) {
 	assert.Contains(t, err.Error(), "agent ID must not be empty")
 }
 
+// TestSageoxScore_ReadRejectsCorruptedScore verifies that a corrupted score file
+// with out-of-range values is rejected on read.
+// Failure prevented: tampered or corrupted score files flowing into attribution metadata.
+func TestSageoxScore_ReadRejectsCorruptedScore(t *testing.T) {
+	agentID := testAgentID(t, "corrupt")
+	t.Cleanup(func() { _ = CleanupSageoxScore(agentID) })
+
+	// write a valid score first, then corrupt it on disk
+	require.NoError(t, WriteSageoxScore(agentID, 0.5, "valid"))
+
+	// overwrite with out-of-range score directly
+	corrupt := `{"score": 1.5, "updated_at": "2026-01-01T00:00:00Z"}`
+	require.NoError(t, os.WriteFile(scorePath(agentID), []byte(corrupt), 0600))
+
+	sf, err := ReadSageoxScore(agentID)
+	assert.Error(t, err)
+	assert.Nil(t, sf)
+	assert.Contains(t, err.Error(), "invalid score")
+}
+
 // --- D. Boundary values ---
 
 // TestSageoxScore_BoundaryValues verifies that exactly 0.0 and 1.0 are valid scores.
