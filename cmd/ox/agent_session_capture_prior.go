@@ -108,10 +108,6 @@ func capturePriorViaAdapter(inst *agentinstance.Instance, projectRoot string, op
 		captureResult.AgentType,
 	)
 
-	if opts.Title != "" && history.Meta != nil {
-		history.Meta.SessionTitle = opts.Title
-	}
-
 	return session.CapturePriorFromHistory(history, opts)
 }
 
