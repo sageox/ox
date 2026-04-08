@@ -237,6 +237,13 @@ func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, i
 		return "", 0, fmt.Errorf("failed to read project directory: %w", err)
 	}
 
+	// subtract a buffer to account for startup timing drift — Claude Code
+	// may not write to the session file until after the first human message,
+	// so its mtime can lag behind the recorded StartedAt timestamp.
+	if !sinceTime.IsZero() {
+		sinceTime = sinceTime.Add(-30 * time.Second)
+	}
+
 	var candidates []sessionCandidate
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
@@ -246,7 +253,7 @@ func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, i
 		if err != nil {
 			continue
 		}
-		if !sinceTime.IsZero() && !info.ModTime().After(sinceTime) {
+		if !sinceTime.IsZero() && info.ModTime().Before(sinceTime) {
 			continue
 		}
 		candidates = append(candidates, sessionCandidate{

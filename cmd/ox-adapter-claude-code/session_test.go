@@ -114,6 +114,98 @@ func TestFindSessionFile_TimestampFallback(t *testing.T) {
 	}
 }
 
+// --- B2. Mtime filter boundary (regression: off-by-one and timing buffer) ---
+
+// TestFindSessionFile_MtimeBoundary_ExactMatch verifies that a file whose mtime
+// equals sinceTime is NOT rejected. Before the fix, strict After() comparison
+// meant mtime == sinceTime was skipped.
+// Failure prevented: session stop fails with "no sessions modified after ..." when
+// the session file was created at the exact same second as StartedAt.
+func TestFindSessionFile_MtimeBoundary_ExactMatch(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot := "/tmp/test-repo-boundary"
+	projectHash := claudeProjectHash(repoRoot)
+	projectDir := filepath.Join(home, ".claude", "projects", projectHash)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sinceTime := time.Date(2026, 4, 8, 6, 30, 5, 0, time.UTC)
+
+	sessionFile := filepath.Join(projectDir, "boundary-session.jsonl")
+	content := []byte(`{"type":"user","timestamp":"2026-04-08T06:30:05Z","message":{"role":"user","content":"hello"}}` + "\n")
+	if err := os.WriteFile(sessionFile, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// set mtime to exactly sinceTime
+	if err := os.Chtimes(sessionFile, sinceTime, sinceTime); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := findSessionFile(repoRoot, "", sinceTime.Format(time.RFC3339), "")
+	if err != nil {
+		t.Fatalf("findSessionFile should find file at exact boundary, got error: %v", err)
+	}
+	if got != sessionFile {
+		t.Errorf("got %q, want %q", got, sessionFile)
+	}
+}
+
+// TestFindSessionFile_MtimeBuffer verifies that a file whose mtime is up to
+// 30 seconds before sinceTime is still found (timing buffer for startup drift).
+// Failure prevented: session file written slightly before StartedAt is rejected.
+func TestFindSessionFile_MtimeBuffer(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot := "/tmp/test-repo-buffer"
+	projectHash := claudeProjectHash(repoRoot)
+	projectDir := filepath.Join(home, ".claude", "projects", projectHash)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	sinceTime := time.Date(2026, 4, 8, 6, 30, 5, 0, time.UTC)
+
+	// file mtime is 20 seconds before sinceTime — within the 30s buffer
+	withinBuffer := filepath.Join(projectDir, "within-buffer.jsonl")
+	content := []byte(`{"type":"user","timestamp":"2026-04-08T06:29:45Z","message":{"role":"user","content":"hello"}}` + "\n")
+	if err := os.WriteFile(withinBuffer, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mtime := sinceTime.Add(-20 * time.Second)
+	if err := os.Chtimes(withinBuffer, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, err := findSessionFile(repoRoot, "", sinceTime.Format(time.RFC3339), "")
+	if err != nil {
+		t.Fatalf("findSessionFile should find file within 30s buffer, got error: %v", err)
+	}
+	if got != withinBuffer {
+		t.Errorf("got %q, want %q", got, withinBuffer)
+	}
+
+	// file mtime is 60 seconds before sinceTime — outside the 30s buffer
+	outsideBuffer := filepath.Join(projectDir, "outside-buffer.jsonl")
+	if err := os.WriteFile(outsideBuffer, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldMtime := sinceTime.Add(-60 * time.Second)
+	if err := os.Chtimes(outsideBuffer, oldMtime, oldMtime); err != nil {
+		t.Fatal(err)
+	}
+	// remove the within-buffer file so only the old one remains
+	os.Remove(withinBuffer)
+
+	_, _, err = findSessionFile(repoRoot, "", sinceTime.Format(time.RFC3339), "")
+	if err == nil {
+		t.Fatal("findSessionFile should reject file outside 30s buffer")
+	}
+}
+
 // --- C. Direct lookup with offset ---
 
 // TestFindSessionFile_DirectLookup_RespectsOffset verifies that direct lookup
