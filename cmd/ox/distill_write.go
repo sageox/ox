@@ -189,28 +189,6 @@ func writeMemoryFile(tcPath, relPath, content string) error {
 	return os.WriteFile(fullPath, []byte(content), 0o644)
 }
 
-// removeOldFactFiles deletes old fact files matching a glob pattern and stages
-// their deletions (without committing). The caller's subsequent commitMemoryFile
-// call will include these deletions in its commit. This prevents duplicate fact
-// files when re-extraction creates a new UUID7-named file.
-func removeOldFactFiles(tcPath, globPattern string) {
-	matches, _ := filepath.Glob(filepath.Join(tcPath, globPattern))
-	for _, m := range matches {
-		if err := os.Remove(m); err != nil && !os.IsNotExist(err) {
-			slog.Warn("failed to remove old fact file", "path", m, "error", err)
-			continue
-		}
-		rel, _ := filepath.Rel(tcPath, m)
-		if rel == "" {
-			continue
-		}
-		addCmd := exec.Command("git", "add", "--sparse", rel)
-		addCmd.Dir = tcPath
-		if out, err := addCmd.CombinedOutput(); err != nil {
-			slog.Warn("failed to stage old fact file removal", "path", rel, "error", fmt.Sprintf("%s: %v", string(out), err))
-		}
-	}
-}
 
 // removeMemoryFile deletes a file from the team context and commits the removal.
 func removeMemoryFile(tcPath, relPath, commitMsg string) error {

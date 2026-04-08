@@ -85,10 +85,6 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, repoID, led
 		extractedFacts := sessionSummaryToFacts(s)
 		if len(extractedFacts) == 0 {
 			slog.Debug("no facts extracted from session", "session", s.DirName)
-			// Remove old fact files for this session before writing new version
-			removeOldFactFiles(tc.Path, filepath.Join("memory", ".session-facts", s.Date, s.DirName+"-*.jsonl"))
-			removeOldFactFiles(tc.Path, filepath.Join("memory", ".session-facts", s.Date, s.DirName+".jsonl"))
-
 			// write empty marker so scanPendingSessions skips this session
 			markerUID, _ := uuid.NewV7() // error only if crypto/rand fails — zero UUID collision is acceptable
 			markerFile := filepath.Join("memory", ".session-facts", s.Date, s.DirName+"-"+markerUID.String()+".jsonl")
@@ -121,10 +117,6 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, repoID, led
 				SourceHash:    s.Hash,
 			},
 		}
-
-		// Remove old fact files for this session before writing new version
-		removeOldFactFiles(tc.Path, filepath.Join("memory", ".session-facts", s.Date, s.DirName+"-*.jsonl"))
-		removeOldFactFiles(tc.Path, filepath.Join("memory", ".session-facts", s.Date, s.DirName+".jsonl"))
 
 		uid, _ := uuid.NewV7() // error only if crypto/rand fails — zero UUID collision is acceptable
 		factFile := filepath.Join("memory", ".session-facts", s.Date, s.DirName+"-"+uid.String()+".jsonl")

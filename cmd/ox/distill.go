@@ -908,10 +908,6 @@ func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend age
 			continue
 		}
 
-		// Remove old fact files for this discussion before writing new version
-		removeOldFactFiles(tc.Path, filepath.Join("memory", ".discussion-facts", d.DirName+"-*.jsonl"))
-		removeOldFactFiles(tc.Path, filepath.Join("memory", ".discussion-facts", d.DirName+".jsonl"))
-
 		uid, _ := uuid.NewV7() // error only if crypto/rand fails — zero UUID collision is acceptable
 		factFile := filepath.Join("memory", ".discussion-facts", d.DirName+"-"+uid.String()+".jsonl")
 		if err := writeMemoryFile(tc.Path, factFile, factContent); err != nil {
