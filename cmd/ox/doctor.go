@@ -745,7 +745,6 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 			opts.shouldFix(CheckSlugGitignoreMissing),
 			opts.shouldFix(CheckSlugLedgerBranchStatus),
 			opts.shouldFix(CheckSlugLedgerCleanWorkdir),
-			opts.shouldFix(CheckSlugGitHubDataMigration),
 		)
 		if len(ledgerGitChecks) > 0 {
 			categories = append(categories, checkCategory{
@@ -986,7 +985,7 @@ func enrichCheckResult(check *checkResult) {
 //   - fixGitignore: whether to fix .sageox/.gitignore issues in checkouts
 //   - fixBranch: whether to auto-sync branch (push/pull)
 //   - fixWorkdir: whether to auto-commit dirty workdir
-func checkLedgerGitHealth(networkChecks bool, fixRemote bool, fixGitignore bool, fixBranch bool, fixWorkdir bool, fixMigration ...bool) []checkResult {
+func checkLedgerGitHealth(networkChecks bool, fixRemote bool, fixGitignore bool, fixBranch bool, fixWorkdir bool) []checkResult {
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
 		return nil // no ledger found, skip entire category
@@ -1019,13 +1018,6 @@ func checkLedgerGitHealth(networkChecks bool, fixRemote bool, fixGitignore bool,
 	if !teamGitignoreCheck.skipped {
 		checks = append(checks, teamGitignoreCheck)
 	}
-
-	// check for legacy/corrupted GitHub data files
-	doMigration := networkChecks // default: follows global --fix
-	if len(fixMigration) > 0 {
-		doMigration = fixMigration[0]
-	}
-	checks = append(checks, checkGitHubDataMigration(doMigration))
 
 	return checks
 }
