@@ -54,7 +54,7 @@ type Attribution struct {
 
 	// Name is the full, unabbreviated name as provided by the source.
 	// NOT a username. NOT an email.
-	// Examples: "Ryan Snodgrass", "Anonymous"
+	// Examples: "Albert Einstein" (not PII — illustrative), "Anonymous"
 	// Always non-empty.
 	// PRIVACY: LOCAL ONLY. Do NOT write to ledger or shared contexts.
 	// Use for: local git commit author, login display, internal audit.
@@ -62,7 +62,7 @@ type Attribution struct {
 
 	// DisplayName is a privacy-safe abbreviated name for shared contexts.
 	// NOT a username. NOT an email. NOT the full name.
-	// Examples: "Ryan S.", "port8080", "Anonymous"
+	// Examples: "Albert E.", "port8080", "Anonymous"
 	// Always non-empty.
 	// PRIVACY: SAFE FOR SHARING. Use for ALL team-visible metadata.
 	// Use for: session meta.json, murmur files, session list/view,

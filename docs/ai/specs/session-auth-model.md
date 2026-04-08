@@ -102,8 +102,8 @@ sequenceDiagram
 |-------|--------|---------|---------|-----------|
 | `Username` | Lowercase slug, filesystem-safe | `"ryan"`, `"anonymous"` | Safe (non-PII) | Folder names, file paths, principal IDs, slug matching |
 | `Email` | Full email or `""` | `"ryan@example.com"`, `""` | PII (local only) | Git commit author field |
-| `Name` | Full unabbreviated name | `"Ryan Snodgrass"`, `"Anonymous"` | **LOCAL ONLY** — never in ledger or shared contexts | Local git commit author, login display, internal audit |
-| `DisplayName` | Privacy-abbreviated | `"Ryan S."`, `"Anonymous"` | **SAFE FOR SHARING** — all team-visible metadata | Session meta.json, murmur files, session list/view |
+| `Name` | Full unabbreviated name | `"Albert Einstein"` (not PII — illustrative), `"Anonymous"` | **LOCAL ONLY** — never in ledger or shared contexts | Local git commit author, login display, internal audit |
+| `DisplayName` | Privacy-abbreviated | `"Albert E."`, `"Anonymous"` | **SAFE FOR SHARING** — all team-visible metadata | Session meta.json, murmur files, session list/view |
 
 ### Field-to-Location Mapping
 
