@@ -127,16 +127,39 @@ func (ea *ExternalAdapter) Detect() bool {
 }
 
 // resolveRepoRoot returns the symlink-resolved OX_REPO_ROOT, falling back to
-// the raw value if resolution fails (e.g., path doesn't exist).
+// cwd-based detection (walk up to find .sageox/) when the env var is unset.
 func resolveRepoRoot() string {
 	root := os.Getenv("OX_REPO_ROOT")
 	if root == "" {
-		return root
+		root = detectRepoRootFromCwd()
+	}
+	if root == "" {
+		return ""
 	}
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
 		return resolved
 	}
 	return root
+}
+
+// detectRepoRootFromCwd walks up from cwd looking for a .sageox/ directory,
+// providing a fallback when OX_REPO_ROOT is not set in the environment.
+func detectRepoRootFromCwd() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	dir := cwd
+	for {
+		if info, statErr := os.Stat(filepath.Join(dir, ".sageox")); statErr == nil && info.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return cwd
+		}
+		dir = parent
+	}
 }
 
 // FindSessionFile calls find-session via one-shot mode.
