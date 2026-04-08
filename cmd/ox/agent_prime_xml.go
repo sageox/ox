@@ -116,7 +116,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 		sb.WriteString("The commit hook adds the trailer automatically — do NOT add it manually.\n")
 	}
 	if output.Attribution.PR != "" {
-		sb.WriteString("\nPR attribution: check `git log` for SageOx Co-Authored-By trailers.\n")
+		fmt.Fprintf(&sb, "\nPR attribution: check `git log` for `%s` trailers.\n", escapeXML(output.Attribution.Commit))
 		fmt.Fprintf(&sb, "If any commit has one, add as last line of PR body: `%s`\n", escapeXML(output.Attribution.PR))
 	}
 	sb.WriteString("</attribution>\n")
