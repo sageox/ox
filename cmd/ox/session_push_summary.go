@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/telemetry"
+	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/spf13/cobra"
 )
 
@@ -106,9 +107,19 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
-	// parse quality score from the summary JSON for gating
+	// parse and validate the summary JSON
 	var summaryParsed session.SummarizeResponse
 	_ = json.Unmarshal(data, &summaryParsed)
+
+	// validate summary content for agent meta-output contamination
+	if valErr := sessionsummary.ValidateSummaryContent(&summaryParsed); valErr != nil {
+		slog.Warn("summary content validation failed", "error", valErr)
+		return &pushSummaryOutput{
+			Success: false,
+			Type:    "push_summary",
+			Error:   fmt.Sprintf("summary content invalid: %v", valErr),
+		}
+	}
 
 	// load quality thresholds from user config
 	userCfg, _ := config.LoadUserConfig()

@@ -153,10 +153,10 @@ func TestProcessResult_UnparsableJSON(t *testing.T) {
 		}
 	}
 
-	// summary.json should contain the raw text as summary field (fallback)
+	// summary.json should contain the error message (not raw LLM output)
 	data, _ := os.ReadFile(filepath.Join(sessionDir, "summary.json"))
-	if !strings.Contains(string(data), "This session was about testing things") {
-		t.Error("summary.json fallback should contain the raw LLM output as summary text")
+	if !strings.Contains(string(data), "Summary generation failed") {
+		t.Error("summary.json fallback should contain error message, not raw LLM output")
 	}
 }
 
@@ -280,7 +280,7 @@ func TestProcessResult_QualityScoreDiscard(t *testing.T) {
 
 	// score below discard threshold — session dir should be removed
 	result := &RunResult{
-		Output: `{"title":"Routine rebasing","summary":"Just a rebase","key_actions":[],"outcome":"success","topics_found":[],"quality_score":0.05,"score_reason":"Trivial maintenance"}`,
+		Output: `{"title":"Routine rebasing","summary":"Just a simple rebase with no meaningful changes to report","key_actions":[],"outcome":"success","topics_found":[],"quality_score":0.05,"score_reason":"Trivial maintenance"}`,
 	}
 
 	err := handler.ProcessResult(item, result)

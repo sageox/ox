@@ -615,19 +615,46 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 
 	llmOutput := result.Output
 
+	// non-zero exit = summarization failed; don't trust the output at all
+	if result.ExitCode != 0 {
+		h.logger.Warn("summarization agent exited with error, discarding output",
+			"session", filepath.Base(payload.SessionDir),
+			"exit_code", result.ExitCode,
+			"output_len", len(llmOutput),
+		)
+		return nil
+	}
+
 	// parse LLM output into SummarizeResponse
 	var summaryResp *session.SummarizeResponse
 	parsed, parseErr := sessionsummary.ParseSummaryJSON(llmOutput)
 	if parseErr != nil {
-		h.logger.Warn("could not parse summary JSON from LLM output, using raw text", "err", parseErr)
-		// fall back to raw LLM output as summary text; default to upload (benefit of the doubt)
+		preview := llmOutput
+		if len(preview) > 200 {
+			preview = preview[:200]
+		}
+		h.logger.Warn("LLM output not parsable as summary JSON, discarding",
+			"err", parseErr,
+			"output_len", len(llmOutput),
+			"output_preview", preview,
+		)
 		summaryResp = &session.SummarizeResponse{
-			Summary:      llmOutput,
-			QualityScore: 1.0,
-			ScoreReason:  "unparsable LLM output, defaulting to upload",
+			Summary:      "Summary generation failed: LLM output was not valid JSON",
+			QualityScore: 0.0,
+			ScoreReason:  "unparsable LLM output",
 		}
 	} else {
 		summaryResp = parsed
+	}
+
+	// validate summary content for agent meta-output contamination
+	if valErr := sessionsummary.ValidateSummaryContent(summaryResp); valErr != nil {
+		h.logger.Warn("summary content validation failed, discarding",
+			"session", filepath.Base(payload.SessionDir),
+			"error", valErr,
+		)
+		summaryResp.QualityScore = 0.0
+		summaryResp.ScoreReason = fmt.Sprintf("content validation failed: %v", valErr)
 	}
 
 	sessionName := filepath.Base(payload.SessionDir)
