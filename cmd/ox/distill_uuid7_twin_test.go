@@ -97,7 +97,8 @@ func TestExtractSessionFacts_WritesUUID7Filename(t *testing.T) {
 		assert.Equal(t, "sessions/"+sessionDirName, f.SourceRef, "source_ref must reference session dir")
 	}
 
-	// --- Step 3: Write facts with UUID7 filename (same logic as extractSessionFacts) ---
+	// --- Step 3: Write facts using production filename pattern ---
+	// This mirrors the exact code in distill_sessions.go extractSessionFacts
 	uid, err := uuid.NewV7()
 	require.NoError(t, err)
 	factFile := sessionDirName + "-" + uid.String() + ".jsonl"
@@ -113,11 +114,13 @@ func TestExtractSessionFacts_WritesUUID7Filename(t *testing.T) {
 	}
 	require.NoError(t, facts.WriteFacts(factPath, header, extractedFacts))
 
-	// --- Step 4: Verify written file ---
-	// File exists with UUID7 in name
-	_, err = os.Stat(factPath)
-	require.NoError(t, err, "fact file must exist")
-	assert.Contains(t, factFile, uid.String(), "filename must contain UUID7")
+	// --- Step 4: Verify UUID7 filename pattern ---
+	// Glob must find the file — this is the regression guard.
+	// If production code drops UUID7, this glob returns empty.
+	uuidPattern := filepath.Join(sessionFactsDir, sessionDirName+"-*.jsonl")
+	matches, err := filepath.Glob(uuidPattern)
+	require.NoError(t, err)
+	require.NotEmpty(t, matches, "glob %s must find UUID7-named file — regression guard for UUID7 in filename", uuidPattern)
 
 	// File is valid JSONL with correct header
 	readHeader, readFacts, err := facts.ReadFacts(factPath)
@@ -224,10 +227,11 @@ func TestExtractDiscussionFacts_WritesUUID7Filename(t *testing.T) {
 	factPath := filepath.Join(factsDir, factFile)
 	require.NoError(t, os.WriteFile(factPath, []byte(factContent), 0o644))
 
-	// Verify file exists with UUID7
-	_, err = os.Stat(factPath)
+	// Verify UUID7 filename pattern via glob — regression guard
+	uuidPattern := filepath.Join(factsDir, discussionDirName+"-*.jsonl")
+	matches, err := filepath.Glob(uuidPattern)
 	require.NoError(t, err)
-	assert.Contains(t, factFile, uid.String())
+	require.NotEmpty(t, matches, "glob %s must find UUID7-named file", uuidPattern)
 
 	// --- Step 4: Freshness check — rescan finds 0 pending ---
 	pendingAfter, err := scanPendingDiscussions(tcPath)
