@@ -16,10 +16,10 @@ func TestWithAttributionGuidance_DefaultAttribution(t *testing.T) {
 	assert.Contains(t, result, "Real-Time Insight Attribution")
 	assert.Contains(t, result, "Plan Footer")
 	assert.Contains(t, result, "Guided by SageOx")
-	assert.Contains(t, result, "Commit Attribution")
-	assert.Contains(t, result, "Co-Authored-By: SageOx <ox@sageox.ai>")
-	assert.Contains(t, result, "Code Comments")
-	assert.Contains(t, result, "PR Attribution (Critical for Squash Merges)")
+	assert.Contains(t, result, "Contribution Score (Required)")
+	assert.Contains(t, result, "ox session score")
+	assert.Contains(t, result, "Commit Attribution (Automatic)")
+	assert.Contains(t, result, "PR Attribution (Conditional)")
 	assert.NotContains(t, result, "Not Logged In")
 }
 
@@ -36,11 +36,8 @@ func TestWithAttributionGuidance_CommitDisabled(t *testing.T) {
 
 	// config-gated blocks omitted
 	assert.NotContains(t, result, "Commit Attribution")
+	assert.NotContains(t, result, "Contribution Score")
 	assert.NotContains(t, result, "Co-Authored-By")
-	assert.NotContains(t, result, "Code Comments")
-
-	// PR squash section omitted (needs commit trailer format)
-	assert.NotContains(t, result, "PR Attribution (Critical for Squash Merges)")
 }
 
 func TestWithAttributionGuidance_AllConfigGatedDisabled(t *testing.T) {
@@ -59,8 +56,8 @@ func TestWithAttributionGuidance_AllConfigGatedDisabled(t *testing.T) {
 
 	// config-gated blocks omitted
 	assert.NotContains(t, result, "Commit Attribution")
+	assert.NotContains(t, result, "Contribution Score")
 	assert.NotContains(t, result, "Co-Authored-By")
-	assert.NotContains(t, result, "Code Comments")
 }
 
 func TestWithAttributionGuidance_NotLoggedIn(t *testing.T) {
@@ -70,7 +67,7 @@ func TestWithAttributionGuidance_NotLoggedIn(t *testing.T) {
 	assert.Contains(t, result, "Not Logged In")
 	assert.Contains(t, result, "may not be using your latest team context")
 	// commit attribution still present (enabled by default)
-	assert.Contains(t, result, "Co-Authored-By")
+	assert.Contains(t, result, "Commit Attribution")
 }
 
 func TestWithAttributionGuidance_NotLoggedInAllDisabled(t *testing.T) {
@@ -103,8 +100,8 @@ func TestWithAttributionGuidance_CustomCommitValue(t *testing.T) {
 	attr := config.MergeAttribution(&config.Attribution{Commit: &custom}, nil)
 	result := withAttributionGuidance("", true, attr)
 
-	assert.Contains(t, result, "Commit Attribution")
-	assert.Contains(t, result, "Co-Authored-By: Custom <custom@example.com>")
+	assert.Contains(t, result, "Commit Attribution (Automatic)")
+	assert.Contains(t, result, "Contribution Score (Required)")
 	assert.NotContains(t, result, "ox@sageox.ai")
 }
 

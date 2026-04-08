@@ -3,10 +3,11 @@ package config
 // Attribution configures how ox-guided work is credited in plans, git commits, and PRs.
 // Use pointer fields to distinguish between "not set" (nil) and "explicitly disabled" ("").
 type Attribution struct {
-	Plan    *string `yaml:"plan,omitempty" json:"plan,omitempty"`
-	Commit  *string `yaml:"commit,omitempty" json:"commit,omitempty"`
-	PR      *string `yaml:"pr,omitempty" json:"pr,omitempty"`
-	Session *string `yaml:"session,omitempty" json:"session,omitempty"` // session URL trailer; nil=auto, ""=disabled
+	Plan           *string  `yaml:"plan,omitempty" json:"plan,omitempty"`
+	Commit         *string  `yaml:"commit,omitempty" json:"commit,omitempty"`
+	PR             *string  `yaml:"pr,omitempty" json:"pr,omitempty"`
+	Session        *string  `yaml:"session,omitempty" json:"session,omitempty"`         // session URL trailer; nil=auto, ""=disabled
+	ScoreThreshold *float64 `yaml:"score_threshold,omitempty" json:"score_threshold,omitempty"` // minimum sageox_score for commit/PR attribution
 }
 
 // default attribution values - friendly for humans, concise for git
@@ -18,6 +19,7 @@ var (
 	defaultPlanFooterAttribution = "Guided by SageOx"
 	defaultCommitAttribution     = "Co-Authored-By: SageOx <ox@sageox.ai>"
 	defaultPRAttribution         = "Co-Authored-By: [SageOx](https://github.com/SageOx)"
+	defaultScoreThreshold        = 0.5
 )
 
 // DefaultAttribution returns the default attribution settings.
@@ -37,11 +39,12 @@ var defaultSessionAttribution = "auto"
 // ResolvedAttribution holds the final resolved attribution values (non-pointer).
 // Use this after merging configs for easier consumption.
 type ResolvedAttribution struct {
-	Plan       string `json:"plan"`
-	PlanFooter string `json:"plan_footer"` // exact footer text for plans ("Guided by SageOx")
-	Commit     string `json:"commit"`
-	PR         string `json:"pr"`
-	Session    string `json:"session"` // "auto" = append when recording, "" = disabled
+	Plan           string  `json:"plan"`
+	PlanFooter     string  `json:"plan_footer"`     // exact footer text for plans ("Guided by SageOx")
+	Commit         string  `json:"commit"`
+	PR             string  `json:"pr"`
+	Session        string  `json:"session"`         // "auto" = append when recording, "" = disabled
+	ScoreThreshold float64 `json:"score_threshold"` // minimum sageox_score for commit/PR attribution
 }
 
 // GetPlan returns the plan attribution value, or empty string if nil
@@ -68,6 +71,14 @@ func (a *Attribution) GetPR() string {
 	return *a.PR
 }
 
+// GetScoreThreshold returns the score threshold value, or 0 if nil
+func (a *Attribution) GetScoreThreshold() float64 {
+	if a == nil || a.ScoreThreshold == nil {
+		return 0
+	}
+	return *a.ScoreThreshold
+}
+
 // IsPlanSet returns true if plan attribution is explicitly set (including to empty string)
 func (a *Attribution) IsPlanSet() bool {
 	return a != nil && a.Plan != nil
@@ -81,6 +92,11 @@ func (a *Attribution) IsCommitSet() bool {
 // IsPRSet returns true if PR attribution is explicitly set (including to empty string)
 func (a *Attribution) IsPRSet() bool {
 	return a != nil && a.PR != nil
+}
+
+// IsScoreThresholdSet returns true if score threshold is explicitly set
+func (a *Attribution) IsScoreThresholdSet() bool {
+	return a != nil && a.ScoreThreshold != nil
 }
 
 // GetSession returns the session attribution value, or empty string if nil
@@ -108,11 +124,12 @@ func (a *Attribution) IsSessionSet() bool {
 // Leaving a field unset (nil) means "use lower priority config or default".
 func MergeAttribution(project, user *Attribution) ResolvedAttribution {
 	result := ResolvedAttribution{
-		Plan:       defaultPlanAttribution,
-		PlanFooter: defaultPlanFooterAttribution,
-		Commit:     defaultCommitAttribution,
-		PR:         defaultPRAttribution,
-		Session:    defaultSessionAttribution,
+		Plan:           defaultPlanAttribution,
+		PlanFooter:     defaultPlanFooterAttribution,
+		Commit:         defaultCommitAttribution,
+		PR:             defaultPRAttribution,
+		Session:        defaultSessionAttribution,
+		ScoreThreshold: defaultScoreThreshold,
 	}
 
 	// apply user config first (lower priority)
@@ -128,6 +145,9 @@ func MergeAttribution(project, user *Attribution) ResolvedAttribution {
 		}
 		if user.Session != nil {
 			result.Session = *user.Session
+		}
+		if user.ScoreThreshold != nil {
+			result.ScoreThreshold = *user.ScoreThreshold
 		}
 	}
 
@@ -145,6 +165,9 @@ func MergeAttribution(project, user *Attribution) ResolvedAttribution {
 		if project.Session != nil {
 			result.Session = *project.Session
 		}
+		if project.ScoreThreshold != nil {
+			result.ScoreThreshold = *project.ScoreThreshold
+		}
 	}
 
 	return result
@@ -159,4 +182,9 @@ func DefaultPlanFooterAttribution() string {
 // StringPtr is a helper to create a pointer to a string value
 func StringPtr(s string) *string {
 	return &s
+}
+
+// Float64Ptr is a helper to create a pointer to a float64 value
+func Float64Ptr(f float64) *float64 {
+	return &f
 }

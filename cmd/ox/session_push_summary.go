@@ -121,6 +121,20 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
+	// inject sageox contribution score from cache file (deterministic, not LLM-generated)
+	// read agent ID from meta.json (more reliable than env var for retries)
+	if metaData, readErr := os.ReadFile(filepath.Join(sessionDir, "meta.json")); readErr == nil {
+		var metaParsed struct {
+			AgentID string `json:"agent_id"`
+		}
+		if json.Unmarshal(metaData, &metaParsed) == nil && metaParsed.AgentID != "" {
+			if scoreFile, _ := session.ReadSageoxScore(metaParsed.AgentID); scoreFile != nil {
+				summaryParsed.SageoxScore = &scoreFile.Score
+				summaryParsed.SageoxScoreReason = scoreFile.Reason
+			}
+		}
+	}
+
 	// load quality thresholds from user config
 	userCfg, _ := config.LoadUserConfig()
 	awCfg := userCfg.GetAgentWorkerConfig()

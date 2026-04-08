@@ -179,4 +179,7 @@ const (
 
 	// Ledger Infrastructure checks
 	CheckSlugLedgerSparseCheckout = "ledger-sparse-checkout"
+
+	// Attribution checks
+	CheckSlugScoreThresholdRange = "score-threshold-range"
 )

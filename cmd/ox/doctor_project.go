@@ -209,3 +209,25 @@ func checkConfigFields(fix bool) checkResult {
 		message: "",
 	}
 }
+
+// checkScoreThresholdRange validates that attribution.score_threshold is in [0.0, 1.0].
+func checkScoreThresholdRange() checkResult {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck("Score threshold range", "not in git repo", "")
+	}
+
+	cfg, err := config.LoadProjectConfig(gitRoot)
+	if err != nil {
+		return SkippedCheck("Score threshold range", "config not loaded", "")
+	}
+
+	resolved := resolveProjectAttribution(cfg)
+	if resolved.ScoreThreshold < 0 || resolved.ScoreThreshold > 1 {
+		return FailedCheck("Score threshold range",
+			fmt.Sprintf("attribution.score_threshold=%g is out of range [0.0, 1.0]", resolved.ScoreThreshold),
+			"Run `ox config set attribution.score_threshold 0.5`")
+	}
+
+	return PassedCheck("Score threshold range", fmt.Sprintf("%.1f", resolved.ScoreThreshold))
+}

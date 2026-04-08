@@ -225,14 +225,22 @@ func TestOutputAgentPrimeXML_PRAttribution_UsesCorrectField(t *testing.T) {
 
 	xml := buf.String()
 
-	// PR line must render the PR field, not the Commit field
-	if !strings.Contains(xml, "PR body (last line): `Co-Authored-By: SageOx <ox@sageox.ai>`") {
+	// contribution score instruction must be present when commit is configured
+	if !strings.Contains(xml, "SageOx contribution score") {
+		t.Error("contribution score instruction missing")
+	}
+	if !strings.Contains(xml, "ox session score") {
+		t.Error("ox session score command missing")
+	}
+
+	// PR attribution line must render the PR field value
+	if !strings.Contains(xml, "add as last line of PR body: `Co-Authored-By: SageOx <ox@sageox.ai>`") {
 		t.Error("PR attribution line missing or incorrect")
 	}
 
-	// verify both commit and PR lines appear
-	if !strings.Contains(xml, "Commit: `Co-Authored-By: SageOx <ox@sageox.ai>`") {
-		t.Error("commit attribution line missing")
+	// commit hook instruction must be present
+	if !strings.Contains(xml, "commit hook adds the trailer automatically") {
+		t.Error("commit hook instruction missing")
 	}
 }
 
@@ -257,10 +265,10 @@ func TestOutputAgentPrimeXML_PRAttribution_DifferentValues(t *testing.T) {
 
 	xml := buf.String()
 
-	if !strings.Contains(xml, "PR body (last line): `pr-value`") {
+	if !strings.Contains(xml, "add as last line of PR body: `pr-value`") {
 		t.Errorf("PR line should render PR field value, got:\n%s", xml)
 	}
-	if strings.Contains(xml, "PR body (last line): `commit-value`") {
+	if strings.Contains(xml, "add as last line of PR body: `commit-value`") {
 		t.Error("PR line is incorrectly rendering the Commit field")
 	}
 }

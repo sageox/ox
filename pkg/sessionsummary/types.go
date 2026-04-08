@@ -57,6 +57,10 @@ type SummarizeResponse struct {
 	// Quality gate
 	QualityScore float64 `json:"quality_score"`          // 0.0-1.0 session value for team sharing
 	ScoreReason  string  `json:"score_reason,omitempty"` // brief explanation of the quality score
+
+	// SageOx contribution (injected from cache file, not LLM-generated)
+	SageoxScore       *float64 `json:"sageox_score,omitempty"`        // 0.0-1.0 self-reported contribution score
+	SageoxScoreReason string   `json:"sageox_score_reason,omitempty"` // detailed paragraph explaining SageOx influence
 }
 
 // AgentSummary contains structured data for AI agents to consume.

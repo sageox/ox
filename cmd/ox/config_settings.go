@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/sageox/ox/internal/config"
 )
@@ -260,6 +261,26 @@ Default: "Co-Authored-By: [SageOx](https://github.com/SageOx)"`,
 		Default:     "Co-Authored-By: [SageOx](https://github.com/SageOx)",
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
 	},
+	{
+		Key:         "attribution.score_threshold",
+		Description: "Minimum SageOx contribution score for commit attribution",
+		LongDescription: `Controls the threshold at which SageOx earns commit attribution.
+
+AI coworkers self-report how much SageOx team context influenced their work
+on a 0.0-1.0 scale. When the score meets or exceeds this threshold, the
+commit hook adds the Co-Authored-By trailer.
+
+  Set to a value between 0.0 and 1.0.
+  Set to 0.0 to always attribute (when a score is reported).
+  Set to 1.0 to only attribute when SageOx was critically influential.
+  Unset to restore the default.
+
+Default: 0.5`,
+		Category:    "Attribution",
+		ValidValues: []string{},
+		Default:     "0.5",
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
+	},
 }
 
 // GetSetting returns the setting definition for a key.
@@ -427,6 +448,14 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 				cv.RepoVal = v
 			}
 		}
+
+	case "attribution.score_threshold":
+		if userCfg != nil && userCfg.Attribution != nil && userCfg.Attribution.IsScoreThresholdSet() {
+			cv.UserVal = strconv.FormatFloat(userCfg.Attribution.GetScoreThreshold(), 'f', -1, 64)
+		}
+		if repoCfg != nil && repoCfg.Attribution != nil && repoCfg.Attribution.IsScoreThresholdSet() {
+			cv.RepoVal = strconv.FormatFloat(repoCfg.Attribution.GetScoreThreshold(), 'f', -1, 64)
+		}
 	}
 
 	// determine effective value and source (User > Repo > Team > Default)
@@ -485,10 +514,15 @@ func SetConfigValue(key, value string, level ConfigLevel, projectRoot string) er
 		return fmt.Errorf("unknown setting: %s", key)
 	}
 
-	// validate value — timezone uses custom IANA validation, others use ValidValues list
+	// validate value — timezone uses custom IANA validation, score_threshold uses float validation, others use ValidValues list
 	if key == "timezone" {
 		if !config.IsValidTimezone(value) {
 			return fmt.Errorf("invalid timezone %q: must be a valid IANA timezone (e.g., America/New_York, Europe/London, UTC)", value)
+		}
+	} else if key == "attribution.score_threshold" {
+		f, err := strconv.ParseFloat(value, 64)
+		if err != nil || f < 0.0 || f > 1.0 {
+			return fmt.Errorf("invalid value %q for %s: must be a number between 0.0 and 1.0", value, key)
 		}
 	} else if len(setting.ValidValues) > 0 {
 		valid := false
@@ -598,6 +632,13 @@ func setUserConfig(key, value string) error {
 			cfg.Attribution.PR = config.StringPtr(value)
 		}
 
+	case "attribution.score_threshold":
+		if cfg.Attribution == nil {
+			cfg.Attribution = &config.Attribution{}
+		}
+		f, _ := strconv.ParseFloat(value, 64) // already validated
+		cfg.Attribution.ScoreThreshold = config.Float64Ptr(f)
+
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)
 	}
@@ -647,6 +688,13 @@ func setRepoConfig(key, value, projectRoot string) error {
 		} else {
 			cfg.Attribution.PR = config.StringPtr(value)
 		}
+
+	case "attribution.score_threshold":
+		if cfg.Attribution == nil {
+			cfg.Attribution = &config.Attribution{}
+		}
+		f, _ := strconv.ParseFloat(value, 64) // already validated
+		cfg.Attribution.ScoreThreshold = config.Float64Ptr(f)
 
 	default:
 		return fmt.Errorf("setting %s not supported at repo level", key)
@@ -741,7 +789,7 @@ func unsetUserConfig(key string) error {
 	case "attribution.commit":
 		if cfg.Attribution != nil {
 			cfg.Attribution.Commit = nil
-			if !cfg.Attribution.IsPlanSet() && !cfg.Attribution.IsPRSet() && !cfg.Attribution.IsSessionSet() {
+			if !cfg.Attribution.IsPlanSet() && !cfg.Attribution.IsPRSet() && !cfg.Attribution.IsSessionSet() && !cfg.Attribution.IsScoreThresholdSet() {
 				cfg.Attribution = nil
 			}
 		}
@@ -749,7 +797,15 @@ func unsetUserConfig(key string) error {
 	case "attribution.pr":
 		if cfg.Attribution != nil {
 			cfg.Attribution.PR = nil
-			if !cfg.Attribution.IsPlanSet() && !cfg.Attribution.IsCommitSet() && !cfg.Attribution.IsSessionSet() {
+			if !cfg.Attribution.IsPlanSet() && !cfg.Attribution.IsCommitSet() && !cfg.Attribution.IsSessionSet() && !cfg.Attribution.IsScoreThresholdSet() {
+				cfg.Attribution = nil
+			}
+		}
+
+	case "attribution.score_threshold":
+		if cfg.Attribution != nil {
+			cfg.Attribution.ScoreThreshold = nil
+			if !cfg.Attribution.IsPlanSet() && !cfg.Attribution.IsCommitSet() && !cfg.Attribution.IsPRSet() && !cfg.Attribution.IsSessionSet() {
 				cfg.Attribution = nil
 			}
 		}
@@ -784,7 +840,7 @@ func unsetRepoConfig(key, projectRoot string) error {
 	case "attribution.commit":
 		if cfg.Attribution != nil {
 			cfg.Attribution.Commit = nil
-			if !cfg.Attribution.IsPlanSet() && !cfg.Attribution.IsPRSet() && !cfg.Attribution.IsSessionSet() {
+			if !cfg.Attribution.IsPlanSet() && !cfg.Attribution.IsPRSet() && !cfg.Attribution.IsSessionSet() && !cfg.Attribution.IsScoreThresholdSet() {
 				cfg.Attribution = nil
 			}
 		}
@@ -792,7 +848,15 @@ func unsetRepoConfig(key, projectRoot string) error {
 	case "attribution.pr":
 		if cfg.Attribution != nil {
 			cfg.Attribution.PR = nil
-			if !cfg.Attribution.IsPlanSet() && !cfg.Attribution.IsCommitSet() && !cfg.Attribution.IsSessionSet() {
+			if !cfg.Attribution.IsPlanSet() && !cfg.Attribution.IsCommitSet() && !cfg.Attribution.IsSessionSet() && !cfg.Attribution.IsScoreThresholdSet() {
+				cfg.Attribution = nil
+			}
+		}
+
+	case "attribution.score_threshold":
+		if cfg.Attribution != nil {
+			cfg.Attribution.ScoreThreshold = nil
+			if !cfg.Attribution.IsPlanSet() && !cfg.Attribution.IsCommitSet() && !cfg.Attribution.IsPRSet() && !cfg.Attribution.IsSessionSet() {
 				cfg.Attribution = nil
 			}
 		}

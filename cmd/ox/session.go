@@ -28,6 +28,7 @@ func init() {
 	sessionCmd.AddCommand(sessionUploadCmd)
 	sessionCmd.AddCommand(sessionPushSummaryCmd)
 	sessionCmd.AddCommand(sessionRegenerateCmd)
+	sessionCmd.AddCommand(sessionScoreCmd)
 
 	// TODO(post-MVP): commit, download, and upload should be automated.
 	// Users should only need start/stop — the rest is implementation detail.

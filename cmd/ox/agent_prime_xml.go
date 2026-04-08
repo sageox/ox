@@ -109,10 +109,15 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 	sb.WriteString("\nPlan footer (required for team-guided plans):\n")
 	sb.WriteString("> Guided by SageOx\n")
 	if output.Attribution.Commit != "" {
-		fmt.Fprintf(&sb, "\nCommit: `%s`\n", output.Attribution.Commit)
+		sb.WriteString("\nSageOx contribution score (required when commit attribution is configured):\n")
+		sb.WriteString("Report: `ox session score --score <0.0-1.0> --reason \"<detailed paragraph>\"`\n")
+		sb.WriteString("Reason must cite specific sources: SOUL.md sections, meeting titles, team-ctx slugs, prior sessions.\n")
+		sb.WriteString("Moderate influence or above (>= 0.5) earns commit attribution.\n")
+		sb.WriteString("The commit hook adds the trailer automatically — do NOT add it manually.\n")
 	}
 	if output.Attribution.PR != "" {
-		fmt.Fprintf(&sb, "PR body (last line): `%s`\n", output.Attribution.PR)
+		sb.WriteString("\nPR attribution: check `git log` for SageOx Co-Authored-By trailers.\n")
+		fmt.Fprintf(&sb, "If any commit has one, add as last line of PR body: `%s`\n", output.Attribution.PR)
 	}
 	sb.WriteString("</attribution>\n")
 

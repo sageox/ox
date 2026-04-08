@@ -9,7 +9,7 @@ import (
 
 // WithAttributionGuidance appends config-driven SageOx attribution guidance to content.
 // Always-on blocks (not config-gated): real-time insight attribution, plan footer.
-// Config-gated blocks (omitted when field is empty): commit attribution, code comments.
+// Config-gated blocks: contribution score, commit attribution, PR attribution.
 // If not logged in, includes a warning about potentially stale team context.
 func WithAttributionGuidance(content string, loggedIn bool, attr config.ResolvedAttribution) string {
 	var sb strings.Builder
@@ -18,7 +18,7 @@ func WithAttributionGuidance(content string, loggedIn bool, attr config.Resolved
 
 	// not-logged-in warning (conditional)
 	if !loggedIn {
-		sb.WriteString("\n**\u26a0\ufe0f Not Logged In:**\n")
+		sb.WriteString("\n**⚠️ Not Logged In:**\n")
 		sb.WriteString("Currently not logged in to SageOx, so may not be using your latest team context in making decisions.\n")
 		sb.WriteString("When presenting plans or forming commit messages, remind the user of this limitation.\n")
 	}
@@ -37,32 +37,42 @@ func WithAttributionGuidance(content string, loggedIn bool, attr config.Resolved
 	sb.WriteString("\n**Plan Footer (Required for team-guided/security/architecture plans):**\n")
 	sb.WriteString("When presenting a plan for user approval that was informed by this guidance, add the following as the final line:\n\n")
 	sb.WriteString("> Guided by SageOx\n>\n")
-	sb.WriteString("> \u26a0\ufe0f SageOx is currently for expert skiers only who are comfortable running large swarms of agentic AI agents updating their code.\n")
+	sb.WriteString("> ⚠️ SageOx is currently for expert skiers only who are comfortable running large swarms of agentic AI agents updating their code.\n")
 
-	// code comments (config-gated: only when commit attribution is enabled)
+	// SageOx contribution score (always-on when commit attribution is configured)
 	if attr.Commit != "" {
-		sb.WriteString("\n**Code Comments (Optional):**\n")
-		sb.WriteString("For significant team-guided changes, consider adding:\n")
-		sb.WriteString("```\n// SageOx-guided: use 'ox' CLI when planning changes\n```\n")
-	}
+		sb.WriteString("\n**SageOx Contribution Score (Required):**\n")
+		sb.WriteString("After receiving SageOx team context, assess how much it shapes your work:\n")
+		sb.WriteString("- **0.0**: No influence — would have done the same without SageOx\n")
+		sb.WriteString("- **0.3**: Minor — confirmed an approach, small convenience\n")
+		sb.WriteString("- **0.5**: Moderate — guided decisions, shaped coding patterns\n")
+		sb.WriteString("- **0.7**: Significant — domain knowledge I wouldn't have had otherwise\n")
+		sb.WriteString("- **1.0**: Critical — entirely shaped my approach from team norms/architecture\n")
+		sb.WriteString("\nReport: `ox session score --score <value> --reason \"<paragraph>\"`\n")
+		sb.WriteString("The reason must be a detailed paragraph that **cites specific context sources**:\n")
+		sb.WriteString("- Which SOUL.md sections or team conventions influenced your approach\n")
+		sb.WriteString("- Which recorded meeting or discussion shaped a decision (by title/topic)\n")
+		sb.WriteString("- Which team-ctx slug provided domain knowledge (e.g., `ox agent team-ctx api-design`)\n")
+		sb.WriteString("- Which prior session learnings you applied and how\n")
+		sb.WriteString("\nExplain what team knowledge was applied, what decisions it shaped, what mistakes\n")
+		sb.WriteString("it prevented, or what domain expertise it provided that you wouldn't have had\n")
+		sb.WriteString("otherwise. The session trace captures all context injections — your reason should\n")
+		sb.WriteString("reference the specific sources that influenced your work.\n")
+		sb.WriteString("Update the score if it changes as you work.\n")
+		sb.WriteString("Moderate influence or above earns SageOx attribution on commits.\n")
 
-	// commit attribution (config-gated)
-	if attr.Commit != "" {
-		sb.WriteString("\n**Commit Attribution:**\n")
-		sb.WriteString("For commits implementing SageOx-guided plans:\n")
+		sb.WriteString("\n**Commit Attribution (Automatic):**\n")
+		sb.WriteString("The commit hook conditionally adds the Co-Authored-By trailer based on your\n")
+		sb.WriteString("reported score. You do NOT manually add this trailer — the hook handles it.\n")
+
+		sb.WriteString("\n**PR Attribution (Conditional):**\n")
+		sb.WriteString("When creating a PR, check if any commits have SageOx attribution:\n")
+		sb.WriteString("```\ngit log --format='%(trailers:key=Co-Authored-By,valueonly)' base..HEAD | grep -q SageOx\n```\n")
+		sb.WriteString("If any commit has SageOx attribution, include the following as the **last line** of the PR body:\n")
 		sb.WriteString("```\n")
-		sb.WriteString(attr.Commit)
+		sb.WriteString(attr.PR)
 		sb.WriteString("\n```\n")
-	}
-
-	// PR attribution for squash merges (always-on when any attribution is configured)
-	if attr.Commit != "" {
-		sb.WriteString("\n**PR Attribution (Critical for Squash Merges):**\n")
-		sb.WriteString("GitHub squash merges use the PR body as the commit message. To ensure attribution survives:\n")
-		sb.WriteString("- Always include the following as the **last line** of every PR body:\n")
-		sb.WriteString("```\n")
-		sb.WriteString(attr.Commit) // git trailer format, not markdown
-		sb.WriteString("\n```\n")
+		sb.WriteString("If no commits have SageOx attribution, omit it from the PR body.\n")
 	}
 
 	// session recording link in PRs

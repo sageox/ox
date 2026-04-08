@@ -378,6 +378,19 @@ func init() {
 	})
 
 	// ============================================================
+	// Attribution checks
+	// ============================================================
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugScoreThresholdRange,
+		Name:        "Score threshold range",
+		Category:    "SageOx Configuration",
+		FixLevel:    FixLevelCheckOnly,
+		Description: "Validates attribution.score_threshold is in [0.0, 1.0]",
+		Run:         func(_ bool) checkResult { return checkScoreThresholdRange() },
+	})
+
+	// ============================================================
 	// Team Context checks
 	// ============================================================
 

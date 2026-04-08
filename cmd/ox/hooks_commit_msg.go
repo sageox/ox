@@ -82,18 +82,22 @@ func runHooksCommitMsg(cmd *cobra.Command, args []string) error {
 	}
 	msgContent := string(msgBytes)
 
+	agentID := os.Getenv("SAGEOX_AGENT_ID")
+
 	var trailers []string
 
-	// co-authored-by trailer (config-gated)
+	// co-authored-by trailer (conditional on sageox score)
 	if attr.Commit != "" && !strings.Contains(msgContent, attr.Commit) {
-		trailers = append(trailers, attr.Commit)
+		if shouldAttributeCommit(agentID, attr) {
+			trailers = append(trailers, attr.Commit)
+		}
 	}
 
 	// session trailer (only when actively recording)
 	if attr.Session != "" {
 		var state *session.RecordingState
 		var loadErr error
-		if agentID := os.Getenv("SAGEOX_AGENT_ID"); agentID != "" {
+		if agentID != "" {
 			// agent context: use agent-specific lookup to avoid picking another concurrent agent's session
 			state, loadErr = session.LoadRecordingStateForAgent(projectRoot, agentID)
 			// subagent: prefer parent session so commits/PRs link to the main session
@@ -136,6 +140,26 @@ func runHooksCommitMsg(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// shouldAttributeCommit checks whether the current commit should receive
+// SageOx attribution based on the agent's self-reported contribution score.
+//
+// Decision logic:
+//   - No agent ID (human commit): attribute unconditionally (they opted in via ox init)
+//   - No score file (old agent or not yet reported): attribute unconditionally (backward compat)
+//   - Score file exists: attribute only when score >= threshold
+func shouldAttributeCommit(agentID string, attr config.ResolvedAttribution) bool {
+	if agentID == "" {
+		return true // human commit — no score available, preserve current behavior
+	}
+
+	scoreFile, _ := session.ReadSageoxScore(agentID)
+	if scoreFile == nil {
+		return true // no score reported — backward compat: unconditional
+	}
+
+	return scoreFile.Score >= attr.ScoreThreshold
 }
 
 // resolveProjectAttribution loads and merges attribution for the project.
