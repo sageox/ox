@@ -269,7 +269,7 @@ func assertNoConflictMarkers(t *testing.T, dir string) {
 		}
 		data, readErr := os.ReadFile(path)
 		if readErr != nil {
-			return nil // skip unreadable files
+			return readErr
 		}
 		content := string(data)
 		if strings.Contains(content, "<<<<<<<") || strings.Contains(content, ">>>>>>>") {
