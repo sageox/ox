@@ -256,27 +256,16 @@ func readDailyFilesForDateRange(dailyDir, startDate, endDate string) ([]string, 
 		}
 	}
 
-	// sort by date chronologically, then by filename descending (latest UUID7 first)
+	// sort chronologically (then by full filename for stability within same day)
 	sort.Slice(matched, func(i, j int) bool {
 		if matched[i].date != matched[j].date {
 			return matched[i].date < matched[j].date
 		}
-		return matched[i].name > matched[j].name // latest UUID7 first
+		return matched[i].name < matched[j].name
 	})
 
-	// deduplicate by date — keep the first (latest UUID7) per day
-	seenDates := make(map[string]bool)
-	var deduped []dailyFile
-	for _, f := range matched {
-		if seenDates[f.date] {
-			continue
-		}
-		seenDates[f.date] = true
-		deduped = append(deduped, f)
-	}
-
 	var contents, names []string
-	for _, f := range deduped {
+	for _, f := range matched {
 		data, err := os.ReadFile(filepath.Join(dailyDir, f.name))
 		if err != nil {
 			continue
@@ -331,31 +320,16 @@ func readWeeklyFilesForMonth(weeklyDir string, year, month int, tz *time.Locatio
 		}
 	}
 
-	// sort by week chronologically, then by filename descending (latest UUID7 first)
+	// sort chronologically
 	sort.Slice(matched, func(i, j int) bool {
 		if matched[i].year != matched[j].year {
 			return matched[i].year < matched[j].year
 		}
-		if matched[i].week != matched[j].week {
-			return matched[i].week < matched[j].week
-		}
-		return matched[i].name > matched[j].name // latest UUID7 first
+		return matched[i].week < matched[j].week
 	})
 
-	// deduplicate by (year, week) — keep the first (latest UUID7) per week
-	seen := make(map[[2]int]bool)
-	var deduped []weeklyFile
-	for _, f := range matched {
-		key := [2]int{f.year, f.week}
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		deduped = append(deduped, f)
-	}
-
 	var contents, names []string
-	for _, f := range deduped {
+	for _, f := range matched {
 		data, err := os.ReadFile(filepath.Join(weeklyDir, f.name))
 		if err != nil {
 			continue
