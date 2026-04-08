@@ -15,6 +15,7 @@ import (
 // This allows permission tests to verify directory creation with 0700.
 func NewTestClient(t *testing.T) *AuthClient {
 	t.Helper()
+	resetKnownEndpoints()
 	return NewAuthClientWithDir(filepath.Join(t.TempDir(), "sageox"))
 }
 
@@ -37,44 +38,7 @@ func CreateTestTokenForClient(t *testing.T, client *AuthClient, expiresIn time.D
 	return token
 }
 
-// --- Legacy functions for backward compatibility during migration ---
-// NOTE: These use global state (configDirOverride) and cannot be used with t.Parallel().
-// Prefer NewTestClient(t) and AuthClient methods for new tests.
-
-// setupTestDir creates a temporary directory and overrides the config path.
-// DEPRECATED: Cannot be used with t.Parallel(). Use NewTestClient(t) instead.
-func setupTestDir(t *testing.T) string {
-	t.Helper()
-	tempDir := t.TempDir()
-
-	// save original override value
-	originalOverride := configDirOverride
-
-	// set override for this test
-	configDirOverride = tempDir
-
-	// restore on cleanup
-	t.Cleanup(func() {
-		configDirOverride = originalOverride
-	})
-
-	return tempDir
-}
-
-// SetTestConfigDir sets a temporary config directory for testing.
-// DEPRECATED: Use NewTestClient(t) instead.
-func SetTestConfigDir(t *testing.T) func() {
-	t.Helper()
-	tempDir := t.TempDir()
-	oldDir := configDirOverride
-	configDirOverride = tempDir
-	return func() {
-		configDirOverride = oldDir
-	}
-}
-
 // createTestToken returns a test token for testing (not saved).
-// DEPRECATED: Use CreateTestTokenForClient(t, client, expiresIn) instead.
 func createTestToken(expiresIn time.Duration) *StoredToken {
 	return &StoredToken{
 		AccessToken:  "test-access-token",
@@ -88,13 +52,4 @@ func createTestToken(expiresIn time.Duration) *StoredToken {
 			Name:   "Test User",
 		},
 	}
-}
-
-// CreateTestToken creates a test token and saves it using global functions.
-// DEPRECATED: Use CreateTestTokenForClient(t, client, expiresIn) instead.
-func CreateTestToken(t *testing.T, expiresIn time.Duration) *StoredToken {
-	t.Helper()
-	token := createTestToken(expiresIn)
-	require.NoError(t, SaveToken(token), "failed to save test token")
-	return token
 }

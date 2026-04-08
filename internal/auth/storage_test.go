@@ -682,11 +682,11 @@ func TestWithEndpoint(t *testing.T) {
 
 // --- P0: Tests for silent customer breakage scenarios ---
 
-// These use setupTestDir (not t.Parallel) because GetLoggedInEndpoints and
-// GetUserID are package-level functions that use configDirOverride.
+// These use t.Setenv (not t.Parallel) because GetLoggedInEndpoints and
+// GetUserID are package-level functions that rely on XDG_CONFIG_HOME.
 
 func TestGetLoggedInEndpoints_EmptyAccessToken(t *testing.T) {
-	setupTestDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	// save a token with empty AccessToken — should NOT appear in logged-in endpoints
 	emptyToken := &StoredToken{
@@ -710,7 +710,7 @@ func TestGetLoggedInEndpoints_EmptyAccessToken(t *testing.T) {
 }
 
 func TestGetLoggedInEndpoints_MixedValidity(t *testing.T) {
-	setupTestDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	// expired token
 	expired := &StoredToken{
@@ -732,7 +732,7 @@ func TestGetLoggedInEndpoints_MixedValidity(t *testing.T) {
 }
 
 func TestGetUserID_WithUserInfo(t *testing.T) {
-	setupTestDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	token := &StoredToken{
 		AccessToken: "tok",
@@ -746,7 +746,7 @@ func TestGetUserID_WithUserInfo(t *testing.T) {
 }
 
 func TestGetUserID_EmptyUserInfo(t *testing.T) {
-	setupTestDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	token := &StoredToken{
 		AccessToken: "tok",
@@ -760,7 +760,7 @@ func TestGetUserID_EmptyUserInfo(t *testing.T) {
 }
 
 func TestGetUserID_NoToken(t *testing.T) {
-	setupTestDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	uid := GetUserID("")
 	assert.Equal(t, "", uid, "no token should return empty user ID")
 }
@@ -784,18 +784,12 @@ func TestLoadAuthStore_LegacyMigration(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0700))
 	require.NoError(t, os.WriteFile(authPath, data, 0600))
 
-	// loadAuthStore should migrate to multi-endpoint format
-	store, err := client.loadAuthStore()
+	// loading via public API should migrate to multi-endpoint format
+	tok, err := client.GetToken()
 	require.NoError(t, err)
-	require.NotNil(t, store)
-	require.NotNil(t, store.Tokens)
-	assert.Len(t, store.Tokens, 1, "legacy token should be migrated to single entry")
-
-	// verify the token is accessible
-	for _, token := range store.Tokens {
-		assert.Equal(t, "legacy-access", token.AccessToken)
-		assert.Equal(t, "legacy-refresh", token.RefreshToken)
-	}
+	require.NotNil(t, tok, "legacy token should be migrated and retrievable")
+	assert.Equal(t, "legacy-access", tok.AccessToken)
+	assert.Equal(t, "legacy-refresh", tok.RefreshToken)
 }
 
 // TestLoadAuthStore_NullTokensField verifies that {"tokens": null} is treated as an
@@ -811,10 +805,10 @@ func TestLoadAuthStore_NullTokensField(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0700))
 	require.NoError(t, os.WriteFile(authPath, []byte(`{"tokens": null}`), 0600))
 
-	store, err := client.loadAuthStore()
+	// loading via public API should treat null tokens as empty (no token for this endpoint)
+	tok, err := client.GetToken()
 	require.NoError(t, err, `{"tokens": null} is valid JSON and should not error`)
-	require.NotNil(t, store)
-	assert.Empty(t, store.Tokens, "null tokens should yield an empty store, not a migrated zero-value token")
+	assert.Nil(t, tok, "null tokens should yield nil, not a migrated zero-value token")
 
 	// the file must not have been overwritten with a zero-value token
 	raw, err := os.ReadFile(authPath)
@@ -947,9 +941,8 @@ func TestLoadAuthStore_TruncatedJSON(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0700))
 	require.NoError(t, os.WriteFile(authPath, []byte(`{"tokens": {"https://sage`), 0600))
 
-	_, err = client.loadAuthStore()
+	_, err = client.GetToken()
 	require.Error(t, err, "truncated JSON should return error")
-	assert.Contains(t, err.Error(), "failed to parse auth file")
 }
 
 // --- Concurrent write tests ---
@@ -978,11 +971,11 @@ func TestConcurrentSaveToken_NoCorruption(t *testing.T) {
 	}
 	wg.Wait()
 
-	// the file should still be valid JSON — verify by loading
-	store, err := client.loadAuthStore()
+	// the file should still be valid JSON — verify by loading via public API
+	// spot-check one of the endpoints to confirm the store is readable
+	tok, err := client.GetTokenForEndpoint("https://endpoint-0.example.com")
 	require.NoError(t, err, "auth store should be valid JSON after concurrent writes")
-	require.NotNil(t, store)
-	require.NotNil(t, store.Tokens)
+	// token may or may not exist due to concurrent overwrites, but no error means valid JSON
 
 	// verify the raw file is valid JSON
 	authPath, err := client.GetAuthFilePath()
@@ -990,6 +983,7 @@ func TestConcurrentSaveToken_NoCorruption(t *testing.T) {
 	data, err := os.ReadFile(authPath)
 	require.NoError(t, err)
 	assert.True(t, json.Valid(data), "auth file should be valid JSON after concurrent writes")
+	_ = tok
 }
 
 func TestConcurrentSaveAndGetToken_NoCorruption(t *testing.T) {
@@ -1030,9 +1024,9 @@ func TestConcurrentSaveAndGetToken_NoCorruption(t *testing.T) {
 	wg.Wait()
 
 	// final state should be consistent
-	store, err := client.loadAuthStore()
+	finalTok, err := client.GetTokenForEndpoint("https://sageox.ai")
 	require.NoError(t, err)
-	require.NotNil(t, store.Tokens["https://sageox.ai"])
+	require.NotNil(t, finalTok, "token should exist after concurrent writes")
 }
 
 func TestConcurrentSaveToken_SameEndpoint(t *testing.T) {
@@ -1056,9 +1050,8 @@ func TestConcurrentSaveToken_SameEndpoint(t *testing.T) {
 	wg.Wait()
 
 	// exactly one token should remain at the endpoint
-	store, err := client.loadAuthStore()
+	token, err := client.GetTokenForEndpoint("https://sageox.ai")
 	require.NoError(t, err)
-	token := store.Tokens["https://sageox.ai"]
 	require.NotNil(t, token, "token should exist after concurrent writes to same endpoint")
 	assert.Contains(t, token.AccessToken, "token-", "should be one of the written tokens")
 }

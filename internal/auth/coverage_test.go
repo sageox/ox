@@ -11,6 +11,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// setupPackageLevelTest isolates package-level auth functions by pointing
+// XDG_CONFIG_HOME at a temp dir and pre-creating the sageox config directory
+// so that auth file lock operations succeed.
+func setupPackageLevelTest(t *testing.T) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", tmpDir)
+	t.Setenv("SAGEOX_ENDPOINT", "https://test.example.com")
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "sageox"), 0700))
+}
+
 // --- Feature flag tests ---
 
 func TestIsAuthRequired(t *testing.T) {
@@ -101,9 +112,7 @@ func TestRequireAuth_AuthNotRequired(t *testing.T) {
 
 func TestRequireAuth_AuthRequired_NotAuthenticated(t *testing.T) {
 	t.Setenv("FEATURE_AUTH", "true")
-
-	// use a temp dir with no token to force not-authenticated state
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	err := RequireAuth()
 	require.Error(t, err)
@@ -112,8 +121,7 @@ func TestRequireAuth_AuthRequired_NotAuthenticated(t *testing.T) {
 
 func TestRequireAuth_AuthRequired_ValidToken(t *testing.T) {
 	t.Setenv("FEATURE_AUTH", "true")
-
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	token := &StoredToken{
 		AccessToken:  "valid-token",
@@ -270,7 +278,7 @@ func TestStoredToken_EffectiveRefreshToken(t *testing.T) {
 // --- Package-level ListEndpoints ---
 
 func TestListEndpoints(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	// initially empty
 	endpoints, err := ListEndpoints()
@@ -292,7 +300,7 @@ func TestListEndpoints(t *testing.T) {
 }
 
 func TestListEndpoints_NormalizesKeys(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	token := &StoredToken{AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour)}
 	require.NoError(t, SaveTokenForEndpoint("https://api.sageox.ai", token))
@@ -306,52 +314,58 @@ func TestListEndpoints_NormalizesKeys(t *testing.T) {
 // --- Package-level RemoveToken / RemoveTokenForEndpoint ---
 
 func TestPackageLevelRemoveToken(t *testing.T) {
-	setupTestDir(t)
+	t.Parallel()
+
+	client := NewTestClient(t)
 
 	token := &StoredToken{AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour)}
-	require.NoError(t, SaveToken(token))
+	require.NoError(t, client.SaveToken(token))
 
-	got, err := GetToken()
+	got, err := client.GetToken()
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
-	require.NoError(t, RemoveToken())
+	require.NoError(t, client.RemoveToken())
 
-	got, err = GetToken()
+	got, err = client.GetToken()
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
 
 func TestPackageLevelRemoveTokenForEndpoint(t *testing.T) {
-	setupTestDir(t)
+	t.Parallel()
+
+	client := NewTestClient(t)
 
 	ep := "https://remove-test.example.com"
 	token := &StoredToken{AccessToken: "tok", ExpiresAt: time.Now().Add(time.Hour)}
-	require.NoError(t, SaveTokenForEndpoint(ep, token))
+	require.NoError(t, client.SaveTokenForEndpoint(ep, token))
 
-	got, err := GetTokenForEndpoint(ep)
+	got, err := client.GetTokenForEndpoint(ep)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 
-	require.NoError(t, RemoveTokenForEndpoint(ep))
+	require.NoError(t, client.RemoveTokenForEndpoint(ep))
 
-	got, err = GetTokenForEndpoint(ep)
+	got, err = client.GetTokenForEndpoint(ep)
 	require.NoError(t, err)
 	assert.Nil(t, got)
 }
 
 func TestPackageLevelRemoveTokenForEndpoint_NoStore(t *testing.T) {
-	setupTestDir(t)
+	t.Parallel()
+
+	client := NewTestClient(t)
 
 	// removing from empty store should not error
-	err := RemoveTokenForEndpoint("https://nonexistent.example.com")
+	err := client.RemoveTokenForEndpoint("https://nonexistent.example.com")
 	assert.NoError(t, err)
 }
 
 // --- GetUserID with explicit endpoint ---
 
 func TestGetUserID_WithExplicitEndpoint(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	ep := "https://userid-test.example.com"
 	token := &StoredToken{
@@ -366,7 +380,7 @@ func TestGetUserID_WithExplicitEndpoint(t *testing.T) {
 }
 
 func TestGetUserID_EndpointNoToken(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	uid := GetUserID("https://no-token.example.com")
 	assert.Equal(t, "", uid)
@@ -375,7 +389,7 @@ func TestGetUserID_EndpointNoToken(t *testing.T) {
 // --- GetLoggedInEndpoints edge cases ---
 
 func TestGetLoggedInEndpoints_NilToken(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	// write a store with a nil token value
 	authPath, err := GetAuthFilePath()
@@ -402,7 +416,7 @@ func TestGetLoggedInEndpoints_NilToken(t *testing.T) {
 }
 
 func TestGetLoggedInEndpoints_AllExpired(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	token := &StoredToken{
 		AccessToken: "expired",
@@ -501,9 +515,9 @@ func TestRefreshTokenResponse_effectiveRefreshToken(t *testing.T) {
 	}
 }
 
-// --- AuthClient.loadAuthStore legacy migration with empty endpoint ---
+// --- AuthClient legacy migration with empty endpoint ---
 
-func TestAuthClient_LoadAuthStore_LegacyMigration_EmptyEndpoint(t *testing.T) {
+func TestAuthClient_LegacyMigration_EmptyEndpoint(t *testing.T) {
 	t.Parallel()
 
 	tmpDir := t.TempDir()
@@ -513,7 +527,7 @@ func TestAuthClient_LoadAuthStore_LegacyMigration_EmptyEndpoint(t *testing.T) {
 		endpoint:  "",
 	}
 
-	// write legacy single-token format
+	// write legacy single-token format directly to the auth file
 	legacyToken := StoredToken{
 		AccessToken: "legacy-token",
 		ExpiresAt:   time.Now().Add(time.Hour),
@@ -527,16 +541,11 @@ func TestAuthClient_LoadAuthStore_LegacyMigration_EmptyEndpoint(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0700))
 	require.NoError(t, os.WriteFile(authPath, data, 0600))
 
-	store, err := client.loadAuthStore()
+	// verify via public API that the legacy token is accessible
+	got, err := client.GetToken()
 	require.NoError(t, err)
-	require.NotNil(t, store)
-	require.NotNil(t, store.Tokens)
-	assert.Len(t, store.Tokens, 1)
-
-	// should have migrated under the default endpoint
-	for _, tok := range store.Tokens {
-		assert.Equal(t, "legacy-token", tok.AccessToken)
-	}
+	require.NotNil(t, got)
+	assert.Equal(t, "legacy-token", got.AccessToken)
 }
 
 // --- AuthClient.GetToken / SaveToken / RemoveToken with empty endpoint ---
@@ -601,7 +610,7 @@ func TestAuthClient_IsAuthenticated_EmptyEndpoint(t *testing.T) {
 // --- Package-level IsAuthenticated / IsAuthenticatedForEndpoint ---
 
 func TestPackageLevel_IsAuthenticated_NoToken(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	authed, err := IsAuthenticated()
 	require.NoError(t, err)
@@ -609,7 +618,7 @@ func TestPackageLevel_IsAuthenticated_NoToken(t *testing.T) {
 }
 
 func TestPackageLevel_IsAuthenticatedForEndpoint_NoToken(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	authed, err := IsAuthenticatedForEndpoint("https://example.com")
 	require.NoError(t, err)
@@ -617,7 +626,7 @@ func TestPackageLevel_IsAuthenticatedForEndpoint_NoToken(t *testing.T) {
 }
 
 func TestPackageLevel_IsAuthenticatedForEndpoint_ValidToken(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	ep := "https://auth-check.example.com"
 	token := &StoredToken{
@@ -632,7 +641,7 @@ func TestPackageLevel_IsAuthenticatedForEndpoint_ValidToken(t *testing.T) {
 }
 
 func TestPackageLevel_IsAuthenticatedForEndpoint_ExpiredWithRefresh(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	ep := "https://expired-auth.example.com"
 	token := &StoredToken{
@@ -652,7 +661,7 @@ func TestPackageLevel_IsAuthenticatedForEndpoint_ExpiredWithRefresh(t *testing.T
 // --- Package-level EnsureValidToken / EnsureValidTokenForEndpoint ---
 
 func TestPackageLevel_EnsureValidToken_NoToken(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	token, err := EnsureValidToken(300)
 	require.NoError(t, err)
@@ -660,7 +669,7 @@ func TestPackageLevel_EnsureValidToken_NoToken(t *testing.T) {
 }
 
 func TestPackageLevel_EnsureValidToken_Valid(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	saved := &StoredToken{
 		AccessToken:  "valid-token",
@@ -676,7 +685,7 @@ func TestPackageLevel_EnsureValidToken_Valid(t *testing.T) {
 }
 
 func TestPackageLevel_EnsureValidTokenForEndpoint_NoToken(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	token, err := EnsureValidTokenForEndpoint("https://example.com", 300)
 	require.NoError(t, err)
@@ -686,7 +695,7 @@ func TestPackageLevel_EnsureValidTokenForEndpoint_NoToken(t *testing.T) {
 // --- Package-level RevokeToken ---
 
 func TestPackageLevel_RevokeToken_NoToken(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	success, err := RevokeToken()
 	assert.NoError(t, err)
@@ -696,7 +705,7 @@ func TestPackageLevel_RevokeToken_NoToken(t *testing.T) {
 // --- Package-level Handle401Error ---
 
 func TestPackageLevel_Handle401Error_NoRefreshToken(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	token := &StoredToken{
 		AccessToken:  "tok",
@@ -713,7 +722,7 @@ func TestPackageLevel_Handle401Error_NoRefreshToken(t *testing.T) {
 // --- Package-level refreshToken ---
 
 func TestPackageLevel_refreshToken_NoRefreshToken(t *testing.T) {
-	setupTestDir(t)
+	setupPackageLevelTest(t)
 
 	token := &StoredToken{
 		AccessToken:  "tok",

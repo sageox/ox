@@ -295,59 +295,65 @@ func TestRefreshTokenForEndpoint_SessionTokenFallback(t *testing.T) {
 // --- loadAuthStore: edge cases ---
 
 func TestLoadAuthStore_CorruptJSON(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: HTTP timeouts")
 	}
-	setupTestDir(t)
+	client := NewTestClient(t)
 
-	authPath, err := GetAuthFilePath()
+	authPath, err := client.GetAuthFilePath()
 	require.NoError(t, err)
 	configDir := filepath.Dir(authPath)
 	require.NoError(t, os.MkdirAll(configDir, 0700))
 	require.NoError(t, os.WriteFile(authPath, []byte("not json {{{"), 0600))
 
-	store, err := loadAuthStore()
+	_, err = client.GetToken()
 	require.Error(t, err)
-	assert.Nil(t, store)
 }
 
 func TestLoadAuthStore_EmptyFile(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: HTTP timeouts")
 	}
-	setupTestDir(t)
+	client := NewTestClient(t)
 
-	authPath, err := GetAuthFilePath()
+	authPath, err := client.GetAuthFilePath()
 	require.NoError(t, err)
 	configDir := filepath.Dir(authPath)
 	require.NoError(t, os.MkdirAll(configDir, 0700))
 	require.NoError(t, os.WriteFile(authPath, []byte(""), 0600))
 
-	store, err := loadAuthStore()
+	_, err = client.GetToken()
 	require.Error(t, err)
-	assert.Nil(t, store)
 }
 
 func TestLoadAuthStore_NonexistentFile(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: HTTP timeouts")
 	}
-	setupTestDir(t)
+	client := NewTestClient(t)
 
-	store, err := loadAuthStore()
+	// create the config directory but not the auth.json file
+	authPath, err := client.GetAuthFilePath()
 	require.NoError(t, err)
-	assert.NotNil(t, store)
-	assert.NotNil(t, store.Tokens)
-	assert.Empty(t, store.Tokens)
+	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0700))
+
+	// no auth.json — GetToken should return nil, nil
+	got, err := client.GetToken()
+	require.NoError(t, err)
+	assert.Nil(t, got)
 }
 
 // --- saveAuthStore: round-trip ---
 
 func TestSaveAndLoadAuthStore_RoundTrip(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: HTTP timeouts")
 	}
-	setupTestDir(t)
+	client := NewTestClient(t)
 
 	token := &StoredToken{
 		AccessToken:  "round-trip-token",
@@ -357,9 +363,9 @@ func TestSaveAndLoadAuthStore_RoundTrip(t *testing.T) {
 		UserInfo:     UserInfo{UserID: "u1", Email: "rt@example.com"},
 	}
 
-	require.NoError(t, SaveToken(token))
+	require.NoError(t, client.SaveToken(token))
 
-	loaded, err := GetToken()
+	loaded, err := client.GetToken()
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 	assert.Equal(t, "round-trip-token", loaded.AccessToken)
@@ -374,7 +380,7 @@ func TestRequireAuth_AuthRequired_ExpiredToken(t *testing.T) {
 		t.Skip("short: HTTP timeouts")
 	}
 	t.Setenv("FEATURE_AUTH", "true")
-	setupTestDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	// save expired token without refresh token
 	token := &StoredToken{
@@ -475,7 +481,7 @@ func TestPackageLevel_RefreshTokenForEndpoint_Success(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: HTTP timeouts")
 	}
-	setupTestDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -516,7 +522,7 @@ func TestPackageLevel_RefreshTokenForEndpoint_NoRefreshToken(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: HTTP timeouts")
 	}
-	setupTestDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	token := &StoredToken{
 		AccessToken:  "tok",
@@ -533,7 +539,7 @@ func TestPackageLevel_RefreshTokenForEndpoint_ServerError(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: HTTP timeouts")
 	}
-	setupTestDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -560,7 +566,7 @@ func TestPackageLevel_RefreshTokenForEndpoint_NetworkError(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: HTTP timeouts")
 	}
-	setupTestDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	token := &StoredToken{
 		AccessToken:  "tok",
@@ -577,7 +583,7 @@ func TestPackageLevel_RefreshTokenForEndpoint_MissingAccessToken(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: HTTP timeouts")
 	}
-	setupTestDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -603,7 +609,7 @@ func TestPackageLevel_RefreshTokenForEndpoint_JWTExchangeFails(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: HTTP timeouts")
 	}
-	setupTestDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	requestCount := 0
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -699,7 +705,7 @@ func TestEnsureValidTokenForEndpoint_FreshTokenNoBigBuffer(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: HTTP timeouts")
 	}
-	setupTestDir(t)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	ep := "https://fresh-ep.example.com"
 	token := &StoredToken{

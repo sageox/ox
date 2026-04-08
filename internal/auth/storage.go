@@ -1,14 +1,11 @@
 package auth
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
-	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -61,23 +58,15 @@ type AuthStore struct {
 	Tokens map[string]*StoredToken `json:"tokens"`
 }
 
-// configDirOverride allows tests to override the config directory
-var configDirOverride string
-
 // GetAuthFilePath returns the path to the auth token file.
 //
 // Path Resolution (via internal/paths package):
 //
-//	Default:           ~/.sageox/config/auth.json
-//	With OX_XDG_ENABLE: $XDG_CONFIG_HOME/sageox/auth.json
+//	Default:           $XDG_CONFIG_HOME/sageox/auth.json (typically ~/.config/sageox/auth.json)
+//	With OX_XDG_DISABLE: ~/.sageox/config/auth.json
 //
 // See internal/paths/doc.go for architecture rationale.
 func GetAuthFilePath() (string, error) {
-	// allow tests to override config directory
-	if configDirOverride != "" {
-		return filepath.Join(configDirOverride, "sageox", "auth.json"), nil
-	}
-
 	authPath := paths.AuthFile()
 	if authPath == "" {
 		return "", fmt.Errorf("failed to get auth file path")
@@ -110,86 +99,6 @@ func normalizeTokenKeys(store *AuthStore) {
 	}
 }
 
-// loadAuthStore loads the entire auth store from disk
-func loadAuthStore() (*AuthStore, error) {
-	authPath, err := GetAuthFilePath()
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := os.ReadFile(authPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &AuthStore{Tokens: make(map[string]*StoredToken)}, nil
-		}
-		return nil, fmt.Errorf("failed to read auth file: %w", err)
-	}
-
-	// Distinguish new multi-endpoint format from legacy single-token format by probing
-	// for the "tokens" key. This is necessary because both formats produce
-	// store.Tokens == nil after a bare json.Unmarshal (legacy has no "tokens" key;
-	// new format may have "tokens": null). We must not fall through to legacy
-	// migration for new-format files — doing so would overwrite the file with an
-	// empty zero-value StoredToken, silently wiping all credentials.
-	var probe struct {
-		Tokens json.RawMessage `json:"tokens"`
-	}
-	if json.Unmarshal(data, &probe) == nil && probe.Tokens != nil {
-		// "tokens" key is present — this is the new multi-endpoint format.
-		// Parse and normalize; treat null/empty tokens map as an empty store.
-		var store AuthStore
-		if err := json.Unmarshal(data, &store); err != nil {
-			return nil, fmt.Errorf("failed to parse auth file: %w", err)
-		}
-		if store.Tokens == nil {
-			store.Tokens = make(map[string]*StoredToken)
-		}
-		normalizeTokenKeys(&store)
-		return &store, nil
-	}
-
-	// No "tokens" key — migrate from legacy single-token format.
-	var legacyToken StoredToken
-	if err := json.Unmarshal(data, &legacyToken); err != nil {
-		return nil, fmt.Errorf("failed to parse auth file: %w", err)
-	}
-
-	// migrate legacy token to new format using default endpoint
-	store := AuthStore{
-		Tokens: map[string]*StoredToken{
-			endpoint.Get(): &legacyToken,
-		},
-	}
-
-	// save migrated format (best effort)
-	_ = saveAuthStore(&store)
-
-	return &store, nil
-}
-
-// saveAuthStore saves the entire auth store to disk
-func saveAuthStore(store *AuthStore) error {
-	authPath, err := GetAuthFilePath()
-	if err != nil {
-		return err
-	}
-
-	// SECURITY: directory permission 0700 = owner-only access.
-	// Auth tokens are sensitive credentials; prevent other users on shared
-	// systems from reading them.
-	configDir := filepath.Dir(authPath)
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-
-	// SECURITY: atomic write with fsync prevents partial/corrupt token files.
-	if err := fileutil.AtomicWriteJSON(authPath, store, 0600); err != nil {
-		return fmt.Errorf("failed to save auth store: %w", err)
-	}
-
-	return nil
-}
-
 // GetToken loads the raw stored token for the current endpoint.
 // Internal use only (refresh logic, display/identity checks).
 // Callers making API requests MUST use EnsureValidToken(300) or
@@ -205,14 +114,25 @@ func GetToken() (*StoredToken, error) {
 func GetTokenForEndpoint(ep string) (*StoredToken, error) {
 	ep = endpoint.NormalizeEndpoint(ep)
 
-	store, err := loadAuthStore()
+	authPath, err := GetAuthFilePath()
 	if err != nil {
 		return nil, err
 	}
 
-	token, exists := store.Tokens[ep]
-	if !exists {
-		return nil, nil // not authenticated for this endpoint
+	var token *StoredToken
+	err = withAuthFileRLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
+		}
+		t, exists := store.Tokens[ep]
+		if exists {
+			token = t
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return token, nil
@@ -262,17 +182,22 @@ func SaveToken(token *StoredToken) error {
 func SaveTokenForEndpoint(ep string, token *StoredToken) error {
 	ep = endpoint.NormalizeEndpoint(ep)
 
-	store, err := loadAuthStore()
+	authPath, err := GetAuthFilePath()
 	if err != nil {
 		return err
 	}
 
-	if store.Tokens == nil {
-		store.Tokens = make(map[string]*StoredToken)
-	}
-
-	store.Tokens[ep] = token
-	return saveAuthStore(store)
+	return withAuthFileLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
+		}
+		if store.Tokens == nil {
+			store.Tokens = make(map[string]*StoredToken)
+		}
+		store.Tokens[ep] = token
+		return h.save(store)
+	})
 }
 
 // RemoveToken deletes the authentication token for the current API endpoint
@@ -284,29 +209,45 @@ func RemoveToken() error {
 func RemoveTokenForEndpoint(ep string) error {
 	ep = endpoint.NormalizeEndpoint(ep)
 
-	store, err := loadAuthStore()
+	authPath, err := GetAuthFilePath()
 	if err != nil {
 		return err
 	}
 
-	if store.Tokens == nil {
-		return nil // nothing to remove
-	}
-
-	delete(store.Tokens, ep)
-	return saveAuthStore(store)
+	return withAuthFileLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
+		}
+		if store.Tokens == nil {
+			return nil // nothing to remove
+		}
+		delete(store.Tokens, ep)
+		return h.save(store)
+	})
 }
 
 // ListEndpoints returns all endpoints that have stored tokens
 func ListEndpoints() ([]string, error) {
-	store, err := loadAuthStore()
+	authPath, err := GetAuthFilePath()
 	if err != nil {
 		return nil, err
 	}
 
-	endpoints := make([]string, 0, len(store.Tokens))
-	for ep := range store.Tokens {
-		endpoints = append(endpoints, endpoint.NormalizeEndpoint(ep))
+	var endpoints []string
+	err = withAuthFileRLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
+		}
+		endpoints = make([]string, 0, len(store.Tokens))
+		for ep := range store.Tokens {
+			endpoints = append(endpoints, endpoint.NormalizeEndpoint(ep))
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return endpoints, nil
 }
@@ -314,18 +255,25 @@ func ListEndpoints() ([]string, error) {
 // GetLoggedInEndpoints returns all endpoints with valid (non-expired) tokens.
 // Returns nil if no valid tokens exist.
 func GetLoggedInEndpoints() []string {
-	store, err := loadAuthStore()
-	if err != nil || store == nil {
+	authPath, err := GetAuthFilePath()
+	if err != nil {
 		return nil
 	}
 
 	var endpoints []string
-	now := time.Now()
-	for ep, token := range store.Tokens {
-		if token != nil && token.AccessToken != "" && token.ExpiresAt.After(now) {
-			endpoints = append(endpoints, endpoint.NormalizeEndpoint(ep))
+	_ = withAuthFileRLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
 		}
-	}
+		now := time.Now()
+		for ep, token := range store.Tokens {
+			if token != nil && token.AccessToken != "" && token.ExpiresAt.After(now) {
+				endpoints = append(endpoints, endpoint.NormalizeEndpoint(ep))
+			}
+		}
+		return nil
+	})
 	return endpoints
 }
 
@@ -375,85 +323,7 @@ func (c *AuthClient) GetAuthFilePath() (string, error) {
 		return "", fmt.Errorf("failed to get config directory")
 	}
 
-	// auth.json is stored in {configDir}/auth.json
-	// configDir is already the sageox config directory (e.g., ~/.config/sageox)
 	return filepath.Join(configDir, "auth.json"), nil
-}
-
-// loadAuthStore loads the entire auth store from disk for this client
-func (c *AuthClient) loadAuthStore() (*AuthStore, error) {
-	authPath, err := c.GetAuthFilePath()
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := os.ReadFile(authPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return &AuthStore{Tokens: make(map[string]*StoredToken)}, nil
-		}
-		return nil, fmt.Errorf("failed to read auth file: %w", err)
-	}
-
-	// Distinguish new multi-endpoint format from legacy single-token format by probing
-	// for the "tokens" key. See the package-level loadAuthStore for the full rationale.
-	var probe struct {
-		Tokens json.RawMessage `json:"tokens"`
-	}
-	if json.Unmarshal(data, &probe) == nil && probe.Tokens != nil {
-		var store AuthStore
-		if err := json.Unmarshal(data, &store); err != nil {
-			return nil, fmt.Errorf("failed to parse auth file: %w", err)
-		}
-		if store.Tokens == nil {
-			store.Tokens = make(map[string]*StoredToken)
-		}
-		normalizeTokenKeys(&store)
-		return &store, nil
-	}
-
-	// No "tokens" key — migrate from legacy single-token format.
-	var legacyToken StoredToken
-	if err := json.Unmarshal(data, &legacyToken); err != nil {
-		return nil, fmt.Errorf("failed to parse auth file: %w", err)
-	}
-
-	// migrate legacy token to new format using client's endpoint
-	ep := c.endpoint
-	if ep == "" {
-		ep = endpoint.Get()
-	}
-	store := AuthStore{
-		Tokens: map[string]*StoredToken{
-			ep: &legacyToken,
-		},
-	}
-
-	// save migrated format (best effort)
-	_ = c.saveAuthStore(&store)
-
-	return &store, nil
-}
-
-// saveAuthStore saves the entire auth store to disk for this client
-func (c *AuthClient) saveAuthStore(store *AuthStore) error {
-	authPath, err := c.GetAuthFilePath()
-	if err != nil {
-		return err
-	}
-
-	// SECURITY: directory permission 0700 = owner-only access.
-	configDir := filepath.Dir(authPath)
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-
-	// SECURITY: atomic write with fsync prevents partial/corrupt token files.
-	if err := fileutil.AtomicWriteJSON(authPath, store, 0600); err != nil {
-		return fmt.Errorf("failed to save auth store: %w", err)
-	}
-
-	return nil
 }
 
 // GetToken loads the authentication token for this client's endpoint
@@ -469,14 +339,26 @@ func (c *AuthClient) GetToken() (*StoredToken, error) {
 func (c *AuthClient) GetTokenForEndpoint(ep string) (*StoredToken, error) {
 	ep = endpoint.NormalizeEndpoint(ep)
 
-	store, err := c.loadAuthStore()
+	authPath, err := c.GetAuthFilePath()
 	if err != nil {
 		return nil, err
 	}
 
-	token, exists := store.Tokens[ep]
-	if !exists {
-		return nil, nil // not authenticated for this endpoint
+	var token *StoredToken
+	legacyOpt := withLegacyMigrationEndpoint(c.endpoint)
+	err = withAuthFileRLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
+		}
+		t, exists := store.Tokens[ep]
+		if exists {
+			token = t
+		}
+		return nil
+	}, legacyOpt)
+	if err != nil {
+		return nil, err
 	}
 
 	return token, nil
@@ -495,17 +377,23 @@ func (c *AuthClient) SaveToken(token *StoredToken) error {
 func (c *AuthClient) SaveTokenForEndpoint(ep string, token *StoredToken) error {
 	ep = endpoint.NormalizeEndpoint(ep)
 
-	store, err := c.loadAuthStore()
+	authPath, err := c.GetAuthFilePath()
 	if err != nil {
 		return err
 	}
 
-	if store.Tokens == nil {
-		store.Tokens = make(map[string]*StoredToken)
-	}
-
-	store.Tokens[ep] = token
-	return c.saveAuthStore(store)
+	legacyOpt := withLegacyMigrationEndpoint(c.endpoint)
+	return withAuthFileLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
+		}
+		if store.Tokens == nil {
+			store.Tokens = make(map[string]*StoredToken)
+		}
+		store.Tokens[ep] = token
+		return h.save(store)
+	}, legacyOpt)
 }
 
 // RemoveToken deletes the authentication token for this client's endpoint
@@ -521,17 +409,23 @@ func (c *AuthClient) RemoveToken() error {
 func (c *AuthClient) RemoveTokenForEndpoint(ep string) error {
 	ep = endpoint.NormalizeEndpoint(ep)
 
-	store, err := c.loadAuthStore()
+	authPath, err := c.GetAuthFilePath()
 	if err != nil {
 		return err
 	}
 
-	if store.Tokens == nil {
-		return nil // nothing to remove
-	}
-
-	delete(store.Tokens, ep)
-	return c.saveAuthStore(store)
+	legacyOpt := withLegacyMigrationEndpoint(c.endpoint)
+	return withAuthFileLocked(authPath, func(h *authFileHandle) error {
+		store, loadErr := h.load()
+		if loadErr != nil {
+			return loadErr
+		}
+		if store.Tokens == nil {
+			return nil // nothing to remove
+		}
+		delete(store.Tokens, ep)
+		return h.save(store)
+	}, legacyOpt)
 }
 
 // IsAuthenticated checks if a valid non-expired token exists for this client's endpoint
