@@ -795,7 +795,7 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	// then clean up to prevent stale scores leaking into future sessions
 	if agentID != "" {
 		if scoreFile, _ := session.ReadSageoxScore(agentID); scoreFile != nil {
-			metaBuilder.SageoxScore(scoreFile.Score, scoreFile.Reason)
+			metaBuilder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason)
 		}
 		_ = session.CleanupSageoxScore(agentID)
 	}

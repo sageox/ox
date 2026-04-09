@@ -59,8 +59,9 @@ type SummarizeResponse struct {
 	ScoreReason  string  `json:"score_reason,omitempty"` // brief explanation of the quality score
 
 	// SageOx contribution (injected from cache file, not LLM-generated)
-	SageoxScore       *float64 `json:"sageox_score,omitempty"`        // 0.0-1.0 self-reported contribution score
-	SageoxScoreReason string   `json:"sageox_score_reason,omitempty"` // detailed paragraph explaining SageOx influence
+	SageoxScore         *float64 `json:"sageox_score,omitempty"`          // 0.0-1.0 self-reported contribution score
+	SageoxScoreCategory string   `json:"sageox_score_category,omitempty"` // named category: none, minor, moderate, significant, critical
+	SageoxScoreReason   string   `json:"sageox_score_reason,omitempty"`   // detailed paragraph explaining SageOx influence
 }
 
 // AgentSummary contains structured data for AI agents to consume.

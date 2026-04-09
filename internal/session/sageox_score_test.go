@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -278,4 +279,115 @@ func TestCleanupStaleScores_EmptyDir(t *testing.T) {
 	removed, err := CleanupStaleScores(map[string]bool{})
 	assert.NoError(t, err)
 	assert.Equal(t, 0, removed)
+}
+
+// --- I. Categorical scoring ---
+
+// TestWriteSageoxScoreCategory_RoundTrip verifies category-based write/read.
+// Failure prevented: category name not persisted or wrong float mapped.
+func TestWriteSageoxScoreCategory_RoundTrip(t *testing.T) {
+	tests := []struct {
+		cat   ScoreCategory
+		score float64
+	}{
+		{ScoreNone, 0.0},
+		{ScoreMinor, 0.3},
+		{ScoreModerate, 0.5},
+		{ScoreSignificant, 0.7},
+		{ScoreCritical, 1.0},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.cat), func(t *testing.T) {
+			agentID := testAgentID(t, "category")
+			t.Cleanup(func() { _ = CleanupSageoxScore(agentID) })
+
+			require.NoError(t, WriteSageoxScoreCategory(agentID, tt.cat, "test reason"))
+
+			sf, err := ReadSageoxScore(agentID)
+			require.NoError(t, err)
+			require.NotNil(t, sf)
+			assert.Equal(t, tt.score, sf.Score)
+			assert.Equal(t, tt.cat, sf.Category)
+			assert.Equal(t, "test reason", sf.Reason)
+		})
+	}
+}
+
+// TestWriteSageoxScoreCategory_InvalidCategory rejects unknown category names.
+// Failure prevented: garbage category names silently accepted.
+func TestWriteSageoxScoreCategory_InvalidCategory(t *testing.T) {
+	err := WriteSageoxScoreCategory("test-agent", "extreme", "reason")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid score category")
+}
+
+// TestParseScoreCategory verifies case-insensitive category parsing.
+// Failure prevented: agents sending "Moderate" or "MODERATE" rejected.
+func TestParseScoreCategory(t *testing.T) {
+	tests := []struct {
+		input string
+		want  ScoreCategory
+		ok    bool
+	}{
+		{"none", ScoreNone, true},
+		{"Minor", ScoreMinor, true},
+		{"MODERATE", ScoreModerate, true},
+		{"  significant  ", ScoreSignificant, true},
+		{"critical", ScoreCritical, true},
+		{"extreme", "", false},
+		{"", "", false},
+		{"0.5", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			cat, ok := ParseScoreCategory(tt.input)
+			assert.Equal(t, tt.ok, ok)
+			if ok {
+				assert.Equal(t, tt.want, cat)
+			}
+		})
+	}
+}
+
+// TestCategoryForScore maps numeric scores to nearest category.
+// Failure prevented: backward-compat read of numeric-only score files.
+func TestCategoryForScore(t *testing.T) {
+	tests := []struct {
+		score float64
+		want  ScoreCategory
+	}{
+		{0.0, ScoreNone},
+		{0.1, ScoreMinor},
+		{0.3, ScoreMinor},
+		{0.4, ScoreModerate},
+		{0.5, ScoreModerate},
+		{0.6, ScoreSignificant},
+		{0.7, ScoreSignificant},
+		{0.8, ScoreCritical},
+		{1.0, ScoreCritical},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("%.1f", tt.score), func(t *testing.T) {
+			assert.Equal(t, tt.want, CategoryForScore(tt.score))
+		})
+	}
+}
+
+// TestWriteSageoxScore_BackwardCompat_SetsCategory verifies that the numeric
+// WriteSageoxScore function auto-maps to the nearest category.
+// Failure prevented: old numeric API producing score files without category field.
+func TestWriteSageoxScore_BackwardCompat_SetsCategory(t *testing.T) {
+	agentID := testAgentID(t, "compat")
+	t.Cleanup(func() { _ = CleanupSageoxScore(agentID) })
+
+	require.NoError(t, WriteSageoxScore(agentID, 0.7, "numeric input"))
+
+	sf, err := ReadSageoxScore(agentID)
+	require.NoError(t, err)
+	require.NotNil(t, sf)
+	assert.Equal(t, 0.7, sf.Score)
+	assert.Equal(t, ScoreSignificant, sf.Category)
 }

@@ -125,6 +125,7 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	if meta, err := lfs.ReadSessionMeta(sessionDir); err == nil && meta.AgentID != "" {
 		if scoreFile, _ := session.ReadSageoxScore(meta.AgentID); scoreFile != nil {
 			summaryParsed.SageoxScore = &scoreFile.Score
+			summaryParsed.SageoxScoreCategory = string(scoreFile.Category)
 			summaryParsed.SageoxScoreReason = scoreFile.Reason
 		}
 	}

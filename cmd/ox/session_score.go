@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
@@ -16,22 +18,22 @@ var sessionScoreCmd = &cobra.Command{
 
 Without flags, displays the current score. With --score, sets or updates it.
 
-The score (0.0-1.0) determines whether commits receive SageOx attribution:
-  0.0  No influence
-  0.3  Minor -- confirmed an approach
-  0.5  Moderate -- guided decisions
-  0.7  Significant -- domain knowledge otherwise unavailable
-  1.0  Critical -- entirely shaped the approach
+The score determines whether commits receive SageOx attribution:
+  none         (0.0)  No influence
+  minor        (0.3)  Confirmed an approach
+  moderate     (0.5)  Guided decisions
+  significant  (0.7)  Domain knowledge otherwise unavailable
+  critical     (1.0)  Entirely shaped the approach
 
 Examples:
-  ox session score                              # view current score
-  ox session score --score 0.7                  # set score
-  ox session score --score 0.7 --reason "..."   # set score with explanation`,
+  ox session score                                      # view current score
+  ox session score --score moderate                     # set score
+  ox session score --score significant --reason "..."   # set score with explanation`,
 	RunE: runSessionScore,
 }
 
 func init() {
-	sessionScoreCmd.Flags().Float64("score", 0, "SageOx contribution score (0.0-1.0)")
+	sessionScoreCmd.Flags().String("score", "", "SageOx contribution level (none, minor, moderate, significant, critical)")
 	sessionScoreCmd.Flags().String("reason", "", "Detailed explanation of SageOx influence")
 }
 
@@ -76,8 +78,26 @@ func showSessionScore(agentID string) error {
 }
 
 func setSessionScore(cmd *cobra.Command, agentID string) error {
-	scoreVal, _ := cmd.Flags().GetFloat64("score")
+	scoreStr, _ := cmd.Flags().GetString("score")
 	reason, _ := cmd.Flags().GetString("reason")
+
+	// try parsing as category name first
+	if cat, ok := session.ParseScoreCategory(scoreStr); ok {
+		if err := session.WriteSageoxScoreCategory(agentID, cat, reason); err != nil {
+			return fmt.Errorf("write score: %w", err)
+		}
+		return outputScoreResult(session.CategoryValue(cat), string(cat), reason)
+	}
+
+	// fall back to numeric for backward compatibility
+	scoreVal, err := strconv.ParseFloat(scoreStr, 64)
+	if err != nil {
+		validCats := make([]string, 0, len(session.ValidScoreCategories()))
+		for _, c := range session.ValidScoreCategories() {
+			validCats = append(validCats, string(c))
+		}
+		return fmt.Errorf("invalid score %q: use a category (%s)", scoreStr, strings.Join(validCats, ", "))
+	}
 
 	if scoreVal < 0 || scoreVal > 1 {
 		return fmt.Errorf("score must be between 0.0 and 1.0, got %f", scoreVal)
@@ -86,10 +106,14 @@ func setSessionScore(cmd *cobra.Command, agentID string) error {
 	if err := session.WriteSageoxScore(agentID, scoreVal, reason); err != nil {
 		return fmt.Errorf("write score: %w", err)
 	}
+	return outputScoreResult(scoreVal, string(session.CategoryForScore(scoreVal)), reason)
+}
 
+func outputScoreResult(score float64, category, reason string) error {
 	out := map[string]interface{}{
 		"ok":           true,
-		"sageox_score": scoreVal,
+		"sageox_score": score,
+		"category":     category,
 	}
 	if reason != "" {
 		out["reason"] = reason

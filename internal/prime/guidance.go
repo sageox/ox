@@ -114,7 +114,7 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 	if p.TeamCtx != nil {
 		cmds = append(cmds, IntentCommand{
 			Intent:  "report SageOx contribution score for this session (required when team context influences work)",
-			Command: `ox session score --score <0.0-1.0> --reason "<explanation>"`,
+			Command: `ox session score --score <none|minor|moderate|significant|critical> --reason "<explanation>"`,
 		})
 	}
 
