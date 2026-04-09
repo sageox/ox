@@ -36,7 +36,7 @@ func NewDaemonTracer() *DaemonTracer {
 //
 // Example:
 //
-//	ctx, span := dt.StartTask(ctx, "daemon:sync_read")
+//	ctx, span := dt.StartTask(ctx, "daemon:gc_check")
 //	defer span.End()
 func (dt *DaemonTracer) StartTask(ctx context.Context, taskName string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	if dt == nil {

@@ -697,23 +697,20 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			return
 
 		case <-readTicker.C:
-			taskCtx, span := s.tracer.StartTask(ctx, "daemon:sync_read")
-			s.pullChanges(taskCtx)
-			span.End()
+			// not traced: high-frequency sync dominates span volume with little diagnostic value
+			s.pullChanges(ctx)
 			readTicker.Reset(jitteredDuration(s.config.SyncIntervalRead, 0.10))
 
 		case <-teamContextChan:
-			taskCtx, span := s.tracer.StartTask(ctx, "daemon:sync_team_context")
-			s.pullTeamContexts(taskCtx)
-			span.End()
+			// not traced: high-frequency sync dominates span volume with little diagnostic value
+			s.pullTeamContexts(ctx)
 			if teamContextTicker != nil {
 				teamContextTicker.Reset(jitteredDuration(s.config.TeamContextSyncInterval, 0.10))
 			}
 
 		case <-heartbeatTicker.C:
-			_, span := s.tracer.StartTask(ctx, "daemon:heartbeat")
+			// not traced: lightweight liveness ping, not useful in telemetry
 			s.writeHeartbeats()
-			span.End()
 
 		case <-versionCheckChan:
 			taskCtx, span := s.tracer.StartTask(ctx, "daemon:version_check")
