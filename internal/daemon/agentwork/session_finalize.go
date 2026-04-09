@@ -791,11 +791,13 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		EntryCount(len(stored.Entries)).
 		StopReason(session.StopReasonRecovered)
 
-	// inject sageox contribution score from cache file (matches synchronous path)
+	// inject sageox contribution score from cache file (matches synchronous path),
+	// then clean up to prevent stale scores leaking into future sessions
 	if agentID != "" {
 		if scoreFile, _ := session.ReadSageoxScore(agentID); scoreFile != nil {
 			metaBuilder.SageoxScore(scoreFile.Score, scoreFile.Reason)
 		}
+		_ = session.CleanupSageoxScore(agentID)
 	}
 
 	meta := metaBuilder.Build()

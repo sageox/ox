@@ -103,6 +103,78 @@ func TestBuildSessionURL(t *testing.T) {
 	}
 }
 
+// --- Attribution decision gate ---
+
+// TestShouldAttributeCommit_HumanCommit verifies that human commits (no agent ID)
+// always receive attribution regardless of score state.
+// Failure prevented: human commits silently lose Co-Authored-By after ox init.
+func TestShouldAttributeCommit_HumanCommit(t *testing.T) {
+	attr := config.ResolvedAttribution{ScoreThreshold: 0.5}
+	assert.True(t, shouldAttributeCommit("", attr))
+}
+
+// TestShouldAttributeCommit_NoScoreFile verifies backward compatibility: agents
+// that haven't reported a score get unconditional attribution.
+// Failure prevented: old agents or agents before first ox session score lose attribution.
+func TestShouldAttributeCommit_NoScoreFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	attr := config.ResolvedAttribution{ScoreThreshold: 0.5}
+	assert.True(t, shouldAttributeCommit("OxNONE", attr))
+}
+
+// TestShouldAttributeCommit_ScoreThreshold verifies the conditional attribution
+// decision across boundary values (below, at, above threshold).
+// Failure prevented: incorrect >= comparison suppresses or grants attribution at boundary.
+func TestShouldAttributeCommit_ScoreThreshold(t *testing.T) {
+	cacheDir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+
+	tests := []struct {
+		name      string
+		score     float64
+		threshold float64
+		want      bool
+	}{
+		{"below threshold", 0.3, 0.5, false},
+		{"at threshold", 0.5, 0.5, true},
+		{"above threshold", 0.8, 0.5, true},
+		{"zero score zero threshold", 0.0, 0.0, true},
+		{"max score", 1.0, 0.5, true},
+		{"high threshold", 0.5, 0.9, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agentID := "OxTest" + tt.name
+			require.NoError(t, session.WriteSageoxScore(agentID, tt.score, "test"))
+			t.Cleanup(func() { _ = session.CleanupSageoxScore(agentID) })
+
+			attr := config.ResolvedAttribution{ScoreThreshold: tt.threshold}
+			assert.Equal(t, tt.want, shouldAttributeCommit(agentID, attr))
+		})
+	}
+}
+
+// TestShouldAttributeCommit_ReadErrorFallsBackToUnconditional verifies that
+// a corrupt score file doesn't block attribution (safe fallback).
+// Failure prevented: corrupt cache file permanently suppresses attribution.
+func TestShouldAttributeCommit_ReadErrorFallsBackToUnconditional(t *testing.T) {
+	cacheDir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", cacheDir)
+
+	// write a corrupt score file
+	scoresDir := filepath.Join(cacheDir, "sageox", "scores")
+	require.NoError(t, os.MkdirAll(scoresDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(scoresDir, "OxCorrupt.json"), []byte("{bad json"), 0600))
+
+	attr := config.ResolvedAttribution{ScoreThreshold: 0.5}
+	assert.True(t, shouldAttributeCommit("OxCorrupt", attr), "corrupt score file should fall back to unconditional attribution")
+}
+
 // TestSessionLookupUsesAgentID verifies that when SAGEOX_AGENT_ID is set,
 // LoadRecordingStateForAgent is used instead of the first-found LoadRecordingState.
 // This prevents linking the wrong session when multiple agents record concurrently.

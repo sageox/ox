@@ -110,6 +110,13 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 	sb.WriteString("> Guided by SageOx\n")
 	if output.Attribution.Commit != "" {
 		sb.WriteString("\nSageOx contribution score (required when commit attribution is configured):\n")
+		sb.WriteString("Score reflects how much SageOx team context shaped your work — NOT that a session was recorded.\n")
+		sb.WriteString("Scale:\n")
+		sb.WriteString("  0.0  No influence — worked independently of team context\n")
+		sb.WriteString("  0.3  Minor — confirmed an approach you already planned\n")
+		sb.WriteString("  0.5  Moderate — team context guided decisions\n")
+		sb.WriteString("  0.7  Significant — domain knowledge you would not have had otherwise\n")
+		sb.WriteString("  1.0  Critical — team context entirely shaped the approach\n")
 		sb.WriteString("Report: `ox session score --score &lt;0.0-1.0&gt; --reason \"&lt;detailed paragraph&gt;\"`\n")
 		sb.WriteString("Reason must cite specific sources: SOUL.md sections, meeting titles, team-ctx slugs, prior sessions.\n")
 		fmt.Fprintf(&sb, "Score >= %g earns commit attribution.\n", output.Attribution.ScoreThreshold)

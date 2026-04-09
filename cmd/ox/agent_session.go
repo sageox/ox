@@ -1025,10 +1025,12 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		Summary(result.Summary).
 		StopReason(session.StopReasonStopped)
 
-	// inject sageox contribution score from cache file into meta.json
+	// inject sageox contribution score from cache file into meta.json,
+	// then clean up the score file to prevent stale scores leaking into future sessions
 	if scoreFile, _ := session.ReadSageoxScore(state.AgentID); scoreFile != nil {
 		metaBuilder.SageoxScore(scoreFile.Score, scoreFile.Reason)
 	}
+	_ = session.CleanupSageoxScore(state.AgentID)
 
 	meta := metaBuilder.Build()
 	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
