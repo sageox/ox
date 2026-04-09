@@ -19,8 +19,9 @@ git status
 
 # Run quality gates (run lint and tests in parallel)
 make lint
-make test-all   # includes slow tests (timeouts, delays)
-make test-slow  # build tag: slow (real session tests)
+make test-all          # all unit tests incl. expensive (git clone, SQLite, LFS)
+make test-slow         # build tag: slow (real ox binary tests)
+make test-digital-twin # ledger + team-context structural verification
 ```
 
 If tests or lint fail, fix issues before proceeding.
@@ -41,7 +42,21 @@ make smoke-test
 
 This runs end-to-end tests against test.sageox.ai: auth, init, doctor, status, re-init, agent prime, session list, and clone-without-ox. If smoke tests fail, investigate before proceeding — these verify ox works in a real environment.
 
-**Tip:** Run lint, test-all, and test-integration in parallel background tasks to save time.
+### Step 1d: Run Walks (Human-Driven)
+
+**Coordinate in the Slack channel.** A team member installs the release candidate and walks through core workflows on a real machine:
+
+1. **Fresh setup** — `ox login` → `ox init` on a new repo → `ox doctor` → `ox status`
+2. **Agent prime** — open Claude Code, verify `ox agent prime` loads team context
+3. **Session recording** — start a session, do some work, stop it, verify `ox session list`
+4. **Team context** — verify team knowledge appears via `ox agent team-ctx`
+5. **Clone experience** — clone the repo in a fresh directory, run `ox init`
+6. **Doctor recovery** — delete `.sageox/config.json`, run `ox doctor`, verify auto-repair
+7. **Upgrade path** — if upgrading, verify `ox version` and existing config survive
+
+Report pass/fail per step, OS/arch, and ox version back in Slack. Do NOT proceed to version bump until Run Walks pass.
+
+**Tip:** Run lint, test-all, smoke-test, and test-integration in parallel background tasks to save time. See `docs/human/guides/release-testing-playbook.md` for the full testing reference.
 
 ### Step 2: Create Release Branch
 
