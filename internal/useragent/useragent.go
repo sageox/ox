@@ -169,7 +169,7 @@ func SetHeaders(h http.Header) {
 			tp = randomTraceparent()
 		}
 		h.Set("traceparent", tp)
-		slog.Info("http request", "traceparent", tp, "user-agent", h.Get("User-Agent"))
+		slog.Debug("http request traceparent", "traceparent", tp)
 	}
 }
 

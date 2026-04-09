@@ -79,7 +79,7 @@ func Init(ctx context.Context, serviceName, apiEndpoint string) error {
 	shutFn = tp.Shutdown
 	mu.Unlock()
 
-	slog.Info("otel tracing enabled", "endpoint", apiEndpoint, "service", serviceName)
+	slog.Debug("otel tracing enabled", "endpoint", apiEndpoint, "service", serviceName)
 	return nil
 }
 
