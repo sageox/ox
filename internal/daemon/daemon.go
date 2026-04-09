@@ -9,14 +9,19 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/gitserver"
@@ -171,6 +176,7 @@ type Daemon struct {
 	projectWatcher         *ProjectWatcher
 	dbMaintenance          *DBMaintenanceScheduler
 	settingsFetcher        *SettingsFetcher
+	tracer                 *observability.DaemonTracer
 
 	// state
 	mu               sync.Mutex
@@ -637,6 +643,9 @@ func (d *Daemon) shutdown() error {
 		d.friction.Stop()
 	}
 
+	// flush pending trace spans before canceling context (exporter needs live HTTP)
+	observability.Shutdown(context.Background())
+
 	// close whisper registry (flush SQLite WAL before exit)
 	if d.whisperRegistry != nil {
 		if err := d.whisperRegistry.Close(); err != nil {
@@ -903,6 +912,22 @@ func (d *Daemon) initComponents() time.Duration {
 	d.startTime = time.Now()
 	d.friction = NewFrictionCollector(d.logger, projectEndpoint)
 
+	// OTel tracing for per-task operational visibility (traces → Honeycomb).
+	// Separate from the TelemetryCollector which handles product events.
+	if isTelemetryEnabled() && projectEndpoint != "" {
+		apiEndpoint := endpoint.GetForProject(d.config.ProjectRoot)
+		if err := observability.Init(d.ctx, "ox-daemon", apiEndpoint,
+			attribute.String("client.id", d.telemetry.clientID),
+			attribute.String("client.class", "daemon"),
+			attribute.String("service.version", version.Version),
+			attribute.String("os.type", runtime.GOOS),
+			attribute.String("host.arch", runtime.GOARCH),
+		); err != nil {
+			d.logger.Warn("otel tracing init failed", "error", err)
+		}
+		d.tracer = observability.NewDaemonTracer()
+	}
+
 	// health check + notification infrastructure
 	d.issues = NewIssueTracker()
 
@@ -952,6 +977,7 @@ func (d *Daemon) initComponents() time.Duration {
 
 	// sync scheduler
 	d.scheduler = NewSyncScheduler(d.config, d.logger)
+	d.scheduler.SetTracer(d.tracer)
 
 	// code index manager
 	if d.config.ProjectRoot != "" {

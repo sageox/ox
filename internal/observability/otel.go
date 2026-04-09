@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -34,8 +35,11 @@ var (
 // Init sets up the OTel TracerProvider with OTLP/HTTP export to the SageOx
 // OTLP proxy at {apiEndpoint}/api/v1/otlp/v1/traces.
 //
+// Extra attrs are merged into the OTel resource alongside service.name.
+// The daemon uses this to set client.id, client.class, os.type, etc.
+//
 // Safe to call with empty apiEndpoint — tracing is disabled (noop).
-func Init(ctx context.Context, serviceName, apiEndpoint string) error {
+func Init(ctx context.Context, serviceName, apiEndpoint string, attrs ...attribute.KeyValue) error {
 	if apiEndpoint == "" {
 		slog.Debug("otel tracing disabled", "reason", "no endpoint")
 		return nil
@@ -61,6 +65,9 @@ func Init(ctx context.Context, serviceName, apiEndpoint string) error {
 		return fmt.Errorf("create OTLP exporter: %w", err)
 	}
 
+	resAttrs := []attribute.KeyValue{semconv.ServiceName(serviceName)}
+	resAttrs = append(resAttrs, attrs...)
+
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(exporter,
 			sdktrace.WithBatchTimeout(1*time.Second),
@@ -68,7 +75,7 @@ func Init(ctx context.Context, serviceName, apiEndpoint string) error {
 		),
 		sdktrace.WithResource(resource.NewWithAttributes(
 			semconv.SchemaURL,
-			semconv.ServiceName(serviceName),
+			resAttrs...,
 		)),
 	)
 	otel.SetTracerProvider(tp)
