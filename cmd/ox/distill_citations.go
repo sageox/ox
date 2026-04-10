@@ -403,7 +403,7 @@ func walkOutsideCodeFences(text string, fn func(string) string) string {
 //
 //	1. [Discussion: 2026-03-10 — Architecture sync][1]
 //	2. [sageox/ox#152][2]
-//	3. Session: 2026-03-11 — stateless refactor   ← no URL, no link
+//	3. Session: 2026-03-11 — stateless refactor <!-- ref:sessions/2026-03-11T09-00-ryan-Oxabcd -->
 //
 //	[1]: https://sageox.ai/team/team_xxx/media/recordings/rec_yyy
 //	[2]: https://github.com/sageox/ox/pull/152
@@ -412,6 +412,14 @@ func walkOutsideCodeFences(text string, fn func(string) string) string {
 // underneath let `[anchor][N]` and bare `[N]` markers in the body resolve to
 // real links. Entries without a URL render as plain text — still cited, just
 // not clickable.
+//
+// Label-only entries (no URL) get a trailing HTML comment containing the
+// citation Key (typically the source_ref like `sessions/<dirname>` or
+// `discussions/<dirname>`). Most markdown renderers strip HTML comments, so
+// the human reader sees only the label — but parseSourcesSection reads the
+// comment back to recover the stable identifier. Without this, two distinct
+// label-only sources that happen to share a label (e.g., two short
+// discussion titles) would collapse during weekly/monthly merging.
 //
 // Returns empty string if cites is empty (caller suppresses the section
 // entirely in that case).
@@ -426,7 +434,14 @@ func renderSourcesSection(cites []citation) string {
 		if c.URL != "" {
 			fmt.Fprintf(&sb, "%d. [%s][%d]\n", c.Num, escapeMarkdownLinkText(c.Label), c.Num)
 		} else {
-			fmt.Fprintf(&sb, "%d. %s\n", c.Num, c.Label)
+			// label-only: append a hidden ref comment so the parser can
+			// recover the stable Key on round-trip. Skip the comment if the
+			// Key looks like the synthetic "label:..." form (no useful info).
+			if c.Key != "" && !strings.HasPrefix(c.Key, "label:") {
+				fmt.Fprintf(&sb, "%d. %s <!-- ref:%s -->\n", c.Num, c.Label, c.Key)
+			} else {
+				fmt.Fprintf(&sb, "%d. %s\n", c.Num, c.Label)
+			}
 		}
 	}
 	// reference link definitions (only for cites with a URL)
@@ -495,18 +510,29 @@ func parseSourcesSection(md string) []citation {
 	}
 
 	// collect numbered list entries: "1. [label][N]" or "1. label"
+	// Each line may end with a hidden ` <!-- ref:<key> -->` comment carrying
+	// a stable identifier (e.g., source_ref) for label-only entries. Strip
+	// it before matching the line so the regexes don't have to know about it.
 	var cites []citation
 	for _, line := range strings.Split(rest, "\n") {
 		line = strings.TrimSpace(line)
+		var refKey string
+		if m := refCommentRe.FindStringSubmatchIndex(line); m != nil {
+			refKey = strings.TrimSpace(line[m[2]:m[3]])
+			line = strings.TrimSpace(line[:m[0]])
+		}
 		if m := numberedRefEntryRe.FindStringSubmatch(line); m != nil {
 			num, _ := strconv.Atoi(m[1])
 			label := unescapeMarkdownLinkText(m[2])
 			refNum, _ := strconv.Atoi(m[3])
 			url := urls[refNum]
-			// If the matching ref definition is missing (malformed input),
-			// fall back to a synthetic label-based key so dedup still works
-			// — never leave Key empty for downstream callers.
-			key := url
+			// Key priority: hidden ref comment > URL > label fallback. The
+			// comment wins when present so a label-only entry that was
+			// later upgraded to URL still has a stable Key from its origin.
+			key := refKey
+			if key == "" {
+				key = url
+			}
 			if key == "" {
 				key = "label:" + label
 			}
@@ -521,10 +547,19 @@ func parseSourcesSection(md string) []citation {
 		if m := numberedPlainEntryRe.FindStringSubmatch(line); m != nil {
 			num, _ := strconv.Atoi(m[1])
 			label := strings.TrimSpace(m[2])
+			// Prefer the hidden ref comment as the Key so two distinct
+			// label-only sources that share a label don't collapse during
+			// cross-layer merging. Falls back to "label:" only when no
+			// comment was present (legacy daily files written before this
+			// change, or render paths that didn't have a Key).
+			key := refKey
+			if key == "" {
+				key = "label:" + label
+			}
 			cites = append(cites, citation{
 				Num:   num,
 				Label: label,
-				Key:   "label:" + label, // synthetic key for label-only entries
+				Key:   key,
 			})
 		}
 	}
@@ -545,6 +580,10 @@ var (
 	numberedRefEntryRe = regexp.MustCompile(`^(\d+)\.\s+\[((?:\\\[|\\\]|[^\[\]])+)\]\[(\d+)\]\s*$`)
 	// numberedPlainEntryRe matches `1. plain text label` (no link)
 	numberedPlainEntryRe = regexp.MustCompile(`^(\d+)\.\s+(.+)$`)
+	// refCommentRe matches a trailing ` <!-- ref:<key> -->` HTML comment
+	// used to carry a stable Key for label-only citation entries across
+	// render→parse cycles (CodeRabbit round-2 feedback).
+	refCommentRe = regexp.MustCompile(`\s*<!--\s*ref:([^>]*?)\s*-->\s*$`)
 )
 
 func unescapeMarkdownLinkText(s string) string {

@@ -1126,6 +1126,33 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 		// (gh #476). Citations are deduped by source URL/ref so multiple facts
 		// from the same discussion share one [N].
 		flatFacts, factOriginPaths := loadDayFacts(tc.Path, dayFacts)
+
+		// Empty-marker short-circuit (CodeRabbit round-2 #7): if all the day's
+		// fact files are empty markers AND there are no observations, the
+		// only thing distillation can do is hallucinate. Skip the LLM call
+		// and write a tiny placeholder daily so the marker file paths are
+		// recorded in the cache index — otherwise they'd get re-processed
+		// every run.
+		if len(flatFacts) == 0 && len(dayObs) == 0 {
+			id, err := uuid.NewV7()
+			if err != nil {
+				return fmt.Errorf("generate daily file ID: %w", err)
+			}
+			sources := append([]string(nil), factOriginPaths...)
+			filePath := filepath.Join("memory", "daily", day+"-"+id.String()+".md")
+			placeholder := "*No signal extracted for this day — only empty fact markers were present.*"
+			content := formatDailyMemory(day, placeholder, 0, 0, sources, nil)
+			if err := writeMemoryFile(tc.Path, filePath, content); err != nil {
+				return fmt.Errorf("write daily memory: %w", err)
+			}
+			if err := commitMemoryFile(tc.Path, filePath, fmt.Sprintf("memory: empty daily %s (markers only)", day)); err != nil {
+				slog.Warn("failed to commit empty daily memory", "error", err)
+			}
+			idx.addDailySummary(filePath, sources)
+			fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s (empty markers only — skipped AI coworker call)\n", filePath)
+			continue
+		}
+
 		cites, factToCiteNum := buildCitationsFromFacts(flatFacts)
 		citedFacts := buildFactCitationsForPrompt(flatFacts, factToCiteNum)
 

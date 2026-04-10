@@ -413,6 +413,70 @@ func TestSourcesSectionRoundTrip_LabelsWithBrackets(t *testing.T) {
 	}
 }
 
+// TestSourcesSection_LabelOnlyKeyRoundTrip — CodeRabbit round-2 #6: label-only
+// citations with distinct stable Keys (e.g., source_ref) must round-trip
+// through render → parse without collapsing. The hidden ` <!-- ref:... -->`
+// HTML comment carries the Key. Without this, two label-only sources sharing
+// a label would silently merge during weekly/monthly distillation.
+//
+// Failure prevented: legacy / audio-only discussions with similar titles get
+// merged into a single citation, losing one of the sources from the weekly.
+func TestSourcesSection_LabelOnlyKeyRoundTrip(t *testing.T) {
+	cites := []citation{
+		{Num: 1, Label: "Discussion: 2026-03-10 — Sync", Key: "discussions/2026-03-10-1000-alice"},
+		{Num: 2, Label: "Discussion: 2026-03-10 — Sync", Key: "discussions/2026-03-10-1500-bob"}, // SAME label, DIFFERENT source
+	}
+	rendered := renderSourcesSection(cites)
+	if !strings.Contains(rendered, "<!-- ref:discussions/2026-03-10-1000-alice -->") {
+		t.Errorf("expected ref comment for first cite:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "<!-- ref:discussions/2026-03-10-1500-bob -->") {
+		t.Errorf("expected ref comment for second cite:\n%s", rendered)
+	}
+
+	// Round-trip: parse should preserve the distinct keys
+	parsed := parseSourcesSection("# Daily\n\n" + rendered)
+	if len(parsed) != 2 {
+		t.Fatalf("expected 2 parsed citations, got %d: %+v", len(parsed), parsed)
+	}
+	if parsed[0].Key != "discussions/2026-03-10-1000-alice" {
+		t.Errorf("parsed[0].Key = %q, want %q", parsed[0].Key, "discussions/2026-03-10-1000-alice")
+	}
+	if parsed[1].Key != "discussions/2026-03-10-1500-bob" {
+		t.Errorf("parsed[1].Key = %q, want %q", parsed[1].Key, "discussions/2026-03-10-1500-bob")
+	}
+
+	// Cross-layer merge: these two distinct sources must NOT collapse
+	_, merged := mergeCitations([]mergeInput{
+		{Text: "x [1] [2]", Cites: parsed},
+	})
+	if len(merged) != 2 {
+		t.Errorf("two distinct label-only sources collapsed during merge: got %d, want 2", len(merged))
+	}
+}
+
+// TestParseSourcesSection_LegacyDailyWithoutRefComment — backwards compat:
+// daily files written before the ref-comment change MUST still parse. Their
+// label-only entries fall back to "label:" synthetic keys (and may collapse
+// across distinct sources sharing a label, but that's a transient issue
+// resolved on next regeneration).
+func TestParseSourcesSection_LegacyDailyWithoutRefComment(t *testing.T) {
+	doc := `# Daily
+
+## Sources
+
+1. Discussion: legacy entry
+2. Session: another legacy
+`
+	parsed := parseSourcesSection(doc)
+	if len(parsed) != 2 {
+		t.Fatalf("expected 2 parsed citations, got %d", len(parsed))
+	}
+	if !strings.HasPrefix(parsed[0].Key, "label:") {
+		t.Errorf("legacy entry should have label: key, got %q", parsed[0].Key)
+	}
+}
+
 // TestParseSourcesSection_IgnoresBodyMentionOfHeading — CodeRabbit #2: a body
 // that mentions "## Sources" in prose or a code sample (e.g., agent guidance
 // describing the format) must not trick the parser into slicing the wrong
