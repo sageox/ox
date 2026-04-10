@@ -67,10 +67,34 @@ func TestRedactArgs(t *testing.T) {
 			want:     []string{"-k=<REDACTED>"},
 		},
 		{
-			name:     "boolean_flag_followed_by_another_flag",
-			prevents: "redacting nothing after a boolean flag (false positive)",
+			name:     "chained_long_flags_both_preserved",
+			prevents: "losing visibility into chained boolean long flags like `--verbose --json`",
 			in:       []string{"--verbose", "--json"},
 			want:     []string{"--verbose", "--json"},
+		},
+		{
+			name:     "long_flag_with_negative_number_value",
+			prevents: "leaking `--limit -5` style hyphen-prefixed values (CodeRabbit PR488)",
+			in:       []string{"--limit", "-5"},
+			want:     []string{"--limit", "<REDACTED>"},
+		},
+		{
+			name:     "short_flag_followed_by_short_flag_value",
+			prevents: "leaking values starting with `-` after short flags (e.g. `-k -1`)",
+			in:       []string{"-k", "-1"},
+			want:     []string{"-k", "<REDACTED>"},
+		},
+		{
+			name:     "long_flag_followed_by_short_flag_value",
+			prevents: "leaking single-dash values after long flags (e.g. `--name -foo`)",
+			in:       []string{"--name", "-foo"},
+			want:     []string{"--name", "<REDACTED>"},
+		},
+		{
+			name:     "short_flag_then_long_flag_preserves_long",
+			prevents: "false-redacting a chained long flag after a short flag (e.g. `-v --json`)",
+			in:       []string{"-v", "--json"},
+			want:     []string{"-v", "--json"},
 		},
 		{
 			name:     "boolean_flag_at_end_of_args",

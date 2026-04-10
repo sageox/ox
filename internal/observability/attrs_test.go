@@ -187,7 +187,10 @@ func TestSetCommandAttrs_OmitsAgentEnv_WhenEmpty(t *testing.T) {
 // emitted attribute, the helper has leaked.
 //
 // Failure prevented: a future change that bypasses RedactArgs (e.g., a
-// "fast path for short arg lists") and exports values directly.
+// "fast path for short arg lists") and exports values directly. Also
+// catches the inverse — a refactor that drops AttrCLIArgs entirely
+// would otherwise pass this test silently because there'd be nothing
+// to scan for leaks. findAttr fails the test if the key is missing.
 func TestSetCommandAttrs_RedactsValues(t *testing.T) {
 	recorder := installTestTracer(t)
 
@@ -198,16 +201,14 @@ func TestSetCommandAttrs_RedactsValues(t *testing.T) {
 	rootSpan.End()
 	mu.RUnlock()
 
-	args := recorder.Ended()[0].Attributes()
-	for _, kv := range args {
-		if string(kv.Key) != AttrCLIArgs {
-			continue
-		}
-		for _, tok := range kv.Value.AsStringSlice() {
-			if tok == "ghp_REAL_SECRET_VALUE" || tok == "internal-codename-leaks" {
-				t.Errorf("ox.command.args leaked a value token: %q (full slice: %v)",
-					tok, kv.Value.AsStringSlice())
-			}
+	span := recorder.Ended()[0]
+	// findAttr fails the test if AttrCLIArgs is absent — this guards
+	// against a regression that drops the attribute entirely.
+	args := findAttr(t, span, AttrCLIArgs).AsStringSlice()
+	for _, tok := range args {
+		if tok == "ghp_REAL_SECRET_VALUE" || tok == "internal-codename-leaks" {
+			t.Errorf("ox.command.args leaked a value token: %q (full slice: %v)",
+				tok, args)
 		}
 	}
 }
@@ -301,17 +302,23 @@ func TestSetResultCount_Zero(t *testing.T) {
 // down, init failure) would panic on every command if the helpers
 // dereferenced a nil rootSpan.
 func TestSetters_NoOpWhenTracingDisabled(t *testing.T) {
-	// Snapshot and clear globals to simulate "tracing not initialized".
+	// Snapshot and clear ALL package-global tracing state to fully
+	// simulate "tracing not initialized". rootCtx is part of that
+	// state — leaving a stale value behind would let other tests in
+	// the package see leaked context across runs.
 	mu.Lock()
 	prevTracer := tracer
 	prevRootSpan := rootSpan
+	prevRootCtx := rootCtx
 	tracer = nil
 	rootSpan = nil
+	rootCtx = nil
 	mu.Unlock()
 	t.Cleanup(func() {
 		mu.Lock()
 		tracer = prevTracer
 		rootSpan = prevRootSpan
+		rootCtx = prevRootCtx
 		mu.Unlock()
 	})
 
