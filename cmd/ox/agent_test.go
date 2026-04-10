@@ -118,6 +118,101 @@ func TestReinjectSessionFlags(t *testing.T) {
 	})
 }
 
+// TestDispatchedCommandPath verifies that the dispatcher's span-naming
+// helper produces the right token sequence for each invocation shape.
+//
+// Why this matters: dispatchedCommandPath is what determines how a
+// dispatcher hit gets bucketed in trace backends. A regression that
+// silently returns the wrong tokens (or always returns the same single
+// token) re-creates the very "one giant ox agent bucket" problem the
+// dispatcher rename was added to fix.
+func TestDispatchedCommandPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// what real-world bucketing failure does this prevent
+		prevents string
+		in       []string
+		want     []string
+	}{
+		{
+			name:     "empty",
+			prevents: "panic on no-args dispatcher invocation",
+			in:       nil,
+			want:     nil,
+		},
+		{
+			name:     "doctor_alone",
+			prevents: "doctor calls collapsing into a single bucket with other commands",
+			in:       []string{"doctor"},
+			want:     []string{"doctor"},
+		},
+		{
+			name:     "heartbeat_alone",
+			prevents: "heartbeats hiding in the generic bucket — they are the highest-volume call",
+			in:       []string{"heartbeat"},
+			want:     []string{"heartbeat"},
+		},
+		{
+			name:     "session_with_subsubcommand",
+			prevents: "session start / stop / capture-prior all collapsing into one `session` bucket",
+			in:       []string{"session", "start"},
+			want:     []string{"session", "start"},
+		},
+		{
+			name:     "session_capture_prior",
+			prevents: "capture-prior latency / errors hiding inside the `session` bucket",
+			in:       []string{"session", "capture-prior", "--adapter=claude"},
+			want:     []string{"session", "capture-prior"},
+		},
+		{
+			name:     "session_alone",
+			prevents: "panic on bare `session` with no sub-subcommand (validation error path)",
+			in:       []string{"session"},
+			want:     []string{"session"},
+		},
+		{
+			name:     "query_does_not_include_query_text",
+			prevents: "high-cardinality query string blowing up span-name cardinality",
+			// query has its arg as the search text — must NOT be included
+			in:   []string{"query", "how do we handle auth"},
+			want: []string{"query"},
+		},
+		{
+			name:     "whisper_alone",
+			prevents: "whisper history vs whisper non-history collapsing — but query text would be worse",
+			in:       []string{"whisper"},
+			want:     []string{"whisper"},
+		},
+		{
+			name:     "whisper_history_collapses_to_whisper",
+			prevents: "treating `whisper history` as something it isn't (we deliberately keep one bucket)",
+			// We don't expand whisper because the second arg can be
+			// "history" or absent — keeping it as one bucket is fine.
+			in:   []string{"whisper", "history"},
+			want: []string{"whisper"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := dispatchedCommandPath(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("dispatchedCommandPath(%q) = %q, want %q\n(prevents: %s)",
+					tt.in, got, tt.want, tt.prevents)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("dispatchedCommandPath(%q)[%d] = %q, want %q\n(prevents: %s)",
+						tt.in, i, got[i], tt.want[i], tt.prevents)
+				}
+			}
+		})
+	}
+}
+
 func TestGenerateAgentID(t *testing.T) {
 	t.Run("generates valid agent ID with no existing IDs", func(t *testing.T) {
 		agentID, err := agentinstance.GenerateAgentID([]string{})

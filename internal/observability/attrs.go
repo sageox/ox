@@ -58,6 +58,16 @@ const (
 	// `ox.agent.env exists` query in the trace backend cleanly isolates
 	// agent traffic from human traffic.
 	AttrAgentEnv = "ox.agent.env"
+
+	// AttrCommandSubcommand is the resolved subcommand path for commands
+	// that go through a dispatcher. Cobra's PreRunE creates the root
+	// span before the dispatcher resolves what was actually invoked, so
+	// every dispatcher hit would otherwise share one bland span name
+	// (e.g. "ox agent"). RenameRootSpan attaches this attribute alongside
+	// the renamed span so backends can group by it even if a future
+	// refactor changes the span-name scheme — and so high-cardinality
+	// suffixes like hook phase names don't bloat span-name buckets.
+	AttrCommandSubcommand = "ox.command.subcommand"
 )
 
 // agentEnv returns the value of the AGENT_ENV environment variable, or the
@@ -136,4 +146,40 @@ func SetResultCount(n int) {
 		return
 	}
 	span.SetAttributes(attribute.Int(AttrResultCount, n))
+}
+
+// RenameRootSpan rewrites the name of the root command span and attaches
+// an ox.command.subcommand attribute. Used by command dispatchers — most
+// notably the `ox agent <agent_id> <cmd>` dispatcher in cmd/ox/agent.go —
+// that need to refine the span name once they have resolved the actual
+// invocation.
+//
+// Why this exists: cobra's PersistentPreRunE creates the root span before
+// the dispatcher's RunE runs, so the span starts life with a bland name
+// like "ox agent" because cobra only sees the agentCmd. Without renaming,
+// every dispatcher hit ends up in one giant bucket in the trace backend
+// and you can't answer "which dispatcher path is slow / erroring?".
+//
+// The subcommand string is also attached as an attribute (AttrCommandSubcommand)
+// so dashboards can group by it independently of the span name. Empty
+// subcommand strings are not attached.
+//
+// Should be called BEFORE any early-return paths in the dispatcher
+// (unknown agent_id, validation errors, help) so even fast failures end
+// up under the right span name.
+//
+// Safe to call when tracing is disabled.
+func RenameRootSpan(name, subcommand string) {
+	mu.RLock()
+	span := rootSpan
+	mu.RUnlock()
+	if span == nil {
+		return
+	}
+	if name != "" {
+		span.SetName(name)
+	}
+	if subcommand != "" {
+		span.SetAttributes(attribute.String(AttrCommandSubcommand, subcommand))
+	}
 }

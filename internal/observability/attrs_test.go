@@ -294,6 +294,87 @@ func TestSetResultCount_Zero(t *testing.T) {
 	}
 }
 
+// TestRenameRootSpan_RewritesNameAndSetsAttr verifies that
+// RenameRootSpan updates the active root span's name AND attaches the
+// ox.command.subcommand attribute. Both pieces of state are part of the
+// dispatcher's contract: the renamed name powers default span-name
+// grouping in trace backends, while the attribute lets dashboards
+// group by subcommand independently of any future naming scheme change.
+//
+// Failure prevented: a regression that updates only the name (or only
+// the attribute) would silently break one of the two query paths.
+// Users would only notice when their saved Honeycomb queries stopped
+// returning results.
+func TestRenameRootSpan_RewritesNameAndSetsAttr(t *testing.T) {
+	recorder := installTestTracer(t)
+
+	RenameRootSpan("ox agent session start", "session start")
+
+	mu.RLock()
+	rootSpan.End()
+	mu.RUnlock()
+
+	span := recorder.Ended()[0]
+	if got := span.Name(); got != "ox agent session start" {
+		t.Errorf("span name = %q, want %q", got, "ox agent session start")
+	}
+	if v := findAttr(t, span, AttrCommandSubcommand).AsString(); v != "session start" {
+		t.Errorf("ox.command.subcommand = %q, want %q", v, "session start")
+	}
+}
+
+// TestRenameRootSpan_EmptyNameKeepsExistingName verifies that calling
+// RenameRootSpan with an empty name does not blank out the existing
+// span name. Lets callers set just the attribute (rare but possible)
+// without accidentally producing an unnamed span.
+//
+// Failure prevented: a defensive caller passing "" by mistake would
+// otherwise corrupt the span's identity in trace backends.
+func TestRenameRootSpan_EmptyNameKeepsExistingName(t *testing.T) {
+	recorder := installTestTracer(t)
+
+	// installTestTracer starts the span with name "test-root".
+	RenameRootSpan("", "subcommand-only")
+
+	mu.RLock()
+	rootSpan.End()
+	mu.RUnlock()
+
+	span := recorder.Ended()[0]
+	if got := span.Name(); got != "test-root" {
+		t.Errorf("span name = %q, want %q (empty name should not overwrite)", got, "test-root")
+	}
+	if v := findAttr(t, span, AttrCommandSubcommand).AsString(); v != "subcommand-only" {
+		t.Errorf("ox.command.subcommand = %q, want %q", v, "subcommand-only")
+	}
+}
+
+// TestRenameRootSpan_EmptySubcommandSkipsAttr verifies the inverse:
+// passing an empty subcommand only renames the span and does not attach
+// an empty ox.command.subcommand attribute. This keeps the "exists"
+// filter clean — backends shouldn't see ox.command.subcommand="" rows.
+//
+// Failure prevented: a "set anyway, downstream can filter" simplification
+// that would pollute every renamed span with an empty subcommand.
+func TestRenameRootSpan_EmptySubcommandSkipsAttr(t *testing.T) {
+	recorder := installTestTracer(t)
+
+	RenameRootSpan("ox agent help", "")
+
+	mu.RLock()
+	rootSpan.End()
+	mu.RUnlock()
+
+	span := recorder.Ended()[0]
+	if got := span.Name(); got != "ox agent help" {
+		t.Errorf("span name = %q, want %q", got, "ox agent help")
+	}
+	if hasAttr(span, AttrCommandSubcommand) {
+		t.Errorf("ox.command.subcommand present despite empty subcommand arg; have: %v",
+			span.Attributes())
+	}
+}
+
 // TestSetters_NoOpWhenTracingDisabled verifies that all three setter
 // helpers are safe to call when tracing was never initialized. They
 // must not panic and must not allocate spans on a nil tracer.
@@ -326,4 +407,5 @@ func TestSetters_NoOpWhenTracingDisabled(t *testing.T) {
 	SetCommandAttrs("0.0.0", []string{"foo", "bar"})
 	SetExitCode(7)
 	SetResultCount(99)
+	RenameRootSpan("ox agent foo", "foo")
 }
