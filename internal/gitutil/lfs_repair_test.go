@@ -171,7 +171,7 @@ func TestRepairMissingLFSObjects_PushSucceedsAfterRepair(t *testing.T) {
 	assert.Empty(t, content)
 
 	// verify unpushed commits were squashed into one
-	countAfter := runGitOutput(t, localDir, "rev-list", "--count", "origin/main..HEAD")
+	countAfter := runGitOutput(t, localDir, "rev-list", "--count", "@{u}..HEAD")
 	assert.Equal(t, "1", countAfter, "repair should squash unpushed commits into one")
 
 	// verify push succeeds after repair
@@ -267,7 +267,7 @@ func TestRepairMissingLFSObjects_SquashesHistory(t *testing.T) {
 	runGitCmd(t, localDir, "commit", "-m", "session 3")
 
 	// verify 3 unpushed commits
-	countBefore := runGitOutput(t, localDir, "rev-list", "--count", "origin/main..HEAD")
+	countBefore := runGitOutput(t, localDir, "rev-list", "--count", "@{u}..HEAD")
 	assert.Equal(t, "3", countBefore, "should have 3 unpushed commits before repair")
 
 	// run repair
@@ -276,7 +276,7 @@ func TestRepairMissingLFSObjects_SquashesHistory(t *testing.T) {
 	assert.Greater(t, repaired, 0)
 
 	// verify squashed to 1 unpushed commit
-	countAfter := runGitOutput(t, localDir, "rev-list", "--count", "origin/main..HEAD")
+	countAfter := runGitOutput(t, localDir, "rev-list", "--count", "@{u}..HEAD")
 	assert.Equal(t, "1", countAfter, "all unpushed commits should be squashed into one after repair")
 
 	// verify all files are still present
