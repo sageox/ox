@@ -584,11 +584,14 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	// resolve project endpoint once — used for the deferred push and for
+	// building per-fact citation URLs (gh #476) at extraction time.
+	ep := endpoint.GetForProject(projectRoot)
+
 	// push team context commits to remote when we're done — even if the
 	// pipeline partially fails, earlier stages may have committed facts or
 	// distilled summaries that should be synced.
 	if !distillDryRun && !distillNoPush {
-		ep := endpoint.GetForProject(projectRoot)
 		defer func() {
 			if err := pushTeamContext(context.Background(), tc.Path, ep); err != nil {
 				slog.Warn("failed to push team context after distill", "error", err)
@@ -695,7 +698,7 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	// extract facts from unprocessed discussions before daily distill
 	// (discussions live in team context, not per-ledger — no multi-repo loop needed)
 	if plan.Daily {
-		if err := extractDiscussionFacts(ctx, cmd, backend, tc, extractGuidelines, extractSince); err != nil {
+		if err := extractDiscussionFacts(ctx, cmd, backend, tc, extractGuidelines, ep, extractSince); err != nil {
 			slog.Warn("discussion fact extraction failed", "error", err)
 		}
 	}
@@ -708,7 +711,7 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 				fmt.Fprintf(cmd.OutOrStdout(), "Processing repo %s (%s)...\n", repo.RepoID, repo.ProjectRoot)
 			}
 
-			if err := extractSessionFacts(cmd, tc, repo.RepoID, repo.LedgerPath, extractSince); err != nil {
+			if err := extractSessionFacts(cmd, tc, repo.RepoID, repo.LedgerPath, ep, extractSince); err != nil {
 				slog.Warn("session fact extraction failed", "repo", repoLabel, "error", err)
 			}
 
@@ -861,7 +864,10 @@ func enumerateMonths(lastTime, now time.Time, tz *time.Location) []string {
 // extractDiscussionFacts scans for unprocessed discussions and writes fact files.
 // Each discussion gets a fact file in memory/.discussion-facts/{dirName}.md.
 // Uses LLM to extract structured facts, or writes stub if in dry-run mode.
-func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, guidelines string, since time.Time) error {
+//
+// ep is the endpoint for building per-fact SourceURL (clickable citation links
+// in distilled summaries — gh #476). Empty endpoint degrades to label-only.
+func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, guidelines, ep string, since time.Time) error {
 	pending, err := scanPendingDiscussions(tc.Path, since)
 	if err != nil {
 		return fmt.Errorf("scan discussions: %w", err)
@@ -888,7 +894,7 @@ func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend age
 		// compute source hash before extraction for embedding in the fact file
 		sourceHash := discussionContentHash(filepath.Join(tc.Path, "discussions", d.DirName))
 
-		factContent, err := extractSingleDiscussionFacts(ctx, cmd, backend, d, guidelines, sourceHash)
+		factContent, err := extractSingleDiscussionFacts(ctx, cmd, backend, d, guidelines, sourceHash, tc.TeamID, ep)
 		if err != nil {
 			// non-fatal per discussion — log and continue
 			slog.Warn("skip discussion fact extraction", "dir", d.DirName, "error", err)
@@ -925,10 +931,11 @@ func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend age
 // When server-generated summary.json exists, extracts facts directly from
 // structured data without an LLM call. Falls back to LLM via JSONL output.
 // sourceHash is embedded in the fact file header for stateless change detection.
-func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, d discussionInput, guidelines, sourceHash string) (string, error) {
+// teamID + ep populate per-fact SourceURL for clickable citations (gh #476).
+func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, d discussionInput, guidelines, sourceHash, teamID, ep string) (string, error) {
 	// if server-generated summary.json exists, extract facts directly without LLM
 	if d.SummaryJSONDir != "" {
-		result, err := extractFactsFromSummaryJSON(d, sourceHash)
+		result, err := extractFactsFromSummaryJSON(d, sourceHash, teamID, ep)
 		if err == nil {
 			slog.Info("extracted facts from summary.json", "discussion", d.DirName)
 			return result, nil
@@ -950,6 +957,19 @@ func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backe
 	}
 	if len(parsedFacts) == 0 {
 		return "", nil // no valid facts extracted
+	}
+
+	// LLM extractor doesn't know about citation links — fill in deterministic
+	// SourceURL/SourceTitle for every fact so the daily summary can cite them.
+	// (gh #476)
+	sourceURL := buildDiscussionURL(ep, teamID, d.RecordingID)
+	for i := range parsedFacts {
+		if parsedFacts[i].SourceURL == "" {
+			parsedFacts[i].SourceURL = sourceURL
+		}
+		if parsedFacts[i].SourceTitle == "" {
+			parsedFacts[i].SourceTitle = d.Title
+		}
 	}
 
 	header := facts.FileHeader{
@@ -1084,22 +1104,24 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 		dayObs := obsByDay[day]
 		dayFacts := factsByDay[day]
 
-		// extract observation content strings
+		// extract observation content strings (no citation numbers — observations
+		// are weaved into narrative prose; only facts get [N] markers)
 		contents := make([]string, len(dayObs))
 		for i, obs := range dayObs {
 			contents[i] = obs.Content
 		}
 
-		// extract fact paths for the prompt
-		var factPaths []string
-		for _, f := range dayFacts {
-			factPaths = append(factPaths, f.RelPath)
-		}
+		// parse fact files into a flat []facts.Fact and build the citation list
+		// (gh #476). Citations are deduped by source URL/ref so multiple facts
+		// from the same discussion share one [N].
+		flatFacts, factOriginPaths := loadDayFacts(tc.Path, dayFacts)
+		cites, factToCiteNum := buildCitationsFromFacts(flatFacts)
+		citedFacts := buildFactCitationsForPrompt(flatFacts, factToCiteNum)
 
-		prompt := agentcli.DailyPrompt(contents, day, guidelines, factPaths...)
+		prompt := agentcli.DailyPrompt(contents, day, guidelines, citedFacts)
 		logPrompt(cmd, "daily:"+day, prompt)
 		fmt.Fprintf(cmd.OutOrStdout(), "Distilling %d observations and %d facts into daily summary for %s...\n",
-			len(dayObs), len(dayFacts), day)
+			len(dayObs), len(flatFacts), day)
 
 		output, err := backend.Run(ctx, prompt)
 		if err != nil {
@@ -1112,14 +1134,16 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 			return fmt.Errorf("generate daily file ID: %w", err)
 		}
 
-		// collect source paths for frontmatter
-		var sources []string
-		for _, f := range dayFacts {
-			sources = append(sources, f.RelPath)
-		}
+		// collect source paths for frontmatter — both fact files and observation
+		// files. The frontmatter is the cache-index input list (used by
+		// distill_index.distilledSources to skip already-processed files).
+		// Observations were previously not tracked here; gh #476 adds them so
+		// the cache can detect already-distilled observation files too.
+		sources := append([]string(nil), factOriginPaths...)
+		sources = append(sources, observationSourcePaths(tc.Path, dayObs)...)
 
 		filePath := filepath.Join("memory", "daily", day+"-"+id.String()+".md")
-		content := formatDailyMemory(day, output, len(dayObs), len(dayFacts), sources)
+		content := formatDailyMemory(day, output, len(dayObs), len(flatFacts), sources, cites)
 
 		if err := writeMemoryFile(tc.Path, filePath, content); err != nil {
 			return fmt.Errorf("write daily memory: %w", err)
@@ -1163,9 +1187,16 @@ func distillWeekly(ctx context.Context, cmd *cobra.Command, backend agentcli.Bac
 		return nil
 	}
 
-	prompt := agentcli.WeeklyPrompt(dailySummaries, weekID, guidelines)
+	// Parse Sources sections from each daily, merge into a unified citation
+	// list, and renumber the daily prose to use the unified numbers (gh #476).
+	// The LLM then sees globally-numbered markers and only has to preserve
+	// them — no arithmetic.
+	rewrittenDailies, mergedCites := mergeCitationsFromMarkdown(dailySummaries)
+	hasCitations := len(mergedCites) > 0
+
+	prompt := agentcli.WeeklyPrompt(rewrittenDailies, weekID, guidelines, hasCitations)
 	logPrompt(cmd, "weekly:"+weekID, prompt)
-	slog.Info("distill weekly: sending to AI coworker", "week", weekID, "daily_count", len(dailySummaries), "daily_files", dailyFiles, "prompt_bytes", len(prompt))
+	slog.Info("distill weekly: sending to AI coworker", "week", weekID, "daily_count", len(dailySummaries), "daily_files", dailyFiles, "prompt_bytes", len(prompt), "cites", len(mergedCites))
 	fmt.Fprintf(cmd.OutOrStdout(), "Synthesizing %d daily summaries into weekly %s...\n", len(dailySummaries), weekID)
 
 	output, err := backend.Run(ctx, prompt)
@@ -1176,8 +1207,8 @@ func distillWeekly(ctx context.Context, cmd *cobra.Command, backend agentcli.Bac
 
 	wuid, _ := uuid.NewV7() // error only if crypto/rand fails — zero UUID collision is acceptable
 	filePath := filepath.Join("memory", "weekly", weekID+"-"+wuid.String()+".md")
-	content := fmt.Sprintf("# Weekly Memory — %s\n\n%s\n\n---\n*Synthesized from %d daily summaries (%s)*\n",
-		weekID, output, len(dailySummaries), strings.Join(dailyFiles, ", "))
+	content := formatLayeredMemory("Weekly Memory", weekID, output, mergedCites,
+		fmt.Sprintf("Synthesized from %d daily summaries (%s)", len(dailySummaries), strings.Join(dailyFiles, ", ")))
 
 	if err := writeMemoryFile(tc.Path, filePath, content); err != nil {
 		return fmt.Errorf("write weekly memory: %w", err)
@@ -1216,7 +1247,12 @@ func distillMonthly(ctx context.Context, cmd *cobra.Command, backend agentcli.Ba
 		return nil
 	}
 
-	prompt := agentcli.MonthlyPrompt(weeklySummaries, month, guidelines)
+	// Parse Sources sections from each weekly, merge into a unified citation
+	// list, renumber prose markers (gh #476). Same pattern as weekly.
+	rewrittenWeeklies, mergedCites := mergeCitationsFromMarkdown(weeklySummaries)
+	hasCitations := len(mergedCites) > 0
+
+	prompt := agentcli.MonthlyPrompt(rewrittenWeeklies, month, guidelines, hasCitations)
 	logPrompt(cmd, "monthly:"+month, prompt)
 	fmt.Fprintf(cmd.OutOrStdout(), "Synthesizing %d weekly summaries into monthly %s...\n", len(weeklySummaries), month)
 
@@ -1227,8 +1263,8 @@ func distillMonthly(ctx context.Context, cmd *cobra.Command, backend agentcli.Ba
 
 	muid, _ := uuid.NewV7() // error only if crypto/rand fails — zero UUID collision is acceptable
 	filePath := filepath.Join("memory", "monthly", month+"-"+muid.String()+".md")
-	content := fmt.Sprintf("# Monthly Memory — %s\n\n%s\n\n---\n*Synthesized from %d weekly summaries (%s)*\n",
-		month, output, len(weeklySummaries), strings.Join(weeklyFiles, ", "))
+	content := formatLayeredMemory("Monthly Memory", month, output, mergedCites,
+		fmt.Sprintf("Synthesized from %d weekly summaries (%s)", len(weeklySummaries), strings.Join(weeklyFiles, ", ")))
 
 	if err := writeMemoryFile(tc.Path, filePath, content); err != nil {
 		return fmt.Errorf("write monthly memory: %w", err)
@@ -1284,7 +1320,20 @@ func readRecentMemoryFiles(dir string, maxFiles int) ([]string, []string, error)
 	return contents, names, nil
 }
 
-func formatDailyMemory(date, content string, obsCount, factCount int, sources []string) string {
+// formatDailyMemory builds the on-disk daily summary file.
+//
+// The output has four parts:
+//  1. YAML frontmatter with `sources:` — the cache-index input list (file
+//     paths to observation/fact JSONLs that fed this distill, used by
+//     distill_index.distilledSources for dedup across runs)
+//  2. The "# Daily Memory — <date>" heading and LLM-generated body
+//  3. A "## Sources" section (gh #476) with numbered citations and
+//     reference-link definitions, so readers can drill down into the original
+//     discussion / PR / session
+//  4. The "*Distilled from N observations and M facts*" footer
+//
+// The Sources section is suppressed when there are no facts to cite.
+func formatDailyMemory(date, content string, obsCount, factCount int, sources []string, cites []citation) string {
 	var sb strings.Builder
 	if len(sources) > 0 {
 		sb.WriteString("---\nsources:\n")
@@ -1303,8 +1352,119 @@ func formatDailyMemory(date, content string, obsCount, factCount int, sources []
 	default:
 		source = fmt.Sprintf("%d observations", obsCount)
 	}
-	fmt.Fprintf(&sb, "# Daily Memory — %s\n\n%s\n\n---\n*Distilled from %s*\n", date, content, source)
+	fmt.Fprintf(&sb, "# Daily Memory — %s\n\n%s\n", date, strings.TrimRight(content, "\n"))
+	if section := renderSourcesSection(cites); section != "" {
+		sb.WriteString("\n")
+		sb.WriteString(section)
+	}
+	fmt.Fprintf(&sb, "\n---\n*Distilled from %s*\n", source)
 	return sb.String()
+}
+
+// loadDayFacts parses each fact file in entries and returns a flat slice of
+// facts plus the relative paths of files that contributed at least one fact.
+// Files that fail to parse are logged and skipped — the daily summary should
+// degrade gracefully rather than abort.
+func loadDayFacts(tcPath string, entries []discussionFactEntry) ([]facts.Fact, []string) {
+	var flat []facts.Fact
+	var paths []string
+	for _, entry := range entries {
+		_, parsedFacts, err := facts.ReadFacts(filepath.Join(tcPath, entry.RelPath))
+		if err != nil {
+			slog.Warn("skip unparseable fact file in daily distill", "path", entry.RelPath, "error", err)
+			continue
+		}
+		if len(parsedFacts) == 0 {
+			// empty marker file — record the path for the index but no facts to cite
+			paths = append(paths, entry.RelPath)
+			continue
+		}
+		flat = append(flat, parsedFacts...)
+		paths = append(paths, entry.RelPath)
+	}
+	return flat, paths
+}
+
+// buildFactCitationsForPrompt converts parsed facts into the FactCitation
+// shape that agentcli.DailyPrompt expects, attaching citation numbers from
+// factToCiteNum. Facts without a citation number (uncitable — no source
+// URL/ref) are omitted from the prompt entirely.
+func buildFactCitationsForPrompt(flat []facts.Fact, factToCiteNum map[int]int) []agentcli.FactCitation {
+	out := make([]agentcli.FactCitation, 0, len(flat))
+	for i, f := range flat {
+		num, ok := factToCiteNum[i]
+		if !ok {
+			continue
+		}
+		out = append(out, agentcli.FactCitation{
+			Num:         num,
+			Headline:    f.Headline,
+			Summary:     f.Summary,
+			Rationale:   f.Rationale,
+			Who:         f.Who,
+			SourceType:  f.SourceType,
+			SourceTitle: f.SourceTitle,
+			Date:        citationDate(f.Timestamp),
+			Category:    f.Category,
+		})
+	}
+	return out
+}
+
+// mergeCitationsFromMarkdown parses the "## Sources" section out of each
+// input markdown file, merges them into a unified deduplicated citation list,
+// and rewrites each input's prose markers from per-input numbering to the
+// unified numbering. Used by weekly and monthly distill stages (gh #476).
+//
+// Inputs without a Sources section pass through unchanged with no contribution
+// to the merged list.
+func mergeCitationsFromMarkdown(inputs []string) ([]string, []citation) {
+	mergeInputs := make([]mergeInput, len(inputs))
+	for i, in := range inputs {
+		mergeInputs[i] = mergeInput{
+			Text:  in,
+			Cites: parseSourcesSection(in),
+		}
+	}
+	return mergeCitations(mergeInputs)
+}
+
+// formatLayeredMemory builds a weekly or monthly memory file. Same shape as
+// formatDailyMemory but without the YAML frontmatter (weekly/monthly aren't
+// tracked in the cache index — they're regenerated from dailies/weeklies).
+func formatLayeredMemory(heading, label, body string, cites []citation, footer string) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "# %s — %s\n\n%s\n", heading, label, strings.TrimRight(body, "\n"))
+	if section := renderSourcesSection(cites); section != "" {
+		sb.WriteString("\n")
+		sb.WriteString(section)
+	}
+	fmt.Fprintf(&sb, "\n---\n*%s*\n", footer)
+	return sb.String()
+}
+
+// observationSourcePaths returns the relative paths of observation files that
+// contributed to a daily distill. Used to track observations in the daily
+// frontmatter so the cache index can dedup them on subsequent runs (gh #476).
+// Falls back to absolute path if the file isn't under tcPath.
+func observationSourcePaths(tcPath string, obs []distillObservation) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, o := range obs {
+		if o.SourceFile == "" {
+			continue
+		}
+		rel, err := filepath.Rel(tcPath, o.SourceFile)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			rel = o.SourceFile // fall back to absolute path
+		}
+		if seen[rel] {
+			continue
+		}
+		seen[rel] = true
+		out = append(out, rel)
+	}
+	return out
 }
 
 // parseDailySources extracts source paths from YAML frontmatter in a daily summary.

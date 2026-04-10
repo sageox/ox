@@ -51,25 +51,56 @@ func WriteGuidelines(sb *strings.Builder, guidelines, stage string) {
 	sb.WriteString("</team-guidelines>\n\n")
 }
 
+// FactCitation is a fact-with-citation-number passed into DailyPrompt for
+// inline rendering. The Num field is the citation marker the LLM should use
+// when referencing this fact in its synthesis. Multiple facts may share the
+// same Num if they originate from the same source (deduped by URL upstream).
+//
+// Added for gh #476: distill summaries must carry source links so readers
+// can drill down to the original discussion / PR / session.
+type FactCitation struct {
+	Num         int    // 1-based citation number (the [N] the LLM should emit)
+	Headline    string // required
+	Summary     string // optional
+	Rationale   string // optional
+	Who         string // optional
+	SourceType  string // "discussion" | "github" | "session" | "observation"
+	SourceTitle string // optional human label (e.g., PR or discussion title)
+	Date        string // YYYY-MM-DD slice of the fact's timestamp
+	Category    string // optional: decision | learning | ship | ...
+}
+
 // DailyPrompt builds a prompt for distilling observations into a daily memory summary.
 // If guidelines is non-empty, it is prepended as team-specific distillation preferences.
-// Optional factPaths are relative file paths to fact JSONL files (discussion, github, etc.)
-// that the AI coworker should read and incorporate into the summary.
-func DailyPrompt(observations []string, date, guidelines string, factPaths ...string) string {
+//
+// Facts are rendered inline with citation numbers. The LLM is instructed to
+// include `[N]` markers (or `[anchor][N]` reference links) in its synthesis;
+// the caller post-processes the output to append a "## Sources" section with
+// resolved URLs. See cmd/ox/distill_citations.go for the rendering side.
+func DailyPrompt(observations []string, date, guidelines string, citedFacts []FactCitation) string {
 	var sb strings.Builder
 
 	sb.WriteString(systemPrompt)
 	WriteGuidelines(&sb, guidelines, "distill-daily")
 
 	sb.WriteString("<task>\n")
-	sb.WriteString("Distill these team observations into a daily memory summary.\n")
+	sb.WriteString("Distill these team observations and facts into a daily memory summary.\n")
 	sb.WriteString("Focus on decisions, patterns, and learnings. Omit routine actions.\n")
-	if len(factPaths) > 0 {
-		sb.WriteString("Read each fact file listed below and synthesize their content\n")
-		sb.WriteString("together with the observations into a cohesive summary.\n")
-		sb.WriteString("Fact files are JSONL — each line is a JSON object with a headline, summary, and category.\n")
-		sb.WriteString("Incorporate facts from ALL sources (discussions, github activity, etc.).\n")
-		sb.WriteString("Exception: You MAY use the Read tool to access the fact files listed below.\n")
+	if len(citedFacts) > 0 {
+		sb.WriteString("\n")
+		sb.WriteString("Each fact below has a citation number in brackets, like [3].\n")
+		sb.WriteString("When you reference a fact in your summary, attach its citation marker.\n")
+		sb.WriteString("Prefer markdown reference-link syntax with a NATURAL anchor from the sentence:\n")
+		sb.WriteString("    \"We merged [PR #152][2] last week.\"\n")
+		sb.WriteString("    \"Following the [architecture discussion][1], the storage layer was rewritten.\"\n")
+		sb.WriteString("If no natural anchor fits, end the sentence with a bare marker:\n")
+		sb.WriteString("    \"Natural language is more merge-friendly than code. [1]\"\n")
+		sb.WriteString("Combine multiple sources at one point as chained markers: [1][3].\n")
+		sb.WriteString("\n")
+		sb.WriteString("Rules:\n")
+		sb.WriteString("- Do NOT invent citation numbers — only use numbers from the Facts list below.\n")
+		sb.WriteString("- Do NOT write a Sources section yourself; it is appended programmatically.\n")
+		sb.WriteString("- Observations have NO citation numbers — weave them into the narrative without markers.\n")
 	}
 	sb.WriteString("</task>\n\n")
 
@@ -78,16 +109,75 @@ func DailyPrompt(observations []string, date, guidelines string, factPaths ...st
 		for i, obs := range observations {
 			fmt.Fprintf(&sb, "%d. %s\n", i+1, obs)
 		}
+		sb.WriteString("\n")
 	}
 
-	if len(factPaths) > 0 {
-		sb.WriteString("\n## Fact Files\n\n")
-		for _, path := range factPaths {
-			fmt.Fprintf(&sb, "- [%s](%s)\n", path, path)
+	if len(citedFacts) > 0 {
+		sb.WriteString("## Facts\n\n")
+		for _, f := range citedFacts {
+			writeFactCitationLine(&sb, f)
 		}
 	}
 
 	return sb.String()
+}
+
+// writeFactCitationLine renders a single fact for the daily prompt.
+// Format: "[N] (source_type · date · title · who · category) headline. summary. Rationale: rationale."
+// Fields are omitted when empty so short facts stay short.
+//
+// Multiline fact content (LLM-extracted github PR descriptions can contain
+// literal newlines) is collapsed to a single line so each fact occupies
+// exactly one prompt line — keeps the [N]-per-line layout parseable.
+func writeFactCitationLine(sb *strings.Builder, f FactCitation) {
+	fmt.Fprintf(sb, "[%d] (", f.Num)
+	sb.WriteString(f.SourceType)
+	if f.Date != "" {
+		sb.WriteString(" · ")
+		sb.WriteString(f.Date)
+	}
+	if f.SourceTitle != "" {
+		sb.WriteString(" · ")
+		sb.WriteString(collapseWhitespace(f.SourceTitle))
+	}
+	if f.Who != "" {
+		sb.WriteString(" · ")
+		sb.WriteString(collapseWhitespace(f.Who))
+	}
+	if f.Category != "" {
+		sb.WriteString(" · ")
+		sb.WriteString(f.Category)
+	}
+	sb.WriteString(") ")
+	headline := collapseWhitespace(f.Headline)
+	sb.WriteString(headline)
+	if !strings.HasSuffix(headline, ".") {
+		sb.WriteString(".")
+	}
+	if f.Summary != "" {
+		summary := collapseWhitespace(f.Summary)
+		sb.WriteString(" ")
+		sb.WriteString(summary)
+		if !strings.HasSuffix(summary, ".") {
+			sb.WriteString(".")
+		}
+	}
+	if f.Rationale != "" {
+		rationale := collapseWhitespace(f.Rationale)
+		sb.WriteString(" Rationale: ")
+		sb.WriteString(rationale)
+		if !strings.HasSuffix(rationale, ".") {
+			sb.WriteString(".")
+		}
+	}
+	sb.WriteString("\n")
+}
+
+// collapseWhitespace replaces runs of whitespace (including newlines) with a
+// single space and trims. Used to sanitize fact fields that may contain
+// embedded newlines from LLM extraction (notably github PR descriptions).
+func collapseWhitespace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // DiscussionFactsPrompt builds a prompt for extracting structured facts from a discussion.
@@ -142,7 +232,13 @@ func DiscussionFactsPrompt(title, summary, transcript, guidelines, annotations s
 }
 
 // WeeklyPrompt builds a prompt for synthesizing daily summaries into a weekly memory.
-func WeeklyPrompt(dailySummaries []string, weekID, guidelines string) string {
+//
+// hasCitations should be true when the daily summaries contain `[N]` citation
+// markers (the new format from gh #476). When true, the prompt instructs the
+// LLM to preserve those markers verbatim — the caller has already renumbered
+// them to a unified weekly numbering, and a fresh "## Sources" section will
+// be appended after the LLM returns.
+func WeeklyPrompt(dailySummaries []string, weekID, guidelines string, hasCitations bool) string {
 	var sb strings.Builder
 
 	sb.WriteString(systemPrompt)
@@ -151,6 +247,9 @@ func WeeklyPrompt(dailySummaries []string, weekID, guidelines string) string {
 	sb.WriteString("<task>\n")
 	sb.WriteString("Synthesize these daily summaries into a weekly memory.\n")
 	sb.WriteString("Identify themes, key decisions, and unresolved work. Compress — shorter than the combined input.\n")
+	if hasCitations {
+		writePreserveCitationsInstruction(&sb)
+	}
 	sb.WriteString("</task>\n\n")
 
 	fmt.Fprintf(&sb, "## Dailies (%s)\n\n", weekID)
@@ -162,7 +261,11 @@ func WeeklyPrompt(dailySummaries []string, weekID, guidelines string) string {
 }
 
 // MonthlyPrompt builds a prompt for synthesizing weekly summaries into a monthly memory.
-func MonthlyPrompt(weeklySummaries []string, month, guidelines string) string {
+//
+// hasCitations behaves the same way as in WeeklyPrompt — when true, the LLM
+// is instructed to preserve `[N]` markers and the caller appends a unified
+// "## Sources" section after generation.
+func MonthlyPrompt(weeklySummaries []string, month, guidelines string, hasCitations bool) string {
 	var sb strings.Builder
 
 	sb.WriteString(systemPrompt)
@@ -171,6 +274,9 @@ func MonthlyPrompt(weeklySummaries []string, month, guidelines string) string {
 	sb.WriteString("<task>\n")
 	sb.WriteString("Synthesize these weekly summaries into a monthly memory.\n")
 	sb.WriteString("Focus on milestones, architecture changes, and strategic direction. Omit day-to-day details.\n")
+	if hasCitations {
+		writePreserveCitationsInstruction(&sb)
+	}
 	sb.WriteString("</task>\n\n")
 
 	fmt.Fprintf(&sb, "## Weeklies (%s)\n\n", month)
@@ -179,4 +285,14 @@ func MonthlyPrompt(weeklySummaries []string, month, guidelines string) string {
 	}
 
 	return sb.String()
+}
+
+// writePreserveCitationsInstruction appends the standard preserve-markers
+// guidance to a weekly or monthly prompt body.
+func writePreserveCitationsInstruction(sb *strings.Builder) {
+	sb.WriteString("\n")
+	sb.WriteString("The summaries below contain markdown reference-link citations like `[N]` and\n")
+	sb.WriteString("`[anchor][N]`. Preserve these markers VERBATIM in any text you carry forward.\n")
+	sb.WriteString("Do NOT invent new numbers, do NOT renumber, do NOT remove them.\n")
+	sb.WriteString("Do NOT write a Sources section — it is appended programmatically.\n")
 }

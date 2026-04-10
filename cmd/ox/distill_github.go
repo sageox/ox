@@ -89,6 +89,7 @@ For each meaningful event in the batch, produce a raw fact object:
   "who": "The primary author. If a reviewer significantly shaped the outcome, include them: 'Sarah (reviewed by Jake)'",
   "source_type": "github",
   "source_ref": "The URL of the primary GitHub object (usually the PR)",
+  "source_title": "The PR or issue title verbatim from the source — used as a citation label in distilled summaries. For commit batches, use a brief description like 'commits on <date>'.",
   "timestamp": "ISO 8601 timestamp of the most recent meaningful event (merge time for shipped PRs, latest review comment for in-progress PRs, creation time for new issues)",
   "category": "ship|decision|blocker|direction_change — the type of signal (optional)"
 }
@@ -370,6 +371,10 @@ func extractSingleGitHubItem(ctx context.Context, cmd *cobra.Command, mu *sync.M
 		return nil
 	}
 
+	// github source_ref is already a URL — mirror it to source_url so the
+	// citation pipeline (gh #476) has a uniform field across all source types.
+	mirrorGitHubSourceURL(parsedFacts)
+
 	header := facts.FileHeader{
 		Meta: facts.FileMeta{
 			SchemaVersion: facts.SchemaVersion,
@@ -460,6 +465,10 @@ func extractGitHubCommitBatch(ctx context.Context, cmd *cobra.Command, mu *sync.
 		return nil
 	}
 
+	// github source_ref is already a URL — mirror it to source_url so the
+	// citation pipeline (gh #476) has a uniform field across all source types.
+	mirrorGitHubSourceURL(parsedFacts)
+
 	if err := facts.WriteFacts(fullPath, header, parsedFacts); err != nil {
 		return fmt.Errorf("write github facts: %w", err)
 	}
@@ -472,6 +481,23 @@ func extractGitHubCommitBatch(ctx context.Context, cmd *cobra.Command, mu *sync.
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s (%d facts)\n", factFile, len(parsedFacts))
 	return nil
+}
+
+// mirrorGitHubSourceURL copies source_ref → source_url for github facts that
+// don't already have a URL set. github facts always carry their PR/issue URL
+// in source_ref (it's required by the extractor prompt), so this gives the
+// citation pipeline (gh #476) a uniform place to look. Skips facts whose
+// source_ref is not http(s)://, and never overwrites a populated source_url.
+func mirrorGitHubSourceURL(fs []facts.Fact) {
+	for i := range fs {
+		if fs[i].SourceURL != "" {
+			continue
+		}
+		ref := fs[i].SourceRef
+		if strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") {
+			fs[i].SourceURL = ref
+		}
+	}
 }
 
 // findLatestFactFileSourceHash globs factsDir for files matching pattern, picks the

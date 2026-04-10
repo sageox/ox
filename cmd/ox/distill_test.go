@@ -184,7 +184,7 @@ func TestWriteMemoryFile(t *testing.T) {
 }
 
 func TestFormatDailyMemory(t *testing.T) {
-	content := formatDailyMemory("2026-03-11", "Some distilled content", 5, 0, nil)
+	content := formatDailyMemory("2026-03-11", "Some distilled content", 5, 0, nil, nil)
 	if content == "" {
 		t.Error("expected non-empty content")
 	}

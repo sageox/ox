@@ -339,7 +339,7 @@ func TestFormatDailyMemory_AllCombinations(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := formatDailyMemory(tt.date, tt.content, tt.obsCount, tt.factCount, nil)
+			got := formatDailyMemory(tt.date, tt.content, tt.obsCount, tt.factCount, nil, nil)
 			if len(got) == 0 {
 				t.Fatal("formatDailyMemory returned empty string")
 			}

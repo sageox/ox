@@ -78,7 +78,7 @@ func TestExtractSessionFacts_WritesUUID7Filename(t *testing.T) {
 	assert.NotEmpty(t, pending[0].Hash, "content hash must be computed")
 
 	// --- Step 2: sessionSummaryToFacts transforms to facts (pure, no LLM) ---
-	extractedFacts := sessionSummaryToFacts(pending[0])
+	extractedFacts := sessionSummaryToFacts(pending[0], "repo_test", "https://sageox.ai")
 	require.NotEmpty(t, extractedFacts, "must extract facts from summary")
 
 	// Verify fact categories match input data
@@ -200,7 +200,7 @@ func TestExtractDiscussionFacts_WritesUUID7Filename(t *testing.T) {
 	sourceHash := discussionContentHash(discussionDir)
 	require.NotEmpty(t, sourceHash)
 
-	factContent, err := extractFactsFromSummaryJSON(pending[0], sourceHash)
+	factContent, err := extractFactsFromSummaryJSON(pending[0], sourceHash, "team_test", "https://sageox.ai")
 	require.NoError(t, err)
 	require.NotEmpty(t, factContent)
 
@@ -307,7 +307,7 @@ func TestExtractDiscussionFacts_LLMPath_WritesUUID7Filename(t *testing.T) {
 	// We need a cobra command for logging — create a minimal one
 	cmd := &cobra.Command{}
 	cmd.SetOut(os.Stdout)
-	factContent, err := extractSingleDiscussionFacts(ctx, cmd, backend, pending[0], "", sourceHash)
+	factContent, err := extractSingleDiscussionFacts(ctx, cmd, backend, pending[0], "", sourceHash, "team_test", "https://sageox.ai")
 	require.NoError(t, err)
 	require.NotEmpty(t, factContent)
 
@@ -613,7 +613,7 @@ func TestSessionFacts_UUID7_RealCodePath_NoGitConflict(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, pendingA, 1, "node A must find the pending session")
 
-	factsA := sessionSummaryToFacts(pendingA[0])
+	factsA := sessionSummaryToFacts(pendingA[0], "repo_a", "https://sageox.ai")
 	require.NotEmpty(t, factsA)
 
 	uidA, err := uuid.NewV7()
@@ -638,7 +638,7 @@ func TestSessionFacts_UUID7_RealCodePath_NoGitConflict(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, pendingB, 1, "node B must find the pending session")
 
-	factsB := sessionSummaryToFacts(pendingB[0])
+	factsB := sessionSummaryToFacts(pendingB[0], "repo_b", "https://sageox.ai")
 	require.NotEmpty(t, factsB)
 
 	uidB, err := uuid.NewV7()
@@ -748,7 +748,7 @@ func TestDiscussionFacts_UUID7_RealCodePath_NoGitConflict(t *testing.T) {
 	sourceHashA := discussionContentHash(filepath.Join(nodeAPath, "discussions", discussionDirName))
 	require.NotEmpty(t, sourceHashA)
 
-	factContentA, err := extractFactsFromSummaryJSON(pendingA[0], sourceHashA)
+	factContentA, err := extractFactsFromSummaryJSON(pendingA[0], sourceHashA, "team_test", "https://sageox.ai")
 	require.NoError(t, err)
 	require.NotEmpty(t, factContentA)
 
@@ -770,7 +770,7 @@ func TestDiscussionFacts_UUID7_RealCodePath_NoGitConflict(t *testing.T) {
 	sourceHashB := discussionContentHash(filepath.Join(nodeBPath, "discussions", discussionDirName))
 	require.NotEmpty(t, sourceHashB)
 
-	factContentB, err := extractFactsFromSummaryJSON(pendingB[0], sourceHashB)
+	factContentB, err := extractFactsFromSummaryJSON(pendingB[0], sourceHashB, "team_test", "https://sageox.ai")
 	require.NoError(t, err)
 	require.NotEmpty(t, factContentB)
 

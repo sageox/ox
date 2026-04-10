@@ -549,7 +549,7 @@ func TestFormatDailyMemoryWithDiscussions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			content := formatDailyMemory("2026-03-11", "content", tt.obsCount, tt.discCount, nil)
+			content := formatDailyMemory("2026-03-11", "content", tt.obsCount, tt.discCount, nil, nil)
 			if !strings.Contains(content, tt.wantSource) {
 				t.Errorf("expected %q in output, got:\n%s", tt.wantSource, content)
 			}
@@ -668,7 +668,7 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 			SummaryJSONDir: dir,
 		}
 
-		output, err := extractFactsFromSummaryJSON(d, "test-hash-123")
+		output, err := extractFactsFromSummaryJSON(d, "test-hash-123", "team_test", "https://sageox.ai")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -689,6 +689,49 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 		assertContains(t, output, "token service is stateless")
 		assertContains(t, output, "Okta SAML provider")
 		assertContains(t, output, "latency budget is 50ms")
+
+		// gh #476 regression: every fact line MUST carry source_url and
+		// source_title so the citation pipeline can render clickable links
+		// in the final daily summary. The recording_id comes from summary.json
+		// (set by v2Base() helper as "rec-test").
+		wantURL := "https://sageox.ai/team/team_test/media/recordings/rec-test"
+		assertContains(t, output, `"source_url":"`+wantURL+`"`)
+		// title comes from summary.json title field (set by v2Base() as "Test")
+		assertContains(t, output, `"source_title":"Test"`)
+	})
+
+	// TestExtractFactsFromSummaryJSON_NoRecordingID covers the audio-only /
+	// legacy fallback: when summary.json has no recording_id, source_url is
+	// empty (graceful degradation — citation pipeline renders label-only).
+	// Failure prevented: panic / broken URL when discussions lack a recording.
+	t.Run("missing recording_id leaves source_url empty", func(t *testing.T) {
+		dir := t.TempDir()
+		writeSummaryJSON(t, dir, map[string]any{
+			"schema_version": 2,
+			"recording_id":   "", // legacy / audio-only
+			"title":          "Audio-only sync",
+			"human_summary":  "summary",
+			"decisions":      []map[string]any{{"description": "ship the demo"}},
+		})
+
+		d := discussionInput{
+			DirName:        "2026-03-20-1423-person",
+			Title:          "Audio-only sync",
+			CreatedAt:      time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
+			SummaryJSONDir: dir,
+		}
+
+		output, err := extractFactsFromSummaryJSON(d, "test-hash", "team_test", "https://sageox.ai")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertContains(t, output, "ship the demo")
+		// source_url should be omitted (empty) — JSON omitempty drops the field entirely
+		if strings.Contains(output, `"source_url":`) {
+			t.Errorf("expected source_url omitted when recording_id is empty, got:\n%s", output)
+		}
+		// source_title should still be present
+		assertContains(t, output, `"source_title":"Audio-only sync"`)
 	})
 
 	t.Run("v1 summary with categorized facts — succeeds without chapters", func(t *testing.T) {
@@ -709,7 +752,7 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 			SummaryJSONDir: dir,
 		}
 
-		output, err := extractFactsFromSummaryJSON(d, "v1-hash")
+		output, err := extractFactsFromSummaryJSON(d, "v1-hash", "team_test", "https://sageox.ai")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -734,7 +777,7 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 			SummaryJSONDir: dir,
 		}
 
-		_, err := extractFactsFromSummaryJSON(d, "test-hash")
+		_, err := extractFactsFromSummaryJSON(d, "test-hash", "team_test", "https://sageox.ai")
 		if err == nil {
 			t.Fatal("expected error for empty facts")
 		}
@@ -751,7 +794,7 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 			SummaryJSONDir: dir,
 		}
 
-		_, err := extractFactsFromSummaryJSON(d, "test-hash")
+		_, err := extractFactsFromSummaryJSON(d, "test-hash", "team_test", "https://sageox.ai")
 		if err == nil {
 			t.Fatal("expected error for missing summary.json")
 		}
@@ -780,7 +823,7 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 			SummaryJSONDir: dir,
 		}
 
-		output, err := extractFactsFromSummaryJSON(d, "test-hash")
+		output, err := extractFactsFromSummaryJSON(d, "test-hash", "team_test", "https://sageox.ai")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -812,7 +855,7 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 			SummaryJSONDir: dir,
 		}
 
-		output, err := extractFactsFromSummaryJSON(d, "test-hash")
+		output, err := extractFactsFromSummaryJSON(d, "test-hash", "team_test", "https://sageox.ai")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -847,7 +890,7 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 			SummaryJSONDir: dir,
 		}
 
-		output, err := extractFactsFromSummaryJSON(d, "test-hash")
+		output, err := extractFactsFromSummaryJSON(d, "test-hash", "team_test", "https://sageox.ai")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -875,7 +918,7 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 			SummaryJSONDir: dir,
 		}
 
-		output, err := extractFactsFromSummaryJSON(d, "test-hash")
+		output, err := extractFactsFromSummaryJSON(d, "test-hash", "team_test", "https://sageox.ai")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}

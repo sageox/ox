@@ -45,9 +45,11 @@ type sessionInput struct {
 //
 // repoID identifies the repo for per-repo state tracking.
 // ledgerPath is the path to the ledger directory containing sessions/.
+// ep is the endpoint used to build per-fact SourceURL for clickable citations
+// in distilled summaries (gh #476). Empty endpoint degrades to label-only.
 //
 // No LLM calls — pure data transformation from structured summary.json.
-func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, repoID, ledgerPath string, since time.Time) error {
+func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, repoID, ledgerPath, ep string, since time.Time) error {
 	if ledgerPath == "" {
 		slog.Debug("no ledger path, skipping session fact extraction", "repo", repoID)
 		return nil
@@ -82,7 +84,7 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, repoID, led
 			recordedAt = s.StartedAt.UTC().Format(time.RFC3339)
 		}
 
-		extractedFacts := sessionSummaryToFacts(s)
+		extractedFacts := sessionSummaryToFacts(s, repoID, ep)
 		if len(extractedFacts) == 0 {
 			slog.Debug("no facts extracted from session", "session", s.DirName)
 			// write empty marker so scanPendingSessions skips this session
@@ -292,7 +294,14 @@ func sessionContentHash(ledgerPath, dirName string) string {
 
 // sessionSummaryToFacts transforms a session summary into uniform facts.
 // Pure data transformation — no LLM calls.
-func sessionSummaryToFacts(input sessionInput) []facts.Fact {
+//
+// repoID + ep populate per-fact SourceURL for clickable citations in distilled
+// summaries (gh #476). When either is empty, SourceURL is left empty and the
+// citation pipeline degrades to a label-only entry. We deliberately do NOT
+// fall through to buildSessionURL with an empty cfg, because that helper's
+// cfg.GetEndpoint() would resolve to the SAGEOX_ENDPOINT env var or the
+// default — silently producing a wrong URL in tests / unconfigured runs.
+func sessionSummaryToFacts(input sessionInput, repoID, ep string) []facts.Fact {
 	var result []facts.Fact
 	s := input.Summary
 	ts := input.Date
@@ -300,6 +309,26 @@ func sessionSummaryToFacts(input sessionInput) []facts.Fact {
 		ts = input.StartedAt.UTC().Format(time.RFC3339)
 	}
 	ref := "sessions/" + input.DirName
+	var sourceURL string
+	if repoID != "" && ep != "" {
+		sourceURL = buildSessionURL(&config.ProjectConfig{RepoID: repoID, Endpoint: ep}, input.DirName)
+	}
+	sourceTitle := s.Title // already loaded; falls back to dirname-derived label at citation time
+
+	mkFact := func(headline, summary, rationale, who, category string) facts.Fact {
+		return facts.Fact{
+			Headline:    headline,
+			Summary:     summary,
+			Rationale:   rationale,
+			SourceType:  facts.SourceSession,
+			SourceRef:   ref,
+			SourceURL:   sourceURL,
+			SourceTitle: sourceTitle,
+			Timestamp:   ts,
+			Category:    category,
+			Who:         who,
+		}
+	}
 
 	// session context fact (title + summary)
 	if s.Title != "" && s.Summary != "" {
@@ -307,15 +336,7 @@ func sessionSummaryToFacts(input sessionInput) []facts.Fact {
 		if len(s.KeyActions) > 0 {
 			summary += " Key actions: " + strings.Join(s.KeyActions, "; ")
 		}
-		result = append(result, facts.Fact{
-			Headline:   s.Title,
-			Summary:    summary,
-			SourceType: facts.SourceSession,
-			SourceRef:  ref,
-			Timestamp:  ts,
-			Category:   facts.CategoryContext,
-			Who:        input.Who,
-		})
+		result = append(result, mkFact(s.Title, summary, "", input.Who, facts.CategoryContext))
 	}
 
 	if s.AgentSummary != nil {
@@ -325,15 +346,7 @@ func sessionSummaryToFacts(input sessionInput) []facts.Fact {
 			if who == "" {
 				who = input.Who
 			}
-			result = append(result, facts.Fact{
-				Headline:   d.What,
-				Rationale:  d.Why,
-				SourceType: facts.SourceSession,
-				SourceRef:  ref,
-				Timestamp:  ts,
-				Category:   facts.CategoryDecision,
-				Who:        who,
-			})
+			result = append(result, mkFact(d.What, "", d.Why, who, facts.CategoryDecision))
 		}
 
 		// action items
@@ -346,28 +359,12 @@ func sessionSummaryToFacts(input sessionInput) []facts.Fact {
 			if a.Priority != "" {
 				summary = fmt.Sprintf("Priority: %s", a.Priority)
 			}
-			result = append(result, facts.Fact{
-				Headline:   a.Task,
-				Summary:    summary,
-				SourceType: facts.SourceSession,
-				SourceRef:  ref,
-				Timestamp:  ts,
-				Category:   facts.CategoryActionItem,
-				Who:        who,
-			})
+			result = append(result, mkFact(a.Task, summary, "", who, facts.CategoryActionItem))
 		}
 
 		// open questions
 		for _, q := range s.AgentSummary.OpenQuestions {
-			result = append(result, facts.Fact{
-				Headline:   q.Question,
-				Summary:    q.Context,
-				SourceType: facts.SourceSession,
-				SourceRef:  ref,
-				Timestamp:  ts,
-				Category:   facts.CategoryOpenQuestion,
-				Who:        input.Who,
-			})
+			result = append(result, mkFact(q.Question, q.Context, "", input.Who, facts.CategoryOpenQuestion))
 		}
 	}
 
@@ -375,25 +372,9 @@ func sessionSummaryToFacts(input sessionInput) []facts.Fact {
 	for _, aha := range s.AhaMoments {
 		switch aha.Type {
 		case "insight", "breakthrough", "synthesis":
-			result = append(result, facts.Fact{
-				Headline:   aha.Highlight,
-				Summary:    aha.Why,
-				SourceType: facts.SourceSession,
-				SourceRef:  ref,
-				Timestamp:  ts,
-				Category:   facts.CategoryLearning,
-				Who:        input.Who,
-			})
+			result = append(result, mkFact(aha.Highlight, aha.Why, "", input.Who, facts.CategoryLearning))
 		case "decision":
-			result = append(result, facts.Fact{
-				Headline:   aha.Highlight,
-				Summary:    aha.Why,
-				SourceType: facts.SourceSession,
-				SourceRef:  ref,
-				Timestamp:  ts,
-				Category:   facts.CategoryDecision,
-				Who:        input.Who,
-			})
+			result = append(result, mkFact(aha.Highlight, aha.Why, "", input.Who, facts.CategoryDecision))
 		}
 	}
 

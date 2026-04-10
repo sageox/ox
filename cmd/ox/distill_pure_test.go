@@ -230,7 +230,7 @@ func TestFormatDailyMemory_SourceVariants(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := formatDailyMemory("2026-03-25", "Distilled content here.", tt.obsCount, tt.factCount, nil)
+			result := formatDailyMemory("2026-03-25", "Distilled content here.", tt.obsCount, tt.factCount, nil, nil)
 			assert.Contains(t, result, "# Daily Memory")
 			assert.Contains(t, result, "2026-03-25")
 			assert.Contains(t, result, "Distilled content here.")

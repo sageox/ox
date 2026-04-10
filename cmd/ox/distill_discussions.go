@@ -28,6 +28,7 @@ const highImportanceThreshold = 0.5
 type discussionInput struct {
 	DirName        string // directory name (e.g., "2026-03-10-1423-ryan")
 	Title          string
+	RecordingID    string // from metadata.json; empty for legacy/audio-only discussions
 	CreatedAt      time.Time
 	Summary        string
 	Transcript     string // formatted speaker text from VTT, or empty
@@ -103,6 +104,7 @@ func scanPendingDiscussions(tcPath string, since time.Time) ([]discussionInput, 
 		di := discussionInput{
 			DirName:     dirName,
 			Title:       meta.Title,
+			RecordingID: meta.RecordingID,
 			CreatedAt:   createdAt,
 			Summary:     loadDiscussionSummary(dirPath),
 			Transcript:  loadDiscussionTranscript(dirPath),
@@ -265,7 +267,11 @@ func categorizeAnnotations(af *discussion.AnnotationsFile) (decisions, learnings
 // Works with both v1 and v2 server summary formats. The top-level fact categories
 // (decisions, learnings, etc.) are identical in both versions. Chapters are only
 // present in v2 and contribute to context facts when available.
-func extractFactsFromSummaryJSON(d discussionInput, sourceHash string) (string, error) {
+//
+// teamID and ep are used to populate per-fact SourceURL for clickable citations
+// in distilled summaries (gh #476). Either may be empty — buildDiscussionURL
+// returns empty in that case and citations degrade gracefully to label-only.
+func extractFactsFromSummaryJSON(d discussionInput, sourceHash, teamID, ep string) (string, error) {
 	summary, err := discussion.LoadSummary(d.SummaryJSONDir)
 	if err != nil {
 		return "", fmt.Errorf("load summary.json: %w", err)
@@ -279,53 +285,38 @@ func extractFactsFromSummaryJSON(d discussionInput, sourceHash string) (string, 
 
 	ts := d.CreatedAt.Format(time.RFC3339)
 	sourceRef := fmt.Sprintf("discussions/%s", d.DirName)
+	// recording_id may be empty for legacy / audio-only discussions; buildDiscussionURL handles that
+	sourceURL := buildDiscussionURL(ep, teamID, summary.RecordingID)
+	sourceTitle := summary.Title // already loaded; no extra I/O
+
+	mkFact := func(headline, category string) facts.Fact {
+		return facts.Fact{
+			Headline:    headline,
+			SourceType:  facts.SourceDiscussion,
+			SourceRef:   sourceRef,
+			SourceURL:   sourceURL,
+			SourceTitle: sourceTitle,
+			Timestamp:   ts,
+			Category:    category,
+		}
+	}
 
 	var parsedFacts []facts.Fact
 
 	for _, item := range summary.Decisions {
-		parsedFacts = append(parsedFacts, facts.Fact{
-			Headline:   item.Text(),
-			SourceType: facts.SourceDiscussion,
-			SourceRef:  sourceRef,
-			Timestamp:  ts,
-			Category:   facts.CategoryDecision,
-		})
+		parsedFacts = append(parsedFacts, mkFact(item.Text(), facts.CategoryDecision))
 	}
 	for _, item := range summary.Learnings {
-		parsedFacts = append(parsedFacts, facts.Fact{
-			Headline:   item.Text(),
-			SourceType: facts.SourceDiscussion,
-			SourceRef:  sourceRef,
-			Timestamp:  ts,
-			Category:   facts.CategoryLearning,
-		})
+		parsedFacts = append(parsedFacts, mkFact(item.Text(), facts.CategoryLearning))
 	}
 	for _, item := range summary.ActionItems {
-		parsedFacts = append(parsedFacts, facts.Fact{
-			Headline:   item.Text(),
-			SourceType: facts.SourceDiscussion,
-			SourceRef:  sourceRef,
-			Timestamp:  ts,
-			Category:   facts.CategoryActionItem,
-		})
+		parsedFacts = append(parsedFacts, mkFact(item.Text(), facts.CategoryActionItem))
 	}
 	for _, item := range summary.OpenQuestions {
-		parsedFacts = append(parsedFacts, facts.Fact{
-			Headline:   item.Text(),
-			SourceType: facts.SourceDiscussion,
-			SourceRef:  sourceRef,
-			Timestamp:  ts,
-			Category:   facts.CategoryOpenQuestion,
-		})
+		parsedFacts = append(parsedFacts, mkFact(item.Text(), facts.CategoryOpenQuestion))
 	}
 	for _, item := range summary.Requirements {
-		parsedFacts = append(parsedFacts, facts.Fact{
-			Headline:   item.Text(),
-			SourceType: facts.SourceDiscussion,
-			SourceRef:  sourceRef,
-			Timestamp:  ts,
-			Category:   facts.CategoryContext,
-		})
+		parsedFacts = append(parsedFacts, mkFact(item.Text(), facts.CategoryContext))
 	}
 
 	// key context from TechnicalContext, Constraints, NonGoals, and (v2 only) high-importance chapters
@@ -344,13 +335,7 @@ func extractFactsFromSummaryJSON(d discussionInput, sourceHash string) (string, 
 		}
 	}
 	for _, item := range keyContext {
-		parsedFacts = append(parsedFacts, facts.Fact{
-			Headline:   item,
-			SourceType: facts.SourceDiscussion,
-			SourceRef:  sourceRef,
-			Timestamp:  ts,
-			Category:   facts.CategoryContext,
-		})
+		parsedFacts = append(parsedFacts, mkFact(item, facts.CategoryContext))
 	}
 
 	header := facts.FileHeader{

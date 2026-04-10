@@ -306,7 +306,7 @@ func TestSessionSummaryToFacts(t *testing.T) {
 			Summary: testSummary("Database Migration", 0.8),
 		}
 
-		result := sessionSummaryToFacts(input)
+		result := sessionSummaryToFacts(input, "repo_test", "https://sageox.ai")
 
 		// Expected: 1 context + 1 decision + 1 action_item + 1 open_question
 		//         + 1 learning (insight) + 1 decision (aha decision)
@@ -391,7 +391,7 @@ func TestSessionSummaryToFacts(t *testing.T) {
 			},
 		}
 
-		result := sessionSummaryToFacts(input)
+		result := sessionSummaryToFacts(input, "repo_test", "https://sageox.ai")
 		if len(result) != 2 { // 1 context + 1 learning
 			t.Fatalf("got %d facts, want 2", len(result))
 		}
@@ -405,7 +405,7 @@ func TestSessionSummaryToFacts(t *testing.T) {
 			Summary: &sessionsummary.SummarizeResponse{},
 		}
 
-		result := sessionSummaryToFacts(input)
+		result := sessionSummaryToFacts(input, "repo_test", "https://sageox.ai")
 		if len(result) != 0 {
 			t.Errorf("got %d facts, want 0 for empty summary", len(result))
 		}
@@ -426,7 +426,7 @@ func TestSessionSummaryToFacts(t *testing.T) {
 			},
 		}
 
-		result := sessionSummaryToFacts(input)
+		result := sessionSummaryToFacts(input, "repo_test", "https://sageox.ai")
 		// 1 context fact only; question-type aha moments skipped
 		if len(result) != 1 {
 			t.Fatalf("got %d facts, want 1 (context only)", len(result))
@@ -452,7 +452,7 @@ func TestSessionSummaryToFacts(t *testing.T) {
 			},
 		}
 
-		result := sessionSummaryToFacts(input)
+		result := sessionSummaryToFacts(input, "repo_test", "https://sageox.ai")
 		// context + action_item = 2
 		if len(result) != 2 {
 			t.Fatalf("got %d facts, want 2", len(result))
@@ -478,7 +478,7 @@ func TestSessionSummaryToFacts(t *testing.T) {
 			},
 		}
 
-		result := sessionSummaryToFacts(input)
+		result := sessionSummaryToFacts(input, "repo_test", "https://sageox.ai")
 		// context + decision = 2 facts
 		if len(result) != 2 {
 			t.Fatalf("got %d facts, want 2", len(result))
@@ -807,7 +807,7 @@ func TestSessionSummaryToFactsStartedAt(t *testing.T) {
 			},
 		}
 
-		result := sessionSummaryToFacts(input)
+		result := sessionSummaryToFacts(input, "repo_test", "https://sageox.ai")
 		if len(result) != 1 {
 			t.Fatalf("got %d facts, want 1", len(result))
 		}
@@ -828,7 +828,7 @@ func TestSessionSummaryToFactsStartedAt(t *testing.T) {
 			},
 		}
 
-		result := sessionSummaryToFacts(input)
+		result := sessionSummaryToFacts(input, "repo_test", "https://sageox.ai")
 		if len(result) != 1 {
 			t.Fatalf("got %d facts, want 1", len(result))
 		}

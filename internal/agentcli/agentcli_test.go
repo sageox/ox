@@ -30,7 +30,7 @@ func TestDailyPromptFormat(t *testing.T) {
 		"Decided to use PostgreSQL for analytics",
 		"Auth module needs refactoring",
 	}
-	prompt := DailyPrompt(obs, "2026-03-11", "")
+	prompt := DailyPrompt(obs, "2026-03-11", "", nil)
 
 	if !strings.Contains(prompt, "2026-03-11") {
 		t.Error("prompt should contain the date")
@@ -51,7 +51,7 @@ func TestWeeklyPromptFormat(t *testing.T) {
 		"## Key Decisions\n- Use PostgreSQL",
 		"## Progress\n- Auth module refactored",
 	}
-	prompt := WeeklyPrompt(summaries, "2026-W11", "")
+	prompt := WeeklyPrompt(summaries, "2026-W11", "", false)
 
 	if !strings.Contains(prompt, "2026-W11") {
 		t.Error("prompt should contain the week ID")
@@ -68,7 +68,7 @@ func TestMonthlyPromptFormat(t *testing.T) {
 	summaries := []string{
 		"## Week highlights\n- Major refactor completed",
 	}
-	prompt := MonthlyPrompt(summaries, "2026-03", "")
+	prompt := MonthlyPrompt(summaries, "2026-03", "", false)
 
 	if !strings.Contains(prompt, "2026-03") {
 		t.Error("prompt should contain the month")
@@ -81,7 +81,7 @@ func TestMonthlyPromptFormat(t *testing.T) {
 func TestDailyPromptWithGuidelines(t *testing.T) {
 	obs := []string{"observation 1"}
 	guidelines := "Always highlight security decisions.\nIgnore dependency update noise."
-	prompt := DailyPrompt(obs, "2026-03-11", guidelines)
+	prompt := DailyPrompt(obs, "2026-03-11", guidelines, nil)
 
 	if !strings.Contains(prompt, "<team-guidelines>") {
 		t.Error("prompt should contain guidelines header")
@@ -96,32 +96,56 @@ func TestDailyPromptWithGuidelines(t *testing.T) {
 
 func TestDailyPromptWithoutGuidelines(t *testing.T) {
 	obs := []string{"observation 1"}
-	prompt := DailyPrompt(obs, "2026-03-11", "")
+	prompt := DailyPrompt(obs, "2026-03-11", "", nil)
 
 	if strings.Contains(prompt, "<team-guidelines>") {
 		t.Error("prompt should not contain guidelines header when empty")
 	}
 }
 
-func TestDailyPromptWithFactPaths(t *testing.T) {
+// TestDailyPromptWithCitedFacts verifies the new gh #476 prompt shape: facts
+// are rendered inline with citation numbers and the LLM is instructed to use
+// markdown reference-link syntax.
+func TestDailyPromptWithCitedFacts(t *testing.T) {
 	obs := []string{"observation 1"}
-	paths := []string{"memory/.discussion-facts/2026-03-10.jsonl", "memory/.github-facts/2026-03-10-uuid.jsonl"}
-	prompt := DailyPrompt(obs, "2026-03-11", "", paths...)
+	cited := []FactCitation{
+		{
+			Num:         1,
+			Headline:    "Team chose Postgres for analytics",
+			SourceType:  "discussion",
+			SourceTitle: "Architecture sync",
+			Date:        "2026-03-10",
+		},
+		{
+			Num:         2,
+			Headline:    "Adopted token bucket rate limiting",
+			SourceType:  "github",
+			SourceTitle: "Add rate limiting",
+			Date:        "2026-03-11",
+		},
+	}
+	prompt := DailyPrompt(obs, "2026-03-11", "", cited)
 
-	if !strings.Contains(prompt, "## Fact Files") {
-		t.Error("prompt should contain Fact Files section")
+	if !strings.Contains(prompt, "## Facts") {
+		t.Error("prompt should contain Facts section")
 	}
-	if !strings.Contains(prompt, "memory/.discussion-facts/2026-03-10.jsonl") {
-		t.Error("prompt should contain discussion fact path")
+	if !strings.Contains(prompt, "[1]") || !strings.Contains(prompt, "[2]") {
+		t.Error("prompt should contain citation numbers [1] and [2]")
 	}
-	if !strings.Contains(prompt, "memory/.github-facts/2026-03-10-uuid.jsonl") {
-		t.Error("prompt should contain github fact path")
+	if !strings.Contains(prompt, "Team chose Postgres for analytics") {
+		t.Error("prompt should contain fact headline inline")
 	}
-	if !strings.Contains(prompt, "Read each fact file") {
-		t.Error("prompt should instruct reading of fact files")
+	if !strings.Contains(prompt, "reference-link") {
+		t.Error("prompt should mention reference-link syntax")
 	}
-	if !strings.Contains(prompt, "ALL sources") {
-		t.Error("prompt should instruct incorporating all fact sources")
+	if !strings.Contains(prompt, "[PR #152][2]") {
+		t.Error("prompt should include the reference-link example")
+	}
+	if !strings.Contains(prompt, "Do NOT invent citation numbers") {
+		t.Error("prompt should warn against inventing citation numbers")
+	}
+	if !strings.Contains(prompt, "Do NOT write a Sources section") {
+		t.Error("prompt should warn against writing a Sources section")
 	}
 	if !strings.Contains(prompt, "1. observation 1") {
 		t.Error("prompt should still contain observations")
@@ -130,13 +154,35 @@ func TestDailyPromptWithFactPaths(t *testing.T) {
 
 func TestDailyPromptWithoutFacts(t *testing.T) {
 	obs := []string{"observation 1"}
-	prompt := DailyPrompt(obs, "2026-03-11", "")
+	prompt := DailyPrompt(obs, "2026-03-11", "", nil)
 
-	if strings.Contains(prompt, "Fact Files") {
-		t.Error("prompt should not contain Fact Files section when empty")
+	if strings.Contains(prompt, "## Facts") {
+		t.Error("prompt should not contain Facts section when no facts")
 	}
-	if strings.Contains(prompt, "Read each fact file") {
-		t.Error("prompt should not mention reading files when no facts")
+	if strings.Contains(prompt, "citation marker") {
+		t.Error("prompt should not mention citation markers when no facts")
+	}
+}
+
+// TestWeeklyPromptPreservesCitations verifies the gh #476 weekly prompt
+// instruction set: when hasCitations=true, the LLM is told to keep [N]
+// markers verbatim and not write its own Sources section.
+func TestWeeklyPromptPreservesCitations(t *testing.T) {
+	prompt := WeeklyPrompt([]string{"day 1 [1] body"}, "2026-W11", "", true)
+	if !strings.Contains(prompt, "Preserve these markers VERBATIM") {
+		t.Error("weekly prompt should instruct preserving citation markers when hasCitations=true")
+	}
+	if !strings.Contains(prompt, "Do NOT write a Sources section") {
+		t.Error("weekly prompt should warn against writing a Sources section")
+	}
+}
+
+// TestWeeklyPromptNoCitationsClause omits the preserve instruction when there
+// are no citations to preserve (avoids confusing LLM with irrelevant rules).
+func TestWeeklyPromptNoCitationsClause(t *testing.T) {
+	prompt := WeeklyPrompt([]string{"day 1 body"}, "2026-W11", "", false)
+	if strings.Contains(prompt, "Preserve these markers") {
+		t.Error("weekly prompt should NOT include preserve clause when hasCitations=false")
 	}
 }
 
