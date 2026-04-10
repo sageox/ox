@@ -928,6 +928,43 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 			t.Error("low-importance chapter should be excluded")
 		}
 	})
+
+	// CodeRabbit #3: when summary.json omits recording_id / title, fall back
+	// to the metadata.json values that scanPendingDiscussions already loaded
+	// into discussionInput. Older or partial server summaries should still
+	// produce clickable citations.
+	//
+	// Failure prevented: a discussion with metadata.json but a stripped-down
+	// summary.json silently loses its recording link in distilled summaries.
+	t.Run("metadata.json fallback when summary.json omits recording_id and title", func(t *testing.T) {
+		dir := t.TempDir()
+		writeSummaryJSON(t, dir, map[string]any{
+			"schema_version": 2,
+			// recording_id and title intentionally absent / empty
+			"recording_id":  "",
+			"title":         "",
+			"human_summary": "summary",
+			"decisions":     []map[string]any{{"description": "ship the demo"}},
+		})
+
+		d := discussionInput{
+			DirName:        "2026-03-20-1423-person",
+			Title:          "Title from metadata.json",
+			RecordingID:    "rec_from_metadata",
+			CreatedAt:      time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
+			SummaryJSONDir: dir,
+		}
+
+		output, err := extractFactsFromSummaryJSON(d, "test-hash", "team_test", "https://sageox.ai")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		// source_url should be built from the metadata.json fallback recording_id
+		assertContains(t, output, `"source_url":"https://sageox.ai/team/team_test/media/recordings/rec_from_metadata"`)
+		// source_title should fall back to the metadata.json title
+		assertContains(t, output, `"source_title":"Title from metadata.json"`)
+	})
 }
 
 // test helpers

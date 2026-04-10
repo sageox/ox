@@ -285,9 +285,20 @@ func extractFactsFromSummaryJSON(d discussionInput, sourceHash, teamID, ep strin
 
 	ts := d.CreatedAt.Format(time.RFC3339)
 	sourceRef := fmt.Sprintf("discussions/%s", d.DirName)
-	// recording_id may be empty for legacy / audio-only discussions; buildDiscussionURL handles that
-	sourceURL := buildDiscussionURL(ep, teamID, summary.RecordingID)
-	sourceTitle := summary.Title // already loaded; no extra I/O
+	// Prefer summary.json (canonical) but fall back to metadata.json values
+	// that scanPendingDiscussions already loaded into d. Older or partially
+	// populated server summaries can omit recording_id / title; without this
+	// fallback, those discussions silently lose clickable links.
+	recordingID := summary.RecordingID
+	if recordingID == "" {
+		recordingID = d.RecordingID
+	}
+	sourceTitle := summary.Title
+	if sourceTitle == "" {
+		sourceTitle = d.Title
+	}
+	// recording_id may still be empty for legacy / audio-only discussions; buildDiscussionURL handles that
+	sourceURL := buildDiscussionURL(ep, teamID, recordingID)
 
 	mkFact := func(headline, category string) facts.Fact {
 		return facts.Fact{

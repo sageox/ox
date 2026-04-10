@@ -378,8 +378,68 @@ func TestRenderSourcesSection_LabelEscapesBracket(t *testing.T) {
 		{Num: 1, Label: "Discussion: brackets [in title]", URL: "https://example.com/x", Key: "https://example.com/x"},
 	}
 	out := renderSourcesSection(cites)
-	if !strings.Contains(out, `[in title\]`) {
-		t.Errorf("expected escaped bracket in label:\n%s", out)
+	if !strings.Contains(out, `\[in title\]`) {
+		t.Errorf("expected both brackets escaped in label:\n%s", out)
+	}
+}
+
+// TestSourcesSectionRoundTrip_LabelsWithBrackets — CodeRabbit #1: a label
+// like `Foo [bar]` must round-trip cleanly. Previously only `]` was escaped,
+// which produced `[Foo [bar\]][1]` — broken markdown that parsers see as a
+// nested link. Now both ends are escaped.
+//
+// Failure prevented: PR/discussion titles containing brackets render as
+// non-clickable link fragments in the Sources section.
+func TestSourcesSectionRoundTrip_LabelsWithBrackets(t *testing.T) {
+	cites := []citation{
+		{Num: 1, Label: "Foo [bar]", URL: "https://example.com/foo", Key: "https://example.com/foo"},
+		{Num: 2, Label: "Has [both] brackets", URL: "https://example.com/b", Key: "https://example.com/b"},
+		{Num: 3, Label: "Trailing ]", URL: "https://example.com/t", Key: "https://example.com/t"},
+		{Num: 4, Label: "Leading [", URL: "https://example.com/l", Key: "https://example.com/l"},
+	}
+	rendered := renderSourcesSection(cites)
+	doc := "# Daily\n\n" + rendered
+	parsed := parseSourcesSection(doc)
+	if len(parsed) != len(cites) {
+		t.Fatalf("round-trip lost entries: got %d, want %d", len(parsed), len(cites))
+	}
+	for i, want := range cites {
+		if parsed[i].Label != want.Label {
+			t.Errorf("entry %d: Label = %q, want %q", i, parsed[i].Label, want.Label)
+		}
+		if parsed[i].URL != want.URL {
+			t.Errorf("entry %d: URL = %q, want %q", i, parsed[i].URL, want.URL)
+		}
+	}
+}
+
+// TestParseSourcesSection_IgnoresBodyMentionOfHeading — CodeRabbit #2: a body
+// that mentions "## Sources" in prose or a code sample (e.g., agent guidance
+// describing the format) must not trick the parser into slicing the wrong
+// region. Only a real H2 heading on its own line counts.
+//
+// Failure prevented: distill of a daily that quotes the format string itself
+// produces a Sources section parsed from the wrong file region — citations
+// silently disappear from weekly merges.
+func TestParseSourcesSection_IgnoresBodyMentionOfHeading(t *testing.T) {
+	doc := `# Daily Memory
+
+## What We Learned
+
+The format guide says "the file ends with ## Sources, like this:".
+
+## Sources
+
+1. [Real citation][1]
+
+[1]: https://example.com/real
+`
+	cites := parseSourcesSection(doc)
+	if len(cites) != 1 {
+		t.Fatalf("expected 1 citation from real Sources section, got %d: %+v", len(cites), cites)
+	}
+	if cites[0].URL != "https://example.com/real" {
+		t.Errorf("parser sliced from wrong location, got URL %q", cites[0].URL)
 	}
 }
 

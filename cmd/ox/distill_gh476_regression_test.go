@@ -311,7 +311,80 @@ func TestObservationSourcePaths_ConvertsToRelative(t *testing.T) {
 	}
 }
 
-// --- G. Type-check sentinel: agentcli.FactCitation roundtrip ---
+// --- G. mirrorGitHubSourceURL (CodeRabbit round-1 #4) ---
+
+// TestMirrorGitHubSourceURL covers the cases mirrorGitHubSourceURL is
+// expected to handle: http(s) URLs are mirrored, non-URL refs are skipped,
+// existing source_url is never overwritten, and leading/trailing whitespace
+// in source_ref is trimmed before the scheme check.
+//
+// Failure prevented: github fact files with stray whitespace in source_ref
+// (LLM extractor occasionally emits these) silently produce linkless citations.
+func TestMirrorGitHubSourceURL(t *testing.T) {
+	tests := []struct {
+		name           string
+		in             facts.Fact
+		wantURL        string
+		wantNormalized string // expected source_ref after the function returns (may be trimmed)
+	}{
+		{
+			name:           "https url mirrored",
+			in:             facts.Fact{SourceType: facts.SourceGitHub, SourceRef: "https://github.com/sageox/ox/pull/152"},
+			wantURL:        "https://github.com/sageox/ox/pull/152",
+			wantNormalized: "https://github.com/sageox/ox/pull/152",
+		},
+		{
+			name:           "http url mirrored",
+			in:             facts.Fact{SourceType: facts.SourceGitHub, SourceRef: "http://example.com/x"},
+			wantURL:        "http://example.com/x",
+			wantNormalized: "http://example.com/x",
+		},
+		{
+			name:           "leading whitespace trimmed and mirrored",
+			in:             facts.Fact{SourceType: facts.SourceGitHub, SourceRef: "  https://github.com/sageox/ox/pull/1"},
+			wantURL:        "https://github.com/sageox/ox/pull/1",
+			wantNormalized: "https://github.com/sageox/ox/pull/1",
+		},
+		{
+			name:           "trailing whitespace trimmed and mirrored",
+			in:             facts.Fact{SourceType: facts.SourceGitHub, SourceRef: "https://github.com/sageox/ox/pull/1\n"},
+			wantURL:        "https://github.com/sageox/ox/pull/1",
+			wantNormalized: "https://github.com/sageox/ox/pull/1",
+		},
+		{
+			name:           "non-url ref skipped",
+			in:             facts.Fact{SourceType: facts.SourceGitHub, SourceRef: "github.com/sageox/ox/pull/1"},
+			wantURL:        "",
+			wantNormalized: "github.com/sageox/ox/pull/1",
+		},
+		{
+			name:           "empty ref skipped",
+			in:             facts.Fact{SourceType: facts.SourceGitHub, SourceRef: ""},
+			wantURL:        "",
+			wantNormalized: "",
+		},
+		{
+			name:           "existing source_url not overwritten",
+			in:             facts.Fact{SourceType: facts.SourceGitHub, SourceRef: "https://github.com/a/b/pull/1", SourceURL: "https://override.example.com"},
+			wantURL:        "https://override.example.com",
+			wantNormalized: "https://github.com/a/b/pull/1",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := []facts.Fact{tt.in}
+			mirrorGitHubSourceURL(fs)
+			if fs[0].SourceURL != tt.wantURL {
+				t.Errorf("SourceURL = %q, want %q", fs[0].SourceURL, tt.wantURL)
+			}
+			if fs[0].SourceRef != tt.wantNormalized {
+				t.Errorf("SourceRef = %q, want %q", fs[0].SourceRef, tt.wantNormalized)
+			}
+		})
+	}
+}
+
+// --- H. Type-check sentinel: agentcli.FactCitation roundtrip ---
 
 // TestAgentcliFactCitation_FieldNames is a sentinel test that the FactCitation
 // struct exposes the fields buildFactCitationsForPrompt populates. If the

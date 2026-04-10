@@ -959,11 +959,22 @@ func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backe
 		return "", nil // no valid facts extracted
 	}
 
-	// LLM extractor doesn't know about citation links — fill in deterministic
-	// SourceURL/SourceTitle for every fact so the daily summary can cite them.
-	// (gh #476)
+	// LLM extractor doesn't reliably emit source_type / source_ref / URL —
+	// backfill all four source fields from the discussion's metadata so the
+	// daily citation pipeline (gh #476) can always render a citation, even
+	// when buildDiscussionURL returns empty (legacy / audio-only / missing
+	// team or endpoint). Without this backfill, those facts would have an
+	// empty source_ref and citationKey() would return empty, dropping them
+	// from the daily prompt entirely.
 	sourceURL := buildDiscussionURL(ep, teamID, d.RecordingID)
+	sourceRef := "discussions/" + d.DirName
 	for i := range parsedFacts {
+		if parsedFacts[i].SourceType == "" {
+			parsedFacts[i].SourceType = facts.SourceDiscussion
+		}
+		if parsedFacts[i].SourceRef == "" {
+			parsedFacts[i].SourceRef = sourceRef
+		}
 		if parsedFacts[i].SourceURL == "" {
 			parsedFacts[i].SourceURL = sourceURL
 		}

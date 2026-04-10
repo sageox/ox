@@ -449,11 +449,15 @@ func renderSourcesSection(cites []citation) string {
 	return sb.String()
 }
 
-// escapeMarkdownLinkText escapes the closing bracket so labels containing `]`
-// don't break the markdown link syntax. We don't need to escape `[` because
-// markdown only requires escaping the closer.
+// escapeMarkdownLinkText escapes both `[` and `]` so labels containing either
+// bracket don't break the markdown link syntax. A label like `Foo [bar]` would
+// otherwise turn into `[Foo [bar\]][1]`, which markdown parsers see as a nested
+// link and render incorrectly. Escaping both ends keeps the link clickable.
 func escapeMarkdownLinkText(s string) string {
-	return strings.ReplaceAll(s, "]", `\]`)
+	return strings.NewReplacer(
+		`[`, `\[`,
+		`]`, `\]`,
+	).Replace(s)
 }
 
 // parseSourcesSection extracts citation entries from a "## Sources" section
@@ -467,14 +471,14 @@ func escapeMarkdownLinkText(s string) string {
 // fully; bare-text entries (no URL) are parsed with empty URL; malformed
 // lines are skipped.
 func parseSourcesSection(md string) []citation {
-	// locate "## Sources" header
-	const header = "## Sources"
-	headerIdx := strings.Index(md, header)
-	if headerIdx == -1 {
+	// locate the "## Sources" line — anchored to a real heading rather than
+	// a raw substring so a body that mentions "## Sources" in prose / code
+	// doesn't trick the parser into slicing the wrong region.
+	loc := sourcesHeadingRe.FindStringIndex(md)
+	if loc == nil {
 		return nil
 	}
-	// take everything from header to next "## " heading or end of file
-	rest := md[headerIdx+len(header):]
+	rest := md[loc[1]:]
 	if next := nextH2HeadingIndex(rest); next >= 0 {
 		rest = rest[:next]
 	}
@@ -528,18 +532,26 @@ func parseSourcesSection(md string) []citation {
 }
 
 var (
+	// sourcesHeadingRe matches a real `## Sources` heading on its own line.
+	// Multi-line mode + `\s*$` allows trailing whitespace but rejects any
+	// non-heading occurrence of the literal in body text.
+	sourcesHeadingRe = regexp.MustCompile(`(?m)^## Sources\s*$`)
 	// refLinkDefRe matches `[N]: url`
 	refLinkDefRe = regexp.MustCompile(`^\[(\d+)\]:\s*(\S+)\s*$`)
-	// numberedRefEntryRe matches `1. [label][N]`. Label uses a non-greedy
-	// negated character class so labels containing `\]` (the escape produced
-	// by escapeMarkdownLinkText) parse correctly.
-	numberedRefEntryRe = regexp.MustCompile(`^(\d+)\.\s+\[((?:\\\]|[^\]])+)\]\[(\d+)\]\s*$`)
+	// numberedRefEntryRe matches `1. [label][N]`. Label accepts escaped
+	// brackets `\[` and `\]` (produced by escapeMarkdownLinkText) plus any
+	// non-bracket character. Without the escape branch, a label like
+	// `Foo \[bar\]` would terminate the label early at the unescaped close.
+	numberedRefEntryRe = regexp.MustCompile(`^(\d+)\.\s+\[((?:\\\[|\\\]|[^\[\]])+)\]\[(\d+)\]\s*$`)
 	// numberedPlainEntryRe matches `1. plain text label` (no link)
 	numberedPlainEntryRe = regexp.MustCompile(`^(\d+)\.\s+(.+)$`)
 )
 
 func unescapeMarkdownLinkText(s string) string {
-	return strings.ReplaceAll(s, `\]`, "]")
+	return strings.NewReplacer(
+		`\[`, `[`,
+		`\]`, `]`,
+	).Replace(s)
 }
 
 // nextH2HeadingIndex returns the byte offset of the next "## " heading in s,

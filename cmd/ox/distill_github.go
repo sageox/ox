@@ -488,12 +488,19 @@ func extractGitHubCommitBatch(ctx context.Context, cmd *cobra.Command, mu *sync.
 // in source_ref (it's required by the extractor prompt), so this gives the
 // citation pipeline (gh #476) a uniform place to look. Skips facts whose
 // source_ref is not http(s)://, and never overwrites a populated source_url.
+//
+// SourceRef is trimmed before the scheme check (and the trimmed value is
+// written back) so an LLM-extracted ref like " https://..." with stray
+// whitespace doesn't silently produce a linkless citation.
 func mirrorGitHubSourceURL(fs []facts.Fact) {
 	for i := range fs {
 		if fs[i].SourceURL != "" {
 			continue
 		}
-		ref := fs[i].SourceRef
+		ref := strings.TrimSpace(fs[i].SourceRef)
+		if ref != fs[i].SourceRef {
+			fs[i].SourceRef = ref // normalize the stored ref too
+		}
 		if strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") {
 			fs[i].SourceURL = ref
 		}
