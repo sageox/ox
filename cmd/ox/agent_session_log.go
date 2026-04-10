@@ -42,6 +42,7 @@ type sessionLogEntry struct {
 	Content   string `json:"content"`
 	Timestamp string `json:"timestamp"`
 	Seq       int    `json:"seq"`
+	EID       string `json:"eid"`
 	ToolName  string `json:"tool_name,omitempty"`
 	ToolInput string `json:"tool_input,omitempty"`
 }
@@ -194,6 +195,7 @@ func appendSessionLogEntry(filePath, role, content, toolName, toolInput string) 
 		Content:   content,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Seq:       nextSeq,
+		EID:       session.GenerateEntryID(),
 		ToolName:  toolName,
 		ToolInput: toolInput,
 	}

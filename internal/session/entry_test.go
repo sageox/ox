@@ -1,10 +1,12 @@
 package session
 
 import (
+	"regexp"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMapEntryType(t *testing.T) {
@@ -135,6 +137,53 @@ func TestExtractContent(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := ExtractContent(tt.entry)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// --- Entry ID tests ---
+
+var entryIDPattern = regexp.MustCompile(`^[0-9A-Za-z]{5}$`)
+
+// TestGenerateEntryID_Format verifies length and charset.
+// Failure prevented: malformed entry IDs that break downstream parsers expecting [A-Za-z0-9]{5}.
+func TestGenerateEntryID_Format(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		eid := GenerateEntryID()
+		require.Len(t, eid, 5, "entry ID must be exactly 5 chars")
+		assert.Regexp(t, entryIDPattern, eid, "entry ID must match [0-9A-Za-z]{5}")
+	}
+}
+
+// TestGenerateEntryID_Uniqueness verifies no collisions in a realistic batch.
+// Failure prevented: broken randomness producing duplicate IDs within a session.
+func TestGenerateEntryID_Uniqueness(t *testing.T) {
+	seen := make(map[string]bool, 1000)
+	for i := 0; i < 1000; i++ {
+		eid := GenerateEntryID()
+		require.False(t, seen[eid], "duplicate entry ID %q at iteration %d", eid, i)
+		seen[eid] = true
+	}
+}
+
+// TestExtractEntryID verifies extraction from entry maps.
+// Failure prevented: read-path can't find eid field.
+func TestExtractEntryID(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry map[string]any
+		want  string
+	}{
+		{"present", map[string]any{"eid": "aB3xZ"}, "aB3xZ"},
+		{"missing", map[string]any{"type": "user"}, ""},
+		{"wrong type", map[string]any{"eid": 12345}, ""},
+		{"empty string", map[string]any{"eid": ""}, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractEntryID(tt.entry)
 			assert.Equal(t, tt.want, got)
 		})
 	}

@@ -13,11 +13,11 @@ import (
 func TestLintRawJSONLFile_Valid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "raw.jsonl")
-	content := `{"type":"user","content":"hello","ts":"2026-03-11T00:00:00Z","seq":1}
-{"type":"assistant","content":"hi there","ts":"2026-03-11T00:00:01Z","seq":2}
-{"type":"tool","content":"","tool_name":"Bash","tool_input":"ls","ts":"2026-03-11T00:00:02Z","seq":3}
-{"type":"tool","content":"","tool_output":"file.txt","ts":"2026-03-11T00:00:03Z","seq":4}
-{"type":"system","content":"context loaded","ts":"2026-03-11T00:00:04Z","seq":5}
+	content := `{"type":"user","content":"hello","ts":"2026-03-11T00:00:00Z","seq":1,"eid":"aB3xZ"}
+{"type":"assistant","content":"hi there","ts":"2026-03-11T00:00:01Z","seq":2,"eid":"k9Qm2"}
+{"type":"tool","content":"","tool_name":"Bash","tool_input":"ls","ts":"2026-03-11T00:00:02Z","seq":3,"eid":"Tn4pL"}
+{"type":"tool","content":"","tool_output":"file.txt","ts":"2026-03-11T00:00:03Z","seq":4,"eid":"Wv7jR"}
+{"type":"system","content":"context loaded","ts":"2026-03-11T00:00:04Z","seq":5,"eid":"m5PqX"}
 `
 	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
 
@@ -25,6 +25,7 @@ func TestLintRawJSONLFile_Valid(t *testing.T) {
 
 	assert.True(t, result.Valid)
 	assert.Empty(t, result.Errors)
+	assert.Empty(t, result.Warnings)
 	assert.Equal(t, 5, result.EntryCount)
 	assert.Equal(t, 1, result.TypeCounts["user"])
 	assert.Equal(t, 1, result.TypeCounts["assistant"])
@@ -141,6 +142,55 @@ func TestLintRawJSONLFile_WarningsForMissingFields(t *testing.T) {
 	assert.True(t, hasTimestampWarning, "should warn about missing timestamp")
 	assert.True(t, hasEmptyContentWarning, "should warn about empty content")
 	assert.True(t, hasToolWarning, "should warn about tool missing tool_name/tool_output")
+}
+
+// TestLintRawJSONLFile_MissingEID warns about entries without eid.
+// Failure prevented: older sessions silently missing entry IDs without notice.
+func TestLintRawJSONLFile_MissingEID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raw.jsonl")
+	content := `{"type":"user","content":"hello","ts":"2026-03-11T00:00:00Z","seq":1}
+{"type":"assistant","content":"hi","ts":"2026-03-11T00:00:01Z","seq":2,"eid":"aB3xZ"}
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	result := lintRawJSONLFile(path, "test-session")
+
+	assert.True(t, result.Valid, "missing eid is a warning, not an error")
+	hasEIDWarning := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "missing eid") {
+			hasEIDWarning = true
+		}
+	}
+	assert.True(t, hasEIDWarning, "should warn about missing eid on first entry")
+}
+
+// TestLintRawJSONLFile_SkipEID suppresses eid warnings when option is set.
+// Failure prevented: --skip-eid flag doesn't actually suppress warnings.
+func TestLintRawJSONLFile_SkipEID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raw.jsonl")
+	content := `{"type":"user","content":"hello","ts":"2026-03-11T00:00:00Z","seq":1}
+{"type":"assistant","content":"hi","ts":"2026-03-11T00:00:01Z","seq":2}
+`
+	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+
+	// without skip: should have eid warnings
+	result := lintRawJSONLFile(path, "test-session")
+	hasEIDWarning := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "missing eid") {
+			hasEIDWarning = true
+		}
+	}
+	assert.True(t, hasEIDWarning, "should warn about missing eid by default")
+
+	// with skip: no eid warnings
+	result = lintRawJSONLFile(path, "test-session", lintOptions{SkipEID: true})
+	for _, w := range result.Warnings {
+		assert.NotContains(t, w, "missing eid", "should not warn about eid when SkipEID is set")
+	}
 }
 
 func TestLintRawJSONLFile_NonMonotonicSeq(t *testing.T) {

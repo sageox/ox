@@ -294,6 +294,48 @@ func TestSessionWriter_WriteRaw(t *testing.T) {
 	writer.Close()
 }
 
+// TestSessionWriter_WriteRaw_InjectsEID verifies eid is auto-generated when missing.
+// Failure prevented: entries written without stable identifiers.
+func TestSessionWriter_WriteRaw_InjectsEID(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := NewStore(tmpDir)
+	writer, _ := store.CreateRaw("test-eid-session")
+
+	data := map[string]any{
+		"type":    "user",
+		"content": "hello",
+	}
+	err := writer.WriteRaw(data)
+	require.NoError(t, err)
+
+	// eid should have been injected into the map
+	eid, ok := data["eid"].(string)
+	require.True(t, ok, "eid must be a string")
+	assert.Len(t, eid, 5)
+	assert.Regexp(t, `^[0-9A-Za-z]{5}$`, eid)
+
+	writer.Close()
+}
+
+// TestSessionWriter_WriteRaw_PreservesCallerEID verifies caller-provided eid is not overwritten.
+// Failure prevented: imported entries with pre-assigned IDs get their IDs replaced.
+func TestSessionWriter_WriteRaw_PreservesCallerEID(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := NewStore(tmpDir)
+	writer, _ := store.CreateRaw("test-eid-preserve")
+
+	data := map[string]any{
+		"type":    "user",
+		"content": "hello",
+		"eid":     "CuStM",
+	}
+	err := writer.WriteRaw(data)
+	require.NoError(t, err)
+
+	assert.Equal(t, "CuStM", data["eid"], "caller-provided eid must be preserved")
+	writer.Close()
+}
+
 func TestSessionWriter_Close_WritesFooter(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := NewStore(tmpDir)

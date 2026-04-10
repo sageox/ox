@@ -48,14 +48,18 @@ Examples:
   ox session lint OxRvKb
   ox session lint 2026-03-11T22-13-rsnodgrass-OxRvKb
   ox session lint --file /tmp/raw.jsonl
-  ox session lint --all`,
+  ox session lint --all
+  ox session lint --all --skip-eid`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		jsonOutput, _ := cmd.Flags().GetBool("json")
 		filePath, _ := cmd.Flags().GetString("file")
 		all, _ := cmd.Flags().GetBool("all")
+		skipEID, _ := cmd.Flags().GetBool("skip-eid")
+
+		opts := lintOptions{SkipEID: skipEID}
 
 		if filePath != "" {
-			result := lintRawJSONLFile(filePath, filepath.Base(filePath))
+			result := lintRawJSONLFile(filePath, filepath.Base(filePath), opts)
 			return printLintResults([]lintResult{result}, jsonOutput)
 		}
 
@@ -67,7 +71,7 @@ Examples:
 		sessionsDir := filepath.Join(ledgerPath, "sessions")
 
 		if all {
-			return lintAllSessions(sessionsDir, jsonOutput)
+			return lintAllSessions(sessionsDir, jsonOutput, opts)
 		}
 
 		if len(args) == 0 {
@@ -91,7 +95,7 @@ Examples:
 			return printLintResults([]lintResult{result}, jsonOutput)
 		}
 
-		result := lintRawJSONLFile(rawPath, sessionName)
+		result := lintRawJSONLFile(rawPath, sessionName, opts)
 		return printLintResults([]lintResult{result}, jsonOutput)
 	},
 }
@@ -100,10 +104,20 @@ func init() {
 	sessionCmd.AddCommand(sessionLintCmd)
 	sessionLintCmd.Flags().String("file", "", "lint a standalone JSONL file instead of a ledger session")
 	sessionLintCmd.Flags().Bool("all", false, "lint all sessions in the ledger")
+	sessionLintCmd.Flags().Bool("skip-eid", false, "skip missing-eid warnings (for older sessions without entry IDs)")
+}
+
+// lintOptions controls optional lint checks.
+type lintOptions struct {
+	SkipEID bool // skip missing-eid warnings (for older sessions)
 }
 
 // lintRawJSONLFile validates a raw.jsonl file for web viewer compatibility.
-func lintRawJSONLFile(path, name string) lintResult {
+func lintRawJSONLFile(path, name string, opts ...lintOptions) lintResult {
+	var opt lintOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
 	result := lintResult{
 		SessionName: name,
 		Valid:       true,
@@ -196,6 +210,14 @@ func lintRawJSONLFile(path, name string) lintResult {
 			}
 		}
 
+		// warn if eid is missing (older sessions won't have it)
+		if !opt.SkipEID {
+			if _, hasEID := entry["eid"]; !hasEID {
+				result.Warnings = append(result.Warnings,
+					fmt.Sprintf("line %d: missing eid field", lineNum))
+			}
+		}
+
 		// validate seq ordering (file-level concern, not per-entry)
 		if seqVal, hasSeq := entry["seq"]; hasSeq {
 			var seq int
@@ -233,7 +255,11 @@ func lintRawJSONLFile(path, name string) lintResult {
 }
 
 // lintAllSessions validates all sessions in the ledger.
-func lintAllSessions(sessionsDir string, jsonOutput bool) error {
+func lintAllSessions(sessionsDir string, jsonOutput bool, opts ...lintOptions) error {
+	var opt lintOptions
+	if len(opts) > 0 {
+		opt = opts[0]
+	}
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		return fmt.Errorf("read sessions dir: %w", err)
@@ -259,7 +285,7 @@ func lintAllSessions(sessionsDir string, jsonOutput bool) error {
 			continue
 		}
 
-		results = append(results, lintRawJSONLFile(rawPath, entry.Name()))
+		results = append(results, lintRawJSONLFile(rawPath, entry.Name(), opt))
 	}
 
 	return printLintResults(results, jsonOutput)

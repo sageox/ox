@@ -85,11 +85,14 @@ Each entry represents a conversation turn or tool invocation. Entries are writte
 | `content` | string | yes | Message text or tool output |
 | `timestamp` | ISO8601 | yes | When the entry was recorded (auto-added if missing) |
 | `seq` | integer | yes | Zero-based sequence number (auto-added if missing) |
+| `eid` | string | yes | Unique 5-char alphanumeric entry identifier (auto-generated if missing) |
 | `tool_name` | string | no | Tool name (only for `tool` entries) |
 | `tool_input` | string | no | Tool input (only for `tool` entries) |
 | `tool_output` | string | no | Tool output (only for `tool` entries) |
 | `coworker_name` | string | no | Coworker/subagent name if applicable |
 | `coworker_model` | string | no | Coworker model tier (sonnet, opus, haiku) |
+
+**Entry ID (`eid`):** Each entry gets a unique 5-character identifier from `[0-9A-Za-z]` (62^5 ≈ 916M possibilities). Generated automatically by `WriteRaw()` if not provided by the caller. Provides stable references for deduplication, cross-referencing from derived artifacts, and audit trails. Sessions recorded before this field was added will have entries without `eid` — readers should tolerate missing values.
 
 ### Entry Types
 
@@ -130,22 +133,22 @@ Coding agents (e.g., Claude Code) mix human and system content in `type: "user"`
 
 User message:
 ```json
-{"type":"user","content":"Fix the login bug","timestamp":"2026-01-06T14:32:01Z","seq":0}
+{"type":"user","content":"Fix the login bug","timestamp":"2026-01-06T14:32:01Z","seq":0,"eid":"aB3xZ"}
 ```
 
 Assistant response:
 ```json
-{"type":"assistant","content":"I'll investigate the login flow...","timestamp":"2026-01-06T14:32:05Z","seq":1}
+{"type":"assistant","content":"I'll investigate the login flow...","timestamp":"2026-01-06T14:32:05Z","seq":1,"eid":"k9Qm2"}
 ```
 
 Tool call:
 ```json
-{"type":"tool","content":"","tool_name":"bash","tool_input":"go test ./...","tool_output":"ok  github.com/user/repo 1.234s","timestamp":"2026-01-06T14:32:10Z","seq":2}
+{"type":"tool","content":"","tool_name":"bash","tool_input":"go test ./...","tool_output":"ok  github.com/user/repo 1.234s","timestamp":"2026-01-06T14:32:10Z","seq":2,"eid":"Tn4pL"}
 ```
 
 System message (coworker load):
 ```json
-{"type":"system","content":"Loaded coworker: code-reviewer (model: sonnet)","coworker_name":"code-reviewer","coworker_model":"sonnet","timestamp":"2026-01-06T14:33:00Z","seq":5}
+{"type":"system","content":"Loaded coworker: code-reviewer (model: sonnet)","coworker_name":"code-reviewer","coworker_model":"sonnet","timestamp":"2026-01-06T14:33:00Z","seq":5,"eid":"Wv7jR"}
 ```
 
 ## Last Line: Footer
@@ -168,13 +171,13 @@ The footer provides session summary statistics.
 
 ```jsonl
 {"type":"header","metadata":{"version":"1.0","created_at":"2026-01-06T14:32:00Z","agent_id":"Ox7f3a","agent_type":"claude-code","model":"claude-sonnet-4-20250514","username":"dev@example.com"}}
-{"type":"user","content":"Fix the failing test in auth_test.go","timestamp":"2026-01-06T14:32:01Z","seq":0}
-{"type":"assistant","content":"I'll look at the test file to understand the failure.","timestamp":"2026-01-06T14:32:03Z","seq":1}
-{"type":"tool","content":"","tool_name":"read","tool_input":"/path/to/auth_test.go","timestamp":"2026-01-06T14:32:04Z","seq":2}
-{"type":"assistant","content":"The test expects a different error message. Let me fix it.","timestamp":"2026-01-06T14:32:08Z","seq":3}
-{"type":"tool","content":"","tool_name":"edit","tool_input":"{\"file_path\":\"/path/to/auth_test.go\",\"old_string\":\"...\",\"new_string\":\"...\"}","timestamp":"2026-01-06T14:32:10Z","seq":4}
-{"type":"tool","content":"","tool_name":"bash","tool_input":"go test ./internal/auth/...","tool_output":"ok  github.com/user/repo/internal/auth 0.5s","timestamp":"2026-01-06T14:32:15Z","seq":5}
-{"type":"assistant","content":"Test is passing now.","timestamp":"2026-01-06T14:32:17Z","seq":6}
+{"type":"user","content":"Fix the failing test in auth_test.go","timestamp":"2026-01-06T14:32:01Z","seq":0,"eid":"aB3xZ"}
+{"type":"assistant","content":"I'll look at the test file to understand the failure.","timestamp":"2026-01-06T14:32:03Z","seq":1,"eid":"k9Qm2"}
+{"type":"tool","content":"","tool_name":"read","tool_input":"/path/to/auth_test.go","timestamp":"2026-01-06T14:32:04Z","seq":2,"eid":"Tn4pL"}
+{"type":"assistant","content":"The test expects a different error message. Let me fix it.","timestamp":"2026-01-06T14:32:08Z","seq":3,"eid":"Wv7jR"}
+{"type":"tool","content":"","tool_name":"edit","tool_input":"{\"file_path\":\"/path/to/auth_test.go\",\"old_string\":\"...\",\"new_string\":\"...\"}","timestamp":"2026-01-06T14:32:10Z","seq":4,"eid":"m5PqX"}
+{"type":"tool","content":"","tool_name":"bash","tool_input":"go test ./internal/auth/...","tool_output":"ok  github.com/user/repo/internal/auth 0.5s","timestamp":"2026-01-06T14:32:15Z","seq":5,"eid":"nR8cY"}
+{"type":"assistant","content":"Test is passing now.","timestamp":"2026-01-06T14:32:17Z","seq":6,"eid":"J2fKd"}
 {"type":"footer","closed_at":"2026-01-06T14:32:20Z","entry_count":7}
 ```
 

@@ -4,6 +4,7 @@
 package session
 
 import (
+	"crypto/rand"
 	"time"
 )
 
@@ -108,5 +109,34 @@ func ExtractContent(entry map[string]any) string {
 		return result
 	}
 
+	return ""
+}
+
+const (
+	entryIDLength  = 5
+	entryIDCharset = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+)
+
+// GenerateEntryID creates a 5-character alphanumeric identifier for a session entry.
+// Uses crypto/rand for unbiased generation from [0-9A-Za-z].
+// 62^5 ≈ 916M possibilities — collision-safe within a single session.
+func GenerateEntryID() string {
+	b := make([]byte, entryIDLength)
+	rb := make([]byte, entryIDLength)
+	if _, err := rand.Read(rb); err != nil {
+		return "00000"
+	}
+	for i := range b {
+		b[i] = entryIDCharset[int(rb[i])%len(entryIDCharset)]
+	}
+	return string(b)
+}
+
+// ExtractEntryID gets the eid field from an entry.
+// Returns empty string if not present.
+func ExtractEntryID(entry map[string]any) string {
+	if eid, ok := entry["eid"].(string); ok {
+		return eid
+	}
 	return ""
 }

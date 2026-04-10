@@ -229,6 +229,7 @@ func (w *SessionWriter) WriteEntry(entry Writable) error {
 		"type":      entry.EntryType(),
 		"timestamp": time.Now(),
 		"seq":       w.count,
+		"eid":       GenerateEntryID(),
 		"data":      entry,
 	}
 
@@ -246,12 +247,15 @@ func (w *SessionWriter) WriteRaw(data map[string]any) error {
 		return ErrNilData
 	}
 
-	// add timestamp and sequence if not present
+	// add timestamp, sequence, and entry ID if not present
 	if _, ok := data["timestamp"]; !ok {
 		data["timestamp"] = time.Now()
 	}
 	if _, ok := data["seq"]; !ok {
 		data["seq"] = w.count
+	}
+	if _, ok := data["eid"]; !ok {
+		data["eid"] = GenerateEntryID()
 	}
 
 	if err := w.encoder.Encode(data); err != nil {

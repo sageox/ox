@@ -166,9 +166,10 @@ type DiagnoseIssue struct {
 
 // RawEntry represents a single conversation entry from any agent.
 type RawEntry struct {
-	Timestamp  string `json:"timestamp"` // RFC3339 UTC
-	Role       string `json:"role"`      // "user" | "assistant" | "system" | "tool"
+	Timestamp  string `json:"timestamp"`       // RFC3339 UTC
+	Role       string `json:"role"`             // "user" | "assistant" | "system" | "tool"
 	Content    string `json:"content"`
+	EID        string `json:"eid,omitempty"`    // 5-char alphanumeric entry identifier
 	ToolName   string `json:"tool_name,omitempty"`
 	ToolInput  string `json:"tool_input,omitempty"`
 	ToolOutput string `json:"tool_output,omitempty"`

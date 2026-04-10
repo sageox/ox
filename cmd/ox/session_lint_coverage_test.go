@@ -106,7 +106,7 @@ func TestLintRawJSONLFile_TruncatesOnManyErrors(t *testing.T) {
 
 	var content string
 	for i := 0; i < 25; i++ {
-		content += `{"type":"invalid","content":"bad","seq":1}` + "\n"
+		content += `{"type":"invalid","content":"bad","seq":1,"eid":"aB3xZ"}` + "\n"
 	}
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 
@@ -156,7 +156,7 @@ func TestLintRawJSONLFile_TimestampFieldAlternate(t *testing.T) {
 	path := filepath.Join(dir, "raw.jsonl")
 
 	// uses "timestamp" instead of "ts"
-	content := `{"type":"user","content":"hello","timestamp":"2026-01-01T00:00:01Z","seq":1}
+	content := `{"type":"user","content":"hello","timestamp":"2026-01-01T00:00:01Z","seq":1,"eid":"aB3xZ"}
 `
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
 
