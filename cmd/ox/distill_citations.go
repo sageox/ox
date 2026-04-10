@@ -63,26 +63,31 @@ func buildCitationsFromFacts(fs []facts.Fact) ([]citation, map[int]int) {
 		key   string
 		label string
 		url   string
-		ts    string // earliest timestamp across grouped facts
-		idxs  []int  // input indices that belong to this bucket
+		ts    time.Time // earliest parsed timestamp; zero if no fact had a parseable one
+		idxs  []int     // input indices that belong to this bucket
 	}
 	bucketsByKey := make(map[string]*bucket)
 	var keyOrder []string
 	for _, p := range pending {
+		// Parse the fact's timestamp into a real time.Time so multi-offset
+		// RFC3339 inputs sort chronologically. Lexical comparison of raw
+		// strings would order "2026-03-10T15:00:00-05:00" (20:00 UTC) BEFORE
+		// "2026-03-10T13:00:00-07:00" (20:00 UTC) — same instant, wrong shape.
+		factTime := parseFactTimestamp(p.fact.Timestamp)
 		b, ok := bucketsByKey[p.key]
 		if !ok {
 			b = &bucket{
 				key:   p.key,
 				label: p.label,
 				url:   p.fact.SourceURL,
-				ts:    p.fact.Timestamp,
+				ts:    factTime,
 			}
 			bucketsByKey[p.key] = b
 			keyOrder = append(keyOrder, p.key)
 		} else {
 			// keep the earliest timestamp so chronological ordering is stable
-			if p.fact.Timestamp != "" && (b.ts == "" || p.fact.Timestamp < b.ts) {
-				b.ts = p.fact.Timestamp
+			if !factTime.IsZero() && (b.ts.IsZero() || factTime.Before(b.ts)) {
+				b.ts = factTime
 			}
 			// promote a non-empty URL if we hadn't seen one
 			if b.url == "" && p.fact.SourceURL != "" {
@@ -96,10 +101,11 @@ func buildCitationsFromFacts(fs []facts.Fact) ([]citation, map[int]int) {
 	for _, k := range keyOrder {
 		buckets = append(buckets, bucketsByKey[k])
 	}
-	// stable sort: timestamp ascending, then label lex
+	// stable sort: timestamp ascending (parsed), then label lex.
+	// Zero timestamps sort first so untimestamped facts cluster at the top.
 	sort.SliceStable(buckets, func(i, j int) bool {
-		if buckets[i].ts != buckets[j].ts {
-			return buckets[i].ts < buckets[j].ts
+		if !buckets[i].ts.Equal(buckets[j].ts) {
+			return buckets[i].ts.Before(buckets[j].ts)
 		}
 		return buckets[i].label < buckets[j].label
 	})
@@ -181,17 +187,32 @@ func citationLabel(f facts.Fact) string {
 // citationDate extracts a YYYY-MM-DD slice from an ISO 8601 timestamp.
 // Returns empty if the timestamp is empty or unparseable.
 func citationDate(ts string) string {
-	if ts == "" {
-		return ""
-	}
-	if t, err := time.Parse(time.RFC3339, ts); err == nil {
-		return t.Format("2006-01-02")
-	}
-	// already a date?
-	if t, err := time.Parse("2006-01-02", ts); err == nil {
+	if t := parseFactTimestamp(ts); !t.IsZero() {
 		return t.Format("2006-01-02")
 	}
 	return ""
+}
+
+// parseFactTimestamp parses a fact's Timestamp field into a time.Time.
+// Accepts RFC3339 (with any offset) and bare YYYY-MM-DD. Returns zero time
+// for empty / unparseable input — chronological sort callers should treat
+// zero as "earliest" or "unknown".
+//
+// Lexical comparison of raw RFC3339 strings is wrong for mixed-offset inputs
+// (e.g., "...T15:00:00-05:00" and "...T13:00:00-07:00" are the same instant
+// but sort apart), so callers needing chronological order MUST go through
+// this helper, not direct string comparison.
+func parseFactTimestamp(ts string) time.Time {
+	if ts == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339, ts); err == nil {
+		return t.UTC()
+	}
+	if t, err := time.Parse("2006-01-02", ts); err == nil {
+		return t.UTC()
+	}
+	return time.Time{}
 }
 
 // trimDirnameDate strips a leading "<path>/" prefix and a "YYYY-MM-DD-HHMM-"
@@ -340,6 +361,47 @@ func renumberCitationMarkers(text string, oldToNew map[int]int) string {
 	})
 }
 
+// findSourcesHeadingEnd returns the byte offset just AFTER the first
+// `## Sources` heading line that lies OUTSIDE any fenced code block.
+// Returns -1 if no real heading is found.
+//
+// A body that quotes the distilled format in a markdown code sample (e.g.,
+// agent guidance describing the format) would otherwise produce a
+// false-positive match inside the fence and slice from the wrong region.
+func findSourcesHeadingEnd(md string) int {
+	// Scan line by line so we can track fence state cheaply. CommonMark
+	// fences are recognized only at the start of a line.
+	cursor := 0
+	insideCode := false
+	for cursor < len(md) {
+		nl := strings.IndexByte(md[cursor:], '\n')
+		var line string
+		var lineEnd int
+		if nl < 0 {
+			line = md[cursor:]
+			lineEnd = len(md)
+		} else {
+			line = md[cursor : cursor+nl]
+			lineEnd = cursor + nl + 1
+		}
+		// fence toggle: a line starting with ``` (CommonMark fence)
+		if strings.HasPrefix(line, "```") {
+			insideCode = !insideCode
+		} else if !insideCode {
+			// match the heading shape ourselves: "## Sources" possibly
+			// followed by trailing whitespace.
+			if line == "## Sources" || (strings.HasPrefix(line, "## Sources") && strings.TrimSpace(line[len("## Sources"):]) == "") {
+				if nl < 0 {
+					return len(md)
+				}
+				return cursor + nl + 1 // position right after the newline
+			}
+		}
+		cursor = lineEnd
+	}
+	return -1
+}
+
 // walkOutsideInlineCode applies fn to every part of seg that is OUTSIDE an
 // inline backtick code span, leaving spans verbatim. Used by
 // renumberCitationMarkers to avoid renumbering bracketed numerics in
@@ -486,14 +548,15 @@ func escapeMarkdownLinkText(s string) string {
 // fully; bare-text entries (no URL) are parsed with empty URL; malformed
 // lines are skipped.
 func parseSourcesSection(md string) []citation {
-	// locate the "## Sources" line — anchored to a real heading rather than
-	// a raw substring so a body that mentions "## Sources" in prose / code
-	// doesn't trick the parser into slicing the wrong region.
-	loc := sourcesHeadingRe.FindStringIndex(md)
-	if loc == nil {
+	// locate the "## Sources" line — anchored to a real heading on its own
+	// line AND outside any fenced code block. The fence check prevents a
+	// body that quotes the format string in a markdown sample from tricking
+	// the parser into slicing from inside the fence.
+	headerEnd := findSourcesHeadingEnd(md)
+	if headerEnd < 0 {
 		return nil
 	}
-	rest := md[loc[1]:]
+	rest := md[headerEnd:]
 	if next := nextH2HeadingIndex(rest); next >= 0 {
 		rest = rest[:next]
 	}
@@ -567,10 +630,6 @@ func parseSourcesSection(md string) []citation {
 }
 
 var (
-	// sourcesHeadingRe matches a real `## Sources` heading on its own line.
-	// Multi-line mode + `\s*$` allows trailing whitespace but rejects any
-	// non-heading occurrence of the literal in body text.
-	sourcesHeadingRe = regexp.MustCompile(`(?m)^## Sources\s*$`)
 	// refLinkDefRe matches `[N]: url`
 	refLinkDefRe = regexp.MustCompile(`^\[(\d+)\]:\s*(\S+)\s*$`)
 	// numberedRefEntryRe matches `1. [label][N]`. Label accepts escaped

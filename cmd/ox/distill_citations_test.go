@@ -413,6 +413,77 @@ func TestSourcesSectionRoundTrip_LabelsWithBrackets(t *testing.T) {
 	}
 }
 
+// TestBuildCitationsFromFacts_OrdersByParsedTimeNotLexical — CodeRabbit
+// round-3: timestamps with different RFC3339 offsets must sort by their
+// real chronological instant, not by their raw string form. The two facts
+// below represent the same wall-clock day but at different offsets — the
+// EAST coast 9am instant happens BEFORE the west coast 9am instant.
+//
+// Failure prevented: distilled summaries renumber multi-region facts in the
+// wrong order, breaking the chronological narrative the LLM relies on.
+func TestBuildCitationsFromFacts_OrdersByParsedTimeNotLexical(t *testing.T) {
+	// Both timestamps lexically: "2026-03-10T09:00:00-05:00" sorts AFTER
+	// "2026-03-10T09:00:00-08:00" because "-05:00" > "-08:00" string-wise.
+	// But chronologically, -05:00 9am is 14:00 UTC and -08:00 9am is 17:00 UTC,
+	// so the -05:00 fact comes FIRST.
+	fs := []facts.Fact{
+		{
+			Headline:   "west coast",
+			SourceType: facts.SourceDiscussion,
+			SourceURL:  "url-west",
+			Timestamp:  "2026-03-10T09:00:00-08:00", // 17:00 UTC — should be #2
+		},
+		{
+			Headline:   "east coast",
+			SourceType: facts.SourceDiscussion,
+			SourceURL:  "url-east",
+			Timestamp:  "2026-03-10T09:00:00-05:00", // 14:00 UTC — should be #1
+		},
+	}
+	cites, _ := buildCitationsFromFacts(fs)
+	if len(cites) != 2 {
+		t.Fatalf("expected 2 citations, got %d", len(cites))
+	}
+	if cites[0].URL != "url-east" {
+		t.Errorf("first citation should be east coast (earlier UTC instant); got URL=%q", cites[0].URL)
+	}
+	if cites[1].URL != "url-west" {
+		t.Errorf("second citation should be west coast; got URL=%q", cites[1].URL)
+	}
+}
+
+// TestParseSourcesSection_IgnoresHeadingInsideCodeFence — CodeRabbit round-3:
+// a body containing a markdown sample with `## Sources` inside a fenced code
+// block must not trick the parser. Only headings OUTSIDE fences count.
+//
+// Failure prevented: agent guidance documenting the distilled format includes
+// a code sample showing `## Sources`. parseSourcesSection slices from inside
+// the fence, misses the real Sources section, and weekly merges silently
+// drop all citations from that daily.
+func TestParseSourcesSection_IgnoresHeadingInsideCodeFence(t *testing.T) {
+	doc := "# Daily\n\n" +
+		"## What We Learned\n\n" +
+		"Here is what a Sources section looks like:\n\n" +
+		"```markdown\n" +
+		"## Sources\n\n" +
+		"1. [Fake citation in code sample][1]\n\n" +
+		"[1]: https://fake.example.com\n" +
+		"```\n\n" +
+		"## Sources\n\n" +
+		"1. [Real citation][1]\n\n" +
+		"[1]: https://real.example.com\n"
+	cites := parseSourcesSection(doc)
+	if len(cites) != 1 {
+		t.Fatalf("expected 1 real citation, got %d: %+v", len(cites), cites)
+	}
+	if cites[0].URL != "https://real.example.com" {
+		t.Errorf("parser sliced from code fence, got URL %q", cites[0].URL)
+	}
+	if cites[0].Label != "Real citation" {
+		t.Errorf("parser picked up fake label, got %q", cites[0].Label)
+	}
+}
+
 // TestSourcesSection_LabelOnlyKeyRoundTrip — CodeRabbit round-2 #6: label-only
 // citations with distinct stable Keys (e.g., source_ref) must round-trip
 // through render → parse without collapsing. The hidden ` <!-- ref:... -->`
