@@ -4,6 +4,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
@@ -46,6 +47,29 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 			Title:    "Gemini CLI not detected",
 			Detail:   "~/.gemini directory not found.",
 		})
+	}
+
+	// check hooks installation
+	if p.RepoRoot != "" {
+		settingsPath, _ := resolveSettingsPath(p.RepoRoot, "project")
+		hooksInstalled := false
+
+		if data, err := os.ReadFile(settingsPath); err == nil {
+			if strings.Contains(string(data), "ox agent hook") {
+				hooksInstalled = true
+			}
+		}
+
+		if !hooksInstalled {
+			issues = append(issues, adapterprotocol.DiagnoseIssue{
+				Slug:     "gemini:hooks-missing",
+				Severity: "warning",
+				Title:    "ox hooks not installed for Gemini CLI",
+				Detail:   "Gemini CLI hooks are not configured for this project. Session recording is disabled.",
+				Fix:      "ox-adapter-gemini install-hooks --repo-root " + p.RepoRoot + " --scope project",
+				FixSafe:  true,
+			})
+		}
 	}
 
 	return &adapterprotocol.DiagnoseResult{OK: len(issues) == 0, Issues: issues}, nil

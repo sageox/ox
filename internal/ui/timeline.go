@@ -85,8 +85,9 @@ func RenderTimelineNode(node TimelineNode) string {
 
 	for _, item := range node.Items {
 		icon := item.Style.Render(item.Icon)
+		subdot := MutedStyle.Render(TimelineCircle)
 
-		line := fmt.Sprintf("%s   %s %s", bar, icon, item.Text)
+		line := fmt.Sprintf("%s  %s %s", subdot, icon, item.Text)
 		if item.Badge != "" {
 			line += " " + MutedStyle.Render(item.Badge)
 		}

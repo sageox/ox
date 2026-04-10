@@ -39,7 +39,7 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 				Severity: "warning",
 				Title:    "ox hooks not installed for Factory Droid",
 				Detail:   "Factory Droid hooks are not configured for this project. Session recording is disabled.",
-				Fix:      "ox integrate install --droid",
+				Fix:      "ox-adapter-droid install-hooks --repo-root " + p.RepoRoot + " --scope project",
 				FixSafe:  true,
 			})
 		}

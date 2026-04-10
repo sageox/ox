@@ -170,6 +170,10 @@ func TestRepairMissingLFSObjects_PushSucceedsAfterRepair(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, content)
 
+	// verify unpushed commits were squashed into one
+	countAfter := runGitOutput(t, localDir, "rev-list", "--count", "origin/main..HEAD")
+	assert.Equal(t, "1", countAfter, "repair should squash unpushed commits into one")
+
 	// verify push succeeds after repair
 	pushCmd2 := exec.Command("git", "-C", localDir, "push")
 	pushOut2, pushErr2 := pushCmd2.CombinedOutput()
@@ -210,6 +214,104 @@ func TestRepairMissingLFSObjects_SkipsNonPointerFiles(t *testing.T) {
 	content, err := os.ReadFile(normalFile)
 	require.NoError(t, err)
 	assert.Contains(t, string(content), "Summary")
+}
+
+// TestRepairMissingLFSObjects_SquashesHistory verifies that after repair,
+// all unpushed commits are squashed into one. Without this, historical commits
+// still reference missing LFS OIDs and GitLab's pre-receive hook rejects the push.
+func TestRepairMissingLFSObjects_SquashesHistory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git LFS operations")
+	}
+	if _, err := exec.LookPath("git-lfs"); err != nil {
+		t.Skip("git-lfs not installed")
+	}
+
+	// set up bare remote + local clone so we have an upstream tracking ref
+	remoteDir := t.TempDir()
+	runGitCmd(t, remoteDir, "init", "--bare")
+
+	localDir := t.TempDir()
+	cmd := exec.Command("git", "clone", remoteDir, localDir)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "clone: %s", string(out))
+
+	runGitCmd(t, localDir, "config", "user.email", "test@test.com")
+	runGitCmd(t, localDir, "config", "user.name", "Test")
+	runGitCmd(t, localDir, "lfs", "install", "--local")
+
+	// configure LFS tracking and push baseline
+	require.NoError(t, os.WriteFile(filepath.Join(localDir, ".gitattributes"),
+		[]byte("sessions/**/events.jsonl filter=lfs diff=lfs merge=lfs -text\n"), 0o644))
+	runGitCmd(t, localDir, "add", ".gitattributes")
+	runGitCmd(t, localDir, "commit", "-m", "configure lfs")
+	runGitCmd(t, localDir, "push")
+
+	// create multiple unpushed commits, one with an orphaned LFS pointer
+	f1 := filepath.Join(localDir, "sessions", "s1", "meta.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(f1), 0o755))
+	require.NoError(t, os.WriteFile(f1, []byte(`{"session": 1}`), 0o644))
+	runGitCmd(t, localDir, "add", ".")
+	runGitCmd(t, localDir, "commit", "-m", "session 1")
+
+	orphanFile := filepath.Join(localDir, "sessions", "s2", "events.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(orphanFile), 0o755))
+	require.NoError(t, os.WriteFile(orphanFile, []byte(lfsPointer), 0o644))
+	runGitCmd(t, localDir, "add", ".")
+	runGitCmd(t, localDir, "commit", "-m", "orphaned pointer")
+
+	f3 := filepath.Join(localDir, "sessions", "s3", "meta.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(f3), 0o755))
+	require.NoError(t, os.WriteFile(f3, []byte(`{"session": 3}`), 0o644))
+	runGitCmd(t, localDir, "add", ".")
+	runGitCmd(t, localDir, "commit", "-m", "session 3")
+
+	// verify 3 unpushed commits
+	countBefore := runGitOutput(t, localDir, "rev-list", "--count", "origin/main..HEAD")
+	assert.Equal(t, "3", countBefore, "should have 3 unpushed commits before repair")
+
+	// run repair
+	repaired, err := RepairMissingLFSObjects(context.Background(), localDir)
+	require.NoError(t, err)
+	assert.Greater(t, repaired, 0)
+
+	// verify squashed to 1 unpushed commit
+	countAfter := runGitOutput(t, localDir, "rev-list", "--count", "origin/main..HEAD")
+	assert.Equal(t, "1", countAfter, "all unpushed commits should be squashed into one after repair")
+
+	// verify all files are still present
+	assert.FileExists(t, f1)
+	assert.FileExists(t, orphanFile)
+	assert.FileExists(t, f3)
+
+	// verify orphaned pointer was replaced with empty content
+	content, err := os.ReadFile(orphanFile)
+	require.NoError(t, err)
+	assert.Empty(t, content)
+
+	// verify push succeeds
+	pushCmd := exec.Command("git", "-C", localDir, "push")
+	pushOut, pushErr := pushCmd.CombinedOutput()
+	assert.NoError(t, pushErr, "push should succeed after repair+squash: %s", string(pushOut))
+}
+
+// TestSquashUnpushedCommits_NoUpstream verifies graceful failure when there's
+// no upstream tracking ref (e.g., a local-only repo).
+func TestSquashUnpushedCommits_NoUpstream(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
+	dir := t.TempDir()
+	initBareishRepo(t, dir)
+
+	// no remote/upstream set up
+	err := squashUnpushedCommits(context.Background(), dir, "test squash")
+	assert.Error(t, err, "should fail without upstream")
+	assert.Contains(t, err.Error(), "no upstream tracking ref")
+
+	// verify repo is not corrupted — HEAD should still exist
+	headOut := runGitOutput(t, dir, "rev-parse", "HEAD")
+	assert.NotEmpty(t, headOut)
 }
 
 // helpers

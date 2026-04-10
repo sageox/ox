@@ -97,8 +97,59 @@ func RepairMissingLFSObjects(ctx context.Context, repoPath string) (int, error) 
 		return repaired, fmt.Errorf("commit LFS repairs: %w", commitErr)
 	}
 
+	// squash all unpushed commits into one to eliminate historical LFS references.
+	// GitLab's pre-receive hook checks ALL commits in the push range, not just HEAD.
+	// Without squashing, old commits still reference the missing LFS OIDs.
+	if sqErr := squashUnpushedCommits(ctx, repoPath, msg); sqErr != nil {
+		slog.Warn("lfs repair: squash failed, push may still fail due to historical LFS references", "error", sqErr)
+	}
+
 	slog.Info("lfs repair complete", "repaired", repaired)
 	return repaired, nil
+}
+
+// squashUnpushedCommits collapses all unpushed local commits into a single
+// commit. This is necessary after LFS repair because the repair only fixes
+// HEAD — historical commits still reference missing LFS OIDs that would cause
+// the remote's pre-receive hook to reject the push.
+func squashUnpushedCommits(ctx context.Context, repoPath, commitMsg string) error {
+	// find upstream tracking ref
+	upCtx, upCancel := context.WithTimeout(ctx, 5*time.Second)
+	upstream, err := RunGit(upCtx, repoPath, "rev-parse", "--verify", "@{upstream}")
+	upCancel()
+	if err != nil {
+		return fmt.Errorf("no upstream tracking ref: %w", err)
+	}
+	upstream = strings.TrimSpace(upstream)
+
+	// check there are unpushed commits
+	countCtx, countCancel := context.WithTimeout(ctx, 5*time.Second)
+	countOut, err := RunGit(countCtx, repoPath, "rev-list", "--count", upstream+"..HEAD")
+	countCancel()
+	count := strings.TrimSpace(countOut)
+	if err != nil || count == "0" || count == "1" {
+		return nil // nothing to squash or already a single commit
+	}
+
+	slog.Info("lfs repair: squashing unpushed commits", "count", count, "upstream", upstream[:12])
+
+	// soft reset to upstream (preserves working tree and index)
+	resetCtx, resetCancel := context.WithTimeout(ctx, 5*time.Second)
+	_, err = RunGit(resetCtx, repoPath, "reset", "--soft", upstream)
+	resetCancel()
+	if err != nil {
+		return fmt.Errorf("reset --soft: %w", err)
+	}
+
+	// create a single squashed commit
+	squashCtx, squashCancel := context.WithTimeout(ctx, 10*time.Second)
+	_, err = RunGit(squashCtx, repoPath, "commit", "-m", commitMsg, "--no-verify")
+	squashCancel()
+	if err != nil {
+		return fmt.Errorf("squash commit: %w", err)
+	}
+
+	return nil
 }
 
 // findMissingLFSFiles returns paths of LFS-tracked files whose backing objects
