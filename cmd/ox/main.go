@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/mattn/go-isatty"
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/observability"
 
 	// registers all supported agents for detection
 	_ "github.com/sageox/agentx/setup"
@@ -97,6 +99,13 @@ func main() {
 
 	args := os.Args[1:]
 	exitCode := executeWithFrictionRecovery(args, 0)
+
+	// Record cli.exit_code on the root OTel span and flush. This runs on
+	// both success and error paths so failed commands appear in traces
+	// with the right exit code — PersistentPostRunE only fires on success
+	// in cobra, so it cannot be relied on for error reporting.
+	observability.SetExitCode(exitCode)
+	observability.Shutdown(context.Background())
 
 	// close pipe writers so ANSI-stripping goroutines see EOF and flush
 	os.Stdout.Close()

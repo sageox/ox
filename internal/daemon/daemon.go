@@ -930,6 +930,12 @@ func (d *Daemon) initComponents() time.Duration {
 			attribute.String("service.version", version.Version),
 			attribute.String("os.type", runtime.GOOS),
 			attribute.String("host.arch", runtime.GOARCH),
+			// Mirror the CLI attribute keys so dashboards can query
+			// "ox.version" and "host.os" uniformly across ox-cli and
+			// ox-daemon traces. The legacy service.version / os.type
+			// keys above are kept to avoid breaking existing queries.
+			attribute.String(observability.AttrOXVersion, version.Version),
+			attribute.String(observability.AttrHostOS, runtime.GOOS),
 		); err != nil {
 			d.logger.Warn("otel tracing init failed", "error", err)
 		}

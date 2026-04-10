@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"time"
 
 	"github.com/sageox/ox/internal/auth"
@@ -14,7 +15,9 @@ import (
 	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/signature"
 	"github.com/sageox/ox/internal/telemetry"
+	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // Context holds common dependencies for CLI commands.
@@ -107,7 +110,16 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 		// See endpoint.Get() docs for why this is safe here.
 		apiEndpoint = endpoint.Get()
 	}
-	if err := observability.Init(cliCtx.Ctx, "ox-cli", apiEndpoint); err != nil {
+	// Resource-level attrs propagate to every span produced by this
+	// process (the root command span and any HTTP child spans), so they
+	// only need to be set once at init. Span-level attrs (set below via
+	// SetCommandAttrs) are added on top to keep cmd.args close to the
+	// command they describe.
+	if err := observability.Init(cliCtx.Ctx, "ox-cli", apiEndpoint,
+		attribute.String(observability.AttrOXVersion, version.Version),
+		attribute.String(observability.AttrHostOS, runtime.GOOS),
+		attribute.String(observability.AttrHostArch, runtime.GOARCH),
+	); err != nil {
 		slog.Debug("otel init failed, continuing without tracing", "error", err)
 	}
 
@@ -117,6 +129,14 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 		cmdPath = cmd.Parent().Name() + " " + cmdPath
 	}
 	cliCtx.Ctx, _ = observability.StartCommand(cliCtx.Ctx, observability.CommandName(cmdPath))
+
+	// Attach universal attributes to the root span: ox.version, host.os,
+	// host.arch, ox.command.args (with values redacted). This is the only
+	// place we have a clean handle on os.Args before any subcommand runs.
+	// cli.exit_code is set later from main() after Execute returns, so it
+	// is present even when PersistentPostRunE never runs (cobra skips
+	// PostRunE on errors).
+	observability.SetCommandAttrs(version.Version, os.Args[1:])
 
 	return cliCtx, nil
 }
@@ -198,11 +218,16 @@ func (c *Context) TrackCommandError(cmd *cobra.Command, err error) {
 
 // Shutdown performs cleanup operations.
 // Should be called in PersistentPostRunE or deferred.
+//
+// Note: this intentionally does NOT shut down OTel tracing. PostRunE only
+// runs on success — cobra skips it when RunE returns an error. To make
+// cli.exit_code observable on both success and error paths, the OTel root
+// span is ended from main() *after* Execute returns, where the final exit
+// code is known. See cmd/ox/main.go.
 func (c *Context) Shutdown() {
 	if c.TelemetryClient != nil {
 		c.TelemetryClient.Stop() // flush and shutdown (non-blocking, short timeout)
 	}
-	observability.Shutdown(c.Ctx)
 }
 
 // LogInfo logs an info-level message

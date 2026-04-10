@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/codedb/search"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/observability"
 )
 
 // queryArgs holds parsed arguments for the query command.
@@ -211,6 +212,16 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 		resp.CodeResults = compact.Results
 		resp.Guidance = compact.Guidance
 	}
+
+	// Attach combined result count to the root span. Sums team-context
+	// hits and code hits since this command can search either or both
+	// (per --source). Counts the *raw* results before --limit so the
+	// metric reflects what the search actually returned.
+	totalResults := len(codeResults)
+	if combined.TeamContext != nil {
+		totalResults += len(combined.TeamContext.Results)
+	}
+	observability.SetResultCount(totalResults)
 
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)

@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/status"
@@ -129,6 +130,11 @@ var codeSearchCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("search: %w", err)
 		}
+
+		// Attach result count to the root span. We record the *raw* count
+		// from the index, not the count after --limit truncation, so the
+		// metric reflects index recall and not display preferences.
+		observability.SetResultCount(len(results))
 
 		fullJSON, _ := cmd.Flags().GetBool("full-json")
 		limit, _ := cmd.Flags().GetInt("limit")
