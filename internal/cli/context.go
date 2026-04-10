@@ -115,11 +115,18 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	// only need to be set once at init. Span-level attrs (set below via
 	// SetCommandAttrs) are added on top to keep cmd.args close to the
 	// command they describe.
-	if err := observability.Init(cliCtx.Ctx, "ox-cli", apiEndpoint,
+	resourceAttrs := []attribute.KeyValue{
 		attribute.String(observability.AttrOXVersion, version.Version),
 		attribute.String(observability.AttrHostOS, runtime.GOOS),
 		attribute.String(observability.AttrHostArch, runtime.GOARCH),
-	); err != nil {
+	}
+	// AGENT_ENV is set by adapter hooks (claude-code, aider, gemini, ...)
+	// to identify the AI coworker driving this invocation. Only attach it
+	// when present so human-driven invocations stay clean.
+	if env := os.Getenv("AGENT_ENV"); env != "" {
+		resourceAttrs = append(resourceAttrs, attribute.String(observability.AttrAgentEnv, env))
+	}
+	if err := observability.Init(cliCtx.Ctx, "ox-cli", apiEndpoint, resourceAttrs...); err != nil {
 		slog.Debug("otel init failed, continuing without tracing", "error", err)
 	}
 

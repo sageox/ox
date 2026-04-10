@@ -84,6 +84,10 @@ func hasAttr(span sdktrace.ReadOnlySpan, key string) bool {
 // would silently make every CLI trace miss the field, and operators
 // would only notice when querying for it after the regression shipped.
 func TestSetCommandAttrs_AttachesUniversalAttrs(t *testing.T) {
+	// Ensure AGENT_ENV is unset so this case isolates the universal-only
+	// path. The agent-env branches are covered by their own tests.
+	t.Setenv("AGENT_ENV", "")
+
 	recorder := installTestTracer(t)
 
 	SetCommandAttrs("0.99.0", []string{"code", "search", "--limit", "10"})
@@ -117,6 +121,63 @@ func TestSetCommandAttrs_AttachesUniversalAttrs(t *testing.T) {
 		if args[i] != wantArgs[i] {
 			t.Errorf("ox.command.args[%d] = %q, want %q", i, args[i], wantArgs[i])
 		}
+	}
+
+	// AGENT_ENV is unset, so ox.agent.env must be absent — not present
+	// as an empty string. This is the contract that lets backends use
+	// "ox.agent.env exists" to filter agent traffic from human traffic.
+	if hasAttr(span, AttrAgentEnv) {
+		t.Errorf("ox.agent.env present on human-driven invocation; have: %v",
+			span.Attributes())
+	}
+}
+
+// TestSetCommandAttrs_AttachesAgentEnv_WhenSet verifies that when the
+// AGENT_ENV environment variable is set (typical of an AI coworker
+// invocation via adapter hooks), the value lands on the root span as
+// ox.agent.env.
+//
+// Failure prevented: a refactor that loses the AGENT_ENV propagation
+// would silently make every agent-driven trace look like a human
+// invocation, breaking attribution dashboards.
+func TestSetCommandAttrs_AttachesAgentEnv_WhenSet(t *testing.T) {
+	t.Setenv("AGENT_ENV", "claude-code")
+
+	recorder := installTestTracer(t)
+
+	SetCommandAttrs("0.0.1", []string{"agent", "OxAAA1", "session", "start"})
+
+	mu.RLock()
+	rootSpan.End()
+	mu.RUnlock()
+
+	span := recorder.Ended()[0]
+	if v := findAttr(t, span, AttrAgentEnv).AsString(); v != "claude-code" {
+		t.Errorf("ox.agent.env = %q, want %q", v, "claude-code")
+	}
+}
+
+// TestSetCommandAttrs_OmitsAgentEnv_WhenEmpty pins the inverse: when
+// AGENT_ENV is the empty string, the attribute is OMITTED from the span,
+// not set to "". The "exists" filter is the entire point of this design.
+//
+// Failure prevented: a "set anyway, downstream can filter" simplification
+// that would pollute every human invocation with ox.agent.env="".
+func TestSetCommandAttrs_OmitsAgentEnv_WhenEmpty(t *testing.T) {
+	t.Setenv("AGENT_ENV", "")
+
+	recorder := installTestTracer(t)
+
+	SetCommandAttrs("0.0.1", []string{"version"})
+
+	mu.RLock()
+	rootSpan.End()
+	mu.RUnlock()
+
+	span := recorder.Ended()[0]
+	if hasAttr(span, AttrAgentEnv) {
+		t.Errorf("ox.agent.env present despite AGENT_ENV being empty; have: %v",
+			span.Attributes())
 	}
 }
 

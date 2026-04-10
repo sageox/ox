@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"os"
 	"runtime"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -48,10 +49,27 @@ const (
 	// that produces results (search, query, list). Set best-effort by
 	// individual commands via SetResultCount; not every command has one.
 	AttrResultCount = "result.count"
+
+	// AttrAgentEnv identifies the AI coworker that invoked ox, sourced
+	// from the AGENT_ENV environment variable that adapter hooks set
+	// (claude-code, aider, gemini, codex, ...). Only present when the
+	// command is being driven by an AI coworker — human-driven
+	// invocations leave this attribute off the span entirely so a
+	// `ox.agent.env exists` query in the trace backend cleanly isolates
+	// agent traffic from human traffic.
+	AttrAgentEnv = "ox.agent.env"
 )
 
+// agentEnv returns the value of the AGENT_ENV environment variable, or the
+// empty string if it is unset. Centralized in one place so the lookup
+// convention is consistent across resource attrs and span attrs.
+func agentEnv() string {
+	return os.Getenv("AGENT_ENV")
+}
+
 // SetCommandAttrs sets the universal attributes that should be present on
-// every CLI root span: ox.version, host.os, host.arch, and ox.command.args.
+// every CLI root span: ox.version, host.os, host.arch, ox.command.args,
+// and (when set) ox.agent.env.
 //
 // Safe to call when tracing is disabled (no-op if there is no root span).
 // Args are redacted via RedactArgs before being attached.
@@ -67,12 +85,19 @@ func SetCommandAttrs(version string, args []string) {
 		return
 	}
 	redacted := RedactArgs(args)
-	span.SetAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String(AttrOXVersion, version),
 		attribute.String(AttrHostOS, runtime.GOOS),
 		attribute.String(AttrHostArch, runtime.GOARCH),
 		attribute.StringSlice(AttrCLIArgs, redacted),
-	)
+	}
+	// Only attach ox.agent.env when the AGENT_ENV env var is set, so
+	// human-driven invocations don't pollute trace backends with empty
+	// strings. Filter "ox.agent.env exists" to find agent traffic.
+	if env := agentEnv(); env != "" {
+		attrs = append(attrs, attribute.String(AttrAgentEnv, env))
+	}
+	span.SetAttributes(attrs...)
 }
 
 // SetExitCode records the process exit code on the root command span.
