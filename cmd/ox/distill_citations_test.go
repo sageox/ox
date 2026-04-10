@@ -413,6 +413,61 @@ func TestSourcesSectionRoundTrip_LabelsWithBrackets(t *testing.T) {
 	}
 }
 
+// TestCitationDate_PreservesSourceLocalDay — CodeRabbit round-4: citationDate
+// must return the SOURCE-LOCAL calendar day, not the UTC day. For an offset
+// timestamp near midnight, formatting after parseFactTimestamp's UTC
+// normalization shifts the displayed day forward — wrong for human labels.
+//
+// Failure prevented: a discussion recorded at "2026-03-10 23:30 PST" appears
+// in the daily summary as "Discussion: 2026-03-11" instead of "2026-03-10".
+func TestCitationDate_PreservesSourceLocalDay(t *testing.T) {
+	tests := []struct {
+		name string
+		ts   string
+		want string
+	}{
+		{"PST near midnight stays on local day", "2026-03-10T23:30:00-08:00", "2026-03-10"},
+		{"EST near midnight stays on local day", "2026-03-10T23:30:00-05:00", "2026-03-10"},
+		{"UTC midday", "2026-03-10T12:00:00Z", "2026-03-10"},
+		{"date-only string", "2026-03-10", "2026-03-10"},
+		{"empty input", "", ""},
+		{"unparseable input", "not a date", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := citationDate(tt.ts)
+			if got != tt.want {
+				t.Errorf("citationDate(%q) = %q, want %q", tt.ts, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGithubShortLabel_FallbackChain — CodeRabbit round-4: documents the
+// full fallback chain so that a citation NEVER renders with an empty label,
+// and an unparseable github URL still produces something readable.
+func TestGithubShortLabel_FallbackChain(t *testing.T) {
+	tests := []struct {
+		name        string
+		url, ref, t string
+		want        string
+	}{
+		{"parseable PR url", "https://github.com/sageox/ox/pull/486", "", "", "sageox/ox#486"},
+		{"unparseable url falls back to title", "not a url", "", "Add rate limiting", "Add rate limiting"},
+		{"unparseable url falls back to ref", "not a url", "ref-only", "", "ref-only"},
+		{"unparseable url falls back to url itself when ref empty", "https://example.com/weird", "", "", "https://example.com/weird"},
+		{"all empty falls back to GitHub", "", "", "", "GitHub"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := githubShortLabel(tt.url, tt.ref, tt.t)
+			if got != tt.want {
+				t.Errorf("githubShortLabel(%q, %q, %q) = %q, want %q", tt.url, tt.ref, tt.t, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestBuildCitationsFromFacts_OrdersByParsedTimeNotLexical — CodeRabbit
 // round-3: timestamps with different RFC3339 offsets must sort by their
 // real chronological instant, not by their raw string form. The two facts

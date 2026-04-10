@@ -186,7 +186,21 @@ func citationLabel(f facts.Fact) string {
 
 // citationDate extracts a YYYY-MM-DD slice from an ISO 8601 timestamp.
 // Returns empty if the timestamp is empty or unparseable.
+//
+// IMPORTANT: returns the SOURCE-LOCAL calendar date, not the UTC date. For
+// `2026-03-10T23:30:00-08:00` we want the human-facing label to read
+// `2026-03-10` (the local day), not `2026-03-11` (the UTC day after the
+// offset shift). We rely on the YYYY-MM-DD prefix from the raw string
+// because parseFactTimestamp normalizes to UTC (correct for sorting, wrong
+// for display). Only fall back to the parsed date for non-RFC3339 inputs
+// that don't have a leading date.
 func citationDate(ts string) string {
+	if len(ts) >= 10 {
+		prefix := ts[:10]
+		if _, err := time.Parse("2006-01-02", prefix); err == nil {
+			return prefix
+		}
+	}
 	if t := parseFactTimestamp(ts); !t.IsZero() {
 		return t.Format("2006-01-02")
 	}
@@ -243,18 +257,26 @@ var (
 )
 
 // githubShortLabel converts a github URL to a short label like "owner/repo#152"
-// or "owner/repo@abc1234". Falls back to title or URL if parsing fails.
+// or "owner/repo@abc1234".
+//
+// Fallback chain (in order):
+//  1. parseGitHubURLLabel(urlStr || ref) — short form for github.com URLs
+//  2. title — the PR/issue title verbatim
+//  3. ref — the raw source_ref (usually the URL)
+//  4. urlStr — the raw URL when ref is empty but URL is unparseable
+//  5. "GitHub" — final placeholder so a citation never has an empty label
 //
 // Inputs:
 //   - urlStr: the URL to parse (preferred)
 //   - ref: source_ref (often the same as urlStr for github)
 //   - title: PR/issue title from source_title
 func githubShortLabel(urlStr, ref, title string) string {
-	if urlStr == "" {
-		urlStr = ref
+	tryURL := urlStr
+	if tryURL == "" {
+		tryURL = ref
 	}
-	if urlStr != "" {
-		if label := parseGitHubURLLabel(urlStr); label != "" {
+	if tryURL != "" {
+		if label := parseGitHubURLLabel(tryURL); label != "" {
 			return label
 		}
 	}
@@ -263,6 +285,9 @@ func githubShortLabel(urlStr, ref, title string) string {
 	}
 	if ref != "" {
 		return ref
+	}
+	if urlStr != "" {
+		return urlStr
 	}
 	return "GitHub"
 }
