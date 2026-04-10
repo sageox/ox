@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -202,11 +203,13 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 	// hooks fire before prime, so no agent ID exists yet.
 	if firstArg == "hook" {
 		// Hook phase is the second arg (e.g. "PostToolUse",
-		// "SessionStart"). Including it makes spans like
-		// "ox agent hook SessionStart" so phases are visible in the
-		// span name without bloating cardinality (the phase set is
-		// fixed by the adapter protocol).
-		if len(args) > 1 {
+		// "SessionStart"). Only include it in the span name when it
+		// matches the known event-name shape — otherwise an attacker
+		// or buggy hook could pass arbitrary tokens and inflate
+		// span-name cardinality, defeating the very grouping this
+		// rename is trying to add. Unknown phases collapse to just
+		// "ox agent hook".
+		if len(args) > 1 && isKnownHookEventName(args[1]) {
 			renameDispatcherSpan("hook", args[1])
 		} else {
 			renameDispatcherSpan("hook")
@@ -251,6 +254,52 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 	return fmt.Errorf("unknown command or invalid agent_id: %s\nRun 'ox agent --help' for usage", firstArg)
 }
 
+// validSessionSubcommands enumerates the session sub-subcommands the
+// dispatcher knows how to route in runWithAgentID. Used by
+// dispatchedCommandPath to clamp span-name cardinality: only known
+// session sub-subcommands are appended to the span name; an unknown
+// token (typo, attacker input) collapses to just "session" instead of
+// minting a new span-name bucket.
+//
+// Keep in sync with the case statement in runWithAgentID's `case "session"`.
+var validSessionSubcommands = map[string]bool{
+	"start":             true,
+	"stop":              true,
+	"abort":             true,
+	"delete":            true,
+	"log":               true,
+	"remind":            true,
+	"summarize":         true,
+	"record":            true,
+	"plan":              true,
+	"context-trace":     true,
+	"import":            true,
+	"capture-prior":     true,
+	"subagent-complete": true,
+	"subagent-list":     true,
+	"recover":           true,
+}
+
+// hookEventNamePattern matches the canonical shape of a coding-agent
+// hook event name (e.g. "SessionStart", "PostToolUse", "BeforeAgent").
+// Adapter protocols use PascalCase ASCII identifiers; anything outside
+// that shape is rejected so the dispatcher can't be tricked into
+// minting arbitrary span names from caller-controlled input.
+var hookEventNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]{0,63}$`)
+
+// isKnownHookEventName reports whether name matches the canonical
+// PascalCase identifier shape used by every adapter's hook event names.
+// Used by the dispatcher span-rename path to clamp cardinality.
+//
+// We deliberately validate by SHAPE rather than against a fixed
+// allowlist because the set of hook events is agent-specific and
+// extensible (each adapter can introduce new events). A regex covers
+// the whole space cheaply while still rejecting arbitrary user input
+// like paths, strings with spaces, or shell metacharacters.
+func isKnownHookEventName(name string) bool {
+	return hookEventNamePattern.MatchString(name)
+}
+
 // dispatchedCommandPath returns the subcommand path tokens that uniquely
 // identify a dispatcher invocation, e.g. ["session", "start"] for
 // `session start` or ["doctor"] for `doctor`. Used to label the root
@@ -260,6 +309,9 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 // is itself a router (start, stop, capture-prior, recover, ...) and
 // collapsing them all into "ox agent session" would lose the same
 // dispatcher-bucketing problem we're trying to fix at the agent level.
+// The sub-subcommand is only appended when it appears in
+// validSessionSubcommands — unknown tokens collapse to just "session"
+// so a typo or attacker input cannot mint arbitrary span names.
 //
 // Other subcommands (heartbeat, doctor, query, whisper, distill) are
 // kept as a single token — their next argument is either non-existent
@@ -270,7 +322,7 @@ func dispatchedCommandPath(subargs []string) []string {
 		return nil
 	}
 	subcmd := subargs[0]
-	if subcmd == "session" && len(subargs) > 1 {
+	if subcmd == "session" && len(subargs) > 1 && validSessionSubcommands[subargs[1]] {
 		return []string{subcmd, subargs[1]}
 	}
 	return []string{subcmd}

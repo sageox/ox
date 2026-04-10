@@ -84,13 +84,18 @@ func RedactArgs(args []string) []string {
 
 		// Bare long flag (--name) or bare short flag (-n).
 		// The next token is treated as the flag's value and redacted
-		// UNLESS it begins with "--", in which case it's another long
-		// flag we want to preserve in telemetry. This closes the
-		// "value starts with -" leak (e.g. --limit -5) while keeping
-		// chained boolean long flags queryable (e.g. --verbose --json).
+		// UNLESS it is the "--" terminator OR begins with "--" (a
+		// chained long flag we want to preserve in telemetry). This
+		// closes the "value starts with -" leak (e.g. --limit -5)
+		// while keeping chained boolean long flags queryable (e.g.
+		// --verbose --json) AND honoring "--" as a real terminator
+		// even when it appears immediately after a flag (e.g.
+		// `--verbose -- positional` — the "--" must reach the
+		// terminator branch on the next iteration, not get consumed
+		// here as a value of --verbose).
 		if strings.HasPrefix(tok, "-") && len(tok) > 1 {
 			out = append(out, tok)
-			if i+1 < len(args) && !isLongFlag(args[i+1]) {
+			if i+1 < len(args) && args[i+1] != "--" && !isLongFlag(args[i+1]) {
 				out = append(out, RedactedPlaceholder)
 				i++
 			}

@@ -173,6 +173,24 @@ func TestDispatchedCommandPath(t *testing.T) {
 			want:     []string{"session"},
 		},
 		{
+			name:     "session_unknown_subsubcommand_collapses",
+			prevents: "an unknown / typo / attacker-controlled session sub-subcommand minting an arbitrary span name (CodeRabbit PR488). Without the allowlist, `ox agent <id> session <typo>` would create a per-typo bucket.",
+			in:       []string{"session", "totally-bogus-subcommand"},
+			want:     []string{"session"},
+		},
+		{
+			name:     "session_recover_in_allowlist",
+			prevents: "regression that drops `recover` from validSessionSubcommands when adding new entries — keep this case in lock-step with runWithAgentID's case statement",
+			in:       []string{"session", "recover"},
+			want:     []string{"session", "recover"},
+		},
+		{
+			name:     "session_subagent_complete_in_allowlist",
+			prevents: "subagent-complete (hyphenated) accidentally getting filtered by an over-eager allowlist",
+			in:       []string{"session", "subagent-complete"},
+			want:     []string{"session", "subagent-complete"},
+		},
+		{
 			name:     "query_does_not_include_query_text",
 			prevents: "high-cardinality query string blowing up span-name cardinality",
 			// query has its arg as the search text — must NOT be included
@@ -208,6 +226,55 @@ func TestDispatchedCommandPath(t *testing.T) {
 					t.Errorf("dispatchedCommandPath(%q)[%d] = %q, want %q\n(prevents: %s)",
 						tt.in, i, got[i], tt.want[i], tt.prevents)
 				}
+			}
+		})
+	}
+}
+
+// TestIsKnownHookEventName covers the dispatcher's hook-phase clamping
+// rule. The dispatcher passes the second token of `ox agent hook <X>`
+// into the span name only when isKnownHookEventName(X) is true; an
+// invalid token collapses to just "ox agent hook".
+//
+// Failure prevented: a regression that loosens the regex (e.g.
+// removes the start anchor or allows whitespace) lets attacker-
+// controlled tokens flow into span names. Each test case names the
+// shape of input it defends against.
+func TestIsKnownHookEventName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		prevents string
+		in       string
+		want     bool
+	}{
+		{"PostToolUse", "happy path: real Claude Code event", "PostToolUse", true},
+		{"SessionStart", "happy path: common across adapters", "SessionStart", true},
+		{"SessionEnd", "happy path", "SessionEnd", true},
+		{"BeforeAgent", "gemini-style event name", "BeforeAgent", true},
+		{"UserPromptSubmit", "Claude Code event", "UserPromptSubmit", true},
+		{"single_letter", "minimum valid input", "A", true},
+		{"lowercase_start", "lowercase initial char allowed (defensive: future events)", "postToolUse", true},
+		{"empty_string", "empty token must not be a valid name", "", false},
+		{"with_space", "spaces let attacker-controlled strings into span names", "Post ToolUse", false},
+		{"with_slash", "path-like input must be rejected", "Post/Tool", false},
+		{"with_dash", "dashes are not used in adapter event names — reject to keep the regex tight", "Post-Tool-Use", false},
+		{"with_quote", "shell-quoted input must be rejected", "Post\"Tool", false},
+		{"with_semicolon", "shell metacharacters must be rejected", "Post;Tool", false},
+		{"with_newline", "newlines must be rejected", "Post\nTool", false},
+		{"starts_with_digit", "must start with letter to match identifier shape", "1ToolUse", false},
+		{"too_long", "64-char cap prevents pathologically long span names", strings.Repeat("A", 65), false},
+		{"max_length_ok", "exactly 64 chars (1 + 63 trailing) is allowed", strings.Repeat("A", 64), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := isKnownHookEventName(tt.in)
+			if got != tt.want {
+				t.Errorf("isKnownHookEventName(%q) = %v, want %v\n(prevents: %s)",
+					tt.in, got, tt.want, tt.prevents)
 			}
 		})
 	}

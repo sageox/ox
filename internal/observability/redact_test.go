@@ -127,6 +127,26 @@ func TestRedactArgs(t *testing.T) {
 			},
 		},
 		{
+			name:     "double_dash_immediately_after_flag",
+			prevents: "the `--` terminator being consumed as a flag value when it follows a flag (CodeRabbit PR488). Without the fix, `--verbose -- secret` would become `--verbose <REDACTED>` and silently drop `secret`.",
+			in:       []string{"--verbose", "--", "secret"},
+			want: []string{
+				"--verbose",
+				"--",
+				"<REDACTED>",
+			},
+		},
+		{
+			name:     "double_dash_immediately_after_short_flag",
+			prevents: "same `--`-as-value bug for short flags (e.g. `-v -- secret`)",
+			in:       []string{"-v", "--", "secret"},
+			want: []string{
+				"-v",
+				"--",
+				"<REDACTED>",
+			},
+		},
+		{
 			name:     "stdin_sentinel_dash",
 			prevents: "treating bare `-` (stdin) as a flag and skipping next arg",
 			in:       []string{"import", "-", "extra"},
