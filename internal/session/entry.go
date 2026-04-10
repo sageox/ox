@@ -118,7 +118,7 @@ const (
 )
 
 // GenerateEntryID creates a 5-character alphanumeric identifier for a session entry.
-// Uses crypto/rand for unbiased generation from [0-9A-Za-z].
+// Uses crypto/rand for random generation from [0-9A-Za-z].
 // 62^5 ≈ 916M possibilities — collision-safe within a single session.
 func GenerateEntryID() string {
 	b := make([]byte, entryIDLength)
