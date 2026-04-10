@@ -361,6 +361,13 @@ func checkLedgerCleanWorkdir(fix bool) checkResult {
 		return SkippedCheck("Ledger clean workdir", "ledger not a git repo", "")
 	}
 
+	// skip if a rebase is in progress — committing during a broken rebase
+	// sweeps conflict debris into a generic commit, making things worse
+	if gitutil.IsRebaseInProgress(ledgerPath) {
+		return SkippedCheck("Ledger clean workdir", "rebase in progress",
+			"Resolve or abort the rebase first: git -C <ledger> rebase --abort")
+	}
+
 	// check for any uncommitted changes
 	statusCmd := exec.Command("git", "-C", ledgerPath, "status", "--porcelain")
 	output, err := statusCmd.Output()
