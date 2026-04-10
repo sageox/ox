@@ -199,17 +199,21 @@ func TestDispatchedCommandPath(t *testing.T) {
 		},
 		{
 			name:     "whisper_alone",
-			prevents: "whisper history vs whisper non-history collapsing — but query text would be worse",
+			prevents: "bare whisper getting bucketed with whisper history despite being a different RunE path",
 			in:       []string{"whisper"},
 			want:     []string{"whisper"},
 		},
 		{
-			name:     "whisper_history_collapses_to_whisper",
-			prevents: "treating `whisper history` as something it isn't (we deliberately keep one bucket)",
-			// We don't expand whisper because the second arg can be
-			// "history" or absent — keeping it as one bucket is fine.
-			in:   []string{"whisper", "history"},
-			want: []string{"whisper"},
+			name:     "whisper_history_expanded",
+			prevents: "merging `whisper history` (its own RunE in runWithAgentID) into the bare `whisper` bucket and losing the observability split (CodeRabbit PR488)",
+			in:       []string{"whisper", "history"},
+			want:     []string{"whisper", "history"},
+		},
+		{
+			name:     "whisper_unknown_collapses",
+			prevents: "an unknown whisper sub-subcommand minting a per-typo span-name bucket — only `history` is a real branch",
+			in:       []string{"whisper", "totally-bogus"},
+			want:     []string{"whisper"},
 		},
 	}
 
@@ -249,23 +253,33 @@ func TestIsKnownHookEventName(t *testing.T) {
 		in       string
 		want     bool
 	}{
-		{"PostToolUse", "happy path: real Claude Code event", "PostToolUse", true},
-		{"SessionStart", "happy path: common across adapters", "SessionStart", true},
-		{"SessionEnd", "happy path", "SessionEnd", true},
+		// happy paths — all real adapter event names follow strict PascalCase
+		{"PostToolUse", "Claude Code post-tool event", "PostToolUse", true},
+		{"PreToolUse", "Claude Code pre-tool event", "PreToolUse", true},
+		{"SessionStart", "common across adapters", "SessionStart", true},
+		{"SessionEnd", "common lifecycle event", "SessionEnd", true},
 		{"BeforeAgent", "gemini-style event name", "BeforeAgent", true},
-		{"UserPromptSubmit", "Claude Code event", "UserPromptSubmit", true},
-		{"single_letter", "minimum valid input", "A", true},
-		{"lowercase_start", "lowercase initial char allowed (defensive: future events)", "postToolUse", true},
+		{"UserPromptSubmit", "Claude Code prompt event", "UserPromptSubmit", true},
+		{"AfterTool", "compact event name", "AfterTool", true},
+		{"single_uppercase", "minimum valid PascalCase input", "A", true},
+		{"single_segment", "one PascalCase segment", "Session", true},
+		{"with_digits_in_segment", "digits allowed inside a segment (e.g. event versions)", "Tool2Use", true},
+
+		// rejection paths — each prevents a different cardinality leak
 		{"empty_string", "empty token must not be a valid name", "", false},
+		{"lowercase_start", "lowercase-first input lets arbitrary tokens through (CodeRabbit PR488 — strict PascalCase rejects this)", "postToolUse", false},
+		{"all_lowercase", "single lowercase word reaches the regex but not PascalCase shape", "foo", false},
+		{"lowercase_with_digits", "alphanumeric lowercase still rejected", "abc123", false},
 		{"with_space", "spaces let attacker-controlled strings into span names", "Post ToolUse", false},
 		{"with_slash", "path-like input must be rejected", "Post/Tool", false},
-		{"with_dash", "dashes are not used in adapter event names — reject to keep the regex tight", "Post-Tool-Use", false},
+		{"with_dash", "dashes are not PascalCase", "Post-Tool-Use", false},
+		{"with_underscore", "snake_case is not PascalCase", "Post_Tool_Use", false},
 		{"with_quote", "shell-quoted input must be rejected", "Post\"Tool", false},
 		{"with_semicolon", "shell metacharacters must be rejected", "Post;Tool", false},
 		{"with_newline", "newlines must be rejected", "Post\nTool", false},
-		{"starts_with_digit", "must start with letter to match identifier shape", "1ToolUse", false},
-		{"too_long", "64-char cap prevents pathologically long span names", strings.Repeat("A", 65), false},
-		{"max_length_ok", "exactly 64 chars (1 + 63 trailing) is allowed", strings.Repeat("A", 64), true},
+		{"starts_with_digit", "must start with uppercase letter", "1ToolUse", false},
+		{"too_long", "length cap prevents pathologically long span names", strings.Repeat("A", 65), false},
+		{"too_many_segments", "16-segment cap on the regex prevents 64-uppercase-letter pathological input", strings.Repeat("A", 17), false},
 	}
 
 	for _, tt := range tests {

@@ -280,12 +280,23 @@ var validSessionSubcommands = map[string]bool{
 	"recover":           true,
 }
 
-// hookEventNamePattern matches the canonical shape of a coding-agent
-// hook event name (e.g. "SessionStart", "PostToolUse", "BeforeAgent").
-// Adapter protocols use PascalCase ASCII identifiers; anything outside
-// that shape is rejected so the dispatcher can't be tricked into
-// minting arbitrary span names from caller-controlled input.
-var hookEventNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]{0,63}$`)
+// hookEventNamePattern matches the canonical PascalCase shape of a
+// coding-agent hook event name (e.g. "SessionStart", "PostToolUse",
+// "BeforeAgent"). Adapter protocols use PascalCase ASCII identifiers
+// composed of 1..16 segments where each segment is one uppercase
+// letter followed by zero or more lowercase letters or digits.
+//
+// Strict PascalCase (uppercase initial, no lowercase-first names) is
+// what every real adapter uses. Allowing lowercase-first input like
+// `foo` or `abc123` would let arbitrary lowercase tokens through,
+// which is exactly the cardinality leak this guard is meant to close.
+var hookEventNamePattern = regexp.MustCompile(`^(?:[A-Z][a-z0-9]*){1,16}$`)
+
+// hookEventNameMaxLen caps total event-name length, layered on top of
+// the regex's segment count. The regex limits SEGMENTS to 16, but each
+// segment can be arbitrarily long, so a 10000-character single segment
+// would still match without a separate length check.
+const hookEventNameMaxLen = 64
 
 // isKnownHookEventName reports whether name matches the canonical
 // PascalCase identifier shape used by every adapter's hook event names.
@@ -297,6 +308,9 @@ var hookEventNamePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9]{0,63}$`)
 // the whole space cheaply while still rejecting arbitrary user input
 // like paths, strings with spaces, or shell metacharacters.
 func isKnownHookEventName(name string) bool {
+	if len(name) == 0 || len(name) > hookEventNameMaxLen {
+		return false
+	}
 	return hookEventNamePattern.MatchString(name)
 }
 
@@ -313,16 +327,24 @@ func isKnownHookEventName(name string) bool {
 // validSessionSubcommands — unknown tokens collapse to just "session"
 // so a typo or attacker input cannot mint arbitrary span names.
 //
-// Other subcommands (heartbeat, doctor, query, whisper, distill) are
-// kept as a single token — their next argument is either non-existent
-// or high-cardinality user input (e.g. a query string) that would
-// defeat span grouping if included.
+// "whisper" is expanded for the special "whisper history" form because
+// runWithAgentID treats it as a distinct operation (separate RunE path).
+// Collapsing both into one bucket would merge two fixed, low-cardinality
+// operations and lose the observability split this PR is adding.
+//
+// Other subcommands (heartbeat, doctor, query, distill) are kept as a
+// single token — their next argument is either non-existent or
+// high-cardinality user input (e.g. a query string) that would defeat
+// span grouping if included.
 func dispatchedCommandPath(subargs []string) []string {
 	if len(subargs) == 0 {
 		return nil
 	}
 	subcmd := subargs[0]
 	if subcmd == "session" && len(subargs) > 1 && validSessionSubcommands[subargs[1]] {
+		return []string{subcmd, subargs[1]}
+	}
+	if subcmd == "whisper" && len(subargs) > 1 && subargs[1] == "history" {
 		return []string{subcmd, subargs[1]}
 	}
 	return []string{subcmd}
