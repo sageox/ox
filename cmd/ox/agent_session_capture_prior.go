@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/agentinstance"
@@ -16,10 +18,12 @@ import (
 
 // runAgentSessionCapturePrior captures prior history from the active coding agent.
 //
-// Usage: ox agent <id> session capture-prior [--title "..."] [--file <path>] [--session-id <id>]
+// Usage: ox agent <id> session capture-prior [--title "..."] [--file <path>] [--session-id <id>] [--adapter <name>]
 //
 // The command detects the active adapter and delegates to it. Each adapter
 // (Claude Code, Codex, etc.) implements its own session discovery and parsing.
+// An explicit --adapter <name> overrides auto-detection — useful when multiple
+// adapters detect as present (e.g. both aider and claude-code installed).
 //
 // If no adapter with capture-prior capability is detected, falls back to
 // reading validated JSONL from stdin or --file.
@@ -27,6 +31,7 @@ func runAgentSessionCapturePrior(inst *agentinstance.Instance, args []string) er
 	title := parseTitle(args)
 	filePath := parseCapturePriorFile(args)
 	sessionID := parseSessionID(args)
+	adapterName := parseAdapter(args)
 
 	projectRoot := mustFindProjectRoot()
 
@@ -41,7 +46,7 @@ func runAgentSessionCapturePrior(inst *agentinstance.Instance, args []string) er
 
 	// try adapter-based capture first (unless explicit --file was given)
 	if filePath == "" && !isStdinPiped() {
-		result, err = capturePriorViaAdapter(inst, projectRoot, opts, sessionID)
+		result, err = capturePriorViaAdapter(inst, projectRoot, opts, sessionID, adapterName)
 		if err != nil {
 			return fmt.Errorf("capture-prior failed: %w", err)
 		}
@@ -68,7 +73,9 @@ func runAgentSessionCapturePrior(inst *agentinstance.Instance, args []string) er
 }
 
 // capturePriorViaAdapter detects the active adapter and delegates capture-prior to it.
-func capturePriorViaAdapter(inst *agentinstance.Instance, projectRoot string, opts session.CaptureOptions, sessionID string) (*session.CaptureResult, error) {
+// When adapterName is non-empty, that adapter is used explicitly instead of
+// auto-detection, overriding the usual Detect() race.
+func capturePriorViaAdapter(inst *agentinstance.Instance, projectRoot string, opts session.CaptureOptions, sessionID, adapterName string) (*session.CaptureResult, error) {
 	// resolve native session ID from agent environment if not provided
 	if sessionID == "" {
 		if agent := agentx.CurrentAgent(); agent != nil && agent.SupportsSession() {
@@ -76,12 +83,7 @@ func capturePriorViaAdapter(inst *agentinstance.Instance, projectRoot string, op
 		}
 	}
 
-	// discover adapters and find one with capture-prior capability
-	if err := adapters.RegisterExternalAdapters(); err != nil {
-		return nil, fmt.Errorf("adapter discovery: %w", err)
-	}
-
-	ea, err := findCapturePriorAdapter()
+	ea, err := findCapturePriorAdapter(adapterName)
 	if err != nil {
 		return nil, err
 	}
@@ -112,22 +114,83 @@ func capturePriorViaAdapter(inst *agentinstance.Instance, projectRoot string, op
 }
 
 // findCapturePriorAdapter discovers an adapter that supports capture-prior.
-// DetectAdapter already handles full discovery (built-in + external binaries).
-func findCapturePriorAdapter() (*adapters.ExternalAdapter, error) {
-	adapter, err := adapters.DetectAdapter()
-	if err != nil {
-		return nil, fmt.Errorf("no adapter detected: %w", err)
+//
+// When adapterName is non-empty, that adapter is looked up by name (canonical
+// or alias) and its capability is verified. An explicit name is authoritative
+// and does not run Detect() — the caller has declared intent.
+//
+// When adapterName is empty, selection is deterministic:
+//   1. Ensure external adapters are discovered (one-time registry scan).
+//   2. Filter the registry to adapters that *have* the capture-prior
+//      capability (cheap: uses cached Info response).
+//   3. Run Detect() only on capable adapters, in alphabetical order, and
+//      return the first that detects.
+//
+// This avoids the previous bug where DetectAdapter() iterated the registry in
+// non-deterministic map order and returned any adapter that detected, even
+// when it lacked the capability (e.g. aider winning the race over claude-code
+// when both had Detect()=true). It also avoids shelling out to every
+// adapter's detect binary — only adapters that could possibly serve the
+// request are asked.
+func findCapturePriorAdapter(adapterName string) (*adapters.ExternalAdapter, error) {
+	if adapterName != "" {
+		return findCapturePriorAdapterByName(adapterName)
 	}
 
+	if err := adapters.RegisterExternalAdapters(); err != nil {
+		return nil, fmt.Errorf("adapter discovery: %w", err)
+	}
+
+	// filter by capability first (cheap: uses cached Info response)
+	names := adapters.ListAdapters()
+	sort.Strings(names)
+
+	var capable []*adapters.ExternalAdapter
+	for _, name := range names {
+		a, err := adapters.GetAdapter(name)
+		if err != nil {
+			continue
+		}
+		ea, ok := a.(*adapters.ExternalAdapter)
+		if !ok {
+			continue
+		}
+		if ea.HasCapability(adapterprotocol.CapCapturePrior) {
+			capable = append(capable, ea)
+		}
+	}
+
+	if len(capable) == 0 {
+		return nil, fmt.Errorf("no installed adapter supports capture-prior")
+	}
+
+	// detect only on capable adapters (expensive: shells out to detect subcommand)
+	var tried []string
+	for _, ea := range capable {
+		if ea.Detect() {
+			return ea, nil
+		}
+		tried = append(tried, ea.Name())
+	}
+
+	return nil, fmt.Errorf("no capture-prior adapter detected in current environment (tried: %s)",
+		strings.Join(tried, ", "))
+}
+
+// findCapturePriorAdapterByName looks up an adapter by canonical name or alias
+// and verifies it supports capture-prior.
+func findCapturePriorAdapterByName(name string) (*adapters.ExternalAdapter, error) {
+	adapter, err := adapters.GetAdapter(name)
+	if err != nil {
+		return nil, fmt.Errorf("adapter %q not found: %w", name, err)
+	}
 	ea, ok := adapter.(*adapters.ExternalAdapter)
 	if !ok {
-		return nil, fmt.Errorf("detected adapter does not support capture-prior")
+		return nil, fmt.Errorf("adapter %q does not support capture-prior", name)
 	}
-
 	if !ea.HasCapability(adapterprotocol.CapCapturePrior) {
-		return nil, fmt.Errorf("adapter %q does not support capture-prior", ea.Name())
+		return nil, fmt.Errorf("adapter %q does not support capture-prior", name)
 	}
-
 	return ea, nil
 }
 
@@ -210,6 +273,21 @@ func parseCapturePriorFile(args []string) string {
 		}
 		if len(arg) > 7 && arg[:7] == "--file=" {
 			return arg[7:]
+		}
+	}
+	return ""
+}
+
+// parseAdapter extracts --adapter value from args. Used to explicitly select
+// an adapter by canonical name (e.g. "claude-code") or alias (e.g. "claude"),
+// overriding the default capability-filtered detection.
+func parseAdapter(args []string) string {
+	for i, arg := range args {
+		if arg == "--adapter" && i+1 < len(args) {
+			return args[i+1]
+		}
+		if len(arg) > 10 && arg[:10] == "--adapter=" {
+			return arg[10:]
 		}
 	}
 	return ""

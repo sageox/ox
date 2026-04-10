@@ -138,6 +138,28 @@ func init() {
 		"skip confirmation for destructive operations")
 	_ = agentCmd.PersistentFlags().MarkHidden("force")
 
+	// Flags consumed by agent session subcommands via manual arg parsing
+	// (parseTitle, parseCapturePriorFile, parseSessionID, parseAdapter).
+	// They are registered here so cobra doesn't reject them as unknown
+	// flags on agentCmd — the dispatcher reinjects their values into
+	// sessionArgs before handing off to the subcommand handler, preserving
+	// the manual-parser call pattern used across session commands.
+	//
+	// Marked hidden: they only apply to specific subcommands and should
+	// not clutter agent-level help.
+	agentCmd.PersistentFlags().String("title", "",
+		"session title (session start, session import, session capture-prior)")
+	_ = agentCmd.PersistentFlags().MarkHidden("title")
+	agentCmd.PersistentFlags().String("file", "",
+		"input file path (session import, session capture-prior, session summarize)")
+	_ = agentCmd.PersistentFlags().MarkHidden("file")
+	agentCmd.PersistentFlags().String("session-id", "",
+		"native coding agent session id (session capture-prior)")
+	_ = agentCmd.PersistentFlags().MarkHidden("session-id")
+	agentCmd.PersistentFlags().String("adapter", "",
+		"explicit adapter name, overrides auto-detection (session capture-prior)")
+	_ = agentCmd.PersistentFlags().MarkHidden("adapter")
+
 	// initialize prime command flags
 	initAgentPrimeCmd()
 
@@ -209,6 +231,35 @@ func isAgentSubcommand(name string) bool {
 	return agentSubcommands[name]
 }
 
+// reinjectSessionFlags appends cobra-parsed values for --title, --file,
+// --session-id, and --adapter back into the session subcommand's args slice.
+//
+// Why: session subcommands (capture-prior, start, import, summarize) consume
+// these flags via manual parseTitle/parseCapturePriorFile/parseSessionID/
+// parseAdapter helpers that scan a []string. But the flags must also be
+// registered on agentCmd itself, otherwise cobra rejects them as unknown
+// during its flag-parse pass before the dispatcher ever runs. Cobra strips
+// registered flags from args when parsing, so by the time the dispatcher
+// sees args, the flags are gone — the manual parsers would see nothing.
+//
+// This helper bridges the gap: it reads the cobra-parsed values and appends
+// them back as positional tokens so the existing parsers work unchanged.
+// Flags left empty are not injected.
+func reinjectSessionFlags(cmd *cobra.Command, sessionArgs []string) []string {
+	if cmd == nil {
+		return sessionArgs
+	}
+	flags := cmd.Flags()
+	for _, name := range []string{"title", "file", "session-id", "adapter"} {
+		val, err := flags.GetString(name)
+		if err != nil || val == "" {
+			continue
+		}
+		sessionArgs = append(sessionArgs, "--"+name, val)
+	}
+	return sessionArgs
+}
+
 // runWithAgentID executes a command using the specified agent instance
 func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	if len(args) == 0 {
@@ -261,6 +312,13 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		}
 		sessionCmd := subargs[0]
 		sessionArgs := subargs[1:]
+		// Reinject persistent string flags consumed by subcommand manual
+		// parsers. Cobra has already stripped these from args when it
+		// parsed agentCmd's flags; the parseTitle/parseCapturePriorFile/
+		// parseSessionID/parseAdapter helpers expect them as positional
+		// tokens. This preserves the manual-parser call pattern without a
+		// wider refactor of every session handler signature.
+		sessionArgs = reinjectSessionFlags(cmd, sessionArgs)
 		switch sessionCmd {
 		case "start":
 			return runAgentSessionStart(inst, sessionArgs)

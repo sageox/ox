@@ -4,12 +4,119 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/spf13/cobra"
 )
+
+// TestReinjectSessionFlags verifies the dispatcher reinjects cobra-parsed
+// values for --title, --file, --session-id, and --adapter back into
+// sessionArgs as positional tokens.
+//
+// Failure prevented: cobra strips flags it has registered when parsing
+// agentCmd. Without reinjection, the manual parsers (parseTitle,
+// parseCapturePriorFile, parseSessionID, parseAdapter) used by every
+// session subcommand handler would see empty args and silently behave as
+// if no flag was passed. The original bug was that --session-id, --title,
+// and --file were rejected entirely with "unknown flag"; the FParseErrWhitelist
+// fix appears to make them work but actually drops them — this test pins the
+// reinjection behavior so a future "simplification" can't quietly regress.
+func TestReinjectSessionFlags(t *testing.T) {
+	t.Parallel()
+
+	// Use local flags (not persistent) so Set() and GetString() target the
+	// same flagset without going through cobra's Execute()/merge step.
+	// In production, agentCmd registers these as persistent flags and
+	// cobra merges them into cmd.Flags() during Execute() — so the
+	// helper sees the values via Flags().GetString(). The behavior under
+	// test is the lookup-and-append, which is identical regardless of
+	// where the flag was originally declared.
+	makeCmd := func() *cobra.Command {
+		cmd := &cobra.Command{Use: "agent"}
+		cmd.Flags().String("title", "", "")
+		cmd.Flags().String("file", "", "")
+		cmd.Flags().String("session-id", "", "")
+		cmd.Flags().String("adapter", "", "")
+		return cmd
+	}
+
+	tests := []struct {
+		name     string
+		setFlags map[string]string
+		input    []string
+		want     []string
+	}{
+		{
+			name:     "no flags set leaves args unchanged",
+			setFlags: nil,
+			input:    []string{"existing", "positional"},
+			want:     []string{"existing", "positional"},
+		},
+		{
+			name:     "session-id only",
+			setFlags: map[string]string{"session-id": "abc-123"},
+			input:    []string{},
+			want:     []string{"--session-id", "abc-123"},
+		},
+		{
+			name: "all four flags reinjected in stable order",
+			setFlags: map[string]string{
+				"title":      "My Plan",
+				"file":       "/tmp/data.jsonl",
+				"session-id": "sess-xyz",
+				"adapter":    "claude",
+			},
+			input: []string{},
+			want: []string{
+				"--title", "My Plan",
+				"--file", "/tmp/data.jsonl",
+				"--session-id", "sess-xyz",
+				"--adapter", "claude",
+			},
+		},
+		{
+			name:     "appends after existing positional args",
+			setFlags: map[string]string{"adapter": "codex"},
+			input:    []string{"capture-prior-positional"},
+			want:     []string{"capture-prior-positional", "--adapter", "codex"},
+		},
+		{
+			name:     "empty string flag not injected",
+			setFlags: map[string]string{"title": "", "adapter": "claude"},
+			input:    []string{},
+			want:     []string{"--adapter", "claude"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := makeCmd()
+			for k, v := range tt.setFlags {
+				if err := cmd.Flags().Set(k, v); err != nil {
+					t.Fatalf("set %s: %v", k, err)
+				}
+			}
+			got := reinjectSessionFlags(cmd, tt.input)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("reinjectSessionFlags() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("nil cmd is a no-op", func(t *testing.T) {
+		t.Parallel()
+		input := []string{"a", "b"}
+		got := reinjectSessionFlags(nil, input)
+		if !reflect.DeepEqual(got, input) {
+			t.Errorf("reinjectSessionFlags(nil) = %v, want %v", got, input)
+		}
+	})
+}
 
 func TestGenerateAgentID(t *testing.T) {
 	t.Run("generates valid agent ID with no existing IDs", func(t *testing.T) {
