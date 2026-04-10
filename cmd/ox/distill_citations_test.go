@@ -766,6 +766,79 @@ func TestMergeCitations_DoesNotDedupeDifferentURLsWithSameLabel(t *testing.T) {
 	}
 }
 
+// TestMergeCitations_DoesNotUpgradeStableKeyedByLabelAlone — CodeRabbit
+// round-5: after #476 added stable keys to label-only citations (the hidden
+// `<!-- ref:... -->` comment carries source_ref), promoting any
+// label-matching entry by label alone is wrong. Two distinct discussions
+// with the same title (different stable keys) followed by a URL-backed
+// citation with the same title MUST stay as three distinct entries — we
+// have no information linking the URL to either of the two stable keys.
+//
+// Failure prevented: a third-party URL silently attaches to whichever
+// label-only source happened to be processed last, corrupting that
+// citation's link target during weekly/monthly merges.
+func TestMergeCitations_DoesNotUpgradeStableKeyedByLabelAlone(t *testing.T) {
+	inputs := []mergeInput{
+		{
+			Text: "x [1]",
+			Cites: []citation{
+				{Num: 1, Label: "Foo", Key: "discussions/2026-03-10-1000-alice"}, // stable, no URL
+			},
+		},
+		{
+			Text: "y [1]",
+			Cites: []citation{
+				{Num: 1, Label: "Foo", Key: "discussions/2026-03-10-1500-bob"}, // stable, no URL
+			},
+		},
+		{
+			Text: "z [1]",
+			Cites: []citation{
+				{Num: 1, Label: "Foo", URL: "https://example.com/foo", Key: "https://example.com/foo"},
+			},
+		},
+	}
+	_, merged := mergeCitations(inputs)
+	if len(merged) != 3 {
+		t.Fatalf("expected 3 distinct merged citations (two stable label-only + one URL), got %d: %+v", len(merged), merged)
+	}
+
+	// Specifically: Alice's entry should NOT have been upgraded to the URL
+	// (we can't know whether it's the right Foo).
+	for _, c := range merged {
+		if c.Key == "discussions/2026-03-10-1000-alice" && c.URL != "" {
+			t.Errorf("Alice's stable-keyed entry was wrongly upgraded with URL %q", c.URL)
+		}
+		if c.Key == "discussions/2026-03-10-1500-bob" && c.URL != "" {
+			t.Errorf("Bob's stable-keyed entry was wrongly upgraded with URL %q", c.URL)
+		}
+	}
+}
+
+// TestMergeCitations_SyntheticLabelOnlyOnceUpgraded — defensive: even with
+// the synthetic-label restriction, once a synthetic entry has been upgraded
+// it must NOT be upgraded a second time by a different URL with the same
+// label. The second URL must become its own separate entry.
+func TestMergeCitations_SyntheticLabelOnlyOnceUpgraded(t *testing.T) {
+	inputs := []mergeInput{
+		{Text: "a [1]", Cites: []citation{{Num: 1, Label: "Foo", Key: "label:Foo"}}}, // synthetic, no URL
+		{Text: "b [1]", Cites: []citation{{Num: 1, Label: "Foo", URL: "https://example.com/first", Key: "https://example.com/first"}}},
+		{Text: "c [1]", Cites: []citation{{Num: 1, Label: "Foo", URL: "https://example.com/second", Key: "https://example.com/second"}}},
+	}
+	_, merged := mergeCitations(inputs)
+	if len(merged) != 2 {
+		t.Fatalf("expected 2 merged citations (synthetic upgraded to first URL, second URL distinct), got %d: %+v", len(merged), merged)
+	}
+	// merged[0] = upgraded synthetic → first URL
+	if merged[0].URL != "https://example.com/first" {
+		t.Errorf("first merged URL = %q, want %q", merged[0].URL, "https://example.com/first")
+	}
+	// merged[1] = second URL, separate entry
+	if merged[1].URL != "https://example.com/second" {
+		t.Errorf("second merged URL = %q, want %q", merged[1].URL, "https://example.com/second")
+	}
+}
+
 // TestMergeCitations_DoesNotMergeReverseDirection pins the deliberate
 // asymmetry: when a URL-keyed entry comes FIRST and a label-only entry with
 // the same label comes SECOND, they stay distinct. We can't safely assume

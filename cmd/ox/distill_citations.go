@@ -706,22 +706,27 @@ type mergeInput struct {
 // Dedup is by citation Key (URL if present, else label-synthetic key). Order
 // in the merged list is preserved by first appearance.
 //
-// **Forward-upgrade dedup**: a citation can appear in one input as label-only
-// (`Key: "label:Foo"`, no URL) and in a later input as URL-keyed
-// (`Key: "https://..."`) — this happens during a mid-release upgrade where
-// older daily files were generated before #476 added source URLs and newer
-// daily files have them. When a LATER input has the same label AND a URL, we
-// promote the earlier label-only entry to use that URL and dedupe under the
-// URL key. The old label key is intentionally retained in keyToGlobalNum so
-// the second pass can still renumber the earlier input's bare markers.
+// **Forward-upgrade dedup (synthetic labels only)**: a citation can appear
+// in one input as a SYNTHETIC label-only entry (`Key: "label:Foo"`, no URL,
+// no stable identifier — the shape produced by pre-#476 daily files) and in
+// a later input as URL-keyed (`Key: "https://..."`). When that happens, we
+// promote the synthetic entry to use the URL and dedupe under the URL key.
+// The old synthetic label key is intentionally retained in keyToGlobalNum
+// so the second pass can still renumber the earlier input's bare markers.
 //
-// We deliberately do NOT do the reverse: a label-only citation that appears
-// AFTER a URL-keyed one with the same label is kept as a separate entry,
-// because label collisions are real (two PRs titled "Add rate limiting" in
-// different repos). The forward direction is safe because pre-#476 daily
-// files have no URLs at all — every label-only entry necessarily predates
-// any URL-keyed entry for the same source. Reversed-direction "duplicates"
-// can only arise from genuinely different sources sharing a label.
+// We do NOT promote stable-keyed label-only entries (e.g., `Key:
+// "discussions/2026-03-10-1000-alice"`) by label match. Two distinct
+// discussions can share a title — promoting by label alone would attach a
+// URL to the wrong source. Once a citation has a stable key from its
+// origin, it stays distinct unless the keys themselves match.
+//
+// We also do NOT do the reverse direction: a label-only citation that
+// appears AFTER a URL-keyed one with the same label is kept as a separate
+// entry, because label collisions are real (two PRs titled "Add rate
+// limiting" in different repos). The forward direction for synthetic labels
+// is only safe because pre-#476 daily files have no URLs OR stable keys at
+// all — every synthetic-label entry necessarily predates any URL-keyed
+// entry for the same source.
 //
 // This is the core of the weekly/monthly citation propagation logic. The LLM
 // at each layer never has to do arithmetic — it just preserves whatever
@@ -730,9 +735,17 @@ func mergeCitations(inputs []mergeInput) ([]string, []citation) {
 	// build the merged citation list, first-appearance ordered, deduped by key
 	var merged []citation
 	keyToGlobalNum := make(map[string]int)
-	// labelToGlobalNum lets us promote a label-only first-seen entry to use a
-	// URL key when a later input provides the URL for the same label.
-	labelToGlobalNum := make(map[string]int)
+	// syntheticLabelToGlobalNum tracks ONLY entries whose Key is a synthetic
+	// "label:..." form (legacy daily files written before #476 added stable
+	// keys to label-only citations). These are the only entries safe to
+	// upgrade by label match — entries with stable keys are NOT touched
+	// because the label alone can't disambiguate between them.
+	//
+	// Example of why this matters: two distinct discussions with the same
+	// title (key=discussions/A and key=discussions/B), then a later URL-backed
+	// citation with the same title. We have NO information linking the URL
+	// to A vs B, so we must NOT promote either of them by label alone.
+	syntheticLabelToGlobalNum := make(map[string]int)
 	for _, in := range inputs {
 		for _, c := range in.Cites {
 			if c.Key == "" {
@@ -742,8 +755,8 @@ func mergeCitations(inputs []mergeInput) ([]string, []citation) {
 				continue
 			}
 			// Upgrade path: this is a URL-keyed citation, but we previously
-			// saw the same label as label-only. Promote the existing entry
-			// to the URL and dedupe under both keys.
+			// saw the same label as a SYNTHETIC label-only entry (no stable
+			// key). Promote that synthetic entry to use the URL.
 			//
 			// IMPORTANT: keep the OLD label key in keyToGlobalNum pointing at
 			// the same globalNum so that the second pass (renumbering markers
@@ -751,21 +764,30 @@ func mergeCitations(inputs []mergeInput) ([]string, []citation) {
 			// this, an earlier input's `[K]` marker for the label-only Foo
 			// would silently become a stale number pointing at the wrong cite.
 			if c.URL != "" {
-				if existingNum, ok := labelToGlobalNum[c.Label]; ok {
+				if existingNum, ok := syntheticLabelToGlobalNum[c.Label]; ok {
 					existing := &merged[existingNum-1]
-					if existing.URL == "" {
-						// promote the existing label-only entry to use the URL
+					if existing.URL == "" && strings.HasPrefix(existing.Key, "label:") {
+						// promote the synthetic label-only entry to use the URL
 						existing.URL = c.URL
 						existing.Key = c.Key
 						keyToGlobalNum[c.Key] = existingNum
-						// (old label key intentionally retained)
+						// (old synthetic label key intentionally retained)
+						// Drop the label→num index now that the synthetic
+						// slot has been consumed; future URL entries with
+						// the same label must NOT promote it again.
+						delete(syntheticLabelToGlobalNum, c.Label)
 						continue
 					}
 				}
 			}
 			globalNum := len(merged) + 1
 			keyToGlobalNum[c.Key] = globalNum
-			labelToGlobalNum[c.Label] = globalNum
+			// Only synthetic label-only entries are eligible for future
+			// label-based promotion. Stable-keyed and URL-keyed entries are
+			// NOT recorded here.
+			if strings.HasPrefix(c.Key, "label:") && c.URL == "" {
+				syntheticLabelToGlobalNum[c.Label] = globalNum
+			}
 			merged = append(merged, citation{
 				Num:   globalNum,
 				Label: c.Label,
