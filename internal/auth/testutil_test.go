@@ -15,7 +15,6 @@ import (
 // This allows permission tests to verify directory creation with 0700.
 func NewTestClient(t *testing.T) *AuthClient {
 	t.Helper()
-	resetKnownEndpoints()
 	return NewAuthClientWithDir(filepath.Join(t.TempDir(), "sageox"))
 }
 

@@ -469,32 +469,33 @@ func TestSaveDetection_NormalizedEndpointMatch(t *testing.T) {
 
 // --- C. Credential disappearance detection (load-side, in-process) ---
 // These tests verify that checkKnownEndpoints detects when endpoints
-// vanish between loads within the same process.
+// vanish between loads within the same AuthClient instance.
 
 // TestLoadDetection_ErrorOnDisappearance verifies an ERROR is logged
 // when a previously-seen endpoint vanishes on reload.
 // Failure prevented: another process silently overwrites auth.json unnoticed.
 func TestLoadDetection_ErrorOnDisappearance(t *testing.T) {
 	t.Parallel()
-	resetKnownEndpoints()
 
-	dir := t.TempDir()
-	authPath := filepath.Join(dir, "auth.json")
+	client := NewTestClient(t)
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
 
 	// first load — two endpoints
 	store1 := &AuthStore{Tokens: map[string]*StoredToken{
 		"https://disappear-a.example.com": {AccessToken: "a"},
 		"https://disappear-b.example.com": {AccessToken: "b"},
 	}}
-	err := withAuthFileLocked(authPath, func(h *authFileHandle) error {
+	err = withAuthFileLocked(authPath, func(h *authFileHandle) error {
 		return h.writeFile(store1)
 	})
 	require.NoError(t, err)
 
+	trackerOpt := withEndpointTracker(client)
 	err = withAuthFileRLocked(authPath, func(h *authFileHandle) error {
 		_, err := h.load()
 		return err
-	})
+	}, trackerOpt)
 	require.NoError(t, err)
 
 	// externally truncate to one endpoint
@@ -510,8 +511,16 @@ func TestLoadDetection_ErrorOnDisappearance(t *testing.T) {
 	err = withAuthFileRLocked(authPath, func(h *authFileHandle) error {
 		_, err := h.load()
 		return err
-	})
+	}, trackerOpt)
 	require.NoError(t, err, "load must succeed even when disappearance is detected")
+
+	// verify the client tracked the endpoints
+	client.knownEndpointsMu.Lock()
+	_, hasA := client.knownEndpoints["https://disappear-a.example.com"]
+	_, hasB := client.knownEndpoints["https://disappear-b.example.com"]
+	client.knownEndpointsMu.Unlock()
+	assert.True(t, hasA, "endpoint A should be tracked")
+	assert.True(t, hasB, "endpoint B should be tracked from first load")
 }
 
 // TestLoadDetection_NoErrorOnFirstLoad verifies no ERROR on the first
@@ -519,23 +528,24 @@ func TestLoadDetection_ErrorOnDisappearance(t *testing.T) {
 // Failure prevented: spurious errors on startup.
 func TestLoadDetection_NoErrorOnFirstLoad(t *testing.T) {
 	t.Parallel()
-	resetKnownEndpoints()
 
-	dir := t.TempDir()
-	authPath := filepath.Join(dir, "auth.json")
+	client := NewTestClient(t)
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
 
 	store := &AuthStore{Tokens: map[string]*StoredToken{
 		"https://first-load.example.com": {AccessToken: "token"},
 	}}
-	err := withAuthFileLocked(authPath, func(h *authFileHandle) error {
+	err = withAuthFileLocked(authPath, func(h *authFileHandle) error {
 		return h.writeFile(store)
 	})
 	require.NoError(t, err)
 
+	trackerOpt := withEndpointTracker(client)
 	err = withAuthFileRLocked(authPath, func(h *authFileHandle) error {
 		_, err := h.load()
 		return err
-	})
+	}, trackerOpt)
 	require.NoError(t, err, "first load must not error")
 }
 
@@ -544,23 +554,25 @@ func TestLoadDetection_NoErrorOnFirstLoad(t *testing.T) {
 // Failure prevented: false errors when user logs in to new endpoints.
 func TestLoadDetection_NoErrorOnNewEndpoint(t *testing.T) {
 	t.Parallel()
-	resetKnownEndpoints()
 
-	dir := t.TempDir()
-	authPath := filepath.Join(dir, "auth.json")
+	client := NewTestClient(t)
+	authPath, err := client.GetAuthFilePath()
+	require.NoError(t, err)
 
 	// first load
 	store1 := &AuthStore{Tokens: map[string]*StoredToken{
 		"https://grow-a.example.com": {AccessToken: "a"},
 	}}
-	err := withAuthFileLocked(authPath, func(h *authFileHandle) error {
+	err = withAuthFileLocked(authPath, func(h *authFileHandle) error {
 		return h.writeFile(store1)
 	})
 	require.NoError(t, err)
+
+	trackerOpt := withEndpointTracker(client)
 	_ = withAuthFileRLocked(authPath, func(h *authFileHandle) error {
 		_, err := h.load()
 		return err
-	})
+	}, trackerOpt)
 
 	// second load with new endpoint added
 	store2 := &AuthStore{Tokens: map[string]*StoredToken{
@@ -575,29 +587,29 @@ func TestLoadDetection_NoErrorOnNewEndpoint(t *testing.T) {
 	err = withAuthFileRLocked(authPath, func(h *authFileHandle) error {
 		_, err := h.load()
 		return err
-	})
+	}, trackerOpt)
 	require.NoError(t, err, "new endpoint appearing must not cause error")
 }
 
-// TestLoadDetection_IsolatedBetweenTests verifies resetKnownEndpoints
-// prevents cross-test leakage of the in-process tracking set.
-// Failure prevented: test ordering affects detection results.
-func TestLoadDetection_IsolatedBetweenTests(t *testing.T) {
+// TestLoadDetection_IsolatedBetweenClients verifies that separate
+// AuthClient instances have independent endpoint tracking.
+// Failure prevented: cross-client leakage causes spurious disappearance errors.
+func TestLoadDetection_IsolatedBetweenClients(t *testing.T) {
 	t.Parallel()
 
-	// add some endpoints
-	knownEndpointsMu.Lock()
-	knownEndpoints["https://stale.example.com"] = struct{}{}
-	knownEndpointsMu.Unlock()
+	clientA := NewTestClient(t)
+	clientB := NewTestClient(t)
 
-	// reset
-	resetKnownEndpoints()
+	// seed client A with an endpoint
+	clientA.knownEndpointsMu.Lock()
+	clientA.knownEndpoints["https://only-in-a.example.com"] = struct{}{}
+	clientA.knownEndpointsMu.Unlock()
 
-	knownEndpointsMu.Lock()
-	count := len(knownEndpoints)
-	knownEndpointsMu.Unlock()
-
-	assert.Equal(t, 0, count, "resetKnownEndpoints must clear all entries")
+	// client B should have no tracked endpoints
+	clientB.knownEndpointsMu.Lock()
+	count := len(clientB.knownEndpoints)
+	clientB.knownEndpointsMu.Unlock()
+	assert.Equal(t, 0, count, "separate clients must have independent tracking")
 }
 
 // --- D. Structural enforcement ---
@@ -742,7 +754,7 @@ func TestAtomicity_OriginalSurvivesWriteError(t *testing.T) {
 // Failure prevented: users upgrading from old ox lose their token.
 func TestLegacyMigration_SingleTokenFormat(t *testing.T) {
 	t.Parallel()
-	resetKnownEndpoints()
+
 
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
@@ -781,7 +793,7 @@ func TestLegacyMigration_SingleTokenFormat(t *testing.T) {
 // Failure prevented: credential wipe when tokens field is null.
 func TestLegacyMigration_NullTokensField(t *testing.T) {
 	t.Parallel()
-	resetKnownEndpoints()
+
 
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
@@ -805,7 +817,7 @@ func TestLegacyMigration_NullTokensField(t *testing.T) {
 // Failure prevented: empty tokens object causes nil pointer.
 func TestLegacyMigration_EmptyTokensObject(t *testing.T) {
 	t.Parallel()
-	resetKnownEndpoints()
+
 
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
@@ -828,7 +840,7 @@ func TestLegacyMigration_EmptyTokensObject(t *testing.T) {
 // Failure prevented: legacy token stored under wrong endpoint for AuthClient users.
 func TestLegacyMigration_CustomEndpoint(t *testing.T) {
 	t.Parallel()
-	resetKnownEndpoints()
+
 
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
@@ -860,7 +872,7 @@ func TestLegacyMigration_CustomEndpoint(t *testing.T) {
 // Failure prevented: concurrent migration corrupts the file.
 func TestLegacyMigration_ConcurrentMigration(t *testing.T) {
 	t.Parallel()
-	resetKnownEndpoints()
+
 
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
@@ -1080,7 +1092,7 @@ func TestE2E_RapidFireSaveLoad(t *testing.T) {
 // Failure prevented: empty store causes nil pointer on subsequent operations.
 func TestEdge_EmptyStore(t *testing.T) {
 	t.Parallel()
-	resetKnownEndpoints()
+
 
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
@@ -1107,7 +1119,7 @@ func TestEdge_EmptyStore(t *testing.T) {
 // Failure prevented: nil token value causes panic in save/load path.
 func TestEdge_NilTokenValue(t *testing.T) {
 	t.Parallel()
-	resetKnownEndpoints()
+
 
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
@@ -1162,7 +1174,7 @@ func TestEdge_VeryLongEndpointURL(t *testing.T) {
 // Failure prevented: first-time user gets an error instead of clean empty state.
 func TestEdge_NoFile(t *testing.T) {
 	t.Parallel()
-	resetKnownEndpoints()
+
 
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "nonexistent", "auth.json")
@@ -1184,7 +1196,7 @@ func TestEdge_NoFile(t *testing.T) {
 // Failure prevented: corrupt file silently returns empty store.
 func TestEdge_CorruptJSON(t *testing.T) {
 	t.Parallel()
-	resetKnownEndpoints()
+
 
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")

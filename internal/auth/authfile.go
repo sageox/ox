@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -25,6 +24,9 @@ type authFileHandle struct {
 	// legacyMigrationEndpoint overrides the endpoint used when migrating
 	// legacy single-token auth files. If empty, uses endpoint.Get().
 	legacyMigrationEndpoint string
+	// endpointTracker is the owning AuthClient, used for per-instance
+	// disappearance detection. Nil for package-level functions (no tracking).
+	endpointTracker *AuthClient
 }
 
 const (
@@ -41,6 +43,13 @@ type authFileOption func(*authFileHandle)
 func withLegacyMigrationEndpoint(ep string) authFileOption {
 	return func(h *authFileHandle) {
 		h.legacyMigrationEndpoint = ep
+	}
+}
+
+// withEndpointTracker sets the AuthClient used for disappearance detection.
+func withEndpointTracker(c *AuthClient) authFileOption {
+	return func(h *authFileHandle) {
+		h.endpointTracker = c
 	}
 }
 
@@ -110,7 +119,9 @@ func (h *authFileHandle) load() (*AuthStore, error) {
 		return nil, err
 	}
 
-	checkKnownEndpoints(store)
+	if h.endpointTracker != nil {
+		h.endpointTracker.checkKnownEndpoints(store)
+	}
 	return store, nil
 }
 
@@ -227,41 +238,6 @@ func (h *authFileHandle) readRaw() (*AuthStore, error) {
 	return &store, nil
 }
 
-// --- In-process credential disappearance detection ---
-
-var (
-	knownEndpointsMu sync.Mutex
-	knownEndpoints   = make(map[string]struct{})
-)
-
-// checkKnownEndpoints compares the loaded store against endpoints this process
-// has previously seen. Logs an ERROR if any previously-known endpoint has
-// disappeared — this indicates another process may have overwritten auth.json.
-func checkKnownEndpoints(store *AuthStore) {
-	knownEndpointsMu.Lock()
-	defer knownEndpointsMu.Unlock()
-
-	for ep := range knownEndpoints {
-		if _, ok := store.Tokens[ep]; !ok {
-			slog.Error("auth: credential disappeared between loads",
-				"endpoint", ep,
-				"remaining_endpoints", len(store.Tokens),
-				"action", "investigate — another process may have overwritten auth.json")
-		}
-	}
-
-	for ep := range store.Tokens {
-		knownEndpoints[ep] = struct{}{}
-	}
-}
-
-// resetKnownEndpoints clears the in-process endpoint tracking.
-// Called between tests to prevent cross-test leakage.
-func resetKnownEndpoints() {
-	knownEndpointsMu.Lock()
-	defer knownEndpointsMu.Unlock()
-	knownEndpoints = make(map[string]struct{})
-}
 
 // callerInfo returns the file:line of the caller at the given skip depth.
 func callerInfo(skip int) string {

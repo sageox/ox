@@ -346,6 +346,7 @@ func (c *AuthClient) GetTokenForEndpoint(ep string) (*StoredToken, error) {
 
 	var token *StoredToken
 	legacyOpt := withLegacyMigrationEndpoint(c.endpoint)
+	trackerOpt := withEndpointTracker(c)
 	err = withAuthFileRLocked(authPath, func(h *authFileHandle) error {
 		store, loadErr := h.load()
 		if loadErr != nil {
@@ -356,7 +357,7 @@ func (c *AuthClient) GetTokenForEndpoint(ep string) (*StoredToken, error) {
 			token = t
 		}
 		return nil
-	}, legacyOpt)
+	}, legacyOpt, trackerOpt)
 	if err != nil {
 		return nil, err
 	}
@@ -383,6 +384,7 @@ func (c *AuthClient) SaveTokenForEndpoint(ep string, token *StoredToken) error {
 	}
 
 	legacyOpt := withLegacyMigrationEndpoint(c.endpoint)
+	trackerOpt := withEndpointTracker(c)
 	return withAuthFileLocked(authPath, func(h *authFileHandle) error {
 		store, loadErr := h.load()
 		if loadErr != nil {
@@ -393,7 +395,7 @@ func (c *AuthClient) SaveTokenForEndpoint(ep string, token *StoredToken) error {
 		}
 		store.Tokens[ep] = token
 		return h.save(store)
-	}, legacyOpt)
+	}, legacyOpt, trackerOpt)
 }
 
 // RemoveToken deletes the authentication token for this client's endpoint
@@ -415,6 +417,7 @@ func (c *AuthClient) RemoveTokenForEndpoint(ep string) error {
 	}
 
 	legacyOpt := withLegacyMigrationEndpoint(c.endpoint)
+	trackerOpt := withEndpointTracker(c)
 	return withAuthFileLocked(authPath, func(h *authFileHandle) error {
 		store, loadErr := h.load()
 		if loadErr != nil {
@@ -425,7 +428,7 @@ func (c *AuthClient) RemoveTokenForEndpoint(ep string) error {
 		}
 		delete(store.Tokens, ep)
 		return h.save(store)
-	}, legacyOpt)
+	}, legacyOpt, trackerOpt)
 }
 
 // IsAuthenticated checks if a valid non-expired token exists for this client's endpoint
