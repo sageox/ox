@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon/hooks"
 	"github.com/sageox/ox/internal/ledger"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -17,6 +20,12 @@ type MurmurRelay struct {
 	projectRoot   string          // re-checked on every relay to pick up config changes
 	lastRelayAt   time.Time
 	logger        *slog.Logger
+	eventBus      *hooks.EventBus
+}
+
+// SetEventBus sets the event bus for emitting murmur events.
+func (r *MurmurRelay) SetEventBus(bus *hooks.EventBus) {
+	r.eventBus = bus
 }
 
 // NewMurmurRelay creates a relay that scans murmur files and converts them
@@ -108,6 +117,19 @@ func (r *MurmurRelay) RelayFromPath(baseDir, scope string) int {
 
 		if err := r.registry.MarkRelayed(m.ID, scope); err != nil {
 			r.logger.Warn("failed to mark murmur relayed", "murmur_id", m.ID, "err", err)
+		}
+
+		if r.eventBus != nil {
+			eventName := hooks.EventMurmurReceived
+			if m.Importance == "critical" {
+				eventName = hooks.EventMurmurCritical
+			}
+			r.eventBus.Emit(context.Background(), hooks.Event{
+				Name:    eventName,
+				Project: r.projectRoot,
+				RepoID:  config.GetRepoID(r.projectRoot),
+				Payload: hooks.MurmurPayload(m.ID, m.AgentID, m.PrincipalID, m.Topic, m.Importance, m.Content),
+			})
 		}
 
 		relayed++

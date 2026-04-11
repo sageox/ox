@@ -4,16 +4,26 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// hooksCmd is the parent command for deterministic git/tooling hooks.
+// hooksCmd is the parent command for event hooks and git/CI hooks.
 //
-// These are traditional hooks called by git or CI — predictable input/output,
-// no AI reasoning involved. Compare with "ox agent <id> hook" which handles
-// AI coworker lifecycle events (SessionStart, PreCompact, etc.) where output
-// is consumed by AI agents and may include non-deterministic guidance.
+// User-facing subcommands (list, add, test, log) manage daemon event hooks.
+// Git/CI subcommands (pre-commit, post-commit, etc.) are called by agent
+// integrations — prefer "ox agent hooks" for new integrations.
 var hooksCmd = &cobra.Command{
-	Use:    "hooks",
-	Short:  "Deterministic hooks for git and CI tooling",
-	Hidden: true, // called by git hooks, not users directly
+	Use:   "hooks",
+	Short: "Manage event hooks for daemon notifications",
+	Long: `Manage event hooks triggered by daemon events (session uploads, murmurs, sync).
+
+Event hook subcommands:
+  ox hooks list              List registered event hooks
+  ox hooks add <event> <cmd> Register a new event hook
+  ox hooks test <event>      Fire a synthetic event to test hooks
+  ox hooks log               Show how to view hook execution logs
+
+Git/CI hooks (backward compat, prefer 'ox agent hooks'):
+  ox hooks pre-commit        Run pre-commit checks
+  ox hooks post-commit       Run post-commit actions
+  ox hooks commit-msg        Validate commit messages`,
 }
 
 func init() {

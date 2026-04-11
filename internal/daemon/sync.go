@@ -36,8 +36,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/auth"
-	"github.com/sageox/ox/internal/observability"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon/hooks"
 	"github.com/sageox/ox/internal/flags"
+	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
@@ -184,6 +186,9 @@ type SyncScheduler struct {
 
 	// OTel tracer for per-task trace contexts (nil = tracing disabled)
 	tracer *observability.DaemonTracer
+
+	// event bus for emitting sync events to hooks/notifications
+	eventBus *hooks.EventBus
 }
 
 // syncError tracks a sync error with timestamp.
@@ -328,6 +333,11 @@ func (s *SyncScheduler) SetSettingsFetcher(f *SettingsFetcher) {
 // SetTracer sets the OTel daemon tracer for per-task trace contexts.
 func (s *SyncScheduler) SetTracer(t *observability.DaemonTracer) {
 	s.tracer = t
+}
+
+// SetEventBus sets the event bus for emitting sync events.
+func (s *SyncScheduler) SetEventBus(bus *hooks.EventBus) {
+	s.eventBus = bus
 }
 
 // captureHEAD returns the current HEAD SHA for a git repo.
@@ -1142,6 +1152,14 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 				s.issues.SetIssue(*result.Issue)
 			}
 		}
+		if s.eventBus != nil {
+			s.eventBus.Emit(ctx, hooks.Event{
+				Name:    hooks.EventSyncFailed,
+				Project: s.config.ProjectRoot,
+				RepoID:  config.GetRepoID(s.config.ProjectRoot),
+				Payload: hooks.SyncFailedPayload("ledger", "pull", result.Err.Error()),
+			})
+		}
 		return fmt.Errorf("ledger %w", result.Err)
 	}
 
@@ -1167,6 +1185,15 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 	s.recordSync("pull", "ledger", duration, 0)
 	s.metrics.RecordPullSuccess(duration)
 	s.recordActivity()
+
+	if s.eventBus != nil {
+		s.eventBus.Emit(ctx, hooks.Event{
+			Name:    hooks.EventSyncCompleted,
+			Project: s.config.ProjectRoot,
+			RepoID:  config.GetRepoID(s.config.ProjectRoot),
+			Payload: hooks.SyncPayload("ledger", "pull", duration),
+		})
+	}
 
 	s.mu.Lock()
 	s.lastSync = time.Now()

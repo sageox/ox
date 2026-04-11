@@ -20,10 +20,11 @@ import (
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/endpoint"
-	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/daemon/agentwork"
+	"github.com/sageox/ox/internal/daemon/hooks"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/flags"
+	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
@@ -176,6 +177,7 @@ type Daemon struct {
 	projectWatcher         *ProjectWatcher
 	dbMaintenance          *DBMaintenanceScheduler
 	settingsFetcher        *SettingsFetcher
+	eventBus               *hooks.EventBus
 	tracer                 *observability.DaemonTracer
 
 	// state
@@ -639,6 +641,15 @@ func (d *Daemon) Stop() error {
 func (d *Daemon) shutdown() error {
 	d.logger.Info("shutting down")
 
+	// emit daemon.stopped event before tearing down
+	if d.eventBus != nil {
+		d.eventBus.Emit(context.Background(), hooks.Event{
+			Name:    hooks.EventDaemonStopped,
+			Project: d.config.ProjectRoot,
+			RepoID:  config.GetRepoID(d.config.ProjectRoot),
+		})
+	}
+
 	// record shutdown telemetry and flush before stopping
 	if d.telemetry != nil {
 		uptime := time.Since(d.startTime)
@@ -997,9 +1008,21 @@ func (d *Daemon) initComponents() time.Duration {
 		d.heartbeat.SetInitialCredentials(hbCreds)
 	}
 
+	// event bus for hooks (must init before wiring to scheduler/relay)
+	d.eventBus = hooks.New(d.logger)
+	hookCfgs, err := hooks.LoadHooks()
+	if err != nil {
+		d.logger.Warn("failed to load hooks config", "error", err)
+	}
+	if len(hookCfgs) > 0 {
+		runner := hooks.NewHookRunner(hookCfgs, d.logger)
+		d.eventBus.SetHookDispatch(runner.Dispatch)
+	}
+
 	// sync scheduler
 	d.scheduler = NewSyncScheduler(d.config, d.logger)
 	d.scheduler.SetTracer(d.tracer)
+	d.scheduler.SetEventBus(d.eventBus)
 
 	// code index manager
 	if d.config.ProjectRoot != "" {
@@ -1072,6 +1095,7 @@ func (d *Daemon) initComponents() time.Duration {
 		// on every tick so config changes take effect without daemon restart
 		murmurRelay := NewMurmurRelay(d.whisperRegistry, d.config.ProjectRoot, d.logger)
 		d.scheduler.SetMurmurRelay(murmurRelay)
+		murmurRelay.SetEventBus(d.eventBus)
 	}
 	if d.codedb != nil {
 		d.codedb.SetIssueTracker(d.issues)
@@ -1107,6 +1131,15 @@ func (d *Daemon) startWorkers() {
 	d.telemetry.Start()
 	d.friction.Start()
 	d.telemetry.RecordDaemonStartup()
+
+	// emit daemon.started event
+	if d.eventBus != nil {
+		d.eventBus.Emit(d.ctx, hooks.Event{
+			Name:    hooks.EventDaemonStarted,
+			Project: d.config.ProjectRoot,
+			RepoID:  config.GetRepoID(d.config.ProjectRoot),
+		})
+	}
 
 	// initialize whisper sources before IPC server starts, so pause/resume
 	// handlers can safely read d.murmurNudgeSource without a data race
@@ -1592,3 +1625,15 @@ func (s *daemonServiceImpl) ResumeMurmuring(agentID string) {
 		s.d.logger.Debug("murmur nudging resumed", "agent_id", agentID)
 	}
 }
+
+func (s *daemonServiceImpl) SessionUploaded(name, url, agentID string, dur time.Duration) {
+	if s.d.eventBus != nil {
+		s.d.eventBus.Emit(context.Background(), hooks.Event{
+			Name:    hooks.EventSessionUploaded,
+			Project: s.d.config.ProjectRoot,
+			RepoID:  config.GetRepoID(s.d.config.ProjectRoot),
+			Payload: hooks.SessionUploadedPayload(name, url, agentID, dur),
+		})
+	}
+}
+

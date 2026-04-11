@@ -57,6 +57,7 @@ const (
 	MsgTypeSessionWatchStart  = "session_watch_start"  // one-way, start tailing a hookless agent session
 	MsgTypeSessionWatchStop   = "session_watch_stop"   // one-way, stop tailing a session
 	MsgTypeSettingsGet        = "settings_get"         // get cached CLI feature flag settings
+	MsgTypeSessionUploaded    = "session_uploaded"     // one-way, session pushed to ledger
 )
 
 // Protocol Design Decision: NDJSON (Newline-Delimited JSON)
@@ -255,6 +256,7 @@ type CheckoutResult struct {
 	AlreadyExists bool   `json:"already_exists"` // true if repo already existed
 	Cloned        bool   `json:"cloned"`         // true if we performed a clone
 }
+
 
 // CheckoutProgress is sent during long-running checkout operations.
 type CheckoutProgress struct {
@@ -603,6 +605,7 @@ type DaemonService interface {
 	PublishMurmur(payload MurmurPayload)
 	PauseMurmuring(agentID string)
 	ResumeMurmuring(agentID string)
+	SessionUploaded(name, url, agentID string, dur time.Duration)
 }
 
 // CallbackService implements DaemonService using individual callback functions.
@@ -909,6 +912,11 @@ func (c *CallbackService) ResumeMurmuring(agentID string) {
 	}
 }
 
+func (c *CallbackService) SessionUploaded(_, _, _ string, _ time.Duration) {
+	// no-op for callback service; daemon wires via daemonServiceImpl
+}
+
+
 // Server handles IPC requests from clients.
 type Server struct {
 	logger   *slog.Logger
@@ -983,6 +991,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeSessionWatchStart, handleSessionWatchStart)
 	router.Register(MsgTypeSessionWatchStop, handleSessionWatchStop)
 	router.Register(MsgTypeSettingsGet, handleSettingsGet)
+	router.Register(MsgTypeSessionUploaded, handleSessionUploaded)
 
 	return router
 }

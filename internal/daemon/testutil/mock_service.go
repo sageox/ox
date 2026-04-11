@@ -249,3 +249,5 @@ func (m *MockService) ResumeMurmuring(agentID string) {
 		m.ResumeMurmuringFunc(agentID)
 	}
 }
+
+func (m *MockService) SessionUploaded(_, _, _ string, _ time.Duration) {}

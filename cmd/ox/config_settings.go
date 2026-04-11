@@ -456,6 +456,7 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 		if repoCfg != nil && repoCfg.Attribution != nil && repoCfg.Attribution.IsScoreThresholdSet() {
 			cv.RepoVal = strconv.FormatFloat(repoCfg.Attribution.GetScoreThreshold(), 'f', -1, 64)
 		}
+
 	}
 
 	// determine effective value and source (User > Repo > Team > Default)

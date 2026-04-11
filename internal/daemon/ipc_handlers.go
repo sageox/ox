@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"time"
 
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -422,3 +423,19 @@ func handleWhisperHistory(s *Server, msg Message, _ net.Conn) HandlerResult {
 	}
 	return HandlerResult{Response: marshalResponse(result)}
 }
+
+func handleSessionUploaded(s *Server, msg Message, _ net.Conn) HandlerResult {
+	var payload struct {
+		SessionName string `json:"session_name"`
+		URL         string `json:"url"`
+		AgentID     string `json:"agent_id"`
+		DurationSec int    `json:"duration_seconds"`
+	}
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		s.logger.Debug("failed to parse session_uploaded payload", "error", err)
+	} else {
+		s.service.SessionUploaded(payload.SessionName, payload.URL, payload.AgentID, time.Duration(payload.DurationSec)*time.Second)
+	}
+	return HandlerResult{SkipDefault: true}
+}
+
