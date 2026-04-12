@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/repotools"
 )
 
@@ -316,17 +317,28 @@ func extractGitHubDetail(err error) string {
 // pushLedger pushes the ledger with retry and conflict resolution.
 // This is the daemon's version — uses shared ledgerMu (already held by caller).
 func (m *GitHubSyncManager) pushLedger(ctx context.Context, ledgerPath string) error {
+	ep := endpoint.GetForProject(m.projectRoot)
 	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              m.logger,
 		PrePush: func(repoPath string) error {
-			ep := endpoint.GetForProject(m.projectRoot)
 			if ep != "" {
 				if err := gitserver.RefreshRemoteCredentials(repoPath, ep); err != nil {
 					return fmt.Errorf("credential refresh: %w", err)
 				}
 			}
 			return nil
+		},
+		ReconcileLFS: func(repoPath string) bool {
+			if ep == "" {
+				return false
+			}
+			result, err := lfs.ReconcileUnpushedPointers(ctx, repoPath, ep, m.logger)
+			if err != nil {
+				m.logger.Warn("lfs reconciliation failed", "error", err)
+				return false
+			}
+			return result.Replaced > 0
 		},
 	})
 }

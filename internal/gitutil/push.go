@@ -25,6 +25,14 @@ type PushOpts struct {
 	// Non-nil errors are logged as warnings but do not prevent the push attempt.
 	PrePush func(repoPath string) error
 
+	// ReconcileLFS is called when a push fails with "LFS objects are missing".
+	// If set, PushWithRetry calls this instead of failing permanently, then
+	// retries the push once. This allows the caller to wire lfs.ReconcileUnpushedPointers
+	// (which strips orphaned pointer stubs and squashes history) without creating
+	// an import cycle between gitutil and lfs.
+	// Returns true if reconciliation made changes worth retrying.
+	ReconcileLFS func(repoPath string) bool
+
 	// MaxRetries is the number of push attempts. Zero means use default (3).
 	// To attempt exactly once with no retries, set to 1.
 	MaxRetries int
@@ -66,10 +74,11 @@ var permanentPatterns = []string{
 	"repository not found",
 	"The requested URL returned error: 403",
 	"HTTP 403",
-	// GitLab pre-receive hook rejects pushes when commits reference LFS objects
-	// not in the remote LFS store. Rebasing won't fix missing blobs — fail fast.
-	"LFS objects are missing",
 }
+
+// lfsObjectsMissing is the GitLab pre-receive error for orphaned LFS pointers.
+// Handled separately from permanentPatterns because ReconcileLFS can fix it.
+const lfsObjectsMissing = "LFS objects are missing"
 
 // PushWithRetry pushes a git repo to its remote with pre-flight checks,
 // retry, conflict resolution, and backoff.
@@ -110,6 +119,20 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 		cancel()
 		if err == nil {
 			return nil
+		}
+
+		// LFS objects missing — try reconciliation before giving up.
+		// ReconcileLFS strips orphaned pointer stubs and squashes history so the
+		// poisoned blobs no longer appear in the push pack. One shot only.
+		if strings.Contains(outStr, lfsObjectsMissing) {
+			if opts.ReconcileLFS != nil {
+				log.Info("push failed (LFS objects missing), attempting reconciliation", "attempt", attempt)
+				if opts.ReconcileLFS(repoPath) {
+					log.Info("lfs reconciliation made changes, retrying push")
+					continue // retry immediately
+				}
+			}
+			return fmt.Errorf("git push failed (not retryable): %s", outStr)
 		}
 
 		// fail fast on permanent errors
