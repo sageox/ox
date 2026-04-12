@@ -94,21 +94,28 @@ func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL stri
 		oidToIdx[bareOID] = i
 	}
 
-	batchCtx, batchCancel := context.WithTimeout(ctx, 30*time.Second)
-	defer batchCancel()
-	_ = batchCtx // timeout is on the HTTP client, not this context — kept for future use
-
-	resp, err := client.BatchDownload(objects)
-	if err != nil {
-		return result, fmt.Errorf("lfs batch check: %w", err)
-	}
-
-	// identify which pointers have missing backing objects
+	// batch-check in chunks — the LFS Batch API request body can exceed WAF
+	// limits (8KB) when there are many pointers. Each pointer is ~100 bytes
+	// of JSON, so 50 per chunk stays well under the limit.
+	const batchChunkSize = 50
 	missing := make(map[int]bool)
-	for _, obj := range resp.Objects {
-		if obj.Error != nil {
-			if idx, ok := oidToIdx[obj.OID]; ok {
-				missing[idx] = true
+	for start := 0; start < len(objects); start += batchChunkSize {
+		end := start + batchChunkSize
+		if end > len(objects) {
+			end = len(objects)
+		}
+		chunk := objects[start:end]
+
+		resp, err := client.BatchDownload(chunk)
+		if err != nil {
+			return result, fmt.Errorf("lfs batch check: %w", err)
+		}
+
+		for _, obj := range resp.Objects {
+			if obj.Error != nil {
+				if idx, ok := oidToIdx[obj.OID]; ok {
+					missing[idx] = true
+				}
 			}
 		}
 	}
