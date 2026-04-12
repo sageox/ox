@@ -1603,7 +1603,11 @@ func (s *daemonServiceImpl) PublishMurmur(payload MurmurPayload) {
 		if len(summary) > 50 {
 			summary = summary[:50] + "..."
 		}
-		if _, err := gitutil.RunGit(ctx, payload.TargetDir, "commit", "-m", fmt.Sprintf("murmur: %s", summary)); err != nil {
+		// scope commit to data/murmurs/ — a bare `git commit` would sweep in any
+		// other dirty index entries (e.g., session pointer stubs written by a
+		// previous finalize), poisoning the push queue with LFS pointer blobs
+		// whose backing objects may not be in the remote LFS store.
+		if _, err := gitutil.RunGit(ctx, payload.TargetDir, "commit", "-m", fmt.Sprintf("murmur: %s", summary), "--", "data/murmurs/"); err != nil {
 			s.d.logger.Warn("murmur git commit failed", "error", err, "target_dir", payload.TargetDir)
 			return
 		}
