@@ -344,8 +344,9 @@ func TestPermanentPatterns(t *testing.T) {
 		{"http 403 generic", "remote: HTTP 403", true},
 		{"generic network error", "fatal: unable to access: connection refused", false},
 		{"empty output", "", false},
-		// GitLab pre-receive hook rejects pushes with missing LFS objects; retrying won't fix it
-		{"lfs objects missing", "remote: GitLab: LFS objects are missing. Ensure LFS is properly set up or try a manual \"git lfs push --all\".", true},
+		// LFS objects missing is now handled separately via ReconcileLFS callback,
+		// not as a permanent pattern — it's recoverable when the callback is set.
+		{"lfs objects missing", "remote: GitLab: LFS objects are missing. Ensure LFS is properly set up or try a manual \"git lfs push --all\".", false},
 	}
 
 	for _, tt := range tests {
