@@ -312,45 +312,6 @@ func getGitConfigValue(key string) string {
 	return strings.TrimSpace(string(output))
 }
 
-// checkGitLFS checks if Git LFS is properly configured when needed.
-// Returns warning if LFS files are present but LFS is not installed.
-func checkGitLFS() checkResult {
-	gitRoot := findGitRoot()
-	if gitRoot == "" {
-		return SkippedCheck("Git LFS", "not in git repo", "")
-	}
-
-	// check if .gitattributes contains LFS patterns
-	gitattrsPath := gitRoot + "/.gitattributes"
-	content, err := os.ReadFile(gitattrsPath)
-	if err != nil {
-		return SkippedCheck("Git LFS", "no .gitattributes", "")
-	}
-
-	// look for LFS filter patterns
-	hasLFSPatterns := strings.Contains(string(content), "filter=lfs")
-	if !hasLFSPatterns {
-		return SkippedCheck("Git LFS", "not used", "")
-	}
-
-	// LFS patterns found - check if git-lfs is installed
-	_, err = exec.LookPath("git-lfs")
-	if err != nil {
-		return FailedCheck("Git LFS", "not installed",
-			"Install git-lfs: https://git-lfs.com")
-	}
-
-	// check if LFS is initialized in this repo
-	lfsCmd := exec.Command("git", "lfs", "env")
-	lfsCmd.Dir = gitRoot
-	if err := lfsCmd.Run(); err != nil {
-		return WarningCheck("Git LFS", "not initialized",
-			"Run `git lfs install` to initialize LFS in this repo")
-	}
-
-	return PassedCheck("Git LFS", "configured")
-}
-
 // checkStashedChanges reports if there are stashed changes.
 // Informational only - stashes are valid workflow but good to be aware of.
 func checkStashedChanges() checkResult {

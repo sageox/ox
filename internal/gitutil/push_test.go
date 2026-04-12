@@ -393,32 +393,6 @@ func TestPushWithRetry_403FailsFastWithGuidance(t *testing.T) {
 	}
 }
 
-func TestIsLFSPushError(t *testing.T) {
-	tests := []struct {
-		name   string
-		output string
-		want   bool
-	}{
-		{"LFS objects missing", "remote: LFS objects are missing", true},
-		{"missing or corrupt", "error: missing or corrupt local objects", true},
-		{"LFS failed to store", "LFS: error: failed to store blob", true},
-		{"LFS upload missing combo", "LFS upload failed: missing objects", true},
-		{"normal push error", "fatal: unable to access: connection refused", false},
-		{"non-fast-forward", "rejected: non-fast-forward", false},
-		{"empty string", "", false},
-		{"partial LFS no missing", "LFS upload completed", false},
-		{"macOS keychain error", "fatal: failed to store: -25300", false},
-		{"credential store error", "error: failed to store credentials", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := IsLFSPushError(tt.output)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
 func TestPushWithRetry_AutoResolveConflicts(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git push with retry")
@@ -562,7 +536,6 @@ func TestPushWithRetry_LFSErrorRetriesWithoutForcePush(t *testing.T) {
 	err := PushWithRetry(ctx, repo, PushOpts{
 		MaxRetries: 2,
 		OpTimeout:  3 * time.Second,
-		RepairLFS:  true, // would have been paired with AllowForceOnLFS before
 	})
 
 	// should fail after retries, not with a force-push error

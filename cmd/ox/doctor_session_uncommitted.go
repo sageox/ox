@@ -93,7 +93,6 @@ func fixSessionUncommitted(ledgerPath string, count int) checkResult {
 
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
-		RepairLFS:           true,
 	}); err != nil {
 		return WarningCheck(name,
 			fmt.Sprintf("committed %d file(s) but push failed", count),

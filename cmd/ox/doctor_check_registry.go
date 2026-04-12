@@ -178,15 +178,6 @@ func init() {
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
-		Slug:        CheckSlugGitLFS,
-		Name:        "Git LFS",
-		Category:    "Git Repository Health",
-		FixLevel:    FixLevelCheckOnly,
-		Description: "Checks if Git LFS is properly configured when needed",
-		Run:         func(fix bool) checkResult { return checkGitLFS() },
-	})
-
-	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugStashedChanges,
 		Name:        "Git stash",
 		Category:    "Git Repository Health",

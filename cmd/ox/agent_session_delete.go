@@ -174,7 +174,6 @@ func deleteSessionFromLedger(ledgerPath, sessionName, sessionDir string) error {
 	// push with retry — no --force: ledger history must never be rewritten
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
-		RepairLFS:           true,
 	}); err != nil {
 		return fmt.Errorf("git push: %w", err)
 	}

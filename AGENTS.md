@@ -90,12 +90,11 @@ if HasOxPrimeMarker(gitRoot) { ... }
 
 **IPC Architecture:** See [docs/ai/specs/ipc-architecture.md](docs/ai/specs/ipc-architecture.md). IPC is never required, fire-and-forget for non-critical ops, clone has a fallback.
 
-**Git LFS Independence:** CLI must work without git-lfs installed. We use GitLab APIs directly for LFS operations.
-
 ---
 
 ## Key Policies (Details in `.claude/rules/`)
 
+- **LFS independence:** ox NEVER shells out to `git-lfs` and never commits `.gitattributes` with `filter=lfs`. All LFS operations — pointer detection, parsing, upload, download, hydration — are pure Go in `internal/lfs/`. Talking to GitLab's LFS Batch API goes through `internal/lfs/client.go`, not a subprocess. If a push fails with `LFS objects are missing`, the fix is NEVER `git lfs push --all` — see `.claude/rules/lfs-no-git-lfs-binary.md`
 - **Endpoints:** Normalize all subdomain prefixes before storing/comparing. See `.claude/rules/endpoints.md`
 - **Testing:** E2E reality over unit isolation. 85%+ coverage. Table-driven tests. See `.claude/rules/testing.md`
 - **Daemon-CLI split:** Daemon reads (pull), CLI writes (add/commit/push). Never discard uncommitted changes. See `.claude/rules/daemon-git.md`

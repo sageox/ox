@@ -581,61 +581,6 @@ func TestCheckGitHooks_WithActiveHook(t *testing.T) {
 	}
 }
 
-func TestCheckGitLFS_NotInGitRepo(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "ox-test-*")
-	if err != nil {
-		t.Fatalf("failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	restoreCwd := changeToDir(t, tmpDir)
-	defer restoreCwd()
-
-	result := checkGitLFS()
-
-	if !result.skipped {
-		t.Error("expected skipped=true when not in git repo")
-	}
-}
-
-func TestCheckGitLFS_NotUsed(t *testing.T) {
-	gitRoot, cleanup := setupTempGitRepo(t)
-	defer cleanup()
-
-	restoreCwd := changeToDir(t, gitRoot)
-	defer restoreCwd()
-
-	// no .gitattributes file, so LFS is not used
-	result := checkGitLFS()
-
-	if !result.skipped {
-		t.Error("expected skipped=true when LFS not used")
-	}
-}
-
-func TestCheckGitLFS_LFSPatternsPresent(t *testing.T) {
-	gitRoot, cleanup := setupTempGitRepo(t)
-	defer cleanup()
-
-	restoreCwd := changeToDir(t, gitRoot)
-	defer restoreCwd()
-
-	// create .gitattributes with LFS patterns
-	gitattrsPath := filepath.Join(gitRoot, ".gitattributes")
-	content := "*.bin filter=lfs diff=lfs merge=lfs -text\n"
-	if err := os.WriteFile(gitattrsPath, []byte(content), 0644); err != nil {
-		t.Fatalf("failed to create .gitattributes: %v", err)
-	}
-
-	result := checkGitLFS()
-
-	// result depends on whether git-lfs is installed
-	// should not be skipped since LFS patterns are present
-	if result.skipped {
-		t.Error("expected not skipped when LFS patterns present")
-	}
-}
-
 func TestCheckMergeConflicts_NotInGitRepo(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "ox-test-*")
 	if err != nil {

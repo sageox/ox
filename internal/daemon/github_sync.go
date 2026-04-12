@@ -318,7 +318,6 @@ func extractGitHubDetail(err error) string {
 func (m *GitHubSyncManager) pushLedger(ctx context.Context, ledgerPath string) error {
 	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
-		RepairLFS:           true,
 		Logger:              m.logger,
 		PrePush: func(repoPath string) error {
 			ep := endpoint.GetForProject(m.projectRoot)

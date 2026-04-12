@@ -115,7 +115,14 @@ test-integration: ## Integration tests live in sageox/ox-test-harness
 	@echo "Coding agent integration tests are in sageox/ox-test-harness."
 	@exit 1
 
-test-preflight: lint test-all test-slow ## Pre-PR quality gate: lint + all unit tests + slow tests
+check-no-git-lfs-shell: ## Ensure no code shells out to git-lfs binary (see .claude/rules/lfs-no-git-lfs-binary.md)
+	@if grep -r --include='*.go' -nE 'exec\.(Command|CommandContext)\("git",\s*"lfs"|exec\.(Command|CommandContext)\("git-lfs"|LookPath\("git-lfs"\)' . 2>/dev/null \
+		| grep -v _test.go | grep -v vendor/ | grep -v '^\s*//' | grep -v 'doc\.go'; then \
+		echo "ERROR: ox must not shell out to git-lfs. See .claude/rules/lfs-no-git-lfs-binary.md"; \
+		exit 1; \
+	fi
+
+test-preflight: lint check-no-git-lfs-shell test-all test-slow ## Pre-PR quality gate: lint + all unit tests + slow tests
 
 test-digital-twin: test-team-context-twin test-ledger-twin
 

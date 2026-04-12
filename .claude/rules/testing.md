@@ -13,7 +13,7 @@ paths:
 | Tier | Command | When |
 |------|---------|------|
 | Fast (<500ms) | `make test` | Every commit. Target: <30s |
-| Full (expensive) | `make test-all` | Before PRs. Includes git clone, SQLite concurrent, LFS repair |
+| Full (expensive) | `make test-all` | Before PRs. Includes git clone, SQLite concurrent, LFS pointer verification |
 | Slow (real binary) | `make test-slow` | Build tag: `slow`. No agent needed |
 | Integration (real sessions) | `make test-integration` | Release gate. Lives in `sageox/ox-test-harness` |
 | Pre-PR gate | `make test-preflight` | lint + full + slow (~3-5min) |

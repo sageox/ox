@@ -102,7 +102,6 @@ const (
 	CheckSlugGitConnectivity    = "git-connectivity"
 	CheckSlugGitAuth            = "git-auth"
 	CheckSlugGitHooks           = "git-hooks"
-	CheckSlugGitLFS             = "git-lfs"
 	CheckSlugStashedChanges     = "stashed-changes"
 	CheckSlugGitRepoPaths       = "git-repo-paths"
 	CheckSlugGitignoreMissing   = "gitignore-missing" // .sageox/.gitignore in ledger/team checkouts

@@ -673,7 +673,6 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 	}
 	gitRepoChecks = append(gitRepoChecks, checkGitAuth())
 	gitRepoChecks = append(gitRepoChecks, checkGitHooks())
-	gitRepoChecks = append(gitRepoChecks, checkGitLFS())
 	gitRepoChecks = append(gitRepoChecks, checkStashedChanges())
 
 	// git repo paths check - suppress individual warnings when not logged in

@@ -20,9 +20,6 @@ type PushOpts struct {
 	// semantics — e.g., deny "data/proprietary/" while allowing "data/".
 	AutoResolveDenyPrefixes []string
 
-	// RepairLFS runs RepairMissingLFSObjects before pushing.
-	RepairLFS bool
-
 	// PrePush is called before the push loop starts (after lock/LFS checks).
 	// Use for credential refresh or other caller-specific setup.
 	// Non-nil errors are logged as warnings but do not prevent the push attempt.
@@ -81,8 +78,7 @@ var permanentPatterns = []string{
 // conflicts are resolved via pull --rebase. Our git remotes reject force
 // pushes server-side, so any force push attempt would fail anyway.
 //
-// Pre-flight: lock/rebase safety, LFS config cleanup, optional LFS repair,
-// optional credential refresh.
+// Pre-flight: lock/rebase safety, LFS config cleanup, optional credential refresh.
 //
 // Retry loop: up to MaxRetries attempts with linear backoff (1s, 2s, 3s...).
 // On non-fast-forward rejection: pulls with --rebase --autostash, optionally
@@ -97,15 +93,6 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 
 	// pre-flight: strip lfs.repositoryformatversion if set by git-lfs
 	StripLFSConfig(repoPath)
-
-	// pre-flight: repair missing LFS objects that would block push
-	if opts.RepairLFS {
-		if repaired, err := RepairMissingLFSObjects(ctx, repoPath); err != nil {
-			log.Warn("lfs repair failed", "error", err)
-		} else if repaired > 0 {
-			log.Info("repaired missing LFS pointers before push", "count", repaired)
-		}
-	}
 
 	// caller-provided pre-push hook (e.g., credential refresh)
 	if opts.PrePush != nil {
