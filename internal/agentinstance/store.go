@@ -105,6 +105,7 @@ type Store struct {
 	instancesPath string
 	userSlug      string
 	mu            sync.RWMutex
+	pruneWG       sync.WaitGroup // tracks background Prune goroutines launched by Get/List
 }
 
 // NewStore initializes an instance store for the given project root.
@@ -303,7 +304,7 @@ func (s *Store) Get(agentID string) (*Instance, error) {
 
 	// trigger compaction if needed after read
 	if s.shouldCompact(totalCount, expiredCount) {
-		go s.Prune()
+		s.launchBackgroundPrune()
 	}
 
 	// scan backwards (newest first) for the matching agent_id
@@ -326,10 +327,20 @@ func (s *Store) List() ([]*Instance, error) {
 
 	// trigger compaction if needed
 	if s.shouldCompact(totalCount, expiredCount) {
-		go s.Prune()
+		s.launchBackgroundPrune()
 	}
 
 	return instances, nil
+}
+
+// launchBackgroundPrune fires Prune() in a goroutine and tracks it on pruneWG
+// so callers (and tests) can wait for in-flight compactions to complete.
+func (s *Store) launchBackgroundPrune() {
+	s.pruneWG.Add(1)
+	go func() {
+		defer s.pruneWG.Done()
+		_, _ = s.Prune()
+	}()
 }
 
 // Count returns the number of active instances

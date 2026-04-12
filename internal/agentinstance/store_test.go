@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/stretchr/testify/require"
 )
 
 func TestNewStoreForUser(t *testing.T) {
@@ -109,12 +107,7 @@ func TestGetNotFound(t *testing.T) {
 }
 
 func TestGetExpired(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	store, err := NewStoreForUser(tmpDir, "testuser")
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
-	}
+	store := newTestStore(t)
 
 	inst := &Instance{
 		AgentID:         "OxOld1",
@@ -128,16 +121,9 @@ func TestGetExpired(t *testing.T) {
 		t.Fatalf("failed to add instance: %v", err)
 	}
 
-	_, err = store.Get("OxOld1")
-	if err == nil {
+	if _, err := store.Get("OxOld1"); err == nil {
 		t.Error("expected error for expired instance")
 	}
-
-	// Get triggers background compaction via go s.Prune(); wait for it
-	// to finish so t.TempDir() cleanup doesn't race with it.
-	require.Eventually(t, func() bool {
-		return store.Count() == 0
-	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestList(t *testing.T) {
@@ -487,11 +473,9 @@ func newTestStore(t *testing.T) *Store {
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
-	t.Cleanup(func() {
-		// remove lock/tmp files that background Prune() goroutines may create,
-		// which would otherwise race with t.TempDir() cleanup
-		os.RemoveAll(filepath.Dir(store.instancesPath))
-	})
+	// Get/List fire go s.Prune() which creates flock/tmp files in the temp
+	// dir; wait for them to finish so t.TempDir() cleanup doesn't race.
+	t.Cleanup(func() { store.pruneWG.Wait() })
 	return store
 }
 
@@ -772,12 +756,6 @@ func TestListFiltersExpired(t *testing.T) {
 	if list[0].AgentID != "OxLive" {
 		t.Errorf("expected OxLive, got %q", list[0].AgentID)
 	}
-
-	// background compaction may fire; wait for it so t.TempDir() cleanup
-	// doesn't race with the Prune goroutine.
-	require.Eventually(t, func() bool {
-		return store.Count() == 1
-	}, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestShouldCompact(t *testing.T) {
