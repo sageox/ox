@@ -261,17 +261,16 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 // makeLFSReconciler returns a ReconcileLFS callback that strips orphaned LFS
 // pointer stubs and squashes unpushed history so the push can succeed.
 // Returns nil (no reconciliation) if no endpoint is available.
-func makeLFSReconciler(ep string) func(string) bool {
+func makeLFSReconciler(ep string) func(string) (bool, error) {
 	if ep == "" {
 		return nil
 	}
-	return func(repoPath string) bool {
+	return func(repoPath string) (bool, error) {
 		result, err := lfs.ReconcileUnpushedPointers(
 			context.Background(), repoPath, ep, slog.Default())
 		if err != nil {
-			slog.Warn("lfs reconciliation failed", "error", err)
-			return false
+			return false, err
 		}
-		return result.Replaced > 0
+		return result.Replaced > 0, nil
 	}
 }

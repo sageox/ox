@@ -30,8 +30,11 @@ type PushOpts struct {
 	// retries the push once. This allows the caller to wire lfs.ReconcileUnpushedPointers
 	// (which strips orphaned pointer stubs and squashes history) without creating
 	// an import cycle between gitutil and lfs.
-	// Returns true if reconciliation made changes worth retrying.
-	ReconcileLFS func(repoPath string) bool
+	// Returns (true, nil) if reconciliation made changes worth retrying.
+	// Returns (false, err) if reconciliation failed — err is logged and the
+	// original push error is returned to the caller with the reconciliation
+	// error appended for diagnostics.
+	ReconcileLFS func(repoPath string) (changed bool, err error)
 
 	// MaxRetries is the number of push attempts. Zero means use default (3).
 	// To attempt exactly once with no retries, set to 1.
@@ -127,7 +130,14 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 		if strings.Contains(outStr, lfsObjectsMissing) {
 			if opts.ReconcileLFS != nil {
 				log.Info("push failed (LFS objects missing), attempting reconciliation", "attempt", attempt)
-				if opts.ReconcileLFS(repoPath) {
+				changed, reconcileErr := opts.ReconcileLFS(repoPath)
+				if reconcileErr != nil {
+					log.Warn("lfs reconciliation failed", "error", reconcileErr)
+					// don't surface reconciliation internals to the user —
+					// they see the push error, we log the reconciliation error
+					return fmt.Errorf("git push failed (not retryable): %s", outStr)
+				}
+				if changed {
 					log.Info("lfs reconciliation made changes, retrying push")
 					continue // retry immediately
 				}

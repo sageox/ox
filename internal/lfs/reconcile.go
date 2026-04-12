@@ -86,12 +86,15 @@ func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL stri
 		return result, fmt.Errorf("lfs client: %w", err)
 	}
 
-	objects := make([]BatchObject, len(pointers))
-	oidToIdx := make(map[string]int, len(pointers))
+	// deduplicate OIDs — multiple pointer files can reference the same blob
+	oidToIndices := make(map[string][]int, len(pointers))
+	var uniqueObjects []BatchObject
 	for i, p := range pointers {
 		bareOID := p.ref.BareOID()
-		objects[i] = BatchObject{OID: bareOID, Size: p.ref.Size}
-		oidToIdx[bareOID] = i
+		if _, seen := oidToIndices[bareOID]; !seen {
+			uniqueObjects = append(uniqueObjects, BatchObject{OID: bareOID, Size: p.ref.Size})
+		}
+		oidToIndices[bareOID] = append(oidToIndices[bareOID], i)
 	}
 
 	// batch-check in chunks — the LFS Batch API request body can exceed WAF
@@ -99,12 +102,12 @@ func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL stri
 	// of JSON, so 50 per chunk stays well under the limit.
 	const batchChunkSize = 50
 	missing := make(map[int]bool)
-	for start := 0; start < len(objects); start += batchChunkSize {
+	for start := 0; start < len(uniqueObjects); start += batchChunkSize {
 		end := start + batchChunkSize
-		if end > len(objects) {
-			end = len(objects)
+		if end > len(uniqueObjects) {
+			end = len(uniqueObjects)
 		}
-		chunk := objects[start:end]
+		chunk := uniqueObjects[start:end]
 
 		resp, err := client.BatchDownload(chunk)
 		if err != nil {
@@ -113,7 +116,8 @@ func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL stri
 
 		for _, obj := range resp.Objects {
 			if obj.Error != nil {
-				if idx, ok := oidToIdx[obj.OID]; ok {
+				// mark ALL files that reference this OID, not just one
+				for _, idx := range oidToIndices[obj.OID] {
 					missing[idx] = true
 				}
 			}
@@ -164,14 +168,14 @@ func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL stri
 	// squash all unpushed commits into one — GitLab's pre-receive hook checks
 	// every commit in the push, not just HEAD. Without squashing, old commits
 	// still reference the missing LFS OIDs and the push is still rejected.
+	// a failed squash is a real error: the replacement commit exists but old
+	// commits still poison the push pack
 	if sqErr := squashUnpushed(ctx, ledgerPath, msg); sqErr != nil {
-		logger.Warn("lfs reconcile: squash failed, push may still fail", "error", sqErr)
-	} else {
-		result.Squashed = true
+		return result, fmt.Errorf("pointer replacement committed but squash failed (push will still fail): %w", sqErr)
 	}
+	result.Squashed = true
 
-	logger.Info("lfs reconcile complete",
-		"replaced", result.Replaced, "squashed", result.Squashed)
+	logger.Info("lfs reconcile complete", "replaced", result.Replaced)
 	return result, nil
 }
 

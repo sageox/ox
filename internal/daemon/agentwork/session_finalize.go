@@ -1005,17 +1005,16 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
 		Logger:              h.logger,
-		ReconcileLFS: func(repoPath string) bool {
+		ReconcileLFS: func(repoPath string) (bool, error) {
 			if ep == "" {
-				return false
+				return false, nil
 			}
 			result, reconcileErr := lfs.ReconcileUnpushedPointers(
 				context.Background(), repoPath, ep, h.logger)
 			if reconcileErr != nil {
-				h.logger.Warn("lfs reconciliation failed", "error", reconcileErr)
-				return false
+				return false, reconcileErr
 			}
-			return result.Replaced > 0
+			return result.Replaced > 0, nil
 		},
 	}); err != nil {
 		h.logger.Warn("git push failed (non-fatal)", "err", err)

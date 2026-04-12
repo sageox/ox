@@ -117,7 +117,8 @@ test-integration: ## Integration tests live in sageox/ox-test-harness
 
 check-no-git-lfs-shell: ## Ensure no code shells out to git-lfs binary (see .claude/rules/lfs-no-git-lfs-binary.md)
 	@if grep -r --include='*.go' -nE 'exec\.(Command|CommandContext)\("git",\s*"lfs"|exec\.(Command|CommandContext)\("git-lfs"|LookPath\("git-lfs"\)' . 2>/dev/null \
-		| grep -v _test.go | grep -v vendor/ | grep -v '^\s*//' | grep -v 'doc\.go'; then \
+		| grep -v '_test\.go:' | grep -v 'vendor/' | grep -v 'doc\.go:' \
+		| grep -vE ':[0-9]+:[[:space:]]*//' ; then \
 		echo "ERROR: ox must not shell out to git-lfs. See .claude/rules/lfs-no-git-lfs-binary.md"; \
 		exit 1; \
 	fi

@@ -329,16 +329,15 @@ func (m *GitHubSyncManager) pushLedger(ctx context.Context, ledgerPath string) e
 			}
 			return nil
 		},
-		ReconcileLFS: func(repoPath string) bool {
+		ReconcileLFS: func(repoPath string) (bool, error) {
 			if ep == "" {
-				return false
+				return false, nil
 			}
 			result, err := lfs.ReconcileUnpushedPointers(ctx, repoPath, ep, m.logger)
 			if err != nil {
-				m.logger.Warn("lfs reconciliation failed", "error", err)
-				return false
+				return false, err
 			}
-			return result.Replaced > 0
+			return result.Replaced > 0, nil
 		},
 	})
 }
