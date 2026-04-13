@@ -26,7 +26,7 @@ import (
 // entirely.
 func TestLoginProceedsWhenTokenRefreshFails(t *testing.T) {
 	// Mock server: return 404 on /oauth2/token (refresh) and 200 on
-	// /api/auth/device/code (device flow) so we can detect that login
+	// /api/v1/device/code (device flow) so we can detect that login
 	// proceeded past the refresh failure.
 	var deviceCodeRequested atomic.Bool
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,7 +34,7 @@ func TestLoginProceedsWhenTokenRefreshFails(t *testing.T) {
 		case "/oauth2/token":
 			// Simulate the 404 that triggered the original bug
 			w.WriteHeader(http.StatusNotFound)
-		case "/api/auth/device/code":
+		case "/api/v1/device/code":
 			deviceCodeRequested.Store(true)
 			// Return a valid device code response so the flow proceeds
 			w.Header().Set("Content-Type", "application/json")

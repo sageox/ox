@@ -54,6 +54,12 @@ func ValidateTokenServerSide(ep, accessToken string) error {
 
 	// read error body for context
 	body, _ := io.ReadAll(resp.Body)
+	slog.Debug("server-side token validation rejected",
+		"endpoint", ep,
+		"status", resp.StatusCode,
+		"response", string(body),
+	)
+
 	var errResp struct {
 		Error            string `json:"error"`
 		ErrorDescription string `json:"error_description"`

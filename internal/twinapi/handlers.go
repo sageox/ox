@@ -10,7 +10,7 @@ func (tw *Twin) apiMux() http.Handler {
 	mux := http.NewServeMux()
 
 	// device flow
-	mux.HandleFunc("POST /api/auth/device/code", tw.handleDeviceCode)
+	mux.HandleFunc("POST /api/v1/device/code", tw.handleDeviceCode)
 	mux.HandleFunc("POST /api/v1/device/token", tw.handleDeviceToken)
 
 	// JWT exchange
