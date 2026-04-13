@@ -614,6 +614,7 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 			AgentType:               d.heartbeat.GetAgentType(agentID),
 			ParentPID:               d.heartbeat.GetAgentPID(agentID),
 			LastWhisper:             d.heartbeat.GetAgentLastWhisper(agentID),
+			PrincipalID:             d.heartbeat.GetAgentPrincipalID(agentID),
 		})
 	}
 

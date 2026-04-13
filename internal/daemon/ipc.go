@@ -418,6 +418,10 @@ type InstanceInfo struct {
 	// LastWhisper is when whispers were last delivered to this agent.
 	// Zero if no whispers have been delivered in the current daemon session.
 	LastWhisper time.Time `json:"last_whisper,omitempty"`
+
+	// PrincipalID is the human principal's identifier (e.g., "ryan").
+	// Used for teammate attribution in activity displays.
+	PrincipalID string `json:"principal_id,omitempty"`
 }
 
 // InstancesResponse is the response for the instances IPC message.

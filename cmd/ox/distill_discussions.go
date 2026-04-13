@@ -502,11 +502,12 @@ func parseFactDate(content, filename string) string {
 
 // DiscussionIndexEntry holds data for one line in the per-discussion index.
 type DiscussionIndexEntry struct {
-	DirName     string
-	Title       string
-	Date        string   // YYYY-MM-DD
-	VisualTypes []string // content types from keyframes
-	HasSummary  bool     // server-generated summary.json exists
+	DirName      string
+	Title        string
+	Date         string   // YYYY-MM-DD
+	VisualTypes  []string // content types from keyframes
+	HasSummary   bool     // server-generated summary.json exists
+	Participants []string // unique speaker names from transcript
 }
 
 // BuildDiscussionIndex scans the discussions/ directory and returns entries

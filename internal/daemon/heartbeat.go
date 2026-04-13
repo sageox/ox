@@ -73,6 +73,10 @@ type HeartbeatPayload struct {
 	// Captured via os.Getppid() in the CLI. Used by the daemon for instant liveness
 	// detection via kill(pid, 0) instead of waiting for heartbeat timeout.
 	ParentPID int `json:"parent_pid,omitempty"`
+
+	// PrincipalID is the human principal's identifier (e.g., "ryan").
+	// Used for teammate attribution in whispers and heartbeat activity.
+	PrincipalID string `json:"principal_id,omitempty"`
 }
 
 // HeartbeatCreds contains credentials for the daemon.
@@ -149,9 +153,10 @@ type HeartbeatHandler struct {
 
 	// per-agent metadata (parent/type) from heartbeats — enables cross-worktree visibility
 	metaMu        sync.RWMutex
-	agentParentID map[string]string // agent_id → parent agent ID
-	agentType     map[string]string // agent_id → agent type
-	agentPID      map[string]int    // agent_id → parent process ID
+	agentParentID   map[string]string // agent_id → parent agent ID
+	agentType       map[string]string // agent_id → agent type
+	agentPID        map[string]int    // agent_id → parent process ID
+	agentPrincipal  map[string]string // agent_id → human principal ID
 
 	// per-agent whisper delivery tracking
 	whisperMu       sync.RWMutex
@@ -205,6 +210,7 @@ func NewHeartbeatHandler(logger *slog.Logger) *HeartbeatHandler {
 		agentParentID:      make(map[string]string),
 		agentType:          make(map[string]string),
 		agentPID:           make(map[string]int),
+		agentPrincipal:     make(map[string]string),
 		agentLastWhisper:   make(map[string]time.Time),
 	}
 }
@@ -422,9 +428,9 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 			h.ctxMu.Unlock()
 		}
 
-		// store agent metadata (parent/type/pid) if provided.
+		// store agent metadata (parent/type/pid/principal) if provided.
 		// only track agents already admitted by the bounded activity tracker.
-		if h.agentActivity.Has(hb.AgentID) && (hb.ParentAgentID != "" || hb.AgentType != "" || hb.ParentPID > 0) {
+		if h.agentActivity.Has(hb.AgentID) && (hb.ParentAgentID != "" || hb.AgentType != "" || hb.ParentPID > 0 || hb.PrincipalID != "") {
 			h.metaMu.Lock()
 			if hb.ParentAgentID != "" {
 				h.agentParentID[hb.AgentID] = hb.ParentAgentID
@@ -434,6 +440,9 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 			}
 			if hb.ParentPID > 0 {
 				h.agentPID[hb.AgentID] = hb.ParentPID
+			}
+			if hb.PrincipalID != "" {
+				h.agentPrincipal[hb.AgentID] = hb.PrincipalID
 			}
 			h.metaMu.Unlock()
 		}
@@ -600,6 +609,13 @@ func (h *HeartbeatHandler) GetAgentPID(agentID string) int {
 	return h.agentPID[agentID]
 }
 
+// GetAgentPrincipalID returns the human principal ID for the given agent, or empty.
+func (h *HeartbeatHandler) GetAgentPrincipalID(agentID string) string {
+	h.metaMu.RLock()
+	defer h.metaMu.RUnlock()
+	return h.agentPrincipal[agentID]
+}
+
 // RecordWhisperDelivery records that whispers were delivered to the agent right now.
 func (h *HeartbeatHandler) RecordWhisperDelivery(agentID string) {
 	if agentID == "" {
@@ -650,6 +666,11 @@ func (h *HeartbeatHandler) CleanupStaleAgents(activeIDs []string) {
 	for id := range h.agentPID {
 		if _, ok := active[id]; !ok {
 			delete(h.agentPID, id)
+		}
+	}
+	for id := range h.agentPrincipal {
+		if _, ok := active[id]; !ok {
+			delete(h.agentPrincipal, id)
 		}
 	}
 	h.metaMu.Unlock()

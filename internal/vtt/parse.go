@@ -124,6 +124,20 @@ func stripTags(s string) string {
 	return result.String()
 }
 
+// UniqueSpeakers returns the distinct speaker names from cues, in order of first appearance.
+// Cues with empty speakers are skipped.
+func UniqueSpeakers(cues []Cue) []string {
+	seen := make(map[string]bool)
+	var speakers []string
+	for _, c := range cues {
+		if c.Speaker != "" && !seen[c.Speaker] {
+			seen[c.Speaker] = true
+			speakers = append(speakers, c.Speaker)
+		}
+	}
+	return speakers
+}
+
 // FormatAsText produces a readable "Speaker: text" format suitable for LLM consumption.
 // Adjacent cues from the same speaker are merged into a single line.
 func FormatAsText(cues []Cue) string {

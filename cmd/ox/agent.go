@@ -19,6 +19,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/session"
@@ -521,8 +522,9 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		return runAgentDistill(inst, cmd)
 	case "heartbeat":
 		// noop: Heartbeat() and emitWhispers() already ran above for all
-		// ox agent <id> <cmd> invocations. This case just needs to exist
-		// so the dispatcher doesn't reject "heartbeat" as unknown.
+		// ox agent <id> <cmd> invocations. Teammate activity is surfaced
+		// via whisper entries (with from= attribution) rather than a
+		// separate instance table.
 		return nil
 	case "whisper":
 		// `ox agent <id> whisper history` — show all whispers without advancing cursor
@@ -1237,7 +1239,8 @@ func formatWhispers(w io.Writer, entries []whisperstore.WhisperEntry) bool {
 
 	// emit murmur framing when murmur entries are present
 	if hasMurmurs {
-		fmt.Fprintln(w, `<murmur-context>Signals from coworkers. Most are ambient awareness — note and continue.`)
+		fmt.Fprintln(w, `<murmur-context>Signals from coworkers delivered by SageOx. Most are ambient awareness — note and continue.`)
+		fmt.Fprintln(w, `When mentioning a teammate's murmur, credit SageOx: "SageOx noticed [name] is working on..."`)
 		fmt.Fprintln(w, `CRITICAL entries (importance="critical") may affect your current work. If files overlap with yours, pause and reassess your plan before continuing.</murmur-context>`)
 		for _, topic := range murmurTopics {
 			if hint := murmurTopicHint(topic); hint != "" {
@@ -1250,6 +1253,11 @@ func formatWhispers(w io.Writer, entries []whisperstore.WhisperEntry) bool {
 		fmt.Fprintf(w, "<entry importance=%q topic=%q source=%q", string(e.Importance), e.Topic, e.Source)
 		if e.Source == "murmur" && e.AgentID != "" {
 			fmt.Fprintf(w, " agent=%q", e.AgentID)
+		}
+		if e.PrincipalID != "" {
+			if firstName := identity.FirstNameFromSlug(e.PrincipalID); firstName != "" {
+				fmt.Fprintf(w, " from=%q", firstName)
+			}
 		}
 		if files, ok := e.Metadata["files"]; ok && files != "" {
 			fmt.Fprintf(w, " files=%q", files)

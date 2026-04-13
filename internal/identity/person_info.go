@@ -129,6 +129,16 @@ func splitIdentifier(s string) []string {
 	})
 }
 
+// FirstNameFromSlug extracts and capitalizes the first name from a principal slug.
+// "ryan-snodgrass" → "Ryan", "ryan" → "Ryan", "" → "".
+func FirstNameFromSlug(slug string) string {
+	parts := splitIdentifier(slug)
+	if len(parts) == 0 {
+		return ""
+	}
+	return capitalize(parts[0])
+}
+
 // capitalize uppercases the first rune, leaving the rest unchanged.
 func capitalize(s string) string {
 	if s == "" {

@@ -98,6 +98,12 @@ func Heartbeat(repoPath string, teamIDs []string, agentID string) {
 				hbCreds.AuthToken = token.AccessToken
 				hbCreds.UserEmail = token.UserInfo.Email
 				hbCreds.UserID = token.UserInfo.UserID
+				// derive principal ID for teammate attribution
+				if token.UserInfo.Name != "" {
+					payload.PrincipalID = token.UserInfo.Name
+				} else if token.UserInfo.Email != "" {
+					payload.PrincipalID = token.UserInfo.Email
+				}
 			}
 			payload.Credentials = hbCreds
 		}

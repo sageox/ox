@@ -11,6 +11,7 @@ import (
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/vtt"
 	"github.com/sageox/ox/pkg/discussion"
 	"github.com/spf13/cobra"
 )
@@ -114,6 +115,13 @@ func listRecentDiscussions(out io.Writer, discussionsDir string) bool {
 			de.Title = meta.Title
 		}
 
+		// extract unique speaker names from transcript.vtt
+		if data, err := os.ReadFile(filepath.Join(dirPath, "transcript.vtt")); err == nil {
+			if cues, err := vtt.Parse(data); err == nil {
+				de.Participants = vtt.UniqueSpeakers(cues)
+			}
+		}
+
 		// detect visual content from keyframes.json
 		if kf, err := discussion.LoadKeyframes(dirPath); err == nil && kf != nil {
 			de.VisualTypes = discussion.AllVisualTypes(kf)
@@ -146,8 +154,18 @@ func listRecentDiscussions(out io.Writer, discussionsDir string) bool {
 			label = d.Title
 		}
 		dirPath := filepath.Join(discussionsDir, d.DirName)
+
+		// build suffix parts: participants and visual types
+		var suffixes []string
+		if len(d.Participants) > 0 {
+			suffixes = append(suffixes, strings.Join(d.Participants, ", "))
+		}
 		if len(d.VisualTypes) > 0 {
-			fmt.Fprintf(out, "- %s [%s] — %s\n", label, strings.Join(d.VisualTypes, ", "), dirPath)
+			suffixes = append(suffixes, strings.Join(d.VisualTypes, ", "))
+		}
+
+		if len(suffixes) > 0 {
+			fmt.Fprintf(out, "- %s (%s) — %s\n", label, strings.Join(suffixes, "; "), dirPath)
 		} else {
 			fmt.Fprintf(out, "- %s — %s\n", label, dirPath)
 		}
