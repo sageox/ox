@@ -13,7 +13,7 @@ const (
 	deviceCodeExpiry     = 5 * time.Minute
 )
 
-// handleDeviceCode handles POST /api/v1/device/code.
+// handleDeviceCode handles POST /api/auth/device/code.
 // Initiates the device authorization flow by returning a device code and user code.
 func (tw *Twin) handleDeviceCode(w http.ResponseWriter, r *http.Request) {
 	dc := &DeviceCode{

@@ -58,7 +58,7 @@ func TestDeviceFlowEndpoints(t *testing.T) {
 		endpoint string
 		expected string
 	}{
-		{"DeviceCodeEndpoint", DeviceCodeEndpoint, "/api/v1/device/code"},
+		{"DeviceCodeEndpoint", DeviceCodeEndpoint, "/api/auth/device/code"},
 		{"DeviceTokenEndpoint", DeviceTokenEndpoint, "/api/v1/device/token"},
 		{"UserInfoEndpoint", UserInfoEndpoint, "/oauth2/userinfo"},
 	}

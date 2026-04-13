@@ -68,7 +68,7 @@ func TestDeviceFlow_HappyPath(t *testing.T) {
 	client := &http.Client{Timeout: 5 * time.Second}
 
 	// step 1: request device code
-	resp, err := client.Post(tw.APIURL+"/api/v1/device/code", "application/json", nil)
+	resp, err := client.Post(tw.APIURL+"/api/auth/device/code", "application/json", nil)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -130,7 +130,7 @@ func TestDeviceFlow_NoUsers_Pending(t *testing.T) {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	resp, err := client.Post(tw.APIURL+"/api/v1/device/code", "application/json", nil)
+	resp, err := client.Post(tw.APIURL+"/api/auth/device/code", "application/json", nil)
 	require.NoError(t, err)
 	var codeResp map[string]any
 	json.NewDecoder(resp.Body).Decode(&codeResp)
