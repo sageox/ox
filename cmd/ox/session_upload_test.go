@@ -229,7 +229,7 @@ func TestSessionStart_NoOAuthGate_RegressionTest(t *testing.T) {
 	// deliberately do NOT save any auth token — simulates expired/missing OAuth
 
 	// verify auth is indeed missing
-	authenticated, _ := auth.IsAuthenticated()
+	authenticated, _ := auth.IsAuthCredentialValid()
 	require.False(t, authenticated, "precondition: must have no valid auth token")
 
 	inst := &agentinstance.Instance{

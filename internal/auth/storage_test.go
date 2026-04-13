@@ -580,7 +580,7 @@ func TestIsAuthenticatedForEndpoint_NormalizesPrefixedInput(t *testing.T) {
 	require.NoError(t, client.SaveTokenForEndpoint("https://sageox.ai", token))
 
 	// check auth with prefixed endpoint
-	authed, err := client.IsAuthenticatedForEndpoint("https://app.sageox.ai")
+	authed, err := client.IsAuthCredentialValidForEndpoint("https://app.sageox.ai")
 	require.NoError(t, err)
 	assert.True(t, authed, "should find token via prefixed endpoint")
 }

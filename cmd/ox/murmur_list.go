@@ -370,7 +370,7 @@ func collectMurmurDiagnostics(projectRoot string) *murmurListDiagnostic {
 
 	// check auth
 	ep := endpoint.GetForProject(projectRoot)
-	authenticated, _ := auth.IsAuthenticatedForEndpoint(ep)
+	authenticated, _ := auth.IsAuthCredentialValidForEndpoint(ep)
 	diag.Authenticated = authenticated
 
 	// check ledger

@@ -311,7 +311,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// check if user is authenticated — degraded mode if not (recording continues locally)
 	if auth.IsAuthRequired() {
-		authenticated, authErr := auth.IsAuthenticatedForEndpoint(projectEndpoint)
+		authenticated, authErr := auth.IsAuthCredentialValidForEndpoint(projectEndpoint)
 		if !authenticated {
 			endpointSlug := endpoint.NormalizeSlug(projectEndpoint)
 
@@ -371,7 +371,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	capturePrior := buildCapturePriorGuidance(agentID)
 
 	// check auth status for attribution warning
-	isLoggedIn, _ := auth.IsAuthenticated()
+	isLoggedIn, _ := auth.IsAuthCredentialValid()
 
 	// check for .needs-doctor-agent marker
 	needsDoctorAgent := doctor.NeedsDoctorAgent(projectRoot)

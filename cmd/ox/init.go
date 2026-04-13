@@ -392,14 +392,21 @@ func runInit() error {
 	} else {
 		// fetch teams from API to determine if selection is needed
 		teamClient := api.NewRepoClient()
-		if token, err := auth.EnsureValidToken(300); err == nil && token != nil && token.AccessToken != "" {
+		currentEP := endpoint.Get()
+		token, tokenErr := auth.EnsureValidToken(300)
+		if tokenErr != nil {
+			slog.Debug("token ensure failed after auth gate passed", "endpoint", currentEP, "error", tokenErr)
+		}
+		if token != nil && token.AccessToken != "" {
 			teamClient.WithAuthToken(token.AccessToken)
+		} else {
+			slog.Warn("no usable token for team fetch despite passing auth gate", "endpoint", currentEP, "token_err", tokenErr)
 		}
 
 		reposResp, err := teamClient.GetRepos()
 		if err != nil {
 			slog.Debug("failed to fetch teams", "error", err)
-			cli.PrintWarning(fmt.Sprintf("Could not fetch teams: %v", err))
+			cli.PrintWarning(fmt.Sprintf("Could not fetch teams from %s: %v", endpoint.NormalizeSlug(currentEP), err))
 			fmt.Println()
 			if !cli.ConfirmYesNo("Continue without team selection? (a new team may be created)", false) {
 				return fmt.Errorf("team selection canceled")

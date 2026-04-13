@@ -11,7 +11,7 @@ func RequireAuth() error {
 		return nil
 	}
 
-	authenticated, err := IsAuthenticated()
+	authenticated, err := IsAuthCredentialValid()
 	if err != nil {
 		return fmt.Errorf("failed to check authentication status: %w", err)
 	}

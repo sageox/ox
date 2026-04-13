@@ -607,25 +607,25 @@ func TestAuthClient_IsAuthenticated_EmptyEndpoint(t *testing.T) {
 	assert.True(t, authed)
 }
 
-// --- Package-level IsAuthenticated / IsAuthenticatedForEndpoint ---
+// --- Package-level IsAuthCredentialValid / IsAuthCredentialValidForEndpoint ---
 
-func TestPackageLevel_IsAuthenticated_NoToken(t *testing.T) {
+func TestPackageLevel_IsAuthCredentialValid_NoToken(t *testing.T) {
 	setupPackageLevelTest(t)
 
-	authed, err := IsAuthenticated()
+	authed, err := IsAuthCredentialValid()
 	require.NoError(t, err)
 	assert.False(t, authed)
 }
 
-func TestPackageLevel_IsAuthenticatedForEndpoint_NoToken(t *testing.T) {
+func TestPackageLevel_IsAuthCredentialValidForEndpoint_NoToken(t *testing.T) {
 	setupPackageLevelTest(t)
 
-	authed, err := IsAuthenticatedForEndpoint("https://example.com")
+	authed, err := IsAuthCredentialValidForEndpoint("https://example.com")
 	require.NoError(t, err)
 	assert.False(t, authed)
 }
 
-func TestPackageLevel_IsAuthenticatedForEndpoint_ValidToken(t *testing.T) {
+func TestPackageLevel_IsAuthCredentialValidForEndpoint_ValidToken(t *testing.T) {
 	setupPackageLevelTest(t)
 
 	ep := "https://auth-check.example.com"
@@ -635,12 +635,12 @@ func TestPackageLevel_IsAuthenticatedForEndpoint_ValidToken(t *testing.T) {
 	}
 	require.NoError(t, SaveTokenForEndpoint(ep, token))
 
-	authed, err := IsAuthenticatedForEndpoint(ep)
+	authed, err := IsAuthCredentialValidForEndpoint(ep)
 	require.NoError(t, err)
 	assert.True(t, authed)
 }
 
-func TestPackageLevel_IsAuthenticatedForEndpoint_ExpiredWithRefresh(t *testing.T) {
+func TestPackageLevel_IsAuthCredentialValidForEndpoint_ExpiredWithRefresh(t *testing.T) {
 	setupPackageLevelTest(t)
 
 	ep := "https://expired-auth.example.com"
@@ -652,7 +652,7 @@ func TestPackageLevel_IsAuthenticatedForEndpoint_ExpiredWithRefresh(t *testing.T
 	require.NoError(t, SaveTokenForEndpoint(ep, token))
 
 	// refresh will fail (no server), so should return error
-	authed, err := IsAuthenticatedForEndpoint(ep)
+	authed, err := IsAuthCredentialValidForEndpoint(ep)
 	assert.False(t, authed)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "token refresh failed")

@@ -286,32 +286,9 @@ func (t *StoredToken) IsExpired(bufferSeconds int) bool {
 	return threshold.After(t.ExpiresAt)
 }
 
-// IsAuthenticated checks if a valid non-expired token exists for the current endpoint
-func IsAuthenticated() (bool, error) {
-	return IsAuthenticatedForEndpoint(endpoint.Get())
-}
-
-// IsAuthenticatedForEndpoint checks if a valid token exists for a specific endpoint.
-// If the access token is expired but a refresh token exists, attempts auto-refresh
-// before reporting unauthenticated.
-func IsAuthenticatedForEndpoint(ep string) (bool, error) {
-	token, err := EnsureValidTokenForEndpoint(ep, 0)
-	if err != nil {
-		// refresh failed — check if we at least have a stored token (expired)
-		// to distinguish "not logged in" from "token refresh failed"
-		raw, _ := GetTokenForEndpoint(ep)
-		if raw != nil {
-			return false, fmt.Errorf("token refresh failed: %w", err)
-		}
-		return false, nil
-	}
-
-	if token == nil {
-		return false, nil
-	}
-
-	return true, nil
-}
+// Auth validation functions (IsAuthenticated, IsAuthenticatedForEndpoint,
+// IsAuthCredentialValid, IsAuthCredentialValidForEndpoint, ValidateTokenServerSide)
+// are defined in validate.go
 
 // --- AuthClient Methods ---
 // These methods allow using custom config directories for testing isolation.
@@ -431,23 +408,21 @@ func (c *AuthClient) RemoveTokenForEndpoint(ep string) error {
 	}, legacyOpt, trackerOpt)
 }
 
-// IsAuthenticated checks if a valid non-expired token exists for this client's endpoint
+// IsAuthenticated checks if a locally valid token exists for this client's endpoint.
+// AuthClient is used for test isolation — uses local-only check (no server call).
 func (c *AuthClient) IsAuthenticated() (bool, error) {
 	ep := c.endpoint
 	if ep == "" {
 		ep = endpoint.Get()
 	}
-	return c.IsAuthenticatedForEndpoint(ep)
+	return c.IsAuthCredentialValidForEndpoint(ep)
 }
 
-// IsAuthenticatedForEndpoint checks if a valid token exists for a specific endpoint.
-// If the access token is expired but a refresh token exists, attempts auto-refresh
-// before reporting unauthenticated.
-func (c *AuthClient) IsAuthenticatedForEndpoint(ep string) (bool, error) {
+// IsAuthCredentialValidForEndpoint checks if a locally valid token exists for a
+// specific endpoint. Does NOT contact the server. For test isolation only.
+func (c *AuthClient) IsAuthCredentialValidForEndpoint(ep string) (bool, error) {
 	token, err := c.EnsureValidTokenForEndpoint(ep, 0)
 	if err != nil {
-		// refresh failed — check if we at least have a stored token (expired)
-		// to distinguish "not logged in" from "token refresh failed"
 		raw, _ := c.GetTokenForEndpoint(ep)
 		if raw != nil {
 			return false, fmt.Errorf("token refresh failed: %w", err)

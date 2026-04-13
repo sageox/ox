@@ -414,9 +414,9 @@ func getContextualHighlight(cmdName string) *commandHighlight {
 	// check auth: use project-specific endpoint if available, otherwise default
 	var isLoggedIn bool
 	if projectEndpoint := endpoint.GetForProject(gitRoot); projectEndpoint != "" {
-		isLoggedIn, _ = auth.IsAuthenticatedForEndpoint(projectEndpoint)
+		isLoggedIn, _ = auth.IsAuthCredentialValidForEndpoint(projectEndpoint)
 	} else {
-		isLoggedIn, _ = auth.IsAuthenticated()
+		isLoggedIn, _ = auth.IsAuthCredentialValid()
 	}
 
 	switch cmdName {
