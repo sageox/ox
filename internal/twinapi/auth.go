@@ -99,7 +99,7 @@ func (tw *Twin) handleDeviceToken(w http.ResponseWriter, r *http.Request) {
 		"access_token":  token,
 		"refresh_token": refreshToken,
 		"token_type":    "Bearer",
-		"expires_in":    int(defaultJWTExpiry.Seconds()),
+		"expires_in":    int(defaultSessionExpiry.Seconds()),
 	})
 }
 
@@ -122,6 +122,15 @@ func (tw *Twin) handleJWTExchange(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnauthorized, map[string]any{
 			"success": false,
 			"error":   "invalid session token",
+		})
+		return
+	}
+
+	if !tw.store.clock.Before(sess.ExpiresAt) {
+		tw.store.mu.RUnlock()
+		writeJSON(w, http.StatusUnauthorized, map[string]any{
+			"success": false,
+			"error":   "session expired",
 		})
 		return
 	}
@@ -206,7 +215,7 @@ func (tw *Twin) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if sess == nil {
+	if sess == nil || !tw.store.clock.Before(sess.ExpiresAt) {
 		tw.store.mu.Unlock()
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid_grant"})
 		return

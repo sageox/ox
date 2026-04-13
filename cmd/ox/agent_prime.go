@@ -371,7 +371,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	capturePrior := buildCapturePriorGuidance(agentID)
 
 	// check auth status for attribution warning
-	isLoggedIn, _ := auth.IsAuthCredentialValid()
+	isLoggedIn, _ := auth.IsAuthCredentialValidForEndpoint(projectEndpoint)
 
 	// check for .needs-doctor-agent marker
 	needsDoctorAgent := doctor.NeedsDoctorAgent(projectRoot)

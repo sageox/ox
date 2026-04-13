@@ -340,11 +340,12 @@ func TestTokenRefresh_OldRefreshTokenRejected(t *testing.T) {
 	oldRefresh := fix.RefreshToken
 
 	// first refresh succeeds
-	resp, _ := http.DefaultClient.PostForm(tw.APIURL+"/oauth2/token", map[string][]string{
+	resp, err := http.DefaultClient.PostForm(tw.APIURL+"/oauth2/token", map[string][]string{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {oldRefresh},
 		"client_id":     {"ox"},
 	})
+	require.NoError(t, err)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -385,9 +386,10 @@ func TestRevoke_SessionInvalidated(t *testing.T) {
 	fix := tw.WithAuthenticatedUser("revoke@example.com", "Revoker")
 
 	// revoke the session token
-	resp, _ := http.DefaultClient.PostForm(tw.APIURL+"/oauth2/revoke", map[string][]string{
+	resp, err := http.DefaultClient.PostForm(tw.APIURL+"/oauth2/revoke", map[string][]string{
 		"token": {fix.SessionToken},
 	})
+	require.NoError(t, err)
 	resp.Body.Close()
 
 	// JWT exchange should now fail
@@ -471,9 +473,11 @@ func TestCallRecording(t *testing.T) {
 	fix := tw.WithAuthenticatedUser("record@example.com", "Recorder")
 
 	// make a userinfo request
-	req, _ := http.NewRequest("GET", tw.APIURL+"/oauth2/userinfo", nil)
+	req, err := http.NewRequest("GET", tw.APIURL+"/oauth2/userinfo", nil)
+	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer "+fix.JWT)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
 	resp.Body.Close()
 
 	tw.AssertCalled(t, "GET", "/oauth2/userinfo")
@@ -492,9 +496,11 @@ func TestClockAdvance_JWTExpiry(t *testing.T) {
 	fix := tw.WithAuthenticatedUser("clock@example.com", "Clock")
 
 	// verify JWT is valid now
-	req, _ := http.NewRequest("GET", tw.APIURL+"/oauth2/userinfo", nil)
+	req, err := http.NewRequest("GET", tw.APIURL+"/oauth2/userinfo", nil)
+	require.NoError(t, err)
 	req.Header.Set("Authorization", "Bearer "+fix.JWT)
-	resp, _ := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
 	resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
@@ -502,9 +508,11 @@ func TestClockAdvance_JWTExpiry(t *testing.T) {
 	tw.AdvanceTime(25 * time.Hour)
 
 	// same JWT should now fail
-	req2, _ := http.NewRequest("GET", tw.APIURL+"/oauth2/userinfo", nil)
+	req2, err := http.NewRequest("GET", tw.APIURL+"/oauth2/userinfo", nil)
+	require.NoError(t, err)
 	req2.Header.Set("Authorization", "Bearer "+fix.JWT)
-	resp2, _ := http.DefaultClient.Do(req2)
+	resp2, err := http.DefaultClient.Do(req2)
+	require.NoError(t, err)
 	resp2.Body.Close()
 	assert.Equal(t, http.StatusUnauthorized, resp2.StatusCode)
 
@@ -514,9 +522,11 @@ func TestClockAdvance_JWTExpiry(t *testing.T) {
 	tw.store.mu.RUnlock()
 	freshJWT := tw.store.mintJWT(user, defaultJWTExpiry)
 
-	req3, _ := http.NewRequest("GET", tw.APIURL+"/oauth2/userinfo", nil)
+	req3, err := http.NewRequest("GET", tw.APIURL+"/oauth2/userinfo", nil)
+	require.NoError(t, err)
 	req3.Header.Set("Authorization", "Bearer "+freshJWT)
-	resp3, _ := http.DefaultClient.Do(req3)
+	resp3, err := http.DefaultClient.Do(req3)
+	require.NoError(t, err)
 	resp3.Body.Close()
 	assert.Equal(t, http.StatusOK, resp3.StatusCode)
 }

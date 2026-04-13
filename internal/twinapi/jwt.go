@@ -84,7 +84,7 @@ func (s *store) validateJWT(tokenStr string) (*jwtClaims, error) {
 	}
 
 	now := s.now()
-	if now.Unix() > claims.Exp {
+	if now.Unix() >= claims.Exp {
 		return nil, errors.New("JWT expired")
 	}
 

@@ -66,17 +66,31 @@ func TestValidateTokenServerSide_ServerDown(t *testing.T) {
 	assert.Contains(t, err.Error(), "could not reach")
 }
 
-// TestValidateTokenServerSide_ServerRejectsWithUserNotFound verifies that the
-// specific "user account not found" error from JWT exchange is distinguishable.
-// Failure prevented: generic "401" error masking the real cause.
-func TestValidateTokenServerSide_ServerRejectsWithUserNotFound(t *testing.T) {
+// TestValidateTokenServerSide_NonJWTTokenRejected verifies that an opaque
+// session token (not a JWT) is rejected by userinfo validation.
+func TestValidateTokenServerSide_NonJWTTokenRejected(t *testing.T) {
 	tw := twinapi.Start(t)
 
-	// create orphaned session (user doesn't exist), get session token
 	sess := tw.CreateOrphanedSession("usr_ghost")
 
-	// the session token isn't a JWT, so userinfo will reject it as malformed
+	// the session token isn't a JWT, so userinfo rejects it as malformed
 	err := auth.ValidateTokenServerSide(tw.URL(), sess.Token)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server rejected token")
+}
+
+// TestValidateTokenServerSide_UserNotFoundError verifies that the server's
+// "User not found" error is surfaced through validation.
+// Failure prevented: the exact test.sageox.ai bug — server returns descriptive
+// error but CLI showed generic "authentication required".
+func TestValidateTokenServerSide_UserNotFoundError(t *testing.T) {
+	tw := twinapi.Start(t)
+	fix := tw.WithAuthenticatedUser("vanish@example.com", "Vanisher")
+
+	// inject fault that returns the exact error the real server gave us
+	tw.InjectFault("/oauth2/userinfo", 401)
+
+	err := auth.ValidateTokenServerSide(tw.URL(), fix.JWT)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "server rejected token")
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/twinapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -123,9 +124,15 @@ func TestRequireAuth_AuthRequired_ValidToken(t *testing.T) {
 	t.Setenv("FEATURE_AUTH", "true")
 	setupPackageLevelTest(t)
 
+	// RequireAuth now does server-side validation, so we need a twinapi
+	tw := twinapi.Start(t)
+	t.Setenv("SAGEOX_ENDPOINT", tw.URL())
+
+	fix := tw.WithAuthenticatedUser("test@example.com", "Test User")
+
 	token := &StoredToken{
-		AccessToken:  "valid-token",
-		RefreshToken: "refresh",
+		AccessToken:  fix.JWT,
+		RefreshToken: fix.RefreshToken,
 		ExpiresAt:    time.Now().Add(time.Hour),
 		TokenType:    "Bearer",
 	}

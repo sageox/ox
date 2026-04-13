@@ -52,25 +52,38 @@ func (tw *Twin) recordMiddleware(next http.Handler) http.Handler {
 // faultMiddleware intercepts requests and returns configured faults.
 func (tw *Twin) faultMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var (
+			shouldFault bool
+			statusCode  int
+			body        string
+			latency     time.Duration
+		)
+
 		tw.store.mu.Lock()
 		fault, ok := tw.store.faults[r.URL.Path]
 		if ok {
 			fault.count++
 			if fault.count > fault.After {
-				if fault.Latency > 0 {
-					time.Sleep(fault.Latency)
-				}
-				tw.store.mu.Unlock()
-				tw.store.recordCall(r.Method, r.URL.Path, fault.StatusCode)
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(fault.StatusCode)
-				if fault.Body != "" {
-					_, _ = w.Write([]byte(fault.Body))
-				}
-				return
+				shouldFault = true
+				statusCode = fault.StatusCode
+				body = fault.Body
+				latency = fault.Latency
 			}
 		}
 		tw.store.mu.Unlock()
+
+		if shouldFault {
+			if latency > 0 {
+				time.Sleep(latency)
+			}
+			tw.store.recordCall(r.Method, r.URL.Path, statusCode)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(statusCode)
+			if body != "" {
+				_, _ = w.Write([]byte(body))
+			}
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
 }

@@ -619,7 +619,7 @@ func checkGitRepoPaths(fix bool) checkResult {
 			sageoxDir := filepath.Join(gitRoot, ".sageox")
 			if _, err := os.Stat(sageoxDir); err == nil {
 				// .sageox exists - check if authenticated
-				if authenticated, _ := auth.IsAuthCredentialValid(); authenticated {
+				if authenticated, _ := auth.IsAuthenticatedForEndpoint(endpoint.GetForProject(gitRoot)); authenticated {
 					// recently initialized? daemon may not have synced yet
 					if isRecentlyInitialized(gitRoot) {
 						return InfoCheck("git repo paths", "repos syncing",
