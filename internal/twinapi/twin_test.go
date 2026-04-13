@@ -130,13 +130,15 @@ func TestDeviceFlow_NoUsers_Pending(t *testing.T) {
 
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	resp, _ := client.Post(tw.APIURL+"/api/v1/device/code", "application/json", nil)
+	resp, err := client.Post(tw.APIURL+"/api/v1/device/code", "application/json", nil)
+	require.NoError(t, err)
 	var codeResp map[string]any
 	json.NewDecoder(resp.Body).Decode(&codeResp)
 	resp.Body.Close()
 
 	body := fmt.Sprintf(`{"device_code":"%s"}`, codeResp["device_code"])
-	resp2, _ := client.Post(tw.APIURL+"/api/v1/device/token", "application/json", jsonReader(body))
+	resp2, err := client.Post(tw.APIURL+"/api/v1/device/token", "application/json", jsonReader(body))
+	require.NoError(t, err)
 	defer resp2.Body.Close()
 
 	var tokenResp map[string]string
@@ -347,11 +349,12 @@ func TestTokenRefresh_OldRefreshTokenRejected(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// second refresh with OLD token fails (it was rotated)
-	resp2, _ := http.DefaultClient.PostForm(tw.APIURL+"/oauth2/token", map[string][]string{
+	resp2, err := http.DefaultClient.PostForm(tw.APIURL+"/oauth2/token", map[string][]string{
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {oldRefresh},
 		"client_id":     {"ox"},
 	})
+	require.NoError(t, err)
 	defer resp2.Body.Close()
 	assert.Equal(t, http.StatusUnauthorized, resp2.StatusCode)
 }
@@ -365,9 +368,10 @@ func TestRevoke_AlwaysReturns200(t *testing.T) {
 	tw := Start(t)
 
 	// revoke a non-existent token — should still return 200
-	resp, _ := http.DefaultClient.PostForm(tw.APIURL+"/oauth2/revoke", map[string][]string{
+	resp, err := http.DefaultClient.PostForm(tw.APIURL+"/oauth2/revoke", map[string][]string{
 		"token": {"nonexistent_token"},
 	})
+	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
@@ -442,9 +446,11 @@ func TestFaultInjection_AfterN(t *testing.T) {
 	tw.InjectFaultAfter("/oauth2/userinfo", http.StatusServiceUnavailable, 2)
 
 	doRequest := func() int {
-		req, _ := http.NewRequest("GET", tw.APIURL+"/oauth2/userinfo", nil)
+		req, err := http.NewRequest("GET", tw.APIURL+"/oauth2/userinfo", nil)
+		require.NoError(t, err)
 		req.Header.Set("Authorization", "Bearer "+fix.JWT)
-		resp, _ := http.DefaultClient.Do(req)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
 		defer resp.Body.Close()
 		return resp.StatusCode
 	}

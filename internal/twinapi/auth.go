@@ -178,6 +178,7 @@ func (tw *Twin) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 // handleTokenRefresh handles POST /oauth2/token.
 // Accepts grant_type=refresh_token and returns a new JWT + refresh token.
 func (tw *Twin) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
 	if err := r.ParseForm(); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
@@ -236,6 +237,7 @@ func (tw *Twin) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {
 // handleRevoke handles POST /oauth2/revoke.
 // Per RFC 7009, always returns 200 OK. Best-effort removal from store.
 func (tw *Twin) handleRevoke(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
 	if err := r.ParseForm(); err != nil {
 		w.WriteHeader(http.StatusOK)
 		return
