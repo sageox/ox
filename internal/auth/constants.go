@@ -9,7 +9,7 @@ var DefaultScopes = []string{"user:profile", "sageox:write"}
 // Device Flow endpoints (RFC 8628)
 const (
 	DeviceCodeEndpoint  = "/api/auth/device/code"  //nolint:gosec // not a credential
-	DeviceTokenEndpoint = "/api/auth/device/token" //nolint:gosec // not a credential
+	DeviceTokenEndpoint = "/api/v1/device/token" //nolint:gosec // not a credential
 	UserInfoEndpoint    = "/oauth2/userinfo"
 )
 

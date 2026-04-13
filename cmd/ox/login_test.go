@@ -47,7 +47,7 @@ func TestLoginProceedsWhenTokenRefreshFails(t *testing.T) {
 				"expires_in": 900,
 				"interval": 5
 			}`))
-		case "/api/auth/device/token":
+		case "/api/v1/device/token":
 			// Poll endpoint — return "authorization_pending" to let the
 			// flow terminate with a context timeout rather than spinning
 			w.Header().Set("Content-Type", "application/json")
