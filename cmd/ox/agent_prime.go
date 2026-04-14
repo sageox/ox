@@ -427,6 +427,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	contentWithAttribution := withAttributionGuidance("", isLoggedIn, attribution)
 
+	// resolve current user's display name so agents can distinguish self vs teammate
+	currentUserName := identity.AttributionDisplayName(endpoint.GetForProject(projectRoot), config.GetDisplayName())
+
 	output := agentPrimeOutput{
 		Status:           "fresh",
 		AgentID:          agentID,
@@ -450,6 +453,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		NeedsDoctorAgent: needsDoctorAgent,
 		DoctorHint:       doctorHint,
 		HooksInstalled:   hooksInstalled,
+		CurrentUserName:  currentUserName,
 	}
 
 	// populate cumulative context stats from daemon (best-effort).
