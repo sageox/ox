@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-04-13
+
+### Added
+
+**Multi-agent init and teammate discovery**
+- `ox init` now presents a multi-select agent prompt so teams can onboard multiple AI coworkers at once
+- `ox agent prime` surfaces teammate names and credits SageOx throughout sessions
+
+**Session history and distillation**
+- `ox distill history list`, `show`, and `since` commands for browsing distilled session knowledge
+- Unique entry IDs (`eid`) added to raw.jsonl session entries for reliable deduplication
+- `ox distill --quiet` suppresses stdout for non-interactive use
+
+**Observability**
+- OpenTelemetry tracing with per-command trace context and W3C `traceparent` headers on CLI HTTP requests
+- Per-task OTel trace contexts in the daemon
+- Enriched CLI spans for better production debugging
+
+**Daemon event hooks**
+- Extensible hook system for daemon events, enabling automation on session lifecycle changes
+
+**PR review workflow**
+- New `/monitor-pr` skill drives open pull requests to green by triaging CI failures and review threads
+
+**Feature flags**
+- Layered feature flag resolver with disk-cached remote settings
+- Daemon polling, IPC handler, and CLI startup wired for flags
+
+**Attribution**
+- Conditional commit attribution based on SageOx contribution score
+- Unified attribution model removes OAuth gate from session start
+
+**Other**
+- OpenClaw SageOx skills and `clawhub-skill-lint` for community skill quality
+- Server-side token validation and twinapi digital twin for auth
+- Ledger migration system for legacy GitHub data filenames
+- `ox config` surfaces `attribution.commit` and `attribution.pr` settings
+- TUI dashboard redesigned with section-based layout
+- Built-in adapters extracted to external binaries with adapter registry and CLI management
+- Agentx bumped to v0.1.5 for Gemini support and flexible version detection
+- Release testing playbook documentation
+
+### Changed
+- Team timezone feature removed — UTC hardcoded everywhere for consistency
+- `make` targets quiet by default; `V=1` for verbose output
+- Distilled facts now use UUID7 filenames for time-sortable ordering
+- Pure-Go LFS architecture documented; `git-lfs` binary dependency fully removed
+
+### Fixed
+- Vulnerable dependencies bumped (4 Dependabot alerts)
+- `DirtyOverlayDebouncer` stale-timer race in daemon resolved
+- Session recording: prevent empty sessions from being committed, resolve symlinks before file lookup, prevent agent ID orphaning
+- Session upload: resolve all three causes of upload failure; skip LFS stubs in detect loop
+- Distill: carry source links through summary citations, apply lookback window to extraction phase, validate summary content against agent meta-output contamination
+- Auth: flock-based locking prevents `auth.json` TOCTOU race; credential wipe on null tokens prevented
+- Daemon: close leaked file descriptors in workspace scanning
+- Doctor: commit migration changes to ledger, restore `FixLevelAuto`, skip adapter warnings for absent CLIs, restore github-data-migration check
+- Ledger: handle rename/rename conflicts in rebase auto-resolve, prevent multi-node GitHub data conflicts and comment loss
+- Agent: accept session subcommand flags and pick adapter deterministically
+- Murmur: surface diagnostics when list is empty, reduce token noise in file-change output
+- Distill: pick latest snapshot per PR/issue in GitHub indexer, drop mtime filter on session facts
+- OpenClaw skills: enforce 24h window and dedupe state, trim prose, clarify install choice
+- Legacy string-format hooks handled; `ox agent prime` made idempotent
+- Flaky `TestGetExpired` tempdir cleanup race fixed
+
+[0.6.3]: https://github.com/sageox/ox/releases/tag/v0.6.3
+
 ## [0.6.2] - 2026-04-05
 
 ### Added
