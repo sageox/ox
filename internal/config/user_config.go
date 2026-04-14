@@ -329,6 +329,7 @@ type UserConfig struct {
 	Murmuring         string             `yaml:"murmur_send,omitempty"`     // "auto", "manual"
 	LegacyMurmuring   string             `yaml:"murmuring,omitempty"`       // deprecated: read old key on upgrade
 	MurmurReceive     string             `yaml:"murmur_receive,omitempty"`  // "on", "off"
+	RecordingReminder string             `yaml:"recording_reminder,omitempty"` // "on", "off"
 
 }
 

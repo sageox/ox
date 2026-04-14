@@ -80,6 +80,17 @@ type Config struct {
 	// Zero disables nudging (used when murmuring config is "manual").
 	MurmurNudgeInterval time.Duration
 
+	// RecordingReminderInterval is how often to remind agents that their
+	// session is being recorded. Default 1 hour. Not user-visible in
+	// ox config but settable via daemon config for testing (e.g., 1 minute).
+	// Zero disables reminders.
+	RecordingReminderInterval time.Duration
+
+	// RecordingReminderTick is how often the reminder source checks for
+	// agents that need reminding. Default 1 minute. Set lower for testing.
+	// Zero uses the source default (1 minute).
+	RecordingReminderTick time.Duration
+
 	// SocketCheckInterval is how often the daemon checks the registry to see if
 	// its PID is still registered. If a different PID is registered, the daemon
 	// assumes it has been superseded and exits gracefully.
@@ -114,6 +125,7 @@ func DefaultConfig() *Config {
 		LedgerCheckInterval:     15 * time.Minute, // check if ledger index needs rebuild every 15 minutes
 		GitHubSyncInterval:      15 * time.Minute, // sync PRs/issues every 15 minutes
 		MurmurNudgeInterval:     15 * time.Minute, // nudge agents to self-report every 15 minutes
+		RecordingReminderInterval: 1 * time.Hour,  // remind agents recording is active
 		InactivityTimeout:       1 * time.Hour,    // exit after 1 hour of inactivity
 		SocketCheckInterval:     30 * time.Second, // detect socket takeover by new daemon
 		PendingWorkGracePeriod:  10 * time.Minute, // max time to stay alive for pending finalization

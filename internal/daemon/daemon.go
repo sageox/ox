@@ -1151,6 +1151,16 @@ func (d *Daemon) startWorkers() {
 			d.murmurNudgeSource = NewMurmurNudgeSource(d.whisperRegistry.LedgerStore(), d.heartbeat, d.config.MurmurNudgeInterval, d.config.ProjectRoot)
 			ws.RegisterSource(d.murmurNudgeSource)
 		}
+		if d.config.RecordingReminderInterval > 0 {
+			src := NewRecordingReminderSource(
+				d.whisperRegistry.LedgerStore(), d.heartbeat,
+				d.config.RecordingReminderInterval, d.config.ProjectRoot,
+			)
+			if d.config.RecordingReminderTick > 0 {
+				src.SetTick(d.config.RecordingReminderTick)
+			}
+			ws.RegisterSource(src)
+		}
 		if d.config.ProjectRoot != "" && d.config.LedgerPath != "" {
 			accumulator := NewChangeAccumulator(3 * time.Second)
 			tracker := NewGitTrackedMatcher(d.config.ProjectRoot, d.logger)

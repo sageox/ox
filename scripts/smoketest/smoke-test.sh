@@ -138,6 +138,11 @@ main() {
     # skip checkout test for now - requires team setup
     # run_test "ox team context add" "smoke-test-checkout.sh" || true
 
+    # optional slow tests (take 60-90s due to daemon tick intervals)
+    if [[ "${SMOKE_TEST_SLOW:-}" == "true" ]]; then
+        run_test "Recording reminder" "smoke-test-recording-reminder.sh" || true
+    fi
+
     # summary
     echo ""
     echo "========================================"

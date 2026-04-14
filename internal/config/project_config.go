@@ -125,7 +125,8 @@ type ProjectConfig struct {
 	// this project's whisper stream.
 	// Values: "on" (receive murmurs as whispers), "off" (suppress murmur whispers)
 	// Empty string defaults to "on".
-	MurmurReceive string `json:"murmur_receive,omitempty"`
+	MurmurReceive     string `json:"murmur_receive,omitempty"`
+	RecordingReminder string `json:"recording_reminder,omitempty"`
 
 	// GitHubSync controls GitHub data extraction to the ledger (master toggle).
 	// Values: "enabled" (default), "disabled"

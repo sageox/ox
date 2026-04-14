@@ -193,6 +193,23 @@ Rate-limited to 60 invocations/hour, 4 concurrent.`,
 		Default:     "auto",
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
+	{
+		Key:         "recording_reminder",
+		Description: "Periodic recording status reminders",
+		LongDescription: `Controls whether AI coworkers receive periodic reminders
+that their session is being recorded.
+
+  on  - Whisper recording status (turn count, duration) periodically (default)
+  off - No periodic reminders (startup banner still appears)
+
+Useful for confirming sessions are actively being captured, especially
+during long-running sessions. Reminders appear roughly once per hour
+as whispers in the agent's context.`,
+		Category:    "Sessions",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
+	},
 	// NOTE: attribution.plan and attribution.session are intentionally not exposed
 	// in ox config — they are always-on transparency requirements, not user preferences.
 	{
@@ -328,6 +345,14 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 		}
 		if repoCfg != nil && repoCfg.MurmurReceive != "" {
 			cv.RepoVal = config.NormalizeMurmurReceive(repoCfg.MurmurReceive)
+		}
+
+	case "recording_reminder":
+		if userCfg != nil && userCfg.RecordingReminder != "" {
+			cv.UserVal = config.NormalizeRecordingReminder(userCfg.RecordingReminder)
+		}
+		if repoCfg != nil && repoCfg.RecordingReminder != "" {
+			cv.RepoVal = config.NormalizeRecordingReminder(repoCfg.RecordingReminder)
 		}
 
 	case "telemetry":
@@ -569,6 +594,9 @@ func setUserConfig(key, value string) error {
 	case "murmur_receive":
 		cfg.SetMurmurReceive(value)
 
+	case "recording_reminder":
+		cfg.RecordingReminder = value
+
 	case "agent_worker":
 		if value == "auto" {
 			cfg.SetAgentWorkerAgent("") // empty = auto-detect
@@ -629,6 +657,9 @@ func setRepoConfig(key, value, projectRoot string) error {
 
 	case "murmur_receive":
 		cfg.MurmurReceive = value
+
+	case "recording_reminder":
+		cfg.RecordingReminder = value
 
 	case "attribution.commit":
 		if cfg.Attribution == nil {
@@ -741,6 +772,9 @@ func unsetUserConfig(key string) error {
 	case "murmur_receive":
 		cfg.SetMurmurReceive("")
 
+	case "recording_reminder":
+		cfg.RecordingReminder = ""
+
 	case "agent_worker":
 		cfg.AgentWorker = nil
 
@@ -794,6 +828,9 @@ func unsetRepoConfig(key, projectRoot string) error {
 
 	case "murmur_receive":
 		cfg.MurmurReceive = ""
+
+	case "recording_reminder":
+		cfg.RecordingReminder = ""
 
 	case "attribution.commit":
 		if cfg.Attribution != nil {
