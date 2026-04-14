@@ -445,16 +445,36 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	contentWithAttribution := withAttributionGuidance("", isLoggedIn, attribution)
 
 	// resolve current user's identity so agents can distinguish self vs teammate.
-	// sessions use DisplayName, murmurs use Username (principal ID), discussions use full Name.
-	// pass all aliases so the agent can match regardless of which form appears.
-	userAttribution := identity.ResolveAttribution(endpoint.GetForProject(projectRoot), config.GetDisplayName())
+	// collect ALL name forms from ALL sources (OAuth, git config, derived) because
+	// sessions use DisplayName, murmurs use Username, discussions use full Name,
+	// and git commits use git config user.name/user.email — each may differ.
+	projectEP := endpoint.GetForProject(projectRoot)
+	userAttribution := identity.ResolveAttribution(projectEP, config.GetDisplayName())
 	currentUserName := userAttribution.DisplayName
-	currentUserAliases := uniqueNonEmpty(
+
+	// start with the merged attribution (OAuth-wins), then add source-specific values
+	// that ResolveAttribution may have dropped when OAuth took priority.
+	aliasInputs := []string{
 		userAttribution.DisplayName,
 		userAttribution.Name,
 		userAttribution.Username,
+		userAttribution.Email,
 		identity.FirstNameFromSlug(userAttribution.Username),
-	)
+	}
+
+	// git config identity may differ from OAuth (e.g., git user.name="rsnodgrass" vs OAuth name="Ryan Snodgrass")
+	if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
+		aliasInputs = append(aliasInputs, gitIdent.Name, gitIdent.Email)
+	}
+
+	// SageOx OAuth identity may differ from git config
+	if projectEP != "" {
+		if token, err := auth.GetTokenForEndpoint(projectEP); err == nil && token != nil {
+			aliasInputs = append(aliasInputs, token.UserInfo.Name, token.UserInfo.Email)
+		}
+	}
+
+	currentUserAliases := uniqueNonEmpty(aliasInputs...)
 
 	output := agentPrimeOutput{
 		Status:           "fresh",
