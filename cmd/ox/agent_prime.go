@@ -58,6 +58,23 @@ type intentCommand = prime.IntentCommand
 type agentGuidance = prime.Guidance
 type UserNotice = prime.UserNotice
 
+// uniqueNonEmpty returns deduplicated, non-empty strings preserving input order.
+func uniqueNonEmpty(vals ...string) []string {
+	seen := make(map[string]struct{}, len(vals))
+	out := make([]string, 0, len(vals))
+	for _, v := range vals {
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
 // withAttributionGuidance delegates to prime.WithAttributionGuidance.
 func withAttributionGuidance(content string, loggedIn bool, attr config.ResolvedAttribution) string {
 	return prime.WithAttributionGuidance(content, loggedIn, attr)
@@ -427,8 +444,17 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	contentWithAttribution := withAttributionGuidance("", isLoggedIn, attribution)
 
-	// resolve current user's display name so agents can distinguish self vs teammate
-	currentUserName := identity.AttributionDisplayName(endpoint.GetForProject(projectRoot), config.GetDisplayName())
+	// resolve current user's identity so agents can distinguish self vs teammate.
+	// sessions use DisplayName, murmurs use Username (principal ID), discussions use full Name.
+	// pass all aliases so the agent can match regardless of which form appears.
+	userAttribution := identity.ResolveAttribution(endpoint.GetForProject(projectRoot), config.GetDisplayName())
+	currentUserName := userAttribution.DisplayName
+	currentUserAliases := uniqueNonEmpty(
+		userAttribution.DisplayName,
+		userAttribution.Name,
+		userAttribution.Username,
+		identity.FirstNameFromSlug(userAttribution.Username),
+	)
 
 	output := agentPrimeOutput{
 		Status:           "fresh",
@@ -453,7 +479,8 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		NeedsDoctorAgent: needsDoctorAgent,
 		DoctorHint:       doctorHint,
 		HooksInstalled:   hooksInstalled,
-		CurrentUserName:  currentUserName,
+		CurrentUserName:    currentUserName,
+		CurrentUserAliases: currentUserAliases,
 	}
 
 	// populate cumulative context stats from daemon (best-effort).
