@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Attribution**
 - Conditional commit attribution based on SageOx contribution score
 - Unified attribution model removes OAuth gate from session start
+- Current user identity (`you=`, `you_aliases=`) passed to agents so they distinguish their own prior work from teammate contributions
+- Periodic recording reminder whispers from the daemon
 
 **Other**
 - OpenClaw SageOx skills and `clawhub-skill-lint` for community skill quality
@@ -54,6 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pure-Go LFS architecture documented; `git-lfs` binary dependency fully removed
 
 ### Fixed
+- Attribution prompts no longer credit the current user's own prior work as a teammate contribution
 - Vulnerable dependencies bumped (4 Dependabot alerts)
 - `DirtyOverlayDebouncer` stale-timer race in daemon resolved
 - Session recording: prevent empty sessions from being committed, resolve symlinks before file lookup, prevent agent ID orphaning
