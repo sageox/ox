@@ -34,6 +34,7 @@ var initQuiet bool
 var initTeamFlag string
 var initForce bool
 var initEndpointFlag string
+var initAgentsFlag string
 
 // configResult indicates what happened when ensuring config exists
 type configResult int
@@ -119,6 +120,7 @@ func init() {
 	initCmd.Flags().StringVar(&initTeamFlag, "team", "", "team ID to associate this repo with")
 	initCmd.Flags().BoolVar(&initForce, "force", false, "initialize even if .sageox/ exists on remote")
 	initCmd.Flags().StringVar(&initEndpointFlag, "endpoint", "", "SageOx endpoint URL (overrides SAGEOX_ENDPOINT)")
+	initCmd.Flags().StringVar(&initAgentsFlag, "agents", "", "comma-separated list of agents to configure (e.g., 'gemini,codex')")
 }
 
 // initialCommitReadmeContent is the README placed in .sageox/ when creating
@@ -588,45 +590,63 @@ func runInit() error {
 		}
 	}
 
-	// === AGENT INTEGRATION (Claude Code only for now) ===
+	// === AGENT INTEGRATION ===
+
+	// prompt for which agents to configure
+	selectedAgents, agentSelectErr := selectAgentsForInit(gitRoot)
+	if agentSelectErr != nil {
+		// user canceled — default to Claude Code only
+		if !initQuiet {
+			cli.PrintWarning("Agent selection canceled, defaulting to Claude Code")
+		}
+		selectedAgents = map[string]bool{"claude-code": true}
+	}
+
 	if !initQuiet {
 		fmt.Println()
-		fmt.Println(ui.RenderCategory("Claude Code Integration"))
+		fmt.Println(ui.RenderCategory("AI Coworker Integration"))
 	}
 
-	// snapshot AGENTS.md / CLAUDE.md before injection (for rollback of modifications)
-	for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
-		p := filepath.Join(gitRoot, name)
-		if fileExists(p) {
-			tracker.trackModifiedFile(p)
+	// inject ox agent prime into agent config (only if Claude Code selected)
+	var injectionResults []fileInjectionResult
+	if selectedAgents["claude-code"] {
+		// snapshot AGENTS.md / CLAUDE.md before injection (for rollback of modifications)
+		for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+			p := filepath.Join(gitRoot, name)
+			if fileExists(p) {
+				tracker.trackModifiedFile(p)
+			}
 		}
-	}
 
-	// inject ox agent prime into agent config
-	injectionResults, err := injectOxPrime(gitRoot)
-	if err != nil {
-		cli.PrintWarning(fmt.Sprintf("Could not set up Claude Code: %v", err))
-	} else {
-		for _, r := range injectionResults {
-			p := filepath.Join(gitRoot, r.file)
-			if r.status == injectedNew || r.status == symlinkCreated {
-				tracker.trackCreatedFile(p)
+		var injErr error
+		injectionResults, injErr = injectOxPrime(gitRoot)
+		if injErr != nil {
+			cli.PrintWarning(fmt.Sprintf("Could not set up Claude Code: %v", injErr))
+		} else {
+			for _, r := range injectionResults {
+				p := filepath.Join(gitRoot, r.file)
+				if r.status == injectedNew || r.status == symlinkCreated {
+					tracker.trackCreatedFile(p)
+				}
 			}
 		}
 	}
 
 	// detect and install agent hooks
-	installedHooks := installAgentHooks(gitRoot, true) // quiet — summarized below
+	installedHooks := installAgentHooks(gitRoot, true, selectedAgents) // quiet — summarized below
 	for _, hookFile := range installedHooks {
 		tracker.trackCreatedFile(filepath.Join(gitRoot, hookFile))
 		tracker.trackForceStage(filepath.Join(gitRoot, hookFile))
 	}
 
-	// install Claude Code slash commands
-	installedCommands := installClaudeCommands(gitRoot, true) // quiet — summarized below
-	for _, cmdFile := range installedCommands {
-		tracker.trackCreatedFile(filepath.Join(gitRoot, cmdFile))
-		tracker.trackForceStage(filepath.Join(gitRoot, cmdFile))
+	// install Claude Code slash commands (only if Claude Code selected)
+	var installedCommands []string
+	if selectedAgents["claude-code"] {
+		installedCommands = installClaudeCommands(gitRoot, true) // quiet — summarized below
+		for _, cmdFile := range installedCommands {
+			tracker.trackCreatedFile(filepath.Join(gitRoot, cmdFile))
+			tracker.trackForceStage(filepath.Join(gitRoot, cmdFile))
+		}
 	}
 
 	// rules are installed by external adapters via CapRulesInstaller
@@ -634,17 +654,17 @@ func runInit() error {
 
 	// single summary line for the entire integration section
 	if !initQuiet {
-		hasNew := err == nil && len(injectionResults) > 0
+		hasNew := len(injectionResults) > 0
 		for _, r := range injectionResults {
 			if r.status == injectedNew || r.status == injectedUpgrade {
 				hasNew = true
 				break
 			}
 		}
-		if hasNew || len(installedCommands) > 0 {
-			cli.PrintSuccess("Installed Claude Code hooks and commands")
+		if hasNew || len(installedCommands) > 0 || len(installedHooks) > 0 {
+			cli.PrintSuccess("Installed AI coworker hooks and commands")
 		} else {
-			cli.PrintPreserved("Claude Code hooks and commands")
+			cli.PrintPreserved("AI coworker hooks and commands")
 		}
 	}
 
@@ -1621,34 +1641,103 @@ func displayPath(absPath string) string {
 	return base
 }
 
-// installAgentHooks detects AI coding agents and installs project-level hooks.
+// selectAgentsForInit discovers available adapters and prompts the user to
+// choose which ones to configure. Claude Code defaults to selected; all
+// others default to off. Returns adapter names the user selected.
+func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
+	selected := map[string]bool{}
+
+	// if --agents flag provided, use it directly
+	if initAgentsFlag != "" {
+		for _, name := range strings.Split(initAgentsFlag, ",") {
+			name = strings.TrimSpace(name)
+			if name != "" {
+				selected[name] = true
+			}
+		}
+		return selected, nil
+	}
+
+	// non-interactive: Claude Code only
+	if !cli.IsInteractive() {
+		selected["claude-code"] = true
+		return selected, nil
+	}
+
+	// Claude Code is always shown and defaults to selected
+	options := []cli.MultiSelectOption{
+		{Label: "Claude Code", Value: "claude-code", Selected: true},
+	}
+
+	// discover external adapters and check which are actually installed
+	externalAdapters := adapters.DiscoverExternalAdapters()
+	for _, ea := range externalAdapters {
+		if !ea.Detect() {
+			continue
+		}
+		label := ea.Name()
+		if info := ea.Info(); info != nil && info.DisplayName != "" {
+			label = info.DisplayName
+		}
+		options = append(options, cli.MultiSelectOption{
+			Label: label,
+			Value: ea.Name(),
+		})
+	}
+
+	// check for OpenCode separately (built-in detection)
+	openCodeDir := filepath.Join(gitRoot, ".opencode")
+	if _, err := os.Stat(openCodeDir); err == nil {
+		options = append(options, cli.MultiSelectOption{
+			Label: "OpenCode",
+			Value: "opencode",
+		})
+	}
+
+	if !initQuiet {
+		fmt.Println()
+	}
+
+	chosen, err := cli.SelectMany(
+		"Which AI coworkers should ox configure for this repo?",
+		options,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, name := range chosen {
+		selected[name] = true
+	}
+	return selected, nil
+}
+
+// installAgentHooks installs project-level hooks for selected AI coding agents.
+// Only agents present in selectedAgents are installed.
 // Returns a list of relative paths to hook files that were created.
-func installAgentHooks(gitRoot string, quiet bool) []string {
+func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]bool) []string {
 	var installedHooks []string
 
-	// always install Claude Code hooks (we assume Claude Code usage)
-	if HasProjectClaudeHooks(gitRoot) {
-		if !quiet {
-			cli.PrintPreserved("Claude Code integration")
-		}
-	} else {
-		if err := InstallProjectClaudeHooks(gitRoot); err != nil {
-			cli.PrintWarning(fmt.Sprintf("Could not install Claude Code integration: %v", err))
-		} else {
+	// install Claude Code hooks only if selected
+	if selectedAgents["claude-code"] {
+		if HasProjectClaudeHooks(gitRoot) {
 			if !quiet {
-				cli.PrintSuccess("Installed Claude Code integration")
+				cli.PrintPreserved("Claude Code integration")
 			}
-			installedHooks = append(installedHooks, ".claude/settings.json")
+		} else {
+			if err := InstallProjectClaudeHooks(gitRoot); err != nil {
+				cli.PrintWarning(fmt.Sprintf("Could not install Claude Code integration: %v", err))
+			} else {
+				if !quiet {
+					cli.PrintSuccess("Installed Claude Code integration")
+				}
+				installedHooks = append(installedHooks, ".claude/settings.json")
+			}
 		}
 	}
 
-	// detect OpenCode: .opencode directory exists
-	openCodeDir := filepath.Join(gitRoot, ".opencode")
-	_, openCodeErr := os.Stat(openCodeDir)
-	usesOpenCode := openCodeErr == nil
-
-	if usesOpenCode {
-		// check if integration already installed
+	// install OpenCode integration only if user selected it
+	if selectedAgents["opencode"] {
 		if HasProjectOpenCodeHooks(gitRoot) {
 			if !quiet {
 				cli.PrintPreserved("OpenCode integration")
@@ -1665,10 +1754,12 @@ func installAgentHooks(gitRoot string, quiet bool) []string {
 		}
 	}
 
-	// discover external adapter binaries and install hooks + rules for agents
-	// beyond Claude Code / OpenCode (e.g., droid, gemini, codex).
+	// install hooks + rules only for agents the user selected
 	externalAdapters := adapters.DiscoverExternalAdapters()
 	for _, ea := range externalAdapters {
+		if !selectedAgents[ea.Name()] {
+			continue
+		}
 		if ea.HasCapability(adapterprotocol.CapHookInstaller) {
 			result, err := ea.InstallHooks(gitRoot, "project")
 			if err != nil {

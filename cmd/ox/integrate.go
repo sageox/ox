@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"log/slog"
@@ -117,7 +119,148 @@ var integrateListCmd = &cobra.Command{
 	RunE:  runIntegrateList,
 }
 
+// hasAnyAgentFlag returns true if any agent-specific install flag was set.
+func hasAnyAgentFlag() bool {
+	return integratePiFlag || integrateAmpFlag || integrateCodexFlag ||
+		integrateGeminiFlag || integrateOpenCodeFlag || integrateUserFlag
+}
+
+// integrateAgentInfo pairs adapter metadata with its current install status.
+type integrateAgentInfo struct {
+	name        string // adapter name (e.g. "gemini")
+	displayName string
+	installed   bool
+	installFn   func() error
+}
+
+// runIntegrateInteractive shows a multi-select of detected agents and installs
+// the ones the user picks. Already-installed agents are shown greyed out.
+func runIntegrateInteractive() error {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return fmt.Errorf("not in a git repository — run from a project directory")
+	}
+
+	// build the list of agents with their install status
+	agents := []integrateAgentInfo{
+		{
+			name:        "claude-code",
+			displayName: "Claude Code",
+			installed:   HasProjectClaudeHooks(gitRoot),
+			installFn: func() error {
+				if err := InstallProjectClaudeHooks(gitRoot); err != nil {
+					return err
+				}
+				installAdapterRules(gitRoot)
+				return InstallGitHooks(gitRoot)
+			},
+		},
+	}
+
+	// discover external adapters that are detected on this machine
+	for _, ea := range adapters.DiscoverExternalAdapters() {
+		if !ea.Detect() {
+			continue
+		}
+		adapterName := ea.Name()
+		label := adapterName
+		if info := ea.Info(); info != nil && info.DisplayName != "" {
+			label = info.DisplayName
+		}
+		agents = append(agents, integrateAgentInfo{
+			name:        adapterName,
+			displayName: label,
+			installed:   checkExternalAdapterHooks(adapterName, false),
+			installFn: func() error {
+				return installExternalAdapterHooks(adapterName, false)
+			},
+		})
+	}
+
+	// check for OpenCode
+	openCodeDir := filepath.Join(gitRoot, ".opencode")
+	if _, err := os.Stat(openCodeDir); err == nil {
+		agents = append(agents, integrateAgentInfo{
+			name:        "opencode",
+			displayName: "OpenCode",
+			installed:   hasOpenCodeHooks(false),
+			installFn: func() error {
+				return installOpenCodeHooks(false)
+			},
+		})
+	}
+
+	// build multi-select options
+	var options []cli.MultiSelectOption
+	for _, a := range agents {
+		opt := cli.MultiSelectOption{
+			Label:    a.displayName,
+			Value:    a.name,
+			Selected: a.installed,
+			Disabled: a.installed,
+		}
+		if a.installed {
+			opt.Hint = "(installed)"
+		}
+		options = append(options, opt)
+	}
+
+	// if everything is already installed, just report status
+	allInstalled := true
+	for _, a := range agents {
+		if !a.installed {
+			allInstalled = false
+			break
+		}
+	}
+	if allInstalled {
+		fmt.Println("All detected AI coworkers are already integrated.")
+		for _, a := range agents {
+			fmt.Printf("  %s %s\n", ui.PassStyle.Render("✓"), a.displayName)
+		}
+		return nil
+	}
+
+	chosen, err := cli.SelectMany(
+		"Which AI coworkers should ox integrate with this repo?",
+		options,
+	)
+	if err != nil {
+		return fmt.Errorf("selection canceled")
+	}
+
+	// install only newly selected agents (skip already-installed)
+	chosenSet := map[string]bool{}
+	for _, name := range chosen {
+		chosenSet[name] = true
+	}
+
+	installed := 0
+	for _, a := range agents {
+		if a.installed || !chosenSet[a.name] {
+			continue
+		}
+		if err := a.installFn(); err != nil {
+			cli.PrintWarning(fmt.Sprintf("Could not install %s: %v", a.displayName, err))
+		} else {
+			cli.PrintSuccess(fmt.Sprintf("Installed %s integration", a.displayName))
+			installed++
+		}
+	}
+
+	if installed == 0 {
+		fmt.Println("No new integrations installed.")
+	}
+
+	return nil
+}
+
 func runIntegrateInstall(cmd *cobra.Command, args []string) error {
+	// if no agent-specific flags, show interactive multi-select
+	if !hasAnyAgentFlag() && cli.IsInteractive() {
+		return runIntegrateInteractive()
+	}
+
 	// Pi installation
 	if integratePiFlag {
 		if integrateUserFlag {
@@ -352,70 +495,62 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 }
 
 func runIntegrateList(cmd *cobra.Command, args []string) error {
-	// Claude Code status (project-level hooks)
-	fmt.Println("Claude Code (project):")
 	gitRoot := findGitRoot()
-	if gitRoot == "" {
-		fmt.Println("  (not in a git repo)")
-	} else if HasProjectClaudeHooks(gitRoot) {
-		fmt.Printf("  %s hooks: installed (.claude/settings.json)\n", ui.PassStyle.Render("✓"))
-	} else {
-		fmt.Printf("  %s hooks: not installed\n", ui.FailStyle.Render("✗"))
+
+	fmt.Println(ui.RenderCategory("AI Coworker Integrations"))
+	fmt.Println()
+
+	// Claude Code
+	printAgentStatus("Claude Code", gitRoot != "" && HasProjectClaudeHooks(gitRoot), gitRoot == "")
+
+	// all discovered external adapters (includes bundled ones)
+	for _, ea := range adapters.DiscoverExternalAdapters() {
+		label := ea.Name()
+		if info := ea.Info(); info != nil && info.DisplayName != "" {
+			label = info.DisplayName
+		}
+		installed := false
+		if gitRoot != "" {
+			installed = checkExternalAdapterHooks(ea.Name(), false)
+		}
+		printAgentStatus(label, installed, gitRoot == "")
 	}
 
-	// User-level CLAUDE.md marker
-	fmt.Println("Claude Code (user):")
-	if hasUserLevelOxPrime() {
-		fmt.Printf("  %s marker: enabled (~/.claude/CLAUDE.md)\n", ui.PassStyle.Render("✓"))
-	} else {
-		fmt.Printf("  %s marker: not enabled\n", ui.FailStyle.Render("✗"))
+	// OpenCode (built-in detection)
+	if gitRoot != "" {
+		openCodeDir := filepath.Join(gitRoot, ".opencode")
+		if _, err := os.Stat(openCodeDir); err == nil {
+			printAgentStatus("OpenCode", hasOpenCodeHooks(false), false)
+		}
 	}
 
 	fmt.Println()
 
-	// MVP: Only Claude Code integrations are supported for now.
-	// Other agents can use 'ox' via AGENTS.md/CLAUDE.md references.
-	//
-	// Commented out for MVP - uncomment when ready to support:
-	//
-	// // OpenCode status
-	// fmt.Println("OpenCode:")
-	// openCodeStatus := listOpenCodeHooks()
-	// for location, installed := range openCodeStatus {
-	// 	if installed {
-	// 		fmt.Printf("  %s %s: installed\n", ui.PassStyle.Render("✓"), location)
-	// 	} else {
-	// 		fmt.Printf("  %s %s: not installed\n", ui.FailStyle.Render("✗"), location)
-	// 	}
-	// }
-	//
-	// fmt.Println()
-	//
-	// // Gemini CLI status
-	// fmt.Println("Gemini CLI:")
-	// geminiStatus := listGeminiHooks()
-	// for location, installed := range geminiStatus {
-	// 	if installed {
-	// 		fmt.Printf("  %s %s: installed\n", ui.PassStyle.Render("✓"), location)
-	// 	} else {
-	// 		fmt.Printf("  %s %s: not installed\n", ui.FailStyle.Render("✗"), location)
-	// 	}
-	// }
-
-	// git commit hooks status
-	fmt.Println("Git commit hooks:")
+	// git commit hooks
+	fmt.Println(ui.RenderCategory("Git Hooks"))
+	fmt.Println()
 	if gitRoot == "" {
 		fmt.Println("  (not in a git repo)")
 	} else if HasGitHooks(gitRoot) {
-		fmt.Printf("  %s prepare-commit-msg: installed\n", ui.PassStyle.Render("✓"))
+		fmt.Printf("  %s prepare-commit-msg\n", ui.PassStyle.Render("✓"))
 	} else {
-		fmt.Printf("  %s prepare-commit-msg: not installed\n", ui.FailStyle.Render("✗"))
+		fmt.Printf("  %s prepare-commit-msg\n", ui.FailStyle.Render("✗"))
 	}
 
 	// show contextual tip
 	userCfg, _ := config.LoadUserConfig()
 	tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 	return nil
+}
+
+func printAgentStatus(name string, installed bool, noRepo bool) {
+	if noRepo {
+		fmt.Printf("  %s %s (not in a git repo)\n", ui.FailStyle.Render("✗"), name)
+	} else if installed {
+		fmt.Printf("  %s %s\n", ui.PassStyle.Render("✓"), name)
+	} else {
+		fmt.Printf("  %s %s\n", ui.FailStyle.Render("✗"), name)
+	}
 }
 
 // uninstallAllIntegrations removes ox prime integrations from all AI agents
