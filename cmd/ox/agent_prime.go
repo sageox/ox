@@ -255,6 +255,30 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// get project-specific endpoint (single source of truth)
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 
+	// resolve current user's identity early so all output paths (fresh, degraded, unavailable)
+	// can include it. Agents use this to distinguish self vs teammate in attribution.
+	// collect ALL name forms from ALL sources (OAuth, git config, derived) because
+	// sessions use DisplayName, murmurs use Username, discussions use full Name,
+	// and git commits use git config user.name/user.email — each may differ.
+	userAttribution := identity.ResolveAttribution(projectEndpoint, config.GetDisplayName())
+	currentUserName := userAttribution.DisplayName
+	aliasInputs := []string{
+		userAttribution.DisplayName,
+		userAttribution.Name,
+		userAttribution.Username,
+		userAttribution.Email,
+		identity.FirstNameFromSlug(userAttribution.Username),
+	}
+	if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
+		aliasInputs = append(aliasInputs, gitIdent.Name, gitIdent.Email)
+	}
+	if projectEndpoint != "" {
+		if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil {
+			aliasInputs = append(aliasInputs, token.UserInfo.Name, token.UserInfo.Email)
+		}
+	}
+	currentUserAliases := uniqueNonEmpty(aliasInputs...)
+
 	// generate agentID and start recording BEFORE auth check — recording is local,
 	// auth is only needed for upload and cloud features
 	store, err := getInstanceStore(projectRoot)
@@ -351,10 +375,12 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				msg = "Authentication expired."
 			}
 			output := agentPrimeOutput{
-				Status:  "degraded",
-				AgentID: agentID,
-				Session: sessionStat,
-				Message: fmt.Sprintf("%s Run 'ox login' to authenticate with %s. Session recording is active locally — data will be uploaded after authentication.", msg, endpointSlug),
+				Status:             "degraded",
+				AgentID:            agentID,
+				Session:            sessionStat,
+				CurrentUserName:    currentUserName,
+				CurrentUserAliases: currentUserAliases,
+				Message:            fmt.Sprintf("%s Run 'ox login' to authenticate with %s. Session recording is active locally — data will be uploaded after authentication.", msg, endpointSlug),
 			}
 			if sessionStat != nil && sessionStat.UserNotification != "" {
 				output.UserNotification = sessionStat.UserNotification
@@ -443,38 +469,6 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	trackInstanceStart(inst)
 
 	contentWithAttribution := withAttributionGuidance("", isLoggedIn, attribution)
-
-	// resolve current user's identity so agents can distinguish self vs teammate.
-	// collect ALL name forms from ALL sources (OAuth, git config, derived) because
-	// sessions use DisplayName, murmurs use Username, discussions use full Name,
-	// and git commits use git config user.name/user.email — each may differ.
-	projectEP := endpoint.GetForProject(projectRoot)
-	userAttribution := identity.ResolveAttribution(projectEP, config.GetDisplayName())
-	currentUserName := userAttribution.DisplayName
-
-	// start with the merged attribution (OAuth-wins), then add source-specific values
-	// that ResolveAttribution may have dropped when OAuth took priority.
-	aliasInputs := []string{
-		userAttribution.DisplayName,
-		userAttribution.Name,
-		userAttribution.Username,
-		userAttribution.Email,
-		identity.FirstNameFromSlug(userAttribution.Username),
-	}
-
-	// git config identity may differ from OAuth (e.g., git user.name="rsnodgrass" vs OAuth name="Ryan Snodgrass")
-	if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
-		aliasInputs = append(aliasInputs, gitIdent.Name, gitIdent.Email)
-	}
-
-	// SageOx OAuth identity may differ from git config
-	if projectEP != "" {
-		if token, err := auth.GetTokenForEndpoint(projectEP); err == nil && token != nil {
-			aliasInputs = append(aliasInputs, token.UserInfo.Name, token.UserInfo.Email)
-		}
-	}
-
-	currentUserAliases := uniqueNonEmpty(aliasInputs...)
 
 	output := agentPrimeOutput{
 		Status:           "fresh",

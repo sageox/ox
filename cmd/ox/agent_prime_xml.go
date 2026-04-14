@@ -294,9 +294,9 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 	fmt.Fprintf(&sb, " agent_id=%q", output.AgentID)
 	fmt.Fprintf(&sb, " status=%q", output.Status)
 	if output.CurrentUserName != "" {
-		fmt.Fprintf(&sb, " you=%q", output.CurrentUserName)
+		fmt.Fprintf(&sb, " you=\"%s\"", escapeXML(output.CurrentUserName))
 		if len(output.CurrentUserAliases) > 0 {
-			fmt.Fprintf(&sb, " you_aliases=%q", strings.Join(output.CurrentUserAliases, ", "))
+			fmt.Fprintf(&sb, " you_aliases=\"%s\"", escapeXML(strings.Join(output.CurrentUserAliases, ", ")))
 		}
 	}
 	if output.TeamContext != nil {
