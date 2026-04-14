@@ -31,7 +31,7 @@ func TestRunnerJSONOnStdin(t *testing.T) {
 	}
 
 	runner.Dispatch(context.Background(), event)
-	time.Sleep(300 * time.Millisecond)
+	runner.Wait()
 
 	data, err := os.ReadFile(tmpFile)
 	if err != nil {
@@ -200,7 +200,7 @@ func TestRunnerHookDoesNotReadStdin(t *testing.T) {
 		Name:    hooks.EventDaemonStarted,
 		Payload: hooks.MurmurPayload("m-1", "a-1", "Person A", "test", "normal", "content"),
 	})
-	time.Sleep(300 * time.Millisecond)
+	runner.Wait()
 
 	if _, err := os.Stat(markerFile); err != nil {
 		t.Fatal("hook that ignores stdin should still complete")
@@ -557,7 +557,7 @@ func TestRunnerMultipleHooksForSameEvent(t *testing.T) {
 
 	runner := hooks.NewHookRunner(cfgs, testLogger())
 	runner.Dispatch(context.Background(), hooks.Event{Name: hooks.EventDaemonStarted})
-	time.Sleep(500 * time.Millisecond)
+	runner.Wait()
 
 	for i := 0; i < 5; i++ {
 		path := filepath.Join(dir, fmt.Sprintf("hook-%d.txt", i))
@@ -582,7 +582,7 @@ func TestRunnerMixedWildcardAndSpecific(t *testing.T) {
 	}, testLogger())
 
 	runner.Dispatch(context.Background(), hooks.Event{Name: hooks.EventDaemonStarted})
-	time.Sleep(300 * time.Millisecond)
+	runner.Wait()
 
 	for _, f := range []string{"wildcard.txt", "specific.txt"} {
 		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {

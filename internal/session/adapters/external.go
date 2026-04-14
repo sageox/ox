@@ -80,7 +80,7 @@ type ExternalAdapter struct {
 func NewExternalAdapter(binaryPath string) (*ExternalAdapter, error) {
 	ea := &ExternalAdapter{
 		binaryPath:     binaryPath,
-		oneShotTimeout: 5 * time.Second,
+		oneShotTimeout: 10 * time.Second,
 		serveTimeout:   100 * time.Millisecond,
 	}
 
@@ -100,7 +100,7 @@ func NewExternalAdapterWithInfo(binaryPath string, info *adapterprotocol.InfoRes
 	return &ExternalAdapter{
 		binaryPath:     binaryPath,
 		info:           info,
-		oneShotTimeout: 5 * time.Second,
+		oneShotTimeout: 10 * time.Second,
 		serveTimeout:   100 * time.Millisecond,
 	}
 }

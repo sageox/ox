@@ -293,7 +293,7 @@ func (d *FaultDaemon) handleConn(conn net.Conn) {
 		resp := d.generateResponse(request, cfg)
 		for _, b := range resp {
 			conn.Write([]byte{b})
-			time.Sleep(2 * time.Millisecond)
+			time.Sleep(500 * time.Microsecond)
 		}
 		return
 

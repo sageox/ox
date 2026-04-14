@@ -25,6 +25,7 @@ type HookRunner struct {
 	mu     sync.RWMutex
 	hooks  []HookConfig
 	sem    chan struct{}
+	wg     sync.WaitGroup
 	logger *slog.Logger
 }
 
@@ -56,8 +57,18 @@ func (r *HookRunner) Dispatch(ctx context.Context, event Event) {
 			continue
 		}
 		h := hook
-		go r.run(ctx, event, h)
+		r.wg.Add(1)
+		go func() {
+			defer r.wg.Done()
+			r.run(ctx, event, h)
+		}()
 	}
+}
+
+// Wait blocks until all dispatched hooks have finished.
+// Intended for tests; production callers should treat Dispatch as fire-and-forget.
+func (r *HookRunner) Wait() {
+	r.wg.Wait()
 }
 
 func (r *HookRunner) run(ctx context.Context, event Event, hook HookConfig) {
