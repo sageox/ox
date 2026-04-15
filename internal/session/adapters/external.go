@@ -452,6 +452,51 @@ func (ea *ExternalAdapter) UninstallRules(repoRoot, version string) (*adapterpro
 	return &result, nil
 }
 
+// InstallCommands calls the adapter's install-commands subcommand.
+func (ea *ExternalAdapter) InstallCommands(repoRoot, version string) (*adapterprotocol.InstallCommandsResponse, error) {
+	out, err := ea.execOneShot("install-commands", "--repo-root", repoRoot, "--version", version)
+	if err != nil {
+		return nil, err
+	}
+
+	var result adapterprotocol.InstallCommandsResponse
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
+	}
+
+	return &result, nil
+}
+
+// CheckCommands calls the adapter's check-commands subcommand.
+func (ea *ExternalAdapter) CheckCommands(repoRoot, version string) (*adapterprotocol.CheckCommandsResponse, error) {
+	out, err := ea.execOneShot("check-commands", "--repo-root", repoRoot, "--version", version)
+	if err != nil {
+		return nil, err
+	}
+
+	var result adapterprotocol.CheckCommandsResponse
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
+	}
+
+	return &result, nil
+}
+
+// UninstallCommands calls the adapter's uninstall-commands subcommand.
+func (ea *ExternalAdapter) UninstallCommands(repoRoot, version string) (*adapterprotocol.UninstallCommandsResponse, error) {
+	out, err := ea.execOneShot("uninstall-commands", "--repo-root", repoRoot, "--version", version)
+	if err != nil {
+		return nil, err
+	}
+
+	var result adapterprotocol.UninstallCommandsResponse
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
+	}
+
+	return &result, nil
+}
+
 // --- internal helpers ---
 
 func (ea *ExternalAdapter) callInfo() (*adapterprotocol.InfoResponse, error) {

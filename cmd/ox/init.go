@@ -639,18 +639,8 @@ func runInit() error {
 		tracker.trackForceStage(filepath.Join(gitRoot, hookFile))
 	}
 
-	// install Claude Code slash commands (only if Claude Code selected)
-	var installedCommands []string
-	if selectedAgents["claude-code"] {
-		installedCommands = installClaudeCommands(gitRoot, true) // quiet — summarized below
-		for _, cmdFile := range installedCommands {
-			tracker.trackCreatedFile(filepath.Join(gitRoot, cmdFile))
-			tracker.trackForceStage(filepath.Join(gitRoot, cmdFile))
-		}
-	}
-
-	// rules are installed by external adapters via CapRulesInstaller
-	// (see installAgentHooks → ea.InstallRules)
+	// commands and rules are installed by external adapters via CapCommandsInstaller/CapRulesInstaller
+	// (see installAgentHooks → ea.InstallCommands / ea.InstallRules)
 
 	// single summary line for the entire integration section
 	if !initQuiet {
@@ -661,7 +651,7 @@ func runInit() error {
 				break
 			}
 		}
-		if hasNew || len(installedCommands) > 0 || len(installedHooks) > 0 {
+		if hasNew || len(installedHooks) > 0 {
 			cli.PrintSuccess("Installed AI coworker hooks and commands")
 		} else {
 			cli.PrintPreserved("AI coworker hooks and commands")
@@ -1783,6 +1773,20 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 			} else if result.Installed {
 				if !quiet {
 					cli.PrintSuccess(fmt.Sprintf("Installed %s rules", ea.Name()))
+				}
+				installedHooks = append(installedHooks, result.FilesWritten...)
+			}
+		}
+
+		if ea.HasCapability(adapterprotocol.CapCommandsInstaller) {
+			result, err := ea.InstallCommands(gitRoot, version.Version)
+			if err != nil {
+				if !quiet {
+					cli.PrintWarning(fmt.Sprintf("Could not install %s commands: %v", ea.Name(), err))
+				}
+			} else if result.Installed {
+				if !quiet {
+					cli.PrintSuccess(fmt.Sprintf("Installed %s commands", ea.Name()))
 				}
 				installedHooks = append(installedHooks, result.FilesWritten...)
 			}

@@ -86,10 +86,13 @@ type Config struct {
 	ReadFromOffset func(adapterprotocol.ReadFromOffsetParams) (*adapterprotocol.ReadFromOffsetResult, error)
 	ImportSession  func(adapterprotocol.ImportSessionParams) (*adapterprotocol.ImportSessionResult, error)
 	CapturePrior   func(adapterprotocol.CapturePriorParams) (*adapterprotocol.CapturePriorResult, error)
-	InstallRules   func(adapterprotocol.RulesParams) (*adapterprotocol.InstallRulesResponse, error)
-	CheckRules     func(adapterprotocol.RulesParams) (*adapterprotocol.CheckRulesResponse, error)
-	UninstallRules func(adapterprotocol.RulesParams) (*adapterprotocol.UninstallRulesResponse, error)
-	Serve          func(*Server)
+	InstallRules      func(adapterprotocol.RulesParams) (*adapterprotocol.InstallRulesResponse, error)
+	CheckRules        func(adapterprotocol.RulesParams) (*adapterprotocol.CheckRulesResponse, error)
+	UninstallRules    func(adapterprotocol.RulesParams) (*adapterprotocol.UninstallRulesResponse, error)
+	InstallCommands   func(adapterprotocol.CommandsParams) (*adapterprotocol.InstallCommandsResponse, error)
+	CheckCommands     func(adapterprotocol.CommandsParams) (*adapterprotocol.CheckCommandsResponse, error)
+	UninstallCommands func(adapterprotocol.CommandsParams) (*adapterprotocol.UninstallCommandsResponse, error)
+	Serve             func(*Server)
 }
 
 // Run dispatches to the appropriate handler based on os.Args[1].
@@ -254,6 +257,33 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) e
 			return cfg.UninstallRules(p)
 		})
 
+	case "install-commands":
+		p := parseCommandsParams(args[1:])
+		return runOneShot(enc, func() (any, error) {
+			if cfg.InstallCommands == nil {
+				return nil, fmt.Errorf("install-commands not implemented")
+			}
+			return cfg.InstallCommands(p)
+		})
+
+	case "check-commands":
+		p := parseCommandsParams(args[1:])
+		return runOneShot(enc, func() (any, error) {
+			if cfg.CheckCommands == nil {
+				return nil, fmt.Errorf("check-commands not implemented")
+			}
+			return cfg.CheckCommands(p)
+		})
+
+	case "uninstall-commands":
+		p := parseCommandsParams(args[1:])
+		return runOneShot(enc, func() (any, error) {
+			if cfg.UninstallCommands == nil {
+				return nil, fmt.Errorf("uninstall-commands not implemented")
+			}
+			return cfg.UninstallCommands(p)
+		})
+
 	case "--serve":
 		if cfg.Serve == nil {
 			return fmt.Errorf("serve mode not implemented")
@@ -299,6 +329,7 @@ func printUsage(cfg Config, w io.Writer) {
 	p("\nSubcommands:\n")
 	p("  info, detect, install-hooks, check-hooks, uninstall-hooks,\n")
 	p("  install-rules, check-rules, uninstall-rules,\n")
+	p("  install-commands, check-commands, uninstall-commands,\n")
 	p("  read, read-metadata, diagnose, find-session, read-from-offset,\n")
 	p("  import-session, capture-prior, --serve\n")
 	p("\nTo get started with ox:\n")
@@ -407,6 +438,21 @@ func parseReadFromOffsetParams(args []string) adapterprotocol.ReadFromOffsetPara
 
 func parseRulesParams(args []string) adapterprotocol.RulesParams {
 	p := adapterprotocol.RulesParams{}
+	for i := 0; i < len(args)-1; i++ {
+		switch args[i] {
+		case "--repo-root":
+			p.RepoRoot = args[i+1]
+			i++
+		case "--version":
+			p.Version = args[i+1]
+			i++
+		}
+	}
+	return p
+}
+
+func parseCommandsParams(args []string) adapterprotocol.CommandsParams {
+	p := adapterprotocol.CommandsParams{}
 	for i := 0; i < len(args)-1; i++ {
 		switch args[i] {
 		case "--repo-root":

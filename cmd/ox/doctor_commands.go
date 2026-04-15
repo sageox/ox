@@ -1,14 +1,12 @@
 package main
 
 import (
-	"context"
 	"fmt"
-	"log/slog"
 	"strings"
 
-	"github.com/sageox/agentx"
-	"github.com/sageox/ox/extensions/claude"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/version"
+	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
 // checkClaudeCommands validates that ox slash commands are installed in .claude/commands/.
@@ -18,54 +16,52 @@ func checkClaudeCommands(fix bool) checkResult {
 		return SkippedCheck("Claude commands", "not in git repo", "")
 	}
 
-	cm, ok := getClaudeCommandManager()
-	if !ok {
-		return SkippedCheck("Claude commands", "command manager not available", "")
+	ea := findCommandsAdapter()
+	if ea == nil {
+		return SkippedCheck("Claude commands", "adapter not available", "")
 	}
 
-	commands, err := agentx.ReadCommandFiles(claude.CommandFS, "commands")
+	result, err := ea.CheckCommands(gitRoot, version.Version)
 	if err != nil {
-		slog.Warn("failed to read embedded command files", "error", err)
-		return SkippedCheck("Claude commands", "failed to read embedded commands", "")
+		return WarningCheck("Claude commands", "check error", err.Error())
 	}
 
-	for i := range commands {
-		commands[i].Version = version.Version
-	}
-
-	ctx := context.Background()
-	missing, stale, err := cm.Validate(ctx, gitRoot, commands)
-	if err != nil {
-		return WarningCheck("Claude commands", "validation error", err.Error())
-	}
-
-	if len(missing) == 0 && len(stale) == 0 {
-		return PassedCheck("Claude commands", fmt.Sprintf("%d installed", len(commands)))
+	if result.Installed {
+		return PassedCheck("Claude commands", fmt.Sprintf("%d installed", result.Total))
 	}
 
 	// build problem description
 	var problems []string
-	if len(missing) > 0 {
-		problems = append(problems, fmt.Sprintf("%d missing: %s", len(missing), strings.Join(missing, ", ")))
+	if len(result.Missing) > 0 {
+		problems = append(problems, fmt.Sprintf("%d missing: %s", len(result.Missing), strings.Join(result.Missing, ", ")))
 	}
-	if len(stale) > 0 {
-		problems = append(problems, fmt.Sprintf("%d outdated: %s", len(stale), strings.Join(stale, ", ")))
+	if len(result.Stale) > 0 {
+		problems = append(problems, fmt.Sprintf("%d outdated: %s", len(result.Stale), strings.Join(result.Stale, ", ")))
 	}
 	problemStr := strings.Join(problems, "; ")
 
 	if fix {
-		// install missing and update stale (overwrite=true replaces only differing content)
-		written, installErr := cm.Install(ctx, gitRoot, commands, true)
+		installResult, installErr := ea.InstallCommands(gitRoot, version.Version)
 		if installErr != nil {
 			return FailedCheck("Claude commands", problemStr,
 				fmt.Sprintf("Fix failed: %v", installErr))
 		}
 		return PassedCheck("Claude commands",
-			fmt.Sprintf("restored %d command(s)", len(written)))
+			fmt.Sprintf("restored %d command(s)", len(installResult.FilesWritten)))
 	}
 
 	return FailedCheck("Claude commands", problemStr,
 		"Run `ox doctor --fix` or `ox init` to restore")
+}
+
+// findCommandsAdapter returns the first external adapter with CapCommandsInstaller.
+func findCommandsAdapter() *adapters.ExternalAdapter {
+	for _, ea := range adapters.DiscoverExternalAdapters() {
+		if ea.HasCapability(adapterprotocol.CapCommandsInstaller) {
+			return ea
+		}
+	}
+	return nil
 }
 
 func init() {

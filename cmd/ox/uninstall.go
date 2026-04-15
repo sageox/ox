@@ -719,23 +719,22 @@ func cleanupAgentFiles(gitRoot string) error {
 		slog.Warn("failed to cleanup agent markdown files", "error", err)
 	}
 
-	// remove Claude Code slash commands (.claude/commands/ox*.md)
-	if err := removeClaudeCommands(gitRoot); err != nil {
-		slog.Warn("failed to remove Claude commands", "error", err)
-	}
-
-	// remove rules via external adapters
+	// remove commands and rules via external adapters
 	externalAdapters := adapters.DiscoverExternalAdapters()
 	for _, ea := range externalAdapters {
-		if !ea.HasCapability(adapterprotocol.CapRulesInstaller) {
-			continue
+		if ea.HasCapability(adapterprotocol.CapCommandsInstaller) {
+			if uninstallDryRun {
+				slog.Info("would remove commands", "adapter", ea.Name())
+			} else if _, err := ea.UninstallCommands(gitRoot, ""); err != nil {
+				slog.Warn("failed to remove commands", "adapter", ea.Name(), "error", err)
+			}
 		}
-		if uninstallDryRun {
-			slog.Info("would remove rules", "adapter", ea.Name())
-			continue
-		}
-		if _, err := ea.UninstallRules(gitRoot, ""); err != nil {
-			slog.Warn("failed to remove rules", "adapter", ea.Name(), "error", err)
+		if ea.HasCapability(adapterprotocol.CapRulesInstaller) {
+			if uninstallDryRun {
+				slog.Info("would remove rules", "adapter", ea.Name())
+			} else if _, err := ea.UninstallRules(gitRoot, ""); err != nil {
+				slog.Warn("failed to remove rules", "adapter", ea.Name(), "error", err)
+			}
 		}
 	}
 

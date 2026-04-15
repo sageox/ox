@@ -9,54 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestRelFromRoot(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		gitRoot string
-		cmdDir  string
-		file    string
-		want    string
-		wantErr bool
-	}{
-		{
-			name:    "simple relative path",
-			gitRoot: "/home/user/project",
-			cmdDir:  "/home/user/project/.claude/commands",
-			file:    "ox-session-start.md",
-			want:    filepath.Join(".claude", "commands", "ox-session-start.md"),
-		},
-		{
-			name:    "nested dir",
-			gitRoot: "/repo",
-			cmdDir:  "/repo/.claude/commands",
-			file:    "my-command.md",
-			want:    filepath.Join(".claude", "commands", "my-command.md"),
-		},
-		{
-			name:    "same directory",
-			gitRoot: "/repo",
-			cmdDir:  "/repo",
-			file:    "file.txt",
-			want:    "file.txt",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := relFromRoot(tt.gitRoot, tt.cmdDir, tt.file)
-			if tt.wantErr {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				assert.Equal(t, tt.want, got)
-			}
-		})
-	}
-}
-
 func TestGetSageoxReadmeContent_WithConfig(t *testing.T) {
 	t.Parallel()
 

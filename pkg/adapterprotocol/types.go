@@ -35,6 +35,7 @@ const (
 	CapServeMode          = "serve_mode"
 	CapSubagentController = "subagent_controller"
 	CapRulesInstaller     = "rules_installer"
+	CapCommandsInstaller  = "commands_installer"
 	CapCapturePrior       = "capture_prior"
 )
 
@@ -118,6 +119,33 @@ type CheckRulesResponse struct {
 
 // UninstallRulesResponse is returned by `uninstall-rules`.
 type UninstallRulesResponse struct {
+	Uninstalled  bool     `json:"uninstalled"`
+	FilesRemoved []string `json:"files_removed"`
+}
+
+// CommandsParams are passed to install-commands, check-commands, and uninstall-commands.
+type CommandsParams struct {
+	RepoRoot string `json:"repo_root"`
+	Version  string `json:"version"` // ox version for stamped content
+}
+
+// InstallCommandsResponse is returned by `install-commands`.
+type InstallCommandsResponse struct {
+	Installed    bool     `json:"installed"`
+	FilesWritten []string `json:"files_written"`
+}
+
+// CheckCommandsResponse is returned by `check-commands`.
+type CheckCommandsResponse struct {
+	Installed   bool     `json:"installed"`
+	Missing     []string `json:"missing,omitempty"`
+	Stale       []string `json:"stale,omitempty"`
+	CommandsDir string   `json:"commands_dir"`
+	Total       int      `json:"total"`
+}
+
+// UninstallCommandsResponse is returned by `uninstall-commands`.
+type UninstallCommandsResponse struct {
 	Uninstalled  bool     `json:"uninstalled"`
 	FilesRemoved []string `json:"files_removed"`
 }
