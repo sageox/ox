@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 
 	"github.com/sageox/agentx"
-	_ "github.com/sageox/agentx/setup"
 	"github.com/sageox/ox/extensions/claude"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/version"
@@ -16,15 +15,9 @@ import (
 // installClaudeCommands installs ox slash commands to .claude/commands/.
 // Returns the list of installed file paths (relative to gitRoot) for git staging.
 func installClaudeCommands(gitRoot string, quiet bool) []string {
-	agent, ok := agentx.DefaultRegistry.Get(agentx.AgentTypeClaudeCode)
+	cm, ok := getClaudeCommandManager()
 	if !ok {
-		slog.Debug("claude code agent not in registry")
-		return nil
-	}
-
-	cm := agent.CommandManager()
-	if cm == nil {
-		slog.Debug("claude code agent has no command manager")
+		slog.Debug("claude code command manager not available")
 		return nil
 	}
 

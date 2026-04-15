@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/sageox/agentx"
-	_ "github.com/sageox/agentx/setup"
 	"github.com/sageox/ox/extensions/claude"
 	"github.com/sageox/ox/internal/version"
 )
@@ -19,14 +18,9 @@ func checkClaudeCommands(fix bool) checkResult {
 		return SkippedCheck("Claude commands", "not in git repo", "")
 	}
 
-	agent, ok := agentx.DefaultRegistry.Get(agentx.AgentTypeClaudeCode)
+	cm, ok := getClaudeCommandManager()
 	if !ok {
-		return SkippedCheck("Claude commands", "agent not in registry", "")
-	}
-
-	cm := agent.CommandManager()
-	if cm == nil {
-		return SkippedCheck("Claude commands", "no command manager", "")
+		return SkippedCheck("Claude commands", "command manager not available", "")
 	}
 
 	commands, err := agentx.ReadCommandFiles(claude.CommandFS, "commands")

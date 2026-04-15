@@ -5,20 +5,13 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/sageox/agentx"
-	_ "github.com/sageox/agentx/setup"
 	"github.com/sageox/ox/internal/cli"
 )
 
 // removeClaudeCommands removes ox slash commands from .claude/commands/.
 func removeClaudeCommands(gitRoot string) error {
-	agent, ok := agentx.DefaultRegistry.Get(agentx.AgentTypeClaudeCode)
+	cm, ok := getClaudeCommandManager()
 	if !ok {
-		return nil
-	}
-
-	cm := agent.CommandManager()
-	if cm == nil {
 		return nil
 	}
 

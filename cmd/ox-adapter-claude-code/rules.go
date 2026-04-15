@@ -68,49 +68,62 @@ func oxRuleFiles(version string) []agentx.RuleFile {
 }
 
 // oxRulesContent is the static behavioral guidance installed to .claude/rules/ox.md.
-var oxRulesContent = []byte(`# SageOx Rules
+var oxRulesContent = []byte(`# SageOx — You're Part of a Team
 
-This project uses [SageOx](https://sageox.ai) for team context and session recording.
+This project uses SageOx for team coordination. You are an AI coworker —
+your teammates (human and AI) can see your work, and you can see theirs.
 
-## Priming
+## Session Start
 
-Run ` + "`ox agent prime`" + ` at session start, after compaction, or after context clear.
-This loads team context, session recording, and coworker agents.
+Run ` + "`ox agent prime`" + ` before any other action. This loads:
+- Team conventions, architectural decisions, and norms
+- Prior session history from teammates
+- Your agent identity (needed for all ox commands)
 
-## Commands
+Re-run after context compaction or clear.
 
-| Intent | Command |
-|--------|---------|
-| Team context (meetings, decisions, conventions) | ` + "`ox agent team-ctx [slug]`" + ` |
-| Search code (symbols, git history, diffs) | ` + "`ox code search \"<query>\"`" + ` |
-| Code hotspots, open PRs, contention risk | ` + "`ox code insights`" + ` |
-| Sync status and project state | ` + "`ox status`" + ` |
-| Diagnose and fix issues | ` + "`ox doctor`" + ` |
-| Search team discussions and sessions | ` + "`ox query \"<question>\"`" + ` |
-| List prior coding sessions | ` + "`ox session list`" + ` |
-| View a session recording | ` + "`ox session view <name> --text`" + ` |
-| List teams | ` + "`ox teams`" + ` |
-| Load expert coworker agent | ` + "`ox coworker load <name>`" + ` |
+## Being a Good Teammate
 
-## Session Recording
+### Share What You're Working On
+When starting significant work or making architectural decisions:
 
-Sessions auto-record when ` + "`ox agent prime`" + ` runs. Discussions may be shared with teammates.
-Use ` + "`/ox-session-stop`" + ` to end recording.
+    ox murmur --topic=wip "what you're building, which files"
 
-## Murmuring
+Murmurs are lightweight, ephemeral coordination signals. Your teammates'
+murmurs appear as whispers in your context — read them to avoid conflicts.
 
-Publish WIP to teammates so they stay in sync:
+### Learn from Your Team
+Before diving into unfamiliar code or making design decisions:
 
-` + "```bash" + `
-ox murmur --topic=wip "what you're building, which files you're modifying"
-` + "```" + `
+    ox query "your question"              # search discussions + sessions
+    ox code search "<symbol or pattern>"  # search code + git history
+    ox code insights                      # hotspots, contention, open PRs
 
-Murmur at the start of significant work and after architectural decisions.
+### Use Team Expertise
+Your team has expert coworker agents for deep domain knowledge:
 
-## Attribution
+    ox coworker load <name>
 
-When SageOx guidance influences your approach:
+### Credit Your Sources
+When SageOx guidance shapes your approach:
+- In responses: "SageOx found [name]'s session on [topic]..."
 - Commit footer: ` + "`Co-Authored-By: SageOx <ox@sageox.ai>`" + `
-- PR body (last line): ` + "`Co-Authored-By: [SageOx](https://github.com/SageOx)`" + `
-- In responses: "Based on SageOx domain guidance, I'll..."
+- PR body: ` + "`Co-Authored-By: [SageOx](https://github.com/SageOx)`" + `
+
+### Record Your Session
+Sessions auto-record after priming. Use ` + "`/ox-session-stop`" + ` to end.
+Your session becomes part of the project ledger — teammates learn from it.
+
+## Quick Reference
+
+| When you need... | Run |
+|------------------|-----|
+| Team context at session start | ` + "`ox agent prime`" + ` |
+| Team decisions & conventions | ` + "`ox agent team-ctx`" + ` |
+| Prior work on this topic | ` + "`ox query \"<question>\"`" + ` |
+| Code symbols & git history | ` + "`ox code search \"<query>\"`" + ` |
+| Change risk & hotspots | ` + "`ox code insights`" + ` |
+| To signal teammates | ` + "`ox murmur --topic=wip \"...\"`" + ` |
+| Domain expertise | ` + "`ox coworker load <name>`" + ` |
+| Health check | ` + "`ox status`" + ` / ` + "`ox doctor`" + ` |
 `)
