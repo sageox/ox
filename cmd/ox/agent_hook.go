@@ -400,12 +400,27 @@ func handleAfterTool(ctx *HookContext) error {
 		return nil // not recording for this agent, silent noop
 	}
 
+	// Track every afterTool invocation + its terminal reason so `ox session status`
+	// can distinguish a healthy idle session (status=ok) from a broken recording
+	// (status=session-file-not-found, adapter-missing, etc.) when EntryCount=0.
+	recordHookStatus := func(status string) {
+		_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+			s.HookInvocations++
+			s.LastHookStatus = status
+			now := time.Now().UTC()
+			s.LastHookAt = &now
+		})
+	}
+
 	adapter, adapterErr := adapters.GetAdapter(state.AdapterName)
 	if adapterErr != nil {
+		slog.Info("hook: afterTool adapter not found", "agentID", agentID, "adapter", state.AdapterName, "err", adapterErr)
+		recordHookStatus("adapter-not-found")
 		return nil
 	}
 	reader, ok := adapter.(adapters.IncrementalReader)
 	if !ok {
+		recordHookStatus("adapter-no-incremental-reader")
 		return nil // adapter doesn't support incremental reads
 	}
 
@@ -421,7 +436,8 @@ func handleAfterTool(ctx *HookContext) error {
 			Since:    state.StartedAt,
 		})
 		if findErr != nil || sf == "" {
-			slog.Debug("hook: session file not found", "agentID", agentID, "err", findErr)
+			slog.Info("hook: session file not found", "agentID", agentID, "adapter", state.AdapterName, "repo", repoRoot, "err", findErr)
+			recordHookStatus("session-file-not-found")
 			return nil // session file not available yet
 		}
 		state.SessionFile = sf
@@ -467,11 +483,13 @@ func handleAfterTool(ctx *HookContext) error {
 
 	entries, newOffset, readErr := reader.ReadFromOffset(state.SessionFile, readOffset)
 	if readErr != nil {
-		slog.Debug("hook: incremental read failed", "error", readErr)
+		slog.Info("hook: incremental read failed", "agentID", agentID, "adapter", state.AdapterName, "file", state.SessionFile, "offset", readOffset, "error", readErr)
+		recordHookStatus("read-error")
 		return nil // non-fatal, will catch up at stop
 	}
 
 	if len(entries) == 0 {
+		recordHookStatus("no-new-entries")
 		return nil
 	}
 
@@ -489,8 +507,12 @@ func handleAfterTool(ctx *HookContext) error {
 
 	if len(entries) == 0 {
 		// update offset even if no entries passed filter
+		now := time.Now().UTC()
 		_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
 			s.SourceOffset = newOffset
+			s.HookInvocations++
+			s.LastHookStatus = "no-entries-after-filter"
+			s.LastHookAt = &now
 		})
 		return nil
 	}
@@ -525,13 +547,18 @@ func handleAfterTool(ctx *HookContext) error {
 	}
 
 	if appendErr := appendRedactedEntries(rawPath, sessionEntries); appendErr != nil {
-		slog.Debug("hook: append entries failed", "error", appendErr)
+		slog.Info("hook: append entries failed", "agentID", agentID, "path", rawPath, "error", appendErr)
+		recordHookStatus("append-failed")
 		return nil // non-fatal
 	}
 
+	now := time.Now().UTC()
 	_ = session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
 		s.SourceOffset = newOffset
 		s.EntryCount += len(sessionEntries)
+		s.HookInvocations++
+		s.LastHookStatus = "ok"
+		s.LastHookAt = &now
 		// Refresh parent_pid only if the stored PID is dead — each hook call runs in a
 		// new transient shell, so blindly overwriting with os.Getppid() would store a dead
 		// PID. FindAgentAncestorPID walks the tree to find the long-lived agent process.

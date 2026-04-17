@@ -81,3 +81,4 @@ demo/playwright/node_modules/
 # Never commit age private keys
 *-age-key.txt
 *.age-key
+issues.jsonl

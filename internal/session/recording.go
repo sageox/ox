@@ -61,6 +61,14 @@ type RecordingState struct {
 
 	WatchMode string     `json:"watch_mode,omitempty"` // how entries are captured: "hook" (CLI-driven) or "tail" (daemon-driven)
 	StoppedAt *time.Time `json:"stopped_at,omitempty"` // set by ox session stop to signal daemon to finalize
+
+	// Hook observability: lets `ox session status` show whether hooks are firing
+	// and why they're skipping. Without these, a broken recording path (e.g.
+	// adapter binary missing, session file not discoverable) looks identical to
+	// a healthy idle session — both show EntryCount=0 with no signal of cause.
+	HookInvocations int        `json:"hook_invocations,omitempty"` // total afterTool hook calls since recording started
+	LastHookStatus  string     `json:"last_hook_status,omitempty"` // stable reason code from last afterTool: "ok", "session-file-not-found", "read-error", etc.
+	LastHookAt      *time.Time `json:"last_hook_at,omitempty"`     // timestamp of last afterTool invocation
 }
 
 // Duration returns how long the recording has been running.

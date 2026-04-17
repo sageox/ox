@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/version"
 	"github.com/sageox/ox/pkg/adapterprotocol"
@@ -94,6 +95,60 @@ func checkExternalAdapters(opts doctorOptions) []checkResult {
 
 			results = append(results, cr)
 		}
+	}
+
+	return results
+}
+
+// checkRecordingAdapters verifies that every active recording's named adapter
+// is discoverable. When brew ships `ox` but fails to link `ox-adapter-<name>`
+// onto the user's PATH (or the bundled dir), recording state is created under
+// the adapter's name but every hook invocation silently no-ops because the
+// binary can't be forked. This was the top root-cause hypothesis for issue
+// #519 (header-only raw.jsonl across every session).
+func checkRecordingAdapters(projectRoot string) []checkResult {
+	if projectRoot == "" {
+		return nil
+	}
+	states, err := session.LoadAllRecordingStates(projectRoot)
+	if err != nil || len(states) == 0 {
+		return nil
+	}
+
+	// collect unique adapter names from active recordings
+	needed := make(map[string]bool)
+	for _, s := range states {
+		if s.AdapterName != "" && s.AdapterName != "generic" {
+			needed[s.AdapterName] = true
+		}
+	}
+	if len(needed) == 0 {
+		return nil
+	}
+
+	// ensure registry is populated with any external adapters on disk
+	_ = adapters.RegisterExternalAdapters()
+
+	var results []checkResult
+	for name := range needed {
+		if _, gerr := adapters.GetAdapter(name); gerr == nil {
+			results = append(results, PassedCheck(
+				"adapter "+name+" available",
+				"registered for active recordings",
+			))
+			continue
+		}
+		detail := fmt.Sprintf(
+			"active recording uses adapter %q but ox-adapter-%s is not discoverable. "+
+				"Session hooks will silently skip every turn (see issue #519). "+
+				"Check OX_ADAPTER_PATH, ~/.local/share/ox/adapters, or the directory containing the ox binary.",
+			name, name,
+		)
+		results = append(results, CriticalCheck(
+			"adapter "+name+" missing",
+			"adapter binary not found for active recording",
+			detail,
+		).WithFixInfo("adapter:"+name+":missing", FixLevelCheckOnly))
 	}
 
 	return results

@@ -1,15 +1,85 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
+
+// countRawEntries counts turn entries in a raw.jsonl file — total lines minus
+// the header line (if present). Returns -1 if the file can't be read; the
+// caller should treat that as "unknown" and skip cross-checking.
+//
+// Used to cross-check against RecordingState.EntryCount so `ox session status`
+// can warn when the two disagree — the failure mode from issue #519 where the
+// state said "recording" but raw.jsonl only contained the header.
+func countRawEntries(rawPath string) int {
+	f, err := os.Open(rawPath)
+	if err != nil {
+		return -1
+	}
+	defer f.Close()
+
+	n := 0
+	scanner := bufio.NewScanner(f)
+	// raise the default 64KB line cap — some entries (large tool outputs) can
+	// legitimately exceed it and we'd rather count than miss.
+	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for scanner.Scan() {
+		n++
+	}
+	if scanner.Err() != nil {
+		return -1
+	}
+	if n == 0 {
+		return 0
+	}
+	return n - 1 // subtract header line
+}
+
+// stallGracePeriod is how long a recording can run with 0 entries before we
+// flag it as stalled. Generous because quiet sessions (user reading, thinking)
+// legitimately have few hooks. The stall condition requires BOTH (a) significant
+// hook activity AND (b) zero captured entries — both must be true.
+const stallGracePeriod = 3 * time.Minute
+
+// stallHookThreshold: require at least this many hook invocations with zero
+// entries before warning. Filters out fresh sessions that have only had one
+// or two hook fires.
+const stallHookThreshold = 5
+
+// sessionStallStatus returns (stalled, human-readable reason) for a recording.
+// A session is "stalled" when hooks have been firing but no entries have been
+// captured — the silent-failure class of bug exposed by issue #519.
+func sessionStallStatus(state *session.RecordingState) (bool, string) {
+	if state == nil {
+		return false, ""
+	}
+	if state.EntryCount > 0 {
+		return false, ""
+	}
+	if state.HookInvocations < stallHookThreshold {
+		return false, ""
+	}
+	if state.Duration() < stallGracePeriod {
+		return false, ""
+	}
+	reason := state.LastHookStatus
+	if reason == "" {
+		reason = "hooks fired but no entries captured"
+	} else {
+		reason = fmt.Sprintf("hooks fired %d× with 0 entries (last status: %s)", state.HookInvocations, reason)
+	}
+	return true, reason
+}
 
 var sessionStatusCmd = &cobra.Command{
 	Use:   "status",
@@ -50,6 +120,13 @@ type sessionStatusOutput struct {
 	StartedAt     string                  `json:"started_at,omitempty"`
 	WorkspacePath string                  `json:"workspace_path,omitempty"`
 	Branch        string                  `json:"branch,omitempty"`
+
+	// Hook observability (see RecordingState for details)
+	HookInvocations int    `json:"hook_invocations,omitempty"`
+	LastHookStatus  string `json:"last_hook_status,omitempty"`
+	LastHookAt      string `json:"last_hook_at,omitempty"`
+	Stalled         bool   `json:"stalled,omitempty"` // hooks fired but no entries captured
+	StalledReason   string `json:"stalled_reason,omitempty"`
 }
 
 // sessionRecordingEntry represents one active recording in the multi-session output.
@@ -140,26 +217,37 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		durationStr := formatDurationHuman(duration)
 		alive, status := agentLivenessFor(agentAlive, state.AgentID)
 
+		stalled, stalledReason := sessionStallStatus(state)
+		lastHookAtStr := ""
+		if state.LastHookAt != nil {
+			lastHookAtStr = state.LastHookAt.Format("2006-01-02T15:04:05Z07:00")
+		}
+
 		if jsonOutput {
 			output := sessionStatusOutput{
-				Recording:     true,
-				AgentAlive:    agentAlivePtr(state),
-				Guidance:      "Run 'ox agent <id> session stop' to save the recording",
-				Count:         1,
-				Title:         state.Title,
-				DurationSecs:  int(duration.Seconds()),
-				Duration:      durationStr,
-				EntryCount:    state.EntryCount,
-				FilterMode:    state.FilterMode,
-				Model:         state.Model,
-				Agent:         state.AdapterName,
-				AgentID:       state.AgentID,
-				ProcessAlive:  alive,
-				ProcessStatus: status,
-				SessionFile:   state.SessionFile,
-				StartedAt:     state.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
-				WorkspacePath: state.WorkspacePath,
-				Branch:        state.Branch,
+				Recording:       true,
+				AgentAlive:      agentAlivePtr(state),
+				Guidance:        "Run 'ox agent <id> session stop' to save the recording",
+				Count:           1,
+				Title:           state.Title,
+				DurationSecs:    int(duration.Seconds()),
+				Duration:        durationStr,
+				EntryCount:      state.EntryCount,
+				FilterMode:      state.FilterMode,
+				Model:           state.Model,
+				Agent:           state.AdapterName,
+				AgentID:         state.AgentID,
+				ProcessAlive:    alive,
+				ProcessStatus:   status,
+				SessionFile:     state.SessionFile,
+				StartedAt:       state.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+				WorkspacePath:   state.WorkspacePath,
+				Branch:          state.Branch,
+				HookInvocations: state.HookInvocations,
+				LastHookStatus:  state.LastHookStatus,
+				LastHookAt:      lastHookAtStr,
+				Stalled:         stalled,
+				StalledReason:   stalledReason,
 			}
 			return outputJSON(output)
 		}
@@ -174,13 +262,29 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Title:    %s\n", state.Title)
 		}
 		fmt.Printf("  Duration: %s\n", durationStr)
-		fmt.Printf("  Entries:  %d\n", state.EntryCount)
+		rawEntries := -1
+		if state.SessionPath != "" {
+			rawEntries = countRawEntries(filepath.Join(state.SessionPath, "raw.jsonl"))
+		}
+		if rawEntries >= 0 && rawEntries != state.EntryCount {
+			fmt.Printf("  Entries:  %d %s\n", state.EntryCount,
+				cli.StyleWarning.Render(fmt.Sprintf("(raw.jsonl has %d — state may be stale)", rawEntries)))
+		} else {
+			fmt.Printf("  Entries:  %d\n", state.EntryCount)
+		}
 		fmt.Printf("  Agent:    %s\n", state.AdapterName)
 		fmt.Printf("  Started:  %s\n", state.StartedAt.Format("15:04:05"))
 		if state.AgentID != "" {
 			fmt.Printf("  Agent ID: %s\n", state.AgentID)
 		}
 		fmt.Printf("  Process:  %s\n", formatProcessStatus(status))
+		if state.HookInvocations > 0 || state.LastHookStatus != "" {
+			fmt.Printf("  Hooks:    %d invocations", state.HookInvocations)
+			if state.LastHookStatus != "" {
+				fmt.Printf(", last=%s", state.LastHookStatus)
+			}
+			fmt.Println()
+		}
 		if state.WorkspacePath != "" {
 			fmt.Printf("  Workspace: %s\n", state.WorkspacePath)
 		}
@@ -188,7 +292,10 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  Branch:   %s\n", state.Branch)
 		}
 		fmt.Println()
-		if status == "dead" {
+		if stalled {
+			fmt.Println(cli.StyleWarning.Render("⚠ Recording is stalled: " + stalledReason))
+			fmt.Println(cli.StyleDim.Render("  Run 'ox doctor' to diagnose."))
+		} else if status == "dead" {
 			fmt.Println(cli.StyleWarning.Render("Agent process is no longer running. Run 'ox agent <id> session stop' to finalize."))
 		} else {
 			fmt.Println(cli.StyleDim.Render("Run 'ox agent <id> session stop' to save the recording"))

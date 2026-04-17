@@ -877,7 +877,14 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 	// Discover external adapters and run their diagnose subcommands.
 	// Independent of daemon -- works as one-shot subprocess per adapter.
 	progress.show("External Adapters")
-	if adapterChecks := checkExternalAdapters(opts); len(adapterChecks) > 0 {
+	adapterChecks := checkExternalAdapters(opts)
+	// Also verify that every active recording's adapter is discoverable —
+	// catches the #519 failure mode where the adapter binary is missing
+	// from PATH and every hook silently no-ops.
+	if projectRoot := findGitRoot(); projectRoot != "" {
+		adapterChecks = append(adapterChecks, checkRecordingAdapters(projectRoot)...)
+	}
+	if len(adapterChecks) > 0 {
 		categories = append(categories, checkCategory{
 			name:   "External Adapters",
 			checks: adapterChecks,
