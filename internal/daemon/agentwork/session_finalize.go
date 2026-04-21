@@ -625,15 +625,19 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		return nil
 	}
 
-	// parse LLM output into SummarizeResponse
+	// parse LLM output into SummarizeResponse. Track whether we produced a real
+	// summary or a fallback stub so the quality gate only runs on real scores
+	// — a fallback with QualityScore=0 must NOT flow through EvaluateQuality
+	// and get discarded, otherwise transient LLM failures lose sessions (#525).
 	var summaryResp *session.SummarizeResponse
+	scored := true
 	parsed, parseErr := sessionsummary.ParseSummaryJSON(llmOutput)
 	if parseErr != nil {
 		preview := llmOutput
 		if len(preview) > 200 {
 			preview = preview[:200]
 		}
-		h.logger.Warn("LLM output not parsable as summary JSON, discarding",
+		h.logger.Warn("LLM output not parsable as summary JSON, using fallback stub",
 			"err", parseErr,
 			"output_len", len(llmOutput),
 			"output_preview", preview,
@@ -643,24 +647,32 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 			QualityScore: 0.0,
 			ScoreReason:  "unparsable LLM output",
 		}
+		scored = false
 	} else {
 		summaryResp = parsed
 	}
 
 	// validate summary content for agent meta-output contamination
 	if valErr := sessionsummary.ValidateSummaryContent(summaryResp); valErr != nil {
-		h.logger.Warn("summary content validation failed, discarding",
+		h.logger.Warn("summary content validation failed, using fallback stub",
 			"session", filepath.Base(payload.SessionDir),
 			"error", valErr,
 		)
 		summaryResp.QualityScore = 0.0
 		summaryResp.ScoreReason = fmt.Sprintf("content validation failed: %v", valErr)
+		scored = false
 	}
 
 	sessionName := filepath.Base(payload.SessionDir)
 
-	// evaluate quality using shared function
-	disposition := session.EvaluateQuality(summaryResp.QualityScore, h.qualityUploadThreshold, h.qualityDiscardThreshold)
+	// unscored fallbacks default to upload (preserve stub for teammates / doctor).
+	// Only real LLM-scored summaries are gated by the quality thresholds.
+	var disposition session.QualityDisposition
+	if scored {
+		disposition = session.EvaluateQuality(summaryResp.QualityScore, h.qualityUploadThreshold, h.qualityDiscardThreshold)
+	} else {
+		disposition = session.QualityUpload
+	}
 
 	if disposition == session.QualityDiscard {
 		h.logger.Info("session below discard threshold, removing",

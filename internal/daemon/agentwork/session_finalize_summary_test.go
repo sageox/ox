@@ -172,7 +172,7 @@ func TestProcessResult_WithRealGitRepo(t *testing.T) {
 	handler := NewSessionFinalizeHandler(slog.Default())
 	// skipGit=false — exercises the real git commit path
 
-	llmOutput := `{"title":"Git Test","summary":"Testing git commit path.","key_actions":["tested git"],"outcome":"success","topics_found":["git"]}`
+	llmOutput := `{"title":"Git Test","summary":"Testing git commit path.","key_actions":["tested git"],"outcome":"success","topics_found":["git"],"quality_score":0.9}`
 
 	item := &WorkItem{
 		ID:   "test-git",
@@ -291,6 +291,88 @@ func TestProcessResult_QualityScoreDiscard(t *testing.T) {
 	// session dir should be removed
 	if _, statErr := os.Stat(sessionDir); !os.IsNotExist(statErr) {
 		t.Error("expected session directory to be removed for quality below discard threshold")
+	}
+}
+
+// TestProcessResult_ValidationFailure_UploadsFallbackStub pins down the
+// validation-failure branch: when a parsed LLM response fails content
+// validation, the session must still be uploaded with the fallback stub —
+// never discarded as though it had a real quality_score of 0. Guards against
+// a future refactor sending validation-failures through the discard gate.
+func TestProcessResult_ValidationFailure_UploadsFallbackStub(t *testing.T) {
+	ledgerPath := createTestSession(t, "test-valfail", nil)
+	sessionDir := filepath.Join(ledgerPath, "sessions", "test-valfail")
+
+	handler := NewSessionFinalizeHandlerForTest(slog.Default())
+	handler.SetQualityThresholds(0.3, 0.1)
+
+	item := &WorkItem{
+		ID:       "test-valfail",
+		Type:     sessionFinalizeType,
+		DedupKey: "session-finalize:test-valfail",
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
+			Missing:    []string{"summary.md", "summary.json", "session.md"},
+			LedgerPath: ledgerPath,
+		},
+	}
+
+	// valid JSON but summary is too short — trips ValidateSummaryContent.
+	result := &RunResult{
+		Output: `{"title":"x","summary":"too short","key_actions":[],"outcome":"success","topics_found":[],"quality_score":0.9}`,
+	}
+
+	if err := handler.ProcessResult(item, result); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	// validation failed → fallback stub → upload path → artifacts written, dir retained
+	if _, statErr := os.Stat(sessionDir); os.IsNotExist(statErr) {
+		t.Fatal("validation failure must not discard the session")
+	}
+	if _, statErr := os.Stat(filepath.Join(sessionDir, "summary.json")); os.IsNotExist(statErr) {
+		t.Error("summary.json should be written for validation-failure fallback")
+	}
+}
+
+// TestProcessResult_EmptySessionLLMScoreZero_Discarded is the #525 regression:
+// when the LLM correctly scores an empty session as 0 (not missing, explicit 0),
+// the session must flow through the discard gate and be removed — not uploaded.
+// Before the fix, EvaluateQuality's `score <= 0` short-circuit classified these
+// as QualityUpload, causing empty "No Activity Recorded" sessions to reach the
+// team ledger.
+func TestProcessResult_EmptySessionLLMScoreZero_Discarded(t *testing.T) {
+	ledgerPath := createTestSession(t, "test-empty-zero", nil)
+	sessionDir := filepath.Join(ledgerPath, "sessions", "test-empty-zero")
+
+	handler := NewSessionFinalizeHandlerForTest(slog.Default())
+	handler.SetQualityThresholds(0.3, 0.1)
+
+	item := &WorkItem{
+		ID:       "test-525",
+		Type:     sessionFinalizeType,
+		DedupKey: "session-finalize:test-empty-zero",
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
+			Missing:    []string{"summary.md"},
+			LedgerPath: ledgerPath,
+		},
+	}
+
+	// shape of LLM output for an empty session, verbatim from the on-disk
+	// summary.json of one of the 42 leaked sessions observed in the wild.
+	result := &RunResult{
+		Output: `{"title":"Empty Session - No Activity Recorded","summary":"This session contained no dialog or activity. Only a session header was recorded, indicating the session was opened but no work was performed.","key_actions":[],"outcome":"failed","topics_found":[],"quality_score":0,"score_reason":"Session contained only a header with no dialog or work performed."}`,
+	}
+
+	if err := handler.ProcessResult(item, result); err != nil {
+		t.Fatalf("ProcessResult: %v", err)
+	}
+
+	if _, statErr := os.Stat(sessionDir); !os.IsNotExist(statErr) {
+		t.Error("empty session scored 0 by LLM must be discarded, not uploaded")
 	}
 }
 

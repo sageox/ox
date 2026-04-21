@@ -12,12 +12,17 @@ const (
 	QualityDiscard QualityDisposition = "discard"
 )
 
-// EvaluateQuality determines what to do with a session based on its quality score.
-// A score of 0 means the LLM didn't provide one — default to upload (backward compat).
+// EvaluateQuality maps a quality score to a disposition using the two thresholds.
+//
+// The score argument is a real, scored value (0.0–1.0). Callers must not pass
+// a negative sentinel or similar "unscored" placeholder: if the LLM did not
+// produce a score, decide disposition at the callsite (typically
+// QualityUpload with a stub summary) rather than routing through this
+// function. An older version of this code treated score <= 0 as "unscored →
+// upload," which conflated an empty session the LLM correctly scored 0 with
+// the truly-unscored case and quietly published header-only sessions to the
+// team ledger (see #525).
 func EvaluateQuality(score, uploadThreshold, discardThreshold float64) QualityDisposition {
-	if score <= 0 {
-		return QualityUpload
-	}
 	if score < discardThreshold {
 		return QualityDiscard
 	}

@@ -107,7 +107,15 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
-	// parse and validate the summary JSON
+	// parse and validate the summary JSON. Detect whether quality_score was
+	// actually present in the file so a missing field is treated as "unscored"
+	// (default to upload) rather than flowing through the discard gate as an
+	// explicit 0 — otherwise pre-existing summary.json files written by older
+	// ox versions (no quality_score field) would be silently discarded (#525).
+	var rawFields map[string]json.RawMessage
+	_ = json.Unmarshal(data, &rawFields)
+	_, qualityScorePresent := rawFields["quality_score"]
+
 	var summaryParsed session.SummarizeResponse
 	_ = json.Unmarshal(data, &summaryParsed)
 
@@ -140,7 +148,14 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		discardThreshold = awCfg.GetQualityDiscardThreshold()
 	}
 
-	disposition := session.EvaluateQuality(summaryParsed.QualityScore, uploadThreshold, discardThreshold)
+	// unscored summaries (field absent from JSON) default to upload; scored
+	// summaries flow through the quality thresholds.
+	var disposition session.QualityDisposition
+	if qualityScorePresent {
+		disposition = session.EvaluateQuality(summaryParsed.QualityScore, uploadThreshold, discardThreshold)
+	} else {
+		disposition = session.QualityUpload
+	}
 
 	if disposition == session.QualityDiscard {
 		slog.Info("session below discard threshold, skipping push",

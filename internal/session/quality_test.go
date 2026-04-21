@@ -10,8 +10,11 @@ func TestEvaluateQuality(t *testing.T) {
 		discard float64
 		want    QualityDisposition
 	}{
-		{"zero score defaults to upload", 0.0, 0.3, 0.1, QualityUpload},
-		{"negative score defaults to upload", -1.0, 0.3, 0.1, QualityUpload},
+		// Regression for #525: a real LLM score of 0 (e.g. empty session
+		// correctly scored 0) must flow through the discard gate. The function
+		// no longer has an "unscored sentinel" branch — "unscored" decisions
+		// are the caller's responsibility.
+		{"explicit zero is discarded below discard threshold", 0.0, 0.3, 0.1, QualityDiscard},
 		{"below discard threshold", 0.05, 0.3, 0.1, QualityDiscard},
 		{"at discard threshold boundary", 0.1, 0.3, 0.1, QualityLocalOnly},
 		{"between thresholds", 0.2, 0.3, 0.1, QualityLocalOnly},
