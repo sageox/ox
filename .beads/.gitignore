@@ -44,6 +44,7 @@ ephemeral.sqlite3-wal
 ephemeral.sqlite3-shm
 
 # Dolt server management (auto-started by bd)
+dolt-config.log
 dolt-server.pid
 dolt-server.log
 dolt-server.lock
