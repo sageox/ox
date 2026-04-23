@@ -66,10 +66,16 @@ sessions/
 
 # Claude Code local settings (user-specific)
 .claude/settings.local.json
+# Claude worktrees
+.claude/worktrees/
+
+.codex/
+
+team-contexts/
+
 demo/credentials.sops.yaml
 demo/playwright/node_modules/
-.team-contexts/
-
+.
 # Conductor workspace artifacts (blue-green GC reclone)
 .gc-diff
 .gc-untracked/
@@ -82,3 +88,4 @@ demo/playwright/node_modules/
 *-age-key.txt
 *.age-key
 issues.jsonl
+
