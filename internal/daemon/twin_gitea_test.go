@@ -121,9 +121,15 @@ func getSharedGitea(t *testing.T) *giteaFixture {
 // previous `go test` was interrupted (SIGKILL / panic) before Ryuk could clean up.
 func reapStrayGiteaContainers(t *testing.T) {
 	t.Helper()
-	// Find containers bound to the host port.
+	// Find containers bound to the host port AND labeled by testcontainers AND
+	// running the gitea image — narrow enough that we only reap containers a
+	// prior ox test run created, not unrelated dev containers that happen to
+	// publish the same port.
 	out, err := exec.Command("docker", "ps", "-aq",
-		"--filter", "publish="+giteaHostPort).CombinedOutput()
+		"--filter", "publish="+giteaHostPort,
+		"--filter", "ancestor=gitea/gitea:1.22",
+		"--filter", "label=org.testcontainers=true",
+	).CombinedOutput()
 	if err != nil {
 		t.Logf("gitea-fixture: docker ps failed while reaping: %v", err)
 		return
@@ -195,6 +201,7 @@ func createGiteaFixture() (*giteaFixture, error) {
 					}
 					logTail = "\n--- gitea container log tail ---\n" + string(b)
 				}
+				_ = r.Close()
 			}
 			_ = ctr.Terminate(context.Background())
 		}

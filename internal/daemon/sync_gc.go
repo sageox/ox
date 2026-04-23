@@ -25,9 +25,10 @@ import (
 type gcResult int
 
 const (
-	gcSuccess      gcResult = iota // reclone completed successfully
-	gcSkippedDirty                 // skipped: local changes could not be preserved
-	gcFailed                       // reclone attempted but failed (clone, validation, or swap error)
+	gcSuccess       gcResult = iota // reclone completed successfully
+	gcSkippedDirty                  // skipped: local changes could not be preserved
+	gcSkippedLocked                 // skipped: another GC holds the workspace lock
+	gcFailed                        // reclone attempted but failed (clone, validation, or swap error)
 )
 
 // checkAndRunGC iterates team context workspaces and triggers blue-green reclone
@@ -195,6 +196,10 @@ func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 					Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
 				})
 			}
+		case gcSkippedLocked:
+			// another GC holds the workspace lock — not a dirty workspace,
+			// just a concurrency skip
+			resp.Skipped++
 		case gcFailed:
 			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: reclone failed (check daemon logs)", name))
 		}
@@ -221,6 +226,9 @@ func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 						Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
 					})
 				}
+			case gcSkippedLocked:
+				// another GC holds the workspace lock — counted as skip
+				resp.Skipped++
 			case gcFailed:
 				resp.Errors = append(resp.Errors, "ledger: reclone failed (check daemon logs)")
 			}
@@ -281,14 +289,34 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 	// acquire the GC lock up front (before cloning, not just around the swap)
 	// so concurrent GC attempts on the same workspace don't race on .new/.old
 	// or erase each other's in-flight artifacts. Stale locks (>5min) are
-	// reclaimed by acquireGCLock itself.
+	// reclaimed by acquireGCLock itself — we refresh the lock file mtime below
+	// so a long clone/restore cycle doesn't get its lock stolen.
 	gcLock, lockErr := acquireGCLock(lockPath)
 	if lockErr != nil {
 		s.logger.Info("gc: another GC holds the lock for this workspace, skipping",
 			"path", ws.Path, "workspace", wsLabel, "lock", lockPath)
-		return gcSkippedDirty
+		return gcSkippedLocked
 	}
 	defer releaseGCLock(gcLock, lockPath)
+
+	// Heartbeat the lock mtime every 30s so acquireGCLock's 5-minute
+	// stale-lock reclaim doesn't steal an actively-held lock when the
+	// clone/restore phase legitimately runs long.
+	stopLockHeartbeat := make(chan struct{})
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-stopLockHeartbeat:
+				return
+			case <-t.C:
+				now := time.Now()
+				_ = os.Chtimes(lockPath, now, now)
+			}
+		}
+	}()
+	defer close(stopLockHeartbeat)
 
 	// clean up leftover artifacts from a previous failed GC (safe under the lock)
 	leftovers := []string{newPath, diffFile, untrackedDir, cacheBackupDir}

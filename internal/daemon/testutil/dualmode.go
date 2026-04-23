@@ -21,6 +21,34 @@ import (
 	"github.com/sageox/ox/internal/gitserver"
 )
 
+// forceFileStorage is a reference-counted override so concurrent
+// StartTestDaemon callers don't restore the global credential-storage flag
+// out-of-order. Only the last Cleanup flips the process-global back.
+var (
+	forceFileStorageMu    sync.Mutex
+	forceFileStorageUsers int
+	forceFileStoragePrev  bool
+)
+
+// pushForceFileStorage increments the override ref-count, setting the global
+// on the first call. Returns a pop function the caller must invoke on cleanup.
+func pushForceFileStorage() func() {
+	forceFileStorageMu.Lock()
+	defer forceFileStorageMu.Unlock()
+	if forceFileStorageUsers == 0 {
+		forceFileStoragePrev = gitserver.TestSetForceFileStorage(true)
+	}
+	forceFileStorageUsers++
+	return func() {
+		forceFileStorageMu.Lock()
+		defer forceFileStorageMu.Unlock()
+		forceFileStorageUsers--
+		if forceFileStorageUsers == 0 {
+			gitserver.TestSetForceFileStorage(forceFileStoragePrev)
+		}
+	}
+}
+
 // Mode represents the execution mode for tests.
 type Mode string
 
@@ -119,9 +147,10 @@ func StartTestDaemon(t *testing.T, tmpDir string) (cleanup func()) {
 	// Force credential loading to use file storage (not OS keychain) so tests
 	// don't pick up the developer's real credentials — otherwise the daemon
 	// discovers real team contexts and spawns background git-clone goroutines
-	// that outlive test cleanup and race with t.TempDir() removal.
-	prevForceFile := gitserver.TestSetForceFileStorage(true)
-	t.Cleanup(func() { gitserver.TestSetForceFileStorage(prevForceFile) })
+	// that outlive test cleanup and race with t.TempDir() removal. Use the
+	// ref-counted helper so concurrent StartTestDaemon callers restore the
+	// process-global in the correct order (only the last cleanup flips back).
+	t.Cleanup(pushForceFileStorage())
 
 	// configure daemon with test-specific settings
 	cfg := daemon.DefaultConfig()

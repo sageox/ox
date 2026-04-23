@@ -679,8 +679,11 @@ func TestTwinGitHubSync_RealLedgerData(t *testing.T) {
 	// unreproducible from the live ledger. Skip rather than fail to keep the
 	// suite green on healthy ledgers.
 	const pr409LegacyPath = "data/github/2026/04/01/pr/409.json"
-	if _, err := os.Stat(filepath.Join(realLedgerPath, pr409LegacyPath)); os.IsNotExist(err) {
-		t.Skipf("real ledger no longer contains legacy corrupted fixture %s (already repaired)", pr409LegacyPath)
+	if _, err := os.Stat(filepath.Join(realLedgerPath, pr409LegacyPath)); err != nil {
+		if os.IsNotExist(err) {
+			t.Skipf("real ledger no longer contains legacy corrupted fixture %s (already repaired)", pr409LegacyPath)
+		}
+		require.NoError(t, err, "failed to stat legacy fixture precondition")
 	}
 
 	requireDocker(t)
