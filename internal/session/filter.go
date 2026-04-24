@@ -1,6 +1,6 @@
 package session
 
-import ss "github.com/sageox/ox/pkg/sessionsummary"
+import "strings"
 
 // SessionFilterMode represents the level of session recording.
 // Values: "none", "all"
@@ -25,8 +25,31 @@ func (m SessionFilterMode) ShouldRecord() bool {
 	return m != SessionFilterModeNone && m != ""
 }
 
-// IsNoiseCommand checks if a command is noise (low-value unless it fails).
-// Delegates to pkg/sessionsummary.
+// noiseCommands are bash commands that are always filtered out (unless they
+// fail). Used by cmd/ox/session_resummary.go when trimming low-value tool
+// calls before a re-summarization. Formerly lived in pkg/sessionsummary
+// alongside a broader FilterForSummarization — that function was dead code
+// (the summary prompt tells the calling agent to re-read raw.jsonl directly,
+// bypassing any pre-filter), so the filter file was deleted and the one
+// piece that had a real caller (IsNoiseCommand) was inlined here next to
+// its only consumer.
+var noiseCommands = []string{
+	"ls", "pwd", "cd", "clear",
+	"cat", "head", "tail", "less", "more",
+	"echo", "printf",
+	"which", "whereis", "type",
+	"env", "export",
+}
+
+// IsNoiseCommand returns true when a bash command is low-value noise whose
+// output rarely carries signal for summarization. Matches prefix followed
+// by a space or exact command with no args.
 func IsNoiseCommand(cmd string) bool {
-	return ss.IsNoiseCommand(cmd)
+	cmdLower := strings.ToLower(strings.TrimSpace(cmd))
+	for _, pattern := range noiseCommands {
+		if strings.HasPrefix(cmdLower, pattern+" ") || cmdLower == pattern {
+			return true
+		}
+	}
+	return false
 }

@@ -6,18 +6,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/session/pipeline"
 )
 
 // ContentFiles lists the session content files eligible for LFS upload.
 // These are the files that get uploaded to LFS blob storage and replaced
 // with pointer files in the git commit.
-var ContentFiles = []string{
-	"raw.jsonl",
-	"summary.md",
-	"session.md",
-	"plan.md",
-	"context-trace.jsonl",
-}
+//
+// Derived from pipeline.LedgerContentFiles — the canonical source of
+// truth for "what counts as a session artifact." Adding a new artifact
+// there automatically makes it eligible for LFS upload; the two call
+// sites cannot drift out of sync.
+var ContentFiles = pipeline.LedgerContentFiles
 
 // UploadSessionFiles uploads session content files to LFS and returns
 // the filename->FileRef manifest for inclusion in meta.json.

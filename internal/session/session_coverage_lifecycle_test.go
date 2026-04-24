@@ -402,7 +402,11 @@ func TestExtractPathFromToolInput(t *testing.T) {
 
 // --- summarize.go ---
 
-func TestEntriesToPkg_RoundTrip(t *testing.T) {
+// TestEntriesToPkg covers the internal→pkg conversion used by
+// BuildSummaryPrompt and LocalSummary. The reverse direction
+// (pkgToEntries) was deleted when FilterForSummarization — its only
+// consumer — was removed as dead code.
+func TestEntriesToPkg(t *testing.T) {
 	now := time.Now()
 	entries := []Entry{
 		{
@@ -425,13 +429,10 @@ func TestEntriesToPkg_RoundTrip(t *testing.T) {
 		},
 	}
 
-	// convert to pkg and back
 	pkg := entriesToPkg(entries)
 	if len(pkg) != 3 {
 		t.Fatalf("entriesToPkg returned %d entries, want 3", len(pkg))
 	}
-
-	// verify pkg fields
 	if pkg[0].Type != "user" {
 		t.Errorf("pkg[0].Type = %q, want user", pkg[0].Type)
 	}
@@ -444,33 +445,12 @@ func TestEntriesToPkg_RoundTrip(t *testing.T) {
 	if pkg[2].Content != "response" {
 		t.Errorf("pkg[2].Content = %q, want response", pkg[2].Content)
 	}
-
-	// convert back
-	roundTripped := pkgToEntries(pkg)
-	if len(roundTripped) != 3 {
-		t.Fatalf("pkgToEntries returned %d entries, want 3", len(roundTripped))
-	}
-
-	if roundTripped[0].Type != SessionEntryTypeUser {
-		t.Errorf("roundTripped[0].Type = %q, want user", roundTripped[0].Type)
-	}
-	if roundTripped[1].ToolName != "bash" {
-		t.Errorf("roundTripped[1].ToolName = %q, want bash", roundTripped[1].ToolName)
-	}
-	if roundTripped[2].Content != "response" {
-		t.Errorf("roundTripped[2].Content = %q, want response", roundTripped[2].Content)
-	}
 }
 
 func TestEntriesToPkg_Empty(t *testing.T) {
 	pkg := entriesToPkg(nil)
 	if len(pkg) != 0 {
 		t.Errorf("entriesToPkg(nil) returned %d entries, want 0", len(pkg))
-	}
-
-	entries := pkgToEntries(nil)
-	if len(entries) != 0 {
-		t.Errorf("pkgToEntries(nil) returned %d entries, want 0", len(entries))
 	}
 }
 

@@ -27,6 +27,32 @@ func TestLedgerFileConstants(t *testing.T) {
 	}
 }
 
+// TestLedgerContentFiles_CoversAllConstants prevents a new LedgerFile*
+// constant from being added without also appearing in LedgerContentFiles.
+// Missing from the list means the artifact would copy to the ledger but
+// never LFS-upload — a silent GitLab push failure later on.
+func TestLedgerContentFiles_CoversAllConstants(t *testing.T) {
+	want := map[string]bool{
+		LedgerFileRaw:          false,
+		LedgerFileSummaryMD:    false,
+		LedgerFileSessionMD:    false,
+		LedgerFilePlan:         false,
+		LedgerFileContextTrace: false,
+	}
+	for _, f := range LedgerContentFiles {
+		if _, known := want[f]; !known {
+			t.Errorf("LedgerContentFiles includes %q not matching any LedgerFile* constant — declare a constant or drop the entry", f)
+			continue
+		}
+		want[f] = true
+	}
+	for f, seen := range want {
+		if !seen {
+			t.Errorf("LedgerFile* constant %q is defined but missing from LedgerContentFiles; add it or delete the constant", f)
+		}
+	}
+}
+
 func TestResultSecondaryArtifacts(t *testing.T) {
 	r := &Result{
 		SummaryMDPath:    "/tmp/summary.md",

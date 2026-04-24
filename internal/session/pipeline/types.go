@@ -12,12 +12,33 @@ package pipeline
 // Ledger artifact filenames — single source of truth used by both
 // the upload path (write) and post-prune path rewrite (read-back).
 const (
-	LedgerFileRaw       = "raw.jsonl"
-	LedgerFileSummaryMD = "summary.md"
-	LedgerFileSessionMD = "session.md"
-	LedgerFilePlan         = "plan.md"          // may contain multiple plans as separate Markdown sections
+	LedgerFileRaw          = "raw.jsonl"
+	LedgerFileSummaryMD    = "summary.md"
+	LedgerFileSessionMD    = "session.md"
+	LedgerFilePlan         = "plan.md"             // may contain multiple plans as separate Markdown sections
 	LedgerFileContextTrace = "context-trace.jsonl" // context influence trace (what context was provided and what influenced decisions)
 )
+
+// LedgerContentFiles is the canonical ordered list of session artifact
+// filenames that are part of a committed session: copied from cache to
+// ledger (CopySessionToLedger + SecondaryArtifacts) AND uploaded to LFS
+// (internal/lfs.ContentFiles derives from this list).
+//
+// Previously this list was duplicated across internal/lfs and the copy
+// path — a silent drift hazard: adding a new artifact to one location
+// and not the other would cause the file to land in the ledger dir but
+// never upload to LFS, surfacing days later as a GitLab LFS-objects-
+// missing error on an unrelated push.
+//
+// To add a new session artifact: add its const above and append its
+// filename here. Both call sites pick it up automatically.
+var LedgerContentFiles = []string{
+	LedgerFileRaw,
+	LedgerFileSummaryMD,
+	LedgerFileSessionMD,
+	LedgerFilePlan,
+	LedgerFileContextTrace,
+}
 
 // Result contains outcomes from session processing.
 // Populated incrementally: first by processAgentSession (phase 1),

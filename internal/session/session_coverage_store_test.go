@@ -30,11 +30,9 @@ func TestEntriesToPkg_TimestampPreserved(t *testing.T) {
 	if !pkg[0].Timestamp.Equal(ts) {
 		t.Errorf("timestamp not preserved: got %v, want %v", pkg[0].Timestamp, ts)
 	}
-
-	back := pkgToEntries(pkg)
-	if !back[0].Timestamp.Equal(ts) {
-		t.Errorf("round-trip timestamp not preserved: got %v, want %v", back[0].Timestamp, ts)
-	}
+	// pkgToEntries round-trip check was removed when FilterForSummarization
+	// (the only consumer of pkg→internal conversion) was deleted. Only the
+	// internal→pkg direction survives (BuildSummaryPrompt, LocalSummary).
 }
 
 // --- store.go: ListSessions, BasePath, ResolveSessionName ---
