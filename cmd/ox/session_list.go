@@ -10,6 +10,7 @@ import (
 	"time"
 
 	lipgloss "charm.land/lipgloss/v2"
+	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
@@ -76,26 +77,45 @@ type sessionListOutput struct {
 	RepoName        string             `json:"repo_name"`
 	RepoID          string             `json:"repo_id"`
 	LedgerAvailable bool               `json:"ledger_available"`
+	Guidance        string             `json:"guidance,omitempty"`
 }
 
 // sessionListEntry is a single session in JSON output.
 type sessionListEntry struct {
-	Name       string `json:"name"`
-	Date       string `json:"date"`
-	Time       string `json:"time"`
-	User       string `json:"user,omitempty"`
-	Status     string `json:"status"`
-	Recording  bool   `json:"recording,omitempty"`
-	Summary    string `json:"summary,omitempty"`
-	EntryCount int    `json:"entry_count,omitempty"`
-	IsSubagent bool   `json:"is_subagent,omitempty"`
-	Origin     string `json:"origin,omitempty"`
+	Name            string `json:"name"`
+	Date            string `json:"date"`
+	Time            string `json:"time"`
+	User            string `json:"user,omitempty"`
+	Status          string `json:"status"`
+	Recording       bool   `json:"recording,omitempty"`
+	Title           string `json:"title,omitempty"`
+	Summary         string `json:"summary,omitempty"`
+	EntryCount      int    `json:"entry_count,omitempty"`
+	IsSubagent      bool   `json:"is_subagent,omitempty"`
+	Origin          string `json:"origin,omitempty"`
+	HydrationStatus string `json:"hydration_status,omitempty"`
+	StopReason      string `json:"stop_reason,omitempty"`
+	HasRawData      bool   `json:"has_raw_data,omitempty"`
 }
+
+// sessionListAgentGuidance is the hint returned in JSON output when the caller
+// is an agent. Keep terse — it ships to every agent invocation.
+const sessionListAgentGuidance = "Pick sessions by title/summary; run 'ox session view <name>' to dig in. If hydration_status='dehydrated', run 'ox session download <name>' first."
 
 func runSessionList(cmd *cobra.Command, args []string) error {
 	limit, _ := cmd.Flags().GetInt("limit")
 	showAll, _ := cmd.Flags().GetBool("all")
 	jsonOutput, _ := cmd.Root().PersistentFlags().GetBool("json")
+
+	// Agents (AGENT_ENV=claude-code / codex / etc.) consume this output as
+	// context. Default to JSON since it carries title, summary, entry_count,
+	// hydration_status, and stop_reason — everything needed to decide which
+	// session to dig into. Users can still force text with --json=false.
+	jsonFlagSet := cmd.Root().PersistentFlags().Changed("json")
+	inAgent := agentx.IsAgentContext()
+	if inAgent && !jsonFlagSet {
+		jsonOutput = true
+	}
 
 	if showAll {
 		limit = 0
@@ -237,31 +257,42 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 				user = localUser
 			}
 			entries = append(entries, sessionListEntry{
-				Name:       t.SessionName,
-				Date:       t.CreatedAt.Format("2006-01-02"),
-				Time:       t.CreatedAt.Format("15:04"),
-				User:       user,
-				Status:     status,
-				Recording:  t.Recording,
-				Summary:    t.Summary,
-				EntryCount: t.EntryCount,
-				IsSubagent: t.IsSubagent,
-				Origin:     t.Origin,
+				Name:            t.SessionName,
+				Date:            t.CreatedAt.Format("2006-01-02"),
+				Time:            t.CreatedAt.Format("15:04"),
+				User:            user,
+				Status:          status,
+				Recording:       t.Recording,
+				Title:           t.Title,
+				Summary:         t.Summary,
+				EntryCount:      t.EntryCount,
+				IsSubagent:      t.IsSubagent,
+				Origin:          t.Origin,
+				HydrationStatus: string(t.HydrationStatus),
+				StopReason:      t.StopReason,
+				HasRawData:      t.HasRawData,
 			})
 		}
-		return outputJSON(sessionListOutput{
+		out := sessionListOutput{
 			Sessions:        entries,
 			Total:           len(entries),
 			Window:          window,
 			RepoName:        repoName,
 			RepoID:          repoID,
 			LedgerAvailable: ledgerAvailable,
-		})
+		}
+		if inAgent {
+			out.Guidance = sessionListAgentGuidance
+		}
+		return outputJSON(out)
 	}
+
+	// agents consume this output as context — drop decorative chrome that wastes tokens
+	terse := agentx.IsAgentContext()
 
 	// print header
 	fmt.Println()
-	printSessionTableHeader()
+	printSessionTableHeader(terse)
 
 	// print each session
 	for _, t := range sessions {
@@ -270,6 +301,10 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Println()
+
+	if terse {
+		return nil
+	}
 
 	// summary
 	fmt.Printf("%s %d session(s) shown",
@@ -286,7 +321,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func printSessionTableHeader() {
+func printSessionTableHeader(terse bool) {
 	// column headers
 	dateCol := fmt.Sprintf("%-12s", "DATE")
 	timeCol := fmt.Sprintf("%-8s", "TIME")
@@ -297,6 +332,10 @@ func printSessionTableHeader() {
 
 	header := sessionHeaderStyle.Render(dateCol + timeCol + userCol + turnsCol + statusCol + nameCol)
 	fmt.Println("  " + header)
+
+	if terse {
+		return
+	}
 
 	// underline
 	underline := strings.Repeat("-", 128)
@@ -403,6 +442,61 @@ func printSessionRow(t session.SessionInfo, uploaded bool, localUser string) {
 	row += sessionSummaryStyle.Render(name)
 
 	fmt.Println("  " + row)
+
+	// emit a second line with the session's title (or summary snippet) so agents
+	// and humans can tell sessions apart without having to open each one.
+	if blurb := sessionBlurb(t); blurb != "" {
+		fmt.Println("    " + sessionEmptyStyle.Render(blurb))
+	}
+}
+
+// sessionBlurb returns a short, single-line description of the session for display
+// under the row. Prefers meta.Title, falls back to the first real sentence of
+// meta.Summary. Returns empty when neither is useful.
+func sessionBlurb(s session.SessionInfo) string {
+	const maxLen = 100
+	if t := strings.TrimSpace(s.Title); t != "" {
+		return truncateSingleLine(t, maxLen)
+	}
+	sum := strings.TrimSpace(s.Summary)
+	if sum == "" || strings.HasPrefix(sum, "Summary generation failed") {
+		return ""
+	}
+	// skip markdown structure (headings, bullets, tables, metadata lines) and
+	// find the first real prose sentence so the blurb is actually informative.
+	for line := range strings.SplitSeq(sum, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || isMarkdownStructure(line) {
+			continue
+		}
+		if i := strings.Index(line, ". "); i > 0 {
+			line = line[:i+1]
+		}
+		return truncateSingleLine(line, maxLen)
+	}
+	return ""
+}
+
+// isMarkdownStructure reports whether a line is markdown syntax rather than
+// narrative prose (headings, bullets, tables, blockquotes, code fences, or
+// bold metadata like "**Key:** value").
+func isMarkdownStructure(line string) bool {
+	if line == "" {
+		return true
+	}
+	switch line[0] {
+	case '#', '-', '*', '|', '>', '`':
+		return true
+	}
+	return strings.HasPrefix(line, "**")
+}
+
+func truncateSingleLine(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
 }
 
 func formatSessionDuration(d time.Duration) string {

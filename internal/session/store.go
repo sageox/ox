@@ -313,6 +313,7 @@ type SessionInfo struct {
 	ModTime         time.Time           `json:"mod_time"`
 	HydrationStatus lfs.HydrationStatus `json:"hydration_status,omitempty"` // hydrated/dehydrated/partial
 	Username        string              `json:"username,omitempty"`         // from meta.json
+	Title           string              `json:"title,omitempty"`            // from meta.json
 	Summary         string              `json:"summary,omitempty"`          // from meta.json
 	Recording       bool                `json:"recording,omitempty"`        // true if session is actively being recorded
 	AgentID         string              `json:"agent_id,omitempty"`         // from .recording.json when recording
@@ -389,13 +390,14 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 
 		// check hydration status from meta.json if present
 		var hydrationStatus lfs.HydrationStatus
-		var username, summary string
+		var username, title, summary string
 		var createdAt time.Time
 		meta, metaErr := lfs.ReadSessionMeta(sessionPath)
 		if metaErr == nil && meta != nil {
 			cachePath := filepath.Join(s.cacheBasePath, name)
 			hydrationStatus = lfs.CheckHydrationStatusWithCache(sessionPath, cachePath, meta)
 			username = meta.Username
+			title = meta.Title
 			summary = meta.Summary
 			createdAt = meta.CreatedAt
 		}
@@ -493,6 +495,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			ModTime:         modTime,
 			HydrationStatus: hydrationStatus,
 			Username:        username,
+			Title:           title,
 			Summary:         summary,
 			Recording:       isRecording,
 			AgentID:         recordingAgentID,
