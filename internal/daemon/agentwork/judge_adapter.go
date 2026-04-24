@@ -29,6 +29,7 @@ func NewRunnerCompleter(r Runner) summaryeval.Completer {
 		}
 		return summaryeval.CompletionResult{
 			Text:             res.Output,
+			ModelUsed:        res.ModelUsed,
 			PromptTokens:     res.TokensIn,
 			CompletionTokens: res.TokensOut,
 		}, nil

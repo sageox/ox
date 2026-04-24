@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/pkg/summaryeval"
@@ -14,13 +15,20 @@ import (
 
 // TestNewRunnerCompleter_ForwardsPromptAndExtractsOutput verifies the
 // Runner→Completer adapter calls the runner with the prompt and pulls
-// text/token counts back into the Completer shape.
+// text/token counts back into the Completer shape, INCLUDING the
+// ModelUsed attribution so judge verdicts can record which model
+// produced them.
 func TestNewRunnerCompleter_ForwardsPromptAndExtractsOutput(t *testing.T) {
 	var lastPrompt string
 	mock := NewMockRunner(true)
 	mock.RunFunc = func(ctx context.Context, req RunRequest) (*RunResult, error) {
 		lastPrompt = req.Prompt
-		return &RunResult{Output: "ok", TokensIn: 500, TokensOut: 200}, nil
+		return &RunResult{
+			Output:    "ok",
+			TokensIn:  500,
+			TokensOut: 200,
+			ModelUsed: "haiku-4-5-test",
+		}, nil
 	}
 	c := NewRunnerCompleter(mock)
 	res, err := c(context.Background(), "please judge me")
@@ -33,8 +41,49 @@ func TestNewRunnerCompleter_ForwardsPromptAndExtractsOutput(t *testing.T) {
 	if res.PromptTokens != 500 || res.CompletionTokens != 200 {
 		t.Errorf("tokens: in=%d out=%d", res.PromptTokens, res.CompletionTokens)
 	}
+	if res.ModelUsed != "haiku-4-5-test" {
+		t.Errorf("ModelUsed not forwarded: got %q", res.ModelUsed)
+	}
 	if lastPrompt != "please judge me" {
 		t.Errorf("prompt not forwarded: %q", lastPrompt)
+	}
+}
+
+// TestMaybeRunJudge_DaemonContextCancellationIsRespected verifies the
+// judge aborts promptly when the daemon's root context is canceled —
+// enabling daemon shutdown to complete without waiting up to the
+// 3-minute judge deadline.
+func TestMaybeRunJudge_DaemonContextCancellationIsRespected(t *testing.T) {
+	t.Setenv("OX_SUMMARY_JUDGE", "on")
+
+	daemonCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Completer blocks until ctx is canceled.
+	completerReady := make(chan struct{})
+	h := NewSessionFinalizeHandlerForTest(nil)
+	h.SetDaemonContext(daemonCtx)
+	h.SetJudgeCompleter(func(ctx context.Context, prompt string) (summaryeval.CompletionResult, error) {
+		close(completerReady)
+		<-ctx.Done()
+		return summaryeval.CompletionResult{}, ctx.Err()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		h.maybeRunJudge("s", t.TempDir(), &session.SummarizeResponse{Title: "x"})
+		close(done)
+	}()
+
+	<-completerReady
+	// Simulate daemon shutdown.
+	cancel()
+
+	select {
+	case <-done:
+		// Judge returned promptly after daemon ctx canceled. Good.
+	case <-time.After(5 * time.Second):
+		t.Fatal("judge did not abort on daemon context cancellation within 5s")
 	}
 }
 

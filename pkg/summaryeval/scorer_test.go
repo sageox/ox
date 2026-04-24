@@ -2,6 +2,7 @@ package summaryeval
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -175,6 +176,36 @@ func TestScoreCorpus_AllZeroMinMaxNotInverted(t *testing.T) {
 	}
 	if r.OverallMin > r.OverallMax {
 		t.Errorf("min > max: got min=%f max=%f", r.OverallMin, r.OverallMax)
+	}
+}
+
+// TestScoreCorpus_UnknownGateKeyFailsLoudly prevents a config typo from
+// silently letting CI pass. If someone sets a MinDimensions entry under
+// a misspelled dimension name, the gate must fail explicitly rather
+// than be ignored.
+func TestScoreCorpus_UnknownGateKeyFailsLoudly(t *testing.T) {
+	corpus := []GoldenSession{
+		{Name: "s1", Reference: Summary{Title: "perfect", Summary: "everything is fine and matches exactly", KeyActions: []string{"a", "b", "c"}, Outcome: "success"}},
+	}
+	candidates := map[string]Summary{
+		"s1": corpus[0].Reference, // perfect match — no score would fail a legit gate
+	}
+	r := ScoreCorpus(corpus, candidates, DefaultWeights(), &Gates{
+		MinDimensions: map[string]float64{
+			"titel": 0.9, // typo: should be "title"
+		},
+	})
+	if len(r.GatesFailed) == 0 {
+		t.Fatal("typo in MinDimensions key should produce a gate failure")
+	}
+	foundUnknown := false
+	for _, f := range r.GatesFailed {
+		if strings.Contains(f, "unknown gate dimension") && strings.Contains(f, "titel") {
+			foundUnknown = true
+		}
+	}
+	if !foundUnknown {
+		t.Errorf("expected gate failure naming the unknown key, got: %v", r.GatesFailed)
 	}
 }
 

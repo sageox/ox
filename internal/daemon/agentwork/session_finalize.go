@@ -90,6 +90,12 @@ type SessionFinalizeHandler struct {
 	// judgeCompleter, when non-nil and OX_SUMMARY_JUDGE=on is set, runs
 	// a post-summary LLM-as-judge evaluation. Nil disables judging.
 	judgeCompleter summaryeval.Completer
+	// daemonCtx is the daemon's root context. Derivative deadlines for
+	// judge work and other long-running subtasks are layered on top so
+	// daemon shutdown (Stop()) cancels them promptly instead of forcing
+	// ErrShutdownTimeout. Defaults to context.Background() when unset,
+	// which preserves behavior for tests that don't call SetDaemonContext.
+	daemonCtx context.Context
 }
 
 // NewSessionFinalizeHandler creates a handler with the given logger.
@@ -138,6 +144,15 @@ func (h *SessionFinalizeHandler) SetProjectRoot(root string) {
 // until they flip the switch deliberately.
 func (h *SessionFinalizeHandler) SetJudgeCompleter(c summaryeval.Completer) {
 	h.judgeCompleter = c
+}
+
+// SetDaemonContext provides the daemon's root context. The handler uses
+// it as the parent for any long-running subtasks (currently the judge
+// call) so daemon shutdown can cancel them promptly. Without this, such
+// tasks use context.Background() and block shutdown up to their own
+// deadlines — triggering ErrShutdownTimeout that operators see as hangs.
+func (h *SessionFinalizeHandler) SetDaemonContext(ctx context.Context) {
+	h.daemonCtx = ctx
 }
 
 // NewSessionFinalizeHandlerForTest creates a handler with git and LFS operations disabled.
@@ -669,14 +684,23 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		summaryResp = parsed
 	}
 
-	// validate summary content for agent meta-output contamination
+	// validate summary content for agent meta-output contamination.
+	// On failure we REPLACE the parsed response with a stub — not merely
+	// flip a flag — because downstream code writes summary.json /
+	// summary.md and uploads to the ledger. If we kept the original
+	// invalid summary in summaryResp, its contaminated text would leak
+	// onto the ledger as the teammate-visible artifact even though the
+	// quality score reported it as failed.
 	if valErr := sessionsummary.ValidateSummaryContent(summaryResp); valErr != nil {
 		h.logger.Warn("summary content validation failed, using fallback stub",
 			"session", filepath.Base(payload.SessionDir),
 			"error", valErr,
 		)
-		summaryResp.QualityScore = 0.0
-		summaryResp.ScoreReason = fmt.Sprintf("content validation failed: %v", valErr)
+		summaryResp = &session.SummarizeResponse{
+			Summary:      fmt.Sprintf("Summary failed content validation: %v", valErr),
+			QualityScore: 0.0,
+			ScoreReason:  fmt.Sprintf("content validation failed: %v", valErr),
+		}
 		scored = false
 	}
 
@@ -685,19 +709,26 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	// essentially free — output tokens are negligible vs. the input tokens
 	// already paid to ingest the session. Anti-entropy path mirrors the
 	// CLI push-summary path (cmd/ox/session_push_summary.go).
+	//
+	// Same replace-don't-just-flag pattern as content validation above: a
+	// thin summary whose title / key_actions are missing must not survive
+	// on the ledger as the visible artifact for teammates.
 	entryCount := 0
 	if payload.storedSession != nil {
 		entryCount = len(payload.storedSession.Entries)
 	}
 	if scored {
 		if richErr := sessionsummary.ValidateSummaryRichness(summaryResp, entryCount); richErr != nil {
-			h.logger.Warn("summary richness validation failed, downgrading to fallback stub",
+			h.logger.Warn("summary richness validation failed, replacing with fallback stub",
 				"session", filepath.Base(payload.SessionDir),
 				"entry_count", entryCount,
 				"error", richErr,
 			)
-			summaryResp.QualityScore = 0.0
-			summaryResp.ScoreReason = fmt.Sprintf("richness validation failed: %v", richErr)
+			summaryResp = &session.SummarizeResponse{
+				Summary:      fmt.Sprintf("Summary failed richness validation: %v", richErr),
+				QualityScore: 0.0,
+				ScoreReason:  fmt.Sprintf("richness validation failed: %v", richErr),
+			}
 			scored = false
 		}
 	}
@@ -1488,10 +1519,19 @@ func (h *SessionFinalizeHandler) maybeRunJudge(sessionName, ledgerPath string, s
 		IncludeSuggestions: true,
 	})
 
-	// 2-minute hard ceiling — the Runner adapter already caps, but a
+	// Use the daemon's root context as the parent so shutdown cancels
+	// judge work promptly. Without this, context.Background would
+	// block daemon shutdown up to 3 minutes and trigger
+	// ErrShutdownTimeout. Falls back to Background when no daemon
+	// context has been installed (e.g., in tests).
+	parent := h.daemonCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	// 3-minute hard ceiling — the Runner adapter already caps, but a
 	// context deadline is a second layer of defense against a runner
 	// that ignores its own timeout.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 3*time.Minute)
 	defer cancel()
 
 	result, err := j.Score(ctx, sessionName, nil, cand)

@@ -2,6 +2,7 @@ package summaryeval
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,7 +20,10 @@ func LoadGoldenSession(corpusDir, sessionName string) (*GoldenSession, error) {
 	path := filepath.Join(corpusDir, sessionName, "reference.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		// errors.Is + os.ErrNotExist is the modern, wrapping-aware form of
+		// the older os.IsNotExist check. Use it so any wrapped NotExist
+		// returned from custom filesystem layers is still recognized.
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read %s: %w", path, err)
@@ -154,6 +158,29 @@ func ScoreCorpus(corpus []GoldenSession, candidates map[string]Summary, w Weight
 			report.GatesFailed = append(report.GatesFailed,
 				fmt.Sprintf("overall_mean %.3f < gate %.3f", report.OverallMean, gates.MinOverall))
 		}
+
+		// Unknown MinDimensions keys must fail loudly. Silently ignoring
+		// typos would let CI pass without enforcing intended thresholds —
+		// a config-bug-disguised-as-passing-test that's hard to spot later.
+		// Build a fast lookup from the canonical dimension set and report
+		// any key that doesn't match as an immediate gate failure.
+		known := make(map[string]bool, len(Dimensions()))
+		for _, d := range Dimensions() {
+			known[d] = true
+		}
+		// Stable iteration for deterministic GatesFailed ordering.
+		unknownKeys := make([]string, 0)
+		for k := range gates.MinDimensions {
+			if !known[k] {
+				unknownKeys = append(unknownKeys, k)
+			}
+		}
+		sort.Strings(unknownKeys)
+		for _, k := range unknownKeys {
+			report.GatesFailed = append(report.GatesFailed,
+				fmt.Sprintf("unknown gate dimension %q (valid: %v)", k, Dimensions()))
+		}
+
 		for _, d := range Dimensions() {
 			min, ok := gates.MinDimensions[d]
 			if !ok {

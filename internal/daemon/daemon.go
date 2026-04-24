@@ -1062,6 +1062,10 @@ func (d *Daemon) initComponents() time.Duration {
 		// here keeps the daemon ready for per-run judging without paying
 		// any LLM cost until operators flip the env switch.
 		sfh.SetJudgeCompleter(agentwork.NewRunnerCompleter(runner))
+		// Supply the daemon's root context so judge work cancels promptly
+		// on daemon shutdown instead of blocking up to its 3-minute
+		// deadline and triggering ErrShutdownTimeout.
+		sfh.SetDaemonContext(d.ctx)
 		awCfg := configLoader()
 		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
 		d.sessionFinalizeHandler = sfh

@@ -30,6 +30,7 @@ type RunResult struct {
 	Output    string
 	Duration  time.Duration
 	ExitCode  int
-	TokensIn  int // input tokens (from structured output if available)
-	TokensOut int // output tokens
+	TokensIn  int    // input tokens (from structured output if available)
+	TokensOut int    // output tokens
+	ModelUsed string // model identifier the runner reports (for attribution in logs and judge verdicts)
 }
