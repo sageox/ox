@@ -236,3 +236,83 @@ func TestTruncateStr(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateSummaryRichness(t *testing.T) {
+	richSummary := func() *SummarizeResponse {
+		return &SummarizeResponse{
+			Title:      "Refactor the thing",
+			Summary:    "We refactored the thing by doing this and then that and the outcome was X. Opened PR, tests green.",
+			KeyActions: []string{"Ran lint", "Fixed 19 issues", "Opened PR"},
+			AhaMoments: []AhaMoment{{Seq: 5, Type: "question"}},
+			Outcome:    "success",
+		}
+	}
+
+	t.Run("rich summary on non-trivial session passes", func(t *testing.T) {
+		if err := ValidateSummaryRichness(richSummary(), 100); err != nil {
+			t.Errorf("expected pass, got: %v", err)
+		}
+	})
+
+	t.Run("trivial session skips all richness checks", func(t *testing.T) {
+		skeletal := &SummarizeResponse{Title: "x", Summary: "short one", Outcome: "success"}
+		if err := ValidateSummaryRichness(skeletal, 5); err != nil {
+			t.Errorf("trivial session should skip richness, got: %v", err)
+		}
+	})
+
+	t.Run("missing key_actions on medium session rejected", func(t *testing.T) {
+		r := richSummary()
+		r.KeyActions = nil
+		err := ValidateSummaryRichness(r, 100)
+		if err == nil || !strings.Contains(err.Error(), "key_actions") {
+			t.Errorf("expected key_actions rejection, got: %v", err)
+		}
+	})
+
+	t.Run("under-populated key_actions rejected", func(t *testing.T) {
+		r := richSummary()
+		r.KeyActions = []string{"just one"}
+		if err := ValidateSummaryRichness(r, 100); err == nil || !strings.Contains(err.Error(), "key_actions") {
+			t.Errorf("expected under-populated rejection, got: %v", err)
+		}
+	})
+
+	t.Run("empty-string bullets don't count", func(t *testing.T) {
+		r := richSummary()
+		r.KeyActions = []string{"real one", "", "   ", ""}
+		if err := ValidateSummaryRichness(r, 100); err == nil {
+			t.Errorf("expected rejection when only 1 non-empty of 4 bullets")
+		}
+	})
+
+	t.Run("missing aha_moments on long session rejected", func(t *testing.T) {
+		r := richSummary()
+		r.AhaMoments = nil
+		if err := ValidateSummaryRichness(r, 200); err == nil || !strings.Contains(err.Error(), "aha_moments") {
+			t.Errorf("expected aha_moments rejection, got: %v", err)
+		}
+	})
+
+	t.Run("missing aha_moments acceptable below aha threshold", func(t *testing.T) {
+		r := richSummary()
+		r.AhaMoments = nil
+		if err := ValidateSummaryRichness(r, 30); err != nil {
+			t.Errorf("expected aha_moments to be optional at 30 entries, got: %v", err)
+		}
+	})
+
+	t.Run("too-short summary body rejected", func(t *testing.T) {
+		r := richSummary()
+		r.Summary = "Session stopped."
+		if err := ValidateSummaryRichness(r, 100); err == nil || !strings.Contains(err.Error(), "summary too short") {
+			t.Errorf("expected short-summary rejection, got: %v", err)
+		}
+	})
+
+	t.Run("nil response rejected", func(t *testing.T) {
+		if err := ValidateSummaryRichness(nil, 100); err == nil {
+			t.Error("nil response should be rejected")
+		}
+	})
+}

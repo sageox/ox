@@ -663,6 +663,28 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		scored = false
 	}
 
+	// Enforce richness schema on non-trivial sessions. The prompt asks for
+	// key_actions / aha_moments; rejecting summaries that omit them is
+	// essentially free — output tokens are negligible vs. the input tokens
+	// already paid to ingest the session. Anti-entropy path mirrors the
+	// CLI push-summary path (cmd/ox/session_push_summary.go).
+	entryCount := 0
+	if payload.storedSession != nil {
+		entryCount = len(payload.storedSession.Entries)
+	}
+	if scored {
+		if richErr := sessionsummary.ValidateSummaryRichness(summaryResp, entryCount); richErr != nil {
+			h.logger.Warn("summary richness validation failed, downgrading to fallback stub",
+				"session", filepath.Base(payload.SessionDir),
+				"entry_count", entryCount,
+				"error", richErr,
+			)
+			summaryResp.QualityScore = 0.0
+			summaryResp.ScoreReason = fmt.Sprintf("richness validation failed: %v", richErr)
+			scored = false
+		}
+	}
+
 	sessionName := filepath.Base(payload.SessionDir)
 
 	// unscored fallbacks default to upload (preserve stub for teammates / doctor).

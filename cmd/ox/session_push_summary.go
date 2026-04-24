@@ -129,8 +129,29 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
+	// Read meta once; reused below for richness validation and sageox score injection.
+	meta, _ := lfs.ReadSessionMeta(sessionDir)
+
+	// Enforce richness schema on non-trivial sessions. The prompt asks for
+	// key_actions / aha_moments / etc.; rejecting summaries that skip them
+	// is essentially free quality — output tokens cost nothing compared to
+	// the input tokens already paid to ingest the session. See
+	// sessionsummary.ValidateSummaryRichness for thresholds.
+	entryCount := 0
+	if meta != nil {
+		entryCount = meta.EntryCount
+	}
+	if richErr := sessionsummary.ValidateSummaryRichness(&summaryParsed, entryCount); richErr != nil {
+		slog.Warn("summary richness validation failed", "error", richErr, "entry_count", entryCount)
+		return &pushSummaryOutput{
+			Success: false,
+			Type:    "push_summary",
+			Error:   fmt.Sprintf("summary too thin: %v", richErr),
+		}
+	}
+
 	// inject sageox contribution score for the session's recorded agent
-	if meta, err := lfs.ReadSessionMeta(sessionDir); err == nil && meta.AgentID != "" {
+	if meta != nil && meta.AgentID != "" {
 		if scoreFile, _ := session.ReadSageoxScore(meta.AgentID); scoreFile != nil {
 			summaryParsed.SageoxScore = &scoreFile.Score
 			summaryParsed.SageoxScoreCategory = string(scoreFile.Category)
