@@ -63,10 +63,14 @@ func TestProcessResult(t *testing.T) {
 	sessionDir := filepath.Join(ledgerPath, "sessions", "2026-01-06T14-32-testuser-OxPROC")
 	rawPath := filepath.Join(sessionDir, "raw.jsonl")
 
-	// simulate LLM output with valid JSON
+	// simulate LLM output with valid JSON. Summary body must be ≥20 chars
+	// (sessionsummary.ValidateSummaryContent minimum); content validation
+	// failures now replace summaryResp with a stub rather than passing the
+	// original through, which would have been the visible artifact to
+	// teammates despite failing validation.
 	summaryJSON := map[string]any{
 		"title":         "Test Session",
-		"summary":       "A test session.",
+		"summary":       "A test session with enough substance to pass the validator minimum length.",
 		"key_actions":   []string{"said hello"},
 		"outcome":       "success",
 		"topics_found":  []string{"testing"},
@@ -104,7 +108,7 @@ func TestProcessResult(t *testing.T) {
 	summaryContent, err := os.ReadFile(summaryMDPath)
 	require.NoError(t, err)
 	assert.Contains(t, string(summaryContent), "# Session Summary", "summary.md should contain structured markdown header")
-	assert.Contains(t, string(summaryContent), "A test session.", "summary.md should contain the summary text from LLM output")
+	assert.Contains(t, string(summaryContent), "A test session with enough substance", "summary.md should contain the summary text from LLM output")
 
 	// verify summary.json was written
 	summaryJSONPath := filepath.Join(sessionDir, "summary.json")
@@ -153,10 +157,17 @@ func TestProcessResult_UnparsableJSON(t *testing.T) {
 		}
 	}
 
-	// summary.json should contain the error message (not raw LLM output)
+	// summary.json should contain a fallback error message, not raw LLM output.
+	// The exact text depends on which stub wins: parse-error fires first
+	// ("Summary generation failed"), then content validation fires against the
+	// stub's empty title and replaces it with "Summary failed content validation".
+	// Either "failed" marker proves we didn't ship the raw free-text as a summary.
 	data, _ := os.ReadFile(filepath.Join(sessionDir, "summary.json"))
-	if !strings.Contains(string(data), "Summary generation failed") {
-		t.Error("summary.json fallback should contain error message, not raw LLM output")
+	if !strings.Contains(string(data), "failed") {
+		t.Errorf("summary.json fallback should contain a failure marker, not raw LLM output; got: %s", string(data))
+	}
+	if strings.Contains(string(data), "This session was about testing") {
+		t.Error("summary.json must not contain the raw LLM free-text output")
 	}
 }
 
