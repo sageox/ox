@@ -1,0 +1,167 @@
+package agentwork
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/pkg/summaryeval"
+)
+
+// TestNewRunnerCompleter_ForwardsPromptAndExtractsOutput verifies the
+// Runner→Completer adapter calls the runner with the prompt and pulls
+// text/token counts back into the Completer shape.
+func TestNewRunnerCompleter_ForwardsPromptAndExtractsOutput(t *testing.T) {
+	var lastPrompt string
+	mock := NewMockRunner(true)
+	mock.RunFunc = func(ctx context.Context, req RunRequest) (*RunResult, error) {
+		lastPrompt = req.Prompt
+		return &RunResult{Output: "ok", TokensIn: 500, TokensOut: 200}, nil
+	}
+	c := NewRunnerCompleter(mock)
+	res, err := c(context.Background(), "please judge me")
+	if err != nil {
+		t.Fatalf("completer: %v", err)
+	}
+	if res.Text != "ok" {
+		t.Errorf("Text: got %q", res.Text)
+	}
+	if res.PromptTokens != 500 || res.CompletionTokens != 200 {
+		t.Errorf("tokens: in=%d out=%d", res.PromptTokens, res.CompletionTokens)
+	}
+	if lastPrompt != "please judge me" {
+		t.Errorf("prompt not forwarded: %q", lastPrompt)
+	}
+}
+
+// TestMaybeRunJudge_GatedByEnvVar confirms the judge is a no-op when
+// OX_SUMMARY_JUDGE is unset, even with a valid completer installed.
+// This is the load-bearing safety: operators shouldn't pay LLM cost
+// until they flip the switch.
+func TestMaybeRunJudge_GatedByEnvVar(t *testing.T) {
+	t.Setenv("OX_SUMMARY_JUDGE", "")
+
+	h := NewSessionFinalizeHandlerForTest(nil)
+	h.SetJudgeCompleter(func(ctx context.Context, prompt string) (summaryeval.CompletionResult, error) {
+		t.Fatal("completer must not be called when OX_SUMMARY_JUDGE is unset")
+		return summaryeval.CompletionResult{}, nil
+	})
+
+	ledgerDir := t.TempDir()
+	h.maybeRunJudge("session-x", ledgerDir, &session.SummarizeResponse{Title: "x"})
+
+	// No cache file should exist.
+	cacheDir := filepath.Join(ledgerDir, ".sageox", "cache", "summary-judge")
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Errorf("cache dir should not be created when judge is disabled")
+	}
+}
+
+// TestMaybeRunJudge_WritesVerdictToCacheWhenEnabled covers the happy
+// path: env var on + completer returns a judge-shaped JSON.
+func TestMaybeRunJudge_WritesVerdictToCacheWhenEnabled(t *testing.T) {
+	t.Setenv("OX_SUMMARY_JUDGE", "on")
+
+	completerCalled := false
+	h := NewSessionFinalizeHandlerForTest(nil)
+	h.SetJudgeCompleter(func(ctx context.Context, prompt string) (summaryeval.CompletionResult, error) {
+		completerCalled = true
+		if !strings.Contains(prompt, "Session Summary Quality Judge") {
+			t.Errorf("prompt missing judge header")
+		}
+		return summaryeval.CompletionResult{
+			Text: `{
+				"dimensions":[{"dimension":"title","score":0.9}],
+				"overall":0.85,
+				"rationale":"solid",
+				"suggestions":[]
+			}`,
+			ModelUsed:    "mock",
+			PromptTokens: 1000,
+		}, nil
+	})
+
+	ledgerDir := t.TempDir()
+	h.maybeRunJudge("session-y", ledgerDir, &session.SummarizeResponse{
+		Title:   "A valid title",
+		Summary: "A body with substance.",
+		Outcome: "success",
+	})
+
+	if !completerCalled {
+		t.Fatal("completer was not called despite env var=on")
+	}
+
+	cachePath := filepath.Join(ledgerDir, ".sageox", "cache", "summary-judge", "session-y.json")
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatalf("cache file not written: %v", err)
+	}
+	var result summaryeval.JudgeResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("cache file not valid JSON: %v", err)
+	}
+	if result.Overall != 0.85 {
+		t.Errorf("Overall: got %f", result.Overall)
+	}
+	if result.Name != "session-y" {
+		t.Errorf("Name: got %q", result.Name)
+	}
+}
+
+// TestMaybeRunJudge_FailuresAreSwallowed: a judge completer that errors
+// or returns malformed JSON must NOT crash or block the caller. The
+// whole purpose of the judge is diagnostic; it can't be a regression
+// vector for session finalization.
+func TestMaybeRunJudge_FailuresAreSwallowed(t *testing.T) {
+	t.Setenv("OX_SUMMARY_JUDGE", "on")
+
+	cases := map[string]summaryeval.Completer{
+		"completer error": func(ctx context.Context, prompt string) (summaryeval.CompletionResult, error) {
+			return summaryeval.CompletionResult{}, context.DeadlineExceeded
+		},
+		"malformed json": func(ctx context.Context, prompt string) (summaryeval.CompletionResult, error) {
+			return summaryeval.CompletionResult{Text: "I refuse to judge"}, nil
+		},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := NewSessionFinalizeHandlerForTest(nil)
+			h.SetJudgeCompleter(c)
+			ledgerDir := t.TempDir()
+			// Must not panic.
+			h.maybeRunJudge("s", ledgerDir, &session.SummarizeResponse{Title: "x"})
+		})
+	}
+}
+
+// TestMaybeRunJudge_NilSummaryIsNoOp prevents a nil-deref on an
+// unexpected call path.
+func TestMaybeRunJudge_NilSummaryIsNoOp(t *testing.T) {
+	t.Setenv("OX_SUMMARY_JUDGE", "on")
+	h := NewSessionFinalizeHandlerForTest(nil)
+	h.SetJudgeCompleter(func(ctx context.Context, prompt string) (summaryeval.CompletionResult, error) {
+		t.Fatal("should not call completer with nil summary")
+		return summaryeval.CompletionResult{}, nil
+	})
+	h.maybeRunJudge("s", t.TempDir(), nil)
+}
+
+// TestMaybeRunJudge_NoCompleterIsNoOp confirms the ambient safety net:
+// installing the judge completer is what enables judging, and its
+// absence is the permanent off state.
+func TestMaybeRunJudge_NoCompleterIsNoOp(t *testing.T) {
+	t.Setenv("OX_SUMMARY_JUDGE", "on")
+	h := NewSessionFinalizeHandlerForTest(nil)
+	// Do NOT SetJudgeCompleter.
+	ledgerDir := t.TempDir()
+	h.maybeRunJudge("s", ledgerDir, &session.SummarizeResponse{Title: "x"})
+	cacheDir := filepath.Join(ledgerDir, ".sageox", "cache", "summary-judge")
+	if _, err := os.Stat(cacheDir); !os.IsNotExist(err) {
+		t.Errorf("no completer → no cache dir; got one")
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/pkg/sessionsummary"
+	"github.com/sageox/ox/pkg/summaryeval"
 )
 
 const (
@@ -86,6 +87,9 @@ type SessionFinalizeHandler struct {
 	// quality thresholds (configurable via AgentWorkerConfig)
 	qualityUploadThreshold  float64
 	qualityDiscardThreshold float64
+	// judgeCompleter, when non-nil and OX_SUMMARY_JUDGE=on is set, runs
+	// a post-summary LLM-as-judge evaluation. Nil disables judging.
+	judgeCompleter summaryeval.Completer
 }
 
 // NewSessionFinalizeHandler creates a handler with the given logger.
@@ -121,6 +125,19 @@ func (h *SessionFinalizeHandler) SetLedgerMu(mu *sync.Mutex) {
 // Required for LFS upload during session finalization.
 func (h *SessionFinalizeHandler) SetProjectRoot(root string) {
 	h.projectRoot = root
+}
+
+// SetJudgeCompleter installs the optional LLM-as-judge completer. When
+// non-nil AND OX_SUMMARY_JUDGE=on is set in the environment, the
+// finalize handler runs a judgment pass after every successful summary
+// and writes the verdict to <ledger>/.sageox/cache/summary-judge/.
+//
+// Nil disables judging entirely. The env var gate is intentional: the
+// daemon may be configured with a judge completer in advance, but
+// operators may not want to pay the LLM cost on every anti-entropy run
+// until they flip the switch deliberately.
+func (h *SessionFinalizeHandler) SetJudgeCompleter(c summaryeval.Completer) {
+	h.judgeCompleter = c
 }
 
 // NewSessionFinalizeHandlerForTest creates a handler with git and LFS operations disabled.
@@ -686,6 +703,16 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	}
 
 	sessionName := filepath.Base(payload.SessionDir)
+
+	// Optional LLM-as-judge quality scoring. Runs only when
+	// OX_SUMMARY_JUDGE=on is set AND a judge completer is configured on
+	// the handler. Diagnostic-only: writes the judge's verdict to the
+	// ledger cache at .sageox/cache/summary-judge/<session>.json and
+	// logs the path. Failures are swallowed — never block finalization
+	// on a judgment run.
+	if scored {
+		h.maybeRunJudge(sessionName, payload.LedgerPath, summaryResp)
+	}
 
 	// unscored fallbacks default to upload (preserve stub for teammates / doctor).
 	// Only real LLM-scored summaries are gated by the quality thresholds.
@@ -1402,4 +1429,114 @@ func isPIDAlive(pid int) bool {
 		return false
 	}
 	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// maybeRunJudge runs the LLM-as-judge scorer against a validated
+// summary and writes the verdict to the ledger cache when enabled. See
+// SetJudgeCompleter for the activation contract.
+//
+// Design rationale (nuanced bits worth preserving inline):
+//
+//   - Absolute mode (nil reference). The daemon doesn't have a curated
+//     golden corpus to compare against; judging on-merits is what's
+//     actionable in the anti-entropy context.
+//
+//   - Cache location under ledger/.sageox/cache/summary-judge/. Follows
+//     the local-only-derived-data convention documented in
+//     .claude/rules/ledger-cache.md. Deliberately outside the LFS
+//     allowlist (internal/lfs.ContentFiles) so it never uploads.
+//
+//   - Failures never block finalization. A judge timeout or malformed
+//     LLM response is diagnostic noise, not a correctness issue; swallow
+//     with a warn-level log so operators see it but sessions still ship.
+//
+//   - Uses context.Background rather than inheriting a request-scoped
+//     context. The judge is fire-and-forget diagnostic work after the
+//     summary has already been validated; attaching it to a ctx that
+//     might get canceled when the parent work item completes would
+//     cause spurious cancellations.
+func (h *SessionFinalizeHandler) maybeRunJudge(sessionName, ledgerPath string, summaryResp *session.SummarizeResponse) {
+	if h.judgeCompleter == nil {
+		return
+	}
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("OX_SUMMARY_JUDGE"))); v != "on" && v != "1" && v != "true" && v != "yes" {
+		return
+	}
+	if summaryResp == nil {
+		return
+	}
+
+	// Construct the eval-facing Summary shape from the richer
+	// SummarizeResponse. summaryeval.Summary is intentionally narrower;
+	// it only scores fields the rubric covers.
+	cand := summaryeval.Summary{
+		Title:       summaryResp.Title,
+		Summary:     summaryResp.Summary,
+		KeyActions:  summaryResp.KeyActions,
+		Outcome:     summaryResp.Outcome,
+		TopicsFound: summaryResp.TopicsFound,
+	}
+	for _, a := range summaryResp.AhaMoments {
+		cand.AhaMoments = append(cand.AhaMoments, summaryeval.AhaMoment{
+			Seq:  a.Seq,
+			Type: a.Type,
+		})
+	}
+
+	j := summaryeval.NewJudge(h.judgeCompleter, summaryeval.JudgeOptions{
+		ModelHint:          "haiku",
+		IncludeSuggestions: true,
+	})
+
+	// 2-minute hard ceiling — the Runner adapter already caps, but a
+	// context deadline is a second layer of defense against a runner
+	// that ignores its own timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	result, err := j.Score(ctx, sessionName, nil, cand)
+	if err != nil {
+		h.logger.Warn("summary judge failed, continuing without verdict",
+			"session", sessionName,
+			"error", err,
+		)
+		return
+	}
+
+	// Write verdict to cache. Errors here are operator-visible but
+	// don't affect the session finalize outcome.
+	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "summary-judge")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		h.logger.Warn("summary judge: mkdir cache failed",
+			"session", sessionName,
+			"path", cacheDir,
+			"error", err,
+		)
+		return
+	}
+	cachePath := filepath.Join(cacheDir, sessionName+".json")
+	body, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		h.logger.Warn("summary judge: marshal verdict failed",
+			"session", sessionName,
+			"error", err,
+		)
+		return
+	}
+	if err := os.WriteFile(cachePath, body, 0o644); err != nil {
+		h.logger.Warn("summary judge: write verdict failed",
+			"session", sessionName,
+			"path", cachePath,
+			"error", err,
+		)
+		return
+	}
+
+	// One-line key=value log so operators can grep for judge verdicts
+	// and pull the cache path to read the rationale + suggestions.
+	h.logger.Info("summary_judge",
+		"session", sessionName,
+		"cache_path", cachePath,
+		"verdict", result,
+	)
 }

@@ -1056,6 +1056,12 @@ func (d *Daemon) initComponents() time.Duration {
 		sfh.SetPIDLookup(d.heartbeat.GetAgentPID)
 		sfh.SetLedgerMu(d.scheduler.LedgerMu())
 		sfh.SetProjectRoot(d.config.ProjectRoot)
+		// Wire the LLM-as-judge completer to re-use the same Runner the
+		// summarizer path uses. Activation is still gated at call time
+		// by OX_SUMMARY_JUDGE=on — configuring the completer unconditionally
+		// here keeps the daemon ready for per-run judging without paying
+		// any LLM cost until operators flip the env switch.
+		sfh.SetJudgeCompleter(agentwork.NewRunnerCompleter(runner))
 		awCfg := configLoader()
 		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
 		d.sessionFinalizeHandler = sfh

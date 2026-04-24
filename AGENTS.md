@@ -3,11 +3,11 @@
 
 ## Human attention is the scarcest resource
 
-Ryan's time is more expensive than compute. Before interrupting him with a question, a PR for review, or a new issue, ask yourself: *could I have resolved this without him?*
+Human time is more expensive than compute. Before interrupting with a question, a PR for review, or a new issue, ask yourself: *could I have resolved this without a human in the loop?*
 
 **Default to independent resolution:**
 - Can you debug the issue yourself by reading code, running tests, checking logs, or using tools? Do that.
-- Is the decision reversible? If yes, make the call and note the reasoning in a commit message. He'll tell you if he disagrees.
+- Is the decision reversible? If yes, make the call and note the reasoning in a commit message. The human will tell you if they disagree.
 - Do you have enough context from `CLAUDE.md`, past sessions, or the codebase to decide? Decide.
 - Is this a genuinely novel tradeoff that sets precedent? *That* is worth interrupting for.
 
