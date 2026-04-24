@@ -618,3 +618,47 @@ func TestWriteSessionMeta_WritesPointers_WriteSessionMetaOnlyDoesNot(t *testing.
 			"summary.md must become a pointer stub after WriteSessionMeta")
 	})
 }
+
+// TestUpdateMetaSummary_SetsTitleAndSummary locks in the ox-g5zw fix.
+// Before this fix, the function only populated meta.Summary despite all
+// callers passing an AI-generated title — which is why 91/155 sessions
+// on the ox team ledger shipped with empty meta.Title. After the fix,
+// both fields are set from the same source string so the bug can't recur.
+func TestUpdateMetaSummary_SetsTitleAndSummary(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write an initial meta with Title empty (simulating the state
+	// immediately after processAgentSession before a summary exists).
+	initial := &SessionMeta{
+		Version:   "1.0",
+		AgentID:   "Ox000",
+		CreatedAt: timeFromString("2026-04-24T12:00:00Z"),
+		Title:     "",
+		Summary:   "",
+	}
+	if err := WriteSessionMeta(dir, initial); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate push-summary calling the function with an AI-generated title.
+	const aiTitle = "Fix 19 golangci-lint issues across 10 files"
+	if err := UpdateMetaSummary(dir, aiTitle); err != nil {
+		t.Fatalf("UpdateMetaSummary: %v", err)
+	}
+
+	got, err := ReadSessionMeta(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Title != aiTitle {
+		t.Errorf("meta.Title: got %q, want %q (this is the ox-g5zw regression guard)", got.Title, aiTitle)
+	}
+	if got.Summary != aiTitle {
+		t.Errorf("meta.Summary: got %q, want %q", got.Summary, aiTitle)
+	}
+}
+
+func timeFromString(s string) time.Time {
+	t, _ := time.Parse(time.RFC3339, s)
+	return t
+}

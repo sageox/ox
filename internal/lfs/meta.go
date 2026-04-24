@@ -274,15 +274,34 @@ func NewFileRef(content []byte) FileRef {
 	}
 }
 
-// UpdateMetaSummary reads meta.json from sessionPath, updates the Summary field,
-// and re-writes it atomically. Used by push-summary to replace the local summary
-// with the AI-generated title.
-func UpdateMetaSummary(sessionPath, summary string) error {
+// UpdateMetaSummary reads meta.json from sessionPath, updates BOTH the
+// Title and Summary fields with the given string, and re-writes
+// atomically. The caller always passes an AI-generated title — both
+// fields get set so meta.json stays consistent regardless of which
+// consumer reads which field.
+//
+// # Why both fields
+//
+// meta.Title is the canonical short descriptor (5-10 word session name).
+// meta.Summary historically held a short descriptive string too, before
+// meta.Title existed. Some consumers (older ox versions, tools downstream)
+// read meta.Summary for display; newer ones read meta.Title. Setting
+// both closes the ox-g5zw distiller bug where meta.Title was left empty
+// because this function only touched Summary despite its callers always
+// passing a Title. Result: 91/155 sessions shipped with empty titles on
+// the ox team's ledger before a mass backfill. Fixing at source ensures
+// the bug can't recur on new sessions.
+//
+// If a separate short-summary string is ever needed alongside the title,
+// add a distinct UpdateMetaSummaryOnly function; don't reintroduce the
+// single-field ambiguity.
+func UpdateMetaSummary(sessionPath, title string) error {
 	meta, err := ReadSessionMeta(sessionPath)
 	if err != nil {
-		return fmt.Errorf("read meta for summary update: %w", err)
+		return fmt.Errorf("read meta for title update: %w", err)
 	}
-	meta.Summary = summary
+	meta.Title = title
+	meta.Summary = title
 	return WriteSessionMeta(sessionPath, meta)
 }
 
