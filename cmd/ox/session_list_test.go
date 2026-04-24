@@ -88,7 +88,7 @@ func TestSanitizeSessionText(t *testing.T) {
 		{"strips OSC 8 hyperlink (BEL terminator)", "\x1b]8;;https://evil.example\x07visible\x1b]8;;\x07", "visible"},
 		{"strips OSC with ST terminator", "\x1b]0;title\x1b\\after", "after"},
 		{"strips DEL", "a\x7fbc", "abc"},
-		{"strips C1 codepoint U+009C", "xy", "xy"},
+		{"strips C1 codepoint U+009C", "x\u009cy", "xy"},
 		{"strips C0 except tab/newline", "x\x00y\x08z", "xyz"},
 		{"two-byte ESC (ESC =)", "hi\x1b=bye", "hibye"},
 		{"lone ESC at end", "trailing\x1b", "trailing"},
