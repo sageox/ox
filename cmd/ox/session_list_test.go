@@ -69,3 +69,33 @@ func TestMergeSessionSources(t *testing.T) {
 		assert.Equal(t, "old", result[2].SessionName)
 	})
 }
+
+// TestSanitizeSessionText guards the ANSI/control-byte sanitizer applied to
+// meta.json Title/Summary from the shared ledger. Failure prevented: a hostile
+// or malformed escape sequence rendered verbatim in the session list, spoofing
+// the terminal or leaking control bytes into agent-consumed JSON.
+func TestSanitizeSessionText(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"plain ascii", "hello world", "hello world"},
+		{"preserves tab and newline", "a\tb\nc", "a\tb\nc"},
+		{"strips CSI color payload", "\x1b[31mred\x1b[0m text", "red text"},
+		{"strips CSI with params", "before\x1b[1;2;3Hafter", "beforeafter"},
+		{"strips OSC 8 hyperlink (BEL terminator)", "\x1b]8;;https://evil.example\x07visible\x1b]8;;\x07", "visible"},
+		{"strips OSC with ST terminator", "\x1b]0;title\x1b\\after", "after"},
+		{"strips DEL", "a\x7fbc", "abc"},
+		{"strips C1 codepoint U+009C", "xy", "xy"},
+		{"strips C0 except tab/newline", "x\x00y\x08z", "xyz"},
+		{"two-byte ESC (ESC =)", "hi\x1b=bye", "hibye"},
+		{"lone ESC at end", "trailing\x1b", "trailing"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, sanitizeSessionText(tc.in))
+		})
+	}
+}

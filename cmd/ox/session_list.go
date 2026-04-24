@@ -125,12 +125,16 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		if jsonOutput {
 			cwd, _ := os.Getwd()
-			return outputJSON(sessionListOutput{
+			out := sessionListOutput{
 				Sessions:        []sessionListEntry{},
 				RepoName:        filepath.Base(cwd),
 				RepoID:          "",
 				LedgerAvailable: false,
-			})
+			}
+			if inAgent {
+				out.Guidance = sessionListAgentGuidance
+			}
+			return outputJSON(out)
 		}
 		cwd, _ := os.Getwd()
 		fmt.Println()
@@ -210,13 +214,17 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 			if showAll {
 				window = "all"
 			}
-			return outputJSON(sessionListOutput{
+			out := sessionListOutput{
 				Sessions:        []sessionListEntry{},
 				RepoName:        repoName,
 				RepoID:          repoID,
 				LedgerAvailable: ledgerAvailable,
 				Window:          window,
-			})
+			}
+			if inAgent {
+				out.Guidance = sessionListAgentGuidance
+			}
+			return outputJSON(out)
 		}
 		fmt.Println()
 		repoLabel := fmt.Sprintf("%q", repoName)
@@ -487,9 +495,10 @@ func sessionBlurb(s session.SessionInfo) string {
 	return ""
 }
 
-// sanitizeSessionText strips ANSI CSI escape sequences and other C0/C1 control
-// bytes from text originating in a shared ledger's meta.json. Preserves tabs
-// and newlines (callers flatten newlines separately when rendering single-line).
+// sanitizeSessionText strips ANSI CSI/OSC escape sequences and other C0/C1
+// control bytes from text originating in a shared ledger's meta.json. Preserves
+// tabs and newlines (callers flatten newlines separately when rendering
+// single-line).
 func sanitizeSessionText(s string) string {
 	if s == "" {
 		return s
@@ -499,16 +508,33 @@ func sanitizeSessionText(s string) string {
 	runes := []rune(s)
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
-		// ESC: skip the whole CSI / OSC / other escape sequence.
-		if r == 0x1b {
-			// consume until a likely terminator (@-~ for CSI, BEL/ESC\ for OSC).
-			// conservative: drop until the next printable letter or end of input.
-			for i+1 < len(runes) {
-				i++
-				nr := runes[i]
-				if (nr >= '@' && nr <= '~') || nr == 0x07 {
-					break
+		if r == 0x1b && i+1 < len(runes) {
+			// consume the introducer byte first so its value is not treated as
+			// a sequence terminator (e.g. '[' is itself in the CSI final-byte
+			// range @-~, which would otherwise end the CSI on byte one).
+			i++
+			switch runes[i] {
+			case '[': // CSI — params then final byte in 0x40..0x7e
+				for i+1 < len(runes) {
+					nr := runes[i+1]
+					i++
+					if nr >= '@' && nr <= '~' {
+						break
+					}
 				}
+			case ']': // OSC — payload then BEL or ST (ESC \)
+				for i+1 < len(runes) {
+					i++
+					if runes[i] == 0x07 {
+						break
+					}
+					if runes[i] == 0x1b && i+1 < len(runes) && runes[i+1] == '\\' {
+						i++
+						break
+					}
+				}
+			default:
+				// two-byte escape (e.g. ESC =, ESC 7) — introducer already consumed
 			}
 			continue
 		}
