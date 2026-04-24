@@ -2,6 +2,7 @@ package agentwork
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/sageox/ox/pkg/summaryeval"
@@ -26,6 +27,17 @@ func NewRunnerCompleter(r Runner) summaryeval.Completer {
 		})
 		if err != nil {
 			return summaryeval.CompletionResult{}, err
+		}
+		// A non-zero exit code means the runner's agent CLI exited in
+		// failure (rate-limited, auth error, crash). Its stdout is
+		// unreliable — often raw stderr or a usage banner — and must not
+		// be fed into the judge-JSON parser, which would either parse-fail
+		// noisily or, worse, pick up malformed "JSON-ish" text and
+		// produce spurious verdicts. Mirror SessionFinalizeHandler's
+		// behavior: surface the failure to the caller so maybeRunJudge
+		// can swallow it and log a warn without caching a verdict.
+		if res.ExitCode != 0 {
+			return summaryeval.CompletionResult{}, fmt.Errorf("judge runner exited with code %d (output ignored)", res.ExitCode)
 		}
 		return summaryeval.CompletionResult{
 			Text:             res.Output,

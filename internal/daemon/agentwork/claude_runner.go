@@ -20,6 +20,7 @@ type claudeMessage struct {
 	Type       string       `json:"type"`
 	Subtype    string       `json:"subtype,omitempty"`
 	Result     string       `json:"result,omitempty"`
+	Model      string       `json:"model,omitempty"` // e.g. "claude-sonnet-4-6" — preserved for attribution
 	DurationMS int64        `json:"duration_ms,omitempty"`
 	Usage      *claudeUsage `json:"usage,omitempty"`
 }
@@ -166,6 +167,7 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	}
 	if pr.msg != nil {
 		res.Output = pr.msg.Result
+		res.ModelUsed = pr.msg.Model
 		if pr.msg.Usage != nil {
 			res.TokensIn = pr.msg.Usage.InputTokens
 			res.TokensOut = pr.msg.Usage.OutputTokens

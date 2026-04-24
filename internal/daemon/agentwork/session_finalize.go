@@ -1574,9 +1574,23 @@ func (h *SessionFinalizeHandler) maybeRunJudge(sessionName, ledgerPath string, s
 
 	// One-line key=value log so operators can grep for judge verdicts
 	// and pull the cache path to read the rationale + suggestions.
+	//
+	// IMPORTANT: emit ONLY scalar, non-session-derived fields here.
+	// result.Rationale and result.Suggestions are LLM-generated text that
+	// can paraphrase session content — potentially including fragments
+	// of secrets that escaped redaction, proprietary code, or user PII.
+	// Those stay in the cache file (local, gitignored) where operators
+	// who need the narrative can read them. The logs, which may flow to
+	// aggregators / dashboards / remote observability, get only numeric
+	// scores and model attribution.
 	h.logger.Info("summary_judge",
 		"session", sessionName,
 		"cache_path", cachePath,
-		"verdict", result,
+		"overall", result.Overall,
+		"model", result.ModelUsed,
+		"duration_ms", result.DurationMs,
+		"prompt_tokens", result.PromptTokens,
+		"completion_tokens", result.CompletionTokens,
+		"suggestion_count", len(result.Suggestions),
 	)
 }

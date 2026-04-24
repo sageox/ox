@@ -130,9 +130,14 @@ func (r *CodexRunner) Run(ctx context.Context, req RunRequest) (*RunResult, erro
 		}
 	}
 
+	// Codex CLI does not emit the model it used in a parseable channel today.
+	// Attribution stays empty; if/when codex exposes the model in its output
+	// format, populate ModelUsed here (mirrors claude_runner.go which reads
+	// it from the stream-json result message).
 	return &RunResult{
-		Output:   output,
-		Duration: elapsed,
-		ExitCode: exitCode,
+		Output:    output,
+		Duration:  elapsed,
+		ExitCode:  exitCode,
+		ModelUsed: "codex", // best-effort — coarse family attribution pending real CLI signal
 	}, nil
 }

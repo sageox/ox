@@ -122,9 +122,13 @@ func (r *GeminiRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 		}
 	}
 
+	// Gemini CLI doesn't yet emit the concrete model version in a parseable
+	// channel. Coarse family attribution for now; refine when the CLI
+	// output format exposes it (same TODO pattern as codex_runner.go).
 	return &RunResult{
-		Output:   string(output),
-		Duration: elapsed,
-		ExitCode: exitCode,
+		Output:    string(output),
+		Duration:  elapsed,
+		ExitCode:  exitCode,
+		ModelUsed: "gemini",
 	}, nil
 }

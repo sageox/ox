@@ -1,8 +1,10 @@
 package agentwork
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,6 +48,73 @@ func TestNewRunnerCompleter_ForwardsPromptAndExtractsOutput(t *testing.T) {
 	}
 	if lastPrompt != "please judge me" {
 		t.Errorf("prompt not forwarded: %q", lastPrompt)
+	}
+}
+
+// TestNewRunnerCompleter_NonZeroExitCodeIsError prevents a silent
+// failure mode where a runner exits with a non-zero code but err==nil
+// (e.g., the agent CLI wrote a usage banner to stdout). Without this
+// check, the judge would parse the banner as JSON, fail, and either
+// noise-log or in the worst case produce a malformed verdict that
+// gets cached to disk.
+func TestNewRunnerCompleter_NonZeroExitCodeIsError(t *testing.T) {
+	mock := NewMockRunner(true)
+	mock.RunFunc = func(ctx context.Context, req RunRequest) (*RunResult, error) {
+		return &RunResult{
+			Output:   "Usage: claude [options]...",
+			ExitCode: 2,
+		}, nil
+	}
+	c := NewRunnerCompleter(mock)
+	_, err := c(context.Background(), "judge this")
+	if err == nil {
+		t.Fatal("expected error on non-zero ExitCode, got nil")
+	}
+	if !strings.Contains(err.Error(), "exit") {
+		t.Errorf("error should mention exit code, got: %v", err)
+	}
+}
+
+// TestMaybeRunJudge_LogDoesNotLeakRationaleOrSuggestions covers the
+// privacy-sensitive requirement that only scalar fields leave the
+// ledger-local cache path. rationale/suggestions stay in the cache
+// JSON — never in logs that might flow to remote observability.
+func TestMaybeRunJudge_LogDoesNotLeakRationaleOrSuggestions(t *testing.T) {
+	t.Setenv("OX_SUMMARY_JUDGE", "on")
+
+	// Capture slog output into a buffer so we can scan it.
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	h := NewSessionFinalizeHandlerForTest(logger)
+	h.SetJudgeCompleter(func(ctx context.Context, prompt string) (summaryeval.CompletionResult, error) {
+		return summaryeval.CompletionResult{
+			Text: `{
+				"dimensions":[{"dimension":"title","score":0.9}],
+				"overall":0.85,
+				"rationale":"SENSITIVE_RATIONALE_SHOULD_NOT_LEAK_TO_LOGS",
+				"suggestions":["SENSITIVE_SUGGESTION_SHOULD_NOT_LEAK_TO_LOGS"]
+			}`,
+			ModelUsed: "mock-model",
+		}, nil
+	})
+
+	h.maybeRunJudge("sess", t.TempDir(), &session.SummarizeResponse{Title: "x"})
+
+	logged := logBuf.String()
+	for _, forbidden := range []string{
+		"SENSITIVE_RATIONALE_SHOULD_NOT_LEAK_TO_LOGS",
+		"SENSITIVE_SUGGESTION_SHOULD_NOT_LEAK_TO_LOGS",
+	} {
+		if strings.Contains(logged, forbidden) {
+			t.Errorf("log leaked session-derived content %q:\n%s", forbidden, logged)
+		}
+	}
+	// Positive: scalar fields should be present.
+	for _, must := range []string{"overall", "mock-model", "suggestion_count"} {
+		if !strings.Contains(logged, must) {
+			t.Errorf("log missing expected scalar field %q:\n%s", must, logged)
+		}
 	}
 }
 
