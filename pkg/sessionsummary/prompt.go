@@ -168,6 +168,18 @@ The score_reason should be a single sentence explaining the rating.
 //     fewer lines than len(entries).
 //
 // Callers pick the path; the prompt stays agnostic.
+//
+// # Contract mismatch with ValidateSummaryContent (historical note)
+//
+// The prompt below REQUESTS a rich schema: title, summary, key_actions,
+// aha_moments, sageox_insights, diagrams, chapter_titles, agent_summary,
+// quality_score. Originally the validator in validate.go only REQUIRED the
+// first three plus outcome, so agents could ship minimal summaries that
+// passed validation but lacked the fields that make session recordings
+// useful to coworkers. ValidateSummaryRichness now enforces key_actions
+// and aha_moments on non-trivial sessions (entry_count > 20) — output-
+// token cost is negligible compared to input-token cost already paid to
+// ingest the session.
 func BuildSummaryPrompt(entries []Entry, rawPath, ledgerSessionDir string) string {
 	var sb strings.Builder
 

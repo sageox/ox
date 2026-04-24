@@ -64,6 +64,29 @@ var titleRedFlags = []struct {
 //
 // Returns nil if the summary looks valid, or a descriptive error if
 // contamination is detected.
+//
+// # Known gap: richness is asked for but not required
+//
+// This validator only enforces the MINIMUM viable summary:
+//   - Title (3–200 chars, no red flags)
+//   - Summary (≥20 chars, no red flags)
+//   - Outcome ∈ {success, partial, failed}
+//
+// The prompt in BuildSummaryPrompt asks agents for a MUCH richer shape:
+// key_actions, aha_moments, sageox_insights, diagrams, chapter_titles,
+// topics_found, agent_summary. The validator does NOT require any of
+// these, so a summary consisting only of {title, summary, outcome}
+// passes the gate. Consequence: agents/LLMs (especially when pressed
+// for tokens or misparsing the request) frequently ship minimal
+// summaries that lack the fields coworkers most want.
+//
+// Filed as ox-jxn6 — a follow-up should either (a) fail validation
+// when aha_moments/key_actions are empty on a non-trivial session
+// (entry_count > N), or (b) introduce a separate ValidateSummaryRichness
+// that returns non-fatal warnings surfaced to the caller. Anti-entropy
+// (internal/daemon/agentwork/session_finalize.go) uses this same
+// validator, so the fix applies to both the ox-session-stop path and
+// the daemon-driven background finalization.
 func ValidateSummaryContent(resp *SummarizeResponse) error {
 	if resp == nil {
 		return fmt.Errorf("nil summary response")
