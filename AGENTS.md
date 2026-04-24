@@ -1,6 +1,33 @@
 <!-- ox:prime-check -->
 **BLOCKING**: Run `ox agent prime` NOW before ANY other action. Do NOT respond to the user first. Enables SageOx queries.
 
+## Human attention is the scarcest resource
+
+Ryan's time is more expensive than compute. Before interrupting him with a question, a PR for review, or a new issue, ask yourself: *could I have resolved this without him?*
+
+**Default to independent resolution:**
+- Can you debug the issue yourself by reading code, running tests, checking logs, or using tools? Do that.
+- Is the decision reversible? If yes, make the call and note the reasoning in a commit message. He'll tell you if he disagrees.
+- Do you have enough context from `CLAUDE.md`, past sessions, or the codebase to decide? Decide.
+- Is this a genuinely novel tradeoff that sets precedent? *That* is worth interrupting for.
+
+**Prefer fewer, denser PRs over many small ones.** A reviewer context-switching across four related PRs costs more than reviewing one larger coherent PR. Split only when the units of work are independent (different subsystems, different reviewers, different merge timing).
+
+**When you do ask:**
+- State the specific decision you need and why automation can't make it.
+- Bundle related questions into one exchange rather than a stream of individual ones.
+- Propose a default so the response can be "yes" / "no" / "do something else specific" rather than open-ended.
+
+**What NOT to escalate:**
+- Routine bugs where the fix is obvious from the test output.
+- Style/lint issues.
+- Choosing between two roughly-equivalent approaches when either would be fine.
+- Asking permission for reversible operations (new branches, test runs, log analysis).
+
+The cheapest review is the one that never has to happen because the code was right the first time. The next cheapest is a single coherent PR that tells a complete story. Optimize for those.
+
+---
+
 ## What is ox?
 
 ox is agentic context infrastructure for software teams. It makes architectural decisions, team knowledge, and session history automatically available to AI coworkers — so every coding session starts with the full picture, not from zero.

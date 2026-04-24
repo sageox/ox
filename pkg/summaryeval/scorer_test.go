@@ -155,6 +155,29 @@ func TestScoreCorpus_MissingCandidateIsZero(t *testing.T) {
 	}
 }
 
+// TestScoreCorpus_AllZeroMinMaxNotInverted guards against a bug where
+// initial OverallMin=1.0 / OverallMax=0.0 left min > max when every
+// session scored zero (e.g., all candidates missing). Fix initializes
+// min/max from the first observed score.
+func TestScoreCorpus_AllZeroMinMaxNotInverted(t *testing.T) {
+	corpus := []GoldenSession{
+		{Name: "a", Reference: Summary{Title: "a", Outcome: "success"}},
+		{Name: "b", Reference: Summary{Title: "b", Outcome: "success"}},
+		{Name: "c", Reference: Summary{Title: "c", Outcome: "success"}},
+	}
+	// Empty candidates map → all scores 0.
+	r := ScoreCorpus(corpus, map[string]Summary{}, DefaultWeights(), nil)
+	if r.OverallMin != 0 {
+		t.Errorf("OverallMin: got %f want 0", r.OverallMin)
+	}
+	if r.OverallMax != 0 {
+		t.Errorf("OverallMax: got %f want 0", r.OverallMax)
+	}
+	if r.OverallMin > r.OverallMax {
+		t.Errorf("min > max: got min=%f max=%f", r.OverallMin, r.OverallMax)
+	}
+}
+
 func TestScoreCorpus_GatesFailAppropriately(t *testing.T) {
 	corpus := []GoldenSession{
 		{Name: "s1", Reference: Summary{Title: "a", Outcome: "success"}},

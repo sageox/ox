@@ -99,8 +99,12 @@ func ScoreCorpus(corpus []GoldenSession, candidates map[string]Summary, w Weight
 	var overallSum float64
 	dimSums := make(map[string]float64)
 
-	report.OverallMin = 1.0
-	report.OverallMax = 0.0
+	// Initialize min/max from the first session rather than 1.0/0.0, so an
+	// all-zero corpus (e.g., every candidate missing) reports OverallMin=0,
+	// OverallMax=0 instead of the semantically-wrong OverallMin=1.0,
+	// OverallMax=0.0 that happens when neither condition inside the loop
+	// ever fires.
+	firstSeen := false
 
 	for _, g := range corpus {
 		cand, ok := candidates[g.Name]
@@ -122,11 +126,17 @@ func ScoreCorpus(corpus []GoldenSession, candidates map[string]Summary, w Weight
 		}
 		report.Sessions = append(report.Sessions, ss)
 		overallSum += ss.Overall
-		if ss.Overall < report.OverallMin {
+		if !firstSeen {
 			report.OverallMin = ss.Overall
-		}
-		if ss.Overall > report.OverallMax {
 			report.OverallMax = ss.Overall
+			firstSeen = true
+		} else {
+			if ss.Overall < report.OverallMin {
+				report.OverallMin = ss.Overall
+			}
+			if ss.Overall > report.OverallMax {
+				report.OverallMax = ss.Overall
+			}
 		}
 		for _, d := range ss.Dimensions {
 			dimSums[d.Dimension] += d.Score

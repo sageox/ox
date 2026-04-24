@@ -456,3 +456,65 @@ func TestReaderErrorPropagates(t *testing.T) {
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+// TestCanonWS_TrimsTrailingWhitespaceAtEndOfString covers the case
+// where content ends with trailing whitespace but no terminating
+// newline — the previous regex only matched trailing whitespace
+// followed by \n, leaving end-of-string cruft intact.
+func TestCanonWS_TrimsTrailingWhitespaceAtEndOfString(t *testing.T) {
+	content := "Answer  goes here   "
+	line, _ := json.Marshal(map[string]any{"type": "assistant", "content": content})
+	lines, stats := runCompress(t, []string{string(line)}, Options{})
+	if len(lines) != 1 {
+		t.Fatalf("want 1 line, got %d", len(lines))
+	}
+	var got struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &got); err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasSuffix(got.Content, " ") || strings.HasSuffix(got.Content, "\t") {
+		t.Errorf("trailing whitespace not stripped at end-of-string: %q", got.Content)
+	}
+	if stats.WhitespaceCanonicalized == 0 {
+		t.Errorf("expected WhitespaceCanonicalized > 0")
+	}
+}
+
+// TestSynonymRuleOrderIsDeterministic guards against map iteration
+// non-determinism producing different synonym sequences across runs.
+// Go map range order is randomized; the rules are applied in order
+// so a non-deterministic build order would make one run produce
+// different output than another given the same input.
+func TestSynonymRuleOrderIsDeterministic(t *testing.T) {
+	opts := Options{
+		EnableSynonymSub: true,
+		SynonymTable: map[string]string{
+			"configuration": "config",
+			"documentation": "docs",
+			"applications":  "apps",
+			"specification": "spec",
+			"environment":   "env",
+			"development":   "dev",
+		},
+	}
+
+	first := newState(opts)
+	firstSeq := make([]string, len(first.synonymRes))
+	for i, r := range first.synonymRes {
+		firstSeq[i] = r.replace
+	}
+
+	for iter := 0; iter < 20; iter++ {
+		s := newState(opts)
+		if len(s.synonymRes) != len(firstSeq) {
+			t.Fatalf("iter %d: rule count mismatch", iter)
+		}
+		for i, r := range s.synonymRes {
+			if r.replace != firstSeq[i] {
+				t.Fatalf("iter %d: rule[%d] differs (got %q, first %q)", iter, i, r.replace, firstSeq[i])
+			}
+		}
+	}
+}

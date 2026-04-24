@@ -12,21 +12,34 @@
 // and — strictly inside assistant <thinking> blocks — drop stop words and
 // optionally substitute high-token phrases with shorter synonyms.
 //
-// # Safety model
+// # Safety model — precise contract by transform
 //
 // Some transforms here are lossy. The package is therefore OFF by default
-// in upstream callers and gated behind explicit opt-in. Regardless of
-// config, tokenstrip never mutates:
+// in upstream callers and gated behind explicit opt-in.
 //
-//   - user turns (intent signal is sacred)
-//   - assistant prose OUTSIDE <thinking> blocks (the answer to the user)
-//   - tool_name, tool_input, tool_mark.brief (summarizer scaffolding)
+// Fields NEVER mutated, regardless of transform or config:
+//
 //   - header entries (session metadata)
+//   - user turns, in their entirety (intent signal is sacred)
+//   - tool_name, tool_input, tool_mark.brief (summarizer scaffolding)
 //
-// Stop-word removal and synonym substitution only touch text inside
-// <thinking>...</thinking> blocks on assistant entries. NFC normalization,
-// zero-width stripping, and whitespace canonicalization are lossless enough
-// to apply to assistant content globally (but still skip user turns).
+// For assistant entries, the applicability depends on whether a transform
+// is lossless or lossy:
+//
+//   Lossless transforms (apply to assistant content globally):
+//     - NFC Unicode normalization — round-trippable canonical form
+//     - Zero-width + unusual whitespace strip — information-free glyphs
+//     - Whitespace canonicalization — multiple spaces/newlines → one
+//
+//   Lossy transforms (apply ONLY to text inside <thinking>…</thinking>):
+//     - Stop-word removal
+//     - Synonym substitution (opt-in even when tokenstrip is enabled)
+//
+// This means assistant prose OUTSIDE <thinking> may see its whitespace
+// canonicalized and zero-width chars removed (lossless-safe), but its
+// words will never be dropped or rewritten (preserves the answer to the
+// user verbatim). Assistant prose INSIDE <thinking> may additionally lose
+// stop words / have synonyms substituted (lossy but scoped to reasoning).
 //
 // # Streaming
 //

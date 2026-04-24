@@ -2,6 +2,10 @@ package pipeline
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"strings"
 	"testing"
 )
 
@@ -31,26 +35,94 @@ func TestLedgerFileConstants(t *testing.T) {
 // constant from being added without also appearing in LedgerContentFiles.
 // Missing from the list means the artifact would copy to the ledger but
 // never LFS-upload — a silent GitLab push failure later on.
+//
+// The expected set is derived dynamically by AST-parsing types.go for
+// constants whose name starts with "LedgerFile". That way adding a new
+// LedgerFile* constant automatically fails this test until it's added
+// to LedgerContentFiles — the check cannot be bypassed by forgetting to
+// update a hand-maintained list in the test itself.
 func TestLedgerContentFiles_CoversAllConstants(t *testing.T) {
-	want := map[string]bool{
-		LedgerFileRaw:          false,
-		LedgerFileSummaryMD:    false,
-		LedgerFileSessionMD:    false,
-		LedgerFilePlan:         false,
-		LedgerFileContextTrace: false,
+	declared := ledgerFileConstantsFromAST(t)
+	if len(declared) == 0 {
+		t.Fatal("AST parse found zero LedgerFile* constants in types.go — the parser or file moved")
+	}
+
+	inSlice := make(map[string]bool, len(LedgerContentFiles))
+	for _, f := range LedgerContentFiles {
+		inSlice[f] = true
+	}
+
+	// Every declared LedgerFile* constant must appear in LedgerContentFiles.
+	for name, value := range declared {
+		if !inSlice[value] {
+			t.Errorf("constant %s (value %q) is declared but missing from LedgerContentFiles — add it or delete the constant", name, value)
+		}
+	}
+
+	// And nothing extra allowed: every LedgerContentFiles entry must match a constant.
+	valueToName := make(map[string]string, len(declared))
+	for name, value := range declared {
+		valueToName[value] = name
 	}
 	for _, f := range LedgerContentFiles {
-		if _, known := want[f]; !known {
-			t.Errorf("LedgerContentFiles includes %q not matching any LedgerFile* constant — declare a constant or drop the entry", f)
+		if _, ok := valueToName[f]; !ok {
+			t.Errorf("LedgerContentFiles contains %q which is not a declared LedgerFile* constant value", f)
+		}
+	}
+}
+
+// ledgerFileConstantsFromAST parses types.go and returns a map of
+// {constant name → string value} for every const whose name starts with
+// "LedgerFile". Lets the drift-guard test detect new constants without
+// any hand-maintained duplicate list.
+func ledgerFileConstantsFromAST(t *testing.T) map[string]string {
+	t.Helper()
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "types.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse types.go: %v", err)
+	}
+	out := make(map[string]string)
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
 			continue
 		}
-		want[f] = true
-	}
-	for f, seen := range want {
-		if !seen {
-			t.Errorf("LedgerFile* constant %q is defined but missing from LedgerContentFiles; add it or delete the constant", f)
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if !strings.HasPrefix(name.Name, "LedgerFile") {
+					continue
+				}
+				if i >= len(vs.Values) {
+					continue
+				}
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				// Kind == STRING literal value includes the quotes; strip them.
+				val, err := strconvUnquote(lit.Value)
+				if err != nil {
+					continue
+				}
+				out[name.Name] = val
+			}
 		}
 	}
+	return out
+}
+
+// strconvUnquote is a small wrapper to avoid importing strconv only for
+// one call. Go's string literals in AST come with quotes; unquote them.
+func strconvUnquote(s string) (string, error) {
+	if len(s) >= 2 && (s[0] == '"' || s[0] == '`') && s[len(s)-1] == s[0] {
+		return s[1 : len(s)-1], nil
+	}
+	return s, nil
 }
 
 func TestResultSecondaryArtifacts(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/bbalet/stopwords"
@@ -66,13 +67,26 @@ func newState(opts Options) *state {
 		multiSpace: regexp.MustCompile(`[ \t]{2,}`),
 		// Three-or-more newlines collapse to two (preserves paragraph breaks).
 		multiNL: regexp.MustCompile(`\n{3,}`),
-		// Trailing spaces/tabs before end-of-line.
-		trailingWS: regexp.MustCompile(`[ \t]+\n`),
+		// Trailing spaces/tabs before end-of-line OR end-of-string. The
+		// alternation matters for the last line of any buffer that doesn't
+		// end with a newline — otherwise trailing whitespace there survives.
+		trailingWS: regexp.MustCompile(`[ \t]+(\n|$)`),
 	}
 
 	if opts.EnableSynonymSub && len(opts.SynonymTable) > 0 {
 		s.synonymRes = make([]synonymRule, 0, len(opts.SynonymTable))
-		for k, v := range opts.SynonymTable {
+		// Iterate keys in sorted order for deterministic rule construction.
+		// Go map range order is randomized; the rules are applied sequentially
+		// at match time, and non-deterministic ordering would make one run
+		// produce different output than another given the same input. The
+		// package advertises determinism.
+		keys := make([]string, 0, len(opts.SynonymTable))
+		for k := range opts.SynonymTable {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v := opts.SynonymTable[k]
 			// Whole-word, case-insensitive match. regexp.QuoteMeta guards
 			// against regex metacharacters in user-supplied keys.
 			pattern := `(?i)\b` + regexp.QuoteMeta(k) + `\b`
