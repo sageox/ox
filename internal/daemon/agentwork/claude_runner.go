@@ -154,20 +154,30 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 		}
 	}
 
+	// Family-level attribution is the floor. The stream-json result
+	// message carries the concrete model id (e.g., claude-sonnet-4-6);
+	// when present, we overwrite below. Either way, ModelUsed is never
+	// empty on any return path from this runner.
+	const claudeFamily = "claude"
+
 	if pr.err != nil && pr.msg == nil {
 		return &RunResult{
-			Duration: elapsed,
-			ExitCode: exitCode,
+			Duration:  elapsed,
+			ExitCode:  exitCode,
+			ModelUsed: claudeFamily,
 		}, fmt.Errorf("parse claude output: %w", pr.err)
 	}
 
 	res := &RunResult{
-		Duration: elapsed,
-		ExitCode: exitCode,
+		Duration:  elapsed,
+		ExitCode:  exitCode,
+		ModelUsed: claudeFamily,
 	}
 	if pr.msg != nil {
 		res.Output = pr.msg.Result
-		res.ModelUsed = pr.msg.Model
+		if pr.msg.Model != "" {
+			res.ModelUsed = pr.msg.Model // concrete model id from stream-json
+		}
 		if pr.msg.Usage != nil {
 			res.TokensIn = pr.msg.Usage.InputTokens
 			res.TokensOut = pr.msg.Usage.OutputTokens
