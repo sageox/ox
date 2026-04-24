@@ -3,28 +3,36 @@ package tokenstrip
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// ledgerSessionsDir is the canonical location where session raw.jsonl
-// files live for the repo this codebase is checked out of. Tests walk
-// it opportunistically — if the ledger isn't present (CI, contributor
-// running tests with a fresh clone), the A/B measurement is skipped
-// with a clear message rather than failing.
+// ledgerSessionsDir returns the path to a session ledger's sessions/
+// directory, resolved from the OX_TOKENSTRIP_AB_LEDGER env var. Empty
+// return = skip the A/B measurement.
+//
+// Env var, not hardcoded XDG, for two reasons:
+//
+//  1. Package boundary. pkg/tokenstrip is a public package; it can't
+//     import internal/config (where the canonical DefaultLedgerPath
+//     helper lives). Hardcoding XDG defaults papers over that and
+//     would silently skip on valid setups with non-default XDG config.
+//
+//  2. Intent. The A/B measurement is diagnostic, run by someone who
+//     explicitly wants to sweep their ledger for tokenstrip regressions.
+//     It's not a CI-required test; requiring an explicit env var makes
+//     that intent portable (no assumption the test machine is a
+//     particular developer's laptop).
+//
+// Set OX_TOKENSTRIP_AB_LEDGER to a directory containing <session>/raw.jsonl
+// subdirectories — i.e., the `sessions/` directory under a ledger checkout.
+// In non-test code that needs the same path, use:
+//
+//	filepath.Join(config.DefaultLedgerPath(repoID, endpointURL), "sessions")
 func ledgerSessionsDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	// Canonical local ledger path for this repo. Other machines won't
-	// have this; that's fine — the test short-circuits gracefully.
-	return filepath.Join(home, ".local", "share", "sageox", "sageox.ai",
-		"ledgers", "repo_019c5812-01e9-7b7d-b5b1-321c471c9777", "sessions")
+	return strings.TrimSpace(os.Getenv("OX_TOKENSTRIP_AB_LEDGER"))
 }
 
 // TestABCorpus_TokenStripReductionAndSacredRules is the A/B measurement
@@ -45,11 +53,11 @@ func ledgerSessionsDir() string {
 func TestABCorpus_TokenStripReductionAndSacredRules(t *testing.T) {
 	sessionsDir := ledgerSessionsDir()
 	if sessionsDir == "" {
-		t.Skip("ledger path unknown (no home dir); A/B measurement skipped")
+		t.Skip("A/B measurement skipped: set OX_TOKENSTRIP_AB_LEDGER to a sessions/ directory to enable")
 	}
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
-		t.Skipf("ledger sessions dir not present at %s; A/B measurement skipped", sessionsDir)
+		t.Skipf("sessions dir not present at %s (from OX_TOKENSTRIP_AB_LEDGER): %v", sessionsDir, err)
 	}
 
 	var measured, skipped int
@@ -81,7 +89,7 @@ func TestABCorpus_TokenStripReductionAndSacredRules(t *testing.T) {
 
 		// Snapshot user turns + tool fields + header from the input for
 		// the sacred-rules post-check.
-		inputSnapshot := extractSacredFields(t, data, e.Name())
+		inputSnapshot := extractSacredLines(data)
 
 		var out bytes.Buffer
 		stats, err := Compress(bytes.NewReader(data), &out)
@@ -107,8 +115,8 @@ func TestABCorpus_TokenStripReductionAndSacredRules(t *testing.T) {
 		}
 
 		// Invariant 3: sacred fields unchanged.
-		outputSnapshot := extractSacredFields(t, out.Bytes(), e.Name())
-		checkSacredRules(t, e.Name(), inputSnapshot, outputSnapshot)
+		outputSnapshot := extractSacredLines(out.Bytes())
+		checkSacredLines(t, e.Name(), inputSnapshot, outputSnapshot)
 	}
 
 	if measured == 0 {
@@ -144,81 +152,72 @@ func TestABCorpus_TokenStripReductionAndSacredRules(t *testing.T) {
 	}
 }
 
-// sacredFields captures the content of entries we MUST NOT modify.
-type sacredFields struct {
-	userTurns   []string // full content of user entries
-	headers     []string // full raw bytes of header entries
-	toolMeta    []string // tool_name + tool_input for tool entries (tool_output may change in edge cases)
-	entryCount  int
+// sacredLines captures the raw-byte form of entries we MUST NOT modify
+// so the post-check is a byte-identity comparison, not a decode-and-
+// recompare. A decoded-content comparison misses:
+//   - JSON escape-form changes (e.g., & vs & in identical semantics)
+//   - Unknown top-level fields getting stripped or added during re-marshal
+//   - Ordering / whitespace differences from encoding/json's defaults
+//   - Any other lossy round-trip that happens to preserve the fields we
+//     chose to decode while mutating bytes we didn't inspect
+//
+// Raw-line comparison is the contract tokenstrip advertises for user
+// turns, tool metadata, and header entries: bytes in = bytes out. Any
+// deviation — even semantically-equivalent — violates the guarantee and
+// should fail the test.
+type sacredLines struct {
+	// indexed by line number in the original stream; value is raw line bytes
+	// OR empty string if the line isn't sacred for its type (e.g. assistant).
+	byIndex []string
 }
 
-func extractSacredFields(t *testing.T, data []byte, sessionName string) sacredFields {
-	t.Helper()
-	var out sacredFields
+func extractSacredLines(data []byte) sacredLines {
+	var out sacredLines
 	for _, line := range bytes.Split(data, []byte{'\n'}) {
 		if len(line) == 0 {
+			out.byIndex = append(out.byIndex, "")
 			continue
 		}
-		out.entryCount++
-		var e struct {
-			Type      string `json:"type"`
-			Content   string `json:"content"`
-			ToolName  string `json:"tool_name"`
-			ToolInput string `json:"tool_input"`
+		var hdr struct {
+			Type string `json:"type"`
 		}
-		if err := json.Unmarshal(line, &e); err != nil {
-			// Malformed lines pass through unchanged — keep the raw bytes
-			// so post-check can confirm byte-for-byte preservation.
-			out.headers = append(out.headers, string(line))
-			continue
+		// Default: preserve raw bytes of unparseable lines (they should
+		// pass through byte-for-byte).
+		rawLine := string(line)
+		if err := json.Unmarshal(line, &hdr); err == nil {
+			switch hdr.Type {
+			case "user", "header", "tool":
+				// Sacred — store raw bytes for byte-identity check.
+				out.byIndex = append(out.byIndex, rawLine)
+				continue
+			default:
+				// Assistant / tool_mark / other — mutation permitted.
+				out.byIndex = append(out.byIndex, "")
+				continue
+			}
 		}
-		switch e.Type {
-		case "user":
-			out.userTurns = append(out.userTurns, e.Content)
-		case "header":
-			out.headers = append(out.headers, string(line))
-		case "tool":
-			out.toolMeta = append(out.toolMeta, e.ToolName+"|"+e.ToolInput)
-		}
+		// Unparseable — tokenstrip passes these through unchanged; treat
+		// as sacred for byte-identity.
+		out.byIndex = append(out.byIndex, rawLine)
 	}
 	return out
 }
 
-func checkSacredRules(t *testing.T, sessionName string, in, out sacredFields) {
+func checkSacredLines(t *testing.T, sessionName string, in, out sacredLines) {
 	t.Helper()
-	if len(in.userTurns) != len(out.userTurns) {
-		t.Errorf("session %s: user turn count changed (in=%d out=%d)",
-			sessionName, len(in.userTurns), len(out.userTurns))
+	if len(in.byIndex) != len(out.byIndex) {
+		t.Errorf("session %s: line count changed (in=%d out=%d)",
+			sessionName, len(in.byIndex), len(out.byIndex))
 		return
 	}
-	for i, got := range out.userTurns {
-		if got != in.userTurns[i] {
-			t.Errorf("session %s: user turn #%d was modified\n  in:  %q\n  out: %q",
-				sessionName, i, truncateForErr(in.userTurns[i], 120), truncateForErr(got, 120))
-			return
+	for i, want := range in.byIndex {
+		if want == "" {
+			continue // non-sacred line; mutation permitted
 		}
-	}
-	if len(in.toolMeta) != len(out.toolMeta) {
-		t.Errorf("session %s: tool entry count changed (in=%d out=%d)",
-			sessionName, len(in.toolMeta), len(out.toolMeta))
-		return
-	}
-	for i, got := range out.toolMeta {
-		if got != in.toolMeta[i] {
-			t.Errorf("session %s: tool metadata changed at #%d (should be untouched)\n  in:  %q\n  out: %q",
-				sessionName, i, in.toolMeta[i], got)
-			return
-		}
-	}
-	// Headers (and malformed lines) should byte-match.
-	if len(in.headers) != len(out.headers) {
-		t.Errorf("session %s: header/malformed count changed (in=%d out=%d)",
-			sessionName, len(in.headers), len(out.headers))
-		return
-	}
-	for i, got := range out.headers {
-		if got != in.headers[i] {
-			t.Errorf("session %s: header #%d changed", sessionName, i)
+		got := out.byIndex[i]
+		if got != want {
+			t.Errorf("session %s: sacred line #%d mutated (byte identity required)\n  in:  %q\n  out: %q",
+				sessionName, i, truncateForErr(want, 120), truncateForErr(got, 120))
 			return
 		}
 	}
@@ -242,9 +241,3 @@ func isLFSPointer(path string) bool {
 	return strings.HasPrefix(string(head[:n]), "version https://git-lfs.github.com")
 }
 
-// Compile-time check that the ledger helpers don't accidentally grow
-// dependencies that would break test isolation.
-var _ fs.FS = os.DirFS("/tmp")
-
-// Ensure fmt is imported (used in a t.Logf path covered above).
-var _ = fmt.Sprintf
