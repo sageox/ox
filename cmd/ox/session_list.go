@@ -256,15 +256,22 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 			if user == "" {
 				user = localUser
 			}
+			// legacy sessions leave SessionName empty — fall back to the filename so
+			// agents always have a usable identifier for the 'ox session view <name>'
+			// follow-up step described in the guidance hint.
+			name := t.SessionName
+			if name == "" {
+				name = t.Filename
+			}
 			entries = append(entries, sessionListEntry{
-				Name:            t.SessionName,
+				Name:            name,
 				Date:            t.CreatedAt.Format("2006-01-02"),
 				Time:            t.CreatedAt.Format("15:04"),
 				User:            user,
 				Status:          status,
 				Recording:       t.Recording,
-				Title:           t.Title,
-				Summary:         t.Summary,
+				Title:           sanitizeSessionText(t.Title),
+				Summary:         sanitizeSessionText(t.Summary),
 				EntryCount:      t.EntryCount,
 				IsSubagent:      t.IsSubagent,
 				Origin:          t.Origin,
@@ -455,10 +462,13 @@ func printSessionRow(t session.SessionInfo, uploaded bool, localUser string) {
 // meta.Summary. Returns empty when neither is useful.
 func sessionBlurb(s session.SessionInfo) string {
 	const maxLen = 100
-	if t := strings.TrimSpace(s.Title); t != "" {
+	// Title/Summary come verbatim from meta.json written by other coworkers —
+	// strip ANSI and control bytes before rendering so a shared ledger can't
+	// spoof the terminal.
+	if t := sanitizeSessionText(strings.TrimSpace(s.Title)); t != "" {
 		return truncateSingleLine(t, maxLen)
 	}
-	sum := strings.TrimSpace(s.Summary)
+	sum := sanitizeSessionText(strings.TrimSpace(s.Summary))
 	if sum == "" || strings.HasPrefix(sum, "Summary generation failed") {
 		return ""
 	}
@@ -475,6 +485,43 @@ func sessionBlurb(s session.SessionInfo) string {
 		return truncateSingleLine(line, maxLen)
 	}
 	return ""
+}
+
+// sanitizeSessionText strips ANSI CSI escape sequences and other C0/C1 control
+// bytes from text originating in a shared ledger's meta.json. Preserves tabs
+// and newlines (callers flatten newlines separately when rendering single-line).
+func sanitizeSessionText(s string) string {
+	if s == "" {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		// ESC: skip the whole CSI / OSC / other escape sequence.
+		if r == 0x1b {
+			// consume until a likely terminator (@-~ for CSI, BEL/ESC\ for OSC).
+			// conservative: drop until the next printable letter or end of input.
+			for i+1 < len(runes) {
+				i++
+				nr := runes[i]
+				if (nr >= '@' && nr <= '~') || nr == 0x07 {
+					break
+				}
+			}
+			continue
+		}
+		// drop C0 controls except \t and \n; drop DEL and C1 (0x80-0x9f).
+		if r < 0x20 && r != '\t' && r != '\n' {
+			continue
+		}
+		if r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // isMarkdownStructure reports whether a line is markdown syntax rather than
