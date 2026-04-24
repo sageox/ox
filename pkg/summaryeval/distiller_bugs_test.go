@@ -64,12 +64,14 @@ func TestScorer_CatchesOxG5zw_EmptyTitleBug(t *testing.T) {
 	// The title dimension specifically must score 0 — that's the load-
 	// bearing check. Any other dimension scoring poorly for unrelated
 	// reasons would let the real bug hide behind noise.
-	var titleScore float64 = -1
-	for _, d := range result.Dimensions {
-		if d.Dimension == DimTitle {
-			titleScore = d.Score
-			break
-		}
+	//
+	// Fail fast if DimTitle is missing entirely from the result: a sentinel
+	// score of -1 would otherwise silently pass the "< 0.15" style checks
+	// and let a future Score() regression that stops emitting the title
+	// dimension slip through this test.
+	titleScore, found := dimensionScore(result.Dimensions, DimTitle)
+	if !found {
+		t.Fatalf("result missing %q dimension entirely; Score() contract broken", DimTitle)
 	}
 	if titleScore != 0 {
 		t.Errorf("title dimension for empty-title candidate should be 0.0; got %.3f (reason: %q)",
@@ -129,12 +131,13 @@ func TestScorer_CatchesOx0pxt_StatsOnlySummaryBug(t *testing.T) {
 
 	result := Score("ox-0pxt-fingerprint", ref, statsOnly, DefaultWeights())
 
-	var summaryScore float64 = -1
-	for _, d := range result.Dimensions {
-		if d.Dimension == DimSummary {
-			summaryScore = d.Score
-			break
-		}
+	// Fail fast if DimSummary is missing. Without this, a sentinel score
+	// of -1 would silently satisfy "-1 > 0.15" == false and let a
+	// future Score() regression that stopped emitting the summary
+	// dimension sneak past this bug-detection test.
+	summaryScore, found := dimensionScore(result.Dimensions, DimSummary)
+	if !found {
+		t.Fatalf("result missing %q dimension entirely; Score() contract broken", DimSummary)
 	}
 	// A stats-only summary shares almost no vocabulary with a real
 	// narrative reference — Jaccard should be < 0.1.
@@ -216,4 +219,17 @@ func findReason(dims []DimensionScore, name string) string {
 		}
 	}
 	return ""
+}
+
+// dimensionScore returns (score, true) when the named dimension is
+// present in the result, (0, false) when it's missing. Tests should
+// Fatal on missing instead of allowing a sentinel value to vacuously
+// satisfy a threshold comparison.
+func dimensionScore(dims []DimensionScore, name string) (float64, bool) {
+	for _, d := range dims {
+		if d.Dimension == name {
+			return d.Score, true
+		}
+	}
+	return 0, false
 }

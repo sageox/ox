@@ -132,11 +132,15 @@ func TestABCorpus_TokenStripReductionAndSacredRules(t *testing.T) {
 
 	// Loose floor — tokenstrip should produce SOME reduction across a
 	// real corpus. Zero reduction would indicate the stage isn't doing
-	// anything (broken regex, disabled transforms, etc.). 0.1% is well
-	// below what we'd expect but catches the "completely broken" case.
-	if tokReduction < 0.01 && bytesReduction < 0.01 {
-		t.Errorf("A/B reduction is effectively zero over %d sessions; tokenstrip may not be running",
-			measured)
+	// anything (broken regex, disabled transforms, etc.). The 0.01%
+	// threshold below is deliberately far below anything realistic —
+	// it only catches the "completely broken" case where the pipeline
+	// produces byte-identical output. Historical measurement on this
+	// repo's ledger: ~0.11% reduction.
+	const minReductionPct = 0.01
+	if tokReduction < minReductionPct && bytesReduction < minReductionPct {
+		t.Errorf("A/B reduction is effectively zero over %d sessions (threshold %.2f%%); tokenstrip may not be running",
+			measured, minReductionPct)
 	}
 }
 
