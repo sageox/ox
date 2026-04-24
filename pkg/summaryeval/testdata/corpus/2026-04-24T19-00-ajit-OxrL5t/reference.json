@@ -1,0 +1,32 @@
+{
+  "name": "2026-04-24T19-00-ajit-OxrL5t",
+  "notes": "Medium session (213 entries) from a different user (Ajit). Nice agent-UX feature work: making a CLI surface actually useful. Tests summarizer on authors other than Ryan.",
+  "reference": {
+    "title": "Surface titles and agent-friendly JSON in ox session list",
+    "summary": "Made ox session list actually useful for figuring out what a session was about. The old output — DATE/TIME/USER/TURNS/STATUS/SESSION — was fine for bookkeeping but useless for identification. Each row now carries a second indented line with the session title from meta.json, falling back intelligently to the first real prose sentence of the summary (skipping headings, bullets, and 'Summary generation failed' noise). In agent contexts (AGENT_ENV set, detected via agentx.IsAgentContext), the command now defaults to JSON carrying title, summary, entry_count, status, hydration_status, stop_reason, has_raw_data, and a top-level guidance string pointing agents at ox session view and ox session download when hydration is needed. Humans still get the table. --json=false is the escape hatch to force text inside an agent.",
+    "key_actions": [
+      "Added Title field to session.SessionInfo, populated from lfs.SessionMeta.Title",
+      "Wired meta.json title into the text-table second line with smart summary fallback",
+      "Filtered fallback to skip markdown headings, bullets, and 'Summary generation failed' text",
+      "Detected agent context via agentx.IsAgentContext and defaulted to JSON output there",
+      "Added top-level guidance string pointing agents at ox session view / download",
+      "Included hydration_status so agents know when to download before viewing",
+      "Added --json=false escape hatch for forcing text inside an agent",
+      "Ran make install to deploy the updated binary"
+    ],
+    "outcome": "success",
+    "aha_moments": [
+      {"seq": 1, "type": "question"},
+      {"seq": 60, "type": "decision"},
+      {"seq": 140, "type": "insight"}
+    ],
+    "topics_found": [
+      "ox session list",
+      "agent UX",
+      "agentx",
+      "hydration status",
+      "JSON output",
+      "fallback heuristics"
+    ]
+  }
+}

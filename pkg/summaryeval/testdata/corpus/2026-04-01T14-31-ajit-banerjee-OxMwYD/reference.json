@@ -1,0 +1,31 @@
+{
+  "name": "2026-04-01T14-31-ajit-banerjee-OxMwYD",
+  "notes": "Shorter Ajit session (178 entries). Existing summary failed outright (rate-limit error text in the summary field). Good test of 'no useful prior summary' recovery.",
+  "reference": {
+    "title": "Simplify cart CLI and add Claude skills",
+    "summary": "Reworked the cart-tracking CLI to match the simpler design sketched in ~/claude-task.md and added Claude Code skills that expose carts to agents. Added --json support to ox carts start so the skill can parse the cart title and trigger a /rename of the Claude session to a kebab-case name derived from it. Built four skills — /ox-cart, /ox-cart-start, /ox-cart-done, /ox-cart-drop — placed in both .claude/commands/ and extensions/claude/commands/ so they ship with the CLI. Landed the work on branch ajit-kanban-basecamp-cli (22 files) with an amended commit feat(carts): add DoltDB-backed cart tracking for work items, pushed to origin and ready for PR.",
+    "key_actions": [
+      "Reviewed ~/claude-task.md and simplified the cart implementation to match",
+      "Added --json output to ox carts start for skill consumption",
+      "Built /ox-cart, /ox-cart-start, /ox-cart-done, and /ox-cart-drop Claude skills",
+      "Wired /ox-cart-start to auto-rename the Claude session via the cart title",
+      "Duplicated skills into extensions/claude/commands/ so they ship with the CLI",
+      "Amended the commit to feat(carts): add DoltDB-backed cart tracking for work items",
+      "Pushed branch ajit-kanban-basecamp-cli (22 files) to origin"
+    ],
+    "outcome": "success",
+    "aha_moments": [
+      {"seq": 1, "type": "question"},
+      {"seq": 40, "type": "insight"},
+      {"seq": 100, "type": "decision"}
+    ],
+    "topics_found": [
+      "cart tracking",
+      "DoltDB",
+      "Claude skills",
+      "CLI JSON",
+      "session rename",
+      "extensions/claude"
+    ]
+  }
+}

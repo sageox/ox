@@ -1,0 +1,32 @@
+{
+  "name": "2026-03-06T17-19-30-ryan-OxRsd1",
+  "notes": "Long feature build (660 entries) with multiple user-driven design corrections mid-implementation. Tests the summarizer's ability to surface pivotal user interventions as aha moments rather than flatten everything into 'the agent implemented X'.",
+  "reference": {
+    "title": "Implement Claude memory import into the ledger",
+    "summary": "Built the Claude Code memory import feature end to end for the ox CLI, starting from architecture exploration (how Claude's per-absolute-path memory isolation works, how ledger data/ flows through sync) and ending with 8 new files across internal/memoryimport, internal/claude, internal/gitutil, and cmd/ox. Three user corrections reshaped the design midway: switch source identity from raw paths to SHA-256 fingerprints, track mtime/import per source rather than globally, and TTL-expire stale Conductor workspaces. A test-engineer review flagged P0 missing non-DryRun integration coverage and a P1 path-traversal risk, both addressed. Session also resolved a merge conflict with main and surfaced a separate session-recording bug where ox session stop reported success without writing artifacts.",
+    "key_actions": [
+      "Researched Claude memory system and discovered per-absolute-path (not per-repo) isolation",
+      "Created internal/memoryimport with source fingerprinting and per-source tracking",
+      "Switched source identity from raw paths to SHA-256 fingerprints after user pushback",
+      "Added TTL expiration for stale Conductor workspace entries",
+      "Addressed P0 missing non-DryRun integration tests and P1 path-traversal risk from review",
+      "Resolved merge conflict with main",
+      "Filed a separate bug for ox session stop returning success without writing artifacts"
+    ],
+    "outcome": "success",
+    "aha_moments": [
+      {"seq": 1, "type": "question"},
+      {"seq": 150, "type": "decision"},
+      {"seq": 300, "type": "decision"},
+      {"seq": 480, "type": "insight"}
+    ],
+    "topics_found": [
+      "Claude memory",
+      "ledger data pipeline",
+      "source fingerprinting",
+      "path traversal",
+      "test coverage",
+      "session recording bug"
+    ]
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "name": "2026-03-11T07-18-ryan-OxZgb1",
+  "notes": "Very-long architectural session (2233 entries). Covers design + implementation of a new data pipeline with significant cross-cutting impact. Exercises the summarizer's ability to distill a sprawling, multi-topic session into a coherent narrative without stats-dumping.",
+  "reference": {
+    "title": "Index GitHub PRs and issues into CodeDB",
+    "summary": "Designed and shipped a GitHub data indexing pipeline that pulls PR diffs, review comments, descriptions, and issues into the ledger under data/github/YYYY/MM/DD and indexes them into CodeDB for local semantic search. The work pushed through several architectural decisions: a time-partitioned storage layout, sparse-checkout windowing to keep local disks small, multi-writer conflict resolution for distributed daemon sync, and a unified top-level ox index command that replaced the narrower ox ledger sync-github. Along the way the session moved the sync cursor from XDG cache into the ledger cache so state survives across worktrees, extended the IPC protocol to support --full reindex, and wired ox doctor repairs for conflict recovery. Outcome: the full pipeline landed end to end.",
+    "key_actions": [
+      "Designed data/github/YYYY/MM/DD/{pr,issue}/NNN.json time-partitioned layout in the ledger",
+      "Implemented GitHub REST extraction for PR diffs, review comments, descriptions, and issues",
+      "Built the unified ox index command (code + github subcommands) to replace ox ledger sync-github",
+      "Added sparse-checkout windowing so only recent PR/issue data lives locally",
+      "Resolved multi-writer conflicts in distributed daemon sync",
+      "Moved sync cursor state from XDG cache into the ledger cache for cross-worktree persistence",
+      "Extended the IPC protocol to support --full reindex",
+      "Added ox doctor repairs for conflict resolution"
+    ],
+    "outcome": "success",
+    "aha_moments": [
+      {"seq": 1, "type": "question"},
+      {"seq": 120, "type": "decision"},
+      {"seq": 640, "type": "insight"},
+      {"seq": 1500, "type": "synthesis"}
+    ],
+    "topics_found": [
+      "CodeDB",
+      "GitHub indexing",
+      "sparse checkout",
+      "daemon sync",
+      "IPC protocol",
+      "ledger cache",
+      "ox doctor"
+    ]
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "2026-04-07T01-47-ryan-Ox01yU",
+  "notes": "Shorter bug-fix session (221 entries) on a specific GitHub issue. Good example of 'fix a leak + build a systemic guard against it'. Existing summary is a permission-blocked fragment.",
+  "reference": {
+    "title": "Fix daemon FD leak and add a generic leak guard",
+    "summary": "Closed GitHub issue #443: a daemon file-descriptor leak with two root causes. The FileSystemWatcher interface was missing a Remove() method, which meant kqueue FDs leaked whenever a watched directory was deleted — an abstraction gap, not a misuse. Separately, IndexLocalRepo opened go-git repos with KeepDescriptors but never called repo.Close(), so packfile FDs accumulated on every index. Fixed both and then elevated the test insight from the specific case into a reusable testguard.RequireNoFDLeak(t) helper that probes live FDs via fcntl(F_GETFD) — needed because macOS sandbox blocks /dev/fd. A regression test for the KeepDescriptors path required forcing git gc to create a packfile, since bare git init repos only have loose objects; even with that, go-git v6 FD cleanup semantics proved subtle and are documented in the test.",
+    "key_actions": [
+      "Added Remove() to the FileSystemWatcher interface and wired kqueue cleanup on directory deletion",
+      "Added repo.Close() to IndexLocalRepo to release KeepDescriptors packfile FDs",
+      "Built testguard.RequireNoFDLeak(t) using fcntl(F_GETFD) probing",
+      "Worked around macOS sandbox blocking /dev/fd",
+      "Added a regression test that forces git gc to create a packfile for the KeepDescriptors path",
+      "Documented go-git v6 FD cleanup subtleties in the test",
+      "Verified make lint clean and full test suite green"
+    ],
+    "outcome": "success",
+    "aha_moments": [
+      {"seq": 1, "type": "question"},
+      {"seq": 50, "type": "insight"},
+      {"seq": 120, "type": "breakthrough"}
+    ],
+    "topics_found": [
+      "file descriptor leak",
+      "kqueue",
+      "go-git KeepDescriptors",
+      "fcntl",
+      "testguard",
+      "macOS sandbox"
+    ]
+  }
+}

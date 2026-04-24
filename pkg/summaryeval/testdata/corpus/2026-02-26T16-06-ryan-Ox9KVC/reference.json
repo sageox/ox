@@ -1,0 +1,32 @@
+{
+  "name": "2026-02-26T16-06-ryan-Ox9KVC",
+  "notes": "Long refactor (547 entries) generalizing a hardcoded hook system across 9 coding-agent integrations. Useful for testing summarizer handling of broad, horizontal refactors touching many adapters.",
+  "reference": {
+    "title": "Generalize agent hook lifecycle across 9 agents",
+    "summary": "Replaced the hardcoded per-event Claude Code shell hooks with a generalized ox agent hook <event> command that maps any coding agent's native lifecycle events onto canonical phases (start, compact, etc.). Added LifecycleEventMapper implementations for 9 agents — Claude Code, Cursor, Windsurf, Kiro, Droid, Cline, Copilot, Amp, and OpenCode — and extracted HookInput/ReadHookInput into a reusable agentx package. A principal-engineer review during the session flagged three real bugs that would have shipped: fragmented pipe reads (switched to io.ReadAll), stdin passthrough silently dropping unknown fields (added RawBytes field), and leftover dead code from the hardcoded path. Also added belt-and-suspenders auto-recording where both prime and the hook handler start the recording, made idempotent so double-start is harmless.",
+    "key_actions": [
+      "Implemented ox agent hook <event> with phase dispatch for start and compact",
+      "Added LifecycleEventMapper in agentx for 9 coding agents",
+      "Extracted HookInput and ReadHookInput into pkg/agentx/hook_input.go",
+      "Fixed fragmented-pipe-read bug by switching to io.ReadAll",
+      "Added RawBytes field so stdin passthrough preserves unknown JSON fields",
+      "Removed dead code from the pre-refactor hardcoded hook path",
+      "Made auto-recording idempotent across prime and hook-handler entry points"
+    ],
+    "outcome": "success",
+    "aha_moments": [
+      {"seq": 1, "type": "question"},
+      {"seq": 150, "type": "decision"},
+      {"seq": 320, "type": "insight"}
+    ],
+    "topics_found": [
+      "agent hooks",
+      "agentx",
+      "lifecycle events",
+      "Claude Code",
+      "Cursor",
+      "principal review",
+      "auto-recording"
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "2026-03-12T19-02-user-OxW4Ag",
+  "notes": "Medium session (242 entries) attributed to a generic 'user'. Three small shippable improvements. Tests the summarizer on heterogenous small work with an unfamiliar author signature.",
+  "reference": {
+    "title": "XML prime output, session liveness, agent list rename",
+    "summary": "Three small improvements to ox agent surfaces. First, continued the ox agent prime XML-output redesign by removing the CACHE BOUNDARY XML-comment block that was wasting agent context tokens. Second, added agent process liveness detection to ox session status by combining two sources — disk instance-store PID checks via kill(pid,0) and daemon heartbeats — and surfaced the result as process_alive and process_status fields in JSON, with a styled warning for dead agent processes in text mode. Third, renamed 'Active AI coworkers' to 'Active SageOx enriched agents' in ox agent list output to reduce ambiguity about what the list actually represents.",
+    "key_actions": [
+      "Removed CACHE BOUNDARY XML comment block from ox agent prime output",
+      "Added disk PID-check (kill(pid,0)) path for session liveness",
+      "Added daemon-heartbeat path for session liveness",
+      "Exposed process_alive and process_status fields in ox session status JSON",
+      "Added styled warning in text output when the agent process is dead",
+      "Renamed 'Active AI coworkers' to 'Active SageOx enriched agents' in ox agent list"
+    ],
+    "outcome": "success",
+    "aha_moments": [
+      {"seq": 1, "type": "question"},
+      {"seq": 80, "type": "insight"},
+      {"seq": 160, "type": "decision"}
+    ],
+    "topics_found": [
+      "ox agent prime",
+      "XML output",
+      "session liveness",
+      "process detection",
+      "ox agent list",
+      "copy changes"
+    ]
+  }
+}

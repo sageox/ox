@@ -1,0 +1,33 @@
+{
+  "name": "2026-03-22T09-47-rsnodgrass-Ox6fQF",
+  "notes": "Shorter continuation session (220 entries) — 'continue from where you left off' — that ends up shipping a large infrastructure feature. Tests summarizer when the first user message gives almost no information.",
+  "reference": {
+    "title": "Build whisper and murmur agent-communication infrastructure",
+    "summary": "Continued a prior design and landed the full whispering (system-to-agent) and murmuring (agent-to-agent via system) infrastructure across two phases. Phase 1 built WhisperStore (SQLite-backed, WAL-mode, auto-recovering), WhisperScheduler with periodic sources and a prune tick, WhisperRegistry, IPC handlers, the CLI delivery path via emitWhispers(), and ox doctor auto-fix for DB corruption. Phase 2 added the murmur pub/sub system: topic filtering, importance levels (critical/normal/ambient), attention thresholds, the ox murmur CLI, the MurmurRelay daemon component, and a temporal file layout with rolling 12-hour sparse checkout. The architectural decisions locked in during the session — SQLite over Dolt, two physical DBs (ledger- and team-scoped), voice-metaphor naming, and optional human-only principal identity for now — are called out explicitly. 25 files, 4,644 insertions pushed on ryan/whispering.",
+    "key_actions": [
+      "Implemented WhisperStore with SQLite, WAL mode, and auto-recovery",
+      "Built WhisperScheduler with periodic sources and prune tick",
+      "Added WhisperRegistry, IPC handlers, and CLI delivery via emitWhispers()",
+      "Wired ox doctor auto-fix for whisper DB corruption",
+      "Designed the murmur pub/sub with topics, importance levels, and attention thresholds",
+      "Built the MurmurRelay daemon component and ox murmur CLI command",
+      "Set up temporal file layout with rolling 12-hour sparse checkout",
+      "Pushed 25 files / 4,644 insertions on ryan/whispering"
+    ],
+    "outcome": "success",
+    "aha_moments": [
+      {"seq": 1, "type": "question"},
+      {"seq": 70, "type": "decision"},
+      {"seq": 150, "type": "synthesis"}
+    ],
+    "topics_found": [
+      "whisper",
+      "murmur",
+      "SQLite",
+      "pub/sub",
+      "IPC",
+      "daemon",
+      "sparse checkout"
+    ]
+  }
+}

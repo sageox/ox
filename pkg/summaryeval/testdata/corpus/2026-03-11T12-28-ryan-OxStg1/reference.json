@@ -1,0 +1,33 @@
+{
+  "name": "2026-03-11T12-28-ryan-OxStg1",
+  "notes": "Long architectural refactor (939 entries) moving daemon identity from per-worktree to per-repo. Good exercise for summarizer: the motivation (measured resource waste) is as important as the implementation.",
+  "reference": {
+    "title": "Collapse daemon-per-worktree into one daemon per repo",
+    "summary": "Measured and then fixed a real resource problem: 12 ox daemons were holding 185MB of RAM across what should have been two repos, because daemon identity was keyed off worktree path. Three parallel explore agents mapped every per-worktree assumption across config, IPC, sync, and registry. The fix rekeyed daemon identity to SHA256(repo_id), added a graceful stopLegacyDaemon migration for existing users, and taught the daemon about multiple clones via CallerID/CallerPath tracking so ox status and ox agent list still show the right context. Landed as PR #181 with 3 commits and 17 new tests.",
+    "key_actions": [
+      "Ran 3 parallel explore subagents to map per-worktree assumptions across config, IPC, sync, and registry",
+      "Measured live system footprint: 12 daemons, 185MB for 2 repos",
+      "Rekeyed daemon WorkspaceID from worktree path hash to repo_id hash",
+      "Added stopLegacyDaemon() migration to gracefully retire old path-based daemons",
+      "Added CallerID/CallerPath tracking so multi-clone users still get useful status",
+      "Improved ox status and ox agent list output for the shared-daemon world",
+      "Wrote 17 new tests covering identity, migration, and multi-caller flows",
+      "Opened PR #181 with 3 commits"
+    ],
+    "outcome": "success",
+    "aha_moments": [
+      {"seq": 1, "type": "question"},
+      {"seq": 110, "type": "insight"},
+      {"seq": 350, "type": "decision"},
+      {"seq": 700, "type": "synthesis"}
+    ],
+    "topics_found": [
+      "daemon architecture",
+      "repo_id identity",
+      "multi-clone",
+      "IPC",
+      "migration",
+      "resource footprint"
+    ]
+  }
+}

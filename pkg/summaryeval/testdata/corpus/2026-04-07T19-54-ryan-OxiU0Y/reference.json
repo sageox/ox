@@ -1,0 +1,31 @@
+{
+  "name": "2026-04-07T19-54-ryan-OxiU0Y",
+  "notes": "Medium session (230 entries) ending mid-implementation of a redesign. Good partial-outcome case; existing summary is a permission-blocked fragment, so this tests rescuing a failed summary.",
+  "reference": {
+    "title": "Fix capture-prior silently dropping tool calls",
+    "summary": "Root-caused a P1 data-loss bug where capture-prior — the path that reconstructs a session from a prior Claude Code conversation — was dropping every tool call and the bulk of assistant responses, leaving ledger entries without the most valuable content (file reads/writes, implementations, error recovery). The implementation iterated through three architectural designs driven by user feedback, landing on capture-prior as a proper adapter-protocol method (like import-session) so each coding-agent adapter owns its own session parsing. The session ended mid-implementation of that final redesign with 12,326 tests passing and zero lint issues, but the work isn't merged.",
+    "key_actions": [
+      "Diagnosed capture-prior as silently dropping tool calls and full assistant responses",
+      "Designed iteration 1: in-place fix inside capture-prior",
+      "Redesigned after user feedback: route through the adapter layer",
+      "Final design: capture-prior becomes an adapter-protocol method alongside import-session",
+      "Began implementing adapter-owned capture-prior in ox-adapter-claude",
+      "Held 12,326 tests green and 0 lint issues through the WIP"
+    ],
+    "outcome": "partial",
+    "aha_moments": [
+      {"seq": 1, "type": "question"},
+      {"seq": 44, "type": "question"},
+      {"seq": 52, "type": "question"},
+      {"seq": 120, "type": "synthesis"}
+    ],
+    "topics_found": [
+      "capture-prior",
+      "adapter protocol",
+      "ox-adapter-claude",
+      "session import",
+      "tool call capture",
+      "silent data loss"
+    ]
+  }
+}

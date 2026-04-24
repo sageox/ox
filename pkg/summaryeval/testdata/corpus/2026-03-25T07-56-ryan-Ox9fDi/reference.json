@@ -1,0 +1,31 @@
+{
+  "name": "2026-03-25T07-56-ryan-Ox9fDi",
+  "notes": "Medium UX-iteration session (375 entries) building a single CLI command through many small refinements. Useful for testing summarizer's handling of iterative UX work, which is easy to under-describe as 'built a command'.",
+  "reference": {
+    "title": "Ship ox teams with unified team discovery",
+    "summary": "Built the ox teams CLI command from scratch through heavy iterative UX refinement with the user. First pass was a verbose multi-line dump; the user pushed it through dense single-line, then into an aligned column layout (Name, ID, Slug, Sync) with lipgloss semantic colors and a --json flag. Along the way a real bug surfaced: team names were missing because the command fell back to filesystem-only data; the fix was to query the daemon first, with filesystem as a last resort. That in turn exposed four scattered team-discovery paths (daemon, local config, filesystem, project config), which were consolidated into a single team_discovery.go — fixing a separate bug where ox agent team-ctx sageox failed because slug resolution only saw filesystem data. Landed as PR #308.",
+    "key_actions": [
+      "Created ox teams with aligned columns, semantic colors, and --json output",
+      "Iterated UX through verbose, dense, and aligned-columns forms based on user feedback",
+      "Switched name resolution from filesystem-only to daemon-first lookup",
+      "Added slug and non-production endpoint display",
+      "Consolidated 4 team-discovery paths into a single team_discovery.go",
+      "Fixed ox agent team-ctx sageox failing due to slug-less filesystem data",
+      "Opened PR #308"
+    ],
+    "outcome": "success",
+    "aha_moments": [
+      {"seq": 1, "type": "question"},
+      {"seq": 60, "type": "decision"},
+      {"seq": 180, "type": "insight"}
+    ],
+    "topics_found": [
+      "ox teams",
+      "CLI UX",
+      "lipgloss",
+      "team discovery",
+      "daemon query",
+      "slug resolution"
+    ]
+  }
+}

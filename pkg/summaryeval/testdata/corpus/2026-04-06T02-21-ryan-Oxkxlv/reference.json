@@ -1,0 +1,32 @@
+{
+  "name": "2026-04-06T02-21-ryan-Oxkxlv",
+  "notes": "Long debugging session (564 entries) that fixed one bug and left a second one open. A good partial-outcome test case — and the existing summary.json is low quality (a permission-prompt fragment), so this specifically exercises improving a broken summary.",
+  "reference": {
+    "title": "Fix ox prime agent-ID reuse after /clear",
+    "summary": "Diagnosed and partially fixed a recording-loss bug where ox agent prime, when invoked from the Claude Code /clear hook, minted a fresh agent ID instead of reusing the existing one — orphaning the active session recording. Root cause: the hook subprocess lost SAGEOX_AGENT_ID across process boundaries. The fix landed three defense-in-depth changes: explicitly pass SAGEOX_AGENT_ID into the prime subprocess, add env-var and sole-active-recording fallbacks in runAgentPrime, and finalize the old session via stopSessionForClear before the new agent takes over. 7 regression tests added; the 12,198-test suite stayed green. A second related bug — sessions in the speaker repo showing stopped_at 2-9 seconds after start — was investigated but not resolved; the leading hypothesis (cross-agent session-marker collision) is documented for follow-up.",
+    "key_actions": [
+      "Traced the agent-ID regeneration path from /clear hook through prime subprocess",
+      "Passed SAGEOX_AGENT_ID through the hook-to-prime subprocess boundary",
+      "Added env-var and sole-active-recording fallbacks in runAgentPrime",
+      "Implemented stopSessionForClear to finalize the pre-/clear session",
+      "Wrote 7 regression tests covering the three defense layers",
+      "Investigated but did not resolve a second bug: premature stopped_at in the speaker repo",
+      "Documented cross-agent session-marker collision as the leading hypothesis for Bug 2"
+    ],
+    "outcome": "partial",
+    "aha_moments": [
+      {"seq": 1, "type": "question"},
+      {"seq": 70, "type": "insight"},
+      {"seq": 220, "type": "breakthrough"},
+      {"seq": 400, "type": "question"}
+    ],
+    "topics_found": [
+      "ox prime",
+      "agent ID",
+      "session recording",
+      "Claude /clear hook",
+      "regression tests",
+      "env var propagation"
+    ]
+  }
+}

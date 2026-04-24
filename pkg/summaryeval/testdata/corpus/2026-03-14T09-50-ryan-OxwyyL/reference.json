@@ -1,0 +1,32 @@
+{
+  "name": "2026-03-14T09-50-ryan-OxwyyL",
+  "notes": "Shorter dependency-upgrade session (184 entries) with a focused evaluation step before committing to the change. Tests summarizer on library-upgrade work — easy to trivialize as 'bumped a version'.",
+  "reference": {
+    "title": "Upgrade go-git v5 to v6 with regression tests",
+    "summary": "Evaluated go-git v6 across six areas of the ox codebase (codedb, two-phase clone, daemon sync, conflict detection, CLI writes, context cancellation) and picked codedb indexing as the clear win. Upgraded internal/codedb/index from v5 to v6, which let a 128-line extensionSafeStorer workaround and the plainOpenTolerant wrapper get deleted outright — both had existed only to work around v5 bugs that v6 fixes natively. Added 11 regression tests covering extension handling, blob hash consistency, tree iteration paths, bare repo resolution, and Hash semantics, and corrected existing tests that had baked-in wrong assumptions about format v1 extensions. Architectural decisions for keeping exec.Command in daemon sync and CLI writes (rather than going all-in on go-git) were documented. Landed as PR #233.",
+    "key_actions": [
+      "Evaluated go-git v6 value across 6 areas of the ox codebase",
+      "Upgraded internal/codedb/index imports and API from v5 to v6",
+      "Removed the 128-line extensionSafeStorer workaround",
+      "Simplified plainOpenTolerant to a direct PlainOpen",
+      "Added 11 regression tests covering v5-to-v6 behavioral differences",
+      "Fixed existing tests with wrong assumptions about format v1 extensions",
+      "Documented the decision to keep exec.Command in daemon sync and CLI writes",
+      "Opened PR #233"
+    ],
+    "outcome": "success",
+    "aha_moments": [
+      {"seq": 1, "type": "question"},
+      {"seq": 30, "type": "decision"},
+      {"seq": 100, "type": "insight"}
+    ],
+    "topics_found": [
+      "go-git",
+      "dependency upgrade",
+      "codedb",
+      "regression tests",
+      "extensionSafeStorer",
+      "format v1 extensions"
+    ]
+  }
+}
