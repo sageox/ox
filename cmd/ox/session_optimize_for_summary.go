@@ -14,13 +14,12 @@ import (
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/pkg/sessionpipeline"
 	"github.com/sageox/ox/pkg/tokenopt"
+	"github.com/sageox/ox/pkg/tokenstrip"
 )
 
 // tokenoptStage adapts pkg/tokenopt to the sessionpipeline.Stage shape.
-// Today this is the only pipeline stage; it runs as a one-element stage
-// list. When a streaming redactor (e.g. REDACT.md-driven LLM redactor)
-// lands, it implements the same Stage interface and joins the slice with
-// no changes to the runner or the call site below.
+// First stage in the pipeline: drops system entries, collapses tool
+// entries to compact tool_mark markers, keeps user+assistant verbatim.
 type tokenoptStage struct{}
 
 func (tokenoptStage) Name() string { return "tokenopt" }
@@ -34,6 +33,24 @@ func (tokenoptStage) Apply(ctx context.Context, r io.Reader, w io.Writer) (sessi
 	stats, err := tokenopt.Compress(r, w)
 	// tokenopt.Stats already implements slog.LogValuer, so it satisfies
 	// sessionpipeline.Stats directly.
+	return stats, err
+}
+
+// tokenstripStage adapts pkg/tokenstrip to the sessionpipeline.Stage shape.
+// Runs AFTER tokenopt: operates on the compressed stream tokenopt produced,
+// applying token-aware transforms (NFC normalization, zero-width strip,
+// whitespace canonicalization on assistant content; stop-word removal
+// + optional synonym substitution strictly inside <thinking> blocks).
+//
+// Enabled by default; opt-out via OX_SUMMARY_INPUT_TOKEN_STRIP=off. See
+// summaryInputTokenStripDisabled() for the gate.
+type tokenstripStage struct{}
+
+func (tokenstripStage) Name() string { return "tokenstrip" }
+
+func (tokenstripStage) Apply(ctx context.Context, r io.Reader, w io.Writer) (sessionpipeline.Stats, error) {
+	_ = ctx
+	stats, err := tokenstrip.Compress(r, w)
 	return stats, err
 }
 
@@ -58,6 +75,33 @@ const summaryInputOptimizeEnvVar = "OX_SUMMARY_INPUT_OPTIMIZE"
 // summaryInputOptimizeDisabled reports whether the env opt-out is engaged.
 func summaryInputOptimizeDisabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv(summaryInputOptimizeEnvVar))) {
+	case "off", "0", "false", "no":
+		return true
+	}
+	return false
+}
+
+// summaryInputTokenStripEnvVar is the opt-OUT knob for the tokenstrip
+// stage (NFC normalization, zero-width stripping, whitespace canon on
+// assistant content globally; stop-word + synonym substitution inside
+// <thinking> blocks only).
+//
+// tokenstrip is ENABLED by default — operators who want to disable it
+// set OX_SUMMARY_INPUT_TOKEN_STRIP=off. The sacred rules (user turns
+// and tool fields untouched; assistant prose outside <thinking> gets
+// only lossless transforms) are test-enforced, so shipping default-on
+// is a bounded-risk bet: any regression in summary quality can be
+// toggled off per operator without a rebuild.
+//
+// Values: "off", "0", "false", "no" → disable tokenstrip. Anything else
+// (including unset) → enable.
+const summaryInputTokenStripEnvVar = "OX_SUMMARY_INPUT_TOKEN_STRIP"
+
+// summaryInputTokenStripDisabled reports whether tokenstrip should be
+// skipped. Defaults to false (tokenstrip runs) unless the operator sets
+// the env var to an opt-out value.
+func summaryInputTokenStripDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(summaryInputTokenStripEnvVar))) {
 	case "off", "0", "false", "no":
 		return true
 	}
@@ -113,19 +157,29 @@ func writeOptimizedJSONLForSummary(rawPath, ledgerPath, sessionName string) stri
 		return ""
 	}
 
-	// Pipeline: one stage today (tokenopt), ordered slice tomorrow. Running
-	// even the single-stage case through sessionpipeline.Run exercises the
-	// composition seam, so the second stage (planned: REDACT.md-driven LLM
-	// redactor — bead ox-xtwf) lands as a slice append rather than a
-	// structural refactor.
+	// Pipeline composition. tokenopt always runs first (it drops system
+	// entries and collapses tools to compact markers). tokenstrip runs
+	// second when enabled — operates on tokenopt's output, applying
+	// token-aware transforms. Order matters: stripping stop words inside
+	// <thinking> blocks is cheaper AFTER tokenopt has already dropped
+	// all the tool output that doesn't have thinking blocks to begin
+	// with. Also planned: REDACT.md-driven LLM redactor (ox-xtwf) would
+	// slot between these or after tokenstrip depending on whether it
+	// needs token-clean input or assistant-only input.
 	stages := []sessionpipeline.Stage{tokenoptStage{}}
+	if !summaryInputTokenStripDisabled() {
+		stages = append(stages, tokenstripStage{})
+	}
 	stageResults, runErr := sessionpipeline.Run(context.Background(), in, out, stages)
 	if cerr := out.Close(); cerr != nil && runErr == nil {
 		runErr = cerr
 	}
 
-	// Recover tokenopt.Stats from the stage result for the sanity gate and
-	// telemetry. Today one stage == one stats struct.
+	// Recover tokenopt.Stats from the first stage result for the sanity
+	// gate and telemetry. The sanity gate checks invariants produced by
+	// tokenopt (EntriesIn - SystemDropped == EntriesOut); subsequent
+	// stages don't modify those invariants, so scoring from stage[0] is
+	// sufficient.
 	var stats tokenopt.Stats
 	if len(stageResults) > 0 && stageResults[0].Stats != nil {
 		if ts, ok := stageResults[0].Stats.(tokenopt.Stats); ok {
