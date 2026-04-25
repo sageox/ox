@@ -14,22 +14,60 @@ type ArtifactPaths struct {
 	SessionMD   string // session.md — full session transcript in markdown
 }
 
+// IsStubSummary reports whether resp is a stats-only LocalSummary stub
+// rather than a substantive LLM-generated summary or a deliberate
+// daemon-side failure marker. Stubs have no Title, no KeyActions, no
+// AhaMoments, no Diagrams, no SageoxInsights, no AgentSummary, AND no
+// ScoreReason — they're the silent-placeholder shape the heuristic
+// LocalSummary generator produces while the LLM path hasn't run yet.
+//
+// Detection is structural, not text-pattern-based, so a future change to
+// LocalSummary's wording wouldn't bypass this guard.
+//
+// ScoreReason is the load-bearing distinction from daemon validation-
+// failure stubs: those also lack structured fields, but the daemon
+// explicitly fills ScoreReason ("content validation failed: …",
+// "richness validation failed: …") to mark the stub as a deliberate
+// failure artifact that MUST be persisted so teammates see the failure
+// in the ledger rather than a missing file.
+func IsStubSummary(resp *SummarizeResponse) bool {
+	if resp == nil {
+		return true
+	}
+	if resp.ScoreReason != "" {
+		return false
+	}
+	return resp.Title == "" &&
+		len(resp.KeyActions) == 0 &&
+		len(resp.AhaMoments) == 0 &&
+		len(resp.Diagrams) == 0 &&
+		len(resp.SageoxInsights) == 0 &&
+		resp.AgentSummary == nil
+}
+
 // WriteSessionArtifacts generates the standard set of session artifacts from
 // a stored session and summary response. Both the CLI stop path and daemon
 // anti-entropy finalization call this to ensure identical output.
 //
-// The summaryResp may come from LocalSummary (stats-only) or LLM (rich).
-// Either way, the same 3 files are produced.
+// When summaryResp is a stats-only LocalSummary stub (see IsStubSummary),
+// summary.json and summary.md are NOT written — leaving them absent signals
+// to push-summary / daemon anti-entropy that a real LLM summary still owes.
+// Persisting the stub on disk was the ox-0pxt fingerprint: galexy-account
+// sessions shipped with "N user messages, N assistant responses" because the
+// stub got committed to the ledger before the LLM path ran. session.md is
+// still emitted (it's the raw transcript, always useful).
 func WriteSessionArtifacts(sessionDir string, stored *StoredSession, summaryResp *SummarizeResponse) (*ArtifactPaths, error) {
 	paths := &ArtifactPaths{}
 
+	writeSummary := summaryResp != nil && !IsStubSummary(summaryResp)
+
 	// --- enrich summary.json with computed fields (files_changed, chapters) ---
-	if summaryResp != nil && stored != nil {
+	if writeSummary && stored != nil {
 		EnrichSummary(stored, summaryResp)
 	}
 
 	// --- summary.json ---
-	if summaryResp != nil {
+	if writeSummary {
 		summaryJSONPath := filepath.Join(sessionDir, "summary.json")
 		summaryJSON, err := json.MarshalIndent(summaryResp, "", "  ")
 		if err != nil {
@@ -42,7 +80,7 @@ func WriteSessionArtifacts(sessionDir string, stored *StoredSession, summaryResp
 	}
 
 	// --- summary.md (structured markdown from SummarizeResponse) ---
-	if summaryResp != nil {
+	if writeSummary {
 		summaryMDPath := filepath.Join(sessionDir, "summary.md")
 		summaryView := SummarizeResponseToSummaryView(summaryResp)
 		gen := NewSummaryMarkdownGenerator()
