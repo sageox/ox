@@ -286,9 +286,20 @@ func regenerateSingleSessionSummary(nameArg string) error {
 		return fmt.Errorf("session %s has no entries", sessionName)
 	}
 
+	// Mirror the live `ox session stop` path: tokenopt-compress raw.jsonl
+	// into the ledger cache before building the prompt. ConversationOnly
+	// keeps user+assistant turns verbatim, compacts tool entries, drops
+	// system entries — typically 50-80% smaller. Without this, large
+	// sessions (>100k tokens) can blow Claude's context on regenerate.
+	// Falls back to rawPath on any failure (helper returns "").
+	summaryInputPath := writeOptimizedJSONLForSummary(rawPath, ledgerPath, sessionName)
+	if summaryInputPath == "" {
+		summaryInputPath = rawPath
+	}
+
 	// build summary prompt using shared template
 	entries := sessionsummary.EntriesFromRaw(rawSession.Entries)
-	prompt := sessionsummary.BuildSummaryPrompt(entries, rawPath, "")
+	prompt := sessionsummary.BuildSummaryPrompt(entries, summaryInputPath, "")
 
 	cli.PrintInfo(fmt.Sprintf("Generating summary for %s...", sessionName))
 
@@ -300,6 +311,28 @@ func regenerateSingleSessionSummary(nameArg string) error {
 	summaryResp, err := sessionsummary.ParseSummaryJSON(resultText)
 	if err != nil {
 		return fmt.Errorf("parse summary from claude output: %w", err)
+	}
+
+	// Mirror the daemon path's content + richness gates. Both REPLACE the
+	// parsed response with a failure-marker stub on validation failure so
+	// the bad summary doesn't get persisted as the teammate-visible
+	// artifact. ScoreReason is set so internal/session.IsStubSummary
+	// recognizes these as deliberate failure markers (which DO get
+	// written) rather than silent LocalSummary stubs (which don't).
+	if valErr := sessionsummary.ValidateSummaryContent(summaryResp); valErr != nil {
+		cli.PrintWarning(fmt.Sprintf("content validation failed for %s: %v", sessionName, valErr))
+		summaryResp = &sessionsummary.SummarizeResponse{
+			Summary:      fmt.Sprintf("Summary failed content validation: %v", valErr),
+			QualityScore: 0.0,
+			ScoreReason:  fmt.Sprintf("content validation failed: %v", valErr),
+		}
+	} else if richErr := sessionsummary.ValidateSummaryRichness(summaryResp, len(rawSession.Entries)); richErr != nil {
+		cli.PrintWarning(fmt.Sprintf("richness validation failed for %s: %v", sessionName, richErr))
+		summaryResp = &sessionsummary.SummarizeResponse{
+			Summary:      fmt.Sprintf("Summary failed richness validation: %v", richErr),
+			QualityScore: 0.0,
+			ScoreReason:  fmt.Sprintf("richness validation failed: %v", richErr),
+		}
 	}
 
 	// enrich with computed fields (files_changed, chapters) before writing
