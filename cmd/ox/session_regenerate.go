@@ -238,6 +238,37 @@ func needsHydration(rawPath string) bool {
 	return lfs.IsPointerFile(rawPath)
 }
 
+// applyValidationGates runs ValidateSummaryContent then ValidateSummaryRichness.
+// On any failure it REPLACES the response with a failure-marker stub
+// (ScoreReason set, so internal/session.IsStubSummary recognizes it as
+// a deliberate failure artifact that DOES get persisted, distinct from a
+// silent LocalSummary stub which doesn't).
+//
+// This mirrors the daemon's session-finalize path so regenerate produces
+// the same teammate-visible failure semantics — no silent regression to
+// thin summaries when the LLM under-fills the prompt schema.
+//
+// Returns the (possibly replaced) response and a short human-readable
+// message ("" when validation passed). The caller decides what to do
+// with the message — log, print, or ignore.
+func applyValidationGates(resp *sessionsummary.SummarizeResponse, entryCount int) (*sessionsummary.SummarizeResponse, string) {
+	if valErr := sessionsummary.ValidateSummaryContent(resp); valErr != nil {
+		return &sessionsummary.SummarizeResponse{
+			Summary:      fmt.Sprintf("Summary failed content validation: %v", valErr),
+			QualityScore: 0.0,
+			ScoreReason:  fmt.Sprintf("content validation failed: %v", valErr),
+		}, fmt.Sprintf("content validation failed: %v", valErr)
+	}
+	if richErr := sessionsummary.ValidateSummaryRichness(resp, entryCount); richErr != nil {
+		return &sessionsummary.SummarizeResponse{
+			Summary:      fmt.Sprintf("Summary failed richness validation: %v", richErr),
+			QualityScore: 0.0,
+			ScoreReason:  fmt.Sprintf("richness validation failed: %v", richErr),
+		}, fmt.Sprintf("richness validation failed: %v", richErr)
+	}
+	return resp, ""
+}
+
 // --- Summary regeneration (--summary) ---
 
 // regenerateSingleSessionSummary re-generates summary.json for a session by
@@ -313,27 +344,12 @@ func regenerateSingleSessionSummary(nameArg string) error {
 		return fmt.Errorf("parse summary from claude output: %w", err)
 	}
 
-	// Mirror the daemon path's content + richness gates. Both REPLACE the
-	// parsed response with a failure-marker stub on validation failure so
-	// the bad summary doesn't get persisted as the teammate-visible
-	// artifact. ScoreReason is set so internal/session.IsStubSummary
-	// recognizes these as deliberate failure markers (which DO get
-	// written) rather than silent LocalSummary stubs (which don't).
-	if valErr := sessionsummary.ValidateSummaryContent(summaryResp); valErr != nil {
-		cli.PrintWarning(fmt.Sprintf("content validation failed for %s: %v", sessionName, valErr))
-		summaryResp = &sessionsummary.SummarizeResponse{
-			Summary:      fmt.Sprintf("Summary failed content validation: %v", valErr),
-			QualityScore: 0.0,
-			ScoreReason:  fmt.Sprintf("content validation failed: %v", valErr),
-		}
-	} else if richErr := sessionsummary.ValidateSummaryRichness(summaryResp, len(rawSession.Entries)); richErr != nil {
-		cli.PrintWarning(fmt.Sprintf("richness validation failed for %s: %v", sessionName, richErr))
-		summaryResp = &sessionsummary.SummarizeResponse{
-			Summary:      fmt.Sprintf("Summary failed richness validation: %v", richErr),
-			QualityScore: 0.0,
-			ScoreReason:  fmt.Sprintf("richness validation failed: %v", richErr),
-		}
+	// Mirror the daemon path's content + richness gates.
+	gated, gateMsg := applyValidationGates(summaryResp, len(rawSession.Entries))
+	if gateMsg != "" {
+		cli.PrintWarning(fmt.Sprintf("%s for %s", gateMsg, sessionName))
 	}
+	summaryResp = gated
 
 	// enrich with computed fields (files_changed, chapters) before writing
 	session.EnrichSummary(rawSession, summaryResp)
