@@ -266,6 +266,58 @@ func CheckHydrationStatusWithCache(sessionPath, cachePath string, meta *SessionM
 	}
 }
 
+// ResolveContentPath returns a path that holds REAL session content (not an
+// LFS pointer stub) for filename, choosing in this order:
+//
+//  1. cacheDir/filename — the canonical hydrated location for content owned
+//     by other team members. Cache files are full content by definition.
+//  2. sessionDir/filename — only when it exists as real content (not a
+//     pointer). This case applies to a coworker's own freshly-recorded
+//     session before LFS upload; for any session synced from the ledger,
+//     the in-place file MUST be a pointer.
+//
+// Returns "" when neither location has hydrated content (caller must hydrate).
+//
+// # CACHE-ONLY DESIGN — DO NOT WRITE TO sessionDir/filename
+//
+// This resolver enforces a load-bearing invariant: the in-place git-tracked
+// file MUST stay as an LFS pointer for any session synced from the ledger.
+// The cache is where hydrated content lives. Two failure modes if this
+// invariant is broken:
+//
+//   - commitAndPushLedger globs *.jsonl/*.html/*.md inside the session dir
+//     and stages whatever is there. A hydrated in-place raw.jsonl gets
+//     committed as a regular git blob, replacing the LFS pointer reference
+//     and breaking LFS linkage. The ledger then rejects future pushes for
+//     any session whose meta.json references the now-orphaned OID.
+//
+//   - The daemon's session-finalize anti-entropy skips sessions whose
+//     raw.jsonl IS a pointer (internal/daemon/agentwork/session_finalize.go).
+//     When in-place is full content, the skip doesn't apply and the daemon
+//     can re-finalize already-finalized sessions, racing with concurrent
+//     regen and clobbering good summaries with failure-marker stubs.
+//
+// Both failures were observed in the 2026-04-25 Phase 2 regen:
+// 31 of 71 sessions had their summaries clobbered, 2 had raw.jsonl
+// committed as full git blobs. See bd ox-4ncz for the post-mortem.
+//
+// All readers (regenerate, view, lint, token-optimize) MUST consult this
+// resolver. Hydration paths (downloadFileFromLFS, hydrateFromLedger) MUST
+// write only to cacheDir.
+func ResolveContentPath(sessionDir, cacheDir, filename string) string {
+	if cacheDir != "" {
+		cachePath := filepath.Join(cacheDir, filename)
+		if info, err := os.Stat(cachePath); err == nil && info.Size() > 0 {
+			return cachePath
+		}
+	}
+	inPlace := filepath.Join(sessionDir, filename)
+	if info, err := os.Stat(inPlace); err == nil && info.Size() > 0 && !IsPointerFile(inPlace) {
+		return inPlace
+	}
+	return ""
+}
+
 // NewFileRef creates a FileRef from content bytes.
 func NewFileRef(content []byte) FileRef {
 	return FileRef{

@@ -223,20 +223,69 @@ func syncRegeneratedSession(projectRoot, sessionPath, sessionName string) error 
 	return nil
 }
 
-// needsHydration reports whether the file at rawPath is missing OR is an
-// LFS pointer stub rather than the real session bytes. Both cases require
-// a Batch API fetch before the file can be read as session content.
+// hasSubstantiveTurns reports whether the session has at least one user OR
+// assistant turn. A session with only header/system entries (e.g., a
+// recording that never proceeded past "Loaded coworker: <name>") has nothing
+// for the summarizer to work on. Without this preflight the LLM either
+// refuses ("there's nothing to summarize"), narrates the absence, or
+// fabricates content — all three produce validation-failing output that
+// gets persisted as a failure-marker stub on the ledger. Cleaner to fail
+// fast with a clear error.
 //
-// The os.Stat-only check this replaced silently passed for LFS stubs:
-// pointer files exist on disk (~140 bytes of "version https://..." text)
-// so existence-only gating skipped the download and the next
-// ReadSessionFromPath failed parsing pointer bytes as JSONL. This was
-// the bug that blocked Phase 2 of the 71-session richness regen.
-func needsHydration(rawPath string) bool {
-	if _, err := os.Stat(rawPath); err != nil {
-		return true
+// Filed as bd ox-o45g.
+func hasSubstantiveTurns(entries []map[string]any) bool {
+	for _, e := range entries {
+		t, _ := e["type"].(string)
+		if t == "user" || t == "assistant" {
+			return true
+		}
 	}
-	return lfs.IsPointerFile(rawPath)
+	return false
+}
+
+// resolveHydratedRawPath returns the path to a fully-hydrated raw.jsonl for
+// the given session, hydrating into the ledger cache if necessary. The
+// returned path may be EITHER:
+//
+//   - <ledger>/.sageox/cache/sessions/<name>/raw.jsonl  (preferred — cache)
+//   - <ledger>/sessions/<name>/raw.jsonl                (only if it's
+//     already real content, not a pointer; case applies to a coworker's
+//     own freshly-recorded session before LFS upload)
+//
+// # CACHE-ONLY DESIGN — we MUST NOT write hydrated bytes to the in-place path
+//
+// Hydration goes to the cache, never in-place. Two failure modes if hydrated
+// content lands at <ledger>/sessions/<name>/raw.jsonl:
+//
+//  1. commitAndPushLedger globs *.jsonl in the session dir and `git add`s
+//     it — committing full content as a regular blob and breaking the LFS
+//     pointer reference. Future pushes referencing the orphaned OID fail.
+//
+//  2. The daemon's session-finalize anti-entropy skips sessions whose raw.jsonl
+//     IS a pointer (session_finalize.go:306). When in-place is full content,
+//     the skip doesn't apply, the daemon can re-finalize already-finalized
+//     sessions, race with concurrent regen, and clobber good summaries with
+//     failure-marker stubs.
+//
+// Both observed in the 2026-04-25 Phase 2 batch — see bd ox-4ncz.
+func resolveHydratedRawPath(projectRoot, ledgerPath, sessionPath, sessionName string) (string, error) {
+	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
+
+	if p := lfs.ResolveContentPath(sessionPath, cacheDir, ledgerFileRaw); p != "" {
+		return p, nil
+	}
+
+	// Need to hydrate. Use the cache-only download path. Never write
+	// hydrated content to sessionPath/raw.jsonl — see top-of-function comment.
+	sessionsDir := filepath.Dir(sessionPath)
+	if err := hydrateFromLedger(projectRoot, sessionsDir, sessionName, true /*quiet*/); err != nil {
+		return "", fmt.Errorf("hydrate %s: %w", sessionName, err)
+	}
+
+	if p := lfs.ResolveContentPath(sessionPath, cacheDir, ledgerFileRaw); p != "" {
+		return p, nil
+	}
+	return "", fmt.Errorf("hydration completed but content still not resolvable for %s", sessionName)
 }
 
 // --- Summary regeneration (--summary) ---
@@ -264,18 +313,12 @@ func regenerateSingleSessionSummary(nameArg string) error {
 	}
 
 	sessionPath := filepath.Join(sessionsDir, sessionName)
-	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 
-	// ensure raw.jsonl is hydrated locally — missing OR an LFS stub means
-	// we need to fetch the real bytes via the Batch API.
-	if needsHydration(rawPath) {
-		meta, metaErr := lfs.ReadSessionMeta(sessionPath)
-		if metaErr != nil {
-			return fmt.Errorf("read meta.json for %s: %w", sessionName, metaErr)
-		}
-		if dlErr := downloadFileFromLFS(projectRoot, sessionPath, meta, ledgerFileRaw); dlErr != nil {
-			return fmt.Errorf("download %s for %s: %w", ledgerFileRaw, sessionName, dlErr)
-		}
+	// Resolve a hydrated raw.jsonl path — cache preferred, never in-place
+	// hydration. See resolveHydratedRawPath for the cache-only contract.
+	rawPath, err := resolveHydratedRawPath(projectRoot, ledgerPath, sessionPath, sessionName)
+	if err != nil {
+		return err
 	}
 
 	rawSession, err := session.ReadSessionFromPath(rawPath)
@@ -283,8 +326,11 @@ func regenerateSingleSessionSummary(nameArg string) error {
 		return fmt.Errorf("read raw.jsonl: %w", err)
 	}
 
-	if len(rawSession.Entries) == 0 {
-		return fmt.Errorf("session %s has no entries", sessionName)
+	if !hasSubstantiveTurns(rawSession.Entries) {
+		// ox-o45g: skip sessions with no user/assistant turns. The LLM has
+		// nothing to summarize and would either refuse, narrate, or generate
+		// fabricated content. Surface as a clean exit, not an LLM call.
+		return fmt.Errorf("session %s has no substantive user/assistant turns; nothing to summarize", sessionName)
 	}
 
 	// Mirror the live `ox session stop` path: tokenopt-compress raw.jsonl
@@ -554,9 +600,22 @@ func regenerateSessionRedact(projectRoot, ledgerPath, sessionsDir, nameArg strin
 		return nil, fmt.Errorf("read meta.json for %s: %w", sessionName, err)
 	}
 
-	// ensure raw.jsonl is hydrated locally
+	// ensure raw.jsonl is hydrated locally.
+	//
+	// Note: --redact MUST hydrate in-place (unlike --summary which uses the
+	// cache resolver). Redaction is a controlled overwrite-and-reupload
+	// cycle: we replace the in-place file with redacted bytes, compute a
+	// new OID, re-upload the new content to LFS, then commit a fresh
+	// pointer with the new OID. Reading from the cache wouldn't work — the
+	// downstream commit needs to write a NEW pointer to the in-place path.
 	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
-	if needsHydration(rawPath) {
+	needHydrate := false
+	if _, err := os.Stat(rawPath); err != nil {
+		needHydrate = true
+	} else if lfs.IsPointerFile(rawPath) {
+		needHydrate = true
+	}
+	if needHydrate {
 		if err := downloadFileFromLFS(projectRoot, sessionPath, meta, ledgerFileRaw); err != nil {
 			return nil, fmt.Errorf("download %s for %s: %w", ledgerFileRaw, sessionName, err)
 		}

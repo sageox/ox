@@ -30,7 +30,13 @@ func InvokeClaude(ctx context.Context, prompt, workDir string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, invokeTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, claudePath, "--output-format", "stream-json", "--verbose", "-p", prompt)
+	// --permission-mode bypassPermissions: in `-p` non-interactive mode there
+	// is no human to approve any tool gated on a permission prompt, so the
+	// LLM stalls and narrates the block instead of doing the work.
+	// Summary regen has tightly-scoped writes (one /tmp file + one
+	// `ox session push-summary` exec) — the permission prompt adds no
+	// safety in this context, only failure modes. Filed as bd ox-5cc9.
+	cmd := exec.CommandContext(ctx, claudePath, "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "-p", prompt)
 	if workDir != "" {
 		cmd.Dir = workDir
 	}

@@ -645,6 +645,27 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		return h.processUploadOnly(payload)
 	}
 
+	// Re-verify the precondition at processing time.
+	//
+	// The Detect() snapshot is taken on a periodic timer; ProcessResult runs
+	// asynchronously, sometimes 30+ seconds later. In that window another
+	// path (CLI `ox session regenerate`, `ox session push-summary`, or a
+	// concurrent finalize) may have already produced the missing artifacts.
+	// Without re-verification, the daemon races and overwrites a freshly-
+	// produced good summary with whatever its LLM call returned (often a
+	// permission-prompt narration that fails validation, persisting a
+	// failure-marker stub on the ledger).
+	//
+	// Observed 2026-04-25 Phase 2: 31 of 71 freshly regen'd summaries got
+	// clobbered ~30s after the regen commits. Filed as bd ox-91sl.
+	sessionName := filepath.Base(payload.SessionDir)
+	if h.workNoLongerNeeded(payload.SessionDir) {
+		h.logger.Info("session no longer needs finalization, skipping (work landed via another path)",
+			"session", sessionName,
+		)
+		return nil
+	}
+
 	llmOutput := result.Output
 
 	// non-zero exit = summarization failed; don't trust the output at all
@@ -733,7 +754,7 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		}
 	}
 
-	sessionName := filepath.Base(payload.SessionDir)
+	// sessionName already computed above for the workNoLongerNeeded check.
 
 	// Optional LLM-as-judge quality scoring. Runs only when
 	// OX_SUMMARY_JUDGE=on is set AND a judge completer is configured on
@@ -1249,6 +1270,46 @@ func missingArtifacts(sessionDir string) []string {
 		}
 	}
 	return missing
+}
+
+// workNoLongerNeeded reports whether a session that was previously enqueued
+// for finalization no longer needs the work — typically because a concurrent
+// path (CLI regenerate / push-summary / a prior finalize) already wrote the
+// artifacts. Re-checks the same predicates Detect() uses so the answers
+// stay consistent.
+//
+// Returns true ONLY when ALL of the following hold:
+//   - All required artifacts exist (no missing)
+//   - No .needs-summary marker
+//   - The on-disk summary.json has substantive content (not a failure-
+//     marker stub from an earlier round we'd just overwrite again)
+//
+// The substantive-summary check uses internal/session.IsStubSummary's
+// inverse: a daemon failure-marker stub has ScoreReason set, which
+// IsStubSummary considers "not a stub" — but we want to RE-finalize those
+// because they're known-bad. So we explicitly look for non-empty Title.
+func (h *SessionFinalizeHandler) workNoLongerNeeded(sessionDir string) bool {
+	if len(missingArtifacts(sessionDir)) > 0 {
+		return false
+	}
+	if session.HasNeedsSummaryMarker(sessionDir) {
+		return false
+	}
+	// Read summary.json; if it has a non-empty title, treat the work as
+	// done. An empty-title summary indicates either a never-finalized
+	// session (impossible at this point — missingArtifacts would have
+	// caught it) or a daemon failure-marker stub that should be redone.
+	data, err := os.ReadFile(filepath.Join(sessionDir, "summary.json"))
+	if err != nil {
+		return false
+	}
+	var head struct {
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(data, &head); err != nil {
+		return false
+	}
+	return strings.TrimSpace(head.Title) != ""
 }
 
 // convertStoredEntries converts []map[string]any from StoredSession to []session.Entry.

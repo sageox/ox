@@ -82,7 +82,13 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	args := []string{"--output-format", "stream-json", "--verbose", "-p", req.Prompt}
+	// --permission-mode bypassPermissions: see the equivalent comment in
+	// pkg/sessionsummary/claude.go. The daemon ALSO runs claude in `-p`
+	// mode for session summarization; without this flag the LLM hits a
+	// permission prompt and produces narration that fails validation,
+	// resulting in the failure-marker-stub output that clobbered 31
+	// Phase 2 sessions on 2026-04-25 (bd ox-5cc9, ox-91sl).
+	args := []string{"--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "-p", req.Prompt}
 
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	if req.WorkDir != "" {
