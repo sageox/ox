@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/lfs"
@@ -238,37 +239,6 @@ func needsHydration(rawPath string) bool {
 	return lfs.IsPointerFile(rawPath)
 }
 
-// applyValidationGates runs ValidateSummaryContent then ValidateSummaryRichness.
-// On any failure it REPLACES the response with a failure-marker stub
-// (ScoreReason set, so internal/session.IsStubSummary recognizes it as
-// a deliberate failure artifact that DOES get persisted, distinct from a
-// silent LocalSummary stub which doesn't).
-//
-// This mirrors the daemon's session-finalize path so regenerate produces
-// the same teammate-visible failure semantics — no silent regression to
-// thin summaries when the LLM under-fills the prompt schema.
-//
-// Returns the (possibly replaced) response and a short human-readable
-// message ("" when validation passed). The caller decides what to do
-// with the message — log, print, or ignore.
-func applyValidationGates(resp *sessionsummary.SummarizeResponse, entryCount int) (*sessionsummary.SummarizeResponse, string) {
-	if valErr := sessionsummary.ValidateSummaryContent(resp); valErr != nil {
-		return &sessionsummary.SummarizeResponse{
-			Summary:      fmt.Sprintf("Summary failed content validation: %v", valErr),
-			QualityScore: 0.0,
-			ScoreReason:  fmt.Sprintf("content validation failed: %v", valErr),
-		}, fmt.Sprintf("content validation failed: %v", valErr)
-	}
-	if richErr := sessionsummary.ValidateSummaryRichness(resp, entryCount); richErr != nil {
-		return &sessionsummary.SummarizeResponse{
-			Summary:      fmt.Sprintf("Summary failed richness validation: %v", richErr),
-			QualityScore: 0.0,
-			ScoreReason:  fmt.Sprintf("richness validation failed: %v", richErr),
-		}, fmt.Sprintf("richness validation failed: %v", richErr)
-	}
-	return resp, ""
-}
-
 // --- Summary regeneration (--summary) ---
 
 // regenerateSingleSessionSummary re-generates summary.json for a session by
@@ -328,52 +298,51 @@ func regenerateSingleSessionSummary(nameArg string) error {
 		summaryInputPath = rawPath
 	}
 
-	// build summary prompt using shared template
+	// Build the prompt with sessionPath as ledgerSessionDir so the LLM is
+	// instructed to run `ox session push-summary` itself once it's saved
+	// the JSON. push-summary handles validation (content + richness),
+	// summary.json write, meta.json title update, git add/commit/push.
+	//
+	// Why delegate to push-summary instead of parsing inline JSON: the
+	// shared prompt template tells the LLM to *save* the JSON to a temp
+	// file, not return it inline. In Claude Code's `-p` non-interactive
+	// mode the result text is prose narration of the work, not the JSON.
+	// Trying to ParseSummaryJSON from that prose fails (we tried — both
+	// sessions in the Phase 2 driver failed identically with "no valid
+	// summary JSON found in LLM output"). Routing through push-summary
+	// gets us the same path the rest of the system already trusts.
+	summaryPathBefore := filepath.Join(sessionPath, "summary.json")
+	mtimeBefore := fileMtime(summaryPathBefore)
+
 	entries := sessionsummary.EntriesFromRaw(rawSession.Entries)
-	prompt := sessionsummary.BuildSummaryPrompt(entries, summaryInputPath, "")
+	prompt := sessionsummary.BuildSummaryPrompt(entries, summaryInputPath, sessionPath)
 
 	cli.PrintInfo(fmt.Sprintf("Generating summary for %s...", sessionName))
 
-	resultText, err := sessionsummary.InvokeClaude(context.Background(), prompt, sessionPath)
-	if err != nil {
+	if _, err := sessionsummary.InvokeClaude(context.Background(), prompt, sessionPath); err != nil {
 		return fmt.Errorf("claude invocation: %w", err)
 	}
 
-	summaryResp, err := sessionsummary.ParseSummaryJSON(resultText)
+	// Verify push-summary actually wrote a fresh summary.json. If the LLM
+	// silently failed to save / push, mtime won't have advanced and we'd
+	// be regenerating downstream artifacts from stale content.
+	mtimeAfter := fileMtime(summaryPathBefore)
+	if mtimeAfter.IsZero() {
+		return fmt.Errorf("summary.json missing after claude run — push-summary did not complete for %s", sessionName)
+	}
+	if !mtimeBefore.IsZero() && !mtimeAfter.After(mtimeBefore) {
+		return fmt.Errorf("summary.json not refreshed for %s — push-summary may have rejected the LLM output (check validation logs)", sessionName)
+	}
+
+	// Read the just-written summary so we can regenerate downstream
+	// artifacts (summary.md, session.md) and report the quality score.
+	freshData, err := os.ReadFile(summaryPathBefore)
 	if err != nil {
-		return fmt.Errorf("parse summary from claude output: %w", err)
+		return fmt.Errorf("read fresh summary.json for %s: %w", sessionName, err)
 	}
-
-	// Mirror the daemon path's content + richness gates.
-	gated, gateMsg := applyValidationGates(summaryResp, len(rawSession.Entries))
-	if gateMsg != "" {
-		cli.PrintWarning(fmt.Sprintf("%s for %s", gateMsg, sessionName))
-	}
-	summaryResp = gated
-
-	// enrich with computed fields (files_changed, chapters) before writing
-	session.EnrichSummary(rawSession, summaryResp)
-
-	// write summary.json atomically
-	summaryData, err := json.MarshalIndent(summaryResp, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal summary: %w", err)
-	}
-
-	summaryPath := filepath.Join(sessionPath, "summary.json")
-	tmpPath := summaryPath + ".tmp"
-	if err := os.WriteFile(tmpPath, summaryData, 0644); err != nil {
-		return fmt.Errorf("write summary: %w", err)
-	}
-	if err := os.Rename(tmpPath, summaryPath); err != nil {
-		return fmt.Errorf("rename summary: %w", err)
-	}
-
-	// update meta.json title from new summary
-	if summaryResp.Title != "" {
-		if err := lfs.UpdateMetaSummary(sessionPath, summaryResp.Title); err != nil {
-			slog.Debug("update meta.json summary", "error", err)
-		}
+	var freshSummary sessionsummary.SummarizeResponse
+	if err := json.Unmarshal(freshData, &freshSummary); err != nil {
+		return fmt.Errorf("parse fresh summary.json for %s: %w", sessionName, err)
 	}
 
 	// regenerate downstream artifacts (summary.md, session.md)
@@ -381,17 +350,25 @@ func regenerateSingleSessionSummary(nameArg string) error {
 		slog.Warn("artifact regeneration partially failed", "session", sessionName, "error", err)
 	}
 
-	// upload to LFS and push to ledger
-	if _, lfsErr := uploadSessionLFS(projectRoot, sessionPath); lfsErr != nil {
-		slog.Warn("LFS upload skipped", "session", sessionName, "error", lfsErr)
-	}
-
+	// push-summary already ran git add/commit/push for summary.json +
+	// meta.json, but not for the regenerated .md files. Stage them too.
 	if err := commitAndPushLedger(ledgerPath, sessionName); err != nil {
-		slog.Warn("ledger push skipped", "error", err)
+		slog.Warn("md-artifact ledger push skipped", "error", err)
 	}
 
-	cli.PrintSuccess(fmt.Sprintf("Regenerated summary for %s (quality: %.2f)", sessionName, summaryResp.QualityScore))
+	cli.PrintSuccess(fmt.Sprintf("Regenerated summary for %s (quality: %.2f)", sessionName, freshSummary.QualityScore))
 	return nil
+}
+
+// fileMtime returns the mtime of path or the zero time if the file doesn't
+// exist. Used to detect "did this file get rewritten" without needing a
+// content diff.
+func fileMtime(path string) time.Time {
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
 }
 
 // --- Redaction mode (--redact) ---
