@@ -129,9 +129,14 @@ func hydrateFromLedger(projectRoot, sessionsDir, nameArg string, quiet bool) err
 			continue
 		}
 
-		// skip if present in-place as real content (legacy hydration)
+		// skip if present in-place as real content (legacy hydration).
+		// Size > 0 guard handles the corruption case where an earlier ox
+		// bug committed a 0-byte regular blob to the ledger (raw.jsonl
+		// references a real LFS OID in meta.json but the in-place file
+		// is empty). Without this, we'd treat the empty stub as content
+		// and skip download, leaving the resolver to return "" forever.
 		inPlacePath := filepath.Join(sessionPath, filename)
-		if _, err := os.Stat(inPlacePath); err == nil && !lfs.IsPointerFile(inPlacePath) {
+		if info, err := os.Stat(inPlacePath); err == nil && info.Size() > 0 && !lfs.IsPointerFile(inPlacePath) {
 			slog.Debug("hydrate: in-place content", "file", filename, "path", inPlacePath)
 			continue
 		}
