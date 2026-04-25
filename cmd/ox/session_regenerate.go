@@ -112,7 +112,12 @@ func regenerateSingleSessionArtifacts(store *session.Store, projectRoot, name st
 		return fmt.Errorf("session %q: %w\nRun 'ox session list' to see available sessions", name, err)
 	}
 
-	sessionPath := store.GetSessionPath(sessionName)
+	// Resolve the artifact-write path. For sessions authored locally,
+	// store.GetSessionPath returns the local managed-store path. For
+	// sessions authored by other team members and synced via the ledger,
+	// that path doesn't exist on this machine — write directly to the
+	// ledger sessions/<name>/ path instead, matching the --summary path.
+	sessionPath := artifactWriteDir(store, sessionName)
 	if err := regenerateSessionArtifacts(storedSession, sessionPath); err != nil {
 		return err
 	}
@@ -123,6 +128,33 @@ func regenerateSingleSessionArtifacts(store *session.Store, projectRoot, name st
 
 	cli.PrintSuccess(fmt.Sprintf("Regenerated artifacts for %s", sessionName))
 	return nil
+}
+
+// artifactWriteDir returns the directory where regenerated .md artifacts
+// should be written for a session. Locally-authored sessions live in the
+// project's managed store; team-uploaded sessions only exist in the ledger.
+//
+// We prefer the local managed-store path when it exists (so an in-progress
+// recording's artifacts stay co-located with raw.jsonl). Otherwise we fall
+// back to the ledger sessions/<name>/ directory, which is where any
+// team-synced session lives.
+func artifactWriteDir(store *session.Store, sessionName string) string {
+	if store != nil {
+		local := store.GetSessionPath(sessionName)
+		if _, err := os.Stat(local); err == nil {
+			return local
+		}
+	}
+	ledgerPath, err := resolveLedgerPath()
+	if err != nil {
+		// last resort — return the local path even if missing; caller's
+		// write will fail with a clear error.
+		if store != nil {
+			return store.GetSessionPath(sessionName)
+		}
+		return sessionName
+	}
+	return filepath.Join(ledgerPath, "sessions", sessionName)
 }
 
 // readSessionViaCache reads raw.jsonl through the cache-only resolver,
@@ -181,7 +213,7 @@ func regenerateAllSessionsArtifacts(store *session.Store, projectRoot string, fo
 			continue
 		}
 
-		sessionPath := store.GetSessionPath(sessionName)
+		sessionPath := artifactWriteDir(store, sessionName)
 		if regenErr := regenerateSessionArtifacts(storedSession, sessionPath); regenErr != nil {
 			slog.Warn("failed to regenerate session", "session", sessionName, "error", regenErr)
 			skipped++
