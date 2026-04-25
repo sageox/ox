@@ -107,9 +107,9 @@ func regenerateSingleSessionArtifacts(store *session.Store, projectRoot, name st
 		return fmt.Errorf("resolve session name: %w", err)
 	}
 
-	storedSession, err := store.ReadSession(sessionName)
+	storedSession, err := readSessionViaCache(projectRoot, store, sessionName)
 	if err != nil {
-		return fmt.Errorf("session %q not found\nRun 'ox session list' to see available sessions", name)
+		return fmt.Errorf("session %q: %w\nRun 'ox session list' to see available sessions", name, err)
 	}
 
 	sessionPath := store.GetSessionPath(sessionName)
@@ -123,6 +123,29 @@ func regenerateSingleSessionArtifacts(store *session.Store, projectRoot, name st
 
 	cli.PrintSuccess(fmt.Sprintf("Regenerated artifacts for %s", sessionName))
 	return nil
+}
+
+// readSessionViaCache reads raw.jsonl through the cache-only resolver,
+// hydrating on demand. Replaces direct calls to store.ReadSession in code
+// paths that need to handle ledger-side LFS-pointer stubs (sessions
+// authored by other team members).
+//
+// store.ReadSession would error with ErrSessionNotHydrated for stubs;
+// this helper triggers a Batch-API hydrate-to-cache and returns the
+// real bytes from the cache path. The in-place git-tracked file is
+// untouched (see openSessionContent for the cache-only invariant).
+func readSessionViaCache(projectRoot string, store *session.Store, sessionName string) (*session.StoredSession, error) {
+	ledgerPath, err := resolveLedgerPath()
+	if err != nil {
+		// Fall back to store.ReadSession when no ledger is available
+		// (e.g. tests or detached project state).
+		return store.ReadSession(sessionName)
+	}
+	rawPath, err := openSessionContent(projectRoot, ledgerPath, sessionName, ledgerFileRaw)
+	if err != nil {
+		return nil, err
+	}
+	return session.ReadSessionFromPath(rawPath)
 }
 
 func regenerateAllSessionsArtifacts(store *session.Store, projectRoot string, force bool) error {
@@ -151,7 +174,7 @@ func regenerateAllSessionsArtifacts(store *session.Store, projectRoot string, fo
 			continue
 		}
 
-		storedSession, readErr := store.ReadSession(sessionName)
+		storedSession, readErr := readSessionViaCache(projectRoot, store, sessionName)
 		if readErr != nil {
 			slog.Warn("skipping unreadable session", "session", sessionName, "error", readErr)
 			skipped++
@@ -243,51 +266,6 @@ func hasSubstantiveTurns(entries []map[string]any) bool {
 	return false
 }
 
-// resolveHydratedRawPath returns the path to a fully-hydrated raw.jsonl for
-// the given session, hydrating into the ledger cache if necessary. The
-// returned path may be EITHER:
-//
-//   - <ledger>/.sageox/cache/sessions/<name>/raw.jsonl  (preferred — cache)
-//   - <ledger>/sessions/<name>/raw.jsonl                (only if it's
-//     already real content, not a pointer; case applies to a coworker's
-//     own freshly-recorded session before LFS upload)
-//
-// # CACHE-ONLY DESIGN — we MUST NOT write hydrated bytes to the in-place path
-//
-// Hydration goes to the cache, never in-place. Two failure modes if hydrated
-// content lands at <ledger>/sessions/<name>/raw.jsonl:
-//
-//  1. commitAndPushLedger globs *.jsonl in the session dir and `git add`s
-//     it — committing full content as a regular blob and breaking the LFS
-//     pointer reference. Future pushes referencing the orphaned OID fail.
-//
-//  2. The daemon's session-finalize anti-entropy skips sessions whose raw.jsonl
-//     IS a pointer (session_finalize.go:306). When in-place is full content,
-//     the skip doesn't apply, the daemon can re-finalize already-finalized
-//     sessions, race with concurrent regen, and clobber good summaries with
-//     failure-marker stubs.
-//
-// Both observed in the 2026-04-25 Phase 2 batch — see bd ox-4ncz.
-func resolveHydratedRawPath(projectRoot, ledgerPath, sessionPath, sessionName string) (string, error) {
-	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
-
-	if p := lfs.ResolveContentPath(sessionPath, cacheDir, ledgerFileRaw); p != "" {
-		return p, nil
-	}
-
-	// Need to hydrate. Use the cache-only download path. Never write
-	// hydrated content to sessionPath/raw.jsonl — see top-of-function comment.
-	sessionsDir := filepath.Dir(sessionPath)
-	if err := hydrateFromLedger(projectRoot, sessionsDir, sessionName, true /*quiet*/); err != nil {
-		return "", fmt.Errorf("hydrate %s: %w", sessionName, err)
-	}
-
-	if p := lfs.ResolveContentPath(sessionPath, cacheDir, ledgerFileRaw); p != "" {
-		return p, nil
-	}
-	return "", fmt.Errorf("hydration completed but content still not resolvable for %s", sessionName)
-}
-
 // --- Summary regeneration (--summary) ---
 
 // regenerateSingleSessionSummary re-generates summary.json for a session by
@@ -314,9 +292,8 @@ func regenerateSingleSessionSummary(nameArg string) error {
 
 	sessionPath := filepath.Join(sessionsDir, sessionName)
 
-	// Resolve a hydrated raw.jsonl path — cache preferred, never in-place
-	// hydration. See resolveHydratedRawPath for the cache-only contract.
-	rawPath, err := resolveHydratedRawPath(projectRoot, ledgerPath, sessionPath, sessionName)
+	// Cache-only resolution — see openSessionContent for the load-bearing invariant.
+	rawPath, err := openSessionContent(projectRoot, ledgerPath, sessionName, ledgerFileRaw)
 	if err != nil {
 		return err
 	}

@@ -83,14 +83,18 @@ Examples:
 			return err
 		}
 
-		rawPath := filepath.Join(sessionsDir, sessionName, "raw.jsonl")
-
-		// if file is an LFS pointer, report it
-		if lfs.IsPointerFile(rawPath) {
+		// Cache-only resolver: hydrates on demand, never writes in-place.
+		// See openSessionContent for the load-bearing invariant.
+		projectRoot, projErr := requireProjectRoot()
+		if projErr != nil {
+			return projErr
+		}
+		rawPath, openErr := openSessionContent(projectRoot, ledgerPath, sessionName, "raw.jsonl")
+		if openErr != nil {
 			result := lintResult{
 				SessionName: sessionName,
 				Valid:       false,
-				Errors:      []string{"raw.jsonl is an LFS pointer (not hydrated). Run 'ox session download' first."},
+				Errors:      []string{fmt.Sprintf("raw.jsonl not available: %v", openErr)},
 			}
 			return printLintResults([]lintResult{result}, jsonOutput)
 		}

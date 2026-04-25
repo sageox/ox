@@ -884,8 +884,29 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		result.Model = sessionMeta.Model
 	}
 
-	// check if raw.jsonl already has entries from incremental hooks.
-	// a header-only file has exactly 1 line; 2+ lines means hooks appended entries.
+	// CACHE-ONLY DESIGN — recording-time invariant.
+	//
+	// state.SessionPath is the user's local recording cache (xdg / project
+	// .sageox/cache/sessions/), NOT the ledger's git-tracked path. The
+	// recording lifecycle:
+	//
+	//   1. session start    → mkdir state.SessionPath, write header into
+	//                         state.SessionPath/raw.jsonl (full content, local).
+	//   2. agent activity   → append entries to that local raw.jsonl.
+	//   3. session stop     → upload raw.jsonl bytes to LFS via Batch API,
+	//                         then commit an LFS POINTER (not the bytes) to
+	//                         <ledger>/sessions/<name>/raw.jsonl. Local full
+	//                         content stays in the recording cache only.
+	//
+	// The git-tracked ledger path NEVER receives the full content. Future
+	// readers (other team members, regenerate, view, etc.) must hydrate via
+	// the LFS Batch API into a separate .sageox/cache/ location — see
+	// openSessionContent in cmd/ox/session_content.go.
+	//
+	// If a future change starts writing recording content directly to
+	// <ledger>/sessions/<name>/raw.jsonl, every push that includes the
+	// resulting commit will break LFS linkage and the daemon's anti-entropy
+	// will start clobbering. See the 2026-04-25 post-mortem (bd ox-4ncz).
 	rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
 	hasIncrementalEntries := rawJSONLHasEntries(rawPath)
 

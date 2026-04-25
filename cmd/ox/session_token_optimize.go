@@ -48,15 +48,9 @@ func runSessionTokenOptimize(cmd *cobra.Command, args []string) error {
 	}
 	defer in.Close()
 
-	// Guard against LFS pointer files — nothing useful to compress.
-	head := make([]byte, 64)
-	n, _ := in.Read(head)
-	if n > 0 && string(head[:min(n, 40)]) == "version https://git-lfs.github.com/spec" {
-		return fmt.Errorf("raw.jsonl is an LFS pointer; run `ox session download %s` first", sessionName)
-	}
-	if _, err := in.Seek(0, 0); err != nil {
-		return fmt.Errorf("rewind: %w", err)
-	}
+	// Note: pointer-file guard removed. resolveRawJSONL routes through
+	// openSessionContent, which guarantees rawPath is real content
+	// (cache or in-place full content), never a pointer stub.
 
 	var out io.Writer = os.Stdout
 	outPath, _ := cmd.Flags().GetString("out")
@@ -108,15 +102,20 @@ func runSessionTokenOptimize(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// resolveRawJSONL locates a session's hydrated raw.jsonl in the local ledger.
+// resolveRawJSONL locates a session's hydrated raw.jsonl in the local ledger,
+// auto-hydrating into the cache if the in-place file is an LFS pointer.
+//
+// Cache-only — see openSessionContent for the load-bearing invariant. We must
+// not let token-optimize overwrite the in-place LFS pointer with hydrated
+// content; the resolver returns the cache path when in-place is a stub.
 func resolveRawJSONL(sessionName string) (string, error) {
 	ledgerPath, err := resolveLedgerPath()
 	if err != nil {
 		return "", fmt.Errorf("resolve ledger: %w", err)
 	}
-	path := filepath.Join(ledgerPath, "sessions", sessionName, "raw.jsonl")
-	if _, err := os.Stat(path); err != nil {
-		return "", fmt.Errorf("session raw.jsonl not found at %s: %w", path, err)
+	projectRoot, err := requireProjectRoot()
+	if err != nil {
+		return "", err
 	}
-	return path, nil
+	return openSessionContent(projectRoot, ledgerPath, sessionName, "raw.jsonl")
 }
