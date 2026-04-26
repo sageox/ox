@@ -1,113 +1,289 @@
-<!-- Keep this file thin. Behavioral guidance (use-when, common-issues, errors)
-     belongs in the ox CLI JSON output (guidance field), not here.
-     Skills are agent-specific wrappers; ox serves all agents (Codex, etc.). -->
-Audit all sessions in the project ledger for quality, then offer cleanup and regeneration actions.
+<!-- Keep this file thin on behavioral guidance that belongs in `ox` CLI JSON
+     output (guidance field). Skills are agent-specific wrappers; ox serves all
+     agents (Codex, etc.). This skill is intentionally richer than most because
+     the audit + regeneration flow is not backed by a single ox subcommand. -->
+Audit every session in the project ledger for quality, then offer cleanup and regeneration.
+
+This skill carries the operational knowledge from the 2026-04-25 cleanup
+(see PRs #559–#564 and bd ox-b917, ox-9o29, ox-4ncz, ox-1i3k). Read the
+**Failure-mode watch-list** before acting — it is the difference between
+a routine audit and re-causing the same incident.
+
+## Failure-mode watch-list (READ FIRST)
+
+When operating on the ledger, watch for and handle each of these
+explicitly. Silent skipping is not allowed — surface them in the report.
+
+| Mode | Symptom | Right action |
+|---|---|---|
+| **Cache-only invariant break** | After hydration, the in-place `<ledger>/sessions/<name>/raw.jsonl` is real content (not a ~140B LFS pointer). | Stop. Do not run any ox command that may `git add` the session dir. Investigate which code path wrote in-place — likely a regression of `.claude/rules/cache-only-design.md`. |
+| **Phantom LFS OID** | `ox session download` returns HTTP 404 from the LFS Batch API for an OID referenced in `meta.json`. | Unrecoverable from client. `ox session remove <name> --force` and report the lost session in the final summary. |
+| **0-byte in-place stub** | `meta.json` references a real OID, but in-place file is 0 bytes (and not a pointer). | Treat as needing download. Confirm `cmd/ox/session_hydrate.go` has the `info.Size() > 0` guard (PR #564). Without it, the resolver will silently return "" forever. |
+| **Daemon anti-entropy clobber** | A freshly-pushed good summary gets overwritten with a failure-marker stub minutes later. | The daemon scheduled finalize before our regen landed. Look at `internal/daemon/agentwork/session_finalize.go` `workNoLongerNeeded` re-verify guard (PR #561). If running a long batch regen, prefer a quiet daemon window. |
+| **Validation banner on the website** | Site shows "Summary failed content validation: title too short" but the ledger has good content. | Likely browser-side React Query cache (staleTime 5m, gcTime 30m). Verify origin/main HEAD has the right summary; advise hard refresh. Do not "fix" by re-pushing. |
+| **LLM regenerate hangs / asks for permission** | Regenerate spawns Claude Code and times out without writing. | Pass `--permission-mode bypassPermissions` to the headless invocation (PR #560 / regenerate flow). |
+
+## The cache-only invariant (assert this before and after every batch)
+
+Per `.claude/rules/cache-only-design.md`:
+
+- For any session synced from the ledger, `<ledger>/sessions/<name>/raw.jsonl`
+  MUST stay an LFS pointer (size ~140B, `lfs.IsPointerFile == true`).
+- Hydrated full content lives only at
+  `<ledger>/.sageox/cache/sessions/<name>/raw.jsonl` (gitignored).
+- All readers route through `cmd/ox/session_content.go:openSessionContent`.
+
+**Assertion to run before declaring a batch complete:**
+
+```bash
+# From the ledger root. Should print 0.
+find sessions -name 'raw.jsonl' -size +1k -not -path '*/.*' | wc -l
+```
+
+Any non-zero count means hydrated bytes leaked to the in-place path —
+the next `commitAndPushLedger` will glob them into a regular blob and
+break LFS linkage. Stop and investigate before pushing.
 
 ## Phase 1 — Scan & Score (read-only)
 
-1. Run `ox session list --all` to enumerate all sessions
+1. Run `ox session list --all`.
 2. Resolve the ledger sessions directory:
-   - Read `.sageox/config.json` to get `repo_id` and endpoint
-   - The ledger lives at `~/.local/share/sageox/<endpoint-slug>/ledgers/<repo_id>/sessions/`
-   - List subdirectories — each is a session folder
+   - Read `.sageox/config.json` for `repo_id` and `endpoint`.
+   - Sessions live at
+     `~/.local/share/sageox/<endpoint-slug>/ledgers/<repo_id>/sessions/`.
 3. For each session directory:
-   a. Read `meta.json` — get `entry_count`, `title`, `summary`, `files`, `created_at`
-   b. Read `summary.json` if it exists — get `title`, `summary`, `key_actions`, `outcome`
-   c. Check hydration status: if `raw.jsonl` is missing or is an LFS pointer (starts with `version https://git-lfs.github.com`), run `ox session download <session_name>` to hydrate it
-   d. Read `raw.jsonl` — count substantive messages, tool calls (Write/Edit), total entries
-   e. Score quality using the signals below
+   1. Read `meta.json` — capture `entry_count`, `title`, `summary`,
+      `files`, `created_at`.
+   2. Read `summary.json` if present — capture `title`, `summary`,
+      `key_actions`, `outcome`, `diagrams`, `aha_moments`,
+      `sageox_insights`.
+   3. Do NOT hydrate `raw.jsonl` during scan — hydration only happens in
+      Phase 4 for sessions the user explicitly approves for
+      regeneration. (For 100+ session ledgers, eager hydration is
+      prohibitively slow and risks the failure modes above.)
+   4. Score into the first-matching bucket below.
 
-## Quality Signals
-
-Categorize each session into one of these buckets (first match wins):
+## Quality Buckets (first match wins)
 
 ### Removal Candidates
-- `entry_count` is 0 OR meta has no `files` manifest
-- Very few substantive messages (< 3 user+assistant turns in `raw.jsonl`)
-- Only skill invocations, no real work (e.g., just `/ox-session-start` + `/ox-session-stop` with nothing between)
-- Session errored/failed immediately (check `outcome` = "failed" in summary, or raw.jsonl shows early error)
-- No files modified (zero Write/Edit tool calls) AND < 5 total entries in `raw.jsonl`
+- `entry_count` is `0` or missing AND `files` manifest is empty/missing.
+- Session outcome is `"failed"` AND `entry_count < 5`.
+- Only skill-wrapper activity with nothing between (`/ox-session-start`
+  → `/ox-session-stop`).
+- Phantom-OID sessions surfaced during a previous Phase 4 run (track
+  these — they cannot be regenerated).
+
+### Meta Repair
+- `files` manifest empty/missing BUT `entry_count > 0` — meta needs
+  repair after hydrating + re-scanning raw.jsonl for actual file writes.
 
 ### Missing/Poor Summary
-- No `summary.json` exists at all
-- `summary.json` has empty or missing `title`, `summary`, or `key_actions`
-- Summary is fallback stats-only text (matches pattern like "N user messages, N assistant responses")
+- No `summary.json`.
+- `summary.json` has empty `title`, `summary`, or `key_actions`.
+- Summary matches the stats-only fallback pattern (e.g., "N user
+  messages, N assistant responses"; any summary where the body is < 80
+  chars and contains only digits + "messages"/"responses").
+- Title fails the website's content-validation gate (e.g., < 4 words or
+  matches "Summary failed content validation: title too short").
+- `diagrams` or `aha_moments` empty on a session with `entry_count > 50`.
 
 ### Poor Title
-- Title is empty, or matches generic patterns: "Session recording", date-only, fewer than 4 words
-- Title doesn't reflect actual session content (compare title to raw.jsonl topics)
+- Empty, or matches generic patterns: `"Session recording"`, date-only,
+  fewer than 4 words, or doesn't reflect content.
 
 ### OK
-- Session passes all checks above
+- Passes all checks.
 
 ## Phase 2 — Report
 
-Present a grouped report to the user. Use tables for each category:
+Present grouped tables (Removal, Meta Repair, Missing/Poor Summary, Poor
+Title) plus a one-line `OK: N healthy` tally. Surface systemic patterns
+(e.g., "91/153 sessions have empty titles — likely a distiller bug") so
+the user can file upstream bugs rather than just masking symptoms.
 
-**Removal Candidates** (N sessions)
-| Session | Date | Entries | Reason |
-|---------|------|---------|--------|
-
-**Missing/Poor Summaries** (N sessions)
-| Session | Date | Issue |
-|---------|------|-------|
-
-**Poor Titles** (N sessions)
-| Session | Date | Current Title | Suggested Title |
-|---------|------|---------------|-----------------|
-
-**Summary**: X total sessions, Y removal candidates, Z need summary work, W have poor titles, V are OK.
+Always include in the report:
+- A count of sessions where in-place raw.jsonl is NOT a pointer (should
+  be 0; non-zero is an invariant break — surface loudly).
+- Daemon liveness check: `ox doctor` daemon section. If a long batch is
+  planned, mention whether the daemon will be racing.
 
 ## Phase 3 — User Confirms Actions
 
-ASK the user which sessions to act on. Present options:
-- Remove specific sessions (list them)
-- Regenerate summaries for specific sessions (list them)
-- Skip / do nothing
-
-**NEVER auto-delete or auto-regenerate.** Wait for explicit user approval on each category.
+ASK the user what to act on. Never auto-delete or auto-regenerate. Offer
+per-bucket choices plus a "top-N by entry_count" option to target
+highest-value sessions first when buckets are large.
 
 ## Phase 4 — Execute Approved Actions
 
-### For approved removals:
+### Removals
 ```
 ox session remove <session_name> --force
 ```
 
-### For approved summary regenerations:
-1. Read the full `raw.jsonl` for the session
-2. Generate a summary JSON object matching this exact schema:
+### Meta Repair
+1. Hydrate: `ox session download <session_name>` (writes to cache, not
+   in-place — verify after).
+2. Re-scan hydrated `raw.jsonl` for Write/Edit tool calls; collect
+   unique file paths.
+3. Regenerate summary (see below) — the summary pipeline will also
+   repopulate `files`.
+
+### Summary Regeneration — Full-Session Processing
+
+**Step 4a — Hydrate.** `ox session download <session_name>`. After,
+verify the in-place file is still a pointer: `ls -la
+<ledger>/sessions/<name>/raw.jsonl` should show ~140B. Real bytes go to
+`<ledger>/.sageox/cache/sessions/<name>/raw.jsonl`.
+
+**Step 4b — Token-Optimize (pre-summarize stage).**
+
+Before feeding raw.jsonl into the summarization LLM, run a token-
+optimize pass. For now this is a **no-op pass-through** — copy
+raw.jsonl unchanged — but the long-term intent is documented so future
+implementers (or a future `ox session token-optimize` subcommand) know
+the contract:
+
+```
+# token_optimize(raw_jsonl) -> optimized_jsonl
+#
+# Goal: reduce token footprint 5-10x while preserving all signal needed
+#       for title/summary/key_actions/aha_moments/diagrams/insights.
+#
+# Intended removals / compressions:
+#   - Duplicate tool_result blocks that repeat file contents already shown.
+#   - Large Read tool_result bodies (keep first/last ~40 lines + elision).
+#   - Base64 image payloads (keep MIME + dimensions only).
+#   - Binary blobs, minified JS/CSS, compiled output in tool_results.
+#   - Repeated system-reminder boilerplate (keep first occurrence).
+#   - Verbose stack traces (keep top frame + ellipsis).
+#   - Bash outputs with progress bars / spinners / ANSI — strip to final state.
+#   - Redundant tool_use inputs that mirror the prior assistant message verbatim.
+#
+# Must preserve verbatim:
+#   - All user turns (intent signal).
+#   - Assistant turns with reasoning / decisions / explanations.
+#   - Every Write/Edit tool_use input (path + diff — drives `files` manifest).
+#   - First + last 3 entries (chapter boundaries).
+#   - Error messages and their immediate resolution turns.
+#
+# Long-term: pipe raw.jsonl through a cheap model (haiku-class) for this
+# compression pass, THEN pipe into a reasoning model for the actual summary.
+# For now: no-op copy.
+```
+
+Implement inline: copy `raw.jsonl` from cache → `/tmp/ox-optimized-
+<session>.jsonl` unchanged. Log: "token_optimize: no-op pass-through (N
+bytes in / N bytes out)".
+
+**Step 4c — Chunked Full-Session Analysis.**
+
+Split the optimized jsonl into ordered chunks sized to fit a single LLM
+context window (target ~60k tokens; roughly 1500-2000 lines depending on
+turn size). Per chunk produce:
+
+```
+{
+  "chunk_index": N,
+  "local_actions": [...],
+  "local_aha_moments": [...],
+  "local_topics": [...],
+  "local_files_touched": [...],
+  "local_errors_or_decisions": [...]
+}
+```
+
+**Step 4d — Synthesize Final Summary.**
+
+Feed the ordered partials (plus first 50 and last 50 lines of raw.jsonl
+for opening/closing context) into a final synthesis pass producing the
+canonical summary JSON:
 
 ```json
 {
-  "title": "Short descriptive title (5-10 words)",
-  "summary": "One paragraph executive summary describing what was accomplished",
-  "key_actions": ["Action 1", "Action 2"],
+  "title": "Short descriptive title reflecting actual work (5-10 words)",
+  "summary": "One paragraph executive summary covering motivation, approach, and outcome",
+  "key_actions": ["Concrete action 1", "Concrete action 2"],
   "outcome": "success|partial|failed",
   "topics_found": ["topic1", "topic2"],
-  "diagrams": [],
-  "chapter_titles": ["Phase 1", "Phase 2"],
+  "chapter_titles": ["Phase 1: ...", "Phase 2: ..."],
   "aha_moments": [
     {
       "seq": 7,
       "role": "user|assistant",
       "type": "question|insight|decision|breakthrough|synthesis",
       "highlight": "Key text from this moment",
-      "why": "Why this was important"
+      "why": "Why this mattered for the session's trajectory"
     }
   ],
-  "sageox_insights": []
+  "diagrams": [
+    {
+      "title": "Data flow / architecture / state machine title",
+      "type": "flowchart|sequence|state|architecture",
+      "mermaid": "graph TD\n  A[Start] --> B[End]",
+      "why": "What this diagram clarifies about the session"
+    }
+  ],
+  "sageox_insights": [
+    {
+      "kind": "decision|convention|gotcha|followup",
+      "insight": "Concrete reusable insight other coworkers would benefit from",
+      "evidence_seq": 42
+    }
+  ]
 }
 ```
 
-3. Save the JSON to a temp file (e.g., `/tmp/ox-summary-<session_name>.json`)
-4. Push via: `ox session push-summary --file /tmp/ox-summary-<session_name>.json --session-dir <full_path_to_session_dir>`
-5. Verify the push succeeded (check JSON output for `"success": true`)
-6. Clean up the temp file
+**`diagrams` and `sageox_insights` MUST NOT be hardcoded empty.**
+Generate them when the session has material worth capturing:
+- **Diagrams**: any architectural change, data flow, state machine,
+  pipeline, or non-trivial refactor. Mermaid syntax compatible with
+  GitHub. Skip only if genuinely trivial (e.g., typo fix).
+- **sageox_insights**: decisions, conventions discovered, gotchas that
+  tripped the session, and followups other coworkers should inherit.
+  Skip only if no reusable knowledge.
+
+If invoking a headless LLM (Claude Code in `-p` mode), pass
+`--permission-mode bypassPermissions`. Without it the LLM hangs waiting
+for a tool-permission prompt that no one will answer.
+
+**Step 4e — Push.**
+1. Write synthesized JSON to `/tmp/ox-summary-<session_name>.json`.
+2. `ox session push-summary --file /tmp/ox-summary-<session_name>.json --session-dir <full_ledger_path>`
+3. Verify `"success": true`.
+4. Delete temp file.
+
+**Step 4f — Post-batch invariant check.**
+After a batch run, before any `git push`, confirm:
+- `find <ledger>/sessions -name 'raw.jsonl' -size +1k -not -path '*/.*' | wc -l` is `0`.
+- `git status` in the ledger shows only `summary.json` / `summary.md` /
+  `meta.json` modifications, never `raw.jsonl`.
+
+If either check fails, do not push. Diagnose which step wrote in-place.
 
 ## Edge Cases
 
-- **Empty ledger**: Report "No sessions found" and exit
-- **All sessions OK**: Report "All N sessions are healthy" and exit
-- **Hydration failure**: Log warning, skip that session, continue with others
-- **Large sessions**: For raw.jsonl > 5000 lines, read first 200 and last 200 lines for quality assessment
+- **Empty ledger**: report and exit.
+- **All sessions OK**: report and exit.
+- **Hydration failure (404)**: phantom OID. Surface for removal, do not
+  retry endlessly.
+- **Hydration failure (network)**: log, skip, continue; list at end.
+- **Very large session (raw.jsonl > 20k lines)**: still process fully
+  via chunking — never fall back to edge-only sampling. If resource-
+  constrained, warn and offer to defer rather than produce a low-
+  quality summary.
+- **Systemic distiller bugs**: if scan reveals patterns ("all sessions
+  from user X have stats-only summaries", ">50% empty titles"), surface
+  as likely upstream bug and suggest `bd create` for a root-cause fix
+  instead of only per-session regeneration.
+
+## Reusable prompt for ledger reviews in other repos
+
+When asked to review a different ledger, lead with:
+
+> Audit every session in this project's ledger for quality.
+> Read `.claude/rules/cache-only-design.md` and
+> `.claude/rules/lfs-no-git-lfs-binary.md` first — both invariants
+> apply during this audit. Run the `/ox-session-review` skill flow:
+> scan read-only, report by bucket, confirm with me before any
+> removals or regenerations, and run the post-batch invariant check
+> before pushing.
