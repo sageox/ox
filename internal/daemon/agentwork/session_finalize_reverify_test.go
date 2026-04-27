@@ -49,8 +49,14 @@ func TestWorkNoLongerNeeded(t *testing.T) {
 
 	t.Run("all artifacts present but empty title → still needed (failure-marker stub from prior round)", func(t *testing.T) {
 		dir := t.TempDir()
+		// Fixture intent: a prior round failed content validation. After
+		// ox-qqka, the failure stub keeps user-visible fields (title,
+		// summary) EMPTY and records the diagnostic in validation_error
+		// + summary_status. Tests must mirror the new shape — older
+		// fixtures that put the diagnostic into "summary" baked the
+		// ox-qqka leak in as expected behavior.
 		writeAll(t, dir, map[string]string{
-			"summary.json": `{"title":"","summary":"Summary failed content validation","score_reason":"content validation failed"}`,
+			"summary.json": `{"title":"","summary":"","summary_status":"failed_validation","validation_error":"content validation failed: title too short","score_reason":"content validation failed"}`,
 			"summary.md":   "# stub",
 			"session.md":   "# stub",
 		})
@@ -62,10 +68,10 @@ func TestWorkNoLongerNeeded(t *testing.T) {
 	t.Run("needs-summary marker present → still needed", func(t *testing.T) {
 		dir := t.TempDir()
 		writeAll(t, dir, map[string]string{
-			"summary.json":    `{"title":"Real","summary":"x","key_actions":["x"]}`,
-			"summary.md":      "x",
-			"session.md":      "x",
-			".needs-summary":  `{}`,
+			"summary.json":   `{"title":"Real","summary":"x","key_actions":["x"]}`,
+			"summary.md":     "x",
+			"session.md":     "x",
+			".needs-summary": `{}`,
 		})
 		if h.workNoLongerNeeded(dir) {
 			t.Error("a session with the .needs-summary marker still set requires finalization regardless of artifact presence")

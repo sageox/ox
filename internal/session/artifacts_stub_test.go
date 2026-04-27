@@ -58,11 +58,16 @@ func TestIsStubSummary_NilIsStub(t *testing.T) {
 // TestIsStubSummary_DaemonFailureMarkerIsNotStub guards the load-bearing
 // distinction between LocalSummary stubs (skip-write, daemon will replace)
 // and daemon-side validation-failure markers (explicit failure artifact
-// the daemon WANTS persisted so teammates see "Summary failed validation"
-// in the ledger). Both shapes look structurally similar — only ScoreReason
-// distinguishes them. Without this guard, validation-failure tests in
-// internal/daemon/agentwork would silently lose their failure-marker
-// summary.json/.md files.
+// the daemon WANTS persisted so teammates / doctor see the failure in the
+// ledger). Both shapes look structurally similar — ScoreReason and
+// ValidationError both signal "deliberate failure artifact, persist".
+// Without this guard, validation-failure tests in internal/daemon/agentwork
+// would silently lose their failure-marker summary.json/.md files.
+//
+// Fixtures intentionally do NOT put the diagnostic into the user-visible
+// Summary field — that would bake in the ox-qqka leak as expected
+// behavior. Failure markers post-ox-qqka leave Summary empty and surface
+// the diagnostic via ValidationError + ScoreReason + SummaryStatus.
 func TestIsStubSummary_DaemonFailureMarkerIsNotStub(t *testing.T) {
 	cases := []struct {
 		name string
@@ -71,23 +76,26 @@ func TestIsStubSummary_DaemonFailureMarkerIsNotStub(t *testing.T) {
 		{
 			"unparsable LLM output",
 			&SummarizeResponse{
-				Summary:      "Summary generation failed: LLM output was not valid JSON",
-				QualityScore: 0.0,
-				ScoreReason:  "unparsable LLM output",
+				QualityScore:    0.0,
+				ScoreReason:     "unparsable LLM output",
+				SummaryStatus:   "failed_validation",
+				ValidationError: "LLM output was not valid JSON",
 			},
 		},
 		{
 			"content validation failure",
 			&SummarizeResponse{
-				Summary:     "Summary failed content validation: title too short",
-				ScoreReason: "content validation failed: title too short (0 chars, minimum 3)",
+				ScoreReason:     "content validation failed: title too short (0 chars, minimum 3)",
+				SummaryStatus:   "failed_validation",
+				ValidationError: "content validation failed: title too short",
 			},
 		},
 		{
 			"richness validation failure",
 			&SummarizeResponse{
-				Summary:     "Summary failed richness validation: missing key_actions",
-				ScoreReason: "richness validation failed: missing key_actions",
+				ScoreReason:     "richness validation failed: missing key_actions",
+				SummaryStatus:   "failed_validation",
+				ValidationError: "richness validation failed: missing key_actions",
 			},
 		},
 	}

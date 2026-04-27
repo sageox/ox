@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/identity"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -477,7 +478,12 @@ func sessionBlurb(s session.SessionInfo) string {
 		return truncateSingleLine(t, maxLen)
 	}
 	sum := sanitizeSessionText(strings.TrimSpace(s.Summary))
-	if sum == "" || strings.HasPrefix(sum, "Summary generation failed") {
+	// Belt-and-suspenders against the ox-qqka leak: even though
+	// producer-side fixes (session_finalize.go) and the writer guard
+	// (lfs.ValidateUserVisible) prevent new leaks, EXISTING ledgers may
+	// still carry validator-error stubs in meta.summary until ox-l4mj
+	// runs. Render nothing rather than the diagnostic string.
+	if sum == "" || lfs.IsLeakySummaryString(sum) {
 		return ""
 	}
 	// skip markdown structure (headings, bullets, tables, metadata lines) and

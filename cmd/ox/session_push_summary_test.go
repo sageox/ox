@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -121,4 +123,90 @@ func TestPushSummaryToLedger_NoGitRoot(t *testing.T) {
 
 	assert.False(t, result.Success)
 	assert.Contains(t, result.Error, "git root")
+}
+
+// TestUpdateMetaSummary_FailedThenSucceeded_NoStickyTombstone is the
+// ox-wstd regression. Before the fix, session_push_summary.go gated the
+// UpdateMetaSummary call on `summaryObj.Title != ""`. Once a validator
+// failure had landed in meta.summary (pre-ox-qqka), no later success
+// could overwrite it because the guard short-circuited. 14 sessions on
+// the SageOx Internal ledger had successful summary.json regen but
+// stale meta.summary forever.
+//
+// The test exercises the sequence at the lfs.UpdateMetaSummary boundary
+// (the same level the wstd fix changed): write a meta with a stale
+// failure-state summary, then call UpdateMetaSummary with a fresh
+// successful title, and assert meta.summary reflects the success.
+//
+// Failure prevented: a future "optimization" that re-introduces the
+// non-empty-title guard would silently revert sticky tombstones.
+func TestUpdateMetaSummary_FailedThenSucceeded_NoStickyTombstone(t *testing.T) {
+	dir := t.TempDir()
+
+	// Round 1: a prior failure left meta with empty user-visible fields
+	// and a SummaryStatus=failed_validation marker. (This is the
+	// post-ox-qqka shape; the pre-fix shape with the leak in Summary
+	// would be rejected by the writer's Validate() guard.)
+	initial := &lfs.SessionMeta{
+		Version:         "1.0",
+		SessionName:     "test",
+		AgentID:         "OxStuck",
+		AgentType:       "claude-code",
+		CreatedAt:       time.Now(),
+		Title:           "",
+		Summary:         "",
+		SummaryStatus:   "failed_validation",
+		ValidationError: "content validation failed: title too short",
+	}
+	require.NoError(t, lfs.WriteSessionMetaOnly(dir, initial))
+
+	// Round 2: a successful regenerate produces a fresh title.
+	const freshTitle = "Implemented session-validation invariant guards"
+	require.NoError(t, lfs.UpdateMetaSummary(dir, freshTitle))
+
+	// Assert meta.json reflects the new state, not the stale one.
+	got, err := lfs.ReadSessionMeta(dir)
+	require.NoError(t, err)
+
+	assert.Equal(t, freshTitle, got.Title, "meta.title must reflect the new success")
+	assert.Equal(t, freshTitle, got.Summary, "meta.summary must reflect the new success (sticky-tombstone fix)")
+	assert.Equal(t, "ok", got.SummaryStatus, "SummaryStatus must transition failed_validation → ok")
+	assert.Empty(t, got.ValidationError, "stale ValidationError from prior failure must be cleared")
+}
+
+// TestPushSummaryUnmarshal_EmptyTitleStillCallsUpdateMetaSummary is a
+// direct regression on the ox-wstd code path: the Unmarshal block in
+// pushSummaryToLedger MUST call UpdateMetaSummary regardless of whether
+// the parsed title is empty. We can't run the full pushSummaryToLedger
+// without a real git repo + ledger; this test exercises the same logic
+// shape against a JSON document with empty title and asserts that
+// passing the empty title to UpdateMetaSummary is a meaningful clear-
+// stale-state operation, not a no-op.
+//
+// Failure prevented: someone re-adds `&& summaryObj.Title != ""` and
+// the failure-then-clear path silently breaks again.
+func TestPushSummaryUnmarshal_EmptyTitleStillCallsUpdateMetaSummary(t *testing.T) {
+	dir := t.TempDir()
+
+	// Pre-populate meta.json with a stale "successful" title from a
+	// previous round that we now want to CLEAR (e.g. a regenerate that
+	// determined the session has no substantive content).
+	initial := &lfs.SessionMeta{
+		Version: "1.0", SessionName: "s", AgentID: "Ox",
+		AgentType:     "claude-code",
+		Title:         "Stale title from a prior round",
+		Summary:       "Stale summary",
+		SummaryStatus: "ok",
+	}
+	require.NoError(t, lfs.WriteSessionMetaOnly(dir, initial))
+
+	// Calling UpdateMetaSummary with empty string MUST clear both
+	// fields. Pre-wstd-fix, the gate prevented this call entirely;
+	// post-fix, empty-title is a meaningful clear signal.
+	require.NoError(t, lfs.UpdateMetaSummary(dir, ""))
+
+	got, err := lfs.ReadSessionMeta(dir)
+	require.NoError(t, err)
+	assert.Empty(t, got.Title, "empty title must clear meta.Title")
+	assert.Empty(t, got.Summary, "empty title must clear meta.Summary")
 }

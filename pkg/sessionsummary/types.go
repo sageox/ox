@@ -10,6 +10,36 @@ const (
 	EntryTypeTool      = "tool"
 )
 
+// SummaryStatus values describe the lifecycle state of a session's
+// summary. Consumers should prefer this structured signal over sniffing
+// for sentinel strings in the user-visible Summary/Title fields.
+//
+// Older ledgers may have an empty SummaryStatus — readers MUST treat
+// empty as "unknown / pre-status" and fall back to the existing logic
+// (e.g. Summary populated → ok, Summary empty → pending).
+const (
+	// SummaryStatusOK means the LLM-generated summary passed all
+	// content + richness validation and is the source of truth for
+	// the user-visible Title / Summary fields.
+	SummaryStatusOK = "ok"
+
+	// SummaryStatusPending means the summary has not been generated
+	// yet (e.g. session stop has finished but push-summary or the
+	// daemon-side runner has not yet completed).
+	SummaryStatusPending = "pending"
+
+	// SummaryStatusFailedValidation means the LLM produced output but
+	// validators rejected it. ValidationError carries the diagnostic
+	// for ops; user-visible fields stay empty so the UI never displays
+	// the error string as if it were the session's title.
+	SummaryStatusFailedValidation = "failed_validation"
+
+	// SummaryStatusUnrecoverable means the summary cannot be produced
+	// for this session at all (e.g. session has no substantive turns,
+	// raw.jsonl is corrupt). User-visible fields stay empty.
+	SummaryStatusUnrecoverable = "unrecoverable"
+)
+
 // Entry is a minimal session entry for summarization.
 // Uses plain strings for the Type field (not an enum) so this package
 // has no dependency on internal/session.
@@ -62,6 +92,24 @@ type SummarizeResponse struct {
 	SageoxScore         *float64 `json:"sageox_score,omitempty"`          // 0.0-1.0 self-reported contribution score
 	SageoxScoreCategory string   `json:"sageox_score_category,omitempty"` // named category: none, minor, moderate, significant, critical
 	SageoxScoreReason   string   `json:"sageox_score_reason,omitempty"`   // detailed paragraph explaining SageOx influence
+
+	// Lifecycle / failure signals.
+	//
+	// SummaryStatus is the canonical structured signal for "did summary
+	// generation succeed?". See SummaryStatus* constants. Readers should
+	// prefer this over sniffing the Summary string for known failure
+	// prefixes ("Summary failed content validation: ...") — that
+	// sniffing pattern is what motivated the ox-qqka fix.
+	//
+	// ValidationError, when populated, carries the *ops-facing* diagnostic
+	// from ValidateSummaryContent / ValidateSummaryRichness. It MUST NEVER
+	// be displayed as a user-visible session title or summary; the UI
+	// should treat it as engineer-visible only.
+	//
+	// Both are omitempty so older readers (and older meta.json on disk)
+	// keep working without migration.
+	SummaryStatus   string `json:"summary_status,omitempty"`
+	ValidationError string `json:"validation_error,omitempty"`
 }
 
 // AgentSummary contains structured data for AI agents to consume.
@@ -128,11 +176,11 @@ type SageoxInsight struct {
 // Computed from the raw JSONL by the grouping algorithm, enriched with
 // LLM-generated titles when available.
 type ChapterSummary struct {
-	ID         int            `json:"id"`                    // 1-based chapter number
-	Title      string         `json:"title"`                 // LLM or heuristic title
-	StartSeq   int            `json:"start_seq"`             // first message seq in this chapter
-	EndSeq     int            `json:"end_seq"`               // last message seq in this chapter
-	ToolCounts map[string]int `json:"tool_counts,omitempty"` // aggregated tool usage {"Read": 5, "Edit": 3}
+	ID          int            `json:"id"`                     // 1-based chapter number
+	Title       string         `json:"title"`                  // LLM or heuristic title
+	StartSeq    int            `json:"start_seq"`              // first message seq in this chapter
+	EndSeq      int            `json:"end_seq"`                // last message seq in this chapter
+	ToolCounts  map[string]int `json:"tool_counts,omitempty"`  // aggregated tool usage {"Read": 5, "Edit": 3}
 	TotalTools  int            `json:"total_tools"`            // total tool calls in chapter
 	TotalErrors int            `json:"total_errors,omitempty"` // tool calls that failed
 	HasEdits    bool           `json:"has_edits"`              // true if chapter contains file modifications

@@ -260,13 +260,25 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
-	// update meta.json summary with the AI-generated title from summary.json
+	// Update meta.json title/summary from the AI-generated summary.json.
+	//
+	// ox-wstd: this used to be gated on `summaryObj.Title != ""`. The
+	// guard caused sticky failure tombstones — once a validator-failure
+	// stub had landed in meta.summary (pre-ox-qqka), no later success
+	// could overwrite it because the guard short-circuited. 14 sessions
+	// on the SageOx Internal ledger had successful summary.json regen
+	// but stale meta.summary forever.
+	//
+	// Always call UpdateMetaSummary now. An empty title is a meaningful
+	// signal: it CLEARS stale state (e.g. a previous failed attempt left
+	// a non-empty title behind). UpdateMetaSummary writes both Title and
+	// Summary, so this also keeps the two fields consistent.
 	metaUpdated := false
 	var summaryObj struct {
 		Title   string `json:"title"`
 		Summary string `json:"summary"`
 	}
-	if err := json.Unmarshal(data, &summaryObj); err == nil && summaryObj.Title != "" {
+	if err := json.Unmarshal(data, &summaryObj); err == nil {
 		if err := lfs.UpdateMetaSummary(sessionDir, summaryObj.Title); err != nil {
 			slog.Debug("update meta.json summary", "error", err)
 		} else {

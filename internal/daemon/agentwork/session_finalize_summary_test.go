@@ -119,6 +119,93 @@ func TestProcessResult(t *testing.T) {
 	require.FileExists(t, mdPath, "session.md must be created")
 }
 
+// TestFinalize_ValidationFailure_LeavesUserVisibleFieldsEmpty is the
+// ox-4ggw cross-layer property test. Per ox-qqka, when the LLM produces
+// invalid output the daemon must:
+//
+//  1. Persist a deliberate failure marker (so the session isn't lost
+//     and doctor knows to retry / surface it).
+//  2. Leave user-visible fields (Title, Summary) EMPTY in BOTH
+//     summary.json AND meta.json — the validator's diagnostic must
+//     never surface as the session's title in the UI.
+//  3. Populate ValidationError + SummaryStatus structurally so
+//     consumers can distinguish "pending" from "failed" without
+//     sniffing for sentinel strings.
+//
+// This test is the integration-level boundary check that the entire
+// stack honors the contract — not the per-layer unit tests, which
+// individually all passed even when the leak was live.
+//
+// Failure prevented: any of the producer-side fixes (the three
+// SummarizeResponse construction sites in session_finalize.go) regress
+// and copy the diagnostic into Summary again. Pre-this-test, that
+// regression silently shipped to ledgers; post-this-test, CI catches
+// it.
+func TestFinalize_ValidationFailure_LeavesUserVisibleFieldsEmpty(t *testing.T) {
+	handler := NewSessionFinalizeHandler(slog.Default())
+	handler.skipGit = true
+	handler.skipLFS = true
+
+	ledgerPath := createTestSession(t, "2026-01-06T14-32-testuser-OxFAIL", nil)
+	sessionDir := filepath.Join(ledgerPath, "sessions", "2026-01-06T14-32-testuser-OxFAIL")
+
+	// LLM returns valid JSON but the title is too short — content
+	// validation will fail. This is the exact path that produced the
+	// 14 leaked sessions on the SageOx Internal ledger.
+	tooShort := map[string]any{
+		"title":         "x", // < minimum (3)
+		"summary":       "Some real-looking summary text that's long enough to pass length checks.",
+		"key_actions":   []string{"a"},
+		"outcome":       "success",
+		"topics_found":  []string{"x"},
+		"quality_score": 0.8,
+	}
+	jsonBytes, _ := json.MarshalIndent(tooShort, "", "  ")
+
+	item := &WorkItem{
+		ID: "test-fail", Type: sessionFinalizeType,
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    filepath.Join(sessionDir, "raw.jsonl"),
+			Missing:    requiredArtifacts,
+			LedgerPath: ledgerPath,
+		},
+	}
+	require.NoError(t, handler.ProcessResult(item, &RunResult{
+		Output: string(jsonBytes), Duration: time.Second, ExitCode: 0,
+	}))
+
+	// --- summary.json: the structured signal must be set, the user-
+	//     visible string fields must be empty.
+	summaryJSONBytes, err := os.ReadFile(filepath.Join(sessionDir, "summary.json"))
+	require.NoError(t, err, "summary.json must be persisted as a deliberate failure marker, not silently dropped")
+	var sj map[string]any
+	require.NoError(t, json.Unmarshal(summaryJSONBytes, &sj))
+
+	if title, _ := sj["title"].(string); title != "" {
+		t.Errorf("summary.json title must be empty on validation failure (was the ox-qqka leak); got %q", title)
+	}
+	if summary, _ := sj["summary"].(string); summary != "" {
+		t.Errorf("summary.json summary must be empty on validation failure; got %q", summary)
+	}
+	if status, _ := sj["summary_status"].(string); status != "failed_validation" {
+		t.Errorf("summary.json summary_status must be 'failed_validation'; got %q", status)
+	}
+	if ve, _ := sj["validation_error"].(string); ve == "" {
+		t.Error("summary.json validation_error must be populated so ops can diagnose")
+	}
+
+	// --- meta.json: same invariants. THIS is what the api-go list
+	//     handler reads and the web UI renders. Pre-fix the diagnostic
+	//     showed up here as the row title.
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	require.NoError(t, err)
+	assert.Empty(t, meta.Title, "meta.title must be empty on validation failure (UI row title leak)")
+	assert.Empty(t, meta.Summary, "meta.summary must be empty on validation failure (the ox-qqka leak)")
+	assert.Equal(t, "failed_validation", meta.SummaryStatus, "meta must carry structured failure status")
+	assert.NotEmpty(t, meta.ValidationError, "meta must carry the ops-facing diagnostic separately from user-visible fields")
+}
+
 func TestProcessResult_UnparsableJSON(t *testing.T) {
 	handler := NewSessionFinalizeHandler(slog.Default())
 	handler.skipGit = true
@@ -157,17 +244,50 @@ func TestProcessResult_UnparsableJSON(t *testing.T) {
 		}
 	}
 
-	// summary.json should contain a fallback error message, not raw LLM output.
-	// The exact text depends on which stub wins: parse-error fires first
-	// ("Summary generation failed"), then content validation fires against the
-	// stub's empty title and replaces it with "Summary failed content validation".
-	// Either "failed" marker proves we didn't ship the raw free-text as a summary.
+	// summary.json should record the failure structurally, not as user-
+	// visible prose, and must NOT echo the raw LLM free-text. After
+	// ox-qqka the failure stub leaves "title" and "summary" empty and
+	// records the diagnostic in "validation_error" + "summary_status";
+	// older versions wrote "Summary generation failed: ..." into the
+	// "summary" field, which then leaked into meta.json and the UI.
+	//
+	// We assert intent, not exact wording: (a) some structured failure
+	// signal is present, (b) the LLM free-text is not in the file at
+	// all, (c) the user-visible "summary" key is empty so consumers
+	// that read it directly get a clean empty string rather than a
+	// diagnostic disguised as a session description.
 	data, _ := os.ReadFile(filepath.Join(sessionDir, "summary.json"))
-	if !strings.Contains(string(data), "failed") {
-		t.Errorf("summary.json fallback should contain a failure marker, not raw LLM output; got: %s", string(data))
-	}
+
 	if strings.Contains(string(data), "This session was about testing") {
 		t.Error("summary.json must not contain the raw LLM free-text output")
+	}
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(data, &parsed))
+
+	// User-visible "summary" must NOT carry a diagnostic — that's the
+	// exact leak ox-qqka fixed.
+	if s, _ := parsed["summary"].(string); s != "" {
+		t.Errorf("summary.json[\"summary\"] must be empty on failure (was the ox-qqka leak); got %q", s)
+	}
+	if s, _ := parsed["title"].(string); s != "" {
+		t.Errorf("summary.json[\"title\"] must be empty on failure; got %q", s)
+	}
+
+	// At least one structured failure signal must be present so consumers
+	// can distinguish "still pending" from "tried and failed".
+	hasFailureSignal := false
+	if status, _ := parsed["summary_status"].(string); status == "failed_validation" {
+		hasFailureSignal = true
+	}
+	if ve, _ := parsed["validation_error"].(string); ve != "" {
+		hasFailureSignal = true
+	}
+	if sr, _ := parsed["score_reason"].(string); strings.Contains(sr, "failed") {
+		hasFailureSignal = true // legacy diagnostic field kept for ops
+	}
+	if !hasFailureSignal {
+		t.Errorf("summary.json must carry a structured failure signal (summary_status / validation_error / score_reason); got: %s", string(data))
 	}
 }
 
