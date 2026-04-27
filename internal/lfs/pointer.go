@@ -76,10 +76,15 @@ func WritePointerFile(path string, ref FileRef) error {
 	return os.WriteFile(path, []byte(content), 0644)
 }
 
-// WritePointerFiles writes LFS pointer files for each entry in files.
-// Keys are filenames written as dir/<key>. Returns sorted absolute paths
-// of written files. Both sessions and imports use this to create the
+// WritePointerFiles writes LFS pointer files for each LFS-stored entry in
+// files. Keys are filenames written as dir/<key>. Returns sorted absolute
+// paths of written files. Both sessions and imports use this to create the
 // standard git-lfs pointer files that prevent garbage collection.
+//
+// Entries with Storage=git (committed directly to git, e.g. summary.json)
+// are skipped — writing a pointer file there would clobber the real content
+// with empty bytes. Legacy entries (no Storage field) are treated as LFS
+// per FileRef.EffectiveStorage().
 func WritePointerFiles(dir string, files map[string]FileRef) ([]string, error) {
 	if len(files) == 0 {
 		return nil, nil
@@ -87,6 +92,9 @@ func WritePointerFiles(dir string, files map[string]FileRef) ([]string, error) {
 
 	var paths []string
 	for name, ref := range files {
+		if !ref.IsLFS() {
+			continue // Storage=git: real content stays in place
+		}
 		p := filepath.Join(dir, name)
 		if err := WritePointerFile(p, ref); err != nil {
 			return paths, fmt.Errorf("write pointer %s: %w", name, err)
@@ -131,5 +139,5 @@ func ReadPointerFile(path string) (FileRef, error) {
 	if err != nil {
 		return FileRef{}, err
 	}
-	return FileRef{OID: oid, Size: size}, nil
+	return FileRef{Storage: StorageLFS, OID: oid, Size: size}, nil
 }

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -250,4 +252,205 @@ func TestSessionStart_NoOAuthGate_RegressionTest(t *testing.T) {
 		assert.NotContains(t, err.Error(), "ox login",
 			"session start must not prompt for ox login")
 	}
+}
+
+// --- meta.json manifest refactor (bd ox-9mrk) ---
+
+// TestSessionArtifactsToStage_ManifestPath: when meta.json has a non-empty
+// Files map, the helper returns absolute paths for exactly those entries
+// — no more, no less. Failure prevented: a future change re-introduces
+// the historical glob ALONGSIDE the manifest, accidentally double-staging
+// or staging files the manifest deliberately omits.
+func TestSessionArtifactsToStage_ManifestPath(t *testing.T) {
+	dir := t.TempDir()
+
+	// write a meta.json with mixed Storage entries
+	meta := &lfs.SessionMeta{
+		Version: "1.0", SessionName: "s", AgentID: "Ox", AgentType: "claude-code",
+		CreatedAt: time.Now(),
+		Files: map[string]lfs.FileRef{
+			"raw.jsonl":    {Storage: lfs.StorageLFS, OID: "sha256:abc", Size: 10},
+			"summary.json": lfs.NewGitFileRef(20),
+		},
+	}
+	require.NoError(t, lfs.WriteSessionMetaOnly(dir, meta))
+
+	// also drop a stray *.md file that should NOT appear (manifest excludes it)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "stray.md"), []byte("nope"), 0644))
+
+	got := sessionArtifactsToStage(dir)
+	sort.Strings(got)
+	want := []string{
+		filepath.Join(dir, "raw.jsonl"),
+		filepath.Join(dir, "summary.json"),
+	}
+	sort.Strings(want)
+	assert.Equal(t, want, got, "manifest path must return exactly meta.Files entries; stray.md must be ignored")
+}
+
+// TestSessionArtifactsToStage_FallbackWhenNoMetaJSON: the historical glob
+// path runs when meta.json is missing. Must include summary.json
+// opportunistically. Failure prevented: a torn write or legacy session
+// produces an empty staging set and silently commits nothing.
+func TestSessionArtifactsToStage_FallbackWhenNoMetaJSON(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte("x"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.md"), []byte("y"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "summary.json"), []byte(`{}`), 0644))
+
+	got := sessionArtifactsToStage(dir)
+	sort.Strings(got)
+	expected := []string{
+		filepath.Join(dir, "raw.jsonl"),
+		filepath.Join(dir, "summary.json"),
+		filepath.Join(dir, "summary.md"),
+	}
+	sort.Strings(expected)
+	assert.Equal(t, expected, got, "fallback path must glob known extensions plus opportunistic summary.json")
+}
+
+// TestSessionArtifactsToStage_FallbackWhenManifestEmpty: meta.json exists
+// but Files is empty. Must STILL fall back to glob — otherwise an empty
+// `Files: {}` would commit zero artifacts. Failure prevented: a write
+// race or buggy upload path zeros out Files and the subsequent commit
+// silently strips every artifact from the ledger.
+func TestSessionArtifactsToStage_FallbackWhenManifestEmpty(t *testing.T) {
+	dir := t.TempDir()
+	meta := &lfs.SessionMeta{
+		Version: "1.0", SessionName: "s", AgentID: "Ox", AgentType: "claude-code",
+		CreatedAt: time.Now(),
+		Files:     map[string]lfs.FileRef{}, // empty!
+	}
+	require.NoError(t, lfs.WriteSessionMetaOnly(dir, meta))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte("x"), 0644))
+
+	got := sessionArtifactsToStage(dir)
+	assert.Contains(t, got, filepath.Join(dir, "raw.jsonl"),
+		"empty Files map must trigger glob fallback, not return nil")
+}
+
+// TestSessionArtifactsToStage_EmptyDir: the legitimate empty case — no
+// meta.json, no files at all — returns nothing without error.
+func TestSessionArtifactsToStage_EmptyDir(t *testing.T) {
+	got := sessionArtifactsToStage(t.TempDir())
+	assert.Empty(t, got)
+}
+
+// TestBackfillGitArtifactInMeta_LiftsLegacyEntry: a meta.json that
+// predates the Storage tag (entry has only Size) gets lifted to
+// Storage=git when backfill runs. Failure prevented: redact path leaves
+// stale Storage="" entries on summary.json that doctor would later flag
+// as inconsistent or that a future strict-mode reader would reject.
+func TestBackfillGitArtifactInMeta_LiftsLegacyEntry(t *testing.T) {
+	dir := t.TempDir()
+	meta := &lfs.SessionMeta{
+		Version: "1.0", SessionName: "s", AgentID: "Ox", AgentType: "claude-code",
+		CreatedAt: time.Now(),
+		Files: map[string]lfs.FileRef{
+			// legacy: no Storage field
+			"summary.json": {Size: 100},
+		},
+	}
+	require.NoError(t, lfs.WriteSessionMetaOnly(dir, meta))
+
+	updated := backfillGitArtifactInMeta(dir, "summary.json", 200)
+	assert.True(t, updated, "size differs, should rewrite")
+
+	got, err := lfs.ReadSessionMeta(dir)
+	require.NoError(t, err)
+	assert.Equal(t, lfs.StorageGit, got.Files["summary.json"].Storage)
+	assert.Equal(t, int64(200), got.Files["summary.json"].Size)
+}
+
+// TestBackfillGitArtifactInMeta_Idempotent: calling with the same size as
+// already recorded returns false (no rewrite). Failure prevented: every
+// `commitAndPushLedgerWithExtras` invocation re-touching meta.json and
+// triggering spurious "session: foo (retry)" diffs.
+func TestBackfillGitArtifactInMeta_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	meta := &lfs.SessionMeta{
+		Version: "1.0", SessionName: "s", AgentID: "Ox", AgentType: "claude-code",
+		CreatedAt: time.Now(),
+		Files: map[string]lfs.FileRef{
+			"summary.json": lfs.NewGitFileRef(150),
+		},
+	}
+	require.NoError(t, lfs.WriteSessionMetaOnly(dir, meta))
+
+	updated := backfillGitArtifactInMeta(dir, "summary.json", 150)
+	assert.False(t, updated, "same size, should not rewrite")
+}
+
+// TestBackfillGitArtifactInMeta_MissingMetaFailsSoft: best-effort
+// contract — no meta.json means return false, no panic, no file created.
+// Failure prevented: a fresh ledger or torn-write state crashes the
+// commit pipeline.
+func TestBackfillGitArtifactInMeta_MissingMetaFailsSoft(t *testing.T) {
+	dir := t.TempDir()
+	updated := backfillGitArtifactInMeta(dir, "summary.json", 100)
+	assert.False(t, updated)
+	_, err := os.Stat(filepath.Join(dir, "meta.json"))
+	assert.True(t, os.IsNotExist(err), "missing meta.json must NOT be created by the helper")
+}
+
+// TestRegisterGitArtifactInMeta_AddsNewEntryAndPreservesLFS: the helper
+// used by push-summary adds summary.json with Storage=git WITHOUT
+// disturbing existing LFS entries. Failure prevented: a refactor that
+// replaces meta.Files instead of mutating it would silently drop the
+// raw.jsonl pointer, breaking every later read.
+func TestRegisterGitArtifactInMeta_AddsNewEntryAndPreservesLFS(t *testing.T) {
+	dir := t.TempDir()
+	meta := &lfs.SessionMeta{
+		Version: "1.0", SessionName: "s", AgentID: "Ox", AgentType: "claude-code",
+		CreatedAt: time.Now(),
+		Files: map[string]lfs.FileRef{
+			"raw.jsonl": {Storage: lfs.StorageLFS, OID: "sha256:abc", Size: 999},
+		},
+	}
+	require.NoError(t, lfs.WriteSessionMetaOnly(dir, meta))
+
+	updated := registerGitArtifactInMeta(dir, "summary.json", 42)
+	assert.True(t, updated)
+
+	got, err := lfs.ReadSessionMeta(dir)
+	require.NoError(t, err)
+
+	// new entry added correctly
+	assert.Equal(t, lfs.StorageGit, got.Files["summary.json"].Storage)
+	assert.Equal(t, int64(42), got.Files["summary.json"].Size)
+
+	// existing entry preserved verbatim
+	assert.Equal(t, lfs.StorageLFS, got.Files["raw.jsonl"].Storage)
+	assert.Equal(t, "sha256:abc", got.Files["raw.jsonl"].OID)
+	assert.Equal(t, int64(999), got.Files["raw.jsonl"].Size)
+}
+
+// TestRegisterGitArtifactInMeta_IdempotentSameSize: a second call with
+// the same size returns false; no spurious meta.json rewrites. Failure
+// prevented: push-summary called twice (e.g., manual retry) churning
+// meta.json mtime and racing the daemon.
+func TestRegisterGitArtifactInMeta_IdempotentSameSize(t *testing.T) {
+	dir := t.TempDir()
+	meta := &lfs.SessionMeta{
+		Version: "1.0", SessionName: "s", AgentID: "Ox", AgentType: "claude-code",
+		CreatedAt: time.Now(),
+		Files: map[string]lfs.FileRef{
+			"summary.json": lfs.NewGitFileRef(77),
+		},
+	}
+	require.NoError(t, lfs.WriteSessionMetaOnly(dir, meta))
+
+	assert.False(t, registerGitArtifactInMeta(dir, "summary.json", 77),
+		"same Storage=git + same size: no rewrite expected")
+}
+
+// TestRegisterGitArtifactInMeta_MissingMetaFailsSoft: no meta.json →
+// return false, no file created, no error escapes. Same fail-soft
+// contract as backfill. Failure prevented: push-summary against a
+// session whose meta.json hasn't been written yet panics or aborts.
+func TestRegisterGitArtifactInMeta_MissingMetaFailsSoft(t *testing.T) {
+	dir := t.TempDir()
+	assert.False(t, registerGitArtifactInMeta(dir, "summary.json", 1))
+	_, err := os.Stat(filepath.Join(dir, "meta.json"))
+	assert.True(t, os.IsNotExist(err))
 }

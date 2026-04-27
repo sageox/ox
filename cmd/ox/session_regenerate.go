@@ -687,6 +687,15 @@ func regenerateSessionRedact(projectRoot, ledgerPath, sessionsDir, nameArg strin
 		if sumErr != nil {
 			slog.Warn("summary.json redaction failed", "session", sessionName, "error", sumErr)
 		}
+		// Refresh manifest entry: redaction can change summary.json's size,
+		// so meta.Files[summary.json].Size would otherwise drift. Also lifts
+		// the entry to Storage=git for legacy meta.json that predates the
+		// manifest refactor.
+		if summaryRedacted {
+			if info, statErr := os.Stat(summaryPath); statErr == nil {
+				_ = backfillGitArtifactInMeta(sessionPath, "summary.json", info.Size())
+			}
+		}
 	}
 
 	if entriesRedacted == 0 && !summaryRedacted {
@@ -986,24 +995,19 @@ func redactSummaryJSON(path string, redactor *session.Redactor) (bool, error) {
 }
 
 // commitAndPushLedgerBatch commits all modified meta.json files in one commit and pushes.
+//
+// Staging strategy mirrors commitAndPushLedger: derive the per-session
+// artifact list from meta.Files (manifest-driven), with the historical
+// glob as fallback for legacy sessions or torn writes. summary.json is
+// staged automatically when meta.Files records it (Storage=git).
 func commitAndPushLedgerBatch(ledgerPath string, sessionNames []string) error {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 
-	// collect files to stage
 	var filesToAdd []string
 	for _, name := range sessionNames {
 		sessionDir := filepath.Join(sessionsDir, name)
 		filesToAdd = append(filesToAdd, filepath.Join(sessionDir, "meta.json"))
-		// summary.json is git-tracked (not LFS)
-		summaryPath := filepath.Join(sessionDir, "summary.json")
-		if _, err := os.Stat(summaryPath); err == nil {
-			filesToAdd = append(filesToAdd, summaryPath)
-		}
-		// stage LFS pointer files
-		for _, pattern := range []string{"*.jsonl", "*.md"} {
-			matches, _ := filepath.Glob(filepath.Join(sessionDir, pattern))
-			filesToAdd = append(filesToAdd, matches...)
-		}
+		filesToAdd = append(filesToAdd, sessionArtifactsToStage(sessionDir)...)
 	}
 	filesToAdd = append(filesToAdd, filepath.Join(sessionsDir, ".gitignore"))
 

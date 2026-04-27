@@ -69,6 +69,29 @@ type SessionFinalizePayload struct {
 // SessionFinalizeHandler detects and finalizes incomplete sessions in the ledger.
 // It generates missing artifacts: summary.md (via LLM), summary.json,
 // and session.md (deterministic exports).
+//
+// SESSION SUMMARIZATION DELEGATION — see ADR-016.
+//
+// This handler is the daemon-owned alternative to inline summarization in
+// `cmd/ox/session_push_summary.go`. The motivating problem with inline-only
+// summarization: it forces the calling agent to run a 30–120s LLM call in the
+// foreground at the exact moment the user has just said "I'm done" and wants
+// to close the agent or `/clear` and start something new. Delegating to the
+// calling agent is the right default *technically* (the agent already has
+// context loaded, no extra binary is required, every agent type works), but
+// it should only be the *forced* path when the user has not specified — and
+// ox cannot auto-detect — an LLM agent for daemon callouts.
+//
+// When this handler runs, `ox session stop` returns immediately with an
+// empty `summary_prompt`. The daemon spawns the user's configured LLM CLI
+// (claude/codex/gemini), runs the same prompt the inline path would have
+// used, validates richness/content, and calls into the shared
+// `pushSummaryToLedger` flow. Prompt construction and validation live in
+// exactly one place (`pkg/sessionsummary`) — there is no second
+// implementation to drift.
+//
+// `ox doctor` enqueues missing summaries into this same handler, so the
+// repair path is the same as the happy path.
 type SessionFinalizeHandler struct {
 	logger *slog.Logger
 	// skipGit disables git add/commit/push in tests

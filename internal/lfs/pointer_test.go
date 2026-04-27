@@ -118,6 +118,50 @@ func TestWritePointerFiles_NilMap(t *testing.T) {
 	assert.Nil(t, paths)
 }
 
+// TestWritePointerFiles_SkipsGitStorage verifies that a Storage=git entry
+// in the manifest does NOT get a pointer file written for it. Without this
+// guard, summary.json (or any future git-stored artifact) would be
+// clobbered with a 130-byte LFS pointer text — silent data loss every
+// time meta.json is rewritten.
+//
+// Failure prevented: rewriting meta.json after push-summary clobbers
+// summary.json's content.
+func TestWritePointerFiles_SkipsGitStorage(t *testing.T) {
+	dir := t.TempDir()
+
+	// pre-populate summary.json with real JSON content
+	realJSON := `{"title":"hello","summary":"world"}`
+	summaryPath := filepath.Join(dir, "summary.json")
+	require.NoError(t, os.WriteFile(summaryPath, []byte(realJSON), 0644))
+
+	files := map[string]FileRef{
+		"raw.jsonl":    {Storage: StorageLFS, OID: "sha256:abc", Size: 100},
+		"summary.json": NewGitFileRef(int64(len(realJSON))), // Storage=git
+	}
+
+	paths, err := WritePointerFiles(dir, files)
+	require.NoError(t, err)
+	// only the LFS entry should produce a pointer file path
+	assert.Len(t, paths, 1)
+	assert.Contains(t, paths[0], "raw.jsonl")
+
+	// summary.json must still hold the original JSON, not a pointer
+	got, err := os.ReadFile(summaryPath)
+	require.NoError(t, err)
+	assert.Equal(t, realJSON, string(got), "summary.json content must NOT be replaced with an LFS pointer")
+	assert.False(t, IsPointerFile(summaryPath), "summary.json must not be a pointer file")
+}
+
+// TestFileRef_BackwardsCompatLegacyEmpty verifies the canonical reader
+// helper treats an empty Storage field as "lfs" — the only legal value
+// at the time pre-refactor meta.json files were written.
+func TestFileRef_BackwardsCompatLegacyEmpty(t *testing.T) {
+	legacy := FileRef{OID: "sha256:abc", Size: 1234}
+	assert.Equal(t, StorageLFS, legacy.EffectiveStorage())
+	assert.True(t, legacy.IsLFS())
+	assert.False(t, legacy.IsGit())
+}
+
 func TestIsPointerFile(t *testing.T) {
 	dir := t.TempDir()
 

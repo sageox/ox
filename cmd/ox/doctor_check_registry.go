@@ -555,6 +555,20 @@ func init() {
 		},
 	})
 
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugSessionManifest,
+		Name:        "session manifest integrity",
+		Category:    "Sessions",
+		FixLevel:    FixLevelCheckOnly,
+		Description: "Verifies every file recorded in each session's meta.json Files manifest exists on disk (LFS pointer for Storage=lfs, real blob for Storage=git)",
+		Run: func(fix bool) checkResult {
+			gitRoot := findGitRoot()
+			check := doctor.NewSessionManifestCheck(gitRoot)
+			result := check.Run(context.Background(), fix)
+			return convertDoctorResult(result)
+		},
+	})
+
 	// ============================================================
 	// Agent Worker checks
 	// ============================================================

@@ -1,3 +1,31 @@
+// session_push_summary.go is the inline-summarization endpoint: it accepts a
+// summary JSON produced by the calling agent (in response to the summary_prompt
+// returned by `ox session stop`), validates and enriches it, then commits and
+// pushes summary.json to the ledger.
+//
+// # Why two execution sites exist for summarization
+//
+// Delegating summarization back to the calling agent is the right default
+// *technically*: the agent already has the conversation in context (so input
+// tokens are effectively free), no extra binary is required, and it works for
+// every supported agent (Claude Code, Cursor, Aider, Codex CLI, …).
+//
+// But it blocks the user at exactly the wrong moment. They have just signaled
+// "I'm done" and want to close the agent or `/clear` and move on; an inline
+// LLM call holds them in the foreground for 30–120s for a ~1–4KB JSON output.
+// We should only force the inline path when the user has not specified (and
+// ox cannot auto-detect) an LLM agent for daemon callouts.
+//
+// The daemon-side equivalent lives in
+// `internal/daemon/agentwork/session_finalize.go` and calls back into the
+// shared `pushSummaryToLedger` flow below — so prompt construction and
+// validation live in exactly one place. Today the dispatch is gated behind
+// `SAGEOX_ASYNC_SESSION_UPLOAD=1` (see `cmd/ox/agent_session.go`); the plan
+// is to lift that to a first-class `agent.summarizer` user-config key with
+// `auto` as the default.
+//
+// See ADR-016 (docs/adr/ADR-016-session-summarization-delegation.md) for the
+// full rationale, behavior matrix, and tradeoffs.
 package main
 
 import (
@@ -246,6 +274,21 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
+	// Register summary.json in meta.Files with Storage=git so the manifest
+	// is the single source of truth for "what artifacts belong to this
+	// session". commitAndPushLedger and the redact path iterate meta.Files
+	// to decide what to stage; without this entry summary.json would only
+	// be staged via the explicit summaryDst arg below (today's behavior),
+	// which keeps drifting every time a new code path is added.
+	//
+	// Best-effort: if meta.json is missing or unwritable, fall through —
+	// the summary.json file itself is still committed via the explicit
+	// add below, and doctor will reconcile the manifest later. We also
+	// re-mark metaUpdated so meta.json gets staged in the same commit.
+	if updated := registerGitArtifactInMeta(sessionDir, "summary.json", int64(len(mergedData))); updated {
+		metaUpdated = true
+	}
+
 	// extract session name from session dir path for commit message
 	sessionName := filepath.Base(sessionDir)
 
@@ -398,6 +441,38 @@ func preserveComputedFields(summaryPath string, newSummary *session.SummarizeRes
 	if len(newSummary.Chapters) == 0 && len(existing.Chapters) > 0 {
 		newSummary.Chapters = existing.Chapters
 	}
+}
+
+// registerGitArtifactInMeta records a git-stored (non-LFS) artifact in
+// the session's meta.json Files manifest. Returns true if meta.json was
+// successfully read and rewritten so the caller knows to stage meta.json
+// in the next commit.
+//
+// Best-effort: any failure (missing meta.json, unwritable, invalid JSON)
+// returns false. The artifact file is still committed by the caller's
+// explicit `git add`; the manifest entry is a follow-up that doctor can
+// reconcile if it doesn't land here.
+//
+// Idempotent: if meta.Files[filename] already records a Storage=git entry
+// with the same size, no rewrite is performed.
+func registerGitArtifactInMeta(sessionDir, filename string, size int64) bool {
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	if err != nil {
+		slog.Debug("registerGitArtifactInMeta: meta.json unreadable", "session", sessionDir, "filename", filename, "error", err)
+		return false
+	}
+	if meta.Files == nil {
+		meta.Files = make(map[string]lfs.FileRef)
+	}
+	if existing, ok := meta.Files[filename]; ok && existing.IsGit() && existing.Size == size {
+		return false // already up-to-date
+	}
+	meta.Files[filename] = lfs.NewGitFileRef(size)
+	if err := lfs.WriteSessionMetaOnly(sessionDir, meta); err != nil {
+		slog.Debug("registerGitArtifactInMeta: write meta.json failed", "session", sessionDir, "error", err)
+		return false
+	}
+	return true
 }
 
 // findGitRootFrom walks up from a directory to find the .git root.

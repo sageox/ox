@@ -122,6 +122,22 @@ func ensureSessionsGitignore(sessionsDir string) error {
 // Uses pull --rebase with retry to handle concurrent pushes from other team members.
 // NEVER uses --force push. Conflicts are resolved via pull --rebase.
 //
+// # File staging strategy (manifest-driven, with glob fallback)
+//
+// The set of session-artifact files to stage is derived from meta.Files
+// (the canonical manifest in meta.json). Each entry — LFS pointer file or
+// git-stored artifact like summary.json — is staged uniformly. This makes
+// meta.Files the single source of truth: adding a new session artifact is
+// one entry in the manifest, no code drift across upload, commit, redact,
+// and doctor paths.
+//
+// When meta.json is unreadable or its Files map is empty (very legacy
+// sessions, or a torn write), we fall back to the historical glob
+// (*.jsonl/*.html/*.md). The fallback is the original behavior; it
+// preserves backwards compatibility with sessions that predate the
+// Storage-tagged manifest. summary.json is also opportunistically staged
+// in the fallback path so the redact flow always carries forward.
+//
 // Uses exec.Command("git") rather than go-git for the same reasons as the daemon
 // (see daemon/sync.go doPull): rebase support, process isolation, and lock safety.
 // This is a low-volume path (once per session stop), so subprocess overhead is negligible.
@@ -136,12 +152,7 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 	metaPath := filepath.Join(sessionDir, "meta.json")
 	gitignorePath := filepath.Join(sessionsDir, ".gitignore")
 
-	// stage meta.json, .gitignore, and any LFS pointer files
-	filesToAdd := []string{metaPath, gitignorePath}
-	for _, pattern := range []string{"*.jsonl", "*.html", "*.md"} {
-		matches, _ := filepath.Glob(filepath.Join(sessionDir, pattern))
-		filesToAdd = append(filesToAdd, matches...)
-	}
+	filesToAdd := append([]string{metaPath, gitignorePath}, sessionArtifactsToStage(sessionDir)...)
 
 	// --sparse: ledger repos use sparse-checkout (cone mode); this flag
 	// prevents git from blocking adds if sparse rules change or edge cases arise
@@ -166,46 +177,81 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 	return pushLedger(context.Background(), ledgerPath)
 }
 
-// commitAndPushLedgerWithExtras commits meta.json, .gitignore, and optionally summary.json,
-// then pushes to remote. Used by doctor retry path where summary.json may have been
-// copied from cache alongside the LFS upload retry.
-// NEVER uses --force push. Conflicts are resolved via pull --rebase.
+// commitAndPushLedgerWithExtras is a thin compatibility shim around
+// commitAndPushLedger, retained for the doctor retry path. Pre-manifest,
+// commitAndPushLedger only globbed *.jsonl/*.html/*.md and missed
+// summary.json; this helper existed to opt summary.json in. With the
+// manifest-driven staging in commitAndPushLedger, summary.json is now
+// staged automatically whenever meta.Files records it (which push-summary
+// always does). The includeSummary flag is therefore a no-op for new
+// sessions; it remains accepted for old call sites and to belt-and-
+// suspender any session whose meta.json hasn't been updated yet.
 func commitAndPushLedgerWithExtras(ledgerPath, sessionName string, includeSummary bool) error {
-	// ensure .gitignore is in place before any commit to prevent cache file leakage
-	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
-	sessionsDir := filepath.Join(ledgerPath, "sessions")
-	sessionDir := filepath.Join(sessionsDir, sessionName)
-
-	filesToAdd := []string{
-		filepath.Join(sessionDir, "meta.json"),
-		filepath.Join(sessionsDir, ".gitignore"),
-	}
 	if includeSummary {
-		filesToAdd = append(filesToAdd, filepath.Join(sessionDir, "summary.json"))
+		// best-effort: ensure summary.json is registered in the manifest
+		// so commitAndPushLedger picks it up even on legacy meta.json.
+		sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+		summaryPath := filepath.Join(sessionDir, "summary.json")
+		if info, err := os.Stat(summaryPath); err == nil {
+			_ = backfillGitArtifactInMeta(sessionDir, "summary.json", info.Size())
+		}
 	}
-	// stage LFS pointer files
+	return commitAndPushLedger(ledgerPath, sessionName)
+}
+
+// sessionArtifactsToStage returns the set of session-artifact files (LFS
+// pointer files + git-stored artifacts like summary.json) that should be
+// staged for commit, derived from meta.Files. Falls back to the historical
+// glob (*.jsonl/*.html/*.md) plus opportunistic summary.json when
+// meta.json is missing, unreadable, or its Files map is empty — this
+// preserves backwards compat with very-legacy sessions and any torn-write
+// recovery scenario.
+//
+// All returned paths are absolute (joined with sessionDir).
+func sessionArtifactsToStage(sessionDir string) []string {
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	if err == nil && len(meta.Files) > 0 {
+		paths := make([]string, 0, len(meta.Files))
+		for name := range meta.Files {
+			paths = append(paths, filepath.Join(sessionDir, name))
+		}
+		return paths
+	}
+
+	// fallback: glob the historical artifact extensions and opportunistically
+	// pick up summary.json if it exists. Used when meta.json is unreadable
+	// or the manifest is empty.
+	var paths []string
 	for _, pattern := range []string{"*.jsonl", "*.html", "*.md"} {
 		matches, _ := filepath.Glob(filepath.Join(sessionDir, pattern))
-		filesToAdd = append(filesToAdd, matches...)
+		paths = append(paths, matches...)
 	}
-
-	// --sparse: see commitAndPushLedger for rationale
-	args := append([]string{"-C", ledgerPath, "add", "--sparse"}, filesToAdd...)
-	addCmd := exec.Command("git", args...)
-	if output, err := addCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git add failed: %s: %w", string(output), err)
+	if summaryPath := filepath.Join(sessionDir, "summary.json"); fileExists(summaryPath) {
+		paths = append(paths, summaryPath)
 	}
+	return paths
+}
 
-	commitMsg := fmt.Sprintf("session: %s (retry)", sessionName)
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		if strings.Contains(string(output), "nothing to commit") {
-			return nil
-		}
-		return fmt.Errorf("git commit failed: %s: %w", string(output), err)
+// backfillGitArtifactInMeta records a git-stored artifact in meta.Files
+// for legacy sessions whose manifest predates the Storage tag. Idempotent
+// and best-effort; failures are logged at debug only.
+func backfillGitArtifactInMeta(sessionDir, filename string, size int64) bool {
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	if err != nil {
+		return false
 	}
-
-	return pushLedger(context.Background(), ledgerPath)
+	if meta.Files == nil {
+		meta.Files = make(map[string]lfs.FileRef)
+	}
+	if existing, ok := meta.Files[filename]; ok && existing.IsGit() && existing.Size == size {
+		return false
+	}
+	meta.Files[filename] = lfs.NewGitFileRef(size)
+	if err := lfs.WriteSessionMetaOnly(sessionDir, meta); err != nil {
+		slog.Debug("backfillGitArtifactInMeta: write meta.json failed", "session", sessionDir, "error", err)
+		return false
+	}
+	return true
 }
 
 // resolveLedgerPath returns the ledger git repo path for the project.

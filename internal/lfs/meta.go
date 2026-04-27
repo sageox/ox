@@ -14,29 +14,79 @@ import (
 // WriteSessionMeta also writes LFS pointer files (standard git-lfs naming)
 // to replace content files, preventing LFS garbage collection.
 type SessionMeta struct {
-	Version     string             `json:"version"` // "1.0"
-	SessionName string             `json:"session_name"`
-	Username    string             `json:"username"` // privacy-safe display name — via identity.AttributionDisplayName(). Shared in ledger. NOT an email.
-	UserID      string             `json:"user_id,omitempty"`
-	AgentID     string             `json:"agent_id"`
-	AgentType   string             `json:"agent_type"` // "claude-code", "cursor", etc.
-	Model       string             `json:"model,omitempty"`
-	Title       string             `json:"title,omitempty"`
-	CreatedAt   time.Time          `json:"created_at"`
-	EntryCount  int                `json:"entry_count,omitempty"`
-	Summary     string             `json:"summary,omitempty"`
-	StopReason  string             `json:"stop_reason,omitempty"` // how session ended: "stopped", "aborted", "recovered", ""
-	RepoID      string             `json:"repo_id,omitempty"`
+	Version             string             `json:"version"` // "1.0"
+	SessionName         string             `json:"session_name"`
+	Username            string             `json:"username"` // privacy-safe display name — via identity.AttributionDisplayName(). Shared in ledger. NOT an email.
+	UserID              string             `json:"user_id,omitempty"`
+	AgentID             string             `json:"agent_id"`
+	AgentType           string             `json:"agent_type"` // "claude-code", "cursor", etc.
+	Model               string             `json:"model,omitempty"`
+	Title               string             `json:"title,omitempty"`
+	CreatedAt           time.Time          `json:"created_at"`
+	EntryCount          int                `json:"entry_count,omitempty"`
+	Summary             string             `json:"summary,omitempty"`
+	StopReason          string             `json:"stop_reason,omitempty"` // how session ended: "stopped", "aborted", "recovered", ""
+	RepoID              string             `json:"repo_id,omitempty"`
 	SageoxScore         *float64           `json:"sageox_score,omitempty"`          // agent's self-reported contribution score (0.0-1.0)
 	SageoxScoreCategory string             `json:"sageox_score_category,omitempty"` // named category: none, minor, moderate, significant, critical
 	SageoxScoreReason   string             `json:"sageox_score_reason,omitempty"`   // detailed explanation of SageOx influence
-	Files             map[string]FileRef `json:"files"`                         // OID manifest: filename -> ref
+	Files               map[string]FileRef `json:"files"`                           // OID manifest: filename -> ref
 }
 
-// FileRef identifies a content file by its LFS OID and size.
+// FileRef identifies a session content file by storage backend, OID
+// (for LFS files), and size.
+//
+// # Storage tag
+//
+// The Storage field declares which backend holds the bytes:
+//
+//   - StorageLFS — content is in the LFS blob store, identified by OID.
+//     The in-place git-tracked file is a ~130-byte pointer.
+//   - StorageGit — content is committed directly to git as a regular blob
+//     (small JSON, e.g. summary.json). OID is empty.
+//
+// # Backwards compatibility
+//
+// Pre-Storage meta.json files have FileRef{OID, Size} and no Storage field.
+// JSON unmarshalling leaves Storage="" on those entries; the reader's
+// canonical helper FileRef.EffectiveStorage() promotes empty to StorageLFS
+// (the only legal value at the time those files were written). All call
+// sites MUST go through EffectiveStorage() rather than reading f.Storage
+// directly. Writers set Storage explicitly for new entries; legacy entries
+// stay untouched on disk until something rewrites the manifest.
+//
+// See ADR-016 (delegation) and meta.json manifest refactor (bd ox-9mrk).
 type FileRef struct {
-	OID  string `json:"oid"`  // "sha256:<hex>"
-	Size int64  `json:"size"` // bytes
+	Storage string `json:"storage,omitempty"` // "lfs" | "git"; empty == "lfs" for legacy reads
+	OID     string `json:"oid,omitempty"`     // "sha256:<hex>" — populated only for Storage=="lfs"
+	Size    int64  `json:"size"`              // bytes (always populated)
+}
+
+// FileRef storage backends. Use these constants rather than string literals.
+const (
+	StorageLFS = "lfs"
+	StorageGit = "git"
+)
+
+// EffectiveStorage returns the storage backend for this FileRef, promoting
+// empty (legacy meta.json with no storage tag) to StorageLFS. All readers
+// that branch on storage MUST use this helper.
+func (f FileRef) EffectiveStorage() string {
+	if f.Storage == "" {
+		return StorageLFS
+	}
+	return f.Storage
+}
+
+// IsLFS reports whether this FileRef is stored in LFS (including legacy
+// entries with no Storage field).
+func (f FileRef) IsLFS() bool {
+	return f.EffectiveStorage() == StorageLFS
+}
+
+// IsGit reports whether this FileRef is stored directly in git (no LFS).
+func (f FileRef) IsGit() bool {
+	return f.EffectiveStorage() == StorageGit
 }
 
 // HydrationStatus describes whether a session's content files are present locally.
@@ -318,11 +368,24 @@ func ResolveContentPath(sessionDir, cacheDir, filename string) string {
 	return ""
 }
 
-// NewFileRef creates a FileRef from content bytes.
+// NewFileRef creates a FileRef for an LFS-stored file from its content
+// bytes. Computes the OID and stamps Storage=lfs explicitly so future
+// readers don't need to fall back to the empty-means-lfs legacy rule.
 func NewFileRef(content []byte) FileRef {
 	return FileRef{
-		OID:  "sha256:" + ComputeOID(content),
-		Size: int64(len(content)),
+		Storage: StorageLFS,
+		OID:     "sha256:" + ComputeOID(content),
+		Size:    int64(len(content)),
+	}
+}
+
+// NewGitFileRef creates a FileRef for a file committed directly to git
+// (no LFS). Used for small artifacts like summary.json that are not worth
+// indirecting through LFS. OID is intentionally empty.
+func NewGitFileRef(size int64) FileRef {
+	return FileRef{
+		Storage: StorageGit,
+		Size:    size,
 	}
 }
 

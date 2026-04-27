@@ -155,11 +155,11 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 				adapterName = adapter.Name()
 				since := time.Now().Add(-5 * time.Minute)
 				sf, findErr := adapter.FindSessionFile(adapters.SessionLookup{
-				RepoRoot: projectRoot,
-				AgentID:  inst.AgentID,
-				Since:    since,
-			})
-			if findErr != nil {
+					RepoRoot: projectRoot,
+					AgentID:  inst.AgentID,
+					Since:    since,
+				})
+				if findErr != nil {
 					slog.Info("session file not found at start (will retry at stop)", "adapter", adapterName, "error", findErr)
 				} else {
 					sessionFile = sf
@@ -314,7 +314,6 @@ func printSessionStartText(agentID, adapterName, title, notice string, startedAt
 	fmt.Printf("  Started: %s\n", startedAt.Format("15:04:05"))
 	fmt.Printf("  Run %s to end recording\n", cli.StyleCommand.Render("/ox-session-stop"))
 }
-
 
 // isManualSessionAgent returns true for agent types that require explicit
 // adapter selection instead of generic/deep autodetection.
@@ -1133,6 +1132,32 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// write meta.json to ledger, commit and push.
 	// This is best-effort -- session processing already succeeded.
 	// No spinner here -- bubbletea conflicts with Claude Code's own epoll on stdin.
+	//
+	// SESSION SUMMARIZATION DELEGATION — see ADR-016 for full rationale.
+	//
+	// Two paths produce summary.json:
+	//
+	//   1. Inline (default today): SummaryPrompt is returned to the calling
+	//      agent. The agent runs the LLM on its existing conversation context
+	//      and pipes the result to `ox session push-summary`. Free in input
+	//      tokens, agent-agnostic, no extra binary required — but blocks the
+	//      user in the foreground for 30–120s at exactly the moment they
+	//      signaled "I'm done" and wanted to /clear or close the agent.
+	//
+	//   2. Daemon-delegated (this branch when asyncUpload is true): CLI
+	//      uploads raw.jsonl + meta.json synchronously (small, durability-
+	//      critical), then signals the daemon and returns immediately.
+	//      `internal/daemon/agentwork/session_finalize.go` spawns the user's
+	//      configured LLM CLI (claude/codex/gemini), generates the summary,
+	//      and calls back into the shared pushSummaryToLedger flow.
+	//
+	// Delegating to the calling agent is the right default *technically*, but
+	// only when the user has not specified an LLM agent for daemon callouts.
+	// When the user *has* a usable runner configured (or auto-detectable on
+	// PATH), forcing the inline path is pure user-visible latency for no
+	// architectural benefit. The plan is to lift this env var to a first-class
+	// `agent.summarizer` config key with `auto` (PATH detection) as the
+	// default. The current env var stays as a compatibility alias.
 	asyncUpload := os.Getenv("SAGEOX_ASYNC_SESSION_UPLOAD") == "1"
 
 	if ledgerErr != nil {
@@ -1161,7 +1186,11 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 				slog.Info("daemon signal failed, doctor will catch it", "error", signalErr)
 				_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			} else {
-				// clear summary prompt — daemon handles summary generation
+				// clear summary prompt — daemon handles summary generation.
+				// This is the user-facing payoff of ADR-016: the calling
+				// agent sees an empty summary_prompt, knows the daemon owns
+				// it, and can return control to the user immediately instead
+				// of holding them in the foreground for an inline LLM call.
 				result.SummaryPrompt = ""
 				result.UploadWarning = ""
 			}
@@ -1553,8 +1582,6 @@ func runAgentSessionSummarize(inst *agentinstance.Instance, args []string) error
 	fmt.Println(string(jsonOut))
 	return nil
 }
-
-
 
 // mapRoleToEntryType delegates to session.MapRoleToEntryType.
 func mapRoleToEntryType(role string) session.EntryType {

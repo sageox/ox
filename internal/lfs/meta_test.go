@@ -1,6 +1,7 @@
 package lfs
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -269,6 +270,125 @@ func TestUpdateMetaSummary(t *testing.T) {
 			assert.Equal(t, tt.wantUser, got.Username)
 		})
 	}
+}
+
+// TestSessionMeta_StorageRoundTrip verifies that the FileRef Storage tag
+// survives a marshal+unmarshal cycle for all three encodings:
+//
+//  1. Storage="lfs" (new explicit form)
+//  2. Storage="git" (new git-stored form)
+//  3. Storage="" (legacy meta.json files written before the refactor)
+//
+// And — critically — that legacy entries do NOT gain a `"storage"` key on
+// rewrite: the field is `omitempty`, so a freshly-marshaled legacy ref
+// stays byte-equivalent to what we read. Without this guard, every rewrite
+// of an old meta.json would churn `"storage":""` into the JSON, breaking
+// any tooling that does byte-equality on ledger files.
+//
+// Failure prevented: silently rewriting every legacy meta.json on first
+// write-after-refactor with a spurious storage key.
+func TestSessionMeta_StorageRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	// build a manifest with one of each kind
+	original := &SessionMeta{
+		Version:     "1.0",
+		SessionName: "test",
+		Username:    "user@test",
+		AgentID:     "Oxabc",
+		AgentType:   "claude-code",
+		CreatedAt:   time.Date(2026, 4, 26, 0, 0, 0, 0, time.UTC),
+		Files: map[string]FileRef{
+			"raw.jsonl":    {Storage: StorageLFS, OID: "sha256:lfs1", Size: 100},
+			"summary.json": {Storage: StorageGit, Size: 42},
+			"legacy.md":    {OID: "sha256:lfs2", Size: 200}, // no Storage field
+		},
+	}
+
+	// marshal → unmarshal → assert all three preserved through the typed reader
+	require.NoError(t, WriteSessionMetaOnly(sessionDir, original))
+	got, err := ReadSessionMeta(sessionDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, StorageLFS, got.Files["raw.jsonl"].Storage)
+	assert.Equal(t, StorageGit, got.Files["summary.json"].Storage)
+	assert.Equal(t, "", got.Files["legacy.md"].Storage, "legacy entry must keep empty Storage on read")
+	assert.True(t, got.Files["legacy.md"].IsLFS(), "legacy entry must be treated as LFS via EffectiveStorage")
+	assert.Equal(t, "", got.Files["summary.json"].OID, "git-stored entry should have empty OID")
+
+	// raw JSON inspection: the legacy entry must NOT gain a "storage" key
+	rawBytes, err := os.ReadFile(filepath.Join(sessionDir, "meta.json"))
+	require.NoError(t, err)
+	var raw struct {
+		Files map[string]map[string]any `json:"files"`
+	}
+	require.NoError(t, json.Unmarshal(rawBytes, &raw))
+
+	_, legacyHasStorage := raw.Files["legacy.md"]["storage"]
+	assert.False(t, legacyHasStorage,
+		"legacy entry must NOT have a storage key on rewrite (omitempty regression)")
+
+	_, lfsHasStorage := raw.Files["raw.jsonl"]["storage"]
+	assert.True(t, lfsHasStorage, "explicit Storage=lfs must be persisted")
+
+	_, gitHasStorage := raw.Files["summary.json"]["storage"]
+	assert.True(t, gitHasStorage, "explicit Storage=git must be persisted")
+
+	_, gitHasOID := raw.Files["summary.json"]["oid"]
+	assert.False(t, gitHasOID, "git-stored entry must NOT persist an oid key (omitempty)")
+}
+
+// TestWriteSessionMeta_PreservesGitContent_ReplacesLFSContent verifies the
+// load-bearing safety property at the public API level: when meta.Files
+// contains a mix of Storage=lfs and Storage=git entries, WriteSessionMeta
+// replaces the LFS files with pointers but leaves the git-stored file's
+// real bytes untouched.
+//
+// TestWritePointerFiles_SkipsGitStorage covers the inner helper; this test
+// covers the entrypoint that callers actually use (push-summary's later
+// meta rewrites, redact's mid-flow rewrite, doctor repairs).
+//
+// Failure prevented: any future change to WriteSessionMeta that bypasses
+// the WritePointerFiles guard (e.g., inlining the loop) would clobber
+// summary.json with an empty pointer file every time meta.json is
+// rewritten. Test asserts the user-visible invariant directly.
+func TestWriteSessionMeta_PreservesGitContent_ReplacesLFSContent(t *testing.T) {
+	dir := t.TempDir()
+	sessionDir := filepath.Join(dir, "session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	// write real content for both files
+	rawContent := []byte(`{"event":"recording"}`)
+	summaryContent := []byte(`{"title":"hello","summary":"world"}`)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), rawContent, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.json"), summaryContent, 0644))
+
+	meta := &SessionMeta{
+		Version:     "1.0",
+		SessionName: "mixed",
+		Username:    "user@test",
+		AgentID:     "Oxmix",
+		AgentType:   "claude-code",
+		CreatedAt:   time.Now(),
+		Files: map[string]FileRef{
+			"raw.jsonl":    {Storage: StorageLFS, OID: "sha256:abc", Size: int64(len(rawContent))},
+			"summary.json": NewGitFileRef(int64(len(summaryContent))),
+		},
+	}
+	require.NoError(t, WriteSessionMeta(sessionDir, meta))
+
+	// LFS entry: replaced with a pointer file
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	assert.True(t, IsPointerFile(rawPath), "raw.jsonl must be replaced with an LFS pointer")
+
+	// Git entry: real bytes intact
+	summaryPath := filepath.Join(sessionDir, "summary.json")
+	assert.False(t, IsPointerFile(summaryPath), "summary.json must NOT be a pointer file")
+	gotSummary, err := os.ReadFile(summaryPath)
+	require.NoError(t, err)
+	assert.Equal(t, summaryContent, gotSummary, "summary.json content must survive WriteSessionMeta unchanged")
 }
 
 func TestWriteSessionMeta_ReplacesContentWithPointers(t *testing.T) {

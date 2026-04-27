@@ -160,6 +160,7 @@ const (
 	CheckSlugSessionUploadRetry = "session-upload-retry"
 	CheckSlugSessionUncommitted = "session-uncommitted"
 	CheckSlugSessionOrphaned    = "session-orphaned"
+	CheckSlugSessionManifest    = "session-manifest"
 
 	// Authentication checks (credential health)
 	CheckSlugGitHubAuth          = "github-auth"
