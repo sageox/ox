@@ -82,16 +82,24 @@ func IsLeakySummaryString(s string) bool {
 // leakySummaryReason returns a short label describing why s is leaky,
 // or empty string if it is not. Centralizes the shape so callers don't
 // each duplicate the prefix list.
+//
+// We trim leading/trailing whitespace before matching so a disguised
+// diagnostic like "  Summary failed content validation: x" or
+// "\tSummary generation failed: x" cannot bypass the writer-side guard
+// or the retro-cleanup tool. Without this, a future caller could
+// persist a padded sentinel to meta.json and the on-disk truth would
+// carry the leak even if every render-time mitigation already trims.
 func leakySummaryReason(s string) string {
-	if s == "" {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
 		return ""
 	}
 	for _, prefix := range LeakySummaryPrefixes {
-		if strings.HasPrefix(s, prefix) {
+		if strings.HasPrefix(trimmed, prefix) {
 			return "prefix=" + prefix
 		}
 	}
-	if statsStubPattern.MatchString(s) {
+	if statsStubPattern.MatchString(trimmed) {
 		return "shape=stats-stub"
 	}
 	return ""

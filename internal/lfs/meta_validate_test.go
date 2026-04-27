@@ -157,6 +157,40 @@ func TestIsLeakySummaryString_MatchesOnlyKnownShapes(t *testing.T) {
 	}
 }
 
+// TestValidateUserVisible_RejectsPaddedSentinels: a leaky string with
+// leading/trailing whitespace must still be rejected. Pre-fix, the
+// detector used `strings.HasPrefix` against the raw value, which a
+// caller could trivially bypass by writing
+// "  Summary failed content validation: x" — every render-time
+// mitigation already trims, so the UI would hide the leak, but the
+// on-disk meta.json would still carry the disguised diagnostic.
+//
+// Failure prevented: a future producer (or third-party tool) writes a
+// whitespace-padded sentinel and the writer accepts it. Both the
+// writer-side guard and the retro-cleanup tool now share the same
+// trim-then-match invariant via leakySummaryReason.
+func TestValidateUserVisible_RejectsPaddedSentinels(t *testing.T) {
+	padded := []string{
+		"  Summary failed content validation: title too short",  // leading spaces
+		"\tSummary generation failed: bad json",                  // leading tab
+		"Summary failed richness validation: missing actions  ",  // trailing spaces
+		" \n Summary failed content validation: leading newline", // mixed whitespace
+		"  5 user messages, 10 assistant responses",              // padded stats stub
+	}
+	for _, leak := range padded {
+		t.Run(leak, func(t *testing.T) {
+			assert.True(t, IsLeakySummaryString(leak),
+				"detector must catch %q despite leading/trailing whitespace", leak)
+
+			err := ValidateUserVisible(&SessionMeta{Summary: leak})
+			require.Error(t, err, "writer-side guard must reject padded leak in Summary")
+
+			err = ValidateUserVisible(&SessionMeta{Title: leak})
+			require.Error(t, err, "writer-side guard must reject padded leak in Title")
+		})
+	}
+}
+
 // TestSessionMeta_Validate_RoundTripsThroughWriter is the integration
 // proof that meta.Validate() == ValidateUserVisible(meta) and is wired
 // through both writer entry points. The user-visible invariant is the
