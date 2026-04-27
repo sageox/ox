@@ -202,6 +202,63 @@ func TestRepairMetaSummary_RunTwiceIsNoop(t *testing.T) {
 	assert.True(t, second.Skipped, "second run must be a no-op (idempotency)")
 }
 
+// TestRepairMetaSummary_OnlyLeakyFieldIsCleared: when one user-visible
+// field is leaky and the other carries legitimate content, the repair
+// must clear ONLY the leaky one. Pre-fix the code blanked both fields
+// whenever either matched IsLeakySummaryString, erasing real titles by
+// mistake. CodeRabbit caught this on PR #566.
+//
+// Failure prevented: a session whose meta.title is "Migrated auth to
+// OAuth2" but whose meta.summary somehow ended up with the validator
+// stub gets its real title nuked when we run the repair. This test
+// pins the corrected behavior.
+func TestRepairMetaSummary_OnlyLeakyFieldIsCleared(t *testing.T) {
+	sd := t.TempDir()
+	const goodTitle = "Migrated auth to OAuth2"
+
+	require.NoError(t, writeRawMeta(sd, map[string]any{
+		"version":      "1.0",
+		"session_name": "s", "agent_id": "Ox", "agent_type": "claude-code",
+		"created_at": time.Now().Format(time.RFC3339Nano),
+		"title":      goodTitle, // legitimate
+		"summary":    "Summary failed content validation: x", // leaky
+	}))
+
+	oc := repairSessionMetaSummary(sd, false)
+	require.Empty(t, oc.Error)
+	assert.False(t, oc.ChangedTitle, "the clean title must NOT be cleared")
+	assert.True(t, oc.ChangedSummary, "the leaky summary must be cleared")
+
+	got, err := lfs.ReadSessionMeta(sd)
+	require.NoError(t, err)
+	assert.Equal(t, goodTitle, got.Title, "real title preserved")
+	assert.Empty(t, got.Summary, "leaky summary cleared")
+	// ValidationError must come from the leaky summary, not the clean title —
+	// otherwise pickDiagnosticForOps's "longer string wins" heuristic would
+	// have mis-attributed the title (longer than the leak prefix) into ops.
+	assert.Contains(t, got.ValidationError, "Summary failed content validation",
+		"diagnostic must be sourced from the actually-leaky field")
+	assert.NotContains(t, got.ValidationError, goodTitle,
+		"clean title must not be copied into ValidationError")
+}
+
+// TestRepairMetaSummary_MissingMetaJSON_IsSkippedNotErrored: a session
+// folder with no meta.json (e.g. a recording that crashed before stop)
+// must hit the Skipped path. Pre-fix the wrapped error from
+// lfs.ReadSessionMeta broke os.IsNotExist detection and these sessions
+// were silently flagged as errors by the repair tool. Caught by
+// CodeRabbit on PR #566.
+//
+// Failure prevented: a large ledger with many in-flight sessions
+// reports a sea of false-positive errors that mask real problems.
+func TestRepairMetaSummary_MissingMetaJSON_IsSkippedNotErrored(t *testing.T) {
+	sd := t.TempDir() // no meta.json inside
+
+	oc := repairSessionMetaSummary(sd, false)
+	assert.True(t, oc.Skipped, "session without meta.json must be skipped, not errored")
+	assert.Empty(t, oc.Error)
+}
+
 // TestRepairMetaSummary_PreservesFilesManifest: the OID manifest
 // (meta.Files) must survive the rewrite verbatim. A repair that
 // accidentally dropped or mutated the manifest would orphan LFS blobs

@@ -734,11 +734,15 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		scored = false
 	} else {
 		summaryResp = parsed
-		// Successful parse — mark explicitly so consumers can rely on
-		// SummaryStatus rather than sniffing for sentinel strings.
-		if summaryResp.SummaryStatus == "" {
-			summaryResp.SummaryStatus = sessionsummary.SummaryStatusOK
-		}
+		// SummaryStatus and ValidationError are daemon-owned lifecycle
+		// fields. The model could echo stale values in its output (a
+		// previous failed_validation status, a leftover diagnostic, or
+		// adversarial input). Discard whatever the parse step picked
+		// up — the validator pipeline below is the only authority on
+		// these fields. Stamp OK only if all subsequent validators pass
+		// (see the `if scored` block after richness validation).
+		summaryResp.SummaryStatus = ""
+		summaryResp.ValidationError = ""
 	}
 
 	// validate summary content for agent meta-output contamination.
@@ -812,6 +816,12 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	// logs the path. Failures are swallowed — never block finalization
 	// on a judgment run.
 	if scored {
+		// All validators (parse + content + richness) passed. Daemon
+		// is the sole authority on lifecycle metadata — stamp OK and
+		// ensure no stale ValidationError leaked through from earlier
+		// states or from the parsed model output.
+		summaryResp.SummaryStatus = sessionsummary.SummaryStatusOK
+		summaryResp.ValidationError = ""
 		h.maybeRunJudge(sessionName, payload.LedgerPath, summaryResp)
 	}
 

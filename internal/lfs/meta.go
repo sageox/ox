@@ -272,7 +272,13 @@ func ReadSessionMeta(sessionPath string) (*SessionMeta, error) {
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("meta.json not found in %s", sessionPath)
+			// Wrap with %w so callers can use errors.Is(err, fs.ErrNotExist)
+			// or os.IsNotExist(err). Pre-fix this returned a plain
+			// fmt.Errorf("meta.json not found...") which broke the
+			// IsNotExist check at every caller (e.g. the repair tool's
+			// "skip unfinished sessions" path silently flagged them as
+			// errors instead).
+			return nil, fmt.Errorf("meta.json not found in %s: %w", sessionPath, err)
 		}
 		return nil, fmt.Errorf("read session meta: %w", err)
 	}

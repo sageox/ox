@@ -13,7 +13,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -160,8 +162,11 @@ func repairSessionMetaSummary(sessionDir string, dryRun bool) repairOutcome {
 	if err != nil {
 		// missing meta.json is normal for sessions that never finished —
 		// this tool is only about repairing an existing leak, not about
-		// authoring new metadata.
-		if os.IsNotExist(err) {
+		// authoring new metadata. Use errors.Is(fs.ErrNotExist) rather
+		// than os.IsNotExist: the latter does NOT unwrap, so a wrapped
+		// not-found error from lfs.ReadSessionMeta would be missed and
+		// the session would be flagged as an error instead.
+		if errors.Is(err, fs.ErrNotExist) {
 			oc.Skipped = true
 			return oc
 		}
@@ -179,13 +184,31 @@ func repairSessionMetaSummary(sessionDir string, dryRun bool) repairOutcome {
 	// Try to recover from summary.json.
 	cleanTitle, cleanSummary := readSummaryJSONForRepair(sessionDir)
 
-	originalDiagnostic := pickDiagnosticForOps(meta.Summary, meta.Title)
+	// Diagnostic preservation: ONLY pull from fields that were actually
+	// flagged as leaky. If meta.Summary is leaky but meta.Title is a real
+	// title, we must not treat the title as a diagnostic source —
+	// pickDiagnosticForOps's "longer string wins" heuristic would
+	// otherwise mis-attribute clean text into ValidationError. See the
+	// CodeRabbit review on PR #566 for the trap this avoids.
+	originalDiagnostic := ""
+	switch {
+	case titleLeaky && summaryLeaky:
+		originalDiagnostic = pickDiagnosticForOps(meta.Summary, meta.Title)
+	case summaryLeaky:
+		originalDiagnostic = meta.Summary
+	case titleLeaky:
+		originalDiagnostic = meta.Title
+	}
 
 	switch {
 	case cleanTitle != "":
 		// Recovered: a successful regenerate (or earlier success) wrote
 		// summary.json but the sticky-tombstone bug (ox-wstd) prevented
 		// meta.summary from being overwritten. Apply the recovery.
+		// Recovery overwrites both Title and Summary with the clean
+		// values from summary.json, regardless of which side(s) were
+		// leaky — the goal is consistency between meta and summary.json
+		// as the source of truth.
 		if meta.Title != cleanTitle {
 			meta.Title = cleanTitle
 			oc.ChangedTitle = true
@@ -209,14 +232,16 @@ func repairSessionMetaSummary(sessionDir string, dryRun bool) repairOutcome {
 		oc.RecoveredFromJSON = true
 
 	default:
-		// No clean replacement available. Clear the leak and mark the
+		// No clean replacement available. Clear ONLY the field(s) that
+		// were actually flagged as leaky — never erase a legitimate
+		// value just because the OTHER side was bad. Then mark the
 		// session structurally as failed_validation so consumers don't
 		// rely on string-sniffing.
-		if meta.Title != "" {
+		if titleLeaky && meta.Title != "" {
 			meta.Title = ""
 			oc.ChangedTitle = true
 		}
-		if meta.Summary != "" {
+		if summaryLeaky && meta.Summary != "" {
 			meta.Summary = ""
 			oc.ChangedSummary = true
 		}
