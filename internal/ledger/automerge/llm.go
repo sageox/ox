@@ -42,6 +42,20 @@ func (r *Resolver) tryLLMTier(ctx context.Context, repoPath string, paths []stri
 // writes back the merged result, and stages it.
 func (r *Resolver) mergeOneWithLLM(ctx context.Context, repoPath, path string) error {
 	full := filepath.Join(repoPath, path)
+
+	// Refuse to follow symlinks. A malicious commit can stage a symlink
+	// at a conflicted path that points outside repoPath; reading and
+	// (worse) writing through it during merge would leak/clobber files
+	// outside the ledger. Lstat + Mode().IsRegular() blocks this before
+	// any os.ReadFile / os.WriteFile (which both follow symlinks).
+	info, err := os.Lstat(full)
+	if err != nil {
+		return fmt.Errorf("lstat: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("refuse to merge non-regular file: %s (mode=%v)", path, info.Mode())
+	}
+
 	data, err := os.ReadFile(full)
 	if err != nil {
 		return fmt.Errorf("read: %w", err)
@@ -64,11 +78,9 @@ func (r *Resolver) mergeOneWithLLM(ctx context.Context, repoPath, path string) e
 		return fmt.Errorf("llm output still contains conflict markers")
 	}
 
-	// preserve original file mode where possible
-	mode := os.FileMode(0o644)
-	if info, statErr := os.Stat(full); statErr == nil {
-		mode = info.Mode().Perm()
-	}
+	// preserve original file mode (info from the Lstat above; we already
+	// confirmed it's a regular file)
+	mode := info.Mode().Perm()
 	if err := os.WriteFile(full, []byte(merged), mode); err != nil {
 		return fmt.Errorf("write merged: %w", err)
 	}
@@ -100,24 +112,38 @@ func buildPrompt(path string, content []byte) string {
 // stripFences removes common LLM artifacts (leading/trailing markdown
 // code fences) defensively. The system prompt forbids them, but models
 // occasionally ignore that.
+//
+// IMPORTANT: only strip fences when they are present. Do NOT trim
+// arbitrary whitespace from the body — many file types (Python,
+// Makefiles, YAML, multi-line strings) carry semantically meaningful
+// leading indentation and trailing blank lines that must be preserved.
 func stripFences(s string) string {
-	t := strings.TrimSpace(s)
+	// detect a leading fence on its own line, ignoring at most one optional
+	// leading blank line that some models prepend.
+	t := s
+	if strings.HasPrefix(t, "\n") {
+		t = t[1:]
+	}
 	if strings.HasPrefix(t, "```") {
-		// drop first fence line
 		if nl := strings.IndexByte(t, '\n'); nl >= 0 {
 			t = t[nl+1:]
 		} else {
 			t = ""
 		}
+		// also drop a single trailing fence (with optional trailing newline)
+		// if present.
+		trimTrailing := strings.TrimRight(t, "\n")
+		if strings.HasSuffix(trimTrailing, "```") {
+			t = trimTrailing[:len(trimTrailing)-3]
+			// if the model emitted a final newline before the fence, keep it
+			if strings.HasSuffix(t, "\n") {
+				return t
+			}
+			return t + "\n"
+		}
 	}
-	if strings.HasSuffix(strings.TrimRight(t, "\n"), "```") {
-		t = strings.TrimRight(t, "\n")
-		t = t[:len(t)-3]
-	}
-	// preserve trailing newline if the original input had one — we don't
-	// know either way, so default to ensuring exactly one trailing newline.
-	t = strings.TrimRight(t, "\n") + "\n"
-	return t
+	// no fence detected — return untouched (preserves whitespace)
+	return s
 }
 
 // claudeStreamMessage models the subset of `claude --output-format
@@ -130,10 +156,17 @@ type claudeStreamMessage struct {
 }
 
 // runClaudeBinary spawns `claude --output-format stream-json
-// --permission-mode bypassPermissions -p <prompt>` and returns the result
-// message's text. This is the production llmRunner; tests inject a fake.
+// --permission-mode plan -p <prompt>` and returns the result message's
+// text. This is the production llmRunner; tests inject a fake.
+//
+// Permission mode rationale: the merge prompt feeds untrusted ledger
+// content (potentially including hostile prompt-injection in conflict
+// markers) to the model. We want pure text output — no tool execution
+// at all. `plan` mode disables all tool use including Bash/Edit/Write.
+// Even if the model is tricked into trying to "fix" something, it
+// can't write to disk or execute commands.
 func runClaudeBinary(ctx context.Context, binary, prompt string) (string, error) {
-	args := []string{"--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "-p", prompt}
+	args := []string{"--output-format", "stream-json", "--verbose", "--permission-mode", "plan", "-p", prompt}
 	cmd := exec.CommandContext(ctx, binary, args...)
 	setProcAttr(cmd) // process-group isolation so hung descendants get killed on cancel
 

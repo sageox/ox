@@ -152,7 +152,7 @@ func (r *Resolver) Resolve(ctx context.Context, repoPath string) (bool, error) {
 
 	// Tier 3: LLM merge for the remaining semantic conflicts.
 	if r.opts.LLMBinary == "" {
-		return false, fmt.Errorf("automerge: %d conflict(s) need semantic merge but LLMBinary is empty: %v", len(remaining), remaining)
+		return false, fmt.Errorf("%w: %d conflict(s) need semantic merge: %v", ErrLLMUnavailable, len(remaining), remaining)
 	}
 	if err := r.tryLLMTier(ctx, repoPath, remaining); err != nil {
 		return false, fmt.Errorf("llm tier: %w", err)

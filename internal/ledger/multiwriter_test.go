@@ -249,7 +249,8 @@ func testContentContentRootAGENTSUnionMerges(t *testing.T) {
 	out, rebaseErr := mwGitTry(t, clientA, "pull", "--rebase", "--autostash", "origin", "main")
 	require.NoErrorf(t, rebaseErr, "rebase should succeed under merge=union; output:\n%s", out)
 
-	data, _ := os.ReadFile(filepath.Join(clientA, "AGENTS.md"))
+	data, err := os.ReadFile(filepath.Join(clientA, "AGENTS.md"))
+	require.NoError(t, err, "read AGENTS.md after rebase")
 	merged := string(data)
 	assert.Contains(t, merged, "client edit")
 	assert.Contains(t, merged, "server edit")

@@ -76,9 +76,16 @@ func EnsureMergeAttributes(ledgerPath string) (changed bool, err error) {
 	if ledgerPath == "" {
 		return false, fmt.Errorf("ledger path is empty")
 	}
-	full := filepath.Join(ledgerPath, ledgerMergeAttributesRelPath)
 
-	if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+	// fail fast if .git is missing — silently MkdirAll-ing into a non-git
+	// directory would mask path/caller bugs and leave the rules where git
+	// will never read them.
+	if info, statErr := os.Stat(filepath.Join(ledgerPath, ".git")); statErr != nil || !info.IsDir() {
+		return false, fmt.Errorf("not a git repository: %s", ledgerPath)
+	}
+
+	full := filepath.Join(ledgerPath, ledgerMergeAttributesRelPath)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return false, fmt.Errorf("create info dir: %w", err)
 	}
 

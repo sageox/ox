@@ -46,11 +46,18 @@ func TestStripFences(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"no fences", "hello world", "hello world\n"},
+		// non-fenced input is returned untouched — preserves leading
+		// indentation and trailing blank lines for whitespace-sensitive
+		// file types (Python, Makefiles, YAML, etc.).
+		{"no fences", "hello world", "hello world"},
+		{"already clean trailing newline", "hello\n", "hello\n"},
+		{"preserves leading indent", "    indented\n", "    indented\n"},
+		// fences only stripped when paired (leading + trailing). a stray
+		// trailing-only fence is ambiguous (could be content) and is
+		// preserved verbatim.
 		{"leading fence with lang", "```json\n{\"a\":1}\n```\n", "{\"a\":1}\n"},
 		{"leading fence no lang", "```\nhello\n```", "hello\n"},
-		{"trailing only", "hello\n```", "hello\n"},
-		{"already clean trailing newline", "hello\n", "hello\n"},
+		{"trailing only is preserved", "hello\n```", "hello\n```"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

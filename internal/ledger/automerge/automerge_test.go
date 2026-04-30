@@ -122,9 +122,12 @@ func TestResolve_AcceptTheirsTier(t *testing.T) {
 		t.Fatal("expected ok=true")
 	}
 
-	// rebase should be done — no .git/rebase-* dir
-	if _, statErr := os.Stat(filepath.Join(repo, ".git", "rebase-merge")); statErr == nil {
-		t.Errorf("rebase-merge dir still exists; rebase didn't continue")
+	// rebase should be done — neither rebase-merge nor rebase-apply dir
+	// should exist (git uses one or the other depending on mode/version).
+	for _, name := range []string{"rebase-merge", "rebase-apply"} {
+		if _, statErr := os.Stat(filepath.Join(repo, ".git", name)); statErr == nil {
+			t.Errorf("%s dir still exists; rebase didn't continue", name)
+		}
 	}
 
 	// after `git rebase main` from feature, the "incoming" side (the
@@ -141,14 +144,15 @@ func TestResolve_LLMTier(t *testing.T) {
 	repo := makeRebaseConflict(t, "config.toml", "version = \"ours\"\n", "version = \"theirs\"\n")
 
 	r := New(Options{LLMBinary: "fake-llm"})
-	// pretend the binary exists by skipping the LookPath gate via overriding
-	// runLLM AND short-circuiting the LookPath check: easier path is to
-	// drop into mergeOneWithLLM directly via the public surface.
-	//
-	// The LookPath gate guards tryLLMTier — to exercise the success path we
-	// need a binary that exists. Use /bin/echo (always present on darwin/linux)
-	// as the "binary", then override runLLM to ignore it.
-	r.opts.LLMBinary = "/bin/echo"
+	// The LookPath gate in tryLLMTier requires the binary to resolve from
+	// PATH. Use `git` — it must be on PATH for the rebase setup itself to
+	// work, so this is portable across darwin/linux/windows. runLLM is then
+	// overridden to ignore the binary entirely.
+	gitBin, gitErr := exec.LookPath("git")
+	if gitErr != nil {
+		t.Skipf("git not on PATH: %v", gitErr)
+	}
+	r.opts.LLMBinary = gitBin
 	r.runLLM = func(ctx context.Context, binary, prompt string) (string, error) {
 		return "version = \"ours-and-theirs\"\n", nil
 	}
@@ -176,8 +180,8 @@ func TestResolve_LLMTier_DisabledWithoutBinary(t *testing.T) {
 	if ok {
 		t.Errorf("expected ok=false")
 	}
-	if err == nil || !strings.Contains(err.Error(), "LLMBinary is empty") {
-		t.Errorf("expected LLMBinary-empty error, got: %v", err)
+	if err == nil || !errors.Is(err, ErrLLMUnavailable) {
+		t.Errorf("expected ErrLLMUnavailable sentinel, got: %v", err)
 	}
 }
 

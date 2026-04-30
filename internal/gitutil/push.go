@@ -207,10 +207,13 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 							hookCtx, hookCancel := context.WithTimeout(ctx, opTimeout)
 							resolved, hookErr := opts.OnUnresolvedConflicts(hookCtx, repoPath, conflicted)
 							hookCancel()
+							// only treat as resolved when the hook succeeded AND
+							// signalled resolved. a hook that returned an error
+							// MAY have left the rebase index half-staged; we
+							// must abort rather than continue retrying.
 							if hookErr != nil {
 								log.Warn("OnUnresolvedConflicts hook failed", "error", hookErr)
-							}
-							if resolved {
+							} else if resolved {
 								log.Info("resolved rebase conflicts via OnUnresolvedConflicts hook", "paths", conflicted)
 								hookResolved = true
 							}
