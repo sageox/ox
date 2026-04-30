@@ -234,10 +234,16 @@ func TestDoPull_DivergedWithMixedConflicts_AbortsRebase(t *testing.T) {
 	setupGitRepo(t, cloneDir)
 	bareDir := bareRepoPath(cloneDir)
 
-	// local commit: modify both a safe and unsafe file
+	// local commit: modify both a safe (data/github/) and an
+	// unsafe (src/main.go — neither in AutoResolvePrefixes nor in the
+	// merge=union list) file. AGENTS.md was the historical unsafe choice
+	// here, but with the daemon-side EnsureMergeAttributes pre-flight
+	// AGENTS.md now union-merges automatically, so we use a truly
+	// unresolvable code path instead.
 	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, "data", "github"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, "src"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "data", "github", "prs.json"), []byte(`{"local":true}`), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "AGENTS.md"), []byte("local agents"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "src", "main.go"), []byte("package main // local"), 0o644))
 	gitCmd(t, cloneDir, "add", ".")
 	gitCmd(t, cloneDir, "commit", "-m", "local mixed changes")
 
@@ -247,8 +253,9 @@ func TestDoPull_DivergedWithMixedConflicts_AbortsRebase(t *testing.T) {
 	gitCmd(t, tmpClone, "config", "user.name", "test")
 	gitCmd(t, tmpClone, "config", "user.email", "test@test.com")
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpClone, "data", "github"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpClone, "src"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "data", "github", "prs.json"), []byte(`{"remote":true}`), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "AGENTS.md"), []byte("remote agents"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "src", "main.go"), []byte("package main // remote"), 0o644))
 	gitCmd(t, tmpClone, "add", ".")
 	gitCmd(t, tmpClone, "commit", "-m", "remote mixed changes")
 	gitCmd(t, tmpClone, "push", "origin", "HEAD")

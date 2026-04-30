@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/manifest"
 )
 
@@ -207,6 +208,24 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 			logger.Info("branches diverged, rebasing to reconcile", "repo", repoName)
 			result.Diverged = true
 		}
+	}
+
+	// --- Pull pre-flight: ensure merge=union rules for root metadata ---
+	//
+	// Without this, an add/add or content/content collision on AGENTS.md
+	// (or any other metadata file written by both server seed and client)
+	// halts the rebase and lands us in the "ledger has diverged from
+	// remote" error path below. EnsureMergeAttributes writes the rules
+	// into per-clone .git/info/attributes (no working-tree artifact);
+	// idempotent and safe to call on every pull cycle.
+	//
+	// Best-effort: failure here is degraded mode (rebases may wedge),
+	// not a pull failure. Logged at warn level so an operator can spot
+	// a permission/IO issue.
+	if changed, ensureErr := ledger.EnsureMergeAttributes(path); ensureErr != nil {
+		logger.Warn("ensure merge attributes failed", "repo", repoName, "error", ensureErr)
+	} else if changed {
+		logger.Info("healed ledger merge attributes (auto-repair pre-flight)", "repo", repoName)
 	}
 
 	// --- Pull ---
