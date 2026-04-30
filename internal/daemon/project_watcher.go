@@ -473,24 +473,46 @@ func (pw *ProjectWatcher) handleEvent(watcher FileSystemWatcher, event fsnotify.
 		isDir = info.IsDir()
 	}
 
-	// new directory created — add to watch list (will be validated on next git refresh)
+	// new directory created — add to watch list (will be validated on next git refresh).
+	// Skip if already watched: avoids redundant unix.Open() calls for a path that's
+	// still in our map but whose underlying FD may have been silently invalidated by
+	// a prior remove/rename — re-Add'ing would open a fresh FD without releasing the old one.
 	if isDir && event.Op&fsnotify.Create != 0 {
 		pw.mu.Lock()
+		_, alreadyWatched := pw.watchedDirs[event.Name]
 		atCap := len(pw.watchedDirs) >= maxWatchedDirs
 		pw.mu.Unlock()
-		if !atCap {
+		if !alreadyWatched && !atCap {
 			pw.addDir(watcher, event.Name)
 		}
 	}
 
-	// directory removed — remove from tracked set and release kqueue/inotify FD
+	// directory removed — remove from tracked set and release kqueue/inotify FDs.
+	// fsnotify v1.9.0's kqueue backend (backend_kqueue.go:489) calls
+	// w.remove(name, false) on NOTE_DELETE, which does NOT recursively close
+	// children added via watchDirectoryFiles. Without explicit recursion we
+	// leak one FD per descendant on every rm-rf; over a long-lived daemon
+	// against churning build-output dirs, FDs accumulate without bound.
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 		pw.mu.Lock()
 		_, wasWatched := pw.watchedDirs[event.Name]
 		delete(pw.watchedDirs, event.Name)
+		prefix := event.Name + string(filepath.Separator)
+		var children []string
+		for d := range pw.watchedDirs {
+			if strings.HasPrefix(d, prefix) {
+				children = append(children, d)
+			}
+		}
+		for _, d := range children {
+			delete(pw.watchedDirs, d)
+		}
 		pw.mu.Unlock()
 		if wasWatched {
 			_ = watcher.Remove(event.Name)
+		}
+		for _, d := range children {
+			_ = watcher.Remove(d)
 		}
 	}
 

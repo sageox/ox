@@ -216,6 +216,10 @@ func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 				if s.issues != nil {
 					s.issues.ClearIssue(IssueTypeDirtyWorkspace, "ledger")
 				}
+				// runBlueGreenGC closes the whisper store before the rename to release
+				// SQLite's mmap; reopen it now so writes don't silently fail until the
+				// next daemon restart.
+				s.reopenWhisperStoreAfterGC()
 			case gcSkippedDirty:
 				resp.Errors = append(resp.Errors, "ledger: local changes could not be preserved for GC")
 				if s.issues != nil {
@@ -418,6 +422,19 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 	// ensure .sageox/.gitignore excludes daemon-written files (cache/, checkout.json, etc.)
 	if err := gitserver.EnsureCheckoutGitignoreCtx(ctx, newPath); err != nil {
 		s.logger.Warn("gc: failed to ensure checkout .gitignore on new clone", "error", err)
+	}
+
+	// Close any whisper SQLite store rooted under ws.Path BEFORE the rename.
+	// SQLite keeps -shm/-wal files mmap'd; on POSIX, os.Rename + os.RemoveAll
+	// unlinks the underlying inodes but the kernel pins them as long as the
+	// mmap region is alive, leaking FDs across every reclone. Ledger reopens
+	// via reopenWhisperStoreAfterGC; team stores reopen lazily on next sync.
+	if s.whisperRegistry != nil {
+		if isLedger {
+			s.whisperRegistry.CloseLedgerStore()
+		} else if ws.TeamID != "" {
+			s.whisperRegistry.CloseTeamStore(ws.TeamID)
+		}
 	}
 
 	// step 3: atomic swap — the GC lock (held since entry) serializes against

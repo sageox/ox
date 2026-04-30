@@ -328,6 +328,31 @@ func (r *WhisperRegistry) ReopenLedgerStore(dbPath string) error {
 	return nil
 }
 
+// CloseLedgerStore closes the ledger whisper store and clears the reference.
+// Called by GC before the workspace rename so the OS can release SQLite's
+// mmap on -shm/-wal files. Without this, the kernel pins the orphan inode
+// (POSIX unlink + open mmap) and FDs accumulate across reclones.
+func (r *WhisperRegistry) CloseLedgerStore() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.ledgerStore != nil {
+		_ = r.ledgerStore.Close()
+		r.ledgerStore = nil
+	}
+}
+
+// CloseTeamStore closes and removes a team whisper store. The next sync of the
+// team workspace re-opens it via AddTeamStore. Called by GC before the
+// workspace rename so SQLite releases its mmap on the to-be-orphaned files.
+func (r *WhisperRegistry) CloseTeamStore(teamID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if store, ok := r.teamStores[teamID]; ok {
+		_ = store.Close()
+		delete(r.teamStores, teamID)
+	}
+}
+
 // Close closes all stores.
 func (r *WhisperRegistry) Close() error {
 	r.mu.Lock()

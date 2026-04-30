@@ -765,3 +765,112 @@ func TestProjectWatcher_FDStability(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// TestProjectWatcher_RemoveUnwatchesChildrenRecursively verifies that when a
+// watched directory is removed, every descendant directory we were watching
+// is also unwatched. fsnotify v1.9.0's kqueue backend does not recursively
+// close children on NOTE_DELETE (see backend_kqueue.go:489 — it calls
+// w.remove(name, false), the no-op-children branch). Without our recursive
+// cleanup, FDs leak per descendant on every rm-rf, which is exactly the
+// 226-FDs-against-one-inode pattern observed in the daemon FD-leak diagnosis.
+func TestProjectWatcher_RemoveUnwatchesChildrenRecursively(t *testing.T) {
+	mockWatcher := NewMockFileSystemWatcher()
+	mockFS := NewMockFileSystem()
+
+	dir := t.TempDir()
+	parent := filepath.Join(dir, ".context")
+	childA := filepath.Join(parent, "build")
+	childB := filepath.Join(parent, "build", "esp32")
+	sibling := filepath.Join(dir, "src")
+
+	for _, d := range []string{parent, childA, childB, sibling} {
+		require.NoError(t, os.MkdirAll(d, 0o755))
+		mockFS.AddDir(d, nil)
+	}
+
+	acc := NewChangeAccumulator(50 * time.Millisecond)
+	defer acc.Stop()
+
+	tracker := &GitTrackedMatcher{
+		projectRoot: dir,
+		trackedDirs: map[string]struct{}{
+			".context":            {},
+			".context/build":      {},
+			".context/build/esp32": {},
+			"src":                 {},
+		},
+		trackedFiles: map[string]struct{}{},
+		logger:       slogDiscard(),
+	}
+
+	pw := NewProjectWatcher(
+		dir, slogDiscard(),
+		func() (FileSystemWatcher, error) { return mockWatcher, nil },
+		mockFS, acc, tracker,
+	)
+
+	pw.walkAndWatch(mockWatcher)
+	require.Equal(t, 5, pw.WatchedDirCount(), "root + .context + build + esp32 + src")
+
+	// simulate rm -rf .context — fsnotify only emits a single Remove for the
+	// top-level dir (the kqueue NOTE_DELETE on the parent), not one per child.
+	mockFS.SetStatError(parent, os.ErrNotExist)
+	pw.handleEvent(mockWatcher, fsnotify.Event{Name: parent, Op: fsnotify.Remove})
+
+	assert.Equal(t, 2, pw.WatchedDirCount(),
+		"only root + sibling should remain after recursive cleanup; got %d", pw.WatchedDirCount())
+
+	removed := mockWatcher.RemovedPaths()
+	assert.Contains(t, removed, parent, "parent must be unwatched")
+	assert.Contains(t, removed, childA, "child must be unwatched (fsnotify v1.9 leaks this without our help)")
+	assert.Contains(t, removed, childB, "grandchild must be unwatched (fsnotify v1.9 leaks this without our help)")
+	assert.NotContains(t, removed, sibling, "unrelated sibling must not be unwatched")
+}
+
+// TestProjectWatcher_CreateSkipsAlreadyWatched verifies addDir is not called
+// twice for the same path. Defensive against the diagnosed re-Create storm
+// where a stale Remove leaves an orphan FD and a subsequent Create on the
+// same path would otherwise drive a fresh unix.Open() each time.
+func TestProjectWatcher_CreateSkipsAlreadyWatched(t *testing.T) {
+	mockWatcher := NewMockFileSystemWatcher()
+	mockFS := NewMockFileSystem()
+
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "pkg")
+	require.NoError(t, os.MkdirAll(sub, 0o755))
+	mockFS.AddDir(sub, nil)
+
+	acc := NewChangeAccumulator(50 * time.Millisecond)
+	defer acc.Stop()
+
+	tracker := &GitTrackedMatcher{
+		projectRoot:  dir,
+		trackedDirs:  map[string]struct{}{"pkg": {}},
+		trackedFiles: map[string]struct{}{},
+		logger:       slogDiscard(),
+	}
+
+	pw := NewProjectWatcher(
+		dir, slogDiscard(),
+		func() (FileSystemWatcher, error) { return mockWatcher, nil },
+		mockFS, acc, tracker,
+	)
+
+	pw.walkAndWatch(mockWatcher)
+	beforeAdds := len(mockWatcher.AddedPaths())
+
+	// fire 10 spurious Create events on a path we already watch
+	for i := 0; i < 10; i++ {
+		pw.handleEvent(mockWatcher, fsnotify.Event{Name: sub, Op: fsnotify.Create})
+	}
+
+	addsForPath := 0
+	for _, p := range mockWatcher.AddedPaths() {
+		if p == sub {
+			addsForPath++
+		}
+	}
+	assert.Equal(t, 1, addsForPath, "Add must be called exactly once per path")
+	assert.Equal(t, beforeAdds, len(mockWatcher.AddedPaths()),
+		"redundant Create events must not call Add again")
+}

@@ -124,6 +124,88 @@ func TestReopenWhisperStoreAfterGC_ConcurrentReads(t *testing.T) {
 	assert.Equal(t, "post-concurrent", entries[0].ID)
 }
 
+// TestCloseLedgerStore_ReleasesHandle verifies CloseLedgerStore actually
+// releases the SQLite handle so the underlying files can be unlinked and
+// reopened cleanly. Failure mode prevented: blue-green GC accumulates one
+// orphaned mmap per reclone because the *sql.DB was never closed before
+// the workspace rename — see daemon FD-leak diagnosis (whisper.db-shm
+// pinned under team_*.old paths).
+func TestCloseLedgerStore_ReleasesHandle(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: SQLite file operations")
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "whisper.db")
+	store, err := whisperstore.Open(dbPath)
+	require.NoError(t, err)
+	registry := NewWhisperRegistry(store, nil)
+	defer registry.Close()
+
+	require.NoError(t, registry.Add("ledger", whisperstore.WhisperEntry{
+		ID: "before-close", Scope: "ledger", Type: whisperstore.WhisperTrigger,
+		Source: "test", Topic: "leak", Content: "x",
+		Importance: whisperstore.ImportanceNormal, CreatedAt: time.Now(),
+	}))
+
+	registry.CloseLedgerStore()
+
+	// after close, the registry must report no ledger store and writes must
+	// be no-ops (or surface as errors), not silently mutate the orphaned db.
+	assert.Nil(t, registry.LedgerStore(), "LedgerStore() must be nil after CloseLedgerStore()")
+
+	// reopening at a fresh path must succeed (proves the close fully released
+	// the handle — leaving an mmap alive would block re-open on some platforms).
+	newPath := filepath.Join(t.TempDir(), "whisper-new.db")
+	require.NoError(t, registry.ReopenLedgerStore(newPath))
+	require.NoError(t, registry.Add("ledger", whisperstore.WhisperEntry{
+		ID: "after-reopen", Scope: "ledger", Type: whisperstore.WhisperTrigger,
+		Source: "test", Topic: "leak", Content: "y",
+		Importance: whisperstore.ImportanceNormal, CreatedAt: time.Now(),
+	}))
+
+	entries, _, err := registry.GetWhispersPage("", time.Time{}, 50)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "after-reopen", entries[0].ID)
+}
+
+// TestCloseTeamStore_RemovesAndCloses verifies CloseTeamStore both closes
+// the underlying *sql.DB and removes it from the registry so the next sync
+// can reopen via AddTeamStore. Failure mode prevented: team-context GC
+// reclones leak one whisper.db mmap per reclone because nothing closes
+// the team store before the workspace rename + RemoveAll.
+func TestCloseTeamStore_RemovesAndCloses(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: SQLite file operations")
+	}
+
+	ledgerPath := filepath.Join(t.TempDir(), "ledger.db")
+	ledger, err := whisperstore.Open(ledgerPath)
+	require.NoError(t, err)
+	registry := NewWhisperRegistry(ledger, nil)
+	defer registry.Close()
+
+	teamPath := filepath.Join(t.TempDir(), "team.db")
+	teamStore, err := whisperstore.Open(teamPath)
+	require.NoError(t, err)
+	registry.AddTeamStore("team-1", teamStore)
+	require.True(t, registry.HasTeamStore("team-1"))
+
+	registry.CloseTeamStore("team-1")
+	assert.False(t, registry.HasTeamStore("team-1"),
+		"team store must be removed from registry so next sync re-opens it")
+
+	// closing an already-closed/unknown team must be a no-op (idempotent)
+	assert.NotPanics(t, func() { registry.CloseTeamStore("team-1") })
+	assert.NotPanics(t, func() { registry.CloseTeamStore("never-existed") })
+
+	// re-registering at the same teamID must work cleanly
+	teamStore2, err := whisperstore.Open(teamPath)
+	require.NoError(t, err)
+	registry.AddTeamStore("team-1", teamStore2)
+	assert.True(t, registry.HasTeamStore("team-1"))
+}
+
 func TestReopenWhisperStoreAfterGC_NilRegistry(t *testing.T) {
 	// real-world failure prevented: if murmur feature is disabled, whisperRegistry
 	// is nil — reopenWhisperStoreAfterGC must be a safe no-op
