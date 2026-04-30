@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/ledger/automerge"
 	"github.com/sageox/ox/internal/lfs"
 )
 
@@ -290,6 +292,17 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 	} else {
 		slog.Warn("pushLedger: no git root found, credential refresh will be skipped")
 	}
+
+	// pre-flight: heal ledger merge=union rules in .git/info/attributes so
+	// multi-writer merges work even on ledgers initialized with older CLI
+	// versions that lacked this. Per-clone, never enters the working tree.
+	// Best-effort: failure here is a degraded mode, not a push failure.
+	if changed, err := ledger.EnsureMergeAttributes(ledgerPath); err != nil {
+		slog.Warn("pushLedger: ensure ledger merge attributes failed", "error", err)
+	} else if changed {
+		slog.Info("healed ledger merge attributes", "ledger", ledgerPath)
+	}
+
 	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
 		PrePush: func(repoPath string) error {
@@ -300,8 +313,47 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 			}
 			return nil
 		},
-		ReconcileLFS: makeLFSReconciler(ep),
+		ReconcileLFS:          makeLFSReconciler(ep),
+		OnUnresolvedConflicts: ledgerLLMResolveHook(),
 	})
+}
+
+// ledgerLLMResolveHook returns the OnUnresolvedConflicts callback used by
+// pushLedger when accept-theirs auto-resolution does not cover every
+// conflicted path. Tries the automerge resolver's tiered strategy:
+// in-code union, then LLM merge if a model binary is configured.
+//
+// LLM tier is opt-in via the OX_LLM_MERGE_BIN env var (path to a `claude` /
+// `codex` / `gemini` binary). When unset, the hook still runs the in-code
+// union tier and reports back; LLM is skipped silently.
+func ledgerLLMResolveHook() func(ctx context.Context, repoPath string, paths []string) (bool, error) {
+	return func(ctx context.Context, repoPath string, paths []string) (bool, error) {
+		llmBin := os.Getenv("OX_LLM_MERGE_BIN")
+		r := automerge.New(automerge.Options{
+			LLMBinary:    llmBin,
+			SafePrefixes: ledgerAutoResolvePrefixes,
+			Logger:       slog.Default(),
+		})
+		resolved, err := r.Resolve(ctx, repoPath)
+		switch {
+		case err == nil:
+			return resolved, nil
+		case errors.Is(err, automerge.ErrNoConflicts):
+			// nothing to do == nothing to fail. PushWithRetry's caller
+			// already saw the conflict; if automerge can't see one anymore
+			// it means another tier (or git itself) handled it.
+			return true, nil
+		case errors.Is(err, automerge.ErrLLMUnavailable):
+			// expected when no LLM binary is configured. Lower-tier
+			// resolution already ran inside Resolve; we just couldn't
+			// escalate further. Surface as info, not warn.
+			slog.Info("automerge: llm tier skipped", "reason", "binary not configured", "paths", paths)
+			return resolved, nil
+		default:
+			slog.Warn("automerge: resolve failed", "paths", paths, "error", err)
+			return resolved, err
+		}
+	}
 }
 
 // makeLFSReconciler returns a ReconcileLFS callback that strips orphaned LFS

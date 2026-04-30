@@ -466,6 +466,61 @@ func TestPushWithRetry_RebaseInProgressAborted(t *testing.T) {
 	assert.Contains(t, err.Error(), "broken rebase state")
 }
 
+// TestPushWithRetry_OnUnresolvedConflictsHookCalled verifies that when
+// ResolveRebaseAcceptTheirs cannot resolve a conflict because the path is
+// outside AutoResolvePrefixes, the OnUnresolvedConflicts hook is invoked
+// with the conflicted paths. If the hook reports unresolved, the rebase is
+// aborted and PushWithRetry returns an error.
+//
+// Failure prevented: a higher-tier resolver (e.g. LLM merge) can never be
+// wired in if PushWithRetry refuses to surface the conflict.
+func TestPushWithRetry_OnUnresolvedConflictsHookCalled(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git push with retry")
+	}
+	repo, bare := initBareRemoteRepo(t)
+
+	// second clone pushes a conflicting change to a path NOT covered by
+	// AutoResolvePrefixes (we use "data/github/" as the safe prefix below,
+	// but the conflict happens at the repo root).
+	second := filepath.Join(t.TempDir(), "second")
+	run(t, "", "git", "clone", "--quiet", bare, second)
+	run(t, second, "git", "config", "user.email", "test@test.local")
+	run(t, second, "git", "config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(second, "shared.txt"),
+		[]byte("from-second"), 0644))
+	run(t, second, "git", "add", "shared.txt")
+	run(t, second, "git", "commit", "-m", "second shared", "--no-verify", "--quiet")
+	run(t, second, "git", "push", "--quiet")
+
+	// first clone makes a conflicting change to the same path
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "shared.txt"),
+		[]byte("from-first"), 0644))
+	run(t, repo, "git", "add", "shared.txt")
+	run(t, repo, "git", "commit", "-m", "first shared", "--no-verify", "--quiet")
+
+	var hookCalls atomic.Int32
+	var capturedPaths []string
+	err := PushWithRetry(context.Background(), repo, PushOpts{
+		MaxRetries:          2,
+		OpTimeout:           10 * time.Second,
+		AutoResolvePrefixes: []string{"data/github/"}, // does NOT cover shared.txt
+		OnUnresolvedConflicts: func(ctx context.Context, repoPath string, paths []string) (bool, error) {
+			hookCalls.Add(1)
+			capturedPaths = append([]string(nil), paths...)
+			return false, nil // signal unresolved → PushWithRetry should abort
+		},
+	})
+
+	assert.Error(t, err, "expected push to fail when hook reports unresolved")
+	assert.Equal(t, int32(1), hookCalls.Load(), "OnUnresolvedConflicts hook must be invoked exactly once")
+	assert.Contains(t, capturedPaths, "shared.txt",
+		"hook must receive the unresolved conflicted paths")
+
+	// rebase must have been aborted before returning so the repo is left clean
+	assert.False(t, IsRebaseInProgress(repo), "rebase should be aborted on hook-unresolved failure")
+}
+
 // contains mirrors strings.Contains for test clarity.
 func contains(s, substr string) bool {
 	return len(substr) > 0 && len(s) >= len(substr) && containsImpl(s, substr)

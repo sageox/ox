@@ -36,6 +36,17 @@ type PushOpts struct {
 	// error appended for diagnostics.
 	ReconcileLFS func(repoPath string) (changed bool, err error)
 
+	// OnUnresolvedConflicts is called when pull --rebase halts AND
+	// AutoResolvePrefixes-based accept-theirs cannot resolve every conflicted
+	// path. Receives the list of conflicted paths. If it returns (true, nil),
+	// the rebase has been resolved (rebase --continue ran inside the callback)
+	// and PushWithRetry continues the retry loop. If it returns (false, nil) or
+	// (false, err), PushWithRetry aborts the rebase and returns an error.
+	//
+	// Use this to wire higher-tier resolution (e.g. LLM merge) without coupling
+	// gitutil to those packages.
+	OnUnresolvedConflicts func(ctx context.Context, repoPath string, paths []string) (resolved bool, err error)
+
 	// MaxRetries is the number of push attempts. Zero means use default (3).
 	// To attempt exactly once with no retries, set to 1.
 	MaxRetries int
@@ -181,12 +192,39 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 					resolveCancel()
 					if resolveErr != nil {
 						log.Debug("rebase auto-resolve failed", "error", resolveErr)
-						abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
-						_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
-						abortCancel()
-						return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
+
+						// give the caller a chance to resolve via a higher tier
+						// (e.g. LLM merge) before we abort. The hook owns the
+						// rebase --continue if it succeeds.
+						hookResolved := false
+						if opts.OnUnresolvedConflicts != nil {
+							pathsCtx, pathsCancel := context.WithTimeout(ctx, opTimeout)
+							conflicted, listErr := listConflictedFiles(pathsCtx, repoPath)
+							pathsCancel()
+							if listErr != nil {
+								log.Warn("listing conflicted files failed", "error", listErr)
+							}
+							hookCtx, hookCancel := context.WithTimeout(ctx, opTimeout)
+							resolved, hookErr := opts.OnUnresolvedConflicts(hookCtx, repoPath, conflicted)
+							hookCancel()
+							if hookErr != nil {
+								log.Warn("OnUnresolvedConflicts hook failed", "error", hookErr)
+							}
+							if resolved {
+								log.Info("resolved rebase conflicts via OnUnresolvedConflicts hook", "paths", conflicted)
+								hookResolved = true
+							}
+						}
+
+						if !hookResolved {
+							abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
+							_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
+							abortCancel()
+							return fmt.Errorf("git pull --rebase failed during retry: %s", pullOut)
+						}
+					} else {
+						log.Info("auto-resolved rebase conflicts", "strategy", "accept-theirs")
 					}
-					log.Info("auto-resolved rebase conflicts", "strategy", "accept-theirs")
 				} else {
 					// no auto-resolve configured — abort and fail
 					abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
