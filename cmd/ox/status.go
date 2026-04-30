@@ -1642,10 +1642,29 @@ func renderAuthStatus(authFile string) string {
 			b.WriteString(statusMutedStyle.Render(" <" + epToken.UserInfo.Email + ">"))
 			b.WriteString("\n")
 
-			b.WriteString(statusLabelStyle.Render("Token expires"))
-			b.WriteString(statusMutedStyle.Render(epToken.ExpiresAt.Format("2006-01-02 15:04:05 MST")))
-			if i == 0 {
-				b.WriteString(statusMutedStyle.Render(" (" + authFile + ")"))
+			// Auth status. The OAuth access token expires every ~hour and
+			// is rotated silently via the refresh token (or Better-Auth
+			// session token) — the user does NOT need to re-login when
+			// it rotates. Displaying the short access-token expiry here
+			// historically confused users into thinking they had to ox
+			// login on a near-daily basis. Show the user-meaningful state
+			// instead: "auto-refresh enabled" when refresh is available,
+			// and only surface a timestamp when re-login is genuinely
+			// needed (no refresh token at all).
+			hasRefresh := epToken.EffectiveRefreshToken() != ""
+			if hasRefresh {
+				b.WriteString(statusLabelStyle.Render("Session"))
+				b.WriteString(statusSuccessStyle.Render("✓ auto-refresh enabled"))
+				if i == 0 {
+					b.WriteString(statusMutedStyle.Render(" (" + authFile + ")"))
+				}
+			} else {
+				b.WriteString(statusLabelStyle.Render("Re-login by"))
+				b.WriteString(statusErrorStyle.Render(epToken.ExpiresAt.Format("2006-01-02 15:04:05 MST")))
+				b.WriteString(statusMutedStyle.Render(" (no refresh token; ox login required when this expires)"))
+				if i == 0 {
+					b.WriteString(statusMutedStyle.Render(" " + authFile))
+				}
 			}
 			b.WriteString("\n")
 

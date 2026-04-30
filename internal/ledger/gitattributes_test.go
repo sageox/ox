@@ -22,37 +22,124 @@ func mkGitDir(t *testing.T) string {
 	return dir
 }
 
-func TestEnsureMergeAttributes_CreatesFileWhenMissing(t *testing.T) {
-	dir := mkGitDir(t)
+// TestEnsureMergeAttributes is table-driven across the read-modify-write
+// scenarios. Each entry documents a specific failure that the case
+// prevents — naming after the failure prevented per the project's testing
+// rule, while keeping setup compact via the table.
+//
+// True invariant tests (paths that EnsureMergeAttributes is forbidden
+// from touching, preconditions, errors-on-bad-input) live as separate
+// named tests below — these cannot share the table's read-back assertion
+// pattern.
+func TestEnsureMergeAttributes(t *testing.T) {
+	type tc struct {
+		name string
+		// failurePrevented documents what would break without this case
+		// passing. Required for new entries; if you can't write one,
+		// the case is test theater and shouldn't be added.
+		failurePrevented string
+		// existing seeds .git/info/attributes before EnsureMergeAttributes
+		// runs; "" means the file does not pre-exist.
+		existing string
+		// wantChanged is the expected return value of EnsureMergeAttributes.
+		wantChanged bool
+		// mustContain are substrings that must appear in the output.
+		mustContain []string
+		// mustNotContain are substrings that must NOT appear.
+		mustNotContain []string
+	}
 
-	changed, err := EnsureMergeAttributes(dir)
-	require.NoError(t, err)
-	require.True(t, changed, "expected changed=true on initial write")
+	cases := []tc{
+		{
+			name:             "creates_file_when_missing",
+			failurePrevented: "fresh ledger has no merge driver, first push wedges on add/add",
+			existing:         "",
+			wantChanged:      true,
+			mustContain:      []string{mergeAttrsHeader, mergeAttrsFooter, "AGENTS.md", "merge=union"},
+		},
+		{
+			name:             "preserves_user_authored_lines",
+			failurePrevented: "user who manually configured attributes loses their config the next ox run",
+			existing:         "*.bin binary\n",
+			wantChanged:      true,
+			mustContain:      []string{"*.bin binary", "merge=union"},
+		},
+		{
+			name:             "replaces_stale_managed_block_keeps_user_content",
+			failurePrevented: "old managed block from a different version accumulates across runs",
+			existing:         "*.bin binary\n" + mergeAttrsHeader + "\nAGENTS.md merge=stale-driver\n" + mergeAttrsFooter + "\n",
+			wantChanged:      true,
+			mustContain:      []string{"*.bin binary", "merge=union"},
+			mustNotContain:   []string{"stale-driver"},
+		},
+		{
+			name:             "recovers_from_truncated_block_missing_footer",
+			failurePrevented: "interrupted write or hand-edit causes managed block to grow unbounded each call",
+			existing:         mergeAttrsHeader + "\nAGENTS.md merge=truncated\n",
+			wantChanged:      true,
+			mustContain:      []string{mergeAttrsHeader, mergeAttrsFooter, "merge=union"},
+			mustNotContain:   []string{"merge=truncated"},
+		},
+	}
 
-	data, err := os.ReadFile(filepath.Join(dir, infoAttrsRel))
-	require.NoError(t, err, "read info/attributes")
-	got := string(data)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dir := mkGitDir(t)
+			path := filepath.Join(dir, infoAttrsRel)
 
-	for _, want := range []string{
-		mergeAttrsHeader,
-		mergeAttrsFooter,
-		"AGENTS.md",
-		"merge=union",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("expected output to contain %q, got:\n%s", want, got)
-		}
+			if c.existing != "" {
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+				require.NoError(t, os.WriteFile(path, []byte(c.existing), 0o644))
+			}
+
+			changed, err := EnsureMergeAttributes(dir)
+			require.NoError(t, err)
+			require.Equal(t, c.wantChanged, changed, "changed return value")
+
+			data, err := os.ReadFile(path)
+			require.NoError(t, err, "read info/attributes")
+			got := string(data)
+
+			for _, want := range c.mustContain {
+				if !strings.Contains(got, want) {
+					t.Errorf("[%s] expected output to contain %q\noutput:\n%s\n\nfailure prevented: %s",
+						c.name, want, got, c.failurePrevented)
+				}
+			}
+			for _, banned := range c.mustNotContain {
+				if strings.Contains(got, banned) {
+					t.Errorf("[%s] output unexpectedly contains %q\noutput:\n%s\n\nfailure prevented: %s",
+						c.name, banned, got, c.failurePrevented)
+				}
+			}
+		})
 	}
 }
 
-// TestEnsureMergeAttributes_NotInWorkingTree verifies our chosen path
-// (.git/info/attributes) keeps the user's git-lfs install and any
-// user-authored top-level .gitattributes untouched.
+// TestEnsureMergeAttributes_Idempotent is its own test because the
+// assertion (changed=false on second call) is shape-different from the
+// table above — it requires running EnsureMergeAttributes twice.
 //
-// Failure prevented: regression where someone "helpfully" reverts the
-// path to .gitattributes in the working tree and breaks every user with
-// git-lfs configured globally.
-func TestEnsureMergeAttributes_NotInWorkingTree(t *testing.T) {
+// Failure prevented: every CLI command that calls EnsureMergeAttributes
+// (push pre-flight, ledger init, doctor) needlessly rewrites the file
+// and triggers fsnotify churn / makes audit logs noisy.
+func TestEnsureMergeAttributes_Idempotent(t *testing.T) {
+	dir := mkGitDir(t)
+	_, err := EnsureMergeAttributes(dir)
+	require.NoError(t, err, "first call")
+	changed, err := EnsureMergeAttributes(dir)
+	require.NoError(t, err, "second call")
+	require.False(t, changed, "expected changed=false on second call")
+}
+
+// TestEnsureMergeAttributes_NeverInWorkingTree is its own test because
+// the assertion is about a path that must NOT exist — fundamentally
+// different from the table's "what's in the file" model.
+//
+// Failure prevented: regression where someone reverts the path back to
+// a tracked .gitattributes in the working tree, breaking every user
+// with git-lfs configured globally.
+func TestEnsureMergeAttributes_NeverInWorkingTree(t *testing.T) {
 	dir := mkGitDir(t)
 	_, err := EnsureMergeAttributes(dir)
 	require.NoError(t, err)
@@ -61,113 +148,33 @@ func TestEnsureMergeAttributes_NotInWorkingTree(t *testing.T) {
 	}
 }
 
-func TestEnsureMergeAttributes_Idempotent(t *testing.T) {
-	dir := mkGitDir(t)
-
-	_, err := EnsureMergeAttributes(dir)
-	require.NoError(t, err, "first call")
-
-	changed, err := EnsureMergeAttributes(dir)
-	require.NoError(t, err, "second call")
-	require.False(t, changed, "expected changed=false on second call")
-}
-
-// TestEnsureMergeAttributes_PreservesExistingContent verifies that a
-// user-authored line in info/attributes is not clobbered by our managed
-// block.
-//
-// Failure prevented: a user who manually configures attributes loses
-// their config the next time ox runs.
-func TestEnsureMergeAttributes_PreservesExistingContent(t *testing.T) {
-	dir := mkGitDir(t)
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git/info"), 0o755))
-	userLine := "*.bin binary\n"
-	require.NoError(t, os.WriteFile(filepath.Join(dir, infoAttrsRel), []byte(userLine), 0o644))
-
-	_, err := EnsureMergeAttributes(dir)
-	require.NoError(t, err)
-
-	data, err := os.ReadFile(filepath.Join(dir, infoAttrsRel))
-	require.NoError(t, err, "read info/attributes")
-	got := string(data)
-	if !strings.Contains(got, userLine) {
-		t.Errorf("user content %q was lost; got:\n%s", userLine, got)
-	}
-	if !strings.Contains(got, "merge=union") {
-		t.Errorf("managed block missing; got:\n%s", got)
-	}
-}
-
-// TestEnsureMergeAttributes_ReplacesManagedBlock verifies that stale
-// ox-managed content is rewritten while user content outside the markers
-// survives.
-//
-// Failure prevented: an old managed block (e.g. from a different version
-// with different paths) accumulates across runs instead of being replaced.
-func TestEnsureMergeAttributes_ReplacesManagedBlock(t *testing.T) {
-	dir := mkGitDir(t)
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git/info"), 0o755))
-	stale := mergeAttrsHeader + "\nAGENTS.md merge=stale-driver\n" + mergeAttrsFooter + "\n"
-	userLine := "*.bin binary\n"
-	require.NoError(t, os.WriteFile(filepath.Join(dir, infoAttrsRel), []byte(userLine+stale), 0o644))
-
-	_, err := EnsureMergeAttributes(dir)
-	require.NoError(t, err)
-
-	data, err := os.ReadFile(filepath.Join(dir, infoAttrsRel))
-	require.NoError(t, err)
-	got := string(data)
-	if strings.Contains(got, "stale-driver") {
-		t.Errorf("stale managed content not replaced; got:\n%s", got)
-	}
-	if !strings.Contains(got, userLine) {
-		t.Errorf("user content lost; got:\n%s", got)
-	}
-	if !strings.Contains(got, "merge=union") {
-		t.Errorf("canonical managed block missing; got:\n%s", got)
-	}
-}
-
-// TestEnsureMergeAttributes_HandlesMissingFooter verifies that a
-// truncated managed block (header but no footer) is replaced rather
-// than appended to.
-//
-// Failure prevented: corruption (interrupted write, hand-edit) causes
-// the managed block to grow without bound on each Ensure call.
-func TestEnsureMergeAttributes_HandlesMissingFooter(t *testing.T) {
-	dir := mkGitDir(t)
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git/info"), 0o755))
-	corrupted := mergeAttrsHeader + "\nAGENTS.md merge=truncated\n"
-	require.NoError(t, os.WriteFile(filepath.Join(dir, infoAttrsRel), []byte(corrupted), 0o644))
-
-	_, err := EnsureMergeAttributes(dir)
-	require.NoError(t, err)
-
-	data, err := os.ReadFile(filepath.Join(dir, infoAttrsRel))
-	require.NoError(t, err)
-	got := string(data)
-	if strings.Contains(got, "merge=truncated") {
-		t.Errorf("truncated managed block not replaced; got:\n%s", got)
-	}
-	if !strings.Contains(got, mergeAttrsFooter) {
-		t.Errorf("footer not restored; got:\n%s", got)
-	}
-}
-
-func TestEnsureMergeAttributes_EmptyPath(t *testing.T) {
-	_, err := EnsureMergeAttributes("")
-	require.Error(t, err)
-}
-
-// TestEnsureMergeAttributes_NotAGitRepo verifies the precondition guard:
-// callers passing a non-git path get a clear error rather than a silent
-// MkdirAll into the wrong location.
+// TestEnsureMergeAttributes_RejectsInvalidInput covers the
+// fail-fast preconditions (empty path, not-a-git-repo). Returning an
+// error here is the contract — the table cases above never trigger this
+// path because they all use mkGitDir.
 //
 // Failure prevented: a refactor that changes how callers compute
 // ledgerPath silently writes attributes into a non-git directory where
-// git will never read them, leaving the union driver disabled.
-func TestEnsureMergeAttributes_NotAGitRepo(t *testing.T) {
-	dir := t.TempDir() // intentionally NO .git inside
-	_, err := EnsureMergeAttributes(dir)
-	require.Error(t, err, "should fail without a .git directory")
+// git never reads them, leaving the union driver disabled and the
+// wedge bug reintroduced.
+func TestEnsureMergeAttributes_RejectsInvalidInput(t *testing.T) {
+	cases := []struct {
+		name string
+		dir  func(t *testing.T) string
+	}{
+		{
+			name: "empty_path",
+			dir:  func(t *testing.T) string { return "" },
+		},
+		{
+			name: "not_a_git_repo",
+			dir:  func(t *testing.T) string { return t.TempDir() }, // no .git
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := EnsureMergeAttributes(c.dir(t))
+			require.Error(t, err)
+		})
+	}
 }
