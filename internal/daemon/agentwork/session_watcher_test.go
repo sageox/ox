@@ -423,13 +423,22 @@ func TestSessionWatcherManager_DetectAndRestart_CatchUpFromPersistedOffset(t *te
 	assert.Contains(t, rawStr, "second message", "catch-up should recover entry2")
 	assert.NotContains(t, rawStr, "first message", "catch-up should NOT re-read entry1")
 
-	// verify SourceOffset was persisted to .recording.json
-	recData, err := os.ReadFile(filepath.Join(sessionDir, ".recording.json"))
-	require.NoError(t, err)
+	// verify SourceOffset was persisted to .recording.json. raw.jsonl is
+	// written inside the same loop that calls persistOffset, but persist
+	// runs *after* the encode. On slower runners (CI) the test would see
+	// raw.jsonl > 0 before persistOffset finished, racing the read of
+	// .recording.json. Poll until the persisted offset advances.
 	var updatedState session.RecordingState
-	require.NoError(t, json.Unmarshal(recData, &updatedState))
-	assert.Greater(t, updatedState.SourceOffset, state.SourceOffset,
-		"persisted offset should advance past entry2")
+	require.Eventually(t, func() bool {
+		recData, err := os.ReadFile(filepath.Join(sessionDir, ".recording.json"))
+		if err != nil {
+			return false
+		}
+		if err := json.Unmarshal(recData, &updatedState); err != nil {
+			return false
+		}
+		return updatedState.SourceOffset > state.SourceOffset
+	}, 2*time.Second, 50*time.Millisecond, "persisted offset should advance past entry2")
 }
 
 // TestSessionWatcherManager_PersistOffset_UpdatesRecordingState verifies that
