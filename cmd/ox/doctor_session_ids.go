@@ -23,7 +23,7 @@ func init() {
 		Name:        "Legacy session IDs",
 		Category:    "Ledger Git Health",
 		FixLevel:    FixLevelSuggested,
-		Description: "Detects session recordings whose meta.json predates the ses_<UUIDv7> field; opt-in backfill stamps a stable ID",
+		Description: "Detects session recordings whose meta.json has no session_id field; opt-in backfill persists the deterministic EffectiveSessionID() (ses_-prefixed UUIDv5 fallback for legacy)",
 		Run: func(fix bool) checkResult {
 			return checkLegacySessionIDs(fix)
 		},
@@ -69,10 +69,10 @@ func checkLegacySessionIDs(fix bool) checkResult {
 		return fixLegacySessionIDs(ledgerPath, legacy)
 	}
 
-	msg := fmt.Sprintf("%d session(s) without ses_<UUIDv7>", len(legacy))
+	msg := fmt.Sprintf("%d legacy session(s) missing session_id", len(legacy))
 	detail := []string{
-		"Synthetic fallback (UUIDv5) covers correctness; backfill is optional cleanup.",
-		"Run `ox doctor --fix-slug=session-ids` to stamp a stable ID into each meta.json.",
+		"Synthetic fallback (EffectiveSessionID, UUIDv5 over RepoID + SessionName) covers correctness on every read.",
+		"Run `ox doctor --fix-slug=session-ids` to persist that same value into each meta.json.",
 		fmt.Sprintf("Affected: %d session(s) under %s", len(legacy), sessionsDir),
 	}
 	return WarningCheck("Legacy session IDs", msg, strings.Join(detail, "\n"))
@@ -191,6 +191,12 @@ func fixLegacySessionIDs(ledgerPath string, sessionNames []string) checkResult {
 	if raced > 0 || failed > 0 {
 		msg = fmt.Sprintf("%s (skipped %d races, %d failures)", msg, raced, failed)
 	}
+	// Any per-session failure leaves legacy sessions behind — that's a
+	// degraded outcome, not a clean pass. Surface as a warning with the
+	// per-session details so the operator can investigate.
+	if failed > 0 {
+		return WarningCheck("Legacy session IDs", msg, strings.Join(failures, "\n"))
+	}
 	return PassedCheck("Legacy session IDs", msg)
 }
 
@@ -211,7 +217,7 @@ func commitAndPushSessionIDBackfill(ledgerPath string, sessionNames []string) er
 		return fmt.Errorf("git add: %s: %w", string(output), err)
 	}
 
-	commitMsg := fmt.Sprintf("session: backfill ses_<UUIDv7> for %d legacy session(s)", len(sessionNames))
+	commitMsg := fmt.Sprintf("session: backfill stable session_id for %d legacy session(s)", len(sessionNames))
 	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
 	if output, err := commitCmd.CombinedOutput(); err != nil {
 		if strings.Contains(string(output), "nothing to commit") {

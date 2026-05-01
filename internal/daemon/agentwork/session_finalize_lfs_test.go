@@ -61,6 +61,59 @@ func TestDetect_SkipsLFSStubSessions(t *testing.T) {
 	}
 }
 
+// TestWriteMetaAndUploadLFS_CorruptExistingMetaIsFatal asserts that if
+// meta.json already exists on disk but cannot be read or parsed,
+// writeMetaAndUploadLFS returns a non-nil error and does NOT overwrite
+// the file. The caller (ProcessResult) must use this error to abort the
+// finalize flow before staging/committing — silently rotating an ID we
+// cannot verify would break dedup.
+//
+// Failure prevented: a regression where the function only logs and
+// returns nil on PreservedSessionID errors lets the daemon stage and
+// commit a fresh meta.json over the corrupted one, silently rotating
+// any SessionID that was there.
+func TestWriteMetaAndUploadLFS_CorruptExistingMetaIsFatal(t *testing.T) {
+	handler := NewSessionFinalizeHandler(slog.Default())
+	handler.skipGit = true
+
+	sessionName := "2026-05-01T10-00-testuser-OxCRPT"
+	ledgerPath := t.TempDir()
+	sessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// plant a corrupt meta.json that ReadSessionMeta cannot parse
+	corruptBytes := []byte("{this is not valid JSON")
+	metaPath := filepath.Join(sessionDir, "meta.json")
+	if err := os.WriteFile(metaPath, corruptBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stored := &session.StoredSession{
+		Entries: []map[string]any{{"type": "user"}},
+	}
+	summaryResp := &session.SummarizeResponse{Title: "x", Summary: "x"}
+	payload := &SessionFinalizePayload{SessionDir: sessionDir, LedgerPath: ledgerPath}
+
+	fileRefs, err := handler.writeMetaAndUploadLFS(payload, stored, summaryResp)
+	if err == nil {
+		t.Fatal("expected error from writeMetaAndUploadLFS when existing meta.json is corrupt")
+	}
+	if fileRefs != nil {
+		t.Errorf("fileRefs must be nil on fatal error, got %d entries", len(fileRefs))
+	}
+
+	// CRITICAL: the corrupt meta.json must be untouched on disk; rotating
+	// it to a fresh write is exactly the failure this guard prevents.
+	got, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatalf("read meta.json after fatal-error path: %v", err)
+	}
+	if string(got) != string(corruptBytes) {
+		t.Errorf("meta.json was modified despite fatal-error path; got %q want %q", got, corruptBytes)
+	}
+}
+
 // TestWriteMetaAndUploadLFS_ContentFilesIntactAndMetaWritten is a regression test for
 // bug #291 at the writeMetaAndUploadLFS layer. It verifies that when LFS is skipped
 // (projectRoot=""), the function uses WriteSessionMetaOnly — writing meta.json without
@@ -102,9 +155,11 @@ func TestWriteMetaAndUploadLFS_ContentFilesIntactAndMetaWritten(t *testing.T) {
 	}
 
 	// projectRoot="" → LFS early-return path: WriteSessionMetaOnly is called,
-	// LFS upload is skipped, function returns nil fileRefs
-	fileRefs := handler.writeMetaAndUploadLFS(payload, stored, summaryResp)
-
+	// LFS upload is skipped, function returns (nil, nil) fileRefs.
+	fileRefs, err := handler.writeMetaAndUploadLFS(payload, stored, summaryResp)
+	if err != nil {
+		t.Fatalf("writeMetaAndUploadLFS returned unexpected error: %v", err)
+	}
 	if fileRefs != nil {
 		t.Errorf("expected nil fileRefs with empty projectRoot, got %d refs", len(fileRefs))
 	}
