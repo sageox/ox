@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -184,6 +185,26 @@ common issues, or --fix-slug to target specific checks.`,
 
 		// check if project is initialized (only relevant if in a git repo)
 		projectInitialized := gitRoot != "" && config.IsInitialized(gitRoot)
+
+		// "init was reverted from git" recovery: if config.json is missing but
+		// surviving local state encodes a repo_id (config.local.toml ledger
+		// path or .repo_<uuid> marker), backfill BEFORE the setup-gate so the
+		// real doctor checks get a chance to run. Without this, the gate
+		// short-circuits to "Step 2: Run ox init" and the user is told to
+		// re-init — which would mint a fresh repo_id and orphan the existing
+		// ledger checkout + running daemon. --fix gates the write; without
+		// --fix we still surface the situation through CheckSlugInitReverted.
+		if !projectInitialized && gitRoot != "" {
+			fixRequested, _ := cmd.Flags().GetBool("fix")
+			fixSlugs, _ := cmd.Flags().GetStringSlice("fix-slug")
+			if fixRequested || len(fixSlugs) > 0 {
+				if backfilled, err := config.BackfillProjectConfigFromLocalState(gitRoot); err != nil {
+					slog.Debug("init-reverted backfill failed", "error", err, "git_root", gitRoot)
+				} else if backfilled {
+					projectInitialized = config.IsInitialized(gitRoot)
+				}
+			}
+		}
 
 		// short-circuit: not in a git repo
 		if gitRoot == "" {

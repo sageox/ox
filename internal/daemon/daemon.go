@@ -340,6 +340,22 @@ func (d *Daemon) Start() error {
 	}
 	// cache for later use (after StabilizeCWD, os.Getwd returns $HOME)
 	d.cachedWorkspacePath = workspacePath
+
+	// Self-heal "init was reverted from git" before we cache the workspace ID.
+	// If .sageox/config.json is missing but the surviving local state still
+	// encodes a repo_id (config.local.toml ledger path or .repo_<uuid> marker),
+	// write it back so RegisterDaemon → CurrentWorkspaceID picks the
+	// repo-id-derived workspace_id the CLI will also compute. Without this,
+	// the daemon registers under a path-hash workspace_id the CLI provably
+	// cannot recompute, and every IPC call sees "daemon unavailable".
+	if backfilled, err := config.BackfillProjectConfigFromLocalState(workspacePath); err != nil {
+		d.logger.Warn("config.json backfill failed", "error", err, "workspace", workspacePath)
+	} else if backfilled {
+		d.logger.Info("recovered .sageox/config.json from local state",
+			"workspace", workspacePath,
+			"reason", "init artifacts likely reverted from git")
+	}
+
 	if err := RegisterDaemon(workspacePath, Version()); err != nil {
 		d.logger.Warn("failed to register daemon", "error", err)
 	}

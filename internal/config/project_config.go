@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/endpoint"
@@ -436,6 +437,93 @@ func GetProjectContext() (*ProjectConfig, string, error) {
 	}
 
 	return cfg, configPath, nil
+}
+
+// BackfillProjectConfigFromLocalState writes a minimal .sageox/config.json
+// when one is missing but RecoverRepoIDFromLocalState found a repo_id. Returns
+// (true, nil) when a file was written, (false, nil) when nothing was needed
+// or recoverable, and (false, err) on a write failure.
+//
+// This is the daemon-side counterpart to ensureSageoxConfig: it lets a daemon
+// self-heal a half-initialized project (init committed on a feature branch,
+// later reset away) so subsequent CLI calls can recompute the same workspace_id
+// the daemon registers under and IPC discovery succeeds.
+//
+// Caller must verify projectRoot is a real, initialized .sageox/ workspace
+// (e.g. via IsInitialized or by checking for .sageox/ + config.local.toml) —
+// this function intentionally does NOT create .sageox/ from scratch, mirroring
+// SaveLocalConfig's "do not bootstrap an uninitialized project" stance.
+func BackfillProjectConfigFromLocalState(projectRoot string) (bool, error) {
+	if projectRoot == "" {
+		return false, nil
+	}
+	configPath := filepath.Join(projectRoot, sageoxDir, projectConfigFilename)
+	if _, err := os.Stat(configPath); err == nil {
+		return false, nil // config.json already present — nothing to do
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("stat config.json: %w", err)
+	}
+
+	// require .sageox/ to already exist — never bootstrap an uninitialized project
+	if _, err := os.Stat(filepath.Join(projectRoot, sageoxDir)); err != nil {
+		return false, nil
+	}
+
+	repoID, _ := RecoverRepoIDFromLocalState(projectRoot)
+	if repoID == "" {
+		return false, nil
+	}
+
+	cfg := GetDefaultProjectConfig()
+	cfg.RepoID = repoID
+	if err := SaveProjectConfig(projectRoot, cfg); err != nil {
+		return false, fmt.Errorf("save backfilled config: %w", err)
+	}
+	return true, nil
+}
+
+// RecoverRepoIDFromLocalState attempts to recover the canonical repo_id for a
+// project when .sageox/config.json is missing but other local state survived.
+//
+// Recovery sources (in priority order):
+//  1. .sageox/.repo_<uuid> marker files — exact repo_id is the marker name suffix.
+//  2. .sageox/config.local.toml — ledger.path encodes the repo_id (see
+//     RepoIDFromLedgerPath).
+//
+// This is the canonical "init was reverted from git" recovery path: when a user
+// runs 'ox init' on a feature branch and later resets to a branch where the
+// init commit was never merged, git removes the tracked .sageox/config.json and
+// .repo_<uuid> marker, but the gitignored config.local.toml survives — and its
+// ledger path still encodes the repo_id. This lets ox doctor and the daemon
+// rebuild config.json without losing the link to the existing ledger checkout
+// or breaking workspace_id-based daemon discovery.
+//
+// Returns ("", "") if no recoverable repo_id is found.
+func RecoverRepoIDFromLocalState(projectRoot string) (repoID, endpointSlug string) {
+	if projectRoot == "" {
+		return "", ""
+	}
+
+	// 1. .repo_<uuid> marker is authoritative when present.
+	sageoxPath := filepath.Join(projectRoot, sageoxDir)
+	if entries, err := os.ReadDir(sageoxPath); err == nil {
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if strings.HasPrefix(name, ".repo_") && len(name) > len(".repo_") {
+				return "repo_" + strings.TrimPrefix(name, ".repo_"), ""
+			}
+		}
+	}
+
+	// 2. ledger path in config.local.toml encodes both repo_id and endpoint slug.
+	localCfg, err := LoadLocalConfig(projectRoot)
+	if err != nil || localCfg == nil || localCfg.Ledger == nil {
+		return "", ""
+	}
+	return RepoIDFromLedgerPath(localCfg.Ledger.Path), EndpointSlugFromLedgerPath(localCfg.Ledger.Path)
 }
 
 // GetRepoID returns the repo ID for the given project root.

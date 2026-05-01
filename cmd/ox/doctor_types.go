@@ -81,6 +81,7 @@ const (
 	// Project Health checks
 	CheckSlugSageoxDir       = "sageox-dir"
 	CheckSlugConfigJSON      = "config-json"
+	CheckSlugInitReverted    = "init-reverted"
 	CheckSlugGitignore       = "gitignore"
 	CheckSlugGitattributes   = "gitattributes"
 	CheckSlugSageoxGitignore = "sageox-gitignore"

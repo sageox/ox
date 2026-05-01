@@ -52,6 +52,22 @@ func init() {
 		Run:         func(fix bool) checkResult { return checkSageoxDirectory() },
 	})
 
+	// MUST run before CheckSlugConfigJSON: when 'ox init' was committed on a
+	// feature branch and the user reset back to a branch where the init commit
+	// was never merged, .sageox/config.json was removed by git but the
+	// gitignored .sageox/config.local.toml (which encodes the repo_id in its
+	// ledger path) survives. This check recovers the canonical repo_id from
+	// that surviving state so the subsequent config.json bootstrap doesn't
+	// mint a fresh, mismatched ID.
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugInitReverted,
+		Name:        "Init artifacts",
+		Category:    "Project Structure",
+		FixLevel:    FixLevelAuto,
+		Description: "Detects when 'ox init' was reverted from git but local state can recover repo_id",
+		Run:         checkInitReverted,
+	})
+
 	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugConfigJSON,
 		Name:        "config.json",

@@ -55,9 +55,22 @@ func ensureSageoxConfig(gitRoot string) configResult {
 
 	// check if file actually exists on disk
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// file doesn't exist - create it
-		defaultConfig := config.GetDefaultProjectConfig()
-		if err := config.SaveProjectConfig(gitRoot, defaultConfig); err != nil {
+		// file doesn't exist - create it.
+		// Recover repo_id (and endpoint) from surviving local state if possible.
+		// This is the "init was reverted from git" path: the user ran 'ox init'
+		// on a feature branch, never merged it, and reset to a branch where
+		// .sageox/config.json was never committed. The gitignored
+		// config.local.toml and .repo_<uuid> marker may still be on disk and
+		// encode the canonical repo_id — recovering it preserves the link to
+		// the existing ledger checkout and the running daemon's workspace_id.
+		newConfig := config.GetDefaultProjectConfig()
+		if recoveredID, recoveredSlug := config.RecoverRepoIDFromLocalState(gitRoot); recoveredID != "" {
+			newConfig.RepoID = recoveredID
+			if newConfig.Endpoint == "" && recoveredSlug != "" {
+				newConfig.Endpoint = recoveredSlug
+			}
+		}
+		if err := config.SaveProjectConfig(gitRoot, newConfig); err != nil {
 			_ = doctor.SetNeedsDoctorHuman(gitRoot) // config issue needs doctor
 			return configError
 		}

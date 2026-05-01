@@ -192,6 +192,44 @@ func DefaultLedgerPath(repoID, endpointURL string) string {
 	return paths.LedgersDataDir(repoID, endpointURL)
 }
 
+// RepoIDFromLedgerPath extracts the repo_id from a ledger path produced by
+// DefaultLedgerPath. Returns the empty string if the path does not match the
+// canonical .../<endpoint>/ledgers/repo_<uuid>/... layout.
+//
+// Used for self-healing when a repo's .sageox/config.json was deleted (e.g.
+// because the user reset to a branch where 'ox init' was never committed)
+// while config.local.toml — which holds an absolute ledger path — survived.
+// The path encodes the repo_id, so we can recover the canonical identity.
+func RepoIDFromLedgerPath(ledgerPath string) string {
+	if ledgerPath == "" {
+		return ""
+	}
+	// walk parts looking for ".../ledgers/<repo_id>/..."
+	parts := strings.Split(filepath.Clean(ledgerPath), string(filepath.Separator))
+	for i := 0; i < len(parts)-1; i++ {
+		if parts[i] == "ledgers" && strings.HasPrefix(parts[i+1], "repo_") {
+			return parts[i+1]
+		}
+	}
+	return ""
+}
+
+// EndpointSlugFromLedgerPath extracts the endpoint slug from a ledger path
+// produced by DefaultLedgerPath. The slug is the path component immediately
+// before "ledgers". Returns empty if no match. Companion to RepoIDFromLedgerPath.
+func EndpointSlugFromLedgerPath(ledgerPath string) string {
+	if ledgerPath == "" {
+		return ""
+	}
+	parts := strings.Split(filepath.Clean(ledgerPath), string(filepath.Separator))
+	for i := 1; i < len(parts); i++ {
+		if parts[i] == "ledgers" {
+			return parts[i-1]
+		}
+	}
+	return ""
+}
+
 // SiblingLedgerPath returns the DEPRECATED sibling-directory path for the ledger repo.
 // This is used for migration detection when upgrading from the sibling to user-directory layout.
 //
