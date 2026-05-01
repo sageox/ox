@@ -82,6 +82,7 @@ const (
 	CheckSlugSageoxDir       = "sageox-dir"
 	CheckSlugConfigJSON      = "config-json"
 	CheckSlugInitReverted    = "init-reverted"
+	CheckSlugClaudeHooksFmt  = "claude-hooks-format"
 	CheckSlugGitignore       = "gitignore"
 	CheckSlugGitattributes   = "gitattributes"
 	CheckSlugSageoxGitignore = "sageox-gitignore"

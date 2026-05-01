@@ -345,6 +345,15 @@ func init() {
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugClaudeHooksFmt,
+		Name:        "Claude hooks format",
+		Category:    "Integration",
+		FixLevel:    FixLevelAuto,
+		Description: "Repairs legacy string-format hook values in .claude/settings.json that Claude Code rejects",
+		Run:         checkClaudeHooksFormat,
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugSessionStartHookBug,
 		Name:        "SessionStart hook reliability",
 		Category:    "Integration",
