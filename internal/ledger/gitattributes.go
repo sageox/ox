@@ -101,8 +101,36 @@ func EnsureMergeAttributes(ledgerPath string) (changed bool, err error) {
 		return false, nil
 	}
 
-	if err := os.WriteFile(full, []byte(desired), 0644); err != nil {
-		return false, fmt.Errorf("write info/attributes: %w", err)
+	// Atomic write: temp + fsync + rename. A direct WriteFile interrupted
+	// mid-write (process kill, power loss) would leave a truncated
+	// info/attributes that git silently treats as "no rules", which is
+	// exactly the wedged-rebase state this whole pre-flight is trying to
+	// prevent. Rename is atomic on the same filesystem.
+	dir := filepath.Dir(full)
+	tmp, err := os.CreateTemp(dir, ".attributes.tmp-*")
+	if err != nil {
+		return false, fmt.Errorf("create temp info/attributes: %w", err)
+	}
+	tmpName := tmp.Name()
+	// best-effort cleanup if we bail before rename
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, err := tmp.WriteString(desired); err != nil {
+		_ = tmp.Close()
+		return false, fmt.Errorf("write temp info/attributes: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return false, fmt.Errorf("fsync temp info/attributes: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return false, fmt.Errorf("close temp info/attributes: %w", err)
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return false, fmt.Errorf("chmod temp info/attributes: %w", err)
+	}
+	if err := os.Rename(tmpName, full); err != nil {
+		return false, fmt.Errorf("rename info/attributes: %w", err)
 	}
 	return true, nil
 }

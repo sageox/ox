@@ -1126,13 +1126,14 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		// ledger repos don't have a sync.manifest — use the manifest defaults
 		// (data/) which cover all idempotent import paths (github, linear, murmurs).
 		return s.pullManagedRepo(ctx, ManagedRepoPullOpts{
-			RepoPath:         s.config.LedgerPath,
-			RepoName:         "ledger",
-			ProjectRoot:      s.config.ProjectRoot,
-			SyncInterval:     s.config.SyncIntervalRead,
-			DetectDivergence: true,
-			ResolveRules:     ledger.DefaultResolveRules,
-			Logger:           s.logger,
+			RepoPath:           s.config.LedgerPath,
+			RepoName:           "ledger",
+			ProjectRoot:        s.config.ProjectRoot,
+			SyncInterval:       s.config.SyncIntervalRead,
+			DetectDivergence:   true,
+			ResolveRules:       ledger.DefaultResolveRules,
+			EnsureKBMergeAttrs: true, // shared kb resilience for both ledger + team-context
+			Logger:             s.logger,
 		})
 	}()
 

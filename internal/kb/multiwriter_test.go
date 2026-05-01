@@ -1,4 +1,4 @@
-package ledger
+package kb
 
 import (
 	"os"
@@ -11,30 +11,44 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMultiWriter exercises the structural ledger bug class: two writers
-// committing to a shared remote with no shared base or with concurrent edits
-// to root metadata files.
+// TestMultiWriter exercises the structural multi-writer KB bug class for
+// both ledger AND team-context repos: two writers committing to a shared
+// remote with no shared base, or with concurrent edits to root metadata
+// files (AGENTS.md, CLAUDE.md, README.md, SOUL.md, .gitignore).
 //
-// With merge=union declared in .git/info/attributes (via EnsureMergeAttributes),
-// the system auto-recovers — rebases concatenate instead of wedging.
-// Without it, the rebase halts with conflict markers.
+// With merge=union declared in .git/info/attributes (via
+// EnsureMergeAttributes), the system auto-recovers — rebases concatenate
+// instead of wedging. Without it, the rebase halts with conflict
+// markers.
 //
-// Note: info/attributes is per-clone (not version-controlled). The client
-// performing the rebase is the one that must have it configured; the seed
-// remote and other clones don't carry it.
+// Note: info/attributes is per-clone (not version-controlled). The
+// client performing the rebase is the one that must have it configured;
+// the seed remote and other clones don't carry it.
 //
 // This is the regression harness for epic ox-hs1b. Each subtest is a
-// self-contained scenario in its own tempdir; no network, no real ox CLI.
+// self-contained scenario in its own tempdir; no network, no real ox
+// CLI. Add new scenarios HERE — every new path covered by
+// MergeUnionPaths needs a multi-writer regression test, and every new
+// failure mode (wedge category, race window) needs an explicit reproducer.
 func TestMultiWriter(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: spawns git subprocesses for clones, commits, rebases")
 	}
 
+	// Ledger-shaped scenarios (AGENTS.md is the canonical hot file).
 	t.Run("addAdd_RootAGENTS_UnionMerges", testAddAddRootAGENTSUnionMerges)
 	t.Run("addAdd_WithoutGitAttributes_Fails", testAddAddWithoutGitAttributesFails)
 	t.Run("contentContent_RootAGENTS_UnionMerges", testContentContentRootAGENTSUnionMerges)
 	t.Run("nonUnionPath_StillConflicts", testNonUnionPathStillConflicts)
 	t.Run("cleanRebase_NoConflict", testCleanRebaseNoConflict)
+
+	// Team-context-shaped scenarios. SOUL.md is team-context-only;
+	// concurrent edits from multiple coworkers are the norm. README.md
+	// + .gitignore are common across both repo types and worth a
+	// dedicated test each.
+	t.Run("contentContent_SOUL_md_UnionMerges_TeamContext", testContentContentSOULUnionMerges)
+	t.Run("contentContent_gitignore_UnionMerges", testContentContentGitignoreUnionMerges)
+	t.Run("everyUnionPath_HasMergeRule", testEveryUnionPathHasMergeRule)
 }
 
 // mwGit runs a git command in dir with isolated config and a deterministic
@@ -334,4 +348,145 @@ func testCleanRebaseNoConflict(t *testing.T) {
 	assert.NoError(t, err, "server-only.txt should be present after rebase")
 	_, err = os.Stat(filepath.Join(clientA, "client-only.txt"))
 	assert.NoError(t, err, "client-only.txt should be present after rebase")
+}
+
+// --- F. Team-context: SOUL.md content/content union ---
+//
+// SOUL.md is the team-identity doc; multiple coworkers editing it in
+// parallel is the common case (every member contributes their voice).
+// Without union, the second pusher wedges and the team has to choose
+// whose edit "wins."
+//
+// Failure prevented: a team-context wedge on SOUL.md halting the daemon's
+// pull cycle and forcing the user to manually resolve in
+// ~/.local/share/sageox/.../teams/.
+func testContentContentSOULUnionMerges(t *testing.T) {
+	bare := setupBareRemoteWithSeed(t)
+
+	// Seed a base SOUL.md.
+	seeder := cloneFresh(t, bare)
+	require.NoError(t, os.WriteFile(filepath.Join(seeder, "SOUL.md"),
+		[]byte("# Team Soul\n\nbase principle\n"), 0o644))
+	mwGit(t, seeder, "add", "SOUL.md")
+	mwGit(t, seeder, "commit", "-m", "seed SOUL.md")
+	mwGit(t, seeder, "push", "origin", "main")
+	baseSHA := mwGit(t, seeder, "rev-parse", "HEAD")
+
+	// Coworker B appends a section + pushes.
+	clientB := cloneFresh(t, bare)
+	require.NoError(t, os.WriteFile(filepath.Join(clientB, "SOUL.md"),
+		[]byte("# Team Soul\n\nbase principle\n\n## Coworker B view\nB cares deeply about cross-team review.\n"), 0o644))
+	mwGit(t, clientB, "add", "SOUL.md")
+	mwGit(t, clientB, "commit", "-m", "B: add review principle")
+	mwGit(t, clientB, "push", "origin", "main")
+
+	// Coworker A independently edited from the same base.
+	clientA := cloneFresh(t, bare)
+	mwGit(t, clientA, "reset", "--hard", baseSHA)
+	_, err := EnsureMergeAttributes(clientA)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(clientA, "SOUL.md"),
+		[]byte("# Team Soul\n\nbase principle\n\n## Coworker A view\nA values shipping over polish.\n"), 0o644))
+	mwGit(t, clientA, "add", "SOUL.md")
+	mwGit(t, clientA, "commit", "-m", "A: add velocity principle")
+
+	mwGit(t, clientA, "fetch", "origin")
+	out, rebaseErr := mwGitTry(t, clientA, "pull", "--rebase", "--autostash", "origin", "main")
+	require.NoErrorf(t, rebaseErr, "rebase should succeed under merge=union; output:\n%s", out)
+
+	data, err := os.ReadFile(filepath.Join(clientA, "SOUL.md"))
+	require.NoError(t, err, "read SOUL.md after rebase")
+	merged := string(data)
+	assert.Contains(t, merged, "Coworker A view", "A's edit must survive union merge")
+	assert.Contains(t, merged, "Coworker B view", "B's edit must survive union merge")
+	assert.False(t, hasConflictMarkers(t, filepath.Join(clientA, "SOUL.md")),
+		"union merge must not leave conflict markers in SOUL.md")
+}
+
+// --- G. .gitignore content/content union ---
+//
+// Both repo types accumulate ignore rules (CLI seed, team conventions,
+// local user additions). Concurrent appends to .gitignore are common
+// and should never wedge.
+//
+// Failure prevented: a .gitignore conflict halting the pull cycle on
+// either ledger or team-context, requiring user intervention to resolve
+// what is essentially "keep both lists."
+func testContentContentGitignoreUnionMerges(t *testing.T) {
+	bare := setupBareRemoteWithSeed(t)
+
+	seeder := cloneFresh(t, bare)
+	require.NoError(t, os.WriteFile(filepath.Join(seeder, ".gitignore"),
+		[]byte("*.tmp\n*.log\n"), 0o644))
+	mwGit(t, seeder, "add", ".gitignore")
+	mwGit(t, seeder, "commit", "-m", "seed .gitignore")
+	mwGit(t, seeder, "push", "origin", "main")
+	baseSHA := mwGit(t, seeder, "rev-parse", "HEAD")
+
+	clientB := cloneFresh(t, bare)
+	require.NoError(t, os.WriteFile(filepath.Join(clientB, ".gitignore"),
+		[]byte("*.tmp\n*.log\n.DS_Store\n"), 0o644))
+	mwGit(t, clientB, "add", ".gitignore")
+	mwGit(t, clientB, "commit", "-m", "ignore DS_Store")
+	mwGit(t, clientB, "push", "origin", "main")
+
+	clientA := cloneFresh(t, bare)
+	mwGit(t, clientA, "reset", "--hard", baseSHA)
+	_, err := EnsureMergeAttributes(clientA)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(clientA, ".gitignore"),
+		[]byte("*.tmp\n*.log\n*.swp\n"), 0o644))
+	mwGit(t, clientA, "add", ".gitignore")
+	mwGit(t, clientA, "commit", "-m", "ignore swap files")
+
+	mwGit(t, clientA, "fetch", "origin")
+	out, rebaseErr := mwGitTry(t, clientA, "pull", "--rebase", "--autostash", "origin", "main")
+	require.NoErrorf(t, rebaseErr, "rebase should succeed under merge=union; output:\n%s", out)
+
+	data, err := os.ReadFile(filepath.Join(clientA, ".gitignore"))
+	require.NoError(t, err)
+	merged := string(data)
+	assert.Contains(t, merged, ".DS_Store", "B's ignore line must survive")
+	assert.Contains(t, merged, "*.swp", "A's ignore line must survive")
+	assert.False(t, hasConflictMarkers(t, filepath.Join(clientA, ".gitignore")))
+}
+
+// --- H. Coverage assertion: every MergeUnionPaths entry has a rule ---
+//
+// This is a guard against the union list and the rendered attributes
+// drifting out of sync (e.g. someone adds a file to MergeUnionPaths but
+// renders it under a different attribute, or vice versa). Without this
+// check, a typo in renderManagedBlock could silently disable union for
+// a path and we'd only find out via a wedge in production.
+//
+// Failure prevented: silent drift between MergeUnionPaths (the public
+// contract) and the actual attribute file written to .git/info/attributes.
+func testEveryUnionPathHasMergeRule(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git"), 0o755))
+	_, err := EnsureMergeAttributes(dir)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, ".git/info/attributes"))
+	require.NoError(t, err)
+	got := string(data)
+
+	for _, p := range MergeUnionPaths {
+		// every path must appear with merge=union on its line. We check
+		// the literal "<path> ... merge=union" combination so a typo
+		// (e.g. "merge=onion") is caught.
+		expected := p
+		if !strings.Contains(got, expected) {
+			t.Errorf("MergeUnionPaths entry %q is missing from rendered attributes:\n%s", p, got)
+			continue
+		}
+		// confirm the line containing the path also contains merge=union
+		for _, line := range strings.Split(got, "\n") {
+			if strings.HasPrefix(line, p+" ") || strings.HasPrefix(line, p+"\t") {
+				if !strings.Contains(line, "merge=union") {
+					t.Errorf("path %q is in attributes but not declared merge=union: %q", p, line)
+				}
+			}
+		}
+	}
 }

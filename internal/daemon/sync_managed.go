@@ -13,7 +13,7 @@ import (
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
-	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/manifest"
 )
 
@@ -52,6 +52,21 @@ type ManagedRepoPullOpts struct {
 	// Most specific prefix wins: `resolve none data/proprietary/` overrides
 	// `resolve auto data/` for files under data/proprietary/.
 	ResolveRules []manifest.ResolveRule
+
+	// EnsureKBMergeAttrs controls the pull pre-flight that installs the
+	// shared KB merge=union rules into .git/info/attributes via
+	// internal/kb.EnsureMergeAttributes. Both ledger and team-context
+	// clones are KB-style repos (multi-writer, multi-coworker, server
+	// + CLI seeded) and benefit from the same resilience — concurrent
+	// writes to AGENTS.md / CLAUDE.md / README.md / SOUL.md / etc.
+	// auto-merge by concatenation instead of wedging the rebase.
+	//
+	// The list of unioned paths is the canonical kb.MergeUnionPaths and
+	// is intentionally narrow: only append-mostly root metadata. Source
+	// files, configs, and anything where last-write-wins semantics
+	// matter are NOT in scope. See internal/kb/mergeattrs.go for the
+	// full list and rationale.
+	EnsureKBMergeAttrs bool
 
 	// Logger for structured logging. Required.
 	Logger *slog.Logger
@@ -210,22 +225,29 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 		}
 	}
 
-	// --- Pull pre-flight: ensure merge=union rules for root metadata ---
+	// --- Pull pre-flight: ensure shared KB merge=union rules ---
 	//
-	// Without this, an add/add or content/content collision on AGENTS.md
-	// (or any other metadata file written by both server seed and client)
-	// halts the rebase and lands us in the "ledger has diverged from
-	// remote" error path below. EnsureMergeAttributes writes the rules
-	// into per-clone .git/info/attributes (no working-tree artifact);
-	// idempotent and safe to call on every pull cycle.
+	// Applies to both ledger AND team-context repos: they're both
+	// multi-writer KB-style clones (server seed + CLI seed + multiple
+	// coworker writes) and have the same wedge failure mode on
+	// concurrent writes to root metadata files. Without this rule,
+	// add/add or content/content collisions on AGENTS.md / CLAUDE.md /
+	// README.md / SOUL.md etc. halt the rebase and surface as "diverged
+	// from remote" errors that require manual intervention.
+	//
+	// kb.EnsureMergeAttributes writes per-clone .git/info/attributes
+	// (no working-tree artifact); idempotent, atomic, safe to call on
+	// every pull cycle.
 	//
 	// Best-effort: failure here is degraded mode (rebases may wedge),
 	// not a pull failure. Logged at warn level so an operator can spot
 	// a permission/IO issue.
-	if changed, ensureErr := ledger.EnsureMergeAttributes(path); ensureErr != nil {
-		logger.Warn("ensure merge attributes failed", "repo", repoName, "error", ensureErr)
-	} else if changed {
-		logger.Info("healed ledger merge attributes (auto-repair pre-flight)", "repo", repoName)
+	if opts.EnsureKBMergeAttrs {
+		if changed, ensureErr := kb.EnsureMergeAttributes(path); ensureErr != nil {
+			logger.Warn("ensure merge attributes failed", "repo", repoName, "error", ensureErr)
+		} else if changed {
+			logger.Info("healed kb merge attributes (auto-repair pre-flight)", "repo", repoName)
+		}
 	}
 
 	// --- Pull ---

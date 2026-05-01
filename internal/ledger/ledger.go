@@ -27,6 +27,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/repotools"
 )
@@ -366,12 +367,12 @@ func Init(path string, remoteURL string) (*Ledger, error) {
 		return nil, fmt.Errorf("clone: %w", err)
 	}
 
-	// declare merge=union for ledger root metadata files so concurrent
+	// declare merge=union for KB root metadata files so concurrent
 	// writes from server seed, CLI seed, and coworkers don't wedge the
 	// ledger on first push. Stored in per-clone .git/info/attributes so
 	// nothing enters the working tree. Best-effort: failure here is a
 	// degraded mode (rebases may wedge), not a clone failure.
-	if _, err := EnsureMergeAttributes(path); err != nil {
+	if _, err := kb.EnsureMergeAttributes(path); err != nil {
 		// log via fmt.Fprintln to stderr — slog is not wired into this package
 		fmt.Fprintf(os.Stderr, "warning: ledger init: ensure merge attributes: %v\n", err)
 	}

@@ -120,10 +120,7 @@ func buildPrompt(path string, content []byte) string {
 func stripFences(s string) string {
 	// detect a leading fence on its own line, ignoring at most one optional
 	// leading blank line that some models prepend.
-	t := s
-	if strings.HasPrefix(t, "\n") {
-		t = t[1:]
-	}
+	t := strings.TrimPrefix(s, "\n")
 	if strings.HasPrefix(t, "```") {
 		if nl := strings.IndexByte(t, '\n'); nl >= 0 {
 			t = t[nl+1:]

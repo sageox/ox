@@ -201,14 +201,23 @@ func PushWithRetry(ctx context.Context, repoPath string, opts PushOpts) error {
 							pathsCtx, pathsCancel := context.WithTimeout(ctx, opTimeout)
 							conflicted, listErr := listConflictedFiles(pathsCtx, repoPath)
 							pathsCancel()
+							// if we can't enumerate conflicts, the hook can't make
+							// an informed decision (it'd see an empty list and
+							// either falsely report "resolved" or operate on
+							// stale state). Skip the hook and abort the rebase
+							// rather than guess.
 							if listErr != nil {
-								log.Warn("listing conflicted files failed", "error", listErr)
+								log.Warn("listing conflicted files failed; skipping resolve hook", "error", listErr)
+								abortCtx, abortCancel := context.WithTimeout(ctx, opTimeout)
+								_, _ = RunGit(abortCtx, repoPath, "rebase", "--abort")
+								abortCancel()
+								return fmt.Errorf("git pull --rebase failed during retry: %s (could not list conflicts: %w)", pullOut, listErr)
 							}
 							hookCtx, hookCancel := context.WithTimeout(ctx, opTimeout)
 							resolved, hookErr := opts.OnUnresolvedConflicts(hookCtx, repoPath, conflicted)
 							hookCancel()
 							// only treat as resolved when the hook succeeded AND
-							// signalled resolved. a hook that returned an error
+							// signaled resolved. a hook that returned an error
 							// MAY have left the rebase index half-staged; we
 							// must abort rather than continue retrying.
 							if hookErr != nil {

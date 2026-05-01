@@ -24,6 +24,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/ledger/automerge"
 	"github.com/sageox/ox/internal/lfs"
@@ -297,10 +298,10 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 	// multi-writer merges work even on ledgers initialized with older CLI
 	// versions that lacked this. Per-clone, never enters the working tree.
 	// Best-effort: failure here is a degraded mode, not a push failure.
-	if changed, err := ledger.EnsureMergeAttributes(ledgerPath); err != nil {
-		slog.Warn("pushLedger: ensure ledger merge attributes failed", "error", err)
+	if changed, err := kb.EnsureMergeAttributes(ledgerPath); err != nil {
+		slog.Warn("pushLedger: ensure kb merge attributes failed", "error", err)
 	} else if changed {
-		slog.Info("healed ledger merge attributes", "ledger", ledgerPath)
+		slog.Info("healed kb merge attributes", "ledger", ledgerPath)
 	}
 
 	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{

@@ -90,6 +90,13 @@ func TestCheckInitReverted_FixRecoversRepoID(t *testing.T) {
 
 // TestCheckInitReverted_SkipsWhenConfigPresent ensures the check stays out of
 // the way during normal operation.
+//
+// Why this matters: doctor runs every check on every invocation. A
+// recovery check that fires on healthy repos would either (a) flood the
+// output with false-positive warnings, conditioning users to ignore real
+// ones, or (b) under --fix, rewrite a perfectly good config.json and
+// risk dropping fields the default config doesn't set. Both are worse
+// than the bug this check is for.
 func TestCheckInitReverted_SkipsWhenConfigPresent(t *testing.T) {
 	gitRoot := testGitRepo(t)
 	sageoxDir := filepath.Join(gitRoot, ".sageox")
@@ -117,6 +124,13 @@ func TestCheckInitReverted_SkipsWhenConfigPresent(t *testing.T) {
 // TestCheckInitReverted_SkipsForUninitializedRepo guards against false
 // positives in genuinely uninitialized repos — the existing config-json check
 // owns that case.
+//
+// Why this matters: a fresh `git clone` of a repo that has never been
+// touched by ox should NOT see "init artifacts missing — likely
+// reverted from git." That message implies prior state to recover from
+// and would be misleading. The existing CheckSlugConfigJSON path emits
+// the right "run ox init" guidance for genuinely uninitialized repos;
+// init-reverted must defer to it (skip) rather than overlap.
 func TestCheckInitReverted_SkipsForUninitializedRepo(t *testing.T) {
 	gitRoot := testGitRepo(t)
 	// no .sageox/ at all

@@ -305,15 +305,16 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 	mCfg := manifest.ParseFile(manifestPath)
 
 	result := s.pullManagedRepo(ctx, ManagedRepoPullOpts{
-		RepoPath:          path,
-		RepoName:          repoName,
-		ProjectRoot:       s.config.ProjectRoot,
-		SyncInterval:      s.config.TeamContextSyncInterval,
-		MinFetchAge:       minFetchAge,
-		ValidateIntegrity: true,
-		DetectDivergence:  true,
-		ResolveRules:      mCfg.ResolveRules,
-		Logger:            s.logger,
+		RepoPath:           path,
+		RepoName:           repoName,
+		ProjectRoot:        s.config.ProjectRoot,
+		SyncInterval:       s.config.TeamContextSyncInterval,
+		MinFetchAge:        minFetchAge,
+		ValidateIntegrity:  true,
+		DetectDivergence:   true,
+		ResolveRules:       mCfg.ResolveRules,
+		EnsureKBMergeAttrs: true, // shared kb resilience for team-context wedges
+		Logger:             s.logger,
 	})
 
 	// corrupt repo: move aside so background clone picks it up next cycle

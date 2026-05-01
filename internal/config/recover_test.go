@@ -6,6 +6,19 @@ import (
 	"testing"
 )
 
+// TestRepoIDFromLedgerPath covers the ledger-path → repo_id extractor.
+//
+// Why this matters: the ledger path is the *only* on-disk source of the
+// canonical repo_id when .sageox/config.json has been removed by a git
+// reset. If this parser silently returns the wrong path component, we
+// either (a) mint a "valid-looking" but wrong repo_id (orphans the
+// existing ledger checkout and the running daemon's registry entry) or
+// (b) fall back to default config (same orphan outcome). Each subcase
+// guards a real shape we've observed: the canonical user-dir layout
+// from production, trailing slashes that filepath.Clean does NOT strip
+// for some inputs, sub-paths into the ledger that callers may pass in,
+// and malformed inputs that must NOT match a "looks plausible"
+// fallback.
 func TestRepoIDFromLedgerPath(t *testing.T) {
 	tests := []struct {
 		name string
