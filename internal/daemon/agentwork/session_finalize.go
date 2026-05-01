@@ -1022,7 +1022,22 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 				merged[k] = v
 			}
 			for k, v := range fileRefs {
-				merged[k] = v // LFS refs from this finalize win for shared keys
+				// LFS-safety guard: never demote a Storage=git entry
+				// to Storage=lfs. The CLI's session_upload registers
+				// small JSON artifacts (summary.json) as Storage=git
+				// because their bytes live directly in the git tree;
+				// if a daemon-side merge replaced that with an LFS
+				// pointer, WritePointerFiles would overwrite the
+				// real summary.json with a 130-byte pointer stub —
+				// silent data loss the user has explicitly flagged
+				// as a worry. Storage=git wins for shared keys.
+				if existing, ok := merged[k]; ok && existing.IsGit() && v.IsLFS() {
+					h.logger.Warn("rejecting LFS overwrite of git-stored entry",
+						"session", sessionName, "file", k,
+						"existing_size", existing.Size, "incoming_oid", v.OID)
+					continue
+				}
+				merged[k] = v
 			}
 			base.Files = merged
 		} else {

@@ -400,11 +400,16 @@ func removeTeamContext(teamID string, jsonOutput bool) error {
 		}
 	}
 
-	// remove from project config if present
+	// remove from project config if present, under MutateLocalConfig
+	// so concurrent daemon writes to config.local.toml don't lose the
+	// removal (ox-dfy4).
 	configRemoved := false
 	if localCfg != nil && tc != nil {
-		localCfg.RemoveTeamContext(teamID)
-		if err := config.SaveLocalConfig(projectRoot, localCfg); err != nil {
+		err := config.MutateLocalConfig(context.Background(), projectRoot, func(cfg *config.LocalConfig) error {
+			cfg.RemoveTeamContext(teamID)
+			return nil
+		})
+		if err != nil {
 			if !jsonOutput {
 				cli.PrintWarning(fmt.Sprintf("Failed to save config: %v", err))
 			}

@@ -24,6 +24,8 @@ package fileutil
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -53,20 +55,46 @@ func (e *ErrLockTimeout) Error() string {
 // data file. Exposed so tests and callers that need to clean up stale
 // locks know where to look.
 //
-// Convention: alongside the target with a leading dot and `.lock`
-// suffix, e.g.
+// Lock files live in the OS tmpdir under `sageox-locks/`, keyed by an
+// absolute-path hash of the target. Why NOT alongside the target:
 //
-//	/x/sessions/abc/meta.json    -> /x/sessions/abc/.meta.json.lock
-//	/y/.sageox/config.local.toml -> /y/.sageox/.config.local.toml.lock
+//   - `<ledger>/sessions/<name>/meta.json`'s sibling `.meta.json.lock`
+//     would live inside a git-tracked tree. A crashed writer leaves an
+//     empty lock file there; the next `git add .` (user) or any glob
+//     that didn't anticipate `.lock` files would commit it. We can't
+//     rely on every adjacent `.gitignore` covering `.*.lock`.
+//   - User-visible: even with the dot prefix, `ls -a` shows the lock
+//     and prompts "what is this?" support questions.
+//   - GC / blue-green reclone: any extra file inside a sparse-checkout
+//     tree is a state-divergence risk.
 //
-// The dot prefix is intentional: keeps the lock out of `ls`, ignored by
-// most globs, and obviously not user-facing.
+// Storing in OS tmpdir sidesteps all three. The hash is sha256 of the
+// abs target path truncated to 16 hex chars — collisions among the
+// bounded set of lock targets in ox (one per session, plus a few
+// per-project files) are statistically zero, and even if one occurred
+// it'd just serialize two unrelated writers harmlessly.
+//
+// Tradeoff accepted: locks don't survive a reboot. That's correct —
+// after reboot every prior holder is dead and the lock should be
+// gone. It also means the OS tmpdir cleaner reaps stale lock files
+// for free, no per-session cleanup logic needed.
 func LockPath(targetPath string) string {
-	dir, base := filepath.Split(targetPath)
-	if dir == "" {
-		dir = "."
+	abs, err := filepath.Abs(targetPath)
+	if err != nil {
+		abs = targetPath // best-effort; relative paths still hash deterministically
 	}
-	return filepath.Join(dir, "."+base+".lock")
+	sum := sha256.Sum256([]byte(abs))
+	name := hex.EncodeToString(sum[:8]) + ".lock"
+	return filepath.Join(lockDir(), name)
+}
+
+// lockDir returns (and lazily creates) the per-user tmpdir we store
+// lock files in. Best-effort: if MkdirAll fails the subsequent
+// OpenFile will surface the error to the caller.
+func lockDir() string {
+	dir := filepath.Join(os.TempDir(), "sageox-locks")
+	_ = os.MkdirAll(dir, 0o700)
+	return dir
 }
 
 // WithFileLock acquires an advisory exclusive lock on the sidecar lock
@@ -91,13 +119,8 @@ func LockPath(targetPath string) string {
 func WithFileLock(ctx context.Context, targetPath string, fn func() error) error {
 	lockPath := LockPath(targetPath)
 
-	// Ensure the lock file's directory exists. Don't create the lock
-	// file's parents recursively — the caller's data file should
-	// already live in an extant directory; if not, that's a real
-	// caller error we'd rather surface here than mask.
-	if _, err := os.Stat(filepath.Dir(lockPath)); err != nil {
-		return fmt.Errorf("lock directory missing for %q: %w", targetPath, err)
-	}
+	// lockDir() creates the parent on first call; nothing else to
+	// pre-flight here — OpenFile below will surface any real error.
 
 	// In-process serialization first. Two goroutines in the same
 	// process trying to flock the same FD do NOT block each other on

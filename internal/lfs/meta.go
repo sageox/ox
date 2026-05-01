@@ -496,25 +496,57 @@ func NewGitFileRef(size int64) FileRef {
 // add a distinct UpdateMetaSummaryOnly function; don't reintroduce the
 // single-field ambiguity.
 func UpdateMetaSummary(sessionPath, title string) error {
-	meta, err := ReadSessionMeta(sessionPath)
-	if err != nil {
-		return fmt.Errorf("read meta for title update: %w", err)
-	}
-	meta.Title = title
-	meta.Summary = title
+	// Runs the entire read-modify-write under MutateSessionMeta's flock
+	// so a daemon finalize concurrently writing Files / Summary doesn't
+	// clobber this Title write (and vice versa). Without this the
+	// title-write path — which is hit on every session push — was the
+	// single most frequent unlocked RMW on meta.json. See ox-e1ot.
+	//
+	// We also need the LFS-pointer side of WriteSessionMeta to fire so
+	// content files get replaced with pointers post-write; do it
+	// outside the lock since pointer writes don't race with the
+	// manifest mutation.
+	var pointerFiles map[string]FileRef
+	if err := MutateSessionMeta(context.Background(), sessionPath, func(meta *SessionMeta) (*SessionMeta, error) {
+		if meta == nil {
+			return nil, fmt.Errorf("meta.json not found in %s: cannot update title", sessionPath)
+		}
+		meta.Title = title
+		meta.Summary = title
 
-	// If a non-empty title is being written, the session HAS a successful
-	// summary now — stamp SummaryStatus=ok and clear any stale failure
-	// signals from a previous failed attempt (ox-wstd: sticky tombstones).
-	// We hard-code "ok" here rather than importing pkg/sessionsummary
-	// because internal/lfs is below it in the dep graph; both sides agree
-	// on the literal "ok".
-	if title != "" {
-		meta.SummaryStatus = "ok"
-		meta.ValidationError = ""
+		// If a non-empty title is being written, the session HAS a successful
+		// summary now — stamp SummaryStatus=ok and clear any stale failure
+		// signals from a previous failed attempt (ox-wstd: sticky tombstones).
+		// We hard-code "ok" here rather than importing pkg/sessionsummary
+		// because internal/lfs is below it in the dep graph; both sides agree
+		// on the literal "ok".
+		if title != "" {
+			meta.SummaryStatus = "ok"
+			meta.ValidationError = ""
+		}
+		// Capture the snapshot of Files we want pointer-replaced after
+		// the lock releases. Copy the map so the post-lock work can't
+		// see a concurrent mutation.
+		if len(meta.Files) > 0 {
+			pointerFiles = make(map[string]FileRef, len(meta.Files))
+			for k, v := range meta.Files {
+				pointerFiles[k] = v
+			}
+		}
+		return meta, nil
+	}); err != nil {
+		return err
 	}
 
-	return WriteSessionMeta(sessionPath, meta)
+	// Replace content files with LFS pointer files for GC protection.
+	// Best-effort, matches WriteSessionMeta's prior behavior; pointer
+	// write failures don't invalidate the meta.json update.
+	if len(pointerFiles) > 0 {
+		if _, err := WritePointerFiles(sessionPath, pointerFiles); err != nil {
+			slog.Warn("LFS pointer file write failed", "error", err, "path", sessionPath)
+		}
+	}
+	return nil
 }
 
 // BareOID returns the hex digest without the "sha256:" prefix.

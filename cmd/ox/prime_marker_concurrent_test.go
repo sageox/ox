@@ -66,52 +66,47 @@ func TestEnsureOxPrimeMarker_ConcurrentInjections_NoDuplicates(t *testing.T) {
 
 // TestEnsureOxPrimeMarker_ConcurrentSeed_NoDuplicateFiles verifies the
 // "neither AGENTS.md nor CLAUDE.md exists" path: when many goroutines
-// hit it together, exactly ONE creates the file and the rest see it.
-// Without per-file flock, multiple writers each truncate-create the
-// file and the result is non-deterministic.
+// hit it together, the file ends up with exactly one set of markers
+// regardless of how many writers raced.
 //
-// Failure prevented: race between adapters during a fresh `ox init`
-// where one adapter's write clobbers another's freshly-seeded content.
+// Design note: this used to assert "exactly one writer reports
+// injected" under a per-file flock. After the lock was removed (the
+// realistic contended writer is the user's editor, not another ox
+// process — flock between two ox processes does nothing about that),
+// multiple writers MAY report injected; what matters is the
+// post-condition of the file. The atomic write (random temp +
+// rename) guarantees readers always see one or the other writer's
+// complete bytes, never a torn intermediate, and the marker
+// idempotence (strings.Contains) means re-running converges.
+//
+// Failure prevented: a future change re-introduces a non-atomic
+// write to the seed path, allowing one writer to truncate-then-write
+// while another reads, producing torn or empty AGENTS.md.
 func TestEnsureOxPrimeMarker_ConcurrentSeed_NoDuplicateFiles(t *testing.T) {
 	gitRoot := t.TempDir()
 	// no AGENTS.md, no CLAUDE.md — the fresh-init failure window
 
 	const N = 8
 	var wg sync.WaitGroup
-	var injectedCount int
-	var mu sync.Mutex
 	for i := 0; i < N; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			injected, err := EnsureOxPrimeMarker(gitRoot)
-			if err != nil {
+			if _, err := EnsureOxPrimeMarker(gitRoot); err != nil {
 				t.Errorf("EnsureOxPrimeMarker: %v", err)
-				return
-			}
-			if injected {
-				mu.Lock()
-				injectedCount++
-				mu.Unlock()
 			}
 		}()
 	}
 	wg.Wait()
-
-	// Exactly one writer should report "injected" — the rest hit the
-	// double-check inside the lock and bail out.
-	if injectedCount != 1 {
-		t.Errorf("injectedCount = %d, want 1 (multiple writers raced past the seed guard)", injectedCount)
-	}
 
 	body, err := os.ReadFile(filepath.Join(gitRoot, "AGENTS.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got := strings.Count(string(body), OxPrimeMarker); got != 1 {
-		t.Errorf("seed produced %d footer markers, want 1", got)
+		t.Errorf("seed produced %d footer markers, want exactly 1\nbody:\n%s", got, body)
 	}
 	if got := strings.Count(string(body), OxPrimeCheckMarker); got != 1 {
-		t.Errorf("seed produced %d header markers, want 1", got)
+		t.Errorf("seed produced %d header markers, want exactly 1\nbody:\n%s", got, body)
 	}
 }
