@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/lfs"
-	"github.com/sageox/ox/internal/sessionid"
 )
 
 // CheckSlugSessionIDsBackfilled is the slug for the legacy-session-id check.
@@ -108,8 +107,22 @@ func findLegacySessions(sessionsDir string) ([]string, error) {
 	return legacy, nil
 }
 
-// fixLegacySessionIDs stamps a fresh ses_<UUIDv7> into every legacy
-// meta.json under flock, then commits and pushes the batch.
+// fixLegacySessionIDs persists EffectiveSessionID() (the deterministic
+// ses_<UUIDv5> over (RepoID, SessionName)) into every legacy meta.json
+// under flock, then commits and pushes the batch.
+//
+// # Why we persist EffectiveSessionID() and NOT a fresh UUIDv7
+//
+// EffectiveSessionID() is the canonical accessor every consumer uses. For
+// legacy recordings it returns a stable v5 derivation that the SageOx
+// server independently computes the same way. Backfilling that exact
+// value is a pure no-op for any consumer — it just promotes on-the-fly
+// synthesis to on-disk persistence. Stamping a fresh v7 here would change
+// the visible identity of every legacy recording at backfill time,
+// invalidating any reference (cache, server-side index, cross-machine
+// link) that captured the v5 value before this doctor ran. That violates
+// the documented contract on EffectiveSessionID and undoes the entire
+// rationale for opt-in backfill.
 //
 // On a per-session basis the work is idempotent: MutateSessionMeta only
 // rewrites the file when the mutator returns a non-nil meta, and we
@@ -118,11 +131,13 @@ func findLegacySessions(sessionsDir string) ([]string, error) {
 func fixLegacySessionIDs(ledgerPath string, sessionNames []string) checkResult {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 
-	var stamped, raced, failed int
+	var raced, failed int
 	var failures []string
+	var rewritten []string // sessions whose meta.json we actually mutated
 
 	for _, name := range sessionNames {
 		sessionDir := filepath.Join(sessionsDir, name)
+		var didWrite bool
 		err := lfs.MutateSessionMeta(context.Background(), sessionDir, func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 			if m == nil {
 				return nil, nil // file vanished mid-fix; skip
@@ -131,7 +146,11 @@ func fixLegacySessionIDs(ledgerPath string, sessionNames []string) checkResult {
 				raced++
 				return nil, nil // another writer beat us; preserve theirs
 			}
-			m.SessionID = sessionid.GenerateSessionID()
+			// Persist the v5 derivation, NOT a fresh v7. EffectiveSessionID()
+			// returns the v5 fallback because m.SessionID is currently "".
+			// See the doc comment on this function for why this matters.
+			m.SessionID = m.EffectiveSessionID()
+			didWrite = true
 			return m, nil
 		})
 		if err != nil {
@@ -139,9 +158,13 @@ func fixLegacySessionIDs(ledgerPath string, sessionNames []string) checkResult {
 			failures = append(failures, fmt.Sprintf("  %s: %v", name, err))
 			continue
 		}
-		stamped++
+		if !didWrite {
+			continue // raced or vanished; already counted
+		}
+		rewritten = append(rewritten, name)
 	}
 
+	stamped := len(rewritten)
 	if stamped == 0 {
 		// nothing to commit — either all races or all failures.
 		if failed > 0 {
@@ -152,7 +175,10 @@ func fixLegacySessionIDs(ledgerPath string, sessionNames []string) checkResult {
 		return PassedCheck("Legacy session IDs", "no changes (raced with concurrent writer)")
 	}
 
-	if err := commitAndPushSessionIDBackfill(ledgerPath, sessionNames); err != nil {
+	// Commit only the meta.json files we actually rewrote — staging the
+	// full sessionNames list would dirty the index for races/failures and
+	// could include unrelated meta.json edits made between scan and fix.
+	if err := commitAndPushSessionIDBackfill(ledgerPath, rewritten); err != nil {
 		// Local writes succeeded but commit/push failed. Next doctor run
 		// will re-detect (in case a fresh meta.json clobber happened) or
 		// commit them on its next attempt.

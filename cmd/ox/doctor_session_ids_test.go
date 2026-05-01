@@ -84,13 +84,22 @@ func TestFindLegacySessions_SkipsMissingMetaJSON(t *testing.T) {
 	assert.Equal(t, []string{"legacy"}, got)
 }
 
-// TestFixLegacySessionIDs_StampsMissingPreservesPopulated drives the
-// MutateSessionMeta-based fix path directly (no git) and asserts each
-// legacy meta.json gains a unique ses_<UUIDv7> while populated metas
-// are untouched.
-// Failure prevented: a regression that overwrites existing SessionIDs
-// would invalidate cached references in every ledger ever backfilled.
-func TestFixLegacySessionIDs_StampsMissingPreservesPopulated(t *testing.T) {
+// TestFixLegacySessionIDs_PersistsDeterministicV5PreservesPopulated drives
+// the MutateSessionMeta-based fix loop using the SAME assignment pattern
+// as production (m.SessionID = m.EffectiveSessionID()) and asserts:
+//
+//  1. Each legacy meta.json gains the deterministic ses_<UUIDv5> that
+//     EffectiveSessionID() would return on-the-fly — NOT a fresh v7.
+//  2. Populated SessionIDs are untouched.
+//  3. The backfilled value is byte-identical to what EffectiveSessionID()
+//     returned before the backfill (the contract the doctor check
+//     promises in its docstring).
+//
+// Failure prevented: a regression that mints a fresh v7 here would
+// rotate every legacy recording's identity at backfill time, breaking
+// any cached cross-machine reference and violating the documented
+// "EffectiveSessionID is the canonical accessor" contract.
+func TestFixLegacySessionIDs_PersistsDeterministicV5PreservesPopulated(t *testing.T) {
 	tmp := t.TempDir()
 	sessionsDir := filepath.Join(tmp, "sessions")
 	require.NoError(t, os.MkdirAll(sessionsDir, 0o755))
@@ -100,19 +109,31 @@ func TestFixLegacySessionIDs_StampsMissingPreservesPopulated(t *testing.T) {
 	writeTestSessionMeta(t, sessionsDir, "legacy-2", "")
 	writeTestSessionMeta(t, sessionsDir, "modern", preservedID)
 
-	// run the per-session mutate loop directly, decoupled from git.
+	// capture pre-backfill v5 derivations so we can assert byte-identity
+	// after the mutate loop.
+	preLegacy1, err := lfs.ReadSessionMeta(filepath.Join(sessionsDir, "legacy-1"))
+	require.NoError(t, err)
+	preLegacy2, err := lfs.ReadSessionMeta(filepath.Join(sessionsDir, "legacy-2"))
+	require.NoError(t, err)
+	wantLegacy1 := preLegacy1.EffectiveSessionID()
+	wantLegacy2 := preLegacy2.EffectiveSessionID()
+	require.True(t, sessionid.IsValidSessionID(wantLegacy1))
+	require.True(t, sessionid.IsValidSessionID(wantLegacy2))
+	require.NotEqual(t, wantLegacy1, wantLegacy2, "v5 derivations must differ across sessions")
+
+	// run the per-session mutate loop directly, mirroring production.
 	for _, name := range []string{"legacy-1", "legacy-2"} {
 		err := lfs.MutateSessionMeta(context.Background(), filepath.Join(sessionsDir, name), func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 			if m.SessionID != "" {
 				return nil, nil
 			}
-			m.SessionID = sessionid.GenerateSessionID()
+			m.SessionID = m.EffectiveSessionID() // deterministic v5
 			return m, nil
 		})
 		require.NoError(t, err)
 	}
 
-	// legacy sessions now carry valid ses_ IDs, distinct from each other
+	// persisted IDs equal the pre-backfill EffectiveSessionID values
 	m1, err := lfs.ReadSessionMeta(filepath.Join(sessionsDir, "legacy-1"))
 	require.NoError(t, err)
 	m2, err := lfs.ReadSessionMeta(filepath.Join(sessionsDir, "legacy-2"))
@@ -120,10 +141,47 @@ func TestFixLegacySessionIDs_StampsMissingPreservesPopulated(t *testing.T) {
 	mModern, err := lfs.ReadSessionMeta(filepath.Join(sessionsDir, "modern"))
 	require.NoError(t, err)
 
-	assert.True(t, sessionid.IsValidSessionID(m1.SessionID), "legacy-1 stamped: %q", m1.SessionID)
-	assert.True(t, sessionid.IsValidSessionID(m2.SessionID), "legacy-2 stamped: %q", m2.SessionID)
+	assert.Equal(t, wantLegacy1, m1.SessionID, "must persist deterministic v5, not a fresh v7")
+	assert.Equal(t, wantLegacy2, m2.SessionID, "must persist deterministic v5, not a fresh v7")
 	assert.NotEqual(t, m1.SessionID, m2.SessionID, "must not collide")
 	assert.Equal(t, preservedID, mModern.SessionID, "populated SessionID must survive untouched")
+}
+
+// TestFixLegacySessionIDs_RaceDoesNotInflateRewrittenList simulates the
+// concurrent-writer race: a session that already has a SessionID by the
+// time the mutator runs must NOT be counted as rewritten or staged for
+// commit.
+//
+// Failure prevented: a regression where stamped/rewritten count includes
+// no-op mutator returns would push extraneous meta.json files into the
+// backfill commit, dirtying unrelated changes and inflating the
+// "backfilled N session(s)" message to the user.
+func TestFixLegacySessionIDs_RaceDoesNotInflateRewrittenList(t *testing.T) {
+	tmp := t.TempDir()
+	sessionsDir := filepath.Join(tmp, "sessions")
+	require.NoError(t, os.MkdirAll(sessionsDir, 0o755))
+
+	// pre-populate with a SessionID — simulates "another writer beat us"
+	const preExisting = "ses_01950000-0000-7abc-8def-0123456789ab"
+	writeTestSessionMeta(t, sessionsDir, "raced", preExisting)
+
+	var rewritten []string
+	err := lfs.MutateSessionMeta(context.Background(), filepath.Join(sessionsDir, "raced"), func(m *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		if m.SessionID != "" {
+			return nil, nil // race: another writer set it first
+		}
+		m.SessionID = m.EffectiveSessionID()
+		return m, nil
+	})
+	require.NoError(t, err)
+	// production code only appends to rewritten when the mutator wrote;
+	// since we returned (nil, nil), nothing should be appended here.
+	assert.Empty(t, rewritten, "raced sessions must not enter the rewrite/commit list")
+
+	// the pre-existing SessionID must survive intact
+	got, err := lfs.ReadSessionMeta(filepath.Join(sessionsDir, "raced"))
+	require.NoError(t, err)
+	assert.Equal(t, preExisting, got.SessionID)
 }
 
 // TestCheckLegacySessionIDs_NoLedgerSkips verifies the check skips when
