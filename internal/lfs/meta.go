@@ -11,19 +11,64 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/fileutil"
 )
+
+// legacySessionNamespace is the UUIDv5 namespace for synthesizing session
+// IDs for recordings predating the SessionID field. Generated once on
+// 2026-05-01; MUST NEVER change.
+//
+// Changing this value would change EffectiveSessionID for every legacy
+// recording in every ledger, breaking server-side dedup, cross-machine
+// references, and any external system that has cached the value. Treat
+// as a load-bearing constant — same status as a database table name. To
+// regenerate it would require a coordinated migration across every ledger.
+//
+// The SageOx server performs the same UUIDv5 derivation with this same
+// namespace when ingesting a meta.json with no session_id, so client and
+// server always compute the same ses_-prefixed value for every legacy
+// recording. If this constant changes, the server must change in lockstep.
+var legacySessionNamespace = uuid.MustParse("5e6238b7-9403-4ee4-b5ec-8a6d37a5de14")
 
 // SessionMeta is the git-tracked metadata + OID manifest for a session.
 // Stored as meta.json in each session folder. When Files is populated,
 // WriteSessionMeta also writes LFS pointer files (standard git-lfs naming)
 // to replace content files, preventing LFS garbage collection.
 type SessionMeta struct {
-	Version             string    `json:"version"` // "1.0"
-	SessionName         string    `json:"session_name"`
-	Username            string    `json:"username"` // privacy-safe display name — via identity.AttributionDisplayName(). Shared in ledger. NOT an email.
-	UserID              string    `json:"user_id,omitempty"`
-	AgentID             string    `json:"agent_id"`
+	Version     string `json:"version"` // "1.0"
+	SessionName string `json:"session_name"`
+	Username    string `json:"username"` // privacy-safe display name — via identity.AttributionDisplayName(). Shared in ledger. NOT an email.
+	UserID      string `json:"user_id,omitempty"`
+	AgentID     string `json:"agent_id"`
+
+	// SessionID is the globally unique, content-bound identifier for THIS
+	// specific recording. Format: "ses_<UUIDv7>". Populated at session
+	// creation time and never regenerated. Independent of path/name so
+	// renames, moves, and re-imports do not change identity.
+	//
+	// Do NOT confuse with OxSID (per-agent-instance, reused across many
+	// recordings during a 24h prime window) or AgentID (per-agent, reused
+	// across all of that agent's recordings).
+	//
+	// # Backwards compatibility
+	//
+	// Pre-existing meta.json files do not carry this field. The compat model:
+	//
+	//   - JSON tag is `omitempty` — older readers see no schema change;
+	//     newer readers see "" for legacy sessions.
+	//   - Version is NOT bumped — additive optional field, no breaking
+	//     change to the on-disk format.
+	//   - Legacy sessions on disk are NEVER backfilled automatically. The
+	//     deterministic EffectiveSessionID() helper synthesizes a stable
+	//     ses_<UUIDv5> from (RepoID, SessionName) on every read, so
+	//     consumers always get a ses_-prefixed value without writing to
+	//     old meta.json. Doctor offers an opt-in backfill (FixLevelSuggested).
+	//   - All consumers MUST go through EffectiveSessionID() rather than
+	//     reading SessionID directly. Direct reads return "" for legacy
+	//     and silently break dedup/lookup.
+	SessionID string `json:"session_id,omitempty"`
+
 	AgentType           string    `json:"agent_type"` // "claude-code", "cursor", etc.
 	Model               string    `json:"model,omitempty"`
 	Title               string    `json:"title,omitempty"`
@@ -166,6 +211,15 @@ func (b *SessionMetaBuilder) UserID(id string) *SessionMetaBuilder {
 
 func (b *SessionMetaBuilder) RepoID(id string) *SessionMetaBuilder {
 	b.meta.RepoID = id
+	return b
+}
+
+// SessionID stamps the per-recording ses_<UUIDv7>. Caller is expected to
+// pass sessionid.GenerateSessionID() at session creation time. Never
+// regenerated: MutateSessionMeta-based RMW paths preserve it via JSON
+// round-trip.
+func (b *SessionMetaBuilder) SessionID(id string) *SessionMetaBuilder {
+	b.meta.SessionID = id
 	return b
 }
 
@@ -555,4 +609,34 @@ func (f FileRef) BareOID() string {
 		return f.OID[7:]
 	}
 	return f.OID
+}
+
+// EffectiveSessionID returns the canonical "ses_"-prefixed identifier for
+// this recording, regardless of whether the recording predates the
+// SessionID field.
+//
+//   - If meta.SessionID is non-empty (post-rollout), it is returned verbatim.
+//   - Otherwise the result is a deterministic ses_<UUIDv5> derived from
+//     (RepoID, SessionName) using legacySessionNamespace.
+//
+// Deterministic: calling EffectiveSessionID twice on the same legacy
+// session always returns the same value.
+//
+// # Why UUIDv5 over (RepoID, SessionName) and not OxSID
+//
+// OxSID is per-prime, not per-recording (cmd/ox/agent_prime.go:514;
+// reused at 540, 746, 1614, 1630, 1650). Two recordings produced by the
+// same prime share an OxSID and would collide. SessionName is the only
+// per-recording entropy already present in meta.json; using it here also
+// avoids LFS hydration of raw.jsonl on dehydrated clones.
+//
+// All call sites that need a stable per-recording handle MUST go through
+// this helper. Reading m.SessionID directly returns "" for legacy
+// recordings and silently breaks dedup/lookup.
+func (m *SessionMeta) EffectiveSessionID() string {
+	if m.SessionID != "" {
+		return m.SessionID
+	}
+	name := m.RepoID + "/" + m.SessionName
+	return "ses_" + uuid.NewSHA1(legacySessionNamespace, []byte(name)).String()
 }

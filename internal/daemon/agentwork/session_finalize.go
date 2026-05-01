@@ -21,6 +21,7 @@ import (
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/sessionid"
 	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/sageox/ox/pkg/summaryeval"
 )
@@ -963,7 +964,18 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	// stub into meta.Summary; post-fix, an empty summaryResp.Summary
 	// stays empty here and the writer's invariant guard (ValidateUserVisible)
 	// rejects any future regression that tries to put a leaky string in.
+	//
+	// SessionID: if a meta.json already exists on disk (e.g., the CLI
+	// stamped one at session start and the daemon is recovering a partial
+	// finalize), preserve it. Otherwise stamp a fresh ses_<UUIDv7> here so
+	// daemon-recovered sessions still get an identifier. Never regenerate
+	// over an existing one — that would invalidate any cached references.
+	sessionIDForMeta := sessionid.GenerateSessionID()
+	if existing, err := lfs.ReadSessionMeta(payload.SessionDir); err == nil && existing != nil && existing.SessionID != "" {
+		sessionIDForMeta = existing.SessionID
+	}
 	metaBuilder := lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).
+		SessionID(sessionIDForMeta).
 		Title(summaryResp.Title).
 		Summary(summaryResp.Summary).
 		EntryCount(len(stored.Entries)).
