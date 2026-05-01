@@ -5,9 +5,48 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.5] - Unreleased
+## [0.7.0] - 2026-05-01
 
-_No changes yet. Populate as changes land during the 0.6.5 cycle._
+### Added
+
+**Globally unique session recording IDs**
+- Every session recording now carries a stable `ses_<UUIDv7>` identifier in `meta.json`, independent of path or name. Renames, moves, and re-imports no longer change identity.
+- Legacy recordings without the field get a deterministic `ses_<UUIDv5>` derived from `(repo_id, session_name)` via the `EffectiveSessionID()` accessor — client and server compute the same value byte-for-byte, so no backfill is required.
+- `ox doctor --fix-slug=session-ids` opt-in backfill persists the deterministic value into `meta.json` for cleaner ledgers.
+- Adapter coverage: ses_ IDs are stamped by ox core for sessions captured by every adapter (Claude Code, Aider, Amp, Codex, Droid, Gemini, OpenCode, Pi).
+
+**Session summary quality**
+- New evaluation harness scores summary richness against a curated 18-session golden corpus, catching distiller regressions before release.
+- LLM judge wired into the daemon for live summary validation; richness checks block stub or empty summaries from reaching the ledger.
+- Tokenstrip is now on by default, reducing recording sizes without losing detail.
+- Streaming compressor and `ox session token-optimize` shrink recordings for long-running agents.
+
+**Ledger resilience epic**
+- Multi-writer safety: structural protections against concurrent CLI/daemon writes corrupting `meta.json` or losing summary fields.
+- Daemon LLM tier and autofix scheduler proactively repair corrupted or missing artifacts.
+- `meta.json` manifest now carries an explicit `Storage` tag (`lfs` vs `git`) per file (ADR-016), preventing silent demotion of git-stored summaries to LFS pointers.
+
+**Session UX**
+- `ox session list` shows session titles by default; agent-context invocations default to JSON output.
+
+### Fixed
+
+**Session recording**
+- Regenerate now hydrates LFS-stub raw.jsonl files instead of producing stub summaries.
+- Regenerate writes to the canonical ledger path for team sessions instead of the local cache.
+- Validator errors no longer leak into user-visible `meta.title` or `meta.summary`.
+- `meta.json.title` is populated alongside `summary` so list views render correctly (previously 91/155 sessions on the ox team's ledger shipped with empty titles).
+- Session content readers unified behind `openSessionContent` to enforce the cache-only invariant — hydrated bytes never overwrite the in-place LFS pointer.
+- Closed an autostash race where the LFS pointer rewrite could be lost during commit.
+
+**Daemon**
+- Whisper SQLite handles are properly closed and child watches recursively unwatched, eliminating a file-descriptor leak under long uptimes.
+
+**Init and doctor**
+- `ox doctor --fix` now restores missing `ox-*` slash commands (the `claude-commands` check was previously registered but never run).
+- `ox init` no longer offers Claude Code twice when an external adapter is already installed.
+
+[0.7.0]: https://github.com/sageox/ox/releases/tag/v0.7.0
 
 ## [0.6.4] - 2026-04-22
 
