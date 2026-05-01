@@ -304,12 +304,18 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 
 	// build and write meta.json; use WriteSessionMetaOnly so content files
 	// remain intact until after the push (pointer stubs + no remote = unrecoverable)
-	meta := sessionMetaBase(orphan.SessionName, orphan.Meta.Username, orphan.Meta.AgentID, orphan.Meta.AgentType, orphan.Meta.CreatedAt, projectRoot).
+	metaBuilder := sessionMetaBase(orphan.SessionName, orphan.Meta.Username, orphan.Meta.AgentID, orphan.Meta.AgentType, orphan.Meta.CreatedAt, projectRoot).
 		Model(orphan.Meta.Model).
 		EntryCount(orphan.EntryCount).
 		StopReason(session.StopReasonRecovered).
-		WithFiles(fileRefs).
-		Build()
+		WithFiles(fileRefs)
+	// preserve any pre-existing ses_<UUIDv7> on retry: a prior orphan
+	// publish attempt may have written meta.json before crashing on push.
+	// Mirrors the daemon-side preservation in session_finalize.go.
+	if existing, err := lfs.ReadSessionMeta(sessionDir); err == nil && existing != nil && existing.SessionID != "" {
+		metaBuilder = metaBuilder.SessionID(existing.SessionID)
+	}
+	meta := metaBuilder.Build()
 	if err := lfs.WriteSessionMetaOnly(sessionDir, meta); err != nil {
 		return fmt.Errorf("write meta.json: %w", err)
 	}

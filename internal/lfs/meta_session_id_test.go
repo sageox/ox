@@ -168,6 +168,44 @@ func TestEffectiveSessionID_LegacyDistinctInputs(t *testing.T) {
 	}
 }
 
+// TestSessionMeta_RepublishPreservesIDPattern simulates the
+// "republish after partial-failure" pattern used by every ledger-write
+// call site (agent_session.go, agent_session_recover.go,
+// doctor_session_upload_retry.go, daemon session_finalize.go). Each of
+// these reads any existing meta.json on disk before building fresh, and
+// reuses the prior SessionID if present. This test asserts that the
+// pattern actually preserves the value end-to-end via ReadSessionMeta +
+// builder.SessionID(...).Build() + WriteSessionMetaOnly.
+//
+// Failure prevented: a refactor that changes the ReadSessionMeta return
+// shape, or one that drops the .SessionID() chain in any of the four
+// republish call sites, would silently rotate the ID on retry — which
+// would invalidate every cached cross-machine reference to the recording.
+func TestSessionMeta_RepublishPreservesIDPattern(t *testing.T) {
+	tmp := t.TempDir()
+	sessionDir := filepath.Join(tmp, "session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+
+	const original = "ses_01950000-0000-7abc-8def-0123456789ab"
+	first := NewSessionMeta("name", "user", "Ox1234", "claude-code", time.Now()).
+		SessionID(original).
+		Build()
+	require.NoError(t, WriteSessionMetaOnly(sessionDir, first))
+
+	// simulate the republish pattern: read prior meta, mint fresh builder,
+	// preserve SessionID if existing was non-empty.
+	var rebuilder = NewSessionMeta("name", "user", "Ox1234", "claude-code", time.Now())
+	if existing, err := ReadSessionMeta(sessionDir); err == nil && existing != nil && existing.SessionID != "" {
+		rebuilder = rebuilder.SessionID(existing.SessionID)
+	}
+	require.NoError(t, WriteSessionMetaOnly(sessionDir, rebuilder.Build()))
+
+	got, err := ReadSessionMeta(sessionDir)
+	require.NoError(t, err)
+	assert.Equal(t, original, got.SessionID,
+		"republish must preserve SessionID; got %q want %q", got.SessionID, original)
+}
+
 // TestEffectiveSessionID_NamespaceStability is the load-bearing test that
 // pins the legacy fallback to a specific concrete value. If
 // legacySessionNamespace is ever changed (or the derivation algorithm

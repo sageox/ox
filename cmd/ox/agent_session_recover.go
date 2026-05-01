@@ -207,11 +207,19 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 				_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			} else {
 				displayName := identity.AttributionDisplayName(endpoint.GetForProject(projectRoot), config.GetDisplayName())
-				meta := sessionMetaBase(sessionName, displayName, state.AgentID, state.AdapterName, state.StartedAt, projectRoot).
+				metaBuilder := sessionMetaBase(sessionName, displayName, state.AgentID, state.AdapterName, state.StartedAt, projectRoot).
 					EntryCount(entryCount).
 					StopReason(session.StopReasonRecovered).
-					WithFiles(fileRefs).
-					Build()
+					WithFiles(fileRefs)
+				// preserve any pre-existing ses_<UUIDv7> on retry: if a prior
+				// recovery attempt already wrote meta.json (or an earlier
+				// publish stamped one and crashed mid-push), reuse that
+				// SessionID rather than minting a fresh one. Mirrors the
+				// daemon-side preservation in session_finalize.go.
+				if existing, err := lfs.ReadSessionMeta(ledgerSessionDir); err == nil && existing != nil && existing.SessionID != "" {
+					metaBuilder = metaBuilder.SessionID(existing.SessionID)
+				}
+				meta := metaBuilder.Build()
 				if err := lfs.WriteSessionMeta(ledgerSessionDir, meta); err != nil {
 					slog.Warn("write meta.json failed", "error", err)
 					_ = doctor.SetNeedsDoctorAgent(projectRoot)
