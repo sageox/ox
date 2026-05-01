@@ -184,19 +184,24 @@ func TestDoPull_ConflictInUnsafePath_ReportsIssueAndAborts(t *testing.T) {
 	setupGitRepo(t, cloneDir)
 	bareDir := bareRepoPath(cloneDir)
 
-	// local commit: modify SOUL.md (not under any safe auto-resolve prefix)
-	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "SOUL.md"), []byte("local team soul"), 0o644))
-	gitCmd(t, cloneDir, "add", "SOUL.md")
-	gitCmd(t, cloneDir, "commit", "-m", "local soul edit")
+	// local commit: modify a path that's neither under AutoResolvePrefixes
+	// NOR in kb.MergeUnionPaths. SOUL.md / AGENTS.md / etc. are now
+	// union-merged automatically, so we use a code path here to keep the
+	// "unsafe path causes abort" assertion valid.
+	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, "src"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "src", "main.go"), []byte("package main // local"), 0o644))
+	gitCmd(t, cloneDir, "add", "src/main.go")
+	gitCmd(t, cloneDir, "commit", "-m", "local code edit")
 
 	// push conflicting change from separate clone
 	tmpClone := filepath.Join(t.TempDir(), "conflict-clone")
 	gitCmd(t, t.TempDir(), "clone", bareDir, tmpClone)
 	gitCmd(t, tmpClone, "config", "user.name", "test")
 	gitCmd(t, tmpClone, "config", "user.email", "test@test.com")
-	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "SOUL.md"), []byte("remote team soul"), 0o644))
-	gitCmd(t, tmpClone, "add", "SOUL.md")
-	gitCmd(t, tmpClone, "commit", "-m", "remote soul edit")
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpClone, "src"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "src", "main.go"), []byte("package main // remote"), 0o644))
+	gitCmd(t, tmpClone, "add", "src/main.go")
+	gitCmd(t, tmpClone, "commit", "-m", "remote code edit")
 	gitCmd(t, tmpClone, "push", "origin", "HEAD")
 
 	s := newPullTestScheduler(t, cloneDir)
@@ -351,28 +356,33 @@ func TestPullTeamContext_ConflictReportsIssue(t *testing.T) {
 	setupGitRepo(t, cloneDir)
 	bareDir := bareRepoPath(cloneDir)
 
-	// local commit: edit SOUL.md
-	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "SOUL.md"), []byte("local soul"), 0o644))
-	gitCmd(t, cloneDir, "add", "SOUL.md")
-	gitCmd(t, cloneDir, "commit", "-m", "local soul")
+	// local commit: edit a path that's neither auto-resolved nor union-
+	// merged. SOUL.md is now in kb.MergeUnionPaths and gets union-merged
+	// automatically; we use src/main.go here to keep this test exercising
+	// the non-resolvable-conflict code path.
+	require.NoError(t, os.MkdirAll(filepath.Join(cloneDir, "src"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "src", "main.go"), []byte("package main // local"), 0o644))
+	gitCmd(t, cloneDir, "add", "src/main.go")
+	gitCmd(t, cloneDir, "commit", "-m", "local code")
 
-	// push conflicting SOUL.md from remote
+	// push conflicting change from remote
 	tmpClone := filepath.Join(t.TempDir(), "conflict-clone")
 	gitCmd(t, t.TempDir(), "clone", bareDir, tmpClone)
 	gitCmd(t, tmpClone, "config", "user.name", "test")
 	gitCmd(t, tmpClone, "config", "user.email", "test@test.com")
-	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "SOUL.md"), []byte("remote soul"), 0o644))
-	gitCmd(t, tmpClone, "add", "SOUL.md")
-	gitCmd(t, tmpClone, "commit", "-m", "remote soul")
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpClone, "src"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpClone, "src", "main.go"), []byte("package main // remote"), 0o644))
+	gitCmd(t, tmpClone, "add", "src/main.go")
+	gitCmd(t, tmpClone, "commit", "-m", "remote code")
 	gitCmd(t, tmpClone, "push", "origin", "HEAD")
 
 	s := newPullTestScheduler(t, cloneDir)
 
 	err := s.pullTeamContext(context.Background(), cloneDir)
-	assert.Error(t, err, "pullTeamContext should fail on conflict (no auto-resolve prefixes for SOUL.md)")
+	assert.Error(t, err, "pullTeamContext should fail on conflict (no auto-resolve for src/main.go)")
 
 	// team context uses fallback manifest which includes data/ auto-resolve,
-	// but SOUL.md is NOT under data/ so it should fail with IssueTypeDiverged
+	// but src/main.go is NOT under data/ so it should fail with IssueTypeDiverged
 	issues := s.issues.GetIssues()
 	foundDiverged := false
 	for _, issue := range issues {
