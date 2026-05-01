@@ -631,6 +631,8 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		if !staleLocalCheck.skipped {
 			integrationChecks = append(integrationChecks, staleLocalCheck)
 		}
+		// verify ox-* slash commands are installed in .claude/commands/
+		integrationChecks = append(integrationChecks, checkClaudeCommands(opts.shouldFix(CheckSlugClaudeCommands)))
 	}
 	if detectOpenCode() {
 		integrationChecks = append(integrationChecks, checkOpenCodeHooks(opts.shouldFix(CheckSlugOpenCodeHooks)))

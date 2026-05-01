@@ -1,7 +1,7 @@
 ---
 name: sageox-distill
 description: "Sync, index, and distill team activity across SageOx-enabled repositories. Keeps your team's knowledge base up to date by syncing repo contexts, indexing GitHub PRs/issues, and running the SageOx distillation pipeline."
-version: 0.2.0
+version: 0.2.1
 metadata:
   {
     "openclaw":

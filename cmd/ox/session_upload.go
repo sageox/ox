@@ -180,6 +180,48 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 	return pushLedger(context.Background(), ledgerPath)
 }
 
+// commitPointerRewriteAndPush commits the post-upload LFS pointer rewrite and
+// pushes it. Called immediately after lfs.WritePointerFiles in the session-stop
+// pipeline to close the dirty-worktree window that would otherwise race against
+// the daemon's sync-timer pull (`git pull --rebase --autostash`).
+//
+// Stages only the explicit pointer paths returned by WritePointerFiles — does
+// not re-glob the manifest — so any concurrent unrelated change to the session
+// dir between the initial commit and this one cannot be silently folded into
+// the "lfs: pointerize <name>" commit.
+//
+// Returns nil if pointerPaths is empty (nothing to commit) or if git reports
+// "nothing to commit" (idempotent).
+func commitPointerRewriteAndPush(ledgerPath, sessionName string, pointerPaths []string) error {
+	if len(pointerPaths) == 0 {
+		return nil
+	}
+
+	// --sparse: ledger repos use sparse-checkout (cone mode)
+	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, pointerPaths...)
+	addCmd := exec.Command("git", addArgs...)
+	if output, err := addCmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add failed: %s: %w", string(output), err)
+	}
+
+	// commit under a distinct subject so it doesn't shadow the canonical
+	// "session: <name>" commit in git log
+	commitMsg := fmt.Sprintf("lfs: pointerize %s", sessionName)
+	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "--no-verify", "-m", commitMsg)
+	if output, err := commitCmd.CombinedOutput(); err != nil {
+		if strings.Contains(string(output), "nothing to commit") {
+			return nil
+		}
+		return fmt.Errorf("git commit failed: %s: %w", string(output), err)
+	}
+
+	// push with pull --rebase retry. If the remote has independently modified
+	// the same path (the very race this guards against), PushWithRetry will
+	// abort the rebase cleanly (internal/gitutil/push.go:191) — no conflict
+	// markers can survive into a commit. Caller (slog.Warn) handles the error.
+	return pushLedger(context.Background(), ledgerPath)
+}
+
 // commitAndPushLedgerWithExtras is a thin compatibility shim around
 // commitAndPushLedger, retained for the doctor retry path. Pre-manifest,
 // commitAndPushLedger only globbed *.jsonl/*.html/*.md and missed

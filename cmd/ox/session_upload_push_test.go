@@ -603,3 +603,116 @@ func TestCommitAndPushLedger_EmptySessionDir(t *testing.T) {
 	assert.Contains(t, err.Error(), "git add failed",
 		"error should indicate files were missing for git add")
 }
+
+// TestCommitPointerRewriteAndPush_CleanWorktreeAfterPointerCommit verifies the
+// load-bearing invariant introduced by the post-WritePointerFiles commit step:
+// after the pointer-rewrite commit lands, the ledger working tree must be
+// clean. A dirty pointer file post-push is what produced the autostash race
+// observed in the scribe ledger (e77a7c84) — daemon's sync-timer pull would
+// stash the pointer, and a peer's incompatible push to the same path would
+// turn the stash-pop into permanent conflict markers via ox doctor's auto-
+// commit. This test ensures we don't regress to that state.
+func TestCommitPointerRewriteAndPush_CleanWorktreeAfterPointerCommit(t *testing.T) {
+	_, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+
+	sessionName := "2026-01-01T00-00-testuser-OxPtr1"
+	sessionsDir := filepath.Join(clonePath, "sessions")
+	sessionDir := filepath.Join(sessionsDir, sessionName)
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	// stage 1: write meta.json and a fake "full content" raw.jsonl, commit + push
+	// (mirrors what commitAndPushLedger does at session-stop step 5)
+	meta := fmt.Sprintf(`{"session_name":"%s","agent_id":"OxTest","files":{"raw.jsonl":{"oid":"sha256:0000000000000000000000000000000000000000000000000000000000000000","size":42,"storage":"lfs"}}}`, sessionName)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "meta.json"), []byte(meta), 0644))
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	fullContent := []byte("full content body that pretends to be the recorded session\n")
+	require.NoError(t, os.WriteFile(rawPath, fullContent, 0644))
+	require.NoError(t, ensureSessionsGitignore(sessionsDir))
+	require.NoError(t, commitAndPushLedger(clonePath, sessionName))
+
+	// stage 2: simulate WritePointerFiles by overwriting raw.jsonl with a pointer.
+	// the worktree is now dirty (pointer != HEAD's full content blob).
+	pointerBytes := []byte("version https://git-lfs.github.com/spec/v1\noid sha256:0000000000000000000000000000000000000000000000000000000000000000\nsize 42\n")
+	require.NoError(t, os.WriteFile(rawPath, pointerBytes, 0644))
+
+	statusBefore := runGit(t, clonePath, "status", "--porcelain")
+	require.NotEmpty(t, statusBefore, "precondition: worktree must be dirty after simulated WritePointerFiles")
+
+	// stage 3: the actual code under test — commit the pointer rewrite
+	err := commitPointerRewriteAndPush(clonePath, sessionName, []string{rawPath})
+	require.NoError(t, err)
+
+	// invariant: worktree is clean
+	statusAfter := runGit(t, clonePath, "status", "--porcelain")
+	assert.Empty(t, statusAfter, "worktree must be clean after pointer-rewrite commit (autostash-race precondition)")
+
+	// invariant: the new commit has the distinct subject
+	subject := runGit(t, clonePath, "log", "-1", "--format=%s")
+	assert.Equal(t, fmt.Sprintf("lfs: pointerize %s", sessionName), subject)
+
+	// invariant: the previous commit is the canonical session: commit, untouched
+	prevSubject := runGit(t, clonePath, "log", "-1", "--format=%s", "HEAD~1")
+	assert.Equal(t, fmt.Sprintf("session: %s", sessionName), prevSubject)
+}
+
+// TestCommitPointerRewriteAndPush_EmptyPathsIsNoop verifies that calling with
+// no pointer paths is a clean no-op — neither stages, commits, nor pushes.
+// The session-stop call site short-circuits via len(written) > 0, but defense
+// in depth: if a future caller passes an empty slice, we don't generate an
+// empty commit or hit `git add` with no args.
+func TestCommitPointerRewriteAndPush_EmptyPathsIsNoop(t *testing.T) {
+	_, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+
+	headBefore := runGit(t, clonePath, "rev-parse", "HEAD")
+	err := commitPointerRewriteAndPush(clonePath, "any-session", nil)
+	require.NoError(t, err)
+	headAfter := runGit(t, clonePath, "rev-parse", "HEAD")
+	assert.Equal(t, headBefore, headAfter, "no-op input must not advance HEAD")
+}
+
+// TestCommitPointerRewriteAndPush_StagesOnlyExplicitPaths verifies the H1
+// fix from the code review: the pointer-rewrite commit must NOT silently
+// fold in unrelated changes that happened to be in the session dir between
+// the initial commit and the pointer rewrite. Stages only the paths
+// returned by WritePointerFiles.
+func TestCommitPointerRewriteAndPush_StagesOnlyExplicitPaths(t *testing.T) {
+	_, clonePath := createBareAndClone(t)
+	isolatePushEnv(t, clonePath)
+
+	sessionName := "2026-01-01T00-00-testuser-OxPtr2"
+	sessionsDir := filepath.Join(clonePath, "sessions")
+	sessionDir := filepath.Join(sessionsDir, sessionName)
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	// initial commit with two files: raw.jsonl (LFS) and summary.md (LFS)
+	meta := fmt.Sprintf(`{"session_name":"%s","agent_id":"OxTest","files":{"raw.jsonl":{"oid":"sha256:1111111111111111111111111111111111111111111111111111111111111111","size":10,"storage":"lfs"},"summary.md":{"oid":"sha256:2222222222222222222222222222222222222222222222222222222222222222","size":20,"storage":"lfs"}}}`, sessionName)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "meta.json"), []byte(meta), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte("raw-original\n"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.md"), []byte("summary-original\n"), 0644))
+	require.NoError(t, ensureSessionsGitignore(sessionsDir))
+	require.NoError(t, commitAndPushLedger(clonePath, sessionName))
+
+	// rewrite ONLY raw.jsonl to a pointer; ALSO modify summary.md as if some
+	// other process touched it concurrently. The pointer-rewrite commit must
+	// NOT include the summary.md change.
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	summaryPath := filepath.Join(sessionDir, "summary.md")
+	require.NoError(t, os.WriteFile(rawPath, []byte("version https://git-lfs.github.com/spec/v1\noid sha256:1111111111111111111111111111111111111111111111111111111111111111\nsize 10\n"), 0644))
+	require.NoError(t, os.WriteFile(summaryPath, []byte("summary-CONCURRENTLY-MODIFIED\n"), 0644))
+
+	// only raw.jsonl is the "WritePointerFiles output"
+	err := commitPointerRewriteAndPush(clonePath, sessionName, []string{rawPath})
+	require.NoError(t, err)
+
+	// the pointer-rewrite commit must touch raw.jsonl only
+	changedFiles := runGit(t, clonePath, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
+	assert.Contains(t, changedFiles, "raw.jsonl", "raw.jsonl pointer must be in the commit")
+	assert.NotContains(t, changedFiles, "summary.md",
+		"unrelated concurrent change to summary.md must NOT be folded into the pointer-rewrite commit")
+
+	// summary.md is still dirty (not staged, not committed) — caller's responsibility
+	status := runGit(t, clonePath, "status", "--porcelain")
+	assert.Contains(t, status, "summary.md", "summary.md should remain in worktree-modified state")
+}
