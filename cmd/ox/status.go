@@ -214,12 +214,51 @@ func getGitRepoStatus(repoPath string, lastSync time.Time, hasLastSync bool) git
 		}
 	}
 
-	// check if synced with remote (only if uncommitted count is 0)
-	if status.UncommittedCount == 0 {
+	// rebase-in-progress detection (ox-un4u): the most direct signal of
+	// a wedge. gitutil.IsRebaseInProgress checks .git/rebase-merge and
+	// .git/rebase-apply. Cheap (two stat calls); always run.
+	status.RebaseInProgress = gitutil.IsRebaseInProgress(repoPath)
+
+	// ahead/behind count vs upstream. Silent if no upstream is
+	// configured (offline-only repo) — that's not a wedge, just a fact
+	// of the workspace. Failures here are non-fatal; status UI would
+	// rather under-report than refuse to render.
+	if ahead, behind, ok := gitAheadBehind(repoPath); ok {
+		status.AheadCount = ahead
+		status.BehindCount = behind
+	}
+
+	// check if synced with remote (only if uncommitted count is 0
+	// AND no rebase in progress AND no real divergence). A wedged repo
+	// must NOT show as synced.
+	if status.UncommittedCount == 0 && !status.IsWedged() {
 		status.IsSynced = true
 	}
 
 	return status
+}
+
+// gitAheadBehind returns the number of commits the local branch is
+// ahead/behind its upstream. Returns (0, 0, false) when no upstream is
+// configured or when the rev-list query fails — UI rendering treats
+// missing data as "don't show counts" rather than erroring out.
+func gitAheadBehind(repoPath string) (ahead, behind int, ok bool) {
+	cmd := exec.Command("git", "-C", repoPath, "rev-list", "--left-right", "--count", "@{u}...HEAD")
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, 0, false // no upstream tracking, or transient error
+	}
+	parts := strings.Fields(strings.TrimSpace(string(out)))
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	if _, err := fmt.Sscanf(parts[0], "%d", &behind); err != nil {
+		return 0, 0, false
+	}
+	if _, err := fmt.Sscanf(parts[1], "%d", &ahead); err != nil {
+		return 0, 0, false
+	}
+	return ahead, behind, true
 }
 
 // getGitRemoteURL returns the origin remote URL for a git repo.
@@ -496,6 +535,26 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			if !repoStatus.Exists {
 				b.WriteString(statusLabelStyle.Render(""))
 				b.WriteString(statusMutedStyle.Render("Run 'ox doctor --fix' to restore"))
+				b.WriteString("\n")
+			}
+
+			// ox-un4u: surface wedged-ledger state. The user must see
+			// this BEFORE they hit a failed `ox agent session stop`
+			// trying to push a stuck rebase or a divergent branch.
+			if repoStatus.IsWedged() {
+				var summary string
+				switch {
+				case repoStatus.RebaseInProgress:
+					summary = "⚠ rebase in progress (wedged)"
+				default: // divergence
+					summary = fmt.Sprintf("⚠ diverged from remote (ahead %d, behind %d)",
+						repoStatus.AheadCount, repoStatus.BehindCount)
+				}
+				b.WriteString(statusLabelStyle.Render(""))
+				b.WriteString(formatValue(summary, "warning"))
+				b.WriteString("\n")
+				b.WriteString(statusLabelStyle.Render(""))
+				b.WriteString(statusMutedStyle.Render("Run 'ox doctor --fix' to repair (or it will auto-repair on next session stop)"))
 				b.WriteString("\n")
 			}
 		}

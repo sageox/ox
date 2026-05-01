@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -87,6 +88,14 @@ func HasBothPrimeMarkers(gitRoot string) bool {
 // EnsureOxPrimeMarker adds both header and footer markers if missing from AGENTS.md or CLAUDE.md.
 // It also handles upgrade from legacy SageOxPrimeLine block to the new format.
 // Returns (injected bool, error) where injected is true if any marker was added or upgraded.
+//
+// Concurrency: each per-file read-modify-write runs under
+// fileutil.WithFileLock so two adapters (or doctor + ox prime) can't
+// race on AGENTS.md/CLAUDE.md and silently lose user edits between
+// marker injections. The has-marker fast path is unlocked because it's
+// idempotent — but if the fast path returns "missing" we re-check
+// inside the lock to avoid a double-inject under concurrency. See
+// ox-l07b for the failure mode.
 func EnsureOxPrimeMarker(gitRoot string) (bool, error) {
 	if gitRoot == "" {
 		return false, nil
@@ -95,48 +104,81 @@ func EnsureOxPrimeMarker(gitRoot string) (bool, error) {
 	agentsPath := filepath.Join(gitRoot, "AGENTS.md")
 	claudePath := filepath.Join(gitRoot, "CLAUDE.md")
 
-	// check which markers are missing
-	hasFooter := HasOxPrimeMarker(gitRoot)
-	hasHeader := HasOxPrimeCheckMarker(gitRoot)
-
-	// if both exist, nothing to do
-	if hasFooter && hasHeader {
+	// fast path: both markers already present in either file → nothing to do.
+	if HasOxPrimeMarker(gitRoot) && HasOxPrimeCheckMarker(gitRoot) {
 		return false, nil
 	}
 
 	// try AGENTS.md first (primary file)
-	if content, err := os.ReadFile(agentsPath); err == nil {
-		injected, err := ensureMarkersInFile(agentsPath, string(content), !hasHeader, !hasFooter)
-		if err != nil {
-			return false, err
-		}
-		if injected {
-			return true, nil
-		}
-	}
-
-	// try CLAUDE.md
-	if content, err := os.ReadFile(claudePath); err == nil {
-		injected, err := ensureMarkersInFile(claudePath, string(content), !hasHeader, !hasFooter)
-		if err != nil {
-			return false, err
-		}
-		if injected {
-			return true, nil
-		}
-	}
-
-	// neither file exists or both failed - try to create AGENTS.md with both markers
-	_, agentsErr := os.Stat(agentsPath)
-	if os.IsNotExist(agentsErr) {
-		content := OxPrimeCheckBlock + "\n# AI Agent Instructions\n\n" + OxPrimeLine + "\n"
-		if err := fileutil.AtomicWriteBytes(agentsPath, []byte(content), 0644); err != nil {
-			return false, err
-		}
+	if injected, err := ensureMarkersInFileLocked(agentsPath, gitRoot); err != nil {
+		return false, err
+	} else if injected {
 		return true, nil
 	}
 
+	// try CLAUDE.md
+	if injected, err := ensureMarkersInFileLocked(claudePath, gitRoot); err != nil {
+		return false, err
+	} else if injected {
+		return true, nil
+	}
+
+	// neither file exists - create AGENTS.md with both markers, also under
+	// the per-file lock so a concurrent caller doesn't race on the same
+	// "create from scratch" path.
+	if _, err := os.Stat(agentsPath); os.IsNotExist(err) {
+		var injected bool
+		lockErr := fileutil.WithFileLock(context.Background(), agentsPath, func() error {
+			// double-check under the lock — another caller may have just created it
+			if _, err := os.Stat(agentsPath); err == nil {
+				return nil
+			}
+			content := OxPrimeCheckBlock + "\n# AI Agent Instructions\n\n" + OxPrimeLine + "\n"
+			if err := fileutil.AtomicWriteBytes(agentsPath, []byte(content), 0644); err != nil {
+				return err
+			}
+			injected = true
+			return nil
+		})
+		if lockErr != nil {
+			return false, lockErr
+		}
+		return injected, nil
+	}
+
 	return false, nil
+}
+
+// ensureMarkersInFileLocked is the flock'd wrapper around ensureMarkersInFile.
+// All marker injection on AGENTS.md / CLAUDE.md MUST go through this so
+// concurrent adapters serialize at the FS level and a user edit between
+// read and write isn't lost.
+func ensureMarkersInFileLocked(filePath, gitRoot string) (bool, error) {
+	var injected bool
+	err := fileutil.WithFileLock(context.Background(), filePath, func() error {
+		content, err := os.ReadFile(filePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil // caller will try the other file or seed fresh
+			}
+			return err
+		}
+		// recompute marker presence INSIDE the lock — caller's fast path
+		// reading was unlocked, so a concurrent writer may have just
+		// added markers and we'd otherwise inject duplicates.
+		needHeader := !strings.Contains(string(content), OxPrimeCheckMarker)
+		needFooter := !strings.Contains(string(content), OxPrimeMarker)
+		if !needHeader && !needFooter {
+			return nil
+		}
+		out, mutErr := ensureMarkersInFile(filePath, string(content), needHeader, needFooter)
+		if mutErr != nil {
+			return mutErr
+		}
+		injected = out
+		return nil
+	})
+	return injected, err
 }
 
 // ensureMarkersInFile adds header and/or footer markers to a file.

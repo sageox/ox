@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -103,6 +105,12 @@ func LoadLocalConfig(projectRoot string) (*LocalConfig, error) {
 
 // SaveLocalConfig saves the local configuration to .sageox/config.local.toml
 // relative to projectRoot. Creates the .sageox directory if it does not exist.
+//
+// On-disk write is atomic via fileutil.AtomicWriteBytes (random temp +
+// fsync + rename). Callers that read-then-modify-then-save MUST do the
+// whole sequence under MutateLocalConfig so two daemons / a daemon + CLI
+// can't lose each other's team_contexts rows or ledger.last_sync updates.
+// See ox-dfy4 for the failure mode.
 func SaveLocalConfig(projectRoot string, cfg *LocalConfig) error {
 	if projectRoot == "" {
 		return errors.New("project root cannot be empty")
@@ -124,17 +132,77 @@ func SaveLocalConfig(projectRoot string, cfg *LocalConfig) error {
 		return fmt.Errorf("create .sageox directory: %w", err)
 	}
 
+	// In-memory dedup before serializing — defensive; callers go through
+	// SetTeamContext which already dedups, but a manually-built
+	// LocalConfig from a test or future caller could contain duplicates
+	// and we don't want the on-disk file to inherit them.
+	cfg = dedupLocalConfig(cfg)
+
 	data, err := toml.Marshal(cfg)
 	if err != nil {
 		return fmt.Errorf("marshal local config: %w", err)
 	}
 
 	configPath := filepath.Join(sageoxPath, localConfigFilename)
-	if err := os.WriteFile(configPath, data, 0600); err != nil {
+	if err := fileutil.AtomicWriteBytes(configPath, data, 0o600); err != nil {
 		return fmt.Errorf("write local config file=%s: %w", configPath, err)
 	}
 
 	return nil
+}
+
+// MutateLocalConfig runs an exclusive read-modify-write under an advisory
+// flock on config.local.toml. Use this for ANY caller that mutates the
+// file (SetTeamContext, UpdateTeamContextLastSync, ledger.last_sync
+// touch, etc.) so concurrent daemons / CLI calls can't lose each
+// other's writes.
+//
+// The mutator receives the current on-disk LocalConfig (or an empty one
+// if the file doesn't exist yet). It mutates in place and returns nil
+// to commit the write, or an error to abort. Returning a sentinel
+// nil-config tells the wrapper to skip the write entirely (no-op
+// guard for "only update if changed" callers).
+func MutateLocalConfig(ctx context.Context, projectRoot string, mutate func(*LocalConfig) error) error {
+	if projectRoot == "" {
+		return errors.New("project root cannot be empty")
+	}
+	configPath := filepath.Join(projectRoot, sageoxDir, localConfigFilename)
+	return fileutil.WithFileLock(ctx, configPath, func() error {
+		cfg, err := LoadLocalConfig(projectRoot)
+		if err != nil {
+			return fmt.Errorf("load local config: %w", err)
+		}
+		if cfg == nil {
+			cfg = &LocalConfig{}
+		}
+		if err := mutate(cfg); err != nil {
+			return err
+		}
+		return SaveLocalConfig(projectRoot, cfg)
+	})
+}
+
+// dedupLocalConfig returns a copy of cfg with duplicate team_contexts
+// rows removed (last write wins per team_id). Pure function — no I/O.
+// Defensive against producers that build a config by hand or accumulate
+// rows via direct slice append; SetTeamContext is the recommended path.
+func dedupLocalConfig(cfg *LocalConfig) *LocalConfig {
+	if cfg == nil || len(cfg.TeamContexts) <= 1 {
+		return cfg
+	}
+	seen := make(map[string]int, len(cfg.TeamContexts))
+	out := make([]TeamContext, 0, len(cfg.TeamContexts))
+	for _, tc := range cfg.TeamContexts {
+		if idx, ok := seen[tc.TeamID]; ok {
+			out[idx] = tc // last write wins
+			continue
+		}
+		seen[tc.TeamID] = len(out)
+		out = append(out, tc)
+	}
+	cp := *cfg
+	cp.TeamContexts = out
+	return &cp
 }
 
 // -----------------------------------------------------------------------------

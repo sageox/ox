@@ -1,12 +1,17 @@
 package lfs
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/sageox/ox/internal/fileutil"
 )
 
 // SessionMeta is the git-tracked metadata + OID manifest for a session.
@@ -231,6 +236,17 @@ func WriteSessionMeta(sessionPath string, meta *SessionMeta) error {
 // LFS pointer stubs. Use this when content files must remain intact until a
 // successful git push — call WritePointerFiles separately after the push so that
 // push failure never leaves a session with pointer stubs but no remote copy.
+//
+// The on-disk write is atomic via fileutil.AtomicWriteBytes (random temp +
+// fsync + rename + parent dir fsync). The previous implementation used the
+// literal "meta.json.tmp" as the temp path, which raced with concurrent
+// writers — both rename'd the same temp inode and one writer saw ENOENT.
+// Random suffix per write closes that loophole.
+//
+// Callers that mutate meta.json (read → modify → write) MUST do the entire
+// RMW under MutateSessionMeta so the daemon and CLI don't lose each other's
+// fields. WriteSessionMetaOnly itself is unlocked for backwards compat;
+// MutateSessionMeta is the safe path.
 func WriteSessionMetaOnly(sessionPath string, meta *SessionMeta) error {
 	if meta == nil {
 		return fmt.Errorf("nil session meta")
@@ -251,18 +267,43 @@ func WriteSessionMetaOnly(sessionPath string, meta *SessionMeta) error {
 	}
 
 	metaPath := filepath.Join(sessionPath, metaFilename)
-
-	// atomic write
-	tmpPath := metaPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	if err := fileutil.AtomicWriteBytes(metaPath, data, 0o644); err != nil {
 		return fmt.Errorf("write session meta: %w", err)
 	}
-	if err := os.Rename(tmpPath, metaPath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename session meta: %w", err)
-	}
-
 	return nil
+}
+
+// MutateSessionMeta runs an exclusive read-modify-write under an advisory
+// flock on meta.json. Any code path where the daemon and CLI both mutate
+// the manifest (session_finalize summary write, session_upload artifact
+// registration) MUST go through this so they serialize at the FS level.
+//
+// The mutator is given a fresh copy of the on-disk SessionMeta to mutate
+// in place. If the file does not exist, mutator receives nil and may
+// return a freshly-constructed *SessionMeta to write; returning nil
+// without writing is a no-op (useful for "only update if exists"
+// guards). Returning an error aborts the write.
+func MutateSessionMeta(ctx context.Context, sessionPath string, mutate func(*SessionMeta) (*SessionMeta, error)) error {
+	metaPath := filepath.Join(sessionPath, metaFilename)
+	return fileutil.WithFileLock(ctx, metaPath, func() error {
+		meta, readErr := ReadSessionMeta(sessionPath)
+		if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+			return readErr
+		}
+		// pass nil if file truly missing; mutator decides whether to seed
+		var arg *SessionMeta
+		if readErr == nil {
+			arg = meta
+		}
+		out, mutErr := mutate(arg)
+		if mutErr != nil {
+			return mutErr
+		}
+		if out == nil {
+			return nil // mutator chose not to write
+		}
+		return WriteSessionMetaOnly(sessionPath, out)
+	})
 }
 
 // ReadSessionMeta reads meta.json from the given session directory.

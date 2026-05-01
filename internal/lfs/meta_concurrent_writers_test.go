@@ -1,6 +1,7 @@
 package lfs
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -50,15 +51,6 @@ func TestSessionMeta_ConcurrentReadModifyWrite_DoesNotLoseFields(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: spawns concurrent writers")
 	}
-	// Pending the ox-e1ot fix (flock / version field / CAS). Run this
-	// test manually with -run='ConcurrentReadModifyWrite' to confirm the
-	// bug still reproduces; remove the skip when the fix lands. Also
-	// surfaces a secondary bug: the writer's temp path is the literal
-	// 'meta.json.tmp' (no random suffix), so concurrent writers race on
-	// the same temp file and one's rename can fail with ENOENT — needs
-	// fixing alongside the read-modify-write race.
-	t.Skip("ox-e1ot pending: meta.json read-modify-write race + shared meta.json.tmp temp path")
-
 	dir := t.TempDir()
 
 	// Seed an initial meta.json that both writers will modify.
@@ -68,39 +60,45 @@ func TestSessionMeta_ConcurrentReadModifyWrite_DoesNotLoseFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Daemon role: read → set Summary → write.
+	// Daemon role: read → set Summary → write, all under MutateSessionMeta.
 	const wantSummary = "daemon: summarized"
 	daemonWrite := func() {
-		meta, err := ReadSessionMeta(dir)
+		err := MutateSessionMeta(context.Background(), dir, func(meta *SessionMeta) (*SessionMeta, error) {
+			if meta == nil {
+				t.Errorf("daemon: meta missing")
+				return nil, nil
+			}
+			meta.Summary = wantSummary
+			// hold the in-memory copy for a beat to widen the race window
+			// without sleeping — pure goroutine reschedule.
+			yield()
+			return meta, nil
+		})
 		if err != nil {
-			t.Errorf("daemon read: %v", err)
-			return
-		}
-		meta.Summary = wantSummary
-		// hold the in-memory copy for a beat to widen the race window
-		// without any sleep (just a context switch on the channel).
-		yield()
-		if err := WriteSessionMetaOnly(dir, meta); err != nil {
-			t.Errorf("daemon write: %v", err)
+			t.Errorf("daemon mutate: %v", err)
 		}
 	}
 
-	// CLI role: read → register a git artifact → write.
+	// CLI role: read → register a git artifact → write, also under
+	// MutateSessionMeta. Both writers MUST go through it for the lock to
+	// matter; that's the contract callers in production must follow.
 	const wantFile = "summary.json"
 	const wantSize = int64(1234)
 	cliWrite := func() {
-		meta, err := ReadSessionMeta(dir)
+		err := MutateSessionMeta(context.Background(), dir, func(meta *SessionMeta) (*SessionMeta, error) {
+			if meta == nil {
+				t.Errorf("cli: meta missing")
+				return nil, nil
+			}
+			if meta.Files == nil {
+				meta.Files = map[string]FileRef{}
+			}
+			meta.Files[wantFile] = NewGitFileRef(wantSize)
+			yield()
+			return meta, nil
+		})
 		if err != nil {
-			t.Errorf("cli read: %v", err)
-			return
-		}
-		if meta.Files == nil {
-			meta.Files = map[string]FileRef{}
-		}
-		meta.Files[wantFile] = NewGitFileRef(wantSize)
-		yield()
-		if err := WriteSessionMetaOnly(dir, meta); err != nil {
-			t.Errorf("cli write: %v", err)
+			t.Errorf("cli mutate: %v", err)
 		}
 	}
 
@@ -157,9 +155,6 @@ func TestSessionMeta_RepeatedConcurrentWrites_ConvergesWithoutLoss(t *testing.T)
 	if testing.Short() {
 		t.Skip("short: many concurrent writes")
 	}
-	// Pending ox-e1ot fix; see sibling test.
-	t.Skip("ox-e1ot pending: meta.json read-modify-write race")
-
 	dir := t.TempDir()
 	if err := WriteSessionMetaOnly(dir, NewSessionMeta("s", "u", "a", "claude-code", time.Now()).Build()); err != nil {
 		t.Fatal(err)
@@ -175,18 +170,19 @@ func TestSessionMeta_RepeatedConcurrentWrites_ConvergesWithoutLoss(t *testing.T)
 	go func() {
 		defer wg.Done()
 		for i := 0; i < rounds; i++ {
-			meta, err := ReadSessionMeta(dir)
+			err := MutateSessionMeta(context.Background(), dir, func(meta *SessionMeta) (*SessionMeta, error) {
+				if meta == nil {
+					return nil, nil
+				}
+				if meta.Files == nil {
+					meta.Files = map[string]FileRef{}
+				}
+				meta.Files[fileKey(i)] = NewGitFileRef(int64(i))
+				yield()
+				return meta, nil
+			})
 			if err != nil {
-				t.Errorf("daemon read round %d: %v", i, err)
-				return
-			}
-			if meta.Files == nil {
-				meta.Files = map[string]FileRef{}
-			}
-			meta.Files[fileKey(i)] = NewGitFileRef(int64(i))
-			yield()
-			if err := WriteSessionMetaOnly(dir, meta); err != nil {
-				t.Errorf("daemon write round %d: %v", i, err)
+				t.Errorf("daemon mutate round %d: %v", i, err)
 				return
 			}
 		}
@@ -194,15 +190,16 @@ func TestSessionMeta_RepeatedConcurrentWrites_ConvergesWithoutLoss(t *testing.T)
 	go func() {
 		defer wg.Done()
 		for i := 0; i < rounds; i++ {
-			meta, err := ReadSessionMeta(dir)
+			err := MutateSessionMeta(context.Background(), dir, func(meta *SessionMeta) (*SessionMeta, error) {
+				if meta == nil {
+					return nil, nil
+				}
+				meta.Summary = summaryFor(i)
+				yield()
+				return meta, nil
+			})
 			if err != nil {
-				t.Errorf("cli read round %d: %v", i, err)
-				return
-			}
-			meta.Summary = summaryFor(i)
-			yield()
-			if err := WriteSessionMetaOnly(dir, meta); err != nil {
-				t.Errorf("cli write round %d: %v", i, err)
+				t.Errorf("cli mutate round %d: %v", i, err)
 				return
 			}
 		}

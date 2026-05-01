@@ -113,6 +113,12 @@ type AgentWorkerJSON struct {
 }
 
 // GitRepoStatus holds information about a git repository's status.
+//
+// Wedge fields (RebaseInProgress, AheadCount, BehindCount) are populated
+// by the `ox status` collector and consumed by the renderer to surface
+// 'wedged ledger' guidance to the user — see ox-un4u for the failure
+// mode they prevent (a stuck rebase invisible to ox status until the
+// user's next session-stop fails to push).
 type GitRepoStatus struct {
 	Path             string
 	Exists           bool
@@ -121,6 +127,33 @@ type GitRepoStatus struct {
 	IsSynced         bool
 	HasLastSync      bool
 	LastSync         time.Time
-	BehindCount      int
-	Error            string
+
+	// AheadCount is the number of local commits not yet on the upstream
+	// branch. Zero when no upstream tracking is configured.
+	AheadCount int
+
+	// BehindCount is the number of upstream commits not yet pulled
+	// locally. Zero when no upstream tracking is configured.
+	BehindCount int
+
+	// RebaseInProgress reports whether the working tree has an
+	// in-progress rebase (.git/rebase-merge or .git/rebase-apply
+	// directory present). The most direct signal of a wedge.
+	RebaseInProgress bool
+
+	Error string
+}
+
+// IsWedged reports whether the repo is in a state that needs user (or
+// `ox doctor --fix`) intervention before the next push can succeed.
+// True when a rebase is stuck or the branch has diverged with both
+// sides ahead — the two states `ox doctor --fix` is built to repair.
+func (s GitRepoStatus) IsWedged() bool {
+	if s.RebaseInProgress {
+		return true
+	}
+	// True divergence: both sides have commits the other doesn't.
+	// Pure ahead (uncommitted local progress) and pure behind (just
+	// haven't pulled yet) are not wedges.
+	return s.AheadCount > 0 && s.BehindCount > 0
 }

@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -79,7 +80,13 @@ type Message struct {
 	Type        string          `json:"type"`
 	WorkspaceID string          `json:"workspace_id,omitempty"` // repo-scoped daemon identity
 	CallerID    string          `json:"caller_id,omitempty"`    // identifies calling clone/worktree (path-based hash)
-	Payload     json.RawMessage `json:"payload,omitempty"`
+	// CallerVersion is the ox CLI version of the process making this IPC
+	// call. Used by the daemon to detect skew between a long-running
+	// daemon and a CLI that's many releases behind (ox-mt3k). Empty
+	// when an older client predates the field — the daemon treats
+	// missing-version as "unknown skew" (no warning).
+	CallerVersion string          `json:"caller_version,omitempty"`
+	Payload       json.RawMessage `json:"payload,omitempty"`
 }
 
 // Response represents an IPC response.
@@ -933,6 +940,108 @@ type Server struct {
 	connSem  chan struct{}  // semaphore for connection limit
 
 	startTime time.Time
+
+	// version-skew tracking (ox-mt3k). Records the most recent CLI
+	// version observed via IPC so the daemon can warn when a long-
+	// running daemon is being driven by a CLI N+ releases behind. Both
+	// fields are guarded by skewMu — IPC is concurrent.
+	skewMu                sync.Mutex
+	lastCallerVersion     string
+	lastCallerVersionAt   time.Time
+	skewWarnLoggedVersion string // de-dup warn log per skewing version
+}
+
+// recordCallerVersion stamps the most recent caller version observed
+// via IPC and emits a warn log (once per distinct skewing version)
+// when the gap between the caller and the daemon's own version is
+// big enough to plausibly cause behavior drift.
+//
+// "Big enough" lives in IsSignificantVersionSkew below — currently
+// any minor-or-greater gap. Patch-level differences are routine
+// during a rolling upgrade and intentionally don't warn.
+func (s *Server) recordCallerVersion(v string) {
+	if v == "" {
+		return // older clients predate the field; no signal
+	}
+	s.skewMu.Lock()
+	defer s.skewMu.Unlock()
+	s.lastCallerVersion = v
+	s.lastCallerVersionAt = time.Now()
+	if !IsSignificantVersionSkew(v, Version()) {
+		return
+	}
+	if s.skewWarnLoggedVersion == v {
+		return // already warned for this exact version this run
+	}
+	s.skewWarnLoggedVersion = v
+	s.logger.Warn("CLI version skew detected — please upgrade `ox`",
+		"caller_version", v,
+		"daemon_version", Version())
+}
+
+// LastCallerVersion returns the most recent CLI version observed via
+// IPC (or "" if none observed). Exposed for status rendering and
+// tests; do not write through this — use recordCallerVersion.
+func (s *Server) LastCallerVersion() (version string, observedAt time.Time) {
+	s.skewMu.Lock()
+	defer s.skewMu.Unlock()
+	return s.lastCallerVersion, s.lastCallerVersionAt
+}
+
+// IsSignificantVersionSkew reports whether a caller's version lags the
+// daemon's far enough to warn the user about. Both arguments are
+// expected to be the strings produced by Version() (e.g.
+// "0.6.5+2026-04-30T..." or "dev"). Skew detection is intentionally
+// conservative:
+//
+//   - "dev" or "" on either side → no skew (development builds, older
+//     callers predating CallerVersion).
+//   - Identical major.minor → no skew (patch-level upgrade in flight).
+//   - Different major OR different minor → significant skew. A new
+//     daemon version that changes wire shape or expected on-disk
+//     state is reason enough to warn.
+//
+// We deliberately don't try to parse build metadata or pre-release
+// tags; the version semantics in ox are coarse enough (0.<release>.0)
+// that a minor-level check matches what 'a release behind' means
+// operationally.
+func IsSignificantVersionSkew(caller, daemon string) bool {
+	cMaj, cMin, cOK := majorMinor(caller)
+	dMaj, dMin, dOK := majorMinor(daemon)
+	if !cOK || !dOK {
+		return false
+	}
+	if cMaj != dMaj {
+		return true
+	}
+	return cMin != dMin
+}
+
+// majorMinor parses the leading "<major>.<minor>" out of a Version()
+// string. Returns (0, 0, false) for unparseable inputs (development
+// builds, empty strings) so callers treat them as "skew unknown".
+func majorMinor(v string) (major, minor int, ok bool) {
+	if v == "" || v == "dev" {
+		return 0, 0, false
+	}
+	// strip everything after first '+' (build metadata) or '-' (pre-release)
+	for i, r := range v {
+		if r == '+' || r == '-' {
+			v = v[:i]
+			break
+		}
+	}
+	parts := strings.SplitN(v, ".", 3)
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	if _, err := fmt.Sscanf(parts[0], "%d", &major); err != nil {
+		return 0, 0, false
+	}
+	if _, err := fmt.Sscanf(parts[1], "%d", &minor); err != nil {
+		return 0, 0, false
+	}
+	return major, minor, true
 }
 
 // NewServer creates a new IPC server with a mutable CallbackService.
@@ -1332,6 +1441,10 @@ func (s *Server) handleConnection(_ context.Context, conn net.Conn) {
 		s.logger.Warn("workspace mismatch", "expected", CurrentWorkspaceID(), "got", msg.WorkspaceID, "caller_id", msg.CallerID)
 	}
 
+	// record CLI version skew (ox-mt3k) — track the most recent caller
+	// version and warn (once per version) when it lags the daemon.
+	s.recordCallerVersion(msg.CallerVersion)
+
 	// record activity on any IPC message
 	s.service.Activity()
 
@@ -1464,6 +1577,14 @@ func (c *Client) sendMessage(msg Message) (*Response, error) {
 	// identify which clone/worktree is sending this message
 	if msg.CallerID == "" {
 		msg.CallerID = LegacyWorkspaceID()
+	}
+
+	// stamp the caller's CLI version so the daemon can detect when a
+	// long-running daemon is being driven by a CLI that's many releases
+	// behind (ox-mt3k). Older callers leave this empty; daemon treats
+	// missing as "unknown".
+	if msg.CallerVersion == "" {
+		msg.CallerVersion = Version()
 	}
 
 	// send message

@@ -238,23 +238,32 @@ func sessionArtifactsToStage(sessionDir string) []string {
 // backfillGitArtifactInMeta records a git-stored artifact in meta.Files
 // for legacy sessions whose manifest predates the Storage tag. Idempotent
 // and best-effort; failures are logged at debug only.
+//
+// Runs the entire read-modify-write under MutateSessionMeta's flock so
+// the daemon's concurrent summary write doesn't clobber this artifact
+// entry (and vice versa). See ox-e1ot for the failure mode this
+// prevents.
 func backfillGitArtifactInMeta(sessionDir, filename string, size int64) bool {
-	meta, err := lfs.ReadSessionMeta(sessionDir)
+	changed := false
+	err := lfs.MutateSessionMeta(context.Background(), sessionDir, func(meta *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		if meta == nil {
+			return nil, nil // no meta.json yet — skip silently (legacy callers expect best-effort)
+		}
+		if meta.Files == nil {
+			meta.Files = make(map[string]lfs.FileRef)
+		}
+		if existing, ok := meta.Files[filename]; ok && existing.IsGit() && existing.Size == size {
+			return nil, nil // already canonical
+		}
+		meta.Files[filename] = lfs.NewGitFileRef(size)
+		changed = true
+		return meta, nil
+	})
 	if err != nil {
-		return false
-	}
-	if meta.Files == nil {
-		meta.Files = make(map[string]lfs.FileRef)
-	}
-	if existing, ok := meta.Files[filename]; ok && existing.IsGit() && existing.Size == size {
-		return false
-	}
-	meta.Files[filename] = lfs.NewGitFileRef(size)
-	if err := lfs.WriteSessionMetaOnly(sessionDir, meta); err != nil {
 		slog.Debug("backfillGitArtifactInMeta: write meta.json failed", "session", sessionDir, "error", err)
 		return false
 	}
-	return true
+	return changed
 }
 
 // resolveLedgerPath returns the ledger git repo path for the project.
