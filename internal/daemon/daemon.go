@@ -22,6 +22,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/internal/daemon/hooks"
+	"github.com/sageox/ox/internal/doctor/autofix"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/observability"
@@ -1116,6 +1117,17 @@ func (d *Daemon) initComponents() time.Duration {
 	d.scheduler.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
 	d.friction.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
 	d.scheduler.SetIssueTracker(d.issues)
+
+	// ox-21cb: wire daemon-side LLM merge tier when an LLM binary is
+	// configured. OX_DAEMON_LLM_MERGE_BIN is the daemon-only env var so
+	// LLM access can be enabled server-side independent of the user's
+	// CLI environment. Falls back to OX_LLM_MERGE_BIN (shared with the
+	// CLI's session_upload escalation) for single-machine setups where
+	// the same binary serves both.
+	if llmBin := llmMergeBinary(); llmBin != "" {
+		d.scheduler.SetLLMResolver(newDaemonLLMResolver(llmBin, d.logger))
+	}
+
 	if d.whisperRegistry != nil {
 		d.scheduler.SetWhisperRegistry(d.whisperRegistry)
 		// always wire relay + nudge tracker; they re-check MurmuringEnabled()
@@ -1232,6 +1244,40 @@ func (d *Daemon) startWorkers() {
 		defer d.wg.Done()
 		d.scheduler.Start(d.ctx)
 	}()
+
+	// ox-0xgx: periodic auto-fix scheduler. Runs the registered
+	// auto-fix-safe doctor checks on a slow cadence so silent drift
+	// (init artifacts reverted from git, legacy hook formats in
+	// settings.json, etc.) gets repaired without anyone typing
+	// `ox doctor`. The set of checks lives in
+	// internal/doctor/autofix/default_checks.go and is intentionally
+	// small at first — incremental migration of cmd/ox/doctor_*.go
+	// auto-safe checks happens in follow-up beads.
+	if d.config.ProjectRoot != "" {
+		autofixReg := autofix.Default()
+		autofixSched := autofix.NewScheduler(autofixReg, d.logger,
+			func() []string { return []string{d.config.ProjectRoot} },
+			func(r autofix.CheckResult) {
+				if d.issues == nil {
+					return
+				}
+				severity := SeverityWarning
+				if r.Status == autofix.StatusError {
+					severity = SeverityError
+				}
+				d.issues.SetIssue(DaemonIssue{
+					Type:     "autofix_" + r.Slug,
+					Severity: severity,
+					Repo:     r.Repo,
+					Summary:  r.Summary,
+				})
+			})
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			autofixSched.Run(d.ctx)
+		}()
+	}
 
 	// unified DB maintenance: prune, vacuum, integrity check for all SQLite databases
 	d.dbMaintenance = NewDBMaintenanceScheduler(d.logger)

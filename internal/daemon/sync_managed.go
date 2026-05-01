@@ -53,6 +53,27 @@ type ManagedRepoPullOpts struct {
 	// `resolve auto data/` for files under data/proprietary/.
 	ResolveRules []manifest.ResolveRule
 
+	// LLMResolver, when non-nil, is called as the third tier of the
+	// pull-cycle conflict resolver: union (pre-flight via merge=union)
+	// + accept-theirs (post-fail) didn't fully resolve, so escalate to
+	// a semantic LLM merge before aborting the rebase. The resolver is
+	// expected to be the same automerge.New(...).Resolve shape the
+	// CLI's ledgerLLMResolveHook uses, just exposed as a daemon
+	// dependency injection.
+	//
+	// Returning (true, nil) means resolved + rebase already continued
+	// inside the resolver (it owns rebase --continue on success).
+	// (false, nil) means "nothing the resolver could do" — fall
+	// through to abort. Any non-nil error is logged and we abort.
+	//
+	// Daemon-side LLM tier (ox-21cb): when configured server-side, the
+	// daemon spawns the LLM merge directly. When unconfigured, callers
+	// can leave this nil and rely on CLI-side escalation
+	// (cmd/ox/session_upload.go::ledgerLLMResolveHook) the next time
+	// the user invokes a session-stop or push — best-effort, since ox
+	// is not always invoked by an LLM.
+	LLMResolver func(ctx context.Context, repoPath string, paths []string) (bool, error)
+
 	// EnsureKBMergeAttrs controls the pull pre-flight that installs the
 	// shared KB merge=union rules into .git/info/attributes via
 	// internal/kb.EnsureMergeAttributes. Both ledger and team-context
@@ -269,7 +290,29 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 				result.AutoResolved = true
 				return result
 			}
-			logger.Warn("auto-resolve failed, aborting rebase", "repo", repoName, "error", resolveErr)
+			logger.Warn("auto-resolve failed, attempting LLM tier", "repo", repoName, "error", resolveErr)
+
+			// Tier 3: LLM merge for paths that union + accept-theirs
+			// couldn't handle. The resolver itself decides whether to
+			// run the LLM tier — if no binary is configured it returns
+			// ErrLLMUnavailable, which we treat as "no escalation
+			// available, surface to user". See ox-21cb.
+			if opts.LLMResolver != nil {
+				llmResolved, llmErr := opts.LLMResolver(ctx, path, autoPaths)
+				switch {
+				case llmErr == nil && llmResolved:
+					logger.Info("auto-resolved rebase conflicts", "repo", repoName, "strategy", "llm")
+					result.AutoResolved = true
+					return result
+				case llmErr == nil:
+					// resolver returned (false, nil) — best-effort no-op,
+					// e.g. nothing it could do; fall through to abort.
+					logger.Info("LLM tier produced no resolution", "repo", repoName)
+				default:
+					logger.Warn("LLM tier failed", "repo", repoName, "error", llmErr)
+				}
+			}
+
 			// use a fresh context for abort — the parent ctx may be canceled
 			abortCtx, abortCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			_, abortErr := gitutil.RunGit(abortCtx, path, "rebase", "--abort")

@@ -1,0 +1,132 @@
+package autofix
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/hooks/claude"
+)
+
+// Default returns a registry seeded with the auto-fix-safe checks the
+// daemon ships with today. New checks land here as they're migrated
+// from cmd/ox/doctor_*.go (see ox-0xgx for the migration list).
+//
+// The seed set is deliberately small — proving the structural path
+// works is the primary goal of the initial landing. Each check below
+// is self-contained, idempotent, bounded in blast radius, and
+// validated by its own regression test.
+func Default() *Registry {
+	r := NewRegistry()
+	r.Register(&Check{
+		Slug:        "init-reverted",
+		Description: "Backfill .sageox/config.json when init artifacts were reverted from git but local state survives",
+		MinInterval: 30 * time.Minute,
+		BlastRadius: "single workspace; pure file write of recovered repo_id",
+		Run:         checkInitReverted,
+	})
+	r.Register(&Check{
+		Slug:        "claude-hooks-format",
+		Description: "Rewrite legacy string-format hooks in .claude/settings.json into the array form Claude Code accepts",
+		MinInterval: 30 * time.Minute,
+		BlastRadius: "single file (.claude/settings.json); idempotent canonical re-marshal",
+		Run:         checkClaudeHooksFormat,
+	})
+	return r
+}
+
+// checkInitReverted is the daemon-side counterpart of cmd/ox/doctor_init_reverted.go.
+// It calls the same canonical recovery (config.BackfillProjectConfigFromLocalState),
+// so the behavior is identical to `ox doctor --fix` invoked by hand —
+// just runs unattended on a slow ticker.
+func checkInitReverted(_ context.Context, repoPath string) CheckResult {
+	if repoPath == "" {
+		return CheckResult{Status: StatusClean}
+	}
+	wrote, err := config.BackfillProjectConfigFromLocalState(repoPath)
+	switch {
+	case err != nil:
+		return CheckResult{
+			Status:  StatusError,
+			Repo:    repoPath,
+			Summary: fmt.Sprintf("backfill failed: %v", err),
+		}
+	case wrote:
+		return CheckResult{
+			Status:  StatusFixed,
+			Repo:    repoPath,
+			Summary: "recovered .sageox/config.json from surviving local state (init was reverted from git)",
+		}
+	default:
+		return CheckResult{Status: StatusClean, Repo: repoPath}
+	}
+}
+
+// checkClaudeHooksFormat reads .claude/settings.json (if any) and
+// rewrites it into the canonical array form when it has drifted.
+//
+// This is the same logic as cmd/ox/doctor_fix_hooks.go, ported to
+// take an explicit repoPath rather than relying on findGitRoot() so
+// it's safe to call from the daemon. The CLI version stays in place
+// for `ox doctor --fix` invocations; this is the unattended twin.
+func checkClaudeHooksFormat(_ context.Context, repoPath string) CheckResult {
+	if repoPath == "" {
+		return CheckResult{Status: StatusClean}
+	}
+	settingsPath := filepath.Join(repoPath, ".claude", "settings.json")
+	data, err := os.ReadFile(settingsPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return CheckResult{Status: StatusClean, Repo: repoPath}
+	}
+	if err != nil {
+		return CheckResult{
+			Status:  StatusError,
+			Repo:    repoPath,
+			Summary: fmt.Sprintf("read settings.json: %v", err),
+		}
+	}
+
+	settings, rawMap, parseErr := claude.ParseSettingsRaw(data)
+	if parseErr != nil {
+		// can't even parse — surface as Found so a human can look,
+		// don't try to rewrite garbage and lose the user's bytes.
+		return CheckResult{
+			Status:  StatusFound,
+			Repo:    repoPath,
+			Summary: fmt.Sprintf("settings.json unparseable: %v — manual repair needed", parseErr),
+		}
+	}
+	canonical, err := claude.MarshalSettings(settings, rawMap)
+	if err != nil {
+		return CheckResult{
+			Status:  StatusError,
+			Repo:    repoPath,
+			Summary: fmt.Sprintf("re-marshal: %v", err),
+		}
+	}
+	if string(canonical) == string(data) {
+		return CheckResult{Status: StatusClean, Repo: repoPath}
+	}
+
+	// preserve existing perms (settings.json may hold tokens)
+	perm := os.FileMode(0o600)
+	if info, statErr := os.Stat(settingsPath); statErr == nil {
+		perm = info.Mode().Perm()
+	}
+	if err := os.WriteFile(settingsPath, canonical, perm); err != nil {
+		return CheckResult{
+			Status:  StatusError,
+			Repo:    repoPath,
+			Summary: fmt.Sprintf("write settings.json: %v", err),
+		}
+	}
+	return CheckResult{
+		Status:  StatusFixed,
+		Repo:    repoPath,
+		Summary: "rewrote .claude/settings.json into canonical array form",
+	}
+}

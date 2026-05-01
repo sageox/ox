@@ -100,6 +100,16 @@ type SyncScheduler struct {
 	git   gitutil.GitRunner
 	creds CredentialProvider
 
+	// llmResolver is the optional tier-3 LLM merge escalator for the
+	// pull cycle (ox-21cb). Wired by daemon startup when an LLM merge
+	// binary is available; nil otherwise — pullManagedRepo treats nil
+	// as "no daemon-side LLM tier configured" and falls through to the
+	// existing surface-and-wait error path. CLI-side escalation
+	// (cmd/ox/session_upload.go::ledgerLLMResolveHook) handles the
+	// case where the user invokes a session-stop while ox is already
+	// running under an LLM.
+	llmResolver func(ctx context.Context, repoPath string, paths []string) (bool, error)
+
 	// state
 	mu       sync.Mutex
 	lastSync time.Time
@@ -262,6 +272,22 @@ func (s *SyncScheduler) SetActivityCallback(cb func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onActivity = cb
+}
+
+// SetLLMResolver wires the daemon-side tier-3 LLM merge escalator
+// (ox-21cb). Daemon startup calls this when OX_DAEMON_LLM_MERGE_BIN (or
+// equivalent server-side config) is set. Pass nil to disable; the pull
+// cycle then falls through to the existing surface-and-wait path
+// without the LLM tier — same as before this issue.
+//
+// The resolver should follow automerge.Resolve semantics: returns
+// (true, nil) on full resolution including rebase --continue, (false,
+// nil) for "nothing I could do," ErrLLMUnavailable when no binary is
+// configured, or any other error to abort.
+func (s *SyncScheduler) SetLLMResolver(cb func(ctx context.Context, repoPath string, paths []string) (bool, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.llmResolver = cb
 }
 
 // SetTelemetryCallback sets the callback for telemetry events.
@@ -1133,6 +1159,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 			DetectDivergence:   true,
 			ResolveRules:       ledger.DefaultResolveRules,
 			EnsureKBMergeAttrs: true, // shared kb resilience for both ledger + team-context
+			LLMResolver:        s.llmResolver, // ox-21cb: tier 3 escalation when configured
 			Logger:             s.logger,
 		})
 	}()
