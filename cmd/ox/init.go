@@ -1676,6 +1676,10 @@ func selectAgentsForInit(gitRoot string) (map[string]bool, error) {
 	// discover external adapters and check which are actually installed
 	externalAdapters := adapters.DiscoverExternalAdapters()
 	for _, ea := range externalAdapters {
+		if ea.Name() == "claude-code" {
+			// already represented by the hardcoded option above
+			continue
+		}
 		if !ea.Detect() {
 			continue
 		}
