@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -47,11 +48,62 @@ func getGitSHA(t *testing.T, dir string) string {
 func commitFile(t *testing.T, dir, name, content, msg string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
-	cmd := exec.Command("git", "-C", dir, "add", name)
-	require.NoError(t, cmd.Run())
-	cmd = exec.Command("git", "-C", dir, "commit", "-m", msg)
-	out, err := cmd.CombinedOutput()
+	require.NoError(t, runGitWithSEGVRetry(exec.Command("git", "-C", dir, "add", name)),
+		"git add failed")
+	out, err := runGitOutputWithSEGVRetry(exec.Command("git", "-C", dir, "commit", "-m", msg))
 	require.NoError(t, err, "commit failed: %s", string(out))
+}
+
+// runGitWithSEGVRetry runs a git subprocess and retries once on
+// SIGSEGV / SIGBUS exit. ox-a9ak: under heavy preflight parallelism
+// the system git binary occasionally crashes mid-command. This is an
+// external-tool defect, not an ox bug, but we'd rather not flake the
+// test suite over it. Single retry is enough — the crashes are
+// transient under load and don't recur.
+func runGitWithSEGVRetry(cmd *exec.Cmd) error {
+	if err := cmd.Run(); err != nil {
+		if isSEGVExit(err) {
+			retried := exec.Command(cmd.Path, cmd.Args[1:]...)
+			retried.Dir = cmd.Dir
+			return retried.Run()
+		}
+		return err
+	}
+	return nil
+}
+
+func runGitOutputWithSEGVRetry(cmd *exec.Cmd) ([]byte, error) {
+	out, err := cmd.CombinedOutput()
+	if err != nil && isSEGVExit(err) {
+		retried := exec.Command(cmd.Path, cmd.Args[1:]...)
+		retried.Dir = cmd.Dir
+		return retried.CombinedOutput()
+	}
+	return out, err
+}
+
+// isSEGVExit reports whether an exec error is a process-killed-by-
+// signal exit for SIGSEGV or SIGBUS — the two signals we've seen the
+// git binary die from under preflight load. Any other error (real
+// non-zero exit, ENOENT, etc.) returns false so production failures
+// surface normally.
+func isSEGVExit(err error) bool {
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		return false
+	}
+	ws, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok {
+		return false
+	}
+	if !ws.Signaled() {
+		return false
+	}
+	switch ws.Signal() {
+	case syscall.SIGSEGV, syscall.SIGBUS:
+		return true
+	}
+	return false
 }
 
 func newDetectTestScheduler(t *testing.T) *SyncScheduler {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/go-git/go-git/v6"
@@ -24,15 +25,26 @@ func initGitRepo(t *testing.T, numCommits int) (string, string) {
 
 	run := func(args ...string) string {
 		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), // safe: git CLI in temp dir needs inherited PATH
-			"GIT_AUTHOR_NAME=test",
-			"GIT_AUTHOR_EMAIL=test@sageox.ai",
-			"GIT_COMMITTER_NAME=test",
-			"GIT_COMMITTER_EMAIL=test@sageox.ai",
-		)
-		out, err := cmd.CombinedOutput()
+		mkCmd := func() *exec.Cmd {
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), // safe: git CLI in temp dir needs inherited PATH
+				"GIT_AUTHOR_NAME=test",
+				"GIT_AUTHOR_EMAIL=test@sageox.ai",
+				"GIT_COMMITTER_NAME=test",
+				"GIT_COMMITTER_EMAIL=test@sageox.ai",
+			)
+			return cmd
+		}
+		out, err := mkCmd().CombinedOutput()
+		// ox-a9ak: under heavy preflight parallelism the system git
+		// binary occasionally crashes mid-command (SIGSEGV / SIGBUS).
+		// External-tool defect, transient under load — single retry
+		// is enough to keep the test suite from flaking. Real
+		// non-zero exits still surface immediately.
+		if err != nil && isGitSignalCrash(err) {
+			out, err = mkCmd().CombinedOutput()
+		}
 		require.NoError(t, err, "git %v: %s", args, out)
 		return string(out)
 	}
@@ -280,4 +292,25 @@ func TestIndexLocalRepo_NormalRepo(t *testing.T) {
 	var commitCount int
 	require.NoError(t, s.QueryRow("SELECT COUNT(*) FROM commits").Scan(&commitCount))
 	assert.Equal(t, 3, commitCount, "should index all 3 commits")
+}
+
+// isGitSignalCrash reports whether an exec error reflects the system
+// git binary being killed by SIGSEGV / SIGBUS — the external-tool
+// crash mode observed under preflight parallelism (ox-a9ak). Used by
+// test helpers to retry once on signal-induced failures while still
+// surfacing real non-zero exits.
+func isGitSignalCrash(err error) bool {
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok {
+		return false
+	}
+	ws, ok := exitErr.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() {
+		return false
+	}
+	switch ws.Signal() {
+	case syscall.SIGSEGV, syscall.SIGBUS:
+		return true
+	}
+	return false
 }
