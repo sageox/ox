@@ -304,16 +304,21 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 
 	// build and write meta.json; use WriteSessionMetaOnly so content files
 	// remain intact until after the push (pointer stubs + no remote = unrecoverable)
+	//
+	// preserve any pre-existing ses_<UUIDv7> on retry: a prior orphan
+	// publish attempt may have written meta.json before crashing on push.
+	// Non-NotExist read errors are fatal — see PreservedSessionID doc.
+	preservedID, err := lfs.PreservedSessionID(sessionDir)
+	if err != nil {
+		return fmt.Errorf("preserve existing SessionID: %w", err)
+	}
 	metaBuilder := sessionMetaBase(orphan.SessionName, orphan.Meta.Username, orphan.Meta.AgentID, orphan.Meta.AgentType, orphan.Meta.CreatedAt, projectRoot).
 		Model(orphan.Meta.Model).
 		EntryCount(orphan.EntryCount).
 		StopReason(session.StopReasonRecovered).
 		WithFiles(fileRefs)
-	// preserve any pre-existing ses_<UUIDv7> on retry: a prior orphan
-	// publish attempt may have written meta.json before crashing on push.
-	// Mirrors the daemon-side preservation in session_finalize.go.
-	if existing, err := lfs.ReadSessionMeta(sessionDir); err == nil && existing != nil && existing.SessionID != "" {
-		metaBuilder = metaBuilder.SessionID(existing.SessionID)
+	if preservedID != "" {
+		metaBuilder = metaBuilder.SessionID(preservedID)
 	}
 	meta := metaBuilder.Build()
 	if err := lfs.WriteSessionMetaOnly(sessionDir, meta); err != nil {

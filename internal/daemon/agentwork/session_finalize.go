@@ -968,11 +968,16 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	// SessionID: if a meta.json already exists on disk (e.g., the CLI
 	// stamped one at session start and the daemon is recovering a partial
 	// finalize), preserve it. Otherwise stamp a fresh ses_<UUIDv7> here so
-	// daemon-recovered sessions still get an identifier. Never regenerate
-	// over an existing one — that would invalidate any cached references.
-	sessionIDForMeta := sessionid.GenerateSessionID()
-	if existing, err := lfs.ReadSessionMeta(payload.SessionDir); err == nil && existing != nil && existing.SessionID != "" {
-		sessionIDForMeta = existing.SessionID
+	// daemon-recovered sessions still get an identifier. Non-NotExist
+	// read errors are fatal — see PreservedSessionID doc.
+	preservedSessionID, err := lfs.PreservedSessionID(payload.SessionDir)
+	if err != nil {
+		h.logger.Warn("read existing meta.json failed during finalize; skipping to avoid SessionID rotation", "session", sessionName, "err", err)
+		return nil
+	}
+	sessionIDForMeta := preservedSessionID
+	if sessionIDForMeta == "" {
+		sessionIDForMeta = sessionid.GenerateSessionID()
 	}
 	metaBuilder := lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).
 		SessionID(sessionIDForMeta).

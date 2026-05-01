@@ -611,6 +611,43 @@ func (f FileRef) BareOID() string {
 	return f.OID
 }
 
+// PreservedSessionID reads meta.json at sessionDir and returns the
+// SessionID found there. It is the canonical way for any republish path
+// (CLI session stop, daemon recovery, orphan retry) to look up a
+// previously-stamped ID before building a fresh meta.
+//
+// Three return shapes:
+//
+//   - ("ses_...", nil): meta.json exists with a populated SessionID.
+//     Caller MUST chain .SessionID(returned) onto its builder so the
+//     republish does not rotate the ID.
+//   - ("", nil): meta.json is genuinely absent (NotExist) OR exists but
+//     has no SessionID (legacy pre-rollout file). Caller may mint fresh
+//     via sessionid.GenerateSessionID() (already done by sessionMetaBase).
+//   - ("", non-nil err): meta.json exists but cannot be read or parsed
+//     (corrupted, IO failure, permission). Caller MUST treat this as
+//     fatal and surface the error — silently minting a fresh SessionID
+//     here would rotate an ID that may already be cached by the server
+//     or by other coworkers, breaking dedup.
+//
+// The strict "non-NotExist error is fatal" rule exists because there is
+// no safe heuristic for "meta.json exists but I couldn't read it" — we
+// don't know whether it had a SessionID we'd overwrite. Refusing to
+// proceed is the only conservative choice.
+func PreservedSessionID(sessionDir string) (string, error) {
+	existing, err := ReadSessionMeta(sessionDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil // genuinely first publish — caller mints fresh
+	}
+	if err != nil {
+		return "", fmt.Errorf("read existing meta.json (refusing to silently rotate SessionID): %w", err)
+	}
+	if existing == nil {
+		return "", nil
+	}
+	return existing.SessionID, nil
+}
+
 // EffectiveSessionID returns the canonical "ses_"-prefixed identifier for
 // this recording, regardless of whether the recording predates the
 // SessionID field.

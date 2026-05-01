@@ -1273,9 +1273,13 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	// preserve any pre-existing ses_<UUIDv7> on republish: if a prior stop
 	// attempt already wrote meta.json (e.g., LFS upload failed and we're
 	// retrying), reuse that SessionID rather than minting a fresh one.
-	// Same invariant the daemon and recovery paths enforce.
-	if existing, err := lfs.ReadSessionMeta(sessionDir); err == nil && existing != nil && existing.SessionID != "" {
-		metaBuilder = metaBuilder.SessionID(existing.SessionID)
+	// Non-NotExist read errors are fatal — see PreservedSessionID doc.
+	preservedID, err := lfs.PreservedSessionID(sessionDir)
+	if err != nil {
+		return err
+	}
+	if preservedID != "" {
+		metaBuilder = metaBuilder.SessionID(preservedID)
 	}
 
 	meta := metaBuilder.Build()

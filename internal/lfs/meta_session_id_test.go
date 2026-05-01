@@ -206,6 +206,68 @@ func TestSessionMeta_RepublishPreservesIDPattern(t *testing.T) {
 		"republish must preserve SessionID; got %q want %q", got.SessionID, original)
 }
 
+// --- C. PreservedSessionID error semantics ---
+
+// TestPreservedSessionID_PopulatedReturnsValue verifies the happy path:
+// meta.json with a SessionID returns that value, no error.
+func TestPreservedSessionID_PopulatedReturnsValue(t *testing.T) {
+	tmp := t.TempDir()
+	const want = "ses_01950000-0000-7abc-8def-0123456789ab"
+	require.NoError(t, WriteSessionMetaOnly(tmp,
+		NewSessionMeta("name", "u", "Ox1234", "claude-code", time.Now()).
+			SessionID(want).Build()))
+
+	got, err := PreservedSessionID(tmp)
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+// TestPreservedSessionID_NotExistReturnsEmpty verifies the genuinely-
+// first-publish path: no meta.json present, returns ("", nil) so the
+// caller mints fresh.
+func TestPreservedSessionID_NotExistReturnsEmpty(t *testing.T) {
+	tmp := t.TempDir()
+	got, err := PreservedSessionID(filepath.Join(tmp, "nonexistent"))
+	require.NoError(t, err, "missing meta.json must NOT be an error")
+	assert.Equal(t, "", got)
+}
+
+// TestPreservedSessionID_LegacyMetaReturnsEmpty verifies that meta.json
+// existing without a SessionID (legacy file) returns ("", nil) — the
+// caller mints fresh, which is correct for legacy sessions where
+// EffectiveSessionID would synthesize the same v5 anyway.
+func TestPreservedSessionID_LegacyMetaReturnsEmpty(t *testing.T) {
+	tmp := t.TempDir()
+	require.NoError(t, WriteSessionMetaOnly(tmp,
+		NewSessionMeta("name", "u", "Ox1234", "claude-code", time.Now()).Build()))
+
+	got, err := PreservedSessionID(tmp)
+	require.NoError(t, err)
+	assert.Equal(t, "", got)
+}
+
+// TestPreservedSessionID_CorruptedMetaIsFatalError is the load-bearing
+// test for the conservative-error rule. A meta.json that exists but
+// cannot be parsed must NOT silently produce ("", nil) — that would let
+// the caller mint a fresh SessionID and silently rotate an ID that may
+// have been there before corruption.
+//
+// Failure prevented: a refactor that swallows non-NotExist errors here
+// would silently rotate SessionIDs whenever meta.json is corrupted, IO
+// fails, or permissions are wrong — exactly the failure CodeRabbit
+// flagged in PR #575.
+func TestPreservedSessionID_CorruptedMetaIsFatalError(t *testing.T) {
+	tmp := t.TempDir()
+	corrupted := filepath.Join(tmp, "meta.json")
+	require.NoError(t, os.WriteFile(corrupted, []byte("{this is not valid JSON"), 0o644))
+
+	got, err := PreservedSessionID(tmp)
+	require.Error(t, err, "corrupted meta.json must NOT be silently treated as 'no SessionID'")
+	assert.Equal(t, "", got)
+	assert.Contains(t, err.Error(), "refusing to silently rotate SessionID",
+		"error must explain the conservative-rotation rule")
+}
+
 // TestEffectiveSessionID_NamespaceStability is the load-bearing test that
 // pins the legacy fallback to a specific concrete value. If
 // legacySessionNamespace is ever changed (or the derivation algorithm

@@ -206,31 +206,37 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 				slog.Warn("LFS upload failed during recovery", "error", uploadErr)
 				_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			} else {
-				displayName := identity.AttributionDisplayName(endpoint.GetForProject(projectRoot), config.GetDisplayName())
-				metaBuilder := sessionMetaBase(sessionName, displayName, state.AgentID, state.AdapterName, state.StartedAt, projectRoot).
-					EntryCount(entryCount).
-					StopReason(session.StopReasonRecovered).
-					WithFiles(fileRefs)
 				// preserve any pre-existing ses_<UUIDv7> on retry: if a prior
 				// recovery attempt already wrote meta.json (or an earlier
 				// publish stamped one and crashed mid-push), reuse that
-				// SessionID rather than minting a fresh one. Mirrors the
-				// daemon-side preservation in session_finalize.go.
-				if existing, err := lfs.ReadSessionMeta(ledgerSessionDir); err == nil && existing != nil && existing.SessionID != "" {
-					metaBuilder = metaBuilder.SessionID(existing.SessionID)
-				}
-				meta := metaBuilder.Build()
-				if err := lfs.WriteSessionMeta(ledgerSessionDir, meta); err != nil {
-					slog.Warn("write meta.json failed", "error", err)
+				// SessionID rather than minting a fresh one. Non-NotExist
+				// read errors are fatal — see PreservedSessionID doc.
+				preservedID, preserveErr := lfs.PreservedSessionID(ledgerSessionDir)
+				if preserveErr != nil {
+					slog.Warn("read existing meta.json failed during recovery; skipping write to avoid SessionID rotation", "error", preserveErr)
 					_ = doctor.SetNeedsDoctorAgent(projectRoot)
 				} else {
-					sessionsDir := filepath.Join(ledgerPath, "sessions")
-					_ = ensureSessionsGitignore(sessionsDir)
-					if err := commitAndPushLedger(ledgerPath, sessionName); err != nil {
-						slog.Warn("commit+push failed during recovery", "error", err)
+					displayName := identity.AttributionDisplayName(endpoint.GetForProject(projectRoot), config.GetDisplayName())
+					metaBuilder := sessionMetaBase(sessionName, displayName, state.AgentID, state.AdapterName, state.StartedAt, projectRoot).
+						EntryCount(entryCount).
+						StopReason(session.StopReasonRecovered).
+						WithFiles(fileRefs)
+					if preservedID != "" {
+						metaBuilder = metaBuilder.SessionID(preservedID)
+					}
+					meta := metaBuilder.Build()
+					if err := lfs.WriteSessionMeta(ledgerSessionDir, meta); err != nil {
+						slog.Warn("write meta.json failed", "error", err)
 						_ = doctor.SetNeedsDoctorAgent(projectRoot)
 					} else {
-						uploaded = true
+						sessionsDir := filepath.Join(ledgerPath, "sessions")
+						_ = ensureSessionsGitignore(sessionsDir)
+						if err := commitAndPushLedger(ledgerPath, sessionName); err != nil {
+							slog.Warn("commit+push failed during recovery", "error", err)
+							_ = doctor.SetNeedsDoctorAgent(projectRoot)
+						} else {
+							uploaded = true
+						}
 					}
 				}
 			}
