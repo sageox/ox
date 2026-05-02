@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -873,4 +875,397 @@ func TestProjectWatcher_CreateSkipsAlreadyWatched(t *testing.T) {
 	assert.Equal(t, 1, addsForPath, "Add must be called exactly once per path")
 	assert.Equal(t, beforeAdds, len(mockWatcher.AddedPaths()),
 		"redundant Create events must not call Add again")
+}
+
+// --- Per-file FD-leak tests (epic ox-5pwx) ---
+
+// TestProjectWatcher_AddDir_SnapshotsChildren verifies that addDir captures
+// the per-file child set so Remove/Rename can replay it. fsnotify's kqueue
+// backend opens 1+N FDs per watched dir (1 dir + N per file via
+// watchDirectoryFiles); without the snapshot we can't tell fsnotify to close
+// the per-file FDs on rm-rf.
+// Failure prevented: per-file FD leak invisible to userspace because
+// fsnotify exposes it only through a package-private map.
+func TestProjectWatcher_AddDir_SnapshotsChildren(t *testing.T) {
+	mockWatcher := NewMockFileSystemWatcher()
+	mockFS := NewMockFileSystem()
+
+	dir := t.TempDir()
+	pkgDir := filepath.Join(dir, "pkg")
+	require.NoError(t, os.MkdirAll(pkgDir, 0o755))
+	mockFS.AddDir(pkgDir, []string{"a.go", "b.go", "c.go"})
+
+	pw := NewProjectWatcher(
+		dir, slogDiscard(),
+		func() (FileSystemWatcher, error) { return mockWatcher, nil },
+		mockFS, NewChangeAccumulator(50*time.Millisecond),
+		&GitTrackedMatcher{
+			projectRoot: dir, trackedDirs: map[string]struct{}{}, trackedFiles: map[string]struct{}{},
+			logger: slogDiscard(),
+		},
+	)
+
+	pw.addDir(mockWatcher, pkgDir)
+
+	pw.mu.Lock()
+	children := append([]string(nil), pw.dirChildren[pkgDir]...)
+	pw.mu.Unlock()
+
+	assert.ElementsMatch(t,
+		[]string{
+			filepath.Join(pkgDir, "a.go"),
+			filepath.Join(pkgDir, "b.go"),
+			filepath.Join(pkgDir, "c.go"),
+		},
+		children,
+		"addDir must snapshot all non-dir entries as absolute paths")
+}
+
+// TestProjectWatcher_RemoveCallsUnwatchOnChildFiles verifies the actual leak
+// fix: on Remove/Rename of a watched directory, watcher.Remove must be called
+// for every child file we knew about, not just the directory itself. This is
+// what forces fsnotify's kqueue backend down its file-Remove path
+// (backend_kqueue.go:283 → unix.Close at :302). Without per-file Remove calls,
+// fsnotify v1.9.0 leaks one FD per child on every dir Remove/Rename.
+// Failure prevented: long-lived daemon FD growth from build-output churn,
+// the reproducible host symptom that made `lsof` itself hang on the daemon PID.
+func TestProjectWatcher_RemoveCallsUnwatchOnChildFiles(t *testing.T) {
+	mockWatcher := NewMockFileSystemWatcher()
+	mockFS := NewMockFileSystem()
+
+	dir := t.TempDir()
+	pkg := filepath.Join(dir, "pkg")
+	subPkg := filepath.Join(pkg, "internal")
+	require.NoError(t, os.MkdirAll(subPkg, 0o755))
+	mockFS.AddDir(pkg, []string{"a.go", "b.go"})
+	mockFS.AddDir(subPkg, []string{"x.go"})
+
+	tracker := &GitTrackedMatcher{
+		projectRoot: dir,
+		trackedDirs: map[string]struct{}{
+			"pkg":          {},
+			"pkg/internal": {},
+		},
+		trackedFiles: map[string]struct{}{},
+		logger:       slogDiscard(),
+	}
+
+	pw := NewProjectWatcher(
+		dir, slogDiscard(),
+		func() (FileSystemWatcher, error) { return mockWatcher, nil },
+		mockFS, NewChangeAccumulator(50*time.Millisecond), tracker,
+	)
+
+	pw.walkAndWatch(mockWatcher)
+	require.Equal(t, 3, pw.WatchedDirCount(), "root + pkg + pkg/internal")
+
+	// simulate rm -rf pkg — single Remove event for pkg
+	mockFS.SetStatError(pkg, os.ErrNotExist)
+	pw.handleEvent(mockWatcher, fsnotify.Event{Name: pkg, Op: fsnotify.Remove})
+
+	removed := mockWatcher.RemovedPaths()
+
+	// Dir-level removes: pkg and pkg/internal
+	assert.Contains(t, removed, pkg, "pkg dir must be unwatched")
+	assert.Contains(t, removed, subPkg, "descendant dir must be unwatched")
+
+	// THE NEW INVARIANT: per-file Remove calls. fsnotify v1.9.0 won't close
+	// these FDs on its own — we must ask explicitly.
+	assert.Contains(t, removed, filepath.Join(pkg, "a.go"),
+		"pkg/a.go must be Remove'd to close fsnotify's per-file FD")
+	assert.Contains(t, removed, filepath.Join(pkg, "b.go"),
+		"pkg/b.go must be Remove'd to close fsnotify's per-file FD")
+	assert.Contains(t, removed, filepath.Join(subPkg, "x.go"),
+		"descendant child files must be Remove'd too (descendant snapshots flushed)")
+
+	// And the maps are cleaned up.
+	pw.mu.Lock()
+	_, dirStillTracked := pw.watchedDirs[pkg]
+	_, childrenStillTracked := pw.dirChildren[pkg]
+	_, descendantStillTracked := pw.dirChildren[subPkg]
+	pw.mu.Unlock()
+	assert.False(t, dirStillTracked, "watchedDirs entry must be cleared")
+	assert.False(t, childrenStillTracked, "dirChildren entry must be cleared")
+	assert.False(t, descendantStillTracked, "descendant dirChildren must be cleared")
+}
+
+// TestProjectWatcher_PruneStaleWatches_RemovesChildFiles verifies the same
+// invariant via the periodic-prune path: a dir falling out of git-tracked set
+// must drop its per-file FDs too, not just the dir's own FD.
+// Failure prevented: gitignore changes / branch switches accumulate per-file
+// FDs over the lifetime of the daemon.
+func TestProjectWatcher_PruneStaleWatches_RemovesChildFiles(t *testing.T) {
+	mockWatcher := NewMockFileSystemWatcher()
+	mockFS := NewMockFileSystem()
+
+	dir := t.TempDir()
+	buildDir := filepath.Join(dir, "build")
+	require.NoError(t, os.MkdirAll(buildDir, 0o755))
+	mockFS.AddDir(buildDir, []string{"out1.o", "out2.o", "out3.o"})
+
+	tracker := &GitTrackedMatcher{
+		projectRoot:  dir,
+		trackedDirs:  map[string]struct{}{"build": {}},
+		trackedFiles: map[string]struct{}{},
+		logger:       slogDiscard(),
+	}
+
+	pw := NewProjectWatcher(
+		dir, slogDiscard(),
+		func() (FileSystemWatcher, error) { return mockWatcher, nil },
+		mockFS, NewChangeAccumulator(50*time.Millisecond), tracker,
+	)
+
+	pw.walkAndWatch(mockWatcher)
+	require.Equal(t, 2, pw.WatchedDirCount(), "root + build")
+
+	// build/ is no longer tracked (e.g., added to .gitignore)
+	tracker.mu.Lock()
+	delete(tracker.trackedDirs, "build")
+	tracker.mu.Unlock()
+
+	pw.pruneStaleWatches(mockWatcher)
+
+	removed := mockWatcher.RemovedPaths()
+	assert.Contains(t, removed, buildDir, "build dir must be unwatched")
+	assert.Contains(t, removed, filepath.Join(buildDir, "out1.o"),
+		"per-file FD must be released on prune")
+	assert.Contains(t, removed, filepath.Join(buildDir, "out2.o"),
+		"per-file FD must be released on prune")
+	assert.Contains(t, removed, filepath.Join(buildDir, "out3.o"),
+		"per-file FD must be released on prune")
+
+	pw.mu.Lock()
+	_, stillInChildren := pw.dirChildren[buildDir]
+	pw.mu.Unlock()
+	assert.False(t, stillInChildren, "dirChildren entry must be cleared on prune")
+}
+
+// TestProjectWatcher_SnapshotChildren_BoundedAtCap verifies the
+// maxFilesPerWatchedDir cap. A pathological dir (millions of generated files)
+// would otherwise dominate startup memory and snapshot cost. The cap is a
+// safe-degradation: files beyond the cap lose the leak guarantee, but the
+// ungranted FDs are bounded by file count regardless.
+// Failure prevented: cold-start memory/CPU spike on monorepos with one
+// pathological generated-files directory.
+func TestProjectWatcher_SnapshotChildren_BoundedAtCap(t *testing.T) {
+	mockWatcher := NewMockFileSystemWatcher()
+	mockFS := NewMockFileSystem()
+
+	dir := t.TempDir()
+	bigDir := filepath.Join(dir, "generated")
+	require.NoError(t, os.MkdirAll(bigDir, 0o755))
+
+	// Create a dir with maxFilesPerWatchedDir + 100 entries. ReadDir returns
+	// all of them; the cap should kick in inside snapshotDirFiles.
+	overflow := 100
+	names := make([]string, 0, maxFilesPerWatchedDir+overflow)
+	for i := 0; i < maxFilesPerWatchedDir+overflow; i++ {
+		names = append(names, fmt.Sprintf("f%06d.go", i))
+	}
+	mockFS.AddDir(bigDir, names)
+
+	pw := NewProjectWatcher(
+		dir, slogDiscard(),
+		func() (FileSystemWatcher, error) { return mockWatcher, nil },
+		mockFS, NewChangeAccumulator(50*time.Millisecond),
+		&GitTrackedMatcher{
+			projectRoot: dir, trackedDirs: map[string]struct{}{}, trackedFiles: map[string]struct{}{},
+			logger: slogDiscard(),
+		},
+	)
+
+	pw.addDir(mockWatcher, bigDir)
+
+	pw.mu.Lock()
+	got := len(pw.dirChildren[bigDir])
+	pw.mu.Unlock()
+	assert.Equal(t, maxFilesPerWatchedDir, got,
+		"snapshotDirFiles must cap at maxFilesPerWatchedDir; got %d", got)
+}
+
+// TestProjectWatcher_AcquireRelease_TypedHandle verifies the watchedDirHandle
+// discipline helper: acquireDir+Release must produce the same effect as
+// addDir+Remove-with-children, with no extra leaks and no extra dirs left in
+// the maps. Not RAII (Go has no RAII for resources outliving function scope),
+// but enforces register-and-release pairing through the type system.
+// Failure prevented: future caller adds a watch via the handle but forgets
+// the children-cleanup half of the contract.
+func TestProjectWatcher_AcquireRelease_TypedHandle(t *testing.T) {
+	mockWatcher := NewMockFileSystemWatcher()
+	mockFS := NewMockFileSystem()
+
+	dir := t.TempDir()
+	pkg := filepath.Join(dir, "pkg")
+	require.NoError(t, os.MkdirAll(pkg, 0o755))
+	mockFS.AddDir(pkg, []string{"main.go", "main_test.go"})
+
+	pw := NewProjectWatcher(
+		dir, slogDiscard(),
+		func() (FileSystemWatcher, error) { return mockWatcher, nil },
+		mockFS, NewChangeAccumulator(50*time.Millisecond),
+		&GitTrackedMatcher{
+			projectRoot: dir, trackedDirs: map[string]struct{}{}, trackedFiles: map[string]struct{}{},
+			logger: slogDiscard(),
+		},
+	)
+
+	h, err := pw.acquireDir(mockWatcher, pkg)
+	require.NoError(t, err)
+	require.NotNil(t, h)
+
+	pw.mu.Lock()
+	_, watched := pw.watchedDirs[pkg]
+	childCount := len(pw.dirChildren[pkg])
+	pw.mu.Unlock()
+	assert.True(t, watched, "acquireDir must register the dir")
+	assert.Equal(t, 2, childCount, "acquireDir must snapshot children")
+
+	h.Release()
+
+	pw.mu.Lock()
+	_, stillWatched := pw.watchedDirs[pkg]
+	_, stillChildren := pw.dirChildren[pkg]
+	pw.mu.Unlock()
+	assert.False(t, stillWatched, "Release must clear watchedDirs entry")
+	assert.False(t, stillChildren, "Release must clear dirChildren entry")
+
+	removed := mockWatcher.RemovedPaths()
+	assert.Contains(t, removed, pkg, "Release must Remove the dir")
+	assert.Contains(t, removed, filepath.Join(pkg, "main.go"),
+		"Release must Remove each tracked child file")
+	assert.Contains(t, removed, filepath.Join(pkg, "main_test.go"),
+		"Release must Remove each tracked child file")
+
+	// Idempotent: second Release is a no-op (children list now empty).
+	preCount := len(mockWatcher.RemovedPaths())
+	h.Release()
+	postCount := len(mockWatcher.RemovedPaths())
+	// Second Release issues a single Remove for the dir itself (harmless,
+	// fsnotify returns ErrNonExistentWatch which we ignore). What matters
+	// is that no new per-file Removes happen.
+	assert.LessOrEqual(t, postCount-preCount, 1, "Release must be idempotent for child files")
+}
+
+// TestProjectWatcher_NoFDLeak_RealWatcher_Darwin is the production-grade
+// regression test. It uses a REAL fsnotify watcher, real os.MkdirAll +
+// os.RemoveAll, and counts open FDs on the test process via /dev/fd. This
+// is the test that would have caught the original leak — the mock-based
+// tests can't, because the mock has no internal per-file FDs to leak.
+//
+// macOS-only: fsnotify's kqueue backend is the source of the leak. Linux's
+// inotify uses one FD per watch (not per file), so the leak doesn't exist
+// there.
+//
+// Failure prevented: regression of the FD leak that, in production, made
+// the daemon's FD table grow unbounded and `lsof` hang on the daemon PID.
+func TestProjectWatcher_NoFDLeak_RealWatcher_Darwin(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("kqueue per-file FD leak is macOS-specific")
+	}
+	if testing.Short() {
+		t.Skip("short: real-watcher FD test runs many churn cycles")
+	}
+
+	dir := t.TempDir()
+	logger := slogDiscard()
+
+	tracker := &GitTrackedMatcher{
+		projectRoot: dir, trackedDirs: map[string]struct{}{}, trackedFiles: map[string]struct{}{},
+		logger: logger,
+	}
+	pw := NewProjectWatcher(
+		dir, logger,
+		DefaultWatcherFactory,
+		&RealFileSystem{},
+		NewChangeAccumulator(20*time.Millisecond),
+		tracker,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		pw.Start(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	// Wait until root is being watched.
+	require.Eventually(t, func() bool {
+		return pw.WatchedDirCount() >= 1
+	}, 2*time.Second, 10*time.Millisecond)
+
+	// Settle and capture baseline. Run a few warmup cycles first because the
+	// fsnotify goroutine and kqueue itself open FDs on first use.
+	for i := 0; i < 3; i++ {
+		warmDir := filepath.Join(dir, fmt.Sprintf("warmup-%d", i))
+		require.NoError(t, os.MkdirAll(warmDir, 0o755))
+		require.NoError(t, os.RemoveAll(warmDir))
+	}
+	time.Sleep(150 * time.Millisecond)
+
+	baseline := countOpenFDs(t)
+
+	// Churn: 50 iterations of mkdir + N files + rm-rf. Each iteration
+	// pre-fix would open (1 + 5) kqueue FDs and only release 1 — net +5/round.
+	const iterations = 50
+	const filesPerDir = 5
+	for i := 0; i < iterations; i++ {
+		sub := filepath.Join(dir, fmt.Sprintf("churn-%04d", i))
+		require.NoError(t, os.MkdirAll(sub, 0o755))
+		for j := 0; j < filesPerDir; j++ {
+			f := filepath.Join(sub, fmt.Sprintf("f%d.go", j))
+			require.NoError(t, os.WriteFile(f, []byte("package x\n"), 0o644))
+		}
+		// Give fsnotify a beat to register the dir + auto-watch the files
+		// before we delete them. Without this, the kernel may coalesce events
+		// and we don't exercise the per-file FD path.
+		time.Sleep(2 * time.Millisecond)
+		require.NoError(t, os.RemoveAll(sub))
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// Allow handler to drain.
+	require.Eventually(t, func() bool {
+		// All churn dirs should have been removed from watchedDirs.
+		return pw.WatchedDirCount() <= 5
+	}, 5*time.Second, 50*time.Millisecond, "watcher should drain churn dirs")
+	time.Sleep(200 * time.Millisecond)
+
+	final := countOpenFDs(t)
+	delta := final - baseline
+
+	// Pre-fix: delta ≈ iterations*filesPerDir = 250 leaked FDs (and growing
+	// unbounded across runs). Post-fix: delta should be small — bounded by
+	// transient watch state, sleep timers, and any long-tail handler queue.
+	// Tolerance of 30 is generous for noise but catches the leak by 8x.
+	const tolerance = 30
+	assert.Less(t, delta, tolerance,
+		"FD count grew by %d (baseline %d, final %d). Pre-fix this is ~%d. Tolerance: <%d.",
+		delta, baseline, final, iterations*filesPerDir, tolerance)
+}
+
+// countOpenFDs returns the number of FDs open on the current process.
+// Uses /dev/fd via Readdirnames (not os.ReadDir) — on macOS, ReadDir's
+// per-entry fstatat fails on some kernel-only FD types with "bad file
+// descriptor". Readdirnames just enumerates names from the directory
+// stream, no per-entry stat. We subtract 1 because the readdir itself
+// holds a transient FD on /dev/fd.
+func countOpenFDs(t *testing.T) int {
+	t.Helper()
+	d, err := os.Open("/dev/fd")
+	require.NoError(t, err, "failed to open /dev/fd for FD count")
+	defer d.Close()
+	names, err := d.Readdirnames(-1)
+	require.NoError(t, err, "failed to enumerate /dev/fd")
+	// Subtract 1 for the FD held by 'd' itself, which is closed before
+	// the caller checks the next sample.
+	n := len(names) - 1
+	if n < 0 {
+		n = 0
+	}
+	return n
 }
