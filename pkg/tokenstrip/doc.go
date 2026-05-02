@@ -26,14 +26,14 @@
 // For assistant entries, the applicability depends on whether a transform
 // is lossless or lossy:
 //
-//   Lossless transforms (apply to assistant content globally):
-//     - NFC Unicode normalization — round-trippable canonical form
-//     - Zero-width + unusual whitespace strip — information-free glyphs
-//     - Whitespace canonicalization — multiple spaces/newlines → one
+//	Lossless transforms (apply to assistant content globally):
+//	  - NFC Unicode normalization — round-trippable canonical form
+//	  - Zero-width + unusual whitespace strip — information-free glyphs
+//	  - Whitespace canonicalization — multiple spaces/newlines → one
 //
-//   Lossy transforms (apply ONLY to text inside <thinking>…</thinking>):
-//     - Stop-word removal
-//     - Synonym substitution (opt-in even when tokenstrip is enabled)
+//	Lossy transforms (apply ONLY to text inside <thinking>…</thinking>):
+//	  - Stop-word removal
+//	  - Synonym substitution (opt-in even when tokenstrip is enabled)
 //
 // This means assistant prose OUTSIDE <thinking> may see its whitespace
 // canonicalized and zero-width chars removed (lossless-safe), but its

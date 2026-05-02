@@ -239,7 +239,6 @@ func (f *UserIntegrationsFinder) findGeminiHooks() ([]UserIntegrationItem, error
 	return nil, nil
 }
 
-
 // findUserGitHooks finds user-level git hooks containing ox prime
 func (f *UserIntegrationsFinder) findUserGitHooks() ([]UserIntegrationItem, error) {
 	var items []UserIntegrationItem

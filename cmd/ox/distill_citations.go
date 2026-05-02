@@ -345,7 +345,7 @@ var codeFenceRe = regexp.MustCompile("(?m)^```[^\n]*$")
 // containing no backticks or newlines. Used to skip `arr[1]`-style content
 // during citation marker renumbering.
 //
-// Limitation: doesn't recognize multi-backtick spans (`` `` ` `` ``) — those
+// Limitation: doesn't recognize multi-backtick spans (“ “ ` “ “) — those
 // are rare in distilled prose. CommonMark allows them but our LLM output
 // doesn't emit them.
 var inlineCodeRe = regexp.MustCompile("`[^`\n]+`")

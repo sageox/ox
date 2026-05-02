@@ -42,7 +42,7 @@ func TestResolveContentPath_CacheOnlyDesign(t *testing.T) {
 		cache := t.TempDir()
 		// in-place: LFS pointer
 		if err := lfs.WritePointerFile(filepath.Join(sess, "raw.jsonl"), lfs.FileRef{
-			OID: "deadbeef" + "1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
+			OID:  "deadbeef" + "1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
 			Size: 1024,
 		}); err != nil {
 			t.Fatal(err)

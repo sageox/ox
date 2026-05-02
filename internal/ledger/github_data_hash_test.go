@@ -291,4 +291,3 @@ func TestWriteGitHubPR_FilenameFormat(t *testing.T) {
 	name := entries[0].Name()
 	assert.Regexp(t, `^409-[0-9a-f]{8}\.json$`, name)
 }
-

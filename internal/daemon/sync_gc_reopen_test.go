@@ -74,7 +74,7 @@ func TestReopenWhisperStoreAfterGC_ConcurrentReads(t *testing.T) {
 	// seed data for readers to scan
 	for i := 0; i < 10; i++ {
 		require.NoError(t, registry.Add("ledger", whisperstore.WhisperEntry{
-			ID: "w-" + time.Now().Add(time.Duration(i)*time.Millisecond).Format("150405.000000"),
+			ID:    "w-" + time.Now().Add(time.Duration(i)*time.Millisecond).Format("150405.000000"),
 			Scope: "ledger", Type: whisperstore.WhisperTimeBased,
 			Source: "test", Topic: "concurrent", Content: "data",
 			Importance: whisperstore.ImportanceNormal,

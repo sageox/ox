@@ -547,7 +547,7 @@ func TestPostProcess(t *testing.T) {
 
 		// create source files simulating cobra output
 		files := map[string]string{
-			"ox.md": "---\ntitle: \"ox\"\ndescription: \"CLI reference for ox\"\n---\n\n## ox\n\nRoot command.\n\n## SEE ALSO\n\n* [ox login](ox_login.md) - Log in\n* [ox session](ox_session.md) - Sessions\n* [ox agent](ox_agent.md) - Agent commands\n",
+			"ox.md":               "---\ntitle: \"ox\"\ndescription: \"CLI reference for ox\"\n---\n\n## ox\n\nRoot command.\n\n## SEE ALSO\n\n* [ox login](ox_login.md) - Log in\n* [ox session](ox_session.md) - Sessions\n* [ox agent](ox_agent.md) - Agent commands\n",
 			"ox_login.md":         "---\ntitle: \"ox login\"\ndescription: \"CLI reference for ox login\"\n---\n\n## ox login\n\nLog in to SageOx.\n",
 			"ox_session.md":       "---\ntitle: \"ox session\"\ndescription: \"CLI reference for ox session\"\n---\n\n## ox session\n\nManage sessions.\n",
 			"ox_session_start.md": "---\ntitle: \"ox session start\"\ndescription: \"CLI reference for ox session start\"\n---\n\n## ox session start\n\nStart a session.\n\n## SEE ALSO\n\n* [ox session](ox_session.md) - Parent\n",
@@ -571,11 +571,11 @@ func TestPostProcess(t *testing.T) {
 
 		// verify expected output files exist
 		expectedFiles := []string{
-			"index.mdx",                              // ox.md
-			"login.mdx",                              // ox_login.md
-			filepath.Join("session", "index.mdx"),     // ox_session.md (parent)
-			filepath.Join("session", "start.mdx"),     // ox_session_start.md
-			filepath.Join("session", "stop.mdx"),      // ox_session_stop.md
+			"index.mdx",                           // ox.md
+			"login.mdx",                           // ox_login.md
+			filepath.Join("session", "index.mdx"), // ox_session.md (parent)
+			filepath.Join("session", "start.mdx"), // ox_session_start.md
+			filepath.Join("session", "stop.mdx"),  // ox_session_stop.md
 		}
 
 		for _, f := range expectedFiles {

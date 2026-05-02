@@ -138,4 +138,3 @@ func RenderCallers(target domain.InspectorTarget, width int) string {
 
 	return strings.Join(lines, "\n")
 }
-

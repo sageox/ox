@@ -103,7 +103,6 @@ func TestPtrIntToNullInt64(t *testing.T) {
 	}
 }
 
-
 func TestDirtyIndexPath_Structure(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {

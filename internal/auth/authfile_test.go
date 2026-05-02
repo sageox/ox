@@ -755,7 +755,6 @@ func TestAtomicity_OriginalSurvivesWriteError(t *testing.T) {
 func TestLegacyMigration_SingleTokenFormat(t *testing.T) {
 	t.Parallel()
 
-
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
 
@@ -794,7 +793,6 @@ func TestLegacyMigration_SingleTokenFormat(t *testing.T) {
 func TestLegacyMigration_NullTokensField(t *testing.T) {
 	t.Parallel()
 
-
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
 
@@ -818,7 +816,6 @@ func TestLegacyMigration_NullTokensField(t *testing.T) {
 func TestLegacyMigration_EmptyTokensObject(t *testing.T) {
 	t.Parallel()
 
-
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
 
@@ -840,7 +837,6 @@ func TestLegacyMigration_EmptyTokensObject(t *testing.T) {
 // Failure prevented: legacy token stored under wrong endpoint for AuthClient users.
 func TestLegacyMigration_CustomEndpoint(t *testing.T) {
 	t.Parallel()
-
 
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
@@ -872,7 +868,6 @@ func TestLegacyMigration_CustomEndpoint(t *testing.T) {
 // Failure prevented: concurrent migration corrupts the file.
 func TestLegacyMigration_ConcurrentMigration(t *testing.T) {
 	t.Parallel()
-
 
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
@@ -1093,7 +1088,6 @@ func TestE2E_RapidFireSaveLoad(t *testing.T) {
 func TestEdge_EmptyStore(t *testing.T) {
 	t.Parallel()
 
-
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
 
@@ -1119,7 +1113,6 @@ func TestEdge_EmptyStore(t *testing.T) {
 // Failure prevented: nil token value causes panic in save/load path.
 func TestEdge_NilTokenValue(t *testing.T) {
 	t.Parallel()
-
 
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
@@ -1175,7 +1168,6 @@ func TestEdge_VeryLongEndpointURL(t *testing.T) {
 func TestEdge_NoFile(t *testing.T) {
 	t.Parallel()
 
-
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "nonexistent", "auth.json")
 
@@ -1196,7 +1188,6 @@ func TestEdge_NoFile(t *testing.T) {
 // Failure prevented: corrupt file silently returns empty store.
 func TestEdge_CorruptJSON(t *testing.T) {
 	t.Parallel()
-
 
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")

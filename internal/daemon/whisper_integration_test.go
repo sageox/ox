@@ -12,7 +12,6 @@ import (
 
 func TestWhisperPipeline_MurmurToDelivery(t *testing.T) {
 
-
 	relay, registry, _ := newTestRelay(t)
 	baseDir := t.TempDir()
 
@@ -58,7 +57,6 @@ func TestWhisperPipeline_MurmurToDelivery(t *testing.T) {
 }
 
 func TestWhisperPipeline_CursorAdvancement(t *testing.T) {
-
 
 	relay, registry, _ := newTestRelay(t)
 	baseDir := t.TempDir()
@@ -120,7 +118,6 @@ func TestWhisperPipeline_CursorAdvancement(t *testing.T) {
 
 func TestWhisperPipeline_SelfAuthoredFiltering(t *testing.T) {
 
-
 	relay, registry, _ := newTestRelay(t)
 	baseDir := t.TempDir()
 
@@ -152,7 +149,6 @@ func TestWhisperPipeline_SelfAuthoredFiltering(t *testing.T) {
 }
 
 func TestWhisperPipeline_CrossAgentDelivery(t *testing.T) {
-
 
 	relay, registry, _ := newTestRelay(t)
 	baseDir := t.TempDir()
@@ -200,7 +196,6 @@ func TestWhisperPipeline_CrossAgentDelivery(t *testing.T) {
 }
 
 func TestWhisperPipeline_AttentionFiltering(t *testing.T) {
-
 
 	baseDir := t.TempDir()
 	now := time.Now().UTC()
@@ -278,7 +273,6 @@ func TestWhisperPipeline_AttentionFiltering(t *testing.T) {
 }
 
 func TestWhisperPipeline_TeamScope(t *testing.T) {
-
 
 	ledgerStore := openTestStore(t)
 	teamStore := openTestStore(t)
@@ -366,7 +360,6 @@ func TestWhisperPipeline_TeamScope(t *testing.T) {
 }
 
 func TestWhisperPipeline_MultipleMurmursBatch(t *testing.T) {
-
 
 	relay, registry, _ := newTestRelay(t)
 	baseDir := t.TempDir()

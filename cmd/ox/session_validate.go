@@ -182,5 +182,3 @@ func validateRawJSONLFile(path string) *sessionValidation {
 
 	return v
 }
-
-

@@ -14,7 +14,6 @@ var functionKinds = map[string]bool{
 	"constructor": true,
 }
 
-
 // extractTypeInfoFromTree enriches function-like symbols with signature, return type,
 // and params using an already-parsed tree (avoids a redundant second parse).
 func extractTypeInfoFromTree(lang *gotreesitter.Language, language string, source []byte, tree *gotreesitter.Tree, syms []Symbol) {

@@ -412,4 +412,3 @@ func TestGCRestoreEmptyBackup(t *testing.T) {
 		t.Fatalf("expected no error restoring empty backup, got %v", err)
 	}
 }
-

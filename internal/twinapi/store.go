@@ -13,11 +13,11 @@ type store struct {
 	jwtSecret []byte // per-instance, 32 bytes from crypto/rand
 	clock     time.Time
 
-	users       map[string]*User        // user_id -> User
-	sessions    map[string]*Session      // opaque_token -> Session
-	teams       map[string]*Team        // team_id -> Team
-	repos       map[string]*Repo        // repo_id -> Repo
-	deviceCodes map[string]*DeviceCode  // device_code -> DeviceCode
+	users       map[string]*User       // user_id -> User
+	sessions    map[string]*Session    // opaque_token -> Session
+	teams       map[string]*Team       // team_id -> Team
+	repos       map[string]*Repo       // repo_id -> Repo
+	deviceCodes map[string]*DeviceCode // device_code -> DeviceCode
 
 	calls  []CallRecord
 	faults map[string]*EndpointFault // path pattern -> fault config

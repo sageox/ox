@@ -1022,7 +1022,7 @@ func TestSparseCheckoutReconfigure_PreservesLocalFiles(t *testing.T) {
 		".sageox/cache/github_sync/state.json": "sync-state",
 		// telemetry queue + health metadata
 		".sageox/cache/telemetry.jsonl": "event-data",
-		".sageox/cache/health.json":    "health-data",
+		".sageox/cache/health.json":     "health-data",
 		// sync state
 		".sageox/cache/sync-state.json": `{"last":"now"}`,
 	}

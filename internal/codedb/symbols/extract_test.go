@@ -292,11 +292,11 @@ func TestExtract_AllLanguages(t *testing.T) {
 		"go":         "package main\nfunc main() {}",
 		"python":     "def main():\n    pass",
 		"javascript": "function main() {}",
-		"typescript":  "function main(): void {}",
-		"tsx":         "function App(): JSX.Element { return <div/>; }",
-		"rust":        "fn main() {}",
-		"c":           "int main() { return 0; }",
-		"cpp":         "int main() { return 0; }",
+		"typescript": "function main(): void {}",
+		"tsx":        "function App(): JSX.Element { return <div/>; }",
+		"rust":       "fn main() {}",
+		"c":          "int main() { return 0; }",
+		"cpp":        "int main() { return 0; }",
 	}
 
 	for lang, src := range cases {

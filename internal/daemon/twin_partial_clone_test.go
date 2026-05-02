@@ -185,8 +185,8 @@ func TestPartialClone_SparseRedefine_AddsDirectory(t *testing.T) {
 	cloneURL := g.createRepo(t, "twin-partial-redefine")
 
 	pushMultipleFiles(t, cloneURL, map[string]string{
-		"docs/readme.md":       "# Docs\n",
-		"data/github/repo.json": `{"stars":42}`,
+		"docs/readme.md":         "# Docs\n",
+		"data/github/repo.json":  `{"stars":42}`,
 		"data/linear/tasks.json": `{"count":5}`,
 	})
 

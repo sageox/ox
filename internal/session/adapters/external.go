@@ -63,12 +63,12 @@ type ExternalAdapter struct {
 	info       *adapterprotocol.InfoResponse
 
 	// serve-mode state (lazily initialized)
-	serveMu   sync.Mutex
-	serveCmd  *exec.Cmd
-	serveIn   io.WriteCloser
-	serveOut  *ndjson.Scanner
-	serveEnc  *ndjson.Encoder
-	serveSeq  int
+	serveMu  sync.Mutex
+	serveCmd *exec.Cmd
+	serveIn  io.WriteCloser
+	serveOut *ndjson.Scanner
+	serveEnc *ndjson.Encoder
+	serveSeq int
 
 	// timeouts
 	oneShotTimeout time.Duration

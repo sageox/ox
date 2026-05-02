@@ -125,8 +125,8 @@ func TestScoreCorpus_AggregatesAndAverages(t *testing.T) {
 		{Name: "s2", Reference: Summary{Title: "b", Summary: "b", KeyActions: []string{"y"}, Outcome: "failed"}},
 	}
 	candidates := map[string]Summary{
-		"s1": corpus[0].Reference,                                                                // perfect
-		"s2": {Title: "zzz", Summary: "zzz", KeyActions: []string{"zz"}, Outcome: "success"},     // mismatched
+		"s1": corpus[0].Reference,                                                            // perfect
+		"s2": {Title: "zzz", Summary: "zzz", KeyActions: []string{"zz"}, Outcome: "success"}, // mismatched
 	}
 	r := ScoreCorpus(corpus, candidates, DefaultWeights(), nil)
 	if r.CorpusSize != 2 {

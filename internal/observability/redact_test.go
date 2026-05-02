@@ -107,10 +107,10 @@ func TestRedactArgs(t *testing.T) {
 			prevents: "any positional leaking — only flag names should survive",
 			in:       []string{"query", "auth flow", "--limit", "5", "--source=team"},
 			want: []string{
-				"<REDACTED>",     // "query" (subcommand looks positional from argv)
-				"<REDACTED>",     // "auth flow"
-				"--limit",        // flag name kept
-				"<REDACTED>",     // "5"
+				"<REDACTED>", // "query" (subcommand looks positional from argv)
+				"<REDACTED>", // "auth flow"
+				"--limit",    // flag name kept
+				"<REDACTED>", // "5"
 				"--source=<REDACTED>",
 			},
 		},

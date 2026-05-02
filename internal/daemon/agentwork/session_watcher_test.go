@@ -25,8 +25,8 @@ type testAdapter struct {
 	name string
 }
 
-func (a *testAdapter) Name() string  { return a.name }
-func (a *testAdapter) Detect() bool  { return false }
+func (a *testAdapter) Name() string { return a.name }
+func (a *testAdapter) Detect() bool { return false }
 func (a *testAdapter) FindSessionFile(_ adapters.SessionLookup) (string, error) {
 	return "", adapters.ErrSessionNotFound
 }

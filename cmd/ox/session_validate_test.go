@@ -177,7 +177,6 @@ func TestValidation_SummaryEmpty(t *testing.T) {
 	assert.Equal(t, "", v.summary())
 }
 
-
 // writeJSONL writes a slice of maps as JSONL to the given path.
 func writeJSONL(t *testing.T, path string, lines []map[string]any) {
 	t.Helper()

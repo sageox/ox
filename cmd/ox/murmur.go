@@ -17,8 +17,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const maxMurmurContentBytes = 500            // ~125 tokens — murmurs must be concise coordination signals
-const murmurRateInterval  = 5 * time.Second // max 1 murmur per agent per this window
+const maxMurmurContentBytes = 500          // ~125 tokens — murmurs must be concise coordination signals
+const murmurRateInterval = 5 * time.Second // max 1 murmur per agent per this window
 
 var murmurCmd = &cobra.Command{
 	Use:   "murmur [content]",
@@ -287,4 +287,3 @@ func publishMurmurViaIPC(targetDir, relPath, content string, murmurJSON []byte) 
 		MurmurJSON: murmurJSON,
 	})
 }
-

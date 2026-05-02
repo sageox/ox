@@ -57,7 +57,6 @@ func (c *SessionCheck) Category() string {
 	return "Sessions"
 }
 
-
 // Run executes all session health checks.
 func (c *SessionCheck) Run(_ context.Context, _ bool) CheckResult {
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
@@ -121,7 +120,6 @@ func (c *SessionStorageCheck) Category() string {
 	return "Sessions"
 }
 
-
 // Run executes the storage check.
 func (c *SessionStorageCheck) Run(_ context.Context, _ bool) CheckResult {
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
@@ -176,7 +174,6 @@ func (c *SessionRepoCheck) Name() string {
 func (c *SessionRepoCheck) Category() string {
 	return "Sessions"
 }
-
 
 // Run executes the repo check.
 func (c *SessionRepoCheck) Run(_ context.Context, _ bool) CheckResult {
@@ -241,7 +238,6 @@ func (c *SessionRecordingCheck) Category() string {
 	return "Sessions"
 }
 
-
 // Run executes the recording check.
 func (c *SessionRecordingCheck) Run(_ context.Context, _ bool) CheckResult {
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
@@ -292,7 +288,6 @@ func (c *SessionPendingCheck) Name() string {
 func (c *SessionPendingCheck) Category() string {
 	return "Sessions"
 }
-
 
 // Run executes the pending check.
 func (c *SessionPendingCheck) Run(_ context.Context, _ bool) CheckResult {
@@ -346,7 +341,6 @@ func (c *SessionStaleCheck) Name() string {
 func (c *SessionStaleCheck) Category() string {
 	return "Sessions"
 }
-
 
 // Run executes the stale recording check.
 func (c *SessionStaleCheck) Run(_ context.Context, _ bool) CheckResult {
@@ -416,7 +410,6 @@ func (c *SessionSyncCheck) Category() string {
 	return "Sessions"
 }
 
-
 // Run executes the sync check.
 func (c *SessionSyncCheck) Run(_ context.Context, _ bool) CheckResult {
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
@@ -474,7 +467,6 @@ func (c *SessionModeCheck) Category() string {
 	return "Sessions"
 }
 
-
 // Run executes the session recording check.
 func (c *SessionModeCheck) Run(_ context.Context, _ bool) CheckResult {
 	resolved := config.ResolveSessionRecording(c.gitRoot)
@@ -527,7 +519,6 @@ func (c *SessionLedgerCheck) Name() string {
 func (c *SessionLedgerCheck) Category() string {
 	return "Sessions"
 }
-
 
 // Run executes the ledger check.
 func (c *SessionLedgerCheck) Run(_ context.Context, _ bool) CheckResult {
@@ -599,7 +590,6 @@ func (c *SessionOrphanedCheck) Name() string {
 func (c *SessionOrphanedCheck) Category() string {
 	return "Sessions"
 }
-
 
 // Run executes the orphaned recording check.
 func (c *SessionOrphanedCheck) Run(_ context.Context, _ bool) CheckResult {
@@ -718,7 +708,6 @@ func (c *SessionStopIncompleteCheck) Category() string {
 	return "Sessions"
 }
 
-
 // Run detects recordings with StopIncomplete=true.
 func (c *SessionStopIncompleteCheck) Run(_ context.Context, _ bool) CheckResult {
 	status := getOrComputeHealth(c.cachedStatus, c.gitRoot)
@@ -767,7 +756,6 @@ func (c *SessionIncompleteCheck) Name() string {
 func (c *SessionIncompleteCheck) Category() string {
 	return "Sessions"
 }
-
 
 // IncompleteSessionIssue describes what's missing for a session file.
 type IncompleteSessionIssue struct {
@@ -1049,7 +1037,6 @@ func (c *SessionAutoStageCheck) Category() string {
 	return "Sessions"
 }
 
-
 // Run executes the auto-stage check.
 // This check automatically stages unstaged session files in the ledger's sessions/ directory.
 func (c *SessionAutoStageCheck) Run(_ context.Context, _ bool) CheckResult {
@@ -1259,7 +1246,6 @@ func (c *SessionPushCheck) Name() string {
 func (c *SessionPushCheck) Category() string {
 	return "Sessions"
 }
-
 
 // Run executes the session push check.
 func (c *SessionPushCheck) Run(_ context.Context, _ bool) CheckResult {

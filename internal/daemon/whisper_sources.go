@@ -32,7 +32,7 @@ type MurmurNudgeSource struct {
 	store        *whisperstore.Store
 	heartbeat    *HeartbeatHandler
 	interval     time.Duration
-	projectRoot  string // re-checked on every tick to pick up config changes
+	projectRoot  string   // re-checked on every tick to pick up config changes
 	pausedAgents sync.Map // agentID → struct{}: agents with murmuring paused
 }
 

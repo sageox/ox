@@ -73,10 +73,10 @@ func init() {
 
 // murmurListOutput is the JSON output format.
 type murmurListOutput struct {
-	Murmurs     []murmurListEntry    `json:"murmurs"`
-	Total       int                  `json:"total"`
-	Window      string               `json:"window"`
-	Scope       string               `json:"scope,omitempty"`
+	Murmurs     []murmurListEntry     `json:"murmurs"`
+	Total       int                   `json:"total"`
+	Window      string                `json:"window"`
+	Scope       string                `json:"scope,omitempty"`
 	Diagnostics *murmurListDiagnostic `json:"diagnostics,omitempty"`
 }
 

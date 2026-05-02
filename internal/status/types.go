@@ -106,8 +106,8 @@ type DaemonJSON struct {
 
 // AgentWorkerJSON represents the agent worker status in JSON output.
 type AgentWorkerJSON struct {
-	Agent         string `json:"agent"`         // resolved agent: "claude", "codex", or "none"
-	Source        string `json:"source"`        // "auto", "configured", or "disabled"
+	Agent         string `json:"agent"`  // resolved agent: "claude", "codex", or "none"
+	Source        string `json:"source"` // "auto", "configured", or "disabled"
 	Authenticated bool   `json:"authenticated"`
 	AuthDetail    string `json:"auth_detail,omitempty"`
 }

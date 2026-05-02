@@ -36,8 +36,8 @@ func init() {
 type murmurAgentStatus struct {
 	AgentID      string `json:"agent_id"`
 	PrincipalID  string `json:"principal_id,omitempty"`
-	LastMurmur   string `json:"last_murmur"`          // RFC3339, or "" if none
-	NextEligible string `json:"next_eligible"`         // RFC3339, or "ready"
+	LastMurmur   string `json:"last_murmur"`   // RFC3339, or "" if none
+	NextEligible string `json:"next_eligible"` // RFC3339, or "ready"
 	Ready        bool   `json:"ready"`
 	LastTopic    string `json:"last_topic,omitempty"`
 	LastContent  string `json:"last_content,omitempty"`
@@ -163,11 +163,11 @@ func runMurmurStatus(cmd *cobra.Command, _ []string) error {
 	}
 
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(cli.ColorPrimary)
-	agentCol  := fmt.Sprintf("%-12s", "COWORKER")
-	userCol   := fmt.Sprintf("%-12s", "USER")
-	lastCol   := fmt.Sprintf("%-14s", "LAST MURMUR")
+	agentCol := fmt.Sprintf("%-12s", "COWORKER")
+	userCol := fmt.Sprintf("%-12s", "USER")
+	lastCol := fmt.Sprintf("%-14s", "LAST MURMUR")
 	statusCol := fmt.Sprintf("%-16s", "STATUS")
-	topicCol  := "LAST TOPIC"
+	topicCol := "LAST TOPIC"
 	fmt.Println("  " + headerStyle.Render(agentCol+userCol+lastCol+statusCol+topicCol))
 	fmt.Println("  " + cli.StyleDim.Render(strings.Repeat("-", 90)))
 

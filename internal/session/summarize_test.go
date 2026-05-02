@@ -106,4 +106,3 @@ func TestLocalSummary_SkillInvocations(t *testing.T) {
 		})
 	}
 }
-

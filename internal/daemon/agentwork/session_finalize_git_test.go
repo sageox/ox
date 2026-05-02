@@ -187,4 +187,3 @@ func runGitCmd(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v in %s failed: %s\n%s", args, dir, err, out)
 	}
 }
-

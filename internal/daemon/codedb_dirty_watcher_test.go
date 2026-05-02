@@ -935,4 +935,3 @@ func TestRefreshDirtyOverlay_NoIssueWithoutTracker(t *testing.T) {
 		return !mgr.dirtyRefreshing
 	}, 5*time.Second, 10*time.Millisecond, "dirtyRefreshing flag not released — possible panic in goroutine")
 }
-

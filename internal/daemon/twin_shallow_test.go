@@ -122,7 +122,7 @@ func TestShallow_PartialFilter_WithDepth(t *testing.T) {
 	pushMultipleFiles(t, cloneURL, map[string]string{
 		"docs/readme.md": "# Docs\n",
 		"src/main.go":    "package main\n",
-		"data/test.json":  `{"key":"value"}`,
+		"data/test.json": `{"key":"value"}`,
 	})
 
 	// clone with both --filter=blob:none and --depth=1 (TwoPhaseClone pattern)

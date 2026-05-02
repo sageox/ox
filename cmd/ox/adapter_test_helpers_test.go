@@ -15,8 +15,8 @@ import (
 // Parses the Claude Code JSONL format used in hook and session tests.
 type testClaudeCodeAdapter struct{}
 
-func (a *testClaudeCodeAdapter) Name() string  { return "claude-code" }
-func (a *testClaudeCodeAdapter) Detect() bool  { return false }
+func (a *testClaudeCodeAdapter) Name() string { return "claude-code" }
+func (a *testClaudeCodeAdapter) Detect() bool { return false }
 func (a *testClaudeCodeAdapter) FindSessionFile(_ adapters.SessionLookup) (string, error) {
 	return "", adapters.ErrSessionNotFound
 }
@@ -71,9 +71,9 @@ func (a *testClaudeCodeAdapter) readFrom(path string, offset int64) ([]adapters.
 // parseLine parses a single Claude Code JSONL line into RawEntries.
 func (a *testClaudeCodeAdapter) parseLine(line []byte) []adapters.RawEntry {
 	var raw struct {
-		Type      string    `json:"type"`
-		Timestamp string    `json:"timestamp"`
-		IsMeta    bool      `json:"isMeta"`
+		Type      string `json:"type"`
+		Timestamp string `json:"timestamp"`
+		IsMeta    bool   `json:"isMeta"`
 		Message   struct {
 			Role    string          `json:"role"`
 			Content json.RawMessage `json:"content"`
@@ -108,11 +108,11 @@ func (a *testClaudeCodeAdapter) parseLine(line []byte) []adapters.RawEntry {
 	case "assistant":
 		// content is array of blocks
 		var blocks []struct {
-			Type  string `json:"type"`
-			Text  string `json:"text"`
-			Name  string `json:"name"`
+			Type  string          `json:"type"`
+			Text  string          `json:"text"`
+			Name  string          `json:"name"`
 			Input json.RawMessage `json:"input"`
-			ID    string `json:"id"`
+			ID    string          `json:"id"`
 		}
 		if err := json.Unmarshal(raw.Message.Content, &blocks); err != nil {
 			return nil
@@ -148,8 +148,8 @@ func (a *testClaudeCodeAdapter) parseLine(line []byte) []adapters.RawEntry {
 // Parses the Codex JSONL format used in manual publish tests.
 type testCodexAdapter struct{}
 
-func (a *testCodexAdapter) Name() string  { return "codex" }
-func (a *testCodexAdapter) Detect() bool  { return false }
+func (a *testCodexAdapter) Name() string { return "codex" }
+func (a *testCodexAdapter) Detect() bool { return false }
 func (a *testCodexAdapter) FindSessionFile(lookup adapters.SessionLookup) (string, error) {
 	// scan ~/.codex/sessions/ for recent session files (mirrors real CodexAdapter behavior)
 	home, err := os.UserHomeDir()

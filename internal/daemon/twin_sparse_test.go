@@ -32,10 +32,10 @@ func TestSparseReconfig_DuringPush_NoCorruption(t *testing.T) {
 
 	// seed with ledger-like structure
 	pushMultipleFiles(t, cloneURL, map[string]string{
-		".sageox/config.json":      `{"version":1}`,
-		".sync/status.json":        `{"ok":true}`,
-		"sessions/old/summary.md":  "old session\n",
-		"data/github/issues.json":  `{"count":1}`,
+		".sageox/config.json":     `{"version":1}`,
+		".sync/status.json":       `{"ok":true}`,
+		"sessions/old/summary.md": "old session\n",
+		"data/github/issues.json": `{"count":1}`,
 	})
 
 	cloneDir := filepath.Join(t.TempDir(), "sparse-push")

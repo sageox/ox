@@ -34,7 +34,7 @@ var (
 )
 
 const (
-	maxRespawnAttempts    = 3
+	maxRespawnAttempts   = 3
 	idleShutdownDuration = 30 * time.Second
 	processWaitTimeout   = 5 * time.Second
 	adapterBinaryPrefix  = "ox-adapter-"

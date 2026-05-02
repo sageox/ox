@@ -75,13 +75,13 @@ type SessionScore struct {
 
 // Report is the aggregate result of running an eval over a corpus.
 type Report struct {
-	ScoredAt       time.Time        `json:"scored_at"`
-	CorpusSize     int              `json:"corpus_size"`
-	OverallMean    float64          `json:"overall_mean"`
-	OverallMin     float64          `json:"overall_min"`
-	OverallMax     float64          `json:"overall_max"`
+	ScoredAt       time.Time          `json:"scored_at"`
+	CorpusSize     int                `json:"corpus_size"`
+	OverallMean    float64            `json:"overall_mean"`
+	OverallMin     float64            `json:"overall_min"`
+	OverallMax     float64            `json:"overall_max"`
 	DimensionMeans map[string]float64 `json:"dimension_means"`
-	Sessions       []SessionScore   `json:"sessions"`
+	Sessions       []SessionScore     `json:"sessions"`
 
 	// GatesFailed lists any minimum-threshold gates that didn't pass.
 	// Empty = all gates met (or no gates configured).

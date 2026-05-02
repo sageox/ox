@@ -865,11 +865,11 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 		dir := t.TempDir()
 		writeSummaryJSON(t, dir, map[string]any{
 			"schema_version":    1,
-			"recording_id":     "rec-test",
-			"title":            "V1 With Chapters",
-			"human_summary":    "summary",
-			"decisions":        []map[string]any{{"description": "keep monolith"}},
-			"constraints":      []string{"budget limited"},
+			"recording_id":      "rec-test",
+			"title":             "V1 With Chapters",
+			"human_summary":     "summary",
+			"decisions":         []map[string]any{{"description": "keep monolith"}},
+			"constraints":       []string{"budget limited"},
 			"technical_context": map[string]any{"notes": []string{"uses AWS"}},
 			// chapters might be present in v1 JSON but should not be used
 			"chapters": []map[string]any{

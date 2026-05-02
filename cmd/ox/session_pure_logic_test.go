@@ -213,8 +213,8 @@ func TestConvertStoredEntries(t *testing.T) {
 	t.Run("handles wrong value types gracefully", func(t *testing.T) {
 		stored := []map[string]any{
 			{
-				"type":    42,      // wrong type: int instead of string
-				"content": true,    // wrong type: bool instead of string
+				"type":      42,    // wrong type: int instead of string
+				"content":   true,  // wrong type: bool instead of string
 				"timestamp": 12345, // wrong type: int instead of string
 			},
 		}

@@ -107,8 +107,8 @@ func doThing() {}
 `,
 		},
 		{
-			name: "go_comment_inside_backtick_not_extracted",
-			lang: "go",
+			name:   "go_comment_inside_backtick_not_extracted",
+			lang:   "go",
 			source: "var s = `this /* is not */ a comment`\n// this is a comment\n",
 		},
 		{
@@ -120,8 +120,8 @@ func doThing() {}
 `,
 		},
 		{
-			name: "go_eof_no_newline",
-			lang: "go",
+			name:   "go_eof_no_newline",
+			lang:   "go",
 			source: `// comment at end of file with no newline`,
 		},
 		{
@@ -206,8 +206,8 @@ x = 1
 `,
 		},
 		{
-			name: "python_eof_no_newline",
-			lang: "python",
+			name:   "python_eof_no_newline",
+			lang:   "python",
 			source: `# comment without trailing newline`,
 		},
 
@@ -241,8 +241,8 @@ const x: number = 1;
 `,
 		},
 		{
-			name: "js_comment_in_template_literal_not_extracted",
-			lang: "javascript",
+			name:   "js_comment_in_template_literal_not_extracted",
+			lang:   "javascript",
 			source: "const s = `// not a comment`;\n// real comment\n",
 		},
 

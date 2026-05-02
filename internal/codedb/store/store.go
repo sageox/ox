@@ -12,7 +12,7 @@ import (
 	"syscall"
 
 	"github.com/blevesearch/bleve/v2"
-	"github.com/sageox/ox/internal/codedb/sqlc"
+	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
 	_ "modernc.org/sqlite"
 )
 

@@ -10,10 +10,10 @@ import (
 // mockCompleter returns the configured response for any prompt, recording
 // the prompt for assertion.
 type mockCompleter struct {
-	response    CompletionResult
-	err         error
-	lastPrompt  string
-	callCount   int
+	response   CompletionResult
+	err        error
+	lastPrompt string
+	callCount  int
 }
 
 func (m *mockCompleter) complete(ctx context.Context, prompt string) (CompletionResult, error) {

@@ -305,7 +305,6 @@ func TestDetectGemini_WithProjectConfig(t *testing.T) {
 	}
 }
 
-
 // TestCheckAgentsIntegration_LegacyPatterns tests legacy pattern detection
 func TestCheckAgentsIntegration_LegacyOxAgentPrime(t *testing.T) {
 	gitRoot, cleanup := setupTempGitRepo(t)

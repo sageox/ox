@@ -410,7 +410,7 @@ func TestFindBadgeInsertionPoint_EdgeCases(t *testing.T) {
 			name:  "badges with blank lines between them",
 			lines: []string{"# Title", "[![B1](u1)](l1)", "", "[![B2](u2)](l2)", "Content"},
 			// empty lines don't stop scanning; second badge is still found
-			want:  4, // after second badge
+			want: 4, // after second badge
 		},
 		{
 			name:  "whitespace-only lines between heading and content",
@@ -446,8 +446,8 @@ func setupTestEnv(t *testing.T) string {
 	tmpDir := t.TempDir()
 
 	t.Setenv("XDG_CONFIG_HOME", tmpDir)
-	t.Setenv("OX_XDG_DISABLE", "")     // ensure XDG mode
-	t.Setenv("OX_USER_CONFIG", "")      // don't override user config path
+	t.Setenv("OX_XDG_DISABLE", "") // ensure XDG mode
+	t.Setenv("OX_USER_CONFIG", "") // don't override user config path
 	t.Setenv("SAGEOX_ENDPOINT", "https://test.sageox.ai")
 
 	return tmpDir

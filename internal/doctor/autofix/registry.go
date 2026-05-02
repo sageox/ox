@@ -39,10 +39,10 @@ type CheckResult struct {
 type Status int
 
 const (
-	StatusClean   Status = iota // nothing to do; the workspace is healthy
-	StatusFixed                 // detected drift, applied a safe fix
-	StatusFound                 // detected drift, no auto-fix applied (e.g., requires user)
-	StatusError                 // check itself errored — log and surface; do not retry in tight loop
+	StatusClean Status = iota // nothing to do; the workspace is healthy
+	StatusFixed               // detected drift, applied a safe fix
+	StatusFound               // detected drift, no auto-fix applied (e.g., requires user)
+	StatusError               // check itself errored — log and surface; do not retry in tight loop
 )
 
 // CheckFunc is the contract every registered check implements.
@@ -63,13 +63,13 @@ type CheckFunc func(ctx context.Context, repoPath string) CheckResult
 // matches cmd/ox/doctor_types.go's CheckSlug* constants where the
 // daemon-side check shares logic with the CLI doctor check.
 type Check struct {
-	Slug         string
-	Description  string
-	Run          CheckFunc
-	MinInterval  time.Duration // throttle: don't run more often than this
-	BlastRadius  string        // human-readable: "single workspace", "single file", etc. — for ops review
-	lastRunMu    sync.Mutex
-	lastRunAt    time.Time
+	Slug        string
+	Description string
+	Run         CheckFunc
+	MinInterval time.Duration // throttle: don't run more often than this
+	BlastRadius string        // human-readable: "single workspace", "single file", etc. — for ops review
+	lastRunMu   sync.Mutex
+	lastRunAt   time.Time
 }
 
 // Registry holds the set of auto-fix checks the daemon will run.

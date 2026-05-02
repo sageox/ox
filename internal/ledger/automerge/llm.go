@@ -248,4 +248,3 @@ func parseClaudeStream(r io.Reader) (string, error) {
 	}
 	return "", lastErr
 }
-

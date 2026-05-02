@@ -13,12 +13,12 @@ func TestResolveAgentMetadata(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		agentID        string
-		envAgentID     string
-		envAgentType   string
-		wantParent     string
-		wantAgentType  string
+		name          string
+		agentID       string
+		envAgentID    string
+		envAgentType  string
+		wantParent    string
+		wantAgentType string
 	}{
 		{
 			name:          "empty agent ID returns empty",
@@ -37,12 +37,12 @@ func TestResolveAgentMetadata(t *testing.T) {
 			wantAgentType: "claude-code",
 		},
 		{
-			name:           "different ID in env means parent detected",
-			agentID:        "OxChild",
-			envAgentID:     "OxParent",
-			envAgentType:   "claude-code",
-			wantParent:     "OxParent",
-			wantAgentType:  "claude-code",
+			name:          "different ID in env means parent detected",
+			agentID:       "OxChild",
+			envAgentID:    "OxParent",
+			envAgentType:  "claude-code",
+			wantParent:    "OxParent",
+			wantAgentType: "claude-code",
 		},
 		{
 			name:          "no env vars set",
@@ -53,12 +53,12 @@ func TestResolveAgentMetadata(t *testing.T) {
 			wantAgentType: "",
 		},
 		{
-			name:           "agent type without agent ID env",
-			agentID:        "OxABC",
-			envAgentID:     "",
-			envAgentType:   "cursor",
-			wantParent:     "",
-			wantAgentType:  "cursor",
+			name:          "agent type without agent ID env",
+			agentID:       "OxABC",
+			envAgentID:    "",
+			envAgentType:  "cursor",
+			wantParent:    "",
+			wantAgentType: "cursor",
 		},
 	}
 

@@ -26,7 +26,7 @@ const (
 type SourceType string
 
 const (
-	SourceTeamContext     SourceType = "team-context"
+	SourceTeamContext    SourceType = "team-context"
 	SourceTeamMemory     SourceType = "team-memory"
 	SourceTeamDocs       SourceType = "team-docs"
 	SourceProjectConfig  SourceType = "project-config"

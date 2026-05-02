@@ -58,7 +58,7 @@ func (s *Store) Create(ctx context.Context, opts CreateOpts) (*Issue, error) {
 		IssueType:   issueType,
 		Assignee:    opts.Assignee,
 		Creator:     opts.Creator,
-		Source:       source,
+		Source:      source,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
@@ -89,7 +89,7 @@ func (s *Store) Get(ctx context.Context, id string) (*Issue, error) {
 
 // IssueFilter holds filter criteria for listing carts.
 type IssueFilter struct {
-	Status       string     // single status or comma-separated
+	Status       string // single status or comma-separated
 	Assignee     string
 	Priority     *int
 	IssueType    string

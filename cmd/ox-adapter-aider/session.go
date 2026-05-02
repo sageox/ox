@@ -1,10 +1,11 @@
 // session.go handles session reading, parsing, discovery, and types for Aider.
 //
 // Aider chat history format (.aider.chat.history.md):
-//   # aider chat started at 2024-01-15 14:30:45   <- session header
-//   #### user message here                         <- user (H4 prefix)
-//   assistant response here                        <- assistant (plain text)
-//   > tool output here                             <- tool (blockquote prefix)
+//
+//	# aider chat started at 2024-01-15 14:30:45   <- session header
+//	#### user message here                         <- user (H4 prefix)
+//	assistant response here                        <- assistant (plain text)
+//	> tool output here                             <- tool (blockquote prefix)
 //
 // See: https://aider.chat/docs/config/options.html#history-files
 package main

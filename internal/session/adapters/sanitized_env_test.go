@@ -376,10 +376,10 @@ func TestIsAllowlisted(t *testing.T) {
 		{"SAGEOX_TOKEN", false},
 		{"EDITOR", false},
 		{"SHELL", false},
-		{"XDGFAKE", false},   // no underscore, not a real XDG var
-		{"OXIDE", false},     // starts with OX but not OX_
-		{"HOME_DIR", false},  // contains HOME but isn't exact match
-		{"PATHINFO", false},  // contains PATH but isn't exact match
+		{"XDGFAKE", false},  // no underscore, not a real XDG var
+		{"OXIDE", false},    // starts with OX but not OX_
+		{"HOME_DIR", false}, // contains HOME but isn't exact match
+		{"PATHINFO", false}, // contains PATH but isn't exact match
 	}
 
 	for _, tt := range tests {

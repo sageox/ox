@@ -149,4 +149,3 @@ func ScanLegacyGitHubFiles(ledgerPath string) (legacyFiles, corruptedFiles []str
 
 	return legacyFiles, corruptedFiles, nil
 }
-

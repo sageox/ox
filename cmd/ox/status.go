@@ -908,7 +908,6 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 // daemonSyncWarningThreshold is the uptime duration after which we expect syncs to have occurred
 const daemonSyncWarningThreshold = time.Minute
 
-
 // renderDaemonSyncSection renders daemon sync statistics
 func renderDaemonSyncSection(ds *daemon.StatusData, syncHistory []daemon.SyncEvent, localCfg *config.LocalConfig, noProject bool, projectInitialized bool) string {
 	var b strings.Builder

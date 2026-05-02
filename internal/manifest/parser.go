@@ -28,7 +28,7 @@ func Parse(r io.Reader) (*ManifestConfig, error) {
 	includeSet := make(map[string]bool)
 	denySet := make(map[string]bool)
 	var resolveRules []ResolveRule // explicit `resolve <mode> <path>` directives
-	hasResolve := false           // tracks whether any resolve directive was specified
+	hasResolve := false            // tracks whether any resolve directive was specified
 	versionSeen := false
 
 	scanner := bufio.NewScanner(r)

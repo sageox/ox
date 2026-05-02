@@ -303,7 +303,7 @@ func TestTokenRefresh_HappyPath(t *testing.T) {
 	newJWT := tokenResp["access_token"].(string)
 	newRefresh := tokenResp["refresh_token"].(string)
 
-	assert.Contains(t, newJWT, ".") // is a JWT
+	assert.Contains(t, newJWT, ".")                  // is a JWT
 	assert.NotEqual(t, fix.RefreshToken, newRefresh) // rotated
 	assert.Len(t, newRefresh, 32)
 }
@@ -457,8 +457,8 @@ func TestFaultInjection_AfterN(t *testing.T) {
 		return resp.StatusCode
 	}
 
-	assert.Equal(t, http.StatusOK, doRequest())            // call 1: ok
-	assert.Equal(t, http.StatusOK, doRequest())            // call 2: ok
+	assert.Equal(t, http.StatusOK, doRequest())                 // call 1: ok
+	assert.Equal(t, http.StatusOK, doRequest())                 // call 2: ok
 	assert.Equal(t, http.StatusServiceUnavailable, doRequest()) // call 3: fault
 	assert.Equal(t, http.StatusServiceUnavailable, doRequest()) // call 4: still faulted
 }

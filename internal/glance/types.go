@@ -21,13 +21,13 @@ type SessionRecord struct {
 //   - topic="file-changes": daemon filesystem observation, structured content, has Files+Branch+Worktree
 type MurmurRecord struct {
 	ID         string    `json:"id"`
-	User       string    `json:"user"`       // PrincipalID
+	User       string    `json:"user"` // PrincipalID
 	AgentID    string    `json:"agent_id"`
 	Topic      string    `json:"topic"`
 	Time       time.Time `json:"time"`
 	TimeAgo    string    `json:"time_ago,omitempty"`
 	Content    string    `json:"content"`
-	Files      []string  `json:"files,omitempty"` // from Metadata["files"] (file-changes only)
+	Files      []string  `json:"files,omitempty"`  // from Metadata["files"] (file-changes only)
 	Branch     string    `json:"branch,omitempty"` // from Metadata["branch"] (file-changes only)
 	Importance string    `json:"importance"`
 }

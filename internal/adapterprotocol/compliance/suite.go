@@ -477,13 +477,13 @@ func (s *Suite) TestSubagentStatus(t *testing.T) {
 	}
 	// status must be one of the valid values
 	validStatuses := map[string]bool{
-		adapterprotocol.WorkerStatusStarting:   true,
-		adapterprotocol.WorkerStatusRunning:     true,
-		adapterprotocol.WorkerStatusCompleted:   true,
-		adapterprotocol.WorkerStatusFailed:      true,
-		adapterprotocol.WorkerStatusCanceled:   true,
-		adapterprotocol.WorkerStatusTimedOut:     true,
-		adapterprotocol.WorkerStatusCanceling:  true,
+		adapterprotocol.WorkerStatusStarting:  true,
+		adapterprotocol.WorkerStatusRunning:   true,
+		adapterprotocol.WorkerStatusCompleted: true,
+		adapterprotocol.WorkerStatusFailed:    true,
+		adapterprotocol.WorkerStatusCanceled:  true,
+		adapterprotocol.WorkerStatusTimedOut:  true,
+		adapterprotocol.WorkerStatusCanceling: true,
 	}
 	if !validStatuses[result.Status] {
 		t.Errorf("status.status = %q, not a valid worker status", result.Status)

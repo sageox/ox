@@ -135,7 +135,7 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 
 // unmergedEntry represents one stage of an unmerged file in the git index.
 type unmergedEntry struct {
-	stage int    // 1=base, 2=theirs (target branch), 3=ours (commit being replayed)
+	stage int // 1=base, 2=theirs (target branch), 3=ours (commit being replayed)
 	path  string
 }
 

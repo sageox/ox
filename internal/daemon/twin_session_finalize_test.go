@@ -118,7 +118,7 @@ func TestSessionFinalize_AutoResolve_Sessions(t *testing.T) {
 	cloneURL := g.createRepo(t, "twin-finalize-autoresolve")
 
 	pushMultipleFiles(t, cloneURL, map[string]string{
-		".sageox/config.json":     `{"version":1}`,
+		".sageox/config.json":      `{"version":1}`,
 		"sessions/seed/summary.md": "seed\n",
 	})
 

@@ -189,7 +189,6 @@ func writeMemoryFile(tcPath, relPath, content string) error {
 	return os.WriteFile(fullPath, []byte(content), 0o644)
 }
 
-
 // removeMemoryFile deletes a file from the team context and commits the removal.
 func removeMemoryFile(tcPath, relPath, commitMsg string) error {
 	fullPath := filepath.Join(tcPath, relPath)

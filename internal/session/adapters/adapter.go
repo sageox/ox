@@ -201,21 +201,21 @@ var adapterAliases = map[string]string{
 	"gemini cli":  "gemini",
 
 	// generic adapter fallbacks (remove alias when deep adapter is added)
-	"codex":    "codex",
+	"codex":           "codex",
 	"amp":             "amp",
 	"opencode":        "opencode",
 	"pi":              "pi",
 	"pi-coding-agent": "pi",
-	"cursor":   "generic",
-	"windsurf": "generic",
-	"copilot":  "generic",
-	"aider":    "aider",
-	"cody":     "generic",
-	"continue": "generic",
-	"cline":    "generic",
-	"goose":    "generic",
-	"kiro":     "generic",
-	"droid":    "droid",
+	"cursor":          "generic",
+	"windsurf":        "generic",
+	"copilot":         "generic",
+	"aider":           "aider",
+	"cody":            "generic",
+	"continue":        "generic",
+	"cline":           "generic",
+	"goose":           "generic",
+	"kiro":            "generic",
+	"droid":           "droid",
 }
 
 // GetAdapter returns a specific adapter by name.

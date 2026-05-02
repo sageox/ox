@@ -194,10 +194,10 @@ type DiagnoseIssue struct {
 
 // RawEntry represents a single conversation entry from any agent.
 type RawEntry struct {
-	Timestamp  string `json:"timestamp"`       // RFC3339 UTC
-	Role       string `json:"role"`             // "user" | "assistant" | "system" | "tool"
+	Timestamp  string `json:"timestamp"` // RFC3339 UTC
+	Role       string `json:"role"`      // "user" | "assistant" | "system" | "tool"
 	Content    string `json:"content"`
-	EID        string `json:"eid,omitempty"`    // 5-char alphanumeric entry identifier
+	EID        string `json:"eid,omitempty"` // 5-char alphanumeric entry identifier
 	ToolName   string `json:"tool_name,omitempty"`
 	ToolInput  string `json:"tool_input,omitempty"`
 	ToolOutput string `json:"tool_output,omitempty"`
@@ -433,15 +433,15 @@ type CapturePriorParams struct {
 	SessionID string `json:"session_id,omitempty"` // native session ID (optional; adapter finds most recent if empty)
 	RepoRoot  string `json:"repo_root"`            // project root for session discovery
 	AgentID   string `json:"agent_id"`             // ox agent ID for metadata
-	Title     string `json:"title,omitempty"`       // optional session title
+	Title     string `json:"title,omitempty"`      // optional session title
 }
 
 // CapturePriorResult is the result for capture-prior.
 type CapturePriorResult struct {
-	Entries    []RawEntry       `json:"entries"`
-	Metadata   *SessionMetadata `json:"metadata,omitempty"`
-	AgentType  string           `json:"agent_type"`            // adapter name (e.g., "claude-code")
-	SessionID  string           `json:"session_id,omitempty"`  // resolved native session ID
+	Entries   []RawEntry       `json:"entries"`
+	Metadata  *SessionMetadata `json:"metadata,omitempty"`
+	AgentType string           `json:"agent_type"`           // adapter name (e.g., "claude-code")
+	SessionID string           `json:"session_id,omitempty"` // resolved native session ID
 }
 
 // EndSessionParams are the params for end-session.

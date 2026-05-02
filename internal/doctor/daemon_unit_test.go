@@ -10,9 +10,9 @@ import (
 
 func TestSplitCompositeID(t *testing.T) {
 	tests := []struct {
-		name        string
-		id          string
-		wantRepo    string
+		name          string
+		id            string
+		wantRepo      string
 		wantWorkspace string
 	}{
 		{

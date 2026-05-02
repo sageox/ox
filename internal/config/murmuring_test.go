@@ -199,11 +199,11 @@ func TestMurmurReceiveEnabled(t *testing.T) {
 // with real config files at each level.
 func TestResolveMurmuring_FullResolutionChain(t *testing.T) {
 	tests := []struct {
-		name     string
-		userCfg  string // yaml content for user config ("" = empty file)
-		repoCfg  string // murmuring value in project config ("" = no project config)
-		want     string
-		wantSrc  string // "user", "repo", or "default"
+		name    string
+		userCfg string // yaml content for user config ("" = empty file)
+		repoCfg string // murmuring value in project config ("" = no project config)
+		want    string
+		wantSrc string // "user", "repo", or "default"
 	}{
 		{
 			name:    "user=manual repo=auto → user wins",

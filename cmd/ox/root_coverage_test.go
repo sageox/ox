@@ -208,8 +208,8 @@ func newStringValue(val string) *stringValue {
 	return &stringValue{val: val}
 }
 
-func (s *stringValue) String() string   { return s.val }
+func (s *stringValue) String() string     { return s.val }
 func (s *stringValue) Set(v string) error { s.val = v; return nil }
-func (s *stringValue) Type() string     { return "string" }
+func (s *stringValue) Type() string       { return "string" }
 
 // writeTestFile already declared in helpers_coverage_test.go

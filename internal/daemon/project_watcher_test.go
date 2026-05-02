@@ -794,10 +794,10 @@ func TestProjectWatcher_RemoveUnwatchesChildrenRecursively(t *testing.T) {
 	tracker := &GitTrackedMatcher{
 		projectRoot: dir,
 		trackedDirs: map[string]struct{}{
-			".context":            {},
-			".context/build":      {},
+			".context":             {},
+			".context/build":       {},
 			".context/build/esp32": {},
-			"src":                 {},
+			"src":                  {},
 		},
 		trackedFiles: map[string]struct{}{},
 		logger:       slogDiscard(),

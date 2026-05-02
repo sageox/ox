@@ -114,9 +114,9 @@ const (
 	IssueTypeSyncBackoff        = "sync_backoff"
 	IssueTypeGitHubAuth         = "github_auth"
 	IssueTypeDirtyWorkspace     = "dirty_workspace"
-	IssueTypeCodeDBCacheWiped     = "codedb_cache_wiped"
-	IssueTypeDirtyOverlayFailed   = "dirty_overlay_failed"
-	IssueTypeRebaseStuck          = "rebase_stuck"
+	IssueTypeCodeDBCacheWiped   = "codedb_cache_wiped"
+	IssueTypeDirtyOverlayFailed = "dirty_overlay_failed"
+	IssueTypeRebaseStuck        = "rebase_stuck"
 )
 
 // severityRank returns a numeric rank for sorting (higher = more severe).

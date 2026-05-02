@@ -14,15 +14,15 @@ var langToExt = map[string]string{
 	"go":         "x.go",
 	"python":     "x.py",
 	"javascript": "x.js",
-	"typescript":  "x.ts",
-	"tsx":         "x.tsx",
-	"rust":        "x.rs",
-	"c":           "x.c",
-	"cpp":         "x.cpp",
-	"c++":         "x.cpp",
-	"java":        "x.java",
-	"ruby":        "x.rb",
-	"php":         "x.php",
+	"typescript": "x.ts",
+	"tsx":        "x.tsx",
+	"rust":       "x.rs",
+	"c":          "x.c",
+	"cpp":        "x.cpp",
+	"c++":        "x.cpp",
+	"java":       "x.java",
+	"ruby":       "x.rb",
+	"php":        "x.php",
 }
 
 // supportedLangs is the canonical list returned by SupportedLanguages.
@@ -175,7 +175,7 @@ func assignParents(syms []Symbol) {
 	})
 
 	type stackEntry struct {
-		idx     int    // original index in syms
+		idx     int // original index in syms
 		endByte uint32
 	}
 	var stack []stackEntry

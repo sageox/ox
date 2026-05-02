@@ -23,11 +23,11 @@ const RedactedPlaceholder = "<REDACTED>"
 //   - "--name=value"        -> "--name=<REDACTED>"
 //   - "--name", "value"     -> "--name", "<REDACTED>"
 //   - "--name", "-5"        -> "--name", "<REDACTED>"  (closes the
-//                              "value starts with -" leak)
+//     "value starts with -" leak)
 //   - "-n", "value"         -> "-n", "<REDACTED>"
 //   - "positional"          -> "<REDACTED>"
 //   - "--bool", "--other"   -> "--bool", "--other"     (chained long flags
-//                              are preserved as flag NAMES)
+//     are preserved as flag NAMES)
 //   - "--", "rest..."       -> "--", "<REDACTED>", "<REDACTED>", ...
 //
 // We do NOT have a flag schema here, so we cannot distinguish a boolean

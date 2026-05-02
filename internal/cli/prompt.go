@@ -190,10 +190,10 @@ type MultiSelectOption struct {
 
 // multiSelectModel is the bubbletea model for checkbox-style selection.
 type multiSelectModel struct {
-	title   string
-	items   []MultiSelectOption
-	cursor  int
-	done    bool
+	title    string
+	items    []MultiSelectOption
+	cursor   int
+	done     bool
 	canceled bool
 }
 

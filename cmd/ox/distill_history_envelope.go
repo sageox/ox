@@ -30,13 +30,13 @@ import (
 //   - elapsed_ms is measured at the command layer (wall clock from
 //     RunE entry to envelope flush), not inside the reader.
 type distillHistoryEnvelope struct {
-	Success   bool                `json:"success"`
-	Type      string              `json:"type,omitempty"`
-	Data      *distillHistoryEnvelopeData `json:"data,omitempty"`
+	Success   bool                         `json:"success"`
+	Type      string                       `json:"type,omitempty"`
+	Data      *distillHistoryEnvelopeData  `json:"data,omitempty"`
 	Error     *distillHistoryEnvelopeError `json:"error,omitempty"`
-	Guidance  string              `json:"guidance,omitempty"`
-	AgentHint string              `json:"agent_hint,omitempty"`
-	ElapsedMS int64               `json:"elapsed_ms"`
+	Guidance  string                       `json:"guidance,omitempty"`
+	AgentHint string                       `json:"agent_hint,omitempty"`
+	ElapsedMS int64                        `json:"elapsed_ms"`
 }
 
 // distillHistoryEnvelopeData carries the command-specific payload. Fields are
@@ -59,9 +59,9 @@ type distillHistoryEnvelope struct {
 // set by show.
 type distillHistoryEnvelopeData struct {
 	Entries   []distillHistoryEnvelopeEntry `json:"entries"`
-	Bodies    *[]string              `json:"bodies,omitempty"`
+	Bodies    *[]string                     `json:"bodies,omitempty"`
 	Window    *distillHistoryEnvelopeWindow `json:"window,omitempty"`
-	Truncated bool                   `json:"truncated,omitempty"`
+	Truncated bool                          `json:"truncated,omitempty"`
 }
 
 // distillHistoryEnvelopeEntry mirrors the Entry shape in spec §4.3. Fields are
@@ -73,23 +73,23 @@ type distillHistoryEnvelopeData struct {
 // CitationCount are always populated, so list callers can show counts
 // without materializing bodies.
 type distillHistoryEnvelopeEntry struct {
-	ID            string                `json:"id"`
-	Layer         string                `json:"layer"`
-	Date          string                `json:"date"`
-	Team          string                `json:"team,omitempty"`
-	Path          string                `json:"path"`
-	FactCount     int                   `json:"fact_count"`
-	CitationCount int                   `json:"citation_count"`
-	SourceFiles   []string              `json:"source_files"`
-	CreatedAt     string                `json:"created_at,omitempty"`
-	Citations     []memoryio.Citation   `json:"citations,omitempty"`
-	BodyMD        string                `json:"body_md,omitempty"`
+	ID            string              `json:"id"`
+	Layer         string              `json:"layer"`
+	Date          string              `json:"date"`
+	Team          string              `json:"team,omitempty"`
+	Path          string              `json:"path"`
+	FactCount     int                 `json:"fact_count"`
+	CitationCount int                 `json:"citation_count"`
+	SourceFiles   []string            `json:"source_files"`
+	CreatedAt     string              `json:"created_at,omitempty"`
+	Citations     []memoryio.Citation `json:"citations,omitempty"`
+	BodyMD        string              `json:"body_md,omitempty"`
 	// Status and Error are populated only by `ox distill history show`'s
 	// partial-success envelope. list leaves them empty. When Status
 	// is "not_found" / "ambiguous" / "read_error", Error carries the
 	// per-ID detail and the row's other fields may be partially
 	// unset (only ID is guaranteed).
-	Status string                `json:"status,omitempty"`
+	Status string                       `json:"status,omitempty"`
 	Error  *distillHistoryEnvelopeError `json:"error,omitempty"`
 }
 

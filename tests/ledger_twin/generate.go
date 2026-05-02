@@ -189,16 +189,16 @@ func generateCarts(basePath string, specs []CartSpec) error {
 
 	for _, spec := range specs {
 		data := map[string]any{
-			"id":         spec.ID,
-			"title":      spec.Title,
+			"id":          spec.ID,
+			"title":       spec.Title,
 			"description": spec.Description,
-			"status":     spec.Status,
-			"priority":   spec.Priority,
-			"issue_type": spec.IssueType,
-			"assignee":   spec.Assignee,
-			"creator":    spec.Creator,
-			"source":     "cli",
-			"created_at": spec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
+			"status":      spec.Status,
+			"priority":    spec.Priority,
+			"issue_type":  spec.IssueType,
+			"assignee":    spec.Assignee,
+			"creator":     spec.Creator,
+			"source":      "cli",
+			"created_at":  spec.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 		}
 		if spec.ClosedAt != nil {
 			data["closed_at"] = spec.ClosedAt.UTC().Format("2006-01-02T15:04:05Z")

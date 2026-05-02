@@ -525,10 +525,10 @@ func BuildNav(s *Store) []domain.NavNode {
 				item := items[i]
 				itemCopy := item.target
 				nodes = append(nodes, domain.NavNode{
-					ID:    fmt.Sprintf("feed-%d-%d", i, item.timestamp.Unix()),
-					Kind:  domain.NavNodeTeamFeedSection,
-					Label: item.label,
-					Depth: 1,
+					ID:     fmt.Sprintf("feed-%d-%d", i, item.timestamp.Unix()),
+					Kind:   domain.NavNodeTeamFeedSection,
+					Label:  item.label,
+					Depth:  1,
 					Target: &itemCopy,
 				})
 			}
@@ -759,10 +759,10 @@ func ActivityEntries(s *Store) []domain.TimelineEntry {
 		}
 		wCopy := []domain.WhisperHistoryEntry{w}
 		otherEntries = append(otherEntries, domain.TimelineEntry{
-			ID:      fmt.Sprintf("whisper-%d", i),
-			Kind:    domain.TimelineAgent,
-			Actor:   w.AgentID,
-			Summary: fmt.Sprintf("%s [whisper] %s", icon, truncate(w.Content, 60)),
+			ID:        fmt.Sprintf("whisper-%d", i),
+			Kind:      domain.TimelineAgent,
+			Actor:     w.AgentID,
+			Summary:   fmt.Sprintf("%s [whisper] %s", icon, truncate(w.Content, 60)),
 			Timestamp: w.CreatedAt,
 			Target: &domain.InspectorTarget{
 				Kind:           domain.TargetWhisperHistory,

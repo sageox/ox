@@ -68,10 +68,10 @@ func TestFetchAndCacheURLs_EmptyInputs(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		sageox   string
-		repoID   string
-		want     bool
+		name   string
+		sageox string
+		repoID string
+		want   bool
 	}{
 		{"both empty", "", "", false},
 		{"sageox empty", "", "repo-1", false},

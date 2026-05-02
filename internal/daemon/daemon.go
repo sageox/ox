@@ -25,10 +25,10 @@ import (
 	"github.com/sageox/ox/internal/doctor/autofix"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/flags"
-	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/version"
@@ -1723,4 +1723,3 @@ func (s *daemonServiceImpl) SessionUploaded(name, url, agentID string, dur time.
 		})
 	}
 }
-

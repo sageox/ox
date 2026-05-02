@@ -4,12 +4,12 @@ package app
 type Section int
 
 const (
-	SectionOverview  Section = iota // system health at a glance
-	SectionSync                     // ledger + team context sync
-	SectionCode                     // code indexing status
-	SectionSessions                 // session recordings + AI coworkers
-	SectionFeed                     // murmurs, discussions, whispers
-	sectionCount                    // sentinel
+	SectionOverview Section = iota // system health at a glance
+	SectionSync                    // ledger + team context sync
+	SectionCode                    // code indexing status
+	SectionSessions                // session recordings + AI coworkers
+	SectionFeed                    // murmurs, discussions, whispers
+	sectionCount                   // sentinel
 )
 
 // Label returns the display name for the section tab.

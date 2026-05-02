@@ -61,7 +61,7 @@ func TestIsSessionFile(t *testing.T) {
 		{"test.jsonl", false},
 		{"sessions/test.txt", false},
 		{"sessions/test.go", false},
-		{"sessions/test.json", false},  // .json is not summary.json
+		{"sessions/test.json", false},       // .json is not summary.json
 		{"data/sessions/test.jsonl", false}, // must start with sessions/
 		{"", false},
 	}

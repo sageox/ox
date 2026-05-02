@@ -120,11 +120,11 @@ func capturePriorViaAdapter(inst *agentinstance.Instance, projectRoot string, op
 // and does not run Detect() — the caller has declared intent.
 //
 // When adapterName is empty, selection is deterministic:
-//   1. Ensure external adapters are discovered (one-time registry scan).
-//   2. Filter the registry to adapters that *have* the capture-prior
-//      capability (cheap: uses cached Info response).
-//   3. Run Detect() only on capable adapters, in alphabetical order, and
-//      return the first that detects.
+//  1. Ensure external adapters are discovered (one-time registry scan).
+//  2. Filter the registry to adapters that *have* the capture-prior
+//     capability (cheap: uses cached Info response).
+//  3. Run Detect() only on capable adapters, in alphabetical order, and
+//     return the first that detects.
 //
 // This avoids the previous bug where DetectAdapter() iterated the registry in
 // non-deterministic map order and returned any adapter that detected, even

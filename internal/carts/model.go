@@ -11,17 +11,17 @@ import (
 
 // Issue represents a cart — a trackable work item.
 type Issue struct {
-	ID          string    `json:"id"`
-	Title       string    `json:"title"`
-	Description string    `json:"description,omitempty"`
-	Status      Status    `json:"status"`
-	Priority    int       `json:"priority"`
-	IssueType   IssueType `json:"issue_type"`
-	Assignee    string    `json:"assignee,omitempty"`
-	Creator     string    `json:"creator,omitempty"`
-	Source      string    `json:"source,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID          string     `json:"id"`
+	Title       string     `json:"title"`
+	Description string     `json:"description,omitempty"`
+	Status      Status     `json:"status"`
+	Priority    int        `json:"priority"`
+	IssueType   IssueType  `json:"issue_type"`
+	Assignee    string     `json:"assignee,omitempty"`
+	Creator     string     `json:"creator,omitempty"`
+	Source      string     `json:"source,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 	ClosedAt    *time.Time `json:"closed_at,omitempty"`
 
 	// Populated on Show/Get for display
@@ -109,8 +109,8 @@ type Dependency struct {
 type DependencyType string
 
 const (
-	DepBlocks        DependencyType = "blocks"
-	DepRelated       DependencyType = "related"
+	DepBlocks         DependencyType = "blocks"
+	DepRelated        DependencyType = "related"
 	DepDiscoveredFrom DependencyType = "discovered-from"
 )
 

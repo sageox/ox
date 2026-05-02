@@ -18,8 +18,8 @@ func TestResetGitHubTypeSyncState_RemovesExistingFile(t *testing.T) {
 
 	// write a state file first
 	state := &GitHubTypeSyncState{
-		LastSyncAt:  time.Now(),
-		Count:       5,
+		LastSyncAt: time.Now(),
+		Count:      5,
 		KnownItems: map[int]KnownItem{1: {State: "open"}},
 	}
 	require.NoError(t, WriteGitHubTypeSyncState(tmp, "pr", state))
@@ -52,8 +52,8 @@ func TestResetGitHubTypeSyncState_Issue(t *testing.T) {
 	tmp := t.TempDir()
 
 	state := &GitHubTypeSyncState{
-		LastSyncAt:  time.Now(),
-		Count:       3,
+		LastSyncAt: time.Now(),
+		Count:      3,
 		KnownItems: map[int]KnownItem{10: {State: "closed"}},
 	}
 	require.NoError(t, WriteGitHubTypeSyncState(tmp, "issue", state))
@@ -362,8 +362,8 @@ func TestReadGitHubTypeSyncState_MigratesLegacyKnownStates(t *testing.T) {
 func TestWriteGitHubTypeSyncState_CreatesDir(t *testing.T) {
 	tmp := t.TempDir()
 	state := &GitHubTypeSyncState{
-		LastSyncAt:  time.Now(),
-		Count:       1,
+		LastSyncAt: time.Now(),
+		Count:      1,
 		KnownItems: map[int]KnownItem{1: {State: "open"}},
 	}
 

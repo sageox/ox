@@ -860,9 +860,9 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 
 // murmur whisper budget: keep context lean so murmurs don't crowd out real work.
 const (
-	maxMurmurWhisperTokens   = 1024 // ~4096 bytes — hard cap on total murmur whisper content
-	maxMurmurWhispersPerAgent = 1   // keep only the most recent murmur per authoring agent
-	estimatedBytesPerToken    = 4   // rough byte-to-token ratio for English text
+	maxMurmurWhisperTokens    = 1024 // ~4096 bytes — hard cap on total murmur whisper content
+	maxMurmurWhispersPerAgent = 1    // keep only the most recent murmur per authoring agent
+	estimatedBytesPerToken    = 4    // rough byte-to-token ratio for English text
 )
 
 // runAgentWhisperHistory is a human debugging tool for inspecting what whispers
@@ -949,12 +949,12 @@ func runAgentWhisperHistory(inst *agentinstance.Instance) error {
 	return nil
 }
 
-
 // runAgentWhisper handles `ox agent <id> whisper` — active pull for pending whispers.
 //
 // Whisper delivery uses belt-and-suspenders:
-//   Belt:       UserPromptSubmit hook stdout (passive push, fires before each prompt)
-//   Suspenders: `ox agent <id> whisper` via Bash tool (active pull, agent-initiated)
+//
+//	Belt:       UserPromptSubmit hook stdout (passive push, fires before each prompt)
+//	Suspenders: `ox agent <id> whisper` via Bash tool (active pull, agent-initiated)
 //
 // The active pull exists because hook-based delivery has limitations:
 //   - Hooks only fire at specific lifecycle events, not between prompts
@@ -994,9 +994,9 @@ func runAgentWhisper(inst *agentinstance.Instance) error {
 // Non-blocking: if daemon is unavailable, silently returns.
 //
 // Called from two hook handlers:
-//   1. handlePrompt (UserPromptSubmit) — PRIMARY: stdout reaches Claude's context
-//   2. handleAfterTool (PostToolUse)   — FALLBACK: stdout discarded by Claude Code,
-//      but may work for other agents (Cursor, Windsurf, etc.)
+//  1. handlePrompt (UserPromptSubmit) — PRIMARY: stdout reaches Claude's context
+//  2. handleAfterTool (PostToolUse)   — FALLBACK: stdout discarded by Claude Code,
+//     but may work for other agents (Cursor, Windsurf, etc.)
 //
 // Also called from runWithAgentID (line ~225) on every `ox agent <id> <cmd>`
 // invocation, providing a third delivery path via command output.

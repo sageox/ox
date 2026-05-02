@@ -74,9 +74,9 @@ func CategoryForScore(score float64) ScoreCategory {
 // Stored at ~/.cache/sageox/scores/<agent_id>.json
 type ScoreFile struct {
 	Score     float64       `json:"score"`
-	Category ScoreCategory `json:"category,omitempty"`
-	Reason   string        `json:"reason,omitempty"`
-	UpdatedAt time.Time    `json:"updated_at"`
+	Category  ScoreCategory `json:"category,omitempty"`
+	Reason    string        `json:"reason,omitempty"`
+	UpdatedAt time.Time     `json:"updated_at"`
 }
 
 // scoresDir returns the directory for score files.

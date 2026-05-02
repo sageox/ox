@@ -330,8 +330,8 @@ func TestLikeOrGlobParam(t *testing.T) {
 		pattern string
 		want    string
 	}{
-		{"foo", "%foo%"},       // substring wrapping
-		{"*.go", "*.go"},      // glob passthrough
+		{"foo", "%foo%"},         // substring wrapping
+		{"*.go", "*.go"},         // glob passthrough
 		{"test?.rs", "test?.rs"}, // question-mark glob passthrough
 	}
 	for _, tt := range tests {
@@ -458,10 +458,10 @@ func TestEnrichDirtyHit(t *testing.T) {
 
 func TestAddDiffFilters(t *testing.T) {
 	tests := []struct {
-		name      string
-		filters   Filters
-		wantSQL   []string // substrings expected in appended SQL
-		wantArgs  int      // number of args appended
+		name     string
+		filters  Filters
+		wantSQL  []string // substrings expected in appended SQL
+		wantArgs int      // number of args appended
 	}{
 		{
 			"repo filter",

@@ -561,8 +561,8 @@ func TestFindPointerStubsWithMissingBlobs_SomeMissing(t *testing.T) {
 			if i == 0 {
 				// first object missing
 				resp.Objects = append(resp.Objects, BatchResponseObject{
-					OID:  obj.OID,
-					Size: obj.Size,
+					OID:   obj.OID,
+					Size:  obj.Size,
 					Error: &ObjectError{Code: 404, Message: "Object does not exist"},
 				})
 			} else {

@@ -7,7 +7,8 @@
 // Content block types: text, thinking, tool_use, tool_result, image.
 //
 // Hooks use a structured JSON format in ~/.factory/settings.json:
-//   {"hooks": {"EventName": [{"hooks": [{"type": "command", "command": "..."}]}]}}
+//
+//	{"hooks": {"EventName": [{"hooks": [{"type": "command", "command": "..."}]}]}}
 //
 // Format reference: https://docs.factory.ai
 package main

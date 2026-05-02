@@ -438,4 +438,3 @@ func handleSessionUploaded(s *Server, msg Message, _ net.Conn) HandlerResult {
 	}
 	return HandlerResult{SkipDefault: true}
 }
-

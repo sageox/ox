@@ -106,13 +106,13 @@ func TestRenderSummaryBox(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		pass      int
-		warn      int
-		fail      int
-		skip      int
-		hint      string
-		wantParts []string // substrings expected in output
+		name       string
+		pass       int
+		warn       int
+		fail       int
+		skip       int
+		hint       string
+		wantParts  []string // substrings expected in output
 		wantAbsent []string // substrings that should NOT appear
 	}{
 		{

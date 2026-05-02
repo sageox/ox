@@ -25,7 +25,7 @@ func TestGhostCleanup_SkipsYoungRecordingWithDeadPID(t *testing.T) {
 	state := &RecordingState{
 		AgentID:     "OxYoung",
 		StartedAt:   time.Now().Add(-2 * time.Minute), // 2 min old — within grace period
-		ParentPID:   999999999,                         // dead PID
+		ParentPID:   999999999,                        // dead PID
 		SessionPath: sessionDir,
 	}
 	data := mustMarshal(t, state)
@@ -50,7 +50,7 @@ func TestGhostCleanup_RemovesOldRecordingWithDeadPID(t *testing.T) {
 	state := &RecordingState{
 		AgentID:     "OxOld",
 		StartedAt:   time.Now().Add(-15 * time.Minute), // 15 min old — past grace period
-		ParentPID:   999999999,                          // dead PID
+		ParentPID:   999999999,                         // dead PID
 		SessionPath: sessionDir,
 	}
 	data := mustMarshal(t, state)
@@ -71,7 +71,7 @@ func TestGhostCleanup_SkipsAlivePIDRegardlessOfAge(t *testing.T) {
 	state := &RecordingState{
 		AgentID:     "OxAlive",
 		StartedAt:   time.Now().Add(-2 * time.Hour), // old
-		ParentPID:   os.Getpid(),                     // alive PID
+		ParentPID:   os.Getpid(),                    // alive PID
 		SessionPath: sessionDir,
 	}
 	data := mustMarshal(t, state)

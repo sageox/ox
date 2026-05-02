@@ -465,4 +465,3 @@ func TestProcessResult_UploadOnly_CachePreservedOnPushFail(t *testing.T) {
 		t.Error("DATALOSS: upload-only cache removed after push failure — session content irrecoverable")
 	}
 }
-

@@ -43,10 +43,10 @@ func TestBuildHumanSummary(t *testing.T) {
 		{
 			name: "with session and team context",
 			output: Output{
-				AgentID:   "agent-99",
-				SessionID: "sess-123",
-				AgentType: "claude-code",
-				Status:    "fresh",
+				AgentID:        "agent-99",
+				SessionID:      "sess-123",
+				AgentType:      "claude-code",
+				Status:         "fresh",
 				AgentSupported: true,
 				Session: &SessionStatus{
 					Recording: true,
@@ -76,11 +76,11 @@ func TestBuildHumanSummary(t *testing.T) {
 		{
 			name: "with doctor and hooks",
 			output: Output{
-				AgentID:          "agent-1",
-				Status:           "fresh",
-				NeedsDoctorAgent: true,
-				DoctorHint:       "Run ox agent doctor",
-				HooksInstalled:   true,
+				AgentID:            "agent-1",
+				Status:             "fresh",
+				NeedsDoctorAgent:   true,
+				DoctorHint:         "Run ox agent doctor",
+				HooksInstalled:     true,
 				HooksRestartNotice: "Restart required",
 			},
 			contains: []string{"Doctor Attention Needed", "Hooks Installed"},

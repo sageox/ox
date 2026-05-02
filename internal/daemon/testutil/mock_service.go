@@ -34,27 +34,27 @@ type MockService struct {
 	CodeStatusFunc func() *daemon.CodeDBStats
 
 	// mutation operations
-	StopFunc            func()
-	CheckoutFunc        func(payload daemon.CheckoutPayload, progress *daemon.ProgressWriter) (*daemon.CheckoutResult, error)
-	MarkErrorsFunc      func(ids []string)
-	TriggerGCFunc       func() *daemon.TriggerGCResponse
-	CodeIndexFunc       func(payload daemon.CodeIndexPayload, progress *daemon.ProgressWriter) (*daemon.CodeIndexResult, error)
-	DoctorFunc          func() *daemon.DoctorResponse
-	SessionFinalizeFunc    func(payload daemon.SessionFinalizeIPCPayload)
-	SessionWatchStartFunc  func(payload daemon.SessionWatchStartPayload)
-	SessionWatchStopFunc   func(payload daemon.SessionWatchStopPayload)
+	StopFunc              func()
+	CheckoutFunc          func(payload daemon.CheckoutPayload, progress *daemon.ProgressWriter) (*daemon.CheckoutResult, error)
+	MarkErrorsFunc        func(ids []string)
+	TriggerGCFunc         func() *daemon.TriggerGCResponse
+	CodeIndexFunc         func(payload daemon.CodeIndexPayload, progress *daemon.ProgressWriter) (*daemon.CodeIndexResult, error)
+	DoctorFunc            func() *daemon.DoctorResponse
+	SessionFinalizeFunc   func(payload daemon.SessionFinalizeIPCPayload)
+	SessionWatchStartFunc func(payload daemon.SessionWatchStartPayload)
+	SessionWatchStopFunc  func(payload daemon.SessionWatchStopPayload)
 
 	// settings
 	SettingsGetFunc func() *flags.CLISettingsResponse
 
 	// fire-and-forget operations
-	ActivityFunc  func()
-	HeartbeatFunc func(callerID string, payload json.RawMessage)
-	TelemetryFunc func(payload json.RawMessage)
-	FrictionFunc       func(payload daemon.FrictionPayload)
-	PublishMurmurFunc     func(payload daemon.MurmurPayload)
-	PauseMurmuringFunc    func(agentID string)
-	ResumeMurmuringFunc   func(agentID string)
+	ActivityFunc        func()
+	HeartbeatFunc       func(callerID string, payload json.RawMessage)
+	TelemetryFunc       func(payload json.RawMessage)
+	FrictionFunc        func(payload daemon.FrictionPayload)
+	PublishMurmurFunc   func(payload daemon.MurmurPayload)
+	PauseMurmuringFunc  func(agentID string)
+	ResumeMurmuringFunc func(agentID string)
 }
 
 // NewMockService creates a MockService with sensible defaults: healthy status, no errors,

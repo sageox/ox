@@ -768,11 +768,11 @@ func TestShouldCompact(t *testing.T) {
 		want         bool
 	}{
 		{"no expired", 10, 0, false},
-		{"high expired ratio", 10, 6, true},               // 60% > compactionExpiredRatio (50%)
-		{"entry count exceeds threshold", 501, 1, true},    // > compactionCountThreshold
-		{"low expired ratio, low count", 10, 1, false},     // 10% < pruned ratio threshold
-		{"at pruned ratio boundary", 100, 11, true},        // 11% > compactionPrunedRatio (10%)
-		{"just below pruned ratio", 100, 10, false},        // 10% == threshold, not >
+		{"high expired ratio", 10, 6, true},             // 60% > compactionExpiredRatio (50%)
+		{"entry count exceeds threshold", 501, 1, true}, // > compactionCountThreshold
+		{"low expired ratio, low count", 10, 1, false},  // 10% < pruned ratio threshold
+		{"at pruned ratio boundary", 100, 11, true},     // 11% > compactionPrunedRatio (10%)
+		{"just below pruned ratio", 100, 10, false},     // 10% == threshold, not >
 	}
 
 	for _, tt := range tests {

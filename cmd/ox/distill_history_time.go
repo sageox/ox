@@ -159,4 +159,3 @@ func timestampHasExplicitZone(s string) bool {
 	}
 	return false
 }
-

@@ -240,4 +240,3 @@ func isLFSPointer(path string) bool {
 	n, _ := f.Read(head[:])
 	return strings.HasPrefix(string(head[:n]), "version https://git-lfs.github.com")
 }
-

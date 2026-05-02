@@ -565,7 +565,7 @@ func TestFormatWhispers_MetadataFiles_OtherKeysIgnored(t *testing.T) {
 		{
 			ID: "1", Source: "murmur", Topic: "wip", Content: "working",
 			Importance: whisperstore.ImportanceNormal, AgentID: "OxC",
-			Metadata:   map[string]string{"branch": "ryan/auth", "pr": "287"},
+			Metadata: map[string]string{"branch": "ryan/auth", "pr": "287"},
 		},
 	}
 	var buf bytes.Buffer

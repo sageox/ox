@@ -22,7 +22,7 @@ type Overlay interface {
 type OverlayID int
 
 const (
-	OverlayHelp    OverlayID = iota
+	OverlayHelp OverlayID = iota
 	OverlayConfirm
 	OverlayPalette
 )

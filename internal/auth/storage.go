@@ -18,8 +18,8 @@ type UserInfo struct {
 
 // StoredToken represents the authentication token stored locally
 type StoredToken struct {
-	AccessToken  string    `json:"access_token"`
-	RefreshToken string    `json:"refresh_token"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
 	// SessionToken is a Better Auth compatibility field. Better Auth servers may issue
 	// a single long-lived session token that serves as BOTH the access token AND the
 	// refresh token — i.e. access_token == refresh_token == session_token is a valid

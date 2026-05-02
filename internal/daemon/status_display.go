@@ -45,9 +45,9 @@ type statusSyncJSON struct {
 }
 
 type statusProjectGroupJSON struct {
-	Ledger      *statusWorkspaceJSON  `json:"ledger,omitempty"`
+	Ledger      *statusWorkspaceJSON   `json:"ledger,omitempty"`
 	TeamContext *statusTeamContextJSON `json:"team_context,omitempty"`
-	CodeIndex   *statusCodeIndexJSON  `json:"code_index,omitempty"`
+	CodeIndex   *statusCodeIndexJSON   `json:"code_index,omitempty"`
 }
 
 type statusWorkspaceJSON struct {

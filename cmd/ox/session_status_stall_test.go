@@ -65,8 +65,8 @@ func TestCountRawEntries(t *testing.T) {
 func TestSessionStallStatus(t *testing.T) {
 	now := time.Now().UTC()
 	tests := []struct {
-		name     string
-		state    *session.RecordingState
+		name      string
+		state     *session.RecordingState
 		wantStall bool
 	}{
 		{

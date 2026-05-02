@@ -20,10 +20,10 @@ type SettingsFetcher struct {
 	endpoint     string // normalized project endpoint
 	getAuthToken func() string
 
-	mu       sync.Mutex
-	last     *flags.CLISettingsResponse
+	mu        sync.Mutex
+	last      *flags.CLISettingsResponse
 	lastFetch time.Time
-	lastErr  error
+	lastErr   error
 }
 
 // NewSettingsFetcher creates a fetcher for the given project endpoint.

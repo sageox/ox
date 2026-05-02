@@ -238,7 +238,6 @@ func (h *authFileHandle) readRaw() (*AuthStore, error) {
 	return &store, nil
 }
 
-
 // callerInfo returns the file:line of the caller at the given skip depth.
 func callerInfo(skip int) string {
 	_, file, line, ok := runtime.Caller(skip)

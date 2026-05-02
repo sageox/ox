@@ -13,11 +13,11 @@ func TestAgentLivenessFor_TableDriven(t *testing.T) {
 	falseVal := false
 
 	tests := []struct {
-		name         string
-		livenessMap  map[string]bool
-		agentID      string
-		wantAlive    *bool
-		wantStatus   string
+		name        string
+		livenessMap map[string]bool
+		agentID     string
+		wantAlive   *bool
+		wantStatus  string
 	}{
 		{
 			name:        "nil map returns unknown",

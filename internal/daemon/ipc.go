@@ -30,35 +30,35 @@ const maxConcurrentConnections = 100
 
 // Message types for IPC communication.
 const (
-	MsgTypeStatus          = "status"
-	MsgTypeSync            = "sync"
-	MsgTypeTeamSync        = "team_sync" // on-demand team context sync
-	MsgTypePing            = "ping"
-	MsgTypeStop            = "stop"
-	MsgTypeVersion         = "version"
-	MsgTypeSyncHistory     = "sync_history"
-	MsgTypeHeartbeat       = "heartbeat"        // one-way, no response expected
-	MsgTypeCheckout        = "checkout"         // synchronous git clone operation
-	MsgTypeTelemetry       = "telemetry"        // one-way, no response expected
-	MsgTypeFriction        = "friction"         // one-way, friction event for analytics
-	MsgTypeGetErrors       = "get_errors"       // retrieve unviewed daemon errors
-	MsgTypeMarkErrors      = "mark_errors"      // mark errors as viewed
-	MsgTypeSessions        = "sessions"         // get active agent sessions (deprecated: use instances)
-	MsgTypeInstances       = "instances"        // get active agent instances
-	MsgTypeDoctor          = "doctor"           // trigger daemon health checks (anti-entropy, etc.)
-	MsgTypeTriggerGC       = "trigger_gc"       // force GC reclone for team contexts
-	MsgTypeCodeIndex       = "code_index"       // index local code with progress
-	MsgTypeCodeStatus      = "code_status"      // get code index status/stats
-	MsgTypeWhispers        = "whispers"         // query whisper entries for an agent
-	MsgTypeWhisperHistory  = "whisper_history"  // query all whispers (pending + delivered) without advancing cursor
-	MsgTypeSessionFinalize = "session_finalize" // one-way, trigger async session upload+finalization
-	MsgTypeMurmur          = "murmur"           // one-way, write+commit a murmur file in ledger/team context
-	MsgTypeMurmurPause        = "murmur_pause"         // one-way, pause murmur nudging for an agent
-	MsgTypeMurmurResume       = "murmur_resume"        // one-way, resume murmur nudging for an agent
-	MsgTypeSessionWatchStart  = "session_watch_start"  // one-way, start tailing a hookless agent session
-	MsgTypeSessionWatchStop   = "session_watch_stop"   // one-way, stop tailing a session
-	MsgTypeSettingsGet        = "settings_get"         // get cached CLI feature flag settings
-	MsgTypeSessionUploaded    = "session_uploaded"     // one-way, session pushed to ledger
+	MsgTypeStatus            = "status"
+	MsgTypeSync              = "sync"
+	MsgTypeTeamSync          = "team_sync" // on-demand team context sync
+	MsgTypePing              = "ping"
+	MsgTypeStop              = "stop"
+	MsgTypeVersion           = "version"
+	MsgTypeSyncHistory       = "sync_history"
+	MsgTypeHeartbeat         = "heartbeat"           // one-way, no response expected
+	MsgTypeCheckout          = "checkout"            // synchronous git clone operation
+	MsgTypeTelemetry         = "telemetry"           // one-way, no response expected
+	MsgTypeFriction          = "friction"            // one-way, friction event for analytics
+	MsgTypeGetErrors         = "get_errors"          // retrieve unviewed daemon errors
+	MsgTypeMarkErrors        = "mark_errors"         // mark errors as viewed
+	MsgTypeSessions          = "sessions"            // get active agent sessions (deprecated: use instances)
+	MsgTypeInstances         = "instances"           // get active agent instances
+	MsgTypeDoctor            = "doctor"              // trigger daemon health checks (anti-entropy, etc.)
+	MsgTypeTriggerGC         = "trigger_gc"          // force GC reclone for team contexts
+	MsgTypeCodeIndex         = "code_index"          // index local code with progress
+	MsgTypeCodeStatus        = "code_status"         // get code index status/stats
+	MsgTypeWhispers          = "whispers"            // query whisper entries for an agent
+	MsgTypeWhisperHistory    = "whisper_history"     // query all whispers (pending + delivered) without advancing cursor
+	MsgTypeSessionFinalize   = "session_finalize"    // one-way, trigger async session upload+finalization
+	MsgTypeMurmur            = "murmur"              // one-way, write+commit a murmur file in ledger/team context
+	MsgTypeMurmurPause       = "murmur_pause"        // one-way, pause murmur nudging for an agent
+	MsgTypeMurmurResume      = "murmur_resume"       // one-way, resume murmur nudging for an agent
+	MsgTypeSessionWatchStart = "session_watch_start" // one-way, start tailing a hookless agent session
+	MsgTypeSessionWatchStop  = "session_watch_stop"  // one-way, stop tailing a session
+	MsgTypeSettingsGet       = "settings_get"        // get cached CLI feature flag settings
+	MsgTypeSessionUploaded   = "session_uploaded"    // one-way, session pushed to ledger
 )
 
 // Protocol Design Decision: NDJSON (Newline-Delimited JSON)
@@ -77,9 +77,9 @@ const (
 
 // Message represents an IPC message.
 type Message struct {
-	Type        string          `json:"type"`
-	WorkspaceID string          `json:"workspace_id,omitempty"` // repo-scoped daemon identity
-	CallerID    string          `json:"caller_id,omitempty"`    // identifies calling clone/worktree (path-based hash)
+	Type        string `json:"type"`
+	WorkspaceID string `json:"workspace_id,omitempty"` // repo-scoped daemon identity
+	CallerID    string `json:"caller_id,omitempty"`    // identifies calling clone/worktree (path-based hash)
 	// CallerVersion is the ox CLI version of the process making this IPC
 	// call. Used by the daemon to detect skew between a long-running
 	// daemon and a CLI that's many releases behind (ox-mt3k). Empty
@@ -263,7 +263,6 @@ type CheckoutResult struct {
 	AlreadyExists bool   `json:"already_exists"` // true if repo already existed
 	Cloned        bool   `json:"cloned"`         // true if we performed a clone
 }
-
 
 // CheckoutProgress is sent during long-running checkout operations.
 type CheckoutProgress struct {
@@ -450,7 +449,7 @@ type WhispersResponse struct {
 
 // WhisperHistoryPayload is the payload for whisper history queries.
 type WhisperHistoryPayload struct {
-	AgentID string    `json:"agent_id"`        // empty = all agents
+	AgentID string    `json:"agent_id"`         // empty = all agents
 	Before  time.Time `json:"before,omitempty"` // cursor: only return entries older than this
 	Limit   int       `json:"limit,omitempty"`  // max entries per page; 0 = default (50), max 200
 }
@@ -458,9 +457,9 @@ type WhisperHistoryPayload struct {
 // WhisperHistoryResponse returns a page of whispers with delivery status.
 type WhisperHistoryResponse struct {
 	Entries    []whisperstore.WhisperEntry `json:"entries"`
-	Cursor     time.Time                   `json:"cursor"`              // agent's delivery cursor (entries at/before this are "delivered")
-	HasCursor  bool                        `json:"has_cursor"`           // false if agent has never received whispers
-	HasMore    bool                        `json:"has_more,omitempty"`   // true if more entries exist beyond this page
+	Cursor     time.Time                   `json:"cursor"`                // agent's delivery cursor (entries at/before this are "delivered")
+	HasCursor  bool                        `json:"has_cursor"`            // false if agent has never received whispers
+	HasMore    bool                        `json:"has_more,omitempty"`    // true if more entries exist beyond this page
 	NextCursor time.Time                   `json:"next_cursor,omitempty"` // pass as Before in next request to get the next page
 }
 
@@ -625,34 +624,34 @@ type DaemonService interface {
 type CallbackService struct {
 	mu sync.Mutex
 
-	onSync             func() error
-	onSyncWithProgress func(progress *ProgressWriter) error
-	onTeamSync         func(progress *ProgressWriter) error
-	onStop             func()
-	onStatus           func() *StatusData
-	onActivity         func()
-	onHeartbeat        func(callerID string, payload json.RawMessage)
-	onCheckout         func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error)
-	onTelemetry        func(payload json.RawMessage)
-	onFriction         func(payload FrictionPayload)
-	onSessionFinalize    func(payload SessionFinalizeIPCPayload)
-	onSessionWatchStart  func(payload SessionWatchStartPayload)
-	onSessionWatchStop   func(payload SessionWatchStopPayload)
-	onPublishMurmur      func(payload MurmurPayload)
-	onPauseMurmuring   func(agentID string)
-	onResumeMurmuring  func(agentID string)
-	onGetErrors        func() []StoredError
-	onMarkErrors       func(ids []string)
-	onSessions         func() []AgentSession
-	onInstances        func() []InstanceInfo
-	onSyncHistory      func() []SyncEvent
-	onDoctor           func() *DoctorResponse
-	onTriggerGC        func() *TriggerGCResponse
-	onCodeIndex        func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)
-	onCodeStatus       func() *CodeDBStats
-	onWhispers         func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
-	onWhisperHistory   func(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error)
-	onSettingsGet      func() *flags.CLISettingsResponse
+	onSync              func() error
+	onSyncWithProgress  func(progress *ProgressWriter) error
+	onTeamSync          func(progress *ProgressWriter) error
+	onStop              func()
+	onStatus            func() *StatusData
+	onActivity          func()
+	onHeartbeat         func(callerID string, payload json.RawMessage)
+	onCheckout          func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error)
+	onTelemetry         func(payload json.RawMessage)
+	onFriction          func(payload FrictionPayload)
+	onSessionFinalize   func(payload SessionFinalizeIPCPayload)
+	onSessionWatchStart func(payload SessionWatchStartPayload)
+	onSessionWatchStop  func(payload SessionWatchStopPayload)
+	onPublishMurmur     func(payload MurmurPayload)
+	onPauseMurmuring    func(agentID string)
+	onResumeMurmuring   func(agentID string)
+	onGetErrors         func() []StoredError
+	onMarkErrors        func(ids []string)
+	onSessions          func() []AgentSession
+	onInstances         func() []InstanceInfo
+	onSyncHistory       func() []SyncEvent
+	onDoctor            func() *DoctorResponse
+	onTriggerGC         func() *TriggerGCResponse
+	onCodeIndex         func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)
+	onCodeStatus        func() *CodeDBStats
+	onWhispers          func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
+	onWhisperHistory    func(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error)
+	onSettingsGet       func() *flags.CLISettingsResponse
 }
 
 func (c *CallbackService) Sync() error {
@@ -926,7 +925,6 @@ func (c *CallbackService) ResumeMurmuring(agentID string) {
 func (c *CallbackService) SessionUploaded(_, _, _ string, _ time.Duration) {
 	// no-op for callback service; daemon wires via daemonServiceImpl
 }
-
 
 // Server handles IPC requests from clients.
 type Server struct {

@@ -31,7 +31,7 @@ const (
 	oxPrimeCommandIdempotent = constants.OxPrimeCommandClaudeCodeIdempotent // Claude Code hooks (idempotent mode)
 	oxPrimeCommandGemini     = constants.OxPrimeCommandGemini               // Gemini CLI hooks
 	oxPrimeLegacy            = constants.OxPrimeCommand                     // legacy command without AGENT_ENV (for detection)
-	hookType = "command"
+	hookType                 = "command"
 
 	// claude code hook events
 	claudeSessionStart = "SessionStart"
@@ -58,14 +58,14 @@ const (
 )
 
 var (
-	integrateUserFlag      bool
-	integrateOpenCodeFlag  bool
-	integrateGeminiFlag    bool
-	integrateCodexFlag     bool
-	integrateAmpFlag       bool
-	integratePiFlag        bool
-	integrateAllFlag       bool
-	integrateForceFlag     bool
+	integrateUserFlag     bool
+	integrateOpenCodeFlag bool
+	integrateGeminiFlag   bool
+	integrateCodexFlag    bool
+	integrateAmpFlag      bool
+	integratePiFlag       bool
+	integrateAllFlag      bool
+	integrateForceFlag    bool
 )
 
 var integrateCmd = &cobra.Command{

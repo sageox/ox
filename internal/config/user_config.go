@@ -325,10 +325,10 @@ type UserConfig struct {
 	ContextGit        *ContextGitConfig  `yaml:"context_git,omitempty"`
 	Sessions          *SessionsConfig    `yaml:"sessions,omitempty"`
 	AgentWorker       *AgentWorkerConfig `yaml:"agent_worker,omitempty"`
-	ViewFormat        string             `yaml:"view_format,omitempty"`     // "web", "text", "json" (default: "web")
-	Murmuring         string             `yaml:"murmur_send,omitempty"`     // "auto", "manual"
-	LegacyMurmuring   string             `yaml:"murmuring,omitempty"`       // deprecated: read old key on upgrade
-	MurmurReceive     string             `yaml:"murmur_receive,omitempty"`  // "on", "off"
+	ViewFormat        string             `yaml:"view_format,omitempty"`        // "web", "text", "json" (default: "web")
+	Murmuring         string             `yaml:"murmur_send,omitempty"`        // "auto", "manual"
+	LegacyMurmuring   string             `yaml:"murmuring,omitempty"`          // deprecated: read old key on upgrade
+	MurmurReceive     string             `yaml:"murmur_receive,omitempty"`     // "on", "off"
 	RecordingReminder string             `yaml:"recording_reminder,omitempty"` // "on", "off"
 
 }

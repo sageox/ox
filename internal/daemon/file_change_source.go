@@ -38,7 +38,6 @@ const (
 
 	// startupMaxAge caps how far back we report on first murmur after startup.
 	startupMaxAge = 30 * time.Minute
-
 )
 
 // FileChangeMurmurPublisher drains the ChangeAccumulator frequently and

@@ -149,7 +149,7 @@ func TestDeriveSlug(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
+		name  string
 		input string
 		want  string
 	}{
@@ -247,10 +247,10 @@ func TestReadFirstRepoMarker(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		files    map[string]any // filename -> content (will be JSON marshaled)
-		wantNil  bool
-		wantID   string
+		name    string
+		files   map[string]any // filename -> content (will be JSON marshaled)
+		wantNil bool
+		wantID  string
 	}{
 		{
 			name:    "no marker files",
@@ -287,7 +287,7 @@ func TestReadFirstRepoMarker(t *testing.T) {
 			wantNil: true,
 		},
 		{
-			name: "skips directories with repo prefix",
+			name:  "skips directories with repo prefix",
 			files: map[string]any{
 				// directory will be created separately
 			},

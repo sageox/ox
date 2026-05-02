@@ -691,10 +691,10 @@ func TestMergeCitations_DedupesAcrossLayers(t *testing.T) {
 // upgrade where day1 was distilled BEFORE #476 added source URLs (citation
 // stored as label-only) and day2 was distilled AFTER (same source now has a
 // URL). The merged weekly should:
-//   1. Dedupe to ONE entry, not two
-//   2. Use the URL so the merged Sources section is clickable
-//   3. Renumber day1's bare marker to the unified global number, not leave
-//      it pointing at a stale slot
+//  1. Dedupe to ONE entry, not two
+//  2. Use the URL so the merged Sources section is clickable
+//  3. Renumber day1's bare marker to the unified global number, not leave
+//     it pointing at a stale slot
 //
 // Failure prevented: weekly Sources sections produced during a release
 // upgrade have duplicate Foo entries, OR earlier daily prose markers point

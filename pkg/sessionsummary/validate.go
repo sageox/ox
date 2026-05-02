@@ -15,10 +15,10 @@ import (
 // richness is optional because there genuinely may not be aha_moments
 // or multiple key_actions to capture.
 const (
-	RichnessMinEntries       = 20 // sessions below this are "trivial" — only structural checks apply
-	RichnessMinKeyActions    = 3  // minimum key_actions bullets on a non-trivial session
-	RichnessAhaMinEntries    = 50 // sessions above this must have aha_moments (long-enough for pivotal turns)
-	RichnessMinSummaryChars  = 80 // one paragraph ~= 80+ chars of actual content, catches "Session ended." stubs
+	RichnessMinEntries      = 20 // sessions below this are "trivial" — only structural checks apply
+	RichnessMinKeyActions   = 3  // minimum key_actions bullets on a non-trivial session
+	RichnessAhaMinEntries   = 50 // sessions above this must have aha_moments (long-enough for pivotal turns)
+	RichnessMinSummaryChars = 80 // one paragraph ~= 80+ chars of actual content, catches "Session ended." stubs
 )
 
 // summaryRedFlags are substrings that indicate agent meta-output contamination

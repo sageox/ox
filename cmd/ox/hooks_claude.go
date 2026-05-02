@@ -139,13 +139,13 @@ func writeClaudeSettings(settings *ClaudeSettings) error {
 }
 
 // delegates to extracted pure functions
-func hasOxPrimeHook(entry ClaudeHookEntry) bool    { return claude.HasOxPrimeHook(entry) }
-func hasAnyOxHook(entry ClaudeHookEntry) bool       { return claude.HasAnyOxHook(entry) }
-func isOxPrimeCommand(cmd string) bool              { return claude.IsOxPrimeCommand(cmd) }
-func isOxHookCommand(cmd string) bool               { return claude.IsOxHookCommand(cmd) }
-func isAnyOxCommand(cmd string) bool                { return claude.IsAnyOxCommand(cmd) }
-func removeOxPrimeHook(entry *ClaudeHookEntry)      { claude.RemoveOxPrimeHook(entry) }
-func removeAnyOxHook(entry *ClaudeHookEntry)        { claude.RemoveAnyOxHook(entry) }
+func hasOxPrimeHook(entry ClaudeHookEntry) bool { return claude.HasOxPrimeHook(entry) }
+func hasAnyOxHook(entry ClaudeHookEntry) bool   { return claude.HasAnyOxHook(entry) }
+func isOxPrimeCommand(cmd string) bool          { return claude.IsOxPrimeCommand(cmd) }
+func isOxHookCommand(cmd string) bool           { return claude.IsOxHookCommand(cmd) }
+func isAnyOxCommand(cmd string) bool            { return claude.IsAnyOxCommand(cmd) }
+func removeOxPrimeHook(entry *ClaudeHookEntry)  { claude.RemoveOxPrimeHook(entry) }
+func removeAnyOxHook(entry *ClaudeHookEntry)    { claude.RemoveAnyOxHook(entry) }
 
 func mergeHookEntries(existing, new []ClaudeHookEntry) []ClaudeHookEntry {
 	return claude.MergeHookEntries(existing, new)

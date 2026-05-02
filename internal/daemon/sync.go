@@ -1158,7 +1158,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 			SyncInterval:       s.config.SyncIntervalRead,
 			DetectDivergence:   true,
 			ResolveRules:       ledger.DefaultResolveRules,
-			EnsureKBMergeAttrs: true, // shared kb resilience for both ledger + team-context
+			EnsureKBMergeAttrs: true,          // shared kb resilience for both ledger + team-context
 			LLMResolver:        s.llmResolver, // ox-21cb: tier 3 escalation when configured
 			Logger:             s.logger,
 		})

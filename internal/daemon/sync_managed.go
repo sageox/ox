@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/manifest"

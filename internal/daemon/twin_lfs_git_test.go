@@ -201,4 +201,3 @@ func TestLFS_BadCredentials_ReturnsError(t *testing.T) {
 	_, err := badClient.BatchUpload([]lfs.BatchObject{{OID: oid, Size: size}})
 	require.Error(t, err, "LFS batch with bad credentials should fail")
 }
-

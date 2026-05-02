@@ -154,11 +154,11 @@ func TestMockRepoService_MergeWorkflow(t *testing.T) {
 		EndpointFunc: func() string { return "https://test.sageox.ai" },
 		MergeRepoFunc: func(repoID string, markers map[string]json.RawMessage) (*MergeRepoResponse, *RedirectInfo, error) {
 			return &MergeRepoResponse{
-				Canonical: "repo-winner",
-				Merged:    []string{repoID},
-			}, &RedirectInfo{
-				Repo: &RedirectMapping{From: repoID, To: "repo-winner"},
-			}, nil
+					Canonical: "repo-winner",
+					Merged:    []string{repoID},
+				}, &RedirectInfo{
+					Repo: &RedirectMapping{From: repoID, To: "repo-winner"},
+				}, nil
 		},
 		NotifyImportFunc: func(teamID string, metadata any) error {
 			require.Equal(t, "team-1", teamID)

@@ -171,7 +171,7 @@ func TestIsLeakySummaryString_MatchesOnlyKnownShapes(t *testing.T) {
 // trim-then-match invariant via leakySummaryReason.
 func TestValidateUserVisible_RejectsPaddedSentinels(t *testing.T) {
 	padded := []string{
-		"  Summary failed content validation: title too short",  // leading spaces
+		"  Summary failed content validation: title too short",   // leading spaces
 		"\tSummary generation failed: bad json",                  // leading tab
 		"Summary failed richness validation: missing actions  ",  // trailing spaces
 		" \n Summary failed content validation: leading newline", // mixed whitespace

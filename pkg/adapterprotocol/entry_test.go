@@ -91,8 +91,8 @@ func TestValidateEntries(t *testing.T) {
 	entries := []RawEntry{
 		{Role: RoleUser, Content: "hello"},
 		{Role: "invalid", Content: "bad"},
-		{Role: RoleAssistant, Content: ""},     // warning
-		{Role: RoleTool},                       // warning
+		{Role: RoleAssistant, Content: ""},                             // warning
+		{Role: RoleTool},                                               // warning
 		{Role: RoleUser, Content: "has content", Timestamp: "garbage"}, // error
 	}
 

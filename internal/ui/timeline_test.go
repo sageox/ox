@@ -172,9 +172,9 @@ func TestRenderTimeline(t *testing.T) {
 	testStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
 
 	tests := []struct {
-		name     string
-		nodes    []TimelineNode
-		endLabel string
+		name      string
+		nodes     []TimelineNode
+		endLabel  string
 		wantParts []string
 	}{
 		{

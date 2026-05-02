@@ -5,9 +5,9 @@ import (
 	"os"
 	"sync"
 
-	lipgloss "charm.land/lipgloss/v2"
 	"charm.land/glamour/v2"
 	"charm.land/glamour/v2/ansi"
+	lipgloss "charm.land/lipgloss/v2"
 
 	"github.com/sageox/ox/internal/theme"
 )

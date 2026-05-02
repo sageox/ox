@@ -36,9 +36,9 @@ func TestIsNetworkError_WrappedNetError(t *testing.T) {
 
 func TestIsNetworkError_MessagePatterns(t *testing.T) {
 	tests := []struct {
-		name    string
-		errMsg  string
-		isNet   bool
+		name   string
+		errMsg string
+		isNet  bool
 	}{
 		{"no such host", "dial tcp: lookup bogus.invalid: no such host", true},
 		{"connection refused", "dial tcp 127.0.0.1:9999: connection refused", true},

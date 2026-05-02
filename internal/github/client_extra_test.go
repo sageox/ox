@@ -165,11 +165,11 @@ func TestDoRequestRateLimitReturnedOnError(t *testing.T) {
 
 func TestParseRateLimitPartialHeaders(t *testing.T) {
 	tests := []struct {
-		name            string
-		headers         map[string]string
-		wantNil         bool
-		wantRemaining   int
-		wantLimit       int
+		name          string
+		headers       map[string]string
+		wantNil       bool
+		wantRemaining int
+		wantLimit     int
 	}{
 		{
 			name:    "no headers at all",

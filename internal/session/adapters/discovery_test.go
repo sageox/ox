@@ -265,9 +265,11 @@ type discoveryMockAdapter struct {
 	name string
 }
 
-func (m *discoveryMockAdapter) Name() string                                              { return m.name }
-func (m *discoveryMockAdapter) Detect() bool                                              { return false }
-func (m *discoveryMockAdapter) FindSessionFile(_ SessionLookup) (string, error)            { return "", nil }
-func (m *discoveryMockAdapter) Read(_ string) ([]RawEntry, error)                         { return nil, nil }
-func (m *discoveryMockAdapter) ReadMetadata(_ string) (*SessionMetadata, error)            { return nil, nil }
-func (m *discoveryMockAdapter) Watch(_ context.Context, _ string) (<-chan RawEntry, error) { return nil, nil }
+func (m *discoveryMockAdapter) Name() string                                    { return m.name }
+func (m *discoveryMockAdapter) Detect() bool                                    { return false }
+func (m *discoveryMockAdapter) FindSessionFile(_ SessionLookup) (string, error) { return "", nil }
+func (m *discoveryMockAdapter) Read(_ string) ([]RawEntry, error)               { return nil, nil }
+func (m *discoveryMockAdapter) ReadMetadata(_ string) (*SessionMetadata, error) { return nil, nil }
+func (m *discoveryMockAdapter) Watch(_ context.Context, _ string) (<-chan RawEntry, error) {
+	return nil, nil
+}

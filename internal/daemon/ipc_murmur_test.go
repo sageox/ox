@@ -121,9 +121,10 @@ func TestSetMurmurHandler_PanicsOnServiceServer(t *testing.T) {
 
 // TestServerClient_Murmur_Integration is a full round-trip test over a real
 // Unix socket. It verifies:
-//  (a) the PublishMurmur callback fires with the correct payload
-//  (b) Client.Murmur returns without error (fire-and-forget, no response needed)
-//  (c) the connection closes cleanly — no goroutine leak or hang
+//
+//	(a) the PublishMurmur callback fires with the correct payload
+//	(b) Client.Murmur returns without error (fire-and-forget, no response needed)
+//	(c) the connection closes cleanly — no goroutine leak or hang
 func TestServerClient_Murmur_Integration(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("/tmp", "ox-ipc-murmur-")
 	require.NoError(t, err)

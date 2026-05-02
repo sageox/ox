@@ -41,7 +41,7 @@ var (
 type userContentClass int
 
 const (
-	userContentUser   userContentClass = iota
+	userContentUser userContentClass = iota
 	userContentSystem
 	userContentSkip
 )

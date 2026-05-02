@@ -56,7 +56,7 @@ func ConflictVelocity(sessions []MurmurRecord, since, until time.Time, sliceWidt
 		points = append(points, VelocityPoint{
 			Window:    windowStart,
 			Conflicts: conflictCount,
-			Murmurs:  murmurCount,
+			Murmurs:   murmurCount,
 			Density:   density,
 		})
 	}

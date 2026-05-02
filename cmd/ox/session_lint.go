@@ -186,11 +186,11 @@ func lintRawJSONLFile(path, name string, opts ...lintOptions) lintResult {
 			timestamp, _ = entry["ts"].(string)
 		}
 		re := adapterprotocol.RawEntry{
-			Role:      entryType, // on-disk "type" maps to protocol "role"
-			Timestamp: timestamp,
-			Content:   strField(entry, "content"),
-			ToolName:  strField(entry, "tool_name"),
-			ToolInput: strField(entry, "tool_input"),
+			Role:       entryType, // on-disk "type" maps to protocol "role"
+			Timestamp:  timestamp,
+			Content:    strField(entry, "content"),
+			ToolName:   strField(entry, "tool_name"),
+			ToolInput:  strField(entry, "tool_input"),
 			ToolOutput: strField(entry, "tool_output"),
 		}
 		for _, issue := range re.Check(lineNum) {

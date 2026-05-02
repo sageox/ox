@@ -152,14 +152,14 @@ type HeartbeatHandler struct {
 	agentCommandCount  map[string]int   // agent_id → command count
 
 	// per-agent metadata (parent/type) from heartbeats — enables cross-worktree visibility
-	metaMu        sync.RWMutex
-	agentParentID   map[string]string // agent_id → parent agent ID
-	agentType       map[string]string // agent_id → agent type
-	agentPID        map[string]int    // agent_id → parent process ID
-	agentPrincipal  map[string]string // agent_id → human principal ID
+	metaMu         sync.RWMutex
+	agentParentID  map[string]string // agent_id → parent agent ID
+	agentType      map[string]string // agent_id → agent type
+	agentPID       map[string]int    // agent_id → parent process ID
+	agentPrincipal map[string]string // agent_id → human principal ID
 
 	// per-agent whisper delivery tracking
-	whisperMu       sync.RWMutex
+	whisperMu        sync.RWMutex
 	agentLastWhisper map[string]time.Time // agent_id → last whisper delivery time
 
 	// credentials (updated from heartbeats) - protected by credMu

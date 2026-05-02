@@ -186,7 +186,6 @@ func resolveUserMurmuring(fallback string) string {
 	return fallback
 }
 
-
 // MurmuringEnabled returns true if auto-murmuring is active for the project.
 func MurmuringEnabled(projectRoot string) bool {
 	return ResolveMurmuring(projectRoot) == MurmuringAuto

@@ -72,8 +72,8 @@ func TestFormatCredentialExpiry_ReturnFormat(t *testing.T) {
 
 	// verify the format is always a suffix of d/h/m or the word "expired"
 	tests := []struct {
-		name      string
-		expiresAt time.Time
+		name       string
+		expiresAt  time.Time
 		wantSuffix string
 	}{
 		{name: "expired has no suffix", expiresAt: time.Now().Add(-1 * time.Hour), wantSuffix: ""},

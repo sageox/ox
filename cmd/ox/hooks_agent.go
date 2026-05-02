@@ -260,6 +260,7 @@ func (c *CodexAgent) DetectCLI() bool {
 func (c *CodexAgent) SupportsHooks() bool {
 	return true
 }
+
 // AmpAgent implements Agent interface for Amp CLI (Sourcegraph)
 type AmpAgent struct{}
 

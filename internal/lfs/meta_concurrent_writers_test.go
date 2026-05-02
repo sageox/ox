@@ -10,7 +10,6 @@ import (
 	"time"
 )
 
-
 // TestSessionMeta_ConcurrentReadModifyWrite_DoesNotLoseFields is the
 // regression test for ox-e1ot.
 //
@@ -20,14 +19,14 @@ import (
 // Today the byte-level write is atomic (temp + rename), but the
 // read-modify-write window is unprotected:
 //
-//	   daemon                        CLI
-//	   ----------------------       ----------------------
-//	   meta := Read(metaPath)
-//	                                 meta := Read(metaPath)
-//	   meta.Summary = "..."
-//	                                 meta.Files["x.json"] = ...
-//	   Write(meta)
-//	                                 Write(meta)   ← clobbers Summary
+//	daemon                        CLI
+//	----------------------       ----------------------
+//	meta := Read(metaPath)
+//	                              meta := Read(metaPath)
+//	meta.Summary = "..."
+//	                              meta.Files["x.json"] = ...
+//	Write(meta)
+//	                              Write(meta)   ← clobbers Summary
 //
 // Whichever writer commits second silently overwrites the other's
 // in-memory copy of the file. Both writers carry the value they care
@@ -226,7 +225,7 @@ func TestSessionMeta_RepeatedConcurrentWrites_ConvergesWithoutLoss(t *testing.T)
 
 // fileKey/summaryFor: small helpers that keep the test bodies above terse
 // and make the per-round payloads inspectable in failures.
-func fileKey(i int) string  { return "f-" + itoa(i) + ".json" }
+func fileKey(i int) string    { return "f-" + itoa(i) + ".json" }
 func summaryFor(i int) string { return "summary-" + itoa(i) }
 func itoa(i int) string {
 	if i == 0 {

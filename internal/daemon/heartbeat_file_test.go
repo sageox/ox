@@ -188,4 +188,3 @@ func TestUserTeamHeartbeatPath(t *testing.T) {
 	assert.Contains(t, path, "team_xyz.jsonl")
 	assert.True(t, filepath.IsAbs(path))
 }
-

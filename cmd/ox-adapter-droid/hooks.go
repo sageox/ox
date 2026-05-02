@@ -38,8 +38,8 @@ const oxHookMarker = "ox agent hook"
 
 // hookRuleEntry is one rule in the event's array.
 type hookRuleEntry struct {
-	Matcher string          `json:"matcher,omitempty"`
-	Hooks   []hookCmdEntry  `json:"hooks"`
+	Matcher string         `json:"matcher,omitempty"`
+	Hooks   []hookCmdEntry `json:"hooks"`
 }
 
 // hookCmdEntry is a single command within a rule.

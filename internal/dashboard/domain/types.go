@@ -36,12 +36,12 @@ const (
 // InspectorTarget is a tagged union of the entities the inspector pane can display.
 // Only the field matching Kind is non-nil.
 type InspectorTarget struct {
-	Kind       InspectorTargetKind
-	Session    *session.SessionInfo
-	Workspace  *daemon.WorkspaceSyncStatus
-	Issue      *daemon.DaemonIssue
-	Murmur     *MurmurEntry
-	Discussion *TeamDiscussion
+	Kind           InspectorTargetKind
+	Session        *session.SessionInfo
+	Workspace      *daemon.WorkspaceSyncStatus
+	Issue          *daemon.DaemonIssue
+	Murmur         *MurmurEntry
+	Discussion     *TeamDiscussion
 	Auth           *daemon.StatusData         // full status, auth fields used by renderer
 	CodeDB         *daemon.CodeDBStats        // code index statistics
 	SyncHealth     *daemon.StatusData         // full status, workspaces used by renderer
@@ -60,7 +60,7 @@ type WhisperHistoryEntry struct {
 	AgentID   string
 	Topic     string
 	Content   string
-	Source    string    // source of the whisper (e.g. "murmur-nudge", "activity-summary")
+	Source    string // source of the whisper (e.g. "murmur-nudge", "activity-summary")
 	CreatedAt time.Time
 	Delivered bool // true when the agent has read past this entry's cursor
 }
@@ -105,26 +105,26 @@ type TeamDiscussion struct {
 type NavNodeKind int
 
 const (
-	NavNodeSection    NavNodeKind = iota // collapsible heading row
-	NavNodeLedger                        // the project ledger workspace
-	NavNodeSession                       // a single recorded session
-	NavNodeWorkspace                     // a synced workspace (team context, etc.)
-	NavNodeIssue                         // a daemon-flagged issue
-	NavNodeCodeIndex                     // codedb index status
-	NavNodeMurmur                        // a murmur broadcast
-	NavNodeDiscussion                    // a team discussion document
-	NavNodeHint                          // non-interactive hint shown when a section is empty
-	NavNodeAuth                          // authentication status node
-	NavNodeSyncHealth                    // sync health summary node
-	NavNodeSOUL                          // SOUL.md team identity node
-	NavNodeAICoworker                    // active AI coworker instance node
-	NavNodeDaemon                        // daemon health section header
-	NavNodeDaemonErrors                  // stored errors sub-node
-	NavNodeAgentWork                     // agent work queue sub-node
-	NavNodeCallers                       // connected callers sub-node
-	NavNodeTeamContext                   // team context entry node
-	NavNodeWhisper                       // a whisper history node
-	NavNodeTeamFeedSection               // combined murmurs + discussions feed section
+	NavNodeSection         NavNodeKind = iota // collapsible heading row
+	NavNodeLedger                             // the project ledger workspace
+	NavNodeSession                            // a single recorded session
+	NavNodeWorkspace                          // a synced workspace (team context, etc.)
+	NavNodeIssue                              // a daemon-flagged issue
+	NavNodeCodeIndex                          // codedb index status
+	NavNodeMurmur                             // a murmur broadcast
+	NavNodeDiscussion                         // a team discussion document
+	NavNodeHint                               // non-interactive hint shown when a section is empty
+	NavNodeAuth                               // authentication status node
+	NavNodeSyncHealth                         // sync health summary node
+	NavNodeSOUL                               // SOUL.md team identity node
+	NavNodeAICoworker                         // active AI coworker instance node
+	NavNodeDaemon                             // daemon health section header
+	NavNodeDaemonErrors                       // stored errors sub-node
+	NavNodeAgentWork                          // agent work queue sub-node
+	NavNodeCallers                            // connected callers sub-node
+	NavNodeTeamContext                        // team context entry node
+	NavNodeWhisper                            // a whisper history node
+	NavNodeTeamFeedSection                    // combined murmurs + discussions feed section
 )
 
 // NavNode represents a single row in the left-hand navigation tree pane.

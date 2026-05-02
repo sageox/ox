@@ -6,7 +6,7 @@ type Attribution struct {
 	Plan           *string  `yaml:"plan,omitempty" json:"plan,omitempty"`
 	Commit         *string  `yaml:"commit,omitempty" json:"commit,omitempty"`
 	PR             *string  `yaml:"pr,omitempty" json:"pr,omitempty"`
-	Session        *string  `yaml:"session,omitempty" json:"session,omitempty"`         // session URL trailer; nil=auto, ""=disabled
+	Session        *string  `yaml:"session,omitempty" json:"session,omitempty"`                 // session URL trailer; nil=auto, ""=disabled
 	ScoreThreshold *float64 `yaml:"score_threshold,omitempty" json:"score_threshold,omitempty"` // minimum sageox_score for commit/PR attribution
 }
 
@@ -40,7 +40,7 @@ var defaultSessionAttribution = "auto"
 // Use this after merging configs for easier consumption.
 type ResolvedAttribution struct {
 	Plan           string  `json:"plan"`
-	PlanFooter     string  `json:"plan_footer"`     // exact footer text for plans ("Guided by SageOx")
+	PlanFooter     string  `json:"plan_footer"` // exact footer text for plans ("Guided by SageOx")
 	Commit         string  `json:"commit"`
 	PR             string  `json:"pr"`
 	Session        string  `json:"session"`         // "auto" = append when recording, "" = disabled

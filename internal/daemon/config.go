@@ -115,23 +115,23 @@ type Config struct {
 // DefaultConfig returns the default daemon configuration.
 func DefaultConfig() *Config {
 	return &Config{
-		SyncIntervalRead:        60 * time.Second, // git pull from remote (ledger, team contexts)
-		CodeDBCheckInterval:     15 * time.Minute, // full reindex for new commits; dirty overlay handles file edits via fsnotify
-		TeamContextSyncInterval: 15 * time.Second,
-		DebounceWindow:          500 * time.Millisecond,
-		VersionCheckInterval:    30 * time.Minute, // ETag conditional requests make this cheap
-		GCCheckInterval:         1 * time.Hour,    // check hourly, actual GC cadence is per-workspace
-		DistillInterval:         6 * time.Hour,    // distill memory every 6 hours
-		LedgerCheckInterval:     15 * time.Minute, // check if ledger index needs rebuild every 15 minutes
-		GitHubSyncInterval:      15 * time.Minute, // sync PRs/issues every 15 minutes
-		MurmurNudgeInterval:     15 * time.Minute, // nudge agents to self-report every 15 minutes
-		RecordingReminderInterval: 1 * time.Hour,  // remind agents recording is active
-		InactivityTimeout:       1 * time.Hour,    // exit after 1 hour of inactivity
-		SocketCheckInterval:     30 * time.Second, // detect socket takeover by new daemon
-		PendingWorkGracePeriod:  10 * time.Minute, // max time to stay alive for pending finalization
-		AutoStart:               true,
-		LedgerPath:              "", // resolved at runtime
-		ProjectRoot:             "", // resolved at runtime
+		SyncIntervalRead:          60 * time.Second, // git pull from remote (ledger, team contexts)
+		CodeDBCheckInterval:       15 * time.Minute, // full reindex for new commits; dirty overlay handles file edits via fsnotify
+		TeamContextSyncInterval:   15 * time.Second,
+		DebounceWindow:            500 * time.Millisecond,
+		VersionCheckInterval:      30 * time.Minute, // ETag conditional requests make this cheap
+		GCCheckInterval:           1 * time.Hour,    // check hourly, actual GC cadence is per-workspace
+		DistillInterval:           6 * time.Hour,    // distill memory every 6 hours
+		LedgerCheckInterval:       15 * time.Minute, // check if ledger index needs rebuild every 15 minutes
+		GitHubSyncInterval:        15 * time.Minute, // sync PRs/issues every 15 minutes
+		MurmurNudgeInterval:       15 * time.Minute, // nudge agents to self-report every 15 minutes
+		RecordingReminderInterval: 1 * time.Hour,    // remind agents recording is active
+		InactivityTimeout:         1 * time.Hour,    // exit after 1 hour of inactivity
+		SocketCheckInterval:       30 * time.Second, // detect socket takeover by new daemon
+		PendingWorkGracePeriod:    10 * time.Minute, // max time to stay alive for pending finalization
+		AutoStart:                 true,
+		LedgerPath:                "", // resolved at runtime
+		ProjectRoot:               "", // resolved at runtime
 	}
 }
 
