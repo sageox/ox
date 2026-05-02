@@ -167,6 +167,11 @@ func (h *authFileHandle) loadFromDisk() (*AuthStore, error) {
 	if ep == "" {
 		ep = endpoint.Get()
 	}
+	if ep == "" {
+		slog.Warn("auth: skipping legacy migration — no endpoint configured")
+		return &AuthStore{Tokens: make(map[string]*StoredToken)}, nil
+	}
+
 	store := AuthStore{
 		Tokens: map[string]*StoredToken{
 			ep: &legacyToken,

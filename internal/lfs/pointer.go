@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -57,6 +58,11 @@ func ParsePointer(content string) (oid string, size int64, err error) {
 		return "", 0, fmt.Errorf("not an LFS pointer: missing or invalid size")
 	}
 
+	maxSize := MaxObjectSize()
+	if size > maxSize {
+		return "", 0, fmt.Errorf("LFS object size %d exceeds maximum %d (set OX_LFS_MAX_OBJECT_SIZE to override)", size, maxSize)
+	}
+
 	return oid, size, nil
 }
 
@@ -95,6 +101,9 @@ func WritePointerFiles(dir string, files map[string]FileRef) ([]string, error) {
 		if !ref.IsLFS() {
 			continue // Storage=git: real content stays in place
 		}
+		if err := ValidateRelativePath(name); err != nil {
+			return paths, fmt.Errorf("unsafe pointer filename: %w", err)
+		}
 		p := filepath.Join(dir, name)
 		if err := WritePointerFile(p, ref); err != nil {
 			return paths, fmt.Errorf("write pointer %s: %w", name, err)
@@ -111,6 +120,22 @@ func WritePointerFiles(dir string, files map[string]FileRef) ([]string, error) {
 // are ~130 bytes (version + sha256 OID + size). 200 bytes gives headroom
 // for long OIDs while skipping content files without reading them.
 const maxPointerSize = 200
+
+// DefaultMaxObjectSize is the upper bound for LFS objects we accept. Prevents
+// malicious pointers from triggering unbounded disk writes. Override
+// with OX_LFS_MAX_OBJECT_SIZE env var for legitimate large files.
+const DefaultMaxObjectSize int64 = 5 * 1024 * 1024 * 1024 // 5 GiB
+
+// MaxObjectSize returns the configured maximum LFS object size.
+// Reads OX_LFS_MAX_OBJECT_SIZE env var, falling back to DefaultMaxObjectSize.
+func MaxObjectSize() int64 {
+	if v := os.Getenv("OX_LFS_MAX_OBJECT_SIZE"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return DefaultMaxObjectSize
+}
 
 // IsPointerFile reports whether the file at path is an LFS pointer.
 // Returns false for missing files, content files, or read errors.

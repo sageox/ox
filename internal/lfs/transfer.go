@@ -197,8 +197,17 @@ func DownloadToFile(action *Action, dst io.Writer, verify bool, expectedOID stri
 		w = io.MultiWriter(dst, h)
 	}
 
-	if _, err := io.Copy(w, resp.Body); err != nil {
+	maxBytes := MaxObjectSize()
+	if resp.ContentLength > 0 && resp.ContentLength <= maxBytes {
+		maxBytes = resp.ContentLength
+	}
+	limitedBody := io.LimitReader(resp.Body, maxBytes+1)
+	n, err := io.Copy(w, limitedBody)
+	if err != nil {
 		return fmt.Errorf("stream download: %w", err)
+	}
+	if n > maxBytes {
+		return fmt.Errorf("download exceeded maximum size (%d bytes)", maxBytes)
 	}
 
 	if verify && h != nil {

@@ -364,3 +364,93 @@ func TestRevokeOnServer_RFC7009Compliance(t *testing.T) {
 	// 200 = success per RFC 7009
 	assert.True(t, success)
 }
+
+// ======
+// RevokeTokenStatus Tests - Structured revocation status
+// ======
+
+func TestRevokeTokenStatus_Success(t *testing.T) {
+	t.Parallel()
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockServer.Close()
+
+	tmpDir, err := os.MkdirTemp("", "auth-revoke-status-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	client := NewAuthClientWithDir(tmpDir)
+	client.endpoint = mockServer.URL
+
+	err = client.SaveToken(&StoredToken{
+		AccessToken:  "test",
+		RefreshToken: "refresh",
+		ExpiresAt:    time.Now().Add(1 * time.Hour),
+	})
+	require.NoError(t, err)
+
+	status, err := client.RevokeTokenStatus()
+	assert.NoError(t, err)
+	assert.Equal(t, RevocationSuccess, status)
+}
+
+func TestRevokeTokenStatus_NoToken(t *testing.T) {
+	t.Parallel()
+
+	tmpDir, err := os.MkdirTemp("", "auth-revoke-status-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	client := NewAuthClientWithDir(tmpDir)
+	status, err := client.RevokeTokenStatus()
+	assert.NoError(t, err)
+	assert.Equal(t, RevocationNoToken, status)
+}
+
+func TestRevokeTokenStatus_ServerFailed(t *testing.T) {
+	t.Parallel()
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer mockServer.Close()
+
+	tmpDir, err := os.MkdirTemp("", "auth-revoke-status-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	client := NewAuthClientWithDir(tmpDir)
+	client.endpoint = mockServer.URL
+
+	err = client.SaveToken(&StoredToken{AccessToken: "test", ExpiresAt: time.Now().Add(1 * time.Hour)})
+	require.NoError(t, err)
+
+	status, err := client.RevokeTokenStatus()
+	assert.NoError(t, err)
+	assert.Equal(t, RevocationServerFailed, status)
+
+	// token should still be removed locally
+	tok, err := client.GetToken()
+	assert.NoError(t, err)
+	assert.Nil(t, tok)
+}
+
+func TestRevokeTokenStatus_NetworkError(t *testing.T) {
+	t.Parallel()
+
+	tmpDir, err := os.MkdirTemp("", "auth-revoke-status-*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	client := NewAuthClientWithDir(tmpDir)
+	client.endpoint = "http://localhost:99999"
+
+	err = client.SaveToken(&StoredToken{AccessToken: "test", ExpiresAt: time.Now().Add(1 * time.Hour)})
+	require.NoError(t, err)
+
+	status, err := client.RevokeTokenStatus()
+	assert.NoError(t, err)
+	assert.Equal(t, RevocationNetworkError, status)
+}

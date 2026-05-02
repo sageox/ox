@@ -45,7 +45,7 @@ func TestSanitizeOutput(t *testing.T) {
 		{
 			name:     "non-oauth2 URL unchanged",
 			input:    "https://user:password@host.com/repo.git",
-			expected: "https://user:password@host.com/repo.git",
+			expected: "https://***:***@host.com/repo.git",
 		},
 		{
 			name:     "keychain noise only",
@@ -66,6 +66,36 @@ func TestSanitizeOutput(t *testing.T) {
 			name:     "credential and keychain noise both cleaned",
 			input:    "fatal: failed to store: -25300\nhttps://oauth2:glpat-xxxx@gitlab.com/org/repo.git\n",
 			expected: "https://oauth2:***@gitlab.com/org/repo.git",
+		},
+		{
+			name:     "bearer token",
+			input:    "Authorization: Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig",
+			expected: "Authorization: Bearer ***",
+		},
+		{
+			name:     "bearer token lowercase",
+			input:    "header: bearer glpat-xxxxxxxxxxxx",
+			expected: "header: Bearer ***",
+		},
+		{
+			name:     "x-access-token in URL",
+			input:    "https://x-access-token:ghs_xxxxxxxxxxxx@github.com/org/repo.git",
+			expected: "https://x-access-token:***@github.com/org/repo.git",
+		},
+		{
+			name:     "generic user:pass URL",
+			input:    "https://user:s3cretP4ss@host.example.com/repo.git",
+			expected: "https://***:***@host.example.com/repo.git",
+		},
+		{
+			name:     "oauth2 still works with new patterns",
+			input:    "https://oauth2:glpat-xxxx@gitlab.com/org/repo.git",
+			expected: "https://oauth2:***@gitlab.com/org/repo.git",
+		},
+		{
+			name:     "multiple credential types in one string",
+			input:    "remote https://oauth2:tok@host.com auth: Bearer eyJ123 fallback https://x-access-token:ghs@gh.com",
+			expected: "remote https://oauth2:***@host.com auth: Bearer *** fallback https://x-access-token:***@gh.com",
 		},
 	}
 

@@ -338,3 +338,25 @@ func TestWritePointerFiles_PartialFailure(t *testing.T) {
 	// if both succeeded (map iteration hit good first), that's also fine
 	// the key test is that it doesn't panic
 }
+
+func TestParsePointer_RejectsExcessiveSize(t *testing.T) {
+	content := FormatPointer("sha256:abc123", 10*1024*1024*1024*1024) // 10 TiB
+	_, _, err := ParsePointer(content)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds maximum")
+}
+
+func TestMaxObjectSize_Default(t *testing.T) {
+	t.Setenv("OX_LFS_MAX_OBJECT_SIZE", "")
+	assert.Equal(t, DefaultMaxObjectSize, MaxObjectSize())
+}
+
+func TestMaxObjectSize_EnvOverride(t *testing.T) {
+	t.Setenv("OX_LFS_MAX_OBJECT_SIZE", "1073741824") // 1 GiB
+	assert.Equal(t, int64(1073741824), MaxObjectSize())
+}
+
+func TestMaxObjectSize_InvalidEnv(t *testing.T) {
+	t.Setenv("OX_LFS_MAX_OBJECT_SIZE", "not-a-number")
+	assert.Equal(t, DefaultMaxObjectSize, MaxObjectSize())
+}

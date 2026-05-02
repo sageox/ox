@@ -106,22 +106,29 @@ var logoutCmd = &cobra.Command{
 		}
 
 		// logout from each endpoint
-		var anyServerSuccess bool
+		var anyServerFailed bool
 		for _, ep := range endpointsToLogout {
 			client := auth.NewAuthClient().WithEndpoint(ep)
-			serverSuccess, err := client.RevokeToken()
+			status, err := client.RevokeTokenStatus()
 			if err != nil {
 				fmt.Printf("Failed to logout from %s: %v\n", ep, err)
+				anyServerFailed = true
 				continue
 			}
-			if serverSuccess {
-				anyServerSuccess = true
+			switch status {
+			case auth.RevocationSuccess, auth.RevocationNoToken:
+				fmt.Printf("Logged out from %s\n", ep)
+			case auth.RevocationNetworkError:
+				anyServerFailed = true
+				fmt.Printf("Logged out locally from %s (could not reach server)\n", ep)
+			case auth.RevocationServerFailed:
+				anyServerFailed = true
+				fmt.Printf("Logged out locally from %s (server did not confirm revocation)\n", ep)
 			}
-			fmt.Printf("Logged out from %s\n", ep)
 		}
 
-		if !anyServerSuccess && len(endpointsToLogout) > 0 {
-			fmt.Println(cli.StyleDim.Render("Note: server-side sessions may still be active."))
+		if anyServerFailed {
+			fmt.Println(cli.StyleDim.Render("Note: server-side sessions may still be active — try again when online."))
 		}
 
 		// strip PATs from git remote URLs for logged-out endpoints
