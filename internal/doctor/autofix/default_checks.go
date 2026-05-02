@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/hooks/claude"
+	"github.com/sageox/ox/internal/lfs"
 )
 
 // Default returns a registry seeded with the auto-fix-safe checks the
@@ -35,6 +36,13 @@ func Default() *Registry {
 		MinInterval: 30 * time.Minute,
 		BlastRadius: "single file (.claude/settings.json); idempotent canonical re-marshal",
 		Run:         checkClaudeHooksFormat,
+	})
+	r.Register(&Check{
+		Slug:        "session-meta-titles",
+		Description: "Recover empty meta.title from summary.json on finalized sessions; cap retries at MaxSummaryAttempts",
+		MinInterval: 30 * time.Minute,
+		BlastRadius: "single ledger; per-session meta.json rewrite, bounded by MaxSummaryAttempts",
+		Run:         checkSessionMetaTitles,
 	})
 	return r
 }
@@ -128,5 +136,93 @@ func checkClaudeHooksFormat(_ context.Context, repoPath string) CheckResult {
 		Status:  StatusFixed,
 		Repo:    repoPath,
 		Summary: "rewrote .claude/settings.json into canonical array form",
+	}
+}
+
+// checkSessionMetaTitles is the daemon-side empty-title repair. It
+// resolves the ledger for repoPath, walks sessions/, and runs
+// lfs.RecoverEmptyTitleMeta on each session whose meta.title is
+// empty. Recovers from summary.json when possible; otherwise
+// increments the bounded attempt counter and at lfs.MaxSummaryAttempts
+// flips status to "unrecoverable" so the next pass short-circuits.
+//
+// Why per-ledger and not per-session: the autofix scheduler iterates
+// repoPaths (workspaces). The session repair lives on the LEDGER
+// (separate path), so each tick we resolve the workspace's ledger
+// once and walk it. Skipping a workspace whose ledger isn't on disk
+// yet is normal during clone.
+//
+// Blast radius: per-session meta.json rewrites, bounded by the cap.
+// No git operations, no LFS calls, no network. Worst-case if the
+// recovery is wrong: the affected session row title shows the wrong
+// string, fixable by a future regenerate.
+func checkSessionMetaTitles(_ context.Context, repoPath string) CheckResult {
+	if repoPath == "" {
+		return CheckResult{Status: StatusClean}
+	}
+	ctx, err := config.LoadProjectContext(repoPath)
+	if err != nil || ctx == nil {
+		// uninitialized workspace or no ledger configured — nothing to do
+		return CheckResult{Status: StatusClean, Repo: repoPath}
+	}
+	ledgerPath := ctx.DefaultLedgerPath()
+	if ledgerPath == "" {
+		return CheckResult{Status: StatusClean, Repo: repoPath}
+	}
+	return repairLedgerSessionTitles(filepath.Join(ledgerPath, "sessions"), repoPath)
+}
+
+// repairLedgerSessionTitles is the side-effect-free-on-healthy core of
+// checkSessionMetaTitles, exported (within the package) for tests that
+// want to drive it without standing up a full ProjectContext +
+// LoadProjectContext stack. Iterates session subdirs and aggregates
+// per-session recovery outcomes into a CheckResult.
+func repairLedgerSessionTitles(sessionsDir, repoPath string) CheckResult {
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return CheckResult{Status: StatusClean, Repo: repoPath}
+		}
+		return CheckResult{
+			Status:  StatusError,
+			Repo:    repoPath,
+			Summary: fmt.Sprintf("read sessions dir: %v", err),
+		}
+	}
+
+	var recovered, bumped, flipped, errored int
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		out := lfs.RecoverEmptyTitleMeta(filepath.Join(sessionsDir, e.Name()), false)
+		switch {
+		case out.Error != "":
+			errored++
+		case out.RecoveredFromJSON:
+			recovered++
+		case out.FlippedTerminal:
+			flipped++
+		case out.BumpedAttempts:
+			bumped++
+		}
+	}
+	if recovered == 0 && bumped == 0 && flipped == 0 && errored == 0 {
+		return CheckResult{Status: StatusClean, Repo: repoPath}
+	}
+	if recovered > 0 || flipped > 0 {
+		return CheckResult{
+			Status:  StatusFixed,
+			Repo:    repoPath,
+			Summary: fmt.Sprintf("session meta titles: recovered=%d flipped_terminal=%d bumped=%d errored=%d", recovered, flipped, bumped, errored),
+		}
+	}
+	// only bumps and/or errors — surface as Found so it's visible in
+	// the issue tracker but doesn't claim we actively fixed anything
+	// (we just made progress toward the terminal cap).
+	return CheckResult{
+		Status:  StatusFound,
+		Repo:    repoPath,
+		Summary: fmt.Sprintf("session meta titles: bumped=%d errored=%d (no recoveries this pass)", bumped, errored),
 	}
 }

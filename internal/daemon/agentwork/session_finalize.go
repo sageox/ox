@@ -639,7 +639,16 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 	payload.storedSession = stored
 
 	entries := sessionsummary.EntriesFromRaw(stored.Entries)
-	prompt := sessionsummary.BuildSummaryPrompt(entries, payload.RawPath, payload.SessionDir)
+	// Daemon owns persistence (ProcessResult writes summary.json + meta.json
+	// and gitCommitAndPush commits). Pass empty ledgerSessionDir so the prompt
+	// drops the "save to file + run ox session push-summary" steps and the LLM
+	// returns the JSON inline. Without this, claude treats the prompt as a
+	// shell-out request, returns conversational text, ParseSummaryJSON's
+	// fence fallback latches onto incidental fenced text, validation rejects,
+	// and meta.json ships with empty title (visible as "Summary unavailable"
+	// in the web UI). The CLI inline path keeps ledgerSessionDir non-empty —
+	// it intentionally delegates to push-summary.
+	prompt := sessionsummary.BuildSummaryPrompt(entries, payload.RawPath, "")
 
 	return RunRequest{
 		Prompt:  prompt,
@@ -995,14 +1004,47 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	if sessionIDForMeta == "" {
 		sessionIDForMeta = sessionid.GenerateSessionID()
 	}
+
+	// Failure-stub retry cap. Pre-fix, the daemon would re-finalize a
+	// session on every anti-entropy cycle whenever its title was empty,
+	// burning tokens forever on a structurally-broken raw.jsonl or a
+	// model that consistently can't summarize this session. Now: count
+	// how many failure stubs we've produced, and after MaxSummaryAttempts
+	// flip to "unrecoverable" so the work-no-longer-needed gate stops
+	// the loop. A successful run (any non-stub status) resets the
+	// counter via the else branch below.
+	statusToWrite := summaryResp.SummaryStatus
+	attempts := 0
+	if priorMeta, _ := lfs.ReadSessionMeta(payload.SessionDir); priorMeta != nil {
+		attempts = priorMeta.SummaryAttempts
+	}
+	if statusToWrite == sessionsummary.SummaryStatusFailedValidation {
+		attempts++
+		if attempts >= lfs.MaxSummaryAttempts {
+			h.logger.Warn("session summary unrecoverable after max attempts; will not retry",
+				"session", sessionName,
+				"attempts", attempts,
+				"max", lfs.MaxSummaryAttempts,
+				"last_error", summaryResp.ValidationError,
+			)
+			statusToWrite = sessionsummary.SummaryStatusUnrecoverable
+		}
+	} else {
+		// success or non-failure shape — clear the counter so a future
+		// anti-entropy pass after a regression won't inherit a stale
+		// retry budget.
+		attempts = 0
+	}
+
 	metaBuilder := lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).
 		SessionID(sessionIDForMeta).
 		Title(summaryResp.Title).
 		Summary(summaryResp.Summary).
 		EntryCount(len(stored.Entries)).
 		StopReason(session.StopReasonRecovered).
-		SummaryStatus(summaryResp.SummaryStatus).
-		ValidationError(summaryResp.ValidationError)
+		SummaryStatus(statusToWrite).
+		ValidationError(summaryResp.ValidationError).
+		SummaryAttempts(attempts)
 
 	// inject sageox contribution score from cache file (matches synchronous path),
 	// then clean up to prevent stale scores leaking into future sessions
@@ -1423,12 +1465,24 @@ func missingArtifacts(sessionDir string) []string {
 // inverse: a daemon failure-marker stub has ScoreReason set, which
 // IsStubSummary considers "not a stub" — but we want to RE-finalize those
 // because they're known-bad. So we explicitly look for non-empty Title.
+//
+// Exception: a meta.json carrying SummaryStatus=="unrecoverable" is
+// terminal — the daemon already exhausted MaxSummaryAttempts on it
+// and further retries would just burn tokens. Treat unrecoverable as
+// "work no longer needed" even when title is empty.
 func (h *SessionFinalizeHandler) workNoLongerNeeded(sessionDir string) bool {
 	if len(missingArtifacts(sessionDir)) > 0 {
 		return false
 	}
 	if session.HasNeedsSummaryMarker(sessionDir) {
 		return false
+	}
+	// Terminal-state check: meta.json may already record this session as
+	// unrecoverable after exceeding MaxSummaryAttempts. Stop retrying.
+	if meta, err := lfs.ReadSessionMeta(sessionDir); err == nil && meta != nil {
+		if meta.SummaryStatus == sessionsummary.SummaryStatusUnrecoverable {
+			return true
+		}
 	}
 	// Read summary.json; if it has a non-empty title, treat the work as
 	// done. An empty-title summary indicates either a never-finalized

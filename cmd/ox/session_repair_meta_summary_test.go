@@ -183,10 +183,27 @@ func TestRepairMetaSummary_TitleLeak(t *testing.T) {
 	assert.Empty(t, got.Title, "leak in title must be cleared")
 }
 
-// TestRepairMetaSummary_RunTwiceIsNoop: the second run reports nothing
-// to do. Combined with the mtime-stable assertion in the cleanMeta
-// test, this is the full idempotency contract.
-func TestRepairMetaSummary_RunTwiceIsNoop(t *testing.T) {
+// TestRepairMetaSummary_LeakyCleanupConvergesToTerminal: a leaky meta
+// with no recoverable summary.json gets cleaned on the first pass
+// (leak removed, status stamped failed_validation), then progresses
+// through the bounded empty-title retry on each subsequent pass and
+// converges to SummaryStatusUnrecoverable in a finite number of runs.
+//
+// This replaces the older "second run is a no-op" assertion. The
+// no-op model was correct when only the leaky-string repair existed,
+// but the empty-title repair (added to handle the post-Apr-27 failure
+// shape on the SageOx Internal ledger) is an additional pass with its
+// own bounded convergence: it MUST keep working on still-broken
+// sessions, not fall silent. The new contract:
+//
+//   - Healthy meta: no-op (covered by TestRepairMetaSummary_CleanMetaIsSkipped_Idempotency)
+//   - Terminal meta: no-op (proven below by the post-cap re-run)
+//   - In-flight broken meta: bounded progress toward terminal
+//
+// Failure prevented: any future "simplification" that drops the
+// empty-title pass and reverts to silent skip — the user's existing
+// broken sessions would never get repaired by the autofix scheduler.
+func TestRepairMetaSummary_LeakyCleanupConvergesToTerminal(t *testing.T) {
 	sd := t.TempDir()
 	require.NoError(t, writeRawMeta(sd, map[string]any{
 		"version": "1.0", "session_name": "s", "agent_id": "Ox", "agent_type": "claude-code",
@@ -194,12 +211,25 @@ func TestRepairMetaSummary_RunTwiceIsNoop(t *testing.T) {
 		"summary":    "Summary failed content validation: x",
 	}))
 
+	// First pass: leaky cleanup. Clears the leak, stamps status.
 	first := repairSessionMetaSummary(sd, false)
 	require.Empty(t, first.Error)
-	require.False(t, first.Skipped)
+	require.False(t, first.Skipped, "first pass must clean the leak")
 
-	second := repairSessionMetaSummary(sd, false)
-	assert.True(t, second.Skipped, "second run must be a no-op (idempotency)")
+	// Subsequent passes: empty-title progression. Each bumps attempts;
+	// the call that hits MaxSummaryAttempts flips to unrecoverable.
+	for i := 1; i <= lfs.MaxSummaryAttempts; i++ {
+		oc := repairSessionMetaSummary(sd, false)
+		require.Empty(t, oc.Error, "pass %d", i)
+	}
+	got, err := lfs.ReadSessionMeta(sd)
+	require.NoError(t, err)
+	assert.Equal(t, sessionsummary.SummaryStatusUnrecoverable, got.SummaryStatus,
+		"after MaxSummaryAttempts empty-title passes, status must be terminal")
+
+	// Terminal sessions are now no-ops — the autofix loop closes here.
+	terminal := repairSessionMetaSummary(sd, false)
+	assert.True(t, terminal.Skipped, "terminal session must short-circuit subsequent calls")
 }
 
 // TestRepairMetaSummary_OnlyLeakyFieldIsCleared: when one user-visible
@@ -220,7 +250,7 @@ func TestRepairMetaSummary_OnlyLeakyFieldIsCleared(t *testing.T) {
 		"version":      "1.0",
 		"session_name": "s", "agent_id": "Ox", "agent_type": "claude-code",
 		"created_at": time.Now().Format(time.RFC3339Nano),
-		"title":      goodTitle, // legitimate
+		"title":      goodTitle,                              // legitimate
 		"summary":    "Summary failed content validation: x", // leaky
 	}))
 
@@ -282,6 +312,86 @@ func TestRepairMetaSummary_PreservesFilesManifest(t *testing.T) {
 	require.Contains(t, got.Files, "raw.jsonl")
 	assert.Equal(t, "sha256:abc", got.Files["raw.jsonl"].OID)
 	assert.Equal(t, int64(12345), got.Files["raw.jsonl"].Size)
+}
+
+// TestRepairMetaSummary_EmptyTitle_RecoversFromSummaryJSON covers the
+// post-Apr-27 failure shape we actually see on the SageOx Internal
+// ledger: meta.title is empty, no leaky string anywhere, summary.json
+// happens to carry a real title (e.g., a future regenerate succeeded).
+// Pre-this-change, the repair tool early-exited on `!titleLeaky &&
+// !summaryLeaky` and did nothing — the row stayed "Summary unavailable"
+// in the UI forever.
+//
+// Failure prevented: the empty-title rows on the user's existing
+// ledger never get repaired, even when summary.json has a clean
+// title to recover from.
+func TestRepairMetaSummary_EmptyTitle_RecoversFromSummaryJSON(t *testing.T) {
+	sd := t.TempDir()
+	require.NoError(t, writeRawMeta(sd, map[string]any{
+		"version":          "1.0",
+		"session_name":     "s", "agent_id": "Ox", "agent_type": "claude-code",
+		"created_at":       time.Now().Format(time.RFC3339Nano),
+		"title":            "",
+		"summary":          "",
+		"summary_status":   "failed_validation",
+		"validation_error": "content validation failed: title too short (0 chars, minimum 3)",
+		"summary_attempts": 1,
+	}))
+	require.NoError(t, os.WriteFile(filepath.Join(sd, "summary.json"),
+		[]byte(`{"title":"Real recovered title","summary":"the body"}`), 0644))
+
+	oc := repairSessionMetaSummary(sd, false)
+	require.Empty(t, oc.Error)
+	assert.True(t, oc.RecoveredFromJSON, "must recover the title from summary.json")
+	assert.True(t, oc.ChangedTitle, "title field must be reported as changed")
+
+	got, err := lfs.ReadSessionMeta(sd)
+	require.NoError(t, err)
+	assert.Equal(t, "Real recovered title", got.Title)
+	assert.Equal(t, sessionsummary.SummaryStatusOK, got.SummaryStatus, "status must transition failed_validation → ok")
+	assert.Empty(t, got.ValidationError, "stale ops diagnostic must be cleared on recovery")
+}
+
+// TestRepairMetaSummary_EmptyTitle_BumpsAttemptsToTerminal proves the
+// retry cap converges. With no clean summary.json to recover from,
+// the tool bumps SummaryAttempts each invocation and at
+// MaxSummaryAttempts flips to unrecoverable. Subsequent passes
+// short-circuit so the autofix loop terminates cleanly.
+//
+// Failure prevented: an unbounded autofix loop on a session whose
+// summary.json is permanently empty (e.g., raw.jsonl is corrupt and
+// every regenerate yields the same failure stub).
+func TestRepairMetaSummary_EmptyTitle_BumpsAttemptsToTerminal(t *testing.T) {
+	sd := t.TempDir()
+	require.NoError(t, writeRawMeta(sd, map[string]any{
+		"version":        "1.0",
+		"session_name":   "s", "agent_id": "Ox", "agent_type": "claude-code",
+		"created_at":     time.Now().Format(time.RFC3339Nano),
+		"title":          "",
+		"summary_status": "failed_validation",
+	}))
+
+	// Run MaxSummaryAttempts times — last call must flip to terminal.
+	for i := 1; i <= lfs.MaxSummaryAttempts; i++ {
+		oc := repairSessionMetaSummary(sd, false)
+		require.Empty(t, oc.Error, "attempt %d", i)
+		got, err := lfs.ReadSessionMeta(sd)
+		require.NoError(t, err)
+		if i < lfs.MaxSummaryAttempts {
+			assert.Equal(t, sessionsummary.SummaryStatusFailedValidation, got.SummaryStatus,
+				"attempt %d: status should still be failed_validation before cap", i)
+		} else {
+			assert.Equal(t, sessionsummary.SummaryStatusUnrecoverable, got.SummaryStatus,
+				"final attempt must flip to unrecoverable")
+		}
+		assert.Equal(t, i, got.SummaryAttempts, "attempt %d: SummaryAttempts must increment", i)
+	}
+
+	// Idempotency floor: terminal sessions short-circuit. The repair
+	// tool must NOT keep bumping SummaryAttempts past the cap.
+	oc := repairSessionMetaSummary(sd, false)
+	assert.True(t, oc.Skipped || (!oc.ChangedStatus && !oc.ChangedTitle),
+		"terminal session must be a no-op on subsequent passes")
 }
 
 // metaMtime returns meta.json's modtime, failing the test on stat

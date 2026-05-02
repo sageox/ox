@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/lfs"
@@ -176,7 +177,21 @@ func repairSessionMetaSummary(sessionDir string, dryRun bool) repairOutcome {
 
 	titleLeaky := lfs.IsLeakySummaryString(meta.Title)
 	summaryLeaky := lfs.IsLeakySummaryString(meta.Summary)
-	if !titleLeaky && !summaryLeaky {
+
+	// Empty-title repair (post-Apr-27 failure shape): the daemon's
+	// failure-stub branches (session_finalize.go) deliberately leave
+	// Title empty when validation fails. The web UI renders this as
+	// "Summary unavailable". If summary.json happens to carry a real
+	// title (e.g., a successful CLI push-summary landed a good
+	// summary.json but the meta-write step never ran, or a future
+	// fix to ParseSummaryJSON gets a clean run on retry), promote
+	// it back into meta. Bounded by MaxSummaryAttempts so a session
+	// whose summary.json is also empty won't churn forever.
+	titleEmpty := strings.TrimSpace(meta.Title) == ""
+	terminalFailure := meta.SummaryStatus == sessionsummary.SummaryStatusUnrecoverable
+	emptyTitleNeedsRepair := titleEmpty && !terminalFailure && meta.SummaryAttempts < lfs.MaxSummaryAttempts
+
+	if !titleLeaky && !summaryLeaky && !emptyTitleNeedsRepair {
 		oc.Skipped = true
 		return oc
 	}
@@ -254,6 +269,19 @@ func repairSessionMetaSummary(sessionDir string, dryRun bool) repairOutcome {
 		// running this tool repeatedly must be idempotent.
 		if meta.ValidationError == "" && originalDiagnostic != "" {
 			meta.ValidationError = originalDiagnostic
+		}
+
+		// Empty-title path with no recoverable summary.json: bump the
+		// attempt counter and, at the cap, flip to unrecoverable so
+		// future runs (CLI or daemon autofix) skip this session and
+		// stop churning. terminalFailure was already filtered above —
+		// we only get here on a bounded-retry session.
+		if emptyTitleNeedsRepair && cleanTitle == "" {
+			meta.SummaryAttempts++
+			oc.ChangedStatus = true
+			if meta.SummaryAttempts >= lfs.MaxSummaryAttempts {
+				meta.SummaryStatus = sessionsummary.SummaryStatusUnrecoverable
+			}
 		}
 	}
 

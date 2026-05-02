@@ -47,6 +47,56 @@ func TestParseSummaryJSON_InvalidJSON(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestParseSummaryJSON_WhitespaceTitleRejected ensures that a JSON
+// payload whose title is non-empty raw but trims to zero length is
+// rejected at parse time, not accepted and then later flagged by
+// ValidateSummaryContent as "title too short (0 chars)". Without this
+// gate, the daemon's anti-entropy path would persist the resulting
+// failure stub on disk and surface "Summary unavailable" in the UI on
+// every session whose claude-side prompt landed conversational text.
+//
+// Failure prevented: silent acceptance of LLM output that lacks a real
+// summary, leading to permanent failure-stub state on the ledger.
+func TestParseSummaryJSON_WhitespaceTitleRejected(t *testing.T) {
+	cases := map[string]string{
+		"single space":      `{"title":" ","summary":"x","key_actions":["a"],"outcome":"success"}`,
+		"newline only":      `{"title":"\n","summary":"x","key_actions":["a"],"outcome":"success"}`,
+		"tabs and spaces":   `{"title":"\t  \n","summary":"x","key_actions":["a"],"outcome":"success"}`,
+		"fenced whitespace": "```json\n{\"title\":\" \",\"summary\":\"x\",\"key_actions\":[\"a\"],\"outcome\":\"success\"}\n```",
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseSummaryJSON(input)
+			require.Error(t, err, "whitespace-only title must not parse as a valid summary")
+			assert.Contains(t, err.Error(), "no valid summary JSON")
+		})
+	}
+}
+
+// TestParseSummaryJSON_MissingKeyActionsRejected ensures that a JSON
+// payload with a real-looking title but no key_actions is rejected.
+// The daemon's claude-shell-out narration sometimes produces JSON-like
+// objects where only Title is set (e.g., the LLM picked up a partial
+// header from earlier in its response). Without this gate, that
+// produces a parse-success that then fails ValidateSummaryRichness or
+// ships an under-populated summary that's worse than no summary.
+//
+// Failure prevented: shipping minimal summaries that lack the spine
+// (key_actions) the prompt explicitly requests.
+func TestParseSummaryJSON_MissingKeyActionsRejected(t *testing.T) {
+	cases := map[string]string{
+		"missing key_actions field": `{"title":"Real Title","summary":"x","outcome":"success"}`,
+		"empty key_actions array":   `{"title":"Real Title","summary":"x","key_actions":[],"outcome":"success"}`,
+		"whitespace key_actions":    `{"title":"Real Title","summary":"x","key_actions":["  ","\n"],"outcome":"success"}`,
+	}
+	for name, input := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseSummaryJSON(input)
+			require.Error(t, err, "missing/empty key_actions must not parse as a valid summary")
+		})
+	}
+}
+
 func TestEntriesFromRaw(t *testing.T) {
 	ts := "2026-03-24T10:00:00.000Z"
 	raw := []map[string]any{

@@ -93,8 +93,27 @@ type SessionMeta struct {
 	SummaryStatus   string `json:"summary_status,omitempty"`
 	ValidationError string `json:"validation_error,omitempty"`
 
+	// SummaryAttempts counts how many daemon-side LLM summarization
+	// attempts have produced a failure stub for this session. Used by
+	// the daemon to cap retries: after MaxSummaryAttempts the status
+	// is flipped to "unrecoverable" and the daemon stops re-finalizing.
+	// Without this, an LLM that consistently fails on a given session
+	// (e.g. raw.jsonl is corrupt, prompt is too large, model is having
+	// a bad day) ends up burning tokens on every anti-entropy cycle
+	// and overwriting whatever local state existed with the same
+	// failure-stub shape. omitempty so older meta.json files keep
+	// working unchanged.
+	SummaryAttempts int `json:"summary_attempts,omitempty"`
+
 	Files map[string]FileRef `json:"files"` // OID manifest: filename -> ref
 }
+
+// MaxSummaryAttempts caps how many failure-stub-producing daemon LLM
+// summarization passes will run for a single session before the daemon
+// flips SummaryStatus to "unrecoverable" and stops retrying. Three is
+// enough to absorb a transient LLM hiccup without burning unbounded
+// tokens on a structurally-broken session.
+const MaxSummaryAttempts = 3
 
 // FileRef identifies a session content file by storage backend, OID
 // (for LFS files), and size.
@@ -253,6 +272,15 @@ func (b *SessionMetaBuilder) SummaryStatus(status string) *SessionMetaBuilder {
 // visible only. See ox-qqka for the leak this prevents.
 func (b *SessionMetaBuilder) ValidationError(msg string) *SessionMetaBuilder {
 	b.meta.ValidationError = msg
+	return b
+}
+
+// SummaryAttempts stamps the daemon's failure-stub retry counter. Used
+// by the daemon path to cap how many times a structurally-broken
+// session is re-finalized before being marked unrecoverable. Inline
+// (CLI) writers should leave this at zero.
+func (b *SessionMetaBuilder) SummaryAttempts(n int) *SessionMetaBuilder {
+	b.meta.SummaryAttempts = n
 	return b
 }
 
