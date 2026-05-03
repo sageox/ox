@@ -922,9 +922,11 @@ func TestMockFileSystemWatcher_Remove(t *testing.T) {
 // Failure prevented: regression of the per-file FD leak pattern that, in
 // production, made `lsof` itself hang on the daemon PID.
 func TestWatcher_LedgerDirRemove_FlushesPerFileFDs(t *testing.T) {
-	if !childMirrorEnabled {
-		t.Skip("kqueue per-file FD leak is macOS-specific")
-	}
+	// Force the mirror on so this mock-based regression runs (and fails
+	// against broken code) on Linux CI as well as Darwin. Production
+	// behavior is unchanged — the mirror still no-ops on non-Darwin in
+	// real binaries.
+	forceChildMirrorForTest(t)
 
 	tmp := t.TempDir()
 	ledgerDir := filepath.Join(tmp, "ledger")

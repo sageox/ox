@@ -40,6 +40,12 @@ type FileSystem interface {
 
 	// ReadDir reads a directory and returns its entries.
 	ReadDir(name string) ([]fs.DirEntry, error)
+
+	// ReadDirN reads up to n entries from a directory and returns them.
+	// If n <= 0 returns all entries (equivalent to ReadDir). Used by the
+	// kqueue mirror so a pathological million-entry directory doesn't
+	// materialize the full listing just to truncate to maxFilesPerWatchedDir.
+	ReadDirN(name string, n int) ([]fs.DirEntry, error)
 }
 
 // RealFileSystemWatcher implements FileSystemWatcher using fsnotify.
@@ -92,6 +98,23 @@ func (r *RealFileSystem) Stat(name string) (fs.FileInfo, error) {
 // ReadDir reads a directory and returns its entries.
 func (r *RealFileSystem) ReadDir(name string) ([]fs.DirEntry, error) {
 	return os.ReadDir(name)
+}
+
+// ReadDirN reads up to n entries from a directory using *os.File.ReadDir(n),
+// which streams entries from the underlying readdir(3) without materializing
+// the full listing. This lets the kqueue mirror bound BOTH memory and read
+// cost for pathological directories with millions of entries. Falls back to
+// ReadDir when n <= 0.
+func (r *RealFileSystem) ReadDirN(name string, n int) ([]fs.DirEntry, error) {
+	if n <= 0 {
+		return os.ReadDir(name)
+	}
+	d, err := os.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	return d.ReadDir(n)
 }
 
 // WatcherFactory creates FileSystemWatcher instances.
@@ -189,11 +212,39 @@ func (w *Watcher) Start(ctx context.Context, onChange func()) {
 				w.Stop()
 				return
 			}
+			// Keep our child mirror in sync with fsnotify's: kqueue's
+			// dirChange watches new files via sendCreateIfNew on
+			// NOTE_WRITE for the dir, and closes per-file FDs on
+			// individual NOTE_DELETE. The post-Add snapshot would
+			// otherwise drift from fsnotify's actual watch set, missing
+			// FDs for files created during daemon operation. Darwin-only.
+			if childMirrorEnabled && filepath.Dir(event.Name) == w.path && event.Name != w.path {
+				switch {
+				case event.Op&fsnotify.Create != 0 && len(children) < maxFilesPerWatchedDir:
+					present := false
+					for _, c := range children {
+						if c == event.Name {
+							present = true
+							break
+						}
+					}
+					if !present {
+						children = append(children, event.Name)
+					}
+				case event.Op&(fsnotify.Remove|fsnotify.Rename) != 0:
+					out := children[:0]
+					for _, c := range children {
+						if c != event.Name {
+							out = append(out, c)
+						}
+					}
+					children = out
+				}
+			}
 			// Plug fsnotify v1.9.0 kqueue per-file FD leak: when our
 			// watched dir is removed/renamed (e.g., blue-green GC reclone
 			// of the ledger), force fsnotify to close each per-file kqueue
-			// FD by replaying our snapshot. childMirrorEnabled is false
-			// outside Darwin so this loop costs nothing on Linux.
+			// FD by replaying our (now-up-to-date) snapshot.
 			if childMirrorEnabled && event.Name == w.path &&
 				event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
 				for _, f := range children {
@@ -475,6 +526,18 @@ func (m *MockFileSystem) ReadDir(name string) ([]fs.DirEntry, error) {
 		return result, nil
 	}
 	return nil, os.ErrNotExist
+}
+
+// ReadDirN reads up to n entries from a mock directory. n <= 0 returns all.
+func (m *MockFileSystem) ReadDirN(name string, n int) ([]fs.DirEntry, error) {
+	all, err := m.ReadDir(name)
+	if err != nil {
+		return nil, err
+	}
+	if n <= 0 || n >= len(all) {
+		return all, nil
+	}
+	return all[:n], nil
 }
 
 // AddFile adds a mock file to the filesystem.

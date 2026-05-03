@@ -1,14 +1,11 @@
 package daemon
 
-import (
-	"os"
-	"runtime"
-	"syscall"
-)
+import "os"
 
 // CurrentProcessFDCount returns the number of open file descriptors for the
 // current process, or -1 if it cannot be determined. Portable across macOS
-// (/dev/fd) and Linux (/proc/self/fd).
+// (/dev/fd) and Linux (/proc/self/fd); on Windows neither path exists and
+// the function returns -1 (the doctor check skips silently in that case).
 //
 // Used by the daemon status to surface FD growth as a first-class metric.
 // The whole reason the project_watcher FD leak got bad enough in production
@@ -44,19 +41,4 @@ func countFDsAt(path string) (int, bool) {
 		n = 0
 	}
 	return n, true
-}
-
-// CurrentProcessFDLimit returns the soft RLIMIT_NOFILE for the current
-// process, or 0 if it cannot be determined. Used to compute FD-pressure
-// percentage rather than hard-coding thresholds: a daemon at 4096 open FDs
-// is fine on a host with a 1M limit, alarming on a host with a 4500 limit.
-func CurrentProcessFDLimit() uint64 {
-	if runtime.GOOS == "windows" {
-		return 0
-	}
-	var rlim syscall.Rlimit
-	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlim); err != nil {
-		return 0
-	}
-	return uint64(rlim.Cur)
 }

@@ -567,6 +567,34 @@ func (pw *ProjectWatcher) handleEvent(watcher FileSystemWatcher, event fsnotify.
 		}
 	}
 
+	// individual file Create inside a watched dir — add to the parent's
+	// child snapshot. fsnotify v1.9.0's kqueue backend reacts to NOTE_WRITE
+	// on the directory by calling dirChange → sendCreateIfNew, which opens
+	// a per-file kqueue FD for any new file. So files created post-Add do
+	// have FDs we'll need to release if the parent later disappears. Skip
+	// if the parent isn't tracked or we're already at the snapshot cap.
+	// Darwin-only.
+	if childMirrorEnabled && !isDir && event.Op&fsnotify.Create != 0 {
+		parent := filepath.Dir(event.Name)
+		pw.mu.Lock()
+		if _, watched := pw.watchedDirs[parent]; watched {
+			children := pw.dirChildren[parent]
+			if len(children) < maxFilesPerWatchedDir {
+				present := false
+				for _, c := range children {
+					if c == event.Name {
+						present = true
+						break
+					}
+				}
+				if !present {
+					pw.dirChildren[parent] = append(children, event.Name)
+				}
+			}
+		}
+		pw.mu.Unlock()
+	}
+
 	// individual file Remove/Rename inside a watched dir — drop the file
 	// from the parent's child snapshot. fsnotify's kqueue backend already
 	// closed the per-file FD via the file's own NOTE_DELETE; keeping it in

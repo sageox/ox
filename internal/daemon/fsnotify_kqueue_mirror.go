@@ -25,19 +25,29 @@ import (
 // capped at maxFilesPerWatchedDir. Errors are logged at Debug and treated as
 // "no children" — drift is recovered by the periodic re-snapshot in
 // pruneStaleWatches and by event-driven incremental updates.
+//
+// Uses the streaming ReadDirN so a pathological million-entry directory
+// can't materialize the full listing just to truncate. We read cap+1
+// entries to detect truncation: if we got more than cap regular files we
+// log a Warn so the operator can investigate.
 func snapshotKqueueChildren(fs FileSystem, path string, logger *slog.Logger) []string {
 	if !childMirrorEnabled {
 		return nil
 	}
-	entries, err := fs.ReadDir(path)
+	// Read cap+1 entries: enough to know whether we hit the cap, no more.
+	// Note that "entries" includes both files and dirs, and we filter dirs
+	// below. In the worst case where most entries are dirs we still might
+	// not fill our cap from the first batch — but the cap is meant as a
+	// hard upper bound on memory, not a strict guarantee that we capture
+	// exactly cap files. Dirs in a watched-dir snapshot are normally rare
+	// in source repos.
+	const probe = maxFilesPerWatchedDir + 1
+	entries, err := fs.ReadDirN(path, probe)
 	if err != nil {
-		logger.Debug("kqueue mirror: ReadDir failed during snapshot",
+		logger.Debug("kqueue mirror: ReadDirN failed during snapshot",
 			"path", path, "error", err)
 		return nil
 	}
-	// Cap allocation up front so a pathological directory (millions of
-	// generated files) can't dominate startup memory or snapshot cost.
-	// Memory bound is independent of directory cardinality.
 	capLen := len(entries)
 	if capLen > maxFilesPerWatchedDir {
 		capLen = maxFilesPerWatchedDir
@@ -57,7 +67,6 @@ func snapshotKqueueChildren(fs FileSystem, path string, logger *slog.Logger) []s
 	if truncated {
 		logger.Warn("kqueue mirror: per-dir child snapshot truncated",
 			"path", path, "cap", maxFilesPerWatchedDir,
-			"total_entries", len(entries),
 			"impact", "FD-leak guarantee weakened for files beyond cap")
 	}
 	return out

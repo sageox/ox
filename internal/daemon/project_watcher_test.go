@@ -879,6 +879,19 @@ func TestProjectWatcher_CreateSkipsAlreadyWatched(t *testing.T) {
 
 // --- Per-file FD-leak tests (epic ox-5pwx) ---
 
+// forceChildMirrorForTest enables the kqueue child mirror for the duration
+// of the test, regardless of GOOS. The mirror is gated by
+// childMirrorEnabled = (runtime.GOOS == "darwin") in production, so without
+// this helper the mock-based tests below would silently no-op on Linux CI
+// runners and still pass — which would defeat their purpose. Restored in
+// t.Cleanup so test order doesn't matter.
+func forceChildMirrorForTest(t *testing.T) {
+	t.Helper()
+	old := childMirrorEnabled
+	childMirrorEnabled = true
+	t.Cleanup(func() { childMirrorEnabled = old })
+}
+
 // TestProjectWatcher_AddDir_SnapshotsChildren verifies that addDir captures
 // the per-file child set so Remove/Rename can replay it. fsnotify's kqueue
 // backend opens 1+N FDs per watched dir (1 dir + N per file via
@@ -887,6 +900,7 @@ func TestProjectWatcher_CreateSkipsAlreadyWatched(t *testing.T) {
 // Failure prevented: per-file FD leak invisible to userspace because
 // fsnotify exposes it only through a package-private map.
 func TestProjectWatcher_AddDir_SnapshotsChildren(t *testing.T) {
+	forceChildMirrorForTest(t)
 	mockWatcher := NewMockFileSystemWatcher()
 	mockFS := NewMockFileSystem()
 
@@ -930,6 +944,7 @@ func TestProjectWatcher_AddDir_SnapshotsChildren(t *testing.T) {
 // Failure prevented: long-lived daemon FD growth from build-output churn,
 // the reproducible host symptom that made `lsof` itself hang on the daemon PID.
 func TestProjectWatcher_RemoveCallsUnwatchOnChildFiles(t *testing.T) {
+	forceChildMirrorForTest(t)
 	mockWatcher := NewMockFileSystemWatcher()
 	mockFS := NewMockFileSystem()
 
@@ -995,6 +1010,7 @@ func TestProjectWatcher_RemoveCallsUnwatchOnChildFiles(t *testing.T) {
 // Failure prevented: gitignore changes / branch switches accumulate per-file
 // FDs over the lifetime of the daemon.
 func TestProjectWatcher_PruneStaleWatches_RemovesChildFiles(t *testing.T) {
+	forceChildMirrorForTest(t)
 	mockWatcher := NewMockFileSystemWatcher()
 	mockFS := NewMockFileSystem()
 
@@ -1049,6 +1065,7 @@ func TestProjectWatcher_PruneStaleWatches_RemovesChildFiles(t *testing.T) {
 // Failure prevented: cold-start memory/CPU spike on monorepos with one
 // pathological generated-files directory.
 func TestProjectWatcher_SnapshotChildren_BoundedAtCap(t *testing.T) {
+	forceChildMirrorForTest(t)
 	mockWatcher := NewMockFileSystemWatcher()
 	mockFS := NewMockFileSystem()
 
@@ -1092,6 +1109,7 @@ func TestProjectWatcher_SnapshotChildren_BoundedAtCap(t *testing.T) {
 // Failure prevented: future caller adds a watch via the handle but forgets
 // the children-cleanup half of the contract.
 func TestProjectWatcher_AcquireRelease_TypedHandle(t *testing.T) {
+	forceChildMirrorForTest(t)
 	mockWatcher := NewMockFileSystemWatcher()
 	mockFS := NewMockFileSystem()
 
