@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -13,6 +14,13 @@ import (
 
 	"github.com/sageox/ox/internal/gitutil"
 )
+
+// childMirrorEnabled reports whether we maintain a userspace mirror of
+// fsnotify's per-file child set. Only useful on macOS where fsnotify's
+// kqueue backend opens 1+N FDs per watched directory and skips closing the
+// per-file FDs on dir Remove/Rename. On Linux/inotify each watch is a single
+// FD (not per-file), so the mirror is dead weight.
+var childMirrorEnabled = runtime.GOOS == "darwin"
 
 // ChangeType categorizes a filesystem change.
 type ChangeType string
@@ -342,7 +350,15 @@ type ProjectWatcher struct {
 	// forcing fsnotify down its file-Remove path which closes the FD via
 	// unix.Close. Keyed by absolute directory path; values are absolute
 	// child file paths.
+	//
+	// Empty on Linux (childMirrorEnabled=false) — inotify uses one FD per
+	// watch, not per file, so there's nothing to mirror.
 	dirChildren map[string][]string
+	// dirMtimes tracks the directory mtime captured at snapshot time so the
+	// periodic re-sync in pruneStaleWatches can detect drift cheaply (one
+	// stat call per dir vs a full ReadDir). Only populated when
+	// childMirrorEnabled.
+	dirMtimes map[string]time.Time
 }
 
 // NewProjectWatcher creates a new project watcher.
@@ -363,6 +379,7 @@ func NewProjectWatcher(
 		tracker:        tracker,
 		watchedDirs:    make(map[string]struct{}),
 		dirChildren:    make(map[string][]string),
+		dirMtimes:      make(map[string]time.Time),
 	}
 }
 
@@ -458,35 +475,58 @@ func (pw *ProjectWatcher) walkAndWatch(watcher FileSystemWatcher) {
 	}
 }
 
-// addDir adds a single directory to the watcher and snapshots the per-file
-// child set that fsnotify will auto-watch. The snapshot is consulted on
-// Remove/Rename to force fsnotify to close each child FD.
+// addDir adds a single directory to the watcher and (on macOS) snapshots the
+// per-file child set that fsnotify will auto-watch. The snapshot is consulted
+// on Remove/Rename to force fsnotify to close each child FD.
+//
+// To close the TOCTOU window between snapshot and Add, we snapshot twice
+// (pre-Add and post-Add) and union the results. A file racing into the dir
+// will be present in at least one snapshot; a file racing out leaves a
+// harmless ErrNonExistentWatch on its eventual Remove.
 func (pw *ProjectWatcher) addDir(watcher FileSystemWatcher, path string) {
+	pre := pw.snapshotDirFiles(path)
 	if err := watcher.Add(path); err != nil {
 		pw.logger.Debug("project watcher: failed to watch dir",
 			"path", path, "error", err)
 		return
 	}
-	children := pw.snapshotDirFiles(path)
+	post := pw.snapshotDirFiles(path)
+	children := unionChildren(pre, post)
+	mtime := pw.dirMtime(path)
 	pw.mu.Lock()
 	pw.watchedDirs[path] = struct{}{}
-	pw.dirChildren[path] = children
+	if childMirrorEnabled {
+		pw.dirChildren[path] = children
+		pw.dirMtimes[path] = mtime
+	}
 	pw.mu.Unlock()
 }
 
 // snapshotDirFiles returns absolute child file paths for path. Best-effort:
-// errors are logged at Debug and treated as "no children" — drift is recovered
-// by pruneStaleWatches and by per-file Create events that update the snapshot
-// in addDir. Truncated to maxFilesPerWatchedDir with a single Warn log so we
-// can tell from telemetry which dirs are pathological.
+// errors are logged at Debug and returned as nil. Truncated to
+// maxFilesPerWatchedDir with a single Warn log so we can tell from telemetry
+// which dirs are pathological.
+//
+// Returns nil unconditionally on non-Darwin — the mirror is only used to
+// compensate for fsnotify's kqueue per-file FD leak on macOS.
 func (pw *ProjectWatcher) snapshotDirFiles(path string) []string {
+	if !childMirrorEnabled {
+		return nil
+	}
 	entries, err := pw.fs.ReadDir(path)
 	if err != nil {
 		pw.logger.Debug("project watcher: ReadDir failed during snapshot",
 			"path", path, "error", err)
 		return nil
 	}
-	out := make([]string, 0, len(entries))
+	// Cap allocation up front: even if entries has millions of items, we
+	// only ever retain maxFilesPerWatchedDir of them and stop iterating
+	// once full. Memory bound is independent of directory cardinality.
+	capLen := len(entries)
+	if capLen > maxFilesPerWatchedDir {
+		capLen = maxFilesPerWatchedDir
+	}
+	out := make([]string, 0, capLen)
 	truncated := false
 	for _, e := range entries {
 		if e.IsDir() {
@@ -502,6 +542,49 @@ func (pw *ProjectWatcher) snapshotDirFiles(path string) []string {
 		pw.logger.Warn("project watcher: per-dir child snapshot truncated",
 			"path", path, "cap", maxFilesPerWatchedDir, "total_entries", len(entries),
 			"impact", "FD-leak guarantee weakened for files beyond cap")
+	}
+	return out
+}
+
+// dirMtime returns the directory mtime, used by pruneStaleWatches as a cheap
+// drift detector. Returns zero time on error or non-Darwin (where we don't
+// use it).
+func (pw *ProjectWatcher) dirMtime(path string) time.Time {
+	if !childMirrorEnabled {
+		return time.Time{}
+	}
+	info, err := pw.fs.Stat(path)
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
+// unionChildren merges two child-path slices, preserving order from the first
+// and de-duplicating. Used by addDir to combine pre-Add and post-Add
+// snapshots and close the TOCTOU race against fsnotify's watchDirectoryFiles.
+func unionChildren(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, s := range a {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	for _, s := range b {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
 	}
 	return out
 }
@@ -544,6 +627,27 @@ func (pw *ProjectWatcher) handleEvent(watcher FileSystemWatcher, event fsnotify.
 		}
 	}
 
+	// individual file Remove/Rename inside a watched dir — drop the file
+	// from the parent's child snapshot. fsnotify's kqueue backend already
+	// closed the per-file FD via the file's own NOTE_DELETE; keeping it in
+	// the snapshot would cause a noisy ErrNonExistentWatch on the next dir
+	// Remove and waste effort. Darwin-only since dirChildren is empty on
+	// other platforms.
+	if childMirrorEnabled && !isDir && event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		parent := filepath.Dir(event.Name)
+		pw.mu.Lock()
+		if children, ok := pw.dirChildren[parent]; ok {
+			out := children[:0]
+			for _, c := range children {
+				if c != event.Name {
+					out = append(out, c)
+				}
+			}
+			pw.dirChildren[parent] = out
+		}
+		pw.mu.Unlock()
+	}
+
 	// directory removed — remove from tracked set and release kqueue/inotify FDs.
 	// fsnotify v1.9.0's kqueue backend (backend_kqueue.go:489) calls
 	// w.remove(name, false) on NOTE_DELETE, which does NOT recursively close
@@ -561,6 +665,7 @@ func (pw *ProjectWatcher) handleEvent(watcher FileSystemWatcher, event fsnotify.
 		delete(pw.watchedDirs, event.Name)
 		childFiles := pw.dirChildren[event.Name]
 		delete(pw.dirChildren, event.Name)
+		delete(pw.dirMtimes, event.Name)
 
 		prefix := event.Name + string(filepath.Separator)
 		var descendantDirs []string
@@ -573,6 +678,7 @@ func (pw *ProjectWatcher) handleEvent(watcher FileSystemWatcher, event fsnotify.
 			childFiles = append(childFiles, pw.dirChildren[d]...)
 			delete(pw.watchedDirs, d)
 			delete(pw.dirChildren, d)
+			delete(pw.dirMtimes, d)
 		}
 		pw.mu.Unlock()
 
@@ -585,7 +691,8 @@ func (pw *ProjectWatcher) handleEvent(watcher FileSystemWatcher, event fsnotify.
 		// The crucial bit: explicitly Remove each tracked child file so
 		// fsnotify closes its per-file kqueue FD. Tolerates ErrNonExistentWatch
 		// for files that the kernel already auto-cleaned via individual
-		// NOTE_DELETE — that's a no-op on our side.
+		// NOTE_DELETE — that's a no-op on our side. childFiles is empty on
+		// non-Darwin so this loop costs nothing there.
 		for _, f := range childFiles {
 			_ = watcher.Remove(f)
 		}
@@ -624,20 +731,56 @@ func (pw *ProjectWatcher) pruneStaleWatches(watcher FileSystemWatcher) {
 			children := pw.dirChildren[absDir]
 			delete(pw.watchedDirs, absDir)
 			delete(pw.dirChildren, absDir)
+			delete(pw.dirMtimes, absDir)
 			pw.mu.Unlock()
 			_ = watcher.Remove(absDir)
 			// Force fsnotify to close per-file kqueue FDs for any child files
 			// it auto-watched on Add. Without this, pruning a stale dir leaks
 			// the same per-file FDs that the Remove/Rename handler plugs.
+			// children is empty on non-Darwin — no-op there.
 			for _, f := range children {
 				_ = watcher.Remove(f)
 			}
 			pruned++
+			continue
+		}
+
+		// Still-tracked dir: re-snapshot if mtime advanced since last check.
+		// This is the safety net for any drift the event-driven incremental
+		// updates miss (e.g., events the kernel coalesced under churn).
+		// Cheap on Darwin (one stat per watched dir per refresh), no-op on
+		// other platforms because the mirror is unused there.
+		if childMirrorEnabled {
+			pw.resnapshotIfChanged(absDir)
 		}
 	}
 	if pruned > 0 {
 		pw.logger.Info("project watcher: pruned stale watches", "count", pruned)
 	}
+}
+
+// resnapshotIfChanged re-reads the per-file child snapshot for absDir if its
+// directory mtime has advanced since the last snapshot. Catches drift from
+// kernel-event coalescing without requiring a full ReadDir on every cycle.
+// Caller must NOT hold pw.mu.
+func (pw *ProjectWatcher) resnapshotIfChanged(absDir string) {
+	currentMtime := pw.dirMtime(absDir)
+	if currentMtime.IsZero() {
+		return // dir gone or unstattable; Remove/Rename handler will catch up
+	}
+	pw.mu.Lock()
+	last, known := pw.dirMtimes[absDir]
+	pw.mu.Unlock()
+	if known && !currentMtime.After(last) {
+		return // no drift since last snapshot
+	}
+	fresh := pw.snapshotDirFiles(absDir)
+	pw.mu.Lock()
+	if _, stillWatched := pw.watchedDirs[absDir]; stillWatched {
+		pw.dirChildren[absDir] = fresh
+		pw.dirMtimes[absDir] = currentMtime
+	}
+	pw.mu.Unlock()
 }
 
 // WatchedDirCount returns the number of directories being watched.
@@ -665,18 +808,26 @@ type watchedDirHandle struct {
 }
 
 // acquireDir wraps addDir, returning a handle whose Release is paired with
-// the underlying Add. Equivalent in effect to addDir but enforces the
-// register-and-release pairing through the type system rather than convention.
+// the underlying Add. Equivalent in effect to addDir (including the pre/post
+// snapshot to close the TOCTOU window with watchDirectoryFiles) but enforces
+// the register-and-release pairing through the type system rather than
+// convention.
 func (pw *ProjectWatcher) acquireDir(watcher FileSystemWatcher, path string) (*watchedDirHandle, error) {
+	pre := pw.snapshotDirFiles(path)
 	if err := watcher.Add(path); err != nil {
 		pw.logger.Debug("project watcher: acquireDir failed",
 			"path", path, "error", err)
 		return nil, err
 	}
-	children := pw.snapshotDirFiles(path)
+	post := pw.snapshotDirFiles(path)
+	children := unionChildren(pre, post)
+	mtime := pw.dirMtime(path)
 	pw.mu.Lock()
 	pw.watchedDirs[path] = struct{}{}
-	pw.dirChildren[path] = children
+	if childMirrorEnabled {
+		pw.dirChildren[path] = children
+		pw.dirMtimes[path] = mtime
+	}
 	pw.mu.Unlock()
 	return &watchedDirHandle{watcher: watcher, path: path, pw: pw}, nil
 }
@@ -690,6 +841,7 @@ func (h *watchedDirHandle) Release() {
 	h.pw.mu.Lock()
 	children := h.pw.dirChildren[h.path]
 	delete(h.pw.dirChildren, h.path)
+	delete(h.pw.dirMtimes, h.path)
 	delete(h.pw.watchedDirs, h.path)
 	h.pw.mu.Unlock()
 	for _, f := range children {

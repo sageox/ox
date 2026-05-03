@@ -1211,26 +1211,44 @@ func TestProjectWatcher_NoFDLeak_RealWatcher_Darwin(t *testing.T) {
 
 	// Churn: 50 iterations of mkdir + N files + rm-rf. Each iteration
 	// pre-fix would open (1 + 5) kqueue FDs and only release 1 — net +5/round.
+	//
+	// Wait for an observable readiness signal between mkdir and rm-rf
+	// (the watcher actually registers the new dir) instead of a fixed sleep.
+	// Fixed sleeps were racy on slow Darwin runners — if rm-rf fires before
+	// fsnotify attaches the per-file watches, the test becomes a false
+	// negative. require.Eventually polls cheaply.
 	const iterations = 50
 	const filesPerDir = 5
+	const churnReadyTimeout = 500 * time.Millisecond
+	const churnReadyPoll = 1 * time.Millisecond
 	for i := 0; i < iterations; i++ {
 		sub := filepath.Join(dir, fmt.Sprintf("churn-%04d", i))
+		preCount := pw.WatchedDirCount()
 		require.NoError(t, os.MkdirAll(sub, 0o755))
 		for j := 0; j < filesPerDir; j++ {
 			f := filepath.Join(sub, fmt.Sprintf("f%d.go", j))
 			require.NoError(t, os.WriteFile(f, []byte("package x\n"), 0o644))
 		}
-		// Give fsnotify a beat to register the dir + auto-watch the files
-		// before we delete them. Without this, the kernel may coalesce events
-		// and we don't exercise the per-file FD path.
-		time.Sleep(2 * time.Millisecond)
+		// Wait until the daemon has actually added the new dir to its watch
+		// set. WatchedDirCount() advancing past preCount is the observable
+		// proxy for "fsnotify Add() returned and watchDirectoryFiles ran."
+		// Falling back to a short sleep if the count never advances would
+		// silently turn this into a no-op test, so we require strictly.
+		require.Eventually(t, func() bool {
+			return pw.WatchedDirCount() > preCount
+		}, churnReadyTimeout, churnReadyPoll, "watcher should register churn dir %d (preCount=%d)", i, preCount)
+
 		require.NoError(t, os.RemoveAll(sub))
-		time.Sleep(2 * time.Millisecond)
+
+		// Wait for the Remove handler to drain back to the pre-mkdir count
+		// (give or take 1 for any stragglers from prior iterations).
+		require.Eventually(t, func() bool {
+			return pw.WatchedDirCount() <= preCount
+		}, churnReadyTimeout, churnReadyPoll, "watcher should drain churn dir %d (preCount=%d, current=%d)", i, preCount, pw.WatchedDirCount())
 	}
 
-	// Allow handler to drain.
+	// Allow handler to drain any residual events.
 	require.Eventually(t, func() bool {
-		// All churn dirs should have been removed from watchedDirs.
 		return pw.WatchedDirCount() <= 5
 	}, 5*time.Second, 50*time.Millisecond, "watcher should drain churn dirs")
 	time.Sleep(200 * time.Millisecond)

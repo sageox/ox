@@ -1444,6 +1444,8 @@ func (s *daemonServiceImpl) Status() *StatusData {
 		Issues:             issues,
 		StartupDurationMs:  s.d.startupDurationMs.Load(),
 		ThrottleDurationMs: s.d.throttleDurationMs.Load(),
+		OpenFDs:            CurrentProcessFDCount(),
+		OpenFDLimit:        CurrentProcessFDLimit(),
 		CodeDB:             codeDBStats,
 		AgentWork:          agentWorkStatus,
 		Callers:            callers,

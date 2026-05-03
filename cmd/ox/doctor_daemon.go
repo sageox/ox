@@ -54,6 +54,7 @@ func checkDaemonHealth(opts doctorOptions) []checkResult {
 		doctor.NewDaemonSyncErrorsCheck(),
 		doctor.NewDaemonGitHubAuthCheck(),
 		doctor.NewDaemonDirtyTeamContextCheck(),
+		doctor.NewDaemonFDPressureCheck(),
 	}
 
 	// add heartbeat checks for monitored repos

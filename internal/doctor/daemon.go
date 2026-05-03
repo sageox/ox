@@ -575,6 +575,79 @@ func splitCompositeID(id string) (repoID, workspaceID string) {
 	return id[:lastIdx], id[lastIdx+1:]
 }
 
+// DaemonFDPressureCheck warns when the daemon is consuming a worrying
+// fraction of its open-file-descriptor limit. Surfaces FD leaks within hours
+// instead of months — see internal/daemon/fd_count.go for the rationale.
+type DaemonFDPressureCheck struct{}
+
+// NewDaemonFDPressureCheck creates an FD-pressure check for the daemon.
+func NewDaemonFDPressureCheck() *DaemonFDPressureCheck {
+	return &DaemonFDPressureCheck{}
+}
+
+// Name returns the check name.
+func (c *DaemonFDPressureCheck) Name() string {
+	return "fd pressure"
+}
+
+// Category returns the check category.
+func (c *DaemonFDPressureCheck) Category() string {
+	return "Daemon"
+}
+
+// FD-pressure thresholds, expressed as a fraction of the soft RLIMIT_NOFILE.
+// Crossing 50% warns; crossing 80% fails. Computed against the current limit
+// rather than hard-coded numbers so the check stays meaningful across very
+// different host configs (macOS default 256 vs Linux container 1M+).
+const (
+	fdPressureWarn = 0.50
+	fdPressureFail = 0.80
+)
+
+// Run executes the FD-pressure check.
+func (c *DaemonFDPressureCheck) Run(_ context.Context, _ bool) CheckResult {
+	if !daemon.IsRunning() {
+		return CheckResult{Name: c.Name(), Status: StatusSkip}
+	}
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
+	status, err := client.Status()
+	if err != nil {
+		return CheckResult{Name: c.Name(), Status: StatusSkip}
+	}
+	if status.OpenFDs <= 0 {
+		// platform doesn't surface FD count (e.g. windows) — skip silently
+		return CheckResult{Name: c.Name(), Status: StatusSkip}
+	}
+	if status.OpenFDLimit == 0 {
+		// no limit info — report raw count without a verdict
+		return CheckResult{
+			Name:    c.Name(),
+			Status:  StatusPass,
+			Message: fmt.Sprintf("%d FDs open (limit unknown)", status.OpenFDs),
+		}
+	}
+	pct := float64(status.OpenFDs) / float64(status.OpenFDLimit)
+	msg := fmt.Sprintf("%d / %d open (%.0f%%)", status.OpenFDs, status.OpenFDLimit, pct*100)
+	switch {
+	case pct >= fdPressureFail:
+		return CheckResult{
+			Name:    c.Name(),
+			Status:  StatusFail,
+			Message: msg,
+			Fix:  "Daemon is approaching its file-descriptor limit. Restart with `ox daemon restart` while we investigate the leak source.",
+		}
+	case pct >= fdPressureWarn:
+		return CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarn,
+			Message: msg,
+			Fix:  "FD count is climbing toward the soft limit. Worth monitoring; check `ox status --verbose` over the next hour.",
+		}
+	default:
+		return CheckResult{Name: c.Name(), Status: StatusPass, Message: msg}
+	}
+}
+
 // formatDuration formats a duration for display.
 func formatDuration(d time.Duration) string {
 	if d < time.Minute {

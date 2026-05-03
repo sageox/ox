@@ -155,6 +155,15 @@ type StatusData struct {
 	StartupDurationMs  int64 `json:"startup_duration_ms,omitempty"`
 	ThrottleDurationMs int64 `json:"throttle_duration_ms,omitempty"`
 
+	// open file descriptor count for the daemon process (sampled at status
+	// query time). -1 if the platform can't expose it. OpenFDLimit is the
+	// soft RLIMIT_NOFILE (0 if unknown). Used to surface FD pressure before
+	// the daemon hits the wall — see internal/daemon/fd_count.go for the
+	// rationale (a leak that hung lsof in prod went undetected for months
+	// because nothing graphed FD count).
+	OpenFDs     int    `json:"open_fds,omitempty"`
+	OpenFDLimit uint64 `json:"open_fd_limit,omitempty"`
+
 	// code index status
 	CodeDB *CodeDBStats `json:"code_db,omitempty"`
 

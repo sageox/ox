@@ -419,6 +419,14 @@ func FormatStatusVerbose(status *StatusData, history []SyncEvent, cliVersion str
 	if status.AuthenticatedUser != nil && status.AuthenticatedUser.Email != "" {
 		out += formatKV("User", status.AuthenticatedUser.Email) + "\n"
 	}
+	if status.OpenFDs > 0 {
+		fdStr := fmt.Sprintf("%d", status.OpenFDs)
+		if status.OpenFDLimit > 0 {
+			pct := float64(status.OpenFDs) * 100 / float64(status.OpenFDLimit)
+			fdStr = fmt.Sprintf("%d / %d (%.0f%%)", status.OpenFDs, status.OpenFDLimit, pct)
+		}
+		out += formatKV("FDs open", fdStr) + "\n"
+	}
 	if status.StartupDurationMs > 0 {
 		startupStr := fmt.Sprintf("%dms", status.StartupDurationMs)
 		if status.ThrottleDurationMs > 0 {
