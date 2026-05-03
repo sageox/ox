@@ -157,11 +157,23 @@ func (w *Watcher) Start(ctx context.Context, onChange func()) {
 	w.stopped = false
 	w.mu.Unlock()
 
-	// add path to watch
+	// Snapshot the per-file children that fsnotify's kqueue backend will
+	// auto-open via watchDirectoryFiles when we Add a directory on macOS.
+	// We need our own copy because fsnotify's set is private and on
+	// Remove/Rename of the watched dir its kqueue backend
+	// (backend_kqueue.go:489) calls w.remove(name, false) — which leaves
+	// the per-file FDs open. They'd remain open until our defer Close()
+	// fires, which for the ledger watcher means the entire daemon
+	// lifetime after the first reclone. Snapshot pre AND post Add to
+	// close the TOCTOU race against watchDirectoryFiles. No-op on
+	// non-Darwin (snapshotKqueueChildren returns nil there).
+	preChildren := snapshotKqueueChildren(w.fs, w.path, w.logger)
 	if err := watcher.Add(w.path); err != nil {
 		w.logger.Error("failed to watch path", "path", w.path, "error", err)
 		return
 	}
+	postChildren := snapshotKqueueChildren(w.fs, w.path, w.logger)
+	children := unionKqueueChildren(preChildren, postChildren)
 
 	w.logger.Info("watching ledger directory", "path", w.path)
 
@@ -176,6 +188,18 @@ func (w *Watcher) Start(ctx context.Context, onChange func()) {
 			if !ok {
 				w.Stop()
 				return
+			}
+			// Plug fsnotify v1.9.0 kqueue per-file FD leak: when our
+			// watched dir is removed/renamed (e.g., blue-green GC reclone
+			// of the ledger), force fsnotify to close each per-file kqueue
+			// FD by replaying our snapshot. childMirrorEnabled is false
+			// outside Darwin so this loop costs nothing on Linux.
+			if childMirrorEnabled && event.Name == w.path &&
+				event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+				for _, f := range children {
+					_ = watcher.Remove(f)
+				}
+				children = nil
 			}
 			w.handleEvent(event)
 

@@ -62,8 +62,13 @@ func (fw *FileWatcher) Watch(agentID, sessionFile string, offset int64) error {
 		if existing.timer != nil {
 			existing.timer.Stop()
 		}
-		// only remove from fsnotify if no other session uses this file
-		if !fw.fileInUse(sessionFile, agentID) {
+		// only remove from fsnotify if no other session uses the
+		// existing file. The previous arg here was sessionFile (the NEW
+		// file), which was wrong: when re-Watching agent A from file X
+		// to file Y while another agent B watches Y, fileInUse(Y, A)
+		// returns true and we'd skip Remove(X), orphaning fsnotify's
+		// entry for X forever. Fixed to consult existing.sessionFile.
+		if !fw.fileInUse(existing.sessionFile, agentID) {
 			_ = fw.watcher.Remove(existing.sessionFile)
 		}
 	}

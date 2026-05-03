@@ -502,48 +502,10 @@ func (pw *ProjectWatcher) addDir(watcher FileSystemWatcher, path string) {
 	pw.mu.Unlock()
 }
 
-// snapshotDirFiles returns absolute child file paths for path. Best-effort:
-// errors are logged at Debug and returned as nil. Truncated to
-// maxFilesPerWatchedDir with a single Warn log so we can tell from telemetry
-// which dirs are pathological.
-//
-// Returns nil unconditionally on non-Darwin — the mirror is only used to
-// compensate for fsnotify's kqueue per-file FD leak on macOS.
+// snapshotDirFiles delegates to the package-level kqueue mirror helper. Kept
+// as a method so the existing call sites and tests don't need to change.
 func (pw *ProjectWatcher) snapshotDirFiles(path string) []string {
-	if !childMirrorEnabled {
-		return nil
-	}
-	entries, err := pw.fs.ReadDir(path)
-	if err != nil {
-		pw.logger.Debug("project watcher: ReadDir failed during snapshot",
-			"path", path, "error", err)
-		return nil
-	}
-	// Cap allocation up front: even if entries has millions of items, we
-	// only ever retain maxFilesPerWatchedDir of them and stop iterating
-	// once full. Memory bound is independent of directory cardinality.
-	capLen := len(entries)
-	if capLen > maxFilesPerWatchedDir {
-		capLen = maxFilesPerWatchedDir
-	}
-	out := make([]string, 0, capLen)
-	truncated := false
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		if len(out) >= maxFilesPerWatchedDir {
-			truncated = true
-			break
-		}
-		out = append(out, filepath.Join(path, e.Name()))
-	}
-	if truncated {
-		pw.logger.Warn("project watcher: per-dir child snapshot truncated",
-			"path", path, "cap", maxFilesPerWatchedDir, "total_entries", len(entries),
-			"impact", "FD-leak guarantee weakened for files beyond cap")
-	}
-	return out
+	return snapshotKqueueChildren(pw.fs, path, pw.logger)
 }
 
 // dirMtime returns the directory mtime, used by pruneStaleWatches as a cheap
@@ -560,33 +522,11 @@ func (pw *ProjectWatcher) dirMtime(path string) time.Time {
 	return info.ModTime()
 }
 
-// unionChildren merges two child-path slices, preserving order from the first
-// and de-duplicating. Used by addDir to combine pre-Add and post-Add
-// snapshots and close the TOCTOU race against fsnotify's watchDirectoryFiles.
+// unionChildren is a thin wrapper around the package-level kqueue mirror
+// helper, kept so the existing call sites in addDir/acquireDir don't need
+// renaming.
 func unionChildren(a, b []string) []string {
-	if len(a) == 0 {
-		return b
-	}
-	if len(b) == 0 {
-		return a
-	}
-	seen := make(map[string]struct{}, len(a)+len(b))
-	out := make([]string, 0, len(a)+len(b))
-	for _, s := range a {
-		if _, dup := seen[s]; dup {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	for _, s := range b {
-		if _, dup := seen[s]; dup {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	return out
+	return unionKqueueChildren(a, b)
 }
 
 // handleEvent processes a single fsnotify event.

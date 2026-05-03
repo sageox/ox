@@ -903,3 +903,92 @@ func TestMockFileSystemWatcher_Remove(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, 3, len(mock.RemovedPaths()), "path still recorded even on error")
 }
+
+// TestWatcher_LedgerDirRemove_FlushesPerFileFDs verifies that when the
+// watched ledger directory is removed mid-watch (the blue-green GC reclone
+// case), the singleton ledger Watcher explicitly Removes each child file
+// from fsnotify so its kqueue per-file FDs get closed via unix.Close.
+//
+// Without this, fsnotify v1.9.0's kqueue backend on macOS leaves per-file
+// FDs open until the daemon's defer Close() fires — for a long-lived
+// daemon that's effectively forever, accumulating FDs across reclones.
+//
+// Mock-level test: MockFileSystemWatcher tracks Remove calls regardless of
+// platform, so we drive a Remove event for the watched path and assert the
+// per-file Removes were issued. Skipped on non-Darwin since the production
+// code is gated by childMirrorEnabled (no children snapshotted on Linux,
+// no per-file Removes expected).
+//
+// Failure prevented: regression of the per-file FD leak pattern that, in
+// production, made `lsof` itself hang on the daemon PID.
+func TestWatcher_LedgerDirRemove_FlushesPerFileFDs(t *testing.T) {
+	if !childMirrorEnabled {
+		t.Skip("kqueue per-file FD leak is macOS-specific")
+	}
+
+	tmp := t.TempDir()
+	ledgerDir := filepath.Join(tmp, "ledger")
+	require.NoError(t, os.MkdirAll(ledgerDir, 0o755))
+
+	// Create children fsnotify would auto-watch via watchDirectoryFiles.
+	// MockFileSystem's ReadDir is what snapshotKqueueChildren calls — it
+	// must return these as non-dir entries.
+	mockFS := NewMockFileSystem()
+	mockFS.AddDir(ledgerDir, []string{"a.json", "b.json", "c.json"})
+
+	mockWatcher := NewMockFileSystemWatcher()
+	w := NewWatcherWithFS(
+		ledgerDir,
+		50*time.Millisecond,
+		slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		func() (FileSystemWatcher, error) { return mockWatcher, nil },
+		mockFS,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		w.Start(ctx, func() {})
+		close(done)
+	}()
+
+	// Wait until Add has been recorded (Start has snapshotted children).
+	require.Eventually(t, func() bool {
+		for _, p := range mockWatcher.AddedPaths() {
+			if p == ledgerDir {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 5*time.Millisecond, "Watcher should have called Add on ledgerDir")
+
+	// Simulate the kernel firing NOTE_DELETE on the watched dir (blue-green
+	// GC just rm'd it to make way for the new clone). Pre-fix this would
+	// be silently absorbed and the per-file FDs would orphan.
+	mockWatcher.SendEvent(fsnotify.Event{Name: ledgerDir, Op: fsnotify.Remove})
+
+	require.Eventually(t, func() bool {
+		removed := mockWatcher.RemovedPaths()
+		need := []string{
+			filepath.Join(ledgerDir, "a.json"),
+			filepath.Join(ledgerDir, "b.json"),
+			filepath.Join(ledgerDir, "c.json"),
+		}
+		for _, want := range need {
+			found := false
+			for _, got := range removed {
+				if got == want {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+		return true
+	}, 2*time.Second, 5*time.Millisecond, "Watcher must Remove each child file to close fsnotify's per-file FD on dir-removed event")
+
+	cancel()
+	<-done
+}
