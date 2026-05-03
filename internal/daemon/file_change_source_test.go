@@ -2,6 +2,9 @@ package daemon
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -429,4 +432,115 @@ func TestFilterFileChangeNoise(t *testing.T) {
 	assert.Equal(t, 2, len(filtered))
 	assert.Equal(t, "cmd/ox/main.go", filtered[0].Path)
 	assert.Equal(t, "internal/foo.go", filtered[1].Path)
+}
+
+// --- E. gitignore filter ---
+//
+// Failure prevented: build artifacts (.pyc, dist/, node_modules/) leaking into
+// murmurs, falsely warning teammates that an engineer touched that area.
+
+// initGitRepoForFilter creates a tmp dir with `git init` for testing the gitignore
+// filter. Uses cmd.Dir to keep the test isolated from the user's git config.
+func initGitRepoForFilter(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	cmd := exec.Command("git", "init", "-q", "-b", "main")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run(), "git init failed")
+	return dir
+}
+
+// TestFilterGitIgnored_DropsIgnoredPaths verifies that paths matching a
+// .gitignore pattern (build artifacts) are filtered out of the change set.
+func TestFilterGitIgnored_DropsIgnoredPaths(t *testing.T) {
+	root := initGitRepoForFilter(t)
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.pyc\nbuild/\n"), 0o644))
+
+	changes := []FileChange{
+		{Path: "main.go", ChangeType: ChangeModified},
+		{Path: "cache.pyc", ChangeType: ChangeCreated},
+		{Path: "build/out", ChangeType: ChangeCreated},
+		{Path: "README.md", ChangeType: ChangeModified},
+	}
+
+	filtered := filterGitIgnored(root, changes, slogDiscard())
+
+	paths := make([]string, len(filtered))
+	for i, c := range filtered {
+		paths[i] = c.Path
+	}
+	assert.ElementsMatch(t, []string{"main.go", "README.md"}, paths,
+		"only non-ignored paths should survive")
+}
+
+// TestFilterGitIgnored_NestedGitignore verifies per-directory .gitignore files
+// are respected (e.g. subdir/.gitignore only applies inside subdir).
+func TestFilterGitIgnored_NestedGitignore(t *testing.T) {
+	root := initGitRepoForFilter(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "subdir"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "subdir", ".gitignore"), []byte("secrets.txt\n"), 0o644))
+
+	changes := []FileChange{
+		{Path: "secrets.txt", ChangeType: ChangeCreated},        // top-level: not ignored
+		{Path: "subdir/secrets.txt", ChangeType: ChangeCreated}, // nested: ignored
+		{Path: "subdir/code.go", ChangeType: ChangeModified},
+	}
+
+	filtered := filterGitIgnored(root, changes, slogDiscard())
+
+	paths := make([]string, len(filtered))
+	for i, c := range filtered {
+		paths[i] = c.Path
+	}
+	assert.ElementsMatch(t, []string{"secrets.txt", "subdir/code.go"}, paths,
+		"nested .gitignore should only apply within its directory")
+}
+
+// TestFilterGitIgnored_NoGitignore verifies that when no .gitignore exists,
+// every path is preserved (no false-positive filtering).
+func TestFilterGitIgnored_NoGitignore(t *testing.T) {
+	root := initGitRepoForFilter(t)
+	changes := []FileChange{
+		{Path: "main.go", ChangeType: ChangeModified},
+		{Path: "anything.pyc", ChangeType: ChangeCreated},
+	}
+
+	filtered := filterGitIgnored(root, changes, slogDiscard())
+	assert.Len(t, filtered, 2, "no .gitignore means nothing is filtered")
+}
+
+// TestFilterGitIgnored_EmptyInput verifies short-circuit on empty input
+// (no subprocess spawned, no error).
+func TestFilterGitIgnored_EmptyInput(t *testing.T) {
+	// Use a path that doesn't exist — proves we never invoke git.
+	filtered := filterGitIgnored("/nonexistent/path", nil, slogDiscard())
+	assert.Empty(t, filtered)
+}
+
+// TestFilterGitIgnored_NonGitDir verifies graceful degradation when the
+// project root isn't a git repo: returns input unchanged rather than
+// crashing the daemon's publish loop.
+func TestFilterGitIgnored_NonGitDir(t *testing.T) {
+	dir := t.TempDir() // no `git init`
+	changes := []FileChange{
+		{Path: "main.go", ChangeType: ChangeModified},
+		{Path: "cache.pyc", ChangeType: ChangeCreated},
+	}
+
+	filtered := filterGitIgnored(dir, changes, slogDiscard())
+	assert.Len(t, filtered, 2,
+		"non-git directory should fail open, not drop everything")
+}
+
+// TestFilterGitIgnored_GitBinaryMissing verifies graceful degradation when
+// `git` isn't on PATH. Murmur is best-effort; over-reporting beats crashing.
+func TestFilterGitIgnored_GitBinaryMissing(t *testing.T) {
+	t.Setenv("PATH", "")
+	changes := []FileChange{
+		{Path: "main.go", ChangeType: ChangeModified},
+		{Path: "cache.pyc", ChangeType: ChangeCreated},
+	}
+
+	filtered := filterGitIgnored(t.TempDir(), changes, slogDiscard())
+	assert.Len(t, filtered, 2, "missing git binary should fail open")
 }

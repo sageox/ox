@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -202,6 +205,7 @@ func (p *FileChangeMurmurPublisher) publish() {
 
 	// filter infrastructure noise before formatting
 	changes = filterFileChangeNoise(changes)
+	changes = filterGitIgnored(p.projectRoot, changes, p.logger)
 	if len(changes) == 0 {
 		return
 	}
@@ -542,4 +546,84 @@ func isFileChangeNoise(path string) bool {
 		}
 	}
 	return false
+}
+
+// gitCheckIgnoreTimeout bounds the git check-ignore subprocess. Murmur publish
+// runs every 10 minutes and feeds at most ~50 paths, so this should always
+// finish in milliseconds; the timeout exists purely to prevent a wedged git
+// subprocess from blocking the daemon's publish loop.
+const gitCheckIgnoreTimeout = 5 * time.Second
+
+// filterGitIgnored drops paths that git would consider ignored (build
+// artifacts, caches, anything matched by a .gitignore rule). Without this,
+// fsnotify events for files like *.pyc leak into murmurs and look to teammates
+// like an engineer touched that area of the repo.
+//
+// On any error (git missing, non-git directory, exec failure), returns the
+// input unchanged. Murmurs are best-effort — over-reporting beats crashing the
+// daemon's publish loop.
+func filterGitIgnored(projectRoot string, changes []FileChange, logger *slog.Logger) []FileChange {
+	if len(changes) == 0 {
+		return changes
+	}
+
+	ignored, err := gitCheckIgnore(projectRoot, changes)
+	if err != nil {
+		if logger != nil {
+			logger.Debug("file change murmur: gitignore filter skipped", "error", err)
+		}
+		return changes
+	}
+	if len(ignored) == 0 {
+		return changes
+	}
+
+	filtered := changes[:0]
+	for _, c := range changes {
+		if _, drop := ignored[c.Path]; drop {
+			continue
+		}
+		filtered = append(filtered, c)
+	}
+	return filtered
+}
+
+// gitCheckIgnore returns the set of paths from changes that git considers
+// ignored. Calls `git -C <projectRoot> check-ignore --stdin -z` once with all
+// paths NUL-separated. Exit code 0 means at least one ignored path; 1 means
+// none matched (success-with-empty-output, not an error); >1 is a real error.
+func gitCheckIgnore(projectRoot string, changes []FileChange) (map[string]struct{}, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitCheckIgnoreTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "-C", projectRoot, "check-ignore", "--stdin", "-z")
+
+	var stdin bytes.Buffer
+	for _, c := range changes {
+		stdin.WriteString(c.Path)
+		stdin.WriteByte(0)
+	}
+	cmd.Stdin = &stdin
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			// exit 1 = no paths matched any ignore rule
+			return nil, nil
+		}
+		return nil, fmt.Errorf("git check-ignore: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+	}
+
+	ignored := make(map[string]struct{})
+	for _, p := range strings.Split(stdout.String(), "\x00") {
+		if p != "" {
+			ignored[p] = struct{}{}
+		}
+	}
+	return ignored, nil
 }
