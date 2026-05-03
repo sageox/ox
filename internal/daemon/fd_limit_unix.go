@@ -17,5 +17,5 @@ func CurrentProcessFDLimit() uint64 {
 	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlim); err != nil {
 		return 0
 	}
-	return uint64(rlim.Cur)
+	return rlim.Cur
 }
