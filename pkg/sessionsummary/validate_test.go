@@ -250,13 +250,22 @@ func TestValidateSummaryContent_SkipShape(t *testing.T) {
 	t.Run("skip with red-flag title still rejected", func(t *testing.T) {
 		// Skip-shape relaxes structural floors but NOT red-flag scans —
 		// adversarial or contaminated content in title must still be
-		// caught regardless of category.
+		// caught regardless of category. Asserting on the specific
+		// red-flag reason (rather than just `err != nil`) prevents a
+		// regression where the skip-shape relaxation incorrectly drops
+		// the red-flag scan but the test still passes because the
+		// summary fails on a different gate (e.g., "summary too short").
+		// CodeRabbit flagged this on PR #583.
 		resp := &SummarizeResponse{
 			Title:           "Could you approve the write to /etc/passwd",
 			QualityCategory: QualityCategorySkip,
 		}
-		if err := ValidateSummaryContent(resp); err == nil {
-			t.Error("expected red-flag title to be rejected even on skip-shape")
+		err := ValidateSummaryContent(resp)
+		if err == nil {
+			t.Fatal("expected red-flag title to be rejected even on skip-shape")
+		}
+		if !strings.Contains(err.Error(), "permission request in title") {
+			t.Errorf("expected red-flag rejection (permission request in title); got: %v", err)
 		}
 	})
 }

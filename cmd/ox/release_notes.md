@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Cheaper session summarization on the delegated path**
 - Delegated summarization now defaults to Claude Haiku 4.5 instead of inheriting the user's local default (typically Sonnet). The summarization task is structured JSON extraction over a fixed schema — well within Haiku's capabilities and 5–15× cheaper. `OX_SUMMARY_MODEL` overrides the default.
-- The summary-input optimizer now strips tool entries down to bare `{type:"tool_mark"}` markers (with `count:N` when adjacent runs collapse). Tool name, brief, and I/O are no longer carried — assistant prose already names concrete actions, and the marker only needs to signal "the agent acted between these two messages." On a realistic 300-entry session this is an 87% byte/token reduction over the previous shape.
+- The summary-input optimizer slims tool entries to `{type:"tool_mark", description:"...", count?:N}`. Agent-authored `description` strings (Bash, Agent, Task, WebFetch, ...) are kept because they're already a one-line statement of intent and ideal as `key_action` candidates; tool name, raw inputs, and outputs are dropped. Tool calls without a description (Edit, Read, Write, Glob, Grep, ...) drop entirely — assistant prose names those actions reliably. Adjacent calls with the same description collapse via `count` (typical: a polling loop). On a realistic 300-entry session this is roughly an 80% byte/token reduction over the previous shape.
 
 [0.7.2]: https://github.com/sageox/ox/releases/tag/v0.7.2
 

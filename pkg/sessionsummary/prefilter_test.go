@@ -32,6 +32,30 @@ func TestPrefilter_RealSession_LetItThrough(t *testing.T) {
 	}
 }
 
+// TestPrefilter_TwoEntryUserAssistant_LetThrough verifies the change
+// from minMeaningfulEntries=3 to =2 lets a substantive single-exchange
+// Q&A through to the real LLM summarizer. Failure prevented: the
+// prefilter over-fires on legitimate two-turn sessions (CodeRabbit
+// flagged this on PR #583) and quietly suppresses summaries the user
+// would have wanted.
+//
+// The session here has only one user prompt + one assistant response,
+// but the user content is substantive (>= minUserContentChars) so none
+// of the three low-value heuristics should fire.
+func TestPrefilter_TwoEntryUserAssistant_LetThrough(t *testing.T) {
+	entries := []Entry{
+		mkEntry("user", "Walk me through the data flow when a session is finalized — specifically how the daemon coordinates LFS upload, ledger commit, and summary writeback."),
+		mkEntry("assistant", "The daemon's session-finalize handler runs after the calling agent's hook fires; it reads the cached raw.jsonl, runs the summary LLM, and the CLI commits + pushes both the artifacts and the meta.json. Here's the sequence diagram..."),
+	}
+	resp, skip := MaybeBuildSkipSummary(entries)
+	if skip {
+		t.Fatalf("two-entry user→assistant session must NOT be prefiltered when content is substantive; resp=%+v", resp)
+	}
+	if resp != nil {
+		t.Errorf("expected nil response when not skipping, got %+v", resp)
+	}
+}
+
 // TestPrefilter_TooFewEntries verifies the entry-count floor. Failure
 // prevented: a session with one user prompt and an empty agent (e.g.,
 // the agent crashed before responding) sails through to an LLM call

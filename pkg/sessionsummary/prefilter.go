@@ -18,11 +18,17 @@ import (
 const (
 	// minMeaningfulEntries is the floor below which any summary would be
 	// guesswork. A real interaction has at minimum: 1 user prompt + 1
-	// assistant response. Below 2 entries we have nothing to summarize.
-	// Set to 3 to also reject sessions where a single tool call followed
-	// a single user prompt with no assistant text — those are usually
-	// agent test invocations or accidental session starts.
-	minMeaningfulEntries = 3
+	// assistant response, so the floor is 2 entries.
+	//
+	// We do NOT raise this to 3 to filter "user + tool, no assistant"
+	// sessions: that case is already caught by the silent-user heuristic
+	// (`!hasAssistant` flips `silent=true` with the same effect). Setting
+	// the floor to 3 would over-fire on legitimate single-exchange Q&A
+	// sessions — 1 user prompt + 1 substantive assistant response that
+	// happens to land under-budget by entry count but contains real
+	// content. Per CodeRabbit on PR #583: a 2-entry user→assistant
+	// session can be valuable; let the LLM (and later quality gate) judge.
+	minMeaningfulEntries = 2
 
 	// minUserContentChars is the floor on combined user-turn length. A
 	// user typing "ok" or pressing enter to dismiss a hook starts a

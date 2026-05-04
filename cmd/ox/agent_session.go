@@ -1072,21 +1072,35 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		result.LedgerSessionDir = filepath.Join(ledgerPath, "sessions", sessionName)
 	}
 
+	// Resolve summarizer mode early so the `off` case can skip both the
+	// SummaryPrompt construction and the needs-summary marker — otherwise
+	// `off` falls through to the inline path: the calling agent receives a
+	// non-empty summary_prompt, the doctor sees a needs-summary marker, and
+	// the user's explicit "don't summarize" choice is silently ignored.
+	// See PR #583 review thread on cmd/ox/agent_session.go:1166.
+	summarizerMode := config.GetAgentSummarizer(projectRoot)
+	summarizerOff := summarizerMode == config.AgentSummarizerOff
+
 	// Compress raw.jsonl into the ledger cache (.sageox/cache/summary-input/)
 	// before the summarizer reads it. ConversationOnly mode keeps user+assistant
 	// turns verbatim, tool entries become compact markers, system entries are
 	// dropped. Typically 50-80% smaller on real sessions. Local-only derived
 	// data per .claude/rules/ledger-cache.md; never committed, never LFS-uploaded.
 	// Falls back to raw.jsonl if compression (or ledger path resolution) fails.
-	summaryInputPath := writeOptimizedJSONLForSummary(result.RawPath, ledgerPath, sessionName)
-	if summaryInputPath == "" {
-		summaryInputPath = result.RawPath
-	}
-	result.SummaryPrompt = session.BuildSummaryPrompt(entries, summaryInputPath, result.LedgerSessionDir)
+	//
+	// Skip compression entirely when summarizer is off — no summarizer will
+	// ever read the optimized file, so the work is pure waste.
+	if !summarizerOff {
+		summaryInputPath := writeOptimizedJSONLForSummary(result.RawPath, ledgerPath, sessionName)
+		if summaryInputPath == "" {
+			summaryInputPath = result.RawPath
+		}
+		result.SummaryPrompt = session.BuildSummaryPrompt(entries, summaryInputPath, result.LedgerSessionDir)
 
-	// mark that this session needs summary generation (cleared when push-summary succeeds)
-	sessionCacheDir := filepath.Dir(result.RawPath)
-	_ = session.WriteNeedsSummaryMarker(sessionCacheDir, result.RawPath, result.LedgerSessionDir)
+		// mark that this session needs summary generation (cleared when push-summary succeeds)
+		sessionCacheDir := filepath.Dir(result.RawPath)
+		_ = session.WriteNeedsSummaryMarker(sessionCacheDir, result.RawPath, result.LedgerSessionDir)
+	}
 
 	// generate all session artifacts via shared path
 	if result.RawPath != "" {
@@ -1154,6 +1168,14 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	//               session. The only thing this buys the user is getting
 	//               their terminal back immediately at session-stop.
 	//
+	//   off       — no summarization at all. Session uploads to the ledger
+	//               but no summary.md / summary.json is produced. Handled
+	//               by the `summarizerOff` guard above the prompt-building
+	//               block: the SummaryPrompt stays empty and no
+	//               needs-summary marker is written. Dispatch below treats
+	//               `off` exactly like `inline` — non-async upload — but
+	//               with no summary work for the calling agent to do.
+	//
 	//   cloud     — RESERVED. SageOx cloud-side summarization. Not implemented.
 	//
 	// Default is `inline` because the cost asymmetry is too large to default
@@ -1162,7 +1184,6 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// honors (in priority order): the legacy SAGEOX_ASYNC_SESSION_UPLOAD /
 	// OX_SESSION_INLINE_SUMMARY env vars (deprecated, one-release shim), the
 	// `agent.summarizer` user-config key, and finally the inline default.
-	summarizerMode := config.GetAgentSummarizer(projectRoot)
 	asyncUpload := summarizerMode == config.AgentSummarizerDelegated
 
 	if ledgerErr != nil {
