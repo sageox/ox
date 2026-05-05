@@ -268,3 +268,66 @@ func BuildSummaryPrompt(entries []Entry, rawPath, ledgerSessionDir string) strin
 
 	return sb.String()
 }
+
+// maxInlineEntries is the cap beyond which we filter to user+assistant only.
+const maxInlineEntries = 800
+
+// BuildInlineSummaryPrompt builds a prompt with session content embedded
+// directly in the text. Used by the daemon's cold-start subprocess path
+// where the LLM (Haiku 4.5 via `claude -p`) cannot reliably read files
+// from disk. Embedding avoids the tool-use hop that was failing silently
+// for 40+ sessions since April 2026.
+//
+// For sessions exceeding maxInlineEntries, only user/assistant entries are
+// included (tool entries are dropped) to stay within context limits.
+func BuildInlineSummaryPrompt(entries []Entry) string {
+	var sb strings.Builder
+
+	sb.WriteString("# Summarize Session\n\n")
+	sb.WriteString("Analyze the following session transcript and generate a summary JSON object.\n\n")
+
+	sb.WriteString(SummaryPromptGuidelines)
+	sb.WriteString("\n")
+
+	sb.WriteString("## Session Transcript\n\n")
+	sb.WriteString("Below is the complete session content in chronological order.\n\n")
+
+	// for very long sessions, keep only user+assistant to fit context
+	filtered := entries
+	if len(entries) > maxInlineEntries {
+		filtered = make([]Entry, 0, len(entries)/2)
+		for _, e := range entries {
+			if e.Type == EntryTypeUser || e.Type == EntryTypeAssistant {
+				filtered = append(filtered, e)
+			}
+		}
+	}
+
+	for i, e := range filtered {
+		switch e.Type {
+		case EntryTypeUser:
+			content := truncateContent(e.Content, 2000)
+			fmt.Fprintf(&sb, "### [%d] Human\n%s\n\n", i+1, content)
+		case EntryTypeAssistant:
+			content := truncateContent(e.Content, 3000)
+			fmt.Fprintf(&sb, "### [%d] Assistant\n%s\n\n", i+1, content)
+		case "tool_mark":
+			sb.WriteString("*[tool activity]*\n\n")
+		}
+	}
+
+	sb.WriteString("## Instructions\n\n")
+	sb.WriteString("Based on the transcript above, generate the summary JSON object.\n")
+	sb.WriteString("Output ONLY the JSON object — no markdown fences, no explanation, no preamble.\n")
+
+	return sb.String()
+}
+
+// truncateContent shortens content to maxLen characters, appending an
+// ellipsis marker if truncated.
+func truncateContent(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "\n[...truncated]"
+}

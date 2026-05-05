@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/hooks/claude"
 	"github.com/sageox/ox/internal/lfs"
 )
@@ -43,6 +44,13 @@ func Default() *Registry {
 		MinInterval: 30 * time.Minute,
 		BlastRadius: "single ledger; per-session meta.json rewrite, bounded by MaxSummaryAttempts",
 		Run:         checkSessionMetaTitles,
+	})
+	r.Register(&Check{
+		Slug:        "session-inline-summary-retry",
+		Description: "Reset sessions that failed summarization due to the file-read prompt bug (pre-0.7.2); allows re-summarization with inline prompt",
+		MinInterval: 24 * time.Hour,
+		BlastRadius: "single ledger; resets summary_attempts on eligible sessions so daemon re-attempts with fixed inline prompt",
+		Run:         checkSessionInlineSummaryRetry,
 	})
 	return r
 }
@@ -136,6 +144,72 @@ func checkClaudeHooksFormat(_ context.Context, repoPath string) CheckResult {
 		Status:  StatusFixed,
 		Repo:    repoPath,
 		Summary: "rewrote .claude/settings.json into canonical array form",
+	}
+}
+
+// checkSessionInlineSummaryRetry resets sessions that were marked
+// "unrecoverable" due to the pre-0.7.2 file-read prompt bug. The daemon
+// previously asked the LLM subprocess to read raw.jsonl from disk, which
+// consistently failed (96% failure rate). The fix embeds content inline.
+//
+// This check runs at most once per day (MinInterval: 24h). After all
+// eligible sessions are reset, subsequent runs are no-ops (no sessions
+// match the "unrecoverable" + "title too short" filter).
+//
+// The 24h interval prevents runaway token burn: if the inline prompt also
+// fails for some reason, sessions exhaust MaxSummaryAttempts (3) and get
+// re-marked unrecoverable. The daily check would reset them again, but
+// only 3 LLM calls per session per day — bounded by design.
+func checkSessionInlineSummaryRetry(_ context.Context, repoPath string) CheckResult {
+	if repoPath == "" {
+		return CheckResult{Status: StatusClean}
+	}
+	ctx, err := config.LoadProjectContext(repoPath)
+	if err != nil || ctx == nil {
+		return CheckResult{Status: StatusClean, Repo: repoPath}
+	}
+	ledgerPath := ctx.DefaultLedgerPath()
+	if ledgerPath == "" {
+		return CheckResult{Status: StatusClean, Repo: repoPath}
+	}
+
+	sessionsDir := filepath.Join(ledgerPath, "sessions")
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return CheckResult{Status: StatusClean, Repo: repoPath}
+		}
+		return CheckResult{
+			Status:  StatusError,
+			Repo:    repoPath,
+			Summary: fmt.Sprintf("read sessions dir: %v", err),
+		}
+	}
+
+	// best-effort LFS client for hydrating pointer stubs
+	ep := endpoint.GetForProject(repoPath)
+	var lfsClient *lfs.Client
+	if ep != "" {
+		lfsClient, _ = lfs.NewClientFromLedger(ledgerPath, ep)
+	}
+
+	var resetCount int
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if lfs.ResetInlineSummaryEligible(filepath.Join(sessionsDir, e.Name()), false, lfsClient, ledgerPath) {
+			resetCount++
+		}
+	}
+
+	if resetCount == 0 {
+		return CheckResult{Status: StatusClean, Repo: repoPath}
+	}
+	return CheckResult{
+		Status:  StatusFixed,
+		Repo:    repoPath,
+		Summary: fmt.Sprintf("reset %d sessions for inline-prompt re-summarization", resetCount),
 	}
 }
 

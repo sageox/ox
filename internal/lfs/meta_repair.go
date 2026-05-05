@@ -3,6 +3,7 @@ package lfs
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -101,6 +102,135 @@ func RecoverEmptyTitleMeta(sessionDir string, dryRun bool) MetaRepairOutcome {
 		out.Error = "write meta.json: " + err.Error()
 	}
 	return out
+}
+
+// ResetInlineSummaryEligible resets sessions that were marked "unrecoverable"
+// due to the pre-0.7.2 bug where the daemon asked the LLM to read a file
+// from disk (which consistently failed). These sessions now qualify for
+// re-summarization using the inline prompt that embeds content directly.
+//
+// Eligibility: summary_status="unrecoverable" AND validation_error contains
+// "title too short" (the exact failure signature of the file-read bug).
+//
+// After reset: summary_status="" and summary_attempts=0. Also writes a
+// ".needs-summary" marker so the daemon's Detect() picks up the session
+// (Detect skips sessions that have all artifact files unless the marker
+// is present).
+//
+// If client is non-nil and raw.jsonl is an LFS pointer, hydrates it to the
+// ledger cache so the daemon can read actual content for summarization.
+//
+// Returns true if the session was reset. Idempotent: sessions already reset
+// (status != unrecoverable) are skipped.
+func ResetInlineSummaryEligible(sessionDir string, dryRun bool, client *Client, ledgerPath string) (reset bool) {
+	meta, err := ReadSessionMeta(sessionDir)
+	if err != nil {
+		return false
+	}
+
+	if meta.SummaryStatus != "unrecoverable" {
+		return false
+	}
+	if !strings.Contains(meta.ValidationError, "title too short") {
+		return false
+	}
+
+	if dryRun {
+		return true
+	}
+
+	meta.SummaryStatus = ""
+	meta.SummaryAttempts = 0
+	meta.ValidationError = ""
+	if err := WriteSessionMetaOnly(sessionDir, meta); err != nil {
+		return false
+	}
+
+	// if raw.jsonl is an LFS pointer, hydrate to cache so daemon can read it
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	if client != nil && IsPointerFile(rawPath) {
+		sessionName := filepath.Base(sessionDir)
+		cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
+		cachePath := HydrateRawToCache(client, sessionDir, ledgerPath)
+		if cachePath != "" {
+			rawPath = cachePath
+			// write marker in cache dir (daemon scans cache first)
+			markerData := fmt.Sprintf(`{"cache_dir":"%s","raw_path":"%s","ledger_session_dir":"%s"}`, cacheDir, rawPath, sessionDir)
+			_ = os.WriteFile(filepath.Join(cacheDir, ".needs-summary"), []byte(markerData), 0644)
+			return true
+		}
+	}
+
+	// write .needs-summary marker in session dir for blob sessions
+	markerData := fmt.Sprintf(`{"cache_dir":"%s","raw_path":"%s","ledger_session_dir":"%s"}`, sessionDir, rawPath, sessionDir)
+	_ = os.WriteFile(filepath.Join(sessionDir, ".needs-summary"), []byte(markerData), 0644)
+
+	return true
+}
+
+// HydrateRawToCache downloads raw.jsonl from LFS to the session cache dir.
+// Used by the doctor autofix to make pointer-stub sessions available for
+// re-summarization. The daemon's Detect() scans the cache dir first, so
+// placing hydrated content there allows re-summarization without modifying
+// the git-tracked pointer file.
+//
+// Returns the cache path on success, empty string on failure.
+func HydrateRawToCache(client *Client, sessionDir, ledgerPath string) string {
+	meta, err := ReadSessionMeta(sessionDir)
+	if err != nil {
+		return ""
+	}
+
+	rawRef, ok := meta.Files["raw.jsonl"]
+	if !ok || rawRef.OID == "" {
+		return ""
+	}
+
+	sessionName := filepath.Base(sessionDir)
+	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
+	cachePath := filepath.Join(cacheDir, "raw.jsonl")
+
+	// skip if already cached
+	if info, err := os.Stat(cachePath); err == nil && info.Size() > 0 {
+		return cachePath
+	}
+
+	bareOID := rawRef.BareOID()
+	resp, err := client.BatchDownload([]BatchObject{{OID: bareOID, Size: rawRef.Size}})
+	if err != nil {
+		return ""
+	}
+	if len(resp.Objects) == 0 {
+		return ""
+	}
+	obj := resp.Objects[0]
+	if obj.Error != nil || obj.Actions == nil || obj.Actions.Download == nil {
+		return ""
+	}
+
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return ""
+	}
+
+	tmpPath := cachePath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return ""
+	}
+
+	if err := DownloadToFile(obj.Actions.Download, f, true, bareOID); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return ""
+	}
+	f.Close()
+
+	if err := os.Rename(tmpPath, cachePath); err != nil {
+		os.Remove(tmpPath)
+		return ""
+	}
+
+	return cachePath
 }
 
 // readSummaryJSONTitle returns a trimmed, non-leaky title from

@@ -176,3 +176,75 @@ func TestRecoverEmptyTitleMeta_DryRunWritesNothing(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got.Title, "dry-run must not modify meta.json on disk")
 }
+
+// TestResetInlineSummaryEligible_ResetsFileReadBugSessions verifies that
+// sessions marked unrecoverable due to the pre-0.7.2 file-read prompt bug
+// ("title too short") are reset for re-summarization with the inline prompt.
+//
+// Failure prevented: 40+ sessions stuck permanently in "unrecoverable"
+// state even after the daemon is fixed to use inline prompts.
+func TestResetInlineSummaryEligible_ResetsFileReadBugSessions(t *testing.T) {
+	dir := t.TempDir()
+	writeTestMeta(t, dir, &SessionMeta{
+		Title:           "",
+		SummaryStatus:   "unrecoverable",
+		SummaryAttempts: MaxSummaryAttempts,
+		ValidationError: "content validation failed: title too short (0 chars, minimum 3)",
+	})
+
+	reset := ResetInlineSummaryEligible(dir, false, nil, "")
+	assert.True(t, reset)
+
+	got, err := ReadSessionMeta(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.SummaryStatus, "status must be cleared for re-attempt")
+	assert.Equal(t, 0, got.SummaryAttempts, "attempts must be reset to zero")
+	assert.Equal(t, "", got.ValidationError, "validation error must be cleared")
+}
+
+// TestResetInlineSummaryEligible_SkipsHealthySessions verifies that sessions
+// with successful summaries are not touched.
+func TestResetInlineSummaryEligible_SkipsHealthySessions(t *testing.T) {
+	dir := t.TempDir()
+	writeTestMeta(t, dir, &SessionMeta{
+		Title:         "Working Session",
+		SummaryStatus: "ok",
+	})
+
+	reset := ResetInlineSummaryEligible(dir, false, nil, "")
+	assert.False(t, reset)
+}
+
+// TestResetInlineSummaryEligible_SkipsUnrelatedUnrecoverable verifies that
+// sessions marked unrecoverable for OTHER reasons (not the file-read bug)
+// are not reset.
+func TestResetInlineSummaryEligible_SkipsUnrelatedUnrecoverable(t *testing.T) {
+	dir := t.TempDir()
+	writeTestMeta(t, dir, &SessionMeta{
+		Title:           "",
+		SummaryStatus:   "unrecoverable",
+		SummaryAttempts: MaxSummaryAttempts,
+		ValidationError: "richness validation failed: key_actions empty",
+	})
+
+	reset := ResetInlineSummaryEligible(dir, false, nil, "")
+	assert.False(t, reset, "should not reset sessions that failed for other reasons")
+}
+
+// TestResetInlineSummaryEligible_DryRun verifies no disk write in dry-run mode.
+func TestResetInlineSummaryEligible_DryRun(t *testing.T) {
+	dir := t.TempDir()
+	writeTestMeta(t, dir, &SessionMeta{
+		Title:           "",
+		SummaryStatus:   "unrecoverable",
+		SummaryAttempts: MaxSummaryAttempts,
+		ValidationError: "content validation failed: title too short (0 chars, minimum 3)",
+	})
+
+	reset := ResetInlineSummaryEligible(dir, true, nil, "")
+	assert.True(t, reset)
+
+	got, err := ReadSessionMeta(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "unrecoverable", got.SummaryStatus, "dry-run must not modify disk")
+}

@@ -46,18 +46,24 @@ func TestBuildPrompt(t *testing.T) {
 	if req.WorkDir != ledgerPath {
 		t.Errorf("expected WorkDir=%q, got %q", ledgerPath, req.WorkDir)
 	}
-	// prompt must reference the concrete raw file path
-	if !strings.Contains(req.Prompt, rawPath) {
-		t.Errorf("prompt should contain raw path %q", rawPath)
+	// daemon embeds session content inline — prompt must contain the actual
+	// session text, not a file-read instruction. The file-read approach
+	// failed for 40+ sessions because the cold-start subprocess couldn't
+	// reliably use tool calls to read files.
+	if strings.Contains(req.Prompt, "Read the session recording at") {
+		t.Error("daemon-side prompt must embed content inline, not instruct LLM to read a file")
+	}
+	// prompt must contain the actual session content from raw.jsonl
+	if !strings.Contains(req.Prompt, "session-finalize loop") {
+		t.Error("prompt should contain session content embedded inline")
 	}
 	// daemon owns persistence — prompt MUST NOT delegate to push-summary.
-	// Pre-fix, the daemon prompt told claude to "save JSON to file + run
-	// ox session push-summary"; claude responded with conversational text
-	// instead of inline JSON, the daemon's ParseSummaryJSON fence-fallback
-	// latched onto incidental fenced text, and the resulting failure stub
-	// shipped as meta.title="" → "Summary unavailable" in the web UI.
 	if strings.Contains(req.Prompt, "push-summary") {
 		t.Error("daemon-side prompt must not contain push-summary instruction; daemon writes meta directly")
+	}
+	// must instruct the LLM to output JSON only (no fences, no preamble)
+	if !strings.Contains(req.Prompt, "Output ONLY the JSON") {
+		t.Error("prompt must instruct LLM to output raw JSON without fences")
 	}
 }
 

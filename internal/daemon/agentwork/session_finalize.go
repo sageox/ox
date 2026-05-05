@@ -769,16 +769,11 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 		return RunRequest{SkipLLM: true}, nil
 	}
 
-	// Daemon owns persistence (ProcessResult writes summary.json + meta.json
-	// and gitCommitAndPush commits). Pass empty ledgerSessionDir so the prompt
-	// drops the "save to file + run ox session push-summary" steps and the LLM
-	// returns the JSON inline. Without this, claude treats the prompt as a
-	// shell-out request, returns conversational text, ParseSummaryJSON's
-	// fence fallback latches onto incidental fenced text, validation rejects,
-	// and meta.json ships with empty title (visible as "Summary unavailable"
-	// in the web UI). The CLI inline path keeps ledgerSessionDir non-empty —
-	// it intentionally delegates to push-summary.
-	prompt := sessionsummary.BuildSummaryPrompt(entries, payload.RawPath, "")
+	// Daemon spawns a cold-start coding agent subprocess for summarization.
+	// The subprocess cannot reliably read files via tool calls — empirically,
+	// 96% of sessions fail when the prompt says "Read the file at <path>".
+	// Embed the session content directly in the prompt instead.
+	prompt := sessionsummary.BuildInlineSummaryPrompt(entries)
 
 	return RunRequest{
 		Prompt:  prompt,
@@ -1147,9 +1142,15 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	pushed := h.gitCommitAndPush(payload)
 
 	// push succeeded — now safe to replace content files with LFS pointer stubs
+	// and commit the pointer rewrite so the remote ledger has pointers (not blobs)
 	if pushed && len(fileRefs) > 0 {
-		if _, err := lfs.WritePointerFiles(payload.SessionDir, fileRefs); err != nil {
+		written, err := lfs.WritePointerFiles(payload.SessionDir, fileRefs)
+		if err != nil {
 			h.logger.Warn("LFS pointer file write failed after push", "session", sessionName, "err", err)
+		} else if len(written) > 0 {
+			if err := h.gitCommitPointerRewrite(payload, written); err != nil {
+				h.logger.Warn("pointer rewrite commit failed (non-fatal)", "session", sessionName, "err", err)
+			}
 		}
 	}
 
@@ -1457,8 +1458,13 @@ func (h *SessionFinalizeHandler) processUploadOnly(payload *SessionFinalizePaylo
 	// on failure the cache is the only surviving copy of the session content
 	if pushed {
 		if len(fileRefs) > 0 {
-			if _, err := lfs.WritePointerFiles(payload.SessionDir, fileRefs); err != nil {
+			written, err := lfs.WritePointerFiles(payload.SessionDir, fileRefs)
+			if err != nil {
 				h.logger.Warn("upload-only: LFS pointer write failed after push", "session", sessionName, "err", err)
+			} else if len(written) > 0 {
+				if err := h.gitCommitPointerRewrite(payload, written); err != nil {
+					h.logger.Warn("upload-only: pointer rewrite commit failed (non-fatal)", "session", sessionName, "err", err)
+				}
 			}
 		}
 		if err := os.RemoveAll(origCacheDir); err != nil {
@@ -1529,6 +1535,59 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 		return false
 	}
 	return true
+}
+
+// gitCommitPointerRewrite commits and pushes the LFS pointer file rewrite.
+// Without this second commit, the remote ledger retains raw blobs alongside
+// meta.json claiming storage=lfs — the web frontend then fails to resolve
+// content via the LFS Batch API. This mirrors the CLI's
+// commitPointerRewriteAndPush (cmd/ox/session_upload.go).
+func (h *SessionFinalizeHandler) gitCommitPointerRewrite(payload *SessionFinalizePayload, pointerPaths []string) error {
+	if h.skipGit || len(pointerPaths) == 0 {
+		return nil
+	}
+
+	if h.ledgerMu != nil {
+		h.ledgerMu.Lock()
+		defer h.ledgerMu.Unlock()
+	}
+
+	ledgerPath := payload.LedgerPath
+	sessionName := filepath.Base(payload.SessionDir)
+
+	// stage only the pointer files
+	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, pointerPaths...)
+	cmd := exec.Command("git", addArgs...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git add pointers: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+
+	msg := fmt.Sprintf("lfs: pointerize %s", sessionName)
+	if err := h.runGit(ledgerPath, "commit", "-m", msg); err != nil {
+		// nothing to commit is fine — files may already be pointers
+		if strings.Contains(err.Error(), "nothing to commit") {
+			return nil
+		}
+		return err
+	}
+
+	ep := endpoint.GetForProject(h.projectRoot)
+	return gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
+		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
+		Logger:              h.logger,
+		ReconcileLFS: func(repoPath string) (bool, error) {
+			if ep == "" {
+				return false, nil
+			}
+			result, reconcileErr := lfs.ReconcileUnpushedPointers(
+				context.Background(), repoPath, ep, h.logger)
+			if reconcileErr != nil {
+				return false, reconcileErr
+			}
+			return result.Replaced > 0, nil
+		},
+	})
 }
 
 // runGit executes a git command in the ledger directory.
