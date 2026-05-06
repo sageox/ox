@@ -318,6 +318,7 @@ func BuildInlineSummaryPrompt(entries []Entry) string {
 
 	sb.WriteString("## Instructions\n\n")
 	sb.WriteString("Based on the transcript above, generate the summary JSON object.\n")
+	sb.WriteString("CRITICAL: The title MUST be 5-10 words. Not a sentence. Not a paragraph. A short label like a git commit subject line.\n")
 	sb.WriteString("Output ONLY the JSON object — no markdown fences, no explanation, no preamble.\n")
 
 	return sb.String()

@@ -128,10 +128,9 @@ func ResetInlineSummaryEligible(sessionDir string, dryRun bool, client *Client, 
 		return false
 	}
 
-	if meta.SummaryStatus != "unrecoverable" {
-		return false
-	}
-	if !strings.Contains(meta.ValidationError, "title too short") {
+	eligible := (meta.SummaryStatus == "unrecoverable" || meta.SummaryStatus == "failed_validation") &&
+		strings.Contains(meta.ValidationError, "title too short")
+	if !eligible {
 		return false
 	}
 
