@@ -1,7 +1,18 @@
 // ox-adapter-amp is the external adapter binary for Sourcegraph Amp sessions.
 //
-// Amp stores sessions as JSONL in ~/.amp/sessions/*.jsonl.
-// Hooks are installed via AGENTS.md markers in the project root.
+// Current Amp does not persist conversation transcripts to disk on its
+// own. install-hooks therefore drops two artifacts into a project:
+//
+//  1. an AGENTS.md "ox prime" marker block so the model knows to run
+//     `ox agent prime` at session start, and
+//  2. a Bun plugin at .amp/plugins/ox-bridge.ts (embedded via go:embed)
+//     that subscribes to Amp's plugin events and writes a per-thread
+//     JSONL sidecar to ~/.cache/amp/ox-sessions/<thread-id>.jsonl.
+//
+// The adapter discovers and tails those sidecar files via FindSession +
+// Serve. For pre-2026 Amp installs that wrote ~/.amp/sessions/*.jsonl
+// directly, discovery falls back to the legacy directory so existing
+// users keep working without a reinstall.
 package main
 
 import (

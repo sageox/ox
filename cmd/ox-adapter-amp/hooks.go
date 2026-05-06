@@ -59,60 +59,56 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 		}, fmt.Errorf("amp does not support user-level hooks (no user-level AGENTS.md)")
 	}
 
+	// Project: AGENTS.md marker block (idempotent).
 	agentsPath := resolveAgentsMDPath(p.RepoRoot)
-
 	existing, err := os.ReadFile(agentsPath)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("failed to read AGENTS.md: %w", err)
 	}
-
 	content := string(existing)
-
-	// already installed — idempotent (current or legacy markers)
-	if ampBlockAlreadyPresent(content) {
-		return &adapterprotocol.InstallHooksResponse{
-			Installed:    true,
-			FilesWritten: []string{agentsPath},
-		}, nil
+	if !ampBlockAlreadyPresent(content) {
+		var newContent string
+		if content == "" {
+			newContent = ampPrimeBlock + "\n"
+		} else {
+			newContent = strings.TrimRight(content, "\n") + "\n\n" + ampPrimeBlock + "\n"
+		}
+		if err := fileutil.AtomicWriteBytes(agentsPath, []byte(newContent), 0644); err != nil {
+			return nil, fmt.Errorf("failed to write AGENTS.md: %w", err)
+		}
 	}
 
-	var newContent string
-	if content == "" {
-		newContent = ampPrimeBlock + "\n"
-	} else {
-		newContent = strings.TrimRight(content, "\n") + "\n\n" + ampPrimeBlock + "\n"
+	// User-global: ox-bridge.ts plugin. Installed once per machine
+	// regardless of which project triggered install-hooks — Amp loads
+	// ~/.config/amp/plugins/ for every session, so we don't need (and
+	// shouldn't) drop a plugin file into each repo.
+	bridgePath := userBridgePluginPath()
+	if err := os.MkdirAll(filepath.Dir(bridgePath), 0755); err != nil {
+		return nil, fmt.Errorf("failed to create plugin dir: %w", err)
 	}
-
-	if err := fileutil.AtomicWriteBytes(agentsPath, []byte(newContent), 0644); err != nil {
-		return nil, fmt.Errorf("failed to write AGENTS.md: %w", err)
+	if err := fileutil.AtomicWriteBytes(bridgePath, oxBridgePluginSrc, 0644); err != nil {
+		return nil, fmt.Errorf("failed to write ox-bridge plugin: %w", err)
 	}
 
 	return &adapterprotocol.InstallHooksResponse{
 		Installed:    true,
-		FilesWritten: []string{agentsPath},
+		FilesWritten: []string{agentsPath, bridgePath},
 	}, nil
 }
 
 func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooksResponse, error) {
 	if p.Scope == "user" {
-		return &adapterprotocol.CheckHooksResponse{
-			Installed: false,
-			Scope:     p.Scope,
-		}, nil
+		return &adapterprotocol.CheckHooksResponse{Installed: false, Scope: p.Scope}, nil
 	}
 
 	agentsPath := resolveAgentsMDPath(p.RepoRoot)
 	data, err := os.ReadFile(agentsPath)
 	if err != nil {
-		return &adapterprotocol.CheckHooksResponse{
-			Installed: false,
-			Scope:     p.Scope,
-		}, nil
+		return &adapterprotocol.CheckHooksResponse{Installed: false, Scope: p.Scope}, nil
 	}
 
-	installed := ampBlockAlreadyPresent(string(data))
 	return &adapterprotocol.CheckHooksResponse{
-		Installed: installed,
+		Installed: ampBlockAlreadyPresent(string(data)),
 		Scope:     p.Scope,
 		HookFiles: []string{agentsPath},
 	}, nil
@@ -123,6 +119,9 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 		return &adapterprotocol.UninstallHooksResponse{Uninstalled: true}, nil
 	}
 
+	// Only project-scope state is touched here. The user-global bridge
+	// plugin is intentionally left in place — other repos on the same
+	// machine may still be using it.
 	agentsPath := resolveAgentsMDPath(p.RepoRoot)
 	data, err := os.ReadFile(agentsPath)
 	if err != nil {
@@ -133,10 +132,6 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 	}
 
 	content := string(data)
-
-	// remove both the current-marker block and any legacy-marker block —
-	// a pre-#527 installation may carry the generic <!-- ox:prime:start -->
-	// pair that we no longer emit.
 	cleaned := removePrimeBlock(content, ampPrimeMarkerStart, ampPrimeMarkerEnd)
 	cleaned = removePrimeBlock(cleaned, ampLegacyPrimeMarkerStart, ampLegacyPrimeMarkerEnd)
 

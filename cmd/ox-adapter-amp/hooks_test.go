@@ -75,3 +75,42 @@ func TestAmpUninstall_RemovesCurrentAndLegacyBlocks(t *testing.T) {
 		assert.NotContains(t, got, ampLegacyPrimeMarkerStart)
 	}
 }
+
+// TestAmpInstall_WritesUserBridgePlugin guards the new architecture:
+// install-hooks writes the embedded plugin to ~/.config/amp/plugins/
+// once per machine, regardless of which project triggered the install.
+// Failure prevented: silent regression to the old "marker-only" install
+// that leaves users with a broken adapter (Amp persists no transcripts
+// on its own; the bridge is the only source of session data).
+func TestAmpInstall_WritesUserBridgePlugin(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+
+	resp, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"})
+	require.NoError(t, err)
+	require.True(t, resp.Installed)
+
+	bridge := userBridgePluginPath()
+	data, err := os.ReadFile(bridge)
+	require.NoError(t, err, "user-global bridge plugin must be written")
+	assert.Equal(t, oxBridgePluginSrc, data)
+	assert.Contains(t, resp.FilesWritten, bridge)
+}
+
+// TestAmpUninstall_PreservesUserBridgePlugin protects the multi-project
+// invariant: removing the marker from project A must NOT delete the
+// user-global plugin, because project B on the same machine may still
+// rely on it. Failure prevented: cross-project breakage on uninstall.
+func TestAmpUninstall_PreservesUserBridgePlugin(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+
+	_, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"})
+	require.NoError(t, err)
+	bridge := userBridgePluginPath()
+	require.FileExists(t, bridge)
+
+	_, err = handleUninstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"})
+	require.NoError(t, err)
+	assert.FileExists(t, bridge, "user-global bridge plugin must survive project uninstall")
+}

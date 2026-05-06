@@ -206,3 +206,68 @@ func TestFindAmpSession_NoSessions(t *testing.T) {
 		t.Error("expected error for no sessions")
 	}
 }
+
+// TestFindAmpSession_PrefersBridgeDir verifies the new sidecar directory
+// (~/.cache/amp/ox-sessions) is preferred over the legacy
+// ~/.amp/sessions when both exist. This is the migration path: a user
+// upgrades, install-hooks drops a bridge plugin, and from that moment
+// the adapter must read fresh sidecar JSONL — not stale legacy files.
+// Failure prevented: adapter reading stale legacy session after upgrade.
+func TestFindAmpSession_PrefersBridgeDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	legacyDir := filepath.Join(home, ".amp", "sessions")
+	bridgeDir := filepath.Join(home, ".cache", "amp", "ox-sessions")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(bridgeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	data := `{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"x"}` + "\n"
+	legacyFile := filepath.Join(legacyDir, "old.jsonl")
+	bridgeFile := filepath.Join(bridgeDir, "new.jsonl")
+	if err := os.WriteFile(legacyFile, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bridgeFile, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := findAmpSession("", "", "", "")
+	if err != nil {
+		t.Fatalf("findAmpSession: %v", err)
+	}
+	if got != bridgeFile {
+		t.Errorf("got %q, want %q (bridge dir must win over legacy)", got, bridgeFile)
+	}
+}
+
+// TestFindAmpSession_LegacyFallback verifies that on a host with no
+// bridge sidecar dir, discovery still finds files in the legacy
+// ~/.amp/sessions location. This is what keeps pre-2026 Amp users
+// working until they reinstall hooks.
+func TestFindAmpSession_LegacyFallback(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	legacyDir := filepath.Join(home, ".amp", "sessions")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacyFile := filepath.Join(legacyDir, "old.jsonl")
+	data := `{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"x"}` + "\n"
+	if err := os.WriteFile(legacyFile, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := findAmpSession("", "", "", "")
+	if err != nil {
+		t.Fatalf("findAmpSession: %v", err)
+	}
+	if got != legacyFile {
+		t.Errorf("got %q, want %q (legacy fallback)", got, legacyFile)
+	}
+}
