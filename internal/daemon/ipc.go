@@ -473,21 +473,35 @@ type WhisperHistoryResponse struct {
 }
 
 // DoctorResponse is the response for the doctor IPC message.
+//
+// The Doctor RPC is asynchronous: the daemon kicks off the heavy work
+// (autofix scheduler RunNow, ForceDetect across all session caches,
+// session-watcher detect/restart/cleanup) in a background goroutine and
+// returns immediately. Results surface via the daemon's IssueTracker
+// (visible in `ox daemon status`) and the agent worker queue (also
+// reflected in status). This shape exists so the IPC ping itself is a
+// few milliseconds even on ledgers with thousands of sessions.
+//
+// The legacy synchronous result fields (Autofix*, SessionFinalize*) are
+// retained for backwards compatibility with any caller that still reads
+// them, but newly written code should rely on BackgroundStarted /
+// AlreadyRunning and route the user to status/logs for results.
 type DoctorResponse struct {
+	// Async lifecycle indicators (preferred).
+	BackgroundStarted bool `json:"background_started,omitempty"` // a fresh doctor pass was kicked off
+	AlreadyRunning    bool `json:"already_running,omitempty"`    // a prior pass is still in progress; this call was a no-op
+
+	// Legacy synchronous fields. Populated only when the daemon ran
+	// the work inline (e.g., older daemon versions, or unit tests
+	// driving the impl synchronously). Production callers in 0.7.2+
+	// see these empty.
 	AntiEntropyTriggered     bool     `json:"anti_entropy_triggered"`
 	ClonesTriggered          int      `json:"clones_triggered"`
 	SessionFinalizeTriggered bool     `json:"session_finalize_triggered"`
 	SessionFinalizeQueued    int      `json:"session_finalize_queued"`
-
-	// Autofix breakdown — populated when the daemon runs its
-	// auto-fix-safe checks (e.g., session-meta-titles repair) on the
-	// caller's workspace as part of Doctor(). Surfaced separately from
-	// SessionFinalizeQueued because these don't run the LLM — they
-	// only rewrite meta.json from already-good summary.json titles or
-	// bump the bounded retry counter toward "unrecoverable."
-	AutofixRan        bool     `json:"autofix_ran,omitempty"`
-	AutofixSummaries  []string `json:"autofix_summaries,omitempty"` // one summary per non-clean check, e.g. "session meta titles: recovered=2 ..."
-	MetaTitlesRepaired int     `json:"meta_titles_repaired,omitempty"`
+	AutofixRan               bool     `json:"autofix_ran,omitempty"`
+	AutofixSummaries         []string `json:"autofix_summaries,omitempty"`
+	MetaTitlesRepaired       int      `json:"meta_titles_repaired,omitempty"`
 
 	Errors []string `json:"errors,omitempty"`
 }

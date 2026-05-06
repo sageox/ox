@@ -382,15 +382,20 @@ func init() {
 }
 
 // runForceSessionUploads triggers the daemon to detect and upload incomplete sessions.
+//
+// As of 0.7.2 the daemon's Doctor() RPC is asynchronous: it kicks off
+// anti-entropy + autofix + ForceDetect + session-watcher cleanup in a
+// background goroutine and returns within milliseconds. This function
+// reports the kick-off and routes the user to where the actual results
+// land (`ox daemon status` for autofix issues + queued counts,
+// `ox daemon logs -f` for per-session detail). The 5s/30s retry
+// scaffolding remains so a busy daemon (initial sync, GC) still gets
+// a fair chance to respond.
 func runForceSessionUploads(cmd *cobra.Command) error {
 	if err := daemon.EnsureDaemon(); err != nil {
 		return fmt.Errorf("daemon required for session finalization: %w", err)
 	}
-	// Doctor() runs synchronously in the daemon: anti-entropy + full ledger scan
-	// (ForceDetect) + session-watcher detect/restart/cleanup. On real ledgers
-	// this routinely exceeds the 50ms default IPC timeout, so use a generous
-	// ceiling and retry once on timeout (mirrors the pattern in daemonStatusCmd).
-	resp, err := cli.WithSpinner("Scanning for incomplete sessions...", func() (*daemon.DoctorResponse, error) {
+	resp, err := cli.WithSpinner("Triggering doctor pass...", func() (*daemon.DoctorResponse, error) {
 		client := daemon.NewClientForCurrentRepoWithTimeout(5 * time.Second)
 		r, err := client.Doctor()
 		if err != nil && isTimeoutErr(err) {
@@ -401,27 +406,44 @@ func runForceSessionUploads(cmd *cobra.Command) error {
 	})
 	if err != nil {
 		if isTimeoutErr(err) {
-			return fmt.Errorf("daemon is busy (likely scanning sessions), try again in a moment")
+			return fmt.Errorf("daemon is busy, try again in a moment")
 		}
-		return fmt.Errorf("session finalization trigger failed: %w", err)
+		return fmt.Errorf("doctor trigger failed: %w", err)
 	}
 
 	w := cmd.OutOrStdout()
-	// surface what autofix did (meta.json repairs from clean summary.json titles,
-	// retry counter bumps, terminal flips) before the LLM-retry queue counter,
-	// because they happened synchronously in the daemon already.
-	for _, summary := range resp.AutofixSummaries {
-		fmt.Fprintf(w, "%s  %s\n",
-			ui.PassStyle.Render(ui.TimelineDot), summary)
-	}
-	if resp.SessionFinalizeQueued > 0 {
-		fmt.Fprintf(w, "%s  Queued %d session(s) for finalization\n",
-			ui.PassStyle.Render(ui.TimelineDot), resp.SessionFinalizeQueued)
-		fmt.Fprintf(w, "%s  Sessions will be finalized in the background by the daemon\n",
-			ui.MutedStyle.Render(ui.TimelineBar))
-	} else if len(resp.AutofixSummaries) == 0 {
-		fmt.Fprintf(w, "%s  No incomplete sessions found\n",
+	switch {
+	case resp.AlreadyRunning:
+		fmt.Fprintf(w, "%s  Doctor pass already in progress; this call was a no-op\n",
 			ui.PassStyle.Render(ui.TimelineDot))
+	case resp.BackgroundStarted:
+		fmt.Fprintf(w, "%s  Doctor pass started in the background\n",
+			ui.PassStyle.Render(ui.TimelineDot))
+	default:
+		// Older daemon ran the work inline; surface what we got.
+		for _, summary := range resp.AutofixSummaries {
+			fmt.Fprintf(w, "%s  %s\n",
+				ui.PassStyle.Render(ui.TimelineDot), summary)
+		}
+		if resp.SessionFinalizeQueued > 0 {
+			fmt.Fprintf(w, "%s  Queued %d session(s) for finalization\n",
+				ui.PassStyle.Render(ui.TimelineDot), resp.SessionFinalizeQueued)
+		} else if len(resp.AutofixSummaries) == 0 {
+			fmt.Fprintf(w, "%s  No incomplete sessions found\n",
+				ui.PassStyle.Render(ui.TimelineDot))
+		}
+	}
+
+	// Route the user to where the async results land.
+	if resp.BackgroundStarted || resp.AlreadyRunning {
+		fmt.Fprintf(w, "%s  Anti-entropy, autofix (meta.title recovery), ForceDetect, watcher cleanup\n",
+			ui.MutedStyle.Render(ui.TimelineBar))
+		fmt.Fprintf(w, "%s  Run %s to see autofix issues + queue\n",
+			ui.MutedStyle.Render(ui.TimelineBar),
+			ui.MutedStyle.Render("`ox daemon status`"))
+		fmt.Fprintf(w, "%s  Run %s for per-session detail\n",
+			ui.MutedStyle.Render(ui.TimelineBar),
+			ui.MutedStyle.Render("`ox daemon logs -f`"))
 	}
 	for _, e := range resp.Errors {
 		fmt.Fprintf(w, "%s  %s\n",
