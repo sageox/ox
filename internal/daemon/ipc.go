@@ -478,7 +478,18 @@ type DoctorResponse struct {
 	ClonesTriggered          int      `json:"clones_triggered"`
 	SessionFinalizeTriggered bool     `json:"session_finalize_triggered"`
 	SessionFinalizeQueued    int      `json:"session_finalize_queued"`
-	Errors                   []string `json:"errors,omitempty"`
+
+	// Autofix breakdown — populated when the daemon runs its
+	// auto-fix-safe checks (e.g., session-meta-titles repair) on the
+	// caller's workspace as part of Doctor(). Surfaced separately from
+	// SessionFinalizeQueued because these don't run the LLM — they
+	// only rewrite meta.json from already-good summary.json titles or
+	// bump the bounded retry counter toward "unrecoverable."
+	AutofixRan        bool     `json:"autofix_ran,omitempty"`
+	AutofixSummaries  []string `json:"autofix_summaries,omitempty"` // one summary per non-clean check, e.g. "session meta titles: recovered=2 ..."
+	MetaTitlesRepaired int     `json:"meta_titles_repaired,omitempty"`
+
+	Errors []string `json:"errors,omitempty"`
 }
 
 // TriggerGCResponse is the response for trigger_gc requests.

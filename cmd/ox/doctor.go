@@ -386,23 +386,46 @@ func runForceSessionUploads(cmd *cobra.Command) error {
 	if err := daemon.EnsureDaemon(); err != nil {
 		return fmt.Errorf("daemon required for session finalization: %w", err)
 	}
-	client := daemon.NewClientForCurrentRepo()
+	// Doctor() runs synchronously in the daemon: anti-entropy + full ledger scan
+	// (ForceDetect) + session-watcher detect/restart/cleanup. On real ledgers
+	// this routinely exceeds the 50ms default IPC timeout, so use a generous
+	// ceiling and retry once on timeout (mirrors the pattern in daemonStatusCmd).
 	resp, err := cli.WithSpinner("Scanning for incomplete sessions...", func() (*daemon.DoctorResponse, error) {
-		return client.Doctor()
+		client := daemon.NewClientForCurrentRepoWithTimeout(5 * time.Second)
+		r, err := client.Doctor()
+		if err != nil && isTimeoutErr(err) {
+			client = daemon.NewClientForCurrentRepoWithTimeout(30 * time.Second)
+			r, err = client.Doctor()
+		}
+		return r, err
 	})
 	if err != nil {
+		if isTimeoutErr(err) {
+			return fmt.Errorf("daemon is busy (likely scanning sessions), try again in a moment")
+		}
 		return fmt.Errorf("session finalization trigger failed: %w", err)
 	}
 
 	w := cmd.OutOrStdout()
+	// surface what autofix did (meta.json repairs from clean summary.json titles,
+	// retry counter bumps, terminal flips) before the LLM-retry queue counter,
+	// because they happened synchronously in the daemon already.
+	for _, summary := range resp.AutofixSummaries {
+		fmt.Fprintf(w, "%s  %s\n",
+			ui.PassStyle.Render(ui.TimelineDot), summary)
+	}
 	if resp.SessionFinalizeQueued > 0 {
 		fmt.Fprintf(w, "%s  Queued %d session(s) for finalization\n",
 			ui.PassStyle.Render(ui.TimelineDot), resp.SessionFinalizeQueued)
 		fmt.Fprintf(w, "%s  Sessions will be finalized in the background by the daemon\n",
 			ui.MutedStyle.Render(ui.TimelineBar))
-	} else {
+	} else if len(resp.AutofixSummaries) == 0 {
 		fmt.Fprintf(w, "%s  No incomplete sessions found\n",
 			ui.PassStyle.Render(ui.TimelineDot))
+	}
+	for _, e := range resp.Errors {
+		fmt.Fprintf(w, "%s  %s\n",
+			ui.WarnStyle.Render(ui.TimelineDot), e)
 	}
 	return nil
 }

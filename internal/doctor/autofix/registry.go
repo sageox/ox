@@ -128,3 +128,12 @@ func (c *Check) shouldRun(now time.Time) bool {
 	c.lastRunAt = now
 	return true
 }
+
+// markRun records a forced invocation in lastRunAt without consulting
+// MinInterval. Used by Scheduler.RunNow to keep the throttle clock
+// honest after a user-triggered bypass.
+func (c *Check) markRun(now time.Time) {
+	c.lastRunMu.Lock()
+	defer c.lastRunMu.Unlock()
+	c.lastRunAt = now
+}

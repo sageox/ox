@@ -100,7 +100,30 @@ func (s *Scheduler) Run(ctx context.Context) {
 // so callers get the same observable side-effects whether the
 // scheduler is running on its ticker or invoked imperatively.
 func (s *Scheduler) RunOnce(ctx context.Context) []CheckResult {
-	results := s.tickCollect(ctx)
+	results := s.tickCollect(ctx, false)
+	if s.emit != nil {
+		for _, r := range results {
+			if r.Status == StatusClean {
+				continue
+			}
+			s.emit(r)
+		}
+	}
+	return results
+}
+
+// RunNow is RunOnce with the per-check MinInterval throttle disabled.
+// Intended for explicit user-triggered invocations like
+// `ox doctor --force-session-uploads`, where the user has asked the
+// daemon to do its anti-entropy work _right now_ regardless of when
+// the slow ticker last ran.
+//
+// Throttling exists to keep the unattended ticker from spamming work;
+// it should not gate explicit human-triggered runs. RunNow advances
+// each check's lastRunAt so the next ticker round still respects the
+// throttle relative to this call.
+func (s *Scheduler) RunNow(ctx context.Context) []CheckResult {
+	results := s.tickCollect(ctx, true)
 	if s.emit != nil {
 		for _, r := range results {
 			if r.Status == StatusClean {
@@ -113,7 +136,7 @@ func (s *Scheduler) RunOnce(ctx context.Context) []CheckResult {
 }
 
 func (s *Scheduler) tick(ctx context.Context) {
-	results := s.tickCollect(ctx)
+	results := s.tickCollect(ctx, false)
 	for _, r := range results {
 		if r.Status == StatusClean {
 			continue
@@ -129,7 +152,7 @@ func (s *Scheduler) tick(ctx context.Context) {
 	}
 }
 
-func (s *Scheduler) tickCollect(ctx context.Context) []CheckResult {
+func (s *Scheduler) tickCollect(ctx context.Context, force bool) []CheckResult {
 	checks := s.registry.All()
 	var paths []string
 	if s.workspace != nil {
@@ -143,8 +166,11 @@ func (s *Scheduler) tickCollect(ctx context.Context) []CheckResult {
 	now := time.Now()
 	results := make([]CheckResult, 0, len(checks)*len(paths))
 	for _, c := range checks {
-		if !c.shouldRun(now) {
+		if !force && !c.shouldRun(now) {
 			continue
+		}
+		if force {
+			c.markRun(now)
 		}
 		for _, p := range paths {
 			select {

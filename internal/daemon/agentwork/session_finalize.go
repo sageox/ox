@@ -441,6 +441,36 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 				continue
 			}
 
+			// All artifacts exist, no .needs-summary marker, but a prior daemon
+			// summarization run may have written failure-marker stubs into them
+			// (empty title in summary.json + empty meta.title + status !=
+			// unrecoverable). The autofix scheduler's session-meta-titles check
+			// can recover meta.json from a clean summary.json title — but only
+			// when summary.json itself has one. When summary.json is _also_
+			// empty, the only path forward is re-running the LLM.
+			//
+			// Bound by lfs.MaxSummaryAttempts via the shared finalize path:
+			// each LLM retry that fails increments meta.SummaryAttempts and
+			// flips to "unrecoverable" at the cap, after which this branch
+			// short-circuits via shouldRetryEmptySummary.
+			if h.shouldRetryEmptySummary(sessionDir) {
+				h.logger.Info("session has empty-title summary stub, queuing LLM retry",
+					"session", name,
+				)
+				items = append(items, &WorkItem{
+					Type:     sessionFinalizeType,
+					Priority: sessionFinalizePriority,
+					DedupKey: sessionFinalizeType + ":" + name,
+					Payload: &SessionFinalizePayload{
+						SessionDir: sessionDir,
+						RawPath:    rawPath,
+						Missing:    requiredArtifacts, // regenerate all artifacts
+						LedgerPath: ledgerPath,
+					},
+				})
+				continue
+			}
+
 			// Truly finalized. If this session is in the ledger cache
 			// but not yet in the git-tracked sessions/ dir, it needs to be pushed.
 			if isInLedgerCacheDir(sessionDir, ledgerPath) {
@@ -1658,6 +1688,55 @@ func missingArtifacts(sessionDir string) []string {
 // terminal — the daemon already exhausted MaxSummaryAttempts on it
 // and further retries would just burn tokens. Treat unrecoverable as
 // "work no longer needed" even when title is empty.
+// shouldRetryEmptySummary reports whether a session whose artifact files
+// all exist on disk is actually a failure-marker stub from a prior daemon
+// summarization run, and is therefore eligible for an LLM retry.
+//
+// The signature of this state:
+//   - All required artifacts present (caller already established this).
+//   - No `.needs-summary` marker (CLI didn't punt — daemon ran and "completed").
+//   - meta.SummaryStatus is NOT "unrecoverable" (terminal failures stay terminal;
+//     bounded by lfs.MaxSummaryAttempts).
+//   - meta.SummaryAttempts < lfs.MaxSummaryAttempts (haven't burned the budget).
+//   - summary.json has empty/whitespace-only title (autofix can't recover meta
+//     from this either — only an LLM rerun can produce content).
+//
+// Returns false (don't enqueue) if any of the above is wrong, including
+// the meta.json being unreadable — better to skip a confusing session
+// than enqueue work the worker will then refuse via workNoLongerNeeded.
+func (h *SessionFinalizeHandler) shouldRetryEmptySummary(sessionDir string) bool {
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	if err != nil || meta == nil {
+		return false
+	}
+	if meta.SummaryStatus == sessionsummary.SummaryStatusUnrecoverable {
+		return false
+	}
+	if meta.SummaryAttempts >= lfs.MaxSummaryAttempts {
+		return false
+	}
+	// If meta.title is already populated, autofix or a prior good run
+	// already settled this session — nothing to retry.
+	if strings.TrimSpace(meta.Title) != "" {
+		return false
+	}
+	// summary.json must exist (caller said missing == 0) and have an
+	// empty title. An empty title here is the LLM-retry signal; a
+	// non-empty title is the autofix-can-recover-meta signal handled
+	// separately by checkSessionMetaTitles.
+	data, err := os.ReadFile(filepath.Join(sessionDir, "summary.json"))
+	if err != nil {
+		return false
+	}
+	var head struct {
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(data, &head); err != nil {
+		return false
+	}
+	return strings.TrimSpace(head.Title) == ""
+}
+
 func (h *SessionFinalizeHandler) workNoLongerNeeded(sessionDir string) bool {
 	if len(missingArtifacts(sessionDir)) > 0 {
 		return false

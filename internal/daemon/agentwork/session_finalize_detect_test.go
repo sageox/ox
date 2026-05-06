@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/pkg/sessionsummary"
 )
 
 func TestDetect(t *testing.T) {
@@ -879,5 +881,115 @@ func TestDetect_NeedsSummaryMarkerTriggersRefinalization(t *testing.T) {
 	}
 	if len(payload.Missing) != len(requiredArtifacts) {
 		t.Errorf("expected all artifacts in Missing (for regeneration), got %d: %v", len(payload.Missing), payload.Missing)
+	}
+}
+
+// TestDetect_EmptyTitleSummaryStubTriggersRetry verifies that sessions which
+// "completed" finalization but ended up with a failure-marker stub
+// (summary.json present but with empty title, no .needs-summary marker,
+// meta.summary_attempts < cap) get re-enqueued for an LLM retry. Without
+// this, the only repair path was to delete artifacts by hand or wait for
+// the autofix scheduler — which can't help when summary.json itself is
+// also empty.
+//
+// Failure prevented: silent loss of session summaries when daemon
+// summarization fails partway through; user runs --force-session-uploads
+// expecting repair and gets "No incomplete sessions found".
+func TestDetect_EmptyTitleSummaryStubTriggersRetry(t *testing.T) {
+	handler := NewSessionFinalizeHandler(slog.Default())
+
+	ledgerPath := t.TempDir()
+	sessionsDir := filepath.Join(ledgerPath, "sessions")
+
+	// Three sessions that exercise the boundary:
+	//   1. retryable: empty-title summary.json, attempts < cap → enqueue
+	//   2. terminal: empty-title summary.json, status unrecoverable → skip
+	//   3. autofix-recoverable: clean-title summary.json, empty meta.title → skip
+	//      (autofix scheduler handles this case, not Detect — Detect would
+	//      double-process and burn LLM tokens unnecessarily)
+	rawContent := `{"_meta":{"schema_version":"1","agent_type":"claude-code","session_id":"x","started_at":"2026-04-01T10:00:00Z"}}
+{"type":"user","content":"hello","seq":1}
+{"type":"assistant","content":"hi","seq":2}
+`
+
+	mkSession := func(name string, summaryTitle string, meta *lfs.SessionMeta) string {
+		dir := filepath.Join(sessionsDir, name)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(rawContent), 0644); err != nil {
+			t.Fatal(err)
+		}
+		// summary.json with the requested title (may be empty)
+		sj, err := json.Marshal(struct {
+			Title   string `json:"title"`
+			Summary string `json:"summary"`
+		}{Title: summaryTitle})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "summary.json"), sj, 0644); err != nil {
+			t.Fatal(err)
+		}
+		// summary.md / session.md / session.html stubs — content irrelevant,
+		// Detect only checks for presence
+		for _, name := range []string{artifactSummaryMD, artifactSessionMD} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("stub"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := lfs.WriteSessionMetaOnly(dir, meta); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+
+	retrySession := "2026-04-01T10-00-testuser-OxRTRY"
+	mkSession(retrySession, "" /* empty title */, &lfs.SessionMeta{
+		SessionName:     retrySession,
+		Title:           "",
+		SummaryStatus:   sessionsummary.SummaryStatusFailedValidation,
+		SummaryAttempts: 1, // below cap
+	})
+
+	terminalSession := "2026-04-01T11-00-testuser-OxTERM"
+	mkSession(terminalSession, "", &lfs.SessionMeta{
+		SessionName:     terminalSession,
+		Title:           "",
+		SummaryStatus:   sessionsummary.SummaryStatusUnrecoverable,
+		SummaryAttempts: lfs.MaxSummaryAttempts,
+	})
+
+	autofixableSession := "2026-04-01T12-00-testuser-OxAFIX"
+	mkSession(autofixableSession, "good clean title", &lfs.SessionMeta{
+		SessionName:     autofixableSession,
+		Title:           "", // empty meta.title but summary.json has good title
+		SummaryStatus:   sessionsummary.SummaryStatusFailedValidation,
+		SummaryAttempts: 1,
+	})
+
+	items, err := handler.Detect(ledgerPath)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+
+	if len(items) != 1 {
+		names := make([]string, 0, len(items))
+		for _, it := range items {
+			names = append(names, filepath.Base(it.Payload.(*SessionFinalizePayload).SessionDir))
+		}
+		t.Fatalf("expected 1 item (only retrySession), got %d: %v", len(items), names)
+	}
+
+	payload := items[0].Payload.(*SessionFinalizePayload)
+	if filepath.Base(payload.SessionDir) != retrySession {
+		t.Errorf("expected %s to be enqueued, got %s",
+			retrySession, filepath.Base(payload.SessionDir))
+	}
+	if payload.UploadOnly {
+		t.Error("retry should NOT be upload-only — needs LLM regeneration")
+	}
+	if len(payload.Missing) != len(requiredArtifacts) {
+		t.Errorf("expected all artifacts in Missing for full regeneration, got %v", payload.Missing)
 	}
 }

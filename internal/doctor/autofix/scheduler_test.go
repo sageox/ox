@@ -137,6 +137,56 @@ func TestCheck_ShouldRun_RespectsMinInterval(t *testing.T) {
 	}
 }
 
+// TestScheduler_RunNow_BypassesThrottle pins the contract that
+// user-triggered Doctor() RPCs (e.g., `ox doctor --force-session-uploads`)
+// actually perform their auto-fix work even when the slow ticker just
+// finished a round. Without this, the user-facing button silently
+// becomes a no-op for 30 minutes after every scheduler tick.
+//
+// Failure prevented: a future refactor that gates RunNow on shouldRun
+// ships a regressed user experience.
+func TestScheduler_RunNow_BypassesThrottle(t *testing.T) {
+	var calls atomic.Int32
+	reg := NewRegistry()
+	reg.Register(&Check{
+		Slug:        "throttled",
+		MinInterval: time.Hour,
+		Run: func(_ context.Context, _ string) CheckResult {
+			calls.Add(1)
+			return CheckResult{Status: StatusFixed, Summary: "did the thing"}
+		},
+	})
+	s := NewScheduler(reg, nil, func() []string { return []string{"/x"} }, nil)
+
+	// First RunOnce establishes the throttle clock.
+	_ = s.RunOnce(context.Background())
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("first RunOnce: calls=%d, want 1", got)
+	}
+
+	// Second RunOnce within MinInterval should be throttled — no call.
+	_ = s.RunOnce(context.Background())
+	if got := calls.Load(); got != 1 {
+		t.Errorf("RunOnce within throttle: calls=%d, want still 1", got)
+	}
+
+	// RunNow MUST run the check despite the throttle.
+	results := s.RunNow(context.Background())
+	if got := calls.Load(); got != 2 {
+		t.Errorf("RunNow within throttle: calls=%d, want 2", got)
+	}
+	if len(results) != 1 || results[0].Slug != "throttled" {
+		t.Errorf("RunNow results = %+v, want one result for slug=throttled", results)
+	}
+
+	// And after RunNow, the throttle clock advances — a follow-up RunOnce
+	// is throttled again, not perpetually open.
+	_ = s.RunOnce(context.Background())
+	if got := calls.Load(); got != 2 {
+		t.Errorf("RunOnce after RunNow within throttle: calls=%d, want still 2", got)
+	}
+}
+
 // TestRegistry_Register_OverwritesSlug guarantees the test-stub use
 // case: a test can swap a check by re-registering its slug, without
 // having to invent a removal API. Documenting via test so a future

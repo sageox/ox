@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -180,6 +181,7 @@ type Daemon struct {
 	settingsFetcher        *SettingsFetcher
 	eventBus               *hooks.EventBus
 	tracer                 *observability.DaemonTracer
+	autofixSched           *autofix.Scheduler
 
 	// state
 	mu               sync.Mutex
@@ -1260,7 +1262,7 @@ func (d *Daemon) startWorkers() {
 	// auto-safe checks happens in follow-up beads.
 	if d.config.ProjectRoot != "" {
 		autofixReg := autofix.Default()
-		autofixSched := autofix.NewScheduler(autofixReg, d.logger,
+		d.autofixSched = autofix.NewScheduler(autofixReg, d.logger,
 			func() []string { return []string{d.config.ProjectRoot} },
 			func(r autofix.CheckResult) {
 				if d.issues == nil {
@@ -1280,7 +1282,7 @@ func (d *Daemon) startWorkers() {
 		d.wg.Add(1)
 		go func() {
 			defer d.wg.Done()
-			autofixSched.Run(d.ctx)
+			d.autofixSched.Run(d.ctx)
 		}()
 	}
 
@@ -1557,6 +1559,31 @@ func (s *daemonServiceImpl) Doctor() *DoctorResponse {
 	// trigger anti-entropy (self-healing for missing repos)
 	s.d.scheduler.TriggerAntiEntropy()
 	resp := &DoctorResponse{AntiEntropyTriggered: true}
+
+	// Run the auto-fix-safe checks NOW (bypassing the 30m throttle) so
+	// the user-triggered Doctor() RPC actually performs meta.json
+	// recovery instead of waiting for the next slow tick. This catches
+	// the common "summary.json has a clean title but meta.title is
+	// empty / leaky" case that the LLM-retry path can't see.
+	if s.d.autofixSched != nil {
+		results := s.d.autofixSched.RunNow(s.d.ctx)
+		resp.AutofixRan = true
+		for _, r := range results {
+			if r.Status == autofix.StatusClean {
+				continue
+			}
+			if r.Summary != "" {
+				resp.AutofixSummaries = append(resp.AutofixSummaries, r.Summary)
+			}
+			if r.Slug == "session-meta-titles" {
+				resp.MetaTitlesRepaired += parseRecoveredCount(r.Summary)
+			}
+			if r.Status == autofix.StatusError {
+				resp.Errors = append(resp.Errors, fmt.Sprintf("autofix %s: %s", r.Slug, r.Summary))
+			}
+		}
+	}
+
 	// trigger session finalization detection (bypasses hourly cooldown)
 	if s.d.agentWorker != nil {
 		queued := s.d.agentWorker.ForceDetect()
@@ -1570,6 +1597,32 @@ func (s *daemonServiceImpl) Doctor() *DoctorResponse {
 		s.d.sessionWatcher.Cleanup()
 	}
 	return resp
+}
+
+// parseRecoveredCount extracts the "recovered=N" integer from the
+// session-meta-titles check summary. The summary shape is fixed by
+// internal/doctor/autofix/default_checks.go, so a small regex-free
+// scan is sufficient. Returns 0 on any parse failure — the value is
+// informational, not load-bearing for control flow.
+func parseRecoveredCount(summary string) int {
+	const key = "recovered="
+	i := strings.Index(summary, key)
+	if i < 0 {
+		return 0
+	}
+	rest := summary[i+len(key):]
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return 0
+	}
+	n, err := strconv.Atoi(rest[:end])
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
