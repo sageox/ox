@@ -49,8 +49,12 @@ func TestBuildInlineSummaryPrompt_LargeSession_FiltersToConversation(t *testing.
 
 	prompt := BuildInlineSummaryPrompt(entries)
 
-	// tool_mark entries should be filtered out for large sessions
-	assert.NotContains(t, prompt, "tool activity")
+	// tool_mark entries should be filtered out for large sessions —
+	// the rendered marker is "*[tool activity]*"; check the bracketed
+	// form so the assertion does not collide with the prompt's own
+	// disclosure note ("tool activity is dropped...") which is
+	// supposed to be present.
+	assert.NotContains(t, prompt, "*[tool activity]*")
 	// user entries should remain
 	assert.Contains(t, prompt, "question")
 }

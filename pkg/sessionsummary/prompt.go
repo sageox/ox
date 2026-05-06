@@ -290,7 +290,7 @@ func BuildInlineSummaryPrompt(entries []Entry) string {
 	sb.WriteString("\n")
 
 	sb.WriteString("## Session Transcript\n\n")
-	sb.WriteString("Below is the complete session content in chronological order.\n\n")
+	fmt.Fprintf(&sb, "Below is the session content in chronological order. NOTE: this transcript may be FILTERED OR TRUNCATED — for sessions over %d entries, tool activity is dropped and only user/assistant messages are kept; individual messages over 2000-3000 chars are cut with a `[...truncated]` marker. Base your summary, outcome, key_actions, and aha_moments ONLY on the content visible below. Do not assume the transcript is complete or infer events from gaps.\n\n", maxInlineEntries)
 
 	// for very long sessions, keep only user+assistant to fit context
 	filtered := entries
@@ -321,7 +321,7 @@ func BuildInlineSummaryPrompt(entries []Entry) string {
 	}
 
 	sb.WriteString("## Instructions\n\n")
-	sb.WriteString("Based on the transcript above, generate the summary JSON object.\n")
+	sb.WriteString("Base every field — summary, outcome, key_actions, aha_moments, decisions — on what is visible in the transcript above. Treat missing entries and `[...truncated]` markers as unknown, not as evidence of inactivity. If the visible content is too thin to support a field, omit it or mark it conservatively rather than fabricating.\n")
 	sb.WriteString("CRITICAL: The title MUST be 5-10 words. Not a sentence. Not a paragraph. A short label like a git commit subject line.\n")
 	sb.WriteString("Output ONLY the JSON object — no markdown fences, no explanation, no preamble.\n")
 
