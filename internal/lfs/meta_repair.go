@@ -3,7 +3,6 @@ package lfs
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -104,24 +103,15 @@ func RecoverEmptyTitleMeta(sessionDir string, dryRun bool) MetaRepairOutcome {
 	return out
 }
 
-// ResetInlineSummaryEligible resets sessions that were marked "unrecoverable"
-// due to the pre-0.7.2 bug where the daemon asked the LLM to read a file
-// from disk (which consistently failed). These sessions now qualify for
-// re-summarization using the inline prompt that embeds content directly.
-//
-// Eligibility: summary_status="unrecoverable" AND validation_error contains
-// "title too short" (the exact failure signature of the file-read bug).
-//
-// After reset: summary_status="" and summary_attempts=0. Also writes a
-// ".needs-summary" marker so the daemon's Detect() picks up the session
-// (Detect skips sessions that have all artifact files unless the marker
-// is present).
+// ResetInlineSummaryEligible resets sessions that failed summarization due
+// to the pre-0.7.2 file-read prompt bug. Targets sessions with
+// summary_status "unrecoverable" or "failed_validation" whose
+// validation_error contains "title too short".
 //
 // If client is non-nil and raw.jsonl is an LFS pointer, hydrates it to the
 // ledger cache so the daemon can read actual content for summarization.
 //
-// Returns true if the session was reset. Idempotent: sessions already reset
-// (status != unrecoverable) are skipped.
+// Returns true if the session was reset, false if not eligible.
 func ResetInlineSummaryEligible(sessionDir string, dryRun bool, client *Client, ledgerPath string) (reset bool) {
 	meta, err := ReadSessionMeta(sessionDir)
 	if err != nil {
@@ -153,18 +143,26 @@ func ResetInlineSummaryEligible(sessionDir string, dryRun bool, client *Client, 
 		cachePath := HydrateRawToCache(client, sessionDir, ledgerPath)
 		if cachePath != "" {
 			rawPath = cachePath
-			// write marker in cache dir (daemon scans cache first)
-			markerData := fmt.Sprintf(`{"cache_dir":"%s","raw_path":"%s","ledger_session_dir":"%s"}`, cacheDir, rawPath, sessionDir)
-			_ = os.WriteFile(filepath.Join(cacheDir, ".needs-summary"), []byte(markerData), 0644)
+			writeNeedsSummaryMarker(cacheDir, rawPath, sessionDir)
 			return true
 		}
 	}
 
-	// write .needs-summary marker in session dir for blob sessions
-	markerData := fmt.Sprintf(`{"cache_dir":"%s","raw_path":"%s","ledger_session_dir":"%s"}`, sessionDir, rawPath, sessionDir)
-	_ = os.WriteFile(filepath.Join(sessionDir, ".needs-summary"), []byte(markerData), 0644)
-
+	writeNeedsSummaryMarker(sessionDir, rawPath, sessionDir)
 	return true
+}
+
+func writeNeedsSummaryMarker(dir, rawPath, ledgerSessionDir string) {
+	marker := struct {
+		CacheDir         string `json:"cache_dir"`
+		RawPath          string `json:"raw_path"`
+		LedgerSessionDir string `json:"ledger_session_dir"`
+	}{dir, rawPath, ledgerSessionDir}
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(dir, ".needs-summary"), data, 0644)
 }
 
 // HydrateRawToCache downloads raw.jsonl from LFS to the session cache dir.

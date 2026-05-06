@@ -303,16 +303,20 @@ func BuildInlineSummaryPrompt(entries []Entry) string {
 		}
 	}
 
-	for i, e := range filtered {
+	seq := 0
+	for _, e := range filtered {
+		seq++
 		switch e.Type {
 		case EntryTypeUser:
 			content := truncateContent(e.Content, 2000)
-			fmt.Fprintf(&sb, "### [%d] Human\n%s\n\n", i+1, content)
+			fmt.Fprintf(&sb, "### [%d] Human\n%s\n\n", seq, content)
 		case EntryTypeAssistant:
 			content := truncateContent(e.Content, 3000)
-			fmt.Fprintf(&sb, "### [%d] Assistant\n%s\n\n", i+1, content)
+			fmt.Fprintf(&sb, "### [%d] Assistant\n%s\n\n", seq, content)
 		case "tool_mark":
-			sb.WriteString("*[tool activity]*\n\n")
+			fmt.Fprintf(&sb, "### [%d] *[tool activity]*\n\n", seq)
+		default:
+			seq-- // don't count skipped types
 		}
 	}
 
