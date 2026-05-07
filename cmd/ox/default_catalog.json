@@ -328,6 +328,18 @@
       "target": "--json",
       "kind": "unknown-flag",
       "confidence": 0.90
+    },
+    {
+      "pattern": "--format=json",
+      "target": "--json",
+      "kind": "unknown-flag",
+      "confidence": 0.95
+    },
+    {
+      "pattern": "--format=text",
+      "target": "--json=false",
+      "kind": "unknown-flag",
+      "confidence": 0.95
     }
   ]
 }
