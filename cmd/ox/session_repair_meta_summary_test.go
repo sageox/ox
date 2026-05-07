@@ -328,8 +328,8 @@ func TestRepairMetaSummary_PreservesFilesManifest(t *testing.T) {
 func TestRepairMetaSummary_EmptyTitle_RecoversFromSummaryJSON(t *testing.T) {
 	sd := t.TempDir()
 	require.NoError(t, writeRawMeta(sd, map[string]any{
-		"version":          "1.0",
-		"session_name":     "s", "agent_id": "Ox", "agent_type": "claude-code",
+		"version":      "1.0",
+		"session_name": "s", "agent_id": "Ox", "agent_type": "claude-code",
 		"created_at":       time.Now().Format(time.RFC3339Nano),
 		"title":            "",
 		"summary":          "",
@@ -364,8 +364,8 @@ func TestRepairMetaSummary_EmptyTitle_RecoversFromSummaryJSON(t *testing.T) {
 func TestRepairMetaSummary_EmptyTitle_BumpsAttemptsToTerminal(t *testing.T) {
 	sd := t.TempDir()
 	require.NoError(t, writeRawMeta(sd, map[string]any{
-		"version":        "1.0",
-		"session_name":   "s", "agent_id": "Ox", "agent_type": "claude-code",
+		"version":      "1.0",
+		"session_name": "s", "agent_id": "Ox", "agent_type": "claude-code",
 		"created_at":     time.Now().Format(time.RFC3339Nano),
 		"title":          "",
 		"summary_status": "failed_validation",

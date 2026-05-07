@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/charmbracelet/x/ansi"
@@ -98,7 +99,7 @@ func main() {
 	_ = godotenv.Load(".env.local")
 	_ = godotenv.Load(".env")
 
-	args := os.Args[1:]
+	args := rewriteFormatAlias(os.Args[1:])
 	exitCode := executeWithFrictionRecovery(args, 0)
 
 	// Record cli.exit_code on the root OTel span and flush. This runs on
@@ -183,4 +184,47 @@ func printError(err error) {
 	if !cli.IsSilent(err) {
 		fmt.Fprintf(os.Stderr, "%s %s\n", cli.Styles.Error.Render("Error:"), err)
 	}
+}
+
+// rewriteFormatAlias rewrites `--format=json|text` (and the space-separated
+// form) onto our canonical `--json` boolean before cobra sees the args.
+//
+// Why: agents trained on CLIs like gcloud/kubectl reach for `--format=json`,
+// and we accept that hand-crafted alias rather than make them retry. The
+// alias is documented in default_catalog.json as a token mapping;
+// frictionax v0.1.2 doesn't auto-execute token-level mappings yet, so we
+// apply the rewrite here. When upstream lands token auto-execute (see the
+// ox-54a TODO at agent_query.go:51), this function can be deleted.
+//
+// Scope: only `json` and `text` values are rewritten. Other values
+// (`yaml`, `csv`, ...) pass through to cobra so the unknown-flag error +
+// friction suggestion still fires. Commands that legitimately own a
+// `--format` flag (e.g. `ox distill history list`) get the canonical
+// values mapped — both paths produce the same output, so it's a no-op
+// for them.
+func rewriteFormatAlias(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--format=json":
+			out = append(out, "--json")
+		case a == "--format=text":
+			out = append(out, "--json=false")
+		case a == "--format" && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-"):
+			switch args[i+1] {
+			case "json":
+				out = append(out, "--json")
+				i++
+			case "text":
+				out = append(out, "--json=false")
+				i++
+			default:
+				out = append(out, a) // unknown value: passthrough so cobra/friction handle it
+			}
+		default:
+			out = append(out, a)
+		}
+	}
+	return out
 }

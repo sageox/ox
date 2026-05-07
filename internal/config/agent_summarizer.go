@@ -8,23 +8,27 @@ import (
 // AgentSummarizer modes — see ADR-016.
 //
 // inline    — the CLI hands a SummaryPrompt back to the calling agent, which
-//             runs the LLM in its already-warm conversation context. Cheap
-//             (input tokens are mostly cache reads); blocks the user in the
-//             foreground for ~30–120s while the agent finishes. **Default.**
+//
+//	runs the LLM in its already-warm conversation context. Cheap
+//	(input tokens are mostly cache reads); blocks the user in the
+//	foreground for ~30–120s while the agent finishes. **Default.**
 //
 // delegated — the daemon spawns a fresh `claude`/`codex`/`gemini` subprocess
-//             against the cached raw.jsonl. Every call is a cold prompt, so
-//             input tokens are paid in full — roughly 10× the cost of inline
-//             on the same session. The only thing this buys the user is
-//             returning the terminal immediately at session-stop.
+//
+//	against the cached raw.jsonl. Every call is a cold prompt, so
+//	input tokens are paid in full — roughly 10× the cost of inline
+//	on the same session. The only thing this buys the user is
+//	returning the terminal immediately at session-stop.
 //
 // off       — disables LLM summarization entirely. The session is uploaded
-//             without a summary; downstream features that depend on the
-//             summary (team-context surfacing, session search) will be
-//             degraded for that recording.
+//
+//	without a summary; downstream features that depend on the
+//	summary (team-context surfacing, session search) will be
+//	degraded for that recording.
 //
 // cloud     — RESERVED for future SageOx cloud-side summarization. Not
-//             implemented; rejected at validation.
+//
+//	implemented; rejected at validation.
 const (
 	AgentSummarizerInline    = "inline"
 	AgentSummarizerDelegated = "delegated"

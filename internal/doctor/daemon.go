@@ -634,14 +634,14 @@ func (c *DaemonFDPressureCheck) Run(_ context.Context, _ bool) CheckResult {
 			Name:    c.Name(),
 			Status:  StatusFail,
 			Message: msg,
-			Fix:  "Daemon is approaching its file-descriptor limit. Restart with `ox daemon restart` while we investigate the leak source.",
+			Fix:     "Daemon is approaching its file-descriptor limit. Restart with `ox daemon restart` while we investigate the leak source.",
 		}
 	case pct >= fdPressureWarn:
 		return CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarn,
 			Message: msg,
-			Fix:  "FD count is climbing toward the soft limit. Worth monitoring; check `ox status --verbose` over the next hour.",
+			Fix:     "FD count is climbing toward the soft limit. Worth monitoring; check `ox status --verbose` over the next hour.",
 		}
 	default:
 		return CheckResult{Name: c.Name(), Status: StatusPass, Message: msg}

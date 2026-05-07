@@ -335,7 +335,6 @@ func emitTokenoptTelemetry(rawPath string, stats tokenopt.Stats, stripStats toke
 	})
 }
 
-
 // sanityCheckOptimized returns a non-empty reason string when the compressed
 // file looks wrong and should not be trusted. Empty string = pass.
 //

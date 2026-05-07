@@ -863,137 +863,137 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		)
 	} else {
 
-	// non-zero exit = summarization failed; don't trust the output at all.
-	if result.ExitCode != 0 {
-		h.logger.Warn("summarization agent exited with error, discarding output",
-			"session", filepath.Base(payload.SessionDir),
-			"exit_code", result.ExitCode,
-			"output_len", len(llmOutput),
-		)
-		return nil
-	}
-
-	// parse LLM output into SummarizeResponse. Track whether we produced a real
-	// summary or a fallback stub so the quality gate only runs on real scores
-	// — a fallback with QualityScore=0 must NOT flow through EvaluateQuality
-	// and get discarded, otherwise transient LLM failures lose sessions (#525).
-	parsed, parseErr := sessionsummary.ParseSummaryJSON(llmOutput)
-	if parseErr != nil {
-		preview := llmOutput
-		if len(preview) > 200 {
-			preview = preview[:200]
-		}
-		h.logger.Warn("LLM output not parsable as summary JSON, using fallback stub",
-			"err", parseErr,
-			"output_len", len(llmOutput),
-			"output_preview", preview,
-		)
-		// Failure stub — see ox-qqka. User-visible Title and Summary
-		// stay empty so the UI never displays the diagnostic as if it
-		// were the session's title. The ops-facing message moves into
-		// ValidationError; SummaryStatus communicates the lifecycle
-		// state explicitly so consumers don't have to sniff sentinel
-		// strings. ScoreReason still carries the diagnostic for
-		// existing log-based tooling.
-		summaryResp = &session.SummarizeResponse{
-			QualityScore:    0.0,
-			ScoreReason:     "unparsable LLM output",
-			SummaryStatus:   sessionsummary.SummaryStatusFailedValidation,
-			ValidationError: fmt.Sprintf("LLM output was not valid JSON: %v", parseErr),
-		}
-		scored = false
-	} else {
-		summaryResp = parsed
-		// SummaryStatus and ValidationError are daemon-owned lifecycle
-		// fields. The model could echo stale values in its output (a
-		// previous failed_validation status, a leftover diagnostic, or
-		// adversarial input). Discard whatever the parse step picked
-		// up — the validator pipeline below is the only authority on
-		// these fields. Stamp OK only if all subsequent validators pass
-		// (see the `if scored` block after richness validation).
-		summaryResp.SummaryStatus = ""
-		summaryResp.ValidationError = ""
-	}
-
-	// validate summary content for agent meta-output contamination.
-	// On failure we REPLACE the parsed response with a stub — not merely
-	// flip a flag — because downstream code writes summary.json /
-	// summary.md and uploads to the ledger. If we kept the original
-	// invalid summary in summaryResp, its contaminated text would leak
-	// onto the ledger as the teammate-visible artifact even though the
-	// quality score reported it as failed.
-	if valErr := sessionsummary.ValidateSummaryContent(summaryResp); valErr != nil {
-		h.logger.Warn("summary content validation failed, using fallback stub",
-			"session", filepath.Base(payload.SessionDir),
-			"error", valErr,
-		)
-		// Failure stub — see ox-qqka. Critical: leave Title and Summary
-		// empty. Pre-fix, the validator's diagnostic was assigned to
-		// Summary and propagated through writeMetaAndUploadLFS into
-		// meta.json.summary, where the api-go list handler returned it
-		// and the web UI rendered it as the session row title. 14
-		// sessions on the SageOx Internal ledger were affected.
-		// ValidationError carries the diagnostic for ops; SummaryStatus
-		// signals the lifecycle state structurally.
-		summaryResp = &session.SummarizeResponse{
-			QualityScore:    0.0,
-			ScoreReason:     fmt.Sprintf("content validation failed: %v", valErr),
-			SummaryStatus:   sessionsummary.SummaryStatusFailedValidation,
-			ValidationError: fmt.Sprintf("content validation failed: %v", valErr),
-		}
-		scored = false
-	}
-
-	// Enforce richness schema on non-trivial sessions. The prompt asks for
-	// key_actions / aha_moments; rejecting summaries that omit them is
-	// essentially free — output tokens are negligible vs. the input tokens
-	// already paid to ingest the session. Anti-entropy path mirrors the
-	// CLI push-summary path (cmd/ox/session_push_summary.go).
-	//
-	// Same replace-don't-just-flag pattern as content validation above: a
-	// thin summary whose title / key_actions are missing must not survive
-	// on the ledger as the visible artifact for teammates.
-	entryCount := 0
-	if payload.storedSession != nil {
-		entryCount = len(payload.storedSession.Entries)
-	}
-	if scored {
-		if richErr := sessionsummary.ValidateSummaryRichness(summaryResp, entryCount); richErr != nil {
-			h.logger.Warn("summary richness validation failed, replacing with fallback stub",
+		// non-zero exit = summarization failed; don't trust the output at all.
+		if result.ExitCode != 0 {
+			h.logger.Warn("summarization agent exited with error, discarding output",
 				"session", filepath.Base(payload.SessionDir),
-				"entry_count", entryCount,
-				"error", richErr,
+				"exit_code", result.ExitCode,
+				"output_len", len(llmOutput),
 			)
-			// Same shape as the content-validation failure above (ox-qqka):
-			// no diagnostic in user-visible fields; ValidationError carries
-			// the ops-facing reason; SummaryStatus signals the lifecycle.
+			return nil
+		}
+
+		// parse LLM output into SummarizeResponse. Track whether we produced a real
+		// summary or a fallback stub so the quality gate only runs on real scores
+		// — a fallback with QualityScore=0 must NOT flow through EvaluateQuality
+		// and get discarded, otherwise transient LLM failures lose sessions (#525).
+		parsed, parseErr := sessionsummary.ParseSummaryJSON(llmOutput)
+		if parseErr != nil {
+			preview := llmOutput
+			if len(preview) > 200 {
+				preview = preview[:200]
+			}
+			h.logger.Warn("LLM output not parsable as summary JSON, using fallback stub",
+				"err", parseErr,
+				"output_len", len(llmOutput),
+				"output_preview", preview,
+			)
+			// Failure stub — see ox-qqka. User-visible Title and Summary
+			// stay empty so the UI never displays the diagnostic as if it
+			// were the session's title. The ops-facing message moves into
+			// ValidationError; SummaryStatus communicates the lifecycle
+			// state explicitly so consumers don't have to sniff sentinel
+			// strings. ScoreReason still carries the diagnostic for
+			// existing log-based tooling.
 			summaryResp = &session.SummarizeResponse{
 				QualityScore:    0.0,
-				ScoreReason:     fmt.Sprintf("richness validation failed: %v", richErr),
+				ScoreReason:     "unparsable LLM output",
 				SummaryStatus:   sessionsummary.SummaryStatusFailedValidation,
-				ValidationError: fmt.Sprintf("richness validation failed: %v", richErr),
+				ValidationError: fmt.Sprintf("LLM output was not valid JSON: %v", parseErr),
+			}
+			scored = false
+		} else {
+			summaryResp = parsed
+			// SummaryStatus and ValidationError are daemon-owned lifecycle
+			// fields. The model could echo stale values in its output (a
+			// previous failed_validation status, a leftover diagnostic, or
+			// adversarial input). Discard whatever the parse step picked
+			// up — the validator pipeline below is the only authority on
+			// these fields. Stamp OK only if all subsequent validators pass
+			// (see the `if scored` block after richness validation).
+			summaryResp.SummaryStatus = ""
+			summaryResp.ValidationError = ""
+		}
+
+		// validate summary content for agent meta-output contamination.
+		// On failure we REPLACE the parsed response with a stub — not merely
+		// flip a flag — because downstream code writes summary.json /
+		// summary.md and uploads to the ledger. If we kept the original
+		// invalid summary in summaryResp, its contaminated text would leak
+		// onto the ledger as the teammate-visible artifact even though the
+		// quality score reported it as failed.
+		if valErr := sessionsummary.ValidateSummaryContent(summaryResp); valErr != nil {
+			h.logger.Warn("summary content validation failed, using fallback stub",
+				"session", filepath.Base(payload.SessionDir),
+				"error", valErr,
+			)
+			// Failure stub — see ox-qqka. Critical: leave Title and Summary
+			// empty. Pre-fix, the validator's diagnostic was assigned to
+			// Summary and propagated through writeMetaAndUploadLFS into
+			// meta.json.summary, where the api-go list handler returned it
+			// and the web UI rendered it as the session row title. 14
+			// sessions on the SageOx Internal ledger were affected.
+			// ValidationError carries the diagnostic for ops; SummaryStatus
+			// signals the lifecycle state structurally.
+			summaryResp = &session.SummarizeResponse{
+				QualityScore:    0.0,
+				ScoreReason:     fmt.Sprintf("content validation failed: %v", valErr),
+				SummaryStatus:   sessionsummary.SummaryStatusFailedValidation,
+				ValidationError: fmt.Sprintf("content validation failed: %v", valErr),
 			}
 			scored = false
 		}
-	}
 
-	// sessionName already computed above for the workNoLongerNeeded check.
+		// Enforce richness schema on non-trivial sessions. The prompt asks for
+		// key_actions / aha_moments; rejecting summaries that omit them is
+		// essentially free — output tokens are negligible vs. the input tokens
+		// already paid to ingest the session. Anti-entropy path mirrors the
+		// CLI push-summary path (cmd/ox/session_push_summary.go).
+		//
+		// Same replace-don't-just-flag pattern as content validation above: a
+		// thin summary whose title / key_actions are missing must not survive
+		// on the ledger as the visible artifact for teammates.
+		entryCount := 0
+		if payload.storedSession != nil {
+			entryCount = len(payload.storedSession.Entries)
+		}
+		if scored {
+			if richErr := sessionsummary.ValidateSummaryRichness(summaryResp, entryCount); richErr != nil {
+				h.logger.Warn("summary richness validation failed, replacing with fallback stub",
+					"session", filepath.Base(payload.SessionDir),
+					"entry_count", entryCount,
+					"error", richErr,
+				)
+				// Same shape as the content-validation failure above (ox-qqka):
+				// no diagnostic in user-visible fields; ValidationError carries
+				// the ops-facing reason; SummaryStatus signals the lifecycle.
+				summaryResp = &session.SummarizeResponse{
+					QualityScore:    0.0,
+					ScoreReason:     fmt.Sprintf("richness validation failed: %v", richErr),
+					SummaryStatus:   sessionsummary.SummaryStatusFailedValidation,
+					ValidationError: fmt.Sprintf("richness validation failed: %v", richErr),
+				}
+				scored = false
+			}
+		}
 
-	// Optional LLM-as-judge quality scoring. Runs only when
-	// OX_SUMMARY_JUDGE=on is set AND a judge completer is configured on
-	// the handler. Diagnostic-only: writes the judge's verdict to the
-	// ledger cache at .sageox/cache/summary-judge/<session>.json and
-	// logs the path. Failures are swallowed — never block finalization
-	// on a judgment run.
-	if scored {
-		// All validators (parse + content + richness) passed. Daemon
-		// is the sole authority on lifecycle metadata — stamp OK and
-		// ensure no stale ValidationError leaked through from earlier
-		// states or from the parsed model output.
-		summaryResp.SummaryStatus = sessionsummary.SummaryStatusOK
-		summaryResp.ValidationError = ""
-		h.maybeRunJudge(sessionName, payload.LedgerPath, summaryResp)
-	}
+		// sessionName already computed above for the workNoLongerNeeded check.
+
+		// Optional LLM-as-judge quality scoring. Runs only when
+		// OX_SUMMARY_JUDGE=on is set AND a judge completer is configured on
+		// the handler. Diagnostic-only: writes the judge's verdict to the
+		// ledger cache at .sageox/cache/summary-judge/<session>.json and
+		// logs the path. Failures are swallowed — never block finalization
+		// on a judgment run.
+		if scored {
+			// All validators (parse + content + richness) passed. Daemon
+			// is the sole authority on lifecycle metadata — stamp OK and
+			// ensure no stale ValidationError leaked through from earlier
+			// states or from the parsed model output.
+			summaryResp.SummaryStatus = sessionsummary.SummaryStatusOK
+			summaryResp.ValidationError = ""
+			h.maybeRunJudge(sessionName, payload.LedgerPath, summaryResp)
+		}
 
 	} // end of else — LLM-output handling. Prefilter path skips here directly.
 
