@@ -116,7 +116,7 @@ highest-value sessions first when buckets are large.
 ## Phase 4 — Execute Approved Actions
 
 ### Removals
-```
+```bash
 ox session remove <session_name> --force
 ```
 
@@ -143,7 +143,7 @@ raw.jsonl unchanged — but the long-term intent is documented so future
 implementers (or a future `ox session token-optimize` subcommand) know
 the contract:
 
-```
+```text
 # token_optimize(raw_jsonl) -> optimized_jsonl
 #
 # Goal: reduce token footprint 5-10x while preserving all signal needed
@@ -181,7 +181,7 @@ Split the optimized jsonl into ordered chunks sized to fit a single LLM
 context window (target ~60k tokens; roughly 1500-2000 lines depending on
 turn size). Per chunk produce:
 
-```
+```json
 {
   "chunk_index": N,
   "local_actions": [...],
