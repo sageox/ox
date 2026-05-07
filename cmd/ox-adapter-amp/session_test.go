@@ -245,6 +245,42 @@ func TestFindAmpSession_PrefersBridgeDir(t *testing.T) {
 	}
 }
 
+// TestFindAmpSession_EmptyBridgeFallsBackToLegacy guards the case where
+// the bridge dir exists but is still empty (e.g. install-hooks just
+// ran, no session has flushed yet) and the user has live legacy
+// sessions in ~/.amp/sessions. The previous implementation stopped
+// at the first existing dir and returned "no sessions found"; now we
+// continue walking until we get usable candidates.
+// Failure prevented: discovery returning "no sessions" when legacy
+// data is right there.
+func TestFindAmpSession_EmptyBridgeFallsBackToLegacy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	bridgeDir := filepath.Join(home, ".cache", "amp", "ox-sessions")
+	legacyDir := filepath.Join(home, ".amp", "sessions")
+	if err := os.MkdirAll(bridgeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// bridge dir is intentionally empty
+	legacyFile := filepath.Join(legacyDir, "old.jsonl")
+	data := `{"type":"user","timestamp":"2024-01-15T10:00:00Z","content":"x"}` + "\n"
+	if err := os.WriteFile(legacyFile, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := findAmpSession("", "", "", "")
+	if err != nil {
+		t.Fatalf("findAmpSession: %v", err)
+	}
+	if got != legacyFile {
+		t.Errorf("got %q, want %q (empty bridge must fall through to legacy)", got, legacyFile)
+	}
+}
+
 // TestFindAmpSession_LegacyFallback verifies that on a host with no
 // bridge sidecar dir, discovery still finds files in the legacy
 // ~/.amp/sessions location. This is what keeps pre-2026 Amp users

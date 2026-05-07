@@ -90,7 +90,8 @@ func TestAmpInstall_WritesUserBridgePlugin(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, resp.Installed)
 
-	bridge := userBridgePluginPath()
+	bridge, err := userBridgePluginPath()
+	require.NoError(t, err)
 	data, err := os.ReadFile(bridge)
 	require.NoError(t, err, "user-global bridge plugin must be written")
 	assert.Equal(t, oxBridgePluginSrc, data)
@@ -107,7 +108,8 @@ func TestAmpUninstall_PreservesUserBridgePlugin(t *testing.T) {
 
 	_, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"})
 	require.NoError(t, err)
-	bridge := userBridgePluginPath()
+	bridge, err := userBridgePluginPath()
+	require.NoError(t, err)
 	require.FileExists(t, bridge)
 
 	_, err = handleUninstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"})

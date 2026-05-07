@@ -65,20 +65,24 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 
 	// User-global ox-bridge plugin must exist for the adapter to read
 	// any sessions on current Amp. install-hooks installs it as a
-	// side-effect, so the same fix-it command surfaces it.
-	if _, err := os.Stat(userBridgePluginPath()); os.IsNotExist(err) {
-		fix := "ox-adapter-amp install-hooks --scope project"
-		if p.RepoRoot != "" {
-			fix = "ox-adapter-amp install-hooks --repo-root " + p.RepoRoot + " --scope project"
+	// side-effect, so the same fix-it command surfaces it. If the home
+	// directory itself can't be resolved, skip this check rather than
+	// reporting a misleading "missing" issue — install would fail too.
+	if bridgePath, err := userBridgePluginPath(); err == nil {
+		if _, statErr := os.Stat(bridgePath); os.IsNotExist(statErr) {
+			fix := "ox-adapter-amp install-hooks --scope project"
+			if p.RepoRoot != "" {
+				fix = "ox-adapter-amp install-hooks --repo-root " + p.RepoRoot + " --scope project"
+			}
+			issues = append(issues, adapterprotocol.DiagnoseIssue{
+				Slug:     "amp:bridge-plugin-missing",
+				Severity: "warning",
+				Title:    "Amp ox-bridge plugin not installed",
+				Detail:   "~/.config/amp/plugins/ox-bridge.ts is missing; the adapter has no session transcripts to read until install-hooks runs.",
+				Fix:      fix,
+				FixSafe:  true,
+			})
 		}
-		issues = append(issues, adapterprotocol.DiagnoseIssue{
-			Slug:     "amp:bridge-plugin-missing",
-			Severity: "warning",
-			Title:    "Amp ox-bridge plugin not installed",
-			Detail:   "~/.config/amp/plugins/ox-bridge.ts is missing; the adapter has no session transcripts to read until install-hooks runs.",
-			Fix:      fix,
-			FixSafe:  true,
-		})
 	}
 
 	return &adapterprotocol.DiagnoseResult{OK: len(issues) == 0, Issues: issues}, nil

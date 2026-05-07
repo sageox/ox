@@ -82,7 +82,10 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 	// regardless of which project triggered install-hooks — Amp loads
 	// ~/.config/amp/plugins/ for every session, so we don't need (and
 	// shouldn't) drop a plugin file into each repo.
-	bridgePath := userBridgePluginPath()
+	bridgePath, err := userBridgePluginPath()
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve plugin path: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(bridgePath), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create plugin dir: %w", err)
 	}
