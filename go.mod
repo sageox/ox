@@ -9,6 +9,7 @@ require (
 	charm.land/lipgloss/v2 v2.0.2
 	github.com/AlexanderGrooff/mermaid-ascii v0.0.0-20251230110936-0ccc8d6547f7
 	github.com/Microsoft/go-winio v0.6.2
+	github.com/bbalet/stopwords v1.0.0
 	github.com/blevesearch/bleve/v2 v2.5.7
 	github.com/charmbracelet/x/ansi v0.11.6
 	github.com/docker/docker v28.5.2+incompatible
@@ -26,7 +27,7 @@ require (
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pelletier/go-toml/v2 v2.3.0
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
-	github.com/sageox/agentx v0.1.9
+	github.com/sageox/agentx v0.1.10
 	github.com/sageox/frictionax v0.1.2
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
@@ -54,7 +55,6 @@ require (
 	github.com/RoaringBitmap/roaring/v2 v2.4.5 // indirect
 	github.com/alecthomas/chroma/v2 v2.14.0 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
-	github.com/bbalet/stopwords v1.0.0 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/blevesearch/bleve_index_api v1.2.11 // indirect
 	github.com/blevesearch/geo v0.2.4 // indirect

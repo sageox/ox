@@ -319,8 +319,8 @@ github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0t
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
 github.com/russross/blackfriday/v2 v2.1.0 h1:JIOH55/0cWyOuilr9/qlrm0BSXldqnqwMsf35Ld67mk=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
-github.com/sageox/agentx v0.1.9 h1:Hm5voAzQweoSmT3Zc0qgv0hHKH3p9fx46tYv1gbA7GQ=
-github.com/sageox/agentx v0.1.9/go.mod h1:J/hA2opcWUvbI+11QSdTJBxT4WOP3ReZtF7L1d7Z/no=
+github.com/sageox/agentx v0.1.10 h1:uLDo3p5YdKThMIHqcq+vPApI8n484UODNu/RVZzG92g=
+github.com/sageox/agentx v0.1.10/go.mod h1:J/hA2opcWUvbI+11QSdTJBxT4WOP3ReZtF7L1d7Z/no=
 github.com/sageox/frictionax v0.1.2 h1:iQfssC1g/vVdGXi55smMfY5/4JKcQbJXRzcwrQWiNLo=
 github.com/sageox/frictionax v0.1.2/go.mod h1:Mnlre6UE4F95yX2xAhx4fJ5AKJiNThBDZIyav04O6lo=
 github.com/sergi/go-diff v1.4.0 h1:n/SP9D5ad1fORl+llWyN+D6qoUETXNZARKjyY2/KVCw=
