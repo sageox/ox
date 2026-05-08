@@ -34,6 +34,15 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 		})
 	}
 
+	// bundled guides — always available; teaches users + agents about ox
+	// concepts (team rules, AGENTS.md, team context, murmur vs. rule). Listed
+	// early so agents see it before falling back to file exploration when
+	// asked "how do I...?" questions.
+	cmds = append(cmds, IntentCommand{
+		Intent:  "learn how to do something in ox: team rules, AGENTS.md, team context, getting started — bundled topical guides",
+		Command: "ox guide [topic]",
+	})
+
 	// health check — always available on initialized project
 	cmds = append(cmds, IntentCommand{
 		Intent:  "setup issues, health check, configuration problems, known issues",

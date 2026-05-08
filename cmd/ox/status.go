@@ -1632,15 +1632,16 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 		output.Daemon.AgentWorker = buildAgentWorkerJSON()
 
 		if daemonClient != nil {
-			// AI coworkers with context stats
+			// AI coworkers with context stats (per-source split included)
 			if instances, err := daemonClient.Instances(); err == nil && len(instances) > 0 {
 				for _, inst := range instances {
 					output.AICoworkers = append(output.AICoworkers, statusAICoworkerJSON{
-						AgentID:       inst.AgentID,
-						ContextTokens: inst.CumulativeContextTokens,
-						CommandCount:  inst.CommandCount,
-						Status:        inst.Status,
-						Age:           status.FormatTimeAgo(inst.LastHeartbeat),
+						AgentID:               inst.AgentID,
+						ContextTokens:         inst.CumulativeContextTokens,
+						ContextTokensBySource: inst.CumulativeContextTokensBySource,
+						CommandCount:          inst.CommandCount,
+						Status:                inst.Status,
+						Age:                   status.FormatTimeAgo(inst.LastHeartbeat),
 					})
 				}
 			}

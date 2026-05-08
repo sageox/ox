@@ -10,6 +10,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/status"
 	"github.com/sageox/ox/internal/version"
@@ -125,8 +126,23 @@ func Heartbeat(repoPath string, teamIDs []string, agentID string) {
 // Takes raw bytes produced by the command, converts to tokens (~4 bytes/token),
 // then sends to daemon. Fire-and-forget: never blocks CLI.
 //
+// All tokens are credited to the SageOx-overhead bucket (no split available).
+// Use sendContextHeartbeatSplit when the command produced a known
+// SageOx/Team/Project breakdown (currently: ox agent prime).
+//
 // TODO: fold into a unified post-command heartbeat (see consolidation note above).
 func sendContextHeartbeat(agentID string, bytes int64, commandName string) {
+	sendContextHeartbeatSplit(agentID, bytes, commandName, nil)
+}
+
+// sendContextHeartbeatSplit is sendContextHeartbeat with a per-source
+// breakdown. budget may be nil — in that case the rolled-up total is sent
+// without a split (the daemon will credit the whole amount to the "sageox"
+// bucket so the signal isn't lost). When budget is non-nil, every source
+// it reports is forwarded; the daemon and consumers carry the source
+// strings through verbatim, so future knowledge bubbles flow without
+// touching this code path.
+func sendContextHeartbeatSplit(agentID string, bytes int64, commandName string, budget *prime.ContextBudget) {
 	tokens := status.EstimateTokens(bytes)
 	if tokens <= 0 {
 		return
@@ -144,6 +160,12 @@ func sendContextHeartbeat(agentID string, bytes int64, commandName string) {
 			ParentAgentID: parentAgentID,
 			AgentType:     agentType,
 			ParentPID:     proc.FindAgentAncestorPID(),
+		}
+		if budget != nil && len(budget.BySource) > 0 {
+			payload.ContextTokensBySource = make(map[string]int64, len(budget.BySource))
+			for src, n := range budget.BySource {
+				payload.ContextTokensBySource[src] = int64(n)
+			}
 		}
 		data, err := json.Marshal(payload)
 		if err != nil {

@@ -123,7 +123,11 @@ This command will:
 7. Associate the repo with your team (prompts for team selection)
 8. Register repository with SageOx API
 
-Use --team to specify a team ID directly, or let ox init prompt you.`,
+Use --team to specify a team ID directly, or let ox init prompt you.
+
+After init, run 'ox guide getting-started' for a five-minute walkthrough,
+or 'ox guide team-rules' to learn how to share AI coworker conventions
+across your whole team (Claude, Codex, Amp, etc.).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runInit()
 	},

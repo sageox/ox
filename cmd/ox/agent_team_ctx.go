@@ -30,7 +30,10 @@ Lists the 15 most recent discussion files (read them for full detail),
 then outputs the distilled summary from agent-context/distilled-discussions.md.
 
 Output includes a content hash (team-ctx:<hash>) - if this marker is already
-in your context, you don't need to re-run this command.`,
+in your context, you don't need to re-run this command.
+
+To learn how to add to team context (rules, docs, discussions),
+run 'ox guide team-context' or 'ox guide team-rules'.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runAgentTeamCtx,
 }

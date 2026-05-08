@@ -5,8 +5,41 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/prime"
+	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/spf13/cobra"
 )
+
+// bookkeeper tracks per-source byte counts as XML is written into a
+// strings.Builder. It uses snapshot-mark accounting: charge(source)
+// attributes every byte written since the previous charge() call to that
+// source. Token estimates use the same len/4 heuristic as
+// tokens.EstimateTokens to avoid pulling in a tokenizer dependency.
+//
+// Sources are identified by string constants in the prime package
+// (prime.BudgetSourceSageox, ...Team, ...Project, ...User, ...). Tagging
+// an emit site with a new source name is the only code change needed to
+// account for content from a future knowledge bubble — the budget,
+// heartbeat, daemon, and status layers all carry the source string
+// verbatim through the rest of the pipeline.
+type bookkeeper struct {
+	sb     *strings.Builder
+	budget prime.ContextBudget
+	mark   int
+}
+
+func newBookkeeper(sb *strings.Builder) *bookkeeper {
+	return &bookkeeper{sb: sb, mark: sb.Len()}
+}
+
+func (b *bookkeeper) charge(source string) {
+	delta := b.sb.Len() - b.mark
+	if delta < 0 {
+		delta = 0
+	}
+	b.budget.Add(source, delta/4)
+	b.mark = b.sb.Len()
+}
 
 // outputAgentPrimeXML renders prime output as structured XML tags.
 //
@@ -56,8 +89,9 @@ import (
 //  4. Use the natural format for the content (prose, table, key=value)
 //  5. Keep tag names descriptive — they ARE the documentation for the model
 //  6. Test with `make test-integration` to verify agent comprehension
-func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
+func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.ContextBudget, error) {
 	var sb strings.Builder
+	bk := newBookkeeper(&sb)
 
 	sb.WriteString("<ox-prime>\n")
 
@@ -80,6 +114,14 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 	sb.WriteString("Match against ALL aliases — the same person may appear as different names across sessions,\n")
 	sb.WriteString("murmurs, and discussions. Do NOT credit them as a teammate — say \"Building on your earlier session...\" instead.\n")
 	sb.WriteString("</instructions>\n")
+
+	// rule-promotion-guidance: nudge the agent to ask whether a project-local
+	// rule should also become a team rule when one looks generally applicable.
+	// Static (no per-session/per-team variance) so it's fully cacheable.
+	sb.WriteString("\n<rule-promotion-guidance>\n")
+	sb.WriteString("When the user adds or edits a project-local rule (CLAUDE.md, AGENTS.md, .claude/rules/*.md, .cursorrules, .windsurfrules, etc.) that looks generally applicable — not specific to this repo's code, paths, or services — ask: \"This looks like it could apply to your whole team. Want me to also publish it to your SageOx team context as agents/rules/<name>.md?\" If yes, run `ox guide team-rules` for the file format and current manual workflow. Default to asking; do not silently publish. Skip the prompt for repo-specific rules (paths, services, schemas unique to this codebase).\n")
+	sb.WriteString("Team rules apply to every supported AI coding agent (Claude, Codex, Amp, etc.) used by teammates running ox — but only for teammates running ox. Project-local .claude/rules/ only reaches Claude users.\n")
+	sb.WriteString("</rule-promotion-guidance>\n")
 
 	// code-search: behavioral instruction to prefer ox code search over built-in tools
 	if output.CodeDBAvailable {
@@ -145,14 +187,20 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 	}
 	sb.WriteString("</attribution>\n")
 
+	// charge: everything above is SageOx framing/instructions/commands/attribution
+	bk.charge(prime.BudgetSourceSageox)
+
 	// project guidance: AGENTS.md from the project root
 	if output.ProjectGuidance != nil && !output.ProjectGuidance.Skipped && output.ProjectGuidance.Content != "" {
 		fmt.Fprintf(&sb, "\n<project-guidance source=%q>\n", output.ProjectGuidance.Source)
+		bk.charge(prime.BudgetSourceSageox) // <project-guidance> tag is our framing
 		sb.WriteString(output.ProjectGuidance.Content)
 		if !strings.HasSuffix(output.ProjectGuidance.Content, "\n") {
 			sb.WriteString("\n")
 		}
+		bk.charge(prime.BudgetSourceProject) // body comes from the repo's AGENTS.md
 		sb.WriteString("</project-guidance>\n")
+		bk.charge(prime.BudgetSourceSageox)
 	}
 
 	// ════════════════════════════════════════════════════════════
@@ -164,32 +212,40 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 
 	if output.TeamContext != nil {
 		sb.WriteString("\n<team-knowledge>\n")
+		bk.charge(prime.BudgetSourceSageox)
 
 		// team instructions (AGENTS.md / CLAUDE.md from team context root)
 		if output.TeamInstructions != nil && output.TeamInstructions.Content != "" {
 			sb.WriteString("\n<team-instructions>\n")
+			bk.charge(prime.BudgetSourceSageox)
 			sb.WriteString(output.TeamInstructions.Content)
 			if !strings.HasSuffix(output.TeamInstructions.Content, "\n") {
 				sb.WriteString("\n")
 			}
+			bk.charge(prime.BudgetSourceTeam)
 			sb.WriteString("</team-instructions>\n")
+			bk.charge(prime.BudgetSourceSageox)
 		}
 
 		// agents-level AGENTS.md (coworkers/agents/AGENTS.md)
 		if output.TeamContext.AgentsAgentsMDContent != "" {
 			sb.WriteString("\n<coworker-instructions>\n")
+			bk.charge(prime.BudgetSourceSageox)
 			sb.WriteString(output.TeamContext.AgentsAgentsMDContent)
 			if !strings.HasSuffix(output.TeamContext.AgentsAgentsMDContent, "\n") {
 				sb.WriteString("\n")
 			}
+			bk.charge(prime.BudgetSourceTeam)
 			sb.WriteString("</coworker-instructions>\n")
+			bk.charge(prime.BudgetSourceSageox)
 		}
 
-		// coworkers catalog
+		// coworkers catalog: framing is ours, rows are team data
 		if len(output.TeamContext.Coworkers) > 0 {
 			sb.WriteString("\n<coworkers>\n")
 			sb.WriteString("| Name | Specialty | Model |\n")
 			sb.WriteString("|------|-----------|-------|\n")
+			bk.charge(prime.BudgetSourceSageox)
 			for _, cw := range output.TeamContext.Coworkers {
 				desc := cw.Description
 				if desc == "" {
@@ -201,15 +257,18 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 				}
 				fmt.Fprintf(&sb, "| %s | %s | %s |\n", cw.Name, desc, model)
 			}
+			bk.charge(prime.BudgetSourceTeam)
 			sb.WriteString("\nLoad: `ox coworker load <name>`\n")
 			sb.WriteString("</coworkers>\n")
+			bk.charge(prime.BudgetSourceSageox)
 		}
 
-		// team commands
+		// team commands: framing is ours, rows are team data
 		if len(output.TeamContext.CoworkerCommands) > 0 {
 			sb.WriteString("\n<team-commands>\n")
 			sb.WriteString("| Command | Trigger | Description |\n")
 			sb.WriteString("|---------|---------|-------------|\n")
+			bk.charge(prime.BudgetSourceSageox)
 			for _, tcmd := range output.TeamContext.CoworkerCommands {
 				desc := tcmd.Description
 				if desc == "" {
@@ -217,7 +276,9 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 				}
 				fmt.Fprintf(&sb, "| %s | %s | %s |\n", tcmd.Name, tcmd.Trigger, desc)
 			}
+			bk.charge(prime.BudgetSourceTeam)
 			sb.WriteString("</team-commands>\n")
+			bk.charge(prime.BudgetSourceSageox)
 		}
 
 		// docs catalog (progressive disclosure — paths only, not content)
@@ -225,6 +286,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 			sb.WriteString("\n<docs hint=\"read on demand, not preloaded\">\n")
 			sb.WriteString("| Name | When to Read |\n")
 			sb.WriteString("|------|--------------|\n")
+			bk.charge(prime.BudgetSourceSageox)
 			for _, doc := range output.TeamContext.TeamDocs {
 				title := doc.Title
 				if title == "" {
@@ -236,23 +298,35 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 				}
 				fmt.Fprintf(&sb, "| %s | %s |\n", doc.Name, when)
 			}
+			bk.charge(prime.BudgetSourceTeam)
 			if output.TeamContext.ReadCommand != "" {
 				fmt.Fprintf(&sb, "\nRead: `%s`\n", output.TeamContext.ReadCommand)
 			}
 			sb.WriteString("</docs>\n")
+			bk.charge(prime.BudgetSourceSageox)
 		}
 
-		// team memory (inlined content)
+		// team rules: framing is ours, bodies and rows are team data.
+		// emitTeamRules charges its own buckets through the bookkeeper.
+		if len(output.TeamContext.TeamRules) > 0 {
+			emitTeamRules(&sb, bk, output.TeamContext.TeamRules)
+		}
+
+		// team memory (inlined content): framing ours, body is team's
 		if output.TeamContext.MemoryContent != "" {
 			sb.WriteString("\n<memory>\n")
+			bk.charge(prime.BudgetSourceSageox)
 			sb.WriteString(output.TeamContext.MemoryContent)
 			if !strings.HasSuffix(output.TeamContext.MemoryContent, "\n") {
 				sb.WriteString("\n")
 			}
+			bk.charge(prime.BudgetSourceTeam)
 			sb.WriteString("</memory>\n")
+			bk.charge(prime.BudgetSourceSageox)
 		}
 
 		sb.WriteString("\n</team-knowledge>\n")
+		bk.charge(prime.BudgetSourceSageox)
 	}
 
 	// ledger info
@@ -395,20 +469,41 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 		sb.WriteString("</capture-prior>\n")
 	}
 
+	// final SageOx-overhead charge BEFORE the budget block, so the budget
+	// emitted below reports the totals of everything that came before it.
+	bk.charge(prime.BudgetSourceSageox)
+
+	// context-budget: split of estimated token cost by who controls each
+	// emit site. Each known source becomes an attribute on the open tag;
+	// the schema is open — adding a new knowledge bubble (e.g. "user")
+	// adds an attribute without breaking existing parsers. Total is the
+	// sum across all sources.
+	sb.WriteString("\n<context-budget hint=\"who controls each token in this prime output\"")
+	for _, src := range bk.budget.OrderedSources() {
+		fmt.Fprintf(&sb, " %s=\"%d\"", src, bk.budget.Get(src))
+	}
+	fmt.Fprintf(&sb, " total=\"%d\">\n", bk.budget.Total())
+	sb.WriteString("SageOx is judged on the sageox bucket — every word in it is our product decision.\n")
+	sb.WriteString("Other sources (team, project, user, ...) reflect content authored elsewhere; SageOx delivers them but does not control their size.\n")
+	sb.WriteString("</context-budget>\n")
+	bk.charge(prime.BudgetSourceSageox)
+
 	sb.WriteString("\n</ox-prime>\n")
+	bk.charge(prime.BudgetSourceSageox)
 
 	// write output
 	cw := agentinstance.NewCountingWriter(cmd.OutOrStdout())
 	_, err := cw.Write([]byte(sb.String()))
 	if err != nil {
-		return err
+		return &bk.budget, err
 	}
 
-	// send context heartbeat
+	// send context heartbeat with per-bucket breakdown so the daemon can
+	// track cumulative tokens by category, not just a rolled-up total.
 	if bytes := cw.BytesWritten(); bytes > 0 && output.AgentID != "" {
-		sendContextHeartbeat(output.AgentID, bytes, "prime")
+		sendContextHeartbeatSplit(output.AgentID, bytes, "prime", &bk.budget)
 	}
-	return nil
+	return &bk.budget, nil
 }
 
 // xmlEscaper replaces XML-special characters with their entity references.
@@ -422,4 +517,91 @@ var xmlEscaper = strings.NewReplacer(
 
 func escapeXML(s string) string {
 	return xmlEscaper.Replace(s)
+}
+
+// emitTeamRules writes <team-rules> and <team-rules-budget> blocks for the
+// discovered, filtered set of team rules. Charges its bookkeeper as it goes:
+// framing (tags, table headers, attribute names) is sageox-overhead; the
+// rule names, descriptions, paths, and bodies are team-content (the team
+// authored them). This keeps the rolled-up <context-budget> accurate even
+// when teams accumulate large always-tier rule libraries.
+func emitTeamRules(sb *strings.Builder, bk *bookkeeper, rules []teamdocs.TeamRule) {
+	var alwaysRules []teamdocs.TeamRule
+	var indexedRules []teamdocs.TeamRule
+	totalAlwaysTokens := 0
+
+	for _, r := range rules {
+		switch r.Visibility {
+		case teamdocs.VisibilityAlways:
+			alwaysRules = append(alwaysRules, r)
+			totalAlwaysTokens += r.EstimatedTokens
+		default:
+			indexedRules = append(indexedRules, r)
+		}
+	}
+
+	sb.WriteString("\n<team-rules hint=\"agents/rules/<topic>.md — modular AI-coworker rules. See `ox guide team-rules`.\">\n")
+	bk.charge(prime.BudgetSourceSageox)
+
+	// always-tier rules: framing is ours, body+name+desc+path are team's
+	for _, r := range alwaysRules {
+		sb.WriteString("\n<rule")
+		bk.charge(prime.BudgetSourceSageox)
+		fmt.Fprintf(sb, " name=%q", r.Name)
+		bk.charge(prime.BudgetSourceTeam)
+		sb.WriteString(" visibility=\"always\"")
+		bk.charge(prime.BudgetSourceSageox)
+		if r.Description != "" {
+			fmt.Fprintf(sb, " description=%q", r.Description)
+			bk.charge(prime.BudgetSourceTeam)
+		}
+		fmt.Fprintf(sb, " path=%q", r.RelPath)
+		bk.charge(prime.BudgetSourceTeam)
+		sb.WriteString(">\n")
+		bk.charge(prime.BudgetSourceSageox)
+		sb.WriteString(r.Body)
+		if !strings.HasSuffix(r.Body, "\n") {
+			sb.WriteString("\n")
+		}
+		bk.charge(prime.BudgetSourceTeam)
+		sb.WriteString("</rule>\n")
+		bk.charge(prime.BudgetSourceSageox)
+	}
+
+	// indexed-tier rules: framing/headers ours, rows are team's
+	if len(indexedRules) > 0 {
+		sb.WriteString("\n<indexed hint=\"read on demand by path\">\n")
+		sb.WriteString("| Name | Description | Path |\n")
+		sb.WriteString("|------|-------------|------|\n")
+		bk.charge(prime.BudgetSourceSageox)
+		for _, r := range indexedRules {
+			desc := r.Description
+			if desc == "" {
+				desc = "(no description)"
+			}
+			fmt.Fprintf(sb, "| %s | %s | %s |\n", r.Name, desc, r.RelPath)
+		}
+		bk.charge(prime.BudgetSourceTeam)
+		sb.WriteString("</indexed>\n")
+		bk.charge(prime.BudgetSourceSageox)
+	}
+
+	sb.WriteString("</team-rules>\n")
+	bk.charge(prime.BudgetSourceSageox)
+
+	// per-rule budget: framing ours, the rule names listed are team-derived
+	// but small (just the names) — round to sageox to keep this simple
+	if len(alwaysRules) > 0 {
+		fmt.Fprintf(sb,
+			"\n<team-rules-budget always_rules=\"%d\" indexed_rules=\"%d\" estimated_always_tokens=\"%d\">\n",
+			len(alwaysRules), len(indexedRules), totalAlwaysTokens)
+		sb.WriteString("Per-rule token estimates (always-tier only; indexed rules cost zero until read):\n")
+		sb.WriteString("| Rule | ~Tokens |\n")
+		sb.WriteString("|------|---------|\n")
+		for _, r := range alwaysRules {
+			fmt.Fprintf(sb, "| %s | %d |\n", r.Name, r.EstimatedTokens)
+		}
+		sb.WriteString("</team-rules-budget>\n")
+		bk.charge(prime.BudgetSourceSageox)
+	}
 }

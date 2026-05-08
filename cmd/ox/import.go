@@ -56,7 +56,10 @@ Supports Loom, Cap, and direct video URLs.
   ox import --status rec_01234567 --watch       # wait until complete
 
 The team is auto-discovered from the current repo. Use --team to override
-or when working outside an initialized repo.`,
+or when working outside an initialized repo.
+
+For behavioral rules (vs. documents), see 'ox guide team-rules' — rules
+go in agents/rules/, not through ox import.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runImport,
 }

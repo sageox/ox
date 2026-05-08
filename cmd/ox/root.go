@@ -159,6 +159,7 @@ func init() {
 	releaseNotesCmd.GroupID = "diagnostics"
 	daemonCmd.GroupID = "diagnostics"
 	upgradeCmd.GroupID = "diagnostics"
+	guideCmd.GroupID = "diagnostics"
 
 	// register commands
 	rootCmd.AddCommand(initCmd)
@@ -178,6 +179,7 @@ func init() {
 	rootCmd.AddCommand(releaseNotesCmd)
 	rootCmd.AddCommand(daemonCmd)
 	rootCmd.AddCommand(upgradeCmd)
+	rootCmd.AddCommand(guideCmd)
 
 	// silence default error and usage handling - we handle errors ourselves
 	// usage is not shown on runtime errors (network failures, auth issues, etc.)

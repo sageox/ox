@@ -21,6 +21,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/observability"
+	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
@@ -669,17 +670,22 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 
 	// merge: daemon instances are authoritative for liveness, disk provides metadata
 	type mergedInstance struct {
-		AgentID       string
-		AgentType     string
-		Status        string
-		Tokens        int64
-		CommandCount  int
-		LastHeartbeat time.Time
-		LastWhisper   time.Time
-		CreatedAt     time.Time
-		WorkspacePath string
-		ParentAgentID string
-		Recording     bool
+		AgentID   string
+		AgentType string
+		Status    string
+		Tokens    int64 // rolled-up cumulative across all sources
+		// TokensBySource is the per-source split keyed by prime.BudgetSource*
+		// constants ("sageox", "team", "project", "user", and any future
+		// knowledge bubble). SageOx is judged on the "sageox" entry alone;
+		// other entries reflect authoring choices.
+		TokensBySource map[string]int64
+		CommandCount   int
+		LastHeartbeat  time.Time
+		LastWhisper    time.Time
+		CreatedAt      time.Time
+		WorkspacePath  string
+		ParentAgentID  string
+		Recording      bool
 	}
 
 	var merged []mergedInstance
@@ -688,14 +694,15 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 	// daemon-known instances first (authoritative)
 	for _, di := range daemonInstances {
 		m := mergedInstance{
-			AgentID:       di.AgentID,
-			Status:        di.Status,
-			Tokens:        di.CumulativeContextTokens,
-			CommandCount:  di.CommandCount,
-			LastHeartbeat: di.LastHeartbeat,
-			LastWhisper:   di.LastWhisper,
-			WorkspacePath: di.WorkspacePath,
-			Recording:     session.IsRecordingForAgent(projectRoot, di.AgentID),
+			AgentID:        di.AgentID,
+			Status:         di.Status,
+			Tokens:         di.CumulativeContextTokens,
+			TokensBySource: di.CumulativeContextTokensBySource,
+			CommandCount:   di.CommandCount,
+			LastHeartbeat:  di.LastHeartbeat,
+			LastWhisper:    di.LastWhisper,
+			WorkspacePath:  di.WorkspacePath,
+			Recording:      session.IsRecordingForAgent(projectRoot, di.AgentID),
 		}
 		if disk, ok := diskByID[di.AgentID]; ok {
 			m.AgentType = disk.AgentType
@@ -855,7 +862,49 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// per-source context budget summary across all coworkers. Iterate the
+	// map so future knowledge bubbles (user, org, ...) appear automatically
+	// once they tag emit sites with a new source. SageOx is judged on
+	// "sageox" alone; other sources reflect authoring choices.
+	var sumTotal int64
+	combined := prime.ContextBudget{}
+	for _, m := range merged {
+		sumTotal += m.Tokens
+		for src, n := range m.TokensBySource {
+			combined.Add(src, int(n))
+		}
+	}
+	if sumTotal > 0 {
+		fmt.Println()
+		fmt.Println(dim.Render("  Context tokens consumed (cumulative across all coworkers):"))
+		for _, src := range combined.OrderedSources() {
+			label := contextSourceLabel(src)
+			fmt.Printf("    %-18s %s\n", label, "~"+status.FormatTokenCount(combined.Get(src)))
+		}
+		fmt.Printf("    %-18s %s\n", dim.Render("Total"), dim.Render("~"+status.FormatTokenCount(int(sumTotal))))
+		fmt.Println(dim.Render("  SageOx is judged on the sageox bucket; other sources reflect authoring choices."))
+	}
+
 	return nil
+}
+
+// contextSourceLabel returns a human-readable label for a budget source
+// identifier. Known sources get a polished label; unknown sources fall
+// through with their raw identifier so a future knowledge bubble shows up
+// even before the display layer learns its name.
+func contextSourceLabel(source string) string {
+	switch source {
+	case prime.BudgetSourceSageox:
+		return "SageOx overhead"
+	case prime.BudgetSourceTeam:
+		return "Team content"
+	case prime.BudgetSourceProject:
+		return "Project content"
+	case prime.BudgetSourceUser:
+		return "User content"
+	default:
+		return source + " content"
+	}
 }
 
 // murmur whisper budget: keep context lean so murmurs don't crowd out real work.

@@ -88,13 +88,16 @@ func TestHandleCheckRules_Installed(t *testing.T) {
 
 // --- C. Uninstall lifecycle ---
 
-// TestHandleUninstallRules_KnownLimitation documents that agentx v0.1.7
-// cannot uninstall rule files with YAML frontmatter (ExtractCommandHash only
-// checks the first line). This test asserts the current broken behavior so
-// it will FAIL once agentx fixes the limitation — prompting us to remove
-// this test and rely on the intent-based test below.
-// Failure prevented: agentx fix lands silently without us updating our code.
-func TestHandleUninstallRules_KnownLimitation(t *testing.T) {
+// TestHandleUninstallRules_AgentxLimitationOnTopLevelOxMd documents that
+// agentx v0.1.10's Uninstall cannot remove the top-level ox.md because
+// ExtractCommandHash only inspects the first line, and YAML frontmatter
+// (description: ...) lives there. The adapter works around this for the
+// sageox/ namespace via looksStamped(), but the top-level file still
+// hits the upstream bug.
+//
+// When agentx fixes the limitation upstream, this test will FAIL —
+// prompting us to remove it and simplify the workaround.
+func TestHandleUninstallRules_AgentxLimitationOnTopLevelOxMd(t *testing.T) {
 	dir := t.TempDir()
 	params := adapterprotocol.RulesParams{RepoRoot: dir, Version: "0.8.0"}
 
@@ -104,13 +107,15 @@ func TestHandleUninstallRules_KnownLimitation(t *testing.T) {
 	resp, err := handleUninstallRules(params)
 	require.NoError(t, err)
 
-	// agentx v0.1.7: frontmatter prevents uninstall from finding the stamp
-	assert.False(t, resp.Uninstalled, "expected Uninstalled=false due to agentx frontmatter limitation — if this fails, agentx fixed the bug and this test should be removed")
-	assert.Empty(t, resp.FilesRemoved, "expected no files removed due to agentx frontmatter limitation")
+	for _, name := range resp.FilesRemoved {
+		if name == "ox.md" {
+			t.Fatalf("ox.md was removed — agentx may have fixed the frontmatter limitation; remove this test and update the workaround in rules.go")
+		}
+	}
 
 	ruleFile := filepath.Join(dir, ".factory", "rules", "ox.md")
 	_, err = os.Stat(ruleFile)
-	assert.NoError(t, err, "file survives uninstall due to agentx frontmatter limitation")
+	assert.NoError(t, err, "ox.md survives uninstall due to agentx frontmatter limitation")
 }
 
 // --- D. Diagnose integration ---

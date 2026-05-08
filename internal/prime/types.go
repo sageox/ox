@@ -62,6 +62,14 @@ type TeamContextInfo struct {
 	// Content is NOT inlined — agents read on demand via file path.
 	TeamDocs []teamdocs.TeamDoc `json:"team_docs,omitempty"`
 
+	// Team rules — modular AI-coworker rules under agents/rules/**/*.md
+	// (with coworkers/rules/ as legacy fallback). The team-scope cousin of
+	// Claude's .claude/rules/<topic>.md. Filtered by repos:, audience:, and
+	// status: at discovery time. visibility: always rules carry their body
+	// inlined for prime emission; visibility: indexed rules carry only
+	// metadata and are read on demand by the agent.
+	TeamRules []teamdocs.TeamRule `json:"team_rules,omitempty"`
+
 	// v4 Team Memory
 	MemoryContent        string   `json:"memory_content,omitempty"`         // full MEMORY.md content (always inlined)
 	SoulHint             string   `json:"soul_hint,omitempty"`              // path to SOUL.md (reference, not inlined)
@@ -123,6 +131,118 @@ type TeamInstructions struct {
 	Files    []string `json:"files"`               // which files contributed: ["AGENTS.md", "CLAUDE.md"]
 }
 
+// Knowledge-bubble source identifiers for ContextBudget.
+//
+// Add a new constant here when introducing a new knowledge bubble (e.g., a
+// per-user knowledge bubble, an organization-level bubble, a role-scoped
+// bubble). Tag every emit site that injects content from that bubble with
+// the new constant; the rest of the pipeline (heartbeat, daemon, status)
+// flows the source through automatically — no schema migration required.
+//
+// Source names are stable string keys serialized into JSON and surfaced to
+// agents in the prime XML <context-budget> block. Use lowercase, no spaces.
+const (
+	// BudgetSourceSageox: tool overhead. Every word is a SageOx product
+	// decision: instructions, commands table, attribution, code-search hint,
+	// rule-promotion-guidance, ledger descriptor, session-context framing,
+	// immediate-actions, user-notices, catalog headers/footers. SageOx is
+	// judged on this bucket and only this bucket.
+	BudgetSourceSageox = "sageox"
+
+	// BudgetSourceTeam: team-authored or team-imported content delivered
+	// from the team-context repo. AGENTS.md, CLAUDE.md, MEMORY.md, team
+	// rules (always-tier bodies and indexed rows), coworker profiles,
+	// team commands catalog rows, team docs catalog rows. SageOx delivers
+	// it; the team controls its size.
+	BudgetSourceTeam = "team"
+
+	// BudgetSourceProject: content the repo (project) authored — the
+	// project's own AGENTS.md surfaced via <project-guidance>. Distinct
+	// from team content because it lives in the repo, not in team context.
+	BudgetSourceProject = "project"
+
+	// BudgetSourceUser: reserved for the upcoming per-user knowledge
+	// bubble (a SageOx user's personal context that travels across teams
+	// and repos). When the feature lands, tag those emit sites with this
+	// constant; no other plumbing changes required.
+	BudgetSourceUser = "user"
+)
+
+// ContextBudget reports the estimated token cost of prime output split by
+// who controls the content. SageOx is judged on what it directly emits
+// (BudgetSourceSageox) separately from content authored by teams, projects,
+// users, or any future knowledge bubble. A rolled-up single number
+// conflates these and unfairly penalizes teams whose context is rich.
+//
+// Estimates use the same len/4 heuristic as tokens.EstimateTokens — no
+// tokenizer dependency at the prime emit site.
+//
+// The map shape (rather than fixed fields) is intentional: future
+// knowledge bubbles add entries by tagging emit sites with a new source
+// constant. The IPC, daemon aggregation, and display layers preserve the
+// map verbatim, so adding a bubble is a one-line code change.
+type ContextBudget struct {
+	// BySource maps a source identifier (BudgetSource* constants) to the
+	// estimated token count for that source. Sum across all entries
+	// equals Total().
+	BySource map[string]int `json:"by_source,omitempty"`
+}
+
+// Add increments the token count for a given source. Zero or negative
+// tokens are ignored. Lazily initializes the map.
+func (b *ContextBudget) Add(source string, tokens int) {
+	if tokens <= 0 || source == "" {
+		return
+	}
+	if b.BySource == nil {
+		b.BySource = make(map[string]int)
+	}
+	b.BySource[source] += tokens
+}
+
+// Get returns the token count for a given source, or 0 if absent.
+func (b ContextBudget) Get(source string) int {
+	return b.BySource[source]
+}
+
+// Total returns the sum of every source's tokens.
+func (b ContextBudget) Total() int {
+	sum := 0
+	for _, v := range b.BySource {
+		sum += v
+	}
+	return sum
+}
+
+// OrderedSources returns source names in display order: well-known sources
+// first (sageox, team, project, user — the order users intuit most), then
+// any other sources alphabetically. Use for consistent output across
+// runs as new bubbles are added.
+func (b ContextBudget) OrderedSources() []string {
+	wellKnown := []string{BudgetSourceSageox, BudgetSourceTeam, BudgetSourceProject, BudgetSourceUser}
+	seen := make(map[string]bool, len(b.BySource))
+	out := make([]string, 0, len(b.BySource))
+	for _, k := range wellKnown {
+		if _, ok := b.BySource[k]; ok {
+			out = append(out, k)
+			seen[k] = true
+		}
+	}
+	var rest []string
+	for k := range b.BySource {
+		if !seen[k] {
+			rest = append(rest, k)
+		}
+	}
+	// stable alphabetical order for unknown sources
+	for i := 1; i < len(rest); i++ {
+		for j := i; j > 0 && rest[j-1] > rest[j]; j-- {
+			rest[j-1], rest[j] = rest[j], rest[j-1]
+		}
+	}
+	return append(out, rest...)
+}
+
 // IntentCommand maps a user intent to the ox command that resolves it.
 type IntentCommand struct {
 	Intent  string `json:"intent"`  // natural language phrases the user might say
@@ -171,9 +291,14 @@ type Output struct {
 	// Prime call tracking
 	PrimeCallCount       int    `json:"prime_call_count,omitempty"`       // number of prime calls this session
 	PrimeExcessiveNotice string `json:"prime_excessive_notice,omitempty"` // warning if prime called excessively
-	// Cumulative context stats (from daemon, best-effort)
-	CumulativeContextTokens int64 `json:"cumulative_context_tokens,omitempty"` // estimated total tokens produced by ox commands
-	CommandCount            int   `json:"command_count,omitempty"`             // number of ox commands that produced context
+	// Cumulative context stats (from daemon, best-effort).
+	// CumulativeContextTokens is the rolled-up total; the per-source
+	// split lives in CumulativeContextTokensBySource (keyed by
+	// BudgetSource* constants — extensible for future knowledge bubbles).
+	CumulativeContextTokens         int64            `json:"cumulative_context_tokens,omitempty"`
+	CumulativeContextTokensBySource map[string]int64 `json:"cumulative_context_tokens_by_source,omitempty"`
+	CommandCount                    int              `json:"command_count,omitempty"` // number of ox commands that produced context
+
 	// Doctor agent marker
 	NeedsDoctorAgent bool   `json:"needs_doctor_agent,omitempty"` // true if .needs-doctor-agent marker exists
 	DoctorHint       string `json:"doctor_hint,omitempty"`        // hint for agent to run ox agent doctor

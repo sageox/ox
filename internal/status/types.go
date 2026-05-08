@@ -15,12 +15,24 @@ type JSONOutput struct {
 }
 
 // AICoworkerJSON represents an AI coworker in JSON output.
+//
+// ContextTokens is the rolled-up total. ContextTokensBySource splits it
+// by content source — SageOx tool overhead, team-authored content,
+// project-authored content, and any future knowledge bubble (per-user,
+// per-org, etc.). SageOx is judged on the "sageox" entry only; other
+// entries reflect authoring choices SageOx does not control. See
+// prime.ContextBudget for the rationale.
+//
+// The map is open: future knowledge bubbles add entries by tagging
+// emit sites in cmd/ox/agent_prime_xml.go with a new source constant.
+// No schema migration required.
 type AICoworkerJSON struct {
-	AgentID       string `json:"agent_id"`
-	ContextTokens int64  `json:"context_tokens"`
-	CommandCount  int    `json:"command_count"`
-	Status        string `json:"status"`
-	Age           string `json:"age"`
+	AgentID               string           `json:"agent_id"`
+	ContextTokens         int64            `json:"context_tokens"`
+	ContextTokensBySource map[string]int64 `json:"context_tokens_by_source,omitempty"`
+	CommandCount          int              `json:"command_count"`
+	Status                string           `json:"status"`
+	Age                   string           `json:"age"`
 }
 
 // VersionJSON represents version info in JSON output.

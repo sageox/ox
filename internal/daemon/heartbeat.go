@@ -57,6 +57,22 @@ type HeartbeatPayload struct {
 	// Zero means no context tracking for this heartbeat (e.g., non-agent commands).
 	ContextTokens int64 `json:"context_tokens,omitempty"`
 
+	// ContextTokensBySource is the per-source split of ContextTokens
+	// (rolled-up total). Keys are source identifiers — see
+	// prime.BudgetSource* constants ("sageox", "team", "project", "user",
+	// and any future knowledge bubbles). When non-empty, the daemon
+	// aggregates each entry into the matching cumulative bucket.
+	//
+	// When empty (older clients, or commands without budget tracking),
+	// the daemon credits all of ContextTokens to the "sageox" bucket so
+	// the signal isn't lost — degrades gracefully rather than dropping
+	// the data on the floor.
+	//
+	// The schema is open: new sources are added by tagging emit sites
+	// with a new constant; the daemon and consumers accept any string
+	// key without code changes.
+	ContextTokensBySource map[string]int64 `json:"context_tokens_by_source,omitempty"`
+
 	// CommandName identifies which ox subcommand produced this context (e.g., "prime",
 	// "team-ctx", "session list"). Used for per-command breakdown (ox-aw0).
 	CommandName string `json:"command_name,omitempty"`
@@ -148,8 +164,14 @@ type HeartbeatHandler struct {
 
 	// per-agent context consumption tracking
 	ctxMu              sync.RWMutex
-	agentContextTokens map[string]int64 // agent_id → cumulative estimated tokens
-	agentCommandCount  map[string]int   // agent_id → command count
+	agentContextTokens map[string]int64 // agent_id → cumulative estimated tokens (rolled-up total)
+	// agentContextTokensBySource is agent_id → source name → cumulative tokens.
+	// Source names come from prime.BudgetSource* constants; the schema is
+	// open so future knowledge bubbles (user, org, ...) flow through
+	// without code changes here — the daemon aggregates whatever sources
+	// the heartbeat declares.
+	agentContextTokensBySource map[string]map[string]int64
+	agentCommandCount          map[string]int // agent_id → command count
 
 	// per-agent metadata (parent/type) from heartbeats — enables cross-worktree visibility
 	metaMu         sync.RWMutex
@@ -199,19 +221,20 @@ func NewHeartbeatHandler(logger *slog.Logger) *HeartbeatHandler {
 	)
 
 	return &HeartbeatHandler{
-		logger:             logger,
-		repoActivity:       NewActivityTrackerWithMaxKeys(activityCap, maxRepos),
-		teamActivity:       NewActivityTrackerWithMaxKeys(activityCap, maxTeams),
-		workspaceActivity:  NewActivityTrackerWithMaxKeys(activityCap, maxWorkspaces),
-		agentActivity:      NewActivityTrackerWithMaxKeys(activityCap, maxAgents),
-		callers:            make(map[string]CallerInfo),
-		agentContextTokens: make(map[string]int64),
-		agentCommandCount:  make(map[string]int),
-		agentParentID:      make(map[string]string),
-		agentType:          make(map[string]string),
-		agentPID:           make(map[string]int),
-		agentPrincipal:     make(map[string]string),
-		agentLastWhisper:   make(map[string]time.Time),
+		logger:                     logger,
+		repoActivity:               NewActivityTrackerWithMaxKeys(activityCap, maxRepos),
+		teamActivity:               NewActivityTrackerWithMaxKeys(activityCap, maxTeams),
+		workspaceActivity:          NewActivityTrackerWithMaxKeys(activityCap, maxWorkspaces),
+		agentActivity:              NewActivityTrackerWithMaxKeys(activityCap, maxAgents),
+		callers:                    make(map[string]CallerInfo),
+		agentContextTokens:         make(map[string]int64),
+		agentContextTokensBySource: make(map[string]map[string]int64),
+		agentCommandCount:          make(map[string]int),
+		agentParentID:              make(map[string]string),
+		agentType:                  make(map[string]string),
+		agentPID:                   make(map[string]int),
+		agentPrincipal:             make(map[string]string),
+		agentLastWhisper:           make(map[string]time.Time),
 	}
 }
 
@@ -425,6 +448,27 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 			h.ctxMu.Lock()
 			h.agentContextTokens[hb.AgentID] += hb.ContextTokens
 			h.agentCommandCount[hb.AgentID]++
+
+			// Per-source split. If the heartbeat declares one, aggregate
+			// each source into its own bucket — the schema is open so
+			// any source name flows through (sageox/team/project today,
+			// user/org/... when those bubbles land). If no split is
+			// reported (older clients or commands without budget tracking),
+			// credit the rolled-up total to "sageox" so the signal isn't
+			// lost — degrades gracefully rather than dropping the data.
+			if h.agentContextTokensBySource[hb.AgentID] == nil {
+				h.agentContextTokensBySource[hb.AgentID] = make(map[string]int64)
+			}
+			perSource := h.agentContextTokensBySource[hb.AgentID]
+			if len(hb.ContextTokensBySource) > 0 {
+				for source, n := range hb.ContextTokensBySource {
+					if n > 0 {
+						perSource[source] += n
+					}
+				}
+			} else {
+				perSource["sageox"] += hb.ContextTokens
+			}
 			h.ctxMu.Unlock()
 		}
 
@@ -570,18 +614,39 @@ func (h *HeartbeatHandler) GetAgentActivity() *ActivityTracker {
 }
 
 // AgentContextStats holds cumulative context consumption for an agent.
+//
+// ContextTokens is the rolled-up total across all sources. ContextTokensBySource
+// is the per-source split (see HeartbeatPayload for the rationale). When older
+// clients report only the total, the daemon credits the whole amount to the
+// "sageox" source so the rolled-up number is preserved without falsely
+// inflating other buckets.
+//
+// The map shape is intentional: future knowledge bubbles (user, org, ...)
+// add entries by tagging emit sites; no code changes here.
 type AgentContextStats struct {
-	ContextTokens int64 `json:"context_tokens"`
-	CommandCount  int   `json:"command_count"`
+	ContextTokens         int64            `json:"context_tokens"`
+	ContextTokensBySource map[string]int64 `json:"context_tokens_by_source,omitempty"`
+	CommandCount          int              `json:"command_count"`
 }
 
 // GetAgentContextStats returns the cumulative context consumption for a given agent.
+// The returned map is a copy — the caller is free to read or mutate it
+// without affecting the daemon's internal state.
 func (h *HeartbeatHandler) GetAgentContextStats(agentID string) AgentContextStats {
 	h.ctxMu.RLock()
 	defer h.ctxMu.RUnlock()
+
+	var bySource map[string]int64
+	if src := h.agentContextTokensBySource[agentID]; len(src) > 0 {
+		bySource = make(map[string]int64, len(src))
+		for k, v := range src {
+			bySource[k] = v
+		}
+	}
 	return AgentContextStats{
-		ContextTokens: h.agentContextTokens[agentID],
-		CommandCount:  h.agentCommandCount[agentID],
+		ContextTokens:         h.agentContextTokens[agentID],
+		ContextTokensBySource: bySource,
+		CommandCount:          h.agentCommandCount[agentID],
 	}
 }
 
@@ -647,6 +712,7 @@ func (h *HeartbeatHandler) CleanupStaleAgents(activeIDs []string) {
 	for id := range h.agentContextTokens {
 		if _, ok := active[id]; !ok {
 			delete(h.agentContextTokens, id)
+			delete(h.agentContextTokensBySource, id)
 			delete(h.agentCommandCount, id)
 		}
 	}

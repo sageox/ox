@@ -412,8 +412,26 @@ type InstanceInfo struct {
 	// Status is "active" (recent heartbeat) or "idle" (stale heartbeat).
 	Status string `json:"status"`
 
-	// CumulativeContextTokens is the estimated total tokens of context this agent consumed from ox commands.
+	// CumulativeContextTokens is the estimated total tokens of context this
+	// agent consumed from ox commands. Equal to the sum across all
+	// CumulativeContextTokensBySource entries.
 	CumulativeContextTokens int64 `json:"cumulative_context_tokens,omitempty"`
+
+	// CumulativeContextTokensBySource splits the total by content source
+	// (prime.BudgetSource* keys: "sageox", "team", "project", "user",
+	// and any future knowledge bubble identifier).
+	//
+	// SageOx is judged on the "sageox" bucket — every word in it is a
+	// SageOx product decision. Other buckets reflect content the team,
+	// project, user, or another knowledge bubble authored; SageOx
+	// delivers it but does not control the size. This split lets
+	// ox status, ox agent list, telemetry, and tests measure the tool
+	// independently from the content it carries.
+	//
+	// The map is open: a future knowledge bubble adds an entry by
+	// tagging emit sites in cmd/ox/agent_prime_xml.go with a new source
+	// constant from internal/prime. No daemon or IPC schema change.
+	CumulativeContextTokensBySource map[string]int64 `json:"cumulative_context_tokens_by_source,omitempty"`
 
 	// CommandCount is the number of ox commands that produced context output for this agent.
 	CommandCount int `json:"command_count,omitempty"`

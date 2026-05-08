@@ -627,18 +627,19 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 
 		ctxStats := d.heartbeat.GetAgentContextStats(agentID)
 		instances = append(instances, InstanceInfo{
-			AgentID:                 agentID,
-			WorkspacePath:           workspacePath,
-			LastHeartbeat:           last,
-			HeartbeatCount:          count,
-			Status:                  status,
-			CumulativeContextTokens: ctxStats.ContextTokens,
-			CommandCount:            ctxStats.CommandCount,
-			ParentAgentID:           d.heartbeat.GetAgentParentID(agentID),
-			AgentType:               d.heartbeat.GetAgentType(agentID),
-			ParentPID:               d.heartbeat.GetAgentPID(agentID),
-			LastWhisper:             d.heartbeat.GetAgentLastWhisper(agentID),
-			PrincipalID:             d.heartbeat.GetAgentPrincipalID(agentID),
+			AgentID:                         agentID,
+			WorkspacePath:                   workspacePath,
+			LastHeartbeat:                   last,
+			HeartbeatCount:                  count,
+			Status:                          status,
+			CumulativeContextTokens:         ctxStats.ContextTokens,
+			CumulativeContextTokensBySource: ctxStats.ContextTokensBySource,
+			CommandCount:                    ctxStats.CommandCount,
+			ParentAgentID:                   d.heartbeat.GetAgentParentID(agentID),
+			AgentType:                       d.heartbeat.GetAgentType(agentID),
+			ParentPID:                       d.heartbeat.GetAgentPID(agentID),
+			LastWhisper:                     d.heartbeat.GetAgentLastWhisper(agentID),
+			PrincipalID:                     d.heartbeat.GetAgentPrincipalID(agentID),
 		})
 	}
 

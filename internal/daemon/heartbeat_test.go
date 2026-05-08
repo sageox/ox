@@ -717,6 +717,90 @@ func TestHeartbeatHandler_ContextTokensTracking(t *testing.T) {
 	}
 }
 
+// TestHeartbeatHandler_ContextTokensBySource verifies the daemon
+// accumulates per-source cumulative tokens via the open ContextTokensBySource
+// map (extensible for future knowledge bubbles), and falls back to crediting
+// the rolled-up total to "sageox" when older clients send only ContextTokens.
+//
+// Failure prevented: the daemon silently drops the per-source data, making
+// it impossible to judge SageOx independently from authored content; OR a
+// future knowledge bubble's tokens get dropped because the daemon hard-codes
+// the known source list.
+func TestHeartbeatHandler_ContextTokensBySource(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := NewHeartbeatHandler(logger)
+
+	// New-style heartbeat with explicit per-source split, including a
+	// hypothetical future bubble ("user") to prove the open schema works.
+	handler.Handle("", mustMarshal(HeartbeatPayload{
+		AgentID:       "Oxa7b3",
+		ContextTokens: 1000,
+		ContextTokensBySource: map[string]int64{
+			"sageox":  300,
+			"team":    500,
+			"project": 200,
+		},
+		Timestamp: time.Now(),
+	}))
+
+	stats := handler.GetAgentContextStats("Oxa7b3")
+	if stats.ContextTokens != 1000 {
+		t.Errorf("expected 1000 total, got %d", stats.ContextTokens)
+	}
+	if stats.ContextTokensBySource["sageox"] != 300 {
+		t.Errorf("expected 300 sageox, got %d", stats.ContextTokensBySource["sageox"])
+	}
+	if stats.ContextTokensBySource["team"] != 500 {
+		t.Errorf("expected 500 team, got %d", stats.ContextTokensBySource["team"])
+	}
+	if stats.ContextTokensBySource["project"] != 200 {
+		t.Errorf("expected 200 project, got %d", stats.ContextTokensBySource["project"])
+	}
+
+	// Second heartbeat introduces a NEW source ("user") on the same agent —
+	// future knowledge bubble. Daemon must accept it without code changes.
+	handler.Handle("", mustMarshal(HeartbeatPayload{
+		AgentID:       "Oxa7b3",
+		ContextTokens: 500,
+		ContextTokensBySource: map[string]int64{
+			"sageox": 100,
+			"team":   300,
+			"user":   100, // unknown to today's display layer; daemon must still aggregate
+		},
+		Timestamp: time.Now(),
+	}))
+	stats = handler.GetAgentContextStats("Oxa7b3")
+	if stats.ContextTokensBySource["sageox"] != 400 {
+		t.Errorf("expected 400 sageox cumulative, got %d", stats.ContextTokensBySource["sageox"])
+	}
+	if stats.ContextTokensBySource["team"] != 800 {
+		t.Errorf("expected 800 team cumulative, got %d", stats.ContextTokensBySource["team"])
+	}
+	if stats.ContextTokensBySource["user"] != 100 {
+		t.Errorf("expected 100 user (new bubble), got %d — daemon must accept unknown sources",
+			stats.ContextTokensBySource["user"])
+	}
+
+	// Legacy heartbeat from older client: only ContextTokens, no map.
+	// Should be credited to sageox so we don't silently drop the signal.
+	handler.Handle("", mustMarshal(HeartbeatPayload{
+		AgentID:       "OxLegacy",
+		ContextTokens: 750,
+		Timestamp:     time.Now(),
+	}))
+	stats = handler.GetAgentContextStats("OxLegacy")
+	if stats.ContextTokens != 750 {
+		t.Errorf("expected legacy total 750, got %d", stats.ContextTokens)
+	}
+	if stats.ContextTokensBySource["sageox"] != 750 {
+		t.Errorf("expected legacy fallback to credit 750 to sageox, got %d", stats.ContextTokensBySource["sageox"])
+	}
+	if stats.ContextTokensBySource["team"] != 0 || stats.ContextTokensBySource["project"] != 0 {
+		t.Errorf("legacy heartbeat should not populate team/project, got team=%d project=%d",
+			stats.ContextTokensBySource["team"], stats.ContextTokensBySource["project"])
+	}
+}
+
 func TestHeartbeatHandler_ContextTokensZeroIgnored(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	handler := NewHeartbeatHandler(logger)

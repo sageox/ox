@@ -30,7 +30,10 @@ Examples:
   ox murmur --topic=lint "ESLint rule failing in src/auth/"
   ox murmur --scope=team --topic=architecture "API contract v3 rolling out"
   ox murmur --importance=critical --topic=conflict "Modifying shared auth middleware"
-  ox murmur '{"content": "Fixing lint rule X", "topic": "lint"}'`,
+  ox murmur '{"content": "Fixing lint rule X", "topic": "lint"}'
+
+Murmurs expire in 24 hours. For durable team rules (conventions, policies,
+post-incident learnings), see 'ox guide murmur-vs-rule' and 'ox guide team-rules'.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: runMurmur,
 }

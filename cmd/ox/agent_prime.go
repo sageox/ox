@@ -421,7 +421,8 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// discover team context if configured
 	phaseStart = time.Now()
-	teamCtx := discoverTeamContext(projectRoot)
+	repoSlug := repoSlugFromRemoteOrDir(projectRoot)
+	teamCtx := discoverTeamContext(projectRoot, repoSlug)
 
 	// check team context staleness
 	checkTeamContextStaleness(teamCtx, projectRoot)
@@ -569,6 +570,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			for _, di := range instances {
 				if di.AgentID == agentID {
 					output.CumulativeContextTokens = di.CumulativeContextTokens
+					output.CumulativeContextTokensBySource = di.CumulativeContextTokensBySource
 					output.CommandCount = di.CommandCount
 					break
 				}
@@ -771,7 +773,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// append code search tip to AgentTip based on index availability
-	repoSlug := repoSlugFromRemoteOrDir(projectRoot)
+	// (repoSlug already computed above for team-rules discovery)
 	codeDBDir := resolveCodeDBDir(projectRoot)
 	if _, statErr := os.Stat(codeDBDir); statErr == nil {
 		output.CodeDBAvailable = true
@@ -1243,7 +1245,8 @@ func outputAgentPrime(cmd *cobra.Command, textMode, reviewMode bool, output agen
 		return nil
 	default:
 		// XML: structured tags optimized for LLM consumption and prompt caching
-		return outputAgentPrimeXML(cmd, output)
+		_, err := outputAgentPrimeXML(cmd, output)
+		return err
 	}
 }
 
@@ -1660,7 +1663,11 @@ func trackPrimeTypeMismatch(inst *agentinstance.Instance, claimedType string) {
 
 // discoverTeamContext discovers team context from local config and scans for skills/agents.
 // Returns nil if no team context is configured.
-func discoverTeamContext(projectRoot string) *teamContextInfo {
+//
+// repoSlug is the current repo's "owner/repo" identifier (or empty if unknown).
+// It is used to filter team rules by their repos: frontmatter field — rules
+// that specify a repos: list only load when the current repo matches.
+func discoverTeamContext(projectRoot, repoSlug string) *teamContextInfo {
 	if projectRoot == "" {
 		return nil
 	}
@@ -1740,6 +1747,20 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 	// disclosure mechanisms and are out of scope for this catalog.
 	if docs, _ := teamdocs.DiscoverDocs(tc.Path); len(docs) > 0 {
 		info.TeamDocs = docs
+	}
+
+	// discover team rules from agents/rules/ (preferred) and coworkers/rules/
+	// (legacy fallback). Modular per-rule files mirroring .claude/rules/ at
+	// team scope. visibility: always rules carry their body inlined for
+	// prime emission; visibility: indexed rules carry only metadata for
+	// progressive disclosure.
+	//
+	// TODO(sync-out): a future optimization could write the filtered subset
+	// of these rules out to .claude/sageox-team-<slug>/rules/ inside the
+	// current repo so Claude's native paths:-scoped lazy loading kicks in
+	// for free. See cmd/ox/guides/team-rules.md for the rationale.
+	if rules, _ := teamdocs.DiscoverRules(tc.Path, repoSlug); len(rules) > 0 {
+		info.TeamRules = rules
 	}
 
 	// v4 team memory loading
