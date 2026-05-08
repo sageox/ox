@@ -1112,6 +1112,14 @@ func (m *CodeDBManager) handleMappingCorrupt(mce *store.MappingCorruptError, dat
 	m.mu.Unlock()
 
 	if err := store.RebuildBleveSubIndex(dataDir, mce.Name); err != nil {
+		if errors.Is(err, store.ErrFullReindexRequired) {
+			// code/diff: not safe to auto-rebuild (would leave search empty
+			// until manual --full). Surface to ox doctor instead of looping.
+			m.logger.Warn("codedb sub-index needs full reindex; not auto-recovering",
+				"name", mce.Name,
+				"action", "run 'ox doctor --fix' or 'ox code index --full'")
+			return
+		}
 		m.logger.Warn("codedb sub-index auto-rebuild failed",
 			"name", mce.Name, "error", err)
 		return

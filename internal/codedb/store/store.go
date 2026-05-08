@@ -21,6 +21,15 @@ import (
 // ErrCorrupt indicates the index is corrupted and needs re-indexing.
 var ErrCorrupt = fmt.Errorf("codedb index is corrupt")
 
+// ErrFullReindexRequired is returned by RebuildBleveSubIndex when the
+// requested sub-index (code/diff) cannot be repopulated from existing SQL
+// data alone. Callers that hit this should fall back to a full reindex
+// (wipe dataDir + run IndexLocalRepo) — the rebuild path is currently only
+// safe for "comment" because ParseComments is gated on a per-blob SQL flag
+// we can reset, while code/diff are populated only during the per-commit
+// walk in IndexRepo and have no rebleve-from-blobs path yet.
+var ErrFullReindexRequired = errors.New("full reindex required")
+
 // MappingCorruptError indicates that a Bleve sub-index is in a structurally
 // broken state that bleve.Open cannot recover from on its own. The Name
 // identifies which sub-index ("code", "diff", or "comment") so callers can
@@ -480,29 +489,31 @@ func decodeSegmentEpoch(b []byte) uint64 {
 	return v
 }
 
-// RebuildBleveSubIndex removes the named bleve sub-index directory and
-// recreates it empty. It also resets the SQL flags that control which blobs
-// are re-fed into the rebuilt bleve, so the next indexing pass repopulates
-// the sub-index from existing SQL data without re-walking git history or
-// touching unrelated indexes.
+// RebuildBleveSubIndex performs a targeted rebuild of a single bleve
+// sub-index. Currently supported only for "comment", which can be fully
+// repopulated from existing SQL data via the comments_parsed flag.
 //
-// Supported names: "code", "diff", "comment".
+// For "code" and "diff", this function returns ErrFullReindexRequired
+// without modifying state — those sub-indexes are populated during the
+// per-commit walk in IndexRepo, gated on `commits` SQL rows, and there is
+// no rebleve-from-blobs path that could refill them from SQL alone. A
+// surgical rebuild would leave search permanently empty; callers must fall
+// back to a full reindex (wipe dataDir + IndexLocalRepo).
 //
-// Per-sub-index repopulation strategy:
-//   - "comment": clear blobs.comments_parsed → ParseComments re-extracts and
-//     re-bleves from existing blobs. Full coverage on next indexing pass.
-//   - "code"/"diff": these sub-indexes are populated during the per-commit
-//     walk in IndexRepo, gated on `commits` SQL rows. Re-populating them from
-//     SQL alone (without re-walking git) requires a "rebleve from blobs"
-//     pass that does not yet exist. Until that lands, this function recreates
-//     the bleve directory empty; callers needing full code/diff search after
-//     a rebuild should trigger a full reindex (--full / wipe dataDir).
+// On success for "comment": removes bleve/comment/, recreates empty, and
+// resets blobs.comments_parsed=0 so ParseComments re-extracts every blob
+// on the next indexing pass. SQL/Open failures during the flag reset are
+// surfaced as errors — a rebuild that "succeeds" with comments_parsed
+// still set would silently leave search empty forever.
 //
 // This function works without an open Store — by design, since Open fails
-// when a sub-index has the empty-mapping condition we are recovering from.
+// when the sub-index is in the corrupt state we are recovering from.
 func RebuildBleveSubIndex(root, name string) error {
 	switch name {
-	case "code", "diff", "comment":
+	case "comment":
+		// continue
+	case "code", "diff":
+		return fmt.Errorf("%s sub-index: %w", name, ErrFullReindexRequired)
 	default:
 		return fmt.Errorf("unknown bleve sub-index %q", name)
 	}
@@ -520,21 +531,19 @@ func RebuildBleveSubIndex(root, name string) error {
 		return fmt.Errorf("close recreated %s bleve index: %w", name, err)
 	}
 
-	if name == "comment" {
-		dbPath := filepath.Join(root, MetadataDBFile)
-		if _, statErr := os.Stat(dbPath); statErr == nil {
-			db, openErr := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
-			if openErr != nil {
-				slog.Warn("rebuild comment: open metadata.db", "err", openErr)
-				return nil
-			}
-			defer db.Close()
-			if _, exErr := db.Exec(`UPDATE blobs SET comments_parsed = 0`); exErr != nil {
-				slog.Warn("rebuild comment: clear comments_parsed", "err", exErr)
-			}
-		}
+	dbPath := filepath.Join(root, MetadataDBFile)
+	if _, statErr := os.Stat(dbPath); statErr != nil {
+		// no metadata.db means no blobs to mark — nothing to do (e.g. fresh dataDir)
+		return nil
 	}
-
+	db, openErr := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if openErr != nil {
+		return fmt.Errorf("open metadata.db for comment rebuild: %w", openErr)
+	}
+	defer db.Close()
+	if _, exErr := db.Exec(`UPDATE blobs SET comments_parsed = 0`); exErr != nil {
+		return fmt.Errorf("reset comments_parsed after comment rebuild: %w", exErr)
+	}
 	return nil
 }
 

@@ -731,6 +731,62 @@ func TestRebuildBleveSubIndex_RejectsUnknownName(t *testing.T) {
 	tmp := t.TempDir()
 	err := RebuildBleveSubIndex(tmp, "../../etc")
 	require.Error(t, err, "unknown name must be rejected")
+	require.False(t, errors.Is(err, ErrFullReindexRequired),
+		"unknown name must not masquerade as full-reindex-required")
+}
+
+// TestRebuildBleveSubIndex_CodeDiff_RequireFullReindex is the contract that
+// prevents a silent broken-heal: code and diff cannot be repopulated from
+// SQL alone, so RebuildBleveSubIndex must refuse and force callers to fall
+// back to a full reindex. Without this, doctor/daemon would report a
+// "successful" rebuild while leaving search permanently empty.
+//
+// Failure prevented: a code/diff rebuild that recreates an empty bleve and
+// returns nil — the previous behavior in this PR's first revision.
+func TestRebuildBleveSubIndex_CodeDiff_RequireFullReindex(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+
+	for _, name := range []string{"code", "diff"} {
+		err := RebuildBleveSubIndex(tmp, name)
+		require.Error(t, err, "%s rebuild must not silently succeed", name)
+		require.True(t, errors.Is(err, ErrFullReindexRequired),
+			"%s rebuild must wrap ErrFullReindexRequired so callers can branch on it", name)
+	}
+
+	// Refusal must NOT touch the filesystem — bleve dirs and SQL stay intact.
+	// We assert nothing was created by checking the tmpdir is empty afterwards.
+	entries, err := os.ReadDir(tmp)
+	require.NoError(t, err)
+	require.Empty(t, entries, "code/diff refusal must not modify state on disk")
+}
+
+// TestRebuildBleveSubIndex_Comment_BubblesSQLFailure verifies that if the
+// SQL flag reset fails, the rebuild does NOT silently report success.
+// Without this, the comment bleve would be empty AND comments_parsed=1
+// would still be set on every blob, leaving comment search dead until a
+// future migration or manual intervention.
+//
+// Failure prevented: silent broken-heal where the bleve is rebuilt empty
+// but ParseComments has nothing to repopulate it with.
+func TestRebuildBleveSubIndex_Comment_BubblesSQLFailure(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
+	tmp := t.TempDir()
+	s, err := Open(tmp)
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	// Replace metadata.db with garbage so PRAGMA (or the UPDATE) fails.
+	dbPath := filepath.Join(tmp, MetadataDBFile)
+	require.NoError(t, os.WriteFile(dbPath, []byte("not a sqlite file"), 0o600))
+
+	rbErr := RebuildBleveSubIndex(tmp, "comment")
+	require.Error(t, rbErr, "rebuild must surface SQL failure, not return nil")
+	require.False(t, errors.Is(rbErr, ErrFullReindexRequired),
+		"SQL failure must not be confused with full-reindex-required")
 }
 
 func mustModTime(t *testing.T, path string) time.Time {

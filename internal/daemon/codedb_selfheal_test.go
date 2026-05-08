@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -93,6 +94,51 @@ func TestHandleMappingCorrupt_RebuildsAndCapsAttempts(t *testing.T) {
 
 	mgr.mu.Lock()
 	require.Equal(t, 2, mgr.bleveRebuildAttempts["comment"], "counter must not advance past cap")
+	mgr.mu.Unlock()
+}
+
+// TestHandleMappingCorrupt_CodeDiff_DoesNotLoop verifies that when a
+// code/diff sub-index is reported corrupt, the daemon does NOT keep
+// looping through auto-rebuild — RebuildBleveSubIndex returns
+// ErrFullReindexRequired, so we log once per attempt (counter increments)
+// and then stop trying after the cap. Without this, a code/diff
+// MappingCorruptError combined with the previous "rebuild + return nil"
+// behavior would have left search silently empty while the daemon
+// reported "auto-rebuilt" every cycle.
+//
+// Failure prevented: silent broken-heal of code/diff sub-index.
+func TestHandleMappingCorrupt_CodeDiff_DoesNotLoop(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
+
+	tmp := t.TempDir()
+	db, err := codedb.Open(tmp)
+	require.NoError(t, err)
+	require.NoError(t, db.Close())
+
+	mgr := NewCodeDBManager(t.TempDir(), codedbTestLogger(), nil)
+	mce := &store.MappingCorruptError{Name: "code", Path: filepath.Join(tmp, "bleve", "code")}
+
+	// before: code bleve dir exists with content
+	codeBleveDir := filepath.Join(tmp, "bleve", "code")
+	beforeEntries, err := os.ReadDir(codeBleveDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, beforeEntries, "code bleve must have entries before refusal")
+
+	mgr.handleMappingCorrupt(mce, tmp)
+
+	// after: code bleve dir untouched (refusal does NOT delete on disk)
+	afterEntries, err := os.ReadDir(codeBleveDir)
+	require.NoError(t, err)
+	require.Equal(t, len(beforeEntries), len(afterEntries),
+		"ErrFullReindexRequired path must not modify code bleve on disk")
+
+	// counter must increment so the daemon stops after maxBleveRebuildAttempts
+	mgr.mu.Lock()
+	require.Equal(t, 1, mgr.bleveRebuildAttempts["code"],
+		"attempt must count even when rebuild refused — otherwise infinite loop")
 	mgr.mu.Unlock()
 }
 
