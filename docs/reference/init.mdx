@@ -1,7 +1,7 @@
 ---
 title: "ox init"
 description: "CLI reference for ox init"
-sidebar_position: 45
+sidebar_position: 50
 ---
 
 ## ox init
@@ -30,6 +30,10 @@ This command will:
 
 Use --team to specify a team ID directly, or let ox init prompt you.
 
+After init, run 'ox guide getting-started' for a five-minute walkthrough,
+or 'ox guide team-rules' to learn how to share AI coworker conventions
+across your whole team (Claude, Codex, Amp, etc.).
+
 ```
 ox init [flags]
 ```
@@ -37,6 +41,7 @@ ox init [flags]
 ### Options
 
 ```
+      --agents string     comma-separated list of agents to configure (e.g., 'gemini,codex')
       --endpoint string   SageOx endpoint URL (overrides SAGEOX_ENDPOINT)
       --force             initialize even if .sageox/ exists on remote
   -h, --help              help for init

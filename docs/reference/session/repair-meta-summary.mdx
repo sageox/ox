@@ -1,0 +1,63 @@
+---
+title: "ox session repair-meta-summary"
+description: "CLI reference for ox session repair-meta-summary"
+sidebar_position: 65
+---
+
+## ox session repair-meta-summary
+
+Retro-clear validator-failure strings leaked into meta.json (ox-qqka cleanup)
+
+### Synopsis
+
+Walk the ledger and clear validator-error strings that pre-fix
+versions of ox wrote into meta.summary / meta.title.
+
+Detection: a meta.json field is considered "leaked" if its value matches
+one of the known validator/error string shapes (see lfs.IsLeakySummaryString).
+
+Action per session:
+  - If the field is leaky and summary.json has a clean title, use that title.
+  - Otherwise, clear the leaky field to "" so the UI renders blank instead of
+    the diagnostic.
+  - Stamp meta.summary_status so consumers can rely on the structured signal:
+      ok                  → summary.json title is non-empty and clean
+      failed_validation   → summary.json missing or also leaky
+  - Move any diagnostic prose from meta.summary into meta.validation_error
+    (ops-facing) when no clean replacement is available.
+  - Preserve meta.Files (OID manifest) verbatim — we never re-upload LFS.
+
+Idempotent: a meta.json that's already clean is left untouched.
+
+Examples:
+  ox session repair-meta-summary           # repair the current repo's ledger
+  ox session repair-meta-summary --dry-run # show what would change
+  ox session repair-meta-summary --ledger /path/to/ledger
+
+```
+ox session repair-meta-summary [flags]
+```
+
+### Options
+
+```
+      --dry-run         list what would change without modifying anything
+  -h, --help            help for repair-meta-summary
+      --ledger string   ledger path (defaults to current repo's ledger)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox session](/session)	 - Manage AI coworker sessions
+

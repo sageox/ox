@@ -1,0 +1,51 @@
+---
+title: "ox session token-optimize"
+description: "CLI reference for ox session token-optimize"
+sidebar_position: 69
+---
+
+## ox session token-optimize
+
+Compress a session raw.jsonl for summarization (streaming, deterministic)
+
+### Synopsis
+
+Read a session's raw.jsonl, apply deterministic streaming transforms
+(strip ANSI, collapse progress bars, elide base64 images, truncate large Read
+bodies, dedupe system-reminders and repeated tool results), and emit the
+compressed jsonl.
+
+Default: writes compressed stream to stdout, stats to stderr.
+Use --out to write to a file instead.
+Use --stats to include detailed per-transform counts on stderr.
+
+The original raw.jsonl is never modified — this is a read-only transform.
+
+```
+ox session token-optimize <session-name> [flags]
+```
+
+### Options
+
+```
+  -h, --help          help for token-optimize
+      --mode string   compression mode: conversation (default, keeps user+assistant+tool_marks) or lossless (content-preserving) (default "conversation")
+  -o, --out string    write compressed jsonl to this file (default: stdout)
+      --stats         emit detailed per-transform counts on stderr
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox session](/session)	 - Manage AI coworker sessions
+

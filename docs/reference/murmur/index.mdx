@@ -1,7 +1,7 @@
 ---
 title: "ox murmur"
 description: "CLI reference for ox murmur"
-sidebar_position: 48
+sidebar_position: 53
 ---
 
 ## ox murmur
@@ -18,6 +18,9 @@ Examples:
   ox murmur --scope=team --topic=architecture "API contract v3 rolling out"
   ox murmur --importance=critical --topic=conflict "Modifying shared auth middleware"
   ox murmur '{"content": "Fixing lint rule X", "topic": "lint"}'
+
+Murmurs expire in 24 hours. For durable team rules (conventions, policies,
+post-incident learnings), see 'ox guide murmur-vs-rule' and 'ox guide team-rules'.
 
 ```
 ox murmur [content] [flags]

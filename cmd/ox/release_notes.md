@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+**Modular team rules with first-class context-budget accounting**
+- Team rules now live as one-file-per-concern under `<team-context>/agents/rules/<topic>.md` (subdirectories supported, walked recursively). Mirrors the muscle memory of Claude Code's `.claude/rules/` and Cursor's `.cursor/rules/`, scaled up to team scope. Frontmatter spec covers `name`, `description`, `repos`, `audience`, `visibility`, `status`, `from-discussion`. `visibility: always` rules are inlined in `ox agent prime`; `visibility: indexed` rules emit a catalog entry only and the agent reads them on demand. Backward-compat fallback to `coworkers/rules/` for any teams that adopted that location early.
+- `ox agent prime` XML now reports a `<context-budget>` block split by content source (sageox / team / project, plus any future knowledge bubble like `user`). The split lets SageOx be measured on its own tool overhead instead of conflating it with team-authored content. The split flows through every layer: per-prime budget, per-heartbeat per-source aggregation, daemon-side cumulative tracking, and `ox agent list`'s per-source footer. The schema is open — adding a new knowledge bubble takes one new constant in `internal/prime/types.go` plus tagging emit sites; no IPC or daemon-schema changes required.
+- New `<rule-promotion-guidance>` block in prime XML proactively coaches AI coworkers to ask before publishing a project-local rule team-wide ("this looks like it could apply to your whole team — want me to also add it under `<team-context>/agents/rules/`?"). Default to asking; never silently publish.
+- New `<team-rules-budget>` block reports the running token cost of `always`-tier rules so teams self-regulate rule-library size.
+- Regression-test guard on minimal-prime SageOx overhead (currently ~600 tokens, ceiling 1500). A future change that quietly adds 5K of `<instructions>` blocks itself on review.
+
+**Bundled topical guides via `ox guide`**
+- New `ox guide [topic]` reads from `//go:embed`'d markdown — no internet required, no docs-site dependency. Five starter guides ship: `team-rules`, `agents-md`, `team-context`, `murmur-vs-rule`, `getting-started`. `--raw` flag emits unrendered markdown for AI agents that prefer plain text.
+- `ox init`, `ox import`, `ox murmur`, and `ox agent team-ctx` --help now cross-reference the relevant guide so users discover them in context.
+- Prime XML's commands table includes a new "learn how to do something in ox" row pointing at `ox guide [topic]`.
+
+**Adapter rule installation under `.claude/rules/sageox/` namespace**
+- `cmd/ox-adapter-claude-code` now installs a second rule alongside the canonical `.claude/rules/ox.md`: `.claude/rules/sageox/use-team-context.md` — a "MORE RULES → here" pointer that teaches the agent to discover team rules in their canonical home rather than syncing every rule into every cloned repo. No mirror semantics, no conflict resolution, no per-adapter sync coverage gap. The `sageox/` namespace reserves room for future SageOx-installed rules without polluting `.claude/rules/` with `ox-feature1.md`, `ox-feature2.md`, ... siblings.
+- `cmd/ox-adapter-droid` mirrors the same pattern under `.factory/rules/sageox/`.
+- `handleUninstallRules` walks `sageox/` and removes only ox-stamped files (preserves user-authored content), then cleans up the empty namespace dir. Works around an agentx-v0.1.10 limitation where `ExtractCommandHash` only inspects the first line and misses files with frontmatter.
+
+**Rules-support scaffolding for the remaining adapters**
+- New `rules.go` files for `ox-adapter-codex`, `ox-adapter-amp`, `ox-adapter-aider`, `ox-adapter-gemini`, `ox-adapter-opencode`, and `ox-adapter-pi` — each documenting the May 2026 state of that agent's rules surface. None of these agents has a Claude-Code-style modular *behavioral* rules directory today (Codex's `.codex/rules/` is for Starlark execution policies, not behavioral content). The handlers are stub no-ops, NOT wired into `main.go`, and the adapters do NOT advertise `CapRulesInstaller`. When upstream adds modular rules, flipping the wiring on is a 3-line change per adapter.
+
+### Changed
+
+**Reference docs regenerated**
+- `docs/reference/` is now in sync with current cobra command definitions. Adds `guide.mdx`, `session/repair-meta-summary.mdx`, `session/token-optimize.mdx`; drops a stale `distill.mdx` that was never registered as a root command.
+
 ## [0.7.2] - 2026-05-04
 
 ### Added
