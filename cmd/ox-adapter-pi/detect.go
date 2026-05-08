@@ -14,6 +14,15 @@ func handleDetect() (*adapterprotocol.DetectResponse, error) {
 		return &adapterprotocol.DetectResponse{Detected: true, Reason: "AGENT_ENV=pi"}, nil
 	}
 
+	// pi-mono's CLI entry sets process.env.PI_CODING_AGENT = "true"
+	// (packages/coding-agent/src/cli.ts) and Node child_process inherits
+	// process.env, so this propagates to every subprocess pi spawns —
+	// including the bash tool. Strongest available signal that we're
+	// running inside pi right now.
+	if v := os.Getenv("PI_CODING_AGENT"); v == "true" || v == "1" {
+		return &adapterprotocol.DetectResponse{Detected: true, Reason: "PI_CODING_AGENT=" + v}, nil
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return &adapterprotocol.DetectResponse{Detected: false, Reason: "cannot determine home directory"}, nil
