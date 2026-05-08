@@ -404,7 +404,11 @@ func isBleveIndexCorrupt(boltPath string) bool {
 	defer db.Close()
 
 	storeDir := filepath.Dir(boltPath)
-	zapsOnDisk := zapFilesInDir(storeDir)
+	zapsOnDisk, listErr := zapFilesInDir(storeDir)
+	if listErr != nil {
+		// can't enumerate segments — won't claim corruption without proof
+		return false
+	}
 
 	var corrupt bool
 	_ = db.View(func(tx *bbolt.Tx) error {
@@ -451,12 +455,15 @@ func isBleveIndexCorrupt(boltPath string) bool {
 }
 
 // zapFilesInDir returns a set of *.zap filenames in dir for fast lookup.
-func zapFilesInDir(dir string) map[string]struct{} {
-	out := map[string]struct{}{}
+// On any os.ReadDir error returns the error so the caller can refuse to
+// flag corruption based on incomplete information — a transient read
+// failure must not be misread as "every segment is missing."
+func zapFilesInDir(dir string) (map[string]struct{}, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return out
+		return nil, err
 	}
+	out := map[string]struct{}{}
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -466,7 +473,7 @@ func zapFilesInDir(dir string) map[string]struct{} {
 			out[name] = struct{}{}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // decodeSegmentEpoch parses scorch's varint-style segment epoch encoding from
@@ -533,8 +540,13 @@ func RebuildBleveSubIndex(root, name string) error {
 
 	dbPath := filepath.Join(root, MetadataDBFile)
 	if _, statErr := os.Stat(dbPath); statErr != nil {
-		// no metadata.db means no blobs to mark — nothing to do (e.g. fresh dataDir)
-		return nil
+		if errors.Is(statErr, os.ErrNotExist) {
+			// no metadata.db means no blobs to mark — nothing to do (e.g. fresh dataDir)
+			return nil
+		}
+		// permission/IO error: must not silently skip the SQL reset, which
+		// would leave the rebuilt comment shard unable to repopulate.
+		return fmt.Errorf("stat metadata.db for comment rebuild: %w", statErr)
 	}
 	db, openErr := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if openErr != nil {

@@ -789,6 +789,43 @@ func TestRebuildBleveSubIndex_Comment_BubblesSQLFailure(t *testing.T) {
 		"SQL failure must not be confused with full-reindex-required")
 }
 
+// TestIsBleveIndexCorrupt_UnreadableStoreDir_NotFlagged verifies that a
+// transient/permission failure to list the store/ directory does NOT
+// cause isBleveIndexCorrupt to return true. Without this guard, an
+// EACCES on store/ would make every referenced segment look missing and
+// route a healthy index to the destructive rebuild path.
+//
+// Failure prevented: false-positive corruption signal triggering data
+// loss on transient I/O.
+func TestIsBleveIndexCorrupt_UnreadableStoreDir_NotFlagged(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: Bleve operations")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("permission test not reliable on Windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("skipping permission test when running as root")
+	}
+
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "idx")
+	idx, err := openOrCreateBleveIndex(indexPath, "test")
+	require.NoError(t, err)
+	require.NoError(t, idx.Close())
+
+	storeDir := filepath.Join(indexPath, "store")
+	boltPath := filepath.Join(storeDir, "root.bolt")
+	t.Cleanup(func() { _ = os.Chmod(storeDir, 0o700) })
+	require.NoError(t, os.Chmod(storeDir, 0o000), "make store dir unreadable")
+
+	// bolt path itself stat-able through parent (we own it); but ReadDir on
+	// store/ will EACCES. Must NOT report corrupt.
+	require.False(t, isBleveIndexCorrupt(boltPath),
+		"unreadable store dir must not be misread as missing segments")
+}
+
 func mustModTime(t *testing.T, path string) time.Time {
 	t.Helper()
 	info, err := os.Stat(path)
