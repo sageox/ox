@@ -13,10 +13,17 @@ import (
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
+	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/paths"
 )
+
+// maxBleveRebuildAttempts caps how many times the daemon will auto-rebuild a
+// single bleve sub-index across CheckFreshness cycles before giving up. A
+// genuinely-corrupt-disk situation should not become a rebuild loop; once the
+// cap is hit we leave the index broken and let `ox doctor` surface it.
+const maxBleveRebuildAttempts = 2
 
 // CodeDBManager manages CodeDB indexing in the daemon.
 // It ensures only one indexing operation runs at a time and tracks index status.
@@ -65,6 +72,11 @@ type CodeDBManager struct {
 	lastDirtyRefresh time.Time
 	// dirtyTestHook is called at the start of RefreshDirtyOverlay; nil in production.
 	dirtyTestHook func()
+
+	// bleveRebuildAttempts tracks per-sub-index auto-rebuild attempts so a
+	// chronically-corrupt index can't become an infinite rebuild loop. Keyed
+	// by sub-index name ("code"/"diff"/"comment").
+	bleveRebuildAttempts map[string]int
 }
 
 // CodeDBStats tracks index statistics.
@@ -765,6 +777,16 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 					Summary:  "codedb cache directory missing; sparse-checkout may have wiped .sageox/cache/",
 				})
 			}
+			// Self-heal: a single bleve sub-index with an empty mapping doc
+			// blocks every indexing pass forever (observed: daemon at 340% CPU
+			// looping on `error parsing mapping JSON: unexpected end of JSON
+			// input`). Detect via typed MappingCorruptError; rebuild only the
+			// affected sub-index and let the next CheckFreshness cycle retry
+			// the indexing pipeline. Bounded by maxBleveRebuildAttempts so a
+			// chronically-broken disk doesn't become a rebuild loop.
+			if mce := mappingCorruptFromErr(err); mce != nil {
+				m.handleMappingCorrupt(mce, dataDir)
+			}
 			if isInitial {
 				m.logger.Warn("codedb initial index failed", "error", err)
 			} else {
@@ -1058,4 +1080,43 @@ func (m *CodeDBManager) setError(err error) {
 	m.mu.Lock()
 	m.lastErr = err
 	m.mu.Unlock()
+}
+
+// mappingCorruptFromErr returns the MappingCorruptError in err's chain, or nil.
+func mappingCorruptFromErr(err error) *store.MappingCorruptError {
+	var mce *store.MappingCorruptError
+	if errors.As(err, &mce) {
+		return mce
+	}
+	return nil
+}
+
+// handleMappingCorrupt rebuilds a single bleve sub-index that has an empty
+// persisted mapping doc. Bounded by maxBleveRebuildAttempts per sub-index so
+// repeated rebuild failures don't burn CPU forever — once exhausted, the
+// daemon emits a warning and leaves recovery to `ox doctor`.
+func (m *CodeDBManager) handleMappingCorrupt(mce *store.MappingCorruptError, dataDir string) {
+	m.mu.Lock()
+	if m.bleveRebuildAttempts == nil {
+		m.bleveRebuildAttempts = make(map[string]int)
+	}
+	attempts := m.bleveRebuildAttempts[mce.Name]
+	if attempts >= maxBleveRebuildAttempts {
+		m.mu.Unlock()
+		m.logger.Warn("codedb sub-index auto-rebuild exhausted",
+			"name", mce.Name, "attempts", attempts,
+			"action", "run 'ox doctor --fix' to repair manually")
+		return
+	}
+	m.bleveRebuildAttempts[mce.Name] = attempts + 1
+	m.mu.Unlock()
+
+	if err := store.RebuildBleveSubIndex(dataDir, mce.Name); err != nil {
+		m.logger.Warn("codedb sub-index auto-rebuild failed",
+			"name", mce.Name, "error", err)
+		return
+	}
+	m.logger.Warn("codedb sub-index auto-rebuilt",
+		"name", mce.Name, "attempt", attempts+1,
+		"note", "next indexing pass will repopulate")
 }

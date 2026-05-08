@@ -8,8 +8,10 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
 )
 
 // expectedTables lists every table the schema should create.
@@ -583,7 +585,7 @@ func TestOpenOrCreateBleveIndex_LockedIndexNotNuked(t *testing.T) {
 	indexPath := filepath.Join(tmp, "test-index")
 
 	// create a real bleve index at indexPath so root.bolt exists with valid bbolt structure
-	first, err := openOrCreateBleveIndex(indexPath)
+	first, err := openOrCreateBleveIndex(indexPath, "test")
 	if err != nil {
 		t.Fatalf("create index: %v", err)
 	}
@@ -597,11 +599,185 @@ func TestOpenOrCreateBleveIndex_LockedIndexNotNuked(t *testing.T) {
 	require.NoError(t, os.WriteFile(boltPath, []byte("corrupted"), 0600))
 
 	// openOrCreateBleveIndex must fail (corrupt bolt) but must NOT delete the index directory
-	_, openErr := openOrCreateBleveIndex(indexPath)
+	_, openErr := openOrCreateBleveIndex(indexPath, "test")
 	require.Error(t, openErr, "expected error opening corrupt index")
 
 	// bolt file must survive — index was not nuked
 	if _, statErr := os.Stat(boltPath); statErr != nil {
 		t.Errorf("root.bolt was deleted: openOrCreateBleveIndex nuked on open error: %v", statErr)
 	}
+}
+
+// emptyMappingForLatestSnapshot opens root.bolt and overwrites the latest
+// snapshot's `_mapping` value with zero bytes — reproducing the on-disk state
+// observed in the field where bleve.Open fails with "error parsing mapping
+// JSON: unexpected end of JSON input" while .zap shards are healthy.
+func emptyMappingForLatestSnapshot(t *testing.T, boltPath string) {
+	t.Helper()
+	db, err := bbolt.Open(boltPath, 0600, &bbolt.Options{Timeout: 2 * time.Second})
+	require.NoError(t, err, "open bolt for mapping corruption")
+	t.Cleanup(func() { db.Close() })
+	require.NoError(t, db.Update(func(tx *bbolt.Tx) error {
+		snaps := tx.Bucket([]byte{'s'})
+		require.NotNil(t, snaps, "snapshots bucket missing — bleve layout changed")
+		var lastKey []byte
+		require.NoError(t, snaps.ForEach(func(k, _ []byte) error {
+			lastKey = append(lastKey[:0], k...)
+			return nil
+		}))
+		require.NotNil(t, lastKey, "no snapshots in bolt")
+		snap := snaps.Bucket(lastKey)
+		require.NotNil(t, snap, "snapshot bucket missing")
+		internal := snap.Bucket([]byte{'i'})
+		require.NotNil(t, internal, "internal bucket missing — no mapping to corrupt")
+		return internal.Put([]byte("_mapping"), []byte{})
+	}))
+	require.NoError(t, db.Close())
+}
+
+// TestOpen_EmptyMapping_ReturnsTypedError verifies that the empty-mapping
+// failure mode (root.bolt present, _mapping value zero-length) is surfaced
+// as MappingCorruptError instead of being misclassified as lock contention.
+//
+// Failure prevented: daemon spinning at 340% CPU because each indexing pass
+// fails with the wrapped lock-contention error and openOrCreateBleveIndex
+// refuses to nuke an "in-use" index that is actually permanently broken.
+func TestOpen_EmptyMapping_ReturnsTypedError(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
+
+	tmp := t.TempDir()
+	s1, err := Open(tmp)
+	require.NoError(t, err, "first Open")
+	require.NoError(t, s1.Close())
+
+	boltPath := filepath.Join(tmp, "bleve", "comment", "store", "root.bolt")
+	emptyMappingForLatestSnapshot(t, boltPath)
+
+	_, err = Open(tmp)
+	require.Error(t, err, "Open must fail when mapping is empty")
+	var mce *MappingCorruptError
+	require.True(t, errors.As(err, &mce), "expected MappingCorruptError in chain, got: %v", err)
+	require.Equal(t, "comment", mce.Name, "wrong sub-index name")
+
+	// peer sub-indexes (code, diff) must be untouched
+	for _, name := range []string{"code", "diff"} {
+		boltOK := filepath.Join(tmp, "bleve", name, "store", "root.bolt")
+		_, statErr := os.Stat(boltOK)
+		require.NoError(t, statErr, "%s sub-index was disturbed by open of corrupt comment", name)
+	}
+}
+
+// TestRebuildBleveSubIndex_Comment verifies that a targeted rebuild of the
+// comment sub-index recovers Open without affecting code/diff data and
+// resets the SQL flag so ParseComments will repopulate on the next pass.
+//
+// Failure prevented: doctor's only remedy being a full os.RemoveAll(dataDir),
+// which destroys ~600MB of code data plus ~600MB of diff data to recover
+// from a small mapping-doc corruption.
+func TestRebuildBleveSubIndex_Comment(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
+
+	tmp := t.TempDir()
+	s1, err := Open(tmp)
+	require.NoError(t, err, "first Open")
+	// seed a blob so we can verify comments_parsed reset
+	_, err = s1.Exec(`INSERT INTO blobs (content_hash, language, parsed, comments_parsed) VALUES (?, ?, 1, 1)`, "deadbeef", "go")
+	require.NoError(t, err, "seed blob")
+	require.NoError(t, s1.Close())
+
+	boltPath := filepath.Join(tmp, "bleve", "comment", "store", "root.bolt")
+	emptyMappingForLatestSnapshot(t, boltPath)
+
+	// Open should fail with MappingCorruptError before rebuild
+	_, err = Open(tmp)
+	require.Error(t, err)
+	var preMCE *MappingCorruptError
+	require.True(t, errors.As(err, &preMCE), "expected MappingCorruptError")
+
+	// Capture code sub-index state AFTER the failed Open so the rebuild call
+	// is the only operation that could perturb it. We assert the rebuild leaves
+	// every code-side artifact byte-for-byte identical.
+	codeFingerprint := codeIndexFingerprint(t, tmp)
+
+	// targeted rebuild
+	require.NoError(t, RebuildBleveSubIndex(tmp, "comment"), "rebuild comment")
+
+	// code sub-index must be untouched
+	require.Equal(t, codeFingerprint, codeIndexFingerprint(t, tmp),
+		"rebuild of comment sub-index must not touch code sub-index")
+
+	// Open + integrity must succeed post-rebuild
+	s2, err := Open(tmp)
+	require.NoError(t, err, "Open post-rebuild")
+	defer s2.Close()
+	require.NoError(t, s2.CheckIntegrity(), "integrity post-rebuild")
+
+	// comments_parsed must be reset so ParseComments will retry the seeded blob
+	var cp int
+	require.NoError(t, s2.QueryRow(`SELECT comments_parsed FROM blobs WHERE content_hash = ?`, "deadbeef").Scan(&cp))
+	require.Equal(t, 0, cp, "comments_parsed must be cleared after rebuild")
+}
+
+// TestRebuildBleveSubIndex_RejectsUnknownName guards the API surface so
+// callers can't silently nuke an arbitrary path.
+func TestRebuildBleveSubIndex_RejectsUnknownName(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	err := RebuildBleveSubIndex(tmp, "../../etc")
+	require.Error(t, err, "unknown name must be rejected")
+}
+
+func mustModTime(t *testing.T, path string) time.Time {
+	t.Helper()
+	info, err := os.Stat(path)
+	require.NoError(t, err, "stat %s", path)
+	return info.ModTime()
+}
+
+// codeIndexFingerprint hashes file paths + mtimes + sizes under bleve/code/.
+// Used to assert a rebuild of one sub-index doesn't perturb a peer.
+func codeIndexFingerprint(t *testing.T, root string) string {
+	t.Helper()
+	codeDir := filepath.Join(root, "bleve", "code")
+	var entries []string
+	err := filepath.Walk(codeDir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(codeDir, p)
+		entries = append(entries, rel+":"+info.ModTime().UTC().String()+":"+
+			fmtInt64(info.Size()))
+		return nil
+	})
+	require.NoError(t, err, "walk code dir")
+	return joinSorted(entries)
+}
+
+func fmtInt64(n int64) string {
+	return time.Unix(n, 0).UTC().String()
+}
+
+func joinSorted(s []string) string {
+	out := make([]string, len(s))
+	copy(out, s)
+	// stable order independent of walk order
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1] > out[j]; j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	res := ""
+	for _, v := range out {
+		res += v + "\n"
+	}
+	return res
 }

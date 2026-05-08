@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 
 	"github.com/sageox/ox/internal/codedb"
@@ -37,6 +38,20 @@ func checkCodeIndexAtDir(dataDir string, fix bool) checkResult {
 
 	db, err := codedb.Open(dataDir)
 	if err != nil {
+		// Targeted self-heal: a single bleve sub-index with an empty mapping
+		// document is independently recoverable without nuking the whole
+		// dataDir (~1GB+ on real repos). Detect via typed MappingCorruptError
+		// from store.openOrCreateBleveIndex; rebuild only that sub-index.
+		var mce *store.MappingCorruptError
+		if errors.As(err, &mce) {
+			if fix {
+				if rbErr := store.RebuildBleveSubIndex(dataDir, mce.Name); rbErr != nil {
+					return FailedCheck("Code index", fmt.Sprintf("rebuild %s sub-index failed: %v", mce.Name, rbErr), "run 'ox code index --full' to rebuild from scratch")
+				}
+				return PassedCheck("Code index", fmt.Sprintf("%s sub-index rebuilt; run 'ox code index' to repopulate", mce.Name))
+			}
+			return FailedCheck("Code index", fmt.Sprintf("%s sub-index mapping is empty/corrupt", mce.Name), "run 'ox doctor --fix' to rebuild only the affected sub-index")
+		}
 		if fix {
 			_ = os.RemoveAll(dataDir)
 			return PassedCheck("Code index", "corrupt index removed, run 'ox code index' to rebuild")
