@@ -21,71 +21,77 @@ func isolateDetectEnv(t *testing.T) {
 	t.Setenv("PI_CODING_AGENT", "")
 }
 
-// TestDetect_PICodingAgentTrue confirms handleDetect recognizes pi when
-// PI_CODING_AGENT=true is propagated by pi's bash subprocess.
-//
-// Failure prevented: ox CLI invoked from inside pi (which sets
-// process.env.PI_CODING_AGENT="true" at cli.ts:13) reports
-// "must be run from within a coding agent" because detection misses
+// TestDetect_HandleDetectSignals exercises every signal handleDetect knows
+// about, in priority order. The original motivating failure: ox CLI invoked
+// from inside pi (which sets process.env.PI_CODING_AGENT="true" at cli.ts:13)
+// reports "must be run from within a coding agent" because detection misses
 // the only env signal pi actually exports.
-func TestDetect_PICodingAgentTrue(t *testing.T) {
-	isolateDetectEnv(t)
-	t.Setenv("PI_CODING_AGENT", "true")
+//
+// Each case below names the specific regression it guards against — losing
+// one of these branches must surface as a failed subtest, not a silent drift.
+func TestDetect_HandleDetectSignals(t *testing.T) {
+	tests := []struct {
+		name          string
+		agentEnv      string
+		piCodingAgent string
+		wantDetected  bool
+		wantReason    string
+		// failure prevented: short note on what real-world breakage this case
+		// would let through if removed. Documented per .claude/rules/testing.md.
+		failurePrevented string
+	}{
+		{
+			name:             "PI_CODING_AGENT=true",
+			piCodingAgent:    "true",
+			wantDetected:     true,
+			wantReason:       "PI_CODING_AGENT=true",
+			failurePrevented: "ox unable to detect pi sessions on default pi-mono installs",
+		},
+		{
+			name:             "PI_CODING_AGENT=1",
+			piCodingAgent:    "1",
+			wantDetected:     true,
+			wantReason:       "PI_CODING_AGENT=1",
+			failurePrevented: "callers using the boolean-1 convention silently fail detection",
+		},
+		{
+			name:             "PI_CODING_AGENT=false",
+			piCodingAgent:    "false",
+			wantDetected:     false,
+			failurePrevented: "treating any non-empty value as truthy false-positives PI_CODING_AGENT=false",
+		},
+		{
+			name:             "AGENT_ENV=pi wins over PI_CODING_AGENT",
+			agentEnv:         "pi",
+			piCodingAgent:    "true",
+			wantDetected:     true,
+			wantReason:       "AGENT_ENV=pi",
+			failurePrevented: "downstream callers keying off Reason break if priority order shifts",
+		},
+		{
+			name:             "no signals",
+			wantDetected:     false,
+			wantReason:       "~/.pi/ not found and pi not in PATH",
+			failurePrevented: "default-true detection forces pi adapter onto Claude Code/Cursor sessions",
+		},
+	}
 
-	resp, err := handleDetect()
-	require.NoError(t, err)
-	assert.True(t, resp.Detected)
-	assert.Equal(t, "PI_CODING_AGENT=true", resp.Reason)
-}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateDetectEnv(t)
+			if tc.agentEnv != "" {
+				t.Setenv("AGENT_ENV", tc.agentEnv)
+			}
+			if tc.piCodingAgent != "" {
+				t.Setenv("PI_CODING_AGENT", tc.piCodingAgent)
+			}
 
-// TestDetect_PICodingAgentOne accepts "1" alongside "true" so callers that
-// follow the more common boolean-env convention still match.
-func TestDetect_PICodingAgentOne(t *testing.T) {
-	isolateDetectEnv(t)
-	t.Setenv("PI_CODING_AGENT", "1")
-
-	resp, err := handleDetect()
-	require.NoError(t, err)
-	assert.True(t, resp.Detected)
-	assert.Equal(t, "PI_CODING_AGENT=1", resp.Reason)
-}
-
-// TestDetect_PICodingAgentFalse must NOT trigger detection — explicitly
-// disabling the flag should behave like "unset", otherwise we false-positive
-// for any process that happens to forward PI_CODING_AGENT=false from elsewhere.
-func TestDetect_PICodingAgentFalse(t *testing.T) {
-	isolateDetectEnv(t)
-	t.Setenv("PI_CODING_AGENT", "false")
-
-	resp, err := handleDetect()
-	require.NoError(t, err)
-	assert.False(t, resp.Detected, "PI_CODING_AGENT=false must not be treated as detection signal")
-}
-
-// TestDetect_AGENTEnvWinsOverPICodingAgent — when both signals are present,
-// the existing AGENT_ENV=pi short-circuit must still fire first so the Reason
-// stays stable for callers that key off it.
-func TestDetect_AGENTEnvWinsOverPICodingAgent(t *testing.T) {
-	isolateDetectEnv(t)
-	t.Setenv("AGENT_ENV", "pi")
-	t.Setenv("PI_CODING_AGENT", "true")
-
-	resp, err := handleDetect()
-	require.NoError(t, err)
-	assert.True(t, resp.Detected)
-	assert.Equal(t, "AGENT_ENV=pi", resp.Reason)
-}
-
-// TestDetect_NoSignals — clean machine, nothing claiming pi: must report
-// not-detected with the original "~/.pi/ not found and pi not in PATH" reason.
-// Failure prevented: silently flipping default detection to true would force
-// pi adapter onto Claude-Code/Cursor sessions on machines that incidentally
-// have neither pi nor PI_CODING_AGENT set.
-func TestDetect_NoSignals(t *testing.T) {
-	isolateDetectEnv(t)
-
-	resp, err := handleDetect()
-	require.NoError(t, err)
-	assert.False(t, resp.Detected)
-	assert.Equal(t, "~/.pi/ not found and pi not in PATH", resp.Reason)
+			resp, err := handleDetect()
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantDetected, resp.Detected, tc.failurePrevented)
+			if tc.wantReason != "" {
+				assert.Equal(t, tc.wantReason, resp.Reason, tc.failurePrevented)
+			}
+		})
+	}
 }
