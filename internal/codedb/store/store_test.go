@@ -616,7 +616,6 @@ func emptyMappingForLatestSnapshot(t *testing.T, boltPath string) {
 	t.Helper()
 	db, err := bbolt.Open(boltPath, 0600, &bbolt.Options{Timeout: 2 * time.Second})
 	require.NoError(t, err, "open bolt for mapping corruption")
-	t.Cleanup(func() { db.Close() })
 	require.NoError(t, db.Update(func(tx *bbolt.Tx) error {
 		snaps := tx.Bucket([]byte{'s'})
 		require.NotNil(t, snaps, "snapshots bucket missing — bleve layout changed")
