@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sageox/ox/internal/api"
@@ -24,6 +25,14 @@ import (
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/paths"
 )
+
+// kbReconcileLocks serializes concurrent reconcileBubble passes for the
+// same kb_id. Without this, two overlapping syncBubbles invocations can
+// both observe target/.git absent, both kick off cloneBubble, and the
+// second clone trashes the first one's freshly-populated tree (caught by
+// TestSyncBubbles_ConcurrentPasses_NoPanic on Linux CI). Per-kb_id rather
+// than global so independent bubbles still reconcile in parallel.
+var kbReconcileLocks sync.Map // map[kb_id]*sync.Mutex
 
 // envDisableKBDaemon mirrors the merger's OX_KB_DISABLE escape hatch on
 // the daemon side. When set to a truthy value (anything but empty / "0" /
@@ -213,6 +222,13 @@ func (s *SyncScheduler) reconcileBubble(ctx context.Context, b api.KB) {
 		s.logger.Warn("kb_sync target path empty, skipping", "kb_id", b.KBID, "type", string(b.KBType))
 		return
 	}
+
+	// Serialize concurrent reconciles for the same kb_id so overlapping
+	// syncBubbles passes don't race each other into a half-cloned state.
+	muIface, _ := kbReconcileLocks.LoadOrStore(b.KBID, &sync.Mutex{})
+	mu := muIface.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
 
 	// per-bubble cadence routing: high-mutation bubbles (personal/profile/team)
 	// should be reconciled at the team-context cadence; repo/custom at the
