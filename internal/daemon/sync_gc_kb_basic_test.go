@@ -70,7 +70,7 @@ import (
 // TestKBGC_FullCycle_MixedAuthorizedAndOrphans verifies that a single
 // GC pass over a tree containing both authorized and orphaned bubbles
 // moves only the orphans into .trash/ and leaves authorized dirs
-// byte-identical. This is the kb analogue of TestGC_FullCycle_TeamContext.
+// byte-identical. This is the kb analog of TestGC_FullCycle_TeamContext.
 //
 // Failure prevented: a triage bug that either (a) sweeps authorized
 // dirs into trash because of an off-by-one in the API set check, or (b)
@@ -149,7 +149,7 @@ func TestKBGC_FullCycle_TriageThenReap_SamePass(t *testing.T) {
 
 // TestKBGC_KBRootMissing_NoPanic verifies that runKBGC tolerates the
 // canonical kb root not yet existing (fresh install, never logged in,
-// never synced any bubbles). This is the kb analogue of
+// never synced any bubbles). This is the kb analog of
 // TestBlueGreenGC_WorkspacePathDoesNotExist.
 //
 // Failure prevented: GC tick panicking on a fresh install and taking
@@ -200,7 +200,7 @@ func TestKBGC_EmptyEndpoint_NoPanic(t *testing.T) {
 // TestKBGC_PreExistingTrash_NewOrphansAddedAlongside verifies that a
 // pre-existing .trash/ directory (left behind from earlier passes) does
 // not block a new triage from depositing additional orphans. This is
-// the kb analogue of TestBlueGreenGC_PreExistingOldDir +
+// the kb analog of TestBlueGreenGC_PreExistingOldDir +
 // TestBlueGreenGC_CleansUpLeftoverNewDir.
 //
 // Failure prevented: a triage that aborts on first failure (e.g.
@@ -242,7 +242,7 @@ func TestKBGC_PreExistingTrash_NewOrphansAddedAlongside(t *testing.T) {
 
 // TestKBGC_TriageMovesEntireDir_IncludingUntrackedFiles verifies that
 // triage uses os.Rename so every file inside the orphan dir — tracked,
-// untracked, gitignored — moves intact. This is the kb analogue of the
+// untracked, gitignored — moves intact. This is the kb analog of the
 // TestBlueGreenGC_PreservesUntrackedFiles family.
 //
 // Failure prevented: a "tidy" refactor that switches to copy+delete or
@@ -292,7 +292,7 @@ func TestKBGC_TriageMovesEntireDir_IncludingUntrackedFiles(t *testing.T) {
 // TestKBGC_NonDirEntriesIgnored verifies that stray files at the kb
 // root level (not directories) are not triaged. The triage loop only
 // considers IsDir entries — a stray file is left alone. This is the kb
-// analogue of the validate*GCClone family: "don't act on shapes that
+// analog of the validate*GCClone family: "don't act on shapes that
 // don't match expectations".
 //
 // Failure prevented: a future refactor of the readdir loop that drops

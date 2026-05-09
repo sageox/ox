@@ -310,7 +310,7 @@ func TestMerge_AllEmpty(t *testing.T) {
 }
 
 // TestMerge_ContextCancellation verifies all three goroutines respect a
-// cancelled context and the merger returns promptly rather than blocking.
+// canceled context and the merger returns promptly rather than blocking.
 // Failure prevented: a hung CLI when the user hits Ctrl-C during a slow
 // kb/legacy fetch.
 func TestMerge_ContextCancellation(t *testing.T) {
@@ -328,7 +328,7 @@ func TestMerge_ContextCancellation(t *testing.T) {
 	elapsed := time.Since(start)
 
 	require.NoError(t, err)
-	assert.Less(t, elapsed, time.Second, "cancelled context must abort fan-out goroutines promptly")
+	assert.Less(t, elapsed, time.Second, "canceled context must abort fan-out goroutines promptly")
 	// the result is allowed to be empty (cancellation arrived first) or
 	// to contain a warning — the contract here is just "returned fast";
 	// the warnings/bubbles values are advisory.

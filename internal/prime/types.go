@@ -20,8 +20,10 @@ type SessionStatus struct {
 
 // LedgerInfo represents discovered ledger state for prime output.
 //
-// Deprecated: use Output.KB instead. Will be removed in a future release once
-// the kb envelope has shipped for one full release cycle.
+// MIGRATION NOTE: New callers should consume Output.KB (typed entries with
+// type=repo). LedgerInfo is the legacy mirror retained for one release while
+// downstream consumers migrate; it will be removed once the kb envelope has
+// shipped for one full release cycle.
 type LedgerInfo struct {
 	Exists bool   `json:"exists"`
 	Path   string `json:"path,omitempty"`
@@ -61,11 +63,12 @@ type CapturePriorGuidance struct {
 
 // TeamContextInfo represents discovered team context for prime output.
 //
-// Deprecated: use Output.KB instead. Will be removed in a future release once
-// the kb envelope has shipped for one full release cycle. The full payload
-// (AGENTS.md, team_docs, team_rules, soul/team hints, memory) continues to
-// flow here for now because KBInfo is the minimal-envelope contract; per-type
-// rich content moves into KB entries in a follow-up bead.
+// MIGRATION NOTE: New callers should consume Output.KB (typed entries with
+// type=team). TeamContextInfo is the legacy mirror retained for one release
+// while downstream consumers migrate; the full payload (AGENTS.md, team_docs,
+// team_rules, soul/team hints, memory) continues to flow here for now because
+// KBInfo is the minimal-envelope contract — per-type rich content moves into
+// KB entries in a follow-up bead.
 type TeamContextInfo struct {
 	TeamID     string   `json:"team_id"`
 	TeamName   string   `json:"team_name,omitempty"`
@@ -314,9 +317,9 @@ type Output struct {
 	ContentLength     int                        `json:"content_length,omitempty"`      // raw byte length
 	Session           *SessionStatus             `json:"session,omitempty"`             // session recording status
 	KB                []KBInfo                   `json:"kb,omitempty"`                  // unified knowledge-bubble envelope (kb-API + legacy team-contexts + legacy ledgers, deduped)
-	Ledger            *LedgerInfo                `json:"ledger,omitempty"`              // Deprecated: use KB instead. Will be removed in a future release.
+	Ledger            *LedgerInfo                `json:"ledger,omitempty"`              // legacy mirror; new callers should use KB (see LedgerInfo godoc)
 	Important         string                     `json:"important"`                     // always-present disambiguation of knowledge sources
-	TeamContext       *TeamContextInfo           `json:"team_context,omitempty"`        // Deprecated: use KB instead. Will be removed in a future release.
+	TeamContext       *TeamContextInfo           `json:"team_context,omitempty"`        // legacy mirror; new callers should use KB (see TeamContextInfo godoc)
 	TeamContextStatus string                     `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
 	OtherTeams        *OtherTeams                `json:"other_teams,omitempty"`         // non-primary teams (nil when only 1 team)
 	UserNotification  string                     `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user

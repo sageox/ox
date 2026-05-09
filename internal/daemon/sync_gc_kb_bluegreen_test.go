@@ -45,7 +45,7 @@ import (
 // TestKBGC_StaleBakDir_FromCorruptRecovery_Triaged verifies that a
 // `<kb_id>.bak.<unix-ts>` directory left behind by reconcileBubble's
 // corrupt-repo recovery is treated as an orphan and triaged into
-// .trash/. This is the kb analogue of the team-context "stale .old
+// .trash/. This is the kb analog of the team-context "stale .old
 // after green is promoted" cleanup: dead staging artifacts must not
 // accumulate forever.
 //
@@ -245,7 +245,7 @@ func TestKBGC_CrashMidTriage_LeavesNoHalfState(t *testing.T) {
 // TestKBGC_TriageFailure_DoesNotBlockReaper verifies that even when
 // triage cannot proceed (e.g. trash dir blocked by a regular file),
 // the reaper still runs against any pre-existing valid trash entries.
-// This is the kb-GC analogue of the design rule "phase 2 is
+// This is the kb-GC analog of the design rule "phase 2 is
 // independent of phase 1".
 //
 // Failure prevented: a single failure mode (e.g. permissions on the

@@ -159,7 +159,7 @@ func TestSyncBubbles_Clone_EndpointScoping(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "B\n", string(body), "prod endpoint must clone B's content into a path distinct from staging")
 		// the path must be under the new XDG data home, not the previous one
-		assert.True(t, filepath.HasPrefix(target, tmp), "kb path must be scoped to the active endpoint's XDG home")
+		assert.True(t, strings.HasPrefix(target, tmp), "kb path must be scoped to the active endpoint's XDG home")
 	})
 }
 
