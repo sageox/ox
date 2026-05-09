@@ -200,6 +200,11 @@ type SyncScheduler struct {
 	// settings fetcher for CLI feature flag polling
 	settingsFetcher *SettingsFetcher
 
+	// kbListerFactory builds the kb API client used by syncBubbles. nil in
+	// production (real api.KBClient is constructed lazily); tests inject
+	// fakes via SetKBBubbleListerFactory.
+	kbListerFactory kbBubbleListerFactory
+
 	// OTel tracer for per-task trace contexts (nil = tracing disabled)
 	tracer *observability.DaemonTracer
 
@@ -770,6 +775,12 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		case <-teamContextChan:
 			// not traced: high-frequency sync dominates span volume with little diagnostic value
 			s.pullTeamContexts(ctx)
+			// kb bubbles share the team-context cadence (15s). Per-bubble
+			// FETCH_HEAD dedup inside pullManagedRepo (threshold =
+			// max(SyncInterval/2, MinFetchHeadAge)) gates repo/custom
+			// bubbles down to the slower read cadence automatically — see
+			// kbSyncIntervalFor in sync_bubbles.go.
+			s.syncBubbles(ctx)
 			if teamContextTicker != nil {
 				teamContextTicker.Reset(jitteredDuration(s.config.TeamContextSyncInterval, 0.10))
 			}

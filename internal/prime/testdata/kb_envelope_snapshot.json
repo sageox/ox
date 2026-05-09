@@ -1,0 +1,50 @@
+[
+  {
+    "kb_id": "kb_personal",
+    "type": "personal",
+    "slug": "personal-abc",
+    "name": "Personal",
+    "path": "/data/sageox/sageox.ai/kb/kb_personal",
+    "viewer_role": "owner",
+    "tokens": 100,
+    "hint": "your personal scratchpad — your own notes/decisions across all repos"
+  },
+  {
+    "kb_id": "kb_team",
+    "type": "team",
+    "slug": "platform",
+    "name": "Platform",
+    "path": "/data/sageox/sageox.ai/kb/kb_team",
+    "viewer_role": "member",
+    "tokens": 200,
+    "hint": "team-wide decisions/conventions; read with 'ox agent team-ctx'"
+  },
+  {
+    "type": "team",
+    "slug": "team-old",
+    "name": "Team (legacy)",
+    "path": "/data/team-contexts/team-old",
+    "tokens": 200,
+    "legacy": true,
+    "hint": "team-wide decisions/conventions; read with 'ox agent team-ctx'"
+  },
+  {
+    "kb_id": "kb_repo",
+    "type": "repo",
+    "slug": "my-app",
+    "name": "my-app",
+    "path": "/data/sageox/sageox.ai/kb/kb_repo",
+    "viewer_role": "owner",
+    "tokens": 25,
+    "hint": "ledger archive — read on demand"
+  },
+  {
+    "type": "repo",
+    "slug": "ledger-old",
+    "name": "ox (legacy)",
+    "path": "/data/ledgers/ox",
+    "tokens": 25,
+    "legacy": true,
+    "hint": "ledger archive — read on demand"
+  }
+]

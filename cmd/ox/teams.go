@@ -14,11 +14,27 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// teamsDeprecationNotice is printed once on stderr before the command runs.
+// Centralized so tests can match against the same string the user sees.
+//
+// `ox teams` is retained for one release as an alias for `ox kb list --type=team`
+// so existing scripts and muscle memory keep working through the Knowledge
+// Bubbles rollout. The hint points users at the canonical command.
+const teamsDeprecationNotice = "Note: 'ox teams' is deprecated. Use 'ox kb list --type=team' instead. This alias will be removed in a future release."
+
+// teamsDeprecationJSON is the value placed in the JSON envelope's `deprecated`
+// field. Tooling parsing `ox teams --json` already exists; the field is purely
+// additive and signals the deprecation without breaking the legacy shape.
+const teamsDeprecationJSON = "use 'ox kb list --type=team' — this alias will be removed in a future release"
+
 // teamsOutput is the JSON output structure for ox teams.
 type teamsOutput struct {
 	PrimaryTeam string      `json:"primary_team"` // team ID of this repo's team
 	Teams       []teamEntry `json:"teams"`
 	Guidance    string      `json:"guidance"`
+	// Deprecated is populated unconditionally on the deprecation alias so any
+	// tooling can detect the legacy command at parse time.
+	Deprecated string `json:"deprecated,omitempty"`
 }
 
 // teamEntry represents a single team in the output.
@@ -61,9 +77,23 @@ var (
 
 var teamsCmd = &cobra.Command{
 	Use:   "teams",
-	Short: "List teams you belong to",
-	Long:  `List all teams available to you, showing which is primary for this repo.`,
-	RunE:  runTeams,
+	Short: "[deprecated] alias for 'ox kb list --type=team'",
+	Long: `List teams you belong to.
+
+DEPRECATED: this command is retained as a one-release alias for
+` + "`ox kb list --type=team`" + ` and will be removed in a future release. The
+Knowledge Bubbles surface (` + "`ox kb`" + `) is the canonical way to enumerate
+team contexts alongside personal bubbles, profiles, and ledgers.
+
+Existing scripts that parse ` + "`ox teams --json`" + ` will continue to work — the
+JSON envelope keeps its legacy shape and gains a top-level ` + "`deprecated`" + `
+field signaling the move.`,
+	// We intentionally do NOT set Deprecated on the cobra command: cobra's
+	// docs generator hides commands with that field, and we need `ox teams`
+	// to remain visible in `--help` and `docs/reference/teams.mdx` for the
+	// one-release deprecation window. Runtime emits a stderr notice from
+	// runTeams instead.
+	RunE: runTeams,
 }
 
 func init() {
@@ -73,6 +103,12 @@ func init() {
 func runTeams(cmd *cobra.Command, args []string) error {
 	jsonMode, _ := cmd.Flags().GetBool("json")
 	out := cmd.OutOrStdout()
+
+	// Emit the deprecation hint to stderr exactly once. Stderr keeps it
+	// separate from the human/JSON listing on stdout so existing pipelines
+	// and `--json` consumers aren't disturbed; the JSON envelope carries
+	// its own `deprecated` field for programmatic detection.
+	fmt.Fprintln(cmd.ErrOrStderr(), teamsDeprecationNotice)
 
 	projectRoot, _ := findProjectRoot()
 
@@ -95,8 +131,9 @@ func runTeams(cmd *cobra.Command, args []string) error {
 	if len(teams) == 0 {
 		if jsonMode {
 			return json.NewEncoder(out).Encode(teamsOutput{
-				Teams:    []teamEntry{},
-				Guidance: "No teams found. Run 'ox login' then 'ox init' to set up.",
+				Teams:      []teamEntry{},
+				Guidance:   "No teams found. Run 'ox login' then 'ox init' to set up.",
+				Deprecated: teamsDeprecationJSON,
 			})
 		}
 		fmt.Fprintln(out, "No teams found.")
@@ -111,6 +148,7 @@ func runTeams(cmd *cobra.Command, args []string) error {
 			PrimaryTeam: primaryTeamID,
 			Teams:       entries,
 			Guidance:    "Use 'ox agent team-ctx <slug>' to read a team's context.",
+			Deprecated:  teamsDeprecationJSON,
 		}
 		encoder := json.NewEncoder(out)
 		encoder.SetIndent("", "  ")

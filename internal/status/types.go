@@ -3,15 +3,42 @@ package status
 import "time"
 
 // JSONOutput is the JSON output structure for ox status --json.
+//
+// Ledger and TeamContexts are deprecated mirrors retained for one release
+// while consumers migrate to the unified Bubbles field. New consumers
+// should read Bubbles; legacy consumers continue to read Ledger /
+// TeamContexts unchanged. See plan: "ox status" — collapse to bubbles
+// summary; keep mirrors one release.
 type JSONOutput struct {
 	Auth         *AuthJSON         `json:"auth"`
 	Config       *ConfigJSON       `json:"config"`
 	Project      *ProjectJSON      `json:"project"`
+	Bubbles      *BubblesJSON      `json:"bubbles,omitempty"`
 	Ledger       *LedgerJSON       `json:"ledger"`
 	TeamContexts []TeamContextJSON `json:"team_contexts,omitempty"`
 	AICoworkers  []AICoworkerJSON  `json:"ai_coworkers,omitempty"`
 	Daemon       *DaemonJSON       `json:"daemon,omitempty"`
 	Version      *VersionJSON      `json:"version,omitempty"`
+}
+
+// BubblesJSON is the unified knowledge-bubble summary surfaced by
+// `ox status --json`. Counts come from the F3 three-source merger
+// (internal/kb.Merger). ByType is keyed by kb_type slug ("personal",
+// "profile", "team", "repo", "custom", "unknown") and contains only
+// non-zero buckets — zero counts are omitted to keep the line short
+// and to match the human-readable format. Warnings is one entry per
+// fan-out source that errored non-fatally.
+type BubblesJSON struct {
+	Total    int                 `json:"total"`
+	ByType   map[string]int      `json:"by_type,omitempty"`
+	Warnings []BubbleWarningJSON `json:"warnings,omitempty"`
+}
+
+// BubbleWarningJSON mirrors kb.SourceWarning for JSON output. Defined
+// in internal/status to avoid pulling internal/kb into this package.
+type BubbleWarningJSON struct {
+	Source string `json:"source"`
+	Error  string `json:"error"`
 }
 
 // AICoworkerJSON represents an AI coworker in JSON output.

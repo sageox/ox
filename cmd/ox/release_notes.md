@@ -29,10 +29,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Rules-support scaffolding for the remaining adapters**
 - New `rules.go` files for `ox-adapter-codex`, `ox-adapter-amp`, `ox-adapter-aider`, `ox-adapter-gemini`, `ox-adapter-opencode`, and `ox-adapter-pi` — each documenting the May 2026 state of that agent's rules surface. None of these agents has a Claude-Code-style modular *behavioral* rules directory today (Codex's `.codex/rules/` is for Starlark execution policies, not behavioral content). The handlers are stub no-ops, NOT wired into `main.go`, and the adapters do NOT advertise `CapRulesInstaller`. When upstream adds modular rules, flipping the wiring on is a 3-line change per adapter.
 
+**Knowledge Bubbles: one home for the knowledge your AI coworkers need**
+- New `ox kb` command surfaces every knowledge source you have access to in one list. Run `ox kb list` to see your personal scratchpad, your profile, your team contexts, and the per-repo ledgers side by side. `ox kb show <slug>` opens a single bubble; `ox kb path <slug>` prints its local checkout path so `cd $(ox kb path notes)` Just Works. `bubble` and `bubbles` are accepted as aliases for `kb` so muscle memory works either way.
+- Personal bubbles are surfaced for the first time. Every signed-in user gets a private, single-owner scratchpad provisioned automatically; it shows up in `ox kb list` and is loaded into `ox agent prime` so AI coworkers can read and reference it from session one.
+- Per-project ergonomic symlinks land in `.sageox/kb/<slug>` (gitignored) so editors and file pickers surface the bubbles relevant to the project you're in — personal, profile, team contexts you belong to, and this repo's ledger. The canonical XDG checkout still lives under `~/.local/share/sageox/<endpoint>/kb/<kb_id>/`; the symlinks are derived state, refreshed by the daemon on every reconciliation.
+- `ox doctor` learned three new checks: orphaned bubble directories that no longer match the API list, bubbles stuck in `provision-failed` lifecycle state, and bubbles whose last sync is more than an hour stale. All three are auto-fixable on `--fix`.
+- The daemon now syncs bubbles on its existing 15s/60s cadence (split by mutation rate) and gardens the local store: revoked bubbles move to `bubbles/.trash/<kb_id>-<timestamp>/` for a seven-day grace period before deletion, so an accidental access revoke is recoverable without a full reclone.
+- Set `OX_KB_DISABLE=1` to force the CLI and daemon to skip the kb API and fall back to legacy team-context + ledger sources only. Mirrors `OX_XDG_DISABLE`; intended as an operator escape hatch during the rollout, not for daily use.
+
 ### Changed
 
 **Reference docs regenerated**
-- `docs/reference/` is now in sync with current cobra command definitions. Adds `guide.mdx`, `session/repair-meta-summary.mdx`, `session/token-optimize.mdx`; drops a stale `distill.mdx` that was never registered as a root command.
+- `docs/reference/` is now in sync with current cobra command definitions. Adds `guide.mdx`, `session/repair-meta-summary.mdx`, `session/token-optimize.mdx`, and the new `kb/`, `kb/list.mdx`, `kb/show.mdx`, `kb/path.mdx` pages. Drops a stale `distill.mdx` that was never registered as a root command. The `teams.mdx` page now carries the deprecation note inline.
+
+### Deprecated
+
+**`ox teams` is now an alias for `ox kb list --type=team`**
+- `ox teams` continues to work for one release and prints a one-line deprecation hint to stderr pointing at the canonical command. Existing `ox teams --json` consumers see a new `deprecated` field in the JSON envelope so tooling can detect the alias programmatically; the rest of the legacy shape is unchanged. The alias will be removed in a future release.
 
 ## [0.7.2] - 2026-05-04
 

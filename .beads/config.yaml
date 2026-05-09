@@ -62,3 +62,5 @@ sync-branch: "beads-sync"
 # - github.repo
 
 dolt.shared-server: false
+
+sync.remote: "git+ssh://git@github.com/sageox/ox.git"

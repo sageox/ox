@@ -147,6 +147,19 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 		}
 	}
 
+	// knowledge-bubble GC — independent of ledger / team-context GC.
+	// Wrapped in a defer/recover so a bug in the kb GC path can never
+	// prevent the ledger / team-context passes above from running, nor
+	// stall future GC ticks.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.Warn("kb_gc panic recovered", "panic", r)
+			}
+		}()
+		s.runKBGC(ctx, s.buildKBGCListFn())
+	}()
+
 	atomic.StoreInt32(&s.gcInProgress, 0)
 }
 

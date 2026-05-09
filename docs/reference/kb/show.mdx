@@ -1,0 +1,54 @@
+---
+title: "ox kb show"
+description: "CLI reference for ox kb show"
+sidebar_position: 54
+---
+
+## ox kb show
+
+Show details for a knowledge bubble
+
+### Synopsis
+
+Show details for a single knowledge bubble.
+
+The argument may be a kb_id (starts with 'kb_', passed directly to the
+detail endpoint) or a slug (resolved client-side against the list of
+bubbles you can access). When a slug matches multiple bubbles, the tie
+is broken in this order: personal, profile, team, repo, custom.
+
+Output fields are limited to what the API reliably returns: kb_id, type,
+slug, name, lifecycle_state, viewer_role, owner_user_id (if not yours),
+and the local on-disk path. Members and file counts are intentionally
+omitted — those endpoints are not guaranteed.
+
+Examples:
+  ox kb show kb_01HXYZ...
+  ox kb show personal
+  ox kb show platform --json
+
+```
+ox kb show <slug|id> [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for show
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox kb](/kb)	 - Work with knowledge bubbles
+

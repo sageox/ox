@@ -69,6 +69,7 @@ func init() {
 	murmurListCmd.Flags().String("topic", "", "filter by topic slug")
 	murmurListCmd.Flags().String("scope", "", "filter by scope: ledger or team")
 	murmurListCmd.Flags().String("agent-id", "", "filter by coworker ID")
+	murmurListCmd.Flags().Bool("show-file-changes", false, "include daemon-published file-change murmurs in the output")
 }
 
 // murmurListOutput is the JSON output format.
@@ -111,6 +112,7 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 	topicFilter, _ := cmd.Flags().GetString("topic")
 	scopeFilter, _ := cmd.Flags().GetString("scope")
 	agentFilter, _ := cmd.Flags().GetString("agent-id")
+	showFileChanges, _ := cmd.Flags().GetBool("show-file-changes")
 
 	// positional arg overrides --topic when flag not explicitly set
 	if len(args) > 0 && !cmd.Flags().Changed("topic") {
@@ -204,21 +206,18 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 
 	total := len(allMurmurs)
 
-	// apply --last limit
-	if last > 0 && len(allMurmurs) > last {
-		allMurmurs = allMurmurs[:last]
-	}
-
-	// collect diagnostics when empty (check sync/auth health)
-	var diag *murmurListDiagnostic
-	if total == 0 {
-		diag = collectMurmurDiagnostics(projectRoot)
-	}
-
-	// JSON output
+	// JSON output: agents need full data, no file-changes hiding, --last still applies
 	if jsonOutput {
-		entries := make([]murmurListEntry, 0, len(allMurmurs))
-		for _, m := range allMurmurs {
+		jsonMurmurs := allMurmurs
+		if last > 0 && len(jsonMurmurs) > last {
+			jsonMurmurs = jsonMurmurs[:last]
+		}
+		var jsonDiag *murmurListDiagnostic
+		if total == 0 {
+			jsonDiag = collectMurmurDiagnostics(projectRoot)
+		}
+		entries := make([]murmurListEntry, 0, len(jsonMurmurs))
+		for _, m := range jsonMurmurs {
 			entries = append(entries, murmurListEntry{
 				ID:          m.ID,
 				Timestamp:   m.Timestamp.Format(time.RFC3339),
@@ -235,8 +234,27 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 			Total:       total,
 			Window:      windowLabel,
 			Scope:       scopeFilter,
-			Diagnostics: diag,
+			Diagnostics: jsonDiag,
 		})
+	}
+
+	// human path: hide file-changes unless explicitly requested
+	hideFileChanges := shouldHideFileChanges(showFileChanges, topicFilter)
+	var hiddenFileChanges int
+	if hideFileChanges {
+		allMurmurs, hiddenFileChanges = dropFileChangeMurmurs(allMurmurs)
+		total = len(allMurmurs)
+	}
+
+	// apply --last limit
+	if last > 0 && len(allMurmurs) > last {
+		allMurmurs = allMurmurs[:last]
+	}
+
+	// collect diagnostics when empty (check sync/auth health)
+	var diag *murmurListDiagnostic
+	if total == 0 {
+		diag = collectMurmurDiagnostics(projectRoot)
 	}
 
 	// empty case
@@ -247,6 +265,9 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 			printMurmurDiagnostics(diag)
 		}
 		fmt.Println()
+		if hideFileChanges && hiddenFileChanges > 0 {
+			cli.PrintHint(fmt.Sprintf("%d file-change murmur(s) hidden — show with: ox murmur list --show-file-changes", hiddenFileChanges))
+		}
 		cli.PrintHint("Murmurs are short-lived coordination signals from AI coworkers.")
 		cli.PrintHint("Publish one with: ox murmur --topic=wip \"what you're doing\"")
 		return nil
@@ -344,6 +365,28 @@ func printMurmurRow(m ledger.MurmurFile) {
 		murmurContentStyle.Render(content)
 
 	fmt.Println("  " + row)
+}
+
+// shouldHideFileChanges decides whether file-change murmurs should be hidden
+// from the human-rendered list. Daemon-published file-changes are noise for
+// humans but still useful to AI coworkers reading JSON.
+func shouldHideFileChanges(showFileChanges bool, topicFilter string) bool {
+	return !showFileChanges && topicFilter != "file-changes"
+}
+
+// dropFileChangeMurmurs returns the input slice with all Topic=="file-changes"
+// entries removed, plus the count that was dropped. Order is preserved.
+func dropFileChangeMurmurs(in []ledger.MurmurFile) ([]ledger.MurmurFile, int) {
+	out := in[:0]
+	dropped := 0
+	for _, m := range in {
+		if m.Topic == "file-changes" {
+			dropped++
+			continue
+		}
+		out = append(out, m)
+	}
+	return out, dropped
 }
 
 // parseDuration extends time.ParseDuration with support for "d" (days).

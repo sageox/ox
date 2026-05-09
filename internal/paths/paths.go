@@ -504,6 +504,102 @@ func LedgersDataDir(repoID, ep string) string {
 }
 
 // -----------------------------------------------------------------------------
+// Knowledge Bubble (KB) Paths
+// -----------------------------------------------------------------------------
+//
+// Knowledge bubbles are the unified primitive for organizing knowledge — see
+// the "Paths" section of the kb plan. Two locations:
+//
+//   - Canonical XDG store, keyed by immutable kb_id, endpoint-scoped:
+//     ~/.local/share/sageox/<endpoint>/kb/<kb_id>/   (KBDir)
+//     ~/.cache/sageox/<endpoint>/kb/<kb_id>/         (KBCacheDir)
+//
+//   - Per-project symlink, keyed by human-readable slug:
+//     <projectRoot>/.sageox/kb/<slug>                (ProjectKBLink)
+//
+// kb_id is used on disk because slugs can rename — keying canonical storage
+// by slug would force reclones on rename. The per-project link is the *only*
+// slug-keyed path because humans read symlink names.
+
+// KBDir returns the CANONICAL directory for a knowledge bubble's git checkout.
+//
+//	~/.local/share/sageox/<endpoint>/kb/<kb_id>/
+//
+// Endpoint-scoped (mandatory) so staging and production bubbles never collide.
+// Keyed by kb_id (immutable per ADR-036), not slug (renameable).
+//
+// Empty kb_id returns the base kb directory for that endpoint (matches the
+// LedgersDataDir(...) convention so callers can list all bubbles).
+func KBDir(kbID string) string {
+	// endpoint.Get() (not GetForProject) is correct here: KBDir is keyed by the
+	// immutable kb_id and is not project-bound. The KB store is per-machine,
+	// per-endpoint; a kb_id collides only if the user logs into multiple
+	// endpoints, in which case the endpoint subdir disambiguates.
+	ep := endpoint.Get()
+	if ep == "" {
+		panic("KBDir: endpoint is required - endpoint.Get() returned empty")
+	}
+
+	slug := endpoint.NormalizeSlug(ep)
+	if slug == "" {
+		slug = "unknown"
+	}
+
+	base := filepath.Join(DataDir(), slug, "kb")
+	if kbID == "" {
+		return base
+	}
+	return filepath.Join(base, sanitizePathComponent(kbID))
+}
+
+// KBCacheDir returns the CANONICAL cache directory for a knowledge bubble's
+// derived state (token counts, file index, etc.).
+//
+//	~/.cache/sageox/<endpoint>/kb/<kb_id>/
+//
+// Endpoint-scoped, kb_id-keyed — same invariants as KBDir but rooted under
+// the XDG cache home rather than the data home.
+//
+// Empty kb_id returns the base kb cache directory for that endpoint.
+func KBCacheDir(kbID string) string {
+	// see KBDir for the endpoint.Get() rationale.
+	ep := endpoint.Get()
+	if ep == "" {
+		panic("KBCacheDir: endpoint is required - endpoint.Get() returned empty")
+	}
+
+	slug := endpoint.NormalizeSlug(ep)
+	if slug == "" {
+		slug = "unknown"
+	}
+
+	base := filepath.Join(CacheDir(), slug, "kb")
+	if kbID == "" {
+		return base
+	}
+	return filepath.Join(base, sanitizePathComponent(kbID))
+}
+
+// ProjectKBLink returns the per-project symlink path for a knowledge bubble.
+//
+//	<projectRoot>/.sageox/kb/<slug>
+//
+// Slug-keyed because humans read symlink names. The symlink points at the
+// canonical KBDir(kb_id). Lives inside the project's existing .sageox/ dir
+// (which is already gitignored for cache contents) — daemon writes it on
+// every reconciliation; never committed.
+//
+// Returns empty string if either projectRoot or slug is empty (matches the
+// "empty inputs return empty" convention used by the CodeDB helpers).
+func ProjectKBLink(projectRoot, slug string) string {
+	if projectRoot == "" || slug == "" {
+		return ""
+	}
+	// filepath.Join cleans trailing slashes on projectRoot automatically.
+	return filepath.Join(projectRoot, ".sageox", "kb", sanitizePathComponent(slug))
+}
+
+// -----------------------------------------------------------------------------
 // State Paths (Daemon)
 // -----------------------------------------------------------------------------
 

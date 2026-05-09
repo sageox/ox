@@ -606,4 +606,35 @@ func init() {
 		Description: "Verifies configured agent CLI binary is available in PATH",
 		Run:         func(_ bool) checkResult { return checkAgentWorkerBinary() },
 	})
+
+	// ============================================================
+	// Knowledge Bubble checks
+	// ============================================================
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugKBOrphans,
+		Name:        "kb orphan dirs",
+		Category:    "Knowledge Bubbles",
+		FixLevel:    FixLevelAuto,
+		Description: "Detects local kb directories no longer in the kb API list and triages them via the daemon's GC pass",
+		Run:         checkKBOrphans,
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugKBFailedProvision,
+		Name:        "kb provisioning",
+		Category:    "Knowledge Bubbles",
+		FixLevel:    FixLevelCheckOnly,
+		Description: "Surfaces bubbles whose server-side provisioning failed (lifecycle_state=provision-failed); requires server-side recovery",
+		Run:         checkKBFailedProvision,
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugKBStaleSync,
+		Name:        "kb sync freshness",
+		Category:    "Knowledge Bubbles",
+		FixLevel:    FixLevelAuto,
+		Description: "Flags subscribed bubbles whose meta.json last_sync is older than 1h; auto-fix kicks an immediate daemon sync",
+		Run:         checkKBStaleSync,
+	})
 }

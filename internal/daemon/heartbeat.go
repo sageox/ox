@@ -73,6 +73,23 @@ type HeartbeatPayload struct {
 	// key without code changes.
 	ContextTokensBySource map[string]int64 `json:"context_tokens_by_source,omitempty"`
 
+	// ContextTokensByKBType is the per-knowledge-bubble-kind split of
+	// ContextTokens. Keys are KBType slugs from internal/api/kb.go
+	// ("personal", "profile", "team", "repo", "custom", "unknown").
+	// Lets dashboards split, e.g., "personal vs team load" without
+	// looking up each source's metadata.
+	//
+	// When empty, the daemon synthesizes a kb_type split from
+	// ContextTokensBySource using the legacy mapping: the existing
+	// "team" source counts as kb_type="team" and the legacy ledger
+	// source ("project") counts as kb_type="repo". Sources without a
+	// known mapping (e.g., "sageox" tool overhead) credit to
+	// kb_type="unknown" rather than being dropped. When the kb
+	// migration completes, callers will populate this map directly
+	// with per-bubble kb_type values and the synthesis becomes a
+	// no-op for new clients.
+	ContextTokensByKBType map[string]int64 `json:"context_tokens_by_kb_type,omitempty"`
+
 	// CommandName identifies which ox subcommand produced this context (e.g., "prime",
 	// "team-ctx", "session list"). Used for per-command breakdown (ox-aw0).
 	CommandName string `json:"command_name,omitempty"`
@@ -171,6 +188,11 @@ type HeartbeatHandler struct {
 	// without code changes here — the daemon aggregates whatever sources
 	// the heartbeat declares.
 	agentContextTokensBySource map[string]map[string]int64
+	// agentContextTokensByKBType is agent_id → kb_type slug → cumulative tokens.
+	// kb_type slugs match api.KBType ("personal", "profile", "team", "repo",
+	// "custom", "unknown"). Forward-compat: unknown kinds aggregate under
+	// "unknown" rather than panicking or being dropped.
+	agentContextTokensByKBType map[string]map[string]int64
 	agentCommandCount          map[string]int // agent_id → command count
 
 	// per-agent metadata (parent/type) from heartbeats — enables cross-worktree visibility
@@ -229,6 +251,7 @@ func NewHeartbeatHandler(logger *slog.Logger) *HeartbeatHandler {
 		callers:                    make(map[string]CallerInfo),
 		agentContextTokens:         make(map[string]int64),
 		agentContextTokensBySource: make(map[string]map[string]int64),
+		agentContextTokensByKBType: make(map[string]map[string]int64),
 		agentCommandCount:          make(map[string]int),
 		agentParentID:              make(map[string]string),
 		agentType:                  make(map[string]string),
@@ -469,6 +492,39 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 			} else {
 				perSource["sageox"] += hb.ContextTokens
 			}
+
+			// Per-kb_type split. Two paths:
+			//   1. Caller declared an explicit kb_type breakdown — aggregate
+			//      it verbatim, normalizing unrecognized slugs to "unknown"
+			//      so dashboards always see a known bucket set.
+			//   2. Caller only sent a per-source breakdown (legacy CLI) —
+			//      synthesize kb_type from the source name: "team" source
+			//      → "team", "project" source → "repo" (legacy ledger),
+			//      everything else → "unknown" (tool overhead and future
+			//      bubbles whose source-to-kb mapping isn't decided yet).
+			//   3. Caller sent neither (oldest CLI, total only) — credit
+			//      the rolled-up amount to kb_type="unknown" so the signal
+			//      survives without falsely inflating any classified bucket.
+			if h.agentContextTokensByKBType[hb.AgentID] == nil {
+				h.agentContextTokensByKBType[hb.AgentID] = make(map[string]int64)
+			}
+			perKBType := h.agentContextTokensByKBType[hb.AgentID]
+			switch {
+			case len(hb.ContextTokensByKBType) > 0:
+				for kbType, n := range hb.ContextTokensByKBType {
+					if n > 0 {
+						perKBType[normalizeKBTypeSlug(kbType)] += n
+					}
+				}
+			case len(hb.ContextTokensBySource) > 0:
+				for source, n := range hb.ContextTokensBySource {
+					if n > 0 {
+						perKBType[kbTypeForLegacySource(source)] += n
+					}
+				}
+			default:
+				perKBType[kbTypeUnknownSlug] += hb.ContextTokens
+			}
 			h.ctxMu.Unlock()
 		}
 
@@ -626,7 +682,60 @@ func (h *HeartbeatHandler) GetAgentActivity() *ActivityTracker {
 type AgentContextStats struct {
 	ContextTokens         int64            `json:"context_tokens"`
 	ContextTokensBySource map[string]int64 `json:"context_tokens_by_source,omitempty"`
+	// ContextTokensByKBType splits the total by knowledge-bubble kind
+	// (api.KBType slug: "personal", "profile", "team", "repo", "custom",
+	// "unknown"). Lets dashboards split personal vs team load without
+	// looking up each source's metadata. Forward-compat: a kb_type the
+	// CLI doesn't recognize aggregates under "unknown" rather than being
+	// dropped.
+	ContextTokensByKBType map[string]int64 `json:"context_tokens_by_kb_type,omitempty"`
 	CommandCount          int              `json:"command_count"`
+}
+
+// kb_type slugs the daemon recognizes for the per-kb_type split. Matches
+// api.KBType in internal/api/kb.go but kept as plain strings here to avoid
+// pulling internal/api into internal/daemon (cycle risk; daemon already
+// stays free of API client deps).
+const (
+	kbTypePersonalSlug = "personal"
+	kbTypeProfileSlug  = "profile"
+	kbTypeTeamSlug     = "team"
+	kbTypeRepoSlug     = "repo"
+	kbTypeCustomSlug   = "custom"
+	kbTypeUnknownSlug  = "unknown"
+)
+
+// normalizeKBTypeSlug collapses unrecognized kb_type values into "unknown"
+// so dashboards always see a known bucket set. Empty strings also fold to
+// "unknown" — an empty kb_type carries no signal and shouldn't inflate any
+// classified bucket.
+func normalizeKBTypeSlug(s string) string {
+	switch s {
+	case kbTypePersonalSlug, kbTypeProfileSlug, kbTypeTeamSlug,
+		kbTypeRepoSlug, kbTypeCustomSlug, kbTypeUnknownSlug:
+		return s
+	default:
+		return kbTypeUnknownSlug
+	}
+}
+
+// kbTypeForLegacySource maps a legacy budget source name to its
+// best-effort kb_type bucket. Only used when the heartbeat sent a
+// per-source split but no explicit per-kb_type split. The mapping
+// follows the spirit of the kb migration: the legacy team-context
+// source is kind=team, and the legacy ledger source (carried under
+// the "project" budget bucket today) is kind=repo. Tool overhead
+// ("sageox") and any future / unmapped source falls under "unknown"
+// because it doesn't represent a single kb of any kind.
+func kbTypeForLegacySource(source string) string {
+	switch source {
+	case "team":
+		return kbTypeTeamSlug
+	case "project":
+		return kbTypeRepoSlug
+	default:
+		return kbTypeUnknownSlug
+	}
 }
 
 // GetAgentContextStats returns the cumulative context consumption for a given agent.
@@ -643,9 +752,17 @@ func (h *HeartbeatHandler) GetAgentContextStats(agentID string) AgentContextStat
 			bySource[k] = v
 		}
 	}
+	var byKBType map[string]int64
+	if kt := h.agentContextTokensByKBType[agentID]; len(kt) > 0 {
+		byKBType = make(map[string]int64, len(kt))
+		for k, v := range kt {
+			byKBType[k] = v
+		}
+	}
 	return AgentContextStats{
 		ContextTokens:         h.agentContextTokens[agentID],
 		ContextTokensBySource: bySource,
+		ContextTokensByKBType: byKBType,
 		CommandCount:          h.agentCommandCount[agentID],
 	}
 }
@@ -713,6 +830,7 @@ func (h *HeartbeatHandler) CleanupStaleAgents(activeIDs []string) {
 		if _, ok := active[id]; !ok {
 			delete(h.agentContextTokens, id)
 			delete(h.agentContextTokensBySource, id)
+			delete(h.agentContextTokensByKBType, id)
 			delete(h.agentCommandCount, id)
 		}
 	}

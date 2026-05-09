@@ -433,6 +433,19 @@ type InstanceInfo struct {
 	// constant from internal/prime. No daemon or IPC schema change.
 	CumulativeContextTokensBySource map[string]int64 `json:"cumulative_context_tokens_by_source,omitempty"`
 
+	// CumulativeContextTokensByKBType splits the total by knowledge-bubble
+	// kind (api.KBType slug: "personal", "profile", "team", "repo",
+	// "custom", "unknown"). Lets dashboards split, e.g., "personal vs
+	// team load" without dereferencing each source's bubble metadata.
+	//
+	// Forward-compat: a kb_type the CLI doesn't recognize aggregates
+	// under "unknown" rather than being dropped. When the heartbeat
+	// declared no explicit kb_type split, the daemon synthesizes one
+	// from the per-source map (legacy "team" → "team", legacy "project"
+	// ledger → "repo", everything else → "unknown") so dashboards
+	// always see populated buckets even with older clients.
+	CumulativeContextTokensByKBType map[string]int64 `json:"cumulative_context_tokens_by_kb_type,omitempty"`
+
 	// CommandCount is the number of ox commands that produced context output for this agent.
 	CommandCount int `json:"command_count,omitempty"`
 

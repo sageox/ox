@@ -1,7 +1,7 @@
 ---
 title: "ox murmur list"
 description: "CLI reference for ox murmur list"
-sidebar_position: 55
+sidebar_position: 59
 ---
 
 ## ox murmur list
@@ -30,12 +30,13 @@ ox murmur list [topic] [flags]
 ### Options
 
 ```
-      --agent-id string   filter by coworker ID
-  -h, --help              help for list
-      --last int          number of murmurs to show (0 for no limit) (default 10)
-      --scope string      filter by scope: ledger or team
-      --since string      time window: e.g. 30m, 2h, 1d (default: 12h)
-      --topic string      filter by topic slug
+      --agent-id string     filter by coworker ID
+  -h, --help                help for list
+      --last int            number of murmurs to show (0 for no limit) (default 10)
+      --scope string        filter by scope: ledger or team
+      --show-file-changes   include daemon-published file-change murmurs in the output
+      --since string        time window: e.g. 30m, 2h, 1d (default: 12h)
+      --topic string        filter by topic slug
 ```
 
 ### Options inherited from parent commands

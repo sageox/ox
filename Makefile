@@ -125,7 +125,7 @@ check-no-git-lfs-shell: ## Ensure no code shells out to git-lfs binary (see .cla
 
 test-preflight: lint check-no-git-lfs-shell test-all test-slow ## Pre-PR quality gate: lint + all unit tests + slow tests
 
-test-digital-twin: test-ledger-twin ## Digital twin tests (team_context_twin pending, see ox-au5)
+test-digital-twin: test-ledger-twin test-kb-twin ## Digital twin tests (team_context_twin pending, see ox-au5)
 
 test-team-context-twin: ## Digital twin tests (generates fake team context for inspection)
 	@echo "Running team context digital twin tests..."
@@ -134,6 +134,10 @@ test-team-context-twin: ## Digital twin tests (generates fake team context for i
 test-ledger-twin: ## Digital twin ledger tests (generates fake ledger for inspection)
 	@echo "Running ledger digital twin tests..."
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=ledger_twin -v -count=1 -timeout=2m ./tests/ledger_twin/...
+
+test-kb-twin: ## Digital twin kb tests (drives syncBubbles + GC against real bare repos)
+	@echo "Running kb digital twin tests..."
+	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=kb_twin -v -count=1 -timeout=5m ./tests/kb_twin/...
 
 test-benchmark: ## Run prime efficiency benchmarks (requires claude CLI) - ~80 min, ~40 API calls
 	@echo "Running prime efficiency benchmarks..."

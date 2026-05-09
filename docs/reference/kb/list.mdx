@@ -1,0 +1,53 @@
+---
+title: "ox kb list"
+description: "CLI reference for ox kb list"
+sidebar_position: 52
+---
+
+## ox kb list
+
+List knowledge bubbles you can access
+
+### Synopsis
+
+List the knowledge bubbles available to you across all sources.
+
+Merges three sources concurrently:
+  - The kb API (/api/v1/kb) — the new typed knowledge-bubble surface
+  - Legacy team contexts (/api/v1/cli/repos)
+  - Local ledger registry
+
+Legacy entries are tagged "team (legacy)" / "repo (legacy)" in the TYPE column
+so you can see at a glance which rows still need to be migrated server-side.
+
+Examples:
+  ox kb list                  # all bubbles
+  ox kb list --type=team      # only team bubbles (legacy + new)
+  ox kb list --json           # scriptable JSON output
+
+```
+ox kb list [flags]
+```
+
+### Options
+
+```
+  -h, --help          help for list
+      --type string   filter by kb type: personal|profile|team|repo|custom
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox kb](/kb)	 - Work with knowledge bubbles
+

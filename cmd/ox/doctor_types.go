@@ -188,4 +188,9 @@ const (
 
 	// Config hygiene checks
 	CheckSlugTimezoneScrub = "timezone-scrub"
+
+	// Knowledge Bubble checks
+	CheckSlugKBOrphans         = "kb-orphans"
+	CheckSlugKBFailedProvision = "kb-failed-provision"
+	CheckSlugKBStaleSync       = "kb-stale-sync"
 )

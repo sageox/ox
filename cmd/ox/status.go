@@ -1412,11 +1412,24 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			}
 		}
 
+		// collect bubbles summary once — used by both JSON and human output.
+		// failure of the merger is not allowed to block the rest of status,
+		// so collectBubblesSummary swallows errors into Unavailable=true.
+		var bubblesSummary statusBubblesSummary
+		if gitRoot != "" || projectInitialized {
+			bubblesSummary = collectBubblesSummary(statusBubblesMergerForRoot(gitRoot))
+		} else {
+			// outside a project the merger has nothing useful to say;
+			// surface zero rather than "(unavailable)" which would imply
+			// a transient error.
+			bubblesSummary = statusBubblesSummary{}
+		}
+
 		// JSON output mode
 		if statusJSONFlag {
 			output := buildStatusJSON(authenticated, authErr, token, endpointSlug, authFile, authFileExists,
 				userConfigDir, cwd, sageoxDir, projectInitialized, localCfg, gitRoot, repoDetail, codeStats,
-				daemonStatus, client)
+				daemonStatus, client, bubblesSummary)
 			jsonBytes, err := json.MarshalIndent(output, "", "  ")
 			if err != nil {
 				return fmt.Errorf("failed to marshal JSON: %w", err)
@@ -1457,6 +1470,13 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		// skip ledger/daemon sections when not in a git repo — nothing to show
 		if gitRoot != "" {
 
+			// Knowledge bubbles summary — single scannable line sourced
+			// from the F3 three-source merger. Replaces the historical
+			// "Team contexts: N / Ledger: synced" pair (legacy
+			// team_contexts/ledger blocks below stay one release per
+			// the kb plan).
+			fmt.Print(renderBubblesLine(bubblesSummary))
+
 			// Ledger and Team Context sections - shows repos from cloud API
 			// Only displays repos that are actually provisioned
 			fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus))
@@ -1487,12 +1507,21 @@ daemon health, and a tree view of all SageOx directory locations.`,
 // buildStatusJSON constructs the JSON output structure for ox status --json.
 // daemonStatus and daemonClient are pre-fetched from the daemon to avoid a second ping
 // that could race with the first (one succeeds, the other times out = contradictory output).
+//
+// bubblesSummary is the F3 three-source merger result. The deprecated
+// team_contexts/ledger fields are still populated from localCfg for one
+// release while consumers migrate to the new bubbles field.
 func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken, endpointSlug, authFile string, authFileExists bool,
 	userConfigDir, cwd, sageoxDir string, projectInitialized bool, localCfg *config.LocalConfig, gitRoot string,
 	repoDetail *api.RepoDetailResponse, codeStats *daemon.CodeDBStats,
-	daemonStatus *daemon.StatusData, daemonClient *daemon.Client) statusJSONOutput {
+	daemonStatus *daemon.StatusData, daemonClient *daemon.Client,
+	bubblesSummary statusBubblesSummary) statusJSONOutput {
 
 	output := statusJSONOutput{}
+
+	// bubbles section — additive; team_contexts/ledger mirrors below
+	// stay populated for one release per the kb plan.
+	output.Bubbles = buildBubblesJSON(bubblesSummary)
 
 	// auth section
 	output.Auth = &statusAuthJSON{

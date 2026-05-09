@@ -35,6 +35,7 @@ func TestBuildStatusJSON_WithRepoDetail(t *testing.T) {
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 		localCfg, "", repoDetail, nil,
 		nil, nil,
+		statusBubblesSummary{},
 	)
 
 	require.NotNil(t, output.Ledger, "ledger section should be populated when localCfg.Ledger has a path")
@@ -58,6 +59,7 @@ func TestBuildStatusJSON_WithoutRepoDetail(t *testing.T) {
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 		localCfg, "", nil, nil,
 		nil, nil,
+		statusBubblesSummary{},
 	)
 
 	require.NotNil(t, output.Ledger, "ledger section should be populated even without repoDetail")
@@ -85,6 +87,7 @@ func TestBuildStatusJSON_ViewerAccess(t *testing.T) {
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 		localCfg, "", repoDetail, nil,
 		nil, nil,
+		statusBubblesSummary{},
 	)
 
 	require.NotNil(t, output.Ledger)
@@ -108,6 +111,7 @@ func TestBuildStatusJSON_NoLedgerConfig(t *testing.T) {
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 		localCfg, "", repoDetail, nil,
 		nil, nil,
+		statusBubblesSummary{},
 	)
 
 	require.NotNil(t, output.Ledger, "ledger section should always be present")
@@ -122,6 +126,7 @@ func TestBuildStatusJSON_NilLocalConfig(t *testing.T) {
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 		nil, "", nil, nil,
 		nil, nil,
+		statusBubblesSummary{},
 	)
 
 	require.NotNil(t, output.Ledger, "ledger section should always be present")
@@ -147,6 +152,7 @@ func TestBuildStatusJSON_LedgerPathNotExists(t *testing.T) {
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 		localCfg, "", repoDetail, nil,
 		nil, nil,
+		statusBubblesSummary{},
 	)
 
 	require.NotNil(t, output.Ledger)
@@ -176,6 +182,7 @@ func TestBuildStatusJSON_AuthenticatedWithToken(t *testing.T) {
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", true,
 		nil, "", nil, nil,
 		nil, nil,
+		statusBubblesSummary{},
 	)
 
 	require.NotNil(t, output.Auth)
@@ -193,6 +200,7 @@ func TestBuildStatusJSON_ProjectInitialized(t *testing.T) {
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", true,
 		nil, "", nil, nil,
 		nil, nil,
+		statusBubblesSummary{},
 	)
 
 	require.NotNil(t, output.Project)
@@ -208,6 +216,7 @@ func TestBuildStatusJSON_ProjectNotInitialized(t *testing.T) {
 		"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 		nil, "", nil, nil,
 		nil, nil,
+		statusBubblesSummary{},
 	)
 
 	require.NotNil(t, output.Project)
@@ -263,6 +272,7 @@ func TestBuildStatusJSON_VisibilityAccessLevelCombinations(t *testing.T) {
 				"/tmp/config", "/tmp/cwd", "/tmp/cwd/.sageox", false,
 				localCfg, "", repoDetail, nil,
 				nil, nil,
+				statusBubblesSummary{},
 			)
 
 			require.NotNil(t, output.Ledger)

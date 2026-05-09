@@ -223,6 +223,143 @@ func TestMurmurListPositionalTopicArg(t *testing.T) {
 	}
 }
 
+// --- File-changes hiding (ox-1p1) ---
+//
+// Failure prevented: file-changes murmurs (auto-published by the daemon for
+// AI collision detection) leaking into human terminal output as noise, and
+// the converse — silently hiding them from JSON consumers (AI coworkers)
+// who need the full picture.
+
+func TestShouldHideFileChanges(t *testing.T) {
+	tests := []struct {
+		name            string
+		showFileChanges bool
+		topicFilter     string
+		want            bool
+	}{
+		{"default hides", false, "", true},
+		{"--show-file-changes overrides", true, "", false},
+		{"explicit topic filter overrides", false, "file-changes", false},
+		{"unrelated topic filter still hides", false, "wip", true},
+		{"flag wins when both set", true, "file-changes", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldHideFileChanges(tt.showFileChanges, tt.topicFilter); got != tt.want {
+				t.Errorf("shouldHideFileChanges(%v, %q) = %v, want %v",
+					tt.showFileChanges, tt.topicFilter, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDropFileChangeMurmurs(t *testing.T) {
+	now := time.Now().UTC()
+	in := []ledger.MurmurFile{
+		{ID: "m1", Topic: "wip", Timestamp: now},
+		{ID: "m2", Topic: "file-changes", Timestamp: now.Add(-1 * time.Minute)},
+		{ID: "m3", Topic: "conflict", Timestamp: now.Add(-2 * time.Minute)},
+		{ID: "m4", Topic: "file-changes", Timestamp: now.Add(-3 * time.Minute)},
+	}
+	out, dropped := dropFileChangeMurmurs(in)
+	if dropped != 2 {
+		t.Errorf("dropped = %d, want 2", dropped)
+	}
+	if len(out) != 2 {
+		t.Fatalf("len(out) = %d, want 2", len(out))
+	}
+	if out[0].ID != "m1" || out[1].ID != "m3" {
+		t.Errorf("order not preserved or wrong entries kept: %+v", out)
+	}
+	for _, m := range out {
+		if m.Topic == "file-changes" {
+			t.Errorf("file-changes leaked through: %+v", m)
+		}
+	}
+}
+
+func TestDropFileChangeMurmurs_NoFileChanges(t *testing.T) {
+	in := []ledger.MurmurFile{
+		{ID: "m1", Topic: "wip"},
+		{ID: "m2", Topic: "conflict"},
+	}
+	out, dropped := dropFileChangeMurmurs(in)
+	if dropped != 0 {
+		t.Errorf("dropped = %d, want 0", dropped)
+	}
+	if len(out) != 2 {
+		t.Errorf("len(out) = %d, want 2", len(out))
+	}
+}
+
+func TestDropFileChangeMurmurs_AllFileChanges(t *testing.T) {
+	in := []ledger.MurmurFile{
+		{ID: "m1", Topic: "file-changes"},
+		{ID: "m2", Topic: "file-changes"},
+	}
+	out, dropped := dropFileChangeMurmurs(in)
+	if dropped != 2 {
+		t.Errorf("dropped = %d, want 2", dropped)
+	}
+	if len(out) != 0 {
+		t.Errorf("len(out) = %d, want 0", len(out))
+	}
+}
+
+// TestMurmurListShowFileChangesFlagRegistered verifies the flag is wired up
+// with the right name, default, and type. Failure prevented: a rename or
+// removal that silently breaks the documented "ox murmur list --show-file-changes"
+// invocation.
+func TestMurmurListShowFileChangesFlagRegistered(t *testing.T) {
+	flag := murmurListCmd.Flags().Lookup("show-file-changes")
+	if flag == nil {
+		t.Fatal("--show-file-changes flag not registered")
+	}
+	if flag.Value.Type() != "bool" {
+		t.Errorf("flag type = %q, want bool", flag.Value.Type())
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("flag default = %q, want false", flag.DefValue)
+	}
+	if flag.Usage == "" {
+		t.Error("flag usage text is empty")
+	}
+}
+
+// TestMurmurListJSON_FileChangesNeverHidden documents the contract that
+// JSON output is unaffected by --show-file-changes. AI coworkers consuming
+// the JSON path need the full data set regardless of human-facing flags.
+// This test asserts the property via the JSON entry shape (Topic field
+// preserved through marshal/unmarshal); the actual JSON-path behavior in
+// runMurmurList does not branch on showFileChanges by design.
+func TestMurmurListJSON_FileChangesNeverHidden(t *testing.T) {
+	entries := []murmurListEntry{
+		{ID: "m1", Topic: "wip", Content: "hello"},
+		{ID: "m2", Topic: "file-changes", Content: "edited foo.go"},
+	}
+	out := murmurListOutput{Murmurs: entries, Total: 2, Window: "12h"}
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded murmurListOutput
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(decoded.Murmurs) != 2 {
+		t.Fatalf("expected 2 murmurs in JSON, got %d", len(decoded.Murmurs))
+	}
+	var sawFileChanges bool
+	for _, m := range decoded.Murmurs {
+		if m.Topic == "file-changes" {
+			sawFileChanges = true
+		}
+	}
+	if !sawFileChanges {
+		t.Error("file-changes murmur missing from JSON output")
+	}
+}
+
 func TestMurmurFileRoundTrip(t *testing.T) {
 	tmpDir := t.TempDir()
 	now := time.Now().UTC()

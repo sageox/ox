@@ -438,6 +438,13 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	phaseStart = time.Now()
 	ledgerStatus := discoverLedger(teamCtx)
 
+	// fan out to the F3 three-source merger (kb API + legacy team-contexts +
+	// legacy ledger registry) and build the unified KB envelope. The merger
+	// owns dedup and per-source error handling; failures don't fail prime —
+	// at worst the KB array is empty and the deprecated mirrors carry the
+	// session through.
+	kbInfos, _ := buildPrimeKBEnvelope(cmd.Context(), projectRoot)
+
 	// load project guidance from AGENTS.md
 	projectGuidance := loadProjectGuidance(projectRoot, agentType)
 
@@ -551,6 +558,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		TeamInstructions:   teamInstructions,
 		CapturePrior:       capturePrior,
 		Session:            sessionStat,
+		KB:                 kbInfos,
 		Ledger:             ledgerStatus,
 		TeamContext:        teamCtx,
 		PrimeCallCount:     primeCallCount,
@@ -2037,6 +2045,62 @@ func discoverLedger(teamCtx *teamContextInfo) *ledgerInfo {
 		Path:   path,
 		Hint:   hint,
 	}
+}
+
+// buildPrimeKBEnvelope runs the F3 three-source merger and converts the
+// result into the prime []KBInfo envelope, enforcing the I2 invariant that
+// the caller's personal bubble must always be present when the kb-API
+// source is reachable.
+//
+// Reuses newDefaultKBListMerger so the prime envelope and `ox kb list` see
+// the exact same view of the world (no chance of one rendering a bubble
+// the other can't see). A short timeout caps prime's worst-case latency —
+// merger fan-out is parallel across the three sources.
+//
+// Returns:
+//   - the sorted []KBInfo envelope (nil when no rows merged)
+//   - kbSourceReachable: true iff the kb API contributed at least one row,
+//     used by callers that need to know whether kb-API tokens / counters
+//     are real ("kb feature flag on") or absent because the source itself
+//     was unavailable.
+func buildPrimeKBEnvelope(ctx context.Context, projectRoot string) ([]prime.KBInfo, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	mergeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	merger := newDefaultKBListMerger(projectRoot)
+	res, err := merger.Merge(mergeCtx)
+	if err != nil {
+		// catastrophic merger failure — per-source errors land in
+		// res.Warnings, never here. Keep prime alive with an empty KB.
+		slog.Warn("prime_kb_merge_failed", "err", err.Error())
+		return nil, false
+	}
+
+	// per-bubble token attribution: pull cumulative counters from the
+	// daemon (best-effort) so KB[].Tokens reflects what's actually been
+	// consumed for each kb_type. Missing daemon → leave at zero; that
+	// matches the existing CumulativeContextTokensBySource handling.
+	tokensByType := make(map[string]int64)
+	if dc := daemon.TryConnect(); dc != nil {
+		if instances, ierr := dc.Instances(); ierr == nil {
+			// rolled-up across all instances for this machine — scoping
+			// to a single agent_id would require the agent_id which isn't
+			// known yet here. Per-agent attribution can be a follow-up.
+			for _, di := range instances {
+				for k, v := range di.CumulativeContextTokensByKBType {
+					tokensByType[k] += v
+				}
+			}
+		}
+	}
+
+	infos := prime.BuildKBInfos(res, tokensByType)
+	reachable := prime.KBSourceReachable(res)
+	infos = prime.EnsurePersonalKBPresent(infos, reachable)
+	return infos, reachable
 }
 
 // ensureClaudeHooks auto-installs Claude Code hooks if Claude Code is detected

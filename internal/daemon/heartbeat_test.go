@@ -801,6 +801,212 @@ func TestHeartbeatHandler_ContextTokensBySource(t *testing.T) {
 	}
 }
 
+// TestHeartbeatHandler_ContextTokensByKBType verifies that token counts
+// surface a per-kb_type split alongside the per-source split, so dashboards
+// can answer "personal vs team load" without dereferencing each source.
+//
+// Failure prevented: the daemon drops the kb_type signal (or panics on
+// unrecognized values), making it impossible to chart load by knowledge-bubble
+// kind once the kb migration completes.
+func TestHeartbeatHandler_ContextTokensByKBType_Explicit(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := NewHeartbeatHandler(logger)
+
+	// New-style heartbeat with explicit per-kb_type split, including a
+	// "personal" bubble — the field the new kb migration unlocks.
+	handler.Handle("", mustMarshal(HeartbeatPayload{
+		AgentID:       "OxKB1",
+		ContextTokens: 1000,
+		ContextTokensBySource: map[string]int64{
+			"team":   600,
+			"sageox": 100,
+			"bub-1":  300,
+		},
+		ContextTokensByKBType: map[string]int64{
+			"personal": 300,
+			"team":     600,
+			"unknown":  100,
+		},
+		Timestamp: time.Now(),
+	}))
+
+	stats := handler.GetAgentContextStats("OxKB1")
+	if stats.ContextTokensByKBType["personal"] != 300 {
+		t.Errorf("expected 300 personal, got %d", stats.ContextTokensByKBType["personal"])
+	}
+	if stats.ContextTokensByKBType["team"] != 600 {
+		t.Errorf("expected 600 team kb_type, got %d", stats.ContextTokensByKBType["team"])
+	}
+	if stats.ContextTokensByKBType["unknown"] != 100 {
+		t.Errorf("expected 100 unknown, got %d", stats.ContextTokensByKBType["unknown"])
+	}
+}
+
+// TestHeartbeatHandler_ContextTokensByKBType_LegacySourceFallback verifies
+// that when older clients send only a per-source split, the daemon
+// synthesizes a kb_type bucket from each source: "team" → "team",
+// "project" (legacy ledger) → "repo", and unmapped sources → "unknown".
+//
+// Failure prevented: dashboards built on kb_type are blank for every
+// existing client that hasn't been updated to declare kb_type.
+func TestHeartbeatHandler_ContextTokensByKBType_LegacySourceFallback(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := NewHeartbeatHandler(logger)
+
+	handler.Handle("", mustMarshal(HeartbeatPayload{
+		AgentID:       "OxLegacy2",
+		ContextTokens: 900,
+		ContextTokensBySource: map[string]int64{
+			"sageox":  200, // tool overhead → unknown
+			"team":    400, // legacy team-context → team
+			"project": 300, // legacy ledger → repo
+		},
+		Timestamp: time.Now(),
+	}))
+
+	stats := handler.GetAgentContextStats("OxLegacy2")
+	if stats.ContextTokensByKBType["team"] != 400 {
+		t.Errorf("expected 400 team (from legacy 'team' source), got %d", stats.ContextTokensByKBType["team"])
+	}
+	if stats.ContextTokensByKBType["repo"] != 300 {
+		t.Errorf("expected 300 repo (from legacy 'project' source), got %d", stats.ContextTokensByKBType["repo"])
+	}
+	if stats.ContextTokensByKBType["unknown"] != 200 {
+		t.Errorf("expected 200 unknown (from 'sageox' tool overhead), got %d", stats.ContextTokensByKBType["unknown"])
+	}
+	// no personal/profile/custom expected without explicit declaration
+	if stats.ContextTokensByKBType["personal"] != 0 || stats.ContextTokensByKBType["profile"] != 0 {
+		t.Errorf("legacy source fallback should not synthesize personal/profile, got personal=%d profile=%d",
+			stats.ContextTokensByKBType["personal"], stats.ContextTokensByKBType["profile"])
+	}
+}
+
+// TestHeartbeatHandler_ContextTokensByKBType_UnknownNormalizes verifies
+// that an unrecognized kb_type slug aggregates under "unknown" rather
+// than panicking or being passed through verbatim.
+//
+// Failure prevented: a future server-only kb_type leaks into client
+// dashboards as a phantom bucket, or worse, the daemon panics on an
+// unexpected string.
+func TestHeartbeatHandler_ContextTokensByKBType_UnknownNormalizes(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := NewHeartbeatHandler(logger)
+
+	handler.Handle("", mustMarshal(HeartbeatPayload{
+		AgentID:       "OxKBFuture",
+		ContextTokens: 500,
+		ContextTokensByKBType: map[string]int64{
+			"team":                    200,
+			"future-kind-from-server": 200, // not in api.KBType today
+			"":                        100, // empty-string kb_type also normalizes
+		},
+		Timestamp: time.Now(),
+	}))
+
+	stats := handler.GetAgentContextStats("OxKBFuture")
+	if stats.ContextTokensByKBType["team"] != 200 {
+		t.Errorf("expected 200 team, got %d", stats.ContextTokensByKBType["team"])
+	}
+	if stats.ContextTokensByKBType["unknown"] != 300 {
+		t.Errorf("expected 300 unknown (200 future + 100 empty), got %d", stats.ContextTokensByKBType["unknown"])
+	}
+	if _, ok := stats.ContextTokensByKBType["future-kind-from-server"]; ok {
+		t.Error("unrecognized kb_type leaked into stats verbatim — must collapse to 'unknown'")
+	}
+}
+
+// TestHeartbeatHandler_ContextTokensByKBType_NoSplitFallback verifies the
+// oldest-CLI path: a heartbeat with neither per-source nor per-kb_type
+// split still produces a kb_type bucket so the signal survives.
+//
+// Failure prevented: legacy heartbeats silently drop out of any
+// kb_type-keyed dashboard, hiding genuine load.
+func TestHeartbeatHandler_ContextTokensByKBType_NoSplitFallback(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := NewHeartbeatHandler(logger)
+
+	handler.Handle("", mustMarshal(HeartbeatPayload{
+		AgentID:       "OxOldest",
+		ContextTokens: 750,
+		Timestamp:     time.Now(),
+	}))
+
+	stats := handler.GetAgentContextStats("OxOldest")
+	if stats.ContextTokens != 750 {
+		t.Errorf("expected 750 total, got %d", stats.ContextTokens)
+	}
+	if stats.ContextTokensByKBType["unknown"] != 750 {
+		t.Errorf("expected 750 credited to unknown for oldest CLI, got %d", stats.ContextTokensByKBType["unknown"])
+	}
+}
+
+// TestHeartbeatHandler_ContextTokensByKBType_JSONShape pins the JSON
+// serialization of the heartbeat payload and AgentContextStats so
+// downstream consumers (ipc.go InstanceInfo, status display, telemetry)
+// don't silently break when the schema evolves. Adding a kb_type field
+// must be additive — old keys keep their names, casing, and omitempty
+// semantics.
+//
+// Failure prevented: a refactor renames kb_type to kbType (or drops
+// omitempty), and every consumer parsing this JSON breaks at once
+// without a test failure to catch it.
+func TestHeartbeatHandler_ContextTokensByKBType_JSONShape(t *testing.T) {
+	payload := HeartbeatPayload{
+		AgentID:               "OxShape",
+		ContextTokens:         100,
+		ContextTokensBySource: map[string]int64{"team": 100},
+		ContextTokensByKBType: map[string]int64{"team": 100},
+		Timestamp:             time.Time{}, // zero — avoid timezone flakiness
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	got := string(data)
+	for _, want := range []string{
+		`"agent_id":"OxShape"`,
+		`"context_tokens":100`,
+		`"context_tokens_by_source":{"team":100}`,
+		`"context_tokens_by_kb_type":{"team":100}`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("payload JSON missing %q\n got=%s", want, got)
+		}
+	}
+
+	// Round-trip through AgentContextStats too — that's the shape
+	// surfaced over IPC to InstanceInfo.
+	stats := AgentContextStats{
+		ContextTokens:         100,
+		ContextTokensBySource: map[string]int64{"team": 100},
+		ContextTokensByKBType: map[string]int64{"team": 100},
+		CommandCount:          1,
+	}
+	statsData, err := json.Marshal(stats)
+	if err != nil {
+		t.Fatalf("marshal stats: %v", err)
+	}
+	statsGot := string(statsData)
+	for _, want := range []string{
+		`"context_tokens":100`,
+		`"context_tokens_by_source":{"team":100}`,
+		`"context_tokens_by_kb_type":{"team":100}`,
+		`"command_count":1`,
+	} {
+		if !strings.Contains(statsGot, want) {
+			t.Errorf("stats JSON missing %q\n got=%s", want, statsGot)
+		}
+	}
+
+	// Empty maps must omitempty — older clients should not see a
+	// dangling `"context_tokens_by_kb_type":{}` field.
+	emptyStats := AgentContextStats{ContextTokens: 5, CommandCount: 1}
+	emptyData, _ := json.Marshal(emptyStats)
+	if strings.Contains(string(emptyData), "context_tokens_by_kb_type") {
+		t.Errorf("empty stats should omit context_tokens_by_kb_type, got %s", string(emptyData))
+	}
+}
+
 func TestHeartbeatHandler_ContextTokensZeroIgnored(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	handler := NewHeartbeatHandler(logger)

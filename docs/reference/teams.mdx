@@ -1,16 +1,25 @@
 ---
 title: "ox teams"
 description: "CLI reference for ox teams"
-sidebar_position: 73
+sidebar_position: 77
 ---
 
 ## ox teams
 
-List teams you belong to
+[deprecated] alias for 'ox kb list --type=team'
 
 ### Synopsis
 
-List all teams available to you, showing which is primary for this repo.
+List teams you belong to.
+
+DEPRECATED: this command is retained as a one-release alias for
+`ox kb list --type=team` and will be removed in a future release. The
+Knowledge Bubbles surface (`ox kb`) is the canonical way to enumerate
+team contexts alongside personal bubbles, profiles, and ledgers.
+
+Existing scripts that parse `ox teams --json` will continue to work — the
+JSON envelope keeps its legacy shape and gains a top-level `deprecated`
+field signaling the move.
 
 ```
 ox teams [flags]

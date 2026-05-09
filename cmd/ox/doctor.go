@@ -937,6 +937,20 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		})
 	}
 
+	// Category 10c: Knowledge Bubbles
+	// Three checks: orphan kb dirs, failed-provision rows, stale sync.
+	// Each check no-ops cleanly when its prerequisites are missing
+	// (no kb root, kb API unavailable, etc.) so we always run them and
+	// let the individual checks decide what to surface.
+	progress.show("Knowledge Bubbles")
+	kbChecks := runKBChecks(opts)
+	if len(kbChecks) > 0 {
+		categories = append(categories, checkCategory{
+			name:   "Knowledge Bubbles",
+			checks: kbChecks,
+		})
+	}
+
 	// Category 11: Agent Worker
 	progress.show("Agent Worker")
 	categories = append(categories, checkCategory{

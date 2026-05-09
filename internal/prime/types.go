@@ -18,11 +18,37 @@ type SessionStatus struct {
 	SessionURL       string `json:"session_url,omitempty"`       // web URL to view this session recording
 }
 
-// LedgerInfo represents discovered ledger state for prime output
+// LedgerInfo represents discovered ledger state for prime output.
+//
+// Deprecated: use Output.KB instead. Will be removed in a future release once
+// the kb envelope has shipped for one full release cycle.
 type LedgerInfo struct {
 	Exists bool   `json:"exists"`
 	Path   string `json:"path,omitempty"`
 	Hint   string `json:"hint,omitempty"`
+}
+
+// KBInfo is one row in Output.KB — the unified per-knowledge-bubble envelope
+// emitted by `ox agent prime`. Built from the F3 three-source merger
+// (internal/kb.Merger) so kb-API rows, legacy team contexts, and legacy
+// ledger rows all flow through the same shape.
+//
+// Per the kb plan: per-kind rendering in prime stays differentiated (the
+// rich `team_context` mirror still carries the full team payload for one
+// release). KBInfo itself is intentionally minimal — it identifies the
+// bubble, where it lives on disk, the caller's role, and a short hint;
+// payloads are emitted in their type-specific siblings until the legacy
+// mirrors are removed.
+type KBInfo struct {
+	KBID       string `json:"kb_id,omitempty"`
+	Type       string `json:"type"` // kb_type slug ("personal", "team", "repo", ...)
+	Slug       string `json:"slug,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Path       string `json:"path,omitempty"`        // canonical XDG path (paths.KBDir) or legacy local dir
+	ViewerRole string `json:"viewer_role,omitempty"` // "owner", "member", "viewer"
+	Tokens     int    `json:"tokens,omitempty"`      // estimated/observed tokens contributed by this bubble
+	Legacy     bool   `json:"legacy,omitempty"`      // true for legacy team-context / ledger synthesized rows
+	Hint       string `json:"hint,omitempty"`        // short, type-specific guidance for the agent
 }
 
 // CapturePriorGuidance provides instructions for capturing prior history
@@ -33,7 +59,13 @@ type CapturePriorGuidance struct {
 	Example      string   `json:"example"`
 }
 
-// TeamContextInfo represents discovered team context for prime output
+// TeamContextInfo represents discovered team context for prime output.
+//
+// Deprecated: use Output.KB instead. Will be removed in a future release once
+// the kb envelope has shipped for one full release cycle. The full payload
+// (AGENTS.md, team_docs, team_rules, soul/team hints, memory) continues to
+// flow here for now because KBInfo is the minimal-envelope contract; per-type
+// rich content moves into KB entries in a follow-up bead.
 type TeamContextInfo struct {
 	TeamID     string   `json:"team_id"`
 	TeamName   string   `json:"team_name,omitempty"`
@@ -281,9 +313,10 @@ type Output struct {
 	TokenEstimate     int                        `json:"token_estimate,omitempty"`      // estimated token count
 	ContentLength     int                        `json:"content_length,omitempty"`      // raw byte length
 	Session           *SessionStatus             `json:"session,omitempty"`             // session recording status
-	Ledger            *LedgerInfo                `json:"ledger,omitempty"`              // repo-specific archive of coding sessions (NOT team context)
+	KB                []KBInfo                   `json:"kb,omitempty"`                  // unified knowledge-bubble envelope (kb-API + legacy team-contexts + legacy ledgers, deduped)
+	Ledger            *LedgerInfo                `json:"ledger,omitempty"`              // Deprecated: use KB instead. Will be removed in a future release.
 	Important         string                     `json:"important"`                     // always-present disambiguation of knowledge sources
-	TeamContext       *TeamContextInfo           `json:"team_context,omitempty"`        // team context if configured
+	TeamContext       *TeamContextInfo           `json:"team_context,omitempty"`        // Deprecated: use KB instead. Will be removed in a future release.
 	TeamContextStatus string                     `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
 	OtherTeams        *OtherTeams                `json:"other_teams,omitempty"`         // non-primary teams (nil when only 1 team)
 	UserNotification  string                     `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user

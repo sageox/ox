@@ -51,6 +51,12 @@ ox agent <id> session       → Records session for later analysis
   },
   "capabilities_used": ["tool_use", "mcp"],
   "content": "...",
+  "kb": [
+    {"kb_id": "kb_...", "type": "personal", "slug": "personal-abc", "path": "/...", "viewer_role": "owner", "tokens": 1240},
+    {"kb_id": "kb_...", "type": "team",     "slug": "platform",    "path": "/...", "viewer_role": "member", "tokens": 8200}
+  ],
+  "team_context": "...",
+  "ledger": "...",
   "mcp_servers": [],
   "hooks": {
     "session_start": "ox agent prime",
@@ -58,6 +64,15 @@ ox agent <id> session       → Records session for later analysis
   }
 }
 ```
+
+The `kb` array is the canonical envelope for the user's knowledge sources —
+it merges personal bubbles, profiles, team contexts, and per-repo ledgers
+into a single typed list. Each entry carries `kb_id`, `type`
+(`personal`/`profile`/`team`/`repo`/`custom`), `slug`, `path`,
+`viewer_role`, and a per-source `tokens` count. The legacy
+`team_context` and `ledger` fields are still populated for one release as
+deprecated mirrors of the same data; new consumers should read `kb`.
+See `ox kb list` and `cmd/ox/kb_list.go` for the source-of-truth shape.
 
 ---
 
