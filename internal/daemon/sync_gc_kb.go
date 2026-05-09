@@ -172,6 +172,16 @@ func (s *SyncScheduler) kbGCTriage(ctx context.Context, kbRoot, trashDir string,
 		if _, ok := want[name]; ok {
 			continue // still authorized — leave alone
 		}
+		// Clone-in-flight guard: if cloneBubble is mid-flight for this
+		// kb_id, the target dir may LOOK like an orphan (not yet in the
+		// API list, freshly mkdir'd, no .git yet) but renaming it to
+		// .trash/ would race the active git clone and leave a silent
+		// half-cloned bubble. Skip and let the next GC pass re-evaluate
+		// once cloneBubble has either finished or been canceled.
+		if kbCloneActive(name) {
+			s.logger.Debug("kb_gc triage skip: clone in flight", "kb_id", name)
+			continue
+		}
 
 		// orphan — move into .trash/<kb_id>-<RFC3339>
 		if err := os.MkdirAll(trashDir, 0o755); err != nil {

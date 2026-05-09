@@ -71,7 +71,8 @@ func init() {
 	murmurCmd.AddCommand(murmurPauseCmd)
 	murmurCmd.AddCommand(murmurResumeCmd)
 
-	murmurCmd.GroupID = "agent-interface"
+	// GroupID is owned by root.go's init() (murmur is in the "teams" group
+	// alongside carts/glance — coordination signals between teammates).
 	rootCmd.AddCommand(murmurCmd)
 }
 

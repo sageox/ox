@@ -49,8 +49,9 @@ Merges three sources concurrently:
   - Legacy team contexts (/api/v1/cli/repos)
   - Local ledger registry
 
-Legacy entries are tagged "team (legacy)" / "repo (legacy)" in the TYPE column
-so you can see at a glance which rows still need to be migrated server-side.
+Legacy team contexts and ledgers surface here too — they're synthesized from
+the per-source data and shown alongside new kb-API rows so the list is
+complete during the migration window.
 
 Examples:
   ox kb list                  # all bubbles
@@ -273,17 +274,19 @@ func kbTypePriority(t api.KBType) int {
 	}
 }
 
-// formatKBType renders the TYPE column. Legacy entries get a " (legacy)"
-// suffix so users can see migration progress at a glance. Empty/unknown
-// types render as "unknown" so a forward-compat row never produces a blank
-// column.
+// formatKBType renders the TYPE column. Empty/unknown types render as
+// "unknown" so a forward-compat row never produces a blank column.
+//
+// Legacy origin (team-context list / ledger registry vs the new kb API) is
+// tracked on the Bubble struct (Legacy bool) and used for sort-stability,
+// but the rendered TYPE column intentionally omits it for now — keeps the
+// column narrow during the migration window. Re-enable the suffix later
+// once we want users to see migration progress at a glance.
 func formatKBType(t api.KBType, legacy bool) string {
+	_ = legacy
 	base := string(t)
 	if base == "" || t == api.KBTypeUnknown {
 		base = "unknown"
-	}
-	if legacy {
-		return base + " (legacy)"
 	}
 	return base
 }
@@ -299,31 +302,25 @@ var (
 	kbListTypeStyle = lipgloss.NewStyle().
 			Foreground(cli.ColorAccent)
 
-	kbListLegacyStyle = lipgloss.NewStyle().
-				Foreground(cli.ColorDim)
-
 	kbListSlugStyle = lipgloss.NewStyle().
 			Foreground(cli.ColorPrimary)
 
 	kbListNameStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#CCCCCC"))
 
-	kbListRoleStyle = lipgloss.NewStyle().
-			Foreground(cli.ColorSecondary)
-
 	kbListWarnStyle = lipgloss.NewStyle().
 			Foreground(cli.ColorWarning)
 )
 
-// kb-list column widths. Wide enough for typical content; the NAME column
-// is unbounded (last) so very long names wrap rather than truncate. SLUG
-// at 24 chars covers the kebab-case slugs we generate; longer slugs are
-// truncated with an ellipsis to keep the table aligned — losing tail
-// characters is preferable to breaking the column.
+// kb-list column widths. SLUG at 24 chars covers the kebab-case slugs we
+// generate; longer slugs truncate with an ellipsis to keep the table
+// aligned — losing tail characters is preferable to breaking the column.
+// TYPE is sized for the longest known KBType ("personal") plus a buffer
+// for unknown forward-compat values; NAME absorbs the freed space so
+// real-world bubble names rarely truncate.
 const (
-	kbListColTypeWidth = 16
+	kbListColTypeWidth = 10
 	kbListColSlugWidth = 24
-	kbListColRoleWidth = 10
 )
 
 func emitKBListTable(w io.Writer, bubbles []kb.Bubble) {
@@ -339,19 +336,18 @@ func emitKBListTable(w io.Writer, bubbles []kb.Bubble) {
 	fmt.Fprintf(w, "%s %s\n", cli.StyleDim.Render("Total:"), cli.StyleDim.Render(summary))
 }
 
-// kbListColNameWidth — bounded to keep the rule line and ROLE column on
-// screen; long names truncate with an ellipsis, slug stays the
-// machine-readable identifier.
-const kbListColNameWidth = 32
+// kbListColNameWidth — last column, gets the space we freed by dropping
+// the ROLE column. Long names still truncate with an ellipsis so the
+// rule line stays clean; slug remains the machine-readable identifier.
+const kbListColNameWidth = 48
 
 func printKBListHeader(w io.Writer) {
 	typeCol := fmt.Sprintf("%-*s", kbListColTypeWidth, "TYPE")
 	slugCol := fmt.Sprintf("%-*s", kbListColSlugWidth, "SLUG")
 	nameCol := fmt.Sprintf("%-*s", kbListColNameWidth, "NAME")
-	roleCol := fmt.Sprintf("%-*s", kbListColRoleWidth, "ROLE")
-	header := kbListHeaderStyle.Render(typeCol + slugCol + nameCol + roleCol)
+	header := kbListHeaderStyle.Render(typeCol + slugCol + nameCol)
 	fmt.Fprintln(w, "  "+header)
-	fmt.Fprintln(w, "  "+cli.StyleDim.Render(strings.Repeat("-", kbListColTypeWidth+kbListColSlugWidth+kbListColNameWidth+kbListColRoleWidth)))
+	fmt.Fprintln(w, "  "+cli.StyleDim.Render(strings.Repeat("-", kbListColTypeWidth+kbListColSlugWidth+kbListColNameWidth)))
 }
 
 func printKBListRow(w io.Writer, b kb.Bubble) {
@@ -366,21 +362,9 @@ func printKBListRow(w io.Writer, b kb.Bubble) {
 	}
 	nameCol := fmt.Sprintf("%-*s", kbListColNameWidth, truncateForColumn(name, kbListColNameWidth))
 
-	role := b.ViewerRole
-	if role == "" {
-		role = "-"
-	}
-	roleCol := fmt.Sprintf("%-*s", kbListColRoleWidth, truncateForColumn(role, kbListColRoleWidth))
-
-	typeStyle := kbListTypeStyle
-	if b.Legacy {
-		typeStyle = kbListLegacyStyle
-	}
-
-	row := typeStyle.Render(typeCol) +
+	row := kbListTypeStyle.Render(typeCol) +
 		kbListSlugStyle.Render(slugCol) +
-		kbListNameStyle.Render(nameCol) +
-		kbListRoleStyle.Render(roleCol)
+		kbListNameStyle.Render(nameCol)
 	fmt.Fprintln(w, "  "+row)
 }
 

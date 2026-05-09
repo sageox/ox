@@ -173,7 +173,7 @@ func EnsurePersonalKBPresent(kbInfos []KBInfo, kbSourceReachable bool) []KBInfo 
 	if kbSourceReachable {
 		// shouldn't happen — middleware provisions on demand. Logged as a
 		// single-line key=value record so it's grep-friendly.
-		slog.Warn("personal_kb_missing", "reason", "kb_api_reachable_but_no_personal_bubble", "kb_count", len(kbInfos))
+		slog.Info("personal_kb_missing", "reason", "kb_api_reachable_but_no_personal_bubble", "kb_count", len(kbInfos))
 	}
 	return kbInfos
 }

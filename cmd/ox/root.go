@@ -134,19 +134,34 @@ func init() {
 	// custom help with brand colors
 	rootCmd.SetHelpFunc(brandedHelp)
 
-	// define command groups
+	// define command groups (rendered in registration order)
 	rootCmd.AddGroup(&cobra.Group{ID: "dev", Title: "Software Development:"})
+	rootCmd.AddGroup(&cobra.Group{ID: "knowledge", Title: "Knowledge:"})
+	rootCmd.AddGroup(&cobra.Group{ID: "teams", Title: "Teams:"})
 	rootCmd.AddGroup(&cobra.Group{ID: "auth", Title: "Authentication:"})
-	rootCmd.AddGroup(&cobra.Group{ID: "diagnostics", Title: "Diagnostics:"})
 	rootCmd.AddGroup(&cobra.Group{ID: "agent-interface", Title: "Agent Integration:"})
+	rootCmd.AddGroup(&cobra.Group{ID: "diagnostics", Title: "Diagnostics:"})
+
+	// agent integration
 	agentCmd.GroupID = "agent-interface"
 	coworkerCmd.GroupID = "agent-interface"
+	hooksCmd.GroupID = "agent-interface"
 
-	// software development commands
+	// software development
 	initCmd.GroupID = "dev"
-	importCmd.GroupID = "dev"
-	queryCmd.GroupID = "dev"
-	teamsCmd.GroupID = "dev"
+
+	// knowledge surfaces — context, search, distillation, kb bubbles
+	importCmd.GroupID = "knowledge"
+	kbCmd.GroupID = "knowledge"
+	queryCmd.GroupID = "knowledge"
+	distillCmd.GroupID = "knowledge"
+
+	// team coordination — carts, cart analysis, glance, murmurs, teams alias
+	cartsCmd.GroupID = "teams"
+	cartAnalyzeCmd.GroupID = "teams"
+	glanceCmd.GroupID = "teams"
+	murmurCmd.GroupID = "teams"
+	teamsCmd.GroupID = "teams"
 
 	// auth commands
 	loginCmd.GroupID = "auth"

@@ -458,7 +458,8 @@ func runCartsDepRemove(cmd *cobra.Command, args []string) error {
 // --- registration ---
 
 func init() {
-	cartsCmd.GroupID = "dev"
+	// GroupID is owned by root.go's init() so all command-grouping decisions
+	// live in one file (cartsCmd is in the "teams" group).
 
 	cartsDepCmd.AddCommand(cartsDepAddCmd)
 	cartsDepCmd.AddCommand(cartsDepRemoveCmd)

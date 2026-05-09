@@ -592,9 +592,17 @@ func runInit() error {
 	// symlinks (one slug-keyed link per relevant kb pointing at
 	// paths.KBDir(kb_id)). Symlinks are derived state — never committed.
 	// Idempotent: only appends the line when missing, never modifies
-	// other entries.
-	if err := ensureProjectGitignoreKBLine(gitRoot); err != nil {
+	// other entries. Track the file with the init rollback tracker so a
+	// later API failure undoes our gitignore mutation alongside the rest
+	// of the staged files.
+	rootGitignore := filepath.Join(gitRoot, ".gitignore")
+	switch action, err := ensureProjectGitignoreKBLine(gitRoot); {
+	case err != nil:
 		cli.PrintWarning(fmt.Sprintf("Could not update project .gitignore: %v", err))
+	case action == kbGitignoreCreated:
+		tracker.trackCreatedFile(rootGitignore)
+	case action == kbGitignoreModified:
+		tracker.trackModifiedFile(rootGitignore)
 	}
 
 	// add SageOx entries to .gitattributes
@@ -1174,14 +1182,31 @@ const projectGitignoreKBLine = ".sageox/kb/"
 // exactly once. Idempotent: re-reads the file each call and only appends
 // when the line is genuinely absent. Creates the file with just the entry
 // if it does not already exist.
-func ensureProjectGitignoreKBLine(gitRoot string) error {
+// kbGitignoreAction reports what ensureProjectGitignoreKBLine actually
+// did to the project's .gitignore so the init tracker can register the
+// path for rollback + staging in the same way other init-modified files
+// are handled.
+type kbGitignoreAction int
+
+const (
+	kbGitignoreUnchanged kbGitignoreAction = iota
+	kbGitignoreCreated
+	kbGitignoreModified
+)
+
+func ensureProjectGitignoreKBLine(gitRoot string) (kbGitignoreAction, error) {
 	gitignorePath := filepath.Join(gitRoot, ".gitignore")
+	existed := true
 	existing, err := os.ReadFile(gitignorePath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read .gitignore: %w", err)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return kbGitignoreUnchanged, fmt.Errorf("read .gitignore: %w", err)
+		}
+		existed = false
+		existing = nil
 	}
 	if hasGitignoreEntry(string(existing), projectGitignoreKBLine) {
-		return nil
+		return kbGitignoreUnchanged, nil
 	}
 	var out string
 	if len(existing) > 0 {
@@ -1191,7 +1216,13 @@ func ensureProjectGitignoreKBLine(gitRoot string) error {
 		}
 	}
 	out += projectGitignoreKBLine + "\n"
-	return os.WriteFile(gitignorePath, []byte(out), 0644)
+	if err := os.WriteFile(gitignorePath, []byte(out), 0644); err != nil {
+		return kbGitignoreUnchanged, err
+	}
+	if existed {
+		return kbGitignoreModified, nil
+	}
+	return kbGitignoreCreated, nil
 }
 
 // hasGitignoreEntry reports whether `content` already has `entry` as a

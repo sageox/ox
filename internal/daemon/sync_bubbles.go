@@ -34,6 +34,26 @@ import (
 // than global so independent bubbles still reconcile in parallel.
 var kbReconcileLocks sync.Map // map[kb_id]*sync.Mutex
 
+// kbCloneInFlight tracks kb_ids whose initial clone is mid-flight so the
+// GC triage pass can skip them. Without this guard, a GC tick during a
+// transient API-list hiccup could rename a partially-cloned target into
+// .trash/ while git is still writing to the old inode — silent half-
+// cloned bubble. Set in cloneBubble via markKBCloneStart, cleared via
+// markKBCloneDone (deferred).
+var kbCloneInFlight sync.Map // map[kb_id]struct{}
+
+// markKBCloneStart records that a clone for kb_id is in progress.
+func markKBCloneStart(kbID string) { kbCloneInFlight.Store(kbID, struct{}{}) }
+
+// markKBCloneDone clears the in-flight marker for kb_id.
+func markKBCloneDone(kbID string) { kbCloneInFlight.Delete(kbID) }
+
+// kbCloneActive reports whether kb_id is currently being cloned.
+func kbCloneActive(kbID string) bool {
+	_, ok := kbCloneInFlight.Load(kbID)
+	return ok
+}
+
 // envDisableKBDaemon mirrors the merger's OX_KB_DISABLE escape hatch on
 // the daemon side. When set to a truthy value (anything but empty / "0" /
 // "false" / "no" / "off") the kb sync loop is a no-op. Intentionally
@@ -331,6 +351,12 @@ func (s *SyncScheduler) cloneBubble(ctx context.Context, b api.KB, target string
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		return fmt.Errorf("create kb parent dir: %w", err)
 	}
+
+	// Mark this kb_id as having an active clone so GC triage skips it
+	// (otherwise a transient API-list hiccup mid-clone could rename the
+	// half-populated target into .trash/ — silent corruption).
+	markKBCloneStart(b.KBID)
+	defer markKBCloneDone(b.KBID)
 
 	cloneCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()

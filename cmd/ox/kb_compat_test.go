@@ -229,9 +229,10 @@ func TestCompat_PersonalBubble_AppearsInListAfterAuth(t *testing.T) {
 	if !strings.Contains(out, "personal-abc") {
 		t.Errorf("personal bubble missing from list output:\n%s", out)
 	}
-	if !strings.Contains(out, "owner") {
-		t.Errorf("personal bubble's viewer_role 'owner' must surface in the table:\n%s", out)
-	}
+	// ROLE column was dropped from the table for now — viewer_role still
+	// flows through the merger and the JSON envelope, but the human table
+	// is intentionally narrower. Re-add a role column assertion if/when
+	// the column comes back.
 }
 
 // --- D. forward-compat unknown type across kb commands ---

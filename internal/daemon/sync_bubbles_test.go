@@ -72,9 +72,9 @@ func makeBareRepo(t *testing.T, name, fileName, fileContent string) string {
 	t.Helper()
 	bareDir, workDir := initBareRepo(t, name)
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, fileName), []byte(fileContent), 0o644))
-	require.NoError(t, exec.Command("git", "-C", workDir, "add", fileName).Run())
-	require.NoError(t, exec.Command("git", "-C", workDir, "commit", "-m", "initial").Run())
-	require.NoError(t, exec.Command("git", "-C", workDir, "push", "origin", "HEAD:main").Run())
+	gitInDir(t, workDir, "add", fileName)
+	gitInDir(t, workDir, "commit", "-m", "initial")
+	gitInDir(t, workDir, "push", "origin", "HEAD:main")
 	return bareDir
 }
 

@@ -53,6 +53,9 @@ func (d *scenarioRepoDir) makeBareRepoForBubble(b BubbleSpec) (string, error) {
 
 	if b.SeedFile != "" {
 		seedPath := filepath.Join(workDir, b.SeedFile)
+		if err := os.MkdirAll(filepath.Dir(seedPath), 0o755); err != nil {
+			return "", fmt.Errorf("create parent dirs for %s: %w", b.KBID, err)
+		}
 		if err := os.WriteFile(seedPath, []byte(b.SeedContent), 0o644); err != nil {
 			return "", fmt.Errorf("write seed file for %s: %w", b.KBID, err)
 		}
@@ -83,7 +86,11 @@ func (d *scenarioRepoDir) pushExtraCommit(bareDir, fileName, content string) err
 	if err := configGitIdentity(tmpClone); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(tmpClone, fileName), []byte(content), 0o644); err != nil {
+	dst := filepath.Join(tmpClone, fileName)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("create parent dirs for follow-up file: %w", err)
+	}
+	if err := os.WriteFile(dst, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("write follow-up file: %w", err)
 	}
 	if err := runGit(tmpClone, "add", fileName); err != nil {

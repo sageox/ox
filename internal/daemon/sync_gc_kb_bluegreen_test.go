@@ -152,42 +152,32 @@ func TestKBGC_PartiallyClonedDir_NotInAPI_StillTriaged(t *testing.T) {
 
 // --- Clone-in-flight race (production gap, see follow-up bead) ---
 
-// TestKBGC_RespectsCloneInFlight_DoesNotTriageActiveClone documents
-// the *desired* contract: when kb sync is actively cloning a bubble
-// (cloneInFlight set for that kb_id), GC must not triage the partial
-// directory even if a transient API hiccup briefly omits the kb_id
-// from the list.
+// TestKBGC_RespectsCloneInFlight_DoesNotTriageActiveClone enforces the
+// contract that when kb sync is actively cloning a bubble (kb_id is in
+// kbCloneInFlight), GC must not triage the partial directory even if a
+// transient API hiccup briefly omits the kb_id from the list.
 //
-// CURRENT STATUS: skipped. The production runKBGC implementation does
-// not consult s.cloneInFlight. This is a real race window — small in
-// practice (the kb API list call is the same one feeding the clone
-// scheduler) but real. Tracked as a follow-up bead; see the comment
-// at the bottom of this file.
-//
-// Failure prevented (once production fixes this): a half-cloned kb
-// dir being renamed into .trash/ mid-clone, leaving the kb sync
-// loop's `git clone` writing into a renamed inode and producing a
-// broken bubble that "looks fine" until the next pull.
+// Failure prevented: a half-cloned kb dir being renamed into .trash/
+// mid-clone, leaving the kb sync loop's git clone writing into a renamed
+// inode and producing a broken bubble that "looks fine" until the next
+// pull.
 func TestKBGC_RespectsCloneInFlight_DoesNotTriageActiveClone(t *testing.T) {
-	t.Skip("FUTURE: runKBGC does not yet consult cloneInFlight. " +
-		"Tracked separately — see follow-up bead filed during ox-gzp.18 " +
-		"implementation. When the guard lands, remove this skip.")
-
 	kbGCEnv(t)
 	s, _ := kbTestScheduler(t)
 	ctx := context.Background()
 
 	active := paths.KBDir("kb_being_cloned")
 	require.NoError(t, os.MkdirAll(active, 0o755))
-	// mark clone as in-flight (the production sync_clone.go path does
-	// `s.cloneInFlight.LoadOrStore(workspaceID, true)`)
-	s.cloneInFlight.Store("kb_being_cloned", true)
-	defer s.cloneInFlight.Delete("kb_being_cloned")
+	// Mark clone as in-flight via the kb-specific sync.Map maintained by
+	// cloneBubble. The deferred clear ensures other tests don't see the
+	// flag if they happen to use the same kb_id.
+	markKBCloneStart("kb_being_cloned")
+	defer markKBCloneDone("kb_being_cloned")
 
 	// transient API hiccup: kb_id missing from list this pass
 	s.runKBGC(ctx, stubListFn())
 
-	// desired behavior: the active clone is left alone
+	// the active clone must be left alone
 	assert.DirExists(t, active, "in-flight clone must NOT be triaged")
 }
 

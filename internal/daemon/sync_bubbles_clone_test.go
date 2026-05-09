@@ -109,9 +109,16 @@ func TestSyncBubbles_Clone_EndpointScoping(t *testing.T) {
 	bareA := makeBareRepo(t, "ep-a", "f.md", "A\n")
 	bareB := makeBareRepo(t, "ep-b", "f.md", "B\n")
 
+	// kbTestEnv pins XDG_DATA_HOME for the whole parent test, so both
+	// subtests share the same XDG root. Endpoint scoping is therefore
+	// the only thing that can produce two distinct on-disk paths for the
+	// same kb_id — which is exactly the behavior we want to assert (and
+	// the bug we'd miss if the subtests rebound XDG too).
+	kbTestEnv(t) // sets SAGEOX_ENDPOINT=staging.sageox.ai
+	var stagingTarget string
+
 	// First endpoint: staging.
 	t.Run("staging", func(t *testing.T) {
-		kbTestEnv(t) // sets SAGEOX_ENDPOINT=staging.sageox.ai
 		s, _ := kbTestScheduler(t)
 		bubble := api.KB{
 			KBID:    "kb_same_id",
@@ -124,21 +131,18 @@ func TestSyncBubbles_Clone_EndpointScoping(t *testing.T) {
 		})
 		s.syncBubbles(context.Background())
 
-		target := paths.KBDir(bubble.KBID)
-		body, err := os.ReadFile(filepath.Join(target, "f.md"))
+		stagingTarget = paths.KBDir(bubble.KBID)
+		body, err := os.ReadFile(filepath.Join(stagingTarget, "f.md"))
 		require.NoError(t, err)
 		assert.Equal(t, "A\n", string(body), "staging endpoint must clone A's content")
 	})
 
 	// Second endpoint: prod. Must produce a different on-disk path
-	// even though kb_id is identical. We rebind XDG_DATA_HOME via
-	// a fresh kbTestEnv-equivalent override so paths.KBDir picks up
-	// the new endpoint slug.
+	// even though kb_id is identical — driven purely by the endpoint
+	// slug change, NOT by an XDG rebind. The previous XDG override here
+	// confounded the test (any endpoint-scoping regression would have
+	// been masked by the trivially-different XDG home).
 	t.Run("prod_distinct_path", func(t *testing.T) {
-		tmp := t.TempDir()
-		t.Setenv("OX_XDG_DISABLE", "")
-		t.Setenv("XDG_DATA_HOME", tmp)
-		t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "cache"))
 		t.Setenv("SAGEOX_ENDPOINT", "https://app.sageox.ai")
 
 		s, _ := kbTestScheduler(t)
@@ -158,8 +162,9 @@ func TestSyncBubbles_Clone_EndpointScoping(t *testing.T) {
 		body, err := os.ReadFile(filepath.Join(target, "f.md"))
 		require.NoError(t, err)
 		assert.Equal(t, "B\n", string(body), "prod endpoint must clone B's content into a path distinct from staging")
-		// the path must be under the new XDG data home, not the previous one
-		assert.True(t, strings.HasPrefix(target, tmp), "kb path must be scoped to the active endpoint's XDG home")
+		require.NotEmpty(t, stagingTarget, "staging subtest must have stored its target path")
+		assert.NotEqual(t, stagingTarget, target,
+			"endpoint scoping must place prod and staging at different paths even though kb_id is identical")
 	})
 }
 
@@ -488,15 +493,15 @@ func TestSyncBubbles_Clone_HasGitignoreEntries(t *testing.T) {
 	bareDir := filepath.Join(tmp, "gitignore.bare")
 	workDir := filepath.Join(tmp, "gitignore.work")
 	require.NoError(t, exec.Command("git", "init", "--bare", "-b", "main", bareDir).Run())
-	require.NoError(t, exec.Command("git", "-C", bareDir, "config", "uploadpack.allowfilter", "true").Run())
+	gitInDir(t, bareDir, "config", "uploadpack.allowfilter", "true")
 	require.NoError(t, exec.Command("git", "clone", bareDir, workDir).Run())
 	gitConfig(t, workDir)
 	require.NoError(t, os.MkdirAll(filepath.Join(workDir, ".sageox"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, ".sageox", "sync.manifest"), []byte("version 1\ninclude .sageox/\ninclude README.md\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, "README.md"), []byte("v1\n"), 0o644))
-	require.NoError(t, exec.Command("git", "-C", workDir, "add", ".").Run())
-	require.NoError(t, exec.Command("git", "-C", workDir, "commit", "-m", "seed with .sageox").Run())
-	require.NoError(t, exec.Command("git", "-C", workDir, "push", "origin", "HEAD:main").Run())
+	gitInDir(t, workDir, "add", ".")
+	gitInDir(t, workDir, "commit", "-m", "seed with .sageox")
+	gitInDir(t, workDir, "push", "origin", "HEAD:main")
 
 	bubble := api.KB{
 		KBID:    "kb_gitignore",

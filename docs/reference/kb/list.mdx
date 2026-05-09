@@ -1,7 +1,7 @@
 ---
 title: "ox kb list"
 description: "CLI reference for ox kb list"
-sidebar_position: 52
+sidebar_position: 53
 ---
 
 ## ox kb list
@@ -17,8 +17,9 @@ Merges three sources concurrently:
   - Legacy team contexts (/api/v1/cli/repos)
   - Local ledger registry
 
-Legacy entries are tagged "team (legacy)" / "repo (legacy)" in the TYPE column
-so you can see at a glance which rows still need to be migrated server-side.
+Legacy team contexts and ledgers surface here too — they're synthesized from
+the per-source data and shown alongside new kb-API rows so the list is
+complete during the migration window.
 
 Examples:
   ox kb list                  # all bubbles

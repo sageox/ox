@@ -54,10 +54,10 @@ func TestRenderKBListResult_HappyHuman(t *testing.T) {
 
 	out := buf.String()
 	for _, want := range []string{
-		"TYPE", "SLUG", "NAME", "ROLE",
-		"personal", "notes", "My Notes", "owner",
-		"team", "platform", "Platform Team", "member",
-		"repo", "my-app", "viewer",
+		"TYPE", "SLUG", "NAME",
+		"personal", "notes", "My Notes",
+		"team", "platform", "Platform Team",
+		"repo", "my-app",
 		"3 bubble(s)",
 	} {
 		if !strings.Contains(out, want) {
@@ -115,12 +115,16 @@ func TestRenderKBListResult_HappyJSON(t *testing.T) {
 	}
 }
 
-// TestRenderKBListResult_LegacyDisplay verifies that Bubble.Legacy=true rows
-// render `team (legacy)` / `repo (legacy)` so users can see migration progress.
+// TestRenderKBListResult_LegacyNoSuffix verifies that Bubble.Legacy=true rows
+// render WITHOUT a "(legacy)" suffix in the TYPE column. The Legacy bool is
+// preserved on the Bubble for sort-stability and backend dedup, but the
+// rendered column intentionally hides it during the migration window so the
+// table stays narrow.
 //
-// Failure prevented: dropping the suffix would conceal which rows still
-// flow from the legacy fan-out and surprise users when those sources retire.
-func TestRenderKBListResult_LegacyDisplay(t *testing.T) {
+// Failure prevented: re-introducing the suffix would re-widen the TYPE
+// column past the values it now needs to fit ("personal" is the longest)
+// and silently push real-world bubble names off-screen.
+func TestRenderKBListResult_LegacyNoSuffix(t *testing.T) {
 	t.Parallel()
 
 	res := kb.MergeResult{
@@ -136,11 +140,15 @@ func TestRenderKBListResult_LegacyDisplay(t *testing.T) {
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "team (legacy)") {
-		t.Errorf("expected 'team (legacy)' in output:\n%s", out)
+	if strings.Contains(out, "(legacy)") {
+		t.Errorf("legacy suffix must not render in TYPE column:\n%s", out)
 	}
-	if !strings.Contains(out, "repo (legacy)") {
-		t.Errorf("expected 'repo (legacy)' in output:\n%s", out)
+	// the rows themselves must still appear — legacy is a display tweak,
+	// not a filter.
+	for _, want := range []string{"old-team", "old-repo", "team", "repo"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output:\n%s", want, out)
+		}
 	}
 }
 
@@ -171,7 +179,7 @@ func TestRenderKBListResult_TypeFilter(t *testing.T) {
 		t.Errorf("expected team-new in output:\n%s", out)
 	}
 	if !strings.Contains(out, "team-old") {
-		t.Errorf("expected team-old (legacy) in output:\n%s", out)
+		t.Errorf("expected team-old (legacy origin) in output:\n%s", out)
 	}
 	if strings.Contains(out, "repo-x") {
 		t.Errorf("repo-x should be filtered out:\n%s", out)
@@ -420,8 +428,9 @@ func TestKBListCmd_RegistrationOnParent(t *testing.T) {
 // cases: known/legacy/unknown/empty. Centralized here so the rendering
 // tests above don't duplicate the assertion.
 //
-// Failure prevented: a helper change that swallows the "(legacy)" suffix
-// or stops normalizing empty types to "unknown".
+// Failure prevented: a helper change that breaks empty-type normalization
+// to "unknown" or starts injecting a "(legacy)" suffix without a matching
+// column-width review.
 func TestFormatKBType(t *testing.T) {
 	t.Parallel()
 
@@ -431,8 +440,10 @@ func TestFormatKBType(t *testing.T) {
 		want   string
 	}{
 		{api.KBTypePersonal, false, "personal"},
-		{api.KBTypeTeam, true, "team (legacy)"},
-		{api.KBTypeRepo, true, "repo (legacy)"},
+		// legacy is preserved on Bubble for sort-stability but suppressed in
+		// the TYPE column for now — the table stays narrow during migration.
+		{api.KBTypeTeam, true, "team"},
+		{api.KBTypeRepo, true, "repo"},
 		{api.KBTypeUnknown, false, "unknown"},
 		{"", false, "unknown"},
 		{api.KBTypeCustom, false, "custom"},

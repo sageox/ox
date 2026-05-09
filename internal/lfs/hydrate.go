@@ -2,6 +2,7 @@ package lfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -85,8 +86,29 @@ func HydrateBubble(ctx context.Context, dir, relPath string, client *Client, fil
 	var pointers []pointerEntry
 
 	if relPath != "" {
-		// single-file mode
-		abs := filepath.Join(dir, filepath.FromSlash(relPath))
+		// single-file mode — clean the input, reject absolute paths, and
+		// confirm the resolved target stays inside `dir` before we touch
+		// the filesystem. Lstat the path so a missing file surfaces as a
+		// HydrateFailure rather than getting silently swallowed by
+		// inspectPointer's open path.
+		cleaned := filepath.Clean(filepath.FromSlash(relPath))
+		if filepath.IsAbs(cleaned) {
+			return result, fmt.Errorf("path %q must be repo-relative, not absolute", relPath)
+		}
+		abs := filepath.Join(dir, cleaned)
+		absClean, absErr := filepath.Abs(abs)
+		dirClean, dirErr := filepath.Abs(dir)
+		if absErr != nil || dirErr != nil {
+			return result, fmt.Errorf("resolve absolute path: %w", errors.Join(absErr, dirErr))
+		}
+		rel, relErr := filepath.Rel(dirClean, absClean)
+		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return result, fmt.Errorf("path %q escapes bubble dir", relPath)
+		}
+		if _, lstatErr := os.Lstat(abs); lstatErr != nil {
+			result.Skipped = append(result.Skipped, HydrateFailure{Path: relPath, Err: lstatErr})
+			return result, nil
+		}
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
@@ -322,10 +344,17 @@ func looksPointerShaped(path string) bool {
 // hydratePointerInPlace downloads the LFS object referenced by oid and
 // atomically replaces the pointer file at absPath with the real content.
 // The temp file lives next to the target so rename is a metadata-only
-// operation (same device).
+// operation (same device). Original file permissions are preserved
+// across the swap so executable scripts stored as LFS pointers stay
+// executable after hydration; if stat fails (rare) we fall back to
+// 0644 so the file is at least readable.
 func hydratePointerInPlace(absPath string, action *Action, bareOID string) error {
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(absPath); err == nil {
+		mode = info.Mode().Perm()
+	}
 	tmpPath := fmt.Sprintf("%s.lfs-tmp.%d", absPath, time.Now().UnixNano())
-	f, err := os.Create(tmpPath)
+	f, err := os.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {
 		return fmt.Errorf("create temp: %w", err)
 	}
@@ -338,6 +367,8 @@ func hydratePointerInPlace(absPath string, action *Action, bareOID string) error
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close temp: %w", err)
 	}
+	// re-chmod after Close on platforms where umask narrowed the mode.
+	_ = os.Chmod(tmpPath, mode)
 	if err := os.Rename(tmpPath, absPath); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("rename: %w", err)

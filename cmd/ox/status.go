@@ -381,7 +381,7 @@ func shortenPathViaSymlink(projectRoot, fullPath string, candidates ...string) s
 
 // Shows ledger and team contexts grouped by endpoint
 // Always renders both sections, showing "(none)" if not configured
-func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, daemonStatus *daemon.StatusData) string {
+func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, daemonStatus *daemon.StatusData, bubblesSummary statusBubblesSummary) string {
 	var b strings.Builder
 
 	hasLedger := localCfg != nil && localCfg.Ledger != nil && localCfg.Ledger.Path != ""
@@ -869,6 +869,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString(statusMutedStyle.Render("not configured"))
 		b.WriteString("\n")
 	}
+
+	// Knowledge bubbles summary — rendered as the last line of the
+	// project-status block, immediately above "Other Team Contexts" so the
+	// kb noun is adjacent to the team contexts it (eventually) supersedes
+	// without dominating the project-state header.
+	b.WriteString(renderBubblesLine(bubblesSummary))
 
 	// Other team contexts
 	hasOtherTCs := len(otherCloudTCs) > 0 || len(otherDetailTCs) > 0
@@ -1470,16 +1476,11 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		// skip ledger/daemon sections when not in a git repo — nothing to show
 		if gitRoot != "" {
 
-			// Knowledge bubbles summary — single scannable line sourced
-			// from the F3 three-source merger. Replaces the historical
-			// "Team contexts: N / Ledger: synced" pair (legacy
-			// team_contexts/ledger blocks below stay one release per
-			// the kb plan).
-			fmt.Print(renderBubblesLine(bubblesSummary))
-
-			// Ledger and Team Context sections - shows repos from cloud API
-			// Only displays repos that are actually provisioned
-			fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus))
+			// Ledger + Team Context sections — repos from cloud API.
+			// Knowledge-bubbles summary is rendered inside renderGitReposSection
+			// (just above "Other Team Contexts") so the kb line is the
+			// last line of the project-state block, not sandwiched mid-header.
+			fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus, bubblesSummary))
 
 			// show daemon sync section
 			fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, localCfg, false, projectInitialized))
