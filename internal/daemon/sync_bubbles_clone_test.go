@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/kb"
@@ -406,4 +408,224 @@ func TestSyncBubbles_Clone_RestoresAfterManualGitDirRemoval(t *testing.T) {
 	assert.NotPanics(t, func() {
 		s.syncBubbles(context.Background())
 	})
+}
+
+// TestSyncBubbles_Clone_ShallowAndPartialFilter verifies that kb clones
+// via TwoPhaseClone produce a shallow + partial clone (depth=1 +
+// blob:none filter) — the same posture team-context uses. Without this,
+// every kb clone would download the full history and every blob, which
+// scales poorly for large or long-lived bubbles.
+//
+// Failure prevented: a future refactor that swaps cloneBubble back to a
+// plain `git clone`, ballooning bandwidth and disk usage on every fresh
+// install.
+func TestSyncBubbles_Clone_ShallowAndPartialFilter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	kbTestEnv(t)
+	s, _ := kbTestScheduler(t)
+
+	bareDir := makeBareRepo(t, "shallow", "README.md", "v1\n")
+	bubble := api.KB{
+		KBID:    "kb_shallow",
+		KBType:  api.KBTypeTeam,
+		Slug:    "shallow",
+		RepoURL: "file://" + bareDir,
+	}
+	s.SetKBBubbleListerFactory(func(_, _ string) KBBubbleLister {
+		return &fakeKBLister{bubbles: []api.KB{bubble}}
+	})
+
+	s.syncBubbles(context.Background())
+
+	target := paths.KBDir(bubble.KBID)
+	require.DirExists(t, filepath.Join(target, ".git"))
+
+	// blob:none filter must be recorded on the remote config so subsequent
+	// fetches preserve the partial-clone semantics. mirrors the
+	// twin_partial_clone_test.go assertion for team-context.
+	out, err := exec.Command("git", "-C", target, "config", "--get", "remote.origin.partialclonefilter").CombinedOutput()
+	require.NoError(t, err, "remote.origin.partialclonefilter must be set: %s", out)
+	assert.Equal(t, "blob:none", strings.TrimSpace(string(out)),
+		"kb clone must use --filter=blob:none, got: %q", string(out))
+
+	// promisor flag confirms partial-clone behavior is active.
+	promisor, err := exec.Command("git", "-C", target, "config", "--get", "remote.origin.promisor").CombinedOutput()
+	require.NoError(t, err, "remote.origin.promisor must be set: %s", promisor)
+	assert.Equal(t, "true", strings.TrimSpace(string(promisor)))
+}
+
+// TestSyncBubbles_Clone_HasGitignoreEntries verifies cloneBubble installs
+// the .sageox/.gitignore entries that prevent daemon-written cache files
+// from showing up as untracked. Without this, blue-green GC reclone (if
+// kb ever grows one) would treat the checkout as permanently dirty.
+//
+// Mirrors team-context's EnsureCheckoutGitignore behavior: only kicks in
+// when the cloned repo has a .sageox/ directory (the path that holds the
+// generated cache + meta files). Most kb bubbles will have one because
+// the daemon writes meta.json into it.
+//
+// Failure prevented: cache files (.sageox/cache/, etc.) being committed
+// or blocking future GC because EnsureCheckoutGitignoreCtx never ran.
+func TestSyncBubbles_Clone_HasGitignoreEntries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	kbTestEnv(t)
+	s, _ := kbTestScheduler(t)
+
+	// build a bare repo that already has a .sageox/ directory so
+	// EnsureCheckoutGitignoreCtx has somewhere to write. mirrors what a
+	// server-provisioned bubble actually looks like.
+	tmp := t.TempDir()
+	bareDir := filepath.Join(tmp, "gitignore.bare")
+	workDir := filepath.Join(tmp, "gitignore.work")
+	require.NoError(t, exec.Command("git", "init", "--bare", "-b", "main", bareDir).Run())
+	require.NoError(t, exec.Command("git", "-C", bareDir, "config", "uploadpack.allowfilter", "true").Run())
+	require.NoError(t, exec.Command("git", "clone", bareDir, workDir).Run())
+	gitConfig(t, workDir)
+	require.NoError(t, os.MkdirAll(filepath.Join(workDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, ".sageox", "sync.manifest"), []byte("version 1\ninclude .sageox/\ninclude README.md\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "README.md"), []byte("v1\n"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", workDir, "add", ".").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "commit", "-m", "seed with .sageox").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "push", "origin", "HEAD:main").Run())
+
+	bubble := api.KB{
+		KBID:    "kb_gitignore",
+		KBType:  api.KBTypeTeam,
+		Slug:    "gitignore",
+		RepoURL: "file://" + bareDir,
+	}
+	s.SetKBBubbleListerFactory(func(_, _ string) KBBubbleLister {
+		return &fakeKBLister{bubbles: []api.KB{bubble}}
+	})
+
+	s.syncBubbles(context.Background())
+
+	target := paths.KBDir(bubble.KBID)
+	gitignoreBytes, err := os.ReadFile(filepath.Join(target, ".sageox", ".gitignore"))
+	require.NoError(t, err, ".sageox/.gitignore must exist after clone")
+	contents := string(gitignoreBytes)
+	for _, want := range []string{"*", "!.gitignore", "!sync.manifest"} {
+		assert.Contains(t, contents, want,
+			".sageox/.gitignore must contain %q so cache files don't appear as untracked", want)
+	}
+
+	// daemon-written meta.json must not surface as untracked — exactly
+	// what the gitignore's `*` blanket entry prevents.
+	statusOut, err := exec.Command("git", "-C", target, "status", "--porcelain").CombinedOutput()
+	require.NoError(t, err, "git status: %s", statusOut)
+	for _, line := range strings.Split(strings.TrimSpace(string(statusOut)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		assert.False(t,
+			strings.Contains(line, ".sageox/cache/") ||
+				strings.Contains(line, ".sageox/meta.json"),
+			"cache/meta file %q must not appear in git status — gitignore is missing entries", line)
+	}
+}
+
+// TestSyncBubbles_Pull_ManifestResolveRules verifies that when a bubble
+// includes a sync.manifest with custom `resolve auto` directives,
+// reconcileBubble passes those rules to pullManagedRepo so an induced
+// conflict on a manifest-allowed path auto-resolves on rebase. The
+// kb path must mirror team-context's manifest-driven resolve behavior
+// (sync_team.go reads manifest before pull and passes ResolveRules).
+//
+// Failure prevented: kb bubbles that ship a sync.manifest with
+// resolve directives have those directives silently ignored, leaving
+// every conflict on data/ paths to wedge the daemon's pull loop.
+func TestSyncBubbles_Pull_ManifestResolveRules(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git pull operations")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	kbTestEnv(t)
+	s, _ := kbTestScheduler(t)
+
+	// build a bare repo with a manifest that auto-resolves data/.
+	tmp := t.TempDir()
+	bareDir := filepath.Join(tmp, "manifest.bare")
+	workDir := filepath.Join(tmp, "manifest.work")
+	require.NoError(t, exec.Command("git", "init", "--bare", "-b", "main", bareDir).Run())
+	require.NoError(t, exec.Command("git", "-C", bareDir, "config", "uploadpack.allowfilter", "true").Run())
+	require.NoError(t, exec.Command("git", "clone", bareDir, workDir).Run())
+	gitConfig(t, workDir)
+
+	manifestBody := `version 1
+include .sageox/
+include data/
+resolve auto data/
+`
+	require.NoError(t, os.MkdirAll(filepath.Join(workDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, ".sageox", "sync.manifest"), []byte(manifestBody), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(workDir, "data"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "data", "facts.json"), []byte("v1\n"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", workDir, "add", ".").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "commit", "-m", "seed").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "push", "origin", "HEAD:main").Run())
+
+	bubble := api.KB{
+		KBID:    "kb_resolve",
+		KBType:  api.KBTypeTeam,
+		Slug:    "resolve",
+		RepoURL: "file://" + bareDir,
+	}
+	s.SetKBBubbleListerFactory(func(_, _ string) KBBubbleLister {
+		return &fakeKBLister{bubbles: []api.KB{bubble}}
+	})
+
+	// first pass: clone — manifest should ship into the local checkout.
+	s.syncBubbles(context.Background())
+	target := paths.KBDir(bubble.KBID)
+	require.DirExists(t, filepath.Join(target, ".git"))
+	require.FileExists(t, filepath.Join(target, ".sageox", "sync.manifest"))
+
+	// induce a conflict: local edit on data/facts.json followed by a
+	// remote edit on the same file. The pull must auto-resolve via the
+	// manifest's `resolve auto data/` rule (accept-theirs).
+	require.NoError(t, os.WriteFile(filepath.Join(target, "data", "facts.json"), []byte("local-change\n"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", target, "add", "data/facts.json").Run())
+	gitConfig(t, target)
+	require.NoError(t, exec.Command("git", "-C", target, "commit", "-m", "local edit").Run())
+
+	// remote update.
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "data", "facts.json"), []byte("remote-change\n"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", workDir, "add", "data/facts.json").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "commit", "-m", "remote edit").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "push", "origin", "HEAD:main").Run())
+
+	// nudge FETCH_HEAD into the past so dedup doesn't skip the pull.
+	fetchHead := filepath.Join(target, ".git", "FETCH_HEAD")
+	if info, err := os.Stat(fetchHead); err == nil {
+		past := info.ModTime().Add(-10 * time.Minute)
+		_ = os.Chtimes(fetchHead, past, past)
+	}
+
+	// second pass: pull. With ResolveRules wired through, the conflict
+	// must auto-resolve and not leave the repo in a rebase state.
+	s.syncBubbles(context.Background())
+
+	// no rebase in progress — auto-resolve cleared it.
+	_, statErr := os.Stat(filepath.Join(target, ".git", "rebase-merge"))
+	assert.True(t, os.IsNotExist(statErr), "rebase must not be in progress after auto-resolve")
+	_, statErr = os.Stat(filepath.Join(target, ".git", "rebase-apply"))
+	assert.True(t, os.IsNotExist(statErr), "rebase-apply must not exist after auto-resolve")
+
+	// no UU markers in status.
+	statusOut, err := exec.Command("git", "-C", target, "status", "--porcelain").CombinedOutput()
+	require.NoError(t, err)
+	assert.NotContains(t, string(statusOut), "UU", "no unmerged paths after manifest-driven resolve")
 }

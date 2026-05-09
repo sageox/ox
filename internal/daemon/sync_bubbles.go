@@ -13,15 +13,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/endpoint"
-	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/kb"
+	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -234,6 +234,13 @@ func (s *SyncScheduler) reconcileBubble(ctx context.Context, b api.KB) {
 		s.logger.Warn("kb_sync stat failed", "kb_id", b.KBID, "type", string(b.KBType), "error", statErr)
 		return
 	} else {
+		// read manifest before pull to get auto-resolve prefixes. The
+		// manifest is already on disk from clone (TwoPhaseClone materializes
+		// .sageox/ in phase 1). If missing/unparseable, ParseFile returns
+		// FallbackConfig which already includes DefaultResolveRules.
+		manifestPath := filepath.Join(target, ".sageox", "sync.manifest")
+		mCfg := manifest.ParseFile(manifestPath)
+
 		// existing clone — pull via the shared managed-repo pipeline so we
 		// reuse fetch dedup, lock-file cleanup, kb merge=union pre-flight,
 		// auto-resolve, and divergence detection.
@@ -241,9 +248,10 @@ func (s *SyncScheduler) reconcileBubble(ctx context.Context, b api.KB) {
 			RepoPath:           target,
 			RepoName:           fmt.Sprintf("kb/%s", b.Slug),
 			ProjectRoot:        s.config.ProjectRoot,
-			SyncInterval:       s.kbSyncIntervalFor(b.KBType),
+			SyncInterval:       intervalForType(s.config, string(b.KBType)),
 			ValidateIntegrity:  true,
 			DetectDivergence:   true,
+			ResolveRules:       mCfg.ResolveRules,
 			EnsureKBMergeAttrs: true,
 			Logger:             s.logger,
 		})
@@ -265,6 +273,15 @@ func (s *SyncScheduler) reconcileBubble(ctx context.Context, b api.KB) {
 		default:
 			s.logger.Info("kb_sync pulled", "kb_id", b.KBID, "type", string(b.KBType), "slug", b.Slug)
 		}
+
+		// Reapply sparse-checkout from the (possibly updated) manifest. We
+		// re-parse here AFTER the pull because the pre-pull mCfg was the
+		// pre-pull manifest; if the server pushed new include directives,
+		// they're only on disk now. Without this re-parse + reapply, kb
+		// would silently drift from team-context sync behavior, which
+		// reapplies sparse on every pull.
+		postPullCfg := manifest.ParseFile(manifestPath)
+		_ = applySparseFromManifest(ctx, target, postPullCfg, s.logger)
 	}
 
 	// shared kb merge=union rules — idempotent, safe to call after both
@@ -282,12 +299,13 @@ func (s *SyncScheduler) reconcileBubble(ctx context.Context, b api.KB) {
 }
 
 // cloneBubble performs the initial clone of a bubble into the canonical
-// XDG path. Uses a direct `git clone` (not the IPC Checkout path)
-// because Checkout's URL validator rejects file:// — we want test
-// fixtures to work, and the URLs that come back from the kb API have
-// already been vetted server-side. NEVER shells out to git-lfs (per
-// .claude/rules/lfs-no-git-lfs-binary.md); LFS hydration is a separate
-// flow handled by internal/lfs.
+// XDG path via gitserver.TwoPhaseClone — the same shallow + blob:none +
+// sparse-checkout pipeline team-contexts use. This unlocks manifest-driven
+// sparse sets, depth-1 history, and EnsureCheckoutGitignore as part of the
+// clone itself. NEVER shells out to git-lfs (per
+// .claude/rules/lfs-no-git-lfs-binary.md); TwoPhaseClone calls
+// gitutil.StripLFSConfig to disable any smudge filter git-lfs may have
+// injected during the clone.
 func (s *SyncScheduler) cloneBubble(ctx context.Context, b api.KB, target string) error {
 	if b.RepoURL == "" {
 		return fmt.Errorf("bubble %s (%s) has no repo_url; server may not have provisioned it yet", b.KBID, b.Slug)
@@ -301,12 +319,8 @@ func (s *SyncScheduler) cloneBubble(ctx context.Context, b api.KB, target string
 	cloneCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	args := append([]string{}, gitHTTPTimeoutFlags()...)
-	args = append(args, "clone", "--quiet", b.RepoURL, target)
-	cmd := exec.CommandContext(cloneCtx, "git", args...)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		detail := gitutil.SanitizeOutput(string(output))
-		return fmt.Errorf("git clone failed: %s: %w", detail, err)
+	if _, err := gitserver.TwoPhaseClone(cloneCtx, b.RepoURL, target); err != nil {
+		return fmt.Errorf("kb two-phase clone failed: %w", err)
 	}
 
 	// install kb merge=union rules immediately so the very first pull
@@ -316,25 +330,15 @@ func (s *SyncScheduler) cloneBubble(ctx context.Context, b api.KB, target string
 		// non-fatal — degraded mode, like the team-context path.
 		s.logger.Warn("kb_sync post-clone ensure merge attrs failed", "kb_id", b.KBID, "type", string(b.KBType), "error", err)
 	}
-	return nil
-}
 
-// kbSyncIntervalFor returns the cadence we expect each bubble kind to be
-// reconciled on. Mirrors the plan: high-churn bubbles (personal,
-// profile, team) on the team-context cadence; lower-churn bubbles
-// (repo, custom, unknown) on the slower read cadence. Used for
-// FETCH_HEAD dedup thresholds inside pullManagedRepo.
-func (s *SyncScheduler) kbSyncIntervalFor(t api.KBType) time.Duration {
-	switch t {
-	case api.KBTypePersonal, api.KBTypeProfile, api.KBTypeTeam:
-		if s.config.TeamContextSyncInterval > 0 {
-			return s.config.TeamContextSyncInterval
-		}
+	// belt-and-suspenders: TwoPhaseClone already calls EnsureCheckoutGitignoreCtx
+	// internally, but we re-call it explicitly to mirror the explicit-is-better
+	// posture from sync_gc.go. Idempotent — no-ops when entries are already
+	// present.
+	if err := gitserver.EnsureCheckoutGitignoreCtx(ctx, target); err != nil {
+		s.logger.Warn("kb_sync post-clone ensure checkout gitignore failed", "kb_id", b.KBID, "type", string(b.KBType), "error", err)
 	}
-	if s.config.SyncIntervalRead > 0 {
-		return s.config.SyncIntervalRead
-	}
-	return 60 * time.Second
+	return nil
 }
 
 // writeKBMeta serializes the bubble's metadata to <target>/.sageox/meta.json.

@@ -66,15 +66,11 @@ func kbTestScheduler(t *testing.T) (*SyncScheduler, string) {
 
 // makeBareRepo creates a bare repo on disk and seeds it with one commit
 // from a working clone. Returns the bare path (suitable for file:// URL).
+// Thin wrapper over initBareRepo (sync_test_helpers_managed_test.go) that
+// adds the file-write/commit/push step.
 func makeBareRepo(t *testing.T, name, fileName, fileContent string) string {
 	t.Helper()
-	tmp := t.TempDir()
-	bareDir := filepath.Join(tmp, name+".bare")
-	workDir := filepath.Join(tmp, name+".work")
-
-	require.NoError(t, exec.Command("git", "init", "--bare", "-b", "main", bareDir).Run())
-	require.NoError(t, exec.Command("git", "clone", bareDir, workDir).Run())
-	gitConfig(t, workDir)
+	bareDir, workDir := initBareRepo(t, name)
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, fileName), []byte(fileContent), 0o644))
 	require.NoError(t, exec.Command("git", "-C", workDir, "add", fileName).Run())
 	require.NoError(t, exec.Command("git", "-C", workDir, "commit", "-m", "initial").Run())
@@ -341,7 +337,7 @@ func TestSyncBubbles_CadenceRouting(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := s.kbSyncIntervalFor(tc.t)
+			got := intervalForType(s.config, string(tc.t))
 			assert.Equal(t, tc.want, got)
 		})
 	}

@@ -41,15 +41,20 @@ func BuildKBInfos(result kb.MergeResult, tokensByType map[string]int64) []KBInfo
 		return nil
 	}
 
-	// pre-count bubbles per type so token splits are deterministic.
-	typeCounts := make(map[api.KBType]int, len(result.Bubbles))
+	// pre-count bubbles per type so token splits are deterministic. Key
+	// is the same normalized slug bubbleToKBInfo emits ("unknown" for
+	// empty/Unknown types) so the count matches the bucket that token
+	// attribution looks up — otherwise empty-Type and Unknown-Type rows
+	// would share a token bucket but not a count bucket and per-bubble
+	// attribution would inflate.
+	typeCounts := make(map[string]int, len(result.Bubbles))
 	for _, b := range result.Bubbles {
-		typeCounts[b.Type]++
+		typeCounts[normalizedTypeKey(b.Type)]++
 	}
 
 	out := make([]KBInfo, 0, len(result.Bubbles))
 	for _, b := range result.Bubbles {
-		out = append(out, bubbleToKBInfo(b, typeCounts[b.Type], tokensByType))
+		out = append(out, bubbleToKBInfo(b, typeCounts[normalizedTypeKey(b.Type)], tokensByType))
 	}
 
 	sort.SliceStable(out, func(i, j int) bool {
@@ -71,10 +76,7 @@ func BuildKBInfos(result kb.MergeResult, tokensByType map[string]int64) []KBInfo
 // the bubble is checked out, so we don't fabricate a path here when the
 // merger doesn't supply one (kb-API rows that haven't been pulled yet).
 func bubbleToKBInfo(b kb.Bubble, sameTypeCount int, tokensByType map[string]int64) KBInfo {
-	typeStr := string(b.Type)
-	if typeStr == "" || b.Type == api.KBTypeUnknown {
-		typeStr = "unknown"
-	}
+	typeStr := normalizedTypeKey(b.Type)
 
 	info := KBInfo{
 		KBID:       b.KBID,
@@ -96,6 +98,17 @@ func bubbleToKBInfo(b kb.Bubble, sameTypeCount int, tokensByType map[string]int6
 	}
 
 	return info
+}
+
+// normalizedTypeKey collapses empty and KBTypeUnknown to the literal
+// "unknown" slug so token bucket and count bucket lookups agree on the
+// same key. Used by both BuildKBInfos (for typeCounts) and
+// bubbleToKBInfo (for per-bubble token attribution).
+func normalizedTypeKey(t api.KBType) string {
+	if t == "" || t == api.KBTypeUnknown {
+		return "unknown"
+	}
+	return string(t)
 }
 
 // hintForType returns a short, type-specific agent hint. Legacy ledger rows

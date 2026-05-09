@@ -37,12 +37,15 @@ func fixtureBubbles() []api.KB {
 }
 
 // TestFilterKBsBySlug_ExactMatch verifies the slug matcher returns only
-// rows whose slug equals the input — case-sensitive, no prefix matching.
+// rows whose slug equals the input. Match is case-insensitive (matches
+// `ox kb path` / `ox kb hydrate`) but never a prefix match.
 //
 // Failure prevented: a fuzzy match would silently surface the wrong
 // bubble when a shorter slug is a prefix of a longer one (e.g., "team"
-// matching "team-platform"), and case-insensitive matching would let
-// "Personal" resolve a slug that the server stored as "personal".
+// matching "team-platform"). Case-insensitivity is intentional so
+// `ox kb show MyTeam` resolves the same bubble `ox kb path MyTeam`
+// already does — server-side normalization keeps b.Slug lowercase, but
+// user input may be mixed case.
 func TestFilterKBsBySlug_ExactMatch(t *testing.T) {
 	t.Parallel()
 
@@ -51,14 +54,19 @@ func TestFilterKBsBySlug_ExactMatch(t *testing.T) {
 		t.Fatalf("expected 2 matches for 'notes', got %d (%+v)", len(got), got)
 	}
 
-	if filtered := filterKBsBySlug(fixtureBubbles(), "Notes"); len(filtered) != 0 {
-		t.Errorf("case-insensitive match leaked through: %+v", filtered)
+	// Case-insensitive: "Notes" must resolve the same set as "notes".
+	if mixed := filterKBsBySlug(fixtureBubbles(), "Notes"); len(mixed) != 2 {
+		t.Errorf("expected 2 case-insensitive matches for 'Notes', got %d (%+v)", len(mixed), mixed)
 	}
 	if filtered := filterKBsBySlug(fixtureBubbles(), "note"); len(filtered) != 0 {
 		t.Errorf("prefix match leaked through: %+v", filtered)
 	}
 	if filtered := filterKBsBySlug(fixtureBubbles(), "platform"); len(filtered) != 1 {
 		t.Errorf("platform should match exactly once, got %d", len(filtered))
+	}
+	// Empty / whitespace-only input must not match anything.
+	if filtered := filterKBsBySlug(fixtureBubbles(), "  "); len(filtered) != 0 {
+		t.Errorf("whitespace input leaked through: %+v", filtered)
 	}
 }
 

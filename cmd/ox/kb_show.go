@@ -158,13 +158,20 @@ func resolveKBIdentifier(ctx context.Context, client *api.KBClient, input string
 	return chosen.KBID, nil
 }
 
-// filterKBsBySlug returns bubbles whose slug equals the input (case-sensitive
-// — slugs are normalized server-side per ADR-036). Kept separate from
-// pickKBByPriority so the priority logic is independently testable.
+// filterKBsBySlug returns bubbles whose slug equals the input. Match is
+// case-insensitive: slugs are normalized server-side per ADR-036, but a
+// user typing `MyTeam` should resolve the same bubble as `myteam`. The
+// sibling commands `ox kb path` and `ox kb hydrate` do the same. Kept
+// separate from pickKBByPriority so the priority logic is independently
+// testable.
 func filterKBsBySlug(bubbles []api.KB, slug string) []api.KB {
+	needle := strings.ToLower(strings.TrimSpace(slug))
+	if needle == "" {
+		return nil
+	}
 	var out []api.KB
 	for _, b := range bubbles {
-		if b.Slug == slug {
+		if strings.ToLower(b.Slug) == needle {
 			out = append(out, b)
 		}
 	}

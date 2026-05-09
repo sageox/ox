@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/gitserver"
-	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/paths"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
@@ -368,28 +367,11 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 
 // applySparseCheckout reads the manifest from a team context repo and applies
 // sparse-checkout rules. Returns the parsed ManifestConfig so callers can use
-// SyncIntervalMin. Errors are logged as warnings but never fatal.
+// SyncIntervalMin. Thin wrapper over applySparseFromManifest (sync_sparse.go)
+// so kb sync and team-context sync share the same sparse application logic.
 func (s *SyncScheduler) applySparseCheckout(ctx context.Context, tcPath string) *manifest.ManifestConfig {
-	manifestPath := filepath.Join(tcPath, ".sageox", "sync.manifest")
-	cfg := manifest.ParseFile(manifestPath)
-
-	sparsePaths := manifest.ComputeSparseSet(cfg)
-	if len(sparsePaths) == 0 {
-		s.logger.Debug("manifest: no sparse paths computed, skipping sparse-checkout", "path", tcPath)
-		return cfg
-	}
-
-	// use --no-cone mode to support both file and directory patterns
-	// (cone mode only supports directories, but fallback includes files like AGENTS.md)
-	args := append([]string{"sparse-checkout", "set", "--no-cone"}, sparsePaths...)
-	if _, err := gitutil.RunGit(ctx, tcPath, args...); err != nil {
-		s.logger.Warn("sparse-checkout set failed, continuing without sparse checkout",
-			"path", tcPath, "error", err)
-		return cfg
-	}
-
-	s.logger.Debug("sparse-checkout applied",
-		"path", tcPath, "paths", sparsePaths, "sync_interval_min", cfg.SyncIntervalMin)
+	cfg := manifest.ParseFile(filepath.Join(tcPath, ".sageox", "sync.manifest"))
+	_ = applySparseFromManifest(ctx, tcPath, cfg, s.logger)
 	return cfg
 }
 

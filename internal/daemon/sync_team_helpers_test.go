@@ -62,17 +62,9 @@ func newTestScheduler(projectDir string) *SyncScheduler {
 // Returns the bare repo path suitable for cloning with file:// URL.
 func setupTeamContextBareRepo(t *testing.T, manifestContent string, extraFiles map[string]string) string {
 	t.Helper()
-	tmpDir := t.TempDir()
-	bareDir := filepath.Join(tmpDir, "team.bare")
-	workDir := filepath.Join(tmpDir, "work")
-
-	require.NoError(t, exec.Command("git", "init", "--bare", "-b", "main", bareDir).Run())
-
-	// enable partial clone support on the bare repo
-	require.NoError(t, exec.Command("git", "-C", bareDir, "config", "uploadpack.allowfilter", "true").Run())
-
-	require.NoError(t, exec.Command("git", "clone", bareDir, workDir).Run())
-	gitConfig(t, workDir)
+	// Bootstrap (init --bare, allowfilter, clone, gitConfig) shared with kb
+	// tests via initBareRepo (sync_test_helpers_managed_test.go).
+	bareDir, workDir := initBareRepo(t, "team")
 
 	// create .sageox/ directory
 	sageoxDir := filepath.Join(workDir, ".sageox")

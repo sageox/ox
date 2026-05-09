@@ -9,7 +9,7 @@ package daemon
 // branch.
 //
 // What's NOT here (covered elsewhere):
-//   - per-bubble cadence routing (kbSyncIntervalFor) → sync_bubbles_test.go
+//   - per-bubble cadence routing (intervalForType) → sync_bubbles_test.go
 //   - clone idempotency → sync_bubbles_clone_test.go
 //   - integration end-to-end → sync_bubbles_integration_test.go
 
@@ -142,18 +142,17 @@ func TestSyncBubbles_Scheduler_NoTickerWhenIntervalZero(t *testing.T) {
 		"with TeamContextSyncInterval=0, kb sync must not fire on its own")
 }
 
-// TestSyncBubbles_Checkout_NonDefaultBranch verifies a bubble whose
-// remote default branch is NOT "main" still produces a populated
-// working tree on the correct branch. This is the kb equivalent of
-// asking "does the daemon respect whatever branch the server's git
-// pipeline points HEAD at?" Important because some legacy team-context
-// repos still default to `master` and personal bubbles may default to
-// `personal-<userid>` in future provisioning code.
+// TestSyncBubbles_Checkout_MainBranch verifies a bubble cloned via
+// gitserver.TwoPhaseClone produces a populated working tree on the
+// `main` branch. The kb path uses the same two-phase clone pipeline as
+// team-context, which hard-codes `--branch main` (server provisioning
+// guarantees `main` for both team-context and kb repos). Mirrors the
+// team-context branch posture.
 //
-// Failure prevented: the daemon hard-coding `main` and silently
-// producing an empty working tree when the remote default is anything
-// else.
-func TestSyncBubbles_Checkout_NonDefaultBranch(t *testing.T) {
+// Failure prevented: a future refactor that diverges the kb checkout
+// from the team-context two-phase pipeline and silently produces an
+// empty working tree.
+func TestSyncBubbles_Checkout_MainBranch(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git operations")
 	}
@@ -163,23 +162,23 @@ func TestSyncBubbles_Checkout_NonDefaultBranch(t *testing.T) {
 	kbTestEnv(t)
 	s, _ := kbTestScheduler(t)
 
-	// build a bare repo whose default branch is `develop`, not `main`.
+	// build a bare repo whose default branch is `main` (matches server
+	// provisioning, which two-phase clone requires).
 	tmp := t.TempDir()
-	bareDir := filepath.Join(tmp, "develop.bare")
-	workDir := filepath.Join(tmp, "develop.work")
-	require.NoError(t, exec.Command("git", "init", "--bare", "-b", "develop", bareDir).Run())
+	bareDir := filepath.Join(tmp, "mainline.bare")
+	workDir := filepath.Join(tmp, "mainline.work")
+	require.NoError(t, exec.Command("git", "init", "--bare", "-b", "main", bareDir).Run())
 	require.NoError(t, exec.Command("git", "clone", bareDir, workDir).Run())
 	gitConfig(t, workDir)
-	require.NoError(t, os.WriteFile(filepath.Join(workDir, "DEVELOP.md"), []byte("on develop\n"), 0o644))
-	require.NoError(t, exec.Command("git", "-C", workDir, "checkout", "-b", "develop").Run())
-	require.NoError(t, exec.Command("git", "-C", workDir, "add", "DEVELOP.md").Run())
-	require.NoError(t, exec.Command("git", "-C", workDir, "commit", "-m", "develop initial").Run())
-	require.NoError(t, exec.Command("git", "-C", workDir, "push", "origin", "develop").Run())
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "MAIN.md"), []byte("on main\n"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", workDir, "add", "MAIN.md").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "commit", "-m", "main initial").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "push", "origin", "main").Run())
 
 	bubble := api.KB{
-		KBID:    "kb_develop",
+		KBID:    "kb_mainline",
 		KBType:  api.KBTypeTeam,
-		Slug:    "develop",
+		Slug:    "mainline",
 		RepoURL: "file://" + bareDir,
 	}
 	s.SetKBBubbleListerFactory(func(_, _ string) KBBubbleLister {
@@ -191,18 +190,16 @@ func TestSyncBubbles_Checkout_NonDefaultBranch(t *testing.T) {
 	target := paths.KBDir(bubble.KBID)
 	require.DirExists(t, filepath.Join(target, ".git"))
 
-	// the file from the develop branch must be in the working tree —
-	// proves git-clone followed the remote's HEAD instead of guessing.
-	body, err := os.ReadFile(filepath.Join(target, "DEVELOP.md"))
-	require.NoError(t, err, "working tree must contain the file from the remote default branch")
-	assert.Equal(t, "on develop\n", string(body))
+	body, err := os.ReadFile(filepath.Join(target, "MAIN.md"))
+	require.NoError(t, err, "working tree must contain the seeded file from main")
+	assert.Equal(t, "on main\n", string(body))
 
-	// confirm the local HEAD is the develop branch (not main).
+	// confirm the local HEAD is main.
 	headRefBytes, err := os.ReadFile(filepath.Join(target, ".git", "HEAD"))
 	require.NoError(t, err)
 	headRef := string(headRefBytes)
-	assert.Contains(t, headRef, "refs/heads/develop",
-		"HEAD must point at the remote's default branch, got: %q", headRef)
+	assert.Contains(t, headRef, "refs/heads/main",
+		"HEAD must point at main, got: %q", headRef)
 }
 
 // TestSyncBubbles_Scheduler_HighChurnVsLowChurnRouting verifies the
@@ -242,7 +239,7 @@ func TestSyncBubbles_Scheduler_HighChurnVsLowChurnRouting(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("%s_%s", tc.category, tc.name), func(t *testing.T) {
-			got := s.kbSyncIntervalFor(tc.kbType)
+			got := intervalForType(s.config, string(tc.kbType))
 			assert.Equal(t, tc.want, got,
 				"%s bubble (%s) should use cadence %v, got %v", tc.name, tc.category, tc.want, got)
 		})
