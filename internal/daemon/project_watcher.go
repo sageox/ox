@@ -326,6 +326,11 @@ const (
 
 	// gitRefreshInterval controls how often the git-tracked file set is refreshed.
 	gitRefreshInterval = 30 * time.Second
+
+	// fdPressureThreshold triggers an emergency prune when the process FD count
+	// exceeds this value. Acts as a safety net if transient watches slip through
+	// the git-tracking guard (e.g., during races with rapid dir creation).
+	fdPressureThreshold = 4096
 )
 
 // ProjectWatcher watches a project directory recursively for file changes
@@ -388,6 +393,21 @@ func (pw *ProjectWatcher) Accumulator() *ChangeAccumulator {
 	return pw.accumulator
 }
 
+// isAncestorTracked returns true if any parent directory of relPath is
+// git-tracked. Used to allow new subdirectories under tracked parents
+// (e.g. src/newpkg/) while blocking directories whose entire ancestry
+// is untracked (e.g. node_modules/.pnpm/foo/).
+func (pw *ProjectWatcher) isAncestorTracked(relPath string) bool {
+	dir := filepath.Dir(relPath)
+	for dir != "." && dir != "" {
+		if pw.tracker.IsTrackedDir(dir) {
+			return true
+		}
+		dir = filepath.Dir(dir)
+	}
+	return false
+}
+
 // Start begins watching the project directory. Blocks until ctx is canceled.
 func (pw *ProjectWatcher) Start(ctx context.Context) {
 	watcher, err := pw.watcherFactory()
@@ -445,6 +465,7 @@ func (pw *ProjectWatcher) Start(ctx context.Context) {
 		case <-refreshTicker.C:
 			pw.tracker.Refresh()
 			pw.pruneStaleWatches(watcher)
+			pw.checkFDPressure(watcher)
 		}
 	}
 }
@@ -553,17 +574,22 @@ func (pw *ProjectWatcher) handleEvent(watcher FileSystemWatcher, event fsnotify.
 		isDir = info.IsDir()
 	}
 
-	// new directory created — add to watch list (will be validated on next git refresh).
-	// Skip if already watched: avoids redundant unix.Open() calls for a path that's
-	// still in our map but whose underlying FD may have been silently invalidated by
-	// a prior remove/rename — re-Add'ing would open a fresh FD without releasing the old one.
+	// new directory created — add to watch list only if it's under a git-tracked
+	// parent. Without this guard, transient directories (node_modules, build
+	// outputs) get watched unconditionally, opening 1+N kqueue FDs per directory
+	// on macOS. Those FDs only get pruned on the next gitRefreshInterval (30s),
+	// but by then fsnotify has already opened per-file FDs that the child
+	// snapshot may miss — producing revoked-but-never-closed FDs that accumulate
+	// for the daemon's lifetime.
 	if isDir && event.Op&fsnotify.Create != 0 {
-		pw.mu.Lock()
-		_, alreadyWatched := pw.watchedDirs[event.Name]
-		atCap := len(pw.watchedDirs) >= maxWatchedDirs
-		pw.mu.Unlock()
-		if !alreadyWatched && !atCap {
-			pw.addDir(watcher, event.Name)
+		if pw.tracker.IsTrackedDir(relPath) || pw.isAncestorTracked(relPath) {
+			pw.mu.Lock()
+			_, alreadyWatched := pw.watchedDirs[event.Name]
+			atCap := len(pw.watchedDirs) >= maxWatchedDirs
+			pw.mu.Unlock()
+			if !alreadyWatched && !atCap {
+				pw.addDir(watcher, event.Name)
+			}
 		}
 	}
 
@@ -725,6 +751,19 @@ func (pw *ProjectWatcher) pruneStaleWatches(watcher FileSystemWatcher) {
 	if pruned > 0 {
 		pw.logger.Info("project watcher: pruned stale watches", "count", pruned)
 	}
+}
+
+// checkFDPressure forces an aggressive prune when the process FD count
+// exceeds fdPressureThreshold. This is the safety net for any transient
+// watches that slip through the git-tracking guard during rapid churn.
+func (pw *ProjectWatcher) checkFDPressure(watcher FileSystemWatcher) {
+	count := CurrentProcessFDCount()
+	if count < 0 || count < fdPressureThreshold {
+		return
+	}
+	pw.logger.Warn("project watcher: FD pressure detected, forcing aggressive prune",
+		"fd_count", count, "threshold", fdPressureThreshold)
+	pw.pruneStaleWatches(watcher)
 }
 
 // resnapshotIfChanged re-reads the per-file child snapshot for absDir if its

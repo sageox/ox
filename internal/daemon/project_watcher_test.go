@@ -1188,9 +1188,16 @@ func TestProjectWatcher_NoFDLeak_RealWatcher_Darwin(t *testing.T) {
 	dir := t.TempDir()
 	logger := slogDiscard()
 
+	// Create a tracked parent so churn subdirectories pass the
+	// isAncestorTracked check and actually get watched.
+	srcDir := filepath.Join(dir, "src")
+	require.NoError(t, os.MkdirAll(srcDir, 0o755))
+
 	tracker := &GitTrackedMatcher{
-		projectRoot: dir, trackedDirs: map[string]struct{}{}, trackedFiles: map[string]struct{}{},
-		logger: logger,
+		projectRoot:  dir,
+		trackedDirs:  map[string]struct{}{"src": {}},
+		trackedFiles: map[string]struct{}{"src/main.go": {}},
+		logger:       logger,
 	}
 	pw := NewProjectWatcher(
 		dir, logger,
@@ -1211,15 +1218,15 @@ func TestProjectWatcher_NoFDLeak_RealWatcher_Darwin(t *testing.T) {
 		<-done
 	}()
 
-	// Wait until root is being watched.
+	// Wait until root + src are being watched.
 	require.Eventually(t, func() bool {
-		return pw.WatchedDirCount() >= 1
+		return pw.WatchedDirCount() >= 2
 	}, 2*time.Second, 10*time.Millisecond)
 
 	// Settle and capture baseline. Run a few warmup cycles first because the
 	// fsnotify goroutine and kqueue itself open FDs on first use.
 	for i := 0; i < 3; i++ {
-		warmDir := filepath.Join(dir, fmt.Sprintf("warmup-%d", i))
+		warmDir := filepath.Join(srcDir, fmt.Sprintf("warmup-%d", i))
 		require.NoError(t, os.MkdirAll(warmDir, 0o755))
 		require.NoError(t, os.RemoveAll(warmDir))
 	}
@@ -1227,8 +1234,9 @@ func TestProjectWatcher_NoFDLeak_RealWatcher_Darwin(t *testing.T) {
 
 	baseline := countOpenFDs(t)
 
-	// Churn: 50 iterations of mkdir + N files + rm-rf. Each iteration
-	// pre-fix would open (1 + 5) kqueue FDs and only release 1 — net +5/round.
+	// Churn: 50 iterations of mkdir + N files + rm-rf under the tracked src/
+	// parent. Each iteration pre-fix would open (1 + 5) kqueue FDs and only
+	// release 1 — net +5/round.
 	//
 	// Wait for an observable readiness signal between mkdir and rm-rf
 	// (the watcher actually registers the new dir) instead of a fixed sleep.
@@ -1240,7 +1248,7 @@ func TestProjectWatcher_NoFDLeak_RealWatcher_Darwin(t *testing.T) {
 	const churnReadyTimeout = 500 * time.Millisecond
 	const churnReadyPoll = 1 * time.Millisecond
 	for i := 0; i < iterations; i++ {
-		sub := filepath.Join(dir, fmt.Sprintf("churn-%04d", i))
+		sub := filepath.Join(srcDir, fmt.Sprintf("churn-%04d", i))
 		preCount := pw.WatchedDirCount()
 		require.NoError(t, os.MkdirAll(sub, 0o755))
 		for j := 0; j < filesPerDir; j++ {
@@ -1282,6 +1290,144 @@ func TestProjectWatcher_NoFDLeak_RealWatcher_Darwin(t *testing.T) {
 	assert.Less(t, delta, tolerance,
 		"FD count grew by %d (baseline %d, final %d). Pre-fix this is ~%d. Tolerance: <%d.",
 		delta, baseline, final, iterations*filesPerDir, tolerance)
+}
+
+// --- Bug fix: handleEvent must skip untracked dirs (issue #594) ---
+
+// TestProjectWatcher_CreateSkipsUntrackedDir verifies that handleEvent does NOT
+// add a watch when a directory is created under an untracked parent (e.g.,
+// node_modules/.pnpm/foo). This is the primary fix for the FD leak: previously
+// handleEvent watched every new directory unconditionally, opening 1+N kqueue
+// FDs that only got pruned 30s later — by which time per-file FDs had already
+// leaked as revoked-but-unclosed handles.
+func TestProjectWatcher_CreateSkipsUntrackedDir(t *testing.T) {
+	mockWatcher := NewMockFileSystemWatcher()
+	mockFS := NewMockFileSystem()
+
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "src")
+	nmDir := filepath.Join(dir, "node_modules")
+	pnpmDir := filepath.Join(dir, "node_modules", ".pnpm")
+	deepDir := filepath.Join(dir, "node_modules", ".pnpm", "@babel+core@7.28.6")
+	require.NoError(t, os.MkdirAll(srcDir, 0o755))
+	require.NoError(t, os.MkdirAll(deepDir, 0o755))
+
+	mockFS.AddDir(nmDir, nil)
+	mockFS.AddDir(pnpmDir, nil)
+	mockFS.AddDir(deepDir, nil)
+
+	acc := NewChangeAccumulator(50 * time.Millisecond)
+	defer acc.Stop()
+
+	tracker := &GitTrackedMatcher{
+		projectRoot:  dir,
+		trackedDirs:  map[string]struct{}{"src": {}},
+		trackedFiles: map[string]struct{}{"src/main.go": {}},
+		logger:       slogDiscard(),
+	}
+
+	pw := NewProjectWatcher(
+		dir, slogDiscard(),
+		func() (FileSystemWatcher, error) { return mockWatcher, nil },
+		mockFS, acc, tracker,
+	)
+	pw.walkAndWatch(mockWatcher)
+	beforeAdds := len(mockWatcher.AddedPaths())
+
+	pw.handleEvent(mockWatcher, fsnotify.Event{Name: nmDir, Op: fsnotify.Create})
+	pw.handleEvent(mockWatcher, fsnotify.Event{Name: pnpmDir, Op: fsnotify.Create})
+	pw.handleEvent(mockWatcher, fsnotify.Event{Name: deepDir, Op: fsnotify.Create})
+
+	assert.Equal(t, beforeAdds, len(mockWatcher.AddedPaths()),
+		"untracked directory Create events must NOT trigger watcher.Add")
+
+	for _, p := range mockWatcher.AddedPaths() {
+		assert.NotContains(t, p, "node_modules",
+			"no node_modules path should appear in watched dirs")
+	}
+}
+
+// TestProjectWatcher_CreateAllowsNewTrackedSubdir verifies that handleEvent
+// DOES add a watch for a new subdirectory created under a tracked parent.
+func TestProjectWatcher_CreateAllowsNewTrackedSubdir(t *testing.T) {
+	mockWatcher := NewMockFileSystemWatcher()
+	mockFS := NewMockFileSystem()
+
+	dir := t.TempDir()
+	srcDir := filepath.Join(dir, "src")
+	newPkgDir := filepath.Join(dir, "src", "newpkg")
+	require.NoError(t, os.MkdirAll(newPkgDir, 0o755))
+
+	mockFS.AddDir(srcDir, nil)
+	mockFS.AddDir(newPkgDir, nil)
+
+	acc := NewChangeAccumulator(50 * time.Millisecond)
+	defer acc.Stop()
+
+	tracker := &GitTrackedMatcher{
+		projectRoot:  dir,
+		trackedDirs:  map[string]struct{}{"src": {}},
+		trackedFiles: map[string]struct{}{"src/main.go": {}},
+		logger:       slogDiscard(),
+	}
+
+	pw := NewProjectWatcher(
+		dir, slogDiscard(),
+		func() (FileSystemWatcher, error) { return mockWatcher, nil },
+		mockFS, acc, tracker,
+	)
+	pw.walkAndWatch(mockWatcher)
+
+	pw.handleEvent(mockWatcher, fsnotify.Event{Name: newPkgDir, Op: fsnotify.Create})
+
+	paths := mockWatcher.AddedPaths()
+	assert.Contains(t, paths, newPkgDir,
+		"new subdirectory under tracked parent should be watched")
+}
+
+// TestProjectWatcher_IsAncestorTracked verifies the ancestor-walk logic.
+func TestProjectWatcher_IsAncestorTracked(t *testing.T) {
+	dir := t.TempDir()
+	acc := NewChangeAccumulator(50 * time.Millisecond)
+	defer acc.Stop()
+
+	tracker := &GitTrackedMatcher{
+		projectRoot: dir,
+		trackedDirs: map[string]struct{}{
+			"src":          {},
+			"src/internal": {},
+			"pkg":          {},
+		},
+		trackedFiles: map[string]struct{}{},
+		logger:       slogDiscard(),
+	}
+
+	pw := NewProjectWatcher(
+		dir, slogDiscard(),
+		func() (FileSystemWatcher, error) { return NewMockFileSystemWatcher(), nil },
+		NewMockFileSystem(), acc, tracker,
+	)
+
+	tests := []struct {
+		relPath string
+		want    bool
+	}{
+		{"src/newpkg", true},
+		{"src/internal/deep/nested", true},
+		{"pkg/subpkg", true},
+		{"node_modules", false},
+		{"node_modules/.pnpm", false},
+		{"node_modules/.pnpm/@babel+core", false},
+		{"build", false},
+		{"dist/assets", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.relPath, func(t *testing.T) {
+			got := pw.isAncestorTracked(tt.relPath)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
 // countOpenFDs returns the number of FDs open on the current process.
