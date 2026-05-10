@@ -1283,10 +1283,15 @@ func TestProjectWatcher_NoFDLeak_RealWatcher_Darwin(t *testing.T) {
 	delta := final - baseline
 
 	// Pre-fix: delta ≈ iterations*filesPerDir = 250 leaked FDs (and growing
-	// unbounded across runs). Post-fix: delta should be small — bounded by
-	// transient watch state, sleep timers, and any long-tail handler queue.
-	// Tolerance of 30 is generous for noise but catches the leak by 8x.
-	const tolerance = 30
+	// unbounded across runs). Post-fix: delta should be near zero — the
+	// gating in handleEvent stops untracked dirs from being watched at all,
+	// and tracked-dir churn is cleaned by the Remove handler. Tolerance of
+	// 10 catches a regression of even one leaked FD per churn iteration
+	// while leaving headroom for goroutine startup and timer noise.
+	//
+	// The earlier tolerance of 30 was loose enough to swallow a smaller
+	// regression of the same shape — precisely why the original bug shipped.
+	const tolerance = 10
 	assert.Less(t, delta, tolerance,
 		"FD count grew by %d (baseline %d, final %d). Pre-fix this is ~%d. Tolerance: <%d.",
 		delta, baseline, final, iterations*filesPerDir, tolerance)
@@ -1428,6 +1433,133 @@ func TestProjectWatcher_IsAncestorTracked(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// --- FD pressure breaker: threshold computation + offender ranking ---
+
+// TestComputeFDPressureThreshold verifies the breaker self-tunes to the
+// platform's soft RLIMIT_NOFILE.
+//
+// Failure prevented: a static threshold (the original 4096) is dead code on
+// hosts where the OS kills the process before the breaker fires, and fires
+// only after a severe leak on hosts with raised ulimits. Self-tuning keeps
+// the breaker meaningful everywhere.
+func TestComputeFDPressureThreshold(t *testing.T) {
+	tests := []struct {
+		name  string
+		limit uint64
+		want  int
+	}{
+		{"unknown soft limit falls back", 0, fdPressureFallback},
+		{"macOS default 256 → floor", 256, fdPressureFloor},
+		{"macOS small raised 512 → floor (half=256)", 512, fdPressureFloor},
+		{"just above floor doubles", 1024, 512},
+		{"linux default 1024 → 512", 1024, 512},
+		{"macOS dev 10240 → 5120", 10240, 5120},
+		{"linux server 65536 → 32768", 65536, 32768},
+		{"very small limit floored", 100, fdPressureFloor},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := computeFDPressureThreshold(tt.limit)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestTopWatchedDirsByChildCount verifies offender ranking returns the
+// largest watched dirs by per-file FD footprint, descending.
+//
+// Failure prevented: when the breaker fires, users need to know *which*
+// dir is leaking. Without this, the only signal is a global FD count and
+// the user has to reach for lsof — which most users won't.
+func TestTopWatchedDirsByChildCount(t *testing.T) {
+	dir := t.TempDir()
+	acc := NewChangeAccumulator(50 * time.Millisecond)
+	defer acc.Stop()
+	tracker := &GitTrackedMatcher{
+		projectRoot:  dir,
+		trackedDirs:  map[string]struct{}{},
+		trackedFiles: map[string]struct{}{},
+		logger:       slogDiscard(),
+	}
+	pw := NewProjectWatcher(
+		dir, slogDiscard(),
+		func() (FileSystemWatcher, error) { return NewMockFileSystemWatcher(), nil },
+		NewMockFileSystem(), acc, tracker,
+	)
+
+	// Prime watchedDirs + dirChildren with three offenders of varying size.
+	// Use absolute paths because dirChildren is keyed by absolute dir.
+	pw.mu.Lock()
+	huge := filepath.Join(dir, "node_modules/.pnpm")
+	medium := filepath.Join(dir, "vendor")
+	small := filepath.Join(dir, "src")
+	empty := filepath.Join(dir, "docs")
+	pw.watchedDirs[huge] = struct{}{}
+	pw.watchedDirs[medium] = struct{}{}
+	pw.watchedDirs[small] = struct{}{}
+	pw.watchedDirs[empty] = struct{}{}
+	pw.dirChildren[huge] = makeFakeChildren(4200)
+	pw.dirChildren[medium] = makeFakeChildren(120)
+	pw.dirChildren[small] = makeFakeChildren(8)
+	// empty has no entry → should be excluded
+	pw.mu.Unlock()
+
+	t.Run("top 2 are largest descending", func(t *testing.T) {
+		got := pw.topWatchedDirsByChildCount(2)
+		require.Len(t, got, 2)
+		assert.Equal(t, "node_modules/.pnpm", got[0].Dir)
+		assert.Equal(t, 4200, got[0].Files)
+		assert.Equal(t, "vendor", got[1].Dir)
+		assert.Equal(t, 120, got[1].Files)
+	})
+
+	t.Run("excludes dirs with zero children", func(t *testing.T) {
+		got := pw.topWatchedDirsByChildCount(10)
+		for _, o := range got {
+			assert.NotEqual(t, "docs", o.Dir, "empty dir should be filtered out")
+		}
+		assert.Len(t, got, 3, "exactly the three non-empty dirs")
+	})
+
+	t.Run("n=0 returns all sorted", func(t *testing.T) {
+		got := pw.topWatchedDirsByChildCount(0)
+		require.Len(t, got, 3)
+		assert.Equal(t, 4200, got[0].Files)
+		assert.Equal(t, 120, got[1].Files)
+		assert.Equal(t, 8, got[2].Files)
+	})
+}
+
+// TestFormatOffenders verifies the log-line formatter is grep-friendly and
+// stable. The breaker log is the user's primary signal that *which* dir is
+// leaking — drift in this format would silently break parsers that key on it.
+func TestFormatOffenders(t *testing.T) {
+	t.Run("empty input → empty string", func(t *testing.T) {
+		assert.Equal(t, "", formatOffenders(nil))
+		assert.Equal(t, "", formatOffenders([]dirOffender{}))
+	})
+	t.Run("single offender", func(t *testing.T) {
+		got := formatOffenders([]dirOffender{{Dir: "node_modules/.pnpm", Files: 4200}})
+		assert.Equal(t, "node_modules/.pnpm(4200)", got)
+	})
+	t.Run("multiple offenders comma-joined, no spaces", func(t *testing.T) {
+		got := formatOffenders([]dirOffender{
+			{Dir: "node_modules/.pnpm", Files: 4200},
+			{Dir: "vendor", Files: 120},
+			{Dir: "src", Files: 8},
+		})
+		assert.Equal(t, "node_modules/.pnpm(4200),vendor(120),src(8)", got)
+	})
+}
+
+func makeFakeChildren(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("/abs/file-%d.go", i)
+	}
+	return out
 }
 
 // countOpenFDs returns the number of FDs open on the current process.

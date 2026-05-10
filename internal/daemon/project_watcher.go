@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"runtime"
@@ -327,11 +328,47 @@ const (
 	// gitRefreshInterval controls how often the git-tracked file set is refreshed.
 	gitRefreshInterval = 30 * time.Second
 
-	// fdPressureThreshold triggers an emergency prune when the process FD count
-	// exceeds this value. Acts as a safety net if transient watches slip through
-	// the git-tracking guard (e.g., during races with rapid dir creation).
-	fdPressureThreshold = 4096
+	// fdPressureFloor is the minimum threshold the breaker can be armed at.
+	// On a 256-FD soft ulimit (the macOS default) we want the breaker to fire
+	// at the floor, not at half (128) — pruning under 128 already-tight FDs
+	// has no headroom. 256 lets the breaker double as a "we're already at
+	// limit" signal.
+	fdPressureFloor = 256
+
+	// fdPressureFallback is used when the soft RLIMIT_NOFILE can't be
+	// determined (Windows, syscall failure). Sized for "small but not tiny"
+	// — high enough to skip noise, low enough that even a misconfigured
+	// host catches a leak before death.
+	fdPressureFallback = 512
 )
+
+// computeFDPressureThreshold returns the FD count at which checkFDPressure
+// triggers an emergency prune. Computed from the soft RLIMIT_NOFILE: half
+// the soft limit, with fdPressureFloor as a lower bound and fdPressureFallback
+// when the limit is unknown.
+//
+// Self-tuning so the breaker is meaningful on every platform:
+//   - macOS default (256 soft limit) → 256 (kicks in at the floor)
+//   - macOS dev raised (10240) → 5120 (ample recovery headroom)
+//   - Linux server (65536+) → 32768
+//
+// The original hard-coded 4096 was effectively dead code on default ulimits
+// because the OS would kill the process first.
+func computeFDPressureThreshold(softLimit uint64) int {
+	if softLimit == 0 {
+		return fdPressureFallback
+	}
+	half := softLimit / 2
+	if half < fdPressureFloor {
+		return fdPressureFloor
+	}
+	// Cap conversion at math.MaxInt to be safe on 32-bit; in practice no
+	// soft RLIMIT_NOFILE comes near that.
+	if half > uint64(int(^uint(0)>>1)) {
+		return int(^uint(0) >> 1)
+	}
+	return int(half)
+}
 
 // ProjectWatcher watches a project directory recursively for file changes
 // and feeds events through a ChangeAccumulator for settled batch processing.
@@ -364,6 +401,10 @@ type ProjectWatcher struct {
 	// stat call per dir vs a full ReadDir). Only populated when
 	// childMirrorEnabled.
 	dirMtimes map[string]time.Time
+
+	// fdPressureThreshold is the FD count at which checkFDPressure forces
+	// an emergency prune. Computed from RLIMIT_NOFILE at construction.
+	fdPressureThreshold int
 }
 
 // NewProjectWatcher creates a new project watcher.
@@ -376,15 +417,16 @@ func NewProjectWatcher(
 	tracker *GitTrackedMatcher,
 ) *ProjectWatcher {
 	return &ProjectWatcher{
-		projectRoot:    projectRoot,
-		logger:         logger,
-		watcherFactory: watcherFactory,
-		fs:             fileSystem,
-		accumulator:    accumulator,
-		tracker:        tracker,
-		watchedDirs:    make(map[string]struct{}),
-		dirChildren:    make(map[string][]string),
-		dirMtimes:      make(map[string]time.Time),
+		projectRoot:         projectRoot,
+		logger:              logger,
+		watcherFactory:      watcherFactory,
+		fs:                  fileSystem,
+		accumulator:         accumulator,
+		tracker:             tracker,
+		watchedDirs:         make(map[string]struct{}),
+		dirChildren:         make(map[string][]string),
+		dirMtimes:           make(map[string]time.Time),
+		fdPressureThreshold: computeFDPressureThreshold(CurrentProcessFDLimit()),
 	}
 }
 
@@ -432,7 +474,11 @@ func (pw *ProjectWatcher) Start(ctx context.Context) {
 	pw.mu.Unlock()
 	sort.Strings(dirs)
 
-	pw.logger.Info("project watcher started", "root", pw.projectRoot, "dirs_watched", dirCount)
+	pw.logger.Info("project watcher started",
+		"root", pw.projectRoot,
+		"dirs_watched", dirCount,
+		"fd_pressure_threshold", pw.fdPressureThreshold,
+		"fd_soft_limit", CurrentProcessFDLimit())
 	for _, d := range dirs {
 		pw.logger.Debug("project watcher: watching dir", "dir", d)
 	}
@@ -753,17 +799,85 @@ func (pw *ProjectWatcher) pruneStaleWatches(watcher FileSystemWatcher) {
 	}
 }
 
+// dirOffender names a watched directory and the size of its kqueue per-file
+// FD footprint (1 + len(children) on macOS, ~1 on Linux).
+type dirOffender struct {
+	Dir   string
+	Files int
+}
+
+// topWatchedDirsByChildCount snapshots watchedDirs and returns the top n
+// by per-dir child file count, descending. Used by the FD-pressure breaker
+// to surface the actual culprit so the user can act without lsof.
+//
+// On Linux the dirChildren mirror is empty (one inotify FD per watch, not
+// per file), so this returns nothing meaningful — the breaker rarely fires
+// there anyway.
+func (pw *ProjectWatcher) topWatchedDirsByChildCount(n int) []dirOffender {
+	pw.mu.Lock()
+	out := make([]dirOffender, 0, len(pw.watchedDirs))
+	for d := range pw.watchedDirs {
+		files := len(pw.dirChildren[d])
+		if files == 0 {
+			continue
+		}
+		rel, err := filepath.Rel(pw.projectRoot, d)
+		if err != nil {
+			rel = d
+		}
+		out = append(out, dirOffender{Dir: rel, Files: files})
+	}
+	pw.mu.Unlock()
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Files > out[j].Files
+	})
+	if n > 0 && len(out) > n {
+		out = out[:n]
+	}
+	return out
+}
+
+// formatOffenders renders dirOffender slices as a single grep-friendly token
+// like "node_modules/.pnpm/@aws-sdk(4200),dist(1204)". Empty string when the
+// slice is empty.
+func formatOffenders(offenders []dirOffender) string {
+	if len(offenders) == 0 {
+		return ""
+	}
+	parts := make([]string, len(offenders))
+	for i, o := range offenders {
+		parts[i] = fmt.Sprintf("%s(%d)", o.Dir, o.Files)
+	}
+	return strings.Join(parts, ",")
+}
+
 // checkFDPressure forces an aggressive prune when the process FD count
-// exceeds fdPressureThreshold. This is the safety net for any transient
-// watches that slip through the git-tracking guard during rapid churn.
+// exceeds the per-watcher threshold. Safety net for any transient watches
+// that slip through the git-tracking guard during rapid churn.
+//
+// Logs the top offenders before pruning and the before/after watched-dir
+// counts after, so users see *which* tree is leaking and can add it to
+// .gitignore — turning a vague "daemon FD count is high" into actionable
+// "node_modules/.pnpm has 4,200 watched files."
 func (pw *ProjectWatcher) checkFDPressure(watcher FileSystemWatcher) {
 	count := CurrentProcessFDCount()
-	if count < 0 || count < fdPressureThreshold {
+	if count < 0 || count < pw.fdPressureThreshold {
 		return
 	}
-	pw.logger.Warn("project watcher: FD pressure detected, forcing aggressive prune",
-		"fd_count", count, "threshold", fdPressureThreshold)
+	offenders := pw.topWatchedDirsByChildCount(5)
+	before := pw.WatchedDirCount()
+	pw.logger.Warn("project watcher: FD pressure detected",
+		"fd_count", count,
+		"threshold", pw.fdPressureThreshold,
+		"watched_dirs", before,
+		"top_offenders", formatOffenders(offenders))
 	pw.pruneStaleWatches(watcher)
+	after := pw.WatchedDirCount()
+	pw.logger.Warn("project watcher: emergency prune complete",
+		"watched_before", before,
+		"watched_after", after,
+		"freed", before-after,
+		"fd_count_after", CurrentProcessFDCount())
 }
 
 // resnapshotIfChanged re-reads the per-file child snapshot for absDir if its
