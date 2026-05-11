@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bufio"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -211,6 +213,18 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 		return fmt.Errorf("classify findings by push status: %w", err)
 	}
 
+	// Print catalog identity BEFORE the finding counts so the operator
+	// knows which ruleset produced them. Same version+hash will be
+	// persisted to meta.json for every session this pass redacts —
+	// see ox-8bfh for the trust model. The redactor used here is the
+	// same instance reused below for the rewrite; reusing keeps the
+	// catalog identity consistent between scan-time reporting and
+	// post-write persistence.
+	redactor := session.NewRedactor()
+	catalogVersion := redactor.CatalogVersion()
+	catalogHash := redactor.CatalogHash()
+	fmt.Fprintf(opts.Stdout, "Catalog: %s\n  hash: %s\n\n", catalogVersion, catalogHash)
+
 	fmt.Fprintf(opts.Stdout, "Found %d credential matches across %d file(s):\n",
 		len(findings), countDistinctRedactHistoryPaths(findings))
 	fmt.Fprintf(opts.Stdout, "  %d in unpushed working tree (actionable)\n", len(unpushed))
@@ -249,7 +263,13 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	// many findings only gets reviewed once (the operator approves the
 	// whole file's redaction, not every single line).
 	byPath := groupFindingsByPath(unpushed)
-	redactor := session.NewRedactor()
+	// Collect per-session redaction entries as files succeed. After all
+	// redactions are done we write one RedactionPass to each affected
+	// session's meta.json — this is the ox-8bfh audit trail. We use
+	// the same passID across all sessions touched by this run so the
+	// trail is correlatable; appliedAt is captured once so the records
+	// share a wall-clock instant.
+	redactedBySession := map[string][]lfs.RedactionEntry{}
 	redactedFiles := 0
 	for _, fileFindings := range byPath {
 		path := fileFindings[0].Path
@@ -272,6 +292,17 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 				return fmt.Errorf("redact %s: %w", path, err)
 			}
 			redactedFiles++
+			// Record per-finding entries against the session that owns
+			// this file. Detector + line + filename only — never bytes.
+			if sess, fname, ok := splitSessionPath(path); ok {
+				for _, f := range fileFindings {
+					redactedBySession[sess] = append(redactedBySession[sess], lfs.RedactionEntry{
+						File:     fname,
+						Line:     f.Line,
+						Detector: f.Detector,
+					})
+				}
+			}
 			fmt.Fprintf(opts.Stdout, "  Redacted: %s\n\n", path)
 		default:
 			fmt.Fprintf(opts.Stdout, "  Skipped: %s\n\n", path)
@@ -283,11 +314,33 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 		return nil
 	}
 
+	// Persist a RedactionPass to each affected session's meta.json
+	// BEFORE staging+amending — so the amend commit includes the audit
+	// trail entry. Uses lfs.MutateSessionMeta (flock + atomic rename)
+	// so concurrent daemon writes to meta.json can't lose the entry.
+	// This is the load-bearing ox-8bfh transparency step.
+	metaPaths, err := writeRedactionPassesPerSession(context.Background(), opts.LedgerPath,
+		redactedBySession, catalogVersion, catalogHash)
+	if err != nil {
+		return fmt.Errorf("write redaction pass: %w", err)
+	}
+	// Stage the modified meta.json files alongside the redacted content
+	// files so the amend commit captures both.
+	for _, mp := range metaPaths {
+		if _, ok := byPath[mp]; !ok {
+			byPath[mp] = nil
+		}
+	}
+
 	// Stage + amend in a single holding commit. The operator can review
 	// the amended diff before running `ox session push`.
 	if err := stageAndAmendRedactedFiles(opts.LedgerPath, byPath); err != nil {
 		return fmt.Errorf("stage/amend: %w", err)
 	}
+
+	// Surface what was caught back to the operator — same data that
+	// just landed in meta.json, summarized for the terminal.
+	fmt.Fprintf(opts.Stdout, "Recorded redaction pass in %d session meta.json file(s).\n", len(metaPaths))
 
 	// Re-scan and report.
 	postScan, err := scanLedgerForSecrets(opts.ProjectRoot, opts.LedgerPath)

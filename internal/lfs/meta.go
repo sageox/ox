@@ -106,7 +106,91 @@ type SessionMeta struct {
 	// working unchanged.
 	SummaryAttempts int `json:"summary_attempts,omitempty"`
 
+	// Redactions is the append-only log of redaction passes that have
+	// touched this session's content. Each pass records who applied it,
+	// which detector catalog was in force (version + hash), and a
+	// summary plus per-finding metadata — NEVER the matched bytes (the
+	// same ox-zyg7 rule that governs audit output). Designed so that
+	// "did the redactor run, when, with which rules, and what did it
+	// catch?" is auditable months later, and so re-runs after the
+	// catalog evolves can identify findings the older ruleset missed.
+	//
+	// Mutations MUST go through MutateSessionMeta so concurrent CLI /
+	// daemon writers serialize at the filesystem level — same flock
+	// path that prevented ox-lrrq from being recreated when this
+	// schema was added.
+	//
+	// omitempty so legacy meta.json files keep round-tripping and
+	// older readers ignore the new field.
+	Redactions []RedactionPass `json:"redactions,omitempty"`
+
 	Files map[string]FileRef `json:"files"` // OID manifest: filename -> ref
+}
+
+// RedactionPass records a single end-to-end pass of the redactor against
+// a session's content files. Append-only: a later pass NEVER overwrites
+// an earlier one in meta.json; supersession is expressed via the
+// Supersedes back-pointer so the audit trail stays complete.
+type RedactionPass struct {
+	// PassID is a UUIDv7 (time-sortable) that uniquely identifies this
+	// pass across the ledger. Later passes can reference it via
+	// Supersedes when they replace a finding the earlier pass made.
+	PassID string `json:"pass_id"`
+
+	// AppliedAt is the UTC instant the pass committed its changes.
+	AppliedAt time.Time `json:"applied_at"`
+
+	// AppliedBy identifies what code path ran the redactor. Useful for
+	// distinguishing write-time chokepoint redaction from after-the-
+	// fact `ox session redact-history` rewrites. Examples:
+	//   "ox session redact-history"
+	//   "ox session redact-history (dry-run)"  -- never persisted; here for clarity
+	//   "RawWriter (session-stop)"             -- future write-time integration
+	AppliedBy string `json:"applied_by"`
+
+	// CatalogVersion is the human-readable identifier of the detector
+	// catalog (e.g. "ox-secrets-2026-05-11-N7"). Tracks WHICH ruleset
+	// was applied so future re-audits can decide whether the session
+	// needs a re-run under a newer catalog. Always paired with
+	// CatalogHash to detect locally-modified rules even when the
+	// version string matches.
+	CatalogVersion string `json:"catalog_version"`
+
+	// CatalogHash is a sha256 hex string over the canonicalized
+	// detector set (name + pattern source + skipif + keywords). Detects
+	// "you said catalog v3 but your rules don't actually match the
+	// official v3 set" cases that the version string alone misses.
+	CatalogHash string `json:"catalog_hash"`
+
+	// Summary is the aggregate finding count and per-detector
+	// breakdown for this pass. Cheap to read without pulling Entries.
+	Summary RedactionPassSummary `json:"summary"`
+
+	// Entries lists every finding the pass acted on. Detector + file +
+	// line only — NEVER the matched bytes.
+	Entries []RedactionEntry `json:"entries,omitempty"`
+
+	// Supersedes references PassIDs of earlier passes whose findings
+	// this pass replaces (e.g. a more-specific per-prefix github
+	// detector replacing a generic one). Empty for a fresh pass.
+	Supersedes []string `json:"supersedes,omitempty"`
+}
+
+// RedactionPassSummary is the at-a-glance roll-up for a RedactionPass.
+type RedactionPassSummary struct {
+	Total      int            `json:"total"`
+	ByDetector map[string]int `json:"by_detector,omitempty"`
+}
+
+// RedactionEntry is a single finding within a RedactionPass. Records
+// where the match was (file + line) and which detector fired, never
+// the matched bytes. char_offset / match_len could be added later for
+// finer-grained re-audit; intentionally omitted today to keep
+// meta.json compact.
+type RedactionEntry struct {
+	File     string `json:"file"`     // relative to session dir, e.g. "raw.jsonl"
+	Line     int    `json:"line"`     // 1-based line number in pre-redaction file
+	Detector string `json:"detector"` // SecretPattern.Name
 }
 
 // MaxSummaryAttempts caps how many failure-stub-producing daemon LLM

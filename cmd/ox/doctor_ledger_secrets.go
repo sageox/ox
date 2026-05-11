@@ -133,8 +133,16 @@ func checkLedgerSecrets(fix bool) checkResult {
 		result.SessionsSkipped += hyd.Failed
 	}
 
-	scope := fmt.Sprintf("scanned %d session recording file(s) across %d session(s)",
-		result.FilesScanned, result.SessionsScanned)
+	// Identify the catalog that produced these findings. ox-8bfh: the
+	// version+hash is the audit anchor that lets future re-runs decide
+	// "this session was last scanned under N7-aaaa, current ruleset is
+	// N8-bbbb; the new detectors might catch new findings — re-scan."
+	catalogRedactor := session.NewRedactor()
+	catalogTag := fmt.Sprintf("catalog=%s (hash %s…)",
+		catalogRedactor.CatalogVersion(), catalogRedactor.CatalogHash()[:8])
+
+	scope := fmt.Sprintf("scanned %d session recording file(s) across %d session(s); %s",
+		result.FilesScanned, result.SessionsScanned, catalogTag)
 	if result.SessionsHydrated > 0 {
 		scope += fmt.Sprintf("; auto-hydrated %d session(s) from LFS", result.SessionsHydrated)
 	}

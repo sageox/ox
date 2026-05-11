@@ -384,31 +384,41 @@ func DefaultPatterns() []SecretPattern {
 	}
 }
 
-// Redactor handles secret detection and redaction
+// Redactor handles secret detection and redaction. Holds the live
+// SecretPattern slice plus its cached catalog identity (version+hash);
+// see catalog.go for the trust model that ox-8bfh requires.
 type Redactor struct {
-	patterns []SecretPattern
-	mu       sync.RWMutex
+	patterns       []SecretPattern
+	catalogVersion string
+	catalogHash    string
+	mu             sync.RWMutex
 }
 
 // NewRedactor creates a new Redactor with default patterns
 func NewRedactor() *Redactor {
-	return &Redactor{
-		patterns: DefaultPatterns(),
-	}
+	r := &Redactor{patterns: DefaultPatterns()}
+	r.catalogVersion, r.catalogHash = computeCatalogIdentity(r.patterns)
+	return r
 }
 
 // NewRedactorWithPatterns creates a Redactor with custom patterns
 func NewRedactorWithPatterns(patterns []SecretPattern) *Redactor {
-	return &Redactor{
-		patterns: patterns,
-	}
+	r := &Redactor{patterns: patterns}
+	r.catalogVersion, r.catalogHash = computeCatalogIdentity(r.patterns)
+	return r
 }
 
-// AddPattern adds an additional pattern to the redactor
+// AddPattern adds an additional pattern to the redactor. The catalog
+// identity (version + hash) is recomputed under the write lock so
+// subsequent CatalogVersion / CatalogHash calls reflect the change.
+// Required by ox-8bfh: a session redacted with a tampered ruleset
+// must carry a different fingerprint than one redacted with the
+// pristine default catalog.
 func (r *Redactor) AddPattern(pattern SecretPattern) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.patterns = append(r.patterns, pattern)
+	r.catalogVersion, r.catalogHash = computeCatalogIdentity(r.patterns)
 }
 
 // RedactionResult contains details about a redaction
