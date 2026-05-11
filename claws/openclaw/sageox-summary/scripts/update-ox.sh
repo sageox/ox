@@ -23,8 +23,12 @@
 # Usage: update-ox.sh
 #
 # Stdout: nothing on success, human-readable progress during an upgrade
-# Stderr: one-line "needs install" / "not at pinned path" / "PATH order
-#         wrong" signals; install-ox-curl.sh's stderr on upgrade failure
+# Stderr: install/path diagnostics surfaced verbatim — most paths emit
+#         an `error:` line followed by a `fix:` line, but some emit a
+#         single line and others (e.g. when `ox version` itself fails)
+#         include captured command stderr, so line count is not fixed.
+#         On upgrade failure, install-ox-curl.sh's stderr is also passed
+#         through.
 # Exit:
 #   0 — pinned ox is ready (either already current, or upgraded in place)
 #   2 — initial install required (state file missing, binary missing at
