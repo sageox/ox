@@ -124,8 +124,8 @@ func viewContextTraceText(events []contexttrace.Event, sessionName string) {
 	fmt.Println(showTitleStyle.Render("Context Trace"))
 	fmt.Println(showSeparatorStyle.Render(strings.Repeat("-", 60)))
 	fmt.Println()
-	printShowField("Session", sessionName)
-	printShowField("Events", fmt.Sprintf("%d", len(events)))
+	printShowField(os.Stdout, "Session", sessionName)
+	printShowField(os.Stdout, "Events", fmt.Sprintf("%d", len(events)))
 	fmt.Println()
 
 	// partition events

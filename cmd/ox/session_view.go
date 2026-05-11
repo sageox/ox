@@ -195,7 +195,7 @@ func runSessionView(cmd *cobra.Command, args []string) error {
 	case "text":
 		return viewAsText(store, storedSession, projectRoot)
 	case "json":
-		return viewAsJSON(storedSession, metadataOnly, entryLimit)
+		return viewAsJSON(cmd.OutOrStdout(), storedSession, metadataOnly, entryLimit)
 	default:
 		return fmt.Errorf("unknown view format: %s", format)
 	}
@@ -209,7 +209,7 @@ func runContextTrace(store *session.Store, sessionName, projectRoot string, json
 	}
 	if len(events) == 0 {
 		fmt.Println()
-		printShowField("Session", sessionName)
+		printShowField(os.Stdout, "Session", sessionName)
 		fmt.Println()
 		fmt.Println(cli.StyleDim.Render("  No context trace available for this session."))
 		cli.PrintHint("Context tracing records what team knowledge was provided during ox agent prime.")

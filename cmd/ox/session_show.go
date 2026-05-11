@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 	"time"
 
@@ -128,23 +128,25 @@ func runSessionShowLegacy(cmd *cobra.Command, args []string) error {
 		t = convertStoredSession(st)
 	} else {
 		// no input - show hint
-		fmt.Println()
-		fmt.Println(sessionEmptyStyle.Render("  No sessions found."))
-		fmt.Println()
+		out := cmd.OutOrStdout()
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, sessionEmptyStyle.Render("  No sessions found."))
+		fmt.Fprintln(out)
 		cli.PrintHint("Start a recording with 'ox agent <id> session start' to capture your development session.")
 		return nil
 	}
 
+	out := cmd.OutOrStdout()
 	// output based on format
 	if showRaw {
-		return showRawSession(t, entryLimit)
+		return showRawSession(out, t, entryLimit)
 	}
 
-	return showFormattedSession(t, metadataOnly, entryLimit)
+	return showFormattedSession(out, t, metadataOnly, entryLimit)
 }
 
 // viewAsJSON renders a session as raw JSON output.
-func viewAsJSON(storedSession *session.StoredSession, metadataOnly bool, limit int) error {
+func viewAsJSON(w io.Writer, storedSession *session.StoredSession, metadataOnly bool, limit int) error {
 	t := convertStoredSession(storedSession)
 	if metadataOnly {
 		metaOnly := &sessionShowData{
@@ -152,9 +154,9 @@ func viewAsJSON(storedSession *session.StoredSession, metadataOnly bool, limit i
 			Metadata: t.Metadata,
 			Footer:   t.Footer,
 		}
-		return showRawSession(metaOnly, 0)
+		return showRawSession(w, metaOnly, 0)
 	}
-	return showRawSession(t, limit)
+	return showRawSession(w, t, limit)
 }
 
 // convertStoredSession converts a session.StoredSession to sessionShowData.
@@ -179,8 +181,8 @@ func convertStoredSession(st *session.StoredSession) *sessionShowData {
 	return t
 }
 
-func showRawSession(t *sessionShowData, limit int) error {
-	encoder := json.NewEncoder(os.Stdout)
+func showRawSession(w io.Writer, t *sessionShowData, limit int) error {
+	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 
 	// if showing with limit, only include limited entries
@@ -191,44 +193,44 @@ func showRawSession(t *sessionShowData, limit int) error {
 	return encoder.Encode(t)
 }
 
-func showFormattedSession(t *sessionShowData, metadataOnly bool, limit int) error {
-	fmt.Println()
+func showFormattedSession(w io.Writer, t *sessionShowData, metadataOnly bool, limit int) error {
+	fmt.Fprintln(w)
 
 	// header
-	fmt.Println(showTitleStyle.Render("Session"))
-	fmt.Println(showSeparatorStyle.Render(strings.Repeat("-", 60)))
-	fmt.Println()
+	fmt.Fprintln(w, showTitleStyle.Render("Session"))
+	fmt.Fprintln(w, showSeparatorStyle.Render(strings.Repeat("-", 60)))
+	fmt.Fprintln(w)
 
 	// file info
-	printShowField("Filename", t.Info.Filename)
-	printShowField("Type", t.Info.Type)
-	printShowField("Size", formatSize(t.Info.Size))
-	printShowField("Created", t.Info.CreatedAt.Format("2006-01-02 15:04:05"))
-	printShowField("Modified", t.Info.ModTime.Format("2006-01-02 15:04:05"))
+	printShowField(w, "Filename", t.Info.Filename)
+	printShowField(w, "Type", t.Info.Type)
+	printShowField(w, "Size", formatSize(t.Info.Size))
+	printShowField(w, "Created", t.Info.CreatedAt.Format("2006-01-02 15:04:05"))
+	printShowField(w, "Modified", t.Info.ModTime.Format("2006-01-02 15:04:05"))
 
 	// metadata section
 	if t.Metadata != nil {
-		fmt.Println()
-		fmt.Println(showSectionStyle.Render("Metadata"))
-		fmt.Println(showSeparatorStyle.Render(strings.Repeat("-", 40)))
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, showSectionStyle.Render("Metadata"))
+		fmt.Fprintln(w, showSeparatorStyle.Render(strings.Repeat("-", 40)))
 
 		if t.Metadata.Version != "" {
-			printShowField("Version", t.Metadata.Version)
+			printShowField(w, "Version", t.Metadata.Version)
 		}
 		if t.Metadata.AgentID != "" {
-			printShowField("Agent ID", t.Metadata.AgentID)
+			printShowField(w, "Agent ID", t.Metadata.AgentID)
 		}
 		if t.Metadata.AgentType != "" {
-			printShowField("Agent Type", t.Metadata.AgentType)
+			printShowField(w, "Agent Type", t.Metadata.AgentType)
 		}
 		if t.Metadata.Username != "" {
-			printShowField("Username", t.Metadata.Username)
+			printShowField(w, "Username", t.Metadata.Username)
 		}
 		if t.Metadata.RepoID != "" {
-			printShowField("Repo ID", t.Metadata.RepoID)
+			printShowField(w, "Repo ID", t.Metadata.RepoID)
 		}
 		if !t.Metadata.CreatedAt.IsZero() {
-			printShowField("Started", t.Metadata.CreatedAt.Format("2006-01-02 15:04:05"))
+			printShowField(w, "Started", t.Metadata.CreatedAt.Format("2006-01-02 15:04:05"))
 		}
 	}
 
@@ -236,57 +238,57 @@ func showFormattedSession(t *sessionShowData, metadataOnly bool, limit int) erro
 	if t.Footer != nil {
 		if closedAt, ok := t.Footer["closed_at"].(string); ok {
 			if parsed, err := time.Parse(time.RFC3339Nano, closedAt); err == nil {
-				printShowField("Closed", parsed.Format("2006-01-02 15:04:05"))
+				printShowField(w, "Closed", parsed.Format("2006-01-02 15:04:05"))
 			}
 		}
 		if entryCount, ok := t.Footer["entry_count"].(float64); ok {
-			printShowField("Entries", fmt.Sprintf("%d", int(entryCount)))
+			printShowField(w, "Entries", fmt.Sprintf("%d", int(entryCount)))
 		}
 	}
 
 	// stop here if metadata only
 	if metadataOnly {
-		fmt.Println()
+		fmt.Fprintln(w)
 		return nil
 	}
 
 	// entries section
 	if len(t.Entries) > 0 {
-		fmt.Println()
-		fmt.Println(showSectionStyle.Render("Entries"))
-		fmt.Println(showSeparatorStyle.Render(strings.Repeat("-", 40)))
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, showSectionStyle.Render("Entries"))
+		fmt.Fprintln(w, showSeparatorStyle.Render(strings.Repeat("-", 40)))
 
 		entries := t.Entries
 		if limit > 0 && len(entries) > limit {
 			entries = entries[:limit]
-			fmt.Println(cli.StyleDim.Render(fmt.Sprintf("  (showing first %d of %d entries)", limit, len(t.Entries))))
-			fmt.Println()
+			fmt.Fprintln(w, cli.StyleDim.Render(fmt.Sprintf("  (showing first %d of %d entries)", limit, len(t.Entries))))
+			fmt.Fprintln(w)
 		}
 
 		for i, entry := range entries {
-			printSessionEntry(i+1, entry)
+			printSessionEntry(w, i+1, entry)
 		}
 
 		if limit > 0 && len(t.Entries) > limit {
-			fmt.Println()
-			fmt.Println(cli.StyleDim.Render(fmt.Sprintf("  ... %d more entries (use --limit 0 to show all)", len(t.Entries)-limit)))
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, cli.StyleDim.Render(fmt.Sprintf("  ... %d more entries (use --limit 0 to show all)", len(t.Entries)-limit)))
 		}
 	} else {
-		fmt.Println()
-		fmt.Println(cli.StyleDim.Render("  No entries recorded."))
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, cli.StyleDim.Render("  No entries recorded."))
 	}
 
-	fmt.Println()
+	fmt.Fprintln(w)
 	return nil
 }
 
-func printShowField(label, value string) {
-	fmt.Printf("  %s %s\n",
+func printShowField(w io.Writer, label, value string) {
+	fmt.Fprintf(w, "  %s %s\n",
 		showLabelStyle.Render(label+":"),
 		showValueStyle.Render(value))
 }
 
-func printSessionEntry(seq int, entry map[string]any) {
+func printSessionEntry(w io.Writer, seq int, entry map[string]any) {
 	// get entry type
 	entryType, _ := entry["type"].(string)
 	if entryType == "" {
@@ -308,24 +310,24 @@ func printSessionEntry(seq int, entry map[string]any) {
 	if timestamp != "" {
 		typeLabel += " " + showEntryTimestampStyle.Render(timestamp)
 	}
-	fmt.Println("  " + typeLabel)
+	fmt.Fprintln(w, "  "+typeLabel)
 
 	// entry data based on type
 	switch entryType {
 	case "message":
-		printMessageEntry(entry)
+		printMessageEntry(w, entry)
 	case "tool_call":
-		printToolCallEntry(entry)
+		printToolCallEntry(w, entry)
 	case "tool_result":
-		printToolResultEntry(entry)
+		printToolResultEntry(w, entry)
 	default:
-		printGenericEntry(entry)
+		printGenericEntry(w, entry)
 	}
 
-	fmt.Println()
+	fmt.Fprintln(w)
 }
 
-func printMessageEntry(entry map[string]any) {
+func printMessageEntry(w io.Writer, entry map[string]any) {
 	data, ok := entry["data"].(map[string]any)
 	if !ok {
 		return
@@ -335,9 +337,9 @@ func printMessageEntry(entry map[string]any) {
 	content, _ := data["content"].(string)
 
 	if role != "" {
-		fmt.Printf("    %s: ", showHighlightStyle.Render(role))
+		fmt.Fprintf(w, "    %s: ", showHighlightStyle.Render(role))
 	} else {
-		fmt.Print("    ")
+		fmt.Fprint(w, "    ")
 	}
 
 	// truncate long content
@@ -349,17 +351,17 @@ func printMessageEntry(entry map[string]any) {
 	lines := strings.Split(content, "\n")
 	for i, line := range lines {
 		if i == 0 {
-			fmt.Println(showEntryContentStyle.Render(line))
+			fmt.Fprintln(w, showEntryContentStyle.Render(line))
 		} else if i < 5 {
-			fmt.Println("    " + showEntryContentStyle.Render(line))
+			fmt.Fprintln(w, "    "+showEntryContentStyle.Render(line))
 		} else if i == 5 {
-			fmt.Println("    " + cli.StyleDim.Render("... (truncated)"))
+			fmt.Fprintln(w, "    "+cli.StyleDim.Render("... (truncated)"))
 			break
 		}
 	}
 }
 
-func printToolCallEntry(entry map[string]any) {
+func printToolCallEntry(w io.Writer, entry map[string]any) {
 	data, ok := entry["data"].(map[string]any)
 	if !ok {
 		return
@@ -367,7 +369,7 @@ func printToolCallEntry(entry map[string]any) {
 
 	toolName, _ := data["tool_name"].(string)
 	if toolName != "" {
-		fmt.Printf("    %s %s\n", cli.StyleDim.Render("Tool:"), showToolStyle.Render(toolName))
+		fmt.Fprintf(w, "    %s %s\n", cli.StyleDim.Render("Tool:"), showToolStyle.Render(toolName))
 	}
 
 	// show input preview
@@ -376,11 +378,11 @@ func printToolCallEntry(entry map[string]any) {
 		if len(preview) > 100 {
 			preview = preview[:97] + "..."
 		}
-		fmt.Printf("    %s %s\n", cli.StyleDim.Render("Input:"), cli.StyleDim.Render(preview))
+		fmt.Fprintf(w, "    %s %s\n", cli.StyleDim.Render("Input:"), cli.StyleDim.Render(preview))
 	}
 }
 
-func printToolResultEntry(entry map[string]any) {
+func printToolResultEntry(w io.Writer, entry map[string]any) {
 	data, ok := entry["data"].(map[string]any)
 	if !ok {
 		return
@@ -388,15 +390,15 @@ func printToolResultEntry(entry map[string]any) {
 
 	toolName, _ := data["tool_name"].(string)
 	if toolName != "" {
-		fmt.Printf("    %s %s\n", cli.StyleDim.Render("Tool:"), showToolStyle.Render(toolName))
+		fmt.Fprintf(w, "    %s %s\n", cli.StyleDim.Render("Tool:"), showToolStyle.Render(toolName))
 	}
 
 	// show success/error status
 	if success, ok := data["success"].(bool); ok {
 		if success {
-			fmt.Printf("    %s %s\n", cli.StyleDim.Render("Status:"), cli.StyleSuccess.Render("success"))
+			fmt.Fprintf(w, "    %s %s\n", cli.StyleDim.Render("Status:"), cli.StyleSuccess.Render("success"))
 		} else {
-			fmt.Printf("    %s %s\n", cli.StyleDim.Render("Status:"), cli.StyleError.Render("failed"))
+			fmt.Fprintf(w, "    %s %s\n", cli.StyleDim.Render("Status:"), cli.StyleError.Render("failed"))
 		}
 	}
 
@@ -406,11 +408,11 @@ func printToolResultEntry(entry map[string]any) {
 		if len(preview) > 100 {
 			preview = preview[:97] + "..."
 		}
-		fmt.Printf("    %s %s\n", cli.StyleDim.Render("Output:"), cli.StyleDim.Render(preview))
+		fmt.Fprintf(w, "    %s %s\n", cli.StyleDim.Render("Output:"), cli.StyleDim.Render(preview))
 	}
 }
 
-func printGenericEntry(entry map[string]any) {
+func printGenericEntry(w io.Writer, entry map[string]any) {
 	// show data as compact JSON
 	if data, ok := entry["data"]; ok {
 		jsonBytes, err := json.Marshal(data)
@@ -423,7 +425,7 @@ func printGenericEntry(entry map[string]any) {
 			jsonStr = jsonStr[:147] + "..."
 		}
 
-		fmt.Printf("    %s\n", cli.StyleDim.Render(jsonStr))
+		fmt.Fprintf(w, "    %s\n", cli.StyleDim.Render(jsonStr))
 	}
 }
 

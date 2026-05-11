@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +13,7 @@ import (
 )
 
 func TestFormatSize_ShowCoverage(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		bytes int64
 		want  string
@@ -39,6 +39,7 @@ func TestFormatSize_ShowCoverage(t *testing.T) {
 }
 
 func TestConvertStoredSession_NilMeta(t *testing.T) {
+	t.Parallel()
 	st := &session.StoredSession{
 		Info: session.SessionInfo{
 			Filename: "test.jsonl",
@@ -61,6 +62,7 @@ func TestConvertStoredSession_NilMeta(t *testing.T) {
 }
 
 func TestConvertStoredSession_WithMeta(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	st := &session.StoredSession{
 		Info: session.SessionInfo{
@@ -104,6 +106,7 @@ func TestConvertStoredSession_WithMeta(t *testing.T) {
 }
 
 func TestShowRawSession_LimitEntries(t *testing.T) {
+	t.Parallel()
 	data := &sessionShowData{
 		Info: session.SessionInfo{Filename: "test.jsonl"},
 		Entries: []map[string]any{
@@ -115,22 +118,10 @@ func TestShowRawSession_LimitEntries(t *testing.T) {
 		},
 	}
 
-	// capture stdout
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := showRawSession(data, 2)
-
-	w.Close()
-	os.Stdout = old
-
-	if err != nil {
+	var buf bytes.Buffer
+	if err := showRawSession(&buf, data, 2); err != nil {
 		t.Fatalf("showRawSession returned error: %v", err)
 	}
-
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
 
 	var result sessionShowData
 	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
@@ -143,6 +134,7 @@ func TestShowRawSession_LimitEntries(t *testing.T) {
 }
 
 func TestShowRawSession_NoLimit(t *testing.T) {
+	t.Parallel()
 	data := &sessionShowData{
 		Info: session.SessionInfo{Filename: "test.jsonl"},
 		Entries: []map[string]any{
@@ -152,21 +144,10 @@ func TestShowRawSession_NoLimit(t *testing.T) {
 		},
 	}
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := showRawSession(data, 0)
-
-	w.Close()
-	os.Stdout = old
-
-	if err != nil {
+	var buf bytes.Buffer
+	if err := showRawSession(&buf, data, 0); err != nil {
 		t.Fatalf("showRawSession returned error: %v", err)
 	}
-
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
 
 	var result sessionShowData
 	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
@@ -178,20 +159,16 @@ func TestShowRawSession_NoLimit(t *testing.T) {
 	}
 }
 
-// captureStdout runs fn while capturing stdout, returning the output.
-func captureStdout(fn func()) string {
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-	fn()
-	w.Close()
-	os.Stdout = old
+// captureStdout runs fn with a fresh bytes.Buffer as its writer and returns
+// the captured output. This is parallel-safe — no os.Stdout mutation.
+func captureStdout(fn func(w io.Writer)) string {
 	var buf bytes.Buffer
-	io.Copy(&buf, r)
+	fn(&buf)
 	return buf.String()
 }
 
 func TestPrintSessionEntry_MessageType(t *testing.T) {
+	t.Parallel()
 	entry := map[string]any{
 		"type":      "message",
 		"timestamp": time.Now().Format(time.RFC3339Nano),
@@ -200,11 +177,12 @@ func TestPrintSessionEntry_MessageType(t *testing.T) {
 			"content": "hello world",
 		},
 	}
-	output := captureStdout(func() { printSessionEntry(1, entry) })
+	output := captureStdout(func(w io.Writer) { printSessionEntry(w, 1, entry) })
 	assert.Contains(t, output, "user")
 }
 
 func TestPrintSessionEntry_ToolCallType(t *testing.T) {
+	t.Parallel()
 	entry := map[string]any{
 		"type": "tool_call",
 		"data": map[string]any{
@@ -212,11 +190,12 @@ func TestPrintSessionEntry_ToolCallType(t *testing.T) {
 			"input":     "/path/to/file",
 		},
 	}
-	output := captureStdout(func() { printSessionEntry(2, entry) })
+	output := captureStdout(func(w io.Writer) { printSessionEntry(w, 2, entry) })
 	assert.Contains(t, output, "read_file")
 }
 
 func TestPrintSessionEntry_ToolResultType(t *testing.T) {
+	t.Parallel()
 	entry := map[string]any{
 		"type": "tool_result",
 		"data": map[string]any{
@@ -225,11 +204,12 @@ func TestPrintSessionEntry_ToolResultType(t *testing.T) {
 			"output":    "file written successfully",
 		},
 	}
-	output := captureStdout(func() { printSessionEntry(3, entry) })
+	output := captureStdout(func(w io.Writer) { printSessionEntry(w, 3, entry) })
 	assert.Contains(t, output, "write_file")
 }
 
 func TestPrintSessionEntry_ToolResultFailed(t *testing.T) {
+	t.Parallel()
 	entry := map[string]any{
 		"type": "tool_result",
 		"data": map[string]any{
@@ -238,36 +218,32 @@ func TestPrintSessionEntry_ToolResultFailed(t *testing.T) {
 			"output":    "permission denied",
 		},
 	}
-	output := captureStdout(func() { printSessionEntry(4, entry) })
+	output := captureStdout(func(w io.Writer) { printSessionEntry(w, 4, entry) })
 	assert.Contains(t, output, "write_file")
 }
 
 func TestPrintSessionEntry_UnknownType(t *testing.T) {
+	t.Parallel()
 	entry := map[string]any{
 		"type": "custom_event",
 		"data": map[string]any{
 			"key": "value",
 		},
 	}
-	output := captureStdout(func() { printSessionEntry(5, entry) })
+	output := captureStdout(func(w io.Writer) { printSessionEntry(w, 5, entry) })
 	assert.NotEmpty(t, output)
 }
 
 func TestPrintSessionEntry_EmptyType(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
+	t.Parallel()
 	entry := map[string]any{
 		"timestamp": "2026-01-01T00:00:00Z",
 	}
-	printSessionEntry(1, entry)
-
-	w.Close()
-	os.Stdout = old
+	printSessionEntry(io.Discard, 1, entry)
 }
 
 func TestPrintMessageEntry_LongContent(t *testing.T) {
+	t.Parallel()
 	longContent := strings.Repeat("x", 250)
 	entry := map[string]any{
 		"data": map[string]any{
@@ -275,63 +251,47 @@ func TestPrintMessageEntry_LongContent(t *testing.T) {
 			"content": longContent,
 		},
 	}
-	output := captureStdout(func() { printMessageEntry(entry) })
+	output := captureStdout(func(w io.Writer) { printMessageEntry(w, entry) })
 	assert.Contains(t, output, "assistant")
 }
 
 func TestPrintMessageEntry_MultilineContent(t *testing.T) {
+	t.Parallel()
 	entry := map[string]any{
 		"data": map[string]any{
 			"role":    "user",
 			"content": "line1\nline2\nline3\nline4\nline5\nline6\nline7",
 		},
 	}
-	output := captureStdout(func() { printMessageEntry(entry) })
+	output := captureStdout(func(w io.Writer) { printMessageEntry(w, entry) })
 	assert.Contains(t, output, "user")
 }
 
 func TestPrintMessageEntry_NoData(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
+	t.Parallel()
 	// no "data" key — should return silently
 	entry := map[string]any{}
-	printMessageEntry(entry)
-
-	w.Close()
-	os.Stdout = old
+	printMessageEntry(io.Discard, entry)
 }
 
 func TestPrintMessageEntry_NoRole(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
+	t.Parallel()
 	entry := map[string]any{
 		"data": map[string]any{
 			"content": "anonymous message",
 		},
 	}
-	printMessageEntry(entry)
-
-	w.Close()
-	os.Stdout = old
+	printMessageEntry(io.Discard, entry)
 }
 
 func TestPrintToolCallEntry_NoData(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
+	t.Parallel()
 	entry := map[string]any{}
-	printToolCallEntry(entry)
-
-	w.Close()
-	os.Stdout = old
+	printToolCallEntry(io.Discard, entry)
 }
 
 func TestPrintToolCallEntry_LongInput(t *testing.T) {
+	t.Parallel()
 	longInput := strings.Repeat("y", 150)
 	entry := map[string]any{
 		"data": map[string]any{
@@ -339,23 +299,18 @@ func TestPrintToolCallEntry_LongInput(t *testing.T) {
 			"input":     longInput,
 		},
 	}
-	output := captureStdout(func() { printToolCallEntry(entry) })
+	output := captureStdout(func(w io.Writer) { printToolCallEntry(w, entry) })
 	assert.Contains(t, output, "bash")
 }
 
 func TestPrintToolResultEntry_NoData(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
+	t.Parallel()
 	entry := map[string]any{}
-	printToolResultEntry(entry)
-
-	w.Close()
-	os.Stdout = old
+	printToolResultEntry(io.Discard, entry)
 }
 
 func TestPrintToolResultEntry_LongOutput(t *testing.T) {
+	t.Parallel()
 	longOutput := strings.Repeat("z", 150)
 	entry := map[string]any{
 		"data": map[string]any{
@@ -364,34 +319,30 @@ func TestPrintToolResultEntry_LongOutput(t *testing.T) {
 			"output":    longOutput,
 		},
 	}
-	output := captureStdout(func() { printToolResultEntry(entry) })
+	output := captureStdout(func(w io.Writer) { printToolResultEntry(w, entry) })
 	assert.NotEmpty(t, output)
 }
 
 func TestPrintGenericEntry_NoData(t *testing.T) {
-	old := os.Stdout
-	_, w, _ := os.Pipe()
-	os.Stdout = w
-
+	t.Parallel()
 	entry := map[string]any{}
-	printGenericEntry(entry)
-
-	w.Close()
-	os.Stdout = old
+	printGenericEntry(io.Discard, entry)
 }
 
 func TestPrintGenericEntry_LongJSON(t *testing.T) {
+	t.Parallel()
 	longVal := strings.Repeat("a", 200)
 	entry := map[string]any{
 		"data": map[string]any{
 			"long_key": longVal,
 		},
 	}
-	output := captureStdout(func() { printGenericEntry(entry) })
+	output := captureStdout(func(w io.Writer) { printGenericEntry(w, entry) })
 	assert.NotEmpty(t, output)
 }
 
 func TestShowFormattedSession_MetadataOnly(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	data := &sessionShowData{
 		Info: session.SessionInfo{
@@ -419,7 +370,7 @@ func TestShowFormattedSession_MetadataOnly(t *testing.T) {
 	}
 
 	var err error
-	output := captureStdout(func() { err = showFormattedSession(data, true, 0) })
+	output := captureStdout(func(w io.Writer) { err = showFormattedSession(w, data, true, 0) })
 
 	if err != nil {
 		t.Fatalf("showFormattedSession returned error: %v", err)
@@ -428,6 +379,7 @@ func TestShowFormattedSession_MetadataOnly(t *testing.T) {
 }
 
 func TestShowFormattedSession_NoEntries(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	data := &sessionShowData{
 		Info: session.SessionInfo{
@@ -441,7 +393,7 @@ func TestShowFormattedSession_NoEntries(t *testing.T) {
 	}
 
 	var err error
-	output := captureStdout(func() { err = showFormattedSession(data, false, 0) })
+	output := captureStdout(func(w io.Writer) { err = showFormattedSession(w, data, false, 0) })
 
 	if err != nil {
 		t.Fatalf("showFormattedSession returned error: %v", err)
@@ -450,6 +402,7 @@ func TestShowFormattedSession_NoEntries(t *testing.T) {
 }
 
 func TestShowFormattedSession_WithLimit(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	data := &sessionShowData{
 		Info: session.SessionInfo{
@@ -467,7 +420,7 @@ func TestShowFormattedSession_WithLimit(t *testing.T) {
 	}
 
 	var err error
-	output := captureStdout(func() { err = showFormattedSession(data, false, 1) })
+	output := captureStdout(func(w io.Writer) { err = showFormattedSession(w, data, false, 1) })
 
 	if err != nil {
 		t.Fatalf("showFormattedSession returned error: %v", err)
@@ -476,10 +429,7 @@ func TestShowFormattedSession_WithLimit(t *testing.T) {
 }
 
 func TestViewAsJSON_MetadataOnly(t *testing.T) {
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
+	t.Parallel()
 	now := time.Now()
 	st := &session.StoredSession{
 		Info: session.SessionInfo{Filename: "test.jsonl", CreatedAt: now, ModTime: now},
@@ -490,17 +440,10 @@ func TestViewAsJSON_MetadataOnly(t *testing.T) {
 		},
 	}
 
-	err := viewAsJSON(st, true, 0)
-
-	w.Close()
-	os.Stdout = old
-
-	if err != nil {
+	var buf bytes.Buffer
+	if err := viewAsJSON(&buf, st, true, 0); err != nil {
 		t.Fatalf("viewAsJSON returned error: %v", err)
 	}
-
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
 
 	var result sessionShowData
 	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
@@ -514,10 +457,7 @@ func TestViewAsJSON_MetadataOnly(t *testing.T) {
 }
 
 func TestViewAsJSON_WithEntries(t *testing.T) {
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
+	t.Parallel()
 	now := time.Now()
 	st := &session.StoredSession{
 		Info: session.SessionInfo{Filename: "test.jsonl", CreatedAt: now, ModTime: now},
@@ -527,17 +467,10 @@ func TestViewAsJSON_WithEntries(t *testing.T) {
 		},
 	}
 
-	err := viewAsJSON(st, false, 1)
-
-	w.Close()
-	os.Stdout = old
-
-	if err != nil {
+	var buf bytes.Buffer
+	if err := viewAsJSON(&buf, st, false, 1); err != nil {
 		t.Fatalf("viewAsJSON returned error: %v", err)
 	}
-
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
 
 	var result sessionShowData
 	if err := json.Unmarshal(buf.Bytes(), &result); err != nil {
@@ -550,6 +483,7 @@ func TestViewAsJSON_WithEntries(t *testing.T) {
 }
 
 func TestPrintSessionEntry_InvalidTimestamp(t *testing.T) {
+	t.Parallel()
 	entry := map[string]any{
 		"type":      "message",
 		"timestamp": "not-a-timestamp",
@@ -558,6 +492,6 @@ func TestPrintSessionEntry_InvalidTimestamp(t *testing.T) {
 			"content": "test",
 		},
 	}
-	output := captureStdout(func() { printSessionEntry(1, entry) })
+	output := captureStdout(func(w io.Writer) { printSessionEntry(w, 1, entry) })
 	assert.Contains(t, output, "user")
 }
