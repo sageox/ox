@@ -4,9 +4,9 @@ package main
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -92,22 +92,13 @@ func TestLoginProceedsWhenTokenRefreshFails(t *testing.T) {
 	// Force non-interactive mode so login doesn't try bubbletea
 	t.Setenv("CI", "true")
 
-	// Suppress stdout from login flow (device code URL, etc.)
-	oldStdout := os.Stdout
-	devNull, openErr := os.Open(os.DevNull)
-	require.NoError(t, openErr)
-	os.Stdout = devNull
-	t.Cleanup(func() {
-		os.Stdout = oldStdout
-		_ = devNull.Close()
-	})
-
 	// Run the login flow — this should NOT return the refresh error.
 	// Use a short-lived context so the device flow poll times out quickly.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	cmd := &cobra.Command{}
 	cmd.SetContext(ctx)
+	cmd.SetOut(io.Discard) // suppress device-code URL etc. from test output
 	err = runLoginFlow(cmd, mockServer.URL)
 
 	// The flow should have proceeded past the refresh failure and

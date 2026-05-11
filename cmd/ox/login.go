@@ -266,6 +266,7 @@ func selectLoginEndpoint() (string, error) {
 
 // runLoginFlow executes the login flow for a specific endpoint
 func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
+	out := cmd.OutOrStdout()
 	// check if already authenticated for this endpoint
 	// If token refresh fails, treat as unauthenticated and proceed with login
 	// (the user is explicitly trying to log in, so a refresh failure shouldn't block them)
@@ -282,9 +283,9 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 			return fmt.Errorf("failed to get token: %w", err)
 		}
 
-		fmt.Printf("Already authenticated as %s on %s\n", token.UserInfo.Email, endpoint.NormalizeSlug(currentEndpoint))
+		fmt.Fprintf(out, "Already authenticated as %s on %s\n", token.UserInfo.Email, endpoint.NormalizeSlug(currentEndpoint))
 		if !cli.ConfirmYesNo("Do you want to re-authenticate?", false) {
-			fmt.Println("Authentication canceled.")
+			fmt.Fprintln(out, "Authentication canceled.")
 			return nil
 		}
 	}
@@ -292,15 +293,15 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 	authClient := auth.NewAuthClient().WithEndpoint(currentEndpoint)
 
 	// request device code
-	fmt.Println("Initiating device authentication flow...")
+	fmt.Fprintln(out, "Initiating device authentication flow...")
 	deviceCode, err := authClient.RequestDeviceCode()
 	if err != nil {
 		// check if this is a network error and offer alternatives
 		if isNetworkError(err) {
 			alternatives := getAlternativeEndpoints(currentEndpoint)
 			if len(alternatives) > 0 {
-				fmt.Printf("\nCould not reach %s\n", currentEndpoint)
-				fmt.Println("This project is configured for a different endpoint.")
+				fmt.Fprintf(out, "\nCould not reach %s\n", currentEndpoint)
+				fmt.Fprintln(out, "This project is configured for a different endpoint.")
 
 				var selectedEndpoint string
 				if len(alternatives) == 1 {
@@ -319,7 +320,7 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 				if selectedEndpoint != "" {
 					// retry with selected endpoint
 					authClient = authClient.WithEndpoint(selectedEndpoint)
-					fmt.Printf("\nAuthenticating to %s...\n", selectedEndpoint)
+					fmt.Fprintf(out, "\nAuthenticating to %s...\n", selectedEndpoint)
 					deviceCode, err = authClient.RequestDeviceCode()
 					if err != nil {
 						return fmt.Errorf("failed to request device code: %w", err)
@@ -336,14 +337,14 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 	}
 
 	// display verification instructions
-	fmt.Println()
+	fmt.Fprintln(out)
 	if deviceCode.VerificationURIComplete != "" {
-		fmt.Printf("Visit: %s\n", deviceCode.VerificationURIComplete)
+		fmt.Fprintf(out, "Visit: %s\n", deviceCode.VerificationURIComplete)
 	} else {
-		fmt.Printf("Visit: %s\n", deviceCode.VerificationURI)
-		fmt.Printf("Enter code: %s\n", deviceCode.UserCode)
+		fmt.Fprintf(out, "Visit: %s\n", deviceCode.VerificationURI)
+		fmt.Fprintf(out, "Enter code: %s\n", deviceCode.UserCode)
 	}
-	fmt.Println()
+	fmt.Fprintln(out)
 
 	// Open browser to the verification URL so the user can authorize.
 	// SKIP_BROWSER and headless detection are handled inside cli.OpenInBrowser.
@@ -361,9 +362,9 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 
 	// non-interactive mode: skip bubbletea spinner, just poll directly
 	if !cli.IsInteractive() {
-		fmt.Println("Waiting for authorization...")
+		fmt.Fprintln(out, "Waiting for authorization...")
 		err := authClient.Login(ctx, deviceCode, func(status string) {
-			fmt.Printf("Status: %s\n", status)
+			fmt.Fprintf(out, "Status: %s\n", status)
 		})
 		if err != nil {
 			return fmt.Errorf("authentication failed: %w", err)
@@ -406,7 +407,7 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 	}
 
 	// display a fun welcome message
-	fmt.Println()
+	fmt.Fprintln(out)
 	welcomeStyle := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("212"))
@@ -422,9 +423,9 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 		displayName = parts[0]
 	}
 
-	fmt.Printf("%s %s!\n", welcomeStyle.Render("Welcome back,"), nameStyle.Render(displayName))
-	fmt.Printf("You're signed in as %s\n", token.UserInfo.Email)
-	fmt.Println()
+	fmt.Fprintf(out, "%s %s!\n", welcomeStyle.Render("Welcome back,"), nameStyle.Render(displayName))
+	fmt.Fprintf(out, "You're signed in as %s\n", token.UserInfo.Email)
+	fmt.Fprintln(out)
 
 	// fetch git credentials from /api/v1/cli/repos (source of truth for team context URLs)
 	// use spinner since this can take a while
@@ -441,8 +442,8 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 			errMsg = "API authentication failed - credentials may not be ready yet"
 		}
 		slog.Warn("failed to fetch git credentials", "error", errMsg)
-		fmt.Println("Git credentials sync failed - this won't affect your login.")
-		fmt.Println("You can sync git credentials later with 'ox doctor'.")
+		fmt.Fprintln(out, "Git credentials sync failed - this won't affect your login.")
+		fmt.Fprintln(out, "You can sync git credentials later with 'ox doctor'.")
 	} else {
 		cli.PrintPreserved("Git credentials synced")
 		// refresh remote URLs in existing repos with new credentials
