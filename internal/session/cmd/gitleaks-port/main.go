@@ -59,101 +59,101 @@ type gitleaksRule struct {
 // generic slug.
 var skipRuleIDs = map[string]bool{
 	// Covered by internal/session/secrets.go DefaultPatterns:
-	"aws-access-token":           true, // we have aws_access_key / aws_sts_session_key
-	"aws-secret-token":           true, // we have aws_secret_key
-	"github-pat":                 true, // we have github_token + github_fine_grained_pat
-	"github-fine-grained-pat":    true,
-	"github-oauth":               true,
-	"github-app-token":           true,
-	"github-refresh-token":       true,
-	"gitlab-pat":                 true, // we have gitlab_token
-	"gitlab-oat":                 true, // gitlab_oauth_token
-	"gitlab-deploy-token":        true, // gitlab_deploy_token
-	"gitlab-runner-token":        true, // gitlab_runner_token
-	"gitlab-feed-token":          true, // gitlab_feed_token
-	"slack-bot-token":            true, // we have slack_token (covers all xox*)
-	"slack-user-token":           true,
-	"slack-app-token":            true,
-	"slack-config-access-token":  true,
-	"slack-config-refresh-token": true,
-	"slack-legacy-bot-token":     true,
-	"slack-legacy-token":         true,
-	"slack-legacy-workspace-token": true,
-	"slack-webhook-url":          true, // hand-ported (slack_webhook_url)
-	"stripe-access-token":        true, // we have stripe_key
-	"twilio-api-key":             true, // we have twilio_key
-	"sendgrid-api-token":         true, // we have sendgrid_key
-	"mailchimp-api-key":          true, // we have mailchimp_key
-	"npm-access-token":           true, // we have npm_token
-	"pypi-upload-token":          true, // we have pypi_token
-	"heroku-api-key":             true, // hand-ported
-	"private-key":                true, // private_key_header
-	"jwt":                        true, // jwt_token
-	"jwt-base64":                 true,
-	"openai-api-key":             true, // hand-ported
-	"anthropic-api-key":          true, // hand-ported
-	"gcp-api-key":                true, // hand-ported
-	"gcp-service-account":        true, // hand-ported
-	"datadog-access-token":       true, // hand-ported
-	"pagerduty-api-key":          true, // hand-ported
-	"sentry-access-token":        true, // hand-ported (sentry_auth_token)
-	"sentry-org-token":           true,
-	"sentry-user-token":          true,
-	"new-relic-user-api-key":     true, // hand-ported
+	"aws-access-token":                   true, // we have aws_access_key / aws_sts_session_key
+	"aws-secret-token":                   true, // we have aws_secret_key
+	"github-pat":                         true, // we have github_token + github_fine_grained_pat
+	"github-fine-grained-pat":            true,
+	"github-oauth":                       true,
+	"github-app-token":                   true,
+	"github-refresh-token":               true,
+	"gitlab-pat":                         true, // we have gitlab_token
+	"gitlab-oat":                         true, // gitlab_oauth_token
+	"gitlab-deploy-token":                true, // gitlab_deploy_token
+	"gitlab-runner-token":                true, // gitlab_runner_token
+	"gitlab-feed-token":                  true, // gitlab_feed_token
+	"slack-bot-token":                    true, // we have slack_token (covers all xox*)
+	"slack-user-token":                   true,
+	"slack-app-token":                    true,
+	"slack-config-access-token":          true,
+	"slack-config-refresh-token":         true,
+	"slack-legacy-bot-token":             true,
+	"slack-legacy-token":                 true,
+	"slack-legacy-workspace-token":       true,
+	"slack-webhook-url":                  true, // hand-ported (slack_webhook_url)
+	"stripe-access-token":                true, // we have stripe_key
+	"twilio-api-key":                     true, // we have twilio_key
+	"sendgrid-api-token":                 true, // we have sendgrid_key
+	"mailchimp-api-key":                  true, // we have mailchimp_key
+	"npm-access-token":                   true, // we have npm_token
+	"pypi-upload-token":                  true, // we have pypi_token
+	"heroku-api-key":                     true, // hand-ported
+	"private-key":                        true, // private_key_header
+	"jwt":                                true, // jwt_token
+	"jwt-base64":                         true,
+	"openai-api-key":                     true, // hand-ported
+	"anthropic-api-key":                  true, // hand-ported
+	"gcp-api-key":                        true, // hand-ported
+	"gcp-service-account":                true, // hand-ported
+	"datadog-access-token":               true, // hand-ported
+	"pagerduty-api-key":                  true, // hand-ported
+	"sentry-access-token":                true, // hand-ported (sentry_auth_token)
+	"sentry-org-token":                   true,
+	"sentry-user-token":                  true,
+	"new-relic-user-api-key":             true, // hand-ported
 	"new-relic-ingest-browser-api-token": true,
-	"grafana-cloud-api-token":    true, // hand-ported
-	"grafana-service-account-token": true,
-	"vault-service-token":        true, // hand-ported (vault_root_token)
-	"vault-batch-token":          true,
-	"doppler-api-token":          true, // hand-ported
-	"square-access-token":        true, // hand-ported
-	"shopify-shared-secret":      true,
-	"shopify-access-token":       true, // hand-ported
-	"shopify-custom-access-token":     true,
-	"shopify-private-app-access-token": true,
-	"discord-api-token":          true, // hand-ported (discord_bot_token)
-	"discord-client-secret":      true,
-	"discord-client-id":          true,
-	"linear-api-key":             true, // hand-ported
-	"linear-client-secret":       true,
-	"notion-api-key":             true, // hand-ported (notion_integration_token)
-	"postman-api-token":          true, // hand-ported
-	"cloudflare-api-key":         true, // hand-ported
-	"cloudflare-api-token":       true,
-	"cloudflare-origin-ca-key":   true,
-	"cloudflare-global-api-key":  true,
-	"digitalocean-pat":           true, // hand-ported
-	"digitalocean-access-token":  true,
-	"digitalocean-refresh-token": true,
-	"dynatrace-api-token":        true, // hand-ported
-	"snyk-api-token":             true, // hand-ported
-	"cloudinary-credentials":     true, // hand-ported (cloudinary_url)
-	"facebook-access-token":      true, // hand-ported
-	"facebook-secret":            true,
-	"dropbox-access-token":       true, // hand-ported
-	"dropbox-api-token":          true,
-	"dropbox-short-lived-access-token": true,
-	"airtable-api-key":           true, // hand-ported
-	"vercel-api-token":           true, // hand-ported
-	"netlify-access-token":       true, // hand-ported
-	"planetscale-password":       true, // hand-ported
-	"planetscale-api-token":      true,
-	"mailgun-private-api-token":  true, // hand-ported (mailgun_api_key)
-	"mailgun-pub-key":            true,
-	"mailgun-signing-key":        true,
-	"sendinblue-api-token":       true, // hand-ported (brevo_api_key)
-	"rubygems-api-token":         true, // hand-ported
-	"clerk-secret-key":           true, // hand-ported
-	"clerk-publishable-key":      true,
-	"clerk-frontend-api":         true,
-	"braintree-access-token":     true, // hand-ported
+	"grafana-cloud-api-token":            true, // hand-ported
+	"grafana-service-account-token":      true,
+	"vault-service-token":                true, // hand-ported (vault_root_token)
+	"vault-batch-token":                  true,
+	"doppler-api-token":                  true, // hand-ported
+	"square-access-token":                true, // hand-ported
+	"shopify-shared-secret":              true,
+	"shopify-access-token":               true, // hand-ported
+	"shopify-custom-access-token":        true,
+	"shopify-private-app-access-token":   true,
+	"discord-api-token":                  true, // hand-ported (discord_bot_token)
+	"discord-client-secret":              true,
+	"discord-client-id":                  true,
+	"linear-api-key":                     true, // hand-ported
+	"linear-client-secret":               true,
+	"notion-api-key":                     true, // hand-ported (notion_integration_token)
+	"postman-api-token":                  true, // hand-ported
+	"cloudflare-api-key":                 true, // hand-ported
+	"cloudflare-api-token":               true,
+	"cloudflare-origin-ca-key":           true,
+	"cloudflare-global-api-key":          true,
+	"digitalocean-pat":                   true, // hand-ported
+	"digitalocean-access-token":          true,
+	"digitalocean-refresh-token":         true,
+	"dynatrace-api-token":                true, // hand-ported
+	"snyk-api-token":                     true, // hand-ported
+	"cloudinary-credentials":             true, // hand-ported (cloudinary_url)
+	"facebook-access-token":              true, // hand-ported
+	"facebook-secret":                    true,
+	"dropbox-access-token":               true, // hand-ported
+	"dropbox-api-token":                  true,
+	"dropbox-short-lived-access-token":   true,
+	"airtable-api-key":                   true, // hand-ported
+	"vercel-api-token":                   true, // hand-ported
+	"netlify-access-token":               true, // hand-ported
+	"planetscale-password":               true, // hand-ported
+	"planetscale-api-token":              true,
+	"mailgun-private-api-token":          true, // hand-ported (mailgun_api_key)
+	"mailgun-pub-key":                    true,
+	"mailgun-signing-key":                true,
+	"sendinblue-api-token":               true, // hand-ported (brevo_api_key)
+	"rubygems-api-token":                 true, // hand-ported
+	"clerk-secret-key":                   true, // hand-ported
+	"clerk-publishable-key":              true,
+	"clerk-frontend-api":                 true,
+	"braintree-access-token":             true, // hand-ported
 
 	// Skipped because too broad / false-positive-prone for coding agent
 	// content (these regexes match too much "looks-like-a-token" text
 	// without a clear credential boundary):
-	"generic-api-key":            true,
-	"generic-bearer":             true,
-	"hashicorp-tf-api-token":     true, // overlaps with vault-service-token in shape
+	"generic-api-key":        true,
+	"generic-bearer":         true,
+	"hashicorp-tf-api-token": true, // overlaps with vault-service-token in shape
 }
 
 // classFromID derives a [REDACTED_<CLASS>] slug from a gitleaks rule ID.
@@ -265,6 +265,19 @@ func generatedGitleaksDetectors() []SecretPattern {
 		fmt.Fprintf(&b, "\t\t\tName:    %q,\n", nameFromID(r.ID))
 		fmt.Fprintf(&b, "\t\t\tPattern: regexp.MustCompile(%s),\n", goRawString(r.Regex))
 		fmt.Fprintf(&b, "\t\t\tRedact:  %q,\n", "[REDACTED_"+class+"]")
+		// Keywords are emitted lowercase. The chokepoint quick-screen in
+		// RawWriter assumes lowercase; doing it once at generate time
+		// avoids per-write ToLower work for ~200 keyword slices.
+		if len(r.Keywords) > 0 {
+			fmt.Fprintf(&b, "\t\t\tKeywords: []string{")
+			for i, kw := range r.Keywords {
+				if i > 0 {
+					fmt.Fprintf(&b, ", ")
+				}
+				fmt.Fprintf(&b, "%q", strings.ToLower(kw))
+			}
+			fmt.Fprintf(&b, "},\n")
+		}
 		fmt.Fprintf(&b, "\t\t},\n")
 		emitted++
 	}

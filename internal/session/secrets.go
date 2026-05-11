@@ -17,6 +17,34 @@ type SecretPattern struct {
 	// for GitHub-style URLs, ":****@" for already-masked URLs) without writing
 	// negative lookaheads (RE2 doesn't support them).
 	SkipIf []string
+	// Keywords lists lowercase substrings that anchor the pattern. If
+	// non-empty, the regex is only evaluated when at least one keyword
+	// appears (case-insensitive) in the input. Empty means always run.
+	//
+	// The win is enormous: gitleaks-derived patterns each carry a
+	// distinctive anchor (e.g. "akia", "adafruit", "ops_"), so a quick
+	// strings.Contains on a once-lowercased input shaves orders of
+	// magnitude off the cost when no credentials are present. The
+	// chokepoint runs ~200 patterns per WriteEntry; without the screen,
+	// a 1 MB tool output takes tens of seconds. With the screen, the
+	// no-match path is dominated by the lowercase pass.
+	Keywords []string
+}
+
+// MatchesKeyword reports whether lowerInput contains at least one of p's
+// keywords. lowerInput MUST already be lowercased — the caller is
+// expected to lowercase the field once and reuse it across all
+// patterns. Returns true if Keywords is empty (pattern is unconditional).
+func (p *SecretPattern) MatchesKeyword(lowerInput string) bool {
+	if len(p.Keywords) == 0 {
+		return true
+	}
+	for _, kw := range p.Keywords {
+		if strings.Contains(lowerInput, kw) {
+			return true
+		}
+	}
+	return false
 }
 
 // DefaultPatterns returns built-in secret patterns covering common credential types.

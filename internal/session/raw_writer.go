@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // RawWriter is the SINGLE supported way to write entries to a session's
@@ -135,16 +136,42 @@ func (w *RawWriter) WriteEntry(entry *SessionEntry) error {
 	// specific slugs win when they apply, with layer 3 catching the
 	// long tail. The traversal is a thin loop over the same string
 	// fields rather than a second Redactor allocation per write.
-	for _, p := range w.extras {
+	//
+	// Quick-screen: most patterns carry distinctive lowercase Keywords
+	// (e.g. "akia", "adafruit"). Lowercasing each field once and asking
+	// each pattern "does the input even mention you?" lets the no-match
+	// case skip the regex entirely. On a 1 MB credential-free string,
+	// this is a >300x speedup vs. running every pattern unconditionally.
+	lowerContent := lowerForScreen(entry.Content)
+	lowerInput := lowerForScreen(entry.ToolInput)
+	lowerOutput := lowerForScreen(entry.ToolOutput)
+	for i := range w.extras {
+		p := &w.extras[i]
 		if p.Pattern == nil {
 			continue
 		}
-		entry.Content = p.Pattern.ReplaceAllString(entry.Content, p.Redact)
-		entry.ToolInput = p.Pattern.ReplaceAllString(entry.ToolInput, p.Redact)
-		entry.ToolOutput = p.Pattern.ReplaceAllString(entry.ToolOutput, p.Redact)
+		if p.MatchesKeyword(lowerContent) {
+			entry.Content = p.Pattern.ReplaceAllString(entry.Content, p.Redact)
+		}
+		if p.MatchesKeyword(lowerInput) {
+			entry.ToolInput = p.Pattern.ReplaceAllString(entry.ToolInput, p.Redact)
+		}
+		if p.MatchesKeyword(lowerOutput) {
+			entry.ToolOutput = p.Pattern.ReplaceAllString(entry.ToolOutput, p.Redact)
+		}
 	}
 
 	return w.encoder.Encode(entry)
+}
+
+// lowerForScreen returns a lowercase copy of s used only for the
+// keyword pre-screen. Empty input short-circuits so we don't allocate
+// in the common case where ToolInput/ToolOutput are unused.
+func lowerForScreen(s string) string {
+	if s == "" {
+		return ""
+	}
+	return strings.ToLower(s)
 }
 
 // WriteEntries writes a slice. Returns on the first error; partial
@@ -175,7 +202,8 @@ func (w *RawWriter) WriteRaw(data map[string]any) error {
 		return fmt.Errorf("raw writer: nil data")
 	}
 	w.redactor.RedactMap(data)
-	for _, p := range w.extras {
+	for i := range w.extras {
+		p := &w.extras[i]
 		if p.Pattern == nil {
 			continue
 		}
@@ -187,12 +215,14 @@ func (w *RawWriter) WriteRaw(data map[string]any) error {
 // applyPatternToMap walks data (nested maps + slices) and applies a
 // single pattern to every string value. Helper for the WriteRaw layer-3
 // pass; the built-in Redactor.RedactMap already does this for its own
-// patterns.
-func applyPatternToMap(data map[string]any, p SecretPattern) {
+// patterns. Honors p.Keywords as a quick-screen.
+func applyPatternToMap(data map[string]any, p *SecretPattern) {
 	for k, v := range data {
 		switch tv := v.(type) {
 		case string:
-			data[k] = p.Pattern.ReplaceAllString(tv, p.Redact)
+			if p.MatchesKeyword(lowerForScreen(tv)) {
+				data[k] = p.Pattern.ReplaceAllString(tv, p.Redact)
+			}
 		case map[string]any:
 			applyPatternToMap(tv, p)
 		case []any:
@@ -201,11 +231,13 @@ func applyPatternToMap(data map[string]any, p SecretPattern) {
 	}
 }
 
-func applyPatternToSlice(data []any, p SecretPattern) {
+func applyPatternToSlice(data []any, p *SecretPattern) {
 	for i, v := range data {
 		switch tv := v.(type) {
 		case string:
-			data[i] = p.Pattern.ReplaceAllString(tv, p.Redact)
+			if p.MatchesKeyword(lowerForScreen(tv)) {
+				data[i] = p.Pattern.ReplaceAllString(tv, p.Redact)
+			}
 		case map[string]any:
 			applyPatternToMap(tv, p)
 		case []any:

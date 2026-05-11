@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -499,15 +500,23 @@ func TestSessionWatcherManager_WritePath_RedactsCredentials(t *testing.T) {
 	started := mgr.DetectAndRestart(ledgerDir)
 	require.Equal(t, 1, started)
 
+	// Wait until ALL three redaction slugs land in raw.jsonl. Polling
+	// on file size alone races against the watcher: the AWS entry can
+	// flush before the GitLab/Bearer entry, and the assertion fires on
+	// partial output. The slugs are the load-bearing signal that both
+	// entries have been processed, so wait for them directly.
 	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	var rawStr string
 	require.Eventually(t, func() bool {
-		info, err := os.Stat(rawPath)
-		return err == nil && info.Size() > 0
-	}, 2*time.Second, 50*time.Millisecond, "raw.jsonl should be written by catch-up read")
-
-	rawData, err := os.ReadFile(rawPath)
-	require.NoError(t, err)
-	rawStr := string(rawData)
+		data, err := os.ReadFile(rawPath)
+		if err != nil {
+			return false
+		}
+		rawStr = string(data)
+		return strings.Contains(rawStr, "[REDACTED_AWS_KEY]") &&
+			strings.Contains(rawStr, "[REDACTED_GITLAB_TOKEN]") &&
+			strings.Contains(rawStr, "[REDACTED_BEARER_TOKEN]")
+	}, 5*time.Second, 50*time.Millisecond, "raw.jsonl should contain all three redaction slugs after catch-up read")
 
 	// The actual canary bytes must NEVER appear in raw.jsonl. This is the
 	// load-bearing assertion of the entire ox-hhc3 fix.
