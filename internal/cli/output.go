@@ -132,10 +132,20 @@ func PrintPreservedTo(w io.Writer, msg string) {
 }
 
 func PrintError(msg string) {
+	// Preserves historical split: JSON to stdout, text to stderr.
+	if jsonMode {
+		PrintJSON(map[string]any{
+			"status":  "error",
+			"message": msg,
+		})
+		return
+	}
 	PrintErrorTo(os.Stderr, msg)
 }
 
-// PrintErrorTo writes an error message to w. Parallel-safe.
+// PrintErrorTo writes an error message to w. Parallel-safe. Always writes
+// the formatted text (or JSON in jsonMode) to w — does not split between
+// stdout/stderr like the package-level PrintError does.
 func PrintErrorTo(w io.Writer, msg string) {
 	if jsonMode {
 		enc := json.NewEncoder(w)
@@ -150,10 +160,18 @@ func PrintErrorTo(w io.Writer, msg string) {
 }
 
 func PrintWarning(msg string) {
+	if jsonMode {
+		PrintJSON(map[string]any{
+			"status":  "warning",
+			"message": msg,
+		})
+		return
+	}
 	PrintWarningTo(os.Stderr, msg)
 }
 
-// PrintWarningTo writes a warning to w. Parallel-safe.
+// PrintWarningTo writes a warning to w. Parallel-safe. Always writes to w
+// (does not split between stdout/stderr like the package-level PrintWarning).
 func PrintWarningTo(w io.Writer, msg string) {
 	if jsonMode {
 		enc := json.NewEncoder(w)
