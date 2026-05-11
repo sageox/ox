@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,10 +31,11 @@ func checkAgentFileExists() checkResult {
 }
 
 func checkAgentsIntegration() checkResult {
-	return checkAgentsIntegrationWithFix(false)
+	// io.Discard is safe: fix=false never reaches outputAgentUpgradeInstructions
+	return checkAgentsIntegrationWithFix(io.Discard, false)
 }
 
-func checkAgentsIntegrationWithFix(fix bool) checkResult {
+func checkAgentsIntegrationWithFix(w io.Writer, fix bool) checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
 		return SkippedCheck("ox agent prime integration", "not in git repo", "")
@@ -84,7 +86,7 @@ func checkAgentsIntegrationWithFix(fix bool) checkResult {
 						// check if running in agent context
 						if agentx.IsAgentContext() {
 							// output instructions for agent to perform smart upgrade
-							return outputAgentUpgradeInstructions(file, filePath, contentStr)
+							return outputAgentUpgradeInstructions(w, file, filePath, contentStr)
 						}
 						// perform the upgrade using EnsureOxPrimeMarker
 						injected, err := EnsureOxPrimeMarker(gitRoot)
@@ -161,7 +163,8 @@ var agentInstructionStyles = struct {
 // outputAgentUpgradeInstructions outputs structured instructions for an agent
 // to perform smart file upgrades rather than crude append operations.
 // This enables agents to intelligently replace entire SageOx sections.
-func outputAgentUpgradeInstructions(file, filePath, content string) checkResult {
+// w is the destination for the rendered instructions (production: os.Stdout).
+func outputAgentUpgradeInstructions(w io.Writer, file, filePath, content string) checkResult {
 	s := agentInstructionStyles
 
 	// find all legacy SageOx-related lines/sections to identify what to replace
@@ -248,7 +251,7 @@ func outputAgentUpgradeInstructions(file, filePath, content string) checkResult 
 	b.WriteString(ui.RenderSeparator())
 	b.WriteString("\n")
 
-	fmt.Print(b.String())
+	fmt.Fprint(w, b.String())
 
 	return PassedCheck(fmt.Sprintf("ox agent prime in %s", file), "agent instructions provided")
 }

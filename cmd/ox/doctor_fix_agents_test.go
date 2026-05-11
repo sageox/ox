@@ -3,6 +3,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,7 +41,7 @@ func TestCheckAgentsIntegration_FixInjects(t *testing.T) {
 	defer os.Chdir(originalWd)
 	os.Chdir(gitRoot)
 
-	result := checkAgentsIntegrationWithFix(true)
+	result := checkAgentsIntegrationWithFix(io.Discard, true)
 	if !result.passed {
 		t.Errorf("expected passed=true, got false: %s", result.message)
 	}

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -132,7 +133,7 @@ func TestDoctorFix_CombinedScenario(t *testing.T) {
 		t.Errorf("config fix failed: %s", configResult.message)
 	}
 
-	agentsResult := checkAgentsIntegrationWithFix(true)
+	agentsResult := checkAgentsIntegrationWithFix(io.Discard, true)
 	if !agentsResult.passed {
 		t.Errorf("agents integration fix failed: %s", agentsResult.message)
 	}
@@ -406,7 +407,7 @@ func TestDoctorFix_CombinedMultipleIssues(t *testing.T) {
 		t.Errorf("root gitignore fix failed: %s", rootGitignoreResult.message)
 	}
 
-	agentsResult := checkAgentsIntegrationWithFix(true)
+	agentsResult := checkAgentsIntegrationWithFix(io.Discard, true)
 	if !agentsResult.passed {
 		t.Errorf("agents integration fix failed: %s", agentsResult.message)
 	}

@@ -647,7 +647,7 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 	progress.show("Integration")
 	integrationChecks := []checkResult{
 		checkAgentFileExists(),
-		checkAgentsIntegrationWithFix(opts.shouldFix(CheckSlugClaudeCodeHooks)),
+		checkAgentsIntegrationWithFix(os.Stdout, opts.shouldFix(CheckSlugClaudeCodeHooks)),
 	}
 	if detectClaudeCode() {
 		integrationChecks = append(integrationChecks, checkClaudeCodeHooks(opts.shouldFix(CheckSlugClaudeCodeHooks)))

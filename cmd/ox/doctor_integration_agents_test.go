@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
@@ -19,7 +20,7 @@ func TestCheckAgentsIntegration_NoFiles(t *testing.T) {
 	restoreCwd := changeToDir(t, gitRoot)
 	defer restoreCwd()
 
-	result := checkAgentsIntegrationWithFix(false)
+	result := checkAgentsIntegrationWithFix(io.Discard, false)
 
 	if result.passed {
 		t.Error("expected passed=false when no agent files exist")
@@ -48,7 +49,7 @@ func TestCheckAgentsIntegration_AgentsMdExists(t *testing.T) {
 		t.Fatalf("failed to create AGENTS.md: %v", err)
 	}
 
-	result := checkAgentsIntegrationWithFix(false)
+	result := checkAgentsIntegrationWithFix(io.Discard, false)
 
 	if !result.passed {
 		t.Errorf("expected passed=true when AGENTS.md has OxPrimeLine, got: %+v", result)
@@ -74,7 +75,7 @@ func TestCheckAgentsIntegration_MissingPrimeLine(t *testing.T) {
 		t.Fatalf("failed to create AGENTS.md: %v", err)
 	}
 
-	result := checkAgentsIntegrationWithFix(false)
+	result := checkAgentsIntegrationWithFix(io.Discard, false)
 
 	if result.passed {
 		t.Error("expected passed=false when OxPrimeLine is missing")
@@ -101,7 +102,7 @@ func TestCheckAgentsIntegration_FixInjectsIntoExistingAgentsMd(t *testing.T) {
 		t.Fatalf("failed to create AGENTS.md: %v", err)
 	}
 
-	result := checkAgentsIntegrationWithFix(true)
+	result := checkAgentsIntegrationWithFix(io.Discard, true)
 
 	if !result.passed {
 		t.Errorf("expected passed=true after fix, got: %+v", result)
@@ -142,7 +143,7 @@ func TestCheckAgentsIntegration_LegacyFormat(t *testing.T) {
 		t.Fatalf("failed to create CLAUDE.md: %v", err)
 	}
 
-	result := checkAgentsIntegrationWithFix(false)
+	result := checkAgentsIntegrationWithFix(io.Discard, false)
 
 	if !result.passed {
 		t.Error("expected passed=true for legacy format (with warning)")
@@ -171,7 +172,7 @@ func TestCheckAgentsIntegration_ClaudeMdExists(t *testing.T) {
 		t.Fatalf("failed to create CLAUDE.md: %v", err)
 	}
 
-	result := checkAgentsIntegrationWithFix(false)
+	result := checkAgentsIntegrationWithFix(io.Discard, false)
 
 	if !result.passed {
 		t.Errorf("expected passed=true when CLAUDE.md has OxPrimeLine, got: %+v", result)
@@ -198,7 +199,7 @@ func TestCheckAgentsIntegration_FixInjectsIntoClaude(t *testing.T) {
 		t.Fatalf("failed to create CLAUDE.md: %v", err)
 	}
 
-	result := checkAgentsIntegrationWithFix(true)
+	result := checkAgentsIntegrationWithFix(io.Discard, true)
 
 	if !result.passed {
 		t.Errorf("expected passed=true after fix, got: %+v", result)
@@ -707,7 +708,7 @@ func TestCheckAgentsIntegration_CanonicalInCopilotInstructions(t *testing.T) {
 		t.Fatalf("failed to create .copilot-instructions.md: %v", err)
 	}
 
-	result := checkAgentsIntegrationWithFix(false)
+	result := checkAgentsIntegrationWithFix(io.Discard, false)
 
 	if !result.passed {
 		t.Errorf("expected passed=true for canonical format in .copilot-instructions.md, got: %+v", result)
@@ -781,7 +782,7 @@ func TestCheckAgentsIntegration_FixNoExistingFiles(t *testing.T) {
 	defer restoreCwd()
 
 	// no agent files exist - fix should create AGENTS.md with the marker
-	result := checkAgentsIntegrationWithFix(true)
+	result := checkAgentsIntegrationWithFix(io.Discard, true)
 
 	if !result.passed {
 		t.Errorf("expected passed=true when fix creates AGENTS.md, got: %+v", result)
@@ -1059,7 +1060,7 @@ func TestCheckAgentsIntegrationWithFix_LegacyUpgrade(t *testing.T) {
 				t.Fatalf("failed to create test file: %v", err)
 			}
 
-			result := checkAgentsIntegrationWithFix(tt.fix)
+			result := checkAgentsIntegrationWithFix(io.Discard, tt.fix)
 
 			if result.passed != tt.wantPassed {
 				t.Errorf("passed = %v, want %v (result: %+v)", result.passed, tt.wantPassed, result)
@@ -1165,17 +1166,8 @@ func TestOutputAgentUpgradeInstructions(t *testing.T) {
 				t.Fatalf("failed to create test file: %v", err)
 			}
 
-			oldStdout := os.Stdout
-			r, w, _ := os.Pipe()
-			os.Stdout = w
-
-			result := outputAgentUpgradeInstructions(tt.filename, testFile, tt.content)
-
-			w.Close()
-			os.Stdout = oldStdout
-
-			var buf strings.Builder
-			io.Copy(&buf, r)
+			var buf bytes.Buffer
+			result := outputAgentUpgradeInstructions(&buf, tt.filename, testFile, tt.content)
 			output := buf.String()
 
 			if result.passed != tt.wantPassed {
@@ -1213,17 +1205,8 @@ func TestCheckAgentsIntegrationWithFix_InAgentContext(t *testing.T) {
 
 	t.Setenv("CLAUDE_CODE_SESSION_ID", "test-session-id")
 
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	result := checkAgentsIntegrationWithFix(true)
-
-	w.Close()
-	os.Stdout = oldStdout
-
-	var buf strings.Builder
-	io.Copy(&buf, r)
+	var buf bytes.Buffer
+	result := checkAgentsIntegrationWithFix(&buf, true)
 	output := buf.String()
 
 	if !result.passed {

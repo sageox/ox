@@ -1,6 +1,8 @@
 package main
 
 import (
+	"io"
+
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/tips"
 )
@@ -31,7 +33,7 @@ func init() {
 		Name:   "AGENTS.md integration",
 		Weight: 10,
 		Check: func() bool {
-			result := checkAgentsIntegrationWithFix(false)
+			result := checkAgentsIntegrationWithFix(io.Discard, false)
 			return !result.passed && !result.skipped
 		},
 		FixTip: "Agent file missing `ox agent prime` instruction. Run `ox doctor --fix` to add it.",
