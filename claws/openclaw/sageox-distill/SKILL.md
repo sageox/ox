@@ -1,7 +1,7 @@
 ---
 name: sageox-distill
 description: "Sync, index, and distill team activity across SageOx-enabled repositories. Keeps your team's knowledge base up to date by syncing repo contexts, indexing GitHub PRs/issues, and running the SageOx distillation pipeline."
-version: 0.2.1
+version: 0.3.0
 metadata:
   {
     "openclaw":
@@ -93,32 +93,42 @@ runs. Re-validate every read.
 
 The `ox` CLI install state is recorded in
 `~/.openclaw/memory/sageox-ox-install.json`. On every run of this
-skill, invoke the bundled readiness gate:
+skill, invoke the bundled install-and-update gate:
 
 ```bash
 bash scripts/update-ox.sh
 ```
 
+The script reads the ox release this skill pins from
+`scripts/install-ox-curl.sh` (the source of truth, with its
+`OX_INSTALL_REF` and per-platform sha256s reviewed at skill publish).
+If the installed binary doesn't match that pin, it re-runs
+`install-ox-curl.sh` to upgrade in place — so picking up a newer ox
+no longer requires the user to manually re-enter the install flow.
+
 Contract:
 
-- **Stdout:** nothing on success
+- **Stdout:** nothing when ox is already at the skill's pin; download /
+  verify / extract progress when an in-place upgrade runs.
 - **Stderr:** on any failure, a two-line message — an `error:` line
   describing what's wrong, followed by a `fix:` line with the
   remediation. Surface both verbatim to the user.
-- **Exit:** `0` ox is pinned, installed, and reports the expected
-  version (continue to § 4); `2` ox is not usable — one of: state file
-  missing, binary missing at `$HOME/.local/bin/ox`, `ox` on PATH
-  resolves to a different binary, binary fails to run, or binary
-  reports a version other than the one recorded in
-  `sageox-ox-install.json`. On exit `2`, STOP, read
-  [`references/INSTALL.md`](references/INSTALL.md), follow the install
-  flow, then re-run this script to confirm.
+- **Exit:**
+  - `0` — ox is ready (either already current, or upgraded in place);
+    continue to § 4.
+  - `2` — initial install required. One of: state file missing, binary
+    missing at `$HOME/.local/bin/ox`, `ox` on PATH resolves to a
+    different binary, or the binary fails to run. STOP, read
+    [`references/INSTALL.md`](references/INSTALL.md), follow the
+    install flow, then re-run this script to confirm.
+  - `3` — an in-place upgrade was attempted but `install-ox-curl.sh`
+    failed (download error, checksum mismatch, etc.). Surface its
+    stderr to the user and stop.
 
-There is no per-run auto-update. The curl install pins a specific `ox`
-release by tag and sha256; users pick up newer releases by re-running
-`clawhub install` for this skill after a new skill version publishes.
-The user can say **"reinstall ox"** at any time to re-enter the flow in
-[`references/INSTALL.md`](references/INSTALL.md).
+The script does not introduce dynamic "latest" resolution — the pin
+still lives in `install-ox-curl.sh` and is reviewed at skill publish.
+Users can say **"reinstall ox"** at any time to re-enter the manual
+flow in [`references/INSTALL.md`](references/INSTALL.md).
 
 **Do not install `ox` via Homebrew or any package manager** (e.g.
 `brew install sageox/tap/ox`, `apt`, `dnf`, `pacman`). The tap exists

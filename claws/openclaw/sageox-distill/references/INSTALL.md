@@ -61,8 +61,19 @@ It should exit `0` with no stderr.
 
 ## Upgrading `ox`
 
-The curl flow pins a specific `ox` release by tag and sha256. There is
-no per-run auto-update. To pick up a newer release, re-run
-`scripts/install-ox-curl.sh` from a version of this skill that pins the
-newer release — typically by re-running `clawhub install` for the
-skill after a new skill version publishes.
+The curl flow pins a specific `ox` release by tag and sha256. The pin
+itself only moves when the skill is republished with new
+`OX_INSTALL_REF` and sha256 constants in `scripts/install-ox-curl.sh`
+(reviewed at skill publish — there is no dynamic "latest" resolution).
+
+What changed in skill version ≥0.3.0 (distill) / ≥0.4.0 (summary):
+`scripts/update-ox.sh` now closes the loop on every run. It compares
+the installed binary's `ox version` against the skill's current pin,
+and when they differ, it re-invokes `scripts/install-ox-curl.sh`
+automatically to converge. Users no longer have to manually re-enter
+this install flow just to pick up a newer pinned release after a
+`clawhub install` of a refreshed skill.
+
+To force a reinstall (for example, after `~/.local/bin/ox` was
+deleted), users can still say **"reinstall ox"** to re-enter the flow
+above.
