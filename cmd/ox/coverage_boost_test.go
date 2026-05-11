@@ -22,27 +22,15 @@ import (
 // =============================================================================
 
 func TestOutputAgentDoctorJSON_BasicOutput(t *testing.T) {
-
+	t.Parallel()
 	output := &AgentDoctorOutput{
 		Success: true,
 		Type:    "agent_doctor",
 		AgentID: "Oxa7b3",
 	}
 
-	// capture stdout
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := outputAgentDoctorJSON(output)
-
-	w.Close()
-	os.Stdout = old
-
-	require.NoError(t, err)
-
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	require.NoError(t, outputAgentDoctorJSON(&buf, output))
 	got := buf.String()
 
 	assert.Contains(t, got, `"success": true`)
@@ -55,7 +43,7 @@ func TestOutputAgentDoctorJSON_BasicOutput(t *testing.T) {
 }
 
 func TestOutputAgentDoctorJSON_WithIncompleteSessions(t *testing.T) {
-
+	t.Parallel()
 	output := &AgentDoctorOutput{
 		Success: true,
 		Type:    "agent_doctor",
@@ -77,24 +65,12 @@ func TestOutputAgentDoctorJSON_WithIncompleteSessions(t *testing.T) {
 		NextSteps:    []string{"Generate summary", "ox session commit"},
 	}
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := outputAgentDoctorJSON(output)
-
-	w.Close()
-	os.Stdout = old
-
-	require.NoError(t, err)
-
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
-	got := buf.String()
+	require.NoError(t, outputAgentDoctorJSON(&buf, output))
 
 	// verify JSON structure
 	var parsed AgentDoctorOutput
-	require.NoError(t, json.Unmarshal([]byte(got), &parsed))
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &parsed))
 	assert.Equal(t, 1, len(parsed.IncompleteSessions))
 	assert.Equal(t, "2026-03-15-user-abc1", parsed.IncompleteSessions[0].SessionID)
 	assert.Equal(t, 2, parsed.StagedCount)
@@ -103,26 +79,15 @@ func TestOutputAgentDoctorJSON_WithIncompleteSessions(t *testing.T) {
 }
 
 func TestOutputAgentDoctorJSON_EmptyOutput(t *testing.T) {
-
+	t.Parallel()
 	output := &AgentDoctorOutput{
 		Success: true,
 		Type:    "agent_doctor",
 		AgentID: "",
 	}
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := outputAgentDoctorJSON(output)
-
-	w.Close()
-	os.Stdout = old
-
-	require.NoError(t, err)
-
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	require.NoError(t, outputAgentDoctorJSON(&buf, output))
 
 	var parsed map[string]any
 	require.NoError(t, json.Unmarshal(buf.Bytes(), &parsed))
@@ -133,23 +98,13 @@ func TestOutputAgentDoctorJSON_EmptyOutput(t *testing.T) {
 // =============================================================================
 
 func TestOutputAgentDoctorText_AllGood(t *testing.T) {
-
+	t.Parallel()
 	output := &AgentDoctorOutput{
 		Success: true,
 	}
 
-	// capture stdout
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	outputAgentDoctorText(output)
-
-	w.Close()
-	os.Stdout = old
-
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	outputAgentDoctorText(&buf, output)
 	got := buf.String()
 
 	// should indicate everything is ok
@@ -157,7 +112,7 @@ func TestOutputAgentDoctorText_AllGood(t *testing.T) {
 }
 
 func TestOutputAgentDoctorText_WithIncompleteSessions(t *testing.T) {
-
+	t.Parallel()
 	output := &AgentDoctorOutput{
 		IncompleteSessions: []IncompleteSessionInfo{
 			{
@@ -168,17 +123,8 @@ func TestOutputAgentDoctorText_WithIncompleteSessions(t *testing.T) {
 		},
 	}
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	outputAgentDoctorText(output)
-
-	w.Close()
-	os.Stdout = old
-
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	outputAgentDoctorText(&buf, output)
 	got := buf.String()
 
 	assert.Contains(t, got, "Incomplete sessions: 1")
@@ -187,7 +133,7 @@ func TestOutputAgentDoctorText_WithIncompleteSessions(t *testing.T) {
 }
 
 func TestOutputAgentDoctorText_CommitAndPushNeeded(t *testing.T) {
-
+	t.Parallel()
 	output := &AgentDoctorOutput{
 		CommitNeeded: true,
 		PushNeeded:   true,
@@ -195,17 +141,8 @@ func TestOutputAgentDoctorText_CommitAndPushNeeded(t *testing.T) {
 		NextSteps:    []string{"ox session commit", "git push (in ledger)"},
 	}
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	outputAgentDoctorText(output)
-
-	w.Close()
-	os.Stdout = old
-
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	outputAgentDoctorText(&buf, output)
 	got := buf.String()
 
 	assert.Contains(t, got, "Staged files: 3")
@@ -433,20 +370,9 @@ func TestAppendRedactedEntries_InvalidPath(t *testing.T) {
 // =============================================================================
 
 func TestOutputInstancesJSON_EmptyInstances(t *testing.T) {
-
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := outputInstancesJSON(nil, nil)
-
-	w.Close()
-	os.Stdout = old
-
-	require.NoError(t, err)
-
+	t.Parallel()
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	require.NoError(t, outputInstancesJSON(&buf, nil, nil))
 
 	var parsed struct {
 		Instances []daemon.InstanceInfo `json:"instances"`
@@ -460,7 +386,7 @@ func TestOutputInstancesJSON_EmptyInstances(t *testing.T) {
 }
 
 func TestOutputInstancesJSON_WithInstances(t *testing.T) {
-
+	t.Parallel()
 	instances := []daemon.InstanceInfo{
 		{
 			AgentID:       "Oxa7b3",
@@ -470,19 +396,8 @@ func TestOutputInstancesJSON_WithInstances(t *testing.T) {
 		},
 	}
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := outputInstancesJSON(instances, nil)
-
-	w.Close()
-	os.Stdout = old
-
-	require.NoError(t, err)
-
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	require.NoError(t, outputInstancesJSON(&buf, instances, nil))
 	got := buf.String()
 
 	assert.Contains(t, got, "Oxa7b3")
@@ -490,20 +405,9 @@ func TestOutputInstancesJSON_WithInstances(t *testing.T) {
 }
 
 func TestOutputInstancesJSON_WithError(t *testing.T) {
-
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := outputInstancesJSON(nil, fmt.Errorf("daemon not running"))
-
-	w.Close()
-	os.Stdout = old
-
-	require.NoError(t, err)
-
+	t.Parallel()
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	require.NoError(t, outputInstancesJSON(&buf, nil, fmt.Errorf("daemon not running")))
 
 	var parsed struct {
 		Error string `json:"error"`
@@ -517,27 +421,14 @@ func TestOutputInstancesJSON_WithError(t *testing.T) {
 // =============================================================================
 
 func TestOutputInstancesTable_EmptyInstances(t *testing.T) {
-
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := outputInstancesTable(nil)
-
-	w.Close()
-	os.Stdout = old
-
-	require.NoError(t, err)
-
+	t.Parallel()
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
-	got := buf.String()
-
-	assert.Contains(t, got, "No active AI coworker instances")
+	require.NoError(t, outputInstancesTable(&buf, nil))
+	assert.Contains(t, buf.String(), "No active AI coworker instances")
 }
 
 func TestOutputInstancesTable_WithInstances(t *testing.T) {
-
+	t.Parallel()
 	instances := []daemon.InstanceInfo{
 		{
 			AgentID:       "Oxa7b3",
@@ -553,19 +444,8 @@ func TestOutputInstancesTable_WithInstances(t *testing.T) {
 		},
 	}
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := outputInstancesTable(instances)
-
-	w.Close()
-	os.Stdout = old
-
-	require.NoError(t, err)
-
 	var buf bytes.Buffer
-	buf.ReadFrom(r)
+	require.NoError(t, outputInstancesTable(&buf, instances))
 	got := buf.String()
 
 	assert.Contains(t, got, "Oxa7b3")

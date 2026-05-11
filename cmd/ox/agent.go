@@ -473,7 +473,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 
 	switch subcommand {
 	case "doctor":
-		return runAgentDoctor(inst)
+		return runAgentDoctor(cmd.OutOrStdout(), inst)
 	case "session":
 		if len(subargs) == 0 {
 			return fmt.Errorf("session requires a subcommand\nUsage: ox agent %s session <start|stop|abort|delete|log|remind|summarize|record|plan|context-trace|import|capture-prior|subagent-complete|subagent-list|recover>", inst.AgentID)

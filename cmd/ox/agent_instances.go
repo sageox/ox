@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,23 +39,24 @@ func init() {
 
 func runAgentInstances(cmd *cobra.Command, _ []string) error {
 	jsonOutput, _ := cmd.Flags().GetBool("json")
+	out := cmd.OutOrStdout()
 
 	instances, err := daemon.GetAllInstances()
 	if err != nil {
 		if jsonOutput {
-			return outputInstancesJSON(nil, err)
+			return outputInstancesJSON(out, nil, err)
 		}
 		return fmt.Errorf("failed to get instances: %w", err)
 	}
 
 	if jsonOutput {
-		return outputInstancesJSON(instances, nil)
+		return outputInstancesJSON(out, instances, nil)
 	}
 
-	return outputInstancesTable(instances)
+	return outputInstancesTable(out, instances)
 }
 
-func outputInstancesJSON(instances []daemon.InstanceInfo, err error) error {
+func outputInstancesJSON(w io.Writer, instances []daemon.InstanceInfo, err error) error {
 	type output struct {
 		Instances []daemon.InstanceInfo `json:"instances"`
 		Error     string                `json:"error,omitempty"`
@@ -68,28 +70,28 @@ func outputInstancesJSON(instances []daemon.InstanceInfo, err error) error {
 		out.Instances = []daemon.InstanceInfo{}
 	}
 
-	enc := json.NewEncoder(os.Stdout)
+	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
 }
 
-func outputInstancesTable(instances []daemon.InstanceInfo) error {
+func outputInstancesTable(w io.Writer, instances []daemon.InstanceInfo) error {
 	if len(instances) == 0 {
-		fmt.Println("No active AI coworker instances.")
-		fmt.Println()
-		fmt.Println("Instances appear when coworkers run 'ox agent prime' and hooks send heartbeats.")
-		fmt.Println("Run 'ox agent prime' in a repository to register this instance.")
+		fmt.Fprintln(w, "No active AI coworker instances.")
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "Instances appear when coworkers run 'ox agent prime' and hooks send heartbeats.")
+		fmt.Fprintln(w, "Run 'ox agent prime' in a repository to register this instance.")
 		return nil
 	}
 
 	// header
-	fmt.Printf("%-10s %-36s %-8s %-18s %s\n",
+	fmt.Fprintf(w, "%-10s %-36s %-8s %-18s %s\n",
 		cli.StyleBold.Render("COWORKER"),
 		cli.StyleBold.Render("WORKSPACE"),
 		cli.StyleBold.Render("STATUS"),
 		cli.StyleBold.Render("LAST HEARTBEAT"),
 		cli.StyleBold.Render("LAST WHISPER"))
-	fmt.Println(strings.Repeat("-", 90))
+	fmt.Fprintln(w, strings.Repeat("-", 90))
 
 	// rows
 	for _, inst := range instances {
@@ -108,7 +110,7 @@ func outputInstancesTable(instances []daemon.InstanceInfo) error {
 			statusStyle = cli.StyleDim
 		}
 
-		fmt.Printf("%-10s %-36s %s %-18s %s\n",
+		fmt.Fprintf(w, "%-10s %-36s %s %-18s %s\n",
 			inst.AgentID,
 			workspace,
 			statusStyle.Render(fmt.Sprintf("%-8s", inst.Status)),
@@ -116,8 +118,8 @@ func outputInstancesTable(instances []daemon.InstanceInfo) error {
 			cli.StyleDim.Render(lastWhisper))
 	}
 
-	fmt.Println()
-	fmt.Printf("%d active instance(s)\n", len(instances))
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "%d active instance(s)\n", len(instances))
 
 	return nil
 }

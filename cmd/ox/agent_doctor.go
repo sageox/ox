@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,7 +40,7 @@ type IncompleteSessionInfo struct {
 
 // runAgentDoctor checks session health and returns structured info for agents.
 // Usage: ox agent <id> doctor [--json]
-func runAgentDoctor(inst *agentinstance.Instance) error {
+func runAgentDoctor(w io.Writer, inst *agentinstance.Instance) error {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
 		return fmt.Errorf("could not find project root: %w", err)
@@ -58,20 +59,20 @@ func runAgentDoctor(inst *agentinstance.Instance) error {
 	// output format selection (priority: review > text > json default)
 	if cfg.Review {
 		// security audit mode: human summary + JSON
-		outputAgentDoctorText(output)
-		fmt.Println()
-		fmt.Println("--- Machine Output ---")
-		return outputAgentDoctorJSON(output)
+		outputAgentDoctorText(w, output)
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, "--- Machine Output ---")
+		return outputAgentDoctorJSON(w, output)
 	}
 
 	if cfg.Text {
 		// human-readable text output
-		outputAgentDoctorText(output)
+		outputAgentDoctorText(w, output)
 		return nil
 	}
 
 	// default: JSON output
-	return outputAgentDoctorJSON(output)
+	return outputAgentDoctorJSON(w, output)
 }
 
 // buildAgentDoctorOutput gathers session health information for agent consumption
@@ -331,45 +332,45 @@ func buildNextSteps(output *AgentDoctorOutput) []string {
 }
 
 // outputAgentDoctorJSON outputs the doctor results as JSON
-func outputAgentDoctorJSON(output *AgentDoctorOutput) error {
+func outputAgentDoctorJSON(w io.Writer, output *AgentDoctorOutput) error {
 	jsonOut, err := json.MarshalIndent(output, "", "  ")
 	if err != nil {
 		return fmt.Errorf("format doctor JSON: %w", err)
 	}
 	trackContextBytes(int64(len(jsonOut)))
-	fmt.Println(string(jsonOut))
+	fmt.Fprintln(w, string(jsonOut))
 	return nil
 }
 
 // outputAgentDoctorText outputs the doctor results as human-readable text
-func outputAgentDoctorText(output *AgentDoctorOutput) {
+func outputAgentDoctorText(w io.Writer, output *AgentDoctorOutput) {
 	if len(output.IncompleteSessions) == 0 && !output.CommitNeeded && !output.PushNeeded {
-		cli.PrintSuccess("Session health: all good")
+		cli.PrintSuccessTo(w, "Session health: all good")
 		return
 	}
 
 	if len(output.IncompleteSessions) > 0 {
-		fmt.Printf("Incomplete sessions: %d\n", len(output.IncompleteSessions))
+		fmt.Fprintf(w, "Incomplete sessions: %d\n", len(output.IncompleteSessions))
 		for _, sess := range output.IncompleteSessions {
-			fmt.Printf("  %s: missing %s\n", sess.SessionID, strings.Join(sess.Missing, ", "))
+			fmt.Fprintf(w, "  %s: missing %s\n", sess.SessionID, strings.Join(sess.Missing, ", "))
 			for _, cmd := range sess.FinalizeCommands {
-				fmt.Printf("    -> %s\n", cmd)
+				fmt.Fprintf(w, "    -> %s\n", cmd)
 			}
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 
 	if output.CommitNeeded {
-		fmt.Printf("Staged files: %d (commit needed)\n", output.StagedCount)
+		fmt.Fprintf(w, "Staged files: %d (commit needed)\n", output.StagedCount)
 	}
 	if output.PushNeeded {
-		fmt.Println("Push needed to sync with remote")
+		fmt.Fprintln(w, "Push needed to sync with remote")
 	}
 
 	if len(output.NextSteps) > 0 {
-		fmt.Println("\nNext steps:")
+		fmt.Fprintln(w, "\nNext steps:")
 		for _, step := range output.NextSteps {
-			fmt.Printf("  - %s\n", step)
+			fmt.Fprintf(w, "  - %s\n", step)
 		}
 	}
 }

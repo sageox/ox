@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"regexp"
@@ -91,14 +92,23 @@ func PrintJSON(v any) {
 }
 
 func PrintSuccess(msg string) {
+	PrintSuccessTo(os.Stdout, msg)
+}
+
+// PrintSuccessTo writes a success message to w. Parallel-safe — does not
+// touch os.Stdout. Honors jsonMode (encodes JSON to w) so output shape is
+// identical to PrintSuccess.
+func PrintSuccessTo(w io.Writer, msg string) {
 	if jsonMode {
-		PrintJSON(map[string]any{
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(map[string]any{
 			"status":  "success",
 			"message": msg,
 		})
 		return
 	}
-	fmt.Fprintf(os.Stdout, "%s %s\n", successStyle.Render("✓"), msg)
+	fmt.Fprintf(w, "%s %s\n", successStyle.Render("✓"), msg)
 }
 
 // PrintPreserved prints a message indicating an existing file was preserved (not overwritten).
