@@ -131,6 +131,39 @@ func TestBatch_ServerError(t *testing.T) {
 	assert.Contains(t, err.Error(), "HTTP 500")
 }
 
+// TestBatch_RejectsPlaintextHTTP confirms doBatch refuses to send
+// Authorization to a non-loopback http URL. Without this guard, a
+// misconfigured or attacker-rewritten remote (http://example.com/...)
+// would leak the user's PAT in the clear on the very first request,
+// before the per-action trusted-host stamping has any chance to run.
+func TestBatch_RejectsPlaintextHTTP(t *testing.T) {
+	c := &Client{
+		batchURL:   "http://example.com/sageox/ledger.git/info/lfs/objects/batch",
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+		authHeader: "Basic dGVzdDp0b2tlbg==",
+	}
+	_, err := c.BatchUpload([]BatchObject{{OID: "abc", Size: 10}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "plaintext http")
+}
+
+// TestBatch_AllowsLoopbackHTTP confirms the guard does not break
+// httptest-based tests, which always use 127.0.0.1.
+func TestBatch_AllowsLoopbackHTTP(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(BatchResponse{Transfer: "basic"})
+	}))
+	defer server.Close()
+
+	c := &Client{
+		batchURL:   server.URL, // http://127.0.0.1:NNNN — must be permitted
+		httpClient: server.Client(),
+		authHeader: "Basic dGVzdDp0b2tlbg==",
+	}
+	_, err := c.BatchUpload([]BatchObject{{OID: "abc", Size: 10}})
+	require.NoError(t, err)
+}
+
 func TestBatch_ObjectError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := BatchResponse{

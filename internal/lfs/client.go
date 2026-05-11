@@ -125,6 +125,20 @@ func (c *Client) BatchDownload(objects []BatchObject) (*BatchResponse, error) {
 
 // doBatch sends a batch request and returns the response.
 func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchResponse, error) {
+	// Fail closed before sending Authorization. The batch URL is built
+	// from the git remote URL in NewClient; if someone misconfigures or
+	// MITM-rewrites the remote to plaintext http://example.com, this
+	// guard prevents shipping Basic auth (the user's PAT) over the
+	// wire. http is only allowed for loopback hosts so httptest servers
+	// keep working without TLS.
+	batchU, parseErr := url.Parse(c.batchURL)
+	if parseErr != nil {
+		return nil, fmt.Errorf("batch url parse: %w", parseErr)
+	}
+	if strings.EqualFold(batchU.Scheme, "http") && !isLoopbackHost(batchU.Hostname()) {
+		return nil, fmt.Errorf("batch url %q uses plaintext http on a non-loopback host; refusing to send Authorization", c.batchURL)
+	}
+
 	reqBody := batchRequest{
 		Operation: operation,
 		Transfers: []string{"basic"},
@@ -169,27 +183,24 @@ func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchRespons
 
 	// Stamp every action in the response with the trusted host derived
 	// from the batch URL. Per ox-90gh, consumers use this to reject
-	// hrefs that point at attacker-controlled hosts. We parse the batch
-	// URL once here rather than re-parsing per action.
-	batchU, parseErr := url.Parse(c.batchURL)
-	if parseErr == nil && batchU != nil {
-		scheme := strings.ToLower(batchU.Scheme)
-		host := strings.ToLower(batchU.Host)
-		stamp := func(a *Action) {
-			if a == nil {
-				return
-			}
-			a.TrustedScheme = scheme
-			a.TrustedHost = host
+	// hrefs that point at attacker-controlled hosts. batchU was already
+	// parsed at the top of this function for the plaintext-auth guard.
+	scheme := strings.ToLower(batchU.Scheme)
+	host := strings.ToLower(batchU.Host)
+	stamp := func(a *Action) {
+		if a == nil {
+			return
 		}
-		for i := range batchResp.Objects {
-			if batchResp.Objects[i].Actions == nil {
-				continue
-			}
-			stamp(batchResp.Objects[i].Actions.Upload)
-			stamp(batchResp.Objects[i].Actions.Download)
-			stamp(batchResp.Objects[i].Actions.Verify)
+		a.TrustedScheme = scheme
+		a.TrustedHost = host
+	}
+	for i := range batchResp.Objects {
+		if batchResp.Objects[i].Actions == nil {
+			continue
 		}
+		stamp(batchResp.Objects[i].Actions.Upload)
+		stamp(batchResp.Objects[i].Actions.Download)
+		stamp(batchResp.Objects[i].Actions.Verify)
 	}
 
 	return &batchResp, nil

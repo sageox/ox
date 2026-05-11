@@ -3,17 +3,19 @@
 package daemon
 
 import (
-	"fmt"
 	"net"
 )
 
-// peerUID is a stub on Windows. The Windows IPC transport uses named pipes
-// (see ipc_windows.go); peer authentication there is enforced by ACLs on
-// the pipe object, not by an after-accept syscall. Returning an error
-// here causes handleConnection to fail closed — when Windows support is
-// added with proper named-pipe ACLs, this can be implemented as a no-op
-// or wired into the pipe's ACL check.
+// peerUID is a no-op on Windows. The Windows IPC transport uses named
+// pipes (see ipc_windows.go); same-user enforcement is provided by the
+// pipe's ACL — only processes running as the owning user can connect.
+// Returning an error here would make handleConnection reject every
+// connection, breaking IPC on Windows. The ACL is the trust boundary;
+// this function intentionally trusts it.
+//
+// DisablePeerCredForTesting still gates the call site identically on
+// every platform — its semantics are unchanged.
 func peerUID(conn net.Conn) (uint32, error) {
 	_ = conn
-	return 0, fmt.Errorf("peercred: not implemented on Windows; rely on named-pipe ACLs")
+	return 0, nil
 }
