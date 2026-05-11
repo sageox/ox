@@ -1,6 +1,6 @@
 # Makefile for ox CLI tool
 
-.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-all test-slow test-integration test-preflight test-digital-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
+.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-all test-slow test-integration test-preflight test-digital-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
 
 # Variables
 GO := go
@@ -84,14 +84,25 @@ run: build ## Build and run ox
 # Testing (uses gotestsum for human-readable colorized output)
 #
 # Test Tiers:
-#   fast  (make test)             — Unit tests <500ms. No git clone, no network. Runs on every commit.
-#   full  (make test-all)         — All unit tests including expensive ones (git clone, SQLite concurrent, LFS).
+#   fast  (make test)             — Unit tests <500ms. No git clone, no network, NO coverage instrumentation.
+#                                   Runs on every commit. Target: <60s wall.
+#   fast+cov (make test-cover)    — Same as fast but with coverage (~15-20% slower). Local use.
+#   full  (make test-all)         — All unit tests including expensive ones (git clone, SQLite, LFS).
+#                                   Coverage collection lives here. Target: <5min wall.
 #   slow  (make test-slow)        — Tests requiring real ox binary (build tag: slow). No Claude needed.
 #   integration — E2E with real Claude sessions. Lives in sageox/ox-test-harness (private).
 #
+# Tier criteria for `make test` (fast):
+#   - No exec.Command (git or otherwise) except via an in-process fake.
+#   - No time.Sleep > 5ms on the success path.
+#   - No real SQLite/Bleve file I/O.
+#   - No os.Setenv (use t.Setenv); tests should call t.Parallel().
+#   - httptest.NewServer OK; no reliance on real timeouts.
+#   - Only env-gated t.Skip (e.g. git binary missing).
+#
 # Recommended usage:
-#   Coding:    make test           — Fast feedback (<30s target)
-#   Pre-PR:    make test-preflight — Full + slow + lint (~3-5min)
+#   Coding:    make test           — Fast feedback (target <60s, no coverage)
+#   Pre-PR:    make test-preflight — Full + slow + lint (~3-5min, with coverage)
 #   Release:   make test-all test-slow (+ integration tests from ox-test-harness)
 #
 # Output: quiet by default (agent-friendly). V=1 for verbose.
@@ -99,11 +110,15 @@ run: build ## Build and run ox
 GOTESTSUM := $(shell which gotestsum 2>/dev/null || echo "go run gotest.tools/gotestsum@latest")
 
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
-test: ## Run fast tests — unit tests <500ms, race detection (every commit)
-	$(call say,"Running fast tests (skipping >500ms)...")
+test: ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
+	$(call say,"Running fast tests (skipping >500ms, no coverage)...")
+	@$(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -short -race -p 8 -parallel 32 ./...
+
+test-cover: ## Run fast tests with coverage collection (~15-20% slower than `make test`)
+	$(call say,"Running fast tests with coverage...")
 	@$(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -short -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
 
-test-all: ## Run all unit tests including expensive ones (git clone, SQLite, LFS)
+test-all: ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
 	$(call say,"Running all tests including expensive tests...")
 	@$(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
 
@@ -185,27 +200,27 @@ test-watch: ## Run tests in watch mode (requires gotestsum)
 COVERDIR := tmp/coverage
 COVERAGE_THRESHOLD ?= 50
 
-coverage: test ## Run tests and open coverage report
+coverage: test-cover ## Run fast tests with coverage and open report
 	@$(GO) tool cover -func=coverage.out | tail -1
 	@$(GO) tool cover -html=coverage.out -o coverage.html
 	@open coverage.html 2>/dev/null || xdg-open coverage.html 2>/dev/null || echo "Open coverage.html in your browser"
 
 coverage-report: ## Open coverage report from last test run (no re-run)
-	@test -f coverage.out || (echo "No coverage.out found. Run 'make test' first." && exit 1)
+	@test -f coverage.out || (echo "No coverage.out found. Run 'make test-cover' or 'make test-all' first." && exit 1)
 	@$(GO) tool cover -func=coverage.out | tail -1
 	@$(GO) tool cover -html=coverage.out -o coverage.html
 	@open coverage.html 2>/dev/null || xdg-open coverage.html 2>/dev/null || echo "Open coverage.html in your browser"
 
 coverage-func: ## Show per-function coverage in terminal
-	@test -f coverage.out || (echo "No coverage.out found. Run 'make test' first." && exit 1)
+	@test -f coverage.out || (echo "No coverage.out found. Run 'make test-cover' or 'make test-all' first." && exit 1)
 	@$(GO) tool cover -func=coverage.out
 
-coverage-baseline: test ## Save current coverage as baseline for diffs
+coverage-baseline: test-cover ## Save current coverage as baseline for diffs
 	@cp coverage.out .coverage-baseline.out
 	@$(GO) tool cover -func=.coverage-baseline.out | tail -1
 	@echo "Baseline saved."
 
-coverage-diff: test ## Show coverage change vs saved baseline
+coverage-diff: test-cover ## Show coverage change vs saved baseline
 	@test -f .coverage-baseline.out || (echo "No baseline. Run 'make coverage-baseline' first." && exit 1)
 	@echo "=== Coverage: baseline → current ==="
 	@echo "Baseline: $$($(GO) tool cover -func=.coverage-baseline.out | grep total: | awk '{print $$3}')"
