@@ -11,16 +11,15 @@
 package slogquiet
 
 import (
-	"io"
 	"log/slog"
 	"os"
 )
 
-// Silence redirects the slog default logger to io.Discard.
+// Silence redirects the slog default logger to the discard handler.
 // Honors OX_TEST_LOG=1 to keep logs visible during local debugging.
 func Silence() {
 	if os.Getenv("OX_TEST_LOG") == "1" {
 		return
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	slog.SetDefault(slog.New(slog.DiscardHandler))
 }
