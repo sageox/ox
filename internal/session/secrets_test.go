@@ -222,8 +222,10 @@ func TestRedactString_GitHubTokens(t *testing.T) {
 			wantFind: true,
 		},
 		{
-			name:     "github refresh token",
-			input:    "ghr_1234567890abcdefghijklmnopqrstuvwxyz12",
+			name: "github refresh token",
+			// Refresh tokens are 76 chars after the ghr_ prefix; older fixture
+			// used 38 chars (the classic-PAT tail length). Updated in ox-def1.
+			input:    "ghr_1234567890abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZabcd",
 			expected: "[REDACTED_GITHUB_TOKEN]",
 			wantFind: true,
 		},
@@ -234,8 +236,11 @@ func TestRedactString_GitHubTokens(t *testing.T) {
 			wantFind: true,
 		},
 		{
-			name:     "github fine-grained pat",
-			input:    "github_pat_11ABCDEFGH0123456789_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcdefghijklmnopqrs",
+			name: "github fine-grained pat",
+			// Real shape: 11-char "github_pat_" + 22-char ID + "_" + 59-char secret = 92 total.
+			// Updated from a shorter fixture in ox-def1 (the strict {82,255} tail
+			// length follows GitHub's published format and the user's spec).
+			input:    "github_pat_11ABCDEFGHIJ012345678901_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcdefghijklmnopqRStUVWxYz",
 			expected: "[REDACTED_GITHUB_PAT]",
 			wantFind: true,
 		},
@@ -252,7 +257,15 @@ func TestRedactString_GitHubTokens(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			output, found := r.RedactString(tt.input)
 			assert.Equal(t, tt.expected, output)
-			hasGitHub := containsPattern(found, "github_token") || containsPattern(found, "github_fine_grained_pat")
+			// After ox-def1 the broad `github_token` detector was split into
+			// per-prefix patterns. Any of these counts as "we caught a
+			// GitHub-shaped token" for the purposes of this test.
+			hasGitHub := containsPattern(found, "github_personal_access_token") ||
+				containsPattern(found, "github_oauth_token") ||
+				containsPattern(found, "github_user_to_server_token") ||
+				containsPattern(found, "github_server_token") ||
+				containsPattern(found, "github_refresh_token") ||
+				containsPattern(found, "github_fine_grained_pat")
 			assert.Equal(t, tt.wantFind, hasGitHub)
 		})
 	}
@@ -724,7 +737,9 @@ func TestScanForSecrets(t *testing.T) {
 	found := r.ScanForSecrets(input)
 
 	assert.True(t, containsPattern(found, "aws_access_key"))
-	assert.True(t, containsPattern(found, "github_token"))
+	// After ox-def1 the broad `github_token` was split per-prefix. A full
+	// 40-char ghp_<36> matches the specific PAT detector now.
+	assert.True(t, containsPattern(found, "github_personal_access_token"))
 }
 
 func TestRedactWithAllowlist(t *testing.T) {

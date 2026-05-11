@@ -93,7 +93,11 @@ func hydrateFromLedger(projectRoot, sessionsDir, nameArg string, quiet bool) err
 	}
 	slog.Debug("hydrate: read meta.json", "file_count", len(meta.Files))
 	for fn, ref := range meta.Files {
-		slog.Debug("hydrate: manifest entry", "file", fn, "oid", ref.OID[:20]+"…", "size", ref.Size)
+		oidPreview := ref.OID
+		if len(oidPreview) > 20 {
+			oidPreview = oidPreview[:20] + "…"
+		}
+		slog.Debug("hydrate: manifest entry", "file", fn, "oid", oidPreview, "size", ref.Size)
 	}
 
 	// cache base: <ledger>/.sageox/cache/sessions/<sessionName>/

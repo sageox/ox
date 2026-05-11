@@ -33,20 +33,25 @@ type ledgerSecretsFinding struct {
 }
 
 // ledgerSecretsScanResult is what checkLedgerSecrets passes back. Findings
-// are keyed by detector name; FilesScanned is total count for "scanned N
-// files, found 0 secrets" reassurance.
+// are keyed by detector name; FilesScanned/SessionsScanned describe scope
+// for "scanned N session recordings, found 0 secrets" reassurance.
+// SessionsHydrated/SessionsSkipped report on the LFS auto-hydration loop:
+// a non-zero SessionsSkipped means coverage is incomplete and the result
+// MUST NOT be reported as a clean bill of health.
 type ledgerSecretsScanResult struct {
-	LedgerPath   string
-	FilesScanned int
-	Findings     map[string]*ledgerSecretsFinding
+	LedgerPath       string
+	FilesScanned     int
+	SessionsScanned  int
+	SessionsHydrated int // session dirs we auto-hydrated to cache during the scan
+	SessionsSkipped  int // session dirs we couldn't read at all (hydration failed)
+	Findings         map[string]*ledgerSecretsFinding
 }
 
-// ledgerSecretsScanExts lists file extensions worth scanning. The
-// remediation set is dominated by JSONL (sessions), JSON (caches and meta),
-// markdown (docs, summaries, memory), txt (transcripts), and VTT
-// (audio captions). Binaries are skipped — the same logic the pre-push
-// scanner uses (see prePushScannerSkipExts) but inverted to an allowlist
-// because we expect the ledger to contain a wider mix of file types.
+// ledgerSecretsScanExts lists file extensions worth scanning inside a
+// session directory. JSONL is the recording itself; JSON covers meta and
+// summary; MD covers any per-session notes; TXT and VTT cover legacy
+// transcripts and audio captions. Anything else inside a session dir is
+// either binary or not a recording artifact, so we don't pay regex cost.
 var ledgerSecretsScanExts = map[string]bool{
 	".jsonl": true,
 	".json":  true,
@@ -55,15 +60,16 @@ var ledgerSecretsScanExts = map[string]bool{
 	".vtt":   true,
 }
 
-// ledgerSecretsSkipDirs lists subdirectory names that we never descend into
-// during the scan. .git/.dolt/.beads contain pack files and SQL state, not
-// user-authored content; .gc-cache and .bak are local-only artifacts.
+// ledgerSecretsSkipDirs is retained for the snapshot tarball walk in
+// session_redact_history.go (which still archives the whole ledger). The
+// credential-scan path no longer uses it — that path iterates session
+// directories explicitly rather than filtering a global walk.
 var ledgerSecretsSkipDirs = map[string]bool{
-	".git":      true,
-	".dolt":     true,
-	".beads":    true,
-	".bak":      true,
-	".gc-cache": true,
+	".git":         true,
+	".dolt":        true,
+	".beads":       true,
+	".bak":         true,
+	".gc-cache":    true,
 	"node_modules": true,
 }
 
@@ -103,14 +109,41 @@ func checkLedgerSecrets(fix bool) checkResult {
 		return SkippedCheck(name, "ledger directory does not exist", "")
 	}
 
-	result, err := scanLedgerForSecrets(ledgerPath)
+	// Pre-scan hydration. Without this, dehydrated session files would be
+	// scanned as 140-byte LFS pointer stubs and return "clean" regardless
+	// of what's inside. The doctor harness suppresses incremental stdout
+	// during check execution, so we pass io.Discard for the progress
+	// writer — the result counters carry the same information.
+	hyd, hydErr := hydrateAllSessionsForScan(gitRoot, ledgerPath, io.Discard)
+	if hydErr != nil {
+		return FailedCheck(name, fmt.Sprintf("pre-scan hydration error: %v", hydErr), "")
+	}
+
+	result, err := scanLedgerForSecrets(gitRoot, ledgerPath)
 	if err != nil {
 		return FailedCheck(name, fmt.Sprintf("scan error: %v", err), "")
 	}
+	// Surface hydration outcome on the result so the report line below
+	// is accurate. SessionsHydrated tracks "we fetched something during
+	// this scan call"; merge with the pre-pass for the cleaner number.
+	if hyd.Hydrated > result.SessionsHydrated {
+		result.SessionsHydrated = hyd.Hydrated
+	}
+	if hyd.Failed > 0 {
+		result.SessionsSkipped += hyd.Failed
+	}
+
+	scope := fmt.Sprintf("scanned %d session recording file(s) across %d session(s)",
+		result.FilesScanned, result.SessionsScanned)
+	if result.SessionsHydrated > 0 {
+		scope += fmt.Sprintf("; auto-hydrated %d session(s) from LFS", result.SessionsHydrated)
+	}
+	if result.SessionsSkipped > 0 {
+		scope += fmt.Sprintf("; %d session(s) unscannable (hydration failed)", result.SessionsSkipped)
+	}
 
 	if len(result.Findings) == 0 {
-		return PassedCheck(name,
-			fmt.Sprintf("scanned %d files, no credential patterns found", result.FilesScanned))
+		return PassedCheck(name, scope+"; no credential patterns found")
 	}
 
 	// Build the failure message without ever including matched bytes.
@@ -130,8 +163,8 @@ func checkLedgerSecrets(fix bool) checkResult {
 			f.Detector, f.Count, f.FileCount, f.Sample)
 	}
 
-	summary := fmt.Sprintf("found %d credential pattern(s) across %d distinct detectors in %d scanned files",
-		totalCount, len(result.Findings), result.FilesScanned)
+	summary := fmt.Sprintf("found %d credential pattern(s) across %d distinct detectors (%s)",
+		totalCount, len(result.Findings), scope)
 
 	guidance := "Run `ox session redact-history` for interactive per-finding cleanup. " +
 		"For already-pushed commits, see docs/security/credential-redaction.md."
@@ -153,51 +186,121 @@ func resolveLedgerPathForAudit(localCfg *config.LocalConfig) string {
 	return defaultPath
 }
 
-// scanLedgerForSecrets walks the ledger working tree (skipping .git,
-// .beads, etc.) and runs DefaultPatterns against every line of every
-// allowlisted-extension file. Aggregates matches per detector. Never
-// retains the matched bytes — only counts, file paths, and timestamps.
+// scanLedgerForSecrets enumerates session-recording files inside
+// <ledger>/sessions/<name>/, hydrates LFS pointers to the cache via the
+// canonical openSessionContent path, and runs DefaultPatterns against
+// every line of every allowlisted-extension file. Aggregates matches per
+// detector. Never retains the matched bytes — only counts, file paths,
+// and timestamps.
+//
+// Scope is intentionally session-only: the previous global ledger walk
+// matched fixture/test-fixture bytes inside data/github/.../pr/*.json
+// (PR-review archives containing the very example credentials these
+// detectors are designed to spot) and inflated counts by an order of
+// magnitude with non-actionable findings. Anything outside sessions/
+// is not a "session recording" and belongs to other audits if needed.
+//
+// Hydration is mandatory: dehydrated session files are ~140-byte LFS
+// pointer stubs that match no credential pattern. Pre-fix, 17.5 % of
+// the on-disk file set on a real ledger were pointer stubs returning
+// "scanned, clean" — a credible audit cannot have that blind spot.
+// openSessionContent writes hydrated bytes to .sageox/cache/sessions/
+// per .claude/rules/cache-only-design.md, never in-place.
 //
 // Exposed (unexported) for use by `ox session redact-history` so both
 // surfaces share the same definition of "what counts as a finding."
-func scanLedgerForSecrets(ledgerPath string) (*ledgerSecretsScanResult, error) {
+func scanLedgerForSecrets(projectRoot, ledgerPath string) (*ledgerSecretsScanResult, error) {
 	redactor := session.NewRedactor()
 	result := &ledgerSecretsScanResult{
 		LedgerPath: ledgerPath,
 		Findings:   map[string]*ledgerSecretsFinding{},
 	}
 
-	err := filepath.WalkDir(ledgerPath, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			// transient stat errors (deleted-mid-walk, permission) — log
-			// implicitly by continuing; this is a best-effort audit, not
-			// a transactional read.
-			return nil
-		}
-		if d.IsDir() {
-			if ledgerSecretsSkipDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !ledgerSecretsScanExts[strings.ToLower(filepath.Ext(d.Name()))] {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		if info.Size() > ledgerSecretsSizeCap {
-			return nil
-		}
-		result.FilesScanned++
-		rel, _ := filepath.Rel(ledgerPath, path)
-		return scanLedgerFileForSecrets(redactor, path, rel, info.ModTime(), result)
-	})
+	sessionsRoot := filepath.Join(ledgerPath, "sessions")
+	entries, err := os.ReadDir(sessionsRoot)
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			return result, nil // ledger has no sessions yet — vacuously clean
+		}
+		return nil, fmt.Errorf("read sessions dir: %w", err)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		sessionName := entry.Name()
+		result.SessionsScanned++
+
+		sessionDir := filepath.Join(sessionsRoot, sessionName)
+		files, err := os.ReadDir(sessionDir)
+		if err != nil {
+			result.SessionsSkipped++
+			continue
+		}
+
+		hydratedThisSession := false
+		anyFileRead := false
+		for _, fEntry := range files {
+			if fEntry.IsDir() {
+				continue
+			}
+			filename := fEntry.Name()
+			if !ledgerSecretsScanExts[strings.ToLower(filepath.Ext(filename))] {
+				continue
+			}
+
+			contentPath, hydratedNow, err := resolveSessionContentForScan(projectRoot, ledgerPath, sessionName, filename)
+			if err != nil {
+				// Hydration failed (network, missing LFS object, etc.). Skip
+				// this file but keep going — other files in this session
+				// might still be locally readable.
+				continue
+			}
+			if hydratedNow {
+				hydratedThisSession = true
+			}
+			info, err := os.Stat(contentPath)
+			if err != nil || info.Size() > ledgerSecretsSizeCap {
+				continue
+			}
+			anyFileRead = true
+			result.FilesScanned++
+			relForReport := filepath.Join("sessions", sessionName, filename)
+			if err := scanLedgerFileForSecrets(redactor, contentPath, relForReport, info.ModTime(), result); err != nil {
+				continue
+			}
+		}
+		if hydratedThisSession {
+			result.SessionsHydrated++
+		}
+		if !anyFileRead {
+			result.SessionsSkipped++
+		}
 	}
 	return result, nil
+}
+
+// resolveSessionContentForScan is a thin wrapper around openSessionContent
+// that also tells the caller whether hydration happened during this call
+// (so the audit can report "auto-hydrated N sessions"). The signal is
+// approximate — we treat "cache file didn't exist before the call but
+// does after" as "hydrated by us." Pre-existing cached files don't
+// count, which is what the user wants for the scope summary.
+func resolveSessionContentForScan(projectRoot, ledgerPath, sessionName, filename string) (string, bool, error) {
+	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
+	cachePath := filepath.Join(cacheDir, filename)
+	_, cacheExistedBefore := os.Stat(cachePath)
+
+	resolved, err := openSessionContent(projectRoot, ledgerPath, sessionName, filename)
+	if err != nil {
+		return "", false, err
+	}
+	// hydrated by this call iff the cache file did not exist before and
+	// the resolved path is the cache path.
+	hydratedNow := cacheExistedBefore != nil && resolved == cachePath
+	return resolved, hydratedNow, nil
 }
 
 // scanLedgerFileForSecrets reads a single file line-by-line, runs every
