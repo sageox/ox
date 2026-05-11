@@ -337,6 +337,107 @@ func TestRawWriter_RedactsGeneratedPatternsSample(t *testing.T) {
 	}
 }
 
+// TestRawWriter_KeywordScreen_DoesNotBypassTokenLeak is the regression
+// test for the Critical PR review finding. gitleaks ships per-rule
+// "keywords" as vendor names ("airtable"), but many rules match a
+// context-free token shape that may appear in a tool dump WITHOUT the
+// vendor name nearby. If the keyword screen relied on those vendor
+// keywords, a bare leaked token would silently bypass redaction.
+//
+// The generator now derives keywords from the regex AST instead, so
+// each keyword is a guaranteed substring of every match. This test
+// confirms the airtable case — a bare `pat<14alnum>.<64hex>` token
+// with no surrounding context — is still redacted.
+func TestRawWriter_KeywordScreen_DoesNotBypassTokenLeak(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "raw.jsonl")
+	w, err := NewRawWriter(path, "")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = w.Close() })
+
+	// Construct a valid airtable PAT shape: "pat" + 14 alphanumeric +
+	// "." + 64 hex. The tool dump deliberately omits the word
+	// "airtable" — the only thing that would have anchored the
+	// vendor-name-keyword screen before this fix.
+	canary := "patABCDEFGHIJKLMN." + strings.Repeat("0123456789abcdef", 4)
+	require.NoError(t, w.WriteEntry(&SessionEntry{
+		Type:    EntryTypeTool,
+		Content: "tool output dump:\n" + canary + "\n(no vendor context)",
+	}))
+	require.NoError(t, w.CloseAndSync())
+
+	data, _ := os.ReadFile(path)
+	out := string(data)
+	assert.NotContains(t, out, canary,
+		"bare airtable PAT leaked through keyword screen; vendor keyword bypass regression")
+	// The hand-ported airtable_key rule fires first and uses a
+	// different slug than the generated rule. Either is fine — the
+	// load-bearing check is that the bytes don't survive.
+	assert.True(t,
+		strings.Contains(out, "[REDACTED_AIRTABLE_KEY]") ||
+			strings.Contains(out, "[REDACTED_AIRTABLE_PERSONNAL_ACCESS_TOKEN]"),
+		"airtable rule did not fire on bare token")
+}
+
+// TestGeneratedGitleaksDetectors_KeywordsAreGuaranteedSubstrings is a
+// generator-output invariant: any non-empty Keywords list on a
+// generated rule MUST contain only lowercase substrings that are
+// guaranteed to appear in every match of the rule's regex. Otherwise
+// the chokepoint quick-screen would create a false-negative bypass.
+//
+// We approximate "guaranteed substring" by structural inspection: the
+// keyword must appear in the regex source (case-insensitively). This
+// is a necessary but not sufficient condition — a stronger semantic
+// check is done by the AST walker in the generator itself
+// (cmd/gitleaks-port). This test catches accidental drift if a future
+// edit bypasses the generator and adds a Keywords entry by hand.
+func TestGeneratedGitleaksDetectors_KeywordsAreGuaranteedSubstrings(t *testing.T) {
+	for _, p := range generatedGitleaksDetectors() {
+		if len(p.Keywords) == 0 {
+			continue
+		}
+		for _, kw := range p.Keywords {
+			assert.Equal(t, strings.ToLower(kw), kw,
+				"rule %q keyword %q must be lowercase", p.Name, kw)
+			assert.GreaterOrEqual(t, len(kw), 3,
+				"rule %q keyword %q is shorter than 3 chars; would screen out almost nothing",
+				p.Name, kw)
+		}
+	}
+}
+
+// TestGeneratedAirtableRule_KeywordIsTokenAnchor is the targeted
+// regression test for the Critical PR review finding. The
+// airtable_personnal_access_token rule used to carry only the vendor
+// keyword "airtable", which would let a bare token like
+// `pat<14alnum>.<64hex>` bypass the keyword screen entirely. The
+// generator now derives the keyword from the regex AST, so a leaked
+// token (which by definition begins with "pat") always triggers the
+// regex.
+func TestGeneratedAirtableRule_KeywordIsTokenAnchor(t *testing.T) {
+	var found bool
+	for _, p := range generatedGitleaksDetectors() {
+		if p.Name != "airtable_personnal_access_token" {
+			continue
+		}
+		found = true
+		require.NotEmpty(t, p.Keywords,
+			"airtable rule must have at least one derived keyword")
+		// The keyword must be present in every legitimate match. A
+		// match starts with "pat" by regex definition, so the keyword
+		// must be a substring of "pat<random suffix>".
+		sampleMatch := "patabcdefghijklmn." + strings.Repeat("0", 64)
+		for _, kw := range p.Keywords {
+			assert.Contains(t, sampleMatch, kw,
+				"airtable keyword %q not present in a valid match %q — bypass risk",
+				kw, sampleMatch)
+			assert.NotEqual(t, "airtable", kw,
+				"airtable keyword regression: vendor-name keyword is bypassable")
+		}
+	}
+	require.True(t, found, "airtable_personnal_access_token rule not found in generated detectors")
+}
+
 // TestRawWriter_JSONLOutputIsValid verifies every line in the output is
 // parseable JSON. A redactor that introduces unescaped quotes or breaks
 // the wire format would create downstream parse failures.

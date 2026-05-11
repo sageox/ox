@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"regexp/syntax"
 	"sort"
 	"strings"
 
@@ -196,6 +197,145 @@ func validateRegex(pattern string) error {
 	return err
 }
 
+// minKeywordLen is the shortest synthetic keyword we'll emit. Anything
+// shorter (e.g. a single dash or hyphen from a regex literal) screens
+// out almost nothing and just bloats the keyword list, so we skip it.
+const minKeywordLen = 3
+
+// guaranteedAlternatives walks a parsed regex AST and returns a set of
+// lowercase literal substrings such that every match contains at least
+// one element of the set (substring, case-insensitively). Returns nil
+// when no such guarantee can be made — the caller treats this as "no
+// safe screen, run the regex unconditionally."
+//
+// This is the load-bearing function for keyword pre-screen correctness:
+// the chokepoint OR-matches the set against lower(input) and skips the
+// regex when no element appears, so the set must be sound for every
+// possible match.
+//
+// We derive this from the regex AST (not from gitleaks' shipped
+// keywords field) because many gitleaks rules use a vendor name as the
+// keyword ("airtable") while the regex matches a context-free token
+// (\b(pat[[:alnum:]]{14}\.[a-f0-9]{64})\b). A leaked token in a
+// context-poor tool dump wouldn't contain "airtable" and would bypass
+// the screen — a real security false-negative.
+//
+// FoldCase is honored implicitly: the returned literals are always
+// lowercase, matching how the chokepoint lowercases its input.
+func guaranteedAlternatives(re *syntax.Regexp) []string {
+	if re == nil {
+		return nil
+	}
+	switch re.Op {
+	case syntax.OpLiteral:
+		if len(re.Rune) == 0 {
+			return nil
+		}
+		lit := strings.ToLower(string(re.Rune))
+		// Apply the length floor here, inside the walker, so that
+		// OpAlternate's "every branch must contribute" rule
+		// correctly returns nil when a branch's only literal is
+		// shorter than minKeywordLen. Doing the filter at the top
+		// level would break alternation safety.
+		if len(lit) < minKeywordLen {
+			return nil
+		}
+		return []string{lit}
+
+	case syntax.OpConcat:
+		// Every child's match is in every match. Pick the single
+		// child whose guarantee set has the longest single literal
+		// (most selective). The OR-union of THAT child's set is
+		// sufficient: a match contains a match of that child, hence
+		// contains one of its alternatives.
+		var best []string
+		bestLen := 0
+		for _, sub := range re.Sub {
+			subG := guaranteedAlternatives(sub)
+			if len(subG) == 0 {
+				continue
+			}
+			maxLen := 0
+			for _, l := range subG {
+				if len(l) > maxLen {
+					maxLen = len(l)
+				}
+			}
+			if maxLen > bestLen {
+				bestLen = maxLen
+				best = subG
+			}
+		}
+		return best
+
+	case syntax.OpAlternate:
+		// A match takes exactly one branch. For the OR-screen to be
+		// sound, EVERY branch must contribute at least one
+		// alternative; otherwise some branch could match without any
+		// of our keywords being present.
+		var out []string
+		for _, sub := range re.Sub {
+			subG := guaranteedAlternatives(sub)
+			if len(subG) == 0 {
+				return nil
+			}
+			out = append(out, subG...)
+		}
+		return out
+
+	case syntax.OpCapture:
+		if len(re.Sub) == 0 {
+			return nil
+		}
+		return guaranteedAlternatives(re.Sub[0])
+
+	case syntax.OpPlus:
+		// 1+ repetition: the body matches at least once.
+		if len(re.Sub) == 0 {
+			return nil
+		}
+		return guaranteedAlternatives(re.Sub[0])
+
+	case syntax.OpRepeat:
+		if re.Min > 0 && len(re.Sub) > 0 {
+			return guaranteedAlternatives(re.Sub[0])
+		}
+		return nil
+	}
+	// OpStar / OpQuest / OpAnyChar / OpCharClass / OpBegin*  etc:
+	// nothing guaranteed.
+	return nil
+}
+
+// deriveKeywords returns the keyword set the generator should emit for
+// a rule. Filters short literals (under minKeywordLen) and dedupes.
+// Returns nil when the result is empty — caller omits Keywords so the
+// regex runs unconditionally (the safe fallback for context-free
+// tokens like sourcegraph's bare 40-char hex).
+func deriveKeywords(rx string) []string {
+	parsed, err := syntax.Parse(rx, syntax.Perl)
+	if err != nil {
+		return nil
+	}
+	// We deliberately do NOT call Simplify(): it can factor common
+	// prefixes out of alternations (e.g. fo1_|fm1[ar]_|fm2_ becomes
+	// f(?:o1_|m1[ar]_|m2_)), which leaves one branch with no literal
+	// of length >= minKeywordLen and forces the whole rule into the
+	// always-run fallback. The unsimplified tree usually has longer
+	// per-branch literals, which makes the screen sharper.
+	alts := guaranteedAlternatives(parsed)
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range alts {
+		if seen[l] {
+			continue
+		}
+		seen[l] = true
+		out = append(out, l)
+	}
+	return out
+}
+
 func main() {
 	var (
 		input  = flag.String("in", "gitleaks-v8.30.1.toml", "gitleaks.toml source path")
@@ -261,20 +401,28 @@ func generatedGitleaksDetectors() []SecretPattern {
 			continue
 		}
 		class := classFromID(r.ID)
+		// Keywords are derived from the regex AST (NOT from gitleaks'
+		// shipped keywords). A keyword in the emitted SecretPattern
+		// must be a guaranteed substring of every possible match,
+		// because the chokepoint quick-screen skips the regex when no
+		// keyword appears in the input. gitleaks' shipped keywords
+		// often name the vendor ("airtable") while the regex matches a
+		// context-free token ("pat[alnum]{14}.{hex64}"), which would
+		// false-negative on a leaked bare token. When the AST yields
+		// no literal of length >= minKeywordLen, Keywords is omitted
+		// and the regex runs unconditionally — slower but correct.
+		kw := deriveKeywords(r.Regex)
 		fmt.Fprintf(&b, "\t\t{\n")
 		fmt.Fprintf(&b, "\t\t\tName:    %q,\n", nameFromID(r.ID))
 		fmt.Fprintf(&b, "\t\t\tPattern: regexp.MustCompile(%s),\n", goRawString(r.Regex))
 		fmt.Fprintf(&b, "\t\t\tRedact:  %q,\n", "[REDACTED_"+class+"]")
-		// Keywords are emitted lowercase. The chokepoint quick-screen in
-		// RawWriter assumes lowercase; doing it once at generate time
-		// avoids per-write ToLower work for ~200 keyword slices.
-		if len(r.Keywords) > 0 {
+		if len(kw) > 0 {
 			fmt.Fprintf(&b, "\t\t\tKeywords: []string{")
-			for i, kw := range r.Keywords {
+			for i, k := range kw {
 				if i > 0 {
 					fmt.Fprintf(&b, ", ")
 				}
-				fmt.Fprintf(&b, "%q", strings.ToLower(kw))
+				fmt.Fprintf(&b, "%q", k)
 			}
 			fmt.Fprintf(&b, "},\n")
 		}
