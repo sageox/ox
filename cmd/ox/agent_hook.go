@@ -436,7 +436,7 @@ func handlePrompt(ctx *HookContext) error {
 	if agentID == "" {
 		return nil
 	}
-	emitWhispers(agentID)
+	emitWhispers(os.Stdout, agentID)
 	return nil
 }
 
@@ -472,7 +472,7 @@ func handleAfterTool(ctx *HookContext) error {
 		return nil
 	}
 	// emit pending whispers (fallback — primary delivery is handlePrompt)
-	emitWhispers(agentID)
+	emitWhispers(os.Stdout, agentID)
 
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil {

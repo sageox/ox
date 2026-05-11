@@ -458,7 +458,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	// command output. This is opportunistic — the primary channel is
 	// handlePrompt (UserPromptSubmit hook) and the active pull is
 	// `ox agent <id> whisper`.
-	emitWhispers(agentID)
+	emitWhispers(cmd.OutOrStdout(), agentID)
 
 	subcommand := args[0]
 
@@ -547,9 +547,9 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 	case "whisper":
 		// `ox agent <id> whisper history` — show all whispers without advancing cursor
 		if len(subargs) > 0 && subargs[0] == "history" {
-			return runAgentWhisperHistory(inst)
+			return runAgentWhisperHistory(cmd.OutOrStdout(), inst)
 		}
-		return runAgentWhisper(inst)
+		return runAgentWhisper(cmd.OutOrStdout(), inst)
 	case "hook":
 		return runAgentHook(subargs)
 	default:
@@ -922,7 +922,7 @@ const (
 //
 // Unlike `ox agent <id> whisper`, this does NOT advance the delivery cursor,
 // so it's safe to run repeatedly without side effects.
-func runAgentWhisperHistory(inst *agentinstance.Instance) error {
+func runAgentWhisperHistory(w io.Writer, inst *agentinstance.Instance) error {
 	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 
 	// collect all pages; break if no more entries or no pagination
@@ -951,7 +951,7 @@ func runAgentWhisperHistory(inst *agentinstance.Instance) error {
 	}
 
 	if len(allEntries) == 0 {
-		fmt.Fprintln(os.Stdout, "No whispers in store.")
+		fmt.Fprintln(w, "No whispers in store.")
 		return nil
 	}
 
@@ -966,33 +966,33 @@ func runAgentWhisperHistory(inst *agentinstance.Instance) error {
 		}
 	}
 
-	fmt.Fprintf(os.Stdout, "Whisper history for %s (%d total)\n\n", inst.AgentID, len(allEntries))
+	fmt.Fprintf(w, "Whisper history for %s (%d total)\n\n", inst.AgentID, len(allEntries))
 
 	if len(pending) > 0 {
-		fmt.Fprintf(os.Stdout, "Pending (%d, not yet delivered):\n", len(pending))
+		fmt.Fprintf(w, "Pending (%d, not yet delivered):\n", len(pending))
 		for _, e := range pending {
-			fmt.Fprintf(os.Stdout, "  [%s] %s (%s) — %s\n",
+			fmt.Fprintf(w, "  [%s] %s (%s) — %s\n",
 				e.Importance, e.Topic, e.Source, e.CreatedAt.Local().Format("Jan 2 15:04:05"))
 			if e.Content != "" {
-				fmt.Fprintf(os.Stdout, "    %s\n", truncateString(e.Content, 120))
+				fmt.Fprintf(w, "    %s\n", truncateString(e.Content, 120))
 			}
 		}
-		fmt.Fprintln(os.Stdout)
+		fmt.Fprintln(w)
 	}
 
 	if len(delivered) > 0 {
-		fmt.Fprintf(os.Stdout, "Delivered (%d, already sent to agent):\n", len(delivered))
+		fmt.Fprintf(w, "Delivered (%d, already sent to agent):\n", len(delivered))
 		for _, e := range delivered {
-			fmt.Fprintf(os.Stdout, "  [%s] %s (%s) — %s\n",
+			fmt.Fprintf(w, "  [%s] %s (%s) — %s\n",
 				e.Importance, e.Topic, e.Source, e.CreatedAt.Local().Format("Jan 2 15:04:05"))
 			if e.Content != "" {
-				fmt.Fprintf(os.Stdout, "    %s\n", truncateString(e.Content, 120))
+				fmt.Fprintf(w, "    %s\n", truncateString(e.Content, 120))
 			}
 		}
 	}
 
 	if !hasCursor {
-		fmt.Fprintln(os.Stdout, "(cursor not set — all entries are pending)")
+		fmt.Fprintln(w, "(cursor not set — all entries are pending)")
 	}
 
 	return nil
@@ -1013,7 +1013,7 @@ func runAgentWhisperHistory(inst *agentinstance.Instance) error {
 //
 // Uses the same WhisperStore cursor as hook delivery — if the hook already
 // delivered pending whispers, this returns nothing. No double delivery.
-func runAgentWhisper(inst *agentinstance.Instance) error {
+func runAgentWhisper(w io.Writer, inst *agentinstance.Instance) error {
 	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	resp, err := client.Whispers(inst.AgentID, "normal", nil)
 	if err != nil {
@@ -1034,7 +1034,7 @@ func runAgentWhisper(inst *agentinstance.Instance) error {
 		return nil
 	}
 
-	formatWhispers(os.Stdout, entries)
+	formatWhispers(w, entries)
 	traceWhisperDelivery(projectRoot, inst.AgentID, entries)
 	return nil
 }
@@ -1054,7 +1054,7 @@ func runAgentWhisper(inst *agentinstance.Instance) error {
 // but not ambient ones, to avoid flooding agent context.
 // Timeout is 100ms (vs 500ms for runAgentWhisper) because this runs in the
 // hot path of every hook invocation and must not add perceptible latency.
-func emitWhispers(agentID string) {
+func emitWhispers(w io.Writer, agentID string) {
 	// best-effort delivery — 100ms allows for daemon startup/load
 	client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
 	resp, err := client.Whispers(agentID, "normal", nil)
@@ -1074,7 +1074,7 @@ func emitWhispers(agentID string) {
 		return
 	}
 
-	formatWhispers(os.Stdout, entries)
+	formatWhispers(w, entries)
 
 	// best-effort context-trace for whisper delivery observability
 	traceWhisperDelivery(projectRoot, agentID, entries)
