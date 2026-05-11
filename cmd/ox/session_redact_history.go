@@ -24,8 +24,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// ox session redact-history is the forensic cleanup companion to
-// `ox doctor --check=ledger-secrets`. The doctor check tells the user
+// ox session redact is the forensic cleanup companion to
+// `ox doctor --check=ledger-secrets` / `ox session audit`. The audit
+// surfaces tell the user
 // THAT they have leaked credentials in their local Ledger; this command
 // fixes them, with strict safety rails per ox-pd5f:
 //
@@ -48,16 +49,70 @@ import (
 //   - Operator auto-approves and the tool redacts content the user
 //     wanted to keep (e.g. legitimate examples in documentation).
 
-var sessionRedactHistoryCmd = &cobra.Command{
-	Use:   "redact-history",
-	Short: "Interactively redact credentials from historical local sessions",
-	Long: `Scan the local Ledger for credential patterns in committed-but-not-yet-pushed
-sessions, then interactively cleanup each finding.
+// Two surfaces over the same scan code path (ox-zukx / ox-8bfh
+// follow-up). The pre-split `ox session redact-history` was misleading
+// because most users running it with --dry-run were doing an audit,
+// not preparing a destructive rewrite — the name fought the intent.
+//
+//   ox session audit   — read-only audit. Always hydrates LFS pointers
+//                        first (LFS Batch API fetch of every dehydrated
+//                        session — can be slow on a large ledger),
+//                        prints catalog identity, then reports per-line
+//                        findings grouped pushed-vs-unpushed. Never
+//                        writes anything. Always safe to run; the cost
+//                        is bandwidth + time, not data integrity.
+//
+//   ox session redact  — destructive interactive rewrite. Runs the same
+//                        hydration + scan as `audit`, then snapshots the
+//                        ledger, prompts per-file [y/N/q], rewrites
+//                        bytes, appends a RedactionPass to each
+//                        affected session's meta.json (ox-8bfh), and
+//                        amends the holding commit. Refuses findings
+//                        in already-pushed commits.
+//
+// Both share the same hydration + scan + per-file enumeration
+// (runRedactHistoryWorkflow); the difference is whether the interactive
+// rewrite tail runs.
+
+var sessionAuditCmd = &cobra.Command{
+	Use:   "audit",
+	Short: "Audit session recordings for credential patterns (read-only; expensive)",
+	Long: `Audit every session recording in the local Ledger for credential patterns.
+Read-only — never modifies files, never amends commits, never uploads.
+
+Cost: this command force-hydrates every LFS-pointer session file via the
+LFS Batch API before scanning, because pointer-stub bytes match no
+credential pattern and would silently produce a clean-looking lie.
+Hydration is bounded by network throughput and the number of dehydrated
+sessions; on a fresh clone with hundreds of sessions this can take
+minutes and pull tens of megabytes. Sessions that fail to hydrate are
+surfaced as a Warning so partial coverage is never mistaken for clean.
+
+Findings are reported with detector name + file + line; matched bytes
+are NEVER printed (ox-zyg7). The output stamps the catalog version + a
+sha256 hash that produced the findings, so future re-audits can decide
+whether a newer ruleset would catch additional leaks.
+
+For interactive cleanup of any findings, run ` + "`ox session redact`" + `.`,
+	RunE: runSessionAudit,
+}
+
+var sessionRedactCmd = &cobra.Command{
+	Use:   "redact",
+	Short: "Interactively redact credentials in session recordings (destructive; expensive)",
+	Long: `Interactively redact each credential finding in committed-but-not-yet-pushed
+session recordings. Runs the full audit pass first, then prompts
+per-file for approval.
+
+Cost: same hydration cost as ` + "`ox session audit`" + ` (LFS Batch API fetch of
+every dehydrated session), plus a per-file rewrite + ledger snapshot +
+git amend on every approved file. Plan for minutes-not-seconds on a
+large ledger.
 
 Workflow:
 
-  1. ` + "`ox doctor --check=ledger-secrets`" + ` first — read-only audit.
-  2. ` + "`ox session redact-history`" + ` — interactive cleanup.
+  1. ` + "`ox session audit`" + ` first — read-only, confirms what would change.
+  2. ` + "`ox session redact`" + ` — interactive cleanup.
   3. After cleanup, ` + "`ox session push`" + ` (or normal session-stop flow) republishes.
 
 Safety:
@@ -69,61 +124,75 @@ Safety:
     correct response is: rotate the leaked credential, mark the finding
     as known, and follow up via the team comms process.
   - Per-finding human approval. There is no bulk-approve flag.
-  - --dry-run lists findings without snapshotting or modifying anything.`,
-	RunE: runSessionRedactHistory,
+  - Each redaction pass appends a RedactionPass entry to the session's
+    meta.json (ox-8bfh) recording WHO redacted, WHEN, with WHICH catalog
+    version+hash, and WHAT was caught — never the matched bytes.`,
+	RunE: runSessionRedact,
 }
 
-// dry-run and ledger-path are intentionally the only flags here. Adding a
-// "yes to all" override is deliberately omitted — per ox-pd5f the
-// per-finding gate IS the safety mechanism.
+// Flag storage. Each command reads from its own variable so cobra's
+// flag namespacing stays clean.
 var (
-	redactHistoryDryRun     bool
-	redactHistoryLedgerPath string
-	redactHistoryBackupDir  string
+	auditLedgerPath string
+
+	redactLedgerPath string
+	redactBackupDir  string
 )
 
 func init() {
-	sessionRedactHistoryCmd.Flags().BoolVar(&redactHistoryDryRun, "dry-run", false,
-		"Show what would change without snapshotting or modifying anything")
-	sessionRedactHistoryCmd.Flags().StringVar(&redactHistoryLedgerPath, "ledger-path", "",
+	sessionAuditCmd.Flags().StringVar(&auditLedgerPath, "ledger-path", "",
 		"Override the ledger path (defaults to the current project's ledger)")
-	sessionRedactHistoryCmd.Flags().StringVar(&redactHistoryBackupDir, "backup-dir", "",
-		"Override the backup directory (defaults to ~/.local/share/sageox/backups/redact-history/)")
+	sessionCmd.AddCommand(sessionAuditCmd)
 
-	// register under the existing `ox session` parent (see session.go).
-	sessionCmd.AddCommand(sessionRedactHistoryCmd)
+	sessionRedactCmd.Flags().StringVar(&redactLedgerPath, "ledger-path", "",
+		"Override the ledger path (defaults to the current project's ledger)")
+	sessionRedactCmd.Flags().StringVar(&redactBackupDir, "backup-dir", "",
+		"Override the backup directory (defaults to ~/.local/share/sageox/backups/redact-history/)")
+	sessionCmd.AddCommand(sessionRedactCmd)
 }
 
-// runSessionRedactHistory is the cobra RunE. It does only argument
-// validation + branching; the real workflow lives in
-// runRedactHistoryWorkflow so tests can drive it directly without going
-// through cobra.
-func runSessionRedactHistory(cmd *cobra.Command, args []string) error {
-	ledgerPath, err := redactHistoryResolveLedger()
+// runSessionAudit is the cobra entrypoint for the read-only audit
+// surface. Pins DryRun=true on the shared workflow so no rewrite can
+// happen even if a future caller passes the wrong opts.
+func runSessionAudit(cmd *cobra.Command, args []string) error {
+	ledgerPath, err := resolveLedgerPathForSessionCmd(auditLedgerPath)
 	if err != nil {
 		return err
 	}
-	// ProjectRoot drives openSessionContent's hydration call (which uses the
-	// project's auth/endpoint to talk to the LFS Batch API). Empty when
-	// --ledger-path is used without a project context; hydration will fail
-	// in that case but the scan still works on whatever's already in cache.
-	projectRoot := findGitRoot()
 	opts := redactHistoryOptions{
-		ProjectRoot: projectRoot,
+		ProjectRoot: findGitRoot(),
 		LedgerPath:  ledgerPath,
-		DryRun:      redactHistoryDryRun,
-		BackupDir:   redactHistoryBackupDir,
+		DryRun:      true,
 		Stdin:       cmd.InOrStdin(),
 		Stdout:      cmd.OutOrStdout(),
 	}
 	return runRedactHistoryWorkflow(opts)
 }
 
-// redactHistoryResolveLedger returns the ledger path, honoring the
-// --ledger-path flag if set, otherwise resolving from the project.
-func redactHistoryResolveLedger() (string, error) {
-	if redactHistoryLedgerPath != "" {
-		return redactHistoryLedgerPath, nil
+// runSessionRedact is the cobra entrypoint for the destructive
+// interactive surface. Pins DryRun=false; rewrite proceeds.
+func runSessionRedact(cmd *cobra.Command, args []string) error {
+	ledgerPath, err := resolveLedgerPathForSessionCmd(redactLedgerPath)
+	if err != nil {
+		return err
+	}
+	opts := redactHistoryOptions{
+		ProjectRoot: findGitRoot(),
+		LedgerPath:  ledgerPath,
+		DryRun:      false,
+		BackupDir:   redactBackupDir,
+		Stdin:       cmd.InOrStdin(),
+		Stdout:      cmd.OutOrStdout(),
+	}
+	return runRedactHistoryWorkflow(opts)
+}
+
+// resolveLedgerPathForSessionCmd is the common ledger-path resolver
+// shared by audit and redact. Returns the explicit override when set,
+// otherwise the current project's ledger.
+func resolveLedgerPathForSessionCmd(override string) (string, error) {
+	if override != "" {
+		return override, nil
 	}
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
@@ -142,6 +211,7 @@ func redactHistoryResolveLedger() (string, error) {
 	}
 	return path, nil
 }
+
 
 // redactHistoryOptions bundles inputs so the workflow can be unit-tested
 // with synthetic stdin/stdout and an override backup directory.

@@ -102,7 +102,7 @@ func TestWriteRedactionPassesPerSession_AppendsToMeta(t *testing.T) {
 	require.Len(t, got1.Redactions, 1)
 	assert.Equal(t, "ox-secrets-N9-cafebabe", got1.Redactions[0].CatalogVersion)
 	assert.Equal(t, 2, got1.Redactions[0].Summary.Total)
-	assert.Equal(t, "ox session redact-history", got1.Redactions[0].AppliedBy)
+	assert.Equal(t, "ox session redact", got1.Redactions[0].AppliedBy)
 	firstPassID := got1.Redactions[0].PassID
 	assert.NotEmpty(t, firstPassID, "pass id must be populated")
 

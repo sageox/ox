@@ -74,7 +74,7 @@ func writeRedactionPassesPerSession(
 		return nil, fmt.Errorf("generate pass id: %w", err)
 	}
 	appliedAt := time.Now().UTC()
-	appliedBy := "ox session redact-history"
+	appliedBy := "ox session redact"
 
 	out := make([]string, 0, len(bySession))
 	for sessionName, entries := range bySession {

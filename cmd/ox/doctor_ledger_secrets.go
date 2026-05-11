@@ -87,7 +87,7 @@ const ledgerSecretsSizeCap = 8 * 1024 * 1024
 // Per ox-zyg7: read-only by default; the check NEVER prints matched bytes,
 // NEVER uploads findings, NEVER mutates the ledger. The `fix` argument is
 // ignored — there's no auto-fix for "credential in committed history".
-// The companion `ox session redact-history` tool (ox-pd5f) handles
+// The companion `ox session redact` tool (ox-pd5f) handles
 // per-finding interactive cleanup.
 func checkLedgerSecrets(fix bool) checkResult {
 	name := "Ledger credential scan"
@@ -174,7 +174,7 @@ func checkLedgerSecrets(fix bool) checkResult {
 	summary := fmt.Sprintf("found %d credential pattern(s) across %d distinct detectors (%s)",
 		totalCount, len(result.Findings), scope)
 
-	guidance := "Run `ox session redact-history` for interactive per-finding cleanup. " +
+	guidance := "Run `ox session audit` to see per-line findings, then `ox session redact` for interactive cleanup. " +
 		"For already-pushed commits, see docs/security/credential-redaction.md."
 
 	return FailedCheck(name, summary+"\n"+details.String(), guidance)
@@ -215,7 +215,7 @@ func resolveLedgerPathForAudit(localCfg *config.LocalConfig) string {
 // openSessionContent writes hydrated bytes to .sageox/cache/sessions/
 // per .claude/rules/cache-only-design.md, never in-place.
 //
-// Exposed (unexported) for use by `ox session redact-history` so both
+// Exposed (unexported) for use by `ox session audit` and `ox session redact` so all
 // surfaces share the same definition of "what counts as a finding."
 func scanLedgerForSecrets(projectRoot, ledgerPath string) (*ledgerSecretsScanResult, error) {
 	redactor := session.NewRedactor()
