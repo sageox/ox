@@ -109,9 +109,11 @@ Contract:
 
 - **Stdout:** nothing when ox is already at the skill's pin; download /
   verify / extract progress when an in-place upgrade runs.
-- **Stderr:** on any failure, a two-line message — an `error:` line
-  describing what's wrong, followed by a `fix:` line with the
-  remediation. Surface both verbatim to the user.
+- **Stderr:** on failure, surface stderr verbatim to the user — do not
+  trim, reformat, or summarize. Most failure paths emit an `error:`
+  line followed by a `fix:` line, but some emit a single line and
+  others include captured command stderr (e.g. when `ox version`
+  itself fails to run), so the line count is not fixed.
 - **Exit:**
   - `0` — ox is ready (either already current, or upgraded in place);
     continue to § 4.

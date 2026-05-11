@@ -75,9 +75,12 @@ if [ ! -f "$INSTALL_SCRIPT" ]; then
   echo "fix: reinstall this skill via clawhub" >&2
   exit 2
 fi
-skill_pin="$(grep -E '^OX_INSTALL_REF=' "$INSTALL_SCRIPT" \
-  | head -n1 \
-  | sed -E 's/^OX_INSTALL_REF="([^"]*)".*$/\1/')"
+# awk over grep|head|sed: a no-match grep exits non-zero, and under
+# `set -euo pipefail` that would silently abort the script inside this
+# command substitution before the empty-check below ever ran. awk
+# always exits 0 (printing nothing when the pattern doesn't match), so
+# control reaches the empty-check and emits the proper remediation.
+skill_pin="$(awk -F'"' '/^OX_INSTALL_REF="/ { print $2; exit }' "$INSTALL_SCRIPT")"
 if [ -z "$skill_pin" ]; then
   echo "error: could not read OX_INSTALL_REF from $INSTALL_SCRIPT" >&2
   echo "fix: reinstall this skill via clawhub" >&2
