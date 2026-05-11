@@ -167,12 +167,15 @@ func TestClassifyFindingsByPushStatus_SplitsCorrectly(t *testing.T) {
 }
 
 // TestRunRedactHistoryWorkflow_DryRunListsButDoesntModify is the load-
-// bearing test that --dry-run is truly inert.
+// bearing test that --dry-run is truly inert. Fixtures use the
+// session-scoped layout enforced by ox-zukx (scan iterates
+// sessions/<name>/, not loose files at sessions/ root).
 func TestRunRedactHistoryWorkflow_DryRunListsButDoesntModify(t *testing.T) {
 	work := makeLedgerWithCommitAndOrigin(t, map[string]string{
-		"sessions/leak.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
+		"sessions/leaky/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
 	})
-	originalBytes, err := os.ReadFile(filepath.Join(work, "sessions/leak.jsonl"))
+	leakPath := filepath.Join(work, "sessions/leaky/raw.jsonl")
+	originalBytes, err := os.ReadFile(leakPath)
 	require.NoError(t, err)
 	backupDir := t.TempDir()
 	out := &bytes.Buffer{}
@@ -187,7 +190,7 @@ func TestRunRedactHistoryWorkflow_DryRunListsButDoesntModify(t *testing.T) {
 	require.NoError(t, err)
 
 	// file must be unchanged
-	after, err := os.ReadFile(filepath.Join(work, "sessions/leak.jsonl"))
+	after, err := os.ReadFile(leakPath)
 	require.NoError(t, err)
 	assert.Equal(t, originalBytes, after, "dry-run must not modify files")
 
@@ -198,17 +201,21 @@ func TestRunRedactHistoryWorkflow_DryRunListsButDoesntModify(t *testing.T) {
 
 	// output must mention the finding and the path:line
 	assert.Contains(t, out.String(), "aws_access_key")
-	assert.Contains(t, out.String(), "sessions/leak.jsonl:1")
+	assert.Contains(t, out.String(), "sessions/leaky/raw.jsonl:1")
 	// output must NOT leak the secret bytes
 	assert.NotContains(t, out.String(), "AKIAIOSFODNN7EXAMPLE")
 }
 
 // TestRunRedactHistoryWorkflow_InteractiveYesRedacts verifies that
 // answering "y" to the prompt actually scrubs the file and amends the
-// commit, while preserving the canary in the snapshot.
+// commit, while preserving the canary in the snapshot. Also exercises
+// the ox-8bfh path that appends a RedactionPass to meta.json — the
+// fixture seeds a minimum-valid meta.json so MutateSessionMeta has
+// something to mutate.
 func TestRunRedactHistoryWorkflow_InteractiveYesRedacts(t *testing.T) {
 	work := makeLedgerWithCommitAndOrigin(t, map[string]string{
-		"sessions/leak.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
+		"sessions/leaky/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
+		"sessions/leaky/meta.json": minimalMetaJSON("leaky", "OxLEAK"),
 	})
 	backupDir := t.TempDir()
 	out := &bytes.Buffer{}
@@ -222,7 +229,7 @@ func TestRunRedactHistoryWorkflow_InteractiveYesRedacts(t *testing.T) {
 	require.NoError(t, err)
 
 	// the working-tree file must be scrubbed
-	after, err := os.ReadFile(filepath.Join(work, "sessions/leak.jsonl"))
+	after, err := os.ReadFile(filepath.Join(work, "sessions/leaky/raw.jsonl"))
 	require.NoError(t, err)
 	assert.NotContains(t, string(after), "AKIA", "file must be redacted in place")
 	assert.Contains(t, string(after), "[REDACTED_AWS_KEY]")
@@ -246,9 +253,10 @@ func TestRunRedactHistoryWorkflow_InteractiveYesRedacts(t *testing.T) {
 // not the operator approves the change.
 func TestRunRedactHistoryWorkflow_NoSkipsLeavesFileUnchanged(t *testing.T) {
 	work := makeLedgerWithCommitAndOrigin(t, map[string]string{
-		"sessions/leak.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
+		"sessions/leaky/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
 	})
-	originalBytes, err := os.ReadFile(filepath.Join(work, "sessions/leak.jsonl"))
+	leakPath := filepath.Join(work, "sessions/leaky/raw.jsonl")
+	originalBytes, err := os.ReadFile(leakPath)
 	require.NoError(t, err)
 	backupDir := t.TempDir()
 	out := &bytes.Buffer{}
@@ -261,7 +269,7 @@ func TestRunRedactHistoryWorkflow_NoSkipsLeavesFileUnchanged(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	after, err := os.ReadFile(filepath.Join(work, "sessions/leak.jsonl"))
+	after, err := os.ReadFile(leakPath)
 	require.NoError(t, err)
 	assert.Equal(t, originalBytes, after, "declining prompt must leave file unchanged")
 
@@ -274,10 +282,11 @@ func TestRunRedactHistoryWorkflow_NoSkipsLeavesFileUnchanged(t *testing.T) {
 // "q" stops the loop before processing subsequent files.
 func TestRunRedactHistoryWorkflow_QuitAbortsWithoutWritingMore(t *testing.T) {
 	work := makeLedgerWithCommitAndOrigin(t, map[string]string{
-		"sessions/a.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
-		"sessions/b.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
+		"sessions/sess-a/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
+		"sessions/sess-b/raw.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
 	})
-	originalB, err := os.ReadFile(filepath.Join(work, "sessions/b.jsonl"))
+	bPath := filepath.Join(work, "sessions/sess-b/raw.jsonl")
+	originalB, err := os.ReadFile(bPath)
 	require.NoError(t, err)
 	out := &bytes.Buffer{}
 
@@ -289,11 +298,30 @@ func TestRunRedactHistoryWorkflow_QuitAbortsWithoutWritingMore(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// b.jsonl must be unchanged (we quit before reaching it OR after the first prompt)
-	stillThere, err := os.ReadFile(filepath.Join(work, "sessions/b.jsonl"))
+	// sess-b raw.jsonl must be unchanged (we quit before reaching it OR after the first prompt)
+	stillThere, err := os.ReadFile(bPath)
 	require.NoError(t, err)
 	assert.Equal(t, originalB, stillThere)
 	assert.Contains(t, out.String(), "Aborting")
+}
+
+// minimalMetaJSON returns a JSON string for a meta.json that just clears
+// the lfs.SessionMeta.Validate() invariants. Used by tests that exercise
+// the real-write path (ox-8bfh appends a RedactionPass via
+// MutateSessionMeta, which insists on an existing meta.json). Fields
+// kept tiny on purpose so a future Validate() addition won't silently
+// break — the test will fail loudly and prompt an explicit update here.
+func minimalMetaJSON(sessionName, agentID string) string {
+	return `{
+  "version": "1.0",
+  "session_name": "` + sessionName + `",
+  "username": "test-user",
+  "agent_id": "` + agentID + `",
+  "agent_type": "claude-code",
+  "created_at": "2026-05-11T00:00:00Z",
+  "files": {}
+}
+`
 }
 
 // mustGitOutput runs git -C dir args... and returns stdout.
