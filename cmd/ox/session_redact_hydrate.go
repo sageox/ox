@@ -66,6 +66,12 @@ func hydrateAllSessionsForScan(projectRoot, ledgerPath string, out io.Writer) (h
 		sessionDir := filepath.Join(sessionsRoot, sessionName)
 		files, err := os.ReadDir(sessionDir)
 		if err != nil {
+			// Can't even list this session's directory. Don't silently
+			// drop it from coverage — count it as Failed and tell the
+			// operator. Otherwise the hydration summary could claim
+			// full coverage while a whole session was never inspected.
+			summary.Failed++
+			fmt.Fprintf(out, "  failed to inspect %s: %v\n", sessionName, err)
 			continue
 		}
 		sessionNeedsAny := false

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -106,13 +107,41 @@ func TestWriteRedactionPassesPerSession_AppendsToMeta(t *testing.T) {
 	firstPassID := got1.Redactions[0].PassID
 	assert.NotEmpty(t, firstPassID, "pass id must be populated")
 
-	// Critical: never store matched bytes.
-	for _, p := range got1.Redactions {
-		for _, e := range p.Entries {
-			// RedactionEntry has no Original field; trip on any future
-			// regression that adds one and starts populating it.
-			_ = e
-		}
+	// Critical: never store matched bytes. Use reflection so a future
+	// `Original`/`Match`/`Bytes` field added to lfs.RedactionEntry can't
+	// silently start carrying secret material. Pair this with a JSON
+	// round-trip check on the serialized payload — if anything secret-y
+	// makes it into the bytes that hit disk, we want to know.
+	bannedFieldNames := map[string]bool{
+		"Original":  true, // legacy session.RedactionResult shape
+		"Match":     true,
+		"Matched":   true,
+		"Bytes":     true,
+		"RawBytes":  true,
+		"Plaintext": true,
+		"Secret":    true,
+		"Value":     true,
+	}
+	entryType := reflect.TypeOf(lfs.RedactionEntry{})
+	for i := 0; i < entryType.NumField(); i++ {
+		fname := entryType.Field(i).Name
+		assert.Falsef(t, bannedFieldNames[fname],
+			"RedactionEntry must NEVER add a field named %q (would risk leaking matched bytes — ox-zyg7)", fname)
+	}
+	// Also verify the field count stays minimal so a stealth `Original`
+	// under a different name (Capture, Span, etc.) gets caught by the
+	// reviewer. If a legitimate new field needs to land, bump this
+	// number AND explain in the assertion message why it's safe.
+	assert.LessOrEqual(t, entryType.NumField(), 3,
+		"RedactionEntry should stay {File, Line, Detector}; adding fields requires audit")
+
+	// Belt-and-braces: serialize the persisted meta.json and assert no
+	// canary bytes leaked into the JSON payload.
+	persistedBytes, err := os.ReadFile(filepath.Join(sessDir, "meta.json"))
+	require.NoError(t, err)
+	for _, canary := range []string{"AKIA", "ghp_", "ghs_", "github_pat_"} {
+		assert.NotContainsf(t, string(persistedBytes), canary,
+			"persisted meta.json must not contain detector canary %q", canary)
 	}
 
 	// Second pass — must APPEND, not overwrite.

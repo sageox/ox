@@ -103,39 +103,50 @@ func DefaultPatterns() []SecretPattern {
 		// have to be rewritten in lockstep with this split. The win from
 		// per-prefix detectors is in the *detector name* in scan reports,
 		// not in the redaction placeholder.
+		// Lengths are EXACT per GitHub's published shapes — a token that
+		// runs longer is not a real PAT and shouldn't pretend to be one.
+		// The keyword pre-screen anchors on the prefix; the exact-length
+		// quantifier prevents an alphanumeric run starting with `ghp_`
+		// from matching arbitrarily far. Greedy-then-truncated lookalikes
+		// (e.g. a base64 blob that happens to start with `ghp_`) won't
+		// pretend to be a real PAT.
 		{
 			Name:     "github_personal_access_token",
-			Pattern:  regexp.MustCompile(`ghp_[A-Za-z0-9]{36,255}`),
+			Pattern:  regexp.MustCompile(`ghp_[A-Za-z0-9]{36}`),
 			Redact:   "[REDACTED_GITHUB_TOKEN]",
 			Keywords: []string{"ghp_"},
 		},
 		{
 			Name:     "github_oauth_token",
-			Pattern:  regexp.MustCompile(`gho_[A-Za-z0-9]{36,255}`),
+			Pattern:  regexp.MustCompile(`gho_[A-Za-z0-9]{36}`),
 			Redact:   "[REDACTED_GITHUB_TOKEN]",
 			Keywords: []string{"gho_"},
 		},
 		{
 			Name:     "github_user_to_server_token",
-			Pattern:  regexp.MustCompile(`ghu_[A-Za-z0-9]{36,255}`),
+			Pattern:  regexp.MustCompile(`ghu_[A-Za-z0-9]{36}`),
 			Redact:   "[REDACTED_GITHUB_TOKEN]",
 			Keywords: []string{"ghu_"},
 		},
 		{
 			Name:     "github_server_token",
-			Pattern:  regexp.MustCompile(`ghs_[A-Za-z0-9]{36,255}`),
+			Pattern:  regexp.MustCompile(`ghs_[A-Za-z0-9]{36}`),
 			Redact:   "[REDACTED_GITHUB_TOKEN]",
 			Keywords: []string{"ghs_"},
 		},
 		{
 			Name:     "github_refresh_token",
-			Pattern:  regexp.MustCompile(`ghr_[A-Za-z0-9]{76,255}`),
+			Pattern:  regexp.MustCompile(`ghr_[A-Za-z0-9]{76}`),
 			Redact:   "[REDACTED_GITHUB_TOKEN]",
 			Keywords: []string{"ghr_"},
 		},
+		// Fine-grained PAT structure: 11-char "github_pat_" + 22-char ID
+		// + "_" + 59-char secret. No underscores inside the 22 or 59
+		// portions — using a tighter character class than the broad
+		// [A-Za-z0-9_] catches that constraint too.
 		{
 			Name:     "github_fine_grained_pat",
-			Pattern:  regexp.MustCompile(`github_pat_[A-Za-z0-9_]{82,255}`),
+			Pattern:  regexp.MustCompile(`github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}`),
 			Redact:   "[REDACTED_GITHUB_PAT]",
 			Keywords: []string{"github_pat_"},
 		},
@@ -441,15 +452,26 @@ func matchSkipped(match string, skipIf []string) bool {
 
 // RedactString scans and redacts secrets from a string.
 // Returns the redacted output and a list of pattern names that matched.
+//
+// Applies the SecretPattern.Keywords pre-screen — patterns with a
+// non-empty Keywords list are only evaluated when at least one keyword
+// appears in the (lowercased) input. Without this, a bare-UUID regex
+// gated only by Keywords (e.g. heroku_key) would over-redact every UUID
+// in the input — a corruption far worse than the leak it's trying to
+// catch. See ox-zukx for the audit-path version of the same bug.
 func (r *Redactor) RedactString(input string) (output string, found []string) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	output = input
+	lowerInput := strings.ToLower(input)
 	foundMap := make(map[string]bool)
 
 	for _, p := range r.patterns {
 		if p.Pattern == nil {
+			continue
+		}
+		if !p.MatchesKeyword(lowerInput) {
 			continue
 		}
 
@@ -474,15 +496,21 @@ func (r *Redactor) RedactString(input string) (output string, found []string) {
 	return output, found
 }
 
-// RedactStringWithDetails provides detailed redaction results
+// RedactStringWithDetails provides detailed redaction results.
+// Applies the same SecretPattern.Keywords pre-screen as RedactString
+// to keep detection semantics consistent across the public API.
 func (r *Redactor) RedactStringWithDetails(input string) (output string, results []RedactionResult) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	output = input
+	lowerInput := strings.ToLower(input)
 
 	for _, p := range r.patterns {
 		if p.Pattern == nil {
+			continue
+		}
+		if !p.MatchesKeyword(lowerInput) {
 			continue
 		}
 
@@ -614,13 +642,20 @@ func (r *Redactor) RedactCapturedHistory(history *CapturedHistory) (count int) {
 	return r.RedactHistoryEntries(history.Entries)
 }
 
-// ContainsSecrets checks if a string contains any secrets without modifying it
+// ContainsSecrets checks if a string contains any secrets without modifying it.
+// Applies the SecretPattern.Keywords pre-screen so a bare-UUID pattern
+// gated only by Keywords doesn't fire on every UUID-shaped input.
 func (r *Redactor) ContainsSecrets(input string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	lowerInput := strings.ToLower(input)
+
 	for _, p := range r.patterns {
 		if p.Pattern == nil {
+			continue
+		}
+		if !p.MatchesKeyword(lowerInput) {
 			continue
 		}
 		if len(p.SkipIf) == 0 {

@@ -273,7 +273,15 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	// the audit doesn't need it; the cleanup tool does.
 	findings, err := enumerateRedactHistoryFindings(opts.ProjectRoot, opts.LedgerPath, scanResult)
 	if err != nil {
-		return fmt.Errorf("enumerate findings: %w", err)
+		// Partial enumeration is useful — we still have whatever findings
+		// the successful files produced. Surface the issue as a Warning
+		// (loudly, so the operator can't miss it) but keep going. A
+		// total-loss return is reserved for cases where `findings` is
+		// nil; here we have actionable data alongside the error.
+		fmt.Fprintf(opts.Stdout, "\nWarning: enumeration partial — %v\n\n", err)
+		if findings == nil {
+			return fmt.Errorf("enumerate findings: %w", err)
+		}
 	}
 
 	// Classify each finding by pushed/unpushed. Pushed-commit findings are
@@ -460,6 +468,11 @@ func enumerateRedactHistoryFindings(projectRoot, ledgerPath string, audit *ledge
 		}
 		return nil, fmt.Errorf("read sessions dir: %w", err)
 	}
+	// Enumeration errors that previously got swallowed by `continue` are
+	// now collected so the caller surfaces them. A file that was visible
+	// in the aggregate scan can't silently vanish from the per-line list
+	// without warning — that pattern hid a real failure mode in ox-zukx.
+	var enumErrs []string
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -468,6 +481,7 @@ func enumerateRedactHistoryFindings(projectRoot, ledgerPath string, audit *ledge
 		sessionDir := filepath.Join(sessionsRoot, sessionName)
 		files, err := os.ReadDir(sessionDir)
 		if err != nil {
+			enumErrs = append(enumErrs, fmt.Sprintf("%s: list dir: %v", sessionName, err))
 			continue
 		}
 		for _, fEntry := range files {
@@ -480,14 +494,21 @@ func enumerateRedactHistoryFindings(projectRoot, ledgerPath string, audit *ledge
 			}
 			contentPath, err := openSessionContent(projectRoot, ledgerPath, sessionName, filename)
 			if err != nil {
+				enumErrs = append(enumErrs, fmt.Sprintf("%s/%s: open: %v", sessionName, filename, err))
 				continue
 			}
 			info, err := os.Stat(contentPath)
-			if err != nil || info.Size() > ledgerSecretsSizeCap {
+			if err != nil {
+				enumErrs = append(enumErrs, fmt.Sprintf("%s/%s: stat: %v", sessionName, filename, err))
+				continue
+			}
+			if info.Size() > ledgerSecretsSizeCap {
+				// Over-cap is a deliberate skip, not an error.
 				continue
 			}
 			f, err := os.Open(contentPath) //nolint:gosec // G304: path resolved via openSessionContent (ledger-owned)
 			if err != nil {
+				enumErrs = append(enumErrs, fmt.Sprintf("%s/%s: read: %v", sessionName, filename, err))
 				continue
 			}
 			scanner := bufio.NewScanner(f)
@@ -502,6 +523,9 @@ func enumerateRedactHistoryFindings(projectRoot, ledgerPath string, audit *ledge
 					out = append(out, redactHistoryFinding{Detector: name, Path: rel, Line: lineNo})
 				}
 			}
+			if scanErr := scanner.Err(); scanErr != nil {
+				enumErrs = append(enumErrs, fmt.Sprintf("%s: scan: %v", rel, scanErr))
+			}
 			f.Close()
 		}
 	}
@@ -515,6 +539,16 @@ func enumerateRedactHistoryFindings(projectRoot, ledgerPath string, audit *ledge
 		}
 		return out[i].Detector < out[j].Detector
 	})
+	if len(enumErrs) > 0 {
+		// Don't return an error that aborts the workflow — partial
+		// enumeration is still useful and the redact-history caller
+		// already prints a Warning summary. Just attach the detail so
+		// the caller can surface it. Today the caller logs the count
+		// via the existing hydration Warning path; future work can
+		// pass the slice through a richer return type if needed.
+		return out, fmt.Errorf("enumeration incomplete (%d issue(s)):\n  %s",
+			len(enumErrs), strings.Join(enumErrs, "\n  "))
+	}
 	return out, nil
 }
 

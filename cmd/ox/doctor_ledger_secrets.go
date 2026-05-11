@@ -35,16 +35,27 @@ type ledgerSecretsFinding struct {
 // ledgerSecretsScanResult is what checkLedgerSecrets passes back. Findings
 // are keyed by detector name; FilesScanned/SessionsScanned describe scope
 // for "scanned N session recordings, found 0 secrets" reassurance.
-// SessionsHydrated/SessionsSkipped report on the LFS auto-hydration loop:
-// a non-zero SessionsSkipped means coverage is incomplete and the result
-// MUST NOT be reported as a clean bill of health.
+// SessionsHydrated, SessionsHydrationFailed, and SessionsEmpty report on
+// the LFS auto-hydration loop. A non-zero SessionsHydrationFailed means
+// coverage is incomplete and the result MUST NOT be reported as a clean
+// bill of health. SessionsEmpty is benign — it just means a session dir
+// existed but had no allowlisted files (e.g. legacy session with only
+// .html artifacts).
+//
+// SessionsSkipped is retained as the legacy alias and equals
+// SessionsHydrationFailed + SessionsEmpty for callers that don't need to
+// distinguish the two. The check itself uses the finer-grained fields so
+// "scan failed" and "nothing to scan" don't get conflated in the
+// PassedCheck / FailedCheck decision.
 type ledgerSecretsScanResult struct {
-	LedgerPath       string
-	FilesScanned     int
-	SessionsScanned  int
-	SessionsHydrated int // session dirs we auto-hydrated to cache during the scan
-	SessionsSkipped  int // session dirs we couldn't read at all (hydration failed)
-	Findings         map[string]*ledgerSecretsFinding
+	LedgerPath              string
+	FilesScanned            int
+	SessionsScanned         int
+	SessionsHydrated        int // sessions where at least one pointer was fetched from LFS during this call
+	SessionsHydrationFailed int // sessions where hydration or read errored — coverage is incomplete
+	SessionsEmpty           int // sessions where no allowlisted file was readable (no failure, just nothing to scan)
+	SessionsSkipped         int // legacy alias: SessionsHydrationFailed + SessionsEmpty
+	Findings                map[string]*ledgerSecretsFinding
 }
 
 // ledgerSecretsScanExts lists file extensions worth scanning inside a
@@ -146,12 +157,24 @@ func checkLedgerSecrets(fix bool) checkResult {
 	if result.SessionsHydrated > 0 {
 		scope += fmt.Sprintf("; auto-hydrated %d session(s) from LFS", result.SessionsHydrated)
 	}
-	if result.SessionsSkipped > 0 {
-		scope += fmt.Sprintf("; %d session(s) unscannable (hydration failed)", result.SessionsSkipped)
+	if result.SessionsHydrationFailed > 0 {
+		scope += fmt.Sprintf("; %d session(s) unscannable (hydration failed)", result.SessionsHydrationFailed)
+	}
+	if result.SessionsEmpty > 0 {
+		scope += fmt.Sprintf("; %d session(s) had no allowlisted content", result.SessionsEmpty)
 	}
 
-	if len(result.Findings) == 0 {
+	// Decision matrix (ox-zukx + ox-8bfh): a credible audit must not
+	// report a clean bill of health when coverage is incomplete.
+	// Hydration failures are the broken-coverage signal; empty sessions
+	// (no allowlisted content / over-cap files) are benign.
+	switch {
+	case len(result.Findings) == 0 && result.SessionsHydrationFailed == 0:
 		return PassedCheck(name, scope+"; no credential patterns found")
+	case len(result.Findings) == 0 && result.SessionsHydrationFailed > 0:
+		return FailedCheck(name,
+			scope+"; no findings reported BUT scan coverage is incomplete",
+			"Re-run after fixing connectivity / auth; until then this result is not a clean bill of health.")
 	}
 
 	// Build the failure message without ever including matched bytes.
@@ -244,12 +267,17 @@ func scanLedgerForSecrets(projectRoot, ledgerPath string) (*ledgerSecretsScanRes
 		sessionDir := filepath.Join(sessionsRoot, sessionName)
 		files, err := os.ReadDir(sessionDir)
 		if err != nil {
+			// Couldn't even list the session dir. Treat as a hard failure
+			// (not "nothing to scan") so the check downgrades the result.
+			result.SessionsHydrationFailed++
 			result.SessionsSkipped++
 			continue
 		}
 
 		hydratedThisSession := false
+		anyAllowlistedSeen := false
 		anyFileRead := false
+		anyFileFailed := false
 		for _, fEntry := range files {
 			if fEntry.IsDir() {
 				continue
@@ -258,32 +286,57 @@ func scanLedgerForSecrets(projectRoot, ledgerPath string) (*ledgerSecretsScanRes
 			if !ledgerSecretsScanExts[strings.ToLower(filepath.Ext(filename))] {
 				continue
 			}
+			anyAllowlistedSeen = true
 
 			contentPath, hydratedNow, err := resolveSessionContentForScan(projectRoot, ledgerPath, sessionName, filename)
 			if err != nil {
-				// Hydration failed (network, missing LFS object, etc.). Skip
-				// this file but keep going — other files in this session
-				// might still be locally readable.
+				// Hydration failed (network, missing LFS object, etc.).
+				// That's a real failure, not "no content to scan" —
+				// flag it so the check downgrades the result.
+				anyFileFailed = true
 				continue
 			}
 			if hydratedNow {
 				hydratedThisSession = true
 			}
 			info, err := os.Stat(contentPath)
-			if err != nil || info.Size() > ledgerSecretsSizeCap {
+			if err != nil {
+				anyFileFailed = true
+				continue
+			}
+			if info.Size() > ledgerSecretsSizeCap {
+				// Over-cap is a deliberate skip, not a failure — don't
+				// flag it as hydration-failed, but don't count the file
+				// as "read" either.
 				continue
 			}
 			anyFileRead = true
 			result.FilesScanned++
 			relForReport := filepath.Join("sessions", sessionName, filename)
 			if err := scanLedgerFileForSecrets(redactor, contentPath, relForReport, info.ModTime(), result); err != nil {
+				anyFileFailed = true
 				continue
 			}
 		}
 		if hydratedThisSession {
 			result.SessionsHydrated++
 		}
-		if !anyFileRead {
+		switch {
+		case anyFileFailed:
+			// At least one file in this session couldn't be hydrated or
+			// read. Coverage is incomplete — surface as a hydration
+			// failure so the doctor check downgrades the result.
+			result.SessionsHydrationFailed++
+			result.SessionsSkipped++
+		case !anyFileRead && anyAllowlistedSeen:
+			// Allowlisted files existed but all were over the size cap.
+			// Benign — nothing to scan, but no failure either.
+			result.SessionsEmpty++
+			result.SessionsSkipped++
+		case !anyFileRead && !anyAllowlistedSeen:
+			// Session dir has no allowlisted content at all (e.g.
+			// legacy session with only .html). Benign skip.
+			result.SessionsEmpty++
 			result.SessionsSkipped++
 		}
 	}

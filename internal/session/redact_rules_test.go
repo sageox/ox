@@ -405,10 +405,10 @@ regex "emp_[0-9]{6}" -> [REDACTED_EMPLOYEE_ID]
 		},
 		{
 			name: "mixed builtin and custom secrets",
-			input: `token=ghp_1234567890abcdefghijklmnopqrstuvwxyz12
+			input: `token=ghp_1234567890abcdefghijklmnopqrstuvwxyz
 curl -H "Authorization: Bearer $TOKEN" https://auth-service.k8s.acmecorp.net/verify`,
 			contains: []string{"[REDACTED_GITHUB_TOKEN]", "[REDACTED_INTERNAL_HOST]"},
-			absent:   []string{"ghp_1234567890abcdefghijklmnopqrstuvwxyz12", "auth-service.k8s.acmecorp.net"},
+			absent:   []string{"ghp_1234567890abcdefghijklmnopqrstuvwxyz", "auth-service.k8s.acmecorp.net"},
 		},
 		{
 			name:     "no false positive on similar but non-matching text",
@@ -588,7 +588,7 @@ func TestCustomRules_OverlappingRules(t *testing.T) {
 		redactor, errs := NewRedactorWithCustomRules(tmpDir)
 		require.Empty(t, errs)
 
-		input := "token=ghp_1234567890abcdefghijklmnopqrstuvwxyz12"
+		input := "token=ghp_1234567890abcdefghijklmnopqrstuvwxyz"
 		output, _ := redactor.RedactString(input)
 
 		// builtin github_token pattern runs first and wins
@@ -782,7 +782,7 @@ func TestCustomRules_SessionStopPath(t *testing.T) {
 			Content:    "bash output",
 			ToolName:   "bash",
 			ToolInput:  "curl https://payments.internal.acme.net/health",
-			ToolOutput: "Connected. Token: ghp_1234567890abcdefghijklmnopqrstuvwxyz12",
+			ToolOutput: "Connected. Token: ghp_1234567890abcdefghijklmnopqrstuvwxyz",
 		},
 		{
 			Type:    EntryTypeAssistant,
@@ -812,7 +812,7 @@ func TestCustomRules_SessionStopPath(t *testing.T) {
 		"content":    "connecting to payments.internal.acme.net",
 		"tool_input": "ACME-KEY-deadbeef0123456789abcdef01234567",
 		"tool_output": map[string]any{
-			"result": "token ghp_1234567890abcdefghijklmnopqrstuvwxyz12 accepted",
+			"result": "token ghp_1234567890abcdefghijklmnopqrstuvwxyz accepted",
 		},
 		"metadata": []any{
 			"host=payments.internal.acme.net",

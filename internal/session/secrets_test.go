@@ -205,19 +205,19 @@ func TestRedactString_GitHubTokens(t *testing.T) {
 	}{
 		{
 			name:     "github personal access token",
-			input:    "token: ghp_1234567890abcdefghijklmnopqrstuvwxyz12",
+			input:    "token: ghp_1234567890abcdefghijklmnopqrstuvwxyz",
 			expected: "token: [REDACTED_GITHUB_TOKEN]",
 			wantFind: true,
 		},
 		{
 			name:     "github oauth token",
-			input:    "gho_1234567890abcdefghijklmnopqrstuvwxyz12",
+			input:    "gho_1234567890abcdefghijklmnopqrstuvwxyz",
 			expected: "[REDACTED_GITHUB_TOKEN]",
 			wantFind: true,
 		},
 		{
 			name:     "github server token",
-			input:    "ghs_1234567890abcdefghijklmnopqrstuvwxyz12",
+			input:    "ghs_1234567890abcdefghijklmnopqrstuvwxyz",
 			expected: "[REDACTED_GITHUB_TOKEN]",
 			wantFind: true,
 		},
@@ -225,13 +225,13 @@ func TestRedactString_GitHubTokens(t *testing.T) {
 			name: "github refresh token",
 			// Refresh tokens are 76 chars after the ghr_ prefix; older fixture
 			// used 38 chars (the classic-PAT tail length). Updated in ox-def1.
-			input:    "ghr_1234567890abcdefghijklmnopqrstuvwxyz1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZabcd",
+			input:    "ghr_abcdefghijklmnopqrstuvwxyz0987654321XYZWVUTSRQPONMLKJIHGFEDCBAzyxwvutsrqponm",
 			expected: "[REDACTED_GITHUB_TOKEN]",
 			wantFind: true,
 		},
 		{
 			name:     "github user token",
-			input:    "ghu_1234567890abcdefghijklmnopqrstuvwxyz12",
+			input:    "ghu_1234567890abcdefghijklmnopqrstuvwxyz",
 			expected: "[REDACTED_GITHUB_TOKEN]",
 			wantFind: true,
 		},
@@ -240,7 +240,7 @@ func TestRedactString_GitHubTokens(t *testing.T) {
 			// Real shape: 11-char "github_pat_" + 22-char ID + "_" + 59-char secret = 92 total.
 			// Updated from a shorter fixture in ox-def1 (the strict {82,255} tail
 			// length follows GitHub's published format and the user's spec).
-			input:    "github_pat_11ABCDEFGHIJ012345678901_aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789abcdefghijklmnopqRStUVWxYz",
+			input:    "github_pat_AABBCCDDEEFFGGHHIIJJ00_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456",
 			expected: "[REDACTED_GITHUB_PAT]",
 			wantFind: true,
 		},
@@ -619,7 +619,7 @@ func TestRedactString_MultipleSecrets(t *testing.T) {
 	input := `
 AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE
 AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-GITHUB_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz12
+GITHUB_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz
 `
 	r := NewRedactor()
 	output, found := r.RedactString(input)
@@ -701,7 +701,7 @@ func TestRedactEntries(t *testing.T) {
 				Type:      EntryTypeTool,
 				Content:   "Result output",
 				ToolName:  "bash",
-				ToolInput: "export GITHUB_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz12",
+				ToolInput: "export GITHUB_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz",
 			},
 		}
 		count := r.RedactEntries(entries)
@@ -718,7 +718,7 @@ func TestContainsSecrets(t *testing.T) {
 		expected bool
 	}{
 		{"AKIAIOSFODNN7EXAMPLE", true},
-		{"ghp_1234567890abcdefghijklmnopqrstuvwxyz12", true},
+		{"ghp_1234567890abcdefghijklmnopqrstuvwxyz", true},
 		{"-----BEGIN RSA PRIVATE KEY-----", true},
 		{"Normal text", false},
 		{"", false},
@@ -733,7 +733,7 @@ func TestContainsSecrets(t *testing.T) {
 func TestScanForSecrets(t *testing.T) {
 	r := NewRedactor()
 
-	input := "AKIAIOSFODNN7EXAMPLE and ghp_1234567890abcdefghijklmnopqrstuvwxyz12"
+	input := "AKIAIOSFODNN7EXAMPLE and ghp_1234567890abcdefghijklmnopqrstuvwxyz"
 	found := r.ScanForSecrets(input)
 
 	assert.True(t, containsPattern(found, "aws_access_key"))
@@ -936,7 +936,7 @@ func TestRedactHistorySecrets_TokenInToolOutput(t *testing.T) {
 				Content:    "Command completed",
 				ToolName:   "bash",
 				ToolInput:  "cat config.json",
-				ToolOutput: `{"token": "ghp_1234567890abcdefghijklmnopqrstuvwxyz12"}`,
+				ToolOutput: `{"token": "ghp_1234567890abcdefghijklmnopqrstuvwxyz"}`,
 				Timestamp:  time.Now(),
 			},
 		},
@@ -945,7 +945,7 @@ func TestRedactHistorySecrets_TokenInToolOutput(t *testing.T) {
 	count := RedactHistorySecrets(history)
 	assert.Equal(t, 1, count)
 	assert.Contains(t, history.Entries[0].ToolOutput, "[REDACTED_GITHUB_TOKEN]")
-	assert.NotContains(t, history.Entries[0].ToolOutput, "ghp_1234567890abcdefghijklmnopqrstuvwxyz12")
+	assert.NotContains(t, history.Entries[0].ToolOutput, "ghp_1234567890abcdefghijklmnopqrstuvwxyz")
 }
 
 func TestRedactHistorySecrets_MultipleSecrets(t *testing.T) {
@@ -973,7 +973,7 @@ func TestRedactHistorySecrets_MultipleSecrets(t *testing.T) {
 				Type:       "tool",
 				Content:    "Output",
 				ToolName:   "bash",
-				ToolInput:  "export GITHUB_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz12",
+				ToolInput:  "export GITHUB_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz",
 				ToolOutput: `{"secret": "client_secret=abc123def456789012345"}`,
 				Timestamp:  time.Now(),
 			},
@@ -992,7 +992,7 @@ func TestRedactHistorySecrets_MultipleSecrets(t *testing.T) {
 	// verify original secrets are gone
 	assert.NotContains(t, history.Entries[0].Content, "AKIAIOSFODNN7EXAMPLE")
 	assert.NotContains(t, history.Entries[1].Content, "password@localhost")
-	assert.NotContains(t, history.Entries[2].ToolInput, "ghp_1234567890abcdefghijklmnopqrstuvwxyz12")
+	assert.NotContains(t, history.Entries[2].ToolInput, "ghp_1234567890abcdefghijklmnopqrstuvwxyz")
 }
 
 func TestRedactHistorySecrets_NoSecrets(t *testing.T) {
@@ -1113,7 +1113,7 @@ func TestRedactHistorySecrets_AllFieldsWithSecrets(t *testing.T) {
 				Content:    "AWS: AKIAIOSFODNN7EXAMPLE",
 				ToolName:   "bash",
 				ToolInput:  `password="verysecret123"`,
-				ToolOutput: "ghp_1234567890abcdefghijklmnopqrstuvwxyz12",
+				ToolOutput: "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
 				Timestamp:  time.Now(),
 			},
 		},
@@ -1167,7 +1167,7 @@ func TestRedactCapturedHistory_DirectCall(t *testing.T) {
 			{
 				Seq:       1,
 				Type:      "user",
-				Content:   "Token: ghp_1234567890abcdefghijklmnopqrstuvwxyz12",
+				Content:   "Token: ghp_1234567890abcdefghijklmnopqrstuvwxyz",
 				Timestamp: time.Now(),
 			},
 		},
@@ -1472,7 +1472,7 @@ func BenchmarkRedactString_NoSecrets(b *testing.B) {
 
 func BenchmarkRedactString_WithSecrets(b *testing.B) {
 	r := NewRedactor()
-	input := "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE and token=ghp_1234567890abcdefghijklmnopqrstuvwxyz12"
+	input := "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE and token=ghp_1234567890abcdefghijklmnopqrstuvwxyz"
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

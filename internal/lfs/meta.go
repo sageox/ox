@@ -115,10 +115,30 @@ type SessionMeta struct {
 	// catch?" is auditable months later, and so re-runs after the
 	// catalog evolves can identify findings the older ruleset missed.
 	//
-	// Mutations MUST go through MutateSessionMeta so concurrent CLI /
-	// daemon writers serialize at the filesystem level — same flock
-	// path that prevented ox-lrrq from being recreated when this
-	// schema was added.
+	// # Concurrent-write safety (LOAD-BEARING)
+	//
+	// Mutations to this field MUST go through MutateSessionMeta so
+	// concurrent CLI / daemon writers serialize at the filesystem
+	// level — same flock path that prevented ox-lrrq from being
+	// recreated when this schema was added.
+	//
+	// WARNING (tracked in ox-q42i): there are pre-existing
+	// read-modify-write call sites that bypass MutateSessionMeta and
+	// call WriteSessionMetaOnly / WriteSessionMeta directly:
+	//
+	//   - cmd/ox/session_push_summary.go     (Files update)
+	//   - cmd/ox/session_regenerate.go       (Files update)
+	//   - cmd/ox/session_upload_cmd.go       (Files update)
+	//   - cmd/ox/agent_session.go            (initial write + Files update)
+	//   - internal/daemon/agentwork/session_finalize.go
+	//
+	// Each of those races with concurrent writers and can lose
+	// updates — including new Redactions entries written by
+	// ox session redact between the racing reader's read and write.
+	// The risk is bounded today because redact-history runs are
+	// operator-initiated and the daemon doesn't run during them in
+	// practice, but the invariant is fragile. Tracked separately so
+	// the cleanup lands in a focused PR.
 	//
 	// omitempty so legacy meta.json files keep round-tripping and
 	// older readers ignore the new field.

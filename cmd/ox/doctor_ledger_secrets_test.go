@@ -106,8 +106,20 @@ func TestScanLedgerForSecrets_OutOfScopeIgnored(t *testing.T) {
 		"AKIA appearances in data/, docs/, .git/ must NOT count")
 	assert.Equal(t, 1, result.Findings["aws_access_key"].FileCount)
 	assert.Equal(t, "sessions/real/raw.jsonl", result.Findings["aws_access_key"].Sample)
-	assert.NotContains(t, result.Findings, "github_token",
-		"github_token in .git/ must not be reachable: out of scope")
+	// After ox-def1 the broad `github_token` slug was retired. Assert
+	// absence of EVERY current GitHub slug so this test fails loudly if
+	// any of them starts firing on a file outside scope.
+	for _, slug := range []string{
+		"github_personal_access_token",
+		"github_oauth_token",
+		"github_user_to_server_token",
+		"github_server_token",
+		"github_refresh_token",
+		"github_fine_grained_pat",
+	} {
+		assert.NotContains(t, result.Findings, slug,
+			"%s in .git/ must not be reachable: out of scope", slug)
+	}
 }
 
 // TestScanLedgerForSecrets_SizeCap verifies oversized files are skipped.
