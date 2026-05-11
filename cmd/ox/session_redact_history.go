@@ -320,7 +320,13 @@ func enumerateRedactHistoryFindings(ledgerPath string, audit *ledgerSecretsScanR
 			return nil
 		}
 		rel, _ := filepath.Rel(ledgerPath, path)
-		f, err := os.Open(path)
+		// G122: filepath.WalkDir rooted at ledgerPath, which is an ox-owned
+		// directory under the user's XDG data dir. Symlink TOCTOU between
+		// the walker's stat and our Open is theoretical here — the threat
+		// model is an attacker with write access to the ledger directory,
+		// which already grants direct read of the secret content this
+		// scan is auditing.
+		f, err := os.Open(path) //nolint:gosec // G122: see comment above
 		if err != nil {
 			return nil
 		}
@@ -462,7 +468,11 @@ func snapshotLedger(ledgerPath, backupDir string) (string, string, error) {
 		if !info.Mode().IsRegular() {
 			return nil
 		}
-		fh, err := os.Open(path)
+		// G122: filepath.WalkDir rooted at ledgerPath, an ox-owned
+		// directory under the user's XDG data dir. Snapshotting is a
+		// read-only operation; symlink TOCTOU does not enable any
+		// privilege escalation beyond what the operating user already has.
+		fh, err := os.Open(path) //nolint:gosec // G122: see comment above
 		if err != nil {
 			return nil
 		}

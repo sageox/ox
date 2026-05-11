@@ -1,6 +1,7 @@
 package gitserver
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os/exec"
@@ -169,20 +170,6 @@ func MigrateLedgerCredentials(repoPath string, helperCmd string) (changed bool, 
 }
 
 // asErr is a tiny shim around errors.As to keep call sites readable.
-// Declared here to avoid pulling errors into helper_config.go just for one
-// site.
 func asErr(err error, target **exec.ExitError) bool {
-	for e := err; e != nil; {
-		if x, ok := e.(*exec.ExitError); ok {
-			*target = x
-			return true
-		}
-		type wrapper interface{ Unwrap() error }
-		w, ok := e.(wrapper)
-		if !ok {
-			return false
-		}
-		e = w.Unwrap()
-	}
-	return false
+	return errors.As(err, target)
 }

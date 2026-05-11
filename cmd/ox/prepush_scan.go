@@ -184,7 +184,7 @@ func scanFileForSecrets(r *session.Redactor, abs, rel string, result *PrePushSca
 			})
 		}
 	}
-	if err := scanner.Err(); err != nil && err != io.EOF {
+	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
 		return err
 	}
 	return nil

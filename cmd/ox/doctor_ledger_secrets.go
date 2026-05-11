@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -219,7 +220,7 @@ func scanLedgerFileForSecrets(r *session.Redactor, abs, rel string,
 			hitsInFile[name]++
 		}
 	}
-	if err := scanner.Err(); err != nil && err != io.EOF {
+	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
 		return nil
 	}
 	for name, count := range hitsInFile {
