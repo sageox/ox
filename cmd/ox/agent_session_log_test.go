@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -62,7 +64,7 @@ func TestSessionLog_UserEntry(t *testing.T) {
 	_, state := setupLogTest(t)
 
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
-	err := runAgentSessionLog(inst, []string{"--role", "user", "--content", "Fix the login bug"})
+	err := runAgentSessionLog(io.Discard, inst, []string{"--role", "user", "--content", "Fix the login bug"})
 	require.NoError(t, err)
 
 	targetFile := sessionLogTargetFile(state)
@@ -79,7 +81,7 @@ func TestSessionLog_AssistantEntry(t *testing.T) {
 	_, state := setupLogTest(t)
 
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
-	err := runAgentSessionLog(inst, []string{"--role", "assistant", "--content", "I'll investigate the issue."})
+	err := runAgentSessionLog(io.Discard, inst, []string{"--role", "assistant", "--content", "I'll investigate the issue."})
 	require.NoError(t, err)
 
 	targetFile := sessionLogTargetFile(state)
@@ -94,7 +96,7 @@ func TestSessionLog_ToolEntry(t *testing.T) {
 	_, state := setupLogTest(t)
 
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
-	err := runAgentSessionLog(inst, []string{
+	err := runAgentSessionLog(io.Discard, inst, []string{
 		"--role", "tool",
 		"--tool-name", "bash",
 		"--tool-input", "go test ./...",
@@ -130,7 +132,7 @@ func TestSessionLog_Stdin(t *testing.T) {
 	}()
 
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
-	err = runAgentSessionLog(inst, []string{"--role", "assistant", "--stdin"})
+	err = runAgentSessionLog(io.Discard, inst, []string{"--role", "assistant", "--stdin"})
 	require.NoError(t, err)
 
 	targetFile := sessionLogTargetFile(state)
@@ -145,7 +147,7 @@ func TestSessionLog_BothContentAndStdin_Error(t *testing.T) {
 	setupLogTest(t)
 
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
-	err := runAgentSessionLog(inst, []string{"--role", "user", "--content", "hello", "--stdin"})
+	err := runAgentSessionLog(io.Discard, inst, []string{"--role", "user", "--content", "hello", "--stdin"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot use both --content and --stdin")
 }
@@ -154,7 +156,7 @@ func TestSessionLog_NeitherContentNorStdin_Error(t *testing.T) {
 	setupLogTest(t)
 
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
-	err := runAgentSessionLog(inst, []string{"--role", "user"})
+	err := runAgentSessionLog(io.Discard, inst, []string{"--role", "user"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "one of --content or --stdin is required")
 }
@@ -163,7 +165,7 @@ func TestSessionLog_InvalidRole_Error(t *testing.T) {
 	setupLogTest(t)
 
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
-	err := runAgentSessionLog(inst, []string{"--role", "observer", "--content", "test"})
+	err := runAgentSessionLog(io.Discard, inst, []string{"--role", "observer", "--content", "test"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid role")
 }
@@ -172,7 +174,7 @@ func TestSessionLog_MissingRole_Error(t *testing.T) {
 	setupLogTest(t)
 
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
-	err := runAgentSessionLog(inst, []string{"--content", "test"})
+	err := runAgentSessionLog(io.Discard, inst, []string{"--content", "test"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--role is required")
 }
@@ -186,7 +188,7 @@ func TestSessionLog_NoActiveRecording_Error(t *testing.T) {
 	defer os.Chdir(origDir)
 
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
-	err := runAgentSessionLog(inst, []string{"--role", "user", "--content", "test"})
+	err := runAgentSessionLog(io.Discard, inst, []string{"--role", "user", "--content", "test"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no active session")
 }
@@ -197,11 +199,11 @@ func TestSessionLog_SeqIncrement(t *testing.T) {
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
 
 	// first entry
-	err := runAgentSessionLog(inst, []string{"--role", "user", "--content", "first"})
+	err := runAgentSessionLog(io.Discard, inst, []string{"--role", "user", "--content", "first"})
 	require.NoError(t, err)
 
 	// second entry
-	err = runAgentSessionLog(inst, []string{"--role", "assistant", "--content", "second"})
+	err = runAgentSessionLog(io.Discard, inst, []string{"--role", "assistant", "--content", "second"})
 	require.NoError(t, err)
 
 	targetFile := sessionLogTargetFile(state)
@@ -218,23 +220,11 @@ func TestSessionLog_TextOutput(t *testing.T) {
 	cfg = &config.Config{Text: true}
 	t.Cleanup(func() { cfg = &config.Config{} })
 
-	// capture stdout
-	oldStdout := os.Stdout
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stdout = w
-
+	var buf bytes.Buffer
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
-	logErr := runAgentSessionLog(inst, []string{"--role", "user", "--content", "hello"})
-	w.Close()
-	os.Stdout = oldStdout
+	require.NoError(t, runAgentSessionLog(&buf, inst, []string{"--role", "user", "--content", "hello"}))
 
-	require.NoError(t, logErr)
-
-	out := make([]byte, 4096)
-	n, _ := r.Read(out)
-	output := string(out[:n])
-
+	output := buf.String()
 	assert.Contains(t, output, "Logged entry #0")
 	assert.Contains(t, output, "user")
 	assert.Contains(t, output, "5 chars")
@@ -244,7 +234,7 @@ func TestSessionLog_ToolFlagsWithNonToolRole_Error(t *testing.T) {
 	setupLogTest(t)
 
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
-	err := runAgentSessionLog(inst, []string{
+	err := runAgentSessionLog(io.Discard, inst, []string{
 		"--role", "user",
 		"--tool-name", "bash",
 		"--content", "test",
@@ -260,7 +250,7 @@ func TestSessionLog_GenericAdapterUsesInputJsonl(t *testing.T) {
 	assert.Empty(t, state.SessionFile, "generic adapter should start with empty SessionFile")
 
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
-	err := runAgentSessionLog(inst, []string{"--role", "user", "--content", "hello"})
+	err := runAgentSessionLog(io.Discard, inst, []string{"--role", "user", "--content", "hello"})
 	require.NoError(t, err)
 
 	expectedPath := filepath.Join(state.SessionPath, "input.jsonl")
@@ -273,24 +263,12 @@ func TestSessionLog_JSONOutput(t *testing.T) {
 
 	cfg = &config.Config{}
 
-	// capture stdout
-	oldStdout := os.Stdout
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stdout = w
-
+	var buf bytes.Buffer
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
-	logErr := runAgentSessionLog(inst, []string{"--role", "user", "--content", "test"})
-	w.Close()
-	os.Stdout = oldStdout
-
-	require.NoError(t, logErr)
-
-	out := make([]byte, 4096)
-	n, _ := r.Read(out)
+	require.NoError(t, runAgentSessionLog(&buf, inst, []string{"--role", "user", "--content", "test"}))
 
 	var output sessionLogOutput
-	require.NoError(t, json.Unmarshal(out[:n], &output))
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &output))
 
 	assert.True(t, output.Success)
 	assert.Equal(t, 0, output.Seq)
@@ -300,7 +278,7 @@ func TestSessionLog_EqualsStyleFlags(t *testing.T) {
 	_, state := setupLogTest(t)
 
 	inst := &agentinstance.Instance{AgentID: "OxLog1"}
-	err := runAgentSessionLog(inst, []string{"--role=assistant", "--content=equals style"})
+	err := runAgentSessionLog(io.Discard, inst, []string{"--role=assistant", "--content=equals style"})
 	require.NoError(t, err)
 
 	targetFile := sessionLogTargetFile(state)

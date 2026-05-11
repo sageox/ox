@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -207,9 +208,10 @@ func dispatchPhase(ctx *HookContext) error {
 	}
 }
 
-// emitStartupBanner writes a systemMessage JSON line to stdout for agents
+// emitStartupBanner writes a systemMessage JSON line to w for agents
 // that support the systemMessage protocol (Claude Code, Gemini CLI).
-func emitStartupBanner(ctx *HookContext) {
+// Production callers pass os.Stdout; tests pass a buffer.
+func emitStartupBanner(w io.Writer, ctx *HookContext) {
 	switch ctx.AgentType {
 	case "claude-code", "gemini":
 		// these agents inject hook stdout into model context
@@ -231,7 +233,7 @@ func emitStartupBanner(ctx *HookContext) {
 		slog.Debug("hook: failed to marshal startup banner", "error", err)
 		return
 	}
-	fmt.Fprintln(os.Stdout, string(data))
+	fmt.Fprintln(w, string(data))
 }
 
 // handleStart handles the session start phase.
@@ -241,7 +243,7 @@ func emitStartupBanner(ctx *HookContext) {
 // (covering agents without hooks), and we call it again here as a safety net.
 // startSessionRecording is idempotent (checks session.IsRecording first).
 func handleStart(ctx *HookContext) error {
-	emitStartupBanner(ctx)
+	emitStartupBanner(os.Stdout, ctx)
 
 	source := ""
 	if ctx.Input != nil {

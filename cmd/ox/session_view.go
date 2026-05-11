@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,7 +117,7 @@ func runSessionView(cmd *cobra.Command, args []string) error {
 
 			// context trace only needs the session name, not full session data
 			if contextFlag {
-				return runContextTrace(store, sessionName, projectRoot, jsonFlag, entryLimit)
+				return runContextTrace(cmd.OutOrStdout(), store, sessionName, projectRoot, jsonFlag, entryLimit)
 			}
 
 			// local formats: try local cache first, then fall back to ledger
@@ -177,7 +178,7 @@ func runSessionView(cmd *cobra.Command, args []string) error {
 				if latestName == "" {
 					latestName = latest.SessionName // fallback
 				}
-				return runContextTrace(store, latestName, projectRoot, jsonFlag, entryLimit)
+				return runContextTrace(cmd.OutOrStdout(), store, latestName, projectRoot, jsonFlag, entryLimit)
 			}
 
 			st, err := store.ReadSession(latest.Filename)
@@ -202,25 +203,25 @@ func runSessionView(cmd *cobra.Command, args []string) error {
 }
 
 // runContextTrace resolves and renders context-trace events for a session.
-func runContextTrace(store *session.Store, sessionName, projectRoot string, jsonOutput bool, limit int) error {
+func runContextTrace(w io.Writer, store *session.Store, sessionName, projectRoot string, jsonOutput bool, limit int) error {
 	events, err := resolveContextTrace(store, sessionName, projectRoot)
 	if err != nil {
 		return fmt.Errorf("resolve context trace for %s: %w", sessionName, err)
 	}
 	if len(events) == 0 {
-		fmt.Println()
-		printShowField(os.Stdout, "Session", sessionName)
-		fmt.Println()
-		fmt.Println(cli.StyleDim.Render("  No context trace available for this session."))
-		cli.PrintHint("Context tracing records what team knowledge was provided during ox agent prime.")
-		cli.PrintHint("Sessions recorded before context tracing was added won't have this data.")
-		fmt.Println()
+		fmt.Fprintln(w)
+		printShowField(w, "Session", sessionName)
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, cli.StyleDim.Render("  No context trace available for this session."))
+		cli.PrintHintTo(w, "Context tracing records what team knowledge was provided during ox agent prime.")
+		cli.PrintHintTo(w, "Sessions recorded before context tracing was added won't have this data.")
+		fmt.Fprintln(w)
 		return nil
 	}
 	if jsonOutput {
-		return viewContextTraceJSON(events, sessionName, limit)
+		return viewContextTraceJSON(w, events, sessionName, limit)
 	}
-	viewContextTraceText(events, sessionName)
+	viewContextTraceText(w, events, sessionName)
 	return nil
 }
 

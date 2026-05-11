@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -81,7 +82,7 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 
 	// intentionally do NOT set doctor.SetNeedsDoctorAgent() — user chose to discard
 
-	return emitAbortOutput(inst.AgentID, sessionName)
+	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName)
 }
 
 // runAgentSessionAbortByName aborts a session by name. Only allows discarding
@@ -134,7 +135,7 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 		return fmt.Errorf("failed to remove session data at %s: %w", sessionPath, err)
 	}
 
-	return emitAbortOutput(inst.AgentID, sessionName)
+	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName)
 }
 
 // buildSessionInfo constructs a SessionInfo from a session folder on disk.
@@ -238,7 +239,7 @@ func confirmAbort(inst *agentinstance.Instance, cmd *cobra.Command) error {
 }
 
 // emitAbortOutput writes the JSON (and optional text) output for a successful abort.
-func emitAbortOutput(agentID, sessionName string) error {
+func emitAbortOutput(w io.Writer, agentID, sessionName string) error {
 	output := sessionAbortOutput{
 		Success:     true,
 		Type:        "session_abort",
@@ -249,10 +250,10 @@ func emitAbortOutput(agentID, sessionName string) error {
 	}
 
 	if cfg.Text || cfg.Review {
-		fmt.Printf("Session %q aborted and discarded.\n", sessionName)
+		fmt.Fprintf(w, "Session %q aborted and discarded.\n", sessionName)
 		if cfg.Review {
-			fmt.Println()
-			fmt.Println("--- Machine Output ---")
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "--- Machine Output ---")
 		} else {
 			return nil
 		}
@@ -262,6 +263,6 @@ func emitAbortOutput(agentID, sessionName string) error {
 	if err != nil {
 		return fmt.Errorf("format abort JSON: %w", err)
 	}
-	fmt.Println(string(jsonOut))
+	fmt.Fprintln(w, string(jsonOut))
 	return nil
 }

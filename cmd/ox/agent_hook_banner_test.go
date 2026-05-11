@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,8 +28,8 @@ func TestEmitStartupBanner_ClaudeCodeAutoRecording(t *testing.T) {
 		ProjectRoot: projectRoot,
 	}
 
-	output := captureBannerStdout(t, func() {
-		emitStartupBanner(ctx)
+	output := captureBannerStdout(t, func(w io.Writer) {
+		emitStartupBanner(w, ctx)
 	})
 
 	msg := parseBannerSystemMessage(t, output)
@@ -55,8 +57,8 @@ func TestEmitStartupBanner_ClaudeCodeNoRecording(t *testing.T) {
 		ProjectRoot: projectRoot,
 	}
 
-	output := captureBannerStdout(t, func() {
-		emitStartupBanner(ctx)
+	output := captureBannerStdout(t, func(w io.Writer) {
+		emitStartupBanner(w, ctx)
 	})
 
 	msg := parseBannerSystemMessage(t, output)
@@ -84,8 +86,8 @@ func TestEmitStartupBanner_GeminiAgent(t *testing.T) {
 		ProjectRoot: projectRoot,
 	}
 
-	output := captureBannerStdout(t, func() {
-		emitStartupBanner(ctx)
+	output := captureBannerStdout(t, func(w io.Writer) {
+		emitStartupBanner(w, ctx)
 	})
 
 	msg := parseBannerSystemMessage(t, output)
@@ -112,8 +114,8 @@ func TestEmitStartupBanner_UnsupportedAgent(t *testing.T) {
 		ProjectRoot: projectRoot,
 	}
 
-	output := captureBannerStdout(t, func() {
-		emitStartupBanner(ctx)
+	output := captureBannerStdout(t, func(w io.Writer) {
+		emitStartupBanner(w, ctx)
 	})
 
 	if strings.TrimSpace(output) != "" {
@@ -137,21 +139,13 @@ func initBannerTestProject(t *testing.T, recordingMode string) string {
 	return dir
 }
 
-func captureBannerStdout(t *testing.T, fn func()) string {
+// captureBannerStdout runs fn with a fresh bytes.Buffer as its writer and
+// returns the captured output. Parallel-safe — no os.Stdout mutation.
+func captureBannerStdout(t *testing.T, fn func(w io.Writer)) string {
 	t.Helper()
-	old := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
-	fn()
-	w.Close()
-	os.Stdout = old
-
-	buf := make([]byte, 4096)
-	n, _ := r.Read(buf)
-	return string(buf[:n])
+	var buf bytes.Buffer
+	fn(&buf)
+	return buf.String()
 }
 
 func parseBannerSystemMessage(t *testing.T, output string) string {

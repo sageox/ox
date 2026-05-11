@@ -509,7 +509,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		case "record":
 			return runAgentSessionRecord(inst, sessionArgs)
 		case "log":
-			return runAgentSessionLog(inst, sessionArgs)
+			return runAgentSessionLog(cmd.OutOrStdout(), inst, sessionArgs)
 		case "plan":
 			return runAgentSessionPlan(inst)
 		case "context-trace":

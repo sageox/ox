@@ -54,7 +54,7 @@ type sessionLogEntry struct {
 //	ox agent <id> session log --role user --content "Fix the login bug"
 //	ox agent <id> session log --role tool --tool-name bash --tool-input "go test ./..." --content "PASS"
 //	echo "Multi-line content" | ox agent <id> session log --role assistant --stdin
-func runAgentSessionLog(inst *agentinstance.Instance, args []string) error {
+func runAgentSessionLog(w io.Writer, inst *agentinstance.Instance, args []string) error {
 	projectRoot, err := findProjectRoot()
 	if err != nil {
 		return fmt.Errorf("could not find project root: %w", err)
@@ -129,10 +129,10 @@ func runAgentSessionLog(inst *agentinstance.Instance, args []string) error {
 
 	// output
 	if cfg.Text || cfg.Review {
-		fmt.Printf("Logged entry #%d (%s, %d chars)\n", seq, role, len(content))
+		fmt.Fprintf(w, "Logged entry #%d (%s, %d chars)\n", seq, role, len(content))
 		if cfg.Review {
-			fmt.Println()
-			fmt.Println("--- Machine Output ---")
+			fmt.Fprintln(w)
+			fmt.Fprintln(w, "--- Machine Output ---")
 		} else {
 			return nil
 		}
@@ -146,7 +146,7 @@ func runAgentSessionLog(inst *agentinstance.Instance, args []string) error {
 	if err != nil {
 		return fmt.Errorf("format log JSON: %w", err)
 	}
-	fmt.Println(string(jsonOut))
+	fmt.Fprintln(w, string(jsonOut))
 	return nil
 }
 

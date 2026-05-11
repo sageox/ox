@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,14 +120,14 @@ func resolveContextTrace(store *session.Store, sessionName, projectRoot string) 
 }
 
 // viewContextTraceText renders context-trace events as formatted terminal output.
-func viewContextTraceText(events []contexttrace.Event, sessionName string) {
-	fmt.Println()
-	fmt.Println(showTitleStyle.Render("Context Trace"))
-	fmt.Println(showSeparatorStyle.Render(strings.Repeat("-", 60)))
-	fmt.Println()
-	printShowField(os.Stdout, "Session", sessionName)
-	printShowField(os.Stdout, "Events", fmt.Sprintf("%d", len(events)))
-	fmt.Println()
+func viewContextTraceText(w io.Writer, events []contexttrace.Event, sessionName string) {
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, showTitleStyle.Render("Context Trace"))
+	fmt.Fprintln(w, showSeparatorStyle.Render(strings.Repeat("-", 60)))
+	fmt.Fprintln(w)
+	printShowField(w, "Session", sessionName)
+	printShowField(w, "Events", fmt.Sprintf("%d", len(events)))
+	fmt.Fprintln(w)
 
 	// partition events
 	var provided, influenced []contexttrace.Event
@@ -141,37 +142,37 @@ func viewContextTraceText(events []contexttrace.Event, sessionName string) {
 
 	// provided context
 	if len(provided) > 0 {
-		fmt.Println(showSectionStyle.Render("Provided Context"))
-		fmt.Println(showSeparatorStyle.Render(strings.Repeat("-", 40)))
-		fmt.Println()
+		fmt.Fprintln(w, showSectionStyle.Render("Provided Context"))
+		fmt.Fprintln(w, showSeparatorStyle.Render(strings.Repeat("-", 40)))
+		fmt.Fprintln(w)
 
 		for _, ev := range provided {
-			printProvidedEvent(ev)
+			printProvidedEvent(w, ev)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 
 	// influenced decisions
 	if len(influenced) > 0 {
-		fmt.Println(showSectionStyle.Render("Influenced Decisions"))
-		fmt.Println(showSeparatorStyle.Render(strings.Repeat("-", 40)))
-		fmt.Println()
+		fmt.Fprintln(w, showSectionStyle.Render("Influenced Decisions"))
+		fmt.Fprintln(w, showSeparatorStyle.Render(strings.Repeat("-", 40)))
+		fmt.Fprintln(w)
 
 		for _, ev := range influenced {
-			printInfluencedEvent(ev)
+			printInfluencedEvent(w, ev)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 
 	// summary
-	fmt.Println(showSeparatorStyle.Render(strings.Repeat("-", 60)))
-	fmt.Printf("  %s provided, %s influenced decisions\n",
+	fmt.Fprintln(w, showSeparatorStyle.Render(strings.Repeat("-", 60)))
+	fmt.Fprintf(w, "  %s provided, %s influenced decisions\n",
 		showHighlightStyle.Render(fmt.Sprintf("%d sources", len(provided))),
 		showHighlightStyle.Render(fmt.Sprintf("%d", len(influenced))))
-	fmt.Println()
+	fmt.Fprintln(w)
 }
 
-func printProvidedEvent(ev contexttrace.Event) {
+func printProvidedEvent(w io.Writer, ev contexttrace.Event) {
 	ts := formatTraceTimestamp(ev.Timestamp)
 	style := sourceStyle(ev.Source)
 
@@ -192,7 +193,7 @@ func printProvidedEvent(ev contexttrace.Event) {
 		line += " " + showEntryTimestampStyle.Render(ts)
 	}
 
-	fmt.Println(line)
+	fmt.Fprintln(w, line)
 
 	// details line
 	var details []string
@@ -210,11 +211,11 @@ func printProvidedEvent(ev contexttrace.Event) {
 	}
 
 	if len(details) > 0 {
-		fmt.Printf("    %s\n", strings.Join(details, " "+cli.StyleDim.Render("|")+" "))
+		fmt.Fprintf(w, "    %s\n", strings.Join(details, " "+cli.StyleDim.Render("|")+" "))
 	}
 }
 
-func printInfluencedEvent(ev contexttrace.Event) {
+func printInfluencedEvent(w io.Writer, ev contexttrace.Event) {
 	ts := formatTraceTimestamp(ev.Timestamp)
 	style := sourceStyle(ev.Source)
 
@@ -228,18 +229,18 @@ func printInfluencedEvent(ev contexttrace.Event) {
 		line += " " + showEntryTimestampStyle.Render(ts)
 	}
 
-	fmt.Println(line)
+	fmt.Fprintln(w, line)
 
 	if ev.Decision != "" {
 		decision := ev.Decision
 		if len(decision) > 200 {
 			decision = decision[:197] + "..."
 		}
-		fmt.Printf("    %s\n", ctxDecisionStyle.Render(decision))
+		fmt.Fprintf(w, "    %s\n", ctxDecisionStyle.Render(decision))
 	}
 
 	if ev.PlanStep > 0 {
-		fmt.Printf("    %s\n", cli.StyleDim.Render(fmt.Sprintf("plan step %d", ev.PlanStep)))
+		fmt.Fprintf(w, "    %s\n", cli.StyleDim.Render(fmt.Sprintf("plan step %d", ev.PlanStep)))
 	}
 }
 
@@ -253,7 +254,7 @@ type contextTraceJSONOutput struct {
 }
 
 // viewContextTraceJSON renders context-trace events as structured JSON.
-func viewContextTraceJSON(events []contexttrace.Event, sessionName string, limit int) error {
+func viewContextTraceJSON(w io.Writer, events []contexttrace.Event, sessionName string, limit int) error {
 	var provided, influenced int
 	for _, ev := range events {
 		switch ev.Type {
@@ -276,7 +277,7 @@ func viewContextTraceJSON(events []contexttrace.Event, sessionName string, limit
 		Events:      events,
 	}
 
-	encoder := json.NewEncoder(os.Stdout)
+	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(out)
 }

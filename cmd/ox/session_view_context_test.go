@@ -3,14 +3,13 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"io"
-	"os"
 	"testing"
 
 	"github.com/sageox/ox/internal/session/contexttrace"
 )
 
 func TestViewContextTraceJSON_StructureAndCounts(t *testing.T) {
+	t.Parallel()
 	events := []contexttrace.Event{
 		{Type: contexttrace.EventProvided, Source: contexttrace.SourceTeamContext, Doc: "AGENTS.md", InlineTokens: 2048},
 		{Type: contexttrace.EventProvided, Source: contexttrace.SourceTeamMemory, Doc: "MEMORY.md", ReadOnDemand: true},
@@ -18,22 +17,10 @@ func TestViewContextTraceJSON_StructureAndCounts(t *testing.T) {
 		{Type: contexttrace.EventInfluenced, Source: contexttrace.SourceTeamContext, Doc: "AGENTS.md", Decision: "used snake_case per team convention"},
 	}
 
-	// capture stdout
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := viewContextTraceJSON(events, "2026-04-01T10-00-ryan-OxTest", 0)
-
-	w.Close()
-	os.Stdout = old
-
-	if err != nil {
+	var buf bytes.Buffer
+	if err := viewContextTraceJSON(&buf, events, "2026-04-01T10-00-ryan-OxTest", 0); err != nil {
 		t.Fatalf("viewContextTraceJSON returned error: %v", err)
 	}
-
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
 
 	var out contextTraceJSONOutput
 	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
@@ -58,27 +45,17 @@ func TestViewContextTraceJSON_StructureAndCounts(t *testing.T) {
 }
 
 func TestViewContextTraceJSON_Limit(t *testing.T) {
+	t.Parallel()
 	events := []contexttrace.Event{
 		{Type: contexttrace.EventProvided, Source: contexttrace.SourceTeamContext, Doc: "A.md"},
 		{Type: contexttrace.EventProvided, Source: contexttrace.SourceTeamContext, Doc: "B.md"},
 		{Type: contexttrace.EventProvided, Source: contexttrace.SourceTeamContext, Doc: "C.md"},
 	}
 
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := viewContextTraceJSON(events, "test-session", 2)
-
-	w.Close()
-	os.Stdout = old
-
-	if err != nil {
+	var buf bytes.Buffer
+	if err := viewContextTraceJSON(&buf, events, "test-session", 2); err != nil {
 		t.Fatalf("viewContextTraceJSON returned error: %v", err)
 	}
-
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
 
 	var out contextTraceJSONOutput
 	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
@@ -95,21 +72,11 @@ func TestViewContextTraceJSON_Limit(t *testing.T) {
 }
 
 func TestViewContextTraceJSON_Empty(t *testing.T) {
-	old := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
-	err := viewContextTraceJSON(nil, "empty-session", 0)
-
-	w.Close()
-	os.Stdout = old
-
-	if err != nil {
+	t.Parallel()
+	var buf bytes.Buffer
+	if err := viewContextTraceJSON(&buf, nil, "empty-session", 0); err != nil {
 		t.Fatalf("viewContextTraceJSON returned error: %v", err)
 	}
-
-	var buf bytes.Buffer
-	io.Copy(&buf, r)
 
 	var out contextTraceJSONOutput
 	if err := json.Unmarshal(buf.Bytes(), &out); err != nil {
@@ -122,6 +89,7 @@ func TestViewContextTraceJSON_Empty(t *testing.T) {
 }
 
 func TestFormatTraceTimestamp(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -134,6 +102,7 @@ func TestFormatTraceTimestamp(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			got := formatTraceTimestamp(tt.input)
 			if got != tt.want {
 				t.Errorf("formatTraceTimestamp(%q) = %q, want %q", tt.input, got, tt.want)

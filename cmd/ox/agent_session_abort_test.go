@@ -1,9 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -200,22 +200,15 @@ func TestAbortOutputIncludesGuidance(t *testing.T) {
 	setupAbortTest(t)
 	setForceFlag(t, true)
 
-	// capture stdout
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
+	var buf bytes.Buffer
+	agentCmd.SetOut(&buf)
+	t.Cleanup(func() { agentCmd.SetOut(nil) })
 
 	inst := &agentinstance.Instance{AgentID: "OxAbrt"}
-	err := runAgentSessionAbort(inst, agentCmd, nil)
+	require.NoError(t, runAgentSessionAbort(inst, agentCmd, nil))
 
-	w.Close()
-	os.Stdout = oldStdout
-
-	require.NoError(t, err)
-
-	out, _ := io.ReadAll(r)
 	var output sessionAbortOutput
-	require.NoError(t, json.Unmarshal(out, &output), "output should be valid JSON")
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &output), "output should be valid JSON")
 	assert.True(t, output.Success)
 	assert.NotEmpty(t, output.Guidance, "abort JSON output must include guidance field")
 	assert.Contains(t, output.Guidance, "No further action needed")
