@@ -114,55 +114,88 @@ func PrintSuccessTo(w io.Writer, msg string) {
 // PrintPreserved prints a message indicating an existing file was preserved (not overwritten).
 // Uses cyan color to distinguish from green success (created) messages.
 func PrintPreserved(msg string) {
+	PrintPreservedTo(os.Stdout, msg)
+}
+
+// PrintPreservedTo writes a preserved-file notice to w. Parallel-safe.
+func PrintPreservedTo(w io.Writer, msg string) {
 	if jsonMode {
-		PrintJSON(map[string]any{
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(map[string]any{
 			"status":  "preserved",
 			"message": msg,
 		})
 		return
 	}
-	fmt.Fprintf(os.Stdout, "%s %s\n", preservedStyle.Render("✓"), msg)
+	fmt.Fprintf(w, "%s %s\n", preservedStyle.Render("✓"), msg)
 }
 
 func PrintError(msg string) {
+	PrintErrorTo(os.Stderr, msg)
+}
+
+// PrintErrorTo writes an error message to w. Parallel-safe.
+func PrintErrorTo(w io.Writer, msg string) {
 	if jsonMode {
-		PrintJSON(map[string]any{
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(map[string]any{
 			"status":  "error",
 			"message": msg,
 		})
 		return
 	}
-	fmt.Fprintf(os.Stderr, "%s %s\n", errorStyle.Render("✗"), msg)
+	fmt.Fprintf(w, "%s %s\n", errorStyle.Render("✗"), msg)
 }
 
 func PrintWarning(msg string) {
+	PrintWarningTo(os.Stderr, msg)
+}
+
+// PrintWarningTo writes a warning to w. Parallel-safe.
+func PrintWarningTo(w io.Writer, msg string) {
 	if jsonMode {
-		PrintJSON(map[string]any{
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(map[string]any{
 			"status":  "warning",
 			"message": msg,
 		})
 		return
 	}
-	fmt.Fprintf(os.Stderr, "%s %s\n", warningStyle.Render("⚠"), msg)
+	fmt.Fprintf(w, "%s %s\n", warningStyle.Render("⚠"), msg)
 }
 
 func PrintInfo(msg string) {
+	PrintInfoTo(os.Stdout, msg)
+}
+
+// PrintInfoTo writes an info message to w. Parallel-safe.
+func PrintInfoTo(w io.Writer, msg string) {
 	if jsonMode {
-		PrintJSON(map[string]any{
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(map[string]any{
 			"status":  "info",
 			"message": msg,
 		})
 		return
 	}
-	fmt.Fprintf(os.Stdout, "%s %s\n", infoStyle.Render("ℹ"), msg)
+	fmt.Fprintf(w, "%s %s\n", infoStyle.Render("ℹ"), msg)
 }
 
 // PrintHint prints a dimmed hint message (e.g., "Run 'ox login' to authenticate")
 func PrintHint(msg string) {
+	PrintHintTo(os.Stdout, msg)
+}
+
+// PrintHintTo writes a hint to w. Parallel-safe. Suppressed in jsonMode.
+func PrintHintTo(w io.Writer, msg string) {
 	if jsonMode {
 		return // hints are not included in JSON output
 	}
-	fmt.Fprintln(os.Stdout, hintStyle.Render(msg))
+	fmt.Fprintln(w, hintStyle.Render(msg))
 }
 
 // PrintActionHint prints a prominent actionable hint with star, command, and optional step.

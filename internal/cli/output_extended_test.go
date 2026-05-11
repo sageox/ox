@@ -455,3 +455,49 @@ func TestPrintJSON(t *testing.T) {
 	assert.Contains(t, output, `"key"`)
 	assert.Contains(t, output, `"value"`)
 }
+
+// =============================================================================
+// Writer-aware *To variants — parallel-safe, no os.Stdout/Stderr mutation
+// =============================================================================
+
+func TestPrintSuccessTo_WritesToWriter(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	PrintSuccessTo(&buf, "all good")
+	assert.Contains(t, buf.String(), "all good")
+}
+
+func TestPrintErrorTo_WritesToWriter(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	PrintErrorTo(&buf, "something broke")
+	assert.Contains(t, buf.String(), "something broke")
+}
+
+func TestPrintWarningTo_WritesToWriter(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	PrintWarningTo(&buf, "heads up")
+	assert.Contains(t, buf.String(), "heads up")
+}
+
+func TestPrintInfoTo_WritesToWriter(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	PrintInfoTo(&buf, "for your information")
+	assert.Contains(t, buf.String(), "for your information")
+}
+
+func TestPrintPreservedTo_WritesToWriter(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	PrintPreservedTo(&buf, "kept original")
+	assert.Contains(t, buf.String(), "kept original")
+}
+
+func TestPrintHintTo_WritesToWriter(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	PrintHintTo(&buf, "consider running ox doctor")
+	assert.Contains(t, buf.String(), "consider running ox doctor")
+}
