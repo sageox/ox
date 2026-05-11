@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,7 +61,7 @@ Examples:
 
 		if filePath != "" {
 			result := lintRawJSONLFile(filePath, filepath.Base(filePath), opts)
-			return printLintResults([]lintResult{result}, jsonOutput)
+			return printLintResults(cmd.OutOrStdout(), []lintResult{result}, jsonOutput)
 		}
 
 		ledgerPath, err := resolveLedgerPath()
@@ -71,7 +72,7 @@ Examples:
 		sessionsDir := filepath.Join(ledgerPath, "sessions")
 
 		if all {
-			return lintAllSessions(sessionsDir, jsonOutput, opts)
+			return lintAllSessions(cmd.OutOrStdout(), sessionsDir, jsonOutput, opts)
 		}
 
 		if len(args) == 0 {
@@ -96,11 +97,11 @@ Examples:
 				Valid:       false,
 				Errors:      []string{fmt.Sprintf("raw.jsonl not available: %v", openErr)},
 			}
-			return printLintResults([]lintResult{result}, jsonOutput)
+			return printLintResults(cmd.OutOrStdout(), []lintResult{result}, jsonOutput)
 		}
 
 		result := lintRawJSONLFile(rawPath, sessionName, opts)
-		return printLintResults([]lintResult{result}, jsonOutput)
+		return printLintResults(cmd.OutOrStdout(), []lintResult{result}, jsonOutput)
 	},
 }
 
@@ -258,8 +259,8 @@ func lintRawJSONLFile(path, name string, opts ...lintOptions) lintResult {
 	return result
 }
 
-// lintAllSessions validates all sessions in the ledger.
-func lintAllSessions(sessionsDir string, jsonOutput bool, opts ...lintOptions) error {
+// lintAllSessions validates all sessions in the ledger, writing results to w.
+func lintAllSessions(w io.Writer, sessionsDir string, jsonOutput bool, opts ...lintOptions) error {
 	var opt lintOptions
 	if len(opts) > 0 {
 		opt = opts[0]
@@ -292,13 +293,13 @@ func lintAllSessions(sessionsDir string, jsonOutput bool, opts ...lintOptions) e
 		results = append(results, lintRawJSONLFile(rawPath, entry.Name(), opt))
 	}
 
-	return printLintResults(results, jsonOutput)
+	return printLintResults(w, results, jsonOutput)
 }
 
-// printLintResults outputs lint results as JSON or human-readable text.
-func printLintResults(results []lintResult, jsonOutput bool) error {
+// printLintResults outputs lint results to w as JSON or human-readable text.
+func printLintResults(w io.Writer, results []lintResult, jsonOutput bool) error {
 	if jsonOutput {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		return enc.Encode(results)
 	}
@@ -308,7 +309,7 @@ func printLintResults(results []lintResult, jsonOutput bool) error {
 		if !r.Valid {
 			allValid = false
 		}
-		printLintResult(r)
+		printLintResult(w, r)
 	}
 
 	if len(results) > 1 {
@@ -318,7 +319,7 @@ func printLintResults(results []lintResult, jsonOutput bool) error {
 				valid++
 			}
 		}
-		fmt.Printf("\n%d/%d sessions valid\n", valid, len(results))
+		fmt.Fprintf(w, "\n%d/%d sessions valid\n", valid, len(results))
 	}
 
 	if !allValid {
@@ -327,9 +328,9 @@ func printLintResults(results []lintResult, jsonOutput bool) error {
 	return nil
 }
 
-func printLintResult(r lintResult) {
+func printLintResult(w io.Writer, r lintResult) {
 	if r.Valid {
-		fmt.Printf("%s %s  %d entries", ui.RenderPassIcon(), r.SessionName, r.EntryCount)
+		fmt.Fprintf(w, "%s %s  %d entries", ui.RenderPassIcon(), r.SessionName, r.EntryCount)
 		if len(r.TypeCounts) > 0 {
 			var parts []string
 			for _, t := range []string{"user", "assistant", "tool", "system"} {
@@ -337,19 +338,19 @@ func printLintResult(r lintResult) {
 					parts = append(parts, fmt.Sprintf("%s:%d", t, c))
 				}
 			}
-			fmt.Printf("  (%s)", strings.Join(parts, " "))
+			fmt.Fprintf(w, "  (%s)", strings.Join(parts, " "))
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	} else {
-		fmt.Printf("%s %s\n", ui.RenderFailIcon(), r.SessionName)
+		fmt.Fprintf(w, "%s %s\n", ui.RenderFailIcon(), r.SessionName)
 		for _, e := range r.Errors {
-			fmt.Printf("    %s\n", e)
+			fmt.Fprintf(w, "    %s\n", e)
 		}
 	}
 
 	if len(r.Warnings) > 0 {
-		for _, w := range r.Warnings {
-			fmt.Printf("    %s %s\n", ui.RenderWarnIcon(), w)
+		for _, warn := range r.Warnings {
+			fmt.Fprintf(w, "    %s %s\n", ui.RenderWarnIcon(), warn)
 		}
 	}
 }

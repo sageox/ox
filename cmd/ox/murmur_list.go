@@ -229,7 +229,7 @@ func runMurmurList(cmd *cobra.Command, args []string) error {
 				Scope:       m.Scope,
 			})
 		}
-		return outputJSON(murmurListOutput{
+		return outputJSON(cmd.OutOrStdout(), murmurListOutput{
 			Murmurs:     entries,
 			Total:       total,
 			Window:      windowLabel,

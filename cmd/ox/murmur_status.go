@@ -145,7 +145,7 @@ func runMurmurStatus(cmd *cobra.Command, _ []string) error {
 			}
 			agents = append(agents, s)
 		}
-		return outputJSON(murmurStatusOutput{
+		return outputJSON(cmd.OutOrStdout(), murmurStatusOutput{
 			YourAgentID: yourAgentID,
 			Agents:      agents,
 			Source:      source,

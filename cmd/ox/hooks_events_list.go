@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/sageox/ox/internal/daemon/hooks"
 	"github.com/spf13/cobra"
@@ -20,9 +19,10 @@ var hooksEventsListCmd = &cobra.Command{
 		}
 
 		jsonOut, _ := cmd.Flags().GetBool("json")
+		out := cmd.OutOrStdout()
 
 		if jsonOut {
-			enc := json.NewEncoder(os.Stdout)
+			enc := json.NewEncoder(out)
 			enc.SetIndent("", "  ")
 			if cfgs == nil {
 				cfgs = []hooks.HookConfig{}
@@ -31,17 +31,17 @@ var hooksEventsListCmd = &cobra.Command{
 		}
 
 		if len(cfgs) == 0 {
-			fmt.Println("No event hooks configured.")
-			fmt.Printf("Use 'ox hooks add <event> <command>' to register one.\n")
-			fmt.Printf("Config: %s\n", hooks.HooksFilePath())
+			fmt.Fprintln(out, "No event hooks configured.")
+			fmt.Fprintf(out, "Use 'ox hooks add <event> <command>' to register one.\n")
+			fmt.Fprintf(out, "Config: %s\n", hooks.HooksFilePath())
 			return nil
 		}
 
-		fmt.Printf("%-25s %s\n", "EVENT", "COMMAND")
+		fmt.Fprintf(out, "%-25s %s\n", "EVENT", "COMMAND")
 		for _, c := range cfgs {
-			fmt.Printf("%-25s %s\n", c.Event, c.Command)
+			fmt.Fprintf(out, "%-25s %s\n", c.Event, c.Command)
 		}
-		fmt.Printf("\nConfig: %s\n", hooks.HooksFilePath())
+		fmt.Fprintf(out, "\nConfig: %s\n", hooks.HooksFilePath())
 		return nil
 	},
 }

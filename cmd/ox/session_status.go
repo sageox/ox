@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -160,7 +161,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 	projectRoot, err := requireProjectRoot()
 	if err != nil {
 		if jsonOutput {
-			return outputJSON(sessionStatusOutput{Recording: false})
+			return outputJSON(cmd.OutOrStdout(), sessionStatusOutput{Recording: false})
 		}
 		return err
 	}
@@ -169,7 +170,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 	states, err := session.LoadAllRecordingStates(projectRoot)
 	if err != nil {
 		if jsonOutput {
-			return outputJSON(sessionStatusOutput{Recording: false})
+			return outputJSON(cmd.OutOrStdout(), sessionStatusOutput{Recording: false})
 		}
 		return fmt.Errorf("failed to check recording state: %w", err)
 	}
@@ -179,7 +180,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		agentID := os.Getenv("SAGEOX_AGENT_ID")
 		if agentID == "" {
 			if jsonOutput {
-				return outputJSON(sessionStatusOutput{Recording: false})
+				return outputJSON(cmd.OutOrStdout(), sessionStatusOutput{Recording: false})
 			}
 			return fmt.Errorf("--current requires SAGEOX_AGENT_ID environment variable (set by 'ox agent prime')")
 		}
@@ -199,7 +200,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 	// no recordings
 	if len(states) == 0 {
 		if jsonOutput {
-			return outputJSON(sessionStatusOutput{
+			return outputJSON(cmd.OutOrStdout(), sessionStatusOutput{
 				Recording: false,
 				Guidance:  "Run 'ox agent <id> session start' to begin recording",
 			})
@@ -249,7 +250,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 				Stalled:         stalled,
 				StalledReason:   stalledReason,
 			}
-			return outputJSON(output)
+			return outputJSON(cmd.OutOrStdout(), output)
 		}
 
 		if !state.IsAgentAlive() {
@@ -327,7 +328,7 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 				Branch:        s.Branch,
 			})
 		}
-		return outputJSON(sessionStatusOutput{
+		return outputJSON(cmd.OutOrStdout(), sessionStatusOutput{
 			Recording: true,
 			Guidance:  "Use --current to filter to this agent's recording",
 			Count:     len(states),
@@ -468,9 +469,9 @@ func formatProcessStatus(status string) string {
 	}
 }
 
-// outputJSON writes JSON to stdout.
-func outputJSON(v any) error {
-	encoder := json.NewEncoder(os.Stdout)
+// outputJSON writes JSON to w with 2-space indentation.
+func outputJSON(w io.Writer, v any) error {
+	encoder := json.NewEncoder(w)
 	encoder.SetIndent("", "  ")
 	return encoder.Encode(v)
 }

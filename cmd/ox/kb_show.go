@@ -101,20 +101,20 @@ func runKBShow(cmd *cobra.Command, args []string) error {
 
 	kbID, resolveErr := resolveKBIdentifier(ctx, client, input)
 	if resolveErr != nil {
-		return handleKBShowError(resolveErr, input, jsonOutput)
+		return handleKBShowError(cmd.OutOrStdout(), resolveErr, input, jsonOutput)
 	}
 
 	slog.Info("kb show: resolving", "input", input, "kb_id", kbID)
 
 	bubble, err := client.GetBubble(ctx, kbID)
 	if err != nil {
-		return handleKBShowError(err, input, jsonOutput)
+		return handleKBShowError(cmd.OutOrStdout(), err, input, jsonOutput)
 	}
 
 	localPath := paths.KBDir(bubble.KBID)
 
 	if jsonOutput {
-		return outputJSON(kbShowOutput{KB: bubble, LocalPath: localPath})
+		return outputJSON(cmd.OutOrStdout(), kbShowOutput{KB: bubble, LocalPath: localPath})
 	}
 
 	renderKBShow(cmd.OutOrStdout(), bubble, localPath, ep)
@@ -201,12 +201,12 @@ func pickKBByPriority(matches []api.KB) *api.KB {
 // CLI error. ErrKBAPIUnavailable gets dedicated copy because the most
 // common cause is the knowledge-bubbles flag being off for the caller's
 // account — we don't want users hunting through logs for a 403.
-func handleKBShowError(err error, input string, jsonOutput bool) error {
+func handleKBShowError(w io.Writer, err error, input string, jsonOutput bool) error {
 	if errors.Is(err, api.ErrKBAPIUnavailable) {
 		msg := "Knowledge bubbles not enabled for this account"
 		slog.Info("kb show: api unavailable", "input", input, "error", err)
 		if jsonOutput {
-			return outputJSON(map[string]any{
+			return outputJSON(w, map[string]any{
 				"status":  "unavailable",
 				"message": msg,
 				"hint":    "Set OX_KB_DISABLE=1 to skip the kb API entirely. 'ox kb list' falls back to legacy team contexts and ledgers.",

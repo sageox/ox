@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -79,7 +80,7 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 
 	if len(result.Murmurs) == 0 && len(sessResult.Sessions) == 0 {
 		// Output valid JSON with empty arrays (not null) for stable schema
-		return outputGlanceJSON(glance.ActivityData{
+		return outputGlanceJSON(cmd.OutOrStdout(), glance.ActivityData{
 			Since:     since,
 			Until:     until,
 			Repo:      repo,
@@ -131,11 +132,11 @@ func runGlance(cmd *cobra.Command, _ []string) error {
 	// Advance checkpoint so next invocation without --since starts from now
 	_ = glance.MarkRead(ledgerPath)
 
-	return outputGlanceJSON(data)
+	return outputGlanceJSON(cmd.OutOrStdout(), data)
 }
 
-func outputGlanceJSON(data glance.ActivityData) error {
-	enc := json.NewEncoder(os.Stdout)
+func outputGlanceJSON(w io.Writer, data glance.ActivityData) error {
+	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(data)
 }

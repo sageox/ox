@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -102,7 +103,7 @@ func TestCompat_KBFlagOff_ShowFallsBackGracefully(t *testing.T) {
 	t.Parallel()
 
 	wrapped := fmt.Errorf("listing failed: %w", api.ErrKBAPIUnavailable)
-	err := handleKBShowError(wrapped, "personal", false)
+	err := handleKBShowError(io.Discard, wrapped, "personal", false)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

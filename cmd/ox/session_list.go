@@ -135,7 +135,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 			if inAgent {
 				out.Guidance = sessionListAgentGuidance
 			}
-			return outputJSON(out)
+			return outputJSON(cmd.OutOrStdout(), out)
 		}
 		cwd, _ := os.Getwd()
 		fmt.Println()
@@ -225,7 +225,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 			if inAgent {
 				out.Guidance = sessionListAgentGuidance
 			}
-			return outputJSON(out)
+			return outputJSON(cmd.OutOrStdout(), out)
 		}
 		fmt.Println()
 		repoLabel := fmt.Sprintf("%q", repoName)
@@ -305,7 +305,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 		if inAgent {
 			out.Guidance = sessionListAgentGuidance
 		}
-		return outputJSON(out)
+		return outputJSON(cmd.OutOrStdout(), out)
 	}
 
 	// agents consume this output as context — drop decorative chrome that wastes tokens

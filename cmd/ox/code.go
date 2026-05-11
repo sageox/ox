@@ -458,7 +458,7 @@ var codeStatusCmd = &cobra.Command{
 					Commits: r.commits, Blobs: r.blobs,
 				})
 			}
-			enc := json.NewEncoder(os.Stdout)
+			enc := json.NewEncoder(cmd.OutOrStdout())
 			enc.SetIndent("", "  ")
 			return enc.Encode(out)
 		}

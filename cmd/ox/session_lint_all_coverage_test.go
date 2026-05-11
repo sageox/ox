@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,7 +12,7 @@ func TestLintAllSessions_EmptyDir(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	err := lintAllSessions(dir, true)
+	err := lintAllSessions(io.Discard, dir, true)
 	if err != nil {
 		t.Errorf("lintAllSessions on empty dir: %v", err)
 	}
@@ -20,7 +21,7 @@ func TestLintAllSessions_EmptyDir(t *testing.T) {
 func TestLintAllSessions_NonexistentDir(t *testing.T) {
 	t.Parallel()
 
-	err := lintAllSessions("/nonexistent/sessions/dir", true)
+	err := lintAllSessions(io.Discard, "/nonexistent/sessions/dir", true)
 	if err == nil {
 		t.Error("expected error for nonexistent dir")
 	}
@@ -43,7 +44,7 @@ func TestLintAllSessions_WithValidSession(t *testing.T) {
 	}
 
 	// should not error; we capture output via JSON mode
-	err := lintAllSessions(dir, true)
+	err := lintAllSessions(io.Discard, dir, true)
 	if err != nil {
 		t.Errorf("lintAllSessions with valid session: %v", err)
 	}
@@ -63,7 +64,7 @@ func TestLintAllSessions_SkipsDirsWithoutRawJSONL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := lintAllSessions(dir, true)
+	err := lintAllSessions(io.Discard, dir, true)
 	if err != nil {
 		t.Errorf("lintAllSessions should skip dirs without raw.jsonl: %v", err)
 	}
@@ -85,7 +86,7 @@ func TestPrintLintResults_JSONOutput(t *testing.T) {
 
 	// printLintResults writes to stdout; just verify it doesn't panic
 	// with JSON output mode
-	err := printLintResults(results, true)
+	err := printLintResults(io.Discard, results, true)
 	if err != nil {
 		t.Errorf("printLintResults (json): %v", err)
 	}
@@ -111,7 +112,7 @@ func TestPrintLintResults_TextOutput(t *testing.T) {
 		},
 	}
 
-	err := printLintResults(results, false)
+	err := printLintResults(io.Discard, results, false)
 	// printLintResults returns "lint failed" error when any result is invalid
 	if err == nil {
 		t.Error("expected error when results contain invalid sessions")

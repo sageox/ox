@@ -90,7 +90,7 @@ func runCodeActivity(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	fmt.Fprintln(os.Stdout, string(data))
+	fmt.Fprintln(cmd.OutOrStdout(), string(data))
 	return nil
 }
 

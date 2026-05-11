@@ -3,7 +3,7 @@ package main
 import (
 	_ "embed"
 	"fmt"
-	"os"
+	"io"
 	"strings"
 
 	lipgloss "charm.land/lipgloss/v2"
@@ -30,12 +30,12 @@ var releaseNotesCmd = &cobra.Command{
 		}
 
 		if raw {
-			fmt.Println(content)
+			fmt.Fprintln(cmd.OutOrStdout(), content)
 			return nil
 		}
 
 		// render with terminal formatting
-		renderReleaseNotes(content)
+		renderReleaseNotes(cmd.OutOrStdout(), content)
 		return nil
 	},
 }
@@ -74,12 +74,12 @@ func extractLatestVersion(content string) string {
 	return strings.TrimSpace(result.String())
 }
 
-func renderReleaseNotes(content string) {
+func renderReleaseNotes(w io.Writer, content string) {
 	lines := strings.Split(content, "\n")
 
 	for _, line := range lines {
 		rendered := renderLine(line)
-		fmt.Fprintln(os.Stdout, rendered)
+		fmt.Fprintln(w, rendered)
 	}
 }
 

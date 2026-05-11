@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -277,7 +278,7 @@ func TestHandleKBShowError_Unavailable(t *testing.T) {
 	t.Parallel()
 
 	wrapped := fmt.Errorf("wrapped: %w", api.ErrKBAPIUnavailable)
-	err := handleKBShowError(wrapped, "personal", false)
+	err := handleKBShowError(io.Discard, wrapped, "personal", false)
 	if err == nil {
 		t.Fatal("expected silent error, got nil")
 	}
@@ -299,7 +300,7 @@ func TestHandleKBShowError_NotFound(t *testing.T) {
 	t.Parallel()
 
 	raw := errors.New("HTTP 404 from https://api.example/api/v1/kb/kb_missing")
-	err := handleKBShowError(raw, "kb_missing", false)
+	err := handleKBShowError(io.Discard, raw, "kb_missing", false)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
