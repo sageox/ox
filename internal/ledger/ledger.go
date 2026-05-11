@@ -26,6 +26,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/manifest"
@@ -406,8 +407,17 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 		os.Remove(path)
 	}
 
-	// clone with filter (partial clone) and sparse checkout
-	cloneCmd := exec.Command("git", "clone",
+	// Clone with the ox credential helper installed for this single
+	// invocation, then persist the helper into the fresh clone's
+	// .git/config (via MigrateLedgerCredentials). Per ox-eeqi this
+	// replaces the previous "pre-embed PAT into URL" approach so the
+	// cloned origin URL stays bare and credentials live in the OS
+	// keychain or 0600 file store.
+	helperCmd := gitserver.DefaultHelperCommand()
+	cloneCmd := exec.Command("git",
+		"-c", "credential.helper=",
+		"-c", "credential.helper="+helperCmd,
+		"clone",
 		"--filter=blob:none",
 		"--sparse",
 		remoteURL,
@@ -415,6 +425,13 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 	)
 	if output, err := cloneCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git clone: %w: %s", err, output)
+	}
+
+	// Persist the helper into the cloned repo's .git/config so future
+	// fetch/push operations use it too. Best-effort: failure here doesn't
+	// fail the clone (the daemon startup sweep re-runs the migration).
+	if _, err := gitserver.MigrateLedgerCredentials(path, helperCmd); err != nil {
+		_ = err
 	}
 
 	// configure sparse checkout

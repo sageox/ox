@@ -787,8 +787,11 @@ func TestRefreshRemoteCredentials_UpdatesStaleFileCreds(t *testing.T) {
 	prevForce := TestSetForceFileStorage(true)
 	defer TestSetForceFileStorage(prevForce)
 
-	ep := "https://stale-file.sageox.ai"
-	require.NoError(t, SaveCredentialsForEndpoint(ep, GitCredentials{
+	// Per ox-eeqi: save credentials under the endpoint that matches the
+	// repo's origin host (host-match guard skips otherwise). Was historically
+	// "stale-file.sageox.ai" — irrelevant in the new model where the helper
+	// looks up by git host at invocation time.
+	require.NoError(t, SaveCredentialsForEndpoint("https://example.com", GitCredentials{
 		Token: "new-file-token", ServerURL: "https://git.example.com",
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}))
@@ -796,10 +799,15 @@ func TestRefreshRemoteCredentials_UpdatesStaleFileCreds(t *testing.T) {
 	repoPath := makeCovTestRepo(t)
 	runGit(t, repoPath, "remote", "add", "origin", "https://oauth2:stale-token@git.example.com/repo.git")
 
-	require.NoError(t, RefreshRemoteCredentials(repoPath, ep))
+	// pass "" so RefreshRemoteCredentials derives endpoint from origin host
+	require.NoError(t, RefreshRemoteCredentials(repoPath, ""))
 	out, err := exec.Command("git", "-C", repoPath, "remote", "get-url", "origin").Output()
 	require.NoError(t, err)
-	assert.Contains(t, string(out), "new-file-token")
+	// Per ox-eeqi: refresh no longer embeds creds. Both the old token and
+	// the new token must be absent — the helper resolves auth at git
+	// invocation time.
+	assert.NotContains(t, string(out), "stale-token")
+	assert.NotContains(t, string(out), "new-file-token")
 }
 
 func TestRefreshRemoteCredentials_EmptyServerURLSkipsHostCheck(t *testing.T) {
@@ -809,18 +817,19 @@ func TestRefreshRemoteCredentials_EmptyServerURLSkipsHostCheck(t *testing.T) {
 	prevForce := TestSetForceFileStorage(true)
 	defer TestSetForceFileStorage(prevForce)
 
-	ep := "https://noserver-file.sageox.ai"
-	require.NoError(t, SaveCredentialsForEndpoint(ep, GitCredentials{
+	require.NoError(t, SaveCredentialsForEndpoint("https://example.com", GitCredentials{
 		Token: "updated-token", ServerURL: "", ExpiresAt: time.Now().Add(24 * time.Hour),
 	}))
 
 	repoPath := makeCovTestRepo(t)
 	runGit(t, repoPath, "remote", "add", "origin", "https://oauth2:old-token@git.example.com/repo.git")
 
-	require.NoError(t, RefreshRemoteCredentials(repoPath, ep))
+	require.NoError(t, RefreshRemoteCredentials(repoPath, ""))
 	out, err := exec.Command("git", "-C", repoPath, "remote", "get-url", "origin").Output()
 	require.NoError(t, err)
-	assert.Contains(t, string(out), "updated-token")
+	// Per ox-eeqi: PAT must be stripped; new token MUST NOT replace it in the URL.
+	assert.NotContains(t, string(out), "old-token")
+	assert.NotContains(t, string(out), "updated-token")
 }
 
 // --- EnsureCheckoutGitignore ---

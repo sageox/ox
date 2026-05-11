@@ -183,6 +183,15 @@ const (
 	// Ledger Infrastructure checks
 	CheckSlugLedgerSparseCheckout = "ledger-sparse-checkout"
 
+	// Credential hygiene checks (ox-zyg7, ox-yeae): audit local Ledgers for
+	// credential exposure without uploading findings off-machine.
+	CheckSlugLedgerSecrets       = "ledger-secrets"
+	CheckSlugLedgerEmbeddedCreds = "ledger-embedded-creds"
+
+	// Hook content integrity (ox-9y4k): scan installed adapter hook
+	// content for suspicious shapes (curl|sh, eval $(…), base64 -d|sh).
+	CheckSlugHookContentIntegrity = "hook-content-integrity"
+
 	// Attribution checks
 	CheckSlugScoreThresholdRange = "score-threshold-range"
 

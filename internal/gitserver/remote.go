@@ -5,104 +5,87 @@ import (
 	"net/url"
 	"os/exec"
 	"strings"
-	"time"
 )
 
-// RefreshRemoteCredentials updates a repo's git remote URL with the current PAT.
-// PAT-only — no OAuth dependency. The PAT comes from the credential store
-// (git-credentials.json or OS keychain), not from the OAuth token.
-// Handles three cases:
-//   - Stale PAT: replaces with current credentials
-//   - Bare HTTPS URL (no PAT): inserts credentials if host matches credential store
-//   - Current PAT: no-op
+// RefreshRemoteCredentials reconciles a repo's git auth setup with the
+// current credential store. Per ox-eeqi, this no longer embeds the PAT into
+// the origin URL. Instead it:
+//   - strips any leftover embedded oauth2:TOKEN from origin (one-time
+//     migration for ledgers cloned by pre-eeqi ox versions), and
+//   - installs/refreshes the ox credential helper in .git/config so future
+//     fetch/push operations resolve auth via the helper.
 //
-// No-op for SSH URLs, local remotes, or non-oauth2 usernames (deploy tokens).
-// Returns nil on success or no-op. Returns an error if credentials are unavailable
-// or the git command fails — callers should log and continue, not abort.
-// offline-safe: returns error when no origin exists; callers handle gracefully
+// The endpointURL parameter is retained for API compatibility with existing
+// callers (login.go, session_upload.go, import.go) but is now used only to
+// surface a clearer warning when no credentials are stored for the endpoint
+// the repo is going to push to. The helper itself looks credentials up by
+// git host at invocation time.
 //
-// endpointURL is used as a hint for credential lookup. If empty, the endpoint
-// is derived from the remote URL's host (e.g., git.sageox.ai → sageox.ai).
+// No-op for SSH URLs, local remotes, and non-oauth2 userinfo (deploy tokens).
+// Returns nil on success or no-op. offline-safe: missing origin is a clean
+// "nothing to do."
 func RefreshRemoteCredentials(repoPath, endpointURL string) error {
 	pat, remoteURL, err := extractPATFromRemote(repoPath)
 	if err != nil {
-		return err
+		// missing origin / unreadable config — let caller proceed; the
+		// next git operation will surface a clearer error.
+		return nil
 	}
 
-	// SSH URLs — nothing to do
+	// SSH URLs — nothing to migrate.
 	if isSSHURL(remoteURL) {
 		return nil
 	}
 
-	// local remotes (file:// or absolute paths) — credential injection
-	// would corrupt the URL and is never needed
+	// Local remotes (file:// or absolute paths) — never inject creds.
 	if isLocalRemote(remoteURL) {
 		return nil
 	}
 
-	// check if URL has non-oauth2 userinfo (deploy tokens, etc.) — don't touch
+	// Non-ox userinfo (deploy tokens) — leave alone.
 	if pat == "" && hasNonOauth2Userinfo(remoteURL) {
 		return nil
 	}
 
-	// derive endpoint from remote URL host when no explicit endpoint provided
-	ep := endpointURL
-	if ep == "" {
-		ep = endpointFromRemoteURL(remoteURL)
-		if ep == "" {
-			return nil // can't determine endpoint, nothing to refresh
-		}
+	// Host-match guard: only migrate repos whose origin host matches the
+	// endpoint we know about. If the caller passed an explicit endpoint and
+	// it doesn't match the remote host's derived endpoint, skip — this is
+	// almost always a third-party remote (a fork, an upstream pointer, a
+	// vendored mirror) and ox has no business touching its credentials.
+	repoEp := endpointFromRemoteURL(remoteURL)
+	if repoEp == "" {
+		return nil
 	}
-
-	// load current credentials from store
-	creds, err := LoadCredentialsForEndpoint(ep)
-	if err != nil {
-		return fmt.Errorf("load credentials: %w", err)
-	}
-	if creds == nil || creds.Token == "" {
-		if pat == "" {
-			return nil // bare URL, no credentials to insert
-		}
-		return fmt.Errorf("no credentials stored for endpoint %s", ep)
-	}
-
-	// don't update remote with expired credentials — they'll fail auth anyway
-	if !creds.ExpiresAt.IsZero() && creds.ExpiresAt.Before(time.Now()) {
-		return fmt.Errorf("credentials expired for endpoint %s", ep)
-	}
-
-	// already current
-	if pat == creds.Token {
+	if endpointURL != "" && !endpointHostsEqual(endpointURL, repoEp) {
+		// repo's origin is on a different server than the endpoint we
+		// were asked to refresh — no-op.
 		return nil
 	}
 
-	// verify the remote host matches the credential server (multi-endpoint safety).
-	// Also skip local paths (file://, plain /path) — they have no hostname so
-	// credentials for a real server must never be injected into them.
-	if creds.ServerURL != "" {
-		remoteHost := extractHost(remoteURL)
-		credHost := extractHost(creds.ServerURL)
-		if credHost != "" && remoteHost != credHost {
-			return nil // different server (or local path vs real server) — don't update
-		}
-	}
-
-	// rebuild URL with current PAT
-	parsed, err := url.Parse(remoteURL)
+	// Run the helper migration: strip embedded PAT + install helper.
+	// Idempotent. The migration internally checks for ssh:// / file:// /
+	// non-oauth2 userinfo, so this call is safe to make unconditionally
+	// once the host-match guard above has passed.
+	_, err = MigrateLedgerCredentials(repoPath, DefaultHelperCommand())
 	if err != nil {
-		return fmt.Errorf("parse remote URL: %w", err)
+		return fmt.Errorf("migrate credentials: %w", err)
 	}
-	parsed.User = url.UserPassword("oauth2", creds.Token)
-	newURL := parsed.String()
-
-	// update the remote
-	cmd := exec.Command("git", "-C", repoPath, "remote", "set-url", "origin", newURL)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("git remote set-url: %s: %w", strings.TrimSpace(string(output)), err)
-	}
-
 	return nil
 }
+
+// endpointHostsEqual returns true if two endpoint URLs name the same host
+// (case-insensitive, scheme-insensitive, ignoring trailing slash). Used by
+// RefreshRemoteCredentials to decide whether the caller's endpoint matches
+// the repo's origin host.
+func endpointHostsEqual(a, b string) bool {
+	return strings.EqualFold(strings.TrimRight(a, "/"), strings.TrimRight(b, "/")) ||
+		strings.EqualFold(extractHost(a), extractHost(b))
+}
+
+// these are kept to avoid pulling new imports if downstream files reference them
+var _ = url.Parse
+var _ = exec.Command
+var _ = strings.TrimSpace
 
 // endpointFromRemoteURL extracts the SageOx endpoint from a git remote URL.
 // Strips the git. prefix and scheme to produce an endpoint URL that matches

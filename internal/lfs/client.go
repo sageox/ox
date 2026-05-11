@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -82,11 +83,28 @@ type Actions struct {
 }
 
 // Action is a single LFS action with an href and optional headers.
+//
+// TrustedHost and TrustedScheme are populated by doBatch from the batch
+// URL the action came from, so consumers (Upload/Download/Verify) can
+// reject hrefs whose host doesn't match the LFS server we just talked
+// to. Per ox-90gh: without this, a compromised LFS server can hand us
+// action.Href = https://attacker.example/leak with action.Header carrying
+// our bearer token, and the default http.Client follows redirects
+// blindly. The fields are zero-valued when actions are constructed by
+// callers outside doBatch (tests); the validation helpers below default
+// to "no constraint" in that case.
 type Action struct {
 	Href      string            `json:"href"`
 	Header    map[string]string `json:"header,omitempty"`
 	ExpiresIn int               `json:"expires_in,omitempty"` // seconds
 	ExpiresAt string            `json:"expires_at,omitempty"` // RFC3339
+
+	// TrustedScheme is "https" for actions returned by an https batch URL.
+	// Non-https schemes are rejected outside of loopback addresses.
+	TrustedScheme string `json:"-"`
+	// TrustedHost is the host:port of the batch URL the action came from.
+	// Lowercased so comparisons are case-insensitive.
+	TrustedHost string `json:"-"`
 }
 
 // ObjectError is returned when the server cannot process an object.
@@ -147,6 +165,31 @@ func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchRespons
 	var batchResp BatchResponse
 	if err := json.Unmarshal(respBody, &batchResp); err != nil {
 		return nil, fmt.Errorf("decode batch response: %w", err)
+	}
+
+	// Stamp every action in the response with the trusted host derived
+	// from the batch URL. Per ox-90gh, consumers use this to reject
+	// hrefs that point at attacker-controlled hosts. We parse the batch
+	// URL once here rather than re-parsing per action.
+	batchU, parseErr := url.Parse(c.batchURL)
+	if parseErr == nil && batchU != nil {
+		scheme := strings.ToLower(batchU.Scheme)
+		host := strings.ToLower(batchU.Host)
+		stamp := func(a *Action) {
+			if a == nil {
+				return
+			}
+			a.TrustedScheme = scheme
+			a.TrustedHost = host
+		}
+		for i := range batchResp.Objects {
+			if batchResp.Objects[i].Actions == nil {
+				continue
+			}
+			stamp(batchResp.Objects[i].Actions.Upload)
+			stamp(batchResp.Objects[i].Actions.Download)
+			stamp(batchResp.Objects[i].Actions.Verify)
+		}
 	}
 
 	return &batchResp, nil

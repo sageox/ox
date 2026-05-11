@@ -59,6 +59,14 @@ func setupTestCredentials(t *testing.T, ep string, token string, serverURL strin
 	require.NoError(t, os.WriteFile(credFile, data, 0o600))
 }
 
+// Per ox-eeqi, RefreshRemoteCredentials no longer embeds the PAT into the
+// origin URL. It strips any embedded PAT and installs the ox credential
+// helper. The tests below assert the new behavior:
+//
+//   - embedded PAT in origin → stripped + helper installed
+//   - bare origin           → helper installed (idempotent)
+//   - SSH / file:// / non-oauth2 → untouched
+
 func TestRefreshRemoteCredentials_StalePAT(t *testing.T) {
 	ep := "https://sageox.ai"
 	oldToken := "old-pat-token-12345"
@@ -70,12 +78,18 @@ func TestRefreshRemoteCredentials_StalePAT(t *testing.T) {
 	err := RefreshRemoteCredentials(dir, ep)
 	require.NoError(t, err)
 
-	// verify remote was updated
-	cmd := exec.Command("git", "-C", dir, "remote", "get-url", "origin")
-	output, err := cmd.Output()
+	// New behavior: origin is now bare; credentials live in the store, not the URL.
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
 	require.NoError(t, err)
-	assert.Contains(t, string(output), newToken)
-	assert.NotContains(t, string(output), oldToken)
+	assert.NotContains(t, string(out), oldToken, "old token should be stripped from URL")
+	assert.NotContains(t, string(out), newToken, "new token must NOT be embedded — that's the leak we're closing")
+	assert.Contains(t, string(out), "https://git.sageox.ai/team/ledger.git",
+		"bare URL expected after migration")
+
+	// Helper must be configured for the matching host.
+	helperVal, err := readGitConfig(dir, "credential.https://git.sageox.ai.helper")
+	require.NoError(t, err)
+	assert.NotEmpty(t, helperVal, "credential helper should be installed for git.sageox.ai")
 }
 
 func TestRefreshRemoteCredentials_CurrentPAT(t *testing.T) {
@@ -88,11 +102,14 @@ func TestRefreshRemoteCredentials_CurrentPAT(t *testing.T) {
 	err := RefreshRemoteCredentials(dir, ep)
 	require.NoError(t, err)
 
-	// verify remote unchanged
-	cmd := exec.Command("git", "-C", dir, "remote", "get-url", "origin")
-	output, err := cmd.Output()
+	// Even when the embedded token matches the store, the new behavior strips
+	// it — the goal is "no token in .git/config", period. Idempotent on re-run.
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
 	require.NoError(t, err)
-	assert.Contains(t, string(output), token)
+	assert.NotContains(t, string(out), token, "embedded token must be removed")
+	helperVal, err := readGitConfig(dir, "credential.https://git.sageox.ai.helper")
+	require.NoError(t, err)
+	assert.NotEmpty(t, helperVal)
 }
 
 func TestRefreshRemoteCredentials_SSHRemote(t *testing.T) {
@@ -118,17 +135,25 @@ func TestRefreshRemoteCredentials_BareHTTPS(t *testing.T) {
 	err := RefreshRemoteCredentials(dir, ep)
 	require.NoError(t, err)
 
-	// bare HTTPS URL should get credentials inserted when host matches
-	cmd := exec.Command("git", "-C", dir, "remote", "get-url", "origin")
-	output, err := cmd.Output()
+	// Bare URLs stay bare. The helper handles auth at fetch/push time.
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
 	require.NoError(t, err)
-	assert.Contains(t, string(output), "oauth2:some-token@git.sageox.ai")
+	assert.NotContains(t, string(out), "some-token", "URL must NOT carry the token")
+	assert.NotContains(t, string(out), "oauth2:", "URL must NOT carry userinfo at all")
+
+	// And the helper must be installed for this host.
+	helperVal, err := readGitConfig(dir, "credential.https://git.sageox.ai.helper")
+	require.NoError(t, err)
+	assert.NotEmpty(t, helperVal)
 }
 
 func TestRefreshRemoteCredentials_NoCredentials(t *testing.T) {
+	// Per ox-eeqi: missing credentials are not a hard error at refresh time.
+	// The helper returns nothing when called, git prompts (or falls back),
+	// and the user gets a clearer error from the actual operation. What the
+	// refresh MUST do is strip the embedded PAT so we close the leak.
 	dir := setupGitRepoWithRemote(t, "https://oauth2:old-token@git.sageox.ai/team/ledger.git")
 
-	// set up empty credential dir (no credentials file)
 	credDir := t.TempDir()
 	prev := TestSetConfigDirOverride(credDir)
 	prevForce := TestSetForceFileStorage(true)
@@ -138,14 +163,13 @@ func TestRefreshRemoteCredentials_NoCredentials(t *testing.T) {
 	})
 
 	err := RefreshRemoteCredentials(dir, "https://sageox.ai")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "credentials")
-
-	// verify remote was NOT modified on error
-	cmd := exec.Command("git", "-C", dir, "remote", "get-url", "origin")
-	output, err := cmd.Output()
 	require.NoError(t, err)
-	assert.Contains(t, string(output), "old-token")
+
+	// embedded PAT must have been stripped regardless of credentials presence
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), "old-token",
+		"embedded PAT must be stripped even when no store credentials exist — closing the leak doesn't depend on having a replacement token")
 }
 
 func TestRefreshRemoteCredentials_NonOauth2Username(t *testing.T) {
@@ -207,15 +231,16 @@ func TestRefreshRemoteCredentials_ExpiredCredentials(t *testing.T) {
 	require.NoError(t, os.WriteFile(credFile, data, 0o600))
 
 	err = RefreshRemoteCredentials(dir, ep)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "expired")
+	require.NoError(t, err, "expired creds no longer fail refresh; daemon renewal handles them")
 
-	// verify remote was NOT updated with expired credentials
-	cmd := exec.Command("git", "-C", dir, "remote", "get-url", "origin")
-	output, err := cmd.Output()
+	// New behavior strips the embedded PAT regardless of whether the store
+	// credentials are expired — the leak we close (URL-embedded token) is
+	// independent of the renewal cycle.
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
 	require.NoError(t, err)
-	assert.Contains(t, string(output), "old-token")
-	assert.NotContains(t, string(output), "new-but-expired-token")
+	assert.NotContains(t, string(out), "old-token")
+	assert.NotContains(t, string(out), "new-but-expired-token",
+		"expired tokens must never be embedded — but they were never going to be under the new model anyway")
 }
 
 // empty endpoint derives endpoint from remote URL host, then loads credentials
@@ -233,19 +258,19 @@ func TestRefreshRemoteCredentials_EmptyEndpoint_DerivesFromRemote(t *testing.T) 
 	})
 
 	// empty endpoint → derives "https://example.invalid" from remote
-	// no credentials stored → error (PAT exists but can't refresh)
+	// no credentials stored → still strips the PAT (closing the leak doesn't
+	// require having a replacement token).
 	err := RefreshRemoteCredentials(dir, "")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "no credentials stored")
-
-	// remote URL must remain unchanged despite error
-	cmd := exec.Command("git", "-C", dir, "remote", "get-url", "origin")
-	output, err := cmd.Output()
 	require.NoError(t, err)
-	assert.Contains(t, string(output), "some-token")
+
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), "some-token",
+		"PAT must be stripped even when no replacement creds are available")
 }
 
-// empty endpoint with matching credentials refreshes successfully
+// empty endpoint with matching credentials installs the helper and strips
+// the embedded PAT.
 func TestRefreshRemoteCredentials_EmptyEndpoint_WithCredentials(t *testing.T) {
 	oldToken := "old-token-abc"
 	newToken := "new-token-xyz"
@@ -257,11 +282,14 @@ func TestRefreshRemoteCredentials_EmptyEndpoint_WithCredentials(t *testing.T) {
 	err := RefreshRemoteCredentials(dir, "")
 	require.NoError(t, err)
 
-	cmd := exec.Command("git", "-C", dir, "remote", "get-url", "origin")
-	output, err := cmd.Output()
+	out, err := exec.Command("git", "-C", dir, "remote", "get-url", "origin").Output()
 	require.NoError(t, err)
-	assert.Contains(t, string(output), newToken)
-	assert.NotContains(t, string(output), oldToken)
+	assert.NotContains(t, string(out), oldToken)
+	assert.NotContains(t, string(out), newToken,
+		"new token MUST NOT be embedded — that's the entire migration")
+	helperVal, err := readGitConfig(dir, "credential.https://git.sageox.ai.helper")
+	require.NoError(t, err)
+	assert.NotEmpty(t, helperVal)
 }
 
 // local file:// remotes must never have credentials injected
@@ -353,6 +381,9 @@ func TestStripRemoteCredentials_NonOauth2NoOp(t *testing.T) {
 }
 
 func TestStripThenRefresh_RoundTrip(t *testing.T) {
+	// Per ox-eeqi, the round-trip is "strip → install helper → leave bare."
+	// PATs no longer get re-inserted into URLs on login. They live in the
+	// credential store; git asks the helper for them at fetch/push time.
 	ep := "https://sageox.ai"
 	token := "active-pat-token"
 	originalURL := "https://oauth2:" + token + "@git.sageox.ai/team/ledger.git"
@@ -369,15 +400,19 @@ func TestStripThenRefresh_RoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "https://git.sageox.ai/team/ledger.git\n", string(output), "PAT should be stripped after logout")
 
-	// refresh credentials (simulates ox login or daemon sync)
+	// refresh credentials (simulates ox login or daemon sync). The URL
+	// MUST stay bare; the credential helper MUST be installed.
 	err = RefreshRemoteCredentials(dir, ep)
 	require.NoError(t, err)
 
 	cmd = exec.Command("git", "-C", dir, "remote", "get-url", "origin")
 	output, err = cmd.Output()
 	require.NoError(t, err)
-	assert.Contains(t, string(output), token, "PAT should be re-inserted after login")
-	assert.Contains(t, string(output), "oauth2:"+token+"@", "should use oauth2 username")
+	assert.Equal(t, "https://git.sageox.ai/team/ledger.git\n", string(output),
+		"URL stays bare after refresh; helper resolves auth at git invocation time")
+	helperVal, err := readGitConfig(dir, "credential.https://git.sageox.ai.helper")
+	require.NoError(t, err)
+	assert.NotEmpty(t, helperVal, "helper must be installed after refresh")
 }
 
 func TestSanitizeRemoteURL(t *testing.T) {

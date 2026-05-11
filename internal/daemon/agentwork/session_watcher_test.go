@@ -441,6 +441,191 @@ func TestSessionWatcherManager_DetectAndRestart_CatchUpFromPersistedOffset(t *te
 	}, 2*time.Second, 50*time.Millisecond, "persisted offset should advance past entry2")
 }
 
+// --- D'. Write-path redaction (ox-hhc3) ---
+
+// TestSessionWatcherManager_WritePath_RedactsCredentials verifies that the
+// session watcher applies the secret redactor BEFORE writing to raw.jsonl.
+// Failure prevented: AWS keys / GitLab PATs / Bearer headers reach .sageox/cache/
+// in plaintext, then ride backup tools (Time Machine, iCloud, Dropbox) off the
+// user's machine. This was the active leak path in the 2026-05-10 forensic scan.
+func TestSessionWatcherManager_WritePath_RedactsCredentials(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: fsnotify watcher test")
+	}
+
+	mgr := newTestWatcherManager()
+	defer mgr.StopAll()
+
+	ledgerDir := t.TempDir()
+	sessionsDir := filepath.Join(ledgerDir, "sessions")
+	sessionDir := filepath.Join(sessionsDir, "canary-session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	// Plant credentials of three classes across two entries. Using the test
+	// adapter, each JSONL line becomes a single Content field on a session
+	// entry. The redactor must scrub all three before they hit raw.jsonl.
+	awsCanary := "AKIAIOSFODNN7EXAMPLE"
+	gitlabCanary := "glpat-AbCdEfGhIjKlMnOpQrSt"
+	bearerLine := `Authorization: Bearer ya29.thisIsATokenValue1234567890abc`
+
+	sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+	entry1 := `aws_access_key_id=` + awsCanary + "\n"
+	entry2 := gitlabCanary + " " + bearerLine + "\n"
+	require.NoError(t, os.WriteFile(sessionFile, []byte(entry1+entry2), 0644))
+
+	state := session.RecordingState{
+		WatchMode:    "tail",
+		AdapterName:  "codex",
+		SessionFile:  sessionFile,
+		SourceOffset: 0, // catch-up from start of file
+	}
+	// SourceOffset of 0 means runWatcher's catch-up block is skipped — but we
+	// want the canary entries to flow through the SAME redactor path. To force
+	// catch-up, set offset to a positive number smaller than the entries length
+	// so the IncrementalReader's ReadFromOffset returns all entries from offset.
+	// Easier: just set offset=1 so catch-up reads from byte 1 to EOF, which
+	// captures both entries minus their first byte. That's not a clean test.
+	//
+	// Instead: pre-populate offset such that catch-up reads from 0 by setting
+	// offset to 1 (>0 so catch-up branch runs) and rely on the fact that the
+	// testAdapter's ReadFromOffset seeks to that byte and reads forward. Use a
+	// dummy first character to absorb the offset.
+	preamble := "X"
+	require.NoError(t, os.WriteFile(sessionFile, []byte(preamble+entry1+entry2), 0644))
+	state.SourceOffset = int64(len(preamble))
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, ".recording.json"), data, 0644))
+
+	started := mgr.DetectAndRestart(ledgerDir)
+	require.Equal(t, 1, started)
+
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	require.Eventually(t, func() bool {
+		info, err := os.Stat(rawPath)
+		return err == nil && info.Size() > 0
+	}, 2*time.Second, 50*time.Millisecond, "raw.jsonl should be written by catch-up read")
+
+	rawData, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	rawStr := string(rawData)
+
+	// The actual canary bytes must NEVER appear in raw.jsonl. This is the
+	// load-bearing assertion of the entire ox-hhc3 fix.
+	assert.NotContains(t, rawStr, awsCanary, "AWS key leaked to raw.jsonl: %s", rawStr)
+	assert.NotContains(t, rawStr, gitlabCanary, "GitLab PAT leaked to raw.jsonl: %s", rawStr)
+	assert.NotContains(t, rawStr, "ya29.thisIsATokenValue1234567890abc", "Bearer token leaked: %s", rawStr)
+
+	// And the redaction slugs MUST appear (proves the redactor ran, not that
+	// the entries silently dropped).
+	assert.Contains(t, rawStr, "[REDACTED_AWS_KEY]")
+	assert.Contains(t, rawStr, "[REDACTED_GITLAB_TOKEN]")
+	assert.Contains(t, rawStr, "[REDACTED_BEARER_TOKEN]")
+}
+
+// TestSessionWatcherManager_WritePath_WholeOutputRedactsAwsSso verifies the
+// command-allowlist (ox-mmkf) fires on the write path. AWS SSO output is
+// multi-line and includes credentials in shapes that no single regex catches
+// reliably; whole-output redaction is the primary boundary.
+// Failure prevented: aws sso login captures ASIA + secret + session token into
+// raw.jsonl because individual fields look benign to per-regex detectors.
+func TestSessionWatcherManager_WritePath_WholeOutputRedactsAwsSso(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: fsnotify watcher test")
+	}
+
+	mgr := newTestWatcherManager()
+	defer mgr.StopAll()
+
+	ledgerDir := t.TempDir()
+	sessionsDir := filepath.Join(ledgerDir, "sessions")
+	sessionDir := filepath.Join(sessionsDir, "aws-sso-session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+
+	// Source line carries a synthetic tool-result-shaped JSON. The test adapter
+	// surfaces each line as a generic entry; the convert path that produces
+	// ToolInput/ToolOutput isn't exercised by the generic adapter, so this
+	// test asserts the regex backstop on raw Content fields (which the
+	// generic adapter populates with the full JSON line).
+	canarySecret := "ASIATESTTESTTESTTEST"
+	preamble := "X"
+	awsLine := `aws_credentials="ASIATESTTESTTESTTEST + wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"` + "\n"
+	sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+	require.NoError(t, os.WriteFile(sessionFile, []byte(preamble+awsLine), 0644))
+
+	state := session.RecordingState{
+		WatchMode:    "tail",
+		AdapterName:  "codex",
+		SessionFile:  sessionFile,
+		SourceOffset: int64(len(preamble)),
+	}
+	data, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, ".recording.json"), data, 0644))
+
+	require.Equal(t, 1, mgr.DetectAndRestart(ledgerDir))
+
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	require.Eventually(t, func() bool {
+		info, err := os.Stat(rawPath)
+		return err == nil && info.Size() > 0
+	}, 2*time.Second, 50*time.Millisecond)
+
+	rawData, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	rawStr := string(rawData)
+
+	// Either path (cmd-redactor on a proper tool entry, or regex backstop on
+	// raw content) must produce a clean output. Assert the canary bytes are
+	// absent regardless of which mechanism caught them.
+	assert.NotContains(t, rawStr, canarySecret, "AWS canary reached raw.jsonl: %s", rawStr)
+}
+
+// TestSessionWatcherManager_LiveTail_RedactsCredentials verifies redaction also
+// fires in the live-tail loop (separate from catch-up). Different code path,
+// same invariant.
+func TestSessionWatcherManager_LiveTail_RedactsCredentials(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: fsnotify watcher test")
+	}
+
+	mgr := newTestWatcherManager()
+	defer mgr.StopAll()
+
+	cacheDir := t.TempDir()
+	sessionFile := filepath.Join(t.TempDir(), "session.jsonl")
+	require.NoError(t, os.WriteFile(sessionFile, []byte{}, 0644))
+
+	state := session.RecordingState{WatchMode: "tail", EntryCount: 0}
+	recData, _ := json.Marshal(state)
+	require.NoError(t, os.WriteFile(filepath.Join(cacheDir, ".recording.json"), recData, 0644))
+
+	require.NoError(t, mgr.StartWatch("live-canary", sessionFile, "codex", "/ledger", cacheDir))
+
+	require.Eventually(t, func() bool {
+		return len(mgr.ActiveSessions()) > 0
+	}, 2*time.Second, 10*time.Millisecond)
+	time.Sleep(200 * time.Millisecond) // fsnotify OS registration
+
+	// append a single line carrying an AWS key
+	canary := "AKIAIOSFODNN7EXAMPLE"
+	f, err := os.OpenFile(sessionFile, os.O_WRONLY|os.O_APPEND, 0644)
+	require.NoError(t, err)
+	_, err = f.WriteString(`{"text":"export AWS_ACCESS_KEY_ID=` + canary + `"}` + "\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	rawPath := filepath.Join(cacheDir, "raw.jsonl")
+	require.Eventually(t, func() bool {
+		info, err := os.Stat(rawPath)
+		return err == nil && info.Size() > 0
+	}, 5*time.Second, 100*time.Millisecond, "raw.jsonl should be written via live tail")
+
+	rawData, err := os.ReadFile(rawPath)
+	require.NoError(t, err)
+	rawStr := string(rawData)
+	assert.NotContains(t, rawStr, canary, "AWS key reached raw.jsonl via live tail: %s", rawStr)
+	assert.Contains(t, rawStr, "[REDACTED_AWS_KEY]", "expected redaction slug in raw.jsonl: %s", rawStr)
+}
+
 // TestSessionWatcherManager_PersistOffset_UpdatesRecordingState verifies that
 // persistOffset writes SourceOffset to .recording.json.
 // Failure prevented: daemon crash loses offset, causing full re-read on restart.

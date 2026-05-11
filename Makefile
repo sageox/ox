@@ -123,7 +123,31 @@ check-no-git-lfs-shell: ## Ensure no code shells out to git-lfs binary (see .cla
 		exit 1; \
 	fi
 
-test-preflight: lint check-no-git-lfs-shell test-all test-slow ## Pre-PR quality gate: lint + all unit tests + slow tests
+sync-gitleaks-rules: ## Regenerate the gitleaks-derived detector catalog from a pinned gitleaks.toml
+	@echo "Regenerating internal/session/gitleaks_generated.go..."
+	@cd internal/session/cmd/gitleaks-port && go run . \
+		-in gitleaks-v8.30.1.toml \
+		-out ../../gitleaks_generated.go \
+		-gitleaks-version v8.30.1
+
+check-raw-writer-chokepoint: ## Ensure raw.jsonl is only opened via session.RawWriter (ox-h20u)
+	@# Any os.OpenFile/Create/WriteFile of a raw.jsonl path outside the
+	@# canonical chokepoint (internal/session/raw_writer.go) is a redaction
+	@# bypass risk. Test files and the chokepoint itself are allowed.
+	@violations=$$(grep -rnE '(os\.OpenFile|os\.Create|os\.WriteFile)\([^)]*raw[._]?jsonl' \
+		--include='*.go' . 2>/dev/null \
+		| grep -v '_test\.go:' \
+		| grep -v 'vendor/' \
+		| grep -v 'internal/session/raw_writer\.go:' \
+		| grep -vE ':[0-9]+:[[:space:]]*//') ; \
+	if [ -n "$$violations" ] ; then \
+		echo "ERROR: raw.jsonl must be written via session.RawWriter (see internal/session/raw_writer.go)"; \
+		echo "Violations:"; \
+		echo "$$violations"; \
+		exit 1; \
+	fi
+
+test-preflight: lint check-no-git-lfs-shell check-raw-writer-chokepoint test-all test-slow ## Pre-PR quality gate: lint + all unit tests + slow tests
 
 test-digital-twin: test-ledger-twin test-kb-twin ## Digital twin tests (team_context_twin pending, see ox-au5)
 

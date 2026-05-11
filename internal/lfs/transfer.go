@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -15,8 +17,67 @@ import (
 )
 
 // lfsHTTPClient is shared across LFS operations for connection reuse.
+//
+// CheckRedirect returns http.ErrUseLastResponse so that redirects on
+// action URLs are never followed. Per ox-90gh: a compromised batch API
+// can return action.Href that 302s to an attacker-controlled host,
+// where the Authorization or action-supplied bearer header would be
+// forwarded. By refusing to follow redirects at all, we eliminate that
+// exfiltration vector — and pre-signed cloud-storage URLs (the
+// legitimate use case for action.Href) never 302 anyway.
 var lfsHTTPClient = &http.Client{
 	Timeout: 5 * time.Minute,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
+// validateActionHref enforces the ox-90gh trust contract on an action:
+//   - https scheme outside of loopback (http allowed for 127.0.0.1/::1
+//     so tests can use httptest servers without TLS plumbing).
+//   - host matches the TrustedHost stamped by doBatch when the action
+//     came from a real batch response. When TrustedHost is empty the
+//     check defaults to "no constraint" — used by tests that build
+//     actions in-band without going through the client.
+//
+// Returns an error that callers wrap with the operation context.
+func validateActionHref(action *Action) error {
+	if action == nil || action.Href == "" {
+		return fmt.Errorf("validate action: empty href")
+	}
+	u, err := url.Parse(action.Href)
+	if err != nil {
+		return fmt.Errorf("validate action: parse href: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "https" && !isLoopbackHost(u.Hostname()) {
+		return fmt.Errorf("validate action: scheme %q is not allowed (https required outside loopback)", scheme)
+	}
+	if action.TrustedHost == "" {
+		// no stamp from doBatch — caller is bypassing the client (tests).
+		// Accept; the kernel-level threats this guards against don't
+		// apply when there's no batch response to begin with.
+		return nil
+	}
+	if !strings.EqualFold(u.Host, action.TrustedHost) {
+		return fmt.Errorf("validate action: href host %q does not match trusted host %q from batch response",
+			u.Host, action.TrustedHost)
+	}
+	return nil
+}
+
+// isLoopbackHost returns true for IP literals that name the local host.
+// Used by validateActionHref to permit http:// for httptest URLs.
+func isLoopbackHost(h string) bool {
+	if h == "" {
+		return false
+	}
+	ip := net.ParseIP(h)
+	if ip == nil {
+		// hostnames like "localhost" — accept the well-known name
+		return strings.EqualFold(h, "localhost")
+	}
+	return ip.IsLoopback()
 }
 
 // ComputeOID computes the SHA256 hex digest of content (the LFS OID).
@@ -35,6 +96,9 @@ type UploadResult struct {
 func UploadObject(action *Action, content []byte) error {
 	if action == nil || action.Href == "" {
 		return fmt.Errorf("no upload action provided")
+	}
+	if err := validateActionHref(action); err != nil {
+		return fmt.Errorf("upload: %w", err)
 	}
 
 	client := lfsHTTPClient
@@ -76,6 +140,9 @@ func VerifyObject(action *Action, oid string, size int64) error {
 	if action == nil || action.Href == "" {
 		return nil // no verify action = server doesn't require verification
 	}
+	if err := validateActionHref(action); err != nil {
+		return fmt.Errorf("verify: %w", err)
+	}
 
 	body := fmt.Sprintf(`{"oid":"%s","size":%d}`, oid, size)
 
@@ -109,6 +176,9 @@ func VerifyObject(action *Action, oid string, size int64) error {
 func DownloadObject(action *Action) ([]byte, error) {
 	if action == nil || action.Href == "" {
 		return nil, fmt.Errorf("no download action provided")
+	}
+	if err := validateActionHref(action); err != nil {
+		return nil, fmt.Errorf("download: %w", err)
 	}
 
 	client := lfsHTTPClient
@@ -168,6 +238,9 @@ func DownloadToFile(action *Action, dst io.Writer, verify bool, expectedOID stri
 	}
 	if action == nil || action.Href == "" {
 		return fmt.Errorf("no download action provided")
+	}
+	if err := validateActionHref(action); err != nil {
+		return fmt.Errorf("download: %w", err)
 	}
 
 	req, err := http.NewRequest("GET", action.Href, nil)

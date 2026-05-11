@@ -12,17 +12,34 @@ type SecretPattern struct {
 	Pattern *regexp.Regexp   // compiled regex
 	Redact  string           // replacement text, e.g., "[REDACTED_AWS_KEY]"
 	Source  RedactRuleSource // origin: builtin, team, repo, or user (zero = builtin)
+	// SkipIf lists substrings that, if present in a match, suppress redaction.
+	// Used to whitelist already-masked or known-safe shapes (e.g. ":x-oauth-basic@"
+	// for GitHub-style URLs, ":****@" for already-masked URLs) without writing
+	// negative lookaheads (RE2 doesn't support them).
+	SkipIf []string
 }
 
 // DefaultPatterns returns built-in secret patterns covering common credential types.
 // Patterns are ordered roughly by specificity (more specific patterns first).
 func DefaultPatterns() []SecretPattern {
 	return []SecretPattern{
-		// AWS Access Keys (AKIA... format, exactly 20 chars)
+		// AWS Access Keys (AKIA... format, exactly 20 chars) — long-lived IAM access keys.
 		{
 			Name:    "aws_access_key",
 			Pattern: regexp.MustCompile(`AKIA[0-9A-Z]{16}`),
 			Redact:  "[REDACTED_AWS_KEY]",
+		},
+
+		// AWS STS session access key id (ASIA... format, exactly 20 chars) — short-lived
+		// temporary credentials minted by `aws sso login`, `aws sts assume-role`, etc.
+		// Separate slug from aws_access_key so triage can tell IAM-static from STS-temporary
+		// at a glance — the response posture differs (rotate vs. ride out TTL).
+		// Forensic scan 2026-05-10 found 194 occurrences in committed raw.jsonl files that
+		// slipped past the AKIA-only regex; this closes that gap.
+		{
+			Name:    "aws_sts_session_key",
+			Pattern: regexp.MustCompile(`ASIA[0-9A-Z]{16}`),
+			Redact:  "[REDACTED_AWS_STS_KEY]",
 		},
 
 		// AWS Secret Keys (40 char base64, usually after key= or similar)
@@ -46,11 +63,60 @@ func DefaultPatterns() []SecretPattern {
 			Redact:  "[REDACTED_GITHUB_PAT]",
 		},
 
-		// GitLab tokens (glpat- prefix)
+		// GitLab personal access tokens (glpat- prefix)
 		{
 			Name:    "gitlab_token",
 			Pattern: regexp.MustCompile(`glpat-[A-Za-z0-9\-_]{20,}`),
 			Redact:  "[REDACTED_GITLAB_TOKEN]",
+		},
+
+		// GitLab OAuth access tokens (gloas- prefix)
+		{
+			Name:    "gitlab_oauth_token",
+			Pattern: regexp.MustCompile(`gloas-[A-Za-z0-9\-_]{15,}`),
+			Redact:  "[REDACTED_GITLAB_OAUTH]",
+		},
+
+		// GitLab deploy tokens (gldt- prefix)
+		{
+			Name:    "gitlab_deploy_token",
+			Pattern: regexp.MustCompile(`gldt-[A-Za-z0-9\-_]{15,}`),
+			Redact:  "[REDACTED_GITLAB_DEPLOY_TOKEN]",
+		},
+
+		// GitLab runner tokens (glrt- prefix)
+		{
+			Name:    "gitlab_runner_token",
+			Pattern: regexp.MustCompile(`glrt-[A-Za-z0-9\-_]{15,}`),
+			Redact:  "[REDACTED_GITLAB_RUNNER_TOKEN]",
+		},
+
+		// GitLab feed tokens (glft- prefix)
+		{
+			Name:    "gitlab_feed_token",
+			Pattern: regexp.MustCompile(`glft-[A-Za-z0-9\-_]{15,}`),
+			Redact:  "[REDACTED_GITLAB_FEED_TOKEN]",
+		},
+
+		// SageOx share-session cookies
+		{
+			Name:    "sox_share_session",
+			Pattern: regexp.MustCompile(`sox_share_session=[A-Za-z0-9_\-]{15,}`),
+			Redact:  "sox_share_session=[REDACTED_SOX_SHARE_SESSION]",
+		},
+
+		// SageOx API keys (mk_ prefix)
+		{
+			Name:    "sageox_api_key",
+			Pattern: regexp.MustCompile(`\bmk_[A-Za-z0-9]{20,}`),
+			Redact:  "[REDACTED_SAGEOX_API_KEY]",
+		},
+
+		// AgentX keys (axk_ prefix, exactly 32 chars after prefix)
+		{
+			Name:    "agentx_key",
+			Pattern: regexp.MustCompile(`\baxk_[A-Za-z0-9_]{32}\b`),
+			Redact:  "[REDACTED_AGENTX_KEY]",
 		},
 
 		// Slack tokens (xoxb-, xoxp-, xoxa-, xoxs-, xoxr-)
@@ -137,21 +203,50 @@ func DefaultPatterns() []SecretPattern {
 			Redact:  "[REDACTED_EXPORT]",
 		},
 
-		// Connection strings with embedded credentials
+		// Connection strings with embedded credentials (DB protocols)
 		{
 			Name:    "connection_string",
 			Pattern: regexp.MustCompile(`(?i)(mongodb|postgres|postgresql|mysql|redis|amqp|mssql):\/\/[^:]+:[^@]+@[^\s'"]+`),
 			Redact:  "[REDACTED_CONNECTION_STRING]",
 		},
 
-		// Bearer tokens in headers
+		// HTTP(S) URLs with embedded userinfo (PAT in clone URL, etc.)
+		// SkipIf whitelists already-masked or GitHub-style sentinel passwords.
+		{
+			Name:    "url_with_password",
+			Pattern: regexp.MustCompile(`https?://[^\s/:@]+:[^\s/:@]{6,}@[^\s'"]+`),
+			Redact:  "[REDACTED_URL_WITH_CREDENTIALS]",
+			SkipIf: []string{
+				":x-oauth-basic@",
+				":x-access-token@",
+				":****@",
+				":[REDACTED",
+			},
+		},
+
+		// Bearer tokens in HTTP headers â clean shape: "Authorization: Bearer <token>"
+		{
+			Name:    "authorization_bearer",
+			Pattern: regexp.MustCompile(`(?i)Authorization:\s*Bearer\s+[A-Za-z0-9._=/+\-]{20,}`),
+			Redact:  "Authorization: Bearer [REDACTED_BEARER_TOKEN]",
+		},
+
+		// Basic auth headers â clean shape: "Authorization: Basic <b64>"
+		{
+			Name:    "authorization_basic",
+			Pattern: regexp.MustCompile(`(?i)Authorization:\s*Basic\s+[A-Za-z0-9+/=]{20,}`),
+			Redact:  "Authorization: Basic [REDACTED_BASIC_AUTH]",
+		},
+
+		// Legacy bearer pattern retained for backward compatibility (covers
+		// looser shapes like "bearer=<token>" without the Authorization prefix).
 		{
 			Name:    "bearer_token",
 			Pattern: regexp.MustCompile(`(?i)(authorization|bearer)\s*[:=]\s*['"]?bearer\s+[A-Za-z0-9_\-\.]{20,}['"]?`),
 			Redact:  "[REDACTED_BEARER_TOKEN]",
 		},
 
-		// Basic auth headers (base64)
+		// Legacy basic auth pattern retained for backward compatibility.
 		{
 			Name:    "basic_auth",
 			Pattern: regexp.MustCompile(`(?i)authorization\s*[:=]\s*['"]?basic\s+[A-Za-z0-9+/=]{10,}['"]?`),
@@ -192,6 +287,16 @@ func DefaultPatterns() []SecretPattern {
 			Pattern: regexp.MustCompile(`eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*`),
 			Redact:  "[REDACTED_JWT]",
 		},
+
+		// .env-style sensitive assignments â fallback for cases the more
+		// specific patterns above didn't catch. Position deliberately AFTER
+		// generic_api_key / generic_token / generic_password so the more
+		// specific [REDACTED_*] slugs win when they apply.
+		{
+			Name:    "env_assignment",
+			Pattern: regexp.MustCompile(`(?i)\b(GITHUB_TOKEN|GITLAB_TOKEN|DATABASE_PASSWORD|DB_PASSWORD|MYSQL_PASSWORD|POSTGRES_PASSWORD|REDIS_PASSWORD|MONGO_PASSWORD)\s*=\s*['"]?[A-Za-z0-9_\-\.=/+]{12,}['"]?`),
+			Redact:  "[REDACTED_ENV_ASSIGNMENT]",
+		},
 	}
 }
 
@@ -229,6 +334,17 @@ type RedactionResult struct {
 	Position    int    // position in the string where match was found
 }
 
+// matchSkipped returns true if a match should be skipped because it contains
+// any of the pattern's SkipIf substrings.
+func matchSkipped(match string, skipIf []string) bool {
+	for _, skip := range skipIf {
+		if skip != "" && strings.Contains(match, skip) {
+			return true
+		}
+	}
+	return false
+}
+
 // RedactString scans and redacts secrets from a string.
 // Returns the redacted output and a list of pattern names that matched.
 func (r *Redactor) RedactString(input string) (output string, found []string) {
@@ -245,6 +361,9 @@ func (r *Redactor) RedactString(input string) (output string, found []string) {
 
 		matched := false
 		output = p.Pattern.ReplaceAllStringFunc(output, func(match string) string {
+			if matchSkipped(match, p.SkipIf) {
+				return match
+			}
 			matched = true
 			return p.Redact
 		})
@@ -273,17 +392,26 @@ func (r *Redactor) RedactStringWithDetails(input string) (output string, results
 			continue
 		}
 
-		// find all matches with positions
+		// find all matches with positions; record only those not skipped
 		matches := p.Pattern.FindAllStringIndex(output, -1)
 		for _, match := range matches {
+			matched := output[match[0]:match[1]]
+			if matchSkipped(matched, p.SkipIf) {
+				continue
+			}
 			results = append(results, RedactionResult{
 				PatternName: p.Name,
-				Original:    output[match[0]:match[1]],
+				Original:    matched,
 				Position:    match[0],
 			})
 		}
 
-		output = p.Pattern.ReplaceAllString(output, p.Redact)
+		output = p.Pattern.ReplaceAllStringFunc(output, func(match string) string {
+			if matchSkipped(match, p.SkipIf) {
+				return match
+			}
+			return p.Redact
+		})
 	}
 
 	return output, results
@@ -401,8 +529,17 @@ func (r *Redactor) ContainsSecrets(input string) bool {
 		if p.Pattern == nil {
 			continue
 		}
-		if p.Pattern.MatchString(input) {
-			return true
+		if len(p.SkipIf) == 0 {
+			if p.Pattern.MatchString(input) {
+				return true
+			}
+			continue
+		}
+		// honor SkipIf: a match that contains a skip substring doesn't count
+		for _, m := range p.Pattern.FindAllString(input, -1) {
+			if !matchSkipped(m, p.SkipIf) {
+				return true
+			}
 		}
 	}
 
@@ -419,8 +556,17 @@ func (r *Redactor) ScanForSecrets(input string) []string {
 		if p.Pattern == nil {
 			continue
 		}
-		if p.Pattern.MatchString(input) {
-			found = append(found, p.Name)
+		if len(p.SkipIf) == 0 {
+			if p.Pattern.MatchString(input) {
+				found = append(found, p.Name)
+			}
+			continue
+		}
+		for _, m := range p.Pattern.FindAllString(input, -1) {
+			if !matchSkipped(m, p.SkipIf) {
+				found = append(found, p.Name)
+				break
+			}
 		}
 	}
 

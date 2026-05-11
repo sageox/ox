@@ -77,7 +77,10 @@ func TestNormalizeEndpoint(t *testing.T) {
 		{"www with path", "https://www.sageox.ai/v1", "https://sageox.ai/v1"},
 		{"www staging", "https://www.test.sageox.ai", "https://test.sageox.ai"},
 		{"www bare host", "www.sageox.ai", "https://sageox.ai"},
-		{"www enterprise", "https://www.sageox.walmart.com", "https://sageox.walmart.com"},
+		// Per ox-v5de: third-party hosts (not in the sageox.ai family) keep
+		// their subdomain prefix — silently rewriting them caused tokens
+		// to be mis-keyed against a non-existent parent domain.
+		{"www enterprise (third-party preserved)", "https://www.sageox.walmart.com", "https://www.sageox.walmart.com"},
 
 		// api. stripping
 		{"api full URL", "https://api.sageox.ai", "https://sageox.ai"},
@@ -176,8 +179,10 @@ func TestNormalizeSlug(t *testing.T) {
 		{"dev subdomain preserved", "dev.example.com", "dev.example.com"},
 		{"uppercase normalized", "HTTPS://API.SAGEOX.AI", "sageox.ai"},
 
-		// should not strip multiple prefixes
-		{"nested prefix api.www", "api.www.example.com", "www.example.com"},
+		// Per ox-v5de: third-party hosts keep their subdomain prefix to
+		// prevent silent token mis-keying. example.com isn't in the
+		// sageox.ai family, so api.www.example.com is preserved as-is.
+		{"nested prefix api.www (third-party preserved)", "api.www.example.com", "api.www.example.com"},
 	}
 
 	for _, tt := range tests {

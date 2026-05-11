@@ -96,6 +96,62 @@ func TestRedactString_AWSAccessKey(t *testing.T) {
 	}
 }
 
+func TestRedactString_AWSSTSKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+		wantFind bool
+	}{
+		{
+			name:     "valid aws sts session key",
+			input:    "my key is ASIAIOSFODNN7EXAMPLE",
+			expected: "my key is [REDACTED_AWS_STS_KEY]",
+			wantFind: true,
+		},
+		{
+			name:     "aws sts key in export",
+			input:    `export AWS_ACCESS_KEY_ID="ASIAIOSFODNN7EXAMPLE"`,
+			expected: `export AWS_ACCESS_KEY_ID="[REDACTED_AWS_STS_KEY]"`,
+			wantFind: true,
+		},
+		{
+			name:     "aws sts key in json",
+			input:    `{"access_key": "ASIAIOSFODNN7EXAMPLE"}`,
+			expected: `{"access_key": "[REDACTED_AWS_STS_KEY]"}`,
+			wantFind: true,
+		},
+		{
+			name:     "too short to be aws sts key",
+			input:    "ASIAIOSFODNN7EX",
+			expected: "ASIAIOSFODNN7EX",
+			wantFind: false,
+		},
+		{
+			name:     "lowercase not aws sts key",
+			input:    "asiaiosfodnn7example",
+			expected: "asiaiosfodnn7example",
+			wantFind: false,
+		},
+		{
+			name:     "akia not flagged as sts",
+			input:    "my key is AKIAIOSFODNN7EXAMPLE",
+			expected: "my key is [REDACTED_AWS_KEY]",
+			wantFind: false,
+		},
+	}
+
+	r := NewRedactor()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, found := r.RedactString(tt.input)
+			assert.Equal(t, tt.expected, output)
+			hasSTS := containsPattern(found, "aws_sts_session_key")
+			assert.Equal(t, tt.wantFind, hasSTS)
+		})
+	}
+}
+
 func TestRedactString_AWSSecretKey(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -385,29 +441,48 @@ func TestRedactString_JWT(t *testing.T) {
 }
 
 func TestRedactString_BearerTokens(t *testing.T) {
+	// Bearer-token inputs may match either the specific authorization_bearer
+	// pattern (clean "Authorization: Bearer X" shape) or the legacy bearer_token
+	// pattern (looser "bearer: ..." shape). Test the intent — that the credential
+	// is redacted — not the specific detector that fires.
 	tests := []struct {
-		name     string
-		input    string
-		wantFind bool
+		name           string
+		input          string
+		acceptable     []string // any of these pattern names satisfies the test
+		wantRedactedIn string   // substring expected in redacted output
+		wantFind       bool
 	}{
 		{
-			name:     "bearer in header",
-			input:    "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
-			wantFind: true,
+			name:           "bearer in header",
+			input:          "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+			acceptable:     []string{"authorization_bearer", "bearer_token"},
+			wantRedactedIn: "[REDACTED_BEARER_TOKEN]",
+			wantFind:       true,
 		},
 		{
-			name:     "bearer with equals",
-			input:    "authorization=bearer abc123def456ghi789jkl012mno345",
-			wantFind: true,
+			name:           "bearer with equals",
+			input:          "authorization=bearer abc123def456ghi789jkl012mno345",
+			acceptable:     []string{"authorization_bearer", "bearer_token"},
+			wantRedactedIn: "[REDACTED_BEARER_TOKEN]",
+			wantFind:       true,
 		},
 	}
 
 	r := NewRedactor()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, found := r.RedactString(tt.input)
-			hasBearer := containsPattern(found, "bearer_token")
-			assert.Equal(t, tt.wantFind, hasBearer, "found: %v", found)
+			output, found := r.RedactString(tt.input)
+			matchedSome := false
+			for _, want := range tt.acceptable {
+				if containsPattern(found, want) {
+					matchedSome = true
+					break
+				}
+			}
+			assert.Equal(t, tt.wantFind, matchedSome, "found: %v", found)
+			if tt.wantFind {
+				assert.Contains(t, output, tt.wantRedactedIn)
+			}
 		})
 	}
 }
@@ -1092,6 +1167,280 @@ func TestRedactCapturedHistory_NilHistory(t *testing.T) {
 	r := NewRedactor()
 	count := r.RedactCapturedHistory(nil)
 	assert.Equal(t, 0, count)
+}
+
+// --- New detectors added by ox-ceuj ---
+// Each subtest exercises a positive case (must be caught) and at least one
+// negative / skip-list case (must not be caught) so we know each detector
+// has both signal and specificity.
+
+func TestRedactString_SoxShareSession(t *testing.T) {
+	r := NewRedactor()
+	tests := []struct {
+		name     string
+		input    string
+		wantFind bool
+	}{
+		{"sets cookie", "Set-Cookie: sox_share_session=AbCdEf1234567890XyZ", true},
+		{"in url", "https://sageox.ai/s/foo?sox_share_session=abcdefghij1234567890", true},
+		{"too short", "sox_share_session=short", false},
+		{"different cookie", "sox_other=AbCdEf1234567890XyZ", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, found := r.RedactString(tt.input)
+			has := containsPattern(found, "sox_share_session")
+			assert.Equal(t, tt.wantFind, has, "found: %v", found)
+			if tt.wantFind {
+				assert.Contains(t, output, "[REDACTED_SOX_SHARE_SESSION]")
+			}
+		})
+	}
+}
+
+func TestRedactString_AuthorizationHeaders(t *testing.T) {
+	r := NewRedactor()
+	tests := []struct {
+		name     string
+		input    string
+		want     string // pattern name expected
+		slug     string // redaction slug expected in output
+		wantFind bool
+	}{
+		{
+			name:     "authorization bearer header",
+			input:    "Authorization: Bearer ya29.a0ARrdaM_THIS_IS_A_LONG_TOKEN_xyz",
+			want:     "authorization_bearer",
+			slug:     "[REDACTED_BEARER_TOKEN]",
+			wantFind: true,
+		},
+		{
+			name:     "authorization bearer extra whitespace",
+			input:    "Authorization:    Bearer abc123def456ghi789jkl012mno",
+			want:     "authorization_bearer",
+			slug:     "[REDACTED_BEARER_TOKEN]",
+			wantFind: true,
+		},
+		{
+			name:     "authorization basic header",
+			input:    "Authorization: Basic dXNlcjpwYXNzd29yZDEyMzQ1Ng==",
+			want:     "authorization_basic",
+			slug:     "[REDACTED_BASIC_AUTH]",
+			wantFind: true,
+		},
+		{
+			name:     "not an auth header",
+			input:    "Authorization is required for this endpoint.",
+			want:     "authorization_bearer",
+			slug:     "",
+			wantFind: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, found := r.RedactString(tt.input)
+			has := containsPattern(found, tt.want)
+			assert.Equal(t, tt.wantFind, has, "found: %v", found)
+			if tt.wantFind {
+				assert.Contains(t, output, tt.slug)
+			}
+		})
+	}
+}
+
+func TestRedactString_GitLabVariants(t *testing.T) {
+	r := NewRedactor()
+	tests := []struct {
+		name string
+		in   string
+		want string
+		slug string
+	}{
+		{"OAuth gloas-", "token=gloas-abcdef1234567890", "gitlab_oauth_token", "[REDACTED_GITLAB_OAUTH]"},
+		{"Deploy gldt-", "GL_TOKEN=gldt-deadbeef1234567890", "gitlab_deploy_token", "[REDACTED_GITLAB_DEPLOY_TOKEN]"},
+		{"Runner glrt-", "runner_token: glrt-feedface12345678", "gitlab_runner_token", "[REDACTED_GITLAB_RUNNER_TOKEN]"},
+		{"Feed glft-", "feed=glft-cafebabe1234567890", "gitlab_feed_token", "[REDACTED_GITLAB_FEED_TOKEN]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, found := r.RedactString(tt.in)
+			assert.True(t, containsPattern(found, tt.want), "want %s, found: %v", tt.want, found)
+			assert.Contains(t, output, tt.slug)
+		})
+	}
+	t.Run("not a gitlab variant", func(t *testing.T) {
+		_, found := r.RedactString("token=gl-something-else-12345")
+		for _, name := range []string{"gitlab_oauth_token", "gitlab_deploy_token", "gitlab_runner_token", "gitlab_feed_token"} {
+			assert.False(t, containsPattern(found, name), "false positive on %s: %v", name, found)
+		}
+	})
+}
+
+func TestRedactString_SageOxAndAgentXKeys(t *testing.T) {
+	r := NewRedactor()
+	tests := []struct {
+		name     string
+		input    string
+		want     string
+		slug     string
+		wantFind bool
+	}{
+		{
+			name:     "sageox api key",
+			input:    "OX_API_KEY=mk_abcdef1234567890wxyz0987654321",
+			want:     "sageox_api_key",
+			slug:     "[REDACTED_SAGEOX_API_KEY]",
+			wantFind: true,
+		},
+		{
+			name:     "agentx key full length",
+			input:    "AGENTX_KEY=axk_abcdefghij1234567890ABCDEFGHIJkl",
+			want:     "agentx_key",
+			slug:     "[REDACTED_AGENTX_KEY]",
+			wantFind: true,
+		},
+		{
+			name:     "mk in middle of word not matched",
+			input:    "filename=foobar_mk_short.txt",
+			want:     "sageox_api_key",
+			slug:     "",
+			wantFind: false,
+		},
+		{
+			name:     "axk too short",
+			input:    "axk_short",
+			want:     "agentx_key",
+			slug:     "",
+			wantFind: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, found := r.RedactString(tt.input)
+			has := containsPattern(found, tt.want)
+			assert.Equal(t, tt.wantFind, has, "found: %v", found)
+			if tt.wantFind {
+				assert.Contains(t, output, tt.slug)
+			}
+		})
+	}
+}
+
+func TestRedactString_URLWithPassword(t *testing.T) {
+	r := NewRedactor()
+	// Each case asserts the SECRET BYTES are gone (intent), and where the
+	// url_with_password detector is the only one that could fire (no inner
+	// token-shape match), asserts that specific slug.
+	type tc struct {
+		name           string
+		input          string
+		secret         string // bytes that must NOT appear in output
+		wantUrlPattern bool   // true only when no inner-token detector could preempt
+	}
+	tests := []tc{
+		{
+			name:           "http with basic auth",
+			input:          "curl http://admin:supersecret123@internal.example.com/api",
+			secret:         "supersecret123",
+			wantUrlPattern: true,
+		},
+		{
+			name:           "https with non-prefix password",
+			input:          "https://user:plainpassword123456@host.example.com/foo",
+			secret:         "plainpassword123456",
+			wantUrlPattern: true,
+		},
+		{
+			name:           "https with gitlab pat embedded (gitlab_token preempts)",
+			input:          "git remote add origin https://oauth2:glpat-abc123def456ghi789jk@git.sageox.ai/foo/bar.git",
+			secret:         "glpat-abc123def456ghi789jk",
+			wantUrlPattern: false, // gitlab_token fires first, url_with_password doesn't get a chance
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, found := r.RedactString(tt.input)
+			assert.NotContains(t, output, tt.secret, "secret leaked through: found=%v output=%q", found, output)
+			if tt.wantUrlPattern {
+				assert.True(t, containsPattern(found, "url_with_password"), "expected url_with_password, found: %v", found)
+				assert.Contains(t, output, "[REDACTED_URL_WITH_CREDENTIALS]")
+			}
+		})
+	}
+
+	t.Run("skip list cases not flagged", func(t *testing.T) {
+		// SkipIf substrings must suppress redaction by url_with_password.
+		// Note: other detectors may still fire on the same input if they match
+		// independently. We assert specifically that url_with_password did NOT.
+		skipCases := []string{
+			"remote: https://gh_token_value_here:x-oauth-basic@github.com/foo/bar.git",
+			"https://token123456:x-access-token@github.com/foo/bar.git",
+			"https://user:****@host.example.com/foo",
+			"https://user:[REDACTED]@host.example.com/foo",
+			"https://git.sageox.ai/foo/bar.git", // no userinfo
+		}
+		for _, input := range skipCases {
+			_, found := r.RedactString(input)
+			assert.False(t, containsPattern(found, "url_with_password"),
+				"url_with_password incorrectly fired on skip-list case %q: %v", input, found)
+		}
+	})
+}
+
+func TestRedactString_EnvAssignmentFallback(t *testing.T) {
+	r := NewRedactor()
+	// env_assignment fills the gap for env-dump-shaped vars NOT covered by
+	// existing generic patterns. It must NOT preempt them.
+	tests := []struct {
+		name     string
+		input    string
+		wantFind bool
+	}{
+		{"github token assignment", "GITHUB_TOKEN=ghp_alphanumericvalue1234567890XYZ", true}, // ghp_ matches first; env_assignment may also match
+		{"gitlab token assignment", "GITLAB_TOKEN=somelong-tokenvalue-1234567890abc", true},
+		{"postgres password assignment", `POSTGRES_PASSWORD="reallylongpassword1234"`, true},
+		{"unrelated assignment", "FOO_VAR=hello_world", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			output, _ := r.RedactString(tt.input)
+			// intent: secret should be gone from output regardless of which detector fires
+			if tt.wantFind {
+				// match any [REDACTED_*] slug
+				assert.True(t, strings.Contains(output, "[REDACTED"), "expected some redaction, got %q", output)
+			} else {
+				assert.NotContains(t, output, "[REDACTED")
+			}
+		})
+	}
+}
+
+func TestRedactString_PreservesNonSecrets(t *testing.T) {
+	// Regression guard: legitimate Ledger content must not get redacted.
+	r := NewRedactor()
+	legitimate := []string{
+		"abc12345-6789-1abc-def0-1234567890ab",                                                // UUID — already covered by heroku_key pattern; intentional false positive
+		"commit a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",                                     // git SHA
+		"https://git.sageox.ai/foo/bar.git",                                                   // bare URL
+		"[REDACTED_AWS_KEY] was found",                                                        // already-redacted slug
+		"This is a regular sentence containing no credentials at all whatsoever you can grep", // prose
+	}
+	for _, input := range legitimate {
+		// allow already-known overmatches (UUID/heroku_key) by checking we don't introduce NEW false positives
+		_, found := r.RedactString(input)
+		// must not match any of the new ox-ceuj detectors
+		newDetectors := []string{
+			"sox_share_session",
+			"gitlab_oauth_token", "gitlab_deploy_token", "gitlab_runner_token", "gitlab_feed_token",
+			"sageox_api_key", "agentx_key",
+			"authorization_bearer", "authorization_basic",
+			"url_with_password",
+			"env_assignment",
+		}
+		for _, d := range newDetectors {
+			assert.False(t, containsPattern(found, d), "input %q false-matched %s (full: %v)", input, d, found)
+		}
+	}
 }
 
 // Benchmarks

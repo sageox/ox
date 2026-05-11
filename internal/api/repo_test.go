@@ -237,9 +237,18 @@ func TestRegisterRepo_NoDuplicate_ExistingRepoFieldsEmpty(t *testing.T) {
 func TestGetDoctorIssues_Success_ReturnsIssues(t *testing.T) {
 	t.Parallel()
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// verify request
+		// Per ox-alh the client now probes the authed path first
+		// (/api/v1/repos/{id}/doctor) and falls back to the legacy public
+		// path on 404. Accept either shape so this test exercises the
+		// real behavior without coupling to whichever probe is current.
 		assert.Equal(t, "GET", r.Method)
-		assert.True(t, strings.Contains(r.URL.Path, "/api/v1/public/repos/") && strings.HasSuffix(r.URL.Path, "/doctor"))
+		isAuthed := strings.Contains(r.URL.Path, "/api/v1/repos/") &&
+			!strings.Contains(r.URL.Path, "/api/v1/public/") &&
+			strings.HasSuffix(r.URL.Path, "/doctor")
+		isLegacy := strings.Contains(r.URL.Path, "/api/v1/public/repos/") &&
+			strings.HasSuffix(r.URL.Path, "/doctor")
+		assert.True(t, isAuthed || isLegacy,
+			"request path should be the authed or legacy doctor route, got %s", r.URL.Path)
 
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{

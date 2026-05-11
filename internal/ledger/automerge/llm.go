@@ -20,12 +20,51 @@ import (
 // conflict content for the model's attention budget.
 const systemPrompt = `You are a careful code-merge assistant. The user will give you a single file containing git merge conflict markers (<<<<<<<, =======, >>>>>>>). Produce ONLY the merged file content with no commentary, no markdown fences, no explanation. Preserve user intent on both sides; when in doubt prefer including more content over deleting. Remove all conflict markers from your output.`
 
+// llmBinaryAllowlist enumerates the binary names automerge is permitted
+// to invoke. Per ox-7esb: the LLMBinary is exec'd against attacker-
+// influenced prompt content (merge-conflict bodies). If LLMBinary ever
+// got sourced from team-context-synced config (e.g. .sageox/config.toml
+// pulled from the cloud), an attacker who controls the config could
+// redirect to /tmp/evil. Restricting argv[0] to a small allowlist makes
+// that redirect harmless even if such a config path is ever introduced.
+//
+// Absolute paths are accepted regardless — the operator running ox
+// already chose where to point this binary. The allowlist applies only
+// to bare-name resolution (which goes through $PATH).
+var llmBinaryAllowlist = map[string]bool{
+	"claude": true,
+	"gemini": true,
+	"codex":  true,
+}
+
+// isAllowedLLMBinary returns true if binary names a permitted LLM tool.
+// Absolute paths pass through (operator-chosen); bare names must match
+// the allowlist; relative paths with a slash are refused outright.
+func isAllowedLLMBinary(binary string) bool {
+	if binary == "" {
+		return false
+	}
+	if filepath.IsAbs(binary) {
+		return true
+	}
+	// Reject relative paths containing a separator — those are neither
+	// allowlisted bare names nor explicit absolute paths.
+	if strings.ContainsRune(binary, filepath.Separator) {
+		return false
+	}
+	return llmBinaryAllowlist[strings.ToLower(binary)]
+}
+
 // tryLLMTier attempts a semantic merge for each remaining conflicted path.
 // On any per-file failure it returns immediately so the caller can abort
 // the rebase rather than partially-resolve.
 func (r *Resolver) tryLLMTier(ctx context.Context, repoPath string, paths []string) error {
 	r.logger.Info("automerge.tier", "tier", "llm", "paths", len(paths), "binary", r.opts.LLMBinary)
 
+	if !isAllowedLLMBinary(r.opts.LLMBinary) {
+		return fmt.Errorf("%w: refusing non-allowlisted LLM binary %q (allowlist: claude, gemini, codex; or absolute path)",
+			ErrLLMUnavailable, r.opts.LLMBinary)
+	}
 	if _, err := exec.LookPath(r.opts.LLMBinary); err != nil {
 		return fmt.Errorf("%w: %s", ErrLLMUnavailable, r.opts.LLMBinary)
 	}

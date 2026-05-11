@@ -391,17 +391,24 @@ func extractDiagramsFromPlanEntries(entries []planHistoryEntry) []string {
 	return diagrams
 }
 
-// writePlanHistoryRaw writes entries to raw.jsonl with proper header.
+// writePlanHistoryRaw writes entries to raw.jsonl via the
+// session.RawWriter chokepoint (ox-h20u). Plan-history entries come
+// from user-supplied JSONL (via `ox agent <id> session capture-prior` /
+// session import) and may include accidentally-pasted credentials from
+// the planning discussion — code review snippets, tool output, etc.
+// The writer guarantees the three-layer redaction stack runs on every
+// entry before it touches disk; we no longer need to invoke the
+// redactor manually here.
 func writePlanHistoryRaw(path string, entries []planHistoryEntry, meta *planHistoryMeta, agentID string) error {
-	f, err := os.Create(path)
+	rw, err := session.NewRawWriterTruncate(path, "")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer rw.Close()
 
-	encoder := json.NewEncoder(f)
-
-	// write header
+	// write header (the metadata block; not a credential-bearing field
+	// but goes through WriteRaw for consistency and so any embedded
+	// strings get the same redaction sweep as entry bodies)
 	header := map[string]any{
 		"type": "header",
 		"metadata": map[string]any{
@@ -423,7 +430,7 @@ func writePlanHistoryRaw(path string, entries []planHistoryEntry, meta *planHist
 			header["metadata"].(map[string]any)["username"] = meta.Username
 		}
 	}
-	if err := encoder.Encode(header); err != nil {
+	if err := rw.WriteRaw(header); err != nil {
 		return fmt.Errorf("write header: %w", err)
 	}
 
@@ -435,7 +442,6 @@ func writePlanHistoryRaw(path string, entries []planHistoryEntry, meta *planHist
 				ts = parsed
 			}
 		}
-
 		data := map[string]any{
 			"type":      entry.Type,
 			"content":   entry.Content,
@@ -454,8 +460,7 @@ func writePlanHistoryRaw(path string, entries []planHistoryEntry, meta *planHist
 		if entry.ToolInput != "" {
 			data["tool_input"] = entry.ToolInput
 		}
-
-		if err := encoder.Encode(data); err != nil {
+		if err := rw.WriteRaw(data); err != nil {
 			return fmt.Errorf("write entry %d: %w", i, err)
 		}
 	}
@@ -466,11 +471,10 @@ func writePlanHistoryRaw(path string, entries []planHistoryEntry, meta *planHist
 		"closed_at":   time.Now().Format(time.RFC3339),
 		"entry_count": len(entries),
 	}
-	if err := encoder.Encode(footer); err != nil {
+	if err := rw.WriteRaw(footer); err != nil {
 		return fmt.Errorf("write footer: %w", err)
 	}
-
-	return f.Sync()
+	return rw.Sync()
 }
 
 // truncateString truncates a string to maxLen chars, adding ellipsis if truncated.

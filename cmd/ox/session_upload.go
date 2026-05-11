@@ -355,6 +355,16 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 		slog.Info("healed kb merge attributes", "ledger", ledgerPath)
 	}
 
+	// Pre-push secret gate (ox-1uss). Scans the commit range that we're about
+	// to push for known credential patterns; refuses the push if any are found
+	// unless the user has set OX_ALLOW_SECRETS=1. Runs AFTER credential
+	// refresh / merge-attribute healing so failures from those don't get
+	// confused with a secret-gate refusal; runs BEFORE PushWithRetry so we
+	// never send bytes containing detected credentials.
+	if err := runPrePushSecretGate(ctx, ledgerPath); err != nil {
+		return err
+	}
+
 	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
 		PrePush: func(repoPath string) error {

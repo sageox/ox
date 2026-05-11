@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -739,61 +738,76 @@ func regenerateSessionRedact(projectRoot, ledgerPath, sessionsDir, nameArg strin
 
 // --- Shared helpers ---
 
-// rewriteRawJSONL writes the modified StoredSession back to raw.jsonl atomically.
+// rewriteRawJSONL writes the modified StoredSession back to raw.jsonl
+// atomically via the session.RawWriter chokepoint (ox-h20u). Atomicity
+// is preserved by writing to a temp file via the chokepoint, then
+// renaming. The chokepoint guarantees the three-layer redaction stack
+// runs on every line — entries reaching here have typically already
+// been redacted upstream, but the writer is the load-bearing guarantee.
 func rewriteRawJSONL(path string, sess *session.StoredSession) error {
 	tmpPath := path + ".tmp"
-	f, err := os.Create(tmpPath)
+	rw, err := session.NewRawWriterTruncate(tmpPath, "")
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
-	defer func() {
-		f.Close()
+	cleanup := func() {
+		_ = rw.Close()
 		os.Remove(tmpPath) // no-op if already renamed
-	}()
-
-	w := bufio.NewWriter(f)
-
-	// write header if present (serialize StoreMeta directly via json.Marshal)
-	if sess.Meta != nil {
-		header := map[string]any{
-			"type":     "header",
-			"metadata": sess.Meta,
-		}
-		line, err := json.Marshal(header)
-		if err != nil {
-			return fmt.Errorf("marshal header: %w", err)
-		}
-		w.Write(line)
-		w.WriteByte('\n')
 	}
 
-	// write entries
-	for _, entry := range sess.Entries {
-		line, err := json.Marshal(entry)
+	// write header if present (StoreMeta serialized as JSON; RawWriter's
+	// WriteRaw applies the same redaction sweep, idempotent on already-
+	// safe metadata fields)
+	if sess.Meta != nil {
+		metaBytes, err := json.Marshal(sess.Meta)
 		if err != nil {
-			return fmt.Errorf("marshal entry: %w", err)
+			cleanup()
+			return fmt.Errorf("marshal header metadata: %w", err)
 		}
-		w.Write(line)
-		w.WriteByte('\n')
+		var metaMap map[string]any
+		if err := json.Unmarshal(metaBytes, &metaMap); err != nil {
+			cleanup()
+			return fmt.Errorf("unmarshal header metadata: %w", err)
+		}
+		if err := rw.WriteRaw(map[string]any{
+			"type":     "header",
+			"metadata": metaMap,
+		}); err != nil {
+			cleanup()
+			return fmt.Errorf("write header: %w", err)
+		}
+	}
+
+	// write entries via the chokepoint
+	for _, entry := range sess.Entries {
+		if err := rw.WriteRaw(entry); err != nil {
+			cleanup()
+			return fmt.Errorf("write entry: %w", err)
+		}
 	}
 
 	// write footer if present
 	if sess.Footer != nil {
-		line, err := json.Marshal(sess.Footer)
+		footerBytes, err := json.Marshal(sess.Footer)
 		if err != nil {
+			cleanup()
 			return fmt.Errorf("marshal footer: %w", err)
 		}
-		w.Write(line)
-		w.WriteByte('\n')
+		var footerMap map[string]any
+		if err := json.Unmarshal(footerBytes, &footerMap); err != nil {
+			cleanup()
+			return fmt.Errorf("unmarshal footer: %w", err)
+		}
+		if err := rw.WriteRaw(footerMap); err != nil {
+			cleanup()
+			return fmt.Errorf("write footer: %w", err)
+		}
 	}
 
-	if err := w.Flush(); err != nil {
-		return fmt.Errorf("flush: %w", err)
-	}
-	if err := f.Close(); err != nil {
+	if err := rw.CloseAndSync(); err != nil {
+		os.Remove(tmpPath)
 		return fmt.Errorf("close: %w", err)
 	}
-
 	return os.Rename(tmpPath, path)
 }
 

@@ -253,15 +253,93 @@ func NormalizeEndpoint(ep string) string {
 
 // stripSubdomainPrefix removes a single common subdomain prefix from a hostname.
 // Uses the shared stripPrefixes list as the single source of truth.
+//
+// Per ox-v5de: prefix stripping is restricted to the *.sageox.ai family
+// plus loopback so third-party hosts (e.g. git.example.com) are never
+// silently rewritten to example.com — under the old behavior, that
+// rewrite meant tokens for git.example.com got mis-keyed under a
+// non-existent example.com endpoint, silently breaking auth.
 func stripSubdomainPrefix(host string) string {
 	lower := strings.ToLower(host)
 	for _, prefix := range stripPrefixes {
-		if strings.HasPrefix(lower, prefix) {
-			// preserve original casing of the remainder
-			return host[len(prefix):]
+		if !strings.HasPrefix(lower, prefix) {
+			continue
 		}
+		rest := host[len(prefix):]
+		restLower := strings.ToLower(rest)
+		// Empty remainder = malformed input ("api."). Strip it so the
+		// caller's "empty result → invalid" branch can fire — preserves
+		// pre-ox-v5de behavior on malformed inputs.
+		if restLower == "" {
+			return ""
+		}
+		// Only strip if the result is in our known endpoint family
+		// (sageox.ai exactly or a *.sageox.ai subdomain) or loopback.
+		// Anything else: leave the prefix alone to preserve the host
+		// the user actually typed/configured.
+		if restLower == "sageox.ai" ||
+			strings.HasSuffix(restLower, ".sageox.ai") ||
+			restLower == "localhost" ||
+			restLower == "127.0.0.1" ||
+			restLower == "::1" {
+			return rest
+		}
+		return host
 	}
 	return host
+}
+
+// ValidateEndpoint performs ox-v5de's security checks on an endpoint
+// URL: rejects http:// outside of loopback unless the user has
+// explicitly opted in with OX_ALLOW_PLAINTEXT_ENDPOINT=1.
+//
+// Callers (ox login, ox init) should invoke this before any flow that
+// would store credentials under the endpoint's slug. A malformed or
+// disallowed endpoint must not silently route auth state into a
+// new keychain entry — the user has to confirm.
+//
+// Returns nil for the empty string so the "no endpoint configured"
+// callers don't have to special-case validation.
+func ValidateEndpoint(ep string) error {
+	if ep == "" {
+		return nil
+	}
+	u, err := url.Parse(ep)
+	if err != nil {
+		return errInvalidEndpoint{reason: "parse: " + err.Error(), endpoint: ep}
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return errInvalidEndpoint{reason: "missing scheme or host", endpoint: ep}
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "https" && scheme != "http" {
+		return errInvalidEndpoint{reason: "scheme must be http or https", endpoint: ep}
+	}
+	if scheme == "http" {
+		host := strings.ToLower(u.Hostname())
+		if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+			if os.Getenv("OX_ALLOW_PLAINTEXT_ENDPOINT") != "1" {
+				return errInvalidEndpoint{
+					reason:   "plaintext http:// is disallowed for non-loopback hosts (set OX_ALLOW_PLAINTEXT_ENDPOINT=1 to override)",
+					endpoint: ep,
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// errInvalidEndpoint is a typed error so callers can recognize the
+// validation failure and surface a tailored UX (e.g., the login flow
+// prints a specific remediation message rather than a generic
+// "couldn't parse URL").
+type errInvalidEndpoint struct {
+	reason   string
+	endpoint string
+}
+
+func (e errInvalidEndpoint) Error() string {
+	return "invalid endpoint " + e.endpoint + ": " + e.reason
 }
 
 // NormalizeSlug returns a normalized endpoint slug for use in filesystem paths.

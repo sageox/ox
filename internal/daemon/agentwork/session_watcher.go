@@ -271,15 +271,19 @@ func (m *SessionWatcherManager) runWatcher(
 		m.mu.Unlock()
 	}()
 
-	rawFile, err := os.OpenFile(rawPath, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	// Per ox-h20u: ALL raw.jsonl writes go through session.RawWriter. The
+	// writer constructs and applies the three-layer redaction stack
+	// (CommandRedactor → built-in Redactor → gitleaks extras). There is no
+	// way to call WriteEntry without redaction running first. Adapters can
+	// only emit RawEntry JSON on stdout — they have no write access to
+	// raw.jsonl.
+	rw, err := session.NewRawWriter(rawPath, "")
 	if err != nil {
 		m.logger.Error("failed to open raw.jsonl for writing",
 			"session", aw.sessionName, "path", rawPath, "error", err)
 		return
 	}
-	defer rawFile.Close()
-
-	enc := json.NewEncoder(rawFile)
+	defer rw.Close()
 
 	// catch-up: read entries between persisted offset and current EOF
 	if reader, ok := adapter.(adapters.IncrementalReader); ok && aw.startOffset > 0 {
@@ -289,8 +293,8 @@ func (m *SessionWatcherManager) runWatcher(
 				"session", aw.sessionName, "offset", aw.startOffset, "error", readErr)
 		} else if len(entries) > 0 {
 			converted := session.ConvertRawEntries(entries)
-			for _, e := range converted {
-				if encErr := enc.Encode(e); encErr != nil {
+			for i := range converted {
+				if encErr := rw.WriteEntry(&converted[i]); encErr != nil {
 					m.logger.Warn("failed to write catch-up entry to raw.jsonl",
 						"session", aw.sessionName, "error", encErr)
 				}
@@ -315,8 +319,8 @@ func (m *SessionWatcherManager) runWatcher(
 
 	for entry := range ch {
 		converted := session.ConvertRawEntries([]adapters.RawEntry{entry})
-		for _, e := range converted {
-			if encErr := enc.Encode(e); encErr != nil {
+		for i := range converted {
+			if encErr := rw.WriteEntry(&converted[i]); encErr != nil {
 				m.logger.Warn("failed to write entry to raw.jsonl",
 					"session", aw.sessionName, "error", encErr)
 			}

@@ -20,8 +20,19 @@ import (
 )
 
 const (
-	repoInitPath      = "/api/v1/repo/init"
-	repoDoctorPath    = "/api/v1/public/repos/%s/doctor"  // %s = repo_id; intentionally public (no PII, works pre-auth)
+	repoInitPath = "/api/v1/repo/init"
+
+	// repoDoctorPath: per ox-alh, the cloud doctor endpoint is being moved
+	// from /api/v1/public/repos/{id}/doctor (unauthenticated) to
+	// /api/v1/repos/{id}/doctor (authenticated Bearer). The CLI already
+	// sends the Authorization header on this call, so flipping the path
+	// here doesn't break anything once the server-side route lands. We
+	// hit the authed path FIRST; on 404 we fall back to the legacy path
+	// so a CLI on a newer ox version keeps working against an older
+	// server.
+	repoDoctorPathAuthed = "/api/v1/repos/%s/doctor"
+	repoDoctorPathLegacy = "/api/v1/public/repos/%s/doctor"
+
 	repoUninstallPath = "/api/v1/repo/%s/uninstall"       // %s = repo_id
 	repoMergePath     = "/api/v1/repo/%s/merge"           // %s = repo_id
 	gitImportPath     = "/api/v1/teams/%s/context/import" // %s = team_id
@@ -261,56 +272,60 @@ func (c *RepoClient) RegisterRepo(req *RepoInitRequest) (*RepoInitResponse, erro
 
 // GetDoctorIssues calls GET /api/v1/repo/{repo_id}/doctor for cloud diagnostics
 // Returns nil, nil if API unavailable (graceful degradation for offline mode)
+//
+// Path probe order (ox-alh): try the authenticated path first; fall back to
+// the legacy unauthenticated path only on 404 so the CLI keeps working
+// against older servers that haven't shipped the auth move yet. Once every
+// production endpoint has the authed path, the legacy fallback can be
+// removed.
 func (c *RepoClient) GetDoctorIssues(repoID string) (*DoctorResponse, error) {
-	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(repoDoctorPath, repoID)
-
-	logger.LogHTTPRequest("GET", reqURL)
-	start := time.Now()
-
-	httpReq, err := useragent.NewRequest(context.Background(), "GET", reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+	status, bodyBytes := c.tryDoctorPathFollow(repoID, repoDoctorPathAuthed)
+	if status == http.StatusNotFound {
+		status, bodyBytes = c.tryDoctorPathFollow(repoID, repoDoctorPathLegacy)
 	}
-	if c.authToken != "" {
-		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
-	}
-
-	resp, err := c.httpClient.Do(httpReq)
-	duration := time.Since(start)
-
-	if err != nil {
-		logger.LogHTTPError("GET", reqURL, err, duration)
-		// graceful degradation - return nil instead of error for network issues
-		return nil, nil
-	}
-	defer resp.Body.Close()
-
-	logger.LogHTTPResponse("GET", reqURL, resp.StatusCode, duration)
-
-	// handle 404 gracefully - endpoint not yet deployed
-	if resp.StatusCode == http.StatusNotFound {
-		io.Copy(io.Discard, resp.Body) // drain body for connection reuse
-		return nil, nil
-	}
-
-	// read response body
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
+	if status < 200 || status >= 300 {
 		return nil, nil // graceful degradation
 	}
 
-	// handle non-2xx responses silently (graceful degradation)
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, nil
-	}
-
-	// decode successful response
 	var doctorResp DoctorResponse
 	if err := json.Unmarshal(bodyBytes, &doctorResp); err != nil {
 		return nil, nil // graceful degradation on malformed response
 	}
-
 	return &doctorResp, nil
+}
+
+// tryDoctorPathFollow issues a single GET against the formatted path and
+// returns the status code + body bytes. Sealed: network errors become
+// status=0 so the caller's fallback logic stays simple. Logs at the same
+// level the original code did.
+func (c *RepoClient) tryDoctorPathFollow(repoID, pathFmt string) (int, []byte) {
+	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(pathFmt, repoID)
+	logger.LogHTTPRequest("GET", reqURL)
+	start := time.Now()
+	httpReq, err := useragent.NewRequest(context.Background(), "GET", reqURL, nil)
+	if err != nil {
+		return 0, nil
+	}
+	if c.authToken != "" {
+		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
+	}
+	resp, err := c.httpClient.Do(httpReq)
+	duration := time.Since(start)
+	if err != nil {
+		logger.LogHTTPError("GET", reqURL, err, duration)
+		return 0, nil
+	}
+	defer resp.Body.Close()
+	logger.LogHTTPResponse("GET", reqURL, resp.StatusCode, duration)
+	if resp.StatusCode == http.StatusNotFound {
+		io.Copy(io.Discard, resp.Body)
+		return http.StatusNotFound, nil
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil
+	}
+	return resp.StatusCode, body
 }
 
 // NotifyUninstall calls POST /api/v1/repo/{repo_id}/uninstall to notify server of local uninstall.

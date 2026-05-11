@@ -1,0 +1,188 @@
+package gitserver
+
+import (
+	"fmt"
+	"net/url"
+	"os/exec"
+	"strings"
+	"sync"
+)
+
+// helperCommand is the shell string git invokes for credential resolution.
+// Set once at process startup via SetHelperCommand from the main binary, where
+// we know the path to the running ox executable. Internal callers query it
+// via DefaultHelperCommand(); when unset, returns a fallback that assumes
+// `ox` is on $PATH.
+var (
+	helperCmdMu sync.RWMutex
+	helperCmd   string
+)
+
+// SetHelperCommand records the credential helper invocation string for use
+// by MigrateLedgerCredentials and other gitserver callers. Idempotent.
+func SetHelperCommand(cmd string) {
+	helperCmdMu.Lock()
+	defer helperCmdMu.Unlock()
+	helperCmd = cmd
+}
+
+// DefaultHelperCommand returns the current helper command, or a sensible
+// fallback ("!ox git-credential-helper") if the binary location wasn't
+// registered. The fallback still works as long as `ox` is on $PATH, which
+// is the install default.
+func DefaultHelperCommand() string {
+	helperCmdMu.RLock()
+	defer helperCmdMu.RUnlock()
+	if helperCmd != "" {
+		return helperCmd
+	}
+	return "!ox git-credential-helper"
+}
+
+// HelperConfig holds the parameters needed to install an ox-managed git
+// credential helper into a single repo's .git/config. The shell command
+// the helper invokes is produced by the cmd/ox layer (see HelperCommandString)
+// and threaded down here so internal/gitserver doesn't have to know the path
+// to the running ox binary.
+type HelperConfig struct {
+	// Host is the git server host (e.g. "git.sageox.ai"). The credential
+	// scope is set to "https://<host>" so the helper only fires for that
+	// exact host — never for third-party remotes that may live in the
+	// same repo (forks, upstream pointers).
+	Host string
+
+	// Command is the shell command git invokes for credential resolution.
+	// Conventionally prefixed with "!" (per git-credential helper docs)
+	// and includes the absolute path to the ox binary when available.
+	// See cmd/ox/git_credential_helper.go:HelperCommandString.
+	Command string
+}
+
+// InstallCredentialHelper writes the ox-managed credential helper config
+// into a repo's .git/config under a host-scoped section. Idempotent: if
+// the same helper is already configured, the function is a no-op.
+//
+// Rewrites (not appends) the per-host helper value so a repo whose
+// .git/config previously had an embedded oauth2:TOKEN URL gets a clean
+// single entry instead of stacked helpers. Other unrelated [credential]
+// sections (e.g. for github.com, third-party hosts) are preserved.
+//
+// Per ox-eeqi: this is the migration target. After this is called and
+// StripRemoteCredentials runs against the same repo, future git fetch /
+// push operations resolve credentials via the helper instead of reading
+// them out of the embedded origin URL.
+func InstallCredentialHelper(repoPath string, cfg HelperConfig) error {
+	if cfg.Host == "" {
+		return fmt.Errorf("helper config: host is empty")
+	}
+	if cfg.Command == "" {
+		return fmt.Errorf("helper config: command is empty")
+	}
+	scope := "credential.https://" + cfg.Host + ".helper"
+
+	// Read current value so we can skip the write if it already matches.
+	if current, err := readGitConfig(repoPath, scope); err == nil && current == cfg.Command {
+		return nil
+	}
+
+	// Use --replace-all so a previously-stacked helper entry (left from an
+	// earlier ox version, or hand-edited by the user) gets reset to a
+	// single canonical value. Without --replace-all, git ERRORS if the key
+	// already has multiple values.
+	cmd := exec.Command("git", "-C", repoPath, "config",
+		"--replace-all", scope, cfg.Command)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("git config %s: %s: %w", scope, strings.TrimSpace(string(output)), err)
+	}
+	return nil
+}
+
+// readGitConfig reads a single config value; returns ("", nil) when the
+// key is absent (git exits 1 with empty output in that case).
+func readGitConfig(repoPath, key string) (string, error) {
+	cmd := exec.Command("git", "-C", repoPath, "config", "--get", key)
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		// "git config --get" returns 1 when the key is missing — treat that
+		// as a clean "no value" rather than an error so callers don't need
+		// to special-case it.
+		if asErr(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// MigrateLedgerCredentials performs the one-shot migration for a single
+// ledger: strip any embedded oauth2:TOKEN from the origin URL, then install
+// the ox credential helper for the resulting bare host. Idempotent — safe
+// to invoke on every daemon startup.
+//
+// Returns ok=true if the migration ran (either stripped or installed or
+// both); ok=false if there was nothing to do. The error result is reserved
+// for genuine failures (git command errors, malformed origin URLs).
+func MigrateLedgerCredentials(repoPath string, helperCmd string) (changed bool, err error) {
+	// 1. Read origin URL; bail cleanly for SSH / file:// / missing remotes.
+	pat, remoteURL, err := extractPATFromRemote(repoPath)
+	if err != nil {
+		// No origin or unreadable config — nothing to migrate, but not a
+		// hard error. Callers (daemon startup) shouldn't fail because of one
+		// weird ledger.
+		return false, nil
+	}
+	if remoteURL == "" {
+		return false, nil
+	}
+
+	// Only migrate https:// remotes with the ox-managed oauth2 prefix.
+	parsed, err := url.Parse(remoteURL)
+	if err != nil || parsed.Scheme != "https" {
+		return false, nil
+	}
+
+	// 2. Strip embedded PAT if present (no-op if origin is already bare).
+	if pat != "" {
+		if err := StripRemoteCredentials(repoPath); err != nil {
+			return false, fmt.Errorf("strip credentials: %w", err)
+		}
+		changed = true
+	}
+
+	// 3. Install (or refresh) the credential helper for this host. We do
+	// this even when no PAT was embedded so brand-new ledgers also get
+	// the helper configured during normal sync.
+	host := parsed.Hostname()
+	if host == "" {
+		return changed, nil
+	}
+	if err := InstallCredentialHelper(repoPath, HelperConfig{
+		Host:    host,
+		Command: helperCmd,
+	}); err != nil {
+		return changed, fmt.Errorf("install helper: %w", err)
+	}
+	// InstallCredentialHelper is itself idempotent; "changed" only reflects
+	// the strip (which is the user-observable migration).
+	return changed, nil
+}
+
+// asErr is a tiny shim around errors.As to keep call sites readable.
+// Declared here to avoid pulling errors into helper_config.go just for one
+// site.
+func asErr(err error, target **exec.ExitError) bool {
+	for e := err; e != nil; {
+		if x, ok := e.(*exec.ExitError); ok {
+			*target = x
+			return true
+		}
+		type wrapper interface{ Unwrap() error }
+		w, ok := e.(wrapper)
+		if !ok {
+			return false
+		}
+		e = w.Unwrap()
+	}
+	return false
+}

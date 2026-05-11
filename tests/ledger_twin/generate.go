@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/session"
 )
 
 // GenerateTwinLedger writes a complete fake ledger to basePath.
@@ -83,16 +84,19 @@ func writeMeta(dir, folderName string, spec SessionSpec) error {
 }
 
 func writeRawJSONL(dir string, spec SessionSpec) error {
-	f, err := os.Create(filepath.Join(dir, "raw.jsonl"))
+	// Per ox-h20u: digital-twin test fixtures go through the same
+	// session.RawWriter chokepoint as production writers, so that test
+	// data exercises the same redaction stack production hits. The
+	// chokepoint is idempotent on clean test content; only credential
+	// canaries (which test fixtures shouldn't carry) would change.
+	rw, err := session.NewRawWriterTruncate(filepath.Join(dir, "raw.jsonl"), "")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-
-	enc := json.NewEncoder(f)
+	defer rw.Close()
 
 	// Header — matches real session format
-	_ = enc.Encode(map[string]any{
+	_ = rw.WriteRaw(map[string]any{
 		"type": "header",
 		"metadata": map[string]any{
 			"version":    "1.0",
@@ -103,14 +107,14 @@ func writeRawJSONL(dir string, spec SessionSpec) error {
 	})
 
 	// Noise: user message (skipped by parser)
-	_ = enc.Encode(map[string]any{
+	_ = rw.WriteRaw(map[string]any{
 		"type":      "user",
 		"content":   "Please work on " + spec.Title,
 		"timestamp": spec.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
 	})
 
 	// Noise: assistant message (skipped by parser)
-	_ = enc.Encode(map[string]any{
+	_ = rw.WriteRaw(map[string]any{
 		"type":      "assistant",
 		"content":   "I'll start working on that now.",
 		"timestamp": spec.Timestamp.UTC().Format("2006-01-02T15:04:05Z"),
@@ -119,7 +123,7 @@ func writeRawJSONL(dir string, spec SessionSpec) error {
 	if len(spec.Files) > 0 {
 		// Noise: Read tool call (skipped — not edit/write/multiedit)
 		toolInput, _ := json.Marshal(map[string]string{"file_path": spec.Files[0].AbsPath})
-		_ = enc.Encode(map[string]any{
+		_ = rw.WriteRaw(map[string]any{
 			"type":       "tool",
 			"tool_name":  "Read",
 			"tool_input": string(toolInput),
@@ -130,7 +134,7 @@ func writeRawJSONL(dir string, spec SessionSpec) error {
 	// Actual file touches — same fields as real Claude Code sessions
 	for _, ft := range spec.Files {
 		input, _ := json.Marshal(map[string]string{"file_path": ft.AbsPath})
-		_ = enc.Encode(map[string]any{
+		_ = rw.WriteRaw(map[string]any{
 			"type":       "tool",
 			"tool_name":  ft.ToolName,
 			"tool_input": string(input),

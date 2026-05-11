@@ -117,10 +117,12 @@ func finalizeIncrementalSession(projectRoot string, state *session.RecordingStat
 			}
 
 			if len(entries) > 0 {
-				redactor, _ := session.NewRedactorWithCustomRules(projectRoot)
-
+				// Per ox-h20u: redaction is enforced by the RawWriter
+				// chokepoint that appendRedactedEntries delegates to.
+				// Callers no longer pre-redact — the writer guarantees
+				// every byte passes through cmd-allowlist + builtin +
+				// gitleaks layers in order before encoding.
 				drainEntries := session.ConvertRawEntries(entries)
-				redactor.RedactEntries(drainEntries)
 
 				if appendErr := appendRedactedEntries(rawPath, drainEntries); appendErr != nil {
 					slog.Debug("finalize: append entries failed", "error", appendErr)

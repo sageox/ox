@@ -181,13 +181,45 @@ type DiagnoseResult struct {
 }
 
 // DiagnoseIssue is a single diagnostic finding.
+//
+// Auto-execution policy (per ox-saoy):
+//
+//   - FixArgv is the structured form preferred for auto-run. Each element
+//     is one argv slot; ox calls exec.Command(argv[0], argv[1:]...) without
+//     shell interpretation, so spaces and quotes inside arguments survive.
+//
+//   - Fix is the legacy free-form string form. It remains in the protocol
+//     for display purposes (the human-readable instruction shown to the
+//     user) but ox will NOT auto-execute it — the lossy strings.Fields
+//     splitter mis-parsed quoted arguments and a hijacked PATH plus an
+//     arbitrary argv[0] amounted to RCE on `ox doctor --fix --yes`.
+//
+//   - FixSafe gates auto-execution. Even FixArgv requires FixSafe=true to
+//     run; FixSafe=false issues are surfaced as manual instructions only.
+//
+//   - argv[0] is allowlisted to {"git", "ox"}. Anything else is refused
+//     even when FixSafe=true — adapters that need to run other binaries
+//     return a display string in Fix instead and rely on the user to run
+//     it manually.
+//
+// Migration: adapters that previously shipped Fix="git checkout main"
+// should now ship FixArgv=["git","checkout","main"] AND keep Fix as the
+// human-readable display string. Bundled ox adapters (claude-code, codex,
+// gemini, opencode, amp, pi, aider, droid) are migrated in the same PR
+// as this protocol change.
 type DiagnoseIssue struct {
 	Slug     string `json:"slug"`
 	Severity string `json:"severity"` // "error", "warning", "info"
 	Title    string `json:"title"`
 	Detail   string `json:"detail"`
-	Fix      string `json:"fix,omitempty"`
-	FixSafe  bool   `json:"fix_safe"`
+	// Fix is a human-readable display string. Not auto-executed.
+	Fix string `json:"fix,omitempty"`
+	// FixArgv is the structured argv for auto-execution. If empty,
+	// the issue is treated as display-only regardless of FixSafe.
+	FixArgv []string `json:"fix_argv,omitempty"`
+	// FixSafe is true when auto-execution would not surprise the user
+	// (e.g. idempotent, reversible). Required for auto-run.
+	FixSafe bool `json:"fix_safe"`
 }
 
 // --- Session data types ---

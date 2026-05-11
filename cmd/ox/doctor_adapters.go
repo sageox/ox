@@ -77,8 +77,8 @@ func checkExternalAdapters(opts doctorOptions) []checkResult {
 			cr.slug = slug
 
 			// handle fix execution for adapter-reported fixes
-			if issue.Fix != "" && opts.shouldFixAdapterSlug(slug, issue.FixSafe) {
-				fixErr := runAdapterFix(issue.Fix, issue.FixSafe, opts.forceYes)
+			if (issue.Fix != "" || len(issue.FixArgv) > 0) && opts.shouldFixAdapterSlug(slug, issue.FixSafe) {
+				fixErr := runAdapterFix(issue, opts.forceYes)
 				if fixErr != nil {
 					cr.detail = fmt.Sprintf("fix failed: %s", fixErr)
 				} else {
@@ -266,22 +266,45 @@ func (opts doctorOptions) shouldFixAdapterSlug(slug string, fixSafe bool) bool {
 	return false
 }
 
-// runAdapterFix executes a fix command reported by an adapter.
-// If fixSafe is false and forceYes is false, this is a no-op (the fix
-// requires user confirmation which is not yet implemented for adapter fixes).
-func runAdapterFix(fixCmd string, fixSafe, forceYes bool) error {
-	if !fixSafe && !forceYes {
-		// non-safe fixes require explicit confirmation
-		// for now, skip -- the user can run the command manually
-		return fmt.Errorf("fix requires confirmation (run with --yes or execute manually: %s)", fixCmd)
+// adapterFixArgvAllowlist enumerates the binaries an adapter is allowed
+// to invoke via the auto-fix path. Per ox-saoy: arbitrary argv[0] +
+// hijacked PATH = code execution on `ox doctor --fix --yes`. By
+// restricting argv[0] to "git" and "ox" we keep the common cases
+// (config writes, git-config tweaks, ox subcommand orchestration)
+// working while making the auto-run path useless as a backdoor.
+var adapterFixArgvAllowlist = map[string]bool{
+	"git": true,
+	"ox":  true,
+}
+
+// runAdapterFix executes a fix produced by an adapter.
+//
+// Hardening contract (ox-saoy):
+//   - Refuses Fix string-only issues — they're display-only now.
+//   - Requires FixArgv != nil.
+//   - Allowlists FixArgv[0] to {"git", "ox"}.
+//   - FixSafe=false issues are surfaced as manual instructions even
+//     when --yes is passed (auto-run only follows the FixSafe=true
+//     contract; --yes can't elevate an unsafe argv to auto-run).
+func runAdapterFix(issue adapterprotocol.DiagnoseIssue, forceYes bool) error {
+	if !issue.FixSafe && !forceYes {
+		return fmt.Errorf("fix requires confirmation (run with --yes or execute manually: %s)", issue.Fix)
+	}
+	if len(issue.FixArgv) == 0 {
+		// Legacy Fix-string-only issue. Per ox-saoy this is no longer
+		// auto-executed — the strings.Fields splitter mis-parsed quoted
+		// arguments and gave hijacked-PATH attacks a comfortable home.
+		// Surface as a manual instruction.
+		return fmt.Errorf("auto-fix not available (display-only Fix; adapter must supply FixArgv): %s", issue.Fix)
+	}
+	argv0 := issue.FixArgv[0]
+	if !adapterFixArgvAllowlist[argv0] {
+		return fmt.Errorf("auto-fix refused: argv[0]=%q not in allowlist {git, ox}; manual instruction: %s",
+			argv0, issue.Fix)
 	}
 
-	slog.Info("running adapter fix", "command", fixCmd)
-	parts := strings.Fields(fixCmd)
-	if len(parts) == 0 {
-		return fmt.Errorf("empty fix command")
-	}
-	cmd := exec.Command(parts[0], parts[1:]...)
+	slog.Info("running adapter fix", "argv", issue.FixArgv)
+	cmd := exec.Command(issue.FixArgv[0], issue.FixArgv[1:]...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))

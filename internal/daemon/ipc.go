@@ -1012,6 +1012,22 @@ type Server struct {
 	lastCallerVersion     string
 	lastCallerVersionAt   time.Time
 	skewWarnLoggedVersion string // de-dup warn log per skewing version
+
+	// peerCredDisabled, when true, skips the SO_PEERCRED / LOCAL_PEERCRED
+	// check in handleConnection. Test-only — exercised by in-process IPC
+	// tests where peer credentials are technically the same UID but the
+	// loopback conn dance with mocked listeners can interfere with the
+	// real syscall. Production code never sets this.
+	peerCredDisabled bool
+}
+
+// DisablePeerCredForTesting marks the server to skip peer-credential
+// checks. Only intended for tests that drive IPC over Unix sockets in a
+// way that doesn't survive the real check (e.g. listener wrapping that
+// breaks the connection-type assertion). Production callers MUST NOT
+// invoke this.
+func (s *Server) DisablePeerCredForTesting() {
+	s.peerCredDisabled = true
 }
 
 // recordCallerVersion stamps the most recent caller version observed
@@ -1474,6 +1490,29 @@ func (s *Server) Start(ctx context.Context) error {
 // handleConnection handles a single client connection.
 func (s *Server) handleConnection(_ context.Context, conn net.Conn) {
 	defer conn.Close()
+
+	// Peer authentication (ox-79cg): kernel-mediated check that the peer
+	// process belongs to the same UID as the daemon. SO_PEERCRED on Linux,
+	// LOCAL_PEERCRED (Getpeereid) on macOS. Stub returns an error on
+	// unsupported platforms — we fail CLOSED because the alternative is
+	// silently accepting connections from any local process on the box.
+	//
+	// Tests can opt out via DisablePeerCred (set during test setup) — real
+	// production code paths never set this.
+	if !s.peerCredDisabled {
+		ownerUID := uint32(os.Geteuid())
+		peer, err := peerUID(conn)
+		if err != nil {
+			s.logger.Warn("ipc: rejecting connection — peercred lookup failed",
+				"error", err, "owner_uid", ownerUID)
+			return
+		}
+		if peer != ownerUID {
+			s.logger.Warn("ipc: rejecting connection — peer uid mismatch",
+				"peer_uid", peer, "owner_uid", ownerUID)
+			return
+		}
+	}
 
 	// set read timeout for initial message parsing only
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))

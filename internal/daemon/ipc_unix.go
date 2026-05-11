@@ -11,12 +11,29 @@ import (
 )
 
 // listen creates a Unix socket listener with owner-only permissions.
-// SECURITY: Socket is created mode 0600 to prevent other users from connecting.
-// Only the socket owner can send/receive messages, including credentials.
+//
+// Security (ox-79cg / ox-79cg-followup):
+//   - Socket is created mode 0600 (umask 0077) so only the socket owner
+//     can connect.
+//   - Parent directory is chmod'd to 0700 EVEN IF IT ALREADY EXISTS.
+//     MkdirAll only sets perms on directories it creates; if a previous
+//     ox version or another process left the parent at 0755, we tighten
+//     it now. Otherwise a directory traversal could expose the socket
+//     name on a shared host.
+//   - Layered with the peer-credential check in handleConnection: even
+//     if a directory perm slips, the kernel-mediated UID check still
+//     refuses connections from other users.
 func listen(path string) (net.Listener, error) {
-	// ensure parent directory exists (owner-only for security)
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	parent := filepath.Dir(path)
+	if err := os.MkdirAll(parent, 0700); err != nil {
 		return nil, err
+	}
+	// Explicit chmod handles the "directory already existed with looser
+	// perms" case that MkdirAll silently leaves alone.
+	if err := os.Chmod(parent, 0700); err != nil {
+		// non-fatal — the socket itself is still 0600 and the peer-cred
+		// check defends the IPC handlers regardless. Best-effort to log.
+		_ = err
 	}
 	// remove existing socket file
 	os.Remove(path)

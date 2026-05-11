@@ -538,6 +538,38 @@ func init() {
 		Run:         checkLedgerSparseCheckout,
 	})
 
+	// Credential hygiene (ox-zyg7, ox-yeae): read-only audit + fix for
+	// historical credential exposure inside the local ledger. Findings
+	// never include matched bytes and are never uploaded off-machine.
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugLedgerSecrets,
+		Name:        "Ledger credential scan",
+		Category:    "Credential Hygiene",
+		FixLevel:    FixLevelCheckOnly,
+		Description: "Scans local ledger files (*.jsonl, *.json, *.md, *.txt, *.vtt) for credential patterns; read-only and local-only.",
+		Run:         checkLedgerSecrets,
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugLedgerEmbeddedCreds,
+		Name:        "Ledger embedded credentials",
+		Category:    "Credential Hygiene",
+		FixLevel:    FixLevelSuggested,
+		Description: "Detects oauth2:TOKEN@ embedded in the ledger's origin URL; --fix strips the PAT and installs the ox credential helper.",
+		Run:         checkLedgerEmbeddedCreds,
+	})
+
+	// ox-9y4k: scan installed adapter hook content for known-suspicious
+	// shapes that have no legitimate use in a commit/prompt hook.
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugHookContentIntegrity,
+		Name:        "Hook content integrity",
+		Category:    "Credential Hygiene",
+		FixLevel:    FixLevelCheckOnly,
+		Description: "Flags installed hook files containing patterns inconsistent with normal ox hook templates (curl|sh, eval $(…), base64 -d|sh).",
+		Run:         checkHookContentIntegrity,
+	})
+
 	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugCodeDBConsistency,
 		Name:        "CodeDB consistency",

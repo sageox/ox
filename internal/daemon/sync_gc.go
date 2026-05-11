@@ -387,10 +387,16 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 
 	// --- phase 1: clone, validate, swap ---
 
+	// GC reclones use the bare clone URL with the ox credential helper
+	// instead of embedded credentials. Per ox-eeqi — embedded credentials
+	// in the cloned .git/config leak via backups, `git remote -v`, etc.
 	cloneURL := ws.CloneURL
 	ep := s.workspaceRegistry.GetEndpoint()
-	if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err == nil && creds != nil && creds.Token != "" {
-		cloneURL = injectGitCredentials(ws.CloneURL, "oauth2", creds.Token)
+	// Sanity check that credentials exist for this endpoint; the helper
+	// resolves them at clone time but a missing-creds situation should
+	// surface as a clear log line, not a silent git prompt.
+	if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err != nil || creds == nil || creds.Token == "" {
+		s.logger.Warn("gc: clone may fail — no credentials for endpoint", "endpoint", ep)
 	}
 
 	s.logger.Info("gc: starting reclone", "workspace", wsLabel, "path", newPath)
@@ -402,6 +408,12 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 			s.logger.Error("gc: reclone failed, keeping old", "workspace", wsLabel, "error", err)
 			_ = os.RemoveAll(newPath)
 			return gcFailed
+		}
+		// Install the credential helper into the freshly cloned ledger so
+		// subsequent pulls/pushes resolve auth via the helper.
+		if _, err := gitserver.MigrateLedgerCredentials(newPath, gitserver.DefaultHelperCommand()); err != nil {
+			s.logger.Warn("gc: failed to install credential helper after reclone",
+				"path", newPath, "error", err)
 		}
 	} else {
 		mCfg, err = s.twoPhaseClone(ctx, cloneURL, newPath, nil)
@@ -568,27 +580,24 @@ func (s *SyncScheduler) gcPushUnpushedCommits(ctx context.Context, ws WorkspaceS
 
 	s.logger.Info("gc: pushing unpushed commits before reclone", "path", ws.Path, "count", count)
 
-	// inject credentials for push (same pattern as clone)
-	pushURL := ws.CloneURL
+	// Per ox-eeqi: push via the ox credential helper rather than embedding
+	// the PAT in the remote URL. The helper installed in the repo's
+	// .git/config resolves credentials; we still pass an explicit
+	// `-c credential.helper=...` to make this push self-contained — in
+	// case migration hasn't run on this repo yet (e.g., a fresh daemon
+	// that just adopted an old ledger without sweeping it).
 	ep := s.workspaceRegistry.GetEndpoint()
-	if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err == nil && creds != nil && creds.Token != "" {
-		pushURL = injectGitCredentials(ws.CloneURL, "oauth2", creds.Token)
+	if creds, err := gitserver.LoadCredentialsForEndpoint(ep); err != nil || creds == nil || creds.Token == "" {
+		s.logger.Warn("gc: push may fail — no credentials for endpoint", "endpoint", ep)
 	}
+	helperCmd := gitserver.DefaultHelperCommand()
 
-	// temporarily set push URL with credentials, push, then restore
-	origURL, _ := gitutil.RunGit(ctx, ws.Path, "remote", "get-url", "origin")
-	origURL = strings.TrimSpace(origURL)
-
-	if _, err := gitutil.RunGit(ctx, ws.Path, "remote", "set-url", "origin", pushURL); err != nil {
-		return fmt.Errorf("failed to set push URL: %w", err)
+	pushArgs := []string{
+		"-c", "credential.helper=",
+		"-c", "credential.helper=" + helperCmd,
+		"push", "origin", "HEAD", "--quiet",
 	}
-	defer func() {
-		if origURL != "" {
-			_, _ = gitutil.RunGit(ctx, ws.Path, "remote", "set-url", "origin", origURL)
-		}
-	}()
-
-	if _, err := gitutil.RunGit(ctx, ws.Path, "push", "origin", "HEAD", "--quiet"); err != nil {
+	if _, err := gitutil.RunGit(ctx, ws.Path, pushArgs...); err != nil {
 		return fmt.Errorf("push failed: %w", err)
 	}
 

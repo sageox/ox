@@ -498,20 +498,18 @@ func logCoworkerLoad(projectRoot, agentID, name, model string) {
 	}
 }
 
-// appendEntryToSession appends a session entry to a session file.
+// appendEntryToSession appends a session entry to a session file via the
+// canonical session.RawWriter chokepoint (ox-h20u). The writer applies
+// the three-layer redaction stack automatically — coworker-load events
+// can't bypass redaction even though they're low-risk for credentials
+// in practice.
 func appendEntryToSession(filePath string, entry session.SessionEntry) {
-	f, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	rw, err := session.NewRawWriter(filePath, "")
 	if err != nil {
 		return
 	}
-	defer f.Close()
-
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return
-	}
-	_, _ = f.Write(data)
-	_, _ = f.WriteString("\n")
+	_ = rw.WriteEntry(&entry)
+	_ = rw.Close()
 }
 
 // trackCoworkerLoad sends a telemetry event for coworker loads.

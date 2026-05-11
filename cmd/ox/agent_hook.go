@@ -682,41 +682,27 @@ func deriveLedgerPath(sessionPath string) string {
 	return ""
 }
 
-// appendRedactedEntries appends redacted session entries to a raw.jsonl file.
+// appendRedactedEntries appends session entries to a raw.jsonl file via
+// the canonical session.RawWriter chokepoint. Per ox-h20u: the writer
+// guarantees the three-layer redaction stack (CommandRedactor →
+// built-in Redactor → gitleaks extras) runs before any byte reaches
+// disk. Callers no longer need to remember to invoke redactors —
+// WriteEntry is the only way to land bytes in raw.jsonl.
+//
 // ox is the sole writer to raw.jsonl, so no file locking is needed.
 // Uses fsync for durability so entries survive process crashes.
 func appendRedactedEntries(rawPath string, entries []session.Entry) error {
-	f, err := os.OpenFile(rawPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	rw, err := session.NewRawWriter(rawPath, "")
 	if err != nil {
 		return fmt.Errorf("open raw.jsonl: %w", err)
 	}
-	defer f.Close()
-
-	encoder := json.NewEncoder(f)
-	for _, entry := range entries {
-		data := map[string]any{
-			"type":      string(entry.Type),
-			"content":   entry.Content,
-			"timestamp": entry.Timestamp,
-		}
-		if entry.ToolName != "" {
-			data["tool_name"] = entry.ToolName
-		}
-		if entry.ToolInput != "" {
-			data["tool_input"] = entry.ToolInput
-		}
-		if entry.ToolOutput != "" {
-			data["tool_output"] = entry.ToolOutput
-		}
-		if entry.IsError {
-			data["is_error"] = true
-		}
-		if err := encoder.Encode(data); err != nil {
+	for i := range entries {
+		if err := rw.WriteEntry(&entries[i]); err != nil {
+			_ = rw.Close()
 			return fmt.Errorf("encode entry: %w", err)
 		}
 	}
-
-	return f.Sync()
+	return rw.CloseAndSync()
 }
 
 // runPrimeForHook runs ox agent prime as a subprocess.

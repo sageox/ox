@@ -626,6 +626,18 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		s.logger.Warn("failed to load workspace registry", "error", err)
 	}
 
+	// One-shot credential migration sweep (ox-eeqi). Walk every workspace
+	// the daemon knows about; for each ledger with an https:// origin,
+	// strip any embedded oauth2:TOKEN userinfo and install the ox
+	// credential helper into .git/config. Idempotent — safe on every
+	// daemon startup, including restarts in steady state.
+	//
+	// Backups taken AFTER this migration won't contain the embedded PAT.
+	// Backups taken BEFORE it still do, which is what the user has to
+	// rotate the leaked PAT to fully recover from. The migration is
+	// best-effort: per-ledger failures log warnings and continue.
+	s.migrateLedgerCredentialsOnStartup()
+
 	readTicker := time.NewTicker(s.config.SyncIntervalRead)
 	defer readTicker.Stop()
 
@@ -1681,22 +1693,28 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		_ = progress.WriteStage("cloning", "Cloning repository...")
 	}
 
-	// inject credentials into clone URL if available
-	// this allows git clone to authenticate without requiring credential helper setup
-	// use oauth2:TOKEN format for GitLab compatibility (same as checkout.go)
-	// use endpoint-aware credential loading for multi-endpoint support
+	// Clone with bare URL + an in-argv credential helper instead of embedding
+	// the PAT into the origin URL. Per ox-eeqi, embedded credentials persist
+	// into .git/config and leak via backups, `git remote -v`, and GIT_TRACE.
+	// After clone succeeds, we install the helper into the cloned repo's
+	// .git/config (see post-clone block) so future fetch/push operations
+	// resolve credentials the same way.
+	//
+	// The `-c credential.helper=` (empty) before the real helper resets any
+	// inherited helpers so ours is authoritative for this single invocation.
 	cloneURL := payload.CloneURL
 	endpointURL := s.workspaceRegistry.GetEndpoint()
-	s.logger.Info("checkout: loading credentials", "endpoint", endpointURL, "clone_url", payload.CloneURL)
-	if creds, err := s.creds.LoadCredentialsForEndpoint(endpointURL); err == nil && creds != nil && creds.Token != "" {
-		s.logger.Info("checkout: injecting git credentials", "token_len", len(creds.Token), "endpoint", endpointURL)
-		cloneURL = injectGitCredentials(payload.CloneURL, "oauth2", creds.Token)
-	} else if err != nil {
+	s.logger.Info("checkout: clone via credential helper",
+		"endpoint", endpointURL, "clone_url", payload.CloneURL)
+	// Sanity check: we have credentials for this endpoint (caller already
+	// authenticated). Without them, the helper will return nothing and git
+	// falls back to its own prompt — fine for interactive use, broken for
+	// daemon. So we log clearly when creds are missing.
+	if creds, err := s.creds.LoadCredentialsForEndpoint(endpointURL); err != nil {
 		s.logger.Error("checkout: failed to load git credentials", "error", err, "endpoint", endpointURL)
-	} else if creds == nil {
-		s.logger.Warn("checkout: no git credentials found", "endpoint", endpointURL)
-	} else {
-		s.logger.Warn("checkout: git credentials have empty token", "endpoint", endpointURL)
+	} else if creds == nil || creds.Token == "" {
+		s.logger.Warn("checkout: no git credentials found; clone may fail",
+			"endpoint", endpointURL)
 	}
 
 	// branch on repo type: team contexts use two-phase partial clone,
@@ -1724,7 +1742,16 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		if progress != nil {
 			_ = progress.WriteStage("cloning", "Cloning repository...")
 		}
-		cloneArgs := append(gitHTTPTimeoutFlags(), "clone", "--quiet", cloneURL, payload.RepoPath)
+		// Per ox-eeqi: clone with ox-managed credential helper, not embedded
+		// URL credentials. `-c credential.helper=` empty clears inherited
+		// helpers; the second `-c` installs ours for this single invocation.
+		helperCmd := gitserver.DefaultHelperCommand()
+		preArgs := []string{
+			"-c", "credential.helper=",
+			"-c", "credential.helper=" + helperCmd,
+		}
+		cloneArgs := append(preArgs, gitHTTPTimeoutFlags()...)
+		cloneArgs = append(cloneArgs, "clone", "--quiet", cloneURL, payload.RepoPath)
 		cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)
 		// set cmd.Dir so git doesn't fail when daemon CWD has been deleted
 		if parentDir := filepath.Dir(payload.RepoPath); parentDir != "" {
@@ -1768,6 +1795,18 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 	configCmd := exec.CommandContext(ctx, "git", "-C", payload.RepoPath, "config", "pull.rebase", "true")
 	if output, err := configCmd.CombinedOutput(); err != nil {
 		s.logger.Warn("checkout: failed to set pull.rebase config", "error", err, "output", string(output))
+	}
+
+	// Install the ox-managed credential helper into the fresh clone's
+	// .git/config so subsequent fetch/push/LFS operations resolve creds
+	// via the helper instead of via embedded URL userinfo. Idempotent on
+	// re-clone. Per ox-eeqi.
+	if changed, err := gitserver.MigrateLedgerCredentials(payload.RepoPath, gitserver.DefaultHelperCommand()); err != nil {
+		s.logger.Warn("checkout: failed to install credential helper",
+			"error", err, "path", payload.RepoPath)
+	} else if changed {
+		s.logger.Info("checkout: stripped embedded PAT from origin",
+			"path", payload.RepoPath)
 	}
 
 	result.Cloned = true
@@ -1900,6 +1939,55 @@ func isValidCloneURL(cloneURL string) error {
 	}
 
 	return fmt.Errorf("untrusted git host: %s (allowed: %v)", parsed.Host, trustedGitHosts)
+}
+
+// migrateLedgerCredentialsOnStartup walks every known workspace and runs
+// the ox-eeqi credential-helper migration. Per-workspace failures log and
+// continue — one broken ledger can't block daemon startup.
+//
+// Migration semantics per workspace:
+//   - SSH remotes, file:// remotes, missing-origin repos: skipped (no-op).
+//   - https:// origin with embedded oauth2:TOKEN: strip + install helper.
+//   - https:// origin already bare: install helper only.
+//   - Repo with no git config (path doesn't exist yet, not cloned):
+//     skipped — checkout flow installs the helper when the clone completes.
+//
+// The migration sweep is intentionally non-fatal at every level. The user
+// can recover from a botched migration by deleting the helper config from
+// .git/config manually; that's a strictly weaker failure mode than
+// continuing to leak the PAT.
+func (s *SyncScheduler) migrateLedgerCredentialsOnStartup() {
+	workspaces := s.workspaceRegistry.GetAllWorkspaces()
+	if len(workspaces) == 0 {
+		return
+	}
+	helper := gitserver.DefaultHelperCommand()
+	migrated := 0
+	for _, ws := range workspaces {
+		if ws.Path == "" {
+			continue
+		}
+		// Skip workspaces whose path doesn't yet exist — they'll be handled
+		// at checkout time.
+		if _, err := os.Stat(filepath.Join(ws.Path, ".git")); err != nil {
+			continue
+		}
+		changed, err := gitserver.MigrateLedgerCredentials(ws.Path, helper)
+		if err != nil {
+			s.logger.Warn("startup migration: helper install failed",
+				"path", ws.Path, "error", err)
+			continue
+		}
+		if changed {
+			migrated++
+			s.logger.Info("startup migration: stripped embedded PAT", "path", ws.Path)
+		}
+	}
+	if migrated > 0 {
+		s.logger.Info("startup migration: complete",
+			"workspaces_total", len(workspaces),
+			"workspaces_migrated", migrated)
+	}
 }
 
 // injectGitCredentials embeds username:password into a git URL for authentication.

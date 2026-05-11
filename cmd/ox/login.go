@@ -150,12 +150,26 @@ var loginCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// if endpoint flag provided, skip selection
 		if loginEndpointFlag != "" {
-			return runLoginFlow(cmd, endpoint.NormalizeEndpoint(loginEndpointFlag))
+			normalized := endpoint.NormalizeEndpoint(loginEndpointFlag)
+			if err := endpoint.ValidateEndpoint(normalized); err != nil {
+				return err
+			}
+			if err := confirmNewEndpointTrust(cmd, normalized); err != nil {
+				return err
+			}
+			return runLoginFlow(cmd, normalized)
 		}
 
 		// if SAGEOX_ENDPOINT env var is set, use it directly (no interactive picker)
 		if envEP := os.Getenv(endpoint.EnvVar); envEP != "" {
-			return runLoginFlow(cmd, endpoint.NormalizeEndpoint(envEP))
+			normalized := endpoint.NormalizeEndpoint(envEP)
+			if err := endpoint.ValidateEndpoint(normalized); err != nil {
+				return err
+			}
+			if err := confirmNewEndpointTrust(cmd, normalized); err != nil {
+				return err
+			}
+			return runLoginFlow(cmd, normalized)
 		}
 
 		// build list of endpoints to show

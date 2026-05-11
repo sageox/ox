@@ -128,8 +128,87 @@ func DateDir(ledgerPath string, t time.Time, dataType string) string {
 	)
 }
 
+// FieldRedactor is an optional function that scrubs credential patterns from
+// user-authored text fields before a PR or Issue is serialized to disk.
+// `internal/ledger` cannot import `internal/session` (cycle via session/health),
+// so the secret redactor lives in a sibling package and is injected from above.
+// When SetFieldRedactor has not been called, WriteGitHubPR/WriteGitHubIssue
+// passes content through unchanged — but every CLI/daemon entry point that can
+// reach these writers MUST set a redactor at startup (see cmd/ox/main.go).
+//
+// Per ox-8bkk: the forensic scan on 2026-05-10 found 16 Authorization: Bearer
+// headers across 8 PR cache files. They came from PR descriptions and comments
+// (user-authored text that pasted curl examples), not from any HTTP-header
+// capture in ox itself. Redaction at the cache writer closes that hole.
+type FieldRedactor func(string) string
+
+var fieldRedactor FieldRedactor
+
+// SetFieldRedactor installs the credential-redaction hook for cache writers.
+// Intended to be called once at process startup. Idempotent; replaces any
+// previously installed redactor.
+func SetFieldRedactor(r FieldRedactor) {
+	fieldRedactor = r
+}
+
+func redactField(s string) string {
+	if fieldRedactor == nil {
+		return s
+	}
+	return fieldRedactor(s)
+}
+
+// redactPR returns a copy of pr with user-authored text fields scrubbed.
+// The caller's struct is not mutated.
+func redactPR(pr *PRFile) *PRFile {
+	if pr == nil {
+		return nil
+	}
+	out := *pr
+	out.Title = redactField(pr.Title)
+	out.Body = redactField(pr.Body)
+	if len(pr.Comments) > 0 {
+		out.Comments = make([]PRComment, len(pr.Comments))
+		for i, c := range pr.Comments {
+			out.Comments[i] = c
+			out.Comments[i].Body = redactField(c.Body)
+		}
+	}
+	if len(pr.Commits) > 0 {
+		out.Commits = make([]PRCommit, len(pr.Commits))
+		for i, c := range pr.Commits {
+			out.Commits[i] = c
+			out.Commits[i].Msg = redactField(c.Msg)
+		}
+	}
+	return &out
+}
+
+// redactIssue is the IssueFile analog of redactPR.
+func redactIssue(issue *IssueFile) *IssueFile {
+	if issue == nil {
+		return nil
+	}
+	out := *issue
+	out.Title = redactField(issue.Title)
+	out.Body = redactField(issue.Body)
+	if len(issue.Comments) > 0 {
+		out.Comments = make([]IssueComment, len(issue.Comments))
+		for i, c := range issue.Comments {
+			out.Comments[i] = c
+			out.Comments[i].Body = redactField(c.Body)
+		}
+	}
+	return &out
+}
+
 // WriteGitHubPR writes a PR to its date-partitioned directory based on created_at.
 // Creates the directory structure if it does not exist.
+//
+// Credentials in user-authored fields (Title, Body, Comments, commit messages)
+// are redacted before serialization when a FieldRedactor has been installed via
+// SetFieldRedactor. Per ox-8bkk, this closes the cache-side credential leak that
+// forensic scans observed in PR JSON files.
 //
 // Design decision: files stay in the created_at date directory permanently — we do NOT
 // move them on close/merge. This means long-lived open issues may fall outside the
@@ -142,7 +221,8 @@ func WriteGitHubPR(ledgerPath string, pr *PRFile) error {
 		return fmt.Errorf("create pr dir: %w", err)
 	}
 
-	data, err := json.MarshalIndent(pr, "", "  ")
+	redacted := redactPR(pr)
+	data, err := json.MarshalIndent(redacted, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal PR %d: %w", pr.Number, err)
 	}
@@ -174,7 +254,8 @@ func WriteGitHubIssue(ledgerPath string, issue *IssueFile) error {
 		return fmt.Errorf("create issue dir: %w", err)
 	}
 
-	data, err := json.MarshalIndent(issue, "", "  ")
+	redacted := redactIssue(issue)
+	data, err := json.MarshalIndent(redacted, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal issue %d: %w", issue.Number, err)
 	}
