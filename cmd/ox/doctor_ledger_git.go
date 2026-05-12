@@ -601,7 +601,10 @@ func checkLedgerURLAPIMatch(fix bool) checkResult {
 func applyCorrectedLedgerURL(ledgerPath, apiURL, checkName string) *checkResult {
 	parsed, parseErr := url.Parse(apiURL)
 	if parseErr != nil {
-		r := WarningCheck(checkName, "cannot fix (invalid API URL)", parseErr.Error())
+		// In --fix mode this means the remediation did NOT happen — the
+		// origin URL is still stale. Returning a Warning here would let
+		// `ox doctor --fix` look successful; surface it as a real failure.
+		r := FailedCheck(checkName, "cannot fix (invalid API URL)", parseErr.Error())
 		return &r
 	}
 	parsed.User = nil
