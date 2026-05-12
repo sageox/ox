@@ -597,8 +597,24 @@ func (s *SyncScheduler) gcPushUnpushedCommits(ctx context.Context, ws WorkspaceS
 		"-c", "credential.helper=" + helperCmd,
 		"push", "origin", "HEAD", "--quiet",
 	}
-	if _, err := gitutil.RunGit(ctx, ws.Path, pushArgs...); err != nil {
-		return fmt.Errorf("push failed: %w", err)
+	if _, pushErr := gitutil.RunGit(ctx, ws.Path, pushArgs...); pushErr != nil {
+		errMsg := pushErr.Error()
+		if strings.Contains(errMsg, "LFS") || strings.Contains(errMsg, "lfs") || strings.Contains(errMsg, "allowincompletepush") {
+			s.logger.Warn("gc: LFS objects missing, retrying push with allowincompletepush",
+				"path", ws.Path, "error", pushErr)
+			retryArgs := []string{
+				"-c", "credential.helper=",
+				"-c", "credential.helper=" + helperCmd,
+				"-c", "lfs.allowincompletepush=true",
+				"push", "origin", "HEAD", "--quiet",
+			}
+			if _, retryErr := gitutil.RunGit(ctx, ws.Path, retryArgs...); retryErr != nil {
+				return fmt.Errorf("push failed (even with allowincompletepush): %w", retryErr)
+			}
+			s.logger.Info("gc: push succeeded with allowincompletepush", "path", ws.Path)
+			return nil
+		}
+		return fmt.Errorf("push failed: %w", pushErr)
 	}
 
 	return nil

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -203,9 +204,17 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			}
 		}
 
-		if err := s.workspaceRegistry.UpdateConfigLastSync(r.ws.ID); err != nil {
-			s.logger.Warn("failed to update config last sync", "team", r.ws.TeamName, "path", r.ws.Path, "error", err)
+		if _, skipped := s.configSyncSkipped.Load(r.ws.ID); !skipped {
+			if err := s.workspaceRegistry.UpdateConfigLastSync(r.ws.ID); err != nil {
+				if strings.Contains(err.Error(), "project not initialized") {
+					s.logger.Debug("skipping config last sync for uninitialized workspace", "team", r.ws.TeamName, "path", r.ws.Path)
+					s.configSyncSkipped.Store(r.ws.ID, true)
+				} else {
+					s.logger.Warn("failed to update config last sync", "team", r.ws.TeamName, "path", r.ws.Path, "error", err)
+				}
+			}
 		}
+
 		s.recordSyncState(ctx, r.ws.Path)
 
 		// open team whisper store (once per team) and relay murmurs after successful sync

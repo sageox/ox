@@ -161,6 +161,9 @@ type SyncScheduler struct {
 	// per-workspace locks for sync state file updates (load-mutate-save)
 	syncStateLocks sync.Map // map[string]*sync.Mutex
 
+	// workspace IDs where UpdateConfigLastSync is known to fail (e.g., uninitialized projects)
+	configSyncSkipped sync.Map
+
 	// test hooks (nil in production)
 	onBeforeCloneSem        func()        // called just before acquiring cloneSem; tests use this to observe blocking
 	cloneSemTimeoutOverride time.Duration // override cloneSemTimeout for tests (0 = use default)

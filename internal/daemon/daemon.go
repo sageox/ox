@@ -248,6 +248,7 @@ func (d *Daemon) checkDeadAgentsAndFinalize() {
 	keys := tracker.Keys()
 	now := time.Now()
 
+	var evicted int
 	for _, agentID := range keys {
 		last := tracker.Last(agentID)
 		if now.Sub(last) <= IdleThreshold {
@@ -261,24 +262,28 @@ func (d *Daemon) checkDeadAgentsAndFinalize() {
 
 		proc, err := os.FindProcess(pid)
 		if err != nil || proc.Signal(syscall.Signal(0)) != nil {
-			// PID is dead — check for orphaned sessions
-			d.logger.Info("agent PID dead, checking for orphaned sessions",
+			d.logger.Debug("agent PID dead, checking for orphaned sessions",
 				"agent_id", agentID, "pid", pid,
 			)
 
-			if d.sessionFinalizeHandler == nil {
-				continue
-			}
-
-			items := d.sessionFinalizeHandler.DetectOrphanedForAgent(d.config.LedgerPath, agentID, pid)
-			for _, item := range items {
-				if d.agentWorker.Enqueue(item) {
-					d.logger.Info("enqueued orphaned session for finalization",
-						"agent_id", agentID, "dedup_key", item.DedupKey,
-					)
+			if d.sessionFinalizeHandler != nil {
+				items := d.sessionFinalizeHandler.DetectOrphanedForAgent(d.config.LedgerPath, agentID, pid)
+				for _, item := range items {
+					if d.agentWorker.Enqueue(item) {
+						d.logger.Info("enqueued orphaned session for finalization",
+							"agent_id", agentID, "dedup_key", item.DedupKey,
+						)
+					}
 				}
 			}
+
+			tracker.Clear(agentID)
+			d.heartbeat.ClearAgentPID(agentID)
+			evicted++
 		}
+	}
+	if evicted > 0 {
+		d.logger.Info("evicted dead agents from tracker", "count", evicted)
 	}
 }
 

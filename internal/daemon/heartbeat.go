@@ -791,6 +791,13 @@ func (h *HeartbeatHandler) GetAgentPID(agentID string) int {
 	return h.agentPID[agentID]
 }
 
+// ClearAgentPID removes the PID entry for a dead agent.
+func (h *HeartbeatHandler) ClearAgentPID(agentID string) {
+	h.metaMu.Lock()
+	defer h.metaMu.Unlock()
+	delete(h.agentPID, agentID)
+}
+
 // GetAgentPrincipalID returns the human principal ID for the given agent, or empty.
 func (h *HeartbeatHandler) GetAgentPrincipalID(agentID string) string {
 	h.metaMu.RLock()

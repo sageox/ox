@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -225,6 +226,7 @@ type GitTrackedMatcher struct {
 	trackedFiles map[string]struct{} // relative file paths tracked by git
 	mu           sync.RWMutex
 	logger       *slog.Logger
+	rootGone     bool // set when projectRoot disappears; prevents log spam
 }
 
 // NewGitTrackedMatcher creates a matcher that watches only git-tracked paths.
@@ -242,6 +244,16 @@ func NewGitTrackedMatcher(projectRoot string, logger *slog.Logger) *GitTrackedMa
 
 // Refresh re-reads the tracked file set from git.
 func (m *GitTrackedMatcher) Refresh() {
+	if _, err := os.Stat(m.projectRoot); os.IsNotExist(err) {
+		if !m.rootGone {
+			m.logger.Info("git-tracked matcher: project root no longer exists, pausing refresh",
+				"path", m.projectRoot)
+			m.rootGone = true
+		}
+		return
+	}
+	m.rootGone = false
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
