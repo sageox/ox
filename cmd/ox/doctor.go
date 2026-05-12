@@ -753,17 +753,15 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		gitRepoChecks = append(gitRepoChecks, SkippedCheck("git repo paths", "requires login", ""))
 	}
 
-	// add remote URL checks for ledger and team contexts (SageOx is multiplayer)
+	// add remote URL checks for team contexts (SageOx is multiplayer).
+	// Ledger remote URL is no longer compared against an in-URL PAT — per
+	// ox-eeqi the PAT lives in the git credential helper, not the URL. The
+	// `ledger-embedded-creds` check (doctor_ledger_secrets.go) covers the
+	// only legitimate question: is there an embedded PAT to strip?
 	gitRoot := findGitRoot()
 	if gitRoot != "" {
 		localCfg, err := config.LoadLocalConfig(gitRoot)
 		if err == nil && localCfg != nil {
-			// check ledger remote URL
-			ledgerRemoteCheck := checkLedgerRemoteURL(localCfg)
-			if !ledgerRemoteCheck.skipped {
-				gitRepoChecks = append(gitRepoChecks, ledgerRemoteCheck)
-			}
-			// check team context remote URLs
 			teamContextRemoteChecks := checkTeamContextRemoteURLs(localCfg)
 			for _, check := range teamContextRemoteChecks {
 				if !check.skipped {
@@ -811,10 +809,11 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 	} else {
 		ledgerGitChecks := checkLedgerGitHealth(
 			opts.fix,
-			opts.shouldFix(CheckSlugLedgerRemote),
 			opts.shouldFix(CheckSlugGitignoreMissing),
 			opts.shouldFix(CheckSlugLedgerBranchStatus),
 			opts.shouldFix(CheckSlugLedgerCleanWorkdir),
+			opts.shouldFix(CheckSlugLedgerEmbeddedCreds),
+			opts.shouldFix(CheckSlugLedgerURLAPIMatch),
 			opts.shouldFix(CheckSlugGitHubDataMigration),
 		)
 		if len(ledgerGitChecks) > 0 {
@@ -1074,12 +1073,13 @@ func enrichCheckResult(check *checkResult) {
 // Returns a slice of check results, or empty slice if no ledger exists.
 // Parameters:
 //   - networkChecks: whether to run network checks (git ls-remote); only with --fix
-//   - fixRemote: whether to fix remote URL issues
 //   - fixGitignore: whether to fix .sageox/.gitignore issues in checkouts
 //   - fixBranch: whether to auto-sync branch (push/pull)
 //   - fixWorkdir: whether to auto-commit dirty workdir
+//   - fixEmbeddedCreds: whether to strip embedded oauth2:TOKEN from origin URL
+//   - fixURLAPIMatch: whether to repoint origin URL to the API-authoritative URL
 //   - fixMigration: whether to migrate legacy GitHub data files
-func checkLedgerGitHealth(networkChecks bool, fixRemote bool, fixGitignore bool, fixBranch bool, fixWorkdir bool, fixMigration ...bool) []checkResult {
+func checkLedgerGitHealth(networkChecks bool, fixGitignore bool, fixBranch bool, fixWorkdir bool, fixEmbeddedCreds bool, fixURLAPIMatch bool, fixMigration ...bool) []checkResult {
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
 		return nil // no ledger found, skip entire category
@@ -1099,7 +1099,16 @@ func checkLedgerGitHealth(networkChecks bool, fixRemote bool, fixGitignore bool,
 	checks = append(checks,
 		checkLedgerCleanWorkdir(fixWorkdir),
 		checkLedgerBranchStatus(fixBranch),
-		checkLedgerRemoteURLMatch(fixRemote),
+		// ox-eeqi: post-migration the PAT lives in the credential helper,
+		// not the origin URL. This check flags + strips any leftover
+		// oauth2:TOKEN@ that survived from a pre-eeqi clone, and it also
+		// catches the silent-success trap of a bare origin URL with no
+		// helper installed (auth will fail at the first push).
+		checkLedgerEmbeddedCreds(fixEmbeddedCreds),
+		// catches a ledger whose origin still points at a stale/incorrect
+		// URL — authenticates fine but writes to the wrong repository.
+		// Cheap when the API is reachable; gracefully Skipped otherwise.
+		checkLedgerURLAPIMatch(fixURLAPIMatch),
 	)
 
 	// add checkout .gitignore checks (protects checkout.json from being committed)

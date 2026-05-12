@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 
-	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/doctor"
 )
 
@@ -236,25 +235,6 @@ func init() {
 		FixLevel:    FixLevelConfirm,
 		Description: "Detects when config.local.toml ledger path differs from computed default",
 		Run:         checkLedgerPathMismatch,
-	})
-
-	RegisterDoctorCheck(&DoctorCheck{
-		Slug:        CheckSlugLedgerRemote,
-		Name:        "Ledger remote URL",
-		Category:    "Git Repository Health",
-		FixLevel:    FixLevelConfirm,
-		Description: "Validates ledger remote URL matches cloud configuration",
-		Run: func(fix bool) checkResult {
-			gitRoot := findGitRoot()
-			if gitRoot == "" {
-				return SkippedCheck("Ledger remote URL", "not in git repo", "")
-			}
-			localCfg, err := config.LoadLocalConfig(gitRoot)
-			if err != nil {
-				return SkippedCheck("Ledger remote URL", "config error", "")
-			}
-			return checkLedgerRemoteURL(localCfg)
-		},
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
@@ -553,7 +533,7 @@ func init() {
 	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugLedgerEmbeddedCreds,
 		Name:        "Ledger embedded credentials",
-		Category:    "Credential Hygiene",
+		Category:    "Ledger Git Health",
 		FixLevel:    FixLevelSuggested,
 		Description: "Detects oauth2:TOKEN@ embedded in the ledger's origin URL; --fix strips the PAT and installs the ox credential helper.",
 		Run:         checkLedgerEmbeddedCreds,

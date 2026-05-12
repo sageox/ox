@@ -207,7 +207,7 @@ func FormatPrePushFindings(r *PrePushScanResult) string {
 	}
 	b.WriteString("\nTo proceed:\n")
 	b.WriteString("  1. Inspect the flagged paths and remove or redact the credential.\n")
-	b.WriteString("     Run `ox doctor --check=ledger-secrets` for a full audit.\n")
+	b.WriteString("     Run `ox session redact-history --dry-run` for a per-line audit.\n")
 	b.WriteString("  2. Amend the holding commit, then retry the push.\n")
 	b.WriteString("  3. If this is a false positive, set OX_ALLOW_SECRETS=1 to override.\n")
 	b.WriteString("     The override is logged and emits a loud warning.\n")

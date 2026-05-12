@@ -709,21 +709,6 @@ func checkGitRepoPaths(fix bool) checkResult {
 		fmt.Sprintf("%s\n       Run `ox doctor --fix` to repair", strings.Join(details, "\n       ")))
 }
 
-// checkLedgerRemoteURL validates the ledger's remote credentials are current.
-// Delegates to checkLedgerRemoteURLMatch for the actual PAT comparison.
-func checkLedgerRemoteURL(localCfg *config.LocalConfig) checkResult {
-	if localCfg == nil || localCfg.Ledger == nil || localCfg.Ledger.Path == "" {
-		return SkippedCheck("Ledger remote URL", "no ledger configured", "")
-	}
-
-	if !isGitRepo(localCfg.Ledger.Path) {
-		return SkippedCheck("Ledger remote URL", "ledger not a git repo", "")
-	}
-
-	// delegate to the PAT comparison check (read-only, no fix)
-	return checkLedgerRemoteURLMatch(false)
-}
-
 // checkTeamContextRemoteURLs validates team context local git remotes match cloud URLs.
 // Reads from locally saved git credentials (populated by checkGitCredentials in Category 0)
 // to avoid duplicate API calls.

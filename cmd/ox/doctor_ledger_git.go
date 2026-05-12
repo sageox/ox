@@ -25,7 +25,6 @@ const (
 	CheckSlugLedgerRemoteReachable = "ledger-remote-reachable"
 	CheckSlugLedgerBranchStatus    = "ledger-branch-status"
 	CheckSlugLedgerCleanWorkdir    = "ledger-clean-workdir"
-	CheckSlugLedgerRemoteURLMatch  = "ledger-remote-url-match"
 	CheckSlugLedgerURLAPIMatch     = "ledger-url-api-match"
 	CheckSlugLedgerCacheTracked    = "ledger-cache-tracked"
 )
@@ -69,15 +68,6 @@ func init() {
 		FixLevel:    FixLevelAuto,
 		Description: "Detects local-only cache files that were accidentally committed to the ledger",
 		Run:         func(fix bool) checkResult { return checkLedgerCacheTracked(fix) },
-	})
-
-	RegisterDoctorCheck(&DoctorCheck{
-		Slug:        CheckSlugLedgerRemoteURLMatch,
-		Name:        "Ledger remote URL match",
-		Category:    "Ledger Git Health",
-		FixLevel:    FixLevelAuto,
-		Description: "Validates ledger remote credentials match current login",
-		Run:         func(fix bool) checkResult { return checkLedgerRemoteURLMatch(fix) },
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
@@ -510,127 +500,6 @@ func checkLedgerCacheTracked(fix bool) checkResult {
 	return PassedCheck(name, "untracked cache files from ledger")
 }
 
-// checkLedgerRemoteURLMatch detects stale PATs in the ledger's git remote URL.
-// Compares the embedded PAT against the currently stored credentials.
-// With fix=true, updates the remote URL with the current PAT.
-func checkLedgerRemoteURLMatch(fix bool) checkResult {
-	ledgerPath := getLedgerPath()
-	if ledgerPath == "" {
-		return SkippedCheck("Ledger remote URL match", "no ledger found", "")
-	}
-
-	if !isGitRepo(ledgerPath) {
-		return SkippedCheck("Ledger remote URL match", "ledger not a git repo", "")
-	}
-
-	// get local origin URL and extract embedded PAT
-	localCmd := exec.Command("git", "-C", ledgerPath, "remote", "get-url", "origin")
-	localOutput, err := localCmd.Output()
-	if err != nil {
-		return SkippedCheck("Ledger remote URL match", "no origin remote", "")
-	}
-	localURL := strings.TrimSpace(string(localOutput))
-
-	// extract the PAT embedded in the remote URL
-	embeddedPAT, _ := extractPATFromURL(localURL)
-
-	// SSH URLs — credentials managed externally
-	if strings.Contains(localURL, "@") && !strings.Contains(localURL, "://") {
-		return PassedCheck("Ledger remote URL match", "SSH remote (credentials managed externally)")
-	}
-
-	// load current credentials from store
-	gitRoot := findGitRoot()
-	ep := endpoint.GetForProject(gitRoot)
-	if ep == "" {
-		return SkippedCheck("Ledger remote URL match", "no endpoint configured", "")
-	}
-
-	creds, err := gitserver.LoadCredentialsForEndpoint(ep)
-	if err != nil || creds == nil || creds.Token == "" {
-		if embeddedPAT == "" {
-			return PassedCheck("Ledger remote URL match", "no credentials to check")
-		}
-		return SkippedCheck("Ledger remote URL match", "no stored credentials (run ox login)", "")
-	}
-
-	// check if credentials are expired
-	if !creds.ExpiresAt.IsZero() && creds.ExpiresAt.Before(time.Now()) {
-		return SkippedCheck("Ledger remote URL match", "credentials expired (run ox login)", "")
-	}
-
-	// compare PATs — both stale and missing PATs need repair
-	if embeddedPAT == creds.Token {
-		return PassedCheck("Ledger remote URL match", "credentials current")
-	}
-
-	// credentials need repair: either stale PAT or bare URL missing credentials
-	sanitizedURL := gitserver.SanitizeRemoteURL(localURL)
-
-	if fix {
-		return fixLedgerStalePAT(ledgerPath, ep)
-	}
-
-	if embeddedPAT == "" {
-		return WarningCheck("Ledger remote URL match",
-			fmt.Sprintf("missing credentials in remote: %s", sanitizedURL),
-			"Remote has no embedded credentials. Run `ox doctor` to auto-fix.")
-	}
-
-	return WarningCheck("Ledger remote URL match",
-		fmt.Sprintf("stale credentials in remote: %s", sanitizedURL),
-		"Remote uses credentials from a different login. Run `ox doctor` to auto-fix.")
-}
-
-// extractPATFromURL parses a git URL and returns the embedded PAT and the full URL.
-// Returns ("", url) for SSH URLs, bare URLs, or non-oauth2 auth.
-func extractPATFromURL(rawURL string) (pat string, fullURL string) {
-	// SSH URLs don't have embedded PATs
-	if strings.Contains(rawURL, "@") && !strings.Contains(rawURL, "://") {
-		return "", rawURL
-	}
-
-	parsed, err := url.Parse(rawURL)
-	if err != nil || parsed.User == nil {
-		return "", rawURL
-	}
-
-	// only handle oauth2-style auth (ox-managed)
-	if parsed.User.Username() != "oauth2" {
-		return "", rawURL
-	}
-
-	password, hasPassword := parsed.User.Password()
-	if !hasPassword || password == "" {
-		return "", rawURL
-	}
-
-	return password, rawURL
-}
-
-// fixLedgerStalePAT updates the ledger remote URL with the current PAT.
-func fixLedgerStalePAT(ledgerPath, ep string) checkResult {
-	err := gitserver.RefreshRemoteCredentials(ledgerPath, ep)
-	if err != nil {
-		return FailedCheck("Ledger remote URL match",
-			"failed to update remote credentials",
-			fmt.Sprintf("Error: %v", err))
-	}
-
-	return PassedCheck("Ledger remote URL match", "credentials updated")
-}
-
-// stripURLCredentials removes userinfo (credentials) from a URL for safe comparison.
-// Returns the original string if parsing fails.
-func stripURLCredentials(rawURL string) string {
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	parsed.User = nil
-	return parsed.String()
-}
-
 // checkLedgerURLAPIMatch compares the local ledger's git remote URL path against
 // the authoritative URL from the API. This catches cases where the ledger was
 // cloned with an old or incorrect URL that still authenticates but points to the
@@ -698,31 +567,13 @@ func checkLedgerURLAPIMatch(fix bool) checkResult {
 				localStripped, apiStripped))
 	}
 
-	// fix: build correct URL with current PAT embedded
-	ep := endpoint.GetForProject(gitRoot)
-	creds, credErr := gitserver.LoadCredentialsForEndpoint(ep)
-	if credErr != nil || creds == nil || creds.Token == "" {
-		return WarningCheck(checkName, "cannot fix (no credentials)",
-			"Run `ox login` first, then `ox doctor --fix`")
+	if applyResult := applyCorrectedLedgerURL(ledgerPath, ledgerStatus.RepoURL, checkName); applyResult != nil {
+		return *applyResult
 	}
 
-	parsed, parseErr := url.Parse(ledgerStatus.RepoURL)
-	if parseErr != nil {
-		return WarningCheck(checkName, "cannot fix (invalid API URL)", parseErr.Error())
-	}
-	parsed.User = url.UserPassword("oauth2", creds.Token)
-	correctURL := parsed.String()
-
-	// update the remote URL
-	setCmd := exec.Command("git", "-C", ledgerPath, "remote", "set-url", "origin", correctURL)
-	if output, setErr := setCmd.CombinedOutput(); setErr != nil {
-		// sanitize output — git may echo the URL with embedded credentials
-		safeOutput := stripURLCredentials(strings.TrimSpace(string(output)))
-		return FailedCheck(checkName, "set-url failed",
-			fmt.Sprintf("git remote set-url error: %s", safeOutput))
-	}
-
-	// verify connectivity with a timeout
+	// verify connectivity with a timeout. Authentication will use the
+	// freshly-installed helper, so this also proves the helper is wired
+	// correctly end-to-end.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	verifyCmd := exec.CommandContext(ctx, "git", "-C", ledgerPath, "ls-remote", "--heads", "origin")
@@ -732,7 +583,58 @@ func checkLedgerURLAPIMatch(fix bool) checkResult {
 				"Remote URL was updated but connectivity check timed out after 5s")
 		}
 		return WarningCheck(checkName, "URL updated but verification failed",
-			"Remote URL was updated but could not verify connectivity")
+			"Remote URL was updated but could not verify connectivity. If you haven't logged in, run `ox login`.")
 	}
-	return PassedCheck(checkName, "URL updated and verified")
+	return PassedCheck(checkName, "URL updated, helper installed, and verified")
+}
+
+// applyCorrectedLedgerURL writes the API-provided ledger URL to origin in
+// its bare form (no userinfo) and installs the ox credential helper for the
+// resulting host. Returns nil on success; on failure returns a non-nil
+// pointer to the checkResult the caller should propagate.
+//
+// Per ox-eeqi this is the load-bearing invariant: the corrected origin URL
+// MUST NOT carry an embedded oauth2:TOKEN. The PAT lives in the credential
+// helper; embedding it here would re-create the leak the redesign was
+// supposed to eliminate. Extracted so the invariant is unit-testable
+// without standing up a fake API client.
+func applyCorrectedLedgerURL(ledgerPath, apiURL, checkName string) *checkResult {
+	parsed, parseErr := url.Parse(apiURL)
+	if parseErr != nil {
+		r := WarningCheck(checkName, "cannot fix (invalid API URL)", parseErr.Error())
+		return &r
+	}
+	parsed.User = nil
+	bareURL := parsed.String()
+
+	setCmd := exec.Command("git", "-C", ledgerPath, "remote", "set-url", "origin", bareURL)
+	if output, setErr := setCmd.CombinedOutput(); setErr != nil {
+		safeOutput := stripURLCredentials(strings.TrimSpace(string(output)))
+		r := FailedCheck(checkName, "set-url failed",
+			fmt.Sprintf("git remote set-url error: %s", safeOutput))
+		return &r
+	}
+
+	// Install (or refresh) the credential helper for the new host. The new
+	// URL may live on a different host than the old one; even when it
+	// doesn't, MigrateLedgerCredentials is idempotent. Same primitive
+	// checkLedgerEmbeddedCreds uses, so behavior stays consistent across
+	// the two fix paths.
+	if _, migErr := gitserver.MigrateLedgerCredentials(ledgerPath, gitserver.DefaultHelperCommand()); migErr != nil {
+		r := FailedCheck(checkName, "URL updated but helper install failed",
+			fmt.Sprintf("MigrateLedgerCredentials: %v", migErr))
+		return &r
+	}
+	return nil
+}
+
+// stripURLCredentials removes userinfo (credentials) from a URL for safe comparison.
+// Returns the original string if parsing fails.
+func stripURLCredentials(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	parsed.User = nil
+	return parsed.String()
 }

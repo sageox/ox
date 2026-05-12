@@ -92,7 +92,6 @@ const (
 	// Git Repository Health checks
 	CheckSlugLedgerPath         = "ledger-path"
 	CheckSlugLedgerPathMismatch = "ledger-path-mismatch"
-	CheckSlugLedgerRemote       = "ledger-remote"
 	CheckSlugTeamContextPath    = "team-context-path"
 	CheckSlugTeamSymlink        = "team-symlink"
 	CheckSlugProjectSymlinks    = "project-symlinks"

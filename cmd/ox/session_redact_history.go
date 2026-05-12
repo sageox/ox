@@ -22,10 +22,12 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// ox session redact-history is the forensic cleanup companion to
-// `ox doctor --check=ledger-secrets`. The doctor check tells the user
-// THAT they have leaked credentials in their local Ledger; this command
-// fixes them, with strict safety rails per ox-pd5f:
+// ox session redact-history is the forensic audit + cleanup tool for
+// credentials leaked into session content. `--dry-run` performs the deep
+// audit (per-line findings, classified pushed vs unpushed); the default
+// invocation snapshots and interactively redacts. Same scanner as the
+// pre-push gate (cmd/ox/prepush_scan.go), so a finding here is exactly
+// what would have blocked a push. Strict safety rails per ox-pd5f:
 //
 //   1. Snapshot the entire ledger to an immutable backup location BEFORE
 //      any modification. Print the snapshot path + SHA-256 so the user
@@ -54,8 +56,8 @@ sessions, then interactively cleanup each finding.
 
 Workflow:
 
-  1. ` + "`ox doctor --check=ledger-secrets`" + ` first — read-only audit.
-  2. ` + "`ox session redact-history`" + ` — interactive cleanup.
+  1. ` + "`ox session redact-history --dry-run`" + ` — per-line audit, no changes.
+  2. ` + "`ox session redact-history`" + ` — snapshot + interactive cleanup.
   3. After cleanup, ` + "`ox session push`" + ` (or normal session-stop flow) republishes.
 
 Safety:

@@ -72,8 +72,8 @@ var ledgerSecretsSkipDirs = map[string]bool{
 // session raw.jsonl is comfortably under this even after a long agent run.
 const ledgerSecretsSizeCap = 8 * 1024 * 1024
 
-// checkLedgerSecrets implements `ox doctor --check=ledger-secrets`. It
-// scans the current project's local Ledger for credential patterns using
+// checkLedgerSecrets is the doctor-side credential audit for the local
+// Ledger (slug `ledger-secrets`). It scans for credential patterns using
 // the same DefaultPatterns as the redactor + pre-push gate, so a finding
 // here is exactly what would have been blocked at write or push time if
 // the gate had been in place.
@@ -246,19 +246,25 @@ func scanLedgerFileForSecrets(r *session.Redactor, abs, rel string,
 	return nil
 }
 
-// --- ox-yeae: embedded-PAT check ---
+// --- ox-yeae: embedded-PAT + credential-helper check ---
 
-// checkLedgerEmbeddedCreds implements `ox doctor --check=ledger-embedded-creds`.
-// It runs extractPATFromRemote against the current project's ledger and
-// reports if the origin URL has an embedded oauth2:TOKEN. With `--fix` (which
-// the doctor harness threads in as the `fix` arg), it calls
-// MigrateLedgerCredentials to strip + install the helper — same primitive
-// the daemon's startup sweep uses, so behavior is identical and idempotent.
+// checkLedgerEmbeddedCreds is the post-ox-eeqi invariant guard for the
+// ledger's git auth state. It fires on two distinct failures:
 //
-// Per ox-yeae: depends on the credential helper subcommand (ox-eeqi) being
-// in place, otherwise the daemon's normal sync flow would re-embed the PAT
-// the moment we stripped it. ox-eeqi is closed; both directions of the
-// migration land together.
+//  1. The origin URL contains an embedded oauth2:TOKEN (pre-eeqi leftover).
+//     The PAT leaks via `git remote -v`, GIT_TRACE, Time Machine, etc.
+//  2. The origin URL is bare (post-eeqi) but the ox credential helper isn't
+//     installed in this ledger's .git/config. Fetch/push will fail at auth.
+//     This is the silent-success trap that the deleted "Ledger remote URL
+//     match" check accidentally papered over before this fix.
+//
+// With `fix=true` it calls MigrateLedgerCredentials — same primitive the
+// daemon's startup sweep uses — which both strips any embedded PAT and
+// installs/refreshes the helper. Idempotent.
+//
+// Per ox-yeae: depends on ox-eeqi (the credential helper subcommand) being
+// in place, otherwise the daemon's normal sync would re-embed the PAT the
+// moment we stripped it. Both directions of the migration land together.
 func checkLedgerEmbeddedCreds(fix bool) checkResult {
 	name := "Ledger embedded credentials"
 	gitRoot := findGitRoot()
@@ -277,51 +283,118 @@ func checkLedgerEmbeddedCreds(fix bool) checkResult {
 		return SkippedCheck(name, "ledger directory does not exist", "")
 	}
 
-	hasEmbedded, err := ledgerOriginHasEmbeddedPAT(ledgerPath)
+	hasEmbedded, host, err := ledgerOriginState(ledgerPath)
 	if err != nil {
 		return SkippedCheck(name, fmt.Sprintf("origin check error: %v", err), "")
 	}
-	if !hasEmbedded {
-		return PassedCheck(name, "origin URL is bare; credentials live in the credential store")
+	// host == "" means there's no https origin we'd manage (SSH, file://,
+	// no remote yet, non-oauth2 deploy token). Nothing for this check to
+	// assert.
+	if host == "" {
+		return SkippedCheck(name, "no managed https origin", "")
+	}
+
+	helperInstalled, helperErr := ledgerHasCredentialHelper(ledgerPath, host)
+	if helperErr != nil {
+		return SkippedCheck(name, fmt.Sprintf("helper check error: %v", helperErr), "")
+	}
+
+	if !hasEmbedded && helperInstalled {
+		return PassedCheck(name, "origin URL is bare; ox credential helper installed")
 	}
 
 	if !fix {
+		if hasEmbedded {
+			return FailedCheck(name,
+				"origin URL contains embedded oauth2:TOKEN — visible to backups, `git remote -v`, and GIT_TRACE",
+				"Run `ox doctor --fix-slug=ledger-embedded-creds` to strip the PAT and install the credential helper.")
+		}
+		// bare URL, helper missing
 		return FailedCheck(name,
-			"origin URL contains embedded oauth2:TOKEN — visible to backups, `git remote -v`, and GIT_TRACE",
-			"Run `ox doctor --check=ledger-embedded-creds --fix` to strip the PAT and install the credential helper.")
+			fmt.Sprintf("ox credential helper not configured for %s — fetch/push will fail without it", host),
+			"Run `ox doctor --fix-slug=ledger-embedded-creds` to install the credential helper.")
 	}
 
-	changed, migErr := gitserver.MigrateLedgerCredentials(ledgerPath, gitserver.DefaultHelperCommand())
-	if migErr != nil {
+	if _, migErr := gitserver.MigrateLedgerCredentials(ledgerPath, gitserver.DefaultHelperCommand()); migErr != nil {
 		return FailedCheck(name, fmt.Sprintf("migration failed: %v", migErr), "")
 	}
-	if !changed {
-		return PassedCheck(name, "no embedded PAT found (re-check)")
+
+	// Re-verify post-fix — defense in depth. If MigrateLedgerCredentials
+	// reports success but the helper still isn't present (e.g. its host
+	// guard rejected our repo, or someone hand-edited .git/config
+	// concurrently), fail loudly rather than report a green check that
+	// the next push will contradict.
+	postHelper, postErr := ledgerHasCredentialHelper(ledgerPath, host)
+	if postErr != nil || !postHelper {
+		return FailedCheck(name,
+			"credential helper still missing after migration attempt",
+			fmt.Sprintf("Inspect: git -C %s config --get credential.https://%s.helper", ledgerPath, host))
 	}
-	return PassedCheck(name, "stripped embedded PAT and installed ox credential helper")
+
+	if hasEmbedded {
+		return PassedCheck(name, "stripped embedded PAT and installed ox credential helper")
+	}
+	return PassedCheck(name, "installed ox credential helper")
 }
 
-// ledgerOriginHasEmbeddedPAT returns true if the ledger's origin URL has an
-// oauth2:TOKEN@ prefix. Mirrors the check in gitserver.extractPATFromRemote
-// but lives here because that function is unexported and this check has
-// project-context-specific path resolution.
-func ledgerOriginHasEmbeddedPAT(ledgerPath string) (bool, error) {
-	out, err := exec.Command("git", "-C", ledgerPath, "remote", "get-url", "origin").Output()
-	if err != nil {
-		// no origin = nothing to leak
-		return false, nil
+// ledgerOriginState returns (hasEmbeddedPAT, host) for the ledger's origin URL.
+// host is "" when there is no remote, the remote isn't https, or it carries
+// a non-oauth2 userinfo (deploy token) ox shouldn't touch. A non-empty host
+// means "this is a remote whose credential state we own."
+func ledgerOriginState(ledgerPath string) (hasPAT bool, host string, err error) {
+	out, gitErr := exec.Command("git", "-C", ledgerPath, "remote", "get-url", "origin").Output()
+	if gitErr != nil {
+		// no origin = nothing to manage
+		return false, "", nil
 	}
 	remote := strings.TrimSpace(string(out))
 	if remote == "" {
-		return false, nil
+		return false, "", nil
 	}
-	parsed, err := url.Parse(remote)
-	if err != nil || parsed.User == nil {
-		return false, nil
+	parsed, parseErr := url.Parse(remote)
+	if parseErr != nil || parsed.Scheme != "https" {
+		return false, "", nil
 	}
-	if parsed.User.Username() != "oauth2" {
-		return false, nil
+	host = parsed.Hostname()
+	if host == "" {
+		return false, "", nil
 	}
-	pw, hasPW := parsed.User.Password()
-	return hasPW && pw != "", nil
+	if parsed.User != nil && parsed.User.Username() != "" && parsed.User.Username() != "oauth2" {
+		// third-party deploy token — leave alone
+		return false, "", nil
+	}
+	if parsed.User != nil && parsed.User.Username() == "oauth2" {
+		if pw, ok := parsed.User.Password(); ok && pw != "" {
+			hasPAT = true
+		}
+	}
+	return hasPAT, host, nil
+}
+
+// ledgerOriginHasEmbeddedPAT returns whether the ledger's origin URL has an
+// embedded oauth2:TOKEN. Thin wrapper over ledgerOriginState for tests that
+// only care about the embedded-PAT axis.
+func ledgerOriginHasEmbeddedPAT(ledgerPath string) (bool, error) {
+	hasPAT, _, err := ledgerOriginState(ledgerPath)
+	return hasPAT, err
+}
+
+// ledgerHasCredentialHelper returns true when the ledger's .git/config has
+// a non-empty `credential.https://<host>.helper` entry. We deliberately do
+// NOT verify the helper command's exact value or that the referenced binary
+// exists — a user-installed third-party helper is a legitimate override,
+// and resolving binary paths under `!ox …` would race against $PATH state.
+// The narrow assertion is: there is *some* helper configured for this host.
+func ledgerHasCredentialHelper(ledgerPath, host string) (bool, error) {
+	out, err := exec.Command("git", "-C", ledgerPath, "config", "--get",
+		"credential.https://"+host+".helper").Output()
+	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 1 {
+			// key absent — git's documented signal for "not configured"
+			return false, nil
+		}
+		return false, err
+	}
+	return strings.TrimSpace(string(out)) != "", nil
 }

@@ -183,6 +183,71 @@ func TestLedgerOriginHasEmbeddedPAT_NoOrigin(t *testing.T) {
 	assert.False(t, hasPAT)
 }
 
+// TestLedgerHasCredentialHelper_NotConfigured covers the case the deleted
+// "Ledger remote URL match" check accidentally papered over: a bare https
+// origin with no credential helper installed in .git/config. Authentication
+// will fail at the first push; the doctor must NOT report this as healthy.
+func TestLedgerHasCredentialHelper_NotConfigured(t *testing.T) {
+	work := t.TempDir()
+	mustGit(t, work, "init", "--initial-branch=main")
+	mustGit(t, work, "remote", "add", "origin", "https://git.sageox.ai/team/ledger.git")
+
+	installed, err := ledgerHasCredentialHelper(work, "git.sageox.ai")
+	require.NoError(t, err)
+	assert.False(t, installed,
+		"a fresh ledger with no helper config must not be treated as healthy")
+}
+
+// TestLedgerHasCredentialHelper_Configured verifies positive detection when
+// `git config credential.https://<host>.helper` is present.
+func TestLedgerHasCredentialHelper_Configured(t *testing.T) {
+	work := t.TempDir()
+	mustGit(t, work, "init", "--initial-branch=main")
+	mustGit(t, work, "remote", "add", "origin", "https://git.sageox.ai/team/ledger.git")
+	mustGit(t, work, "config", "credential.https://git.sageox.ai.helper", "!ox git-credential-helper")
+
+	installed, err := ledgerHasCredentialHelper(work, "git.sageox.ai")
+	require.NoError(t, err)
+	assert.True(t, installed)
+}
+
+// TestLedgerOriginState_BareURL captures the (no-PAT, has-host) shape that
+// only `ledgerOriginState` exposes — the wrapper `ledgerOriginHasEmbeddedPAT`
+// discards the host and would let the helper-missing case go undetected.
+func TestLedgerOriginState_BareURL(t *testing.T) {
+	work := t.TempDir()
+	mustGit(t, work, "init", "--initial-branch=main")
+	mustGit(t, work, "remote", "add", "origin", "https://git.sageox.ai/team/ledger.git")
+
+	hasPAT, host, err := ledgerOriginState(work)
+	require.NoError(t, err)
+	assert.False(t, hasPAT)
+	assert.Equal(t, "git.sageox.ai", host,
+		"host must be returned for a bare https origin so the helper-presence check can run")
+}
+
+// TestLedgerOriginState_NonHTTPSReturnsNoHost ensures SSH / file:// remotes
+// route to the SkippedCheck branch in the doctor check rather than getting
+// dragged into the helper-installation flow.
+func TestLedgerOriginState_NonHTTPSReturnsNoHost(t *testing.T) {
+	for _, remote := range []string{
+		"git@github.com:org/repo.git",
+		"file:///tmp/local-bare.git",
+		"ssh://git@example.com/repo.git",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			work := t.TempDir()
+			mustGit(t, work, "init", "--initial-branch=main")
+			mustGit(t, work, "remote", "add", "origin", remote)
+
+			_, host, err := ledgerOriginState(work)
+			require.NoError(t, err)
+			assert.Empty(t, host,
+				"non-https remote must not be claimed as managed; got host=%q", host)
+		})
+	}
+}
+
 // TestCheckLedgerSecrets_OutputDoesNotLeakBytes is the load-bearing
 // privacy assertion: even when findings exist, the rendered checkResult
 // (the thing printed to the user) must never contain a matched secret.

@@ -4,7 +4,9 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -24,6 +26,62 @@ func TestCheckLedgerURLAPIMatch_Skip_NoLedger(t *testing.T) {
 	if !result.skipped {
 		t.Errorf("expected skipped=true when no ledger found, got: %+v", result)
 	}
+}
+
+// TestApplyCorrectedLedgerURL_LeavesOriginBare is the load-bearing
+// regression for the post-ox-eeqi invariant: the URL-API-match fix path
+// MUST NOT re-embed the PAT into origin, even when the API returns a URL
+// that carries credentials. Failure prevented: PAT leakage via
+// `git remote -v`, GIT_TRACE, Time Machine, and shell history-adjacent
+// diagnostics — the same leak vectors ox-eeqi was meant to close.
+func TestApplyCorrectedLedgerURL_LeavesOriginBare(t *testing.T) {
+	for _, apiURL := range []string{
+		// API may return any of these shapes; all must produce a bare origin.
+		"https://oauth2:glpat-secret-token-do-not-leak@git.sageox.ai/team/ledger.git",
+		"https://user@git.sageox.ai/team/ledger.git",
+		"https://git.sageox.ai/team/ledger.git",
+	} {
+		t.Run(apiURL, func(t *testing.T) {
+			work := t.TempDir()
+			mustGit(t, work, "init", "--initial-branch=main")
+			// seed origin with a stale URL so the fix has something to overwrite
+			mustGit(t, work, "remote", "add", "origin", "https://git.sageox.ai/team/old-ledger.git")
+
+			if r := applyCorrectedLedgerURL(work, apiURL, "test"); r != nil {
+				t.Fatalf("applyCorrectedLedgerURL failed: %s — %s", r.message, r.detail)
+			}
+
+			out, err := exec.Command("git", "-C", work, "remote", "get-url", "origin").Output()
+			require.NoError(t, err)
+			got := strings.TrimSpace(string(out))
+
+			assert.NotContains(t, got, "@",
+				"origin must not carry userinfo (PAT leak); api=%q origin=%q", apiURL, got)
+			assert.NotContains(t, got, "glpat-",
+				"origin must not contain the PAT; api=%q origin=%q", apiURL, got)
+			assert.NotContains(t, got, "oauth2:",
+				"origin must not contain oauth2: userinfo; api=%q origin=%q", apiURL, got)
+		})
+	}
+}
+
+// TestApplyCorrectedLedgerURL_InstallsHelper covers Codex finding 1 (round 2):
+// after the URL is corrected, the credential helper must be present so the
+// next fetch/push actually authenticates. Without it the doctor would
+// report "URL updated" while the next push silently fails on auth.
+func TestApplyCorrectedLedgerURL_InstallsHelper(t *testing.T) {
+	work := t.TempDir()
+	mustGit(t, work, "init", "--initial-branch=main")
+	mustGit(t, work, "remote", "add", "origin", "https://git.sageox.ai/team/stale.git")
+
+	if r := applyCorrectedLedgerURL(work, "https://git.sageox.ai/team/correct.git", "test"); r != nil {
+		t.Fatalf("applyCorrectedLedgerURL failed: %s — %s", r.message, r.detail)
+	}
+
+	installed, err := ledgerHasCredentialHelper(work, "git.sageox.ai")
+	require.NoError(t, err)
+	assert.True(t, installed,
+		"helper must be installed after URL correction; otherwise the next push fails at auth")
 }
 
 // TestFixLedgerBranchDiverged_GitHubConflictAutoResolved verifies that
@@ -239,3 +297,4 @@ func TestStripURLCredentials(t *testing.T) {
 		})
 	}
 }
+
