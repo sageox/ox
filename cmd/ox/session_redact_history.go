@@ -24,11 +24,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// ox session redact is the forensic cleanup companion to
-// `ox doctor --check=ledger-secrets` / `ox session audit`. The audit
-// surfaces tell the user
-// THAT they have leaked credentials in their local Ledger; this command
-// fixes them, with strict safety rails per ox-pd5f:
+// ox session redact is the forensic cleanup companion to `ox session
+// audit` (and to the `ledger-secrets` doctor check). The audit surfaces
+// tell the user THAT they have leaked credentials in their local
+// Ledger; this command fixes them, with strict safety rails per ox-pd5f:
 //
 //   1. Snapshot the entire ledger to an immutable backup location BEFORE
 //      any modification. Print the snapshot path + SHA-256 so the user
