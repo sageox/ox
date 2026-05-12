@@ -32,6 +32,8 @@ func makeLedgerForAuditTest(t *testing.T, files map[string]string) string {
 // TestScanLedgerForSecrets_FindsCanaries plants known-secret patterns into
 // session files and asserts the scanner reports them — without leaking the
 // values back through the result.
+//
+// Failure prevented: scan misses a session-level credential leak (ox-zukx).
 func TestScanLedgerForSecrets_FindsCanaries(t *testing.T) {
 	work := makeLedgerForAuditTest(t, map[string]string{
 		"sessions/2026-05-10/raw.jsonl": `{"text":"AKIAIOSFODNN7EXAMPLE"}` + "\n",
@@ -40,11 +42,15 @@ func TestScanLedgerForSecrets_FindsCanaries(t *testing.T) {
 		"docs/notes.md":                 "this file has no secrets in it",
 	})
 
-	result, err := scanLedgerForSecrets(work)
+	result, err := scanLedgerForSecrets(work, work)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
-	assert.GreaterOrEqual(t, result.FilesScanned, 4)
+	// Scope is sessions-only now (ox-zukx). docs/notes.md is intentionally
+	// NOT scanned — only files under <ledger>/sessions/<name>/ count.
+	assert.Equal(t, 3, result.FilesScanned,
+		"sessions-only scope: 2 raw.jsonl + 1 meta.json; docs/notes.md is out of scope")
+	assert.Equal(t, 2, result.SessionsScanned)
 	assert.Contains(t, result.Findings, "aws_access_key")
 	assert.Contains(t, result.Findings, "gitlab_token")
 
@@ -69,33 +75,51 @@ func TestScanLedgerForSecrets_CleanLedger(t *testing.T) {
 		"docs/note.md":             "no creds here\n",
 	})
 
-	result, err := scanLedgerForSecrets(work)
+	result, err := scanLedgerForSecrets(work, work)
 	require.NoError(t, err)
 	assert.Empty(t, result.Findings)
-	assert.GreaterOrEqual(t, result.FilesScanned, 3)
+	// sessions-only scope: 2 files in sessions/clean/; docs/ is ignored
+	assert.Equal(t, 2, result.FilesScanned)
+	assert.Equal(t, 1, result.SessionsScanned)
 }
 
-// TestScanLedgerForSecrets_SkipsBlessedDirs verifies that .git, .beads,
-// .dolt etc. are never descended into — saves time and avoids false
-// positives on binary pack-files that random-bytes-match a regex.
-func TestScanLedgerForSecrets_SkipsBlessedDirs(t *testing.T) {
+// TestScanLedgerForSecrets_OutOfScopeIgnored verifies the scope reduction
+// in ox-zukx: anything outside <ledger>/sessions/<name>/ is not scanned,
+// even if it has a matching extension and contains canary bytes. Pre-fix
+// the audit scanned the entire ledger working tree and matched fixture
+// credentials inside data/github/.../pr/*.json archives — non-actionable
+// "findings" that drowned the real signal.
+func TestScanLedgerForSecrets_OutOfScopeIgnored(t *testing.T) {
 	work := makeLedgerForAuditTest(t, map[string]string{
-		"sessions/leak.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
+		"sessions/real/raw.jsonl":         "AKIAIOSFODNN7EXAMPLE\n",
+		"data/github/2026/05/pr/597.json": `{"body":"AKIAIOSFODNN7EXAMPLE"}` + "\n",
+		"docs/architecture.md":            "describes the AKIAIOSFODNN7EXAMPLE pattern\n",
+		".git/hidden.jsonl":               `{"k":"ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}`,
 	})
-	// plant a "secret" inside .git — it must NOT be scanned
-	require.NoError(t, os.WriteFile(filepath.Join(work, ".git", "hidden.jsonl"),
-		[]byte(`{"k":"ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}`), 0644))
-	// also plant one inside .beads
-	require.NoError(t, os.MkdirAll(filepath.Join(work, ".beads"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(work, ".beads", "x.json"),
-		[]byte(`{"k":"gho_alphabetabcdefghijklmnopqrstuvwxyz12"}`), 0644))
 
-	result, err := scanLedgerForSecrets(work)
+	result, err := scanLedgerForSecrets(work, work)
 	require.NoError(t, err)
-	// only the real session file should have fired
-	assert.Contains(t, result.Findings, "aws_access_key")
-	assert.NotContains(t, result.Findings, "github_token",
-		".git/.beads should be skipped, github_token detector should not have fired")
+
+	// One real session-scoped finding, no others.
+	require.Contains(t, result.Findings, "aws_access_key")
+	assert.Equal(t, 1, result.Findings["aws_access_key"].Count,
+		"AKIA appearances in data/, docs/, .git/ must NOT count")
+	assert.Equal(t, 1, result.Findings["aws_access_key"].FileCount)
+	assert.Equal(t, "sessions/real/raw.jsonl", result.Findings["aws_access_key"].Sample)
+	// After ox-def1 the broad `github_token` slug was retired. Assert
+	// absence of EVERY current GitHub slug so this test fails loudly if
+	// any of them starts firing on a file outside scope.
+	for _, slug := range []string{
+		"github_personal_access_token",
+		"github_oauth_token",
+		"github_user_to_server_token",
+		"github_server_token",
+		"github_refresh_token",
+		"github_fine_grained_pat",
+	} {
+		assert.NotContains(t, result.Findings, slug,
+			"%s in .git/ must not be reachable: out of scope", slug)
+	}
 }
 
 // TestScanLedgerForSecrets_SizeCap verifies oversized files are skipped.
@@ -114,7 +138,7 @@ func TestScanLedgerForSecrets_SizeCap(t *testing.T) {
 		"sessions/huge.jsonl": string(buf),
 	})
 
-	result, err := scanLedgerForSecrets(work)
+	result, err := scanLedgerForSecrets(work, work)
 	require.NoError(t, err)
 	assert.Empty(t, result.Findings, "over-cap file must be skipped, but detectors fired: %v", result.Findings)
 }
@@ -123,16 +147,52 @@ func TestScanLedgerForSecrets_SizeCap(t *testing.T) {
 // extensions are skipped — a binary blob shouldn't be scanned.
 func TestScanLedgerForSecrets_OnlyAllowlistedExts(t *testing.T) {
 	work := makeLedgerForAuditTest(t, map[string]string{
-		"sessions/audio.mp3": "AKIAIOSFODNN7EXAMPLE",   // plant in a "binary" — must not be scanned
-		"sessions/img.png":   "AKIAIOSFODNN7EXAMPLE",   // same
-		"sessions/real.jsonl": "no secrets in this one", // .jsonl is scanned; nothing to find
+		"sessions/s1/audio.mp3":  "AKIAIOSFODNN7EXAMPLE",   // "binary" inside a session — must not be scanned
+		"sessions/s1/img.png":    "AKIAIOSFODNN7EXAMPLE",   // same
+		"sessions/s1/real.jsonl": "no secrets in this one", // .jsonl is scanned; nothing to find
 	})
 
-	result, err := scanLedgerForSecrets(work)
+	result, err := scanLedgerForSecrets(work, work)
 	require.NoError(t, err)
 	assert.Empty(t, result.Findings)
 	// .mp3 and .png should not be counted toward FilesScanned (only .jsonl matched)
 	assert.Equal(t, 1, result.FilesScanned)
+}
+
+// TestScanLedgerForSecrets_HerokuKeyDoesNotFireOnUUIDs is a regression
+// test for ox-zukx: heroku_key was a bare UUID regex with no Keywords
+// guard, so it matched every UUIDv7 in meta.json (session_id, agent_id,
+// etc.). On a real ledger this produced 2141 false positives across 641
+// sessions. Running redact-history on that result would have rewritten
+// session_id values in meta.json and corrupted session resolution. The
+// fix in internal/session/secrets.go adds Keywords: ["heroku"], AND
+// ScanForSecrets now actually applies the keyword pre-screen.
+//
+// Failure prevented: a single UUIDv7 in a meta.json file produces a
+// "heroku_key" finding.
+func TestScanLedgerForSecrets_HerokuKeyDoesNotFireOnUUIDs(t *testing.T) {
+	work := makeLedgerForAuditTest(t, map[string]string{
+		"sessions/s/meta.json": `{"session_id":"ses_019e15c2-a128-73d4-b034-a262c3ddc96b",` +
+			`"agent_id":"019e15c2-a128-73d4-b034-a262c3ddc96b"}`,
+		"sessions/s/raw.jsonl": `{"text":"just a UUID 11111111-2222-3333-4444-555555555555 with no special context"}` + "\n",
+	})
+
+	result, err := scanLedgerForSecrets(work, work)
+	require.NoError(t, err)
+	assert.NotContains(t, result.Findings, "heroku_key",
+		"heroku_key must only fire when 'heroku' appears in the same line")
+}
+
+// TestScanLedgerForSecrets_HerokuKeyFiresWithContext is the positive
+// pair to the above — when 'heroku' IS present in the line, the
+// detector should still catch real Heroku-shaped keys.
+func TestScanLedgerForSecrets_HerokuKeyFiresWithContext(t *testing.T) {
+	work := makeLedgerForAuditTest(t, map[string]string{
+		"sessions/s/raw.jsonl": `{"text":"heroku api key: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}` + "\n",
+	})
+	result, err := scanLedgerForSecrets(work, work)
+	require.NoError(t, err)
+	assert.Contains(t, result.Findings, "heroku_key")
 }
 
 // TestLedgerOriginHasEmbeddedPAT_True verifies detection when a PAT is
@@ -253,10 +313,10 @@ func TestLedgerOriginState_NonHTTPSReturnsNoHost(t *testing.T) {
 // (the thing printed to the user) must never contain a matched secret.
 func TestCheckLedgerSecrets_OutputDoesNotLeakBytes(t *testing.T) {
 	work := makeLedgerForAuditTest(t, map[string]string{
-		"sessions/leak.jsonl": "AKIAIOSFODNN7EXAMPLE and " +
+		"sessions/leaky/raw.jsonl": "AKIAIOSFODNN7EXAMPLE and " +
 			"gh token ghp_alphabetabcdefghijklmnopqrstuvwxyz12\n",
 	})
-	result, err := scanLedgerForSecrets(work)
+	result, err := scanLedgerForSecrets(work, work)
 	require.NoError(t, err)
 	require.NotEmpty(t, result.Findings)
 

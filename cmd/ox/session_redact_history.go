@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bufio"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -18,16 +19,16 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
 
-// ox session redact-history is the forensic audit + cleanup tool for
-// credentials leaked into session content. `--dry-run` performs the deep
-// audit (per-line findings, classified pushed vs unpushed); the default
-// invocation snapshots and interactively redacts. Same scanner as the
-// pre-push gate (cmd/ox/prepush_scan.go), so a finding here is exactly
-// what would have blocked a push. Strict safety rails per ox-pd5f:
+// ox session redact is the forensic cleanup companion to
+// `ox doctor --check=ledger-secrets` / `ox session audit`. The audit
+// surfaces tell the user
+// THAT they have leaked credentials in their local Ledger; this command
+// fixes them, with strict safety rails per ox-pd5f:
 //
 //   1. Snapshot the entire ledger to an immutable backup location BEFORE
 //      any modification. Print the snapshot path + SHA-256 so the user
@@ -48,16 +49,70 @@ import (
 //   - Operator auto-approves and the tool redacts content the user
 //     wanted to keep (e.g. legitimate examples in documentation).
 
-var sessionRedactHistoryCmd = &cobra.Command{
-	Use:   "redact-history",
-	Short: "Interactively redact credentials from historical local sessions",
-	Long: `Scan the local Ledger for credential patterns in committed-but-not-yet-pushed
-sessions, then interactively cleanup each finding.
+// Two surfaces over the same scan code path (ox-zukx / ox-8bfh
+// follow-up). The pre-split `ox session redact-history` was misleading
+// because most users running it with --dry-run were doing an audit,
+// not preparing a destructive rewrite — the name fought the intent.
+//
+//   ox session audit   — read-only audit. Always hydrates LFS pointers
+//                        first (LFS Batch API fetch of every dehydrated
+//                        session — can be slow on a large ledger),
+//                        prints catalog identity, then reports per-line
+//                        findings grouped pushed-vs-unpushed. Never
+//                        writes anything. Always safe to run; the cost
+//                        is bandwidth + time, not data integrity.
+//
+//   ox session redact  — destructive interactive rewrite. Runs the same
+//                        hydration + scan as `audit`, then snapshots the
+//                        ledger, prompts per-file [y/N/q], rewrites
+//                        bytes, appends a RedactionPass to each
+//                        affected session's meta.json (ox-8bfh), and
+//                        amends the holding commit. Refuses findings
+//                        in already-pushed commits.
+//
+// Both share the same hydration + scan + per-file enumeration
+// (runRedactHistoryWorkflow); the difference is whether the interactive
+// rewrite tail runs.
+
+var sessionAuditCmd = &cobra.Command{
+	Use:   "audit",
+	Short: "Audit session recordings for credential patterns (read-only; expensive)",
+	Long: `Audit every session recording in the local Ledger for credential patterns.
+Read-only — never modifies files, never amends commits, never uploads.
+
+Cost: this command force-hydrates every LFS-pointer session file via the
+LFS Batch API before scanning, because pointer-stub bytes match no
+credential pattern and would silently produce a clean-looking lie.
+Hydration is bounded by network throughput and the number of dehydrated
+sessions; on a fresh clone with hundreds of sessions this can take
+minutes and pull tens of megabytes. Sessions that fail to hydrate are
+surfaced as a Warning so partial coverage is never mistaken for clean.
+
+Findings are reported with detector name + file + line; matched bytes
+are NEVER printed (ox-zyg7). The output stamps the catalog version + a
+sha256 hash that produced the findings, so future re-audits can decide
+whether a newer ruleset would catch additional leaks.
+
+For interactive cleanup of any findings, run ` + "`ox session redact`" + `.`,
+	RunE: runSessionAudit,
+}
+
+var sessionRedactCmd = &cobra.Command{
+	Use:   "redact",
+	Short: "Interactively redact credentials in session recordings (destructive; expensive)",
+	Long: `Interactively redact each credential finding in committed-but-not-yet-pushed
+session recordings. Runs the full audit pass first, then prompts
+per-file for approval.
+
+Cost: same hydration cost as ` + "`ox session audit`" + ` (LFS Batch API fetch of
+every dehydrated session), plus a per-file rewrite + ledger snapshot +
+git amend on every approved file. Plan for minutes-not-seconds on a
+large ledger.
 
 Workflow:
 
-  1. ` + "`ox session redact-history --dry-run`" + ` — per-line audit, no changes.
-  2. ` + "`ox session redact-history`" + ` — snapshot + interactive cleanup.
+  1. ` + "`ox session audit`" + ` first — read-only, confirms what would change.
+  2. ` + "`ox session redact`" + ` — interactive cleanup.
   3. After cleanup, ` + "`ox session push`" + ` (or normal session-stop flow) republishes.
 
 Safety:
@@ -69,55 +124,75 @@ Safety:
     correct response is: rotate the leaked credential, mark the finding
     as known, and follow up via the team comms process.
   - Per-finding human approval. There is no bulk-approve flag.
-  - --dry-run lists findings without snapshotting or modifying anything.`,
-	RunE: runSessionRedactHistory,
+  - Each redaction pass appends a RedactionPass entry to the session's
+    meta.json (ox-8bfh) recording WHO redacted, WHEN, with WHICH catalog
+    version+hash, and WHAT was caught — never the matched bytes.`,
+	RunE: runSessionRedact,
 }
 
-// dry-run and ledger-path are intentionally the only flags here. Adding a
-// "yes to all" override is deliberately omitted — per ox-pd5f the
-// per-finding gate IS the safety mechanism.
+// Flag storage. Each command reads from its own variable so cobra's
+// flag namespacing stays clean.
 var (
-	redactHistoryDryRun     bool
-	redactHistoryLedgerPath string
-	redactHistoryBackupDir  string
+	auditLedgerPath string
+
+	redactLedgerPath string
+	redactBackupDir  string
 )
 
 func init() {
-	sessionRedactHistoryCmd.Flags().BoolVar(&redactHistoryDryRun, "dry-run", false,
-		"Show what would change without snapshotting or modifying anything")
-	sessionRedactHistoryCmd.Flags().StringVar(&redactHistoryLedgerPath, "ledger-path", "",
+	sessionAuditCmd.Flags().StringVar(&auditLedgerPath, "ledger-path", "",
 		"Override the ledger path (defaults to the current project's ledger)")
-	sessionRedactHistoryCmd.Flags().StringVar(&redactHistoryBackupDir, "backup-dir", "",
-		"Override the backup directory (defaults to ~/.local/share/sageox/backups/redact-history/)")
+	sessionCmd.AddCommand(sessionAuditCmd)
 
-	// register under the existing `ox session` parent (see session.go).
-	sessionCmd.AddCommand(sessionRedactHistoryCmd)
+	sessionRedactCmd.Flags().StringVar(&redactLedgerPath, "ledger-path", "",
+		"Override the ledger path (defaults to the current project's ledger)")
+	sessionRedactCmd.Flags().StringVar(&redactBackupDir, "backup-dir", "",
+		"Override the backup directory (defaults to ~/.local/share/sageox/backups/redact-history/)")
+	sessionCmd.AddCommand(sessionRedactCmd)
 }
 
-// runSessionRedactHistory is the cobra RunE. It does only argument
-// validation + branching; the real workflow lives in
-// runRedactHistoryWorkflow so tests can drive it directly without going
-// through cobra.
-func runSessionRedactHistory(cmd *cobra.Command, args []string) error {
-	ledgerPath, err := redactHistoryResolveLedger()
+// runSessionAudit is the cobra entrypoint for the read-only audit
+// surface. Pins DryRun=true on the shared workflow so no rewrite can
+// happen even if a future caller passes the wrong opts.
+func runSessionAudit(cmd *cobra.Command, args []string) error {
+	ledgerPath, err := resolveLedgerPathForSessionCmd(auditLedgerPath)
 	if err != nil {
 		return err
 	}
 	opts := redactHistoryOptions{
-		LedgerPath: ledgerPath,
-		DryRun:     redactHistoryDryRun,
-		BackupDir:  redactHistoryBackupDir,
-		Stdin:      cmd.InOrStdin(),
-		Stdout:     cmd.OutOrStdout(),
+		ProjectRoot: findGitRoot(),
+		LedgerPath:  ledgerPath,
+		DryRun:      true,
+		Stdin:       cmd.InOrStdin(),
+		Stdout:      cmd.OutOrStdout(),
 	}
 	return runRedactHistoryWorkflow(opts)
 }
 
-// redactHistoryResolveLedger returns the ledger path, honoring the
-// --ledger-path flag if set, otherwise resolving from the project.
-func redactHistoryResolveLedger() (string, error) {
-	if redactHistoryLedgerPath != "" {
-		return redactHistoryLedgerPath, nil
+// runSessionRedact is the cobra entrypoint for the destructive
+// interactive surface. Pins DryRun=false; rewrite proceeds.
+func runSessionRedact(cmd *cobra.Command, args []string) error {
+	ledgerPath, err := resolveLedgerPathForSessionCmd(redactLedgerPath)
+	if err != nil {
+		return err
+	}
+	opts := redactHistoryOptions{
+		ProjectRoot: findGitRoot(),
+		LedgerPath:  ledgerPath,
+		DryRun:      false,
+		BackupDir:   redactBackupDir,
+		Stdin:       cmd.InOrStdin(),
+		Stdout:      cmd.OutOrStdout(),
+	}
+	return runRedactHistoryWorkflow(opts)
+}
+
+// resolveLedgerPathForSessionCmd is the common ledger-path resolver
+// shared by audit and redact. Returns the explicit override when set,
+// otherwise the current project's ledger.
+func resolveLedgerPathForSessionCmd(override string) (string, error) {
+	if override != "" {
+		return override, nil
 	}
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
@@ -137,14 +212,20 @@ func redactHistoryResolveLedger() (string, error) {
 	return path, nil
 }
 
+
 // redactHistoryOptions bundles inputs so the workflow can be unit-tested
 // with synthetic stdin/stdout and an override backup directory.
 type redactHistoryOptions struct {
-	LedgerPath string
-	DryRun     bool
-	BackupDir  string // empty → default ~/.local/share/sageox/backups/redact-history/
-	Stdin      io.Reader
-	Stdout     io.Writer
+	// ProjectRoot is the git repo path used to authenticate LFS hydration
+	// (via openSessionContent → hydrateFromLedger). May be empty when the
+	// caller targets a ledger directly with --ledger-path; in that case
+	// hydration falls back to whatever is already in the cache.
+	ProjectRoot string
+	LedgerPath  string
+	DryRun      bool
+	BackupDir   string // empty → default ~/.local/share/sageox/backups/redact-history/
+	Stdin       io.Reader
+	Stdout      io.Writer
 }
 
 // runRedactHistoryWorkflow implements the dry-run / scan / snapshot /
@@ -159,23 +240,48 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 		opts.Stdout = os.Stdout
 	}
 
+	// Pre-scan hydration. The scan is content-based and pointer-file bytes
+	// match no credential pattern, so we MUST hydrate every dehydrated
+	// session recording before scanning or the result is meaningless. This
+	// is intentionally visible — printing progress and a final hydration
+	// summary so the operator can see what was fetched and whether any
+	// session was unreachable.
+	hyd, err := hydrateAllSessionsForScan(opts.ProjectRoot, opts.LedgerPath, opts.Stdout)
+	if err != nil {
+		return fmt.Errorf("pre-scan hydration: %w", err)
+	}
+	if hyd.Failed > 0 {
+		fmt.Fprintf(opts.Stdout,
+			"Warning: %d session file(s) across %d session(s) could NOT be hydrated and were not scanned.\n"+
+				"Scan coverage is incomplete — re-run after fixing connectivity / auth.\n\n",
+			hyd.FailedFiles, hyd.Failed)
+	}
+
 	fmt.Fprintf(opts.Stdout, "Scanning ledger %s for credentials...\n", opts.LedgerPath)
-	scanResult, err := scanLedgerForSecrets(opts.LedgerPath)
+	scanResult, err := scanLedgerForSecrets(opts.ProjectRoot, opts.LedgerPath)
 	if err != nil {
 		return fmt.Errorf("scan: %w", err)
 	}
 	if len(scanResult.Findings) == 0 {
-		fmt.Fprintf(opts.Stdout, "No credential patterns found across %d files. Nothing to redact.\n",
-			scanResult.FilesScanned)
+		fmt.Fprintf(opts.Stdout, "No credential patterns found across %d session file(s) in %d session(s). Nothing to redact.\n",
+			scanResult.FilesScanned, scanResult.SessionsScanned)
 		return nil
 	}
 
 	// Enumerate per-finding details (file:line:detector) by re-walking the
 	// affected files. We didn't keep this from the aggregate scan because
 	// the audit doesn't need it; the cleanup tool does.
-	findings, err := enumerateRedactHistoryFindings(opts.LedgerPath, scanResult)
+	findings, err := enumerateRedactHistoryFindings(opts.ProjectRoot, opts.LedgerPath, scanResult)
 	if err != nil {
-		return fmt.Errorf("enumerate findings: %w", err)
+		// Partial enumeration is useful — we still have whatever findings
+		// the successful files produced. Surface the issue as a Warning
+		// (loudly, so the operator can't miss it) but keep going. A
+		// total-loss return is reserved for cases where `findings` is
+		// nil; here we have actionable data alongside the error.
+		fmt.Fprintf(opts.Stdout, "\nWarning: enumeration partial — %v\n\n", err)
+		if findings == nil {
+			return fmt.Errorf("enumerate findings: %w", err)
+		}
 	}
 
 	// Classify each finding by pushed/unpushed. Pushed-commit findings are
@@ -184,6 +290,18 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	if err != nil {
 		return fmt.Errorf("classify findings by push status: %w", err)
 	}
+
+	// Print catalog identity BEFORE the finding counts so the operator
+	// knows which ruleset produced them. Same version+hash will be
+	// persisted to meta.json for every session this pass redacts —
+	// see ox-8bfh for the trust model. The redactor used here is the
+	// same instance reused below for the rewrite; reusing keeps the
+	// catalog identity consistent between scan-time reporting and
+	// post-write persistence.
+	redactor := session.NewRedactor()
+	catalogVersion := redactor.CatalogVersion()
+	catalogHash := redactor.CatalogHash()
+	fmt.Fprintf(opts.Stdout, "Catalog: %s\n  hash: %s\n\n", catalogVersion, catalogHash)
 
 	fmt.Fprintf(opts.Stdout, "Found %d credential matches across %d file(s):\n",
 		len(findings), countDistinctRedactHistoryPaths(findings))
@@ -223,7 +341,13 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	// many findings only gets reviewed once (the operator approves the
 	// whole file's redaction, not every single line).
 	byPath := groupFindingsByPath(unpushed)
-	redactor := session.NewRedactor()
+	// Collect per-session redaction entries as files succeed. After all
+	// redactions are done we write one RedactionPass to each affected
+	// session's meta.json — this is the ox-8bfh audit trail. We use
+	// the same passID across all sessions touched by this run so the
+	// trail is correlatable; appliedAt is captured once so the records
+	// share a wall-clock instant.
+	redactedBySession := map[string][]lfs.RedactionEntry{}
 	redactedFiles := 0
 	for _, fileFindings := range byPath {
 		path := fileFindings[0].Path
@@ -246,6 +370,17 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 				return fmt.Errorf("redact %s: %w", path, err)
 			}
 			redactedFiles++
+			// Record per-finding entries against the session that owns
+			// this file. Detector + line + filename only — never bytes.
+			if sess, fname, ok := splitSessionPath(path); ok {
+				for _, f := range fileFindings {
+					redactedBySession[sess] = append(redactedBySession[sess], lfs.RedactionEntry{
+						File:     fname,
+						Line:     f.Line,
+						Detector: f.Detector,
+					})
+				}
+			}
 			fmt.Fprintf(opts.Stdout, "  Redacted: %s\n\n", path)
 		default:
 			fmt.Fprintf(opts.Stdout, "  Skipped: %s\n\n", path)
@@ -257,14 +392,36 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 		return nil
 	}
 
+	// Persist a RedactionPass to each affected session's meta.json
+	// BEFORE staging+amending — so the amend commit includes the audit
+	// trail entry. Uses lfs.MutateSessionMeta (flock + atomic rename)
+	// so concurrent daemon writes to meta.json can't lose the entry.
+	// This is the load-bearing ox-8bfh transparency step.
+	metaPaths, err := writeRedactionPassesPerSession(context.Background(), opts.LedgerPath,
+		redactedBySession, catalogVersion, catalogHash)
+	if err != nil {
+		return fmt.Errorf("write redaction pass: %w", err)
+	}
+	// Stage the modified meta.json files alongside the redacted content
+	// files so the amend commit captures both.
+	for _, mp := range metaPaths {
+		if _, ok := byPath[mp]; !ok {
+			byPath[mp] = nil
+		}
+	}
+
 	// Stage + amend in a single holding commit. The operator can review
 	// the amended diff before running `ox session push`.
 	if err := stageAndAmendRedactedFiles(opts.LedgerPath, byPath); err != nil {
 		return fmt.Errorf("stage/amend: %w", err)
 	}
 
+	// Surface what was caught back to the operator — same data that
+	// just landed in meta.json, summarized for the terminal.
+	fmt.Fprintf(opts.Stdout, "Recorded redaction pass in %d session meta.json file(s).\n", len(metaPaths))
+
 	// Re-scan and report.
-	postScan, err := scanLedgerForSecrets(opts.LedgerPath)
+	postScan, err := scanLedgerForSecrets(opts.ProjectRoot, opts.LedgerPath)
 	if err != nil {
 		return fmt.Errorf("post-scan: %w", err)
 	}
@@ -286,66 +443,91 @@ type redactHistoryFinding struct {
 	Line     int
 }
 
-// enumerateRedactHistoryFindings re-walks just the files the audit
-// flagged and collects per-line findings. Two-pass on purpose: the audit
-// stays cheap (per-file aggregation), and the cleanup pays the per-line
-// cost only for files that need it.
-func enumerateRedactHistoryFindings(ledgerPath string, audit *ledgerSecretsScanResult) ([]redactHistoryFinding, error) {
+// enumerateRedactHistoryFindings re-walks just the session directories
+// surfaced by the audit and collects per-line findings. Two-pass on
+// purpose: the audit stays cheap (per-file aggregation), and the cleanup
+// pays the per-line cost only for files that need it.
+//
+// Hydration policy matches scanLedgerForSecrets: pointer files are
+// resolved via openSessionContent so per-line classification reads the
+// same bytes the audit saw. The path recorded on each finding is the
+// git-tracked in-place path (sessions/<name>/<filename>) so downstream
+// push-status classification and the snapshot tarball stay correct.
+func enumerateRedactHistoryFindings(projectRoot, ledgerPath string, audit *ledgerSecretsScanResult) ([]redactHistoryFinding, error) {
 	if audit == nil || len(audit.Findings) == 0 {
 		return nil, nil
 	}
-	// collect the set of files that need a per-line pass
-	files := map[string]bool{}
-	for _, f := range audit.Findings {
-		files[f.Sample] = true
-	}
-	// Sample is one path per detector; the audit doesn't keep full lists.
-	// Walk again with the same allowlist to enumerate every affected file.
-	// This is conservative: scan all files matching the allowlist, but
-	// emit findings only for the detectors that fired in the audit so
-	// we don't pay regex cost for detectors that didn't.
 	redactor := session.NewRedactor()
 
 	var out []redactHistoryFinding
-	err := filepath.WalkDir(ledgerPath, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil || d.IsDir() {
-			if d != nil && d.IsDir() && ledgerSecretsSkipDirs[d.Name()] {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !ledgerSecretsScanExts[strings.ToLower(filepath.Ext(d.Name()))] {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil || info.Size() > ledgerSecretsSizeCap {
-			return nil
-		}
-		rel, _ := filepath.Rel(ledgerPath, path)
-		// G122: filepath.WalkDir rooted at ledgerPath, which is an ox-owned
-		// directory under the user's XDG data dir. Symlink TOCTOU between
-		// the walker's stat and our Open is theoretical here — the threat
-		// model is an attacker with write access to the ledger directory,
-		// which already grants direct read of the secret content this
-		// scan is auditing.
-		f, err := os.Open(path) //nolint:gosec // G122: see comment above
-		if err != nil {
-			return nil
-		}
-		defer f.Close()
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-		lineNo := 0
-		for scanner.Scan() {
-			lineNo++
-			for _, name := range redactor.ScanForSecrets(scanner.Text()) {
-				out = append(out, redactHistoryFinding{Detector: name, Path: rel, Line: lineNo})
-			}
-		}
-		return nil
-	})
+	sessionsRoot := filepath.Join(ledgerPath, "sessions")
+	entries, err := os.ReadDir(sessionsRoot)
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read sessions dir: %w", err)
+	}
+	// Enumeration errors that previously got swallowed by `continue` are
+	// now collected so the caller surfaces them. A file that was visible
+	// in the aggregate scan can't silently vanish from the per-line list
+	// without warning — that pattern hid a real failure mode in ox-zukx.
+	var enumErrs []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		sessionName := entry.Name()
+		sessionDir := filepath.Join(sessionsRoot, sessionName)
+		files, err := os.ReadDir(sessionDir)
+		if err != nil {
+			enumErrs = append(enumErrs, fmt.Sprintf("%s: list dir: %v", sessionName, err))
+			continue
+		}
+		for _, fEntry := range files {
+			if fEntry.IsDir() {
+				continue
+			}
+			filename := fEntry.Name()
+			if !ledgerSecretsScanExts[strings.ToLower(filepath.Ext(filename))] {
+				continue
+			}
+			contentPath, err := openSessionContent(projectRoot, ledgerPath, sessionName, filename)
+			if err != nil {
+				enumErrs = append(enumErrs, fmt.Sprintf("%s/%s: open: %v", sessionName, filename, err))
+				continue
+			}
+			info, err := os.Stat(contentPath)
+			if err != nil {
+				enumErrs = append(enumErrs, fmt.Sprintf("%s/%s: stat: %v", sessionName, filename, err))
+				continue
+			}
+			if info.Size() > ledgerSecretsSizeCap {
+				// Over-cap is a deliberate skip, not an error.
+				continue
+			}
+			f, err := os.Open(contentPath) //nolint:gosec // G304: path resolved via openSessionContent (ledger-owned)
+			if err != nil {
+				enumErrs = append(enumErrs, fmt.Sprintf("%s/%s: read: %v", sessionName, filename, err))
+				continue
+			}
+			scanner := bufio.NewScanner(f)
+			scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+			lineNo := 0
+			// rel is the in-place git-tracked path. Required so push-status
+			// classification can `git log -1 -- <rel>` against the ledger.
+			rel := filepath.Join("sessions", sessionName, filename)
+			for scanner.Scan() {
+				lineNo++
+				for _, name := range redactor.ScanForSecrets(scanner.Text()) {
+					out = append(out, redactHistoryFinding{Detector: name, Path: rel, Line: lineNo})
+				}
+			}
+			if scanErr := scanner.Err(); scanErr != nil {
+				enumErrs = append(enumErrs, fmt.Sprintf("%s: scan: %v", rel, scanErr))
+			}
+			f.Close()
+		}
 	}
 	// stable order: path, then line, then detector
 	sort.Slice(out, func(i, j int) bool {
@@ -357,6 +539,16 @@ func enumerateRedactHistoryFindings(ledgerPath string, audit *ledgerSecretsScanR
 		}
 		return out[i].Detector < out[j].Detector
 	})
+	if len(enumErrs) > 0 {
+		// Don't return an error that aborts the workflow — partial
+		// enumeration is still useful and the redact-history caller
+		// already prints a Warning summary. Just attach the detail so
+		// the caller can surface it. Today the caller logs the count
+		// via the existing hydration Warning path; future work can
+		// pass the slice through a richer return type if needed.
+		return out, fmt.Errorf("enumeration incomplete (%d issue(s)):\n  %s",
+			len(enumErrs), strings.Join(enumErrs, "\n  "))
+	}
 	return out, nil
 }
 

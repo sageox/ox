@@ -129,7 +129,9 @@ func TestRunPrePushSecretGate_RefusesWhenSecretsPresent(t *testing.T) {
 
 	msg := err.Error()
 	assert.Contains(t, msg, "Push refused")
-	assert.Contains(t, msg, "github_token") // detector name
+	// After ox-def1 the broad `github_token` detector was split per-prefix;
+	// a full-shape ghp_<36> matches the personal-access-token variant.
+	assert.Contains(t, msg, "github_personal_access_token")
 	assert.Contains(t, msg, "sessions/leak.jsonl")
 	// MUST NOT include the secret bytes
 	assert.NotContains(t, msg, "alphabetabcdefghijklmnopqrstuvwxyz")
@@ -216,7 +218,7 @@ func TestFormatPrePushFindings_DoesNotLeakBytes(t *testing.T) {
 	msg := FormatPrePushFindings(r)
 	assert.Contains(t, msg, "aws_access_key")
 	assert.Contains(t, msg, "leak.jsonl:42")
-	assert.Contains(t, msg, "ox session redact-history --dry-run")
+	assert.Contains(t, msg, "ox session audit")
 	assert.Contains(t, msg, "OX_ALLOW_SECRETS=1")
 }
 

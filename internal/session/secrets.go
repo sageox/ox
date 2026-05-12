@@ -77,18 +77,78 @@ func DefaultPatterns() []SecretPattern {
 			Redact:  "[REDACTED_AWS_SECRET]",
 		},
 
-		// GitHub tokens (ghp_, gho_, ghs_, ghr_, ghu_ prefixes)
+		// GitHub tokens. Split per-prefix so the report identifies WHICH
+		// kind of GitHub credential leaked (Personal Access Token,
+		// OAuth user-to-server, installation/server, refresh) — that
+		// distinction matters for rotation: refresh tokens, server
+		// tokens, and PATs are revoked through different paths.
+		//
+		// Lengths follow GitHub's published shapes (docs.github.com/en/
+		// rest/authentication/keeping-your-api-credentials-secure):
+		//   ghp_<36>  classic PAT
+		//   gho_<36>  OAuth access token
+		//   ghu_<36>  user-to-server token
+		//   ghs_<36>  server-to-server / installation token
+		//   ghr_<76>  refresh token
+		//   github_pat_<22>_<59>  fine-grained PAT (82 chars after prefix)
+		//
+		// Keywords lock the pre-screen to the exact prefix so the regex
+		// is only evaluated on lines that already contain the literal
+		// 4-char (or 11-char) anchor. Without this, before ox-zukx the
+		// audit path bypassed the pre-screen entirely and these patterns
+		// were re-evaluated on every line — fixable but unnecessarily
+		// expensive.
+		// Redact strings stay backward-compatible ([REDACTED_GITHUB_TOKEN]
+		// / [REDACTED_GITHUB_PAT]) so callers asserting on output don't
+		// have to be rewritten in lockstep with this split. The win from
+		// per-prefix detectors is in the *detector name* in scan reports,
+		// not in the redaction placeholder.
+		// Lengths are EXACT per GitHub's published shapes — a token that
+		// runs longer is not a real PAT and shouldn't pretend to be one.
+		// The keyword pre-screen anchors on the prefix; the exact-length
+		// quantifier prevents an alphanumeric run starting with `ghp_`
+		// from matching arbitrarily far. Greedy-then-truncated lookalikes
+		// (e.g. a base64 blob that happens to start with `ghp_`) won't
+		// pretend to be a real PAT.
 		{
-			Name:    "github_token",
-			Pattern: regexp.MustCompile(`gh[psortu]_[A-Za-z0-9_]{36,255}`),
-			Redact:  "[REDACTED_GITHUB_TOKEN]",
+			Name:     "github_personal_access_token",
+			Pattern:  regexp.MustCompile(`ghp_[A-Za-z0-9]{36}`),
+			Redact:   "[REDACTED_GITHUB_TOKEN]",
+			Keywords: []string{"ghp_"},
 		},
-
-		// GitHub fine-grained PAT (github_pat_ prefix)
 		{
-			Name:    "github_fine_grained_pat",
-			Pattern: regexp.MustCompile(`github_pat_[A-Za-z0-9_]{22,255}`),
-			Redact:  "[REDACTED_GITHUB_PAT]",
+			Name:     "github_oauth_token",
+			Pattern:  regexp.MustCompile(`gho_[A-Za-z0-9]{36}`),
+			Redact:   "[REDACTED_GITHUB_TOKEN]",
+			Keywords: []string{"gho_"},
+		},
+		{
+			Name:     "github_user_to_server_token",
+			Pattern:  regexp.MustCompile(`ghu_[A-Za-z0-9]{36}`),
+			Redact:   "[REDACTED_GITHUB_TOKEN]",
+			Keywords: []string{"ghu_"},
+		},
+		{
+			Name:     "github_server_token",
+			Pattern:  regexp.MustCompile(`ghs_[A-Za-z0-9]{36}`),
+			Redact:   "[REDACTED_GITHUB_TOKEN]",
+			Keywords: []string{"ghs_"},
+		},
+		{
+			Name:     "github_refresh_token",
+			Pattern:  regexp.MustCompile(`ghr_[A-Za-z0-9]{76}`),
+			Redact:   "[REDACTED_GITHUB_TOKEN]",
+			Keywords: []string{"ghr_"},
+		},
+		// Fine-grained PAT structure: 11-char "github_pat_" + 22-char ID
+		// + "_" + 59-char secret. No underscores inside the 22 or 59
+		// portions — using a tighter character class than the broad
+		// [A-Za-z0-9_] catches that constraint too.
+		{
+			Name:     "github_fine_grained_pat",
+			Pattern:  regexp.MustCompile(`github_pat_[A-Za-z0-9]{22}_[A-Za-z0-9]{59}`),
+			Redact:   "[REDACTED_GITHUB_PAT]",
+			Keywords: []string{"github_pat_"},
 		},
 
 		// GitLab personal access tokens (glpat- prefix)
@@ -196,11 +256,18 @@ func DefaultPatterns() []SecretPattern {
 			Redact:  "[REDACTED_PYPI_TOKEN]",
 		},
 
-		// Heroku API keys (UUIDs - careful with false positives)
+		// Heroku API keys (UUIDs - careful with false positives).
+		// Keywords guard is mandatory: without it the bare UUID regex fires
+		// on every UUIDv7 in the ledger (session_id, agent_id, etc.). On a
+		// real sageox ledger this produced 2141 false positives across 641
+		// sessions before the guard was added; running redact-history on
+		// that result would have rewritten every session_id in meta.json
+		// and corrupted session resolution. See ox-zukx.
 		{
-			Name:    "heroku_key",
-			Pattern: regexp.MustCompile(`[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}`),
-			Redact:  "[REDACTED_UUID]",
+			Name:     "heroku_key",
+			Pattern:  regexp.MustCompile(`[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}`),
+			Redact:   "[REDACTED_HEROKU_KEY]",
+			Keywords: []string{"heroku"},
 		},
 
 		// Private keys (RSA, DSA, EC, OPENSSH)
@@ -328,31 +395,41 @@ func DefaultPatterns() []SecretPattern {
 	}
 }
 
-// Redactor handles secret detection and redaction
+// Redactor handles secret detection and redaction. Holds the live
+// SecretPattern slice plus its cached catalog identity (version+hash);
+// see catalog.go for the trust model that ox-8bfh requires.
 type Redactor struct {
-	patterns []SecretPattern
-	mu       sync.RWMutex
+	patterns       []SecretPattern
+	catalogVersion string
+	catalogHash    string
+	mu             sync.RWMutex
 }
 
 // NewRedactor creates a new Redactor with default patterns
 func NewRedactor() *Redactor {
-	return &Redactor{
-		patterns: DefaultPatterns(),
-	}
+	r := &Redactor{patterns: DefaultPatterns()}
+	r.catalogVersion, r.catalogHash = computeCatalogIdentity(r.patterns)
+	return r
 }
 
 // NewRedactorWithPatterns creates a Redactor with custom patterns
 func NewRedactorWithPatterns(patterns []SecretPattern) *Redactor {
-	return &Redactor{
-		patterns: patterns,
-	}
+	r := &Redactor{patterns: patterns}
+	r.catalogVersion, r.catalogHash = computeCatalogIdentity(r.patterns)
+	return r
 }
 
-// AddPattern adds an additional pattern to the redactor
+// AddPattern adds an additional pattern to the redactor. The catalog
+// identity (version + hash) is recomputed under the write lock so
+// subsequent CatalogVersion / CatalogHash calls reflect the change.
+// Required by ox-8bfh: a session redacted with a tampered ruleset
+// must carry a different fingerprint than one redacted with the
+// pristine default catalog.
 func (r *Redactor) AddPattern(pattern SecretPattern) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.patterns = append(r.patterns, pattern)
+	r.catalogVersion, r.catalogHash = computeCatalogIdentity(r.patterns)
 }
 
 // RedactionResult contains details about a redaction
@@ -375,15 +452,26 @@ func matchSkipped(match string, skipIf []string) bool {
 
 // RedactString scans and redacts secrets from a string.
 // Returns the redacted output and a list of pattern names that matched.
+//
+// Applies the SecretPattern.Keywords pre-screen — patterns with a
+// non-empty Keywords list are only evaluated when at least one keyword
+// appears in the (lowercased) input. Without this, a bare-UUID regex
+// gated only by Keywords (e.g. heroku_key) would over-redact every UUID
+// in the input — a corruption far worse than the leak it's trying to
+// catch. See ox-zukx for the audit-path version of the same bug.
 func (r *Redactor) RedactString(input string) (output string, found []string) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	output = input
+	lowerInput := strings.ToLower(input)
 	foundMap := make(map[string]bool)
 
 	for _, p := range r.patterns {
 		if p.Pattern == nil {
+			continue
+		}
+		if !p.MatchesKeyword(lowerInput) {
 			continue
 		}
 
@@ -408,15 +496,21 @@ func (r *Redactor) RedactString(input string) (output string, found []string) {
 	return output, found
 }
 
-// RedactStringWithDetails provides detailed redaction results
+// RedactStringWithDetails provides detailed redaction results.
+// Applies the same SecretPattern.Keywords pre-screen as RedactString
+// to keep detection semantics consistent across the public API.
 func (r *Redactor) RedactStringWithDetails(input string) (output string, results []RedactionResult) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	output = input
+	lowerInput := strings.ToLower(input)
 
 	for _, p := range r.patterns {
 		if p.Pattern == nil {
+			continue
+		}
+		if !p.MatchesKeyword(lowerInput) {
 			continue
 		}
 
@@ -548,13 +642,20 @@ func (r *Redactor) RedactCapturedHistory(history *CapturedHistory) (count int) {
 	return r.RedactHistoryEntries(history.Entries)
 }
 
-// ContainsSecrets checks if a string contains any secrets without modifying it
+// ContainsSecrets checks if a string contains any secrets without modifying it.
+// Applies the SecretPattern.Keywords pre-screen so a bare-UUID pattern
+// gated only by Keywords doesn't fire on every UUID-shaped input.
 func (r *Redactor) ContainsSecrets(input string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	lowerInput := strings.ToLower(input)
+
 	for _, p := range r.patterns {
 		if p.Pattern == nil {
+			continue
+		}
+		if !p.MatchesKeyword(lowerInput) {
 			continue
 		}
 		if len(p.SkipIf) == 0 {
@@ -574,14 +675,26 @@ func (r *Redactor) ContainsSecrets(input string) bool {
 	return false
 }
 
-// ScanForSecrets returns pattern names of all secrets found without redacting
+// ScanForSecrets returns pattern names of all secrets found without redacting.
+//
+// Applies the SecretPattern.Keywords pre-screen — patterns with a non-empty
+// Keywords list are only evaluated when at least one keyword appears in the
+// (lowercased) input. The write-time chokepoint relies on this filter to
+// keep regex cost bounded; until ox-zukx the audit/redact-history path
+// bypassed it, which let bare-UUID and other anchorless patterns fire on
+// every line. See SecretPattern docs at the top of this file for rationale.
 func (r *Redactor) ScanForSecrets(input string) []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	lowerInput := strings.ToLower(input)
+
 	var found []string
 	for _, p := range r.patterns {
 		if p.Pattern == nil {
+			continue
+		}
+		if !p.MatchesKeyword(lowerInput) {
 			continue
 		}
 		if len(p.SkipIf) == 0 {
