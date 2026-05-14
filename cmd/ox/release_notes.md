@@ -7,7 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+**`ox session audit` and `ox session redact` now require an explicit scope**
+
+Bare invocation used to silently hydrate and scan the entire ledger — a multi-minute LFS Batch fetch that could process hundreds of sessions without the operator's consent. The command now refuses to run without one of:
+
+- `--session <name>` (repeatable) — limit to specific sessions
+- `--since <date>` / `--until <date>` — half-open lexicographic window against the ISO-prefixed session name (e.g. `--since 2026-04-01`)
+- `--all` — explicit opt-in to the full-ledger sweep
+
+`--all` is mutually exclusive with the narrowing flags. Mistyped `--session` names error before any hydration begins, so a typo no longer triggers minutes of unnecessary LFS fetch followed by an error. The full-ledger sweep that used to fire on bare `ox session redact` is preserved verbatim under `--all`.
+
 ### Fixed
+
+**`ox doctor` redaction-debt guidance now points at a command that exists and works**
+
+The 0.8.1 `ledger-redaction-debt` doctor check told the user to run `ox session redact <session>` for interactive cleanup of a quarantined session. No such positional surface existed — cobra silently dropped the positional and scanned the entire ledger. The fix is two-part:
+
+1. The doctor message now emits a copy-pasteable `ox session redact --session <name>` command for each quarantined session (up to five, with a "+N more" hint above that).
+2. `ox session redact --session <name>` now also walks `.sageox/cache/quarantine/<name>/` for the targeted sessions. For JSONL quarantine, it redacts at the quarantine path via the canonical chokepoint, moves the file back to `sessions/<name>/`, appends a `RedactionPass` to `meta.json`, and removes the debt marker on success. Non-JSONL quarantine is listed as "manual scrub required" — the chokepoint applies the raw-writer redaction stack and expects JSONL.
+
+Before this PR, the doctor warning pointed at a command that couldn't help: the forward path (`prepush_autoredact.quarantineUnredactableFindings`) had moved the bytes OUT of `sessions/<name>/`, and the backward path only walked `sessions/`. Recovery required manually inspecting, scrubbing, and moving files back. Now `ox doctor` → copy-paste → done.
+
+### Security
+
+**Redaction-debt markers are now validated against path-traversal**
+
+The quarantine integration above reads `.sageox/cache/redaction-debt/<session>.json` markers to locate quarantined bytes. An attacker with write access to that directory could previously craft a marker whose `quarantine_paths[].to` pointed outside the ledger (e.g. `../../../tmp/owned.jsonl`); when the operator next ran `ox session redact`, the marker-driven `os.Rename(quarantineAbs, inPlaceAbs)` would overwrite arbitrary files reachable by the operator's UID. Threat model is narrow — the attacker already needs ledger write — but it escalates "ledger-writer" to "arbitrary-file-writer at operator UID."
+
+The fix rejects any marker whose `session_name` contains a path separator or `..`, whose marker filename doesn't match the embedded `session_name`, or whose `quarantine_paths` entries aren't direct children of `sessions/<sess>/` (source) and `.sageox/cache/quarantine/<sess>/` (destination). Defense-in-depth `safeRelativeUnder` checks at the `os.Rename` / `os.Open` call sites block any path that slips past the marker-shape guard.
+
+Closes #608.
 
 **`.claude/settings.json` no longer rewritten on every session**
 

@@ -1,0 +1,60 @@
+---
+title: "ox session audit"
+description: "CLI reference for ox session audit"
+sidebar_position: 67
+---
+
+## ox session audit
+
+Audit session recordings for credential patterns (read-only; expensive)
+
+### Synopsis
+
+Audit every session recording in the local Ledger for credential patterns.
+Read-only — never modifies files, never amends commits, never uploads.
+
+Cost: this command force-hydrates every LFS-pointer session file via the
+LFS Batch API before scanning, because pointer-stub bytes match no
+credential pattern and would silently produce a clean-looking lie.
+Hydration is bounded by network throughput and the number of dehydrated
+sessions; on a fresh clone with hundreds of sessions this can take
+minutes and pull tens of megabytes. Sessions that fail to hydrate are
+surfaced as a Warning so partial coverage is never mistaken for clean.
+
+Findings are reported with detector name + file + line; matched bytes
+are NEVER printed (ox-zyg7). The output stamps the catalog version + a
+sha256 hash that produced the findings, so future re-audits can decide
+whether a newer ruleset would catch additional leaks.
+
+For interactive cleanup of any findings, run `ox session redact`.
+
+```
+ox session audit [flags]
+```
+
+### Options
+
+```
+      --all                  Process every session in the ledger (slow + bulk). Mutually exclusive with --session/--since/--until.
+  -h, --help                 help for audit
+      --ledger-path string   Override the ledger path (defaults to the current project's ledger)
+      --session name         Limit to this session name (repeatable). Get names from 'ox doctor' output.
+      --since string         Limit to sessions whose name is >= this prefix (e.g. 2026-04-01). Lexicographic against ISO-prefixed session names.
+      --until string         Limit to sessions whose name is < this prefix (end-exclusive). Lexicographic against ISO-prefixed session names.
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox session](/session)	 - Manage AI coworker sessions
+

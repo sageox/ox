@@ -184,6 +184,7 @@ func TestRunRedactHistoryWorkflow_DryRunListsButDoesntModify(t *testing.T) {
 		LedgerPath: work,
 		DryRun:     true,
 		BackupDir:  backupDir,
+		Scope:      &sessionScope{AllowAll: true},
 		Stdin:      strings.NewReader(""),
 		Stdout:     out,
 	})
@@ -223,6 +224,7 @@ func TestRunRedactHistoryWorkflow_InteractiveYesRedacts(t *testing.T) {
 	err := runRedactHistoryWorkflow(redactHistoryOptions{
 		LedgerPath: work,
 		BackupDir:  backupDir,
+		Scope:      &sessionScope{AllowAll: true},
 		Stdin:      strings.NewReader("y\n"),
 		Stdout:     out,
 	})
@@ -264,6 +266,7 @@ func TestRunRedactHistoryWorkflow_NoSkipsLeavesFileUnchanged(t *testing.T) {
 	err = runRedactHistoryWorkflow(redactHistoryOptions{
 		LedgerPath: work,
 		BackupDir:  backupDir,
+		Scope:      &sessionScope{AllowAll: true},
 		Stdin:      strings.NewReader("n\n"),
 		Stdout:     out,
 	})
@@ -293,6 +296,7 @@ func TestRunRedactHistoryWorkflow_QuitAbortsWithoutWritingMore(t *testing.T) {
 	err = runRedactHistoryWorkflow(redactHistoryOptions{
 		LedgerPath: work,
 		BackupDir:  t.TempDir(),
+		Scope:      &sessionScope{AllowAll: true},
 		Stdin:      strings.NewReader("q\n"),
 		Stdout:     out,
 	})

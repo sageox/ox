@@ -125,12 +125,12 @@ func checkLedgerSecrets(fix bool) checkResult {
 	// of what's inside. The doctor harness suppresses incremental stdout
 	// during check execution, so we pass io.Discard for the progress
 	// writer — the result counters carry the same information.
-	hyd, hydErr := hydrateAllSessionsForScan(gitRoot, ledgerPath, io.Discard)
+	hyd, hydErr := hydrateAllSessionsForScan(gitRoot, ledgerPath, io.Discard, nil)
 	if hydErr != nil {
 		return FailedCheck(name, fmt.Sprintf("pre-scan hydration error: %v", hydErr), "")
 	}
 
-	result, err := scanLedgerForSecrets(gitRoot, ledgerPath)
+	result, err := scanLedgerForSecrets(gitRoot, ledgerPath, nil)
 	if err != nil {
 		return FailedCheck(name, fmt.Sprintf("scan error: %v", err), "")
 	}
@@ -240,7 +240,7 @@ func resolveLedgerPathForAudit(localCfg *config.LocalConfig) string {
 //
 // Exposed (unexported) for use by `ox session audit` and `ox session redact` so all
 // surfaces share the same definition of "what counts as a finding."
-func scanLedgerForSecrets(projectRoot, ledgerPath string) (*ledgerSecretsScanResult, error) {
+func scanLedgerForSecrets(projectRoot, ledgerPath string, match func(name string) bool) (*ledgerSecretsScanResult, error) {
 	redactor := session.NewRedactor()
 	result := &ledgerSecretsScanResult{
 		LedgerPath: ledgerPath,
@@ -262,6 +262,9 @@ func scanLedgerForSecrets(projectRoot, ledgerPath string) (*ledgerSecretsScanRes
 			continue
 		}
 		sessionName := entry.Name()
+		if match != nil && !match(sessionName) {
+			continue
+		}
 		result.SessionsScanned++
 
 		sessionDir := filepath.Join(sessionsRoot, sessionName)

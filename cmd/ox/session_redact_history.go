@@ -129,25 +129,56 @@ Safety:
 	RunE: runSessionRedact,
 }
 
-// Flag storage. Each command reads from its own variable so cobra's
-// flag namespacing stays clean.
+// Flag storage. Each command reads from its own set of variables so
+// cobra's flag namespacing stays clean — `--session` lives on both
+// `audit` and `redact` but the underlying storage is per-command.
 var (
 	auditLedgerPath string
+	auditScopeNames []string
+	auditScopeSince string
+	auditScopeUntil string
+	auditScopeAll   bool
 
 	redactLedgerPath string
 	redactBackupDir  string
+	redactScopeNames []string
+	redactScopeSince string
+	redactScopeUntil string
+	redactScopeAll   bool
 )
 
 func init() {
+	registerSessionScopeFlags(sessionAuditCmd, &auditScopeNames, &auditScopeSince, &auditScopeUntil, &auditScopeAll)
 	sessionAuditCmd.Flags().StringVar(&auditLedgerPath, "ledger-path", "",
 		"Override the ledger path (defaults to the current project's ledger)")
 	sessionCmd.AddCommand(sessionAuditCmd)
 
+	registerSessionScopeFlags(sessionRedactCmd, &redactScopeNames, &redactScopeSince, &redactScopeUntil, &redactScopeAll)
 	sessionRedactCmd.Flags().StringVar(&redactLedgerPath, "ledger-path", "",
 		"Override the ledger path (defaults to the current project's ledger)")
 	sessionRedactCmd.Flags().StringVar(&redactBackupDir, "backup-dir", "",
 		"Override the backup directory (defaults to ~/.local/share/sageox/backups/redact-history/)")
 	sessionCmd.AddCommand(sessionRedactCmd)
+}
+
+// registerSessionScopeFlags wires --session/--since/--until/--all onto
+// a cobra command and enforces the --all mutex. Bare invocation (no
+// scope flag set) is rejected at the workflow entry point, not here —
+// cobra's required-flag machinery can't express "at least one of these
+// four" cleanly, so the rejection lives next to the validation that
+// produces the user-facing error message.
+func registerSessionScopeFlags(cmd *cobra.Command, names *[]string, since, until *string, all *bool) {
+	cmd.Flags().StringSliceVar(names, "session", nil,
+		"Limit to this session `name` (repeatable). Get names from 'ox doctor' output.")
+	cmd.Flags().StringVar(since, "since", "",
+		"Limit to sessions whose name is >= this prefix (e.g. 2026-04-01). Lexicographic against ISO-prefixed session names.")
+	cmd.Flags().StringVar(until, "until", "",
+		"Limit to sessions whose name is < this prefix (end-exclusive). Lexicographic against ISO-prefixed session names.")
+	cmd.Flags().BoolVar(all, "all", false,
+		"Process every session in the ledger (slow + bulk). Mutually exclusive with --session/--since/--until.")
+	cmd.MarkFlagsMutuallyExclusive("all", "session")
+	cmd.MarkFlagsMutuallyExclusive("all", "since")
+	cmd.MarkFlagsMutuallyExclusive("all", "until")
 }
 
 // runSessionAudit is the cobra entrypoint for the read-only audit
@@ -162,8 +193,14 @@ func runSessionAudit(cmd *cobra.Command, args []string) error {
 		ProjectRoot: findGitRoot(),
 		LedgerPath:  ledgerPath,
 		DryRun:      true,
-		Stdin:       cmd.InOrStdin(),
-		Stdout:      cmd.OutOrStdout(),
+		Scope: &sessionScope{
+			Names:    auditScopeNames,
+			Since:    auditScopeSince,
+			Until:    auditScopeUntil,
+			AllowAll: auditScopeAll,
+		},
+		Stdin:  cmd.InOrStdin(),
+		Stdout: cmd.OutOrStdout(),
 	}
 	return runRedactHistoryWorkflow(opts)
 }
@@ -180,8 +217,14 @@ func runSessionRedact(cmd *cobra.Command, args []string) error {
 		LedgerPath:  ledgerPath,
 		DryRun:      false,
 		BackupDir:   redactBackupDir,
-		Stdin:       cmd.InOrStdin(),
-		Stdout:      cmd.OutOrStdout(),
+		Scope: &sessionScope{
+			Names:    redactScopeNames,
+			Since:    redactScopeSince,
+			Until:    redactScopeUntil,
+			AllowAll: redactScopeAll,
+		},
+		Stdin:  cmd.InOrStdin(),
+		Stdout: cmd.OutOrStdout(),
 	}
 	return runRedactHistoryWorkflow(opts)
 }
@@ -222,8 +265,15 @@ type redactHistoryOptions struct {
 	LedgerPath  string
 	DryRun      bool
 	BackupDir   string // empty → default ~/.local/share/sageox/backups/redact-history/
-	Stdin       io.Reader
-	Stdout      io.Writer
+
+	// Scope narrows which session directories the workflow visits. A
+	// nil or IsEmpty scope is rejected at workflow entry — bare-form
+	// invocation is no longer the silent "scan everything" default.
+	// Use Scope{AllowAll: true} to opt back into the full-ledger sweep.
+	Scope *sessionScope
+
+	Stdin  io.Reader
+	Stdout io.Writer
 }
 
 // runRedactHistoryWorkflow implements the dry-run / scan / snapshot /
@@ -238,13 +288,23 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 		opts.Stdout = os.Stdout
 	}
 
+	// Scope rejection rail. Bare invocation used to silently hydrate +
+	// scan the entire ledger — a multi-minute LFS Batch fetch the user
+	// did not consent to. #608. Validate BEFORE any hydration so a
+	// typo'd --session name doesn't pay the fetch cost just to error.
+	sessionsRoot := filepath.Join(opts.LedgerPath, "sessions")
+	if err := opts.Scope.Validate(sessionsRoot); err != nil {
+		return err
+	}
+	matcher := opts.Scope.Matcher()
+
 	// Pre-scan hydration. The scan is content-based and pointer-file bytes
 	// match no credential pattern, so we MUST hydrate every dehydrated
 	// session recording before scanning or the result is meaningless. This
 	// is intentionally visible — printing progress and a final hydration
 	// summary so the operator can see what was fetched and whether any
 	// session was unreachable.
-	hyd, err := hydrateAllSessionsForScan(opts.ProjectRoot, opts.LedgerPath, opts.Stdout)
+	hyd, err := hydrateAllSessionsForScan(opts.ProjectRoot, opts.LedgerPath, opts.Stdout, matcher)
 	if err != nil {
 		return fmt.Errorf("pre-scan hydration: %w", err)
 	}
@@ -256,11 +316,26 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	}
 
 	fmt.Fprintf(opts.Stdout, "Scanning ledger %s for credentials...\n", opts.LedgerPath)
-	scanResult, err := scanLedgerForSecrets(opts.ProjectRoot, opts.LedgerPath)
+	scanResult, err := scanLedgerForSecrets(opts.ProjectRoot, opts.LedgerPath, matcher)
 	if err != nil {
 		return fmt.Errorf("scan: %w", err)
 	}
-	if len(scanResult.Findings) == 0 {
+
+	// Quarantine integration (#608 / Path Y). When --session (or a date
+	// range) matches a quarantined session, surface the quarantined
+	// findings alongside the in-place ones. The forward path (pre-push
+	// gate) moved bytes from sessions/<name>/ to
+	// .sageox/cache/quarantine/<name>/; the backward path needs to see
+	// them or the doctor warning points at a no-op.
+	quarantinedFindings, err := enumerateQuarantineFindings(opts.LedgerPath, matcher)
+	if err != nil {
+		// Non-fatal: log to stdout and continue. Quarantine recovery is
+		// best-effort — if the markers are malformed, the in-place pass
+		// is still valuable.
+		fmt.Fprintf(opts.Stdout, "\nWarning: quarantine enumeration partial — %v\n\n", err)
+	}
+
+	if len(scanResult.Findings) == 0 && len(quarantinedFindings) == 0 {
 		fmt.Fprintf(opts.Stdout, "No credential patterns found across %d session file(s) in %d session(s). Nothing to redact.\n",
 			scanResult.FilesScanned, scanResult.SessionsScanned)
 		return nil
@@ -269,7 +344,7 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	// Enumerate per-finding details (file:line:detector) by re-walking the
 	// affected files. We didn't keep this from the aggregate scan because
 	// the audit doesn't need it; the cleanup tool does.
-	findings, err := enumerateRedactHistoryFindings(opts.ProjectRoot, opts.LedgerPath, scanResult)
+	findings, err := enumerateRedactHistoryFindings(opts.ProjectRoot, opts.LedgerPath, scanResult, matcher)
 	if err != nil {
 		// Partial enumeration is useful — we still have whatever findings
 		// the successful files produced. Surface the issue as a Warning
@@ -281,6 +356,11 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 			return fmt.Errorf("enumerate findings: %w", err)
 		}
 	}
+
+	// Merge quarantined findings collected earlier. They share the
+	// redactHistoryFinding shape and the same classification path; the
+	// downstream redact loop branches on f.Quarantined.
+	findings = append(findings, quarantinedFindings...)
 
 	// Classify each finding by pushed/unpushed. Pushed-commit findings are
 	// listed but NOT actionable here — they need the gated rewrite tool.
@@ -345,16 +425,36 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	// the same passID across all sessions touched by this run so the
 	// trail is correlatable; appliedAt is captured once so the records
 	// share a wall-clock instant.
+	answers := newAnswerReader(opts.Stdin)
 	redactedBySession := map[string][]lfs.RedactionEntry{}
+	// quarantineSessionsTouched tracks sessions whose quarantined files
+	// were redacted + moved back; used after the loop to clean up debt
+	// markers and emit the `ox doctor` clearance signal.
+	quarantineSessionsTouched := map[string]bool{}
+	// quarantineSkipped collects non-JSONL quarantined paths the
+	// chokepoint cannot rewrite. They surface as guidance at the end
+	// rather than as a silent skip — the operator needs to know which
+	// files require the manual scrub path.
+	var quarantineSkipped []string
 	redactedFiles := 0
 	for _, fileFindings := range byPath {
 		path := fileFindings[0].Path
-		fmt.Fprintf(opts.Stdout, "%s\n  %d finding(s):\n", path, len(fileFindings))
+		quarantined := fileFindings[0].Quarantined
+		quarantineRel := fileFindings[0].QuarantinePath
+		header := path
+		if quarantined {
+			header = fmt.Sprintf("%s  (quarantined → %s)", path, quarantineRel)
+		}
+		fmt.Fprintf(opts.Stdout, "%s\n  %d finding(s):\n", header, len(fileFindings))
 		for _, f := range fileFindings {
 			fmt.Fprintf(opts.Stdout, "    line %d: %s\n", f.Line, f.Detector)
 		}
-		fmt.Fprint(opts.Stdout, "  Redact in place? [y/N/q to quit]: ")
-		answer, err := readRedactHistoryAnswer(opts.Stdin)
+		prompt := "  Redact in place? [y/N/q to quit]: "
+		if quarantined {
+			prompt = "  Redact at quarantine path and move back to sessions/? [y/N/q to quit]: "
+		}
+		fmt.Fprint(opts.Stdout, prompt)
+		answer, err := readRedactHistoryAnswer(answers)
 		if err != nil {
 			return err
 		}
@@ -363,9 +463,27 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 			fmt.Fprintln(opts.Stdout, "Aborting. Snapshot is preserved at the path above.")
 			return nil
 		case "y", "yes":
-			abs := filepath.Join(opts.LedgerPath, path)
-			if err := redactFileInPlace(abs, redactor); err != nil {
-				return fmt.Errorf("redact %s: %w", path, err)
+			if quarantined {
+				if err := redactQuarantinedFile(opts.LedgerPath, quarantineRel, redactor); err != nil {
+					// Non-JSONL or rewrite failure → record and continue.
+					// The operator can still resolve manually; we don't
+					// want a single hard-to-redact file to abort the
+					// whole interactive session.
+					fmt.Fprintf(opts.Stdout, "  Skipped (cannot auto-redact): %v\n\n", err)
+					quarantineSkipped = append(quarantineSkipped, quarantineRel)
+					continue
+				}
+				if err := moveQuarantinedFileBack(opts.LedgerPath, quarantineRel, path); err != nil {
+					return fmt.Errorf("move back %s → %s: %w", quarantineRel, path, err)
+				}
+				if fileFindings[0].SessionName != "" {
+					quarantineSessionsTouched[fileFindings[0].SessionName] = true
+				}
+			} else {
+				abs := filepath.Join(opts.LedgerPath, path)
+				if err := redactFileInPlace(abs, redactor); err != nil {
+					return fmt.Errorf("redact %s: %w", path, err)
+				}
 			}
 			redactedFiles++
 			// Record per-finding entries against the session that owns
@@ -418,13 +536,35 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 	// just landed in meta.json, summarized for the terminal.
 	fmt.Fprintf(opts.Stdout, "Recorded redaction pass in %d session meta.json file(s).\n", len(metaPaths))
 
-	// Re-scan and report.
-	postScan, err := scanLedgerForSecrets(opts.ProjectRoot, opts.LedgerPath)
+	// Debt-marker cleanup for fully-drained quarantined sessions. Only
+	// removes the marker when every quarantined file in it has been
+	// moved back; partial cleanup leaves the marker in place so
+	// `ox doctor` still surfaces remaining work.
+	for sess := range quarantineSessionsTouched {
+		if err := removeDebtMarkerIfDrained(opts.LedgerPath, sess); err != nil {
+			fmt.Fprintf(opts.Stdout, "Warning: could not clean up debt marker for %s: %v\n", sess, err)
+		}
+	}
+	if len(quarantineSkipped) > 0 {
+		fmt.Fprintln(opts.Stdout, "\nQuarantined files requiring manual scrub (non-JSONL):")
+		for _, p := range quarantineSkipped {
+			fmt.Fprintf(opts.Stdout, "  %s\n", p)
+		}
+		fmt.Fprintln(opts.Stdout, "  Inspect, scrub the secret, move back to sessions/<name>/<file>, then remove the debt marker.")
+	}
+
+	// Re-scan and report. Scope the post-scan to the same matcher so
+	// the "remaining findings" count reflects the requested scope —
+	// telling the user "you cleaned X but there are 47 findings in
+	// unrelated sessions" re-introduces O(ledger) cost on the back end
+	// without surfacing actionable information.
+	postScan, err := scanLedgerForSecrets(opts.ProjectRoot, opts.LedgerPath, matcher)
 	if err != nil {
 		return fmt.Errorf("post-scan: %w", err)
 	}
-	remaining := len(postScan.Findings)
-	fmt.Fprintf(opts.Stdout, "\nRedaction complete. Files modified: %d. Remaining findings: %d.\n",
+	remainingQuarantine, _ := enumerateQuarantineFindings(opts.LedgerPath, matcher)
+	remaining := len(postScan.Findings) + len(remainingQuarantine)
+	fmt.Fprintf(opts.Stdout, "\nRedaction complete. Files modified: %d. Remaining findings in scope: %d.\n",
 		redactedFiles, remaining)
 	if remaining > 0 {
 		fmt.Fprintln(opts.Stdout, "Re-run to address remaining findings.")
@@ -435,10 +575,26 @@ func runRedactHistoryWorkflow(opts redactHistoryOptions) error {
 // redactHistoryFinding is a single (detector, path, line) tuple — the
 // granular unit users approve or reject. Distinct from the aggregate
 // ledgerSecretsFinding used by the audit, which only counts.
+//
+// Path is always the ledger-relative GIT-TRACKED path
+// (sessions/<name>/<file>) regardless of whether the bytes physically
+// live there. For Quarantined=true findings the bytes live at
+// .sageox/cache/quarantine/<name>/<file>; the workflow uses
+// QuarantinePath (when set) to locate them and moves them back to Path
+// on successful redaction. Carrying the in-place path keeps push-status
+// classification and the snapshot tarball correct.
 type redactHistoryFinding struct {
 	Detector string
-	Path     string // relative to ledger root
+	Path     string // ledger-relative, in-place path (sessions/<name>/<file>)
 	Line     int
+
+	// Quarantined marks findings whose physical bytes were moved aside
+	// by the pre-push gate (#608 Path Y integration). When true, the
+	// workflow reads from QuarantinePath, redacts there, then moves the
+	// file back to Path and removes the debt marker for the session.
+	Quarantined    bool
+	QuarantinePath string // ledger-relative, only set when Quarantined=true
+	SessionName    string // session this finding belongs to (set on both flavors)
 }
 
 // enumerateRedactHistoryFindings re-walks just the session directories
@@ -451,7 +607,7 @@ type redactHistoryFinding struct {
 // same bytes the audit saw. The path recorded on each finding is the
 // git-tracked in-place path (sessions/<name>/<filename>) so downstream
 // push-status classification and the snapshot tarball stay correct.
-func enumerateRedactHistoryFindings(projectRoot, ledgerPath string, audit *ledgerSecretsScanResult) ([]redactHistoryFinding, error) {
+func enumerateRedactHistoryFindings(projectRoot, ledgerPath string, audit *ledgerSecretsScanResult, match func(name string) bool) ([]redactHistoryFinding, error) {
 	if audit == nil || len(audit.Findings) == 0 {
 		return nil, nil
 	}
@@ -476,6 +632,9 @@ func enumerateRedactHistoryFindings(projectRoot, ledgerPath string, audit *ledge
 			continue
 		}
 		sessionName := entry.Name()
+		if match != nil && !match(sessionName) {
+			continue
+		}
 		sessionDir := filepath.Join(sessionsRoot, sessionName)
 		files, err := os.ReadDir(sessionDir)
 		if err != nil {
@@ -518,7 +677,12 @@ func enumerateRedactHistoryFindings(projectRoot, ledgerPath string, audit *ledge
 			for scanner.Scan() {
 				lineNo++
 				for _, name := range redactor.ScanForSecrets(scanner.Text()) {
-					out = append(out, redactHistoryFinding{Detector: name, Path: rel, Line: lineNo})
+					out = append(out, redactHistoryFinding{
+						Detector:    name,
+						Path:        rel,
+						Line:        lineNo,
+						SessionName: sessionName,
+					})
 				}
 			}
 			if scanErr := scanner.Err(); scanErr != nil {
@@ -558,8 +722,18 @@ func enumerateRedactHistoryFindings(projectRoot, ledgerPath string, audit *ledge
 func classifyFindingsByPushStatus(ledgerPath string, findings []redactHistoryFinding) (pushed, unpushed []redactHistoryFinding, err error) {
 	// Build a per-file map of "is this file's last-modifying commit
 	// reachable from origin/main?" — one git call per distinct path.
+	// Quarantined paths are unconditionally treated as unpushed: the
+	// pre-push gate carved them out of the holding commit before any
+	// push could reference the bytes (prepush_autoredact.go:309
+	// amendDroppingPaths). Doing the git lookup for a path that no
+	// commit references would return "not tracked" → "unpushed" anyway,
+	// but skipping the exec saves a fork per quarantined file.
 	pushedFiles := map[string]bool{}
 	for _, f := range findings {
+		if f.Quarantined {
+			pushedFiles[f.Path] = false
+			continue
+		}
 		if _, seen := pushedFiles[f.Path]; seen {
 			continue
 		}
@@ -572,6 +746,10 @@ func classifyFindingsByPushStatus(ledgerPath string, findings []redactHistoryFin
 		pushedFiles[f.Path] = isPushed
 	}
 	for _, f := range findings {
+		if f.Quarantined {
+			unpushed = append(unpushed, f)
+			continue
+		}
 		if pushedFiles[f.Path] {
 			pushed = append(pushed, f)
 		} else {
@@ -813,16 +991,25 @@ func countDistinctRedactHistoryPaths(findings []redactHistoryFinding) int {
 	return len(seen)
 }
 
-// readRedactHistoryAnswer reads a single line of input from stdin. The
-// prompt itself is rendered by the caller; this only consumes the
-// response so we can pipe a scripted test stdin through it.
-func readRedactHistoryAnswer(stdin io.Reader) (string, error) {
-	scanner := bufio.NewScanner(stdin)
-	if scanner.Scan() {
-		return scanner.Text(), nil
-	}
-	if err := scanner.Err(); err != nil {
+// readRedactHistoryAnswer reads a single line from a stateful reader.
+// Caller passes a *bufio.Reader (constructed once via newAnswerReader)
+// so that successive prompts each consume one line — using a fresh
+// bufio.Scanner per call drained the upstream reader on the first read
+// and starved every subsequent prompt of input, observable only with
+// multi-prompt fixtures.
+func readRedactHistoryAnswer(r *bufio.Reader) (string, error) {
+	line, err := r.ReadString('\n')
+	if err != nil && line == "" {
+		if err == io.EOF {
+			return "", nil
+		}
 		return "", err
 	}
-	return "", nil
+	return strings.TrimRight(line, "\n"), nil
+}
+
+// newAnswerReader wraps stdin in a single bufio.Reader the workflow
+// reuses across all interactive prompts. Once per workflow run.
+func newAnswerReader(stdin io.Reader) *bufio.Reader {
+	return bufio.NewReader(stdin)
 }

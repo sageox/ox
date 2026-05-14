@@ -42,7 +42,7 @@ func TestScanLedgerForSecrets_FindsCanaries(t *testing.T) {
 		"docs/notes.md":                 "this file has no secrets in it",
 	})
 
-	result, err := scanLedgerForSecrets(work, work)
+	result, err := scanLedgerForSecrets(work, work, nil)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 
@@ -75,7 +75,7 @@ func TestScanLedgerForSecrets_CleanLedger(t *testing.T) {
 		"docs/note.md":             "no creds here\n",
 	})
 
-	result, err := scanLedgerForSecrets(work, work)
+	result, err := scanLedgerForSecrets(work, work, nil)
 	require.NoError(t, err)
 	assert.Empty(t, result.Findings)
 	// sessions-only scope: 2 files in sessions/clean/; docs/ is ignored
@@ -97,7 +97,7 @@ func TestScanLedgerForSecrets_OutOfScopeIgnored(t *testing.T) {
 		".git/hidden.jsonl":               `{"k":"ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}`,
 	})
 
-	result, err := scanLedgerForSecrets(work, work)
+	result, err := scanLedgerForSecrets(work, work, nil)
 	require.NoError(t, err)
 
 	// One real session-scoped finding, no others.
@@ -138,7 +138,7 @@ func TestScanLedgerForSecrets_SizeCap(t *testing.T) {
 		"sessions/huge.jsonl": string(buf),
 	})
 
-	result, err := scanLedgerForSecrets(work, work)
+	result, err := scanLedgerForSecrets(work, work, nil)
 	require.NoError(t, err)
 	assert.Empty(t, result.Findings, "over-cap file must be skipped, but detectors fired: %v", result.Findings)
 }
@@ -152,7 +152,7 @@ func TestScanLedgerForSecrets_OnlyAllowlistedExts(t *testing.T) {
 		"sessions/s1/real.jsonl": "no secrets in this one", // .jsonl is scanned; nothing to find
 	})
 
-	result, err := scanLedgerForSecrets(work, work)
+	result, err := scanLedgerForSecrets(work, work, nil)
 	require.NoError(t, err)
 	assert.Empty(t, result.Findings)
 	// .mp3 and .png should not be counted toward FilesScanned (only .jsonl matched)
@@ -177,7 +177,7 @@ func TestScanLedgerForSecrets_HerokuKeyDoesNotFireOnUUIDs(t *testing.T) {
 		"sessions/s/raw.jsonl": `{"text":"just a UUID 11111111-2222-3333-4444-555555555555 with no special context"}` + "\n",
 	})
 
-	result, err := scanLedgerForSecrets(work, work)
+	result, err := scanLedgerForSecrets(work, work, nil)
 	require.NoError(t, err)
 	assert.NotContains(t, result.Findings, "heroku_key",
 		"heroku_key must only fire when 'heroku' appears in the same line")
@@ -190,7 +190,7 @@ func TestScanLedgerForSecrets_HerokuKeyFiresWithContext(t *testing.T) {
 	work := makeLedgerForAuditTest(t, map[string]string{
 		"sessions/s/raw.jsonl": `{"text":"heroku api key: aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}` + "\n",
 	})
-	result, err := scanLedgerForSecrets(work, work)
+	result, err := scanLedgerForSecrets(work, work, nil)
 	require.NoError(t, err)
 	assert.Contains(t, result.Findings, "heroku_key")
 }
@@ -316,7 +316,7 @@ func TestCheckLedgerSecrets_OutputDoesNotLeakBytes(t *testing.T) {
 		"sessions/leaky/raw.jsonl": "AKIAIOSFODNN7EXAMPLE and " +
 			"gh token ghp_alphabetabcdefghijklmnopqrstuvwxyz12\n",
 	})
-	result, err := scanLedgerForSecrets(work, work)
+	result, err := scanLedgerForSecrets(work, work, nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, result.Findings)
 

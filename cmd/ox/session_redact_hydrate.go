@@ -36,7 +36,7 @@ type hydrateSummary struct {
 // untouched. Progress is printed to `out` so the operator can see what's
 // happening on a real ledger (115 dehydrated sessions on a fresh clone
 // is not unusual and the fetch is not instant).
-func hydrateAllSessionsForScan(projectRoot, ledgerPath string, out io.Writer) (hydrateSummary, error) {
+func hydrateAllSessionsForScan(projectRoot, ledgerPath string, out io.Writer, match func(name string) bool) (hydrateSummary, error) {
 	var summary hydrateSummary
 	sessionsRoot := filepath.Join(ledgerPath, "sessions")
 	entries, err := os.ReadDir(sessionsRoot)
@@ -61,8 +61,15 @@ func hydrateAllSessionsForScan(projectRoot, ledgerPath string, out io.Writer) (h
 		if !entry.IsDir() {
 			continue
 		}
-		summary.Sessions++
 		sessionName := entry.Name()
+		if match != nil && !match(sessionName) {
+			// Out of scope (#608). Skipping non-matching sessions here
+			// is what makes scoped recovery O(matching) instead of
+			// O(ledger) — the LFS Batch API fetch never fires for
+			// excluded names.
+			continue
+		}
+		summary.Sessions++
 		sessionDir := filepath.Join(sessionsRoot, sessionName)
 		files, err := os.ReadDir(sessionDir)
 		if err != nil {

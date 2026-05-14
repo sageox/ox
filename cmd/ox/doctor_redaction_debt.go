@@ -26,10 +26,11 @@ import (
 // gracefully reflects the new state.
 //
 // --fix is intentionally a no-op: the recovery action is either
-// `ox session redact <session>` (interactive cleanup) or the user
-// manually moving the quarantined file back. The doctor command cannot
-// safely choose between those for the user; it surfaces the state and
-// gets out of the way.
+// `ox session redact --session <name>` (interactive cleanup, supported
+// for JSONL quarantine via the Path Y integration in #608) or the user
+// manually moving the quarantined file back (the only path for
+// non-JSONL files). The doctor command cannot safely choose between
+// those for the user; it surfaces the state and gets out of the way.
 func checkLedgerRedactionDebt(fix bool) checkResult {
 	name := "Ledger redaction debt"
 	_ = fix // recovery is intentionally user-driven; see doc above.
@@ -76,10 +77,25 @@ func checkLedgerRedactionDebt(fix bool) checkResult {
 		fmt.Fprintf(&detail, "  %s — %d finding(s) across %d file(s); detectors: %s\n",
 			s.session, s.findings, s.files, strings.Join(s.detectors, ", "))
 	}
-	detail.WriteString("\nNext steps for each session:\n")
-	detail.WriteString("  1. Inspect bytes at .sageox/cache/quarantine/<session>/\n")
-	detail.WriteString("  2. Run `ox session redact <session>` for interactive cleanup, OR\n")
-	detail.WriteString("     manually scrub the file and move it back to sessions/<session>/\n")
+	detail.WriteString("\nNext steps:\n")
+	detail.WriteString("  1. For interactive cleanup (JSONL quarantine; redact + move back automatically), run:\n")
+	const maxCmdLines = 5
+	shown := 0
+	for _, s := range summaries {
+		if shown >= maxCmdLines {
+			break
+		}
+		fmt.Fprintf(&detail, "       ox session redact --session %s\n", s.session)
+		shown++
+	}
+	if len(summaries) > maxCmdLines {
+		fmt.Fprintf(&detail, "       ... and %d more (see list above)\n", len(summaries)-maxCmdLines)
+	}
+	detail.WriteString("  2. For non-JSONL quarantine (or to scrub manually):\n")
+	detail.WriteString("       a. Inspect bytes at .sageox/cache/quarantine/<session>/<file>\n")
+	detail.WriteString("       b. Edit to remove the secret\n")
+	detail.WriteString("       c. Move back to sessions/<session>/<file>\n")
+	detail.WriteString("       d. Remove .sageox/cache/redaction-debt/<session>.json\n")
 	detail.WriteString("  3. Re-stage and commit; the next push will publish the cleaned bytes\n")
 	if len(malformed) > 0 {
 		detail.WriteString("\nUnreadable markers (remove and re-run if no quarantined bytes exist):\n")
