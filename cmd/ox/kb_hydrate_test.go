@@ -62,9 +62,9 @@ func newFakeLFSServer(t *testing.T, files map[string][]byte) *fakeLFSServer {
 		}
 		s.expectAuthOK = true
 		var req struct {
-			Operation string             `json:"operation"`
-			Objects   []lfs.BatchObject  `json:"objects"`
-			Transfers []string           `json:"transfers"`
+			Operation string            `json:"operation"`
+			Objects   []lfs.BatchObject `json:"objects"`
+			Transfers []string          `json:"transfers"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -482,4 +482,3 @@ func TestKBHydrate_KBIDDirect(t *testing.T) {
 		t.Fatalf("hydrate: %v", err)
 	}
 }
-

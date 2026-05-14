@@ -211,7 +211,6 @@ func resolveLedgerPathForSessionCmd(override string) (string, error) {
 	return path, nil
 }
 
-
 // redactHistoryOptions bundles inputs so the workflow can be unit-tested
 // with synthetic stdin/stdout and an override backup directory.
 type redactHistoryOptions struct {

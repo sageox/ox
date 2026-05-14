@@ -43,8 +43,8 @@ func TestSyncBubbles_Clone_AllKinds(t *testing.T) {
 	kbTestEnv(t)
 
 	cases := []struct {
-		name    string
-		kbType  api.KBType
+		name     string
+		kbType   api.KBType
 		seedFile string
 		seedBody string
 	}{

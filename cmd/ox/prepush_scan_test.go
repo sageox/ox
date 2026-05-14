@@ -247,11 +247,11 @@ func TestScanPrePushForSecrets_OnlyScansSessionsScope(t *testing.T) {
 	// prePushScannerScopePrefixes for the policy).
 	canary := `{"text":"AKIAIOSFODNN7EXAMPLE"}` + "\n"
 	work := makeLedgerWithCommit(t, map[string]string{
-		"sessions/2026-05-12/raw.jsonl":      canary,
-		"data/github/2026/05/09/pr/42.json":  canary,
+		"sessions/2026-05-12/raw.jsonl":       canary,
+		"data/github/2026/05/09/pr/42.json":   canary,
 		"data/github/2026/05/11/issue/7.json": canary,
-		"kb/notes.md":                        canary,
-		"team-context/conventions.md":        canary,
+		"kb/notes.md":                         canary,
+		"team-context/conventions.md":         canary,
 	})
 
 	result, err := scanPrePushForSecrets(context.Background(), work)
@@ -275,17 +275,17 @@ func TestScanPrePushForSecrets_OnlyScansSessionsScope(t *testing.T) {
 // would let new paths into the gate silently.
 func TestInPrePushScannerScope(t *testing.T) {
 	cases := map[string]bool{
-		"sessions/abc/raw.jsonl":              true,
-		"sessions/2026-05-12/meta.json":       true,
-		"data/github/2026/05/11/pr/1.json":    false,
-		"data/github/issue/x.json":            false,
-		"kb/notes.md":                         false,
-		"team-context/conventions.md":         false,
-		"docs/README.md":                      false,
-		".sageox/config.json":                 false,
-		"":                                    false,
-		"session/typo/raw.jsonl":              false, // singular: not the prefix
-		"sessionsfoo/raw.jsonl":               false, // no trailing slash
+		"sessions/abc/raw.jsonl":           true,
+		"sessions/2026-05-12/meta.json":    true,
+		"data/github/2026/05/11/pr/1.json": false,
+		"data/github/issue/x.json":         false,
+		"kb/notes.md":                      false,
+		"team-context/conventions.md":      false,
+		"docs/README.md":                   false,
+		".sageox/config.json":              false,
+		"":                                 false,
+		"session/typo/raw.jsonl":           false, // singular: not the prefix
+		"sessionsfoo/raw.jsonl":            false, // no trailing slash
 	}
 	for path, want := range cases {
 		t.Run(path, func(t *testing.T) {

@@ -21,9 +21,9 @@ import (
 // (a) how much had to be fetched and (b) whether any session was
 // unreachable, which would make the resulting scan incomplete.
 type hydrateSummary struct {
-	Sessions     int // total sessions inspected
-	AlreadyOK    int // sessions where every scannable file was already real content
-	Hydrated     int // sessions where we fetched at least one file from LFS
+	Sessions      int // total sessions inspected
+	AlreadyOK     int // sessions where every scannable file was already real content
+	Hydrated      int // sessions where we fetched at least one file from LFS
 	HydratedFiles int
 	Failed        int // sessions where >=1 scannable file could not be hydrated
 	FailedFiles   int

@@ -204,3 +204,161 @@ func TestCheckClaudeHooksFormat_DetectsWithoutFix(t *testing.T) {
 		t.Error("expected actionable detail pointing the user at `ox doctor --fix`")
 	}
 }
+
+// TestCheckClaudeHooksFormat_LeavesUserAuthoredFileUntouched is the regression
+// test for the "settings.json rewritten on every Claude Code session" bug
+// (ox-647t). Prior to the fix, MarshalSettings used encoding/json defaults
+// that HTML-escape <, >, & and strip trailing newlines, and both no-op
+// guards (here and in internal/doctor/autofix/default_checks.go) compared
+// bytes after re-marshaling. Any user-authored file that contained those
+// characters in a permission rule, or simply ended with a newline, would
+// be silently rewritten on every doctor / autofix pass — the rewrite
+// itself produced encoder output that drifted on the next pass too, so
+// the file churned forever even though no real content had changed.
+//
+// Failure prevented: doctor mutating a user's hand-written settings.json
+// on every session. Concretely: a file containing `<`, `>`, `&` literals
+// in a Bash() permission rule must remain byte-identical across two
+// consecutive checkClaudeHooksFormat(true) calls.
+//
+// This is the adversarial-input test that was missing — the existing
+// idempotency test seeded `{"hooks": {"PostToolUse": "echo legacy"}}`,
+// which has none of the bytes that exposed the bug. A test that only
+// round-trips the encoder's own output can never catch an encoder that
+// mistreats user input.
+func TestCheckClaudeHooksFormat_LeavesUserAuthoredFileUntouched(t *testing.T) {
+	gitRoot := testGitRepo(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	originalWd, _ := os.Getwd()
+	defer os.Chdir(originalWd)
+	if err := os.Chdir(gitRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	// User-authored settings.json: array-form hooks, literal HTML
+	// characters in a permission rule, hand-written \uXXXX escape,
+	// trailing newline, four-space indentation, top-level keys in
+	// insertion order (permissions before hooks). All of these are
+	// shapes the previous byte-equal guard would have rewritten.
+	userAuthored := "{\n" +
+		"    \"permissions\": {\n" +
+		"        \"allow\": [\n" +
+		"            \"Bash(grep '</script>':*)\",\n" +
+		"            \"Bash(curl 'https://example.com/?a=1\\u0026b=2':*)\"\n" +
+		"        ]\n" +
+		"    },\n" +
+		"    \"hooks\": {\n" +
+		"        \"SessionStart\": [\n" +
+		"            {\n" +
+		"                \"matcher\": \"\",\n" +
+		"                \"hooks\": [\n" +
+		"                    {\"command\": \"ox agent hook SessionStart\", \"type\": \"command\"}\n" +
+		"                ]\n" +
+		"            }\n" +
+		"        ]\n" +
+		"    }\n" +
+		"}\n"
+	path := writeRawSettings(t, gitRoot, userAuthored)
+
+	first := checkClaudeHooksFormat(true)
+	if !first.passed {
+		t.Fatalf("first pass should pass on a well-formed user file: %+v", first)
+	}
+	if strings.Contains(first.message, "repaired") {
+		t.Errorf("well-formed user file was rewritten on first pass: %q\n"+
+			"this is the regression — user content must not be mutated by the no-op path",
+			first.message)
+	}
+	afterFirst, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterFirst) != userAuthored {
+		t.Errorf("on-disk bytes changed after first checkClaudeHooksFormat(true)\nwant:\n%s\ngot:\n%s",
+			userAuthored, string(afterFirst))
+	}
+
+	second := checkClaudeHooksFormat(true)
+	if strings.Contains(second.message, "repaired") {
+		t.Errorf("idempotency broken — second pass rewrote: %q", second.message)
+	}
+	afterSecond, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterSecond) != string(afterFirst) {
+		t.Errorf("file mutated between consecutive passes\nfirst:\n%s\nsecond:\n%s",
+			string(afterFirst), string(afterSecond))
+	}
+}
+
+// TestCheckClaudeHooksFormat_RepairsThenStays verifies the two-pass invariant
+// for files that *do* need repair: the first pass rewrites into canonical
+// form, the second pass leaves the rewritten file alone. This is the
+// property the old TestCheckClaudeHooksFormat_Idempotent test attempted to
+// prove, but with an adversarial input (HTML chars in permissions) that
+// actually exercises the encoder's behavior on user content.
+//
+// Failure prevented: the daemon autofix scheduler rewriting a freshly
+// repaired file on the next tick because canonical form ≠ canonical form
+// when read back through the round-trip.
+func TestCheckClaudeHooksFormat_RepairsThenStays(t *testing.T) {
+	gitRoot := testGitRepo(t)
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	originalWd, _ := os.Getwd()
+	defer os.Chdir(originalWd)
+	if err := os.Chdir(gitRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	// Legacy string-form hooks alongside HTML-bearing permissions: the
+	// file needs migration AND its content has the bytes the old encoder
+	// mishandled.
+	legacy := `{
+  "permissions": {"allow": ["Bash(grep '</style>':*)"]},
+  "hooks": {"PostToolUse": "ox agent hook PostToolUse"}
+}`
+	path := writeRawSettings(t, gitRoot, legacy)
+
+	first := checkClaudeHooksFormat(true)
+	if !first.passed {
+		t.Fatalf("first pass (repair) failed: %+v", first)
+	}
+	if !strings.Contains(first.message, "repaired") {
+		t.Errorf("expected repair message on legacy file, got: %q", first.message)
+	}
+	afterFirst, _ := os.ReadFile(path)
+
+	// Migrated file must still contain the literal HTML chars (not <,
+	// >, & escapes) and must parse as array-shape hooks.
+	if !strings.Contains(string(afterFirst), `</style>`) {
+		t.Errorf("repair re-escaped user content (<, >, & should stay literal):\n%s", afterFirst)
+	}
+	var probe struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Command string `json:"command"`
+				Type    string `json:"type"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(afterFirst, &probe); err != nil {
+		t.Fatalf("repaired file does not parse as array-shape hooks: %v\n%s", err, afterFirst)
+	}
+	if len(probe.Hooks["PostToolUse"]) != 1 {
+		t.Errorf("PostToolUse not in array shape after repair:\n%s", afterFirst)
+	}
+
+	second := checkClaudeHooksFormat(true)
+	if strings.Contains(second.message, "repaired") {
+		t.Errorf("second pass rewrote a freshly canonical file: %q", second.message)
+	}
+	afterSecond, _ := os.ReadFile(path)
+	if string(afterFirst) != string(afterSecond) {
+		t.Errorf("file churned between consecutive passes:\nfirst:\n%s\nsecond:\n%s",
+			afterFirst, afterSecond)
+	}
+}

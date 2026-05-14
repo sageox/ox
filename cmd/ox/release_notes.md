@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+**`.claude/settings.json` no longer rewritten on every session**
+
+Before this fix, ox could silently rewrite a user's `.claude/settings.json` on every Claude Code lifecycle event (via the daemon's 30-minute autofix tick, and on session start when the hook set drifted). The rewrite came from running the file through `encoding/json`'s defaults: literal `<`, `>`, `&` inside a permission rule got escaped to `<`, `>`, `&`; hand-written `\uXXXX` source escapes were decoded to literal runes; trailing newlines were stripped; and indentation inside opaque blocks like `permissions` was normalized to two-space. Each rewrite produced bytes that drifted from on-disk on the *next* pass too, so the file churned in a loop even when no content had actually changed.
+
+The fix replaces the encoder with one that has `SetEscapeHTML(false)` and preserves a trailing newline, and switches the "already canonical?" guard from byte equality (which the previous tests proved was satisfiable in lockstep with the encoder's own output but never against real user content) to a combination of strict-shape detection plus semantic content comparison. Result: doctor and the daemon autofix now leave user-authored files alone if Claude Code can read them, and only rewrite when the on-disk hooks shape is one Claude Code actually rejects.
+
+Regression tests seed adversarial inputs that would have failed the byte-equal guard on every pass — literal HTML characters in permission rules, tab indentation, trailing newlines — and assert the file is byte-identical across two consecutive checks.
+
 ## [0.8.1] - 2026-05-12
 
 ### Fixed

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,10 +56,22 @@ func checkClaudeHooksFormat(fix bool) checkResult {
 		return FailedCheck("Claude hooks format", "re-marshal failed", err.Error())
 	}
 
-	// Compare canonical bytes (post-MarshalIndent) against on-disk. If
-	// already canonical, nothing to do — keeps the check idempotent so
-	// repeated `doctor --fix` runs don't churn the file.
-	if bytes.Equal(bytes.TrimSpace(data), bytes.TrimSpace(canonical)) {
+	// "Already canonical" requires two things:
+	//   1. On-disk hooks values parse strictly into the array shape Claude
+	//      Code reads (no parseHooksMixed legacy-string fallback).
+	//   2. Semantic content matches what we'd emit — ignoring encoder
+	//      cosmetics (HTML escaping of <, >, &; trailing newline; \uXXXX
+	//      vs literal rune; key order; indentation inside opaque blocks).
+	//
+	// Byte equality alone is too strict (cosmetic drift triggers rewrites
+	// forever); semantic equality alone is too permissive (legacy string-
+	// form parses to the same in-memory shape as canonical array form, so
+	// the check would refuse to migrate broken files). Combining both gives
+	// the property users actually want: idempotent on any file Claude Code
+	// will accept, repairing only the ones it won't.
+	canonicalOnDisk, _ := claude.IsCanonicalHooksFormat(data)
+	semEqual, _ := claude.SettingsSemanticallyEqual(data, canonical)
+	if canonicalOnDisk && semEqual {
 		return PassedCheck("Claude hooks format", "canonical")
 	}
 

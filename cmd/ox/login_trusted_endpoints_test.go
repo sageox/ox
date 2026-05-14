@@ -16,12 +16,12 @@ import (
 // `ox login` becomes unusably noisy.
 func TestIsPreTrustedEndpoint(t *testing.T) {
 	cases := map[string]bool{
-		"https://sageox.ai":         true,
-		"https://test.sageox.ai":    true,
+		"https://sageox.ai":          true,
+		"https://test.sageox.ai":     true,
 		"https://api.test.sageox.ai": true,
-		"https://attacker.example":  false,
-		"http://localhost:8080":     false, // not pre-trusted; user must approve
-		"":                          false,
+		"https://attacker.example":   false,
+		"http://localhost:8080":      false, // not pre-trusted; user must approve
+		"":                           false,
 	}
 	for ep, want := range cases {
 		t.Run(ep, func(t *testing.T) {

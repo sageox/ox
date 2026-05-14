@@ -57,20 +57,20 @@ const prePushScannerSizeCap = 8 * 1024 * 1024 // 8 MiB
 // recovery tooling can actually fix. As of ox-cqdo:
 //
 //   - sessions/      raw AI session recordings — assistant chat and tool
-//                    I/O. The one path where unscrubbed credentials can
-//                    plausibly land in a ledger from ox-controlled writes.
-//                    Covered by `ox session audit` / `ox session redact`.
+//     I/O. The one path where unscrubbed credentials can
+//     plausibly land in a ledger from ox-controlled writes.
+//     Covered by `ox session audit` / `ox session redact`.
 //
 // Out of scope (intentionally not gated):
 //
 //   - data/github/   verbatim cache of PR/Issue bytes already published on
-//                    GitHub. Replicating them into the ledger is the same
-//                    exposure surface as ingesting the PR at all; rewriting
-//                    them at write time produced a false-positive class
-//                    that blocked routine pushes (the regression that drove
-//                    this fix).
+//     GitHub. Replicating them into the ledger is the same
+//     exposure surface as ingesting the PR at all; rewriting
+//     them at write time produced a false-positive class
+//     that blocked routine pushes (the regression that drove
+//     this fix).
 //   - kb/            user-curated knowledge bubbles. User-authored content
-//                    is the user's responsibility; not an ox write path.
+//     is the user's responsibility; not an ox write path.
 //   - team-context/  same — user-edited markdown.
 //
 // If you widen this list, also widen the recovery surface in
@@ -384,4 +384,3 @@ func emitQuarantineWarning(w *os.File, auto *autoRedactResult, q *quarantineResu
 	}
 	fmt.Fprint(w, b.String())
 }
-

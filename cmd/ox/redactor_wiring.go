@@ -7,10 +7,10 @@ import (
 // init wires cross-cutting hooks that internal packages need but cannot
 // resolve themselves without creating import cycles.
 //
-//   1. gitserver.SetHelperCommand — the shell command git invokes to
-//      resolve credentials via ox-managed credential storage (ox-eeqi).
-//      internal/gitserver can't import cmd/ox to discover the running
-//      binary's absolute path.
+//  1. gitserver.SetHelperCommand — the shell command git invokes to
+//     resolve credentials via ox-managed credential storage (ox-eeqi).
+//     internal/gitserver can't import cmd/ox to discover the running
+//     binary's absolute path.
 //
 // Previously also wired `ledger.SetFieldRedactor` (ox-8bkk) to scrub
 // credential patterns from GitHub PR/Issue cache fields at write time.

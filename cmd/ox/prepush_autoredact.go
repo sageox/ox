@@ -232,8 +232,8 @@ func quarantineUnredactableFindings(ledgerPath string, findings []PrePushFinding
 
 	// Group findings by session for the marker write.
 	type sessionGroup struct {
-		findings        []PrePushFinding
-		quarantineLocs  []redactionDebtLocation
+		findings       []PrePushFinding
+		quarantineLocs []redactionDebtLocation
 	}
 	groups := map[string]*sessionGroup{}
 	for _, f := range findings {

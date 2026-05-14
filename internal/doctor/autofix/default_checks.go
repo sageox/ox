@@ -124,7 +124,20 @@ func checkClaudeHooksFormat(_ context.Context, repoPath string) CheckResult {
 			Summary: fmt.Sprintf("re-marshal: %v", err),
 		}
 	}
-	if string(canonical) == string(data) {
+	// "Already canonical" requires both a strict on-disk shape check and a
+	// semantic content compare. Byte equality alone was the original guard
+	// and it failed forever on any file with HTML-escapable characters
+	// (<, >, & in a permission rule), hand-written \uXXXX escapes, missing
+	// trailing newline, or non-canonical indentation inside opaque
+	// permissions blocks — the autofix scheduler then rewrote the file
+	// every 30 minutes. Semantic equality alone is too permissive (legacy
+	// string-form hooks parse into the same in-memory shape as the array
+	// form Claude Code requires, so the check would refuse to migrate
+	// broken files). Combining both gives idempotency on any file Claude
+	// Code accepts and repair on any file it would reject.
+	canonicalOnDisk, _ := claude.IsCanonicalHooksFormat(data)
+	semEqual, _ := claude.SettingsSemanticallyEqual(data, canonical)
+	if canonicalOnDisk && semEqual {
 		return CheckResult{Status: StatusClean, Repo: repoPath}
 	}
 

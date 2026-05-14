@@ -214,4 +214,3 @@ func EndpointURLForHost(scheme, host string) string {
 	host = strings.TrimPrefix(host, "git.")
 	return scheme + "://" + host
 }
-

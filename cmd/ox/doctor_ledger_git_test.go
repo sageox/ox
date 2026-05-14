@@ -299,4 +299,3 @@ func TestStripURLCredentials(t *testing.T) {
 		})
 	}
 }
-

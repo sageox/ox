@@ -147,6 +147,148 @@ func TestMarshalSettings_NilRawMap(t *testing.T) {
 	assert.Contains(t, string(data), "cmd")
 }
 
+// TestMarshalSettings_DoesNotHTMLEscapeUserContent locks in the encoder
+// behavior that was broken before ox-647t: the stdlib default
+// json.MarshalIndent escapes <, >, & inside any string value, which
+// caused a rewrite-on-every-tick loop for users whose permission rules
+// contained those bytes. The fix replaces MarshalIndent with an Encoder
+// that has SetEscapeHTML(false).
+//
+// Failure prevented: doctor / autofix mutating user content. If this
+// test fails (the encoder re-escapes), the daemon would resume churning
+// settings.json on every 30-min tick.
+func TestMarshalSettings_DoesNotHTMLEscapeUserContent(t *testing.T) {
+	rawMap := map[string]json.RawMessage{
+		"permissions": json.RawMessage(`{"allow":["Bash(grep '</script>':*)","Bash(curl 'https://x?a=1&b=2':*)"]}`),
+	}
+	settings := &Settings{Hooks: map[string][]HookEntry{}}
+
+	out, err := MarshalSettings(settings, rawMap)
+	require.NoError(t, err)
+
+	s := string(out)
+	assert.Contains(t, s, "</script>", "encoder must not escape literal `<` and `>` (would churn user settings.json on every doctor pass)")
+	assert.Contains(t, s, "a=1&b=2", "encoder must not escape literal `&` (same churn issue)")
+	// build the six-character escape sequences via concatenation so the
+	// source can't accidentally collapse to the literal rune (which is
+	// what we want to keep, not what we want to forbid).
+	bs := string([]byte{'\\'})
+	assert.NotContains(t, s, bs+"u003c", "encoder must not emit the HTML escape for `<`")
+	assert.NotContains(t, s, bs+"u003e", "encoder must not emit the HTML escape for `>`")
+	assert.NotContains(t, s, bs+"u0026", "encoder must not emit the HTML escape for `&`")
+}
+
+// TestMarshalSettings_HasTrailingNewline confirms json.Encoder.Encode's
+// always-append-newline behavior is preserved in the output. POSIX-friendly,
+// matches what most editors leave on disk, and avoids "editor adds \n →
+// ox strips \n" oscillation. The semantic equality guard tolerates either
+// form, but the canonical emit should be the editor-friendly one.
+func TestMarshalSettings_HasTrailingNewline(t *testing.T) {
+	out, err := MarshalSettings(&Settings{Hooks: map[string][]HookEntry{}}, nil)
+	require.NoError(t, err)
+	assert.True(t, len(out) > 0 && out[len(out)-1] == '\n', "MarshalSettings output must end with a newline; got: %q", string(out))
+}
+
+// TestIsCanonicalHooksFormat_StrictArrayShape covers the predicate the doctor
+// and autofix guards rely on to decide whether a file needs migration even
+// when its in-memory shape is already canonical (because parseHooksMixed
+// promotes legacy strings).
+func TestIsCanonicalHooksFormat_StrictArrayShape(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"empty bytes", "", true},
+		{"whitespace only", "  \n\t", true},
+		{"no hooks key", `{"permissions":{"allow":["Read"]}}`, true},
+		{"array shape", `{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"command":"x","type":"command"}]}]}}`, true},
+		{"legacy string shape", `{"hooks":{"PostToolUse":"echo legacy"}}`, false},
+		{"mixed legacy + array", `{"hooks":{"PostToolUse":"x","SessionStart":[{"matcher":"","hooks":[{"command":"y","type":"command"}]}]}}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := IsCanonicalHooksFormat([]byte(tc.in))
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestSettingsSemanticallyEqual_IgnoresCosmetics verifies the no-op guard
+// tolerates encoder-cosmetic differences that don't affect what Claude Code
+// reads. These are exactly the cases that triggered perpetual rewrites
+// before the fix.
+func TestSettingsSemanticallyEqual_IgnoresCosmetics(t *testing.T) {
+	canonical := []byte(`{
+  "permissions": {"allow": ["Bash(curl 'a&b':*)"]},
+  "hooks": {"SessionStart": [{"matcher": "", "hooks": [{"command": "ox", "type": "command"}]}]}
+}
+`)
+	cases := []struct {
+		name  string
+		other []byte
+		want  bool
+	}{
+		{
+			name: "trailing newline absent",
+			other: []byte(`{
+  "permissions": {"allow": ["Bash(curl 'a&b':*)"]},
+  "hooks": {"SessionStart": [{"matcher": "", "hooks": [{"command": "ox", "type": "command"}]}]}
+}`),
+			want: true,
+		},
+		{
+			name: "html-escaped & in permissions",
+			other: []byte(`{
+  "permissions": {"allow": ["Bash(curl 'a&b':*)"]},
+  "hooks": {"SessionStart": [{"matcher": "", "hooks": [{"command": "ox", "type": "command"}]}]}
+}
+`),
+			want: true,
+		},
+		{
+			name: "different top-level key order",
+			other: []byte(`{
+  "hooks": {"SessionStart": [{"matcher": "", "hooks": [{"command": "ox", "type": "command"}]}]},
+  "permissions": {"allow": ["Bash(curl 'a&b':*)"]}
+}
+`),
+			want: true,
+		},
+		{
+			name:  "tab indentation inside permissions",
+			other: []byte("{\n\t\"permissions\": {\n\t\t\"allow\": [\"Bash(curl 'a&b':*)\"]\n\t},\n\t\"hooks\": {\"SessionStart\": [{\"matcher\": \"\", \"hooks\": [{\"command\": \"ox\", \"type\": \"command\"}]}]}\n}\n"),
+			want:  true,
+		},
+		{
+			name: "different hook command",
+			other: []byte(`{
+  "permissions": {"allow": ["Bash(curl 'a&b':*)"]},
+  "hooks": {"SessionStart": [{"matcher": "", "hooks": [{"command": "different", "type": "command"}]}]}
+}
+`),
+			want: false,
+		},
+		{
+			name: "extra permission rule",
+			other: []byte(`{
+  "permissions": {"allow": ["Bash(curl 'a&b':*)", "Bash(rm:*)"]},
+  "hooks": {"SessionStart": [{"matcher": "", "hooks": [{"command": "ox", "type": "command"}]}]}
+}
+`),
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := SettingsSemanticallyEqual(canonical, tc.other)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got, "canonical:\n%s\nother:\n%s", canonical, tc.other)
+		})
+	}
+}
+
 func TestParseAndMarshalRoundtrip(t *testing.T) {
 	original := []byte(`{
   "permissions": {"allow": ["Read", "Write"]},

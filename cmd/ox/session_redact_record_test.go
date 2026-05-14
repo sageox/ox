@@ -25,11 +25,11 @@ func TestSplitSessionPath(t *testing.T) {
 	}{
 		{"sessions/2026-05-11-abc/raw.jsonl", "2026-05-11-abc", "raw.jsonl", true},
 		{"sessions/X/meta.json", "X", "meta.json", true},
-		{"sessions/X/sub/nested.jsonl", "", "", false},   // nested unsupported
-		{"data/github/pr/1.json", "", "", false},         // wrong prefix
-		{"sessions//raw.jsonl", "", "", false},           // empty session name
-		{"sessions/onlysession/", "", "", false},         // trailing slash, no file
-		{"sessions/onlysession", "", "", false},          // no filename
+		{"sessions/X/sub/nested.jsonl", "", "", false}, // nested unsupported
+		{"data/github/pr/1.json", "", "", false},       // wrong prefix
+		{"sessions//raw.jsonl", "", "", false},         // empty session name
+		{"sessions/onlysession/", "", "", false},       // trailing slash, no file
+		{"sessions/onlysession", "", "", false},        // no filename
 	}
 	for _, tt := range tests {
 		s, f, ok := splitSessionPath(tt.in)

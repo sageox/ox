@@ -224,9 +224,9 @@ func TestSyncBubbles_Network_ContextAlreadyCanceledIsNoOp(t *testing.T) {
 // error.
 func TestSyncBubbles_Network_HTTPMockServer_KnownStatuses(t *testing.T) {
 	cases := []struct {
-		name       string
-		status     int
-		body       string
+		name         string
+		status       int
+		body         string
 		wantSentinel bool
 		wantErr      bool
 	}{

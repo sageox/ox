@@ -32,8 +32,8 @@ import (
 // passes — the simplest way to model "the API answer changed". The
 // existing fakeKBLister in sync_bubbles_test.go is fixed-response.
 type dynamicKBLister struct {
-	get      func() ([]api.KB, error)
-	calls    atomic.Int32
+	get   func() ([]api.KB, error)
+	calls atomic.Int32
 }
 
 func (d *dynamicKBLister) ListBubbles(_ context.Context) ([]api.KB, error) {
