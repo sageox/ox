@@ -42,8 +42,21 @@ func listen(path string) (net.Listener, error) {
 	oldMask := syscall.Umask(0077)
 	listener, err := net.Listen("unix", path)
 	syscall.Umask(oldMask)
+	if err != nil {
+		return nil, err
+	}
 
-	return listener, err
+	// Go's *net.UnixListener.Close() unlinks the socket file by default.
+	// That's wrong for ox: when a daemon is superseded by a replacement that
+	// has already rebound the same path, our shutdown would delete the new
+	// daemon's socket file, leaving it running but unreachable. Socket-file
+	// lifetime is owned by Daemon.cleanup (which respects wasSuperseded);
+	// listener shutdown must not unlink.
+	if unixL, ok := listener.(*net.UnixListener); ok {
+		unixL.SetUnlinkOnClose(false)
+	}
+
+	return listener, nil
 }
 
 // dial connects to a Unix socket with a timeout.

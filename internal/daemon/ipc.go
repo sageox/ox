@@ -1483,7 +1483,12 @@ func (s *Server) Start(ctx context.Context) error {
 	// wait for all connection handlers to finish
 	s.connWg.Wait()
 
-	cleanupSocket(socketPath)
+	// socket file removal is owned by Daemon.cleanup, which knows whether
+	// this daemon was superseded. when supersede happens, the file at the
+	// socket path now belongs to the replacement daemon — unlinking it here
+	// would leave the new daemon unreachable (kernel-side socket survives,
+	// on-disk path gone). the legitimate pre-bind unlink of stale paths
+	// still happens in listen() for the next daemon to start at this path.
 	return ctx.Err()
 }
 
