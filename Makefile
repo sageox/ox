@@ -328,6 +328,96 @@ docs-publish: docs ## Publish docs to GitHub Packages
 	cd docs && npm publish
 	@echo "Published @sageox/cli-docs"
 
+# ── UX component catalog ────────────────────────────────────────────
+# Build a self-contained catalog/cli/index.html that ships to
+# sageox-design.netlify.app/catalog/cli/.
+# Spec: sageox-design/catalog/README.md
+# Rule: .claude/rules/design.md
+
+CATALOG_OUT := .context/catalog-out/cli
+CATALOG_ASSETS := $(CATALOG_OUT)/assets
+CATALOG_VENDOR := tmp/catalog-vendor
+ASCIINEMA_PLAYER_VERSION := 3.8.1
+
+.PHONY: catalog-build catalog-svgs catalog-casts catalog-html catalog-vendor catalog-publish check-no-binary-bloat
+
+catalog-build: catalog-vendor catalog-svgs catalog-casts catalog-html ## Build self-contained catalog/cli/index.html
+	@echo "✓ catalog: $(CATALOG_OUT)/index.html"
+
+catalog-vendor: ## Fetch asciinema-player into tmp/catalog-vendor (text-only)
+	@mkdir -p $(CATALOG_VENDOR)
+	@test -f $(CATALOG_VENDOR)/asciinema-player.min.js || \
+		curl -sSfL "https://cdn.jsdelivr.net/npm/asciinema-player@$(ASCIINEMA_PLAYER_VERSION)/dist/bundle/asciinema-player.min.js" \
+			-o $(CATALOG_VENDOR)/asciinema-player.min.js
+	@test -f $(CATALOG_VENDOR)/asciinema-player.css || \
+		curl -sSfL "https://cdn.jsdelivr.net/npm/asciinema-player@$(ASCIINEMA_PLAYER_VERSION)/dist/bundle/asciinema-player.css" \
+			-o $(CATALOG_VENDOR)/asciinema-player.css
+
+catalog-svgs: build-ox ## Render freeze SVG snapshots (light + dark) per entry
+	@mkdir -p $(CATALOG_ASSETS)
+	@if ! command -v freeze >/dev/null 2>&1; then \
+		echo "  ⚠ freeze not installed; SVG snapshots skipped"; \
+		echo "    install: brew install charmbracelet/tap/freeze"; \
+	else \
+		for name in $$(./bin/$(BINARY_NAME) dev catalog --json | jq -r '.components[].name'); do \
+			./bin/$(BINARY_NAME) dev catalog --component=$$name 2>/dev/null > $(CATALOG_ASSETS)/$$name.ans; \
+			freeze --output $(CATALOG_ASSETS)/$$name.dark.svg \
+				--language ansi \
+				--font.family "JetBrains Mono" --font.size 13 \
+				--padding 16 --margin 0 --line-height 1.4 \
+				--background "#111518" --window=false $(CATALOG_ASSETS)/$$name.ans \
+				&& echo "  freeze: $$name.dark.svg" || true; \
+			freeze --output $(CATALOG_ASSETS)/$$name.light.svg \
+				--language ansi \
+				--theme github \
+				--font.family "JetBrains Mono" --font.size 13 \
+				--padding 16 --margin 0 --line-height 1.4 \
+				--background "#f5f3ed" --window=false $(CATALOG_ASSETS)/$$name.ans \
+				&& echo "  freeze: $$name.light.svg" || true; \
+			rm -f $(CATALOG_ASSETS)/$$name.ans; \
+		done; \
+	fi
+
+catalog-casts: build-ox ## Record asciinema .cast for animated components
+	@mkdir -p $(CATALOG_ASSETS)
+	@if ! command -v asciinema >/dev/null 2>&1; then \
+		echo "  ⚠ asciinema not installed; .cast recordings skipped"; \
+		echo "    install: brew install asciinema"; \
+		exit 0; \
+	fi
+	@for name in $$(./bin/$(BINARY_NAME) dev catalog --json | jq -r '.components[] | select(.renderer=="asciinema") | .name'); do \
+		asciinema rec --quiet --overwrite --cols=80 --rows=24 \
+			--command="./bin/$(BINARY_NAME) dev catalog --component=$$name" \
+			$(CATALOG_ASSETS)/$$name.cast 2>/dev/null \
+			&& echo "  asciinema: $$name.cast" || true; \
+	done
+
+catalog-html: build-ox ## Emit self-contained catalog/cli/index.html
+	@mkdir -p $(CATALOG_OUT)
+	@./bin/$(BINARY_NAME) dev catalog \
+		--export=$(CATALOG_OUT)/.. \
+		--assets-dir=$(CATALOG_ASSETS) \
+		--player-js=$(CATALOG_VENDOR)/asciinema-player.min.js \
+		--player-css=$(CATALOG_VENDOR)/asciinema-player.css
+	@$(MAKE) -s check-no-binary-bloat CATALOG_PATH=$(CATALOG_OUT)
+
+catalog-publish: catalog-build ## rsync catalog to local sageox-design checkout (set SAGEOX_DESIGN_REPO)
+	@bash scripts/publish-design-catalog.sh
+
+check-no-binary-bloat: ## Fail if catalog dirs contain raster/binary assets
+	@found=$$( \
+		find docs/design $(or $(CATALOG_PATH),$(CATALOG_OUT)) -type f \
+			\( -name '*.png' -o -name '*.gif' -o -name '*.jpg' \
+			   -o -name '*.jpeg' -o -name '*.mp4' -o -name '*.webm' \) \
+			2>/dev/null \
+	); \
+	if [ -n "$$found" ]; then \
+		echo "✗ binary assets detected in catalog paths (forbidden by .claude/rules/design.md rule #13):"; \
+		echo "$$found" | sed 's/^/    /'; \
+		exit 1; \
+	fi
+	@echo "✓ no binary catalog assets"
+
 # Friction catalog
 refresh-friction-catalog: ## Fetch friction catalog from API and generate Go code
 	@echo "Fetching friction catalog from API..."
