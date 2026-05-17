@@ -32,16 +32,24 @@ Local working copy: `/Users/ryan/conductor/workspaces/sageox-design/bogota-v2/`.
 
 ## Light vs dark detection
 
-Done by `lipgloss.AdaptiveColor` at runtime. Each token defines both variants; lipgloss picks the right one based on `COLORFGBG` and terminal queries.
+ox ships **one palette in two variants** and picks the right one at runtime — no config flag, no theme file, no restart. Detection runs in this order:
+
+1. **OSC 11 query.** At first render lipgloss writes the escape sequence `\x1b]11;?\x07` to stdout. Modern terminals (iTerm2, Alacritty, Kitty, Wezterm, Windows Terminal, recent VS Code) answer back with their actual background color. lipgloss computes luminance and picks dark or light.
+2. **`COLORFGBG` fallback.** Older or rxvt-derived emulators export this env var instead of answering OSC 11. lipgloss reads it.
+3. **Default dark.** If nothing answers (CI, piped output, exotic terminal), ox assumes a dark background — the most common case among coworkers.
+4. **`NO_COLOR=1`** short-circuits everything: no ANSI emitted, terminal default colors only.
+
+Mechanism in code:
 
 ```go
+// internal/theme/generated.go (synced from sageox-design)
 ColorPrimary = compat.AdaptiveColor{
     Light: lipgloss.Color("#4F6A48"),
     Dark:  lipgloss.Color("#7A8F78"),
 }
 ```
 
-When the user toggles their terminal between light and dark, the next ox invocation renders with the matching variant. No restart, no config flag.
+When the user toggles their terminal between light and dark, the next ox invocation renders with the matching variant. The published catalog page at [sageox-design.netlify.app/catalog/cli/](https://sageox-design.netlify.app/catalog/cli/) shows both variants per token, with the active variant outlined according to the page's Mode toggle.
 
 ## NO_COLOR
 

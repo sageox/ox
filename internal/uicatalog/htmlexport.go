@@ -212,7 +212,20 @@ func renderThemeBlock() string {
 
 	w := &strings.Builder{}
 	w.WriteString(`<section id="theme" class="theme">` + "\n")
-	w.WriteString(`<header class="theme-header"><h2>Theme</h2><p>Semantic color tokens sourced from <a href="https://github.com/sageox/sageox-design/blob/main/tokens/colors.yaml"><code>sageox-design/tokens/colors.yaml</code></a>. Each token resolves to a different hex in light vs dark terminals via <code>lipgloss.AdaptiveColor</code>.</p></header>` + "\n")
+	w.WriteString(`<header class="theme-header">` +
+		`<h2>Theme</h2>` +
+		`<p>ox ships <strong>one palette in two variants</strong>. Every command — boxes, timelines, spinners, the doctor wordmark — uses the same semantic tokens; lipgloss picks the right hex at runtime based on your terminal's background.</p>` +
+		`<div class="theme-howto">` +
+		`<h3>How detection works</h3>` +
+		`<ol>` +
+		`<li><strong>OSC 11 query.</strong> At first render, lipgloss queries the terminal for its actual background color (escape sequence <code>\x1b]11;?\x07</code>). Modern terminals (iTerm2, Alacritty, Kitty, Wezterm, Windows Terminal, recent VS Code) answer back; lipgloss computes luminance and picks dark or light.</li>` +
+		`<li><strong><code>COLORFGBG</code> fallback.</strong> Some emulators (rxvt-derived) export this env var instead. lipgloss reads it.</li>` +
+		`<li><strong>Default dark.</strong> If nothing answers (CI, piped output, exotic terminal), ox assumes a dark background — the most common case among coworkers.</li>` +
+		`<li><strong><code>NO_COLOR=1</code></strong> short-circuits everything: no ANSI emitted, terminal default colors only.</li>` +
+		`</ol>` +
+		`<p class="theme-howto-mech">Mechanism: <code>compat.AdaptiveColor{Light, Dark}</code> in <a href="https://github.com/sageox/ox/blob/main/internal/theme/generated.go"><code>internal/theme/generated.go</code></a> (npm-synced from <a href="https://github.com/sageox/sageox-design/blob/main/tokens/colors.yaml"><code>sageox-design/tokens/colors.yaml</code></a>). The pair below shows <em>both</em> variants; the one outlined is what your current Mode toggle would render.</p>` +
+		`</div>` +
+		`</header>` + "\n")
 
 	for _, cat := range order {
 		toks, ok := byCategory[cat]
@@ -223,8 +236,16 @@ func renderThemeBlock() string {
 			html.EscapeString(string(cat)))
 		for _, t := range toks {
 			fmt.Fprintf(w, `<figure class="swatch">`+
-				`<div class="swatch-pair"><span class="chip chip-light" style="background:%s"></span><span class="chip chip-dark" style="background:%s"></span></div>`+
-				`<figcaption><code class="tname">%s</code><span class="thex thex-light">%s</span><span class="thex thex-dark">%s</span><span class="tdesc">%s</span></figcaption>`+
+				`<div class="swatch-pair">`+
+				`<span class="chip chip-light" style="background:%s" title="light variant"></span>`+
+				`<span class="chip chip-dark" style="background:%s" title="dark variant"></span>`+
+				`</div>`+
+				`<figcaption>`+
+				`<code class="tname">%s</code>`+
+				`<span class="thex thex-light"><span class="lbl">light</span>%s</span>`+
+				`<span class="thex thex-dark"><span class="lbl">dark</span>%s</span>`+
+				`<span class="tdesc">%s</span>`+
+				`</figcaption>`+
 				`</figure>`+"\n",
 				html.EscapeString(t.LightHex), html.EscapeString(t.DarkHex),
 				html.EscapeString(t.Name),
@@ -322,21 +343,35 @@ html[data-mode="light"] .snapshot-light { display: block; }
 /* Theme block (palette reference) */
 .theme { margin-bottom: 2.5rem; padding: 1.5rem; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; }
 .theme-header h2 { margin: 0 0 0.25rem; font-family: var(--mono); font-size: 1.1rem; color: var(--accent); }
-.theme-header p { margin: 0 0 1.25rem; color: var(--fg-dim); font-size: 0.9rem; max-width: 70ch; }
-.theme-header code { font-family: var(--mono); font-size: 0.85rem; }
+.theme-header > p { margin: 0 0 1.25rem; color: var(--fg); font-size: 0.95rem; max-width: 70ch; }
+.theme-header strong { color: var(--accent); font-weight: 600; }
+.theme-header code { font-family: var(--mono); font-size: 0.85rem; background: var(--bg); padding: 0.05rem 0.3rem; border-radius: 3px; }
+.theme-howto { margin: 0 0 1.5rem; padding: 1rem 1.25rem; background: var(--bg); border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0; }
+.theme-howto h3 { margin: 0 0 0.5rem; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--accent); font-weight: 600; }
+.theme-howto ol { margin: 0 0 0.75rem; padding-left: 1.25rem; color: var(--fg); font-size: 0.88rem; line-height: 1.6; }
+.theme-howto li { margin-bottom: 0.3rem; }
+.theme-howto-mech { margin: 0; color: var(--fg-dim); font-size: 0.82rem; line-height: 1.5; max-width: 70ch; }
+.theme-howto-mech em { font-style: italic; color: var(--fg); }
+
 .token-group { margin-bottom: 1.5rem; }
 .token-group h3 { margin: 0 0 0.75rem; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-dim); font-weight: 600; }
 .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.75rem; }
-.swatch { margin: 0; display: flex; flex-direction: column; gap: 0.4rem; padding: 0.65rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
-.swatch-pair { display: flex; height: 32px; border-radius: 4px; overflow: hidden; border: 1px solid var(--border); }
-.swatch-pair .chip { flex: 1; }
-.swatch figcaption { display: grid; grid-template-columns: auto auto; gap: 0.15rem 0.5rem; font-size: 0.78rem; }
-.swatch .tname { grid-column: 1 / -1; font-family: var(--mono); color: var(--fg); font-size: 0.85rem; }
-.swatch .thex { font-family: var(--mono); color: var(--fg-dim); font-size: 0.72rem; }
-.swatch .thex::before { color: var(--fg-dim); font-size: 0.65rem; margin-right: 0.25rem; }
-.swatch .thex-light::before { content: "L"; }
-.swatch .thex-dark::before { content: "D"; }
-.swatch .tdesc { grid-column: 1 / -1; color: var(--fg-dim); font-size: 0.78rem; line-height: 1.4; }
+.swatch { margin: 0; display: flex; flex-direction: column; gap: 0.45rem; padding: 0.65rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
+.swatch-pair { display: flex; height: 36px; border-radius: 4px; overflow: hidden; border: 1px solid var(--border); }
+.swatch-pair .chip { flex: 1; position: relative; transition: flex 0.2s ease; }
+/* Highlight the variant ox would pick right now, based on the page Mode toggle.
+   The "active" chip grows; the other dims behind a subtle veil. */
+html[data-mode="dark"] .swatch-pair .chip-light { flex: 0.4; opacity: 0.55; }
+html[data-mode="dark"] .swatch-pair .chip-dark { box-shadow: inset 0 0 0 2px var(--accent); }
+html[data-mode="light"] .swatch-pair .chip-dark { flex: 0.4; opacity: 0.55; }
+html[data-mode="light"] .swatch-pair .chip-light { box-shadow: inset 0 0 0 2px var(--accent); }
+.swatch figcaption { display: grid; grid-template-columns: auto 1fr; gap: 0.2rem 0.5rem; font-size: 0.78rem; align-items: baseline; }
+.swatch .tname { grid-column: 1 / -1; font-family: var(--mono); color: var(--fg); font-size: 0.88rem; font-weight: 500; }
+.swatch .thex { font-family: var(--mono); color: var(--fg-dim); font-size: 0.74rem; transition: color 0.15s; }
+.swatch .thex .lbl { display: inline-block; min-width: 2.5em; color: var(--fg-dim); opacity: 0.7; font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.06em; margin-right: 0.35rem; }
+html[data-mode="dark"] .swatch .thex-dark { color: var(--fg); font-weight: 500; }
+html[data-mode="light"] .swatch .thex-light { color: var(--fg); font-weight: 500; }
+.swatch .tdesc { grid-column: 1 / -1; color: var(--fg-dim); font-size: 0.78rem; line-height: 1.4; margin-top: 0.15rem; }
 `
 
 const inlineJS = `

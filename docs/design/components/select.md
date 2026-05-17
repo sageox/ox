@@ -10,11 +10,11 @@ exports: [SelectOne, SelectOneValue, SelectMany]
 
 # Select
 
-> Pick one or many from a known set of options.
+> Radio-button single-pick from a known set of options.
 
 ## When to use
 
-Arrow-key navigation in a TTY; numbered-prompt fallback in pipes and CI — same contract either way. Generic `SelectOneValue[T]` avoids index-juggling at call sites. Use `SelectMany` for checkbox-style multi-pick.
+The canonical TUI radio button. Used by every `ox init` choice point: endpoint picker, team chooser, IDE selector. Arrow-key navigation in TTY; numbered-prompt fallback in pipes and CI — same contract either way. Generic `SelectOneValue[T]` avoids index-juggling at call sites. For checkbox-style multi-pick, use [multi-select](multi-select.md).
 
 ## When NOT to use
 
