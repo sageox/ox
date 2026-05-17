@@ -12,6 +12,56 @@ import (
 
 // --- A. Direct lookup via agent_session_id ---
 
+// TestFindSessionFile_RejectsTraversalInAgentSessionID pins the trust-boundary
+// fix for the AgentSessionID path-traversal class. AgentSessionID arrives via
+// adapterprotocol JSON-RPC from the daemon; without validation, a malicious
+// project's hook could pass "../../sensitive-export" and the adapter would
+// read attacker-chosen files through the normal session pipeline.
+//
+// Failure prevented: SECREVIEW MEDIUM on cmd/ox-adapter-claude-code/session.go.
+// The other 6 ox adapters already call adapterruntime.ValidateSessionID;
+// claude-code was the lone outlier. This test pins that the call is present.
+func TestFindSessionFile_RejectsTraversalInAgentSessionID(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoRoot := "/tmp/test-repo"
+	projectHash := claudeProjectHash(repoRoot)
+	projectDir := filepath.Join(home, ".claude", "projects", projectHash)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Lay down a victim file outside projectDir that the traversal would target.
+	// findSessionFile must NEVER return this path or stat-probe it successfully.
+	victimDir := filepath.Join(home, "secret")
+	if err := os.MkdirAll(victimDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(victimDir, "exfil.jsonl")
+	if err := os.WriteFile(victim, []byte(`{"type":"user","content":"victim"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []string{
+		"../../secret/exfil", // would resolve to victim path with .jsonl suffix
+		"a/b",                // contains separator
+		"a\\b",               // backslash separator (windows shape)
+		"foo/../bar",         // traversal disguised
+	}
+	for _, badID := range cases {
+		t.Run(badID, func(t *testing.T) {
+			got, _, err := findSessionFile(repoRoot, "", "", badID)
+			if err == nil {
+				t.Errorf("expected error for agentSessionID=%q, got path=%q", badID, got)
+			}
+			if got != "" {
+				t.Errorf("expected empty path on rejection, got %q", got)
+			}
+		})
+	}
+}
+
 // TestFindSessionFile_DirectLookup verifies that providing an agent session ID
 // skips timestamp scanning and returns the file directly.
 // Failure prevented: slow directory scan when the session ID is already known.

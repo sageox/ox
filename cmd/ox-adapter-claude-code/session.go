@@ -211,6 +211,15 @@ func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, i
 
 	// direct lookup via agent session ID: Claude Code files are {sessionId}.jsonl
 	if agentSessionID != "" {
+		// Trust boundary: AgentSessionID arrives via the adapterprotocol JSON-RPC
+		// channel from the daemon. Without this gate, a malicious project's
+		// CLAUDE.md hook could pass "../../../sensitive-export" and the adapter
+		// would happily read and return that file's bytes through the normal
+		// session pipeline. The other 6 ox adapters already call this — claude-code
+		// was the lone outlier flagged by /security-review.
+		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
+			return "", 0, err
+		}
 		candidate := filepath.Join(projectDir, agentSessionID+".jsonl")
 		if _, err := os.Stat(candidate); err == nil {
 			sinceTime := time.Time{}

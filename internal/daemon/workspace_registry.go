@@ -945,6 +945,19 @@ func (r *WorkspaceRegistry) CleanupRevokedTeamContexts(currentTeamIDs map[string
 		if ws.Exists && ws.Path != "" {
 			clean := isCheckoutClean(ws.Path)
 			if clean {
+				// Defense in depth: never RemoveAll a path that isn't under the
+				// canonical team-data root. If ws.Path was ever influenced by a
+				// hostile config.local.toml round-trip or a future code path
+				// that sets Path from API input, this gate prevents a stray
+				// "clean up revoked team context" from wiping arbitrary user
+				// directories. See SECREVIEW threat model: workspace_registry.go
+				// → CleanupRevokedTeamContexts (cloud-API trust boundary).
+				if !isUnderTeamsDataRoot(ws.Path, ws.Endpoint) {
+					slog.Error("workspace registry: refusing RemoveAll — path outside teams data root",
+						"team_id", ws.TeamID, "path", ws.Path, "endpoint", ws.Endpoint)
+					ws.LastErr = "access revoked but local path outside teams data root — refused to remove"
+					continue
+				}
 				slog.Info("workspace registry: team context no longer accessible, removing clean checkout",
 					"team_id", ws.TeamID, "path", ws.Path)
 				os.RemoveAll(ws.Path)
@@ -958,6 +971,31 @@ func (r *WorkspaceRegistry) CleanupRevokedTeamContexts(currentTeamIDs map[string
 			delete(r.workspaces, id)
 		}
 	}
+}
+
+// isUnderTeamsDataRoot reports whether path is the canonical teams-data
+// directory for the given endpoint, or a subdirectory of it. Returns false
+// when endpoint is empty (can't derive the root) or when path is not absolute.
+//
+// Used as a defense-in-depth gate before os.RemoveAll on team-context cleanup.
+// The discovery code paths today compute Path via paths.TeamContextDir, so
+// this gate is currently a tautology — but the gate prevents a future
+// regression (or a hostile config.local.toml round-trip) from turning the
+// "revoked team context" cleanup into an arbitrary-directory wipe.
+func isUnderTeamsDataRoot(path, ep string) bool {
+	if path == "" || ep == "" {
+		return false
+	}
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) {
+		return false
+	}
+	root := filepath.Clean(paths.TeamsDataDir(ep))
+	if clean == root {
+		// the root itself is not a legitimate per-team checkout; refuse.
+		return false
+	}
+	return strings.HasPrefix(clean, root+string(filepath.Separator))
 }
 
 // isCheckoutClean returns true if a git repo has no uncommitted or untracked changes.

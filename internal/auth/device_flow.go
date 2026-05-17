@@ -114,7 +114,7 @@ func RequestDeviceCode() (*DeviceCodeResponse, error) {
 		if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error != "" {
 			return nil, fmt.Errorf("device code request to %s failed: %s - %s", endpointURL, errResp.Error, errResp.ErrorDescription)
 		}
-		return nil, fmt.Errorf("device code request to %s failed with status %d: %s", endpointURL, resp.StatusCode, string(body))
+		return nil, fmt.Errorf("device code request to %s failed with status %d: %s", endpointURL, resp.StatusCode, redactedBody(body, resp.Header.Get("Content-Type")))
 	}
 
 	var deviceCode DeviceCodeResponse
@@ -302,7 +302,7 @@ func pollToken(client *http.Client, endpoint, deviceCode string) (*TokenResponse
 		if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error != "" {
 			return nil, fmt.Errorf("%s", errResp.Error)
 		}
-		return nil, fmt.Errorf("token request failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("token request failed with status %d: %s", resp.StatusCode, redactedBody(body, resp.Header.Get("Content-Type")))
 	}
 
 	var token TokenResponse
@@ -352,7 +352,7 @@ func exchangeForJWT(client *http.Client, apiURL, opaqueToken string) (*JWTExchan
 	logger.LogHTTPResponse("GET", endpoint, resp.StatusCode, duration)
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("JWT exchange failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("JWT exchange failed with status %d: %s", resp.StatusCode, redactedBody(body, resp.Header.Get("Content-Type")))
 	}
 
 	var jwtResp JWTExchangeResponse
@@ -369,7 +369,7 @@ func exchangeForJWT(client *http.Client, apiURL, opaqueToken string) (*JWTExchan
 		}
 	}
 	if jwtResp.AccessToken == "" {
-		slog.Debug("JWT exchange returned empty access token", "body", string(body))
+		slog.Debug("JWT exchange returned empty access token", "body", redactedBody(body, resp.Header.Get("Content-Type")))
 		return nil, fmt.Errorf("JWT exchange returned empty access token")
 	}
 	return &jwtResp, nil
@@ -406,7 +406,7 @@ func fetchUserInfo(client *http.Client, apiURL, accessToken string) (*UserInfo, 
 	logger.LogHTTPResponse("GET", endpoint, resp.StatusCode, duration)
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("user info request failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("user info request failed with status %d: %s", resp.StatusCode, redactedBody(body, resp.Header.Get("Content-Type")))
 	}
 
 	var userInfo UserInfo
@@ -467,7 +467,7 @@ func (c *AuthClient) RequestDeviceCode() (*DeviceCodeResponse, error) {
 		if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error != "" {
 			return nil, fmt.Errorf("device code request to %s failed: %s - %s", endpointURL, errResp.Error, errResp.ErrorDescription)
 		}
-		return nil, fmt.Errorf("device code request to %s failed with status %d: %s", endpointURL, resp.StatusCode, string(body))
+		return nil, fmt.Errorf("device code request to %s failed with status %d: %s", endpointURL, resp.StatusCode, redactedBody(body, resp.Header.Get("Content-Type")))
 	}
 
 	var deviceCode DeviceCodeResponse

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -202,6 +203,45 @@ func TestCheckout_RejectsArbitraryHomeSubdir(t *testing.T) {
 	require.NoError(t, err)
 	for _, e := range entries {
 		assert.NotContains(t, e.Name(), ".bak.", "no backup file should appear when checkout is rejected")
+	}
+}
+
+// TestIsUnderTeamsDataRoot pins the defense-in-depth gate that protects
+// CleanupRevokedTeamContexts → os.RemoveAll from wiping arbitrary directories
+// if ws.Path is ever influenced by a hostile config.local.toml round-trip or
+// a future code path that lifts a path verbatim from API input.
+//
+// Failure prevented: SECREVIEW threat model (cloud-API trust boundary) flagged
+// workspace_registry.go:950 as missing a path-prefix invariant before the
+// destructive RemoveAll. This test pins the gate.
+func TestIsUnderTeamsDataRoot(t *testing.T) {
+	ep := "sageox.ai"
+	root := paths.TeamsDataDir(ep)
+
+	cases := []struct {
+		name string
+		path string
+		ep   string
+		want bool
+	}{
+		{"happy: direct child of root", filepath.Join(root, "team-abc"), ep, true},
+		{"happy: nested grandchild", filepath.Join(root, "team-abc", ".git"), ep, true},
+		{"reject: empty path", "", ep, false},
+		{"reject: empty endpoint", filepath.Join(root, "team-abc"), "", false},
+		{"reject: relative path", "team-abc", ep, false},
+		{"reject: root itself", root, ep, false},
+		{"reject: $HOME (the attack)", os.Getenv("HOME"), ep, false},
+		{"reject: /etc", "/etc", ep, false},
+		{"reject: sibling outside root", filepath.Dir(root) + "/teams-evil/abc", ep, false},
+		{"reject: traversal escape", filepath.Join(root, "..", "..", "etc"), ep, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isUnderTeamsDataRoot(tc.path, tc.ep)
+			assert.Equal(t, tc.want, got,
+				"isUnderTeamsDataRoot(%q, %q) = %v, want %v",
+				tc.path, tc.ep, got, tc.want)
+		})
 	}
 }
 
