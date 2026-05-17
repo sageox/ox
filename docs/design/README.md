@@ -19,15 +19,22 @@ ox dev catalog --json                # machine-readable manifest
 | Name | Family | Source | Spec |
 |------|--------|--------|------|
 | Box | layout | [`internal/ui/box.go`](../../internal/ui/box.go) | [components/box.md](components/box.md) |
+| Columns | layout | [`internal/cli/columns.go`](../../internal/cli/columns.go) | [components/columns.md](components/columns.md) |
+| Modal | layout | [`internal/dashboard/overlays/`](../../internal/dashboard/overlays/) | [components/modal.md](components/modal.md) |
+| Nav tree | layout | [`internal/dashboard/panes/nav/`](../../internal/dashboard/panes/nav/) | [components/nav-tree.md](components/nav-tree.md) |
+| Pane | layout | [`internal/dashboard/theme/styles.go`](../../internal/dashboard/theme/styles.go) | [components/pane.md](components/pane.md) |
+| Wordmark | layout | [`internal/ui/wordmark.go`](../../internal/ui/wordmark.go) | [components/wordmark.md](components/wordmark.md) |
+| Log formatter | data-display | [`internal/cli/logfmt.go`](../../internal/cli/logfmt.go) | [components/log-formatter.md](components/log-formatter.md) |
+| Markdown | data-display | [`internal/ui/markdown.go`](../../internal/ui/markdown.go) | [components/markdown.md](components/markdown.md) |
 | Timeline | data-display | [`internal/ui/timeline.go`](../../internal/ui/timeline.go) | [components/timeline.md](components/timeline.md) |
 | Sparkline | viz | [`internal/tui/sparkline.go`](../../internal/tui/sparkline.go) | [components/sparkline.md](components/sparkline.md) |
-| Markdown | data-display | [`internal/ui/markdown.go`](../../internal/ui/markdown.go) | [components/markdown.md](components/markdown.md) |
-| Select | input | [`internal/cli/select.go`](../../internal/cli/select.go) | [components/select.md](components/select.md) |
-| Prompt | input | [`internal/cli/prompt.go`](../../internal/cli/prompt.go) | [components/prompt.md](components/prompt.md) |
 | Confirm | input | [`internal/cli/confirm.go`](../../internal/cli/confirm.go) | [components/confirm.md](components/confirm.md) |
+| Filter tabs | input | [`internal/dashboard/panes/timeline/`](../../internal/dashboard/panes/timeline/) | [components/filter-tabs.md](components/filter-tabs.md) |
+| Multi-select | input | [`internal/cli/prompt.go`](../../internal/cli/prompt.go) | [components/multi-select.md](components/multi-select.md) |
+| Prompt | input | [`internal/cli/prompt.go`](../../internal/cli/prompt.go) | [components/prompt.md](components/prompt.md) |
+| Select (radio) | input | [`internal/cli/select.go`](../../internal/cli/select.go) | [components/select.md](components/select.md) |
 | Spinner | feedback | [`internal/cli/spinner.go`](../../internal/cli/spinner.go) | [components/spinner.md](components/spinner.md) |
-| Log formatter | data-display | [`internal/cli/logfmt.go`](../../internal/cli/logfmt.go) | [components/log-formatter.md](components/log-formatter.md) |
-| Columns | layout | [`internal/cli/columns.go`](../../internal/cli/columns.go) | [components/columns.md](components/columns.md) |
+| Status bar | feedback | [`internal/dashboard/panes/statusbar/`](../../internal/dashboard/panes/statusbar/) | [components/status-bar.md](components/status-bar.md) |
 
 ## Patterns
 
@@ -36,6 +43,10 @@ Composite patterns showing how multiple components compose into the real CLI sur
 - [patterns/doctor-output.md](patterns/doctor-output.md) — how `ox doctor` composes Box + Timeline + summary
 - [patterns/status-dashboard.md](patterns/status-dashboard.md) — how `ox status` composes Sparkline + Columns + Box
 - [patterns/session-timeline.md](patterns/session-timeline.md) — how session views compose
+- [patterns/dashboard.md](patterns/dashboard.md) — `ox dashboard` 4-pane TUI (Pane + Nav tree + Timeline + Inspector + Status bar + Modal)
+- [patterns/config-editor.md](patterns/config-editor.md) — `ox config` full-screen TUI form (scoped editor with categorized fields)
+- [patterns/init-wizard.md](patterns/init-wizard.md) — `ox init` inline multi-step wizard (Select + Multi-select + Confirm + Timeline)
+- [patterns/login-flow.md](patterns/login-flow.md) — `ox login` OAuth flow (Box + Spinner)
 
 ## Theming
 
