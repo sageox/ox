@@ -383,13 +383,27 @@ catalog-casts: build-ox ## Record asciinema .cast for animated components
 	@if ! command -v asciinema >/dev/null 2>&1; then \
 		echo "  ⚠ asciinema not installed; .cast recordings skipped"; \
 		echo "    install: brew install asciinema"; \
-		exit 0; \
+	else \
+		for name in $$(./bin/$(BINARY_NAME) dev catalog --json | jq -r '.components[] | select(.renderer=="asciinema") | .name'); do \
+			asciinema rec --quiet --overwrite --cols=80 --rows=24 \
+				--command="./bin/$(BINARY_NAME) dev catalog --component=$$name" \
+				$(CATALOG_ASSETS)/$$name.cast 2>/dev/null \
+				&& echo "  asciinema: $$name.cast" || true; \
+		done; \
+		$(MAKE) -s catalog-casts-v2; \
 	fi
-	@for name in $$(./bin/$(BINARY_NAME) dev catalog --json | jq -r '.components[] | select(.renderer=="asciinema") | .name'); do \
-		asciinema rec --quiet --overwrite --cols=80 --rows=24 \
-			--command="./bin/$(BINARY_NAME) dev catalog --component=$$name" \
-			$(CATALOG_ASSETS)/$$name.cast 2>/dev/null \
-			&& echo "  asciinema: $$name.cast" || true; \
+
+catalog-casts-v2: ## Rewrite v3 cast headers to v2 (player compat)
+	@for f in $(CATALOG_ASSETS)/*.cast; do \
+		[ -f "$$f" ] || continue; \
+		header=$$(head -1 "$$f"); \
+		case "$$header" in \
+			*'"version":3'*|*'"version": 3'*) \
+				v2=$$(echo "$$header" | jq -c '{version: 2, width: .term.cols, height: .term.rows, timestamp: .timestamp, env: .env, title: .title}'); \
+				{ echo "$$v2"; tail -n +2 "$$f"; } > "$$f.tmp" && mv "$$f.tmp" "$$f"; \
+				echo "  cast→v2: $$(basename $$f)"; \
+				;; \
+		esac; \
 	done
 
 catalog-html: build-ox ## Emit self-contained catalog/cli/index.html
