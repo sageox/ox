@@ -70,9 +70,13 @@ jobs:
           OX_SECURITY_BIN_CACHE: ${{ runner.temp }}/security-bin
 
       - name: Run deterministic security scanners
-        run: make sec-fast
-        env:
-          PATH: ${{ github.workspace }}/bin:${{ env.PATH }}
+        # `env.PATH` is not populated by GitHub Actions, so setting
+        # `PATH: ${{ github.workspace }}/bin:${{ env.PATH }}` truncates to
+        # `${workspace}/bin:` and drops /usr/bin (where `make` lives).
+        # Extend PATH inside the shell instead.
+        run: |
+          export PATH="${GITHUB_WORKSPACE}/bin:${PATH}"
+          make sec-fast
 
       - name: Upload SARIF to GitHub Security tab
         if: always()

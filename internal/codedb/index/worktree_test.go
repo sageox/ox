@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -38,11 +39,14 @@ func initGitRepo(t *testing.T, numCommits int) (string, string) {
 		}
 		out, err := mkCmd().CombinedOutput()
 		// ox-a9ak: under heavy preflight parallelism the system git
-		// binary occasionally crashes mid-command (SIGSEGV / SIGBUS).
-		// External-tool defect, transient under load — single retry
-		// is enough to keep the test suite from flaking. Real
-		// non-zero exits still surface immediately.
-		if err != nil && isGitSignalCrash(err) {
+		// binary occasionally crashes mid-command (SIGSEGV / SIGBUS)
+		// or emits transient object-DB errors ("bad tree object",
+		// "invalid object", "Error building trees") when packed
+		// objects haven't reached disk yet. External-tool defect,
+		// transient under load — single retry is enough to keep the
+		// test suite from flaking. Real non-zero exits surface on the
+		// retry attempt.
+		if err != nil && (isGitSignalCrash(err) || isGitTransientObjectError(out)) {
 			out, err = mkCmd().CombinedOutput()
 		}
 		require.NoError(t, err, "git %v: %s", args, out)
@@ -313,4 +317,17 @@ func isGitSignalCrash(err error) bool {
 		return true
 	}
 	return false
+}
+
+// isGitTransientObjectError reports whether git's combined output matches
+// the transient object-DB corruption pattern observed under heavy parallel
+// CI load (ox-a9ak family). Symptoms include "bad tree object HEAD",
+// "invalid object", and "Error building trees" emitted mid-loop in a long
+// sequence of `git commit` calls. These resolve on retry once pending
+// writes settle; real corruption persists across retries and surfaces then.
+func isGitTransientObjectError(out []byte) bool {
+	s := string(out)
+	return strings.Contains(s, "bad tree object") ||
+		strings.Contains(s, "invalid object") ||
+		strings.Contains(s, "Error building trees")
 }
