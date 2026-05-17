@@ -23,6 +23,10 @@ const (
 	FamilyViz         Family = "viz"
 	FamilyInput       Family = "input"
 	FamilyFeedback    Family = "feedback"
+	// FamilyScreen groups full composed screens — concrete snapshots of
+	// real commands (`ox config`, `ox init`, `ox dashboard`) so designers
+	// can see the assembled surface, not just the primitives that build it.
+	FamilyScreen Family = "screen"
 )
 
 // Renderer picks the right tool for the visual fidelity a component needs.

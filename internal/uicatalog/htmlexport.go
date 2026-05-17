@@ -144,7 +144,7 @@ func renderExports(exports []string) string {
 
 func renderTOC(byFamily map[Family][]Entry) string {
 	families := []Family{
-		FamilyLayout, FamilyDataDisplay, FamilyViz, FamilyInput, FamilyFeedback,
+		FamilyScreen, FamilyLayout, FamilyDataDisplay, FamilyViz, FamilyInput, FamilyFeedback,
 	}
 	w := &strings.Builder{}
 	for _, fam := range families {
