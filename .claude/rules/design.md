@@ -82,7 +82,18 @@ Data-ink ratio matters. Don't add chrome that doesn't carry information. Borders
 
 Test with `COLUMNS=80 ox dev catalog`. Lines wider than 80 visible columns get rejected.
 
-### 13. No binary catalog assets — ever
+### 13. Only `.cast` when there is actual motion
+
+A catalog entry's `Renderer: RendererAsciinema` says "this component IS the motion." A static-frame demo recorded as `.cast` just adds player chrome around a still — it implies motion that isn't there, and reads as worse than a freeze SVG.
+
+**Why:** the asciinema player widget is a *promise* that something will animate when you press play. Breaking that promise (silent screen, no movement) is a UX bug. The catalog must not falsely signal interactivity.
+
+**How to apply:**
+- Default new entries to freeze (omit `Renderer`).
+- Set `Renderer: RendererAsciinema` only if the demo command produces **observable temporal change** (frames over time, not a single rendered string).
+- If you want to *describe* an animated behavior without actually animating, use freeze + the component's spec doc to explain where the motion lives at runtime (see `docs/design/components/spinner.md` for the canonical example).
+
+### 14. No binary catalog assets — ever
 
 Forbidden in `docs/design/`, `dist/design-catalog/`, and the published `proposals/...-ox-cli-component-catalog/` directory:
 

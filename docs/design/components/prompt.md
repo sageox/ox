@@ -4,7 +4,7 @@ component: prompt
 package: internal/cli
 since: 0.3.0
 family: input
-renderer: asciinema
+renderer: freeze
 exports: [Prompt]
 ---
 

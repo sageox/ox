@@ -4,7 +4,7 @@ component: spinner
 package: internal/cli
 since: 0.3.0
 family: feedback
-renderer: asciinema
+renderer: freeze
 exports: [WithSpinner, WithSpinnerNoResult]
 ---
 
@@ -22,7 +22,7 @@ Operations under 100ms (the spinner appears, blinks, vanishes — noise without 
 
 ## Anatomy
 
-`ox dev catalog --component=spinner` (asciinema captures the motion). Static fallback shows a single frame.
+`ox dev catalog --component=spinner` — static snapshot showing the in-progress + done frames. The actual spinner animation only exists in live commands (e.g. `ox sync`); a single-frame .cast adds player chrome without showing motion, which the catalog deliberately avoids per [.claude/rules/design.md](../../../.claude/rules/design.md) ("only .cast when there is actual motion").
 
 ## API
 

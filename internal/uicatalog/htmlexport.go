@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/theme"
 )
 
 // HTMLExportOpts controls how the catalog snapshot is built.
@@ -85,11 +87,12 @@ func ExportHTML(w io.Writer, opts HTMLExportOpts) error {
 	}
 
 	page := buildPage(pageInput{
-		Version:   opts.Version,
-		Cards:     bodyCards.String(),
-		TOC:       renderTOC(tocByFamily),
-		PlayerCSS: playerCSS,
-		PlayerJS:  playerJS,
+		Version:    opts.Version,
+		Cards:      bodyCards.String(),
+		ThemeBlock: renderThemeBlock(),
+		TOC:        renderTOC(tocByFamily),
+		PlayerCSS:  playerCSS,
+		PlayerJS:   playerJS,
 		ClientJSON: string(clientJSON),
 	})
 
@@ -185,10 +188,53 @@ func readOrEmpty(path string) string {
 type pageInput struct {
 	Version    string
 	Cards      string
+	ThemeBlock string
 	TOC        string
 	PlayerCSS  string
 	PlayerJS   string
 	ClientJSON string
+}
+
+// renderThemeBlock emits the palette/tokens reference at the top of the
+// catalog page so designers and AI coworkers can see every semantic
+// color without reading Go source. Data comes from theme.Tokens, which
+// mirrors internal/theme/generated.go (the npm-synced output of
+// sageox-design).
+func renderThemeBlock() string {
+	byCategory := map[theme.TokenCategory][]theme.TokenInfo{}
+	order := []theme.TokenCategory{
+		theme.CategoryBrand, theme.CategorySemantic,
+		theme.CategoryVisibility, theme.CategoryWordmark,
+	}
+	for _, t := range theme.Tokens {
+		byCategory[t.Category] = append(byCategory[t.Category], t)
+	}
+
+	w := &strings.Builder{}
+	w.WriteString(`<section id="theme" class="theme">` + "\n")
+	w.WriteString(`<header class="theme-header"><h2>Theme</h2><p>Semantic color tokens sourced from <a href="https://github.com/sageox/sageox-design/blob/main/tokens/colors.yaml"><code>sageox-design/tokens/colors.yaml</code></a>. Each token resolves to a different hex in light vs dark terminals via <code>lipgloss.AdaptiveColor</code>.</p></header>` + "\n")
+
+	for _, cat := range order {
+		toks, ok := byCategory[cat]
+		if !ok {
+			continue
+		}
+		fmt.Fprintf(w, `<div class="token-group"><h3>%s</h3><div class="swatches">`+"\n",
+			html.EscapeString(string(cat)))
+		for _, t := range toks {
+			fmt.Fprintf(w, `<figure class="swatch">`+
+				`<div class="swatch-pair"><span class="chip chip-light" style="background:%s"></span><span class="chip chip-dark" style="background:%s"></span></div>`+
+				`<figcaption><code class="tname">%s</code><span class="thex thex-light">%s</span><span class="thex thex-dark">%s</span><span class="tdesc">%s</span></figcaption>`+
+				`</figure>`+"\n",
+				html.EscapeString(t.LightHex), html.EscapeString(t.DarkHex),
+				html.EscapeString(t.Name),
+				html.EscapeString(t.LightHex), html.EscapeString(t.DarkHex),
+				html.EscapeString(t.UseCase))
+		}
+		w.WriteString(`</div></div>` + "\n")
+	}
+	w.WriteString(`</section>` + "\n")
+	return w.String()
 }
 
 // Tokens used here mirror sageox-design/tokens/colors.yaml. If you change
@@ -272,6 +318,25 @@ html[data-mode="light"] .snapshot-light { display: block; }
   main { grid-template-columns: 1fr; }
   nav.toc { display: none; }
 }
+
+/* Theme block (palette reference) */
+.theme { margin-bottom: 2.5rem; padding: 1.5rem; background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; }
+.theme-header h2 { margin: 0 0 0.25rem; font-family: var(--mono); font-size: 1.1rem; color: var(--accent); }
+.theme-header p { margin: 0 0 1.25rem; color: var(--fg-dim); font-size: 0.9rem; max-width: 70ch; }
+.theme-header code { font-family: var(--mono); font-size: 0.85rem; }
+.token-group { margin-bottom: 1.5rem; }
+.token-group h3 { margin: 0 0 0.75rem; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--fg-dim); font-weight: 600; }
+.swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.75rem; }
+.swatch { margin: 0; display: flex; flex-direction: column; gap: 0.4rem; padding: 0.65rem; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; }
+.swatch-pair { display: flex; height: 32px; border-radius: 4px; overflow: hidden; border: 1px solid var(--border); }
+.swatch-pair .chip { flex: 1; }
+.swatch figcaption { display: grid; grid-template-columns: auto auto; gap: 0.15rem 0.5rem; font-size: 0.78rem; }
+.swatch .tname { grid-column: 1 / -1; font-family: var(--mono); color: var(--fg); font-size: 0.85rem; }
+.swatch .thex { font-family: var(--mono); color: var(--fg-dim); font-size: 0.72rem; }
+.swatch .thex::before { color: var(--fg-dim); font-size: 0.65rem; margin-right: 0.25rem; }
+.swatch .thex-light::before { content: "L"; }
+.swatch .thex-dark::before { content: "D"; }
+.swatch .tdesc { grid-column: 1 / -1; color: var(--fg-dim); font-size: 0.78rem; line-height: 1.4; }
 `
 
 const inlineJS = `
@@ -372,8 +437,10 @@ func buildPage(in pageInput) string {
   </div>
 </header>
 <main>
-  <nav class="toc">` + in.TOC + `</nav>
-  <section class="content">` + in.Cards + `</section>
+  <nav class="toc">
+    <section><h3>reference</h3><ul><li><a href="#theme">Theme</a></li></ul></section>
+` + in.TOC + `</nav>
+  <section class="content">` + in.ThemeBlock + in.Cards + `</section>
 </main>
 <script id="catalog-data" type="application/json">` + in.ClientJSON + `</script>
 ` + playerJSBlock + `

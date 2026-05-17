@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"sync"
 
 	"github.com/charmbracelet/x/ansi"
@@ -51,13 +52,20 @@ func init() {
 		os.Setenv("NO_COLOR", "1")
 	}
 
+	// Escape hatch: CLICOLOR_FORCE=1 disables the global ANSI stripper below
+	// so styled output flows verbatim through pipes. Used by `make
+	// catalog-build` to pipe `ox dev catalog --component=…` into
+	// charmbracelet/freeze, which needs the ANSI to produce themed SVGs.
+	// See .claude/rules/design.md and docs/design/theming.md.
+	forceColor, _ := strconv.ParseBool(os.Getenv("CLICOLOR_FORCE"))
+
 	// When stdout/stderr are not a TTY (piped, captured by agent, etc.),
 	// intercept with ANSI-stripping pipes. Lipgloss v2 beta always emits ANSI
 	// via Style.Render() regardless of NO_COLOR — the colorprofile.Writer is
 	// the intended stripping layer, but ~300 call sites use
 	// fmt.Print(style.Render(...)) which bypasses it. These pipes catch
 	// everything globally for both streams.
-	if !isatty.IsTerminal(os.Stdout.Fd()) && !isatty.IsCygwinTerminal(os.Stdout.Fd()) {
+	if !forceColor && !isatty.IsTerminal(os.Stdout.Fd()) && !isatty.IsCygwinTerminal(os.Stdout.Fd()) {
 		os.Setenv("NO_COLOR", "1") // keep for libraries that do check it
 
 		pr, pw, err := os.Pipe()
@@ -72,7 +80,7 @@ func init() {
 			}()
 		}
 	}
-	if !isatty.IsTerminal(os.Stderr.Fd()) && !isatty.IsCygwinTerminal(os.Stderr.Fd()) {
+	if !forceColor && !isatty.IsTerminal(os.Stderr.Fd()) && !isatty.IsCygwinTerminal(os.Stderr.Fd()) {
 		pr, pw, err := os.Pipe()
 		if err == nil {
 			realStderr := os.Stderr

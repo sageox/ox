@@ -4,7 +4,7 @@ component: timeline
 package: internal/ui
 since: 0.5.0
 family: data-display
-renderer: asciinema
+renderer: freeze
 exports: [RenderTimeline, TimelineNode, TimelineItem]
 ---
 
@@ -22,7 +22,7 @@ Single-line status (use `cli.StyleSuccess` directly) or tabular history where or
 
 ## Anatomy
 
-See `ox dev catalog --component=timeline` or [sageox-design.netlify.app/catalog/cli/#c-timeline](https://sageox-design.netlify.app/catalog/cli/#c-timeline). Catalog renders this as an animated asciinema recording so the streaming-progress mode is visible — the static SVG poster shows the completed end state.
+See `ox dev catalog --component=timeline` or [sageox-design.netlify.app/catalog/cli/#c-timeline](https://sageox-design.netlify.app/catalog/cli/#c-timeline). Rendered as a static snapshot — the timeline output IS the visual; the streaming render in `--fix` mode is a `cmd/ox/doctor.go` concern, not a property of the component.
 
 ## API
 

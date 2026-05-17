@@ -10,9 +10,8 @@ func init() {
 		Name:    "prompt",
 		Family:  uicatalog.FamilyInput,
 		Package: "internal/cli",
-		Exports:  []string{"SelectOne"},
-		Since:    "0.3.0",
-		Renderer: uicatalog.RendererAsciinema,
+		Exports: []string{"SelectOne"},
+		Since:   "0.3.0",
 		WhenToUse: "Free-form text input with a default suggestion. " +
 			"Reads from stdin in non-TTY mode without changing the contract — so prompts compose with `echo X | ox foo` cleanly.",
 		WhenNotTo: "Sensitive input (no echo masking yet — file an issue) or " +

@@ -10,9 +10,8 @@ func init() {
 		Name:    "spinner",
 		Family:  uicatalog.FamilyFeedback,
 		Package: "internal/cli",
-		Exports:  []string{"WithSpinner", "WithSpinnerNoResult"},
-		Since:    "0.3.0",
-		Renderer: uicatalog.RendererAsciinema,
+		Exports: []string{"WithSpinner", "WithSpinnerNoResult"},
+		Since:   "0.3.0",
 		WhenToUse: "Wrap any operation expected to take > 300ms (network, git clone, daemon RPC). " +
 			"Auto-hides if the work completes faster, so fast paths don't flicker.",
 		WhenNotTo: "Operations < 100ms — the spinner appears, blinks, vanishes, " +

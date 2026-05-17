@@ -10,9 +10,8 @@ func init() {
 		Name:    "confirm",
 		Family:  uicatalog.FamilyInput,
 		Package: "internal/cli",
-		Exports:  []string{"ConfirmYesNo", "ConfirmDangerousOperation", "ConfirmUninstall"},
-		Since:    "0.4.0",
-		Renderer: uicatalog.RendererAsciinema,
+		Exports: []string{"ConfirmYesNo", "ConfirmDangerousOperation", "ConfirmUninstall"},
+		Since:   "0.4.0",
 		WhenToUse: "Yes/no gates with a clear default. For destructive operations " +
 			"use ConfirmDangerousOperation — it requires typing the exact target name, not just pressing y.",
 		WhenNotTo: "Selecting between equal options (use Select) or " +

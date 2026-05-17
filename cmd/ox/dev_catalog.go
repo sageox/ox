@@ -10,6 +10,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/theme"
 	"github.com/sageox/ox/internal/uicatalog"
 
 	// register all catalog entries via their init() functions
@@ -159,12 +160,31 @@ func runCatalogJSON() error {
 			WhenNotTo: e.WhenNotTo,
 		})
 	}
+	type tokenJSON struct {
+		Name     string `json:"name"`
+		Category string `json:"category"`
+		Light    string `json:"light"`
+		Dark     string `json:"dark"`
+		Use      string `json:"use"`
+	}
+	tokens := make([]tokenJSON, 0, len(theme.Tokens))
+	for _, t := range theme.Tokens {
+		tokens = append(tokens, tokenJSON{
+			Name:     t.Name,
+			Category: string(t.Category),
+			Light:    t.LightHex,
+			Dark:     t.DarkHex,
+			Use:      t.UseCase,
+		})
+	}
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(map[string]any{
 		"surface":    "cli",
 		"version":    version.Version,
 		"components": out,
+		"tokens":     tokens,
 	})
 }
 

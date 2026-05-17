@@ -4,7 +4,7 @@ component: confirm
 package: internal/cli
 since: 0.4.0
 family: input
-renderer: asciinema
+renderer: freeze
 exports: [ConfirmYesNo, ConfirmDangerousOperation, ConfirmUninstall]
 ---
 

@@ -13,9 +13,8 @@ func init() {
 		Name:    "timeline",
 		Family:  uicatalog.FamilyDataDisplay,
 		Package: "internal/ui",
-		Exports:  []string{"RenderTimeline", "TimelineNode", "TimelineItem"},
-		Since:    "0.5.0",
-		Renderer: uicatalog.RendererAsciinema, // streaming check progression has motion worth showing
+		Exports: []string{"RenderTimeline", "TimelineNode", "TimelineItem"},
+		Since:   "0.5.0",
 		WhenToUse: "Multi-step output where order matters — doctor results, " +
 			"sync stages, post-install steps. Each node anchors a phase, items inside report findings.",
 		WhenNotTo: "Single-line status (use `StyleSuccess` directly) or tabular history " +

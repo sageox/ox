@@ -10,9 +10,8 @@ func init() {
 		Name:    "select",
 		Family:  uicatalog.FamilyInput,
 		Package: "internal/cli",
-		Exports:  []string{"SelectOne", "SelectOneValue", "SelectMany"},
-		Since:    "0.4.0",
-		Renderer: uicatalog.RendererAsciinema,
+		Exports: []string{"SelectOne", "SelectOneValue", "SelectMany"},
+		Since:   "0.4.0",
 		WhenToUse: "Pick one (or many) from a known set of options. Arrow-key navigation " +
 			"in TTY; auto-falls-back to numbered prompt in pipes and CI. Generic SelectOneValue avoids index-juggling.",
 		WhenNotTo: "Free-form text (use Prompt) or yes/no (use Confirm). " +

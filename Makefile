@@ -360,7 +360,8 @@ catalog-svgs: build-ox ## Render freeze SVG snapshots (light + dark) per entry
 		echo "    install: brew install charmbracelet/tap/freeze"; \
 	else \
 		for name in $$(./bin/$(BINARY_NAME) dev catalog --json | jq -r '.components[].name'); do \
-			./bin/$(BINARY_NAME) dev catalog --component=$$name 2>/dev/null > $(CATALOG_ASSETS)/$$name.ans; \
+			CLICOLOR_FORCE=1 FORCE_COLOR=1 COLORTERM=truecolor TERM=xterm-256color \
+				./bin/$(BINARY_NAME) dev catalog --component=$$name 2>/dev/null > $(CATALOG_ASSETS)/$$name.ans; \
 			freeze --output $(CATALOG_ASSETS)/$$name.dark.svg \
 				--language ansi \
 				--font.family "JetBrains Mono" --font.size 13 \
@@ -385,7 +386,7 @@ catalog-casts: build-ox ## Record asciinema .cast for animated components
 		echo "    install: brew install asciinema"; \
 	else \
 		for name in $$(./bin/$(BINARY_NAME) dev catalog --json | jq -r '.components[] | select(.renderer=="asciinema") | .name'); do \
-			asciinema rec --quiet --overwrite --cols=80 --rows=24 \
+			CLICOLOR_FORCE=1 FORCE_COLOR=1 asciinema rec --quiet --overwrite --cols=80 --rows=24 \
 				--command="./bin/$(BINARY_NAME) dev catalog --component=$$name" \
 				$(CATALOG_ASSETS)/$$name.cast 2>/dev/null \
 				&& echo "  asciinema: $$name.cast" || true; \

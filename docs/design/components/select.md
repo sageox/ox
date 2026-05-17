@@ -4,7 +4,7 @@ component: select
 package: internal/cli
 since: 0.4.0
 family: input
-renderer: asciinema
+renderer: freeze
 exports: [SelectOne, SelectOneValue, SelectMany]
 ---
 
@@ -22,7 +22,7 @@ Free-form text (use [Prompt](prompt.md)) or yes/no (use [Confirm](confirm.md)). 
 
 ## Anatomy
 
-`ox dev catalog --component=select` (animated recording shows arrow-key navigation) or [sageox-design.netlify.app/catalog/cli/#c-select](https://sageox-design.netlify.app/catalog/cli/#c-select).
+`ox dev catalog --component=select` or [sageox-design.netlify.app/catalog/cli/#c-select](https://sageox-design.netlify.app/catalog/cli/#c-select). Static snapshot — arrow-key navigation is a runtime behavior, exercised in any command that calls `cli.SelectOne` (e.g. `ox init`).
 
 ## API
 
