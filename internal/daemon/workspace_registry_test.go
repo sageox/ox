@@ -235,8 +235,15 @@ func TestCleanupRevokedTeamContexts(t *testing.T) {
 	})
 
 	t.Run("removes clean checkout from disk and registry", func(t *testing.T) {
+		// Point XDG_DATA_HOME at a tmpDir so paths.TeamContextDir resolves
+		// inside the test sandbox. The SECREVIEW-introduced isUnderTeamsDataRoot
+		// gate refuses RemoveAll on paths outside the canonical teams root,
+		// so test fixtures must live under that root or the test would
+		// (correctly) exercise the refusal path instead of the cleanup path.
 		tmpDir := t.TempDir()
-		tcDir := filepath.Join(tmpDir, "team-clean")
+		t.Setenv("XDG_DATA_HOME", tmpDir)
+		ep := "test.sageox.ai"
+		tcDir := paths.TeamContextDir("team_revoked", ep)
 		require.NoError(t, os.MkdirAll(tcDir, 0755))
 		initGitRepo(t, tcDir)
 
@@ -246,6 +253,7 @@ func TestCleanupRevokedTeamContexts(t *testing.T) {
 			Type:     WorkspaceTypeTeamContext,
 			TeamID:   "team_revoked",
 			TeamName: "revoked-team",
+			Endpoint: ep,
 			Path:     tcDir,
 			Exists:   true,
 		}
@@ -256,6 +264,39 @@ func TestCleanupRevokedTeamContexts(t *testing.T) {
 		assert.Nil(t, reg.workspaces["team_revoked"], "revoked clean workspace should be removed from registry")
 		_, err := os.Stat(tcDir)
 		assert.True(t, os.IsNotExist(err), "clean checkout directory should be deleted from disk")
+	})
+
+	t.Run("refuses to RemoveAll path outside teams data root", func(t *testing.T) {
+		// Regression test for the SECREVIEW gate: if ws.Path is somehow set to a
+		// path outside the canonical paths.TeamsDataDir (hostile config.local.toml
+		// round-trip, future bug that lifts a Path from API input), the cleanup
+		// must REFUSE the destructive op instead of wiping the directory.
+		// We construct a CLEAN git repo so isCheckoutClean returns true and
+		// execution reaches the gate (the dirty branch has its own protection).
+		tmpDir := t.TempDir()
+		victim := filepath.Join(tmpDir, "looks-like-ssh-dir")
+		require.NoError(t, os.MkdirAll(victim, 0755))
+		initGitRepo(t, victim) // produces a committed, clean repo
+
+		reg := NewWorkspaceRegistry(tmpDir, "test-repo")
+		reg.workspaces["team_revoked"] = &WorkspaceState{
+			ID:       "team_revoked",
+			Type:     WorkspaceTypeTeamContext,
+			TeamID:   "team_revoked",
+			TeamName: "revoked-team",
+			Endpoint: "test.sageox.ai",
+			Path:     victim, // intentionally NOT under paths.TeamsDataDir
+			Exists:   true,
+		}
+
+		reg.CleanupRevokedTeamContexts(map[string]bool{})
+
+		ws := reg.workspaces["team_revoked"]
+		require.NotNil(t, ws, "workspace must remain in registry — RemoveAll was refused")
+		assert.Contains(t, ws.LastErr, "outside teams data root",
+			"LastErr should record the refusal reason")
+		_, err := os.Stat(victim)
+		assert.NoError(t, err, "victim directory must still exist — RemoveAll was refused")
 	})
 
 	t.Run("keeps dirty checkout with error marker", func(t *testing.T) {
@@ -332,7 +373,9 @@ func TestCleanupRevokedTeamContexts(t *testing.T) {
 
 	t.Run("mixed keep and remove", func(t *testing.T) {
 		tmpDir := t.TempDir()
-		cleanDir := filepath.Join(tmpDir, "team-clean-mix")
+		t.Setenv("XDG_DATA_HOME", tmpDir)
+		ep := "test.sageox.ai"
+		cleanDir := paths.TeamContextDir("team_removed", ep)
 		require.NoError(t, os.MkdirAll(cleanDir, 0755))
 		initGitRepo(t, cleanDir)
 
@@ -343,7 +386,8 @@ func TestCleanupRevokedTeamContexts(t *testing.T) {
 			Type:     WorkspaceTypeTeamContext,
 			TeamID:   "team_active",
 			TeamName: "active-team",
-			Path:     "/some/active/path",
+			Endpoint: ep,
+			Path:     paths.TeamContextDir("team_active", ep),
 			Exists:   true,
 		}
 		// this one gets removed (clean checkout, not in currentTeamIDs)
@@ -352,6 +396,7 @@ func TestCleanupRevokedTeamContexts(t *testing.T) {
 			Type:     WorkspaceTypeTeamContext,
 			TeamID:   "team_removed",
 			TeamName: "removed-team",
+			Endpoint: ep,
 			Path:     cleanDir,
 			Exists:   true,
 		}
@@ -361,6 +406,7 @@ func TestCleanupRevokedTeamContexts(t *testing.T) {
 			Type:     WorkspaceTypeTeamContext,
 			TeamID:   "team_not_on_disk",
 			TeamName: "no-disk-team",
+			Endpoint: ep,
 			Path:     "/nonexistent",
 			Exists:   false,
 		}

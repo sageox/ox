@@ -81,9 +81,9 @@ func TestBuildGitHubExtractorPrompt_WithGuidelines(t *testing.T) {
 	prompt := buildGitHubExtractorPrompt("[]", "1 day", "Focus on security-related changes.")
 
 	// Guidelines should be injected
-	assert.Contains(t, prompt, "<team-guidelines>")
+	assert.Contains(t, prompt, "<team-guidelines-")
 	assert.Contains(t, prompt, "Focus on security-related changes.")
-	assert.Contains(t, prompt, "</team-guidelines>")
+	assert.Contains(t, prompt, "</team-guidelines-")
 
 	// System prompt still present
 	assert.Contains(t, prompt, "You are a signal extractor for an alignment feed system")

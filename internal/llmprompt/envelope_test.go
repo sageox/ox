@@ -85,7 +85,7 @@ func TestEnvelope_AttributeOrderDeterministic(t *testing.T) {
 	aIdx := strings.Index(got, "a-key")
 	mIdx := strings.Index(got, "m-key")
 	zIdx := strings.Index(got, "z-key")
-	if !(aIdx < mIdx && mIdx < zIdx) {
+	if aIdx >= mIdx || mIdx >= zIdx {
 		t.Errorf("attributes must be sorted by key in output: %s", got)
 	}
 }
