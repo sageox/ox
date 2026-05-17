@@ -206,6 +206,30 @@ func TestCheckout_RejectsArbitraryHomeSubdir(t *testing.T) {
 	}
 }
 
+// TestTrustedGitHosts_NarrowedForDaemonPath pins the threat-model decision
+// that the daemon's auto-clone allow-list is SageOx-only. github.com and
+// gitlab.com were intentionally removed: a compromised SageOx cloud API
+// must not be able to direct the daemon to clone arbitrary GitHub/GitLab
+// repositories as "team contexts" (no further compromise required).
+//
+// Failure prevented: SECREVIEW threat model HIGH on the cloud-API trust
+// boundary (sync.go:1887 trustedGitHosts).
+func TestTrustedGitHosts_NarrowedForDaemonPath(t *testing.T) {
+	// The narrowed list MUST exclude generic SaaS git hosts and include only
+	// SageOx-controlled apex domains. Subdomain matching does the rest.
+	for _, h := range trustedGitHosts {
+		switch h {
+		case "sageox.io", "sageox.ai":
+			// expected
+		case "github.com", "gitlab.com":
+			t.Errorf("trustedGitHosts contains %q — narrowed in SECREVIEW; do not re-add to the daemon path. "+
+				"Route any non-SageOx clone need through a separate CLI-side allow-list keyed on workspace type.", h)
+		default:
+			t.Errorf("unexpected entry in trustedGitHosts: %q — review threat model before adding", h)
+		}
+	}
+}
+
 // TestIsUnderTeamsDataRoot pins the defense-in-depth gate that protects
 // CleanupRevokedTeamContexts → os.RemoveAll from wiping arbitrary directories
 // if ws.Path is ever influenced by a hostile config.local.toml round-trip or

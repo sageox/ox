@@ -47,8 +47,15 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 	if err := os.MkdirAll(parentDir, 0755); err != nil {
 		return nil, fmt.Errorf("create parent dir %s: %w", parentDir, err)
 	}
+	// Hardening: `-c protocol.{file,ext}.allow=never` disables file:// and
+	// ext::sh:// transports for this invocation, in case a malicious submodule
+	// or redirect tries to coerce git into a CVE-2017-1000117-class fetch.
+	// `--` terminates option parsing so a hostile URL starting with "-" is
+	// treated as a positional, not a flag.
 	cloneArgs := append(
 		gitutil.GitHTTPTimeoutFlags(),
+		"-c", "protocol.file.allow=never",
+		"-c", "protocol.ext.allow=never",
 		"clone",
 		"--filter=blob:none",
 		"--depth=1",
@@ -57,6 +64,7 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 		"--single-branch",
 		"--branch", "main",
 		"--quiet",
+		"--",
 		cloneURL, repoPath,
 	)
 	cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)

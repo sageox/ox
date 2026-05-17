@@ -128,8 +128,17 @@ func cloneRepo(ctx context.Context, repoURL, path string, creds *GitCredentials,
 		return fmt.Errorf("failed to build authenticated URL: %w", err)
 	}
 
-	// build git clone command
-	args := []string{"clone"}
+	// build git clone command. Hardening:
+	//   - protocol.{file,ext}.allow=never closes file:// and ext::sh:// transports
+	//     (CVE-2017-1000117 class) even if a submodule or redirect tries to coerce
+	//     them. The auth flow already pins https://, but this is belt-and-suspenders.
+	//   - "--" before the URL stops option parsing so a hostile URL starting with
+	//     "-" is treated as positional, never as a flag.
+	args := []string{
+		"-c", "protocol.file.allow=never",
+		"-c", "protocol.ext.allow=never",
+		"clone",
+	}
 
 	if opts != nil {
 		if opts.PartialClone {
@@ -152,7 +161,7 @@ func cloneRepo(ctx context.Context, repoURL, path string, creds *GitCredentials,
 		}
 	}
 
-	args = append(args, authURL, path)
+	args = append(args, "--", authURL, path)
 
 	// log without exposing token
 	logger.Debug("git clone", "repo", sanitizeURL(repoURL), "path", path)

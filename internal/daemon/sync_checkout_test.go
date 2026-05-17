@@ -268,17 +268,7 @@ func TestIsValidCloneURL(t *testing.T) {
 		wantErr bool
 		errMsg  string
 	}{
-		// valid URLs - trusted hosts
-		{
-			name:    "github.com https",
-			url:     "https://github.com/org/repo.git",
-			wantErr: false,
-		},
-		{
-			name:    "gitlab.com https",
-			url:     "https://gitlab.com/org/repo.git",
-			wantErr: false,
-		},
+		// valid URLs - trusted hosts (daemon path: SageOx-controlled only)
 		{
 			name:    "git.sageox.io https",
 			url:     "https://git.sageox.io/team/repo.git",
@@ -290,14 +280,38 @@ func TestIsValidCloneURL(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "subdomain of trusted host - github",
-			url:     "https://api.github.com/repos/org/repo.git",
-			wantErr: false, // api.github.com ends with .github.com, so it's trusted
+			name:    "subdomain of trusted host - sageox.ai",
+			url:     "https://test.sageox.ai/team/repo.git",
+			wantErr: false, // matches .sageox.ai
+		},
+		// The daemon's auto-clone path was narrowed in SECREVIEW follow-up: github.com
+		// and gitlab.com are no longer trusted destinations for daemon-initiated clones.
+		// A compromised cloud API can therefore no longer direct the daemon to clone
+		// arbitrary GitHub/GitLab repos as "team contexts." If you're tempted to add
+		// these back, route through a separate CLI-side allow-list instead.
+		{
+			name:    "github.com https - REJECTED on daemon path (was previously trusted)",
+			url:     "https://github.com/org/repo.git",
+			wantErr: true,
+			errMsg:  "untrusted git host",
 		},
 		{
-			name:    "subdomain of trusted host - gitlab",
+			name:    "gitlab.com https - REJECTED on daemon path (was previously trusted)",
+			url:     "https://gitlab.com/org/repo.git",
+			wantErr: true,
+			errMsg:  "untrusted git host",
+		},
+		{
+			name:    "subdomain of github - also REJECTED on daemon path",
+			url:     "https://api.github.com/repos/org/repo.git",
+			wantErr: true,
+			errMsg:  "untrusted git host",
+		},
+		{
+			name:    "subdomain of gitlab - also REJECTED on daemon path",
 			url:     "https://enterprise.gitlab.com/org/repo.git",
-			wantErr: false, // matches .gitlab.com
+			wantErr: true,
+			errMsg:  "untrusted git host",
 		},
 
 		// invalid URLs - wrong schemes (SSRF vectors)
@@ -458,13 +472,13 @@ func TestIsValidCloneURL(t *testing.T) {
 			errMsg:  "URL has no host", // parsed as path with no scheme/host
 		},
 		{
-			name:    "URL with credentials (should still validate host)",
-			url:     "https://user:pass@github.com/org/repo.git",
+			name:    "URL with credentials on trusted host",
+			url:     "https://user:pass@git.sageox.ai/team/repo.git",
 			wantErr: false,
 		},
 		{
 			name:    "URL with port on trusted host",
-			url:     "https://github.com:443/org/repo.git",
+			url:     "https://git.sageox.ai:443/team/repo.git",
 			wantErr: false,
 		},
 		{

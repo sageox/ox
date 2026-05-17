@@ -1754,7 +1754,18 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 			"-c", "credential.helper=" + helperCmd,
 		}
 		cloneArgs := append(preArgs, gitHTTPTimeoutFlags()...)
-		cloneArgs = append(cloneArgs, "clone", "--quiet", cloneURL, payload.RepoPath)
+		// Belt-and-suspenders hardening on the daemon's auto-clone path:
+		//   - protocol.{file,ext}.allow=never disables ext::sh:// transport (CVE-2017-1000117
+		//     class) and file:// fetch from submodules / .gitmodules, even though we already
+		//     reject those at the URL parse step. A compromised cloud API can't sneak them
+		//     past the parser via, say, a redirect into a submodule that uses ext::.
+		//   - "--" terminates option parsing so an attacker URL beginning with "-" can never
+		//     be reinterpreted as a flag, regardless of future scheme/host policy changes.
+		cloneArgs = append(cloneArgs,
+			"-c", "protocol.file.allow=never",
+			"-c", "protocol.ext.allow=never",
+			"clone", "--quiet", "--", cloneURL, payload.RepoPath,
+		)
 		cloneCmd := exec.CommandContext(ctx, "git", cloneArgs...)
 		// set cmd.Dir so git doesn't fail when daemon CWD has been deleted
 		if parentDir := filepath.Dir(payload.RepoPath); parentDir != "" {
@@ -1881,14 +1892,26 @@ func (s *SyncScheduler) remoteRefCheck(ctx context.Context, repoPath string) boo
 	return match
 }
 
-// trustedGitHosts is the allowlist of hosts permitted for git clone operations.
-// This prevents SSRF attacks by blocking file://, local network, and untrusted hosts.
-// Includes base domains (sageox.ai, sageox.io) to allow staging subdomains like git.test.sageox.ai.
+// trustedGitHosts is the allowlist of hosts permitted for the DAEMON's
+// auto-clone path. It is intentionally narrower than the CLI's manual-clone
+// surface: the daemon only ever clones what the SageOx cloud API directed it
+// to, and the cloud API should only ever direct it at SageOx-controlled hosts.
+//
+// Threat collapsed by narrowing: a compromised cloud API could previously
+// return a `repo.URL` pointing at `github.com/attacker/evil.git` and have
+// the daemon clone it as a "team context" — landing attacker-controlled bytes
+// inside the user's workspace without any further compromise. See SECREVIEW
+// threat-model finding on the cloud-API trust boundary (workspace_registry.go).
+//
+// Includes base domains (sageox.ai, sageox.io) to allow staging subdomains
+// like git.test.sageox.ai.
+//
+// If a future product feature ever requires the daemon to clone from
+// non-SageOx hosts, add an explicit, scoped allow-list keyed on the workspace
+// type — do NOT widen this list.
 var trustedGitHosts = []string{
 	"sageox.io",
 	"sageox.ai",
-	"github.com",
-	"gitlab.com",
 }
 
 // isValidCloneURL validates that a clone URL is safe to use.
