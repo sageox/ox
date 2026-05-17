@@ -335,29 +335,62 @@ echo "[3/6] hunt (parallel hunters) ....................."
 HUNTERS=(cli-input secrets-redaction daemon-ipc supply-chain llm-trust)
 [[ -n "$HUNTER_ARG" ]] && HUNTERS=("$HUNTER_ARG")
 
+# Per-hunter status manifest — one TSV row per hunter so the summary phase can
+# distinguish "model returned {findings:[]}" (legit empty) from "claude CLI
+# crashed" (silent failure). Pre-fix, both shapes produced identical 0-byte
+# JSONL files and the summary mis-reported failures as clean runs.
+: > "$OUT/hunter-status.tsv"
 : > "$OUT/findings-raw.jsonl"
 hunter_pids=()
 for h in "${HUNTERS[@]}"; do
   prompt="$SKILL/prompts/hunter-${h}.md"
   if [[ ! -f "$prompt" ]]; then
     echo "       (skipping $h — playbook not yet authored at $prompt)"
+    echo -e "${h}\tskipped-no-prompt\t0" >> "$OUT/hunter-status.tsv"
     continue
   fi
   (
     invoke_claude "claude-sonnet-4-6" "$prompt" "$OUT/surface.md" "$OUT/hunter-${h}.jsonl" "0.05" \
       "$SKILL/schemas/hunter.json"
-    # Expand the {"findings":[...]} envelope into bare JSONL lines.
-    python3 -c "
-import json, sys
+    # Expand the {"findings":[...]} envelope into bare JSONL lines, OR detect
+    # the {"verdict":"error",...} stub that invoke_claude wrote on CLI failure.
+    # Recording the per-hunter status here is the choke point — every later
+    # stage (sanitize, concat, summary) treats hunter output as opaque JSONL.
+    python3 - "$OUT" "$h" <<'PYEOF'
+import json, sys, os
+out_dir, hunter = sys.argv[1], sys.argv[2]
+path = os.path.join(out_dir, f"hunter-{hunter}.jsonl")
+status_path = os.path.join(out_dir, "hunter-status.tsv")
 try:
-    obj = json.loads(open('$OUT/hunter-${h}.jsonl').read())
-except Exception:
+    raw = open(path).read()
+except Exception as e:
+    open(status_path, "a").write(f"{hunter}\tio-error\t0\n")
     sys.exit(0)
-if isinstance(obj, dict) and isinstance(obj.get('findings'), list):
-    with open('$OUT/hunter-${h}.jsonl', 'w') as f:
-        for item in obj['findings']:
-            f.write(json.dumps(item) + '\n')
-"
+try:
+    obj = json.loads(raw) if raw.strip() else {}
+except Exception:
+    # Model produced non-JSON (rare with --json-schema). Mark as parse-error
+    # and let sanitize_jsonl quarantine the file — it would otherwise pollute
+    # dedup with prose lines that look like findings to a careless reader.
+    open(status_path, "a").write(f"{hunter}\tparse-error\t0\n")
+    sys.exit(0)
+# invoke_claude error stub — claude CLI exited non-zero.
+if isinstance(obj, dict) and obj.get("verdict") == "error":
+    open(status_path, "a").write(f"{hunter}\tcli-error\t0\n")
+    # Drop the stub so it does not flow into dedup as a "finding".
+    open(path, "w").write("")
+    sys.exit(0)
+# Normal {"findings":[...]} envelope.
+if isinstance(obj, dict) and isinstance(obj.get("findings"), list):
+    items = obj["findings"]
+    with open(path, "w") as f:
+        for item in items:
+            f.write(json.dumps(item) + "\n")
+    open(status_path, "a").write(f"{hunter}\tok\t{len(items)}\n")
+    sys.exit(0)
+# Unknown shape — keep file as-is so sanitize_jsonl can decide, but flag.
+open(status_path, "a").write(f"{hunter}\tunknown-shape\t0\n")
+PYEOF
     sanitize_jsonl "$OUT/hunter-${h}.jsonl" "hunter-${h}"
   ) &
   hunter_pids+=($!)
@@ -369,6 +402,20 @@ for h in "${HUNTERS[@]}"; do
   [[ -f "$OUT/hunter-${h}.jsonl" ]] && cat "$OUT/hunter-${h}.jsonl" >> "$OUT/findings-raw.jsonl"
 done
 echo "       wrote $OUT/findings-raw.jsonl ($(wc -l < "$OUT/findings-raw.jsonl" | tr -d ' ') findings before dedup)"
+
+# Surface hunter failures up-front (run-log + stdout). The pipeline still
+# continues — partial results from healthy hunters are better than nothing —
+# but the final exit code reflects whether any hunter actually failed.
+hunter_failures=0
+while IFS=$'\t' read -r hname hstatus hcount; do
+  case "$hstatus" in
+    ok|skipped-no-prompt) ;;
+    *)
+      echo "WARNING: hunter '$hname' did not complete cleanly (status=$hstatus); see $OUT/run-log.md" | tee -a "$OUT/run-log.md"
+      hunter_failures=$((hunter_failures + 1))
+      ;;
+  esac
+done < "$OUT/hunter-status.tsv"
 
 # --- Phase 4: DEDUP ---------------------------------------------------------
 echo "[4/6] dedup (root-cause merge) ...................."
@@ -538,5 +585,22 @@ echo "report:  $OUT/FINDINGS.md"
 echo "sarif:   $OUT/findings.sarif"
 echo "cost:    \$$(cat "$COST_FILE") (cap \$$CAP_USD)"
 echo "log:     $OUT/run-log.md"
+
+# Surface per-hunter outcomes in the summary so a future maintainer reading
+# stdout sees the same picture as run-log.md. Bookkeeping is cheap; silent
+# hunter failures previously hid for two runs before we noticed.
+if [[ -s "$OUT/hunter-status.tsv" ]]; then
+  echo "hunters:"
+  while IFS=$'\t' read -r hname hstatus hcount; do
+    printf "  %-22s status=%-18s findings=%s\n" "$hname" "$hstatus" "$hcount"
+  done < "$OUT/hunter-status.tsv"
+fi
+
+if (( ${hunter_failures:-0} > 0 )); then
+  echo
+  echo "WARNING: $hunter_failures hunter(s) failed — partial coverage. Re-run when claude CLI is healthy."
+  echo "READY: orchestrate.sh completed 6-phase security review (with hunter failures)"
+  exit 1
+fi
 
 echo "READY: orchestrate.sh completed 6-phase security review"

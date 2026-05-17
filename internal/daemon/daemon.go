@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ import (
 	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/version"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -1540,6 +1542,20 @@ func (s *daemonServiceImpl) Stop() {
 }
 
 func (s *daemonServiceImpl) Checkout(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error) {
+	// Trust boundary: same-UID IPC peer could pass repo_path=~/.ssh (or any other
+	// $HOME subdirectory). The scheduler's Checkout path renames the existing
+	// directory aside as a backup and clones an attacker-supplied URL into the
+	// original location, which would silently replace ~/.ssh/authorized_keys.
+	// isValidRepoPath only enforces "under $HOME or tmp" — too permissive.
+	// Gate on the workspace registry allow-list: only paths the daemon already
+	// considers a managed workspace are legal Checkout destinations.
+	if !s.isAllowedWorkspaceTarget(payload.RepoPath) {
+		s.d.logger.Warn("rejected checkout: repo_path not in workspace registry",
+			"repo_path", payload.RepoPath,
+			"clone_url", payload.CloneURL,
+			"repo_type", payload.RepoType)
+		return nil, ErrInvalidRepoPath
+	}
 	return s.d.scheduler.Checkout(payload, progress)
 }
 
@@ -1650,6 +1666,32 @@ func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
 		s.d.logger.Warn("session_finalize received but agent worker not initialized")
 		return
 	}
+	// Trust boundary: SessionName flows into filepath.Join under sessions/ —
+	// any traversal component (`..`) would let an IPC peer point sessionDir at
+	// arbitrary subdirs of the ledger and have the agent worker process
+	// attacker-staged raw.jsonl as a trusted session.
+	if err := validateSessionName(payload.SessionName); err != nil {
+		s.d.logger.Warn("rejected session_finalize: invalid session_name",
+			"session_name", payload.SessionName, "error", err)
+		return
+	}
+	// Trust boundary: same-UID IPC peer could supply a ledger path pointing at an
+	// attacker-controlled git repo (remote pointing at exfil server). The daemon's
+	// own config.LedgerPath is the only authoritative source. Mirrors the
+	// SessionWatchStart pattern below.
+	authorityLedger := s.d.config.LedgerPath
+	if authorityLedger == "" {
+		s.d.logger.Warn("session_finalize received but daemon has no configured ledger path",
+			"session", payload.SessionName)
+		return
+	}
+	if payload.LedgerPath != "" && filepath.Clean(payload.LedgerPath) != filepath.Clean(authorityLedger) {
+		s.d.logger.Warn("session_finalize: ignoring caller-supplied ledger path, using daemon authority",
+			"caller_ledger", payload.LedgerPath,
+			"authority_ledger", authorityLedger,
+			"session", payload.SessionName)
+	}
+	payload.LedgerPath = authorityLedger
 	s.d.logger.Info("session_finalize received, enqueueing",
 		"session", payload.SessionName,
 		"ledger", payload.LedgerPath,
@@ -1697,6 +1739,27 @@ func (s *daemonServiceImpl) SessionWatchStart(payload SessionWatchStartPayload) 
 		s.d.logger.Warn("session_watch_start received but session watcher not initialized")
 		return
 	}
+	// Trust boundary: SessionName is joined into the cache path under sessions/.
+	// Without validation, "../../" components would let an IPC peer redirect the
+	// watcher's writes to arbitrary subdirs of the ledger.
+	if err := validateSessionName(payload.SessionName); err != nil {
+		s.d.logger.Warn("rejected session_watch_start: invalid session_name",
+			"session_name", payload.SessionName, "error", err)
+		return
+	}
+	// Trust boundary: SessionFile flows straight into the watcher's tail loop
+	// and the resulting bytes get uploaded as session content. A same-UID IPC
+	// peer that controls SessionFile can exfiltrate any file the daemon can
+	// read — auth tokens, SSH keys, AWS credentials — by routing it through
+	// the session pipeline. Restrict SessionFile to roots the adapter is
+	// known to own. The set is static because all adapters ship in the ox
+	// release; see internal/session/adapters/session_roots.go.
+	if !adapters.IsSessionFileAllowed(payload.AdapterName, payload.SessionFile, s.userHomeDir()) {
+		s.d.logger.Warn("rejected session_watch_start: session_file outside adapter's allowed roots",
+			"adapter", payload.AdapterName,
+			"session_file", payload.SessionFile)
+		return
+	}
 	// derive paths server-side; never trust client-supplied destinations
 	ledgerPath := s.d.config.LedgerPath
 	cachePath := filepath.Join(ledgerPath, "sessions", payload.SessionName)
@@ -1709,9 +1772,26 @@ func (s *daemonServiceImpl) SessionWatchStart(payload SessionWatchStartPayload) 
 	}
 }
 
+// userHomeDir returns the home dir we use as the root for the SessionFile
+// allow-list. Pinned to os.UserHomeDir for now; a future change may pass a
+// per-daemon-instance value (e.g., for the ox-fault test daemon) without
+// touching the call site.
+func (s *daemonServiceImpl) userHomeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
+}
+
 func (s *daemonServiceImpl) SessionWatchStop(payload SessionWatchStopPayload) {
 	if s.d.sessionWatcher == nil {
 		s.d.logger.Warn("session_watch_stop received but session watcher not initialized")
+		return
+	}
+	if err := validateSessionName(payload.SessionName); err != nil {
+		s.d.logger.Warn("rejected session_watch_stop: invalid session_name",
+			"session_name", payload.SessionName, "error", err)
 		return
 	}
 	s.d.sessionWatcher.StopWatch(payload.SessionName)
@@ -1743,10 +1823,115 @@ func (s *daemonServiceImpl) Friction(payload FrictionPayload) {
 	}
 }
 
+// sessionNameRe pins the legal shape of an IPC-supplied session name. Names
+// flow into filepath.Join under sessions/, so any traversal component (`..`,
+// `/`, leading `.`) would let a same-UID IPC peer escape the sessions/ subtree
+// and target other parts of the ledger. The shape mirrors the names produced
+// by adapters at session-start time:
+//
+//	YYYY-MM-DDTHH-MM-<user-or-agent-slug>
+//
+// We accept underscores and hyphens in the trailing slug, and bound the length
+// so an attacker cannot DoS by allocating a multi-megabyte filename.
+var sessionNameRe = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[A-Za-z0-9_-]{1,64}$`)
+
+// validateSessionName rejects any IPC-supplied SessionName that could escape
+// the sessions/ subtree or otherwise break the documented session-folder
+// layout. Returns nil on accept.
+func validateSessionName(name string) error {
+	if name == "" {
+		return fmt.Errorf("session_name is empty")
+	}
+	if len(name) > 128 {
+		return fmt.Errorf("session_name exceeds 128 bytes")
+	}
+	if !sessionNameRe.MatchString(name) {
+		return fmt.Errorf("session_name does not match expected format")
+	}
+	return nil
+}
+
+// isAllowedWorkspaceTarget reports whether path matches one of the daemon's
+// registered workspace paths (ledger or team contexts). Used to gate IPC writes
+// against an attacker-controlled TargetDir.
+//
+// Returns false if the scheduler or registry is not yet initialized — fail
+// closed when we cannot verify, since the only path that would call this
+// before init is a malicious IPC peer.
+func (s *daemonServiceImpl) isAllowedWorkspaceTarget(target string) bool {
+	if target == "" {
+		return false
+	}
+	if s.d.scheduler == nil {
+		return false
+	}
+	reg := s.d.scheduler.WorkspaceRegistry()
+	if reg == nil {
+		return false
+	}
+	want := filepath.Clean(target)
+	for _, ws := range reg.GetAllWorkspaces() {
+		if ws.Path == "" {
+			continue
+		}
+		if filepath.Clean(ws.Path) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// validateMurmurRelPath ensures relPath cannot escape targetDir via traversal
+// and stays under the expected data/murmurs/ tree. Both checks are defensive:
+// filepath.Clean normalizes `..` sequences so a check against targetDir prefix
+// catches relative-path escapes, and the data/murmurs/ prefix enforces the
+// documented MurmurFile layout (see ledger.MurmurFilePath).
+func validateMurmurRelPath(targetDir, relPath string) error {
+	if relPath == "" {
+		return fmt.Errorf("rel_path is empty")
+	}
+	// reject absolute or rooted rel paths up front — they ignore targetDir.
+	if filepath.IsAbs(relPath) {
+		return fmt.Errorf("rel_path must be relative")
+	}
+	targetClean := filepath.Clean(targetDir)
+	joined := filepath.Clean(filepath.Join(targetClean, relPath))
+	if joined != targetClean && !strings.HasPrefix(joined, targetClean+string(filepath.Separator)) {
+		return fmt.Errorf("rel_path escapes target_dir")
+	}
+	// defense in depth: every legitimate murmur write lands under data/murmurs/
+	// per ledger.MurmurFilePath. Use forward slashes for the prefix check so the
+	// invariant is platform-independent (the on-disk separator may be `\` on
+	// Windows but the documented layout is unix-style).
+	relClean := filepath.ToSlash(filepath.Clean(relPath))
+	const murmurPrefix = "data/murmurs/"
+	if !strings.HasPrefix(relClean, murmurPrefix) {
+		return fmt.Errorf("rel_path must be under %s", murmurPrefix)
+	}
+	return nil
+}
+
 // PublishMurmur writes the murmur file to disk and commits it asynchronously.
 // The CLI passes the full MurmurFile JSON so no temp file is needed on the CLI side.
 // Runs in a goroutine so the IPC handler returns immediately.
 func (s *daemonServiceImpl) PublishMurmur(payload MurmurPayload) {
+	// Trust boundary: any same-UID IPC peer can call this. Validate TargetDir
+	// against the workspace registry allow-list and ensure RelPath cannot escape
+	// the workspace via traversal. Internal callers (file_change_source) pass
+	// the canonical ledger path and a well-formed RelPath, so they pass naturally.
+	if !s.isAllowedWorkspaceTarget(payload.TargetDir) {
+		s.d.logger.Warn("rejected murmur: target_dir not in workspace registry",
+			"target_dir", payload.TargetDir,
+			"rel_path", payload.RelPath)
+		return
+	}
+	if err := validateMurmurRelPath(payload.TargetDir, payload.RelPath); err != nil {
+		s.d.logger.Warn("rejected murmur: rel_path validation failed",
+			"target_dir", payload.TargetDir,
+			"rel_path", payload.RelPath,
+			"error", err)
+		return
+	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
