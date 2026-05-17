@@ -392,3 +392,15 @@ help: ## Display available targets
 
 # Default target
 .DEFAULT_GOAL := help
+
+sec: ## Run AI security review (diff vs origin/main, $2 cost cap)
+	$(call say,"Running security review (full 6-phase AI pipeline)...")
+	@bash security/scripts/orchestrate.sh
+
+sec-fast: ## Run deterministic security scanners only (no AI tier)
+	$(call say,"Running deterministic security scanners...")
+	@bash security/scripts/deterministic.sh
+
+sec-install: ## Install security scanner binaries to ./bin/ (cached at ~/.cache/ox/security/bin)
+	$(call say,"Installing security scanner binaries...")
+	@bash security/scripts/install-bins.sh

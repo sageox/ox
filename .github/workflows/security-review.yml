@@ -1,0 +1,91 @@
+name: Security review
+
+# Fast tier only (no AI tier — explicitly deferred)
+# Runs deterministic OSS scanners on PRs and pushes to main.
+# Advisory only — never blocks merge.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write   # for SARIF upload
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # =============================================================================
+  # Path-filter to gate the security jobs
+  # =============================================================================
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      sensitive: ${{ steps.filter.outputs.sensitive }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            sensitive:
+              - 'internal/auth/**'
+              - 'internal/session/**'
+              - 'internal/daemon/**'
+              - 'cmd/ox/adapter.go'
+              - 'cmd/ox/redaction.go'
+              - 'go.mod'
+              - 'go.sum'
+
+  # =============================================================================
+  # Fast security job: run deterministic scanners only
+  # =============================================================================
+  security-fast:
+    needs: changes
+    if: needs.changes.outputs.sensitive == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: true   # never block merge
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need full history for diff
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Cache security scanner binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/security-bin
+          key: ox-security-bins-${{ hashFiles('security/scripts/install-bins.sh') }}
+
+      - name: Install security scanners
+        run: make sec-install
+        env:
+          OX_SECURITY_BIN_CACHE: ${{ runner.temp }}/security-bin
+
+      - name: Run deterministic security scanners
+        run: make sec-fast
+        env:
+          PATH: ${{ github.workspace }}/bin:${{ env.PATH }}
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: security/.output/findings.sarif
+          category: ox-security-fast
+        continue-on-error: true   # don't fail if SARIF is malformed
+
+      - name: Upload findings as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-findings-${{ github.run_id }}
+          path: security/.output/
+          retention-days: 14

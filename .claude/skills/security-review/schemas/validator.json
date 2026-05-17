@@ -1,0 +1,17 @@
+{
+  "type": "object",
+  "properties": {
+    "class": {"type": "string"},
+    "severity": {"type": "string"},
+    "title": {"type": "string"},
+    "file": {"type": "string"},
+    "verdict": {"type": "string", "enum": ["confirmed", "likely", "false-positive", "needs-escalation"]},
+    "verdict_reason": {"type": "string"},
+    "exploitability": {"type": "number"},
+    "attack": {},
+    "fix": {},
+    "existing_mitigations": {"type": "array"},
+    "reachability": {}
+  },
+  "required": ["class", "verdict"]
+}

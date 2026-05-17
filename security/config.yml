@@ -1,0 +1,114 @@
+# ox security-review pipeline configuration.
+# Single knob source — no env vars, no scattered tool configs.
+# Consumed by: security/scripts/orchestrate.sh, .github/workflows/security-review.yml,
+# .claude/skills/security-review/SKILL.md, make sec target.
+#
+# Source for the pipeline shape: https://www.synthesia.io/post/automating-code-security-reviews-with-claude-mythos-level-capabilities
+# Ported from sageox-monorepo's security/config.yml; adapted to a single-binary
+# Go CLI surface (no BFF, no Helm, no Terraform, no api-go).
+
+# Cost ceiling per run, in USD. Hits => skill pauses with a one-liner explaining
+# how to re-run with --cap=N. Lower than sageox's $5 because ox is a single
+# binary with a much smaller diff surface; the AI tier rarely needs to chew
+# through more than a couple dollars per run. On-demand runs use subsidized
+# Claude Code tokens (effectively free), so this only constrains the daily
+# batch GH Action.
+cost_cap_usd: 2.0
+
+# Models per phase. Right-size aggressively — Haiku for the map phase (cheap,
+# parallelizable), Sonnet for hunt + most validation, Opus only for the hardest
+# finding classes where stricter judgment pays for itself. Synthesia's
+# "right-size models per phase" principle, applied at the per-finding level.
+models:
+  cartographer_model: claude-haiku-4-5-20251001
+  hunter_model: claude-sonnet-4-6
+  validator_model: claude-sonnet-4-6
+  validator_hard_class_model: claude-opus-4-7
+
+# Hunters launched in parallel during the Hunt phase. Order does not matter.
+# Each hunter has an explicit perspective frame (see the playbook frontmatter
+# under .claude/skills/security-review/prompts/) to fight LLM finding
+# convergence — five hunters running the same playbook would rediscover the
+# same root causes. Hunter names match metadata.hunter on every rule above.
+hunters:
+  - cli-input          # flags, env, config, stdin -> exec / path / template injection
+  - secrets-redaction  # keyring use, redaction completeness, raw-writer chokepoint, log/upload leakage
+  - daemon-ipc         # /tmp/ox.sock peer-cred, message-size, command authz, race/TOCTOU
+  - supply-chain       # adapter download URL validation, checksum/signature, go.mod pin drift
+  - llm-trust          # prompt injection from indexed repos / ledger / KB into adapter LLMs
+
+# Hard finding classes routed to the smarter validator model. Picked because
+# each of these classes has historically generated the highest false-positive
+# rate from Sonnet-tier judgment on this codebase pattern, AND the cost of a
+# false-negative is high enough to justify Opus per finding.
+hard_classes:
+  - secrets-redaction-bypass    # raw.jsonl chokepoint violations, keyring leakage
+  - daemon-ipc-authz-bypass     # peer-cred + payload-validation logic
+  - supply-chain-tampering      # adapter binary install path, go.mod drift
+
+# Severity threshold for posting per-PR digest comments. Findings below this
+# still land in security/.output/FINDINGS.md, but don't generate inline noise
+# on the PR. Same threshold drives bd task creation from the daily batch.
+pr_comment_min_severity: medium
+bd_task_min_severity: medium
+
+# Sensitive-path globs. The daily-batch GH Action computes
+#   git diff origin/main@{24h.ago}...origin/main -- <these>
+# and SKIPS the run entirely if the diff is empty (zero cost on quiet days).
+# Always included in scope even when not in the immediate diff — see
+# `diff.expand_to_sensitive` below.
+sensitive_paths:
+  # OAuth device flow, keyring storage, JWT refresh
+  - "internal/auth/**"
+  # Redaction chokepoint — bug = secret upload
+  - "internal/session/raw_writer.go"
+  - "internal/session/redaction.go"
+  - "internal/session/gitleaks_generated.go"
+  - "internal/session/gitleaks_detectors.go"
+  - "internal/session/cmd_redaction.go"
+  # Unix-socket IPC — local privesc surface
+  - "internal/daemon/**"
+  # Adapter binary download — supply-chain surface
+  - "cmd/ox/adapter.go"
+  - "cmd/ox/redaction.go"
+  - "internal/adapter/**"
+  # Dependency lockfiles (supply-chain entry surface)
+  - "**/go.mod"
+  - "**/go.sum"
+  # Anything our OpenGrep entry-point rules match deserves a deep pass
+  - "@opengrep:entry-point"
+  - "@opengrep:secret-or-token-handling"
+
+# Diff-scoping behavior. The orchestrator computes the diff vs `base` and runs
+# the AI tier only on changed files — except `expand_to_sensitive` widens the
+# scope to the full package whenever any hunk lands inside a sensitive path.
+# Rationale: a one-line change to auth_client.go shouldn't be reviewed in
+# isolation; the hunter needs the surrounding flow.
+diff:
+  base: origin/main
+  expand_to_sensitive: true
+
+# OpenGrep rule files. The deterministic.sh script (once ported) merges in
+# $OX_PRIVATE_RULES_DIR/*.yml at runtime if the env var is set — keeps
+# customer-specific or embargoed rules out of the public repo.
+opengrep:
+  rules:
+    - security/rules/ox-entry-points.yml
+
+# Pre-commit fast tier. Behind SEC_PRECOMMIT=1 for the first month so we can
+# A/B the latency hit before defaulting on. Tools below run on every commit
+# in <10s; the deep AI pass only runs on demand or in the daily batch.
+precommit_fast_tier:
+  enabled_when_env: "SEC_PRECOMMIT=1"
+  tools:
+    - gitleaks    # secret scanner
+    - govulncheck # touched Go packages only
+    - opengrep    # --diff-aware on changed files only
+
+# Optional Slack post on completion. Off by default (per-dev preference).
+# When on: posts a one-line summary to a channel so the team sees the cadence
+# — light social proof, not compliance tracking.
+slack:
+  enabled: false
+  channel: "#security-reviews"
+  # webhook_url loaded from env / SOPS at runtime, never inlined here

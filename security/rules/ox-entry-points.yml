@@ -1,0 +1,559 @@
+# ox CLI OpenGrep custom rules — entry points, sinks, and ox-specific safety primitives.
+#
+# Source for the pipeline shape: https://www.synthesia.io/post/automating-code-security-reviews-with-claude-mythos-level-capabilities
+# These rules are the deterministic input to the AI map phase. The Cartographer subagent reads
+# the matches here, draws the call graph from each entry point to its sinks, and hands the
+# resulting `surface.md` to the parallel hunters.
+#
+# Rule format is byte-compatible with Semgrep — runs unchanged on OpenGrep (LGPL-2.1 fork
+# with cross-function taint analysis restored after the late-2024 Semgrep CE license change).
+#
+# Convention: rule IDs are `ox.<class>.<specific>`. Classes: entry-point, sink,
+# secrets-redaction, daemon-ipc, supply-chain, primitive-violation.
+# Every rule includes metadata.hunter (one of the 5 hunter classes in security/config.yml)
+# and metadata.references pointing at a section of security/SECURITY.md.
+
+rules:
+  # ===========================================================================
+  # ENTRY POINTS — anywhere untrusted input enters the trust boundary
+  # ===========================================================================
+
+  - id: ox.entry-point.cobra-command
+    severity: INFO
+    languages: [go]
+    message: |
+      Cobra command entry point. CLI subcommand definition — `args[0..N]` and
+      `cmd.Flags().Get*` are the taint sources. Hunters should trace flag/arg
+      values to exec/path/template sinks and check for sanitization.
+    metadata:
+      class: entry-point
+      hunter: cli-input
+      references: "security/SECURITY.md#hunter-cli-input"
+    pattern-either:
+      - pattern: |
+          &cobra.Command{
+            ...
+            RunE: $RUN,
+            ...
+          }
+      - pattern: |
+          &cobra.Command{
+            ...
+            Run: $RUN,
+            ...
+          }
+    paths:
+      exclude:
+        - "**/*_test.go"
+
+  - id: ox.entry-point.cobra-flag-read
+    severity: INFO
+    languages: [go]
+    message: |
+      Cobra flag/arg read — taint source for CLI input. The returned value is
+      untrusted; if it reaches exec.Command, filepath.Join into ~/.ox, or
+      http.NewRequest URL without validation, it is a finding.
+    metadata:
+      class: entry-point
+      hunter: cli-input
+      references: "security/SECURITY.md#hunter-cli-input"
+    pattern-either:
+      - pattern: $CMD.Flags().GetString($NAME)
+      - pattern: $CMD.Flags().GetStringSlice($NAME)
+      - pattern: $CMD.PersistentFlags().GetString($NAME)
+    paths:
+      exclude:
+        - "**/*_test.go"
+
+  - id: ox.entry-point.daemon-ipc-handler-registration
+    severity: INFO
+    languages: [go]
+    message: |
+      Daemon IPC handler registration (Unix socket /tmp/ox.sock surface).
+      Every registered handler runs as the daemon user with full keyring +
+      filesystem access. Hunters should check (1) peer-cred is verified before
+      sensitive ops, (2) message payload size is bounded (1MB limit at the
+      transport layer), (3) handler does not shell out with user-controlled
+      input from the message body.
+    metadata:
+      class: entry-point
+      hunter: daemon-ipc
+      references: "security/SECURITY.md#hunter-daemon-ipc"
+    pattern: $ROUTER.Register($TYPE, $HANDLER)
+    paths:
+      include:
+        - "internal/daemon/**"
+      exclude:
+        - "**/*_test.go"
+
+  - id: ox.entry-point.daemon-ipc-handler-signature
+    severity: INFO
+    languages: [go]
+    message: |
+      Daemon IPC MessageHandler implementation. Inputs (msg.Payload) come from
+      any local process that can connect to /tmp/ox.sock — treat as untrusted.
+      Decode payloads into typed structs (never substring-match), reject
+      unknown fields, and never reflect raw payload into exec/path sinks.
+    metadata:
+      class: entry-point
+      hunter: daemon-ipc
+      references: "security/SECURITY.md#hunter-daemon-ipc"
+    pattern: |
+      func $HANDLER(s *Server, $MSG Message, $CONN net.Conn) HandlerResult { ... }
+    paths:
+      include:
+        - "internal/daemon/**"
+      exclude:
+        - "**/*_test.go"
+
+  # ===========================================================================
+  # SECRETS / TOKEN HANDLING — keyring is THE secret-storage boundary
+  # ===========================================================================
+
+  - id: ox.secret-or-token-handling.keyring-write
+    severity: WARNING
+    languages: [go]
+    message: |
+      keyring.Set — secret-storage write boundary. Validators must check
+      (1) the value is not being persisted unredacted, (2) the keyring service
+      name is a constant (no per-call dynamic service), (3) the call site is
+      under internal/auth/ or another sanctioned package (NOT scattered).
+      Misuse here = OS-keychain pollution and credential leakage.
+    metadata:
+      class: secrets-redaction
+      hunter: secrets-redaction
+      references: "security/SECURITY.md#hunter-secrets-redaction"
+      cwe: "CWE-522"
+    pattern: keyring.Set($SERVICE, $USER, $VALUE)
+    paths:
+      exclude:
+        - "**/*_test.go"
+
+  - id: ox.secret-or-token-handling.keyring-read
+    severity: INFO
+    languages: [go]
+    message: |
+      keyring.Get — secret-storage read boundary. Returned token MUST NOT flow
+      into stdout, log lines, raw.jsonl, telemetry, or HTTP request bodies
+      bound for non-vetted hosts. Trace the return value with the secrets-
+      redaction hunter.
+    metadata:
+      class: secrets-redaction
+      hunter: secrets-redaction
+      references: "security/SECURITY.md#hunter-secrets-redaction"
+    pattern: keyring.Get($SERVICE, $USER)
+    paths:
+      exclude:
+        - "**/*_test.go"
+
+  - id: ox.secrets-redaction.raw-writer-bypass
+    severity: ERROR
+    languages: [go]
+    message: |
+      Direct write to a raw.jsonl-style path bypasses session.RawWriter — the
+      chokepoint that runs every entry through the redaction stack
+      (CommandRedactor + Redactor + gitleaks-derived ExtraDetectors). Any
+      bypass risks uploading unredacted secrets in session captures. See
+      internal/session/raw_writer.go (ox-h20u) and the Makefile target
+      check-raw-writer-chokepoint. This rule is the declarative twin of that
+      grep gate.
+    metadata:
+      class: secrets-redaction
+      hunter: secrets-redaction
+      references: "security/SECURITY.md#hunter-secrets-redaction"
+      cwe: "CWE-532"
+    pattern-either:
+      - pattern-regex: 'os\.OpenFile\([^)]*raw[._]?jsonl'
+      - pattern-regex: 'os\.Create\([^)]*raw[._]?jsonl'
+      - pattern-regex: 'os\.WriteFile\([^)]*raw[._]?jsonl'
+    paths:
+      exclude:
+        - "**/*_test.go"
+        - "internal/session/raw_writer.go"
+
+  - id: ox.secrets-redaction.token-in-log
+    severity: WARNING
+    languages: [go]
+    message: |
+      slog/log/fmt call with a key that looks like a token, secret, or auth
+      header. Validators should confirm the value is either redacted or a
+      known-safe identifier (e.g. token ID, not the token itself).
+    metadata:
+      class: secrets-redaction
+      hunter: secrets-redaction
+      references: "security/SECURITY.md#hunter-secrets-redaction"
+      cwe: "CWE-532"
+    pattern-either:
+      - pattern: slog.$LEVEL($MSG, ..., "token", $TOK, ...)
+      - pattern: slog.$LEVEL($MSG, ..., "secret", $SEC, ...)
+      - pattern: slog.$LEVEL($MSG, ..., "password", $PW, ...)
+      - pattern: slog.$LEVEL($MSG, ..., "api_key", $K, ...)
+      - pattern: slog.$LEVEL($MSG, ..., "authorization", $A, ...)
+    paths:
+      exclude:
+        - "**/*_test.go"
+
+  # ===========================================================================
+  # SINKS — where untrusted input becomes dangerous
+  # ===========================================================================
+
+  - id: ox.sink.exec-non-literal
+    severity: WARNING
+    languages: [go]
+    message: |
+      exec.Command/CommandContext with a non-literal command name. If the
+      command string is reachable from a cobra flag, IPC message payload, or
+      adapter binary path constructed from user input, this is command
+      injection. The safe shape is a vetted string literal followed by user
+      args; the binary path itself must be a constant or validated against an
+      allow-list.
+    metadata:
+      class: sink
+      hunter: cli-input
+      references: "security/SECURITY.md#hunter-cli-input"
+      cwe: "CWE-78"
+    pattern-either:
+      - pattern: exec.Command($CMD, ...)
+      - pattern: exec.CommandContext($CTX, $CMD, ...)
+    pattern-not:
+      - pattern: exec.Command("...", ...)
+      - pattern: exec.CommandContext($CTX, "...", ...)
+    paths:
+      exclude:
+        - "**/*_test.go"
+
+  - id: ox.sink.filepath-join-user-home
+    severity: WARNING
+    languages: [go]
+    message: |
+      filepath.Join into a user-home / config / state directory with a
+      non-constant trailing component. If any component originates from a
+      flag, arg, IPC payload, env var, or remote content, this is path
+      traversal into ox's own state directory — which includes the auth file
+      and keyring fallback. Validate with filepath.Clean + prefix check, or
+      better, use a constants-only path.
+    metadata:
+      class: sink
+      hunter: cli-input
+      references: "security/SECURITY.md#hunter-cli-input"
+      cwe: "CWE-22"
+    pattern-either:
+      - pattern: filepath.Join($HOME, ".ox", ..., $USER, ...)
+      - pattern: filepath.Join($HOME, ".sageox", ..., $USER, ...)
+      - pattern: filepath.Join($HOME, ".local", "share", "ox", ..., $USER, ...)
+    paths:
+      exclude:
+        - "**/*_test.go"
+
+  - id: ox.sink.template-render
+    severity: WARNING
+    languages: [go]
+    message: |
+      text/template or html/template Execute sink. If template data contains
+      content sourced from indexed repos, ledger, KB, or adapter LLM output,
+      and the template body is itself derived from user input, this is SSTI.
+      Even with a constant template body, the data argument can carry prompt
+      injection into downstream LLM consumers.
+    metadata:
+      class: sink
+      hunter: llm-trust
+      references: "security/SECURITY.md#hunter-llm-trust"
+      cwe: "CWE-94"
+    pattern-either:
+      - pattern: $TPL.Execute($W, $DATA)
+      - pattern: $TPL.ExecuteTemplate($W, $NAME, $DATA)
+    paths:
+      exclude:
+        - "**/*_test.go"
+
+  - id: ox.sink.http-request-non-constant-url
+    severity: WARNING
+    languages: [go]
+    message: |
+      http.Get / http.NewRequest with a URL value that is not a literal or
+      package-level constant. SSRF / data-exfil surface if the URL is reachable
+      from a cobra flag, IPC payload, or content extracted from an indexed
+      repo / ledger entry. The adapter-download path (cmd/ox/adapter.go)
+      constructs URLs from GitHub API responses — those need dedicated review.
+    metadata:
+      class: sink
+      hunter: supply-chain
+      references: "security/SECURITY.md#hunter-supply-chain"
+      cwe: "CWE-918"
+    pattern-either:
+      - pattern: http.Get($URL)
+      - pattern: http.NewRequest($METHOD, $URL, ...)
+      - pattern: http.NewRequestWithContext($CTX, $METHOD, $URL, ...)
+      - pattern: $CLIENT.Get($URL)
+    pattern-not:
+      - pattern: http.Get("...")
+      - pattern: http.NewRequest($M, "...", ...)
+      - pattern: http.NewRequestWithContext($CTX, $M, "...", ...)
+      - pattern: $CLIENT.Get("...")
+    paths:
+      exclude:
+        - "**/*_test.go"
+
+  # ===========================================================================
+  # CROSS-FUNCTION TAINT — the reason we use OpenGrep over Semgrep CE
+  # ===========================================================================
+
+  - id: ox.taint.cli-input-to-exec
+    severity: ERROR
+    languages: [go]
+    mode: taint
+    message: |
+      Cross-function taint: cobra flag/arg value flows into exec.Command
+      without passing through a sanitizer. Command injection on the user's
+      local shell — high severity even though the user is "trusted" because
+      the value may have originated from a config file, an adapter, or a
+      cached daemon message they did not author.
+    metadata:
+      class: taint
+      hunter: cli-input
+      references: "security/SECURITY.md#hunter-cli-input"
+      cwe: "CWE-78"
+    pattern-sources:
+      - pattern: $CMD.Flags().GetString($NAME)
+      - pattern: $CMD.Flags().GetStringSlice($NAME)
+      - pattern: $CMD.PersistentFlags().GetString($NAME)
+      - patterns:
+          - pattern: args[$I]
+          - pattern-inside: |
+              func $F($CMD *cobra.Command, args []string) ... { ... }
+    pattern-sinks:
+      - pattern: exec.Command($CMD, ...)
+      - pattern: exec.CommandContext($CTX, $CMD, ...)
+    pattern-sanitizers:
+      - pattern: filepath.Clean($X)
+      - pattern: shellescape.Quote($X)
+    paths:
+      exclude:
+        - "**/*_test.go"
+
+  - id: ox.taint.ipc-payload-to-exec
+    severity: ERROR
+    languages: [go]
+    mode: taint
+    message: |
+      Cross-function taint: daemon IPC message payload flows into exec.Command
+      without sanitization. Local-privesc surface — any process able to
+      connect to /tmp/ox.sock can trigger command execution as the daemon
+      user. Peer-cred check at connect time is necessary but not sufficient;
+      payload values still need validation against a strict allow-list.
+    metadata:
+      class: taint
+      hunter: daemon-ipc
+      references: "security/SECURITY.md#hunter-daemon-ipc"
+      cwe: "CWE-78"
+    pattern-sources:
+      - patterns:
+          - pattern: $MSG.Payload
+          - pattern-inside: |
+              func $H(s *Server, $MSG Message, $CONN net.Conn) HandlerResult { ... }
+    pattern-sinks:
+      - pattern: exec.Command($CMD, ...)
+      - pattern: exec.CommandContext($CTX, $CMD, ...)
+    paths:
+      include:
+        - "internal/daemon/**"
+      exclude:
+        - "**/*_test.go"
+
+  - id: ox.taint.ipc-payload-to-filesystem
+    severity: WARNING
+    languages: [go]
+    mode: taint
+    message: |
+      Cross-function taint: daemon IPC payload flows into os.OpenFile/Create
+      without path validation. Local process can coerce the daemon into
+      writing to attacker-chosen paths (overwriting ~/.ox/auth.json, planting
+      adapter binaries, etc.). Validate the path is under an allow-listed
+      root after filepath.Clean.
+    metadata:
+      class: taint
+      hunter: daemon-ipc
+      references: "security/SECURITY.md#hunter-daemon-ipc"
+      cwe: "CWE-22"
+    pattern-sources:
+      - patterns:
+          - pattern: $MSG.Payload
+          - pattern-inside: |
+              func $H(s *Server, $MSG Message, $CONN net.Conn) HandlerResult { ... }
+    pattern-sinks:
+      - pattern: os.OpenFile($P, ...)
+      - pattern: os.Create($P)
+      - pattern: os.WriteFile($P, ...)
+    paths:
+      include:
+        - "internal/daemon/**"
+      exclude:
+        - "**/*_test.go"
+
+  # ===========================================================================
+  # SUPPLY CHAIN — adapter download surface
+  # ===========================================================================
+
+  - id: ox.supply-chain.adapter-download-no-checksum
+    severity: ERROR
+    languages: [go]
+    message: |
+      io.Copy(tmpFile, $RESP.Body) followed by os.Chmod 0755 + os.Rename —
+      installing a downloaded binary without a sha256 / signature verification
+      step. The current adapter installer (cmd/ox/adapter.go) trusts whatever
+      GitHub's release-asset URL returns; a compromised GitHub account, a
+      MITM on a corp proxy, or a malicious release in the trusted adapter
+      registry installs arbitrary code as the user. Add checksum verification
+      against a signed manifest before rename.
+    metadata:
+      class: supply-chain
+      hunter: supply-chain
+      references: "security/SECURITY.md#hunter-supply-chain"
+      cwe: "CWE-494"
+    pattern: |
+      io.Copy($TMP, $RESP.Body)
+      ...
+      os.Chmod($PATH, 0755)
+      ...
+      os.Rename($SRC, $DST)
+    paths:
+      include:
+        - "cmd/ox/**"
+        - "internal/adapter/**"
+
+  - id: ox.supply-chain.github-release-url
+    severity: INFO
+    languages: [go]
+    message: |
+      Direct http.Get against api.github.com/.../releases — the adapter
+      install path. Validators should check (1) HTTPS pinning, (2) the URL is
+      built from a constant repo allow-list (not user input), (3) the
+      downloaded asset's URL is re-validated to live on
+      github.com/objects.githubusercontent.com (not an attacker-controlled
+      browser_download_url field).
+    metadata:
+      class: supply-chain
+      hunter: supply-chain
+      references: "security/SECURITY.md#hunter-supply-chain"
+    pattern-regex: 'https://api\.github\.com/repos/'
+
+  - id: ox.supply-chain.go-mod-replace
+    severity: WARNING
+    languages: [generic]
+    message: |
+      `replace` directive in go.mod. If pointing at a local path during
+      development, it MUST NOT land on main. If pointing at a fork or
+      alternate module path, it bypasses the upstream module proxy's
+      tamper-detection — supply-chain risk worth a manual review.
+    metadata:
+      class: supply-chain
+      hunter: supply-chain
+      references: "security/SECURITY.md#hunter-supply-chain"
+    pattern-regex: '^replace\s+'
+    paths:
+      include:
+        - "**/go.mod"
+
+  # ===========================================================================
+  # LLM TRUST BOUNDARY — adapter inputs from indexed repos / ledger / KB
+  # ===========================================================================
+
+  - id: ox.llm-trust.adapter-prompt-from-ledger
+    severity: INFO
+    languages: [go]
+    message: |
+      Construction of an adapter prompt / LLM input from indexed repo,
+      ledger, KB, or session content. These are user-writable git repos —
+      content is untrusted by the LLM trust model (see AGENTS.md "Untrusted
+      Data"). Hunters should verify (1) prompt-injection markers are stripped
+      or escaped, (2) the prompt template itself is not built by concatenating
+      untrusted content, (3) downstream tool-use actions from the adapter
+      cannot be steered by injected instructions.
+    metadata:
+      class: llm-trust
+      hunter: llm-trust
+      references: "security/SECURITY.md#hunter-llm-trust"
+      cwe: "CWE-1427"
+    pattern-either:
+      - pattern: $PROMPT = fmt.Sprintf($TPL, ..., $LEDGER, ...)
+      - pattern: $PROMPT = $A + $LEDGER + $B
+    paths:
+      include:
+        - "internal/adapter/**"
+        - "internal/session/adapters/**"
+        - "pkg/adapterprotocol/**"
+      exclude:
+        - "**/*_test.go"
+
+  # ===========================================================================
+  # OX PRIMITIVE VIOLATIONS — hard rules, no judgment required
+  # ===========================================================================
+
+  - id: ox.primitive-violation.daemon-bind-non-unix
+    severity: ERROR
+    languages: [go]
+    message: |
+      Daemon must listen on a Unix-domain socket only (peer-cred enforced).
+      net.Listen("tcp", ...) inside internal/daemon/** opens the IPC to any
+      local network user (and possibly remote, depending on bind address) —
+      bypasses the SO_PEERCRED / getpeereid checks that protect every IPC
+      handler.
+    metadata:
+      class: primitive-violation
+      hunter: daemon-ipc
+      references: "security/SECURITY.md#hunter-daemon-ipc"
+      cwe: "CWE-284"
+    pattern-either:
+      - pattern: net.Listen("tcp", $ADDR)
+      - pattern: net.Listen("tcp4", $ADDR)
+      - pattern: net.Listen("tcp6", $ADDR)
+    paths:
+      include:
+        - "internal/daemon/**"
+      exclude:
+        - "**/*_test.go"
+
+  - id: ox.primitive-violation.tls-insecure-skip-verify
+    severity: ERROR
+    languages: [go]
+    message: |
+      InsecureSkipVerify: true disables TLS certificate validation —
+      MITM-able. Acceptable only in *_test.go against httptest servers; never
+      in production code paths (especially adapter download, auth refresh,
+      keyring sync).
+    metadata:
+      class: primitive-violation
+      hunter: supply-chain
+      references: "security/SECURITY.md#hunter-supply-chain"
+      cwe: "CWE-295"
+    pattern: "InsecureSkipVerify: true"
+    paths:
+      exclude:
+        - "**/*_test.go"
+
+  - id: ox.primitive-violation.tmp-socket-predictable
+    severity: WARNING
+    languages: [go]
+    message: |
+      Hardcoded /tmp/ox.sock path. /tmp is world-writable; an attacker with
+      local shell can race to create the socket first (TOCTOU) or symlink it
+      elsewhere. Prefer XDG_RUNTIME_DIR or os.UserCacheDir() with 0700 perms,
+      and check the parent dir's ownership before listening.
+    metadata:
+      class: primitive-violation
+      hunter: daemon-ipc
+      references: "security/SECURITY.md#hunter-daemon-ipc"
+      cwe: "CWE-377"
+    pattern-regex: '"/tmp/ox\.sock"'
+    paths:
+      exclude:
+        - "**/*_test.go"
+
+# ---------------------------------------------------------------------------
+# Excluded paths globally — vendored, generated, fixtures
+# ---------------------------------------------------------------------------
+# Per-rule `paths.exclude` handles file-level filtering. Repo-level exclusion
+# happens via the orchestrator (see security/scripts/deterministic.sh once
+# ported). The standard exclude list is: vendor/, testdata/, **/*_test.go for
+# most rules, and internal/session/raw_writer.go for the raw-writer chokepoint
+# rule (it IS the chokepoint).

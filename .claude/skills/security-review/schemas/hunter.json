@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "class": {"type": "string"},
+          "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+          "title": {"type": "string"},
+          "file": {"type": "string"},
+          "attack": {},
+          "fix": {},
+          "exploitability": {"type": "number"},
+          "confidence": {"type": "string"}
+        },
+        "required": ["class", "severity", "title", "file"]
+      }
+    }
+  },
+  "required": ["findings"]
+}
