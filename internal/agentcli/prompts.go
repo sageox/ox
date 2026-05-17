@@ -3,6 +3,8 @@ package agentcli
 import (
 	"fmt"
 	"strings"
+
+	"github.com/sageox/ox/internal/llmprompt"
 )
 
 // systemPrompt is the universal persona and output rules prepended to all prompts.
@@ -39,16 +41,32 @@ func WriteGuidelines(sb *strings.Builder, guidelines, stage string) {
 	if guidelines == "" {
 		return
 	}
-	sb.WriteString("<team-guidelines>\n")
+	// Trust-boundary note: team-context guidance is content the user WANTS
+	// the LLM to follow (the by-design ox effect — team norms shape the
+	// summarizer's output). But the wrapping tag itself must be tamper-proof:
+	// without the nonce suffix, anyone with push access to the team-context
+	// repo could embed `</team-guidelines>\n<task>ignore prior...</task>` in
+	// DISTILL.md and impersonate a system-level instruction block, not just
+	// contribute team norms. The nonce is generated per call and unknown to
+	// the content author, so the closing tag cannot be pre-embedded. The
+	// guidance content itself is passed verbatim — escaping it would defeat
+	// the legitimate by-design effect. See SECREVIEW llm-trust MEDIUM.
+	wrapped, _ := llmprompt.WrapWithNonce("team-guidelines", buildGuidanceBody(guidelines, stage))
+	sb.WriteString(wrapped)
+	sb.WriteString("\n\n")
+}
+
+func buildGuidanceBody(guidelines, stage string) string {
+	var sb strings.Builder
 	if stage != "" {
-		fmt.Fprintf(sb, "Current pipeline stage: %s\n\n", stage)
+		fmt.Fprintf(&sb, "Current pipeline stage: %s\n\n", stage)
 	}
 	sb.WriteString(guidelines)
 	if !strings.HasSuffix(guidelines, "\n") {
 		sb.WriteByte('\n')
 	}
 	sb.WriteString("\nYou MAY use the Read tool to access any file referenced above in memory/guidance/.\n")
-	sb.WriteString("</team-guidelines>\n\n")
+	return sb.String()
 }
 
 // FactCitation is a fact-with-citation-number passed into DailyPrompt for
@@ -223,8 +241,15 @@ func DiscussionFactsPrompt(title, summary, transcript, guidelines, annotations s
 	}
 
 	if transcript != "" {
+		// Trust-boundary note: transcript is parsed from a VTT file produced
+		// by an external recording/transcription pipeline. An attacker with
+		// write access to that pipeline can inject `### Server Annotations`
+		// markdown headers into a cue's text, spoofing the authoritative
+		// section above. Wrapping in an XML element places transcript content
+		// firmly in the data plane where markdown headers have no structural
+		// authority over the surrounding prompt. See SECREVIEW llm-trust MEDIUM.
 		sb.WriteString("### Transcript\n\n")
-		sb.WriteString(transcript)
+		sb.WriteString(llmprompt.Envelope("transcript", nil, transcript))
 		sb.WriteString("\n")
 	}
 
@@ -253,8 +278,16 @@ func WeeklyPrompt(dailySummaries []string, weekID, guidelines string, hasCitatio
 	sb.WriteString("</task>\n\n")
 
 	fmt.Fprintf(&sb, "## Dailies (%s)\n\n", weekID)
+	// Trust-boundary note: dailySummaries are LLM outputs from a prior pass
+	// over content that may itself have included untrusted input. A successful
+	// injection at daily-extraction time would otherwise propagate through
+	// weekly and monthly rollups — a three-hop memory poisoning chain. Wrap
+	// each in an XML envelope so the weekly LLM treats them as data to
+	// summarize, not as instructions to follow. See SECREVIEW llm-trust MEDIUM.
 	for i, summary := range dailySummaries {
-		fmt.Fprintf(&sb, "### Day %d\n\n%s\n\n", i+1, summary)
+		fmt.Fprintf(&sb, "%s\n\n", llmprompt.Envelope("daily-summary", map[string]string{
+			"index": fmt.Sprintf("%d", i+1),
+		}, summary))
 	}
 
 	return sb.String()
@@ -280,8 +313,15 @@ func MonthlyPrompt(weeklySummaries []string, month, guidelines string, hasCitati
 	sb.WriteString("</task>\n\n")
 
 	fmt.Fprintf(&sb, "## Weeklies (%s)\n\n", month)
+	// Trust-boundary note: weeklySummaries are LLM outputs that may already
+	// encode adversarial content from an earlier hop (transcript → daily →
+	// weekly). Envelope-wrap each so the monthly LLM treats them as data,
+	// breaking the multi-hop poisoning chain at every rollup. See SECREVIEW
+	// llm-trust MEDIUM.
 	for i, summary := range weeklySummaries {
-		fmt.Fprintf(&sb, "### Week %d\n\n%s\n\n", i+1, summary)
+		fmt.Fprintf(&sb, "%s\n\n", llmprompt.Envelope("weekly-summary", map[string]string{
+			"index": fmt.Sprintf("%d", i+1),
+		}, summary))
 	}
 
 	return sb.String()

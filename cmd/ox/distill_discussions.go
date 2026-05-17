@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/facts"
+	"github.com/sageox/ox/internal/llmprompt"
 	"github.com/sageox/ox/internal/vtt"
 	"github.com/sageox/ox/pkg/discussion"
 )
@@ -210,7 +211,18 @@ func loadDiscussionAnnotations(dirPath string) string {
 
 	var sb strings.Builder
 	for _, a := range af.Annotations {
-		fmt.Fprintf(&sb, "- [%s] %s\n", a.Type, a.Content)
+		// Trust-boundary note: annotations.json is server-generated and
+		// cloud-synced. Without whitespace collapse, a newline embedded in
+		// a.Content breaks the one-bullet-per-annotation invariant: the
+		// second line becomes a free-standing bullet at the same structural
+		// level, which the LLM treats as another "ground-truth" annotation.
+		// Collapsing whitespace closes that injection vector while preserving
+		// the legitimate single-line annotation text. See SECREVIEW llm-trust
+		// MEDIUM. The helper lives in internal/llmprompt for reuse.
+		fmt.Fprintf(&sb, "- [%s] %s\n",
+			llmprompt.CollapseWhitespace(a.Type),
+			llmprompt.CollapseWhitespace(a.Content),
+		)
 	}
 	return strings.TrimSpace(sb.String())
 }

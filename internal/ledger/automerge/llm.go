@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/llmprompt"
 )
 
 // systemPrompt is the instruction header prepended to every LLM merge
@@ -133,18 +134,29 @@ func (r *Resolver) mergeOneWithLLM(ctx context.Context, repoPath, path string) e
 // buildPrompt assembles the per-file prompt. Both 'ours' and 'theirs' are
 // included verbatim via the conflict-marked content itself; we don't try
 // to pre-parse the markers — the LLM is better at that than we are.
+//
+// Trust-boundary note: a ledger commit file whose content includes the
+// literal string `END_FILE` on its own line would otherwise terminate the
+// data section early, allowing subsequent attacker-controlled text to land
+// in the prompt's instruction plane. Fixed delimiters are not safe for
+// arbitrary file content. Use a per-call nonce so the delimiter cannot be
+// pre-embedded by whoever authored the conflicting commit. See SECREVIEW
+// llm-trust LOW.
 func buildPrompt(path string, content []byte) string {
+	nonce := llmprompt.Nonce()
+	beginTag := "BEGIN_FILE_" + nonce
+	endTag := "END_FILE_" + nonce
 	var b strings.Builder
 	b.Grow(len(systemPrompt) + len(content) + 256)
 	b.WriteString(systemPrompt)
 	b.WriteString("\n\nFile path: ")
 	b.WriteString(path)
-	b.WriteString("\n\nFile content with conflict markers (everything between BEGIN_FILE and END_FILE):\n\nBEGIN_FILE\n")
+	fmt.Fprintf(&b, "\n\nFile content with conflict markers (everything between %s and %s):\n\n%s\n", beginTag, endTag, beginTag)
 	b.Write(content)
 	if len(content) > 0 && content[len(content)-1] != '\n' {
 		b.WriteByte('\n')
 	}
-	b.WriteString("END_FILE\n\nReturn the merged file content only.")
+	fmt.Fprintf(&b, "%s\n\nReturn the merged file content only.", endTag)
 	return b.String()
 }
 

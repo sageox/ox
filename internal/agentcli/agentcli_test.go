@@ -56,8 +56,13 @@ func TestWeeklyPromptFormat(t *testing.T) {
 	if !strings.Contains(prompt, "2026-W11") {
 		t.Error("prompt should contain the week ID")
 	}
-	if !strings.Contains(prompt, "Day 1") {
-		t.Error("prompt should label daily summaries")
+	// Daily summaries are now wrapped in <daily-summary index="N">...</daily-summary>
+	// envelopes (SECREVIEW llm-trust MEDIUM — multi-hop memory poisoning).
+	if !strings.Contains(prompt, `<daily-summary index="1">`) {
+		t.Error("prompt should wrap day 1 in <daily-summary index=\"1\"> envelope")
+	}
+	if !strings.Contains(prompt, "</daily-summary>") {
+		t.Error("prompt should close the daily-summary envelope")
 	}
 	if !strings.Contains(prompt, "weekly memory") {
 		t.Error("prompt should mention weekly")
@@ -83,7 +88,7 @@ func TestDailyPromptWithGuidelines(t *testing.T) {
 	guidelines := "Always highlight security decisions.\nIgnore dependency update noise."
 	prompt := DailyPrompt(obs, "2026-03-11", guidelines, nil)
 
-	if !strings.Contains(prompt, "<team-guidelines>") {
+	if !strings.Contains(prompt, "<team-guidelines-") {
 		t.Error("prompt should contain guidelines header")
 	}
 	if !strings.Contains(prompt, "security decisions") {
@@ -98,7 +103,7 @@ func TestDailyPromptWithoutGuidelines(t *testing.T) {
 	obs := []string{"observation 1"}
 	prompt := DailyPrompt(obs, "2026-03-11", "", nil)
 
-	if strings.Contains(prompt, "<team-guidelines>") {
+	if strings.Contains(prompt, "<team-guidelines-") {
 		t.Error("prompt should not contain guidelines header when empty")
 	}
 }
@@ -240,7 +245,7 @@ func TestDiscussionFactsPromptEmptyTranscript(t *testing.T) {
 func TestDiscussionFactsPromptWithGuidelines(t *testing.T) {
 	prompt := DiscussionFactsPrompt("Title", "summary", "transcript", "Focus on security decisions", "")
 
-	if !strings.Contains(prompt, "<team-guidelines>") {
+	if !strings.Contains(prompt, "<team-guidelines-") {
 		t.Error("prompt should contain guidelines header")
 	}
 	if !strings.Contains(prompt, "security decisions") {
@@ -307,8 +312,15 @@ func TestWriteGuidelines(t *testing.T) {
 		var sb strings.Builder
 		WriteGuidelines(&sb, "focus on security", "extract-discussions")
 		out := sb.String()
-		if !strings.Contains(out, "<team-guidelines>") {
-			t.Error("should contain opening tag")
+		// Tag is nonce-suffixed for trust-boundary protection (SECREVIEW
+		// llm-trust MEDIUM): the closing tag cannot be pre-embedded by a
+		// content author. Match on the prefix and confirm the symmetric
+		// open/close.
+		if !strings.Contains(out, "<team-guidelines-") {
+			t.Error("should contain opening team-guidelines tag with nonce")
+		}
+		if !strings.Contains(out, "</team-guidelines-") {
+			t.Error("should contain closing team-guidelines tag with nonce")
 		}
 		if !strings.Contains(out, "Current pipeline stage: extract-discussions") {
 			t.Error("should contain stage identifier")
@@ -318,9 +330,6 @@ func TestWriteGuidelines(t *testing.T) {
 		}
 		if !strings.Contains(out, "You MAY use the Read tool") {
 			t.Error("should contain Read tool permission")
-		}
-		if !strings.Contains(out, "</team-guidelines>") {
-			t.Error("should contain closing tag")
 		}
 	})
 

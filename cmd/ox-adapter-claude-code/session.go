@@ -290,7 +290,15 @@ func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, i
 		}
 	}
 
-	return candidates[0].path, 0, nil
+	// Trust-boundary note: the previous fallback returned candidates[0].path
+	// (the newest file) when the caller supplied an agentID but no candidate
+	// contained it. Under concurrent ox sessions sharing a project root, that
+	// silently handed session A's adapter a JSONL belonging to session B —
+	// including secrets typed in B. The caller asked for a specific identity;
+	// returning a different one violates the contract. Fail loud instead so
+	// the caller can decide (retry, prompt the user, fall through to a
+	// different lookup). See SECREVIEW llm-trust LOW.
+	return "", 0, fmt.Errorf("no session file contains agentID %q", agentID)
 }
 
 func sessionContainsAgentID(path, agentID string) bool {
