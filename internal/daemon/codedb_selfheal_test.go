@@ -44,10 +44,12 @@ func TestDoIndex_HonorsSelfHealMarker_ForcesFullReindex(t *testing.T) {
 	mgr := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
 	mgr.dataDir = dataDir // skip path-resolution
 
-	// First indexing pass populates SQL + bleve normally.
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-	_, err := mgr.Index(ctx, CodeIndexPayload{}, nil)
+	// First indexing pass populates SQL + bleve normally. Each pass gets its
+	// own 60s deadline so the second pass doesn't inherit time spent by the
+	// first (which can cause spurious timeouts on slow CI).
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel1()
+	_, err := mgr.Index(ctx1, CodeIndexPayload{}, nil)
 	require.NoError(t, err, "first index must succeed")
 
 	// Capture commit count after first pass — proves SQL was populated.
@@ -63,7 +65,9 @@ func TestDoIndex_HonorsSelfHealMarker_ForcesFullReindex(t *testing.T) {
 	// verify this indirectly by confirming the marker is cleared post-pass
 	// (markers are removed by the dataDir wipe Full=true triggers, and
 	// explicitly cleared in the success path as a defensive invariant).
-	_, err = mgr.Index(ctx, CodeIndexPayload{}, nil)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel2()
+	_, err = mgr.Index(ctx2, CodeIndexPayload{}, nil)
 	require.NoError(t, err, "second index must succeed")
 
 	require.False(t, store.HasNeedsReindexMarker(dataDir, "code"),
@@ -161,15 +165,50 @@ func countCommits(t *testing.T, dataDir string) int {
 	return n
 }
 
-// TestIsIndexing_ReflectsFlag verifies the IsIndexing accessor used by
-// daemon.shutdown to decide whether to extend the goroutine-wait timeout.
-// Reading m.indexing directly under m.mu (as IsIndexing does) is the only
-// race-free way to make that decision; a future refactor that bypasses the
-// lock or aliases the field would silently break shutdown-time bleve drain.
+// TestDoIndex_RestoresMarkersWhenMarkerForcedReindexFails verifies the
+// crash-safety contract for self-heal markers: if a marker-forced full
+// reindex fails AFTER the dataDir wipe (which deletes markers), the
+// markers must be restored so the NEXT freshness pass re-forces --full.
+// Without this, a single rebuild failure silently drops the signal and
+// code search stays empty until manual `ox code index --full`.
 //
-// Failure prevented: shutdown reverts to 5s wait even when indexing is in
-// flight, returning to the kill-mid-flush regression that motivated this
-// extension.
+// Failure prevented: marker-driven self-heal regresses to one-shot
+// recovery — any failure on the first marker pass loses the signal.
+func TestDoIndex_RestoresMarkersWhenMarkerForcedReindexFails(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: filesystem + indexer operations")
+	}
+
+	// Point projectRoot at a directory that doesn't exist so doIndex fails
+	// at its "project root no longer exists" guard. This triggers the error
+	// path of doIndex AFTER the marker-forced wipe would have run — letting
+	// us assert markers are restored when reindex fails.
+	bogusRoot := filepath.Join(t.TempDir(), "deleted-worktree")
+	dataDir := t.TempDir()
+
+	// Pre-seed a marker so the marker-forced-full path activates.
+	require.NoError(t, writeMarkerForTest(dataDir, "code"))
+	require.True(t, store.HasNeedsReindexMarker(dataDir, "code"))
+
+	mgr := NewCodeDBManager(bogusRoot, codedbTestLogger(), nil)
+	mgr.dataDir = dataDir
+
+	_, err := mgr.Index(context.Background(), CodeIndexPayload{}, nil)
+	require.Error(t, err, "Index must fail when projectRoot doesn't exist")
+
+	// Marker must still be present so the NEXT freshness pass re-forces --full.
+	require.True(t, store.HasNeedsReindexMarker(dataDir, "code"),
+		"self-heal marker must be restored after failed marker-forced reindex")
+}
+
+// TestIsIndexing_ReflectsFlag verifies the IsIndexing accessor used by
+// WaitIdle. Reading m.indexing directly under m.mu is the only race-free
+// way to make the drain decision; a refactor that bypasses the lock or
+// aliases the field would silently break shutdown-time bleve drain.
+//
+// Failure prevented: WaitIdle returns immediately while indexing is still
+// in flight, returning to the kill-mid-flush regression.
 func TestIsIndexing_ReflectsFlag(t *testing.T) {
 	t.Parallel()
 
@@ -185,6 +224,65 @@ func TestIsIndexing_ReflectsFlag(t *testing.T) {
 	mgr.indexing = false
 	mgr.mu.Unlock()
 	require.False(t, mgr.IsIndexing(), "must reflect flag reset")
+}
+
+// TestWaitIdle_BlocksUntilFlagClears verifies that WaitIdle is a real
+// drain primitive — it returns ONLY after m.indexing flips false, not
+// immediately. daemon.shutdown depends on this contract to keep bleve
+// batches from being killed mid-flush.
+//
+// Failure prevented: regression to the polling-free / no-op WaitIdle
+// where shutdown completes early and the bleve _mapping doc gets torn.
+func TestWaitIdle_BlocksUntilFlagClears(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewCodeDBManager(t.TempDir(), codedbTestLogger(), nil)
+	mgr.mu.Lock()
+	mgr.indexing = true
+	mgr.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- mgr.WaitIdle(context.Background())
+	}()
+
+	// Confirm WaitIdle is blocking (gives the goroutine time to enter the loop).
+	select {
+	case <-done:
+		t.Fatal("WaitIdle returned before flag cleared — drain contract broken")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Clear the flag — WaitIdle's next tick must observe and return.
+	mgr.mu.Lock()
+	mgr.indexing = false
+	mgr.mu.Unlock()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err, "WaitIdle must return nil when flag clears")
+	case <-time.After(2 * time.Second):
+		t.Fatal("WaitIdle did not unblock within 2s of flag clear")
+	}
+}
+
+// TestWaitIdle_RespectsContext verifies cancellation: if indexing never
+// finishes within the deadline, WaitIdle returns ctx.Err() (not nil).
+// daemon.shutdown uses the returned error to log "did not drain" so
+// operators can investigate; a swallowed cancel would hide stuck indexers.
+func TestWaitIdle_RespectsContext(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewCodeDBManager(t.TempDir(), codedbTestLogger(), nil)
+	mgr.mu.Lock()
+	mgr.indexing = true // never flipped back
+	mgr.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err := mgr.WaitIdle(ctx)
+	require.Error(t, err, "WaitIdle must return ctx.Err() on deadline, not nil")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 // poisonCommentMapping overwrites the latest snapshot's `_mapping` value

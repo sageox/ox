@@ -821,8 +821,8 @@ func TestNeedsReindexMarkers_RoundTrip(t *testing.T) {
 	require.Empty(t, NeedsReindexMarkers(tmp), "no markers before any write")
 	require.False(t, HasNeedsReindexMarker(tmp, "code"))
 
-	require.NoError(t, writeNeedsReindexMarker(tmp, "code"))
-	require.NoError(t, writeNeedsReindexMarker(tmp, "comment"))
+	require.NoError(t, WriteNeedsReindexMarker(tmp, "code"))
+	require.NoError(t, WriteNeedsReindexMarker(tmp, "comment"))
 	require.True(t, HasNeedsReindexMarker(tmp, "code"))
 	require.True(t, HasNeedsReindexMarker(tmp, "comment"))
 	require.False(t, HasNeedsReindexMarker(tmp, "diff"))
@@ -832,7 +832,7 @@ func TestNeedsReindexMarkers_RoundTrip(t *testing.T) {
 	require.NoError(t, ClearNeedsReindexMarker(tmp, "code"), "double-clear is no-op")
 	require.False(t, HasNeedsReindexMarker(tmp, "code"))
 
-	ClearAllNeedsReindexMarkers(tmp)
+	require.NoError(t, ClearAllNeedsReindexMarkers(tmp))
 	require.Empty(t, NeedsReindexMarkers(tmp))
 }
 

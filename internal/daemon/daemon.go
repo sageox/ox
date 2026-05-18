@@ -716,18 +716,28 @@ func (d *Daemon) shutdown() error {
 		d.cancel()
 	}
 
-	// Wait for goroutines with timeout. When codedb is mid-flush, kill-9'ing
-	// the indexer leaves a torn bleve `_mapping` doc — the recovery path
-	// (store.openOrCreateBleveIndex self-heal) handles it on next open, but
-	// avoiding the torn write in the first place keeps the on-disk index
-	// well-formed and saves a full reindex. Bleve batches typically flush in
-	// well under 30s, so we give the indexer that long before force-exiting.
-	shutdownWait := 5 * time.Second
-	if d.codedb != nil && d.codedb.IsIndexing() {
-		shutdownWait = 30 * time.Second
-		d.logger.Info("codedb indexing in flight at shutdown; extending wait to let bleve drain", "timeout", shutdownWait)
+	// CodeDB drain: the CheckFreshness indexing goroutine is NOT tracked by
+	// d.wg (it owns its own per-pass context). Killing the daemon mid-bleve-
+	// batch leaves a torn `_mapping` doc — store.openOrCreateBleveIndex
+	// self-heals on next open, but draining cleanly avoids the recovery
+	// cycle entirely. Wait up to 30s explicitly; bleve batches typically
+	// flush in well under that. We do this BEFORE wg.Wait so the wg timeout
+	// only governs the daemon's own goroutines.
+	if d.codedb != nil {
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		drainStart := time.Now()
+		if err := d.codedb.WaitIdle(drainCtx); err != nil {
+			d.logger.Warn("codedb did not drain before shutdown timeout; in-flight bleve batch may be killed",
+				"waited", time.Since(drainStart), "err", err)
+		} else if time.Since(drainStart) > 100*time.Millisecond {
+			// only log when we actually waited — silent in the common case
+			d.logger.Info("codedb drained before shutdown", "waited", time.Since(drainStart))
+		}
+		drainCancel()
 	}
 
+	// Wait for goroutines with a fixed 5s timeout — codedb drain handled
+	// above out-of-band.
 	done := make(chan struct{})
 	go func() {
 		d.wg.Wait()
@@ -738,8 +748,8 @@ func (d *Daemon) shutdown() error {
 	case <-done:
 		d.logger.Info("graceful shutdown complete")
 		d.cleanup() // only cleanup after successful wait
-	case <-time.After(shutdownWait):
-		d.logger.Warn("shutdown timeout, forcing exit", "timeout", shutdownWait)
+	case <-time.After(5 * time.Second):
+		d.logger.Warn("shutdown timeout, forcing exit")
 		// don't cleanup - let OS clean up to avoid corrupting running goroutines
 		d.mu.Lock()
 		d.running = false

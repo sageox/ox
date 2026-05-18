@@ -392,10 +392,37 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	// indexing skips already-indexed commits) and code search stays empty until
 	// the user manually runs `ox code index --full`.
 	healedMarkers := store.NeedsReindexMarkers(dataDir)
+	markerForcedFull := false
 	if len(healedMarkers) > 0 && !payload.Full {
 		m.logger.Warn("codedb self-heal markers present, forcing full reindex",
 			"markers", healedMarkers, "data_dir", dataDir)
 		payload.Full = true
+		markerForcedFull = true
+	}
+
+	// If we wipe dataDir for a marker-forced reindex, the markers themselves
+	// get deleted along with everything else. If the subsequent indexing pass
+	// then fails (network blip, OOM, context cancel), the marker signal is
+	// gone and the NEXT freshness pass won't know to force --full — leaving
+	// the healed-but-empty bleve permanently empty until manual intervention.
+	// Restore the markers in a deferred-success path: indexSucceeded flips
+	// true only after the full pipeline completes; the defer rewrites the
+	// markers when indexSucceeded is still false at function exit.
+	indexSucceeded := false
+	if markerForcedFull {
+		defer func() {
+			if indexSucceeded {
+				return
+			}
+			m.logger.Warn("codedb marker-forced reindex failed; restoring self-heal markers so next pass retries",
+				"markers", healedMarkers, "data_dir", dataDir)
+			for _, name := range healedMarkers {
+				if err := store.WriteNeedsReindexMarker(dataDir, name); err != nil {
+					m.logger.Warn("failed to restore self-heal marker",
+						"name", name, "data_dir", dataDir, "err", err)
+				}
+			}
+		}()
 	}
 
 	m.logger.Info("codedb indexing started", "target", target, "data_dir", dataDir, "full", payload.Full)
@@ -572,8 +599,15 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	// check doesn't re-force --full. (The dataDir wipe above would have removed
 	// them too, but markers may exist on the incremental path if a future
 	// change ever decouples them from --full forcing; clearing here is the
-	// defensive invariant.)
-	store.ClearAllNeedsReindexMarkers(dataDir)
+	// defensive invariant.) Log clear failures: leaving stale markers means
+	// the next pass re-forces --full unnecessarily.
+	if err := store.ClearAllNeedsReindexMarkers(dataDir); err != nil {
+		m.logger.Warn("codedb failed to clear self-heal markers after successful indexing",
+			"data_dir", dataDir, "err", err)
+	}
+	// Marker restoration is keyed off this flag — flip AFTER clearing so a
+	// transient marker-clear failure doesn't trigger the deferred restore.
+	indexSucceeded = true
 
 	logArgs := []any{
 		"blobs_parsed", stats.BlobsParsed,
@@ -1088,15 +1122,43 @@ func (m *CodeDBManager) setError(err error) {
 }
 
 // IsIndexing reports whether a full indexing pass is currently in flight.
-// Used by daemon shutdown to extend the goroutine-wait timeout: if a bleve
-// batch is mid-flush, force-killing the goroutine leaves a torn _mapping doc
-// (the original "bleve index appears to be in use" bug). Letting the in-flight
-// batch finish keeps the on-disk index well-formed.
-//
-// Reports the worktree-indexing flag only — the ledger-index flag has its own
-// short lifetime and uses an independent codepath.
+// Reports the worktree-indexing flag only — the ledger-index flag has its
+// own short lifetime and uses an independent codepath.
 func (m *CodeDBManager) IsIndexing() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.indexing
+}
+
+// WaitIdle blocks until no indexing pass is in flight or ctx is canceled.
+// Returns ctx.Err() on cancellation, nil when idle.
+//
+// Used by daemon shutdown to actually wait for codedb to drain. Without this,
+// kill-9'ing the daemon mid-bleve-batch leaves a torn _mapping doc (the
+// original "bleve index appears to be in use" bug). store.Open's self-heal
+// recovers from that on the next open, but draining cleanly avoids the wipe-
+// and-reindex cycle entirely.
+//
+// The CheckFreshness goroutine is intentionally NOT registered with the
+// daemon's sync.WaitGroup (it has its own per-pass context that the daemon-
+// wide cancel propagates into), so daemon.shutdown needs an explicit drain
+// primitive that polls m.indexing under the same mutex that gates it.
+//
+// Polling every 100ms is appropriate here: indexing passes are seconds-to-
+// minutes long, so the worst-case extra wait is sub-second. A condition
+// variable would be tighter but adds complexity for negligible gain in this
+// codepath (called once at shutdown).
+func (m *CodeDBManager) WaitIdle(ctx context.Context) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if !m.IsIndexing() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }

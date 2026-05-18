@@ -87,9 +87,10 @@ func HasNeedsReindexMarker(root, name string) bool {
 }
 
 // NeedsReindexMarkers returns the names of all sub-indexes with self-heal
-// markers present. Returns an empty slice (never nil) when none are set.
+// markers present. Returns an empty (non-nil) slice when none are set so
+// callers only have one empty-state to handle (`len(out) == 0`).
 func NeedsReindexMarkers(root string) []string {
-	var out []string
+	out := make([]string, 0, len(BleveSubIndexNames))
 	for _, name := range BleveSubIndexNames {
 		if HasNeedsReindexMarker(root, name) {
 			out = append(out, name)
@@ -109,11 +110,17 @@ func ClearNeedsReindexMarker(root, name string) error {
 }
 
 // ClearAllNeedsReindexMarkers removes every marker in root. Called by the
-// indexer after a successful full pass.
-func ClearAllNeedsReindexMarkers(root string) {
+// indexer after a successful full pass. Aggregates per-marker failures into
+// a joined error so callers can surface the problem; a swallowed failure
+// here would leave the daemon re-forcing --full on every freshness pass.
+func ClearAllNeedsReindexMarkers(root string) error {
+	var errs []error
 	for _, name := range BleveSubIndexNames {
-		_ = ClearNeedsReindexMarker(root, name)
+		if err := ClearNeedsReindexMarker(root, name); err != nil {
+			errs = append(errs, fmt.Errorf("clear %s marker: %w", name, err))
+		}
 	}
+	return errors.Join(errs...)
 }
 
 // Store wraps a SQLite database and Bleve full-text search indexes.
@@ -379,13 +386,21 @@ func (s *Store) rebuildCombinedIndex() {
 
 // CheckIntegrity validates that the SQLite database and all Bleve indexes
 // are healthy. Returns nil if everything is fine, ErrCorrupt otherwise.
+//
+// On a SQL-only store (constructed via OpenSQLOnly), the bleve indexes are
+// nil by design — those checks are skipped, not treated as a failure.
+// Callers that genuinely need bleve integrity must use Open, not OpenSQLOnly.
 func (s *Store) CheckIntegrity() error {
 	if err := checkSQLiteIntegrity(s.db); err != nil {
 		return fmt.Errorf("sqlite: %w", ErrCorrupt)
 	}
 
-	// validate bleve indexes can serve a basic query
+	// validate bleve indexes can serve a basic query (skip nil indexes for
+	// SQL-only stores — those legitimately have no bleve to check)
 	for name, idx := range map[string]bleve.Index{"code": s.CodeIndex, "diff": s.DiffIndex, "comment": s.CommentIndex} {
+		if idx == nil {
+			continue
+		}
 		q := bleve.NewMatchNoneQuery()
 		req := bleve.NewSearchRequest(q)
 		req.Size = 0
@@ -503,19 +518,22 @@ func selfHealBleveSubIndex(root, path, name string, openErr error) (bleve.Index,
 		return nil, fmt.Errorf("recreate empty bleve sub-index %s: %w", path, err)
 	}
 
-	if markerErr := writeNeedsReindexMarker(root, name); markerErr != nil {
+	if markerErr := WriteNeedsReindexMarker(root, name); markerErr != nil {
 		slog.Warn("failed to write needs_reindex marker; daemon may not auto-rebuild",
 			"name", name, "root", root, "err", markerErr)
 	}
 	return idx, nil
 }
 
-// writeNeedsReindexMarker creates the marker file that signals to the daemon's
+// WriteNeedsReindexMarker creates the marker file that signals to the daemon's
 // next indexing pass that a sub-index was nuked and needs a full rebuild.
 // The file body is a short human-readable string with the trigger time, so
 // `ox doctor` and `cat .needs_reindex_*` can give a meaningful answer to
-// "why is this here?".
-func writeNeedsReindexMarker(root, name string) error {
+// "why is this here?". Exported so the daemon can restore markers after a
+// failed marker-forced reindex (without restore, a single rebuild failure
+// would silently drop the signal and code search would stay empty until
+// `ox code index --full`).
+func WriteNeedsReindexMarker(root, name string) error {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return err
 	}
