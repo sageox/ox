@@ -1152,7 +1152,7 @@ func TestBlueGreenGC_CleanTreeStillWorks(t *testing.T) {
 // Returns (bareDir, clonedDir, scheduler) for GC testing.
 func setupClonedTeamContext(t *testing.T, manifestContent string, extraFiles map[string]string) (string, string, *SyncScheduler) {
 	t.Helper()
-	isolateCredentials(t)
+	isolateCredentials(t) // also opts into TestAllowFileTransport for file:// clones
 
 	bareDir := setupTeamContextBareRepo(t, manifestContent, extraFiles)
 	cloneURL := "file://" + bareDir

@@ -19,6 +19,17 @@ type TwoPhaseCloneResult struct {
 	SparsePaths    []string
 }
 
+// TestAllowFileTransport is a test-only escape hatch that disables the
+// `-c protocol.file.allow=never` hardening in TwoPhaseClone. The Blue-green
+// GC tests clone from a local bare repo via file:// to simulate a remote;
+// they MUST set this to true for the duration of the test (the production
+// default is false). Setting this in non-test code is a security bug.
+//
+// We use a package var (not a parameter) to keep the production call sites
+// in sync.go / sync_gc.go / sync_team.go unchanged — the hardening still
+// applies to every production code path because none of them flip the var.
+var TestAllowFileTransport bool
+
 // TwoPhaseClone performs a two-phase partial clone for team context repos.
 //
 // Phase 1: Clone with --filter=blob:none --depth=1 --sparse --no-checkout,
@@ -52,9 +63,15 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 	// or redirect tries to coerce git into a CVE-2017-1000117-class fetch.
 	// `--` terminates option parsing so a hostile URL starting with "-" is
 	// treated as a positional, not a flag.
-	cloneArgs := append(
-		gitutil.GitHTTPTimeoutFlags(),
-		"-c", "protocol.file.allow=never",
+	//
+	// TestAllowFileTransport is a test-only override (see its godoc); ext://
+	// hardening is always applied — no production or test code legitimately
+	// needs it.
+	cloneArgs := gitutil.GitHTTPTimeoutFlags()
+	if !TestAllowFileTransport {
+		cloneArgs = append(cloneArgs, "-c", "protocol.file.allow=never")
+	}
+	cloneArgs = append(cloneArgs,
 		"-c", "protocol.ext.allow=never",
 		"clone",
 		"--filter=blob:none",

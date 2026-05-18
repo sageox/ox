@@ -19,9 +19,18 @@ func isolateCredentials(t *testing.T) {
 	t.Helper()
 	prevConfigDir := gitserver.TestSetConfigDirOverride(t.TempDir())
 	prevForceFile := gitserver.TestSetForceFileStorage(true)
+	// Daemon tests routinely clone from a local bare repo via `file://` to
+	// simulate a remote. Production hardens against this transport
+	// (`-c protocol.file.allow=never` in gitserver.TwoPhaseClone and
+	// sync.go's bubble-clone path) as CVE-2017-1000117 defense-in-depth, so
+	// tests must opt back in. The override is restored on cleanup so it
+	// can't leak into tests that don't need it.
+	prevAllowFile := gitserver.TestAllowFileTransport
+	gitserver.TestAllowFileTransport = true
 	t.Cleanup(func() {
 		gitserver.TestSetConfigDirOverride(prevConfigDir)
 		gitserver.TestSetForceFileStorage(prevForceFile)
+		gitserver.TestAllowFileTransport = prevAllowFile
 	})
 }
 

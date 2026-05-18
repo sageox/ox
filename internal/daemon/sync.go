@@ -1761,8 +1761,14 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 		//     past the parser via, say, a redirect into a submodule that uses ext::.
 		//   - "--" terminates option parsing so an attacker URL beginning with "-" can never
 		//     be reinterpreted as a flag, regardless of future scheme/host policy changes.
+		//
+		// gitserver.TestAllowFileTransport is a test-only override that lets
+		// bubble/sync tests clone from a local bare repo via file://. Production
+		// must never set it; see its godoc.
+		if !gitserver.TestAllowFileTransport {
+			cloneArgs = append(cloneArgs, "-c", "protocol.file.allow=never")
+		}
 		cloneArgs = append(cloneArgs,
-			"-c", "protocol.file.allow=never",
 			"-c", "protocol.ext.allow=never",
 			"clone", "--quiet", "--", cloneURL, payload.RepoPath,
 		)

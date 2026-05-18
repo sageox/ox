@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -171,6 +172,14 @@ func TestSyncBubblesIntegration_EndpointSwitchMidFlight(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
+
+	// This test inlines its own env setup rather than calling kbTestEnv (it
+	// needs to switch endpoint mid-test). Mirror kbTestEnv's
+	// TestAllowFileTransport opt-in so file:// clones aren't refused by the
+	// production hardening — see gitserver.TestAllowFileTransport godoc.
+	prevAllowFile := gitserver.TestAllowFileTransport
+	gitserver.TestAllowFileTransport = true
+	t.Cleanup(func() { gitserver.TestAllowFileTransport = prevAllowFile })
 
 	bareA := makeBareRepo(t, "epsa", "f.md", "from-staging\n")
 	bareB := makeBareRepo(t, "epsb", "f.md", "from-prod\n")

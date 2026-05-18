@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,6 +47,13 @@ func kbTestEnv(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", tmp)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "cache"))
 	t.Setenv("SAGEOX_ENDPOINT", "https://staging.sageox.ai")
+	// Bubble sync tests clone from local bare repos via file:// to simulate
+	// remotes. Production (sync.go:1765, gitserver.TwoPhaseClone) hardens
+	// against this with `-c protocol.file.allow=never`; tests must opt back
+	// in. See gitserver.TestAllowFileTransport godoc for the rationale.
+	prevAllowFile := gitserver.TestAllowFileTransport
+	gitserver.TestAllowFileTransport = true
+	t.Cleanup(func() { gitserver.TestAllowFileTransport = prevAllowFile })
 }
 
 // kbTestScheduler builds a SyncScheduler with verbose-quiet logging and a
