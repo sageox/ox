@@ -84,11 +84,10 @@ var codeInsightsCmd = &cobra.Command{
 			return fmt.Errorf("no code index found — run 'ox code index' first")
 		}
 
-		if isCodeDBIndexing(false) {
-			return fmt.Errorf("code index is currently being built — insights unavailable until indexing completes. Run 'ox code status' to check progress")
-		}
-
-		db, err := codedb.Open(dataDir)
+		// insights are SQL-only — open without bleve so a corrupt/locked/
+		// mid-rebuild bleve sub-index can't block the read. SQLite WAL handles
+		// concurrent readers even while the daemon writes.
+		db, err := codedb.OpenSQLOnly(dataDir)
 		if err != nil {
 			return fmt.Errorf("open codedb: %w", err)
 		}

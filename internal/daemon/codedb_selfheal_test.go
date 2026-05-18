@@ -1,11 +1,12 @@
 package daemon
 
 import (
-	"errors"
-	"fmt"
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/store"
@@ -13,40 +14,78 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-// TestMappingCorruptFromErr_FindsTypedErrorThroughWrapping verifies that the
-// daemon's helper unwraps the `codedb initial index failed: open codedb: open
-// codedb store: open comment index: ...` error chain and surfaces the typed
-// MappingCorruptError so handleMappingCorrupt can act on it.
+// TestDoIndex_HonorsSelfHealMarker_ForcesFullReindex is the end-to-end test
+// for the layer-2 contract of the codedb self-heal pipeline:
 //
-// Failure prevented: the daemon would have to string-parse error messages to
-// learn which sub-index failed — brittle and silent if the wrapping changes.
-func TestMappingCorruptFromErr_FindsTypedErrorThroughWrapping(t *testing.T) {
+//  1. store.openOrCreateBleveIndex detects mapping corruption, nukes +
+//     recreates the sub-index, and writes `.needs_reindex_<name>`.
+//  2. The daemon's next doIndex pass sees the marker, forces payload.Full=true
+//     (which wipes dataDir and rebuilds from scratch), and clears the marker.
+//
+// Without this test, layer-2 could silently regress — search would return
+// empty results forever even after the daemon ran an indexing pass, because
+// the incremental path skips already-committed SHAs and the empty bleve
+// would never get repopulated.
+//
+// Failure prevented: a future refactor decouples NeedsReindexMarkers from
+// the Full-forcing logic in doIndex, and code search stays permanently
+// empty after a corruption + auto-heal.
+func TestDoIndex_HonorsSelfHealMarker_ForcesFullReindex(t *testing.T) {
 	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git + SQLite + Bleve operations")
+	}
 
-	original := &store.MappingCorruptError{Name: "comment", Path: "/tmp/whatever"}
-	wrapped := fmt.Errorf("codedb initial index failed: %w",
-		fmt.Errorf("open codedb: %w",
-			fmt.Errorf("open codedb store: %w",
-				fmt.Errorf("open comment index: %w", original))))
+	// Seed a real local git repo so doIndex has something to walk.
+	repoDir := t.TempDir()
+	seedGitRepo(t, repoDir)
 
-	got := mappingCorruptFromErr(wrapped)
-	require.NotNil(t, got, "MappingCorruptError must be findable through 4 levels of wrapping")
-	require.Equal(t, "comment", got.Name)
-	require.Equal(t, "/tmp/whatever", got.Path)
+	dataDir := t.TempDir()
+	mgr := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
+	mgr.dataDir = dataDir // skip path-resolution
 
-	// negative case: unrelated error
-	require.Nil(t, mappingCorruptFromErr(errors.New("unrelated")))
-	require.Nil(t, mappingCorruptFromErr(nil))
+	// First indexing pass populates SQL + bleve normally.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	_, err := mgr.Index(ctx, CodeIndexPayload{}, nil)
+	require.NoError(t, err, "first index must succeed")
+
+	// Capture commit count after first pass — proves SQL was populated.
+	commitsAfterFirst := countCommits(t, dataDir)
+	require.Greater(t, commitsAfterFirst, 0, "first index must populate commits")
+
+	// Write a self-heal marker for "code" — simulating openOrCreateBleveIndex
+	// having nuked + recreated the code sub-index.
+	require.NoError(t, writeMarkerForTest(dataDir, "code"))
+	require.True(t, store.HasNeedsReindexMarker(dataDir, "code"))
+
+	// Next indexing pass must observe the marker and force Full=true. We
+	// verify this indirectly by confirming the marker is cleared post-pass
+	// (markers are removed by the dataDir wipe Full=true triggers, and
+	// explicitly cleared in the success path as a defensive invariant).
+	_, err = mgr.Index(ctx, CodeIndexPayload{}, nil)
+	require.NoError(t, err, "second index must succeed")
+
+	require.False(t, store.HasNeedsReindexMarker(dataDir, "code"),
+		"marker must be cleared after Full=true reindex")
+	require.Empty(t, store.NeedsReindexMarkers(dataDir),
+		"no markers must remain after successful pass")
+
+	// SQL must still be populated (proves the rebuild actually ran, not just
+	// the marker clear).
+	commitsAfterSecond := countCommits(t, dataDir)
+	require.Greater(t, commitsAfterSecond, 0, "second index must repopulate commits after wipe")
 }
 
-// TestHandleMappingCorrupt_RebuildsAndCapsAttempts verifies the bounded
-// auto-rebuild contract: the first observation triggers a rebuild; once the
-// per-sub-index counter hits maxBleveRebuildAttempts, further observations
-// are no-ops so a chronically-broken disk doesn't become a rebuild loop.
+// TestStoreOpen_SelfHealsTransparently_NoDaemonRetryNeeded verifies the
+// integration boundary between store.Open self-heal and the daemon: when the
+// daemon's CheckFreshness opens the store and bleve is corrupt, Open self-
+// heals, doIndex sees no MappingCorruptError, and the marker is left behind
+// for the next pass — no special daemon-side branch needed.
 //
-// Failure prevented: daemon at 340% CPU rebuilding the same broken sub-index
-// every freshness cycle.
-func TestHandleMappingCorrupt_RebuildsAndCapsAttempts(t *testing.T) {
+// Failure prevented: a future refactor reintroduces MappingCorruptError to
+// callers of store.Open, requiring the daemon to special-case it again.
+func TestStoreOpen_SelfHealsTransparently_NoDaemonRetryNeeded(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: SQLite + Bleve operations")
@@ -57,91 +96,99 @@ func TestHandleMappingCorrupt_RebuildsAndCapsAttempts(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.Close())
 
-	// repeatedly poison the comment mapping and ask the manager to heal.
-	mgr := NewCodeDBManager(t.TempDir(), codedbTestLogger(), nil)
-
-	// 1st invocation: should rebuild successfully and increment counter to 1
 	poisonCommentMapping(t, tmp)
-	mce := &store.MappingCorruptError{Name: "comment", Path: filepath.Join(tmp, "bleve", "comment")}
-	mgr.handleMappingCorrupt(mce, tmp)
 
-	// validate Open succeeds after rebuild
+	// Open must succeed silently — no typed error to handle.
 	db2, err := codedb.Open(tmp)
-	require.NoError(t, err, "Open must succeed after first rebuild")
-	require.NoError(t, db2.Close())
+	require.NoError(t, err, "Open must self-heal, not return MappingCorruptError")
+	defer db2.Close()
 
-	mgr.mu.Lock()
-	require.Equal(t, 1, mgr.bleveRebuildAttempts["comment"], "first attempt counted")
-	mgr.mu.Unlock()
-
-	// 2nd invocation: still under cap, rebuilds again
-	poisonCommentMapping(t, tmp)
-	mgr.handleMappingCorrupt(mce, tmp)
-	mgr.mu.Lock()
-	require.Equal(t, 2, mgr.bleveRebuildAttempts["comment"], "second attempt counted")
-	mgr.mu.Unlock()
-
-	// 3rd invocation: at cap (maxBleveRebuildAttempts == 2), MUST NOT rebuild.
-	// Poison the mapping again and verify Open still fails (proof the rebuild
-	// did not run).
-	poisonCommentMapping(t, tmp)
-	mgr.handleMappingCorrupt(mce, tmp)
-
-	_, err = codedb.Open(tmp)
-	require.Error(t, err, "after cap, rebuild must not run; Open stays broken until ox doctor")
-	var mce2 *store.MappingCorruptError
-	require.True(t, errors.As(err, &mce2), "broken state still surfaces as MappingCorruptError")
-
-	mgr.mu.Lock()
-	require.Equal(t, 2, mgr.bleveRebuildAttempts["comment"], "counter must not advance past cap")
-	mgr.mu.Unlock()
+	// Marker must have been written so the next daemon pass forces Full.
+	require.True(t, store.HasNeedsReindexMarker(tmp, "comment"),
+		"self-heal must leave a marker for daemon to consume")
 }
 
-// TestHandleMappingCorrupt_CodeDiff_DoesNotLoop verifies that when a
-// code/diff sub-index is reported corrupt, the daemon does NOT keep
-// looping through auto-rebuild — RebuildBleveSubIndex returns
-// ErrFullReindexRequired, so we log once per attempt (counter increments)
-// and then stop trying after the cap. Without this, a code/diff
-// MappingCorruptError combined with the previous "rebuild + return nil"
-// behavior would have left search silently empty while the daemon
-// reported "auto-rebuilt" every cycle.
-//
-// Failure prevented: silent broken-heal of code/diff sub-index.
-func TestHandleMappingCorrupt_CodeDiff_DoesNotLoop(t *testing.T) {
-	t.Parallel()
-	if testing.Short() {
-		t.Skip("short: SQLite + Bleve operations")
+// seedGitRepo creates a minimal git repo with one commit at repoDir.
+// Uses `git` CLI directly (not go-git) so the repo state is byte-identical
+// to what a real user creates, and so we don't pull in go-git for tests
+// that only need a walk-able history.
+func seedGitRepo(t *testing.T, repoDir string) {
+	t.Helper()
+	runGit := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = repoDir
+		// Test isolation: never read the host's git config (user.email/signing key/etc.).
+		// Without this, signed-commit hooks can prompt for SSH passphrases mid-test.
+		cmd.Env = append(cmd.Env,
+			"HOME="+t.TempDir(),
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_AUTHOR_NAME=ox-test", "GIT_AUTHOR_EMAIL=ox@test",
+			"GIT_COMMITTER_NAME=ox-test", "GIT_COMMITTER_EMAIL=ox@test",
+		)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
 	}
+	runGit("init", "-q", "-b", "main")
+	runGit("config", "commit.gpgsign", "false")
+	runGit("config", "tag.gpgsign", "false")
 
-	tmp := t.TempDir()
-	db, err := codedb.Open(tmp)
+	// one small file so the indexer has something to walk
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "hello.go"), []byte("package main\n"), 0o600))
+	runGit("add", "hello.go")
+	runGit("commit", "-q", "-m", "initial")
+}
+
+// writeMarkerForTest creates a needs_reindex marker the same way Open's
+// self-heal does. We don't call the unexported writeNeedsReindexMarker
+// directly; instead we mimic its contract (the daemon only cares about
+// file *presence*, not body content).
+func writeMarkerForTest(dataDir, name string) error {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(store.NeedsReindexMarkerPath(dataDir, name), []byte("test-marker\n"), 0o600)
+}
+
+// countCommits queries the codedb SQL store for the commit count without
+// going through bleve.
+func countCommits(t *testing.T, dataDir string) int {
+	t.Helper()
+	db, err := codedb.OpenSQLOnly(dataDir)
 	require.NoError(t, err)
-	require.NoError(t, db.Close())
+	defer db.Close()
+	var n int
+	require.NoError(t, db.Store().QueryRow("SELECT COUNT(*) FROM commits").Scan(&n))
+	return n
+}
+
+// TestIsIndexing_ReflectsFlag verifies the IsIndexing accessor used by
+// daemon.shutdown to decide whether to extend the goroutine-wait timeout.
+// Reading m.indexing directly under m.mu (as IsIndexing does) is the only
+// race-free way to make that decision; a future refactor that bypasses the
+// lock or aliases the field would silently break shutdown-time bleve drain.
+//
+// Failure prevented: shutdown reverts to 5s wait even when indexing is in
+// flight, returning to the kill-mid-flush regression that motivated this
+// extension.
+func TestIsIndexing_ReflectsFlag(t *testing.T) {
+	t.Parallel()
 
 	mgr := NewCodeDBManager(t.TempDir(), codedbTestLogger(), nil)
-	mce := &store.MappingCorruptError{Name: "code", Path: filepath.Join(tmp, "bleve", "code")}
+	require.False(t, mgr.IsIndexing(), "fresh manager must not report indexing")
 
-	// before: code bleve dir exists with content
-	codeBleveDir := filepath.Join(tmp, "bleve", "code")
-	beforeEntries, err := os.ReadDir(codeBleveDir)
-	require.NoError(t, err)
-	require.NotEmpty(t, beforeEntries, "code bleve must have entries before refusal")
-
-	mgr.handleMappingCorrupt(mce, tmp)
-
-	// after: code bleve dir untouched (refusal does NOT delete on disk)
-	afterEntries, err := os.ReadDir(codeBleveDir)
-	require.NoError(t, err)
-	require.Equal(t, len(beforeEntries), len(afterEntries),
-		"ErrFullReindexRequired path must not modify code bleve on disk")
-
-	// counter must increment so the daemon stops after maxBleveRebuildAttempts
 	mgr.mu.Lock()
-	require.Equal(t, 1, mgr.bleveRebuildAttempts["code"],
-		"attempt must count even when rebuild refused — otherwise infinite loop")
+	mgr.indexing = true
 	mgr.mu.Unlock()
+	require.True(t, mgr.IsIndexing(), "must reflect flag flip")
+
+	mgr.mu.Lock()
+	mgr.indexing = false
+	mgr.mu.Unlock()
+	require.False(t, mgr.IsIndexing(), "must reflect flag reset")
 }
 
+// poisonCommentMapping overwrites the latest snapshot's `_mapping` value
+// with zero bytes — the exact on-disk state observed in the field.
 func poisonCommentMapping(t *testing.T, root string) {
 	t.Helper()
 	boltPath := filepath.Join(root, "bleve", "comment", "store", "root.bolt")

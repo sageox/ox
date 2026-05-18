@@ -304,13 +304,12 @@ var codeSQLCmd = &cobra.Command{
 			return fmt.Errorf("not in a git repository")
 		}
 
-		dataDir, useLedger := resolvePreferredCodeDBDir(root)
+		dataDir, _ := resolvePreferredCodeDBDir(root)
 
-		if isCodeDBIndexing(useLedger) {
-			return fmt.Errorf("code index is currently being built — SQL queries unavailable until indexing completes")
-		}
-
-		db, err := codedb.Open(dataDir)
+		// Raw SQL bypasses bleve — open without it so a corrupt/locked/
+		// mid-rebuild bleve sub-index can't block the query. SQLite WAL handles
+		// concurrent readers even while the daemon writes.
+		db, err := codedb.OpenSQLOnly(dataDir)
 		if err != nil {
 			return fmt.Errorf("open codedb: %w", err)
 		}
@@ -477,6 +476,22 @@ var codeStatusCmd = &cobra.Command{
 					b.WriteString("\n\n")
 					break
 				}
+			}
+		}
+
+		// Surface self-heal markers: store.Open nukes + recreates a corrupt
+		// bleve sub-index and writes a marker so the daemon's next pass forces
+		// a full rebuild. Until that rebuild completes, search returns no
+		// results for the affected sub-index — show the user why.
+		if indexExists {
+			if healing := store.NeedsReindexMarkers(dataDir); len(healing) > 0 {
+				b.WriteString(statusWarningStyle.Render(
+					fmt.Sprintf("⚠ rebuilding sub-index(es): %s", strings.Join(healing, ", "))))
+				b.WriteString("\n")
+				b.WriteString(statusLabelStyle.Render(""))
+				b.WriteString(statusMutedStyle.Render("Auto-repair after corruption. Search returns empty until daemon completes; force now: "))
+				b.WriteString(statusHighlightStyle.Render("ox code index --full"))
+				b.WriteString("\n\n")
 			}
 		}
 

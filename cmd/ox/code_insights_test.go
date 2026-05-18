@@ -1,11 +1,15 @@
 package main
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/store"
+	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
 )
 
 func setupInsightsDB(t *testing.T) *store.Store {
@@ -362,4 +366,148 @@ func TestSplitAndTrim(t *testing.T) {
 			t.Errorf("splitAndTrim(%q) = %d items, want %d", tt.input, len(result), tt.want)
 		}
 	}
+}
+
+// TestInsights_SurvivesCorruptBleveMapping is the regression test for the
+// "I keep seeing this periodically" bug: `ox code insights` failing with
+//
+//	Error: open codedb: open codedb store: open code index:
+//	  bleve index appears to be in use (lock contention):
+//	  error parsing mapping JSON: unexpected end of JSON input
+//
+// observed across workspaces after an indexer was killed mid-flush (Conductor
+// cycling, daemon shutdown, OOM). The fix has two layers:
+//
+//  1. store.openOrCreateBleveIndex self-heals a structurally-corrupt
+//     `_mapping` doc by nuking + recreating the sub-index + writing a
+//     `.needs_reindex_<name>` marker (covered by store/store_test.go).
+//  2. `ox code insights` uses codedb.OpenSQLOnly so it doesn't depend on
+//     bleve at all — every insights query is pure SQL.
+//
+// This test exercises layer (2): seed insights data, corrupt EVERY bleve
+// sub-index's mapping, then verify the SQL queries that back `ox code
+// insights` still return results via OpenSQLOnly.
+//
+// Failure prevented: future refactor accidentally re-introduces bleve
+// dependency in the insights read path, and the cryptic error returns.
+func TestInsights_SurvivesCorruptBleveMapping(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
+
+	tmp := t.TempDir()
+
+	// Seed data through a full Store so all schema + indexes exist.
+	s := setupInsightsDBAt(t, tmp)
+	require.NoError(t, s.Close())
+
+	// Corrupt every bleve sub-index's _mapping doc — the exact on-disk state
+	// observed in the field after an interrupted writer.
+	for _, sub := range []string{"code", "diff", "comment"} {
+		boltPath := filepath.Join(tmp, "bleve", sub, "store", "root.bolt")
+		corruptMappingForSubIndex(t, boltPath)
+	}
+
+	// Open SQL-only — should succeed without touching bleve.
+	db, err := codedb.OpenSQLOnly(tmp)
+	require.NoError(t, err, "OpenSQLOnly must succeed even when every bleve sub-index is corrupt")
+	defer db.Close()
+
+	// All five insights queries must return data — these are the exact calls
+	// `ox code insights` makes in cmd/ox/code_insights.go:110-114.
+	store := db.Store()
+	hotspots, err := queryHotspots(store, 14, 10)
+	require.NoError(t, err, "queryHotspots")
+	require.NotEmpty(t, hotspots, "hotspots must surface seeded data")
+
+	contention, err := queryContention(store, 14, 10)
+	require.NoError(t, err, "queryContention")
+	require.NotEmpty(t, contention, "contention must surface auth.go touched by 3 workspaces")
+
+	commits, err := queryRecentCommits(store, 14, 10)
+	require.NoError(t, err, "queryRecentCommits")
+	require.NotEmpty(t, commits, "recent commits must surface seeded data")
+
+	prs, err := queryOpenPRs(store, 10)
+	require.NoError(t, err, "queryOpenPRs")
+	require.NotEmpty(t, prs, "open PRs must surface seeded data")
+
+	issues, err := queryOpenIssues(store, 10)
+	require.NoError(t, err, "queryOpenIssues")
+	require.NotEmpty(t, issues, "open issues must surface seeded data")
+}
+
+// setupInsightsDBAt is setupInsightsDB pinned to a caller-specified directory,
+// so a regression test can corrupt the on-disk bleve sub-indexes after
+// seeding completes.
+func setupInsightsDBAt(t *testing.T, root string) *store.Store {
+	t.Helper()
+	s, err := store.Open(root)
+	require.NoError(t, err)
+
+	_, err = s.Exec(`INSERT INTO repos (id, name, path) VALUES (1, 'workspace-a', '/a'), (2, 'workspace-b', '/b'), (3, 'workspace-c', '/c')`)
+	require.NoError(t, err)
+
+	now := time.Now().Unix()
+	day := int64(86400)
+	_, err = s.Exec(`
+		INSERT INTO commits (id, repo_id, hash, author, message, timestamp) VALUES
+		(1, 1, 'aaa1111', 'alice', 'add auth middleware', ?),
+		(2, 1, 'aaa2222', 'alice', 'fix auth token refresh', ?),
+		(3, 2, 'bbb1111', 'bob', 'refactor auth flow', ?),
+		(4, 2, 'bbb2222', 'bob', 'update login handler', ?),
+		(5, 3, 'ccc1111', 'carol', 'fix auth regression', ?),
+		(6, 1, 'aaa3333', 'alice', 'add rate limiting', ?)`,
+		now-day, now-2*day, now-day, now-3*day, now-day, now-5*day)
+	require.NoError(t, err)
+
+	_, err = s.Exec(`
+		INSERT INTO diffs (id, commit_id, path) VALUES
+		(1, 1, 'internal/auth/auth.go'),
+		(2, 2, 'internal/auth/auth.go'),
+		(3, 3, 'internal/auth/auth.go'),
+		(4, 4, 'cmd/server/main.go'),
+		(5, 5, 'internal/auth/auth.go'),
+		(6, 6, 'internal/daemon/sync.go'),
+		(7, 1, 'internal/daemon/sync.go'),
+		(8, 2, 'internal/daemon/sync.go')`)
+	require.NoError(t, err)
+
+	_, err = s.Exec(`
+		INSERT INTO pull_requests (id, number, title, author, state, labels) VALUES
+		(1, 100, 'feat: add OAuth2 support', 'alice', 'open', 'enhancement'),
+		(2, 99, 'fix: token expiry bug', 'bob', 'open', 'bug,urgent')`)
+	require.NoError(t, err)
+
+	_, err = s.Exec(`
+		INSERT INTO issues (id, number, title, author, state, labels) VALUES
+		(1, 50, 'Auth fails on refresh', 'dave', 'open', 'bug'),
+		(2, 49, 'Add rate limiting', 'eve', 'open', 'enhancement')`)
+	require.NoError(t, err)
+
+	return s
+}
+
+// corruptMappingForSubIndex overwrites the latest snapshot's `_mapping` value
+// with zero bytes — the exact on-disk state observed in the field.
+func corruptMappingForSubIndex(t *testing.T, boltPath string) {
+	t.Helper()
+	db, err := bbolt.Open(boltPath, 0o600, &bbolt.Options{Timeout: 2 * time.Second})
+	require.NoError(t, err, "open bolt for mapping corruption: %s", boltPath)
+	require.NoError(t, db.Update(func(tx *bbolt.Tx) error {
+		snaps := tx.Bucket([]byte{'s'})
+		require.NotNil(t, snaps)
+		var lastKey []byte
+		require.NoError(t, snaps.ForEach(func(k, _ []byte) error {
+			lastKey = append(lastKey[:0], k...)
+			return nil
+		}))
+		snap := snaps.Bucket(lastKey)
+		require.NotNil(t, snap)
+		internal := snap.Bucket([]byte{'i'})
+		require.NotNil(t, internal)
+		return internal.Put([]byte("_mapping"), []byte{})
+	}))
+	require.NoError(t, db.Close())
 }

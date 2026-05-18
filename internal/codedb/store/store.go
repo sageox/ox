@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -64,6 +65,57 @@ const MetadataDBFile = "metadata.db"
 // don't have to hardcode the names.
 var BleveSubIndexNames = []string{"code", "diff", "comment"}
 
+// needsReindexMarkerPrefix is the file prefix used inside a codedb dataDir to
+// flag that a specific bleve sub-index was nuked-and-recreated by Open's
+// self-heal path and needs a full rebuild on the next indexing pass.
+// Marker filename: ".needs_reindex_<name>" (e.g. ".needs_reindex_code").
+const needsReindexMarkerPrefix = ".needs_reindex_"
+
+// NeedsReindexMarkerPath returns the on-disk marker path for a bleve sub-index.
+// Exported so the daemon and doctor can locate markers without hardcoding the
+// prefix.
+func NeedsReindexMarkerPath(root, name string) string {
+	return filepath.Join(root, needsReindexMarkerPrefix+name)
+}
+
+// HasNeedsReindexMarker reports whether a self-heal marker exists for the
+// named sub-index. Used by the daemon (to force --full on next pass) and by
+// status/doctor commands (to surface "rebuilding" state to the user).
+func HasNeedsReindexMarker(root, name string) bool {
+	_, err := os.Stat(NeedsReindexMarkerPath(root, name))
+	return err == nil
+}
+
+// NeedsReindexMarkers returns the names of all sub-indexes with self-heal
+// markers present. Returns an empty slice (never nil) when none are set.
+func NeedsReindexMarkers(root string) []string {
+	var out []string
+	for _, name := range BleveSubIndexNames {
+		if HasNeedsReindexMarker(root, name) {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// ClearNeedsReindexMarker removes the self-heal marker for a sub-index.
+// Safe to call when the marker is absent. Returns nil on success or ENOENT.
+func ClearNeedsReindexMarker(root, name string) error {
+	err := os.Remove(NeedsReindexMarkerPath(root, name))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// ClearAllNeedsReindexMarkers removes every marker in root. Called by the
+// indexer after a successful full pass.
+func ClearAllNeedsReindexMarkers(root string) {
+	for _, name := range BleveSubIndexNames {
+		_ = ClearNeedsReindexMarker(root, name)
+	}
+}
+
 // Store wraps a SQLite database and Bleve full-text search indexes.
 // All SQL access goes through the convenience methods below.
 //
@@ -91,13 +143,67 @@ type Store struct {
 // It creates the directory structure, initializes SQLite and Bleve indexes.
 // If SQLite corruption is detected, the database is removed and ErrCorrupt is returned
 // so the caller can trigger a full re-index.
+//
+// Bleve self-heal: when a sub-index has a structurally broken `_mapping` doc
+// (kill-9 mid-flush, partial scorch snapshot), Open nukes the sub-index dir,
+// recreates an empty bleve, and writes a `.needs_reindex_<name>` marker so the
+// daemon's next pass does a full rebuild. Open never returns a typed
+// MappingCorruptError to callers — the entire recovery is internal. Callers
+// that need bleve (e.g. `ox code search`) just see empty results until the
+// daemon repopulates; callers that don't need bleve (e.g. `ox code insights`)
+// should use OpenSQLOnly to skip bleve entirely.
 func Open(root string) (*Store, error) {
+	db, err := openSQLite(root)
+	if err != nil {
+		return nil, err
+	}
+
+	codeIndex, diffIndex, commentIndex, err := openBleveIndexes(root)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+
+	s := &Store{
+		db:               db,
+		queries:          codedbsqlc.New(db),
+		CodeIndex:        codeIndex,
+		DiffIndex:        diffIndex,
+		CommentIndex:     commentIndex,
+		Root:             root,
+		dirtyCodeIndexes: make(map[string]bleve.Index),
+	}
+	s.CombinedCodeIndex = s.CodeIndex // default: no overlay
+	return s, nil
+}
+
+// OpenSQLOnly opens the SQLite half of a Store without touching bleve.
+// Bleve sub-indexes are left nil — search and dirty-overlay APIs MUST NOT be
+// used on a SQL-only store; the Store will panic on nil bleve access.
+//
+// Used by read paths that only query SQL data (e.g. `ox code insights`,
+// `ox code status` counters) so they keep working when bleve is mid-rebuild
+// or otherwise unavailable. SQLite's WAL mode makes concurrent reads safe
+// even while the daemon is actively writing.
+func OpenSQLOnly(root string) (*Store, error) {
+	db, err := openSQLite(root)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{
+		db:               db,
+		queries:          codedbsqlc.New(db),
+		Root:             root,
+		dirtyCodeIndexes: make(map[string]bleve.Index),
+	}, nil
+}
+
+// openSQLite handles the SQLite half of store construction. Shared by Open
+// and OpenSQLOnly so the SQLite pragma string and integrity check live in one
+// place.
+func openSQLite(root string) (*sql.DB, error) {
 	reposDir := filepath.Join(root, "repos")
 	bleveDir := filepath.Join(root, "bleve")
-	bleveCodeDir := filepath.Join(bleveDir, "code")
-	bleveDiffDir := filepath.Join(bleveDir, "diff")
-	bleveCommentDir := filepath.Join(bleveDir, "comment")
-
 	for _, dir := range []string{root, reposDir, bleveDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("create dir %s: %w", dir, err)
@@ -117,7 +223,6 @@ func Open(root string) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
-	// integrity check before schema creation
 	if err := checkSQLiteIntegrity(db); err != nil {
 		db.Close()
 		slog.Error("sqlite corruption detected, removing database", "path", dbPath, "err", err)
@@ -129,39 +234,31 @@ func Open(root string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
+	return db, nil
+}
 
-	codeIndex, err := openOrCreateBleveIndex(bleveCodeDir, "code")
+// openBleveIndexes opens (or self-heals + recreates) the three bleve
+// sub-indexes. Returns all three on success; closes any successfully opened
+// indexes if a later one fails.
+func openBleveIndexes(root string) (codeIdx, diffIdx, commentIdx bleve.Index, err error) {
+	bleveDir := filepath.Join(root, "bleve")
+
+	codeIdx, err = openOrCreateBleveIndex(root, filepath.Join(bleveDir, "code"), "code")
 	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("open code index: %w", err)
+		return nil, nil, nil, fmt.Errorf("open code index: %w", err)
 	}
-
-	diffIndex, err := openOrCreateBleveIndex(bleveDiffDir, "diff")
+	diffIdx, err = openOrCreateBleveIndex(root, filepath.Join(bleveDir, "diff"), "diff")
 	if err != nil {
-		db.Close()
-		codeIndex.Close()
-		return nil, fmt.Errorf("open diff index: %w", err)
+		codeIdx.Close()
+		return nil, nil, nil, fmt.Errorf("open diff index: %w", err)
 	}
-
-	commentIndex, err := openOrCreateBleveIndex(bleveCommentDir, "comment")
+	commentIdx, err = openOrCreateBleveIndex(root, filepath.Join(bleveDir, "comment"), "comment")
 	if err != nil {
-		db.Close()
-		codeIndex.Close()
-		diffIndex.Close()
-		return nil, fmt.Errorf("open comment index: %w", err)
+		codeIdx.Close()
+		diffIdx.Close()
+		return nil, nil, nil, fmt.Errorf("open comment index: %w", err)
 	}
-
-	s := &Store{
-		db:               db,
-		queries:          codedbsqlc.New(db),
-		CodeIndex:        codeIndex,
-		DiffIndex:        diffIndex,
-		CommentIndex:     commentIndex,
-		Root:             root,
-		dirtyCodeIndexes: make(map[string]bleve.Index),
-	}
-	s.CombinedCodeIndex = s.CodeIndex // default: no overlay
-	return s, nil
+	return codeIdx, diffIdx, commentIdx, nil
 }
 
 // ReposDir returns the path to the bare git repos directory.
@@ -170,18 +267,19 @@ func (s *Store) ReposDir() string {
 }
 
 // Close closes all resources. It is safe to call multiple times.
+// Bleve sub-indexes may be nil on a SQL-only store (see OpenSQLOnly); Close
+// skips nil indexes rather than panicking.
 func (s *Store) Close() error {
 	var firstErr error
 	s.closeOnce.Do(func() {
 		s.DetachDirtyOverlay()
-		if err := s.CodeIndex.Close(); err != nil {
-			firstErr = err
-		}
-		if err := s.DiffIndex.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		if err := s.CommentIndex.Close(); err != nil && firstErr == nil {
-			firstErr = err
+		for _, idx := range []bleve.Index{s.CodeIndex, s.DiffIndex, s.CommentIndex} {
+			if idx == nil {
+				continue
+			}
+			if err := idx.Close(); err != nil && firstErr == nil {
+				firstErr = err
+			}
 		}
 		if err := s.db.Close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -321,7 +419,24 @@ func removeSQLiteFiles(dbPath string) {
 	}
 }
 
-func openOrCreateBleveIndex(path, name string) (bleve.Index, error) {
+// openOrCreateBleveIndex opens an existing bleve sub-index, creates a new
+// empty one if the path doesn't exist yet, or self-heals on proven structural
+// corruption.
+//
+// Self-heal contract: when isBleveIndexCorrupt returns true (empty `_mapping`
+// doc or dangling .zap segments), the sub-index is nuked and recreated as an
+// empty bleve, and `.needs_reindex_<name>` is written under root so the next
+// daemon indexing pass does a full rebuild. Returns the empty index with no
+// error — callers see a working but empty bleve, not a typed error.
+//
+// True lock contention (another writer holds bbolt's exclusive flock) is
+// preserved as the pre-existing "lock contention" error: the corruption peek
+// uses a read-only open with 100ms timeout, so a live exclusive lock blocks
+// the peek and we stay in the safe wait-and-retry path.
+//
+// path is the bleve sub-index dir (e.g. <root>/bleve/code); root is the
+// codedb dataDir (needed to locate the marker file).
+func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 	idx, err := safeOpenBleve(path)
 	if err == nil {
 		return idx, nil
@@ -341,14 +456,14 @@ func openOrCreateBleveIndex(path, name string) (bleve.Index, error) {
 	// document is empty (observed: `error parsing mapping JSON: unexpected end
 	// of JSON input` while the worktree's diff/code shards are healthy). That
 	// state is unrecoverable by waiting — the daemon will spin forever — so we
-	// peek the mapping non-blocking and surface a typed MappingCorruptError
-	// when the mapping is provably empty. The peek uses a read-only open with
-	// a 100ms timeout: a real exclusive lock blocks the read, the peek bails
-	// out, and we keep the safe lock-contention behavior.
+	// peek the mapping non-blocking and self-heal when the mapping is provably
+	// empty. The peek uses a read-only open with a 100ms timeout: a real
+	// exclusive lock blocks the read, the peek bails out, and we keep the safe
+	// lock-contention behavior.
 	boltPath := filepath.Join(path, "store", "root.bolt")
 	if _, statErr := os.Stat(boltPath); statErr == nil {
 		if isBleveIndexCorrupt(boltPath) {
-			return nil, &MappingCorruptError{Name: name, Path: path}
+			return selfHealBleveSubIndex(root, path, name, err)
 		}
 		return nil, fmt.Errorf("bleve index appears to be in use (lock contention): %w", err)
 	} else if !os.IsNotExist(statErr) && !errors.Is(statErr, syscall.ENOTDIR) {
@@ -365,34 +480,86 @@ func openOrCreateBleveIndex(path, name string) (bleve.Index, error) {
 	return bleve.New(path, mapping)
 }
 
+// selfHealBleveSubIndex recovers from proven mapping/snapshot corruption by
+// nuking the sub-index dir, recreating an empty bleve, and writing a
+// `.needs_reindex_<name>` marker so the next daemon pass does a full rebuild.
+// Logs a single warn line so the recovery is visible in daemon logs.
+//
+// The marker is best-effort: if the marker write fails (disk full, permission
+// denied) the function still returns the empty index — the daemon will see
+// the empty bleve on its next freshness check via different signals (empty
+// search results) but the explicit signal is preferred. Marker failure is
+// logged at warn level.
+func selfHealBleveSubIndex(root, path, name string, openErr error) (bleve.Index, error) {
+	slog.Warn("bleve sub-index structurally corrupt, self-healing (nuke + recreate)",
+		"name", name, "path", path, "open_err", openErr)
+
+	if removeErr := os.RemoveAll(path); removeErr != nil {
+		return nil, fmt.Errorf("remove corrupt bleve sub-index %s: %w", path, removeErr)
+	}
+	mapping := bleve.NewIndexMapping()
+	idx, err := bleve.New(path, mapping)
+	if err != nil {
+		return nil, fmt.Errorf("recreate empty bleve sub-index %s: %w", path, err)
+	}
+
+	if markerErr := writeNeedsReindexMarker(root, name); markerErr != nil {
+		slog.Warn("failed to write needs_reindex marker; daemon may not auto-rebuild",
+			"name", name, "root", root, "err", markerErr)
+	}
+	return idx, nil
+}
+
+// writeNeedsReindexMarker creates the marker file that signals to the daemon's
+// next indexing pass that a sub-index was nuked and needs a full rebuild.
+// The file body is a short human-readable string with the trigger time, so
+// `ox doctor` and `cat .needs_reindex_*` can give a meaningful answer to
+// "why is this here?".
+func writeNeedsReindexMarker(root, name string) error {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return err
+	}
+	body := fmt.Sprintf("bleve sub-index %q self-healed at %s\n", name, time.Now().UTC().Format(time.RFC3339))
+	return os.WriteFile(NeedsReindexMarkerPath(root, name), []byte(body), 0o600)
+}
+
 // isBleveIndexCorrupt opens root.bolt read-only with a short timeout and
-// affirmatively checks for two on-disk failure modes that present as the
+// affirmatively checks for three on-disk failure modes that present as the
 // same opaque "error parsing mapping JSON" surface error:
 //
-//  1. Empty/missing `_mapping` doc in every snapshot.
-//  2. Latest snapshot references segment IDs whose `.zap` shard files are
-//     missing on disk. (Observed in the field on a real poison pill: bolt is
-//     fully readable, mapping is intact, yet `bleve.Open` still fails because
-//     scorch can't load the snapshot's segments — and downstream the mapping
-//     read returns empty bytes through the degraded reader.)
+//  1. Empty/missing `_mapping` doc in the latest snapshot.
+//  2. Truncated/unparseable `_mapping` doc — bytes present but the JSON
+//     fails validation (kill-mid-write that flushed a partial JSON
+//     document). Same surface error as case 1, same recovery needed.
+//  3. The latest snapshot has segment buckets but the store dir has zero
+//     `.zap` files. (Observed in the field on a real poison pill: bolt is
+//     fully readable, mapping is intact, yet `bleve.Open` still fails
+//     because scorch can't load the snapshot's segments — every referenced
+//     segment is missing on disk.)
 //
 // Returns true only when we successfully read the bolt AND can prove one of
-// the two conditions. On any access error (read-only open timeout, permission,
+// the three conditions. On any access error (read-only open timeout, permission,
 // unparseable bolt structure) returns false — we never flag corruption
 // without proof, so a real exclusive write lock stays in the lock-contention
 // path.
 //
-// scorch's bbolt layout (verified against bleve v2.5.7):
+// scorch's bbolt layout in bleve v2.5.7 (empirically verified, see
+// proposals/2026-05-17-bleve-bolt-layout/ if it gets written):
 //
 //	bucket "s" (snapshots)
-//	  └── bucket <8-byte BE epoch>
-//	         ├── bucket "i" (internal)        — `_mapping` key here
-//	         ├── bucket "m" (meta)
-//	         └── bucket <0xf7-prefixed segId>  — one per .zap segment in snapshot
+//	  └── snapshot bucket <varint epoch>
+//	         ├── bucket "i" (internal)  — holds `_mapping`, `TotBytesWritten`
+//	         ├── bucket "m" (meta)      — holds `timeStamp`, `type`, `version`
+//	         └── bucket <segment id>    — one per segment referenced
 //
-// Segment bucket keys are 0xf7 followed by a varint-encoded segment epoch
-// (two-byte minimum we see in practice). Segment epochs match the lower bits
-// of the .zap filename (e.g. segment epoch 0x521 → 000000000521.zap).
+// Earlier implementations of this function tried to decode segment-bucket
+// keys back into .zap filenames so we could check each reference individually.
+// That coupling broke silently across bleve versions (different epoch
+// encoding), so we now use a coarser but version-independent signal: a
+// snapshot with segment buckets and *zero* .zap files on disk is
+// unambiguously broken. Anything more granular (e.g., partial segment loss)
+// is harder to detect reliably and survives as an empty search result rather
+// than a hard open failure.
 func isBleveIndexCorrupt(boltPath string) bool {
 	db, err := bbolt.Open(boltPath, 0600, &bbolt.Options{
 		ReadOnly: true,
@@ -430,25 +597,44 @@ func isBleveIndexCorrupt(boltPath string) bool {
 			return nil
 		}
 
-		// (1) mapping doc empty/missing
+		// (1) mapping doc empty/missing OR truncated/unparseable.
+		// Both states surface as the same `error parsing mapping JSON:
+		// unexpected end of JSON input` from bleve.Open. We must flag both
+		// or callers will misread truncated mappings as lock contention and
+		// the cryptic error returns. json.Valid is cheaper than Unmarshal
+		// and equivalent for this check (we only care whether bleve will
+		// fail to parse, not the value).
 		internal := snap.Bucket([]byte{'i'})
-		if internal == nil || len(internal.Get([]byte("_mapping"))) == 0 {
+		mappingBytes := []byte(nil)
+		if internal != nil {
+			mappingBytes = internal.Get([]byte("_mapping"))
+		}
+		if internal == nil || len(mappingBytes) == 0 || !json.Valid(mappingBytes) {
 			corrupt = true
 			return nil
 		}
 
-		// (2) any referenced segment's .zap is missing on disk
-		_ = snap.ForEach(func(name []byte, _ []byte) error {
-			if len(name) == 0 || name[0] != 0xf7 {
+		// (2) snapshot has segment buckets but the store dir has zero .zap
+		// files. We avoid decoding scorch's segment-bucket keys back into
+		// filenames — that coupling has broken silently across bleve
+		// versions. The coarser signal (snapshot expects segments, disk
+		// has none) is unambiguous and version-independent.
+		segmentBucketCount := 0
+		_ = snap.ForEach(func(name []byte, val []byte) error {
+			if val != nil {
+				// it's a key/value pair, not a bucket
 				return nil
 			}
-			segEpoch := decodeSegmentEpoch(name[1:])
-			zapName := fmt.Sprintf("%012x.zap", segEpoch)
-			if _, ok := zapsOnDisk[zapName]; !ok {
-				corrupt = true
+			// inner buckets that aren't "i" or "m" are segment buckets
+			if len(name) == 1 && (name[0] == 'i' || name[0] == 'm') {
+				return nil
 			}
+			segmentBucketCount++
 			return nil
 		})
+		if segmentBucketCount > 0 && len(zapsOnDisk) == 0 {
+			corrupt = true
+		}
 		return nil
 	})
 	return corrupt
@@ -474,26 +660,6 @@ func zapFilesInDir(dir string) (map[string]struct{}, error) {
 		}
 	}
 	return out, nil
-}
-
-// decodeSegmentEpoch parses scorch's varint-style segment epoch encoding from
-// the bytes after the 0xf7 prefix. The encoding is a packed big-endian-ish
-// integer; observed instances:
-//
-//	0x02 0x09       → 0x209  → 521
-//	0x03 0x6d       → 0x36d  → 877
-//	0x04 0x81       → 0x481  → 1153
-//	0x05 0x21       → 0x521  → 1313
-//
-// Implementation: build the integer by left-shifting 8 bits per byte (i.e.
-// big-endian). This matches every observed case and the on-disk .zap naming
-// (lower-cased hex of the epoch zero-padded to 12 nibbles).
-func decodeSegmentEpoch(b []byte) uint64 {
-	var v uint64
-	for _, x := range b {
-		v = (v << 8) | uint64(x)
-	}
-	return v
 }
 
 // RebuildBleveSubIndex performs a targeted rebuild of a single bleve

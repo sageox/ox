@@ -19,12 +19,6 @@ import (
 	"github.com/sageox/ox/internal/paths"
 )
 
-// maxBleveRebuildAttempts caps how many times the daemon will auto-rebuild a
-// single bleve sub-index across CheckFreshness cycles before giving up. A
-// genuinely-corrupt-disk situation should not become a rebuild loop; once the
-// cap is hit we leave the index broken and let `ox doctor` surface it.
-const maxBleveRebuildAttempts = 2
-
 // CodeDBManager manages CodeDB indexing in the daemon.
 // It ensures only one indexing operation runs at a time and tracks index status.
 //
@@ -72,11 +66,6 @@ type CodeDBManager struct {
 	lastDirtyRefresh time.Time
 	// dirtyTestHook is called at the start of RefreshDirtyOverlay; nil in production.
 	dirtyTestHook func()
-
-	// bleveRebuildAttempts tracks per-sub-index auto-rebuild attempts so a
-	// chronically-corrupt index can't become an infinite rebuild loop. Keyed
-	// by sub-index name ("code"/"diff"/"comment").
-	bleveRebuildAttempts map[string]int
 }
 
 // CodeDBStats tracks index statistics.
@@ -395,6 +384,20 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	if payload.URL != "" {
 		target = payload.URL
 	}
+
+	// Honor self-heal markers written by store.openOrCreateBleveIndex: if any
+	// bleve sub-index was nuked + recreated since the last pass, force a full
+	// reindex now so the empty sub-index gets repopulated from git history.
+	// Without this, the empty bleve persists across freshness cycles (incremental
+	// indexing skips already-indexed commits) and code search stays empty until
+	// the user manually runs `ox code index --full`.
+	healedMarkers := store.NeedsReindexMarkers(dataDir)
+	if len(healedMarkers) > 0 && !payload.Full {
+		m.logger.Warn("codedb self-heal markers present, forcing full reindex",
+			"markers", healedMarkers, "data_dir", dataDir)
+		payload.Full = true
+	}
+
 	m.logger.Info("codedb indexing started", "target", target, "data_dir", dataDir, "full", payload.Full)
 
 	// --full: wipe existing index so we rebuild from scratch
@@ -564,6 +567,13 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	m.lastErr = nil
 	m.stats = cachedStats
 	m.mu.Unlock()
+
+	// indexing succeeded — clear any self-heal markers so the next freshness
+	// check doesn't re-force --full. (The dataDir wipe above would have removed
+	// them too, but markers may exist on the incremental path if a future
+	// change ever decouples them from --full forcing; clearing here is the
+	// defensive invariant.)
+	store.ClearAllNeedsReindexMarkers(dataDir)
 
 	logArgs := []any{
 		"blobs_parsed", stats.BlobsParsed,
@@ -777,16 +787,11 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 					Summary:  "codedb cache directory missing; sparse-checkout may have wiped .sageox/cache/",
 				})
 			}
-			// Self-heal: a single bleve sub-index with an empty mapping doc
-			// blocks every indexing pass forever (observed: daemon at 340% CPU
-			// looping on `error parsing mapping JSON: unexpected end of JSON
-			// input`). Detect via typed MappingCorruptError; rebuild only the
-			// affected sub-index and let the next CheckFreshness cycle retry
-			// the indexing pipeline. Bounded by maxBleveRebuildAttempts so a
-			// chronically-broken disk doesn't become a rebuild loop.
-			if mce := mappingCorruptFromErr(err); mce != nil {
-				m.handleMappingCorrupt(mce, dataDir)
-			}
+			// (Previously: bounded auto-rebuild for MappingCorruptError. Now
+			// handled silently inside store.openOrCreateBleveIndex via nuke +
+			// recreate + .needs_reindex_<name> marker, so doIndex no longer
+			// observes MappingCorruptError. The marker is consumed at the top
+			// of the next doIndex pass, which forces payload.Full=true.)
 			if isInitial {
 				m.logger.Warn("codedb initial index failed", "error", err)
 			} else {
@@ -1082,49 +1087,16 @@ func (m *CodeDBManager) setError(err error) {
 	m.mu.Unlock()
 }
 
-// mappingCorruptFromErr returns the MappingCorruptError in err's chain, or nil.
-func mappingCorruptFromErr(err error) *store.MappingCorruptError {
-	var mce *store.MappingCorruptError
-	if errors.As(err, &mce) {
-		return mce
-	}
-	return nil
-}
-
-// handleMappingCorrupt rebuilds a single bleve sub-index that has an empty
-// persisted mapping doc. Bounded by maxBleveRebuildAttempts per sub-index so
-// repeated rebuild failures don't burn CPU forever — once exhausted, the
-// daemon emits a warning and leaves recovery to `ox doctor`.
-func (m *CodeDBManager) handleMappingCorrupt(mce *store.MappingCorruptError, dataDir string) {
+// IsIndexing reports whether a full indexing pass is currently in flight.
+// Used by daemon shutdown to extend the goroutine-wait timeout: if a bleve
+// batch is mid-flush, force-killing the goroutine leaves a torn _mapping doc
+// (the original "bleve index appears to be in use" bug). Letting the in-flight
+// batch finish keeps the on-disk index well-formed.
+//
+// Reports the worktree-indexing flag only — the ledger-index flag has its own
+// short lifetime and uses an independent codepath.
+func (m *CodeDBManager) IsIndexing() bool {
 	m.mu.Lock()
-	if m.bleveRebuildAttempts == nil {
-		m.bleveRebuildAttempts = make(map[string]int)
-	}
-	attempts := m.bleveRebuildAttempts[mce.Name]
-	if attempts >= maxBleveRebuildAttempts {
-		m.mu.Unlock()
-		m.logger.Warn("codedb sub-index auto-rebuild exhausted",
-			"name", mce.Name, "attempts", attempts,
-			"action", "run 'ox doctor --fix' to repair manually")
-		return
-	}
-	m.bleveRebuildAttempts[mce.Name] = attempts + 1
-	m.mu.Unlock()
-
-	if err := store.RebuildBleveSubIndex(dataDir, mce.Name); err != nil {
-		if errors.Is(err, store.ErrFullReindexRequired) {
-			// code/diff: not safe to auto-rebuild (would leave search empty
-			// until manual --full). Surface to ox doctor instead of looping.
-			m.logger.Warn("codedb sub-index needs full reindex; not auto-recovering",
-				"name", mce.Name,
-				"action", "run 'ox doctor --fix' or 'ox code index --full'")
-			return
-		}
-		m.logger.Warn("codedb sub-index auto-rebuild failed",
-			"name", mce.Name, "error", err)
-		return
-	}
-	m.logger.Warn("codedb sub-index auto-rebuilt",
-		"name", mce.Name, "attempt", attempts+1,
-		"note", "next indexing pass will repopulate")
+	defer m.mu.Unlock()
+	return m.indexing
 }

@@ -585,7 +585,7 @@ func TestOpenOrCreateBleveIndex_LockedIndexNotNuked(t *testing.T) {
 	indexPath := filepath.Join(tmp, "test-index")
 
 	// create a real bleve index at indexPath so root.bolt exists with valid bbolt structure
-	first, err := openOrCreateBleveIndex(indexPath, "test")
+	first, err := openOrCreateBleveIndex(tmp, indexPath, "test")
 	if err != nil {
 		t.Fatalf("create index: %v", err)
 	}
@@ -599,7 +599,7 @@ func TestOpenOrCreateBleveIndex_LockedIndexNotNuked(t *testing.T) {
 	require.NoError(t, os.WriteFile(boltPath, []byte("corrupted"), 0600))
 
 	// openOrCreateBleveIndex must fail (corrupt bolt) but must NOT delete the index directory
-	_, openErr := openOrCreateBleveIndex(indexPath, "test")
+	_, openErr := openOrCreateBleveIndex(tmp, indexPath, "test")
 	require.Error(t, openErr, "expected error opening corrupt index")
 
 	// bolt file must survive — index was not nuked
@@ -634,14 +634,19 @@ func emptyMappingForLatestSnapshot(t *testing.T, boltPath string) {
 	require.NoError(t, db.Close())
 }
 
-// TestOpen_EmptyMapping_ReturnsTypedError verifies that the empty-mapping
-// failure mode (root.bolt present, _mapping value zero-length) is surfaced
-// as MappingCorruptError instead of being misclassified as lock contention.
+// TestOpen_EmptyMapping_SelfHeals verifies that the empty-mapping failure
+// mode (root.bolt present, _mapping value zero-length) is silently recovered
+// by Open: the corrupt sub-index is nuked + recreated empty, a
+// .needs_reindex_<name> marker is written so the daemon's next pass forces a
+// full rebuild, and peer sub-indexes are left untouched. Open returns a
+// usable Store with no error.
 //
-// Failure prevented: daemon spinning at 340% CPU because each indexing pass
-// fails with the wrapped lock-contention error and openOrCreateBleveIndex
-// refuses to nuke an "in-use" index that is actually permanently broken.
-func TestOpen_EmptyMapping_ReturnsTypedError(t *testing.T) {
+// Failure prevented: every `ox code insights` and `ox code search` invocation
+// failing with the cryptic "bleve index appears to be in use (lock
+// contention): error parsing mapping JSON: unexpected end of JSON input"
+// until the user manually runs `ox doctor`. Self-heal turns it into a silent
+// recovery + background reindex.
+func TestOpen_EmptyMapping_SelfHeals(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: SQLite + Bleve operations")
@@ -652,21 +657,61 @@ func TestOpen_EmptyMapping_ReturnsTypedError(t *testing.T) {
 	require.NoError(t, err, "first Open")
 	require.NoError(t, s1.Close())
 
+	// Capture peer-index fingerprints BEFORE corrupting comment, so we can
+	// prove the self-heal touched only the comment sub-index.
+	codePeerSnapshot := readDirSize(t, filepath.Join(tmp, "bleve", "code"))
+	diffPeerSnapshot := readDirSize(t, filepath.Join(tmp, "bleve", "diff"))
+
 	boltPath := filepath.Join(tmp, "bleve", "comment", "store", "root.bolt")
 	emptyMappingForLatestSnapshot(t, boltPath)
 
-	_, err = Open(tmp)
-	require.Error(t, err, "Open must fail when mapping is empty")
-	var mce *MappingCorruptError
-	require.True(t, errors.As(err, &mce), "expected MappingCorruptError in chain, got: %v", err)
-	require.Equal(t, "comment", mce.Name, "wrong sub-index name")
+	// Marker must not exist before the self-heal fires.
+	require.False(t, HasNeedsReindexMarker(tmp, "comment"),
+		"marker must not exist before corruption is detected")
 
-	// peer sub-indexes (code, diff) must be untouched
-	for _, name := range []string{"code", "diff"} {
-		boltOK := filepath.Join(tmp, "bleve", name, "store", "root.bolt")
-		_, statErr := os.Stat(boltOK)
-		require.NoError(t, statErr, "%s sub-index was disturbed by open of corrupt comment", name)
-	}
+	s2, err := Open(tmp)
+	require.NoError(t, err, "Open must self-heal, not fail")
+	defer s2.Close()
+
+	// Self-heal evidence: marker file was written for the affected sub-index.
+	require.True(t, HasNeedsReindexMarker(tmp, "comment"),
+		"comment marker must be written so daemon forces full reindex")
+	require.False(t, HasNeedsReindexMarker(tmp, "code"),
+		"peer marker must NOT be written")
+	require.False(t, HasNeedsReindexMarker(tmp, "diff"),
+		"peer marker must NOT be written")
+
+	// CommentIndex must be a fresh empty bleve (zero docs).
+	count, err := s2.CommentIndex.DocCount()
+	require.NoError(t, err, "DocCount on recreated comment index")
+	require.Equal(t, uint64(0), count, "comment index must be empty after self-heal")
+
+	// Peer sub-indexes must be byte-identical (self-heal is surgical).
+	require.Equal(t, codePeerSnapshot, readDirSize(t, filepath.Join(tmp, "bleve", "code")),
+		"code sub-index must not be disturbed by comment self-heal")
+	require.Equal(t, diffPeerSnapshot, readDirSize(t, filepath.Join(tmp, "bleve", "diff")),
+		"diff sub-index must not be disturbed by comment self-heal")
+}
+
+// readDirSize returns a deterministic fingerprint of every file under dir
+// (relative path → size). Used to prove that a recovery operation didn't
+// touch peer sub-index files.
+func readDirSize(t *testing.T, dir string) map[string]int64 {
+	t.Helper()
+	out := map[string]int64{}
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, path)
+		out[rel] = info.Size()
+		return nil
+	})
+	require.NoError(t, err)
+	return out
 }
 
 // TestRebuildBleveSubIndex_Comment verifies that a targeted rebuild of the
@@ -690,21 +735,15 @@ func TestRebuildBleveSubIndex_Comment(t *testing.T) {
 	require.NoError(t, err, "seed blob")
 	require.NoError(t, s1.Close())
 
-	boltPath := filepath.Join(tmp, "bleve", "comment", "store", "root.bolt")
-	emptyMappingForLatestSnapshot(t, boltPath)
-
-	// Open should fail with MappingCorruptError before rebuild
-	_, err = Open(tmp)
-	require.Error(t, err)
-	var preMCE *MappingCorruptError
-	require.True(t, errors.As(err, &preMCE), "expected MappingCorruptError")
-
-	// Capture code sub-index state AFTER the failed Open so the rebuild call
-	// is the only operation that could perturb it. We assert the rebuild leaves
-	// every code-side artifact byte-for-byte identical.
+	// Capture code sub-index state BEFORE the rebuild so the call is the only
+	// operation that could perturb it. We assert the rebuild leaves every
+	// code-side artifact byte-for-byte identical.
 	codeFingerprint := codeIndexFingerprint(t, tmp)
 
-	// targeted rebuild
+	// targeted rebuild — RebuildBleveSubIndex is the public recovery API,
+	// callable independently of Open's internal self-heal. The contract is:
+	// remove the bleve sub-index dir, recreate empty, and reset the SQL
+	// extraction flag so ParseComments will repopulate.
 	require.NoError(t, RebuildBleveSubIndex(tmp, "comment"), "rebuild comment")
 
 	// code sub-index must be untouched
@@ -721,6 +760,269 @@ func TestRebuildBleveSubIndex_Comment(t *testing.T) {
 	var cp int
 	require.NoError(t, s2.QueryRow(`SELECT comments_parsed FROM blobs WHERE content_hash = ?`, "deadbeef").Scan(&cp))
 	require.Equal(t, 0, cp, "comments_parsed must be cleared after rebuild")
+}
+
+// TestOpenSQLOnly_SkipsBleve_RunsSQL verifies that OpenSQLOnly opens SQLite
+// without touching bleve at all. The contract: SQL convenience methods work,
+// bleve index fields are nil, and Close doesn't panic.
+//
+// Failure prevented: a future refactor accidentally re-introduces bleve open
+// in OpenSQLOnly, which would revive the original bug (`ox code insights`
+// blocking on bleve state).
+func TestOpenSQLOnly_SkipsBleve_RunsSQL(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite operations")
+	}
+
+	tmp := t.TempDir()
+
+	// First open via full Open() to create schema + bleve dirs.
+	s, err := Open(tmp)
+	require.NoError(t, err)
+	_, err = s.Exec(`INSERT INTO repos (id, name, path) VALUES (1, 'r', '/r')`)
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	// Now corrupt every bleve sub-index — OpenSQLOnly must not care.
+	for _, sub := range BleveSubIndexNames {
+		boltPath := filepath.Join(tmp, "bleve", sub, "store", "root.bolt")
+		emptyMappingForLatestSnapshot(t, boltPath)
+	}
+
+	s2, err := OpenSQLOnly(tmp)
+	require.NoError(t, err, "OpenSQLOnly must succeed even when every bleve sub-index is corrupt")
+	defer s2.Close()
+
+	require.Nil(t, s2.CodeIndex, "CodeIndex must be nil on SQL-only store")
+	require.Nil(t, s2.DiffIndex, "DiffIndex must be nil on SQL-only store")
+	require.Nil(t, s2.CommentIndex, "CommentIndex must be nil on SQL-only store")
+
+	var name string
+	require.NoError(t, s2.QueryRow("SELECT name FROM repos WHERE id = 1").Scan(&name))
+	require.Equal(t, "r", name, "SQL queries must work on SQL-only store")
+
+	// Corruption must NOT have been self-healed (OpenSQLOnly skipped bleve
+	// entirely — no marker file should exist for it). Confirms the path
+	// genuinely bypasses openOrCreateBleveIndex rather than silently calling
+	// it and ignoring the result.
+	require.Empty(t, NeedsReindexMarkers(tmp),
+		"OpenSQLOnly must not write self-heal markers (proves bleve was never touched)")
+}
+
+// TestNeedsReindexMarkers_RoundTrip verifies the marker helpers used by
+// daemon (to force --full) and doctor/status (to surface "rebuilding" state).
+// Without an accurate listing of which sub-indexes need rebuild, the daemon
+// either does pointless wipes or skips a needed one — both observable as
+// stale empty search results until the user runs `ox code index --full`.
+func TestNeedsReindexMarkers_RoundTrip(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	require.Empty(t, NeedsReindexMarkers(tmp), "no markers before any write")
+	require.False(t, HasNeedsReindexMarker(tmp, "code"))
+
+	require.NoError(t, writeNeedsReindexMarker(tmp, "code"))
+	require.NoError(t, writeNeedsReindexMarker(tmp, "comment"))
+	require.True(t, HasNeedsReindexMarker(tmp, "code"))
+	require.True(t, HasNeedsReindexMarker(tmp, "comment"))
+	require.False(t, HasNeedsReindexMarker(tmp, "diff"))
+	require.ElementsMatch(t, []string{"code", "comment"}, NeedsReindexMarkers(tmp))
+
+	require.NoError(t, ClearNeedsReindexMarker(tmp, "code"))
+	require.NoError(t, ClearNeedsReindexMarker(tmp, "code"), "double-clear is no-op")
+	require.False(t, HasNeedsReindexMarker(tmp, "code"))
+
+	ClearAllNeedsReindexMarkers(tmp)
+	require.Empty(t, NeedsReindexMarkers(tmp))
+}
+
+// TestOpen_TruncatedMapping_SelfHeals covers the *sibling* on-disk state to
+// empty-mapping: bytes are present but `_mapping` is a truncated JSON
+// fragment (e.g., process killed mid-write after writing the opening brace
+// but before flushing the closing brace). bleve.Open returns the SAME
+// "unexpected end of JSON input" error for both empty and truncated mappings,
+// so isBleveIndexCorrupt must flag both — otherwise truncated mappings are
+// misread as lock contention and the cryptic error returns to the user.
+//
+// Failure prevented: a partial-flush corruption pattern that the
+// empty-mapping detector misses, sending users back to the original bug.
+func TestOpen_TruncatedMapping_SelfHeals(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
+
+	tmp := t.TempDir()
+	s1, err := Open(tmp)
+	require.NoError(t, err)
+	require.NoError(t, s1.Close())
+
+	// Overwrite _mapping with a truncated-but-nonzero JSON fragment.
+	boltPath := filepath.Join(tmp, "bleve", "comment", "store", "root.bolt")
+	writeMappingBytes(t, boltPath, []byte(`{"foo":`)) // intentionally unclosed
+
+	s2, err := Open(tmp)
+	require.NoError(t, err, "Open must self-heal a truncated mapping the same as empty")
+	defer s2.Close()
+
+	require.True(t, HasNeedsReindexMarker(tmp, "comment"),
+		"truncated mapping must trigger the same marker as empty mapping")
+}
+
+// TestIsBleveIndexCorrupt_DanglingSegment exercises the second branch of
+// isBleveIndexCorrupt that fires when the latest snapshot references segment
+// IDs whose .zap files don't exist on disk. This is the "field-observed
+// poison pill" mentioned in the implementation comment but never tested.
+//
+// Failure prevented: a refactor of the bbolt-walk or segment-ID decoding
+// silently breaks this detector, and the dangling-segment failure mode
+// regresses to the cryptic error.
+func TestIsBleveIndexCorrupt_DanglingSegment(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: Bleve + bbolt operations")
+	}
+
+	tmp := t.TempDir()
+	s, err := Open(tmp)
+	require.NoError(t, err)
+	// seed at least one document so a snapshot with segments exists
+	require.NoError(t, s.CodeIndex.Index("doc1", map[string]string{"body": "hello"}))
+	require.NoError(t, s.Close())
+
+	storeDir := filepath.Join(tmp, "bleve", "code", "store")
+	// Verify segment(s) exist on disk before sabotage so the test fails loudly
+	// if the bleve internals ever change shape.
+	zaps, err := zapFilesInDir(storeDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, zaps, "expected at least one .zap file to delete")
+
+	// Delete every .zap, leaving root.bolt's snapshot referencing missing segments.
+	for name := range zaps {
+		require.NoError(t, os.Remove(filepath.Join(storeDir, name)))
+	}
+
+	boltPath := filepath.Join(storeDir, "root.bolt")
+	require.True(t, isBleveIndexCorrupt(boltPath),
+		"dangling-segment corruption must be detected so Open can self-heal")
+}
+
+// TestSelfHealBleveSubIndex_RecreateFailure_ReturnsError verifies that when
+// the post-nuke bleve.New call fails (disk full, EACCES on the bleve dir,
+// etc.), we return a clean wrapped error instead of returning a nil index
+// that would NPE on first use. Caller treats this as a hard open failure
+// and propagates up — the alternative (silent nil) would crash inside the
+// indexer or search code far from the root cause.
+//
+// Failure prevented: regression where self-heal returns (nil, nil) on
+// recreate failure, leading to confusing panics inside bleve.Batch or
+// db.Search instead of a clear "recreate empty bleve sub-index" error.
+func TestSelfHealBleveSubIndex_RecreateFailure_ReturnsError(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: Bleve + filesystem operations")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("permission test not reliable on Windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("skipping permission test when running as root")
+	}
+
+	tmp := t.TempDir()
+	s, err := Open(tmp)
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	// Corrupt the comment mapping so selfHeal is invoked, then make the
+	// parent bleve dir read-only so bleve.New fails after the nuke.
+	boltPath := filepath.Join(tmp, "bleve", "comment", "store", "root.bolt")
+	emptyMappingForLatestSnapshot(t, boltPath)
+
+	bleveParent := filepath.Join(tmp, "bleve")
+	require.NoError(t, os.Chmod(bleveParent, 0o500), "make bleve parent read-only")
+	t.Cleanup(func() { _ = os.Chmod(bleveParent, 0o700) })
+
+	idx, err := openOrCreateBleveIndex(tmp, filepath.Join(bleveParent, "comment"), "comment")
+	require.Error(t, err, "self-heal recreate must fail when bleve parent is read-only")
+	require.Nil(t, idx, "must not return nil index alongside error")
+	require.Contains(t, err.Error(), "bleve sub-index",
+		"error must identify the failing operation, not bubble up a raw EACCES")
+}
+
+// TestInsights_NeverEmitsCrypticBleveError is the negative regression for
+// the user-facing bug. Any future refactor that re-routes `ox code insights`
+// through a bleve-opening path (or weakens the self-heal) brings back the
+// `"bleve index appears to be in use (lock contention): error parsing
+// mapping JSON: unexpected end of JSON input"` string that motivated this
+// whole fix.
+//
+// Failure prevented: the literal error string the user reported — re-asserts
+// it by name rather than by code path, so even unrelated refactors get
+// caught.
+func TestInsights_NeverEmitsCrypticBleveError(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite + Bleve operations")
+	}
+
+	tmp := t.TempDir()
+	s, err := Open(tmp)
+	require.NoError(t, err)
+	require.NoError(t, s.Close())
+
+	// Corrupt every bleve sub-index — every flavor of the field-observed
+	// failure mode at once.
+	for _, sub := range BleveSubIndexNames {
+		boltPath := filepath.Join(tmp, "bleve", sub, "store", "root.bolt")
+		emptyMappingForLatestSnapshot(t, boltPath)
+	}
+
+	// Mirror the production path: insights opens via OpenSQLOnly. Capture
+	// the error if any.
+	s2, err := OpenSQLOnly(tmp)
+
+	// Whether err is nil or not, the offending strings must never appear.
+	// (Today err is nil; this defends future regressions where OpenSQLOnly
+	// gets reverted to bleve-opening.)
+	for _, banned := range []string{
+		"lock contention",
+		"unexpected end of JSON input",
+		"error parsing mapping JSON",
+		"bleve index appears to be in use",
+	} {
+		if err != nil {
+			require.NotContains(t, err.Error(), banned,
+				"insights open path must never surface the cryptic bleve error")
+		}
+	}
+	if s2 != nil {
+		s2.Close()
+	}
+}
+
+// writeMappingBytes overwrites the `_mapping` value in the latest snapshot
+// with arbitrary bytes — used to inject specific corruption patterns
+// (truncated JSON, garbage bytes, etc.) beyond the empty-byte case.
+func writeMappingBytes(t *testing.T, boltPath string, body []byte) {
+	t.Helper()
+	db, err := bbolt.Open(boltPath, 0600, &bbolt.Options{Timeout: 2 * time.Second})
+	require.NoError(t, err)
+	require.NoError(t, db.Update(func(tx *bbolt.Tx) error {
+		snaps := tx.Bucket([]byte{'s'})
+		require.NotNil(t, snaps)
+		var lastKey []byte
+		require.NoError(t, snaps.ForEach(func(k, _ []byte) error {
+			lastKey = append(lastKey[:0], k...)
+			return nil
+		}))
+		snap := snaps.Bucket(lastKey)
+		require.NotNil(t, snap)
+		internal := snap.Bucket([]byte{'i'})
+		require.NotNil(t, internal)
+		return internal.Put([]byte("_mapping"), body)
+	}))
+	require.NoError(t, db.Close())
 }
 
 // TestRebuildBleveSubIndex_RejectsUnknownName guards the API surface so
@@ -810,7 +1112,7 @@ func TestIsBleveIndexCorrupt_UnreadableStoreDir_NotFlagged(t *testing.T) {
 
 	tmp := t.TempDir()
 	indexPath := filepath.Join(tmp, "idx")
-	idx, err := openOrCreateBleveIndex(indexPath, "test")
+	idx, err := openOrCreateBleveIndex(tmp, indexPath, "test")
 	require.NoError(t, err)
 	require.NoError(t, idx.Close())
 

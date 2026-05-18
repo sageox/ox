@@ -25,6 +25,23 @@ func Open(root string) (*DB, error) {
 	return &DB{store: s}, nil
 }
 
+// OpenSQLOnly opens a CodeDB without touching its bleve sub-indexes.
+// Use for read paths that only query SQL data (insights, status counters) so
+// they keep working when bleve is mid-rebuild, locked by an active writer, or
+// being self-healed after corruption.
+//
+// IMPORTANT: callers MUST NOT use Search, IndexRepo, IndexLocalRepo,
+// BuildDirtyIndex, or any dirty-overlay API on a SQL-only DB — those depend
+// on bleve and will dereference nil. SQL convenience methods (Query, QueryRow,
+// Exec, RawSQL) are safe.
+func OpenSQLOnly(root string) (*DB, error) {
+	s, err := store.OpenSQLOnly(root)
+	if err != nil {
+		return nil, fmt.Errorf("open codedb store: %w", err)
+	}
+	return &DB{store: s}, nil
+}
+
 // Close releases all resources.
 func (db *DB) Close() error {
 	return db.store.Close()

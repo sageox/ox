@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/store"
@@ -38,13 +39,10 @@ func checkCodeIndexAtDir(dataDir string, fix bool) checkResult {
 
 	db, err := codedb.Open(dataDir)
 	if err != nil {
-		// Targeted self-heal: a single bleve sub-index with an empty mapping
-		// document is independently recoverable without nuking the whole
-		// dataDir (~1GB+ on real repos). Detect via typed MappingCorruptError
-		// from store.openOrCreateBleveIndex; rebuild only that sub-index.
-		// "comment" repairs surgically; "code"/"diff" fall back to full
-		// dataDir wipe (the original behavior) since they cannot be
-		// repopulated from SQL alone.
+		// store.Open self-heals MappingCorruptError transparently (nuke +
+		// recreate + marker) — so it is rare to reach this branch. Keep it as
+		// defense-in-depth in case Open's self-heal itself fails (disk full,
+		// EACCES on the bleve dir, panic recovery surfacing a different error).
 		var mce *store.MappingCorruptError
 		if errors.As(err, &mce) {
 			if fix {
@@ -90,6 +88,29 @@ func checkCodeIndexAtDir(dataDir string, fix bool) checkResult {
 			return PassedCheck("Code index", "empty index removed — run 'ox code index' to rebuild")
 		}
 		return FailedCheck("Code index", "index exists but is empty (indexing was never completed)", "run 'ox code index' or 'ox doctor --fix' to rebuild")
+	}
+
+	// Self-heal markers indicate Open already nuked + recreated a bleve
+	// sub-index in response to mapping corruption. The daemon's next indexing
+	// pass will force a full reindex (see internal/daemon/codedb.go); until
+	// then, search returns empty for the affected sub-index. Surface the
+	// state so the user understands why their search results are degraded
+	// and knows the explicit force-now command.
+	if healing := store.NeedsReindexMarkers(dataDir); len(healing) > 0 {
+		if fix {
+			// In --fix mode, trigger the rebuild synchronously by wiping
+			// dataDir and letting the next daemon pass repopulate. This
+			// matches the existing "code/diff need full reindex" doctor path.
+			db.Close()
+			_ = os.RemoveAll(dataDir)
+			return PassedCheck("Code index",
+				fmt.Sprintf("auto-repair pending for %s; dataDir wiped, run 'ox code index' to rebuild now",
+					strings.Join(healing, ", ")))
+		}
+		return WarningCheck("Code index",
+			fmt.Sprintf("auto-repair in progress for sub-index(es) %s — daemon will rebuild on next pass",
+				strings.Join(healing, ", ")),
+			"force immediate rebuild: 'ox code index --full'")
 	}
 
 	return PassedCheck("Code index", "healthy")

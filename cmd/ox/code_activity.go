@@ -54,11 +54,11 @@ func runCodeActivity(cmd *cobra.Command, _ []string) error {
 	}
 	until := time.Now().UTC()
 
-	if isCodeDBIndexing(false) {
-		return fmt.Errorf("code index is currently being built — activity queries unavailable until indexing completes. Run 'ox code status' to check progress")
-	}
-
-	db, err := codedb.Open(dataDir)
+	// Activity queries are SQL-only (see internal/codedb/query/activity.go) —
+	// open without bleve so a corrupt/locked/mid-rebuild bleve sub-index or a
+	// stuck daemon `indexing` flag can't block the read. SQLite WAL handles
+	// concurrent readers even while the daemon writes.
+	db, err := codedb.OpenSQLOnly(dataDir)
 	if err != nil {
 		return fmt.Errorf("open codedb: %w", err)
 	}
