@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/codedb"
+	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/bbolt"
@@ -70,7 +71,16 @@ func TestCheckCodeIndexAtDir_NoIndex(t *testing.T) {
 // empty bleve mapping doc (single sub-index) is repaired surgically: only the
 // affected sub-index dir is recreated, while peer sub-indexes survive byte-for-byte.
 //
-// Failure prevented: doctor's previous remedy was os.RemoveAll(dataDir),
+// Under the current recovery flow:
+//  1. store.Open SELF-HEALS the corrupt mapping on first read (nuke +
+//     recreate + writes .needs_reindex_comment marker).
+//  2. Without --fix, doctor surfaces the marker as a Warning ("auto-repair
+//     in progress, daemon will rebuild on next pass") — not a failure.
+//  3. With --fix, doctor calls RebuildBleveSubIndex synchronously for the
+//     comment marker (the SQL flag reset path), preserving code/diff
+//     byte-for-byte.
+//
+// Failure prevented: doctor's pre-self-heal remedy was os.RemoveAll(dataDir),
 // destroying ~600MB of code data + ~600MB of diff data to recover from a
 // few-byte mapping corruption that only affected the comment sub-index.
 func TestCheckCodeIndexAtDir_CorruptMapping_TargetedRebuild(t *testing.T) {
@@ -88,18 +98,24 @@ func TestCheckCodeIndexAtDir_CorruptMapping_TargetedRebuild(t *testing.T) {
 	boltPath := filepath.Join(tmp, "bleve", "comment", "store", "root.bolt")
 	corruptCommentMapping(t, boltPath)
 
-	// without --fix: must report the targeted condition, not a generic open failure
+	// without --fix: must surface the auto-repair state — must NOT report
+	// "healthy" and must NOT silently pass. WarningCheck reports passed=true
+	// + warning=true so the doctor exit code stays clean while the message
+	// makes the in-flight repair visible.
 	result := checkCodeIndexAtDir(tmp, false)
-	assert.False(t, result.passed, "corrupt mapping must not pass without --fix")
+	assert.True(t, result.warning, "corrupt mapping must surface as a warning (auto-repair in progress); got message=%q", result.message)
+	assert.Contains(t, result.message, "comment",
+		"warning must name the affected sub-index")
 
-	// snapshot code/diff state BEFORE fix (after the failed read above, which
-	// is the only thing that could have touched them prior to fix)
+	// snapshot code/diff state BEFORE fix (Open's self-heal above touched
+	// only the comment sub-index; this proves the --fix path also stays
+	// surgical).
 	codeBoltPath := filepath.Join(tmp, "bleve", "code", "store", "root.bolt")
 	diffBoltPath := filepath.Join(tmp, "bleve", "diff", "store", "root.bolt")
 	codeBefore := mustStatSize(t, codeBoltPath)
 	diffBefore := mustStatSize(t, diffBoltPath)
 
-	// with --fix: rebuild only the comment sub-index
+	// with --fix: surgically rebuild via RebuildBleveSubIndex
 	result = checkCodeIndexAtDir(tmp, true)
 	assert.True(t, result.passed, "fix must succeed: message=%q detail=%q", result.message, result.detail)
 
@@ -109,6 +125,10 @@ func TestCheckCodeIndexAtDir_CorruptMapping_TargetedRebuild(t *testing.T) {
 	diffAfter := mustStatSize(t, diffBoltPath)
 	assert.Equal(t, codeBefore, codeAfter, "code sub-index must not be touched by targeted rebuild")
 	assert.Equal(t, diffBefore, diffAfter, "diff sub-index must not be touched by targeted rebuild")
+
+	// marker must be cleared after surgical rebuild
+	assert.False(t, mustHasMarker(t, tmp, "comment"),
+		"comment marker must be cleared after surgical --fix rebuild")
 
 	// post-rebuild Open must succeed
 	db2, err := codedb.Open(tmp)
@@ -144,4 +164,11 @@ func mustStatSize(t *testing.T, path string) int64 {
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	return info.Size()
+}
+
+// mustHasMarker reports whether a needs_reindex marker is currently present
+// for the named sub-index under dataDir.
+func mustHasMarker(t *testing.T, dataDir, name string) bool {
+	t.Helper()
+	return store.HasNeedsReindexMarker(dataDir, name)
 }
