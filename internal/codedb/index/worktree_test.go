@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -43,10 +44,13 @@ func initGitRepo(t *testing.T, numCommits int) (string, string) {
 		// or emits transient object-DB errors ("bad tree object",
 		// "invalid object", "Error building trees") when packed
 		// objects haven't reached disk yet. External-tool defect,
-		// transient under load — single retry is enough to keep the
-		// test suite from flaking. Real non-zero exits surface on the
-		// retry attempt.
-		if err != nil && (isGitSignalCrash(err) || isGitTransientObjectError(out)) {
+		// transient under load. The original workaround retried once;
+		// under -p 8 -parallel 32 (make test) the transient was
+		// observed surviving a single retry. Retry up to 4 times with
+		// linear backoff to let packed objects settle. Real non-zero
+		// exits surface on the final attempt.
+		for attempt := 1; err != nil && attempt <= 4 && (isGitSignalCrash(err) || isGitTransientObjectError(out)); attempt++ {
+			time.Sleep(time.Duration(attempt*25) * time.Millisecond)
 			out, err = mkCmd().CombinedOutput()
 		}
 		require.NoError(t, err, "git %v: %s", args, out)
