@@ -320,7 +320,7 @@ func LoadProjectConfig(gitRoot string) (*ProjectConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to read yaml config: %w", err)
 		}
-		if err := yaml.Unmarshal(data, &cfg); err != nil {
+		if err := mergeProjectConfigYAML(data, &cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse yaml config: %w", err)
 		}
 	}
@@ -338,6 +338,38 @@ func LoadProjectConfig(gitRoot string) (*ProjectConfig, error) {
 	cfg.Endpoint = endpoint.NormalizeEndpoint(cfg.Endpoint)
 
 	return &cfg, nil
+}
+
+func mergeProjectConfigYAML(data []byte, cfg *ProjectConfig) error {
+	if cfg == nil {
+		return errors.New("config cannot be nil")
+	}
+
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if len(raw) > 0 {
+		jsonData, err := json.Marshal(raw)
+		if err != nil {
+			return fmt.Errorf("yaml to json bridge: %w", err)
+		}
+		if err := json.Unmarshal(jsonData, cfg); err != nil {
+			return fmt.Errorf("yaml to project config: %w", err)
+		}
+	}
+
+	var binding ProjectConfigYAML
+	if err := yaml.Unmarshal(data, &binding); err != nil {
+		return err
+	}
+	if binding.KBID != "" {
+		cfg.KBID = binding.KBID
+	}
+	if binding.RepoID != "" {
+		cfg.RepoID = binding.RepoID
+	}
+	return nil
 }
 
 // SaveProjectConfig saves the project configuration to .sageox/config.json relative to gitRoot

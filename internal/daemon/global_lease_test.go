@@ -12,6 +12,7 @@ package daemon
 
 import (
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -171,6 +172,7 @@ func TestSyncScheduler_ReacquiresGlobalLeaseAfterOwnerExit(t *testing.T) {
 	if err := owner.Release(); err != nil {
 		t.Fatalf("owner release: %v", err)
 	}
+	s.logger = slog.Default()
 	if !s.IsGlobalSyncOwner() {
 		t.Fatal("scheduler should acquire the lease once the previous owner exits")
 	}

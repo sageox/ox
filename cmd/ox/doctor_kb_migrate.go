@@ -324,7 +324,7 @@ func resolveKBIDForRepo(ctx context.Context, repoID string) (string, error) {
 // config.yaml behind. Permissions match the existing config.json (0644)
 // because this file is intended to be committed to git.
 func writeProjectYAMLAtomic(sageoxDir, finalPath string, payload any) error {
-	data, err := yaml.Marshal(payload)
+	data, err := marshalProjectYAML(payload)
 	if err != nil {
 		return fmt.Errorf("marshal yaml: %w", err)
 	}
@@ -337,4 +337,47 @@ func writeProjectYAMLAtomic(sageoxDir, finalPath string, payload any) error {
 		return fmt.Errorf("rename temp: %w", err)
 	}
 	return nil
+}
+
+func marshalProjectYAML(payload any) ([]byte, error) {
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	raw := map[string]any{}
+	if len(jsonData) > 0 {
+		if err := json.Unmarshal(jsonData, &raw); err != nil {
+			return nil, err
+		}
+	}
+
+	switch p := payload.(type) {
+	case config.ProjectConfig:
+		if p.KBID != "" {
+			raw["kb_id"] = p.KBID
+		}
+	case *config.ProjectConfig:
+		if p != nil && p.KBID != "" {
+			raw["kb_id"] = p.KBID
+		}
+	case config.ProjectConfigYAML:
+		if p.KBID != "" {
+			raw["kb_id"] = p.KBID
+		}
+		if p.RepoID != "" {
+			raw["repo_id"] = p.RepoID
+		}
+	case *config.ProjectConfigYAML:
+		if p != nil {
+			if p.KBID != "" {
+				raw["kb_id"] = p.KBID
+			}
+			if p.RepoID != "" {
+				raw["repo_id"] = p.RepoID
+			}
+		}
+	}
+
+	return yaml.Marshal(raw)
 }
