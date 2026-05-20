@@ -124,6 +124,29 @@ func TestEnsureInitialCommit_RepoWithExistingCommits(t *testing.T) {
 func TestEnsureInitialCommit_WithoutGitUserConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 
+	// This test validates that ensureInitialCommit's SageOx fallback identity
+	// is used when the user has no git identity configured anywhere. The
+	// testenv package (loaded process-wide) supplies GIT_AUTHOR_NAME/EMAIL +
+	// GIT_COMMITTER_NAME/EMAIL so cascade tests don't fail on hostile dev
+	// machines — but those env vars MASK the fallback path this test exists
+	// to exercise. Unset them entirely for the duration of the test so the
+	// production code's identity-resolution falls through to SageOx defaults.
+	// (t.Setenv to "" is NOT equivalent — git sees empty-string as "explicit
+	// empty identity" and errors with `empty ident name`. We need the var
+	// actually absent from the env so git falls through to its config /
+	// command-line `-c` identity resolution.)
+	for _, k := range []string{
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+		"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+	} {
+		if v, ok := os.LookupEnv(k); ok {
+			t.Cleanup(func() { _ = os.Setenv(k, v) })
+		} else {
+			t.Cleanup(func() { _ = os.Unsetenv(k) })
+		}
+		_ = os.Unsetenv(k)
+	}
+
 	// init repo WITHOUT configuring user.name/user.email
 	cmd := exec.Command("git", "init")
 	cmd.Dir = tmpDir
