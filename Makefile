@@ -118,10 +118,23 @@ GOTESTSUM := $(shell which gotestsum 2>/dev/null || echo "go run gotest.tools/go
 # in internal/codedb/index, internal/doctor, internal/repotools,
 # internal/secrets, etc.
 #
+# Disabling global config also wipes the runner's `user.name`/`user.email`,
+# so we supply identity via the GIT_{AUTHOR,COMMITTER}_{NAME,EMAIL} env
+# vars — git respects these in lieu of config and they cannot be hijacked
+# by signing/passphrase machinery.
+#
 # GIT_CONFIG_GLOBAL=/dev/null  → ignore $HOME/.gitconfig
 # GIT_CONFIG_NOSYSTEM=1        → ignore /etc/gitconfig
 # GIT_TERMINAL_PROMPT=0        → never prompt; fail fast on missing creds
-TEST_GIT_ISOLATION := GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+# GIT_AUTHOR_*  / GIT_COMMITTER_*  → identity without needing config
+TEST_GIT_ISOLATION := \
+	GIT_CONFIG_GLOBAL=/dev/null \
+	GIT_CONFIG_NOSYSTEM=1 \
+	GIT_TERMINAL_PROMPT=0 \
+	GIT_AUTHOR_NAME=ox-test \
+	GIT_AUTHOR_EMAIL=test@sageox.ai \
+	GIT_COMMITTER_NAME=ox-test \
+	GIT_COMMITTER_EMAIL=test@sageox.ai
 
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
 test: ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)

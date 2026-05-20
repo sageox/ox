@@ -36,6 +36,18 @@ func init() {
 	setIfUnset("GIT_CONFIG_GLOBAL", "/dev/null")
 	setIfUnset("GIT_CONFIG_NOSYSTEM", "1")
 	setIfUnset("GIT_TERMINAL_PROMPT", "0")
+
+	// Disabling global config wipes the developer's (or CI runner's)
+	// `user.name`/`user.email`. Production code paths invoked by tests
+	// — e.g. EnsureCheckoutGitignore in internal/daemon — call `git
+	// commit`, which fails with "Author identity unknown" without one
+	// of: per-repo config, global config, or these env vars. Supplying
+	// the env vars is the only one that works without per-test setup
+	// AND survives our isolation.
+	setIfUnset("GIT_AUTHOR_NAME", "ox-test")
+	setIfUnset("GIT_AUTHOR_EMAIL", "test@sageox.ai")
+	setIfUnset("GIT_COMMITTER_NAME", "ox-test")
+	setIfUnset("GIT_COMMITTER_EMAIL", "test@sageox.ai")
 }
 
 func setIfUnset(name, value string) {
