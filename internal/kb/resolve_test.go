@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -199,6 +200,13 @@ func TestIsWorkspace_LedgerDir(t *testing.T) {
 }
 
 func TestIsWorkspace_KBLink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// os.Symlink requires elevated privileges or Developer Mode on
+		// Windows; the workspace-marker semantics are platform-agnostic
+		// (the function just looks for any dir entry), so skipping here
+		// is safe.
+		t.Skip("symlink creation may require elevated privileges on Windows")
+	}
 	dir := t.TempDir()
 	writeMarker(t, dir, "config.yaml", "kb_id: kb_01\n")
 	kbDir := filepath.Join(dir, ".sageox", "kb")

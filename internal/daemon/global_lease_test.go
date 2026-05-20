@@ -151,6 +151,32 @@ func TestGlobalLeasePerEndpoint(t *testing.T) {
 	}
 }
 
+func TestSyncScheduler_ReacquiresGlobalLeaseAfterOwnerExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows lease backend is a no-op (ADR-017 §5)")
+	}
+	withIsolatedLeaseDir(t)
+
+	owner, err := AcquireGlobalSyncLease("sageox.ai")
+	if err != nil {
+		t.Fatalf("owner acquire: %v", err)
+	}
+
+	s := NewSyncScheduler(DefaultConfig(), nil)
+	s.SetGlobalSyncLease("sageox.ai", nil)
+	if s.IsGlobalSyncOwner() {
+		t.Fatal("scheduler should remain follower while another daemon owns the lease")
+	}
+
+	if err := owner.Release(); err != nil {
+		t.Fatalf("owner release: %v", err)
+	}
+	if !s.IsGlobalSyncOwner() {
+		t.Fatal("scheduler should acquire the lease once the previous owner exits")
+	}
+	s.ReleaseGlobalSyncLease()
+}
+
 // TestGlobalLeaseNormalizesEndpoint verifies prefix-equivalent endpoints
 // (api.sageox.ai vs sageox.ai vs www.sageox.ai) collapse to the same
 // lease file. Without this, a daemon configured with api.sageox.ai and

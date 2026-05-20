@@ -12,7 +12,10 @@ package daemon
 // LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY) when Windows
 // daemon support lands. See ADR-017 §5 / bead ox-kdt2.
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
 func platformAcquireKBLock(path string) (unlock func(), acquired bool, err error) {
 	// Touch the file so the path exists on disk (parity with unix path)
@@ -20,7 +23,7 @@ func platformAcquireKBLock(path string) (unlock func(), acquired bool, err error
 	// current Windows posture.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("open kb lock file %s: %w", path, err)
 	}
 	unlock = func() { _ = f.Close() }
 	return unlock, true, nil

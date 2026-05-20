@@ -11,12 +11,15 @@ package daemon
 // TODO: implement via LockFileEx when Windows multi-daemon support
 // lands. See ADR-017 §5 and bead ox-6zme.
 
-import "os"
+import (
+	"fmt"
+	"os"
+)
 
 func platformAcquireGlobalLease(path string) (*os.File, bool, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, false, err
+		return nil, false, fmt.Errorf("open global lease file %s: %w", path, err)
 	}
 	return f, true, nil
 }

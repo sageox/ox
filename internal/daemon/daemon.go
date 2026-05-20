@@ -723,6 +723,16 @@ func (d *Daemon) shutdown() error {
 		d.cancel()
 	}
 
+	// Release the global-sync lease as soon as global work is canceled so a
+	// replacement daemon can acquire ownership during its startup path —
+	// well before the CodeDB drain + wg.Wait below complete. cleanup() also
+	// calls Release() (idempotent) for the supersession + early-failure
+	// paths that bypass shutdown().
+	d.releaseGlobalSyncLease()
+	if d.scheduler != nil {
+		d.scheduler.ReleaseGlobalSyncLease()
+	}
+
 	// CodeDB drain: the CheckFreshness indexing goroutine is NOT tracked by
 	// d.wg (it owns its own per-pass context). Killing the daemon mid-bleve-
 	// batch leaves a torn `_mapping` doc — store.openOrCreateBleveIndex
@@ -848,6 +858,9 @@ func (d *Daemon) cleanup() {
 	// auto-released on process exit, but Release() also unblocks the
 	// next daemon's acquire attempt promptly when shutdown is graceful.
 	d.releaseGlobalSyncLease()
+	if d.scheduler != nil {
+		d.scheduler.ReleaseGlobalSyncLease()
+	}
 	if !d.wasSuperseded {
 		if err := UnregisterDaemon(); err != nil {
 			d.logger.Warn("failed to unregister daemon", "error", err)
@@ -1141,7 +1154,7 @@ func (d *Daemon) initComponents() time.Duration {
 	// to acquire is not a startup error — non-owner daemons keep doing
 	// per-repo work and just skip team-context + KB ListBubbles ticks.
 	d.acquireGlobalSyncLease(projectEndpoint)
-	d.scheduler.SetGlobalSyncLease(d.globalSyncLease)
+	d.scheduler.SetGlobalSyncLease(endpoint.NormalizeEndpoint(projectEndpoint), d.globalSyncLease)
 	if err := UpdateGlobalSyncOwnership(endpoint.NormalizeEndpoint(projectEndpoint), d.globalSyncLease != nil); err != nil {
 		d.logger.Debug("failed to update global-sync ownership in registry", "error", err)
 	}

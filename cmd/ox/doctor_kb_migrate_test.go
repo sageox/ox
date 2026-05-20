@@ -45,7 +45,8 @@ func kbMigrateProject(t *testing.T, repoID string) string {
 
 	// findGitRoot() shells out to `git rev-parse --show-toplevel`, so we need
 	// a real git repo (not just a .git directory).
-	gitInit := exec.Command("git", "init", "-q", root)
+	gitInit := exec.Command("git", "init", "-q")
+	gitInit.Dir = root
 	require.NoError(t, gitInit.Run())
 
 	sageox := filepath.Join(root, ".sageox")
@@ -104,6 +105,42 @@ func TestCheckKBProjectConfigMigrate_JSONOnlyWritesYAML(t *testing.T) {
 	// Legacy JSON must survive — deletion is deferred to release N+3.
 	_, err = os.Stat(filepath.Join(root, ".sageox", "config.json"))
 	assert.NoError(t, err, "legacy config.json must not be deleted by the migration")
+}
+
+func TestCheckKBProjectConfigMigrate_JSONOnlyPreservesProjectSettingsInYAML(t *testing.T) {
+	root := kbMigrateProject(t, "repo_abc")
+
+	jsonPath := filepath.Join(root, ".sageox", "config.json")
+	cfg := map[string]any{
+		"config_version":         "2",
+		"repo_id":                "repo_abc",
+		"endpoint":               "https://test.sageox.ai",
+		"session_recording":      "auto",
+		"update_frequency_hours": 24,
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(jsonPath, data, 0o600))
+
+	SetKBDoctorHooks(kbDoctorHooks{
+		List: func(_ context.Context) ([]api.KB, error) {
+			return []api.KB{{KBID: "kb_xyz", KBType: api.KBTypeRepo, RepoID: "repo_abc"}}, nil
+		},
+	})
+	t.Cleanup(func() { SetKBDoctorHooks(kbDoctorHooks{}) })
+
+	result := checkKBProjectConfigMigrate(true)
+	require.True(t, result.passed && !result.warning, "expected clean pass, got %+v", result)
+
+	require.NoError(t, os.Remove(jsonPath), "test simulates the follow-up archive step")
+	loaded, err := config.LoadProjectConfig(root)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, "yaml", loaded.Format)
+	assert.Equal(t, "kb_xyz", loaded.KBID)
+	assert.Equal(t, "repo_abc", loaded.RepoID)
+	assert.Equal(t, "https://test.sageox.ai", loaded.Endpoint)
+	assert.Equal(t, "auto", loaded.SessionRecording)
 }
 
 // TestCheckKBProjectConfigMigrate_APIUnavailableIsNoop verifies that an

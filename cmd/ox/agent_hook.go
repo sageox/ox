@@ -219,7 +219,14 @@ func emitStartupBanner(w io.Writer, ctx *HookContext) {
 	default:
 		return
 	}
-	kbID, kbType := kb.ResolveCurrentKBIDAndType(ctx.ProjectRoot)
+	// resolve KB binding from the hook's actual working directory so nested
+	// KB bindings in subdirectories are honored. Fall back to project root
+	// if Getwd fails (e.g., directory deleted out from under the process).
+	resolveFrom := ctx.ProjectRoot
+	if wd, wdErr := os.Getwd(); wdErr == nil && wd != "" {
+		resolveFrom = wd
+	}
+	kbID, kbType := kb.ResolveCurrentKBIDAndType(resolveFrom)
 	recording := config.ResolveSessionRecording(ctx.ProjectRoot, kbID, kbType)
 	canonicalType := agentx.ResolveAgentENV(ctx.AgentType)
 	if canonicalType == agentx.AgentTypeUnknown {
@@ -757,7 +764,13 @@ func buildPrimeEnv(agentID string) []string {
 // startSessionRecordingIfConfigured attempts to start session recording
 // if the configuration enables auto-recording.
 func startSessionRecordingIfConfigured(ctx *HookContext) {
-	kbID, kbType := kb.ResolveCurrentKBIDAndType(ctx.ProjectRoot)
+	// resolve KB binding from the hook's actual working directory so nested
+	// KB bindings are honored. Falls back to project root if Getwd fails.
+	resolveFrom := ctx.ProjectRoot
+	if wd, wdErr := os.Getwd(); wdErr == nil && wd != "" {
+		resolveFrom = wd
+	}
+	kbID, kbType := kb.ResolveCurrentKBIDAndType(resolveFrom)
 	resolved := config.ResolveSessionRecording(ctx.ProjectRoot, kbID, kbType)
 	if !resolved.IsAuto() {
 		return

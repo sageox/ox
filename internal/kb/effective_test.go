@@ -69,6 +69,9 @@ func TestResolveEffective_SessionRecording_EnvWins(t *testing.T) {
 	if ev.Effective != "auto" {
 		t.Fatalf("Effective=%q want auto", ev.Effective)
 	}
+	if ev.SafetyInversion {
+		t.Fatalf("expected SafetyInversion=false when env overrides")
+	}
 }
 
 func TestResolveEffective_SessionRecording_UserBeatsKBWhenNeitherDisabled(t *testing.T) {

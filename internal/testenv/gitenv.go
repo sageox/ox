@@ -45,9 +45,9 @@ func init() {
 	// the env vars is the only one that works without per-test setup
 	// AND survives our isolation.
 	setIfUnset("GIT_AUTHOR_NAME", "ox-test")
-	setIfUnset("GIT_AUTHOR_EMAIL", "test@sageox.ai")
+	setIfUnset("GIT_AUTHOR_EMAIL", "test@test.sageox.ai")
 	setIfUnset("GIT_COMMITTER_NAME", "ox-test")
-	setIfUnset("GIT_COMMITTER_EMAIL", "test@sageox.ai")
+	setIfUnset("GIT_COMMITTER_EMAIL", "test@test.sageox.ai")
 }
 
 func setIfUnset(name, value string) {

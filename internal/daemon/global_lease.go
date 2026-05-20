@@ -172,7 +172,13 @@ func (l *Lease) Release() error {
 	if !l.held.CompareAndSwap(1, 0) {
 		return nil
 	}
-	return platformReleaseGlobalLease(l.file)
+	if err := platformReleaseGlobalLease(l.file); err != nil {
+		// Restore held-state so callers can retry — otherwise a transient
+		// flock release failure strands lock ownership until process exit.
+		l.held.Store(1)
+		return fmt.Errorf("release global sync lease: %w", err)
+	}
+	return nil
 }
 
 // IsHeld returns true while this Lease still owns the lock. Used by

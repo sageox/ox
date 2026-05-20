@@ -175,10 +175,7 @@ func ResolveSessionRecording(projectRoot string, kbID, kbType string) *ResolvedS
 		}
 
 		// neither layer set anything — fall through to per-KB-type default.
-		defaultMode := kbconfig.DefaultSessionRecordingMode(kbType)
-		if defaultMode == "" {
-			defaultMode = SessionRecordingManual
-		}
+		defaultMode := defaultKBSessionRecordingMode(projectRoot, kbID, kbType)
 		return &ResolvedSessionRecording{
 			Mode:   NormalizeSessionRecording(defaultMode),
 			Source: SessionRecordingSourceDefault,
@@ -231,6 +228,28 @@ func ResolveSessionRecording(projectRoot string, kbID, kbType string) *ResolvedS
 	}
 }
 
+// defaultKBSessionRecordingMode returns the fallback mode for a KB-aware
+// resolution when neither env/user/kb layers are set.
+//
+// If kbType is known, the per-type default is authoritative. When kbType is
+// still unknown because local KB metadata has not synced yet, preserve the
+// legacy repo-root behavior for the project's own bound KB so migration to
+// YAML does not silently flip initialized repos from auto to manual.
+func defaultKBSessionRecordingMode(projectRoot, kbID, kbType string) string {
+	if kbType != "" {
+		if mode := kbconfig.DefaultSessionRecordingMode(kbType); mode != "" {
+			return mode
+		}
+	}
+	if projectRoot != "" && kbID != "" {
+		if projectCfg, err := LoadProjectConfig(projectRoot); err == nil &&
+			projectCfg != nil && projectCfg.KBID == kbID {
+			return SessionRecordingAuto
+		}
+	}
+	return SessionRecordingManual
+}
+
 // loadUserSessionRecordingMode returns the normalized user-layer mode, or "" if unset.
 //
 // SessionsConfig.GetMode() returns "none" both when the field is absent AND when
@@ -270,6 +289,12 @@ func loadKBSessionRecordingMode(kbID string) string {
 	}
 	env, err := kbconfig.UnmarshalConfigYAML(data)
 	if err != nil || env == nil {
+		return ""
+	}
+	// Validate before trusting the mode string — malformed config should be
+	// treated as unset rather than silently coerced (which normalizes to
+	// "manual" downstream, turning recording ON for an invalid KB config).
+	if err := kbconfig.ValidateConfig(env.ToKBConfig()); err != nil {
 		return ""
 	}
 	if env.Features.SessionRecording.Mode == nil {

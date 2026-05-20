@@ -132,9 +132,9 @@ TEST_GIT_ISOLATION := \
 	GIT_CONFIG_NOSYSTEM=1 \
 	GIT_TERMINAL_PROMPT=0 \
 	GIT_AUTHOR_NAME=ox-test \
-	GIT_AUTHOR_EMAIL=test@sageox.ai \
+	GIT_AUTHOR_EMAIL=test@test.sageox.ai \
 	GIT_COMMITTER_NAME=ox-test \
-	GIT_COMMITTER_EMAIL=test@sageox.ai
+	GIT_COMMITTER_EMAIL=test@test.sageox.ai
 
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
 test: ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)

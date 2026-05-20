@@ -356,75 +356,120 @@ func writeUserMode(t *testing.T, mode string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0644))
 }
 
-func TestResolveSessionRecording_KB_EnvWinsOverEverything(t *testing.T) {
-	tmpDir, dataHome, ep := kbTestEnv(t)
-	t.Setenv("OX_SESSION_RECORDING", "auto")
-	writeUserMode(t, "disabled")
-	writeKBConfig(t, dataHome, ep, "kb_test", "disabled")
+func TestResolveSessionRecording_KB_PrecedenceMatrix(t *testing.T) {
+	tests := []struct {
+		name          string
+		envMode       string
+		userMode      string
+		kbMode        string
+		kbID          string
+		kbType        string
+		wantMode      string
+		wantSource    SessionRecordingSource
+		wantInversion bool
+	}{
+		{
+			name:          "env wins over everything",
+			envMode:       "auto",
+			userMode:      "disabled",
+			kbMode:        "disabled",
+			kbID:          "kb_test",
+			kbType:        "personal",
+			wantMode:      SessionRecordingAuto,
+			wantSource:    SessionRecordingSourceEnv,
+			wantInversion: false,
+		},
+		{
+			name:          "user beats kb",
+			userMode:      "auto",
+			kbMode:        "manual",
+			kbID:          "kb_test",
+			kbType:        "personal",
+			wantMode:      SessionRecordingAuto,
+			wantSource:    SessionRecordingSourceUser,
+			wantInversion: false,
+		},
+		{
+			name:          "kb set user unset",
+			kbMode:        "auto",
+			kbID:          "kb_test",
+			kbType:        "personal",
+			wantMode:      SessionRecordingAuto,
+			wantSource:    SessionRecordingSourceKB,
+			wantInversion: false,
+		},
+		{
+			name:          "user disabled vetoes kb auto",
+			userMode:      "disabled",
+			kbMode:        "auto",
+			kbID:          "kb_test",
+			kbType:        "personal",
+			wantMode:      SessionRecordingDisabled,
+			wantSource:    SessionRecordingSourceUser,
+			wantInversion: false,
+		},
+		{
+			name:          "kb disabled vetoes user auto",
+			userMode:      "auto",
+			kbMode:        "disabled",
+			kbID:          "kb_test",
+			kbType:        "personal",
+			wantMode:      SessionRecordingDisabled,
+			wantSource:    SessionRecordingSourceKB,
+			wantInversion: true,
+		},
+		{
+			name:          "default from personal kb type",
+			kbID:          "kb_missing",
+			kbType:        "personal",
+			wantMode:      SessionRecordingAuto,
+			wantSource:    SessionRecordingSourceDefault,
+			wantInversion: false,
+		},
+		{
+			name:          "default from profile kb type",
+			kbID:          "kb_missing",
+			kbType:        "profile",
+			wantMode:      SessionRecordingManual,
+			wantSource:    SessionRecordingSourceDefault,
+			wantInversion: false,
+		},
+	}
 
-	resolved := ResolveSessionRecording(tmpDir, "kb_test", "personal")
-	assert.Equal(t, SessionRecordingAuto, resolved.Mode)
-	assert.Equal(t, SessionRecordingSourceEnv, resolved.Source)
-	assert.False(t, resolved.SafetyInversion)
-	assert.Equal(t, "kb_test", resolved.KBID)
-	assert.Equal(t, "personal", resolved.KBType)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir, dataHome, ep := kbTestEnv(t)
+			if tt.envMode != "" {
+				t.Setenv("OX_SESSION_RECORDING", tt.envMode)
+			}
+			if tt.userMode != "" {
+				writeUserMode(t, tt.userMode)
+			}
+			if tt.kbMode != "" {
+				writeKBConfig(t, dataHome, ep, tt.kbID, tt.kbMode)
+			}
+
+			resolved := ResolveSessionRecording(tmpDir, tt.kbID, tt.kbType)
+			assert.Equal(t, tt.wantMode, resolved.Mode)
+			assert.Equal(t, tt.wantSource, resolved.Source)
+			assert.Equal(t, tt.wantInversion, resolved.SafetyInversion)
+			assert.Equal(t, tt.kbID, resolved.KBID)
+			assert.Equal(t, tt.kbType, resolved.KBType)
+		})
+	}
 }
 
-func TestResolveSessionRecording_KB_UserWinsOverKB(t *testing.T) {
-	tmpDir, dataHome, ep := kbTestEnv(t)
-	writeUserMode(t, "auto")
-	writeKBConfig(t, dataHome, ep, "kb_test", "manual")
-
-	resolved := ResolveSessionRecording(tmpDir, "kb_test", "personal")
-	assert.Equal(t, SessionRecordingAuto, resolved.Mode)
-	assert.Equal(t, SessionRecordingSourceUser, resolved.Source)
-	assert.False(t, resolved.SafetyInversion)
-}
-
-func TestResolveSessionRecording_KB_KBSetUserUnset(t *testing.T) {
-	tmpDir, dataHome, ep := kbTestEnv(t)
-	writeKBConfig(t, dataHome, ep, "kb_test", "auto")
-
-	resolved := ResolveSessionRecording(tmpDir, "kb_test", "personal")
-	assert.Equal(t, SessionRecordingAuto, resolved.Mode)
-	assert.Equal(t, SessionRecordingSourceKB, resolved.Source)
-	assert.False(t, resolved.SafetyInversion)
-}
-
-func TestResolveSessionRecording_KB_SafetyInversion_UserDisabledKBAuto(t *testing.T) {
-	tmpDir, dataHome, ep := kbTestEnv(t)
-	writeUserMode(t, "disabled")
-	writeKBConfig(t, dataHome, ep, "kb_test", "auto")
-
-	resolved := ResolveSessionRecording(tmpDir, "kb_test", "personal")
-	assert.Equal(t, SessionRecordingDisabled, resolved.Mode)
-	// user's veto wins precedence too, so source is user. No inversion needed —
-	// precedence layer (user) was itself disabled.
-	assert.Equal(t, SessionRecordingSourceUser, resolved.Source)
-	assert.False(t, resolved.SafetyInversion)
-}
-
-func TestResolveSessionRecording_KB_SafetyInversion_UserAutoKBDisabled(t *testing.T) {
-	tmpDir, dataHome, ep := kbTestEnv(t)
-	writeUserMode(t, "auto")
-	writeKBConfig(t, dataHome, ep, "kb_test", "disabled")
-
-	resolved := ResolveSessionRecording(tmpDir, "kb_test", "personal")
-	assert.Equal(t, SessionRecordingDisabled, resolved.Mode)
-	// KB's veto inverted what precedence would otherwise pick — flag it.
-	assert.Equal(t, SessionRecordingSourceKB, resolved.Source)
-	assert.True(t, resolved.SafetyInversion)
-}
-
-func TestResolveSessionRecording_KB_DefaultFromKBType(t *testing.T) {
+func TestResolveSessionRecording_KB_BoundProjectDefaultsToAutoWhileTypeUnknown(t *testing.T) {
 	tmpDir, _, _ := kbTestEnv(t)
-	// no user, no KB config file — fall through to per-KB-type default.
-	resolved := ResolveSessionRecording(tmpDir, "kb_missing", "personal")
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tmpDir, ".sageox", "config.yaml"),
+		[]byte("kb_id: kb_project\nrepo_id: repo_abc\n"),
+		0o644,
+	))
+
+	resolved := ResolveSessionRecording(tmpDir, "kb_project", "")
 	assert.Equal(t, SessionRecordingAuto, resolved.Mode)
 	assert.Equal(t, SessionRecordingSourceDefault, resolved.Source)
-	assert.Equal(t, "personal", resolved.KBType)
-
-	resolved2 := ResolveSessionRecording(tmpDir, "kb_missing", "profile")
-	assert.Equal(t, SessionRecordingManual, resolved2.Mode)
-	assert.Equal(t, SessionRecordingSourceDefault, resolved2.Source)
+	assert.Equal(t, "kb_project", resolved.KBID)
 }

@@ -173,10 +173,12 @@ func ResolveCurrentKB(cwd string) (*KBBinding, error) {
 
 	ep := endpoint.NormalizeEndpoint(payload.Endpoint)
 	if ep == "" {
-		// endpoint.Get is the documented fallback per ADR-017 §3. We don't
-		// have a projectRoot to feed GetForProject (the binding IS the
-		// project marker), so Get is correct here.
-		ep = endpoint.NormalizeEndpoint(endpoint.Get())
+		// Prefer the project-aware fallback so the resolved endpoint
+		// matches the repo's recorded endpoint (.sageox/config.json), not
+		// whatever the global SAGEOX_ENDPOINT env var happens to be.
+		// GetForProject falls back to endpoint.Get() internally when the
+		// project config is missing, so this strictly widens correctness.
+		ep = endpoint.NormalizeEndpoint(endpoint.GetForProject(anchor))
 	}
 
 	return &KBBinding{

@@ -232,6 +232,7 @@ type SyncScheduler struct {
 	// working. The production daemon always calls SetGlobalSyncLease
 	// (success or failure) before Start, so followers correctly skip.
 	globalSyncLease    *Lease
+	globalSyncEndpoint string
 	globalSyncLeaseSet bool
 }
 
@@ -410,11 +411,28 @@ func (s *SyncScheduler) SetEventBus(bus *hooks.EventBus) {
 // any call, IsGlobalSyncOwner defaults to true (preserves single-daemon
 // behavior for tests and call sites that don't go through the daemon's
 // leader-election startup).
-func (s *SyncScheduler) SetGlobalSyncLease(l *Lease) {
+func (s *SyncScheduler) SetGlobalSyncLease(endpoint string, l *Lease) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.globalSyncEndpoint = endpoint
 	s.globalSyncLease = l
 	s.globalSyncLeaseSet = true
+}
+
+// ReleaseGlobalSyncLease releases any lease currently held by the scheduler.
+// Idempotent and safe to call alongside daemon-level release logic.
+func (s *SyncScheduler) ReleaseGlobalSyncLease() {
+	s.mu.Lock()
+	lease := s.globalSyncLease
+	s.globalSyncLease = nil
+	s.mu.Unlock()
+
+	if lease == nil {
+		return
+	}
+	if err := lease.Release(); err != nil {
+		s.logger.Warn("global-sync lease release failed", "error", err)
+	}
 }
 
 // IsGlobalSyncOwner reports whether this scheduler should run
@@ -428,11 +446,46 @@ func (s *SyncScheduler) SetGlobalSyncLease(l *Lease) {
 //     constructs a scheduler without wiring leader election.
 func (s *SyncScheduler) IsGlobalSyncOwner() bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if !s.globalSyncLeaseSet {
+		s.mu.Unlock()
 		return true
 	}
-	return s.globalSyncLease != nil && s.globalSyncLease.IsHeld()
+	if s.globalSyncLease != nil && s.globalSyncLease.IsHeld() {
+		s.mu.Unlock()
+		return true
+	}
+	endpoint := s.globalSyncEndpoint
+	s.mu.Unlock()
+	return s.tryAcquireGlobalSyncLease(endpoint)
+}
+
+func (s *SyncScheduler) tryAcquireGlobalSyncLease(endpoint string) bool {
+	if endpoint == "" {
+		return false
+	}
+
+	lease, err := AcquireGlobalSyncLease(endpoint)
+	if err != nil {
+		if !errors.Is(err, ErrNotOwner) {
+			s.logger.Debug("global-sync lease retry failed", "endpoint", endpoint, "error", err)
+		}
+		return false
+	}
+
+	s.mu.Lock()
+	if s.globalSyncLease != nil && s.globalSyncLease.IsHeld() {
+		s.mu.Unlock()
+		_ = lease.Release()
+		return true
+	}
+	s.globalSyncLease = lease
+	s.mu.Unlock()
+
+	if err := UpdateGlobalSyncOwnership(endpoint, true); err != nil {
+		s.logger.Debug("failed to update global-sync ownership after retry", "endpoint", endpoint, "error", err)
+	}
+	s.logger.Info("global-sync lease acquired after retry", "endpoint", endpoint)
+	return true
 }
 
 // captureHEAD returns the current HEAD SHA for a git repo.

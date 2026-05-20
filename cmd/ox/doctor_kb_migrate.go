@@ -66,8 +66,14 @@ func checkKBProjectConfigMigrate(fix bool) checkResult {
 	jsonPath := filepath.Join(sageoxPath, "config.json")
 	yamlPath := filepath.Join(sageoxPath, "config.yaml")
 
-	jsonExists := pathExists(jsonPath)
-	yamlExists := pathExists(yamlPath)
+	jsonExists, err := pathExists(jsonPath)
+	if err != nil {
+		return SkippedCheck(name, "config.json status unreadable", err.Error())
+	}
+	yamlExists, err := pathExists(yamlPath)
+	if err != nil {
+		return SkippedCheck(name, "config.yaml status unreadable", err.Error())
+	}
 
 	switch {
 	case !jsonExists && !yamlExists:
@@ -128,10 +134,8 @@ func migrateJSONOnly(name string, fix bool, gitRoot, sageoxPath, _, yamlPath str
 			"re-run `ox init` or wait for the server to provision a knowledge bubble for this repo")
 	}
 
-	payload := config.ProjectConfigYAML{
-		KBID:   kbID,
-		RepoID: cfg.RepoID,
-	}
+	payload := *cfg
+	payload.KBID = kbID
 	if err := writeProjectYAMLAtomic(sageoxPath, yamlPath, payload); err != nil {
 		return FailedCheck(name, "write config.yaml failed", err.Error())
 	}
@@ -256,7 +260,9 @@ func readYAMLConfigBinding(path string) (config.ProjectConfigYAML, error) {
 //
 // Returns the final backup path so callers can log it.
 func archiveJSON(sageoxDir, jsonPath string) (string, error) {
-	ts := time.Now().UTC().Format(time.RFC3339)
+	// RFC3339 contains ":" which is invalid in Windows filenames; use a
+	// filesystem-safe layout that still sorts lexicographically.
+	ts := time.Now().UTC().Format("20060102T150405Z")
 	finalBackup := filepath.Join(sageoxDir, "config.json.bak."+ts)
 	tmpBackup := finalBackup + ".tmp"
 
@@ -281,11 +287,18 @@ func archiveJSON(sageoxDir, jsonPath string) (string, error) {
 }
 
 // pathExists is a small predicate used to keep the dispatch switch readable.
-// os.Stat with errors.Is(err, os.ErrNotExist) inlined would obscure the four-
-// way intent of the case labels in checkKBProjectConfigMigrate.
-func pathExists(path string) bool {
+// Distinguishes ENOENT (legitimately absent) from other stat errors
+// (permission/IO) so a misconfigured directory doesn't silently route to the
+// wrong migration branch.
+func pathExists(path string) (bool, error) {
 	_, err := os.Stat(path)
-	return err == nil
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return false, fmt.Errorf("stat %s: %w", path, err)
 }
 
 // resolveKBIDForRepo asks the kb API for all bubbles the caller can access
@@ -306,11 +319,11 @@ func resolveKBIDForRepo(ctx context.Context, repoID string) (string, error) {
 	return "", nil
 }
 
-// writeProjectYAMLAtomic marshals the binding YAML and writes it via a
+// writeProjectYAMLAtomic marshals the project-side YAML and writes it via a
 // temp + rename so a crash mid-write cannot leave a half-written
 // config.yaml behind. Permissions match the existing config.json (0644)
 // because this file is intended to be committed to git.
-func writeProjectYAMLAtomic(sageoxDir, finalPath string, payload config.ProjectConfigYAML) error {
+func writeProjectYAMLAtomic(sageoxDir, finalPath string, payload any) error {
 	data, err := yaml.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal yaml: %w", err)

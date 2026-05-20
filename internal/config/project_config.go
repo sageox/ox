@@ -173,17 +173,12 @@ const (
 	defaultOfflineSnapshotStaleDays = 7
 )
 
-// ProjectConfigYAML is the on-disk shape of .sageox/config.yaml (ADR-017).
-// This is the project-side YAML — NOT the KB-side envelope (which carries
-// banners and committed_at). The project-side YAML is intentionally narrow:
-// it binds a directory tree to a kb_id, with repo_id retained as a one-
-// release safety net so offline resolution still works while the kb API
-// is unreachable.
-//
-// All other ProjectConfig fields are preserved across migration by
-// round-tripping through JSON tags via yaml.Marshal of the canonical
-// ProjectConfig struct. We keep this narrow type strictly for the
-// minimum-payload binding-only trees described in ADR-017 §2.
+// ProjectConfigYAML is the binding subset of the project-side
+// .sageox/config.yaml (ADR-017). The file itself may contain the full
+// ProjectConfig shape; yaml.v3 honors json tags, so LoadProjectConfig can
+// unmarshal directly into ProjectConfig and preserve existing per-project
+// settings. This narrower view is kept for code paths that only need the
+// binding fields (kb_id + repo_id), such as doctor reconciliation tests.
 type ProjectConfigYAML struct {
 	KBID   string `yaml:"kb_id,omitempty"`
 	RepoID string `yaml:"repo_id,omitempty"`
@@ -264,12 +259,12 @@ func GetDefaultProjectConfig() *ProjectConfig {
 // Hybrid read posture during the staged migration window (ADR-017 §7):
 //
 //   - JSON only present  → Format="json".
-//   - YAML only present  → Format="yaml"; translate ProjectConfigYAML into the
-//     canonical struct (KBID + RepoID are the only fields the narrow YAML
-//     binding carries).
+//   - YAML only present  → Format="yaml"; unmarshal YAML directly into the
+//     canonical struct, preserving all project-scoped settings that were
+//     migrated across.
 //   - Both present       → Format="both"; JSON is the base, YAML overrides on
-//     conflict (kb_id, repo_id). This lets the doctor migration write the YAML
-//     alongside the legacy JSON without losing information either way.
+//     conflict for every field it carries. This lets the doctor migration
+//     write the YAML alongside the legacy JSON without losing information.
 //   - Neither present    → return default config with Format unset (callers
 //     keep treating this as "not initialized" via IsInitialized).
 //
@@ -291,13 +286,13 @@ func LoadProjectConfig(gitRoot string) (*ProjectConfig, error) {
 	jsonExists := false
 	if _, err := os.Stat(jsonPath); err == nil {
 		jsonExists = true
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("failed to stat config file: %w", err)
 	}
 	yamlExists := false
 	if _, err := os.Stat(yamlPath); err == nil {
 		yamlExists = true
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("failed to stat yaml config: %w", err)
 	}
 
@@ -325,18 +320,8 @@ func LoadProjectConfig(gitRoot string) (*ProjectConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to read yaml config: %w", err)
 		}
-		var y ProjectConfigYAML
-		if err := yaml.Unmarshal(data, &y); err != nil {
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
 			return nil, fmt.Errorf("failed to parse yaml config: %w", err)
-		}
-		// YAML overrides on conflict (ADR-017 §7). Only override when the YAML
-		// actually carries a value — an empty kb_id in the YAML must not blank
-		// out the JSON-derived field during the transition.
-		if y.KBID != "" {
-			cfg.KBID = y.KBID
-		}
-		if y.RepoID != "" {
-			cfg.RepoID = y.RepoID
 		}
 	}
 
@@ -491,15 +476,22 @@ func FindProjectRoot() string {
 	}
 }
 
-// findProjectConfigPathFromDir walks up from the given directory looking for .sageox/config.json
+// findProjectConfigPathFromDir walks up from the given directory looking for
+// .sageox/config.json, or .sageox/config.yaml when JSON is absent (ADR-017).
+// Prefer JSON during the migration window so existing tooling/callers that
+// expect a JSON path keep working; fall back to YAML so YAML-only repos are
+// still discoverable.
 func findProjectConfigPathFromDir(startDir string) (string, error) {
 	currentDir := startDir
 
 	for {
-		// check if .sageox/config.json exists in current directory
-		configPath := filepath.Join(currentDir, sageoxDir, projectConfigFilename)
-		if _, err := os.Stat(configPath); err == nil {
-			return configPath, nil
+		jsonPath := filepath.Join(currentDir, sageoxDir, projectConfigFilename)
+		if _, err := os.Stat(jsonPath); err == nil {
+			return jsonPath, nil
+		}
+		yamlPath := filepath.Join(currentDir, sageoxDir, projectConfigYAMLFilename)
+		if _, err := os.Stat(yamlPath); err == nil {
+			return yamlPath, nil
 		}
 
 		// get parent directory

@@ -239,10 +239,16 @@ check_resolve_invariant() {
         local_drift=1
     fi
     # The veto must come before the precedence "userMode != \"\"" check.
-    local veto_line prec_line
-    veto_line=$(grep -nE '(userMode|kbMode)[[:space:]]*==[[:space:]]*SessionRecordingDisabled' <<<"$body" | head -1 | cut -d: -f1)
+    # Track BOTH veto patterns (userMode/kbMode) separately and validate the
+    # LAST veto occurrence against the precedence check — otherwise a config
+    # with the first veto above precedence and a second veto below it would
+    # still pass, even though the second one is in the wrong place.
+    local user_veto_line kb_veto_line prec_line last_veto_line
+    user_veto_line=$(grep -nE 'userMode[[:space:]]*==[[:space:]]*SessionRecordingDisabled' <<<"$body" | head -1 | cut -d: -f1)
+    kb_veto_line=$(grep -nE 'kbMode[[:space:]]*==[[:space:]]*SessionRecordingDisabled' <<<"$body" | head -1 | cut -d: -f1)
+    last_veto_line=$(printf '%s\n%s\n' "$user_veto_line" "$kb_veto_line" | grep -E '^[0-9]+$' | sort -n | tail -1)
     prec_line=$(grep -nE 'userMode[[:space:]]*!=[[:space:]]*""' <<<"$body" | head -1 | cut -d: -f1)
-    if [[ -n "$veto_line" && -n "$prec_line" && "$veto_line" -ge "$prec_line" ]]; then
+    if [[ -n "$last_veto_line" && -n "$prec_line" && "$last_veto_line" -ge "$prec_line" ]]; then
         echo "  DRIFT $label: safety inversion (veto) is below precedence check; ORDER IS SEMANTICS"
         local_drift=1
     fi

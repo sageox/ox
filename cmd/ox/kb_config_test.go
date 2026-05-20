@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/paths"
+	"github.com/stretchr/testify/require"
 )
 
 // withKBConfigResolver swaps the package-level resolver used by `ox kb config`
@@ -263,28 +265,24 @@ func TestKBConfigList_JSONShape(t *testing.T) {
 }
 
 func TestKBConfigGet_KBLayerReadsFromConfigYAML(t *testing.T) {
-	// Build a KB checkout with a config.yaml that pins visibility=team, and
-	// point OX endpoint resolution at the temp dir via XDG_DATA_HOME.
+	// Build a KB checkout with config.yaml pinning visibility=team and assert
+	// that the KB-layer read surfaces "team". Use paths.KBDir as the canonical
+	// helper so the test stays in sync with on-disk layout, and pin a known
+	// endpoint so the path under XDG is deterministic.
 	tmp := t.TempDir()
 	t.Setenv("XDG_DATA_HOME", tmp)
 	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("SAGEOX_ENDPOINT", "test-endpoint")
 	t.Setenv(config.EnvUserConfig, filepath.Join(tmp, "user-config.yaml"))
 	t.Setenv(config.EnvSessionRecording, "")
 
-	// kb checkout path mirrors paths.KBDir(kbID) layout under XDG.
-	kbDir := filepath.Join(tmp, "sageox", os.Getenv("OX_ENDPOINT"), "kb", "kb_xyz", ".sageox")
-	if os.Getenv("OX_ENDPOINT") == "" {
-		// paths.KBDir nests endpoint slug — accept whatever ends up there.
-		kbDir = ""
+	kbCfgDir := filepath.Join(paths.KBDir("kb_xyz"), ".sageox")
+	if err := os.MkdirAll(kbCfgDir, 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if kbDir != "" {
-		if err := os.MkdirAll(kbDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		body := "version: 1\nfeatures:\n  visibility: team\n"
-		if err := os.WriteFile(filepath.Join(kbDir, "config.yaml"), []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	body := "version: 1\nfeatures:\n  visibility: team\n"
+	if err := os.WriteFile(filepath.Join(kbCfgDir, "config.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
 	cmd := newRootForTest(t)
@@ -292,10 +290,35 @@ func TestKBConfigGet_KBLayerReadsFromConfigYAML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// We don't assert "team" here because paths.KBDir layout depends on the
-	// endpoint config which is not stable in this test environment. The
-	// assertion that matters is that the command runs cleanly.
-	_ = stdout
+	if got := strings.TrimSpace(stdout.String()); got != "team" {
+		t.Fatalf("stdout=%q; want %q", got, "team")
+	}
+}
+
+func TestKBConfigGet_DefaultSessionRecordingUsesLocalKBType(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", tmp)
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("SAGEOX_ENDPOINT", "test-endpoint")
+	t.Setenv(config.EnvUserConfig, filepath.Join(tmp, "user-config.yaml"))
+	t.Setenv(config.EnvSessionRecording, "")
+
+	metaDir := filepath.Join(paths.KBDir("kb_personal"), ".sageox")
+	require.NoError(t, os.MkdirAll(metaDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(metaDir, "meta.json"),
+		[]byte(`{"type":"personal","slug":"my-personal"}`),
+		0o644,
+	))
+
+	cmd := newRootForTest(t)
+	stdout, stderr, err := executeCmd(cmd, "kb", "config", "get", "--kb=kb_personal", "features.session_recording.mode")
+	if err != nil {
+		t.Fatalf("unexpected error: %v; stderr=%q", err, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "auto" {
+		t.Fatalf("stdout=%q; want %q", got, "auto")
+	}
 }
 
 // newRootForTest builds a fresh root command tree for a test invocation. The

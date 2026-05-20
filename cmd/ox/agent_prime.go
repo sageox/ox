@@ -572,8 +572,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// ADR-017: surface the binding the agent's CWD currently resolves to.
 	// Look it up in the KB list so the emitted entry carries the same
-	// type/slug/path enrichment as the matching row.
-	output.CurrentKB = resolveCurrentKBEntry(projectRoot, output.KB)
+	// type/slug/path enrichment as the matching row. Resolve from the
+	// actual working directory so nested/subtree KB bindings win over the
+	// repo root binding when applicable.
+	kbResolveFrom := projectRoot
+	if wd, wdErr := os.Getwd(); wdErr == nil && wd != "" {
+		kbResolveFrom = wd
+	}
+	output.CurrentKB = resolveCurrentKBEntry(kbResolveFrom, output.KB)
 
 	// populate cumulative context stats from daemon (best-effort).
 	// read BEFORE sending this command's heartbeat — intentional: these report
@@ -1004,7 +1010,13 @@ func repoSlugFromRemoteOrDir(projectRoot string) string {
 func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string) *sessionStatus {
 	// resolve session mode from config hierarchy; KB binding (when present)
 	// participates in precedence + safety-inversion via ResolveSessionRecording.
-	kbID, kbType := kb.ResolveCurrentKBIDAndType(projectRoot)
+	// Resolve the KB binding from the agent's actual working directory so
+	// nested/subtree bindings win over the repo root binding.
+	kbResolveFrom := projectRoot
+	if wd, wdErr := os.Getwd(); wdErr == nil && wd != "" {
+		kbResolveFrom = wd
+	}
+	kbID, kbType := kb.ResolveCurrentKBIDAndType(kbResolveFrom)
 	resolved := config.ResolveSessionRecording(projectRoot, kbID, kbType)
 
 	// only auto-start recording when config is explicitly set to "auto"

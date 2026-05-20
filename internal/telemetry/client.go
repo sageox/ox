@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -100,11 +101,24 @@ func WithProjectRoot(projectRoot string) ClientOption {
 
 // NewClient creates a new telemetry client.
 // Telemetry is enabled by default unless user has opted out.
+//
+// Opt-out is honored from three sources, in order:
+//  1. DO_NOT_TRACK=1 env var (matches daemon-side collector + ecosystem
+//     convention from https://consoledonottrack.com/).
+//  2. SAGEOX_TELEMETRY=false env var (ox-specific override; matches
+//     daemon-side collector).
+//  3. UserConfig.TelemetryEnabled (persisted setting).
 func NewClient(sessionID string, opts ...ClientOption) *Client {
-	// check user preference
 	enabled := true
-	if cfg, err := config.LoadUserConfig(); err == nil {
-		enabled = cfg.IsTelemetryEnabled()
+	switch {
+	case os.Getenv("DO_NOT_TRACK") == "1":
+		enabled = false
+	case strings.EqualFold(os.Getenv("SAGEOX_TELEMETRY"), "false"):
+		enabled = false
+	default:
+		if cfg, err := config.LoadUserConfig(); err == nil {
+			enabled = cfg.IsTelemetryEnabled()
+		}
 	}
 
 	client := &Client{

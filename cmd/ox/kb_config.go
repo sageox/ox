@@ -84,6 +84,10 @@ var kbConfigResolver = func(ctx context.Context, raw string) (string, error) {
 	return resolveKBInputForCmd(ctx, raw)
 }
 
+type kbMetaSummary struct {
+	Type string `json:"type"`
+}
+
 func loadKBConfigContext(cmd *cobra.Command) (*kbConfigContext, error) {
 	stderr := cmd.ErrOrStderr()
 
@@ -150,14 +154,28 @@ func loadKBConfigContext(cmd *cobra.Command) (*kbConfigContext, error) {
 		ctx.userCfgSrc = filepath.Join(config.GetUserConfigDir(), "config.yaml")
 	}
 
-	// KBType: best-effort. v1 stays offline — defaults that depend on type
-	// (session_recording for personal/team/repo = auto, else manual) fall back
-	// to DefaultSessionRecordingMode("") which is manual. Users on personal/
-	// team/repo bubbles can still see the value via the kb-layer column when
-	// it's set explicitly; the `default` column reads "manual" in v1.
-	ctx.kbType = ""
+	// KBType: best-effort from the daemon-written local metadata. This keeps
+	// `ox kb config` offline while still surfacing correct per-type defaults
+	// for synced bubbles.
+	ctx.kbType = loadKBTypeFromMeta(kbID)
 
 	return ctx, nil
+}
+
+func loadKBTypeFromMeta(kbID string) string {
+	if kbID == "" {
+		return ""
+	}
+	metaPath := filepath.Join(paths.KBDir(kbID), ".sageox", "meta.json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return ""
+	}
+	var meta kbMetaSummary
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return ""
+	}
+	return meta.Type
 }
 
 // extractLayerValue returns the value for a known key at a single layer.

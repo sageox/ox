@@ -32,9 +32,9 @@ func initGitRepo(t *testing.T, numCommits int) (string, string) {
 			cmd.Dir = dir
 			cmd.Env = append(os.Environ(), // safe: git CLI in temp dir needs inherited PATH
 				"GIT_AUTHOR_NAME=test",
-				"GIT_AUTHOR_EMAIL=test@sageox.ai",
+				"GIT_AUTHOR_EMAIL=test@test.sageox.ai",
 				"GIT_COMMITTER_NAME=test",
-				"GIT_COMMITTER_EMAIL=test@sageox.ai",
+				"GIT_COMMITTER_EMAIL=test@test.sageox.ai",
 			)
 			return cmd
 		}
@@ -164,9 +164,9 @@ func TestResolveDefaultBranchGit_Worktree(t *testing.T) {
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), // safe: git CLI in temp dir needs inherited PATH
 			"GIT_AUTHOR_NAME=test",
-			"GIT_AUTHOR_EMAIL=test@sageox.ai",
+			"GIT_AUTHOR_EMAIL=test@test.sageox.ai",
 			"GIT_COMMITTER_NAME=test",
-			"GIT_COMMITTER_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_EMAIL=test@test.sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
@@ -237,9 +237,9 @@ func TestIndexLocalRepo_LinkedWorktree(t *testing.T) {
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), // safe: git CLI in temp dir needs inherited PATH
 			"GIT_AUTHOR_NAME=test",
-			"GIT_AUTHOR_EMAIL=test@sageox.ai",
+			"GIT_AUTHOR_EMAIL=test@test.sageox.ai",
 			"GIT_COMMITTER_NAME=test",
-			"GIT_COMMITTER_EMAIL=test@sageox.ai",
+			"GIT_COMMITTER_EMAIL=test@test.sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)

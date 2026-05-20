@@ -58,6 +58,17 @@ func UnmarshalConfigYAML(data []byte) (*ConfigYAMLEnvelope, error) {
 		}
 		return nil, fmt.Errorf("kbconfig: unmarshal config yaml: %w", err)
 	}
+	// Reject trailing YAML documents to avoid ambiguous/ignored config
+	// payloads. KnownFields(true) only covers stray keys inside a single
+	// document; a second `---`-separated doc would otherwise be silently
+	// dropped on the floor.
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, fmt.Errorf("kbconfig: unmarshal config yaml: trailing YAML document is not allowed")
+		}
+		return nil, fmt.Errorf("kbconfig: unmarshal config yaml: %w", err)
+	}
 	return &env, nil
 }
 

@@ -209,6 +209,37 @@ func TestLoadProjectConfig_AppliesDefaults(t *testing.T) {
 	assert.Equal(t, defaultUpdateFrequencyHours, cfg.UpdateFrequencyHours, "expected default UpdateFrequencyHours")
 }
 
+func TestLoadProjectConfig_YAMLOnlyPreservesProjectFields(t *testing.T) {
+	tmpDir := t.TempDir()
+	RequireSageoxDir(t, tmpDir)
+
+	yamlBody := `config_version: "2"
+repo_id: repo_abc
+kb_id: kb_repo_abc
+endpoint: https://test.sageox.ai
+session_recording: auto
+github_sync: disabled
+update_frequency_hours: 12
+`
+	require.NoError(t, os.WriteFile(
+		filepath.Join(tmpDir, sageoxDir, projectConfigYAMLFilename),
+		[]byte(yamlBody),
+		0o644,
+	))
+
+	cfg, err := LoadProjectConfig(tmpDir)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	assert.Equal(t, "yaml", cfg.Format)
+	assert.Equal(t, "repo_abc", cfg.RepoID)
+	assert.Equal(t, "kb_repo_abc", cfg.KBID)
+	assert.Equal(t, "https://test.sageox.ai", cfg.Endpoint)
+	assert.Equal(t, "auto", cfg.SessionRecording)
+	assert.Equal(t, "disabled", cfg.GitHubSync)
+	assert.Equal(t, 12, cfg.UpdateFrequencyHours)
+}
+
 func TestFindProjectConfigPathFromDir_WalksUpDirectories(t *testing.T) {
 	// create a temporary directory structure
 	tmpDir, err := os.MkdirTemp("", "sageox-test-*")
