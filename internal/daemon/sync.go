@@ -221,7 +221,18 @@ type SyncScheduler struct {
 	// scheduler must skip those global tickers — per-repo work
 	// (pullChanges, codedb, github sync, sessions) is unaffected. See
 	// bead ox-6zme.
-	globalSyncLease *Lease
+	//
+	// globalSyncLeaseSet tracks whether SetGlobalSyncLease was ever
+	// invoked. We must distinguish "production daemon attempted
+	// acquisition and got nil (follower)" from "no leader-election
+	// wiring ran yet (test harness, single-daemon legacy)". Before any
+	// SetGlobalSyncLease call, the scheduler behaves as owner so legacy
+	// single-daemon tests and any code path that constructs a scheduler
+	// without going through the daemon's leader-election startup keep
+	// working. The production daemon always calls SetGlobalSyncLease
+	// (success or failure) before Start, so followers correctly skip.
+	globalSyncLease    *Lease
+	globalSyncLeaseSet bool
 }
 
 // syncError tracks a sync error with timestamp.
@@ -393,18 +404,34 @@ func (s *SyncScheduler) SetEventBus(bus *hooks.EventBus) {
 // handle. Pass nil when the daemon failed to acquire the lease — the
 // scheduler will skip team-context pulls and KB ListBubbles ticks, but
 // continue running every per-repo ticker. See bead ox-6zme.
+//
+// Calling this method — even with nil — flips the scheduler out of
+// "legacy owner" mode and into explicit leader-election mode. Before
+// any call, IsGlobalSyncOwner defaults to true (preserves single-daemon
+// behavior for tests and call sites that don't go through the daemon's
+// leader-election startup).
 func (s *SyncScheduler) SetGlobalSyncLease(l *Lease) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.globalSyncLease = l
+	s.globalSyncLeaseSet = true
 }
 
-// IsGlobalSyncOwner reports whether this scheduler currently holds the
-// global-sync lease for its endpoint. Used by doctor checks and status
-// reporting; the in-loop gates compare s.globalSyncLease directly.
+// IsGlobalSyncOwner reports whether this scheduler should run
+// global-sync work (team-context pulls + KB ListBubbles).
+//
+// Three states, only the first is "follower":
+//   - SetGlobalSyncLease(nil) was called — explicit follower, skip global ticks.
+//   - SetGlobalSyncLease(lease) was called and the lease is held — owner.
+//   - SetGlobalSyncLease was never called — legacy owner (default).
+//     Preserves the pre-ox-6zme behavior for tests and any path that
+//     constructs a scheduler without wiring leader election.
 func (s *SyncScheduler) IsGlobalSyncOwner() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.globalSyncLeaseSet {
+		return true
+	}
 	return s.globalSyncLease != nil && s.globalSyncLease.IsHeld()
 }
 

@@ -283,10 +283,23 @@ func LoadProjectConfig(gitRoot string) (*ProjectConfig, error) {
 	jsonPath := filepath.Join(gitRoot, sageoxDir, projectConfigFilename)
 	yamlPath := filepath.Join(gitRoot, sageoxDir, projectConfigYAMLFilename)
 
-	_, jsonStatErr := os.Stat(jsonPath)
-	jsonExists := jsonStatErr == nil
-	_, yamlStatErr := os.Stat(yamlPath)
-	yamlExists := yamlStatErr == nil
+	// Distinguish ENOENT (file genuinely missing) from EACCES / other
+	// stat failures (parent dir unreadable, broken symlink, etc.). The
+	// legacy LoadProjectConfig used os.IsNotExist; mirroring that here
+	// keeps ensureSageoxConfig's "permission-denied → configError"
+	// contract intact under hostile filesystem state.
+	jsonExists := false
+	if _, err := os.Stat(jsonPath); err == nil {
+		jsonExists = true
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to stat config file: %w", err)
+	}
+	yamlExists := false
+	if _, err := os.Stat(yamlPath); err == nil {
+		yamlExists = true
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to stat yaml config: %w", err)
+	}
 
 	// Neither file exists — preserve the legacy "return defaults" contract so
 	// callers that load eagerly (daemon, IPC discovery) don't have to special-case
