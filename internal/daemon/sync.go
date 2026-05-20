@@ -213,6 +213,15 @@ type SyncScheduler struct {
 
 	// event bus for emitting sync events to hooks/notifications
 	eventBus *hooks.EventBus
+
+	// globalSyncLease is the per-(user, endpoint) leader-election handle
+	// for global-sync work (team-context pulls + KB ListBubbles). Owned
+	// by the daemon; injected via SetGlobalSyncLease at startup. nil
+	// means another daemon owns the lease for this endpoint and this
+	// scheduler must skip those global tickers — per-repo work
+	// (pullChanges, codedb, github sync, sessions) is unaffected. See
+	// bead ox-6zme.
+	globalSyncLease *Lease
 }
 
 // syncError tracks a sync error with timestamp.
@@ -378,6 +387,25 @@ func (s *SyncScheduler) SetTracer(t *observability.DaemonTracer) {
 // SetEventBus sets the event bus for emitting sync events.
 func (s *SyncScheduler) SetEventBus(bus *hooks.EventBus) {
 	s.eventBus = bus
+}
+
+// SetGlobalSyncLease wires the per-endpoint global-sync leader-election
+// handle. Pass nil when the daemon failed to acquire the lease — the
+// scheduler will skip team-context pulls and KB ListBubbles ticks, but
+// continue running every per-repo ticker. See bead ox-6zme.
+func (s *SyncScheduler) SetGlobalSyncLease(l *Lease) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.globalSyncLease = l
+}
+
+// IsGlobalSyncOwner reports whether this scheduler currently holds the
+// global-sync lease for its endpoint. Used by doctor checks and status
+// reporting; the in-loop gates compare s.globalSyncLease directly.
+func (s *SyncScheduler) IsGlobalSyncOwner() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.globalSyncLease != nil && s.globalSyncLease.IsHeld()
 }
 
 // captureHEAD returns the current HEAD SHA for a git repo.
@@ -678,9 +706,14 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			"heartbeat_interval", heartbeatInterval,
 		)
 
-		// delayed team context sync for regular pulls (not just cloning)
+		// delayed team context sync for regular pulls (not just cloning).
+		// Gated on global-sync ownership — non-owner daemons leave team
+		// contexts to the owning daemon for this endpoint (ox-6zme).
 		go func() {
 			time.Sleep(5 * time.Second)
+			if !s.IsGlobalSyncOwner() {
+				return
+			}
 			s.pullTeamContexts(ctx)
 		}()
 	} else {
@@ -789,13 +822,22 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 
 		case <-teamContextChan:
 			// not traced: high-frequency sync dominates span volume with little diagnostic value
-			s.pullTeamContexts(ctx)
-			// kb bubbles share the team-context cadence (15s). Per-bubble
-			// FETCH_HEAD dedup inside pullManagedRepo (threshold =
-			// max(SyncInterval/2, MinFetchHeadAge)) gates repo/custom
-			// bubbles down to the slower read cadence automatically — see
-			// kbSyncIntervalFor in sync_bubbles.go.
-			s.syncBubbles(ctx)
+			//
+			// Global-sync gate (ox-6zme): only the daemon holding the
+			// per-endpoint flock lease runs team-context pulls and KB
+			// ListBubbles. Other daemons consume the on-disk state the
+			// owner keeps fresh — every daemon still resolves its own
+			// per-project KB symlinks from whatever is on disk via the
+			// existing reconciler.
+			if s.IsGlobalSyncOwner() {
+				s.pullTeamContexts(ctx)
+				// kb bubbles share the team-context cadence (15s). Per-bubble
+				// FETCH_HEAD dedup inside pullManagedRepo (threshold =
+				// max(SyncInterval/2, MinFetchHeadAge)) gates repo/custom
+				// bubbles down to the slower read cadence automatically — see
+				// kbSyncIntervalFor in sync_bubbles.go.
+				s.syncBubbles(ctx)
+			}
 			if teamContextTicker != nil {
 				teamContextTicker.Reset(jitteredDuration(s.config.TeamContextSyncInterval, 0.10))
 			}

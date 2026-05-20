@@ -64,6 +64,7 @@ var statusBubblesTypeOrder = []api.KBType{
 	api.KBTypeTeam,
 	api.KBTypeRepo,
 	api.KBTypeCustom,
+	api.KBType("channel"),
 	api.KBTypeUnknown,
 }
 

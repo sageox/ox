@@ -11,6 +11,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestFormatKBSlug pins the canonical "#<slug>" human-display formatter
+// used across kb list, kb show, and kb hydrate. Failure prevented: drift
+// between command surfaces showing a slug without the prefix, or double-
+// prefixing when a caller passes "#foo" by mistake.
+func TestFormatKBSlug(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"empty", "", ""},
+		{"bare", "marketing", "#marketing"},
+		{"already-prefixed", "#marketing", "#marketing"},
+		{"hyphenated", "ryan-personal", "#ryan-personal"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FormatKBSlug(tc.in)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestFormatTipText_HighlightsBackticks(t *testing.T) {
 	tests := []struct {
 		name     string

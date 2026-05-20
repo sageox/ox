@@ -26,6 +26,7 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/identity"
+	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/prime"
@@ -569,6 +570,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		CurrentUserAliases: currentUserAliases,
 	}
 
+	// ADR-017: surface the binding the agent's CWD currently resolves to.
+	// Look it up in the KB list so the emitted entry carries the same
+	// type/slug/path enrichment as the matching row.
+	output.CurrentKB = resolveCurrentKBEntry(projectRoot, output.KB)
+
 	// populate cumulative context stats from daemon (best-effort).
 	// read BEFORE sending this command's heartbeat — intentional: these report
 	// "consumed so far", not including the prime output about to be emitted.
@@ -996,8 +1002,10 @@ func repoSlugFromRemoteOrDir(projectRoot string) string {
 // Returns the session status for inclusion in prime output.
 // Errors are logged but not fatal - session recording is optional.
 func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string) *sessionStatus {
-	// resolve session mode from config hierarchy
-	resolved := config.ResolveSessionRecording(projectRoot)
+	// resolve session mode from config hierarchy; KB binding (when present)
+	// participates in precedence + safety-inversion via ResolveSessionRecording.
+	kbID, kbType := kb.ResolveCurrentKBIDAndType(projectRoot)
+	resolved := config.ResolveSessionRecording(projectRoot, kbID, kbType)
 
 	// only auto-start recording when config is explicitly set to "auto"
 	// "manual" mode requires the user to run `ox session start` themselves
@@ -2141,4 +2149,30 @@ func ensureClaudeHooks(projectRoot string) bool {
 		return false
 	}
 	return true
+}
+
+// resolveCurrentKBEntry returns the KB row matching the binding resolved from
+// cwd, or nil when:
+//   - cwd is empty,
+//   - ResolveCurrentKB returns (nil, nil) — outside any KB-bound tree,
+//   - ResolveCurrentKB returns an error — malformed marker, etc.,
+//   - the binding's kb_id is not present in kbList (revoked or unsynced).
+//
+// Extracted from runAgentPrime so the current_kb envelope field can be
+// unit-tested without standing up the full prime pipeline. Pure function:
+// no I/O beyond the resolver's filesystem walk.
+func resolveCurrentKBEntry(cwd string, kbList []prime.KBInfo) *prime.KBInfo {
+	binding, err := kb.ResolveCurrentKB(cwd)
+	if err != nil || binding == nil {
+		return nil
+	}
+	for i := range kbList {
+		if kbList[i].KBID == binding.KBID {
+			cur := kbList[i]
+			return &cur
+		}
+	}
+	// binding's kb_id doesn't match any row — kb was revoked or hasn't synced.
+	slog.Warn("current_kb_not_in_list", "kb_id", binding.KBID)
+	return nil
 }

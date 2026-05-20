@@ -206,6 +206,13 @@ type Daemon struct {
 	// pass; concurrent callers get AlreadyRunning=true and no work.
 	// The goroutine clears it via Store(false) on exit.
 	doctorRunning atomic.Bool
+
+	// globalSyncLease is the per-(user, endpoint) flock lease that
+	// authorizes this daemon to do team-context pulls and KB
+	// ListBubbles. nil when another daemon owns the lease — the
+	// daemon still runs every per-repo ticker. Acquired in
+	// initComponents and released in shutdown. See bead ox-6zme.
+	globalSyncLease *Lease
 }
 
 // New creates a new daemon instance.
@@ -788,10 +795,59 @@ func (d *Daemon) writePidFile() error {
 	return os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0600)
 }
 
+// acquireGlobalSyncLease attempts to claim the per-endpoint global-sync
+// flock for this daemon's lifetime. On success d.globalSyncLease is set
+// and the scheduler will run team-context + KB ListBubbles ticks; on
+// ErrNotOwner d.globalSyncLease stays nil and another daemon owns those
+// responsibilities. Any other error is treated like ErrNotOwner — we'd
+// rather have a daemon with degraded global sync than a daemon that
+// refuses to start.
+//
+// Endpoint is normalized via NormalizeEndpoint before path resolution
+// (the lease file path uses NormalizeSlug internally). An empty
+// endpoint short-circuits without attempting the flock; there is no
+// "global sync" to coordinate for an unconfigured daemon.
+func (d *Daemon) acquireGlobalSyncLease(projectEndpoint string) {
+	if projectEndpoint == "" {
+		d.logger.Debug("global-sync lease: no endpoint, skipping acquire")
+		return
+	}
+	ep := endpoint.NormalizeEndpoint(projectEndpoint)
+	lease, err := AcquireGlobalSyncLease(ep)
+	if err != nil {
+		if errors.Is(err, ErrNotOwner) {
+			d.logger.Info("global-sync lease held by another daemon", "endpoint", ep)
+			return
+		}
+		d.logger.Warn("global-sync lease acquire failed; running as non-owner", "endpoint", ep, "error", err)
+		return
+	}
+	d.globalSyncLease = lease
+	d.logger.Info("global-sync lease acquired", "endpoint", ep)
+}
+
+// releaseGlobalSyncLease releases the per-endpoint flock if held. Safe
+// to call when the lease was never acquired (nil receiver inside).
+func (d *Daemon) releaseGlobalSyncLease() {
+	if d.globalSyncLease == nil {
+		return
+	}
+	if err := d.globalSyncLease.Release(); err != nil {
+		d.logger.Warn("global-sync lease release failed", "error", err)
+	} else {
+		d.logger.Info("global-sync lease released", "endpoint", d.globalSyncLease.Endpoint())
+	}
+	d.globalSyncLease = nil
+}
+
 // cleanup removes PID and socket files.
 // When the daemon was superseded by a new instance, skip removing the socket
 // and registry entry — those now belong to the replacement daemon.
 func (d *Daemon) cleanup() {
+	// Release the global-sync lease regardless of supersession. flock is
+	// auto-released on process exit, but Release() also unblocks the
+	// next daemon's acquire attempt promptly when shutdown is graceful.
+	d.releaseGlobalSyncLease()
 	if !d.wasSuperseded {
 		if err := UnregisterDaemon(); err != nil {
 			d.logger.Warn("failed to unregister daemon", "error", err)
@@ -1078,6 +1134,17 @@ func (d *Daemon) initComponents() time.Duration {
 	d.scheduler = NewSyncScheduler(d.config, d.logger)
 	d.scheduler.SetTracer(d.tracer)
 	d.scheduler.SetEventBus(d.eventBus)
+
+	// Per-(user, endpoint) global-sync leader election (ox-6zme).
+	// Acquire the flock lease BEFORE the scheduler runs so the first
+	// teamContextChan tick sees the correct ownership state. Failure
+	// to acquire is not a startup error — non-owner daemons keep doing
+	// per-repo work and just skip team-context + KB ListBubbles ticks.
+	d.acquireGlobalSyncLease(projectEndpoint)
+	d.scheduler.SetGlobalSyncLease(d.globalSyncLease)
+	if err := UpdateGlobalSyncOwnership(endpoint.NormalizeEndpoint(projectEndpoint), d.globalSyncLease != nil); err != nil {
+		d.logger.Debug("failed to update global-sync ownership in registry", "error", err)
+	}
 
 	// code index manager
 	if d.config.ProjectRoot != "" {

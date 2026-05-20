@@ -17,7 +17,8 @@ package daemon
 //                            access, so a team row implies membership)
 //   - repo               -> link only in its OWN project, matched by
 //                            kb.repo_id == projectConfig.repo_id
-//   - custom, unknown    -> skip (deferred until explicit subscribe)
+//   - custom, channel,
+//     unknown            -> skip (deferred until explicit subscribe)
 //
 // Critical safety:
 //   - We only ever create/replace/remove symlinks. The canonical kb
@@ -254,6 +255,11 @@ func desiredSymlinks(bubbles []api.KB, projectRepoID string) map[string]string {
 			if projectRepoID == "" || b.RepoID == "" || b.RepoID != projectRepoID {
 				continue
 			}
+		case api.KBType("channel"):
+			// channel is defined in kbconfig but not yet promoted into
+			// internal/api as a typed KBType. Same policy as custom: skip
+			// until explicit subscribe.
+			continue
 		default:
 			// custom, unknown — deferred, skip.
 			continue

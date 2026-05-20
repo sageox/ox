@@ -22,6 +22,7 @@ const (
 	hintTeam     = "team-wide decisions/conventions; read with 'ox agent team-ctx'"
 	hintRepoSyn  = "ledger archive — read on demand"
 	hintCustom   = "custom knowledge bubble"
+	hintChannel  = "channel bubble — broadcast/presence surface; manual session recording"
 )
 
 // BuildKBInfos converts a merger result into the prime KB envelope.
@@ -126,6 +127,11 @@ func hintForType(t api.KBType, legacy bool) string {
 		return hintRepoSyn
 	case api.KBTypeCustom:
 		return hintCustom
+	case "channel":
+		// channel is defined in internal/api/kbconfig but not yet in
+		// internal/api as a typed KBType — match on the string slug so
+		// rows that arrive as kb_type="channel" still get the right hint.
+		return hintChannel
 	default:
 		_ = legacy // intentionally unused; reserved for future per-source nuance
 		return ""
@@ -147,8 +153,12 @@ func kbTypePriority(t string) int {
 		return 3
 	case string(api.KBTypeCustom):
 		return 4
-	default:
+	case "channel":
+		// channel slots between custom and unknown until KBTypeChannel is
+		// promoted into internal/api.
 		return 5
+	default:
+		return 6
 	}
 }
 

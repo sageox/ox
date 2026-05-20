@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -218,7 +219,8 @@ func emitStartupBanner(w io.Writer, ctx *HookContext) {
 	default:
 		return
 	}
-	recording := config.ResolveSessionRecording(ctx.ProjectRoot)
+	kbID, kbType := kb.ResolveCurrentKBIDAndType(ctx.ProjectRoot)
+	recording := config.ResolveSessionRecording(ctx.ProjectRoot, kbID, kbType)
 	canonicalType := agentx.ResolveAgentENV(ctx.AgentType)
 	if canonicalType == agentx.AgentTypeUnknown {
 		canonicalType = agentx.AgentType(ctx.AgentType)
@@ -755,7 +757,8 @@ func buildPrimeEnv(agentID string) []string {
 // startSessionRecordingIfConfigured attempts to start session recording
 // if the configuration enables auto-recording.
 func startSessionRecordingIfConfigured(ctx *HookContext) {
-	resolved := config.ResolveSessionRecording(ctx.ProjectRoot)
+	kbID, kbType := kb.ResolveCurrentKBIDAndType(ctx.ProjectRoot)
+	resolved := config.ResolveSessionRecording(ctx.ProjectRoot, kbID, kbType)
 	if !resolved.IsAuto() {
 		return
 	}

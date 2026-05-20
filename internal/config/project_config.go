@@ -11,6 +11,7 @@ import (
 
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
+	"gopkg.in/yaml.v3"
 )
 
 func init() {
@@ -140,6 +141,18 @@ type ProjectConfig struct {
 	// GitHubSyncIssues controls issue sync independently.
 	// Values: "enabled" (default), "disabled"
 	GitHubSyncIssues string `json:"github_sync_issues,omitempty"`
+
+	// KBID is the immutable knowledge-bubble identifier this project is bound
+	// to (ADR-017). Populated when the project has been migrated to the new
+	// .sageox/config.yaml format. Empty for legacy JSON-only projects that
+	// haven't been migrated yet.
+	KBID string `json:"-" yaml:"kb_id,omitempty"`
+
+	// Format records which on-disk format the loader treated as authoritative
+	// when constructing this struct. Values: "json", "yaml", "both", "none".
+	// Useful for doctor to decide whether a migration is pending.
+	// NOT serialized — derived at load time.
+	Format string `json:"-" yaml:"-"`
 }
 
 // NeedsUpgrade returns true if the config version is older than CurrentConfigVersion
@@ -155,16 +168,42 @@ func (c *ProjectConfig) SetCurrentVersion() {
 const (
 	defaultUpdateFrequencyHours     = 24
 	projectConfigFilename           = "config.json"
+	projectConfigYAMLFilename       = "config.yaml"
 	sageoxDir                       = ".sageox"
 	defaultOfflineSnapshotStaleDays = 7
 )
 
+// ProjectConfigYAML is the on-disk shape of .sageox/config.yaml (ADR-017).
+// This is the project-side YAML — NOT the KB-side envelope (which carries
+// banners and committed_at). The project-side YAML is intentionally narrow:
+// it binds a directory tree to a kb_id, with repo_id retained as a one-
+// release safety net so offline resolution still works while the kb API
+// is unreachable.
+//
+// All other ProjectConfig fields are preserved across migration by
+// round-tripping through JSON tags via yaml.Marshal of the canonical
+// ProjectConfig struct. We keep this narrow type strictly for the
+// minimum-payload binding-only trees described in ADR-017 §2.
+type ProjectConfigYAML struct {
+	KBID   string `yaml:"kb_id,omitempty"`
+	RepoID string `yaml:"repo_id,omitempty"`
+}
+
 // IsInitialized checks if SageOx is initialized in the given git root directory.
-// Returns true if .sageox/config.json exists (the canonical file created by ox init).
+// Returns true if .sageox/config.json OR .sageox/config.yaml exists. Both
+// formats co-exist during the staged deprecation window (ADR-017 §7).
+//
+// TODO(release N+3): drop the JSON fallback once all repos have migrated.
 func IsInitialized(gitRoot string) bool {
-	configPath := filepath.Join(gitRoot, sageoxDir, projectConfigFilename)
-	_, err := os.Stat(configPath)
-	return err == nil
+	jsonPath := filepath.Join(gitRoot, sageoxDir, projectConfigFilename)
+	if _, err := os.Stat(jsonPath); err == nil {
+		return true
+	}
+	yamlPath := filepath.Join(gitRoot, sageoxDir, projectConfigYAMLFilename)
+	if _, err := os.Stat(yamlPath); err == nil {
+		return true
+	}
+	return false
 }
 
 // IsInitializedInCwd checks if SageOx is initialized by walking up from current directory.
@@ -219,36 +258,85 @@ func GetDefaultProjectConfig() *ProjectConfig {
 	}
 }
 
-// LoadProjectConfig loads the project configuration from .sageox/config.json relative to gitRoot
+// LoadProjectConfig loads the project configuration from .sageox/config.json,
+// then merges in .sageox/config.yaml (ADR-017) when present.
+//
+// Hybrid read posture during the staged migration window (ADR-017 §7):
+//
+//   - JSON only present  → Format="json".
+//   - YAML only present  → Format="yaml"; translate ProjectConfigYAML into the
+//     canonical struct (KBID + RepoID are the only fields the narrow YAML
+//     binding carries).
+//   - Both present       → Format="both"; JSON is the base, YAML overrides on
+//     conflict (kb_id, repo_id). This lets the doctor migration write the YAML
+//     alongside the legacy JSON without losing information either way.
+//   - Neither present    → return default config with Format unset (callers
+//     keep treating this as "not initialized" via IsInitialized).
+//
+// TODO(release N+3): drop the JSON read path entirely once all repos are
+// migrated and the legacy files have been removed.
 func LoadProjectConfig(gitRoot string) (*ProjectConfig, error) {
 	if gitRoot == "" {
 		return nil, errors.New("git root cannot be empty")
 	}
 
-	configPath := filepath.Join(gitRoot, sageoxDir, projectConfigFilename)
+	jsonPath := filepath.Join(gitRoot, sageoxDir, projectConfigFilename)
+	yamlPath := filepath.Join(gitRoot, sageoxDir, projectConfigYAMLFilename)
 
-	// check if file exists
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// return default config if file doesn't exist
+	_, jsonStatErr := os.Stat(jsonPath)
+	jsonExists := jsonStatErr == nil
+	_, yamlStatErr := os.Stat(yamlPath)
+	yamlExists := yamlStatErr == nil
+
+	// Neither file exists — preserve the legacy "return defaults" contract so
+	// callers that load eagerly (daemon, IPC discovery) don't have to special-case
+	// uninitialized repos. IsInitialized() is the canonical existence gate.
+	if !jsonExists && !yamlExists {
 		return GetDefaultProjectConfig(), nil
 	}
 
-	// read the file
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
+	cfg := ProjectConfig{}
+
+	if jsonExists {
+		data, err := os.ReadFile(jsonPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read config file: %w", err)
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("failed to parse config file: %w", err)
+		}
 	}
 
-	// parse JSON
-	var cfg ProjectConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	if yamlExists {
+		data, err := os.ReadFile(yamlPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read yaml config: %w", err)
+		}
+		var y ProjectConfigYAML
+		if err := yaml.Unmarshal(data, &y); err != nil {
+			return nil, fmt.Errorf("failed to parse yaml config: %w", err)
+		}
+		// YAML overrides on conflict (ADR-017 §7). Only override when the YAML
+		// actually carries a value — an empty kb_id in the YAML must not blank
+		// out the JSON-derived field during the transition.
+		if y.KBID != "" {
+			cfg.KBID = y.KBID
+		}
+		if y.RepoID != "" {
+			cfg.RepoID = y.RepoID
+		}
 	}
 
-	// apply defaults for missing fields
+	switch {
+	case jsonExists && yamlExists:
+		cfg.Format = "both"
+	case yamlExists:
+		cfg.Format = "yaml"
+	default:
+		cfg.Format = "json"
+	}
+
 	applyDefaults(&cfg)
-
-	// normalize endpoint defensively (handles configs saved by older versions)
 	cfg.Endpoint = endpoint.NormalizeEndpoint(cfg.Endpoint)
 
 	return &cfg, nil

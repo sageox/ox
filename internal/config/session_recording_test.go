@@ -58,7 +58,7 @@ func TestResolveSessionRecording_NoProjectConfig_DefaultsToManual(t *testing.T) 
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("XDG_CONFIG_HOME", userConfigDir)
 
-	resolved := ResolveSessionRecording(tmpDir)
+	resolved := ResolveSessionRecording(tmpDir, "", "")
 
 	assert.Equal(t, SessionRecordingManual, resolved.Mode)
 	assert.Equal(t, SessionRecordingSourceDefault, resolved.Source)
@@ -83,7 +83,7 @@ func TestResolveSessionRecording_ReadsFromProjectConfig(t *testing.T) {
 	}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(configContent), 0644))
 
-	resolved := ResolveSessionRecording(tmpDir)
+	resolved := ResolveSessionRecording(tmpDir, "", "")
 
 	assert.Equal(t, SessionRecordingAuto, resolved.Mode)
 	assert.Equal(t, SessionRecordingSourceRepo, resolved.Source)
@@ -106,7 +106,7 @@ func TestResolveSessionRecording_EmptyProjectConfig_DefaultsToAuto(t *testing.T)
 	}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(configContent), 0644))
 
-	resolved := ResolveSessionRecording(tmpDir)
+	resolved := ResolveSessionRecording(tmpDir, "", "")
 
 	// ox-initialized repo with no explicit setting defaults to auto
 	assert.Equal(t, SessionRecordingAuto, resolved.Mode)
@@ -203,7 +203,7 @@ func TestResolveSessionRecording_EnvVarOverridesAll(t *testing.T) {
 			configContent := `{"config_version": "2", "session_recording": "manual"}`
 			require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(configContent), 0644))
 
-			resolved := ResolveSessionRecording(tmpDir)
+			resolved := ResolveSessionRecording(tmpDir, "", "")
 
 			assert.Equal(t, tt.wantMode, resolved.Mode)
 			assert.Equal(t, SessionRecordingSourceEnv, resolved.Source)
@@ -225,7 +225,7 @@ func TestResolveSessionRecording_EnvVarDisabledOverridesAutoConfig(t *testing.T)
 	configContent := `{"config_version": "2", "session_recording": "auto"}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(configContent), 0644))
 
-	resolved := ResolveSessionRecording(tmpDir)
+	resolved := ResolveSessionRecording(tmpDir, "", "")
 
 	assert.Equal(t, SessionRecordingDisabled, resolved.Mode)
 	assert.Equal(t, SessionRecordingSourceEnv, resolved.Source)
@@ -257,7 +257,7 @@ func TestResolveSessionRecording_UserOverridesProject(t *testing.T) {
 		0644,
 	))
 
-	resolved := ResolveSessionRecording(tmpDir)
+	resolved := ResolveSessionRecording(tmpDir, "", "")
 	// NormalizeSessionRecording maps "disabled" → "disabled"
 	// but sessions.GetMode() returns "disabled" for mode: disabled
 	// The function checks if mode != "" && mode != "none"
@@ -276,7 +276,7 @@ func TestResolveSessionRecording_DefaultIsManual(t *testing.T) {
 	t.Setenv("OX_SESSION_RECORDING", "")
 
 	// no .sageox/ project config, no user config → should default to manual
-	resolved := ResolveSessionRecording(tmpDir)
+	resolved := ResolveSessionRecording(tmpDir, "", "")
 	assert.Equal(t, SessionRecordingManual, resolved.Mode)
 	assert.Equal(t, SessionRecordingSourceDefault, resolved.Source)
 }
@@ -311,4 +311,120 @@ func TestNormalizeSessionPublishing(t *testing.T) {
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+// --- KB-aware precedence + safety inversion ---
+//
+// These tests exercise the kbID/kbType code path. They write a real
+// .sageox/config.yaml under the XDG_DATA_HOME tree so paths.KBDir resolves
+// to a tmp location and the resolver reads the fixture for real.
+
+// writeKBConfig drops a minimal config.yaml under the location paths.KBDir
+// will compute given the env. dataHome must be the value of XDG_DATA_HOME.
+func writeKBConfig(t *testing.T, dataHome, endpointSlug, kbID, mode string) {
+	t.Helper()
+	kbDir := filepath.Join(dataHome, "sageox", endpointSlug, "kb", kbID, ".sageox")
+	require.NoError(t, os.MkdirAll(kbDir, 0755))
+	yaml := "version: 1\nfeatures:\n  session_recording:\n    mode: " + mode + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(kbDir, "config.yaml"), []byte(yaml), 0644))
+}
+
+// kbTestEnv isolates user config, endpoint, and KB data home for a test.
+// Returns the dataHome path so the test can stage a KB config fixture.
+func kbTestEnv(t *testing.T) (tmpDir, dataHome, endpointSlug string) {
+	t.Helper()
+	tmpDir = t.TempDir()
+	userConfigDir := t.TempDir()
+	dataHome = t.TempDir()
+	endpointSlug = "test.sageox.ai"
+
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_CONFIG_HOME", userConfigDir)
+	t.Setenv("XDG_DATA_HOME", dataHome)
+	t.Setenv("SAGEOX_ENDPOINT", endpointSlug)
+	t.Setenv("OX_SESSION_RECORDING", "")
+	return
+}
+
+func writeUserMode(t *testing.T, mode string) {
+	t.Helper()
+	xdg := os.Getenv("XDG_CONFIG_HOME")
+	require.NotEmpty(t, xdg, "XDG_CONFIG_HOME must be set first")
+	dir := filepath.Join(xdg, "sageox")
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	body := "sessions:\n  mode: " + mode + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0644))
+}
+
+func TestResolveSessionRecording_KB_EnvWinsOverEverything(t *testing.T) {
+	tmpDir, dataHome, ep := kbTestEnv(t)
+	t.Setenv("OX_SESSION_RECORDING", "auto")
+	writeUserMode(t, "disabled")
+	writeKBConfig(t, dataHome, ep, "kb_test", "disabled")
+
+	resolved := ResolveSessionRecording(tmpDir, "kb_test", "personal")
+	assert.Equal(t, SessionRecordingAuto, resolved.Mode)
+	assert.Equal(t, SessionRecordingSourceEnv, resolved.Source)
+	assert.False(t, resolved.SafetyInversion)
+	assert.Equal(t, "kb_test", resolved.KBID)
+	assert.Equal(t, "personal", resolved.KBType)
+}
+
+func TestResolveSessionRecording_KB_UserWinsOverKB(t *testing.T) {
+	tmpDir, dataHome, ep := kbTestEnv(t)
+	writeUserMode(t, "auto")
+	writeKBConfig(t, dataHome, ep, "kb_test", "manual")
+
+	resolved := ResolveSessionRecording(tmpDir, "kb_test", "personal")
+	assert.Equal(t, SessionRecordingAuto, resolved.Mode)
+	assert.Equal(t, SessionRecordingSourceUser, resolved.Source)
+	assert.False(t, resolved.SafetyInversion)
+}
+
+func TestResolveSessionRecording_KB_KBSetUserUnset(t *testing.T) {
+	tmpDir, dataHome, ep := kbTestEnv(t)
+	writeKBConfig(t, dataHome, ep, "kb_test", "auto")
+
+	resolved := ResolveSessionRecording(tmpDir, "kb_test", "personal")
+	assert.Equal(t, SessionRecordingAuto, resolved.Mode)
+	assert.Equal(t, SessionRecordingSourceKB, resolved.Source)
+	assert.False(t, resolved.SafetyInversion)
+}
+
+func TestResolveSessionRecording_KB_SafetyInversion_UserDisabledKBAuto(t *testing.T) {
+	tmpDir, dataHome, ep := kbTestEnv(t)
+	writeUserMode(t, "disabled")
+	writeKBConfig(t, dataHome, ep, "kb_test", "auto")
+
+	resolved := ResolveSessionRecording(tmpDir, "kb_test", "personal")
+	assert.Equal(t, SessionRecordingDisabled, resolved.Mode)
+	// user's veto wins precedence too, so source is user. No inversion needed —
+	// precedence layer (user) was itself disabled.
+	assert.Equal(t, SessionRecordingSourceUser, resolved.Source)
+	assert.False(t, resolved.SafetyInversion)
+}
+
+func TestResolveSessionRecording_KB_SafetyInversion_UserAutoKBDisabled(t *testing.T) {
+	tmpDir, dataHome, ep := kbTestEnv(t)
+	writeUserMode(t, "auto")
+	writeKBConfig(t, dataHome, ep, "kb_test", "disabled")
+
+	resolved := ResolveSessionRecording(tmpDir, "kb_test", "personal")
+	assert.Equal(t, SessionRecordingDisabled, resolved.Mode)
+	// KB's veto inverted what precedence would otherwise pick — flag it.
+	assert.Equal(t, SessionRecordingSourceKB, resolved.Source)
+	assert.True(t, resolved.SafetyInversion)
+}
+
+func TestResolveSessionRecording_KB_DefaultFromKBType(t *testing.T) {
+	tmpDir, _, _ := kbTestEnv(t)
+	// no user, no KB config file — fall through to per-KB-type default.
+	resolved := ResolveSessionRecording(tmpDir, "kb_missing", "personal")
+	assert.Equal(t, SessionRecordingAuto, resolved.Mode)
+	assert.Equal(t, SessionRecordingSourceDefault, resolved.Source)
+	assert.Equal(t, "personal", resolved.KBType)
+
+	resolved2 := ResolveSessionRecording(tmpDir, "kb_missing", "profile")
+	assert.Equal(t, SessionRecordingManual, resolved2.Mode)
+	assert.Equal(t, SessionRecordingSourceDefault, resolved2.Source)
 }

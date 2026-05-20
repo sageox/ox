@@ -9,6 +9,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"strings"
 
 	lipgloss "charm.land/lipgloss/v2"
 	"github.com/mattn/go-isatty"
@@ -342,6 +343,20 @@ func OpenInBrowser(url string) error {
 		return ErrHeadless
 	}
 	return browser.OpenURL(url)
+}
+
+// FormatKBSlug returns the canonical human-display form of a KB slug: "#<slug>".
+// Use in CLI tables, headers, banners, and error messages.
+// Do NOT use in JSON envelope fields, on-disk paths, or shell-composable stdout
+// (e.g. `ox kb path`); those stay bare.
+func FormatKBSlug(slug string) string {
+	if slug == "" {
+		return ""
+	}
+	if strings.HasPrefix(slug, "#") {
+		return slug // already prefixed; idempotent
+	}
+	return "#" + slug
 }
 
 // SilentError is an error type that signals the error was already displayed.

@@ -292,6 +292,34 @@ func captureSlog(t *testing.T) *bytes.Buffer {
 	return buf
 }
 
+// TestBuildKBInfos_ChannelTypeHintAndSort verifies a channel bubble carries
+// the channel-specific hint and sorts between custom and unknown — the slot
+// reserved for it before KBTypeChannel is promoted into internal/api.
+//
+// Failure prevented: a channel row arriving from the kb-API source (after the
+// mono rollout) would either lose its agent-facing hint (default empty string)
+// or sort into the wrong bucket, surprising agents that index by position.
+func TestBuildKBInfos_ChannelTypeHintAndSort(t *testing.T) {
+	res := kb.MergeResult{
+		Bubbles: []kb.Bubble{
+			{Type: api.KBTypeCustom, Slug: "custom-thing", Source: kb.SourceKB},
+			{Type: api.KBType("channel"), Slug: "wip-broadcast", Source: kb.SourceKB},
+			{Type: api.KBTypeUnknown, Slug: "future-kind", Source: kb.SourceKB},
+		},
+	}
+
+	got := BuildKBInfos(res, nil)
+	require.Len(t, got, 3)
+
+	// custom (4) → channel (5) → unknown (6)
+	assert.Equal(t, "custom-thing", got[0].Slug)
+	assert.Equal(t, "wip-broadcast", got[1].Slug)
+	assert.Equal(t, "channel", got[1].Type)
+	assert.Contains(t, got[1].Hint, "channel bubble")
+	assert.Contains(t, got[1].Hint, "manual session recording")
+	assert.Equal(t, "future-kind", got[2].Slug)
+}
+
 // sanity: ensure captureSlog actually captures (a meta-test for the helper
 // so a broken capture doesn't hide a missing-warn assertion).
 func TestCaptureSlog_RoundTrips(t *testing.T) {

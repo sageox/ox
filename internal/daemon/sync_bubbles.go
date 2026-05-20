@@ -26,20 +26,16 @@ import (
 	"github.com/sageox/ox/internal/paths"
 )
 
-// kbReconcileLocks serializes concurrent reconcileBubble passes for the
-// same kb_id. Without this, two overlapping syncBubbles invocations can
-// both observe target/.git absent, both kick off cloneBubble, and the
-// second clone trashes the first one's freshly-populated tree (caught by
-// TestSyncBubbles_ConcurrentPasses_NoPanic on Linux CI). Per-kb_id rather
-// than global so independent bubbles still reconcile in parallel.
-var kbReconcileLocks sync.Map // map[kb_id]*sync.Mutex
-
-// kbCloneInFlight tracks kb_ids whose initial clone is mid-flight so the
-// GC triage pass can skip them. Without this guard, a GC tick during a
-// transient API-list hiccup could rename a partially-cloned target into
-// .trash/ while git is still writing to the old inode — silent half-
-// cloned bubble. Set in cloneBubble via markKBCloneStart, cleared via
-// markKBCloneDone (deferred).
+// kbCloneInFlight is a same-process marker used by GC triage as a cheap
+// pre-check before attempting the cross-process kb flock. The flock
+// (AcquireKBLock) is what actually serializes concurrent reconcileBubble
+// passes — both within one daemon and across the N per-repo daemons
+// that share the canonical paths.KBDir(kb_id) working tree. The marker
+// is kept because (a) it makes GC's "skip clones in flight" branch a
+// constant-time map lookup before the syscall, and (b) several existing
+// tests assert on it. Without the flock, two daemons can race into
+// cloneBubble on the same path and corrupt the working tree; the marker
+// alone is useless across processes. See bead ox-kdt2.
 var kbCloneInFlight sync.Map // map[kb_id]struct{}
 
 // markKBCloneStart records that a clone for kb_id is in progress.
@@ -243,12 +239,24 @@ func (s *SyncScheduler) reconcileBubble(ctx context.Context, b api.KB) {
 		return
 	}
 
-	// Serialize concurrent reconciles for the same kb_id so overlapping
-	// syncBubbles passes don't race each other into a half-cloned state.
-	muIface, _ := kbReconcileLocks.LoadOrStore(b.KBID, &sync.Mutex{})
-	mu := muIface.(*sync.Mutex)
-	mu.Lock()
-	defer mu.Unlock()
+	// Serialize concurrent reconciles for the same kb_id across BOTH the
+	// in-process goroutine case AND the N-per-host daemon case. POSIX
+	// flock semantics give us both for the price of one syscall — a
+	// second LOCK_EX|LOCK_NB on the same file (different fd, same or
+	// different process) returns EWOULDBLOCK. If another reconciler
+	// already owns the lock we skip this pass entirely; the next tick
+	// will retry. Lock auto-releases on process death via the kernel
+	// (no stale-lock recovery code needed). See bead ox-kdt2.
+	unlock, acquired, lockErr := AcquireKBLock(b.KBID)
+	if lockErr != nil {
+		s.logger.Warn("kb_sync lock acquire failed", "kb_id", b.KBID, "type", string(b.KBType), "error", lockErr)
+		return
+	}
+	if !acquired {
+		s.logger.Debug("kb_sync skip: another reconciler holds kb lock", "kb_id", b.KBID, "type", string(b.KBType))
+		return
+	}
+	defer unlock()
 
 	// per-bubble cadence routing: high-mutation bubbles (personal/profile/team)
 	// should be reconciled at the team-context cadence; repo/custom at the

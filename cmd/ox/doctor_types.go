@@ -202,4 +202,9 @@ const (
 	CheckSlugKBOrphans         = "kb-orphans"
 	CheckSlugKBFailedProvision = "kb-failed-provision"
 	CheckSlugKBStaleSync       = "kb-stale-sync"
+	// CheckSlugKBProjectConfigMigrate is co-located with its impl in
+	// doctor_kb_migrate.go to keep the v1 migration check self-contained.
+
+	// Global-sync leader-election checks (ox-6zme)
+	CheckSlugKBGlobalSyncNoOwner = "kb-global-sync-no-owner"
 )

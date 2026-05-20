@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -350,8 +351,15 @@ func TestRunKBChecks_SkipsAPIChecksWhenAPIUnavailable_RunsStaleSync(t *testing.T
 	}
 	applyHooks(h)
 
+	// stub the global-sync owner registry reader so this test doesn't
+	// race against the developer's real running daemons.
+	SetKBGlobalSyncReader(func() ([]daemon.DaemonInfo, error) { return nil, nil })
+	t.Cleanup(func() { SetKBGlobalSyncReader(nil) })
+
 	results := runKBChecks(doctorOptions{fix: false})
-	require.Len(t, results, 3, "all three checks must run")
+	// Four checks expected: orphans, provisioning, stale-sync,
+	// global-sync-owner (added in ox-6zme).
+	require.Len(t, results, 4, "all four checks must run")
 
 	// orphans (idx 0) and provisioning (idx 1) must be skipped
 	assert.True(t, results[0].skipped, "orphans must skip when API unavailable")
@@ -360,6 +368,12 @@ func TestRunKBChecks_SkipsAPIChecksWhenAPIUnavailable_RunsStaleSync(t *testing.T
 	// stale-sync (idx 2) must still produce a real signal
 	assert.True(t, results[2].warning, "stale-sync must surface even without API; got %+v", results[2])
 	assert.Contains(t, results[2].message, "kb_stale")
+
+	// global-sync-owner (idx 3) is independent of the kb API; it reads
+	// the daemon registry. In this test the registry is not stubbed and
+	// will skip with "no daemons report endpoint" or "no running
+	// daemons" depending on the host. Just assert it ran (no panic).
+	assert.NotEmpty(t, results[3].name, "global-sync-owner check must run")
 }
 
 // TestRunKBChecks_PanicInOneCheckDoesNotCascade verifies the per-check
@@ -378,8 +392,15 @@ func TestRunKBChecks_PanicInOneCheckDoesNotCascade(t *testing.T) {
 	}
 	applyHooks(h)
 
+	// stub the global-sync owner registry reader so this test doesn't
+	// race against the developer's real running daemons.
+	SetKBGlobalSyncReader(func() ([]daemon.DaemonInfo, error) { return nil, nil })
+	t.Cleanup(func() { SetKBGlobalSyncReader(nil) })
+
 	results := runKBChecks(doctorOptions{fix: false})
-	require.Len(t, results, 3, "every check must run independently")
+	// Four checks expected: orphans, provisioning, stale-sync,
+	// global-sync-owner (added in ox-6zme).
+	require.Len(t, results, 4, "every check must run independently")
 
 	// orphan check (which calls List) panicked → recovered → reported as failure
 	assert.False(t, results[0].passed, "orphan check should fail after panic")
@@ -387,4 +408,7 @@ func TestRunKBChecks_PanicInOneCheckDoesNotCascade(t *testing.T) {
 	// stale-sync (idx 2) is local-only; panic in orphan must not affect it
 	assert.True(t, results[2].warning, "stale-sync must run even after orphan panic")
 	assert.Contains(t, results[2].message, "kb_stale")
+
+	// global-sync-owner (idx 3) is independent of the kb API panic.
+	assert.NotEmpty(t, results[3].name, "global-sync-owner check must run despite orphan panic")
 }

@@ -172,19 +172,37 @@ func (s *SyncScheduler) kbGCTriage(ctx context.Context, kbRoot, trashDir string,
 		if _, ok := want[name]; ok {
 			continue // still authorized — leave alone
 		}
-		// Clone-in-flight guard: if cloneBubble is mid-flight for this
-		// kb_id, the target dir may LOOK like an orphan (not yet in the
-		// API list, freshly mkdir'd, no .git yet) but renaming it to
-		// .trash/ would race the active git clone and leave a silent
-		// half-cloned bubble. Skip and let the next GC pass re-evaluate
-		// once cloneBubble has either finished or been canceled.
+		// Clone-in-flight guard (in-process, cheap): if cloneBubble is
+		// mid-flight for this kb_id in this daemon, the target dir may
+		// LOOK like an orphan (not yet in the API list, freshly
+		// mkdir'd, no .git yet) but renaming it to .trash/ would race
+		// the active git clone and leave a silent half-cloned bubble.
 		if kbCloneActive(name) {
-			s.logger.Debug("kb_gc triage skip: clone in flight", "kb_id", name)
+			s.logger.Debug("kb_gc triage skip: clone in flight (same process)", "kb_id", name)
+			continue
+		}
+
+		// Cross-process guard: the in-process marker above only sees
+		// clones started by THIS daemon. With N per-repo daemons all
+		// reconciling the shared paths.KBDir(kb_id) tree, another
+		// daemon may be mid-clone or mid-pull on this kb_id right now
+		// — os.Rename into .trash/ would yank the inode out from under
+		// its git process. We use the same kb flock as reconcileBubble;
+		// EWOULDBLOCK means "someone is working on it, leave it alone
+		// this pass". See bead ox-kdt2.
+		unlock, acquired, lockErr := AcquireKBLock(name)
+		if lockErr != nil {
+			s.logger.Warn("kb_gc triage lock acquire failed", "kb_id", name, "error", lockErr)
+			continue
+		}
+		if !acquired {
+			s.logger.Debug("kb_gc triage skip: another process holds kb lock", "kb_id", name)
 			continue
 		}
 
 		// orphan — move into .trash/<kb_id>-<RFC3339>
 		if err := os.MkdirAll(trashDir, 0o755); err != nil {
+			unlock()
 			s.logger.Warn("kb_gc triage mkdir trash failed", "path", trashDir, "error", err)
 			return
 		}
@@ -193,8 +211,14 @@ func (s *SyncScheduler) kbGCTriage(ctx context.Context, kbRoot, trashDir string,
 		// need a replacement, but the daemon's GC path is POSIX-first.
 		dest := filepath.Join(trashDir, fmt.Sprintf("%s-%s", name, ts))
 		src := filepath.Join(kbRoot, name)
-		if err := os.Rename(src, dest); err != nil {
-			s.logger.Warn("kb_gc triage rename failed", "kb_id", name, "src", src, "dest", dest, "error", err)
+		renameErr := os.Rename(src, dest)
+		// release the kb lock immediately after the rename completes
+		// (success or failure). The reaper phase does not need it —
+		// once the path is under .trash/<kb_id>-<ts> there is no
+		// canonical-path collision to guard against.
+		unlock()
+		if renameErr != nil {
+			s.logger.Warn("kb_gc triage rename failed", "kb_id", name, "src", src, "dest", dest, "error", renameErr)
 			continue
 		}
 		moved++

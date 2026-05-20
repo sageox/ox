@@ -11,6 +11,7 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/spf13/cobra"
 )
@@ -153,7 +154,10 @@ func runKBPathWithDeps(cmd *cobra.Command, query string, jsonMode bool, deps kbP
 	stdout := cmd.OutOrStdout()
 	stderr := cmd.ErrOrStderr()
 
-	query = strings.TrimSpace(query)
+	// Strip the optional human-display `#` prefix; resolvers look slugs up
+	// bare. STDOUT of this command MUST stay bare regardless (shell
+	// composition); only the input is normalized.
+	query = strings.TrimSpace(kb.NormalizeSlugArg(query))
 	if query == "" {
 		fmt.Fprintln(stderr, "kb path: argument is required")
 		return cli.ErrSilent
@@ -165,8 +169,14 @@ func runKBPathWithDeps(cmd *cobra.Command, query string, jsonMode bool, deps kbP
 	kb, err := resolveKB(ctx, query, deps)
 	if err != nil {
 		// kb-not-found: the canonical message format the spec asks for.
+		// Stderr only — stdout stays empty so a failed `$(ox kb path ...)`
+		// substitutes the empty string, not a help message.
 		if errors.Is(err, errKBNotFound) {
-			fmt.Fprintf(stderr, "kb not found: %s\n", query)
+			display := query
+			if !strings.HasPrefix(query, "kb_") {
+				display = cli.FormatKBSlug(query)
+			}
+			fmt.Fprintf(stderr, "kb not found: %s\n", display)
 			return cli.ErrSilent
 		}
 		fmt.Fprintf(stderr, "kb path: %v\n", err)

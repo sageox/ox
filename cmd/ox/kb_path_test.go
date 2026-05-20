@@ -249,7 +249,9 @@ func TestKBPath_NotFound(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Errorf("stdout must stay empty on failure (no half-printed paths), got %q", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "kb not found: missing-slug") {
+	// Canonical not-found uses the human-display `#<slug>` form for
+	// slug-style inputs. Storage and stdout remain bare; this is stderr.
+	if !strings.Contains(stderr.String(), "kb not found: #missing-slug") {
 		t.Errorf("stderr missing canonical not-found message; got %q", stderr.String())
 	}
 }
@@ -318,7 +320,9 @@ func TestKBPath_LegacyFallbackMissesAlsoMissesOverall(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Errorf("stdout must stay empty on failure, got %q", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "kb not found: totally-missing") {
+	// Canonical not-found uses the human-display `#<slug>` form for
+	// slug-style inputs.
+	if !strings.Contains(stderr.String(), "kb not found: #totally-missing") {
 		t.Errorf("stderr missing canonical not-found message; got %q", stderr.String())
 	}
 	// the internal sentinel must not leak.

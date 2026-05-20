@@ -20,6 +20,19 @@ type DaemonInfo struct {
 	PID           int       `json:"pid"`
 	Version       string    `json:"version"`
 	StartedAt     time.Time `json:"started_at"`
+
+	// Endpoint is the project endpoint slug (NormalizeEndpoint'd) this
+	// daemon talks to. Recorded so doctor checks can group daemons by
+	// endpoint and verify exactly one global-sync owner per endpoint
+	// (ox-6zme).
+	Endpoint string `json:"endpoint,omitempty"`
+
+	// GlobalSyncOwner is true if this daemon holds the per-endpoint
+	// global-sync flock lease — i.e. it is the daemon responsible for
+	// team-context pulls and KB ListBubbles for this user+endpoint.
+	// Doctor cross-references this against the running-daemons list to
+	// flag "0 owners" or ">1 owner" anomalies. See bead ox-6zme.
+	GlobalSyncOwner bool `json:"global_sync_owner,omitempty"`
 }
 
 // Registry tracks all running ox daemons on the host.
@@ -173,6 +186,33 @@ func RegisterDaemon(workspacePath, version string) error {
 		return err
 	}
 	return reg.Register(info)
+}
+
+// UpdateGlobalSyncOwnership refreshes the current daemon's endpoint and
+// global-sync ownership flag in the registry. Called after the lease is
+// acquired (or refused) during initComponents, after the initial
+// RegisterDaemon. Best-effort: a registry write failure logs but does
+// not abort daemon startup, because the in-memory lease state is the
+// real source of truth — the registry entry is for doctor visibility.
+func UpdateGlobalSyncOwnership(endpoint string, isOwner bool) error {
+	workspaceID := CurrentWorkspaceID()
+	reg, err := LoadRegistry()
+	if err != nil {
+		return err
+	}
+	reg.mu.Lock()
+	info, ok := reg.Daemons[workspaceID]
+	if !ok {
+		reg.mu.Unlock()
+		// Daemon never registered or got pruned — nothing to update.
+		// Caller treats this as a soft failure.
+		return nil
+	}
+	info.Endpoint = endpoint
+	info.GlobalSyncOwner = isOwner
+	reg.Daemons[workspaceID] = info
+	reg.mu.Unlock()
+	return reg.Save()
 }
 
 // UnregisterDaemon removes the current daemon from the registry.

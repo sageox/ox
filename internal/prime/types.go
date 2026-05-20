@@ -299,31 +299,35 @@ type UserNotice struct {
 
 // Output is the structured response for agent bootstrap (prime)
 type Output struct {
-	Status            string                     `json:"status"` // fresh, degraded, unavailable
-	AgentID           string                     `json:"agent_id"`
-	Guidance          *Guidance                  `json:"guidance,omitempty"` // intent-to-command lookup (scan first)
-	SessionID         string                     `json:"session_id,omitempty"`
-	AgentType         string                     `json:"agent_type,omitempty"`     // detected or specified agent type
-	AgentSupported    bool                       `json:"agent_supported"`          // true if agent is officially supported
-	SupportNotice     string                     `json:"support_notice,omitempty"` // warning for unsupported agents
-	Content           string                     `json:"content"`
-	Attribution       config.ResolvedAttribution `json:"attribution"`                 // commit/PR attribution for ox-guided work
-	PlanFooter        string                     `json:"plan_footer,omitempty"`       // exact text for plan footer ("Guided by SageOx")
-	ProjectGuidance   *ProjectGuidance           `json:"project_guidance,omitempty"`  // AGENTS.md content if found
-	TeamInstructions  *TeamInstructions          `json:"team_instructions,omitempty"` // team AGENTS.md/CLAUDE.md content if found
-	CapturePrior      *CapturePriorGuidance      `json:"capture_prior,omitempty"`     // instructions for capturing prior history
-	Message           string                     `json:"message,omitempty"`
-	TokenEstimate     int                        `json:"token_estimate,omitempty"`      // estimated token count
-	ContentLength     int                        `json:"content_length,omitempty"`      // raw byte length
-	Session           *SessionStatus             `json:"session,omitempty"`             // session recording status
-	KB                []KBInfo                   `json:"kb,omitempty"`                  // unified knowledge-bubble envelope (kb-API + legacy team-contexts + legacy ledgers, deduped)
-	Ledger            *LedgerInfo                `json:"ledger,omitempty"`              // legacy mirror; new callers should use KB (see LedgerInfo godoc)
-	Important         string                     `json:"important"`                     // always-present disambiguation of knowledge sources
-	TeamContext       *TeamContextInfo           `json:"team_context,omitempty"`        // legacy mirror; new callers should use KB (see TeamContextInfo godoc)
-	TeamContextStatus string                     `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
-	OtherTeams        *OtherTeams                `json:"other_teams,omitempty"`         // non-primary teams (nil when only 1 team)
-	UserNotification  string                     `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user
-	AgentTip          string                     `json:"agent_tip,omitempty"`           // contextual tip for the agent itself (not for the user)
+	Status           string                     `json:"status"` // fresh, degraded, unavailable
+	AgentID          string                     `json:"agent_id"`
+	Guidance         *Guidance                  `json:"guidance,omitempty"` // intent-to-command lookup (scan first)
+	SessionID        string                     `json:"session_id,omitempty"`
+	AgentType        string                     `json:"agent_type,omitempty"`     // detected or specified agent type
+	AgentSupported   bool                       `json:"agent_supported"`          // true if agent is officially supported
+	SupportNotice    string                     `json:"support_notice,omitempty"` // warning for unsupported agents
+	Content          string                     `json:"content"`
+	Attribution      config.ResolvedAttribution `json:"attribution"`                 // commit/PR attribution for ox-guided work
+	PlanFooter       string                     `json:"plan_footer,omitempty"`       // exact text for plan footer ("Guided by SageOx")
+	ProjectGuidance  *ProjectGuidance           `json:"project_guidance,omitempty"`  // AGENTS.md content if found
+	TeamInstructions *TeamInstructions          `json:"team_instructions,omitempty"` // team AGENTS.md/CLAUDE.md content if found
+	CapturePrior     *CapturePriorGuidance      `json:"capture_prior,omitempty"`     // instructions for capturing prior history
+	Message          string                     `json:"message,omitempty"`
+	TokenEstimate    int                        `json:"token_estimate,omitempty"` // estimated token count
+	ContentLength    int                        `json:"content_length,omitempty"` // raw byte length
+	Session          *SessionStatus             `json:"session,omitempty"`        // session recording status
+	KB               []KBInfo                   `json:"kb,omitempty"`             // unified knowledge-bubble envelope (kb-API + legacy team-contexts + legacy ledgers, deduped)
+	// CurrentKB is the KB the agent is currently operating inside, resolved
+	// from the cwd via kb.ResolveCurrentKB. Nil if the cwd is not inside a
+	// .sageox/-mapped tree.
+	CurrentKB         *KBInfo          `json:"current_kb,omitempty"`
+	Ledger            *LedgerInfo      `json:"ledger,omitempty"`              // legacy mirror; new callers should use KB (see LedgerInfo godoc)
+	Important         string           `json:"important"`                     // always-present disambiguation of knowledge sources
+	TeamContext       *TeamContextInfo `json:"team_context,omitempty"`        // legacy mirror; new callers should use KB (see TeamContextInfo godoc)
+	TeamContextStatus string           `json:"team_context_status,omitempty"` // "synced", "syncing", or empty; set when team_context is null but sync is expected
+	OtherTeams        *OtherTeams      `json:"other_teams,omitempty"`         // non-primary teams (nil when only 1 team)
+	UserNotification  string           `json:"user_notification,omitempty"`   // pre-built status summary for agent to relay to user
+	AgentTip          string           `json:"agent_tip,omitempty"`           // contextual tip for the agent itself (not for the user)
 	// Prime call tracking
 	PrimeCallCount       int    `json:"prime_call_count,omitempty"`       // number of prime calls this session
 	PrimeExcessiveNotice string `json:"prime_excessive_notice,omitempty"` // warning if prime called excessively

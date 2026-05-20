@@ -662,4 +662,13 @@ func init() {
 		Description: "Flags subscribed bubbles whose meta.json last_sync is older than 1h; auto-fix kicks an immediate daemon sync",
 		Run:         checkKBStaleSync,
 	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugKBProjectConfigMigrate,
+		Name:        "kb project config migrate",
+		Category:    "Knowledge Bubbles",
+		FixLevel:    FixLevelAuto,
+		Description: "Migrates legacy .sageox/config.json projects to the new config.yaml binding format (ADR-017)",
+		Run:         checkKBProjectConfigMigrate,
+	})
 }

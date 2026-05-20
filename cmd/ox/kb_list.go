@@ -268,9 +268,13 @@ func kbTypePriority(t api.KBType) int {
 		return 3
 	case api.KBTypeCustom:
 		return 4
+	case api.KBType("channel"):
+		// channel slots between custom and unknown until KBTypeChannel is
+		// promoted into internal/api. Kept in sync with internal/prime/kb.go.
+		return 5
 	default:
 		// "" and KBTypeUnknown
-		return 5
+		return 6
 	}
 }
 
@@ -354,7 +358,8 @@ func printKBListRow(w io.Writer, b kb.Bubble) {
 	typeStr := formatKBType(b.Type, b.Legacy)
 	typeCol := fmt.Sprintf("%-*s", kbListColTypeWidth, truncateForColumn(typeStr, kbListColTypeWidth))
 
-	slugCol := fmt.Sprintf("%-*s", kbListColSlugWidth, truncateForColumn(b.Slug, kbListColSlugWidth))
+	// Human-display form is `#<slug>`; storage and JSON keep the bare slug.
+	slugCol := fmt.Sprintf("%-*s", kbListColSlugWidth, truncateForColumn(cli.FormatKBSlug(b.Slug), kbListColSlugWidth))
 
 	name := b.Name
 	if name == "" {

@@ -410,6 +410,7 @@ func TestDesiredSymlinks_PolicyMatrix(t *testing.T) {
 		{KBID: "kb_their_repo", KBType: api.KBTypeRepo, Slug: "their-app", RepoID: "repo_other"},
 		{KBID: "kb_legacy_repo", KBType: api.KBTypeRepo, Slug: "legacy"}, // missing repo_id
 		{KBID: "kb_custom", KBType: api.KBTypeCustom, Slug: "custom-thing"},
+		{KBID: "kb_channel", KBType: api.KBType("channel"), Slug: "wip-broadcast"},
 		{KBID: "kb_unknown", KBType: api.KBTypeUnknown, Slug: "future-kind"},
 		{KBID: "", KBType: api.KBTypePersonal, Slug: "no-id"}, // dropped: empty kb_id
 	}
@@ -429,6 +430,9 @@ func TestDesiredSymlinks_PolicyMatrix(t *testing.T) {
 
 	_, hasCustom := got["custom-thing"]
 	assert.False(t, hasCustom, "custom bubbles are deferred")
+
+	_, hasChannel := got["wip-broadcast"]
+	assert.False(t, hasChannel, "channel bubbles are deferred until explicit subscribe")
 
 	_, hasUnknown := got["future-kind"]
 	assert.False(t, hasUnknown, "unknown bubbles are skipped")

@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitserver"
+	internalkb "github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/spf13/cobra"
@@ -156,7 +157,10 @@ func runKBHydrate(cmd *cobra.Command, args []string) error {
 	if len(args) == 2 {
 		relPath = args[1]
 	}
-	return runKBHydrateWithDeps(cmd, args[0], relPath, jsonMode, projectRoot, deps)
+	// Strip the optional human-display `#` prefix from the slug-or-id arg
+	// before handing it to the resolver; slugs are looked up bare.
+	query := internalkb.NormalizeSlugArg(args[0])
+	return runKBHydrateWithDeps(cmd, query, relPath, jsonMode, projectRoot, deps)
 }
 
 // runKBHydrateWithDeps is the dependency-injected core. Returns cli.ErrSilent
@@ -172,7 +176,11 @@ func runKBHydrateWithDeps(cmd *cobra.Command, query, relPath string, jsonMode bo
 	kb, slug, err := deps.resolveBubble(ctx, query, deps)
 	if err != nil {
 		if errors.Is(err, errKBNotFound) {
-			fmt.Fprintf(stderr, "kb not found: %s\n", query)
+			display := query
+			if !hasKBIDPrefix(query) {
+				display = cli.FormatKBSlug(query)
+			}
+			fmt.Fprintf(stderr, "kb not found: %s\n", display)
 			return cli.ErrSilent
 		}
 		fmt.Fprintf(stderr, "kb hydrate: %v\n", err)
@@ -300,9 +308,15 @@ func writeKBHydrateJSON(w io.Writer, out kbHydrateOutput) error {
 }
 
 func writeKBHydrateHuman(stdout, stderr io.Writer, query, slug string, out kbHydrateOutput) {
+	// Resolved slug wins over the user's original query for display. kb_id
+	// inputs (no resolvable slug) show bare; slug inputs get the human-
+	// display `#` prefix.
 	display := slug
 	if display == "" {
 		display = query
+	}
+	if !hasKBIDPrefix(display) {
+		display = cli.FormatKBSlug(display)
 	}
 	if len(out.Hydrated) == 0 && len(out.Failed) == 0 {
 		fmt.Fprintf(stdout, "Nothing to hydrate in %s\n", display)

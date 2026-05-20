@@ -16,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/spf13/cobra"
 )
@@ -81,7 +82,9 @@ type kbShowOutput struct {
 }
 
 func runKBShow(cmd *cobra.Command, args []string) error {
-	input := strings.TrimSpace(args[0])
+	// Strip the optional human-display `#` prefix before resolution. Slugs
+	// are stored and looked up bare; the prefix is presentation-only.
+	input := strings.TrimSpace(kb.NormalizeSlugArg(args[0]))
 	if input == "" {
 		return fmt.Errorf("kb identifier required\nUsage: ox kb show <slug|id>")
 	}
@@ -147,13 +150,13 @@ func resolveKBIdentifier(ctx context.Context, client *api.KBClient, input string
 
 	matches := filterKBsBySlug(bubbles, input)
 	if len(matches) == 0 {
-		return "", fmt.Errorf("no knowledge bubble found matching %q\nRun 'ox kb list' to see available bubbles", input)
+		return "", fmt.Errorf("no knowledge bubble found matching %q\nRun 'ox kb list' to see available bubbles", cli.FormatKBSlug(input))
 	}
 
 	chosen := pickKBByPriority(matches)
 	if chosen == nil {
 		// shouldn't happen given non-empty matches, but guard anyway
-		return "", fmt.Errorf("no knowledge bubble found matching %q", input)
+		return "", fmt.Errorf("no knowledge bubble found matching %q", cli.FormatKBSlug(input))
 	}
 	return chosen.KBID, nil
 }
@@ -226,7 +229,13 @@ func handleKBShowError(w io.Writer, err error, input string, jsonOutput bool) er
 	// not "this specific id doesn't exist"). Detect by content so the
 	// user gets actionable copy.
 	if strings.Contains(err.Error(), "HTTP 404") {
-		return fmt.Errorf("no knowledge bubble found matching %q\nRun 'ox kb list' to see available bubbles", input)
+		// kb_id-prefixed inputs are immutable identifiers — show them bare.
+		// Slug-style inputs get the human-display `#` prefix.
+		display := input
+		if !strings.HasPrefix(input, kbIDPrefix) {
+			display = cli.FormatKBSlug(input)
+		}
+		return fmt.Errorf("no knowledge bubble found matching %q\nRun 'ox kb list' to see available bubbles", display)
 	}
 	return err
 }
@@ -245,7 +254,7 @@ func renderKBShow(w io.Writer, bubble *api.KB, localPath, ep string) {
 		fmt.Fprintf(w, "  %s %s\n", keyStyle.Render("type:            "), string(bubble.KBType))
 	}
 	if bubble.Slug != "" {
-		fmt.Fprintf(w, "  %s %s\n", keyStyle.Render("slug:            "), bubble.Slug)
+		fmt.Fprintf(w, "  %s %s\n", keyStyle.Render("slug:            "), cli.FormatKBSlug(bubble.Slug))
 	}
 	if bubble.Name != "" {
 		fmt.Fprintf(w, "  %s %s\n", keyStyle.Render("name:            "), bubble.Name)
