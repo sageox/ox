@@ -2,12 +2,16 @@ package doctor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/paths"
 )
 
 // DaemonBootstrapGrace is the grace period after daemon startup during which
@@ -646,6 +650,188 @@ func (c *DaemonFDPressureCheck) Run(_ context.Context, _ bool) CheckResult {
 	default:
 		return CheckResult{Name: c.Name(), Status: StatusPass, Message: msg}
 	}
+}
+
+// DaemonFDGrowthCheck warns when the daemon's open-FD count is climbing
+// over time. DaemonFDPressureCheck catches a runaway leak only once it
+// nears RLIMIT_NOFILE; this check catches the slow-drip case days before
+// that, by comparing the current sample against a rolling history.
+//
+// History lives in ~/.local/state/sageox/daemon/fd-history-<workspace>.json.
+// Each run appends a sample and trims to the most recent fdHistoryMaxSamples;
+// the warn verdict fires only when the spread between the oldest and newest
+// sample exceeds fdGrowthWarnDelta AND the oldest sample is at least
+// fdGrowthMinSpan old (so a single noisy spike or a brand-new history
+// doesn't trip it).
+//
+// Informational: there is no `--fix` for FD growth — the right response is
+// to investigate, not to restart blindly.
+type DaemonFDGrowthCheck struct {
+	// now / historyPath are exposed for tests; both are zero-valued in
+	// production and resolved to time.Now / canonical path inside Run.
+	now         func() time.Time
+	historyPath func(workspaceID string) string
+}
+
+// NewDaemonFDGrowthCheck creates the FD-growth check.
+func NewDaemonFDGrowthCheck() *DaemonFDGrowthCheck { return &DaemonFDGrowthCheck{} }
+
+// Name returns the check name.
+func (c *DaemonFDGrowthCheck) Name() string { return "fd growth" }
+
+// Category returns the check category.
+func (c *DaemonFDGrowthCheck) Category() string { return "Daemon" }
+
+// fdHistorySample is one sample point in the rolling history.
+type fdHistorySample struct {
+	At    time.Time `json:"at"`
+	Count int       `json:"count"`
+	PID   int       `json:"pid,omitempty"`
+}
+
+// fdHistoryFile is the on-disk schema for the rolling history.
+type fdHistoryFile struct {
+	WorkspaceID string            `json:"workspace_id,omitempty"`
+	Samples     []fdHistorySample `json:"samples"`
+}
+
+const (
+	// fdHistoryMaxSamples bounds the on-disk history. With one sample per
+	// `ox doctor` run, this covers many days of history for normal use.
+	fdHistoryMaxSamples = 60
+
+	// fdGrowthMinSpan is the minimum elapsed time between the oldest
+	// retained sample and the newest before a growth warning can fire.
+	// Stops a fresh history (1-2 samples) from producing a false warn.
+	fdGrowthMinSpan = 6 * time.Hour
+
+	// fdGrowthWarnDelta is the absolute FD count growth (newest - oldest)
+	// over the retained window that trips a warn verdict. Calibrated so
+	// real-world subsystem additions don't trip it (~5 extra FDs for a
+	// new persistent SQLite store is normal); a per-team or per-KB leak
+	// would compound far above this bound.
+	fdGrowthWarnDelta = 20
+)
+
+// Run executes the FD-growth check.
+func (c *DaemonFDGrowthCheck) Run(_ context.Context, _ bool) CheckResult {
+	if !daemon.IsRunning() {
+		return CheckResult{Name: c.Name(), Status: StatusSkip}
+	}
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
+	status, err := client.Status()
+	if err != nil {
+		return CheckResult{Name: c.Name(), Status: StatusSkip}
+	}
+	if status.OpenFDs <= 0 {
+		// platform doesn't surface FD count (e.g. windows) — skip silently
+		return CheckResult{Name: c.Name(), Status: StatusSkip}
+	}
+
+	now := time.Now
+	if c.now != nil {
+		now = c.now
+	}
+	historyPath := DefaultFDGrowthHistoryPath
+	if c.historyPath != nil {
+		historyPath = c.historyPath
+	}
+	workspaceID := daemon.CurrentWorkspaceID()
+	path := historyPath(workspaceID)
+
+	history, _ := loadFDHistory(path) // missing/corrupt → start fresh
+	history.WorkspaceID = workspaceID
+	history.Samples = append(history.Samples, fdHistorySample{
+		At:    now(),
+		Count: status.OpenFDs,
+		PID:   status.Pid,
+	})
+	if len(history.Samples) > fdHistoryMaxSamples {
+		history.Samples = history.Samples[len(history.Samples)-fdHistoryMaxSamples:]
+	}
+
+	// Persist BEFORE returning so the next run sees this sample even on a
+	// fast doctor invocation. A failed write is non-fatal — we still
+	// report the in-memory verdict.
+	_ = saveFDHistory(path, history)
+
+	if len(history.Samples) < 2 {
+		return CheckResult{
+			Name:    c.Name(),
+			Status:  StatusPass,
+			Message: fmt.Sprintf("%d FDs (history seeding)", status.OpenFDs),
+		}
+	}
+
+	oldest := history.Samples[0]
+	newest := history.Samples[len(history.Samples)-1]
+	span := newest.At.Sub(oldest.At)
+	delta := newest.Count - oldest.Count
+
+	msg := fmt.Sprintf("%d FDs (delta %+d over %s, %d samples)",
+		status.OpenFDs, delta, formatDuration(span), len(history.Samples))
+
+	if span < fdGrowthMinSpan {
+		// Not enough history to call growth meaningful yet.
+		return CheckResult{Name: c.Name(), Status: StatusPass, Message: msg}
+	}
+	if delta >= fdGrowthWarnDelta {
+		return CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarn,
+			Message: msg,
+			Fix: "Daemon FD count has been climbing across recent doctor runs. " +
+				"Run `ox status --verbose` to inspect per-subsystem counts, and check the " +
+				"daemon log for any subsystem opening per-team/per-KB handles without releasing them.",
+		}
+	}
+	return CheckResult{Name: c.Name(), Status: StatusPass, Message: msg}
+}
+
+// DefaultFDGrowthHistoryPath returns the canonical on-disk path for the
+// rolling FD-growth history file. Lives under DataDir (persistent across
+// reboots, unlike DaemonStateDir which is XDG_RUNTIME_DIR-rooted) so the
+// growth signal accumulates over weeks. Exposed so the doctor wiring and
+// tests can agree on the location without duplicating the layout.
+func DefaultFDGrowthHistoryPath(workspaceID string) string {
+	dir := filepath.Join(paths.DataDir(), "doctor")
+	name := "fd-history.json"
+	if workspaceID != "" {
+		name = "fd-history-" + workspaceID + ".json"
+	}
+	return filepath.Join(dir, name)
+}
+
+// loadFDHistory reads a saved history file. Missing / unreadable / corrupt
+// files return an empty history with no error — this is a best-effort cache,
+// not authoritative state.
+func loadFDHistory(path string) (fdHistoryFile, error) {
+	var h fdHistoryFile
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return h, err
+	}
+	if err := json.Unmarshal(data, &h); err != nil {
+		return fdHistoryFile{}, err
+	}
+	return h, nil
+}
+
+// saveFDHistory writes the history file atomically (write-temp + rename) so
+// a concurrent reader never sees a half-written JSON document.
+func saveFDHistory(path string, h fdHistoryFile) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(h, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // formatDuration formats a duration for display.
