@@ -275,35 +275,33 @@ func (r *WhisperRegistry) MarkRelayed(murmurID, scope string) error {
 }
 
 // RemoveCursor removes an agent's cursor from all stores.
+//
+// Holds the registry read lock through the entire iteration so the idle-close
+// janitor (which acquires the write lock to call store.Close) cannot race
+// with us and free a *whisperstore.Store mid-operation.
 func (r *WhisperRegistry) RemoveCursor(agentID string) {
 	r.mu.RLock()
-	ledger := r.ledgerStore
-	stores := make(map[string]*whisperstore.Store, len(r.teamStores))
-	for k, v := range r.teamStores {
-		stores[k] = v
-	}
-	r.mu.RUnlock()
+	defer r.mu.RUnlock()
 
-	if ledger != nil {
-		ledger.RemoveCursor(agentID)
+	if r.ledgerStore != nil {
+		r.ledgerStore.RemoveCursor(agentID)
 	}
-	for _, store := range stores {
+	for _, store := range r.teamStores {
 		store.RemoveCursor(agentID)
 	}
 }
 
 // Prune runs cleanup on all stores.
+//
+// Holds the registry read lock through the entire iteration; see RemoveCursor.
+// Prune is a once-an-hour background task, so serializing it against the
+// idle-close janitor (5 min cadence) is cheap.
 func (r *WhisperRegistry) Prune(retention time.Duration) {
 	r.mu.RLock()
-	ledger := r.ledgerStore
-	stores := make(map[string]*whisperstore.Store, len(r.teamStores))
-	for k, v := range r.teamStores {
-		stores[k] = v
-	}
-	r.mu.RUnlock()
+	defer r.mu.RUnlock()
 
-	if ledger != nil {
-		result, err := ledger.Prune(retention)
+	if r.ledgerStore != nil {
+		result, err := r.ledgerStore.Prune(retention)
 		if err != nil {
 			r.logger.Warn("ledger whisper prune failed", "err", err)
 		} else if result.WhispersDeleted > 0 {
@@ -311,7 +309,7 @@ func (r *WhisperRegistry) Prune(retention time.Duration) {
 		}
 	}
 
-	for teamID, store := range stores {
+	for teamID, store := range r.teamStores {
 		result, err := store.Prune(retention)
 		if err != nil {
 			r.logger.Warn("team whisper prune failed", "team_id", teamID, "err", err)
@@ -322,21 +320,18 @@ func (r *WhisperRegistry) Prune(retention time.Duration) {
 }
 
 // EnforceMaxSize runs size enforcement on all stores.
+//
+// Holds the registry read lock through the entire iteration; see RemoveCursor.
 func (r *WhisperRegistry) EnforceMaxSize(maxBytes int64) {
 	r.mu.RLock()
-	ledger := r.ledgerStore
-	stores := make(map[string]*whisperstore.Store, len(r.teamStores))
-	for k, v := range r.teamStores {
-		stores[k] = v
-	}
-	r.mu.RUnlock()
+	defer r.mu.RUnlock()
 
-	if ledger != nil {
-		if err := ledger.EnforceMaxSize(maxBytes); err != nil {
+	if r.ledgerStore != nil {
+		if err := r.ledgerStore.EnforceMaxSize(maxBytes); err != nil {
 			r.logger.Warn("ledger whisper size enforcement failed", "err", err)
 		}
 	}
-	for teamID, store := range stores {
+	for teamID, store := range r.teamStores {
 		if err := store.EnforceMaxSize(maxBytes); err != nil {
 			r.logger.Warn("team whisper size enforcement failed", "team_id", teamID, "err", err)
 		}

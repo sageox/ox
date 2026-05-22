@@ -417,18 +417,35 @@ func (r *WorkspaceRegistry) GetTeamContexts() []WorkspaceState {
 	return result
 }
 
-// isGCStagingPath reports whether a path is a transient GC staging directory
-// (the .new / .old / .gc-* suffixes used by runBlueGreenGC in sync_gc.go).
+// isGCStagingPath reports whether a path is a transient GC staging directory.
+//
+// The exact suffixes are the ones produced by runBlueGreenGC in sync_gc.go:
+//
+//	<team>.new          // freshly-cloned candidate
+//	<team>.old          // pre-swap snapshot
+//	<team>.gc-diff      // diff capture of local state
+//	<team>.gc-untracked // backup of untracked files
+//	<team>.gc-lock      // lockfile
+//	<team>.gc-cache     // cache backup
+//
+// We match against the explicit set rather than a `.gc-` substring so a
+// legitimate path that happens to contain ".gc-" elsewhere in its basename
+// (e.g., a team slug "abc.gc-team") is not accidentally filtered.
 func isGCStagingPath(p string) bool {
 	if p == "" {
 		return false
 	}
 	base := filepath.Base(p)
-	if strings.HasSuffix(base, ".new") || strings.HasSuffix(base, ".old") {
+	switch {
+	case strings.HasSuffix(base, ".new"),
+		strings.HasSuffix(base, ".old"),
+		strings.HasSuffix(base, ".gc-diff"),
+		strings.HasSuffix(base, ".gc-untracked"),
+		strings.HasSuffix(base, ".gc-lock"),
+		strings.HasSuffix(base, ".gc-cache"):
 		return true
 	}
-	// matches .gc-diff, .gc-untracked, .gc-lock, .gc-cache
-	return strings.Contains(base, ".gc-")
+	return false
 }
 
 // GetAllWorkspaces returns copies of all workspaces (ledger + team contexts).

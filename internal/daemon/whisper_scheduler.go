@@ -141,7 +141,7 @@ func (s *WhisperScheduler) RunIdleCloseJanitor(ctx context.Context, wg *sync.Wai
 				return
 			case <-ticker.C:
 				if n := s.registry.CloseIdleTeamStores(threshold); n > 0 {
-					s.logger.Debug("idle-close janitor", "closed", n, "threshold", threshold)
+					s.logger.Info("whisper idle-close janitor", "closed", n, "threshold", threshold)
 				}
 			}
 		}
