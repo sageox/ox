@@ -627,3 +627,60 @@ func TestWorkspaceRegistry_RecordSyncFailure_CreatesEntry(t *testing.T) {
 	assert.NotNil(t, ws)
 	assert.Equal(t, 1, ws.SyncFailures)
 }
+
+// --------------------------------------------------------------------------
+// GC staging filter
+// --------------------------------------------------------------------------
+
+// TestGetTeamContexts_FiltersGCStagingPaths verifies team enumeration excludes
+// transient GC staging directories (.new, .old, .gc-*) so downstream code
+// like the whisper registry never opens SQLite stores against ephemeral
+// blue-green reclone carcasses.
+//
+// Failure prevented: a partial / failed GC swap leaves a `<team>.old`
+// directory on disk; without this filter, the next sync cycle would
+// happily open a whisper store against it and pin those FDs forever.
+func TestGetTeamContexts_FiltersGCStagingPaths(t *testing.T) {
+	t.Parallel()
+	reg := &WorkspaceRegistry{
+		workspaces: map[string]*WorkspaceState{
+			"live": {ID: "live", Type: WorkspaceTypeTeamContext, Path: "/x/team-live"},
+			"new":  {ID: "new", Type: WorkspaceTypeTeamContext, Path: "/x/team-live.new"},
+			"old":  {ID: "old", Type: WorkspaceTypeTeamContext, Path: "/x/team-live.old"},
+			"gc1":  {ID: "gc1", Type: WorkspaceTypeTeamContext, Path: "/x/team-live.gc-diff"},
+			"gc2":  {ID: "gc2", Type: WorkspaceTypeTeamContext, Path: "/x/team-live.gc-cache"},
+		},
+	}
+
+	got := reg.GetTeamContexts()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 team context after GC-staging filter, got %d: %+v", len(got), got)
+	}
+	if got[0].ID != "live" {
+		t.Errorf("expected only the live team context, got ID=%q", got[0].ID)
+	}
+}
+
+func TestIsGCStagingPath(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/x/team-live", false},
+		{"", false},
+		{"/x/team-live.new", true},
+		{"/x/team-live.old", true},
+		{"/x/team-live.gc-diff", true},
+		{"/x/team-live.gc-cache", true},
+		{"/x/team-live.gc-untracked", true},
+		{"/x/team-live.gc-lock", true},
+		// .old / .new only at the basename — directory-name "old" alone is fine
+		{"/x/old/team", false},
+	}
+	for _, c := range cases {
+		if got := isGCStagingPath(c.path); got != c.want {
+			t.Errorf("isGCStagingPath(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}

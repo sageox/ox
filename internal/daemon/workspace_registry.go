@@ -393,17 +393,42 @@ func (r *WorkspaceRegistry) GetWorkspace(id string) *WorkspaceState {
 }
 
 // GetTeamContexts returns copies of all team context workspaces.
+//
+// Filters out workspaces whose Path matches the GC staging suffixes
+// (`.new`, `.old`, `.gc-*`) so a partial / failed blue-green reclone
+// can't trick downstream code (e.g., the whisper registry) into opening
+// SQLite stores against ephemeral GC carcasses. The canonical path
+// returned by paths.TeamContextDir never has these suffixes, so this
+// is pure defense-in-depth.
 func (r *WorkspaceRegistry) GetTeamContexts() []WorkspaceState {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	var result []WorkspaceState
 	for _, ws := range r.workspaces {
-		if ws.Type == WorkspaceTypeTeamContext {
-			result = append(result, *ws)
+		if ws.Type != WorkspaceTypeTeamContext {
+			continue
 		}
+		if isGCStagingPath(ws.Path) {
+			continue
+		}
+		result = append(result, *ws)
 	}
 	return result
+}
+
+// isGCStagingPath reports whether a path is a transient GC staging directory
+// (the .new / .old / .gc-* suffixes used by runBlueGreenGC in sync_gc.go).
+func isGCStagingPath(p string) bool {
+	if p == "" {
+		return false
+	}
+	base := filepath.Base(p)
+	if strings.HasSuffix(base, ".new") || strings.HasSuffix(base, ".old") {
+		return true
+	}
+	// matches .gc-diff, .gc-untracked, .gc-lock, .gc-cache
+	return strings.Contains(base, ".gc-")
 }
 
 // GetAllWorkspaces returns copies of all workspaces (ledger + team contexts).

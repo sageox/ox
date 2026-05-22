@@ -100,3 +100,50 @@ func (s *WhisperScheduler) RunPrune(ctx context.Context, wg *sync.WaitGroup, int
 		}
 	}()
 }
+
+// Default tuning for the idle-close janitor.
+//
+//   - DefaultIdleCloseThreshold: a team store with no read/write traffic
+//     for this long is closed. Comfortably longer than the typical team
+//     sync interval (~5 min) so a normally-active team never trips it.
+//   - DefaultIdleCloseInterval: how often the janitor wakes up to check.
+const (
+	DefaultIdleCloseThreshold = 15 * time.Minute
+	DefaultIdleCloseInterval  = 5 * time.Minute
+)
+
+// RunIdleCloseJanitor periodically closes team whisper stores that have
+// been idle for longer than `threshold`. Each closed store releases ~3
+// SQLite file descriptors (.db + .db-shm + .db-wal). The next sync cycle
+// that touches the team will lazily reopen via AddTeamStore.
+//
+// Pass zero for either argument to use DefaultIdleCloseInterval /
+// DefaultIdleCloseThreshold respectively. Set threshold < 0 to disable.
+func (s *WhisperScheduler) RunIdleCloseJanitor(ctx context.Context, wg *sync.WaitGroup, interval, threshold time.Duration) {
+	if threshold < 0 {
+		return
+	}
+	if interval <= 0 {
+		interval = DefaultIdleCloseInterval
+	}
+	if threshold == 0 {
+		threshold = DefaultIdleCloseThreshold
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if n := s.registry.CloseIdleTeamStores(threshold); n > 0 {
+					s.logger.Debug("idle-close janitor", "closed", n, "threshold", threshold)
+				}
+			}
+		}
+	}()
+}

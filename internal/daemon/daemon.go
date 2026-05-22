@@ -1352,6 +1352,10 @@ func (d *Daemon) startWorkers() {
 			}()
 		}
 		ws.Start(d.ctx, &d.wg)
+		// release team whisper SQLite FDs that have been idle for a while.
+		// Whispers are an every-few-minutes workload, so holding every team
+		// DB open between operations leaks ~3 FDs per team for no benefit.
+		ws.RunIdleCloseJanitor(d.ctx, &d.wg, DefaultIdleCloseInterval, DefaultIdleCloseThreshold)
 	}
 
 	d.wg.Add(1)

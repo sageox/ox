@@ -222,7 +222,10 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			if !s.whisperRegistry.HasTeamStore(r.ws.TeamID) {
 				ep := s.workspaceRegistry.GetEndpoint()
 				teamWhisperDir := paths.TeamWhisperDBDir(r.ws.TeamID, ep)
-				if teamWhisperDir != "" {
+				// defense-in-depth: never open a whisper store against a GC
+				// staging directory. The canonical path should never have
+				// these suffixes; this guards against a partial GC swap.
+				if teamWhisperDir != "" && !isGCStagingPath(teamWhisperDir) {
 					dbPath := filepath.Join(teamWhisperDir, "whisper.db")
 					if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err == nil {
 						teamStore, err := whisperstore.Open(dbPath)
@@ -277,6 +280,26 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 			msg += fmt.Sprintf(", cloning %d in background", cloningCount)
 		}
 		_ = progress.WriteStage("complete", msg)
+	}
+
+	// reconcile open whisper stores against the current team set: if a team
+	// has been removed from config / credentials, close its store so we
+	// don't pin SQLite FDs for teams the user no longer works with. The
+	// next sync that re-discovers the team will lazily reopen via
+	// AddTeamStore above.
+	if s.whisperRegistry != nil {
+		currentTeamIDs := make(map[string]struct{}, len(teamContexts))
+		for _, ws := range teamContexts {
+			currentTeamIDs[ws.TeamID] = struct{}{}
+		}
+		for _, openTeamID := range s.whisperRegistry.TeamIDs() {
+			if _, ok := currentTeamIDs[openTeamID]; ok {
+				continue
+			}
+			s.logger.Debug("closing whisper store for team no longer in config",
+				"team_id", openTeamID)
+			s.whisperRegistry.CloseTeamStore(openTeamID)
+		}
 	}
 }
 

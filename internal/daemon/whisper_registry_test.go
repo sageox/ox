@@ -212,3 +212,132 @@ func TestWhisperRegistryUnknownScopeRelayHandling(t *testing.T) {
 		t.Fatalf("MarkRelayed with unknown scope should not error, got: %v", err)
 	}
 }
+
+// --- Idle-close behavior ---
+//
+// Failure prevented: team whisper SQLite stores accumulating FDs across long
+// daemon uptimes when whisper traffic is sparse (every-few-minutes workload).
+
+func TestCloseIdleTeamStores_ClosesOnlyIdle(t *testing.T) {
+	ledger := openTestStore(t)
+	teamA := openTestStore(t)
+	teamB := openTestStore(t)
+	r := NewWhisperRegistry(ledger, nil)
+	defer r.Close()
+
+	clock := time.Now()
+	r.SetClock(func() time.Time { return clock })
+
+	r.AddTeamStore("team-a", teamA)
+	r.AddTeamStore("team-b", teamB)
+
+	// Advance past threshold, then touch team-b only.
+	clock = clock.Add(20 * time.Minute)
+	if _, err := r.GetWhispers("agent-1", whisperstore.AttentionAll, nil); err != nil {
+		t.Fatalf("GetWhispers: %v", err)
+	}
+	// Now team-a's lastAccess is stale (set at clock-20min, < cutoff for a
+	// 15-minute threshold). team-b was just touched. But the touch happens
+	// on every team in GetWhispers, so both are fresh. Override team-a to
+	// simulate it being idle, then assert only team-a closes.
+	r.mu.Lock()
+	r.lastAccess["team-a"] = clock.Add(-30 * time.Minute)
+	r.mu.Unlock()
+
+	closed := r.CloseIdleTeamStores(15 * time.Minute)
+	if closed != 1 {
+		t.Fatalf("expected 1 idle close, got %d", closed)
+	}
+	if r.HasTeamStore("team-a") {
+		t.Error("expected team-a to be closed")
+	}
+	if !r.HasTeamStore("team-b") {
+		t.Error("expected team-b to remain open")
+	}
+}
+
+func TestCloseIdleTeamStores_NoopBelowThreshold(t *testing.T) {
+	ledger := openTestStore(t)
+	team := openTestStore(t)
+	r := NewWhisperRegistry(ledger, nil)
+	defer r.Close()
+
+	clock := time.Now()
+	r.SetClock(func() time.Time { return clock })
+	r.AddTeamStore("team-a", team)
+
+	// Only 5 minutes pass — under the 15-minute threshold.
+	clock = clock.Add(5 * time.Minute)
+	closed := r.CloseIdleTeamStores(15 * time.Minute)
+	if closed != 0 {
+		t.Fatalf("expected 0 closes below threshold, got %d", closed)
+	}
+	if !r.HasTeamStore("team-a") {
+		t.Error("expected team-a to stay open below threshold")
+	}
+}
+
+func TestCloseIdleTeamStores_AccessBumpsTimestamp(t *testing.T) {
+	ledger := openTestStore(t)
+	team := openTestStore(t)
+	r := NewWhisperRegistry(ledger, nil)
+	defer r.Close()
+
+	clock := time.Now()
+	r.SetClock(func() time.Time { return clock })
+	r.AddTeamStore("team-a", team)
+
+	// 10 minutes pass — under threshold.
+	clock = clock.Add(10 * time.Minute)
+
+	// Add a team-scoped entry — should bump lastAccess.
+	if err := r.Add("team", whisperstore.WhisperEntry{
+		ID: "t-bump", Scope: "team", Type: whisperstore.WhisperTrigger,
+		Source: "test", Topic: "lint", Content: "bump",
+		Importance: whisperstore.ImportanceNormal, CreatedAt: clock,
+	}); err != nil {
+		t.Fatalf("Add team: %v", err)
+	}
+
+	// 14 more minutes — without the bump this would be 24 min idle. With it, 14.
+	clock = clock.Add(14 * time.Minute)
+	closed := r.CloseIdleTeamStores(15 * time.Minute)
+	if closed != 0 {
+		t.Fatalf("Add('team') did not bump lastAccess: %d closed", closed)
+	}
+}
+
+func TestCloseIdleTeamStores_LedgerNeverClosed(t *testing.T) {
+	ledger := openTestStore(t)
+	r := NewWhisperRegistry(ledger, nil)
+	defer r.Close()
+
+	clock := time.Now().Add(24 * time.Hour)
+	r.SetClock(func() time.Time { return clock })
+
+	if closed := r.CloseIdleTeamStores(1 * time.Minute); closed != 0 {
+		t.Fatalf("ledger must not be subject to idle-close, got %d", closed)
+	}
+	if r.LedgerStore() == nil {
+		t.Error("ledger store should remain after idle-close pass")
+	}
+}
+
+func TestTeamIDs(t *testing.T) {
+	teamA := openTestStore(t)
+	teamB := openTestStore(t)
+	r := NewWhisperRegistry(nil, nil)
+	r.AddTeamStore("team-a", teamA)
+	r.AddTeamStore("team-b", teamB)
+
+	got := r.TeamIDs()
+	if len(got) != 2 {
+		t.Fatalf("expected 2 team IDs, got %d: %v", len(got), got)
+	}
+
+	r.CloseTeamStore("team-a")
+	got = r.TeamIDs()
+	if len(got) != 1 || got[0] != "team-b" {
+		t.Errorf("expected only team-b after close, got %v", got)
+	}
+}
