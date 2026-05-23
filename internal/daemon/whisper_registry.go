@@ -64,12 +64,12 @@ func (r *WhisperRegistry) AddTeamStore(teamID string, store *whisperstore.Store)
 }
 
 // touchTeamLocked bumps the last-access timestamp for a team store.
-// Caller must hold r.mu (RLock is fine — map write is benign here because
-// we only ever overwrite scalar values and the caller already serializes
-// store usage through the store's own sql.DB pool).
 //
-// We accept the small race for simplicity: in the worst case the janitor
-// sees a slightly stale timestamp and skips a close it would otherwise do.
+// Caller MUST hold r.mu.Lock() (write lock). RLock is not sufficient —
+// this is a Go map write, which requires mutual exclusion against any
+// concurrent map access. All current callers (Add for the "team" scope,
+// GetWhispers, GetWhispersPage) hold the write lock for the full
+// iteration; do not weaken that contract.
 func (r *WhisperRegistry) touchTeamLocked(teamID string) {
 	r.lastAccess[teamID] = r.now()
 }

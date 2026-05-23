@@ -50,6 +50,13 @@ func TestFDHistory_RoundTrip(t *testing.T) {
 		if !got.Samples[i].At.Equal(want.Samples[i].At) {
 			t.Errorf("sample[%d].At = %v, want %v", i, got.Samples[i].At, want.Samples[i].At)
 		}
+		// PID is part of the persisted schema (the doctor check writes
+		// status.Pid so future investigation can correlate growth with
+		// daemon restarts). A regression that drops or renames `pid` in
+		// the JSON tag must trip this assertion.
+		if got.Samples[i].PID != want.Samples[i].PID {
+			t.Errorf("sample[%d].PID = %d, want %d", i, got.Samples[i].PID, want.Samples[i].PID)
+		}
 	}
 }
 
