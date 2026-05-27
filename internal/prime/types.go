@@ -297,6 +297,24 @@ type UserNotice struct {
 	Message string `json:"message"`
 }
 
+// EphemeralHint surfaces, in the prime payload, that ox is running in an
+// ephemeral environment (cloud agent, CI, Codespaces) with sparse local
+// data. When emitted, the calling agent should prefer the cloud MCP server
+// for context operations that would normally hit local codedb / KB / team-
+// context caches.
+//
+// Emitted only when ephemeral.IsEphemeral() returns true. LocalDataSparse
+// is true when no local team-context clone exists (HTTP fallback may have
+// written a subset) AND/OR no codedb index is available.
+type EphemeralHint struct {
+	Active           bool     `json:"active"`
+	Reason           string   `json:"reason,omitempty"`             // env var or venue marker that triggered ephemeral mode
+	LocalDataSparse  bool     `json:"local_data_sparse,omitempty"`  // true when local caches are missing/partial
+	CloudMCPEndpoint string   `json:"cloud_mcp_endpoint,omitempty"` // e.g. https://api.sageox.ai/mcp
+	Recommendation   string   `json:"recommendation,omitempty"`     // single-line guidance for the agent
+	SuggestedTools   []string `json:"suggested_tools,omitempty"`    // cloud MCP tool names to prefer
+}
+
 // Output is the structured response for agent bootstrap (prime)
 type Output struct {
 	Status           string                     `json:"status"` // fresh, degraded, unavailable
@@ -367,4 +385,8 @@ type Output struct {
 	// Per-step timing instrumentation
 	ElapsedMs int64            `json:"elapsed_ms,omitempty"` // total prime execution time
 	Timing    map[string]int64 `json:"timing,omitempty"`     // per-phase timing (ms)
+	// Ephemeral-mode hint: nil when not in ephemeral mode. When set, agents
+	// should prefer the cloud MCP server for context ops since local caches
+	// are sparse. See docs/ai/adr/adr-ephemeral-mode.md.
+	EphemeralHint *EphemeralHint `json:"ephemeral_hint,omitempty"`
 }

@@ -355,6 +355,12 @@ common issues, or --fix-slug to target specific checks.`,
 
 		cli.PrintDisclaimer()
 
+		// trailing PAT expiry warning — single-line stderr, suppressed in
+		// ephemeral mode and when stderr isn't a TTY. Doctor is the right
+		// surface: users run it when something feels off, and a near-expired
+		// PAT is exactly the class of thing they'd want surfaced.
+		_ = auth.CheckAndWarnExpiry(cmd.Context(), projectEndpoint, os.Stderr)
+
 		if hasFailed && (cfg == nil || !cfg.JSON) {
 			return fmt.Errorf("some checks failed")
 		}
@@ -891,14 +897,20 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 
 	// Category 10: Daemon
 	progress.show("Daemon")
+	// always surface the ephemeral-mode predicate first — it explains why
+	// the daemon may be intentionally absent (CI, Claude Cloud, Devin,
+	// user config) and is the single most common source of "doctor says
+	// no daemon" confusion. See docs/ai/adr/adr-ephemeral-mode.md.
+	ephemeralStatus := checkEphemeralMode()
 	if state.isDaemonRunning {
 		daemonChecks := checkDaemonHealth(opts)
-		if state.isBootstrapping && len(daemonChecks) > 0 {
-			// prepend bootstrap info banner
+		daemonChecks = append([]checkResult{ephemeralStatus}, daemonChecks...)
+		if state.isBootstrapping && len(daemonChecks) > 1 {
+			// prepend bootstrap info banner (after ephemeral status)
 			bootstrapBanner := InfoCheck("daemon bootstrap",
 				"initial sync in progress",
 				"Run `ox doctor` again in a minute")
-			daemonChecks = append([]checkResult{bootstrapBanner}, daemonChecks...)
+			daemonChecks = append([]checkResult{ephemeralStatus, bootstrapBanner}, daemonChecks[1:]...)
 		}
 		if len(daemonChecks) > 0 {
 			categories = append(categories, checkCategory{
@@ -911,6 +923,7 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		categories = append(categories, checkCategory{
 			name: "Daemon",
 			checks: []checkResult{
+				ephemeralStatus,
 				SkippedCheck("daemon status", "not started",
 					"Daemon will auto-start on next agentic coding session"),
 			},
@@ -920,6 +933,7 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		categories = append(categories, checkCategory{
 			name: "Daemon",
 			checks: []checkResult{
+				ephemeralStatus,
 				SkippedCheck("daemon status", "DAEMON NOT RUNNING",
 					"Run `ox daemon start` to enable background sync and heartbeats"),
 			},

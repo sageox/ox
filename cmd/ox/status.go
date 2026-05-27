@@ -1501,6 +1501,10 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("status", tips.AlwaysShow, cfg.Quiet, !userCfg.AreTipsEnabled(), cfg.JSON)
 
+		// trailing PAT expiry warning — internally suppressed in ephemeral
+		// mode, when stderr isn't a TTY, and for never-expires tokens.
+		_ = auth.CheckAndWarnExpiry(cmd.Context(), currentEndpoint, os.Stderr)
+
 		return nil
 	},
 }

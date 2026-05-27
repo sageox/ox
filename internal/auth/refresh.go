@@ -114,6 +114,12 @@ func EnsureValidTokenForEndpoint(ep string, bufferSeconds int) (*StoredToken, er
 		return nil, nil
 	}
 
+	// env-sourced tokens (OX_TOKEN/SAGEOX_TOKEN) have no refresh credential —
+	// the server returning 401 is the source of truth for invalidation.
+	if isEnvToken(ep, token) {
+		return token, nil
+	}
+
 	if token.IsExpired(bufferSeconds) {
 		return refreshTokenForEndpoint(token, ep)
 	}
@@ -370,6 +376,12 @@ func (c *AuthClient) EnsureValidTokenForEndpoint(ep string, bufferSeconds int) (
 
 	if token == nil {
 		return nil, nil
+	}
+
+	// env-sourced tokens (OX_TOKEN/SAGEOX_TOKEN) have no refresh credential —
+	// the server returning 401 is the source of truth for invalidation.
+	if isEnvToken(ep, token) {
+		return token, nil
 	}
 
 	if token.IsExpired(bufferSeconds) {
