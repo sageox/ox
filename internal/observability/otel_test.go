@@ -186,9 +186,14 @@ func TestInit_BearerAttachedPerRequest(t *testing.T) {
 func TestInit_NilTokenFuncSendsUnauthenticated(t *testing.T) {
 	resetGlobals()
 
-	var seen []string
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		seen = append(seen, r.Header.Get("Authorization"))
+		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
@@ -198,6 +203,8 @@ func TestInit_NilTokenFuncSendsUnauthenticated(t *testing.T) {
 	span.End()
 	Shutdown(context.Background())
 
+	mu.Lock()
+	defer mu.Unlock()
 	for _, h := range seen {
 		assert.Empty(t, h, "nil tokenFunc must not inject Authorization")
 	}
@@ -209,9 +216,14 @@ func TestInit_NilTokenFuncSendsUnauthenticated(t *testing.T) {
 func TestInit_EmptyTokenSkipsHeader(t *testing.T) {
 	resetGlobals()
 
-	var seen []string
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		seen = append(seen, r.Header.Get("Authorization"))
+		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(srv.Close)
@@ -221,6 +233,8 @@ func TestInit_EmptyTokenSkipsHeader(t *testing.T) {
 	span.End()
 	Shutdown(context.Background())
 
+	mu.Lock()
+	defer mu.Unlock()
 	for _, h := range seen {
 		assert.Empty(t, h, "empty tokenFunc value must not inject Authorization")
 	}
