@@ -736,6 +736,27 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// ADR-019: /clear is a session boundary. When this prime invocation follows
+	// a /clear that finalized a prior session, surface the transition to the
+	// user. The stopSessionForClear handoff is via OX_CLEAR_PRIOR_SESSION env.
+	if clearInfo := parseClearNoticeEnv(); clearInfo != nil {
+		recordingOn := output.Session != nil && output.Session.Recording
+		notice := renderClearNotice(clearInfo, agentID, recordingOn)
+		if notice != "" {
+			output.UserNotices = append(output.UserNotices, UserNotice{
+				Type:    "clear-boundary",
+				Message: notice,
+			})
+			// also prepend to the pre-assembled UserNotification so JSON
+			// consumers without UserNotices support still see it.
+			if output.UserNotification == "" {
+				output.UserNotification = notice
+			} else {
+				output.UserNotification = notice + " " + output.UserNotification
+			}
+		}
+	}
+
 	if hooksInstalled {
 		output.HooksRestartNotice = "SageOx hooks were just installed. Tell the user to exit this session and start a new one so the hooks take effect."
 		output.UserNotices = append(output.UserNotices, UserNotice{
@@ -1042,6 +1063,31 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 		return nil
 	}
 
+	// ADR-020: subagent inheritance. When this prime call is for a subagent
+	// (parentAgentID set) and the parent's recording is currently suspended,
+	// the subagent skips recording entirely. Subagents are atomic units of
+	// work spawned within the parent's context window; if the parent has
+	// paused, the user's intent is "no recording" for this scope.
+	if parentAgentID != "" {
+		if _, _, parentPaused := session.PeekExplicitPause(projectRoot, parentAgentID); parentPaused {
+			return &sessionStatus{
+				Recording:        false,
+				Mode:             resolved.Mode,
+				Source:           string(resolved.Source),
+				UserNotification: "[ox] Parent session suspended. Recording skipped for this subagent.",
+			}
+		}
+		// also honor an in-flight pause without marker (defensive)
+		if parentState, _ := session.LoadRecordingStateForAgent(projectRoot, parentAgentID); parentState != nil && parentState.SuspendedAt != nil {
+			return &sessionStatus{
+				Recording:        false,
+				Mode:             resolved.Mode,
+				Source:           string(resolved.Source),
+				UserNotification: "[ox] Parent session suspended. Recording skipped for this subagent.",
+			}
+		}
+	}
+
 	// check if already recording
 	if existing, err := session.LoadRecordingStateForAgent(projectRoot, agentID); err == nil && existing != nil {
 		return &sessionStatus{
@@ -1099,6 +1145,13 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 		}
 	}
 
+	// ADR-020: per-agent pause stickiness. If a .session_paused.<agentID> marker
+	// exists for this agent (from a prior /clear or pause), the new session
+	// inherits the suspended state. We snapshot the existence here so the
+	// marker can outlive the StartRecording call; the marker itself is only
+	// cleared by explicit resume/stop/abort or daemon expiration.
+	inheritedPauseSeq, inheritedPauseAt, inheritedPause := session.PeekExplicitPause(projectRoot, agentID)
+
 	state, err := session.StartRecording(projectRoot, opts)
 	if err != nil {
 		// already recording is not an error
@@ -1121,6 +1174,39 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 		// non-fatal but visible — agent sees stderr and can surface it
 		fmt.Fprintf(os.Stderr, "warning: session recording failed to start: %v\n", err)
 		return nil
+	}
+
+	// ADR-020: apply inherited pause state when a marker was present at start.
+	// Done before writeRawHeader so the header reflects the suspended lifecycle
+	// from entry 0. The marker survives — it is cleared only by explicit
+	// resume/stop/abort or daemon expiration.
+	if inheritedPause {
+		clearInfo := parseClearNoticeEnv()
+		priorSession := ""
+		if clearInfo != nil {
+			priorSession = clearInfo.SessionName
+		}
+		if updateErr := session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
+			now := time.Now().UTC()
+			s.SuspendedAt = &now
+			s.InheritedPause = true
+			s.InheritedFromSession = priorSession
+			s.PauseCount++
+			s.Lifecycle = append(s.Lifecycle, session.LifecycleEvent{
+				Action: session.LifecycleActionPause,
+				At:     now,
+				Seq:    0,
+				Reason: "inherited-from-clear",
+			})
+			_ = inheritedPauseAt // retained for telemetry if future fields need it
+			_ = inheritedPauseSeq
+		}); updateErr != nil {
+			slog.Warn("inherited pause: failed to update recording state", "agent_id", agentID, "error", updateErr)
+		}
+		// reload so subsequent header write reflects suspended state
+		if reloaded, _ := session.LoadRecordingStateForAgent(projectRoot, agentID); reloaded != nil {
+			state = reloaded
+		}
 	}
 
 	// write raw.jsonl header immediately so incremental hooks can append entries

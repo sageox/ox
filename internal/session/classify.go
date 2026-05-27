@@ -10,34 +10,47 @@ import (
 
 // SessionStatus represents the lifecycle state of a session.
 //
+// See ADR-019 (session entity lifecycle) for the canonical state machine and
+// transition rules. ADR-020 adds StatusSuspended for active pause.
+//
 // Lifecycle:
 //
 //	           ┌──────────┐
-//	           │ recording│
-//	           └────┬─────┘
-//	     ┌──────────┼──────────┐
-//	     ▼          ▼          ▼
-//	┌────────┐ ┌────────┐ ┌────────┐
-//	│ paused │ │ ghost  │ │ orphan │
-//	└───┬────┘ └───┬────┘ └───┬────┘
-//	    │       (cleanup)  (finalize)
-//	    ▼                      │
-//	┌────────┐                 │
-//	│ local  │◄────────────────┘
-//	└───┬────┘
-//	    ▼
-//	┌──────────┐
-//	│ uploaded  │
-//	└──────────┘
+//	           │ recording│◄─────────────┐
+//	           └────┬─────┘  resume      │
+//	  ┌─────┬──────┼──────┬─────────┐    │
+//	  │     │      ▼      ▼         ▼    │ pause
+//	  │     │  ┌────────┐ ┌────────┐     │
+//	  │     │  │ ghost  │ │ orphan │  ┌──┴──────┐
+//	  │     │  └───┬────┘ └───┬────┘  │suspended│
+//	  │     │  (cleanup)  (finalize)  └─────────┘
+//	  │     ▼               │
+//	  │  ┌────────┐         │
+//	  │  │ paused │         │
+//	  │  └───┬────┘         │
+//	  │      ▼              │
+//	  │  ┌────────┐         │
+//	  └─►│ local  │◄────────┘
+//	     └───┬────┘
+//	         ▼
+//	     ┌──────────┐
+//	     │ uploaded │
+//	     └──────────┘
 //
 //	┌──────────┐
-//	│ canceled  │  (terminal — data discarded)
+//	│ canceled │  (terminal — data discarded)
 //	└──────────┘
+//
+// NOTE: StatusPaused is a legacy name meaning "user stopped, data preserved,
+// not yet uploaded" (NOT active pause). StatusSuspended is the active-pause
+// state introduced by ADR-020. The legacy constant is preserved verbatim to
+// avoid migrating .recording.json files and uploaded ledger metadata.
 type SessionStatus string
 
 const (
 	StatusRecording SessionStatus = "recording" // actively being recorded, parent process alive
-	StatusPaused    SessionStatus = "paused"    // user explicitly stopped recording (data preserved, not yet uploaded)
+	StatusSuspended SessionStatus = "suspended" // active pause, recording continues locally, upload will exclude paused range (ADR-020)
+	StatusPaused    SessionStatus = "paused"    // user explicitly stopped recording (data preserved, not yet uploaded) — LEGACY NAME
 	StatusGhost     SessionStatus = "ghost"     // parent dead, no substantive data — safe to delete
 	StatusOrphan    SessionStatus = "orphan"    // parent dead, has data — needs recovery/finalization
 	StatusLocal     SessionStatus = "local"     // exists locally, not uploaded (may have been recovered from orphan)
@@ -81,6 +94,13 @@ func ClassifySession(info SessionInfo, isUploaded bool) SessionStatus {
 			return StatusOrphan
 		}
 		return StatusGhost
+	}
+
+	// ADR-020: active pause has its own status. Reported only while the agent
+	// is alive — if PID is dead past grace, the existing orphan path handles
+	// finalization with the paused range honored at upload.
+	if info.SuspendedAt != nil {
+		return StatusSuspended
 	}
 
 	return StatusRecording

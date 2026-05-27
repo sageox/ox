@@ -128,6 +128,14 @@ type sessionStatusOutput struct {
 	LastHookAt      string `json:"last_hook_at,omitempty"`
 	Stalled         bool   `json:"stalled,omitempty"` // hooks fired but no entries captured
 	StalledReason   string `json:"stalled_reason,omitempty"`
+
+	// ADR-020 pause/resume surface
+	Suspended            bool   `json:"suspended,omitempty"`              // true while SuspendedAt != nil
+	SuspendedAt          string `json:"suspended_at,omitempty"`           // RFC3339
+	SuspendedDuration    string `json:"suspended_duration,omitempty"`     // human-readable
+	PauseCount           int    `json:"pause_count,omitempty"`            // monotonic counter
+	InheritedPause       bool   `json:"inherited_pause,omitempty"`        // started suspended via /clear marker
+	InheritedFromSession string `json:"inherited_from_session,omitempty"` // session that finalized at /clear
 }
 
 // sessionRecordingEntry represents one active recording in the multi-session output.
@@ -249,6 +257,16 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 				LastHookAt:      lastHookAtStr,
 				Stalled:         stalled,
 				StalledReason:   stalledReason,
+			}
+			// ADR-020: surface pause state in status JSON
+			if state.SuspendedAt != nil {
+				output.Suspended = true
+				output.SuspendedAt = state.SuspendedAt.Format("2006-01-02T15:04:05Z07:00")
+				output.SuspendedDuration = formatPausedDuration(time.Since(*state.SuspendedAt))
+				output.PauseCount = state.PauseCount
+				output.InheritedPause = state.InheritedPause
+				output.InheritedFromSession = state.InheritedFromSession
+				output.Guidance = "Recording is SUSPENDED. Resume with `ox session resume` or stop with `ox session stop`."
 			}
 			return outputJSON(cmd.OutOrStdout(), output)
 		}

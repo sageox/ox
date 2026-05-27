@@ -116,6 +116,24 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 		entries = append(entries, entry)
 	}
 
+	// ADR-020: apply pause/resume segment mask BEFORE secret redaction.
+	// The mask excludes entries whose 0-indexed position falls in any
+	// [pause_seq, resume_seq) range from the lifecycle timeline.
+	// Order matters only for performance (don't redact entries being dropped);
+	// correctness is identical either way.
+	if len(state.Lifecycle) > 0 {
+		originalCount := len(entries)
+		entries = session.ApplySegmentMask(entries, state.Lifecycle)
+		result.EntryCount = len(entries)
+
+		// validator: fail-closed if the mask result doesn't match what the
+		// lifecycle says should have been excluded. Aborts upload before
+		// any paused-range entries can leak.
+		if msg := validateMaskInvariant(originalCount, len(entries), state.Lifecycle); msg != "" {
+			return nil, fmt.Errorf("upload aborted: %s", msg)
+		}
+	}
+
 	// redact secrets from entries (modifies in place)
 	result.SecretsRedacted = redactor.RedactEntries(entries)
 

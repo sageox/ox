@@ -277,6 +277,8 @@ var validSessionSubcommands = map[string]bool{
 	"start":             true,
 	"stop":              true,
 	"abort":             true,
+	"pause":             true,
+	"resume":            true,
 	"delete":            true,
 	"log":               true,
 	"remind":            true,
@@ -526,10 +528,14 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 			return runAgentSessionRecover(inst)
 		case "abort":
 			return runAgentSessionAbort(inst, cmd, sessionArgs)
+		case "pause":
+			return runAgentSessionPause(inst, sessionArgs)
+		case "resume":
+			return runAgentSessionResume(inst, sessionArgs)
 		case "delete":
 			return runAgentSessionDelete(inst, cmd, sessionArgs)
 		default:
-			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, delete, log, remind, summarize, record, plan, context-trace, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
+			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, pause, resume, delete, log, remind, summarize, record, plan, context-trace, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
 		}
 	case "query":
 		return runAgentQuery(inst, subargs)

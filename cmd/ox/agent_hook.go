@@ -71,6 +71,10 @@ type HookContext struct {
 	Input       *agentx.HookInput // parsed stdin JSON
 	Marker      *SessionMarker    // nil if not yet primed
 	ProjectRoot string            // git root with .sageox/
+
+	// ClearNotice carries finalized-prior-session info from stopSessionForClear
+	// to the prime subprocess so prime can emit a user-facing notice. See ADR-019.
+	ClearNotice *ClearNoticeInfo
 }
 
 // runAgentHook is the entry point for `ox agent hook <event>`.
@@ -299,11 +303,19 @@ func handleStart(ctx *HookContext) error {
 // This finalizes the old session so it gets uploaded, then prime starts a fresh one.
 // Sets StoppedAt, sends fire-and-forget IPC finalization to the daemon, and clears
 // recording state so prime can start a fresh session.
+//
+// As a side effect, populates ctx.ClearNotice with finalized-session info so the
+// downstream prime subprocess can render a user-facing notice describing the
+// boundary transition (see ADR-019).
 func stopSessionForClear(ctx *HookContext, agentID string) {
 	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
 	if err != nil || state == nil {
 		return // not recording, nothing to stop
 	}
+
+	// capture finalized-session info for the post-clear notice (ADR-019).
+	// done before we mutate state so SessionPath is still accurate.
+	ctx.ClearNotice = buildClearNoticeFromState(state)
 
 	// set StoppedAt to signal this session is complete
 	now := time.Now()
@@ -474,8 +486,30 @@ func handlePrompt(ctx *HookContext) error {
 	if agentID == "" {
 		return nil
 	}
+
+	// ADR-020: emit a per-prompt nudge while the session is suspended. This
+	// fires on every UserPromptSubmit so the user cannot silently forget that
+	// recording is paused. Scoped to the current agent's suspended session
+	// only — other agents' paused sessions in this repo do not bleed into
+	// this terminal's nudge.
+	emitSuspendedNudge(os.Stdout, ctx.ProjectRoot, agentID)
+
 	emitWhispers(os.Stdout, agentID)
 	return nil
+}
+
+// emitSuspendedNudge writes a single-line system reminder to stdout when
+// the current agent's recording is suspended. No-op when not suspended.
+func emitSuspendedNudge(w io.Writer, projectRoot, agentID string) {
+	if projectRoot == "" || agentID == "" {
+		return
+	}
+	state, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
+	if err != nil || state == nil || state.SuspendedAt == nil {
+		return
+	}
+	dur := formatPausedDuration(time.Since(*state.SuspendedAt))
+	fmt.Fprintf(w, "<system-reminder>[ox] ⏸ Recording SUSPENDED (%s ago). Resume: /ox-session-resume · Stop: /ox-session-stop</system-reminder>\n", dur)
 }
 
 // handleCompact handles the compact phase.
@@ -760,6 +794,9 @@ func runPrimeForHook(agentID string, ctx *HookContext) error {
 
 	cmd := exec.Command(oxPath, args...)
 	env := buildPrimeEnv(agentID)
+	if pair := serializeClearNoticeEnv(ctx.ClearNotice); pair != "" {
+		env = append(env, pair)
+	}
 	cmd.Env = env
 	// pass original raw bytes to preserve unknown fields (not re-serialized)
 	if ctx.Input != nil && len(ctx.Input.RawBytes) > 0 {

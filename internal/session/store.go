@@ -323,6 +323,7 @@ type SessionInfo struct {
 	Origin          string              `json:"origin,omitempty"`           // session origin: "human", "subagent", "agent"
 	HasRawData      bool                `json:"has_raw_data,omitempty"`     // true if raw.jsonl exists with content on disk
 	StopReason      string              `json:"stop_reason,omitempty"`      // how session ended: "stopped", "aborted", "recovered"
+	SuspendedAt     *time.Time          `json:"suspended_at,omitempty"`     // ADR-020: non-nil while session is actively paused
 }
 
 // ListSessions returns session files from the last 7 days, sorted by date descending.

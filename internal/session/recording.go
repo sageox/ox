@@ -27,6 +27,36 @@ var (
 
 const recordingFile = ".recording.json"
 
+// LifecycleAction is the durable timeline action recorded in RecordingState.Lifecycle.
+// See ADR-019 (session entity lifecycle).
+type LifecycleAction string
+
+const (
+	LifecycleActionStart         LifecycleAction = "start"
+	LifecycleActionPause         LifecycleAction = "pause"
+	LifecycleActionResume        LifecycleAction = "resume"
+	LifecycleActionStop          LifecycleAction = "stop"
+	LifecycleActionClearFinalize LifecycleAction = "clear-finalize"
+	LifecycleActionExpired       LifecycleAction = "expired"
+)
+
+// LifecycleEvent is one entry in the durable session-entity timeline. The
+// timeline is the single source of truth for what regions of raw.jsonl are
+// excluded from upload (see ADR-020). At upload time, paired
+// (pause, resume) ranges become redaction rules.
+//
+// Seq is the raw.jsonl entry sequence number at the moment of the event. It
+// is the universal cursor — every adapter writes entries in monotonic seq
+// order regardless of its native cursor type (byte offset, entry count, ULID).
+// Offset is a diagnostic for native adapter cursors.
+type LifecycleEvent struct {
+	Action LifecycleAction `json:"action"`
+	At     time.Time       `json:"at"`
+	Seq    int             `json:"seq,omitempty"`
+	Offset int64           `json:"offset,omitempty"`
+	Reason string          `json:"reason,omitempty"`
+}
+
 // RecordingState tracks an active recording session.
 // Stored in sessions/<session-name>/.recording.json
 type RecordingState struct {
@@ -61,6 +91,18 @@ type RecordingState struct {
 
 	WatchMode string     `json:"watch_mode,omitempty"` // how entries are captured: "hook" (CLI-driven) or "tail" (daemon-driven)
 	StoppedAt *time.Time `json:"stopped_at,omitempty"` // set by ox session stop to signal daemon to finalize
+
+	// ADR-020 session pause/resume fields. Lifecycle is the durable timeline of
+	// session-entity transitions and is the source of truth for which raw.jsonl
+	// seq ranges are excluded from upload. SuspendedAt is the hot-path "is the
+	// session currently paused" check; cleared on resume/stop/abort. PauseCount
+	// is a monotonic counter for observability. InheritedPause + InheritedFromSession
+	// trace a pause that was carried across a /clear boundary.
+	Lifecycle            []LifecycleEvent `json:"lifecycle,omitempty"`
+	SuspendedAt          *time.Time       `json:"suspended_at,omitempty"`
+	PauseCount           int              `json:"pause_count,omitempty"`
+	InheritedPause       bool             `json:"inherited_pause,omitempty"`
+	InheritedFromSession string           `json:"inherited_from_session,omitempty"`
 
 	// Hook observability: lets `ox session status` show whether hooks are firing
 	// and why they're skipping. Without these, a broken recording path (e.g.

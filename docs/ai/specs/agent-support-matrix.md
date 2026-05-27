@@ -48,6 +48,11 @@ Agent-specific hooks (`ox integrate install --<agent>`) are *additive* — they 
 | Anti-entropy (daemon recovery) | Yes | Partial (adapter exists, untested E2E) | Yes | No | No |
 | Multi-turn incremental recording | Yes (JSONL append) | Yes (full re-read delta) | Yes (JSONL append) | No | No |
 | E2E integration tests | Yes (real Claude) | No (needs GEMINI_API_KEY CI) | No (needs OPENAI_API_KEY CI) | No | No |
+| **Session pause/resume** (ADR-020) | | | | | |
+| `ox session pause/resume` commands | Yes | Yes | Yes | Yes | Yes |
+| Per-prompt suspended nudge | Yes (UserPromptSubmit) | Yes (BeforeAgent equivalent) | Limited (no push channel) | Limited | Possible (tui.prompt.append) |
+| `/clear` boundary + pause inheritance | Yes | N/A (different lifecycle) | N/A (different lifecycle) | N/A | N/A |
+| Upload mask honoring lifecycle | Yes (adapter-agnostic) | Yes | Yes | Yes (lifecycle-only; cloud-side data not gated) | Yes |
 
 ## Overall Tier Status
 
