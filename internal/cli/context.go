@@ -126,7 +126,17 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	if env := os.Getenv("AGENT_ENV"); env != "" {
 		resourceAttrs = append(resourceAttrs, attribute.String(observability.AttrAgentEnv, env))
 	}
-	if err := observability.Init(cliCtx.Ctx, "ox-cli", apiEndpoint, resourceAttrs...); err != nil {
+	// The OTLP proxy is JWT-gated; closure resolves the token at export
+	// time so the per-command exporter always uses the latest value on disk
+	// (refreshed by other code paths).
+	tokenFunc := func() string {
+		tok, err := auth.GetTokenForEndpoint(apiEndpoint)
+		if err != nil || tok == nil {
+			return ""
+		}
+		return tok.AccessToken
+	}
+	if err := observability.Init(cliCtx.Ctx, "ox-cli", apiEndpoint, tokenFunc, resourceAttrs...); err != nil {
 		slog.Debug("otel init failed, continuing without tracing", "error", err)
 	}
 

@@ -48,7 +48,7 @@ func TestNewDaemonTracer_NoInit(t *testing.T) {
 // TestNewDaemonTracer_WithInit returns a usable tracer after Init.
 func TestNewDaemonTracer_WithInit(t *testing.T) {
 	resetGlobals()
-	err := Init(context.Background(), "ox-daemon-test", "http://192.0.2.1:4318")
+	err := Init(context.Background(), "ox-daemon-test", "http://192.0.2.1:4318", nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { Shutdown(context.Background()); resetGlobals() })
 
@@ -63,7 +63,7 @@ func TestNewDaemonTracer_WithInit(t *testing.T) {
 // Failure prevented: all daemon tasks sharing one trace, defeating per-task visibility.
 func TestDaemonTracer_StartTask_IndependentTraces(t *testing.T) {
 	resetGlobals()
-	err := Init(context.Background(), "ox-daemon-test", "http://192.0.2.1:4318")
+	err := Init(context.Background(), "ox-daemon-test", "http://192.0.2.1:4318", nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { Shutdown(context.Background()); resetGlobals() })
 
@@ -89,7 +89,7 @@ func TestDaemonTracer_StartTask_IndependentTraces(t *testing.T) {
 // Failure prevented: subtask spans disconnected from parent task trace.
 func TestDaemonTracer_StartSubtask_ChildOfTask(t *testing.T) {
 	resetGlobals()
-	err := Init(context.Background(), "ox-daemon-test", "http://192.0.2.1:4318")
+	err := Init(context.Background(), "ox-daemon-test", "http://192.0.2.1:4318", nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { Shutdown(context.Background()); resetGlobals() })
 
@@ -115,7 +115,7 @@ func TestDaemonTracer_StartSubtask_ChildOfTask(t *testing.T) {
 // Failure prevented: panic or ignored attributes on task spans.
 func TestDaemonTracer_StartTask_WithAttrs(t *testing.T) {
 	resetGlobals()
-	err := Init(context.Background(), "ox-daemon-test", "http://192.0.2.1:4318")
+	err := Init(context.Background(), "ox-daemon-test", "http://192.0.2.1:4318", nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { Shutdown(context.Background()); resetGlobals() })
 
@@ -137,7 +137,7 @@ func TestDaemonTracer_StartTask_WithAttrs(t *testing.T) {
 // Failure prevented: daemon can't set client.id, client.class, etc.
 func TestInit_ExtraAttrs(t *testing.T) {
 	resetGlobals()
-	err := Init(context.Background(), "ox-daemon-test", "http://192.0.2.1:4318",
+	err := Init(context.Background(), "ox-daemon-test", "http://192.0.2.1:4318", nil,
 		attribute.String("client.id", "test-id"),
 		attribute.String("client.class", "daemon"),
 	)
