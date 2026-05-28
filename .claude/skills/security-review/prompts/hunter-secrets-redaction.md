@@ -24,7 +24,7 @@ See `security/SECURITY.md#hunter-secrets-redaction` for the threat-model anchor.
 | New `RawEntry` / session-pipeline write path that calls `os.OpenFile` directly | Chokepoint bypass. The chokepoint comment at `internal/session/raw_writer.go:32` is explicit: every writer goes through `RawWriter`. |
 | New `slog`/`fmt` call site that emits an `auth.StoredToken`, a parsed JWT, or a `keyring.Get` return value | Even `slog.Info("token loaded", "token", t)` leaks because the default formatter calls `%+v` on the struct. |
 | `cmd.Env = append(os.Environ(), "X=<secret>")` for a subprocess | The secret lives in `/proc/<pid>/environ` for the subprocess lifetime, readable by any same-UID process. Prefer stdin pipe. |
-| `os.Setenv("OX_TOKEN", ...)` or any env-set of a credential | Bleeds into every child process the parent later spawns, including unrelated tools. |
+| `os.Setenv("SAGEOX_TOKEN", ...)` or any env-set of a credential | Bleeds into every child process the parent later spawns, including unrelated tools. |
 | New gitleaks-derived detector added or removed in `internal/session/gitleaks_generated.go` or `internal/session/gitleaks_detectors.go` | Removing a detector is a redaction-rule gap; adding one is fine but verify it's wired into `RawWriter.extras`. |
 | Auth token written to `auth.json` (positive direction) | This is the design: tokens go to `~/.config/sageox/auth.json` (or `~/.sageox/config/auth.json` under `OX_XDG_DISABLE`), NOT the OS keyring. The chokepoint there is the file's perms — verify `0600`, not `0644`. |
 

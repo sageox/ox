@@ -25,6 +25,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/ephemeral"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/ledger"
@@ -122,6 +123,13 @@ func initAgentPrimeCmd() {
 	// When true and marker exists: outputs nothing, exits 0 (saves ~1k tokens).
 	// When false (default): always outputs context (safe, may waste tokens on duplicate calls).
 	agentPrimeCmd.Flags().Bool("idempotent", false, "Skip priming if session already primed (token optimization)")
+
+	// --ephemeral: opt-in flag mirroring OX_EPHEMERAL=1. When set, subsystems
+	// that consult ephemeral.IsEphemeral() (daemon, kb, codedb, prime's
+	// HTTP team-context fallback) switch to HTTP-only behavior. The flag
+	// is processed in runAgentPrime BEFORE any subsystem initialization,
+	// by exporting OX_EPHEMERAL=1 into the process environment.
+	agentPrimeCmd.Flags().Bool("ephemeral", false, "Run in ephemeral mode: no daemon, no local clone, HTTP-only reads. Equivalent to OX_EPHEMERAL=1.")
 }
 
 // runAgentPrime bootstraps a new agent instance with team context.
@@ -141,6 +149,15 @@ func initAgentPrimeCmd() {
 // so ox cannot intercept this invocation. Users must run `claude` without a prompt
 // argument to allow the session-start hook to run `ox agent prime` first.
 func runAgentPrime(cmd *cobra.Command, args []string) error {
+	// --ephemeral propagates to subsystems via OX_EPHEMERAL. Set it
+	// BEFORE the agentx gate / daemon health check / any subsystem init
+	// reads ephemeral.IsEphemeral(). This is the only place that needs
+	// to honor the flag — every consumer downstream goes through
+	// ephemeral.IsEphemeral().
+	if ephemeralFlag, _ := cmd.Flags().GetBool("ephemeral"); ephemeralFlag {
+		_ = os.Setenv(ephemeral.EnvEphemeral, "1")
+	}
+
 	// gate: require agent context
 	if errMsg := agentx.RequireAgent("ox agent prime"); errMsg != "" {
 		return fmt.Errorf("%s", errMsg)
@@ -570,6 +587,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		CurrentUserAliases: currentUserAliases,
 	}
 
+	// Ephemeral-mode hint: when running in a cloud agent / CI / Codespaces
+	// with sparse local data, point the calling agent at the cloud MCP
+	// server for context ops it would normally satisfy via local caches.
+	// See docs/ai/adr/adr-ephemeral-mode.md.
+	if ephemeral.IsEphemeral() {
+		output.EphemeralHint = buildEphemeralHint(teamCtx, projectRoot)
+	}
+
 	// ADR-017: surface the binding the agent's CWD currently resolves to.
 	// Look it up in the KB list so the emitted entry carries the same
 	// type/slug/path enrichment as the matching row. Resolve from the
@@ -860,6 +885,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	output.Timing = timing
 
 	err = outputAgentPrime(cmd, textMode, reviewMode, output)
+
+	// Emit PAT expiry warning to stderr (post-output so structured stdout is
+	// never polluted). Internally skipped in ephemeral mode and when stderr
+	// isn't a TTY — so cloud agents and JSON-only consumers never see it.
+	_ = auth.CheckAndWarnExpiry(cmd.Context(), projectEndpoint, os.Stderr)
 
 	// eagerly create whisper.db if not yet present (daemon may take time to start)
 	if projCfg, cfgErr := config.LoadProjectConfig(projectRoot); cfgErr == nil && projCfg != nil {
@@ -1833,9 +1863,35 @@ func trackPrimeTypeMismatch(inst *agentinstance.Instance, claimedType string) {
 // repoSlug is the current repo's "owner/repo" identifier (or empty if unknown).
 // It is used to filter team rules by their repos: frontmatter field — rules
 // that specify a repos: list only load when the current repo matches.
+//
+// In ephemeral mode (no daemon, no clone) this falls through to an HTTP
+// fetch of /api/v1/teams/{team_id}/context, writes the response to disk,
+// and re-runs the local discovery. See agent_prime_ephemeral_fallback.go.
 func discoverTeamContext(projectRoot, repoSlug string) *teamContextInfo {
+	return discoverTeamContextWithFallback(projectRoot, repoSlug, true)
+}
+
+// discoverTeamContextWithFallback is the real implementation. The
+// enableEphemeralFallback flag exists so the HTTP-fallback path can
+// re-invoke local-only discovery without recursing into itself.
+func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemeralFallback bool) *teamContextInfo {
 	if projectRoot == "" {
 		return nil
+	}
+
+	// In ephemeral mode, refresh team context over HTTP on every prime. These
+	// environments do not have a daemon keeping the clone warm, so a successful
+	// prior fetch should not turn the fallback into a one-shot stale cache.
+	if enableEphemeralFallback && ephemeral.IsEphemeral() {
+		if pc, err := config.LoadProjectConfig(projectRoot); err == nil && pc != nil && pc.TeamID != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if info, ferr := tryHTTPTeamContextFallback(ctx, projectRoot, pc.TeamID); ferr == nil && info != nil {
+				return info
+			} else if ferr != nil {
+				slog.Debug("ephemeral team-context fallback failed", "team_id", pc.TeamID, "err", ferr)
+			}
+		}
 	}
 
 	tc := config.FindRepoTeamContext(projectRoot)

@@ -355,6 +355,12 @@ common issues, or --fix-slug to target specific checks.`,
 
 		cli.PrintDisclaimer()
 
+		// trailing PAT expiry warning — single-line stderr, suppressed in
+		// ephemeral mode and when stderr isn't a TTY. Doctor is the right
+		// surface: users run it when something feels off, and a near-expired
+		// PAT is exactly the class of thing they'd want surfaced.
+		_ = auth.CheckAndWarnExpiry(cmd.Context(), projectEndpoint, os.Stderr)
+
 		if hasFailed && (cfg == nil || !cfg.JSON) {
 			return fmt.Errorf("some checks failed")
 		}
@@ -814,6 +820,7 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 			opts.shouldFix(CheckSlugLedgerCleanWorkdir),
 			opts.shouldFix(CheckSlugLedgerEmbeddedCreds),
 			opts.shouldFix(CheckSlugLedgerURLAPIMatch),
+			opts.shouldFix(CheckSlugLedgerUnmergedPaths),
 			opts.shouldFix(CheckSlugGitHubDataMigration),
 		)
 		if len(ledgerGitChecks) > 0 {
@@ -889,12 +896,24 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		}
 	}
 
+	// Category 9b: Ephemeral Mode (own category, NOT merged into Daemon).
+	// Surfacing this as a sibling category — rather than appending it to
+	// Daemon — keeps the Daemon category's "single grouped skip" invariant
+	// intact (see TestDoctorSuppression_DaemonNotRunning) while still
+	// making the predicate visible. Ephemeral mode is the most common
+	// explanation for an absent daemon, but it deserves its own grouping.
+	// See docs/ai/adr/adr-ephemeral-mode.md.
+	progress.show("Ephemeral Mode")
+	categories = append(categories, checkCategory{
+		name:   "Ephemeral Mode",
+		checks: []checkResult{checkEphemeralMode()},
+	})
+
 	// Category 10: Daemon
 	progress.show("Daemon")
 	if state.isDaemonRunning {
 		daemonChecks := checkDaemonHealth(opts)
 		if state.isBootstrapping && len(daemonChecks) > 0 {
-			// prepend bootstrap info banner
 			bootstrapBanner := InfoCheck("daemon bootstrap",
 				"initial sync in progress",
 				"Run `ox doctor` again in a minute")
@@ -1078,8 +1097,9 @@ func enrichCheckResult(check *checkResult) {
 //   - fixWorkdir: whether to auto-commit dirty workdir
 //   - fixEmbeddedCreds: whether to strip embedded oauth2:TOKEN from origin URL
 //   - fixURLAPIMatch: whether to repoint origin URL to the API-authoritative URL
+//   - fixUnmergedPaths: whether to auto-abort a stuck merge/rebase that left U-state files
 //   - fixMigration: whether to migrate legacy GitHub data files
-func checkLedgerGitHealth(networkChecks bool, fixGitignore bool, fixBranch bool, fixWorkdir bool, fixEmbeddedCreds bool, fixURLAPIMatch bool, fixMigration ...bool) []checkResult {
+func checkLedgerGitHealth(networkChecks bool, fixGitignore bool, fixBranch bool, fixWorkdir bool, fixEmbeddedCreds bool, fixURLAPIMatch bool, fixUnmergedPaths bool, fixMigration ...bool) []checkResult {
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
 		return nil // no ledger found, skip entire category
@@ -1097,6 +1117,11 @@ func checkLedgerGitHealth(networkChecks bool, fixGitignore bool, fixBranch bool,
 		checks = append(checks, SkippedCheck("Ledger remote connectivity", "use --fix for network checks", ""))
 	}
 	checks = append(checks,
+		// ox-8zd3: unmerged paths must surface BEFORE clean-workdir. A stuck
+		// merge/rebase/cherry-pick silently blocks every future commit on the
+		// ledger; the previous order let the wedge hide inside the dirty-workdir
+		// counter ("3 modified") instead of producing an actionable P0.
+		checkLedgerUnmergedPaths(fixUnmergedPaths),
 		checkLedgerCleanWorkdir(fixWorkdir),
 		checkLedgerBranchStatus(fixBranch),
 		// ox-eeqi: post-migration the PAT lives in the credential helper,

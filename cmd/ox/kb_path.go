@@ -93,7 +93,7 @@ type kbPathDeps struct {
 	legacy   legacyResolver
 	// pathFor maps a resolved kb_id to its on-disk canonical path. In
 	// production this is paths.KBDir; tests override it so they don't have
-	// to set OX_ENDPOINT to construct expected paths.
+	// to set SAGEOX_ENDPOINT to construct expected paths.
 	pathFor func(kbID string) string
 }
 

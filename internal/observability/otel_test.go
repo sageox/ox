@@ -2,7 +2,11 @@ package observability
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -56,7 +60,7 @@ func TestShutdown_NoInit(t *testing.T) {
 // TestInit_EmptyEndpoint disables tracing gracefully.
 func TestInit_EmptyEndpoint(t *testing.T) {
 	resetGlobals()
-	err := Init(context.Background(), "test", "")
+	err := Init(context.Background(), "test", "", nil)
 	require.NoError(t, err)
 	assert.False(t, Enabled())
 }
@@ -64,7 +68,7 @@ func TestInit_EmptyEndpoint(t *testing.T) {
 // TestInit_InvalidEndpoint disables tracing gracefully.
 func TestInit_InvalidEndpoint(t *testing.T) {
 	resetGlobals()
-	err := Init(context.Background(), "test", "://bad")
+	err := Init(context.Background(), "test", "://bad", nil)
 	require.NoError(t, err)
 	assert.False(t, Enabled())
 }
@@ -85,7 +89,7 @@ func TestInit_ValidEndpoint(t *testing.T) {
 	resetGlobals()
 
 	// Use a non-routable IP so export silently fails (no real Collector needed)
-	err := Init(context.Background(), "ox-cli-test", "http://192.0.2.1:4318")
+	err := Init(context.Background(), "ox-cli-test", "http://192.0.2.1:4318", nil)
 	require.NoError(t, err)
 	assert.True(t, Enabled())
 
@@ -115,6 +119,125 @@ func TestSetCommandStatus_NoSpan(t *testing.T) {
 		SetCommandStatus(nil)
 		SetCommandStatus(assert.AnError)
 	})
+}
+
+// --- I. JWT bearer attachment (regression for OTLP 401 dropouts) ---
+
+// TestInit_BearerAttachedPerRequest verifies the exporter attaches the
+// current token from tokenFunc on every export, and picks up rotated
+// values without restart.
+// Failure prevented: PR #1217 server-side JWT-gating silently dropping
+// CLI/daemon trace batches because the exporter sent no Authorization
+// header (174k 401s/30d in prod).
+func TestInit_BearerAttachedPerRequest(t *testing.T) {
+	resetGlobals()
+
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	var tokenMu sync.Mutex
+	current := "tok-A"
+	tokenFunc := func() string {
+		tokenMu.Lock()
+		defer tokenMu.Unlock()
+		return current
+	}
+
+	require.NoError(t, Init(context.Background(), "ox-cli-test", srv.URL, tokenFunc))
+	require.True(t, Enabled())
+
+	_, span := StartCommand(context.Background(), "ox test-cmd")
+	span.End()
+	Shutdown(context.Background())
+
+	resetGlobals()
+	tokenMu.Lock()
+	current = "tok-B"
+	tokenMu.Unlock()
+
+	require.NoError(t, Init(context.Background(), "ox-cli-test", srv.URL, tokenFunc))
+	_, span2 := StartCommand(context.Background(), "ox test-cmd-2")
+	span2.End()
+	Shutdown(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.NotEmpty(t, seen, "exporter should have made at least one request")
+	for _, h := range seen {
+		assert.True(t, strings.HasPrefix(h, "Bearer "), "every export must carry Bearer header, got %q", h)
+	}
+	// At least one batch from each phase should reflect its rotated token.
+	assert.Contains(t, seen, "Bearer tok-A")
+	assert.Contains(t, seen, "Bearer tok-B")
+}
+
+// TestInit_NilTokenFuncSendsUnauthenticated verifies that passing nil
+// tokenFunc is a no-op for header injection (the server will then 401,
+// which matches "logged out" behavior). Documents the contract.
+func TestInit_NilTokenFuncSendsUnauthenticated(t *testing.T) {
+	resetGlobals()
+
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	require.NoError(t, Init(context.Background(), "ox-cli-test", srv.URL, nil))
+	_, span := StartCommand(context.Background(), "ox test-cmd")
+	span.End()
+	Shutdown(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, h := range seen {
+		assert.Empty(t, h, "nil tokenFunc must not inject Authorization")
+	}
+}
+
+// TestInit_EmptyTokenSkipsHeader verifies that a tokenFunc returning ""
+// (e.g. user logged out) leaves Authorization unset rather than sending
+// "Bearer ", which would be a parse error server-side.
+func TestInit_EmptyTokenSkipsHeader(t *testing.T) {
+	resetGlobals()
+
+	var (
+		mu   sync.Mutex
+		seen []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	require.NoError(t, Init(context.Background(), "ox-cli-test", srv.URL, func() string { return "" }))
+	_, span := StartCommand(context.Background(), "ox test-cmd")
+	span.End()
+	Shutdown(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	for _, h := range seen {
+		assert.Empty(t, h, "empty tokenFunc value must not inject Authorization")
+	}
 }
 
 func resetGlobals() {

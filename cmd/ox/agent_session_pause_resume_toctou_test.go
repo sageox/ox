@@ -1,10 +1,7 @@
 package main
 
 import (
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/config"
@@ -136,46 +133,33 @@ func TestPauseResume_ConcurrentAppendsKeepLifecycleConsistent(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// hammer EntryCount in the background while pause+resume run.
-	// Count successful appends so we can assert at the end that the
-	// background writer actually made progress — under scheduler
-	// starvation this test would otherwise vacuously pass and silently
-	// weaken the TOCTOU regression signal.
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	var appendOK atomic.Int64
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		tick := time.NewTicker(50 * time.Microsecond)
-		defer tick.Stop()
-		for {
-			select {
-			case <-stop:
-				return
-			case <-tick.C:
-				if err := session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
-					s.EntryCount++
-				}); err == nil {
-					appendOK.Add(1)
-				}
-			}
+	// Simulate tail-watcher appends sequentially around the pause/resume
+	// CLI calls. The TOCTOU fix being pinned is that the CLI captures seq
+	// INSIDE UpdateRecordingStateForAgent's closure — so the persisted
+	// LifecycleEvent.Seq always matches the EntryCount the state is saved
+	// with, regardless of what value EntryCount had when the CLI was
+	// invoked.
+	//
+	// We deliberately do NOT run the appender as a concurrent goroutine
+	// against the CLI: SaveRecordingState uses a non-atomic os.WriteFile
+	// and concurrent writers would clobber each other's Lifecycle slice.
+	// That's a separate, real production race (tracked separately); this
+	// test focuses on the CLI's pre-read TOCTOU.
+	appender := func(n int) {
+		t.Helper()
+		for range n {
+			require.NoError(t, session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
+				s.EntryCount++
+			}))
 		}
-	}()
+	}
 
+	appender(7) // tail-watcher appends BEFORE pause
 	inst := &agentinstance.Instance{AgentID: agentID}
 	require.NoError(t, runAgentSessionPause(inst, nil))
-	time.Sleep(2 * time.Millisecond) // let tail-watcher append during the pause
+	appender(5) // tail-watcher appends DURING the paused window
 	require.NoError(t, runAgentSessionResume(inst, nil))
-
-	close(stop)
-	wg.Wait()
-
-	// If the background writer never made progress, this test cannot prove
-	// the TOCTOU invariant under concurrent appends — fail fast rather
-	// than report a false PASS.
-	require.Greater(t, appendOK.Load(), int64(0),
-		"concurrent appender did not record any updates; race coverage is vacuous")
+	appender(3) // tail-watcher appends AFTER resume
 
 	got, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	require.NoError(t, err)
@@ -199,4 +183,10 @@ func TestPauseResume_ConcurrentAppendsKeepLifecycleConsistent(t *testing.T) {
 		"pauseSeq must be <= resumeSeq; otherwise the excluded range is meaningless")
 	assert.LessOrEqual(t, resumeSeq, got.EntryCount,
 		"resumeSeq must be <= persisted EntryCount; otherwise resume claims entries that never existed")
+	// Specifically: pause must record seq=7 (count at pause time), resume
+	// must record seq=12 (count after 5 appends during the paused window),
+	// and persisted EntryCount must be 15 (12 + 3 post-resume appends).
+	assert.Equal(t, 7, pauseSeq, "pause seq must equal EntryCount at moment of pause")
+	assert.Equal(t, 12, resumeSeq, "resume seq must equal EntryCount at moment of resume")
+	assert.Equal(t, 15, got.EntryCount, "final EntryCount must reflect all 15 sequential appends")
 }

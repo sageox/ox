@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/ephemeral"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -27,9 +28,18 @@ var (
 )
 
 // IsDaemonDisabled returns true if the daemon has been explicitly disabled
-// via the SAGEOX_DAEMON=false environment variable.
+// via SAGEOX_DAEMON=false, or implicitly disabled because ox is running in
+// an ephemeral cloud agent (Claude Cloud, Devin, Codespaces, CI). Daemon
+// does not run in ephemeral cloud agents; see internal/ephemeral/mode.go.
 func IsDaemonDisabled() bool {
-	return strings.ToLower(os.Getenv("SAGEOX_DAEMON")) == "false"
+	if strings.ToLower(os.Getenv("SAGEOX_DAEMON")) == "false" {
+		return true
+	}
+	if ephemeral.IsEphemeral() {
+		slog.Debug("daemon disabled by ephemeral mode", "reason", ephemeral.Reason())
+		return true
+	}
+	return false
 }
 
 // Config holds daemon configuration settings.

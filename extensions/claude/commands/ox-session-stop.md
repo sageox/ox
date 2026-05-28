@@ -14,10 +14,11 @@ Follow the `guidance` field for next steps.
 1. Read the prompt carefully — it references the raw session file on disk
 2. Read the raw session file at the path specified in the prompt
 3. Generate the summary JSON following the Output Format in the prompt
-4. Save it to a temporary file (e.g., `.ox-summary.json` in the workspace root, or `/tmp/ox-summary.json`) — do NOT write to the session cache dir as it may be outside the workspace sandbox
-5. If the prompt includes a `push-summary` step, run that command with `--file` pointing to your temp file
-6. Verify the push succeeded by checking the JSON output for `"success": true`
-7. Clean up the temporary summary file
+4. Pipe the JSON to `ox session push-summary --file - --session-dir <session-dir>` via stdin. Do NOT write the JSON to `/tmp/` or any shared path — multiple agents may run concurrently on the same machine and race on shared filenames, and macOS tmpfs GC can reap files between attempts.
+   ```bash
+   echo "$summary_json" | ox session push-summary --file - --session-dir <session-dir>
+   ```
+5. Verify the push succeeded by checking the JSON output for `"success": true`
 
 **If `summary_prompt` is absent (async mode):**
 No agent action required. Upload and summary generation happen automatically in the background.

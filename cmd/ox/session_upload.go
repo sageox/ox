@@ -173,7 +173,7 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 		if strings.Contains(string(output), "nothing to commit") {
 			return nil
 		}
-		return fmt.Errorf("git commit failed: %s: %w", string(output), err)
+		return fmt.Errorf("%s: %w", wrapCommitError(string(output), err), err)
 	}
 
 	// push with pull --rebase retry (up to 3 attempts)
@@ -212,7 +212,7 @@ func commitPointerRewriteAndPush(ledgerPath, sessionName string, pointerPaths []
 		if strings.Contains(string(output), "nothing to commit") {
 			return nil
 		}
-		return fmt.Errorf("git commit failed: %s: %w", string(output), err)
+		return fmt.Errorf("%s: %w", wrapCommitError(string(output), err), err)
 	}
 
 	// push with pull --rebase retry. If the remote has independently modified

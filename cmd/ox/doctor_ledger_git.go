@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -27,6 +29,11 @@ const (
 	CheckSlugLedgerCleanWorkdir    = "ledger-clean-workdir"
 	CheckSlugLedgerURLAPIMatch     = "ledger-url-api-match"
 	CheckSlugLedgerCacheTracked    = "ledger-cache-tracked"
+	// CheckSlugLedgerUnmergedPaths detects an in-progress merge/rebase/cherry-pick
+	// that has left files in U-state. These wedges silently block every future
+	// commit on the ledger (push-summary, doctor auto-commit, session uploads)
+	// until cleared. See bd ox-8zd3 for the original incident.
+	CheckSlugLedgerUnmergedPaths = "ledger-unmerged-paths"
 )
 
 func init() {
@@ -50,6 +57,21 @@ func init() {
 		FixLevel:    FixLevelAuto,
 		Description: "Checks if local ledger branch is up-to-date with remote",
 		Run:         func(fix bool) checkResult { return checkLedgerBranchStatus(fix) },
+	})
+
+	// Register the unmerged-paths check ahead of the clean-workdir check so
+	// the wedge — which silently blocks every future commit — surfaces with
+	// a higher-priority status before the dirty-workdir check tries (and
+	// fails) to auto-commit on top of it. The actual ordering in the
+	// doctor run is established in checkLedgerGitHealth (doctor.go); this
+	// note documents the intent for anyone touching either site.
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugLedgerUnmergedPaths,
+		Name:        "Ledger unmerged paths",
+		Category:    "Ledger Git Health",
+		FixLevel:    FixLevelAuto,
+		Description: "Detects ledger files left in U-state by a stuck merge/rebase/cherry-pick",
+		Run:         func(fix bool) checkResult { return checkLedgerUnmergedPaths(fix) },
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
@@ -282,7 +304,12 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 		cancel()
 		if resolveErr != nil {
 			slog.Debug("rebase auto-resolve failed", "error", resolveErr)
-			_ = exec.Command("git", "-C", ledgerPath, "rebase", "--abort").Run()
+			// AuditAndAbort: log HEAD SHA, unmerged files, and stash count
+			// before discarding rebase state so silent recovery is not
+			// invisible. See ox-ooy3 and .claude/rules/daemon-git.md.
+			abortCtx, abortCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			_ = gitutil.AuditAndAbort(abortCtx, ledgerPath, gitutil.AuditOpRebase, "doctor --fix auto-resolve failed", slog.Default())
+			abortCancel()
 			return FailedCheck("Ledger branch status",
 				"pull --rebase failed (aborted)",
 				fmt.Sprintf("Conflict during rebase (aborted to restore clean state): %s", errStr))
@@ -338,9 +365,243 @@ func fixLedgerBranchDiverged(ledgerPath string, aheadCount, behindCount int) che
 		fmt.Sprintf("reconciled: rebased %d + pushed %d commit(s)", behindCount, aheadCount))
 }
 
+// checkLedgerUnmergedPaths detects ledger files left in U-state by a stuck
+// merge / rebase / cherry-pick. These wedges silently block every future
+// commit on the ledger — including push-summary and ox doctor's own
+// auto-commit path — until the operation is aborted or the conflicts are
+// resolved.
+//
+// Failure prevented: a 6-day-old wedge in sessions/<name>/ that blocked
+// every coworker's push-summary while ox doctor reported "Ledger clean
+// workdir: 3 modified" (the wedge was silently lumped into the modified
+// counter). See bd ox-8zd3 for the original incident.
+func checkLedgerUnmergedPaths(fix bool) checkResult {
+	const name = "Ledger unmerged paths"
+
+	ledgerPath := getLedgerPath()
+	if ledgerPath == "" {
+		return SkippedCheck(name, "no ledger found", "")
+	}
+
+	if !isGitRepo(ledgerPath) {
+		return SkippedCheck(name, "ledger not a git repo", "")
+	}
+
+	statusCmd := exec.Command("git", "-C", ledgerPath, "status", "--porcelain=v1")
+	output, err := statusCmd.Output()
+	if err != nil {
+		return SkippedCheck(name, "status check failed", "")
+	}
+
+	unmerged := parseUnmergedPaths(string(output))
+	if len(unmerged) == 0 {
+		return PassedCheck(name, "no conflicts")
+	}
+
+	if !fix {
+		return unmergedPathsFailure(name, ledgerPath, unmerged)
+	}
+
+	return fixLedgerUnmergedPaths(ledgerPath, unmerged)
+}
+
+// unmergedPathsFailure constructs the P0 failure surfaced when unmerged
+// paths are present. Extracted so the message shape is unit-testable
+// without standing up a real git repo.
+func unmergedPathsFailure(name, ledgerPath string, unmerged []unmergedPath) checkResult {
+	sample := make([]string, 0, 3)
+	for i, u := range unmerged {
+		if i >= 3 {
+			break
+		}
+		sample = append(sample, fmt.Sprintf("%s %s", u.Code, u.Path))
+	}
+	more := ""
+	if len(unmerged) > len(sample) {
+		more = fmt.Sprintf(" (+%d more)", len(unmerged)-len(sample))
+	}
+	detail := fmt.Sprintf(
+		"%d file(s) in U-state at %s%s:\n       %s\n       Run `ox doctor --fix` to abort the stuck operation and clear the wedge.",
+		len(unmerged), ledgerPath, more, strings.Join(sample, "\n       "),
+	)
+	// CriticalCheck — this silently blocks every future commit (push-summary,
+	// session uploads, doctor auto-commit). It must be loud.
+	r := CriticalCheck(name, fmt.Sprintf("%d unresolved conflict(s)", len(unmerged)), detail)
+	r.slug = CheckSlugLedgerUnmergedPaths
+	r.fixLevel = FixLevelAuto
+	return r
+}
+
+// unmergedPath represents a single `git status --porcelain` entry whose
+// XY pair indicates an unmerged path (per git-status(1)).
+type unmergedPath struct {
+	Code string // e.g. "UU", "AA", "DD"
+	Path string
+}
+
+// isUnmergedCode reports whether the XY pair from `git status --porcelain`
+// indicates an unmerged path. Per git-status(1):
+//
+//	DD    unmerged, both deleted
+//	AU    unmerged, added by us
+//	UD    unmerged, deleted by them
+//	UA    unmerged, added by them
+//	DU    unmerged, deleted by us
+//	AA    unmerged, both added
+//	UU    unmerged, both modified
+//
+// Any other XY combination (e.g. " M", "M ", "??", "A ") is NOT unmerged.
+func isUnmergedCode(x, y byte) bool {
+	switch string([]byte{x, y}) {
+	case "DD", "AU", "UD", "UA", "DU", "AA", "UU":
+		return true
+	}
+	return false
+}
+
+// parseUnmergedPaths scans `git status --porcelain=v1` output and returns
+// the subset of entries that are in U-state. Lines that don't fit the
+// porcelain shape are silently skipped — they would also be invisible to
+// `git commit` so callers can't act on them anyway.
+func parseUnmergedPaths(porcelain string) []unmergedPath {
+	if porcelain == "" {
+		return nil
+	}
+	var out []unmergedPath
+	for _, raw := range strings.Split(porcelain, "\n") {
+		if len(raw) < 4 {
+			// "XY <space> <path>" — minimum 4 bytes
+			continue
+		}
+		x, y := raw[0], raw[1]
+		if !isUnmergedCode(x, y) {
+			continue
+		}
+		// raw[2] is always a space; the path begins at raw[3].
+		// Rename entries (`R  old -> new`) don't appear for unmerged
+		// codes per the porcelain spec, so we don't need to split on " -> ".
+		path := raw[3:]
+		out = append(out, unmergedPath{Code: string([]byte{x, y}), Path: path})
+	}
+	return out
+}
+
+// fixLedgerUnmergedPaths attempts to clear an unmerged-path wedge by aborting
+// the in-progress operation that created it. Aborts are intentionally chosen
+// over `git reset` / `checkout --theirs` because they're reversible — they
+// only undo the operation in flight, never user-authored commits.
+//
+// If no in-progress operation can be identified (rare — usually means the
+// conflict was staged manually via `git update-index --cacheinfo`), the
+// situation is surfaced for human attention rather than guessed at.
+func fixLedgerUnmergedPaths(ledgerPath string, unmerged []unmergedPath) checkResult {
+	const name = "Ledger unmerged paths"
+
+	op, hint := detectInProgressGitOp(ledgerPath)
+	if op == "" {
+		// No state markers — likely a manually-staged conflict, OR
+		// detectInProgressGitOp could not inspect .git (permission/IO).
+		// DO NOT auto-resolve; the right action depends on user intent.
+		sample := unmerged[0].Path
+		if len(unmerged) > 1 {
+			sample = fmt.Sprintf("%s (+%d more)", sample, len(unmerged)-1)
+		}
+		// Surface the inspection error when present so a permission/IO failure
+		// in os.Stat(.git) is visible instead of silently downgraded to
+		// "manually-staged conflict."
+		prefix := ""
+		if hint != "" {
+			prefix = fmt.Sprintf("could not inspect .git for in-progress operation (%s).\n       ", hint)
+		}
+		detail := prefix + fmt.Sprintf(
+			"%d unmerged file(s) but no merge/rebase/cherry-pick in progress (%s).\n       "+
+				"This usually means the conflict was staged manually. Resolve by hand:\n       "+
+				"  cd %s\n       "+
+				"  git status                       # inspect the conflict\n       "+
+				"  git checkout --ours <file>       # or --theirs, depending on intent\n       "+
+				"  git reset HEAD <file>            # if you want to discard the staged conflict",
+			len(unmerged), sample, ledgerPath,
+		)
+		r := FailedCheck(name, "manual resolution required", detail)
+		r.slug = CheckSlugLedgerUnmergedPaths
+		return r
+	}
+
+	// AuditAndAbort: structured pre/post audit so silent recovery from a
+	// wedged ledger leaves a trail. See ox-ooy3 and .claude/rules/daemon-git.md.
+	abortCtx, abortCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	abortErr := gitutil.AuditAndAbort(abortCtx, ledgerPath, gitutil.AuditableOp(op), "doctor --fix unmerged-paths wedge", slog.Default())
+	abortCancel()
+	if abortErr != nil {
+		return FailedCheck(name,
+			fmt.Sprintf("git %s --abort failed", op),
+			fmt.Sprintf("error: %s\n       %s", abortErr, hint))
+	}
+
+	slog.Info("ledger unmerged-paths wedge cleared",
+		"op", op, "ledger", ledgerPath, "files", len(unmerged),
+	)
+	return PassedCheck(name,
+		fmt.Sprintf("aborted stuck %s (%d file(s) cleared)", op, len(unmerged)))
+}
+
+// detectInProgressGitOp inspects the ledger's .git directory for markers
+// of an in-progress merge / rebase / cherry-pick and returns the
+// corresponding `git <op> --abort` operation name. Returns "" if no
+// marker is present.
+//
+// The second return value is a human-readable hint used when the abort
+// itself fails, to help a human follow up by hand.
+func detectInProgressGitOp(ledgerPath string) (op, hint string) {
+	gitDir := filepath.Join(ledgerPath, ".git")
+	// .git may be a file (gitlink) in worktree-style layouts; we don't
+	// support that for ledgers today, so a missing dir means "no op."
+	// Distinguish "doesn't exist" (clean no-op) from permission/IO failures
+	// (caller surfaces hint so a human can investigate) so we don't silently
+	// downgrade an inspection error to "nothing to do."
+	if _, err := os.Stat(gitDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", ""
+		}
+		return "", fmt.Sprintf("stat .git: %v", err)
+	}
+
+	// rebase-merge / rebase-apply are state directories. They exist for
+	// the duration of an interactive or non-interactive rebase respectively.
+	if _, err := os.Stat(filepath.Join(gitDir, "rebase-merge")); err == nil {
+		return "rebase", "rebase state dir present: .git/rebase-merge/"
+	}
+	if _, err := os.Stat(filepath.Join(gitDir, "rebase-apply")); err == nil {
+		return "rebase", "rebase state dir present: .git/rebase-apply/"
+	}
+
+	// MERGE_HEAD / CHERRY_PICK_HEAD / REVERT_HEAD are single-file markers
+	// written by git when those operations begin and removed when they
+	// complete (or are aborted).
+	if _, err := os.Stat(filepath.Join(gitDir, "CHERRY_PICK_HEAD")); err == nil {
+		return "cherry-pick", "CHERRY_PICK_HEAD present"
+	}
+	if _, err := os.Stat(filepath.Join(gitDir, "MERGE_HEAD")); err == nil {
+		return "merge", "MERGE_HEAD present"
+	}
+	// REVERT_HEAD doesn't typically produce U-state conflicts ox cares
+	// about, but we include it for completeness — `git revert --abort`
+	// is the documented escape hatch.
+	if _, err := os.Stat(filepath.Join(gitDir, "REVERT_HEAD")); err == nil {
+		return "revert", "REVERT_HEAD present"
+	}
+	return "", ""
+}
+
 // checkLedgerCleanWorkdir checks for uncommitted changes in the ledger repository.
 // Reports if there are staged, unstaged, or untracked files.
 // With fix=true, auto-commits all changes. The ledger is fully ox-managed.
+//
+// Unmerged paths (U-state from a stuck merge/rebase/cherry-pick) are
+// intentionally skipped here — they're surfaced separately by
+// checkLedgerUnmergedPaths, which runs first. Folding them into the
+// "modified" counter (as this function used to) let a 6-day-old wedge
+// hide behind a benign "3 modified" line.
 func checkLedgerCleanWorkdir(fix bool) checkResult {
 	ledgerPath := getLedgerPath()
 	if ledgerPath == "" {
@@ -384,6 +645,13 @@ func checkLedgerCleanWorkdir(fix bool) checkResult {
 		// X = index status, Y = work tree status
 		indexStatus := line[0]
 		workTreeStatus := line[1]
+
+		// Skip unmerged entries — they're counted by checkLedgerUnmergedPaths.
+		// Without this guard the wedge gets double-counted as "N modified"
+		// and the more actionable unmerged-paths failure gets buried.
+		if isUnmergedCode(indexStatus, workTreeStatus) {
+			continue
+		}
 
 		if indexStatus == '?' && workTreeStatus == '?' {
 			untracked++

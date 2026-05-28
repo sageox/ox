@@ -254,12 +254,17 @@ func BuildSummaryPrompt(entries []Entry, rawPath, ledgerSessionDir string) strin
 	sb.WriteString("2. Identify the main goal and what was accomplished\n")
 	sb.WriteString("3. Find the pivotal aha moments (questions, insights, decisions)\n")
 	sb.WriteString("4. Generate the JSON with all required fields from the Output Format above\n")
-	sb.WriteString("5. Save the summary JSON to a temporary file (e.g., `/tmp/ox-summary.json` or `.ox-summary.json` in the workspace root)\n")
 
 	// if ledger session dir is available, add push instruction
 	if ledgerSessionDir != "" {
-		fmt.Fprintf(&sb, "6. Push summary to ledger by running: `ox session push-summary --file <path-to-summary-file> --session-dir %s`\n", ledgerSessionDir)
-		sb.WriteString("   Replace `<path-to-summary-file>` with the actual path where you saved the summary in step 5\n")
+		// Pipe via stdin (`--file -`) — do NOT write the JSON to /tmp/ or any
+		// shared path. macOS tmpfs GC can reap the file between write and read,
+		// and multiple agents running concurrently on the same machine would
+		// race on a shared filename. Stdin avoids both failure modes.
+		fmt.Fprintf(&sb, "5. Pipe the summary JSON to push-summary via stdin (do NOT write to `/tmp/` — multiple agents may race on shared paths):\n")
+		fmt.Fprintf(&sb, "   ```bash\n")
+		fmt.Fprintf(&sb, "   echo \"$summary_json\" | ox session push-summary --file - --session-dir %s\n", ledgerSessionDir)
+		fmt.Fprintf(&sb, "   ```\n")
 	}
 
 	// Suppress unused-param warning for `entries` without changing the API;

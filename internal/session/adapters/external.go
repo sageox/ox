@@ -654,9 +654,11 @@ func isAllowlisted(name string) bool {
 	if allowlistedEnvVars[name] {
 		return true
 	}
-	// OX_* protocol vars are always passed through
+	// OX_* protocol vars are always passed through — EXCEPT names matching
+	// the credential denylist, which must never leak to
+	// adapter subprocesses regardless of prefix.
 	if strings.HasPrefix(name, "OX_") {
-		return true
+		return !isDenylisted(name)
 	}
 	for _, prefix := range allowlistedEnvPrefixes {
 		if strings.HasPrefix(name, prefix) {

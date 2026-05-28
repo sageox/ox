@@ -64,3 +64,16 @@ Both remote and local writes happen:
 - All `git add` MUST use `--sparse` (git 2.37+ refuses staging outside sparse definition otherwise)
 - All `git pull --rebase` MUST use `--autostash` (uncommitted changes block pull otherwise)
 - Use `git add -f` for files inside `.gitignore`-excluded paths
+
+## Ephemeral-mode exception
+
+When `ephemeral.IsEphemeral()` is true (`OX_EPHEMERAL=1`, user-config opt-in,
+or auto-detected via `CLAUDE_CODE_REMOTE`, `DEVIN_TASK_ID`, `CODESPACES`, CI
+signals), the daemon does not run and the daemon-CLI split has no daemon
+side. The CLI performs **reads via HTTP API** (team context via
+`GET /api/v1/teams/:id/context`, ledger metadata via
+`GET /api/v1/repos/:id/ledger-status`) and **writes via HTTP** (Phase 2:
+session upload + LFS Batch API). Pull-direction git operations are skipped
+entirely; the local ledger clone never exists.
+
+See `docs/ai/adr/adr-ephemeral-mode.md` for the full rationale and rollout phases.

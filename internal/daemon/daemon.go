@@ -1079,7 +1079,17 @@ func (d *Daemon) initComponents() time.Duration {
 		if env := os.Getenv("AGENT_ENV"); env != "" {
 			daemonAttrs = append(daemonAttrs, attribute.String(observability.AttrAgentEnv, env))
 		}
-		if err := observability.Init(d.ctx, "ox-daemon", apiEndpoint, daemonAttrs...); err != nil {
+		// The OTLP proxy is JWT-gated. The daemon is long-running and the
+		// stored token rotates on refresh, so resolve per-export via this
+		// closure rather than baking a static header at Init time.
+		tokenFunc := func() string {
+			tok, err := auth.GetTokenForEndpoint(apiEndpoint)
+			if err != nil || tok == nil {
+				return ""
+			}
+			return tok.AccessToken
+		}
+		if err := observability.Init(d.ctx, "ox-daemon", apiEndpoint, tokenFunc, daemonAttrs...); err != nil {
 			d.logger.Warn("otel tracing init failed", "error", err)
 		}
 		d.tracer = observability.NewDaemonTracer()

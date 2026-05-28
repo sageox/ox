@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
@@ -24,6 +25,27 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// TokenFunc returns the current bearer token to attach to OTLP requests.
+// Called per-export so long-running processes (daemon) pick up rotated tokens.
+// Returning "" sends the request unauthenticated — the server JWT-gate will
+// then 401 and the batch is dropped, which is the correct behavior when the
+// user is logged out.
+type TokenFunc func() string
+
+type bearerRoundTripper struct {
+	base      http.RoundTripper
+	tokenFunc TokenFunc
+}
+
+func (rt *bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if tok := rt.tokenFunc(); tok != "" {
+		// clone to avoid mutating the caller's request (otlptracehttp may retry)
+		req = req.Clone(req.Context())
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	return rt.base.RoundTrip(req)
+}
+
 var (
 	mu       sync.RWMutex
 	rootCtx  context.Context
@@ -35,11 +57,19 @@ var (
 // Init sets up the OTel TracerProvider with OTLP/HTTP export to the SageOx
 // OTLP proxy at {apiEndpoint}/api/v1/otlp/v1/traces.
 //
+// The proxy is JWT-gated (see apps/api-go/internal/handlers/otlp_proxy.go),
+// so tokenFunc is required for exports to succeed. tokenFunc is invoked
+// per-request rather than baked into a static header so long-running
+// processes (the daemon) pick up rotated tokens without restart.
+//
 // Extra attrs are merged into the OTel resource alongside service.name.
 // The daemon uses this to set client.id, client.class, os.type, etc.
 //
-// Safe to call with empty apiEndpoint — tracing is disabled (noop).
-func Init(ctx context.Context, serviceName, apiEndpoint string, attrs ...attribute.KeyValue) error {
+// Safe to call with empty apiEndpoint or nil tokenFunc — tracing is
+// disabled (noop) or sends unauthenticated (server will 401, batch
+// dropped silently). Either is fine for tests and for users who are
+// logged out.
+func Init(ctx context.Context, serviceName, apiEndpoint string, tokenFunc TokenFunc, attrs ...attribute.KeyValue) error {
 	if apiEndpoint == "" {
 		slog.Debug("otel tracing disabled", "reason", "no endpoint")
 		return nil
@@ -58,6 +88,12 @@ func Init(ctx context.Context, serviceName, apiEndpoint string, attrs ...attribu
 	}
 	if parsed.Scheme == "http" {
 		opts = append(opts, otlptracehttp.WithInsecure())
+	}
+	if tokenFunc != nil {
+		opts = append(opts, otlptracehttp.WithHTTPClient(&http.Client{
+			Timeout:   2 * time.Second,
+			Transport: &bearerRoundTripper{base: http.DefaultTransport, tokenFunc: tokenFunc},
+		}))
 	}
 
 	exporter, err := otlptracehttp.New(ctx, opts...)

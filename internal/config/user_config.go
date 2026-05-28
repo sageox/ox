@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/sageox/ox/internal/ephemeral"
 	"github.com/sageox/ox/internal/paths"
 	"gopkg.in/yaml.v3"
 )
@@ -342,6 +343,54 @@ type UserConfig struct {
 	// Hooks holds per-hook-event policy switches. Today only carries the
 	// UserPromptSubmit cloud_query opt-in; see HooksConfig for rationale.
 	Hooks *HooksConfig `yaml:"hooks,omitempty"`
+
+	// Ephemeral is the persisted user preference for ephemeral mode (no
+	// daemon, no local ledger clone, HTTP-only reads). Pointer so we can
+	// distinguish unset (nil) from explicit false. When non-nil, the value
+	// is published to internal/ephemeral at load time via
+	// ephemeral.SetUserConfigPreference, which treats it as the
+	// lowest-precedence signal — any env var, venue marker, or CI
+	// signal still overrides it. See docs/ai/adr/adr-ephemeral-mode.md.
+	Ephemeral *bool `yaml:"ephemeral,omitempty"`
+
+	// PATExpiryWarningThresholdPct is the fraction of token lifetime remaining
+	// at which to emit a single-line stderr warning during interactive
+	// commands. Default 0.05 (warn at 5% remaining). The effective threshold
+	// is max(PATExpiryWarningMinDays, lifetime*pct) — the floor still applies
+	// when this is zero. Set both this AND PATExpiryWarningMinDays to 0 to
+	// disable warnings entirely. Pointer keeps the zero/unset distinction.
+	PATExpiryWarningThresholdPct *float64 `yaml:"pat_expiry_warning_threshold_pct,omitempty"`
+
+	// PATExpiryWarningMinDays is the floor in days for the PAT expiry
+	// warning threshold (default 1). Combined with PATExpiryWarningThresholdPct
+	// via max(). Set to 0 with pct==0 to disable warnings entirely.
+	PATExpiryWarningMinDays *int `yaml:"pat_expiry_warning_min_days,omitempty"`
+}
+
+// PATExpiryWarningDefaults returns the default warning threshold (5%) and
+// minimum days floor (1) for PAT expiry warnings.
+func PATExpiryWarningDefaults() (pct float64, minDays int) {
+	return 0.05, 1
+}
+
+// GetPATExpiryWarningThresholdPct returns the configured threshold percentage,
+// defaulting to 0.05 when unset.
+func (c *UserConfig) GetPATExpiryWarningThresholdPct() float64 {
+	if c == nil || c.PATExpiryWarningThresholdPct == nil {
+		pct, _ := PATExpiryWarningDefaults()
+		return pct
+	}
+	return *c.PATExpiryWarningThresholdPct
+}
+
+// GetPATExpiryWarningMinDays returns the configured minimum-days floor,
+// defaulting to 1 when unset.
+func (c *UserConfig) GetPATExpiryWarningMinDays() int {
+	if c == nil || c.PATExpiryWarningMinDays == nil {
+		_, days := PATExpiryWarningDefaults()
+		return days
+	}
+	return *c.PATExpiryWarningMinDays
 }
 
 // BadgeConfig tracks badge suggestion state across all projects.
@@ -528,14 +577,33 @@ func (c *UserConfig) SetMurmurReceive(mode string) {
 // LoadUserConfig loads user configuration using standard path discovery.
 // Checks OX_USER_CONFIG env var first, then XDG/default paths.
 //
+// Also publishes the user's ephemeral-mode preference into
+// internal/ephemeral so subsystem checks pick it up without forming a
+// reverse import edge.
+//
 // For tests that need to load from an explicit directory, use LoadUserConfigFrom.
 func LoadUserConfig() (*UserConfig, error) {
 	// OX_USER_CONFIG overrides all path discovery — for CI/ephemeral environments
 	if envPath := os.Getenv(EnvUserConfig); envPath != "" {
-		return loadUserConfigFromFile(envPath)
+		cfg, err := loadUserConfigFromFile(envPath)
+		publishEphemeralPreference(cfg)
+		return cfg, err
 	}
 
-	return LoadUserConfigFrom("")
+	cfg, err := LoadUserConfigFrom("")
+	publishEphemeralPreference(cfg)
+	return cfg, err
+}
+
+// publishEphemeralPreference forwards the user-config Ephemeral pointer to
+// the ephemeral package so its lowest-precedence signal stays in sync with
+// disk. Tolerates nil cfg.
+func publishEphemeralPreference(cfg *UserConfig) {
+	if cfg == nil {
+		ephemeral.SetUserConfigPreference(nil)
+		return
+	}
+	ephemeral.SetUserConfigPreference(cfg.Ephemeral)
 }
 
 // LoadUserConfigFrom loads user configuration from the specified config directory.

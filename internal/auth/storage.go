@@ -114,6 +114,10 @@ func GetToken() (*StoredToken, error) {
 func GetTokenForEndpoint(ep string) (*StoredToken, error) {
 	ep = endpoint.NormalizeEndpoint(ep)
 
+	if envTok := tokenFromEnv(ep); envTok != nil {
+		return envTok, nil
+	}
+
 	authPath, err := GetAuthFilePath()
 	if err != nil {
 		return nil, err
@@ -315,6 +319,10 @@ func (c *AuthClient) GetToken() (*StoredToken, error) {
 // GetTokenForEndpoint loads the authentication token for a specific API endpoint
 func (c *AuthClient) GetTokenForEndpoint(ep string) (*StoredToken, error) {
 	ep = endpoint.NormalizeEndpoint(ep)
+
+	if envTok := tokenFromEnv(ep); envTok != nil {
+		return envTok, nil
+	}
 
 	authPath, err := c.GetAuthFilePath()
 	if err != nil {

@@ -36,6 +36,7 @@ import (
 	"sync"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/ephemeral"
 	"github.com/sageox/ox/internal/endpoint"
 )
 
@@ -188,9 +189,15 @@ func NewMerger(kb KBSource, teams LegacyTeamSource, ledger LedgerSource) *Merger
 }
 
 // kbDisabledByEnv returns true when OX_KB_DISABLE is set to a value
-// commonly understood as "on". Empty / "0" / "false" all leave the kb
-// source enabled.
+// commonly understood as "on", OR when ox is running in an ephemeral cloud
+// agent (Claude Cloud, Devin, Codespaces, CI) — see internal/ephemeral/mode.go.
+// Empty / "0" / "false" all leave the kb source enabled unless ephemeral
+// mode is on. Ephemeral agents skip the kb fan-out to avoid unnecessary
+// API calls during short-lived runs.
 func kbDisabledByEnv() bool {
+	if ephemeral.IsEphemeral() {
+		return true
+	}
 	v := strings.TrimSpace(os.Getenv(envDisableKBSource))
 	if v == "" {
 		return false

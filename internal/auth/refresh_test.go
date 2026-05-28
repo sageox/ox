@@ -853,3 +853,59 @@ func TestRefreshToken_JWTExchangeRefreshTokenFallback_WithSessionToken(t *testin
 	assert.Equal(t, "jwt-refresh-from-exchange", token.RefreshToken,
 		"JWT exchange refresh_token should be preferred over session_token fallback")
 }
+
+// --- B. Env-token refresh bypass (PR #626 follow-up) ---
+// Failure prevented: EnsureValidToken / (*AuthClient).EnsureValidToken (the
+// non-endpoint variants) attempt a refresh call for SAGEOX_TOKEN-sourced
+// tokens, which (a) have no refresh credential and (b) hit the network for
+// no reason. Their *ForEndpoint counterparts already bypass via isEnvToken;
+// these tests pin the same contract for the non-endpoint paths.
+
+// TestEnsureValidToken_EnvTokenSkipsRefresh — Failure prevented: the
+// package-level EnsureValidToken triggers refreshToken() for an env token
+// even though refresh credentials are absent.
+func TestEnsureValidToken_EnvTokenSkipsRefresh(t *testing.T) {
+	// fail-loud server: any HTTP traffic during this test is a regression.
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("env token must NOT trigger network refresh; got %s %s", r.Method, r.URL.Path)
+	}))
+	defer mockServer.Close()
+
+	t.Setenv("SAGEOX_ENDPOINT", mockServer.URL)
+	t.Setenv(EnvVarToken, "oxp_env_bypass")
+
+	// route disk auth into a temp dir without altering package state
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	// buffer exceeds the 24h synthetic env-token TTL so IsExpired() returns true
+	// and the pre-fix code path would call refreshToken().
+	bigBuffer := int((48 * time.Hour).Seconds())
+	token, err := EnsureValidToken(bigBuffer)
+	require.NoError(t, err)
+	require.NotNil(t, token, "env token should be returned as-is")
+	assert.Equal(t, "oxp_env_bypass", token.AccessToken)
+	assert.Empty(t, token.RefreshToken, "env token must have no refresh credential")
+}
+
+// TestAuthClient_EnsureValidToken_EnvTokenSkipsRefresh — Failure prevented:
+// the AuthClient variant of EnsureValidToken triggers refreshToken() for an
+// env token. Mirrors the *ForEndpoint behavior already pinned in
+// EnsureValidTokenForEndpoint.
+func TestAuthClient_EnsureValidToken_EnvTokenSkipsRefresh(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("env token must NOT trigger network refresh; got %s %s", r.Method, r.URL.Path)
+	}))
+	defer mockServer.Close()
+
+	t.Setenv("SAGEOX_ENDPOINT", mockServer.URL)
+	t.Setenv(EnvVarToken, "oxp_env_client_bypass")
+
+	client := NewAuthClientWithDir(t.TempDir()).WithEndpoint(mockServer.URL)
+
+	bigBuffer := int((48 * time.Hour).Seconds())
+	token, err := client.EnsureValidToken(bigBuffer)
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	assert.Equal(t, "oxp_env_client_bypass", token.AccessToken)
+	assert.Empty(t, token.RefreshToken)
+}
