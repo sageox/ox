@@ -19,9 +19,10 @@ type sessionState struct {
 func handleServe(srv *adapterruntime.Server) {
 	store := adapterruntime.NewSessionStore[sessionState]()
 
-	fw, err := adapterruntime.NewFileWatcher(srv.Writer(), func(file string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
+	detector := registerTerminalDetector()
+	fw, err := adapterruntime.NewFileWatcherWithDetector(srv.Writer(), func(file string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
 		return readFromOffset(file, offset)
-	})
+	}, detector)
 	if err != nil {
 		log.Printf("file watcher unavailable: %v", err)
 	}

@@ -98,6 +98,11 @@ type AdapterSupervisor struct {
 	workers     *WorkerTracker
 	adapterCaps map[string][]string // adapter_type -> declared capabilities
 
+	// terminal_error event dispatch (see adapter_supervisor_terminal.go).
+	terminalMu      sync.RWMutex
+	terminalHandler TerminalErrorHandler
+	terminalQueues  map[string]*terminalAgentQueue
+
 	// overridable for testing
 	idleDuration time.Duration
 }
@@ -252,8 +257,15 @@ func (s *AdapterSupervisor) sendRequestLocked(ctx context.Context, proc *Adapter
 		}
 
 		if probe.Event != "" {
-			// push event — log and skip, continue reading for the actual response
-			s.logger.Debug("skipping push event from adapter", "type", proc.adapterType, "event", probe.Event)
+			// push event — decode and dispatch asynchronously so the
+			// read loop never blocks on downstream work (finalize,
+			// metrics, etc.). Unknown event types are still logged.
+			var evt adapterprotocol.Event
+			if err := json.Unmarshal(result.data, &evt); err != nil {
+				s.logger.Warn("decode push event failed", "type", proc.adapterType, "event", probe.Event, "err", err)
+				continue
+			}
+			s.dispatchPushEvent(proc.adapterType, &evt)
 			continue
 		}
 

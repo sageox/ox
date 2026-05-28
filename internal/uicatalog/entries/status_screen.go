@@ -64,6 +64,16 @@ func init() {
 				row("uptime", val("3h 21m")) +
 				row("queue", warn("2 stale repos"))
 
+			// AI coworker session blocks. The "paused" row shows the design
+			// for adapter-detected terminal stops (rate limit / quota / agent
+			// error). Recording==false plus a non-empty FormatStopReason
+			// produces the trailing label — user-initiated stops (stopped /
+			// canceled / recovered) suppress the suffix entirely.
+			coworkers := sect("AI COWORKERS") + "\n" +
+				row("claude-code (Ox1A)", ok("● recording — 47 turns")) +
+				row("claude-code (Ox2B)", warn("⏸ paused — rate limit (resets ~3h). Resume when ready.")) +
+				row("codex (Ox3C)", val("idle"))
+
 			r := rand.New(rand.NewSource(7))
 			now := time.Now()
 			var ts []time.Time
@@ -78,6 +88,7 @@ func init() {
 				workspace + "\n" +
 				ledger + "\n" +
 				daemon + "\n" +
+				coworkers + "\n" +
 				activity
 		},
 	})

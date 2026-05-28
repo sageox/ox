@@ -20,7 +20,7 @@ func TestAll_ReturnsAllChecks(t *testing.T) {
 		LookPath: lookPath,
 	})
 
-	require.Len(t, allChecks, 3, "expected 3 registered checks")
+	require.Len(t, allChecks, 4, "expected 4 registered checks")
 
 	// verify each check has a unique, non-empty name
 	names := make(map[string]bool)
@@ -35,6 +35,7 @@ func TestAll_ReturnsAllChecks(t *testing.T) {
 	assert.True(t, names[".sageox/ directory"], "missing SageoxDirectoryCheck")
 	assert.True(t, names[".gitignore"], "missing GitignoreCheck")
 	assert.True(t, names["ox in PATH"], "missing OxInPathCheck")
+	assert.True(t, names["terminal-patterns framework"], "missing TerminalPatternsCheck")
 }
 
 func TestAll_NilDeps(t *testing.T) {
@@ -42,7 +43,7 @@ func TestAll_NilDeps(t *testing.T) {
 	// prevents: nil deps causes panic — All should handle gracefully
 	// Git=nil will be passed through to checks; OxInPathCheck handles nil lookPath
 	allChecks := All(Deps{})
-	assert.Len(t, allChecks, 3)
+	assert.Len(t, allChecks, 4)
 }
 
 func TestAll_EachCheckHasCategory(t *testing.T) {
@@ -62,10 +63,11 @@ func TestByName_ReturnsMapWithAllChecks(t *testing.T) {
 	git := &mockGitRunner{results: map[string]mockGitResult{}}
 	m := ByName(Deps{Git: git})
 
-	require.Len(t, m, 3, "ByName should return all checks")
+	require.Len(t, m, 4, "ByName should return all checks")
 	assert.NotNil(t, m[".sageox/ directory"], "missing SageoxDirectoryCheck")
 	assert.NotNil(t, m[".gitignore"], "missing GitignoreCheck")
 	assert.NotNil(t, m["ox in PATH"], "missing OxInPathCheck")
+	assert.NotNil(t, m["terminal-patterns framework"], "missing TerminalPatternsCheck")
 }
 
 func TestByName_LookupWorks(t *testing.T) {

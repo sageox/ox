@@ -462,6 +462,17 @@ func printSessionRow(t session.SessionInfo, uploaded bool, localUser string) {
 
 	row += sessionSummaryStyle.Render(name)
 
+	// adapter-detected terminal stop reasons (rate limit, quota, generic
+	// terminal_error) surface here as a trailing annotation so a session
+	// list reader can tell at a glance why the agent paused. User-initiated
+	// stops (stopped/canceled/recovered) return "" from FormatStopReason
+	// and do not add the suffix.
+	if !t.Recording {
+		if stopLabel := session.FormatStopReason(t); stopLabel != "" {
+			row += "  " + sessionHydrationStyle.Render("["+stopLabel+"]")
+		}
+	}
+
 	fmt.Println("  " + row)
 
 	// emit a second line with the session's title (or summary snippet) so agents

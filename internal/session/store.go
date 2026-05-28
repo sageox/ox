@@ -322,8 +322,13 @@ type SessionInfo struct {
 	ParentPID       int                 `json:"parent_pid,omitempty"`       // from .recording.json for liveness detection
 	Origin          string              `json:"origin,omitempty"`           // session origin: "human", "subagent", "agent"
 	HasRawData      bool                `json:"has_raw_data,omitempty"`     // true if raw.jsonl exists with content on disk
-	StopReason      string              `json:"stop_reason,omitempty"`      // how session ended: "stopped", "aborted", "recovered"
-	SuspendedAt     *time.Time          `json:"suspended_at,omitempty"`     // ADR-020: non-nil while session is actively paused
+	StopReason      string              `json:"stop_reason,omitempty"`        // how session ended (StopReason* constants)
+	SuspendedAt     *time.Time          `json:"suspended_at,omitempty"`       // ADR-020: non-nil while session is actively paused
+	StopDetail      string              `json:"stop_detail,omitempty"`        // human-readable detail (matched message, capped 512B)
+	StopSource      string              `json:"stop_source,omitempty"`        // adapterprotocol.TerminalSource* (structured / regex / exit_code)
+	StopPatternID   string              `json:"stop_pattern_id,omitempty"`    // which adapter pattern fired (for telemetry / drift detection)
+	StopResetsAtRaw string              `json:"stop_resets_at_raw,omitempty"` // raw reset-time substring as matched
+	StopResetsAt    *time.Time          `json:"stop_resets_at,omitempty"`     // parsed absolute reset time, may be nil even when raw populated
 }
 
 // ListSessions returns session files from the last 7 days, sorted by date descending.
@@ -515,6 +520,11 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			HasRawData:      hasRawData,
 			StopReason:      stopReason(meta),
 			SuspendedAt:     suspendedAt,
+			StopDetail:      stopMetaString(meta, func(m *lfs.SessionMeta) string { return m.StopDetail }),
+			StopSource:      stopMetaString(meta, func(m *lfs.SessionMeta) string { return m.StopSource }),
+			StopPatternID:   stopMetaString(meta, func(m *lfs.SessionMeta) string { return m.StopPatternID }),
+			StopResetsAtRaw: stopMetaString(meta, func(m *lfs.SessionMeta) string { return m.StopResetsAtRaw }),
+			StopResetsAt:    stopMetaTime(meta),
 		})
 	}
 
@@ -527,6 +537,22 @@ func stopReason(meta *lfs.SessionMeta) string {
 		return meta.StopReason
 	}
 	return ""
+}
+
+// stopMetaString lifts a string field off meta.json safely.
+func stopMetaString(meta *lfs.SessionMeta, pick func(*lfs.SessionMeta) string) string {
+	if meta == nil {
+		return ""
+	}
+	return pick(meta)
+}
+
+// stopMetaTime lifts the parsed reset-at timestamp off meta.json safely.
+func stopMetaTime(meta *lfs.SessionMeta) *time.Time {
+	if meta == nil {
+		return nil
+	}
+	return meta.StopResetsAt
 }
 
 // entryCount returns the best available entry count for a session.

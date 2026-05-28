@@ -230,6 +230,112 @@ func TestRawJSONLHasData(t *testing.T) {
 	assert.True(t, RawJSONLHasData(sessionPath))
 }
 
+// TestCanTransitionStopReason verifies the precedence lattice for
+// StopReason transitions. Failure prevented: a stale replayed adapter
+// rate-limit line overwriting a user-initiated "stopped" reason and
+// flipping the session display to "rate limit".
+func TestCanTransitionStopReason(t *testing.T) {
+	tests := []struct {
+		name    string
+		current string
+		next    string
+		want    bool
+	}{
+		{name: "empty to rate_limited (0 to 50)", current: "", next: StopReasonRateLimited, want: true},
+		{name: "rate_limited idempotent", current: StopReasonRateLimited, next: StopReasonRateLimited, want: true},
+		{name: "stopped beats rate_limited", current: StopReasonStopped, next: StopReasonRateLimited, want: false},
+		{name: "recovered to rate_limited", current: StopReasonRecovered, next: StopReasonRateLimited, want: true},
+		{name: "rate_limited to stopped (user override)", current: StopReasonRateLimited, next: StopReasonStopped, want: true},
+		{name: "unknown to unknown (both rank 0)", current: "weird", next: "alsoweird", want: true},
+		{name: "canceled beats rate_limited", current: StopReasonCanceled, next: StopReasonRateLimited, want: false},
+		{name: "quota beats terminal_error", current: StopReasonTerminalError, next: StopReasonQuotaExceeded, want: true},
+		{name: "stopped beats canceled (equal rank, idempotent)", current: StopReasonStopped, next: StopReasonCanceled, want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CanTransitionStopReason(tt.current, tt.next)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestFormatStopReason verifies the user-facing string produced for each
+// terminal-stop reason and reset-time shape. Failure prevented: a UI
+// regression that renders user-initiated stops as "rate limit", or omits
+// the reset-time hint when the adapter parsed one out of the matched line.
+func TestFormatStopReason(t *testing.T) {
+	resetTime := time.Date(2026, 5, 28, 15, 0, 0, 0, time.Local)
+
+	tests := []struct {
+		name string
+		info SessionInfo
+		want string
+	}{
+		{
+			name: "empty stop reason",
+			info: SessionInfo{StopReason: ""},
+			want: "",
+		},
+		{
+			name: "rate limited, no resets",
+			info: SessionInfo{StopReason: StopReasonRateLimited},
+			want: "rate limit",
+		},
+		{
+			name: "rate limited, raw resets only",
+			info: SessionInfo{StopReason: StopReasonRateLimited, StopResetsAtRaw: "in 3h"},
+			want: "rate limit (resets in 3h)",
+		},
+		{
+			name: "rate limited, parsed resets time",
+			info: SessionInfo{StopReason: StopReasonRateLimited, StopResetsAt: &resetTime},
+			want: "rate limit (resets " + resetTime.Local().Format("15:04") + ")",
+		},
+		{
+			name: "quota exceeded",
+			info: SessionInfo{StopReason: StopReasonQuotaExceeded},
+			want: "quota exceeded",
+		},
+		{
+			name: "terminal error",
+			info: SessionInfo{StopReason: StopReasonTerminalError},
+			want: "agent error",
+		},
+		{
+			name: "user-initiated stopped is suppressed",
+			info: SessionInfo{StopReason: StopReasonStopped},
+			want: "",
+		},
+		{
+			name: "user-initiated canceled is suppressed",
+			info: SessionInfo{StopReason: StopReasonCanceled},
+			want: "",
+		},
+		{
+			name: "recovered is suppressed",
+			info: SessionInfo{StopReason: StopReasonRecovered},
+			want: "",
+		},
+		{
+			name: "parsed time wins over raw",
+			info: SessionInfo{
+				StopReason:      StopReasonRateLimited,
+				StopResetsAt:    &resetTime,
+				StopResetsAtRaw: "in 3h",
+			},
+			want: "rate limit (resets " + resetTime.Local().Format("15:04") + ")",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatStopReason(tt.info)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestIsPIDAlive(t *testing.T) {
 	// current process is alive
 	assert.True(t, isPIDAlive(os.Getpid()))

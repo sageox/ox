@@ -64,10 +64,72 @@ const ghostHeuristicAge = 5 * time.Minute
 
 // StopReason constants for how a session ended.
 const (
-	StopReasonStopped   = "stopped"   // user explicitly stopped via /ox-session-stop
-	StopReasonCanceled  = "canceled"  // user explicitly canceled via /ox-session-abort
-	StopReasonRecovered = "recovered" // recovered from orphan by daemon anti-entropy
+	StopReasonStopped       = "stopped"        // user explicitly stopped via /ox-session-stop
+	StopReasonCanceled      = "canceled"       // user explicitly canceled via /ox-session-abort
+	StopReasonRecovered     = "recovered"      // recovered from orphan by daemon anti-entropy
+	StopReasonRateLimited   = "rate_limited"   // adapter detected agent hit a usage / rate limit
+	StopReasonQuotaExceeded = "quota_exceeded" // adapter detected agent quota exhausted
+	StopReasonTerminalError = "terminal_error" // adapter detected non-recoverable agent error (generic)
 )
+
+// stopReasonRank gates StopReason transitions. Higher wins. User-initiated
+// reasons (stopped, canceled) take precedence over adapter-detected terminal
+// conditions, so a replay of an old rate-limit line can never overwrite a
+// reason the user set explicitly. The "recovered" reason is the lowest,
+// applied only when nothing else is known.
+var stopReasonRank = map[string]int{
+	"":                      0,
+	StopReasonRecovered:     10,
+	StopReasonTerminalError: 40,
+	StopReasonRateLimited:   50,
+	StopReasonQuotaExceeded: 50,
+	StopReasonCanceled:      100,
+	StopReasonStopped:       100,
+}
+
+// CanTransitionStopReason reports whether next is allowed to overwrite current
+// according to the precedence lattice. Equal ranks (e.g. user re-stopping a
+// session) are allowed so explicit user actions are always idempotent.
+// Unknown reasons are treated as rank 0.
+func CanTransitionStopReason(current, next string) bool {
+	return stopReasonRank[next] >= stopReasonRank[current]
+}
+
+// FormatStopReason renders a SessionInfo's terminal-stop reason for display
+// in `ox status` and `ox session list`. Falls back through:
+//
+//   - parsed absolute reset time (e.g. "rate limit (resets 15:00)")
+//   - raw matched reset string (e.g. "rate limit (resets in 3h)")
+//   - bare reason text ("rate limit")
+//
+// Returns "" when there is no terminal stop reason worth surfacing.
+func FormatStopReason(info SessionInfo) string {
+	label := stopReasonLabel(info.StopReason)
+	if label == "" {
+		return ""
+	}
+	switch {
+	case info.StopResetsAt != nil && !info.StopResetsAt.IsZero():
+		return label + " (resets " + info.StopResetsAt.Local().Format("15:04") + ")"
+	case info.StopResetsAtRaw != "":
+		return label + " (resets " + info.StopResetsAtRaw + ")"
+	default:
+		return label
+	}
+}
+
+func stopReasonLabel(reason string) string {
+	switch reason {
+	case StopReasonRateLimited:
+		return "rate limit"
+	case StopReasonQuotaExceeded:
+		return "quota exceeded"
+	case StopReasonTerminalError:
+		return "agent error"
+	default:
+		return ""
+	}
+}
 
 // ClassifySession determines the lifecycle status of a session based on its metadata
 // and whether it exists in the ledger. This is the single source of truth for session

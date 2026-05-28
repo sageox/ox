@@ -1,0 +1,2 @@
+{"_meta":{"fabricated":true,"note":"replace with real sample when captured","phase":"phase-2-initial-corpus"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"For the design doc, let's plan how the system should behave when a user has hit your limit — we'll need a retry strategy."}],"model":"claude-opus-4-7"},"timestamp":"2026-05-28T10:00:00.000Z"}

@@ -1,0 +1,2 @@
+{"_meta":{"fabricated":true,"note":"replace with real sample when captured","phase":"phase-2-initial-corpus"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I need to pause here."}],"stop_reason":"rate_limited","model":"claude-opus-4-7"},"timestamp":"2026-05-28T10:00:00.000Z"}

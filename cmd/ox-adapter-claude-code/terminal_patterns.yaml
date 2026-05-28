@@ -1,0 +1,25 @@
+version: 1
+patterns:
+  - id: claude_code.api_stop_reason.rate_limited
+    source: structured
+    reason: rate_limited
+    structured:
+      json_path: message.stop_reason
+      equals: rate_limited
+  - id: claude_code.api_stop_reason.max_tokens
+    source: structured
+    reason: ""
+    structured:
+      json_path: message.stop_reason
+      equals: max_tokens
+  - id: claude_code.system_error.usage_limit
+    source: regex
+    reason: rate_limited
+    roles:
+      - system
+    substrings:
+      - "limit reached"
+      - "hit your limit"
+      - "usage limit"
+    re: '(?i)(?:hit your limit|limit reached|usage limit)[^\n]{0,80}?(?:resets?(?:\s+in)?\s+(?P<reset>[^\n.]{1,30}))?'
+    parse_resets_at: relative_duration_or_clock

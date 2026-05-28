@@ -76,7 +76,12 @@ type SessionMeta struct {
 	CreatedAt           time.Time `json:"created_at"`
 	EntryCount          int       `json:"entry_count,omitempty"`
 	Summary             string    `json:"summary,omitempty"`
-	StopReason          string    `json:"stop_reason,omitempty"` // how session ended: "stopped", "aborted", "recovered", ""
+	StopReason          string    `json:"stop_reason,omitempty"`             // how session ended (session.StopReason* constants)
+	StopDetail          string    `json:"stop_detail,omitempty"`             // human-readable detail (matched message, capped 512B)
+	StopSource          string    `json:"stop_source,omitempty"`             // adapterprotocol.TerminalSource* (structured / regex / exit_code)
+	StopPatternID       string    `json:"stop_pattern_id,omitempty"`         // which adapter pattern fired
+	StopResetsAtRaw     string    `json:"stop_resets_at_raw,omitempty"`      // raw reset-time substring as matched
+	StopResetsAt        *time.Time `json:"stop_resets_at,omitempty"`         // parsed absolute reset time, may be nil even when raw populated
 	RepoID              string    `json:"repo_id,omitempty"`
 	SageoxScore         *float64  `json:"sageox_score,omitempty"`          // agent's self-reported contribution score (0.0-1.0)
 	SageoxScoreCategory string    `json:"sageox_score_category,omitempty"` // named category: none, minor, moderate, significant, critical
@@ -374,6 +379,20 @@ func (b *SessionMetaBuilder) SessionID(id string) *SessionMetaBuilder {
 
 func (b *SessionMetaBuilder) StopReason(reason string) *SessionMetaBuilder {
 	b.meta.StopReason = reason
+	return b
+}
+
+// TerminalStop stamps the adapter-detected terminal-stop metadata in one
+// call so the daemon's terminal-error handler doesn't have to chain six
+// setters. Detail is truncated to 512 bytes by the caller before this is
+// invoked (the protocol caps it at the wire boundary).
+func (b *SessionMetaBuilder) TerminalStop(reason, source, patternID, detail, resetsRaw string, resetsAt *time.Time) *SessionMetaBuilder {
+	b.meta.StopReason = reason
+	b.meta.StopSource = source
+	b.meta.StopPatternID = patternID
+	b.meta.StopDetail = detail
+	b.meta.StopResetsAtRaw = resetsRaw
+	b.meta.StopResetsAt = resetsAt
 	return b
 }
 

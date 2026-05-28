@@ -7,12 +7,21 @@
 // The canonical protocol reference is adapter/protocol/spec.md.
 package adapterprotocol
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ProtocolVersion is the current adapter protocol version.
 // Adapters return this in their info response. ox refuses adapters
 // whose major version is lower than its own minimum supported.
 const ProtocolVersion = 1
+
+// ProtocolDate is a human-readable date string identifying the protocol
+// revision. Bumped when wire-level changes are made (new event types,
+// new HelloResponse fields) without changing the major ProtocolVersion.
+// Adapters can use this for fine-grained capability negotiation.
+const ProtocolDate = "2026-05-01"
 
 // --- Adapter types ---
 
@@ -274,15 +283,67 @@ const (
 
 // Event is an adapter-initiated push message (no request ID).
 type Event struct {
-	Event   string          `json:"event"` // "entries"
+	Event   string          `json:"event"` // "entries", "terminal_error", "subagent.*"
 	AgentID string          `json:"agent_id"`
 	Data    json.RawMessage `json:"data"`
 }
 
 // EntriesEventData is the data payload for "entries" events.
+//
+// Seq is a per-session monotonically increasing batch sequence number.
+// Daemons use it to gate downstream actions (e.g. terminal_error
+// finalize) on "entries up to seq N have been persisted" — defeats the
+// race where a terminal_error event arrives before its co-batch
+// entries are durable. Adapters older than ProtocolDate=2026-05-01
+// emit seq=0; daemons MUST treat 0 as "unknown / don't gate".
 type EntriesEventData struct {
 	Entries   []RawEntry `json:"entries"`
 	NewOffset int64      `json:"new_offset"`
+	Seq       int64      `json:"seq,omitempty"`
+}
+
+// Event names emitted by adapters.
+const (
+	EventEntries        = "entries"
+	EventTerminalError  = "terminal_error"
+)
+
+// TerminalErrorSource identifies how a terminal condition was detected.
+const (
+	TerminalSourceStructured = "structured" // matched a structured JSON field (preferred)
+	TerminalSourceRegex      = "regex"      // matched a regex over free text (fallback)
+	TerminalSourceExitCode   = "exit_code"  // underlying agent process exited
+)
+
+// TerminalErrorData is the data payload for "terminal_error" events.
+// Emitted by an adapter when it detects the agent has entered a
+// non-recoverable terminal condition (rate limit, quota exceeded,
+// banned content, etc.) AND the detection has survived the silence-
+// window confirmation. The daemon's terminal-error handler reacts by
+// finalizing the session cleanly with a structured StopReason.
+//
+// EntrySeq matches the Seq of the entries-event batch that contained
+// the matched entry; the daemon MUST gate finalize on "entries with
+// Seq <= EntrySeq have been persisted" to avoid losing the trailing
+// content. EntrySeq=0 means the adapter did not track sequencing
+// (older protocol) — daemon falls back to immediate finalize.
+//
+// ResetsAtRaw is the matched substring verbatim (e.g. "in 3h", "3pm
+// local"). ResetsAt is a best-effort parsed absolute timestamp. When
+// parsing is ambiguous (no timezone, locale-sensitive AM/PM) the
+// adapter MUST leave ResetsAt nil rather than emit a wrong absolute
+// time — the UI falls back to ResetsAtRaw verbatim. Both may be empty
+// when no reset hint was present in the matched text.
+type TerminalErrorData struct {
+	Reason       string     `json:"reason"`
+	Source       string     `json:"source"` // see TerminalSource* constants
+	PatternID    string     `json:"pattern_id,omitempty"`
+	RawMessage   string     `json:"raw_message"` // capped at 512 bytes
+	ResetsAtRaw  string     `json:"resets_at_raw,omitempty"`
+	ResetsAt     *time.Time `json:"resets_at,omitempty"`
+	EntrySeq     int64      `json:"entry_seq,omitempty"`
+	DetectedAt   time.Time  `json:"detected_at"`
+	ConfirmedAt  time.Time  `json:"confirmed_at"`
 }
 
 // --- Serve mode method names ---

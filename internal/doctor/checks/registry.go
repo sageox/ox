@@ -21,6 +21,7 @@ func All(d Deps) []doctor.Check {
 		NewSageoxDirectoryCheck(d.Git),
 		NewGitignoreCheck(d.Git, d.FS),
 		NewOxInPathCheck(d.LookPath),
+		NewTerminalPatternsCheck(),
 	}
 }
 

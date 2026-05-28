@@ -52,11 +52,12 @@ func init() {
 				val(pad("oxsid_01JE...A7QX", 22)) + pad("4m ago", 12) + pad(ok("0:18"), 11) + pad("12", 7) + pad(ok("● live"), 12) + sec("claude-code"),
 				val(pad("oxsid_01JE...8MNP", 22)) + pad("28m ago", 12) + pad(val("1:04"), 11) + pad("47", 7) + pad(ok("✓ hydrated"), 12) + sec("claude-code"),
 				val(pad("oxsid_01JE...3KZF", 22)) + pad("2h ago", 12) + pad(val("0:42"), 11) + pad("23", 7) + pad(warn("⟳ stub"), 12) + sec("codex"),
+				val(pad("oxsid_01JE...9PQR", 22)) + pad("3h ago", 12) + pad(val("1:47"), 11) + pad("64", 7) + pad(warn("⏸ paused"), 12) + sec("claude-code") + "  " + warn("[rate limit (resets 15:00)]"),
 				val(pad("oxsid_01JE...7VRC", 22)) + pad("yesterday", 12) + pad(val("2:18"), 11) + pad("93", 7) + pad(ok("✓ hydrated"), 12) + sec("claude-code"),
 				val(pad("oxsid_01JE...2WMD", 22)) + pad("yesterday", 12) + pad(warn("4:31"), 11) + pad("181", 7) + pad(ok("✓ hydrated"), 12) + sec("cursor"),
 			}, "\n")
 
-			footer := "\n\n" + dim("5 sessions · 1 live · 3 hydrated · 1 stub · run `ox session view <id>`")
+			footer := "\n\n" + dim("6 sessions · 1 live · 3 hydrated · 1 stub · 1 paused · run `ox session view <id>`")
 
 			return heading + headerRow + rows + footer
 		},

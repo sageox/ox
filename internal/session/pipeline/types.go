@@ -9,6 +9,8 @@
 // both phases. It does NOT contain cobra commands, LFS upload logic, or git operations.
 package pipeline
 
+import "time"
+
 // Ledger artifact filenames — single source of truth used by both
 // the upload path (write) and post-prune path rewrite (read-back).
 const (
@@ -60,6 +62,17 @@ type Result struct {
 	UploadWarning    string   // non-empty when ledger upload failed (explains recovery)
 	DataWarnings     []string // data quality warnings from validation (reported to agent)
 	UploadMs         int64    // time spent on LFS upload + git push (ms)
+
+	// Adapter-detected terminal-stop metadata, populated by the daemon's
+	// terminal-error handler when finalizing a session that the adapter
+	// declared dead (rate limit / quota / agent error). All fields are
+	// zero when the session ended via normal user-initiated stop.
+	StopReason      string
+	StopDetail      string
+	StopSource      string
+	StopPatternID   string
+	StopResetsAtRaw string
+	StopResetsAt    *time.Time
 }
 
 // StartOutput is the JSON output format for session start.
@@ -103,6 +116,18 @@ type StopOutput struct {
 	Guidance         string           `json:"guidance,omitempty"`           // behavioral guidance for the agent
 	TotalMs          int64            `json:"total_ms,omitempty"`           // wall clock for entire session stop
 	Timing           map[string]int64 `json:"timing,omitempty"`             // per-phase breakdown (ms)
+
+	// Terminal-stop metadata. Populated only when the session was
+	// finalized by the adapter terminal-error path (rate limit etc.),
+	// not by a user-initiated stop. StopReason mirrors session.StopReason*
+	// constants; StopResetsAt may be nil even when StopResetsAtRaw is set
+	// (parsing was ambiguous — UI should fall back to the raw string).
+	StopReason      string     `json:"stop_reason,omitempty"`
+	StopDetail      string     `json:"stop_detail,omitempty"`
+	StopSource      string     `json:"stop_source,omitempty"`
+	StopPatternID   string     `json:"stop_pattern_id,omitempty"`
+	StopResetsAtRaw string     `json:"stop_resets_at_raw,omitempty"`
+	StopResetsAt    *time.Time `json:"stop_resets_at,omitempty"`
 }
 
 // RemindOutput is the JSON output format for session remind.

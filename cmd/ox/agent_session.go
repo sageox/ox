@@ -808,6 +808,12 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 		output.LedgerSessionDir = processResult.LedgerSessionDir
 		output.UploadWarning = processResult.UploadWarning
 		output.DataWarnings = processResult.DataWarnings
+		output.StopReason = processResult.StopReason
+		output.StopDetail = processResult.StopDetail
+		output.StopSource = processResult.StopSource
+		output.StopPatternID = processResult.StopPatternID
+		output.StopResetsAtRaw = processResult.StopResetsAtRaw
+		output.StopResetsAt = processResult.StopResetsAt
 		// async mode: summary_prompt is empty, update guidance
 		if processResult.SummaryPrompt == "" {
 			output.Guidance = "Session stopped and saved. Upload and summary generation happen automatically in the background."
