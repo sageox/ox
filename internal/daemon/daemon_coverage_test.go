@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,6 +30,14 @@ func TestIsDaemonDisabled(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("SAGEOX_DAEMON", tt.envVal)
+			// Pin a laptop-like environment so DaemonViable doesn't collapse
+			// due to CI=true or other env signals — we're testing SAGEOX_DAEMON only.
+			t.Setenv("CI", "")
+			t.Setenv("GITHUB_ACTIONS", "")
+			t.Setenv("OX_NO_DAEMON", "")
+			t.Setenv("OX_PERSIST_DISK", "1")
+			runtime.Reset()
+			t.Cleanup(runtime.Reset)
 			assert.Equal(t, tt.wantDis, IsDaemonDisabled())
 		})
 	}
