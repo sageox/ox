@@ -33,9 +33,10 @@ const (
 	repoDoctorPathAuthed = "/api/v1/repos/%s/doctor"
 	repoDoctorPathLegacy = "/api/v1/public/repos/%s/doctor"
 
-	repoUninstallPath = "/api/v1/repo/%s/uninstall"       // %s = repo_id
-	repoMergePath     = "/api/v1/repo/%s/merge"           // %s = repo_id
-	gitImportPath     = "/api/v1/teams/%s/context/import" // %s = team_id
+	repoUninstallPath   = "/api/v1/repo/%s/uninstall"       // %s = repo_id
+	repoMergePath       = "/api/v1/repo/%s/merge"           // %s = repo_id
+	gitImportPath       = "/api/v1/teams/%s/context/import" // %s = team_id
+	sessionUploadedPath = "/api/v1/sessions/%s/uploaded"    // %s = session_id
 )
 
 // RepoInitRequest represents the POST /api/v1/repo/init request
@@ -104,6 +105,19 @@ type MergeRepoResponse struct {
 type ImportNotification struct {
 	TeamID   string          `json:"team_id"`
 	Metadata json.RawMessage `json:"metadata"`
+}
+
+// SessionUploadedNotification is the POST /api/v1/sessions/{session_id}/uploaded
+// request body. Tells the server a session's content has landed in the
+// ledger and is viewable, so the (v2) GitHub App reconciler can refresh any
+// PR sticky comment. See docs/ai/specs/session-pr-issue-linkage.md (v1.5).
+type SessionUploadedNotification struct {
+	SessionID       string   `json:"session_id"`
+	RepoID          string   `json:"repo_id"`
+	SessionURL      string   `json:"session_url,omitempty"`
+	LinkedPRs       []string `json:"linked_prs,omitempty"`
+	LinkedIssues    []string `json:"linked_issues,omitempty"`
+	ProducedCommits []string `json:"produced_commits,omitempty"`
 }
 
 // DoctorIssue represents a single diagnostic issue from the cloud
@@ -525,6 +539,58 @@ func (c *RepoClient) NotifyImport(teamID string, metadata any) error {
 	}
 
 	return nil
+}
+
+// NotifySessionUploaded tells the SageOx server that a session's content
+// has been uploaded and is viewable. Graceful degradation mirrors
+// NotifyImport: network errors and 404 (endpoint not yet deployed) return
+// nil so the caller can record "notified" optimistically without blocking;
+// 429 and 5xx return an error so the caller records "notify_failed" and
+// retries via ox doctor.
+func (c *RepoClient) NotifySessionUploaded(n SessionUploadedNotification) error {
+	bodyBytes, err := json.Marshal(n)
+	if err != nil {
+		return fmt.Errorf("marshal request: %w", err)
+	}
+
+	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(sessionUploadedPath, n.SessionID)
+
+	logger.LogHTTPRequest("POST", reqURL)
+	start := time.Now()
+
+	httpReq, err := useragent.NewRequest(context.Background(), "POST", reqURL, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	if c.authToken != "" {
+		httpReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.authToken))
+	}
+
+	resp, err := c.httpClient.Do(httpReq)
+	duration := time.Since(start)
+	if err != nil {
+		logger.LogHTTPError("POST", reqURL, err, duration)
+		return fmt.Errorf("session uploaded notification: %w", err)
+	}
+	defer resp.Body.Close()
+
+	logger.LogHTTPResponse("POST", reqURL, resp.StatusCode, duration)
+	io.Copy(io.Discard, resp.Body)
+
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		// endpoint not yet deployed — treat as accepted so the CLI doesn't
+		// thrash retrying against a server that can't answer yet.
+		return nil
+	case resp.StatusCode == http.StatusConflict:
+		// already notified for this session — idempotent success.
+		return nil
+	case resp.StatusCode >= 400:
+		return fmt.Errorf("session uploaded notification failed (%d)", resp.StatusCode)
+	default:
+		return nil
+	}
 }
 
 // RepoMarkerData holds parsed data from a .repo_* marker file
