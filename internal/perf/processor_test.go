@@ -2,6 +2,7 @@ package perf
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -84,37 +86,81 @@ func TestProcessor_ParallelSiblings(t *testing.T) {
 
 // --- D. Detached span renders under <detached> ---
 
-// TestProcessor_OrphanSpanGetsDetached verifies a span whose parent never
-// ran through the processor (e.g. parent in a different sampled state)
-// surfaces under a synthetic <detached> node rather than vanishing.
+// TestProcessor_OrphanSpanRendersUnderDetached verifies that a span whose
+// parent SpanID is NOT present in the trace's pending set (e.g. because
+// the parent was unsampled, lived in a different process, or arrived
+// after the trace was emitted and got dropped) surfaces under a
+// synthetic "<detached>" node rather than vanishing.
+//
+// We test buildTree directly with synthetic tracetest.SpanStub values so
+// we can construct the exact "parent SpanID has no matching span"
+// scenario, which is hard to provoke through the live SDK because every
+// span created via Tracer.Start has a real parent context.
+//
 // Failure prevented: silent timing loss for spans whose parent missed
 // emission.
-func TestProcessor_OrphanSpanGetsDetached(t *testing.T) {
-	// Construct spans by hand by feeding fake ReadOnlySpans is hard with
-	// the SDK; instead, exercise the same code path by calling buildTree
-	// directly. We use the SDK-backed version via two traces.
-	var got *Node
-	tp := setupTP(t, Options{OnTree: func(n *Node) { got = n }})
-	defer func() { _ = tp.Shutdown(context.Background()) }()
-	tr := tp.Tracer("test")
+func TestProcessor_OrphanSpanRendersUnderDetached(t *testing.T) {
+	traceID := randomTraceID(t)
+	rootID := randomSpanID(t)
+	orphanID := randomSpanID(t)
+	missingParentID := randomSpanID(t)
 
-	// Build: root has one real child. We then construct an orphan span
-	// by giving it a parent SpanID that is not in the trace's pending
-	// set — done by ending a span whose parent was a sibling, not the
-	// root.
-	ctx, root := tr.Start(context.Background(), "root")
-	_, mid := tr.Start(ctx, "mid")
-	// Start child of mid, end it AFTER mid has ended — but the SDK
-	// still reports it as child-of-mid via the captured Parent SpanID,
-	// which is present in the slice, so it nests. To make an orphan we
-	// need a parent SpanID that never appears.
-	mid.End()
-	root.End()
+	start := time.Now().Add(-time.Second)
+	end := start.Add(time.Second)
 
-	require.NotNil(t, got)
-	// mid is the only direct child; no orphan in this normal case.
-	require.Len(t, got.Children, 1)
-	assert.Equal(t, "mid", got.Children[0].Name)
+	rootSpan := tracetest.SpanStub{
+		Name: "root",
+		SpanContext: trace.NewSpanContext(trace.SpanContextConfig{
+			TraceID: traceID,
+			SpanID:  rootID,
+		}),
+		// Parent left zero → buildTree treats this as root.
+		StartTime: start,
+		EndTime:   end,
+	}.Snapshot()
+
+	orphanSpan := tracetest.SpanStub{
+		Name: "orphan",
+		SpanContext: trace.NewSpanContext(trace.SpanContextConfig{
+			TraceID: traceID,
+			SpanID:  orphanID,
+		}),
+		// Parent SpanID points to a span we deliberately omit from the
+		// slice — this is what triggers the <detached> branch.
+		Parent: trace.NewSpanContext(trace.SpanContextConfig{
+			TraceID: traceID,
+			SpanID:  missingParentID,
+		}),
+		StartTime: start.Add(100 * time.Millisecond),
+		EndTime:   end.Add(-100 * time.Millisecond),
+	}.Snapshot()
+
+	tree := buildTree([]sdktrace.ReadOnlySpan{rootSpan, orphanSpan}, rootID)
+
+	require.NotNil(t, tree)
+	require.Len(t, tree.Children, 1, "orphan must surface as a child")
+	detached := tree.Children[0]
+	assert.Equal(t, "<detached>", detached.Name)
+	assert.True(t, detached.Detached)
+	require.Len(t, detached.Children, 1, "orphan span must be under <detached>")
+	assert.Equal(t, "orphan", detached.Children[0].Name)
+	assert.True(t, detached.Children[0].Detached, "orphan node should be flagged Detached")
+}
+
+func randomTraceID(t *testing.T) trace.TraceID {
+	t.Helper()
+	var b [16]byte
+	_, err := cryptorand.Read(b[:])
+	require.NoError(t, err)
+	return b
+}
+
+func randomSpanID(t *testing.T) trace.SpanID {
+	t.Helper()
+	var b [8]byte
+	_, err := cryptorand.Read(b[:])
+	require.NoError(t, err)
+	return b
 }
 
 // --- E. Error status surfaces on Node ---
@@ -194,6 +240,71 @@ func TestProcessor_IndependentTraces(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	require.Len(t, trees, 2)
+}
+
+// --- H. Late child spans are dropped without reintroducing pending state ---
+
+// TestProcessor_LateChildDoesNotRequeue verifies the short-lived emitted
+// tombstone still suppresses child spans that end after the root emitted.
+// Failure prevented: late child spans recreating a pending entry that can
+// never be flushed because the root is already gone.
+func TestProcessor_LateChildDoesNotRequeue(t *testing.T) {
+	p := NewTreeProcessor(Options{})
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSpanProcessor(p),
+	)
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+	tr := tp.Tracer("test")
+
+	ctx, root := tr.Start(context.Background(), "root", trace.WithNewRoot())
+	_, child := tr.Start(ctx, "child")
+	tid := root.SpanContext().TraceID()
+
+	root.End()
+	child.End()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	assert.Empty(t, p.pending)
+	_, ok := p.emitted[tid]
+	assert.True(t, ok, "completed trace should retain a short-lived tombstone")
+}
+
+// --- I. Expired tombstones are pruned on the next completed trace ---
+
+// TestProcessor_PrunesExpiredEmitted verifies completed trace tombstones do
+// not accumulate forever in long-lived processes like the daemon.
+// Failure prevented: one TraceID leaked per completed background task.
+func TestProcessor_PrunesExpiredEmitted(t *testing.T) {
+	p := NewTreeProcessor(Options{})
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSpanProcessor(p),
+	)
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+	tr := tp.Tracer("test")
+
+	_, oldRoot := tr.Start(context.Background(), "old", trace.WithNewRoot())
+	oldTID := oldRoot.SpanContext().TraceID()
+	oldRoot.End()
+
+	p.mu.Lock()
+	p.emitted[oldTID] = time.Now().Add(-time.Second)
+	p.mu.Unlock()
+
+	_, newRoot := tr.Start(context.Background(), "new", trace.WithNewRoot())
+	newTID := newRoot.SpanContext().TraceID()
+	newRoot.End()
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	_, oldExists := p.emitted[oldTID]
+	_, newExists := p.emitted[newTID]
+	assert.False(t, oldExists, "expired tombstone should be pruned on the next root span")
+	assert.True(t, newExists, "current root should still install its tombstone")
 }
 
 // setupTP builds a TracerProvider with our processor + an in-memory

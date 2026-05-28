@@ -66,7 +66,7 @@ type TreeCollectorProcessor struct {
 
 	mu      sync.Mutex
 	pending map[trace.TraceID][]sdktrace.ReadOnlySpan
-	emitted map[trace.TraceID]struct{}
+	emitted map[trace.TraceID]time.Time
 }
 
 // NewTreeProcessor returns a processor ready to register with an OTel
@@ -75,9 +75,16 @@ func NewTreeProcessor(opts Options) *TreeCollectorProcessor {
 	return &TreeCollectorProcessor{
 		opts:    opts,
 		pending: make(map[trace.TraceID][]sdktrace.ReadOnlySpan),
-		emitted: make(map[trace.TraceID]struct{}),
+		emitted: make(map[trace.TraceID]time.Time),
 	}
 }
+
+// emittedRetention keeps a short-lived tombstone for completed traces so
+// child spans that end just after the root are dropped instead of creating
+// an un-emittable pending entry. Root traces are pruned opportunistically
+// on the next completed trace so long-lived daemons don't retain one
+// TraceID forever per sync cycle.
+const emittedRetention = 2 * time.Minute
 
 // OnStart is part of the SpanProcessor interface. We don't need it.
 func (p *TreeCollectorProcessor) OnStart(_ context.Context, _ sdktrace.ReadWriteSpan) {}
@@ -98,11 +105,22 @@ func (p *TreeCollectorProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 
 	tid := s.SpanContext().TraceID()
 	isRoot := !s.Parent().SpanID().IsValid()
+	now := time.Now()
 
 	p.mu.Lock()
-	if _, done := p.emitted[tid]; done {
-		// Late arrival after the root already emitted. Drop quietly —
-		// the tree is already gone. A per-span slog (above) still ran.
+	if isRoot {
+		p.pruneExpiredEmittedLocked(now)
+	}
+	if expiresAt, done := p.emitted[tid]; done {
+		if expiresAt.After(now) {
+			// Late arrival after the root already emitted. Drop quietly —
+			// the tree is already gone. A per-span slog (above) still ran.
+			p.mu.Unlock()
+			return
+		}
+		delete(p.emitted, tid)
+	}
+	if p.pending == nil || p.emitted == nil {
 		p.mu.Unlock()
 		return
 	}
@@ -113,7 +131,7 @@ func (p *TreeCollectorProcessor) OnEnd(s sdktrace.ReadOnlySpan) {
 	}
 	spans := p.pending[tid]
 	delete(p.pending, tid)
-	p.emitted[tid] = struct{}{}
+	p.emitted[tid] = now.Add(emittedRetention)
 	p.mu.Unlock()
 
 	if p.opts.OnTree == nil {
@@ -133,6 +151,14 @@ func (p *TreeCollectorProcessor) Shutdown(_ context.Context) error {
 	p.pending = nil
 	p.emitted = nil
 	return nil
+}
+
+func (p *TreeCollectorProcessor) pruneExpiredEmittedLocked(now time.Time) {
+	for tid, expiresAt := range p.emitted {
+		if !expiresAt.After(now) {
+			delete(p.emitted, tid)
+		}
+	}
 }
 
 // ForceFlush is a no-op. Trees emit synchronously on root OnEnd.
