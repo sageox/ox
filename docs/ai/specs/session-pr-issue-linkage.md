@@ -1,7 +1,7 @@
 # Session ↔ PR / Issue Linkage (Design)
 
 **Audience:** AI coworkers and engineers extending ox's linkage system beyond commits to GitHub PRs and Issues.
-**Status:** Design — implementation tracked under epic `bd ox-fdre`.
+**Status:** v1 (M1–M5) shipped; v2 (M6–M8, GitHub App) + v3 remain. Tracked under epic `bd ox-fdre`.
 **Companion:** [`session-commit-linkage.md`](./session-commit-linkage.md) (commit-level linkage; this design builds on it).
 
 ---
@@ -407,6 +407,33 @@ Server-side telemetry (separate spec when v2 lands):
 - Reconciliation latency p50/p95/p99
 - Sticky comment edit failures by error type
 - Comment body size distribution (catch runaway growth on PRs with hundreds of commits)
+
+---
+
+## v1 implementation notes (as shipped)
+
+Divergences from the design above, recorded so the next reader isn't surprised:
+
+| Area | Design | As shipped (v1) | Why |
+|---|---|---|---|
+| Hook name | `pre-push` (decision) | `pre-push` | As designed. Reads git's ref stream on stdin; installed as the 4th ox hook in `hooks_git.go`. |
+| Issue-ref form | `owner/repo#N` | bare `#N` | The CLI doesn't reliably know `owner/repo` without an extra `gh` call; the server reconciler (v2) resolves `#N` to `owner/repo#N` using repo context from the webhook. Cheaper and avoids a second network round-trip in the hot push path. |
+| `LinkageStatus` pre-stop transitions | `pending` at start, `staged` at stop | first written as `staged` at stop | `RecordingState.LinkageStatus` exists but is not written during recording in v1; the field is reserved for a future enhancement that tracks pending state mid-recording. Empty == legacy/pending, treated identically. |
+| Bare `#N` in subject vs body | body only | whole message (`%B`) scanned | The closing-keyword regex requires a keyword (`Fixes`/`Closes`/`Resolves`/`GH-`), so a subject like `fix: thing` does NOT match; only an explicit `Fixes #N` does, wherever it appears. Net effect matches the design intent (no false positives from passing mentions). |
+| Notification gating | always notify on upload | notify only when there is linkage OR produced commits | A session with nothing to link gives the reconciler nothing to act on; skipping the call avoids needless server load. |
+
+Files (v1):
+
+| Concern | File |
+|---|---|
+| `LinkedPRs` / `LinkedIssues` / `LinkageStatus` schema | `internal/lfs/meta.go`, `internal/session/recording.go` |
+| `LinkageStatus*` constants | `internal/lfs/meta.go` |
+| pre-push hook install (4th hook) | `cmd/ox/hooks_git.go` |
+| pre-push handler (range parse, issue refs, PR resolve) | `cmd/ox/hooks_pre_push.go` |
+| fold into SessionMeta on stop | `cmd/ox/agent_session.go` |
+| upload-confirmed transition + notify | `cmd/ox/session_linkage_finalize.go` |
+| server notification client | `internal/api/repo.go` (`NotifySessionUploaded`) |
+| render in `ox session view` | `cmd/ox/session_view_text.go`, `cmd/ox/session_show.go` |
 
 ---
 
