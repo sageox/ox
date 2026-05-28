@@ -91,6 +91,12 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 		results = append(results, incompleteResult)
 	}
 
+	// linkage soft signals: trailer coverage on recent commits and
+	// reachability of closed-session ProducedCommits SHAs. Neither blocks;
+	// both are diagnostic.
+	results = append(results, checkSessionTrailerRatio())
+	results = append(results, checkSessionProducedCommitsStaleness())
+
 	return results
 }
 
