@@ -11,7 +11,6 @@ package main
 import (
 	_ "embed"
 	"log"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -102,7 +101,7 @@ func parseClaudeReset(match []string) (string, *time.Time) {
 // env var or pattern loading fails — callers wire the nil into
 // NewFileWatcherWithDetector, which treats it as "no detection".
 func registerTerminalDetector() *adapterruntime.TerminalDetector {
-	if disabledByEnv("claude-code") {
+	if adapterruntime.AdapterDisabledByEnv(adapterName) {
 		return nil
 	}
 	patterns, err := loadTerminalPatterns()
@@ -111,20 +110,4 @@ func registerTerminalDetector() *adapterruntime.TerminalDetector {
 		return nil
 	}
 	return adapterruntime.NewTerminalDetector(adapterName, patterns, adapterruntime.DefaultSilenceWindow, adapterruntime.NopMetrics{})
-}
-
-// disabledByEnv is a Phase-2 fallback for the Phase-4 helper
-// adapterruntime.AdapterDisabledByEnv. Switch to that helper once it
-// lands so all adapters share one disable surface.
-func disabledByEnv(adapter string) bool {
-	raw := os.Getenv("OX_DISABLE_TERMINAL_DETECTION")
-	if raw == "" {
-		return false
-	}
-	for _, part := range strings.Split(raw, ",") {
-		if strings.TrimSpace(part) == adapter {
-			return true
-		}
-	}
-	return false
 }

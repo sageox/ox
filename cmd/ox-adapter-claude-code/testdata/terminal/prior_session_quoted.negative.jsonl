@@ -1,3 +1,3 @@
 {"_meta":{"fabricated":true,"note":"replace with real sample when captured","phase":"phase-2-initial-corpus"}}
-{"type":"user","isMeta":true,"message":{"role":"user","content":"5-hour limit reached ∙ resets 3pm"},"timestamp":"2026-05-28T10:00:00.000Z"}
+{"type":"user","isMeta":true,"message":{"role":"user","content":"5-hour limit reached · resets 3pm"},"timestamp":"2026-05-28T10:00:00.000Z"}
 {"type":"user","isMeta":true,"message":{"role":"user","content":"continuing normally"},"timestamp":"2026-05-28T10:00:01.000Z"}

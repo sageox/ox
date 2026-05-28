@@ -1,6 +1,7 @@
 package adapterruntime
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -92,11 +93,11 @@ type Metrics interface {
 // NopMetrics is a Metrics that discards all events.
 type NopMetrics struct{}
 
-func (NopMetrics) PatternHit(string, string, PatternSource, string)              {}
-func (NopMetrics) PatternConfirmed(string, string)                               {}
-func (NopMetrics) PatternRevoked(string, string)                                 {}
-func (NopMetrics) ResetsAtParseFailure(string, string)                           {}
-func (NopMetrics) SilenceWindowObservedMs(string, string, time.Duration)         {}
+func (NopMetrics) PatternHit(string, string, PatternSource, string)      {}
+func (NopMetrics) PatternConfirmed(string, string)                       {}
+func (NopMetrics) PatternRevoked(string, string)                         {}
+func (NopMetrics) ResetsAtParseFailure(string, string)                   {}
+func (NopMetrics) SilenceWindowObservedMs(string, string, time.Duration) {}
 
 // ConfirmedMatch is what Tick returns when a pending match's silence
 // window has elapsed. Translates 1:1 to a terminal_error event.
@@ -350,8 +351,8 @@ func substringPresent(content string, substrings []string) bool {
 // LoadYAMLPatterns to get back TerminalPattern values registered with
 // a Go-resident StructuredCheck registry.
 type YAMLCatalog struct {
-	Version  int                  `yaml:"version"`
-	Patterns []YAMLPatternEntry   `yaml:"patterns"`
+	Version  int                `yaml:"version"`
+	Patterns []YAMLPatternEntry `yaml:"patterns"`
 }
 
 // YAMLPatternEntry is a single pattern in the catalog file. Structured
@@ -374,7 +375,7 @@ type YAMLPatternEntry struct {
 type YAMLStructuredRef struct {
 	JSONPath string `yaml:"json_path,omitempty"` // simple dotted path for the bundled equality check
 	Equals   string `yaml:"equals,omitempty"`
-	Check    string `yaml:"check,omitempty"`     // named entry in StructuredRegistry (custom checks)
+	Check    string `yaml:"check,omitempty"` // named entry in StructuredRegistry (custom checks)
 }
 
 // LoadYAMLPatterns parses a YAML catalog and returns TerminalPattern
@@ -390,7 +391,13 @@ func LoadYAMLPatterns(
 	parserRegistry map[string]func(match []string) (string, *time.Time),
 ) ([]TerminalPattern, error) {
 	var catalog YAMLCatalog
-	if err := yaml.Unmarshal(data, &catalog); err != nil {
+	// Strict decode: unknown / mistyped keys in the catalog fail fast
+	// rather than silently dropping a pattern entry. A typo like
+	// "subtsrings:" would otherwise compile to a pattern with no
+	// pre-filter and never be noticed.
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(&catalog); err != nil {
 		return nil, fmt.Errorf("parse YAML catalog: %w", err)
 	}
 	if catalog.Version != 1 {

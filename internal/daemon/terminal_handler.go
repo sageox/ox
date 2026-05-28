@@ -141,24 +141,24 @@ func (h *DefaultTerminalErrorHandler) processTerminalEvent(
 	}
 	markerPath := filepath.Join(sessionPath, terminalMarkerFile)
 
-	// Precedence gate. Read meta first — if a user-initiated stop has
-	// already won, finalize is a no-op (still drop the marker so we
-	// stop replaying it on every restart).
-	existing, metaErr := lfs.ReadSessionMeta(sessionPath)
-	if metaErr != nil && !errors.Is(metaErr, fs.ErrNotExist) {
-		return fmt.Errorf("read existing meta: %w", metaErr)
+	// Stamp the terminal-stop metadata. The precedence gate runs INSIDE
+	// the flocked read-modify-write so the "is this transition allowed?"
+	// decision and the write are atomic — a concurrent user-stop can't
+	// slip in between a separate pre-check and the write (TOCTOU). When
+	// the transition is disallowed (user-stop already won) or there is no
+	// meta.json to stamp, applied is false and we drop the marker so the
+	// recovery sweep stops replaying it.
+	detail := truncate(data.RawMessage, terminalMaxDetail)
+	applied, existingReason, err := stampTerminalStop(ctx, sessionPath, data, detail)
+	if err != nil {
+		return fmt.Errorf("stamp meta: %w", err)
 	}
-	if existing != nil && !session.CanTransitionStopReason(existing.StopReason, data.Reason) {
-		h.Logger.Info("terminal_error skipped: user-stop precedence",
+	if !applied {
+		h.Logger.Info("terminal_error skipped: precedence or missing meta",
 			"adapter", adapterType, "agent_id", agentID,
-			"existing_reason", existing.StopReason, "incoming_reason", data.Reason)
+			"existing_reason", existingReason, "incoming_reason", data.Reason)
 		_ = os.Remove(markerPath)
 		return nil
-	}
-
-	detail := truncate(data.RawMessage, terminalMaxDetail)
-	if err := stampTerminalStop(ctx, sessionPath, data, detail); err != nil {
-		return fmt.Errorf("stamp meta: %w", err)
 	}
 
 	// Best-effort signal to the adapter that it can clean up. Adapter
@@ -185,9 +185,9 @@ func (h *DefaultTerminalErrorHandler) writeMarker(sessionPath, adapterType strin
 		return err
 	}
 	rec := struct {
-		AdapterType string                              `json:"adapter_type"`
-		Data        adapterprotocol.TerminalErrorData   `json:"data"`
-		WrittenAt   time.Time                           `json:"written_at"`
+		AdapterType string                            `json:"adapter_type"`
+		Data        adapterprotocol.TerminalErrorData `json:"data"`
+		WrittenAt   time.Time                         `json:"written_at"`
 	}{
 		AdapterType: adapterType,
 		Data:        data,
@@ -201,10 +201,17 @@ func (h *DefaultTerminalErrorHandler) writeMarker(sessionPath, adapterType strin
 }
 
 // stampTerminalStop mutates meta.json under the standard flock so the
-// daemon and CLI never lose each other's writes. Uses the existing
-// SessionMetaBuilder.TerminalStop helper.
-func stampTerminalStop(ctx context.Context, sessionPath string, data adapterprotocol.TerminalErrorData, detail string) error {
-	return lfs.MutateSessionMeta(ctx, sessionPath, func(meta *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+// daemon and CLI never lose each other's writes, AND runs the stop-reason
+// precedence gate inside the same locked section so the check and write
+// are atomic. Returns:
+//
+//   - applied: true only when the metadata was actually written (meta
+//     existed and the transition was allowed).
+//   - existingReason: the StopReason found on disk (for logging when the
+//     transition was blocked); "" when there was no meta.json.
+//   - err: any error from the locked RMW.
+func stampTerminalStop(ctx context.Context, sessionPath string, data adapterprotocol.TerminalErrorData, detail string) (applied bool, existingReason string, err error) {
+	err = lfs.MutateSessionMeta(ctx, sessionPath, func(meta *lfs.SessionMeta) (*lfs.SessionMeta, error) {
 		if meta == nil {
 			// No meta.json yet — refuse to invent one from scratch in
 			// the terminal path. The session was never committed and
@@ -212,14 +219,23 @@ func stampTerminalStop(ctx context.Context, sessionPath string, data adapterprot
 			// being deleted by the caller is the right outcome.
 			return nil, nil
 		}
+		existingReason = meta.StopReason
+		// Atomic precedence gate: a user-initiated stop committed between
+		// the caller's decision to finalize and this locked section still
+		// wins, because we re-check here under the lock.
+		if !session.CanTransitionStopReason(meta.StopReason, data.Reason) {
+			return nil, nil // no write — caller treats applied=false as "skipped"
+		}
 		meta.StopReason = data.Reason
 		meta.StopSource = data.Source
 		meta.StopPatternID = data.PatternID
 		meta.StopDetail = detail
 		meta.StopResetsAtRaw = data.ResetsAtRaw
 		meta.StopResetsAt = data.ResetsAt
+		applied = true
 		return meta, nil
 	})
+	return applied, existingReason, err
 }
 
 // writeAudit appends a single JSONL row to <ledger>/.sageox/audit/terminal_events.jsonl.
@@ -304,9 +320,9 @@ func (h *DefaultTerminalErrorHandler) RecoverPendingTerminalFinalize(ctx context
 			continue
 		}
 		var rec struct {
-			AdapterType string                              `json:"adapter_type"`
-			Data        adapterprotocol.TerminalErrorData   `json:"data"`
-			WrittenAt   time.Time                           `json:"written_at"`
+			AdapterType string                            `json:"adapter_type"`
+			Data        adapterprotocol.TerminalErrorData `json:"data"`
+			WrittenAt   time.Time                         `json:"written_at"`
 		}
 		if err := json.Unmarshal(raw, &rec); err != nil {
 			h.Logger.Warn("terminal_error recovery: decode marker failed",

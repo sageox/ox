@@ -146,8 +146,9 @@ func TestStructuredRateLimitMatch(t *testing.T) {
 		json.RawMessage(`{"message":{"stop_reason":"rate_limited"}}`),
 	}
 	d.OnBatch("sess1", entries, 1, raws)
-	time.Sleep(15 * time.Millisecond)
-	confirmed := d.Tick(time.Now())
+	// Deterministic: advance the clock past the silence window rather than
+	// sleeping in real time (avoids CI scheduling flakiness).
+	confirmed := d.Tick(time.Now().Add(time.Hour))
 	if len(confirmed) != 1 {
 		t.Fatalf("expected 1 confirmed match, got %d", len(confirmed))
 	}
@@ -165,8 +166,7 @@ func TestStructuredMaxTokensInformational(t *testing.T) {
 		json.RawMessage(`{"message":{"stop_reason":"max_tokens"}}`),
 	}
 	d.OnBatch("sess1", entries, 1, raws)
-	time.Sleep(15 * time.Millisecond)
-	confirmed := d.Tick(time.Now())
+	confirmed := d.Tick(time.Now().Add(time.Hour))
 	if len(confirmed) != 0 {
 		t.Fatalf("expected 0 confirmed (informational), got %d", len(confirmed))
 	}
@@ -186,11 +186,10 @@ func TestRegexSystemRoleOnly(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d := newTestDetector(t, 10*time.Millisecond)
 			entries := []adapterprotocol.RawEntry{
-				{Role: tc.role, Content: "5-hour limit reached ∙ resets 3pm"},
+				{Role: tc.role, Content: "5-hour limit reached · resets 3pm"},
 			}
 			d.OnBatch("sess-"+tc.role, entries, 1, nil)
-			time.Sleep(15 * time.Millisecond)
-			confirmed := d.Tick(time.Now())
+			confirmed := d.Tick(time.Now().Add(time.Hour))
 			if tc.wantMatch && len(confirmed) == 0 {
 				t.Fatalf("expected match, got none")
 			}
@@ -207,8 +206,7 @@ func TestRegexSubstringPreFilter(t *testing.T) {
 		{Role: adapterprotocol.RoleSystem, Content: "hello world"},
 	}
 	d.OnBatch("sess1", entries, 1, nil)
-	time.Sleep(15 * time.Millisecond)
-	confirmed := d.Tick(time.Now())
+	confirmed := d.Tick(time.Now().Add(time.Hour))
 	if len(confirmed) != 0 {
 		t.Fatalf("expected no match, got %d", len(confirmed))
 	}
