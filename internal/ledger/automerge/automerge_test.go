@@ -27,12 +27,14 @@ func initTestRepo(t *testing.T, dir string) string {
 // hermeticGitEnv layers env overrides that scrub host gitconfig so per-user
 // signing (commit.gpgsign + ssh signingkey) can't prompt for passphrases
 // during test commits. Applied to every git subprocess in this package.
+// os.DevNull keeps the helper portable to Windows CI (NUL there,
+// /dev/null elsewhere).
 func hermeticGitEnv() []string {
 	return []string{
 		"GIT_EDITOR=true",
 		"GIT_TERMINAL_PROMPT=0",
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_CONFIG_GLOBAL=" + os.DevNull,
+		"GIT_CONFIG_SYSTEM=" + os.DevNull,
 	}
 }
 

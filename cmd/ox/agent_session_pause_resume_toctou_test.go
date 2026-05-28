@@ -2,6 +2,7 @@ package main
 
 import (
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -136,8 +137,13 @@ func TestPauseResume_ConcurrentAppendsKeepLifecycleConsistent(t *testing.T) {
 	require.NoError(t, err)
 
 	// hammer EntryCount in the background while pause+resume run.
+	// Count successful appends so we can assert at the end that the
+	// background writer actually made progress — under scheduler
+	// starvation this test would otherwise vacuously pass and silently
+	// weaken the TOCTOU regression signal.
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
+	var appendOK atomic.Int64
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -148,9 +154,11 @@ func TestPauseResume_ConcurrentAppendsKeepLifecycleConsistent(t *testing.T) {
 			case <-stop:
 				return
 			case <-tick.C:
-				_ = session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
+				if err := session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
 					s.EntryCount++
-				})
+				}); err == nil {
+					appendOK.Add(1)
+				}
 			}
 		}
 	}()
@@ -162,6 +170,12 @@ func TestPauseResume_ConcurrentAppendsKeepLifecycleConsistent(t *testing.T) {
 
 	close(stop)
 	wg.Wait()
+
+	// If the background writer never made progress, this test cannot prove
+	// the TOCTOU invariant under concurrent appends — fail fast rather
+	// than report a false PASS.
+	require.Greater(t, appendOK.Load(), int64(0),
+		"concurrent appender did not record any updates; race coverage is vacuous")
 
 	got, err := session.LoadRecordingStateForAgent(projectRoot, agentID)
 	require.NoError(t, err)
