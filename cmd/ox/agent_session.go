@@ -1184,7 +1184,20 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// honors (in priority order): the legacy SAGEOX_ASYNC_SESSION_UPLOAD /
 	// OX_SESSION_INLINE_SUMMARY env vars (deprecated, one-release shim), the
 	// `agent.summarizer` user-config key, and finally the inline default.
-	asyncUpload := summarizerMode == config.AgentSummarizerDelegated
+	// Route sync-vs-async through the capability-aware dispatcher in
+	// internal/session. When the daemon isn't viable (sandbox / ephemeral
+	// / OX_NO_DAEMON), the dispatcher forces sync even if the user opted
+	// into `delegated` — otherwise the daemon RPC silently no-ops and
+	// the session sits in the cache until `ox doctor` sweeps it. Prior
+	// to this dispatcher, `delegated` + no daemon = lost upload
+	// orchestration in every sandbox.
+	userPrefersAsync := summarizerMode == config.AgentSummarizerDelegated
+	finalizeMode := session.FinalizeModeForCaller(userPrefersAsync)
+	asyncUpload := finalizeMode == session.FinalizeAsyncDaemon
+	if userPrefersAsync && !asyncUpload {
+		slog.Info("session finalize: delegated summarizer requested but daemon not viable — falling back to sync upload",
+			"session", sessionName)
+	}
 
 	if ledgerErr != nil {
 		// couldn't resolve ledger path - skip upload

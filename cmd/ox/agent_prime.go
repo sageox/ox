@@ -124,12 +124,19 @@ func initAgentPrimeCmd() {
 	// When false (default): always outputs context (safe, may waste tokens on duplicate calls).
 	agentPrimeCmd.Flags().Bool("idempotent", false, "Skip priming if session already primed (token optimization)")
 
-	// --ephemeral: opt-in flag mirroring OX_EPHEMERAL=1. When set, subsystems
-	// that consult ephemeral.IsEphemeral() (daemon, kb, codedb, prime's
-	// HTTP team-context fallback) switch to HTTP-only behavior. The flag
-	// is processed in runAgentPrime BEFORE any subsystem initialization,
-	// by exporting OX_EPHEMERAL=1 into the process environment.
-	agentPrimeCmd.Flags().Bool("ephemeral", false, "Run in ephemeral mode: no daemon, no local clone, HTTP-only reads. Equivalent to OX_EPHEMERAL=1.")
+	// DEPRECATED: --ephemeral is retained for one release as a hidden flag.
+	// Operators have moved to setting OX_EPHEMERAL=1 in their hook env
+	// file (e.g. $CLAUDE_ENV_FILE), which is the only form that survives
+	// across multiple ox invocations in the same shell session. os.Setenv
+	// only writes the current process's env per POSIX — so the flag, set
+	// on `ox agent prime` alone, gave the first command ephemeral
+	// behavior and let subsequent commands silently drift back to
+	// non-ephemeral. False sense of security.
+	//
+	// runAgentPrime emits a stderr deprecation warning when the flag is
+	// passed; removal is tracked as a follow-up issue.
+	agentPrimeCmd.Flags().Bool("ephemeral", false, "DEPRECATED: set OX_EPHEMERAL=1 in your environment instead")
+	_ = agentPrimeCmd.Flags().MarkHidden("ephemeral")
 }
 
 // runAgentPrime bootstraps a new agent instance with team context.
@@ -149,12 +156,26 @@ func initAgentPrimeCmd() {
 // so ox cannot intercept this invocation. Users must run `claude` without a prompt
 // argument to allow the session-start hook to run `ox agent prime` first.
 func runAgentPrime(cmd *cobra.Command, args []string) error {
-	// --ephemeral propagates to subsystems via OX_EPHEMERAL. Set it
-	// BEFORE the agentx gate / daemon health check / any subsystem init
-	// reads ephemeral.IsEphemeral(). This is the only place that needs
-	// to honor the flag — every consumer downstream goes through
-	// ephemeral.IsEphemeral().
+	// Deprecation handling for --ephemeral: warn loudly and propagate the
+	// env var so the in-process subsystems still behave correctly for
+	// this one invocation. The warning calls out the actual fix
+	// (write to the env file) so the operator doesn't reach for the
+	// same flag next time.
 	if ephemeralFlag, _ := cmd.Flags().GetBool("ephemeral"); ephemeralFlag {
+		fmt.Fprintln(os.Stderr, "warning: --ephemeral is deprecated and will be removed in a future release.")
+		fmt.Fprintln(os.Stderr, "  Set OX_EPHEMERAL=1 in your environment instead (e.g. write it to $CLAUDE_ENV_FILE before running ox).")
+		fmt.Fprintln(os.Stderr, "  Reason: a flag on a single command only affects that process; subsequent ox invocations in the same shell would silently drift back to non-ephemeral.")
+		if os.Getenv(ephemeral.EnvEphemeral) == "" {
+			_ = os.Setenv(ephemeral.EnvEphemeral, "1")
+		}
+	}
+
+	// Unconditional propagation: whenever auto-detection identifies a
+	// constrained environment OR the operator set OX_EPHEMERAL
+	// explicitly, ensure the canonical env var is visible to any
+	// subprocess `prime` spawns (Claude Code, sub-`ox` calls). Single
+	// write site, CQS preserved — ephemeral.Reason() stays a query.
+	if reason := ephemeral.Reason(); reason != "" && os.Getenv(ephemeral.EnvEphemeral) == "" {
 		_ = os.Setenv(ephemeral.EnvEphemeral, "1")
 	}
 
@@ -587,13 +608,13 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		CurrentUserAliases: currentUserAliases,
 	}
 
-	// Ephemeral-mode hint: when running in a cloud agent / CI / Codespaces
-	// with sparse local data, point the calling agent at the cloud MCP
-	// server for context ops it would normally satisfy via local caches.
-	// See docs/ai/adr/adr-ephemeral-mode.md.
-	if ephemeral.IsEphemeral() {
-		output.EphemeralHint = buildEphemeralHint(teamCtx, projectRoot)
-	}
+	// MCP routing hint: emit the cloud MCP endpoint + suggested tools
+	// unconditionally — the cloud MCP server is a valid context source
+	// on a dev laptop too, it just isn't preferred there. The hint
+	// builder flips Active=true / Recommendation only when the runtime
+	// cannot satisfy context queries locally (no persistent disk OR no
+	// daemon). See cmd/ox/agent_prime_ephemeral_hint.go.
+	output.EphemeralHint = buildEphemeralHint(teamCtx, projectRoot)
 
 	// ADR-017: surface the binding the agent's CWD currently resolves to.
 	// Look it up in the KB list so the emitted entry carries the same

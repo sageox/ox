@@ -297,15 +297,28 @@ type UserNotice struct {
 	Message string `json:"message"`
 }
 
-// EphemeralHint surfaces, in the prime payload, that ox is running in an
-// ephemeral environment (cloud agent, CI, Codespaces) with sparse local
-// data. When emitted, the calling agent should prefer the cloud MCP server
-// for context operations that would normally hit local codedb / KB / team-
-// context caches.
+// CloudMCPSuggestedTools is the canonical list of cloud MCP tool names
+// agents should consider when local context surfaces are sparse or
+// unavailable. Sourced here so additions don't require touching the
+// ephemeral-hint builder.
 //
-// Emitted only when ephemeral.IsEphemeral() returns true. LocalDataSparse
-// is true when no local team-context clone exists (HTTP fallback may have
-// written a subset) AND/OR no codedb index is available.
+// Order matters: list the highest-leverage tools first — agents that
+// trim the list (token budget pressure) keep the most useful entries.
+var CloudMCPSuggestedTools = []string{
+	"sageox.search_team_context",
+	"sageox.search_codebase",
+	"sageox.kb_query",
+	"sageox.session_history",
+}
+
+// EphemeralHint surfaces cloud MCP routing guidance in the prime payload.
+// The CloudMCPEndpoint and SuggestedTools fields are emitted
+// unconditionally — the cloud MCP server is a valid context source on a
+// dev laptop too, it's just not the preferred one. The Recommendation
+// and LocalDataSparse fields are emitted only when the runtime can't
+// reliably satisfy context queries locally (no persistent disk OR no
+// long-lived helper), at which point the calling agent should prefer
+// MCP over local caches.
 type EphemeralHint struct {
 	Active           bool     `json:"active"`
 	Reason           string   `json:"reason,omitempty"`             // env var or venue marker that triggered ephemeral mode

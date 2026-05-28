@@ -2,25 +2,28 @@ package ephemeral
 
 import (
 	"testing"
+
+	"github.com/sageox/ox/internal/runtime"
 )
 
-// resetUserConfig clears the user-config preference between subtests so
-// each one starts from a known nil state. The package-level var is
-// process-global; tests that set it must restore it.
-func resetUserConfig(t *testing.T) {
+// resetCapsAndUserConfig clears the cached capability probe AND the
+// user-config preference between subtests. The runtime cache is the
+// process-wide source of truth for IsEphemeral(); without resetting it
+// t.Setenv changes are invisible to the cached struct.
+func resetCapsAndUserConfig(t *testing.T) {
 	t.Helper()
-	prev := userConfigEphemeral.Load()
-	t.Cleanup(func() { userConfigEphemeral.Store(prev) })
-	userConfigEphemeral.Store(nil)
+	runtime.SetUserConfigEphemeralPreference(nil)
+	runtime.Reset()
+	t.Cleanup(func() {
+		runtime.SetUserConfigEphemeralPreference(nil)
+		runtime.Reset()
+	})
 }
 
-// clearEnv unsets every env var that IsEphemeral consults, so each subtest
-// starts from a clean baseline. t.Setenv handles per-test isolation and
-// restoration; we just need to zero-out the inherited shell environment.
-//
-// CI-related vars (CI, GITHUB_ACTIONS, ...) are also cleared so the test
-// suite is deterministic on CI runners; they no longer contribute to
-// IsEphemeral but presence here defends against future regressions.
+// clearEnv unsets every env var the runtime probe / venue helpers
+// consult, so each subtest starts from a clean baseline. t.Setenv handles
+// restoration. CI vars are cleared too — they no longer contribute to
+// Reason() but presence here defends against future regressions.
 func clearEnv(t *testing.T) {
 	t.Helper()
 	vars := []string{
@@ -34,6 +37,10 @@ func clearEnv(t *testing.T) {
 		"JENKINS_URL",
 		"BUILDKITE",
 		"CODEBUILD_BUILD_ID",
+		"OX_PERSIST_DISK",
+		"OX_NO_DAEMON",
+		"OX_BROWSER",
+		"OX_NETWORK",
 	}
 	for _, v := range vars {
 		t.Setenv(v, "")
@@ -42,6 +49,7 @@ func clearEnv(t *testing.T) {
 
 func TestIsEphemeral_CleanEnv(t *testing.T) {
 	clearEnv(t)
+	resetCapsAndUserConfig(t)
 	if IsEphemeral() {
 		t.Fatalf("expected IsEphemeral=false on clean env, got true (reason=%q)", Reason())
 	}
@@ -71,6 +79,7 @@ func TestIsEphemeral_ExplicitOverride(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			clearEnv(t)
+			resetCapsAndUserConfig(t)
 			t.Setenv(EnvEphemeral, tc.val)
 			if got := IsEphemeral(); got != tc.want {
 				t.Fatalf("OX_EPHEMERAL=%q: IsEphemeral=%v, want %v (reason=%q)", tc.val, got, tc.want, Reason())
@@ -90,14 +99,26 @@ func TestIsEphemeral_IndividualSignals(t *testing.T) {
 		{"claude_cloud", "CLAUDE_CODE_REMOTE", "1", true, "CLAUDE_CODE_REMOTE"},
 		{"claude_cloud_any_value", "CLAUDE_CODE_REMOTE", "task-abc", true, "CLAUDE_CODE_REMOTE"},
 		{"devin", "DEVIN_TASK_ID", "t_xyz", true, "DEVIN_TASK_ID"},
-		{"codespaces_true", "CODESPACES", "true", true, "CODESPACES"},
+		// Codespaces has persistent disk — it behaves like a slow laptop and
+		// is no longer in the auto-detect chain. A Codespace user that wants
+		// ephemeral behavior sets OX_EPHEMERAL=1 in their devcontainer.json.
+		{"codespaces_true_does_not_trigger", "CODESPACES", "true", false, ""},
 		{"codespaces_other", "CODESPACES", "1", false, ""},
-		// CI signals deliberately do NOT trigger ephemeral mode — CI runners
-		// have writable filesystems and within a job their state persists.
-		// They only drive non-interactive UX, which is handled separately by
-		// internal/config.IsCI. See package doc.
-		{"ci_generic", "CI", "true", false, ""},
-		{"github_actions", "GITHUB_ACTIONS", "true", false, ""},
+		// CI signals trigger the derived IsEphemeral() predicate because
+		// they collapse DaemonViable (minutes-shaped lifetime) — but they
+		// do NOT raise a venue Reason() and they do NOT collapse
+		// PersistDisk. Subsystems that historically gated on "FS doesn't
+		// persist" (kb merge) should gate on runtime.Caps().PersistDisk
+		// directly, not on this composite predicate. CI=true → IsEphemeral
+		// is true (no daemon), Reason is "" (no venue marker), kb merge
+		// still runs (PersistDisk holds).
+		{"ci_generic_is_ephemeral_via_no_daemon", "CI", "true", true, ""},
+		{"github_actions_is_ephemeral_via_no_daemon", "GITHUB_ACTIONS", "true", true, ""},
+		// GitLab CI / Jenkins / Buildkite / CodeBuild don't set CI or
+		// GITHUB_ACTIONS — Probe() doesn't recognize them as a
+		// short-lifetime signal, so DaemonViable holds and IsEphemeral
+		// stays false. This pins that contract; if these markers ever
+		// move into probeLifetime, update the table.
 		{"gitlab_ci", "GITLAB_CI", "true", false, ""},
 		{"jenkins", "JENKINS_URL", "http://jenkins.example", false, ""},
 		{"buildkite", "BUILDKITE", "true", false, ""},
@@ -107,6 +128,7 @@ func TestIsEphemeral_IndividualSignals(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			clearEnv(t)
+			resetCapsAndUserConfig(t)
 			t.Setenv(tc.env, tc.val)
 			if got := IsEphemeral(); got != tc.want {
 				t.Fatalf("%s=%q: IsEphemeral=%v, want %v", tc.env, tc.val, got, tc.want)
@@ -120,43 +142,62 @@ func TestIsEphemeral_IndividualSignals(t *testing.T) {
 
 func TestReason_Precedence(t *testing.T) {
 	// when multiple signals fire, Reason returns the highest-precedence one:
-	// OX_EPHEMERAL > CLAUDE_CODE_REMOTE > DEVIN_TASK_ID > CODESPACES > user-config
+	// OX_EPHEMERAL > CLAUDE_CODE_REMOTE > DEVIN_TASK_ID > user-config
 	clearEnv(t)
+	resetCapsAndUserConfig(t)
 	t.Setenv(EnvEphemeral, "1")
 	t.Setenv("CLAUDE_CODE_REMOTE", "1")
 	t.Setenv("DEVIN_TASK_ID", "x")
-	t.Setenv("CODESPACES", "true")
 	if got := Reason(); got != EnvEphemeral {
 		t.Fatalf("expected OX_EPHEMERAL to win precedence, got %q", got)
 	}
 
 	clearEnv(t)
+	resetCapsAndUserConfig(t)
 	t.Setenv("CLAUDE_CODE_REMOTE", "1")
 	t.Setenv("DEVIN_TASK_ID", "x")
-	t.Setenv("CODESPACES", "true")
 	if got := Reason(); got != "CLAUDE_CODE_REMOTE" {
-		t.Fatalf("expected CLAUDE_CODE_REMOTE to beat DEVIN/CODESPACES, got %q", got)
+		t.Fatalf("expected CLAUDE_CODE_REMOTE to beat DEVIN, got %q", got)
 	}
 
 	clearEnv(t)
+	resetCapsAndUserConfig(t)
 	t.Setenv("DEVIN_TASK_ID", "x")
-	t.Setenv("CODESPACES", "true")
 	if got := Reason(); got != "DEVIN_TASK_ID" {
-		t.Fatalf("expected DEVIN_TASK_ID to beat CODESPACES, got %q", got)
-	}
-
-	clearEnv(t)
-	t.Setenv("CODESPACES", "true")
-	if got := Reason(); got != "CODESPACES" {
-		t.Fatalf("expected CODESPACES to win when set alone, got %q", got)
+		t.Fatalf("expected DEVIN_TASK_ID to win when set alone, got %q", got)
 	}
 }
 
-// TestCISignalsDoNotTriggerEphemeral defends the invariant that CI=true
-// does NOT enable ephemeral mode. Regression: when this list was wired in,
-// every kb merge test failed in CI runs because kb sync was incorrectly
-// disabled. CI affects interactivity, not filesystem persistence.
-func TestCISignalsDoNotTriggerEphemeral(t *testing.T) {
+// TestCodespacesDoesNotTriggerEphemeral defends the design decision that
+// Codespaces, which ships persistent disk, is treated like a slow laptop
+// rather than a sandbox. Regression: if a future refactor re-adds the
+// CODESPACES branch to Reason(), every Codespace user loses the on-disk
+// state they paid for.
+func TestCodespacesDoesNotTriggerEphemeral(t *testing.T) {
+	clearEnv(t)
+	resetCapsAndUserConfig(t)
+	t.Setenv("CODESPACES", "true")
+	if IsEphemeral() {
+		t.Fatalf("CODESPACES=true must not enable ephemeral mode (reason=%q)", Reason())
+	}
+
+	// explicit opt-in still works — need to reset caps because IsEphemeral
+	// reads from the cached probe
+	runtime.Reset()
+	t.Setenv(EnvEphemeral, "1")
+	if !IsEphemeral() {
+		t.Fatalf("Codespace user with OX_EPHEMERAL=1 must still be ephemeral")
+	}
+}
+
+// TestCISignalsKeepPersistDisk pins the invariant that originally lived
+// as "CI doesn't trigger ephemeral": kb merge and any other PersistDisk-
+// gated subsystem must continue to work inside a CI job. The composite
+// IsEphemeral() predicate now fires under CI=true (DaemonViable
+// collapses), but PersistDisk holds so the subsystems that actually care
+// about FS persistence are unaffected. Regression: if a future refactor
+// collapses PersistDisk on CI=true, every kb merge test breaks again.
+func TestCISignalsKeepPersistDisk(t *testing.T) {
 	ciVars := []string{
 		"CI", "GITHUB_ACTIONS", "GITLAB_CI",
 		"JENKINS_URL", "BUILDKITE", "CODEBUILD_BUILD_ID",
@@ -164,51 +205,24 @@ func TestCISignalsDoNotTriggerEphemeral(t *testing.T) {
 	for _, v := range ciVars {
 		t.Run(v, func(t *testing.T) {
 			clearEnv(t)
+			resetCapsAndUserConfig(t)
 			t.Setenv(v, "true")
-			if IsEphemeral() {
-				t.Fatalf("%s=true must not enable ephemeral mode (reason=%q)", v, Reason())
+			c := runtime.Caps()
+			if !c.PersistDisk {
+				t.Fatalf("%s=true must not collapse PersistDisk (caps=%+v)", v, c)
+			}
+			if Reason() != "" {
+				t.Fatalf("%s=true must not raise a venue Reason(), got %q", v, Reason())
 			}
 		})
 	}
 }
 
-func TestIndividualHelpers(t *testing.T) {
-	clearEnv(t)
-	if isClaudeCloud() || isDevin() || isCodespaces() {
-		t.Fatalf("expected all individual helpers false on clean env")
-	}
-
-	t.Setenv("CLAUDE_CODE_REMOTE", "1")
-	if !isClaudeCloud() {
-		t.Fatalf("isClaudeCloud should be true")
-	}
-
-	clearEnv(t)
-	t.Setenv("DEVIN_TASK_ID", "t1")
-	if !isDevin() {
-		t.Fatalf("isDevin should be true")
-	}
-
-	clearEnv(t)
-	t.Setenv("CODESPACES", "true")
-	if !isCodespaces() {
-		t.Fatalf("isCodespaces should be true")
-	}
-	// only the literal "true" string activates Codespaces
-	t.Setenv("CODESPACES", "yes")
-	if isCodespaces() {
-		t.Fatalf("isCodespaces should require exact \"true\"")
-	}
-}
-
 // TestIsEphemeral_UserConfigOnly verifies that a user-config opt-in flips
 // IsEphemeral() to true even when no env var or venue marker is set.
-// Failure prevented: regression where the user-config layer is plumbed
-// in but Reason() forgets to consult it, so the persisted preference
-// silently does nothing.
 func TestIsEphemeral_UserConfigOnly(t *testing.T) {
 	clearEnv(t)
-	resetUserConfig(t)
+	resetCapsAndUserConfig(t)
 
 	if IsEphemeral() {
 		t.Fatalf("clean baseline must be non-ephemeral, got reason=%q", Reason())
@@ -216,27 +230,26 @@ func TestIsEphemeral_UserConfigOnly(t *testing.T) {
 
 	on := true
 	SetUserConfigPreference(&on)
+	runtime.Reset() // user-config feeds into the cached probe; reprime
 
 	if !IsEphemeral() {
 		t.Fatalf("user-config=true must flip IsEphemeral() on")
 	}
-	if got := Reason(); got != reasonUserConfig {
-		t.Fatalf("expected Reason=%q, got %q", reasonUserConfig, got)
+	if got := Reason(); got != runtime.ReasonUserConfig {
+		t.Fatalf("expected Reason=%q, got %q", runtime.ReasonUserConfig, got)
 	}
 }
 
 // TestIsEphemeral_EnvOverridesUserConfigDisable verifies that
 // OX_EPHEMERAL=1 wins even when the user has persisted ephemeral=false.
-// Failure prevented: a future refactor accidentally inverts precedence so
-// a stale user-config setting suppresses an explicit per-invocation
-// env override.
 func TestIsEphemeral_EnvOverridesUserConfigDisable(t *testing.T) {
 	clearEnv(t)
-	resetUserConfig(t)
+	resetCapsAndUserConfig(t)
 
 	off := false
 	SetUserConfigPreference(&off)
 	t.Setenv(EnvEphemeral, "1")
+	runtime.Reset()
 
 	if !IsEphemeral() {
 		t.Fatalf("OX_EPHEMERAL=1 must override user-config=false, got reason=%q", Reason())

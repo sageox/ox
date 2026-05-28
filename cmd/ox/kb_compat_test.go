@@ -18,6 +18,7 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/kb"
+	"github.com/sageox/ox/internal/runtime"
 )
 
 // --- A. knowledge-bubbles flag off (kb API returns 403) ---
@@ -181,6 +182,17 @@ func TestCompat_OXKBDisable_VariantsAreRecognized(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.val, func(t *testing.T) {
+			// Clear venue / capability env vars so the runtime probe
+			// reports a "laptop default" baseline (PersistDisk=true).
+			// Otherwise a sibling test that set OX_EPHEMERAL into the
+			// cached runtime.Caps() would force kb disabled regardless
+			// of OX_KB_DISABLE — and the test would fail intermittently
+			// depending on iteration order.
+			for _, ev := range []string{"OX_EPHEMERAL", "CLAUDE_CODE_REMOTE", "DEVIN_TASK_ID", "OX_PERSIST_DISK", "OX_NO_DAEMON"} {
+				t.Setenv(ev, "")
+			}
+			runtime.Reset()
+			t.Cleanup(runtime.Reset)
 			t.Setenv("OX_KB_DISABLE", tc.val)
 
 			var calls atomic.Int32

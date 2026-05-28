@@ -36,8 +36,8 @@ import (
 	"sync"
 
 	"github.com/sageox/ox/internal/api"
-	"github.com/sageox/ox/internal/ephemeral"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/runtime"
 )
 
 // Source identifies which of the three fan-out sources produced a Bubble or
@@ -189,13 +189,18 @@ func NewMerger(kb KBSource, teams LegacyTeamSource, ledger LedgerSource) *Merger
 }
 
 // kbDisabledByEnv returns true when OX_KB_DISABLE is set to a value
-// commonly understood as "on", OR when ox is running in an ephemeral cloud
-// agent (Claude Cloud, Devin, Codespaces, CI) — see internal/ephemeral/mode.go.
-// Empty / "0" / "false" all leave the kb source enabled unless ephemeral
-// mode is on. Ephemeral agents skip the kb fan-out to avoid unnecessary
-// API calls during short-lived runs.
+// commonly understood as "on", OR when the runtime has no persistent disk
+// for the merger to reconcile against. The persistence probe is the right
+// signal — kb merge writes a local reconciled snapshot, and an environment
+// without persistent disk can't benefit from that work. Sandboxes that
+// happen to have a long lifetime but no FS (Devin-style) still skip kb
+// merge by way of PersistDisk=false.
+//
+// Empty / "0" / "false" on OX_KB_DISABLE all leave the kb source enabled
+// when persistence is available. The OX_KB_DISABLE escape hatch survives
+// for operators debugging rollout issues independently of capabilities.
 func kbDisabledByEnv() bool {
-	if ephemeral.IsEphemeral() {
+	if !runtime.Caps().PersistDisk {
 		return true
 	}
 	v := strings.TrimSpace(os.Getenv(envDisableKBSource))

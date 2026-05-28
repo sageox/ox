@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ephemeral"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/runtime"
 )
 
 // cachedWorkspaceID stores the workspace ID computed from CWD on first call.
@@ -28,15 +29,23 @@ var (
 )
 
 // IsDaemonDisabled returns true if the daemon has been explicitly disabled
-// via SAGEOX_DAEMON=false, or implicitly disabled because ox is running in
-// an ephemeral cloud agent (Claude Cloud, Devin, Codespaces, CI). Daemon
-// does not run in ephemeral cloud agents; see internal/ephemeral/mode.go.
+// via SAGEOX_DAEMON=false, or implicitly disabled because the runtime
+// capability probe says the daemon isn't viable here (sandbox with no
+// persistent disk, short-lived runner, OX_NO_DAEMON override). The function
+// name is kept for caller compatibility — the answer is now derived from
+// runtime.Caps().DaemonViable rather than a separate ephemeral check.
+//
+// SAGEOX_DAEMON=false stays as a deliberate operator off-switch with its
+// own name (the daemon can run on a workstation; this lets the operator
+// force it off without claiming the env is sandbox-shaped).
 func IsDaemonDisabled() bool {
 	if strings.ToLower(os.Getenv("SAGEOX_DAEMON")) == "false" {
 		return true
 	}
-	if ephemeral.IsEphemeral() {
-		slog.Debug("daemon disabled by ephemeral mode", "reason", ephemeral.Reason())
+	if !runtime.Caps().DaemonViable {
+		// keep ephemeral.Reason() in the log line because operators are used
+		// to grepping for it; the underlying signal still flows through.
+		slog.Debug("daemon disabled by runtime capability", "ephemeral_reason", ephemeral.Reason())
 		return true
 	}
 	return false
