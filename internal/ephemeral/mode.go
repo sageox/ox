@@ -1,27 +1,33 @@
 // Package ephemeral provides a single source of truth for detecting when ox
 // is running inside an ephemeral environment (Claude Code Cloud, Devin,
-// GitHub Codespaces, generic CI, user-config opt-in, or explicit env
-// override). Subsystems should consult IsEphemeral() instead of growing
-// their own ad-hoc env-var checks.
+// GitHub Codespaces, user-config opt-in, or explicit env override).
+// Subsystems should consult IsEphemeral() instead of growing their own
+// ad-hoc env-var checks.
 //
 // The mode is named "ephemeral" because the *behavior* is ephemeral (no
 // persistent daemon, no local ledger clone, no on-disk caches). The venue
 // may still be a cloud agent — that's just one of several triggers.
 //
+// IMPORTANT: generic CI signals (CI, GITHUB_ACTIONS, GITLAB_CI, ...) are NOT
+// considered ephemeral here. CI runners have writable filesystems and within
+// a job their state persists. They do trigger non-interactive UX, but that's
+// driven separately by internal/config.IsCI() — keep the two concepts
+// distinct or kb merger / codedb / etc. break in CI test environments.
+//
 // Consumers today:
-//   - internal/config: NoInteractive auto-fires when ephemeral
+//   - internal/config: NoInteractive auto-fires when ephemeral OR isCI
 //   - internal/daemon: short-circuits daemon spawn in ephemeral mode
-//   - internal/kb:     skips the kb merger's network fan-out
+//   - internal/kb:     skips the kb merger's network fan-out in ephemeral mode
 //   - (future) internal/codedb: skips Bleve indexer startup
 //
 // Precedence for Reason() (highest to lowest):
 //
-//	OX_EPHEMERAL  >  CLAUDE_CODE_REMOTE  >  DEVIN_TASK_ID  >  CODESPACES  >  CI  >  user-config
+//	OX_EPHEMERAL  >  CLAUDE_CODE_REMOTE  >  DEVIN_TASK_ID  >  CODESPACES  >  user-config
 //
 // Setting OX_EPHEMERAL=0 (or "false"/"no") does NOT force-disable ephemeral
-// mode — other signals (CI, Codespaces, user-config opt-in) still take
-// effect. To force non-ephemeral, unset every signal and set the user-config
-// value to false. The "explicit override" is one-way: on.
+// mode — other signals (Codespaces, user-config opt-in) still take effect.
+// To force non-ephemeral, unset every signal and set the user-config value
+// to false. The "explicit override" is one-way: on.
 package ephemeral
 
 import (
@@ -38,19 +44,6 @@ const EnvEphemeral = "OX_EPHEMERAL"
 // reasonUserConfig is the synthetic reason name returned when ephemeral
 // mode was triggered solely by the user-config layer. Not an env var.
 const reasonUserConfig = "user-config"
-
-// envCI mirrors the CI detection vars in internal/config/config.go (isCI).
-// Duplicated here intentionally to keep internal/ephemeral self-contained
-// — it is consumed by internal/config, so importing back would form a
-// cycle. Keep this list in sync with internal/config/config.go on changes.
-var envCI = []string{
-	"CI",
-	"GITHUB_ACTIONS",
-	"GITLAB_CI",
-	"JENKINS_URL",
-	"BUILDKITE",
-	"CODEBUILD_BUILD_ID",
-}
 
 // userConfigEphemeral is overridden by the config layer at process start
 // to wire in the user's persisted `ephemeral: true|false` preference
@@ -99,9 +92,6 @@ func Reason() string {
 	if isCodespaces() {
 		return "CODESPACES"
 	}
-	if ciVar := matchedCIVar(); ciVar != "" {
-		return ciVar
-	}
 	if userConfigSaysOn() {
 		return reasonUserConfig
 	}
@@ -148,16 +138,4 @@ func isDevin() bool {
 // that the platform injects into every workspace.
 func isCodespaces() bool {
 	return os.Getenv("CODESPACES") == "true"
-}
-
-// matchedCIVar returns the first CI env var that's set to a truthy value,
-// or "" if none match. Mirrors the truthiness check in internal/config.isCI.
-func matchedCIVar() string {
-	for _, v := range envCI {
-		val := os.Getenv(v)
-		if val != "" && val != "false" && val != "0" {
-			return v
-		}
-	}
-	return ""
 }

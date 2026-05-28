@@ -17,6 +17,10 @@ func resetUserConfig(t *testing.T) {
 // clearEnv unsets every env var that IsEphemeral consults, so each subtest
 // starts from a clean baseline. t.Setenv handles per-test isolation and
 // restoration; we just need to zero-out the inherited shell environment.
+//
+// CI-related vars (CI, GITHUB_ACTIONS, ...) are also cleared so the test
+// suite is deterministic on CI runners; they no longer contribute to
+// IsEphemeral but presence here defends against future regressions.
 func clearEnv(t *testing.T) {
 	t.Helper()
 	vars := []string{
@@ -24,8 +28,13 @@ func clearEnv(t *testing.T) {
 		"CLAUDE_CODE_REMOTE",
 		"DEVIN_TASK_ID",
 		"CODESPACES",
+		"CI",
+		"GITHUB_ACTIONS",
+		"GITLAB_CI",
+		"JENKINS_URL",
+		"BUILDKITE",
+		"CODEBUILD_BUILD_ID",
 	}
-	vars = append(vars, envCI...)
 	for _, v := range vars {
 		t.Setenv(v, "")
 	}
@@ -83,14 +92,16 @@ func TestIsEphemeral_IndividualSignals(t *testing.T) {
 		{"devin", "DEVIN_TASK_ID", "t_xyz", true, "DEVIN_TASK_ID"},
 		{"codespaces_true", "CODESPACES", "true", true, "CODESPACES"},
 		{"codespaces_other", "CODESPACES", "1", false, ""},
-		{"ci_generic", "CI", "true", true, "CI"},
-		{"github_actions", "GITHUB_ACTIONS", "true", true, "GITHUB_ACTIONS"},
-		{"gitlab_ci", "GITLAB_CI", "true", true, "GITLAB_CI"},
-		{"jenkins", "JENKINS_URL", "http://jenkins.example", true, "JENKINS_URL"},
-		{"buildkite", "BUILDKITE", "true", true, "BUILDKITE"},
-		{"codebuild", "CODEBUILD_BUILD_ID", "build:abc", true, "CODEBUILD_BUILD_ID"},
-		{"ci_false", "CI", "false", false, ""},
-		{"ci_zero", "CI", "0", false, ""},
+		// CI signals deliberately do NOT trigger ephemeral mode — CI runners
+		// have writable filesystems and within a job their state persists.
+		// They only drive non-interactive UX, which is handled separately by
+		// internal/config.IsCI. See package doc.
+		{"ci_generic", "CI", "true", false, ""},
+		{"github_actions", "GITHUB_ACTIONS", "true", false, ""},
+		{"gitlab_ci", "GITLAB_CI", "true", false, ""},
+		{"jenkins", "JENKINS_URL", "http://jenkins.example", false, ""},
+		{"buildkite", "BUILDKITE", "true", false, ""},
+		{"codebuild", "CODEBUILD_BUILD_ID", "build:abc", false, ""},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -109,13 +120,12 @@ func TestIsEphemeral_IndividualSignals(t *testing.T) {
 
 func TestReason_Precedence(t *testing.T) {
 	// when multiple signals fire, Reason returns the highest-precedence one:
-	// OX_EPHEMERAL > CLAUDE_CODE_REMOTE > DEVIN_TASK_ID > CODESPACES > CI
+	// OX_EPHEMERAL > CLAUDE_CODE_REMOTE > DEVIN_TASK_ID > CODESPACES > user-config
 	clearEnv(t)
 	t.Setenv(EnvEphemeral, "1")
 	t.Setenv("CLAUDE_CODE_REMOTE", "1")
 	t.Setenv("DEVIN_TASK_ID", "x")
 	t.Setenv("CODESPACES", "true")
-	t.Setenv("CI", "true")
 	if got := Reason(); got != EnvEphemeral {
 		t.Fatalf("expected OX_EPHEMERAL to win precedence, got %q", got)
 	}
@@ -124,24 +134,41 @@ func TestReason_Precedence(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_REMOTE", "1")
 	t.Setenv("DEVIN_TASK_ID", "x")
 	t.Setenv("CODESPACES", "true")
-	t.Setenv("CI", "true")
 	if got := Reason(); got != "CLAUDE_CODE_REMOTE" {
-		t.Fatalf("expected CLAUDE_CODE_REMOTE to beat DEVIN/CODESPACES/CI, got %q", got)
+		t.Fatalf("expected CLAUDE_CODE_REMOTE to beat DEVIN/CODESPACES, got %q", got)
 	}
 
 	clearEnv(t)
 	t.Setenv("DEVIN_TASK_ID", "x")
 	t.Setenv("CODESPACES", "true")
-	t.Setenv("CI", "true")
 	if got := Reason(); got != "DEVIN_TASK_ID" {
-		t.Fatalf("expected DEVIN_TASK_ID to beat CODESPACES/CI, got %q", got)
+		t.Fatalf("expected DEVIN_TASK_ID to beat CODESPACES, got %q", got)
 	}
 
 	clearEnv(t)
 	t.Setenv("CODESPACES", "true")
-	t.Setenv("CI", "true")
 	if got := Reason(); got != "CODESPACES" {
-		t.Fatalf("expected CODESPACES to beat CI, got %q", got)
+		t.Fatalf("expected CODESPACES to win when set alone, got %q", got)
+	}
+}
+
+// TestCISignalsDoNotTriggerEphemeral defends the invariant that CI=true
+// does NOT enable ephemeral mode. Regression: when this list was wired in,
+// every kb merge test failed in CI runs because kb sync was incorrectly
+// disabled. CI affects interactivity, not filesystem persistence.
+func TestCISignalsDoNotTriggerEphemeral(t *testing.T) {
+	ciVars := []string{
+		"CI", "GITHUB_ACTIONS", "GITLAB_CI",
+		"JENKINS_URL", "BUILDKITE", "CODEBUILD_BUILD_ID",
+	}
+	for _, v := range ciVars {
+		t.Run(v, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv(v, "true")
+			if IsEphemeral() {
+				t.Fatalf("%s=true must not enable ephemeral mode (reason=%q)", v, Reason())
+			}
+		})
 	}
 }
 

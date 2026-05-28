@@ -30,9 +30,12 @@ func Load() *Config {
 		JSON:    os.Getenv("OX_JSON") == "1",
 		Text:    os.Getenv("OX_TEXT") == "1",
 		Review:  os.Getenv("OX_REVIEW") == "1",
-		// ephemeral cloud agents (Claude Cloud, Devin, Codespaces, CI) have
-		// no TTY and no human at the keyboard — see internal/ephemeral/mode.go
-		NoInteractive: os.Getenv("OX_NO_INTERACTIVE") == "1" || ephemeral.IsEphemeral(),
+		// CI runners and ephemeral cloud agents (Claude Cloud, Devin,
+		// Codespaces) both lack a TTY and a human at the keyboard. CI
+		// alone does NOT imply ephemeral (CI filesystems persist), but
+		// it does imply non-interactive — see internal/ephemeral/mode.go
+		// for the distinction.
+		NoInteractive: os.Getenv("OX_NO_INTERACTIVE") == "1" || isCI() || ephemeral.IsEphemeral(),
 	}
 }
 
