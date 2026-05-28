@@ -1315,7 +1315,15 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		EntryCount(result.EntryCount).
 		Summary(result.Summary).
 		StopReason(session.StopReasonStopped).
-		ProducedCommits(state.ProducedCommits)
+		ProducedCommits(state.ProducedCommits).
+		LinkedPRs(state.LinkedPRs).
+		LinkedIssues(state.LinkedIssues).
+		// staged: meta.json is being written here, BEFORE the LFS upload +
+		// git push below. The transition to uploaded (and the notify) happens
+		// only after commitAndPushLedger succeeds — see the M5 block at the
+		// end of this function. Setting uploaded here would lie about a
+		// session that may never reach the remote.
+		LinkageStatus(lfs.LinkageStatusStaged)
 
 	// inject sageox contribution score from cache file into meta.json,
 	// then clean up the score file to prevent stale scores leaking into future sessions
@@ -1394,6 +1402,14 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 			slog.Warn("LFS pointer file write failed after push", "error", writeErr, "session", sessionName)
 		}
 	}
+
+	// M5: the push succeeded — the session URL is now viewable. Transition
+	// LinkageStatus to uploaded and best-effort notify the SageOx server so
+	// the (v2) GitHub App reconciler can refresh any PR sticky comment. The
+	// notify is fire-and-forget: a failure leaves the session in
+	// notify_failed for `ox doctor` to retry, and never affects the
+	// already-successful upload.
+	finalizeLinkageAfterPush(projectRoot, sessionDir, meta, sessionName)
 
 	return nil
 }

@@ -69,14 +69,13 @@ func viewAsText(_ *session.Store, storedSession *session.StoredSession, projectR
 		return fmt.Errorf("read markdown file: %w", err)
 	}
 
-	// prepend Commits section if SessionMeta carries a ProducedCommits index.
-	// Each SHA is resolved to "short message" via git log; SHAs no longer
-	// reachable (closed-session post-rewrite case from D3) render as
-	// "<unreachable>" so the section stays informative without lying about
-	// what's in the current history.
-	commitsSection := renderProducedCommits(storedSession, projectRoot)
-	if commitsSection != "" {
-		mdContent = append([]byte(commitsSection), mdContent...)
+	// prepend linkage sections (Pull Requests, Issues, Commits) when the
+	// session's meta.json carries them. Order: PRs, then Issues, then
+	// Commits — coarsest-to-finest granularity reads naturally for a
+	// reviewer scanning "what did this session touch?".
+	linkageSections := renderSessionLinkage(storedSession, projectRoot)
+	if linkageSections != "" {
+		mdContent = append([]byte(linkageSections), mdContent...)
 	}
 
 	// render with glamour and display
@@ -86,28 +85,48 @@ func viewAsText(_ *session.Store, storedSession *session.StoredSession, projectR
 	return nil
 }
 
-// renderProducedCommits returns a markdown "## Commits" section listing the
-// SHAs in SessionMeta.ProducedCommits, or "" if there are none. Resolves
-// each SHA against the project repo via `git log -1 --format=%h %s` so the
-// reader sees the short hash plus commit subject rather than just an opaque
-// 40-char hex string.
-func renderProducedCommits(storedSession *session.StoredSession, projectRoot string) string {
+// renderSessionLinkage returns the combined markdown for the linkage
+// sections (Pull Requests, Issues, Commits) prepended to a session's
+// rendered view. Reads the session's meta.json once and emits whichever
+// sections are populated, in coarse-to-fine order. Returns "" when none
+// are present.
+func renderSessionLinkage(storedSession *session.StoredSession, projectRoot string) string {
 	if storedSession == nil {
 		return ""
 	}
-	shas := readProducedCommits(storedSession.Info.FilePath)
-	if len(shas) == 0 {
+	meta := readSessionMetaForView(storedSession.Info.FilePath)
+	if meta == nil {
 		return ""
 	}
+
 	var b strings.Builder
-	b.WriteString("## Commits\n\n")
-	for _, sha := range shas {
-		display := resolveCommitDisplay(projectRoot, sha)
-		b.WriteString("- ")
-		b.WriteString(display)
+	if len(meta.LinkedPRs) > 0 {
+		b.WriteString("## Pull Requests\n\n")
+		for _, pr := range meta.LinkedPRs {
+			b.WriteString("- ")
+			b.WriteString(pr)
+			b.WriteString("\n")
+		}
 		b.WriteString("\n")
 	}
-	b.WriteString("\n")
+	if len(meta.LinkedIssues) > 0 {
+		b.WriteString("## Issues\n\n")
+		for _, issue := range meta.LinkedIssues {
+			b.WriteString("- ")
+			b.WriteString(issue)
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+	if len(meta.ProducedCommits) > 0 {
+		b.WriteString("## Commits\n\n")
+		for _, sha := range meta.ProducedCommits {
+			b.WriteString("- ")
+			b.WriteString(resolveCommitDisplay(projectRoot, sha))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
 	return b.String()
 }
 

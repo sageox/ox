@@ -68,6 +68,9 @@ type sessionMetadata struct {
 	RepoID          string
 	CreatedAt       time.Time
 	ProducedCommits []string `json:",omitempty"`
+	LinkedPRs       []string `json:",omitempty"`
+	LinkedIssues    []string `json:",omitempty"`
+	LinkageStatus   string   `json:",omitempty"`
 }
 
 var sessionShowCmd = &cobra.Command{
@@ -162,10 +165,11 @@ func viewAsJSON(w io.Writer, storedSession *session.StoredSession, metadataOnly 
 	return showRawSession(w, t, limit)
 }
 
-// readProducedCommits loads SessionMeta.ProducedCommits for the session
-// whose raw.jsonl lives at jsonlPath. Returns nil on any error (the field
-// is purely informational; a read failure should not break view rendering).
-func readProducedCommits(jsonlPath string) []string {
+// readSessionMetaForView loads the full SessionMeta for the session whose
+// raw.jsonl lives at jsonlPath. Returns nil on any error — linkage fields
+// are purely informational and a read failure must not break view
+// rendering. Callers pick whichever fields they render.
+func readSessionMetaForView(jsonlPath string) *lfs.SessionMeta {
 	if jsonlPath == "" {
 		return nil
 	}
@@ -174,7 +178,7 @@ func readProducedCommits(jsonlPath string) []string {
 	if err != nil || meta == nil {
 		return nil
 	}
-	return meta.ProducedCommits
+	return meta
 }
 
 // convertStoredSession converts a session.StoredSession to sessionShowData.
@@ -186,15 +190,24 @@ func convertStoredSession(st *session.StoredSession) *sessionShowData {
 	}
 
 	if st.Meta != nil {
-		t.Metadata = &sessionMetadata{
-			Version:         st.Meta.Version,
-			AgentID:         st.Meta.AgentID,
-			AgentType:       st.Meta.AgentType,
-			Username:        st.Meta.Username,
-			RepoID:          st.Meta.RepoID,
-			CreatedAt:       st.Meta.CreatedAt,
-			ProducedCommits: readProducedCommits(st.Info.FilePath),
+		md := &sessionMetadata{
+			Version:   st.Meta.Version,
+			AgentID:   st.Meta.AgentID,
+			AgentType: st.Meta.AgentType,
+			Username:  st.Meta.Username,
+			RepoID:    st.Meta.RepoID,
+			CreatedAt: st.Meta.CreatedAt,
 		}
+		// linkage fields live in the full lfs.SessionMeta (meta.json), not in
+		// the lighter session.StoreMeta carried by StoredSession. Read them
+		// from disk; best-effort, nil-safe.
+		if full := readSessionMetaForView(st.Info.FilePath); full != nil {
+			md.ProducedCommits = full.ProducedCommits
+			md.LinkedPRs = full.LinkedPRs
+			md.LinkedIssues = full.LinkedIssues
+			md.LinkageStatus = full.LinkageStatus
+		}
+		t.Metadata = md
 	}
 
 	return t
