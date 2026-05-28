@@ -370,11 +370,7 @@ func TestFixLedgerUnmergedPaths_NoStateMarkers_NoAutoResolve(t *testing.T) {
 
 	cmd := exec.Command("git", "update-index", "--index-info")
 	cmd.Dir = repo
-<<<<<<< HEAD
-	cmd.Env = append(os.Environ(), // safe: git subprocess in temp dir, not ox
-=======
 	cmd.Env = append(os.Environ(), // safe: isolated git update-index in temp dir, HOME + GIT_CONFIG_* scrubbed
->>>>>>> d0e307b0 (chore(lint): annotate os.Environ() in unmerged-paths test; simplify isTeamContextSparse)
 		"HOME="+repo,
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",
