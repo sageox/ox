@@ -293,6 +293,10 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 	opts := index.IndexOptions{}
 
 	if err := db.IndexLocalRepo(indexCtx, ledgerPath, opts); err != nil {
+		if errors.Is(err, index.ErrAlternatesUnsupported) {
+			m.logger.Info("codedb ledger: skipped (alternates configured)", "path", ledgerPath)
+			return
+		}
 		m.logger.Warn("codedb ledger: index failed", "error", err)
 		return
 	}
@@ -485,6 +489,13 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 			_ = pw.WriteStage("indexing", fmt.Sprintf("Indexing local repo %s...", projectRoot))
 		}
 		if err := db.IndexLocalRepo(ctx, projectRoot, opts); err != nil {
+			if errors.Is(err, index.ErrAlternatesUnsupported) {
+				m.logger.Info("codedb local: skipped (alternates configured)", "path", projectRoot)
+				if pw != nil {
+					_ = pw.WriteStage("indexing", "codedb: skipped (git alternates not supported)")
+				}
+				return nil, nil
+			}
 			m.setError(err)
 			return nil, fmt.Errorf("index local: %w", err)
 		}

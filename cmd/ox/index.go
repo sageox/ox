@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -110,6 +111,13 @@ func indexCodeInProcess(cmd *cobra.Command, args []string, full bool) error {
 		}
 	} else {
 		if err := db.IndexLocalRepo(ctx, gitRoot, opts); err != nil {
+			if errors.Is(err, index.ErrAlternatesUnsupported) {
+				fmt.Fprintf(cmd.ErrOrStderr(),
+					"codedb: skipping local index — repo uses git alternates (go-git v6 limitation).\n"+
+						"  Remediation: `git repack -a -d --local` to copy objects locally, or\n"+
+						"  re-clone without --shared / --reference. See `ox doctor` (git-alternates check).\n")
+				return nil
+			}
 			return fmt.Errorf("index local: %w", err)
 		}
 	}

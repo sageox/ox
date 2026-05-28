@@ -108,6 +108,8 @@ const (
 	CheckSlugGitignoreMissing   = "gitignore-missing" // .sageox/.gitignore in ledger/team checkouts
 	CheckSlugGitFsck            = "git-fsck"
 	CheckSlugGitLock            = "git-lock"
+	CheckSlugRepoCompleteness   = "repo-completeness"
+	CheckSlugGitAlternates      = "git-alternates"
 
 	// Authentication checks
 	CheckSlugAuthStatus      = "auth-status"

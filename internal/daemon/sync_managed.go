@@ -365,8 +365,17 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 }
 
 // detectDivergedBranchesAt checks if local and remote branches have both
-// progressed independently at the given repo path.
+// progressed independently at the given repo path. Returns false when the
+// repo is shallow — rev-list counts truncate at the shallow boundary and
+// would falsely report "diverged" for branches that share ancestry past
+// the shallow horizon. False is safe: it just means we don't auto-trigger
+// a rebase based on divergence detection; the next sync will retry.
 func detectDivergedBranchesAt(ctx context.Context, repoPath string) bool {
+	if state, _ := gitutil.InspectRepo(repoPath); state.Shallow {
+		slog.Debug("divergence check skipped: shallow clone",
+			"repo", repoPath, "reason", state.Reason)
+		return false
+	}
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath,
 		"rev-list", "--left-right", "--count", "origin/main...HEAD")
 	output, err := cmd.Output()

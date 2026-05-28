@@ -2,6 +2,7 @@ package index
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -141,4 +142,115 @@ func TestPlainOpenTolerant_WorktreeWithExtensions(t *testing.T) {
 	repo, err := plainOpenTolerant(repoOpenPath)
 	require.NoError(t, err)
 	assert.NotNil(t, repo)
+}
+
+// TestPlainOpenTolerant_AlternatesUpstreamLimitation pins the current
+// go-git v6 behavior with .git/objects/info/alternates: object lookups fail
+// because v6's storage layer (both via plainOpenTolerant's custom
+// KeepDescriptors path AND vanilla git.PlainOpen) does NOT read the
+// alternates file. Native git CLI handles this correctly; go-git does not.
+//
+// Subtests cover both alternates-path shapes — relative (common in --reference
+// setups and manual configurations) and absolute (default for
+// `git clone --shared`). Both fail today.
+//
+// Failure prevented: codedb's IndexLocalRepo (internal/codedb/index/indexer.go:310)
+// opens user-controlled paths via plainOpenTolerant. If a user's repo uses
+// shared/reference clones, codedb would silently fail or index incomplete
+// history. Step 3 (ox-5b5p) of the shallow+shared epic gates IndexLocalRepo
+// on alternates absence and surfaces a clear "alternates unsupported" error
+// instead of producing wrong output.
+//
+// When this test starts FAILING — i.e., go-git v6 (or a successor) adds
+// alternates support — remove the IndexLocalRepo gate and flip the assertions
+// here to `require.NoError`. The test then becomes a positive regression test.
+func TestPlainOpenTolerant_AlternatesUpstreamLimitation(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+
+	cases := []struct {
+		name       string
+		makeRelative bool
+	}{
+		{name: "absolute_path", makeRelative: false},
+		{name: "relative_path", makeRelative: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Build source repo with 3 commits (forces packfile creation under gc).
+			srcDir, _ := initGitRepo(t, 3)
+			runGitIn(t, srcDir, "gc", "--quiet")
+
+			// Clone with --shared so destination's alternates references source.
+			// --no-checkout keeps working tree empty; we exercise the object store.
+			parent := t.TempDir()
+			dstDir := filepath.Join(parent, "shared-clone")
+			cloneCmd := exec.Command("git", "clone", "--shared", "--no-checkout", srcDir, dstDir)
+			cloneCmd.Env = append(os.Environ(), // safe: git CLI in temp dir, not ox subprocess
+				"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
+				"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai")
+			out, err := cloneCmd.CombinedOutput()
+			require.NoError(t, err, "git clone --shared: %s", out)
+
+			altsPath := filepath.Join(dstDir, ".git", "objects", "info", "alternates")
+			contents, err := os.ReadFile(altsPath)
+			require.NoError(t, err)
+			require.True(t, filepath.IsAbs(strings.TrimSpace(string(contents))),
+				"git clone --shared should write absolute alternates path by default")
+
+			if tc.makeRelative {
+				srcObjects := filepath.Join(srcDir, ".git", "objects")
+				rel, relErr := filepath.Rel(filepath.Dir(altsPath), srcObjects)
+				require.NoError(t, relErr)
+				require.Contains(t, rel, "..", "rewrite must be relative (contain ../)")
+				require.NoError(t, os.WriteFile(altsPath, []byte(rel+"\n"), 0o644))
+			}
+
+			// Sanity: destination has no own objects — all reads must traverse
+			// alternates. Without this, the test could pass with broken
+			// alternates handling because git put loose objects locally.
+			entries, err := os.ReadDir(filepath.Join(dstDir, ".git", "objects"))
+			require.NoError(t, err)
+			for _, e := range entries {
+				if e.Name() == "info" || e.Name() == "pack" {
+					continue
+				}
+				t.Fatalf("unexpected local object dir %q — test setup leaked objects out of alternates", e.Name())
+			}
+
+			// Repo opens fine — go-git only fails when it tries to read objects.
+			repo, err := plainOpenTolerant(dstDir)
+			require.NoError(t, err, "plainOpenTolerant should accept the repo")
+
+			head, err := repo.Head()
+			require.NoError(t, err, "HEAD ref is in .git/HEAD, no objects needed")
+
+			// Pin the upstream limitation. Object lookups need the object store,
+			// which lives behind alternates — go-git v6 doesn't follow.
+			_, err = repo.CommitObject(head.Hash())
+			require.Error(t, err,
+				"upstream go-git v6 limitation: alternates not honored. "+
+					"If this test starts passing, remove the IndexLocalRepo "+
+					"alternates gate (see ox-5b5p) and flip this to require.NoError.")
+			require.Contains(t, err.Error(), "object not found",
+				"expected 'object not found' from alternates lookup failure")
+		})
+	}
+}
+
+// runGitIn is a tiny helper for the alternates test — runs `git <args>` in dir.
+func runGitIn(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), // safe: git CLI in temp dir, not ox subprocess
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %v: %s", args, out)
 }

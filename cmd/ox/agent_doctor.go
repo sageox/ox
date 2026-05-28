@@ -12,6 +12,7 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/doctor"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -282,13 +283,19 @@ func checkLedgerGitStatus(ledgerPath string) (staged int, commitNeeded bool, pus
 		pushNeeded = true
 	}
 
-	// also check if we have local commits not pushed
+	// also check if we have local commits not pushed.
+	// Skip on shallow clones: rev-list --count truncates at the shallow
+	// boundary and may either over- or under-count. We rely on the
+	// "[ahead" porcelain check above, which uses upstream-tracking info
+	// that's accurate even when local history is truncated.
 	if !pushNeeded {
-		revOutput, err := runAgentDoctorGitCommand(ledgerPath, "rev-list", "--count", "@{upstream}..HEAD")
-		if err == nil {
-			count := strings.TrimSpace(revOutput)
-			if count != "0" && count != "" {
-				pushNeeded = true
+		if state, _ := gitutil.InspectRepo(ledgerPath); !state.Shallow {
+			revOutput, err := runAgentDoctorGitCommand(ledgerPath, "rev-list", "--count", "@{upstream}..HEAD")
+			if err == nil {
+				count := strings.TrimSpace(revOutput)
+				if count != "0" && count != "" {
+					pushNeeded = true
+				}
 			}
 		}
 	}

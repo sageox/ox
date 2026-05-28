@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
@@ -775,8 +776,25 @@ func fileLastCommitIsPushed(ledgerPath, path string) (bool, error) {
 		// file isn't tracked yet — pure working-tree change. Safe to redact.
 		return false, nil
 	}
-	// Is that commit reachable from origin/main? merge-base --is-ancestor
-	// exits 0 if yes, 1 if no.
+	// Is that commit reachable from origin/main?
+	//
+	// On a shallow ledger clone, the commit may live above the shallow
+	// horizon — merge-base would fail with "unknown revision" or report
+	// "not an ancestor" purely because the upstream history isn't
+	// fetched yet. Redaction safety MUST NOT depend on that ambiguity:
+	// claiming "not pushed" when the commit truly is upstream means we
+	// rewrite history that someone else may already have. Deepen up to
+	// 4 × 50 commits (matching `git rebase --autosquash` since 2.39)
+	// to get a definitive answer before deciding.
+	//
+	// If DeepenUntilAncestor errors (e.g. fresh ledger with no origin/main),
+	// fall through to the legacy single-shot check below — same behavior
+	// as before, safe for the fresh-ledger case.
+	ctx := context.Background()
+	if ok, err := gitutil.DeepenUntilAncestor(ctx, ledgerPath, sha, "origin/main", 50, 4); err == nil {
+		return ok, nil
+	}
+
 	cmd := exec.Command("git", "-C", ledgerPath, "merge-base", "--is-ancestor", sha, "origin/main")
 	if err := cmd.Run(); err == nil {
 		return true, nil

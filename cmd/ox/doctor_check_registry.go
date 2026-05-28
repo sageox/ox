@@ -220,6 +220,24 @@ func init() {
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugRepoCompleteness,
+		Name:        "Repo completeness",
+		Category:    "Git Repository Health",
+		FixLevel:    FixLevelCheckOnly,
+		Description: "Detects shallow and partial clones; ox subsystems that walk history (divergence, ancestry, codedb blob reads) need full history to be accurate",
+		Run:         checkRepoCompleteness,
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugGitAlternates,
+		Name:        "Git alternates",
+		Category:    "Git Repository Health",
+		FixLevel:    FixLevelCheckOnly,
+		Description: "Detects .git/objects/info/alternates configuration. Native git handles alternates, but codedb's go-git-based indexer does not — see ox-5b5p.",
+		Run:         checkGitAlternates,
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugGitRepoPaths,
 		Name:        "Git repo paths",
 		Category:    "Git Repository Health",

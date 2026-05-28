@@ -307,6 +307,13 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 // IndexLocalRepo indexes a local git repository in-place (no clone).
 // It indexes all committed history AND the current working tree, including
 // uncommitted (dirty) files.
+//
+// Returns ErrAlternatesUnsupported when the repo has
+// `.git/objects/info/alternates` configured. go-git v6 does not honor
+// alternates (see TestPlainOpenTolerant_AlternatesUpstreamLimitation), so
+// blob and commit reads would silently fail mid-walk. Callers should
+// treat this as a soft-skip (codedb indexing unavailable for this repo)
+// rather than a fatal error.
 func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts IndexOptions) error {
 	report := func(msg string) {
 		if opts.Progress != nil {
@@ -320,6 +327,14 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 	// go-git can access the shared object store (packfiles, loose objects).
 	report("Opening local repository...")
 	repoOpenPath, isWorktree := resolveGitDir(localPath)
+
+	// Gate on alternates BEFORE plainOpenTolerant: go-git v6 silently
+	// returns "object not found" later in the walk, which surfaces as
+	// confusing partial-index failures rather than the actual root cause.
+	if hasAlternates(repoOpenPath) {
+		return fmt.Errorf("codedb cannot index %s: %w", localPath, ErrAlternatesUnsupported)
+	}
+
 	repo, err := plainOpenTolerant(repoOpenPath)
 	if err != nil {
 		return fmt.Errorf("open local repo %s: %w", localPath, err)

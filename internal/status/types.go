@@ -180,6 +180,17 @@ type GitRepoStatus struct {
 	// directory present). The most direct signal of a wedge.
 	RebaseInProgress bool
 
+	// IncompleteHistory reports whether the repo is shallow or partial
+	// (lazy-fetch promisor). When true, AheadCount/BehindCount are not
+	// computable; both are zero and UI should render a sentinel ("—" /
+	// null) rather than treat the zeros as a confident answer.
+	IncompleteHistory bool
+
+	// IncompleteReason is a short human-readable description of why
+	// history is incomplete (e.g. "shallow clone", "partial clone").
+	// Empty when IncompleteHistory is false.
+	IncompleteReason string
+
 	Error string
 }
 

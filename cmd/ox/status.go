@@ -219,13 +219,24 @@ func getGitRepoStatus(repoPath string, lastSync time.Time, hasLastSync bool) git
 	// .git/rebase-apply. Cheap (two stat calls); always run.
 	status.RebaseInProgress = gitutil.IsRebaseInProgress(repoPath)
 
-	// ahead/behind count vs upstream. Silent if no upstream is
-	// configured (offline-only repo) — that's not a wedge, just a fact
-	// of the workspace. Failures here are non-fatal; status UI would
-	// rather under-report than refuse to render.
-	if ahead, behind, ok := gitAheadBehind(repoPath); ok {
-		status.AheadCount = ahead
-		status.BehindCount = behind
+	// Shallow detection. rev-list --left-right needs the commit graph;
+	// when truncated by `--depth N`, divergence counts are wrong (they
+	// silently truncate at the shallow boundary). Partial clones
+	// (--filter=blob:none) keep the commit graph intact — divergence
+	// still works there, so we don't suppress for Partial here.
+	repoState, _ := gitutil.InspectRepo(repoPath)
+	if repoState.Shallow {
+		status.IncompleteHistory = true
+		status.IncompleteReason = repoState.Reason
+	} else {
+		// ahead/behind count vs upstream. Silent if no upstream is
+		// configured (offline-only repo) — that's not a wedge, just a fact
+		// of the workspace. Failures here are non-fatal; status UI would
+		// rather under-report than refuse to render.
+		if ahead, behind, ok := gitAheadBehind(repoPath); ok {
+			status.AheadCount = ahead
+			status.BehindCount = behind
+		}
 	}
 
 	// check if synced with remote (only if uncommitted count is 0
