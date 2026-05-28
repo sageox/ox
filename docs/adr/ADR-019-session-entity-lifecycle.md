@@ -1,3 +1,5 @@
+<!-- doc-audience: ai -->
+
 # ADR-019: Session Entity Lifecycle
 
 **Status**: Accepted
@@ -27,7 +29,7 @@ Sessions are owned by **one** `SAGEOX_AGENT_ID`. Subagents have their own sessio
 
 ### State Machine
 
-```
+```text
                   ┌─────────────────┐
                   │ not-recording   │
                   └────────┬────────┘
@@ -106,7 +108,7 @@ The existing `StatusPaused` (`internal/session/classify.go:40`) labels a *stoppe
 **User-visible notice** (new in this ADR):
 The post-`/clear` prime invocation emits a `UserNotification` describing the boundary transition. Format:
 
-```
+```text
 [ox] /clear → previous session Ox{id} ({status}, {duration}) finalized.
      New session Ox{id} started. Recording: {on|off}.
 ```

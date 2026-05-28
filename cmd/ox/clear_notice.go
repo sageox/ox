@@ -103,18 +103,21 @@ func renderClearNotice(info *ClearNoticeInfo, newAgentID string, recordingOn boo
 	if recordingOn {
 		recState = "on"
 	}
+	// newAgentID already carries the agent's "Ox" prefix from
+	// agentinstance.NewID — re-prefixing it produces "OxOxa7b3" in user-
+	// visible notices. Render the ID as-is.
 	if info.WasSuspended {
 		return fmt.Sprintf(
 			"[ox] /clear → previous session %s (suspended, %s) finalized. "+
 				"Paused range excluded from upload. "+
-				"New session Ox%s started — RECORDING SUSPENDED (carried from previous). "+
+				"New session %s started — RECORDING SUSPENDED (carried from previous). "+
 				"Resume: /ox-session-resume · Stop: /ox-session-stop",
 			info.SessionName, dur, newAgentID,
 		)
 	}
 	return fmt.Sprintf(
 		"[ox] /clear → previous session %s (%s, %s) finalized. "+
-			"New session Ox%s started. Recording: %s.",
+			"New session %s started. Recording: %s.",
 		info.SessionName, info.Status, dur, newAgentID, recState,
 	)
 }

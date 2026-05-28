@@ -71,13 +71,15 @@ func TestRenderClearNotice_Recording(t *testing.T) {
 		Status:       "recording",
 		DurationSecs: 754, // 12m 34s
 	}
-	got := renderClearNotice(info, "b3x9", true)
+	got := renderClearNotice(info, "Oxb3x9", true)
 
 	assert.Contains(t, got, "/clear")
 	assert.Contains(t, got, "2026-05-27T07-12-ryan-Oxa7b3")
 	assert.Contains(t, got, "recording")
 	assert.Contains(t, got, "12m 34s")
 	assert.Contains(t, got, "Oxb3x9")
+	assert.NotContains(t, got, "OxOxb3x9",
+		"newAgentID already carries the Ox prefix; renderer must not re-prefix")
 	assert.Contains(t, got, "Recording: on")
 }
 
@@ -91,13 +93,15 @@ func TestRenderClearNotice_Suspended(t *testing.T) {
 		DurationSecs: 3600,
 		WasSuspended: true,
 	}
-	got := renderClearNotice(info, "b3x9", false)
+	got := renderClearNotice(info, "Oxb3x9", false)
 
 	assert.Contains(t, got, "suspended")
 	assert.Contains(t, got, "1h")
 	assert.Contains(t, got, "Paused range excluded from upload")
 	assert.Contains(t, got, "RECORDING SUSPENDED")
 	assert.Contains(t, got, "carried from previous")
+	assert.NotContains(t, got, "OxOxb3x9",
+		"newAgentID already carries the Ox prefix; renderer must not re-prefix")
 }
 
 // TestRenderClearNotice_Nil verifies graceful empty return.

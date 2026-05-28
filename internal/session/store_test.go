@@ -1146,3 +1146,52 @@ func TestReadSessionFromPath_InvalidJSON(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, sess.Entries, 1)
 }
+
+// TestStore_ListSessions_PropagatesSuspendedAt — Failure prevented:
+// listSessionSessions reads .recording.json but never propagates the
+// SuspendedAt field onto SessionInfo, so ClassifySession (which branches
+// on SessionInfo.SuspendedAt to return StatusSuspended) reports actively
+// paused sessions as plain "recording". The ADR-020 status surface is
+// then broken end-to-end at the listing layer.
+func TestStore_ListSessions_PropagatesSuspendedAt(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := NewStore(tmpDir)
+
+	// Active recording, suspended
+	suspendedDir := filepath.Join(store.basePath, "2026-01-05T12-00-user-Oxsuspd")
+	require.NoError(t, os.MkdirAll(suspendedDir, 0755))
+	pausedAt := time.Now().Add(-2 * time.Minute).UTC()
+	recSuspended := RecordingState{
+		AgentID:     "Oxsuspd",
+		StartedAt:   time.Now().Add(-10 * time.Minute),
+		SuspendedAt: &pausedAt,
+		PauseCount:  1,
+	}
+	data, _ := json.Marshal(recSuspended)
+	require.NoError(t, os.WriteFile(filepath.Join(suspendedDir, recordingFile), data, 0644))
+
+	// Active recording, NOT suspended (control)
+	activeDir := filepath.Join(store.basePath, "2026-01-05T12-30-user-Oxactiv")
+	require.NoError(t, os.MkdirAll(activeDir, 0755))
+	recActive := RecordingState{AgentID: "Oxactiv", StartedAt: time.Now().Add(-5 * time.Minute)}
+	dataA, _ := json.Marshal(recActive)
+	require.NoError(t, os.WriteFile(filepath.Join(activeDir, recordingFile), dataA, 0644))
+
+	sessions, err := store.ListAllSessions()
+	require.NoError(t, err)
+
+	byName := map[string]SessionInfo{}
+	for _, s := range sessions {
+		byName[s.SessionName] = s
+	}
+
+	suspended, ok := byName["2026-01-05T12-00-user-Oxsuspd"]
+	require.True(t, ok, "suspended session missing from results")
+	require.NotNil(t, suspended.SuspendedAt,
+		"SessionInfo.SuspendedAt MUST be populated from .recording.json — ClassifySession depends on it")
+	assert.WithinDuration(t, pausedAt, *suspended.SuspendedAt, time.Second)
+
+	active, ok := byName["2026-01-05T12-30-user-Oxactiv"]
+	require.True(t, ok, "active session missing from results")
+	assert.Nil(t, active.SuspendedAt, "non-suspended recording must NOT report SuspendedAt")
+}

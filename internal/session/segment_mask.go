@@ -1,5 +1,7 @@
 package session
 
+import "sort"
+
 // segment_mask.go applies pause/resume lifecycle events to a slice of session
 // entries by filtering out entries that fall in any [pause_seq, resume_seq)
 // range. See ADR-019 (session entity lifecycle) and ADR-020 (pause/resume).
@@ -111,15 +113,60 @@ func ApplySegmentMask(entries []SessionEntry, lifecycle []LifecycleEvent) []Sess
 // CountMaskedEntries returns how many entries in `entries` fall inside any
 // exclusion range. Useful for telemetry and the upload-time validator.
 func CountMaskedEntries(entries []SessionEntry, lifecycle []LifecycleEvent) int {
+	return CountMaskedEntriesByTotal(len(entries), lifecycle)
+}
+
+// CountMaskedEntriesByTotal returns how many 0-indexed entry positions in
+// [0, total) fall inside any exclusion range built from `lifecycle`.
+// Identical semantics to CountMaskedEntries (overlaps are unioned, not
+// double-counted) but does not require a slice — callers like the upload-
+// path validator only know the entry count and shouldn't have to allocate
+// len(entries) SessionEntry values just to drive a counting loop.
+func CountMaskedEntriesByTotal(total int, lifecycle []LifecycleEvent) int {
+	if total <= 0 {
+		return 0
+	}
 	ranges := BuildSegmentRanges(lifecycle)
 	if len(ranges) == 0 {
 		return 0
 	}
-	count := 0
-	for i := range entries {
-		if IsSeqExcluded(i, ranges) {
-			count++
+
+	// Project each range onto [0, total) and union overlapping ones so we
+	// don't double-count entries covered by two ranges.
+	type clipped struct{ start, end int }
+	clamped := make([]clipped, 0, len(ranges))
+	for _, r := range ranges {
+		start := r.Start
+		if start < 0 {
+			start = 0
+		}
+		end := r.End
+		if end > total {
+			end = total
+		}
+		if end > start {
+			clamped = append(clamped, clipped{start, end})
 		}
 	}
+	if len(clamped) == 0 {
+		return 0
+	}
+	// Sort by start so we can sweep + union in one pass.
+	sort.Slice(clamped, func(i, j int) bool { return clamped[i].start < clamped[j].start })
+
+	count := 0
+	curStart, curEnd := clamped[0].start, clamped[0].end
+	for _, c := range clamped[1:] {
+		if c.start <= curEnd {
+			// overlap or touch — extend the current union
+			if c.end > curEnd {
+				curEnd = c.end
+			}
+			continue
+		}
+		count += curEnd - curStart
+		curStart, curEnd = c.start, c.end
+	}
+	count += curEnd - curStart
 	return count
 }

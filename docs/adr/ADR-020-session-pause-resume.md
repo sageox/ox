@@ -1,3 +1,5 @@
+<!-- doc-audience: ai -->
+
 # ADR-020: Session Pause/Resume
 
 **Status**: Accepted
@@ -57,7 +59,7 @@ A project-level "all agents paused" or TTL-bounded variant was rejected for fail
 
 While `state.SuspendedAt != nil`, `handlePrompt` in `cmd/ox/agent_hook.go` emits a `<system-reminder>` on every `UserPromptSubmit`:
 
-```
+```text
 [ox] ⏸ Recording SUSPENDED (3h 14m ago). Resume: /ox-session-resume · Stop: /ox-session-stop
 ```
 
@@ -67,14 +69,14 @@ Scoped to the **current agent's** suspended session only — other repo paused s
 
 `stopSessionForClear` captures finalized-session info (name, status including `was_suspended`, duration) into `OX_CLEAR_PRIOR_SESSION` env. The prime subprocess reads it via `parseClearNoticeEnv` and emits a `UserNotification`:
 
-```
+```text
 [ox] /clear → previous session Ox{id} ({status}, {duration}) finalized.
      New session Ox{id} started. Recording: {on|off}.
 ```
 
 The suspended variant emits:
 
-```
+```text
 [ox] /clear → previous session Ox{id} (suspended, {duration}) finalized.
      Paused range excluded from upload.
      New session Ox{id} started — RECORDING SUSPENDED (carried from previous).

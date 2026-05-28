@@ -271,3 +271,70 @@ func TestApplySegmentMask_Property(t *testing.T) {
 		}
 	}
 }
+
+// TestCountMaskedEntriesByTotal_MatchesCountMaskedEntries — Failure
+// prevented: the allocation-free variant drifts from CountMaskedEntries
+// semantics (over/under-counting overlapping ranges, ignoring open-ended
+// pauses, off-by-one on resume seq). Pin them to identical results across
+// a few representative lifecycles.
+func TestCountMaskedEntriesByTotal_MatchesCountMaskedEntries(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name      string
+		total     int
+		lifecycle []LifecycleEvent
+	}{
+		{
+			name:      "no lifecycle",
+			total:     100,
+			lifecycle: nil,
+		},
+		{
+			name:  "single closed pause [5, 12)",
+			total: 100,
+			lifecycle: []LifecycleEvent{
+				{Action: LifecycleActionPause, Seq: 5, At: now},
+				{Action: LifecycleActionResume, Seq: 12, At: now.Add(1 * time.Minute)},
+			},
+		},
+		{
+			name:  "open-ended pause clipped by total",
+			total: 50,
+			lifecycle: []LifecycleEvent{
+				{Action: LifecycleActionPause, Seq: 20, At: now},
+			},
+		},
+		{
+			name:  "multiple non-overlapping pauses",
+			total: 100,
+			lifecycle: []LifecycleEvent{
+				{Action: LifecycleActionPause, Seq: 5, At: now},
+				{Action: LifecycleActionResume, Seq: 10, At: now.Add(1 * time.Minute)},
+				{Action: LifecycleActionPause, Seq: 40, At: now.Add(2 * time.Minute)},
+				{Action: LifecycleActionResume, Seq: 55, At: now.Add(3 * time.Minute)},
+			},
+		},
+		{
+			name:  "total smaller than highest seq",
+			total: 8,
+			lifecycle: []LifecycleEvent{
+				{Action: LifecycleActionPause, Seq: 5, At: now},
+				{Action: LifecycleActionResume, Seq: 12, At: now.Add(1 * time.Minute)},
+			},
+		},
+		{
+			name:      "zero total",
+			total:     0,
+			lifecycle: []LifecycleEvent{{Action: LifecycleActionPause, Seq: 0, At: now}},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			stub := make([]SessionEntry, c.total)
+			want := CountMaskedEntries(stub, c.lifecycle)
+			got := CountMaskedEntriesByTotal(c.total, c.lifecycle)
+			assert.Equalf(t, want, got, "alloc-free variant must match slice variant")
+		})
+	}
+}

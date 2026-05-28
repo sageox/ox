@@ -1203,8 +1203,15 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 	if inheritedPause {
 		clearInfo := parseClearNoticeEnv()
 		priorSession := ""
+		// "inherited-from-clear" is only accurate when we actually saw a /clear
+		// handoff (OX_CLEAR_PRIOR_SESSION present); a surviving
+		// .session_paused.<agentID> marker can also come from a plain agent
+		// restart, in which case the persisted timeline should say "inherited"
+		// — not lie about the trigger.
+		reason := "inherited"
 		if clearInfo != nil {
 			priorSession = clearInfo.SessionName
+			reason = "inherited-from-clear"
 		}
 		if updateErr := session.UpdateRecordingStateForAgent(projectRoot, agentID, func(s *session.RecordingState) {
 			now := time.Now().UTC()
@@ -1216,7 +1223,7 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 				Action: session.LifecycleActionPause,
 				At:     now,
 				Seq:    0,
-				Reason: "inherited-from-clear",
+				Reason: reason,
 			})
 			_ = inheritedPauseAt // retained for telemetry if future fields need it
 			_ = inheritedPauseSeq

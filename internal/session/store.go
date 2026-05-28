@@ -416,6 +416,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var isSubagent bool
 		var parentPID int
 		var origin string
+		var suspendedAt *time.Time
 		recPath := filepath.Join(sessionPath, recordingFile)
 		if recData, recErr := os.ReadFile(recPath); recErr == nil {
 			var recState RecordingState
@@ -427,6 +428,13 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 				isSubagent = recState.IsSubagent()
 				parentPID = recState.ParentPID
 				origin = recState.Origin
+				// ADR-020: ClassifySession branches on SessionInfo.SuspendedAt to
+				// return StatusSuspended; without this propagation, suspended
+				// active sessions get reported as plain "recording".
+				if recState.SuspendedAt != nil {
+					ts := *recState.SuspendedAt
+					suspendedAt = &ts
+				}
 				if !recState.StartedAt.IsZero() && createdAt.IsZero() {
 					createdAt = recState.StartedAt
 				}
@@ -506,6 +514,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			Origin:          origin,
 			HasRawData:      hasRawData,
 			StopReason:      stopReason(meta),
+			SuspendedAt:     suspendedAt,
 		})
 	}
 

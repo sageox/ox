@@ -73,10 +73,11 @@ func validateMaskInvariant(originalCount, postMaskCount int, lifecycle []session
 		return ""
 	}
 
-	// Build a synthetic slice the same size as original and use CountMaskedEntries
-	// to compute how many SHOULD be excluded.
-	stub := make([]session.SessionEntry, originalCount)
-	expectedMasked := session.CountMaskedEntries(stub, lifecycle)
+	// Compute how many entries SHOULD be excluded directly from the count —
+	// avoid allocating `originalCount` SessionEntry values just to drive a
+	// counting loop. Sessions on the upload path can be tens of thousands
+	// of entries; the allocation is pure GC pressure.
+	expectedMasked := session.CountMaskedEntriesByTotal(originalCount, lifecycle)
 	actualMasked := originalCount - postMaskCount
 
 	if expectedMasked != actualMasked {
