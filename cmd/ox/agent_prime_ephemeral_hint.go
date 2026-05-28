@@ -82,10 +82,7 @@ func isTeamContextSparse(teamCtx *prime.TeamContextInfo) bool {
 	}
 	// trust an explicit Path when set — that's the canonical clone case
 	if teamCtx.Path != "" {
-		if dirHasEntries(teamCtx.Path) {
-			return false
-		}
-		return true
+		return !dirHasEntries(teamCtx.Path)
 	}
 	// HTTP fallback case: discovery wrote files under paths.TeamContextDir
 	// but left Path empty. Probe the canonical directory directly.
