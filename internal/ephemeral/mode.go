@@ -1,7 +1,7 @@
 // Package ephemeral is the legacy operator-facing facade for the
 // capability-based runtime in internal/runtime. New code should query
 // the specific capability it needs (runtime.Caps().PersistDisk,
-// LongLivedHelper, Browser, ...) directly. This package remains because:
+// DaemonViable, Browser, ...) directly. This package remains because:
 //
 //   - operators grep for `ephemeral_reason=` in logs;
 //   - `ox doctor` still surfaces a single "ephemeral: ACTIVE / INACTIVE" line;
@@ -68,7 +68,7 @@ func IsEphemeral() bool {
 // Useful for structured logging (key=ephemeral_reason). When
 // IsEphemeral() is true but Reason() is empty, the capability probe
 // inferred the constraint from something other than a known venue marker
-// (e.g. OX_NO_DAEMON=1 alone collapses LongLivedHelper without raising a
+// (e.g. OX_NO_DAEMON=1 alone collapses DaemonViable without raising a
 // venue Reason — IsEphemeral() returns true; Reason() returns "").
 func Reason() string {
 	return runtime.Reason()

@@ -137,6 +137,7 @@ func TestAtomicWriteFile_OverwritesExisting(t *testing.T) {
 // directory, later primes stop refreshing it and keep serving stale rules/docs.
 func TestDiscoverTeamContextWithFallback_RefreshesExistingLocalCopy(t *testing.T) {
 	t.Setenv("OX_EPHEMERAL", "1")
+	t.Setenv("OX_PERSIST_DISK", "0") // pin: non-persistent environment forces HTTP refresh
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	runtime.Reset()
@@ -261,6 +262,7 @@ func TestFetchTeamContextViaAPI_RemovesStaleDocsAndRootFiles(t *testing.T) {
 // rewrite of an already-durable local team context on every prime.
 func TestDiscoverTeamContextWithFallback_CIDoesNotForceHTTPRefresh(t *testing.T) {
 	t.Setenv("CI", "true")
+	t.Setenv("OX_PERSIST_DISK", "1") // pin: CI has durable local state, must not force HTTP refresh
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	runtime.Reset()
