@@ -149,6 +149,27 @@ type SessionMeta struct {
 	// older readers ignore the new field.
 	Redactions []RedactionPass `json:"redactions,omitempty"`
 
+	// ProducedCommits is the reverse-direction index linking this session to
+	// the git commits authored during the recording. Populated by the
+	// post-commit hook on the producing repo while the recording is active
+	// and folded into meta.json at session-stop / finalize.
+	//
+	// Source-of-truth note: the canonical forward link is the
+	// SageOx-Session: trailer on each commit message (commit→session). This
+	// list is a structured reverse index for fast session→commits lookup
+	// in session view / query, NOT a replacement for the trailer. If the
+	// two disagree (e.g. because a closed-session post-rewrite went stale),
+	// the trailer wins during reconciliation.
+	//
+	// Staleness model (D3): post-rewrite updates this list ONLY while the
+	// recording is still active. If the user rebases a commit range after
+	// session stop, entries here may reference SHAs no longer reachable in
+	// git log; `ox doctor` surfaces this as a soft signal but does not
+	// auto-mutate closed sessions.
+	//
+	// omitempty so older meta.json files (pre-Phase B) round-trip unchanged.
+	ProducedCommits []string `json:"produced_commits,omitempty"`
+
 	Files map[string]FileRef `json:"files"` // OID manifest: filename -> ref
 }
 
@@ -365,6 +386,15 @@ func (b *SessionMetaBuilder) UserID(id string) *SessionMetaBuilder {
 
 func (b *SessionMetaBuilder) RepoID(id string) *SessionMetaBuilder {
 	b.meta.RepoID = id
+	return b
+}
+
+// ProducedCommits sets the reverse-direction commit-SHA index for this
+// session. Caller passes the SHAs accumulated by the post-commit hook in
+// RecordingState during the active recording. Order preserves commit
+// order; duplicates are not deduplicated (callers do that if needed).
+func (b *SessionMetaBuilder) ProducedCommits(shas []string) *SessionMetaBuilder {
+	b.meta.ProducedCommits = shas
 	return b
 }
 

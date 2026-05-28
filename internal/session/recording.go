@@ -104,6 +104,13 @@ type RecordingState struct {
 	InheritedPause       bool             `json:"inherited_pause,omitempty"`
 	InheritedFromSession string           `json:"inherited_from_session,omitempty"`
 
+	// ProducedCommits is the reverse-direction index of commit SHAs authored
+	// during this recording. Appended by the post-commit hook; rewritten
+	// in place by the post-rewrite hook on amend/rebase. Folded into
+	// SessionMeta.ProducedCommits at session stop / finalize. omitempty so
+	// older .recording.json files round-trip unchanged.
+	ProducedCommits []string `json:"produced_commits,omitempty"`
+
 	// Hook observability: lets `ox session status` show whether hooks are firing
 	// and why they're skipping. Without these, a broken recording path (e.g.
 	// adapter binary missing, session file not discoverable) looks identical to
