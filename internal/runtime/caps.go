@@ -199,10 +199,11 @@ func probePersistDisk() bool {
 	if dir == "" {
 		return false
 	}
-	if info, err := os.Stat(dir); err == nil && info.IsDir() {
-		// permission check: Stat tells us the dir exists. We skip the
-		// actual write to keep Probe side-effect-free; subsystems that
-		// can't write here will discover that on their own and fail closed.
+	// permission check: Stat tells us the dir exists; require at least one
+	// write bit so a read-only dir doesn't get reported as persistable. We
+	// still avoid an actual write to keep Probe side-effect-free; subsystems
+	// that can't write here will discover that on their own and fail closed.
+	if dirLikelyWritable(dir) {
 		return true
 	}
 	// not yet created — fall back to "is the parent writable"
@@ -210,10 +211,22 @@ func probePersistDisk() bool {
 	if parent == "" {
 		return false
 	}
-	if info, err := os.Stat(parent); err == nil && info.IsDir() {
+	if dirLikelyWritable(parent) {
 		return true
 	}
 	return false
+}
+
+// dirLikelyWritable is a side-effect-free heuristic: the path must exist,
+// be a directory, and carry at least one write bit in its mode. A read-only
+// directory returns false. False negatives are acceptable — they push us
+// toward the conservative non-persistent branch, which is the safer default.
+func dirLikelyWritable(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	return info.Mode().Perm()&0o222 != 0
 }
 
 // candidateSageoxDir returns the directory we'd persist into if asked.
@@ -227,14 +240,15 @@ func candidateSageoxDir() string {
 }
 
 // probeTmpdir returns true when os.TempDir() exists and is writable. The
-// check intentionally avoids a real write so Probe stays side-effect-free.
+// check intentionally avoids a real write so Probe stays side-effect-free,
+// but requires at least one write bit in the directory mode so a read-only
+// TMPDIR doesn't get reported as usable.
 func probeTmpdir() bool {
 	tmp := os.TempDir()
 	if tmp == "" {
 		return false
 	}
-	info, err := os.Stat(tmp)
-	return err == nil && info.IsDir()
+	return dirLikelyWritable(tmp)
 }
 
 // probeBrowser returns true when we have a reasonable chance of opening

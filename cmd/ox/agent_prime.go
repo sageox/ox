@@ -33,6 +33,7 @@ import (
 	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/runtime"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/teamdocs"
@@ -1900,10 +1901,15 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 		return nil
 	}
 
-	// In ephemeral mode, refresh team context over HTTP on every prime. These
-	// environments do not have a daemon keeping the clone warm, so a successful
+	// In non-persistent environments, refresh team context over HTTP on every
+	// prime. These environments do not keep a durable clone warm, so a successful
 	// prior fetch should not turn the fallback into a one-shot stale cache.
-	if enableEphemeralFallback && ephemeral.IsEphemeral() {
+	//
+	// IMPORTANT: gate on PersistDisk, not the broader IsEphemeral() composite.
+	// CI runners and OX_NO_DAEMON sandboxes still have durable local state; they
+	// should read the existing clone/path directly instead of rewriting it over
+	// HTTP on every prime.
+	if enableEphemeralFallback && !runtime.Caps().PersistDisk {
 		if pc, err := config.LoadProjectConfig(projectRoot); err == nil && pc != nil && pc.TeamID != "" {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()

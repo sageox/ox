@@ -1,8 +1,8 @@
 package session
 
-// finalize.go — capability-aware shared entry point for session
-// finalization, gating the sync-vs-async decision on
-// runtime.Caps().DaemonViable rather than on a config knob alone.
+// finalize.go — shared entry point for session finalization, encoding the
+// sync-vs-async decision as a small pure function rather than letting each
+// caller re-derive it from config and environment state.
 //
 // Background. There are three players in the session-stop pipeline:
 //
@@ -30,13 +30,8 @@ package session
 //
 // FinalizeDispatchMode encodes the right decision at the entry to the
 // session-stop pipeline. Callers ask "should I run sync or signal the
-// daemon?" and get back a single enum that already accounts for the
-// runtime capability. Tests exercise both branches by constructing
-// Capabilities literals; no global state.
-
-import (
-	"github.com/sageox/ox/internal/runtime"
-)
+// daemon?" and get back a single enum. Tests exercise both branches with
+// explicit booleans; no global state.
 
 // FinalizeDispatchMode is the answer to "how should this session-stop
 // route the upload?" — a single switch the CLI consults.
@@ -91,16 +86,4 @@ func ChooseFinalizeMode(daemonViable, userPrefersAsync bool) FinalizeDispatchMod
 		return FinalizeAsyncDaemon
 	}
 	return FinalizeSync
-}
-
-// FinalizeModeForCaller is the convenience wrapper that the CLI
-// session-stop path uses. It pulls DaemonViable from the runtime probe
-// so callers don't have to thread Capabilities through; tests prefer
-// ChooseFinalizeMode for explicit control.
-//
-// `userPrefersAsync` is the user's preference (true when summarizer
-// mode is `delegated`); we still honor it when the daemon is viable,
-// but force sync when it isn't.
-func FinalizeModeForCaller(userPrefersAsync bool) FinalizeDispatchMode {
-	return ChooseFinalizeMode(runtime.Caps().DaemonViable, userPrefersAsync)
 }
