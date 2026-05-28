@@ -313,12 +313,13 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 				}
 			}
 
-			// use a fresh context for abort — the parent ctx may be canceled
-			abortCtx, abortCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			_, abortErr := gitutil.RunGit(abortCtx, path, "rebase", "--abort")
-			abortCancel()
+			// AuditAndAbort: structured pre/post logs capture HEAD SHA,
+			// unmerged file list, and stash count BEFORE discarding state,
+			// so silent recovery from a wedged rebase leaves an audit
+			// trail. See ox-ooy3 and .claude/rules/daemon-git.md.
+			abortErr := gitutil.AuditAndAbort(ctx, path, gitutil.AuditOpRebase, "auto-resolve exhausted", logger)
 			if abortErr != nil {
-				logger.Error("rebase abort failed, repo stuck in rebase state", "repo", repoName, "error", abortErr)
+				logger.Error("rebase abort failed, repo stuck in rebase state", "op", "rebase_abort_failed", "repo", repoName, "error", abortErr)
 				result.Issue = &DaemonIssue{
 					Type:            IssueTypeRebaseStuck,
 					Severity:        SeverityError,

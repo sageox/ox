@@ -210,3 +210,76 @@ func TestPushSummaryUnmarshal_EmptyTitleStillCallsUpdateMetaSummary(t *testing.T
 	assert.Empty(t, got.Title, "empty title must clear meta.Title")
 	assert.Empty(t, got.Summary, "empty title must clear meta.Summary")
 }
+
+// --- wrapCommitError ---
+//
+// Failure prevented: a stuck-merge wedge surfaces from push-summary as raw
+// git stderr (`fatal: Exiting because of an unresolved conflict.: exit
+// status 128`) with no path forward. ox-v30g — every coworker who saw it
+// had to escalate. The wrapper must detect the three phrasings git uses
+// for unmerged paths AND must NOT alter unrelated commit failures.
+
+func TestWrapCommitError_DetectsUnmergedFiles(t *testing.T) {
+	t.Parallel()
+
+	// the three phrasings git uses across commit / merge --continue /
+	// cherry-pick --continue paths — must ALL trigger the recovery hint
+	cases := []string{
+		"error: Committing is not possible because you have unmerged files.\nfatal: Exiting because of an unresolved conflict.",
+		"error: you have unmerged paths.\nhint: fix conflicts and run 'git commit'",
+		"fatal: Exiting because of an unresolved conflict.",
+		// uppercase variant — match must be case-insensitive
+		"ERROR: UNMERGED FILES",
+	}
+	for _, stderr := range cases {
+		t.Run(stderr[:min(40, len(stderr))], func(t *testing.T) {
+			got := wrapCommitError(stderr, assert.AnError)
+			assert.Contains(t, got, "ox doctor --fix",
+				"recovery hint missing — user has no actionable next step")
+			assert.Contains(t, got, "unresolved merge conflicts blocking commits",
+				"failure-mode summary missing — user can't tell what went wrong")
+			// raw git output must be preserved so the support bundle still has it
+			assert.Contains(t, got, "raw git:")
+		})
+	}
+}
+
+func TestWrapCommitError_PreservesUnrelatedFailures(t *testing.T) {
+	t.Parallel()
+
+	// these failures are already actionable on their own — wrapping them
+	// in the unmerged-paths hint would mislead the user
+	cases := []struct {
+		name   string
+		stderr string
+	}{
+		{"hook rejection", "pre-commit hook failed: pre-commit.py exited 1"},
+		{"empty index", "nothing to commit, working tree clean"},
+		{"lock contention", "fatal: Unable to create '.git/index.lock': File exists."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := wrapCommitError(tc.stderr, assert.AnError)
+			assert.NotContains(t, got, "ox doctor --fix",
+				"recovery hint must NOT appear for non-wedge failures (%s) — would mislead the user", tc.name)
+			assert.Contains(t, got, tc.stderr, "raw stderr must be preserved verbatim for non-wedge failures")
+		})
+	}
+}
+
+func TestWrapCommitError_EmptyStderr(t *testing.T) {
+	t.Parallel()
+	got := wrapCommitError("", assert.AnError)
+	// empty stderr is not a wedge — keep the original error visible
+	assert.NotContains(t, got, "ox doctor --fix")
+	assert.Contains(t, got, "git commit")
+}
+
+// min is a local helper since the test predates Go 1.21's builtin min;
+// remove this once the minimum supported Go version is 1.21+.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

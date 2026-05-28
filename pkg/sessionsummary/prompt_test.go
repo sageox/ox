@@ -38,6 +38,20 @@ func TestBuildSummaryPrompt(t *testing.T) {
 		assert.Contains(t, result, "/ledger/sessions/abc")
 	})
 
+	t.Run("push step uses stdin, never a /tmp/ scratch file", func(t *testing.T) {
+		// Regression guard for ox-34a8: agents previously wrote summary JSON
+		// to /tmp/ox-summary.json, which raced against macOS tmpfs GC and
+		// concurrent agents on the same machine. The canonical form is now
+		// `--file -` via stdin.
+		result := BuildSummaryPrompt(entries, "/ledger/sessions/abc/raw.jsonl", "/ledger/sessions/abc")
+		assert.Contains(t, result, "--file -",
+			"push step must instruct agents to use stdin (--file -)")
+		assert.NotContains(t, result, "/tmp/ox-summary",
+			"push step must not direct agents to write summary JSON under /tmp/")
+		assert.NotContains(t, result, ".ox-summary.json",
+			"push step must not direct agents to a workspace scratch file either; stdin is canonical")
+	})
+
 	t.Run("omits push step when ledger dir empty", func(t *testing.T) {
 		result := BuildSummaryPrompt(entries, "/tmp/raw.jsonl", "")
 		assert.NotContains(t, result, "ox session push-summary")

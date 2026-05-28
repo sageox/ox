@@ -181,11 +181,11 @@ func TestSearch_MultiTermANDSemantics(t *testing.T) {
 func TestParseSessionTimestamp(t *testing.T) {
 	t.Parallel()
 	cases := map[string]bool{
-		"2026-02-13T14-56-ajit-OxmoZK":    true,
-		"not-a-session":                   false,
-		"2026-02-13X14-56-ajit-OxmoZK":    false,
-		"":                                false,
-		"2026-02-13T14:56-ryan-Oxabcd":    false, // colon present, our format uses dashes
+		"2026-02-13T14-56-ajit-OxmoZK": true,
+		"not-a-session":                false,
+		"2026-02-13X14-56-ajit-OxmoZK": false,
+		"":                             false,
+		"2026-02-13T14:56-ryan-Oxabcd": false, // colon present, our format uses dashes
 	}
 	for name, shouldParse := range cases {
 		ts := parseSessionTimestamp(name)

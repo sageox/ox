@@ -377,7 +377,7 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		return &pushSummaryOutput{
 			Success: false,
 			Type:    "push_summary",
-			Error:   fmt.Sprintf("git commit: %s: %v", strings.TrimSpace(outStr), err),
+			Error:   wrapCommitError(outStr, err),
 		}
 	}
 
@@ -522,4 +522,34 @@ func findGitRootFrom(dir string) (string, error) {
 		}
 		dir = parent
 	}
+}
+
+// wrapCommitError translates the raw `git commit` failure into a
+// recovery-actionable error message. When the failure is the unmerged-paths
+// wedge (the only case where raw git output is genuinely opaque to a
+// non-git-native user) we prepend a hint pointing at the doctor fix path.
+// For every other failure mode the raw stderr is already actionable, so we
+// preserve it verbatim.
+//
+// Extracted from the inline pushSummaryToLedger error path so the matching
+// logic is unit-testable. See bd ox-v30g for the original incident: a
+// push-summary that hit a stuck merge wedge surfaced as raw git stderr
+// (`fatal: Exiting because of an unresolved conflict.: exit status 128`)
+// with no path forward; every coworker who saw it had to escalate.
+func wrapCommitError(stderr string, err error) string {
+	trimmed := strings.TrimSpace(stderr)
+	lower := strings.ToLower(stderr)
+	// Match all three of git's unmerged-files phrasings — they each show up
+	// in different code paths (commit, merge --continue, cherry-pick --continue).
+	if strings.Contains(lower, "unmerged files") ||
+		strings.Contains(lower, "unmerged paths") ||
+		strings.Contains(lower, "unresolved conflict") {
+		return fmt.Sprintf(
+			"ledger has unresolved merge conflicts blocking commits. "+
+				"run `ox doctor --fix` to detect and clear the wedge, then retry. "+
+				"(raw git: %s)",
+			trimmed,
+		)
+	}
+	return fmt.Sprintf("git commit: %s: %v", trimmed, err)
 }

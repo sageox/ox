@@ -144,9 +144,9 @@ Also available as: ox agent <id> query "search text"`
 
 // combinedQueryResponse holds results from both team context and local code search.
 type combinedQueryResponse struct {
-	TeamContext   *api.QueryResponse   `json:"team_context,omitempty"`
-	CodeResults   []search.Result      `json:"code_results,omitempty"` // used by --full-json only
-	LocalResults  []ledgersearch.Result `json:"local_results,omitempty"`
+	TeamContext  *api.QueryResponse    `json:"team_context,omitempty"`
+	CodeResults  []search.Result       `json:"code_results,omitempty"` // used by --full-json only
+	LocalResults []ledgersearch.Result `json:"local_results,omitempty"`
 }
 
 // compactQueryResponse is the default agent query output — minimal context footprint.
