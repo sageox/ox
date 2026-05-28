@@ -736,6 +736,26 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// ADR-020: surface the paused-parent subagent skip notice at the top level.
+	// startSessionRecording returns a sessionStatus with UserNotification set
+	// when a subagent's parent was paused; without this, the message lives only
+	// in the nested Session struct and the top-level prime output derives its
+	// "Session recording" hint from Session.Recording alone, so the agent ends
+	// up advertising "Session recording: available (/ox-session-start)" while
+	// the recording was just intentionally skipped. Lift the message into the
+	// canonical UserNotices channel so both --json and --text consumers see it.
+	if sessionStat != nil && !sessionStat.Recording && sessionStat.UserNotification != "" {
+		output.UserNotices = append(output.UserNotices, UserNotice{
+			Type:    "session-skipped",
+			Message: sessionStat.UserNotification,
+		})
+		if output.UserNotification == "" {
+			output.UserNotification = sessionStat.UserNotification
+		} else {
+			output.UserNotification = sessionStat.UserNotification + " " + output.UserNotification
+		}
+	}
+
 	// ADR-019: /clear is a session boundary. When this prime invocation follows
 	// a /clear that finalized a prior session, surface the transition to the
 	// user. The stopSessionForClear handoff is via OX_CLEAR_PRIOR_SESSION env.
@@ -1471,6 +1491,26 @@ func outputAgentPrimeText(cmd *cobra.Command, output agentPrimeOutput) error {
 			output.PrimeExcessiveNotice,
 			"",
 		)
+	}
+
+	// ADR-019/020: surface UserNotices that have no dedicated text-mode
+	// renderer. Without this, the /clear boundary notice and the paused-
+	// parent subagent-skipped notice land in output.UserNotices but
+	// outputAgentPrimeText was previously rendering only the typed boxes
+	// (HooksInstalled / SupportNotice / PrimeExcessiveNotice / upgrade),
+	// so --text mode would lose the lifecycle boundary handoff entirely.
+	// Skip notice types that are already rendered above to avoid dup.
+	renderedTypes := map[string]bool{
+		"restart": true, // HooksInstalled box already printed
+		"support": true, // SupportNotice box already printed
+		"upgrade": true, // UpdateAvailable box already printed
+	}
+	for _, n := range output.UserNotices {
+		if renderedTypes[n.Type] || n.Message == "" {
+			continue
+		}
+		fmt.Fprintln(cmd.OutOrStdout())
+		fmt.Fprintln(cmd.OutOrStdout(), n.Message)
 	}
 
 	// session status section

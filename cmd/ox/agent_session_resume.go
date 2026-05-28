@@ -59,14 +59,24 @@ func runAgentSessionResume(inst *agentinstance.Instance, _ []string) error {
 	}
 
 	pausedAt := *state.SuspendedAt
-	resumeSeq := state.EntryCount
 	now := time.Now().UTC()
 
-	// compute the excluded count: walk lifecycle to find the most recent open
-	// pause and count entries in [pause_seq, resume_seq). Done before update.
-	excluded := computeExcludedSinceLastPause(state.Lifecycle, resumeSeq)
-
+	// Capture resumeSeq + excluded count INSIDE the update closure so the
+	// persisted LifecycleEvent.Seq AND the excluded-range calculation both
+	// see the same EntryCount that .recording.json is about to be saved
+	// with. Reading either beforehand opens a TOCTOU window where entries
+	// appended while still SuspendedAt != nil get treated as resumed and
+	// silently uploaded — the exact failure ADR-020's "temporal redaction
+	// scope" claims to prevent.
+	var (
+		resumeSeq   int
+		excluded    int
+		sessionName string
+	)
 	if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
+		resumeSeq = s.EntryCount
+		excluded = computeExcludedSinceLastPause(s.Lifecycle, resumeSeq)
+		sessionName = session.GetSessionName(s.SessionPath)
 		s.SuspendedAt = nil
 		s.Lifecycle = append(s.Lifecycle, session.LifecycleEvent{
 			Action: session.LifecycleActionResume,
@@ -85,7 +95,7 @@ func runAgentSessionResume(inst *agentinstance.Instance, _ []string) error {
 		Success:         true,
 		Type:            "session_resume",
 		AgentID:         inst.AgentID,
-		SessionName:     session.GetSessionName(state.SessionPath),
+		SessionName:     sessionName,
 		Status:          "resumed",
 		Message:         fmt.Sprintf("session resumed at entry %d", resumeSeq),
 		ResumedSeq:      resumeSeq,

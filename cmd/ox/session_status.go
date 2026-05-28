@@ -155,6 +155,54 @@ type sessionRecordingEntry struct {
 	SessionFile   string `json:"session_file,omitempty"`
 	WorkspacePath string `json:"workspace_path,omitempty"`
 	Branch        string `json:"branch,omitempty"`
+
+	// ADR-020 pause/resume surface — kept in sync with sessionStatusOutput.
+	// Multi-session JSON consumers (status dashboards, daemon, agents
+	// enumerating siblings) need to tell suspended sessions apart from
+	// actively-recording ones.
+	Suspended            bool   `json:"suspended,omitempty"`
+	SuspendedAt          string `json:"suspended_at,omitempty"`
+	SuspendedDuration    string `json:"suspended_duration,omitempty"`
+	PauseCount           int    `json:"pause_count,omitempty"`
+	InheritedPause       bool   `json:"inherited_pause,omitempty"`
+	InheritedFromSession string `json:"inherited_from_session,omitempty"`
+}
+
+// buildSessionRecordingEntry maps a RecordingState into the multi-session
+// JSON row, including ADR-020 pause-state fields. Extracted from
+// runSessionStatus so the mapping can be unit-tested without setting up
+// the full multi-recording fixture on disk.
+func buildSessionRecordingEntry(s *session.RecordingState, alive *bool, status string) sessionRecordingEntry {
+	d := s.Duration()
+	entry := sessionRecordingEntry{
+		AgentID:       s.AgentID,
+		AgentAlive:    agentAlivePtr(s),
+		Title:         s.Title,
+		Agent:         s.AdapterName,
+		DurationSecs:  int(d.Seconds()),
+		Duration:      formatDurationHuman(d),
+		EntryCount:    s.EntryCount,
+		FilterMode:    s.FilterMode,
+		Model:         s.Model,
+		ProcessAlive:  alive,
+		ProcessStatus: status,
+		StartedAt:     s.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
+		SessionFile:   s.SessionFile,
+		WorkspacePath: s.WorkspacePath,
+		Branch:        s.Branch,
+	}
+	// ADR-020: propagate pause state per-row so multi-session JSON
+	// consumers can distinguish suspended sessions from active ones.
+	// Mirrors the single-session output's pause surface.
+	if s.SuspendedAt != nil {
+		entry.Suspended = true
+		entry.SuspendedAt = s.SuspendedAt.Format("2006-01-02T15:04:05Z07:00")
+		entry.SuspendedDuration = formatPausedDuration(time.Since(*s.SuspendedAt))
+		entry.PauseCount = s.PauseCount
+		entry.InheritedPause = s.InheritedPause
+		entry.InheritedFromSession = s.InheritedFromSession
+	}
+	return entry
 }
 
 func init() {
@@ -326,25 +374,8 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 	if jsonOutput {
 		var entries []sessionRecordingEntry
 		for _, s := range states {
-			d := s.Duration()
 			alive, status := agentLivenessFor(agentAlive, s.AgentID)
-			entries = append(entries, sessionRecordingEntry{
-				AgentID:       s.AgentID,
-				AgentAlive:    agentAlivePtr(s),
-				Title:         s.Title,
-				Agent:         s.AdapterName,
-				DurationSecs:  int(d.Seconds()),
-				Duration:      formatDurationHuman(d),
-				EntryCount:    s.EntryCount,
-				FilterMode:    s.FilterMode,
-				Model:         s.Model,
-				ProcessAlive:  alive,
-				ProcessStatus: status,
-				StartedAt:     s.StartedAt.Format("2006-01-02T15:04:05Z07:00"),
-				SessionFile:   s.SessionFile,
-				WorkspacePath: s.WorkspacePath,
-				Branch:        s.Branch,
-			})
+			entries = append(entries, buildSessionRecordingEntry(s, alive, status))
 		}
 		return outputJSON(cmd.OutOrStdout(), sessionStatusOutput{
 			Recording: true,

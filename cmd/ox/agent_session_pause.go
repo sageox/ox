@@ -63,11 +63,25 @@ func runAgentSessionPause(inst *agentinstance.Instance, _ []string) error {
 	}
 
 	now := time.Now().UTC()
-	seq := state.EntryCount
 
+	// Capture seq + pause count INSIDE the update closure so the persisted
+	// LifecycleEvent.Seq matches the EntryCount the .recording.json is about
+	// to be saved with. Reading them beforehand opens a TOCTOU window where
+	// the tail-watcher appends entries between our read and Update's
+	// internal Load-modify-Save — and the persisted seq would silently
+	// trail the real entry stream, leaking paused entries into the upload
+	// at stop time.
+	var (
+		seq          int
+		pauseCount   int
+		sessionName  string
+	)
 	if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
+		seq = s.EntryCount
 		s.SuspendedAt = &now
 		s.PauseCount++
+		pauseCount = s.PauseCount
+		sessionName = session.GetSessionName(s.SessionPath)
 		s.Lifecycle = append(s.Lifecycle, session.LifecycleEvent{
 			Action: session.LifecycleActionPause,
 			At:     now,
@@ -82,18 +96,11 @@ func runAgentSessionPause(inst *agentinstance.Instance, _ []string) error {
 		return fmt.Errorf("recording suspended but marker write failed: %w", err)
 	}
 
-	// reload to read back the persisted PauseCount for output accuracy
-	state, _ = session.LoadRecordingStateForAgent(projectRoot, inst.AgentID)
-	pauseCount := 1
-	if state != nil {
-		pauseCount = state.PauseCount
-	}
-
 	return emitPauseOutput(os.Stdout, &sessionPauseOutput{
 		Success:     true,
 		Type:        "session_pause",
 		AgentID:     inst.AgentID,
-		SessionName: session.GetSessionName(state.SessionPath),
+		SessionName: sessionName,
 		Status:      "paused",
 		Message:     fmt.Sprintf("session suspended at entry %d", seq),
 		Seq:         seq,
