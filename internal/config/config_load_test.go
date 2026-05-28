@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/ephemeral"
+	"github.com/sageox/ox/internal/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,9 +24,16 @@ func clearEphemeralSignalsForConfigTest(t *testing.T) {
 		"JENKINS_URL",
 		"BUILDKITE",
 		"CODEBUILD_BUILD_ID",
+		"OX_PERSIST_DISK",
+		"OX_NO_DAEMON",
+		"OX_BROWSER",
 	} {
 		t.Setenv(key, "")
 	}
+	// Runtime caps are sync.Once-cached; clear them so a sibling test's
+	// probe doesn't pollute this one. Pair with the env-var resets above.
+	runtime.Reset()
+	t.Cleanup(runtime.Reset)
 }
 
 // TestLoad_SeedsEphemeralPreferenceFromUserConfig — Failure prevented: the

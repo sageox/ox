@@ -3,7 +3,7 @@ package config
 import (
 	"os"
 
-	"github.com/sageox/ox/internal/ephemeral"
+	"github.com/sageox/ox/internal/runtime"
 )
 
 type Config struct {
@@ -18,10 +18,11 @@ type Config struct {
 // Load creates a Config from environment variables only.
 // Runtime flags (--verbose, --json, etc.) are applied by the cobra layer in cli/context.go.
 func Load() *Config {
-	// Seed the user-config ephemeral preference before any subsystem consults
-	// ephemeral.IsEphemeral(). Commands like `ox distill --sync` decide about
-	// daemon startup during PersistentPreRun, so the persisted preference must
-	// be visible here even if no later code explicitly loads user config.
+	// Seed the user-config ephemeral preference before any subsystem
+	// consults the runtime capability probe. Commands like `ox distill
+	// --sync` decide about daemon startup during PersistentPreRun, so
+	// the persisted preference must be visible here even if no later
+	// code explicitly loads user config.
 	_, _ = LoadUserConfig()
 
 	return &Config{
@@ -30,20 +31,23 @@ func Load() *Config {
 		JSON:    os.Getenv("OX_JSON") == "1",
 		Text:    os.Getenv("OX_TEXT") == "1",
 		Review:  os.Getenv("OX_REVIEW") == "1",
-		// CI runners and ephemeral cloud agents (Claude Cloud, Devin,
-		// Codespaces) both lack a TTY and a human at the keyboard. CI
-		// alone does NOT imply ephemeral (CI filesystems persist), but
-		// it does imply non-interactive — see internal/ephemeral/mode.go
-		// for the distinction.
-		NoInteractive: os.Getenv("OX_NO_INTERACTIVE") == "1" || isCI() || ephemeral.IsEphemeral(),
+		// NoInteractive turns off spinners and TUI elements. The honest
+		// question is "is there a human watching the terminal?" — which
+		// is what runtime.Caps().Browser probes (sandboxes, CI, and
+		// OX_BROWSER=0 all collapse it). The legacy isCI() check stays
+		// as a second guard in case the Browser probe ever loosens its
+		// CI heuristics; both signals agree on the CI case today, but
+		// the redundancy is cheap.
+		NoInteractive: os.Getenv("OX_NO_INTERACTIVE") == "1" || isCI() || !runtime.Caps().Browser,
 	}
 }
 
 // IsCI returns true if running in a CI environment.
 // Checks standard CI environment variables used by major CI providers.
-// Kept as a separate predicate from ephemeral.IsEphemeral() because some callers
-// want the narrower "is CI specifically" answer (e.g. test fixtures that
-// behave differently under a buildkite agent vs a Claude Cloud sandbox).
+// Kept as a separate predicate from runtime.Caps() because some callers
+// want the narrower "is CI specifically" answer (e.g. test fixtures
+// that behave differently under a buildkite agent vs a Claude Cloud
+// sandbox).
 func IsCI() bool {
 	return isCI()
 }

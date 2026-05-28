@@ -12,7 +12,7 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
-	"github.com/sageox/ox/internal/ephemeral"
+	"github.com/sageox/ox/internal/runtime"
 )
 
 // envTokenAssumedLifetime is the fallback lifetime used for env-supplied
@@ -45,15 +45,23 @@ func resetExpiryWarnedKeysForTest() {
 // cases — ephemeral, never-expires, dedup, non-TTY, no auth).
 //
 // Skipped silently when:
-//   - ephemeral.IsEphemeral() is true (cloud-agent contexts — noise hurts)
+//   - runtime.Caps().Browser is false (no human at keyboard — sandbox,
+//     headless CI runner, OX_BROWSER=0). The warning targets a human
+//     operator; an unwatched stderr just creates noise in agent logs.
 //   - the writer is not a TTY (unless the *os.File path resolves to stderr
 //     and the caller has already decided to force; today the policy is
 //     "TTY only" with no override flag — keep it simple)
 //   - the token has never-expires semantics (ExpiresAt == nil)
 //   - the same token hash already warned this process
 //   - no token is configured for the endpoint (nothing to warn about)
+//
+// IMPORTANT: gated on Browser specifically, not the composite
+// ephemeral.IsEphemeral(). Browser is the honest capability question
+// — "is there a human watching stderr?" — and it captures the same
+// cases (CI, cloud agents, OX_EPHEMERAL=1) without dragging in disk /
+// daemon concerns that have nothing to do with warning visibility.
 func CheckAndWarnExpiry(ctx context.Context, ep string, w io.Writer) bool {
-	if ephemeral.IsEphemeral() {
+	if !runtime.Caps().Browser {
 		return false
 	}
 	if !writerIsTTY(w) {

@@ -12,11 +12,14 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ephemeral"
+	"github.com/sageox/ox/internal/runtime"
 )
 
-// clearEnvironment scrubs every signal that could push ephemeral.IsEphemeral()
-// to true. Tests calling CheckAndWarnExpiry must scrub these first or the
-// ephemeral skip will mask the path under test.
+// clearEphemeralForTest scrubs every signal that could collapse
+// runtime.Caps().Browser. Tests calling CheckAndWarnExpiry must scrub
+// these first or the no-Browser skip will mask the path under test.
+// Also clears the sync.Once-cached capability probe so subsequent
+// runtime.Caps() calls see the cleared env.
 func clearEphemeralForTest(t *testing.T) {
 	t.Helper()
 	t.Setenv("OX_EPHEMERAL", "")
@@ -29,7 +32,12 @@ func clearEphemeralForTest(t *testing.T) {
 	t.Setenv("JENKINS_URL", "")
 	t.Setenv("BUILDKITE", "")
 	t.Setenv("CODEBUILD_BUILD_ID", "")
+	t.Setenv("OX_BROWSER", "")
+	t.Setenv("OX_PERSIST_DISK", "")
+	t.Setenv("OX_NO_DAEMON", "")
 	ephemeral.SetUserConfigPreference(nil)
+	runtime.Reset()
+	t.Cleanup(runtime.Reset)
 }
 
 // TestComputeExpiryThreshold_TableDriven covers the lifetime-pct math against
@@ -96,9 +104,13 @@ func TestComputeExpiryThreshold_DefaultsApply(t *testing.T) {
 
 // TestCheckAndWarnExpiry_SkippedWhenEphemeral — Failure prevented: cloud
 // agents spam stderr on every prime, polluting their structured outputs.
+// The gate is now runtime.Caps().Browser=false; OX_EPHEMERAL=1 collapses
+// it, so the historical OX_EPHEMERAL=1 invocation still suppresses.
 func TestCheckAndWarnExpiry_SkippedWhenEphemeral(t *testing.T) {
 	t.Setenv("OX_EPHEMERAL", "1")
 	defer ephemeral.SetUserConfigPreference(nil)
+	runtime.Reset()
+	t.Cleanup(runtime.Reset)
 
 	resetExpiryWarnedKeysForTest()
 	var buf bytes.Buffer
