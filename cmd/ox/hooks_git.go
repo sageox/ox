@@ -12,6 +12,7 @@ const (
 	prepareCommitMsgHookName = "prepare-commit-msg"
 	postCommitHookName       = "post-commit"
 	postRewriteHookName      = "post-rewrite"
+	prePushHookName          = "pre-push"
 
 	// shared end marker — all ox-managed hook sections close with this.
 	// Mirrors the patterns in internal/uninstall/hooks.go sageoxHookMarkers.
@@ -50,6 +51,20 @@ fi
 # end ox hook`
 	oxPostRewriteProbe = "ox hooks post-rewrite"
 
+	// pre-push: parses the pushed commit range from stdin, resolves the PR
+	// for the branch and any Fixes #N issue refs, and records them on the
+	// active recording's LinkedPRs/LinkedIssues. git pipes the ref lines on
+	// stdin, so the hook reads stdin and forwards it to the handler.
+	// Best-effort, never blocks the push.
+	oxPrePushMarkerStart = "# ox pre-push hook"
+	oxPrePushSection     = `# ox pre-push hook
+# records PR + issue linkage for the active recording from the pushed range
+if command -v ox >/dev/null 2>&1; then
+  ox hooks pre-push --remote "${1:-}" --url "${2:-}" 2>/dev/null || true
+fi
+# end ox hook`
+	oxPrePushProbe = "ox hooks pre-push"
+
 	// Legacy marker name from the single-hook era. Some code paths
 	// (internal/uninstall/hooks.go) may still reference this; keep it as
 	// an alias for the prepare-commit-msg marker so external readers don't
@@ -86,6 +101,12 @@ func allHookSpecs() []hookSpec {
 			markerStart: oxPostRewriteMarkerStart,
 			section:     oxPostRewriteSection,
 			probe:       oxPostRewriteProbe,
+		},
+		{
+			name:        prePushHookName,
+			markerStart: oxPrePushMarkerStart,
+			section:     oxPrePushSection,
+			probe:       oxPrePushProbe,
 		},
 	}
 }
