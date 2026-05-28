@@ -214,6 +214,53 @@ func TestNewSessionMeta_RoundTrip(t *testing.T) {
 	assert.Equal(t, "sha256:abc123", got.Files["raw.jsonl"].OID)
 }
 
+// TestSessionMeta_LinkageFieldsRoundTrip verifies the ProducedCommits,
+// LinkedPRs, LinkedIssues, and LinkageStatus fields survive a write/read
+// cycle. Failure prevented: a JSON tag typo silently drops linkage data,
+// making `ox session view` show empty PR/Issue/Commit sections.
+func TestSessionMeta_LinkageFieldsRoundTrip(t *testing.T) {
+	sessionDir := filepath.Join(t.TempDir(), "linked-session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+
+	meta := NewSessionMeta("linked-session", "user", "Ox1234", "claude-code",
+		time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)).
+		RepoID("repo_xyz").
+		ProducedCommits([]string{"abc1234", "def5678"}).
+		LinkedPRs([]string{"https://github.com/owner/repo/pull/42"}).
+		LinkedIssues([]string{"#101", "#103"}).
+		LinkageStatus(LinkageStatusUploaded).
+		Build()
+
+	require.NoError(t, WriteSessionMeta(sessionDir, meta))
+
+	got, err := ReadSessionMeta(sessionDir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"abc1234", "def5678"}, got.ProducedCommits)
+	assert.Equal(t, []string{"https://github.com/owner/repo/pull/42"}, got.LinkedPRs)
+	assert.Equal(t, []string{"#101", "#103"}, got.LinkedIssues)
+	assert.Equal(t, LinkageStatusUploaded, got.LinkageStatus)
+}
+
+// TestSessionMeta_LegacyWithoutLinkageFields verifies a meta.json written
+// before these fields existed (no linkage keys) reads back with empty
+// slices and empty status — no error, no spurious data.
+// Failure prevented: a required (non-omitempty) tag would break legacy reads.
+func TestSessionMeta_LegacyWithoutLinkageFields(t *testing.T) {
+	sessionDir := filepath.Join(t.TempDir(), "legacy-session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0o755))
+
+	// hand-write a minimal legacy meta.json with no linkage keys
+	legacy := `{"version":"1.0","session_name":"legacy-session","username":"user","agent_id":"Ox1","agent_type":"claude-code","created_at":"2026-01-01T00:00:00Z","files":{}}`
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "meta.json"), []byte(legacy), 0o644))
+
+	got, err := ReadSessionMeta(sessionDir)
+	require.NoError(t, err)
+	assert.Empty(t, got.ProducedCommits)
+	assert.Empty(t, got.LinkedPRs)
+	assert.Empty(t, got.LinkedIssues)
+	assert.Empty(t, got.LinkageStatus)
+}
+
 func TestUpdateMetaSummary(t *testing.T) {
 	tests := []struct {
 		name        string

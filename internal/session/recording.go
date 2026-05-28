@@ -111,6 +111,18 @@ type RecordingState struct {
 	// older .recording.json files round-trip unchanged.
 	ProducedCommits []string `json:"produced_commits,omitempty"`
 
+	// LinkedPRs / LinkedIssues are the GitHub PR and issue references this
+	// recording is associated with. Appended by the pre-push hook from the
+	// pushed commit range, folded into SessionMeta at stop. omitempty for
+	// round-trip with older .recording.json files.
+	LinkedPRs    []string `json:"linked_prs,omitempty"`
+	LinkedIssues []string `json:"linked_issues,omitempty"`
+
+	// LinkageStatus tracks the upload/notify lifecycle for PR/issue linkage
+	// during the active recording. Mirrors lfs.LinkageStatus* values; folded
+	// into SessionMeta.LinkageStatus at stop. omitempty for round-trip.
+	LinkageStatus string `json:"linkage_status,omitempty"`
+
 	// Hook observability: lets `ox session status` show whether hooks are firing
 	// and why they're skipping. Without these, a broken recording path (e.g.
 	// adapter binary missing, session file not discoverable) looks identical to
