@@ -27,6 +27,7 @@ package ephemeral
 import (
 	"os"
 	"strings"
+	"sync/atomic"
 )
 
 // EnvEphemeral is the explicit override env var. Setting it to a truthy
@@ -56,16 +57,22 @@ var envCI = []string{
 // without forming an import cycle. The value is a pointer so we can
 // distinguish "unset" (nil) from explicit false. nil = no opinion.
 //
-// Reads are not synchronized — config loading happens once at process
-// start before any subsystem calls IsEphemeral(). If we ever need to
-// reload mid-run, swap in a sync/atomic.Pointer.
-var userConfigEphemeral *bool
+// The pointer is atomic because config lookups can happen from concurrent
+// goroutines during tests and daemon hot paths; copy the bool on Store so
+// callers can pass stack-local pointers safely.
+var userConfigEphemeral atomic.Pointer[bool]
 
 // SetUserConfigPreference is called by the config-loading code (which
 // imports this package, so the dep arrow stays one-way) to publish the
 // user-config value. Passing nil clears any prior setting.
 func SetUserConfigPreference(value *bool) {
-	userConfigEphemeral = value
+	if value == nil {
+		userConfigEphemeral.Store(nil)
+		return
+	}
+	copy := new(bool)
+	*copy = *value
+	userConfigEphemeral.Store(copy)
 }
 
 // IsEphemeral returns true when ox is running in a short-lived cloud agent
@@ -122,7 +129,8 @@ func explicitEphemeral() bool {
 // marker, CI) overrides it. An explicit `ephemeral: false` in user config
 // simply does not contribute — it neither forces on nor forces off.
 func userConfigSaysOn() bool {
-	return userConfigEphemeral != nil && *userConfigEphemeral
+	value := userConfigEphemeral.Load()
+	return value != nil && *value
 }
 
 // isClaudeCloud detects Claude Code Cloud (remote sandbox) by the presence

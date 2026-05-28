@@ -38,7 +38,6 @@ func TestSanitizedEnv_AllowlistedVarsPassThrough(t *testing.T) {
 		"TMPDIR=/tmp",
 		"ANTHROPIC_API_KEY=sk-secret-key",
 		"SAGEOX_TOKEN=tok-abc123",
-		"OX_TOKEN=oxp-abc123",
 		"SECRET_TOKEN=hunter2",
 	}
 
@@ -53,7 +52,7 @@ func TestSanitizedEnv_AllowlistedVarsPassThrough(t *testing.T) {
 	}
 
 	// secrets must be stripped
-	for _, key := range []string{"ANTHROPIC_API_KEY", "SAGEOX_TOKEN", "OX_TOKEN", "SECRET_TOKEN"} {
+	for _, key := range []string{"ANTHROPIC_API_KEY", "SAGEOX_TOKEN", "SECRET_TOKEN"} {
 		if _, ok := m[key]; ok {
 			t.Errorf("%s must not be in sanitized env", key)
 		}
@@ -231,7 +230,6 @@ func TestSanitizedEnv_SecretsStripped(t *testing.T) {
 	secrets := []string{
 		"ANTHROPIC_API_KEY=sk-ant-secret",
 		"SAGEOX_TOKEN=tok-sageox",
-		"OX_TOKEN=oxp-test",
 		"SAGEOX_ENDPOINT=https://api.sageox.ai",
 		"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI",
 		"OPENAI_API_KEY=sk-openai",
@@ -376,7 +374,6 @@ func TestIsAllowlisted(t *testing.T) {
 		{"OX_TEAM_ID", true},
 		{"ANTHROPIC_API_KEY", false},
 		{"SAGEOX_TOKEN", false},
-		{"OX_TOKEN", false},
 		{"EDITOR", false},
 		{"SHELL", false},
 		{"XDGFAKE", false},  // no underscore, not a real XDG var

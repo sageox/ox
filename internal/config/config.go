@@ -18,12 +18,18 @@ type Config struct {
 // Load creates a Config from environment variables only.
 // Runtime flags (--verbose, --json, etc.) are applied by the cobra layer in cli/context.go.
 func Load() *Config {
+	// Seed the user-config ephemeral preference before any subsystem consults
+	// ephemeral.IsEphemeral(). Commands like `ox distill --sync` decide about
+	// daemon startup during PersistentPreRun, so the persisted preference must
+	// be visible here even if no later code explicitly loads user config.
+	_, _ = LoadUserConfig()
+
 	return &Config{
-		Verbose:       os.Getenv("OX_VERBOSE") == "1",
-		Quiet:         os.Getenv("OX_QUIET") == "1",
-		JSON:          os.Getenv("OX_JSON") == "1",
-		Text:          os.Getenv("OX_TEXT") == "1",
-		Review:        os.Getenv("OX_REVIEW") == "1",
+		Verbose: os.Getenv("OX_VERBOSE") == "1",
+		Quiet:   os.Getenv("OX_QUIET") == "1",
+		JSON:    os.Getenv("OX_JSON") == "1",
+		Text:    os.Getenv("OX_TEXT") == "1",
+		Review:  os.Getenv("OX_REVIEW") == "1",
 		// ephemeral cloud agents (Claude Cloud, Devin, Codespaces, CI) have
 		// no TTY and no human at the keyboard — see internal/ephemeral/mode.go
 		NoInteractive: os.Getenv("OX_NO_INTERACTIVE") == "1" || ephemeral.IsEphemeral(),

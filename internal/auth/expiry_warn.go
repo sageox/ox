@@ -103,7 +103,7 @@ func CheckAndWarnExpiry(ctx context.Context, ep string, w io.Writer) bool {
 	expiryWarnedKeys[key] = true
 	expiryWarnedKeysMu.Unlock()
 
-	emitExpiryWarning(w, label, remaining)
+	emitExpiryWarning(w, ep, label, remaining)
 	return true
 }
 
@@ -168,14 +168,25 @@ func computeExpiryThreshold(expiresAt, createdAt time.Time, cfg *config.UserConf
 	return floor
 }
 
-// emitExpiryWarning writes the single-line key=value warning to the
-// caller's writer. Format follows the CLAUDE.md logging convention so
-// it greps cleanly alongside other ox logs.
-func emitExpiryWarning(w io.Writer, source string, remaining time.Duration) {
+// tokenSettingsURL returns the token-management page for the active endpoint.
+// Production uses the canonical sageox.ai host; self-hosted or staging hosts
+// stay on their own origin.
+func tokenSettingsURL(ep string) string {
+	ep = endpoint.NormalizeEndpoint(ep)
+	if ep == "" {
+		ep = endpoint.Default
+	}
+	return ep + "/settings/tokens"
+}
+
+// emitExpiryWarning writes the single-line key=value warning to the caller's
+// writer. Format follows the CLAUDE.md logging convention so it greps cleanly
+// alongside other ox logs.
+func emitExpiryWarning(w io.Writer, ep, source string, remaining time.Duration) {
 	humanRemaining := humanizeDuration(remaining)
 	fmt.Fprintf(w,
-		"warn=ox_token_expiring source=%s expires_in=%s create_new=https://sageox.ai/settings/tokens\n",
-		source, humanRemaining,
+		"warn=ox_token_expiring source=%s expires_in=%s create_new=%s\n",
+		source, humanRemaining, tokenSettingsURL(ep),
 	)
 }
 

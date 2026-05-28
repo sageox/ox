@@ -9,9 +9,9 @@ import (
 // process-global; tests that set it must restore it.
 func resetUserConfig(t *testing.T) {
 	t.Helper()
-	prev := userConfigEphemeral
-	t.Cleanup(func() { userConfigEphemeral = prev })
-	userConfigEphemeral = nil
+	prev := userConfigEphemeral.Load()
+	t.Cleanup(func() { userConfigEphemeral.Store(prev) })
+	userConfigEphemeral.Store(nil)
 }
 
 // clearEnv unsets every env var that IsEphemeral consults, so each subtest

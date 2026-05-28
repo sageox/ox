@@ -1746,22 +1746,23 @@ func discoverTeamContextWithFallback(projectRoot, repoSlug string, enableEphemer
 		return nil
 	}
 
-	tc := config.FindRepoTeamContext(projectRoot)
-	if tc == nil {
-		// ephemeral fallback: no daemon, no clone — fetch over HTTP.
-		// Only attempted at the top-level entry point; the post-fetch
-		// re-discovery call passes enableEphemeralFallback=false.
-		if enableEphemeralFallback && ephemeral.IsEphemeral() {
-			if pc, err := config.LoadProjectConfig(projectRoot); err == nil && pc != nil && pc.TeamID != "" {
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
-				if info, ferr := tryHTTPTeamContextFallback(ctx, projectRoot, pc.TeamID); ferr == nil && info != nil {
-					return info
-				} else if ferr != nil {
-					slog.Debug("ephemeral team-context fallback failed", "team_id", pc.TeamID, "err", ferr)
-				}
+	// In ephemeral mode, refresh team context over HTTP on every prime. These
+	// environments do not have a daemon keeping the clone warm, so a successful
+	// prior fetch should not turn the fallback into a one-shot stale cache.
+	if enableEphemeralFallback && ephemeral.IsEphemeral() {
+		if pc, err := config.LoadProjectConfig(projectRoot); err == nil && pc != nil && pc.TeamID != "" {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if info, ferr := tryHTTPTeamContextFallback(ctx, projectRoot, pc.TeamID); ferr == nil && info != nil {
+				return info
+			} else if ferr != nil {
+				slog.Debug("ephemeral team-context fallback failed", "team_id", pc.TeamID, "err", ferr)
 			}
 		}
+	}
+
+	tc := config.FindRepoTeamContext(projectRoot)
+	if tc == nil {
 		return nil
 	}
 

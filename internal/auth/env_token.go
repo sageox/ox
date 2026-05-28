@@ -3,17 +3,14 @@ package auth
 import (
 	"os"
 	"time"
+
+	"github.com/sageox/ox/internal/endpoint"
 )
 
-// EnvVarToken is the primary environment variable for supplying an ox access token
+// EnvVarToken is the environment variable for supplying a SageOx access token
 // out-of-band (CI/CD, headless agents, ephemeral containers). When set, it takes
 // precedence over any token stored on disk.
-const EnvVarToken = "OX_TOKEN"
-
-// EnvVarTokenAlias is the back-compat alias for EnvVarToken. Kept for users who
-// adopted SAGEOX_TOKEN before the ryan/ox-session-start work was lost. Resolution
-// order: OX_TOKEN wins, then SAGEOX_TOKEN.
-const EnvVarTokenAlias = "SAGEOX_TOKEN"
+const EnvVarToken = "SAGEOX_TOKEN"
 
 // envTokenTTL is the synthetic rolling expiry stamped on env-sourced tokens.
 // Env tokens have no refresh credential — the server returning 401 is the source
@@ -38,19 +35,31 @@ func isEnvToken(ep string, token *StoredToken) bool {
 	return token.AccessToken == envTok.AccessToken
 }
 
-// tokenFromEnv returns a StoredToken populated from OX_TOKEN (preferred) or
-// SAGEOX_TOKEN (alias). Returns nil when neither is set.
+// envTokenEndpoint returns the single endpoint an env-supplied token is allowed
+// to target in this process. SAGEOX_TOKEN is not self-describing client-side, so we
+// bind it to the explicit endpoint selection surface only:
+//   - SAGEOX_ENDPOINT when set
+//   - production by default
 //
-// The ep parameter is currently unused — it is kept for API symmetry with
-// GetTokenForEndpoint and reserved for future per-endpoint variants
-// (e.g. OX_TOKEN_<HOST>). Callers should pass the normalized endpoint anyway.
+// We intentionally do NOT inherit endpoint.Get() here because that function can
+// fall back to "the only logged-in endpoint", which would let a prod SAGEOX_TOKEN
+// silently ride along to a different host if disk auth happened to be sparse.
+func envTokenEndpoint() string {
+	if ep := os.Getenv(endpoint.EnvVar); ep != "" {
+		return endpoint.NormalizeEndpoint(ep)
+	}
+	return endpoint.Default
+}
+
+// tokenFromEnv returns a StoredToken populated from SAGEOX_TOKEN when the
+// requested endpoint matches envTokenEndpoint(). Returns nil when the env var
+// is unset, or when the request is for a different endpoint.
 func tokenFromEnv(ep string) *StoredToken {
-	_ = ep // reserved for future per-endpoint env tokens
 	val := os.Getenv(EnvVarToken)
 	if val == "" {
-		val = os.Getenv(EnvVarTokenAlias)
+		return nil
 	}
-	if val == "" {
+	if requested := endpoint.NormalizeEndpoint(ep); requested != "" && requested != envTokenEndpoint() {
 		return nil
 	}
 	return &StoredToken{

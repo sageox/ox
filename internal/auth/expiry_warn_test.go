@@ -52,10 +52,10 @@ func TestComputeExpiryThreshold_TableDriven(t *testing.T) {
 		wantFloor time.Duration // minimum acceptable threshold
 		wantCeil  time.Duration // maximum acceptable threshold
 	}{
-		{"7d token", 7 * 24 * time.Hour, 24 * time.Hour, 24 * time.Hour},                    // 5% of 7d < 1d, floor wins
-		{"30d token", 30 * 24 * time.Hour, 36 * time.Hour, 36*time.Hour + time.Minute},      // 5% of 30d = 36h
-		{"90d token", 90 * 24 * time.Hour, 4*24*time.Hour + 12*time.Hour, 109 * time.Hour},  // 5% of 90d = 108h
-		{"365d token", 365 * 24 * time.Hour, 18 * 24 * time.Hour, 19 * 24 * time.Hour},      // 5% of 365d ≈ 18.25d
+		{"7d token", 7 * 24 * time.Hour, 24 * time.Hour, 24 * time.Hour},                   // 5% of 7d < 1d, floor wins
+		{"30d token", 30 * 24 * time.Hour, 36 * time.Hour, 36*time.Hour + time.Minute},     // 5% of 30d = 36h
+		{"90d token", 90 * 24 * time.Hour, 4*24*time.Hour + 12*time.Hour, 109 * time.Hour}, // 5% of 90d = 108h
+		{"365d token", 365 * 24 * time.Hour, 18 * 24 * time.Hour, 19 * 24 * time.Hour},     // 5% of 365d ≈ 18.25d
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -139,7 +139,7 @@ func TestResolveTokenExpiry_NeverExpires(t *testing.T) {
 // depend on this shape.
 func TestEmitExpiryWarning_Format(t *testing.T) {
 	var buf bytes.Buffer
-	emitExpiryWarning(&buf, "disk", 4*24*time.Hour+3*time.Hour)
+	emitExpiryWarning(&buf, "https://sageox.ai", "disk", 4*24*time.Hour+3*time.Hour)
 	out := buf.String()
 	assert.True(t, strings.HasPrefix(out, "warn=ox_token_expiring"), "missing warn= prefix")
 	assert.Contains(t, out, "source=disk")
@@ -191,4 +191,14 @@ func TestExpiryWarn_DedupeWithinProcess(t *testing.T) {
 	already2 := expiryWarnedKeys[key]
 	expiryWarnedKeysMu.Unlock()
 	require.True(t, already2, "second call must see set")
+}
+
+// TestEmitExpiryWarning_UsesEndpointHost — Failure prevented: non-production
+// endpoints tell the user to create a token on sageox.ai instead of the active
+// host that actually issued the credential.
+func TestEmitExpiryWarning_UsesEndpointHost(t *testing.T) {
+	var buf bytes.Buffer
+	emitExpiryWarning(&buf, "https://staging.sageox.ai", "env", 2*time.Hour)
+	out := buf.String()
+	assert.Contains(t, out, "create_new=https://staging.sageox.ai/settings/tokens")
 }

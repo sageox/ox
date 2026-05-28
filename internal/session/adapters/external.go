@@ -655,7 +655,7 @@ func isAllowlisted(name string) bool {
 		return true
 	}
 	// OX_* protocol vars are always passed through — EXCEPT names matching
-	// the credential denylist (e.g. OX_TOKEN), which must never leak to
+	// the credential denylist, which must never leak to
 	// adapter subprocesses regardless of prefix.
 	if strings.HasPrefix(name, "OX_") {
 		return !isDenylisted(name)

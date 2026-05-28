@@ -1,11 +1,17 @@
 package main
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -34,10 +40,10 @@ func TestFetchTeamContextViaAPI_WritesAllFiles(t *testing.T) {
 	require.NoError(t, fetchTeamContextViaAPI(teamCtxDir, resp))
 
 	cases := map[string]string{
-		filepath.Join(teamCtxDir, "AGENTS.md"):                       "# AGENTS\n",
-		filepath.Join(teamCtxDir, "CLAUDE.md"):                       "# CLAUDE\n",
-		filepath.Join(teamCtxDir, "MEMORY.md"):                       "# MEMORY\n",
-		filepath.Join(teamCtxDir, "docs", "onboarding.md"):           "# Onboarding\n",
+		filepath.Join(teamCtxDir, "AGENTS.md"):                         "# AGENTS\n",
+		filepath.Join(teamCtxDir, "CLAUDE.md"):                         "# CLAUDE\n",
+		filepath.Join(teamCtxDir, "MEMORY.md"):                         "# MEMORY\n",
+		filepath.Join(teamCtxDir, "docs", "onboarding.md"):             "# Onboarding\n",
 		filepath.Join(teamCtxDir, "docs", "guides", "architecture.md"): "# Arch\n",
 	}
 	for path, want := range cases {
@@ -123,4 +129,55 @@ func TestAtomicWriteFile_OverwritesExisting(t *testing.T) {
 	for _, e := range entries {
 		assert.NotContains(t, e.Name(), ".tmp-", "temp file leaked: %s", e.Name())
 	}
+}
+
+// TestDiscoverTeamContextWithFallback_RefreshesExistingLocalCopy — Failure
+// prevented: after the first ephemeral HTTP fetch creates a local team-context
+// directory, later primes stop refreshing it and keep serving stale rules/docs.
+func TestDiscoverTeamContextWithFallback_RefreshesExistingLocalCopy(t *testing.T) {
+	t.Setenv("OX_EPHEMERAL", "1")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		assert.Equal(t, "/api/v1/teams/team_abc/context", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{
+			"team_id":"team_abc",
+			"team_name":"Team ABC",
+			"docs":[{"name":"guide.md","title":"Guide","content":"fresh"}],
+			"agents_md":"fresh agents",
+			"claude_md":"",
+			"memory":""
+		}`)
+	}))
+	defer server.Close()
+
+	projectRoot := createInitializedProjectWithConfig(t, &config.ProjectConfig{
+		ProjectID:   "test_project",
+		WorkspaceID: "test_workspace",
+		TeamID:      "team_abc",
+		TeamName:    "Team ABC",
+		Endpoint:    server.URL,
+	})
+
+	teamCtxDir := paths.TeamContextDir("team_abc", server.URL)
+	require.NoError(t, os.MkdirAll(teamCtxDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(teamCtxDir, "AGENTS.md"), []byte("stale agents"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(teamCtxDir, "docs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(teamCtxDir, "docs", "guide.md"), []byte("stale"), 0o644))
+
+	info := discoverTeamContextWithFallback(projectRoot, "", true)
+	require.NotNil(t, info)
+	assert.Equal(t, int32(1), requests.Load(), "ephemeral discovery should refresh over HTTP even when a local copy already exists")
+
+	agents, err := os.ReadFile(filepath.Join(teamCtxDir, "AGENTS.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "fresh agents", string(agents))
+
+	doc, err := os.ReadFile(filepath.Join(teamCtxDir, "docs", "guide.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "fresh", string(doc))
 }
