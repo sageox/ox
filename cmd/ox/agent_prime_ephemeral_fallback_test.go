@@ -181,3 +181,73 @@ func TestDiscoverTeamContextWithFallback_RefreshesExistingLocalCopy(t *testing.T
 	require.NoError(t, err)
 	assert.Equal(t, "fresh", string(doc))
 }
+
+// TestFetchTeamContextViaAPI_RemovesStaleDocsAndRootFiles — Failure prevented:
+// when the upstream team-context omits a doc or root file that was present
+// on a prior fetch, the old copy lingers on disk and the agent keeps seeing
+// deleted instructions. After this fix, files no longer in the response are
+// removed.
+func TestFetchTeamContextViaAPI_RemovesStaleDocsAndRootFiles(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	teamCtxDir := filepath.Join(tmpDir, "team-ctx", "team_stale")
+
+	// First fetch: seed AGENTS.md + CLAUDE.md + MEMORY.md + two docs.
+	first := &api.TeamContextContentResponse{
+		TeamID: "team_stale",
+		Docs: []api.TeamContextDoc{
+			{Name: "keep.md", Content: "keep-v1"},
+			{Name: "drop.md", Content: "drop-me"},
+			{Name: "subdir/old.md", Content: "old-nested"},
+		},
+		AgentsMD: "agents-v1",
+		ClaudeMD: "claude-v1",
+		Memory:   "memory-v1",
+	}
+	require.NoError(t, fetchTeamContextViaAPI(teamCtxDir, first))
+
+	// Sanity-check the seed landed.
+	for _, p := range []string{
+		filepath.Join(teamCtxDir, "AGENTS.md"),
+		filepath.Join(teamCtxDir, "CLAUDE.md"),
+		filepath.Join(teamCtxDir, "MEMORY.md"),
+		filepath.Join(teamCtxDir, "docs", "keep.md"),
+		filepath.Join(teamCtxDir, "docs", "drop.md"),
+		filepath.Join(teamCtxDir, "docs", "subdir", "old.md"),
+	} {
+		_, err := os.Stat(p)
+		require.NoError(t, err, "seed file missing: %s", p)
+	}
+
+	// Second fetch: upstream removed drop.md, subdir/old.md, CLAUDE.md, MEMORY.md.
+	second := &api.TeamContextContentResponse{
+		TeamID: "team_stale",
+		Docs: []api.TeamContextDoc{
+			{Name: "keep.md", Content: "keep-v2"},
+		},
+		AgentsMD: "agents-v2",
+		// ClaudeMD + Memory intentionally blank — upstream removed them
+	}
+	require.NoError(t, fetchTeamContextViaAPI(teamCtxDir, second))
+
+	// Files that should still exist with refreshed content
+	for path, want := range map[string]string{
+		filepath.Join(teamCtxDir, "AGENTS.md"):           "agents-v2",
+		filepath.Join(teamCtxDir, "docs", "keep.md"):     "keep-v2",
+	} {
+		got, err := os.ReadFile(path)
+		require.NoError(t, err, "%s should be kept", path)
+		assert.Equal(t, want, string(got), "%s content mismatch", path)
+	}
+
+	// Files that should be GONE
+	for _, p := range []string{
+		filepath.Join(teamCtxDir, "CLAUDE.md"),
+		filepath.Join(teamCtxDir, "MEMORY.md"),
+		filepath.Join(teamCtxDir, "docs", "drop.md"),
+		filepath.Join(teamCtxDir, "docs", "subdir", "old.md"),
+	} {
+		_, err := os.Stat(p)
+		assert.True(t, os.IsNotExist(err), "stale file must be removed: %s (err=%v)", p, err)
+	}
+}

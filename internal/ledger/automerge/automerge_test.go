@@ -24,11 +24,23 @@ func initTestRepo(t *testing.T, dir string) string {
 	return dir
 }
 
+// hermeticGitEnv layers env overrides that scrub host gitconfig so per-user
+// signing (commit.gpgsign + ssh signingkey) can't prompt for passphrases
+// during test commits. Applied to every git subprocess in this package.
+func hermeticGitEnv() []string {
+	return []string{
+		"GIT_EDITOR=true",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_SYSTEM=/dev/null",
+	}
+}
+
 func mustGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_EDITOR=true", "GIT_TERMINAL_PROMPT=0") // safe: tempdir git subprocess; layered env disables editor + prompts
+	cmd.Env = append(os.Environ(), hermeticGitEnv()...) // safe: tempdir git subprocess; hermetic env disables editor, prompts, host signing
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, string(out))
@@ -41,7 +53,7 @@ func mustGit(t *testing.T, dir string, args ...string) string {
 func runGitAllowFail(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_EDITOR=true", "GIT_TERMINAL_PROMPT=0") // safe: same as mustGit; tolerates non-zero exit (rebase conflicts)
+	cmd.Env = append(os.Environ(), hermeticGitEnv()...) // safe: same as mustGit; tolerates non-zero exit (rebase conflicts)
 	out, err := cmd.CombinedOutput()
 	return strings.TrimSpace(string(out)), err
 }

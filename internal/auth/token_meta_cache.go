@@ -71,6 +71,15 @@ func tokenHashKey(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// tokenMetaCacheKey scopes the cache entry to (endpoint, token). The same
+// token value can legitimately exist for multiple endpoints (dev/prod/etc.);
+// keying on token alone would let metadata from one endpoint shadow another.
+// "\n" is a safe separator — it cannot appear in either input.
+func tokenMetaCacheKey(ep, token string) string {
+	sum := sha256.Sum256([]byte(ep + "\n" + token))
+	return hex.EncodeToString(sum[:])
+}
+
 // tokenMetaCachePath returns the on-disk cache file location:
 // $XDG_CACHE_HOME/sageox/token_meta.json (or legacy ~/.sageox/cache/...).
 func tokenMetaCachePath() string {
@@ -143,7 +152,7 @@ func FetchTokenMetaCached(ctx context.Context, ep, token string) (*TokenMeta, er
 		return nil, fmt.Errorf("empty token")
 	}
 	ep = endpoint.NormalizeEndpoint(ep)
-	key := tokenHashKey(token)
+	key := tokenMetaCacheKey(ep, token)
 
 	tokenMetaCacheMu.Lock()
 	defer tokenMetaCacheMu.Unlock()

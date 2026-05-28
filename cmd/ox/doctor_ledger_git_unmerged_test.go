@@ -243,7 +243,7 @@ func runIsolatedGit(t *testing.T, dir string, args ...string) (string, error) {
 	cmd.Dir = dir
 	// scrub HOME/XDG_CONFIG_HOME so per-user gitconfig (including merge.tool
 	// hooks that could open an editor) can't interfere with the test.
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(os.Environ(), // safe: git subprocess in temp dir, not ox
 		"HOME="+dir,
 		"XDG_CONFIG_HOME="+filepath.Join(dir, ".config"),
 		"GIT_CONFIG_GLOBAL=/dev/null",
@@ -370,7 +370,7 @@ func TestFixLedgerUnmergedPaths_NoStateMarkers_NoAutoResolve(t *testing.T) {
 
 	cmd := exec.Command("git", "update-index", "--index-info")
 	cmd.Dir = repo
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(os.Environ(), // safe: git subprocess in temp dir, not ox
 		"HOME="+repo,
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",

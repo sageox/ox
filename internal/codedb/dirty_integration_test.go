@@ -27,6 +27,10 @@ func initTestRepo(t *testing.T) string {
 			"GIT_AUTHOR_EMAIL=test@sageox.ai",
 			"GIT_COMMITTER_NAME=test",
 			"GIT_COMMITTER_EMAIL=test@sageox.ai",
+			// scrub host gitconfig so commit.gpgsign / signingkey can't prompt
+			// for ssh/gpg passphrases during the test commit.
+			"GIT_CONFIG_GLOBAL=/dev/null",
+			"GIT_CONFIG_SYSTEM=/dev/null",
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -81,6 +82,12 @@ func tryHTTPTeamContextFallback(ctx context.Context, projectRoot, teamID string)
 // fetchTeamContextViaAPI writes the HTTP-fetched team context to disk
 // under teamCtxDir. Each file uses an atomic temp-file + rename pattern
 // so a partial fetch never leaves a half-written file in place.
+//
+// Files present on disk under teamCtxDir/docs/** or the three root files
+// (AGENTS.md / CLAUDE.md / MEMORY.md) that are NOT in the current response
+// are removed AFTER successful writes. This prevents a previously-served
+// doc from lingering and being fed to the agent indefinitely after it was
+// removed upstream.
 func fetchTeamContextViaAPI(teamCtxDir string, resp *api.TeamContextContentResponse) error {
 	if resp == nil {
 		return fmt.Errorf("nil response")
@@ -88,6 +95,8 @@ func fetchTeamContextViaAPI(teamCtxDir string, resp *api.TeamContextContentRespo
 	if err := os.MkdirAll(teamCtxDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir team-context dir: %w", err)
 	}
+
+	keep := map[string]bool{}
 
 	for _, doc := range resp.Docs {
 		if doc.Name == "" {
@@ -108,6 +117,7 @@ func fetchTeamContextViaAPI(teamCtxDir string, resp *api.TeamContextContentRespo
 		if err := atomicWriteFile(destPath, []byte(doc.Content), 0o644); err != nil {
 			return fmt.Errorf("write doc %s: %w", destPath, err)
 		}
+		keep[destPath] = true
 	}
 
 	type rootFile struct {
@@ -120,13 +130,45 @@ func fetchTeamContextViaAPI(teamCtxDir string, resp *api.TeamContextContentRespo
 		{"MEMORY.md", resp.Memory},
 	}
 	for _, rf := range rootFiles {
+		dest := filepath.Join(teamCtxDir, rf.name)
 		if rf.content == "" {
+			// not in this response — make sure a stale copy isn't left behind
+			_ = os.Remove(dest)
 			continue
 		}
-		dest := filepath.Join(teamCtxDir, rf.name)
 		if err := atomicWriteFile(dest, []byte(rf.content), 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", rf.name, err)
 		}
+		keep[dest] = true
+	}
+
+	// sweep stale files under docs/ that the response no longer includes.
+	// We deliberately scope removal to docs/ + the three known root files
+	// so users storing other data under teamCtxDir (e.g. a local clone
+	// sibling, lock files, caches) is never touched.
+	//
+	// Use os.Root to anchor the walk + remove inside docsRoot — defeats
+	// symlink-TOCTOU traversal escapes (gosec G122).
+	docsRoot := filepath.Join(teamCtxDir, "docs")
+	if root, openErr := os.OpenRoot(docsRoot); openErr == nil {
+		defer root.Close()
+		_ = fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			abs := filepath.Join(docsRoot, p)
+			if keep[abs] {
+				return nil
+			}
+			if rmErr := root.Remove(p); rmErr != nil {
+				slog.Debug("ephemeral team-context fallback: failed to remove stale doc",
+					"path", abs, "err", rmErr.Error())
+			}
+			return nil
+		})
+	} else if !errors.Is(openErr, fs.ErrNotExist) {
+		slog.Debug("ephemeral team-context fallback: open docs root failed",
+			"dir", docsRoot, "err", openErr.Error())
 	}
 
 	return nil

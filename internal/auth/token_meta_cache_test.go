@@ -174,3 +174,72 @@ func TestTokenMetaCachePath_InsideCacheDir(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, rel, "..", "path must be inside the configured XDG cache dir")
 }
+
+// --- Endpoint scoping (PR #626 follow-up) ---
+
+// TestFetchTokenMetaCached_EndpointIsolation — Failure prevented: the cache
+// key was originally tokenHashKey(token) only, so the same token value used
+// against two different endpoints (e.g. prod + staging during migration)
+// returned the first endpoint's metadata for both. The user would see a
+// staging name/expiry surfaced for a prod token (or vice versa).
+func TestFetchTokenMetaCached_EndpointIsolation(t *testing.T) {
+	withTempCacheDir(t)
+
+	type epResp struct {
+		prefix string
+		name   string
+	}
+	serve := func(r epResp) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			expires := time.Now().Add(72 * time.Hour)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"expires_at":   expires.Format(time.RFC3339),
+				"token_prefix": r.prefix,
+				"name":         r.name,
+			})
+		}))
+	}
+
+	srvProd := serve(epResp{prefix: "oxp_PROD", name: "prod"})
+	defer srvProd.Close()
+	srvStage := serve(epResp{prefix: "oxp_STAGE", name: "stage"})
+	defer srvStage.Close()
+
+	// Same token value, two endpoints — must NOT collide in the cache.
+	const tok = "oxp_shared_value"
+
+	prodMeta, err := FetchTokenMetaCached(context.Background(), srvProd.URL, tok)
+	require.NoError(t, err)
+	require.NotNil(t, prodMeta)
+	assert.Equal(t, "oxp_PROD", prodMeta.TokenPrefix)
+	assert.Equal(t, "prod", prodMeta.Name)
+
+	stageMeta, err := FetchTokenMetaCached(context.Background(), srvStage.URL, tok)
+	require.NoError(t, err)
+	require.NotNil(t, stageMeta)
+	assert.Equal(t, "oxp_STAGE", stageMeta.TokenPrefix, "second endpoint must NOT return cached prod metadata")
+	assert.Equal(t, "stage", stageMeta.Name)
+
+	// Re-fetch prod — should still be the prod entry, untouched by stage.
+	prodAgain, err := FetchTokenMetaCached(context.Background(), srvProd.URL, tok)
+	require.NoError(t, err)
+	require.NotNil(t, prodAgain)
+	assert.Equal(t, "oxp_PROD", prodAgain.TokenPrefix)
+}
+
+// TestTokenMetaCacheKey_DistinctByEndpoint — Failure prevented: cache-key
+// helper conflates (ep, token) and the on-disk file ends up with one entry
+// per token instead of one per (endpoint, token) pair.
+func TestTokenMetaCacheKey_DistinctByEndpoint(t *testing.T) {
+	a := tokenMetaCacheKey("https://api.sageox.ai", "oxp_x")
+	b := tokenMetaCacheKey("https://staging.sageox.ai", "oxp_x")
+	c := tokenMetaCacheKey("https://api.sageox.ai", "oxp_x")
+	assert.NotEqual(t, a, b, "different endpoints must produce different keys for the same token")
+	assert.Equal(t, a, c, "same (endpoint, token) must produce the same key")
+	// Defend against trivial concatenation collisions:
+	// (ep="ab", token="") vs (ep="a", token="b") must NOT collide.
+	x := tokenMetaCacheKey("ab", "")
+	y := tokenMetaCacheKey("a", "b")
+	assert.NotEqual(t, x, y, "separator must prevent prefix-collision")
+}
