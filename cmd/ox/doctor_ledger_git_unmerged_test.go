@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -329,7 +330,7 @@ func TestFixLedgerUnmergedPaths_ClearsMergeHead(t *testing.T) {
 
 	// MERGE_HEAD must be gone (the load-bearing post-condition)
 	_, err = os.Stat(filepath.Join(repo, ".git", "MERGE_HEAD"))
-	assert.True(t, os.IsNotExist(err),
+	assert.True(t, errors.Is(err, os.ErrNotExist),
 		"MERGE_HEAD must be removed after fix; if it survives, the next commit will still be blocked")
 
 	// status must be clean (no UU files left)

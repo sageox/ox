@@ -499,13 +499,21 @@ func fixLedgerUnmergedPaths(ledgerPath string, unmerged []unmergedPath) checkRes
 
 	op, hint := detectInProgressGitOp(ledgerPath)
 	if op == "" {
-		// No state markers — likely a manually-staged conflict.
+		// No state markers — likely a manually-staged conflict, OR
+		// detectInProgressGitOp could not inspect .git (permission/IO).
 		// DO NOT auto-resolve; the right action depends on user intent.
 		sample := unmerged[0].Path
 		if len(unmerged) > 1 {
 			sample = fmt.Sprintf("%s (+%d more)", sample, len(unmerged)-1)
 		}
-		detail := fmt.Sprintf(
+		// Surface the inspection error when present so a permission/IO failure
+		// in os.Stat(.git) is visible instead of silently downgraded to
+		// "manually-staged conflict."
+		prefix := ""
+		if hint != "" {
+			prefix = fmt.Sprintf("could not inspect .git for in-progress operation (%s).\n       ", hint)
+		}
+		detail := prefix + fmt.Sprintf(
 			"%d unmerged file(s) but no merge/rebase/cherry-pick in progress (%s).\n       "+
 				"This usually means the conflict was staged manually. Resolve by hand:\n       "+
 				"  cd %s\n       "+
@@ -548,8 +556,14 @@ func detectInProgressGitOp(ledgerPath string) (op, hint string) {
 	gitDir := filepath.Join(ledgerPath, ".git")
 	// .git may be a file (gitlink) in worktree-style layouts; we don't
 	// support that for ledgers today, so a missing dir means "no op."
+	// Distinguish "doesn't exist" (clean no-op) from permission/IO failures
+	// (caller surfaces hint so a human can investigate) so we don't silently
+	// downgrade an inspection error to "nothing to do."
 	if _, err := os.Stat(gitDir); err != nil {
-		return "", ""
+		if errors.Is(err, os.ErrNotExist) {
+			return "", ""
+		}
+		return "", fmt.Sprintf("stat .git: %v", err)
 	}
 
 	// rebase-merge / rebase-apply are state directories. They exist for
