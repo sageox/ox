@@ -224,11 +224,19 @@ func getGitRepoStatus(repoPath string, lastSync time.Time, hasLastSync bool) git
 	// silently truncate at the shallow boundary). Partial clones
 	// (--filter=blob:none) keep the commit graph intact — divergence
 	// still works there, so we don't suppress for Partial here.
-	repoState, _ := gitutil.InspectRepo(repoPath)
-	if repoState.Shallow {
+	//
+	// If InspectRepo itself fails (e.g. transient rev-parse error on a
+	// half-initialized repo), skip the divergence query rather than
+	// risk computing counts against an unknown clone state.
+	repoState, inspectErr := gitutil.InspectRepo(repoPath)
+	switch {
+	case inspectErr != nil:
+		status.IncompleteHistory = true
+		status.IncompleteReason = "history detection failed"
+	case repoState.Shallow:
 		status.IncompleteHistory = true
 		status.IncompleteReason = repoState.Reason
-	} else {
+	default:
 		// ahead/behind count vs upstream. Silent if no upstream is
 		// configured (offline-only repo) — that's not a wedge, just a fact
 		// of the workspace. Failures here are non-fatal; status UI would

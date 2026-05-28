@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -102,7 +103,7 @@ func checkGitAlternates(_ bool) checkResult {
 	altsPath := filepath.Join(commonDir, "objects", "info", "alternates")
 	data, err := os.ReadFile(altsPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return PassedCheck("Git alternates", "no alternates configured")
 		}
 		return WarningCheck("Git alternates", "read failed", err.Error())
