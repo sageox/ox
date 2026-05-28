@@ -163,7 +163,7 @@ func TestSyncBubblesIntegration_APIMockToOnDisk(t *testing.T) {
 // corrupt local state — each endpoint's bubble checkouts live under
 // distinct XDG paths. ox-gzp.25 explicitly calls this out.
 //
-// Failure prevented: a developer flipping OX_ENDPOINT between
+// Failure prevented: a developer flipping SAGEOX_ENDPOINT between
 // staging/prod sees one endpoint's bubbles overwritten by the other.
 func TestSyncBubblesIntegration_EndpointSwitchMidFlight(t *testing.T) {
 	if testing.Short() {

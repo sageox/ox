@@ -1,10 +1,10 @@
 <!-- doc-audience: ai -->
 # ADR: Ephemeral Mode
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-05-27
 - **Deciders:** Ryan Snodgrass, SageOx Team
-- **Relates to:** [Ledger Architecture](adr-ledger-architecture.md), [Session LFS Storage](adr-session-lfs-storage.md), [Whisper & Murmur Architecture](adr-whisper-murmur-architecture.md)
+- **Relates to:** sageox-mono [ADR-047: Customer-Facing Env Var Namespace](https://github.com/sageox/sageox-mono/blob/main/docs/human/adr/047-customer-facing-env-var-namespace.md), [Ledger Architecture](adr-ledger-architecture.md), [Session LFS Storage](adr-session-lfs-storage.md), [Whisper & Murmur Architecture](adr-whisper-murmur-architecture.md)
 
 ## Context
 
@@ -57,12 +57,16 @@ The predicate is checked once at process start and cached. Subsystems consult `e
 
 Ephemeral mode uses a user-issued personal access token, not the device-flow OAuth credentials that workstation `ox login` stores on disk:
 
-- **`OX_TOKEN`** is the primary env var (matches `GITHUB_TOKEN` / `GITLAB_TOKEN` convention).
-- **`SAGEOX_TOKEN`** is accepted as an alias. If both are set, `OX_TOKEN` wins.
+- **`SAGEOX_TOKEN`** is the only customer-facing env var for PAT auth.
+- **`SAGEOX_ENDPOINT`** selects the target SageOx deployment. Tokens are bound client-side to this explicit endpoint selection surface, or production by default when unset.
 - Tokens are created via the sageox.ai web app at `/settings/tokens`, prefixed `oxp_`, with a show-once reveal.
 - Token verification happens server-side via Better Auth's `apiKey` plugin against `api.sageox.ai`.
 
 The CLI **never** writes the token to disk in ephemeral mode — it reads it from the environment per process and forgets it.
+
+### Customer-facing env-var naming
+
+The customer-facing env-var namespace rule (`SAGEOX_*` for product/auth/network identity, `OX_*` reserved for CLI-local behavior flags) is documented in sageox-mono [ADR-047: Customer-Facing Env Var Namespace](https://github.com/sageox/sageox-mono/blob/main/docs/human/adr/047-customer-facing-env-var-namespace.md). The PAT work introduced `SAGEOX_TOKEN` to follow that rule; the rule itself is canonical there.
 
 ### Architecture
 
@@ -72,7 +76,7 @@ flowchart LR
         SH["SessionStart hook"]
         IN["curl install.sageox.ai/ox to sh"]
         AP["ox agent prime --cloud"]
-        TK["OX_TOKEN from env"]
+        TK["SAGEOX_TOKEN from env"]
     end
 
     subgraph API["api.sageox.ai"]
@@ -175,9 +179,9 @@ Ship `ox-cloud` as a different binary with no daemon code linked in.
 ### Risks
 
 - **Allowlisted egress.** Claude Cloud `limited` mode and corporate proxies need `api.sageox.ai`, `install.sageox.ai`, and the team-context git host on the allowlist. We document this in `/docs/cli/ephemeral-mode`; we do not auto-detect, because failure to reach the API is indistinguishable from a network outage.
-- **`OX_TOKEN` vs `SAGEOX_TOKEN` confusion.** Two env vars for one concept is a wart. Mitigated by explicit precedence (`OX_TOKEN` wins) and a single doc page explaining the alias.
+- **Legacy `OX_TOKEN` migration.** Older CI configs or shell profiles may still export the legacy `OX_TOKEN` name, which is now ignored. Mitigated by documenting `SAGEOX_TOKEN` as the only supported customer-facing auth variable per sageox-mono [ADR-047](https://github.com/sageox/sageox-mono/blob/main/docs/human/adr/047-customer-facing-env-var-namespace.md), and treating stale legacy names as a migration error, not a second auth path.
 - **Daemon mid-startup race.** If a workstation user sets `OX_EPHEMERAL=1` while the daemon is mid-startup, `IsEphemeral()` may run before the daemon is fully up and we fall back to HTTP. Acceptable — the HTTP path is idempotent and returns the same data the daemon would have served.
-- **Token leakage in shell history / CI logs.** A user pasting `OX_TOKEN=oxp_...` into a terminal leaves it in `.bash_history`. Mitigated by encouraging `.env` files and the GitHub Secret Scanning partner-program integration (tracked separately).
+- **Token leakage in shell history / CI logs.** A user pasting `SAGEOX_TOKEN=oxp_...` into a terminal leaves it in `.bash_history`. Mitigated by encouraging `.env` files and the GitHub Secret Scanning partner-program integration (tracked separately).
 
 ## References
 
@@ -187,4 +191,4 @@ Ship `ox-cloud` as a different binary with no daemon code linked in.
 - `.claude/rules/lfs-no-git-lfs-binary.md` — Pure-Go LFS, no `git-lfs` shell-out
 - `internal/ephemeral/mode.go` — `IsEphemeral()` predicate (sibling agent)
 - `cmd/ox/agent_prime.go` — `--ephemeral` flag wiring (sibling agent)
-- `internal/auth/` — `OX_TOKEN` / `SAGEOX_TOKEN` env-var auth (sibling agent)
+- `internal/auth/` — `SAGEOX_TOKEN` env-var auth (sibling agent)

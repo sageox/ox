@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Customer-facing env-var namespace convention** — sageox-mono ADR-047 ("Customer-Facing Env Var Namespace") is the canonical home for the rule that customer-facing SageOx env vars use `SAGEOX_*` (product/auth/network identity) and `OX_*` is reserved for CLI-local behavior flags. The legacy customer-facing `OX_TOKEN` / `OX_ENDPOINT` names are removed; `internal/auth/env_naming_test.go` guards against re-introduction. The matching sageox-mono ADR-046 ("Credential Classes and Principal Normalization") is now Accepted with companion sections D7-D10 covering the PAT validation contract, principal `AuthMethod`, customer-facing surface, and cryptographic-separation targets.
 - UserPromptSubmit hook prepends ox query --local recall; local-only by default (ADR-018).
 - New `hooks.userpromptsubmit.cloud_query` config key (default `off`) opts the UserPromptSubmit hook into a parallel SageOx cloud query. When enabled, prompt content is redacted via the session secrets pipeline before any byte leaves the machine, and the cloud path silently degrades to local-only if `ox login` has not run. `ox doctor` reports the effective value and the privacy/recall tradeoff.
 

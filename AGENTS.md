@@ -79,6 +79,7 @@ ox is agentic context infrastructure for software teams. It makes architectural 
 - **Path locations** - Where ledgers, team contexts, or any SageOx data is stored
 - **Data access ergonomics** - How users navigate to/access their data
 - **API source of truth** - Where team context or ledger git repo URLs come from
+- **Customer-facing env-var names** - Any new `SAGEOX_*` or any customer-facing `OX_*` env var. `SAGEOX_*` is canonical for customer-facing product/auth/network/deployment identity; customer-facing `OX_*` is an anti-pattern. See sageox-mono ADR-047 (`docs/human/adr/047-customer-facing-env-var-namespace.md`) for the canonical rule.
 
 **Canonical Functions (do NOT bypass or duplicate):**
 
