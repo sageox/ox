@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
 	lipgloss "charm.land/lipgloss/v2"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -59,12 +61,13 @@ type sessionShowData struct {
 
 // sessionMetadata contains session header metadata
 type sessionMetadata struct {
-	Version   string
-	AgentID   string
-	AgentType string
-	Username  string
-	RepoID    string
-	CreatedAt time.Time
+	Version         string
+	AgentID         string
+	AgentType       string
+	Username        string
+	RepoID          string
+	CreatedAt       time.Time
+	ProducedCommits []string `json:",omitempty"`
 }
 
 var sessionShowCmd = &cobra.Command{
@@ -159,6 +162,21 @@ func viewAsJSON(w io.Writer, storedSession *session.StoredSession, metadataOnly 
 	return showRawSession(w, t, limit)
 }
 
+// readProducedCommits loads SessionMeta.ProducedCommits for the session
+// whose raw.jsonl lives at jsonlPath. Returns nil on any error (the field
+// is purely informational; a read failure should not break view rendering).
+func readProducedCommits(jsonlPath string) []string {
+	if jsonlPath == "" {
+		return nil
+	}
+	sessionDir := filepath.Dir(jsonlPath)
+	meta, err := lfs.ReadSessionMeta(sessionDir)
+	if err != nil || meta == nil {
+		return nil
+	}
+	return meta.ProducedCommits
+}
+
 // convertStoredSession converts a session.StoredSession to sessionShowData.
 func convertStoredSession(st *session.StoredSession) *sessionShowData {
 	t := &sessionShowData{
@@ -169,12 +187,13 @@ func convertStoredSession(st *session.StoredSession) *sessionShowData {
 
 	if st.Meta != nil {
 		t.Metadata = &sessionMetadata{
-			Version:   st.Meta.Version,
-			AgentID:   st.Meta.AgentID,
-			AgentType: st.Meta.AgentType,
-			Username:  st.Meta.Username,
-			RepoID:    st.Meta.RepoID,
-			CreatedAt: st.Meta.CreatedAt,
+			Version:         st.Meta.Version,
+			AgentID:         st.Meta.AgentID,
+			AgentType:       st.Meta.AgentType,
+			Username:        st.Meta.Username,
+			RepoID:          st.Meta.RepoID,
+			CreatedAt:       st.Meta.CreatedAt,
+			ProducedCommits: readProducedCommits(st.Info.FilePath),
 		}
 	}
 

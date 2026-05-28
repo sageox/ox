@@ -1314,7 +1314,8 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		Title(state.Title).
 		EntryCount(result.EntryCount).
 		Summary(result.Summary).
-		StopReason(session.StopReasonStopped)
+		StopReason(session.StopReasonStopped).
+		ProducedCommits(state.ProducedCommits)
 
 	// inject sageox contribution score from cache file into meta.json,
 	// then clean up the score file to prevent stale scores leaking into future sessions
