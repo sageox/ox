@@ -55,8 +55,14 @@ const (
 
 	// teamDiscoveryInterval is how often we re-fetch the team list from the API,
 	// independent of credential token expiry. This ensures new teams are discovered
-	// promptly even when the token is still fresh.
-	teamDiscoveryInterval = 5 * time.Minute
+	// without waiting for the next credential refresh.
+	//
+	// 1h is a deliberate trade-off: team membership changes are rare (admin adds
+	// a member, user joins a new team), so the previous 5min cadence cost ~12x
+	// the API load for no perceptible UX gain. New-team discovery still happens
+	// opportunistically on credential refresh and on explicit user actions
+	// (`ox status`, `ox doctor`).
+	teamDiscoveryInterval = 1 * time.Hour
 
 	// maxConcurrentClones limits background clone operations to prevent resource exhaustion.
 	// 100 team contexts shouldn't spawn 100 concurrent git clones.
