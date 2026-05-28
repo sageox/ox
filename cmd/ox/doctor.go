@@ -895,22 +895,28 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		}
 	}
 
+	// Category 9b: Ephemeral Mode (own category, NOT merged into Daemon).
+	// Surfacing this as a sibling category — rather than appending it to
+	// Daemon — keeps the Daemon category's "single grouped skip" invariant
+	// intact (see TestDoctorSuppression_DaemonNotRunning) while still
+	// making the predicate visible. Ephemeral mode is the most common
+	// explanation for an absent daemon, but it deserves its own grouping.
+	// See docs/ai/adr/adr-ephemeral-mode.md.
+	progress.show("Ephemeral Mode")
+	categories = append(categories, checkCategory{
+		name:   "Ephemeral Mode",
+		checks: []checkResult{checkEphemeralMode()},
+	})
+
 	// Category 10: Daemon
 	progress.show("Daemon")
-	// always surface the ephemeral-mode predicate first — it explains why
-	// the daemon may be intentionally absent (CI, Claude Cloud, Devin,
-	// user config) and is the single most common source of "doctor says
-	// no daemon" confusion. See docs/ai/adr/adr-ephemeral-mode.md.
-	ephemeralStatus := checkEphemeralMode()
 	if state.isDaemonRunning {
 		daemonChecks := checkDaemonHealth(opts)
-		daemonChecks = append([]checkResult{ephemeralStatus}, daemonChecks...)
-		if state.isBootstrapping && len(daemonChecks) > 1 {
-			// prepend bootstrap info banner (after ephemeral status)
+		if state.isBootstrapping && len(daemonChecks) > 0 {
 			bootstrapBanner := InfoCheck("daemon bootstrap",
 				"initial sync in progress",
 				"Run `ox doctor` again in a minute")
-			daemonChecks = append([]checkResult{ephemeralStatus, bootstrapBanner}, daemonChecks[1:]...)
+			daemonChecks = append([]checkResult{bootstrapBanner}, daemonChecks...)
 		}
 		if len(daemonChecks) > 0 {
 			categories = append(categories, checkCategory{
@@ -923,7 +929,6 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		categories = append(categories, checkCategory{
 			name: "Daemon",
 			checks: []checkResult{
-				ephemeralStatus,
 				SkippedCheck("daemon status", "not started",
 					"Daemon will auto-start on next agentic coding session"),
 			},
@@ -933,7 +938,6 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		categories = append(categories, checkCategory{
 			name: "Daemon",
 			checks: []checkResult{
-				ephemeralStatus,
 				SkippedCheck("daemon status", "DAEMON NOT RUNNING",
 					"Run `ox daemon start` to enable background sync and heartbeats"),
 			},
