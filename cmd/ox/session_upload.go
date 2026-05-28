@@ -28,6 +28,7 @@ import (
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/ledger/automerge"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/perf"
 )
 
 // checkUploadAccess checks if the user has write access to upload sessions.
@@ -331,13 +332,21 @@ var ledgerAutoResolvePrefixes = ledger.AutoResolvePrefixes
 // pushLedger pushes ledger changes to remote with conflict retry.
 // Delegates to gitutil.PushWithRetry with ledger-appropriate options:
 // LFS reconciliation, rebase on conflict, auto-resolve for data/github/.
+//
+// Per-phase timing is captured as nested spans so OX_TRACE=1 / -v shows
+// which segment of the push dominates — the secret scan, credential
+// refresh, the push itself, or LFS reconcile.
 func pushLedger(ctx context.Context, ledgerPath string) error {
+	ctx, span := perf.Start(ctx, "pre-push total")
+	defer span.End()
+
 	// resolve endpoint once, before entering the push loop.
 	// only refresh credentials when we have a real project root —
 	// GetForProject("") falls back to Default, which would inject
 	// production credentials into a local file:// remote URL.
 	// findGitRoot() is CWD-dependent — if the caller isn't in a git repo
 	// (e.g., doctor retry from a different dir), this silently returns "".
+	_, settingsSpan := perf.Start(ctx, "resolve_push_settings")
 	var ep string
 	if root := findGitRoot(); root != "" {
 		ep = endpoint.GetForProject(root)
@@ -354,6 +363,7 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 	} else if changed {
 		slog.Info("healed kb merge attributes", "ledger", ledgerPath)
 	}
+	settingsSpan.End()
 
 	// Pre-push secret gate (ox-1uss). Scans the commit range that we're about
 	// to push for known credential patterns; refuses the push if any are found
@@ -361,11 +371,17 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 	// refresh / merge-attribute healing so failures from those don't get
 	// confused with a secret-gate refusal; runs BEFORE PushWithRetry so we
 	// never send bytes containing detected credentials.
-	if err := runPrePushSecretGate(ctx, ledgerPath); err != nil {
+	gateCtx, gateSpan := perf.Start(ctx, "secret_gate")
+	if err := runPrePushSecretGate(gateCtx, ledgerPath); err != nil {
+		perf.RecordError(gateSpan, err)
+		gateSpan.End()
+		perf.RecordError(span, err)
 		return err
 	}
+	gateSpan.End()
 
-	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
+	pushCtx, pushSpan := perf.Start(ctx, "git_push")
+	err := gitutil.PushWithRetry(pushCtx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
@@ -378,6 +394,12 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 		ReconcileLFS:          makeLFSReconciler(ep),
 		OnUnresolvedConflicts: ledgerLLMResolveHook(),
 	})
+	if err != nil {
+		perf.RecordError(pushSpan, err)
+		perf.RecordError(span, err)
+	}
+	pushSpan.End()
+	return err
 }
 
 // ledgerLLMResolveHook returns the OnUnresolvedConflicts callback used by

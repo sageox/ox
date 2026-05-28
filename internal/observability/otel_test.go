@@ -247,4 +247,5 @@ func resetGlobals() {
 	rootSpan = nil
 	tracer = nil
 	shutFn = nil
+	extraProcessors = nil
 }

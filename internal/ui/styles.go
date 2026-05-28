@@ -80,9 +80,11 @@ const (
 
 // Tree characters for hierarchical display
 const (
-	TreeChild  = "⎿ "  // child indicator
-	TreeLast   = "└─ " // last child / detail line
-	TreeIndent = "  "  // 2-space indent per level
+	TreeChild    = "⎿ "  // child indicator
+	TreeLast     = "└─ " // last child / detail line
+	TreeBranch   = "├─ " // non-last sibling
+	TreeVertical = "│  " // vertical bar carried by non-last ancestors
+	TreeIndent   = "  "  // 2-space indent per level
 )
 
 // Separators

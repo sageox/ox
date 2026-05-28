@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,7 +40,7 @@ func TestDoctorFreshInstall_NoWarnings(t *testing.T) {
 		verbose:  true, // see all checks for debugging
 		forceYes: true, // non-interactive
 	}
-	categories := runDoctorChecks(opts)
+	categories := runDoctorChecks(context.Background(), opts)
 
 	// collect all warnings, failures, and fixable issues
 	var warnings []string
@@ -92,7 +93,7 @@ func TestDoctorFreshInstall_EmptyRepo_NoWarnings(t *testing.T) {
 		verbose:  true,
 		forceYes: true,
 	}
-	categories := runDoctorChecks(opts)
+	categories := runDoctorChecks(context.Background(), opts)
 
 	// in an empty repo, we expect .sageox check to be skipped (not a warning)
 	// the user simply hasn't run init yet
@@ -309,7 +310,7 @@ func TestDoctorFreshCheckout_NoSideEffectDirectories(t *testing.T) {
 		verbose:  false,
 		forceYes: true,
 	}
-	_ = runDoctorChecks(opts)
+	_ = runDoctorChecks(context.Background(), opts)
 
 	// verify no new directories were created in the parent
 	afterEntries, err := os.ReadDir(parentDir)

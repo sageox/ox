@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
@@ -468,7 +469,7 @@ func TestRunDoctorChecks_CategoryStructure(t *testing.T) {
 func TestRunDoctorChecks_WithFixFlag(t *testing.T) {
 	t.Parallel()
 	// run with fix=true (can't cache this since it may have side effects)
-	categoriesWithFix := runDoctorChecks(doctorOptions{fix: true})
+	categoriesWithFix := runDoctorChecks(context.Background(), doctorOptions{fix: true})
 	require.NotEmpty(t, categoriesWithFix, "runDoctorChecks(true) returned no categories")
 
 	// use cached fix=false result

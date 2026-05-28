@@ -47,12 +47,32 @@ func (rt *bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, erro
 }
 
 var (
-	mu       sync.RWMutex
-	rootCtx  context.Context
-	rootSpan trace.Span
-	tracer   trace.Tracer
-	shutFn   func(context.Context) error
+	mu              sync.RWMutex
+	rootCtx         context.Context
+	rootSpan        trace.Span
+	tracer          trace.Tracer
+	shutFn          func(context.Context) error
+	extraProcessors []sdktrace.SpanProcessor
 )
+
+// AddSpanProcessor registers an additional SpanProcessor to be installed
+// alongside the OTLP batch exporter on the next Init() call. Must be
+// called BEFORE Init — processors added after Init are ignored, because
+// the TracerProvider is already built.
+//
+// Used by callers (CLI bootstrap, daemon bootstrap) to wire in
+// internal/perf's TreeCollectorProcessor so per-phase timing renders
+// locally in addition to flowing to the OTLP backend.
+//
+// Safe to call multiple times; each processor is registered once.
+func AddSpanProcessor(p sdktrace.SpanProcessor) {
+	if p == nil {
+		return
+	}
+	mu.Lock()
+	extraProcessors = append(extraProcessors, p)
+	mu.Unlock()
+}
 
 // Init sets up the OTel TracerProvider with OTLP/HTTP export to the SageOx
 // OTLP proxy at {apiEndpoint}/api/v1/otlp/v1/traces.
@@ -104,7 +124,7 @@ func Init(ctx context.Context, serviceName, apiEndpoint string, tokenFunc TokenF
 	resAttrs := []attribute.KeyValue{semconv.ServiceName(serviceName)}
 	resAttrs = append(resAttrs, attrs...)
 
-	tp := sdktrace.NewTracerProvider(
+	tpOpts := []sdktrace.TracerProviderOption{
 		sdktrace.WithBatcher(exporter,
 			sdktrace.WithBatchTimeout(1*time.Second),
 			sdktrace.WithMaxExportBatchSize(16),
@@ -113,7 +133,18 @@ func Init(ctx context.Context, serviceName, apiEndpoint string, tokenFunc TokenF
 			semconv.SchemaURL,
 			resAttrs...,
 		)),
-	)
+	}
+	// Append any processors registered via AddSpanProcessor before Init.
+	// internal/perf uses this hook to install its TreeCollectorProcessor
+	// so the local tree renderer sees the same spans the OTLP exporter
+	// receives, without duplicate instrumentation.
+	mu.RLock()
+	for _, p := range extraProcessors {
+		tpOpts = append(tpOpts, sdktrace.WithSpanProcessor(p))
+	}
+	mu.RUnlock()
+
+	tp := sdktrace.NewTracerProvider(tpOpts...)
 	otel.SetTracerProvider(tp)
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 

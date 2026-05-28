@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"strings"
@@ -29,7 +30,7 @@ func getCachedDoctorChecks(t *testing.T) []checkCategory {
 		t.Skip("short: full doctor pipeline shells out to git/auth — see .claude/rules/testing.md")
 	}
 	cachedCategoriesOnce.Do(func() {
-		cachedCategories = runDoctorChecks(doctorOptions{fix: false})
+		cachedCategories = runDoctorChecks(context.Background(), doctorOptions{fix: false})
 	})
 	return cachedCategories
 }

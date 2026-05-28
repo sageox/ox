@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/observability"
+	"github.com/sageox/ox/internal/perf"
 	"github.com/sageox/ox/internal/signature"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/version"
@@ -136,6 +137,15 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 		}
 		return tok.AccessToken
 	}
+	// Install perf TreeCollectorProcessor BEFORE Init so the next
+	// NewTracerProvider call sees it alongside the OTLP batch exporter.
+	// Spans produced anywhere in the CLI feed both backends — OTLP for
+	// Honeycomb, and the local sink for the per-phase tree rendered to
+	// stderr on slow ops / OX_TRACE=1 / --verbose.
+	observability.AddSpanProcessor(perf.NewTreeProcessor(perf.Options{
+		OnSpan: perf.PerSpanSlog(cliCtx.Logger),
+		OnTree: perf.CLITreeSink(os.Stderr, cfg.Verbose),
+	}))
 	if err := observability.Init(cliCtx.Ctx, "ox-cli", apiEndpoint, tokenFunc, resourceAttrs...); err != nil {
 		slog.Debug("otel init failed, continuing without tracing", "error", err)
 	}
@@ -146,6 +156,12 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 		cmdPath = cmd.Parent().Name() + " " + cmdPath
 	}
 	cliCtx.Ctx, _ = observability.StartCommand(cliCtx.Ctx, observability.CommandName(cmdPath))
+	// Propagate the traced context onto the cobra command so
+	// downstream cmd.Context() callers inherit the OTel root span.
+	// Without this, perf.Start(cmd.Context(), ...) creates a NEW
+	// root span and the local tree fragments instead of nesting under
+	// the command.
+	cmd.SetContext(cliCtx.Ctx)
 
 	// Attach universal attributes to the root span: ox.version, host.os,
 	// host.arch, ox.command.args (with values redacted). This is the only

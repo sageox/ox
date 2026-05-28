@@ -43,6 +43,7 @@ import (
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/observability"
+	"github.com/sageox/ox/internal/perf"
 	"github.com/sageox/ox/internal/version"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -1053,6 +1054,12 @@ func (s *SyncScheduler) LastSync() time.Time {
 // Also performs anti-entropy: checks for missing workspaces and triggers clones.
 // Errors from doPull are already logged and recorded; background sync continues.
 func (s *SyncScheduler) pullChanges(ctx context.Context) {
+	// Open a root span for this pull cycle. Child spans (do_pull,
+	// managed_repo, fetch, rebase, ...) nest under it so the daemon
+	// log tree shows each cycle as one self-contained block.
+	ctx, span := s.tracer.StartTask(ctx, "daemon:pull_cycle")
+	defer span.End()
+
 	// anti-entropy: ensure missing workspaces get cloned
 	s.triggerMissingClones()
 
@@ -1207,6 +1214,8 @@ func isValidGitRepo(path string) bool {
 //   - lock file safety: if a git process crashes, its .git/index.lock is released
 //     by the OS; an in-process crash may leave stale locks in the same process
 func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, forceSync bool, refreshSparse bool) error {
+	ctx, span := perf.Start(ctx, "daemon:do_pull")
+	defer span.End()
 	if s.config.LedgerPath == "" {
 		return nil
 	}
@@ -1450,6 +1459,9 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 // Called during the ledger sync cycle for natural batching (~60s).
 // Non-fatal: failures are logged but don't block the sync cycle.
 func (s *SyncScheduler) pushMurmurCommits(ctx context.Context, ledgerPath string) {
+	ctx, span := perf.Start(ctx, "daemon:push_murmurs")
+	defer span.End()
+
 	// check for unpushed murmur commits
 	out, err := s.git.RunGit(ctx, ledgerPath, "log", "--oneline", "origin/main..HEAD", "--", "data/murmurs/")
 	if err != nil || strings.TrimSpace(out) == "" {

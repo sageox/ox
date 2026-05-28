@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/perf"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
 
@@ -26,6 +27,9 @@ import (
 // blocking the sync scheduler event loop.
 // Also performs anti-entropy: checks for missing workspaces and triggers clones.
 func (s *SyncScheduler) pullTeamContexts(ctx context.Context) {
+	ctx, span := s.tracer.StartTask(ctx, "daemon:team_pull_cycle")
+	defer span.End()
+
 	// anti-entropy: ensure missing workspaces get cloned
 	s.triggerMissingClones()
 
@@ -52,6 +56,9 @@ func (s *SyncScheduler) TeamSync(progress *ProgressWriter) error {
 // spawns a background goroutine to clone it. This doesn't block the sync loop.
 // Note: Ledger auto-clone is handled separately in doPull() on the ledger sync ticker.
 func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter, forceSync bool) {
+	ctx, span := perf.Start(ctx, "daemon:do_team_sync")
+	defer span.End()
+
 	// refresh credentials if expired or near expiry
 	s.refreshCredentialsIfNeeded()
 

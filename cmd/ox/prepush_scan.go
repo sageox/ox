@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sageox/ox/internal/perf"
 	"github.com/sageox/ox/internal/session"
 )
 
@@ -106,6 +107,8 @@ func inPrePushScannerScope(rel string) bool {
 // 2 seconds on a typical dev machine; see BenchmarkPrePushScan in the test
 // file for the budget assertion.
 func scanPrePushForSecrets(ctx context.Context, ledgerPath string) (*PrePushScanResult, error) {
+	ctx, span := perf.Start(ctx, "secret_scan")
+	defer span.End()
 	// Enumerate files in the push range. The triple-dot syntax includes
 	// every file touched by commits on HEAD that aren't on origin/main —
 	// even if a later commit reverts them, the bytes are still in the
