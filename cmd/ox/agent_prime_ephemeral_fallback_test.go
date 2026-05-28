@@ -359,3 +359,38 @@ func TestFetchTeamContextViaAPI_RemovesStaleDocsAndRootFiles(t *testing.T) {
 		assert.True(t, os.IsNotExist(err), "stale file must be removed: %s (err=%v)", p, err)
 	}
 }
+
+// TestDiscoverTeamContextWithFallback_CIDoesNotForceHTTPRefresh ensures the
+// HTTP fallback is keyed to non-persistent storage, not the broader derived
+// IsEphemeral() predicate. Failure prevented: CI=true forces a redundant HTTP
+// rewrite of an already-durable local team context on every prime.
+func TestDiscoverTeamContextWithFallback_CIDoesNotForceHTTPRefresh(t *testing.T) {
+	t.Setenv("CI", "true")
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	runtime.Reset()
+	t.Cleanup(runtime.Reset)
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	projectRoot := createInitializedProjectWithConfig(t, &config.ProjectConfig{
+		ProjectID:   "test_project",
+		WorkspaceID: "test_workspace",
+		TeamID:      "team_abc",
+		TeamName:    "Team ABC",
+		Endpoint:    server.URL,
+	})
+
+	teamCtxDir := paths.TeamContextDir("team_abc", server.URL)
+	require.NoError(t, os.MkdirAll(filepath.Join(teamCtxDir, "docs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(teamCtxDir, "AGENTS.md"), []byte("local agents"), 0o644))
+
+	info := discoverTeamContextWithFallback(projectRoot, "", true)
+	require.NotNil(t, info)
+	assert.Equal(t, int32(0), requests.Load(), "durable CI environments should use the local team-context path")
+}
