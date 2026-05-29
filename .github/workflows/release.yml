@@ -54,6 +54,14 @@ jobs:
           # List signed artifacts for logs
           echo "Signed artifacts:"
           go run ./scripts/sign-manifest --list
+
+          # sign-manifest rewrites the tracked .github/release-signatures.json with a
+          # freshly-generated signature on every run. The values it produces are already
+          # captured in $GITHUB_OUTPUT above and handed to GoReleaser via env-var ldflags,
+          # so the on-disk file is only a record. Restore it to keep the working tree clean —
+          # GoReleaser's `release --clean` aborts on a dirty git state (this silently broke
+          # the v0.8.0, v0.8.1, and v0.9.0 artifact builds). See goreleaser.com/errors/dirty.
+          git checkout -- .github/release-signatures.json
         env:
           SAGEOX_CLI_SIGNING_KEY: ${{ secrets.SAGEOX_CLI_SIGNING_KEY }}
 
