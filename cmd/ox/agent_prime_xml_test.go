@@ -478,11 +478,16 @@ func TestOutputAgentPrimeXML_ConsultFirst(t *testing.T) {
 		t.Error("consult-first must route code-provenance cues to `ox code search`")
 	}
 
-	// must sit in the static (cacheable) tier — before the cache boundary
+	// must sit in the static (cacheable) tier — above all per-session content.
+	// The cache boundary itself is a source comment (not emitted), so anchor on
+	// <session-context>, the first per-session block in the output.
 	consultIdx := strings.Index(xml, "<consult-first>")
-	boundaryIdx := strings.Index(xml, "CACHE BOUNDARY")
-	if boundaryIdx >= 0 && consultIdx > boundaryIdx {
-		t.Error("consult-first must be above the cache boundary (static tier)")
+	sessionIdx := strings.Index(xml, "<session-context")
+	if sessionIdx < 0 {
+		t.Fatal("missing <session-context> block")
+	}
+	if consultIdx > sessionIdx {
+		t.Error("consult-first must be above the per-session block (static tier)")
 	}
 }
 
