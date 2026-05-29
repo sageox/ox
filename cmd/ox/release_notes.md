@@ -7,13 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-05-28
+
 ### Added
 
+- **Pause and resume sessions** — `ox session pause` and `ox session resume` let you suspend an in-progress recording and pick it back up later without losing context, with a proper session lifecycle (active → paused → resumed → stopped) underneath. Long-running work that spans breaks, meetings, or machine restarts is now captured as one coherent session instead of fragmenting.
+- **Ephemeral mode for throwaway environments** — set `OX_EPHEMERAL=1` to run ox in a capability-based mode tuned for short-lived sandboxes (Codespaces, CI, dev containers): no daemon assumptions, session finalize syncs inline, and Codespaces is now detected reliably. The old per-command `--ephemeral` flag is deprecated (a flag on a single command silently drifted back to non-ephemeral on the next invocation in the same shell) — set the environment variable instead.
+- **Personal access token auth via `SAGEOX_TOKEN`** — non-interactive environments can authenticate by exporting a SageOx PAT in `SAGEOX_TOKEN`, no browser login required. ox warns on stderr as the token nears expiry so automation doesn't fail silently.
+- **Faster clones on large repos** — code-search and ledger clones now support shallow, partial (blobless), and shared-alternates fetching, cutting both wall-clock time and disk for big histories.
+- **Performance metrics in `ox doctor` and the daemon** — `ox doctor` now reports timing for its checks and the daemon exposes per-subsystem performance counters, making slow setups diagnosable instead of mysterious.
+- **`/security-review` pipeline** — a diff-scoped, two-tier (deterministic OSS scanners + AI hunter/validator) security review you can run on demand. Never blocks merge; surfaces input-handling bugs, redaction-bypass risks, daemon IPC authz holes, and supply-chain issues. See `security/README.md`.
+- **Durable session commit + PR/issue linkage** — sessions commit atomically and maintain a reverse index linking each session to the PRs and issues it touched, with stale-URL repair. Past work is now discoverable from the PR/issue side, not just the session list.
+- **Knowledge Bubble as a workspace primitive** (ADR-017) — the resolver, config, and file-locking foundation for treating personal/team/repo knowledge ("bubbles") as first-class workspaces.
 - **Customer-facing env-var namespace convention** — sageox-mono ADR-047 ("Customer-Facing Env Var Namespace") is the canonical home for the rule that customer-facing SageOx env vars use `SAGEOX_*` (product/auth/network identity) and `OX_*` is reserved for CLI-local behavior flags. The legacy customer-facing `OX_TOKEN` / `OX_ENDPOINT` names are removed; `internal/auth/env_naming_test.go` guards against re-introduction. The matching sageox-mono ADR-046 ("Credential Classes and Principal Normalization") is now Accepted with companion sections D7-D10 covering the PAT validation contract, principal `AuthMethod`, customer-facing surface, and cryptographic-separation targets.
-- UserPromptSubmit hook prepends ox query --local recall; local-only by default (ADR-018).
+- **Local recall on every prompt** — the UserPromptSubmit hook prepends `ox query --local` recall, local-only by default (ADR-018).
 - New `hooks.userpromptsubmit.cloud_query` config key (default `off`) opts the UserPromptSubmit hook into a parallel SageOx cloud query. When enabled, prompt content is redacted via the session secrets pipeline before any byte leaves the machine, and the cloud path silently degrades to local-only if `ox login` has not run. `ox doctor` reports the effective value and the privacy/recall tradeoff.
 
 ### Changed
+
+- **AI adapters stop fast on terminal errors** — when a host agent hits an unrecoverable condition (e.g. a rate-limit/quota wall), the adapter detects it and stops promptly instead of retrying into the same wall.
+- **Daemon team discovery relaxed from every 5 minutes to hourly** — less background chatter and CPU for a signal that changes rarely.
 
 **`ox session audit` and `ox session redact` now require an explicit scope**
 
@@ -35,6 +48,13 @@ The 0.8.1 `ledger-redaction-debt` doctor check told the user to run `ox session 
 2. `ox session redact --session <name>` now also walks `.sageox/cache/quarantine/<name>/` for the targeted sessions. For JSONL quarantine, it redacts at the quarantine path via the canonical chokepoint, moves the file back to `sessions/<name>/`, appends a `RedactionPass` to `meta.json`, and removes the debt marker on success. Non-JSONL quarantine is listed as "manual scrub required" — the chokepoint applies the raw-writer redaction stack and expects JSONL.
 
 Before this PR, the doctor warning pointed at a command that couldn't help: the forward path (`prepush_autoredact.quarantineUnredactableFindings`) had moved the bytes OUT of `sessions/<name>/`, and the backward path only walked `sessions/`. Recovery required manually inspecting, scrubbing, and moving files back. Now `ox doctor` → copy-paste → done.
+
+**Daemon and sync reliability**
+
+- The daemon no longer deletes its IPC socket file when a superseded instance shuts down, so a freshly-started daemon stays reachable instead of leaving the CLI unable to connect.
+- Code-search self-heals a corrupt bleve `_mapping` automatically and falls back to SQL-only insights, instead of failing the query outright.
+- Observability exports now attach a fresh JWT Bearer token per OTLP request, fixing dropped telemetry once the initial token expired on long-running daemons.
+- Ledger pushes that wedged in a "U" (unmerged) state are now surfaced and audited rather than silently stalling, and the summary push no longer writes to a `/tmp` scratch path.
 
 ### Security
 
@@ -132,6 +152,7 @@ New tests pin the scope contract, the auto-redact happy path, the quarantine pat
 **Code search resilience**
 - `codedb` self-heals a corrupt bleve sub-index without forcing a full reindex. On large repos this drops recovery time from "several hours" to "2–5 minutes."
 
+[0.9.0]: https://github.com/sageox/ox/releases/tag/v0.9.0
 [0.8.0]: https://github.com/sageox/ox/releases/tag/v0.8.0
 
 ## [0.7.2] - 2026-05-04
