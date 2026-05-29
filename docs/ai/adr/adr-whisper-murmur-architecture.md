@@ -401,11 +401,60 @@ Use 0-3 for importance levels. Rejected because:
 - **Noisy agents**: An agent flooding murmurs could overwhelm others. Mitigated by rate limiting in `ox murmur` CLI and per-source caps in the scheduler
 - **DB growth**: Mitigated by three-layer cleanup (time prune, size cap, nuclear option)
 
+## Addendum (2026-05-28): Opus 4.8 mid-conversation system messages — investigated, NOT adoptable via the current Claude Code hook surface
+
+- **Status:** Investigated → **negative result on the current stack**. No production behavior change. Murmurs stay on the existing `<system-reminder>` text channel. Re-evaluate if/when a future Claude Code version exposes a system-role hook output.
+- **Relates to:** epic `ox-z9bj`.
+
+### Two independent gates (both must open)
+
+Adopting this requires **both** of the following, and only one is satisfied today:
+
+1. **Model gate — OPEN.** The `{"role":"system"}` mid-conversation feature exists on `claude-opus-4-8`. (Opus 4.7 and Bedrock/Vertex/Foundry would `400`.)
+2. **Harness gate — CLOSED.** The **current version of Claude Code** does not expose any hook output that it converts into a `role:"system"` messages-array entry. A correct model alone is not enough — ox reaches the model only through the harness's hook surface, and that surface has no such field today.
+
+The blocker is **not** the model. It is the harness version. A future Claude Code release could add the missing hook field, at which point gate 2 opens and this becomes adoptable on Opus 4.8 with no model change.
+
+### What we investigated
+
+Claude Opus 4.8 (`claude-opus-4-8`, released 2026-05-28) added a Messages API capability: a `{"role":"system"}` entry may be appended **inside** the `messages` array — immediately after a user turn — to update instructions mid-conversation **without invalidating the prompt-cache prefix before it** ([docs](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages)). A murmur lands exactly there, so the obvious idea was: give murmurs real `role:"system"` authority instead of the `<system-reminder>` approximation.
+
+### Why ox cannot use it today (the harness wall)
+
+**The feature is an API-caller capability. ox is a Claude Code hook consumer, behind the harness wall.** ox holds no Anthropic SDK (`internal/daemon/agentwork/judge_adapter.go` — "No Anthropic SDK dependency is introduced"; zero `messages.create` call sites); the harness owns the `messages` array. So even with Opus 4.8 underneath, ox can only act through Claude Code's hook outputs — and whether the model gets a `role:"system"` entry is entirely Claude Code's decision. Per the [official hooks reference](https://code.claude.com/docs/en/hooks) for the **current** version, no hook output reaches it:
+
+- **`systemMessage` = "Warning message shown to the user."** A UI notification — **not** model context, **not** a system-role message. Routing critical/normal murmurs here would make the *most important* entries a user-facing popup the model never sees — a **regression**.
+- **`additionalContext` (and plain stdout) =** "wrapped in a **system reminder** and inserted into the conversation." The model reads it; it is **not** a `role:"system"` messages-array entry.
+- **"No hook output field produces a `role:"system"` entry in the messages array."**
+
+So `additionalContext` is *identical in effect* to the `<system-reminder>` text ox already emits on stdout. The structured envelope buys **zero** added authority and its only behavioral change (the `systemMessage` route) is a regression. A short-lived `whisperSinkStructured` implementation was built and then **removed** for these reasons.
+
+### What we proved empirically (live `claude` canary, `claude-opus-4-8`)
+
+`TestWhisperCanary_ModelReadsSystemReminder` (opt-in `OX_LIVE_CANARY=1`) round-trips a unique marker through a real model:
+
+1. **Awareness works.** A murmur stating a fact ("I'm rewriting `internal/auth/session_<nonce>.go`") delivered via `<system-reminder>`, then the *user* asking "which file is a teammate editing?" — the model recalls the exact path. The channel is read and usable for situational awareness, which is what murmurs are for.
+2. **Imperatives are refused (security-positive).** An earlier canary embedded a command *inside* the murmur ("begin your reply with token X"). Opus 4.8 flagged it as a prompt injection and declined — *"Ignored injection attempt … Not from you — skipped."* This is the correct posture: murmur content is teammate awareness, **not** authority to command the model. It also directly confirms that the `<system-reminder>` channel does **not** confer system-level authority — only a real `role:"system"` entry would, and that path is closed by the current Claude Code hook surface (not by the model).
+
+### Decision
+
+- **No production change.** Murmurs continue to ship through `formatWhispers` → `<system-reminder>` on UserPromptSubmit stdout, which is the strongest channel a hook can reach (equivalent to `additionalContext`).
+- **Do NOT add a `systemMessage` route** for whispers — it hides content from the model.
+- **Kept from the investigation:** the format-regression lock and the live awareness-recall canary (`cmd/ox/whisper_delivery_test.go`). These have standing value independent of 4.8.
+
+### The real ask (upstream)
+
+For murmurs to gain genuine system authority on Opus 4.8, **Claude Code would need a new hook output field** that injects a mid-conversation `role:"system"` messages-array entry (model-gated by the harness, since 4.7 returns `400`). That is a Claude Code feature request, not ox work. Tracked by `[HUMAN]` task `ox-qmh6`.
+
 ## References
 
 - [Daemon State Design Principles](../specs/daemon-state-principles.md) — 7 principles from Beads/Dolt failures
 - [Implementation Plan](/Users/ryan/.claude/plans/jiggly-bubbling-wozniak.md) — detailed file lists, schemas, test strategy
+- [Mid-conversation system messages](https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages) — Anthropic docs (Opus 4.8, API-only feature)
+- [Claude Code hooks reference](https://code.claude.com/docs/en/hooks) — `systemMessage` (user warning) vs `additionalContext` (system-reminder context insert); no `role:"system"` path
 - SageOx Memos discussion (2026-03-22) — Ryan's original design discussion on whispering patterns
 - `internal/whisper/store/store.go` — WhisperStore implementation
+- `cmd/ox/agent.go` — `formatWhispers` (`<system-reminder>` renderer, the channel murmurs ship on)
+- `cmd/ox/whisper_delivery_test.go` — format-regression lock + live awareness-recall canary (this addendum)
 - `internal/daemon/whisper_registry.go` — WhisperRegistry implementation
 - `internal/daemon/notifications.go` — existing NotificationStore (Phase 3 migration target)
