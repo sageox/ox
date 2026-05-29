@@ -115,6 +115,23 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	sb.WriteString("murmurs, and discussions. Do NOT credit them as a teammate — say \"Building on your earlier session...\" instead.\n")
 	sb.WriteString("</instructions>\n")
 
+	// consult-first: the root failure SageOx exists to prevent is an agent
+	// reasoning from first principles when the answer already lives in team
+	// memory — and getting it backwards. This block names the cues that must
+	// trigger a search BEFORE reasoning, and routes each cue to the right
+	// corpus (chronological vs semantic vs code are different retrieval modes).
+	// Static (no per-session/per-team variance) so it's fully cacheable.
+	sb.WriteString("\n<consult-first>\n")
+	sb.WriteString("Before answering from first-principles reasoning, check whether SageOx already has the answer.\n")
+	sb.WriteString("A confident answer that prior work contradicts is worse than a slow one. These cues mean STOP and search first:\n")
+	sb.WriteString("- The user references recent or specific work they did: \"I just pushed...\", \"this request\", \"did X fix Y?\", \"is the alert gone now?\"\n")
+	sb.WriteString("- A prior decision, a prod anomaly, or a metric/cost change — anything with a before/after.\n")
+	sb.WriteString("Route the cue to the right corpus — these are DIFFERENT retrieval modes, not interchangeable:\n")
+	sb.WriteString("- Recency / \"I just did X\" → `ox session list --limit 20 --json` (chronological; the summary is in the list, not in view). A specific recent session is the likeliest source; semantic search can rank it below older fuzzy matches and miss it.\n")
+	sb.WriteString("- Conceptual / \"did we decide or discuss X?\" → `ox query \"<question>\"` (semantic; default `--source=team` covers discussions, docs, and session history). Add `--source=all` to include code.\n")
+	sb.WriteString("- \"Who or what touched this code?\" → `ox code search \"<pattern>\"` / `ox code insights`.\n")
+	sb.WriteString("</consult-first>\n")
+
 	// rule-promotion-guidance: nudge the agent to ask whether a project-local
 	// rule should also become a team rule when one looks generally applicable.
 	// Static (no per-session/per-team variance) so it's fully cacheable.

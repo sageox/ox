@@ -439,6 +439,53 @@ func TestOutputAgentPrimeXML_CacheTierOrdering(t *testing.T) {
 	}
 }
 
+// TestOutputAgentPrimeXML_ConsultFirst verifies the consult-first block ships
+// in every prime output, names the recency/anomaly cues, and routes each to a
+// distinct corpus.
+// Failure prevented: an agent reasons from priors instead of searching prior
+// sessions/ledger — the exact regression that produced a confidently-wrong
+// answer to a question already answered in a session from the day before.
+func TestOutputAgentPrimeXML_ConsultFirst(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	// minimal output — consult-first is static, must appear with no team/ledger
+	if _, err := outputAgentPrimeXML(cmd, agentPrimeOutput{AgentID: "a", Status: "fresh"}); err != nil {
+		t.Fatalf("outputAgentPrimeXML() error = %v", err)
+	}
+	xml := buf.String()
+
+	if !strings.Contains(xml, "<consult-first>") {
+		t.Fatal("prime output missing <consult-first> block")
+	}
+
+	// the trigger: a confident wrong answer is worse than a slow one
+	if !strings.Contains(xml, "first-principles") {
+		t.Error("consult-first must warn against reasoning from first principles")
+	}
+
+	// recency cue routes to chronological session list, not semantic query
+	if !strings.Contains(xml, "ox session list --limit 20 --json") {
+		t.Error("consult-first must route recency cues to `ox session list`")
+	}
+	// conceptual cue routes to semantic query
+	if !strings.Contains(xml, `ox query "<question>"`) {
+		t.Error("consult-first must route conceptual cues to `ox query`")
+	}
+	// code-provenance cue routes to code search
+	if !strings.Contains(xml, `ox code search "<pattern>"`) {
+		t.Error("consult-first must route code-provenance cues to `ox code search`")
+	}
+
+	// must sit in the static (cacheable) tier — before the cache boundary
+	consultIdx := strings.Index(xml, "<consult-first>")
+	boundaryIdx := strings.Index(xml, "CACHE BOUNDARY")
+	if boundaryIdx >= 0 && consultIdx > boundaryIdx {
+		t.Error("consult-first must be above the cache boundary (static tier)")
+	}
+}
+
 func TestEscapeXML_AllSpecialChars(t *testing.T) {
 	tests := []struct {
 		input string
