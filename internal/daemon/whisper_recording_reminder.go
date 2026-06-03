@@ -3,11 +3,13 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/constants"
 	"github.com/sageox/ox/internal/session"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -65,6 +67,20 @@ func (s *RecordingReminderSource) Produce(_ context.Context) []whisperstore.Whis
 		return nil
 	}
 
+	// Resolve the destination the session is shared with, once per tick — a
+	// project-level fact shared by every recording agent in this root. We name
+	// both the team and the repo ("<team>'s <repo> ledger") so the privacy
+	// scope is unmissable. Each part degrades independently when unset.
+	teamName, repoName := "", ""
+	if cfg, err := config.LoadProjectConfig(s.projectRoot); err == nil && cfg != nil {
+		teamName = cfg.TeamName
+		repoName = cfg.Project
+	}
+	if repoName == "" {
+		repoName = repoNameFromPath(s.projectRoot)
+	}
+	dest := recordingDestination(teamName, repoName)
+
 	now := time.Now()
 	var entries []whisperstore.WhisperEntry
 	for _, agent := range summary.Agents {
@@ -81,11 +97,12 @@ func (s *RecordingReminderSource) Produce(_ context.Context) []whisperstore.Whis
 			continue // recording already stopped
 		}
 
-		if !s.shouldRemind(agentID, agent, now) {
+		remind, isFirst := s.shouldRemind(agentID, agent, now)
+		if !remind {
 			continue
 		}
 
-		content := formatReminderContent(state)
+		content := formatReminderContent(state, dest, isFirst)
 
 		id, err := uuid.NewV7()
 		if err != nil {
@@ -127,36 +144,83 @@ func (s *RecordingReminderSource) Produce(_ context.Context) []whisperstore.Whis
 const claudeCodeMinHeartbeats = 2
 
 // shouldRemind checks the whisper store to decide if an agent needs a reminder.
-// Returns true on first call (no prior reminder) or after the configured interval.
-func (s *RecordingReminderSource) shouldRemind(agentID string, agent ActivityEntry, now time.Time) bool {
+// Returns remind=true on first call (no prior reminder) or after the configured
+// interval. isFirst reports whether this is the startup reminder (no prior
+// reminder in the store), which selects the richer first-fire copy.
+func (s *RecordingReminderSource) shouldRemind(agentID string, agent ActivityEntry, now time.Time) (remind bool, isFirst bool) {
 	// Claude Code's SessionStart hook doesn't deliver whispers — wait
 	// until the first prompt has fired. Other agents whisper immediately.
 	agentType := s.heartbeat.GetAgentType(agentID)
 	if agentType == "claude-code" && agent.Count < claudeCodeMinHeartbeats {
-		return false
+		return false, false
 	}
 
 	lastReminder, err := s.store.LatestWhisperTime(whisperstore.SourceRecordingReminder, "recording-status", agentID)
 	if err != nil {
-		return false // store error — skip this tick
+		return false, false // store error — skip this tick
 	}
 
 	if lastReminder.IsZero() {
-		return true // never reminded — produce immediately (startup reminder)
+		return true, true // never reminded — produce immediately (startup reminder)
 	}
 
-	return now.Sub(lastReminder) >= s.interval
+	return now.Sub(lastReminder) >= s.interval, false
+}
+
+// recordingDestination names where the session is shared, as "<team>'s <repo>
+// ledger". The user's #1 ask was clarity on *which* team — naming the team and
+// the repo together makes the privacy scope unmissable. Each part degrades
+// independently so we never render a dangling possessive or a bare "your team":
+//
+//	team + repo → "Acme Eng's web-app ledger"
+//	team only   → "Acme Eng's ledger"
+//	repo only   → "the web-app ledger"
+//	neither     → "your team's ledger"
+func recordingDestination(teamName, repoName string) string {
+	switch {
+	case teamName != "" && repoName != "":
+		return fmt.Sprintf("%s's %s ledger", teamName, repoName)
+	case teamName != "":
+		return fmt.Sprintf("%s's ledger", teamName)
+	case repoName != "":
+		return fmt.Sprintf("the %s ledger", repoName)
+	default:
+		return "your team's ledger"
+	}
+}
+
+// repoNameFromPath derives a human repo name from the project root when the
+// config has no project slug. Returns "" for degenerate roots ("/", ".", "").
+func repoNameFromPath(projectRoot string) string {
+	base := filepath.Base(projectRoot)
+	if base == "." || base == string(filepath.Separator) || base == "" {
+		return ""
+	}
+	return base
 }
 
 // formatReminderContent builds the whisper message from recording state.
 // Instructs the agent to surface the recording status to the user in one line.
-func formatReminderContent(state *session.RecordingState) string {
-	duration := state.Duration()
-	turns := state.EntryCount
+//
+// dest is the pre-resolved destination phrase from recordingDestination. The
+// first fire is richer — it establishes consent and offers a stop hint plus a
+// learn-more link — while periodic fires stay terse to avoid alarm-fatigue over
+// a long session. Separators are middots, not periods: periods read as multiple
+// alarming sentences on every hourly repeat.
+func formatReminderContent(state *session.RecordingState, dest string, isFirst bool) string {
+	const tell = "Tell the user in one short line: "
 
-	return fmt.Sprintf(
-		"Tell the user in one short line: \"SageOx recording active: %d turns, %s. Session will be shared with your team.\"",
-		turns, formatDuration(duration))
+	if isFirst {
+		// First fire: counts are ~0 at t=0 (near-zero info), so spend the line
+		// on who-sees-this + how-to-stop + where-to-learn instead.
+		return fmt.Sprintf(
+			tell+"\"Recording to %s · your teammates can read this session · stop: /ox-session-stop · %s\"",
+			dest, constants.RecordingDocsURL)
+	}
+
+	// Periodic fire: reassert destination + elapsed; no link, no stop hint
+	// (repeating them every hour trains the user to filter the whole line out).
+	return fmt.Sprintf(tell+"\"Recording to %s · %d turns, %s\"", dest, state.EntryCount, formatDuration(state.Duration()))
 }
 
 // formatDuration renders a duration as human-readable "Xh Ym" or "Xm".

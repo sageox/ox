@@ -79,7 +79,7 @@ for attempt in $(seq 1 18); do
     whisper_output=$(AGENT_ENV=claude-code $OX agent "$agent_id" whisper 2>&1)
     set -e
 
-    if echo "$whisper_output" | grep -qi "SageOx recording active"; then
+    if echo "$whisper_output" | grep -qiE "Recording (to|this session)"; then
         reminder_found=true
         echo "  reminder found on attempt $attempt"
         break
@@ -90,7 +90,7 @@ for attempt in $(seq 1 18); do
     history_output=$(AGENT_ENV=claude-code $OX agent "$agent_id" whisper history 2>&1)
     set -e
 
-    if echo "$history_output" | grep -qi "SageOx recording active"; then
+    if echo "$history_output" | grep -qiE "Recording (to|this session)"; then
         reminder_found=true
         echo "  reminder found in history on attempt $attempt"
         break
@@ -108,9 +108,9 @@ fi
 
 echo "Step 4: Validate whisper content..."
 
-# the content should mention turns and duration
+# first-fire content names the destination ledger and offers a learn-more link
 combined_output="${whisper_output}${history_output}"
-if ! echo "$combined_output" | grep -qE "turns.*shared|SageOx recording active"; then
+if ! echo "$combined_output" | grep -qiE "Recording to .* ledger|teammates can read|sageox.ai/rec"; then
     echo "error: whisper content missing expected fields"
     echo "$combined_output"
     exit 1

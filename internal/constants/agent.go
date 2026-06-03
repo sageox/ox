@@ -7,6 +7,12 @@ const SageOxGitEmail = "ox@sageox.ai"
 // SageOxGitName is the canonical name for SageOx git identity.
 const SageOxGitName = "SageOx"
 
+// RecordingDocsURL is the short learn-more link shown on the FIRST recording
+// reminder. Redirects to the full /docs/cli/recording page (what's captured,
+// who sees it, how to stop). Kept short on purpose — it is echoed verbatim by
+// the agent into an 80-col terminal, where a long path wraps and truncates.
+const RecordingDocsURL = "sageox.ai/rec"
+
 const (
 	// OxPrimeCommand is the legacy command without AGENT_ENV prefix.
 	// Kept for backwards compatibility detection of existing hooks.

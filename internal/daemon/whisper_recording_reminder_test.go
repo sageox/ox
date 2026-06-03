@@ -37,17 +37,62 @@ func TestFormatDuration(t *testing.T) {
 	}
 }
 
+// TestRecordingDestination asserts the destination phrase names team + repo and
+// degrades independently — never a dangling possessive or a bare "your team".
+// Failure prevented: regressing to ambiguous "your team" copy, or emitting a
+// broken phrase like "Acme Eng's  ledger" / "'s web-app ledger" when one part
+// is unset.
+func TestRecordingDestination(t *testing.T) {
+	tests := []struct {
+		name, team, repo, want string
+	}{
+		{"team and repo", "Acme Eng", "web-app", "Acme Eng's web-app ledger"},
+		{"team only", "Acme Eng", "", "Acme Eng's ledger"},
+		{"repo only", "", "web-app", "the web-app ledger"},
+		{"neither", "", "", "your team's ledger"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, recordingDestination(tt.team, tt.repo))
+		})
+	}
+}
+
+func TestRepoNameFromPath(t *testing.T) {
+	assert.Equal(t, "web-app", repoNameFromPath("/Users/dev/code/web-app"))
+	assert.Equal(t, "", repoNameFromPath("/"))
+	assert.Equal(t, "", repoNameFromPath("."))
+	assert.Equal(t, "", repoNameFromPath(""))
+}
+
+// TestFormatReminderContent asserts the first/periodic variants by intent, not
+// byte-for-byte: the destination is unmissable, the learn-more link and stop
+// hint appear ONLY on the first fire, and periodic fires carry the live counts.
+// Failure prevented: leaking the hourly-noise link/stop-hint onto every
+// periodic fire, or dropping the destination from either fire.
 func TestFormatReminderContent(t *testing.T) {
 	state := &session.RecordingState{
 		StartedAt:  time.Now().Add(-1*time.Hour - 23*time.Minute),
 		EntryCount: 45,
 	}
-	content := formatReminderContent(state)
-	assert.Contains(t, content, "Tell the user")
-	assert.Contains(t, content, "SageOx recording active")
-	assert.Contains(t, content, "45 turns")
-	assert.Contains(t, content, "1h 23m")
-	assert.Contains(t, content, "shared with your team")
+	const dest = "Acme Eng's web-app ledger"
+
+	t.Run("first fire", func(t *testing.T) {
+		c := formatReminderContent(state, dest, true)
+		assert.Contains(t, c, "Tell the user")
+		assert.Contains(t, c, dest, "destination (team + repo) must be surfaced")
+		assert.Contains(t, c, "/ox-session-stop", "first fire offers a stop hint")
+		assert.Contains(t, c, "sageox.ai/rec", "first fire offers learn-more link")
+	})
+
+	t.Run("periodic fire", func(t *testing.T) {
+		c := formatReminderContent(state, dest, false)
+		assert.Contains(t, c, dest, "destination reasserted on every fire")
+		assert.Contains(t, c, "45 turns")
+		assert.Contains(t, c, "1h 23m")
+		assert.NotContains(t, c, "sageox.ai/rec", "periodic fire must not repeat the link")
+		assert.NotContains(t, c, "/ox-session-stop", "periodic fire must not repeat the stop hint")
+	})
 }
 
 func TestRecordingReminderSource_Name(t *testing.T) {
@@ -86,6 +131,8 @@ func initRecordingReminderProject(t *testing.T) (projectRoot string, sessionsBas
 		"config_version":     "2",
 		"repo_id":            repoID,
 		"recording_reminder": "on",
+		"team_name":          "Acme Eng",
+		"project":            "web-app",
 	})
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), cfgData, 0o644))
 
@@ -138,8 +185,11 @@ func TestRecordingReminderSource_Produce_FirstReminder(t *testing.T) {
 	assert.Equal(t, "recording-reminder", entries[0].Source)
 	assert.Equal(t, "recording-status", entries[0].Topic)
 	assert.Equal(t, agentID, entries[0].AgentID)
-	assert.Contains(t, entries[0].Content, "12 turns")
-	assert.Contains(t, entries[0].Content, "SageOx recording active")
+	// first fire: names team + repo destination, offers stop + learn-more;
+	// counts are omitted (near-zero info at session start)
+	assert.Contains(t, entries[0].Content, "Acme Eng's web-app ledger")
+	assert.Contains(t, entries[0].Content, "/ox-session-stop")
+	assert.Contains(t, entries[0].Content, "sageox.ai/rec")
 }
 
 func TestRecordingReminderSource_Produce_SuppressedUntilHeartbeatThreshold(t *testing.T) {
@@ -182,7 +232,8 @@ func TestRecordingReminderSource_Produce_NonClaudeAgent_ImmediateReminder(t *tes
 	entries := src.Produce(context.Background())
 
 	require.Len(t, entries, 1, "non-claude agent should get immediate reminder")
-	assert.Contains(t, entries[0].Content, "3 turns")
+	// first fire names the destination rather than leaking startup counts
+	assert.Contains(t, entries[0].Content, "Acme Eng's web-app ledger")
 }
 
 func TestRecordingReminderSource_Produce_IntervalGating(t *testing.T) {
