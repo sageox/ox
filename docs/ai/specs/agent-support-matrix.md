@@ -53,6 +53,72 @@ Agent-specific hooks (`ox integrate install --<agent>`) are *additive* — they 
 | Per-prompt suspended nudge | Yes (UserPromptSubmit) | Yes (BeforeAgent equivalent) | Limited (no push channel) | Limited | Possible (tui.prompt.append) |
 | `/clear` boundary + pause inheritance | Yes | N/A (different lifecycle) | N/A (different lifecycle) | N/A | N/A |
 | Upload mask honoring lifecycle | Yes (adapter-agnostic) | Yes | Yes | Yes (lifecycle-only; cloud-side data not gated) | Yes |
+| **Plan enrichment** (`ox plan`) | | | | | |
+| `ox plan --json` baseline (0-token, no network) | Yes (any agent can run it) | Yes | Yes | Yes | Yes |
+| Real-time plan-exit nudge | Yes (PostToolUse on ExitPlanMode → UserPromptSubmit) | Guidance-only | Guidance-only | Guidance-only | Guidance-only |
+| Tiered prime guidance for `ox plan` | Gold block + IntentCommand | Silver block + IntentCommand | Silver block + IntentCommand | Bronze note | Bronze note |
+
+## Plan Enrichment (`ox plan`)
+
+`ox plan` enriches an agent-generated implementation plan with deterministic
+SageOx signals (collision / prior-art / expert-route). `ox plan --json` is the
+plumbing path: 0 tokens, no LLM, no network — it computes badges locally. There
+are three graduated levels of exposure:
+
+| Level | Who | Mechanism |
+|-------|-----|-----------|
+| **Baseline (all agents)** | Every agent | `ox plan --json` is a plain CLI command. Any agent that can run a shell command can invoke it. Nothing to install. |
+| **Guidance fallback (Silver/Bronze)** | codex, gemini (Silver); amp, opencode, pi (Bronze) | No real-time hook. The tiered prime guidance (`internal/prime`, agent-tier-aware) tells the agent that `ox plan` exists. Silver gets the full advisory block + IntentCommand; Bronze gets the lighter note. The agent decides when to run it. |
+| **Real nudge (Gold — Claude Code only)** | claude-code | A PostToolUse hook fires after the `ExitPlanMode` tool. ox enriches the approved plan via `ox plan --json`; if `signals.material` is true, it stashes a one-line nudge that the next `UserPromptSubmit` delivers into model context. |
+
+### Why the Gold nudge uses PostToolUse → UserPromptSubmit (not PostToolUse stdout)
+
+Claude Code's closest plan-exit signal is the **PostToolUse** event firing after
+`ExitPlanMode`. But Claude Code **discards PostToolUse stdout** (empirically
+confirmed — see the channel table in `cmd/ox/agent_hook.go`), so a nudge emitted
+directly from the PostToolUse handler never reaches the model.
+
+The wiring therefore splits across two events:
+
+1. **Detect (PostToolUse):** `handleAfterTool` already runs on every tool. A
+   narrow branch — strictly gated on `ToolName == "ExitPlanMode"` — runs
+   `ox plan --json` against the approved plan text and, if material, writes a
+   single one-line nudge to `.sageox/cache/plan-nudge/<agentID>.txt`. Every
+   other tool is untouched, so this is **not** a noisy always-on hook; it reuses
+   the PostToolUse hook that `ox init` / `ox doctor` already manage.
+2. **Deliver (UserPromptSubmit):** `handlePrompt` — the only Claude Code channel
+   whose stdout is injected into model context — drains the pending nudge as a
+   `<system-reminder>` on the user's next turn (which is exactly when execution
+   begins after plan approval), then removes the file (deliver-once).
+
+The nudge is fail-open and stale-bounded (30 min): any error or a never-followed
+plan exit leaves existing hook behavior completely untouched.
+
+```mermaid
+flowchart LR
+    EPM["ExitPlanMode tool"] --> PTU["PostToolUse hook<br/>(handleAfterTool)"]
+    PTU -->|"ToolName == ExitPlanMode"| ENR["ox plan --json"]
+    ENR -->|"signals.material"| STASH["stash one-line nudge<br/>.sageox/cache/plan-nudge"]
+    UPS["next UserPromptSubmit<br/>(handlePrompt)"] --> DRAIN["drain + deliver as<br/>system-reminder, then remove"]
+    STASH -.->|"deliver-once on next turn"| DRAIN
+```
+
+### Silver / Bronze degradation
+
+Silver (codex, gemini) and Bronze (amp, opencode, pi) get **no real-time hook**
+— they rely on the already-shipped tiered prime guidance plus the baseline
+`ox plan --json` command. Nothing in the plan-exit wiring breaks them: the
+PostToolUse branch is gated on `ToolName == "ExitPlanMode"` (a Claude-Code tool
+name), so for other agents it is simply never taken. No per-agent install is
+required for plan enrichment beyond what each tier already has.
+
+### No new adapter capability
+
+The Gold nudge rides entirely on the existing `PostToolUse` lifecycle hook
+(already in `claudeLifecycleEvents`) and the `ox agent hook PostToolUse` routing.
+It is managed by the same `ox init` / `ox doctor` install path and the existing
+`CapHookInstaller` adapter capability — no new `pkg/adapterprotocol` capability
+was added.
 
 ## Overall Tier Status
 

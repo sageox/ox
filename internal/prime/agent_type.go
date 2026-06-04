@@ -45,6 +45,43 @@ func CanonicalAgentType(agentType string) string {
 	return slug
 }
 
+// AgentTier classifies an agent by the richness of plan-enrichment guidance
+// it can act on. Higher tiers get the full advisory block + IntentCommand;
+// lower tiers get a lighter note that only promises what the tier can deliver.
+type AgentTier int
+
+const (
+	// TierUnknown is the safe baseline for unrecognized/empty agent types:
+	// full block + the active `ox plan` command. We assume capability rather
+	// than under-serve an agent we simply haven't classified yet.
+	TierUnknown AgentTier = iota
+	// TierBronze covers known agents with no real-time lifecycle hooks
+	// (amp, opencode, pi). Lighter note: `ox plan` exists + `ox plan list` to
+	// browse prior plans — no promise of a nudge the tier can't deliver.
+	TierBronze
+	// TierSilver covers guidance-driven agents (codex, gemini): full block +
+	// IntentCommand, but no real-time hook firing the nudge for them.
+	TierSilver
+	// TierGold covers claude-code, which has PostToolUse/Stop hooks that can
+	// drive the enrichment nudge in real time. Full block + IntentCommand.
+	TierGold
+)
+
+// ClassifyAgentTier maps an agent type to its plan-enrichment tier. Unknown or
+// empty agent types fall back to TierUnknown (safe baseline = block + command).
+func ClassifyAgentTier(agentType string) AgentTier {
+	switch CanonicalAgentType(agentType) {
+	case string(agentx.AgentTypeClaudeCode):
+		return TierGold
+	case string(agentx.AgentTypeCodex), string(agentx.AgentTypeGemini):
+		return TierSilver
+	case string(agentx.AgentTypeAmp), string(agentx.AgentTypeOpenCode), string(agentx.AgentTypePi):
+		return TierBronze
+	default:
+		return TierUnknown
+	}
+}
+
 // IsAgentSupported returns true if the agent is officially supported.
 func IsAgentSupported(agentType string) bool {
 	normalized := CanonicalAgentType(agentType)

@@ -787,6 +787,56 @@ func TestInstallProjectClaudeHooks_PreservesExistingPermissions(t *testing.T) {
 	assert.Len(t, allow, 3)
 }
 
+// TestPostToolUseHook_ManagedForPlanExitNudge documents and locks in the
+// dependency the plan-exit enrichment nudge relies on: the PostToolUse event
+// MUST be part of the managed ox hook install (that is the event Claude Code
+// fires after ExitPlanMode), MUST be idempotent (re-install adds no duplicate),
+// and MUST be removable via the managed uninstall path.
+// Failure prevented: someone drops PostToolUse from claudeLifecycleEvents and
+// the plan-exit nudge silently stops firing, or a non-removable hook leaks.
+func TestPostToolUseHook_ManagedForPlanExitNudge(t *testing.T) {
+	gitRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(gitRoot, ".claude"), 0o755))
+
+	// install — PostToolUse must be present (carrier of the plan-exit signal)
+	require.NoError(t, InstallProjectClaudeHooks(gitRoot))
+	assert.True(t, listProjectClaudeHooks(gitRoot)["PostToolUse"],
+		"PostToolUse hook must be installed — it carries the ExitPlanMode plan-exit nudge")
+
+	// idempotent — re-install adds no duplicate ox hook on the event
+	require.NoError(t, InstallProjectClaudeHooks(gitRoot))
+	settings, err := readProjectClaudeSettings(gitRoot)
+	require.NoError(t, err)
+	oxCount := 0
+	for _, entry := range settings.Hooks["PostToolUse"] {
+		for _, h := range entry.Hooks {
+			if isAnyOxCommand(h.Command) {
+				oxCount++
+			}
+		}
+	}
+	assert.Equal(t, 1, oxCount, "re-install must not duplicate the PostToolUse ox hook")
+
+	// the installed hook routes to `ox agent hook PostToolUse`, where the
+	// plan-exit branch lives
+	assert.Contains(t, settings.Hooks["PostToolUse"][0].Hooks[0].Command, "hook PostToolUse")
+
+	// removable — the managed remove primitive strips the PostToolUse ox hook,
+	// leaving the event clean. This is the same primitive doctor cleanup uses.
+	for i := range settings.Hooks["PostToolUse"] {
+		removeAnyOxHook(&settings.Hooks["PostToolUse"][i])
+	}
+	remaining := 0
+	for _, entry := range settings.Hooks["PostToolUse"] {
+		for _, h := range entry.Hooks {
+			if isAnyOxCommand(h.Command) {
+				remaining++
+			}
+		}
+	}
+	assert.Equal(t, 0, remaining, "PostToolUse ox hook must be removable via the managed remove primitive")
+}
+
 // --- getSharedClaudeSettingsPath / getLocalClaudeSettingsPath ---
 
 func TestSettingsPathHelpers(t *testing.T) {

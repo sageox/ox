@@ -248,6 +248,38 @@ as whispers in the agent's context.`,
 		Default:     "on",
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
 	},
+	{
+		Key:         "plan.save",
+		Description: "Auto-save approved plans to the ledger",
+		LongDescription: `Controls whether 'ox plan' auto-saves the enriched plan to this repo's
+ledger.
+
+  on  - Persist finalized plans to data/plans/ (default). Plans become
+        first-class ledger artifacts: searchable, attributable, reusable.
+  off - Never auto-save. 'ox plan save' (the explicit persist path used by
+        the ox-plan skill) still saves regardless of this setting.`,
+		Category:    "Plans",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
+	},
+	{
+		Key:         "plan.html",
+		Description: "Enriched-HTML render mode",
+		LongDescription: `Controls when 'ox plan' renders an enriched HTML plan for human review.
+
+  off       - Never render, never nudge.
+  recommend - Prime nudges for a render on complex/material plans; the
+              render happens only after you confirm. (default)
+  always    - Auto-render without a confirm step.
+
+Override per-invocation with the SAGEOX_PLAN_HTML env var (same three
+values).`,
+		Category:    "Plans",
+		ValidValues: []string{config.PlanHTMLOff, config.PlanHTMLRecommend, config.PlanHTMLAlways},
+		Default:     config.DefaultPlanHTML,
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
+	},
 	// NOTE: attribution.plan and attribution.session are intentionally not exposed
 	// in ox config — they are always-on transparency requirements, not user preferences.
 	{
@@ -531,6 +563,22 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.RepoVal = boolToOnOff(*repoCfg.Hooks.UserPromptSubmit.CloudQuery)
 		}
 
+	case "plan.save":
+		if userCfg != nil && userCfg.Plan.IsSaveSet() {
+			cv.UserVal = boolToOnOff(*userCfg.Plan.Save)
+		}
+		if repoCfg != nil && repoCfg.Plan.IsSaveSet() {
+			cv.RepoVal = boolToOnOff(*repoCfg.Plan.Save)
+		}
+
+	case "plan.html":
+		if userCfg != nil && userCfg.Plan.IsHTMLSet() {
+			cv.UserVal = *userCfg.Plan.HTML
+		}
+		if repoCfg != nil && repoCfg.Plan.IsHTMLSet() {
+			cv.RepoVal = *repoCfg.Plan.HTML
+		}
+
 	}
 
 	// determine effective value and source (User > Repo > Team > Default)
@@ -729,6 +777,19 @@ func setUserConfig(key, value string) error {
 		}
 		cfg.Hooks.SetUserPromptSubmitCloudQuery(value == "on")
 
+	case "plan.save":
+		if cfg.Plan == nil {
+			cfg.Plan = &config.PlanConfig{}
+		}
+		enabled := value == "on"
+		cfg.Plan.Save = &enabled
+
+	case "plan.html":
+		if cfg.Plan == nil {
+			cfg.Plan = &config.PlanConfig{}
+		}
+		cfg.Plan.HTML = config.StringPtr(value)
+
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)
 	}
@@ -791,6 +852,19 @@ func setRepoConfig(key, value, projectRoot string) error {
 			cfg.Hooks = &config.HooksConfig{}
 		}
 		cfg.Hooks.SetUserPromptSubmitCloudQuery(value == "on")
+
+	case "plan.save":
+		if cfg.Plan == nil {
+			cfg.Plan = &config.PlanConfig{}
+		}
+		enabled := value == "on"
+		cfg.Plan.Save = &enabled
+
+	case "plan.html":
+		if cfg.Plan == nil {
+			cfg.Plan = &config.PlanConfig{}
+		}
+		cfg.Plan.HTML = config.StringPtr(value)
 
 	default:
 		return fmt.Errorf("setting %s not supported at repo level", key)
@@ -920,6 +994,22 @@ func unsetUserConfig(key string) error {
 			}
 		}
 
+	case "plan.save":
+		if cfg.Plan != nil {
+			cfg.Plan.Save = nil
+			if cfg.Plan.IsEmpty() {
+				cfg.Plan = nil
+			}
+		}
+
+	case "plan.html":
+		if cfg.Plan != nil {
+			cfg.Plan.HTML = nil
+			if cfg.Plan.IsEmpty() {
+				cfg.Plan = nil
+			}
+		}
+
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)
 	}
@@ -982,6 +1072,22 @@ func unsetRepoConfig(key, projectRoot string) error {
 			}
 			if cfg.Hooks.UserPromptSubmit == nil {
 				cfg.Hooks = nil
+			}
+		}
+
+	case "plan.save":
+		if cfg.Plan != nil {
+			cfg.Plan.Save = nil
+			if cfg.Plan.IsEmpty() {
+				cfg.Plan = nil
+			}
+		}
+
+	case "plan.html":
+		if cfg.Plan != nil {
+			cfg.Plan.HTML = nil
+			if cfg.Plan.IsEmpty() {
+				cfg.Plan = nil
 			}
 		}
 

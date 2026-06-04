@@ -15,6 +15,7 @@ type GuidanceParams struct {
 	CodeDBExists     bool             // true if code search index exists on disk
 	MemoryEnabled    bool             // true if memory feature is enabled
 	MurmuringEnabled bool             // true if murmuring: "auto" is set for this project
+	AgentType        string           // detected/claimed agent type; drives plan-enrichment tiering
 }
 
 // BuildGuidance constructs state-aware command guidance for agent consumption.
@@ -83,6 +84,26 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 		cmds = append(cmds, IntentCommand{
 			Intent:  fmt.Sprintf("code search %s (not indexed yet): index first, then search code, symbols, and diffs", p.RepoSlug),
 			Command: "ox code index",
+		})
+	}
+
+	// plan enrichment — guide the agent toward `ox plan` when it produces a
+	// plan for non-trivial work. Tier-aware: Gold/Silver get the active
+	// enrich command; Bronze gets the browse-prior-plans command so we don't
+	// promise a nudge the tier can't deliver. (The matching behavioral block
+	// is the <plan-enrichment-guidance> advisory in agent_prime_xml.go.)
+	switch ClassifyAgentTier(p.AgentType) {
+	case TierBronze:
+		// lighter: surface that plans can be enriched + browsed, without
+		// promising a real-time nudge this tier can't fire.
+		cmds = append(cmds, IntentCommand{
+			Intent:  "enrich an implementation plan with team context ('ox plan'), or browse prior plans for this repo",
+			Command: "ox plan list",
+		})
+	default: // TierGold, TierSilver, TierUnknown (baseline) — active enrich command
+		cmds = append(cmds, IntentCommand{
+			Intent:  "enrich/render your implementation plan with team context: collisions, prior art, expert routing — run when a plan touches multiple files, architecture, a hotspot/open-PR, or ~5+ steps",
+			Command: "ox plan",
 		})
 	}
 

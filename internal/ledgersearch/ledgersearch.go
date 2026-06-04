@@ -1,5 +1,7 @@
 // Package ledgersearch provides zero-network, local-only full-text search over
-// the cached ledger contents: session summaries/markdown and recent murmurs.
+// the cached ledger contents: session summaries/markdown, recent murmurs, and
+// captured plans (data/plans/<dated-slug>/plan.md). Including plans closes the
+// prior-art flywheel — a plan saved by `ox plan` resurfaces in future plans.
 //
 // Design choice (see ox-m01h): this is an in-memory grep over a bounded window
 // of recent files rather than a persistent bleve index. Rationale:
@@ -40,6 +42,12 @@ const MaxSessionAge = 90 * 24 * time.Hour
 // the last 12 hours hydrated; we scan a slightly wider window to be safe.
 const MaxMurmurAge = 7 * 24 * time.Hour
 
+// MaxPlanAge bounds how far back we scan captured plans. Plans are the prior-art
+// flywheel's highest-signal corpus (a saved plan should resurface in future
+// plans), so we keep the same generous window as sessions rather than the
+// tighter murmur window.
+const MaxPlanAge = 90 * 24 * time.Hour
+
 // DefaultLimit is returned when callers pass limit <= 0.
 const DefaultLimit = 5
 
@@ -52,13 +60,14 @@ type Result struct {
 	Score float64 `json:"score"`
 	// Text is a short snippet around the matched term.
 	Text string `json:"text"`
-	// DocType is "session" or "murmur".
+	// DocType is "session", "murmur", or "plan".
 	DocType string `json:"doc_type"`
 	// FilePath is the absolute on-disk path of the source file.
 	FilePath string `json:"file_path"`
 	// SourceType is "ledger" — distinguishes from team-context results when merged.
 	SourceType string `json:"source_type"`
-	// SourceID is the session folder name or murmur ID.
+	// SourceID is the session folder name, murmur ID, or plan folder name
+	// (the dated slug, e.g. "2026-06-03-add-cache" — usable to locate the plan).
 	SourceID string `json:"source_id"`
 	// CreatedAt is the source's timestamp (ISO 8601). Empty if unknown.
 	CreatedAt string `json:"created_at,omitempty"`
@@ -113,6 +122,7 @@ func Search(opts Options) ([]Result, error) {
 	var results []Result
 	results = append(results, scanSessions(opts.LedgerPath, terms, now)...)
 	results = append(results, scanMurmurs(opts.LedgerPath, terms, now)...)
+	results = append(results, scanPlans(opts.LedgerPath, terms, now)...)
 
 	// sort by score desc, ties broken by recency desc
 	sort.SliceStable(results, func(i, j int) bool {
@@ -268,6 +278,84 @@ func scanMurmurs(ledgerPath string, terms []string, now time.Time) []Result {
 		}
 	}
 	return results
+}
+
+// scanPlans walks data/plans/<YYYY-MM-DD-slug>/ and scores plan.md hits. This
+// closes the prior-art flywheel: a plan saved by `ox plan` must resurface as
+// prior art in future plans. Mirrors scanSessions — same TF scoring, same age
+// filter, same Result shape — but reads the canonical plan.md (always plain
+// git, never an LFS pointer) and pulls created_at from meta.json when present.
+// Fail-open: a missing data/plans/ dir yields no results, never an error.
+func scanPlans(ledgerPath string, terms []string, now time.Time) []Result {
+	plansDir := filepath.Join(ledgerPath, "data", "plans")
+	entries, err := os.ReadDir(plansDir)
+	if err != nil {
+		// missing dir (no plans saved yet) or unreadable — fail open.
+		return nil
+	}
+
+	cutoff := now.Add(-MaxPlanAge)
+	var results []Result
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		planPath := filepath.Join(plansDir, name)
+
+		// created_at comes from meta.json (authoritative); fall back to the
+		// dated dir-name prefix when meta is missing/partial so age filtering
+		// and recency tiebreaks still work on a partial plan dir.
+		ts := planTimestamp(planPath, name)
+		if !ts.IsZero() && ts.Before(cutoff) {
+			continue
+		}
+
+		// plan.md is the canonical plan text — always plain git, the same role
+		// summary.md plays for sessions.
+		path := filepath.Join(planPath, "plan.md")
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			continue
+		}
+		score, snippet := scoreContent(string(data), terms)
+		if score <= 0 {
+			continue
+		}
+		results = append(results, Result{
+			Score:      score,
+			Text:       snippet,
+			DocType:    "plan",
+			FilePath:   path,
+			SourceType: "ledger",
+			SourceID:   name, // dated slug — locates the plan via `ox plan view`
+			CreatedAt:  ts.Format(time.RFC3339),
+		})
+	}
+	return results
+}
+
+// planTimestamp resolves a plan's created_at, preferring meta.json's explicit
+// timestamp and falling back to the YYYY-MM-DD prefix of the dir name. Returns
+// zero time when neither is available — callers treat that as "include".
+func planTimestamp(planPath, dirName string) time.Time {
+	metaPath := filepath.Join(planPath, "meta.json")
+	if data, err := os.ReadFile(metaPath); err == nil {
+		var m struct {
+			CreatedAt time.Time `json:"created_at"`
+		}
+		if json.Unmarshal(data, &m) == nil && !m.CreatedAt.IsZero() {
+			return m.CreatedAt
+		}
+	}
+	// fall back to the dated dir-name prefix "YYYY-MM-DD-<slug>".
+	if len(dirName) >= 10 {
+		if t, err := time.Parse("2006-01-02", dirName[:10]); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
 
 // scoreContent returns a relevance score and a short snippet for content matching all terms.

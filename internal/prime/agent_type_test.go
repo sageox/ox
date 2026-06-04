@@ -6,6 +6,36 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// TestClassifyAgentTier verifies plan-enrichment tier classification, including
+// canonicalization of display names/aliases and the unknown-agent baseline.
+// Failure prevented: an agent landing in the wrong tier and being shown
+// guidance its lifecycle can't honor (or losing the baseline command entirely).
+func TestClassifyAgentTier(t *testing.T) {
+	tests := []struct {
+		agentType string
+		want      AgentTier
+	}{
+		{"claude-code", TierGold},
+		{"Claude Code", TierGold},
+		{"claudecode", TierGold},
+		{"codex", TierSilver},
+		{"gemini", TierSilver},
+		{"gemini-cli", TierSilver},
+		{"amp", TierBronze},
+		{"opencode", TierBronze},
+		{"pi", TierBronze},
+		{"", TierUnknown},
+		{"some-future-agent", TierUnknown},
+		{"cursor", TierUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.agentType, func(t *testing.T) {
+			assert.Equal(t, tt.want, ClassifyAgentTier(tt.agentType),
+				"ClassifyAgentTier(%q)", tt.agentType)
+		})
+	}
+}
+
 func TestCanonicalAgentType(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -1,0 +1,55 @@
+---
+title: "ox plan save"
+description: "CLI reference for ox plan save"
+sidebar_position: 69
+---
+
+## ox plan save
+
+Persist a fully-enriched plan (merged badges + optional HTML) to the ledger
+
+### Synopsis
+
+Persist a fully-enriched plan to the ledger. Unlike bare 'ox plan' — which
+auto-saves only the deterministic, ox-computed annotations — 'ox plan save' is the
+explicit full-plan persist path used by the ox-plan renderer skill after it has
+authored its judgment badges and (optionally) rendered the HTML.
+
+  --plan        the plan markdown (source for plan.md + topic/slug derivation)
+  --annotations a MERGED annotations.json: the 'ox plan --json' Result with the
+                agent-authored judgment badges appended (a full plan.Result)
+  --html        optional pre-rendered HTML; size-gated plain-git-vs-LFS per store.Save
+
+This command never renders HTML and never makes an LLM/network call — it only
+materializes the already-produced artifacts into the ledger working tree. It
+always saves (the skill is deliberately persisting), independent of the
+plan.save config.
+
+```
+ox plan save [flags]
+```
+
+### Options
+
+```
+      --annotations string   merged annotations.json: ox --json badges + agent judgment badges (required)
+  -h, --help                 help for save
+      --html string          optional pre-rendered HTML; size-gated plain-git-vs-LFS on save
+      --plan string          plan markdown file (required; source for plan.md + topic/slug)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox plan](/plan)	 - Enrich an implementation plan with SageOx team context
+

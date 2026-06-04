@@ -502,7 +502,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// build intent-to-command guidance for agent consumption
-	guidance := buildGuidance(agentID, projectRoot, teamCtx, ledgerStatus)
+	guidance := buildGuidance(agentID, projectRoot, teamCtx, ledgerStatus, agentType)
 	timing["guidance_build"] = time.Since(phaseStart).Milliseconds()
 
 	// register or update agent instance locally (bootstrap completes without cloud API)
@@ -1057,7 +1057,7 @@ func buildCapturePriorGuidance(agentID string) *capturePriorGuidance {
 // buildGuidance constructs state-aware command guidance for agent consumption.
 // Performs I/O (os.Stat, exec.Command) to resolve repo slug and code DB availability,
 // then delegates to pure prime.BuildGuidance.
-func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledgerStatus *ledgerInfo) *agentGuidance {
+func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledgerStatus *ledgerInfo, agentType string) *agentGuidance {
 	repoSlug := repoSlugFromRemoteOrDir(projectRoot)
 	codeDBDir := resolveCodeDBDir(projectRoot)
 	_, statErr := os.Stat(codeDBDir)
@@ -1070,6 +1070,7 @@ func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger
 		CodeDBExists:     statErr == nil,
 		MemoryEnabled:    auth.IsMemoryEnabled(),
 		MurmuringEnabled: config.MurmuringEnabled(projectRoot),
+		AgentType:        agentType,
 	})
 }
 

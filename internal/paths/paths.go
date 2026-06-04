@@ -163,6 +163,21 @@ func TeamWhisperDBDir(teamID, endpointURL string) string {
 	return filepath.Join(TeamContextDir(teamID, endpointURL), ".sageox", "cache", "whisper")
 }
 
+// LedgerPlansDir returns the directory holding captured plans inside a ledger
+// checkout. Plans are git-tracked plain text (plan.md, annotations.json,
+// meta.json) so a dehydrated clone can list and read them with zero LFS
+// hydration. Format: <ledgerPath>/data/plans/
+//
+// Unlike the endpoint/repo-keyed helpers above, this takes the already-resolved
+// ledger root (e.g. from ProjectContext.DefaultLedgerPath) so callers don't
+// re-derive the endpoint. Returns "" when ledgerPath is empty.
+func LedgerPlansDir(ledgerPath string) string {
+	if ledgerPath == "" {
+		return ""
+	}
+	return filepath.Join(ledgerPath, "data", "plans")
+}
+
 // LedgerSessionCacheBase returns the base cache directory inside a repo's ledger.
 // Session recording states are stored under <base>/sessions/<session-name>/.
 // This is the canonical, environment-independent cache location — unlike XDG cache dirs

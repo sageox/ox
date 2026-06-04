@@ -491,6 +491,74 @@ func TestOutputAgentPrimeXML_ConsultFirst(t *testing.T) {
 	}
 }
 
+// TestOutputAgentPrimeXML_PlanEnrichmentGuidance verifies the
+// <plan-enrichment-guidance> advisory renders on every prime payload and
+// scales to the agent tier: full block (with the HTML-render recommendation)
+// for Gold/Silver/unknown-baseline, lighter for Bronze.
+// Failure prevented: the block silently dropping, or a Bronze agent being
+// promised an HTML-render nudge its lifecycle can't fire.
+func TestOutputAgentPrimeXML_PlanEnrichmentGuidance(t *testing.T) {
+	tests := []struct {
+		name        string
+		agentType   string
+		wantFull    bool // full block includes the HTML-render recommendation
+		wantCommand string
+	}{
+		{"gold claude-code", "claude-code", true, "ox plan"},
+		{"silver codex", "codex", true, "ox plan"},
+		{"bronze amp", "amp", false, "ox plan list"},
+		{"unknown baseline", "some-future-agent", true, "ox plan"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&buf)
+
+			out := agentPrimeOutput{AgentID: "a", Status: "fresh", AgentType: tt.agentType}
+			if _, err := outputAgentPrimeXML(cmd, out); err != nil {
+				t.Fatalf("outputAgentPrimeXML() error = %v", err)
+			}
+			xml := buf.String()
+
+			// block always present, on every payload
+			if !strings.Contains(xml, "<plan-enrichment-guidance>") {
+				t.Fatal("prime output missing <plan-enrichment-guidance> block")
+			}
+			if !strings.Contains(xml, "</plan-enrichment-guidance>") {
+				t.Error("plan-enrichment-guidance block not closed")
+			}
+
+			// always routes to `ox plan` as the enrich verb
+			if !strings.Contains(xml, "`ox plan`") {
+				t.Error("plan-enrichment-guidance must mention `ox plan`")
+			}
+
+			// the HTML-render recommendation is the differentiator: full tiers
+			// recommend it; Bronze (lighter) does not.
+			hasHTML := strings.Contains(xml, "HTML plan")
+			if tt.wantFull && !hasHTML {
+				t.Error("full-tier block must recommend rendering an HTML plan")
+			}
+			if !tt.wantFull {
+				if hasHTML {
+					t.Error("bronze block must NOT promise HTML-render nudge")
+				}
+				if !strings.Contains(xml, "ox plan list") {
+					t.Error("bronze block must point at `ox plan list` to browse prior plans")
+				}
+			}
+
+			// must sit in the static (cacheable) tier — above per-session content
+			blockIdx := strings.Index(xml, "<plan-enrichment-guidance>")
+			sessionIdx := strings.Index(xml, "<session-context")
+			if sessionIdx >= 0 && blockIdx > sessionIdx {
+				t.Error("plan-enrichment-guidance must be above the per-session block")
+			}
+		})
+	}
+}
+
 func TestEscapeXML_AllSpecialChars(t *testing.T) {
 	tests := []struct {
 		input string

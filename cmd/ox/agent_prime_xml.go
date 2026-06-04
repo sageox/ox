@@ -140,6 +140,13 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	sb.WriteString("Team rules apply to every supported AI coding agent (Claude, Codex, Amp, etc.) used by teammates running ox — but only for teammates running ox. Project-local .claude/rules/ only reaches Claude users.\n")
 	sb.WriteString("</rule-promotion-guidance>\n")
 
+	// plan-enrichment-guidance: when the agent produces a plan for non-trivial
+	// work, nudge it to enrich the plan with team context via `ox plan` and
+	// recommend an HTML render. Tier-aware (Gold/Silver/Bronze) so we only
+	// promise what the agent can deliver — Bronze agents have no real-time
+	// hook, so they get a lighter note. Parallels <rule-promotion-guidance>.
+	writePlanEnrichmentGuidance(&sb, output.AgentType)
+
 	// code-search: behavioral instruction to prefer ox code search over built-in tools
 	if output.CodeDBAvailable {
 		sb.WriteString("\n<code-search status=\"indexed\">\n")
@@ -534,6 +541,28 @@ var xmlEscaper = strings.NewReplacer(
 
 func escapeXML(s string) string {
 	return xmlEscaper.Replace(s)
+}
+
+// writePlanEnrichmentGuidance emits the <plan-enrichment-guidance> advisory
+// block, scaled to the agent's plan-enrichment tier. Gold (claude-code) and
+// Silver (codex/gemini) and the unknown-agent baseline get the full block;
+// Bronze (amp/opencode/pi) gets a lighter note that only points at `ox plan`
+// and `ox plan list` without promising a real-time nudge the tier can't fire.
+//
+// Token-lean by design: this ships on every prime payload (see
+// docs/ai/specs/agent-ux-principles.md — every token competes with the
+// developer's own context).
+func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
+	sb.WriteString("\n<plan-enrichment-guidance>\n")
+	if prime.ClassifyAgentTier(agentType) == prime.TierBronze {
+		// lighter tier: surface the surface, don't promise nudges.
+		sb.WriteString("When you produce a plan for non-trivial work, `ox plan` enriches it with team context (collisions, prior art, expert routing). Run `ox plan list` to browse prior plans for this repo.\n")
+		sb.WriteString("</plan-enrichment-guidance>\n")
+		return
+	}
+	sb.WriteString("When you produce a plan for non-trivial work (multi-file OR architectural OR touches a hotspot/open-PR OR ~5+ steps), run `ox plan` to enrich it with team context — collisions (incl. teammates actively murmuring on these files), prior art, and expert routing.\n")
+	sb.WriteString("Unless plan.html is off, recommend rendering an enriched HTML plan for the human; render only after they confirm, unless plan.html is always.\n")
+	sb.WriteString("</plan-enrichment-guidance>\n")
 }
 
 // emitTeamRules writes <team-rules> and <team-rules-budget> blocks for the

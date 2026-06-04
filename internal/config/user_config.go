@@ -344,6 +344,10 @@ type UserConfig struct {
 	// UserPromptSubmit cloud_query opt-in; see HooksConfig for rationale.
 	Hooks *HooksConfig `yaml:"hooks,omitempty"`
 
+	// Plan holds the user-level `plan.*` settings for the `ox plan` feature.
+	// Pointer so an absent block is distinguishable from explicit zero-values.
+	Plan *PlanConfig `yaml:"plan,omitempty"`
+
 	// Ephemeral is the persisted user preference for ephemeral mode (no
 	// daemon, no local ledger clone, HTTP-only reads). Pointer so we can
 	// distinguish unset (nil) from explicit false. When non-nil, the value

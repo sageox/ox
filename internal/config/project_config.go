@@ -147,6 +147,10 @@ type ProjectConfig struct {
 	// the user hasn't personally configured). See HooksConfig.
 	Hooks *HooksConfig `json:"hooks,omitempty" yaml:"hooks,omitempty"`
 
+	// Plan holds the `plan.*` settings namespace for the `ox plan` feature.
+	// Pointer so an absent block is distinguishable from explicit zero-values.
+	Plan *PlanConfig `json:"plan,omitempty" yaml:"plan,omitempty"`
+
 	// KBID is the immutable knowledge-bubble identifier this project is bound
 	// to (ADR-017). Populated when the project has been migrated to the new
 	// .sageox/config.yaml format. Empty for legacy JSON-only projects that

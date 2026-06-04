@@ -26,4 +26,11 @@ const (
 	// EnvGitHubSyncIssues overrides the issue sync mode.
 	// Consumed by: ResolveGitHubSyncIssues()
 	EnvGitHubSyncIssues = "OX_GITHUB_SYNC_ISSUES"
+
+	// EnvPlanHTML directly overrides the plan.html render mode. It must be one
+	// of the enum values off | recommend | always; any other value falls
+	// through to config/default. Customer-facing, so it uses the canonical
+	// SAGEOX_* namespace (ADR-047).
+	// Consumed by: PlanHTML()
+	EnvPlanHTML = "SAGEOX_PLAN_HTML"
 )

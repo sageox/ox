@@ -152,6 +152,48 @@ func TestBuildGuidance(t *testing.T) {
 	}
 }
 
+// planCommandFor returns the Command string of the plan-enrichment
+// IntentCommand BuildGuidance emits for a given agent type, or "" if absent.
+func planCommandFor(t *testing.T, agentType string) string {
+	t.Helper()
+	g := BuildGuidance(GuidanceParams{AgentID: "p", RepoSlug: "org/repo", AgentType: agentType})
+	require.NotNil(t, g)
+	for _, c := range g.Commands {
+		if c.Command == "ox plan" || c.Command == "ox plan list" {
+			return c.Command
+		}
+	}
+	return ""
+}
+
+// TestBuildGuidance_PlanEnrichmentTiering verifies the plan IntentCommand is
+// tier-aware: Gold/Silver and the unknown baseline route to the active
+// `ox plan`; Bronze routes to the lighter `ox plan list`.
+// Failure prevented: a Bronze agent being promised a real-time enrichment
+// nudge its lifecycle can't deliver, or an unknown agent losing the command.
+func TestBuildGuidance_PlanEnrichmentTiering(t *testing.T) {
+	tests := []struct {
+		name      string
+		agentType string
+		want      string
+	}{
+		{"gold claude-code", "claude-code", "ox plan"},
+		{"silver codex", "codex", "ox plan"},
+		{"silver gemini", "gemini", "ox plan"},
+		{"bronze amp", "amp", "ox plan list"},
+		{"bronze opencode", "opencode", "ox plan list"},
+		{"bronze pi", "pi", "ox plan list"},
+		{"unknown baseline", "some-future-agent", "ox plan"},
+		{"empty baseline", "", "ox plan"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, planCommandFor(t, tt.agentType),
+				"agentType %q should route to %q", tt.agentType, tt.want)
+		})
+	}
+}
+
 func containsStr(haystack, needle string) bool {
 	return len(haystack) >= len(needle) && (haystack == needle ||
 		len(haystack) > len(needle) && (haystack[:len(needle)] == needle ||

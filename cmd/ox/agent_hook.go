@@ -494,6 +494,12 @@ func handlePrompt(ctx *HookContext) error {
 	// this terminal's nudge.
 	emitSuspendedNudge(os.Stdout, ctx.ProjectRoot, agentID)
 
+	// Deliver a pending plan-exit enrichment nudge (stashed by handleAfterTool
+	// on ExitPlanMode). UserPromptSubmit is the only Claude Code channel whose
+	// stdout reaches the model, so delivery happens here — on the turn that
+	// begins right after the plan was approved.
+	emitPlanNudge(os.Stdout, ctx.ProjectRoot, agentID)
+
 	emitWhispers(os.Stdout, agentID)
 	return nil
 }
@@ -543,6 +549,17 @@ func handleAfterTool(ctx *HookContext) error {
 		slog.Debug("hook: afterTool skipped, no agent ID available")
 		return nil
 	}
+
+	// Plan-exit nudge (Gold tier): the closest plan-exit signal Claude Code
+	// exposes is this PostToolUse firing after ExitPlanMode. Strictly gated on
+	// the tool name so it is a no-op for every other tool — NOT a noisy hook.
+	// Enriches the approved plan and stashes a one-line nudge that the next
+	// UserPromptSubmit (handlePrompt) delivers. Independent of recording state,
+	// so it runs before the recording-state checks below.
+	if ctx.Input != nil && ctx.Input.ToolName == exitPlanModeToolName {
+		handlePlanExit(ctx, agentID)
+	}
+
 	// emit pending whispers (fallback — primary delivery is handlePrompt)
 	emitWhispers(os.Stdout, agentID)
 

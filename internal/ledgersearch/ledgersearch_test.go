@@ -178,6 +178,138 @@ func TestSearch_MultiTermANDSemantics(t *testing.T) {
 	}
 }
 
+// --- Plans: the prior-art flywheel ---
+// A plan saved by `ox plan` MUST resurface as prior art in future plans.
+// Failure prevented: plans saved to data/plans/ are invisible to the prior-art
+// detector, so the flywheel never closes and every plan looks novel.
+
+func TestSearch_PlanMatch(t *testing.T) {
+	t.Parallel()
+	dir := makeLedger(t)
+	now := time.Now().UTC()
+	writePlan(t, dir, "2026-05-21-cache-layer", now.Add(-24*time.Hour),
+		"Add cache layer", "ryan",
+		"# Add cache layer\n\nWe will add an in-memory cache to the query path.")
+
+	results, err := Search(Options{LedgerPath: dir, Query: "cache", Now: now})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 plan result, got %d", len(results))
+	}
+	r := results[0]
+	if r.DocType != "plan" {
+		t.Errorf("doc_type = %q, want plan", r.DocType)
+	}
+	if r.SourceType != "ledger" {
+		t.Errorf("source_type = %q, want ledger", r.SourceType)
+	}
+	// SourceID must be the dated-slug dir so a reader can `ox plan view` it.
+	if r.SourceID != "2026-05-21-cache-layer" {
+		t.Errorf("source_id = %q, want dated slug", r.SourceID)
+	}
+	if r.Score <= 0 {
+		t.Errorf("expected positive score, got %f", r.Score)
+	}
+	// created_at must come from meta.json (the day before now), not zero.
+	if r.CreatedAt == "" {
+		t.Errorf("expected created_at from meta.json, got empty")
+	}
+}
+
+func TestSearch_PlanFailOpenNoPlansDir(t *testing.T) {
+	t.Parallel()
+	// ledger with sessions/ but no data/plans/ — scanning plans must not error.
+	dir := makeLedger(t)
+	now := time.Now().UTC()
+	writeSession(t, dir, "2026-05-20T10-15-ryan-OxABCD", "a session about widgets")
+
+	results, err := Search(Options{LedgerPath: dir, Query: "widgets", Now: now})
+	if err != nil {
+		t.Fatalf("expected fail-open with no plans dir, got err %v", err)
+	}
+	// the session still matches; the absence of data/plans/ must not break it.
+	if len(results) != 1 || results[0].DocType != "session" {
+		t.Fatalf("expected the session result to survive, got %+v", results)
+	}
+}
+
+func TestSearch_PlanVsSessionDistinguishable(t *testing.T) {
+	t.Parallel()
+	dir := makeLedger(t)
+	now := time.Now().UTC()
+	// same term in both a session and a plan: results must be tagged distinctly
+	// so the prior-art detector can phrase "planned" vs "worked on".
+	writeSession(t, dir, "2026-05-20T10-15-ryan-OxSESS", "deployment pipeline notes")
+	writePlan(t, dir, "2026-05-22-deployment-rework", now.Add(-2*time.Hour),
+		"Deployment rework", "ajit",
+		"# Deployment rework\n\nRebuild the deployment pipeline end to end.")
+
+	results, err := Search(Options{LedgerPath: dir, Query: "deployment", Now: now, Limit: 10})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	byType := map[string]Result{}
+	for _, r := range results {
+		byType[r.DocType] = r
+	}
+	if _, ok := byType["session"]; !ok {
+		t.Errorf("expected a session result, got types %v", keys(byType))
+	}
+	plan, ok := byType["plan"]
+	if !ok {
+		t.Fatalf("expected a plan result, got types %v", keys(byType))
+	}
+	if plan.SourceID != "2026-05-22-deployment-rework" {
+		t.Errorf("plan source_id = %q, want dated slug", plan.SourceID)
+	}
+}
+
+func TestSearch_PlanAgeCutoff(t *testing.T) {
+	t.Parallel()
+	dir := makeLedger(t)
+	now := time.Now().UTC()
+	// meta.json created_at far in the past — must be excluded by MaxPlanAge.
+	writePlan(t, dir, "2020-01-01-ancient-plan", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		"Ancient plan", "ryan", "# Ancient plan\n\nwidget overhaul")
+
+	results, err := Search(Options{LedgerPath: dir, Query: "widget", Now: now})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected age-cutoff to exclude old plan, got %d", len(results))
+	}
+}
+
+func TestSearch_PlanDateFallsBackToDirName(t *testing.T) {
+	t.Parallel()
+	// plan dir with no meta.json: age filter + created_at fall back to the
+	// YYYY-MM-DD dir prefix so a partial plan dir is still searchable/datable.
+	dir := makeLedger(t)
+	now := time.Now().UTC()
+	planDir := filepath.Join(dir, "data", "plans", "2026-05-23-no-meta-plan")
+	if err := os.MkdirAll(planDir, 0o755); err != nil {
+		t.Fatalf("mkdir plan: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(planDir, "plan.md"),
+		[]byte("# No meta\n\ntelemetry rollout"), 0o644); err != nil {
+		t.Fatalf("write plan.md: %v", err)
+	}
+
+	results, err := Search(Options{LedgerPath: dir, Query: "telemetry", Now: now})
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result from meta-less plan, got %d", len(results))
+	}
+	if results[0].CreatedAt == "" {
+		t.Errorf("expected created_at derived from dir name, got empty")
+	}
+}
+
 func TestParseSessionTimestamp(t *testing.T) {
 	t.Parallel()
 	cases := map[string]bool{
@@ -232,6 +364,39 @@ func writeSession(t *testing.T, ledgerPath, sessionName, summaryMD string) {
 	if err := os.WriteFile(filepath.Join(sessionDir, "summary.md"), []byte(summaryMD), 0o644); err != nil {
 		t.Fatalf("write summary: %v", err)
 	}
+}
+
+// writePlan materializes a captured-plan dir mirroring internal/plan/store.go's
+// layout: data/plans/<dated-slug>/{plan.md,meta.json}. plan.md is the canonical
+// searchable text; meta.json carries the authoritative created_at.
+func writePlan(t *testing.T, ledgerPath, dirName string, createdAt time.Time, topic, author, planMD string) {
+	t.Helper()
+	planDir := filepath.Join(ledgerPath, "data", "plans", dirName)
+	if err := os.MkdirAll(planDir, 0o755); err != nil {
+		t.Fatalf("mkdir plan: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(planDir, "plan.md"), []byte(planMD), 0o644); err != nil {
+		t.Fatalf("write plan.md: %v", err)
+	}
+	meta := map[string]any{
+		"topic":      topic,
+		"slug":       dirName,
+		"authors":    []string{author},
+		"created_at": createdAt,
+	}
+	data, _ := json.Marshal(meta)
+	if err := os.WriteFile(filepath.Join(planDir, "meta.json"), data, 0o644); err != nil {
+		t.Fatalf("write meta.json: %v", err)
+	}
+}
+
+// keys returns the map keys for a clearer test failure message.
+func keys(m map[string]Result) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func writeMurmur(t *testing.T, ledgerPath string, ts time.Time, id, topic, content string) {

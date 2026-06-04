@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ox plan` — team-context-enriched implementation plans** — turns a plan an AI coworker drafts into one that knows where the team is going. `ox plan` annotates each part of a plan with deterministic, locally-computed signals (zero model tokens): **collisions** (a file you're about to touch is in a teammate's open PR — or one they murmured about minutes ago, before any commit exists), **prior art** (a teammate already planned or did this — surfaced from the ledger), and **expert routing** (who owns this area, with cited evidence, so you ask the right person). The plan-mode agent then authors the judgment calls — does this align with or conflict with a team decision — reasoning over a context bundle ox assembles. ox makes no model call itself; the inference cost lands in plan mode where you already expect it. Finalized plans are saved to the team ledger (`data/plans/`) as first-class, searchable artifacts, so today's plan becomes tomorrow's prior art. On Claude Code, a renderer skill turns the enriched plan into a beautiful self-contained HTML page for fast human review; other agents get the same enrichment via guidance and the `ox plan` CLI. Configure with `plan.save` and `plan.html` (`off`/`recommend`/`always`), or `SAGEOX_PLAN_HTML` per-run.
+
 ## [0.9.0] - 2026-05-28
 
 ### Added
