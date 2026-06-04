@@ -67,7 +67,7 @@ func newTestManager(runner Runner, cfgFn func() *config.AgentWorkerConfig) (*Man
 			return enabledConfigWith(1, 100)
 		}
 	}
-	m := NewManager(runner, nil, cfgFn, sig, "/tmp/test-ledger")
+	m := NewManager(runner, nil, cfgFn, sig, "/tmp/test-ledger", "")
 	return m, sig
 }
 

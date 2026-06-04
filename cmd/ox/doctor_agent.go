@@ -363,4 +363,13 @@ func init() {
 		Description: "Detects daemon-tracked agent instances with stale heartbeats",
 		Run:         checkDaemonInstanceStale,
 	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugAgentTasksStuck,
+		Name:        "Agent tasks",
+		Category:    "Agent Health",
+		FixLevel:    FixLevelSuggested,
+		Description: "Reclaims stale task leases and cancels poison agent tasks",
+		Run:         checkAgentTasksStuck,
+	})
 }

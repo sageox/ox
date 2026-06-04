@@ -29,7 +29,7 @@ func TestDaemonDoesNotExitWhileFinalizationPending(t *testing.T) {
 	loader := func() *config.AgentWorkerConfig {
 		return (&config.AgentWorkerConfig{}).WithDefaults()
 	}
-	mgr := agentwork.NewManager(runner, slog.Default(), loader, syncSignal, t.TempDir())
+	mgr := agentwork.NewManager(runner, slog.Default(), loader, syncSignal, t.TempDir(), "")
 	d.agentWorker = mgr
 
 	// enqueue a dummy work item
@@ -64,7 +64,7 @@ func TestDaemonExitsAfterGracePeriod(t *testing.T) {
 	loader := func() *config.AgentWorkerConfig {
 		return (&config.AgentWorkerConfig{}).WithDefaults()
 	}
-	mgr := agentwork.NewManager(runner, slog.Default(), loader, syncSignal, t.TempDir())
+	mgr := agentwork.NewManager(runner, slog.Default(), loader, syncSignal, t.TempDir(), "")
 	d.agentWorker = mgr
 
 	item := &agentwork.WorkItem{
@@ -104,7 +104,7 @@ func TestDaemonExitsImmediatelyWhenNoPendingWork(t *testing.T) {
 	loader := func() *config.AgentWorkerConfig {
 		return (&config.AgentWorkerConfig{}).WithDefaults()
 	}
-	mgr := agentwork.NewManager(runner, slog.Default(), loader, syncSignal, t.TempDir())
+	mgr := agentwork.NewManager(runner, slog.Default(), loader, syncSignal, t.TempDir(), "")
 	d.agentWorker = mgr
 
 	assert.False(t, d.hasPendingWork(), "daemon with empty queue should not report pending work")

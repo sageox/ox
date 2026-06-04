@@ -1,0 +1,89 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/sageox/ox/internal/agenttask"
+)
+
+// maxTaskAttempts is the number of times a task may be (re)claimed before
+// doctor treats it as poison and cancels it on --fix. A task that is claimed,
+// never completed, reclaimed, claimed again, ... forever would otherwise churn
+// agents indefinitely.
+const maxTaskAttempts = 5
+
+// checkAgentTasksStuck inspects the project-local agent task queue. Reading the
+// store reconciles it (reclaims expired/dead-claimer leases, prunes
+// expired/old-terminal rows) as a side effect, so this check doubles as the
+// self-heal trigger. It then surfaces poison tasks — those reclaimed past
+// maxTaskAttempts — and cancels them under --fix.
+func checkAgentTasksStuck(fix bool) checkResult {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck("Agent tasks", "not in git repo", "")
+	}
+
+	// only inspect if the queue file exists — avoid creating the directory as
+	// a side effect of a read-only health check.
+	tasksFile := filepath.Join(gitRoot, ".sageox", "agent_tasks", "agent_tasks.jsonl")
+	if _, err := os.Stat(tasksFile); os.IsNotExist(err) {
+		return SkippedCheck("Agent tasks", "no task queue", "")
+	}
+
+	store, err := agenttask.NewStore(gitRoot)
+	if err != nil {
+		return SkippedCheck("Agent tasks", "could not open task store", "")
+	}
+
+	// List reconciles leases and prunes as a side effect.
+	tasks, err := store.List(true)
+	if err != nil {
+		return SkippedCheck("Agent tasks", "could not read task queue", "")
+	}
+
+	var ready, inProgress int
+	var poison []*agenttask.Task
+	for _, t := range tasks {
+		switch t.Status {
+		case agenttask.StatusReady:
+			ready++
+		case agenttask.StatusInProgress:
+			inProgress++
+		}
+		if !t.IsTerminal() && t.Attempts >= maxTaskAttempts {
+			poison = append(poison, t)
+		}
+	}
+
+	if len(poison) == 0 {
+		if ready == 0 && inProgress == 0 {
+			return SkippedCheck("Agent tasks", "queue empty", "")
+		}
+		return PassedCheck("Agent tasks",
+			fmt.Sprintf("%d ready, %d in progress", ready, inProgress))
+	}
+
+	// describe the poison tasks
+	var ids []string
+	for _, t := range poison {
+		ids = append(ids, fmt.Sprintf("%s (%d attempts)", t.ID[:8], t.Attempts))
+	}
+
+	if fix {
+		canceled := 0
+		for _, t := range poison {
+			if err := store.Cancel(t.ID, fmt.Sprintf("auto-canceled by doctor after %d attempts", t.Attempts)); err == nil {
+				canceled++
+			}
+		}
+		return PassedCheck("Agent tasks",
+			fmt.Sprintf("canceled %d poison task(s) past %d attempts", canceled, maxTaskAttempts))
+	}
+
+	return WarningCheck("Agent tasks",
+		fmt.Sprintf("%d task(s) repeatedly failing: %s", len(poison), strings.Join(ids, ", ")),
+		fmt.Sprintf("Run `ox doctor --fix` to cancel tasks past %d attempts", maxTaskAttempts))
+}

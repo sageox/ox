@@ -103,6 +103,10 @@ type Manager struct {
 	// ledger path for handler detection
 	ledgerPath string
 
+	// project root (the actual working repo) for writing project-local agent
+	// tasks. Empty disables the task producer.
+	projectRoot string
+
 	// optional session watcher for tail-mode recordings (hookless agents)
 	sessionWatcher *SessionWatcherManager
 
@@ -120,6 +124,7 @@ func NewManager(
 	configLoader func() *config.AgentWorkerConfig,
 	syncSignal <-chan struct{},
 	ledgerPath string,
+	projectRoot string,
 ) *Manager {
 	if logger == nil {
 		logger = slog.Default()
@@ -144,6 +149,7 @@ func NewManager(
 		sem:           make(chan struct{}, maxConcurrent),
 		configLoader:  configLoader,
 		ledgerPath:    ledgerPath,
+		projectRoot:   projectRoot,
 		syncSignal:    syncSignal,
 		processSignal: make(chan struct{}, 1),
 	}
@@ -211,6 +217,11 @@ func (m *Manager) Start(ctx context.Context) {
 			m.processQueue(ctx)
 		case <-doctorTicker.C:
 			m.logger.Debug("doctor timer fired, running detection")
+			// Hand work to live agents first. This runs independent of
+			// agent_worker.enabled: even when the daemon cannot (or should
+			// not) fork its own LLM worker, it can still schedule tasks for
+			// the next interactive AI coworker to execute.
+			m.produceAgentTasks()
 			m.detectAndEnqueue()
 			m.processQueue(ctx)
 		}
@@ -343,6 +354,9 @@ func (m *Manager) runSessionCleanup() {
 func (m *Manager) ForceDetect() int {
 	// ghost cleanup always runs
 	m.runSessionCleanup()
+
+	// schedule agent tasks for live coworkers (independent of agent_worker)
+	m.produceAgentTasks()
 
 	cfg := m.configLoader()
 	if cfg == nil || !isEffectivelyEnabled(cfg) {

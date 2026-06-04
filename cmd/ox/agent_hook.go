@@ -495,6 +495,10 @@ func handlePrompt(ctx *HookContext) error {
 	emitSuspendedNudge(os.Stdout, ctx.ProjectRoot, agentID)
 
 	emitWhispers(os.Stdout, agentID)
+
+	// Surface any scheduled agent tasks (throttled). This is the sole channel
+	// into the model's context for the task queue — see agent_tasks_surface.go.
+	emitAgentTasks(os.Stdout, ctx.ProjectRoot, agentID)
 	return nil
 }
 

@@ -1222,7 +1222,7 @@ func (d *Daemon) initComponents() time.Duration {
 		initialCfg := configLoader()
 		resolved := agentwork.ResolveAgent(initialCfg.GetAgent())
 		runner := agentwork.NewRunner(resolved, d.logger)
-		d.agentWorker = agentwork.NewManager(runner, d.logger, configLoader, agentWorkSignal, d.config.LedgerPath)
+		d.agentWorker = agentwork.NewManager(runner, d.logger, configLoader, agentWorkSignal, d.config.LedgerPath, d.config.ProjectRoot)
 		sfh := agentwork.NewSessionFinalizeHandler(d.logger)
 		sfh.SetPIDLookup(d.heartbeat.GetAgentPID)
 		sfh.SetLedgerMu(d.scheduler.LedgerMu())

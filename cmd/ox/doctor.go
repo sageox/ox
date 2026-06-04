@@ -906,6 +906,8 @@ func runDoctorChecks(parent context.Context, opts doctorOptions) []checkCategory
 	agentEnvChecks = append(agentEnvChecks, checkInstanceStale(opts.shouldFix(CheckSlugInstanceStale)))
 	// add daemon agent instance stale check (queries daemon for stale heartbeats)
 	agentEnvChecks = append(agentEnvChecks, checkDaemonInstanceStale(opts.shouldFix(CheckSlugDaemonInstanceStale)))
+	// add agent task queue check (reclaims stale leases, surfaces poison tasks)
+	agentEnvChecks = append(agentEnvChecks, checkAgentTasksStuck(opts.shouldFix(CheckSlugAgentTasksStuck)))
 	categories = append(categories, checkCategory{
 		name:   "Agent Environment",
 		checks: agentEnvChecks,

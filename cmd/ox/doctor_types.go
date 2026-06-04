@@ -152,6 +152,7 @@ const (
 	// Agent Health checks
 	CheckSlugInstanceStale       = "instance-stale"
 	CheckSlugDaemonInstanceStale = "daemon-instance-stale"
+	CheckSlugAgentTasksStuck     = "agent-tasks-stuck"
 
 	// Command checks
 	CheckSlugClaudeCommands = "claude-commands"

@@ -93,6 +93,7 @@ sessions/
 .needs-doctor
 .needs-doctor-agent
 agent_instances/
+agent_tasks/
 config.local.toml
 ledger
 teams/
@@ -116,6 +117,7 @@ sessions/
 .needs-doctor
 .needs-doctor-agent
 agent_instances/
+agent_tasks/
 config.local.toml
 ledger
 teams/

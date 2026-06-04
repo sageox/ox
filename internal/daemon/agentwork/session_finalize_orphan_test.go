@@ -143,7 +143,7 @@ func TestHasPendingWork_TrueWhenItemsQueued(t *testing.T) {
 	loader := func() *config.AgentWorkerConfig {
 		return (&config.AgentWorkerConfig{}).WithDefaults()
 	}
-	mgr := NewManager(runner, slog.Default(), loader, syncSignal, t.TempDir())
+	mgr := NewManager(runner, slog.Default(), loader, syncSignal, t.TempDir(), "")
 
 	item := &WorkItem{
 		Type:     "session-finalize",
@@ -165,7 +165,7 @@ func TestHasPendingWork_FalseWhenEmpty(t *testing.T) {
 	loader := func() *config.AgentWorkerConfig {
 		return (&config.AgentWorkerConfig{}).WithDefaults()
 	}
-	mgr := NewManager(runner, slog.Default(), loader, syncSignal, t.TempDir())
+	mgr := NewManager(runner, slog.Default(), loader, syncSignal, t.TempDir(), "")
 
 	assert.False(t, mgr.HasPendingWork(), "should not report pending work when queue is empty")
 }

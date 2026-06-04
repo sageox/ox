@@ -33,6 +33,9 @@ sessions/
 # Ignore agent instance state (ephemeral, per-user)
 agent_instances/
 
+# Ignore agent task queue (ephemeral, local-only)
+agent_tasks/
+
 # Ignore local-only config (sync state, machine-specific)
 config.local.toml
 
@@ -56,6 +59,7 @@ var requiredGitignoreEntries = []string{
 	".needs-doctor",
 	".needs-doctor-agent",
 	"agent_instances/",
+	"agent_tasks/",
 	"config.local.toml",
 	"ledger",
 	"teams/",
