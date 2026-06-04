@@ -100,7 +100,7 @@ The CLI/JSON contract is the baseline and works for **every** coding agent: any 
 | Polished | Claude Code skill + plan-exit hook (shipped by `ox init`); Codex plugin | first-class targets |
 | Adapter | `ox-adapter-*` capability bridges the contract to other agents | everyone else |
 
-This follows ADR-009 (`ox-adapter-*` naming) and ADR-008 (external adapter binaries): the secret sauce stays in ox's data access, and the adapter layer exposes it to agents we do not ship a native integration for. Support is graduated, not binary.
+This follows ADR-009 (`ox-adapter-*` naming) and ADR-008 (external adapter binaries): the durable value stays in ox's data access, and the adapter layer exposes it to agents we do not ship a native integration for. Support is graduated, not binary.
 
 ### 6. Prime integration
 
@@ -116,7 +116,7 @@ The HTML render is **opt-in / confirm by default**: fast badges compute silently
 
 ### Positive
 
-- **The moat is data access, not an inference call.** A competitor can buy the same model; they cannot buy the team's Ledger. Keeping inference client-side is consistent with "keep our secret sauce in the SageOx cloud / behind APIs."
+- **The durable value is data access, not an inference call.** Any model can score a plan; the team's Ledger is what ox uniquely brings. Keeping inference client-side keeps ox's value in the data and context it provides.
 - **ox spends zero LLM tokens in the plan path.** Every `ox plan` operation is deterministic local work, so the plan-exit hook can fire ambiently on every plan and the deterministic badges can always be on.
 - **No cloud judge service to build, run, secure, or scale.** Simpler architecture, fewer trust boundaries, no per-plan cloud round-trip on a latency-sensitive path.
 - **Plans become first-class Ledger artifacts** — searchable, attributable, reusable across teams.
@@ -134,7 +134,7 @@ The HTML render is **opt-in / confirm by default**: fast badges compute silently
 
 ## Alternatives considered
 
-- **Cloud LLM judge (rejected).** Ship the plan to a hosted model that scores it against team context and returns verdicts. Rejected because it puts the moat in the wrong place (inference is a commodity; data access is not), adds a cloud service to build/run/secure, introduces a per-plan network round-trip on a latency-sensitive path, and bills the user for inference twice (once in plan mode, again in the cloud). `ox plan deep` and any cloud-judge variant are dropped.
+- **Cloud LLM judge (rejected).** Ship the plan to a hosted model that scores it against team context and returns verdicts. Rejected because it puts ox's value in the wrong place (inference is a commodity; data access is not), adds a cloud service to build/run/secure, introduces a per-plan network round-trip on a latency-sensitive path, and bills the user for inference twice (once in plan mode, again in the cloud). `ox plan deep` and any cloud-judge variant are dropped.
 - **`enrich` as a user-facing verb (rejected).** An `ox plan enrich` command that humans type. Rejected because enrichment is not a separate step — it is what `ox plan` *is*. `enrich` is plumbing; exposing it as porcelain adds a verb with no distinct user intent. The plumbing surface is `ox plan --json`.
 - **HTML render on every save (rejected).** Always render `plan.html` so the Ledger is uniformly rich. Rejected as token-wasteful: rendering an artifact the human never asked to see, purely to populate the Ledger, burns client tokens for no human benefit. HTML is committed-when-it-exists, not generated-on-save.
 

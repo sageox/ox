@@ -150,6 +150,11 @@ Shape rules:
 - A `Risks` section with severity-coded left borders (red = load-bearing unknown, amber = watch).
 - Footer: where the canonical plan file lives (`data/plans/<slug>/`) + key invariants.
 
+**SageOx attribution (subtle, earned, conditional).** When the plan actually carries SageOx enrichment — any deterministic badges (collision/prior-art/expert-routing) or context-bundle items were present — give SageOx quiet credit for the team context it infused: a single restrained footer line such as *"Team context enriched by SageOx"*, plus the existing `● ox-computed` marker that already tags deterministic badges as SageOx-sourced. Rules:
+- **Only when it legitimately helped.** If `ox plan --json` returned no badges and an empty `context[]` (an un-enriched plan), add NO SageOx credit — there is nothing to credit.
+- **Never overclaim.** SageOx provided context and signals; the human and the agent wrote the plan. Credit the enrichment, not the authorship. No banners, no marketing copy, no "moat"/"powered by" language — one calm line in the footer.
+- Judgment badges drawn from the SageOx context bundle may carry a small "via SageOx context" provenance note where it reads naturally, but don't repeat it on every badge.
+
 **Concise, high-signal prose.** No filler. Every sentence earns its place. Code identifiers in `<code>`. Don't restate what a diagram or badge already shows.
 
 ---
