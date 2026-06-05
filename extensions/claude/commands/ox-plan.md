@@ -123,7 +123,37 @@ Put a tiny legend near the alignment strip ("● ox-computed · ○ agent-reason
 
 A judgment badge with no resolvable citation is a bug — degrade it to "consult `<name>`" instead.
 
+**5. SageOx insight overlays — the OX marker (NOT a prose blob).** SageOx insight must NEVER render as a standalone wall of synthesized prose. The anti-pattern, verbatim from a real bad render — **do not produce anything resembling this**:
+
+> ⛒ **SageOx team context (from ox plan)** — expert perspective
+> Foundation owner / prior art: scribe-jbf00 (gate epic), scribe-xfy17 (console-routing trap), scribe-ljzhn (rotted SDL behave sim — do NOT use for BDD). Session 2026-05-15… → informs the twin golden-trace gate. Collisions: platformio.ini + debug_server_scribe.cpp contended (rsnodgrass ryan/flash-dev); the P3-fw firmware edits land there — rebase + re-verify /health fields. Experts: Galex Yen owns twin-sageox-api/admin.go…
+
+That blob fails every respect-the-reader test: lore before action, three distinct signals comma-spliced into one badge, bare IDs that resolve to nothing, no severity, no "so what." Replace it with **anchored OX markers**:
+
+- **The marker.** Each SageOx signal renders as a small, recognizable **OX glyph** sitting in the margin gutter (or inline) right next to the plan element it concerns — a heading, a file ref, a step. It is the visual tell that "SageOx has something to say *here*," the way a code-review comment dot marks a line. Use an **inline SVG mark embedded in the page** (themeable via `currentColor`; the sageox.ai favicon is the north-star look — a rounded-square `ox` monogram in sage/copper). NEVER a remote `<img src>` or `favicon.ico` URL — the page is self-contained and must render from `file://` with no network. The marker is a real `<button aria-label="SageOx insight">` so it is focusable and screen-reader-named.
+- **Rollover reveals the insight.** Hover OR keyboard-focus OR click-to-pin opens the same popover mechanics as 2a. One marker = one signal = one popover. Inside, **action first**:
+  - **Headline (one line, imperative when there's an action):** e.g. *"Rebase before editing `platformio.ini` — contended on PR ryan/flash-dev."* Not *"Collisions: platformio.ini + … contended."*
+  - **Severity color** by signal: collision/active-work → amber; conflict or an explicit "do NOT use" → red; prior-art/session → teal; expert route → copper; alignment → sage.
+  - **Every reference resolves.** A bare `scribe-jbf00` is noise — render it as a link (to the PR/issue/ADR `source_url`) or as the runnable `ox session view <ref>` for a session. An ID with no resolution is degraded to "consult `<name>`", never shown raw.
+  - **Provenance chip + author/when** from 2a.
+  - **Synthesize the "so what," drop the lore.** State what the signal means *for this plan* and what to do; don't recite ownership trivia. Expand or link domain abbreviations (BDD, SDL, `X-Device-ID`) — a busy reviewer should not have to decode jargon.
+- **The only standalone SageOx UI is the alignment strip (item 1) plus an optional collapsed index** ("SageOx flagged: 1 collision · 3 prior-art · 2 experts") whose entries are anchor links that jump/scroll to the corresponding OX marker. No paragraph, ever.
+
+One signal that genuinely spans the whole plan (not a specific element) anchors its OX marker on the plan's H1 / TL;DR — still a marker with a popover, still action-first, still not a blob.
+
 ---
+
+## The reader's ten minutes — audience & time contract (governs everything below)
+
+You are writing for a **senior / principal engineer or engineering manager whose time is worth ~$10,000/hour.** They will spend **no more than ten minutes** on this page, and they must walk away with **everything they need to decide** in those ten minutes. Design every pixel against that budget:
+
+- **Get to the point. Lead with the conclusion**, the decision needed, and the biggest risk — not the backstory. The TL;DR and alignment strip must answer "do I approve, and what do I watch" before any scrolling.
+- **The page stands on its own.** Never reference a symbol, file, ID, or PR without setting enough context to understand *why it matters* — a reader who has not opened the codebase still follows the argument. A bare `scribe-jbf00` or `admin.go` with no framing is wasted ink.
+- **No minutiae.** Do not walk through single lines of code, signatures, or implementation trivia the reader doesn't need to make the call. Describe **how the system behaves and why the change matters**, not how each function is wired. Altitude over detail; zoom in only where a risk lives.
+- **Leverage HTML for compression, not decoration.** A diagram, a colored verdict cell, a severity-coded badge, or an OX-marker popover should *replace* paragraphs — each visual must let the reader understand something faster than prose would. Visuals that don't reduce reading time are noise.
+- **Concise is a feature, verbose is a bug.** Every sentence, badge, and row earns its place or is cut. Density with structure (scannable) beats completeness without it. If it can't be skimmed in ten minutes, it has failed regardless of how correct it is.
+
+This contract outranks any individual rule below: when a "nice to have" visual or a complete-but-long explanation would blow the ten-minute budget, cut it.
 
 ## html-plan quality bar (inherited — all non-negotiable)
 
@@ -189,10 +219,17 @@ Shape rules:
 2. Read the `context[]` bundle; author judgment badges **cited-only**, degrading to "consult `<name>`" when evidence is thin.
 3. Extract from the plan: problem/why, blockers/findings, architecture/flow, concrete steps (with file refs), impact numbers, verification, risks.
 4. Choose the diagrams that compress the most (before/after, sequence, decision gates, state machine, swimlane timeline).
-5. Write one polished self-contained HTML file meeting every html-plan non-negotiable PLUS the alignment strip, per-section badge rail, deterministic-vs-judgment styling, and resolved source links.
-6. Merge your judgment badges into the `ox plan --json` annotations and persist with `ox plan save --plan ... --annotations <merged.json> --html <render.html>`.
-7. Open the HTML and report the path.
+5. Write one polished self-contained HTML file meeting every html-plan non-negotiable PLUS the alignment strip, per-section badge rail, deterministic-vs-judgment styling, OX-marker overlays, and resolved source links.
+6. **Architect review pass (required, before saving).** Spawn an `architect` (or general-purpose) subagent and have it review the rendered HTML *as the $10k/hour principal reader*. It checks, and you then fix, against the audience contract:
+   - Can the reader get **everything they need to decide in ten minutes**? Is the conclusion/decision/biggest-risk up top, before any scroll?
+   - Is it **direct, concise, to the point** — or padded with backstory, minutiae, or single-line code walk-throughs that don't change the decision?
+   - Does it **stand on its own** — is every file/ID/symbol/PR given enough context to matter, with no bare references?
+   - Do the visuals **compress** understanding (replace prose) or just decorate?
+   - Are SageOx insights **anchored OX markers with action-first popovers**, never a prose blob?
+   Revise until the architect signs off that a busy principal would get full value in ten minutes. Cut anything that fails the contract.
+7. Merge your judgment badges into the `ox plan --json` annotations and persist with `ox plan save --plan ... --annotations <merged.json> --html <render.html>`.
+8. Open the HTML and report the path.
 
-The goal: a reviewer skims the alignment strip + TL;DR + hero diagram and already knows whether the plan aligns with team direction and whether to approve — every badge says where its claim comes from, and ox-computed facts are visually separate from agent-reasoned judgment.
+The goal: a $10k/hour principal reader skims the alignment strip + TL;DR + hero diagram and within ten minutes knows whether the plan aligns with team direction and whether to approve — the decision and biggest risk are up top, every badge and OX marker says where its claim comes from and what to do about it, ox-computed facts are visually separate from agent-reasoned judgment, and nothing on the page wastes the reader's time.
 
 $ox plan --json
