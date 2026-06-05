@@ -125,11 +125,13 @@ the single reliable channel into Claude's context mid-session. On each prompt,
 throttled `<system-reminder>` block instructing the agent to dispatch each
 task to a **subagent with a fresh context**, then mark it done.
 
-Throttling: a per-agent cursor in `.sageox/cache/agent_tasks_seen/<agentID>.json`
-records the signature (hash of sorted ready task ids) last surfaced. The block
-is re-emitted only when the ready set changes, or after a re-nudge interval if
-work is still pending — so an idle queue costs zero context and a stable queue
-is not repeated every turn.
+Throttling (token conservation): a per-agent cursor in
+`.sageox/cache/agent_tasks_seen/<agentID>.json` records the signature (hash of
+sorted ready task ids) last surfaced. The block is re-emitted **only when the
+ready set changes** — a new task, or a completed/claimed one. An unchanged
+pending queue is never re-injected turn after turn (that would burn the user's
+tokens on identical context), and an idle queue costs zero context. The agent
+can always pull on demand with `ox agent <id> tasks list`.
 
 ## Daemon producer
 
@@ -139,13 +141,29 @@ existing doctor-interval timer (and `ForceDetect`), `produceAgentTasks` runs
 the daemon cannot (or should not) fork `claude -p`, it can still hand work to
 the live agent:
 
-- If the `.needs-doctor-agent` marker is present, enqueue a deduped `doctor`
-  task (dedup key `doctor-agent`) telling the live agent to finalize
-  incomplete sessions.
+- **Doctor bridge** (`produceDoctorTask`): if the `.needs-doctor-agent` marker
+  is present, enqueue a deduped `doctor` task (dedup key `doctor-agent`) telling
+  the live agent to finalize incomplete sessions.
+- **Session finalize** (`produceFinalizeTasks`): runs **only when no local LLM
+  worker is authed/enabled** (`!isEffectivelyEnabled`). This is the direct
+  replacement for the separately-billed `claude -p` anti-entropy fork: it asks
+  the registered `SessionFinalizeHandler` to detect stale recordings needing
+  summaries and enqueues a per-session `session-finalize` task (deduped
+  `session-finalize:<name>`, priority 30, capped at 25/cycle). When a worker IS
+  available the normal queue forks it (delegated mode, ADR-016) and no task is
+  produced — avoiding duplicate work. When a worker is available but finalize is
+  explicitly disabled, the user opted out, so no task is produced either.
 
 `agentwork` cannot import `internal/doctor` (would cycle:
-`daemon → agentwork → doctor → daemon`), so the producer checks the marker via
-`os.Stat` on the canonical path.
+`daemon → agentwork → doctor → daemon`), so the doctor producer checks the
+marker via `os.Stat` on the canonical path.
+
+## Status surfacing
+
+`ox status` and `ox agent list` render a one-line summary of the queue
+(`N ready, M in progress`) when non-empty, pointing at
+`ox agent <id> tasks list` for detail. Reading the queue reconciles stale
+leases as a side effect. An empty queue renders nothing.
 
 ## Reaper / doctor check
 

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	lipgloss "charm.land/lipgloss/v2"
+	"github.com/sageox/ox/internal/agenttask"
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
@@ -1310,6 +1311,61 @@ func renderAICoworkersSection(client *daemon.Client) string {
 	return b.String()
 }
 
+// renderAgentTasksSection renders a one-line summary of scheduled agent tasks.
+// Emits nothing when the queue is empty so it never clutters a clean status.
+// Detail belongs in `ox agent <id> tasks list`.
+func renderAgentTasksSection(gitRoot string) string {
+	ready, inProgress := countAgentTasks(gitRoot)
+	if ready == 0 && inProgress == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(statusLabelStyle.Render("Agent Tasks"))
+	switch {
+	case ready > 0 && inProgress > 0:
+		b.WriteString(formatValue(fmt.Sprintf("%d ready, %d in progress", ready, inProgress), "success"))
+	case ready > 0:
+		b.WriteString(formatValue(fmt.Sprintf("%d ready", ready), "success"))
+	default:
+		b.WriteString(formatValue(fmt.Sprintf("%d in progress", inProgress), "muted"))
+	}
+	b.WriteString(statusMutedStyle.Render("  (ox agent <id> tasks list)"))
+	b.WriteString("\n")
+	return b.String()
+}
+
+// countAgentTasks returns the ready and in-progress task counts for the repo,
+// reconciling stale leases as a side effect of the read. Returns (0, 0) when
+// there is no queue or it cannot be read.
+func countAgentTasks(gitRoot string) (ready, inProgress int) {
+	if gitRoot == "" {
+		return 0, 0
+	}
+	// avoid creating the queue dir as a side effect of a status read
+	if _, err := os.Stat(filepath.Join(gitRoot, ".sageox", "agent_tasks", "agent_tasks.jsonl")); err != nil {
+		return 0, 0
+	}
+	store, err := agenttask.NewStore(gitRoot)
+	if err != nil {
+		return 0, 0
+	}
+	tasks, err := store.List(false)
+	if err != nil {
+		return 0, 0
+	}
+	for _, t := range tasks {
+		switch t.Status {
+		case agenttask.StatusReady:
+			ready++
+		case agenttask.StatusInProgress:
+			inProgress++
+		}
+	}
+	return ready, inProgress
+}
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Display SageOx status and directory locations",
@@ -1506,6 +1562,9 @@ daemon health, and a tree view of all SageOx directory locations.`,
 
 			// show active AI coworkers with context stats
 			fmt.Print(renderAICoworkersSection(client))
+
+			// show pending scheduled agent tasks, if any
+			fmt.Print(renderAgentTasksSection(gitRoot))
 		}
 
 		// show version update notice if available

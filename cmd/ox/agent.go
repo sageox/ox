@@ -899,6 +899,13 @@ func runAgentList(cmd *cobra.Command, args []string) error {
 		fmt.Println(dim.Render("  SageOx is judged on the sageox bucket; other sources reflect authoring choices."))
 	}
 
+	// scheduled agent tasks waiting for a coworker to pick up
+	if ready, inProgress := countAgentTasks(projectRoot); ready > 0 || inProgress > 0 {
+		fmt.Println()
+		fmt.Printf("Agent tasks: %s\n",
+			dim.Render(fmt.Sprintf("%d ready, %d in progress  (ox agent <id> tasks list)", ready, inProgress)))
+	}
+
 	return nil
 }
 

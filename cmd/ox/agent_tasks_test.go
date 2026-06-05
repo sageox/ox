@@ -197,6 +197,41 @@ func TestEmitAgentTasks_NoTasksSilent(t *testing.T) {
 	}
 }
 
+// --- status / agent list count surfacing ---
+
+func TestCountAgentTasks(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// no queue file yet → zeroes, and no directory created as a side effect
+	if ready, inProg := countAgentTasks(root); ready != 0 || inProg != 0 {
+		t.Fatalf("expected 0,0 with no queue, got %d,%d", ready, inProg)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".sageox", "agent_tasks")); !os.IsNotExist(err) {
+		t.Fatalf("countAgentTasks must not create the queue dir on a read")
+	}
+
+	store, _ := agenttask.NewStore(root)
+	_, _ = store.Add(&agenttask.Task{Title: "a"})
+	_, _ = store.Add(&agenttask.Task{Title: "b"})
+	_, _ = store.Claim(agenttask.ClaimOptions{AgentID: "Oxx", PID: os.Getpid()})
+
+	ready, inProg := countAgentTasks(root)
+	if ready != 1 || inProg != 1 {
+		t.Fatalf("expected 1 ready, 1 in progress; got %d,%d", ready, inProg)
+	}
+
+	// section renders when non-empty, stays empty otherwise
+	if got := renderAgentTasksSection(root); got == "" {
+		t.Fatalf("expected non-empty section with pending tasks")
+	}
+	if got := renderAgentTasksSection(t.TempDir()); got != "" {
+		t.Fatalf("expected empty section for repo with no queue, got %q", got)
+	}
+}
+
 func TestEmitAgentTasks_RespectsTargetAgent(t *testing.T) {
 	root := setupTaskProject(t)
 	t.Setenv("AGENT_ENV", "claude")

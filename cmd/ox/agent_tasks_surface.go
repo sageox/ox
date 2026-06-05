@@ -20,26 +20,26 @@ import (
 //
 // It is throttled so a stable queue does not repeat the same block every turn:
 // a per-agent cursor records the signature (hash of the sorted ready task ids)
-// last surfaced, and the block is re-emitted only when the ready set changes or
-// after a re-nudge interval if work is still pending.
+// last surfaced, and the block is re-emitted ONLY when the ready set changes.
+// An unchanged pending queue is never re-injected turn after turn — that would
+// burn the user's tokens on identical context. New or completed tasks change
+// the signature and re-trigger; the agent can also pull on demand with
+// `ox agent <id> tasks list`.
 
-const (
-	// taskRenudgeInterval re-surfaces a still-pending, unchanged queue so the
-	// agent is reminded without being spammed every turn.
-	taskRenudgeInterval = 30 * time.Minute
-	// maxSurfacedTasks caps how many tasks are listed inline to keep context lean.
-	maxSurfacedTasks = 5
-)
+// maxSurfacedTasks caps how many tasks are listed inline to keep context lean.
+const maxSurfacedTasks = 5
 
 // taskSeenCursor records the last ready-set signature surfaced to an agent.
+// At is retained for observability/debugging only; it does not gate surfacing.
 type taskSeenCursor struct {
 	Signature string    `json:"signature"`
 	At        time.Time `json:"at"`
 }
 
-// emitAgentTasks writes a throttled <system-reminder> block listing ready tasks
-// the given agent can pick up. Best-effort: any error (no store, no tasks, I/O
-// failure) results in no output and no disruption to the prompt hook.
+// emitAgentTasks writes a <system-reminder> block listing ready tasks the given
+// agent can pick up, but only when the ready set differs from what this agent
+// last saw. Best-effort: any error (no store, no tasks, I/O failure) results in
+// no output and no disruption to the prompt hook.
 func emitAgentTasks(w io.Writer, projectRoot, agentID string) {
 	if projectRoot == "" || agentID == "" {
 		return
@@ -58,22 +58,12 @@ func emitAgentTasks(w io.Writer, projectRoot, agentID string) {
 
 	sig := readySignature(ready)
 	cursor := readTaskCursor(projectRoot, agentID)
-	if !shouldSurface(sig, cursor) {
-		return
+	if cursor.Signature == sig {
+		return // unchanged set — already surfaced to this agent, stay quiet
 	}
 
 	writeTaskReminder(w, ready)
 	writeTaskCursor(projectRoot, agentID, taskSeenCursor{Signature: sig, At: time.Now()})
-}
-
-// shouldSurface decides whether to emit given the prior cursor: emit on a
-// changed ready set, or when the unchanged set has gone stale past the re-nudge
-// interval.
-func shouldSurface(sig string, cursor taskSeenCursor) bool {
-	if cursor.Signature != sig {
-		return true
-	}
-	return time.Since(cursor.At) > taskRenudgeInterval
 }
 
 // readySignature hashes the sorted ready task ids so the same pending set maps
