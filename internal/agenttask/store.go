@@ -51,6 +51,22 @@ type Store struct {
 	mu sync.Mutex
 }
 
+// QueuePath returns the absolute path to a project's task queue file.
+func QueuePath(projectRoot string) string {
+	return filepath.Join(projectRoot, sageoxDir, subDir, fileName)
+}
+
+// QueueExists reports whether a project has a task queue file yet. Read-only
+// callers (the prompt hook, ox status) use it to avoid NewStore's MkdirAll side
+// effect — a status/surface read must not materialize the queue directory.
+func QueueExists(projectRoot string) bool {
+	if projectRoot == "" {
+		return false
+	}
+	_, err := os.Stat(QueuePath(projectRoot))
+	return err == nil
+}
+
 // NewStore initializes a task store for the given project root, creating the
 // .sageox/agent_tasks/ directory if needed.
 func NewStore(projectRoot string) (*Store, error) {
@@ -545,15 +561,20 @@ func enforceActiveCap(tasks []*Task) []*Task {
 		return tasks
 	}
 
-	// evict oldest ready tasks first
-	byAge := make([]*Task, len(tasks))
-	copy(byAge, tasks)
-	sort.SliceStable(byAge, func(i, j int) bool {
-		return byAge[i].CreatedAt.Before(byAge[j].CreatedAt)
+	// evict the LEAST urgent ready tasks first (highest Priority number), then
+	// oldest within a priority — so an urgent task enqueued early is preserved
+	// under cap pressure rather than dropped for a low-priority newcomer.
+	order := make([]*Task, len(tasks))
+	copy(order, tasks)
+	sort.SliceStable(order, func(i, j int) bool {
+		if order[i].Priority != order[j].Priority {
+			return order[i].Priority > order[j].Priority
+		}
+		return order[i].CreatedAt.Before(order[j].CreatedAt)
 	})
 	toEvict := active - maxActive
 	evict := make(map[string]bool)
-	for _, t := range byAge {
+	for _, t := range order {
 		if toEvict == 0 {
 			break
 		}

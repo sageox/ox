@@ -47,6 +47,12 @@ func emitAgentTasks(w io.Writer, projectRoot, agentID, agentType string) {
 		return
 	}
 
+	// Truly read-only when idle: don't let NewStore's MkdirAll materialize the
+	// queue directory on every keystroke before any task has ever been enqueued.
+	if !agenttask.QueueExists(projectRoot) {
+		return
+	}
+
 	store, err := agenttask.NewStore(projectRoot)
 	if err != nil {
 		return
@@ -170,5 +176,11 @@ func writeTaskCursor(projectRoot, agentID string, c taskSeenCursor) {
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, data, 0o644)
+	// atomic write: a crash mid-write must not leave a truncated cursor (which
+	// would silently force a re-surface on the next prompt).
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, path)
 }

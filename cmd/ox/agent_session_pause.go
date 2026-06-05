@@ -13,16 +13,16 @@ import (
 
 // sessionPauseOutput is the JSON output format for session pause.
 type sessionPauseOutput struct {
-	Success      bool   `json:"success"`
-	Type         string `json:"type"`
-	AgentID      string `json:"agent_id"`
-	SessionName  string `json:"session_name,omitempty"`
-	Status       string `json:"status"`  // "paused" | "already_paused" | "not_recording"
-	Message      string `json:"message"`
-	Guidance     string `json:"guidance,omitempty"`
-	Seq          int    `json:"seq,omitempty"`           // entry seq at pause point
-	PauseCount   int    `json:"pause_count,omitempty"`   // monotonic counter
-	SuspendedAt  string `json:"suspended_at,omitempty"`  // RFC3339
+	Success     bool   `json:"success"`
+	Type        string `json:"type"`
+	AgentID     string `json:"agent_id"`
+	SessionName string `json:"session_name,omitempty"`
+	Status      string `json:"status"` // "paused" | "already_paused" | "not_recording"
+	Message     string `json:"message"`
+	Guidance    string `json:"guidance,omitempty"`
+	Seq         int    `json:"seq,omitempty"`          // entry seq at pause point
+	PauseCount  int    `json:"pause_count,omitempty"`  // monotonic counter
+	SuspendedAt string `json:"suspended_at,omitempty"` // RFC3339
 }
 
 // runAgentSessionPause suspends an active recording. The local cache continues
@@ -72,9 +72,9 @@ func runAgentSessionPause(inst *agentinstance.Instance, _ []string) error {
 	// trail the real entry stream, leaking paused entries into the upload
 	// at stop time.
 	var (
-		seq          int
-		pauseCount   int
-		sessionName  string
+		seq         int
+		pauseCount  int
+		sessionName string
 	)
 	if err := session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
 		seq = s.EntryCount

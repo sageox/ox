@@ -1346,7 +1346,7 @@ func countAgentTasks(gitRoot string) (ready, inProgress int) {
 		return 0, 0
 	}
 	// avoid creating the queue dir as a side effect of a status read
-	if _, err := os.Stat(filepath.Join(gitRoot, ".sageox", "agent_tasks", "agent_tasks.jsonl")); err != nil {
+	if !agenttask.QueueExists(gitRoot) {
 		return 0, 0
 	}
 	store, err := agenttask.NewStore(gitRoot)

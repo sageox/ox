@@ -123,14 +123,15 @@ func runTasksList(w io.Writer, store *agenttask.Store, agentType string) error {
 	if err != nil {
 		return err
 	}
-	claimable, err := store.Ready(agentType)
-	if err != nil {
-		return err
-	}
-	readyCount := len(claimable)
-
+	// Compute the ready count from the SAME snapshot we render, not a second
+	// locked Ready() pass — otherwise a concurrent Claim between the two reads
+	// could make the header ("N ready") contradict the per-task rows below it.
+	readyCount := 0
 	views := make([]taskView, 0, len(tasks))
 	for _, t := range tasks {
+		if t.Status == agenttask.StatusReady && t.ClaimableBy(agentType) {
+			readyCount++
+		}
 		views = append(views, toTaskView(t))
 	}
 

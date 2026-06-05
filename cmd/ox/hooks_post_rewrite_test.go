@@ -85,14 +85,14 @@ func TestLooksLikeSHA(t *testing.T) {
 		s    string
 		want bool
 	}{
-		{"abc1234", true},                                                                  // 7-char short
-		{"abcdef1234567890abcdef1234567890abcdef12", true},                                 // 40-char SHA-1
-		{"abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890", true},         // 64-char SHA-256
-		{"", false},                                                                        // empty
-		{"abc12", false},                                                                   // too short
-		{strings.Repeat("a", 65), false},                                                   // too long
-		{"abcdefg", false},                                                                 // bad hex
-		{"ABC1234", true},                                                                  // uppercase ok
+		{"abc1234", true}, // 7-char short
+		{"abcdef1234567890abcdef1234567890abcdef12", true},                         // 40-char SHA-1
+		{"abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890", true}, // 64-char SHA-256
+		{"", false},                      // empty
+		{"abc12", false},                 // too short
+		{strings.Repeat("a", 65), false}, // too long
+		{"abcdefg", false},               // bad hex
+		{"ABC1234", true},                // uppercase ok
 	}
 	for _, c := range cases {
 		assert.Equalf(t, c.want, looksLikeSHA(c.s), "looksLikeSHA(%q)", c.s)

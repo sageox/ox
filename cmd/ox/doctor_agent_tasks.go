@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/agenttask"
@@ -28,8 +26,7 @@ func checkAgentTasksStuck(fix bool) checkResult {
 
 	// only inspect if the queue file exists — avoid creating the directory as
 	// a side effect of a read-only health check.
-	tasksFile := filepath.Join(gitRoot, ".sageox", "agent_tasks", "agent_tasks.jsonl")
-	if _, err := os.Stat(tasksFile); os.IsNotExist(err) {
+	if !agenttask.QueueExists(gitRoot) {
 		return SkippedCheck("Agent tasks", "no task queue", "")
 	}
 
