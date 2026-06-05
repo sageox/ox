@@ -130,7 +130,10 @@ A judgment badge with no resolvable citation is a bug — degrade it to "consult
 
 That blob fails every respect-the-reader test: lore before action, three distinct signals comma-spliced into one badge, bare IDs that resolve to nothing, no severity, no "so what." Replace it with **anchored OX markers**:
 
-- **The marker.** Each SageOx signal renders as a small, recognizable **OX glyph** sitting in the margin gutter (or inline) right next to the plan element it concerns — a heading, a file ref, a step. It is the visual tell that "SageOx has something to say *here*," the way a code-review comment dot marks a line. Use an **inline SVG mark embedded in the page** (themeable via `currentColor`; the sageox.ai favicon is the north-star look — a rounded-square `ox` monogram in sage/copper). NEVER a remote `<img src>` or `favicon.ico` URL — the page is self-contained and must render from `file://` with no network. The marker is a real `<button aria-label="SageOx insight">` so it is focusable and screen-reader-named.
+- **The marker.** Each SageOx signal renders as a small, recognizable **SageOx glyph** sitting in the margin gutter (or inline) right next to the plan element it concerns — a heading, a file ref, a step. It is the visual tell that "SageOx has something to say *here*," the way a code-review comment dot marks a line.
+  - **Canonical mark = the SageOx avatar** (`https://avatars.githubusercontent.com/u/224450799?s=200&v=4`). **Base64-inline it as a `data:image/png;base64,…` URI at render time** (fetch once during rendering, embed the bytes) — the page is self-contained and must render from `file://` with **no runtime network**, so a live remote `<img src>` is banned. Keep it small (a ~28px avatar at `s=64` is plenty; don't inline a giant blob).
+  - **Offline fallback:** if the avatar can't be fetched at render time, draw an **inline-SVG `ox` monogram** (rounded square, sage/copper, themeable via `currentColor`) instead. Never block the render on the network.
+  - The marker is a real `<button aria-label="SageOx insight">` so it is focusable and screen-reader-named, with a faint ring/badge so it reads as interactive.
 - **Rollover reveals the insight.** Hover OR keyboard-focus OR click-to-pin opens the same popover mechanics as 2a. One marker = one signal = one popover. Inside, **action first**:
   - **Headline (one line, imperative when there's an action):** e.g. *"Rebase before editing `platformio.ini` — contended on PR ryan/flash-dev."* Not *"Collisions: platformio.ini + … contended."*
   - **Severity color** by signal: collision/active-work → amber; conflict or an explicit "do NOT use" → red; prior-art/session → teal; expert route → copper; alignment → sage.
@@ -183,6 +186,25 @@ Shape rules:
 | State with time-bounded transitions (timeouts, debounce, retry/backoff) | **`stateDiagram-v2`** with durations on edges | Label transitions with the timeout. |
 
 **Do NOT use Mermaid `gantt` with `dateFormat X` (numeric)** — it renders a meaningless `0 0 1 1 2…` axis. For relative-effort plans, hand-build a CSS swimlane: a per-lane row (`grid-template-columns: 160px 1fr`), a relative track with faint vertical unit gridlines, and absolutely-positioned bars (`left:%` / `width:%`) colored by workstream, with a diamond marker for any gate.
+
+**Pick the diagram by the QUESTION the reader is asking — not by habit.** Reach for the richer diagram types when (and only when) the plan genuinely has that structure. A flat list is a list; do not flowchart it. Never draw two diagrams that show the same thing.
+
+| The reader is asking… | Diagram type | When it earns its place |
+|---|---|---|
+| "In what **order** does this call out — and how many round-trips?" | **`sequenceDiagram`** | A request/call path crosses components, services, or async boundaries. Shows ordering + latency a flowchart can't. ≤ 4–5 participants. |
+| "**What depends on / connects to** what?" (topology, not order) | **interaction / dependency graph** (`flowchart LR`, C4-ish) | Components, actors, modules and their edges — to reveal coupling, blast radius, a contended boundary. |
+| "What are the **steps and branches**?" | **flow diagram** (`flowchart TB` + decision gates) | A pipeline or algorithm with conditionals/gates. The default "shape in one picture" hero. |
+| "What **states** exist and what **transitions** between them?" | **`stateDiagram-v2`** (enriched) | A lifecycle, connection/session model, retry/backoff, or anything with modes. Label edges with the trigger; push the guard/timeout/side-effect to hover. |
+| "**When**, in what sequence, how long?" | **timeline / CSS swimlane** (see table above) | Phases, rollout, parallel work, latency budget. |
+
+One **hero diagram near the top** captures the whole shape. Add a second diagram only where a specific section has structure the hero can't carry. If a diagram needs more than ~7 nodes / ~5 participants to be honest, it's two diagrams.
+
+**Progressive disclosure — rich underneath, calm on top (lean HARD into HTML here).** The single biggest lever for human understanding is putting *little* on the screen while keeping *all* the richness one hover away. The on-screen diagram is the **skeleton**; the detail lives in reveals:
+- **Mermaid node/edge interactions.** Use `click <NodeId> callback "<short tooltip>"` (requires `securityLevel:'loose'` at init) to attach a hover/click handler that opens the **same popover component as the OX markers / 2a chips**. Keep the node label terse ("auth check"); put the payload, the file/symbol it maps to, the cost, and the rationale in the popover — never on the diagram face.
+- **Sequence diagrams:** terse message labels on the line; the contract/payload/error-path detail surfaces on hover of that message (or a `Note` styled collapsed-by-default, expand on click).
+- **State machines:** the edge shows only its trigger; hovering the edge or state reveals guard, side effects, timeout/backoff, and the code path that implements it.
+- **Layered drill-down.** Start at the subsystem altitude; clicking a node expands its internal subgraph (toggle a second `.mermaid` block / swap source + `mermaid.run`), so the reader drills only where they care. One topic, many depths — the ten-minute reader stays at the top layer; the skeptic drills one node.
+- All of it **pure CSS + vanilla JS, keyboard-focusable, `file://`-safe, no network** — same constraints as every other interaction. Tie it back to the time contract: the diagram answers "how does it behave" at a glance; deeper time is spent *only* on the node the reader chooses to interrogate.
 
 **User-facing mockups — show how the feature is exposed.** If the plan changes anything the user sees or hears, include a visual of the resulting UI state honoring the project's design system — don't describe it in prose. For a net-new or multi-state flow, recommend the `/design-mockup` skill rather than hand-rolling many states. Always state which design-system rules the mockup honors. Annotate behavior in user-facing language, never with implementation detail (write "a subtle chime plays", not a source filename).
 
