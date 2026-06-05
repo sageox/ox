@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/gofrs/flock"
@@ -44,6 +45,10 @@ type Store struct {
 	projectRoot string
 	tasksPath   string
 	host        string
+	// mu guards against concurrent goroutines in the SAME process. The flock
+	// only serializes across processes (POSIX advisory locks are per-process,
+	// so two goroutines here could both acquire it). Mirrors agentinstance.Store.
+	mu sync.Mutex
 }
 
 // NewStore initializes a task store for the given project root, creating the
@@ -78,6 +83,21 @@ func (s *Store) Add(task *Task) (added bool, err error) {
 	if task.Title == "" {
 		return false, fmt.Errorf("task title cannot be empty")
 	}
+	if !ValidKind(task.Kind) {
+		return false, fmt.Errorf("unknown task kind %q (allowed: doctor, session-finalize, anti-entropy, custom)", task.Kind)
+	}
+	if len(task.Title) > MaxTitleLen {
+		return false, fmt.Errorf("task title exceeds %d bytes", MaxTitleLen)
+	}
+	if len(task.Body) > MaxBodyLen {
+		return false, fmt.Errorf("task body exceeds %d bytes", MaxBodyLen)
+	}
+	if payloadSize(task.Payload) > MaxPayloadLen {
+		return false, fmt.Errorf("task payload exceeds %d bytes", MaxPayloadLen)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	lock, unlock, err := s.acquireLock()
 	if err != nil {
@@ -115,11 +135,28 @@ func (s *Store) Add(task *Task) (added bool, err error) {
 	return true, nil
 }
 
-// List returns the current active tasks (after reconciling leases and pruning
-// expired/old-terminal rows). When includeTerminal is false, completed and
-// canceled tasks are omitted. Results are priority-sorted (lower first), then
-// oldest-first within a priority.
+// List returns the current active tasks, persisting reconcile (lease reclaim +
+// expired/old-terminal pruning). When includeTerminal is false, terminal tasks
+// are omitted. Priority-sorted (lower first), then oldest-first.
+//
+// Use this from the daemon timer, doctor, and mutating CLI commands — paths
+// where persisting the reconcile is desirable. For read-only/hot paths (the
+// prompt hook, ox status), use ListView, which never rewrites the file.
 func (s *Store) List(includeTerminal bool) ([]*Task, error) {
+	return s.list(includeTerminal, true)
+}
+
+// ListView is the read-only counterpart of List: it returns the same reconciled
+// view but never rewrites the file. Used on latency-sensitive paths so a user's
+// keystroke never blocks on an O(n) queue rewrite under the cross-process lock.
+func (s *Store) ListView(includeTerminal bool) ([]*Task, error) {
+	return s.list(includeTerminal, false)
+}
+
+func (s *Store) list(includeTerminal, persist bool) ([]*Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	lock, unlock, err := s.acquireLock()
 	if err != nil {
 		return nil, err
@@ -127,7 +164,7 @@ func (s *Store) List(includeTerminal bool) ([]*Task, error) {
 	defer unlock()
 	_ = lock
 
-	tasks, err := s.reconcileLocked()
+	tasks, err := s.reconcileWith(persist)
 	if err != nil {
 		return nil, err
 	}
@@ -143,10 +180,20 @@ func (s *Store) List(includeTerminal bool) ([]*Task, error) {
 	return out, nil
 }
 
-// Ready returns ready tasks claimable by the given agent type, priority-sorted.
-// An empty agentType only matches untargeted tasks.
+// Ready returns ready tasks claimable by the given agent type, priority-sorted,
+// persisting reconcile. An empty agentType only matches untargeted tasks.
 func (s *Store) Ready(agentType string) ([]*Task, error) {
-	all, err := s.List(false)
+	return s.readyWith(agentType, true)
+}
+
+// ReadyView is the read-only counterpart of Ready (no file rewrite). Used by the
+// prompt-hook surfacing path.
+func (s *Store) ReadyView(agentType string) ([]*Task, error) {
+	return s.readyWith(agentType, false)
+}
+
+func (s *Store) readyWith(agentType string, persist bool) ([]*Task, error) {
+	all, err := s.list(false, persist)
 	if err != nil {
 		return nil, err
 	}
@@ -161,6 +208,9 @@ func (s *Store) Ready(agentType string) ([]*Task, error) {
 
 // Get returns a single task by id.
 func (s *Store) Get(id string) (*Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	lock, unlock, err := s.acquireLock()
 	if err != nil {
 		return nil, err
@@ -199,6 +249,9 @@ func (s *Store) Claim(opts ClaimOptions) (*Task, error) {
 	if lease <= 0 {
 		lease = DefaultLease
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	lock, unlock, err := s.acquireLock()
 	if err != nil {
@@ -253,6 +306,9 @@ func (s *Store) Cancel(id, reason string) error {
 }
 
 func (s *Store) terminate(id string, status Status, note string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	lock, unlock, err := s.acquireLock()
 	if err != nil {
 		return err
@@ -276,7 +332,11 @@ func (s *Store) terminate(id string, status Status, note string) error {
 		if note != "" {
 			t.Result = note
 		}
-		// clear lease fields — no longer claimed
+		// clear all claim/lease fields — no longer held
+		t.ClaimedByAgentID = ""
+		t.ClaimedByPID = 0
+		t.ClaimedHost = ""
+		t.ClaimedAt = time.Time{}
 		t.LeaseExpiresAt = time.Time{}
 		return s.rewriteLocked(tasks)
 	}
@@ -289,6 +349,10 @@ func (s *Store) ExtendLease(id string, lease time.Duration) error {
 	if lease <= 0 {
 		lease = DefaultLease
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	lock, unlock, err := s.acquireLock()
 	if err != nil {
 		return err
@@ -313,22 +377,45 @@ func (s *Store) ExtendLease(id string, lease time.Duration) error {
 	return fmt.Errorf("%w: %s", ErrTaskNotFound, id)
 }
 
-// reconcileLocked reads the current task set (last-write-wins by id), drops
-// expired and old-terminal rows, reclaims in_progress tasks whose lease expired
-// or whose claiming process died, and rewrites the file if anything changed.
-// Caller must hold the file lock. Returns the live task set.
+// reconcileLocked reads the task set and rewrites the file if reconciliation
+// changed anything. Caller must hold the file lock. Returns the live set.
 func (s *Store) reconcileLocked() ([]*Task, error) {
+	return s.reconcileWith(true)
+}
+
+// reconcileWith reads the current task set (last-write-wins by id) and computes
+// the live view: drops expired and old-terminal rows, reclaims stale in_progress
+// tasks. When persist is true and anything changed, it rewrites the file; when
+// false (read-only / hot path), it returns the in-memory view without writing.
+// Caller must hold the file lock.
+func (s *Store) reconcileWith(persist bool) ([]*Task, error) {
 	tasks, err := s.readTasksLocked()
 	if err != nil {
 		return nil, err
 	}
+	kept, changed := s.computeLive(tasks)
+	if persist && changed {
+		if err := s.rewriteLocked(kept); err != nil {
+			return nil, err
+		}
+	}
+	return kept, nil
+}
 
+// computeLive reconciles a freshly-read task set in memory and reports whether
+// it diverged from disk. Pure (no I/O); the in-memory Task pointers it reclaims
+// are fresh copies from readTasksLocked, so mutating them is safe.
+//
+// Crucially it never drops an in_progress task: a claimed task must not vanish
+// out from under the agent executing it (which would make its later
+// `tasks done` fail with ErrTaskNotFound). Expiry applies only once a task is
+// no longer being worked.
+func (s *Store) computeLive(tasks []*Task) (kept []*Task, changed bool) {
 	now := time.Now()
-	changed := false
-	kept := tasks[:0]
+	kept = tasks[:0]
 	for _, t := range tasks {
-		// drop expired tasks outright
-		if t.IsExpired() {
+		// expire ready/terminal tasks, but never an in_progress (claimed) one
+		if t.IsExpired() && t.Status != StatusInProgress {
 			changed = true
 			continue
 		}
@@ -349,13 +436,7 @@ func (s *Store) reconcileLocked() ([]*Task, error) {
 		}
 		kept = append(kept, t)
 	}
-
-	if changed {
-		if err := s.rewriteLocked(kept); err != nil {
-			return nil, err
-		}
-	}
-	return kept, nil
+	return kept, changed
 }
 
 // readTasksLocked reads all task rows, collapsing duplicate ids to the last
@@ -448,8 +529,11 @@ func (s *Store) rewriteLocked(tasks []*Task) error {
 	return nil
 }
 
-// enforceActiveCap evicts the oldest non-terminal tasks when the active count
-// exceeds maxActive. Terminal tasks are retained (they age out via retention).
+// enforceActiveCap evicts the oldest READY tasks when the active count exceeds
+// maxActive. It never evicts an in_progress task (claimed and being executed —
+// evicting it would silently discard in-flight work and 404 the agent's later
+// `tasks done`) nor a terminal task (those age out via retention). If every
+// active task is in_progress the cap may be exceeded rather than lose work.
 func enforceActiveCap(tasks []*Task) []*Task {
 	active := 0
 	for _, t := range tasks {
@@ -461,7 +545,7 @@ func enforceActiveCap(tasks []*Task) []*Task {
 		return tasks
 	}
 
-	// evict oldest active tasks first
+	// evict oldest ready tasks first
 	byAge := make([]*Task, len(tasks))
 	copy(byAge, tasks)
 	sort.SliceStable(byAge, func(i, j int) bool {
@@ -473,7 +557,7 @@ func enforceActiveCap(tasks []*Task) []*Task {
 		if toEvict == 0 {
 			break
 		}
-		if !t.IsTerminal() {
+		if t.Status == StatusReady {
 			evict[t.ID] = true
 			toEvict--
 		}
@@ -519,6 +603,15 @@ func (s *Store) acquireLock() (*flock.Flock, func(), error) {
 		cancel()
 	}
 	return lock, unlock, nil
+}
+
+// payloadSize returns the total bytes across a payload map's keys and values.
+func payloadSize(p map[string]string) int {
+	n := 0
+	for k, v := range p {
+		n += len(k) + len(v)
+	}
+	return n
 }
 
 // newTaskID returns a time-sortable UUIDv7 string, falling back to v4.

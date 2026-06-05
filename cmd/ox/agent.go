@@ -88,6 +88,7 @@ Execute scheduled work (run each in a fresh-context subagent):
   ox agent <agent_id> tasks next           # Claim the top ready task
   ox agent <agent_id> tasks done <task-id> # Mark a task completed
   ox agent <agent_id> tasks cancel <task-id> # Mark a task canceled
+  ox agent <agent_id> tasks extend <task-id> # Extend the lease on long work
 
 Stay in sync during long tasks:
   ox agent <agent_id> heartbeat            # Send heartbeat + receive pending whispers

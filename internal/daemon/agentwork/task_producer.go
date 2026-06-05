@@ -3,10 +3,17 @@ package agentwork
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/sageox/ox/internal/agenttask"
 )
+
+// safeSessionName matches the machine-generated session-name shape
+// (timestamp + user + agent-id, e.g. 2026-01-10T09-00-testuser-OxFIN). Anything
+// outside this charset is rejected so a hostile directory name on disk cannot be
+// laundered into a task body the agent reads (second-order injection).
+var safeSessionName = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 
 // Daemon task producer.
 //
@@ -107,6 +114,13 @@ func (m *Manager) produceFinalizeTasks() {
 		}
 		name, missing := finalizeTaskFields(item)
 		if name == "" {
+			continue
+		}
+		// Reject filesystem-derived names that don't match the machine-generated
+		// session shape — a hostile directory name must never be interpolated
+		// into a task body the agent reads (second-order injection).
+		if !safeSessionName.MatchString(name) {
+			m.logger.Warn("task producer: skipping session with unsafe name", "name", name)
 			continue
 		}
 		body := "A recorded session needs finalization (summary/artifacts). In a fresh-context subagent, run `ox agent <id> doctor` for the exact finalize commands, then finalize session " + name + "."

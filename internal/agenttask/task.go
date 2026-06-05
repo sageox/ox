@@ -28,6 +28,38 @@ const (
 	StatusCanceled Status = "canceled"
 )
 
+// Known task kinds. The vocabulary is closed on purpose: the surfacing/guidance
+// layer maps each kind to a FIXED ox action (a playbook), so the agent never
+// derives what to run from free-form task text. An unknown kind has no playbook
+// and must not be auto-executed.
+const (
+	KindDoctor          = "doctor"
+	KindSessionFinalize = "session-finalize"
+	KindAntiEntropy     = "anti-entropy"
+	KindCustom          = "custom"
+)
+
+var knownKinds = map[string]bool{
+	KindDoctor:          true,
+	KindSessionFinalize: true,
+	KindAntiEntropy:     true,
+	KindCustom:          true,
+}
+
+// ValidKind reports whether a kind is in the closed vocabulary. Empty is allowed
+// (treated as unclassified) so producers may omit it.
+func ValidKind(kind string) bool {
+	return kind == "" || knownKinds[kind]
+}
+
+// Size limits bound a single task so a hostile or buggy producer cannot flood
+// the agent's context or wedge the queue with an oversized row.
+const (
+	MaxTitleLen   = 200
+	MaxBodyLen    = 4096
+	MaxPayloadLen = 8192 // total bytes across payload keys+values
+)
+
 // DefaultLease is how long a claimed task stays in_progress before the store
 // reconciles it back to ready (assuming the claimer did not complete or extend
 // it). Picked to be long enough for a subagent to summarize a session but
@@ -97,6 +129,13 @@ func (t *Task) ClaimerDead(host string) bool {
 		return false
 	}
 	return !proc.IsAlive(t.ClaimedByPID)
+}
+
+// ClaimableBy reports whether a task targeted at a particular agent type may be
+// claimed/surfaced to the given agent type. Exported wrapper over the internal
+// match so callers outside the package (surfacing) use identical semantics.
+func (t *Task) ClaimableBy(agentType string) bool {
+	return t.matchesAgentType(agentType)
 }
 
 // matchesAgentType reports whether a ready task may be claimed by the given

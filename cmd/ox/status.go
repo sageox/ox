@@ -1323,11 +1323,13 @@ func renderAgentTasksSection(gitRoot string) string {
 	var b strings.Builder
 	b.WriteString("\n")
 	b.WriteString(statusLabelStyle.Render("Agent Tasks"))
+	// pending work is informational, not a "success" state — use a neutral
+	// highlight (no ✓ glyph) so "N ready" doesn't read as "N completed".
 	switch {
 	case ready > 0 && inProgress > 0:
-		b.WriteString(formatValue(fmt.Sprintf("%d ready, %d in progress", ready, inProgress), "success"))
+		b.WriteString(formatValue(fmt.Sprintf("%d ready, %d in progress", ready, inProgress), "highlight"))
 	case ready > 0:
-		b.WriteString(formatValue(fmt.Sprintf("%d ready", ready), "success"))
+		b.WriteString(formatValue(fmt.Sprintf("%d ready", ready), "highlight"))
 	default:
 		b.WriteString(formatValue(fmt.Sprintf("%d in progress", inProgress), "muted"))
 	}
@@ -1351,7 +1353,8 @@ func countAgentTasks(gitRoot string) (ready, inProgress int) {
 	if err != nil {
 		return 0, 0
 	}
-	tasks, err := store.List(false)
+	// read-only: a status read must not rewrite the queue file
+	tasks, err := store.ListView(false)
 	if err != nil {
 		return 0, 0
 	}

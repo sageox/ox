@@ -1,6 +1,7 @@
 package agenttask
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -61,6 +62,30 @@ func TestAddRequiresTitle(t *testing.T) {
 	}
 	if _, err := store.Add(nil); err == nil {
 		t.Fatalf("expected error for nil task")
+	}
+}
+
+func TestAddValidation(t *testing.T) {
+	store := newTestStore(t)
+
+	// unknown kind rejected
+	if _, err := store.Add(&Task{Title: "x", Kind: "evil-playbook"}); err == nil {
+		t.Fatalf("expected unknown kind to be rejected")
+	}
+	// known kinds accepted
+	for _, k := range []string{"", KindDoctor, KindSessionFinalize, KindAntiEntropy, KindCustom} {
+		if _, err := store.Add(&Task{Title: "ok", Kind: k, DedupKey: "k-" + k}); err != nil {
+			t.Fatalf("kind %q should be valid: %v", k, err)
+		}
+	}
+	// oversized title/body rejected
+	big := make([]byte, MaxBodyLen+1)
+	if _, err := store.Add(&Task{Title: "x", Body: string(big)}); err == nil {
+		t.Fatalf("expected oversized body to be rejected")
+	}
+	long := make([]byte, MaxTitleLen+1)
+	if _, err := store.Add(&Task{Title: string(long)}); err == nil {
+		t.Fatalf("expected oversized title to be rejected")
 	}
 }
 
@@ -317,6 +342,76 @@ func TestGetNotFound(t *testing.T) {
 	}
 	if err := store.Complete("nope", ""); err == nil {
 		t.Fatalf("expected ErrTaskNotFound on Complete")
+	}
+}
+
+// TestExpiry_DoesNotDropInProgress verifies a claimed task is not yanked out
+// from under the agent executing it when its ExpiresAt passes — otherwise the
+// agent's later `tasks done` would fail with ErrTaskNotFound for work it did.
+func TestExpiry_DoesNotDropInProgress(t *testing.T) {
+	store := newTestStore(t)
+	_, _ = store.Add(&Task{Title: "claimed"})
+	claimed, err := store.Claim(ClaimOptions{AgentID: "Oxa", PID: os.Getpid(), Lease: time.Hour})
+	if err != nil || claimed == nil {
+		t.Fatalf("claim: %v %v", claimed, err)
+	}
+
+	// backdate expiry into the past while it is in_progress
+	all, _ := store.readTasksLocked()
+	for _, tk := range all {
+		if tk.ID == claimed.ID {
+			tk.ExpiresAt = time.Now().Add(-time.Hour)
+		}
+	}
+	if err := store.rewriteLocked(all); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	// it must still exist (not expired away), and Complete must succeed
+	got, err := store.Get(claimed.ID)
+	if err != nil || got.Status != StatusInProgress {
+		t.Fatalf("expected in_progress task to survive expiry, got %+v err=%v", got, err)
+	}
+	if err := store.Complete(claimed.ID, "done"); err != nil {
+		t.Fatalf("Complete after expiry should succeed, got %v", err)
+	}
+}
+
+// TestEnforceActiveCap_NeverEvictsInProgress verifies the active-cap eviction
+// drops oldest READY tasks but never an in_progress (claimed, executing) one.
+func TestEnforceActiveCap_NeverEvictsInProgress(t *testing.T) {
+	var tasks []*Task
+	base := time.Now()
+	// oldest task is in_progress (claimed) — must be retained
+	tasks = append(tasks, &Task{ID: "inprog", Status: StatusInProgress, CreatedAt: base})
+	for i := 0; i < maxActive+5; i++ {
+		tasks = append(tasks, &Task{
+			ID:        fmt.Sprintf("ready-%d", i),
+			Status:    StatusReady,
+			CreatedAt: base.Add(time.Duration(i+1) * time.Second),
+		})
+	}
+
+	kept := enforceActiveCap(tasks)
+
+	var foundInprog bool
+	for _, t := range kept {
+		if t.ID == "inprog" {
+			foundInprog = true
+		}
+	}
+	if !foundInprog {
+		t.Fatalf("in_progress task was evicted by the active cap")
+	}
+	// active count is capped (in_progress + ready)
+	active := 0
+	for _, t := range kept {
+		if !t.IsTerminal() {
+			active++
+		}
+	}
+	if active > maxActive {
+		t.Fatalf("active count %d exceeds cap %d", active, maxActive)
 	}
 }
 

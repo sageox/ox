@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/agenttask"
@@ -166,14 +167,17 @@ func TestEmitAgentTasks_Throttle(t *testing.T) {
 	_, _ = agenttask.Enqueue(root, &agenttask.Task{Title: "surfaced", Priority: 1})
 
 	var buf bytes.Buffer
-	emitAgentTasks(&buf, root, "Oxtest")
-	if !strings.Contains(buf.String(), "scheduled agent task") || !strings.Contains(buf.String(), "SUBAGENT") {
+	emitAgentTasks(&buf, root, "Oxtest", "claude")
+	if !strings.Contains(buf.String(), "<agent-tasks") || !strings.Contains(buf.String(), "SUBAGENT") {
 		t.Fatalf("expected first surface to emit, got: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "untrusted-data") {
+		t.Fatalf("expected untrusted-data framing in surface block, got: %s", buf.String())
 	}
 
 	// second call with unchanged ready set is throttled (no output)
 	buf.Reset()
-	emitAgentTasks(&buf, root, "Oxtest")
+	emitAgentTasks(&buf, root, "Oxtest", "claude")
 	if buf.Len() != 0 {
 		t.Fatalf("expected throttled second surface to be silent, got: %s", buf.String())
 	}
@@ -181,7 +185,7 @@ func TestEmitAgentTasks_Throttle(t *testing.T) {
 	// a new task changes the signature → surfaces again
 	_, _ = agenttask.Enqueue(root, &agenttask.Task{Title: "another", Priority: 2})
 	buf.Reset()
-	emitAgentTasks(&buf, root, "Oxtest")
+	emitAgentTasks(&buf, root, "Oxtest", "claude")
 	if buf.Len() == 0 {
 		t.Fatalf("expected changed ready set to surface again")
 	}
@@ -191,9 +195,59 @@ func TestEmitAgentTasks_NoTasksSilent(t *testing.T) {
 	root := setupTaskProject(t)
 	t.Setenv("AGENT_ENV", "claude")
 	var buf bytes.Buffer
-	emitAgentTasks(&buf, root, "Oxtest")
+	emitAgentTasks(&buf, root, "Oxtest", "claude")
 	if buf.Len() != 0 {
 		t.Fatalf("expected silence with no tasks, got: %s", buf.String())
+	}
+}
+
+// TestEmitAgentTasks_BusyAgentSilent verifies an agent already holding an
+// in-progress task is not nudged about more work (prevents context pile-on and
+// task-executing-subagent recursion).
+func TestEmitAgentTasks_BusyAgentSilent(t *testing.T) {
+	root := setupTaskProject(t)
+	store, _ := agenttask.NewStore(root)
+	_, _ = store.Add(&agenttask.Task{Title: "being-worked"})
+	_, _ = store.Add(&agenttask.Task{Title: "also-ready"})
+	// Oxbusy claims one task
+	claimed, _ := store.Claim(agenttask.ClaimOptions{AgentID: "Oxbusy", PID: os.Getpid(), Lease: time.Hour})
+	if claimed == nil {
+		t.Fatal("expected a claim")
+	}
+
+	var buf bytes.Buffer
+	emitAgentTasks(&buf, root, "Oxbusy", "claude")
+	if buf.Len() != 0 {
+		t.Fatalf("busy agent should not be nudged, got: %s", buf.String())
+	}
+
+	// a different, idle agent IS nudged about the remaining ready task
+	buf.Reset()
+	emitAgentTasks(&buf, root, "Oxidle", "claude")
+	if buf.Len() == 0 {
+		t.Fatalf("idle agent should see the remaining ready task")
+	}
+}
+
+// TestEmitAgentTasks_AgentTypeSurfacesTargeted verifies the resolved agent type
+// (not raw AGENT_ENV) is used: a target=claude task surfaces to a claude agent
+// even when AGENT_ENV is unset in the environment.
+func TestEmitAgentTasks_AgentTypeSurfacesTargeted(t *testing.T) {
+	root := setupTaskProject(t)
+	os.Unsetenv("AGENT_ENV")
+	_, _ = agenttask.Enqueue(root, &agenttask.Task{Title: "claude job", TargetAgent: "claude"})
+
+	var buf bytes.Buffer
+	emitAgentTasks(&buf, root, "Oxc", "claude")
+	if buf.Len() == 0 {
+		t.Fatalf("target=claude task should surface to resolved claude agent despite unset AGENT_ENV")
+	}
+
+	// a codex agent must not see the claude-targeted task
+	buf.Reset()
+	emitAgentTasks(&buf, root, "Oxx", "codex")
+	if buf.Len() != 0 {
+		t.Fatalf("codex agent should not see claude-targeted task, got: %s", buf.String())
 	}
 }
 
@@ -239,7 +293,7 @@ func TestEmitAgentTasks_RespectsTargetAgent(t *testing.T) {
 	_, _ = agenttask.Enqueue(root, &agenttask.Task{Title: "codex job", TargetAgent: "codex"})
 
 	var buf bytes.Buffer
-	emitAgentTasks(&buf, root, "Oxtest")
+	emitAgentTasks(&buf, root, "Oxtest", "claude")
 	if buf.Len() != 0 {
 		t.Fatalf("claude should not be nudged about codex-targeted task, got: %s", buf.String())
 	}

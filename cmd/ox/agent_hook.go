@@ -280,6 +280,9 @@ func handleStart(ctx *HookContext) error {
 	// then prime will start a fresh recording for the new context window
 	if forceReprime && agentID != "" {
 		stopSessionForClear(ctx, agentID)
+		// the model's context window was wiped but the on-disk task cursor
+		// survives — reset it so pending tasks re-surface in the fresh context.
+		resetTaskCursor(ctx.ProjectRoot, agentID)
 	}
 
 	// prime auto-starts recording internally; call again as safety net
@@ -498,7 +501,9 @@ func handlePrompt(ctx *HookContext) error {
 
 	// Surface any scheduled agent tasks (throttled). This is the sole channel
 	// into the model's context for the task queue — see agent_tasks_surface.go.
-	emitAgentTasks(os.Stdout, ctx.ProjectRoot, agentID)
+	// Pass the resolved agent type (ctx.AgentType is defaulted to claude-code
+	// when AGENT_ENV is unset) so target-scoped tasks still surface.
+	emitAgentTasks(os.Stdout, ctx.ProjectRoot, agentID, ctx.AgentType)
 	return nil
 }
 
@@ -523,6 +528,9 @@ func handleCompact(ctx *HookContext) error {
 	if ctx.Marker != nil {
 		agentID = ctx.Marker.AgentID
 	}
+	// compaction wipes the context window; reset the task cursor so pending
+	// tasks re-surface afterward (the on-disk cursor outlives the context).
+	resetTaskCursor(ctx.ProjectRoot, agentID)
 	return runPrimeForHook(agentID, ctx)
 }
 
