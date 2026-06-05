@@ -88,6 +88,8 @@ sessions/
 .claude/settings.local.json
 # Claude worktrees
 .claude/worktrees/
+# Claude scheduled-task runtime lock (ephemeral: session PID + timestamp)
+.claude/scheduled_tasks.lock
 
 .codex/
 
