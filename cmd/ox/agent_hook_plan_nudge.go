@@ -47,10 +47,13 @@ const (
 	// later in an unrelated context.
 	planNudgeMaxAge = 30 * time.Minute
 
-	// planSubprocessTimeout caps the `ox plan --json` enrichment call. Enrich is
-	// pure-local (no network/LLM), so this is generous headroom, not a latency
-	// budget the user feels.
-	planSubprocessTimeout = 3 * time.Second
+	// planSubprocessTimeout caps the `ox plan --json --persist` call. Enrichment
+	// itself is pure-local, but --persist also saves + synchronously commits and
+	// pushes a draft to the ledger (the chosen durability model), so this is
+	// sized to absorb a network push, not just local enrichment. The hard kill
+	// is a safety ceiling: if the push wedges, the local commit still stands and
+	// the next push / `ox doctor` carries it — the agent is never hung.
+	planSubprocessTimeout = 30 * time.Second
 )
 
 // exitPlanModeInput is the minimal shape of Claude Code's ExitPlanMode
@@ -144,7 +147,10 @@ func runPlanEnrichment(planText string) (planJSONResult, bool) {
 		return res, false
 	}
 
-	cmd := exec.Command(oxPath, "plan", "--json")
+	// --persist: durably save + commit the draft now, so a plan exists on the
+	// ledger the moment the agent leaves plan mode (not contingent on a later
+	// `ox plan` / skill save). Enrichment output (stdout JSON) is unchanged.
+	cmd := exec.Command(oxPath, "plan", "--json", "--persist")
 	cmd.Stdin = strings.NewReader(planText)
 	cmd.Env = os.Environ()
 

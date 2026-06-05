@@ -32,6 +32,7 @@ Reads the active plan from --file or stdin. Use --json for the plumbing path
 	RunE: func(cmd *cobra.Command, args []string) error {
 		file, _ := cmd.Flags().GetString("file")
 		jsonOut, _ := cmd.Flags().GetBool("json")
+		persist, _ := cmd.Flags().GetBool("persist")
 
 		in, err := plan.Resolve(file, cmd.InOrStdin())
 		if err != nil {
@@ -53,9 +54,16 @@ Reads the active plan from --file or stdin. Use --json for the plumbing path
 
 		result := plan.Enrich(context.Background(), in, gitRoot)
 
-		// --json is the plumbing path: no save, no metrics side effects that
-		// could perturb stdout. Emit the Result and nothing else.
+		// --json is the plumbing path: by default no save, no metrics side
+		// effects that could perturb stdout — emit the Result and nothing else.
+		// With --persist (the ExitPlanMode hook passes it) the path ALSO saves +
+		// commits a draft, so a plan is durable the moment the agent exits plan
+		// mode. The save writes only to logs/ledger, never to stdout, so the
+		// JSON the hook parses stays clean.
 		if jsonOut {
+			if persist && gitRoot != "" && config.PlanSave(gitRoot) {
+				savePlanWithProvenance(gitRoot, in, result, nil)
+			}
 			return writePlanJSON(cmd, result)
 		}
 
@@ -118,23 +126,96 @@ func maybeSavePlan(gitRoot string, in plan.Input, result plan.Result) string {
 	if gitRoot == "" || !config.PlanSave(gitRoot) {
 		return ""
 	}
+	return savePlanWithProvenance(gitRoot, in, result, nil)
+}
 
+// savePlanWithProvenance is the shared capture path: it stamps the plan with
+// provenance (session/agent/repo) + deterministic collaboration signals, writes
+// it to the ledger (read-merge preserving lifecycle), records the reverse link
+// on the live recording, and durably commits + pushes the plan dir. Returns the
+// saved directory, or "" on any failure (capture is best-effort and never
+// aborts the command the agent is waiting on).
+func savePlanWithProvenance(gitRoot string, in plan.Input, result plan.Result, html []byte) string {
 	topic := planTopic(in)
+	slug := plan.Slugify(topic)
+
+	prov, recState := resolvePlanProvenance(gitRoot)
+	collab := deriveCollabSignals(recState)
+
 	meta := plan.Meta{
 		Topic:          topic,
-		Slug:           plan.Slugify(topic),
+		Slug:           slug,
 		Authors:        planAuthors(gitRoot),
 		CreatedAt:      time.Now().UTC(),
 		SourcePlanPath: in.Path,
+		Provenance:     prov,
+		Collaboration:  collab,
 	}
 
-	dir, err := plan.Save(gitRoot, in, result, nil, meta)
+	dir, err := plan.Save(gitRoot, in, result, html, meta)
 	if err != nil {
-		// best-effort: a missing ledger or write failure must not break the
-		// enrichment output the agent is waiting on.
 		return ""
 	}
+
+	// reverse link: record the slug on the live recording so it folds into the
+	// session's meta.json at stop (no-op if there's no live recording).
+	if prov != nil && prov.SessionName != "" {
+		_ = appendProducedPlan(gitRoot, prov.AgentID, slug)
+	}
+
+	// durability: commit + push the plan dir now (sync). Best-effort — a push
+	// failure leaves the local commit for the next push / `ox doctor`.
+	if err := commitPlanToLedger(gitRoot, dir); err != nil {
+		slog.Warn("plan: commit/push failed, deferring to next push/doctor", "error", err, "dir", dir)
+	}
+
+	slog.Info("plan_saved_provenance",
+		"slug", slug,
+		"session", provSessionLabel(prov),
+		"agent_id", provAgentLabel(prov),
+		"user_prompts", collabCount(collab, "user_prompts"),
+		"agent_questions", collabCount(collab, "agent_questions"),
+		"tool_calls", collabCount(collab, "tool_calls"),
+		"duration_s", collabCount(collab, "duration_seconds"))
+
 	return dir
+}
+
+// provSessionLabel / provAgentLabel render provenance fields for structured
+// logs without panicking on a nil provenance.
+func provSessionLabel(p *plan.Provenance) string {
+	if p == nil {
+		return ""
+	}
+	if p.SessionID != "" {
+		return p.SessionID
+	}
+	return p.SessionName
+}
+
+func provAgentLabel(p *plan.Provenance) string {
+	if p == nil {
+		return ""
+	}
+	return p.AgentID
+}
+
+// collabCount reads a single collaboration count for logging; 0 when absent.
+func collabCount(c *plan.CollabSignals, field string) int {
+	if c == nil {
+		return 0
+	}
+	switch field {
+	case "user_prompts":
+		return c.UserPrompts
+	case "agent_questions":
+		return c.AgentQuestions
+	case "tool_calls":
+		return c.ToolCalls
+	case "duration_seconds":
+		return c.DurationSeconds
+	}
+	return 0
 }
 
 // runPlanSave persists a fully-enriched plan to the ledger from a plan markdown
@@ -181,22 +262,16 @@ func runPlanSave(cmd *cobra.Command) error {
 		}
 	}
 
+	// The skill path always persists (no plan.save gate) and reuses the shared
+	// provenance/collaboration + read-merge + commit path so the hook's draft
+	// and the skill's full save converge on the same dated-slug dir.
 	gitRoot := findGitRoot()
-	topic := planTopic(in)
-	meta := plan.Meta{
-		Topic:          topic,
-		Slug:           plan.Slugify(topic),
-		Authors:        planAuthors(gitRoot),
-		CreatedAt:      time.Now().UTC(),
-		SourcePlanPath: planPath,
+	dir := savePlanWithProvenance(gitRoot, in, result, html)
+	if dir == "" {
+		return fmt.Errorf("save plan: no ledger configured for %q or write failed", gitRoot)
 	}
 
-	dir, err := plan.Save(gitRoot, in, result, html, meta)
-	if err != nil {
-		return fmt.Errorf("save plan: %w", err)
-	}
-
-	slog.Info("plan_saved", "dir", dir, "slug", meta.Slug, "html", htmlPath != "", "annotations", len(result.Annotations))
+	slog.Info("plan_saved", "dir", dir, "html", htmlPath != "", "annotations", len(result.Annotations))
 	fmt.Fprintf(cmd.OutOrStdout(), "Saved plan to ledger: %s\n", dir)
 	return nil
 }
@@ -326,6 +401,14 @@ func runPlanView(cmd *cobra.Command, slug string, open bool) error {
 	if len(info.Authors) > 0 {
 		fmt.Fprintln(out, cli.StyleDim.Render("authors: "+strings.Join(info.Authors, ", ")))
 	}
+	if meta, err := plan.ReadPlanMeta(gitRoot, info.Slug); err == nil {
+		if line := planProvenanceLine(meta); line != "" {
+			fmt.Fprintln(out, cli.StyleDim.Render(line))
+		}
+		if line := planCollabLine(meta); line != "" {
+			fmt.Fprintln(out, cli.StyleDim.Render(line))
+		}
+	}
 	fmt.Fprintln(out)
 
 	fmt.Fprintln(out, planMD)
@@ -382,6 +465,58 @@ func writeBadgeSummary(out io.Writer, res plan.Result) {
 	}
 }
 
+// planProvenanceLine renders the one-line forward link (session · agent · model
+// · outcome) for a saved plan, or "" when the plan carries no provenance.
+func planProvenanceLine(meta plan.Meta) string {
+	p := meta.Provenance
+	if p == nil {
+		return ""
+	}
+	var parts []string
+	switch {
+	case p.SessionID != "":
+		parts = append(parts, "session: "+p.SessionID)
+	case p.SessionName != "":
+		parts = append(parts, "session: "+p.SessionName)
+	}
+	if p.AgentID != "" {
+		parts = append(parts, "agent: "+p.AgentID)
+	}
+	if p.Model != "" {
+		parts = append(parts, "model: "+p.Model)
+	}
+	if p.SessionOutcome != "" && p.SessionOutcome != plan.SessionOutcomeActive {
+		parts = append(parts, "session "+p.SessionOutcome)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, " · ")
+}
+
+// planCollabLine renders the one-line collaboration fingerprint (status +
+// effort proxies) for a saved plan, or "" when there are no collaboration
+// signals.
+func planCollabLine(meta plan.Meta) string {
+	c := meta.Collaboration
+	if c == nil {
+		return ""
+	}
+	parts := []string{
+		fmt.Sprintf("%d prompts", c.UserPrompts),
+		fmt.Sprintf("%d questions", c.AgentQuestions),
+		fmt.Sprintf("%d tool calls", c.ToolCalls),
+	}
+	if c.DurationSeconds > 0 {
+		parts = append(parts, fmt.Sprintf("%ds", c.DurationSeconds))
+	}
+	prefix := ""
+	if meta.Status != "" {
+		prefix = string(meta.Status) + " · "
+	}
+	return "collaboration: " + prefix + strings.Join(parts, " · ")
+}
+
 func planDate(t time.Time) string {
 	if t.IsZero() {
 		return "—"
@@ -416,6 +551,7 @@ func truncate(s string, n int) string {
 
 func init() {
 	planCmd.Flags().Bool("json", false, "emit the enrichment Result as JSON (plumbing path; no network/LLM call)")
+	planCmd.Flags().Bool("persist", false, "with --json, also save + commit a draft to the ledger (used by the ExitPlanMode hook)")
 	planCmd.Flags().String("file", "", "plan source file (default: stdin, else newest ~/.claude/plans/*.md)")
 
 	planViewCmd.Flags().Bool("open", false, "open the rendered plan.html in your browser (if one was saved)")

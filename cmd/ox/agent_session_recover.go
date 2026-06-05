@@ -221,6 +221,7 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 						EntryCount(entryCount).
 						StopReason(session.StopReasonRecovered).
 						ProducedCommits(state.ProducedCommits).
+						ProducedPlans(state.ProducedPlans).
 						WithFiles(fileRefs)
 					if preservedID != "" {
 						metaBuilder = metaBuilder.SessionID(preservedID)

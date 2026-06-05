@@ -70,22 +70,22 @@ type SessionMeta struct {
 	//     and silently break dedup/lookup.
 	SessionID string `json:"session_id,omitempty"`
 
-	AgentType           string    `json:"agent_type"` // "claude-code", "cursor", etc.
-	Model               string    `json:"model,omitempty"`
-	Title               string    `json:"title,omitempty"`
-	CreatedAt           time.Time `json:"created_at"`
-	EntryCount          int       `json:"entry_count,omitempty"`
-	Summary             string    `json:"summary,omitempty"`
-	StopReason          string    `json:"stop_reason,omitempty"`             // how session ended (session.StopReason* constants)
-	StopDetail          string    `json:"stop_detail,omitempty"`             // human-readable detail (matched message, capped 512B)
-	StopSource          string    `json:"stop_source,omitempty"`             // adapterprotocol.TerminalSource* (structured / regex / exit_code)
-	StopPatternID       string    `json:"stop_pattern_id,omitempty"`         // which adapter pattern fired
-	StopResetsAtRaw     string    `json:"stop_resets_at_raw,omitempty"`      // raw reset-time substring as matched
-	StopResetsAt        *time.Time `json:"stop_resets_at,omitempty"`         // parsed absolute reset time, may be nil even when raw populated
-	RepoID              string    `json:"repo_id,omitempty"`
-	SageoxScore         *float64  `json:"sageox_score,omitempty"`          // agent's self-reported contribution score (0.0-1.0)
-	SageoxScoreCategory string    `json:"sageox_score_category,omitempty"` // named category: none, minor, moderate, significant, critical
-	SageoxScoreReason   string    `json:"sageox_score_reason,omitempty"`   // detailed explanation of SageOx influence
+	AgentType           string     `json:"agent_type"` // "claude-code", "cursor", etc.
+	Model               string     `json:"model,omitempty"`
+	Title               string     `json:"title,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	EntryCount          int        `json:"entry_count,omitempty"`
+	Summary             string     `json:"summary,omitempty"`
+	StopReason          string     `json:"stop_reason,omitempty"`        // how session ended (session.StopReason* constants)
+	StopDetail          string     `json:"stop_detail,omitempty"`        // human-readable detail (matched message, capped 512B)
+	StopSource          string     `json:"stop_source,omitempty"`        // adapterprotocol.TerminalSource* (structured / regex / exit_code)
+	StopPatternID       string     `json:"stop_pattern_id,omitempty"`    // which adapter pattern fired
+	StopResetsAtRaw     string     `json:"stop_resets_at_raw,omitempty"` // raw reset-time substring as matched
+	StopResetsAt        *time.Time `json:"stop_resets_at,omitempty"`     // parsed absolute reset time, may be nil even when raw populated
+	RepoID              string     `json:"repo_id,omitempty"`
+	SageoxScore         *float64   `json:"sageox_score,omitempty"`          // agent's self-reported contribution score (0.0-1.0)
+	SageoxScoreCategory string     `json:"sageox_score_category,omitempty"` // named category: none, minor, moderate, significant, critical
+	SageoxScoreReason   string     `json:"sageox_score_reason,omitempty"`   // detailed explanation of SageOx influence
 
 	// SummaryStatus and ValidationError mirror the same-named fields on
 	// pkg/sessionsummary.SummarizeResponse. SummaryStatus is the
@@ -184,6 +184,15 @@ type SessionMeta struct {
 	// (Fixes #N / Closes #N / Resolves #N / GH-N) on the pushed range and
 	// from any LinkedPR body. omitempty for legacy round-trip.
 	LinkedIssues []string `json:"linked_issues,omitempty"`
+
+	// ProducedPlans is the reverse-direction index of plan slugs captured
+	// during this recording (the forward link lives on each plan's meta.json
+	// as provenance.session_id). Accumulated in RecordingState.ProducedPlans
+	// while the recording is active and folded into meta.json at session-stop
+	// — exactly mirroring ProducedCommits. An aborted session never reaches
+	// this fold, so the plan's forward link is the sole record in that case.
+	// omitempty so older meta.json files round-trip unchanged.
+	ProducedPlans []string `json:"produced_plans,omitempty"`
 
 	// LinkageStatus is the upload/notify lifecycle state for PR/issue
 	// linkage. See docs/ai/specs/session-pr-issue-linkage.md (v1.5) for the
@@ -439,6 +448,15 @@ func (b *SessionMetaBuilder) RepoID(id string) *SessionMetaBuilder {
 // order; duplicates are not deduplicated (callers do that if needed).
 func (b *SessionMetaBuilder) ProducedCommits(shas []string) *SessionMetaBuilder {
 	b.meta.ProducedCommits = shas
+	return b
+}
+
+// ProducedPlans sets the reverse-direction plan-slug index for this session.
+// Caller passes the slugs accumulated in RecordingState.ProducedPlans during
+// the active recording. Order preserves capture order; duplicates are not
+// deduplicated here (the append site dedups).
+func (b *SessionMetaBuilder) ProducedPlans(slugs []string) *SessionMetaBuilder {
+	b.meta.ProducedPlans = slugs
 	return b
 }
 

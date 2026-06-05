@@ -111,6 +111,13 @@ type RecordingState struct {
 	// older .recording.json files round-trip unchanged.
 	ProducedCommits []string `json:"produced_commits,omitempty"`
 
+	// ProducedPlans is the reverse-direction index of plan slugs captured
+	// during this recording (e.g. by `ox plan` auto-save). Appended at
+	// plan-save time, folded into SessionMeta.ProducedPlans at session stop /
+	// finalize — mirrors ProducedCommits. omitempty so older .recording.json
+	// files round-trip unchanged.
+	ProducedPlans []string `json:"produced_plans,omitempty"`
+
 	// LinkedPRs / LinkedIssues are the GitHub PR and issue references this
 	// recording is associated with. Appended by the pre-push hook from the
 	// pushed commit range, folded into SessionMeta at stop. omitempty for

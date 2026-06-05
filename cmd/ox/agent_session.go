@@ -24,6 +24,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/plan"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/session"
@@ -1316,6 +1317,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		Summary(result.Summary).
 		StopReason(session.StopReasonStopped).
 		ProducedCommits(state.ProducedCommits).
+		ProducedPlans(state.ProducedPlans).
 		LinkedPRs(state.LinkedPRs).
 		LinkedIssues(state.LinkedIssues).
 		// staged: meta.json is being written here, BEFORE the LFS upload +
@@ -1378,6 +1380,12 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		return fmt.Errorf("commit and push: %w", err)
 	}
 
+	// reverse-link reconciliation: the session now has a canonical ses_ id and
+	// is committed, so backfill it + outcome=stopped onto every plan this
+	// session produced (slugs in hand — no directory scan), then commit those
+	// plan dirs. Best-effort; any miss falls to `ox doctor`.
+	reconcileProducedPlansAtStop(projectRoot, state.ProducedPlans, meta.EffectiveSessionID())
+
 	// push succeeded — now safe to replace content files with LFS pointer stubs
 	if len(meta.Files) > 0 {
 		// WritePointerFiles can return both a partial `written` slice AND a
@@ -1412,6 +1420,28 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	finalizeLinkageAfterPush(projectRoot, sessionDir, meta, sessionName)
 
 	return nil
+}
+
+// reconcileProducedPlansAtStop backfills the canonical session id + a
+// "stopped" outcome onto every plan a just-stopped session produced, then
+// commits each updated plan dir (data/plans/ is not covered by the session
+// commit). Slug-driven — no directory scan — and fully best-effort: any miss
+// is reconciled later by `ox doctor`.
+func reconcileProducedPlansAtStop(projectRoot string, slugs []string, sessionID string) {
+	for _, slug := range slugs {
+		if err := plan.ReconcileSessionOutcome(projectRoot, slug, sessionID, plan.SessionOutcomeStopped); err != nil {
+			slog.Debug("plan reconcile at stop failed", "slug", slug, "error", err)
+			continue
+		}
+		_, _, info, err := plan.Load(projectRoot, slug)
+		if err != nil {
+			slog.Debug("plan reconcile load failed", "slug", slug, "error", err)
+			continue
+		}
+		if cerr := commitPlanToLedger(projectRoot, info.Dir); cerr != nil {
+			slog.Debug("plan reconcile commit failed", "slug", slug, "error", cerr)
+		}
+	}
 }
 
 // copySessionCacheToLedger delegates to pipeline.CopySessionToLedger with the real filesystem.

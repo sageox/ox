@@ -2,6 +2,7 @@ package plan
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -308,5 +309,163 @@ func TestSave_DefaultsSlugAndTimestamp(t *testing.T) {
 	}
 	if meta.CreatedAt.IsZero() {
 		t.Errorf("meta.CreatedAt is zero, want defaulted")
+	}
+}
+
+// --- Provenance, status, collaboration, and read-merge lifecycle ---
+
+// TestSave_StampsProvenanceStatusAndCollab verifies a saved plan persists its
+// forward link (provenance), collaboration signals, and defaults Status=draft.
+// Failure prevented: plans saved with no committed link back to the producing
+// session/agent, defeating the whole feature.
+func TestSave_StampsProvenanceStatusAndCollab(t *testing.T) {
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+
+	in := Input{Path: "PLAN.md", Raw: "# Link plans to sessions\n\nbody"}
+	meta := Meta{
+		Topic:     "Link plans to sessions",
+		CreatedAt: time.Date(2026, 6, 4, 9, 0, 0, 0, time.UTC),
+		Provenance: &Provenance{
+			SessionName: "2026-06-04-ryan-Oxab12", AgentID: "Oxab12",
+			RepoID: "repo-1", AgentType: "claude-code", Model: "opus",
+			AuthorName: "Person A", SessionOutcome: SessionOutcomeActive,
+		},
+		Collaboration: &CollabSignals{UserPrompts: 5, AgentQuestions: 3, ToolCalls: 12, DurationSeconds: 600},
+	}
+
+	if _, err := Save("/g", in, sampleResult(), nil, meta); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	got, err := ReadPlanMeta("/g", "link-plans-to-sessions")
+	if err != nil {
+		t.Fatalf("ReadPlanMeta: %v", err)
+	}
+	if got.Status != PlanStatusDraft {
+		t.Errorf("Status = %q, want draft", got.Status)
+	}
+	if got.Provenance == nil || got.Provenance.AgentID != "Oxab12" || got.Provenance.SessionName != "2026-06-04-ryan-Oxab12" {
+		t.Errorf("provenance not persisted: %+v", got.Provenance)
+	}
+	if got.Collaboration == nil || got.Collaboration.UserPrompts != 5 || got.Collaboration.DurationSeconds != 600 {
+		t.Errorf("collaboration not persisted: %+v", got.Collaboration)
+	}
+}
+
+// TestSave_ReadMergePreservesLifecycle verifies a re-save preserves a
+// manually-set Status, the system-reconciled SessionOutcome, and the original
+// CreatedAt while refreshing the rest.
+// Failure prevented: the skill's full save (or any re-enrich) silently resets a
+// plan marked "implemented" back to "draft", or loses the session outcome.
+func TestSave_ReadMergePreservesLifecycle(t *testing.T) {
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+
+	orig := time.Date(2026, 6, 4, 8, 0, 0, 0, time.UTC)
+	in := Input{Path: "P.md", Raw: "# My plan\n\nv1"}
+	if _, err := Save("/g", in, sampleResult(), nil, Meta{Topic: "My plan", CreatedAt: orig}); err != nil {
+		t.Fatalf("Save v1: %v", err)
+	}
+
+	// human marks implemented; stop reconciles the session outcome.
+	if err := SetStatus("/g", "my-plan", PlanStatusImplemented); err != nil {
+		t.Fatalf("SetStatus: %v", err)
+	}
+	if err := ReconcileSessionOutcome("/g", "my-plan", "ses_abc", SessionOutcomeStopped); err != nil {
+		t.Fatalf("ReconcileSessionOutcome: %v", err)
+	}
+
+	// re-save (e.g. skill's full save) with a later CreatedAt and fresh result.
+	if _, err := Save("/g", Input{Path: "P.md", Raw: "# My plan\n\nv2"}, sampleResult(), nil,
+		Meta{Topic: "My plan", CreatedAt: orig.Add(2 * time.Hour)}); err != nil {
+		t.Fatalf("Save v2: %v", err)
+	}
+
+	got, err := ReadPlanMeta("/g", "my-plan")
+	if err != nil {
+		t.Fatalf("ReadPlanMeta: %v", err)
+	}
+	if got.Status != PlanStatusImplemented {
+		t.Errorf("Status = %q, want implemented preserved across re-save", got.Status)
+	}
+	if got.Provenance == nil || got.Provenance.SessionOutcome != SessionOutcomeStopped {
+		t.Errorf("SessionOutcome not preserved: %+v", got.Provenance)
+	}
+	if got.Provenance.SessionID != "ses_abc" {
+		t.Errorf("SessionID backfill lost on re-save: %+v", got.Provenance)
+	}
+	if !got.CreatedAt.Equal(orig) {
+		t.Errorf("CreatedAt = %v, want original %v preserved", got.CreatedAt, orig)
+	}
+	// markdown still refreshed to v2.
+	md, _, _, _ := Load("/g", "my-plan")
+	if !strings.Contains(md, "v2") {
+		t.Errorf("plan.md not refreshed on re-save: %q", md)
+	}
+}
+
+// TestReconcileSessionOutcome_BackfillsSessionID verifies stop-time backfill of
+// the canonical ses_ id alongside the outcome.
+// Failure prevented: the forward link never gets its ses_ id (only the
+// save-time session name), so a UI keyed on ses_ can't join.
+func TestReconcileSessionOutcome_BackfillsSessionID(t *testing.T) {
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+	if _, err := Save("/g", Input{Raw: "# Topic A\n"}, sampleResult(), nil, Meta{Topic: "Topic A", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := ReconcileSessionOutcome("/g", "topic-a", "ses_7", SessionOutcomeAborted); err != nil {
+		t.Fatalf("ReconcileSessionOutcome: %v", err)
+	}
+	got, _ := ReadPlanMeta("/g", "topic-a")
+	if got.Provenance == nil || got.Provenance.SessionID != "ses_7" || got.Provenance.SessionOutcome != SessionOutcomeAborted {
+		t.Errorf("backfill failed: %+v", got.Provenance)
+	}
+}
+
+// TestMutatePlanMeta_MissingFileNoOp verifies the mutator gets nil for a
+// missing meta.json and a nil return writes nothing.
+func TestMutatePlanMeta_MissingFileNoOp(t *testing.T) {
+	dir := t.TempDir()
+	called := false
+	err := MutatePlanMeta(context.Background(), dir, func(m *Meta) (*Meta, error) {
+		called = true
+		if m != nil {
+			t.Errorf("expected nil meta for missing file, got %+v", m)
+		}
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("MutatePlanMeta: %v", err)
+	}
+	if !called {
+		t.Error("mutator not called")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "meta.json")); !os.IsNotExist(err) {
+		t.Error("meta.json should not be created on nil return")
+	}
+}
+
+// TestReadPlanMeta_LegacyNoProvenance verifies a v1 plan dir (no provenance /
+// status) loads cleanly with empty status — readers treat it as draft.
+// Failure prevented: the new fields break reading plans saved before them.
+func TestReadPlanMeta_LegacyNoProvenance(t *testing.T) {
+	ledger := t.TempDir()
+	withLedger(t, ledger)
+	dir := filepath.Join(ledger, "data", "plans", "2026-01-01-legacy-plan")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := `{"topic":"Legacy plan","slug":"legacy-plan","created_at":"2026-01-01T00:00:00Z"}`
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadPlanMeta("/g", "legacy-plan")
+	if err != nil {
+		t.Fatalf("ReadPlanMeta legacy: %v", err)
+	}
+	if got.Status != "" || got.Provenance != nil || got.Collaboration != nil {
+		t.Errorf("legacy meta should have empty new fields, got %+v", got)
 	}
 }

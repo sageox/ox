@@ -53,6 +53,10 @@ const (
 	BadgeConflicts BadgeType = "conflicts"
 	// BadgeExpertPersp: synthesized expert stance, cited (judgment).
 	BadgeExpertPersp BadgeType = "expert-perspective"
+	// BadgeRigor: collaboration-rigor stance synthesized from CollabSignals —
+	// how thoughtful the human↔agent path to this plan was (judgment). ox emits
+	// the raw counts (CollabSignals); the agent/cloud authors this badge.
+	BadgeRigor BadgeType = "rigor"
 )
 
 // Annotation is a single badge attached to a plan section.
