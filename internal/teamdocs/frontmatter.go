@@ -12,6 +12,10 @@ type docFrontmatter struct {
 	Description string
 	Visibility  string
 	When        string
+	// Template marks an ox-shipped starter doc the team hasn't filled in yet.
+	// Forward-compatible: when the cloud stamps starters with `template: true`,
+	// discovery skips them so unedited scaffolds never surface as knowledge.
+	Template bool
 }
 
 // parseFrontmatter extracts team doc metadata from YAML frontmatter.
@@ -84,6 +88,8 @@ func parseFrontmatter(path string) docFrontmatter {
 			fm.Description = extractValue(line, "description:")
 		} else if strings.HasPrefix(line, "visibility:") {
 			fm.Visibility = extractValue(line, "visibility:")
+		} else if strings.HasPrefix(line, "template:") {
+			fm.Template = strings.EqualFold(extractValue(line, "template:"), "true")
 		} else if strings.HasPrefix(line, "when:") {
 			val := extractValue(line, "when:")
 			if val == ">-" || val == ">" || val == "|" || val == "|-" {

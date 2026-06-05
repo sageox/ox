@@ -46,6 +46,14 @@ flowchart TB
    - When unsure whether a conflict is real, downgrade to "Novel — no prior decision found," not a false `conflicts`.
    - Set `kind:"judgment"` on every badge you author so the renderer can style it distinctly from ox's deterministic ones.
 
+   **NEVER paste the `context[]` bundle verbatim into the HTML.** The bundle is your *reasoning input*, not render output. Dumping the raw items as a flat "session / discussion" card list is the failure mode this spec exists to prevent — it surfaces mid-sentence snippet fragments, low-relevance chatter, and un-cited noise as if it were a finding. The bundle items become HTML *only* after you reason over them into a cited judgment badge attached to a specific plan section. A bundle item you can't turn into a section-anchored, cited badge does not appear in the render at all. Worked example:
+
+   > Bundle item → `{kind:"adr", title:"ADR-018 codedb perf budget", ref:"docs/adr/018...", snippet:"...512MB resident ceiling..."}`
+   > Plan section 3 proposes an in-memory index. →
+   > **Authored badge** → `{section:"3. Index", kind:"judgment", type:"conflicts", why:"In-memory index may breach the 512MB ceiling set in ADR-018", source_url:"docs/adr/018...", ...}`
+   >
+   > If the same ADR were only tangentially related: degrade to `expert-perspective` → "consult `<name>`", NOT a card pasting the raw snippet.
+
 3. **Render ONE self-contained HTML file** meeting the full html-plan quality bar below PLUS the badge-native additions.
 
 4. **Persist the full plan with `ox plan save`.** Bare `ox plan` only auto-saves ox's *deterministic* badges (it cannot see your judgment badges). To persist the complete plan — your merged badges plus the render — call:
@@ -80,7 +88,23 @@ These are what make this an *enriched* plan, not just a pretty one. The human mu
 
 Use the SageOx semantic colors: sage for aligns, red for conflicts, amber for collisions/active-work, copper for expert routes. Each count is a chip; clicking/anchoring it can jump to the first section carrying that badge. This is the "should I even keep reading" glance.
 
-**2. Per-section badge rail.** Every plan section renders its badges in a right-aligned rail (or a row directly under the H2). A badge shows: an icon/dot, the type label, and a **source link** when `source_url`/`ref` is present. Collapse multiple badges of the same type into a count chip that expands.
+**2. Per-section badge rail.** Every plan section renders its badges in a right-aligned rail (or a row directly under the H2). A badge shows: an icon/dot, the type label, a **provenance chip** (see below), and a **source link** when `source_url`/`ref` is present. Collapse multiple badges of the same type into a count chip that expands.
+
+**2a. Per-kind provenance chip + (i) popover.** Every badge carries a small chip naming WHERE its evidence came from, keyed off the bundle item's `kind`, so the reviewer can tell team convention from ledger history from live work at a glance:
+
+| `kind` | Chip label | Semantic color |
+|---|---|---|
+| `adr` | `ADR` | copper |
+| `decision` | `decision` | copper |
+| `discussion` | `team context` | sage |
+| `session` | `ledger · session` | teal |
+| `commit` | `commit` | teal |
+| `murmur` | `active work` | amber |
+
+Each chip has an **(i) affordance** that, on hover OR keyboard focus, opens a small popover showing: the source kind, the author and `when` (if present), the **cleaned** snippet trimmed to one readable clause (never a mid-sentence fragment — if the snippet is clipped, summarize it instead of pasting it), and the resolved link. Requirements:
+- **Pure CSS + a tiny vanilla-JS toggle — no external JS, must work from `file://`.** Hover via `:hover`/`:focus-within`; also support click-to-pin for touch/keyboard. The trigger is a real `<button>` (focusable, `aria-describedby` the popover) — not a bare `<span>` — so it is keyboard- and screen-reader-accessible.
+- The popover inherits the light/dark CSS variables (legible in both themes) and never overflows the viewport (flip/clamp on the right edge).
+- Group/color the chips by the palette above so the alignment strip, rail, and popovers tell one consistent provenance story.
 
 **3. Deterministic vs. judgment — visually distinct.** The human must always know which badges ox *computed* (factual) and which the agent *authored* (cited judgment). Make the treatment unmistakable:
 

@@ -252,15 +252,15 @@ func TestTopicTerms(t *testing.T) {
 
 // --- D. Ranking + capping ---
 
-// TestRankAndCap verifies items are ordered by score desc and the bundle is
-// truncated to the cap.
+// TestRankAndCap verifies above-floor items are ordered by score desc and the
+// bundle is truncated to the cap.
 // Failure prevented: an unbounded bundle blowing the client agent's context
 // budget, or low-relevance items crowding out strong ones.
 func TestRankAndCap(t *testing.T) {
 	items := []ContextItem{
-		{Kind: "session", Ref: "low", Score: 0.2},
+		{Kind: "session", Ref: "weak", Score: 0.6},
 		{Kind: "murmur", Ref: "high", Score: 0.9},
-		{Kind: "decision", Ref: "mid", Score: 0.5},
+		{Kind: "decision", Ref: "mid", Score: 0.7},
 	}
 	got := rankAndCap(items, 2)
 	if len(got) != 2 {
@@ -271,15 +271,50 @@ func TestRankAndCap(t *testing.T) {
 	}
 }
 
+// TestRankAndCapScoreFloor verifies items below minBundleScore are dropped.
+// Failure prevented: weak chatter (a single-token doc match, a barely-relevant
+// session) leaking into the bundle as a low-quality citation — the exact
+// "noise" failure mode this fix targets.
+func TestRankAndCapScoreFloor(t *testing.T) {
+	items := []ContextItem{
+		{Kind: "session", Ref: "barely", Score: 0.48},  // below floor
+		{Kind: "discussion", Ref: "weak", Score: 0.43}, // below floor (single-token doc)
+		{Kind: "murmur", Ref: "strong", Score: 0.60},   // clears floor
+	}
+	got := rankAndCap(items, 0)
+	if len(got) != 1 || got[0].Ref != "strong" {
+		t.Fatalf("got %v, want only [strong] after floor", refs(got))
+	}
+}
+
+// TestRankAndCapDedup verifies duplicate (kind,ref) items collapse to the
+// highest-scoring one.
+// Failure prevented: the same session/doc surfacing twice in the bundle,
+// wasting the agent's tokens and double-counting a single source.
+func TestRankAndCapDedup(t *testing.T) {
+	items := []ContextItem{
+		{Kind: "session", Ref: "dup", Score: 0.6},
+		{Kind: "session", Ref: "dup", Score: 0.9}, // higher — should win
+		{Kind: "session", Ref: "other", Score: 0.7},
+	}
+	got := rankAndCap(items, 0)
+	if len(got) != 2 {
+		t.Fatalf("got %d items, want 2 after dedup (refs: %v)", len(got), refs(got))
+	}
+	if got[0].Ref != "dup" || got[0].Score != 0.9 {
+		t.Fatalf("got[0] = {%s, %.2f}, want {dup, 0.90} (kept highest)", got[0].Ref, got[0].Score)
+	}
+}
+
 // TestRankAndCapDeterministic verifies equal scores break ties deterministically
 // (kind then ref) so JSON output is stable across runs.
 // Failure prevented: non-deterministic bundle ordering that breaks output diffs
 // and flakes tests downstream.
 func TestRankAndCapDeterministic(t *testing.T) {
 	items := []ContextItem{
-		{Kind: "session", Ref: "b", Score: 0.5},
-		{Kind: "adr", Ref: "a", Score: 0.5},
-		{Kind: "adr", Ref: "z", Score: 0.5},
+		{Kind: "session", Ref: "b", Score: 0.6},
+		{Kind: "adr", Ref: "a", Score: 0.6},
+		{Kind: "adr", Ref: "z", Score: 0.6},
 	}
 	got := rankAndCap(items, 0) // 0 = no cap
 	wantRefs := []string{"a", "z", "b"}

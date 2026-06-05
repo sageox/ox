@@ -313,9 +313,18 @@ func topicTerms(query string, headings []string) map[string]struct{} {
 	return terms
 }
 
+// minBundleScore is the relevance floor an item must clear to enter the bundle.
+// Below it an item is weak chatter — a session that merely brushed the query, or
+// a team doc matched on a single token — that spends the client agent's tokens
+// without changing its conclusion. Tuned so a topic-only murmur (0.60), a solid
+// session hit, and a team doc with a few real term hits clear, while a
+// single-token doc match (~0.43) and a barely-matched session (~0.48) do not.
+const minBundleScore = 0.55
+
 // rankAndCap sorts items by score descending (deterministic tiebreak on kind then
-// ref) and truncates to cap. This is the single place the bundle's token budget is
-// enforced — see bundleCap's doc comment for why the cap protects the client agent.
+// ref), drops sub-threshold and duplicate (kind,ref) items, then truncates to cap.
+// This is the single place the bundle's relevance floor and token budget are
+// enforced — see bundleCap and minBundleScore for the rationale.
 func rankAndCap(items []ContextItem, limit int) []ContextItem {
 	sort.SliceStable(items, func(i, j int) bool {
 		if items[i].Score != items[j].Score {
@@ -326,6 +335,22 @@ func rankAndCap(items []ContextItem, limit int) []ContextItem {
 		}
 		return items[i].Ref < items[j].Ref
 	})
+	// filter sub-threshold + dedup by (kind, ref); sorted desc means the first
+	// occurrence of a duplicate is its highest-scoring one.
+	seen := make(map[string]struct{}, len(items))
+	kept := items[:0]
+	for _, it := range items {
+		if it.Score < minBundleScore {
+			continue
+		}
+		key := it.Kind + "\x00" + it.Ref
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		kept = append(kept, it)
+	}
+	items = kept
 	if limit > 0 && len(items) > limit {
 		items = items[:limit]
 	}

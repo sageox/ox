@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestSearch_EmptyLedgerPath(t *testing.T) {
@@ -419,5 +421,64 @@ func writeMurmur(t *testing.T, ledgerPath string, ts time.Time, id, topic, conte
 	data, _ := json.Marshal(m)
 	if err := os.WriteFile(filepath.Join(hourDir, id+".json"), data, 0o644); err != nil {
 		t.Fatalf("write murmur: %v", err)
+	}
+}
+
+// --- Snippet word-boundary extraction (A3) ---
+
+// TestSnippetAround_NoMidWordTruncation verifies the snippet window snaps to
+// whole-word boundaries so it never begins or ends mid-word.
+// Failure prevented: the byte-window slicing that produced citations like
+// "...HLS retry semantics" / "...ive intelligence_1" — fragments clipped mid-word
+// at both ends that read as noise in the rendered plan.
+func TestSnippetAround_NoMidWordTruncation(t *testing.T) {
+	// match "retry" mid-sentence; a small window would otherwise clip "...HLS"
+	// on the left and a word on the right.
+	content := "the firmware handles HLS retry semantics carefully before upload begins"
+	idx := strings.Index(content, "retry")
+	got := snippetAround(content, idx, 24)
+
+	trimmed := strings.Trim(got, ".")
+	if trimmed == "" {
+		t.Fatalf("empty snippet for idx=%d", idx)
+	}
+	// every word in the snippet body must be a whole word from the source.
+	srcWords := make(map[string]struct{})
+	for _, w := range strings.Fields(content) {
+		srcWords[w] = struct{}{}
+	}
+	for _, w := range strings.Fields(trimmed) {
+		if _, ok := srcWords[w]; !ok {
+			t.Errorf("snippet word %q is not a whole source word (got %q)", w, got)
+		}
+	}
+}
+
+// TestSnippetAround_UTF8Safe verifies multi-byte runes are never split.
+// Failure prevented: byte slicing through a multi-byte rune yielding a broken
+// "" replacement character in the snippet.
+func TestSnippetAround_UTF8Safe(t *testing.T) {
+	content := "café résumé naïve façade déjà vu coöperate piñata über"
+	for idx := 0; idx < len(content); idx++ {
+		got := snippetAround(content, idx, 16)
+		if !utf8.ValidString(got) {
+			t.Fatalf("invalid UTF-8 snippet at idx=%d: %q", idx, got)
+		}
+	}
+}
+
+// TestSnippetAround_Markers verifies elision markers appear only where text was
+// actually cut.
+func TestSnippetAround_Markers(t *testing.T) {
+	content := "alpha beta gamma delta epsilon zeta eta theta iota"
+	// match at the very start — no left elision.
+	got := snippetAround(content, 0, 16)
+	if strings.HasPrefix(got, "...") {
+		t.Errorf("unexpected left marker when matching at start: %q", got)
+	}
+	// whole string fits — no markers at all.
+	full := snippetAround(content, 0, len(content)+10)
+	if strings.Contains(full, "...") {
+		t.Errorf("unexpected marker when window covers whole string: %q", full)
 	}
 }

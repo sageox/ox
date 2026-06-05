@@ -59,6 +59,15 @@ func DiscoverDocs(teamPath string) ([]TeamDoc, error) {
 		}
 
 		fullPath := filepath.Join(docsDir, name)
+
+		// skip ox-shipped starter scaffolds the team hasn't filled in yet — an
+		// unedited template is noise, not knowledge, and otherwise surfaces as a
+		// bogus citation. Two signals: a `template: true` frontmatter flag, or
+		// known scaffold sentinel text in the body.
+		if isUnfilledScaffold(fullPath) {
+			continue
+		}
+
 		doc := buildDoc(name, fullPath)
 
 		// filter out hidden docs
@@ -74,6 +83,51 @@ func DiscoverDocs(teamPath string) ([]TeamDoc, error) {
 	})
 
 	return docs, nil
+}
+
+// scaffoldSentinels are verbatim fragments found ONLY in ox-shipped starter
+// docs the team has not edited. Matched case-insensitively against the body.
+// Kept deliberately specific — each is placeholder/instruction text a real,
+// filled-in doc would have removed — so a genuine doc is never misclassified.
+var scaffoldSentinels = []string{
+	"define your team's critical domain-specific terms",
+	"replace or extend the examples below",
+}
+
+// isUnfilledScaffold reports whether a team doc is an unedited ox starter
+// scaffold: either flagged `template: true` in frontmatter, or still carrying
+// scaffold sentinel text in its body.
+func isUnfilledScaffold(path string) bool {
+	if parseFrontmatter(path).Template {
+		return true
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+
+	scanner := bufio.NewScanner(file)
+	lineCount := 0
+	for scanner.Scan() {
+		lineCount++
+		line := strings.ToLower(scanner.Text())
+		for _, sentinel := range scaffoldSentinels {
+			if strings.Contains(line, sentinel) {
+				return true
+			}
+		}
+		// sentinels live in the doc's lead-in; don't scan whole files
+		if lineCount > 30 {
+			break
+		}
+	}
+	return false
 }
 
 // buildDoc constructs a TeamDoc from a markdown file, parsing frontmatter

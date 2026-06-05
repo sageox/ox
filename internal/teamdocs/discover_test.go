@@ -62,6 +62,35 @@ func TestDiscoverDocs(t *testing.T) {
 			files:    map[string]string{},
 			wantDocs: nil,
 		},
+		{
+			// the exact failure this fix targets: an unedited ox starter glossary
+			// surfacing as a bogus "discussion" citation.
+			name: "unfilled scaffold excluded by sentinel text",
+			files: map[string]string{
+				"glossary.md": "# Glossary\n\nDefine your team's critical domain-specific terms, acronyms, jargon here for AI coworkers to reference.\n\n<!-- Replace or extend the examples below with your own terms. -->\n",
+				"real.md":     "# Real Doc\nActual filled-in team knowledge.",
+			},
+			wantDocs: []string{"real.md"},
+			wantNot:  []string{"glossary.md"},
+		},
+		{
+			name: "template frontmatter flag excluded",
+			files: map[string]string{
+				"starter.md": "---\ntitle: Starter\ntemplate: true\n---\n# Starter\nReal-looking body but flagged a template.",
+				"keep.md":    "# Keep\nFilled-in content.",
+			},
+			wantDocs: []string{"keep.md"},
+			wantNot:  []string{"starter.md"},
+		},
+		{
+			// a real, filled-in glossary (sentinel instruction removed) must survive —
+			// guards against the scaffold filter over-matching legitimate docs.
+			name: "filled glossary survives",
+			files: map[string]string{
+				"glossary.md": "# Glossary\n\n| Term | Definition |\n|------|------------|\n| **Ledger** | Per-repo history of work. |",
+			},
+			wantDocs: []string{"glossary.md"},
+		},
 	}
 
 	for _, tt := range tests {

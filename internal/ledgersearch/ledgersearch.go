@@ -406,9 +406,13 @@ func scoreContent(content string, terms []string) (float64, string) {
 	return score, snippetAround(content, firstIdx, 160)
 }
 
-// snippetAround returns a window of size chars around idx, trimmed at whitespace.
+// snippetAround returns a readable window of about size bytes centered on idx,
+// with both edges snapped to whole-word boundaries so the snippet never begins
+// or ends mid-word. Elided ends are marked with "...". Snapping at ASCII
+// whitespace is also UTF-8 safe: multi-byte runes never contain a byte < 0x80,
+// so a cut at a space can't split a rune.
 func snippetAround(s string, idx, size int) string {
-	if idx < 0 {
+	if idx < 0 || s == "" {
 		return ""
 	}
 	start := idx - size/2
@@ -419,17 +423,74 @@ func snippetAround(s string, idx, size int) string {
 	if end > len(s) {
 		end = len(s)
 	}
-	out := s[start:end]
-	out = strings.TrimSpace(out)
-	// collapse internal whitespace runs for compact display
+
+	elidedLeft := start > 0
+	elidedRight := end < len(s)
+
+	wStart, wEnd := start, end
+	if elidedLeft {
+		// drop the partial leading word, then advance onto the next word start
+		for wStart < wEnd && !isASCIISpace(s[wStart]) {
+			wStart++
+		}
+		for wStart < wEnd && isASCIISpace(s[wStart]) {
+			wStart++
+		}
+	}
+	if elidedRight {
+		// retreat to the end of the last whole word inside the window
+		for wEnd > wStart && !isASCIISpace(s[wEnd-1]) {
+			wEnd--
+		}
+		for wEnd > wStart && isASCIISpace(s[wEnd-1]) {
+			wEnd--
+		}
+	}
+	// degenerate case: a single token longer than the window collapsed it —
+	// fall back to a rune-safe cut so we still show something.
+	if wStart >= wEnd {
+		wStart = alignRuneStart(s, start)
+		wEnd = alignRuneStart(s, end)
+		if wEnd < wStart {
+			wEnd = wStart
+		}
+	}
+
+	out := strings.TrimSpace(s[wStart:wEnd])
 	out = strings.Join(strings.Fields(out), " ")
-	if start > 0 {
+	if out == "" {
+		return ""
+	}
+	if elidedLeft {
 		out = "..." + out
 	}
-	if end < len(s) {
+	if elidedRight {
 		out = out + "..."
 	}
 	return out
+}
+
+// isASCIISpace reports whether b is an ASCII whitespace byte. Used for word-
+// boundary snapping where only single-byte ASCII spaces are valid cut points.
+func isASCIISpace(b byte) bool {
+	switch b {
+	case ' ', '\t', '\n', '\r', '\f', '\v':
+		return true
+	default:
+		return false
+	}
+}
+
+// alignRuneStart moves i back to the start of the UTF-8 rune it lands inside,
+// so a fallback byte-slice never splits a multi-byte rune.
+func alignRuneStart(s string, i int) int {
+	if i >= len(s) {
+		return len(s)
+	}
+	for i > 0 && s[i]&0xC0 == 0x80 {
+		i--
+	}
+	return i
 }
 
 // parseSessionTimestamp pulls the prefix from "YYYY-MM-DDTHH-MM-<user>-<id>".
