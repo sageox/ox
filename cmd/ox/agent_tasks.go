@@ -67,6 +67,16 @@ func toTaskView(t *agenttask.Task) taskView {
 	}
 }
 
+// shortID renders the leading 8 chars of a task id, guarding against a short
+// or corrupt id (a hand-edited/partial queue row) that would otherwise panic
+// an unchecked id[:8] slice.
+func shortID(id string) string {
+	if len(id) >= 8 {
+		return id[:8]
+	}
+	return id
+}
+
 // shortAge renders a duration compactly (e.g. "3m", "2h", "1d").
 func shortAge(d time.Duration) string {
 	switch {
@@ -91,6 +101,7 @@ func runAgentTasks(w io.Writer, inst *agentinstance.Instance, args []string) err
 	if err != nil {
 		return fmt.Errorf("failed to open task store: %w", err)
 	}
+	defer store.Close()
 
 	sub := "list"
 	if len(args) > 0 {
@@ -143,7 +154,7 @@ func runTasksList(w io.Writer, store *agenttask.Store, agentType string) error {
 		fmt.Fprintf(w, "Agent tasks (%d ready):\n", readyCount)
 		for _, v := range views {
 			fmt.Fprintf(w, "  [%s] p%d %s — %s (%s, %s old)\n",
-				v.Status, v.Priority, v.ID[:8], v.Title, kindOrDash(v.Kind), v.Age)
+				v.Status, v.Priority, shortID(v.ID), v.Title, kindOrDash(v.Kind), v.Age)
 		}
 		return nil
 	}
@@ -186,7 +197,7 @@ func runTasksNext(w io.Writer, store *agenttask.Store, inst *agentinstance.Insta
 	}
 
 	if cfg.Text {
-		fmt.Fprintf(w, "Claimed %s (lease %s): %s\n", claimed.ID[:8], agenttask.DefaultLease, claimed.Title)
+		fmt.Fprintf(w, "Claimed %s (lease %s): %s\n", shortID(claimed.ID), agenttask.DefaultLease, claimed.Title)
 		if claimed.Body != "" {
 			fmt.Fprintf(w, "  %s\n", claimed.Body)
 		}
@@ -328,6 +339,7 @@ var agentTasksListCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		defer store.Close()
 		// producer/debug listing: empty agent type lists untargeted + shows all
 		// active tasks regardless of which agent would claim them.
 		return runTasksList(cmd.OutOrStdout(), store, "")

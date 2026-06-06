@@ -1353,7 +1353,7 @@ func countAgentTasks(gitRoot string) (ready, inProgress int) {
 	if err != nil {
 		return 0, 0
 	}
-	// read-only: a status read must not rewrite the queue file
+	defer store.Close()
 	tasks, err := store.ListView(false)
 	if err != nil {
 		return 0, 0

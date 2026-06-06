@@ -6,12 +6,17 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/sageox/ox/internal/markers"
 )
 
 // Marker file names (in .sageox/ directory)
 const (
-	NeedsDoctorMarker      = ".needs-doctor"
-	NeedsDoctorAgentMarker = ".needs-doctor-agent"
+	NeedsDoctorMarker = ".needs-doctor"
+	// NeedsDoctorAgentMarker aliases the single source of truth in
+	// internal/markers so the daemon's agentwork producer (which cannot import
+	// doctor) shares the exact filename — divergence becomes impossible.
+	NeedsDoctorAgentMarker = markers.NeedsDoctorAgent
 	sageoxDir              = ".sageox"
 )
 

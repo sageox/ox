@@ -34,6 +34,7 @@ func checkAgentTasksStuck(fix bool) checkResult {
 	if err != nil {
 		return SkippedCheck("Agent tasks", "could not open task store", "")
 	}
+	defer store.Close()
 
 	// List reconciles leases and prunes as a side effect.
 	tasks, err := store.List(true)
@@ -50,7 +51,12 @@ func checkAgentTasksStuck(fix bool) checkResult {
 		case agenttask.StatusInProgress:
 			inProgress++
 		}
-		if !t.IsTerminal() && t.Attempts >= maxTaskAttempts {
+		// Poison = repeatedly (re)claimed but never finished. Exclude live
+		// in_progress tasks: List() already reconciled away expired/dead-claimer
+		// leases, so a still-in_progress task has a live claimer on a valid lease
+		// and is legitimately working — canceling it would discard real work and
+		// override the agent's `tasks extend`.
+		if t.Status != agenttask.StatusInProgress && !t.IsTerminal() && t.Attempts >= maxTaskAttempts {
 			poison = append(poison, t)
 		}
 	}
@@ -66,7 +72,7 @@ func checkAgentTasksStuck(fix bool) checkResult {
 	// describe the poison tasks
 	var ids []string
 	for _, t := range poison {
-		ids = append(ids, fmt.Sprintf("%s (%d attempts)", t.ID[:8], t.Attempts))
+		ids = append(ids, fmt.Sprintf("%s (%d attempts)", shortID(t.ID), t.Attempts))
 	}
 
 	if fix {

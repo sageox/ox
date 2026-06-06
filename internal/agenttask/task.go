@@ -8,11 +8,7 @@
 // docs/ai/specs/agent-task-scheduling.md for the full design.
 package agenttask
 
-import (
-	"time"
-
-	"github.com/sageox/ox/internal/proc"
-)
+import "time"
 
 // Status is the lifecycle state of a task.
 type Status string
@@ -111,25 +107,10 @@ func (t *Task) IsExpired() bool {
 	return !t.ExpiresAt.IsZero() && time.Now().After(t.ExpiresAt)
 }
 
-// LeaseExpired reports whether an in_progress task's lease deadline has passed.
-func (t *Task) LeaseExpired() bool {
-	return t.Status == StatusInProgress &&
-		!t.LeaseExpiresAt.IsZero() &&
-		time.Now().After(t.LeaseExpiresAt)
-}
-
-// ClaimerDead reports whether an in_progress task was claimed by a process on
-// this host that is no longer alive. Cross-host claims always return false —
-// a PID on another machine tells us nothing, so those rely on lease expiry.
-func (t *Task) ClaimerDead(host string) bool {
-	if t.Status != StatusInProgress || t.ClaimedByPID <= 0 {
-		return false
-	}
-	if t.ClaimedHost != "" && t.ClaimedHost != host {
-		return false
-	}
-	return !proc.IsAlive(t.ClaimedByPID)
-}
+// Lease reclaim (lease-expired and same-host dead-claimer) is enforced by the
+// store directly in SQL — see Store.reconcile / reclaimDeadClaimers. The
+// same-host PID guard lives there so an empty/foreign claimed_host is never
+// PID-checked against an unrelated local process.
 
 // ClaimableBy reports whether a task targeted at a particular agent type may be
 // claimed/surfaced to the given agent type. Exported wrapper over the internal

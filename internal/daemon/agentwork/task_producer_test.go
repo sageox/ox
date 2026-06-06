@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/ox/internal/agenttask"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/markers"
 )
 
 func newProducerManager(t *testing.T, projectRoot string) *Manager {
@@ -34,7 +35,7 @@ func TestProduceAgentTasks_DoctorMarker(t *testing.T) {
 	m := newProducerManager(t, root)
 
 	// no marker → no task
-	m.produceAgentTasks()
+	m.produceAgentTasks(m.loadConfig())
 	store, _ := agenttask.NewStore(root)
 	tasks, _ := store.List(false)
 	if len(tasks) != 0 {
@@ -42,10 +43,10 @@ func TestProduceAgentTasks_DoctorMarker(t *testing.T) {
 	}
 
 	// drop the marker → one doctor task
-	if err := os.WriteFile(filepath.Join(sageox, needsDoctorAgentMarker), nil, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(sageox, markers.NeedsDoctorAgent), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m.produceAgentTasks()
+	m.produceAgentTasks(m.loadConfig())
 	tasks, _ = store.List(false)
 	if len(tasks) != 1 {
 		t.Fatalf("expected 1 doctor task, got %d", len(tasks))
@@ -55,7 +56,7 @@ func TestProduceAgentTasks_DoctorMarker(t *testing.T) {
 	}
 
 	// running again must not duplicate (dedup key still active)
-	m.produceAgentTasks()
+	m.produceAgentTasks(m.loadConfig())
 	tasks, _ = store.List(false)
 	if len(tasks) != 1 {
 		t.Fatalf("expected dedup to keep 1 task, got %d", len(tasks))
@@ -66,7 +67,7 @@ func TestProduceAgentTasks_DoctorMarker(t *testing.T) {
 // a project root (e.g. ledger-only daemon configuration).
 func TestProduceAgentTasks_NoProjectRoot(t *testing.T) {
 	m := newProducerManager(t, "")
-	m.produceAgentTasks() // must not panic
+	m.produceAgentTasks(m.loadConfig()) // must not panic
 }
 
 // seedStaleSession writes an abandoned recording (raw.jsonl + a >24h-old
@@ -121,7 +122,7 @@ func TestProduceFinalizeTasks_NoWorkerEnqueues(t *testing.T) {
 	seedStaleSession(t, ledger, name)
 
 	m := managerWithFinalizeHandler(project, ledger, nil) // nil cfg => no worker
-	m.produceFinalizeTasks()
+	m.produceFinalizeTasks(m.loadConfig())
 
 	store, _ := agenttask.NewStore(project)
 	tasks, _ := store.List(false)
@@ -153,12 +154,39 @@ func TestProduceFinalizeTasks_WorkerEnabledSkips(t *testing.T) {
 
 	enabled := func() *config.AgentWorkerConfig { return enabledConfigWith(1, 100) }
 	m := managerWithFinalizeHandler(project, ledger, enabled)
-	m.produceFinalizeTasks()
+	m.produceFinalizeTasks(m.loadConfig())
 
 	store, _ := agenttask.NewStore(project)
 	tasks, _ := store.List(false)
 	if len(tasks) != 0 {
 		t.Fatalf("expected 0 tasks when worker enabled, got %d", len(tasks))
+	}
+}
+
+// TestProduceFinalizeTasks_UsesPassedSnapshot verifies the producer decides on
+// the config snapshot it is GIVEN, not a fresh configLoader read. This is the
+// load-bearing property behind the single-snapshot-per-tick fix: even though the
+// manager's loader reports an enabled worker, passing a nil snapshot makes the
+// producer enqueue — proving the two decisions can't straddle a config flip.
+// Failure prevented: a disabled→enabled flip between the producer and the worker
+// fork double-runs session finalize.
+func TestProduceFinalizeTasks_UsesPassedSnapshot(t *testing.T) {
+	ledger := t.TempDir()
+	project := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(project, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seedStaleSession(t, ledger, "2026-01-10T09-00-testuser-OxFIN")
+
+	// loader says ENABLED, but we hand the producer a nil snapshot.
+	enabled := func() *config.AgentWorkerConfig { return enabledConfigWith(1, 100) }
+	m := managerWithFinalizeHandler(project, ledger, enabled)
+	m.produceFinalizeTasks(nil)
+
+	store, _ := agenttask.NewStore(project)
+	tasks, _ := store.List(false)
+	if len(tasks) != 1 {
+		t.Fatalf("producer must honor the passed snapshot (nil=no worker) and enqueue; got %d tasks", len(tasks))
 	}
 }
 

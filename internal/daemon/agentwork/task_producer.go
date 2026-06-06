@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/agenttask"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/markers"
 )
 
 // safeSessionName matches the machine-generated session-name shape
@@ -29,9 +31,9 @@ var safeSessionName = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 //
 // agentwork cannot import internal/doctor (that would cycle:
 // daemon → agentwork → doctor → daemon), so the marker is checked via os.Stat
-// on its canonical path. Keep this constant in sync with
-// internal/doctor.NeedsDoctorAgentMarker.
-const needsDoctorAgentMarker = ".needs-doctor-agent"
+// on its canonical path. The filename is the shared constant in internal/markers
+// (a leaf package both doctor and agentwork import) — single source of truth, so
+// a rename can never silently disable doctor-task production.
 
 // maxFinalizeTasksPerCycle caps how many session-finalize tasks the producer
 // enqueues per detection cycle, so a backlog of many stale sessions cannot
@@ -42,12 +44,12 @@ const maxFinalizeTasksPerCycle = 25
 // produceAgentTasks enqueues agent tasks for detected, agent-actionable work.
 // Best-effort: any error is logged at debug and skipped. Producers are deduped
 // via the task store, so repeated detection does not pile up duplicate tasks.
-func (m *Manager) produceAgentTasks() {
+func (m *Manager) produceAgentTasks(cfg *config.AgentWorkerConfig) {
 	if m.projectRoot == "" {
 		return
 	}
 	m.produceDoctorTask()
-	m.produceFinalizeTasks()
+	m.produceFinalizeTasks(cfg)
 }
 
 // produceDoctorTask converts the .needs-doctor-agent marker into a doctor task.
@@ -55,7 +57,7 @@ func (m *Manager) produceAgentTasks() {
 // artifacts; converting it into a queued task lets the next live coworker
 // finalize those sessions even if it is not the one that created the marker.
 func (m *Manager) produceDoctorTask() {
-	markerPath := filepath.Join(m.projectRoot, ".sageox", needsDoctorAgentMarker)
+	markerPath := filepath.Join(m.projectRoot, ".sageox", markers.NeedsDoctorAgent)
 	if _, err := os.Stat(markerPath); err != nil {
 		return // no marker (or unreadable) — nothing to schedule
 	}
@@ -81,12 +83,13 @@ func (m *Manager) produceDoctorTask() {
 // authed, anti-entropy would otherwise drop the work until the 24h stale sweep;
 // handing it to a live coworker is the token-conserving alternative to a
 // separately-billed `claude -p`.
-func (m *Manager) produceFinalizeTasks() {
-	// configLoader is nil in some unit harnesses; treat that as "no worker".
-	if m.configLoader != nil {
-		if cfg := m.configLoader(); cfg != nil && isEffectivelyEnabled(cfg) {
-			return // local worker will finalize via the normal queue
-		}
+func (m *Manager) produceFinalizeTasks(cfg *config.AgentWorkerConfig) {
+	// cfg is the caller's single per-tick snapshot (nil in some unit harnesses
+	// and when no loader is configured — both mean "no worker"). Using it here
+	// instead of re-reading config keeps this decision consistent with the
+	// worker-fork decision made from the same snapshot.
+	if cfg != nil && isEffectivelyEnabled(cfg) {
+		return // local worker will finalize via the normal queue
 	}
 
 	m.mu.Lock()

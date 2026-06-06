@@ -357,14 +357,9 @@ func TestExpiry_DoesNotDropInProgress(t *testing.T) {
 	}
 
 	// backdate expiry into the past while it is in_progress
-	all, _ := store.readTasksLocked()
-	for _, tk := range all {
-		if tk.ID == claimed.ID {
-			tk.ExpiresAt = time.Now().Add(-time.Hour)
-		}
-	}
-	if err := store.rewriteLocked(all); err != nil {
-		t.Fatalf("rewrite: %v", err)
+	if _, err := store.db.Exec(`UPDATE tasks SET expires_at=? WHERE id=?`,
+		tsToDB(time.Now().Add(-time.Hour)), claimed.ID); err != nil {
+		t.Fatalf("backdate expiry: %v", err)
 	}
 
 	// it must still exist (not expired away), and Complete must succeed
@@ -377,35 +372,42 @@ func TestExpiry_DoesNotDropInProgress(t *testing.T) {
 	}
 }
 
-// TestEnforceActiveCap_NeverEvictsInProgress verifies the active-cap eviction
-// drops oldest READY tasks but never an in_progress (claimed, executing) one.
+// insertRaw inserts a minimal task row directly, bypassing Add's reconcile +
+// cap logic, so a test can stage an over-cap queue cheaply.
+func insertRaw(t *testing.T, s *Store, id string, status Status, priority int, created time.Time) {
+	t.Helper()
+	if _, err := s.db.Exec(
+		`INSERT INTO tasks (id, title, status, priority, created_at) VALUES (?,?,?,?,?)`,
+		id, id, string(status), priority, tsToDB(created)); err != nil {
+		t.Fatalf("insertRaw %s: %v", id, err)
+	}
+}
+
+// TestEnforceActiveCap_NeverEvictsInProgress verifies the Add-time active-cap
+// eviction drops READY tasks but never an in_progress (claimed, executing) one,
+// and that the active count is held at the cap.
+// Failure prevented: cap pressure silently discards in-flight work, 404ing the
+// executing agent's later `tasks done`.
 func TestEnforceActiveCap_NeverEvictsInProgress(t *testing.T) {
-	var tasks []*Task
+	store := newTestStore(t)
 	base := time.Now()
 	// oldest task is in_progress (claimed) — must be retained
-	tasks = append(tasks, &Task{ID: "inprog", Status: StatusInProgress, CreatedAt: base})
-	for i := 0; i < maxActive+5; i++ {
-		tasks = append(tasks, &Task{
-			ID:        fmt.Sprintf("ready-%d", i),
-			Status:    StatusReady,
-			CreatedAt: base.Add(time.Duration(i+1) * time.Second),
-		})
+	insertRaw(t, store, "inprog", StatusInProgress, 0, base)
+	for i := 0; i < maxActive; i++ {
+		insertRaw(t, store, fmt.Sprintf("ready-%d", i), StatusReady, 5,
+			base.Add(time.Duration(i+1)*time.Second))
+	}
+	// active is now maxActive+1 (over). One more Add must evict readys to fit.
+	if _, err := store.Add(&Task{Title: "newcomer", Priority: 5}); err != nil {
+		t.Fatalf("Add over cap: %v", err)
 	}
 
-	kept := enforceActiveCap(tasks)
-
-	var foundInprog bool
-	for _, t := range kept {
-		if t.ID == "inprog" {
-			foundInprog = true
-		}
+	if _, err := store.Get("inprog"); err != nil {
+		t.Fatalf("in_progress task was evicted by the active cap: %v", err)
 	}
-	if !foundInprog {
-		t.Fatalf("in_progress task was evicted by the active cap")
-	}
-	// active count is capped (in_progress + ready)
+	all, _ := store.List(true)
 	active := 0
-	for _, t := range kept {
+	for _, t := range all {
 		if !t.IsTerminal() {
 			active++
 		}
@@ -422,15 +424,10 @@ func TestTerminalRetentionPrune(t *testing.T) {
 	id := tasks[0].ID
 	_ = store.Complete(id, "done")
 
-	// backdate CompletedAt beyond retention by rewriting the row directly
-	all, _ := store.readTasksLocked()
-	for _, tk := range all {
-		if tk.ID == id {
-			tk.CompletedAt = time.Now().Add(-2 * terminalRetention)
-		}
-	}
-	if err := store.rewriteLocked(all); err != nil {
-		t.Fatalf("rewrite: %v", err)
+	// backdate CompletedAt beyond retention by updating the row directly
+	if _, err := store.db.Exec(`UPDATE tasks SET completed_at=? WHERE id=?`,
+		tsToDB(time.Now().Add(-2*terminalRetention)), id); err != nil {
+		t.Fatalf("backdate completed_at: %v", err)
 	}
 
 	withTerminal, _ := store.List(true)

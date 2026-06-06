@@ -57,9 +57,8 @@ func emitAgentTasks(w io.Writer, projectRoot, agentID, agentType string) {
 	if err != nil {
 		return
 	}
+	defer store.Close()
 
-	// Read-only view: never rewrite the queue on the user's keystroke hot path.
-	// The daemon timer and ox doctor own persisting reclaim/prune.
 	active, err := store.ListView(false)
 	if err != nil || len(active) == 0 {
 		return

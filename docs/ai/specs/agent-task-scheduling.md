@@ -29,16 +29,38 @@ which tracks human-facing project work. Agent tasks are ephemeral, machine
 One **shared, project-local** queue per repo:
 
 ```
-.sageox/agent_tasks/agent_tasks.jsonl   # gitignored, ephemeral, local-only
-.sageox/agent_tasks/agent_tasks.jsonl.lock
+.sageox/agent_tasks/agent_tasks.db        # embedded SQLite; gitignored, ephemeral, local-only
+.sageox/agent_tasks/agent_tasks.db-wal     # WAL sidecar
+.sageox/agent_tasks/agent_tasks.db-shm
 ```
 
 - Shared (not per-user): the whole point is "next available agent" — whoever
   primes next can pick it up. Contrast with `.sageox/agent_instances/<user>/`,
   which is per-user by design.
-- JSONL, append-only, last-write-wins by `id` on read — identical concurrency
-  model to `internal/agentinstance`. `gofrs/flock` guards writes.
-- Gitignored via `.sageox/.gitignore` (`agent_tasks/`).
+- **Embedded SQLite** (`modernc.org/sqlite`, pure-Go, no cgo — the same store
+  idiom as `internal/whisper` and `internal/codedb`). The access pattern
+  (claim-top-eligible, filter by `target_agent`/`status`, lease-expiry reclaim,
+  prune) is a relational workload; the database enforces atomic claim, dedup,
+  and the active cap that a flat file could only approximate. Earlier revisions
+  used flock-guarded JSONL — replaced because hand-rolling those guarantees on a
+  file produced a class of races (claim atomicity, dedup, cap bypass, torn
+  writes).
+- WAL mode + `busy_timeout` + `_txlock=immediate`: concurrent readers (the
+  prompt hook, `ox status`) run during a writer's claim; concurrent writers
+  (multiple agents, the daemon producer) serialize instead of deadlocking.
+- Atomic claim is a guarded `UPDATE ... WHERE id=? AND status='ready'`; a racing
+  claimer affects zero rows and moves to the next candidate. Dedup is a partial
+  unique index on `dedup_key` over non-terminal rows. Lease/dead-claimer reclaim
+  and expiry/retention pruning run as indexed `UPDATE`/`DELETE`s on every read.
+- Same-host dead-claimer reclaim only PID-checks rows whose `claimed_host`
+  equals this host; an empty or foreign host relies on lease expiry (a PID is
+  meaningless on another machine).
+- Timestamps are stored as INTEGER unix-nanoseconds so reconcile queries compare
+  deadlines with correct monotonic ordering (RFC3339Nano trims fractional zeros,
+  breaking lexicographic comparison).
+- Local-only: embedded SQLite is unsupported on NFS-mounted working dirs (the
+  same local assumption the JSONL store carried). Gitignored via
+  `.sageox/.gitignore` (`agent_tasks/`, which covers `.db`/`-wal`/`-shm`).
 
 ## Task model
 

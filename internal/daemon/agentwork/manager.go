@@ -221,11 +221,29 @@ func (m *Manager) Start(ctx context.Context) {
 			// agent_worker.enabled: even when the daemon cannot (or should
 			// not) fork its own LLM worker, it can still schedule tasks for
 			// the next interactive AI coworker to execute.
-			m.produceAgentTasks()
-			m.detectAndEnqueue()
+			//
+			// ONE config snapshot for the whole tick: the fallback-task
+			// producer and the local-worker fork must agree on whether a
+			// worker is enabled. Two independent configLoader() reads could
+			// straddle a disabled→enabled flip and both enqueue the task AND
+			// fork the worker — duplicate finalize.
+			cfg := m.loadConfig()
+			m.produceAgentTasks(cfg)
+			m.detectAndEnqueue(cfg)
 			m.processQueue(ctx)
 		}
 	}
+}
+
+// loadConfig returns a single agent-worker config snapshot, tolerating a nil
+// loader (some unit harnesses construct a Manager without one). Callers that
+// must coordinate multiple decisions within one tick snapshot once and thread
+// the result, rather than re-reading config between decisions.
+func (m *Manager) loadConfig() *config.AgentWorkerConfig {
+	if m.configLoader == nil {
+		return nil
+	}
+	return m.configLoader()
 }
 
 // isEffectivelyEnabled returns true if the agent worker should run.
@@ -261,11 +279,10 @@ func isHandlerEnabled(cfg *config.AgentWorkerConfig, handlerType string) bool {
 //
 // Before running full detection, lightweight session cleanup (ghost removal) runs
 // unconditionally — it requires no LLM and is safe regardless of agent_worker.enabled.
-func (m *Manager) detectAndEnqueue() {
+func (m *Manager) detectAndEnqueue(cfg *config.AgentWorkerConfig) {
 	// ghost cleanup always runs — filesystem-only, no LLM needed
 	m.runSessionCleanup()
 
-	cfg := m.configLoader()
 	if cfg == nil || !isEffectivelyEnabled(cfg) {
 		return
 	}
@@ -355,10 +372,11 @@ func (m *Manager) ForceDetect() int {
 	// ghost cleanup always runs
 	m.runSessionCleanup()
 
-	// schedule agent tasks for live coworkers (independent of agent_worker)
-	m.produceAgentTasks()
+	// schedule agent tasks for live coworkers (independent of agent_worker).
+	// One snapshot threads into both the producer and the worker-enable gate.
+	cfg := m.loadConfig()
+	m.produceAgentTasks(cfg)
 
-	cfg := m.configLoader()
 	if cfg == nil || !isEffectivelyEnabled(cfg) {
 		return 0
 	}
