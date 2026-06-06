@@ -3,10 +3,12 @@
 # Agent Task Scheduling
 
 Internal mechanism for scheduling units of work that the **next available AI
-coworker** picks up and executes — typically as a fresh-context subagent. It
-replaces ad-hoc one-off signals (the `.needs-doctor-agent` file drop) and the
-daemon's `claude -p` fork-out for anti-entropy work, which billed against a
-separate account instead of riding on the developer's live session.
+coworker** picks up and executes — typically as a fresh-context subagent. The
+work is about a developer's **own existing sessions and data**: finalizing
+incomplete recordings, summarizing recorded sessions, doctor repairs, anti
+-entropy. It replaces ad-hoc one-off signals (the `.needs-doctor-agent` file
+drop) and the daemon's separate `claude -p` fork-out, handing those chores to
+the live coworker that is already in that context.
 
 This is an **internal** feature. It is NOT a replacement for beads (`bd`),
 which tracks human-facing project work. Agent tasks are ephemeral, machine
@@ -15,14 +17,15 @@ which tracks human-facing project work. Agent tasks are ephemeral, machine
 ## Why
 
 - The daemon (or other internal producers) sometimes discovers work that
-  requires an LLM: finalizing/summarizing a stale recording, running doctor
-  repairs, anti-entropy. Today it either drops a marker file or forks
-  `claude -p`. Forking is billed separately and loses the warm session; the
-  marker file is a single-purpose hack.
+  requires an LLM over the developer's existing sessions/data: finalizing or
+  summarizing a stale recording, running doctor repairs, anti-entropy. Today it
+  either drops a marker file or forks a separate `claude -p` process. The fork
+  is a detached background worker disconnected from the developer's live
+  session; the marker file is a single-purpose hack.
 - A durable, priority-ordered task queue lets any producer schedule work and
-  lets the live coding agent execute it inside the session the developer is
-  already paying for — ideally dispatched to a subagent so it does not pollute
-  the main context window.
+  lets the live coding agent — already in the developer's session and data —
+  execute it, ideally dispatched to a subagent so it does not pollute the main
+  context window.
 
 ## Storage
 
@@ -147,29 +150,29 @@ the single reliable channel into Claude's context mid-session. On each prompt,
 throttled `<system-reminder>` block instructing the agent to dispatch each
 task to a **subagent with a fresh context**, then mark it done.
 
-Throttling (token conservation): a per-agent cursor in
+Throttling (avoid re-injecting unchanged context): a per-agent cursor in
 `.sageox/cache/agent_tasks_seen/<agentID>.json` records the signature (hash of
 sorted ready task ids) last surfaced. The block is re-emitted **only when the
 ready set changes** — a new task, or a completed/claimed one. An unchanged
-pending queue is never re-injected turn after turn (that would burn the user's
-tokens on identical context), and an idle queue costs zero context. The agent
-can always pull on demand with `ox agent <id> tasks list`.
+pending queue is never re-injected turn after turn (identical context is noise),
+and an idle queue costs zero context. The agent can always pull on demand with
+`ox agent <id> tasks list`.
 
 ## Daemon producer
 
 The daemon is the primary producer. Within `internal/daemon/agentwork`, on the
 existing doctor-interval timer (and `ForceDetect`), `produceAgentTasks` runs
 **independent of `agent_worker.enabled`** — the whole point is that even when
-the daemon cannot (or should not) fork `claude -p`, it can still hand work to
-the live agent:
+the daemon cannot (or should not) spin up its own background worker, it can
+still hand work to the live agent:
 
 - **Doctor bridge** (`produceDoctorTask`): if the `.needs-doctor-agent` marker
   is present, enqueue a deduped `doctor` task (dedup key `doctor-agent`) telling
   the live agent to finalize incomplete sessions.
 - **Session finalize** (`produceFinalizeTasks`): runs **only when no local LLM
   worker is authed/enabled** (`!isEffectivelyEnabled`). This is the direct
-  replacement for the separately-billed `claude -p` anti-entropy fork: it asks
-  the registered `SessionFinalizeHandler` to detect stale recordings needing
+  replacement for the separate `claude -p` anti-entropy fork: it asks the
+  registered `SessionFinalizeHandler` to detect stale recordings needing
   summaries and enqueues a per-session `session-finalize` task (deduped
   `session-finalize:<name>`, priority 30, capped at 25/cycle). When a worker IS
   available the normal queue forks it (delegated mode, ADR-016) and no task is
